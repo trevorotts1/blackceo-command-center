@@ -1,3 +1,38 @@
+## [v6.0.94] — 2026-08-26 — Dispatch deadlock: SOP remedy engine runs inside the Triad gate
+
+The GUARD 7 Triad gate `return`ed ~235 lines ABOVE the PRD 2.12-cc SOP remedy
+engine, so a card whose ONLY missing Triad leg was its SOP could never reach its
+own cure. It was held, backed off, and parked as `blocked` at
+TRIAD_HOLD_MAX_ATTEMPTS while the library SOP that would have released it sat one
+query away, unreached. Both halves were correct in isolation; only the ORDER was
+wrong. Effect: departments whose cards lacked a SOP stopped advancing entirely.
+
+- **Extracted** the engine to `resolveSopForTask()` — idempotent (`'already'`
+  short-circuit: no DB write, no embedding call, no authoring when a SOP is
+  already attached) and never-throwing.
+- **Called from inside the gate** when — and only when — the SOP is the ONE
+  missing leg. Fill, re-check, fall through to dispatch in the SAME invocation.
+  The gate is not moved; no second sweep pass, no re-entry.
+- **Missing description/persona gets no fill attempt** — both need human grooming
+  regardless, and attempting one would put an embedding-backed
+  `getBestSOPForTask` call on the hold path of every sweep tick (anti-furnace).
+- **ONE capped accounting owner.** Lifting the engine above the gate made
+  previously-dead code live, and that code carried an uncapped retry: the
+  authoring branch calls `recordDispatchFailure` with no `maxAttempts` (correct
+  at its original call site, which TRIAD_ADVANCER_GATE=0 still runs). Reached
+  from the gate it meant a card whose authoring never landed would be
+  re-selected — and re-fire the authoring loop — every sweep tick forever,
+  never parking, while double-counting attempts. The gate now passes
+  `recordAuthoringAttempt:false` and falls through to the existing capped hold.
+- **Dispatch-entry SOP snapshot.** The gate fill patches `task.sop_id` in memory,
+  so the SOP-aware persona rescore would otherwise compare the freshly-filled SOP
+  against itself and stop firing for exactly the case it serves.
+
+DELIBERATE SEMANTIC CHANGE (pinned by test): with the gate ON, a canonical
+department with a true library gap now HOLDS loudly (`sop_library_gap` event +
+triad hold + park) where pre-U33 it dispatched SOP-LESS. SOP-less dispatch
+remains available only via `TRIAD_ADVANCER_GATE=0`, whose behaviour is unchanged.
+
 ## [v6.0.93] — 2026-08-25 — U55 CI hang root-fix + five latent failures surfaced and repaired
 
 The U55 job (`npm run test:unit` + `test:component`) had hung for ~6 hours on
