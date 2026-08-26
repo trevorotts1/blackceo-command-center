@@ -33,6 +33,7 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import BetterSqlite3 from 'better-sqlite3';
 import { getDb, getMigrationStatus, getDbPath } from '@/lib/db';
+import { resolveActiveCompanyId } from '@/lib/company';
 import {
   FIXTURE_ENV_VARS,
   MEDIA_FIXTURE_ENV_VARS,
@@ -288,9 +289,28 @@ export function checkCompanyBranding(): CompanyBrandingResult {
     // The old filter `WHERE name != ''` caused empty-string rows to be excluded,
     // making the function fall into the dbRowAbsent=true branch (UNKNOWN) instead
     // of the correct FAIL path.  "Empty string is as bad as absent" (truth-table row 7).
-    const row = db
-      .prepare("SELECT name FROM companies ORDER BY id LIMIT 1")
-      .get() as { name: string | null } | undefined;
+    // C-03 FIX: `ORDER BY id LIMIT 1` reported on whichever company row's TEXT id
+    // sorted first — NOT the box's actual company.  A leftover `id='default'` seed
+    // row (standard on provisioned boxes) sorts before almost any real brand slug,
+    // so a correctly-branded box was read as "Default", matched PLACEHOLDER_NAMES,
+    // and hard-FAILED as unbranded.  Measured on live client boxes: the deploy gate
+    // in atomic-deploy.sh rejected builds on boxes whose branding was correct.
+    //
+    // Use the ONE canonical resolver every other caller already uses
+    // (tasks/ingest, departments, workspaces, converge, presentations).  Its
+    // contract: skip placeholder rows, honour a COMPANY_SLUG override, and return
+    // null when ONLY placeholder companies exist.
+    //
+    // NULL → fall back to the original query, which then reads the placeholder and
+    // FAILS.  That is the correct verdict for a genuinely unbranded box, so this
+    // change can never turn a real failure green — it only stops a real BRAND from
+    // being masked by a seed row sitting next to it.
+    const activeCompanyId = resolveActiveCompanyId(db);
+    const row = (
+      activeCompanyId
+        ? db.prepare("SELECT name FROM companies WHERE id = ?").get(activeCompanyId)
+        : db.prepare("SELECT name FROM companies ORDER BY id LIMIT 1").get()
+    ) as { name: string | null } | undefined;
 
     if (!row) {
       dbRowAbsent = true;
