@@ -1,3 +1,26 @@
+## [v6.0.95] — 2026-08-26 — company_branding read the wrong company row (deploy gate false-fail)
+
+`checkCompanyBranding()` resolved the company with
+`SELECT name FROM companies ORDER BY id LIMIT 1` — whichever row's TEXT id sorted
+first, NOT the box's actual company. Provisioned boxes carry a leftover
+`id='default'` seed row, and `'default'` sorts before almost any real brand slug,
+so a correctly-branded box read back as "Default", matched `PLACEHOLDER_NAMES`, and
+hard-FAILED as unbranded.
+
+Measured on live client boxes during the v6.0.94 roll: `atomic-deploy.sh`'s health
+gate rejected builds on boxes whose branding was correct, and the sort order means
+this would very likely have hit most of the fleet.
+
+Same root cause as the Fable-5 regression — a stale placeholder row outranking the
+real brand — in a third caller that was never routed through the shared
+placeholder-aware resolver. Now uses `resolveActiveCompanyId`, as tasks/ingest,
+departments, workspaces, converge and presentations already do.
+
+**Cannot go false-green:** `resolveActiveCompanyId` returns null when only
+placeholder companies exist; that path falls back to the original query, reads the
+placeholder, and FAILS — correct for a genuinely unbranded box. Pinned by an
+explicit invariant test. deep-health 91 → 93 tests.
+
 ## [v6.0.94] — 2026-08-26 — Dispatch deadlock: SOP remedy engine runs inside the Triad gate
 
 The GUARD 7 Triad gate `return`ed ~235 lines ABOVE the PRD 2.12-cc SOP remedy

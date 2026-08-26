@@ -2076,3 +2076,92 @@ describe('anthology_board_projection', () => {
     });
   });
 });
+
+// ── C-03: company_branding must not be masked by a leftover `default` seed row ──
+//
+// FIELD BUG. `checkCompanyBranding()` read the company via
+// `SELECT name FROM companies ORDER BY id LIMIT 1` — i.e. whichever row's TEXT id
+// sorted first, NOT the box's actual company. Provisioned boxes carry a leftover
+// `id='default'` seed row, and `'default'` sorts before almost any real brand slug,
+// so correctly-branded boxes read back as "Default", matched PLACEHOLDER_NAMES, and
+// hard-FAILED as unbranded. Measured on live client boxes; it blocked the
+// atomic-deploy.sh health gate on boxes whose branding was correct.
+//
+// This is the SAME root cause as the Fable-5 regression (a stale placeholder row
+// outranking the real brand), in a third caller that was never routed through the
+// shared placeholder-aware resolver. The fix routes it through
+// resolveActiveCompanyId, as tasks/ingest, departments, workspaces, converge and
+// presentations already do.
+//
+// Mocks here supply a REAL in-memory better-sqlite3 DB rather than a sql-string
+// matcher: the bug requires TWO rows to exist simultaneously, which a single-row
+// stub cannot express — which is precisely why the existing suite missed it.
+describe('company_branding — leftover default seed row (C-03)', () => {
+  function makeCompaniesDb(rows: Array<[string, string, string]>) {
+    const db = new BetterSqlite3(':memory:');
+    db.exec(`
+      CREATE TABLE companies (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        slug TEXT NOT NULL UNIQUE,
+        industry TEXT,
+        logo_url TEXT,
+        config TEXT DEFAULT '{}',
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now'))
+      );
+    `);
+    const ins = db.prepare('INSERT INTO companies (id, name, slug, config) VALUES (?, ?, ?, ?)');
+    for (const [id, name, slug] of rows) ins.run(id, name, slug, '{}');
+    return db;
+  }
+
+  function withoutCompanyEnv<T>(fn: () => T): T {
+    const s = process.env.COMPANY_SLUG;
+    const n = process.env.COMPANY_NAME;
+    delete process.env.COMPANY_SLUG;
+    delete process.env.COMPANY_NAME;
+    try { return fn(); } finally {
+      if (s === undefined) delete process.env.COMPANY_SLUG; else process.env.COMPANY_SLUG = s;
+      if (n === undefined) delete process.env.COMPANY_NAME; else process.env.COMPANY_NAME = n;
+    }
+  }
+
+  it('C-03: a branded box carrying an id=default seed row PASSES (broken code read "Default" and failed)', async () => {
+    writeCompanyConfig(tmpDir, { companyName: 'Summit Retail Enterprises' });
+    // 'default' sorts BEFORE 'summit-retail' — this is the live-box shape.
+    const db = makeCompaniesDb([
+      ['default', 'Default', 'default'],
+      ['summit-retail', 'Summit Retail Enterprises', 'summit-retail'],
+    ]);
+    vi.doMock('@/lib/db', () => ({
+      getDb: () => db,
+      getMigrationStatus: () => ({ applied: ['001'], pending: [] }),
+      getDbPath: () => path.join(tmpDir, 'test.db'),
+    }));
+    const { checkCompanyBranding } = await loadChecks();
+    const result = withoutCompanyEnv(() => checkCompanyBranding());
+    expect(result.pass).toBe(true);
+    expect(result.indeterminate).not.toBe(true);
+    db.close();
+  });
+
+  it('C-03 INVARIANT: an only-placeholder box still FAILS — the fix must never go false-green', async () => {
+    writeCompanyConfig(tmpDir, { companyName: 'Summit Retail Enterprises' });
+    // No real brand at all. resolveActiveCompanyId returns null, we fall back to the
+    // original query, read a placeholder, and FAIL — the correct verdict.
+    const db = makeCompaniesDb([
+      ['default', 'Default', 'default'],
+      ['command-center', 'Command Center', 'command-center'],
+    ]);
+    vi.doMock('@/lib/db', () => ({
+      getDb: () => db,
+      getMigrationStatus: () => ({ applied: ['001'], pending: [] }),
+      getDbPath: () => path.join(tmpDir, 'test.db'),
+    }));
+    const { checkCompanyBranding } = await loadChecks();
+    const result = withoutCompanyEnv(() => checkCompanyBranding());
+    expect(result.pass).toBe(false);
+    db.close();
+  });
+});
