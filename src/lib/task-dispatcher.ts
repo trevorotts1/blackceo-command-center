@@ -442,6 +442,181 @@ export function resolveSpecialistSessionKey(
 }
 
 /**
+ * Outcome of {@link resolveSopForTask}.
+ *
+ *   'already'     — the task already carried a live SOP; nothing was done.
+ *   'filled'      — an SOP was resolved (library pull or canonical-library copy).
+ *   'authoring'   — custom dept with no SOP: the authoring fast loop was fired and
+ *                   the pending attempt recorded. THE CALLER MUST RETURN; dispatch
+ *                   resumes via 'sop-authored-resume' once the SOP is filed.
+ *   'library_gap' — canonical dept with NO role-library row. A `sop_library_gap`
+ *                   event was written. No SOP; the caller decides what happens next.
+ *   'unresolved'  — no SOP and the remedy engine did not run: the
+ *                   DISABLE_SOP_FAST_LOOP kill switch, the SOP-authoring recursion
+ *                   guard, or a non-fatal engine error.
+ */
+type SopResolutionOutcome = 'already' | 'filled' | 'authoring' | 'library_gap' | 'unresolved';
+
+interface SopResolution {
+  outcome: SopResolutionOutcome;
+  sopId: string | null;
+}
+
+/**
+ * PRD 2.12-cc SOP resolution engine: library pull → canonical copy → authoring
+ * fast loop.
+ *
+ * EXTRACTED (U33 / C-02-b) from the body of `autoDispatchTask`, where it sat
+ * ~230 lines AFTER the GUARD 7 Triad gate and was therefore unreachable for the
+ * exact task class it exists to cure: a card missing ONLY its SOP was held by
+ * the gate and `return`ed before the engine could supply one. The logic below is
+ * unchanged; what moved is WHO can call it and WHEN.
+ *
+ * IDEMPOTENT: returns 'already' — no DB write, no embedding call, no authoring —
+ * when the task already carries an SOP, so the GUARD 7 fill and the original
+ * in-line call site can both run within a single dispatch without double work.
+ *
+ * NEVER THROWS: the engine's original try/catch is preserved, so a remedy
+ * failure degrades to 'unresolved' instead of killing the dispatch.
+ *
+ * @param sopAuthoringLink `tasks.sop_authoring_for_task_id` (GUARD 5's recursion
+ *   guard). When set, this task IS an authoring sub-task and MUST NOT re-enter
+ *   the authoring loop.
+ * @param opts.persistFill When true, a LIBRARY-PULL hit is written back to
+ *   `tasks.sop_id`. (The canonical-copy branch always persists — pre-existing
+ *   behaviour.) The GUARD 7 call site sets this so a card the gate cured leaves
+ *   backlog Triad-complete on the board and never re-pays for the pull; the
+ *   original in-line call site leaves it false so `TRIAD_ADVANCER_GATE=0` keeps
+ *   the documented pre-U33 behaviour exactly.
+ */
+async function resolveSopForTask(
+  task: Task,
+  agent: Agent,
+  context: string,
+  sopAuthoringLink: string | null | undefined,
+  opts: { persistFill?: boolean } = {},
+): Promise<SopResolution> {
+  const taskId = task.id;
+
+  // Idempotence gate: an SOP is already attached — no pull, no copy, no authoring.
+  if (task.sop_id) return { outcome: 'already', sopId: task.sop_id };
+
+  // ── SOP pull ────────────────────────────────────────────────────────────
+  let resolvedSopId: string | null = null;
+  try {
+    const best = await getBestSOPForTask({
+      title: task.title,
+      description: task.description ?? undefined,
+      department: task.department ?? undefined,
+      workspace_id: task.workspace_id ?? undefined,
+    });
+    if (best) resolvedSopId = best.id;
+  } catch {
+    /* non-fatal */
+  }
+
+  if (resolvedSopId) {
+    if (opts.persistFill) {
+      try {
+        run(`UPDATE tasks SET sop_id = ?, updated_at = ? WHERE id = ?`, [
+          resolvedSopId,
+          new Date().toISOString(),
+          task.id,
+        ]);
+        // Patch the in-memory row so the caller's Triad re-check and the
+        // idempotence gate above both see the cure within this same dispatch.
+        task.sop_id = resolvedSopId;
+      } catch {
+        /* pre-migration tolerant — the resolved id is still returned and used */
+      }
+    }
+    return { outcome: 'filled', sopId: resolvedSopId };
+  }
+
+  // ── PRD 2.12-cc: no-SOP detection → fast loop or canonical copy ──────────
+  // Only fires when:
+  //   (a) still no SOP after the pull above,
+  //   (b) the fast-loop kill switch is NOT set,
+  //   (c) this task is NOT itself a SOP-authoring sub-task (recursion guard).
+  if (process.env.DISABLE_SOP_FAST_LOOP === '1' || sopAuthoringLink) {
+    return { outcome: 'unresolved', sopId: null };
+  }
+
+  try {
+    const deptSlug = task.department ?? task.workspace_id ?? '';
+    const agentRoleSlug = agent.role ?? null;
+    const ctx = isCanonicalContext(deptSlug, agentRoleSlug);
+
+    if (ctx.canonical) {
+      // Canonical path: copy from library (near-zero tokens).
+      const copied = copyCanonicalSOPForTask(
+        { title: task.title, description: task.description, department: task.department, workspace_id: task.workspace_id },
+        agentRoleSlug,
+      );
+      if (copied) {
+        // Attach the library SOP to the task for future dispatches.
+        run(`UPDATE tasks SET sop_id = ?, updated_at = ? WHERE id = ?`, [
+          copied.id,
+          new Date().toISOString(),
+          task.id,
+        ]);
+        task.sop_id = copied.id;
+        console.log(`[${context}] autoDispatchTask: canonical SOP copy "${copied.name}" attached to task ${taskId}`);
+        return { outcome: 'filled', sopId: copied.id };
+      }
+      // No library row → loud library-gap event. Pre-U33 the dispatch then
+      // proceeded SOP-LESS; under GUARD 7 the caller now HOLDS on this outcome.
+      const gapMsg = `[sop_library_gap] Canonical dept "${deptSlug}" has no role-library SOP for task "${task.title}" (${taskId}). Library/build gap — human review required.`;
+      console.warn(gapMsg);
+      run(
+        `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, 'sop_library_gap', ?, ?, ?)`,
+        [uuidv4(), taskId, gapMsg, new Date().toISOString()],
+      );
+      return { outcome: 'library_gap', sopId: null };
+    }
+
+    // Custom dept → fire the authoring fast loop and HOLD this dispatch.
+    // The original task stays in backlog; authorSOPForTask will re-fire
+    // dispatch (via 'sop-authored-resume') after the SOP is filed.
+    console.log(`[${context}] autoDispatchTask: custom dept "${deptSlug}" — firing SOP authoring fast loop for task ${taskId}`);
+    void authorSOPForTask({
+      originalTaskId: task.id,
+      title: task.title,
+      description: task.description ?? null,
+      department: task.department ?? null,
+      agentRoleSlug,
+      workspaceId: task.workspace_id ?? null,
+    });
+    // DISP-03: this HOLD previously returned with NO accounting, so every
+    // sweep tick re-selected the still-SOP-less card and re-fired the
+    // authoring loop (~every 2 min, uncapped) — a furnace that also spawns
+    // duplicate authoring sub-tasks. Record the pending attempt so the
+    // sweeps back off (via next_dispatch_eligible_at + GUARD 6) between
+    // ticks, and — if authoring never yields an SOP after the cap — the
+    // card BLOCKS with a SYSTEM report instead of looping forever. The
+    // happy path is unaffected: sop-authored-resume bypasses the backoff
+    // (GUARD 6) and recordDispatchSuccess clears this counter on dispatch.
+    // NOTE: this soft-backoff branch does NOT touch `tasks.status`, which is
+    // what lets sop-authoring.ts §6 persist `sop_id` under its
+    // `WHERE status = 'backlog'` clause before re-firing dispatch.
+    recordDispatchFailure(task.id, agent.id, {
+      reason: 'sop_authoring_pending',
+      audience: 'SYSTEM',
+      needs:
+        `Custom dept "${deptSlug}" has no SOP yet; the authoring fast loop is running. ` +
+        'It resumes automatically once the SOP is filed.',
+      context,
+    });
+    return { outcome: 'authoring', sopId: null };
+  } catch (fastLoopErr) {
+    // Fast loop errors are non-fatal — the caller decides (pre-U33: dispatch
+    // proceeds SOP-less; under GUARD 7: the card holds).
+    console.error(`[${context}] autoDispatchTask: fast-loop error (non-fatal):`, (fastLoopErr as Error).message);
+    return { outcome: 'unresolved', sopId: null };
+  }
+}
+
+/**
  * Auto-dispatch a newly-routed task to its assigned specialist via OpenClaw.
  *
  * Fire-and-forget: `void autoDispatchTask(taskId, ctx)` — never awaited on the
@@ -467,6 +642,15 @@ export async function autoDispatchTask(
       console.warn(`[${context}] autoDispatchTask: task ${taskId} not found — skipping`);
       return;
     }
+
+    // F3.4 ANCHOR (U33 / C-02-b): the SOP the CREATION-TIME persona selection
+    // consumed, snapshotted at dispatch ENTRY. The SOP-aware persona rescore far
+    // below compares the dispatch-resolved SOP against this value, and the case it
+    // exists to serve is "selection saw NONE, dispatch resolved one". Since C-02-b
+    // the GUARD 7 Triad fill can patch `task.sop_id` IN-MEMORY mid-function, so
+    // reading `task.sop_id` at the rescore would compare the freshly-filled SOP
+    // against ITSELF and silently stop firing for exactly that case.
+    const selectionSopIdAtEntry = task.sop_id ?? null;
 
     // GUARD 1: must have an assigned agent.
     if (!task.assigned_agent_id) {
@@ -697,11 +881,60 @@ export async function autoDispatchTask(
     // TRIAD_ADVANCER_GATE=0 restores the pre-U33 bypass (documented revert
     // path).
     if (process.env.TRIAD_ADVANCER_GATE !== '0') {
-      const triad = checkTriad({
+      let triad = checkTriad({
         description: task.description,
         sop_id: task.sop_id,
         persona_id: task.persona_id,
       });
+
+      // ── U33 / C-02-b — THE DISPATCH DEADLOCK ────────────────────────────────
+      // GUARD 7 (above) and the PRD 2.12-cc SOP remedy engine were both correct
+      // in isolation and fatal in combination: the gate `return`s here, and the
+      // engine that can SUPPLY a missing SOP sat ~230 lines FURTHER DOWN this
+      // same function. A card whose only defect was a missing SOP could
+      // therefore never reach its own cure — it was held, backed off, and after
+      // TRIAD_HOLD_MAX_ATTEMPTS parked as `blocked`, while the library SOP that
+      // would have released it sat one query away, unreached. Neither half could
+      // see the bug alone; only the ORDER was wrong.
+      //
+      // FIX: when — and ONLY when — the SOP is the ONE missing leg, run the
+      // remedy engine HERE, re-check, and fall through to dispatch in the SAME
+      // invocation. No second sweep pass, no re-entry, no moving the gate.
+      //
+      // A missing DESCRIPTION or PERSONA is deliberately NOT cured here: both
+      // need human grooming regardless, so attempting a fill would buy nothing
+      // and would put an embedding-backed `getBestSOPForTask` call on the hold
+      // path of every sweep tick (anti-furnace — the same discipline
+      // TRIAD_HOLD_MAX_ATTEMPTS enforces).
+      if (triad.missing.length === 1 && triad.missing[0] === 'sop_id') {
+        const resolution = await resolveSopForTask(task, agent, context, sopAuthoringLink, {
+          persistFill: true,
+        });
+        if (resolution.outcome === 'authoring') {
+          // Custom dept, no SOP: the authoring fast loop now owns this card and
+          // has already recorded the pending attempt. It re-enters dispatch via
+          // 'sop-authored-resume' AFTER persisting `tasks.sop_id`
+          // (sop-authoring.ts §6 — the UPDATE precedes the re-fire), so the
+          // resumed pass PASSES this gate instead of deadlocking on it again.
+          return;
+        }
+        if (resolution.outcome === 'filled') {
+          // Cured — re-check against the SOP we just resolved and fall through.
+          triad = checkTriad({
+            description: task.description,
+            sop_id: resolution.sopId,
+            persona_id: task.persona_id,
+          });
+        }
+        // 'library_gap' / 'unresolved' → `triad` is unchanged and the card drops
+        // into the hold below. For a canonical dept with a genuine library gap
+        // this is a DELIBERATE semantic change: pre-U33 the card dispatched
+        // SOP-LESS; it now holds loudly (gap event + triad hold + park). The
+        // documented pre-U33 behaviour remains available via
+        // TRIAD_ADVANCER_GATE=0, which routes SOP resolution through the
+        // ORIGINAL in-line call site instead of this one.
+      }
+
       if (triad.missing.length > 0) {
         const missingLabel = triadMissingPillText(triad.missing as TriadMissingKey[]);
         const holdMsg =
@@ -994,95 +1227,22 @@ export async function autoDispatchTask(
       `[${context}] autoDispatchTask: Task "${task.title}" (${task.id}) → "${agent.name}" | model=${settings.model} (${settings.modelSource}) | modality=${required_modality} | specialist=${specialistType}`,
     );
 
-    // ── SOP pull ────────────────────────────────────────────────────────────
-    let resolvedSopId = task.sop_id ?? null;
-    if (!resolvedSopId) {
-      try {
-        const best = await getBestSOPForTask({
-          title: task.title,
-          description: task.description ?? undefined,
-          department: task.department ?? undefined,
-          workspace_id: task.workspace_id ?? undefined,
-        });
-        if (best) resolvedSopId = best.id;
-      } catch {
-        /* non-fatal */
-      }
+    // ── SOP resolution — library pull → canonical copy → authoring fast loop ──
+    // U33 / C-02-b: the engine itself now lives in `resolveSopForTask()` (above)
+    // so the GUARD 7 Triad gate can run it BEFORE deciding to hold. This call
+    // site is KEPT AT ITS ORIGINAL POSITION and is what `TRIAD_ADVANCER_GATE=0`
+    // executes: with the gate off this is the only invocation, and its behaviour
+    // is the documented pre-U33 one (`persistFill` defaults to false, so a
+    // library-pull hit is NOT written back to `tasks.sop_id`, exactly as before).
+    //
+    // With the gate ON, GUARD 7 has already resolved the SOP and patched the
+    // in-memory row, so the helper's idempotence short-circuit ('already')
+    // makes this a no-op — one dispatch never runs the engine twice.
+    const sopResolution = await resolveSopForTask(task, agent, context, sopAuthoringLink);
+    if (sopResolution.outcome === 'authoring') {
+      return; // HOLD: abort this dispatch; authorSOPForTask re-fires it.
     }
-
-    // ── PRD 2.12-cc: no-SOP detection → fast loop or canonical copy ──────────
-    // Only fires when:
-    //   (a) still no SOP after the pull above,
-    //   (b) the fast-loop kill switch is NOT set,
-    //   (c) this task is NOT itself a SOP-authoring sub-task (recursion guard).
-    if (!resolvedSopId && process.env.DISABLE_SOP_FAST_LOOP !== '1' && !sopAuthoringLink) {
-      try {
-        const deptSlug = task.department ?? task.workspace_id ?? '';
-        const agentRoleSlug = agent.role ?? null;
-        const ctx = isCanonicalContext(deptSlug, agentRoleSlug);
-
-        if (ctx.canonical) {
-          // Canonical path: copy from library (near-zero tokens).
-          const copied = copyCanonicalSOPForTask(
-            { title: task.title, description: task.description, department: task.department, workspace_id: task.workspace_id },
-            agentRoleSlug,
-          );
-          if (copied) {
-            resolvedSopId = copied.id;
-            // Attach the library SOP to the task for future dispatches.
-            run(`UPDATE tasks SET sop_id = ?, updated_at = ? WHERE id = ?`, [
-              copied.id,
-              new Date().toISOString(),
-              task.id,
-            ]);
-            console.log(`[${context}] autoDispatchTask: canonical SOP copy "${copied.name}" attached to task ${taskId}`);
-          } else {
-            // No library row → loud library-gap event; dispatch proceeds SOP-less.
-            const gapMsg = `[sop_library_gap] Canonical dept "${deptSlug}" has no role-library SOP for task "${task.title}" (${taskId}). Library/build gap — human review required.`;
-            console.warn(gapMsg);
-            run(
-              `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, 'sop_library_gap', ?, ?, ?)`,
-              [uuidv4(), taskId, gapMsg, new Date().toISOString()],
-            );
-          }
-        } else {
-          // Custom dept → fire the authoring fast loop and HOLD this dispatch.
-          // The original task stays in backlog; authorSOPForTask will re-fire
-          // dispatch (via 'sop-authored-resume') after the SOP is filed.
-          console.log(`[${context}] autoDispatchTask: custom dept "${deptSlug}" — firing SOP authoring fast loop for task ${taskId}`);
-          void authorSOPForTask({
-            originalTaskId: task.id,
-            title: task.title,
-            description: task.description ?? null,
-            department: task.department ?? null,
-            agentRoleSlug,
-            workspaceId: task.workspace_id ?? null,
-          });
-          // DISP-03: this HOLD previously returned with NO accounting, so every
-          // sweep tick re-selected the still-SOP-less card and re-fired the
-          // authoring loop (~every 2 min, uncapped) — a furnace that also spawns
-          // duplicate authoring sub-tasks. Record the pending attempt so the
-          // sweeps back off (via next_dispatch_eligible_at + GUARD 6) between
-          // ticks, and — if authoring never yields an SOP after the cap — the
-          // card BLOCKS with a SYSTEM report instead of looping forever. The
-          // happy path is unaffected: sop-authored-resume bypasses the backoff
-          // (GUARD 6) and recordDispatchSuccess clears this counter on dispatch.
-          recordDispatchFailure(task.id, agent.id, {
-            reason: 'sop_authoring_pending',
-            audience: 'SYSTEM',
-            needs:
-              `Custom dept "${deptSlug}" has no SOP yet; the authoring fast loop is running. ` +
-              'It resumes automatically once the SOP is filed.',
-            context,
-          });
-          return; // HOLD: abort this dispatch; authorSOPForTask re-fires it.
-        }
-      } catch (fastLoopErr) {
-        // Fast loop errors are non-fatal — dispatch proceeds SOP-less.
-        console.error(`[${context}] autoDispatchTask: fast-loop error (non-fatal):`, (fastLoopErr as Error).message);
-      }
-    }
-    // ── End PRD 2.12-cc fast loop ──────────────────────────────────────────────
+    const resolvedSopId = sopResolution.sopId;
 
     let sopBlock = '';
     let resolvedSopName: string | null = null; // W5.3: captured for START notification
@@ -1129,7 +1289,9 @@ ${stepLines.join('\n')}
     // heuristic-mode timeout), fail-closed (never downgrades an existing
     // persona), and fully non-fatal — dispatch proceeds regardless. Persists a
     // queryable `persona_rescored_at_dispatch` event.
-    const selectionSopId = task.sop_id ?? null; // SOP the creation-time selection consumed
+    // U33 / C-02-b: dispatch-ENTRY snapshot, NOT a live read — the GUARD 7 SOP
+    // fill may have patched `task.sop_id` in-memory since (see the anchor above).
+    const selectionSopId = selectionSopIdAtEntry; // SOP the creation-time selection consumed
     if (resolvedSopId && resolvedSopId !== selectionSopId) {
       try {
         // Dynamic import: tasks.ts already imports this module (autoDispatchTask),
