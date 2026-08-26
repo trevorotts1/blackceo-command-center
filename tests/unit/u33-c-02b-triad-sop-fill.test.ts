@@ -225,7 +225,7 @@ test('[U33/C-02-b] gate ON: a card missing ONLY its SOP is FILLED from the libra
 
 // ── (2) Custom dept → authoring fast loop fires, dispatch HOLDS ──────────────
 
-test('[U33/C-02-b] gate ON: a custom-dept card with no SOP fires the authoring fast loop and records sop_authoring_pending', async () => {
+test('[U33/C-02-b] gate ON: a custom-dept card with no SOP fires the authoring fast loop under a SINGLE capped accounting owner', async () => {
   const taskId = 'task-c02b-custom-authoring';
   seedTask({
     id: taskId,
@@ -247,10 +247,31 @@ test('[U33/C-02-b] gate ON: a custom-dept card with no SOP fires the authoring f
     'authorSOPForTask must have been invoked (it wrote its own no-research-specialist event)',
   );
 
-  // The pending attempt is accounted for (DISP-03 anti-furnace).
+  // ── SINGLE CAPPED ACCOUNTING OWNER (the anti-furnace property) ────────────
+  // Accounting for this tick belongs to the triad hold, NOT to the authoring
+  // branch. That matters for two reasons, both of which regressed when the
+  // remedy engine was first lifted above the gate:
+  //
+  //  1. The authoring branch's own recordDispatchFailure passes NO maxAttempts
+  //     (deliberately — that is pre-U33 behaviour at the original call site,
+  //     which TRIAD_ADVANCER_GATE=0 still uses). Letting it own the accounting
+  //     here would leave the card UNCAPPED: re-selected, and re-firing the
+  //     authoring loop, on every sweep tick forever.
+  //  2. Both branches recording would burn TWO attempts per tick.
+  const deferred = deferredFor(taskId);
+  assert.equal(deferred.length, 1, 'exactly ONE attempt is recorded per tick — not two');
   assert.ok(
-    deferredFor(taskId).some((m) => /sop_authoring_pending/.test(m)),
-    'the hold must be recorded as sop_authoring_pending',
+    deferred.some((m) => /triad_incomplete/.test(m)),
+    'the capped triad hold owns the accounting, so the card can still park',
+  );
+  assert.ok(
+    !deferred.some((m) => /sop_authoring_pending/.test(m)),
+    'the uncapped authoring accounting must NOT also fire from the gate path',
+  );
+  assert.equal(
+    eventsFor(taskId, 'triad_gate_hold').length,
+    1,
+    'the hold is queryable — the card is visibly held, never silently skipped',
   );
 
   // And it did NOT dispatch.

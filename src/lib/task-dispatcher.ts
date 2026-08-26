@@ -494,7 +494,7 @@ async function resolveSopForTask(
   agent: Agent,
   context: string,
   sopAuthoringLink: string | null | undefined,
-  opts: { persistFill?: boolean } = {},
+  opts: { persistFill?: boolean; recordAuthoringAttempt?: boolean } = {},
 ): Promise<SopResolution> {
   const taskId = task.id;
 
@@ -599,14 +599,26 @@ async function resolveSopForTask(
     // NOTE: this soft-backoff branch does NOT touch `tasks.status`, which is
     // what lets sop-authoring.ts §6 persist `sop_id` under its
     // `WHERE status = 'backlog'` clause before re-firing dispatch.
-    recordDispatchFailure(task.id, agent.id, {
-      reason: 'sop_authoring_pending',
-      audience: 'SYSTEM',
-      needs:
-        `Custom dept "${deptSlug}" has no SOP yet; the authoring fast loop is running. ` +
-        'It resumes automatically once the SOP is filed.',
-      context,
-    });
+    //
+    // U33 / C-02-b — SINGLE ACCOUNTING OWNER. The GUARD 7 Triad fill passes
+    // recordAuthoringAttempt:false because it does its OWN accounting, through
+    // the triad hold, which carries maxAttempts: TRIAD_HOLD_MAX_ATTEMPTS.
+    // Recording here as well would (1) double-count, burning two attempts per
+    // sweep tick, and (2) — because THIS call deliberately passes no
+    // maxAttempts, matching pre-U33 behaviour at the original call site — leave
+    // the card able to retry, and re-fire authoring, FOREVER. That uncapped
+    // retry was harmless only while this code sat below the gate and was
+    // unreachable for Triad-incomplete cards; making it reachable exposes it.
+    if (opts.recordAuthoringAttempt !== false) {
+      recordDispatchFailure(task.id, agent.id, {
+        reason: 'sop_authoring_pending',
+        audience: 'SYSTEM',
+        needs:
+          `Custom dept "${deptSlug}" has no SOP yet; the authoring fast loop is running. ` +
+          'It resumes automatically once the SOP is filed.',
+        context,
+      });
+    }
     return { outcome: 'authoring', sopId: null };
   } catch (fastLoopErr) {
     // Fast loop errors are non-fatal — the caller decides (pre-U33: dispatch
@@ -909,15 +921,23 @@ export async function autoDispatchTask(
       if (triad.missing.length === 1 && triad.missing[0] === 'sop_id') {
         const resolution = await resolveSopForTask(task, agent, context, sopAuthoringLink, {
           persistFill: true,
+          recordAuthoringAttempt: false,
         });
-        if (resolution.outcome === 'authoring') {
-          // Custom dept, no SOP: the authoring fast loop now owns this card and
-          // has already recorded the pending attempt. It re-enters dispatch via
-          // 'sop-authored-resume' AFTER persisting `tasks.sop_id`
-          // (sop-authoring.ts §6 — the UPDATE precedes the re-fire), so the
-          // resumed pass PASSES this gate instead of deadlocking on it again.
-          return;
-        }
+        // 'authoring' deliberately does NOT return early. The authoring fast
+        // loop has been fired and will re-enter dispatch via
+        // 'sop-authored-resume' after persisting `tasks.sop_id`
+        // (sop-authoring.ts §6 — the UPDATE precedes the re-fire, under
+        // `WHERE status = 'backlog'`), so the resumed pass clears this gate.
+        // But authoring is a REMEDY, not a guarantee: it can fail, stall, or
+        // return no SOP. Returning here would hand the card to a path with no
+        // attempt cap, so a card whose authoring never lands would be re-tried
+        // — and would re-fire authoring — on every sweep tick, forever. Falling
+        // through to the hold below keeps ONE accounting owner, preserves the
+        // TRIAD_HOLD_MAX_ATTEMPTS park, and keeps the block reason
+        // 'triad_incomplete' (which is the honest cause: the card is still
+        // Triad-incomplete at this instant). The happy path is unharmed —
+        // GUARD 6's 'sop-authored-resume' bypass ignores the backoff this hold
+        // stamps, so a successful authoring run still dispatches immediately.
         if (resolution.outcome === 'filled') {
           // Cured — re-check against the SOP we just resolved and fall through.
           triad = checkTriad({
