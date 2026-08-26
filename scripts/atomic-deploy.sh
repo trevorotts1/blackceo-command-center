@@ -14,7 +14,7 @@
 #   --db-path PATH       Explicit path to mission-control.db (default: resolve from pm2/env)
 #   --disk-path PATH     Filesystem path to check disk headroom on (default: $APP_DIR)
 #   --disk-min-gb N      Minimum free GB required before build (default: 5)
-#   --health-retries N   Number of times to retry after exit-3 UNKNOWN from health check (default: 3)
+#   --health-retries N   Number of times to retry after exit-3 UNKNOWN from health check (default: 36)
 #   --health-retry-wait  Seconds to wait between exit-3 retries (default: 15)
 #   --canonical-dir DIR  Pass-through to cc-health-check.sh --canonical-dir
 #   --public-url URL     Pass-through to cc-health-check.sh --public-url
@@ -75,7 +75,17 @@ PORT="${CC_PORT:-4000}"
 DB_PATH_OVERRIDE="${CC_DB_PATH:-}"
 DISK_PATH_OVERRIDE="${CC_DISK_PATH:-}"
 DISK_MIN_GB="${CC_DISK_MIN_GB:-5}"
-HEALTH_RETRIES="${CC_HEALTH_RETRIES:-3}"
+# HEALTH_RETRIES default: measured evidence, not a guess. teresa-pelham needed
+# ~530s of post-restart boot work (WAL replay / DB recovery) on a 319 MB
+# mission-control.db before the health check went green — the old default
+# (3 retries x (15s probe + 15s wait) = ~95s worst case) reported exit 3
+# (UNKNOWN) on a deploy that had actually succeeded. cassandra-henriquez is
+# untested at 1.69 GB, >5x teresa's size. 36 retries x (15s probe + 15s wait)
+# = ~1080s (18 min), ~2x the one real measured data point, WITHOUT assuming
+# boot time scales linearly with DB size (unproven, and a full 5.3x linear
+# extrapolation would push this past 2800s). If a larger DB is measured and
+# exceeds this window, raise it again from that new data point.
+HEALTH_RETRIES="${CC_HEALTH_RETRIES:-36}"
 HEALTH_RETRY_WAIT="${CC_HEALTH_RETRY_WAIT:-15}"
 CANONICAL_DIR_OVERRIDE="${CC_CANONICAL_DIR:-}"
 PUBLIC_URL_PROBE="${CC_PUBLIC_URL:-}"
