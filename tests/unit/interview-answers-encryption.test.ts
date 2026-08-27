@@ -13,13 +13,16 @@
 import os from 'os';
 import fs from 'fs';
 import path from 'path';
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+
+// This runs before static imports. crypto.ts resolves its key lazily, but this
+// also protects the suite if a future module-level key read is introduced.
+vi.hoisted(() => {
+  process.env.MC_INTERVIEW_SECRET = 'u048-test-secret-do-not-use-in-prod';
+});
 
 // Isolated DB — must be imported before any @/lib/db import.
 import './_isolated-db';
-
-// Force a known test key so encryption is deterministic across runs.
-process.env.MC_INTERVIEW_SECRET = 'u048-test-secret-do-not-use-in-prod';
 
 import {
   encryptAtRest,
@@ -67,8 +70,14 @@ describe('U048 crypto primitives', () => {
 
   it('decryptAtRest returns null for tampered envelope', () => {
     const envelope = encryptAtRest(ANSWER);
-    // Flip a character in the base64 payload.
-    const tampered = envelope.slice(0, 10) + 'X' + envelope.slice(11);
+    // Replace a payload character with a different valid base64 character.
+    // (Replacing it with a fixed character can occasionally make no change.)
+    const payloadStart = 'enc:v1:'.length;
+    const original = envelope[payloadStart];
+    const tampered =
+      envelope.slice(0, payloadStart) +
+      (original === 'A' ? 'B' : 'A') +
+      envelope.slice(payloadStart + 1);
     expect(decryptAtRest(tampered)).toBeNull();
   });
 
