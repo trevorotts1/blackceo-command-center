@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createHmac, createHash } from 'crypto';
-import { queryOne, getDb } from '@/lib/db';
+import { queryOne, getDb, run } from '@/lib/db';
+import { v4 as uuidv4 } from 'uuid';
 import { runMigrations } from '@/lib/db/migrations';
 import { createTaskCore } from '@/lib/tasks';
 import { routeTask } from '@/lib/routing/department-router';
@@ -856,6 +857,37 @@ export async function POST(request: NextRequest) {
     }
 
     const { task, deduped } = result;
+
+    // TICKET 2 Fix A (L-14/L-18): the trust-coverage design (see the
+    // humanDoorId comment above) treats an omitted requester_chat_id as
+    // CORRECT for a producer/backfill call — it deliberately falls outside
+    // the coverage denominator. That design has no way to tell that
+    // legitimate omission apart from a LIVE client-channel caller (source
+    // 'telegram' | 'bridge' | 'agent' — an OpenClaw agent fanning out on
+    // behalf of a real conversation, e.g. `main`'s own ingest fan-out) that
+    // simply forgot to pass it — exactly what happened to this incident's 3
+    // task cards, silently, with no error and no signal anywhere except a
+    // manual DB read. 'backfill' is the one source value that is explicitly
+    // historical/non-live, so it is the only one exempted here. This does
+    // NOT block task creation — it makes the gap queryable in events/
+    // task_activities instead of invisible.
+    if (!requesterChatId && source !== 'backfill') {
+      const missingChatIdMsg =
+        `[requester_chat_id_missing] Task "${task.title}" (${task.id}) was ingested with ` +
+        `source=${source ?? '(none)'} but no requester_chat_id — this task has no way to reach ` +
+        `whoever requested it (no ACK/PROGRESS/DONE trust-engine message can be addressed). If ` +
+        `this was a live client-facing request, the caller needs to supply requester_chat_id.`;
+      try {
+        run(
+          `INSERT INTO events (id, type, task_id, message, created_at)
+           VALUES (?, 'requester_chat_id_missing', ?, ?, ?)`,
+          [uuidv4(), task.id, missingChatIdMsg, new Date().toISOString()],
+        );
+      } catch (writeErr) {
+        console.error('[INGEST] requester_chat_id_missing event write failed (non-fatal):', writeErr);
+      }
+      console.warn(`[INGEST] ${missingChatIdMsg}`);
+    }
 
     // Owner assignment notification now lives in createTaskCore (MR-36) so both
     // the UI create path and the ingest path share a single fire site.
