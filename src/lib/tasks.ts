@@ -61,8 +61,12 @@ import {
   podcastActivationRefusalMessage,
 } from '@/lib/capability-manifest';
 import { ensureCampaignForTask } from '@/lib/campaigns';
-import { notifySystem, notifyTelegram } from '@/lib/notify';
+import { notifySystem } from '@/lib/notify';
 import { notifyOwnerAssigned } from '@/lib/owner-reports';
+import {
+  sendRequesterAudienceAsk,
+  type RequesterAudienceAskDelivery,
+} from '@/lib/jobs/trust-engine';
 import { transition, recordStatusEvent, type LifecycleState } from '@/lib/task-lifecycle';
 import { recordBlockEvent } from '@/lib/block-events';
 import type { Task, TaskPriority, Agent, PersonaBundle, TaskPersonaBundleRow } from '@/lib/types';
@@ -1458,7 +1462,10 @@ export interface AudienceConfirmDecision {
   firstHold: boolean;
 }
 
-type TelegramNotifier = typeof notifyTelegram;
+type RequesterAudienceAskSender = (
+  taskId: string,
+  question: string,
+) => RequesterAudienceAskDelivery;
 
 /**
  * Build the operator-facing audience prompt. A single high-confidence ICP audience
@@ -1694,7 +1701,7 @@ export function holdForAudienceConfirm(
   taskId: string,
   agentId: string | null,
   decision: AudienceConfirmDecision,
-  sendTelegram: TelegramNotifier = notifyTelegram,
+  sendRequesterAudienceAskFn: RequesterAudienceAskSender = sendRequesterAudienceAsk,
 ): void {
   const now = new Date().toISOString();
   const nextEligible = new Date(Date.now() + AUDIENCE_CONFIRM_POLL_MS).toISOString();
@@ -1721,25 +1728,16 @@ export function holdForAudienceConfirm(
     const audienceQuestion = decision.audienceLabel
       ? `Quick check before we start building: this will be written for ${decision.audienceLabel} — is that right, or should it be for someone else?`
       : 'Quick question before we start building: who is this for? Tell me about the audience you want this written for.';
-    let askDelivery = 'none (no requester_chat_id)';
+    let askDelivery: RequesterAudienceAskDelivery = 'send_failed';
+    try {
+      askDelivery = sendRequesterAudienceAskFn(taskId, audienceQuestion);
+    } catch { /* requester notification best-effort; retain send_failed */ }
 
     try {
-      const columns = queryAll<{ name: string }>('PRAGMA table_info(tasks)', []);
-      const hasRequesterColumn = columns.some((column) => column.name === 'requester_chat_id');
-      if (hasRequesterColumn) {
-        const requester = queryOne<{ requester_chat_id: string | null }>(
-          'SELECT requester_chat_id FROM tasks WHERE id = ?',
-          [taskId],
-        );
-        if (requester?.requester_chat_id) {
-          const attempted = sendTelegram({ chatId: requester.requester_chat_id, message: audienceQuestion });
-          askDelivery = attempted ? 'telegram' : 'none (telegram send not attempted)';
-        }
-      }
-    } catch { /* requester notification best-effort */ }
-
-    try {
-      run('UPDATE tasks SET ask = ? WHERE id = ?', [audienceQuestion, taskId]);
+      run(
+        "UPDATE tasks SET ask = ? WHERE id = ? AND (ask IS NULL OR ask = '')",
+        [audienceQuestion, taskId],
+      );
     } catch { /* pre-migration tolerant */ }
 
     try {
