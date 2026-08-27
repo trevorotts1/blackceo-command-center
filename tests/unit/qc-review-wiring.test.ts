@@ -128,13 +128,15 @@ test('runQCOnReview: skips task not in review status (returns null)', async () =
   assert.ok(!evt, 'no qc_review event should be written for a non-review task');
 });
 
-// ─── Test 3: §4 no-criteria = un-reroutable → stays in review ────────────────
+// ─── Test 3: §4 no-criteria = un-reroutable → blocked immediately ────────────
 // §4: "if QC fails on criteria the executor cannot influence (brief wording,
-// missing metadata), it must NOT reroute; it goes to review with a human-readable
-// reason."  No SOP assigned = missing metadata = un-reroutable.
-// Updated from original: test now asserts §4 behavior (stays in review, no backlog).
+// missing metadata), it must NOT reroute (never sent back to backlog for
+// another attempt)." No SOP assigned = missing metadata = un-reroutable.
+// LOOP-FIX-20260827: an un-reroutable verdict now blocks the task IMMEDIATELY
+// (via blockTaskForQC) instead of leaving it in `review` to be rescored
+// identically forever — see qc-loop-close.test.ts for the incident this fixes.
 
-test('FAIL branch (no-criteria): §4 un-reroutable → task stays in review, QC-UNROUTEABLE event written', async () => {
+test('FAIL branch (no-criteria): §4 un-reroutable → task blocked immediately, QC-UNROUTEABLE event written', async () => {
   const id = nextId('qc-fail');
   // Short description, no SOP → no-criteria path (score 7.5 < 8.5).
   insertTask(id, 'review', 'ok');
@@ -143,15 +145,15 @@ test('FAIL branch (no-criteria): §4 un-reroutable → task stays in review, QC-
   assert.ok(result !== null, 'must return a result');
   assert.ok(!result.pass, 'no-criteria path must fail');
 
-  // §4: task must STAY in review (un-reroutable), not move to backlog.
+  // §4: task must be blocked (un-reroutable never returns to backlog).
   const task = queryOne<{ status: string; description: string | null }>(
     `SELECT status, description FROM tasks WHERE id = ?`,
     [id],
   );
   assert.ok(task, 'task must exist');
-  assert.equal(task.status, 'review', '§4 un-reroutable: task must stay in review, not backlog');
+  assert.equal(task.status, 'blocked', '§4 un-reroutable: task must be blocked immediately, never backlog');
 
-  // QC-UNROUTEABLE event must be written.
+  // QC-UNROUTEABLE event must still be written (unchanged marker).
   const unrouteableEvt = queryOne<{ type: string; message: string }>(
     `SELECT type, message FROM events WHERE task_id = ? AND message LIKE '%[QC-UNROUTEABLE]%' LIMIT 1`,
     [id],
@@ -159,7 +161,7 @@ test('FAIL branch (no-criteria): §4 un-reroutable → task stays in review, QC-
   assert.ok(unrouteableEvt, '§4: QC-UNROUTEABLE event must be written for un-reroutable failure');
   assert.ok(unrouteableEvt.message.includes('Human review'), '§4: event message must mention Human review');
 
-  // No QC-REROUTE event (§4 kill).
+  // No QC-REROUTE event (§4 kill) — un-reroutable never reroutes to backlog.
   const reroute = queryOne<{ id: string }>(
     `SELECT id FROM events WHERE task_id = ? AND message LIKE '%[QC-REROUTE]%' LIMIT 1`,
     [id],
