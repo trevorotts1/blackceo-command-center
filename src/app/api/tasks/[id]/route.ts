@@ -25,7 +25,7 @@ import { collectCompletionEvidence, noEvidenceMessage } from '@/lib/completion-e
 import { notifyOwner } from '@/lib/notify';
 import { notifyOwnerAssigned, notifyOwnerDone } from '@/lib/owner-reports';
 import { evaluatePresentationsDoneGate, PROCESS_CERTIFICATE_SHA_RE } from '@/lib/presentations-cert-gate';
-import { transition, TransitionError, type LifecycleState, LEGAL_TRANSITIONS } from '@/lib/task-lifecycle';
+import { transition, TransitionError, type LifecycleState, LEGAL_TRANSITIONS, getArtifactDirLastActivity } from '@/lib/task-lifecycle';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -68,6 +68,12 @@ export async function GET(
     // U38 (C-07) — same human-promote control gate the tasks-list GET
     // attaches; powers the task-detail modal's QcPromotePanel. Short-circuited
     // to review-status tasks only (see route.ts's short-circuit comment).
+    // TICKET 5a (L-09): read-side heartbeat proxy — most recent mtime under
+    // this task's artifact directory, independent of tasks.status. Lets a
+    // status check show "actively rendering" even when the board's own status
+    // column is stale/frozen (the exact divergence L-09 proved cost ~40
+    // minutes of false reassurance). null means no signal available, not
+    // "confirmed inactive" — callers must not treat it as a negative proof.
     const withMismatch: Task = {
       ...task,
       persona_mismatch: task.voice_persona_id ? getOpenPersonaMismatch(task.id) : null,
@@ -75,6 +81,7 @@ export async function GET(
       dispatch_hold: getOpenDispatchHold(task.id),
       qc_heuristic_park: task.status === 'review' ? getQcHeuristicPark(task.id) : null,
       last_block_event: getLatestBlockEvent(task.id),
+      last_activity_at: getArtifactDirLastActivity(task.id),
     };
 
     return NextResponse.json(withMismatch);
