@@ -310,6 +310,15 @@ export function buildSOPEmbedText(sop: Pick<SOP, 'name' | 'task_keywords' | 'ste
  * Returns Float32Array (1536 dims). Throws on error.
  */
 async function fetchEmbeddingOpenAI(text: string, apiKey: string): Promise<Float32Array> {
+  // TICKET 4a: this single-text call is the one on the hot dispatch path
+  // (rankSOPsBySemantic → resolveSopForTask → autoDispatchTask) and previously
+  // had no bound at all — unlike its own batched sibling (fetchEmbeddingsOpenAI,
+  // below) and the Google single-text equivalent (fetchEmbeddingGoogle), both of
+  // which already pass an AbortSignal.timeout. A stalled OpenAI response here
+  // hung forever: the caller's try/catch (rankSOPsBySemantic) only catches a
+  // throw, never an unsettled promise, so nothing downstream (including the
+  // outer catch in autoDispatchTask) ever saw it. Matches the confirmed
+  // "resolution log line, then nothing" dispatch-silent-stall symptom.
   const resp = await fetch('https://api.openai.com/v1/embeddings', {
     method: 'POST',
     headers: {
@@ -321,6 +330,7 @@ async function fetchEmbeddingOpenAI(text: string, apiKey: string): Promise<Float
       input: text,
       encoding_format: 'float',
     }),
+    signal: AbortSignal.timeout(10_000),
   });
 
   if (!resp.ok) {
