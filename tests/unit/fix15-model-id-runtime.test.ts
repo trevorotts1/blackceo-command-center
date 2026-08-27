@@ -38,6 +38,7 @@ import {
   normalizeModelId,
   modelsMatch,
   recordModelSkewEvent,
+  reconcileTaskModelRecord,
 } from '../../src/lib/runtime-model';
 import type { Agent, Task } from '../../src/lib/types';
 
@@ -118,6 +119,24 @@ function seedAgentAndTask(): { agentId: string; taskId: string } {
     `INSERT OR IGNORE INTO tasks (id, title, description, status, priority, created_at, updated_at, workspace_id)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     [taskId, 'FIX-15 test deck', 'Prove model_id matches runtime', 'backlog', 'medium', now, now, 'presentations'],
+  );
+  return { agentId, taskId };
+}
+
+/**
+ * Seed a task under a caller-chosen id, reusing the shared agent. The event
+ * dedupe added for the model-record reconcile is per-task, so each dedupe test
+ * needs its OWN task row — `seedAgentAndTask` hands every caller the same fixed
+ * id and would let one test's rows decide another's outcome.
+ */
+function seedNamedTask(suffix: string): { agentId: string; taskId: string } {
+  const { agentId } = seedAgentAndTask();
+  const taskId = `seed-task-fix15-${suffix}`;
+  const now = new Date().toISOString();
+  run(
+    `INSERT OR IGNORE INTO tasks (id, title, description, status, priority, created_at, updated_at, workspace_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [taskId, `FIX-15 ${suffix}`, 'model paperwork reconcile', 'backlog', 'medium', now, now, 'presentations'],
   );
   return { agentId, taskId };
 }
@@ -234,6 +253,199 @@ test('the skew predicate the dispatch uses would flag a real skew', () => {
   // And the same model both ways is NOT a skew.
   const sameSkew = !!(intended && intended && !modelsMatch(intended, intended));
   assert.equal(sameSkew, false);
+});
+
+// ── Test 6: the MODEL-SKEW message carries no stray quote ──────────────────
+// The live emitter interpolated `runtime="'${runtime}"` — a literal apostrophe
+// inside the template — so every skew row on the box read
+// runtime="'openrouter/z-ai/glm-5.3-flash". The metadata copy was always clean,
+// which is what proved the quote was a message-template typo and not a config
+// or env parse fault. Guard the rendered message against the typo returning.
+test('MODEL-SKEW message quotes the runtime model without a stray apostrophe', () => {
+  const { agentId, taskId } = seedNamedTask('quote-guard');
+  recordModelSkewEvent({
+    taskId,
+    agentId,
+    intended: 'ollama/kimi-k2.7:cloud',
+    runtime: 'openrouter/z-ai/glm-5.3-flash',
+    skew: true,
+    detail: { source: 'openclaw_config' },
+  });
+  const row = queryAll<{ message: string; metadata: string }>(
+    `SELECT message, metadata FROM events WHERE task_id = ? AND type = 'model_skew_detected'`,
+    [taskId],
+  )[0]!;
+  assert.ok(
+    row.message.includes('runtime="openrouter/z-ai/glm-5.3-flash"'),
+    `runtime must be plainly quoted, got: ${row.message}`,
+  );
+  assert.ok(!row.message.includes(`"'`), 'no stray apostrophe after the opening quote');
+  // The message and the metadata must now agree on the model string.
+  assert.equal(JSON.parse(row.metadata).runtime_model, 'openrouter/z-ai/glm-5.3-flash');
+});
+
+// ── Test 7: skew events are deduped — one audit row, not one per dispatch ──
+test('a repeated identical skew observation does not write a second event row', () => {
+  const { agentId, taskId } = seedNamedTask('skew-dedupe');
+  const emit = () =>
+    recordModelSkewEvent({
+      taskId,
+      agentId,
+      intended: 'ollama/minimax-m3:cloud',
+      runtime: 'deepseek/deepseek-v4-flash-vision-exp',
+      skew: true,
+      detail: { source: 'openclaw_config' },
+    });
+  // Four dispatches of the same task, same stale paperwork — the live shape on
+  // task 9e5925c5, which accumulated four identical MODEL-SKEW rows.
+  emit();
+  emit();
+  emit();
+  emit();
+  const rows = queryAll<{ id: string }>(
+    `SELECT id FROM events WHERE task_id = ? AND type = 'model_skew_detected'`,
+    [taskId],
+  );
+  assert.equal(rows.length, 1, 'exactly one skew row survives four identical observations');
+});
+
+test('skew dedupe is provider-prefix-insensitive', () => {
+  const { agentId, taskId } = seedNamedTask('skew-dedupe-prefix');
+  recordModelSkewEvent({
+    taskId,
+    agentId,
+    intended: 'ollama/minimax-m3:cloud',
+    runtime: 'openrouter/deepseek/deepseek-v4-flash-vision-exp',
+    skew: true,
+    detail: {},
+  });
+  // Same two models, written by a resolver that spelled the provider differently.
+  recordModelSkewEvent({
+    taskId,
+    agentId,
+    intended: 'minimax-m3:cloud',
+    runtime: 'deepseek/deepseek-v4-flash-vision-exp',
+    skew: true,
+    detail: {},
+  });
+  const rows = queryAll<{ id: string }>(
+    `SELECT id FROM events WHERE task_id = ? AND type = 'model_skew_detected'`,
+    [taskId],
+  );
+  assert.equal(rows.length, 1, 'a prefix respelling is the same observation, not a new one');
+});
+
+test('a genuinely different skew pair still writes its own event row', () => {
+  const { agentId, taskId } = seedNamedTask('skew-distinct');
+  recordModelSkewEvent({
+    taskId, agentId,
+    intended: 'ollama/minimax-m3:cloud',
+    runtime: 'deepseek/deepseek-v4-flash-vision-exp',
+    skew: true, detail: {},
+  });
+  // The agent got re-pinned; this is a NEW divergence and must stay visible.
+  recordModelSkewEvent({
+    taskId, agentId,
+    intended: 'ollama/kimi-k2.7:cloud',
+    runtime: 'openrouter/z-ai/glm-5.3-flash',
+    skew: true, detail: {},
+  });
+  const rows = queryAll<{ id: string }>(
+    `SELECT id FROM events WHERE task_id = ? AND type = 'model_skew_detected'`,
+    [taskId],
+  );
+  assert.equal(rows.length, 2, 'dedupe must not swallow a genuinely new divergence');
+});
+
+test('model_runtime_confirmed rows are deduped too', () => {
+  const { agentId, taskId } = seedNamedTask('confirm-dedupe');
+  for (let i = 0; i < 8; i++) {
+    recordModelSkewEvent({
+      taskId, agentId,
+      intended: 'openrouter/z-ai/glm-5.3-flash',
+      runtime: 'openrouter/z-ai/glm-5.3-flash',
+      skew: false, detail: {},
+    });
+  }
+  const rows = queryAll<{ id: string }>(
+    `SELECT id FROM events WHERE task_id = ? AND type = 'model_runtime_confirmed'`,
+    [taskId],
+  );
+  assert.equal(rows.length, 1, 'eight confirmations of the same model leave one row');
+});
+
+// ── Test 8: reconcileTaskModelRecord — runtime becomes the recorded truth ───
+test('reconcileTaskModelRecord pins the runtime model and records one reconciliation', () => {
+  const { agentId, taskId } = seedNamedTask('reconcile');
+  // The stale paperwork the live task carried before dispatch.
+  run(`UPDATE tasks SET model_id = ? WHERE id = ?`, ['ollama/kimi-k2.7:cloud', taskId]);
+
+  reconcileTaskModelRecord({
+    taskId,
+    agentId,
+    intended: 'ollama/kimi-k2.7:cloud',
+    runtime: 'openrouter/z-ai/glm-5.3-flash',
+    detail: { source: 'openclaw_config' },
+  });
+
+  const task = queryAll<{ model_id: string }>(
+    `SELECT model_id FROM tasks WHERE id = ?`,
+    [taskId],
+  )[0]!;
+  assert.equal(
+    task.model_id,
+    'openrouter/z-ai/glm-5.3-flash',
+    'the runtime model is authoritative and must land on the task record',
+  );
+
+  const rows = queryAll<{ message: string; metadata: string }>(
+    `SELECT message, metadata FROM events WHERE task_id = ? AND type = 'model_record_reconciled'`,
+    [taskId],
+  );
+  assert.equal(rows.length, 1, 'exactly one reconciliation row');
+  assert.ok(rows[0]!.message.includes('MODEL-RECONCILED'));
+  const meta = JSON.parse(rows[0]!.metadata);
+  assert.equal(meta.authoritative, 'runtime');
+  assert.equal(meta.reconciled_to, 'openrouter/z-ai/glm-5.3-flash');
+  assert.equal(meta.intended_model, 'ollama/kimi-k2.7:cloud');
+});
+
+test('reconcileTaskModelRecord is idempotent across re-dispatches', () => {
+  const { agentId, taskId } = seedNamedTask('reconcile-idempotent');
+  const reconcile = () =>
+    reconcileTaskModelRecord({
+      taskId, agentId,
+      intended: 'ollama/minimax-m3:cloud',
+      runtime: 'deepseek/deepseek-v4-flash-vision-exp',
+      detail: {},
+    });
+  reconcile();
+  reconcile();
+  reconcile();
+  const rows = queryAll<{ id: string }>(
+    `SELECT id FROM events WHERE task_id = ? AND type = 'model_record_reconciled'`,
+    [taskId],
+  );
+  assert.equal(rows.length, 1, 'a re-dispatch must not stack reconciliation rows');
+});
+
+test('reconcileTaskModelRecord does nothing when the runtime model is unknown', () => {
+  const { agentId, taskId } = seedNamedTask('reconcile-null');
+  run(`UPDATE tasks SET model_id = ? WHERE id = ?`, ['ollama/kimi-k2.7:cloud', taskId]);
+  reconcileTaskModelRecord({
+    taskId, agentId,
+    intended: 'ollama/kimi-k2.7:cloud',
+    runtime: null,
+    detail: {},
+  });
+  const task = queryAll<{ model_id: string }>(
+    `SELECT model_id FROM tasks WHERE id = ?`, [taskId],
+  )[0]!;
+  assert.equal(task.model_id, 'ollama/kimi-k2.7:cloud', 'an unresolvable runtime must not clear the pin');
+  const rows = queryAll<{ id: string }>(
+    `SELECT id FROM events WHERE task_id = ? AND type = 'model_record_reconciled'`, [taskId],
+  );
+  assert.equal(rows.length, 0, 'nothing to reconcile, nothing recorded');
 });
 
 // ── Cleanup ────────────────────────────────────────────────────────────────
