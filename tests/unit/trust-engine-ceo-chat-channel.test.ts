@@ -73,6 +73,7 @@ describe('executeSends default channel routing', () => {
         },
       ],
       doneWithoutDeliverable: [],
+      heldForMissingPostflight: [],
     };
 
     const res = executeSends([plan], { now: new Date() });
@@ -113,6 +114,7 @@ describe('executeSends default channel routing', () => {
         },
       ],
       doneWithoutDeliverable: [],
+      heldForMissingPostflight: [],
     };
 
     const res = executeSends([plan], { now: new Date() });
@@ -143,6 +145,7 @@ describe('executeSends default channel routing', () => {
         },
       ],
       doneWithoutDeliverable: [],
+      heldForMissingPostflight: [],
     };
 
     const res = executeSends([plan], { now: new Date() });
@@ -173,6 +176,7 @@ describe('executeSends default channel routing', () => {
         },
       ],
       doneWithoutDeliverable: [],
+      heldForMissingPostflight: [],
     };
 
     executeSends([plan], {

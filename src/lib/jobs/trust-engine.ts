@@ -724,8 +724,9 @@ export function executeSends(plans: PlannedSend[], ctx: ExecuteContext): Execute
     // below and its smell would NEVER reach the operator lane. Handle it
     // first, unconditionally: escalate, count as skipped (nothing was ever
     // going to be claimed or sent), and move on — never attempt dispatch.
-    if (plan.heldForMissingPostflight.length > 0) {
-      for (const held of plan.heldForMissingPostflight) {
+    const heldForMissingPostflight = plan.heldForMissingPostflight ?? [];
+    if (heldForMissingPostflight.length > 0) {
+      for (const held of heldForMissingPostflight) {
         escalate(`[trust-engine] completion_notification_held: ${held.detail}`);
       }
       skipped += 1;
