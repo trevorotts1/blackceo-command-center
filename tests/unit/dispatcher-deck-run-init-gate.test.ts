@@ -1,42 +1,36 @@
 /**
- * GUARD 4c — a deck phase is never dispatched for an uninitialized deck run.
+ * GUARD 4c — a deck phase is never dispatched for a deck that names no run.
  *
- * THE LIVE DEFECT (2026-08-27, operator box). Deck card
- * `666924ec-f5b7-4886-a592-194fa8c091c2` ("Presentation pj_ab3c3") was ingested
- * with `source_ref="2026-08-27"` — a DATE where the canonical producer puts the
- * run directory name. Its `Ref:` line therefore named a run that does not
- * exist. Phase children (P-0.5-RESEARCH `3672e694…` and others) were minted
- * under it and dispatched anyway, so the phase agent was handed work with no
- * intake, no working/ tree, and nowhere to write. It correctly refused to
- * fabricate an intake.json and the deck churned at 0 phases for hours.
+ * THE LIVE DEFECT (2026-08-27, operator box). Phase cards for deck
+ * `666924ec-f5b7-4886-a592-194fa8c091c2` ("Presentation pj_ab3c3") were
+ * dispatched into a FRESH agent session carrying nothing that identified which
+ * deck or run they belonged to. The phase agent could only have guessed or
+ * fabricated an intake; it correctly refused, and the phases churned.
  *
- * The contrast case is the same box's healthy deck `a79f97cb…`, whose
- * `Ref: pres-mta0y199-qj40j3` names a run directory that DOES exist and whose
- * 21 phase children ran.
+ * WHAT THIS GATE IS NOT. An earlier draft blocked when the deck's run directory
+ * was absent under `<workspace>/departments/<dept>/runs/<slug>`. That premise
+ * was disproven on the live box: deck 666924ec's run was alive the entire time
+ * at `/Users/blackceomacmini/webinar-decks/denise-calloway/trust-ledger/2026-08-27`
+ * (state.json job_id `pj_ab3c329ca43a1b98117203f62a`, written throughout the
+ * incident). Deck runs are NOT confined to the department tree, and CC does not
+ * know the deck output root — so a department-rooted existence check would have
+ * HARD-BLOCKED a healthy, running build. Run existence is undeterminable from
+ * CC and is never treated as evidence here.
  *
- * THE GATE: for `source="build_deck_phase"`, resolve the deck's run from the
- * PARENT card's `Ref:` provenance line under
- * `<workspace>/departments/<dept>/runs/`. Missing run ⇒ hold the phase and
- * block the deck, both with visible events. Present run ⇒ dispatch is
- * untouched.
+ * WHAT IT DOES. It blocks on the one fact CC can establish from the board
+ * itself: the parent deck card carries no `Ref:` run identity at all. Then the
+ * phase is held and the deck blocked, both with visible deduped events; nothing
+ * is silently dropped.
  *
- * FAIL-OPEN CLAUSE (deliberate, and tested): when the department `runs/` root
- * is not readable from this process, CC cannot observe run state at all. That
- * is an instrument failure, not evidence about the deck — so the gate stands
- * down and says so in an event, rather than blocking every deck on a box where
- * CC cannot see the department workspace.
- *
- * Known-good controls are built in: an initialized deck passes the gate (the
- * gate can say yes), and a non-deck task is untouched by it.
+ * Known-good controls are built in: a deck that names ANY run passes (including
+ * the live incident's `Ref: 2026-08-27`, which is a real run leaf name), and a
+ * non-deck task is untouched.
  */
 
 import './_isolated-db'; // MUST be first — isolated temp DB, never the live board.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'fs';
-import os from 'os';
-import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import { run, queryOne, queryAll } from '../../src/lib/db';
 import { autoDispatchTask, deckPhaseRunIsInitialized } from '../../src/lib/task-dispatcher';
@@ -47,23 +41,7 @@ delete process.env.RESCUE_RANGERS_WEBHOOK_URL;
 process.env.INTAKE_ADVANCE_SWEEP_ENABLED = '0';
 
 const DEPARTMENT = 'presentations';
-const REASON = 'deck_run_initialization_missing';
-
-/** A temp workspace laid out like a live box: departments/<Dept>/runs/. */
-function makeWorkspace(): string {
-  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-deck-gate-ws-'));
-  // Capitalized on disk while tasks.department is a lowercase slug — exactly
-  // the live mismatch the resolver has to tolerate.
-  fs.mkdirSync(path.join(ws, 'departments', 'Presentations', 'runs'), { recursive: true });
-  return ws;
-}
-
-const WORKSPACE = makeWorkspace();
-process.env.OPENCLAW_WORKSPACE_PATH = WORKSPACE;
-
-function runsDir(): string {
-  return path.join(WORKSPACE, 'departments', 'Presentations', 'runs');
-}
+const REASON = 'deck_run_identity_missing';
 
 function seedAgent(): { wsId: string; agentId: string } {
   const wsId = `ws-${uuidv4()}`;
@@ -80,8 +58,8 @@ function seedAgent(): { wsId: string; agentId: string } {
 }
 
 /**
- * Seed a deck parent whose `Ref:` line names `runSlug`, plus one phase child.
- * Mirrors the live provenance block the ingest route writes.
+ * Seed a deck parent whose `Ref:` line names `runSlug` (or omits it entirely),
+ * plus one phase child. Mirrors the provenance block the ingest route writes.
  */
 function seedDeck(
   ids: { wsId: string; agentId: string },
@@ -157,18 +135,15 @@ function eventMessages(taskId: string, type: string): string[] {
 
 // ── 1. The primitive ────────────────────────────────────────────────────────
 
-test('[GUARD-4c] run directory missing ⇒ gate says NO', () => {
+test('[GUARD-4c] deck names no run at all ⇒ gate says NO', () => {
   const ids = seedAgent();
-  // The literal slug from the live incident: a date, not a run id.
-  const { phaseId } = seedDeck(ids, '2026-08-27');
+  const { phaseId } = seedDeck(ids, null);
   assert.equal(deckPhaseRunIsInitialized(taskRow(phaseId), 'test'), false);
 });
 
-test('[GUARD-4c CONTROL] run directory present ⇒ gate says YES', () => {
+test('[GUARD-4c CONTROL] deck names a run ⇒ gate says YES', () => {
   const ids = seedAgent();
-  const slug = `pres-real-${uuidv4().slice(0, 8)}`;
-  fs.mkdirSync(path.join(runsDir(), slug));
-  const { phaseId } = seedDeck(ids, slug);
+  const { phaseId } = seedDeck(ids, `pres-real-${uuidv4().slice(0, 8)}`);
   assert.equal(
     deckPhaseRunIsInitialized(taskRow(phaseId), 'test'),
     true,
@@ -176,10 +151,18 @@ test('[GUARD-4c CONTROL] run directory present ⇒ gate says YES', () => {
   );
 });
 
-test('[GUARD-4c] parent with no Ref: run id at all ⇒ gate says NO', () => {
+test('[GUARD-4c REGRESSION] the live deck\'s date-style run leaf "2026-08-27" is a VALID run id', () => {
   const ids = seedAgent();
-  const { phaseId } = seedDeck(ids, null);
-  assert.equal(deckPhaseRunIsInitialized(taskRow(phaseId), 'test'), false);
+  const { phaseId, parentId } = seedDeck(ids, '2026-08-27');
+  // Deck 666924ec's run was live at .../trust-ledger/2026-08-27 throughout the
+  // incident. A gate that rejects this slug hard-blocks a healthy build.
+  assert.equal(
+    deckPhaseRunIsInitialized(taskRow(phaseId), 'test'),
+    true,
+    'a run leaf that looks like a date is still a run id — never block on its shape',
+  );
+  assert.equal(eventCount(phaseId, 'deck_phase_dispatch_held'), 0);
+  assert.equal(statusOf(parentId), 'backlog', 'a running deck must never be blocked by this gate');
 });
 
 test('[GUARD-4c CONTROL] a non-deck task is not touched by the gate', () => {
@@ -194,30 +177,11 @@ test('[GUARD-4c CONTROL] a non-deck task is not touched by the gate', () => {
   assert.equal(eventCount(id, 'deck_phase_dispatch_held'), 0);
 });
 
-test('[GUARD-4c] runs root unreadable ⇒ UNDETERMINED: gate stands down, loudly', () => {
-  const ids = seedAgent();
-  const { phaseId, parentId } = seedDeck(ids, 'pres-whatever');
-  const saved = process.env.OPENCLAW_WORKSPACE_PATH;
-  process.env.OPENCLAW_WORKSPACE_PATH = path.join(os.tmpdir(), `cc-absent-${uuidv4()}`);
-  try {
-    assert.equal(
-      deckPhaseRunIsInitialized(taskRow(phaseId), 'test'),
-      true,
-      'an unreadable runs root is an instrument failure, never evidence the deck is uninitialized',
-    );
-  } finally {
-    process.env.OPENCLAW_WORKSPACE_PATH = saved;
-  }
-  assert.equal(eventCount(phaseId, 'deck_run_check_unavailable'), 1, 'the skip is visible, not silent');
-  assert.equal(eventCount(phaseId, 'deck_phase_dispatch_held'), 0, 'nothing was held');
-  assert.equal(statusOf(parentId), 'backlog', 'the deck was NOT blocked on an unknowable');
-});
-
 // ── 2. The chokepoint (autoDispatchTask GUARD 4c) ───────────────────────────
 
-test('[GUARD-4c] autoDispatchTask holds the phase AND blocks the deck when the run is missing', async () => {
+test('[GUARD-4c] autoDispatchTask holds the phase AND blocks the deck when no run is named', async () => {
   const ids = seedAgent();
-  const { parentId, phaseId } = seedDeck(ids, '2026-08-27');
+  const { parentId, phaseId } = seedDeck(ids, null);
 
   await autoDispatchTask(phaseId, 'test-deck-gate');
 
@@ -230,14 +194,12 @@ test('[GUARD-4c] autoDispatchTask holds the phase AND blocks the deck when the r
   assert.equal(blockReasonOf(parentId), REASON);
   assert.equal(eventCount(parentId, REASON), 1);
 
-  const held = eventMessages(phaseId, 'deck_phase_dispatch_held')[0];
-  assert.match(held, /2026-08-27/, 'the reason names the run that is missing');
-  assert.match(held, /does not exist under/);
+  assert.match(eventMessages(phaseId, 'deck_phase_dispatch_held')[0], /carries no run identity/);
 });
 
 test('[GUARD-4c] the hold is deduped across repeated sweep ticks', async () => {
   const ids = seedAgent();
-  const { parentId, phaseId } = seedDeck(ids, '2026-08-27');
+  const { parentId, phaseId } = seedDeck(ids, null);
 
   await autoDispatchTask(phaseId, 'test-tick-1');
   // A blocked task is skipped by GUARD 3, so re-entry must not pile up rows.
@@ -247,11 +209,9 @@ test('[GUARD-4c] the hold is deduped across repeated sweep ticks', async () => {
   assert.equal(eventCount(parentId, REASON), 1);
 });
 
-test('[GUARD-4c CONTROL] an initialized deck is not interfered with by the gate', async () => {
+test('[GUARD-4c CONTROL] a deck that names its run is not interfered with by the gate', async () => {
   const ids = seedAgent();
-  const slug = `pres-real-${uuidv4().slice(0, 8)}`;
-  fs.mkdirSync(path.join(runsDir(), slug));
-  const { parentId, phaseId } = seedDeck(ids, slug);
+  const { parentId, phaseId } = seedDeck(ids, `pres-real-${uuidv4().slice(0, 8)}`);
 
   await autoDispatchTask(phaseId, 'test-deck-gate');
 

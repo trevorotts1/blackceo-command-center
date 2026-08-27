@@ -25,9 +25,9 @@
  *   2. No assigned_agent_id → skip.
  *   3. Already in_progress / review / done / blocked / archived → skip.
  *   4. QC loop cap: qc_reroute_attempts > QC_MAX_REROUTES → skip (task already blocked).
- *   4c. build_deck_phase whose deck run does not exist on disk → HOLD, loudly
- *      (`deck_phase_dispatch_held` on the phase, `deck_run_initialization_missing`
- *      on the deck) — a phase has no intake and nowhere to write without its run.
+ *   4c. build_deck_phase whose deck names no run → HOLD, loudly
+ *      (`deck_phase_dispatch_held` on the phase, `deck_run_identity_missing`
+ *      on the deck) — a fresh agent session cannot find a deck the card never names.
  *   5. Fire-and-forget: errors logged, never thrown. Routing always succeeds.
  *   7. (skill6-v2 U33 / C-02) Triad-incomplete (checkTriad, sops.ts:432) → HOLD,
  *      loudly (`triad_gate_hold` event) — never claimable until description +
@@ -295,22 +295,29 @@ function recordDispatchSuccess(taskId: string): void {
   } catch { /* pre-migration tolerant */ }
 }
 
-// ── Deck-run initialization gate (build_deck_phase) ─────────────────────────
-// A `build_deck_phase` card is one phase of a Presentations deck. It is only
-// executable once the deck's pipeline RUN exists on disk: the run directory is
-// what holds intake.json, working/, and the process manifest the phase agent
-// reads and writes. Dispatching a phase without one hands the agent a job with
-// no inputs and nowhere to put its output.
+// ── Deck-run identity gate (build_deck_phase) ───────────────────────────────
+// A `build_deck_phase` card is one phase of a Presentations deck. A fresh agent
+// session receives only the card, so the card must carry enough identity for the
+// agent to find the deck's run. When it does not, the agent is handed a phase of
+// an unnamed deck and can only guess or fabricate an intake — which is exactly
+// what happened on 2026-08-27 and what the phase agent correctly refused to do.
 //
 // The deck's run identity travels on the PARENT card's `Ref:` provenance line,
 // written by the ingest route from the producer's `source_ref`
-// (src/app/api/tasks/ingest/route.ts:818). For the canonical producer
-// (the Presentations engine's cc_board.py ingest_deck_task) that value IS the
-// run directory name, so the parent's Ref resolves the run. Reading provenance
-// off the `Ref:` line is the established convention in this repo — the
-// anthology card parsers read their subject key the same way
-// (src/components/anthology/anthology-card.ts:159).
-const DECK_RUN_REASON = 'deck_run_initialization_missing';
+// (src/app/api/tasks/ingest/route.ts:818). Reading provenance off the `Ref:`
+// line is the established convention in this repo — the anthology card parsers
+// read their subject key the same way (src/components/anthology/anthology-card.ts:159).
+//
+// DELIBERATELY NOT A FILESYSTEM CHECK. An earlier draft of this gate resolved
+// the run under `<workspace>/departments/<dept>/runs/<slug>` and blocked when it
+// was absent. That is unsound: deck runs are NOT confined to the department
+// tree. The 2026-08-27 deck's run was live the whole time at
+// `~/webinar-decks/<client>/<project>/<date>/`, so an existence check rooted in
+// the department workspace would have hard-blocked a healthy, running build.
+// CC does not know the deck output root — it is client-configurable and
+// currently under review — so run existence is UNDETERMINABLE here and must
+// never be treated as evidence of a missing run.
+const DECK_RUN_REASON = 'deck_run_identity_missing';
 
 /** `Ref: <value>` off a card's ingest provenance block. */
 function refLineOf(description: string | null | undefined): string | null {
@@ -319,50 +326,11 @@ function refLineOf(description: string | null | undefined): string | null {
   return m ? m[1] : null;
 }
 
-/**
- * The `<workspace>/departments` root, resolved the same way every other
- * OpenClaw path in this file is: the VPS Docker persistent volume when we are
- * on that platform, otherwise home-relative through os.homedir(). An explicit
- * OPENCLAW_WORKSPACE_PATH wins (same override sop-auto-replace.ts:55 honours).
- */
-function departmentsRoot(): string {
-  const explicit = process.env.OPENCLAW_WORKSPACE_PATH;
-  if (explicit) return path.join(explicit, 'departments');
-  const homeDir = process.env.HOME || process.env.USERPROFILE || os.homedir();
-  const base = detectPlatform() === 'vps-docker'
-    ? '/data/.openclaw'
-    : path.join(homeDir, '.openclaw');
-  return path.join(base, 'workspace', 'departments');
-}
-
-/**
- * The `runs/` directory for a department, or null when it is not visible.
- * Department directories are capitalized on disk ("Presentations") while
- * tasks.department is a lowercase slug, so match case-insensitively rather
- * than guessing a capitalization.
- */
-function deptRunsRoot(department: string | null | undefined): string | null {
-  if (!department) return null;
-  const root = departmentsRoot();
-  let entries: string[];
-  try {
-    entries = fs.readdirSync(root);
-  } catch {
-    return null; // departments root not readable from this process
-  }
-  const want = department.trim().toLowerCase();
-  const dir = entries.find((e) => e.toLowerCase() === want);
-  if (!dir) return null;
-  const runs = path.join(root, dir, 'runs');
-  return fs.existsSync(runs) ? runs : null;
-}
-
 interface DeckParent {
   id: string;
   title: string;
   status: string;
   description: string | null;
-  department: string | null;
   assigned_agent_id: string | null;
 }
 
@@ -382,51 +350,31 @@ function recordDeckGateEvent(
 }
 
 /**
- * GUARD 4c — hold a deck phase whose run does not exist.
+ * GUARD 4c — hold a deck phase whose deck carries no run identity.
  *
- * Returns true when dispatch may proceed. Fail-closed on a PROVEN missing run;
- * fail-OPEN (loudly) when the runs root itself is not visible, because that is
- * this process being unable to see run state at all — an instrument failure,
- * not evidence about the deck. Blocking every deck on a box where CC cannot
- * read the department workspace would be a far worse outage than the defect.
+ * Returns true when dispatch may proceed. Blocks ONLY on a fact this process can
+ * establish from the board itself: the parent deck names no run at all. It never
+ * blocks on run state it cannot observe.
  */
 export function deckPhaseRunIsInitialized(task: Task, context: string): boolean {
   if (task.source !== 'build_deck_phase') return true;
 
   const parent = task.parent_task_id
     ? queryOne<DeckParent>(
-      `SELECT id, title, status, description, department, assigned_agent_id
+      `SELECT id, title, status, description, assigned_agent_id
          FROM tasks WHERE id = ?`,
       [task.parent_task_id],
     )
     : null;
 
-  const runsRoot = deptRunsRoot(parent?.department ?? task.department);
-  if (!runsRoot) {
-    // UNDETERMINED — say so and let the task through unchanged.
-    recordDeckGateEvent(
-      'deck_run_check_unavailable',
-      task.id,
-      task.assigned_agent_id ?? null,
-      `[${DECK_RUN_REASON}] Run-initialization check SKIPPED for phase "${task.title}" (${task.id}): ` +
-      `the department runs directory is not readable from this process (looked under ${departmentsRoot()}). ` +
-      `Dispatch proceeded unchanged — this is not evidence that the deck run is missing.`,
-    );
-    return true;
-  }
+  if (refLineOf(parent?.description)) return true;
 
-  const runSlug = refLineOf(parent?.description);
-  const runDir = runSlug ? path.join(runsRoot, runSlug) : null;
-  if (runDir && path.dirname(runDir) === runsRoot && fs.existsSync(runDir)) return true;
-
-  // Proven missing: the runs root is readable and the deck's run is not in it.
   const parentId = task.parent_task_id ?? '(no parent_task_id)';
-  const identified = runSlug ? `"${runSlug}"` : '(no Ref: run id on the parent card)';
   const held =
     `[${DECK_RUN_REASON}] Phase "${task.title}" (${task.id}) was NOT dispatched: deck parent ${parentId} ` +
-    `names run ${identified}, which does not exist under ${runsRoot}. The phase has no intake, no working ` +
-    `directory, and nowhere to write its output. Initialize the deck run through the canonical Presentations ` +
-    `entry (cc_board.ingest_deck_task runs inside a real run directory), then re-dispatch.`;
+    `carries no run identity (no \`Ref:\` line from the producer's source_ref), so a fresh agent session has ` +
+    `nothing that identifies which deck or run this phase belongs to. Re-ingest the deck through the canonical ` +
+    `Presentations entry so it carries its run reference, then re-dispatch. Do NOT fabricate an intake.`;
   recordDeckGateEvent('deck_phase_dispatch_held', task.id, task.assigned_agent_id ?? null, held);
 
   if (parent && parent.status !== 'done') {
@@ -434,15 +382,14 @@ export function deckPhaseRunIsInitialized(task: Task, context: string): boolean 
       DECK_RUN_REASON,
       parent.id,
       parent.assigned_agent_id,
-      `[${DECK_RUN_REASON}] Deck "${parent.title}" (${parent.id}) is NOT initialized: run ${identified} ` +
-      `does not exist under ${runsRoot}, but phase cards are already being dispatched against it. ` +
-      `Every phase of this deck is held until the run exists.`,
+      `[${DECK_RUN_REASON}] Deck "${parent.title}" (${parent.id}) names no run, but phase cards are already ` +
+      `being dispatched against it. Every phase of this deck is held until the deck card carries its run reference.`,
     );
     recordDispatchFailure(parent.id, parent.assigned_agent_id, {
       reason: DECK_RUN_REASON,
       audience: 'SYSTEM',
       needs:
-        `Create the deck's pipeline run ${identified} under ${runsRoot} via the canonical Presentations entry, ` +
+        `Re-ingest this deck with its source_ref (run reference) so phase cards can identify the run, ` +
         `then unblock this card. Do NOT hand-create an intake.json to satisfy the phases.`,
       context,
       hardBlock: true,
@@ -453,7 +400,7 @@ export function deckPhaseRunIsInitialized(task: Task, context: string): boolean 
     reason: DECK_RUN_REASON,
     audience: 'SYSTEM',
     needs:
-      'Wait for the parent deck run to be initialized; do not fabricate an intake or phase artifacts.',
+      'Wait for the parent deck card to carry its run reference; do not fabricate an intake or phase artifacts.',
     context,
     hardBlock: true,
   });
@@ -901,13 +848,13 @@ export async function autoDispatchTask(
       return;
     }
 
-    // GUARD 4c: a Presentations deck phase is only executable once the deck's
-    // pipeline run exists. Placed before any session/gateway work so every
+    // GUARD 4c: a Presentations deck phase is only executable if the card names
+    // the deck it belongs to. Placed before any session/gateway work so every
     // caller — create-time dispatch and every sweep — shares one fail-closed
     // path instead of each re-deriving the check.
     if (!deckPhaseRunIsInitialized(task, context)) {
       console.error(
-        `[${context}] autoDispatchTask: phase ${taskId} HELD — deck run not initialized`,
+        `[${context}] autoDispatchTask: phase ${taskId} HELD — deck names no run`,
       );
       return;
     }
