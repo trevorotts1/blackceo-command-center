@@ -36,6 +36,7 @@ import {
   runtimeSlugCandidates,
   resolveRuntimeModelFromConfig,
   normalizeModelId,
+  canonicalSkewModelId,
   modelsMatch,
   recordModelSkewEvent,
   reconcileTaskModelRecord,
@@ -203,6 +204,29 @@ test('modelsMatch treats prefixed and bare ids as the same runtime model', () =>
   assert.equal(modelsMatch('', 'deepseek-v4-flash:0731-cloud'), false);
 });
 
+// ── Test 3b: canonicalSkewModelId — the DEDUPE key (provider-aware, wrapper-tolerant)
+test('canonicalSkewModelId keeps the provider on a plain provider/model id', () => {
+  assert.equal(canonicalSkewModelId('ollama/deepseek-v4-flash:0731-cloud'), 'ollama/deepseek-v4-flash:0731-cloud');
+  assert.equal(canonicalSkewModelId('openrouter/deepseek-v4-flash:0731-cloud'), 'openrouter/deepseek-v4-flash:0731-cloud');
+  assert.equal(canonicalSkewModelId('DEEPSEEK/deepseek-v4-flash-vision-exp'), 'deepseek/deepseek-v4-flash-vision-exp');
+  assert.equal(canonicalSkewModelId('mistral-large-3:675b'), 'mistral-large-3:675b');
+  assert.equal(canonicalSkewModelId(null), '');
+  assert.equal(canonicalSkewModelId(''), '');
+});
+
+test('canonicalSkewModelId strips a WRAPPER segment only when a namespace remains', () => {
+  // openrouter wrapper over a namespaced model — the registry-vs-runtime respelling.
+  assert.equal(
+    canonicalSkewModelId('openrouter/deepseek/deepseek-v4-flash-vision-exp'),
+    'deepseek/deepseek-v4-flash-vision-exp',
+  );
+  // A 2-segment id is provider+model, NOT a wrapper — the provider must survive.
+  assert.equal(
+    canonicalSkewModelId('deepseek/deepseek-v4-flash-vision-exp'),
+    'deepseek/deepseek-v4-flash-vision-exp',
+  );
+});
+
 // ── Test 4: recordModelSkewEvent — the FIX-15 QC event row ─────────────────
 test('recordModelSkewEvent writes a model_skew_detected row when intended ≠ runtime', () => {
   const { agentId, taskId } = seedAgentAndTask();
@@ -335,6 +359,68 @@ test('skew dedupe is provider-prefix-insensitive', () => {
   assert.equal(rows.length, 1, 'a prefix respelling is the same observation, not a new one');
 });
 
+test('a PROVIDER flip on the same model emits a new skew event (2 rows)', () => {
+  const { agentId, taskId } = seedNamedTask('skew-provider-flip');
+  recordModelSkewEvent({
+    taskId, agentId,
+    intended: 'ollama/minimax-m3:cloud',
+    runtime: 'ollama/deepseek-v4-flash:0731-cloud',
+    skew: true, detail: {},
+  });
+  // Same two models, resolved through a DIFFERENT provider this time — a new
+  // divergence the sovereignty audit must see, not a duplicate to swallow.
+  recordModelSkewEvent({
+    taskId, agentId,
+    intended: 'openrouter/minimax-m3:cloud',
+    runtime: 'openrouter/deepseek-v4-flash:0731-cloud',
+    skew: true, detail: {},
+  });
+  const rows = queryAll<{ id: string; metadata: string }>(
+    `SELECT id, metadata FROM events WHERE task_id = ? AND type = 'model_skew_detected'`,
+    [taskId],
+  );
+  assert.equal(rows.length, 2, 'a provider change must emit as a genuinely new divergence');
+  const providers = rows.map((r) => JSON.parse(r.metadata).runtime_model.split('/')[0]).sort();
+  assert.deepEqual(providers, ['ollama', 'openrouter'], 'one row per provider');
+});
+
+test('a provider flip on ONE side of the pair still emits a new skew event', () => {
+  const { agentId, taskId } = seedNamedTask('skew-provider-flip-one-sided');
+  recordModelSkewEvent({
+    taskId, agentId,
+    intended: 'ollama/minimax-m3:cloud',
+    runtime: 'deepseek/deepseek-v4-flash-vision-exp',
+    skew: true, detail: {},
+  });
+  // Intended unchanged; the RUNTIME moved from deepseek-direct to openrouter.
+  recordModelSkewEvent({
+    taskId, agentId,
+    intended: 'ollama/minimax-m3:cloud',
+    runtime: 'openrouter/deepseek/deepseek-v4-flash-vision-exp',
+    skew: true, detail: {},
+  });
+  const rows = queryAll<{ id: string }>(
+    `SELECT id FROM events WHERE task_id = ? AND type = 'model_skew_detected'`,
+    [taskId],
+  );
+  // NOTE: openrouter/deepseek/X wrapper-strips to deepseek/X, so this pair is
+  // the wrapper respelling, not a provider flip — it must DEDUPE to one row.
+  assert.equal(rows.length, 1, 'wrapper respelling of the same runtime model stays deduped');
+
+  // But a real provider flip on one side (deepseek-direct → ollama) is new.
+  recordModelSkewEvent({
+    taskId, agentId,
+    intended: 'ollama/minimax-m3:cloud',
+    runtime: 'ollama/deepseek-v4-flash:0731-cloud',
+    skew: true, detail: {},
+  });
+  const after = queryAll<{ id: string }>(
+    `SELECT id FROM events WHERE task_id = ? AND type = 'model_skew_detected'`,
+    [taskId],
+  );
+  assert.equal(after.length, 2, 'a genuine runtime provider flip emits its own row');
+});
+
 test('a genuinely different skew pair still writes its own event row', () => {
   const { agentId, taskId } = seedNamedTask('skew-distinct');
   recordModelSkewEvent({
@@ -427,6 +513,28 @@ test('reconcileTaskModelRecord is idempotent across re-dispatches', () => {
     [taskId],
   );
   assert.equal(rows.length, 1, 'a re-dispatch must not stack reconciliation rows');
+});
+
+test('reconcileTaskModelRecord emits a new reconciliation row on a provider flip', () => {
+  const { agentId, taskId } = seedNamedTask('reconcile-provider-flip');
+  reconcileTaskModelRecord({
+    taskId, agentId,
+    intended: 'ollama/minimax-m3:cloud',
+    runtime: 'ollama/deepseek-v4-flash:0731-cloud',
+    detail: {},
+  });
+  // Runtime re-resolved through a different provider — new divergence, new row.
+  reconcileTaskModelRecord({
+    taskId, agentId,
+    intended: 'openrouter/minimax-m3:cloud',
+    runtime: 'openrouter/deepseek-v4-flash:0731-cloud',
+    detail: {},
+  });
+  const rows = queryAll<{ id: string }>(
+    `SELECT id FROM events WHERE task_id = ? AND type = 'model_record_reconciled'`,
+    [taskId],
+  );
+  assert.equal(rows.length, 2, 'a provider flip must not be swallowed by reconcile dedupe');
 });
 
 test('reconcileTaskModelRecord does nothing when the runtime model is unknown', () => {
