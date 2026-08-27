@@ -113,7 +113,7 @@ function broadcastQCUpdate(taskId: string): void {
 // to say so. Write a `status_apply_failed` event so this divergence between
 // "what the event log says happened" and "what tasks.status actually is" is
 // visible instead of only a process-log warning.
-function recordStatusApplyFailure(
+export function recordStatusApplyFailure(
   taskId: string,
   attemptedTo: string,
   txErr: unknown,
