@@ -47,7 +47,7 @@
  * guarantee): the terminal escalations above (QC-HEURISTIC-FINAL,
  * QC-JUDGE-FAILED-FINAL) and the QC-UNROUTEABLE immediate-block (qc-scorer.ts)
  * cover every KNOWN zombie shape. This is the defensive backstop for an
- * UNKNOWN one: if the last QC_RESULT_LOOP_THRESHOLD (default 3) consecutive
+ * UNKNOWN one: if the QC_RESULT_LOOP_THRESHOLD (default 3) most recent failing
  * `llm`-scored task_qc_results rows for a task are IDENTICAL (same score,
  * passed, scoring_path), re-scoring it again cannot produce a different
  * outcome — the task is blocked instead, with one loud [QC-LOOP-DETECTED]
@@ -66,8 +66,8 @@ import { queryAll, queryOne, sqlTime, timeNow } from '@/lib/db';
 import { runQCOnReview, blockTaskForQC, classifyQCBlockAudience } from '@/lib/qc-scorer';
 
 /**
- * How many consecutive IDENTICAL `llm` QC results (same score, passed,
- * scoring_path) trigger the loop-detector block. Override with
+ * How many of the most recent failing IDENTICAL `llm` QC results (same score,
+ * passed, scoring_path) trigger the loop-detector block. Override with
  * QC_RESULT_LOOP_THRESHOLD; minimum 2 (a threshold of 1 would block on a
  * single result, which is the un-reroutable path's job, not the loop
  * detector's). Default 3.
@@ -85,8 +85,8 @@ interface QCResultLoopRow {
 
 /**
  * Returns the shared (score, passed, scoring_path) triple when the most
- * recent `threshold` task_qc_results rows for `taskId` are all identical AND
- * all scored via the `llm` path, else null. Never throws — a query failure
+ * most recent `threshold` failing task_qc_results rows for `taskId` are all
+ * identical AND all scored via the `llm` path, else null. Never throws — a query failure
  * (pre-migration DB, missing table) is treated as "no loop detected" so the
  * detector can never itself block a task.
  */
@@ -115,9 +115,33 @@ export function detectIdenticalQCResultLoop(
 }
 
 /**
- * A task whose last N QC results are identical cannot be fixed by re-scoring
- * it again — block it for the same OWNER/SYSTEM audience classification used
- * by the QC reroute-cap path instead.
+ * QC result scalars live in task_qc_results; its diagnostic text is persisted
+ * in the matching [QC-AUTO] qc_review event. Return the newest failing
+ * diagnostic message, if one exists, without letting an event-query problem
+ * interfere with the loop detector's safe fallback.
+ */
+function getLatestFailingQCDiagnosticText(taskId: string): string | null {
+  try {
+    const row = queryOne<{ message: string }>(
+      `SELECT message FROM events
+       WHERE task_id = ?
+         AND type = 'qc_review'
+         AND message LIKE '[QC-AUTO]%'
+         AND message LIKE '%FAIL%'
+       ORDER BY created_at DESC, id DESC
+       LIMIT 1`,
+      [taskId],
+    );
+    return row?.message?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A task whose N most recent failing QC results are identical cannot be fixed
+ * by re-scoring it again — block it for the same OWNER/SYSTEM audience
+ * classification used by the QC reroute-cap path instead.
  * Returns true only when the block actually landed (false on a lost CAS race,
  * in which case the caller should still skip re-scoring this tick).
  */
@@ -132,7 +156,12 @@ async function handleQCResultLoopDetected(
     [taskId],
   );
   const summary = `identical result ${threshold}+ times in a row (score ${loop.score.toFixed(1)}/10, passed=${loop.passed}, path=${loop.scoring_path})`;
-  const audience = classifyQCBlockAudience([summary]);
+  const diagnosticText = getLatestFailingQCDiagnosticText(taskId);
+  // The [QC-AUTO] message contains the persisted reason/gaps from the most
+  // recent failing result. Keep the loop summary last for audit context; if
+  // historical data has no diagnostic event, retain the existing fallback.
+  const classifierInput = diagnosticText ? [diagnosticText, summary] : [summary];
+  const audience = classifyQCBlockAudience(classifierInput);
   const needs = audience === 'SYSTEM'
     ? `System fix required: QC has produced the ${summary} without the task ever advancing. Investigate the scorer/routing for this task before re-enabling scoring.`
     : `Owner action required: QC has produced the ${summary} without the task ever advancing. Reply here to unblock or reassign.`;

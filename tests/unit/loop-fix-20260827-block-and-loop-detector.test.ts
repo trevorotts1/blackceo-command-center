@@ -88,6 +88,35 @@ function insertTask(id: string, status: string, opts: { qcAttempts?: number; arc
   }
 }
 
+/**
+ * task_qc_results persists the result scalars; the production scorer persists
+ * its reason/gaps in the paired [QC-AUTO] qc_review message. Seed both forms
+ * of the same failing QC evidence for loop-detector tests.
+ */
+function seedIdenticalFailingLlmResults(id: string, diagnosticText: string) {
+  // Keep the persisted QC evidence outside the sweep's 10-minute "recently
+  // scored" window, so this fixture is eligible for detector handling.
+  const base = Date.now() - 11 * 60_000;
+  for (let i = 0; i < 3; i++) {
+    const scoredAt = new Date(base + i * 1000).toISOString();
+    run(
+      `INSERT INTO task_qc_results (id, task_id, workspace_id, department_slug, score, passed, scoring_path, qc_agent_id, attempt, scored_at)
+       VALUES (?, ?, NULL, NULL, ?, ?, 'llm', NULL, ?, ?)`,
+      [`qcr-${id}-${i}`, id, 2.8, 0, i + 1, scoredAt],
+    );
+    run(
+      `INSERT INTO events (id, type, task_id, message, created_at)
+       VALUES (?, 'qc_review', ?, ?, ?)`,
+      [
+        nextId('qc-auto'),
+        id,
+        `[QC-AUTO] Score: 2.8/10 | FAIL → returned to Backlog for re-route | ${diagnosticText} [path:llm]`,
+        scoredAt,
+      ],
+    );
+  }
+}
+
 /** Force a deterministic runQCOnReview verdict via the sanctioned test seam. */
 async function runQcWithFixture(
   taskId: string,
@@ -221,20 +250,11 @@ test('qc-scorer cap-reached: OWNER blocks retain main\'s CEO-attributed qc_revie
 
 // ─── 2. qc-review-sweep: identical-result loop detector ──────────────────────
 
-test('qc-review-sweep loop detector: 3 identical llm results block the task and the sweep skips rescoring it', async () => {
+test('qc-review-sweep loop detector: a loop without a cap-style system signal is owner-actionable', async () => {
   const id = nextId('loop-detect');
   insertTask(id, 'review');
 
-  // Seed 3 IDENTICAL `llm` task_qc_results rows (as if rescored 3x with the
-  // same verdict), each with a distinct scored_at so ORDER BY is deterministic.
-  const base = Date.now() - 60_000;
-  for (let i = 0; i < 3; i++) {
-    run(
-      `INSERT INTO task_qc_results (id, task_id, workspace_id, department_slug, score, passed, scoring_path, qc_agent_id, attempt, scored_at)
-       VALUES (?, ?, NULL, NULL, ?, ?, 'llm', NULL, ?, ?)`,
-      [`qcr-${id}-${i}`, id, 2.8, 0, i + 1, new Date(base + i * 1000).toISOString()],
-    );
-  }
+  seedIdenticalFailingLlmResults(id, 'Owner approval is required before publishing');
 
   const loop = detectIdenticalQCResultLoop(id, 3);
   assert.ok(loop, 'detectIdenticalQCResultLoop must detect 3 identical llm results');
@@ -272,6 +292,29 @@ test('qc-review-sweep loop detector: 3 identical llm results block the task and 
     [id],
   );
   assert.ok(blockEvt, 'a task_block_events row must be recorded for the loop-detected block');
+});
+
+test('qc-review-sweep loop detector: system diagnostics classify SYSTEM and do not notify the owner', async () => {
+  const id = nextId('loop-detect-system');
+  insertTask(id, 'review');
+  seedIdenticalFailingLlmResults(id, 'No SOP assigned to this department');
+
+  const result = await runQCReviewSweep();
+  assert.equal(result.loopBlocked, 1, 'the system-diagnostic loop must be blocked before any rescore');
+  assert.equal(result.scored, 0, 'the system-diagnostic loop must not be rescored');
+
+  const task = queryOne<{ block_audience: string | null; blocked_on_human: string | null }>(
+    `SELECT block_audience, blocked_on_human FROM tasks WHERE id = ?`,
+    [id],
+  );
+  assert.equal(task?.block_audience, 'SYSTEM', 'the persisted QC diagnostic must drive SYSTEM classification');
+  assert.equal(task?.blocked_on_human, 'operator', 'SYSTEM blocks must use the operator branch, never the owner-notice branch');
+
+  const escalation = queryOne<{ id: string }>(
+    `SELECT id FROM events WHERE task_id = ? AND type = 'qc_escalation' LIMIT 1`,
+    [id],
+  );
+  assert.ok(escalation, 'a SYSTEM loop block must escalate internally instead of notifying the owner');
 });
 
 test('qc-review-sweep loop detector: does NOT trip on heuristic-path identical results (dedicated escape hatch owns that path)', () => {
