@@ -53,6 +53,11 @@ function mkTask(over: Partial<import('../../src/lib/jobs/trust-engine').TrustTas
     completion_sent_at: over.completion_sent_at ?? null,
     block_audience: over.block_audience ?? null,
     block_needs: over.block_needs ?? null,
+    blocked_notice_sent_at: over.blocked_notice_sent_at ?? null,
+    phase_progress_sent_at: over.phase_progress_sent_at ?? null,
+    last_reported_phase_label: over.last_reported_phase_label ?? null,
+    process_certificate_sha: over.process_certificate_sha ?? null,
+    source: over.source ?? null,
   };
 }
 
@@ -204,6 +209,65 @@ test('DONE with ZERO deliverables sends the honest message (NO fabricated locati
   assert.equal(plans[0].stamps[0].extraSets.result_location, null, 'result_location must stay NULL');
   assert.equal(plans[0].doneWithoutDeliverable.length, 1, 'the QC smell must be flagged to the operator lane');
   assert.equal(plans[0].doneWithoutDeliverable[0].taskId, 't8');
+});
+
+// ── PLANNER: TICKET 3 (L-13) — completion-notification postflight gate ──────
+
+test('DONE on a presentations task with NO registered process_certificate_sha is HELD, not sent', () => {
+  const plans = engine.planSends(
+    [mkTask({ id: 't-cert-missing', status: 'done', department: 'presentations', process_certificate_sha: null })],
+    { now: DAYTIME, deliverableFor: () => ({ location: '/tmp/deck.pptx', summary: 'Deck ready.' }) },
+  );
+  assert.equal(plans.length, 1, 'a held plan is still returned (as a structural no-send), not dropped silently');
+  const [held] = plans;
+  assert.equal(held.stamps.length, 0, 'a held plan must carry NO stamps — nothing may be claimed or sent');
+  assert.equal(held.message, '', 'a held plan must carry no client-facing message body');
+  assert.equal(held.heldForMissingPostflight.length, 1, 'the hold must be recorded for operator escalation');
+  assert.equal(held.heldForMissingPostflight[0].taskId, 't-cert-missing');
+  assert.match(held.heldForMissingPostflight[0].detail, /process_certificate_sha/);
+});
+
+test('DONE on a presentations task WITH a registered process_certificate_sha sends normally', () => {
+  const plans = engine.planSends(
+    [mkTask({
+      id: 't-cert-present', status: 'done', department: 'presentations',
+      process_certificate_sha: 'a'.repeat(64),
+    })],
+    { now: DAYTIME, deliverableFor: () => ({ location: '/tmp/deck.pptx', summary: 'Deck ready.' }) },
+  );
+  assert.equal(plans.length, 1);
+  assert.equal(plans[0].heldForMissingPostflight.length, 0, 'a registered certificate must not be held');
+  assert.equal(plans[0].stamps[0].guardColumn, 'completion_sent_at');
+  assert.match(plans[0].message, /Find it here: \/tmp\/deck\.pptx/);
+});
+
+test('DONE on a non-presentations task is never gated by the certificate check', () => {
+  const plans = engine.planSends(
+    [mkTask({ id: 't-cert-na', status: 'done', department: 'sales', process_certificate_sha: null })],
+    { now: DAYTIME, deliverableFor: () => ({ location: '/tmp/page.html', summary: 'Page ready.' }) },
+  );
+  assert.equal(plans.length, 1);
+  assert.equal(plans[0].heldForMissingPostflight.length, 0, 'the cert gate is scoped to presentations/book-writer only');
+  assert.equal(plans[0].stamps[0].guardColumn, 'completion_sent_at');
+});
+
+test('EXECUTOR: a held (certificate-missing) plan escalates to the operator lane and is never dispatched', async () => {
+  const plans = engine.planSends(
+    [mkTask({ id: 't-cert-exec', status: 'done', department: 'presentations', process_certificate_sha: null })],
+    { now: DAYTIME, deliverableFor: () => ({ location: '/tmp/deck.pptx', summary: 'Deck ready.' }) },
+  );
+  const escalations: string[] = [];
+  let sendCalled = false;
+  const result = engine.executeSends(plans, {
+    now: DAYTIME,
+    send: () => { sendCalled = true; return true; },
+    escalate: (message: string) => { escalations.push(message); },
+  });
+  assert.equal(sendCalled, false, 'a held plan must NEVER reach the send transport');
+  assert.equal(result.sent, 0);
+  assert.equal(escalations.length, 1, 'exactly one operator-lane escalation for the held plan');
+  assert.match(escalations[0], /completion_notification_held/);
+  assert.match(escalations[0], /process_certificate_sha/);
 });
 
 // ── PLANNER: quiet hours, digest, operator-audience guard ────────────────────

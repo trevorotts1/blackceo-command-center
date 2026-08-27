@@ -52,6 +52,7 @@ const GENERAL_WS_ID = `ws-general-${RUN_ID}`;
 type DbModule = typeof import('../../src/lib/db');
 let run: DbModule['run'];
 let queryOne: DbModule['queryOne'];
+let queryAll: DbModule['queryAll'];
 let closeDb: DbModule['closeDb'];
 
 type RouteModule = typeof import('../../src/app/api/tasks/ingest/route');
@@ -93,6 +94,7 @@ test.before(async () => {
   const db = (await import('../../src/lib/db')) as DbModule;
   run = db.run;
   queryOne = db.queryOne;
+  queryAll = db.queryAll;
   closeDb = db.closeDb;
   db.getDb(); // runs the full migration chain (incl. migration 098) against the temp DB
 
@@ -211,4 +213,54 @@ test('ingest with a whitespace-only requester_chat_id is trimmed away to NULL', 
     null,
     'with no real chat id the channel must NOT be stamped (never report on a phantom chat)',
   );
+});
+
+// ── TICKET 2 Fix A — missing-chat-id must be LOUD, not silent (L-14/L-18) ────
+
+function requesterChatIdMissingEvents(taskId: string): Array<{ message: string }> {
+  return queryAll<{ message: string }>(
+    `SELECT message FROM events WHERE task_id = ? AND type = 'requester_chat_id_missing'`,
+    [taskId],
+  );
+}
+
+test('ingest with source=telegram and NO requester_chat_id writes a requester_chat_id_missing event', async () => {
+  const res = await callIngest({
+    title: `Requester E ${RUN_ID}`,
+    department_slug: 'sales',
+    source: 'telegram',
+    idempotency_key: `req-e-${RUN_ID}`,
+  });
+  assert.equal(res.status, 201, 'a missing chat id must NOT block task creation');
+  const body = (await res.json()) as { task_id: string };
+  const events = requesterChatIdMissingEvents(body.task_id);
+  assert.equal(events.length, 1, 'a live-channel-source task with no chat id must be flagged exactly once');
+  assert.match(events[0].message, /requester_chat_id/);
+});
+
+test('ingest with source=backfill and NO requester_chat_id writes NO warning event', async () => {
+  const res = await callIngest({
+    title: `Requester F ${RUN_ID}`,
+    department_slug: 'sales',
+    source: 'backfill',
+    idempotency_key: `req-f-${RUN_ID}`,
+  });
+  assert.equal(res.status, 201);
+  const body = (await res.json()) as { task_id: string };
+  const events = requesterChatIdMissingEvents(body.task_id);
+  assert.equal(events.length, 0, 'an explicit backfill source is the one documented non-live exemption');
+});
+
+test('ingest WITH a requester_chat_id writes NO warning event regardless of source', async () => {
+  const res = await callIngest({
+    title: `Requester G ${RUN_ID}`,
+    department_slug: 'sales',
+    source: 'telegram',
+    requester_chat_id: '111222333',
+    idempotency_key: `req-g-${RUN_ID}`,
+  });
+  assert.equal(res.status, 201);
+  const body = (await res.json()) as { task_id: string };
+  const events = requesterChatIdMissingEvents(body.task_id);
+  assert.equal(events.length, 0, 'a task that DID carry a chat id must never be flagged');
 });

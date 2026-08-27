@@ -376,6 +376,13 @@ export interface Task {
   // column, so the operator can see the last block's reason, needs, and audience
   // to confirm the underlying issue was genuinely resolved.
   last_block_event?: TaskBlockEvent | null;
+  // TICKET 5a (L-09) — read-side heartbeat proxy computed per-row in the tasks
+  // GET route (getArtifactDirLastActivity, task-lifecycle.ts): most recent
+  // mtime under the task's artifact directory, ISO string, or null when no
+  // artifact-directory activity signal is available (not yet dispatched, or
+  // directory empty/missing). Not a DB column — always computed, never
+  // persisted or accepted on write.
+  last_activity_at?: string | null;
   // SOP / Triad Rule fields (migration 022)
   sop_id?: string | null;
   sop_step_progress?: string | null;

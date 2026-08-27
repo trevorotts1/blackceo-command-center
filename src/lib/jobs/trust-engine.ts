@@ -56,6 +56,7 @@ import { BACKLOG_COLUMN_SUBTITLE } from '@/lib/board-labels';
 import { CEO_CHAT_CHANNEL } from '@/lib/ceo-chat/config';
 import { appendTrustMessage } from '@/lib/ceo-chat/store';
 import { broadcast } from '@/lib/events';
+import { requiresRegisteredCertificate } from '@/lib/presentations-cert-gate';
 
 // ── Tunables ──────────────────────────────────────────────────────────────
 /** After ingest, wait up to this long for the triad to advance a task past
@@ -134,6 +135,9 @@ export interface TrustTaskRow {
   blocked_notice_sent_at: string | null;
   phase_progress_sent_at: string | null;
   last_reported_phase_label: string | null;
+  /** TICKET 3 (L-13): gates the DONE message for presentations/book-writer tasks. */
+  process_certificate_sha: string | null;
+  source: string | null;
 }
 
 /** A deliverable pointer for a completed task (from the deliverables registry). */
@@ -162,6 +166,23 @@ export interface PlannedSend {
   stamps: StampOp[];
   /** done-without-deliverable QC smells to escalate to the OPERATOR lane (never the client). */
   doneWithoutDeliverable: { taskId: string; title: string }[];
+  /**
+   * TICKET 3 (L-13 capstone fix). A DONE completion message is the exact
+   * client-facing claim the L-13 shortcut deck proved can fire with no
+   * mechanical check that the SOP pipeline's own postflight gate actually
+   * passed. For presentations/book-writer tasks this reuses the SAME
+   * process_certificate_sha invariant qc-scorer.ts already enforces on the
+   * review->done DB transition (requiresRegisteredCertificate,
+   * presentations-cert-gate.ts) as a SEPARATE, independent precondition on
+   * the notification itself — so a task that somehow reaches status='done'
+   * without a registered certificate (a future bug, a bypass, a race) still
+   * cannot have its completion announced to the client. When populated, the
+   * carrying PlannedSend has `stamps: []` (see executeSends: an empty
+   * `stamps` array claims nothing and dispatches nothing — a structural
+   * no-send, not a suppressed message body) and must be escalated to the
+   * OPERATOR lane only, never retried as a client send.
+   */
+  heldForMissingPostflight: { taskId: string; title: string; detail: string }[];
 }
 
 export interface PlanContext {
@@ -301,6 +322,40 @@ export function planSends(tasks: TrustTaskRow[], ctx: PlanContext): PlannedSend[
 
     // ── Message 3 — DONE (highest priority: a finished task's client is waiting) ──
     if (task.status === 'done' && !task.completion_sent_at) {
+      // TICKET 3 (L-13): mechanical postflight gate on the notification itself,
+      // independent of how the task reached status='done'. currentStatus is
+      // passed as a value OTHER than 'done' deliberately — the underlying
+      // helper short-circuits to { applies: false } when currentStatus ===
+      // targetStatus (it's built for gating a live transition, not a
+      // post-hoc check), so this call asks "would THIS task, department, and
+      // cert state be allowed to become done right now" rather than relying
+      // on a transition that has, by definition, already happened.
+      const certGate = requiresRegisteredCertificate({
+        department: task.department,
+        currentStatus: 'review',
+        targetStatus: 'done',
+        storedCert: task.process_certificate_sha,
+        sopAuthoringForTaskId: null,
+        source: task.source,
+      });
+      if (certGate.applies && !certGate.ok) {
+        perTask.push({
+          chatId,
+          channel,
+          message: '',
+          stamps: [], // structural no-send — see PlannedSend.heldForMissingPostflight doc
+          doneWithoutDeliverable: [],
+          heldForMissingPostflight: [{
+            taskId: task.id,
+            title: task.title,
+            detail:
+              `task ${task.id} ("${task.title}") reached status='done' with NO registered ` +
+              `process_certificate_sha — the completion message was HELD, not sent. ${certGate.error ?? ''} ` +
+              `${certGate.remediation ?? ''}`.trim(),
+          }],
+        });
+        continue;
+      }
       const deliverable = ctx.deliverableFor(task.id);
       const message = doneMessage(task, deliverable);
       const extraSets: Record<string, string | null> = {
@@ -321,6 +376,7 @@ export function planSends(tasks: TrustTaskRow[], ctx: PlanContext): PlannedSend[
           },
         ],
         doneWithoutDeliverable: deliverable ? [] : [{ taskId: task.id, title: task.title }],
+        heldForMissingPostflight: [],
       });
       continue;
     }
@@ -352,6 +408,7 @@ export function planSends(tasks: TrustTaskRow[], ctx: PlanContext): PlannedSend[
             },
           ],
           doneWithoutDeliverable: [],
+          heldForMissingPostflight: [],
         });
         continue;
       }
@@ -385,6 +442,7 @@ export function planSends(tasks: TrustTaskRow[], ctx: PlanContext): PlannedSend[
               },
             ],
             doneWithoutDeliverable: [],
+            heldForMissingPostflight: [],
           });
           continue;
         }
@@ -409,6 +467,7 @@ export function planSends(tasks: TrustTaskRow[], ctx: PlanContext): PlannedSend[
           },
         ],
         doneWithoutDeliverable: [],
+        heldForMissingPostflight: [],
       });
       continue;
     }
@@ -435,6 +494,7 @@ export function planSends(tasks: TrustTaskRow[], ctx: PlanContext): PlannedSend[
             },
           ],
           doneWithoutDeliverable: [],
+          heldForMissingPostflight: [],
         });
         continue;
       }
@@ -451,7 +511,16 @@ export function planSends(tasks: TrustTaskRow[], ctx: PlanContext): PlannedSend[
 
   const out: PlannedSend[] = [];
   for (const chatId of Array.from(byChat.keys())) {
-    const sends: PlannedSend[] = byChat.get(chatId) ?? [];
+    const allSends: PlannedSend[] = byChat.get(chatId) ?? [];
+    // TICKET 3: a held (certificate-missing) entry carries stamps: [] and an
+    // empty message — it is a structural no-send, never a real client update.
+    // Keep it OUT of digest coalescing entirely (no blank bullet line in a
+    // client-facing digest) — it always passes through untouched below, and
+    // executeSends still treats it as a no-op regardless of bucketing.
+    const held = allSends.filter((s) => s.heldForMissingPostflight.length > 0);
+    const sends = allSends.filter((s) => s.heldForMissingPostflight.length === 0);
+    out.push(...held);
+    if (sends.length === 0) continue;
     if (sends.length <= DIGEST_THRESHOLD) {
       out.push(...sends);
       continue;
@@ -464,6 +533,7 @@ export function planSends(tasks: TrustTaskRow[], ctx: PlanContext): PlannedSend[
       message: `Here are ${sends.length} quick updates:\n${lines.join('\n')}`,
       stamps: sends.flatMap((s: PlannedSend) => s.stamps),
       doneWithoutDeliverable: sends.flatMap((s: PlannedSend) => s.doneWithoutDeliverable),
+      heldForMissingPostflight: [],
     };
     out.push(digest);
   }
@@ -605,6 +675,20 @@ export function executeSends(plans: PlannedSend[], ctx: ExecuteContext): Execute
   let skipped = 0;
 
   for (const plan of plans) {
+    // TICKET 3 (L-13): a held (certificate-missing) plan has stamps: [] by
+    // construction (see PlannedSend.heldForMissingPostflight) — it would
+    // otherwise fall into the generic `!anyClaimed => skipped, continue` path
+    // below and its smell would NEVER reach the operator lane. Handle it
+    // first, unconditionally: escalate, count as skipped (nothing was ever
+    // going to be claimed or sent), and move on — never attempt dispatch.
+    if (plan.heldForMissingPostflight.length > 0) {
+      for (const held of plan.heldForMissingPostflight) {
+        escalate(`[trust-engine] completion_notification_held: ${held.detail}`);
+      }
+      skipped += 1;
+      continue;
+    }
+
     // ── Claim: durable stamp BEFORE dispatch (transactional outbox). ──
     // A plan's stamp-claims AND their events rows commit together inside ONE
     // explicit transaction, so a crash mid-claim can never leave a half-applied
@@ -710,7 +794,8 @@ const CANDIDATE_SQL = `
   SELECT t.id, t.title, t.status, t.department, a.name AS assigned_agent_name,
          t.created_at, t.requester_channel, t.requester_chat_id,
          t.ack_sent_at, t.progress_last_sent_at, t.completion_sent_at,
-         t.block_audience, t.block_needs, t.blocked_notice_sent_at, t.phase_progress_sent_at, t.last_reported_phase_label
+         t.block_audience, t.block_needs, t.blocked_notice_sent_at, t.phase_progress_sent_at, t.last_reported_phase_label,
+         t.process_certificate_sha, t.source
     FROM tasks t
     LEFT JOIN agents a ON t.assigned_agent_id = a.id
    WHERE t.requester_chat_id IS NOT NULL

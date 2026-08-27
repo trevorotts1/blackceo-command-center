@@ -96,6 +96,21 @@ import { checkTaskWriteAuth, renderWriteBackInstructions } from '@/lib/mc-auth';
 // in GUARD 3 below and the block WHERE-clause.
 const SKIP_STATUSES = new Set(['in_progress', 'review', 'done', 'blocked']);
 
+// TICKET 4a: dynamic `import('@/lib/tasks')` calls inside autoDispatchTask sit
+// inside try/catch blocks that only catch a THROW — a module that never
+// settles (a genuine hang, not an error) would leave the await paused forever
+// with no downstream signal, matching cc-recon's "resolution row, then
+// nothing" silent-stall symptom. Bound each such import so a stall degrades
+// to the same non-fatal catch path instead of hanging the whole dispatch.
+function importWithTimeout<T>(loader: () => Promise<T>, label: string, ms = 10_000): Promise<T> {
+  return Promise.race([
+    loader(),
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(`importWithTimeout: "${label}" did not resolve within ${ms}ms`)), ms),
+    ),
+  ]);
+}
+
 // ── W8.2 ANTI-FURNACE: dispatch attempt-accounting + backoff + block-on-N ─────
 // The furnace was: a task that can't advance (gateway down / no sovereign model /
 // no per-dept runtime) got re-fired every 2-5 min forever. We now record EVERY
@@ -1093,8 +1108,10 @@ export async function autoDispatchTask(
     }
 
     // ── Intelligence resolution ─────────────────────────────────────────────
+    console.log(`[dispatch-checkpoint] intelligence-resolution-start task=${task.id}`);
     const settings = resolveAndLog(task.id, agent.id, task.workspace_id);
     const specialistType = resolveSpecialistType(agent);
+    console.log(`[dispatch-checkpoint] intelligence-resolution-done task=${task.id}`);
 
     // ── SYNCHRONOUS PERSONA DISPATCH GATE (F3.1 / F4.1 — heal, not stall) ────
     // resolveAndLog reads tasks.persona_id first (Hop 10), so a pinned persona is
@@ -1106,8 +1123,9 @@ export async function autoDispatchTask(
     // persona — the fallback makes NULL impossible (availability > purity). Dynamic
     // import avoids the tasks<->task-dispatcher static cycle.
     if (settings.persona === 'auto') {
+      console.log(`[dispatch-checkpoint] persona-heal-gate-start task=${task.id}`);
       try {
-        const { ensurePersonaForDispatch } = await import('@/lib/tasks');
+        const { ensurePersonaForDispatch } = await importWithTimeout(() => import('@/lib/tasks'), 'persona-heal-gate:@/lib/tasks');
         const healDept =
           canonicalDeptSlug(task.department || task.workspace_id || '') || 'general';
         const healed = ensurePersonaForDispatch(task.id, healDept);
@@ -1122,6 +1140,7 @@ export async function autoDispatchTask(
         // unhealed 'auto' still ships (degraded) rather than stalling the board.
         console.error(`[${context}] persona dispatch gate failed for task ${task.id}:`, healErr);
       }
+      console.log(`[dispatch-checkpoint] persona-heal-gate-done task=${task.id}`);
     }
 
     // ── AUDIENCE-CONFIRM GATE (persona-blend — BEFORE the write step) ────────
@@ -1132,11 +1151,12 @@ export async function autoDispatchTask(
     // we flip to house-voice governance and proceed. Non-content tasks (no bundle)
     // skip this entirely (no regression). Dynamic import avoids the
     // tasks<->task-dispatcher static import cycle (same pattern as the heal gate).
+    console.log(`[dispatch-checkpoint] audience-confirm-gate-start task=${task.id}`);
     try {
       const {
         evaluateAudienceConfirmGate, holdForAudienceConfirm, markAudienceDeadlineFallback,
         isHardHoldConfirmDepartment, blockForOwnerConfirm,
-      } = await import('@/lib/tasks');
+      } = await importWithTimeout(() => import('@/lib/tasks'), 'audience-confirm-gate:@/lib/tasks');
       const gate = evaluateAudienceConfirmGate(task.id);
       if (gate.hold) {
         holdForAudienceConfirm(task.id, agent.id, gate);
@@ -1173,6 +1193,7 @@ export async function autoDispatchTask(
         (gateErr as Error).message,
       );
     }
+    console.log(`[dispatch-checkpoint] audience-confirm-gate-done task=${task.id}`);
     // ── End audience-confirm gate ────────────────────────────────────────────
 
     // ── AF-MODEL-SOVEREIGNTY gate ───────────────────────────────────────────
@@ -1258,7 +1279,9 @@ export async function autoDispatchTask(
     // With the gate ON, GUARD 7 has already resolved the SOP and patched the
     // in-memory row, so the helper's idempotence short-circuit ('already')
     // makes this a no-op — one dispatch never runs the engine twice.
+    console.log(`[dispatch-checkpoint] sop-resolution-start task=${task.id}`);
     const sopResolution = await resolveSopForTask(task, agent, context, sopAuthoringLink);
+    console.log(`[dispatch-checkpoint] sop-resolution-done task=${task.id} outcome=${sopResolution.outcome}`);
     if (sopResolution.outcome === 'authoring') {
       return; // HOLD: abort this dispatch; authorSOPForTask re-fires it.
     }
@@ -1313,11 +1336,12 @@ ${stepLines.join('\n')}
     // fill may have patched `task.sop_id` in-memory since (see the anchor above).
     const selectionSopId = selectionSopIdAtEntry; // SOP the creation-time selection consumed
     if (resolvedSopId && resolvedSopId !== selectionSopId) {
+      console.log(`[dispatch-checkpoint] sop-rescore-start task=${task.id}`);
       try {
         // Dynamic import: tasks.ts already imports this module (autoDispatchTask),
         // so resolve the rescore helpers lazily to avoid a static import cycle —
         // same pattern as the task-lifecycle import below.
-        const { rescorePersonaWithSOP, loadSopSelectorContextById } = await import('@/lib/tasks');
+        const { rescorePersonaWithSOP, loadSopSelectorContextById } = await importWithTimeout(() => import('@/lib/tasks'), 'sop-rescore:@/lib/tasks');
         const sopContext = loadSopSelectorContextById(resolvedSopId);
         if (sopContext) {
           const deptForSelector =
@@ -1358,6 +1382,7 @@ ${stepLines.join('\n')}
           (rescoreErr as Error).message,
         );
       }
+      console.log(`[dispatch-checkpoint] sop-rescore-done task=${task.id}`);
     }
     // ── End F3.4 rescore ────────────────────────────────────────────────────
 
@@ -1380,6 +1405,7 @@ ${stepLines.join('\n')}
     // BEFORE the synchronous pack builder; never throws (degrades to []).
     // Unit 3.2: pass agentId so the matcher intersects the filesystem search
     // with the assigned agent's agent_skills bindings (migration 122).
+    console.log(`[dispatch-checkpoint] skill-match-start task=${task.id}`);
     let matchedSkills: MatchedSkill[] = [];
     try {
       matchedSkills = await matchSkillsForTask({
@@ -1390,6 +1416,7 @@ ${stepLines.join('\n')}
     } catch {
       matchedSkills = [];
     }
+    console.log(`[dispatch-checkpoint] skill-match-done task=${task.id} matched=${matchedSkills.length}`);
 
     // ── Unit 3.6(b) — PUSH-DISPATCH ASSERTION: a PODCAST task MUST resolve
     // Skill 58 (podcast-production-engine) before dispatch. A podcast task that
@@ -1551,7 +1578,9 @@ If you need help or clarification, ask the orchestrator.`;
     //      agent:<slug>:<openclaw_session_id>.
     //   2. Fallback: if no specialist runtime is resolvable we keep the legacy
     //      agent:main:… key and log a warning so other departments are not broken.
+    console.log(`[dispatch-checkpoint] session-key-resolve-start task=${task.id}`);
     const sessionKey = resolveSpecialistSessionKey(agent, session.openclaw_session_id, task.workspace_id, context);
+    console.log(`[dispatch-checkpoint] session-key-resolve-done task=${task.id} resolved=${Boolean(sessionKey)}`);
 
     // ── RESOLVER-DISPATCH gate (Gap E) ─────────────────────────────────────
     // No per-department OpenClaw runtime → do NOT silently dispatch to
@@ -1621,7 +1650,9 @@ If you need help or clarification, ask the orchestrator.`;
     // and the card freezes in_progress until the stuck sweep blocks it (the
     // carded-but-trapped defect). HOLD + SYSTEM report NOW instead of claiming
     // and dispatching work that cannot report back. Dev insecure-open passes.
+    console.log(`[dispatch-checkpoint] write-auth-check-start task=${task.id}`);
     const writeAuth = checkTaskWriteAuth();
+    console.log(`[dispatch-checkpoint] write-auth-check-done task=${task.id} ok=${writeAuth.ok}`);
     if (!writeAuth.ok) {
       console.error(`[${context}] autoDispatchTask: HELD task ${task.id} — task-API write-back auth not provisioned: ${writeAuth.reason}`);
       const nowAuth = new Date().toISOString();
@@ -1652,11 +1683,13 @@ If you need help or clarification, ask the orchestrator.`;
     // transition()'s single expectedFrom can't express); audited immediately
     // below via recordStatusEvent (DISP-10 / DATA-07 — closes the CROSS-LANE
     // note this same function used to carry).
+    console.log(`[dispatch-checkpoint] cas-claim-start task=${task.id}`);
     const claim = run(
       `UPDATE tasks SET status = 'in_progress', updated_at = ?
          WHERE id = ? AND status IN ('backlog','inbox','planning','pending_dispatch','assigned')`,
       [now, task.id],
     );
+    console.log(`[dispatch-checkpoint] cas-claim-done task=${task.id} changes=${claim.changes}`);
     if (claim.changes !== 1) {
       console.log(
         `[${context}] autoDispatchTask: task ${taskId} was already claimed by a concurrent ` +
@@ -1675,12 +1708,15 @@ If you need help or clarification, ask the orchestrator.`;
     // attempt counter instead: genuine retries (after recordDispatchFailure
     // bumps dispatch_attempts) get a fresh key, but two advancers in one window
     // read the same counter → identical key → the gateway collapses them.
+    console.log(`[dispatch-checkpoint] chat-send-start task=${task.id}`);
     try {
       await client.call('chat.send', {
         sessionKey,
         message: taskMessage,
         idempotencyKey: `auto-dispatch-${task.id}-${task.dispatch_attempts ?? 0}`,
+        timeoutMs: 30000,
       });
+      console.log(`[dispatch-checkpoint] chat-send-done task=${task.id}`);
     } catch (sendErr) {
       // DISP-02 send-failure rollback: we already CAS-claimed the card to
       // in_progress; a failed send must NOT strand it there. Restore the prior
@@ -1827,8 +1863,37 @@ If you need help or clarification, ask the orchestrator.`;
     );
   } catch (err) {
     // Fire-and-forget: NEVER throw — routing must succeed even if dispatch fails.
-    console.error(
-      `[${context}] autoDispatchTask: failed for task ${taskId}: ${(err as Error).message}`,
-    );
+    const errMsg = (err as Error).message;
+    console.error(`[${context}] autoDispatchTask: failed for task ${taskId}: ${errMsg}`);
+    // TICKET 4a: this outer catch previously only console.error'd — any throw
+    // (or a `.catch` firing after an importWithTimeout bound above) was
+    // invisible outside the process log, with no DB-visible trace. Write a
+    // queryable event using a DISTINCT type (`dispatch_pipeline_error`, not
+    // `routed_but_not_dispatched` — that type already means something else,
+    // a resolved-but-unroutable specialist) so this failure class is visible
+    // and retryable via task_events/events instead of silently swallowed.
+    // `task`/`agent` are not in scope here (block-scoped inside the try
+    // above) so only `taskId`, always available as the function parameter,
+    // is used.
+    try {
+      const nowErr = new Date().toISOString();
+      run(
+        `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [uuidv4(), 'dispatch_pipeline_error', null, taskId, `[${context}] ${errMsg}`, nowErr],
+      );
+      run(
+        `INSERT INTO task_activities (id, task_id, agent_id, activity_type, message, metadata, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [
+          uuidv4(), taskId, null, 'dispatch_pipeline_error', `[${context}] ${errMsg}`,
+          JSON.stringify({ context, error: errMsg }), nowErr,
+        ],
+      );
+    } catch (writeErr) {
+      // Last resort: even the failure-visibility write failed (e.g. pre-migration
+      // DB) — still never throw out of a fire-and-forget dispatch.
+      console.error(`[${context}] autoDispatchTask: dispatch_pipeline_error write failed:`, writeErr);
+    }
   }
 }

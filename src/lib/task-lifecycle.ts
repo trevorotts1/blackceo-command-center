@@ -983,6 +983,58 @@ export function ensureArtifactDir(taskId: string): string {
   return dir;
 }
 
+// TICKET 5a (L-09): no per-task heartbeat/last_activity column exists (grep
+// confirmed: no last_activity_at anywhere in src/lib or src/app). Rather than
+// add a new write path from the onboarding-repo's Python pipeline into this
+// repo, use a READ-SIDE PROXY: the task's own artifact directory
+// (<PROJECTS_PATH>/artifacts/<task-id>/, the same path L-08 observed the run
+// actually land in) is written to continuously by the render pipeline while
+// work is genuinely in flight. The most recent mtime under that tree — walked
+// shallowly, bounded, tolerant of a missing/unreadable dir — is a true proxy
+// for "is something actually happening right now," independent of whatever
+// tasks.status says. Zero changes needed on the onboarding-repo side.
+const ARTIFACT_HEARTBEAT_MAX_ENTRIES = 500; // bound the walk — a run dir is never this wide in practice
+
+function latestMtimeUnder(dir: string, budget: { remaining: number }): number | null {
+  if (budget.remaining <= 0) return null;
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return null; // missing / unreadable — no proxy available
+  }
+  let latest: number | null = null;
+  for (const entry of entries) {
+    if (budget.remaining-- <= 0) break;
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      const sub = latestMtimeUnder(full, budget);
+      if (sub !== null && (latest === null || sub > latest)) latest = sub;
+      continue;
+    }
+    try {
+      const mtimeMs = fs.statSync(full).mtimeMs;
+      if (latest === null || mtimeMs > latest) latest = mtimeMs;
+    } catch {
+      /* file vanished mid-walk — skip */
+    }
+  }
+  return latest;
+}
+
+/**
+ * Read-side heartbeat proxy for a task: the most recent mtime of any file
+ * under its artifact directory, as an ISO string. Returns null when the
+ * directory doesn't exist yet (never dispatched / no artifact activity) or
+ * is empty — callers should treat null as "no activity signal available",
+ * never as "confirmed inactive".
+ */
+export function getArtifactDirLastActivity(taskId: string): string | null {
+  const dir = artifactDir(taskId);
+  const latest = latestMtimeUnder(dir, { remaining: ARTIFACT_HEARTBEAT_MAX_ENTRIES });
+  return latest === null ? null : new Date(latest).toISOString();
+}
+
 // ---------------------------------------------------------------------------
 // §3 Deliverable registration
 // ---------------------------------------------------------------------------

@@ -207,6 +207,45 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
       );
     }
 
+    // TICKET 4b: this route has no status precondition at all — it fires
+    // chat.send and then routes `transition(id, 'in_progress', ...)` below
+    // unconditionally on every POST. `blocked -> in_progress` is a LEGAL edge
+    // in transition()'s own state machine (an operator resolving a block and
+    // re-dispatching is a normal, designed action), so transition() alone
+    // cannot distinguish that from a stale/duplicate POST replaying against a
+    // task that was blocked/escalated moments ago and never actually reviewed.
+    // Confirmed mechanism for the escalation-overridden-by-redispatch defect:
+    // escalateStuckBacklogTask() (backlog-redispatch-sweep.ts) already excludes
+    // an escalated task from its OWN next SELECT correctly (the status flip to
+    // 'blocked' is itself one of the query's own WHERE-clause columns) — the
+    // override came through THIS route instead, which a detached/ghost dispatch
+    // caller (L-10, confirmed) could hit at any time with no awareness of an
+    // intervening block. Require an explicit acknowledgement to revive a
+    // blocked task from here; a bare retry/replay POST no longer silently wins.
+    if (task.status === 'blocked') {
+      let acknowledgeBlock = false;
+      try {
+        const body = await request.clone().json();
+        acknowledgeBlock = body?.acknowledgeBlock === true;
+      } catch {
+        acknowledgeBlock = false; // no/invalid JSON body — default to refusing
+      }
+      if (!acknowledgeBlock) {
+        return NextResponse.json(
+          {
+            success: false,
+            held: true,
+            reason: 'blocked_requires_acknowledgement',
+            message:
+              `Task "${task.title}" is currently BLOCKED (block_reason: ${task.block_reason ?? 'none recorded'}). ` +
+              `Manual dispatch will not silently revive a blocked task. Resolve the block, then retry this ` +
+              `request with { "acknowledgeBlock": true } to confirm the block was reviewed.`,
+          },
+          { status: 409 },
+        );
+      }
+    }
+
     // FIX-17 / Error 12 / Rule R12: an OWNER-KILLED task (killed_at column OR
     // the "OWNER KILLED" note marker) is terminal-for-dispatch — the manual
     // "Send to Agent" route must refuse to revive it, exactly like every auto
@@ -739,6 +778,7 @@ If you need help or clarification, ask the orchestrator.`;
         sessionKey,
         message: taskMessage,
         idempotencyKey: `dispatch-${task.id}-${task.dispatch_attempts ?? 0}`,
+        timeoutMs: 30000,
       });
 
       // FIX-15 (Error 7 / R7 — model skew): pin the ACTUAL runtime model on the

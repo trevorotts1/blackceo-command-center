@@ -228,3 +228,63 @@ test('task-dispatcher: re-import is stable (no circular dep crash)', async () =>
   const mod = await import('../../src/lib/task-dispatcher');
   assert.strictEqual(typeof mod.autoDispatchTask, 'function');
 });
+
+// ── TICKET 4a — outer catch must write a DB-visible dispatch_pipeline_error ──
+
+test('autoDispatchTask: an unguarded throw is caught, logged, and recorded as a dispatch_pipeline_error event', async () => {
+  // logDispatchResolution (intelligence-resolver.ts, called via the UNGUARDED
+  // resolveAndLog() call near the top of autoDispatchTask's "Intelligence
+  // resolution" section) does a raw `run(INSERT INTO task_activities ...)`
+  // with no surrounding try/catch at that call site. Dropping the table forces
+  // that specific unguarded write to throw, exercising the real, unmodified
+  // code path all the way out to the outer catch — not a stubbed substitute.
+  seedTask('task-forced-throw', 'Forces an unguarded throw', 'backlog', 'ws-graphics', 'agent-graphics');
+  // Satisfy the Triad gate (checkTriad, sops.ts:432 — runs BEFORE "Intelligence
+  // resolution") so this task actually reaches resolveAndLog() instead of
+  // being correctly held as triad-incomplete: a real description, a real
+  // (any) seeded SOP id, and a persona id that is a real key in this box's
+  // own persona-categories.json (isKnownPersonaId validates against it when
+  // present, so an arbitrary string fails on a box that has the real file).
+  const anySop = queryOne<{ id: string }>('SELECT id FROM sops WHERE deleted_at IS NULL LIMIT 1', []);
+  assert.ok(anySop, 'starter SOP seed must have produced at least one row');
+  run(
+    `UPDATE tasks SET description = ?, sop_id = ?, persona_id = ? WHERE id = ?`,
+    ['A real description so the Triad gate is satisfied.', anySop!.id, 'allan-dib-the-1-page-marketing-plan', 'task-forced-throw'],
+  );
+  // Same stub idiom as dispatch-canonical-alias-reverse-probe.test.ts: the
+  // only stub is the OpenClaw gateway network boundary — isConnected() lying
+  // true is what lets this reach past client.connect() (guarded, would
+  // otherwise return early on gateway_down in a test env with no live
+  // gateway) into the section this test actually targets.
+  const { getOpenClawClient } = await import('../../src/lib/openclaw/client');
+  const client = getOpenClawClient();
+  client.isConnected = () => true;
+  run('DROP TABLE task_activities', []);
+  try {
+    await assert.doesNotReject(
+      () => autoDispatchTask('task-forced-throw', 'test'),
+      'a throw anywhere in the body must still be swallowed — fire-and-forget must never throw',
+    );
+    const events = queryAll<{ type: string; message: string }>(
+      `SELECT type, message FROM events WHERE task_id = ? AND type = 'dispatch_pipeline_error'`,
+      ['task-forced-throw'],
+    );
+    assert.equal(events.length, 1, 'exactly one dispatch_pipeline_error event must be recorded');
+    assert.match(events[0].message, /task_activities/i, 'the recorded message should carry the real underlying error');
+  } finally {
+    // Restore the table so later tests in this file (and its own teardown)
+    // are unaffected — re-run the same migration chain's CREATE for it.
+    run(
+      `CREATE TABLE IF NOT EXISTS task_activities (
+        id TEXT PRIMARY KEY,
+        task_id TEXT,
+        agent_id TEXT,
+        activity_type TEXT,
+        message TEXT,
+        metadata TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+      )`,
+      [],
+    );
+  }
+});

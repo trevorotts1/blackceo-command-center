@@ -103,6 +103,43 @@ function broadcastQCUpdate(taskId: string): void {
   }
 }
 
+// TICKET 5b (L-17): every transition() call site below that reroutes a QC
+// verdict already writes its own `qc_review`/`task_status_changed` event
+// BEFORE attempting the status move (see the unconditional write at the top
+// of each scoring branch), then swallows any non-CAS_CONFLICT TransitionError
+// to a console.warn only. A CAS_CONFLICT is a normal race (another advancer
+// already moved the task) and is correctly silent; anything else means the
+// verdict event now claims a move that never landed, with nothing queryable
+// to say so. Write a `status_apply_failed` event so this divergence between
+// "what the event log says happened" and "what tasks.status actually is" is
+// visible instead of only a process-log warning.
+export function recordStatusApplyFailure(
+  taskId: string,
+  attemptedTo: string,
+  txErr: unknown,
+): void {
+  try {
+    const code = txErr instanceof TransitionError ? txErr.code : 'UNKNOWN';
+    const message = txErr instanceof Error ? txErr.message : String(txErr);
+    run(
+      `INSERT INTO events (id, type, task_id, message, created_at)
+       VALUES (?, 'status_apply_failed', ?, ?, ?)`,
+      [
+        uuidv4(),
+        taskId,
+        `[status_apply_failed] qc-scorer attempted to move task to '${attemptedTo}' but the ` +
+          `transition failed (code=${code}): ${message}. The verdict event above may not reflect ` +
+          `the task's actual current status.`,
+        new Date().toISOString(),
+      ],
+    );
+  } catch (writeErr) {
+    // Last resort — the visibility write itself failed; still never throw
+    // out of a QC-scoring catch block.
+    console.error(`[QCScorer] status_apply_failed write failed for task ${taskId}:`, writeErr);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // AF-I14 — KIE.ai image-path guardrail for Presentations department
 //
@@ -4292,6 +4329,7 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
           } catch (txErr) {
             if (!(txErr instanceof TransitionError && txErr.code === 'CAS_CONFLICT')) {
               console.warn(`[QCScorer] missing-deliverables kickback transition failed for ${taskId}:`, (txErr as Error).message);
+              recordStatusApplyFailure(taskId, 'backlog', txErr);
             }
           }
           return failResult;
@@ -4377,6 +4415,7 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
         } catch (txErr) {
           if (!(txErr instanceof TransitionError && txErr.code === 'CAS_CONFLICT')) {
             console.warn(`[QCScorer] AF-I14 kickback transition failed for ${taskId}:`, (txErr as Error).message);
+            recordStatusApplyFailure(taskId, 'backlog', txErr);
           }
         }
 
@@ -5273,6 +5312,7 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
         } catch (txErr) {
           if (!(txErr instanceof TransitionError && txErr.code === 'CAS_CONFLICT')) {
             console.warn(`[QCScorer] block-after-cap transition failed for ${taskId}:`, (txErr as Error).message);
+            recordStatusApplyFailure(taskId, 'blocked', txErr);
           }
         }
         if (blockLanded) {
@@ -5402,6 +5442,7 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
       } catch (txErr) {
         if (!(txErr instanceof TransitionError && txErr.code === 'CAS_CONFLICT')) {
           console.warn(`[QCScorer] reroute-to-backlog transition failed for ${taskId}:`, (txErr as Error).message);
+          recordStatusApplyFailure(taskId, 'backlog', txErr);
         }
       }
 

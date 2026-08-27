@@ -418,3 +418,55 @@ test('[T0-GATE-ok] transition(id,"done") WITH evidence still succeeds', async ()
   const updated = await transition(id, 'done', { actor: 'test', expectedFrom: 'review' });
   assert.equal(updated.status, 'done', 'a delivered task must still complete normally');
 });
+
+// ── TICKET 5b (L-17) — status_apply_failed on a swallowed non-CAS_CONFLICT ───
+
+test('[TICKET-5b] recordStatusApplyFailure writes a queryable status_apply_failed event', async () => {
+  const scorer = await import('../../src/lib/qc-scorer');
+  const lifecycle = await import('../../src/lib/task-lifecycle');
+  const id = nextId('status-apply-fail');
+  seedTask(id, 'Reconcile the vendor invoices', 'Match every invoice to its purchase order.');
+
+  // Exercise the exact helper wired into all four swallowing catch blocks
+  // (qc-scorer.ts: missing-deliverables kickback, AF-I14 kickback,
+  // block-after-cap, reroute-to-backlog) with a real TransitionError instance
+  // carrying a non-CAS_CONFLICT code, exactly the shape those catch blocks
+  // pass it (`if (!(txErr instanceof TransitionError && txErr.code ===
+  // 'CAS_CONFLICT'))`).
+  const forcedErr = new lifecycle.TransitionError('ILLEGAL_TRANSITION', 'Illegal transition review -> backlog for task ' + id);
+  scorer.recordStatusApplyFailure(id, 'backlog', forcedErr);
+
+  const events = queryOne<{ c: number }>(
+    `SELECT COUNT(*) AS c FROM events WHERE task_id = ? AND type = 'status_apply_failed'`,
+    [id],
+  );
+  assert.equal(events?.c, 1, 'exactly one status_apply_failed event must be recorded');
+
+  const detail = queryOne<{ message: string }>(
+    `SELECT message FROM events WHERE task_id = ? AND type = 'status_apply_failed' LIMIT 1`,
+    [id],
+  );
+  assert.match(detail!.message, /ILLEGAL_TRANSITION/, 'the recorded message must carry the TransitionError code');
+  assert.match(detail!.message, /backlog/, 'the recorded message must name the attempted target status');
+});
+
+test('[TICKET-5b] recordStatusApplyFailure tolerates a non-TransitionError (plain Error) input', async () => {
+  const scorer = await import('../../src/lib/qc-scorer');
+  const id = nextId('status-apply-fail-plain');
+  seedTask(id, 'Reconcile the vendor invoices', 'Match every invoice to its purchase order.');
+
+  // The four call sites pass whatever the catch clause bound, which is only
+  // GUARANTEED to satisfy `!(txErr instanceof TransitionError && ...)` -- it
+  // need not be a TransitionError at all (e.g. a raw SqliteError from a bad
+  // extraColumns write inside transition()'s own transaction). Confirm the
+  // helper degrades to code='UNKNOWN' rather than throwing on that shape.
+  scorer.recordStatusApplyFailure(id, 'blocked', new Error('no such column: qc_reroute_attempts'));
+
+  const detail = queryOne<{ message: string }>(
+    `SELECT message FROM events WHERE task_id = ? AND type = 'status_apply_failed' LIMIT 1`,
+    [id],
+  );
+  assert.ok(detail, 'a plain Error must still produce a recorded event');
+  assert.match(detail!.message, /UNKNOWN/, 'a non-TransitionError input must record code=UNKNOWN, not throw');
+  assert.match(detail!.message, /no such column/, 'the underlying message must still be captured verbatim');
+});
