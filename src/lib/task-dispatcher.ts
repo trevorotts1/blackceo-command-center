@@ -74,6 +74,7 @@ import {
   resolveAgentRuntimeModel,
   modelsMatch,
   recordModelSkewEvent,
+  reconcileTaskModelRecord,
   type RuntimeModelResolution,
 } from '@/lib/runtime-model';
 import { blockDispatchIfOwnerKilled } from '@/lib/owner-killed';
@@ -1807,6 +1808,23 @@ If you need help or clarification, ask the orchestrator.`;
     if (runtimeModel) {
       run('UPDATE tasks SET model_id = ?, updated_at = ? WHERE id = ?', [runtimeModel, now, task.id]);
     }
+    // Runtime beat the recorded intent: reconcile the paperwork so the record
+    // itself says runtime won, instead of leaving a stale intended model behind
+    // for the next dispatch to re-detect and re-alarm on.
+    if (skew) {
+      reconcileTaskModelRecord({
+        taskId: task.id,
+        agentId: agent.id,
+        intended: intendedModel,
+        runtime: runtimeModel,
+        detail: {
+          source: runtimeResolved.source,
+          config_agent_id: runtimeResolved.configAgentId,
+          model_source: settings.modelSource,
+          auto_dispatch: true,
+        },
+      });
+    }
     try {
       const updatedTask = queryOne<Task>('SELECT * FROM tasks WHERE id = ?', [task.id]);
       if (updatedTask) broadcast({ type: 'task_updated', payload: updatedTask });
@@ -1832,6 +1850,21 @@ If you need help or clarification, ask the orchestrator.`;
     run('UPDATE agents SET status = ?, updated_at = ? WHERE id = ?', ['working', now, agent.id]);
 
     // ── Audit events ────────────────────────────────────────────────────────
+    // DISPATCH-LAG (2026-08-27): these rows used to be stamped with `now` — the
+    // timestamp captured at the TOP of autoDispatchTask, before ~875 lines of
+    // pre-claim work (SOP resolution, persona heal/rescore, audience gate, skill
+    // matching, gateway connect). On a slow gateway that entry stamp is minutes
+    // stale by the time the dispatch actually lands, so the audit trail LIED
+    // about when the dispatch happened: task f4a2de9a showed `task_dispatched`
+    // at 18:34:00.064Z and the in_progress flip at 18:42:58.787Z — an apparent
+    // 9-minute "dispatched → working" lag, when in truth the CAS claim, the
+    // chat.send and this row all happened within ~600ms at 18:42:58–59 and the
+    // dispatched row merely carried a 9-minute-old stamp. It even ordered the
+    // dispatch BEFORE the status flip that actually preceded it. Stamp these
+    // rows when they are WRITTEN so latency read off the trail is real.
+    // (`now` is deliberately left alone for the status/`updated_at` columns —
+    // those feed sweep eligibility windows and are not this fix's business.)
+    const dispatchedAt = new Date().toISOString();
     run(
       `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
        VALUES (?, ?, ?, ?, ?, ?)`,
@@ -1841,7 +1874,7 @@ If you need help or clarification, ask the orchestrator.`;
         agent.id,
         task.id,
         `[${context}] Task "${task.title}" auto-dispatched to ${agent.name}`,
-        now,
+        dispatchedAt,
       ],
     );
 
@@ -1854,7 +1887,7 @@ If you need help or clarification, ask the orchestrator.`;
         agent.id,
         'status_changed',
         `[${context}] Task auto-dispatched to ${agent.name} — Agent is now working on this task`,
-        now,
+        dispatchedAt,
       ],
     );
 

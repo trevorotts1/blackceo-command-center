@@ -23,6 +23,7 @@ import {
   resolveAgentRuntimeModel,
   modelsMatch,
   recordModelSkewEvent,
+  reconcileTaskModelRecord,
   type RuntimeModelResolution,
 } from '@/lib/runtime-model';
 import type { SOP, SOPStep } from '@/lib/sops';
@@ -839,6 +840,24 @@ If you need help or clarification, ask the orchestrator.`;
         extraColumns: { model_id: runtimeModel || settings.model || null },
       });
 
+      // Runtime beat the recorded intent: reconcile the paperwork so the record
+      // itself says runtime won, instead of leaving a stale intended model behind
+      // for the next dispatch to re-detect and re-alarm on.
+      if (skew) {
+        reconcileTaskModelRecord({
+          taskId: id,
+          agentId: agent.id,
+          intended: intendedModel,
+          runtime: runtimeModel,
+          detail: {
+            source: runtimeResolved.source,
+            config_agent_id: runtimeResolved.configAgentId,
+            model_source: settings.modelSource,
+            manual_dispatch: true,
+          },
+        });
+      }
+
       // Broadcast task update
       const updatedTask = queryOne<Task>('SELECT * FROM tasks WHERE id = ?', [id]);
       if (updatedTask) {
@@ -867,11 +886,20 @@ If you need help or clarification, ask the orchestrator.`;
       );
 
       // Log dispatch event to events table
+      // DISPATCH-LAG (2026-08-27): stamped when WRITTEN, not with `now` (captured
+      // at the top of this handler, before the gateway connect + chat.send). The
+      // stale stamp made the trail contradict itself — on task f4a2de9a the two
+      // manual dispatches logged `task_dispatched` at 18:54:12.794Z/18:54:37.814Z
+      // while the model_runtime_confirmed rows they wrote EARLIER in this same
+      // handler (recordModelSkewEvent, which stamps at write time) landed at
+      // 19:02:43/19:03:23, i.e. ~8.5 minutes "after" an event that in code runs
+      // before them. Same class of artifact as the auto-dispatch path.
+      const dispatchedAt = new Date().toISOString();
       const eventId = uuidv4();
       run(
         `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
          VALUES (?, ?, ?, ?, ?, ?)`,
-        [eventId, 'task_dispatched', agent.id, task.id, `Task "${task.title}" dispatched to ${agent.name}`, now]
+        [eventId, 'task_dispatched', agent.id, task.id, `Task "${task.title}" dispatched to ${agent.name}`, dispatchedAt]
       );
 
       // Log dispatch activity to task_activities table (for Activity tab)
@@ -879,7 +907,7 @@ If you need help or clarification, ask the orchestrator.`;
       run(
         `INSERT INTO task_activities (id, task_id, agent_id, activity_type, message, created_at)
          VALUES (?, ?, ?, ?, ?, ?)`,
-        [activityId, task.id, agent.id, 'status_changed', `Task dispatched to ${agent.name} - Agent is now working on this task`, now]
+        [activityId, task.id, agent.id, 'status_changed', `Task dispatched to ${agent.name} - Agent is now working on this task`, dispatchedAt]
       );
 
       return NextResponse.json({
