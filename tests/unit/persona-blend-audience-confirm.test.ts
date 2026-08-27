@@ -18,7 +18,7 @@
  *      within the deadline → HOLD; pending past the deadline → NEVER-NAKED
  *      house-voice release (hold:false, state deadline_fallback).
  *
- *   D. Side effects — holdForAudienceConfirm surfaces the operator ONCE (firstHold),
+ *   D. Side effects — holdForAudienceConfirm surfaces the operator and requester ONCE (firstHold),
  *      markAudienceDeadlineFallback flips + records once, confirmTaskAudience flips
  *      to 'confirmed' + mirrors source='operator_confirmed'.
  *
@@ -57,6 +57,9 @@ let holdForAudienceConfirm: TasksModule['holdForAudienceConfirm'];
 let markAudienceDeadlineFallback: TasksModule['markAudienceDeadlineFallback'];
 let confirmTaskAudience: TasksModule['confirmTaskAudience'];
 let AUDIENCE_CONFIRM_DEADLINE_MS: TasksModule['AUDIENCE_CONFIRM_DEADLINE_MS'];
+
+type TrustEngineModule = typeof import('../../src/lib/jobs/trust-engine');
+let sendRequesterAudienceAsk: TrustEngineModule['sendRequesterAudienceAsk'];
 
 let counter = 0;
 const nextId = (p: string) => `${p}-${++counter}`;
@@ -108,6 +111,7 @@ test.before(async () => {
   markAudienceDeadlineFallback = tasks.markAudienceDeadlineFallback;
   confirmTaskAudience = tasks.confirmTaskAudience;
   AUDIENCE_CONFIRM_DEADLINE_MS = tasks.AUDIENCE_CONFIRM_DEADLINE_MS;
+  ({ sendRequesterAudienceAsk } = await import('../../src/lib/jobs/trust-engine'));
 });
 
 test.after(() => {
@@ -251,18 +255,34 @@ test('[gate] confirmed → hold:false (write proceeds)', () => {
 
 // ── D. Side effects ──────────────────────────────────────────────────────────
 
-test('[hold] surfaces the operator ONCE, defers the task, never client-spams', () => {
+test('[hold] first hold asks the requester, writes the board ask, and records Telegram delivery', () => {
   const id = nextId('hold');
   insertTask(id);
   persistPersonaBundle(id, bundle({ confirm_required: true }));
+  run('UPDATE tasks SET requester_chat_id = ? WHERE id = ?', ['551234567', id]);
 
   const first = evaluateAudienceConfirmGate(id);
   assert.equal(first.firstHold, true);
-  holdForAudienceConfirm(id, null, first);
+  const audienceAskCalls: Array<{ taskId: string; question: string }> = [];
+  holdForAudienceConfirm(id, null, first, (taskId, question) => {
+    audienceAskCalls.push({ taskId, question });
+    return 'telegram';
+  });
 
   // The task is deferred (sweeps won't hammer it).
   const t1 = queryOne<{ next_dispatch_eligible_at: string | null }>('SELECT next_dispatch_eligible_at FROM tasks WHERE id = ?', [id]);
   assert.ok(t1?.next_dispatch_eligible_at, 'held task is deferred with a poll window');
+
+  assert.deepEqual(audienceAskCalls, [{
+    taskId: id,
+    question: 'Quick question before we start building: who is this for? Tell me about the audience you want this written for.',
+  }], 'the client-safe question is routed through the trust-engine requester seam');
+  const ask = queryOne<{ ask: string | null }>('SELECT ask FROM tasks WHERE id = ?', [id]);
+  assert.equal(ask?.ask, audienceAskCalls[0].question, 'the same question is visible on the board');
+  const askEvent = queryOne<{ message: string }>(
+    "SELECT message FROM events WHERE task_id = ? AND type = 'audience_confirm_ask_sent'", [id],
+  );
+  assert.equal(askEvent?.message, 'telegram');
 
   // A single operator-facing event was written.
   let events = queryAll<{ id: string }>("SELECT id FROM events WHERE task_id = ? AND type = 'audience_confirm_pending'", [id]);
@@ -271,9 +291,72 @@ test('[hold] surfaces the operator ONCE, defers the task, never client-spams', (
   // Second hold must NOT duplicate the operator surface (firstHold=false now).
   const second = evaluateAudienceConfirmGate(id);
   assert.equal(second.firstHold, false, 'a prior pending event suppresses re-surfacing');
-  holdForAudienceConfirm(id, null, second);
+  run('UPDATE tasks SET ask = ? WHERE id = ?', ['leave this board ask alone', id]);
+  holdForAudienceConfirm(id, null, second, (taskId, question) => {
+    audienceAskCalls.push({ taskId, question });
+    return 'telegram';
+  });
   events = queryAll<{ id: string }>("SELECT id FROM events WHERE task_id = ? AND type = 'audience_confirm_pending'", [id]);
   assert.equal(events.length, 1, 'no duplicate operator surface on a repeat hold (no spam)');
+  assert.equal(audienceAskCalls.length, 1, 'repeat holds do not ask the requester again');
+  const askEvents = queryAll<{ id: string }>(
+    "SELECT id FROM events WHERE task_id = ? AND type = 'audience_confirm_ask_sent'", [id],
+  );
+  assert.equal(askEvents.length, 1, 'repeat holds do not write a second requester-ask event');
+  const askAfterRepeat = queryOne<{ ask: string | null }>('SELECT ask FROM tasks WHERE id = ?', [id]);
+  assert.equal(askAfterRepeat?.ask, 'leave this board ask alone', 'repeat holds do not rewrite the board ask');
+});
+
+test('[hold] first hold without a requester chat records no requester delivery and still succeeds', () => {
+  const id = nextId('hold-no-requester');
+  insertTask(id);
+  persistPersonaBundle(id, bundle({ confirm_required: true, resolved_audience: {
+    source: 'onboarding_icp', candidates: ['Founders'], confidence: 0.9, label: 'Founders', id: null,
+  } }));
+
+  const first = evaluateAudienceConfirmGate(id);
+  assert.equal(first.firstHold, true);
+  let audienceAskCalls = 0;
+  holdForAudienceConfirm(id, null, first, () => {
+    audienceAskCalls += 1;
+    return 'none (no requester_chat_id)';
+  });
+
+  assert.equal(audienceAskCalls, 1, 'the trust-engine seam decides that no requester delivery is possible');
+  const ask = queryOne<{ ask: string | null }>('SELECT ask FROM tasks WHERE id = ?', [id]);
+  assert.equal(
+    ask?.ask,
+    'Quick check before we start building: this will be written for Founders — is that right, or should it be for someone else?',
+  );
+  const event = queryOne<{ message: string }>(
+    "SELECT message FROM events WHERE task_id = ? AND type = 'audience_confirm_ask_sent'", [id],
+  );
+  assert.equal(event?.message, 'none (no requester_chat_id)');
+  const deferred = queryOne<{ next_dispatch_eligible_at: string | null }>(
+    'SELECT next_dispatch_eligible_at FROM tasks WHERE id = ?', [id],
+  );
+  assert.ok(deferred?.next_dispatch_eligible_at, 'the hold succeeds without a requester chat');
+});
+
+test('[hold] a throwing trust-lane notifier records send_failed truthfully', () => {
+  const id = nextId('hold-send-failure');
+  insertTask(id);
+  persistPersonaBundle(id, bundle({ confirm_required: true }));
+  run('UPDATE tasks SET requester_chat_id = ?, ask = ? WHERE id = ?', ['551234567', 'keep this existing ask', id]);
+
+  const first = evaluateAudienceConfirmGate(id);
+  holdForAudienceConfirm(id, null, first, (taskId, question) =>
+    sendRequesterAudienceAsk(taskId, question, () => {
+      throw new Error('gateway unavailable');
+    }),
+  );
+
+  const event = queryOne<{ message: string }>(
+    "SELECT message FROM events WHERE task_id = ? AND type = 'audience_confirm_ask_sent'", [id],
+  );
+  assert.equal(event?.message, 'send_failed');
+  const ask = queryOne<{ ask: string | null }>('SELECT ask FROM tasks WHERE id = ?', [id]);
+  assert.equal(ask?.ask, 'keep this existing ask', 'the audience hold never clobbers a pre-existing board ask');
 });
 
 test('[deadline] markAudienceDeadlineFallback flips state once + records a visible event', () => {

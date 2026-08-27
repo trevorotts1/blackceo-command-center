@@ -115,6 +115,49 @@ export function etaForDepartment(department: string | null | undefined): string 
   return table[department.toLowerCase()] ?? DEFAULT_ETA;
 }
 
+/** Result of the one-off, client-safe audience confirmation ask. */
+export type RequesterAudienceAskDelivery =
+  | 'telegram'
+  | 'none (no requester_chat_id)'
+  | 'send_failed';
+
+/** Injectable only to keep the audience-confirm caller hermetic in unit tests. */
+export type RequesterAudienceAskNotifier = typeof notifyTelegram;
+
+/**
+ * Send the first audience-confirmation question through the sole sanctioned
+ * requester-reporting lane. This is intentionally separate from the sweep's
+ * claim-and-send status messages: an audience question is a one-time prompt,
+ * while the caller owns its first-hold idempotency event.
+ */
+export function sendRequesterAudienceAsk(
+  taskId: string,
+  question: string,
+  notifier: RequesterAudienceAskNotifier = notifyTelegram,
+): RequesterAudienceAskDelivery {
+  try {
+    // Old installs may not yet have P1-04's requester identity columns.
+    const columns = queryAll<{ name: string }>('PRAGMA table_info(tasks)', []);
+    if (!columns.some((column) => column.name === 'requester_chat_id')) {
+      return 'none (no requester_chat_id)';
+    }
+
+    const requester = queryOne<{ requester_chat_id: string | null }>(
+      'SELECT requester_chat_id FROM tasks WHERE id = ?',
+      [taskId],
+    );
+    if (!requester?.requester_chat_id) return 'none (no requester_chat_id)';
+
+    return notifier({ chatId: requester.requester_chat_id, message: question })
+      ? 'telegram'
+      : 'send_failed';
+  } catch {
+    // The caller still writes its durable first-hold event; it must accurately
+    // record that a real requester send was attempted but did not complete.
+    return 'send_failed';
+  }
+}
+
 // ── Types ───────────────────────────────────────────────────────────────────
 
 /** The task shape the planner reasons over (a subset of the tasks row). */
@@ -681,8 +724,9 @@ export function executeSends(plans: PlannedSend[], ctx: ExecuteContext): Execute
     // below and its smell would NEVER reach the operator lane. Handle it
     // first, unconditionally: escalate, count as skipped (nothing was ever
     // going to be claimed or sent), and move on — never attempt dispatch.
-    if (plan.heldForMissingPostflight.length > 0) {
-      for (const held of plan.heldForMissingPostflight) {
+    const heldForMissingPostflight = plan.heldForMissingPostflight ?? [];
+    if (heldForMissingPostflight.length > 0) {
+      for (const held of heldForMissingPostflight) {
         escalate(`[trust-engine] completion_notification_held: ${held.detail}`);
       }
       skipped += 1;
