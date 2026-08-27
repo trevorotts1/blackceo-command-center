@@ -38,19 +38,35 @@
  * (the directive sanctions it; MOVE-IN-SILENCE governs operator internals). All
  * sends go through the box's OWN OpenClaw gateway (notify.ts notifyTelegram —
  * `openclaw message send`), NEVER a direct api.telegram.org call. A trust message
- * is only ever sent to a task's captured `requester_chat_id`; it is never routed
+ * is only ever sent to a task's own CAPTURED REQUESTER ADDRESS; it is never routed
  * to a SYSTEM/operator audience. The done-without-deliverable QC smell is the one
  * thing that goes to the OPERATOR lane (notifySystem) — never to the client.
+ *
+ * WEBCHAT-REQUESTER-ROUTE (2026-08-27) — there are now TWO requester addresses,
+ * resolved in ONE place (resolveRequesterRoute) with one precedence rule:
+ *
+ *   1. `requester_chat_id`      -> notifyTelegram (or the ceo-chat transcript)
+ *   2. `requester_session_key`  -> notifySession, the gateway `sessions.send`
+ *                                  lane, for a requester who came in over
+ *                                  WEBCHAT and therefore has NO chat id at all
+ *
+ * The chat id always wins, so no task that reports today changes lane. This is
+ * NOT a new direct-to-client send path in the sense the U95 invariant guards
+ * against: it is the same engine, the same claim-then-dispatch outbox, the same
+ * doctrine — only the address differs. Every telemetry event names the route
+ * that carried it (`trust_ack(chat)` / `trust_ack(session)`).
  */
 
 import { queryAll, queryOne, run, transaction } from '@/lib/db';
 import {
   notifyTelegram,
+  notifySession,
   notifySystem,
   recordUndeliverable,
   resolveOperatorChatId,
   resolveOwnerChatId,
 } from '@/lib/notify';
+import { REQUESTER_SESSION_CHANNEL } from '@/lib/requester-session';
 import { v4 as uuidv4 } from 'uuid';
 import { BACKLOG_COLUMN_SUBTITLE } from '@/lib/board-labels';
 import { CEO_CHAT_CHANNEL } from '@/lib/ceo-chat/config';
@@ -115,47 +131,127 @@ export function etaForDepartment(department: string | null | undefined): string 
   return table[department.toLowerCase()] ?? DEFAULT_ETA;
 }
 
-/** Result of the one-off, client-safe audience confirmation ask. */
+/**
+ * Result of the one-off, client-safe audience confirmation ask. The caller
+ * (`holdForAudienceConfirm`) writes this string VERBATIM as the
+ * `audience_confirm_ask_sent` event message, so the value is the durable
+ * record of WHICH ROUTE delivered the ask — 'telegram' vs 'session'.
+ *
+ * `'none (no requester_chat_id)'` keeps its exact historical spelling: it is
+ * already written into events rows on live boxes, and rewording it would make
+ * the old rows and the new ones look like different outcomes. It now means
+ * "no requester address of EITHER kind".
+ */
 export type RequesterAudienceAskDelivery =
   | 'telegram'
+  | 'session'
   | 'none (no requester_chat_id)'
   | 'send_failed';
 
 /** Injectable only to keep the audience-confirm caller hermetic in unit tests. */
 export type RequesterAudienceAskNotifier = typeof notifyTelegram;
+/** The session-lane counterpart, injectable for the same reason. */
+export type RequesterAudienceAskSessionNotifier = typeof notifySession;
 
 /**
  * Send the first audience-confirmation question through the sole sanctioned
  * requester-reporting lane. This is intentionally separate from the sweep's
  * claim-and-send status messages: an audience question is a one-time prompt,
  * while the caller owns its first-hold idempotency event.
+ *
+ * WEBCHAT-REQUESTER-ROUTE: the chat id still WINS when present (no existing
+ * task changes lane). Only when there is no chat id does this fall through to
+ * the gateway session key — the case that previously returned 'none' and left
+ * a webchat requester waiting on a question that was never asked.
  */
 export function sendRequesterAudienceAsk(
   taskId: string,
   question: string,
   notifier: RequesterAudienceAskNotifier = notifyTelegram,
+  sessionNotifier: RequesterAudienceAskSessionNotifier = notifySession,
 ): RequesterAudienceAskDelivery {
   try {
     // Old installs may not yet have P1-04's requester identity columns.
     const columns = queryAll<{ name: string }>('PRAGMA table_info(tasks)', []);
-    if (!columns.some((column) => column.name === 'requester_chat_id')) {
+    const columnNames = new Set(columns.map((column) => column.name));
+    if (!columnNames.has('requester_chat_id')) {
       return 'none (no requester_chat_id)';
     }
+    // A box that has not yet run migration 127 has no session column to read;
+    // selecting it would throw and cost the ask its (still working) chat lane.
+    const hasSessionColumn = columnNames.has('requester_session_key');
 
-    const requester = queryOne<{ requester_chat_id: string | null }>(
-      'SELECT requester_chat_id FROM tasks WHERE id = ?',
+    const requester = queryOne<{
+      requester_chat_id: string | null;
+      requester_session_key: string | null;
+    }>(
+      hasSessionColumn
+        ? 'SELECT requester_chat_id, requester_session_key FROM tasks WHERE id = ?'
+        : 'SELECT requester_chat_id, NULL AS requester_session_key FROM tasks WHERE id = ?',
       [taskId],
     );
-    if (!requester?.requester_chat_id) return 'none (no requester_chat_id)';
 
-    return notifier({ chatId: requester.requester_chat_id, message: question })
-      ? 'telegram'
-      : 'send_failed';
+    if (requester?.requester_chat_id) {
+      return notifier({ chatId: requester.requester_chat_id, message: question })
+        ? 'telegram'
+        : 'send_failed';
+    }
+
+    if (requester?.requester_session_key) {
+      return sessionNotifier({ sessionKey: requester.requester_session_key, message: question })
+        ? 'session'
+        : 'send_failed';
+    }
+
+    return 'none (no requester_chat_id)';
   } catch {
     // The caller still writes its durable first-hold event; it must accurately
     // record that a real requester send was attempted but did not complete.
     return 'send_failed';
   }
+}
+
+/**
+ * The resolved address for one task's requester, and the lane that reaches it.
+ *
+ * ONE precedence rule, applied in ONE place, so the planner, the audience ask
+ * and the candidate query can never disagree about where a client is being
+ * reported to: `requester_chat_id` wins whenever it is set; otherwise the
+ * gateway session key. Null when neither exists — that task is genuinely
+ * unreachable and is never reported on, exactly as before.
+ */
+export interface RequesterRoute {
+  /** The address to deliver to (a chat id, or a gateway session key). */
+  address: string;
+  /** How to reach it: the stored channel, or REQUESTER_SESSION_CHANNEL. */
+  channel: string;
+  /** Short lane name recorded in the telemetry event so the route is durable. */
+  route: 'chat' | 'session';
+}
+
+export function resolveRequesterRoute(task: {
+  requester_channel: string | null;
+  requester_chat_id: string | null;
+  requester_session_key?: string | null;
+}): RequesterRoute | null {
+  if (task.requester_chat_id) {
+    return {
+      address: task.requester_chat_id,
+      channel: task.requester_channel || 'telegram',
+      route: 'chat',
+    };
+  }
+  if (task.requester_session_key) {
+    // The stored requester_channel is deliberately ignored here: a webchat task
+    // carries no channel (ingest only stamps one alongside a chat id), and the
+    // session key names its own transport.
+    return {
+      address: task.requester_session_key,
+      channel: REQUESTER_SESSION_CHANNEL,
+      route: 'session',
+    };
+  }
+  return null;
 }
 
 // ── Types ───────────────────────────────────────────────────────────────────
@@ -170,6 +266,8 @@ export interface TrustTaskRow {
   created_at: string;
   requester_channel: string | null;
   requester_chat_id: string | null;
+  /** WEBCHAT-REQUESTER-ROUTE: the fallback address when there is no chat id. */
+  requester_session_key: string | null;
   ack_sent_at: string | null;
   progress_last_sent_at: string | null;
   completion_sent_at: string | null;
@@ -357,11 +455,20 @@ export function planSends(tasks: TrustTaskRow[], ctx: PlanContext): PlannedSend[
   const perTask: PlannedSend[] = [];
 
   for (const task of candidates) {
-    const chatId = task.requester_chat_id;
-    if (!chatId) continue; // never reported on
+    // WEBCHAT-REQUESTER-ROUTE: one resolver decides the address AND the lane.
+    // `chatId` keeps its name because it is still PlannedSend.chatId — the
+    // address field — it is simply no longer always a chat id.
+    const route = resolveRequesterRoute(task);
+    if (!route) continue; // no address of either kind => never reported on
+    const chatId = route.address;
     // NEVER target a SYSTEM/operator-internal audience with a client trust message.
     if (ctx.blockedChatIds?.has(chatId)) continue;
-    const channel = task.requester_channel || 'telegram';
+    const channel = route.channel;
+    // Stamped into every telemetry event this task produces, so the operator
+    // trail says WHICH route carried the message, not just that one went. The
+    // parenthesized slot is the existing convention (`trust_progress(blocked)`)
+    // and `extractClientMessage` already strips it, so nothing leaks to the UI.
+    const via = route.route;
 
     // ── Message 3 — DONE (highest priority: a finished task's client is waiting) ──
     if (task.status === 'done' && !task.completion_sent_at) {
@@ -415,7 +522,7 @@ export function planSends(tasks: TrustTaskRow[], ctx: PlanContext): PlannedSend[
             guardColumn: 'completion_sent_at',
             extraSets,
             eventType: 'trust_done',
-            eventMessage: `trust_done -> ${chatId}: ${message}`,
+            eventMessage: `trust_done(${via}) -> ${chatId}: ${message}`,
           },
         ],
         doneWithoutDeliverable: deliverable ? [] : [{ taskId: task.id, title: task.title }],
@@ -447,7 +554,7 @@ export function planSends(tasks: TrustTaskRow[], ctx: PlanContext): PlannedSend[
               guardColumn: 'blocked_notice_sent_at',
               extraSets: {},
               eventType: 'trust_progress',
-              eventMessage: `trust_progress(blocked) -> ${chatId}: ${message}`,
+              eventMessage: `trust_progress(blocked,${via}) -> ${chatId}: ${message}`,
             },
           ],
           doneWithoutDeliverable: [],
@@ -481,7 +588,7 @@ export function planSends(tasks: TrustTaskRow[], ctx: PlanContext): PlannedSend[
                 guardColumn: 'phase_progress_sent_at',
                 extraSets: { last_reported_phase_label: phase.label },
                 eventType: 'trust_phase_progress',
-                eventMessage: `trust_phase_progress -> ${chatId}: ${message}`,
+                eventMessage: `trust_phase_progress(${via}) -> ${chatId}: ${message}`,
               },
             ],
             doneWithoutDeliverable: [],
@@ -506,7 +613,7 @@ export function planSends(tasks: TrustTaskRow[], ctx: PlanContext): PlannedSend[
             guardColumn: 'progress_last_sent_at',
             extraSets: { eta_estimate: eta },
             eventType: 'trust_progress',
-            eventMessage: `trust_progress -> ${chatId}: ${message}`,
+            eventMessage: `trust_progress(${via}) -> ${chatId}: ${message}`,
           },
         ],
         doneWithoutDeliverable: [],
@@ -533,7 +640,7 @@ export function planSends(tasks: TrustTaskRow[], ctx: PlanContext): PlannedSend[
               guardColumn: 'ack_sent_at',
               extraSets: {},
               eventType: 'trust_ack',
-              eventMessage: `trust_ack -> ${chatId}: ${message}`,
+              eventMessage: `trust_ack(${via}) -> ${chatId}: ${message}`,
             },
           ],
           doneWithoutDeliverable: [],
@@ -643,6 +750,13 @@ function defaultTrustSend(plan: PlannedSend): boolean {
       console.warn('[trust-engine] ceo-chat status broadcast failed (non-fatal):', (err as Error).message);
     }
     return true;
+  }
+  // WEBCHAT-REQUESTER-ROUTE: a requester with no chat id is addressed by the
+  // gateway session key the planner resolved into plan.chatId. Same
+  // fire-and-forget contract as the Telegram lane (true = dispatched), so
+  // executeSends's claim/release logic needs no special case.
+  if (plan.channel === REQUESTER_SESSION_CHANNEL) {
+    return notifySession({ sessionKey: plan.chatId, message: plan.message });
   }
   return notifyTelegram({ chatId: plan.chatId, message: plan.message });
 }
@@ -833,16 +947,41 @@ export function executeSends(plans: PlannedSend[], ctx: ExecuteContext): Execute
 
 // ── DB glue: load candidates + deliverable lookup ─────────────────────────────
 
-/** Columns the sweep needs, joined to the assigned agent's display name. */
-const CANDIDATE_SQL = `
+/**
+ * Columns the sweep needs, joined to the assigned agent's display name.
+ *
+ * WEBCHAT-REQUESTER-ROUTE: the WHERE now ORs over BOTH requester addresses —
+ * a task addressable only by gateway session key was previously filtered out
+ * here, which is why nothing downstream could ever reach a webchat requester
+ * no matter what the planner did.
+ *
+ * `sessionExpr` is 't.requester_session_key' once migration 127 has run and the
+ * literal NULL before that. A box mid-upgrade (the schema self-heal defers some
+ * migrations) would otherwise throw "no such column" out of the 2-minute sweep
+ * and take the WHOLE report-back loop down — including the Telegram lane, which
+ * has nothing to do with this change. Degrading to the old behaviour is the
+ * only acceptable failure here.
+ */
+function candidateSql(): string {
+  let sessionExpr = 'NULL';
+  try {
+    const columns = queryAll<{ name: string }>('PRAGMA table_info(tasks)', []);
+    if (columns.some((column) => column.name === 'requester_session_key')) {
+      sessionExpr = 't.requester_session_key';
+    }
+  } catch {
+    // Unreadable schema — keep the pre-127 shape rather than risk the sweep.
+  }
+  return `
   SELECT t.id, t.title, t.status, t.department, a.name AS assigned_agent_name,
          t.created_at, t.requester_channel, t.requester_chat_id,
+         ${sessionExpr} AS requester_session_key,
          t.ack_sent_at, t.progress_last_sent_at, t.completion_sent_at,
          t.block_audience, t.block_needs, t.blocked_notice_sent_at, t.phase_progress_sent_at, t.last_reported_phase_label,
          t.process_certificate_sha, t.source
     FROM tasks t
     LEFT JOIN agents a ON t.assigned_agent_id = a.id
-   WHERE t.requester_chat_id IS NOT NULL
+   WHERE (t.requester_chat_id IS NOT NULL OR ${sessionExpr} IS NOT NULL)
      AND t.archived_at IS NULL
      AND (
        t.ack_sent_at IS NULL
@@ -854,9 +993,11 @@ const CANDIDATE_SQL = `
        OR (t.status = 'in_progress' AND t.progress_last_sent_at IS NOT NULL)
      )
 `;
+}
 
 export function loadCandidateTasks(taskId?: string): TrustTaskRow[] {
   const blockedCutoff = new Date(Date.now() - BLOCKED_RENOTIFY_INTERVAL_MS).toISOString();
+  const CANDIDATE_SQL = candidateSql();
   if (taskId) {
     const row = queryOne<TrustTaskRow>(`${CANDIDATE_SQL} AND t.id = ?`, [blockedCutoff, taskId]);
     return row ? [row] : [];

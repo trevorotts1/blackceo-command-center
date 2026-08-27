@@ -23,6 +23,8 @@ function mkTask(over: Partial<TrustTaskRow>): TrustTaskRow {
     created_at: over.created_at ?? '2026-07-01T00:00:00.000Z',
     requester_channel: over.requester_channel ?? 'telegram',
     requester_chat_id: 'requester_chat_id' in over ? over.requester_chat_id : '12345',
+    requester_session_key:
+      'requester_session_key' in over ? (over.requester_session_key ?? null) : null,
     ack_sent_at: over.ack_sent_at ?? null,
     progress_last_sent_at: over.progress_last_sent_at ?? null,
     completion_sent_at: over.completion_sent_at ?? null,

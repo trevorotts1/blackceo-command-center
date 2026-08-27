@@ -48,6 +48,8 @@ function mkTask(over: Partial<import('../../src/lib/jobs/trust-engine').TrustTas
     created_at: over.created_at ?? new Date().toISOString(),
     requester_channel: 'requester_channel' in over ? (over.requester_channel ?? null) : 'telegram',
     requester_chat_id: 'requester_chat_id' in over ? (over.requester_chat_id ?? null) : '12345',
+    requester_session_key:
+      'requester_session_key' in over ? (over.requester_session_key ?? null) : null,
     ack_sent_at: over.ack_sent_at ?? null,
     progress_last_sent_at: over.progress_last_sent_at ?? null,
     completion_sent_at: over.completion_sent_at ?? null,

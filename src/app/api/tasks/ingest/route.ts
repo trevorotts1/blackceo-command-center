@@ -8,6 +8,9 @@ import { routeTask } from '@/lib/routing/department-router';
 import type { TaskPriority } from '@/lib/types';
 import { notifyOwnerSchemaError } from '@/lib/owner-reports';
 import { getSelfClient } from '@/lib/clients';
+// WEBCHAT-REQUESTER-ROUTE — validates a candidate gateway session key at the
+// front door so only an ADDRESSABLE key is ever stamped as a requester address.
+import { normalizeRequesterSessionKey } from '@/lib/requester-session';
 // WI-15b (D1 Option B — NESTED subtasks) — parent_task_id validation reuses
 // the SAME company-scope convention PR #262 established for
 // /api/presentations/children and /api/presentations/[taskId]/phases, so a
@@ -84,6 +87,10 @@ let selfHealState: 'idle' | 'running' | 'done' = 'idle';
  *   "persona": "Candace",                                    // optional; resolves the workspace by name
  *   "target_agent": "Candace",                               // optional; owner-direct specialist pin (alias: specialist)
  *   "external_session_id": "agent:main:telegram:direct:123",// optional provenance
+ *   "requester_session_key": "agent:main:webchat-42",       // optional; the gateway
+ *                                                            // session to report back
+ *                                                            // into when there is no
+ *                                                            // requester_chat_id
  *   "idempotency_key": "sha256(...)",                        // optional; primary dedupe key
  *   "parent_task_id": "<uuid>"                                // optional; WI-15b — creates a per-phase
  *                                                              // CHILD card under this parent deck-run
@@ -153,6 +160,17 @@ interface IngestPayload {
    */
   requester_channel?: unknown;
   requester_chat_id?: unknown;
+  /**
+   * WEBCHAT-REQUESTER-ROUTE — the OpenClaw gateway session key of the
+   * conversation this request came from (`agent:<agentId>:<peer>`). A WEBCHAT
+   * requester has no chat id at all, so this is the only address the trust
+   * engine can reach them on. Captured whenever it is available, regardless of
+   * channel or source; `external_session_id` is honoured as a fallback source
+   * for the same value (it is the field already documented to carry a session
+   * key) but ONLY when it actually holds an addressable gateway key — its live
+   * traffic is mostly producer run ids, which are provenance, not addresses.
+   */
+  requester_session_key?: unknown;
   /**
    * B-U7 (ingest parity) — OPTIONAL producer-supplied persona-bundle identity,
    * the SAME field vocabulary cc_board.py's report_persona_used posts back
@@ -584,6 +602,25 @@ export async function POST(request: NextRequest) {
           : 'telegram')
       : undefined;
 
+    // WEBCHAT-REQUESTER-ROUTE — the SECOND requester address, captured
+    // unconditionally: no channel gate, no source gate, and no dependency on
+    // requester_chat_id. A webchat request has no chat id, which is exactly the
+    // case this exists for; a Telegram request that happens to carry a session
+    // key keeps both (the chat id still wins at delivery).
+    //
+    // An explicit `requester_session_key` is authoritative. Otherwise we read
+    // `external_session_id` — the field whose own documentation (above) shows a
+    // session key — but only through normalizeRequesterSessionKey, so the
+    // producer run ids that dominate that field in live traffic
+    // (`pres-mta0y199-qj40j3`, `<task-id>:P4-COPY`) are NOT mistaken for
+    // addresses. Storing one of those would hand the trust engine a session the
+    // gateway cannot resolve, converting today's honest silence into a
+    // guaranteed failed send.
+    const requesterSessionKey =
+      normalizeRequesterSessionKey(body.requester_session_key) ??
+      normalizeRequesterSessionKey(externalSessionId) ??
+      undefined;
+
     const priorityRaw = typeof body.priority === 'string' ? body.priority.trim() : undefined;
     const priority: TaskPriority | undefined =
       priorityRaw && VALID_PRIORITIES.has(priorityRaw as TaskPriority)
@@ -833,6 +870,9 @@ export async function POST(request: NextRequest) {
         // P1-04: the originating client channel so the trust engine reports back.
         requester_channel: requesterChannel ?? null,
         requester_chat_id: requesterChatId ?? null,
+        // WEBCHAT-REQUESTER-ROUTE: the fallback address the trust engine uses
+        // when there is no chat id to report into.
+        requester_session_key: requesterSessionKey ?? null,
         // U94 (X.2.3) — this ingest call declared itself human-initiated by
         // supplying requester_chat_id; tag it as the "Telegram/CEO-chat
         // ingest" enumerated door for the trust-coverage health metric
@@ -871,7 +911,28 @@ export async function POST(request: NextRequest) {
     // historical/non-live, so it is the only one exempted here. This does
     // NOT block task creation — it makes the gap queryable in events/
     // task_activities instead of invisible.
-    if (!requesterChatId && source !== 'backfill') {
+    //
+    // WEBCHAT-REQUESTER-ROUTE: a task with NO chat id but a captured session
+    // key is NOT unreachable — the trust engine addresses it over the gateway
+    // session instead. Warning on it would be false, and silence would hide
+    // which lane a client is being reported on, so it gets its own queryable
+    // event naming the route that closed the gap.
+    if (!requesterChatId && requesterSessionKey) {
+      const sessionRouteMsg =
+        `[requester_session_route_captured] Task "${task.title}" (${task.id}) was ingested with ` +
+        `source=${source ?? '(none)'} and NO requester chat id, but carries an addressable gateway ` +
+        `session key — the trust engine will report ACK/PROGRESS/DONE into that session instead of ` +
+        `a chat. This is the webchat lane, not a gap.`;
+      try {
+        run(
+          `INSERT INTO events (id, type, task_id, message, created_at)
+           VALUES (?, 'requester_session_route_captured', ?, ?, ?)`,
+          [uuidv4(), task.id, sessionRouteMsg, new Date().toISOString()],
+        );
+      } catch (writeErr) {
+        console.error('[INGEST] requester_session_route_captured event write failed (non-fatal):', writeErr);
+      }
+    } else if (!requesterChatId && source !== 'backfill') {
       const missingChatIdMsg =
         `[requester_chat_id_missing] Task "${task.title}" (${task.id}) was ingested with ` +
         `source=${source ?? '(none)'} but no requester_chat_id — this task has no way to reach ` +
@@ -1018,6 +1079,8 @@ export async function GET() {
       parent_task_id: 'string (optional; WI-15b — attaches this task as a per-phase CHILD of the named parent deck-run task. Validated: parent must exist AND be in this box\'s active company scope, else 400.)',
       requester_channel: 'string (optional; P1-04 trust engine — originating client channel, default telegram when requester_chat_id is present)',
       requester_chat_id: 'string (optional; P1-04 trust engine — client chat id the report-back loop acks/progress/done into)',
+      requester_session_key:
+        'string (optional; WEBCHAT-REQUESTER-ROUTE — OpenClaw gateway session key `agent:<agentId>:<peer>` of the originating conversation; the fallback address the report-back loop uses when there is no chat id. Falls back to external_session_id when that carries a real gateway key)',
       voice_persona_id: 'string (optional; B-U7 ingest parity — producer-resolved VOICE persona id. GATES the group below: pins directly instead of a fresh selector match; absent = async selector pin, unchanged)',
       topic_persona_id: 'string (optional; B-U7 — producer-resolved topic/craft-hint persona id. Ignored unless voice_persona_id is also present)',
       task_persona_ids: 'string[] (optional; B-U7 — producer-resolved task-slot persona ids. Ignored unless voice_persona_id is also present)',

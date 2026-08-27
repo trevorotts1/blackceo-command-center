@@ -761,6 +761,90 @@ export function notifyTelegram(opts: {
 }
 
 /**
+ * How long the session lane waits for the gateway connect before giving up.
+ * Mirrors ceo-chat/gateway.ts's CONNECT_TIMEOUT_MS default and shares its env
+ * knob so a box that tunes one tunes both.
+ */
+const SESSION_CONNECT_TIMEOUT_MS = Number(process.env.CEO_CHAT_CONNECT_TIMEOUT_MS || 8_000);
+
+/**
+ * Send a message INTO an OpenClaw gateway session, addressed by session key.
+ *
+ * ── WHY THIS EXISTS ────────────────────────────────────────────────────────
+ * `notifyTelegram` can only reach someone who has a Telegram chat id. A
+ * requester who came in over WEBCHAT has none — they exist only as a live
+ * gateway session — so every lane that wanted to reach them fell back to an
+ * operator channel or to silence. This is the second lane, and the ONLY thing
+ * it does differently is the address.
+ *
+ * ── TRANSPORT: REUSED, NOT INVENTED ────────────────────────────────────────
+ * Exactly the mechanism `src/lib/ceo-chat/gateway.ts` already drives for every
+ * "My AI CEO" turn: `getOpenClawClient()` on the box's own loopback gateway,
+ * then `sessions.create` (idempotent per key) followed by `sessions.send`
+ * ({ key, message } — `message`, not `content`, is the required field on this
+ * gateway version). No new transport, no new auth, no new URL: the same
+ * OPENCLAW_GATEWAY_URL default and the same connect-with-auto-pair handshake.
+ *
+ * ── CONTRACT: identical to notifyTelegram's, deliberately ──────────────────
+ * The requester lanes that call this (`trust-engine.ts`) are synchronous by
+ * signature, so this is FIRE-AND-FORGET in the same sense notifyTelegram is:
+ * it starts the work and returns immediately. `true` means DISPATCHED (a real
+ * session key, sends not suppressed) — "attempted", never "confirmed
+ * delivered" — exactly what notifyTelegram's own execFile path promises. The
+ * async chain carries its own terminal `.catch()`, so a gateway that is down
+ * logs and dies there; it can never surface as an unhandled rejection that
+ * takes the process with it. Never throws.
+ *
+ * SAFETY-01 parity: gated on the SAME `ownerSendsSuppressed()` choke point as
+ * every Telegram send, so no test run can reach a live gateway session either.
+ */
+export function notifySession(opts: {
+  sessionKey: string;
+  message: string;
+}): boolean {
+  if (ownerSendsSuppressed()) {
+    return false;
+  }
+  const sessionKey = (opts.sessionKey ?? '').trim();
+  if (!sessionKey) return false;
+
+  // Dynamic import: the gateway client pulls in a WebSocket stack, and this
+  // module is imported by nearly everything. Loading it lazily keeps that cost
+  // (and any module-level side effect) on the one path that actually sends —
+  // the same reason gateway.ts imports it inside probe()/forward().
+  void (async () => {
+    const { getOpenClawClient } = await import('@/lib/openclaw/client');
+    const client = getOpenClawClient({
+      id: '__self__',
+      url: process.env.OPENCLAW_GATEWAY_URL || 'ws://127.0.0.1:18789',
+    });
+    if (!client.isConnected()) {
+      await Promise.race([
+        client.connectWithAutoPair(),
+        new Promise((_, reject) =>
+          setTimeout(
+            () => reject(new Error(`gateway connect timed out after ${SESSION_CONNECT_TIMEOUT_MS}ms`)),
+            SESSION_CONNECT_TIMEOUT_MS,
+          ),
+        ),
+      ]);
+    }
+    // Idempotent per key — a repeat send to the same session reuses the same
+    // gateway-side thread rather than forking a new one.
+    await client.call('sessions.create', { key: sessionKey });
+    await client.call('sessions.send', { key: sessionKey, message: opts.message });
+  })().catch((err: unknown) => {
+    console.error(
+      '[notify] gateway session send failed (sessionKey=%s): %s',
+      sessionKey,
+      err instanceof Error ? err.message : String(err),
+    );
+  });
+
+  return true;
+}
+
+/**
  * ── SAFETY-04: the UNDELIVERABLE escalation, de-fanged ───────────────────────
  *
  * KEEP the escalation (MSG-07 exists because ~501 alerts were once silently
