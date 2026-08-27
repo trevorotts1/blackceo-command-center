@@ -63,7 +63,7 @@
  */
 
 import { queryAll, queryOne, sqlTime, timeNow } from '@/lib/db';
-import { runQCOnReview, blockTaskForQC } from '@/lib/qc-scorer';
+import { runQCOnReview, blockTaskForQC, classifyQCBlockAudience } from '@/lib/qc-scorer';
 
 /**
  * How many consecutive IDENTICAL `llm` QC results (same score, passed,
@@ -97,7 +97,7 @@ export function detectIdenticalQCResultLoop(
   try {
     const rows = queryAll<QCResultLoopRow>(
       `SELECT score, passed, scoring_path FROM task_qc_results
-       WHERE task_id = ?
+       WHERE task_id = ? AND passed = 0
        ORDER BY scored_at DESC, id DESC
        LIMIT ?`,
       [taskId, threshold],
@@ -116,7 +116,8 @@ export function detectIdenticalQCResultLoop(
 
 /**
  * A task whose last N QC results are identical cannot be fixed by re-scoring
- * it again — block it with one loud SYSTEM-audience escalation instead.
+ * it again — block it for the same OWNER/SYSTEM audience classification used
+ * by the QC reroute-cap path instead.
  * Returns true only when the block actually landed (false on a lost CAS race,
  * in which case the caller should still skip re-scoring this tick).
  */
@@ -131,6 +132,10 @@ async function handleQCResultLoopDetected(
     [taskId],
   );
   const summary = `identical result ${threshold}+ times in a row (score ${loop.score.toFixed(1)}/10, passed=${loop.passed}, path=${loop.scoring_path})`;
+  const audience = classifyQCBlockAudience([summary]);
+  const needs = audience === 'SYSTEM'
+    ? `System fix required: QC has produced the ${summary} without the task ever advancing. Investigate the scorer/routing for this task before re-enabling scoring.`
+    : `Owner action required: QC has produced the ${summary} without the task ever advancing. Reply here to unblock or reassign.`;
 
   return blockTaskForQC({
     taskId,
@@ -139,11 +144,11 @@ async function handleQCResultLoopDetected(
     fromStatus: 'review',
     actor: 'qc-review-sweep',
     attempts: null, // distinct guard from the qc-scorer reroute cap — leave it untouched
-    gaps: [],
-    needs: `System fix required: QC has produced the ${summary} without the task ever advancing. Investigate the scorer/routing for this task before re-enabling scoring.`,
-    audience: 'SYSTEM',
+    gaps: [summary],
+    needs,
+    audience,
     blockReason: `qc_result_loop_detected: ${summary}`,
-    timelineEventMessage: `[QC-LOOP-BLOCKED] Task "${taskTitle}" re-scored ${threshold}+ times with an IDENTICAL result (score ${loop.score.toFixed(1)}/10, passed=${loop.passed}, path=${loop.scoring_path}) — QC re-scoring is stuck. Blocked for system review.`,
+    timelineEventMessage: `[QC-LOOP-BLOCKED] Task "${taskTitle}" re-scored ${threshold}+ times with an IDENTICAL result (score ${loop.score.toFixed(1)}/10, passed=${loop.passed}, path=${loop.scoring_path}) — QC re-scoring is stuck. Blocked for ${audience === 'SYSTEM' ? 'system' : 'owner'} review.`,
     escalationMessage: `[QC-LOOP-DETECTED] "${taskTitle}" has been re-scored ${threshold}+ times with an IDENTICAL result (score ${loop.score.toFixed(1)}/10, passed=${loop.passed}, path=${loop.scoring_path}) and never advanced. This is a QC loop — investigate the scorer output / routing for this task before clearing the block.`,
   });
 }

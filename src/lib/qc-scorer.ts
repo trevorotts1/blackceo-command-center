@@ -211,12 +211,19 @@ export interface BlockTaskForQCParams {
   audience: 'OWNER' | 'SYSTEM';
   /** Short machine/human block_reason column value. */
   blockReason: string;
+  /**
+   * Full human-readable audit note for the transition reason and description.
+   * Defaults to blockReason when the caller has no richer context.
+   */
+  auditNote?: string;
   /** Board-timeline `task_status_changed` event text. */
   timelineEventMessage: string;
   /** SYSTEM audience: qc_escalation event text (defaults to timelineEventMessage). */
   escalationMessage?: string;
   /** OWNER audience: notifyOwner() text (defaults to timelineEventMessage). */
   ownerNotifyMessage?: string;
+  /** OWNER audience: optional CEO-attributed qc_review event retained by the QC cap path. */
+  ownerReviewEventMessage?: string;
 }
 
 /**
@@ -236,9 +243,10 @@ export async function blockTaskForQC(p: BlockTaskForQCParams): Promise<boolean> 
   const blockedOnHuman = p.audience === 'SYSTEM' ? 'operator' : 'owner';
   const ask = p.needs.slice(0, 500);
   const blockGapsJson = JSON.stringify(p.gaps);
+  const auditNote = p.auditNote ?? p.blockReason;
   const blockDesc = p.taskDescription && p.taskDescription !== ''
-    ? `${p.taskDescription}\n\n${p.blockReason}`
-    : p.blockReason;
+    ? `${p.taskDescription}\n\n${auditNote}`
+    : auditNote;
 
   const extraColumns: Record<string, string | number | null> = {
     description: blockDesc,
@@ -256,7 +264,7 @@ export async function blockTaskForQC(p: BlockTaskForQCParams): Promise<boolean> 
   try {
     await transition(p.taskId, 'blocked', {
       actor: p.actor,
-      reason: p.blockReason,
+      reason: auditNote,
       expectedFrom: p.fromStatus,
       extraColumns,
     });
@@ -304,8 +312,27 @@ export async function blockTaskForQC(p: BlockTaskForQCParams): Promise<boolean> 
       [uuidv4(), 'qc_escalation', ceoAgentId, p.taskId, p.escalationMessage ?? p.timelineEventMessage, now],
     );
   } else {
-    // OWNER block: fire Telegram immediately (trust-engine's blocked_notice_sent_at
+    // OWNER block: preserve the QC cap path's CEO-authored Live Feed event,
+    // then fire Telegram immediately (trust-engine's blocked_notice_sent_at
     // sweep is the periodic backstop; this is the real-time notice).
+    if (p.ownerReviewEventMessage) {
+      let ceoAgentId: string | null = null;
+      try {
+        const row = queryOne<{ id: string }>(
+          `SELECT id FROM agents WHERE is_master = 1
+           AND (workspace_id = 'master-orchestrator' OR workspace_id = 'ceo')
+           LIMIT 1`,
+          [],
+        );
+        ceoAgentId = row?.id ?? null;
+      } catch { /* no CEO agent — still visible via task event */ }
+
+      run(
+        `INSERT INTO events (id, type, agent_id, task_id, message, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+        [uuidv4(), 'qc_review', ceoAgentId, p.taskId, p.ownerReviewEventMessage, now],
+      );
+    }
+
     try {
       notifyOwner(p.ownerNotifyMessage ?? p.timelineEventMessage);
     } catch (notifyErr) {
@@ -5491,9 +5518,16 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
           needs: blockNeeds,
           audience: blockAudience,
           blockReason: `Failed QC ${newAttempts}x, last score ${result.score.toFixed(1)}/10`,
+          // Keep main's complete cap/audience/reason audit text in both the
+          // description and transition history; blockReason remains concise
+          // machine-readable metadata.
+          auditNote: blockedNote,
           timelineEventMessage: `[QC-BLOCKED] Task "${task.title}" blocked after ${newAttempts} QC-fail re-routes (cap: ${QC_MAX_REROUTES}). Audience: ${blockAudience}. ${isSystemBlock ? 'SYSTEM fix needed — escalating to master orchestrator.' : 'Human review required.'}`,
           escalationMessage: `[QC-SYSTEM-BLOCK] "${task.title}" failed QC ${newAttempts} time(s) due to a SYSTEM issue the executor cannot fix. Score: ${result.score.toFixed(1)}/10. Root cause gaps: ${result.gaps.join('; ')}. Action needed: ${blockNeeds}`,
           ownerNotifyMessage: `⚠️ A task is BLOCKED and needs your attention: "${task.title}".\nReason: ${result.gaps.length > 0 ? result.gaps.join('; ') : result.reason}\n\nThis task failed QC ${newAttempts} time(s) (score ${result.score.toFixed(1)}/10). Reply here to unblock or reassign.`,
+          // This event existed on main and is an OWNER-audience audit signal,
+          // separate from the owner notification the shared helper also sends.
+          ownerReviewEventMessage: `[QC-BLOCKED] "${task.title}" failed QC ${newAttempts} time(s) and has been blocked. Score: ${result.score.toFixed(1)}/10. Owner attention needed.`,
         });
 
         if (landed) {

@@ -259,30 +259,43 @@ export async function runIntakeAdvanceSweep(): Promise<IntakeAdvanceResult> {
           AND t.qc_reroute_attempts IS NOT NULL
           AND t.qc_reroute_attempts >= ?
           AND (t.sop_authoring_for_task_id IS NULL)
-          AND NOT EXISTS (
-            SELECT 1 FROM events e WHERE e.task_id = t.id AND e.type = 'task_capped'
-          )
         LIMIT 50`,
       [...ADVANCEABLE_STATUSES, cap],
     );
     for (const t of cappedRows) {
       try {
-        run(
-          `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, 'task_capped', ?, ?, ?)`,
-          [
-            uuidv4(),
-            t.id,
-            `[CAP] Task "${t.title}" reached the QC-reroute cap (${t.qc_reroute_attempts ?? cap}/${cap}) — ` +
-              `held for operator review; auto-advancement stopped.`,
-            now,
-          ],
-        );
-        notifySystem(
-          `[qc-cap] Task "${t.title}" (id ${t.id}) hit the QC-reroute cap ` +
-            `(${t.qc_reroute_attempts ?? cap}/${cap}) and can no longer auto-advance. ` +
-            `It is held for operator triage (promote, re-scope, or close).`,
-          { agent: 'intake-advance-sweep', action: 'escalate' },
-        );
+        // A prior task_capped event only deduplicates the alert. It must never
+        // exclude a legacy capped task from the real block transition below.
+        let alreadyNotified = false;
+        try {
+          alreadyNotified = Boolean(queryOne<{ id: string }>(
+            `SELECT id FROM events WHERE task_id = ? AND type = 'task_capped' LIMIT 1`,
+            [t.id],
+          ));
+        } catch (err) {
+          // A notification-dedup read must never starve the real block
+          // attempt. If it cannot be read, conservatively emit the alert.
+          console.warn(`[intake-advance] cap notification dedup lookup failed for ${t.id}; continuing to block:`, (err as Error).message);
+        }
+        if (!alreadyNotified) {
+          run(
+            `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, 'task_capped', ?, ?, ?)`,
+            [
+              uuidv4(),
+              t.id,
+              `[CAP] Task "${t.title}" reached the QC-reroute cap (${t.qc_reroute_attempts ?? cap}/${cap}) — ` +
+                `held for operator review; auto-advancement stopped.`,
+              now,
+            ],
+          );
+          notifySystem(
+            `[qc-cap] Task "${t.title}" (id ${t.id}) hit the QC-reroute cap ` +
+              `(${t.qc_reroute_attempts ?? cap}/${cap}) and can no longer auto-advance. ` +
+              `It is held for operator triage (promote, re-scope, or close).`,
+            { agent: 'intake-advance-sweep', action: 'escalate' },
+          );
+          capped++;
+        }
 
         const landed = await blockTaskForQC({
           taskId: t.id,
@@ -302,7 +315,6 @@ export async function runIntakeAdvanceSweep(): Promise<IntakeAdvanceResult> {
           console.warn(`[intake-advance] cap-block transition lost a race for ${t.id} (task already left ${t.status}) — task_capped event still recorded`);
         }
 
-        capped++;
       } catch (err) {
         console.warn(`[intake-advance] cap surfacing failed for ${t.id}:`, (err as Error).message);
       }

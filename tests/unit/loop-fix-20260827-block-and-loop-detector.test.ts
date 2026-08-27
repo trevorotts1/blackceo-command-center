@@ -179,6 +179,46 @@ test('qc-scorer cap-reached: ordinary llm FAILs past QC_MAX_REROUTES block the t
   assert.ok(escalation, 'a qc_escalation notice event must be recorded for a SYSTEM-audience block');
 });
 
+test('qc-scorer cap-reached: OWNER blocks retain main\'s CEO-attributed qc_review event and verbose audit note', async () => {
+  const ceoAgentId = nextId('ceo');
+  run(
+    `INSERT OR IGNORE INTO workspaces (id, name, slug, sort_order) VALUES ('ceo', 'CEO', 'ceo', 999)`,
+  );
+  run(
+    `INSERT INTO agents (id, name, role, is_master, workspace_id) VALUES (?, 'CEO', 'Master Orchestrator', 1, 'ceo')`,
+    [ceoAgentId],
+  );
+
+  const id = nextId('cap-owner-event');
+  insertTask(id, 'review');
+  const gaps = ['Owner approval is required before publishing'];
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    await runQcWithFixture(id, { score: 6.0, pass: false, reason: `Owner fixture FAIL ${attempt}`, gaps });
+    run(`UPDATE tasks SET status = 'review' WHERE id = ?`, [id]);
+  }
+  await runQcWithFixture(id, { score: 6.0, pass: false, reason: 'Owner fixture FAIL 3', gaps });
+
+  const task = queryOne<{ block_audience: string | null; description: string | null }>(
+    `SELECT block_audience, description FROM tasks WHERE id = ?`,
+    [id],
+  );
+  assert.equal(task?.block_audience, 'OWNER', 'an owner-actionable cap failure must remain OWNER-audience');
+  assert.match(task?.description ?? '', /\[QC-BLOCKED\] Task failed QC 3 time\(s\) \(cap: 2\).*Audience: OWNER\. Owner fixture FAIL 3/, 'the richer main audit note must be preserved in the description');
+
+  const ceoEvent = queryOne<{ agent_id: string | null; message: string }>(
+    `SELECT agent_id, message FROM events WHERE task_id = ? AND type = 'qc_review' AND message LIKE '%Owner attention needed.'`,
+    [id],
+  );
+  assert.equal(ceoEvent?.agent_id, ceoAgentId, 'the restored owner-cap event must retain CEO attribution');
+  assert.match(ceoEvent?.message ?? '', /Owner attention needed\.$/, 'the restored event must retain the main audit message');
+
+  const transitionEvent = queryOne<{ reason: string | null }>(
+    `SELECT reason FROM task_events WHERE task_id = ? AND to_status = 'blocked' ORDER BY created_at DESC LIMIT 1`,
+    [id],
+  );
+  assert.match(transitionEvent?.reason ?? '', /\[QC-BLOCKED\] Task failed QC 3 time\(s\) \(cap: 2\).*Audience: OWNER\. Owner fixture FAIL 3/, 'the richer main audit note must also be the transition reason');
+});
+
 // ─── 2. qc-review-sweep: identical-result loop detector ──────────────────────
 
 test('qc-review-sweep loop detector: 3 identical llm results block the task and the sweep skips rescoring it', async () => {
@@ -212,6 +252,12 @@ test('qc-review-sweep loop detector: 3 identical llm results block the task and 
   );
   assert.equal(task?.status, 'blocked', 'loop-detected task must be blocked');
   assert.ok(task?.block_reason?.includes('qc_result_loop_detected'), 'block_reason must name the loop-detector cause');
+  const blockAudience = queryOne<{ block_audience: string | null; blocked_on_human: string | null }>(
+    `SELECT block_audience, blocked_on_human FROM tasks WHERE id = ?`,
+    [id],
+  );
+  assert.equal(blockAudience?.block_audience, 'OWNER', 'a loop without a cap-style system signal must be owner-actionable');
+  assert.equal(blockAudience?.blocked_on_human, 'owner', 'OWNER detector blocks must trigger the owner-notice branch');
 
   // Still exactly 3 task_qc_results rows — proves runQCOnReview was never
   // invoked (which would have inserted a 4th row).
@@ -241,6 +287,21 @@ test('qc-review-sweep loop detector: does NOT trip on heuristic-path identical r
   }
   const loop = detectIdenticalQCResultLoop(id, 3);
   assert.equal(loop, null, 'heuristic-path identical results must NEVER trip the loop detector (own escape hatch owns that path)');
+});
+
+test('qc-review-sweep loop detector: does NOT trip on 3 identical PASSING llm results', () => {
+  const id = nextId('loop-passing-safe');
+  insertTask(id, 'review');
+  const base = Date.now() - 60_000;
+  for (let i = 0; i < 3; i++) {
+    run(
+      `INSERT INTO task_qc_results (id, task_id, workspace_id, department_slug, score, passed, scoring_path, qc_agent_id, attempt, scored_at)
+       VALUES (?, ?, NULL, NULL, ?, 1, 'llm', NULL, ?, ?)`,
+      [`qcr-${id}-${i}`, id, 9.0, i + 1, new Date(base + i * 1000).toISOString()],
+    );
+  }
+  const loop = detectIdenticalQCResultLoop(id, 3);
+  assert.equal(loop, null, 'three identical PASSING results are a producer/judge hold, not a failure loop');
 });
 
 // ─── 3. qc-review-sweep never selects an archived task ───────────────────────
@@ -288,4 +349,28 @@ test('intake-advance-sweep: QC-reroute-cap escalation transitions the task to bl
     [id],
   );
   assert.ok(blockEvt, 'a task_block_events row must be recorded for the intake-advance cap block');
+});
+
+test('intake-advance-sweep: a legacy task_capped event dedups only the notice, not the block transition', async () => {
+  const id = nextId('intake-already-capped');
+  insertTask(id, 'backlog', { qcAttempts: 5 });
+  run(
+    `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, 'task_capped', ?, '[CAP] old code only notified', ?)`,
+    [nextId('event'), id, new Date().toISOString()],
+  );
+
+  await runIntakeAdvanceSweep();
+
+  const task = queryOne<{ status: string; block_reason: string | null }>(
+    `SELECT status, block_reason FROM tasks WHERE id = ?`,
+    [id],
+  );
+  assert.equal(task?.status, 'blocked', 'a legacy task_capped event must not starve the idempotent block attempt');
+  assert.match(task?.block_reason ?? '', /QC-reroute cap reached/, 'the legacy capped task must receive the structured cap block');
+
+  const cappedEvents = queryOne<{ c: number }>(
+    `SELECT COUNT(*) AS c FROM events WHERE task_id = ? AND type = 'task_capped'`,
+    [id],
+  );
+  assert.equal(cappedEvents?.c, 1, 'the notification/event remains deduplicated');
 });
