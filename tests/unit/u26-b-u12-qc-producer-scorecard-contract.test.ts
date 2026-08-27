@@ -274,7 +274,11 @@ test('[U26-c] flag ON + unreadable scorecard_path → falls back to today\'s ind
 
   const task = queryOne<{ status: string }>(`SELECT status FROM tasks WHERE id = ?`, [id]);
   assert.ok(task, 'task must exist');
-  assert.equal(task.status, 'review', 'no-criteria path is un-reroutable — task stays in review, unchanged from pre-U26 behavior');
+  // LOOP-FIX-20260827: the scoring-path fallback (the U26 contract under test
+  // here) is unchanged; what happens AFTER an un-reroutable no-criteria verdict
+  // changed separately (see qc-loop-close.test.ts) — it now blocks immediately
+  // instead of sitting in review forever, so this assertion tracks that fix.
+  assert.equal(task.status, 'blocked', 'no-criteria path is un-reroutable — task is blocked immediately (LOOP-FIX-20260827)');
 });
 
 // ─── (d) both-gates rule: FAB-QC PASS + Page-QC FAIL → does not promote ──────

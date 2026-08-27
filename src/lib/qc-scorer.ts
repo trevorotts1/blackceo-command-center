@@ -72,7 +72,7 @@ import { getMissionControlUrl } from '@/lib/config';
 import { missionControlAuthHeaders } from '@/lib/mc-auth';
 import { notifyOwner, notifySystem } from '@/lib/notify';
 import { notifyOwnerDone } from '@/lib/owner-reports';
-import { transition, TransitionError } from '@/lib/task-lifecycle';
+import { transition, TransitionError, type LifecycleState } from '@/lib/task-lifecycle';
 import { requiresRegisteredCertificate } from '@/lib/presentations-cert-gate';
 import { recordBlockEvent } from '@/lib/block-events';
 import { assertNoFixtureEnvInProduction } from '@/lib/fixture-guard';
@@ -138,6 +138,182 @@ export function recordStatusApplyFailure(
     // out of a QC-scoring catch block.
     console.error(`[QCScorer] status_apply_failed write failed for task ${taskId}:`, writeErr);
   }
+}
+
+// ---------------------------------------------------------------------------
+// LOOP-FIX-20260827 — shared "stop rescoring, escalate to a human" primitive.
+//
+// INCIDENT: task 9102529d sat in `review` while qc-review-sweep rescored it
+// every ~10 min for 8h44m, producing 11+ IDENTICAL results (2.8/10, passed=0)
+// because its verdict was [QC-UNROUTEABLE] ("Human review required") — a
+// terminal signal the old code only logged, never acted on. Separately,
+// intake-advance-sweep's QC-reroute-cap escalation ([CAP] "... held for
+// operator review") was PROSE-ONLY: it wrote an event and called
+// notifySystem(), but never actually changed task.status, so the task rotted
+// in its lane with zero blocked_* fields and no task_block_events row.
+//
+// Both are the SAME defect: a code path DECIDES a task needs a human and says
+// so in text, but never calls the state machine. blockTaskForQC() is the ONE
+// place that turns "a human must look at this" into the real `blocked` state
+// (status flip via transition(), block_* columns, a task_block_events audit
+// row, and the actual notice — notifyOwner() for OWNER audience, a
+// qc_escalation event for SYSTEM audience). Every caller that decides a task
+// is stuck — the QC-reroute cap, an un-reroutable QC verdict, the QC
+// identical-result loop detector, and the intake-advance cap — routes through
+// THIS function so there is exactly one implementation of "block + notify",
+// never a second prose-only copy of it.
+// ---------------------------------------------------------------------------
+
+/**
+ * Regexes that identify a block cause as a SYSTEM problem (something the
+ * OWNER cannot act on — wrong SOP, missing builder, model misbind, routing —
+ * needs an operator/orchestrator) as opposed to an OWNER problem (needs owner
+ * approval or owner-supplied data). Shared by every blockTaskForQC() caller so
+ * the OWNER/SYSTEM split is classified identically everywhere instead of each
+ * call site re-implementing its own copy of this list.
+ */
+export const QC_BLOCK_SYSTEM_SIGNALS: RegExp[] = [
+  /no\s+sop\s+assign/,
+  /no\s+criteria/,
+  /missing\s+builder/,
+  /wrong\s+sop/,
+  /model\s+misbind/,
+  /mismatched\s+rubric/,
+  /wrong\s+department/,
+  /schema\s+error/,
+  /config\s+error/,
+  /routing\s+error/,
+  /rubric\s+mismatch/,
+  /\bno-criteria\b/,
+  /cannot\s+evaluate/,
+  /cannot\s+auto-score/,
+];
+
+/** Classify a block's audience from its gap/reason text using the shared signal list. */
+export function classifyQCBlockAudience(gapsAndReason: string[], forceSystem = false): 'OWNER' | 'SYSTEM' {
+  if (forceSystem) return 'SYSTEM';
+  const text = gapsAndReason.join(' ').toLowerCase();
+  return QC_BLOCK_SYSTEM_SIGNALS.some((p) => p.test(text)) ? 'SYSTEM' : 'OWNER';
+}
+
+export interface BlockTaskForQCParams {
+  taskId: string;
+  taskTitle: string;
+  taskDescription: string | null;
+  /** Status the task is expected to be in right now (transition() CAS guard). */
+  fromStatus: LifecycleState;
+  actor: string;
+  /** Value to persist into qc_reroute_attempts. `null` leaves the column untouched. */
+  attempts: number | null;
+  gaps: string[];
+  /** block_needs / ask (caller-composed; capped to 500 chars for `ask`, matching UpdateTaskSchema.ask). */
+  needs: string;
+  audience: 'OWNER' | 'SYSTEM';
+  /** Short machine/human block_reason column value. */
+  blockReason: string;
+  /** Board-timeline `task_status_changed` event text. */
+  timelineEventMessage: string;
+  /** SYSTEM audience: qc_escalation event text (defaults to timelineEventMessage). */
+  escalationMessage?: string;
+  /** OWNER audience: notifyOwner() text (defaults to timelineEventMessage). */
+  ownerNotifyMessage?: string;
+}
+
+/**
+ * Transition a task to `blocked` with full structured metadata (block_reason,
+ * block_gaps, block_needs, block_audience, blocked_on_human, ask), a
+ * task_block_events audit row, and the actual human notice — ALL atomically
+ * via transition()'s extraColumns, exactly as the pre-existing QC-cap path did
+ * (this function is that path, extracted so it has exactly one implementation).
+ *
+ * Returns false (never throws) when the transition is refused by a CAS
+ * conflict (task already left `fromStatus`) or a transition error — in either
+ * case NOTHING is recorded, so a lost race can never produce a block event for
+ * a block that never landed.
+ */
+export async function blockTaskForQC(p: BlockTaskForQCParams): Promise<boolean> {
+  const now = new Date().toISOString();
+  const blockedOnHuman = p.audience === 'SYSTEM' ? 'operator' : 'owner';
+  const ask = p.needs.slice(0, 500);
+  const blockGapsJson = JSON.stringify(p.gaps);
+  const blockDesc = p.taskDescription && p.taskDescription !== ''
+    ? `${p.taskDescription}\n\n${p.blockReason}`
+    : p.blockReason;
+
+  const extraColumns: Record<string, string | number | null> = {
+    description: blockDesc,
+    block_reason: p.blockReason,
+    block_gaps: blockGapsJson,
+    block_needs: p.needs,
+    block_audience: p.audience,
+    blocked_on_human: blockedOnHuman,
+    ask,
+  };
+  if (p.attempts !== null) {
+    extraColumns.qc_reroute_attempts = p.attempts;
+  }
+
+  try {
+    await transition(p.taskId, 'blocked', {
+      actor: p.actor,
+      reason: p.blockReason,
+      expectedFrom: p.fromStatus,
+      extraColumns,
+    });
+  } catch (txErr) {
+    if (!(txErr instanceof TransitionError && txErr.code === 'CAS_CONFLICT')) {
+      console.warn(`[blockTaskForQC] transition failed for ${p.taskId}:`, (txErr as Error).message);
+      recordStatusApplyFailure(p.taskId, 'blocked', txErr);
+    }
+    return false;
+  }
+
+  // MR-30: snapshot block metadata for the block-history audit trail.
+  recordBlockEvent({
+    taskId: p.taskId,
+    blockReason: p.blockReason,
+    blockGaps: blockGapsJson,
+    blockNeeds: p.needs,
+    blockAudience: p.audience,
+    blockedOnHuman,
+    ask,
+    actor: p.actor,
+  });
+
+  run(
+    `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
+    [uuidv4(), 'task_status_changed', p.taskId, p.timelineEventMessage, now],
+  );
+
+  if (p.audience === 'SYSTEM') {
+    // SYSTEM block: escalate to master orchestrator via event. Never notify
+    // the owner — this is an internal system gap the owner cannot act on.
+    let ceoAgentId: string | null = null;
+    try {
+      const row = queryOne<{ id: string }>(
+        `SELECT id FROM agents WHERE is_master = 1
+         AND (workspace_id = 'master-orchestrator' OR workspace_id = 'ceo')
+         LIMIT 1`,
+        [],
+      );
+      ceoAgentId = row?.id ?? null;
+    } catch { /* no CEO agent — still visible via task event */ }
+
+    run(
+      `INSERT INTO events (id, type, agent_id, task_id, message, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+      [uuidv4(), 'qc_escalation', ceoAgentId, p.taskId, p.escalationMessage ?? p.timelineEventMessage, now],
+    );
+  } else {
+    // OWNER block: fire Telegram immediately (trust-engine's blocked_notice_sent_at
+    // sweep is the periodic backstop; this is the real-time notice).
+    try {
+      notifyOwner(p.ownerNotifyMessage ?? p.timelineEventMessage);
+    } catch (notifyErr) {
+      console.error('[blockTaskForQC] BLOCKED owner notify error (non-fatal):', (notifyErr as Error).message);
+    }
+  }
+
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -3692,8 +3868,17 @@ Reply with ONLY this JSON (no other text):
  * Determine whether a QC failure is un-reroutable (i.e., caused by a factor
  * the executor cannot fix: brief wording, missing metadata, no SOP assigned).
  *
- * Un-reroutable failures MUST NOT trigger the reroute loop.  They go straight
- * to `review` with a human-readable reason.  The 3-strike cap stays.
+ * Un-reroutable failures MUST NOT trigger the reroute loop (never sent back to
+ * `backlog` for another attempt — re-running cannot fix what the executor
+ * cannot influence).
+ *
+ * LOOP-FIX-20260827: this used to mean the task sat in `review` with an
+ * explanatory event and NOTHING further ever acted on it — the qc-review-sweep
+ * would rescore it again in ~10 minutes, forever, since the verdict never
+ * changes on unchanged content. Task 9102529d did exactly that for 8h44m
+ * (11+ identical rescores). The caller (runQCOnReview) now transitions the
+ * task to `blocked` IMMEDIATELY on an unrouteable verdict — see
+ * blockTaskForQC() — instead of waiting for QC_MAX_REROUTES.
  *
  * Returns { unrouteable: true, reason } if un-reroutable, else { unrouteable: false }.
  */
@@ -5197,35 +5382,73 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
     } else {
       // FAIL path
 
+      // ── Infinite-loop guard: increment the per-task attempt counter FIRST,
+      // for EVERY completed FAIL evaluation (un-reroutable or not). LOOP-FIX-
+      // 20260827: this used to be computed only inside the reroute/cap branch
+      // below, so the un-reroutable branch (next) returned BEFORE ever reaching
+      // it — qc_reroute_attempts stayed 0 forever on an un-reroutable verdict,
+      // which is exactly how task 9102529d rescored identically for 8h44m
+      // while its own attempt counter never moved off 1. Every FAIL now
+      // increments once, regardless of which branch handles it next.
+      const prevAttempts = task.qc_reroute_attempts ?? 0;
+      const newAttempts = prevAttempts + 1;
+
       // §4 Un-reroutable kill: if the failure is caused by brief wording,
       // missing metadata, or no SOP — the executor cannot fix it by re-running.
-      // These go straight to `review` with a human-readable reason, NEVER reroute.
+      // LOOP-FIX-20260827: this verdict LITERALLY says "Human review required"
+      // — the executor cannot influence it, so re-scoring it again can NEVER
+      // produce a different outcome. The old code left the task in `review` and
+      // relied on nothing to ever act on that, which is the un-reroutable half
+      // of the 8h44m zombie loop. It now blocks IMMEDIATELY (does not wait for
+      // QC_MAX_REROUTES) through the same blockTaskForQC() the cap path below
+      // uses, so a human/orchestrator is notified once instead of never.
       const failClass = classifyFailure(result);
       if (failClass.unrouteable) {
-        console.warn(`[QCScorer] Task "${task.title}" (${taskId}): un-reroutable failure — going to review, NOT backlog. Reason: ${failClass.reason}`);
-        // Task stays in `review`; write explanatory event
+        const gapsAndReason = [...result.gaps, result.reason, failClass.reason ?? ''];
+        const isSystemBlock = result.scoringPath === 'no-criteria'
+          || classifyQCBlockAudience(gapsAndReason) === 'SYSTEM';
+        const blockAudience: 'OWNER' | 'SYSTEM' = isSystemBlock ? 'SYSTEM' : 'OWNER';
+        const blockNeeds = isSystemBlock
+          ? `System fix required: ${failClass.reason ?? result.reason}. Route diagnosis to master orchestrator.`
+          : `Owner action required: ${failClass.reason ?? result.reason}. Reply here to unblock or reassign.`;
+        const blockedNote = `[QC-UNROUTEABLE-BLOCKED] Score: ${result.score.toFixed(1)}/10 | ${failClass.reason} Human review required (executor cannot influence). Audience: ${blockAudience}.`;
+
+        // Preserve the pre-existing [QC-UNROUTEABLE] audit event (tests +
+        // Live Feed key off this exact marker) BEFORE attempting the block —
+        // it documents the verdict even if the block transition loses a race.
         run(
-          `INSERT INTO events (id, type, task_id, message, created_at)
-           VALUES (?, ?, ?, ?, ?)`,
-          [
-            uuidv4(),
-            'qc_review',
-            taskId,
+          `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
+          [uuidv4(), 'qc_review', taskId,
             `[QC-UNROUTEABLE] Score: ${result.score.toFixed(1)}/10 | ${failClass.reason} Human review required.`,
-            now,
-          ],
+            now],
         );
+
+        const landed = await blockTaskForQC({
+          taskId,
+          taskTitle: task.title,
+          taskDescription: task.description,
+          fromStatus: 'review',
+          actor: 'qc-scorer',
+          attempts: newAttempts,
+          gaps: result.gaps,
+          needs: blockNeeds,
+          audience: blockAudience,
+          blockReason: `QC-UNROUTEABLE: ${failClass.reason ?? result.reason}`,
+          timelineEventMessage: blockedNote,
+          escalationMessage: `[QC-SYSTEM-BLOCK] "${task.title}" QC verdict is un-reroutable due to a SYSTEM issue the executor cannot fix. Score: ${result.score.toFixed(1)}/10. Reason: ${failClass.reason}. Action needed: ${blockNeeds}`,
+          ownerNotifyMessage: `⚠️ A task needs your attention and re-running it will NOT help: "${task.title}".\nReason: ${failClass.reason}\n\nQC says human review is required (score ${result.score.toFixed(1)}/10). Reply here to unblock or reassign.`,
+        });
+
+        if (landed) {
+          console.warn(`[QCScorer] Task "${task.title}" (${taskId}): un-reroutable QC verdict — BLOCKED immediately (audience: ${blockAudience}). Reason: ${failClass.reason}`);
+        } else {
+          console.warn(`[QCScorer] Task "${task.title}" (${taskId}): un-reroutable QC verdict but block-transition lost a race (task already left review) — no further action`);
+        }
         return result;
       }
 
       // FAIL: return to backlog with gap notes, then re-dispatch — unless the
       // infinite-loop cap has been reached.
-
-      // ── Infinite-loop guard ──────────────────────────────────────────────
-      // Increment the per-task attempt counter. If it exceeds QC_MAX_REROUTES,
-      // block the task and notify the CEO instead of re-dispatching.
-      const prevAttempts = task.qc_reroute_attempts ?? 0;
-      const newAttempts = prevAttempts + 1;
 
       if (newAttempts > QC_MAX_REROUTES) {
         // Cap reached → classify the block and set task to `blocked`.
@@ -5241,170 +5464,42 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
         //     "missing builder", "model", "rubric", "routing", "wrong department",
         //     "no criteria", "schema", "config"
         // All other blocks default to OWNER (needs human approval / data).
-        const gapText = [...result.gaps, result.reason].join(' ').toLowerCase();
-        const systemSignals = [
-          /no\s+sop\s+assign/,
-          /no\s+criteria/,
-          /missing\s+builder/,
-          /wrong\s+sop/,
-          /model\s+misbind/,
-          /mismatched\s+rubric/,
-          /wrong\s+department/,
-          /schema\s+error/,
-          /config\s+error/,
-          /routing\s+error/,
-          /rubric\s+mismatch/,
-          /\bno-criteria\b/,
-          /cannot\s+evaluate/,
-          /cannot\s+auto-score/,
-        ];
-        const isSystemBlock = result.scoringPath === 'no-criteria' || systemSignals.some((p) => p.test(gapText));
+        const gapsAndReason = [...result.gaps, result.reason];
+        const isSystemBlock = result.scoringPath === 'no-criteria'
+          || classifyQCBlockAudience(gapsAndReason) === 'SYSTEM';
         const blockAudience: 'OWNER' | 'SYSTEM' = isSystemBlock ? 'SYSTEM' : 'OWNER';
 
-        const blockGapsJson = JSON.stringify(result.gaps);
         const blockNeeds: string = isSystemBlock
           ? `System fix required: ${result.gaps.slice(0, 2).join('; ') || result.reason}. Route diagnosis to master orchestrator.`
           : `Owner action required: ${result.gaps.slice(0, 2).join('; ') || result.reason}. Reply here to unblock or reassign.`;
 
         const blockedNote = `[QC-BLOCKED] Task failed QC ${newAttempts} time(s) (cap: ${QC_MAX_REROUTES}). Last score: ${result.score.toFixed(1)}/10. Audience: ${blockAudience}. ${result.reason}`;
 
-        // MR-06 BLOCKED-ASK FIX: populate blocked_on_human and ask alongside the
-        // existing block_* metadata so the blocked card is ANSWERABLE. Without
-        // `ask`, a blocked card re-escalates forever with "(no ask specified)"
-        // and can never be cleared. SYSTEM blocks name 'operator', OWNER blocks
-        // name 'owner'. ask is capped at 500 to match UpdateTaskSchema.ask's max
-        // length. Both columns land atomically with the status flip; the
-        // migration-104 triggers enforce the invariant going forward.
-        const qcBlockedOnHuman = isSystemBlock ? 'operator' : 'owner';
-        const qcAsk = blockNeeds.slice(0, 500);
+        // fix2(MR-04) / LOOP-FIX-20260827: route through the shared
+        // blockTaskForQC() helper (transition() + extraColumns + recordBlockEvent
+        // + notice), the same one the un-reroutable branch above and the QC
+        // identical-result loop detector use — one implementation of "block and
+        // notify", not three.
+        const landed = await blockTaskForQC({
+          taskId,
+          taskTitle: task.title,
+          taskDescription: task.description,
+          fromStatus: 'review',
+          actor: 'qc-scorer',
+          attempts: newAttempts,
+          gaps: result.gaps,
+          needs: blockNeeds,
+          audience: blockAudience,
+          blockReason: `Failed QC ${newAttempts}x, last score ${result.score.toFixed(1)}/10`,
+          timelineEventMessage: `[QC-BLOCKED] Task "${task.title}" blocked after ${newAttempts} QC-fail re-routes (cap: ${QC_MAX_REROUTES}). Audience: ${blockAudience}. ${isSystemBlock ? 'SYSTEM fix needed — escalating to master orchestrator.' : 'Human review required.'}`,
+          escalationMessage: `[QC-SYSTEM-BLOCK] "${task.title}" failed QC ${newAttempts} time(s) due to a SYSTEM issue the executor cannot fix. Score: ${result.score.toFixed(1)}/10. Root cause gaps: ${result.gaps.join('; ')}. Action needed: ${blockNeeds}`,
+          ownerNotifyMessage: `⚠️ A task is BLOCKED and needs your attention: "${task.title}".\nReason: ${result.gaps.length > 0 ? result.gaps.join('; ') : result.reason}\n\nThis task failed QC ${newAttempts} time(s) (score ${result.score.toFixed(1)}/10). Reply here to unblock or reassign.`,
+        });
 
-        // fix2(MR-04): route through transition() with extraColumns so the
-        // description + qc_reroute_attempts + the full block_* metadata land
-        // atomically with the status flip (mirroring recordDispatchFailure) AND
-        // the legal-transition guard + CAS run (review→blocked is legal). The
-        // raw compound UPDATE this replaces bypassed the state machine;
-        // transition() also writes the task_events audit row + the task_updated
-        // broadcast itself. expectedFrom preserves the raw writer's
-        // `WHERE status = 'review'` CAS; the block snapshot + operator-feed
-        // events below are gated on the transition actually landing so a lost
-        // race never records a block that never happened.
-        const blockDesc = task.description && task.description !== ''
-          ? `${task.description}\n\n${blockedNote}`
-          : blockedNote;
-        let blockLanded = false;
-        try {
-          await transition(taskId, 'blocked', {
-            actor: 'qc-scorer',
-            reason: blockedNote,
-            expectedFrom: 'review',
-            extraColumns: {
-              description: blockDesc,
-              qc_reroute_attempts: newAttempts,
-              block_reason: `Failed QC ${newAttempts}x, last score ${result.score.toFixed(1)}/10`,
-              block_gaps: blockGapsJson,
-              block_needs: blockNeeds,
-              block_audience: blockAudience,
-              blocked_on_human: qcBlockedOnHuman,
-              ask: qcAsk,
-            },
-          });
-          blockLanded = true;
-        } catch (txErr) {
-          if (!(txErr instanceof TransitionError && txErr.code === 'CAS_CONFLICT')) {
-            console.warn(`[QCScorer] block-after-cap transition failed for ${taskId}:`, (txErr as Error).message);
-            recordStatusApplyFailure(taskId, 'blocked', txErr);
-          }
-        }
-        if (blockLanded) {
-          // MR-30: snapshot block metadata for the block-history audit trail.
-          recordBlockEvent({
-            taskId,
-            blockReason: `Failed QC ${newAttempts}x, last score ${result.score.toFixed(1)}/10`,
-            blockGaps: blockGapsJson,
-            blockNeeds: blockNeeds,
-            blockAudience: blockAudience,
-            actor: 'qc-scorer',
-          });
-        }
-
-        if (!blockLanded) {
-          // CAS lost (task already left review) or transition failed — do not
-          // record the operator-feed events, escalate to the master
-          // orchestrator, or notify the owner about a block that never landed.
-          return result;
-        }
-
-        run(
-          `INSERT INTO events (id, type, task_id, message, created_at)
-           VALUES (?, ?, ?, ?, ?)`,
-          [uuidv4(), 'task_status_changed', taskId,
-            `[QC-BLOCKED] Task "${task.title}" blocked after ${newAttempts} QC-fail re-routes (cap: ${QC_MAX_REROUTES}). Audience: ${blockAudience}. ${isSystemBlock ? 'SYSTEM fix needed — escalating to master orchestrator.' : 'Human review required.'}`,
-            now],
-        );
-
-        console.warn(`[QCScorer] Task "${task.title}" (${taskId}): BLOCKED after ${newAttempts} QC-fail re-routes — audience: ${blockAudience}`);
-
-        // Resolve master-orchestrator/CEO agent for the event author field.
-        let ceoAgentIdBlocked: string | null = null;
-        try {
-          const row = queryOne<{ id: string }>(
-            `SELECT id FROM agents WHERE is_master = 1
-             AND (workspace_id = 'master-orchestrator' OR workspace_id = 'ceo')
-             LIMIT 1`,
-            [],
-          );
-          ceoAgentIdBlocked = row?.id ?? null;
-        } catch { /* no CEO agent — still visible via task event */ }
-
-        if (isSystemBlock) {
-          // SYSTEM block: escalate to master orchestrator via event.
-          // This creates a qc_review event attributed to the CEO/master-orchestrator
-          // so the orchestrator's Live Feed picks it up and can re-route or fix the
-          // root cause (wrong SOP, missing builder, model misbind, etc.).
-          // We do NOT notify the owner — this is an internal system gap.
-          run(
-            `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
-             VALUES (?, ?, ?, ?, ?, ?)`,
-            [
-              uuidv4(),
-              'qc_escalation',
-              ceoAgentIdBlocked,
-              taskId,
-              `[QC-SYSTEM-BLOCK] "${task.title}" failed QC ${newAttempts} time(s) due to a SYSTEM issue the executor cannot fix. Score: ${result.score.toFixed(1)}/10. Root cause gaps: ${result.gaps.join('; ')}. Action needed: ${blockNeeds}`,
-              now,
-            ],
-          );
-          console.warn(`[QCScorer] Task "${task.title}" (${taskId}): SYSTEM block — escalated to master orchestrator (no owner Telegram)`);
+        if (landed) {
+          console.warn(`[QCScorer] Task "${task.title}" (${taskId}): BLOCKED after ${newAttempts} QC-fail re-routes — audience: ${blockAudience}`);
         } else {
-          // OWNER block: emit CEO event AND notify the owner via Telegram.
-          run(
-            `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
-             VALUES (?, ?, ?, ?, ?, ?)`,
-            [
-              uuidv4(),
-              'qc_review',
-              ceoAgentIdBlocked,
-              taskId,
-              `[QC-BLOCKED] "${task.title}" failed QC ${newAttempts} time(s) and has been blocked. Score: ${result.score.toFixed(1)}/10. Owner attention needed.`,
-              now,
-            ],
-          );
-
-          // ── OWNER NOTIFICATION (BLOCKED — audience=OWNER only) ─────────────
-          // Only fire Telegram for owner-actionable blocks, NOT system blocks.
-          // Firing for system blocks would flood the owner with noise about
-          // things they cannot resolve themselves.
-          try {
-            const blockReason = result.gaps.length > 0
-              ? result.gaps.join('; ')
-              : result.reason;
-            notifyOwner(
-              `⚠️ A task is BLOCKED and needs your attention: "${task.title}".\nReason: ${blockReason}\n\nThis task failed QC ${newAttempts} time(s) (score ${result.score.toFixed(1)}/10). Reply here to unblock or reassign.`,
-            );
-          } catch (notifyErr) {
-            console.error('[QCScorer] BLOCKED owner notify error (non-fatal):', (notifyErr as Error).message);
-          }
-          // ── End OWNER NOTIFICATION (BLOCKED) ────────────────────────────
+          console.warn(`[QCScorer] Task "${task.title}" (${taskId}): cap reached but block-transition lost a race (task already left review) — no further action`);
         }
 
         return result;

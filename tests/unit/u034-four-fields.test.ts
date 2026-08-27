@@ -3,7 +3,19 @@
  * eight producers have been sending all along.
  *
  * Runs against a THROWAWAY DB — enforced HERE, in the file itself.
+ *
+ * LOOP-FIX-20260827: a PATCH into `review` synchronously fires runQCOnReview,
+ * and this file's seeded tasks (mkTask, dept 'marketing') carry no department
+ * SOP — post-fix, QC classifies them 'no-criteria' (un-reroutable) and now
+ * blocks them IMMEDIATELY instead of leaving a silent event, which broke this
+ * file's PATCH-mechanics assertions (idempotent-PATCH status, description
+ * truncation length) in ways that have nothing to do with QC. Disabled here
+ * so this file keeps testing only the four-fields PATCH contract; the new QC
+ * behavior itself is covered by qc-loop-close.test.ts and
+ * loop-fix-20260827-block-and-loop-detector.test.ts.
  */
+process.env.DISABLE_QC_AUTO_SCORER = '1';
+
 import './_isolated-db';
 
 import test from 'node:test';
