@@ -739,6 +739,7 @@ If you need help or clarification, ask the orchestrator.`;
         sessionKey,
         message: taskMessage,
         idempotencyKey: `dispatch-${task.id}-${task.dispatch_attempts ?? 0}`,
+        timeoutMs: 30000,
       });
 
       // FIX-15 (Error 7 / R7 — model skew): pin the ACTUAL runtime model on the

@@ -1680,6 +1680,7 @@ If you need help or clarification, ask the orchestrator.`;
         sessionKey,
         message: taskMessage,
         idempotencyKey: `auto-dispatch-${task.id}-${task.dispatch_attempts ?? 0}`,
+        timeoutMs: 30000,
       });
     } catch (sendErr) {
       // DISP-02 send-failure rollback: we already CAS-claimed the card to
