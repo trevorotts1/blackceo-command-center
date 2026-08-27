@@ -58,6 +58,7 @@
 
 import { readFileSync, existsSync, statSync, openSync, readSync, closeSync, readdirSync } from 'fs';
 import * as path from 'path';
+import { resolvePresentationRunRoots } from '@/lib/presentation-run-roots';
 // TCC-safe accessors for the ARTIFACT tree (PROJECTS_PATH, default
 // ~/Documents/Shared — a macOS TCC-protected dir where a raw open()/opendir()
 // blocks the qc-review-sweep event loop forever). Session reads under
@@ -2335,6 +2336,43 @@ export function checkPipelineCompleteness(records: PipelineRecords): PipelineCom
  * working/checkpoints). We also accept the run dir itself directly holding
  * `media_library.json` (its checkpoint), as some flows seed it at the root.
  */
+/**
+ * Run-root-agnostic fallback (2026-08-27): when the artifact-path walk-up
+ * cannot find a run dir, probe every configured run root
+ * (PRESENTATION_RUNS_DIRS — e.g. ~/webinar-decks/<client>/<deck>/<date>/)
+ * for a directory carrying the Presentations workdir markers. First hit
+ * wins; unreadable/missing roots are skipped and are NEVER treated as proof
+ * a run does not exist (the caller keeps the all-false/all-null UNDETERMINED
+ * posture). Returns null when nothing is found — UNDETERMINED, not "absent".
+ */
+function findRunDirFromConfiguredRoots(): string | null {
+  for (const root of resolvePresentationRunRoots()) {
+    try {
+      if (!existsSync(root)) continue;
+      for (const entry of safeReaddirNames(root)) {
+        const candidate = path.join(root, entry);
+        try {
+          if (!statSync(candidate).isDirectory()) continue;
+        } catch {
+          continue;
+        }
+        if (
+          existsSync(path.join(candidate, 'working')) ||
+          existsSync(path.join(candidate, 'media_library.json')) ||
+          existsSync(path.join(candidate, 'working', 'checkpoints', 'media_library.json')) ||
+          existsSync(path.join(candidate, 'intake.json')) ||
+          existsSync(path.join(candidate, 'mission_prd.json'))
+        ) {
+          return candidate;
+        }
+      }
+    } catch {
+      /* unreadable root — skip, never fatal */
+    }
+  }
+  return null;
+}
+
 export function collectPipelineRecords(deckArtifactPath: string): PipelineRecords {
   const absent: PipelineRecords = {
     researchBriefComplete: false,
@@ -2364,6 +2402,14 @@ export function collectPipelineRecords(deckArtifactPath: string): PipelineRecord
     const parent = path.dirname(dir);
     if (parent === dir) break; // reached filesystem root
     dir = parent;
+  }
+  // Run-root-agnostic fallback (2026-08-27): the walk-up failed, so probe the
+  // configured run roots (PRESENTATION_RUNS_DIRS, e.g. ~/webinar-decks) for a
+  // working/ subtree. A run living under an extra root is discovered here;
+  // finding nothing anywhere stays UNDETERMINED (all-false record set) and
+  // never reads as proof the run does not exist.
+  if (!runDir) {
+    runDir = findRunDirFromConfiguredRoots();
   }
   if (!runDir) return absent;
 
@@ -2631,6 +2677,13 @@ export function collectCoverageInputs(
     const parent = path.dirname(dir);
     if (parent === dir) break; // reached filesystem root
     dir = parent;
+  }
+  // Run-root-agnostic fallback (2026-08-27): same posture as
+  // collectPipelineRecords — probe the configured run roots before giving up;
+  // nothing found anywhere stays UNDETERMINED (all-null targets), never proof
+  // of absence.
+  if (!runDir) {
+    runDir = findRunDirFromConfiguredRoots();
   }
   if (!runDir) return absent;
 

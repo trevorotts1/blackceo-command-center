@@ -15,7 +15,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { getDb } from '@/lib/db';
-import { existsSync, lstatSync } from 'fs';
+import { existsSync, lstatSync, readdirSync, statSync } from 'fs';
 import { readFileSync } from 'fs';
 import path from 'path';
 import {
@@ -26,6 +26,7 @@ import {
 } from '@/lib/presentation-deliverables';
 import { resolveActiveCompanyId } from '@/lib/company';
 import { boardWhereClause } from '@/lib/workspaces/board-query';
+import { resolvePresentationRunRoots } from '@/lib/presentation-run-roots';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -190,6 +191,33 @@ export async function GET(
     if (!runDir) {
       const projectsPath = (process.env.PROJECTS_PATH || '~/Documents/Shared/projects').replace(/^~/, process.env.HOME || '');
       runDir = findRunDir(path.join(projectsPath, 'artifacts', taskId));
+    }
+    // Run-root-agnostic fallback (2026-08-27): the run may live under any
+    // configured run root (PRESENTATION_RUNS_DIRS, e.g. ~/webinar-decks),
+    // not only beside the artifact/PROJECTS_PATH. Probe each configured root
+    // for a working/ subtree keyed to this task; first hit wins.
+    if (!runDir) {
+      for (const root of resolvePresentationRunRoots()) {
+        if (!existsSync(root)) continue; // unreadable/missing root: skip, never a verdict
+        try {
+          const entries = readdirSync(root);
+          for (const entry of entries) {
+            const candidate = path.join(root, entry);
+            try {
+              if (!statSync(candidate).isDirectory()) continue;
+            } catch { continue; }
+            if (
+              existsSync(path.join(candidate, 'working')) ||
+              existsSync(path.join(candidate, 'media_library.json')) ||
+              existsSync(path.join(candidate, 'working', 'checkpoints', 'media_library.json'))
+            ) {
+              runDir = candidate;
+              break;
+            }
+          }
+        } catch { /* unreadable root -- skip */ }
+        if (runDir) break;
+      }
     }
 
     // Read GHL ledger
