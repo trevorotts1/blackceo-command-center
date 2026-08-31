@@ -28,6 +28,12 @@
  * isolated temp file (import _isolated-db FIRST).
  */
 import './_isolated-db';
+// The QC auto-scorer is fire-and-forget on review entry and would race this
+// suite's evidenced control tasks in `review` — a dept with no SOP hits the
+// no-criteria path and SYSTEM-blocks them (status flips review → blocked).
+// This file tests the FIX 25 evidence gate only; disable auto-QC (same
+// pattern as u034-four-fields.test.ts).
+process.env.DISABLE_QC_AUTO_SCORER = '1';
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
 import os from 'os';
@@ -163,6 +169,7 @@ afterAll(() => {
 });
 
 beforeEach(() => {
+  process.env.DISABLE_QC_AUTO_SCORER = '1';
   // Reset all tasks to their pre-test source status.
   for (const t of [emptyTaskId, unreachableTaskId, evidTaskId]) {
     getDb().prepare('UPDATE tasks SET status = ?, assigned_agent_id = ?, completed_at = NULL WHERE id = ?')

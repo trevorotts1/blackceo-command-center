@@ -1,3 +1,68 @@
+## [v6.0.98] — 2026-08-31 — U55 repair: deliverable-before-transition route fix + runner routing + FIX 25 fixtures
+
+### What changed
+
+- **Production fix: PATCH /api/tasks/[id] materializes `deliverable_url` BEFORE the
+  status transition.** The producer protocol (cc_board.py) sends
+  `{status:'review', deliverable_url}` as ONE request; FIX 25's review-evidence
+  gate (transition → checkPreconditions → collectCompletionEvidence) needs the
+  task_deliverables row already registered, but the route materialized it AFTER
+  the status block — every one-request producer patch got 422. Caught by
+  u034-four-fields.test.ts; local run went 4 fail → 2 after the reorder.
+- **Runner routing: 5 vitest-importing fix*.test.ts files added to BOTH runners.**
+  fix5-stage-timings-ingest, fix14-profile-judge, fix25-review-artifact-gate,
+  fix27-deliverable-path-reject, fix28-bundle-reverify were absent from
+  vitest.config.ts's hardcoded include list (invisible to bare `vitest run`)
+  and crashed `node --test` ("Vitest cannot be imported in a CommonJS module").
+- **FIX 25 test fixtures: 7 stale cases seeded with evidence (gate NOT weakened).**
+  ad-campaigns (2, via existing registerStageDeliverable before review),
+  mr-12-wip-limit-server, skill6-lifecycle-guard, u030-build-deck-board-source,
+  u034-four-fields (2) — each now registers one reachable url deliverable before
+  moving to review, matching the gate's own suite remedy. fix25's suite itself
+  sets DISABLE_QC_AUTO_SCORER=1: the fire-and-forget QC scorer raced its
+  evidenced control (no dept SOP → no-criteria → SYSTEM-block → blocked
+  overwrote review before the assert).
+- **Env isolation: interview-detection sandboxes HOME** so
+  candidateWorkspaceRoots() fallback roots ($HOME/.openclaw/workspace,
+  $HOME/Downloads/openclaw-master-files) cannot leak this operator box's real
+  interview artifacts into tmp-fixture assertions (CI-passes either way).
+
+### Proof
+
+- `npm run test:unit`: **2234/2234 pass, rc=0** (was 14 fail at v6.0.97 CI).
+- 5 re-routed fix files: **50/50 pass under vitest**.
+- middleware-bypass-replay remains the known local env artifact (symlinked
+  node_modules; green on CI in v6.0.97 B.1). No source assertion weakened.
+
+## [v6.0.97] — 2026-08-31 — CI red-release repair: migrations.ts junction + test pins
+
+### What changed
+
+- **Repair: corrupted `src/lib/db/migrations.ts` fixed.** The phase-A merge of FIX 5
+  (commit c0921ae) mangled the junction between migrations 127 and 128 — migration
+  128's opening `{` was glued to 127's closing brace, and the array closing
+  `},\n  },\n];` was lost. Every non-trivial test suite (all 40 vitest files import
+  the db chain) failed at module-transform time: 42 tests red across 6 files, build
+  smoke down, both Playwright e2e suites down, static call-site guard down. v6.0.96
+  shipped that syntax error on main; every client's CI was 9-jobs red.
+- **U117 pin update: passthrough-write-scope counts re-derived.** FIX 5 added POST
+  `/api/presentations/stage-timings` (a legitimate new mutating route, already in
+  middleware's fail-closed webhook family — HMAC over WEBHOOK_SECRET, 503 when
+  secret absent). The test's independent WEBHOOK_SECRET_ROUTES re-implementation
+  wasn't updated, so: total mutating routes 108→109, webhook-protected 5→6,
+  reachable stays 103 (the new route is NOT reachable — it's fail-closed).
+- **Local proof before push:** full `vitest run` on the repaired tree = 569 passed /
+  4 failed, and all 4 failures are in middleware-bypass-replay which fails
+  identically on pre-merge main (2585ad5) locally — env artifact, green on CI
+  runners. The 6 previously-red suites were verified green locally on old main
+  (153/153) and on the repaired tree.
+
+### Fixed
+
+- CI: qc-cc.yml B.1 deep-health (42 reds), build smoke, API smoke, Duck e2e,
+  interview e2e, U55 static guard, behavioral fixtures — all parse-cascade from
+  the single corrupted file.
+
 ## [v6.0.96] — 2026-08-31 — Presentation Department rev2 batch 1
 
 ### What changed

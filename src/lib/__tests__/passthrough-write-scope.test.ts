@@ -7,7 +7,8 @@
  * Derived 2026-07-27; counts re-derived 2026-07-29. Re-derive command (node):
  *   npx vitest run src/lib/__tests__/passthrough-write-scope.test.ts
  *
- * Counts baseline (measured 2026-07-27):
+ * Counts baseline (measured 2026-07-27; re-derived 2026-08-31 for FIX 5
+ * stage-timings: 109 mutating routes, 6 webhook-protected, 103 reachable):
  *   - API routes exporting a mutating method (export async function): 106
  *     (2026-07-29: +2 since derivation -- tasks/[id]/persona-choice and
  *      tasks/[id]/resume, both POST, both added after 2026-07-27. Both are
@@ -171,6 +172,10 @@ const WEBHOOK_SECRET_ROUTES = [
   '/api/webhooks/agent-completion',
   '/api/webhooks/auto-route',
   '/api/webhooks/task-created',
+  // FIX 5 (presentation rev2 phase A): stage-timings ingest joined the
+  // fail-closed webhook family in src/middleware.ts — keep this independent
+  // re-implementation in lockstep (U052 reddens on any drift).
+  '/api/presentations/stage-timings',
 ];
 const WEBHOOK_SECRET_DYNAMIC_ROUTES: RegExp[] = [
   /^\/api\/tasks\/[^/]+\/status$/,
@@ -216,12 +221,12 @@ const reachableCount = allMutatingRoutes.length - webhookProtectedCount;
 describe('passthrough-write-scope — anti-rot lock (U052)', () => {
   // ---- Counts ------------------------------------------------------------
 
-  it('API routes exporting a mutating method: 108 (literal assertion)', () => {
-    expect(allMutatingRoutes.length).toBe(108);
+  it('API routes exporting a mutating method: 109 (literal assertion)', () => {
+    expect(allMutatingRoutes.length).toBe(109);
   });
 
-  it('protected by isWebhookSecretRoute: 5', () => {
-    expect(webhookProtectedCount).toBe(5);
+  it('protected by isWebhookSecretRoute: 6', () => {
+    expect(webhookProtectedCount).toBe(6);
   });
 
   it('REACHABLE via forged same-origin: 103', () => {

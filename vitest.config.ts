@@ -216,6 +216,11 @@ export default defineConfig({
       // real MissionQueue.tsx, so it needs the store + next/navigation mocks —
       // vitest-only, never the tsx --test glob.
       'tests/unit/mr-46-agent-status-dot.test.ts',
+      'tests/unit/fix5-stage-timings-ingest.test.ts',
+      'tests/unit/fix14-profile-judge.test.ts',
+      'tests/unit/fix25-review-artifact-gate.test.ts',
+      'tests/unit/fix27-deliverable-path-reject.test.ts',
+      'tests/unit/fix28-bundle-reverify.test.ts',
     ],
     env: {
       NODE_ENV: 'test',

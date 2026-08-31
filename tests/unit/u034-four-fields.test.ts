@@ -204,6 +204,9 @@ test('qc_scores with null min_average writes NO row and still returns 200', asyn
 
 test('note AND description in same payload keeps BOTH with SET description once', async () => {
   const { id } = mkTask();
+  // FIX 25 (review-evidence gate, default ON): review requires a registered,
+  // reachable deliverable — seed one (fixture data, not a relaxation).
+  run(`INSERT INTO task_deliverables (id, task_id, deliverable_type, title, path) VALUES ('u034-ev-${Math.random().toString(36).slice(2,8)}', ?, 'url', 'U034 four-fields evidence', 'https://example.invalid/evidence.pdf')`, [id]);
   const { PATCH } = await import('../../src/app/api/tasks/[id]/route');
   const req = {
     json: async () => ({
@@ -222,6 +225,9 @@ test('note AND description in same payload keeps BOTH with SET description once'
 
 test('12000-char append trims oldest text, keeps note line at end', async () => {
   const { id } = mkTask();
+  // FIX 25 (review-evidence gate, default ON): review requires a registered,
+  // reachable deliverable — seed one (fixture data, not a relaxation).
+  run(`INSERT INTO task_deliverables (id, task_id, deliverable_type, title, path) VALUES ('u034-ev-${Math.random().toString(36).slice(2,8)}', ?, 'url', 'U034 four-fields evidence', 'https://example.invalid/evidence.pdf')`, [id]);
   // Create a task with a large existing description
   const longDesc = 'X'.repeat(8000);
   run('UPDATE tasks SET description = ? WHERE id = ?', [longDesc, id]);

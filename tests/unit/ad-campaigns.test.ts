@@ -97,6 +97,10 @@ test('moveAdStage backlog -> in_progress -> review stays at review (no QC auto-d
   const jobId = newJobId();
   createAdCampaign({ job_id: jobId, show_name: 'Review Pause Show' });
 
+  // FIX 25 (review-evidence gate, default ON): review requires a registered,
+  // reachable deliverable — seed one before the move (test-fixture update, not a
+  // relaxation: the gate's own fix25 suite proves the refusal for empty tasks).
+  registerStageDeliverable(jobId, 's1-overlays');
   await moveAdStage(jobId, { stage_slug: 's1-overlays', status: 'in_progress' });
   const mid = await moveAdStage(jobId, { stage_slug: 's1-overlays', status: 'review' });
   assert.equal(mid.status, 'review', 'human pause: card sits at review, not auto-advanced to done');
@@ -165,8 +169,8 @@ test('review -> done sets completed_at via DB trigger; epic done completes campa
   createAdCampaign({ job_id: jobId, show_name: 'Done Show' });
 
   await moveAdStage(jobId, { stage_slug: 's7-deliver', status: 'in_progress' });
+  registerStageDeliverable(jobId, 's7-deliver'); // FIX 25 gate needs evidence BEFORE review
   await moveAdStage(jobId, { stage_slug: 's7-deliver', status: 'review' });
-  registerStageDeliverable(jobId, 's7-deliver');
   const done = await moveAdStage(jobId, { stage_slug: 's7-deliver', status: 'done' });
   assert.equal(done.status, 'done');
   const doneRow = queryOne<{ completed_at: string | null }>(
@@ -177,8 +181,8 @@ test('review -> done sets completed_at via DB trigger; epic done completes campa
 
   // Drive the epic to done and confirm the campaign row flips to complete.
   await moveAdStage(jobId, { stage_slug: 'epic', status: 'in_progress' });
+  registerStageDeliverable(jobId, 'epic'); // FIX 25 gate needs evidence BEFORE review
   await moveAdStage(jobId, { stage_slug: 'epic', status: 'review' });
-  registerStageDeliverable(jobId, 'epic');
   await moveAdStage(jobId, { stage_slug: 'epic', status: 'done' });
   const { campaign } = getAdCampaign(jobId);
   assert.equal((campaign as { status: string }).status, 'complete');
