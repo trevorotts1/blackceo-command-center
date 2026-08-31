@@ -39,7 +39,16 @@ process.env.DATABASE_PATH = TMP_DB;
 // Each test writes/deletes specific files inside it and cleans up after itself.
 const TMP_WORKSPACE = fs.mkdtempSync(path.join(os.tmpdir(), 'bc-interview-ws-'));
 process.env.OPENCLAW_WORKSPACE_ROOT = TMP_WORKSPACE;
-
+// candidateWorkspaceRoots() falls through OPENCLAW_WORKSPACE_ROOT to
+// $HOME/.openclaw/workspace, $HOME/clawd, $HOME/Downloads/openclaw-master-files.
+// On an operator box those are REAL directories holding REAL interview
+// artifacts (workforce-interview-answers.md, .workforce-build-state.json),
+// which leak positive signals into the "no filesystem signals" and
+// build-state assertions below even though the tmp fixture is empty. Sandboxing
+// HOME keeps every fallback root inside the throwaway folder — the assertions
+// and signals under test are unchanged; only the probe surface is isolated.
+const SANDBOX_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'bc-interview-home-'));
+process.env.HOME = SANDBOX_HOME;
 type StateModule = typeof import('../../src/lib/conversational-ai/interview-state');
 let getInterviewState: StateModule['getInterviewState'];
 

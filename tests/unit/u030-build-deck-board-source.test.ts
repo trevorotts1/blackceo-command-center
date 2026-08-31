@@ -62,7 +62,11 @@ test('done→403',async()=>{
   assert.equal(r.status,403); assert.equal(st(id),'review');
 });
 test('backlog→review→200 (FIX-5-HIGH-C10-BOARD-5b)',async()=>{
-  const id=mk('build_deck'); const r=await post(id,{status:'review'});
+  const id=mk('build_deck');
+  // FIX 25 (review-evidence gate, default ON): review requires a registered,
+  // reachable deliverable — seed one (fixture data, not a relaxation).
+  run(`INSERT INTO task_deliverables (id, task_id, deliverable_type, title, path) VALUES ('u030-ev', ?, 'url', 'U030 board-source evidence', 'https://example.invalid/evidence.pdf')`,[id]);
+  const r=await post(id,{status:'review'});
   assert.equal(r.status,200); assert.equal(st(id),'review');
 });
 test('engineSourceLabel',async()=>{

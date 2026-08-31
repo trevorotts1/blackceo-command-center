@@ -155,6 +155,13 @@ test('transition into a review column under its limit is allowed', async () => {
 
   const mover = `mr12-rv-mover-${RUN_ID}`;
   seedTask(mover, 'in_progress');
+  // FIX 25 (review-evidence gate, default ON): review requires a registered,
+  // reachable deliverable — seed one (fixture data, not a relaxation).
+  run(
+    `INSERT INTO task_deliverables (id, task_id, deliverable_type, title, path)
+     VALUES ('mr12-ev-${'${'}RUN_ID}', ?, 'url', 'WIP capacity test evidence', 'https://example.invalid/evidence.pdf')`,
+    [mover],
+  );
 
   const updated = await transition(mover, 'review', { actor: 'test' });
   assert.equal(updated.status, 'review', 'a review column with capacity must accept the move');

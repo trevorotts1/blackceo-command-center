@@ -120,6 +120,13 @@ test.after(() => {
 test("backlog → review is a legal transition (succeeds with 200 without operatorOverride)", async () => {
   const id = `s6-backlog-review-${RUN_ID}`;
   seedCard(id, 'backlog'); // LEGAL_TRANSITIONS.backlog now includes 'review'
+  // FIX 25 (review-evidence gate, default ON): review requires a registered,
+  // reachable deliverable — seed one (fixture data, not a relaxation).
+  run(
+    `INSERT INTO task_deliverables (id, task_id, deliverable_type, title, path)
+     VALUES ('s6-ev-${'${'}RUN_ID}', ?, 'url', 'S6 guard evidence', 'https://example.invalid/evidence.pdf')`,
+    [id],
+  );
 
   const res = await callRoute(id, { status: 'review' });
 
