@@ -17,12 +17,15 @@
  * library (one QC specialist per department).
  *
  * Scoring paths:
- *   1. LLM-backed (primary): the JUDGE runs on the CLIENT's OWN Ollama Cloud
- *      model (QC-08 operator decision) — the dept QC agent's model or
- *      QC_JUDGE_MODEL, which MUST be an ollama-cloud / :cloud model, called via
- *      the client's OLLAMA_CLOUD_API_KEY. The judge is NEVER an operator/shared
- *      paid OpenAI/Google key, and NEVER the same model that wrote the content
- *      (JUDGE != WRITER). No client judge configured → fail CLOSED to (2).
+ *   1. LLM-backed (primary): the JUDGE runs on a CLIENT-OWNED provider (QC-08
+ *      sovereignty + FIX 14) — the dept QC agent's model or QC_JUDGE_MODEL, on
+ *      any provider whose client key resolves here (Ollama Cloud stays first in
+ *      priority; OpenRouter, OpenAI, Z.AI, Moonshot, MiniMax, Google, xAI,
+ *      Xiaomi, Ollama Local all qualify), called via the owning connector with
+ *      the client's own key. The judge is NEVER an operator/shared paid key, and
+ *      NEVER the same model that wrote the content (JUDGE != WRITER). No judge
+ *      on ANY owned provider → fail CLOSED to (2). Rollback flag:
+ *      PRESENTATION_QC_JUDGE_PROFILE=0 restores Ollama-Cloud-only selection.
  *   2. Heuristic fallback (no client judge / judge error): structural checks on the
  *      deliverable meta (description non-empty, SOP assigned, persona assigned,
  *      title non-trivial). Returns a conservative score in [6.0, 8.0].
@@ -78,8 +81,8 @@ import { recordBlockEvent } from '@/lib/block-events';
 import { assertNoFixtureEnvInProduction } from '@/lib/fixture-guard';
 import { EVIDENCE_DELIVERABLE_TYPES, isUsableUrl, collectCompletionEvidence, isBundleDeliverablePath, verifyPresentationBundleDeliverable, bundleReverifyEnabled } from '@/lib/completion-evidence';
 import { getProvider } from '@/lib/model-providers';
+import { listModels } from '@/lib/model-registry';
 import {
-  chatCompletion as ollamaCloudChat,
   getOllamaCloudChatEndpoint,
 } from '@/lib/model-providers/ollama-cloud';
 import { resolveProviderApiKey } from '@/lib/provider-key-detection';
@@ -1113,9 +1116,12 @@ export interface QCResult {
     | 'judge-empty-response'
     | 'judge-malformed-response';
   /**
-   * Judge-failure DIAGNOSTICS — WHAT failed and WHERE we called. Populated on
-   * every judge-failure path so the deferral, the operator log and the terminal
+   * Judge DIAGNOSTICS — WHAT ran and WHERE we called. Populated on every
+   * judge-failure path so the deferral, the operator log and the terminal
    * escalation can all report the REAL failure instead of a guessed category.
+   * FIX 14: also populated on the llm SUCCESS path — with the judge now
+   * selectable across every client-owned provider, which provider judged is
+   * part of the verdict's provenance, not just its failure.
    */
   judgeModel?: string;
   judgeEndpoint?: string;
@@ -1439,44 +1445,216 @@ function resolveClientJudgeModel(input: QCScorerInput): string | null {
   return null;
 }
 
-/** Resolve the client's Ollama Cloud API key across all env/file/config stores. */
-function resolveOllamaCloudApiKey(): string | null {
+// ---------------------------------------------------------------------------
+// FIX 14 (presentation rev2) — the QC judge is no longer Ollama-Cloud-ONLY.
+// ---------------------------------------------------------------------------
+// BROKEN (spec): a client whose profile owns DeepSeek via OpenRouter, or
+// OpenAI, Z.AI, Moonshot, MiniMax, Google… — but NOT Ollama Cloud — could never
+// run auto-QC: resolveClientJudgeModel() above rejects every non-`:cloud` id, so
+// the scorer fail-closed to heuristic 'no-key' and the card parked in human
+// review forever. The judge was never allowed to come from the client's OWN
+// other providers even though they are exactly as client-owned as Ollama.
+//
+// FIX (spec binding): "allow the judge model to come from the client profile's
+// available providers; fail-closed to human review only when NO judge is
+// available on ANY owned provider." On the CC side, the client's "available
+// providers" are the provider registry + the key stores
+// resolveProviderApiKey() scans — the same surface FIX 9's probes feed and the
+// weekly refresh job consumes — and "available" means the connector exists,
+// a key resolves for it, AND the box's own probed catalog (model_registry,
+// Migration 031) carries at least one ACTIVE TEXT-capable model for it. The
+// judge id is never invented; it is either explicitly configured (dept QC
+// agent model / QC_JUDGE_MODEL) and then proven against that catalog, or
+// auto-picked from the catalog in provider-priority order.
+//
+// Sovereignty is UNCHANGED — widened, not loosened: the judge still runs on a
+// CLIENT-OWNED key (never an operator/shared paid key), and JUDGE != WRITER
+// still holds. The only thing that changed is WHICH client-owned providers are
+// eligible.
+//
+// Rollout flag: PRESENTATION_QC_JUDGE_PROFILE=1 (default ON). =0 is the
+// documented rollback — it restores the Ollama-Cloud-only selection verbatim.
+// A disabled flag selects the explicitly-documented old path; it never skips
+// the judge gate silently (scoreTaskForQC still fail-closes without a judge).
+// ---------------------------------------------------------------------------
+
+const JUDGE_PROFILE_FLAG_ENV = 'PRESENTATION_QC_JUDGE_PROFILE';
+
+/** Default ON; =0 is the documented Ollama-Cloud-only rollback path. */
+export function qcJudgeProfileFlagEnabled(): boolean {
+  return process.env[JUDGE_PROFILE_FLAG_ENV] !== '0';
+}
+
+/** A judge result: the selected model id, its owning provider slug, the connector. */
+export interface JudgeSelection {
+  modelId: string;
+  provider: string;
+  apiKey: string;
+}
+
+/**
+ * Provider priority for AUTO-picking a judge when none is explicitly
+ * configured. Explicit configuration (dept QC agent model / QC_JUDGE_MODEL)
+ * always wins over this order. The order mirrors the registry's refresh order
+ * (high-traffic text providers first); Anthropic is absent because the
+ * connector itself is operator-only (ALLOW_ANTHROPIC_PROVIDER, P2-2) and is
+ * never present on a client box.
+ */
+const JUDGE_PROVIDER_PRIORITY: readonly string[] = [
+  'ollama-cloud',
+  'ollama-local',
+  'openai',
+  'openrouter',
+  'zai',
+  'moonshot',
+  'minimax',
+  'google',
+  'xai',
+  'xiaomi',
+];
+
+/** True when the registry row can judge text (the QC prompt is pure text). */
+function judgeCatalogEntry(entry: { model_id: string; capabilities?: string[] }): boolean {
+  return (
+    Array.isArray(entry.capabilities) &&
+    (entry.capabilities as string[]).includes('text')
+  );
+}
+
+/** Native model id for a connector: strip the "<slug>/" prefix. */
+function nativeModelId(modelId: string): string {
+  const idx = modelId.indexOf('/');
+  return idx > 0 ? modelId.slice(idx + 1) : modelId;
+}
+
+/** Provider-prefixed id for a connector-owned native id (round-trip helper). */
+function providerModelId(provider: string, nativeId: string): string {
+  return nativeId.includes('/') ? nativeId : `${provider}/${nativeId}`;
+}
+
+/**
+ * FIX 14 — the widened judge selection. Ordered:
+ *   1. Explicit candidates (dept QC agent model, then QC_JUDGE_MODEL):
+ *      accepted when the model id is owned by a registered provider whose key
+ *      resolves (any client-owned provider under the flag; Ollama Cloud only
+ *      under the rollback).
+ *   2. Auto-pick: walk JUDGE_PROVIDER_PRIORITY, take the first provider with a
+ *      resolvable key, a chatCompletion connector, and an active text-capable
+ *      model in this box's own probed catalog.
+ * Returns null when NO judge is available on ANY owned provider — the caller
+ * fail-closes to human review (spec: only then).
+ *
+ * Never raises, never logs a key value.
+ */
+export function resolveJudgeSelection(input: QCScorerInput): JudgeSelection | null {
+  const wide = qcJudgeProfileFlagEnabled();
+
+  // ── 1. Explicit candidates ────────────────────────────────────────────────
+  const explicitCandidates: string[] = [];
+  for (const c of [input.qcAgentModel, process.env.QC_JUDGE_MODEL]) {
+    if (c && c.trim()) explicitCandidates.push(c.trim());
+  }
+  for (const candidate of explicitCandidates) {
+    // Rollback path: the old Ollama-Cloud-only gate, verbatim.
+    if (!wide && !isOllamaCloudModel(candidate)) continue;
+
+    const slug = candidate.includes('/')
+      ? candidate.slice(0, candidate.indexOf('/'))
+      : 'ollama-cloud'; // bare `:cloud`-tagged ids were always Ollama Cloud
+    const provider = getProvider(slug);
+    if (!provider || typeof provider.chatCompletion !== 'function') continue;
+    const keyRes = resolveProviderApiKey(provider);
+    if (!('found' in keyRes) || !keyRes.found || !keyRes.value) continue;
+
+    // Availability (FIX 9's contract, CC side) — split by WHO named the model:
+    //   EXPLICIT (this branch): the operator/client CONFIGURED this judge id
+    //   (dept QC agent model / QC_JUDGE_MODEL). Requiring a model_registry row
+    //   here would re-create the Error-13 defect this file already fixed once —
+    //   the gate silently rejecting a model the operator explicitly named
+    //   because the weekly refresh had not catalogued it. The registry is a
+    //   CACHE of provider catalogs, not an allowlist: an explicitly configured
+    //   judge on a provider whose key resolves IS available — that is exactly
+    //   what "proven available" means for a named model, and the live call
+    //   below is the final truth anyway.
+    //   AUTO-PICK (below): no human named a model, so the catalog IS the only
+    //   availability proof — a model is never invented, only chosen from what
+    //   this box's own probes recorded.
+    const fullId = providerModelId(provider.slug, candidate);
+
+    return { modelId: fullId, provider: provider.slug, apiKey: keyRes.value };
+  }
+
+  if (!wide) return null; // rollback: no auto-pick; Ollama-only or nothing
+
+  // ── 2. Auto-pick from the probed inventory ────────────────────────────────
+  for (const slug of JUDGE_PROVIDER_PRIORITY) {
+    const provider = getProvider(slug);
+    if (!provider || typeof provider.chatCompletion !== 'function') continue;
+    const keyRes = resolveProviderApiKey(provider);
+    if (!('found' in keyRes) || !keyRes.found || !keyRes.value) continue;
+    const entry = firstActiveTextModel(provider.slug);
+    if (!entry) continue;
+    return { modelId: entry.model_id, provider: provider.slug, apiKey: keyRes.value };
+  }
+  return null;
+}
+
+/** First ACTIVE text-capable catalog row for a provider (label-ordered, like the UI). */
+function firstActiveTextModel(providerSlug: string): { model_id: string } | null {
   try {
-    const provider = getProvider('ollama-cloud');
-    if (!provider) return null;
-    const res = resolveProviderApiKey(provider);
-    if ('found' in res && res.found && res.value) return res.value;
-    return null;
+    const rows = listModels({
+      provider: providerSlug,
+      status: 'active',
+      capability: 'text',
+    }) as Array<{ model_id: string; capabilities?: string[] }>;
+    const judgeable = rows.filter(judgeCatalogEntry);
+    return judgeable.length > 0 ? judgeable[0] : null;
   } catch {
     return null;
   }
 }
 
 /**
- * Score the task with the client's Ollama Cloud judge model (OpenAI-compatible
- * via the ollama-cloud connector). Returns null on any error so the caller can
+ * Score the task with the selected judge. FIX 14: the judge may run on ANY
+ * client-owned provider connector (OpenRouter, OpenAI, Z.AI, Moonshot,
+ * MiniMax, Google, xAI, Xiaomi, Ollama Local — or Ollama Cloud, which remains
+ * first in priority), always through the owning connector's own
+ * chatCompletion. OpenAI-compatible across the set, so one implementation
+ * serves every provider. Returns null on any error so the caller can
  * treat it as provider-down (defer + retry). Temperature 0 for a stable verdict.
  */
-async function llmScoreViaOllamaCloud(
+async function llmScoreViaJudge(
   prompt: string,
-  apiKey: string,
-  judgeModelId: string,
+  selection: JudgeSelection,
 ): Promise<JudgeOutcome> {
+  const { apiKey, modelId, provider: providerSlug } = selection;
   const maxTokens = resolveJudgeMaxTokens();
-  const endpoint = getOllamaCloudChatEndpoint();
 
-  // The connector wants the raw Ollama model name; strip the registry
-  // 'ollama-cloud/' prefix but keep any ':cloud' tag (that IS the raw name).
-  const rawModel = judgeModelId.startsWith('ollama-cloud/')
-    ? judgeModelId.slice('ollama-cloud/'.length)
-    : judgeModelId;
+  const provider = getProvider(providerSlug);
+  if (!provider || typeof provider.chatCompletion !== 'function') {
+    return {
+      ok: false,
+      kind: 'unreachable',
+      detail: `no chatCompletion connector registered for provider "${providerSlug}" (judge "${modelId}")`,
+    };
+  }
+  // Every connector in the registry takes the NATIVE model id (registry ids are
+  // `<slug>/<native>`); the ollama-cloud raw name keeps any ':cloud' tag — that
+  // IS the raw name there.
+  const endpoint = provider.slug === 'ollama-cloud'
+    ? getOllamaCloudChatEndpoint()
+    : `${provider.slug} connector`;
+  const rawModel = nativeModelId(modelId);
 
   // ── UNREACHABLE — and ONLY unreachable ─────────────────────────────────────
   // This try wraps the NETWORK CALL ALONE. It used to wrap the parse too, which
   // is how a perfectly healthy provider's reply got reported as an outage.
   let resp: ChatCompletionResponse;
   try {
-    resp = await ollamaCloudChat(apiKey, {
+    // FIX 14: the owning connector carries the call — same request shape
+    // (OpenAI-compatible across the registry), same client-owned key, whatever
+    // provider the client actually has.
+    resp = await provider.chatCompletion(apiKey, {
       model: rawModel,
       messages: [
         { role: 'system', content: 'You are a precise QC agent. Reply only with valid JSON.' },
@@ -1488,7 +1666,7 @@ async function llmScoreViaOllamaCloud(
   } catch (err) {
     const detail =
       `the judge at ${endpoint} never answered: ${(err as Error).message} ` +
-      `(model "${judgeModelId}"). The provider is genuinely UNREACHABLE.`;
+      `(model "${modelId}"). The provider is genuinely UNREACHABLE.`;
     console.warn(`[QCScorer] QC judge UNREACHABLE: ${detail}`);
     return { ok: false, kind: 'unreachable', detail };
   }
@@ -1513,7 +1691,7 @@ async function llmScoreViaOllamaCloud(
   if (!raw) {
     const reasoningChars = message?.reasoning?.length ?? 0;
     const detail =
-      `the judge "${judgeModelId}" at ${endpoint} ANSWERED, but message.content was EMPTY ` +
+      `the judge "${modelId}" at ${endpoint} ANSWERED, but message.content was EMPTY ` +
       `(${budgetNote}, reasoning_chars=${reasoningChars}). THE PROVIDER IS UP — do not chase ` +
       `routing, addresses or credentials. On a REASONING model this is completion-budget ` +
       `starvation: the hidden reasoning field consumes the whole max_tokens budget and content ` +
@@ -1535,7 +1713,7 @@ async function llmScoreViaOllamaCloud(
     // not malformed by the model. This is the "Unterminated string" signature.
     const truncated = finishReason === 'length';
     const detail =
-      `the judge "${judgeModelId}" at ${endpoint} ANSWERED, but its content did not parse as ` +
+      `the judge "${modelId}" at ${endpoint} ANSWERED, but its content did not parse as ` +
       `JSON: ${(err as Error).message} (${budgetNote}, content_chars=${cleaned.length})` +
       (truncated
         ? `. finish_reason=length means the reply was CUT OFF by the completion budget — raise ` +
@@ -1559,6 +1737,11 @@ async function llmScoreViaOllamaCloud(
       reason: typeof parsed.reason === 'string' ? `[model-stated] ${parsed.reason}` : `Score: ${score.toFixed(1)}/10`,
       gaps: Array.isArray(parsed.gaps) ? parsed.gaps.filter((g) => typeof g === 'string') : [],
       scoringPath: 'llm',
+      // FIX 14: record WHICH judge actually ran — the widened selection means
+      // the provider is no longer a constant, so every llm-path verdict carries
+      // its judge identity for the board event and the escalation surfaces.
+      judgeModel: modelId,
+      judgeEndpoint: endpoint,
     },
   };
 }
@@ -1652,25 +1835,35 @@ export async function scoreTaskForQC(input: QCScorerInput): Promise<QCResult> {
     return h;
   };
 
-  const judgeModel = resolveClientJudgeModel(input);
-  if (!judgeModel) {
+  // FIX 14 (presentation rev2): the judge comes from the CLIENT'S OWN
+  // providers — Ollama Cloud remains first in priority, but a DeepSeek/
+  // OpenRouter/OpenAI/Z.AI-only client now gets a REAL auto-QC instead of the
+  // automatic human-review park. Selection is availability-proven (connector
+  // + client key + the box's own probed catalog), never an invented model id,
+  // never an operator/shared key. Flag PRESENTATION_QC_JUDGE_PROFILE=0 rolls
+  // back to the Ollama-Cloud-only behavior verbatim.
+  const judge = resolveJudgeSelection(input);
+  if (!judge) {
+    if (qcJudgeProfileFlagEnabled()) {
+      return failClosed(
+        'no judge model is available on ANY client-owned provider (configure the dept QC agent model or QC_JUDGE_MODEL to a model on a provider whose key is present here, or have the weekly refresh probe that provider\'s catalog; under the rollback flag PRESENTATION_QC_JUDGE_PROFILE=0 an ollama-cloud / :cloud model is required)',
+      );
+    }
     return failClosed(
       'no client Ollama Cloud judge model configured (set the dept QC agent model or QC_JUDGE_MODEL to an ollama-cloud / :cloud model)',
     );
   }
+  const judgeModel = judge.modelId;
 
   // JUDGE != WRITER: the judge model must differ from the model that wrote the
   // content it grades. Enforced whenever the writer model is known (optional).
-  if (
-    input.writerModel &&
-    input.writerModel.trim().toLowerCase() === judgeModel.toLowerCase()
-  ) {
-    return failClosed(`judge model equals writer model (${judgeModel}) — JUDGE != WRITER violated`);
-  }
-
-  const ollamaKey = resolveOllamaCloudApiKey();
-  if (!ollamaKey) {
-    return failClosed('no client Ollama Cloud API key found (OLLAMA_CLOUD_API_KEY / OLLAMA_API_KEY)');
+  // FIX 14 compares BOTH shapes (registry-prefixed and native) so a writer
+  // named `openrouter/deepseek-v4-pro` cannot judge as `deepseek-v4-pro`.
+  if (input.writerModel) {
+    const writer = input.writerModel.trim().toLowerCase();
+    if (writer === judgeModel.toLowerCase() || writer === nativeModelId(judgeModel).toLowerCase()) {
+      return failClosed(`judge model equals writer model (${judgeModel}) — JUDGE != WRITER violated`);
+    }
   }
 
   let failure: { kind: JudgeFailureKind; detail: string };
@@ -1680,7 +1873,7 @@ export async function scoreTaskForQC(input: QCScorerInput): Promise<QCResult> {
       detail: `QC_SIMULATE_PROVIDER_DOWN is set — a genuine provider outage is being simulated for judge "${judgeModel}".`,
     };
   } else {
-    const outcome = await llmScoreViaOllamaCloud(prompt, ollamaKey, judgeModel);
+    const outcome = await llmScoreViaJudge(prompt, judge);
     if (outcome.ok) return outcome.result;
     failure = { kind: outcome.kind, detail: outcome.detail };
   }
@@ -1692,7 +1885,9 @@ export async function scoreTaskForQC(input: QCScorerInput): Promise<QCResult> {
   const heuristic = heuristicScore(input);
   heuristic.heuristicReason = judgeKindToHeuristicReason(failure.kind);
   heuristic.judgeModel = judgeModel;
-  heuristic.judgeEndpoint = getOllamaCloudChatEndpoint();
+  heuristic.judgeEndpoint = judge.provider === 'ollama-cloud'
+    ? getOllamaCloudChatEndpoint()
+    : `${judge.provider} connector (${judgeModel})`;
   heuristic.judgeFailureDetail = failure.detail;
   // heuristicScore() hard-codes "no LLM API key configured" in its reason — TRUE
   // on the no-key path, FALSE here: a client judge IS configured, it just failed.
