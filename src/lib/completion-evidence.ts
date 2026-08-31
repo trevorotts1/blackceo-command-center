@@ -53,7 +53,158 @@
  */
 
 import { queryAll } from '@/lib/db';
-import { existsSync, statSync } from 'fs';
+import { existsSync, statSync, lstatSync, openSync, readSync, closeSync } from 'fs';
+
+// ---------------------------------------------------------------------------
+// FIX 28 — CC-side bundle re-verification (mirrors build_deck.py postflight)
+// ---------------------------------------------------------------------------
+//
+// The strong postflight completeness gate in the client's build pipeline
+// (build_deck.py `run_postflight_gate`, AF-BUNDLE-COMPLETE) verifies every
+// DELIVERABLES_REQUIRED artifact exists in bundle_dir AND passes its per-artifact
+// min_bytes floor AND carries the leading magic bytes its type implies (symlinks
+// rejected, size via lstat never following a link, md size-only, webinar mp4
+// skipped as produced_later). That gate runs CLIENT-SIDE; until FIX 28, CC
+// trusted the certificate JSON / a bare "file exists and is non-empty" and never
+// re-checked a single byte. A decoy — junk bytes renamed to FINAL.pptx at the
+// right size, or an under-floor stub — validated as completion evidence.
+//
+// The table below mirrors the client authority (floors in bytes, magic
+// signatures, size-only md, produced-later webinar skip). CC re-runs the
+// equivalent probe against REGISTERED deliverables at the done gate. A file
+// whose name is bundle-shaped must now actually BE the artifact it names to
+// count as evidence; every other deliverable keeps its existing behavior, and
+// PRESENTATION_BUNDLE_REVERIFY=0 restores the pre-fix semantics verbatim.
+
+/** Feature flag, read LIVE per call. Default ON; =0 rolls back to pre-fix. */
+export function bundleReverifyEnabled(): boolean {
+  return process.env.PRESENTATION_BUNDLE_REVERIFY !== '0';
+}
+
+interface BundleSpec {
+  /** human key from the client table, for the refusal message */
+  key: string;
+  floor: number;
+  /** leading magic signatures; undefined = size-only (plain text, per spec) */
+  signatures?: Buffer[];
+}
+
+const SIG = (...stringsToBuffer: string[]): Buffer[] => stringsToBuffer.map((s) => Buffer.from(s, 'binary'));
+
+/**
+ * DELIVERABLES_REQUIRED ∩ DELIVERABLE_MAGIC from build_deck.py, verbatim
+ * (floors + magics + md size-only). `webinar_mp4` (`*-WEBINAR.mp4`) is
+ * deliberately ABSENT — produced_later in the client table, and its real
+ * presence gate belongs to the phases that produce it.
+ */
+const BUNDLE_SPECS: Array<{ match: (base: string) => boolean; spec: BundleSpec }> = [
+  { match: (b) => b === 'PRESENTER-GUIDE.pdf', spec: { key: 'guide_pdf', floor: 51_200, signatures: SIG('%PDF') } },
+  { match: (b) => b === 'PRESENTERS-SPEECH.pdf', spec: { key: 'speech_pdf', floor: 3_000, signatures: SIG('%PDF') } },
+  { match: (b) => b === 'PRESENTERS-SPEECH.md', spec: { key: 'speech_md', floor: 2_048 } },
+  { match: (b) => b === 'PRESENTERS-SPEECH-FISH-TAGGED.md', spec: { key: 'speech_fish_md', floor: 2_048 } },
+  { match: (b) => b === 'PRESENTER-AUDIO.mp3', spec: { key: 'audio_mp3', floor: 512_000, signatures: SIG('ID3', '\xff\xfb', '\xff\xf3', '\xff\xf2') } },
+  { match: (b) => b === 'infographic.png', spec: { key: 'infographic_png', floor: 102_400, signatures: SIG('\x89PNG') } },
+  {
+    match: (b) => b === 'presenter-teleprompter.html',
+    spec: {
+      key: 'teleprompter_html',
+      floor: 20_000,
+      signatures: SIG('<!DOCTYPE', '<!doctype', '<!Doctype', '<html', '<HTML', '<!--'),
+    },
+  },
+  { match: (b) => b.endsWith('-FINAL.pptx'), spec: { key: 'deck_pptx', floor: 1_048_576, signatures: SIG('PK\x03\x04') } },
+  { match: (b) => b.endsWith('-FINAL.pdf'), spec: { key: 'deck_pdf', floor: 51_200, signatures: SIG('%PDF') } },
+];
+
+/** True when the path's basename is a bundle-managed artifact name. */
+export function isBundleDeliverablePath(rawPath: string | null | undefined): boolean {
+  if (!rawPath) return false;
+  const base = rawPath.trim().split('/').pop() ?? '';
+  return BUNDLE_SPECS.some((e) => e.match(base));
+}
+
+export interface BundleProbeVerdict {
+  ok: boolean;
+  /** named status mirroring build_deck.py's postflight statuses */
+  status?: 'ABSENT' | 'SYMLINK' | 'NOT_REGULAR' | 'UNDER_THRESHOLD' | 'WRONG_TYPE';
+  reason?: string;
+  sizeBytes?: number;
+  bundleKey?: string;
+}
+
+function magicOk(head: Buffer, signatures: Buffer[]): boolean {
+  if (signatures.some((s) => head.subarray(0, s.length).equals(s))) return true;
+  // Text-ish signatures ('<'-leading) tolerate a UTF-8 BOM + leading ASCII
+  // whitespace, exactly like the client's _magic_ok; binary magics stay at 0.
+  const want = Math.max(...signatures.map((s) => s.length));
+  const trimmed = head.subarray(0, want + 8);
+  let t = trimmed;
+  if (t.subarray(0, 3).equals(Buffer.from([0xef, 0xbb, 0xbf]))) t = t.subarray(3);
+  let start = 0;
+  while (start < t.length && (t[start] === 0x20 || t[start] === 0x09 || t[start] === 0x0d || t[start] === 0x0a)) start += 1;
+  const body = t.subarray(start);
+  return signatures.filter((s) => s[0] === 0x3c).some((s) => body.subarray(0, s.length).equals(s));
+}
+
+/**
+ * Re-run the bundle postflight probe for ONE registered deliverable path,
+ * client-authority semantics: lexists-equivalent presence (a dangling symlink
+ * is present-but-rejected), symlink rejection, non-regular-file rejection,
+ * lstat size (never follow a link) against the floor, then leading magic bytes
+ * (md size-only). Reads ONLY the header bytes needed — never the whole file.
+ * Fail-closed: any error to probe is a rejection, never a pass.
+ */
+export function verifyPresentationBundleDeliverable(rawPath: string | null | undefined): BundleProbeVerdict {
+  if (!rawPath || rawPath.trim() === '') {
+    return { ok: false, status: 'ABSENT', reason: 'ABSENT: no path registered' };
+  }
+  const resolved = rawPath.replace(/^~/, process.env.HOME || '');
+  const base = resolved.split('/').pop() ?? '';
+  const entry = BUNDLE_SPECS.find((e) => e.match(base));
+  if (!entry) {
+    // Not a bundle-managed name — nothing to re-verify here.
+    return { ok: true, reason: 'not bundle-managed', sizeBytes: undefined };
+  }
+  const { key, floor, signatures } = entry.spec;
+
+  let lstat: ReturnType<typeof lstatSync>;
+  try {
+    lstat = lstatSync(resolved); // throws on absent/dangling; never follows a symlink
+  } catch {
+    return { ok: false, status: 'ABSENT', reason: `ABSENT: ${base} not found in registered location (${resolved})`, bundleKey: key };
+  }
+  if (lstat.isSymbolicLink()) {
+    return { ok: false, status: 'SYMLINK', reason: `SYMLINK: ${base} is a symlink (rejected: a symlink can point at a large unrelated/decoy file)`, bundleKey: key };
+  }
+  if (!lstat.isFile()) {
+    return { ok: false, status: 'NOT_REGULAR', reason: `NOT_REGULAR: ${base} is not a regular file`, bundleKey: key };
+  }
+  const actual = lstat.size;
+  if (actual < floor) {
+    return { ok: false, status: 'UNDER_THRESHOLD', reason: `UNDER_THRESHOLD: ${base} is ${actual} bytes (min ${floor})`, sizeBytes: actual, bundleKey: key };
+  }
+  if (signatures && signatures.length > 0) {
+    const want = Math.max(...signatures.map((s) => s.length)) + 8; // +8 covers BOM + leading WS
+    let head: Buffer;
+    try {
+      const fd = openSync(resolved, 'r');
+      try {
+        head = Buffer.alloc(want);
+        const read = readSync(fd, head, 0, want, 0);
+        head = head.subarray(0, read);
+      } finally {
+        closeSync(fd);
+      }
+    } catch (err) {
+      // Fail-closed: unreadable leading bytes can never be claimed to match.
+      return { ok: false, status: 'WRONG_TYPE', reason: `WRONG_TYPE: ${base} leading bytes unreadable (${(err as Error).message})`, sizeBytes: actual, bundleKey: key };
+    }
+    if (!magicOk(head, signatures)) {
+      return { ok: false, status: 'WRONG_TYPE', reason: `WRONG_TYPE: ${base} is ${actual} bytes but leading bytes do not match expected magic for this deliverable type (decoy/wrong-type file)`, sizeBytes: actual, bundleKey: key };
+    }
+  }
+  return { ok: true, reason: 'verified', sizeBytes: actual, bundleKey: key };
+}
 
 /**
  * Deliverable types that can serve as completion evidence.
@@ -105,6 +256,18 @@ export function isUsableFile(rawPath: string | null | undefined): boolean {
   }
 }
 
+// FIX 28: bundle-shaped deliverable names get the byte-level re-verification;
+// ordinary files keep the existence+non-empty rule unchanged.
+function isUsableFileForEvidence(rawPath: string | null | undefined): { usable: boolean; problem?: string } {
+  const resolved = rawPath ? rawPath.replace(/^~/, process.env.HOME || '') : '';
+  if (bundleReverifyEnabled() && isBundleDeliverablePath(rawPath)) {
+    const verdict = verifyPresentationBundleDeliverable(resolved);
+    if (verdict.ok) return { usable: true };
+    return { usable: false, problem: verdict.reason ?? 'bundle verification failed' };
+  }
+  return { usable: isUsableFile(rawPath) };
+}
+
 /**
  * Collect the completion evidence registered against a task.
  *
@@ -143,8 +306,15 @@ export function collectCompletionEvidence(taskId: string): CompletionEvidence {
       else problems.push(`"${row.title}": not a valid http(s) URL (${row.path ?? 'no path'})`);
       continue;
     }
-    if (isUsableFile(row.path)) usable += 1;
-    else problems.push(`"${row.title}": file missing or empty (${row.path ?? 'no path'})`);
+    if (row.deliverable_type === 'url') {
+      if (isUsableUrl(row.path)) usable += 1;
+      else problems.push(`"${row.title}": not a valid http(s) URL (${row.path ?? 'no path'})`);
+      continue;
+    }
+    // file | artifact | image — FIX 28: bundle-shaped names re-verify bytes.
+    const fileTry = isUsableFileForEvidence(row.path);
+    if (fileTry.usable) usable += 1;
+    else problems.push(`"${row.title}": ${fileTry.problem ?? `file missing or empty (${row.path ?? 'no path'})`}`);
   }
 
   return { hasEvidence: usable > 0, rows, problems };

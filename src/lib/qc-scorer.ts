@@ -76,7 +76,7 @@ import { transition, TransitionError } from '@/lib/task-lifecycle';
 import { requiresRegisteredCertificate } from '@/lib/presentations-cert-gate';
 import { recordBlockEvent } from '@/lib/block-events';
 import { assertNoFixtureEnvInProduction } from '@/lib/fixture-guard';
-import { EVIDENCE_DELIVERABLE_TYPES, isUsableUrl, collectCompletionEvidence } from '@/lib/completion-evidence';
+import { EVIDENCE_DELIVERABLE_TYPES, isUsableUrl, collectCompletionEvidence, isBundleDeliverablePath, verifyPresentationBundleDeliverable, bundleReverifyEnabled } from '@/lib/completion-evidence';
 import { getProvider } from '@/lib/model-providers';
 import {
   chatCompletion as ollamaCloudChat,
@@ -4233,6 +4233,32 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
           const rawPath = d.path!.replace(/^~/, process.env.HOME || '');
           const ext = rawPath.slice(rawPath.lastIndexOf('.')).toLowerCase();
           const isImage = IMAGE_EXTENSIONS.has(ext);
+
+          // FIX 28: a bundle-shaped deliverable (deck/guide/speech/audio/
+          // infographic/teleprompter names mirrored from build_deck.py's
+          // DELIVERABLES_REQUIRED) is re-verified BYTE-LEVEL — presence,
+          // symlink rejection, size floor, leading magic — so a right-sized
+          // decoy can never reach the judge as a valid manifest item. The
+          // evidence gate (collectCompletionEvidence) enforces the same probe
+          // at done; this makes the QC verdict certify the same bytes.
+          if (bundleReverifyEnabled() && !isImage && isBundleDeliverablePath(rawPath)) {
+            const verdict = verifyPresentationBundleDeliverable(rawPath);
+            if (!verdict.ok) {
+              return {
+                title: d.title,
+                path: rawPath,
+                type: 'file',
+                sizeBytes: verdict.sizeBytes ?? null,
+                dimensions: null,
+                valid: false,
+                invalidReason: verdict.reason ?? `bundle re-verification failed: ${rawPath}`,
+                contentNote: 'bundle re-verification refused this artifact before content scoring (magic-byte/size/symlink check)',
+              };
+            }
+            // Bundle-verified: manifest item is valid on the verified bytes;
+            // size-only members (md) still carry structural content via the
+            // text probe below only when they are text formats.
+          }
 
           if (isImage) {
             const probe = probeImageFile(rawPath);
