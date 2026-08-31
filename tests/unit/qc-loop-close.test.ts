@@ -1,21 +1,33 @@
 /**
- * Unit tests for QC loop-close fixes (v4.12.0, updated PRD 2.4).
+ * Unit tests for QC loop-close fixes (v4.12.0, updated PRD 2.4, updated
+ * LOOP-FIX-20260827).
  *
  * Verifies:
  *   1. getMissionControlUrl() returns port 4000 (not 3000) when NEXTAUTH_URL is unset.
  *   2. getMissionControlUrl() uses MISSION_CONTROL_URL env when set.
  *   3. migration 061 adds qc_reroute_attempts column (schema guard).
- *   4. FAIL branch (non-heuristic path) increments qc_reroute_attempts on each fail.
- *   5. After QC_MAX_REROUTES non-heuristic fails, task is set to `blocked`.
- *   6. Blocked task gets a QC-BLOCKED event (not QC-REROUTE).
- *   7. Sub-cap non-heuristic FAIL stays in backlog (not blocked).
+ *   4. FAIL branch (un-reroutable, no-criteria): increments qc_reroute_attempts
+ *      AND blocks the task IMMEDIATELY (does not wait for the cap).
+ *   5. Un-reroutable failure blocks immediately EVEN below the cap (the cap
+ *      check never runs for an un-reroutable verdict — see #4).
+ *   6. Blocked-via-unrouteable task keeps its QC-UNROUTEABLE event (not QC-REROUTE).
+ *   7. A second, ordinary (non-unrouteable) FAIL still reroutes to backlog
+ *      sub-cap, proving the un-reroutable change did not touch that path.
  *   8. ceo-delegation-sweep picks up QC-fail backlog tasks (qc_reroute_attempts > 0).
+ *
+ * LOOP-FIX-20260827: task 9102529d sat in `review` for 8h44m getting rescored
+ * every ~10 min with an IDENTICAL [QC-UNROUTEABLE] verdict because the old §4
+ * behavior (tested by #4/#5/#7 below, pre-fix) left the task in `review` with
+ * qc_reroute_attempts NEVER incremented — the safety valve never tripped. An
+ * un-reroutable verdict now increments the counter and blocks the task via
+ * blockTaskForQC() on its FIRST occurrence (re-scoring cannot fix a verdict
+ * that says "human review required"). See tests/unit/qc-heuristic-mode-prd2.4.test.ts
+ * for the (unchanged, still-never-increments) heuristic-mode path — that path
+ * is NOT un-reroutable classification and has its own dedicated escape hatch.
  *
  * PRD 2.4 note: heuristic mode (no API key, scoringPath='heuristic') NEVER
  * increments qc_reroute_attempts and NEVER reroutes — see
  * tests/unit/qc-heuristic-mode-prd2.4.test.ts for the dedicated fixture tests.
- * Tests 4-7 below use the 'no-criteria' scoring path (no SOP assigned, no API key)
- * which is NOT heuristic and correctly goes through the reroute loop.
  *
  * Uses an isolated temp DB. Forces no-criteria path (no API keys, no SOP).
  */
@@ -146,12 +158,14 @@ test('migration 061: qc_reroute_attempts column exists on tasks table', () => {
   );
 });
 
-// ─── Test 4: §4 no-criteria = un-reroutable → stays in review, no increment ──
-// §4: "if QC fails on criteria the executor cannot influence (brief wording,
-// missing metadata), it must NOT reroute." No SOP = un-reroutable.
-// Updated: qc_reroute_attempts must NOT increment (no reroute fired).
+// ─── Test 4: un-reroutable → increments qc_reroute_attempts AND blocks NOW ───
+// LOOP-FIX-20260827: an un-reroutable verdict LITERALLY says "human review
+// required" — re-scoring it again can never change that. It now increments
+// the counter (so the safety valve is never silently dead) AND transitions
+// the task straight to `blocked` on its FIRST occurrence, instead of leaving
+// it in `review` to be rescored identically forever (the 8h44m incident).
 
-test('FAIL branch (no-criteria): §4 un-reroutable → task stays in review, qc_reroute_attempts unchanged', async () => {
+test('FAIL branch (no-criteria): un-reroutable verdict increments qc_reroute_attempts AND blocks immediately', async () => {
   const id = nextId('attempts-incr');
   // No SOP → no-criteria path (scoringPath='no-criteria', score=7.5, pass=false).
   insertTask(id, 'review');
@@ -161,25 +175,34 @@ test('FAIL branch (no-criteria): §4 un-reroutable → task stays in review, qc_
   assert.ok(!result.pass, 'no-criteria path must fail');
   assert.equal(result.scoringPath, 'no-criteria', 'path must be no-criteria (no SOP + no key)');
 
-  const task = queryOne<{ qc_reroute_attempts: number; status: string }>(
-    `SELECT qc_reroute_attempts, status FROM tasks WHERE id = ?`,
+  const task = queryOne<{ qc_reroute_attempts: number; status: string; block_audience: string | null; blocked_on_human: string | null }>(
+    `SELECT qc_reroute_attempts, status, block_audience, blocked_on_human FROM tasks WHERE id = ?`,
     [id],
   );
   assert.ok(task, 'task must exist');
-  // §4: un-reroutable → qc_reroute_attempts must NOT increment.
-  assert.equal(task.qc_reroute_attempts ?? 0, 0, '§4 un-reroutable: qc_reroute_attempts must stay at 0');
-  // §4: task must stay in review (not moved to backlog).
-  assert.equal(task.status, 'review', '§4 un-reroutable: task must stay in review');
+  // The counter must increment exactly once — the safety valve now moves.
+  assert.equal(task.qc_reroute_attempts ?? 0, 1, 'un-reroutable verdict must increment qc_reroute_attempts by exactly one');
+  // The task must be blocked immediately, not left in review.
+  assert.equal(task.status, 'blocked', 'un-reroutable verdict must block the task immediately');
+  // no-criteria is a SYSTEM signal (SOP/rubric missing) per the shared classifier.
+  assert.equal(task.block_audience, 'SYSTEM', 'no-criteria un-reroutable block must be classified SYSTEM audience');
+  assert.equal(task.blocked_on_human, 'operator', 'SYSTEM audience must set blocked_on_human=operator');
+
+  const blockEvt = queryOne<{ id: string }>(
+    `SELECT id FROM task_block_events WHERE task_id = ? LIMIT 1`,
+    [id],
+  );
+  assert.ok(blockEvt, 'a task_block_events row must be recorded for the immediate block');
 });
 
-// ─── Test 5: §4 no-criteria un-reroutable even when at cap ───────────────────
-// §4: un-reroutable path should still leave task in review (not backlog or blocked).
+// ─── Test 5: un-reroutable blocks even when qc_reroute_attempts is already at cap ─
+// Proves the un-reroutable branch runs (and increments) BEFORE the cap check —
+// it does not depend on the cap value at all, it always blocks on first sight.
 
-test('FAIL branch (no-criteria, cap): §4 un-reroutable → task stays in review (not blocked)', async () => {
+test('FAIL branch (no-criteria, at cap): un-reroutable verdict still blocks via the un-reroutable path, not double-counted by the cap branch', async () => {
   const id = nextId('attempts-cap');
-  // No SOP → no-criteria path, §4 un-reroutable.
+  // No SOP → no-criteria path, un-reroutable.
   insertTask(id, 'review');
-  // Set counter to QC_MAX_REROUTES — but un-reroutable fires BEFORE the cap check.
   run(`UPDATE tasks SET qc_reroute_attempts = ? WHERE id = ?`, [QC_MAX_REROUTES_val, id]);
 
   const result = await runQCOnReview(id);
@@ -192,10 +215,12 @@ test('FAIL branch (no-criteria, cap): §4 un-reroutable → task stays in review
     [id],
   );
   assert.ok(task, 'task must exist');
-  // §4: un-reroutable fires before cap check → task stays in review (not blocked/backlog).
-  assert.equal(task.status, 'review', `§4 un-reroutable: task must stay in review even at cap, got: ${task.status}`);
-  // qc_reroute_attempts must not be incremented by un-reroutable path.
-  assert.equal(task.qc_reroute_attempts, QC_MAX_REROUTES_val, 'qc_reroute_attempts must not increment on un-reroutable path');
+  assert.equal(task.status, 'blocked', `un-reroutable verdict must block the task even when already at cap, got: ${task.status}`);
+  // Incremented by exactly one past the pre-seeded cap value — proves the
+  // un-reroutable branch's own increment ran exactly once, not the cap
+  // branch's (which would have thrown a CAS_CONFLICT trying to re-enter
+  // `blocked` from `blocked`, never reached here since un-reroutable returns).
+  assert.equal(task.qc_reroute_attempts, QC_MAX_REROUTES_val + 1, 'qc_reroute_attempts must increment by exactly one from the un-reroutable branch');
 });
 
 // ─── Test 6: §4 no-criteria → QC-UNROUTEABLE event, no QC-BLOCKED ───────────
@@ -227,24 +252,44 @@ test('FAIL branch (no-criteria, cap): §4 un-reroutable → QC-UNROUTEABLE event
   assert.ok(!reroute, '§4: no QC-REROUTE event should be written for un-reroutable failure');
 });
 
-// ─── Test 7: §4 no-criteria sub-cap → task stays in review (not blocked) ─────
-// §4: un-reroutable fires before the cap check, so task always stays in review.
-
-test('FAIL branch (no-criteria, sub-cap): §4 un-reroutable → task stays in review', async () => {
-  const id = nextId('subcap');
-  // No SOP → no-criteria path (§4 un-reroutable). 0 prior attempts.
+// ─── Test 7: an ORDINARY (non-unrouteable) sub-cap FAIL still reroutes ───────
+// Proves the un-reroutable behavior change (tests 4-5 above) did NOT touch the
+// ordinary reroute-to-backlog path: a real `llm` FAIL whose gaps do not match
+// any un-reroutable signal must still land in `backlog`, sub-cap, exactly as
+// before. Forces scoringPath='llm' via the sanctioned QC_FIXTURE_JSON_PATH
+// test seam (see u39-c-08-s4-lifecycle-contract.test.ts) so this can never
+// silently drift onto the no-criteria/unrouteable lane under test above.
+test('FAIL branch (ordinary llm fail, sub-cap): task still reroutes to backlog (un-reroutable fix did not touch this path)', async () => {
+  const id = nextId('subcap-ordinary');
   insertTask(id, 'review');
 
-  const result = await runQCOnReview(id);
-  assert.ok(result !== null, 'must return a result');
-  assert.equal(result.scoringPath, 'no-criteria', 'path must be no-criteria');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-qc-loop-fixture-'));
+  const fixturePath = path.join(dir, 'verdict.json');
+  fs.writeFileSync(fixturePath, JSON.stringify({
+    score: 6.0,
+    pass: false,
+    reason: 'Fixture FAIL: output is missing the requested section.',
+    gaps: ['Missing the requested section', 'Wrong file format delivered'],
+  }));
+  process.env.QC_FIXTURE_JSON_PATH = fixturePath;
+  let result;
+  try {
+    result = await runQCOnReview(id);
+  } finally {
+    delete process.env.QC_FIXTURE_JSON_PATH;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 
-  const task = queryOne<{ status: string }>(
-    `SELECT status FROM tasks WHERE id = ?`, [id],
+  assert.ok(result !== null, 'must return a result');
+  assert.equal(result.scoringPath, 'llm', 'fixture must force scoringPath=llm, not no-criteria/heuristic');
+  assert.ok(!result.pass, 'fixture verdict must fail');
+
+  const task = queryOne<{ status: string; qc_reroute_attempts: number }>(
+    `SELECT status, qc_reroute_attempts FROM tasks WHERE id = ?`, [id],
   );
   assert.ok(task, 'task must exist');
-  // §4: task stays in review (un-reroutable kill prevents reroute loop).
-  assert.equal(task.status, 'review', '§4 un-reroutable: task must stay in review, not leave it');
+  assert.equal(task.status, 'backlog', 'an ordinary (non-unrouteable) sub-cap FAIL must still reroute to backlog');
+  assert.equal(task.qc_reroute_attempts, 1, 'qc_reroute_attempts must increment by exactly one');
 });
 
 // ─── Test 8: ceo-delegation-sweep picks up QC-fail backlog tasks ─────────────

@@ -6,7 +6,19 @@
  *
  * MR-11: the warn-mode fallback that permitted illegal transitions via a raw
  * UPDATE was removed; illegal edges now return 409 with the legal targets.
+ *
+ * LOOP-FIX-20260827: a PATCH into `review` synchronously fires runQCOnReview,
+ * and this file's seeded tasks carry no department SOP — so post-fix, QC
+ * classifies them 'no-criteria' (un-reroutable) and now blocks them
+ * IMMEDIATELY (see qc-loop-close.test.ts for why). That is correct QC
+ * behavior, but it is NOT what this file tests: Q1's "one task_events, one
+ * events, one history" invariant is about the PATCH route's OWN transition
+ * bookkeeping for a single legal edge, not about QC's downstream decision.
+ * DISABLE_QC_AUTO_SCORER isolates that so this file keeps testing exactly one
+ * thing. QC's actual new behavior is covered by qc-loop-close.test.ts,
+ * qc-review-wiring.test.ts, and loop-fix-20260827-block-and-loop-detector.test.ts.
  */
+process.env.DISABLE_QC_AUTO_SCORER = '1';
 
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert';
@@ -40,6 +52,7 @@ before(async () => {
 
 after(() => {
   delete process.env.DATABASE_PATH;
+  delete process.env.DISABLE_QC_AUTO_SCORER;
   try { rmSync(join(dbPath, '..'), { recursive: true, force: true }); } catch {}
 });
 

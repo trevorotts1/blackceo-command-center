@@ -5950,6 +5950,56 @@ export const migrations: Migration[] = [
       console.log('[Migration 126] client_interview_state ready');
     },
   },
+  {
+    // EVENTS-LOOKUP-INDEX (2026-08-27): the model-skew dedupe lookup added in
+    // 85590ee (skewObservationAlreadyRecorded in src/lib/runtime-model.ts)
+    // runs `SELECT metadata FROM events WHERE task_id = ? AND type = ?` up to
+    // twice per dispatch. The events table carried only idx_events_created
+    // (created_at DESC) and the PK autoindex, so EXPLAIN QUERY PLAN returned
+    // `SCAN events` — a full-table scan per lookup, growing linearly with the
+    // events table. The same shape is used by owner-killed.ts, qc-scorer.ts
+    // (alreadyJudgeFinal / priorDeferrals), persona-mismatch.ts and tasks.ts
+    // audience-confirm counting, so all of them hit this scan.
+    //
+    // Column order (task_id, type) over (type, task_id) measured on a
+    // 9452-row synthetic events table (live row count at authoring time):
+    // the skew lookup went from 34.6ms to 0.9ms per 200 lookups and the plan
+    // flips from `SCAN events` to `SEARCH ... USING INDEX (task_id=? AND
+    // type=?)`. Every consumer binds BOTH columns with equality, so either
+    // order serves them; task_id-first matches the repo convention for
+    // task-scoped lookup indexes (idx_task_events_task_id,
+    // idx_task_block_events_task, idx_tasks_parent_task_id) and keeps the
+    // `DELETE FROM events WHERE task_id = ?` path indexed too.
+    //
+    // Additive index only — no column changes, safe on any DB that has the
+    // events table (schema.ts creates the table; migration 048-era chains all
+    // predate events). Unconditional CREATE INDEX IF NOT EXISTS: the
+    // migration-ordering suite proves migration-owned indexes are never
+    // created inside a column-absence guard (a fresh install, where schema.ts
+    // already made the table, would silently skip the guard branch and never
+    // get the index).
+    id: '128',
+    name: 'add_events_task_type_index',
+    up: (db) => {
+      // PRAGMA-on-missing-table footgun guard (same convention as 125): some
+      // migration suites pre-seed a hand-built minimal fixture whose
+      // _migrations table claims 001..NNN applied but whose schema predates
+      // the events table — CREATE INDEX would throw there. On every real
+      // database schema.ts creates events before any migration runs, so the
+      // guard is a no-op in production; on a fresh DB the guard branch never
+      // triggers because the table exists (fresh-apply is proven by the
+      // migration-128 suite).
+      const eventsTableExists = !!db
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?")
+        .get('events');
+      if (!eventsTableExists) {
+        console.log('[Migration 128] events table absent (minimal fixture); index skipped');
+        return;
+      }
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_events_task_type ON events(task_id, type)`);
+      console.log('[Migration 128] idx_events_task_type ready');
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner

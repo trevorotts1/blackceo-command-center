@@ -313,11 +313,15 @@ test('[PRD 2.4c] scoreTaskForQC: pass=true when score >= 8.5 (LLM path gate logi
 
 // ─── §4 (b): no-criteria path is un-reroutable (brief/metadata issue) ────────
 // §4 guidance: "if QC fails on criteria the executor cannot influence (brief
-// wording, missing metadata), it must NOT reroute; it goes to review with a
-// human-readable reason."  No SOP assigned = missing metadata = un-reroutable.
-// Updated from PRD 2.4b (which expected rerouting) to the §4 contract.
+// wording, missing metadata), it must NOT reroute (never sent back to backlog
+// for another attempt)."  No SOP assigned = missing metadata = un-reroutable.
+// LOOP-FIX-20260827: un-reroutable now increments qc_reroute_attempts and
+// blocks the task immediately (see qc-loop-close.test.ts for the incident) —
+// this is DISTINCT from heuristic mode (tested elsewhere in this file), which
+// still never increments and never leaves `review`; no-criteria is not
+// heuristic mode, it is the un-reroutable classification's own path.
 
-test('[§4] no-criteria path is un-reroutable: task stays in review with QC-UNROUTEABLE event', async () => {
+test('[§4] no-criteria path is un-reroutable: task blocked immediately, qc_reroute_attempts incremented, QC-UNROUTEABLE event written', async () => {
   // No SOP + no API key → no-criteria path (scoringPath='no-criteria', not 'heuristic').
   const id = nextId('no-criteria-reroutes');
   insertNoCriteriaTask(id);
@@ -332,17 +336,19 @@ test('[§4] no-criteria path is un-reroutable: task stays in review with QC-UNRO
     [id],
   );
   assert.ok(task, 'task must exist');
-  // §4: un-reroutable failure → task STAYS in review (not moved to backlog).
+  // §4 (LOOP-FIX-20260827): un-reroutable failure → task is BLOCKED immediately
+  // (never returned to backlog, never left rescoring in review forever).
   assert.equal(
     task.status,
-    'review',
-    `§4 un-reroutable fail: task must stay in review, got: ${task.status}`,
+    'blocked',
+    `§4 un-reroutable fail: task must be blocked immediately, got: ${task.status}`,
   );
-  // qc_reroute_attempts must NOT have been incremented (no reroute fired).
+  // qc_reroute_attempts MUST increment exactly once — the safety valve must
+  // move even though this branch never reroutes to backlog.
   assert.equal(
     task.qc_reroute_attempts ?? 0,
-    0,
-    `§4 un-reroutable fail: qc_reroute_attempts must not increment, got: ${task.qc_reroute_attempts}`,
+    1,
+    `§4 un-reroutable fail: qc_reroute_attempts must increment by exactly one, got: ${task.qc_reroute_attempts}`,
   );
   // A QC-UNROUTEABLE event must exist (not a QC-REROUTE event).
   const unrouteableEvt = queryOne<{ message: string }>(

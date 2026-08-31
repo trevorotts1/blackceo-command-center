@@ -17,12 +17,18 @@ import { listModels } from '@/lib/model-registry';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { recordDispatchFailure } from '@/lib/task-dispatcher';
 import { blockDispatchIfOwnerKilled } from '@/lib/owner-killed';
+import {
+  checkDuplicateDispatch,
+  buildDuplicateSuppressedMessage,
+  DUPLICATE_SUPPRESSED_EVENT_TYPE,
+} from '@/lib/dispatch-idempotency';
 import { checkTaskWriteAuth, renderWriteBackInstructions } from '@/lib/mc-auth';
 import { transition, recordStatusEvent, checkWipLimit } from '@/lib/task-lifecycle';
 import {
   resolveAgentRuntimeModel,
   modelsMatch,
   recordModelSkewEvent,
+  reconcileTaskModelRecord,
   type RuntimeModelResolution,
 } from '@/lib/runtime-model';
 import type { SOP, SOPStep } from '@/lib/sops';
@@ -261,6 +267,92 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
         },
         { status: 409 },
       );
+    }
+
+    // ── DISPATCH-IDEMPOTENCY-WINDOW (2026-08-27) — suppress ACCIDENTAL
+    // duplicate sends, never deliberate operator re-dispatch. ─────────────────
+    //
+    // DEFECT (live, task f4a2de9a 2026-08-27): this route's only status
+    // precondition was the blocked-ack gate above, so a second POST against an
+    // in_progress task 25s after the first fired a FULL second chat.send — the
+    // agent received the same task twice. The DISP-01 gateway idempotencyKey
+    // below keys on dispatch_attempts and only collapses CONCURRENT sends; it
+    // cannot see two sends seconds apart once both have fired.
+    //
+    // OPERATOR SEMANTICS (unchanged — the intentional-re-dispatch contract
+    // documented on this route stays intact; see src/lib/dispatch-idempotency.ts
+    // for the full contract):
+    //   • After the window elapses, a plain re-POST dispatches exactly as before.
+    //   • An EXPLICIT override — body { "force": true } — always dispatches,
+    //     even inside the window. Deliberate re-dispatch is never blocked.
+    //   • A REASSIGNMENT (task re-pointed to a different agent) is never
+    //     suppressed — the window only matches a repeat send to the SAME agent.
+    //   • BLOCKED tasks are unaffected: the acknowledgeBlock gate above runs
+    //     first and is byte-for-byte unchanged.
+    //
+    // NEVER SILENT: a suppressed duplicate is recorded as a queryable
+    // `duplicate_dispatch_suppressed` events row + task_activities row so the
+    // board shows exactly what was swallowed and how to override.
+    let forceDispatch = false;
+    try {
+      const body = await request.clone().json();
+      forceDispatch = body?.force === true;
+    } catch {
+      forceDispatch = false; // no/invalid JSON body — normal path
+    }
+    if (!forceDispatch) {
+      const dup = checkDuplicateDispatch(task.id, task.assigned_agent_id);
+      if (dup.suppressed) {
+        const agentNameForMsg =
+          task.assigned_agent_name ?? (task.assigned_agent_id ?? 'the assigned agent');
+        const suppressMsg = buildDuplicateSuppressedMessage({
+          taskTitle: task.title,
+          agentName: agentNameForMsg,
+          elapsedSeconds: dup.elapsed_seconds,
+          windowSeconds: dup.window_seconds,
+        });
+        console.warn(`[Dispatch] ${suppressMsg}`);
+        const nowDup = new Date().toISOString();
+        // Activity tab row — the operator sees the suppressed duplicate where
+        // they were just looking (they clicked Send a second time).
+        run(
+          `INSERT INTO task_activities (id, task_id, agent_id, activity_type, message, metadata, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [
+            uuidv4(), task.id, task.assigned_agent_id, DUPLICATE_SUPPRESSED_EVENT_TYPE, suppressMsg,
+            JSON.stringify({
+              reason: dup.reason,
+              window_seconds: dup.window_seconds,
+              elapsed_seconds: dup.elapsed_seconds,
+              last_dispatched_at: dup.last_dispatched_at,
+              last_dispatch_agent_id: dup.last_dispatch_agent_id,
+              forced: false,
+            }),
+            nowDup,
+          ],
+        );
+        // Live-feed events row — queryable, same sink the successful dispatch
+        // itself is recorded in, so the suppressed duplicate is visible next to
+        // the dispatch it shadows (and OPUS-08's idx lands on this lookup).
+        run(
+          `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [uuidv4(), DUPLICATE_SUPPRESSED_EVENT_TYPE, task.assigned_agent_id, task.id, suppressMsg, nowDup],
+        );
+        broadcast({ type: 'task_updated', payload: task });
+        return NextResponse.json(
+          {
+            success: false,
+            held: true,
+            suppressed: true,
+            reason: 'duplicate_within_idempotency_window',
+            message: suppressMsg,
+            elapsed_seconds: dup.elapsed_seconds,
+            window_seconds: dup.window_seconds,
+          },
+          { status: 409 },
+        );
+      }
     }
 
     // Get agent details
@@ -839,6 +931,24 @@ If you need help or clarification, ask the orchestrator.`;
         extraColumns: { model_id: runtimeModel || settings.model || null },
       });
 
+      // Runtime beat the recorded intent: reconcile the paperwork so the record
+      // itself says runtime won, instead of leaving a stale intended model behind
+      // for the next dispatch to re-detect and re-alarm on.
+      if (skew) {
+        reconcileTaskModelRecord({
+          taskId: id,
+          agentId: agent.id,
+          intended: intendedModel,
+          runtime: runtimeModel,
+          detail: {
+            source: runtimeResolved.source,
+            config_agent_id: runtimeResolved.configAgentId,
+            model_source: settings.modelSource,
+            manual_dispatch: true,
+          },
+        });
+      }
+
       // Broadcast task update
       const updatedTask = queryOne<Task>('SELECT * FROM tasks WHERE id = ?', [id]);
       if (updatedTask) {
@@ -867,11 +977,20 @@ If you need help or clarification, ask the orchestrator.`;
       );
 
       // Log dispatch event to events table
+      // DISPATCH-LAG (2026-08-27): stamped when WRITTEN, not with `now` (captured
+      // at the top of this handler, before the gateway connect + chat.send). The
+      // stale stamp made the trail contradict itself — on task f4a2de9a the two
+      // manual dispatches logged `task_dispatched` at 18:54:12.794Z/18:54:37.814Z
+      // while the model_runtime_confirmed rows they wrote EARLIER in this same
+      // handler (recordModelSkewEvent, which stamps at write time) landed at
+      // 19:02:43/19:03:23, i.e. ~8.5 minutes "after" an event that in code runs
+      // before them. Same class of artifact as the auto-dispatch path.
+      const dispatchedAt = new Date().toISOString();
       const eventId = uuidv4();
       run(
         `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
          VALUES (?, ?, ?, ?, ?, ?)`,
-        [eventId, 'task_dispatched', agent.id, task.id, `Task "${task.title}" dispatched to ${agent.name}`, now]
+        [eventId, 'task_dispatched', agent.id, task.id, `Task "${task.title}" dispatched to ${agent.name}`, dispatchedAt]
       );
 
       // Log dispatch activity to task_activities table (for Activity tab)
@@ -879,7 +998,7 @@ If you need help or clarification, ask the orchestrator.`;
       run(
         `INSERT INTO task_activities (id, task_id, agent_id, activity_type, message, created_at)
          VALUES (?, ?, ?, ?, ?, ?)`,
-        [activityId, task.id, agent.id, 'status_changed', `Task dispatched to ${agent.name} - Agent is now working on this task`, now]
+        [activityId, task.id, agent.id, 'status_changed', `Task dispatched to ${agent.name} - Agent is now working on this task`, dispatchedAt]
       );
 
       return NextResponse.json({

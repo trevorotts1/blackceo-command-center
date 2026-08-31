@@ -63,6 +63,10 @@ import {
 import { ensureCampaignForTask } from '@/lib/campaigns';
 import { notifySystem } from '@/lib/notify';
 import { notifyOwnerAssigned } from '@/lib/owner-reports';
+import {
+  sendRequesterAudienceAsk,
+  type RequesterAudienceAskDelivery,
+} from '@/lib/jobs/trust-engine';
 import { transition, recordStatusEvent, type LifecycleState } from '@/lib/task-lifecycle';
 import { recordBlockEvent } from '@/lib/block-events';
 import type { Task, TaskPriority, Agent, PersonaBundle, TaskPersonaBundleRow } from '@/lib/types';
@@ -1458,6 +1462,11 @@ export interface AudienceConfirmDecision {
   firstHold: boolean;
 }
 
+type RequesterAudienceAskSender = (
+  taskId: string,
+  question: string,
+) => RequesterAudienceAskDelivery;
+
 /**
  * Build the operator-facing audience prompt. A single high-confidence ICP audience
  * gets a CONFIRM prompt; multiple / low-confidence / none gets the exact
@@ -1692,6 +1701,7 @@ export function holdForAudienceConfirm(
   taskId: string,
   agentId: string | null,
   decision: AudienceConfirmDecision,
+  sendRequesterAudienceAskFn: RequesterAudienceAskSender = sendRequesterAudienceAsk,
 ): void {
   const now = new Date().toISOString();
   const nextEligible = new Date(Date.now() + AUDIENCE_CONFIRM_POLL_MS).toISOString();
@@ -1707,12 +1717,35 @@ export function holdForAudienceConfirm(
       );
     } catch { /* audit best-effort */ }
     try {
-      // OPERATOR-facing (Rescue Rangers / server), never the client's chat.
+      // OPERATOR-facing (Rescue Rangers / server). The requester ask below is
+      // separate and deliberately client-safe.
       notifySystem(`Audience check before dispatch — ${decision.prompt ?? 'confirm the audience for this content task'}`, {
         agent: 'audience-confirm',
         action: 'escalate',
       });
     } catch { /* notify best-effort */ }
+
+    const audienceQuestion = decision.audienceLabel
+      ? `Quick check before we start building: this will be written for ${decision.audienceLabel} — is that right, or should it be for someone else?`
+      : 'Quick question before we start building: who is this for? Tell me about the audience you want this written for.';
+    let askDelivery: RequesterAudienceAskDelivery = 'send_failed';
+    try {
+      askDelivery = sendRequesterAudienceAskFn(taskId, audienceQuestion);
+    } catch { /* requester notification best-effort; retain send_failed */ }
+
+    try {
+      run(
+        "UPDATE tasks SET ask = ? WHERE id = ? AND (ask IS NULL OR ask = '')",
+        [audienceQuestion, taskId],
+      );
+    } catch { /* pre-migration tolerant */ }
+
+    try {
+      run(
+        `INSERT INTO events (id, type, agent_id, task_id, message, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+        [uuidv4(), 'audience_confirm_ask_sent', agentId, taskId, askDelivery, now],
+      );
+    } catch { /* audit best-effort */ }
   }
   console.log(`[audience-confirm] task ${taskId} HELD — awaiting operator audience confirmation`);
 }
