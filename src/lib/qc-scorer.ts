@@ -56,7 +56,7 @@
  * (human decides) and log a warning. Never crashes the PATCH route.
  */
 
-import { readFileSync, existsSync, statSync, openSync, readSync, closeSync, readdirSync } from 'fs';
+import { readFileSync, writeFileSync, renameSync, unlinkSync, existsSync, statSync, openSync, readSync, closeSync, readdirSync } from 'fs';
 import * as path from 'path';
 // TCC-safe accessors for the ARTIFACT tree (PROJECTS_PATH, default
 // ~/Documents/Shared — a macOS TCC-protected dir where a raw open()/opendir()
@@ -70,7 +70,7 @@ import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { TRIO_ROLE_ALIASES } from '@/lib/db/migrations';
 import { getMissionControlUrl } from '@/lib/config';
 import { missionControlAuthHeaders } from '@/lib/mc-auth';
-import { notifyOwner, notifySystem } from '@/lib/notify';
+import { notifyOwner, notifySystem, resolveWorkspaceBase } from '@/lib/notify';
 import { notifyOwnerDone } from '@/lib/owner-reports';
 import { transition, TransitionError } from '@/lib/task-lifecycle';
 import { requiresRegisteredCertificate } from '@/lib/presentations-cert-gate';
@@ -623,6 +623,150 @@ export const QC_PASS_THRESHOLD = 8.5;
  * Override with QC_MAX_REROUTES env var. Default: 3.
  */
 export const QC_MAX_REROUTES = parseInt(process.env.QC_MAX_REROUTES || '3', 10);
+
+/**
+ * FIX 21 (presentation rev2): how long a SYSTEM-blocked card stays muted after
+ * its operator notification, in SECONDS. Additional same-card blocks inside the
+ * window coalesce into a count ("3rd block, reason unchanged") that rides on
+ * the next window-allowed send; different cards never coalesce into each other.
+ * Override with PRESENTATION_SYSTEM_NOTIFY_COOLDOWN_S. Validation: a
+ * non-numeric, non-finite or non-positive value is REJECTED (warned about) and
+ * the default 3600 ships instead.
+ */
+export const SYSTEM_NOTIFY_COOLDOWN_S = (() => {
+  const raw = (process.env.PRESENTATION_SYSTEM_NOTIFY_COOLDOWN_S ?? '').trim();
+  if (raw === '') return 3600;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    console.warn(
+      `[QCScorer] PRESENTATION_SYSTEM_NOTIFY_COOLDOWN_S="${raw}" is invalid (must be a positive number of seconds) — using default 3600`,
+    );
+    return 3600;
+  }
+  return parsed;
+})();
+
+const SYSTEM_NOTIFY_COOLDOWN_MS = SYSTEM_NOTIFY_COOLDOWN_S * 1000;
+
+/**
+ * FIX 21 feature flag. Default ON. Documented rollback: PRESENTATION_SYSTEM_NOTIFY=0
+ * restores the pre-fix behavior exactly — SYSTEM blocks write the Live-Feed
+ * qc_escalation event and send NO notification.
+ */
+const SYSTEM_BLOCK_NOTIFY_ENABLED = process.env.PRESENTATION_SYSTEM_NOTIFY !== '0';
+
+/** Durable per-card cooldown state lives at <workspace>/.qc-system-block-notify.json */
+const SYSTEM_BLOCK_NOTIFY_STATE_FILE = '.qc-system-block-notify.json';
+
+interface SystemBlockNotifyEntry {
+  /** cumulative SYSTEM blocks recorded for this card since the state file began */
+  count: number;
+  /** epoch ms of the last window-allowed notification send */
+  lastSentAt: number;
+}
+
+const systemBlockNotifyState = new Map<string, SystemBlockNotifyEntry>();
+let systemBlockNotifyStateLoaded = false;
+
+function systemBlockNotifyStatePath(): string {
+  return path.join(resolveWorkspaceBase(), SYSTEM_BLOCK_NOTIFY_STATE_FILE);
+}
+
+function ordinalSuffix(n: number): string {
+  const rem100 = n % 100;
+  if (rem100 >= 11 && rem100 <= 13) return `${n}th`;
+  switch (n % 10) {
+    case 1: return `${n}st`;
+    case 2: return `${n}nd`;
+    case 3: return `${n}rd`;
+    default: return `${n}th`;
+  }
+}
+
+/** Lazy-load durable state (fail-open: an absent or corrupt file starts empty). */
+function ensureSystemBlockNotifyState(): void {
+  if (systemBlockNotifyStateLoaded) return;
+  systemBlockNotifyStateLoaded = true;
+  try {
+    const raw = readFileSync(systemBlockNotifyStatePath(), 'utf8');
+    const parsed = JSON.parse(raw) as Record<string, Partial<SystemBlockNotifyEntry>>;
+    for (const [cardId, entry] of Object.entries(parsed)) {
+      if (typeof entry?.count === 'number' && typeof entry?.lastSentAt === 'number') {
+        systemBlockNotifyState.set(cardId, { count: entry.count, lastSentAt: entry.lastSentAt });
+      }
+    }
+  } catch {
+    /* no state yet (or unreadable) — start from empty; never throw from a QC path */
+  }
+}
+
+/** tmp+rename write, same durable-state pattern as notify.ts SAFETY-03 (fail-open). */
+function persistSystemBlockNotifyState(): void {
+  const p = systemBlockNotifyStatePath();
+  try {
+    const obj: Record<string, SystemBlockNotifyEntry> = {};
+    for (const k of Array.from(systemBlockNotifyState.keys())) {
+      const v = systemBlockNotifyState.get(k);
+      if (v) obj[k] = v;
+    }
+    const tmp = `${p}.tmp-${process.pid}`;
+    writeFileSync(tmp, JSON.stringify(obj), 'utf8');
+    renameSync(tmp, p);
+  } catch {
+    /* fail-open: the notification still fires; only the coalesced count degrades */
+  }
+}
+
+/**
+ * FIX 21 rate gate. Call once per SYSTEM block for a card BEFORE notifying.
+ * Returns send=true exactly once per card per SYSTEM_NOTIFY_COOLDOWN_S window.
+ * Suppressed calls still increment the card's coalesced count so the next
+ * window-allowed send can report "Nth block, reason unchanged". Keyed strictly
+ * by card id — different cards never share a window.
+ */
+function admitSystemBlockNotify(cardId: string): {
+  send: boolean;
+  coalescedNote: string;
+  suppressedReason?: string;
+} {
+  if (!SYSTEM_BLOCK_NOTIFY_ENABLED) {
+    return {
+      send: false,
+      coalescedNote: '',
+      suppressedReason: 'disabled via PRESENTATION_SYSTEM_NOTIFY=0 (pre-fix silent rollback)',
+    };
+  }
+  ensureSystemBlockNotifyState();
+  const now = Date.now();
+  const prev = systemBlockNotifyState.get(cardId);
+  const count = (prev?.count ?? 0) + 1;
+  if (!prev || now - prev.lastSentAt >= SYSTEM_NOTIFY_COOLDOWN_MS) {
+    systemBlockNotifyState.set(cardId, { count, lastSentAt: now });
+    persistSystemBlockNotifyState();
+    const coalescedNote = prev
+      ? ` (${ordinalSuffix(count)} block, reason unchanged — ${count - 1} earlier block(s) coalesced)`
+      : '';
+    return { send: true, coalescedNote };
+  }
+  systemBlockNotifyState.set(cardId, { count, lastSentAt: prev.lastSentAt });
+  persistSystemBlockNotifyState();
+  return {
+    send: false,
+    coalescedNote: '',
+    suppressedReason: `inside the ${SYSTEM_NOTIFY_COOLDOWN_S}s per-card cooldown window (coalesced block #${count})`,
+  };
+}
+
+/** Test seam (same convention as notify.__resetNotifyThrottleForTests). */
+export function __resetSystemBlockNotifyForTests(): void {
+  systemBlockNotifyState.clear();
+  systemBlockNotifyStateLoaded = false;
+  try {
+    unlinkSync(systemBlockNotifyStatePath());
+  } catch {
+    /* nothing to remove */
+  }
+}
 
 /** Disable the whole QC-agent auto-scorer by setting this env to "1". */
 const DISABLE_QC_SCORER =
@@ -5383,11 +5527,15 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
         } catch { /* no CEO agent — still visible via task event */ }
 
         if (isSystemBlock) {
-          // SYSTEM block: escalate to master orchestrator via event.
-          // This creates a qc_review event attributed to the CEO/master-orchestrator
-          // so the orchestrator's Live Feed picks it up and can re-route or fix the
-          // root cause (wrong SOP, missing builder, model misbind, etc.).
-          // We do NOT notify the owner — this is an internal system gap.
+          // SYSTEM block: escalate to master orchestrator via event AND notify the
+          // OPERATOR (FIX 21). The Live-Feed qc_escalation row stays for the
+          // orchestrator's re-route loop; the operator now ALSO gets a Telegram via
+          // notifySystem() — never client-facing (the operator-id guard in notify.ts
+          // makes that structurally impossible). Rate-limited: one send per card per
+          // SYSTEM_NOTIFY_COOLDOWN_S window; same-card blocks inside the window
+          // coalesce into a count riding on the next allowed send ("3rd block,
+          // reason unchanged"); different cards never coalesce into each other.
+          // Rollback: PRESENTATION_SYSTEM_NOTIFY=0 restores the pre-fix silence.
           run(
             `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
              VALUES (?, ?, ?, ?, ?, ?)`,
@@ -5400,7 +5548,25 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
               now,
             ],
           );
-          console.warn(`[QCScorer] Task "${task.title}" (${taskId}): SYSTEM block — escalated to master orchestrator (no owner Telegram)`);
+          const sysNotify = admitSystemBlockNotify(taskId);
+          if (sysNotify.send) {
+            try {
+              notifySystem(
+                `[QC-SYSTEM-BLOCK] "${task.title}" (${taskId}) failed QC ${newAttempts} time(s) due to a SYSTEM issue the executor cannot fix. ` +
+                  `Score: ${result.score.toFixed(1)}/10. Root cause gaps: ${result.gaps.join('; ')}. ` +
+                  `Action needed: ${blockNeeds}.${sysNotify.coalescedNote}`,
+                { agent: 'qc-scorer', action: 'system_block' },
+              );
+            } catch (err) {
+              // Best-effort: the qc_escalation event above is the durable record.
+              console.warn(`[QCScorer] Task "${task.title}" (${taskId}): SYSTEM block notify failed: ${(err as Error).message}`);
+            }
+          }
+          console.warn(
+            `[QCScorer] Task "${task.title}" (${taskId}): SYSTEM block — escalated to master orchestrator; operator ${
+              sysNotify.send ? 'notified (rate-limited)' : `notification held: ${sysNotify.suppressedReason ?? 'suppressed'}`
+            }`,
+          );
         } else {
           // OWNER block: emit CEO event AND notify the owner via Telegram.
           run(
