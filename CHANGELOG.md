@@ -1,3 +1,37 @@
+## [v6.0.96] — 2026-08-31 — Presentation Department rev2 batch 1
+
+### What changed
+
+- **FIX 5 (CC-side): stage-timings ingest route.** New `/api/presentations/stage-timings`
+  endpoint + migration 127 `presentation_stage_timings` table. The presentation engine's
+  per-stage timing stream now lands durably in CC so run duration / slowest-phase history
+  survives run-dir cleanup and is queryable per `run_id`.
+- **FIX 14: QC judge selection across client-owned providers.** Judge scoring no longer
+  assumes Ollama-only; selections resolve against the client's own provider stack
+  (client-owned providers included), so the QC loop judges with the same models the run
+  actually used instead of falling back to a host-only pool.
+- **FIX 21: SYSTEM-block operator notification, rate-limited.** `notifySystem()` on SYSTEM
+  cap blocks is now operator-facing and rate-limited (no per-FAIL spam; one notification
+  per block episode).
+- **FIX 25: verify artifacts before review.** The review gate re-verifies the artifact
+  bundle before handing it to reviewers — magic-bytes + size-floor checks, same
+  verification class as the done gate — so reviewers never get a truncated or
+  wrong-format bundle.
+- **FIX 28: bundle re-verify at done + dead-branch cleanup.** The done gate re-verifies
+  the artifact bundle (magic bytes + size floors) and dead branch/hand-off paths are
+  cleaned up so stale branches cannot resurface a passed bundle.
+- **FIX 34: autodeploy backup LIVEDB-first.** The autodeploy DB-backup step resolves
+  LIVEDB first and carries a non-zero gate — a backup that cannot resolve the live DB
+  fails the deploy instead of silently backing up a wrong/empty file.
+- **QC-loop round 2 reconciliation.** FIX 28/21/14 semantics now layer on the round-2
+  QC infrastructure landed in cf5e2b32/d88a14f (shared `blockTaskForQC()` helper,
+  attempt-counter increment on every FAIL, un-reroutable immediate block,
+  `ownerReviewEventMessage`, F-14 cert gate, persona credit) instead of conflicting with
+  it — the two sides of the round-2 + rev2 changes were reconciled in
+  `src/lib/qc-scorer.ts`.
+
+Companion bump for onboarding Presentation rev2 batch 1.
+
 ## [v6.0.95] — 2026-08-26 — company_branding read the wrong company row (deploy gate false-fail)
 
 `checkCompanyBranding()` resolved the company with
