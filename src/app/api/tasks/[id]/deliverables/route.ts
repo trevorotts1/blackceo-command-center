@@ -17,6 +17,44 @@ export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
 /**
+ * FIX 27 — registration-time reachability gate (rejects fake paths).
+ *
+ * A task_deliverables row is the durable claim "the work landed HERE." Before
+ * this fix, a file/artifact registered at a nonexistent path was accepted with
+ * a 201 + warning — the row lied until the QC scorer probed it much later (or
+ * the task reached `done` on evidence that never existed). Registration now
+ * fails closed (422) unless the backing resource is reachable at register time:
+ *
+ *   file | artifact | image → a filesystem path that exists (after ~ expansion)
+ *   url                     → a syntactically valid http(s) URL
+ *
+ * The type→reachability mapping mirrors EVIDENCE_DELIVERABLE_TYPES
+ * (src/lib/completion-evidence.ts) so FIX 25's review/done gates can trust
+ * that a registered row's path was real at registration. size/sha/mime are
+ * captured ONLY on real regular files (U063 behavior kept).
+ *
+ * ROLLBACK: set DELIVERABLE_PATH_VALIDATION=0 to restore the pre-fix
+ * warn-and-201 behavior. Any other value (including unset) keeps the gate ON.
+ * Read per-request (pathValidationEnabled()), so tests and a process restart
+ * both control it without code changes.
+ */
+function pathValidationEnabled(): boolean {
+  return process.env.DELIVERABLE_PATH_VALIDATION !== '0';
+}
+
+/** FIX 27: the deliverable types whose `path` is a filesystem path. */
+const FILE_BACKED_TYPES = new Set(['file', 'artifact', 'image']);
+
+function isValidHttpUrl(raw: string): boolean {
+  try {
+    const u = new URL(raw);
+    return u.protocol === 'http:' || u.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+/**
  * GET /api/tasks/[id]/deliverables
  * Retrieve all deliverables for a task
  */
@@ -68,40 +106,89 @@ export async function POST(
 
     const { deliverable_type, title, path, description } = validation.data;
 
-    // Validate file existence for file-backed deliverables (QC-04).
-    // Both 'file' and 'artifact' types carry a filesystem path the QC scorer
-    // later probes (see qc-scorer FILE_BACKED_DELIVERABLE_TYPES); the old guard
-    // only checked 'file', so an artifact registered at a non-existent path was
-    // accepted silently and only failed much later inside the QC manifest build.
+    // FIX 27 — reachability at registration time (see PATH_VALIDATION_ENABLED
+    // header above). Gate ON (default): an unreachable path/URL is a 422 and no
+    // row is written; mime/size/sha are captured only on real regular files.
+    // Gate OFF (DELIVERABLE_PATH_VALIDATION=0): the pre-fix QC-04 behavior runs
+    // verbatim — warn and 201 (rollback path).
+    // Both 'file' and 'artifact' (and defensively 'image', per
+    // qc-scorer/EVIDENCE_DELIVERABLE_TYPES) carry a filesystem path the QC
+    // scorer later probes; 'url' carries an http(s) link validated by shape.
     let fileExists = true;
     let normalizedPath = path;
     let mime_type: string | null = null;
     let file_size_bytes: number | null = null;
     let sha256: string | null = null;
-    if ((deliverable_type === 'file' || deliverable_type === 'artifact') && path) {
+
+    const mimeFor = (target: string): string => {
+      const ext = extname(target).replace(/^\./, '').toLowerCase();
+      const mimeMap: Record<string, string> = {
+        pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+        pdf: 'application/pdf', md: 'text/markdown', mp3: 'audio/mpeg',
+        png: 'image/png', html: 'text/html', htm: 'text/html',
+        json: 'application/json', txt: 'text/plain', csv: 'text/csv',
+        jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
+        svg: 'image/svg+xml', webp: 'image/webp',
+      };
+      return mimeMap[ext] || 'application/octet-stream';
+    };
+
+    if (pathValidationEnabled() && FILE_BACKED_TYPES.has(deliverable_type)) {
+      if (!path) {
+        console.warn(`[DELIVERABLE] Rejected (FIX 27): '${deliverable_type}' registered without a path`);
+        return NextResponse.json(
+          { error: `A '${deliverable_type}' deliverable requires a path — registration cannot verify a resource that was never pointed at.` },
+          { status: 422 }
+        );
+      }
       // Expand tilde
+      normalizedPath = path.replace(/^~/, process.env.HOME || '');
+      if (!existsSync(normalizedPath)) {
+        console.warn(`[DELIVERABLE] Rejected (FIX 27): file does not exist: ${normalizedPath}`);
+        return NextResponse.json(
+          { error: `File does not exist at path: ${normalizedPath}. Create the artifact before registering it.`, path: normalizedPath },
+          { status: 422 }
+        );
+      }
+      fileExists = true;
+      // U063: capture mime_type, file_size_bytes, sha256 for regular files.
+      // A path that exists but cannot be stat'ed/read stays NULL on those
+      // columns — size/sha are captured only on real files (FIX 27).
+      try {
+        const stat = lstatSync(normalizedPath);
+        if (stat.isFile()) {
+          file_size_bytes = stat.size;
+          mime_type = mimeFor(normalizedPath);
+          const buf = readFileSync(normalizedPath);
+          sha256 = createHash('sha256').update(buf).digest('hex');
+        }
+      } catch (err) {
+        console.warn(`[DELIVERABLE] Could not stat/read file ${normalizedPath}:`, (err as Error).message);
+      }
+    } else if (pathValidationEnabled() && deliverable_type === 'url') {
+      // A url row is the artifact-free escape hatch (completion-evidence.ts):
+      // its reachability rule is shape, not bytes — a valid http(s) URL.
+      if (!path || !isValidHttpUrl(path)) {
+        console.warn(`[DELIVERABLE] Rejected (FIX 27): invalid url: ${path ?? '(absent)'}`);
+        return NextResponse.json(
+          { error: `A 'url' deliverable requires a valid http(s) URL in path.`, path: path ?? null },
+          { status: 422 }
+        );
+      }
+    } else if ((deliverable_type === 'file' || deliverable_type === 'artifact') && path) {
+      // ROLLBACK PATH (DELIVERABLE_PATH_VALIDATION=0): pre-FIX-27 QC-04
+      // behavior, kept verbatim — nonexistent file warns and still 201s.
       normalizedPath = path.replace(/^~/, process.env.HOME || '');
       fileExists = existsSync(normalizedPath);
       if (!fileExists) {
         console.warn(`[DELIVERABLE] Warning: File does not exist: ${normalizedPath}`);
       }
-      // U063: capture mime_type, file_size_bytes, sha256 for regular files.
-      // Wrap so a stat failure logs and continues — the POST must still return 201.
       if (fileExists) {
         try {
           const stat = lstatSync(normalizedPath);
           if (stat.isFile()) {
             file_size_bytes = stat.size;
-            const ext = extname(normalizedPath).replace(/^\./, '').toLowerCase();
-            const mimeMap: Record<string, string> = {
-              pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-              pdf: 'application/pdf', md: 'text/markdown', mp3: 'audio/mpeg',
-              png: 'image/png', html: 'text/html', htm: 'text/html',
-              json: 'application/json', txt: 'text/plain', csv: 'text/csv',
-              jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
-              svg: 'image/svg+xml', webp: 'image/webp',
-            };
-            mime_type = mimeMap[ext] || 'application/octet-stream';
+            mime_type = mimeFor(normalizedPath);
             const buf = readFileSync(normalizedPath);
             sha256 = createHash('sha256').update(buf).digest('hex');
           }
@@ -144,7 +231,9 @@ export async function POST(
       payload: deliverable,
     });
 
-    // Return with warning if the file-backed deliverable doesn't exist (QC-04).
+    // Return with warning if the file-backed deliverable doesn't exist.
+    // Only reachable on the rollback path now — with the FIX 27 gate ON, an
+    // unreachable file-backed path was already rejected with 422.
     if ((deliverable_type === 'file' || deliverable_type === 'artifact') && !fileExists) {
       return NextResponse.json(
         {
