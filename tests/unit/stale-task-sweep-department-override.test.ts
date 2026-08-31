@@ -21,8 +21,9 @@ import os from 'node:os';
 import path from 'node:path';
 
 // Point BOARD_SLAS_CONFIG_PATH at a throwaway file with ONE department
-// tightened to an 8-hour blocked re-ping/return window (default is 144h),
-// BEFORE any module that reads it is imported.
+// tightened to an 8-hour blocked return window (default is 6h post-FIX-24
+// — must be strictly tighter than the default for the override to be
+// observable), BEFORE any module that reads it is imported.
 const slaConfigPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'bc-board-slas-sweep-')), 'board-slas.json');
 fs.writeFileSync(
   slaConfigPath,
@@ -62,19 +63,20 @@ function taskStatus(id: string): string | undefined {
   return queryOne<{ status: string }>('SELECT status FROM tasks WHERE id = ?', [id])?.status;
 }
 
-test('U101: a department with a tightened staleBlockedRepingedHours returns to orchestrator at ITS (halved) window; a default department does not', async () => {
+test('U101: a department with a tightened staleBlockedRepingedHours returns at ITS window; a default department does not', async () => {
   // Tightened dept: override=8h → return threshold IS 8h (this sweep returns
-  // directly once ageHours >= returnThreshold; no separate re-ping-only zone
-  // when the age already clears the full window on the very first tick).
+  // directly once ageHours >= returnThreshold).
   const tightened = seedBlockedTask('Tightened stale-blocked task', 'finance-accounting', 9);
-  // Default dept: global default is 144h — 9h old must not even re-ping yet
-  // (re-ping threshold is half of 144h = 72h).
-  const defaultDept = seedBlockedTask('Default-dept stale-blocked task', 'client-success', 9);
+  // Default dept: global default is 6h post-FIX-24 — but this task is only 5h
+  // old, so it sits in the 2h..6h RE-PING band (re-ping ≤ 6h = return window),
+  // NOT yet past the default 6h return threshold. It must stay blocked and
+  // untouched, while the 9h tightened task returns.
+  const defaultDept = seedBlockedTask('Default-dept stale-blocked task', 'client-success', 5);
 
   const result = await runStaleTaskSweep();
 
   assert.equal(taskStatus(tightened), 'backlog', 'tightened-dept task (override=8h, age=9h) must be RETURNED to orchestrator');
-  assert.equal(taskStatus(defaultDept), 'blocked', 'default-dept task (global=144h, age=9h) must remain blocked, untouched');
+  assert.equal(taskStatus(defaultDept), 'blocked', 'default-dept task (global=6h, age=5h) must remain blocked, untouched');
   assert.ok(result.returned >= 1);
 });
 
@@ -84,7 +86,10 @@ test('U101: env-var explicit global override wins over the department override, 
     // Aged well past every OTHER default threshold (so the superset query —
     // widened by minPossibleSlaThreshold, which now reflects the env-pinned
     // 1000h for THIS key — still fetches it as a candidate), but far under
-    // both the env override's return (1000h) and re-ping (500h) windows.
+    // the env override's return (1000h) and its re-ping window (STALE_BLOCKED_REPING_HOURS
+    // — an independent named window, NOT half of the return, post-FIX-24; the
+    // per-row clamp keeps re-ping ≤ return, so with return=1000h the untouched
+    // re-ping default of 2h applies and this 50h-old task re-pings, never returns).
     const wouldReturnOnOverrideAlone = seedBlockedTask('Would return on the 8h dept override alone', 'finance-accounting', 50);
     await runStaleTaskSweep();
     assert.equal(
@@ -97,12 +102,12 @@ test('U101: env-var explicit global override wins over the department override, 
   }
 });
 
-test('U101 (b): a department absent from board-slas.json behaves byte-identically to the pre-U101 global default', async () => {
-  const noOverride = seedBlockedTask('No override on file for this department', 'unmapped-department-xyz', 9);
+test('U101 (b): a department absent from board-slas.json behaves byte-identically to the global default', async () => {
+  const noOverride = seedBlockedTask('No override on file for this department', 'unmapped-department-xyz', 5);
   await runStaleTaskSweep();
   assert.equal(
     taskStatus(noOverride),
     'blocked',
-    'a department with NO board-slas.json entry must use the global default (144h), unchanged from pre-U101 behavior',
+    'a department with NO board-slas.json entry must use the global default (6h post-FIX-24; 5h is still in the re-ping band), unchanged from pre-U101 behavior',
   );
 });
