@@ -4,7 +4,7 @@ import { createHmac } from 'crypto';
 import { queryOne, queryAll, run } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { runQCOnReview } from '@/lib/qc-scorer';
-import { transition } from '@/lib/task-lifecycle';
+import { transition, TransitionError } from '@/lib/task-lifecycle';
 import { collectCompletionEvidence } from '@/lib/completion-evidence';
 import { deterministicOpenclawSessionId } from '@/lib/task-dispatcher';
 import type { Task, Agent, OpenClawSession } from '@/lib/types';
@@ -51,6 +51,33 @@ function broadcastTaskUpdate(taskId: string): void {
   if (updated) {
     broadcast({ type: 'task_updated', payload: updated });
   }
+}
+
+/**
+ * FIX 25 — uniform refusal contract for a zero/unreachable-evidence completion.
+ * The shared task-lifecycle gate now throws PRECONDITION_EVIDENCE for review;
+ * this webhook must NOT paper over it: no `task_completed` self-congratulation,
+ * no agent freed to standby, no success-shaped body. The MR-18
+ * `review_no_evidence` audit event stays (operators still see the attempt);
+ * only its "proceed regardless" text changes. Flag mirrors the lifecycle gate:
+ * PRESENTATION_REVIEW_EVIDENCE_GATE (default ON, =0 full rollback).
+ */
+function reviewEvidenceRefusalResponse(taskId: string, evidencePath: string): NextResponse {
+  return NextResponse.json(
+    {
+      success: false,
+      error: 'Completion refused: no reachable deliverable registered for this task.',
+      code: 'PRECONDITION_EVIDENCE',
+      task_id: taskId,
+      remedy: `Register evidence via ${evidencePath} (a 'url' type pointing at where the work landed is sufficient), then re-send the completion.`,
+    },
+    { status: 422 },
+  );
+}
+
+/** FIX 25 — mirrors task-lifecycle's presentationReviewEvidenceGate(). */
+function reviewEvidenceGateEnabled(): boolean {
+  return process.env.PRESENTATION_REVIEW_EVIDENCE_GATE !== '0';
 }
 
 export const dynamic = 'force-dynamic';
@@ -133,31 +160,35 @@ export async function POST(request: NextRequest) {
       // Only move to review if not already in review or done
       // (Don't overwrite user's approval)
       const movedToReview = task.status !== 'review' && task.status !== 'done';
-      if (movedToReview) {
-        // MR-18: soft evidence check — non-artifact tasks may reach review
-        // with no deliverable registered.  Do NOT hard-block (the QC scorer
-        // is the gate), but WRITE an audit event so operators can see which
-        // completions arrived unevidenced.
-        const evidence = collectCompletionEvidence(task.id);
-        if (!evidence.hasEvidence) {
-          try {
-            run(
-              `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
-               VALUES (?, ?, ?, ?, ?, ?)`,
-              [
-                uuidv4(),
-                'review_no_evidence',
-                task.assigned_agent_id,
-                task.id,
-                `[MR-18] Agent reported completion for "${task.title}" with no reachable deliverable registered. Problems: ${evidence.problems.join('; ') || 'no deliverable rows at all'}. The task will proceed to review regardless — the QC scorer gates done.`,
-                now,
-              ],
-            );
-          } catch {
-            /* events audit is best-effort — never block the transition on audit failure */
-          }
+      // FIX 25 — pre-check evidence BEFORE touching anything else, so a
+      // zero-evidence completion is refused up front (no MR-18 text claiming
+      // "proceed regardless", no success body). The gate flag mirrors the
+      // lifecycle gate; =0 restores the soft MR-18 path verbatim.
+      const directRefused = movedToReview && reviewEvidenceGateEnabled()
+        && !collectCompletionEvidence(task.id).hasEvidence;
+      if (directRefused) {
+        // MR-18 soft-audit KEPT (reworded — the task no longer proceeds), then
+        // refuse without logging completion, freeing the agent, or claiming review.
+        try {
+          run(
+            `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+            [
+              uuidv4(),
+              'review_no_evidence',
+              task.assigned_agent_id,
+              task.id,
+              `[MR-18/FIX 25] Agent reported completion for "${task.title}" with no reachable deliverable registered. Problems: ${collectCompletionEvidence(task.id).problems.join('; ') || 'no deliverable rows at all'}. COMPLETION REFUSED — the task stays in its current status; register deliverables and re-send.`,
+              now,
+            ],
+          );
+        } catch {
+          /* events audit is best-effort */
         }
-
+        broadcastTaskUpdate(task.id);
+        return reviewEvidenceRefusalResponse(task.id, `/api/tasks/${task.id}/deliverables`);
+      }
+      if (movedToReview) {
         try {
           // MR-04: route through transition() instead of raw SQL so the
           // legal-transition guard, preconditions, and CAS all run.
@@ -171,8 +202,13 @@ export async function POST(request: NextRequest) {
             operatorOverride: true,
           });
         } catch (err) {
-          // CAS_CONFLICT or ILLEGAL_TRANSITION — non-fatal, the task was
-          // already advanced by a concurrent writer.
+          // FIX 25: PRECONDITION_EVIDENCE here is a REFUSAL, not a concurrency
+          // footnote — surface it (422) instead of falling through to the
+          // success-shaped epilogue. CAS/illegal remain non-fatal.
+          if (err instanceof TransitionError && err.code === 'PRECONDITION_EVIDENCE') {
+            broadcastTaskUpdate(task.id);
+            return reviewEvidenceRefusalResponse(task.id, `/api/tasks/${task.id}/deliverables`);
+          }
           if (err instanceof Error && !err.message.includes('CAS_CONFLICT')) {
             console.warn('[agent-completion] transition failed for task', task.id, err);
           }
@@ -311,31 +347,31 @@ export async function POST(request: NextRequest) {
       // Only move to review if not already in review or done
       // (Don't overwrite user's approval)
       const movedToReviewSession = task.status !== 'review' && task.status !== 'done';
-      if (movedToReviewSession) {
-        // MR-18: soft evidence check — non-artifact tasks may reach review
-        // with no deliverable registered.  Do NOT hard-block (the QC scorer
-        // is the gate), but WRITE an audit event so operators can see which
-        // completions arrived unevidenced.
-        const evidence = collectCompletionEvidence(task.id);
-        if (!evidence.hasEvidence) {
-          try {
-            run(
-              `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
-               VALUES (?, ?, ?, ?, ?, ?)`,
-              [
-                uuidv4(),
-                'review_no_evidence',
-                agentId,
-                task.id,
-                `[MR-18] Agent reported completion for "${task.title}" with no reachable deliverable registered. Problems: ${evidence.problems.join('; ') || 'no deliverable rows at all'}. The task will proceed to review regardless — the QC scorer gates done.`,
-                now,
-              ],
-            );
-          } catch {
-            /* events audit is best-effort — never block the transition on audit failure */
-          }
+      // FIX 25 — identical refusal contract to the direct path above.
+      const sessionRefused = movedToReviewSession && reviewEvidenceGateEnabled()
+        && !collectCompletionEvidence(task.id).hasEvidence;
+      if (sessionRefused) {
+        // MR-18 soft-audit KEPT (reworded — the task no longer proceeds).
+        try {
+          run(
+            `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+            [
+              uuidv4(),
+              'review_no_evidence',
+              agentId,
+              task.id,
+              `[MR-18/FIX 25] Agent reported completion for "${task.title}" with no reachable deliverable registered. Problems: ${collectCompletionEvidence(task.id).problems.join('; ') || 'no deliverable rows at all'}. COMPLETION REFUSED — the task stays in its current status; register deliverables and re-send.`,
+              now,
+            ],
+          );
+        } catch {
+          /* events audit is best-effort */
         }
-
+        broadcastTaskUpdate(task.id);
+        return reviewEvidenceRefusalResponse(task.id, `/api/tasks/${task.id}/deliverables`);
+      }
+      if (movedToReviewSession) {
         try {
           // MR-04: route through transition() instead of raw SQL so the
           // legal-transition guard, preconditions, and CAS all run.
@@ -347,6 +383,12 @@ export async function POST(request: NextRequest) {
             operatorOverride: true,
           });
         } catch (err) {
+          // FIX 25: the evidence refusal (defense-in-depth vs the pre-check)
+          // becomes a 422, not a warn-and-succeed epilogue.
+          if (err instanceof TransitionError && err.code === 'PRECONDITION_EVIDENCE') {
+            broadcastTaskUpdate(task.id);
+            return reviewEvidenceRefusalResponse(task.id, `/api/tasks/${task.id}/deliverables`);
+          }
           if (err instanceof Error && !err.message.includes('CAS_CONFLICT')) {
             console.warn('[agent-completion] transition failed for task', task.id, err);
           }

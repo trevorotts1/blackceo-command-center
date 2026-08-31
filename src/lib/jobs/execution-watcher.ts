@@ -321,7 +321,7 @@ export async function probeSessionLiveness(
  * guard, precondition checks, and CAS all run. The previous raw write had no CAS
  * guard beyond only selecting in_progress tasks; transition() closes the TOCTOU.
  */
-async function advanceToReview(taskId: string, agentId: string | null, agentName: string | null, summary: string): Promise<void> {
+async function advanceToReview(taskId: string, agentId: string | null, agentName: string | null, summary: string): Promise<boolean> {
   // MR-16: migrated from raw UPDATE + recordStatusEvent to transition() for
   // DISP-09 atomicity — the status flip, task_events insert, and events insert
   // now commit as ONE transaction. No separate run() / recordStatusEvent() gap.
@@ -350,10 +350,21 @@ async function advanceToReview(taskId: string, agentId: string | null, agentName
     });
   } catch (err) {
     if (err instanceof TransitionError) {
+      if (err.code === 'PRECONDITION_EVIDENCE') {
+        // FIX 25: the chat-marker string pointed at a task with zero/unreachable
+        // registered deliverables — the gate REFUSED the move. Nothing to free,
+        // nothing to broadcast, and the caller must not fire QC. The refusal was
+        // already recorded by transition(); log the actionable remedy.
+        console.warn(
+          `[execution-watcher] advanceToReview REFUSED for ${taskId} (no completion evidence): ` +
+          `${err.message}`,
+        );
+        return false;
+      }
       // CAS_CONFLICT: another writer already moved the task. Don't double-move
-      // the agent to standby — just log and return.
+      // the agent to standby — just log and report "not advanced by us".
       console.warn(`[execution-watcher] advanceToReview transition failed for ${taskId}: ${err.code} ${err.message}`);
-      return;
+      return false;
     }
     throw err;
   }
@@ -370,6 +381,7 @@ async function advanceToReview(taskId: string, agentId: string | null, agentName
     [taskId]
   );
   if (updated) broadcast({ type: 'task_updated', payload: updated });
+  return true;
 }
 
 /**
@@ -452,11 +464,23 @@ export async function runExecutionCompletionReconcile(): Promise<void> {
         // B5: persist the (possibly derived) session so the webhook / next
         // reconcile resolve it directly rather than re-deriving.
         upsertActiveSession(task.assigned_agent_id, task.openclaw_session_id, task.id);
-        advanceToReview(task.id, task.assigned_agent_id, task.assigned_agent_name, match).catch(err =>
-          console.warn(`[execution-watcher] advanceToReview transition failed for task ${task.id}:`, (err as Error).message),
-        );
-        runQCOnReview(task.id).catch(err => console.error('[execution-watcher] QC error:', err));
-        continue; // task advanced — don't fall back to deliverable check.
+        // FIX 25: the advance is awaited so QC fires ONLY when the move actually
+        // committed. A PRECONDITION_EVIDENCE refusal (zero/unreachable
+        // deliverables behind the TASK_COMPLETE marker) leaves the task in place
+        // — the string alone is no longer completion.
+        const advanced = await advanceToReview(task.id, task.assigned_agent_id, task.assigned_agent_name, match)
+          .catch((err: unknown) => {
+            console.warn(`[execution-watcher] advanceToReview transition failed for task ${task.id}:`, (err as Error).message);
+            return false;
+          });
+        if (advanced) {
+          runQCOnReview(task.id).catch(err => console.error('[execution-watcher] QC error:', err));
+          continue; // task advanced — don't fall back to deliverable check.
+        }
+        // Refused/CAS-lost: fall through to the deliverable fallback below so a
+        // task whose marker outran its artifacts is handled by the same recovery
+        // logic as a gateway-down task (recoverFinishedTaskToReview re-reads
+        // registered deliverables), instead of being silently dropped this tick.
       }
 
       // MR-15: GATEWAY-DOWN DELIVERABLE FALLBACK — when every session probe
