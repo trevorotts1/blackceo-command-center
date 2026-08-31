@@ -5951,7 +5951,43 @@ export const migrations: Migration[] = [
     },
   },
   {
-    // EVENTS-LOOKUP-INDEX (2026-08-27): the model-skew dedupe lookup added in
+    // FIX 5 (presentation rev2 phase A): durable landing table for the
+    // per-stage timing stream the presentation engine emits to
+    // working/telemetry/stage-timings.jsonl. The engine POSTs the same rows
+    // here (spec: "...AND TO A CC ENDPOINT") so run duration / slowest-phase
+    // history survives run-dir cleanup and is queryable per run_id.
+    id: '127',
+    name: 'add_presentation_stage_timings',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS presentation_stage_timings (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          run_id TEXT NOT NULL,
+          event TEXT NOT NULL CHECK (event IN ('phase_exit','run_summary')),
+          phase_id TEXT,
+          wave INTEGER,
+          model_used TEXT,
+          started_at TEXT,
+          ended_at TEXT,
+          duration_s REAL,
+          status TEXT,
+          return_code INTEGER,
+          error_class TEXT,
+          total_wall_s REAL,
+          phase_count INTEGER,
+          slowest_3 TEXT,
+          payload TEXT NOT NULL,
+          created_at TEXT DEFAULT (datetime('now'))
+        )
+      `);
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_presentation_stage_timings_run
+          ON presentation_stage_timings (run_id, event)
+      `);
+      console.log('[Migration 127] presentation_stage_timings ready');
+
+    },
+  },    // EVENTS-LOOKUP-INDEX (2026-08-27): the model-skew dedupe lookup added in
     // 85590ee (skewObservationAlreadyRecorded in src/lib/runtime-model.ts)
     // runs `SELECT metadata FROM events WHERE task_id = ? AND type = ?` up to
     // twice per dispatch. The events table carried only idx_events_created
@@ -5998,8 +6034,7 @@ export const migrations: Migration[] = [
       }
       db.exec(`CREATE INDEX IF NOT EXISTS idx_events_task_type ON events(task_id, type)`);
       console.log('[Migration 128] idx_events_task_type ready');
-    },
-  },
+
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner

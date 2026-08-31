@@ -143,6 +143,11 @@ const WEBHOOK_SECRET_ROUTES = [
   // them at the gate (503) instead of leaving an open write surface.
   '/api/webhooks/auto-route',
   '/api/webhooks/task-created',
+  // FIX 5 (presentation rev2 phase A): stage-timings ingest writes engine
+  // telemetry rows into the CC DB — same authenticated-write family, so a box
+  // without WEBHOOK_SECRET refuses it at the gate (503) instead of leaving an
+  // open write surface. The route re-checks HMAC redundantly, like ingest.
+  '/api/presentations/stage-timings',
 ];
 
 /**
