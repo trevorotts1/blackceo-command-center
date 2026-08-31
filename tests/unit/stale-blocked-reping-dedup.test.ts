@@ -2,12 +2,13 @@
  * stale-blocked-reping-dedup.test.ts — SWEEP-DEDUP.
  *
  * THE INCIDENT this pins: the stale sweep runs on a `* /10 * * * *` cron, but the
- * blocked re-ping window is 72h wide and the blocked branch had NO dedup guard. So
- * every operator-blocked task past the 72h threshold re-escalated on EVERY tick —
- * 6/hour/task, for the entire 72h→144h window. A live board with 71 such tasks
- * produced ~426 escalations/hour and buried the escalation channel in hundreds of
- * identical messages (and ~99k `stale_repinged` event rows). Worse, the operator
- * branch wrote NO dedupable key at all, so there was nothing to dedupe against.
+ * blocked re-ping window is 2h wide (FIX 24) and the blocked branch had NO dedup
+ * guard. So every operator-blocked task past the 2h threshold re-escalated on
+ * EVERY tick — 6/hour/task, for the entire 2h→6h window. A live board with 71
+ * such tasks produced ~426 escalations/hour and buried the escalation channel in
+ * hundreds of identical messages (and ~99k `stale_repinged` event rows). Worse,
+ * the operator branch wrote NO dedupable key at all, so there was nothing to
+ * dedupe against.
  *
  * These tests count REAL escalations end-to-end: a local HTTP server stands in for
  * the escalation webhook (operator) and the Command Center's /api/events (owner), so
@@ -86,14 +87,16 @@ function hoursAgo(h: number): string {
 }
 
 /**
- * A blocked task past the 72h re-ping threshold but short of the 144h return
- * threshold — i.e. sitting squarely in the window that used to re-fire every tick.
+ * A blocked task past the 2h re-ping threshold but short of the 6h return
+ * threshold — i.e. sitting squarely in the window that ships after FIX 24.
  * A non-empty `ask` is supplied because F3's migration-104 invariant now REJECTS a
  * blocked_on_human row with an empty ask (the unanswerable poison state). The ask
  * content is irrelevant to what this suite proves — dedup caps the re-ping
  * regardless of ask text — it exists only so the fixture satisfies the DB invariant.
+ * Age default 4h: inside the 2h..6h re-ping band (past 6h the task is RETURNED,
+ * and there is nothing left to dedupe).
  */
-function seedBlockedTask(who: 'operator' | 'owner', ageHours = 80): string {
+function seedBlockedTask(who: 'operator' | 'owner', ageHours = 4): string {
   const id = uuidv4();
   // tasks.workspace_id defaults to 'default' and REFERENCES workspaces(id), so an
   // isolated DB needs a real workspace row or the INSERT trips the FK.

@@ -52,6 +52,9 @@ export interface BoardSlaOverrides {
   staleReviewHours?: number;
   staleBacklogHours?: number;
   staleTodoHours?: number;
+  // FIX 24: the blocked first re-ping is its OWN window now (default 2h),
+  // independent of the return window (default 6h total).
+  staleBlockedRepingHours?: number;
   staleBlockedRepingedHours?: number;
   // MissionQueue "Tasks Due" filter window (days). Default 7; per-department overridable.
   dueDateWindowDays?: number;
@@ -68,6 +71,7 @@ export const BOARD_SLA_KEYS: (keyof BoardSlaOverrides)[] = [
   'staleReviewHours',
   'staleBacklogHours',
   'staleTodoHours',
+  'staleBlockedRepingHours',
   'staleBlockedRepingedHours',
   'dueDateWindowDays',
 ];
@@ -85,6 +89,7 @@ export const BOARD_SLA_ENV_VAR: Record<keyof BoardSlaOverrides, string> = {
   staleReviewHours: 'STALE_REVIEW_HOURS',
   staleBacklogHours: 'STALE_BACKLOG_HOURS',
   staleTodoHours: 'STALE_TODO_HOURS',
+  staleBlockedRepingHours: 'STALE_BLOCKED_REPING_HOURS',
   staleBlockedRepingedHours: 'STALE_BLOCKED_REPINGED_HOURS',
   dueDateWindowDays: 'BOARD_DUE_DATE_WINDOW_DAYS',
 };
@@ -101,7 +106,8 @@ export const BOARD_SLA_LABEL: Record<keyof BoardSlaOverrides, string> = {
   staleReviewHours: 'Stale sweep: review (hours)',
   staleBacklogHours: 'Stale sweep: backlog (hours)',
   staleTodoHours: 'Stale sweep: to-do (hours)',
-  staleBlockedRepingedHours: 'Stale sweep: blocked re-ping+return (hours)',
+  staleBlockedRepingHours: 'Stale sweep: blocked first re-ping (hours)',
+  staleBlockedRepingedHours: 'Stale sweep: blocked return (hours)',
   dueDateWindowDays: '"Tasks Due" filter window (days)',
 };
 

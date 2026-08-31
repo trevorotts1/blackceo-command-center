@@ -62,8 +62,28 @@ import { requiresRegisteredCertificate } from '@/lib/presentations-cert-gate';
 /** After ingest, wait up to this long for the triad to advance a task past
  *  `backlog` before we send the ACK anyway (honesty over silence). */
 export const ACK_BACKLOG_GRACE_MS = 10 * 60 * 1000; // 10 minutes
-/** Anti-spam: at most one progress message per task per 12h EXCEPT state changes. */
-export const PROGRESS_MIN_INTERVAL_MS = 12 * 60 * 60 * 1000; // 12 hours
+/**
+ * FIX 24: at most one progress message per task per this interval, EXCEPT
+ * state changes (blocked/done are never throttled against it). Shipped default
+ * 1h (was 12h) so a multi-hour render reports hourly without per-slide spam.
+ * Env-overridable via TRUST_ENGINE_PROGRESS_MIN_INTERVAL_HOURS; a non-positive
+ * or non-finite override is REJECTED (warned about) and the 1h default ships.
+ */
+export function resolveProgressMinIntervalHours(raw: string | undefined): number {
+  if (raw === undefined) return 1;
+  const t = raw.trim();
+  if (t === '') return 1;
+  const parsed = Number(t);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    console.warn(
+      `[trust-engine] TRUST_ENGINE_PROGRESS_MIN_INTERVAL_HOURS="${raw}" is invalid (must be a positive number of hours) — using default 1h`,
+    );
+    return 1;
+  }
+  return parsed;
+}
+export const PROGRESS_MIN_INTERVAL_MS =
+  resolveProgressMinIntervalHours(process.env.TRUST_ENGINE_PROGRESS_MIN_INTERVAL_HOURS) * 60 * 60 * 1000;
 /** A blocked job re-asks at most this often. Distinct from PROGRESS_MIN_INTERVAL_MS: the
  *  point of a blocked notice is that the requester is the blocker, so a reminder is
  *  useful, not nagging. Twelve hours was the accidental inherited value; six is a
@@ -422,9 +442,15 @@ export function planSends(tasks: TrustTaskRow[], ctx: PlanContext): PlannedSend[
     if (task.status === 'in_progress' && task.progress_last_sent_at && !night) {
       const phase = ctx.phaseFor?.(task.id);
       if (phase && phase.label) {
+        // FIX 24: the send is gated on BOTH the phase's own budget (silence
+        // ceiling — the old behavior) and the global PROGRESS_MIN_INTERVAL_MS
+        // floor (1h shipped). A phase that advanced 30 minutes after the last
+        // report is HELD until the 1h floor elapses — at most one progress
+        // message per task per hour, phase budget or not.
         const stale =
           task.phase_progress_sent_at === null ||
-          ageMs(ctx.now, task.phase_progress_sent_at) >= phase.budgetMs;
+          (ageMs(ctx.now, task.phase_progress_sent_at) >= phase.budgetMs &&
+            ageMs(ctx.now, task.phase_progress_sent_at) >= PROGRESS_MIN_INTERVAL_MS);
         const advanced = phase.label !== task.last_reported_phase_label;
         if (advanced && stale) {
           const message = phaseProgressMessage(task, phase.label, phase.doneCount, phase.totalCount);

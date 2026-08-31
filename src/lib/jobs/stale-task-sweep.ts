@@ -8,7 +8,10 @@
  *   in_progress:   24h
  *   review:        12h
  *   to-do/backlog: 48h
- *   blocked:       72h (re-ping first; +72h to return to orchestrator)
+ *   blocked:       re-ping at 2h (STALE_BLOCKED_REPING_HOURS); return to
+ *                  orchestrator at 6h TOTAL from first block
+ *                  (STALE_BLOCKED_REPINGED_HOURS). FIX 24 tightened both
+ *                  (was 72h re-ping / 144h return).
  *
  * What happens:
  *   - Non-Blocked stale tasks: synthesize a broken-but-agent-could handback
@@ -19,7 +22,7 @@
  *     threshold (STALE_BLOCKED_REPINGED_THRESHOLD_HOURS), return to the
  *     orchestrator to re-classify.
  *     "Once" is ENFORCED (SWEEP-DEDUP): the sweep runs every 10 minutes but the
- *     re-ping window is 72h wide, so the re-ping is gated on wasRecentlyRepinged()
+ *     re-ping window is 2h wide (FIX 24), so the re-ping is gated on wasRecentlyRepinged()
  *     — at most one escalation per task per STALE_REPING_DEDUP_HOURS (default 24h).
  *     This is a CAP, not a mute: a still-stuck task escalates again next window,
  *     and the guard FAILS OPEN so a query error can never silence an escalation.
@@ -54,13 +57,74 @@ import { v4 as uuidv4 } from 'uuid';
 
 export const STALE_TASK_SWEEP_CRON = '*/10 * * * *';
 
-// F09: presentations signature-deck renders legitimately run for many hours
-// (40 pipeline phases; batch render of 25-50 slides). In_progress presentations
-// tasks younger than this many hours since last progress are exempt from the
-// stale return. Env-overridable.
-const PRESENTATIONS_RENDER_EXEMPT_HOURS = parseFloat(
-  process.env.PRESENTATIONS_RENDER_EXEMPT_HOURS || '72',
+// F09 / FIX 24: presentations signature-deck renders legitimately run for many
+// hours (40 pipeline phases; batch render of 25-50 slides). In_progress
+// presentations tasks younger than this many hours since last progress are
+// exempt from the stale return. FIX 24 tightened the shipped default 72h → 24h
+// (a render 24h+ with NO activity is a dead run, not a long build — render/QC
+// legitimately run hours, not a literal day). Env-overridable; a non-positive
+// override is REJECTED (warned about) and the default 24 ships.
+export const PRESENTATIONS_RENDER_EXEMPT_HOURS = (() => {
+  const raw = (process.env.PRESENTATIONS_RENDER_EXEMPT_HOURS ?? '').trim();
+  if (raw === '') return 24;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    console.warn(
+      `[stale-task-sweep] PRESENTATIONS_RENDER_EXEMPT_HOURS="${raw}" is invalid (must be a positive number of hours) — using default 24`,
+    );
+    return 24;
+  }
+  return parsed;
+})();
+
+/**
+ * FIX 24: the blocked-card lifecycle windows, resolved ONCE as a validated pair.
+ *
+ *   STALE_BLOCKED_REPING_HOURS      — first re-ping to the named human.
+ *     Shipped default 2h (was 72h = half the old 144h return window): a missed
+ *     block catches the same working session instead of three days later.
+ *   STALE_BLOCKED_REPINGED_HOURS    — return to orchestrator / operator
+ *     escalation, TOTAL from first block. Shipped default 6h (was 144h).
+ *
+ * VALIDATION: each window must parse to a positive finite number (0, -1, NaN,
+ * "abc" → REJECTED, default ships), AND the escalation window must not be
+ * shorter than the first re-ping window (internally inverted → BOTH rejected,
+ * defaults ship). The pair is also re-checked per-row at runtime (see the
+ * blocked branch) because resolveSlaThreshold reads env/board-slas.json
+ * independently of this module-level resolve.
+ */
+export function resolveBlockedWindows(
+  repingRaw: string | undefined,
+  returnedRaw: string | undefined,
+): { reping: number; returned: number } {
+  const parsePositive = (raw: string | undefined): number | null => {
+    if (raw === undefined) return null;
+    const t = raw.trim();
+    if (t === '') return null;
+    const parsed = Number(t);
+    if (!Number.isFinite(parsed) || parsed <= 0) return null;
+    return parsed;
+  };
+  const reping = parsePositive(repingRaw) ?? 2;
+  const returned = parsePositive(returnedRaw) ?? 6;
+  if (returned < reping) {
+    console.warn(
+      `[stale-task-sweep] internally inverted blocked windows: STALE_BLOCKED_REPINGED_HOURS="${returned}" is shorter than ` +
+        `STALE_BLOCKED_REPING_HOURS="${reping}" — escalation must never fire before the first re-ping. Rejecting both overrides; ` +
+        `shipped defaults apply (re-ping 2h, return 6h).`,
+    );
+    return { reping: 2, returned: 6 };
+  }
+  return { reping, returned };
+}
+
+const BLOCKED_WINDOWS = resolveBlockedWindows(
+  process.env.STALE_BLOCKED_REPING_HOURS,
+  process.env.STALE_BLOCKED_REPINGED_HOURS,
 );
+
+/** FIX 24: first blocked-card re-ping, hours (see BLOCKED_WINDOWS). */
+export const STALE_BLOCKED_REPING_HOURS = BLOCKED_WINDOWS.reping;
 
 // Per-column stale thresholds in hours.
 const STALE_THRESHOLDS: Record<string, number> = {
@@ -68,8 +132,9 @@ const STALE_THRESHOLDS: Record<string, number> = {
   review: parseFloat(process.env.STALE_REVIEW_HOURS || '12'),
   backlog: parseFloat(process.env.STALE_BACKLOG_HOURS || '48'),
   todo: parseFloat(process.env.STALE_TODO_HOURS || '48'),
-  // Blocked: first threshold = re-ping; second threshold = return to orchestrator.
-  blocked_repinged: parseFloat(process.env.STALE_BLOCKED_REPINGED_HOURS || '144'), // 72+72
+  // Blocked card lifecycle from FIRST block: re-ping at STALE_BLOCKED_REPING_HOURS,
+  // return to orchestrator at this TOTAL window (FIX 24 shipped default 6h, was 144h).
+  blocked_repinged: BLOCKED_WINDOWS.returned,
 };
 
 /** U101: this job's global-default thresholds, keyed to match BoardSlaOverrides
@@ -80,7 +145,8 @@ export const STALE_TASK_SWEEP_GLOBAL_DEFAULTS = {
   staleReviewHours: STALE_THRESHOLDS.review,
   staleBacklogHours: STALE_THRESHOLDS.backlog,
   staleTodoHours: STALE_THRESHOLDS.todo,
-  staleBlockedRepingedHours: STALE_THRESHOLDS.blocked_repinged,
+  staleBlockedRepingHours: STALE_BLOCKED_REPING_HOURS, // FIX 24: 2h shipped
+  staleBlockedRepingedHours: STALE_THRESHOLDS.blocked_repinged, // FIX 24: 6h shipped
 } as const;
 
 interface StaleTaskRow {
@@ -233,11 +299,13 @@ function wasRecentlyRepinged(
 async function repingBlockedHuman(task: StaleTaskRow): Promise<void> {
   const who = task.blocked_on_human ?? 'owner';
   // U101: report THIS task's own effective (department-overridden or global)
-  // re-ping threshold, not always the global constant.
-  const returnThreshold = resolveSlaThreshold(task.department, 'staleBlockedRepingedHours', STALE_THRESHOLDS.blocked_repinged);
+  // re-ping threshold, not always the global constant. FIX 24: the re-ping is
+  // its OWN named window (STALE_BLOCKED_REPING_HOURS), not half of the return
+  // window anymore.
+  const repingHours = resolveSlaThreshold(task.department, 'staleBlockedRepingHours', STALE_BLOCKED_REPING_HOURS);
   const message =
     `[STALE-BLOCKED] Task "${task.title}" (id: ${task.id}) has been waiting in Blocked for over ` +
-    `${returnThreshold / 2}h without a response. ` +
+    `${repingHours}h without a response. ` +
     `Reminder: ${task.ask ?? '(no ask specified)'}`;
 
   if (who === 'operator') {
@@ -397,7 +465,11 @@ export async function runStaleTaskSweep(): Promise<StaleSweepResult> {
     minPossibleSlaThreshold('staleReviewHours', STALE_THRESHOLDS.review),
     minPossibleSlaThreshold('staleBacklogHours', STALE_THRESHOLDS.backlog),
     minPossibleSlaThreshold('staleTodoHours', STALE_THRESHOLDS.todo),
-    minPossibleSlaThreshold('staleBlockedRepingedHours', STALE_THRESHOLDS.blocked_repinged) / 2, // re-ping fires at half the return threshold
+    // FIX 24: the blocked re-ping window is its OWN named constant now (2h
+    // default, NOT half of the 6h return window) — widest-possible fetch must
+    // use the min of the two independent windows.
+    minPossibleSlaThreshold('staleBlockedRepingHours', STALE_BLOCKED_REPING_HOURS),
+    minPossibleSlaThreshold('staleBlockedRepingedHours', STALE_THRESHOLDS.blocked_repinged),
   );
 
   let candidates: StaleTaskRow[];
@@ -447,14 +519,29 @@ export async function runStaleTaskSweep(): Promise<StaleSweepResult> {
       const ageHours = (Date.now() - progressDate) / (1000 * 60 * 60);
 
       if (task.status === 'blocked') {
-        // Blocked tasks: re-ping first threshold, return after second.
-        // U101: per-department override (falls back to the global default).
+        // Blocked tasks: re-ping at the FIRST window (FIX 24: STALE_BLOCKED_REPING_HOURS,
+        // default 2h — its own named constant, no longer half the return window),
+        // return to orchestrator at the SECOND (STALE_BLOCKED_REPINGED_HOURS, default 6h
+        // total from first block). U101: per-department override (falls back to the
+        // global default) for each window independently.
         const returnThreshold = resolveSlaThreshold(
           task.department,
           'staleBlockedRepingedHours',
           STALE_THRESHOLDS.blocked_repinged,
-        ); // default 144h total
-        const repingThreshold = returnThreshold / 2; // default 72h
+        ); // FIX 24 default 6h total (was 144h)
+        let repingThreshold = resolveSlaThreshold(
+          task.department,
+          'staleBlockedRepingHours',
+          STALE_BLOCKED_REPING_HOURS,
+        ); // FIX 24 default 2h (was 72h)
+        // Per-row inversion guard: resolveSlaThreshold reads env/board-slas.json
+        // independently per key, and the module-level BLOCKED_WINDOWS validation
+        // only covers the shipped defaults — a dept override (or env) could still
+        // set re-ping AFTER return. Escalation must never fire before the first
+        // re-ping, so clamp the re-ping to the return window for THIS row.
+        if (repingThreshold > returnThreshold) {
+          repingThreshold = returnThreshold;
+        }
 
         if (ageHours >= returnThreshold) {
           // Second threshold passed: return to orchestrator.
