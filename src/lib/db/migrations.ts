@@ -5987,7 +5987,9 @@ export const migrations: Migration[] = [
       console.log('[Migration 127] presentation_stage_timings ready');
 
     },
-  },    // EVENTS-LOOKUP-INDEX (2026-08-27): the model-skew dedupe lookup added in
+  },
+  {
+    // EVENTS-LOOKUP-INDEX (2026-08-27): the model-skew dedupe lookup added in
     // 85590ee (skewObservationAlreadyRecorded in src/lib/runtime-model.ts)
     // runs `SELECT metadata FROM events WHERE task_id = ? AND type = ?` up to
     // twice per dispatch. The events table carried only idx_events_created
@@ -6034,7 +6036,8 @@ export const migrations: Migration[] = [
       }
       db.exec(`CREATE INDEX IF NOT EXISTS idx_events_task_type ON events(task_id, type)`);
       console.log('[Migration 128] idx_events_task_type ready');
-
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner
