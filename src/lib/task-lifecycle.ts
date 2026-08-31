@@ -65,7 +65,11 @@
  * Preconditions (enforced only for opt-in callers, skippable via operatorOverride):
  *   assigned    : task.assigned_agent_id (specialist_type soft-required, warn only)
  *   in_progress : task.assigned_agent_id (model may be resolved at dispatch time)
- *   review      : no blocking precondition here — QC layer does artifact gating
+ *   review      : REQUIRES completion evidence — at least one registered,
+ *                 reachable deliverable, the SAME invariant done enforces
+ *                 (FIX 25). Also runs BEFORE the operatorOverride bail-out:
+ *                 quality stays the QC scorer's call, but an unregistered
+ *                 deliverable cannot be waved into review either.
  *   done        : REQUIRES completion evidence — at least one registered,
  *                 reachable deliverable (see src/lib/completion-evidence.ts).
  *                 This precondition runs BEFORE the operatorOverride bail-out
@@ -424,6 +428,37 @@ function specialistTypeOf(task: TaskRowForLifecycle): string | null {
 // checkPreconditions
 // ---------------------------------------------------------------------------
 
+/**
+ * FIX 25 — per-request feature flag for the review evidence gate.
+ * Default ON; PRESENTATION_REVIEW_EVIDENCE_GATE=0 restores the pre-FIX-25
+ * behavior (review reachable with zero registered deliverables — the
+ * documented rollback path). Read per call, so tests and a process restart
+ * control it without code changes. This mirrors the done invariant's
+ * un-waivable placement: the gate decides whether the invariant is ACTIVE,
+ * never whether an operator override can skip it.
+ */
+function presentationReviewEvidenceGate(): boolean {
+  return process.env.PRESENTATION_REVIEW_EVIDENCE_GATE !== '0';
+}
+
+/**
+ * FIX 25 — the review-flavored refusal. Same shape and remedies as
+ * noEvidenceMessage (which is done-framed), so every door refuses with the
+ * identical actionable text: register a deliverable at this exact endpoint.
+ */
+function reviewEvidenceRefusalMessage(taskId: string, evidence: { problems: string[] }): string {
+  const detail = evidence.problems.length > 0
+    ? ` Problems: ${evidence.problems.join('; ')}`
+    : ' No deliverables of any type are registered for this task.';
+  return (
+    `Cannot move task ${taskId} to review: review requires at least one registered, reachable deliverable ` +
+    `(the same completion evidence done requires — quality is the QC scorer's call, existence is not).` +
+    detail +
+    ` Register one via POST /api/tasks/${taskId}/deliverables (a 'url' type pointing at where the work ` +
+    `landed is sufficient), then request review again.`
+  );
+}
+
 function checkPreconditions(
   task: TaskRowForLifecycle,
   to: LifecycleState,
@@ -448,6 +483,22 @@ function checkPreconditions(
     const completion = collectCompletionEvidence(task.id);
     if (!completion.hasEvidence) {
       throw new TransitionError('PRECONDITION_EVIDENCE', noEvidenceMessage(task.id, completion));
+    }
+  }
+
+  // ── FIX 25 — review requires THE SAME completion evidence done requires ─────
+  // Before this block, `case 'review'` was a no-op BELOW the operatorOverride
+  // bail-out, so every door that moved a task to review (webhook with override,
+  // watcher reconcile with override, agent self-PATCH) entered review with zero
+  // registered deliverables. Like done above, this runs BEFORE the bail-out: an
+  // override may re-decide routing, it cannot make an unregistered deliverable
+  // exist, and review exists to have artifacts QC'd.
+  // Flag: PRESENTATION_REVIEW_EVIDENCE_GATE (default ON; =0 restores the
+  // pre-FIX-25 soft behavior — the documented rollback path).
+  if (to === 'review' && presentationReviewEvidenceGate()) {
+    const reviewEvidence = collectCompletionEvidence(task.id);
+    if (!reviewEvidence.hasEvidence) {
+      throw new TransitionError('PRECONDITION_EVIDENCE', reviewEvidenceRefusalMessage(task.id, reviewEvidence));
     }
   }
 
@@ -504,14 +555,10 @@ function checkPreconditions(
     }
 
     case 'review': {
-      // Artifact tasks (those with a deliverable record) MUST have a deliverable.
-      // Non-artifact tasks (SOP text work) pass through unconditionally.
-      // We only block if the task HAS deliverables already started but they are
-      // empty — for brand-new artifact tasks the review push itself registers the
-      // deliverable first, so we check for zero-length only when at least one row exists.
-      // Approach: allow through unless there's evidence of an artifact task with no
-      // valid deliverable.  The QC layer does the real gating in artifact mode.
-      break; // no blocking precondition — QC handles it
+      // FIXED under FIX 25: the review precondition LIVES ABOVE the
+      // operatorOverride bail-out (mirroring done), so this case is genuinely a
+      // no-op — the evidence invariant can no longer be skipped by any caller.
+      break;
     }
 
     case 'done': {

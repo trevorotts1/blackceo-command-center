@@ -239,7 +239,8 @@ function safeIsDir(p: string): boolean {
  * when it EXISTS (VPS/Docker) → $HOME/.openclaw/workspace (Mac/bare install).
  * The previous hardcoded '/data/...' default silently broke every Mac box.
  */
-function resolveWorkspaceBase(): string {
+/** Exported for qc-scorer's FIX-21 per-card notify-cooldown state (same sandbox rules). */
+export function resolveWorkspaceBase(): string {
   const override =
     process.env.OPENCLAW_WORKSPACE_PATH || process.env.OPENCLAW_WORKSPACE_ROOT;
   if (override && override.trim()) return override.trim();
