@@ -400,12 +400,18 @@ DB_FILE=""
 if [[ -n "$DB_PATH_OVERRIDE" ]]; then
   DB_FILE="$DB_PATH_OVERRIDE"
 else
-  # Resolve from well-known paths relative to APP_DIR
+  # FIX 34 (presentation rev2): the old candidate order resolved "${APP_DIR}/mission-control.db"
+  # FIRST. On the operator box that repo-root file is a 0-byte decoy, so every
+  # autodeploy backup was a 0-byte rollback source (see spec FIX 34). Now:
+  #   1. LIVEDB (the real ~135MB WAL-mode DB) is tried first;
+  #   2. every candidate additionally requires a NON-ZERO size (-s), so a
+  #      decoy can never satisfy the match even if it wins the ordering.
   for _candidate in \
-    "${APP_DIR}/mission-control.db" \
+    "${HOME}/command-center/data/mission-control.db" \
     "/data/mission-control/mission-control.db" \
-    "/data/projects/command-center/mission-control.db"; do
-    if [[ -f "$_candidate" ]]; then
+    "/data/projects/command-center/mission-control.db" \
+    "${APP_DIR}/mission-control.db"; do
+    if [[ -f "$_candidate" && -s "$_candidate" ]]; then
       DB_FILE="$_candidate"
       break
     fi
@@ -413,7 +419,7 @@ else
 fi
 
 if [[ -z "$DB_FILE" || ! -f "$DB_FILE" ]]; then
-  _warn "  DB not found (tried APP_DIR and heuristic paths). Skipping DB backup."
+  _warn "  DB not found (no non-empty candidate among LIVEDB/APP_DIR/heuristic paths). Skipping DB backup."
   _warn "  Supply --db-path if the DB is at a non-standard location."
   DB_BACKUP=""
 else
@@ -444,7 +450,16 @@ PYWAL
     exit 2
   fi
   cp "$DB_FILE" "$DB_BACKUP"
-  _ok "  DB backed up: ${DB_BACKUP}"
+  # FIX 34 (presentation rev2): a 0-byte/truncated backup is not a backup.
+  # Fail the deploy before the build replaces the old .next — the pre-backup
+  # .next snapshot (1c) has not run yet, so exiting here leaves everything
+  # exactly as it was.
+  if [[ ! -s "$DB_BACKUP" ]]; then
+    _preflight_abort_receipt "DB backup at ${DB_BACKUP} is 0 bytes — refusing to continue (decoy/truncated source would poison the rollback chain). Old build untouched."
+    rm -f "$DB_BACKUP"
+    exit 2
+  fi
+  _ok "  DB backed up: ${DB_BACKUP} ($(oc_backup_size_kb "$DB_BACKUP") KB)"
   # RETENTION: only now that this deploy's backup exists. Never prunes the
   # backup this run just wrote. Prefix scoped to the ".autodeploy." marker
   # (BUG-2 FIX) so this can NEVER match a human/operator-made backup file —
