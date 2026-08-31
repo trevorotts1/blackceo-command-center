@@ -765,6 +765,30 @@ export async function PATCH(
       return NextResponse.json({ error: 'No updates provided' }, { status: 400 });
     }
 
+    // ── U034 deliverable_url register — BEFORE the status transition ───────
+    // FIX 25's review-evidence gate (transition()->checkPreconditions) requires a
+    // registered, reachable deliverable to exist when a move to review is checked.
+    // The producer protocol (cc_board.py) PATCHes {status:'review', deliverable_url}
+    // as a single request, so the row MUST exist before transition() runs —
+    // materializing it after the status block left the gate nothing to find (422).
+    if (u034Url) {
+      try {
+        const dup = queryOne<{ id: string }>(
+          'SELECT id FROM task_deliverables WHERE task_id = ? AND path = ?',
+          [id, u034Url],
+        );
+        if (!dup) {
+          run(
+            `INSERT INTO task_deliverables
+               (id, task_id, deliverable_type, title, path, created_at)
+             VALUES (?, ?, 'url', ?, ?, ?)`,
+            [uuidv4(), id, (validatedData as unknown as { phase_id?: string }).phase_id || 'deliverable', u034Url, now],
+          );
+        }
+      } catch (err) {
+        console.warn('[tasks PATCH] U034 deliverable_url register skipped:', (err as Error).message);
+      }
+    }
     // ── STATUS: through the state machine ─────────────────────────────────────
     if (u035StatusTarget !== null) {
       try {
@@ -864,24 +888,13 @@ export async function PATCH(
         });
       }
     }
-    if (u034Url) {
-      try {
-        const dup = queryOne<{ id: string }>(
-          'SELECT id FROM task_deliverables WHERE task_id = ? AND path = ?',
-          [id, u034Url],
-        );
-        if (!dup) {
-          run(
-            `INSERT INTO task_deliverables
-               (id, task_id, deliverable_type, title, path, created_at)
-             VALUES (?, ?, 'url', ?, ?, ?)`,
-            [uuidv4(), id, (validatedData as unknown as { phase_id?: string }).phase_id || 'deliverable', u034Url, now],
-          );
-        }
-      } catch (err) {
-        console.warn('[tasks PATCH] U034 deliverable_url register skipped:', (err as Error).message);
-      }
-    }
+    // ── U034 deliverable_url register MOVED ABOVE the status-transition block (v6.0.97 CI repair):
+    // the producer protocol PATCHes {status:'review', deliverable_url} in ONE request; the
+    // FIX 25 review-evidence gate inside transition() requires the registered deliverable
+    // to EXIST by the time the review move is checked, so the row must be materialized
+    // first. The old after-transition position made every single-request producer PATCH
+    // 422 (PRECONDITION_EVIDENCE) with the row written afterwards into a 422'd request —
+    // u034-four-fields.test.ts caught this ordering defect.
 
     // U034: `qc_scores` — persist the SCALARS. task_qc_results has no column for
     // the per-gate array (schema.ts:596-607), and the array already rides in the
