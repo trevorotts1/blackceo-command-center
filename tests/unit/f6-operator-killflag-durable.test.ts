@@ -146,7 +146,7 @@ function seedBlockedStuckTask(): string {
   run(
     `INSERT INTO tasks (id, title, status, workspace_id, blocked_on_human, ask, updated_at, last_progress_at)
      VALUES (?, ?, 'blocked', ?, 'operator', 'Awaiting an operator decision (fixture)', ?, ?)`,
-    [taskId, 'F6 stuck task', wsId, hoursAgo(80), hoursAgo(80)], // 80h: past the 72h re-ping threshold
+    [taskId, 'F6 stuck task', wsId, hoursAgo(3), hoursAgo(3)], // 3h: FIX 24 windows — past the 2h first re-ping, inside the 6h return window (stays in the re-ping branch the F6 escalation assertions measure)
   );
   return taskId;
 }
