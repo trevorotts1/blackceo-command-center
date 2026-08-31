@@ -217,6 +217,49 @@ export const CreateDeliverableSchema = z.object({
   description: z.string().optional(),
 });
 
+// FIX 5 (presentation rev2 phase A) -- stage-timings ingest contracts.
+// Shapes mirror EXACTLY what presentation_job/phases.py emits to
+// working/telemetry/stage-timings.jsonl (phase_exit per run_phase_timed call,
+// one run_summary per run). The CC route accepts a batch of these rows.
+const StageTimingExitSchema = z.object({
+  run_id: z.string().min(1),
+  phase_id: z.string().min(1),
+  wave: z.number().int().min(0).optional(),
+  model_used: z.string().nullable().optional(),
+  event: z.literal('phase_exit'),
+  started_at: z.string().min(1),
+  ended_at: z.string().min(1),
+  duration_s: z.number().min(0),
+  status: z.string().min(1),
+  return_code: z.number().int().optional(),
+  error_class: z.string().optional(),
+});
+
+const StageTimingSummarySchema = z.object({
+  run_id: z.string().min(1),
+  event: z.literal('run_summary'),
+  total_wall_s: z.number().min(0),
+  phase_count: z.number().int().min(0),
+  slowest_3: z.array(
+    z.object({
+      phase_id: z.string().min(1),
+      duration_s: z.number().min(0),
+    }),
+  ),
+  generated_at: z.string().min(1),
+});
+
+export const StageTimingRowSchema = z.discriminatedUnion('event', [
+  StageTimingExitSchema,
+  StageTimingSummarySchema,
+]);
+
+// Batch envelope: the engine (or a relay) posts rows in one request. Capped so
+// a runaway or hostile payload cannot smuggle megabytes through the ingest.
+export const StageTimingBatchSchema = z.object({
+  rows: z.array(StageTimingRowSchema).min(1).max(1000),
+});
+
 // Type exports for use in routes
 export type CreateTaskInput = z.infer<typeof CreateTaskSchema>;
 export type UpdateTaskInput = z.infer<typeof UpdateTaskSchema>;
