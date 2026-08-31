@@ -306,11 +306,6 @@ export function collectCompletionEvidence(taskId: string): CompletionEvidence {
       else problems.push(`"${row.title}": not a valid http(s) URL (${row.path ?? 'no path'})`);
       continue;
     }
-    if (row.deliverable_type === 'url') {
-      if (isUsableUrl(row.path)) usable += 1;
-      else problems.push(`"${row.title}": not a valid http(s) URL (${row.path ?? 'no path'})`);
-      continue;
-    }
     // file | artifact | image — FIX 28: bundle-shaped names re-verify bytes.
     const fileTry = isUsableFileForEvidence(row.path);
     if (fileTry.usable) usable += 1;
