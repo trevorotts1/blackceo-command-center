@@ -1,3 +1,39 @@
+## [v6.0.98] — 2026-08-31 — U55 repair: deliverable-before-transition route fix + runner routing + FIX 25 fixtures
+
+### What changed
+
+- **Production fix: PATCH /api/tasks/[id] materializes `deliverable_url` BEFORE the
+  status transition.** The producer protocol (cc_board.py) sends
+  `{status:'review', deliverable_url}` as ONE request; FIX 25's review-evidence
+  gate (transition → checkPreconditions → collectCompletionEvidence) needs the
+  task_deliverables row already registered, but the route materialized it AFTER
+  the status block — every one-request producer patch got 422. Caught by
+  u034-four-fields.test.ts; local run went 4 fail → 2 after the reorder.
+- **Runner routing: 5 vitest-importing fix*.test.ts files added to BOTH runners.**
+  fix5-stage-timings-ingest, fix14-profile-judge, fix25-review-artifact-gate,
+  fix27-deliverable-path-reject, fix28-bundle-reverify were absent from
+  vitest.config.ts's hardcoded include list (invisible to bare `vitest run`)
+  and crashed `node --test` ("Vitest cannot be imported in a CommonJS module").
+- **FIX 25 test fixtures: 7 stale cases seeded with evidence (gate NOT weakened).**
+  ad-campaigns (2, via existing registerStageDeliverable before review),
+  mr-12-wip-limit-server, skill6-lifecycle-guard, u030-build-deck-board-source,
+  u034-four-fields (2) — each now registers one reachable url deliverable before
+  moving to review, matching the gate's own suite remedy. fix25's suite itself
+  sets DISABLE_QC_AUTO_SCORER=1: the fire-and-forget QC scorer raced its
+  evidenced control (no dept SOP → no-criteria → SYSTEM-block → blocked
+  overwrote review before the assert).
+- **Env isolation: interview-detection sandboxes HOME** so
+  candidateWorkspaceRoots() fallback roots ($HOME/.openclaw/workspace,
+  $HOME/Downloads/openclaw-master-files) cannot leak this operator box's real
+  interview artifacts into tmp-fixture assertions (CI-passes either way).
+
+### Proof
+
+- `npm run test:unit`: **2234/2234 pass, rc=0** (was 14 fail at v6.0.97 CI).
+- 5 re-routed fix files: **50/50 pass under vitest**.
+- middleware-bypass-replay remains the known local env artifact (symlinked
+  node_modules; green on CI in v6.0.97 B.1). No source assertion weakened.
+
 ## [v6.0.97] — 2026-08-31 — CI red-release repair: migrations.ts junction + test pins
 
 ### What changed
