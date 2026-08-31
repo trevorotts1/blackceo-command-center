@@ -1,3 +1,32 @@
+## [v6.0.97] — 2026-08-31 — CI red-release repair: migrations.ts junction + test pins
+
+### What changed
+
+- **Repair: corrupted `src/lib/db/migrations.ts` fixed.** The phase-A merge of FIX 5
+  (commit c0921ae) mangled the junction between migrations 127 and 128 — migration
+  128's opening `{` was glued to 127's closing brace, and the array closing
+  `},\n  },\n];` was lost. Every non-trivial test suite (all 40 vitest files import
+  the db chain) failed at module-transform time: 42 tests red across 6 files, build
+  smoke down, both Playwright e2e suites down, static call-site guard down. v6.0.96
+  shipped that syntax error on main; every client's CI was 9-jobs red.
+- **U117 pin update: passthrough-write-scope counts re-derived.** FIX 5 added POST
+  `/api/presentations/stage-timings` (a legitimate new mutating route, already in
+  middleware's fail-closed webhook family — HMAC over WEBHOOK_SECRET, 503 when
+  secret absent). The test's independent WEBHOOK_SECRET_ROUTES re-implementation
+  wasn't updated, so: total mutating routes 108→109, webhook-protected 5→6,
+  reachable stays 103 (the new route is NOT reachable — it's fail-closed).
+- **Local proof before push:** full `vitest run` on the repaired tree = 569 passed /
+  4 failed, and all 4 failures are in middleware-bypass-replay which fails
+  identically on pre-merge main (2585ad5) locally — env artifact, green on CI
+  runners. The 6 previously-red suites were verified green locally on old main
+  (153/153) and on the repaired tree.
+
+### Fixed
+
+- CI: qc-cc.yml B.1 deep-health (42 reds), build smoke, API smoke, Duck e2e,
+  interview e2e, U55 static guard, behavioral fixtures — all parse-cascade from
+  the single corrupted file.
+
 ## [v6.0.96] — 2026-08-31 — Presentation Department rev2 batch 1
 
 ### What changed
