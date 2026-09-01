@@ -67,8 +67,10 @@ import {
   sendRequesterAudienceAsk,
   type RequesterAudienceAskDelivery,
 } from '@/lib/jobs/trust-engine';
+import { normalizeRequesterSessionKey } from '@/lib/requester-session';
 import { transition, recordStatusEvent, type LifecycleState } from '@/lib/task-lifecycle';
 import { recordBlockEvent } from '@/lib/block-events';
+import { assertNoFixtureDerivedServerWrite } from '@/lib/fixture-guard';
 import type { Task, TaskPriority, Agent, PersonaBundle, TaskPersonaBundleRow } from '@/lib/types';
 
 // ─── SENTINEL GUARD HELPERS ──────────────────────────────────────────────────
@@ -629,6 +631,30 @@ export async function resolvePersonaAndPin(
   sopContext?: SopSelectorContext,
   opts?: { blend?: boolean },
 ): Promise<string | null> {
+  // CC-fixture-003 — the first of the two residuals left open by v6.0.62.
+  //
+  // Everything below this line is durable. A selection returned from
+  // PERSONA_FIXTURE_JSON is pinned onto `tasks.persona_id / persona_name /
+  // persona_mode / persona_score / persona_version / persona_selected_at` and
+  // `tasks.persona_reason`, and may also persist a task_persona_bundle row.
+  // NO column marks any of it fixture-derived, so a canned pin is
+  // indistinguishable from a real scored one — and the persona decides whose
+  // voice and governance every downstream artifact carries.
+  //
+  // selectPersonaForTask() already calls assertNoFixtureEnvInProduction(), but
+  // that is a no-op outside NODE_ENV=production and a `next dev` box writes to
+  // the SAME mission-control.db. The marker-keyed guard refuses inside the real
+  // server process at every NODE_ENV, and is invisible to offline tests and
+  // scripts, which never set __CC_SERVER_ENTRYPOINT__ — which is why
+  // tests/unit/p2-02-persona-reason-persistence.test.ts keeps passing unmodified.
+  //
+  // Placed OUTSIDE the retry loop below, deliberately. That loop catches every
+  // attempt into a console.error and continues, and on exhaustion the fallback
+  // at the bottom of this function pins a department-default persona anyway. A
+  // guard inside the loop would therefore be swallowed AND still end in a
+  // durable write — the refusal has to happen before the loop is entered.
+  assertNoFixtureDerivedServerWrite('a tasks.persona_* pin');
+
   for (let attempt = 1; attempt <= PERSONA_PIN_MAX_ATTEMPTS; attempt++) {
     try {
       const persona = await selectPersonaForTask(taskId, taskDescription, departmentForSelector, sopContext, {
@@ -1010,6 +1036,15 @@ export async function resolvePersonaPlanAndPin(
   departmentForSelector: string,
   slots: PersonaSlot[],
 ): Promise<string | null> {
+  // CC-fixture-003 — the plan half of the persona residual. A canned plan from
+  // PERSONA_PLAN_FIXTURE_JSON is persisted as task_subtask_personas rows, has
+  // its required slots backfilled by enforceRequiredSlots(), and has its primary
+  // row mirrored onto `tasks.persona_*` — all unlabelled. Refused here, before
+  // any of that, for the same reason as resolvePersonaAndPin above; note this
+  // function also delegates to resolvePersonaAndPin on a thin plan, so guarding
+  // only there would still let enforceRequiredSlots write first.
+  assertNoFixtureDerivedServerWrite('a tasks.persona_* plan pin');
+
   let plan;
   try {
     plan = await selectPersonaPlanForTask(taskId, taskDescription, departmentForSelector, { slots });
@@ -2231,6 +2266,18 @@ export interface CreateTaskCoreInput {
   requester_channel?: string | null;
   requester_chat_id?: string | null;
   /**
+   * WEBCHAT-REQUESTER-ROUTE (migration 127) — the SECOND requester address: the
+   * OpenClaw gateway session key of the conversation this request came from
+   * (`agent:<agentId>:<peer>`). A webchat requester has no chat id, so this is
+   * the only way the trust engine can reach them. Captured whenever it is
+   * available, regardless of channel — the chat id still wins at delivery time,
+   * so a task that has both reports exactly where it always did. Validated by
+   * `normalizeRequesterSessionKey` at the door: a non-addressable value (a
+   * producer run id, free text) is dropped rather than stored as a phantom
+   * address. See src/lib/requester-session.ts.
+   */
+  requester_session_key?: string | null;
+  /**
    * U94 (X.2.3) — tags this create call as having come through one of the
    * three ENUMERATED human-facing creation doors (Command-Center UI create,
    * Telegram/CEO-chat ingest, interview-driven department provisioning) —
@@ -2520,8 +2567,8 @@ export async function createTaskCore(
       : computeDueDateSmartDefault(resolvedPriority, new Date(now));
 
   run(
-    `INSERT INTO tasks (id, title, description, status, priority, assigned_agent_id, created_by_agent_id, workspace_id, business_id, department, due_date, sop_id, source, requester_channel, requester_chat_id, parent_task_id, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO tasks (id, title, description, status, priority, assigned_agent_id, created_by_agent_id, workspace_id, business_id, department, due_date, sop_id, source, requester_channel, requester_chat_id, requester_session_key, parent_task_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       input.title,
@@ -2540,6 +2587,11 @@ export async function createTaskCore(
       // report back into it. Both NULL for operator/internal tasks (never reported on).
       input.requester_channel || null,
       input.requester_chat_id || null,
+      // WEBCHAT-REQUESTER-ROUTE (migration 127): the fallback address for a
+      // requester who has no chat id (a webchat session). Re-validated here so
+      // this canonical write path — not just the ingest door — is the place a
+      // non-addressable value is refused, whichever caller supplied it.
+      normalizeRequesterSessionKey(input.requester_session_key),
       // WI-15b (migration 124): NULL for a parent/flat task; the pre-validated
       // parent row id for a per-phase child. See CreateTaskCoreInput above.
       input.parent_task_id || null,

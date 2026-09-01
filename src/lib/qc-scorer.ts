@@ -61,6 +61,7 @@
 
 import { readFileSync, writeFileSync, renameSync, unlinkSync, existsSync, statSync, openSync, readSync, closeSync, readdirSync } from 'fs';
 import * as path from 'path';
+import { resolvePresentationRunRoots } from '@/lib/presentation-run-roots';
 // TCC-safe accessors for the ARTIFACT tree (PROJECTS_PATH, default
 // ~/Documents/Shared — a macOS TCC-protected dir where a raw open()/opendir()
 // blocks the qc-review-sweep event loop forever). Session reads under
@@ -78,7 +79,7 @@ import { notifyOwnerDone } from '@/lib/owner-reports';
 import { transition, TransitionError, type LifecycleState } from '@/lib/task-lifecycle';
 import { requiresRegisteredCertificate } from '@/lib/presentations-cert-gate';
 import { recordBlockEvent } from '@/lib/block-events';
-import { assertNoFixtureEnvInProduction } from '@/lib/fixture-guard';
+import { assertNoFixtureEnvInProduction, assertNoFixtureDerivedServerWrite } from '@/lib/fixture-guard';
 import { EVIDENCE_DELIVERABLE_TYPES, isUsableUrl, collectCompletionEvidence, isBundleDeliverablePath, verifyPresentationBundleDeliverable, bundleReverifyEnabled } from '@/lib/completion-evidence';
 import { getProvider } from '@/lib/model-providers';
 import { listModels } from '@/lib/model-registry';
@@ -2877,6 +2878,43 @@ export function checkPipelineCompleteness(records: PipelineRecords): PipelineCom
  * working/checkpoints). We also accept the run dir itself directly holding
  * `media_library.json` (its checkpoint), as some flows seed it at the root.
  */
+/**
+ * Run-root-agnostic fallback (2026-08-27): when the artifact-path walk-up
+ * cannot find a run dir, probe every configured run root
+ * (PRESENTATION_RUNS_DIRS — e.g. ~/webinar-decks/<client>/<deck>/<date>/)
+ * for a directory carrying the Presentations workdir markers. First hit
+ * wins; unreadable/missing roots are skipped and are NEVER treated as proof
+ * a run does not exist (the caller keeps the all-false/all-null UNDETERMINED
+ * posture). Returns null when nothing is found — UNDETERMINED, not "absent".
+ */
+function findRunDirFromConfiguredRoots(): string | null {
+  for (const root of resolvePresentationRunRoots()) {
+    try {
+      if (!existsSync(root)) continue;
+      for (const entry of safeReaddirNames(root)) {
+        const candidate = path.join(root, entry);
+        try {
+          if (!statSync(candidate).isDirectory()) continue;
+        } catch {
+          continue;
+        }
+        if (
+          existsSync(path.join(candidate, 'working')) ||
+          existsSync(path.join(candidate, 'media_library.json')) ||
+          existsSync(path.join(candidate, 'working', 'checkpoints', 'media_library.json')) ||
+          existsSync(path.join(candidate, 'intake.json')) ||
+          existsSync(path.join(candidate, 'mission_prd.json'))
+        ) {
+          return candidate;
+        }
+      }
+    } catch {
+      /* unreadable root — skip, never fatal */
+    }
+  }
+  return null;
+}
+
 export function collectPipelineRecords(deckArtifactPath: string): PipelineRecords {
   const absent: PipelineRecords = {
     researchBriefComplete: false,
@@ -2906,6 +2944,14 @@ export function collectPipelineRecords(deckArtifactPath: string): PipelineRecord
     const parent = path.dirname(dir);
     if (parent === dir) break; // reached filesystem root
     dir = parent;
+  }
+  // Run-root-agnostic fallback (2026-08-27): the walk-up failed, so probe the
+  // configured run roots (PRESENTATION_RUNS_DIRS, e.g. ~/webinar-decks) for a
+  // working/ subtree. A run living under an extra root is discovered here;
+  // finding nothing anywhere stays UNDETERMINED (all-false record set) and
+  // never reads as proof the run does not exist.
+  if (!runDir) {
+    runDir = findRunDirFromConfiguredRoots();
   }
   if (!runDir) return absent;
 
@@ -3173,6 +3219,13 @@ export function collectCoverageInputs(
     const parent = path.dirname(dir);
     if (parent === dir) break; // reached filesystem root
     dir = parent;
+  }
+  // Run-root-agnostic fallback (2026-08-27): same posture as
+  // collectPipelineRecords — probe the configured run roots before giving up;
+  // nothing found anywhere stays UNDETERMINED (all-null targets), never proof
+  // of absence.
+  if (!runDir) {
+    runDir = findRunDirFromConfiguredRoots();
   }
   if (!runDir) return absent;
 
@@ -4498,6 +4551,32 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
     return null;
   }
 
+  // CC-fixture-003 — the second of the two residuals left open by v6.0.62.
+  //
+  // runQCOnReview is a DURABLE path end to end. It writes the `task_qc_results`
+  // row the grading module reads back as qcPassRate evidence, writes `events`
+  // rows the board renders as QC history, and flips `tasks.status` (review →
+  // done / backlog / blocked). With QC_FIXTURE_JSON_PATH set, scoreTaskForQC
+  // returns whatever score the canned file names on the `llm` scoring path —
+  // the exact path the grading module filters FOR — and QC_SIMULATE_PROVIDER_DOWN
+  // forges an outage that persists as genuine judge history. Neither leaves a
+  // mark on the row, so a canned verdict is indistinguishable from a real one.
+  //
+  // scoreTaskForQC already calls assertNoFixtureEnvInProduction(), but that is a
+  // deliberate no-op outside NODE_ENV=production and therefore not containment:
+  // a `next dev` box writes to the SAME mission-control.db as a live one. The
+  // marker-keyed guard refuses at every NODE_ENV inside the real server process,
+  // while leaving fixture mode fully usable for offline tests and smoke scripts
+  // (which never set __CC_SERVER_ENTRYPOINT__) — that is exactly why
+  // tests/unit/prd-2.10-qc-results-persistence.test.ts keeps passing unmodified.
+  //
+  // Placed here DELIBERATELY, before the try below and before the first `events`
+  // write, for two reasons: that catch swallows everything into a console.error
+  // and returns null, which would hide the refusal; and the earliest durable
+  // write in this function is an `events` INSERT well above the task_qc_results
+  // INSERT, so guarding at the task_qc_results site alone would be too late.
+  assertNoFixtureDerivedServerWrite('a task_qc_results row and its QC events');
+
   try {
     const task = queryOne<TaskRowForQC>(
       `SELECT id, title, description, sop_id, department, source, workspace_id,
@@ -5341,6 +5420,10 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
     // ── End producer/judge agreement check + both-gates rule ──────────────────
 
     // ── PRD 2.10: Persist QC result to task_qc_results for grading module ─────
+    // CC-FIXTURE-003: the personable/QC fixture write guard — refuse a durable
+    // task_qc_results row when the verdict came from a fixture (merged from
+    // agent/cc-fixture-003-persona-qc-residuals).
+    assertNoFixtureDerivedServerWrite('a task_qc_results row and its QC events');
     // Fire-and-forget: wrap in try/catch so any DB error never breaks the scorer.
     // All paths (llm, heuristic, no-criteria) write a row so the grading module
     // can surface the "awaiting LLM key" insufficient-data state.

@@ -448,7 +448,204 @@ Units: U017, U019
 
 Units: U013
 - U013 — Document canonical interview state source-of-truth (files, not DB) with safety annotations on all 7 DB accessors
+## [v6.0.66] — 2026-07-21 — CC-SHARED-001: one agent's save rewrote the company's rules for all 23 agents, and the owner profile was never written at all
 
+v6.0.66 — Integrity fix. Two findings on the same write path in the per-agent
+editor, both reporting a successful save for something other than what happened.
+
+- **T1-04 (BLOCKER) — an agent-scoped save rewrote every agent.** Every agent
+  directory's `AGENTS.md`, `TOOLS.md` and `USER.md` are symbolic links into
+  `agents/_shared/` (mode `120000`, the same blob hash across all 23 agent
+  directories). `src/lib/agent-files.ts` wrote straight through them:
+
+      fs.writeFileSync(path.join(dir, filename), content, 'utf-8');
+
+  No `lstat`, no link check, no ownership test. The interface presents a
+  per-agent editor, so an operator changing one agent's rules replaced the
+  operating rules — including the safety rules — for every agent in the company,
+  and the response returned the single updated agent record as if one agent had
+  changed. Nothing in the write path, the response or the interface said
+  otherwise. `agents/_shared/AGENTS.md` itself lists *"Editing this file (it's
+  shared — edit `agents/_shared/AGENTS.md` instead)"* among prohibited actions;
+  the writer performed exactly that.
+
+- **T0-43 — the owner profile reported success and wrote nothing.** `user_md`
+  was accepted into the database by the update route but was absent from the
+  file-sync map entirely, so `USER.md` on disk never changed. Every agent's
+  startup procedure reads that file ("Read `USER.md` (owner profile)"), so the
+  agents kept running on the previous owner context indefinitely while the
+  interface kept showing the new text — it reads the database. The divergence
+  was invisible from both ends.
+
+**What changed**
+
+- `src/lib/agent-files.ts` — the writer `lstat`s the destination and refuses a
+  symbolic link with a typed `SharedFileError` carrying the column, the filename
+  and the link target. `user_md` is now in the file map, so the field is governed
+  rather than silently dropped. `sharedFileTarget()` and `inheritedFields()`
+  expose the same fact to callers. `writeSharedFile()` is the ONE authorised
+  company-wide write: it targets `agents/_shared/<FILE>` directly, never through
+  an agent's link, so a company-wide change is always an explicit act. The agents
+  root is resolved per call and overridable with `CC_AGENTS_DIR` (the same
+  first-class override pattern `DATABASE_PATH` uses) so tests can point the
+  writer at a throwaway tree; unset on every box, the default is unchanged.
+- `src/app/api/agents/[id]/route.ts` — the shared fields are preflighted BEFORE
+  the database update and answered with an explicit `409` naming the inherited
+  field and its shared target, so the record and the disk can never disagree
+  about whether a save happened. `GET` and `PATCH` both report
+  `inherited_fields`.
+- `src/components/AgentModal.tsx` — inherited editors render read-only with an
+  explanation, inherited fields are stripped from the request body, and a failed
+  save now surfaces its reason instead of closing silently.
+
+**Tests** — `tests/unit/agent-shared-file-write-guard.test.ts` (7 tests) on a
+real temporary tree with real symlinks in the shipped shape: the write is
+refused, the shared file is byte-unchanged, no other agent's file changes, the
+route returns 409 without touching the database, a per-agent field still saves,
+the authorised shared write reaches the shared file, and a repository check
+asserts the checked-in `agents/` tree really does use `_shared` symlinks (rule
+E5 — the fixture corresponds to production). The mutation proof performs the
+pre-fix write verbatim and requires all three agents' files to change.
+
+**Operator note.** A previously "successful" interface action now returns a
+conflict. That action was silently destroying 22 agents' rules, so the conflict
+is the fix, not a regression — but communicate it before it lands.
+## [v6.0.67] — 2026-07-21 — A NON-SEARCH MODEL ANSWERING A GROUNDED RESEARCH QUERY, AND AN EMPTY ANSWER STORED AS A COMPLETED SEARCH
+
+Section A item **A43** of the skill-review fix programme. Findings **T0-56** and
+**T0-57**, both in `POST /api/operator/research/search`.
+
+### T0-56 — the model substitution was not capability-checked
+
+`resolveModel()` preferred an active `model_registry` row for the selected
+provider, and when no row matched the documented default by id it fell through
+to `active[0]` — **the first active row for that provider, whatever it was**.
+
+Live web search is a property of *particular models*, not of a provider:
+`sonar-pro` searches the live web every call; a plain chat model under the same
+Perplexity key does not. A registry row promoted to active for an unrelated
+reason therefore silently became the research model, while the route continued
+to present its output as grounded research. The substitution was invisible —
+identical response shape, minus the grounding.
+
+Measured on the pre-fix route with one active row
+`perplexity/mistral-7b-instruct`:
+
+    PROBE model chosen = "mistral-7b-instruct"      # before
+    PROBE model chosen = "sonar-pro"                # after
+
+A candidate is now substituted only when `isSearchCapableModel()` recognises it
+against the families documented in `src/lib/research/providers.ts`. Anything
+else falls back to the provider's **documented default**, which is
+search-capable by construction, so nothing that worked before stops working —
+only the silent substitution stops. The response and the stored
+`search_metadata` now record `answering_model`, `model_source`,
+`model_search_capable` and `non_search_models_rejected`, so a reader of a stored
+search can tell a documented search model from a substitution.
+
+**Why an allowlist and not a capability column.** A `search_capable` column
+would be a schema addition that no box in the fleet currently has, so every real
+row would read false and *every* substitution would be filtered — a check whose
+fixture corresponds to nothing in production. The new
+`src/lib/research/search-capable-models.ts` derives its recognisers from the
+provider contracts already documented in `providers.ts`, which is the same
+source the adapters are written against.
+
+### T0-57 — an empty answer became a durable completed search
+
+The route's `try/catch` only sees a **thrown** error. A 200 response whose
+answer is empty is not an error, so it flowed onward, was persisted through
+`createResearchSearch()` and mirrored to `<vault>/research/**`, where the Memory
+full-text index ingests it as genuine research on that question. The only signal
+was the string `(no answer returned)` rendered inside the markdown body —
+invisible to anything that counts completed searches or reuses stored research.
+
+Measured on the pre-fix route with a provider returning `content: ""`:
+
+    status = 200 | search_id = "d583b279-…" | research_searches rows 1 -> 2   # before
+    status = 502 | search_id = undefined    | research_searches rows 1 -> 1   # after
+
+An empty (or whitespace-only) answer now returns `502 provider_empty_answer`
+with `persisted: false`, and **nothing** is written or mirrored.
+
+A non-empty answer with **zero citations is still stored** — that is a real
+result, not a failure — but it is now stamped `grounded: false` in the metadata
+and carries an explicit **UNGROUNDED — no sources returned** block in the
+markdown, because the vault mirror is what the Memory index ingests.
+
+### Tests
+
+`tests/unit/cc-resear-t0-56-57-search-capability-and-empty-answer.test.ts` — 10
+tests, every predicate proven in **both** directions, driving the **live** route
+path with `globalThis.fetch` stubbed (not fixture mode) against an isolated
+database. Anti-false-fail controls: a search-capable registry row is still
+substituted; an empty registry still resolves to the documented default; a
+normal cited answer is completely unaffected. Every seeded row uses the real
+`model_registry` columns from migration 031 — no column is invented.
+
+Against the pre-fix route 7 of the 10 fail; all 10 pass after.
+## [v6.0.68] — 2026-07-21 — CC-fixture-003: the last two fixture residuals (persona pins, QC results) are closed
+
+v6.0.68 — Security/integrity fix. Completes the arc started by CC-resear-001 (v6.0.61) and
+CC-fixture-002 (v6.0.62). Those two closed six mechanisms but deliberately left **two**
+residuals open, because both are the input seam for a REAL test and closing them naively
+would have meant weakening one — correctly out of bounds. This lands the guard instead.
+
+- **The two residuals (reproduced against pristine `origin/main` @ `b029a43`):**
+  1. `PERSONA_FIXTURE_JSON` / `PERSONA_PLAN_FIXTURE_JSON` — a canned persona was pinned
+     durably onto `tasks.persona_id / persona_name / persona_mode / persona_score /
+     persona_version / persona_selected_at` and `tasks.persona_reason` (plus a possible
+     `task_persona_bundle` row), with **no column marking it fixture-derived**. The persona
+     decides whose voice and governance every downstream artifact carries.
+  2. `QC_FIXTURE_JSON_PATH` / `QC_SIMULATE_PROVIDER_DOWN` — a canned verdict was persisted
+     as a `task_qc_results` row on the `llm` scoring path (the exact path the grading module
+     filters FOR when computing qcPassRate), plus `events` rows the board renders as QC
+     history, plus a `tasks.status` flip.
+  Both were guarded only by `assertNoFixtureEnvInProduction()`, a deliberate no-op outside
+  `NODE_ENV=production`. **That is not containment**: a `next dev` box writes to the SAME
+  `mission-control.db` as a live one, which is the whole reason CC-fixture-002 introduced a
+  marker-keyed guard in the first place.
+- **What lands — the ALREADY-MERGED guard, extended; never a second guard.**
+  `assertNoFixtureDerivedServerWrite()` from `src/lib/fixture-guard.ts` is wired into both
+  write paths. It is keyed on `globalThis.__CC_SERVER_ENTRYPOINT__`, set only by
+  `src/instrumentation.ts`, so it refuses fixture-derived durable writes from the real
+  server process at **every** `NODE_ENV` while leaving offline tests and smoke scripts —
+  which never set the marker — fully working.
+  - `src/lib/tasks.ts` `resolvePersonaAndPin()` — guarded **outside** the retry loop.
+    Placement is load-bearing: that loop catches every attempt into a `console.error` and
+    continues, and on exhaustion the fallback pins a department-default persona anyway, so
+    a guard inside the loop would be swallowed AND still end in a durable write.
+  - `src/lib/tasks.ts` `resolvePersonaPlanAndPin()` — guarded at entry, before
+    `enforceRequiredSlots()` can write and before it can delegate to the single-persona path.
+  - `src/lib/qc-scorer.ts` `runQCOnReview()` — guarded **before** the function's outer
+    `try`, which swallows everything into a `console.error` and returns `null`. Also before
+    the first `events` INSERT, which sits well above the `task_qc_results` INSERT — guarding
+    at the `task_qc_results` site alone would have been too late.
+- **Both named tests still pass, completely unmodified** — that was the hard requirement.
+  `p2-02-persona-reason-persistence` (1/1) and `prd-2.10-qc-results-persistence` (5/5) both
+  set their fixture var and a throwaway `DATABASE_PATH` but never set the server marker, so
+  the guard is invisible to them. Verified by reading both files and by running them; the
+  diff touches no test file other than the new one.
+- **Proof:** new `tests/unit/cc-fixture-003-persona-qc-durable-write-guard.test.ts` —
+  **5 of 9 FAIL against pristine `origin/main` @ `b029a43`, 9/9 PASS after**. The 4 that
+  pass both ways are the deliberate controls: fixture mode still works with no marker (both
+  the persona and QC paths), the live path is unchanged when no fixture var is set, and the
+  diagnostic sweep already names all four vars. `npx tsc --noEmit` clean. Full
+  `npm run test:unit`: 1821 tests, 1816 pass, **5 failures byte-identical to the
+  pre-existing `interview-detection.test.ts` `getInterviewState` set** — verified by running
+  that file against pristine `origin/main` (5/8 fail there too). Zero new failures.
+- **Detection was already complete** — `FIXTURE_ENV_VARS` has named all four of these vars
+  since v6.0.62, so `/api/health/deep` `advisory.fixture_env` already reports them by name.
+  No change was needed there; a test now locks it.
+- **Existing contamination:** one artifact found and removed — a `durable-write-probe`
+  markdown file left in the Memory-indexed research path by the v6.0.61 verification itself,
+  containing a fabricated answer and two `example.invalid` source URLs, unlabelled. Read and
+  positively identified as our own probe debris before being moved to a timestamped
+  quarantine outside the indexed path (moved, not unlinked, so it stays recoverable).
+  Confirmed by direct SQL against every Memory store — `memory/main.sqlite`,
+  `memory/dept-research.sqlite`, `agents/main/agent/openclaw-agent.sqlite` — that it had
+  **never been ingested** (0 rows by path, by content phrase, and by research id), so no
+  reindex or cache purge was required; and by query that `research_searches` holds 0 rows.
 ## [v6.0.65] — 2026-07-21 — A44/A46: the instruction closest to the agent contradicted the platform's impersonation guardrail
 
 v6.0.65 — Safety and contract fix. Four findings from the nine-cluster skill review, all
@@ -507,7 +704,6 @@ verified against pristine `origin/main` before anything was changed.
 **Blast radius:** documentation and contracts plus two new static checks. No runtime code
 path changed. Both new checks are self-tested in both directions and neither can pass by
 skipping.
-
 ## [v6.0.63] — 2026-07-21 — T0-01 / T0-42: a task with no deliverable can no longer be recorded `done`
 
 v6.0.63 — Security/integrity fix. Findings T0-01 and T0-42, ranked first and second in a

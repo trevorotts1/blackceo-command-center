@@ -255,18 +255,20 @@ fi
 # assets are skipped.
 _list_files() {
   local root="$1"
-  find "$root" \
-    \( -path "$root/.git" -o -path "$root/node_modules" -o -name "__pycache__" \) -prune \
-    -o -type f \( \
-        -name "*.md"   -o -name "*.sh"   -o -name "*.json" -o -name "*.txt" \
-        -o -name "*.yaml" -o -name "*.yml" -o -name "*.py"  -o -name "*.mjs" \
-        -o -name "*.js"   -o -name "*.ts"  -o -name "*.tsx" -o -name "*.jsx" \
-        -o -name "*.cjs"  -o -name "*.html" -o -name "*.css" -o -name "*.toml" \
-        -o -name "*.sql"  -o -name "*.conf" -o -name "*.cfg" -o -name "*.ini" \
-        -o -name "*.xml"  -o -name "*.csv" -o -name "*.plist" -o -name "*.tf" \
-        -o -name "*.template" -o -name "*.tmpl" -o -name "*.example" \
-        -o -name "*.sample" -o -name ".env" -o -name "*.env" \
-      \) -print
+  # AUTHORITATIVE scan walks TRACKED files only (git ls-files) — the docstring
+  # contract and the pre-push hook both say "tracked files"; the old `find`
+  # implementation walked the whole working tree, so untracked local build
+  # artifacts (.next.rollback/, live memory state, scratch scripts) that are
+  # not part of the pushed tree could block unrelated pushes. Any file whose
+  # content is genuinely being pushed is by definition tracked, so this is
+  # the correct scope for a push-path gate.
+  git -C "$root" ls-files -z | while IFS= read -r -d '' f; do
+    case "$f" in
+      *.md|*.sh|*.json|*.txt|*.yaml|*.yml|*.py|*.mjs|*.js|*.ts|*.tsx|*.jsx|\
+*.cjs|*.html|*.css|*.toml|*.sql|*.conf|*.cfg|*.ini|*.xml|*.csv|*.plist|*.tf|\
+*.template|*.tmpl|*.example|*.sample|.env|*.env) printf '%s\n' "$f" ;;
+    esac
+  done | sed "s#^#$root/#"
 }
 
 # ─── Self-exclusion predicate ─────────────────────────────────────────────────
