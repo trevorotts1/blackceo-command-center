@@ -1,3 +1,36 @@
+## [v6.0.99] — 2026-08-31 — Presentation rev2 batch 2 (CC-side): FIX 24 stall-window tightening
+
+### What changed
+
+- **FIX 24: tightened stall windows.** Presentations stale-sweep exemption 72h→24h
+  (`PRESENTATIONS_RENDER_EXEMPT_HOURS` validated+exported; non-positive rejected).
+  Progress-notification throttle 12h→1h (`TRUST_ENGINE_PROGRESS_MIN_INTERVAL_MS`
+  now enforced via `resolveProgressMinIntervalHours`; phase-progress gate = phase
+  budget AND 1h floor). Blocked-card first re-ping 72h→2h
+  (`STALE_BLOCKED_REPING_HOURS`, its own named window; per-row clamp reping≤return).
+  Operator escalation 144h→6h total from first block (`STALE_BLOCKED_REPINGED_HOURS`
+  via validated `resolveBlockedWindows` pair; escalation<re-ping → BOTH rejected).
+  FIX 21 immediate SYSTEM-block notification path untouched. All four windows
+  operator-configurable via the existing env-config pattern; `board-slas.ts` carries
+  `staleBlockedRepingHours` into all four tables. Files: stale-task-sweep.ts,
+  trust-engine.ts, board-slas.ts + 3 test files. Commit 3f6eef38, QC verdict pass
+  (verified against spec lines 227–232).
+
+### Merge-safety repairs landed with this batch (proven by suite)
+
+- migrations.ts junction splice re-introduced by the textual merge repaired
+  (esbuild "Expected ']' but found ':'" at 6017) — main's blob restored.
+- tasks/[id] route: U034 deliverable_url register moved back BEFORE the
+  transition call (v6.0.97 ordering cff7ab9), which the batch-2 auto-merge had
+  re-spliced after the transition — producer {status:'review', deliverable_url}
+  422s resolved (u034/ad-campaigns suites green standalone).
+- f6-operator-killflag fixture re-seeded 80h→3h: inside FIX 24's tightened
+  windows so the escalation assertions measure the re-ping branch again (8/8).
+
+### Proof
+
+- Full `npm run test:unit` on the release tree: 2251 pass / 0 fail (exit 0).
+
 ## [v6.0.98] — 2026-08-31 — U55 repair: deliverable-before-transition route fix + runner routing + FIX 25 fixtures
 
 ### What changed
