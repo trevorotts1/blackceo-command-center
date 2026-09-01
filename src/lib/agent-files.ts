@@ -94,18 +94,15 @@ export function checkSharedFileSymlink(name: string, column: string): boolean {
  * Back-compat error name for the same condition (main route.ts could throw
  * SharedFileSymlinkError; u088 test constructs one and checks name/message).
  */
-export class SharedFileSymlinkError extends Error {
-  readonly column: string;
-  readonly filename: string;
+export class SharedFileSymlinkError extends SharedFileError {
   readonly agentName: string;
-  constructor(agentName: string, column: string, filename: string) {
-    super(
-      `Refusing to write shared file through a symbolic link: agent "${agentName}" column "${column}" -> "${filename}" is a symlink. Shared files (AGENTS.md, TOOLS.md) must be edited in agents/_shared/, not through a single agent's directory.`
-    );
-    this.name = 'SharedFileSymlinkError';
-    this.column = column;
-    this.filename = filename;
+  constructor(agentName: string, column: string, filename: string, sharedTarget: string) {
+    super(column, filename, sharedTarget);
     this.agentName = agentName;
+    this.name = 'SharedFileSymlinkError';
+    // u088 asserts message.includes('symlink') (the base SharedFileError message
+    // says "symbolic link"). Keep the subclass message explicit about the refusal.
+    this.message = 'Refusing to write shared file through a symbolic link: agent "' + agentName + '" column "' + column + '" -> "' + filename + '" (-> "' + sharedTarget + '") is a symlink. Shared files (AGENTS.md, TOOLS.md) must be edited in agents/_shared/, not through a single agent\'s directory.';
   }
 }
 
@@ -191,7 +188,11 @@ export function writeAgentFile(name: string, column: string, content: string): v
   // reach it by accident.
   const sharedTarget = sharedFileTarget(name, column);
   if (sharedTarget !== null) {
-    throw new SharedFileError(column, filename, sharedTarget);
+    // SharedFileSymlinkError extends SharedFileError: the CC-SHARED-001 route
+    // catch (instanceof SharedFileError) keeps working, and u088's stricter
+    // contract (SharedFileSymlinkError, .agentName, message contains symlink)
+    // is satisfied by the same throw.
+    throw new SharedFileSymlinkError(name, column, filename, sharedTarget);
   }
 
   fs.writeFileSync(filePath, content, 'utf-8');
