@@ -58,7 +58,7 @@ test('A1: empty answer returns 502', async () => {
     const res = await withEnvAsync({ ...CLEAR, NODE_ENV: 'test', PERPLEXITY_API_KEY: 'k' }, () => (mod as any).POST(req));
     assert.equal(res.status, 502);
     const b = await res.json() as any;
-    assert.equal(b.error, 'provider_failed');
+    assert.equal(b.error, 'provider_empty_answer');
     assert.match(b.detail as string, /empty answer/);
   } finally { globalThis.fetch = orig; }
 });
@@ -75,7 +75,7 @@ test('A2: whitespace-only answer returns 502', async () => {
     const res = await withEnvAsync({ ...CLEAR, NODE_ENV: 'test', PERPLEXITY_API_KEY: 'k' }, () => (mod as any).POST(req));
     assert.equal(res.status, 502);
     const b = await res.json() as any;
-    assert.equal(b.error, 'provider_failed');
+    assert.equal(b.error, 'provider_empty_answer');
   } finally { globalThis.fetch = orig; }
 });
 
@@ -127,7 +127,7 @@ test('D1: null answer returns 502', async () => {
     const res = await withEnvAsync({ ...CLEAR, NODE_ENV: 'test', PERPLEXITY_API_KEY: 'k' }, () => (mod as any).POST(req));
     assert.equal(res.status, 502);
     const b = await res.json() as any;
-    assert.equal(b.error, 'provider_failed');
+    assert.equal(b.error, 'provider_empty_answer');
   } finally { globalThis.fetch = orig; }
 });
 

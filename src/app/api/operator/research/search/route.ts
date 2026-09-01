@@ -281,6 +281,10 @@ export async function POST(req: NextRequest) {
     // T0-57 — a non-empty answer with zero citations is still stored, but it is
     // stamped UNGROUNDED rather than reading as cited research.
     grounded: result.citations.length > 0,
+    // CC-resear-002 (main, U087) reads the same fact as "ungrounded: true" — the
+    // pre-T0-57 key name. Kept sparse: present ONLY on a 0-citation result, so
+    // C1's "cited answers carry no ungrounded flag" assertion holds too.
+    ...(result.citations.length === 0 ? { ungrounded: true } : {}),
   };
 
   // CC-resear-001 — HARD STOP before any durable write. `citation_count` and
