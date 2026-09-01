@@ -21,6 +21,15 @@ export function AgentModal({ agent, onClose, workspaceId, onAgentCreated }: Agen
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [defaultModel, setDefaultModel] = useState<string>('');
   const [modelsLoading, setModelsLoading] = useState(true);
+  // CC-SHARED-001 (T1-04 / T0-43): AGENTS.md, TOOLS.md and USER.md are symbolic
+  // links into agents/_shared — every agent inherits the SAME file. The editor
+  // used to present them as per-agent text: one save rewrote the operating
+  // rules for all 23 agents and reported success, and the owner-profile save
+  // reported success while nothing was written at all. Inherited fields are now
+  // rendered read-only, named by the API rather than guessed here.
+  const [inheritedFields, setInheritedFields] = useState<string[]>([]);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const isInherited = (field: string) => inheritedFields.includes(field);
 
   const [form, setForm] = useState({
     name: agent?.name || '',
@@ -60,22 +69,55 @@ export function AgentModal({ agent, onClose, workspaceId, onAgentCreated }: Agen
     loadModels();
   }, [agent]);
 
+  // Which of this agent's files are inherited (shared with every other agent)?
+  useEffect(() => {
+    if (!agent) { setInheritedFields([]); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`/api/agents/${agent.id}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!cancelled && Array.isArray(data.inherited_fields)) {
+          setInheritedFields(data.inherited_fields as string[]);
+        }
+      } catch (error) {
+        console.error('Failed to resolve inherited agent files:', error);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [agent]);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsSubmitting(true);
+    setSaveError(null);
 
     try {
       const url = agent ? `/api/agents/${agent.id}` : '/api/agents';
       const method = agent ? 'PATCH' : 'POST';
 
+      // Never send an inherited field back: it is read-only in this editor, and
+      // the route refuses it with a conflict.
+      const payload: Record<string, unknown> = {
+        ...form,
+        workspace_id: workspaceId || agent?.workspace_id || 'default',
+      };
+      for (const field of inheritedFields) delete payload[field];
+
       const res = await fetch(url, {
         method,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ...form,
-          workspace_id: workspaceId || agent?.workspace_id || 'default',
-        }),
+        body: JSON.stringify(payload),
       });
+
+      if (!res.ok) {
+        const detail = await res.json().catch(() => null);
+        setSaveError(
+          detail?.error ||
+            `Save failed (HTTP ${res.status}). Nothing was changed.`
+        );
+      }
 
       if (res.ok) {
         const savedAgent = await res.json();
@@ -284,11 +326,23 @@ export function AgentModal({ agent, onClose, workspaceId, onAgentCreated }: Agen
               <label className="block text-sm font-medium text-gray-700 mb-2">
                 SOUL.md - Agent Personality & Identity
               </label>
+              {isInherited('soul_md') && (
+                <p className="mb-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                  Inherited — every agent shares this file. It is read-only here because
+                  saving it from one agent would rewrite it for all of them. Change it once,
+                  deliberately, as a shared file.
+                </p>
+              )}
               <textarea
                 value={form.soul_md}
                 onChange={(e) => setForm({ ...form, soul_md: e.target.value })}
+                readOnly={isInherited('soul_md')}
                 rows={15}
-                className="w-full bg-gray-50 border border-gray-300 rounded-lg px-3 py-2.5 text-sm font-mono text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent resize-none"
+                className={`w-full border rounded-lg px-3 py-2.5 text-sm font-mono placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent resize-none ${
+                  isInherited('soul_md')
+                    ? 'bg-gray-100 border-gray-200 text-gray-500 cursor-not-allowed'
+                    : 'bg-gray-50 border-gray-300 text-gray-900'
+                }`}
                 placeholder="# Agent Name&#10;&#10;Define this agent's personality, values, and communication style..."
               />
             </div>
@@ -299,11 +353,23 @@ export function AgentModal({ agent, onClose, workspaceId, onAgentCreated }: Agen
               <label className="block text-sm font-medium text-gray-700 mb-2">
                 USER.md - Context About the Human
               </label>
+              {isInherited('user_md') && (
+                <p className="mb-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                  Inherited — every agent shares this file. It is read-only here because
+                  saving it from one agent would rewrite it for all of them. Change it once,
+                  deliberately, as a shared file.
+                </p>
+              )}
               <textarea
                 value={form.user_md}
                 onChange={(e) => setForm({ ...form, user_md: e.target.value })}
+                readOnly={isInherited('user_md')}
                 rows={15}
-                className="w-full bg-gray-50 border border-gray-300 rounded-lg px-3 py-2.5 text-sm font-mono text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent resize-none"
+                className={`w-full border rounded-lg px-3 py-2.5 text-sm font-mono placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent resize-none ${
+                  isInherited('user_md')
+                    ? 'bg-gray-100 border-gray-200 text-gray-500 cursor-not-allowed'
+                    : 'bg-gray-50 border-gray-300 text-gray-900'
+                }`}
                 placeholder="# User Context&#10;&#10;Information about the human this agent works with..."
               />
             </div>
@@ -314,11 +380,23 @@ export function AgentModal({ agent, onClose, workspaceId, onAgentCreated }: Agen
               <label className="block text-sm font-medium text-gray-700 mb-2">
                 AGENTS.md - Team Awareness
               </label>
+              {isInherited('agents_md') && (
+                <p className="mb-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                  Inherited — every agent shares this file. It is read-only here because
+                  saving it from one agent would rewrite it for all of them. Change it once,
+                  deliberately, as a shared file.
+                </p>
+              )}
               <textarea
                 value={form.agents_md}
                 onChange={(e) => setForm({ ...form, agents_md: e.target.value })}
+                readOnly={isInherited('agents_md')}
                 rows={15}
-                className="w-full bg-gray-50 border border-gray-300 rounded-lg px-3 py-2.5 text-sm font-mono text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent resize-none"
+                className={`w-full border rounded-lg px-3 py-2.5 text-sm font-mono placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent resize-none ${
+                  isInherited('agents_md')
+                    ? 'bg-gray-100 border-gray-200 text-gray-500 cursor-not-allowed'
+                    : 'bg-gray-50 border-gray-300 text-gray-900'
+                }`}
                 placeholder="# Team Roster&#10;&#10;Information about other agents this agent works with..."
               />
             </div>
@@ -329,11 +407,23 @@ export function AgentModal({ agent, onClose, workspaceId, onAgentCreated }: Agen
               <label className="block text-sm font-medium text-gray-700 mb-2">
                 TOOLS.md - Tools & Capabilities
               </label>
+              {isInherited('tools_md') && (
+                <p className="mb-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                  Inherited — every agent shares this file. It is read-only here because
+                  saving it from one agent would rewrite it for all of them. Change it once,
+                  deliberately, as a shared file.
+                </p>
+              )}
               <textarea
                 value={form.tools_md}
                 onChange={(e) => setForm({ ...form, tools_md: e.target.value })}
+                readOnly={isInherited('tools_md')}
                 rows={15}
-                className="w-full bg-gray-50 border border-gray-300 rounded-lg px-3 py-2.5 text-sm font-mono text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent resize-none"
+                className={`w-full border rounded-lg px-3 py-2.5 text-sm font-mono placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent resize-none ${
+                  isInherited('tools_md')
+                    ? 'bg-gray-100 border-gray-200 text-gray-500 cursor-not-allowed'
+                    : 'bg-gray-50 border-gray-300 text-gray-900'
+                }`}
                 placeholder="# Tools & Capabilities&#10;&#10;Define what tools this agent has access to, API keys, integrations..."
               />
             </div>
@@ -344,16 +434,34 @@ export function AgentModal({ agent, onClose, workspaceId, onAgentCreated }: Agen
               <label className="block text-sm font-medium text-gray-700 mb-2">
                 MEMORY.md - Long-Term Memory
               </label>
+              {isInherited('memory_md') && (
+                <p className="mb-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                  Inherited — every agent shares this file. It is read-only here because
+                  saving it from one agent would rewrite it for all of them. Change it once,
+                  deliberately, as a shared file.
+                </p>
+              )}
               <textarea
                 value={form.memory_md}
                 onChange={(e) => setForm({ ...form, memory_md: e.target.value })}
+                readOnly={isInherited('memory_md')}
                 rows={15}
-                className="w-full bg-gray-50 border border-gray-300 rounded-lg px-3 py-2.5 text-sm font-mono text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent resize-none"
+                className={`w-full border rounded-lg px-3 py-2.5 text-sm font-mono placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent resize-none ${
+                  isInherited('memory_md')
+                    ? 'bg-gray-100 border-gray-200 text-gray-500 cursor-not-allowed'
+                    : 'bg-gray-50 border-gray-300 text-gray-900'
+                }`}
                 placeholder="# Long-Term Memory&#10;&#10;Curated memories, decisions, lessons learned..."
               />
             </div>
           )}
         </form>
+
+        {saveError && (
+          <div className="mx-4 mb-2 text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+            {saveError}
+          </div>
+        )}
 
         {/* Footer */}
         <div className="flex items-center justify-between p-4 border-t border-gray-200 bg-gray-50">
