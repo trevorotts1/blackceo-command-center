@@ -70,7 +70,6 @@ import {
 import { normalizeRequesterSessionKey } from '@/lib/requester-session';
 import { transition, recordStatusEvent, type LifecycleState } from '@/lib/task-lifecycle';
 import { recordBlockEvent } from '@/lib/block-events';
-import { recordStatusEvent } from '@/lib/task-lifecycle';
 import { assertNoFixtureDerivedServerWrite } from '@/lib/fixture-guard';
 import type { Task, TaskPriority, Agent, PersonaBundle, TaskPersonaBundleRow } from '@/lib/types';
 

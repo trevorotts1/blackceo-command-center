@@ -79,11 +79,8 @@ import { notifyOwnerDone } from '@/lib/owner-reports';
 import { transition, TransitionError, type LifecycleState } from '@/lib/task-lifecycle';
 import { requiresRegisteredCertificate } from '@/lib/presentations-cert-gate';
 import { recordBlockEvent } from '@/lib/block-events';
-import { assertNoFixtureEnvInProduction } from '@/lib/fixture-guard';
-import { EVIDENCE_DELIVERABLE_TYPES, isUsableUrl, collectCompletionEvidence, isBundleDeliverablePath, verifyPresentationBundleDeliverable, bundleReverifyEnabled } from '@/lib/completion-evidence';
-import { transition, TransitionError, recordStatusEvent } from '@/lib/task-lifecycle';
 import { assertNoFixtureEnvInProduction, assertNoFixtureDerivedServerWrite } from '@/lib/fixture-guard';
-import { EVIDENCE_DELIVERABLE_TYPES, isUsableUrl, collectCompletionEvidence } from '@/lib/completion-evidence';
+import { EVIDENCE_DELIVERABLE_TYPES, isUsableUrl, collectCompletionEvidence, isBundleDeliverablePath, verifyPresentationBundleDeliverable, bundleReverifyEnabled } from '@/lib/completion-evidence';
 import { getProvider } from '@/lib/model-providers';
 import { listModels } from '@/lib/model-registry';
 import {
@@ -5423,6 +5420,10 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
     // ── End producer/judge agreement check + both-gates rule ──────────────────
 
     // ── PRD 2.10: Persist QC result to task_qc_results for grading module ─────
+    // CC-FIXTURE-003: the personable/QC fixture write guard — refuse a durable
+    // task_qc_results row when the verdict came from a fixture (merged from
+    // agent/cc-fixture-003-persona-qc-residuals).
+    assertNoFixtureDerivedServerWrite('a task_qc_results row and its QC events');
     // Fire-and-forget: wrap in try/catch so any DB error never breaks the scorer.
     // All paths (llm, heuristic, no-criteria) write a row so the grading module
     // can surface the "awaiting LLM key" insufficient-data state.

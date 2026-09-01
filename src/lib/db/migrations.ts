@@ -6036,6 +6036,9 @@ export const migrations: Migration[] = [
       }
       db.exec(`CREATE INDEX IF NOT EXISTS idx_events_task_type ON events(task_id, type)`);
       console.log('[Migration 128] idx_events_task_type ready');
+    },
+  },
+  {
     // WEBCHAT-REQUESTER-ROUTE (2026-08-27): the second requester address.
     //
     // P1-04 (migration 098) gave `tasks` exactly ONE way to reach a requester:
