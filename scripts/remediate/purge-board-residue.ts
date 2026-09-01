@@ -42,16 +42,34 @@
  * non-blocked residue so the two remediations can never race on the same row
  * with different outcomes).
  *
- * Dry-run by default; pass --apply to execute.
+ * Dry-run by default; pass --apply to execute. FIX 35 (Phase D) adds the
+ * DESTRUCTIVE-CONFIRMATION GATE: even with --apply, any write is REFUSED unless
+ * the operator exports PRESENTATION_CONFIRM_DESTRUCTIVE with the literal
+ * confirmation string (PRESENTATION-CONFIRM-DESTRUCTIVE). Without it the script
+ * exits 3 and writes NOTHING — --apply alone is never enough for a board
+ * mutation. The gate covers every destructive lane in the FIX 34/35/36 data
+ * lane (backup-verify, purge, audit backfill).
  *
  *   npx tsx scripts/remediate/purge-board-residue.ts            # dry-run
- *   npx tsx scripts/remediate/purge-board-residue.ts --apply    # execute
+ *   npx tsx scripts/remediate/purge-board-residue.ts --apply    # execute (still gated)
+ *   PRESENTATION_CONFIRM_DESTRUCTIVE=PRESENTATION-CONFIRM-DESTRUCTIVE npx tsx \
+ *     scripts/remediate/purge-board-residue.ts --apply          # actually writes
  */
 
 import { getDb, run, queryAll, timeNow } from '../../src/lib/db';
 
 function argvHasApply(): boolean {
   return process.argv.includes('--apply');
+}
+
+/** FIX 35 (Phase D) — DESTRUCTIVE-CONFIRMATION GATE. Every destructive action in
+ *  the Presentation data lane refuses to run unless this env var carries the
+ *  literal confirmation string. Dry-run mode never requires it. */
+export const DESTRUCTIVE_CONFIRM_ENV = 'PRESENTATION_CONFIRM_DESTRUCTIVE';
+export const DESTRUCTIVE_CONFIRM_VALUE = 'PRESENTATION-CONFIRM-DESTRUCTIVE';
+
+export function destructiveConfirmed(): boolean {
+  return (process.env[DESTRUCTIVE_CONFIRM_ENV] ?? '').trim() === DESTRUCTIVE_CONFIRM_VALUE;
 }
 
 /** Populate once the G9 finding's exact card identifiers are available (see
@@ -92,7 +110,7 @@ export interface PurgeBoardResidueResult {
 }
 
 export function purgeBoardResidue(opts?: { apply?: boolean }): PurgeBoardResidueResult {
-  const apply = opts?.apply ?? argvHasApply();
+  const apply = (opts?.apply ?? argvHasApply()) && destructiveConfirmed();
   getDb(); // ensure migrations are applied before touching the schema
 
   const rows = queryAll<ResidueTaskRow>(
@@ -154,6 +172,14 @@ export function purgeBoardResidue(opts?: { apply?: boolean }): PurgeBoardResidue
 }
 
 function main(): void {
+  if (process.argv.includes('--apply') && !destructiveConfirmed()) {
+    console.error(
+      `[purge-board-residue] REFUSED: --apply without the destructive-confirmation ` +
+        `gate. Export ${DESTRUCTIVE_CONFIRM_ENV}=${DESTRUCTIVE_CONFIRM_VALUE} to ` +
+        `authorize this board mutation. NOTHING was written.`,
+    );
+    process.exit(3);
+  }
   const result = purgeBoardResidue();
   console.log(
     `[purge-board-residue] scanned ${result.scanned} live task(s)` +

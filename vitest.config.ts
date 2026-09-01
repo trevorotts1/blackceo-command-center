@@ -221,6 +221,18 @@ export default defineConfig({
       'tests/unit/fix25-review-artifact-gate.test.ts',
       'tests/unit/fix27-deliverable-path-reject.test.ts',
       'tests/unit/fix28-bundle-reverify.test.ts',
+      // FIX 35 (spec REV 3, Phase D data lane) — synthetic-row purge gate +
+      // audit-backfill route. Hygiene script is driven as a subprocess against
+      // an isolated temp DB; the route suite imports the real handler. Uses
+      // vitest globals + dynamic route import, so vitest-only, never the tsx
+      // --test glob. NEVER executed against the LIVEDB.
+      'tests/unit/fix35-synthetic-purge-gate.test.ts',
+  // FIX 34 (spec REV 3, Phase D data lane) — autodeploy DB backup
+  // restore-verification: extracts the real PYRESTORE verifier from
+  // scripts/atomic-deploy.sh and proves good/corrupt/zero/garbage backups are
+  // discriminated. Parse + fixture files only — the deploy script is never
+  // executed.
+  'tests/unit/fix34-db-backup-verify.test.ts',
     ],
     env: {
       NODE_ENV: 'test',
