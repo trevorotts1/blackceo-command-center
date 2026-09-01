@@ -81,6 +81,34 @@ export class SharedFileError extends Error {
  * to preflight BEFORE the database write, so the database and the disk can
  * never disagree about whether a save happened.
  */
+/**
+ * Back-compat shim (main/api kept `checkSharedFileSymlink` after the
+ * CC-SHARED-001 refactor; u088-symlink-write-guard.test.ts still imports it).
+ * Returns true when the agent's file for `column` is a symlink into _shared/.
+ */
+export function checkSharedFileSymlink(name: string, column: string): boolean {
+  return sharedFileTarget(name, column) !== null;
+}
+
+/**
+ * Back-compat error name for the same condition (main route.ts could throw
+ * SharedFileSymlinkError; u088 test constructs one and checks name/message).
+ */
+export class SharedFileSymlinkError extends Error {
+  readonly column: string;
+  readonly filename: string;
+  readonly agentName: string;
+  constructor(agentName: string, column: string, filename: string) {
+    super(
+      `Refusing to write shared file through a symbolic link: agent "${agentName}" column "${column}" -> "${filename}" is a symlink. Shared files (AGENTS.md, TOOLS.md) must be edited in agents/_shared/, not through a single agent's directory.`
+    );
+    this.name = 'SharedFileSymlinkError';
+    this.column = column;
+    this.filename = filename;
+    this.agentName = agentName;
+  }
+}
+
 export function sharedFileTarget(name: string, column: string): string | null {
   const filename = FILE_MAP[column];
   if (!filename) return null;

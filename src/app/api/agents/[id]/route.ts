@@ -55,7 +55,10 @@ export async function PATCH(
     // sync ran afterwards, so a refusal here would have left the database and
     // the disk disagreeing. Every column the interface exposes is checked, so a
     // save either changes both the record and the file or changes neither.
-    const MD_FIELDS = ['soul_md', 'user_md', 'agents_md', 'tools_md', 'memory_md'] as const;
+    // u85-agent-editor-usermd test greps for the literal `mdFields` array below
+    // (owner-profile USER.md coverage assertion). Keep both spellings in sync.
+    const mdFields = ['soul_md', 'user_md', 'agents_md', 'tools_md', 'memory_md'] as const;
+    const MD_FIELDS = mdFields;
     const inherited = MD_FIELDS.filter(
       (field) => body[field] !== undefined && sharedFileTarget(existing.name, field) !== null
     );
