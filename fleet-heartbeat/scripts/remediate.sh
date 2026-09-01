@@ -65,10 +65,10 @@ FORCE_CLASS="${REMEDIATE_FORCE_CLASS:-}"
 REMEDIATE_TIMEOUT="${REMEDIATE_TIMEOUT:-90}"
 case "$REMEDIATE_TIMEOUT" in ''|*[!0-9]*) REMEDIATE_TIMEOUT=90 ;; esac
 
-ROOT="/Users/blackceomacmini/clawd/fleet-heartbeat"
+ROOT="$HOME/clawd/fleet-heartbeat"
 CHANGE_LOG="${ROOT}/change-log.md"
-SSH_KEY="${SSH_KEY:-/Users/blackceomacmini/.ssh/id_ed25519}"
-SSH_OPTS="-i ${SSH_KEY} -o BatchMode=yes -o ConnectTimeout=8 -o ServerAliveInterval=5 -o ServerAliveCountMax=2 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/Users/blackceomacmini/.ssh/known_hosts"
+SSH_KEY="${SSH_KEY:-$HOME/.ssh/id_ed25519}"
+SSH_OPTS="-i ${SSH_KEY} -o BatchMode=yes -o ConnectTimeout=8 -o ServerAliveInterval=5 -o ServerAliveCountMax=2 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$HOME/.ssh/known_hosts"
 
 # ---- Platform classification: VPS-Docker vs Mac-tunnel ----------------------
 #
@@ -133,7 +133,7 @@ fi
 # root@IP. Resolve the per-client service token by client name (same mapping as
 # probe-fleet.sh) and the absolute cloudflared path (the OpenClaw cron/exec env
 # does not always have Homebrew on PATH).
-SECRETS_ENV="${SECRETS_ENV:-/Users/blackceomacmini/.openclaw/secrets/.env}"
+SECRETS_ENV="${SECRETS_ENV:-$HOME/.openclaw/secrets/.env}"
 CF_TUNNEL_TIMEOUT="${CF_TUNNEL_TIMEOUT:-45}"
 export PATH="/opt/homebrew/bin:$PATH"
 
@@ -226,13 +226,13 @@ mac_ssh_run() {
   [ -x "$cfd" ] || cfd="$(command -v cloudflared 2>/dev/null || echo cloudflared)"
   proxy="ProxyCommand=${cfd} access ssh --hostname %h --service-token-id ${cid} --service-token-secret ${csec}"
   ct=$(( t - 5 )); [ "$ct" -lt 5 ] && ct=5
-  HOME="${HOME:-/Users/blackceomacmini}" _TIMEOUT "$t" ssh \
+  HOME="$HOME" _TIMEOUT "$t" ssh \
     -i "$SSH_KEY" \
     -o "$proxy" \
     -o BatchMode=yes -o ConnectTimeout=${ct} \
     -o ServerAliveInterval=5 -o ServerAliveCountMax=2 \
     -o StrictHostKeyChecking=accept-new \
-    -o UserKnownHostsFile=/Users/blackceomacmini/.ssh/known_hosts \
+    -o UserKnownHostsFile=$HOME/.ssh/known_hosts \
     "${IP}@${CONTAINER}" "$remote" 2>/dev/null
 }
 

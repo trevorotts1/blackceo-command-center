@@ -10,7 +10,7 @@
  * WHAT THIS GATE IS NOT. An earlier draft blocked when the deck's run directory
  * was absent under `<workspace>/departments/<dept>/runs/<slug>`. That premise
  * was disproven on the live box: deck 666924ec's run was alive the entire time
- * at `/Users/blackceomacmini/webinar-decks/denise-calloway/trust-ledger/2026-08-27`
+ * at `~/webinar-decks/<client-slug>/trust-ledger/2026-08-27`
  * (state.json job_id `pj_ab3c329ca43a1b98117203f62a`, written throughout the
  * incident). Deck runs are NOT confined to the department tree, and CC does not
  * know the deck output root — so a department-rooted existence check would have

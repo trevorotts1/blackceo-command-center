@@ -10,17 +10,17 @@ pm2/port cleanups, secret propagation) used to build their own target list from
 whatever source was convenient — Trevor's Hostinger API, the Mac CF-tunnel
 tokens, or one machine copy of the roster. Those constructions STRUCTURALLY
 exclude boxes on other providers (Contabo) and on a client's OWN separate
-provider account (e.g. Dr. Stephanie Brown's private Hostinger). Beverly
-Grandison (Contabo) and Dr. Stephanie Brown were silently dropped exactly this
+provider account (e.g. one client's private hosting account). A Contabo
+client and a private-VPS client were silently dropped exactly this
 way. A "cover everyone" paragraph in AGENTS.md did not stop it because prose is
 not enforcement.
 
 Same failure mode, different layer: probe-fleet.sh's mac-tunnel probe used to
 resolve each client's Cloudflare Access service token via a hand-maintained
 `case "$client" in ...) _tk=... ;;` switch, DUPLICATED in two places in that
-file, with a wildcard default that silently borrowed Teresa Pelham's token for
-any unmatched client. Eddie Otts (missing from both switches) and E.R.
-Spaulding (present in one, missing from the other) were both reported DOWN
+file, with a wildcard default that silently borrowed one client's token for
+any unmatched client. Two other clients (one missing from both switches and
+one present in the other switch) were both reported DOWN
 while perfectly healthy. This gate's reconcile mode now ALSO enforces (always,
 by default — see cf_token_map_reconcile()) that every roster mac-kind box has
 an entry in the single-source accounts/cf-token-map.json that replaced those
@@ -42,7 +42,7 @@ TWO MODES
 
     The optional LIVE legs reconcile the roster against the ACTUAL client
     universe, so a client with real infra but NO roster entry (the founding
-    "overlook" — e.g. Beverly Grandison) is caught rather than silently dropped:
+    "overlook" — e.g. a Contabo client) is caught rather than silently dropped:
       --check-contabo     enumerate the Contabo host; flag any oc-* not rostered.
       --check-cloudflare  enumerate LIVE Cloudflare tunnels; FAIL on any active
                           fleet-box (rescue-*) tunnel with no roster entry.
@@ -517,16 +517,16 @@ def ghl_reconcile(boxes, secrets, ignore, advisory=False):
 
 # ---------------------------------------------------------------- reconcile ---
 def cf_token_map_reconcile(boxes, cf_token_map_path):
-    """Structural tripwire for the class of bug that let Eddie Otts and E.R.
-    Spaulding fall through to a hand-maintained `case "$client" in ...) _tk=...`
-    switch (missing case -> silently borrowed Teresa Pelham's CF Access
+    """Structural tripwire for the class of bug that let two clients fall
+    through to a hand-maintained `case "$client" in ...) _tk=...`
+    switch (missing case -> silently borrowed another client's CF Access
     credential -> reported DOWN while healthy).
 
     Every roster box with kind == "mac" MUST have an entry in the single-source
     CF-token map (accounts/cf-token-map.json), keyed by that box's exact
     probe_match (tunnel hostname) -- the one identifier proven identical across
     fleet-roster.json and probe-fleet.sh's ROSTER array. A roster mac box with
-    no entry there is EXACTLY the Eddie Otts incident waiting to happen again;
+    no entry there is EXACTLY that incident waiting to happen again;
     it is a HARD problem, not a warning.
 
     Returns (problems, warnings).
@@ -568,7 +568,7 @@ def cf_token_map_reconcile(boxes, cf_token_map_path):
                              f"{client} — '{pm}' has no entry in "
                              f"{os.path.basename(cf_token_map_path)}; probe-fleet.sh will "
                              f"fail-closed (DOWN, cf_token_unmapped) for this client, "
-                             f"exactly the Eddie Otts incident"))
+                             f"exactly the token-borrowing incident"))
 
     # Reverse direction (advisory only): a map entry with no matching roster mac
     # box is stale, not dangerous -- warn, never fail.
@@ -635,8 +635,8 @@ def reconcile(boxes, check_contabo, check_cloudflare=False, check_ghl=False,
 
     # 2b) CF Access token mapping (accounts/cf-token-map.json) — every roster
     #     mac-tunnel box must resolve to a token or probe-fleet.sh fail-closes
-    #     it as DOWN. This is the structural fix for the Eddie Otts / E.R.
-    #     Spaulding incident: a client present in the roster+heartbeat ROSTER
+    #     it as DOWN. This is the structural fix for the token-borrowing
+    #     incidents: a client present in the roster+heartbeat ROSTER
     #     but absent from the (formerly hand-maintained, formerly duplicated)
     #     token switch. Always runs — cheap, local, no network/creds needed.
     p, w = cf_token_map_reconcile(boxes, cf_token_map)
@@ -644,7 +644,7 @@ def reconcile(boxes, check_contabo, check_cloudflare=False, check_ghl=False,
     warnings += w
 
     # 3) LIVE Contabo enumeration — catches a container provisioned on the host
-    #    but never added to the roster (the exact Beverly Grandison failure).
+    #    but never added to the roster (the exact dropped-client failure).
     if check_contabo:
         contabo_aliases = set()
         for box_id, meta in boxes.items():

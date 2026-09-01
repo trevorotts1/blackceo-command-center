@@ -9,9 +9,9 @@
 # A one-line comment-out of the main job cannot silence both lines at once.
 # Alerts route through the same dedup guardrail (6h window; no daily spam).
 set -u
-export PATH="/Users/blackceomacmini/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 export OPERATOR_TELEGRAM_CHAT_ID="${OPERATOR_TELEGRAM_CHAT_ID:-5252140759}"
-ROOT="/Users/blackceomacmini/clawd/fb-session-heartbeat"
+ROOT="$HOME/clawd/fb-session-heartbeat"
 DEDUP="/opt/homebrew/bin/python3 $ROOT/scripts/alert-dedup.py"
 STATE_DIR="$ROOT/state/alerts"
 LAST="$ROOT/state/last-run.json"

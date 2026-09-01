@@ -20,7 +20,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 
-const require = createRequire("/Users/blackceomacmini/clawd/");
+const require = createRequire(os.homedir() + "/clawd/");
 const { chromium } = require("playwright");
 
 const args = process.argv.slice(2);
@@ -39,7 +39,7 @@ setTimeout(() => {
 }, 120000).unref();
 
 const work = fs.mkdtempSync(
-  path.join("/Users/blackceomacmini/clawd/fb-session-heartbeat/state", "pwclone-")
+  path.join(os.homedir(), "clawd/fb-session-heartbeat/state", "pwclone-")
 );
 fs.chmodSync(work, 0o700);
 const clone = path.join(work, "profile");

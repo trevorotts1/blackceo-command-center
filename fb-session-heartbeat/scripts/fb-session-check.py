@@ -51,20 +51,20 @@ import sys
 import time
 from datetime import datetime, timezone
 
-ROOT = "/Users/blackceomacmini/clawd/fb-session-heartbeat"
+ROOT = os.path.expanduser("~/clawd/fb-session-heartbeat")
 SCRIPTS = os.path.join(ROOT, "scripts")
 LOGS = os.path.join(ROOT, "logs")
 STATE = os.path.join(ROOT, "state")
 ALERT_STATE = os.path.join(STATE, "alerts")
 
-OPENCLAW = "/Users/blackceomacmini/.local/bin/openclaw"
-AGENT_BROWSER = "/Users/blackceomacmini/.npm-global/bin/agent-browser"
+OPENCLAW = os.path.expanduser("~/.local/bin/openclaw")
+AGENT_BROWSER = os.path.expanduser("~/.npm-global/bin/agent-browser")
 NODE = "/usr/local/bin/node"
 PY = sys.executable or "/opt/homebrew/bin/python3"
 
 CHECK_URL = "https://www.facebook.com/me"
 PW_PROFILE_GLOB = (
-    "/Users/blackceomacmini/Library/Caches/ms-playwright-mcp/mcp-chrome-*"
+    os.path.expanduser("~/Library/Caches/ms-playwright-mcp/mcp-chrome-*")
 )
 AGNES_MODEL = "agnes/agnes-2.0-flash"
 CLIENT = "operator"

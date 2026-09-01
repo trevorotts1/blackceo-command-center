@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ADAPTED COPY for the fb-session heartbeat (2026-07-20). Source of truth:
-#   /Users/blackceomacmini/openclaw-onboarding/58-podcast-production-engine/scripts/alert-dedup.py
+#   ~/openclaw-onboarding/58-podcast-production-engine/scripts/alert-dedup.py
 # Changes vs source: message prefixes [PODCAST...] -> [FB-SESSION...] and
 # episode wording -> occurrence wording. ALL dedup/storm/recovery logic is
 # UNCHANGED. Sends only via `openclaw message send` (gateway), operator DM.
