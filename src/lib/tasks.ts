@@ -67,6 +67,7 @@ import {
   sendRequesterAudienceAsk,
   type RequesterAudienceAskDelivery,
 } from '@/lib/jobs/trust-engine';
+import { normalizeRequesterSessionKey } from '@/lib/requester-session';
 import { transition, recordStatusEvent, type LifecycleState } from '@/lib/task-lifecycle';
 import { recordBlockEvent } from '@/lib/block-events';
 import { recordStatusEvent } from '@/lib/task-lifecycle';
@@ -2266,6 +2267,18 @@ export interface CreateTaskCoreInput {
   requester_channel?: string | null;
   requester_chat_id?: string | null;
   /**
+   * WEBCHAT-REQUESTER-ROUTE (migration 127) — the SECOND requester address: the
+   * OpenClaw gateway session key of the conversation this request came from
+   * (`agent:<agentId>:<peer>`). A webchat requester has no chat id, so this is
+   * the only way the trust engine can reach them. Captured whenever it is
+   * available, regardless of channel — the chat id still wins at delivery time,
+   * so a task that has both reports exactly where it always did. Validated by
+   * `normalizeRequesterSessionKey` at the door: a non-addressable value (a
+   * producer run id, free text) is dropped rather than stored as a phantom
+   * address. See src/lib/requester-session.ts.
+   */
+  requester_session_key?: string | null;
+  /**
    * U94 (X.2.3) — tags this create call as having come through one of the
    * three ENUMERATED human-facing creation doors (Command-Center UI create,
    * Telegram/CEO-chat ingest, interview-driven department provisioning) —
@@ -2555,8 +2568,8 @@ export async function createTaskCore(
       : computeDueDateSmartDefault(resolvedPriority, new Date(now));
 
   run(
-    `INSERT INTO tasks (id, title, description, status, priority, assigned_agent_id, created_by_agent_id, workspace_id, business_id, department, due_date, sop_id, source, requester_channel, requester_chat_id, parent_task_id, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO tasks (id, title, description, status, priority, assigned_agent_id, created_by_agent_id, workspace_id, business_id, department, due_date, sop_id, source, requester_channel, requester_chat_id, requester_session_key, parent_task_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       input.title,
@@ -2575,6 +2588,11 @@ export async function createTaskCore(
       // report back into it. Both NULL for operator/internal tasks (never reported on).
       input.requester_channel || null,
       input.requester_chat_id || null,
+      // WEBCHAT-REQUESTER-ROUTE (migration 127): the fallback address for a
+      // requester who has no chat id (a webchat session). Re-validated here so
+      // this canonical write path — not just the ingest door — is the place a
+      // non-addressable value is refused, whichever caller supplied it.
+      normalizeRequesterSessionKey(input.requester_session_key),
       // WI-15b (migration 124): NULL for a parent/flat task; the pre-validated
       // parent row id for a per-phase child. See CreateTaskCoreInput above.
       input.parent_task_id || null,

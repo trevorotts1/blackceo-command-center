@@ -6036,6 +6036,61 @@ export const migrations: Migration[] = [
       }
       db.exec(`CREATE INDEX IF NOT EXISTS idx_events_task_type ON events(task_id, type)`);
       console.log('[Migration 128] idx_events_task_type ready');
+    // WEBCHAT-REQUESTER-ROUTE (2026-08-27): the second requester address.
+    //
+    // P1-04 (migration 098) gave `tasks` exactly ONE way to reach a requester:
+    // `requester_chat_id`, a Telegram-only field. A request that arrives over a
+    // WEBCHAT session carries no chat id, so the trust engine had nothing to
+    // address — the `requester_chat_id_missing` warning fired correctly and
+    // then NOTHING in the system could close the gap: the sweep's candidate
+    // query filtered the task out entirely, the audience-confirmation ask
+    // returned 'none', and owner re-pings fell back to operator channels. The
+    // requester sat unreachable inside a live gateway session the box knew
+    // about.
+    //
+    //   requester_session_key   the OpenClaw gateway session key
+    //                           (`agent:<agentId>:<peer>`) of the originating
+    //                           conversation — see src/lib/requester-session.ts
+    //
+    // Nullable TEXT + additive: no DEFAULT, no CHECK, so the ALTER can never
+    // fail on existing data. The base schema.ts CREATE TABLE carries it for
+    // fresh installs; this back-fills every existing box. `requester_chat_id`
+    // still WINS when both are present — this is a fallback address, not a
+    // replacement, so no existing task changes the lane it reports on.
+    id: '129',
+    name: 'add_task_requester_session_key',
+    up: (db) => {
+      console.log('[Migration 129] Adding requester_session_key to tasks...');
+      const tasksExists = db
+        .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks'")
+        .get();
+      if (!tasksExists) {
+        console.log('[Migration 129] tasks table absent — nothing to add');
+        return;
+      }
+
+      const presentCols = () =>
+        new Set((db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[]).map((c) => c.name));
+
+      if (!presentCols().has('requester_session_key')) {
+        db.exec('ALTER TABLE tasks ADD COLUMN requester_session_key TEXT');
+        console.log('[Migration 129] Added tasks.requester_session_key');
+      } else {
+        console.log('[Migration 129] tasks.requester_session_key already present');
+      }
+
+      // Partial index mirroring idx_tasks_requester_chat (migration 098): the
+      // 2-minute sweep's candidate query now ORs over both address columns, so
+      // the session-routed arm needs the same cheap lookup the chat-id arm has.
+      if (presentCols().has('requester_session_key')) {
+        const existed = db
+          .prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_tasks_requester_session'")
+          .get();
+        db.exec(
+          'CREATE INDEX IF NOT EXISTS idx_tasks_requester_session ON tasks(requester_session_key) WHERE requester_session_key IS NOT NULL',
+        );
+        if (!existed) console.log('[Migration 129] Created idx_tasks_requester_session');
+      }
     },
   },
 ];

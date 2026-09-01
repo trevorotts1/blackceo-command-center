@@ -197,6 +197,13 @@ CREATE TABLE IF NOT EXISTS tasks (
   -- honest status detail surfaced to the client. See P1-04.
   requester_channel TEXT,
   requester_chat_id TEXT,
+  -- Migration 127 owns this for existing DBs; this base CREATE covers fresh
+  -- installs. The SECOND requester address: the OpenClaw gateway session key
+  -- (agent:AGENT_ID:PEER) of the conversation the request came from. A
+  -- webchat requester has no chat id, so without this the trust engine had
+  -- nothing to address and the report-back loop fell silent. Nullable +
+  -- additive; the chat id still wins when both are present.
+  requester_session_key TEXT,
   ack_sent_at TEXT,
   progress_last_sent_at TEXT,
   eta_estimate TEXT,

@@ -36,23 +36,37 @@ export function isTrustEventType(t: string): t is TrustEventType {
 }
 
 /**
- * Strip the `"trust_x -> <chatId>: "` telemetry prefix, returning the actual
- * client-facing message. Resilient: a message that carries no prefix (or a
- * differently-shaped one) is returned trimmed and verbatim rather than mangled.
+ * Strip the `"trust_x(<route>) -> <address>: "` telemetry prefix, returning the
+ * actual client-facing message. Resilient: a message that carries no prefix (or
+ * a differently-shaped one) is returned trimmed and verbatim rather than mangled.
  */
 export function extractClientMessage(raw: string): string {
   const msg = (raw ?? '').trim();
   // Only strip when the line genuinely begins with a trust telemetry prefix of the
-  // form "<trust_type> -> <token>: <rest>" — anchored so an unrelated ": " inside a
-  // real message is never used as the split point.
-  //
-  // The body is `[\s\S]*` (zero-or-more), NOT `+`: a prefix-ONLY telemetry row such
-  // as "trust_ack -> 55512345:" (or "…: " once trimmed) carries an EMPTY client body.
-  // With `+` that empty-body case failed the whole match and the raw string — prefix
-  // AND chat id — was returned verbatim and leaked into the Activity UI. With `*` the
-  // prefix still matches and the empty body correctly extracts to '' (no id leak).
-  const m = msg.match(/^trust_(?:ack|progress|done)(?:\([^)]*\))?\s*->\s*[^:]*:\s*([\s\S]*)$/);
-  return m ? m[1].trim() : msg;
+  // form "<trust_type>(<annotation>) -> <address>: <rest>" — anchored so an
+  // unrelated ": " inside a real message is never used as the split point. The
+  // optional parenthesized annotation carries the send variant and, since
+  // WEBCHAT-REQUESTER-ROUTE, the route that delivered it (`trust_ack(session)`).
+  const m = msg.match(/^trust_(?:ack|progress|done)(?:\([^)]*\))?\s*->\s*([\s\S]*)$/);
+  if (!m) return msg;
+  const rest = m[1];
+
+  // The address is NOT colon-free: a gateway session key is `agent:<id>:<peer>`.
+  // Splitting on the FIRST colon (the old `[^:]*` pattern) left "main:<peer>: …"
+  // as the "client message" and leaked the requester's session key straight into
+  // the Activity UI — the exact id-leak this function exists to prevent. Split on
+  // the first colon-SPACE instead: the address never contains whitespace, so the
+  // first ": " is always the real prefix/body boundary.
+  const bodyAt = rest.indexOf(': ');
+  if (bodyAt !== -1) return rest.slice(bodyAt + 2).trim();
+
+  // No colon-space anywhere => a prefix-ONLY row with an EMPTY client body, e.g.
+  // "trust_ack -> 55512345:" (a bare ack). Everything up to the LAST colon is the
+  // address; whatever follows — usually nothing — is the body. Zero-or-more, not
+  // one-or-more: with a `+` the empty-body case failed the match entirely and the
+  // raw string (prefix AND id) was returned verbatim.
+  const lastColon = rest.lastIndexOf(':');
+  return lastColon === -1 ? msg : rest.slice(lastColon + 1).trim();
 }
 
 /**
