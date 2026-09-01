@@ -25,6 +25,9 @@
  *   2. No assigned_agent_id → skip.
  *   3. Already in_progress / review / done / blocked / archived → skip.
  *   4. QC loop cap: qc_reroute_attempts > QC_MAX_REROUTES → skip (task already blocked).
+ *   4c. build_deck_phase whose deck names no run → HOLD, loudly
+ *      (`deck_phase_dispatch_held` on the phase, `deck_run_identity_missing`
+ *      on the deck) — a fresh agent session cannot find a deck the card never names.
  *   5. Fire-and-forget: errors logged, never thrown. Routing always succeeds.
  *   7. (skill6-v2 U33 / C-02) Triad-incomplete (checkTriad, sops.ts:432) → HOLD,
  *      loudly (`triad_gate_hold` event) — never claimable until description +
@@ -291,6 +294,118 @@ function recordDispatchSuccess(taskId: string): void {
       [new Date().toISOString(), taskId],
     );
   } catch { /* pre-migration tolerant */ }
+}
+
+// ── Deck-run identity gate (build_deck_phase) ───────────────────────────────
+// A `build_deck_phase` card is one phase of a Presentations deck. A fresh agent
+// session receives only the card, so the card must carry enough identity for the
+// agent to find the deck's run. When it does not, the agent is handed a phase of
+// an unnamed deck and can only guess or fabricate an intake — which is exactly
+// what happened on 2026-08-27 and what the phase agent correctly refused to do.
+//
+// The deck's run identity travels on the PARENT card's `Ref:` provenance line,
+// written by the ingest route from the producer's `source_ref`
+// (src/app/api/tasks/ingest/route.ts:818). Reading provenance off the `Ref:`
+// line is the established convention in this repo — the anthology card parsers
+// read their subject key the same way (src/components/anthology/anthology-card.ts:159).
+//
+// DELIBERATELY NOT A FILESYSTEM CHECK. An earlier draft of this gate resolved
+// the run under `<workspace>/departments/<dept>/runs/<slug>` and blocked when it
+// was absent. That is unsound: deck runs are NOT confined to the department
+// tree. The 2026-08-27 deck's run was live the whole time at
+// `~/webinar-decks/<client>/<project>/<date>/`, so an existence check rooted in
+// the department workspace would have hard-blocked a healthy, running build.
+// CC does not know the deck output root — it is client-configurable and
+// currently under review — so run existence is UNDETERMINABLE here and must
+// never be treated as evidence of a missing run.
+const DECK_RUN_REASON = 'deck_run_identity_missing';
+
+/** `Ref: <value>` off a card's ingest provenance block. */
+function refLineOf(description: string | null | undefined): string | null {
+  if (!description) return null;
+  const m = description.match(/^Ref:\s*(\S.*?)\s*$/m);
+  return m ? m[1] : null;
+}
+
+interface DeckParent {
+  id: string;
+  title: string;
+  status: string;
+  description: string | null;
+  assigned_agent_id: string | null;
+}
+
+/** One deduped, visible event row per task per type. */
+function recordDeckGateEvent(
+  type: string,
+  taskId: string,
+  agentId: string | null,
+  message: string,
+): void {
+  run(
+    `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
+     SELECT ?, ?, ?, ?, ?, ?
+      WHERE NOT EXISTS (SELECT 1 FROM events WHERE task_id = ? AND type = ?)`,
+    [uuidv4(), type, agentId, taskId, message, new Date().toISOString(), taskId, type],
+  );
+}
+
+/**
+ * GUARD 4c — hold a deck phase whose deck carries no run identity.
+ *
+ * Returns true when dispatch may proceed. Blocks ONLY on a fact this process can
+ * establish from the board itself: the parent deck names no run at all. It never
+ * blocks on run state it cannot observe.
+ */
+export function deckPhaseRunIsInitialized(task: Task, context: string): boolean {
+  if (task.source !== 'build_deck_phase') return true;
+
+  const parent = task.parent_task_id
+    ? queryOne<DeckParent>(
+      `SELECT id, title, status, description, assigned_agent_id
+         FROM tasks WHERE id = ?`,
+      [task.parent_task_id],
+    )
+    : null;
+
+  if (refLineOf(parent?.description)) return true;
+
+  const parentId = task.parent_task_id ?? '(no parent_task_id)';
+  const held =
+    `[${DECK_RUN_REASON}] Phase "${task.title}" (${task.id}) was NOT dispatched: deck parent ${parentId} ` +
+    `carries no run identity (no \`Ref:\` line from the producer's source_ref), so a fresh agent session has ` +
+    `nothing that identifies which deck or run this phase belongs to. Re-ingest the deck through the canonical ` +
+    `Presentations entry so it carries its run reference, then re-dispatch. Do NOT fabricate an intake.`;
+  recordDeckGateEvent('deck_phase_dispatch_held', task.id, task.assigned_agent_id ?? null, held);
+
+  if (parent && parent.status !== 'done') {
+    recordDeckGateEvent(
+      DECK_RUN_REASON,
+      parent.id,
+      parent.assigned_agent_id,
+      `[${DECK_RUN_REASON}] Deck "${parent.title}" (${parent.id}) names no run, but phase cards are already ` +
+      `being dispatched against it. Every phase of this deck is held until the deck card carries its run reference.`,
+    );
+    recordDispatchFailure(parent.id, parent.assigned_agent_id, {
+      reason: DECK_RUN_REASON,
+      audience: 'SYSTEM',
+      needs:
+        `Re-ingest this deck with its source_ref (run reference) so phase cards can identify the run, ` +
+        `then unblock this card. Do NOT hand-create an intake.json to satisfy the phases.`,
+      context,
+      hardBlock: true,
+    });
+  }
+
+  recordDispatchFailure(task.id, task.assigned_agent_id, {
+    reason: DECK_RUN_REASON,
+    audience: 'SYSTEM',
+    needs:
+      'Wait for the parent deck card to carry its run reference; do not fabricate an intake or phase artifacts.',
+    context,
+    hardBlock: true,
+  });
+  return false;
 }
 
 /**
@@ -730,6 +845,17 @@ export async function autoDispatchTask(
     if (blockDispatchIfOwnerKilled(task, context)) {
       console.warn(
         `[${context}] autoDispatchTask: task ${taskId} is OWNER-KILLED (Rule R12) — re-dispatch BLOCKED; task stays dead`,
+      );
+      return;
+    }
+
+    // GUARD 4c: a Presentations deck phase is only executable if the card names
+    // the deck it belongs to. Placed before any session/gateway work so every
+    // caller — create-time dispatch and every sweep — shares one fail-closed
+    // path instead of each re-deriving the check.
+    if (!deckPhaseRunIsInitialized(task, context)) {
+      console.error(
+        `[${context}] autoDispatchTask: phase ${taskId} HELD — deck names no run`,
       );
       return;
     }
