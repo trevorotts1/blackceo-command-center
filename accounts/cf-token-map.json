@@ -1,0 +1,28 @@
+{
+  "_doc": "SINGLE SOURCE for mac-tunnel Cloudflare Access service-token NAMES. Each mac-tunnel roster client authenticates over `cloudflared access ssh` using a PER-CLIENT CF Access service token, referenced by env-var NAMES CF_ACCESS_<TOKEN>_SVC_CLIENT_ID / _SVC_CLIENT_SECRET (legacy naming _SVC_ID/_SVC_SECRET also supported) in ~/.openclaw/secrets/.env -- values live ONLY there, never here. This file replaces what used to be a hand-maintained `case \"$client\" in ...) _tk=...` switch statement DUPLICATED in two places inside fleet-heartbeat/scripts/probe-fleet.sh (probe_mac_tunnel() and the auto-update block). Both call sites now read ONLY this file via one shared lookup function (_cf_token_for_tunnel) -- there is no second copy to drift out of sync and no case branch to forget. KEYED BY TUNNEL HOSTNAME (the exact `probe_match` value from accounts/fleet-roster.json for that box), NOT by client display name -- the tunnel hostname is the one identifier proven identical across fleet-roster.json and probe-fleet.sh's ROSTER array; the free-text `client` column is NOT reliable for this join (e.g. fleet-roster.json's Aurelia Gardner mac-mini entry reads 'Aurelia Gardner (Mac mini)' while probe-fleet.sh's ROSTER row for the same box reads just 'Aurelia Gardner'). The token NAME does not derive cleanly from any single roster field -- it is sometimes the client's first name only (KAREN), sometimes first_last (EDDIE_OTTS), and one token (AURELIA) is INTENTIONALLY shared by two different roster boxes (Aurelia Gardner's Mac mini AND MacBook Pro -- same client, same CF Access service token, two machines) -- so this stays an explicit map rather than a computed transform. ENFORCEMENT: accounts/fleet-coverage-gate.py --reconcile (the default mode) FAILS with MISSING_CF_TOKEN_MAPPING the moment a roster mac-kind box has no entry here -- see accounts/ADD-A-FLEET-CLIENT.md step D2d. Adding a mac-tunnel client without adding a line here is now a gate failure, not a silent Teresa-Pelham-credential-borrow.",
+  "tokens": {
+    "rescue-aurelia-gardner-macbookpro.zerohumanworkforce.com": "AURELIA",
+    "rescue-aurelia-gardner.zerohumanworkforce.com": "AURELIA",
+    "rescue-barret-matthews.zerohumanworkforce.com": "BARRET",
+    "rescue-barrett-matthews-mini-2026.zerohumanworkforce.com": "BARRETT_MINI",
+    "rescue-cassandra-henriquez.zerohumanworkforce.com": "CASSANDRA",
+    "rescue-christy-staples.zerohumanworkforce.com": "CHRISTY",
+    "rescue-eddie-otts.zerohumanworkforce.com": "EDDIE_OTTS",
+    "rescue-er-spaulding.zerohumanworkforce.com": "ER_SPAULDING",
+    "rescue-erin-garrett.zerohumanworkforce.com": "ERIN",
+    "rescue-jennifer-allen.zerohumanworkforce.com": "JENNIFER",
+    "rescue-jill-bulluck.zerohumanworkforce.com": "JILL",
+    "rescue-jocelyn-mcclure.zerohumanworkforce.com": "JOCELYN",
+    "rescue-karen-vaughn.zerohumanworkforce.com": "KAREN",
+    "rescue-kofi-bryant.zerohumanworkforce.com": "KOFI",
+    "rescue-leanne-dolce.zerohumanworkforce.com": "LEANNE_DOLCE",
+    "rescue-lyric-hawkins.zerohumanworkforce.com": "LYRIC_HAWKINS",
+    "rescue-maria-anderson.zerohumanworkforce.com": "MARIA",
+    "rescue-sheila-reynolds.zerohumanworkforce.com": "SHEILA",
+    "rescue-sonatta-camara.zerohumanworkforce.com": "SONATTA_CAMARA",
+    "rescue-star-bobatoon.zerohumanworkforce.com": "STAR",
+    "rescue-stephanie-wall.zerohumanworkforce.com": "STEPHANIE",
+    "rescue-talaya-kelley.zerohumanworkforce.com": "TALAYA",
+    "rescue-teresa-pelham.zerohumanworkforce.com": "TERESA"
+  }
+}
