@@ -93,41 +93,104 @@ test('healthy control task is never touched', () => {
   assert.ok(!result.anthologyCandidatesFlagged.some((l) => l.includes(healthyTask)));
 });
 
-test('--apply archives the high-confidence categories (soft-archive, never delete)', () => {
-  const result = purgeBoardResidue({ apply: true });
-  assert.equal(result.applied, true);
-
-  assert.ok(archivedAt(demoTask), '[DEMO] card is soft-archived');
-  assert.ok(archivedAt(testBracketTask), '[TEST] card is soft-archived');
-  assert.ok(archivedAt(smokeTestTask), 'smoke-test card is soft-archived');
-
-  // Row still exists — SOFT archive only, never a DELETE.
-  const stillPresent = queryOne<{ id: string }>('SELECT id FROM tasks WHERE id = ?', [demoTask]);
-  assert.ok(stillPresent, 'archived rows are never hard-deleted');
-
-  // Never touched.
-  assert.equal(archivedAt(legitSmokeTestingLabTask), null);
-  assert.equal(archivedAt(blockedDemoTask), null, 'blocked task is still never archived, even under --apply');
-  assert.equal(archivedAt(anthologyDrillCandidate), null, 'flagged-only candidate is never archived under --apply');
-  assert.equal(archivedAt(healthyTask), null);
+test('--apply WITHOUT the destructive-confirmation env writes NOTHING (FIX 35 gate)', () => {
+  const saved = process.env.PRESENTATION_CONFIRM_DESTRUCTIVE;
+  delete process.env.PRESENTATION_CONFIRM_DESTRUCTIVE;
+  try {
+    const result = purgeBoardResidue({ apply: true });
+    assert.equal(result.applied, false, '--apply alone must not reach the DB');
+    assert.equal(archivedAt(demoTask), null, 'no confirmation -> no archive');
+    assert.equal(archivedAt(testBracketTask), null, 'no confirmation -> no archive');
+  } finally {
+    if (saved === undefined) delete process.env.PRESENTATION_CONFIRM_DESTRUCTIVE;
+    else process.env.PRESENTATION_CONFIRM_DESTRUCTIVE = saved;
+  }
 });
 
-test('re-running --apply is idempotent (archived_at unchanged, no duplicate events)', () => {
-  const before = archivedAt(demoTask);
-  purgeBoardResidue({ apply: true });
-  const after = archivedAt(demoTask);
-  assert.equal(after, before, 'archived_at does not move on a second apply run');
+test('--apply with the literal confirmation env archives the high-confidence categories (soft-archive, never delete)', () => {
+  const saved = process.env.PRESENTATION_CONFIRM_DESTRUCTIVE;
+  process.env.PRESENTATION_CONFIRM_DESTRUCTIVE = 'PRESENTATION-CONFIRM-DESTRUCTIVE';
+  try {
+    const result = purgeBoardResidue({ apply: true });
+    assert.equal(result.applied, true);
+
+    assert.ok(archivedAt(demoTask), '[DEMO] card is soft-archived');
+    assert.ok(archivedAt(testBracketTask), '[TEST] card is soft-archived');
+    assert.ok(archivedAt(smokeTestTask), 'smoke-test card is soft-archived');
+
+    // Row still exists — SOFT archive only, never a DELETE.
+    const stillPresent = queryOne<{ id: string }>('SELECT id FROM tasks WHERE id = ?', [demoTask]);
+    assert.ok(stillPresent, 'archived rows are never hard-deleted');
+
+    // Never touched.
+    assert.equal(archivedAt(legitSmokeTestingLabTask), null);
+    assert.equal(archivedAt(blockedDemoTask), null, 'blocked task is still never archived, even under --apply');
+    assert.equal(archivedAt(anthologyDrillCandidate), null, 'flagged-only candidate is never archived under --apply');
+    assert.equal(archivedAt(healthyTask), null);
+  } finally {
+    if (saved === undefined) delete process.env.PRESENTATION_CONFIRM_DESTRUCTIVE;
+    else process.env.PRESENTATION_CONFIRM_DESTRUCTIVE = saved;
+  }
 });
 
-test('CLI --apply flag (argv-derived default) also works end-to-end', () => {
+test('a WRONG confirmation value is refused too', () => {
+  const freshWrong = seedTask('[DEMO] Fourth demo card for wrong-value coverage');
+  const saved = process.env.PRESENTATION_CONFIRM_DESTRUCTIVE;
+  process.env.PRESENTATION_CONFIRM_DESTRUCTIVE = 'yes';
+  try {
+    const result = purgeBoardResidue({ apply: true });
+    assert.equal(result.applied, false, 'only the literal string authorizes');
+    assert.equal(archivedAt(freshWrong), null);
+  } finally {
+    if (saved === undefined) delete process.env.PRESENTATION_CONFIRM_DESTRUCTIVE;
+    else process.env.PRESENTATION_CONFIRM_DESTRUCTIVE = saved;
+  }
+});
+
+test('re-running --apply (with confirmation) is idempotent (archived_at unchanged, no duplicate events)', () => {
+  process.env.PRESENTATION_CONFIRM_DESTRUCTIVE = 'PRESENTATION-CONFIRM-DESTRUCTIVE';
+  try {
+    const before = archivedAt(demoTask);
+    purgeBoardResidue({ apply: true });
+    const after = archivedAt(demoTask);
+    assert.equal(after, before, 'archived_at does not move on a second apply run');
+  } finally {
+    delete process.env.PRESENTATION_CONFIRM_DESTRUCTIVE;
+  }
+});
+
+test('CLI --apply flag (argv-derived default) also works end-to-end (with confirmation)', () => {
   const freshDemo = seedTask('[DEMO] Second demo card for CLI-flag coverage');
   process.argv.push('--apply');
+  process.env.PRESENTATION_CONFIRM_DESTRUCTIVE = 'PRESENTATION-CONFIRM-DESTRUCTIVE';
   try {
     const result = purgeBoardResidue();
     assert.equal(result.applied, true);
     assert.ok(result.bracketArchivedIds.includes(freshDemo));
   } finally {
     process.argv = process.argv.filter((a) => a !== '--apply');
+    delete process.env.PRESENTATION_CONFIRM_DESTRUCTIVE;
   }
   assert.ok(archivedAt(freshDemo), 'argv-derived --apply must also archive');
+});
+
+test('CLI --apply WITHOUT confirmation exits 3 and writes nothing (main() gate)', async () => {
+  const { execFileSync } = await import('node:child_process');
+  const freshDemo = seedTask('[DEMO] Third demo card for refusal coverage');
+  let refused = false;
+  try {
+    execFileSync('npx', ['tsx', 'scripts/remediate/purge-board-residue.ts', '--apply'], {
+      cwd: new URL('../..', import.meta.url).pathname,
+      env: { ...process.env, DATABASE_PATH: process.env.DATABASE_PATH ?? '' },
+      stdio: 'pipe',
+    });
+  } catch (err) {
+    refused = true;
+    const status = (err as { status?: number }).status;
+    assert.equal(status, 3, 'refusal exit code is 3');
+  }
+  assert.ok(refused, '--apply without confirmation must fail');
+  const still = queryOne<{ archived_at: string | null }>(
+    'SELECT archived_at FROM tasks WHERE id = ?', [freshDemo]);
+  assert.equal(still?.archived_at ?? null, null, 'refusal never archives');
 });
