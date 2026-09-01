@@ -8,8 +8,11 @@
  *   npx vitest run src/lib/__tests__/passthrough-write-scope.test.ts
  *
  * Counts baseline (measured 2026-07-27; re-derived 2026-08-31 for FIX 5
- * stage-timings: 109 mutating routes, 6 webhook-protected, 103 reachable):
- *   - API routes exporting a mutating method (export async function): 106
+ * stage-timings: 110 mutating routes, 6 webhook-protected, 104 reachable):
+ *   - API routes exporting a mutating method (export async function): 107
+ *     (2026-08-31: +1 for FIX 35 — tasks/[id]/audit-backfill, POST, bearer-
+ *      gated in BEARER_REQUIRED_WRITE_ROUTES; hygiene-job-only, never called
+ *      by the browser interface.)
  *     (2026-07-29: +2 since derivation -- tasks/[id]/persona-choice and
  *      tasks/[id]/resume, both POST, both added after 2026-07-27. Both are
  *      accepted residuals, NOT bearer-gated -- the browser interface calls
@@ -19,7 +22,7 @@
  *      101; it does not return to 99. See docs/SECURITY-RESIDUALS.md.)
  *   - protected by isWebhookSecretRoute:                               5
  *   - REACHABLE via forged same-origin:                              101
- *   - covered by BEARER_REQUIRED_WRITE_ROUTES (38 routes / 35 patterns): 38
+ *   - covered by BEARER_REQUIRED_WRITE_ROUTES (40 routes / 37 patterns): 40
  */
 
 import { describe, it, expect } from 'vitest';
@@ -221,16 +224,16 @@ const reachableCount = allMutatingRoutes.length - webhookProtectedCount;
 describe('passthrough-write-scope — anti-rot lock (U052)', () => {
   // ---- Counts ------------------------------------------------------------
 
-  it('API routes exporting a mutating method: 109 (literal assertion)', () => {
-    expect(allMutatingRoutes.length).toBe(109);
+  it('API routes exporting a mutating method: 110 (literal assertion)', () => {
+    expect(allMutatingRoutes.length).toBe(110);
   });
 
   it('protected by isWebhookSecretRoute: 6', () => {
     expect(webhookProtectedCount).toBe(6);
   });
 
-  it('REACHABLE via forged same-origin: 103', () => {
-    expect(reachableCount).toBe(103);
+  it('REACHABLE via forged same-origin: 104', () => {
+    expect(reachableCount).toBe(104);
   });
 
   it('interface call templates found by multi-line scanner', () => {
@@ -247,12 +250,12 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
     expect(count).toBeGreaterThanOrEqual(40);
   });
 
-  it('routes covered by BEARER_REQUIRED_WRITE_ROUTES (39 routes via 36 patterns)', () => {
-    expect(bearerCoveredRoutes.size).toBe(39);
+  it('routes covered by BEARER_REQUIRED_WRITE_ROUTES (40 routes via 37 patterns)', () => {
+    expect(bearerCoveredRoutes.size).toBe(40);
   });
 
-  it('BEARER_REQUIRED_WRITE_ROUTES.length is 36, not 39 (checksum: 33 + 3×2 = 39)', () => {
-    expect(BEARER_REQUIRED_WRITE_ROUTES.length).toBe(36);
+  it('BEARER_REQUIRED_WRITE_ROUTES.length is 37, not 40 (checksum: 34 + 3×2 = 40)', () => {
+    expect(BEARER_REQUIRED_WRITE_ROUTES.length).toBe(37);
   });
 
   it('route-list membership: BEARER_REQUIRED_WRITE_ROUTES includes /api/weight-profiles', () => {

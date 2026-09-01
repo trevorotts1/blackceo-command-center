@@ -470,6 +470,45 @@ PYWAL
     exit 2
   fi
   _ok "  DB backed up: ${DB_BACKUP} ($(oc_backup_size_kb "$DB_BACKUP") KB)"
+  # FIX 34b (presentation rev3, spec REV 3): a backup that cannot be READ BACK
+  # is not a backup — spec PROOF: "next backup is ~135MB and restores to a
+  # working DB". The verifier opens THE BACKUP FILE ITSELF (the artifact a
+  # rollback would restore) and reads its pages back via PRAGMA
+  # integrity_check; a file whose pages are corrupt raises sqlite3.DatabaseError
+  # (or reports a non-ok integrity result) and the deploy aborts (exit 2)
+  # BEFORE the build replaces the old .next, so a poison backup never survives
+  # into the rollback chain. A 0-byte / header-less file is refused on the
+  # magic-header check before any integrity verdict. A bare `cp` of a live
+  # WAL-mode DB can lag the -wal file; the checkpoint above shrinks that
+  # window and integrity_check still proves the restored-from file parses end
+  # to end. FAIL-CLOSED, unlike the checkpoint above: a non-zero verifier exit
+  # aborts the deploy (exit 2) — a poison backup in the rollback chain is worse
+  # than a delayed deploy; the backup itself is kept on disk for forensics.
+  DB_BACKUP_VERIFY_RC=0
+  python3 - "$DB_BACKUP" <<'PYRESTORE' 2>/dev/null || DB_BACKUP_VERIFY_RC=$?
+import sqlite3, os, sys
+ok = False
+try:
+    # A 0-byte / header-less file is not a DB: require the SQLite magic header
+    # before trusting any integrity verdict from it.
+    with open(sys.argv[1], "rb") as fh:
+        ok = fh.read(16) == b"SQLite format 3\x00"
+    if ok:
+        chk = sqlite3.connect(sys.argv[1], timeout=5)
+        try:
+            row = chk.execute("PRAGMA integrity_check").fetchone()
+            ok = bool(row) and str(row[0]).lower() == "ok"
+        finally:
+            chk.close()
+except (sqlite3.DatabaseError, OSError):
+    ok = False  # unreadable/malformed image is a failed verification
+if not ok:
+    sys.exit(9)
+PYRESTORE
+  if [[ "$DB_BACKUP_VERIFY_RC" -ne 0 ]]; then
+    _preflight_abort_receipt "FIX 34b: DB backup at ${DB_BACKUP} FAILED restore-verification (integrity_check != ok) — refusing to continue; the backup is kept on disk for forensics. Old build untouched."
+    exit 2
+  fi
   # RETENTION: only now that this deploy's backup exists. Never prunes the
   # backup this run just wrote. Prefix scoped to the ".autodeploy." marker
   # (BUG-2 FIX) so this can NEVER match a human/operator-made backup file —

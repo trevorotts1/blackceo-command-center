@@ -58,6 +58,10 @@ export const BEARER_REQUIRED_WRITE_ROUTES: RegExp[] = [
   /^\/api\/tasks\/[^/]+\/return-to-orchestrator$/,
   /^\/api\/tasks\/[^/]+\/subagent$/,
   /^\/api\/tasks\/[^/]+\/test$/,
+  // FIX 35 (spec REV 3): audit-backfill is a hygiene-job-only surface (the
+  // browser interface never calls it). Bearer-gated so the destructive-
+  // confirmation backfill is reachable ONLY with MC_API_TOKEN + HMAC.
+  /^\/api\/tasks\/[^/]+\/audit-backfill$/,
   /^\/api\/weight-profiles$/,
   /^\/api\/workspaces\/[^/]+$/,
 ];
