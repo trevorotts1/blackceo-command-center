@@ -233,6 +233,19 @@ export default defineConfig({
   // discriminated. Parse + fixture files only — the deploy script is never
   // executed.
   'tests/unit/fix34-db-backup-verify.test.ts',
+      // FIX-TIMEOUT-DETECT — execution-watcher terminal-failure detection
+      // (openclaw:prompt-error / "chat run timed out" with no TASK_COMPLETE).
+      // Drives the REAL runExecutionCompletionReconcile() against an isolated
+      // DB with both '@/lib/planning-utils' and '@/lib/openclaw/client' mocked
+      // (no network), same technique as fix25-review-artifact-gate.test.ts —
+      // vitest-only, never the tsx --test glob (see package.json).
+      'tests/unit/fix-timeout-detect-terminal-failure.test.ts',
+      // FIX-DISPATCH-COUNTER — intake-advance-sweep's `dispatched` counter must
+      // only count a REAL advance (status -> in_progress), not every
+      // successfully-awaited (but possibly no-op) autoDispatchTask call.
+      // Mocks '@/lib/task-dispatcher' at the module boundary — vitest-only,
+      // never the tsx --test glob (see package.json).
+      'tests/unit/fix-dispatch-counter-intake-advance.test.ts',
     ],
     env: {
       NODE_ENV: 'test',
