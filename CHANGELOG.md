@@ -1,3 +1,33 @@
+## [v6.1.5] — 2026-09-03 — Gemini synthesis model: EOL hardcode replaced with env-configurable default
+
+### What changed
+
+- **SOP synthesis used a dead model id.** `src/lib/gemini.ts` hardcoded
+  `gemini-1.5-flash` as the default model. That id is EOL — Google returns
+  404 (`models/gemini-1.5-flash is not found for API version v1beta`) — so
+  every SOP synthesis call (sop-authoring + sop-auto-replace, the wrapper's
+  only callers) failed with `sop_authoring_generation_failed` and held
+  custom-department SOP cards at the Triad gate.
+- **Fix:** the default is now `GEMINI_SYNTHESIS_MODEL || GEMINI_MODEL ||
+  'gemini-flash-latest'` (explicit `opts.model` still wins; `.env.example`
+  documents both knobs). Unset env = new sane default — a behaviour change
+  from the broken hardcode, and that is the point: this is a fix, not a
+  regression.
+- **Fail loud on the next EOL:** a 404 / model-not-found error now logs
+  (`[gemini] model '<id>' appears retired or unavailable`) and the thrown
+  error names the configured model. No silent fallback to a different
+  model — silent fallback is what masked this EOL.
+- **Other hardcoded Gemini ids (left alone):** `src/lib/qc-scorer.ts`
+  defaults `QC_SCORER_MODEL || 'gemini-2.5-flash'` (vision fallback, still a
+  documented model — same trivially-safe shape but a different subsystem, so
+  untouched pending a decision); `src/lib/model-providers/google.ts` only
+  matches `gemini-2` / `gemini-1.5` substrings for family inference (not
+  request targets); `gemini-2.5-flash-image` entries are image-generation
+  fixtures, not text synthesis.
+- **Tests:** `tests/unit/gemini-synthesis-model.test.ts` (5 tests: new
+  default, `GEMINI_MODEL` override, `GEMINI_SYNTHESIS_MODEL` precedence,
+  explicit-model precedence, loud-404-no-fallback).
+
 ## [v6.1.4] — 2026-09-03 — four fix-PR batch: bounce loop, completion-detection timeout, persona path, orphaned RPCs
 
 ### What changed

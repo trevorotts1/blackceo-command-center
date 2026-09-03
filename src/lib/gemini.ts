@@ -13,7 +13,7 @@ import fs from 'fs';
 import { assertNoFixtureEnvInProduction } from '@/lib/fixture-guard';
 
 export interface GeminiGenerateOptions {
-  model?: string; // default 'gemini-1.5-flash'
+  model?: string; // default: GEMINI_SYNTHESIS_MODEL || GEMINI_MODEL || 'gemini-flash-latest'
   temperature?: number;
   response_mime_type?: 'application/json' | 'text/plain';
 }
@@ -37,7 +37,14 @@ export async function geminiGenerate(prompt: string, opts: GeminiGenerateOptions
     throw new Error('GOOGLE_API_KEY (or GEMINI_API_KEY) is not set. Set it in .env.local or pass GEMINI_FIXTURE_JSON_PATH for testing.');
   }
 
-  const model = opts.model || 'gemini-1.5-flash';
+  // Default model: 'gemini-1.5-flash' is EOL (Google returns 404
+  // "models/gemini-1.5-flash is not found for API version v1beta").
+  // GEMINI_SYNTHESIS_MODEL (synthesis-specific) wins, then GEMINI_MODEL,
+  // then the 'gemini-flash-latest' alias so the next EOL needs no code change.
+  const model = opts.model
+    || process.env.GEMINI_SYNTHESIS_MODEL
+    || process.env.GEMINI_MODEL
+    || 'gemini-flash-latest';
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${apiKey}`;
 
   const body: Record<string, unknown> = {
@@ -58,7 +65,14 @@ export async function geminiGenerate(prompt: string, opts: GeminiGenerateOptions
   });
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`Gemini generateContent failed: ${res.status} ${text.slice(0, 200)}`);
+    // Fail LOUD on a retired / unknown model id (404 "models/<id> is not
+    // found", 400 unknown-model variants): name the configured model and say
+    // so plainly. NEVER silently fall back to a different model — that would
+    // mask the next EOL exactly the way the hardcoded gemini-1.5-flash did.
+    if (res.status === 404 || /not[ -]?found|unknown model|does not exist|unsupported/i.test(text)) {
+      console.error(`[gemini] model '${model}' appears retired or unavailable (HTTP ${res.status}). Set GEMINI_SYNTHESIS_MODEL or GEMINI_MODEL to a current id.`);
+    }
+    throw new Error(`Gemini generateContent failed: ${res.status} (model '${model}' retired or unavailable?) ${text.slice(0, 200)}`);
   }
   const data = await res.json() as {
     candidates?: { content?: { parts?: { text?: string }[] } }[];
