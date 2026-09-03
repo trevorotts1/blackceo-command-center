@@ -131,6 +131,26 @@ const GOOGLE_EMBED_BACKOFF_MS = 1000;
  * up to ~7s of latency for an error that will look identical on attempt 4 as
  * it did on attempt 1. A genuine rate-limit 429 (no billing marker in the
  * body) is unaffected — it keeps the existing exponential-backoff retry.
+ *
+ * KNOWN STALENESS RISK — read before touching this function or its wording:
+ * this is a literal substring match against Google's CURRENT billing-wall
+ * error text ("prepayment credits are depleted" / "credits are depleted" /
+ * "insufficient credits"), verified against real captured 429 bodies from a
+ * live account, not a guess. It is not a generic-word collision risk (it
+ * only ever runs against a 429 response body from Google's own embedding
+ * endpoint, never arbitrary content) — the real risk is DRIFT: if Google
+ * ever rewords this message, every branch below that calls this function
+ * (fetchEmbeddingGoogle's fail-fast-on-429 check, and
+ * isNonRetryableEmbeddingError's breaker-trip check further down) silently
+ * stops matching. The failure mode is SILENT REVERSION TO THE OLD,
+ * WASTEFUL-BUT-SAFE BEHAVIOUR — the 4x retry-with-backoff comes back, the
+ * circuit breaker stops tripping — never data corruption or a wrong answer.
+ * That makes it easy to miss for a long time: nothing errors, nothing
+ * crashes, latency/API-call-volume on a depleted account just quietly climbs
+ * back to pre-fix levels. If Google's wording ever changes, this needs a
+ * matching update; the fix in tests/unit/google-embed-billing-wall.test.ts's
+ * "genuine rate-limit 429 still retries" case is the regression guard that
+ * would need a NEW case added for the new wording to catch the silent gap.
  */
 function isNonRetryableBillingExhaustion(body: string): boolean {
   return /prepayment credits are depleted/i.test(body)
@@ -602,6 +622,16 @@ function breakerOpenError(): Error {
  * (isNonRetryableBillingExhaustion, also used by fetchEmbeddingGoogle's
  * fail-fast-on-429 check above) plus OpenAI's insufficient_quota error code
  * and both providers' 401/403 auth-rejection shapes.
+ *
+ * SAME STALENESS RISK AS isNonRetryableBillingExhaustion ABOVE (this
+ * function is a superset check built on top of it): every branch here is a
+ * literal substring match on provider error text. If any provider reworks
+ * its wording, this silently stops tripping the breaker — the failure mode
+ * is SILENT REVERSION TO WASTEFUL-BUT-SAFE, not corruption: a depleted
+ * account just goes back to paying one real network call per dispatch
+ * forever (the pre-Fix-C state), with nothing crashing or erroring to flag
+ * it. See the fuller note on isNonRetryableBillingExhaustion above before
+ * changing either function.
  */
 function isNonRetryableEmbeddingError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
