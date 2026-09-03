@@ -39,7 +39,7 @@ import { queryAll, queryOne, run, timeNow, parseDbTime } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { getMessagesFromOpenClaw } from '@/lib/planning-utils';
 import { getOpenClawClient } from '@/lib/openclaw/client';
-import { runQCOnReview } from '@/lib/qc-scorer';
+import { runQCOnReview, blockTaskForQC } from '@/lib/qc-scorer';
 import { transition, TransitionError } from '@/lib/task-lifecycle';
 import { resolveSpecialistSessionKey, deterministicOpenclawSessionId } from '@/lib/task-dispatcher';
 import { recoverFinishedTaskToReview } from './finished-work-recovery';
@@ -49,10 +49,24 @@ import type { Task, Agent } from '@/lib/types';
 // Matches the same completion marker the webhook + dispatch instructions use.
 const TASK_COMPLETE_RE = /TASK_COMPLETE:\s*(.+)/i;
 
+// FIX-TIMEOUT-DETECT: matches the terminal-failure signal OpenClaw records in
+// the session transcript when an agent's turn dies WITHOUT ever reporting
+// completion — an `openclaw:prompt-error` frame, or the gateway's own
+// "chat run timed out" error text. Observed live: a dispatched agent's turn
+// hung on an unbounded tool call, the turn died with this signal, and — since
+// no TASK_COMPLETE marker was ever emitted — the card sat `in_progress`
+// invisibly (zero task_events, zero task_activities) until the stuck-in-
+// progress sweep's silence-based timer eventually caught it, tens of minutes
+// later. Absence of TASK_COMPLETE and a POSITIVELY-OBSERVED failure are
+// different states; runExecutionCompletionReconcile below tells them apart
+// instead of treating both as "still working".
+const TERMINAL_FAILURE_RE = /openclaw:prompt-error|chat run timed out/i;
+
 interface InProgressRow {
   id: string;
   title: string;
   status: string;
+  description: string | null;
   assigned_agent_id: string | null;
   assigned_agent_name: string | null;
   assigned_agent_role: string | null;
@@ -221,6 +235,58 @@ export async function readSessionHistory(sessionKey: string): Promise<RawHistory
 }
 
 /**
+ * FIX-TIMEOUT-DETECT: extract plain text from a chat.history message body,
+ * tolerant of BOTH message shapes this codebase already assumes in different
+ * places — a plain string (RawHistoryMessage / the OpenClawHistoryMessage type
+ * in src/lib/types.ts) and an array of content blocks (the shape
+ * getMessagesFromOpenClaw assumes). Never throws.
+ */
+function extractRawMessageText(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((c) =>
+        c && typeof c === 'object' && typeof (c as { text?: unknown }).text === 'string'
+          ? (c as { text: string }).text
+          : '',
+      )
+      .join(' ');
+  }
+  return '';
+}
+
+/**
+ * FIX-TIMEOUT-DETECT: scan a task's OpenClaw session (every candidate
+ * namespace key, same probing order as the TASK_COMPLETE scan) for a
+ * terminal-failure marker (see TERMINAL_FAILURE_RE above). Deliberately reads
+ * via `readSessionHistory` — role-agnostic and shape-tolerant — rather than
+ * `getMessagesFromOpenClaw`, which filters to `role === 'assistant'` only and
+ * assumes array-shaped content; an engine-level failure is plausibly recorded
+ * on a different role (e.g. 'system'/'error'), so filtering it out by
+ * construction would silently defeat this detector. Never throws; returns the
+ * matched snippet or null.
+ */
+export async function findTerminalFailureMarker(
+  task: InProgressRow,
+  reader: SessionHistoryReader = readSessionHistory,
+): Promise<string | null> {
+  for (const sessionKey of candidateSessionKeys(task)) {
+    let messages: RawHistoryMessage[];
+    try {
+      messages = await reader(sessionKey);
+    } catch {
+      continue; // bad/absent key — try the next candidate.
+    }
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const text = extractRawMessageText(messages[i].content);
+      const found = text.match(TERMINAL_FAILURE_RE);
+      if (found) return found[0];
+    }
+  }
+  return null;
+}
+
+/**
  * B3: probe an agent's OpenClaw session for genuine forward-progress BEFORE the
  * stuck-sweep force-blocks it. The `events` table has NO mid-turn agent-activity
  * type, so a legitimately long-running turn leaves no `events` row and is falsely
@@ -265,6 +331,7 @@ export async function probeSessionLiveness(
     id: task.id,
     title: '',
     status: 'in_progress',
+    description: null,
     assigned_agent_id: task.assigned_agent_id,
     assigned_agent_name: task.assigned_agent_name,
     assigned_agent_role: task.assigned_agent_role,
@@ -399,7 +466,7 @@ export async function runExecutionCompletionReconcile(): Promise<void> {
   // IS NOT NULL` filter made a finished-but-session-less task un-reconcilable, so
   // it got swept to blocked.
   const rows = queryAll<InProgressRow>(
-    `SELECT t.id, t.title, t.status, t.assigned_agent_id, t.workspace_id,
+    `SELECT t.id, t.title, t.status, t.description, t.assigned_agent_id, t.workspace_id,
             a.name as assigned_agent_name,
             a.role as assigned_agent_role,
             s.openclaw_session_id
@@ -481,6 +548,85 @@ export async function runExecutionCompletionReconcile(): Promise<void> {
         // task whose marker outran its artifacts is handled by the same recovery
         // logic as a gateway-down task (recoverFinishedTaskToReview re-reads
         // registered deliverables), instead of being silently dropped this tick.
+      }
+
+      // FIX-TIMEOUT-DETECT: no TASK_COMPLETE this tick. Before falling back to
+      // the gateway-down deliverable check (which answers "did the agent
+      // secretly finish?"), check whether we have POSITIVE EVIDENCE the turn
+      // already died — a timed-out/errored chat run emits no completion message
+      // at all, so "no marker" alone cannot distinguish "still working" from
+      // "already dead". Reuses the same chat.history probe + candidate-session-
+      // key ordering both sweeps already read (no new plumbing: no gateway
+      // push-notification listener exists anywhere in this codebase to build
+      // on, and chat.send's own response predates this failure by definition —
+      // it already confirmed dispatch succeeded before the turn later died).
+      // Gracefully degrades when chat.history itself is unhealthy: a failed/
+      // timed-out probe returns null here (never throws), so this tick simply
+      // falls through to the unchanged fallback/next-tick behavior below —
+      // no new dependency on chat.history's uptime.
+      if (!match) {
+        let failureMarker: string | null = null;
+        try {
+          failureMarker = await findTerminalFailureMarker(task);
+        } catch (err) {
+          console.warn(`[execution-watcher] terminal-failure probe failed for ${task.id} (non-fatal):`, (err as Error).message);
+        }
+        if (failureMarker) {
+          const agentLabel = task.assigned_agent_name ?? task.assigned_agent_id ?? 'unknown agent';
+          const reason =
+            `Agent turn ended in a terminal failure ("${failureMarker}") with no TASK_COMPLETE report — ` +
+            `detected directly in the OpenClaw session transcript (execution-watcher reconcile).`;
+          const needs =
+            `Operator review: agent "${agentLabel}" turn on task "${task.title}" ended in error ` +
+            `(${failureMarker}). Check the department session log, resolve the blocker, then re-dispatch or close.`;
+          console.warn(`[execution-watcher] Reconcile detected TERMINAL FAILURE for task ${task.id} ("${task.title}") — ${failureMarker}`);
+
+          // Reuse the established blocked-path funnel (transition() + full
+          // block_* metadata + task_block_events audit row + SYSTEM-audience
+          // escalation), exactly as recordDispatchFailure / blockStuckTask /
+          // the QC-cap path already do — no new status, no new bounce loop:
+          // `blocked` is excluded from every sweep's in_progress/advanceable
+          // selection, so this can never re-fire for the same task. The
+          // `fromStatus: 'in_progress'` CAS guard means a lost race (another
+          // writer already moved the task) returns false and records nothing —
+          // never a double-block, never a double-alert.
+          let landed = false;
+          try {
+            landed = await blockTaskForQC({
+              taskId: task.id,
+              taskTitle: task.title,
+              taskDescription: task.description,
+              fromStatus: 'in_progress',
+              actor: 'execution-watcher',
+              attempts: null, // not a QC failure — leave qc_reroute_attempts untouched
+              gaps: [],
+              needs,
+              audience: 'SYSTEM', // operator concern (MOVE-IN-SILENCE) — never the client's Telegram
+              blockReason: 'agent_turn_terminal_failure',
+              auditNote: reason,
+              timelineEventMessage: `[execution-watcher] ${reason}`,
+              escalationMessage: `[execution-watcher] Task "${task.title}" (${task.id}) auto-blocked — ${reason}`,
+            });
+          } catch (err) {
+            console.warn(`[execution-watcher] blockTaskForQC failed for ${task.id}:`, (err as Error).message);
+          }
+          if (landed) {
+            // Free the wedged agent — mirrors stuck-in-progress-sweep's
+            // blockStuckTask step 3. blockTaskForQC is a QC-review-lane helper
+            // with no notion of a dispatched-and-working agent, so it never
+            // does this itself.
+            if (task.assigned_agent_id) {
+              run(
+                `UPDATE agents SET status='standby', updated_at=? WHERE id=? AND status='working'`,
+                [new Date().toISOString(), task.assigned_agent_id],
+              );
+            }
+            continue; // task blocked — don't fall through to the fallback below.
+          }
+          // CAS lost: nothing was recorded (blockTaskForQC returns false without
+          // writing anything on a CAS conflict), so fall through exactly like the
+          // TASK_COMPLETE/advanceToReview CAS-lost case above.
+        }
       }
 
       // MR-15: GATEWAY-DOWN DELIVERABLE FALLBACK — when every session probe
