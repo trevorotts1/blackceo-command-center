@@ -19,6 +19,38 @@ export interface GeminiGenerateOptions {
 }
 
 /**
+ * True when a generation failure is genuinely a MODEL problem: the model id
+ * is retired/unknown/unsupported for this API version. Only then may the
+ * thrown error carry the "(model '<id>' retired or unavailable?)" suffix.
+ */
+function isModelProblem(status: number, body: string): boolean {
+  return status === 404
+    || /not found for API version/i.test(body)
+    || /unknown model/i.test(body)
+    || /does not exist/i.test(body)
+    || /not[ -]?supported/i.test(body)
+    || /unsupported/i.test(body);
+}
+
+/**
+ * True when a generation failure is a BILLING/QUOTA wall rather than a model
+ * defect. Mirrors the billing-vs-transient classification in
+ * src/lib/sop-embeddings.ts (isNonRetryableBillingExhaustion): a 429 whose
+ * body names depleted credits / quota / billing means the ACCOUNT is empty,
+ * not that the model id is wrong. Live-proven on a real box: a 429
+ * ("Your prepayment credits are depleted") against a healthy model id was
+ * mislabelled as a retired model.
+ */
+function isBillingProblem(status: number, body: string): boolean {
+  return status === 429
+    || /prepayment credits are depleted/i.test(body)
+    || /credits are depleted/i.test(body)
+    || /insufficient credits/i.test(body)
+    || /\bquota\b/i.test(body)
+    || /\bbilling\b/i.test(body);
+}
+
+/**
  * Calls Gemini with a single user prompt and returns the raw text.
  * Caller is responsible for JSON.parse if response_mime_type='application/json'.
  */
@@ -65,14 +97,20 @@ export async function geminiGenerate(prompt: string, opts: GeminiGenerateOptions
   });
   if (!res.ok) {
     const text = await res.text();
-    // Fail LOUD on a retired / unknown model id (404 "models/<id> is not
-    // found", 400 unknown-model variants): name the configured model and say
-    // so plainly. NEVER silently fall back to a different model — that would
-    // mask the next EOL exactly the way the hardcoded gemini-1.5-flash did.
-    if (res.status === 404 || /not[ -]?found|unknown model|does not exist|unsupported/i.test(text)) {
+    // Fail LOUD — but label accurately. A 429 billing wall is an empty
+    // account, not a retired model; the model suffix applies ONLY to a
+    // genuine model problem (404 / not-found-for-version / does-not-exist /
+    // unsupported). NEVER silently fall back to a different model — that
+    // would mask the next EOL exactly the way the hardcoded gemini-1.5-flash did.
+    if (isModelProblem(res.status, text)) {
       console.error(`[gemini] model '${model}' appears retired or unavailable (HTTP ${res.status}). Set GEMINI_SYNTHESIS_MODEL or GEMINI_MODEL to a current id.`);
+      throw new Error(`Gemini generateContent failed: ${res.status} (model '${model}' retired or unavailable?) ${text.slice(0, 200)}`);
     }
-    throw new Error(`Gemini generateContent failed: ${res.status} (model '${model}' retired or unavailable?) ${text.slice(0, 200)}`);
+    if (isBillingProblem(res.status, text)) {
+      console.error(`[gemini] billing/quota wall (HTTP ${res.status}). Check account credits/quota — the model id '${model}' is not the problem.`);
+      throw new Error(`Gemini generateContent failed: ${res.status} (billing/quota exhausted — check account credits) ${text.slice(0, 200)}`);
+    }
+    throw new Error(`Gemini generateContent failed: ${res.status} ${text.slice(0, 200)}`);
   }
   const data = await res.json() as {
     candidates?: { content?: { parts?: { text?: string }[] } }[];
