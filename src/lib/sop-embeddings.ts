@@ -399,6 +399,32 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
+ * Detect a 429 that CANNOT be fixed by waiting a few seconds: the account's
+ * prepay balance is at zero. Google's billing-exhausted response carries this
+ * exact wording regardless of which specific call triggered it — distinct
+ * from a transient per-minute/per-day RATE_LIMIT_EXCEEDED 429, which a short
+ * backoff genuinely can clear.
+ *
+ * STAR-EMBED-01: fetchEmbeddingGoogle used to retry EVERY 429 up to
+ * GOOGLE_EMBED_MAX_RETRIES times with exponential backoff (1s/2s/4s) before
+ * giving up. That is the right posture for a transient rate limit, but once
+ * the account has zero prepay credits every one of those retries is a
+ * guaranteed-to-fail call — the balance does not change in the 1-4 seconds
+ * between attempts. On a depleted account this quadrupled (1 -> 4 attempts)
+ * every single embed call system-wide (department routing, SOP suggest, and
+ * the higher-volume shared persona-selector path — see semantic_task_fit.py
+ * in openclaw-onboarding for the companion fix), with zero chance of success
+ * and real added latency (up to ~7s) on every dispatch. Detecting this one
+ * case and failing fast preserves the retry behavior for a REAL transient
+ * rate limit (a different 429 body, no billing wording) while eliminating
+ * the wasted attempts on a known-exhausted account.
+ */
+function _isBillingExhausted429(errBody: string): boolean {
+  const lower = errBody.toLowerCase();
+  return lower.includes('prepayment credits are depleted') || lower.includes('prepayment credits');
+}
+
+/**
  * Fetch a SINGLE text embedding from Google Gemini (gemini-embedding-2).
  *
  * API shape (PRD 1.8c — GA model, output_dimensionality explicit):
@@ -410,8 +436,12 @@ function sleep(ms: number): Promise<void> {
  * output_dimensionality is always passed explicitly so the dimension is
  * deterministic and does not depend on model-version defaults.
  *
- * Retries on 429 (quota) with exponential backoff. After max retries, throws
- * with a "quota exceeded" message so the caller can fall back to keyword search.
+ * Retries on a transient 429 (quota) with exponential backoff. After max
+ * retries, throws with a "quota exceeded" message so the caller can fall
+ * back to keyword search. STAR-EMBED-01: a 429 whose body identifies the
+ * account's prepay balance as depleted is NOT transient — it fails fast on
+ * the FIRST attempt instead of burning the retry budget (see
+ * _isBillingExhausted429 above).
  */
 async function fetchEmbeddingGoogle(text: string, apiKey: string): Promise<Float32Array> {
   const url = `${GOOGLE_API_BASE}/${GOOGLE_MODEL}:embedContent?key=${encodeURIComponent(apiKey)}`;
@@ -430,6 +460,19 @@ async function fetchEmbeddingGoogle(text: string, apiKey: string): Promise<Float
     });
 
     if (resp.status === 429) {
+      const errBody = await resp.text().catch(() => '');
+
+      if (_isBillingExhausted429(errBody)) {
+        // Not transient — every retry would fail identically. Fail fast on
+        // attempt 1 so the caller falls back to keyword search immediately
+        // instead of after ~7s of guaranteed-failing backoff.
+        throw new Error(
+          `Google embeddings quota exceeded (429, prepay balance depleted) on attempt 1 — ` +
+          `skipping retries (not transient) and falling back to keyword search. ` +
+          `Top up billing at https://ai.studio/projects, then re-run the backfill.`
+        );
+      }
+
       if (attempt >= GOOGLE_EMBED_MAX_RETRIES) {
         throw new Error(
           `Google embeddings quota exceeded (429) after ${GOOGLE_EMBED_MAX_RETRIES} retries — ` +
