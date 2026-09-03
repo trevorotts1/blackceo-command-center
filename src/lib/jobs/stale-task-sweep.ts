@@ -40,6 +40,19 @@
  * board-slas.ts) — precedence: explicit env var > that task's department
  * entry > the hardcoded default. An absent/malformed config file is
  * fail-closed to the unchanged, byte-identical global-default behavior.
+ *
+ * LOOP-FIX-20260903 (sweep-conflict bounce loop): a Blocked task whose
+ * qc_reroute_attempts is already at/over QC_MAX_REROUTES is NEVER returned to
+ * the orchestrator at the second threshold — intake-advance-sweep's cap-out
+ * surfacing (LOOP-FIX-20260827) immediately re-blocks any advanceable-lane
+ * task over the cap, so the return was pure churn: no QC ever ran, yet
+ * returnToOrchestrator increments qc_reroute_attempts unconditionally on every
+ * return, corrupting the very cap the two sweeps disagreed over (observed
+ * live: a task cycled blocked→backlog→blocked every ~6h with the counter
+ * climbing on each bounce). Such a task instead gets a one-time (deduped, see
+ * wasRecentlyEscalatedOverCap) `stale_blocked_over_cap_hold` notice and stays
+ * Blocked — an operator must promote, re-scope, or close it. A Blocked task
+ * UNDER the cap is unaffected: it is still returned exactly as before.
  */
 
 import { queryAll, queryOne, run, sqlTime, parseDbTime } from '@/lib/db';
@@ -53,6 +66,7 @@ import { resolveSlaThreshold, minPossibleSlaThreshold } from '@/lib/board-slas';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { transition, recordStatusEvent } from '@/lib/task-lifecycle';
 import { blockDispatchIfOwnerKilled } from '@/lib/owner-killed';
+import { QC_MAX_REROUTES } from '@/lib/qc-scorer';
 import { v4 as uuidv4 } from 'uuid';
 
 export const STALE_TASK_SWEEP_CRON = '*/10 * * * *';
@@ -286,6 +300,51 @@ function wasRecentlyRepinged(
     // FAIL-OPEN — see contract above. Escalate anyway; never go quiet.
     console.warn(
       `[stale-task-sweep] re-ping dedup check failed for ${taskId} (failing OPEN, will escalate):`,
+      (err as Error).message,
+    );
+    return false;
+  }
+}
+
+/**
+ * LOOP-FIX-20260903 (sweep-conflict bounce loop): the QC-reroute cap, resolved
+ * the exact same way intake-advance-sweep.ts resolves it (env override, else
+ * the qc-scorer default) — the two sweeps MUST agree on what "over cap" means,
+ * or a task can sit in the gap between two different thresholds and still
+ * bounce. See runStaleTaskSweep's blocked branch for how this gates the return.
+ */
+const STALE_SWEEP_QC_CAP = parseInt(process.env.QC_MAX_REROUTES || String(QC_MAX_REROUTES), 10);
+
+/**
+ * How long a single over-cap blocked task's hold stays "already announced"
+ * before this sweep re-logs it (hours). Reuses STALE_REPING_DEDUP_HOURS's
+ * default (24h) so an over-cap hold follows the same cadence contract as
+ * every other dedup in this file — capped, never muted.
+ */
+const STALE_OVER_CAP_HOLD_DEDUP_HOURS = parseFloat(
+  process.env.STALE_OVER_CAP_HOLD_DEDUP_HOURS || String(STALE_REPING_DEDUP_HOURS),
+);
+
+/**
+ * LOOP-FIX-20260903: has this task's over-cap hold already been announced
+ * inside the dedup window? Same FAIL-OPEN contract as wasRecentlyRepinged
+ * above — a thrown query must never swallow the one signal an operator gets
+ * that a task is stuck in the sweep-conflict hold, not silently returned.
+ */
+function wasRecentlyEscalatedOverCap(taskId: string): boolean {
+  try {
+    const row = queryOne<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM events
+        WHERE task_id = ?
+          AND type = 'stale_blocked_over_cap_hold'
+          AND ${sqlTime('created_at')} >= ${sqlTime('?')}`,
+      [taskId, hoursAgo(STALE_OVER_CAP_HOLD_DEDUP_HOURS)],
+    );
+    return (row?.n ?? 0) > 0;
+  } catch (err) {
+    // FAIL-OPEN — see contract above. Escalate anyway; never go quiet.
+    console.warn(
+      `[stale-task-sweep] over-cap hold dedup check failed for ${taskId} (failing OPEN, will escalate):`,
       (err as Error).message,
     );
     return false;
@@ -544,7 +603,57 @@ export async function runStaleTaskSweep(): Promise<StaleSweepResult> {
         }
 
         if (ageHours >= returnThreshold) {
-          // Second threshold passed: return to orchestrator.
+          // LOOP-FIX-20260903 (sweep-conflict bounce loop): a task whose
+          // qc_reroute_attempts is already at/over the QC-reroute cap cannot be
+          // helped by returning it to backlog. intake-advance-sweep's cap-out
+          // surfacing (LOOP-FIX-20260827) selects EVERY advanceable-lane task
+          // whose qc_reroute_attempts >= cap and re-blocks it on the very next
+          // tick — so returnToOrchestrator's backlog round trip is pure churn:
+          // no QC ever runs, yet returnToOrchestrator increments
+          // qc_reroute_attempts unconditionally on every call, so the "cap" the
+          // whole system is built around stops meaning anything (it climbs
+          // forever, ~every STALE_BLOCKED_REPINGED_HOURS, with zero QC activity
+          // behind each bump) while the board flickers blocked→backlog→blocked.
+          // Precedence: once a task is over the cap, THIS sweep's duty ("a
+          // stuck task must reach a human") is already discharged by the cap
+          // block itself (block_reason/blocked_on_human already describe the
+          // cap situation) — cycling it can only corrupt state, never advance
+          // it. So an over-cap task stays exactly where it is (still `blocked`,
+          // still visible for operator triage) and gets a one-time (deduped)
+          // reminder instead of a return attempt. A task under the cap is
+          // unaffected — this branch does not run for it at all.
+          const overQcCap = (task.qc_reroute_attempts ?? 0) >= STALE_SWEEP_QC_CAP;
+          if (overQcCap) {
+            if (!wasRecentlyEscalatedOverCap(task.id)) {
+              const holdMsg =
+                `[stale_blocked_over_cap_hold] Task "${task.title}" (${task.id}) has been Blocked for ` +
+                `${Math.round(ageHours)}h AND already hit the QC-reroute cap ` +
+                `(${task.qc_reroute_attempts ?? 0}/${STALE_SWEEP_QC_CAP}) — returning it to the orchestrator ` +
+                `cannot help (intake-advance-sweep re-blocks any over-cap task on its next tick). Task stays ` +
+                `Blocked; an operator must promote, re-scope, or close it. Ask: "${task.ask ?? '(no ask)'}"`;
+              console.warn(`[stale-task-sweep] ${holdMsg}`);
+              notifySystem(holdMsg, { agent: 'stale-task-sweep', action: 'escalate' });
+              try {
+                run(
+                  `INSERT INTO events (id, type, task_id, message, created_at)
+                   VALUES (?, 'stale_blocked_over_cap_hold', ?, ?, ?)`,
+                  [uuidv4(), task.id, holdMsg, new Date().toISOString()],
+                );
+              } catch (err) {
+                // events table issue — non-fatal for THIS tick, but no dedup key
+                // was written, so the next tick re-announces (fail-open, matching
+                // wasRecentlyRepinged's contract above).
+                console.warn(
+                  `[stale-task-sweep] failed to write over-cap hold dedup key for ${task.id}:`,
+                  (err as Error).message,
+                );
+              }
+            }
+            continue;
+          }
+
+          // Second threshold passed, and the task is still under the QC cap:
+          // return to orchestrator exactly as before.
           returnToOrchestrator(task, `Blocked task stale for ${Math.round(ageHours)}h with no human response to: "${task.ask ?? '(no ask)'}"`).catch(err =>
             console.warn(`[stale-task-sweep] returnToOrchestrator failed for ${task.id}:`, (err as Error).message),
           );
