@@ -123,6 +123,21 @@ const GOOGLE_EMBED_DELAY_MS = 250;
 const GOOGLE_EMBED_MAX_RETRIES = 3;
 const GOOGLE_EMBED_BACKOFF_MS = 1000;
 
+/**
+ * True when a 429 response body indicates a BILLING WALL (prepayment
+ * credits / account quota permanently exhausted) rather than a transient
+ * per-second/per-minute rate limit. A billing wall cannot succeed on retry —
+ * backing off and retrying wastes up to GOOGLE_EMBED_MAX_RETRIES calls and
+ * up to ~7s of latency for an error that will look identical on attempt 4 as
+ * it did on attempt 1. A genuine rate-limit 429 (no billing marker in the
+ * body) is unaffected — it keeps the existing exponential-backoff retry.
+ */
+function isNonRetryableBillingExhaustion(body: string): boolean {
+  return /prepayment credits are depleted/i.test(body)
+    || /credits are depleted/i.test(body)
+    || /insufficient credits/i.test(body);
+}
+
 // ---------------------------------------------------------------------------
 // Types (used by department-router.ts)
 // ---------------------------------------------------------------------------
@@ -430,6 +445,15 @@ async function fetchEmbeddingGoogle(text: string, apiKey: string): Promise<Float
     });
 
     if (resp.status === 429) {
+      const errBody = await resp.text().catch(() => '');
+
+      if (isNonRetryableBillingExhaustion(errBody)) {
+        throw new Error(
+          `Google embeddings billing wall (429): ${errBody.slice(0, 200)} — ` +
+          `not retrying (credits exhausted; retrying cannot succeed). Falling back to keyword search.`
+        );
+      }
+
       if (attempt >= GOOGLE_EMBED_MAX_RETRIES) {
         throw new Error(
           `Google embeddings quota exceeded (429) after ${GOOGLE_EMBED_MAX_RETRIES} retries — ` +
@@ -495,6 +519,125 @@ async function fetchEmbeddingsGoogle(texts: string[], apiKey: string): Promise<E
 }
 
 // ---------------------------------------------------------------------------
+// Circuit breaker — short-cooldown "embeddings known-unavailable" gate
+// ---------------------------------------------------------------------------
+//
+// PRE-FIX: a depleted/exhausted embedding account got REDISCOVERED on every
+// call site — storeEmbeddingForSOP, rankSOPsBySemantic, and
+// department-router's semanticRankDepartments (via fetchEmbeddings) — each
+// one independently hitting the API, throwing, and falling back, for as
+// long as the account stayed exhausted. Wired into fetchEmbedding /
+// fetchEmbeddings (the ONE provider-agnostic choke point both providers and
+// all three call sites already funnel through), this breaker makes that
+// discovery happen ONCE per cooldown window: the first non-retryable
+// failure (billing wall / bad credentials — see isNonRetryableEmbeddingError
+// below) opens the breaker; every call for the rest of the cooldown fails
+// FAST with NO network call at all, throwing the SAME kind of Error callers
+// already catch-and-fall-back on today, so this requires zero caller changes.
+//
+// Self-heals with no restart: once Date.now() clears the cooldown, the very
+// next call attempts a REAL network call again. Success closes the breaker;
+// another non-retryable failure reopens it for a fresh cooldown — so a
+// topped-up account recovers on its own the next time anything calls in.
+//
+// A genuine transient failure (network blip, 5xx, a rate-limit 429 that
+// isn't a billing wall) does NOT trip the breaker — see
+// isNonRetryableEmbeddingError. Those keep today's per-call retry/fallback
+// behaviour untouched; the breaker only ever engages for the "will not
+// clear on its own within the cooldown" class of failure.
+
+const DEFAULT_EMBEDDING_BREAKER_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
+
+function breakerCooldownMs(): number {
+  const raw = process.env.EMBEDDING_BREAKER_COOLDOWN_MS;
+  const n = raw ? Number(raw) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_EMBEDDING_BREAKER_COOLDOWN_MS;
+}
+
+interface EmbeddingBreakerState {
+  /** epoch ms until which the breaker is open; 0 or past = closed. */
+  openUntil: number;
+  reason: string;
+}
+
+const _embeddingBreaker: EmbeddingBreakerState = { openUntil: 0, reason: '' };
+
+function isBreakerOpen(): boolean {
+  return Date.now() < _embeddingBreaker.openUntil;
+}
+
+function tripBreaker(reason: string): void {
+  _embeddingBreaker.openUntil = Date.now() + breakerCooldownMs();
+  _embeddingBreaker.reason = reason;
+  console.warn(
+    `[sop-embeddings] circuit breaker OPEN for ${breakerCooldownMs()}ms — embeddings will fail fast ` +
+    `(no network calls) until it self-heals: ${reason}`
+  );
+}
+
+function closeBreaker(): void {
+  if (_embeddingBreaker.openUntil !== 0) {
+    console.warn('[sop-embeddings] circuit breaker CLOSED — embeddings recovered.');
+  }
+  _embeddingBreaker.openUntil = 0;
+  _embeddingBreaker.reason = '';
+}
+
+function breakerOpenError(): Error {
+  return new Error(
+    `Embeddings circuit breaker open (${_embeddingBreaker.reason}) — failing fast without a network ` +
+    `call. Retries automatically once the cooldown expires.`
+  );
+}
+
+/**
+ * True when an embedding-call failure looks unrecoverable-within-cooldown
+ * (billing wall / quota exhaustion / bad credentials) rather than a
+ * transient blip (network hiccup, 5xx, a single rate-limit tick that
+ * fetchEmbeddingGoogle's own backoff already handles). Trips the breaker
+ * ONLY for the former — a transient failure must not disable embeddings for
+ * every OTHER in-flight/queued call for the next 5-10 minutes.
+ *
+ * Covers both providers: the Google billing-wall phrasing
+ * (isNonRetryableBillingExhaustion, also used by fetchEmbeddingGoogle's
+ * fail-fast-on-429 check above) plus OpenAI's insufficient_quota error code
+ * and both providers' 401/403 auth-rejection shapes.
+ */
+function isNonRetryableEmbeddingError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (isNonRetryableBillingExhaustion(msg)) return true;
+  const lower = msg.toLowerCase();
+  return (
+    lower.includes('insufficient_quota') ||
+    lower.includes('insufficient credits') ||
+    lower.includes(' 401') || lower.startsWith('401') ||
+    lower.includes(' 403') || lower.startsWith('403') ||
+    lower.includes('permission_denied') ||
+    lower.includes('api key not valid') ||
+    lower.includes('unauthorized') ||
+    lower.includes('unauthenticated')
+  );
+}
+
+/** Test-only: force the breaker open (fixed reason) — see tests/unit. */
+export function _tripEmbeddingBreakerForTests(reason = 'test'): void {
+  tripBreaker(reason);
+}
+/** Test-only: force the breaker closed. */
+export function _closeEmbeddingBreakerForTests(): void {
+  closeBreaker();
+}
+/** Test-only: read whether the breaker is currently open. */
+export function _isEmbeddingBreakerOpenForTests(): boolean {
+  return isBreakerOpen();
+}
+/** Test-only: set openUntil directly (e.g. Date.now() - 1 to simulate an
+ * expired cooldown deterministically, with no real waiting). */
+export function _setEmbeddingBreakerOpenUntilForTests(ts: number): void {
+  _embeddingBreaker.openUntil = ts;
+}
+
+// ---------------------------------------------------------------------------
 // Public API: fetchEmbedding / fetchEmbeddings (provider-agnostic)
 // ---------------------------------------------------------------------------
 
@@ -510,11 +653,21 @@ export async function fetchEmbedding(text: string): Promise<Float32Array> {
   if (provider.name === 'none' || !provider.apiKey) {
     throw new Error('No embedding provider configured (no OPENAI_API_KEY or Google key found)');
   }
-  if (provider.name === 'google') {
-    return fetchEmbeddingGoogle(text, provider.apiKey);
+  if (isBreakerOpen()) {
+    throw breakerOpenError();
   }
-  // Default: openai
-  return fetchEmbeddingOpenAI(text, provider.apiKey);
+  try {
+    const result = provider.name === 'google'
+      ? await fetchEmbeddingGoogle(text, provider.apiKey)
+      : await fetchEmbeddingOpenAI(text, provider.apiKey);
+    closeBreaker();
+    return result;
+  } catch (err) {
+    if (isNonRetryableEmbeddingError(err)) {
+      tripBreaker(err instanceof Error ? err.message : String(err));
+    }
+    throw err;
+  }
 }
 
 /**
@@ -533,12 +686,22 @@ export async function fetchEmbeddings(texts: string[]): Promise<EmbeddingResult[
     throw new Error('No embedding API key configured');
   }
   if (texts.length === 0) return [];
-
-  if (provider.name === 'google') {
-    return fetchEmbeddingsGoogle(texts, provider.apiKey);
+  if (isBreakerOpen()) {
+    throw breakerOpenError();
   }
-  // Default: openai
-  return fetchEmbeddingsOpenAI(texts, provider.apiKey);
+
+  try {
+    const result = provider.name === 'google'
+      ? await fetchEmbeddingsGoogle(texts, provider.apiKey)
+      : await fetchEmbeddingsOpenAI(texts, provider.apiKey);
+    closeBreaker();
+    return result;
+  } catch (err) {
+    if (isNonRetryableEmbeddingError(err)) {
+      tripBreaker(err instanceof Error ? err.message : String(err));
+    }
+    throw err;
+  }
 }
 
 // ---------------------------------------------------------------------------
