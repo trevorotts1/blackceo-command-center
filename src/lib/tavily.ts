@@ -1,20 +1,30 @@
 /**
  * Thin Tavily search wrapper.
  *
- * Track S calls this for "best practices {dept} {topic}" research when an
- * operator deletes an SOP and we want to auto-draft a replacement.
+ * Callers: `sop-authoring.ts` §4 (dispatch-time "Author SOP" research) and
+ * `sop-auto-replace.ts`'s Track S (auto-drafted SOP replacement after an
+ * operator deletes one) both call `tavilySearch()` directly.
  *
- * If the project already has a Skill 21 helper or shared OpenClaw tool that
- * exposes Tavily, prefer that path. As of v3.6.0 the dashboard repo has no
- * such helper, so we call Tavily's REST API directly.
+ * As of v3.6.0 the dashboard repo had no shared OpenClaw research helper, so
+ * this called Tavily's REST API directly and THREW when `TAVILY_API_KEY` was
+ * unset — which meant any box without that key had a silently-dead SOP
+ * pipeline. A shared helper exists now: when `TAVILY_API_KEY` is unset,
+ * `tavilySearch()` falls back to OpenClaw's own native web search
+ * (`nativeWebSearchFallback()` in `./native-web-search.ts`, which shells out
+ * to `openclaw infer web search`) instead of throwing. Boxes with a working
+ * `TAVILY_API_KEY` are completely unaffected — see `tavilySearchViaTavily()`
+ * below, which is byte-identical to the pre-fallback implementation.
  *
  * Per Trevor's "stub during tests" policy, callers in tests can inject a
  * fixture by setting `TAVILY_FIXTURE_JSON_PATH` to a JSON file that mirrors
- * the response shape — no live network calls fire when this env var is set.
+ * the response shape — no live network calls fire when this env var is set,
+ * regardless of which path (Tavily or the native fallback) would otherwise
+ * have been taken.
  */
 
 import fs from 'fs';
 import { assertNoFixtureEnvInProduction } from '@/lib/fixture-guard';
+import { nativeWebSearchFallback } from './native-web-search';
 
 export interface TavilyResult {
   title: string;
@@ -50,9 +60,28 @@ export async function tavilySearch(query: string, opts: TavilySearchOptions = {}
 
   const apiKey = process.env.TAVILY_API_KEY;
   if (!apiKey) {
-    throw new Error('TAVILY_API_KEY is not set. Set it in .env.local or pass TAVILY_FIXTURE_JSON_PATH for testing.');
+    // FLEET DEFECT FIX: this used to throw here, which silently killed SOP
+    // research (and therefore SOP authoring) on any box without a Tavily
+    // key. Fall back to OpenClaw's native web search instead. Both callers
+    // run under an explicit fire-and-forget/NEVER-throw contract, and
+    // nativeWebSearchFallback() honors that — it never throws and degrades
+    // to an empty (but well-shaped) result if every provider fails.
+    return nativeWebSearchFallback(query, opts);
   }
 
+  return tavilySearchViaTavily(query, opts, apiKey);
+}
+
+/**
+ * The original Tavily REST call. Unchanged from the pre-fallback
+ * implementation — boxes with a working `TAVILY_API_KEY` see byte-identical
+ * behavior, same return shape, same options.
+ */
+async function tavilySearchViaTavily(
+  query: string,
+  opts: TavilySearchOptions,
+  apiKey: string,
+): Promise<TavilyResponse> {
   const body = {
     api_key: apiKey,
     query,
