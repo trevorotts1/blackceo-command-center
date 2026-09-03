@@ -1,3 +1,63 @@
+## [v6.1.1] — 2026-09-03 — pm2: pass OPENCLAW_CLI_BIN through to the CC process
+
+### What changed
+
+- **`ecosystem.config.cjs`: `OPENCLAW_CLI_BIN` added to the existing conditional
+  env pass-through list**, matching the file's own established
+  `...(process.env.X ? { X: process.env.X } : {})` idiom used for
+  `OPENCLAW_GATEWAY_URL`/`OPENCLAW_GATEWAY_TOKEN`/etc. Purely additive: when the
+  variable is unset, behavior is byte-identical to v6.1.0 on every box.
+
+### Why — the operational trap this closes
+
+The v6.1.0 web-research selector (`src/lib/native-web-search.ts`) shells out to
+the `openclaw` CLI via `execFile('openclaw', ...)` when `OPENCLAW_CLI_BIN` is
+unset, which resolves the bare command name against whatever `PATH` the pm2
+daemon itself was started with — **not** an interactive login shell's `PATH`.
+If pm2 was daemonized with a stripped `PATH` (launchd/systemd, or
+`pm2 resurrect` at boot), `openclaw` can silently fail to resolve there even
+though a terminal's `which openclaw` finds it fine. Every CLI-backed research
+tier (Perplexity, discovered native providers, DuckDuckGo) then reports
+"unusable," and on a box with **no `TAVILY_API_KEY` configured** — Tavily
+being the one tier that's a direct `fetch()`, immune to this — the entire
+selector degrades to a graceful-empty result with no signal anywhere except a
+`[tavily]`/`[native-web-search]` pm2 log line nobody is necessarily watching.
+That replaces a loud, diagnosable blocker (the old `TAVILY_API_KEY is not set`
+throw) with a quiet one that produces plausible-looking but ungrounded SOPs —
+strictly worse than what shipped before.
+
+### Deploy notes — two traps that have already cost cycles today on other vars
+
+1. **A plain `pm2 restart <app-name>` will NOT pick this up.** Set
+   `OPENCLAW_CLI_BIN` in the host/container `.env` or app `.env.local`, then
+   run `pm2 restart ecosystem.config.cjs --update-env` **from the CC
+   directory** — restarting by app name alone, or without `--update-env`,
+   leaves the old (or absent) value in place.
+2. **Resolve the absolute path AS THE USER/CONTEXT THAT ACTUALLY RUNS PM2**,
+   never from an arbitrary interactive shell — that mismatch (a shell's `PATH`
+   differing from the pm2 daemon's own) is the entire bug being closed here.
+3. Zero-new-code pre-deploy check: `openclaw` is already a `MANAGED_CLIS`
+   entry in `src/lib/bridge/cli-manager.ts`, resolved the identical
+   bare-command way, in-process, under the same pm2-inherited `PATH` for a
+   self box. If that existing CLI-health surface reports `openclaw` as not
+   installed on a box, the new research tiers will fail there too, for the
+   same reason — check it before or right after a deploy rather than waiting
+   to find out from a live SOP dispatch. Total silence in the
+   `[tavily]`/`[native-web-search]` pm2 logs after a real dispatch means
+   `tavilySearch()` was never called at all — a different bug, not this one.
+
+### Proof
+
+- `node -e "require('./ecosystem.config.cjs')"` loads cleanly; confirmed the
+  new conditional spread carries a set `OPENCLAW_CLI_BIN` through and leaves
+  the env block unchanged when it's unset.
+- Full `npm run test:unit`: 2353 tests, 2348 pass, 5 pre-existing failures
+  (identical `integrity_check != ok` baseline: `b2-atomic-deploy.test.ts` x2,
+  `fix20-presentation-db-hygiene`, `fix34-db-backup-verify`,
+  `fix35-synthetic-purge-gate`) — this change touches no application code,
+  only the pm2 launch config and version/changelog files, so this is exactly
+  the unchanged baseline, not a new regression.
+
 ## [v6.1.0] — 2026-09-03 — SOP research: capability-detecting web-search selector
 
 ### What changed

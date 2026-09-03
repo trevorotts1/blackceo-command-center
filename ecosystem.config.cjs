@@ -88,6 +88,27 @@ module.exports = {
       ...(process.env.BCC_DEVICE_IDENTITY_DIR ? { BCC_DEVICE_IDENTITY_DIR: process.env.BCC_DEVICE_IDENTITY_DIR } : {}),
       ...(process.env.BCC_INSTALL_TYPE ? { BCC_INSTALL_TYPE: process.env.BCC_INSTALL_TYPE } : {}),
       ...(process.env.OPENCLAW_PLATFORM ? { OPENCLAW_PLATFORM: process.env.OPENCLAW_PLATFORM } : {}),
+      // OPENCLAW_CLI_BIN: absolute path override for the `openclaw` binary that
+      // src/lib/native-web-search.ts and src/lib/openclaw/client.ts shell out to
+      // (SOP research provider discovery/search, device pairing). Without this,
+      // execFile('openclaw', ...) resolves the bare command name against
+      // whatever PATH the pm2 daemon itself was started with — NOT an
+      // interactive login shell's PATH, and NOT necessarily the PATH a
+      // `which openclaw` run in a terminal would show. If pm2 was daemonized
+      // with a stripped PATH (launchd/systemd/`pm2 resurrect` at boot), the CLI
+      // silently fails to resolve, every CLI-backed research tier reports
+      // "unusable," and — on a box with no TAVILY_API_KEY — the whole SOP
+      // research selector degrades to a graceful-empty result with no signal
+      // anywhere except a `[tavily]`/`[native-web-search]` pm2 log line.
+      // Resolve the real absolute path (`command -v openclaw`) AS THE USER/
+      // CONTEXT THAT ACTUALLY RUNS PM2 — not from any interactive shell, that
+      // mismatch is the whole bug — set it in the host/container .env or
+      // app .env.local, then run
+      // `pm2 restart ecosystem.config.cjs --update-env` FROM THE CC DIRECTORY.
+      // A plain `pm2 restart blackceo-command-center` (by app name, without
+      // --update-env, or without pointing at this file) will NOT pick up an
+      // edited env var — same trap as the other OPENCLAW_* passthroughs above.
+      ...(process.env.OPENCLAW_CLI_BIN ? { OPENCLAW_CLI_BIN: process.env.OPENCLAW_CLI_BIN } : {}),
       // WRITE-BACK-401 hardening: pass the task-API write-back credentials into
       // the pm2 child env explicitly. Next.js auto-loads .env.local from cwd, but
       // a cwd-drift restart (or `pm2 restart` without --update-env) could silently
