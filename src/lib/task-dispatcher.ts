@@ -32,6 +32,12 @@
  *   7. (skill6-v2 U33 / C-02) Triad-incomplete (checkTriad, sops.ts:432) → HOLD,
  *      loudly (`triad_gate_hold` event) — never claimable until description +
  *      SOP + persona are all real, same gate the UI PATCH path enforces.
+ *   9. (FLEET-01) Global agent-dispatch concurrency ceiling — opt-in via
+ *      AGENT_DISPATCH_MAX_CONCURRENT (unset = no limit = unchanged default) →
+ *      HOLD (`dispatch_concurrency_hold` event, no attempt/backoff recorded)
+ *      when in-flight (status='in_progress', GLOBAL across every workspace)
+ *      is at/over the configured ceiling. See checkDispatchConcurrencyLimit
+ *      in task-lifecycle.ts.
  *
  * USAGE (call after routing sets assigned_agent_id):
  *   // non-blocking — routing must not fail if OpenClaw is down
@@ -71,7 +77,7 @@ import {
 import { isCanonicalContext, copyCanonicalSOPForTask, authorSOPForTask } from '@/lib/sop-authoring';
 import { recordBlockEvent } from '@/lib/block-events';
 import { canonicalDeptSlug, expandDeptSlugAliases } from '@/lib/routing/canonical-slug';
-import { artifactDispatchPayload, recordStatusEvent } from '@/lib/task-lifecycle';
+import { artifactDispatchPayload, recordStatusEvent, checkDispatchConcurrencyLimit } from '@/lib/task-lifecycle';
 import { healPhantomAgentAssignment } from '@/lib/jobs/heal-phantom-assignments';
 import {
   resolveAgentRuntimeModel,
@@ -151,6 +157,18 @@ const TRIAD_HOLD_MAX_ATTEMPTS = Math.max(
 const TRIAD_HOLD_LOG_INTERVAL_SECONDS = Math.max(
   0,
   parseInt(process.env.TRIAD_HOLD_LOG_INTERVAL_SECONDS || '3600', 10),
+);
+
+// FLEET-01: a dispatch_concurrency_hold can legitimately re-fire every single
+// sweep tick (~2 min) for as long as the box sits at its configured ceiling —
+// it carries NO backoff (see GUARD 9 below), by design, so the held card is
+// retried the instant a slot frees. Without a dedupe window that would flood
+// `events` with an identical line every tick; this caps it to one durable row
+// per card per window, same pattern/purpose as TRIAD_HOLD_LOG_INTERVAL_SECONDS
+// above, tuned shorter to fit the 2-minute tick cadence rather than an hour.
+const DISPATCH_CONCURRENCY_HOLD_LOG_INTERVAL_SECONDS = Math.max(
+  0,
+  parseInt(process.env.DISPATCH_CONCURRENCY_HOLD_LOG_INTERVAL_SECONDS || '300', 10),
 );
 
 type DispatchBlockAudience = 'OWNER' | 'SYSTEM';
@@ -1157,6 +1175,64 @@ export async function autoDispatchTask(
         return; // NOT claimable — held, loudly, never silently skipped
       }
     }
+
+    // ── GUARD 9 (FLEET-01): global agent-dispatch concurrency ceiling ───────
+    // Opt-in via AGENT_DISPATCH_MAX_CONCURRENT (unset/invalid → no limit, the
+    // UNCHANGED default for every box that has not set it — see the doc
+    // comment on checkDispatchConcurrencyLimit in task-lifecycle.ts for the
+    // full gap this closes and why it is GLOBAL, not per-workspace like
+    // WIP_LIMITS). Checked fresh on EVERY call to autoDispatchTask — never
+    // once per sweep batch — so a sequential sweep tick self-limits to the
+    // ceiling as each dispatch's DISP-02 CAS claim below flips a task to
+    // in_progress and the next task's fresh count sees it. Placed BEFORE the
+    // OpenClaw connect / session / SOP-resolution work below so a card that
+    // cannot dispatch right now does not pay for any of it.
+    //
+    // HELD, never FAILED, BLOCKED, or ERRORED: a queued task waiting on
+    // provider capacity is CORRECT behaviour, not a fault. This branch must
+    // NEVER call recordDispatchFailure (no dispatch_attempts bump, no
+    // backoff, no eventual hardBlock) and must NEVER touch task.status — the
+    // card is left exactly where it is, and the very next sweep tick (~2 min,
+    // no backoff imposed) retries automatically the instant a slot frees.
+    const concurrencyHold = checkDispatchConcurrencyLimit();
+    if (concurrencyHold) {
+      const holdMsg =
+        `[dispatch_concurrency_hold] Task "${task.title}" (${task.id}) held from auto-dispatch — ` +
+        `${concurrencyHold.message} Task stays in its current lane (${task.status}); the next ` +
+        `intake-advance tick retries automatically once a slot frees.`;
+
+      // Dedupe the durable event exactly like GUARD 7's triad_gate_hold above —
+      // this hold can legitimately re-fire every sweep tick for as long as the
+      // box sits at capacity, and without a window it would flood `events`.
+      let shouldLogHold = true;
+      try {
+        const lastHold = queryOne<{ created_at: string }>(
+          `SELECT created_at FROM events WHERE task_id = ? AND type = 'dispatch_concurrency_hold'
+             ORDER BY created_at DESC LIMIT 1`,
+          [task.id],
+        );
+        if (lastHold?.created_at) {
+          const ageSeconds = (Date.now() - new Date(lastHold.created_at).getTime()) / 1000;
+          shouldLogHold = ageSeconds >= DISPATCH_CONCURRENCY_HOLD_LOG_INTERVAL_SECONDS;
+        }
+      } catch {
+        /* dedupe is an optimisation — a read failure must still log the hold */
+      }
+
+      if (shouldLogHold) {
+        console.warn(`[${context}] autoDispatchTask: ${holdMsg}`);
+        try {
+          run(
+            `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
+            [uuidv4(), 'dispatch_concurrency_hold', task.id, holdMsg, new Date().toISOString()],
+          );
+        } catch {
+          /* audit best-effort — never block the hold on the write itself */
+        }
+      }
+      return; // held for capacity — no attempt recorded, no status change, no backoff
+    }
+    // ── End GUARD 9 (concurrency ceiling) ────────────────────────────────────
 
     // ── OpenClaw connection ─────────────────────────────────────────────────
     const client = getOpenClawClient();
