@@ -84,13 +84,30 @@ export function renderBlendDirective(directive: string | null | undefined): stri
 }
 
 /**
- * Workspace-relative path to a persona's blueprint. Matches the coaching-personas
- * skill layout the doer's workspace installs (see the `coaching-personas/...`
- * resolution in `src/app/api/personas/route.ts`). Kept relative on purpose so the
- * doer resolves it against its OWN workspace, never an operator-absolute path.
+ * Workspace-relative path to a persona's blueprint.
+ *
+ * NOTE: this is a DIFFERENT file, in a DIFFERENT subtree, than the persona
+ * catalog (`persona-categories.json`) `src/lib/persona-library.ts` /
+ * `src/app/api/personas/route.ts` resolve — that index lives directly under
+ * `<workspace>/coaching-personas/persona-categories.json` (no `data/`
+ * segment). Per-persona blueprints live one level deeper, under the
+ * workspace's `data/` subtree: `<workspace>/data/coaching-personas/
+ * personas/<personaId>/persona-blueprint.md`. Confirmed against the live
+ * on-disk layout (101 blueprint files, uniform suffix) — a prior version of
+ * this function dropped the `data/` segment, which meant the returned path
+ * resolved from neither the doer's cwd (`<workspace>/departments/<dept>/`)
+ * nor the workspace root, and the doer would fall back to an unbounded
+ * filesystem sweep trying to locate the file.
+ *
+ * Kept workspace-relative on purpose (never an operator-absolute path,
+ * e.g. `/Users/...` or `/data/.openclaw/...`) so the SAME string is correct
+ * whether the doer's workspace root is the Mac-mini layout
+ * (`~/.openclaw/workspace/`) or the VPS-docker layout
+ * (`/data/.openclaw/workspace/`) — the doer resolves it against its OWN
+ * workspace root, fleet-wide, with no per-box branching needed here.
  */
 export function personaBlueprintPath(personaId: string): string {
-  return `coaching-personas/personas/${personaId}/persona-blueprint.md`;
+  return `data/coaching-personas/personas/${personaId}/persona-blueprint.md`;
 }
 
 /**
