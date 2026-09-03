@@ -1,3 +1,39 @@
+## [v6.1.6] — 2026-09-03 — Gemini failure-label accuracy + SOP authoring zombie-subtask terminal fail
+
+### What changed
+
+- **FIX 1 — error labels misclassified billing walls as model problems.**
+  The fail-loud Gemini error wrapped EVERY generation failure in
+  `(model '<id>' retired or unavailable?)`. On a live box a 429 billing wall
+  ("Your prepayment credits are depleted") got that misleading model suffix
+  — the id was fine, the account was out of credits, and the suffix sent
+  operators hunting for a model that isn't broken. `src/lib/gemini.ts` now
+  classifies before labeling: model-problem (404 / "not found for API
+  version" / "does not exist" / "not supported" / unknown-model) keeps the
+  model suffix; billing/quota (429 / credits / quota / billing) gets billing
+  wording with NO model suffix; anything else gets neutral wording. Fail-loud
+  behavior is unchanged (no silent fallback) — only the LABEL is accurate.
+  Mirrors the `isNonRetryableBillingExhaustion` idiom in `sop-embeddings.ts`.
+- **FIX 2 — zombie `in_progress` SOP authoring sub-task on synthesis failure.**
+  On generation failure `authorSOPForTask` returned `{status:'error'}` without
+  touching the authoring sub-task row, which stayed `in_progress` forever.
+  Authoring has no agent session, so nothing writes a terminal marker into a
+  transcript and `execution-watcher`'s `findTerminalFailureMarker` (the
+  completion detector) can never fire — the card is a zombie. Both failure
+  paths (generation + sops-table insert) now terminal-fail the sub-task via
+  `blockTaskForQC` to `blocked`: `in_progress -> blocked` is a legal
+  transition edge; carries operator-visible `block_*` metadata + a
+  `task_block_events` audit row; `blocked` is excluded from the intake
+  advance sweep (`ADVANCEABLE_STATUSES`) and `autoDispatchTask`
+  (`SKIP_STATUSES`) so no bounce loop; uncapped so no WIP-limit strand;
+  SYSTEM audience so no client Telegram. The parse-fail-pending path already
+  files a pending proposal (human-visible) — not a zombie, left alone.
+- **Tests:** `tests/unit/gemini-error-label.test.ts` (429 billing + no model
+  suffix; 404 keeps suffix; 400 unknown-model keeps suffix; 500 gets neither)
+  and `tests/unit/sop-authoring-synthesis-failure.test.ts` (429 → sub-task
+  blocked with `sop_authoring_generation_failed` + audit row; failed sub-task
+  excluded from the dispatch sweep; happy path unchanged).
+
 ## [v6.1.5] — 2026-09-03 — Gemini synthesis model: EOL hardcode replaced with env-configurable default
 
 ### What changed
