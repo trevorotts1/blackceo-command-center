@@ -1,3 +1,50 @@
+## [v6.1.0] — 2026-09-03 — SOP research: capability-detecting web-search selector
+
+### What changed
+
+- **FLEET DEFECT FIXED: SOP research no longer hard-depends on `TAVILY_API_KEY`.**
+  `tavilySearch()` (`src/lib/tavily.ts`) previously threw when `TAVILY_API_KEY`
+  was unset, and both its callers — `sop-authoring.ts`'s dispatch-time "Author
+  SOP" research and `sop-auto-replace.ts`'s Track S auto-drafted SOP
+  replacement — run under an explicit fire-and-forget/NEVER-throw contract, so
+  any box without a Tavily key had a silently-dead SOP pipeline that could
+  leave a Triad gate stuck forever.
+- **New capability-detecting selector, not a static fallback.** Tavily is no
+  longer privileged. `tavilySearch()` now detects what web-research capability
+  a box actually has, at runtime, and uses the best available one:
+  1. Perplexity — `PERPLEXITY_API_KEY` or the `OPENROUTER_API_KEY` alias
+     OpenClaw already accepts for it.
+  2. Whatever this box's OpenClaw natively offers — discovered via
+     `openclaw infer web providers` (Ollama's own web search, Gemini's
+     grounded search, or anything else a box reports), not assumed.
+  3. Tavily — same REST call, request body, and return shape as always.
+  4. DuckDuckGo — zero-credential floor.
+- **"Configured" is a claim, not a fact.** Every tier is tried empirically —
+  a provider can report itself configured while unusable (a depleted prepaid
+  balance, an unauthenticated CLI session), including cases where the failure
+  arrives dressed up as a normal-looking answer. `native-web-search.ts` scans
+  for known auth/quota/billing signatures before trusting a response as real
+  content.
+- **Short-TTL usability caching** (`WEB_SEARCH_PROVIDER_CACHE_TTL_MS`, default
+  5 min) so a known-broken provider is not re-probed on every SOP research
+  call; nothing is cached negative forever.
+- `TAVILY_FIXTURE_JSON_PATH` keeps short-circuiting every tier, unchanged. No
+  call-site changes — only `tavilySearch()` itself.
+
+### Proof
+
+- New suite `tests/unit/tavily-native-search-fallback.test.ts`: 18/18 pass,
+  covering provider preference, empirical funded/unusable detection, native
+  provider discovery, the zero-credential duckduckgo floor, graceful
+  exhaustion (no throw), the Tavily regression guard, fixture handling,
+  citation mapping, and usability-cache TTL behavior.
+- Full `npm run test:unit`: 2353 tests, 2348 pass, 5 pre-existing failures
+  (`integrity_check != ok` in `b2-atomic-deploy.test.ts` x2,
+  `fix20-presentation-db-hygiene`, `fix34-db-backup-verify`,
+  `fix35-synthetic-purge-gate`) — independently reproduced against a clean,
+  untouched `origin/main` worktree with the identical count and root cause.
+  Zero regressions.
+
 ## [v6.0.99] — 2026-08-31 — Presentation rev2 batch 2 (CC-side): FIX 24 stall-window tightening
 
 ### What changed
