@@ -88,7 +88,10 @@ export async function getMessagesFromOpenClaw(
 
     return messages;
   } catch (err) {
-    console.error('[Planning Utils] Failed to get messages from OpenClaw:', err);
+    // sessionKey is the only identifier this function has (no task id is
+    // passed in) — without it, this line cannot answer "which sessions/agents
+    // are failing", only that something did.
+    console.error(`[Planning Utils] Failed to get messages from OpenClaw (sessionKey: ${sessionKey}):`, err);
     return [];
   }
 }
