@@ -1,40 +1,53 @@
 /**
  * FLEET DEFECT — SOP-authoring hard-depended on TAVILY_API_KEY.
  *
- * `src/lib/tavily.ts::tavilySearch()` used to throw when `TAVILY_API_KEY` was
- * unset, with no other path to a research result. Both callers —
- * `sop-authoring.ts` §4 (dispatch-time "Author SOP") and
- * `sop-auto-replace.ts`'s Track S — run under an explicit
- * fire-and-forget/NEVER-throw contract, so on any box without that key the
- * SOP pipeline silently never succeeded.
+ * v1 fix (superseded): Tavily stayed the privileged path, native OpenClaw
+ * search was only a fallback when TAVILY_API_KEY was unset.
  *
- * THE FIX: `tavilySearch()` now falls back to
- * `nativeWebSearchFallback()` (src/lib/native-web-search.ts, which shells out
- * to `openclaw infer web search --provider <p> --json`) when no
- * `TAVILY_API_KEY` is set, instead of throwing.
+ * v2 (THIS suite): per Trevor, Tavily is no longer privileged. `tavilySearch()`
+ * (src/lib/tavily.ts) now detects what web-research capability a box
+ * actually has, at runtime, and uses the best available one, in order:
+ *   1. Perplexity — if PERPLEXITY_API_KEY or OPENROUTER_API_KEY is set AND
+ *      the provider is actually usable.
+ *   2. Whatever this box's OpenClaw natively offers — discovered via
+ *      `openclaw infer web providers`, not assumed (e.g. Ollama's own web
+ *      search, Gemini's grounded search).
+ *   3. Tavily — if TAVILY_API_KEY is set AND usable.
+ *   4. DuckDuckGo — zero-credential floor.
+ *
+ * "CONFIGURED" IS A CLAIM, NOT A FACT: a provider can report itself
+ * configured while being unusable (depleted billing, unauthenticated CLI
+ * session). Every tier is tried EMPIRICALLY, and an auth/quota/billing
+ * failure — even one dressed up as a normal-looking answer — is treated as
+ * "try the next tier," never as a reason to stop or throw.
  *
  * THIS SUITE PROVES, IN ORDER:
- *   A. [MANDATORY REGRESSION GUARD] TAVILY_API_KEY set → the Tavily REST path
- *      is used, completely unchanged — same URL, same request body, same
- *      return shape. A box with a working key must not be able to tell this
- *      change happened.
- *   B. TAVILY_API_KEY unset → the native fallback is used, and its result is
- *      mapped into the TavilyResponse shape correctly (content → answer,
- *      citations → results, both string and object citation shapes).
- *   C. Provider preference order: a failing preferred provider is skipped and
- *      the next one in PROVIDER_PREFERENCE is tried.
- *   D. TAVILY_API_KEY unset + the CLI itself fails — absent, non-zero exit,
- *      malformed JSON, real wall-clock timeout — every provider fails →
- *      graceful EMPTY result, no throw.
- *   E. TAVILY_FIXTURE_JSON_PATH is still honored, both with and without
- *      TAVILY_API_KEY set — the fixture short-circuits before either path.
+ *   A. Perplexity available+funded -> selected first, even with other tiers
+ *      also configured.
+ *   B. Perplexity key present but the provider is unusable (429/depleted
+ *      credits, or an auth failure dressed as a normal answer) -> falls
+ *      over to the next provider, does not fail.
+ *   C. No perplexity -> a discovered native OpenClaw provider (e.g. Ollama's
+ *      own web search) is selected.
+ *   D. A provider reports itself `configured: true` in the discovery
+ *      listing but errors live -> skipped, the next one is used.
+ *   E. Nothing but duckduckgo works -> duckduckgo used, real shape returned.
+ *   F. Every tier exhausted -> graceful EMPTY result, no throw.
+ *   G. [MANDATORY] Tavily present and funded, with nothing higher-priority
+ *      configured -> still usable, same shape as always.
+ *   H. TAVILY_FIXTURE_JSON_PATH still honored, short-circuits every tier.
+ *   I. Citation -> results mapping (string and object citation shapes).
+ *   J. Per-provider usability caching: a known-unusable provider is not
+ *      re-probed within the TTL, and IS re-probed once the TTL elapses.
  *
- * Test seam: OPENCLAW_CLI_BIN (already used by src/lib/openclaw/client.ts)
- * points execFile at a throwaway Node script standing in for the real
- * `openclaw` binary, so no live CLI or network call is required. The script
- * reads `--provider` from argv and looks up its behavior in
- * FAKE_CLI_BEHAVIOR_JSON (inherited via process.env, since execFile does not
- * override `env`), so one script serves every scenario below.
+ * Test seam: OPENCLAW_CLI_BIN points execFile at a throwaway Node script
+ * standing in for the real `openclaw` binary — no live CLI or network call
+ * required. It handles BOTH `infer web search --provider <p>` and
+ * `infer web providers`, driven by FAKE_CLI_BEHAVIOR_JSON /
+ * FAKE_CLI_PROVIDERS_JSON (inherited via process.env, since execFile does
+ * not override `env`), and appends one line per invocation to
+ * FAKE_CLI_CALL_LOG so tests can assert how many times (and for which
+ * provider) the CLI was actually invoked — the caching proof.
  *
  *   node --import tsx --test tests/unit/tavily-native-search-fallback.test.ts
  */
@@ -45,22 +58,39 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { tavilySearch } from '../../src/lib/tavily';
+import { tavilySearch, __resetWebSearchCachesForTests } from '../../src/lib/tavily';
 
 // ── fake `openclaw` CLI ──────────────────────────────────────────────────────
 //
-// Reads `--provider <p>` from argv, looks up `FAKE_CLI_BEHAVIOR_JSON[p]`:
-//   { exit?: number, stdout?: string, delayMs?: number }
-// Missing provider key defaults to { exit: 1 } (a failure), so a test only
-// needs to describe the providers it cares about.
+// `infer web search --provider <p> --json`: looks up
+// FAKE_CLI_BEHAVIOR_JSON[p] -> { exit?, stdout?, delayMs? }, default { exit: 1 }.
+// `infer web providers --json`: prints FAKE_CLI_PROVIDERS_JSON verbatim
+// (a full `{outputs:[{result:{providers:[...]}}]}` envelope), default
+// prints an empty providers list.
+// Every invocation appends "<subcommand> <provider-or-blank>" to
+// FAKE_CLI_CALL_LOG when that env var is set, so tests can prove how many
+// times (and for what) the CLI was actually called.
 
 const FAKE_CLI_PATH = path.join(os.tmpdir(), `fake-openclaw-cli-${process.pid}.js`);
 fs.writeFileSync(
   FAKE_CLI_PATH,
   `#!/usr/bin/env node
+const fs = require('fs');
 const args = process.argv.slice(2);
+const isProviders = args[0] === 'infer' && args[1] === 'web' && args[2] === 'providers';
 const providerIdx = args.indexOf('--provider');
 const provider = providerIdx >= 0 ? args[providerIdx + 1] : '';
+
+if (process.env.FAKE_CLI_CALL_LOG) {
+  fs.appendFileSync(process.env.FAKE_CLI_CALL_LOG, (isProviders ? 'providers' : 'search') + ' ' + provider + '\\n');
+}
+
+if (isProviders) {
+  const out = process.env.FAKE_CLI_PROVIDERS_JSON || JSON.stringify({ outputs: [{ result: { providers: [] } }] });
+  process.stdout.write(out);
+  process.exit(0);
+}
+
 let behaviorMap = {};
 try { behaviorMap = JSON.parse(process.env.FAKE_CLI_BEHAVIOR_JSON || '{}'); } catch {}
 const behavior = behaviorMap[provider] || { exit: 1 };
@@ -74,8 +104,13 @@ process.exit(typeof behavior.exit === 'number' ? behavior.exit : 0);
   { mode: 0o755 },
 );
 
-/** Restore every env var this suite touches, whatever a test did to it. */
+/** Restore every env var this suite touches, whatever a test did to it.
+ *  Always resets the provider-usability/discovery caches on entry — node:test
+ *  runs a file's tests serially in ONE process, so those module-level caches
+ *  would otherwise leak an outcome (e.g. an earlier test's "duckduckgo is
+ *  unusable") into a later, unrelated test. */
 async function withEnv<T>(patch: Record<string, string | undefined>, fn: () => Promise<T>): Promise<T> {
+  __resetWebSearchCachesForTests();
   const saved = new Map<string, string | undefined>();
   for (const k of Object.keys(patch)) saved.set(k, process.env[k]);
   for (const [k, v] of Object.entries(patch)) {
@@ -92,17 +127,302 @@ async function withEnv<T>(patch: Record<string, string | undefined>, fn: () => P
   }
 }
 
-const BASE_ENV = {
+const BASE_ENV: Record<string, string | undefined> = {
   TAVILY_API_KEY: undefined,
   TAVILY_FIXTURE_JSON_PATH: undefined,
+  PERPLEXITY_API_KEY: undefined,
+  OPENROUTER_API_KEY: undefined,
   OPENCLAW_CLI_BIN: FAKE_CLI_PATH,
   OPENCLAW_WEB_SEARCH_TIMEOUT_MS: undefined,
+  WEB_SEARCH_PROVIDER_CACHE_TTL_MS: undefined,
   FAKE_CLI_BEHAVIOR_JSON: undefined,
+  FAKE_CLI_PROVIDERS_JSON: undefined,
+  FAKE_CLI_CALL_LOG: undefined,
 };
 
-// ── A. MANDATORY REGRESSION GUARD ────────────────────────────────────────────
+function providersEnvelope(providers: Array<{ id: string; configured?: boolean }>): string {
+  return JSON.stringify({ outputs: [{ result: { providers } }] });
+}
 
-test('A: TAVILY_API_KEY set -> Tavily REST path used, unchanged (regression guard)', async () => {
+function searchEnvelope(content: string, citations: Array<string | { title: string; url: string }>): string {
+  return JSON.stringify({ outputs: [{ result: { content, citations } }] });
+}
+
+/** Fresh call-log file per test, and the caches reset — node:test runs a
+ *  file's tests serially in one process, so state does not leak. */
+function freshCallLog(): string {
+  __resetWebSearchCachesForTests();
+  const p = path.join(os.tmpdir(), `fake-cli-call-log-${process.pid}-${Date.now()}-${Math.random()}.log`);
+  fs.writeFileSync(p, '');
+  return p;
+}
+
+function readCallLog(p: string): string[] {
+  return fs
+    .readFileSync(p, 'utf8')
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean);
+}
+
+// ── A. Perplexity available+funded -> selected first ────────────────────────
+
+test('A: perplexity available+funded is selected first, even with tavily also configured', async () => {
+  const callLog = freshCallLog();
+  await withEnv(
+    {
+      ...BASE_ENV,
+      PERPLEXITY_API_KEY: 'real-perplexity-key',
+      TAVILY_API_KEY: 'real-tavily-key', // configured too, but must NOT win
+      FAKE_CLI_CALL_LOG: callLog,
+      FAKE_CLI_BEHAVIOR_JSON: JSON.stringify({
+        perplexity: { exit: 0, stdout: searchEnvelope('Perplexity answer.', ['https://example.invalid/px']) },
+      }),
+    },
+    async () => {
+      const result = await tavilySearch('sales best practices');
+      assert.equal(result.answer, 'Perplexity answer.');
+      assert.deepEqual(result.results, [{ title: 'https://example.invalid/px', url: 'https://example.invalid/px' }]);
+    },
+  );
+  // Tavily's REST endpoint / CLI must never have been reached.
+  const calls = readCallLog(callLog);
+  assert.deepEqual(calls, ['search perplexity'], 'only perplexity should have been called');
+});
+
+test('A2: OPENROUTER_API_KEY alone is enough to try the perplexity tier', async () => {
+  await withEnv(
+    {
+      ...BASE_ENV,
+      OPENROUTER_API_KEY: 'real-openrouter-key',
+      FAKE_CLI_BEHAVIOR_JSON: JSON.stringify({
+        perplexity: { exit: 0, stdout: searchEnvelope('Answer via OpenRouter alias.', []) },
+      }),
+    },
+    async () => {
+      const result = await tavilySearch('query');
+      assert.equal(result.answer, 'Answer via OpenRouter alias.');
+    },
+  );
+});
+
+// ── B. perplexity present but unusable -> falls over ─────────────────────────
+
+test('B1: perplexity 429/depleted-credits -> falls over to the next provider, does not fail', async () => {
+  await withEnv(
+    {
+      ...BASE_ENV,
+      PERPLEXITY_API_KEY: 'real-key-but-broke',
+      TAVILY_API_KEY: 'real-tavily-key',
+      FAKE_CLI_BEHAVIOR_JSON: JSON.stringify({
+        perplexity: { exit: 0, stdout: 'HTTP 429: Your prepayment credits are depleted' },
+        duckduckgo: { exit: 0, stdout: searchEnvelope('duckduckgo fallback answer', []) },
+      }),
+    },
+    async () => {
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = (async () =>
+        new Response(
+          JSON.stringify({ query: 'q', results: [], answer: 'Real Tavily answer.' }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        )) as unknown as typeof fetch;
+      try {
+        const result = await tavilySearch('query');
+        // perplexity failed -> next configured tier (tavily, since nothing
+        // native was discovered) must have been used instead.
+        assert.equal(result.answer, 'Real Tavily answer.');
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  );
+});
+
+test('B2: perplexity exit 0 with an auth-failure-shaped answer is NOT treated as real content', async () => {
+  await withEnv(
+    {
+      ...BASE_ENV,
+      PERPLEXITY_API_KEY: 'real-key',
+      FAKE_CLI_BEHAVIOR_JSON: JSON.stringify({
+        perplexity: { exit: 0, stdout: searchEnvelope('Error: authentication failed. Please sign in again.', []) },
+        duckduckgo: { exit: 0, stdout: searchEnvelope('Real duckduckgo answer.', []) },
+      }),
+    },
+    async () => {
+      const result = await tavilySearch('query');
+      assert.equal(
+        result.answer,
+        'Real duckduckgo answer.',
+        'an auth-failure string dressed as an "answer" must not be trusted as real content',
+      );
+    },
+  );
+});
+
+// ── C. no perplexity, a discovered native provider is used ──────────────────
+
+test('C1: no perplexity, ollama web search discovered+available -> selected', async () => {
+  await withEnv(
+    {
+      ...BASE_ENV,
+      FAKE_CLI_PROVIDERS_JSON: providersEnvelope([{ id: 'ollama', configured: true }]),
+      FAKE_CLI_BEHAVIOR_JSON: JSON.stringify({
+        ollama: { exit: 0, stdout: searchEnvelope('Answer via Ollama Cloud web search.', ['https://example.invalid/o']) },
+      }),
+    },
+    async () => {
+      const result = await tavilySearch('query');
+      assert.equal(result.answer, 'Answer via Ollama Cloud web search.');
+    },
+  );
+});
+
+test('C2: gemini discovered+available -> selected over tavily', async () => {
+  await withEnv(
+    {
+      ...BASE_ENV,
+      TAVILY_API_KEY: 'real-tavily-key',
+      FAKE_CLI_PROVIDERS_JSON: providersEnvelope([{ id: 'gemini', configured: true }]),
+      FAKE_CLI_BEHAVIOR_JSON: JSON.stringify({
+        gemini: { exit: 0, stdout: searchEnvelope('Grounded gemini answer.', []) },
+      }),
+    },
+    async () => {
+      const originalFetch = globalThis.fetch;
+      let tavilyCalled = false;
+      globalThis.fetch = (async () => {
+        tavilyCalled = true;
+        throw new Error('Tavily must not be called when gemini is available');
+      }) as unknown as typeof fetch;
+      try {
+        const result = await tavilySearch('query');
+        assert.equal(result.answer, 'Grounded gemini answer.');
+        assert.equal(tavilyCalled, false);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  );
+});
+
+// ── D. configured:true but errors live -> skipped ────────────────────────────
+
+test('D1: discovery says ollama configured:true, live call fails auth -> skipped, next used', async () => {
+  await withEnv(
+    {
+      ...BASE_ENV,
+      FAKE_CLI_PROVIDERS_JSON: providersEnvelope([
+        { id: 'ollama', configured: true },
+        { id: 'gemini', configured: true },
+      ]),
+      FAKE_CLI_BEHAVIOR_JSON: JSON.stringify({
+        ollama: { exit: 1, stdout: "Error: Ollama web search authentication failed. Run 'ollama signin'." },
+        gemini: { exit: 0, stdout: searchEnvelope('Real gemini answer.', []) },
+      }),
+    },
+    async () => {
+      const result = await tavilySearch('query');
+      assert.equal(result.answer, 'Real gemini answer.', 'ollama reported configured but failed, gemini must win');
+    },
+  );
+});
+
+test('D2: discovery says configured:false -> skipped without even being called', async () => {
+  const callLog = freshCallLog();
+  await withEnv(
+    {
+      ...BASE_ENV,
+      FAKE_CLI_CALL_LOG: callLog,
+      FAKE_CLI_PROVIDERS_JSON: providersEnvelope([
+        { id: 'ollama', configured: false },
+        { id: 'gemini', configured: true },
+      ]),
+      FAKE_CLI_BEHAVIOR_JSON: JSON.stringify({
+        gemini: { exit: 0, stdout: searchEnvelope('Real gemini answer.', []) },
+      }),
+    },
+    async () => {
+      const result = await tavilySearch('query');
+      assert.equal(result.answer, 'Real gemini answer.');
+    },
+  );
+  const calls = readCallLog(callLog);
+  assert.ok(!calls.includes('search ollama'), 'a provider reported configured:false must never be called at all');
+});
+
+// ── E. nothing but duckduckgo works ──────────────────────────────────────────
+
+test('E1: nothing configured but duckduckgo -> duckduckgo used, real shape returned', async () => {
+  await withEnv(
+    {
+      ...BASE_ENV,
+      FAKE_CLI_BEHAVIOR_JSON: JSON.stringify({
+        duckduckgo: {
+          exit: 0,
+          stdout: searchEnvelope('DuckDuckGo answer, zero credential.', [
+            { title: 'DDG Source', url: 'https://example.invalid/ddg' },
+          ]),
+        },
+      }),
+    },
+    async () => {
+      const result = await tavilySearch('floor query', { max_results: 5 });
+      assert.equal(result.query, 'floor query');
+      assert.equal(result.answer, 'DuckDuckGo answer, zero credential.');
+      assert.deepEqual(result.results, [{ title: 'DDG Source', url: 'https://example.invalid/ddg' }]);
+    },
+  );
+});
+
+// ── F. every tier exhausted -> graceful empty, never throw ──────────────────
+
+test('F1: every tier fails (no keys, no discovery, duckduckgo also fails) -> graceful empty, no throw', async () => {
+  await withEnv({ ...BASE_ENV }, async () => {
+    const result = await tavilySearch('all fail query');
+    assert.deepEqual(result, { query: 'all fail query', results: [], answer: undefined });
+  });
+});
+
+test('F2: CLI binary entirely absent -> graceful empty result, no throw', async () => {
+  await withEnv(
+    { ...BASE_ENV, PERPLEXITY_API_KEY: 'k', TAVILY_API_KEY: 'k2', OPENCLAW_CLI_BIN: '/nonexistent/openclaw-xyz' },
+    async () => {
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = (async () => new Response('bad', { status: 500 })) as unknown as typeof fetch;
+      try {
+        const result = await tavilySearch('absent cli query');
+        assert.deepEqual(result, { query: 'absent cli query', results: [], answer: undefined });
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  );
+});
+
+test('F3: a real wall-clock timeout on every reachable provider -> graceful empty, no throw', async () => {
+  await withEnv(
+    {
+      ...BASE_ENV,
+      PERPLEXITY_API_KEY: 'k',
+      OPENCLAW_WEB_SEARCH_TIMEOUT_MS: '300',
+      FAKE_CLI_BEHAVIOR_JSON: JSON.stringify({
+        perplexity: { delayMs: 2000, exit: 0, stdout: '{}' },
+        duckduckgo: { delayMs: 2000, exit: 0, stdout: '{}' },
+      }),
+    },
+    async () => {
+      const start = Date.now();
+      const result = await tavilySearch('timeout query');
+      const elapsed = Date.now() - start;
+      assert.deepEqual(result, { query: 'timeout query', results: [], answer: undefined });
+      assert.ok(elapsed < 5000, `expected the 300ms timeout to cut each provider short, took ${elapsed}ms`);
+    },
+  );
+});
+
+// ── G. [MANDATORY] Tavily present and funded -> still usable ────────────────
+
+test('G1: Tavily present and funded, nothing higher-priority configured -> still usable', async () => {
   await withEnv({ ...BASE_ENV, TAVILY_API_KEY: 'real-tavily-key' }, async () => {
     const originalFetch = globalThis.fetch;
     let calledUrl: string | null = null;
@@ -112,23 +432,15 @@ test('A: TAVILY_API_KEY set -> Tavily REST path used, unchanged (regression guar
       calledBody = init?.body ? JSON.parse(String(init.body)) : null;
       return new Response(
         JSON.stringify({
-          // Deliberately distinct from the input query, to prove the
-          // pre-fallback behavior is preserved exactly: the live Tavily path
-          // returns the upstream response VERBATIM (unlike the fixture path,
-          // which does overwrite `query`) — no rewriting was introduced.
-          query: 'tavily-echoed-query-untouched',
+          query: 'tavily-echoed-query',
           results: [{ title: 'Real Tavily result', url: 'https://example.invalid/real', content: 'c' }],
           answer: 'A real Tavily answer.',
         }),
         { status: 200, headers: { 'content-type': 'application/json' } },
       );
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    }) as any;
-
+    }) as unknown as typeof fetch;
     try {
       const result = await tavilySearch('best practices sales 2026', { max_results: 3 });
-
-      // Same URL, same request shape as the pre-fallback implementation.
       assert.equal(calledUrl, 'https://api.tavily.com/search');
       assert.deepEqual(calledBody, {
         api_key: 'real-tavily-key',
@@ -137,11 +449,8 @@ test('A: TAVILY_API_KEY set -> Tavily REST path used, unchanged (regression guar
         include_answer: true,
         max_results: 3,
       });
-
-      // Same return shape — the native fallback was never touched, and the
-      // upstream response is passed through unmodified (query included).
       assert.deepEqual(result, {
-        query: 'tavily-echoed-query-untouched',
+        query: 'tavily-echoed-query',
         results: [{ title: 'Real Tavily result', url: 'https://example.invalid/real', content: 'c' }],
         answer: 'A real Tavily answer.',
       });
@@ -151,222 +460,135 @@ test('A: TAVILY_API_KEY set -> Tavily REST path used, unchanged (regression guar
   });
 });
 
-test('A2: TAVILY_API_KEY set -> a Tavily HTTP error still throws exactly as before', async () => {
-  await withEnv({ ...BASE_ENV, TAVILY_API_KEY: 'real-tavily-key' }, async () => {
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async () =>
-      new Response('bad request', { status: 400 })) as unknown as typeof fetch;
-    try {
-      await assert.rejects(
-        () => tavilySearch('anything'),
-        /Tavily search failed: 400/,
-        'a Tavily API error must still propagate as a throw when a key IS configured',
-      );
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-});
-
-// ── B. native fallback used + mapped correctly ───────────────────────────────
-
-test('B1: TAVILY_API_KEY unset -> native fallback used, string citations mapped', async () => {
-  const cliOutput = JSON.stringify({
-    outputs: [
-      {
-        result: {
-          content: 'A grounded native-search answer.',
-          citations: ['https://example.invalid/one', 'https://example.invalid/two'],
-        },
-      },
-    ],
-  });
-  await withEnv(
-    { ...BASE_ENV, FAKE_CLI_BEHAVIOR_JSON: JSON.stringify({ perplexity: { exit: 0, stdout: cliOutput } }) },
-    async () => {
-      const result = await tavilySearch('dept research query');
-      assert.equal(result.query, 'dept research query');
-      assert.equal(result.answer, 'A grounded native-search answer.');
-      assert.deepEqual(result.results, [
-        { title: 'https://example.invalid/one', url: 'https://example.invalid/one' },
-        { title: 'https://example.invalid/two', url: 'https://example.invalid/two' },
-      ]);
-    },
-  );
-});
-
-test('B2: object citations {title,url} mapped correctly, max_results honored', async () => {
-  const cliOutput = JSON.stringify({
-    outputs: [
-      {
-        result: {
-          content: 'Answer with object citations.',
-          citations: [
-            { title: 'First Source', url: 'https://example.invalid/a' },
-            { title: 'Second Source', url: 'https://example.invalid/b' },
-            { title: 'Third Source', url: 'https://example.invalid/c' },
-          ],
-        },
-      },
-    ],
-  });
-  await withEnv(
-    { ...BASE_ENV, FAKE_CLI_BEHAVIOR_JSON: JSON.stringify({ perplexity: { exit: 0, stdout: cliOutput } }) },
-    async () => {
-      const result = await tavilySearch('query', { max_results: 2 });
-      assert.equal(result.results.length, 2, 'max_results must be honored against the mapped citations');
-      assert.deepEqual(result.results, [
-        { title: 'First Source', url: 'https://example.invalid/a' },
-        { title: 'Second Source', url: 'https://example.invalid/b' },
-      ]);
-    },
-  );
-});
-
-// ── C. provider preference order ─────────────────────────────────────────────
-
-test('C1: a failing preferred provider is skipped in favor of the next one', async () => {
-  const geminiOutput = JSON.stringify({
-    outputs: [{ result: { content: 'Answer from gemini.', citations: ['https://example.invalid/gemini'] } }],
-  });
+test('G2: Tavily HTTP 429 -> falls over to duckduckgo instead of throwing', async () => {
   await withEnv(
     {
       ...BASE_ENV,
+      TAVILY_API_KEY: 'real-tavily-key',
       FAKE_CLI_BEHAVIOR_JSON: JSON.stringify({
-        perplexity: { exit: 1 }, // fails — not configured
-        gemini: { exit: 0, stdout: geminiOutput },
-        duckduckgo: { exit: 0, stdout: JSON.stringify({ outputs: [{ result: { content: 'should not be reached' } }] }) },
+        duckduckgo: { exit: 0, stdout: searchEnvelope('DuckDuckGo answer reached after Tavily was rejected.', []) },
       }),
     },
     async () => {
-      const result = await tavilySearch('provider preference query');
-      assert.equal(result.answer, 'Answer from gemini.', 'perplexity failed, so gemini (next in order) must win');
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = (async () =>
+        new Response('{"detail":"quota exceeded"}', { status: 429 })) as unknown as typeof fetch;
+      try {
+        const result = await tavilySearch('query');
+        assert.equal(result.answer, 'DuckDuckGo answer reached after Tavily was rejected.');
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
     },
   );
 });
 
-test('C2: duckduckgo is the zero-credential floor when both paid providers fail', async () => {
-  const ddgOutput = JSON.stringify({
-    outputs: [{ result: { content: 'Answer from duckduckgo.', citations: ['https://example.invalid/ddg'] } }],
-  });
-  await withEnv(
-    {
-      ...BASE_ENV,
-      FAKE_CLI_BEHAVIOR_JSON: JSON.stringify({
-        perplexity: { exit: 1 },
-        gemini: { exit: 1 },
-        duckduckgo: { exit: 0, stdout: ddgOutput },
-      }),
-    },
-    async () => {
-      const result = await tavilySearch('floor provider query');
-      assert.equal(result.answer, 'Answer from duckduckgo.');
-    },
-  );
-});
+// ── H. TAVILY_FIXTURE_JSON_PATH still honored ────────────────────────────────
 
-// ── D. total failure -> graceful empty, NEVER throw ──────────────────────────
-
-test('D1: CLI binary absent -> graceful empty result, no throw', async () => {
-  await withEnv({ ...BASE_ENV, OPENCLAW_CLI_BIN: '/nonexistent/openclaw-cli-that-does-not-exist' }, async () => {
-    const result = await tavilySearch('absent cli query');
-    assert.deepEqual(result, { query: 'absent cli query', results: [], answer: undefined });
-  });
-});
-
-test('D2: every provider exits non-zero -> graceful empty result, no throw', async () => {
-  await withEnv(
-    {
-      ...BASE_ENV,
-      FAKE_CLI_BEHAVIOR_JSON: JSON.stringify({
-        perplexity: { exit: 1 },
-        gemini: { exit: 1 },
-        duckduckgo: { exit: 1 },
-      }),
-    },
-    async () => {
-      const result = await tavilySearch('all fail query');
-      assert.deepEqual(result, { query: 'all fail query', results: [], answer: undefined });
-    },
-  );
-});
-
-test('D3: malformed JSON from every provider -> graceful empty result, no throw', async () => {
-  await withEnv(
-    {
-      ...BASE_ENV,
-      FAKE_CLI_BEHAVIOR_JSON: JSON.stringify({
-        perplexity: { exit: 0, stdout: 'not valid json{{{' },
-        gemini: { exit: 0, stdout: 'also not json' },
-        duckduckgo: { exit: 0, stdout: '' },
-      }),
-    },
-    async () => {
-      const result = await tavilySearch('malformed json query');
-      assert.deepEqual(result, { query: 'malformed json query', results: [], answer: undefined });
-    },
-  );
-});
-
-test('D4: a real wall-clock timeout on every provider -> graceful empty result, no throw', async () => {
-  await withEnv(
-    {
-      ...BASE_ENV,
-      OPENCLAW_WEB_SEARCH_TIMEOUT_MS: '300',
-      FAKE_CLI_BEHAVIOR_JSON: JSON.stringify({
-        perplexity: { delayMs: 2000, exit: 0, stdout: '{}' },
-        gemini: { delayMs: 2000, exit: 0, stdout: '{}' },
-        duckduckgo: { delayMs: 2000, exit: 0, stdout: '{}' },
-      }),
-    },
-    async () => {
-      const start = Date.now();
-      const result = await tavilySearch('timeout query');
-      const elapsed = Date.now() - start;
-      assert.deepEqual(result, { query: 'timeout query', results: [], answer: undefined });
-      // Each provider's execFile is killed at ~300ms; 3 providers serially
-      // should finish well under the 2000ms per-provider delay that would
-      // prove the timeout did NOT fire.
-      assert.ok(elapsed < 5000, `expected the 300ms timeout to cut each provider short, took ${elapsed}ms`);
-    },
-  );
-});
-
-// ── E. TAVILY_FIXTURE_JSON_PATH still honored ────────────────────────────────
-
-test('E1: fixture short-circuits both paths when TAVILY_API_KEY is unset', async () => {
+test('H1: fixture short-circuits every tier, key or no key', async () => {
   const fixtureFile = path.join(os.tmpdir(), `tavily-fixture-${process.pid}-${Date.now()}.json`);
   fs.writeFileSync(
     fixtureFile,
     JSON.stringify({ query: 'ignored', results: [{ title: 'Fixture result', url: 'https://example.invalid/fx' }], answer: 'Fixture answer.' }),
   );
-  await withEnv({ ...BASE_ENV, TAVILY_FIXTURE_JSON_PATH: fixtureFile }, async () => {
-    const result = await tavilySearch('fixture query');
-    assert.equal(result.query, 'fixture query', 'the query arg overwrites the fixture query field');
-    assert.equal(result.answer, 'Fixture answer.');
-    assert.deepEqual(result.results, [{ title: 'Fixture result', url: 'https://example.invalid/fx' }]);
-  });
+  await withEnv(
+    { ...BASE_ENV, PERPLEXITY_API_KEY: 'k', TAVILY_API_KEY: 'k2', TAVILY_FIXTURE_JSON_PATH: fixtureFile },
+    async () => {
+      const originalFetch = globalThis.fetch;
+      let fetchCalled = false;
+      globalThis.fetch = (async () => {
+        fetchCalled = true;
+        throw new Error('must not be called when a fixture is set');
+      }) as unknown as typeof fetch;
+      try {
+        const result = await tavilySearch('fixture query');
+        assert.equal(result.query, 'fixture query');
+        assert.equal(result.answer, 'Fixture answer.');
+        assert.equal(fetchCalled, false);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  );
 });
 
-test('E2: fixture takes priority even when TAVILY_API_KEY IS set (no live Tavily call, no CLI call)', async () => {
-  const fixtureFile = path.join(os.tmpdir(), `tavily-fixture-withkey-${process.pid}-${Date.now()}.json`);
-  fs.writeFileSync(
-    fixtureFile,
-    JSON.stringify({ query: 'ignored', results: [], answer: 'Fixture answer with key set.' }),
+// ── I. citation mapping ──────────────────────────────────────────────────────
+
+test('I1: string and object citation shapes both map correctly, max_results honored', async () => {
+  await withEnv(
+    {
+      ...BASE_ENV,
+      FAKE_CLI_BEHAVIOR_JSON: JSON.stringify({
+        duckduckgo: {
+          exit: 0,
+          stdout: searchEnvelope('mixed citations', [
+            'https://example.invalid/bare-string',
+            { title: 'Object Citation', url: 'https://example.invalid/object' },
+            { title: 'Third', url: 'https://example.invalid/third' },
+          ]),
+        },
+      }),
+    },
+    async () => {
+      const result = await tavilySearch('query', { max_results: 2 });
+      assert.equal(result.results.length, 2, 'max_results must be honored');
+      assert.deepEqual(result.results, [
+        { title: 'https://example.invalid/bare-string', url: 'https://example.invalid/bare-string' },
+        { title: 'Object Citation', url: 'https://example.invalid/object' },
+      ]);
+    },
   );
-  await withEnv({ ...BASE_ENV, TAVILY_API_KEY: 'real-key', TAVILY_FIXTURE_JSON_PATH: fixtureFile }, async () => {
-    const originalFetch = globalThis.fetch;
-    let fetchCalled = false;
-    globalThis.fetch = (async () => {
-      fetchCalled = true;
-      throw new Error('fetch must not be called when a fixture is set');
-    }) as unknown as typeof fetch;
-    try {
-      const result = await tavilySearch('fixture with key query');
-      assert.equal(result.answer, 'Fixture answer with key set.');
-      assert.equal(fetchCalled, false, 'the fixture must short-circuit before the Tavily REST call');
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
+});
+
+// ── J. caching ────────────────────────────────────────────────────────────
+
+test('J1: a known-unusable provider is not re-probed within the TTL', async () => {
+  const callLog = freshCallLog();
+  await withEnv(
+    {
+      ...BASE_ENV,
+      FAKE_CLI_CALL_LOG: callLog,
+      PERPLEXITY_API_KEY: 'broke-key',
+      WEB_SEARCH_PROVIDER_CACHE_TTL_MS: '60000',
+      FAKE_CLI_BEHAVIOR_JSON: JSON.stringify({
+        perplexity: { exit: 1 },
+        duckduckgo: { exit: 0, stdout: searchEnvelope('duckduckgo answer', []) },
+      }),
+    },
+    async () => {
+      const r1 = await tavilySearch('query one');
+      assert.equal(r1.answer, 'duckduckgo answer');
+      const r2 = await tavilySearch('query two');
+      assert.equal(r2.answer, 'duckduckgo answer');
+
+      const calls = readCallLog(callLog);
+      const perplexityCalls = calls.filter((c) => c === 'search perplexity').length;
+      assert.equal(perplexityCalls, 1, 'perplexity should only have been actually invoked once; the 2nd call must hit the cache');
+    },
+  );
+});
+
+test('J2: a cached-unusable provider IS re-probed once the TTL elapses', async () => {
+  const callLog = freshCallLog();
+  await withEnv(
+    {
+      ...BASE_ENV,
+      FAKE_CLI_CALL_LOG: callLog,
+      PERPLEXITY_API_KEY: 'broke-key',
+      WEB_SEARCH_PROVIDER_CACHE_TTL_MS: '50',
+      FAKE_CLI_BEHAVIOR_JSON: JSON.stringify({
+        perplexity: { exit: 1 },
+        duckduckgo: { exit: 0, stdout: searchEnvelope('duckduckgo answer', []) },
+      }),
+    },
+    async () => {
+      await tavilySearch('query one');
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      await tavilySearch('query two');
+
+      const calls = readCallLog(callLog);
+      const perplexityCalls = calls.filter((c) => c === 'search perplexity').length;
+      assert.equal(perplexityCalls, 2, 'once the TTL elapses the provider must be re-probed, not left cached forever');
+    },
+  );
 });
