@@ -14,9 +14,8 @@
  * detects what web-research capability THIS box actually has, at runtime,
  * and uses the best available one:
  *
- *   1. Perplexity — if `PERPLEXITY_API_KEY` OR `OPENROUTER_API_KEY` (an
- *      accepted alias for Perplexity's web-search provider) is set AND the
- *      provider is actually usable (see "CONFIGURED IS A CLAIM" below).
+ *   1. Perplexity — attempted first, unconditionally, exactly like every
+ *      other CLI-backed tier (see "TIER 1 HAS NO ENV GATE" below).
  *   2. Whatever THIS box's OpenClaw natively offers — discovered via
  *      `openclaw infer web providers` (`./native-web-search.ts`), not
  *      assumed. A box with Ollama Cloud has Ollama's own web search;
@@ -62,7 +61,29 @@
  * every provider erroring, the CLI itself absent), `tavilySearch()` resolves
  * an empty-but-well-shaped `TavilyResponse` —
  * `{ query, results: [], answer: undefined }` — instead of throwing, so the
- * fire-and-forget callers degrade gracefully instead of crashing.
+ * fire-and-forget callers degrade gracefully instead of crashing. Both
+ * callers ALSO run their draft through `groundDraftedSOP()` afterward, which
+ * hard-blocks auto-filing whenever `results.length < 1` — so an all-tiers-
+ * exhausted SOP never becomes silently authoritative; it is held as a
+ * `[QC-UNGROUNDED]`/pending-review proposal instead. That gate lives in
+ * sop-authoring.ts / sop-auto-replace.ts, not here — noted so the next
+ * person doesn't go looking for it in this file.
+ *
+ * TIER 1 HAS NO ENV GATE. v6.1.0/v6.1.1 gated Perplexity on
+ * `process.env.PERPLEXITY_API_KEY || process.env.OPENROUTER_API_KEY` — the
+ * Next.js APP's own env. That was wrong: the credential Perplexity actually
+ * needs lives at the OpenClaw CLI layer, which this app-level env check
+ * cannot see. Live-verified: a box existed where NEITHER var was set in the
+ * app's env, yet `searchViaOpenClawProvider(query, 'perplexity', {})` called
+ * directly returned a real synthesized answer with citations through the
+ * pinned CLI — the app-level gate was skipping the one tier that actually
+ * worked. Tier 1 is now attempted unconditionally, exactly like tiers 2 and
+ * 4, and `attemptTier()`'s TTL cache is what keeps a genuinely-unusable
+ * Perplexity from being re-probed on every call — the same mechanism that
+ * already protected every other tier. Tavily (tier 3) is the one tier that
+ * KEEPS its env gate, because it is structurally required there: Tavily is a
+ * direct `fetch()`, not a CLI shell-out, and the key has to be read
+ * in-process to build the request body — there is no CLI layer to defer to.
  *
  * Per Trevor's "stub during tests" policy, callers in tests can inject a
  * fixture by setting `TAVILY_FIXTURE_JSON_PATH` to a JSON file that mirrors
@@ -185,9 +206,11 @@ export async function tavilySearch(query: string, opts: TavilySearchOptions = {}
     return { ...fixture, query };
   }
 
-  // Tier 1 — Perplexity, if a key is present (direct, or via the
-  // OPENROUTER_API_KEY alias OpenClaw already accepts for it).
-  if (process.env.PERPLEXITY_API_KEY || process.env.OPENROUTER_API_KEY) {
+  // Tier 1 — Perplexity, attempted unconditionally (see "TIER 1 HAS NO ENV
+  // GATE" above — the credential lives at the OpenClaw CLI layer, which an
+  // app-level env check cannot see; the TTL cache is what keeps a genuinely
+  // unusable Perplexity from being re-probed every call).
+  {
     const result = await attemptTier('perplexity', () => searchViaOpenClawProvider(query, 'perplexity', opts));
     if (result) return result;
   }
