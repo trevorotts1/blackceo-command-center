@@ -1,3 +1,26 @@
+## [v6.1.4] — 2026-09-03 — four fix-PR batch: bounce loop, completion-detection timeout, persona path, orphaned RPCs
+
+### What changed
+
+Four fixes merged today as PRs #282, #287, #288, #290 (batch-merged to main
+in one integration push):
+
+- **#282 — stale-task-sweep / intake-advance-sweep bounce loop on over-cap
+  blocked tasks.** The two sweeps could each hand the same over-cap blocked
+  task back to the other every tick, burning dispatch attempts without
+  progress.
+- **#287 — completion detection: silent stall on agent-turn timeout +
+  lying dispatch counter.** A dispatched agent's turn dying without a
+  TASK_COMPLETE marker (e.g. "chat run timed out" recorded only in the
+  OpenClaw transcript) left the task looking in-flight forever, and the
+  intake-advance dispatch counter counted attempts that never durably
+  dispatched anything.
+- **#288 — persona blueprint dispatch path missing the `data/` segment.**
+  Dispatches pointing at a persona blueprint 404ed on the real layout.
+- **#290 — orphaned RPCs on socket close now reject instead of 30s silent
+  dead air.** Callers hanging on the closed socket get a rejection
+  immediately rather than timing out blind after half a minute.
+
 ## [v6.1.3] — 2026-09-03 — web-research selector: real CLI envelope shapes, tier-1 gate removed
 
 ### What changed
