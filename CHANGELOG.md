@@ -1,3 +1,56 @@
+## [v6.1.2] — 2026-09-03 — Embedding failure-cache amplification fix (Fixes B + C)
+
+### What changed
+
+Fleet-wide waste bug: an embedding failure was never cached, so every live
+call site rediscovered a depleted/exhausted account independently, over and
+over, for as long as it stayed exhausted.
+
+- **Fix B — `fetchEmbeddingGoogle()` fails fast on a non-retryable 429.** A
+  429 whose body indicates a BILLING WALL ("prepayment credits are
+  depleted" / "credits are depleted" / "insufficient credits") cannot
+  succeed on retry — it now throws on the FIRST such response, zero
+  retries, zero backoff delay, instead of the previous 4x retry / up to
+  ~7s of wasted latency on an error that looks identical on attempt 4 as
+  it did on attempt 1. A genuine rate-limit 429 (no billing marker) keeps
+  the existing exponential-backoff retry unchanged.
+- **Fix C — a shared, short-cooldown circuit breaker** wired into
+  `fetchEmbedding()` / `fetchEmbeddings()` (the ONE provider-agnostic choke
+  point `storeEmbeddingForSOP`, `rankSOPsBySemantic`, and
+  department-router's `semanticRankDepartments` all funnel through). The
+  first non-retryable failure (billing wall or bad credentials, covering
+  both the Google and OpenAI failure shapes) opens the breaker for
+  `EMBEDDING_BREAKER_COOLDOWN_MS` (default 5 minutes, env-tunable); every
+  call for the rest of the cooldown fails fast with ZERO network calls. It
+  self-heals with no restart: once the cooldown clears, the next call
+  attempts a real network call again — success closes the breaker,
+  another non-retryable failure reopens it for a fresh cooldown. A
+  transient failure (network blip, 5xx, a plain rate-limit 429) does NOT
+  trip the breaker.
+- Healthy path is unchanged for both fixes — every behavioural change is on
+  the failure path only.
+
+### Proof
+
+- New: `tests/unit/google-embed-billing-wall.test.ts` (3 cases) — billing
+  wall fails on the first 429 with no retry and no backoff delay; a
+  genuine rate-limit 429 still retries (regression guard); a plain 500 is
+  unaffected.
+- New: `tests/unit/embedding-circuit-breaker.test.ts` (7 cases) — healthy
+  path unchanged; one non-retryable failure trips the breaker and the next
+  call makes zero network calls; a transient failure does NOT trip it
+  (regression guard); self-heals both deterministically and via a real
+  env-tunable cooldown; all three live-embedding call sites
+  (`storeEmbeddingForSOP`, `rankSOPsBySemantic`, `comDispatch`) make zero
+  network calls while the breaker is open; a breaker tripped by one call
+  site is respected by a different one (shared state proof).
+- Full `npm run test:unit` on the release tree, rebased onto origin/main
+  849f01124 (v6.1.1): pre-existing baseline reproduced (5 failures —
+  `b2-atomic-deploy.test.ts` x2, `fix20-presentation-db-hygiene.test.ts`,
+  `fix34-db-backup-verify.test.ts`, `fix35-synthetic-purge-gate.test.ts`,
+  `integrity_check != ok`), independently confirmed identical on a clean
+  `origin/main` worktree before this change; zero new failures.
+
 ## [v6.1.1] — 2026-09-03 — pm2: pass OPENCLAW_CLI_BIN through to the CC process
 
 ### What changed
