@@ -46,6 +46,32 @@
  *      catch it, log clearly, cache the provider as unusable for a short
  *      TTL, and move on to the next one — the same treatment it gives a
  *      failing Tavily call.
+ *
+ * v6.1.3 — REAL RESPONSE SHAPES, FOUND BY EXERCISING THE DEPLOYED CODE. v6.1.0
+ * shipped coded against an idealized envelope that turned out not to match
+ * what the live CLI actually emits, and the test mocks encoded the same wrong
+ * assumption — so the suite could not catch it. All four tiers returned
+ * empty on a real box until this fix. Two shapes were wrong:
+ *   1. `openclaw infer web providers --json` does NOT return `{providers:[...]}`
+ *      or an `outputs[0].result.providers` envelope — it returns
+ *      `{ search: [...], fetch: [...] }`, partitioned by capability. Web
+ *      search must read the `search` list. `parseProvidersListing()` now
+ *      recognizes this shape FIRST, while keeping the original shapes so a
+ *      different OpenClaw version isn't newly broken by this fix. An
+ *      unrecognized envelope now logs loudly (`console.error`) instead of
+ *      silently returning an empty list, so a THIRD shape is visible instead
+ *      of invisible.
+ *   2. `outputs[0].result` is not always `{content, citations[]}`. A
+ *      link-list-style provider (duckduckgo, live-verified) instead returns
+ *      `{ results: [{title,url,snippet}] }` — no `content`, no `citations`.
+ *      `searchViaOpenClawProvider()` now reads BOTH `citations[]` and
+ *      `results[]` and merges them; a `snippet` maps to `TavilyResult.content`.
+ *      Results with no `answer` are NOT a failure — a link list is a
+ *      perfectly usable result on its own (see the empty-check below, which
+ *      was already correct: it only fails on ZERO results AND no answer).
+ * Perplexity itself was never broken — a direct live call through the pinned
+ * CLI returned a real synthesized answer with citations — only these two
+ * parsers were wrong.
  */
 
 import { execFile } from 'child_process';
@@ -127,31 +153,61 @@ export interface DiscoveredProvider {
 }
 
 /**
- * Lenient parse of `openclaw infer web providers --json`. The shape isn't
- * formally documented the way `infer web search`'s is
- * (`outputs[0].result.{content,citations}`), so this accepts several
- * plausible shapes: a bare array, `{ providers: [...] }`, or the same
- * `outputs[0].result.providers` envelope the search command uses. Each
- * element may be a bare provider-name string (treated as configured) or an
- * object carrying an id/name/provider field plus a configured/available/
- * enabled flag.
+ * Lenient parse of `openclaw infer web providers --json`. Tries known shapes
+ * in order, REAL-shape first:
+ *   1. `{ search: [...], fetch: [...] }` — live-verified 2026-09 as the
+ *      actual shape. Providers are partitioned by capability; web search
+ *      reads `search` (never `fetch`, a different capability).
+ *   2. `{ providers: [...] }` and the `outputs[0].result.providers` envelope
+ *      the search command uses — kept so a different OpenClaw version isn't
+ *      newly broken by fixing (1).
+ *   3. A bare top-level array.
+ * Each element may be a bare provider-name string (treated as configured) or
+ * an object carrying an id/name/provider field plus a configured/available/
+ * enabled flag — the exact per-item field names are not formally documented
+ * either, so both are accepted defensively.
+ * An envelope matching NONE of the above logs loudly (visible, not a silent
+ * empty list) so a future shape change is noticed instead of quietly
+ * disabling tier 2 again.
  */
 function parseProvidersListing(parsed: unknown): DiscoveredProvider[] {
   let candidates: unknown;
+  let matchedShape = false;
+
   if (Array.isArray(parsed)) {
     candidates = parsed;
+    matchedShape = true;
   } else if (parsed && typeof parsed === 'object') {
     const root = parsed as Record<string, unknown>;
-    if (Array.isArray(root.providers)) {
+    if (Array.isArray(root.search)) {
+      // Real shape: { search: [...], fetch: [...] }. `fetch` is a different
+      // capability (fetching a specific URL, not searching) — not used here.
+      candidates = root.search;
+      matchedShape = true;
+    } else if (Array.isArray(root.providers)) {
       candidates = root.providers;
+      matchedShape = true;
     } else {
       const outputs = root.outputs;
       const firstResult = Array.isArray(outputs)
         ? (outputs[0] as Record<string, unknown> | undefined)?.result
         : undefined;
       const nestedProviders = (firstResult as Record<string, unknown> | undefined)?.providers;
-      if (Array.isArray(nestedProviders)) candidates = nestedProviders;
+      if (Array.isArray(nestedProviders)) {
+        candidates = nestedProviders;
+        matchedShape = true;
+      }
     }
+  }
+
+  if (!matchedShape) {
+    console.error(
+      `[native-web-search] "openclaw infer web providers --json" returned an unrecognized envelope shape ` +
+        `(none of {search:[]}, {providers:[]}, {outputs:[{result:{providers:[]}}]}, or a bare array matched). ` +
+        `Tier 2 (discovered native providers) will see an empty list this call. Raw keys: ` +
+        `${parsed && typeof parsed === 'object' ? Object.keys(parsed as object).join(', ') : typeof parsed}`,
+    );
+    return [];
   }
 
   const list = Array.isArray(candidates) ? candidates : [];
@@ -198,9 +254,24 @@ interface OpenClawSearchCitation {
   name?: string;
 }
 
+/** The shape a link-list-style provider returns instead of `content`/
+ *  `citations` — live-verified for duckduckgo: `{title, url, snippet}`. */
+interface OpenClawSearchResultItem {
+  title?: string;
+  url?: string;
+  link?: string;
+  snippet?: string;
+  content?: string;
+  source?: string;
+  name?: string;
+}
+
 interface OpenClawSearchResult {
   content?: string;
   citations?: Array<string | OpenClawSearchCitation>;
+  /** Real shape for a link-list provider (duckduckgo) — no `content`/
+   *  `citations` at all, just a list of results. */
+  results?: Array<string | OpenClawSearchResultItem>;
 }
 
 interface OpenClawSearchEnvelope {
@@ -220,6 +291,26 @@ function citationToResult(citation: string | OpenClawSearchCitation): TavilyResu
   if (!url) return null;
   const title = (citation.title || citation.name || citation.source || url).trim();
   return { title, url };
+}
+
+/** Map one `outputs[0].result.results[]` entry (the link-list shape,
+ *  live-verified for duckduckgo) to a TavilyResult. `snippet` — the field
+ *  this shape actually uses — maps to `TavilyResult.content`; `content` is
+ *  also accepted defensively in case a provider uses that name instead. */
+function resultItemToResult(item: string | OpenClawSearchResultItem): TavilyResult | null {
+  if (typeof item === 'string') {
+    const url = item.trim();
+    return url ? { title: url, url } : null;
+  }
+  const url = (item.url || item.link || '').trim();
+  if (!url) return null;
+  const title = (item.title || item.name || item.source || url).trim();
+  const content = (item.snippet || item.content || '').trim();
+  // Omit the `content` key entirely when empty (matches citationToResult's
+  // convention) rather than setting it to `undefined` — TavilyResult.content
+  // is optional, and an explicit `undefined` key vs. an absent key are NOT
+  // the same thing under a strict deep-equality check.
+  return content ? { title, url, content } : { title, url };
 }
 
 /**
@@ -258,9 +349,14 @@ export async function searchViaOpenClawProvider(
     throw new Error(`provider "${provider}" returned no result envelope`);
   }
 
+  // Merge both result shapes the CLI is known to emit: `citations[]`
+  // (perplexity/gemini style, alongside a `content` answer) and `results[]`
+  // (the link-list shape — live-verified for duckduckgo, no `content` at
+  // all). A provider could in principle emit either or both; concatenating
+  // is harmless when only one is present (the other maps to []).
   const rawCitations = Array.isArray(result.citations) ? result.citations : [];
-  const results = rawCitations
-    .map(citationToResult)
+  const rawResultItems = Array.isArray(result.results) ? result.results : [];
+  const results = [...rawCitations.map(citationToResult), ...rawResultItems.map(resultItemToResult)]
     .filter((r): r is TavilyResult => r !== null)
     .slice(0, opts.max_results || 5);
   const answer = typeof result.content === 'string' && result.content.trim() ? result.content : undefined;

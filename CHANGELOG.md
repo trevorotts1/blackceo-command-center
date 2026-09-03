@@ -1,3 +1,83 @@
+## [v6.1.3] — 2026-09-03 — web-research selector: real CLI envelope shapes, tier-1 gate removed
+
+### What changed
+
+Four real bugs in the v6.1.0 capability-detecting web-research selector,
+found by exercising the DEPLOYED code on a live box — not by inference.
+`tavilySearch()` returned empty there: all four tiers failed. The
+architecture was right; the response shapes coded against did not match
+what the CLI actually emits, and the test mocks encoded the same wrong
+assumption, so the suite could not catch it.
+
+- **BUG 1 — `parseProvidersListing()` read the wrong envelope; tier 2 was
+  structurally dead.** `openclaw infer web providers --json` does not return
+  `{providers:[...]}` or `{outputs:[{result:{providers:[...]}}]}` — it
+  returns **`{ search: [...], fetch: [...] }`**, partitioned by capability.
+  `discoverOpenClawProviders()` always returned `[]` on this OpenClaw
+  version, so the entire discovered-native tier never ran. Fixed to read
+  `search` first (never `fetch` — a different capability), while keeping the
+  legacy shapes working so a different OpenClaw version doesn't newly
+  regress. An envelope matching none of the known shapes now logs loudly
+  (`console.error`, naming the raw keys seen) instead of silently returning
+  an empty list.
+- **BUG 2 — duckduckgo's result envelope is different; the zero-credential
+  floor was the tier most reliably broken.** The parser read
+  `outputs[0].result.content` (string) + `outputs[0].result.citations[]`.
+  duckduckgo actually returns **`outputs[0].result.results[]`** with
+  `title`/`url`/`snippet` — no `content`, no `citations` at all. Every
+  duckduckgo call therefore hit "no usable results" and failed — the one
+  tier guaranteed to work with no paid key anywhere was the tier most
+  reliably broken. `searchViaOpenClawProvider()` now reads and merges BOTH
+  shapes; `snippet` maps to `TavilyResult.content`. A missing `answer` with
+  non-empty `results[]` is correctly treated as SUCCESS, not failure (that
+  check was already right — the bug was purely that `results` stayed empty).
+  Perplexity itself was never broken: a direct live call through the pinned
+  CLI returned a real synthesized answer with citations.
+- **BUG 3 — tier 1's gate checked the wrong layer.** Perplexity was gated on
+  `process.env.PERPLEXITY_API_KEY || process.env.OPENROUTER_API_KEY` — the
+  Next.js APP's own env. The credential actually lives at the OpenClaw CLI
+  layer. Live-verified: a box existed where neither var was set in the app
+  env, yet Perplexity worked when called directly through the CLI — the gate
+  was skipping the one tier that actually worked. Tier 1 is now attempted
+  unconditionally, exactly like tiers 2 and 4: empirically, letting failure
+  decide, with the existing usability TTL cache (unchanged) doing the job
+  the env check used to do, cheaply. Tavily (tier 3) keeps its env gate —
+  structurally required there, since it's a direct `fetch()` needing the key
+  read in-process to build the request body, with no CLI layer to defer to.
+- **BUG 4 — the tests encoded the same wrong shape, which is why 18/18
+  passed.** The v6.1.0 suite's `searchEnvelope()` helper built
+  `{content,citations}` for EVERY provider under test, including the
+  duckduckgo-floor case — the exact wrong assumption BUG 2 describes. It
+  never exercised a real duckduckgo response shape. Rebuilt from the real
+  envelopes: `tests/unit/tavily-native-search-fallback.test.ts` now has
+  dedicated cases per real shape, an explicit `results[]`-with-no-`answer`-
+  is-still-usable guard, legacy-shape regression coverage, and an
+  unrecognized-envelope-logs-loudly case.
+
+### On the empty-exhaustion case
+
+Verified (read-only, no code change — out of this fix's authorized scope):
+both callers already hard-block auto-filing when research comes back empty.
+`groundDraftedSOP()` (`sop-auto-replace.ts`) treats `researchCount < 1` as a
+HARD BLOCK. `sop-authoring.ts` §4 calls it too and, on `!grounding.grounded`,
+does NOT auto-file — it writes a `'pending'` proposal tagged
+`[QC-UNGROUNDED — needs human review]` and emits
+`sop_authoring_ungrounded_pending`. `sop-auto-replace.ts`'s Track S is
+always review-gated (`'auto-generated-pending-review'`) regardless of
+grounding, with the same verdict surfaced in the evidence for the reviewer.
+So an all-tiers-exhausted SOP does not become silently authoritative in
+either caller — this predates this fix and was not weakened by it.
+
+### Proof
+
+- New/rebuilt suite: `tests/unit/tavily-native-search-fallback.test.ts`,
+  24/24 pass, including a case per real envelope shape and a regression
+  guard naming each bug.
+- Full `npm run test:unit`: 2369 tests, 2364 pass, 5 pre-existing failures
+  at the identical baseline (`b2-atomic-deploy.test.ts` x2,
+  `fix20-presentation-db-hygiene`, `fix34-db-backup-verify`,
+  `fix35-synthetic-purge-gate`, all `integrity_check != ok`).
+
 ## [v6.1.2] — 2026-09-03 — Embedding failure-cache amplification fix (Fixes B + C)
 
 ### What changed
