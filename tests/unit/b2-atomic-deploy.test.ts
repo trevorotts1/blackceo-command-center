@@ -39,11 +39,36 @@ import { execSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import Database from 'better-sqlite3';
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
 function makeTmpDir(): string {
   return mkdtempSync(path.join(os.tmpdir(), 'b2-test-'));
+}
+
+/**
+ * Write a GENUINELY valid (if trivial) SQLite database file at `dbPath` — not
+ * a plain-text placeholder. FIX 34b (spec REV 3) added a REAL restore-
+ * verification step to atomic-deploy.sh's Phase 1b: it opens the backup file
+ * and runs `PRAGMA integrity_check` against it, refusing (exit 2) if the file
+ * lacks the SQLite magic header or fails the check. Most fixtures never
+ * noticed the old plain-text 'SQLite fixture' placeholder was never real
+ * SQLite, because the base fixture's python3 stub is a no-op that drains
+ * stdin and never actually runs the verifier (see the python3 stub comment
+ * below). buildPortFightFixture() below deliberately wires REAL python3 (the
+ * Phase 1d zombie-selector needs it), which — for the first time in this
+ * file — also makes Phase 1b's verifier run for real, and it correctly
+ * rejected the placeholder text as not-a-database. A real minimal database
+ * satisfies the verifier the same way a real ~135MB LIVEDB does.
+ */
+function writeFixtureDb(dbPath: string): void {
+  const db = new Database(dbPath);
+  try {
+    db.exec('CREATE TABLE IF NOT EXISTS fixture_marker (id INTEGER PRIMARY KEY)');
+  } finally {
+    db.close();
+  }
 }
 
 function rmTmpDir(dir: string): void {
@@ -134,7 +159,7 @@ function buildFixture(cfg: FixtureConfig = {}): Fixture {
   mkdirSync(stubsDir, { recursive: true });
 
   // Fake DB
-  writeFileSync(path.join(appDir, 'mission-control.db'), 'SQLite fixture');
+  writeFixtureDb(path.join(appDir, 'mission-control.db'));
 
   // Existing live .next
   if (liveNextExists) {
@@ -674,7 +699,7 @@ test('Spec Verify (g): NEXT_DIST_DIR bypass + npm exits non-zero → exit 2, APP
   mkdirSync(stubsDir, { recursive: true });
 
   // Fake DB
-  writeFileSync(path.join(appDir, 'mission-control.db'), 'SQLite fixture');
+  writeFixtureDb(path.join(appDir, 'mission-control.db'));
 
   // Existing live .next with a BUILD_ID that will be "fresh" (mtime guard passes
   // because we touch it just before the script runs — the fixture harness runs
@@ -1058,7 +1083,7 @@ function buildDataPathFixture(cfg: FixtureConfig = {}): Fixture {
     spawnSync('cp', ['-r', oldAppDir + '/.', dataSubDir + '/'], { stdio: 'ignore' });
   } catch {
     // If cp fails, write minimal files manually
-    writeFileSync(path.join(dataSubDir, 'mission-control.db'), 'SQLite fixture');
+    writeFixtureDb(path.join(dataSubDir, 'mission-control.db'));
     if (cfg.liveNextExists !== false) {
       mkdirSync(path.join(dataSubDir, '.next'), { recursive: true });
       writeFileSync(path.join(dataSubDir, '.next', 'BUILD_ID'), 'old-build-id');

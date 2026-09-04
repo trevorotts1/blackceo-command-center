@@ -168,20 +168,26 @@ test('qc-scorer cap-reached: ordinary llm FAILs past QC_MAX_REROUTES block the t
   const id = nextId('cap-block');
   insertTask(id, 'review');
 
-  // QC_MAX_REROUTES=2 and the cap trips when newAttempts > QC_MAX_REROUTES,
-  // so it takes THREE ordinary (non-unrouteable) llm FAILs to trip it
-  // (attempt 1 -> backlog, attempt 2 -> backlog, attempt 3 -> 3 > 2 -> blocked).
+  // QC_MAX_REROUTES=2 and (FIX 42, 2026-09-04) the cap trips when
+  // newAttempts >= QC_MAX_REROUTES — the cap names the MAXIMUM number of
+  // reroutes, so the Nth failure (attempt === cap) blocks rather than
+  // rerouting a further time. It now takes only TWO ordinary (non-
+  // unrouteable) llm FAILs to trip it (attempt 1 -> backlog,
+  // attempt 2 -> 2 >= 2 -> blocked). This test was authored 2026-08-27 under
+  // the pre-FIX-42 `>` semantics (three FAILs to trip); FIX 42 landed
+  // 2026-09-04 in the same batch merge that added GUARD 4d, and this fixture
+  // was never updated to match — see qc-scorer.ts's "FIX 42: `>=` not `>`"
+  // comment for the reasoning.
   // Gap text names a SYSTEM signal ("wrong SOP assigned") so the block
   // classifies SYSTEM audience -> qc_escalation event (exercised below).
   const gaps = ['Wrong SOP assigned to this department', 'Missing builder for this deliverable type'];
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    await runQcWithFixture(id, { score: 6.0, pass: false, reason: `Fixture FAIL ${attempt}`, gaps });
-    const midTask = queryOne<{ status: string }>(`SELECT status FROM tasks WHERE id = ?`, [id]);
-    assert.equal(midTask?.status, 'backlog', `sub-cap FAIL ${attempt} must reroute to backlog`);
-    // Re-open into review for the next pass (mirrors a real re-dispatch cycle).
-    run(`UPDATE tasks SET status = 'review' WHERE id = ?`, [id]);
-  }
-  await runQcWithFixture(id, { score: 6.0, pass: false, reason: 'Fixture FAIL 3', gaps });
+  await runQcWithFixture(id, { score: 6.0, pass: false, reason: 'Fixture FAIL 1', gaps });
+  const midTask = queryOne<{ status: string }>(`SELECT status FROM tasks WHERE id = ?`, [id]);
+  assert.equal(midTask?.status, 'backlog', 'sub-cap FAIL 1 must reroute to backlog');
+  // Re-open into review for the next pass (mirrors a real re-dispatch cycle).
+  run(`UPDATE tasks SET status = 'review' WHERE id = ?`, [id]);
+
+  await runQcWithFixture(id, { score: 6.0, pass: false, reason: 'Fixture FAIL 2', gaps });
 
   const task = queryOne<{ status: string }>(`SELECT status FROM tasks WHERE id = ?`, [id]);
   assert.equal(task?.status, 'blocked', 'the FAIL that pushes attempts past the cap must block the task');

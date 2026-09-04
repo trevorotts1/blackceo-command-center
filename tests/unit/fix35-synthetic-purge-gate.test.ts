@@ -36,7 +36,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, copyFileSync, rmSync } from 'nod
 import path from 'node:path';
 import os from 'node:os';
 import { NextRequest } from 'next/server';
-import { getDb } from '../../src/lib/db';
+import { getDb, closeDb } from '../../src/lib/db';
 
 const HYGIENE = path.join(process.cwd(), 'scripts', 'fix35-presentation-board-hygiene.py');
 const CONFIRM_VALUE = 'I-UNDERSTAND-THIS-PURGES-LIVE-BOARD-ROWS';
@@ -50,6 +50,23 @@ let clientTaskId: string;   // done, has to-done event → untouched
 let unknownRowId: string;   // done, zero task_events → unknown provenance, archived
 let workspaceId: string;
 
+/**
+ * CI-ONLY WAL-STALENESS FIX (confirmed via PR #293's diagnostic CI run, not
+ * reproducible on macOS): the hygiene script writes through its OWN sqlite3
+ * connection in a separate `python3` subprocess. getDb()'s long-lived
+ * connection (open since beforeAll) is a SEPARATE reader; on GitHub Actions'
+ * Linux runners it was observed to keep serving a STALE pre-write snapshot
+ * (a fresh, newly-opened connection to the SAME file saw the correct
+ * post-write row — archived_at correctly stamped — while getDb()'s cached
+ * connection still returned archived_at=null for the identical query,
+ * moments later). closeDb() drops the cached handle so the NEXT getDb() call
+ * opens a genuinely fresh connection, guaranteeing every assertion after a
+ * `--apply` run reads the subprocess's actual committed state rather than a
+ * stale WAL snapshot. Called after every runHygiene() invocation (a no-op
+ * cost for dry-run calls, which write nothing) rather than only the one call
+ * that happened to trip it, since every other `--apply` call in this file is
+ * exposed to the identical risk.
+ */
 function runHygiene(args: string[], env: Record<string, string>): { status: number; out: string } {
   try {
     const out = execFileSync('python3', [HYGIENE, ...args], {
@@ -61,6 +78,8 @@ function runHygiene(args: string[], env: Record<string, string>): { status: numb
   } catch (err: unknown) {
     const e = err as { status?: number; stdout?: string; stderr?: string };
     return { status: e.status ?? 1, out: `${e.stdout ?? ''}${e.stderr ?? ''}` };
+  } finally {
+    closeDb();
   }
 }
 

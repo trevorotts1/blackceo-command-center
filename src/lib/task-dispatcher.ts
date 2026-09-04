@@ -853,6 +853,47 @@ export async function autoDispatchTask(
       return;
     }
 
+    // GUARD 4b (FIX-17 / Error 12 / Rule R12): OWNER-KILLED tasks are
+    // TERMINAL-for-dispatch. If the owner killed this task (killed_at column OR
+    // the "OWNER KILLED" note marker), NEVER re-dispatch it — the incident was a
+    // killed deck task re-dispatched as "LIVE" weeks later. One durable
+    // `dispatch_blocked_owner_killed` event row records the block (deduped, so
+    // every re-entry path and every sweep tick write at most one). An un-kill is
+    // an explicit owner action, never an elapsed clock. Runs BEFORE every other
+    // GUARD 4x check: an explicit owner kill outranks both data-integrity (4c)
+    // and ownership (4d) — nothing overrides it.
+    if (blockDispatchIfOwnerKilled(task, context)) {
+      console.warn(
+        `[${context}] autoDispatchTask: task ${taskId} is OWNER-KILLED (Rule R12) — re-dispatch BLOCKED; task stays dead`,
+      );
+      return;
+    }
+
+    // GUARD 4c: a Presentations deck phase is only executable if the card names
+    // the deck it belongs to. Placed before any session/gateway work so every
+    // caller — create-time dispatch and every sweep — shares one fail-closed
+    // path instead of each re-deriving the check.
+    //
+    // MUST run BEFORE GUARD 4d. GUARD 4c and 4d check different, non-overlapping
+    // things — 4c is a DATA-INTEGRITY check ("does this deck even name a run?"),
+    // 4d is an OWNERSHIP check ("is the engine already the single executor for
+    // this otherwise-valid card?"). Every deck phase card GUARD 4c exists to
+    // catch carries source='build_deck_phase' — exactly the source GUARD 4d
+    // treats as engine-owned. When 4d ran first (as it did until the 2026-09-04
+    // batch merge that added it ahead of the pre-existing 4c), it silently
+    // swallowed EVERY card 4c was built to catch: the phase stayed in
+    // 'backlog' — never dispatched, never blocked, no event — reproducing the
+    // exact silent-churn incident (2026-08-27, deck 666924ec) GUARD 4c was
+    // written to fix. A deck with no run identity is not yet a validly
+    // engine-owned card; it must be surfaced (blocked, with a visible event)
+    // before ownership is ever considered.
+    if (!deckPhaseRunIsInitialized(task, context)) {
+      console.error(
+        `[${context}] autoDispatchTask: phase ${taskId} HELD — deck names no run`,
+      );
+      return;
+    }
+
     // ── GUARD 4d (FIX 38a / R5B §F1): engine-owned cards are never dispatched ──
     // An engine-owned card (source ∈ {build_deck, build_deck_phase}) is written
     // and advanced by the Presentations engine itself. Every auto-advancer that
@@ -861,9 +902,10 @@ export async function autoDispatchTask(
     // The advancer must NEVER claim these; the engine is the single executor.
     // A deduped `engine_owned_card_not_dispatched` event row records each block
     // (recordDeckGateEvent's NOT EXISTS dedup — one row per task per type), so
-    // the hold is queryable without flooding. Placed right after GUARD 4 (before
-    // GUARD 4b/4c/5 and all session/gateway work) so EVERY caller — create-time
-    // dispatch and every sweep — shares one fail-closed path.
+    // the hold is queryable without flooding. Runs AFTER GUARD 4b/4c (before
+    // GUARD 5 and all session/gateway work) so EVERY caller — create-time
+    // dispatch and every sweep — shares one fail-closed path. See the GUARD 4c
+    // comment above for why 4c must run first.
     if (isEngineOwnedSource((task as Task & { source?: string | null }).source)) {
       const engineHoldMsg =
         `[engine_owned_card_not_dispatched] Task "${task.title}" (${task.id}) has engine-owned ` +
@@ -876,31 +918,6 @@ export async function autoDispatchTask(
         engineHoldMsg,
       );
       console.log(`[${context}] autoDispatchTask: ${engineHoldMsg}`);
-      return;
-    }
-
-    // GUARD 4b (FIX-17 / Error 12 / Rule R12): OWNER-KILLED tasks are
-    // TERMINAL-for-dispatch. If the owner killed this task (killed_at column OR
-    // the "OWNER KILLED" note marker), NEVER re-dispatch it — the incident was a
-    // killed deck task re-dispatched as "LIVE" weeks later. One durable
-    // `dispatch_blocked_owner_killed` event row records the block (deduped, so
-    // every re-entry path and every sweep tick write at most one). An un-kill is
-    // an explicit owner action, never an elapsed clock.
-    if (blockDispatchIfOwnerKilled(task, context)) {
-      console.warn(
-        `[${context}] autoDispatchTask: task ${taskId} is OWNER-KILLED (Rule R12) — re-dispatch BLOCKED; task stays dead`,
-      );
-      return;
-    }
-
-    // GUARD 4c: a Presentations deck phase is only executable if the card names
-    // the deck it belongs to. Placed before any session/gateway work so every
-    // caller — create-time dispatch and every sweep — shares one fail-closed
-    // path instead of each re-deriving the check.
-    if (!deckPhaseRunIsInitialized(task, context)) {
-      console.error(
-        `[${context}] autoDispatchTask: phase ${taskId} HELD — deck names no run`,
-      );
       return;
     }
 
