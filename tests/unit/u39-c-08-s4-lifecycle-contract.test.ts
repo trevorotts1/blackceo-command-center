@@ -212,9 +212,17 @@ test.after(() => {
 // persists gap notes on the task, and increments `qc_reroute_attempts`.
 // ─────────────────────────────────────────────────────────────────────────
 
-test('[U39-c-08 FAIL] QC FAIL fixture (score 7.0 < 8.5) on a review card lands backlog, persists gap notes, and increments qc_reroute_attempts by exactly one (seeded prevAttempts=2 -> 3, proving a real increment, not a coincidental 1)', async () => {
+test('[U39-c-08 FAIL] QC FAIL fixture (score 7.0 < 8.5) on a review card lands backlog, persists gap notes, and increments qc_reroute_attempts by exactly one (seeded prevAttempts=1 -> 2, proving a real increment, not a coincidental 1)', async () => {
   const id = nextId('fail-owed');
-  insertReviewCard(id, /* qcReroteAttemptsSeed */ 2);
+  // FIX 42 (2026-09-04): the cap now trips at newAttempts >= QC_MAX_REROUTES
+  // (default 3), not newAttempts > QC_MAX_REROUTES. This test's own point is
+  // the SUB-CAP backlog path (see docstring above), so the seed must land
+  // strictly under the cap after incrementing: seeded 1 -> 2 (was seeded
+  // 2 -> 3 pre-FIX-42, which is now AT the cap and blocks — see the
+  // dedicated cap-reached test in loop-fix-20260827-block-and-loop-
+  // detector.test.ts for that path). 1 -> 2 still proves a real increment,
+  // not a coincidental reset-to-1.
+  insertReviewCard(id, /* qcReroteAttemptsSeed */ 1);
 
   const result = await runQcWithFixture(id, {
     score: 7.0,
@@ -233,7 +241,7 @@ test('[U39-c-08 FAIL] QC FAIL fixture (score 7.0 < 8.5) on a review card lands b
 
   const row = currentRow(id);
   assert.equal(row?.status, 'backlog', 'a FAIL verdict must land the task in backlog');
-  assert.equal(row?.qc_reroute_attempts, 3, 'qc_reroute_attempts must be incremented by exactly one (2 -> 3)');
+  assert.equal(row?.qc_reroute_attempts, 2, 'qc_reroute_attempts must be incremented by exactly one (1 -> 2)');
   assert.match(
     row?.description ?? '',
     /Renewal terms section is missing/,
