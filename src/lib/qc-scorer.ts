@@ -5019,7 +5019,7 @@ export async function runEngineOwnedDeckQC(
   const failReasons = failedCriteria.map((r) => `${r.id}: ${r.reason}`);
   const passReasons = criteriaResult.results.filter((r) => r.pass).map((r) => r.id);
 
-  let result: QCResult = {
+  const result: QCResult = {
     score: criteriaResult.score,
     pass: criteriaResult.pass,
     reason: criteriaResult.pass
