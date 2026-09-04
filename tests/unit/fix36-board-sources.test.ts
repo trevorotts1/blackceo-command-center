@@ -51,7 +51,6 @@ function signedPost(id: string, body: Record<string, unknown>): NextRequest {
 
 let run: Function;
 let q1: Function;
-let qAll: Function;
 let close: Function;
 let POST: Function;
 let WSID: string;
@@ -93,7 +92,6 @@ test.before(async () => {
   const db = await import('../../src/lib/db');
   run = db.run;
   q1 = db.queryOne;
-  qAll = db.queryAll;
   close = db.closeDb;
   db.getDb();
   const n = new Date().toISOString();
@@ -105,6 +103,25 @@ test.before(async () => {
   run(
     "INSERT OR IGNORE INTO workspaces(id,slug,name,icon,company_id,sort_order,created_at,updated_at) VALUES (?,'fix36','FIX36','🔧','default',1,?,?)",
     [WSID, n, n],
+  );
+  // FIX 36 test-fixture gap (see PR #293): every ingest() call in this file
+  // omits department_slug, so resolveWorkspaceId() (ingest/route.ts) has no
+  // department/persona signal to match and falls through its tiers to
+  // "5. ANY workspace ORDER BY rowid ASC" — the FIRST workspace row this
+  // isolated DB happens to carry. Migration 113 unconditionally seeds a
+  // 'podcast' workspace on every fresh install (independent of any
+  // departments.json), so without a 'general-task' workspace here, tier 5
+  // silently lands every ingest in this file on 'podcast' — which
+  // createTaskCore then REFUSES (podcast_activation_refused, hard-blocks the
+  // card) on any box without Skill 58 activated. That refusal was invisible
+  // on boxes with Skill 58 already installed (the misroute lands but the
+  // capability check passes) and only surfaced as a hard 'blocked' status on
+  // a clean CI checkout. Seeding the 'general-task' catch-all here makes
+  // resolveWorkspaceId's tier 4 match BEFORE ever reaching the fragile tier-5
+  // fallback — the actual fix, not a workaround for the podcast gate itself.
+  run(
+    "INSERT OR IGNORE INTO workspaces(id,slug,name,icon,company_id,sort_order,created_at,updated_at) VALUES ('general-task','general-task','General Task','📋','default',9999,?,?)",
+    [n, n],
   );
   POST = (await import('../../src/app/api/tasks/[id]/status/route')).POST;
 });
@@ -152,16 +169,6 @@ test('ingest source garbage → status in_progress via signed POST → 403 (fail
   assert.ok(id, 'ingest itself is not source-gated — the card still exists');
   const res = await statusPost(id, { status: 'in_progress' });
   assert.equal(res.status, 403, 'garbage source must stay rejected with 403');
-  // TEMP DIAGNOSTIC (CI-only intermittent failure, unreproducible locally —
-  // see PR #293): dump the full row + its events BEFORE the assertion so the
-  // cause is visible in CI logs even when this fails. Remove once root-caused.
-  const diagRow = q1<Record<string, unknown>>('SELECT * FROM tasks WHERE id = ?', [id]);
-  const diagEvents = qAll<Record<string, unknown>>(
-    'SELECT type, message, created_at FROM events WHERE task_id = ? ORDER BY created_at',
-    [id],
-  );
-  console.error('[DIAG fix36] row:', JSON.stringify(diagRow));
-  console.error('[DIAG fix36] events:', JSON.stringify(diagEvents));
   assert.equal(st(id), 'backlog', 'and the card must NOT move');
 });
 

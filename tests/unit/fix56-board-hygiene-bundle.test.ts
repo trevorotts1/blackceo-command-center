@@ -55,7 +55,6 @@ function signedPost(
 
 let run: (sql: string, params?: unknown[]) => unknown;
 let q1: <T>(sql: string, params?: unknown[]) => T | undefined;
-let qAll: <T>(sql: string, params?: unknown[]) => T[];
 let close: () => void;
 let statusPOST: Function;
 let ingestPOST: (req: NextRequest) => Promise<Response>;
@@ -97,7 +96,6 @@ test.before(async () => {
   const db = await import('../../src/lib/db');
   run = db.run;
   q1 = db.queryOne;
-  qAll = db.queryAll;
   close = db.closeDb;
   db.getDb();
   const n = new Date().toISOString();
@@ -109,6 +107,25 @@ test.before(async () => {
   run(
     "INSERT OR IGNORE INTO workspaces(id,slug,name,icon,company_id,sort_order,created_at,updated_at) VALUES (?,'fix56','FIX56','🔧','default',1,?,?)",
     [WSID, n, n],
+  );
+  // FIX 56 test-fixture gap (see PR #293): ingest() in this file omits
+  // department_slug, so resolveWorkspaceId() (ingest/route.ts) has no
+  // department/persona signal to match and falls through its tiers to
+  // "5. ANY workspace ORDER BY rowid ASC" — the FIRST workspace row this
+  // isolated DB happens to carry. Migration 113 unconditionally seeds a
+  // 'podcast' workspace on every fresh install (independent of any
+  // departments.json), so without a 'general-task' workspace here, tier 5
+  // silently lands every ingest in this file on 'podcast' — which
+  // createTaskCore then REFUSES (podcast_activation_refused, hard-blocks the
+  // card) on any box without Skill 58 activated. That refusal was invisible
+  // on boxes with Skill 58 already installed (the misroute lands but the
+  // capability check passes) and only surfaced as a hard 'blocked' status on
+  // a clean CI checkout. Seeding the 'general-task' catch-all here makes
+  // resolveWorkspaceId's tier 4 match BEFORE ever reaching the fragile tier-5
+  // fallback — the actual fix, not a workaround for the podcast gate itself.
+  run(
+    "INSERT OR IGNORE INTO workspaces(id,slug,name,icon,company_id,sort_order,created_at,updated_at) VALUES ('general-task','general-task','General Task','📋','default',9999,?,?)",
+    [n, n],
   );
   statusPOST = (await import('../../src/app/api/tasks/[id]/status/route')).POST;
   ingestPOST = (await import('../../src/app/api/tasks/ingest/route')).POST;
@@ -132,16 +149,6 @@ test.after(() => {
 test('FIX 56 proof a: stale expectedFrom → TransitionError CAS_CONFLICT, nothing written', async () => {
   const { id, status: created } = await ingest();
   assert.equal(created, 201, 'ingest must succeed');
-  // TEMP DIAGNOSTIC (CI-only intermittent failure, unreproducible locally —
-  // see PR #293): dump the full row + its events BEFORE the assertion so the
-  // cause is visible in CI logs even when this fails. Remove once root-caused.
-  const diagRow = q1<Record<string, unknown>>('SELECT * FROM tasks WHERE id = ?', [id]);
-  const diagEvents = qAll<Record<string, unknown>>(
-    'SELECT type, message, created_at FROM events WHERE task_id = ? ORDER BY created_at',
-    [id],
-  );
-  console.error('[DIAG fix56] row:', JSON.stringify(diagRow));
-  console.error('[DIAG fix56] events:', JSON.stringify(diagEvents));
   assert.equal(taskRow(id)?.status, 'backlog');
 
   // The caller declared the card in 'assigned'; it is actually 'backlog' —

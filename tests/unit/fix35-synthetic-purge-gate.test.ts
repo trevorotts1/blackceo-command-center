@@ -32,12 +32,11 @@
 import './_isolated-db';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, copyFileSync, rmSync, statSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, copyFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { NextRequest } from 'next/server';
-import { getDb } from '../../src/lib/db';
-import DiagDatabase from 'better-sqlite3'; // TEMP DIAGNOSTIC import — see PR #293, remove with the diagnostic block below.
+import { getDb, closeDb } from '../../src/lib/db';
 
 const HYGIENE = path.join(process.cwd(), 'scripts', 'fix35-presentation-board-hygiene.py');
 const CONFIRM_VALUE = 'I-UNDERSTAND-THIS-PURGES-LIVE-BOARD-ROWS';
@@ -51,6 +50,23 @@ let clientTaskId: string;   // done, has to-done event → untouched
 let unknownRowId: string;   // done, zero task_events → unknown provenance, archived
 let workspaceId: string;
 
+/**
+ * CI-ONLY WAL-STALENESS FIX (confirmed via PR #293's diagnostic CI run, not
+ * reproducible on macOS): the hygiene script writes through its OWN sqlite3
+ * connection in a separate `python3` subprocess. getDb()'s long-lived
+ * connection (open since beforeAll) is a SEPARATE reader; on GitHub Actions'
+ * Linux runners it was observed to keep serving a STALE pre-write snapshot
+ * (a fresh, newly-opened connection to the SAME file saw the correct
+ * post-write row — archived_at correctly stamped — while getDb()'s cached
+ * connection still returned archived_at=null for the identical query,
+ * moments later). closeDb() drops the cached handle so the NEXT getDb() call
+ * opens a genuinely fresh connection, guaranteeing every assertion after a
+ * `--apply` run reads the subprocess's actual committed state rather than a
+ * stale WAL snapshot. Called after every runHygiene() invocation (a no-op
+ * cost for dry-run calls, which write nothing) rather than only the one call
+ * that happened to trip it, since every other `--apply` call in this file is
+ * exposed to the identical risk.
+ */
 function runHygiene(args: string[], env: Record<string, string>): { status: number; out: string } {
   try {
     const out = execFileSync('python3', [HYGIENE, ...args], {
@@ -62,6 +78,8 @@ function runHygiene(args: string[], env: Record<string, string>): { status: numb
   } catch (err: unknown) {
     const e = err as { status?: number; stdout?: string; stderr?: string };
     return { status: e.status ?? 1, out: `${e.stdout ?? ''}${e.stderr ?? ''}` };
+  } finally {
+    closeDb();
   }
 }
 
@@ -250,34 +268,6 @@ describe('FIX 35 hygiene script — gated --apply on a THROWAWAY fixture DB', ()
     );
     expect(status).toBe(5);
     expect(out).toContain('archived (soft, reversible)');
-
-    // TEMP DIAGNOSTIC (CI-only intermittent failure, unreproducible locally
-    // across isolated/paired/full-suite/single-fork vitest runs — see PR
-    // #293): dump the full subprocess stdout, a FRESH raw connection's view
-    // of the row (bypassing the getDb() singleton entirely, to rule out a
-    // stale-connection read), and the db file's own stat info, all BEFORE
-    // the assertion so the cause is visible in CI logs even when this fails.
-    // Remove once root-caused.
-    const freshCon = new DiagDatabase(dbPath, { readonly: true });
-    let freshRow: unknown;
-    try {
-      freshRow = freshCon.prepare('SELECT id, archived_at, updated_at FROM tasks WHERE id = ?').get(synthDoneId);
-    } finally {
-      freshCon.close();
-    }
-    const cachedRow = getDb().prepare('SELECT id, archived_at, updated_at FROM tasks WHERE id = ?').get(synthDoneId);
-    console.error('[DIAG fix35] full subprocess stdout:\n' + out);
-    console.error('[DIAG fix35] dbPath:', dbPath);
-    console.error('[DIAG fix35] fresh-connection row:', JSON.stringify(freshRow));
-    console.error('[DIAG fix35] getDb()-singleton row:', JSON.stringify(cachedRow));
-    try {
-      console.error('[DIAG fix35] db stat:', JSON.stringify(statSync(dbPath)));
-    } catch (e) { console.error('[DIAG fix35] db stat failed:', e); }
-    for (const suffix of ['-wal', '-shm']) {
-      try {
-        console.error(`[DIAG fix35] ${suffix} stat:`, JSON.stringify(statSync(dbPath + suffix)));
-      } catch (e) { console.error(`[DIAG fix35] ${suffix} stat failed (may not exist):`, String(e)); }
-    }
 
     // Synthetic rows: archived, NOT deleted.
     const live = getDb().prepare('SELECT title FROM tasks WHERE id = ?').get(synthDoneId) as { title: string };
