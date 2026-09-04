@@ -55,6 +55,7 @@ function signedPost(
 
 let run: (sql: string, params?: unknown[]) => unknown;
 let q1: <T>(sql: string, params?: unknown[]) => T | undefined;
+let qAll: <T>(sql: string, params?: unknown[]) => T[];
 let close: () => void;
 let statusPOST: Function;
 let ingestPOST: (req: NextRequest) => Promise<Response>;
@@ -96,6 +97,7 @@ test.before(async () => {
   const db = await import('../../src/lib/db');
   run = db.run;
   q1 = db.queryOne;
+  qAll = db.queryAll;
   close = db.closeDb;
   db.getDb();
   const n = new Date().toISOString();
@@ -130,6 +132,16 @@ test.after(() => {
 test('FIX 56 proof a: stale expectedFrom → TransitionError CAS_CONFLICT, nothing written', async () => {
   const { id, status: created } = await ingest();
   assert.equal(created, 201, 'ingest must succeed');
+  // TEMP DIAGNOSTIC (CI-only intermittent failure, unreproducible locally —
+  // see PR #293): dump the full row + its events BEFORE the assertion so the
+  // cause is visible in CI logs even when this fails. Remove once root-caused.
+  const diagRow = q1<Record<string, unknown>>('SELECT * FROM tasks WHERE id = ?', [id]);
+  const diagEvents = qAll<Record<string, unknown>>(
+    'SELECT type, message, created_at FROM events WHERE task_id = ? ORDER BY created_at',
+    [id],
+  );
+  console.error('[DIAG fix56] row:', JSON.stringify(diagRow));
+  console.error('[DIAG fix56] events:', JSON.stringify(diagEvents));
   assert.equal(taskRow(id)?.status, 'backlog');
 
   // The caller declared the card in 'assigned'; it is actually 'backlog' —

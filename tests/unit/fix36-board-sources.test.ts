@@ -51,6 +51,7 @@ function signedPost(id: string, body: Record<string, unknown>): NextRequest {
 
 let run: Function;
 let q1: Function;
+let qAll: Function;
 let close: Function;
 let POST: Function;
 let WSID: string;
@@ -92,6 +93,7 @@ test.before(async () => {
   const db = await import('../../src/lib/db');
   run = db.run;
   q1 = db.queryOne;
+  qAll = db.queryAll;
   close = db.closeDb;
   db.getDb();
   const n = new Date().toISOString();
@@ -150,6 +152,16 @@ test('ingest source garbage → status in_progress via signed POST → 403 (fail
   assert.ok(id, 'ingest itself is not source-gated — the card still exists');
   const res = await statusPost(id, { status: 'in_progress' });
   assert.equal(res.status, 403, 'garbage source must stay rejected with 403');
+  // TEMP DIAGNOSTIC (CI-only intermittent failure, unreproducible locally —
+  // see PR #293): dump the full row + its events BEFORE the assertion so the
+  // cause is visible in CI logs even when this fails. Remove once root-caused.
+  const diagRow = q1<Record<string, unknown>>('SELECT * FROM tasks WHERE id = ?', [id]);
+  const diagEvents = qAll<Record<string, unknown>>(
+    'SELECT type, message, created_at FROM events WHERE task_id = ? ORDER BY created_at',
+    [id],
+  );
+  console.error('[DIAG fix36] row:', JSON.stringify(diagRow));
+  console.error('[DIAG fix36] events:', JSON.stringify(diagEvents));
   assert.equal(st(id), 'backlog', 'and the card must NOT move');
 });
 
