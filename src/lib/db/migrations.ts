@@ -6096,6 +6096,105 @@ export const migrations: Migration[] = [
       }
     },
   },
+  {
+    id: '130',
+    name: 'add_tasks_slide_count',
+    up: (db) => {
+      // FIX 52 (MASTER Part 8 / [R5A §H5]) — presentation deck-run cards carry
+      // the deck's slide count so the board and Fix 3's re-ingest gate can show
+      // and compare progress without re-reading the producer manifest. The
+      // producer (cc_board.py / presentation_job.py) posts `slide_count` at
+      // ingest; the ingest route stamps it onto the child card. Additive +
+      // nullable — every non-presentation task keeps slide_count NULL, so this
+      // never touches existing rows or routes.
+      //
+      // REVERSIBILITY (this framework has no auto-down; purely additive so
+      // leaving it in place is always safe). Manual rollback if ever required:
+      //   ALTER TABLE tasks DROP COLUMN slide_count;  -- SQLite >= 3.35 (better-sqlite3 12.x bundles >= 3.45)
+      //   DELETE FROM _migrations WHERE id = '130';
+      console.log('[Migration 130] Adding tasks.slide_count...');
+      const tasksExists = db
+        .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks'")
+        .get();
+      if (!tasksExists) {
+        console.log('[Migration 130] tasks table absent — nothing to add');
+        return;
+      }
+
+      const cols = (db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[]).map(
+        (c) => c.name,
+      );
+      if (!cols.includes('slide_count')) {
+        db.exec('ALTER TABLE tasks ADD COLUMN slide_count INTEGER');
+        console.log('[Migration 130] Added tasks.slide_count');
+      } else {
+        console.log('[Migration 130] tasks.slide_count already present');
+      }
+    },
+  },
+  {
+    // FIX 53a (MASTER Part 8 / [R5A §E, §H6]) — stage timings linked to tasks.
+    // The stage-timings ingest (migration 127) landed rows keyed ONLY by
+    // run_id, so a run's history could not be joined back to the deck-run card
+    // that produced it and the phase stepper could not show real elapsed
+    // times. This adds a nullable `task_id` column plus a task-scoped lookup
+    // index. Nullable + additive: rows that arrive without a task id (older
+    // producer builds) keep working; no DEFAULT, no CHECK, so the ALTER can
+    // never fail on existing data. The batch route (FIX 53a) validates the
+    // optional task_id and writes it through; the per-task GET route (FIX 53b)
+    // and the phases route read it back.
+    //
+    // REVERSIBILITY (this framework has no auto-down; purely additive so
+    // leaving it in place is always safe). Manual rollback if ever required:
+    //   DROP INDEX IF EXISTS idx_presentation_stage_timings_task;
+    //   ALTER TABLE presentation_stage_timings DROP COLUMN task_id;  -- SQLite >= 3.35
+    //   DELETE FROM _migrations WHERE id = '131';
+    id: '131',
+    name: 'add_presentation_stage_timings_task_id',
+    up: (db) => {
+      console.log('[Migration 131] Adding presentation_stage_timings.task_id...');
+      const tableExists = db
+        .prepare(
+          "SELECT 1 FROM sqlite_master WHERE type='table' AND name='presentation_stage_timings'",
+        )
+        .get();
+      if (!tableExists) {
+        // Minimal-fixture guard (migration 128 convention): a hand-built test
+        // fixture can pre-seed the ledger without the timings table. On every
+        // real database migration 127 (or schema.ts on a fresh box) has
+        // already created it, so this branch never triggers in production —
+        // and migration 127 itself recreates the table with task_id included
+        // when it re-runs on a fixture where the ledger lost its 127 row.
+        console.log(
+          '[Migration 131] presentation_stage_timings absent (minimal fixture); nothing to add',
+        );
+        return;
+      }
+
+      const cols = (
+        db
+          .prepare('PRAGMA table_info(presentation_stage_timings)')
+          .all() as { name: string }[]
+      ).map((c) => c.name);
+      if (!cols.includes('task_id')) {
+        db.exec('ALTER TABLE presentation_stage_timings ADD COLUMN task_id TEXT');
+        console.log('[Migration 131] Added presentation_stage_timings.task_id');
+      } else {
+        console.log('[Migration 131] presentation_stage_timings.task_id already present');
+      }
+
+      // Unconditional CREATE INDEX IF NOT EXISTS (migration-128 ordering-suite
+      // rule: never index inside a column-absence guard — a fresh install
+      // where 127 already declared the column would skip the guard branch and
+      // never get the index). Indexing inside the guard is also the DATA-01
+      // class of lie the ordering suite exists to catch.
+      db.exec(
+        `CREATE INDEX IF NOT EXISTS idx_presentation_stage_timings_task
+           ON presentation_stage_timings (task_id, event)`,
+      );
+      console.log('[Migration 131] idx_presentation_stage_timings_task ready');
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner

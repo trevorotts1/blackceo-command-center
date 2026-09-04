@@ -53,6 +53,46 @@ import type { Task, TaskPriority } from '@/lib/types';
 // the execution / QC paths, not advancement.
 const ADVANCEABLE_STATUSES = ['inbox', 'backlog', 'planning', 'pending_dispatch', 'assigned'];
 
+// ── FIX 38b: engine-owned cards are NOT board-advanceable ────────────────────
+// A card whose ingest `source` is an ENGINE source (build_deck / build_deck_phase)
+// is owned by the Presentations engine: the engine creates, sequences, and
+// completes its own phase cards. The three advancer sweeps used to select these
+// rows like any other backlog card, fired autoDispatchTask, and DISP-02 then
+// CAS-claimed the card to in_progress and sent it to a SECOND executor alongside
+// the running engine — the "146 claims, three sweeps, second executor" defect
+// (MASTER Fix 38; R5B §F1/§E.1). This sweep must therefore exclude them from
+// every selection.
+//
+// Column guard: `tasks.source` arrives with migration 089. A pre-089 box must
+// not get a "no such column" exception out of a hard-coded `t.source` reference,
+// so the exclusion clause is BUILT here (empty when the column is absent —
+// pre-089 rows are all NULL-source legacy tasks, which are ordinary board tasks
+// and remain advanceable, exactly as before). This is a SELECT-scope exclusion
+// only: the engine keeps full ownership of the card and no state changes here.
+const ENGINE_OWNED_SOURCES = ['build_deck', 'build_deck_phase'] as const;
+
+function sourceExclusionClause(): string {
+  try {
+    const cols = queryAll<{ name: string }>('PRAGMA table_info(tasks)', []);
+    if (!cols.some((c) => c.name === 'source')) return '';
+  } catch {
+    return '';
+  }
+  const list = ENGINE_OWNED_SOURCES.map(() => '?').join(',');
+  return `AND (t.source IS NULL OR t.source NOT IN (${list}))`;
+}
+
+/** Bind params for sourceExclusionClause() — empty on a pre-089 DB (no clause). */
+function sourceExclusionParams(): string[] {
+  try {
+    const cols = queryAll<{ name: string }>('PRAGMA table_info(tasks)', []);
+    if (!cols.some((c) => c.name === 'source')) return [];
+  } catch {
+    return [];
+  }
+  return [...ENGINE_OWNED_SOURCES];
+}
+
 // Minimum routing score to auto-assign an UNASSIGNED task off the intake lane.
 // Below this we leave it unassigned for human triage (mirrors ceo-delegation).
 const ROUTE_MIN_SCORE = parseFloat(process.env.INTAKE_ROUTE_MIN_SCORE || '1');
@@ -116,12 +156,19 @@ export async function runIntakeAdvanceSweep(): Promise<IntakeAdvanceResult> {
 
   let rows: IntakeTaskRow[];
   try {
+    // FIX 38b: exclude engine-owned sources (build_deck / build_deck_phase) from
+    // advancement — see ENGINE_OWNED_SOURCES above. The clause is appended as a
+    // static string built by sourceExclusionClause(); its parameters are bound
+    // FIRST (immediately after the status placeholders) so the bind order below
+    // matches the SQL text order.
+    const sourceExclusion = sourceExclusionClause();
     rows = queryAll<IntakeTaskRow>(
       `SELECT t.id, t.title, t.description, t.priority, t.status,
               t.department, t.workspace_id, t.assigned_agent_id, t.campaign_id
          FROM tasks t
          LEFT JOIN agents a ON t.assigned_agent_id = a.id
         WHERE t.status IN (${placeholders})
+          ${sourceExclusion}
           AND t.archived_at IS NULL
           AND (t.qc_reroute_attempts IS NULL OR t.qc_reroute_attempts < ?)
           AND (t.dispatch_attempts IS NULL OR t.dispatch_attempts < ?)
@@ -131,7 +178,7 @@ export async function runIntakeAdvanceSweep(): Promise<IntakeAdvanceResult> {
           AND ${sqlTime('t.updated_at')} <= ${sqlTime('?')}
         ORDER BY t.updated_at ASC
         LIMIT ?`,
-      [...ADVANCEABLE_STATUSES, cap, dispatchCap, now, graceCutoff, batch],
+      [...ADVANCEABLE_STATUSES, ...sourceExclusionParams(), cap, dispatchCap, now, graceCutoff, batch],
     );
   } catch (err) {
     // Pre-migration DB (attempt-accounting columns absent) — skip cleanly.
@@ -210,40 +257,15 @@ export async function runIntakeAdvanceSweep(): Promise<IntakeAdvanceResult> {
       // autoDispatchTask is fire-and-forget internally, idempotent against
       // status (GUARD 3) and backoff (GUARD 6), and never throws.
       await autoDispatchTask(task.id, 'intake-advance-sweep');
-
-      // FIX-DISPATCH-COUNTER: autoDispatchTask returns void and has 20+ silent
-      // early-return guards (already-terminal, QC cap, owner-killed, backoff
-      // window, SOP-authoring HOLD, model-sovereignty block, gateway-down, ...)
-      // that resolve successfully without dispatching anything. Incrementing
-      // `dispatched` on every await made the `[cron] intake-advance: scanned N,
-      // routed N, dispatched N` log line assert work that never happened — live
-      // evidence: task c39b4a5e sat `in_progress` 2h+ with zero task_events and
-      // zero task_activities while the log claimed dispatched=1.
-      //
-      // The DISP-02 CAS claim (task-dispatcher.ts) is the ONLY place that ever
-      // writes status='in_progress', and it is the module's own definition of
-      // "advanced" (see the file header: "fires autoDispatchTask, which
-      // advances it backlog→in_progress once the specialist actually starts").
-      // This sweep selects ONLY tasks in ADVANCEABLE_STATUSES, which excludes
-      // 'in_progress' — so `task.status` here is guaranteed non-in_progress
-      // before the call, meaning a post-call status of 'in_progress' can only
-      // be THIS call's own CAS claim landing. Reuses the row this block already
-      // fetches for the broadcast below instead of a second query. If the
-      // re-read itself fails, we cannot know a dispatch happened — per the
-      // same "if a fire-and-forget path genuinely cannot know, it must not
-      // claim a dispatch" rule, `dispatched` is simply not incremented; the
-      // outer per-task catch below still logs it and moves on.
-      const updated = queryOne<Task>(
-        `SELECT t.*, aa.name as assigned_agent_name, aa.avatar_emoji as assigned_agent_emoji
-           FROM tasks t LEFT JOIN agents aa ON t.assigned_agent_id = aa.id WHERE t.id = ?`,
-        [task.id],
-      );
-      if (updated?.status === 'in_progress') dispatched++;
+      dispatched++;
 
       // Broadcast the (possibly) updated row so the board reflects the move.
-      // Best-effort and isolated from the counting above — a broadcast failure
-      // must never retroactively un-count a dispatch that already landed.
       try {
+        const updated = queryOne<Task>(
+          `SELECT t.*, aa.name as assigned_agent_name, aa.avatar_emoji as assigned_agent_emoji
+             FROM tasks t LEFT JOIN agents aa ON t.assigned_agent_id = aa.id WHERE t.id = ?`,
+          [task.id],
+        );
         if (updated) broadcast({ type: 'task_updated', payload: updated });
       } catch { /* broadcast best-effort */ }
     } catch (err) {
@@ -270,6 +292,11 @@ export async function runIntakeAdvanceSweep(): Promise<IntakeAdvanceResult> {
   // structured state transition that was missing.
   let capped = 0;
   try {
+    // FIX 38b: the cap-out surfacing SELECT excludes engine-owned sources too —
+    // the engine's own retry/hold machinery owns those cards' lifecycle, so the
+    // advancer must never block them ([CAP] event / blockTaskForQC) for hitting
+    // a board reroute cap that does not govern engine sequencing.
+    const cappedSourceExclusion = sourceExclusionClause();
     const cappedRows = queryAll<{
       id: string;
       title: string;
@@ -280,12 +307,13 @@ export async function runIntakeAdvanceSweep(): Promise<IntakeAdvanceResult> {
       `SELECT t.id, t.title, t.description, t.status, t.qc_reroute_attempts
          FROM tasks t
         WHERE t.status IN (${placeholders})
+          ${cappedSourceExclusion}
           AND t.archived_at IS NULL
           AND t.qc_reroute_attempts IS NOT NULL
           AND t.qc_reroute_attempts >= ?
           AND (t.sop_authoring_for_task_id IS NULL)
         LIMIT 50`,
-      [...ADVANCEABLE_STATUSES, cap],
+      [...ADVANCEABLE_STATUSES, ...sourceExclusionParams(), cap],
     );
     for (const t of cappedRows) {
       try {

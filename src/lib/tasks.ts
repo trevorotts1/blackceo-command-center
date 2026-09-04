@@ -2309,6 +2309,16 @@ export interface CreateTaskCoreInput {
   topic_persona_id?: string | null;
   task_persona_ids?: string[] | null;
   bundle_sha?: string | null;
+  /**
+   * FIX 56 (W4.1) — OPTIONAL doc-pointer references attached at ingest (the CEO
+   * / caller telling the receiving specialist where specific docs live). The
+   * ingest route validates to a string[] (blank entries dropped, max 20) before
+   * this is ever reached. createTaskCore folds them into the card's description
+   * as a "Context refs:" provenance line — the description is the ONLY channel
+   * that survives to dispatch, where buildContextPack's `contextRefs` reader
+   * picks it up for the receiving agent's handoff.
+   */
+  context_refs?: string[] | null;
 }
 
 export interface CreateTaskCoreResult {
@@ -2388,11 +2398,20 @@ export async function createTaskCore(
       .replace(/\\/g, '\\\\')
       .replace(/%/g, '\\%')
       .replace(/_/g, '\\_');
-    const existing = queryOne<{ task_id: string }>(
-      "SELECT task_id FROM events WHERE type = 'task_created' AND message LIKE ? ESCAPE '\\' AND task_id IS NOT NULL ORDER BY created_at ASC LIMIT 1",
+    // FIX 40 — iterate ALL matching events NEWEST first and dedupe onto the
+    // first LIVE task. The old ORDER BY created_at ASC LIMIT 1 anchored on the
+    // oldest event, so a key whose earliest task had since been archived deduped
+    // onto a dead card (or blocked the key entirely) instead of onto the newest
+    // live match. A missing task row (event pointing at a deleted id) is skipped
+    // the same way. When NO live match exists, fall through to Layer 2 / insert
+    // instead of returning early — the fresh insert logs its own task_created
+    // event carrying [ingest:<key>], so a second ingest with the same key
+    // dedupes onto it.
+    const eventTaskIds = queryAll<{ task_id: string }>(
+      "SELECT task_id FROM events WHERE type = 'task_created' AND message LIKE ? ESCAPE '\\' AND task_id IS NOT NULL ORDER BY created_at DESC",
       [`%[ingest:${escapedKey}]%`],
     );
-    if (existing?.task_id) {
+    for (const { task_id } of eventTaskIds) {
       const priorTask = queryOne<Task>(
         `SELECT t.*,
             aa.name  as assigned_agent_name,
@@ -2403,9 +2422,11 @@ export async function createTaskCore(
          LEFT JOIN agents aa ON t.assigned_agent_id  = aa.id
          LEFT JOIN agents ca ON t.created_by_agent_id = ca.id
          WHERE t.id = ?`,
-        [existing.task_id],
+        [task_id],
       );
-      if (priorTask) {
+      // DISP-12 doctrine: a task is archived iff `archived_at` IS NOT NULL —
+      // there is no 'archived' status value to compare against.
+      if (priorTask && !priorTask.archived_at) {
         return { task: priorTask, deduped: true };
       }
     }
@@ -2435,6 +2456,40 @@ export async function createTaskCore(
 
   const id = uuidv4();
   const now = new Date().toISOString();
+
+  // FIX 56 (W4.1) — context_refs: append the caller's doc pointers to the
+  // description as a "Context refs:" provenance line. The ingest route folds
+  // its own copy into the description BEFORE calling createTaskCore, so this
+  // append is keyed on the structured field only (dedup-safe: a caller that
+  // passed both shapes never gets two lines). Capped at 20 refs / 2,000 chars
+  // and folded into the description's own 10,000-char budget with the same
+  // trim-the-oldest rule the PATCH/status note appends use.
+  const CONTEXT_REFS_MAX_CHARS = 2000;
+  let contextRefsLine: string | null = null;
+  if (Array.isArray(input.context_refs) && input.context_refs.length > 0) {
+    const refs = input.context_refs.filter((r) => typeof r === 'string' && r.trim()).slice(0, 20);
+    if (refs.length > 0) {
+      const joined = refs.join(', ');
+      contextRefsLine = `Context refs: ${joined.length > CONTEXT_REFS_MAX_CHARS ? joined.slice(0, CONTEXT_REFS_MAX_CHARS) : joined}`;
+    }
+  }
+  let resolvedDescription: string | null = input.description || null;
+  if (contextRefsLine) {
+    // FIX 56 (W4.1) dedup: the ingest route folds its OWN "Context refs:" line
+    // into the description's provenance block before calling createTaskCore
+    // AND passes the structured field — appending unconditionally stamped every
+    // ingest with the SAME line twice. Skip the append when the description
+    // already carries this exact line (UI-created tasks with context_refs
+    // still get it appended once here).
+    const alreadyFolded =
+      resolvedDescription !== null && resolvedDescription.includes(contextRefsLine);
+    if (!alreadyFolded) {
+      const base = resolvedDescription ?? '';
+      const joined = base ? `${base}\n\n${contextRefsLine}` : contextRefsLine;
+      resolvedDescription =
+        joined.length <= 10000 ? joined : joined.slice(joined.length - 10000);
+    }
+  }
 
   // Derive workspace_id from the canonical department slug when not explicitly
   // supplied, instead of falling back to 'default' (which has no row in the
@@ -2572,7 +2627,7 @@ export async function createTaskCore(
     [
       id,
       input.title,
-      input.description || null,
+      resolvedDescription,
       status,
       resolvedPriority,
       input.assigned_agent_id || null,

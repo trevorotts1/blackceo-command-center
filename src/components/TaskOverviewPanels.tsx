@@ -16,6 +16,11 @@
 import { useEffect, useState } from 'react';
 import { Bot, FileText, GitBranch, AlertTriangle, ChevronDown, Users, CheckCircle2, RotateCw, Clock, Package, Info } from 'lucide-react';
 import type { Task } from '@/lib/types';
+// FIX 36 — the recognized board-producer source set + normalizer now live in
+// ONE canonical module (src/lib/board-sources.ts) shared with
+// /api/tasks/[id]/status, so the 403 gate and this panel's honest empty-copy
+// can never drift apart again. The panel adds only the human LABELS on top.
+import { RECOGNIZED_BOARD_SOURCES, normalizeBoardSource } from '@/lib/board-sources';
 // U42 (C-11) — reuse the EXACT card-face chip components for the modal's
 // multi-persona plan + per-page/per-part scoped-blend rows. Single source: the
 // modal must never re-derive or restate what the board card already renders,
@@ -41,9 +46,11 @@ function formatScore(score?: number | null): string | null {
 
 /**
  * U42 (C-11) sub-item 2 — "honest engine-card persona surface". Recognized
- * board-producer sources (INGEST-10 `RECOGNIZED_BOARD_SOURCES`,
- * `app/api/tasks/[id]/status/route.ts:177`): Skill 6 (funnel/survey/
- * web-development) and the Anthology Engine (anthology). Producer-ingested
+ * board-producer sources (INGEST-10 `RECOGNIZED_BOARD_SOURCES`, now imported
+ * from src/lib/board-sources.ts per FIX 36): Skill 6 (funnel/survey/
+ * web-development), the Anthology Engine (anthology), and the Presentations
+ * engine (build_deck / presentations / build_deck_phase /
+ * presentation-interview-app). Producer-ingested
  * cards are NOT routed through the CC selector the way an organic task is
  * (C+I.0 point 13 / D-C3 grounding: producer cards move themselves, no CC
  * dispatch routing fires from this card family), so the generic "one is
@@ -60,6 +67,11 @@ const RECOGNIZED_ENGINE_SOURCES: Record<string, string> = {
   anthology: 'the Anthology Engine',
   // U030 (audit E1) — the presentations deck-build producer.
   build_deck: 'the presentations deck build',
+  // FIX 36 — the two engine sources the status route already recognizes but
+  // this panel's label map was missing: per-phase child cards and the
+  // interview app's own cards.
+  build_deck_phase: 'a presentations deck phase build',
+  'presentation-interview-app': 'the presentations interview app',
 };
 
 const LEGACY_ENGINE_SOURCE_MARKER = /^Source:\s*(funnel|survey|web-development|anthology)\s*$/m;
@@ -68,15 +80,29 @@ const LEGACY_ENGINE_SOURCE_MARKER = /^Source:\s*(funnel|survey|web-development|a
 // GatePanel-adjacent Planning/Activity/Deliverables/Sessions tabs in
 // TaskModal) resolve the SAME producer label this panel already proved out in
 // U42, instead of re-deriving the source→label mapping a second time.
+//
+// FIX 36 — membership comes from the shared RECOGNIZED_BOARD_SOURCES set via
+// normalizeBoardSource() (not a second hand-rolled list), and a STAMPED source
+// that the set recognizes but that carries no display label still resolves to
+// the normalized source itself instead of falling through to null.
 export function engineSourceLabel(task: Pick<Task, 'source' | 'description'>): string | null {
-  const stamped = typeof task.source === 'string' ? task.source.trim().toLowerCase() : '';
-  if (stamped && RECOGNIZED_ENGINE_SOURCES[stamped]) return RECOGNIZED_ENGINE_SOURCES[stamped];
-  if (!stamped && typeof task.description === 'string') {
-    const m = task.description.match(LEGACY_ENGINE_SOURCE_MARKER);
-    if (m) return RECOGNIZED_ENGINE_SOURCES[m[1]] ?? null;
+  const normalized = normalizeBoardSource(task.source);
+  if (normalized) return RECOGNIZED_ENGINE_SOURCES[normalized] ?? normalized;
+  if (
+    typeof task.source !== 'string' &&
+    typeof task.description === 'string' &&
+    task.description.match(LEGACY_ENGINE_SOURCE_MARKER)
+  ) {
+    const m = task.description.match(LEGACY_ENGINE_SOURCE_MARKER)!;
+    return RECOGNIZED_ENGINE_SOURCES[m[1]] ?? null;
   }
   return null;
 }
+
+// FIX 36 — re-exported so consumers (TaskModal's mirrored tabs) can ask
+// "is this a signed producer card?" from the same canonical set the 403 gate
+// uses, instead of duplicating the list a third time.
+export { RECOGNIZED_BOARD_SOURCES };
 
 /**
  * "Who's Working On This" — task persona (name + mode + score) with the stored

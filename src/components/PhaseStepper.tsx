@@ -236,6 +236,18 @@ export default function PhaseStepper({
                 className={`text-[10px] font-medium truncate ${textClass}`}
               >
                 {step.label}
+                {/* FIX 53 — wall-clock seconds from the stage-timings stream,
+                    shown only when a timing row exists for this label so a
+                    started-but-untimed phase never reads as "0s". */}
+                {step.elapsed_s != null && (
+                  <span className="ml-1 text-[9px] opacity-70 tabular-nums">
+                    {step.elapsed_s < 1
+                      ? `${Math.round(step.elapsed_s * 1000)}ms`
+                      : step.elapsed_s < 60
+                        ? `${step.elapsed_s % 1 === 0 ? step.elapsed_s : step.elapsed_s.toFixed(1)}s`
+                        : `${Math.floor(step.elapsed_s / 60)}m${Math.round(step.elapsed_s % 60)}s`}
+                  </span>
+                )}
               </span>
               {idx < totalCount - 1 && (
                 <span

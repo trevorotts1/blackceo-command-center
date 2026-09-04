@@ -16,6 +16,8 @@ import { isAnthologyTask } from './anthology/anthology-card';
 import { BoardToastStack, type BoardToastMessage } from './kanban/BoardToast';
 import { BlockTaskModal, type BlockTaskDetails } from './kanban/BlockTaskModal';
 import { MoveTaskMenu } from './kanban/MoveTaskMenu';
+import { StatusPill } from './kanban/StatusPill';
+import { BlockedPanel } from './kanban/BlockedPanel';
 // WI-15b (D1 Option B — NESTED subtasks): the parent+children card replaces
 // flat TaskCard rendering for the presentations department.
 import PresentationParentCard from './PresentationParentCard';
@@ -1417,6 +1419,14 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
                           // of the flat generic TaskCard.
                           const dept = canonicalDeptSlug(task.department);
                           if (dept === 'presentations') {
+                            // FIX 51b — the parent card gets the SAME card
+                            // face affordances as flat TaskCards: native drag
+                            // via the shared handleDragStart, column moves
+                            // through the shared handleColumnMove (incl. the
+                            // Blocked confirmation modal), the touch-friendly
+                            // MoveTaskMenu, and the full Task row (`t.*`
+                            // SELECT) so the shared BlockedPanel shows real
+                            // block state.
                             return (
                               <PresentationParentCard
                                 key={task.id}
@@ -1431,6 +1441,17 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
                                   );
                                   if (child) setEditingTask(child);
                                 }}
+                                onDragStart={(e) => handleDragStart(e, task)}
+                                onMove={(tid, targetColumnId) => {
+                                  if (tid !== task.id) return;
+                                  handleColumnMove(task, targetColumnId);
+                                }}
+                                columns={COLUMNS}
+                                currentColumnId={column.id}
+                                columnTaskCounts={Object.fromEntries(
+                                  COLUMNS.map((c) => [c.id, getTasksByStatus(c.id).length]),
+                                )}
+                                parentTask={task}
                               />
                             );
                           }
@@ -1531,34 +1552,8 @@ export function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted, 
   const toggleSelection = useMissionControl((s) => s.toggleTaskSelection);
 
 
-  // Status pill styles
-  const statusPillStyles: Record<string, string> = {
-    backlog: 'bg-gray-100 text-gray-600',
-    inbox: 'bg-gray-100 text-gray-600',
-    planning: 'bg-gray-100 text-gray-600',
-    assigned: 'bg-gray-100 text-gray-600',
-    pending_dispatch: 'bg-gray-100 text-gray-600',
-    in_progress: 'bg-blue-100 text-blue-700',
-    review: 'bg-amber-100 text-amber-700',
-    testing: 'bg-amber-100 text-amber-700',
-    blocked: 'bg-red-100 text-red-700',
-    done: 'bg-emerald-100 text-emerald-700',
-  };
-
-  const statusLabels: Record<string, string> = {
-    // P2-01: matches the renamed "Being Prepared" column so a card's own
-    // status pill never contradicts the column it's sitting in.
-    backlog: BACKLOG_COLUMN_LABEL,
-    inbox: 'New',
-    planning: 'Planning',
-    assigned: 'Queued',
-    pending_dispatch: 'Pending',
-    in_progress: 'In Progress',
-    review: 'Review',
-    testing: 'Testing',
-    blocked: 'Blocked',
-    done: 'Done',
-  };
+  // Status pill — FIX 51a: extracted to kanban/StatusPill.tsx (shared with
+  // PresentationParentCard); style/label maps no longer live here.
 
   // Priority pill styles (for new pill tags)
   const priorityPillStyles: Record<string, string> = {
@@ -1638,12 +1633,8 @@ export function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted, 
 
       {/* Pill Tags Row */}
       <div className="flex flex-wrap gap-1.5 mb-3">
-        {/* Status Pill */}
-        <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
-          statusPillStyles[task.status] || 'bg-gray-100 text-gray-600'
-        }`}>
-          {statusLabels[task.status] || task.status}
-        </span>
+        {/* Status Pill — FIX 51a: shared extracted component (kanban/StatusPill.tsx) */}
+        <StatusPill status={task.status} />
 
         {/* P2-01 step 2 — "why is this here?" affordance: on a Being-Prepared
             (backlog) card, shows WHICH triad element(s) are still missing.
@@ -1814,60 +1805,9 @@ export function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted, 
         </p>
       )}
 
-      {/* Block transparency panel — only rendered when the task is blocked and has block fields */}
-      {task.status === 'blocked' && (task.block_reason || task.block_needs || task.block_audience) && (
-        <div className="mb-3 rounded-lg border border-red-100 bg-red-50 px-3 py-2 text-xs space-y-1"
-          data-testid="card-face-blocked-panel">
-          {/* Audience badge */}
-          {task.block_audience && (
-            <div className="flex items-center gap-1.5">
-              <span
-                className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide ${
-                  task.block_audience === 'SYSTEM'
-                    ? 'bg-purple-100 text-purple-700'
-                    : 'bg-red-100 text-red-700'
-                }`}
-              >
-                {task.block_audience === 'SYSTEM' ? 'System fix needed' : 'Owner action needed'}
-              </span>
-            </div>
-          )}
-          {/* Block reason */}
-          {task.block_reason && (
-            <p className="text-red-700 font-medium leading-snug line-clamp-2">
-              {task.block_reason}
-            </p>
-          )}
-          {/* Gaps */}
-          {task.block_gaps && (() => {
-            try {
-              const gaps: string[] = JSON.parse(task.block_gaps as string);
-              if (gaps.length > 0) {
-                return (
-                  <ul className="list-disc list-inside text-red-600 space-y-0.5 pl-0.5">
-                    {gaps.slice(0, 3).map((g, i) => (
-                      <li key={i} className="line-clamp-1">{g}</li>
-                    ))}
-                  </ul>
-                );
-              }
-            } catch { /* malformed JSON — skip */ }
-            return null;
-          })()}
-          {/* Needs / resolution action */}
-          {task.block_needs && (
-            <p className="text-red-600 italic leading-snug line-clamp-2">
-              Next step: {task.block_needs}
-            </p>
-          )}
-          {/* U061 — compact heal indicator on the card face only (detail in the modal) */}
-          {typeof task.dispatch_attempts === 'number' && task.dispatch_attempts > 0 && (
-            <p className="text-red-600 font-medium" data-testid="card-face-heal-attempts">
-              retrying — attempt {task.dispatch_attempts}
-            </p>
-          )}
-        </div>
-      )}
+      {/* Block transparency panel — FIX 51a: shared extracted component
+          (kanban/BlockedPanel.tsx); renders nothing unless blocked with fields */}
+      <BlockedPanel task={task} />
 
       {/* MR-38 — live phase progress stepper for ALL departments */}
       <div className="mt-2 pt-2 border-t border-gray-50">

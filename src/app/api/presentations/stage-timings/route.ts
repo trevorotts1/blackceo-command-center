@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createHmac } from 'crypto';
 import { getDb } from '@/lib/db';
 import { runMigrations } from '@/lib/db/migrations';
 import { StageTimingBatchSchema } from '@/lib/validation';
+import { verifyWebhookSignature } from '@/lib/webhook-signature';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -36,14 +36,6 @@ const MAX_BODY_BYTES = 64 * 1024;
 
 let selfHealDone = false;
 
-function verifyWebhookSignature(signature: string | null, rawBody: string): boolean {
-  const webhookSecret = process.env.WEBHOOK_SECRET;
-  if (!webhookSecret) return true; // Dev mode — skip validation.
-  if (!signature) return false;
-  const expected = createHmac('sha256', webhookSecret).update(rawBody).digest('hex');
-  return signature === expected;
-}
-
 export async function POST(request: NextRequest) {
   try {
     const rawBody = await request.text();
@@ -73,6 +65,8 @@ export async function POST(request: NextRequest) {
       );
     } else {
       const signature = request.headers.get('x-webhook-signature');
+      // FIX 56 — constant-time verify via the shared lib (src/lib/
+      // webhook-signature.ts). Wrong-length signature is a clean false, 401.
       if (!verifyWebhookSignature(signature, rawBody)) {
         console.warn('[STAGE-TIMINGS] Invalid signature attempt');
         return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -99,13 +93,20 @@ export async function POST(request: NextRequest) {
     // NOTE: the request body is already consumed above, so the self-heal path
     // retries ONLY the insert loop — never re-enters POST (a second
     // request.text() would hang or throw).
+    //
+    // FIX 53a ([R5A §E, §H6]): phase_exit rows now persist `task_id` (optional
+    // in the producer contract, validated in StageTimingExitSchema) and the
+    // real `error_class` — migration 127 gave the column, but this route
+    // previously hard-bound NULL into it, so every failure row landed
+    // unclassified. run_summary rows keep NULL for both: the summary carries
+    // no error class and predates task linkage.
     const writeRows = (): number => {
       const insert = db.prepare(`
         INSERT INTO presentation_stage_timings (
           run_id, event, phase_id, wave, model_used, started_at, ended_at,
           duration_s, status, return_code, error_class, total_wall_s,
-          phase_count, slowest_3, payload
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+          phase_count, slowest_3, payload, task_id
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
       `);
       let accepted = 0;
       for (const row of validated.data.rows) {
@@ -113,8 +114,10 @@ export async function POST(request: NextRequest) {
           insert.run(
             row.run_id, row.event, row.phase_id, row.wave ?? null,
             row.model_used ?? null, row.started_at, row.ended_at,
-            row.duration_s, row.status, row.return_code ?? null, null,
+            row.duration_s, row.status, row.return_code ?? null,
+            row.error_class ?? null,
             null, null, null, JSON.stringify(row),
+            row.task_id ?? null,
           );
         } else {
           insert.run(
@@ -122,6 +125,7 @@ export async function POST(request: NextRequest) {
             null, null, null, null,
             row.total_wall_s, row.phase_count, JSON.stringify(row.slowest_3),
             JSON.stringify(row),
+            null,
           );
         }
         accepted += 1;

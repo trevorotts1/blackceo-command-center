@@ -11,6 +11,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getDb } from '@/lib/db';
 import {
   computePhaseProgress,
+  phaseElapsedSeconds,
   PHASE_LABELS,
   PHASE_TO_LABEL,
 } from '@/lib/presentation-phases';
@@ -67,11 +68,72 @@ export async function GET(
       metadata?: string | null;
     }>;
 
+    // FIX 50b — SELECT path alongside deliverable_type: the teleprompter is
+    // detected by the basename of the registered path
+    // (presenter-teleprompter.html), not by its type — the registration
+    // contract's deliverable_type enum has no 'teleprompter' value.
     const deliverables = db
-      .prepare('SELECT deliverable_type FROM task_deliverables WHERE task_id = ?')
-      .all(taskId) as Array<{ deliverable_type: string }>;
+      .prepare(
+        'SELECT deliverable_type, path FROM task_deliverables WHERE task_id = ?',
+      )
+      .all(taskId) as Array<{ deliverable_type: string; path: string | null }>;
 
     const progress = computePhaseProgress(activities, deliverables);
+
+    // ── FIX 53 (R5A §E, §H6) — per-label elapsed from stage timings ──────
+    // The stage-timings ingest (W16b) lands the engine's phase_exit rows in
+    // presentation_stage_timings. W18b's migration 131 adds task_id so rows
+    // link to the task; until every box has it, the column is probed
+    // CO-OPERATIVELY (delete-guard.ts hasArchivedAtColumn pattern) and the
+    // lookup falls back to run_id = the task id — the engine names the run
+    // after the parent task, so child-card steppers resolve the same way.
+    // On an un-migrated box the query still runs without task_id; elapsed_s
+    // just stays null instead of crashing the whole endpoint (DATA-01).
+    let elapsed: Partial<Record<typeof PHASE_LABELS[number], number>> = {};
+    try {
+      const hasTaskIdCol = (
+        db.prepare(
+          `SELECT count(*) AS n FROM pragma_table_info('presentation_stage_timings') WHERE name = 'task_id'`,
+        ).get() as { n: number }
+      ).n > 0;
+      if (hasTaskIdCol) {
+        const rows = db
+          .prepare(
+            `SELECT run_id, phase_id, duration_s
+               FROM presentation_stage_timings
+              WHERE task_id = ? AND event = 'phase_exit'
+              ORDER BY id ASC`,
+          )
+          .all(taskId) as Array<{
+          run_id: string;
+          phase_id: string | null;
+          duration_s: number | null;
+        }>;
+        elapsed = phaseElapsedSeconds(rows);
+      } else {
+        const rows = db
+          .prepare(
+            `SELECT run_id, phase_id, duration_s
+               FROM presentation_stage_timings
+              WHERE run_id = ? AND event = 'phase_exit'
+              ORDER BY id ASC`,
+          )
+          .all(taskId) as Array<{
+          run_id: string;
+          phase_id: string | null;
+          duration_s: number | null;
+        }>;
+        elapsed = phaseElapsedSeconds(rows);
+      }
+    } catch (timingErr) {
+      // Missing table (fresh box predating migration 127) or a transient
+      // SQLite hiccup: elapsed is best-effort — never fail the phases read.
+      console.warn(
+        '[U060] stage-timings elapsed lookup skipped:',
+        timingErr instanceof Error ? timingErr.message : timingErr,
+      );
+      elapsed = {};
+    }
 
     // Determine current_phase: the last label that has been seen or the
     // Teleprompter if its deliverable exists, falling back to the first label
@@ -103,7 +165,9 @@ export async function GET(
         label: step.label,
         status: step.status,
         started_at: step.status !== 'not_started' ? null : null,
-        elapsed_s: null as number | null,
+        // FIX 53 — real wall-clock seconds per label from the stage-timings
+        // stream; null when that label has no timing row yet (stepper hides it).
+        elapsed_s: (elapsed[step.label] ?? null) as number | null,
         artifacts: [] as string[],
         percent: step.status === 'done' ? 100 : step.status === 'in_progress' ? 50 : 0,
       })),

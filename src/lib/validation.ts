@@ -59,12 +59,28 @@ export const TaskStatus = z.enum([
 
 const TaskPriority = z.enum(['low', 'medium', 'high', 'critical']);
 
+// FIX 37 (W16a-B2) — widened for the presentations engine producers. The board
+// engine's board.py posts `comment` progress notes and phase lifecycle rows
+// (`phase_started` / `phase_completed` / `error`) plus plain `progress` pings
+// through POST /api/tasks/[id]/activities; every one of these 400'd on the old
+// five-value enum ("Validation failed"), so no stepper pulse and no comment
+// ever reached task_activities. DB side needs no migration:
+// task_activities.activity_type is a free TEXT column (schema.ts:442), and the
+// TS-side ActivityType union in types.ts:547 is already broader than this gate
+// (it carries owner_message / agent_message / trust_*), so widening the gate
+// cannot break a consumer — this enum only VALIDATES, it is not a foreign key.
 const ActivityType = z.enum([
   'spawned',
   'updated',
   'completed',
   'file_created',
-  'status_changed'
+  'status_changed',
+  // FIX 37 — engine producer activity types:
+  'comment',
+  'progress',
+  'phase_started',
+  'phase_completed',
+  'error'
 ]);
 
 // QC-03: 'image' is a first-class deliverable type. Without it a mis-instructed
@@ -233,6 +249,10 @@ const StageTimingExitSchema = z.object({
   status: z.string().min(1),
   return_code: z.number().int().optional(),
   error_class: z.string().optional(),
+  // FIX 53a ([R5A §E, §H6]): the deck-run card this row belongs to, so
+  // timings join back to the task and the stepper shows real elapsed times.
+  // Optional — older producer builds omit it and stay valid.
+  task_id: z.string().min(1).optional(),
 });
 
 const StageTimingSummarySchema = z.object({

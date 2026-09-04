@@ -40,6 +40,40 @@ import type { Task } from '@/lib/types';
 // leave it on the CEO for a human exec decision.
 const CONFIDENCE_THRESHOLD = parseFloat(process.env.CEO_DELEGATION_MIN_SCORE || '1');
 
+// ── FIX 38b: engine-owned cards are NOT re-homable / re-dispatchable ─────────
+// A card whose ingest `source` is an ENGINE source (build_deck / build_deck_phase)
+// is owned by the Presentations engine, which sequences its own phases. The
+// delegation sweep used to select those rows from the CEO workspace and from the
+// QC-fail backlog query and re-home + re-dispatch them, making a SECOND executor
+// race the live engine run (MASTER Fix 38, R5B §F1/§E.1). Both SELECTs below
+// must therefore exclude them.
+//
+// Column guard: `tasks.source` arrives with migration 089. On a pre-089 box the
+// clause is omitted entirely (all rows are NULL-source legacy tasks and remain
+// eligible exactly as before) instead of throwing "no such column". File-local
+// helpers, same shape as the sibling sweeps (intake-advance-sweep,
+// backlog-redispatch-sweep) so the vocabulary cannot drift.
+const ENGINE_OWNED_SOURCES = ['build_deck', 'build_deck_phase'] as const;
+
+function tasksHaveSourceColumn(): boolean {
+  try {
+    const cols = queryAll<{ name: string }>('PRAGMA table_info(tasks)', []);
+    return cols.some((c) => c.name === 'source');
+  } catch {
+    return false;
+  }
+}
+
+function engineSourceExclusionClause(): string {
+  if (!tasksHaveSourceColumn()) return '';
+  const list = ENGINE_OWNED_SOURCES.map(() => '?').join(',');
+  return `AND (t.source IS NULL OR t.source NOT IN (${list}))`;
+}
+
+function engineSourceExclusionParams(): string[] {
+  return tasksHaveSourceColumn() ? [...ENGINE_OWNED_SOURCES] : [];
+}
+
 interface CeoTaskRow {
   id: string;
   title: string;
@@ -88,6 +122,8 @@ export async function runCeoDelegationSweep(): Promise<void> {
     // backoff + grace window + master exclusion (via LEFT JOIN, for symmetry
     // with branch 2 / backlog-redispatch; branch-1 tasks are unassigned so the
     // exclusion is a no-op here but keeps the two branches structurally aligned).
+    // FIX 38b: + engine-source exclusion (params bound right after the cap).
+    const sourceExclusion = engineSourceExclusionClause();
     const rows = queryAll<CeoTaskRow>(
       `SELECT t.id, t.title, t.description, t.priority, t.workspace_id, t.department, t.qc_reroute_attempts
        FROM tasks t
@@ -96,11 +132,12 @@ export async function runCeoDelegationSweep(): Promise<void> {
          AND t.status = 'backlog'
          AND t.assigned_agent_id IS NULL
          AND (t.qc_reroute_attempts IS NULL OR t.qc_reroute_attempts < ?)
+         ${sourceExclusion}
          AND (t.dispatch_attempts IS NULL OR t.dispatch_attempts < ?)
          AND (t.next_dispatch_eligible_at IS NULL OR t.next_dispatch_eligible_at <= ?)
          AND (a.is_master IS NULL OR a.is_master = 0)
          AND t.updated_at <= ?`,
-      [...ceoWorkspaceIds, cap, dispatchCap, nowIso, graceCutoff],
+      [...ceoWorkspaceIds, cap, ...engineSourceExclusionParams(), dispatchCap, nowIso, graceCutoff],
     );
     ceoTasks.push(...rows);
   }
@@ -118,6 +155,9 @@ export async function runCeoDelegationSweep(): Promise<void> {
   // so they stay visible in Backlog for human triage and do not re-loop.
   // SWEEP-04: also add the 120s grace window + master exclusion so this branch
   // matches backlog-redispatch's full anti-furnace SELECT (cap already present).
+  // FIX 38b: + engine-source exclusion — a QC-returned engine phase card stays
+  // engine-owned; re-homing it to a specialist makes a second executor.
+  const qcSourceExclusion = engineSourceExclusionClause();
   const qcFailTasks = queryAll<CeoTaskRow>(
     `SELECT t.id, t.title, t.description, t.priority, t.workspace_id, t.department, t.qc_reroute_attempts
      FROM tasks t
@@ -126,11 +166,12 @@ export async function runCeoDelegationSweep(): Promise<void> {
        AND t.qc_reroute_attempts > 0
        AND t.qc_reroute_attempts < ?
        AND t.archived_at IS NULL
+       ${qcSourceExclusion}
        AND (t.dispatch_attempts IS NULL OR t.dispatch_attempts < ?)
        AND (t.next_dispatch_eligible_at IS NULL OR t.next_dispatch_eligible_at <= ?)
        AND (a.is_master IS NULL OR a.is_master = 0)
        AND t.updated_at <= ?`,
-    [cap, dispatchCap, nowIso, graceCutoff],
+    [cap, ...engineSourceExclusionParams(), dispatchCap, nowIso, graceCutoff],
   );
 
   // Merge: de-duplicate by id (a CEO-workspace QC-fail task would appear in both).

@@ -247,8 +247,13 @@ export function checkWipLimit(
     const params: unknown[] = [...column.counts, taskId];
     if (workspaceId !== null) params.push(workspaceId);
     const row = queryOne<{ cnt: number }>(
+      // FIX 55: hidden child cards (parent_task_id IS NOT NULL) live under
+      // their parent's row on the board, so they must NOT count against the
+      // column's WIP limit — 8 review children of one parent would otherwise
+      // brick every unrelated move into that column.
       `SELECT COUNT(*) AS cnt FROM tasks
-        WHERE status IN (${placeholders}) AND id != ? AND ${workspaceClause}`,
+        WHERE status IN (${placeholders}) AND id != ? AND parent_task_id IS NULL
+          AND ${workspaceClause}`,
       params,
     );
     const count = row?.cnt ?? 0;
@@ -266,105 +271,6 @@ export function checkWipLimit(
     // hard refusal here would block legitimate transitions on a broken count.
     return null;
   }
-}
-
-// ---------------------------------------------------------------------------
-// Global agent-dispatch concurrency ceiling — provider-aware, opt-in (FLEET-01)
-// ---------------------------------------------------------------------------
-
-/**
- * THE GAP THIS CLOSES: some model providers cap concurrency at the ACCOUNT
- * level, not per-model — e.g. a $20/mo Ollama Cloud plan allows at most 3
- * agents running AT ONCE, account-wide. Exceed it and every model on that
- * account starts failing in the same second (a real box logged 234
- * consecutive rejections, 100% one provider, zero successful failover, over
- * ten weeks). Nothing in this codebase previously counted concurrently
- * in-flight agent sessions against any ceiling — `INTAKE_ADVANCE_BATCH`
- * throttles how many tasks one sweep TICK selects, not how many can be
- * simultaneously RUNNING, so a burst past a provider's real capacity reads
- * everywhere downstream as an ordinary agent failure, never as "provider
- * capacity exceeded" — a diagnosis nothing in the system could otherwise make.
- *
- * NOT `WIP_LIMITS` ABOVE: WIP_LIMITS/checkWipLimit is a per-workspace BOARD
- * DISPLAY limit (mirrors the UI's column caps, in_progress=5/review=8 PER
- * WORKSPACE) — on a box with 5 departments each getting their own workspace,
- * that is up to 25 board-wide `in_progress` cards, which is exactly the
- * failure mode this exists to prevent. This ceiling is GLOBAL — summed across
- * every workspace — because a provider's account-level cap does not know or
- * care which workspace a task belongs to.
- *
- * FLEET-SAFE DEFAULT: opt-in via `AGENT_DISPATCH_MAX_CONCURRENT`. Unset,
- * blank, non-numeric, or <= 0 → `getAgentDispatchConcurrencyCeiling()` returns
- * null → `checkDispatchConcurrencyLimit()` always returns null (no hold, ever)
- * → every one of the ~39 fleet boxes that has not explicitly set this env var
- * gets EXACTLY today's behaviour: no cap, no new failure mode, unaffected.
- */
-
-/** Parsed ceiling, or null when unset/invalid (→ NO LIMIT, the fleet-safe default). */
-export function getAgentDispatchConcurrencyCeiling(): number | null {
-  const raw = process.env.AGENT_DISPATCH_MAX_CONCURRENT;
-  if (raw === undefined || raw.trim() === '') return null;
-  const n = parseInt(raw, 10);
-  if (!Number.isFinite(n) || n <= 0) return null; // fail open — never invent a cap from garbage input
-  return n;
-}
-
-/**
- * Count of tasks currently "in flight" — GLOBAL across every workspace (see
- * the module doc above for why this deliberately does NOT scope by
- * workspace_id the way WIP_COLUMNS does). Hidden child cards
- * (parent_task_id IS NOT NULL) ARE counted here — unlike the WIP display
- * count, which hides them from the column count as a UI/board concern — a
- * child card is dispatched through the exact same autoDispatchTask →
- * chat.send path as any other task and holds a real provider slot.
- */
-export function countInFlightDispatches(): number {
-  try {
-    const row = queryOne<{ cnt: number }>(
-      `SELECT COUNT(*) AS cnt FROM tasks WHERE status = 'in_progress'`,
-      [],
-    );
-    return row?.cnt ?? 0;
-  } catch {
-    // Fail OPEN — a broken count must never itself become a false HOLD that
-    // stalls the entire board. Mirrors checkWipLimit's fail-open catch above.
-    return 0;
-  }
-}
-
-export interface DispatchConcurrencyHold {
-  inFlight: number;
-  ceiling: number;
-  message: string;
-}
-
-/**
- * Read-only probe, called immediately before each individual claim/dispatch
- * (never once per sweep batch — a fresh count is taken on every call so a
- * sequential sweep tick self-limits to the ceiling as each dispatch's CAS
- * claim advances a task to in_progress and the NEXT task's count sees it).
- *
- * Returns null when unset (unlimited — today's behaviour) or under the
- * ceiling; a DispatchConcurrencyHold describing the breach when at/over it.
- * Mirrors checkWipLimit's probe/refusal shape so both dispatch paths (the
- * auto-advance sweep and the manual "Send to Agent" route) share ONE
- * definition of "at capacity" instead of two independently-drifting ones.
- */
-export function checkDispatchConcurrencyLimit(): DispatchConcurrencyHold | null {
-  const ceiling = getAgentDispatchConcurrencyCeiling();
-  if (ceiling === null) return null; // unset/invalid → NO LIMIT (fleet-safe default)
-  const inFlight = countInFlightDispatches();
-  if (inFlight >= ceiling) {
-    return {
-      inFlight,
-      ceiling,
-      message:
-        `Global agent-dispatch concurrency ceiling reached (${inFlight}/${ceiling} in flight, ` +
-        `AGENT_DISPATCH_MAX_CONCURRENT=${ceiling}). An in-flight task must complete (or be moved ` +
-        `out of in_progress) to free a slot before another can dispatch.`,
-    };
-  }
-  return null;
 }
 
 /**

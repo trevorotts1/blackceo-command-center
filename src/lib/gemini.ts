@@ -13,41 +13,9 @@ import fs from 'fs';
 import { assertNoFixtureEnvInProduction } from '@/lib/fixture-guard';
 
 export interface GeminiGenerateOptions {
-  model?: string; // default: GEMINI_SYNTHESIS_MODEL || GEMINI_MODEL || 'gemini-flash-latest'
+  model?: string; // default 'gemini-1.5-flash'
   temperature?: number;
   response_mime_type?: 'application/json' | 'text/plain';
-}
-
-/**
- * True when a generation failure is genuinely a MODEL problem: the model id
- * is retired/unknown/unsupported for this API version. Only then may the
- * thrown error carry the "(model '<id>' retired or unavailable?)" suffix.
- */
-function isModelProblem(status: number, body: string): boolean {
-  return status === 404
-    || /not found for API version/i.test(body)
-    || /unknown model/i.test(body)
-    || /does not exist/i.test(body)
-    || /not[ -]?supported/i.test(body)
-    || /unsupported/i.test(body);
-}
-
-/**
- * True when a generation failure is a BILLING/QUOTA wall rather than a model
- * defect. Mirrors the billing-vs-transient classification in
- * src/lib/sop-embeddings.ts (isNonRetryableBillingExhaustion): a 429 whose
- * body names depleted credits / quota / billing means the ACCOUNT is empty,
- * not that the model id is wrong. Live-proven on a real box: a 429
- * ("Your prepayment credits are depleted") against a healthy model id was
- * mislabelled as a retired model.
- */
-function isBillingProblem(status: number, body: string): boolean {
-  return status === 429
-    || /prepayment credits are depleted/i.test(body)
-    || /credits are depleted/i.test(body)
-    || /insufficient credits/i.test(body)
-    || /\bquota\b/i.test(body)
-    || /\bbilling\b/i.test(body);
 }
 
 /**
@@ -69,14 +37,7 @@ export async function geminiGenerate(prompt: string, opts: GeminiGenerateOptions
     throw new Error('GOOGLE_API_KEY (or GEMINI_API_KEY) is not set. Set it in .env.local or pass GEMINI_FIXTURE_JSON_PATH for testing.');
   }
 
-  // Default model: 'gemini-1.5-flash' is EOL (Google returns 404
-  // "models/gemini-1.5-flash is not found for API version v1beta").
-  // GEMINI_SYNTHESIS_MODEL (synthesis-specific) wins, then GEMINI_MODEL,
-  // then the 'gemini-flash-latest' alias so the next EOL needs no code change.
-  const model = opts.model
-    || process.env.GEMINI_SYNTHESIS_MODEL
-    || process.env.GEMINI_MODEL
-    || 'gemini-flash-latest';
+  const model = opts.model || 'gemini-1.5-flash';
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${apiKey}`;
 
   const body: Record<string, unknown> = {
@@ -97,19 +58,6 @@ export async function geminiGenerate(prompt: string, opts: GeminiGenerateOptions
   });
   if (!res.ok) {
     const text = await res.text();
-    // Fail LOUD — but label accurately. A 429 billing wall is an empty
-    // account, not a retired model; the model suffix applies ONLY to a
-    // genuine model problem (404 / not-found-for-version / does-not-exist /
-    // unsupported). NEVER silently fall back to a different model — that
-    // would mask the next EOL exactly the way the hardcoded gemini-1.5-flash did.
-    if (isModelProblem(res.status, text)) {
-      console.error(`[gemini] model '${model}' appears retired or unavailable (HTTP ${res.status}). Set GEMINI_SYNTHESIS_MODEL or GEMINI_MODEL to a current id.`);
-      throw new Error(`Gemini generateContent failed: ${res.status} (model '${model}' retired or unavailable?) ${text.slice(0, 200)}`);
-    }
-    if (isBillingProblem(res.status, text)) {
-      console.error(`[gemini] billing/quota wall (HTTP ${res.status}). Check account credits/quota — the model id '${model}' is not the problem.`);
-      throw new Error(`Gemini generateContent failed: ${res.status} (billing/quota exhausted — check account credits) ${text.slice(0, 200)}`);
-    }
     throw new Error(`Gemini generateContent failed: ${res.status} ${text.slice(0, 200)}`);
   }
   const data = await res.json() as {

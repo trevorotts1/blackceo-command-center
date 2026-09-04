@@ -27,13 +27,54 @@ import {
   ChevronRight,
   Circle,
   CheckCircle2,
+  CheckSquare,
   PlayCircle,
   AlertCircle,
   Clock,
+  Square,
 } from 'lucide-react';
 import PhaseStepper from '@/components/PhaseStepper';
 import { PHASE_LABELS } from '@/lib/presentation-phases';
 import type { PhaseStepStatus } from '@/lib/presentation-phases';
+import { useMissionControl } from '@/lib/store';
+// FIX 51a/51b (master Part 8) — shared card-face pieces extracted from
+// MissionQueue.tsx; the presentation parent card renders the SAME status
+// pill and block-transparency panel as every flat card on the board.
+import { StatusPill } from './kanban/StatusPill';
+import { BlockedPanel } from './kanban/BlockedPanel';
+import { MoveTaskMenu } from './kanban/MoveTaskMenu';
+import { taskToColumnId } from '@/lib/board-projection';
+import type { Task, TaskStatus } from '@/lib/types';
+
+/**
+ * FIX 51b — the shape BlockedPanel reads off a task. ParentData carries the
+ * same fields (block_reason/block_gaps/block_needs/block_audience +
+ * dispatch_attempts), so a parent row satisfies this structural subset
+ * without pretending to be a full Task.
+ */
+type TaskLike = Pick<
+  Task,
+  'status' | 'block_reason' | 'block_gaps' | 'block_needs' | 'block_audience' | 'dispatch_attempts'
+>;
+
+/**
+ * FIX 51b — narrowed face row. Task.block_reason is `string | undefined`
+ * (never null) while the children-route payload can carry null, so the
+ * canonicalizer maps nulls to undefined to satisfy the TaskLike shape.
+ */
+function toFaceTask(
+  status: string,
+  blockFields: Pick<ParentData, 'block_reason' | 'block_gaps' | 'block_needs' | 'block_audience' | 'dispatch_attempts'> | undefined,
+): TaskLike {
+  return {
+    status: status as TaskStatus,
+    block_reason: blockFields?.block_reason ?? undefined,
+    block_gaps: blockFields?.block_gaps ?? undefined,
+    block_needs: blockFields?.block_needs ?? undefined,
+    block_audience: blockFields?.block_audience ?? undefined,
+    dispatch_attempts: blockFields?.dispatch_attempts ?? undefined,
+  };
+}
 
 // ── Types ────────────────────────────────────────────────────────────────
 
@@ -56,6 +97,15 @@ interface ParentData {
   department: string;
   process_certificate_sha?: string | unknown;
   created_at: string;
+  // FIX 51b (master Part 8) — block-transparency fields so the shared
+  // BlockedPanel/StatusPill card face (kanban/BlockedPanel.tsx,
+  // kanban/StatusPill.tsx) renders real block state on the parent card,
+  // not just for flat TaskCards. Served by /api/presentations/children.
+  block_reason?: string | null;
+  block_gaps?: string | null;
+  block_needs?: string | null;
+  block_audience?: 'OWNER' | 'SYSTEM' | null;
+  dispatch_attempts?: number | null;
 }
 
 interface AggregateData {
@@ -85,6 +135,28 @@ export interface PresentationParentCardProps {
   isDragging?: boolean;
   /** Whether the parent run is complete (status === 'done'). */
   isCompleted?: boolean;
+  // ── FIX 51b (master Part 8) — card face: drag + move + bulk checkbox ────
+  /** Native drag-start handler — MissionQueue's handleDragStart so dropping
+   *  the parent on a column runs the SAME shared status-change path as flat
+   *  TaskCards (including the Blocked confirmation modal). Optional so the
+   *  standalone children preview keeps working without the board. */
+  onDragStart?: (e: React.DragEvent) => void;
+  /** Shared column-move entry point (same one drag-drop and the Move menu
+   *  use for flat cards) — receives this parent's task. */
+  onMove?: (taskId: string, targetColumnId: string) => void;
+  /** Board columns, for the touch-friendly MoveTaskMenu. */
+  columns?: { id: string; label: string; maxWip?: number }[];
+  /** Which board column this parent card is currently rendered under. */
+  currentColumnId?: string;
+  /** Current task count per column id, for WIP limit enforcement in the Move menu. */
+  columnTaskCounts?: Record<string, number>;
+  /** The parent's full Task row from the board's task store (the tasks list
+   *  SELECT is `t.*`, so it already carries block_reason / block_gaps /
+   *  block_needs / block_audience / dispatch_attempts). The card face prefers
+   *  it over the narrower /api/presentations/children parent payload so the
+   *  shared BlockedPanel shows real block state. Optional — the standalone
+   *  children preview renders without it. */
+  parentTask?: Task | null;
 }
 
 // ── Status helpers ───────────────────────────────────────────────────────
@@ -125,6 +197,12 @@ export default function PresentationParentCard({
   onOpenParent,
   isDragging,
   isCompleted,
+  onDragStart,
+  onMove,
+  columns,
+  currentColumnId,
+  columnTaskCounts,
+  parentTask,
 }: PresentationParentCardProps) {
   const [data, setData] = useState<ChildrenResponse | null>(
     initialData ?? null,
@@ -133,6 +211,23 @@ export default function PresentationParentCard({
   const [error, setError] = useState<string | null>(null);
   // Collapsed state — children are visible by default
   const [collapsed, setCollapsed] = useState(false);
+
+  // FIX 51b — MR-45 bulk-select parity: the parent card participates in the
+  // SAME selection set flat TaskCards use, so bulk move/archive/assign and
+  // the header "N selected" bar cover presentation runs too.
+  const isSelected = useMissionControl((s) => s.selectedTaskIds.has(taskId));
+  const toggleSelection = useMissionControl((s) => s.toggleTaskSelection);
+
+  // FIX 51b — the column this parent is visually sitting in (drives the Move
+  // menu's "current column" checkmark). Falls back to the task's own status
+  // projection when the board doesn't pass currentColumnId.
+  const effectiveCurrentColumnId =
+    currentColumnId ??
+    taskToColumnId({ status: (data?.parent.status ?? 'backlog') as TaskStatus });
+
+  // FIX 51b — drag is only enabled when the board wired the shared handlers
+  // (the standalone children preview renders the card non-draggable).
+  const dragEnabled = typeof onDragStart === 'function' && typeof onMove === 'function';
 
   const fetchData = useCallback(async () => {
     try {
@@ -205,17 +300,40 @@ export default function PresentationParentCard({
 
   const { parent, children, aggregate } = data;
 
+  // FIX 51b — face data: prefer the board's full Task row (block fields +
+  // dispatch_attempts) when the board passed one; fall back to the narrower
+  // children-route payload so the standalone preview still renders.
+  const faceTask: TaskLike = toFaceTask(
+    parentTask?.status ?? parent.status,
+    {
+      block_reason: parentTask?.block_reason ?? parent.block_reason ?? undefined,
+      block_gaps: parentTask?.block_gaps ?? parent.block_gaps ?? undefined,
+      block_needs: parentTask?.block_needs ?? parent.block_needs ?? undefined,
+      block_audience: parentTask?.block_audience ?? parent.block_audience ?? undefined,
+      dispatch_attempts: parentTask?.dispatch_attempts ?? parent.dispatch_attempts ?? undefined,
+    },
+  );
+  const faceStatus = faceTask.status;
+
   // ── Parent card render ────────────────────────────────────────────────
+  // FIX 51b — the root is draggable like a flat TaskCard (native HTML5 DnD,
+  // MissionQueue's handleDragStart; the column's onDrop runs the shared
+  // handleColumnMove). All interactive children stopPropagation so drag and
+  // open-modal stay separate gestures.
   return (
     <div
+      draggable={dragEnabled}
+      onDragStart={dragEnabled ? (e) => onDragStart?.(e) : undefined}
       className={`bg-white rounded-xl lg:rounded-2xl card-shadow border w-full ${
         isDragging ? 'opacity-50 scale-95' : ''
       } ${isCompleted ? 'opacity-75' : ''} ${
-        parent.status === 'blocked'
-          ? 'border-red-300'
-          : parent.status === 'done'
-            ? 'border-emerald-200'
-            : 'border-gray-50'
+        isSelected
+          ? 'border-brand-500 ring-2 ring-brand-200'
+          : faceStatus === 'blocked'
+            ? 'border-red-300'
+            : faceStatus === 'done'
+              ? 'border-emerald-200'
+              : 'border-gray-50'
       }`}
       data-testid="presentation-parent-card"
     >
@@ -227,6 +345,25 @@ export default function PresentationParentCard({
         {/* Title + collapse toggle */}
         <div className="flex items-start justify-between gap-2 mb-2">
           <div className="flex items-center gap-2 min-w-0">
+            {/* FIX 51b — MR-45 bulk-select checkbox, same affordance and
+                same store selection set as flat TaskCards. */}
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                toggleSelection(taskId);
+              }}
+              className="mt-0.5 shrink-0 text-gray-300 hover:text-brand-600 transition-colors"
+              title={isSelected ? 'Deselect this task' : 'Select this task'}
+              aria-label={isSelected ? `Deselect "${parent.title}"` : `Select "${parent.title}"`}
+              data-testid="presentation-parent-select-checkbox"
+            >
+              {isSelected ? (
+                <CheckSquare className="w-5 h-5 text-brand-600" />
+              ) : (
+                <Square className="w-5 h-5" />
+              )}
+            </button>
             <button
               type="button"
               onClick={(e) => {
@@ -251,10 +388,26 @@ export default function PresentationParentCard({
               {parent.title}
             </h3>
           </div>
+          {/* FIX 51b — touch-friendly Move menu, same shared component flat
+              TaskCards render; selecting a column fires the SAME shared
+              status-change path (including the Blocked confirmation modal). */}
+          {columns && onMove && (
+            <div onClick={(e) => e.stopPropagation()}>
+              <MoveTaskMenu
+                columns={columns}
+                currentColumnId={effectiveCurrentColumnId}
+                taskTitle={parent.title}
+                onSelect={(columnId) => onMove(taskId, columnId)}
+                columnTaskCounts={columnTaskCounts}
+              />
+            </div>
+          )}
         </div>
 
         {/* Aggregate progress: X of N phases done */}
         <div className="flex items-center gap-3 text-xs text-gray-500 mb-3">
+          {/* FIX 51a/51b — shared status pill: identical to every flat card. */}
+          <StatusPill status={faceStatus} />
           <span className="flex items-center gap-1">
             <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
             <span>
@@ -271,6 +424,11 @@ export default function PresentationParentCard({
             <span className="text-emerald-600 font-medium">Certified</span>
           )}
         </div>
+
+        {/* FIX 51a/51b — shared block-transparency panel: the SAME face a
+            blocked flat card renders (audience badge, reason, gaps, next
+            step, heal attempts). Gated + styled inside BlockedPanel. */}
+        <BlockedPanel task={faceTask} />
 
         {/* 7-label stepper — always visible, even when children are collapsed */}
         <PhaseStepper

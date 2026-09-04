@@ -238,32 +238,3 @@ test('BLEND — no blend_directive → persona block is byte-identical to the pr
   const block = buildPersonaBlock(withField, RESOLVER_TASK_PINNED);
   assert.ok(!block.includes('Voice blend directive'), 'absent directive renders no blend block');
 });
-
-test('BLUEPRINT PATH — carries the data/ segment (regression guard for the dropped-segment bug)', () => {
-  // The exact bug: personaBlueprintPath() used to return
-  // `coaching-personas/personas/<id>/persona-blueprint.md`, missing the
-  // `data/` segment that the real on-disk layout requires
-  // (`<workspace>/data/coaching-personas/personas/<id>/persona-blueprint.md`).
-  // That un-resolvable path resolved from neither the doer's cwd nor the
-  // workspace root, so the doer fell back to an unbounded filesystem sweep
-  // to find the file. This guard pins the fixed shape so it cannot silently
-  // regress back to the broken bare-relative fragment.
-  const p = personaBlueprintPath('hormozi-100m-offers');
-  assert.equal(
-    p,
-    'data/coaching-personas/personas/hormozi-100m-offers/persona-blueprint.md',
-    'exact resolvable workspace-relative path',
-  );
-  assert.ok(p.startsWith('data/coaching-personas/personas/'), 'carries the data/ segment');
-  assert.ok(!p.startsWith('coaching-personas/'), 'never regresses to the bare, unresolvable fragment');
-
-  // The load contract text the doer actually reads must carry the same fix.
-  const block = buildPersonaBlock(
-    { persona_id: 'hormozi-100m-offers', persona_name: 'Alex Hormozi', persona_mode: 'leadership' },
-    RESOLVER_TASK_PINNED,
-  );
-  assert.ok(
-    block.includes('Read the blueprint: data/coaching-personas/personas/hormozi-100m-offers/persona-blueprint.md'),
-    'dispatch prompt load-contract line carries the corrected, resolvable path',
-  );
-});

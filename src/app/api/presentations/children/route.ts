@@ -13,6 +13,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getDb } from '@/lib/db';
 import {
+  childPhaseLabel,
   computePhaseProgress,
   PHASE_LABELS,
 } from '@/lib/presentation-phases';
@@ -76,12 +77,34 @@ export async function GET(request: NextRequest) {
     // Fetch children keyed to this parent, ordered by their phase label
     // (stored in the child's title or department metadata). Children are
     // matched by parent_task_id.
-    const children = db
-      .prepare(
-        `SELECT id, title, status, priority, parent_task_id, created_at, updated_at
-         FROM tasks WHERE parent_task_id = ? ORDER BY created_at ASC`,
-      )
-      .all(parentId) as Array<Record<string, unknown>>;
+    //
+    // FIX 52 (W18a-B3): stage_slug is read CO-OPERATIONALLY — the column does
+    // not exist on every box until W16a's migration 130 lands, so the SELECT
+    // first probes the schema. On a pre-migration DB the query runs without
+    // the column and every child just reports stage_slug: null (label then
+    // falls back to the child's own activities/title, never to a title-only
+    // guess where a real phase id exists).
+    let children: Array<Record<string, unknown>>;
+    const hasStageSlug = (
+      db.prepare(
+        `SELECT count(*) AS n FROM pragma_table_info('tasks') WHERE name = 'stage_slug'`,
+      ).get() as { n: number }
+    ).n > 0;
+    if (hasStageSlug) {
+      children = db
+        .prepare(
+          `SELECT id, title, status, priority, parent_task_id, stage_slug, created_at, updated_at
+           FROM tasks WHERE parent_task_id = ? ORDER BY created_at ASC`,
+        )
+        .all(parentId) as Array<Record<string, unknown>>;
+    } else {
+      children = db
+        .prepare(
+          `SELECT id, title, status, priority, parent_task_id, created_at, updated_at
+           FROM tasks WHERE parent_task_id = ? ORDER BY created_at ASC`,
+        )
+        .all(parentId) as Array<Record<string, unknown>>;
+    }
 
     // For each child, fetch its task_activities so the PhaseStepper can
     // derive per-label status from the 26 manifest phase ids.
@@ -95,13 +118,31 @@ export async function GET(request: NextRequest) {
         metadata?: string | null;
       }>;
 
+      // FIX 50b — SELECT path alongside deliverable_type: the teleprompter is
+      // detected by the basename of the registered path
+      // (presenter-teleprompter.html), not by its type — the registration
+      // contract's deliverable_type enum has no 'teleprompter' value.
       const deliverables = db
         .prepare(
-          'SELECT deliverable_type FROM task_deliverables WHERE task_id = ?',
+          'SELECT deliverable_type, path FROM task_deliverables WHERE task_id = ?',
         )
-        .all(child.id as string) as Array<{ deliverable_type: string }>;
+        .all(child.id as string) as Array<{
+        deliverable_type: string;
+        path: string | null;
+      }>;
 
       const progress = computePhaseProgress(activities, deliverables);
+
+      // FIX 52 (W18a-B3): the child's canonical phase label — from its
+      // explicit stage_slug (producer phase id) when known, else its own
+      // activities' phase_id, else the legacy title match. Never the bare
+      // title: 'P4-COPY' shows Script regardless of what the child is called.
+      const phaseLabel =
+        childPhaseLabel({
+          stage_slug: (child.stage_slug as string | null | undefined) ?? null,
+          activities,
+          title: (child.title as string | null | undefined) ?? null,
+        }) ?? (typeof child.title === 'string' ? child.title : null);
 
       return {
         id: child.id,
@@ -110,6 +151,8 @@ export async function GET(request: NextRequest) {
         priority: child.priority,
         created_at: child.created_at,
         updated_at: child.updated_at,
+        stage_slug: (child.stage_slug as string | null | undefined) ?? null,
+        phase_label: phaseLabel,
         phases: progress.phases.map((p) => ({
           label: p.label,
           status: p.status,
@@ -130,43 +173,63 @@ export async function GET(request: NextRequest) {
     const totalChildren = children.length;
 
     // Derive the current phase label from the first child that is in_progress,
-    // or the last child that is done.
+    // or the last child that is done/review.
+    //
+    // FIX 52 (W18a-B3): label resolution now goes through childPhaseLabel —
+    // stage_slug / activity phase_id first, title substring only as the last
+    // resort — so a child ingested with `phase_id: P4-COPY` and an arbitrary
+    // title still drives the aggregate to Script.
+    const labelOfChild = (child: Record<string, unknown>) =>
+      childPhaseLabel({
+        stage_slug: (child.stage_slug as string | null | undefined) ?? null,
+        title: (child.title as string | null | undefined) ?? null,
+      });
     let currentPhase: typeof PHASE_LABELS[number] | null = null;
     for (const child of children) {
       if (child.status === 'in_progress') {
-        // Match to a phase label from the child's title
-        for (const label of PHASE_LABELS) {
-          if (
-            typeof child.title === 'string' &&
-            child.title.toLowerCase().includes(label.toLowerCase())
-          ) {
-            currentPhase = label;
-            break;
-          }
+        const label = labelOfChild(child);
+        if (label) {
+          currentPhase = label;
+          break;
         }
-        if (currentPhase) break;
       }
     }
     if (!currentPhase && children.length > 0) {
-      // Fallback: use the last done child's label
+      // Fallback: use the last done/review child's label. F26 note: 'review'
+      // still identifies the CURRENT phase position here — this loop locates
+      // where the run is, it does not claim completion.
       for (let i = children.length - 1; i >= 0; i--) {
         if (
           children[i].status === 'done' ||
           children[i].status === 'review'
         ) {
-          // F26 note: 'review' still identifies the CURRENT phase position here —
-          // this loop locates where the run is, it does not claim completion.
-          const childTitle = children[i].title;
-          for (const label of PHASE_LABELS) {
-            if (
-              typeof childTitle === 'string' &&
-              (childTitle as string).toLowerCase().includes(label.toLowerCase())
-            ) {
-              currentPhase = label;
-              break;
-            }
+          const label = labelOfChild(children[i]);
+          if (label) {
+            currentPhase = label;
+            break;
           }
-          if (currentPhase) break;
+        }
+      }
+    }
+    if (!currentPhase && children.length > 0) {
+      // FIX 52 critic retry — a freshly ingested phase child lands in status
+      // 'backlog' (src/app/api/tasks/ingest/route.ts:1070). Neither tier
+      // above matches it, so a run whose only phase signal was an explicit
+      // `phase_id` (stage_slug) still fell through to PHASE_LABELS[0]
+      // ('Intake'). Final tier: the first child — in ingest order via the
+      // stage_slug/activity/title chain labelOfChild resolves — whose status
+      // is anything OTHER than a completed state ('done'/'review' excluded
+      // so finished phases never masquerade as the current one; those are
+      // the only terminal states the 10-status manifest in validation.ts
+      // defines for this pointer). A P4-COPY child ingested moments ago now
+      // drives the aggregate to Script even while it is still backlog and
+      // dispatchable.
+      for (const child of children) {
+        if (child.status === 'done' || child.status === 'review') continue;
+        const label = labelOfChild(child);
+        if (label) {
+          currentPhase = label;
+          break;
         }
       }
     }

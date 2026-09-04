@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createHmac, timingSafeEqual } from 'crypto';
+import { timingSafeEqual } from 'crypto';
+import { verifyWebhookSignatureStrict } from '@/lib/webhook-signature';
 import { v4 as uuidv4 } from 'uuid';
 import { z } from 'zod';
 import { queryOne, run } from '@/lib/db';
@@ -7,6 +8,7 @@ import { broadcast } from '@/lib/events';
 import type { Task } from '@/lib/types';
 import { transition, TransitionError, type LifecycleState } from '@/lib/task-lifecycle';
 import { recordBlockEvent } from '@/lib/block-events';
+import { RECOGNIZED_BOARD_SOURCES, normalizeBoardSource } from '@/lib/board-sources';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -195,15 +197,16 @@ function hasPresentationsMarker(description: string | null | undefined): boolean
  * putting "Source: funnel" in ANY task body and then drive its status through
  * this route. The durable fix is an IMMUTABLE, server-stamped `tasks.source`
  * column set ONLY at creation and never exposed on any update surface.
+ *
+ * FIX 36: the set itself is no longer defined here — it is imported from
+ * src/lib/board-sources.ts, the single canonical copy shared with
+ * TaskOverviewPanels.tsx (so the two can never drift again). That shared set
+ * adds the two engine sources this route was missing:
+ * `build_deck_phase` (per-phase child cards minted by the Presentations
+ * engine's cc_board.py) and `presentation-interview-app` (cards minted by the
+ * interview app's intake_writer.py) — both previously 403'd on EVERY status
+ * change despite being signed producers.
  */
-const RECOGNIZED_BOARD_SOURCES = new Set([
-  'funnel',
-  'survey',
-  'web-development',
-  'anthology',
-  'build_deck',
-  'presentations',
-]);
 
 /**
  * Resolve the effective, authoritative board-producer source for a card.
@@ -226,10 +229,10 @@ const RECOGNIZED_BOARD_SOURCES = new Set([
 function resolveBoardSource(
   task: Pick<Task, 'description'> & { source?: string | null },
 ): string | null {
-  const stamped = typeof task.source === 'string' ? task.source.trim().toLowerCase() : '';
+  const stamped = normalizeBoardSource(task.source);
   if (stamped) {
     // Immutable column present → authoritative, non-forgeable gate.
-    return RECOGNIZED_BOARD_SOURCES.has(stamped) ? stamped : null;
+    return stamped;
   }
   // Legacy row (pre-source-column migration) → fall back to the description marker.
   if (hasSkill6Marker(task.description)) {
@@ -277,13 +280,18 @@ function authenticate(request: NextRequest, rawBody: string): AuthResult {
   }
 
   // Layer 2 — HMAC-SHA256 signature over the raw body (hex), keyed by WEBHOOK_SECRET.
+  // FIX 56 — constant-time compare via the ONE shared copy
+  // (src/lib/webhook-signature.ts). verifyWebhookSignatureStrict keeps this
+  // route's fail-closed posture (an unset secret never reaches this branch —
+  // the `if (secret)` gate above matches the producer's header-when-configured
+  // contract) and turns a wrong-length signature into a clean false → 401
+  // (no throw from timingSafeEqual, no timing leak).
   if (secret) {
     const signature = request.headers.get('x-webhook-signature');
     if (!signature) {
       return { ok: false, status: 401, error: 'Unauthorized: missing signature' };
     }
-    const expected = createHmac('sha256', secret).update(rawBody).digest('hex');
-    if (!safeEqual(signature, expected)) {
+    if (!verifyWebhookSignatureStrict(signature, rawBody)) {
       return { ok: false, status: 401, error: 'Unauthorized: invalid signature' };
     }
   }
@@ -361,11 +369,9 @@ export async function POST(
         {
           error: 'Forbidden: this task is not a signed board-producer card.',
           hint:
-            'This route only transitions cards created by a signed board producer: ' +
-            'the Skill-6 board hookup (cc_board.py ingest_task, ' +
-            'source=funnel|survey|web-development), the Anthology Engine board ' +
-            'client (mc_board.py, source=anthology), or the Presentations engine ' +
-            '(cc_board.py ingest_deck_task, source=build_deck). Use ' +
+            'This route only transitions cards created by a signed board producer ' +
+            '(recognized tasks.source values: ' +
+            `${Array.from(RECOGNIZED_BOARD_SOURCES).join(' | ')}). Use ` +
             'PATCH /api/tasks/{id} for other tasks.',
         },
         { status: 403 },
@@ -377,10 +383,18 @@ export async function POST(
 
     // Append the note (when provided) to the description as a timestamped audit
     // line — mirrors the description-append convention in return-to-orchestrator.
-    let nextDescription = existing.description ?? null;
+    // FIX 56: the joined description is capped at 10,000 chars (description's own
+    // schema limit; the PATCH route enforces the same cap for its `note` appends
+    // — src/app/api/tasks/[id]/route.ts MAX_DESCRIPTION). This route appends on
+    // EVERY producer transition, so without the cap an unbounded note stream
+    // (or repeated 5,000-char notes) silently breached the limit; the OLDEST
+    // text is trimmed because the newest line is the one a reviewer needs.
+    const MAX_DESCRIPTION = 10000;
+    let nextDescription: string | null = existing.description ?? null;
     if (trimmedNote) {
       const noteLine = `[status → ${status} @ ${now}] ${trimmedNote}`;
-      nextDescription = existing.description ? `${existing.description}\n\n${noteLine}` : noteLine;
+      const joined = existing.description ? `${existing.description}\n\n${noteLine}` : noteLine;
+      nextDescription = joined.length <= MAX_DESCRIPTION ? joined : joined.slice(joined.length - MAX_DESCRIPTION);
     }
 
     // ── Persist the transition via the shared lifecycle state machine ─────────
@@ -411,18 +425,28 @@ export async function POST(
     // way an operator does — it is HMAC-signed, scoped to its own producer's cards,
     // and cannot set 'done'.
     const statusChanged = status !== existing.status;
+    // FIX 56 — optimistic concurrency (CAS) over the read→write window. `existing`
+    // was read above; a concurrent writer (another producer POST, the QC promoter,
+    // the heal sweep) may have moved the card before this transition lands. Passing
+    // `expectedFrom: existing.status` makes transition() fail CLOSED with
+    // TransitionError('CAS_CONFLICT') — before the idempotent short-circuit and
+    // before any write — instead of silently applying this caller's status on top
+    // of a state it never observed. CAS_CONFLICT maps to 409 (Conflict), the same
+    // code ILLEGAL_TRANSITION already returns, so a producer can distinguish
+    // "retry after re-reading" from a validation failure (422).
     try {
       await transition(id, status as LifecycleState, {
         actor: `board:${boardSource}`,
         reason: trimmedNote ?? undefined,
         operatorOverride: true,
+        expectedFrom: existing.status as LifecycleState,
       });
     } catch (err) {
       if (err instanceof TransitionError) {
         if (err.code === 'NOT_FOUND') {
           return NextResponse.json({ error: 'Task not found' }, { status: 404 });
         }
-        if (err.code === 'ILLEGAL_TRANSITION') {
+        if (err.code === 'ILLEGAL_TRANSITION' || err.code === 'CAS_CONFLICT') {
           return NextResponse.json({ error: err.message, code: err.code }, { status: 409 });
         }
         return NextResponse.json({ error: err.message, code: err.code }, { status: 422 });
@@ -533,11 +557,11 @@ export async function GET() {
       note: 'string (optional; appended to the task description + status-change event)',
     },
     scope:
-      'Only acts on tasks carrying a signed board-producer source marker ' +
-      '("Source: funnel|survey|web-development" for cc_board.py ingest_task() ' +
-      'cards, "Source: anthology" for the Anthology Engine mc_board.py cards, ' +
-      'or "Source: build_deck" for the Presentations engine cc_board.py cards, ' +
-      'in the description, written by /api/tasks/ingest). Other tasks get 403. ' +
+      'Only acts on tasks carrying a signed board-producer source (the ' +
+      'immutable tasks.source column stamped by /api/tasks/ingest; recognized ' +
+      'values: ' + Array.from(RECOGNIZED_BOARD_SOURCES).join(' | ') + '). ' +
+      'Legacy rows predating that column fall back to the "Source: <value>" ' +
+      'description marker. Other tasks get 403. ' +
       "'done' is always rejected with 403 regardless of card scope — it is " +
       'authority-gated on PATCH /api/tasks/{id} (independent QC auto-scorer / ' +
       "master agent only). 'blocked' is allowed ONLY for a marked card (the " +
@@ -546,6 +570,8 @@ export async function GET() {
       "card gets the same 403 as any other out-of-scope status.",
     returns:
       '200 with the updated task JSON; 400 invalid body/status, 401 auth, ' +
-      '403 forbidden status or non-Skill-6 card, 404 unknown id, 500 error',
+      '403 forbidden status or non-Skill-6 card, 404 unknown id, ' +
+      "409 illegal transition or CAS conflict (a concurrent writer moved the " +
+      'card — re-read it and retry), 422 precondition failure, 500 error',
   });
 }

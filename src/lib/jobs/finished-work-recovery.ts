@@ -21,10 +21,11 @@
 
 import path from 'path';
 import { safeReaddirSync, safeStatSync } from '@/lib/fs/safe-fs';
-import { queryOne, run } from '@/lib/db';
+import { queryOne, queryAll, run } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { transition, TransitionError, recordStatusEvent } from '@/lib/task-lifecycle';
 import { getProjectsPath } from '@/lib/config';
+import { EVIDENCE_DELIVERABLE_TYPES } from '@/lib/completion-evidence';
 import { v4 as uuidv4 } from 'uuid';
 import type { Task } from '@/lib/types';
 
@@ -41,8 +42,11 @@ export function taskProjectSlug(title: string): string {
   return title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 }
 
-/** True when `dir` exists and holds at least one non-empty file (shallow, depth-
- * limited so a huge tree can't stall the sweep). Never throws. */
+/** True when `dir` exists and holds at least one non-empty file that is not a
+ * BLOCKED note (shallow, depth-limited so a huge tree can't stall the sweep).
+ * Never throws. FIX 46: a run dir holding only e.g. P4-RENDER-BLOCKED.md is
+ * NOT finished output — the file that marks the failure must not recover the
+ * card, so BLOCK-named files are skipped at every depth. */
 export function dirHasOutput(dir: string, depth = 2): boolean {
   if (!dir) return false;
   // safeReaddirSync NEVER blocks the sweep's event loop: PROJECTS_PATH may be
@@ -51,26 +55,64 @@ export function dirHasOutput(dir: string, depth = 2): boolean {
   // timeout child and returns [] instead of freezing this every-5-minute cron.
   const entries = safeReaddirSync(dir);
   for (const e of entries) {
-    const full = path.join(dir, e.name);
     if (e.isFile()) {
+      if (isBlockedNotePath(e.name)) continue;
+      const full = path.join(dir, e.name);
       const st = safeStatSync(full);
       if (st && st.size > 0) return true;
     } else if (e.isDirectory() && depth > 0) {
+      const full = path.join(dir, e.name);
       if (dirHasOutput(full, depth - 1)) return true;
     }
   }
   return false;
 }
 
-/** Count non-discarded deliverables already registered for a task (a late
- * write-back that DID land). Tolerant of a pre-migration DB (table absent). */
+/**
+ * FIX 46 — a BLOCKED note is not finished work.
+ *
+ * When a phase fails (e.g. P4-RENDER), the deck engine writes a blocker note
+ * such as `P4-RENDER-BLOCKED.md` into the run dir. A stalled `in_progress`
+ * card whose ONLY output is such a note has NOT finished anything — it is a
+ * failure record. The recovery gate used to see those bytes, "recover" the
+ * card to review, and QC then graded a blocker note as if it were a deck.
+ * A card blocked this way must be BLOCKED by the sweep, not recovered.
+ *
+ * Two exclusions, applied to both finished-work signals:
+ *   1. Paths whose basename contains `BLOCK` (P4-RENDER-BLOCKED.md,
+ *      RENDER-BLOCKED.txt, ...) are never evidence of finished output.
+ *      Matched case-sensitively on the filename, at every tree depth, so a
+ *      blocker note anywhere under the project dir stops the dir qualifying.
+ *   2. Registered deliverables of a non-evidence type are not counted. The
+ *      one canon of evidence types is completion-evidence.ts's
+ *      EVIDENCE_DELIVERABLE_TYPES ('file' | 'artifact' | 'image' | 'url');
+ *      a note/other-type row must not pass the recovery gate.
+ */
+
+/** Basename fragment that marks a file as a failure/blocker note, not output.
+ * Case-sensitive 'BLOCK' matches the deck engine's `-BLOCKED.md` convention
+ * (e.g. P4-RENDER-BLOCKED.md) without eating legit output names. */
+export const BLOCKED_NOTE_MARKER = 'BLOCK';
+
+export function isBlockedNotePath(p: string): boolean {
+  return path.basename(p).includes(BLOCKED_NOTE_MARKER);
+}
+
+/** Deliverable types that count as finished work — the single canon imported
+ * from completion-evidence.ts so this gate can never drift from the done-gate
+ * that QC actually enforces. */
+const RECOVERABLE_DELIVERABLE_TYPES = EVIDENCE_DELIVERABLE_TYPES;
+
+/** Count registered deliverables of an evidence-bearing type (a late
+ * write-back that DID land). Non-evidence types (e.g. 'note') do not count
+ * (FIX 46). Tolerant of a pre-migration DB (table absent). */
 export function countRegisteredDeliverables(taskId: string): number {
   try {
-    const row = queryOne<{ n: number }>(
-      'SELECT COUNT(*) AS n FROM task_deliverables WHERE task_id = ?',
+    const rows = queryAll<{ deliverable_type: string }>(
+      'SELECT deliverable_type FROM task_deliverables WHERE task_id = ?',
       [taskId],
     );
-    return row?.n ?? 0;
+    return rows.filter((r) => RECOVERABLE_DELIVERABLE_TYPES.has(r.deliverable_type)).length;
   } catch {
     return 0;
   }

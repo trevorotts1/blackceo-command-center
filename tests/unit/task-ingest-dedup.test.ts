@@ -86,6 +86,7 @@ type DbModule = typeof import('../../src/lib/db');
 let run: DbModule['run'];
 let closeDb: DbModule['closeDb'];
 let getDb: DbModule['getDb'];
+let queryAll: DbModule['queryAll'];
 
 import type { CreateTaskCoreResult } from '../../src/lib/tasks';
 let createTaskCoreImpl: (
@@ -101,6 +102,7 @@ test.before(async () => {
   run = db.run;
   closeDb = db.closeDb;
   getDb = db.getDb;
+  queryAll = db.queryAll;
   getDb(); // runs full migration chain
 
   // Seed the default company row (FK required by workspaces)
@@ -322,6 +324,146 @@ test('same idempotency_key still dedups across the title window (Layer 1 intact)
   assert.equal(r1!.deduped, false, 'first must not be deduped');
   assert.equal(r2!.deduped, true, 'same idempotency key MUST still dedupe (Layer 1 unchanged)');
   assert.equal(r2!.task.id, r1!.task.id, 'deduped result must point to the first task');
+});
+
+// ── FIX 40: Layer 1 must skip DEAD tasks (archived or vanished rows) ─────────
+
+test('FIX 40: archived prior task under same key → falls through, inserts live card, 2nd ingest dedupes onto it', async () => {
+  const wsId = `ws-dedup-${RUN_ID}`;
+  const key = `dead-key-${RUN_ID}-f40a`;
+  const title = `Archived-key retry [${RUN_ID}-f40a]`;
+
+  // Seed a task_created event for key K pointing at an ARCHIVED task id —
+  // exactly the pre-existing state that made the old ASC LIMIT 1 dedupe either
+  // return a dead card or wedge the key forever.
+  const deadId = `dead-task-${RUN_ID}-f40a`;
+  const now = new Date().toISOString();
+  run(
+    `INSERT INTO tasks (id, title, status, priority, workspace_id, business_id, archived_at, created_at, updated_at)
+     VALUES (?, ?, 'backlog', 'medium', ?, 'default', ?, ?, ?)`,
+    [deadId, `${title} (dead)`, wsId, now, now, now],
+  );
+  run(
+    `INSERT INTO events (id, type, task_id, message, created_at)
+     VALUES (?, 'task_created', ?, ?, ?)`,
+    [`evt-${RUN_ID}-f40a-seed`, deadId, `Task captured [ingest:${key}]`, now],
+  );
+
+  // PROOF: ingest with key K — no new task is inserted and the response is
+  // deduped:true against the newest LIVE match… but there is no live match
+  // under this key, so the contract is: fall through to insert, then the next
+  // ingest with K dedupes onto it.
+  const r1 = await createTaskCoreImpl(
+    {
+      title,
+      workspace_id: wsId,
+      status: 'backlog',
+      idempotency_key: key,
+      eventMessage: `Task captured [ingest:${key}]`,
+    },
+    { notifyGateway: false },
+  );
+  assert.ok(r1, 'first ingest must succeed');
+  assert.equal(r1!.deduped, false, 'no live match under the key → must INSERT, not dedupe onto the dead card');
+  assert.notEqual(r1!.task.id, deadId, 'must NOT return the archived task');
+
+  // Second ingest with the same key dedupes onto the fresh live card.
+  const r2 = await createTaskCoreImpl(
+    {
+      title,
+      workspace_id: wsId,
+      status: 'backlog',
+      idempotency_key: key,
+      eventMessage: `Task captured [ingest:${key}]`,
+    },
+    { notifyGateway: false },
+  );
+  assert.ok(r2, 'second ingest must succeed');
+  assert.equal(r2!.deduped, true, 'second ingest MUST dedupe onto the fresh live card');
+  assert.equal(r2!.task.id, r1!.task.id, 'deduped result must point at the live card, never the archived one');
+});
+
+test('FIX 40: event pointing at a deleted task id is skipped, insert proceeds', async () => {
+  const wsId = `ws-dedup-${RUN_ID}`;
+  const key = `dead-key-${RUN_ID}-f40b`;
+  const title = `Vanished-row retry [${RUN_ID}-f40b]`;
+
+  const now = new Date().toISOString();
+  // events.task_id carries an FK to tasks(id), so a dangling event row can only
+  // be created with FK enforcement suspended for that one insert (the same way
+  // historical deletes/pre-FK data can leave one behind in the wild).
+  run('PRAGMA foreign_keys = OFF');
+  run(
+    `INSERT INTO events (id, type, task_id, message, created_at)
+     VALUES (?, 'task_created', ?, ?, ?)`,
+    [`evt-${RUN_ID}-f40b-seed`, `gone-task-${RUN_ID}-f40b`, `Task captured [ingest:${key}]`, now],
+  );
+  run('PRAGMA foreign_keys = ON');
+
+  const r1 = await createTaskCoreImpl(
+    {
+      title,
+      workspace_id: wsId,
+      status: 'backlog',
+      idempotency_key: key,
+      eventMessage: `Task captured [ingest:${key}]`,
+    },
+    { notifyGateway: false },
+  );
+  assert.ok(r1, 'first ingest must succeed');
+  assert.equal(r1!.deduped, false, 'missing task row must be skipped → insert');
+});
+
+test('FIX 40: dead event + live event under same key → dedupes onto the LIVE (newest-first scan), not the dead one', async () => {
+  const wsId = `ws-dedup-${RUN_ID}`;
+  const key = `mixed-key-${RUN_ID}-f40c`;
+  const title = `Mixed dead/live key [${RUN_ID}-f40c]`;
+
+  const now = new Date().toISOString();
+  const deadId = `dead-task-${RUN_ID}-f40c`;
+  run(
+    `INSERT INTO tasks (id, title, status, priority, workspace_id, business_id, archived_at, created_at, updated_at)
+     VALUES (?, ?, 'backlog', 'medium', ?, 'default', ?, ?, ?)`,
+    [deadId, `${title} (dead)`, wsId, now, now, now],
+  );
+  run(
+    `INSERT INTO events (id, type, task_id, message, created_at)
+     VALUES (?, 'task_created', ?, ?, ?)`,
+    [`evt-${RUN_ID}-f40c-dead`, deadId, `Task captured [ingest:${key}]`, now],
+  );
+
+  // Live card created the normal way (logs its own task_created event with the key).
+  const live = await createTaskCoreImpl(
+    {
+      title,
+      workspace_id: wsId,
+      status: 'backlog',
+      idempotency_key: key,
+      eventMessage: `Task captured [ingest:${key}]`,
+    },
+    { notifyGateway: false },
+  );
+  assert.ok(live && live.deduped === false, 'live card must insert cleanly');
+
+  const again = await createTaskCoreImpl(
+    {
+      title,
+      workspace_id: wsId,
+      status: 'backlog',
+      idempotency_key: key,
+      eventMessage: `Task captured [ingest:${key}]`,
+    },
+    { notifyGateway: false },
+  );
+  assert.ok(again, 're-ingest must succeed');
+  assert.equal(again!.deduped, true, 'must dedupe');
+  assert.equal(again!.task.id, live!.task.id, 'must land on the LIVE card, skipping the archived one');
+
+  const taskCount = queryAll<{ n: number }>(
+    "SELECT COUNT(*) as n FROM tasks WHERE workspace_id = ? AND title LIKE ? AND archived_at IS NULL AND id != ?",
+    [wsId, `%${RUN_ID}-f40c%`, deadId],
+  )[0]?.n ?? 0;
+  assert.equal(taskCount, 1, 'exactly one live task row must exist for this key');
 });
 
 test('keyless same-title within window STILL dedups (Layer 2 preserved for keyless callers)', async () => {

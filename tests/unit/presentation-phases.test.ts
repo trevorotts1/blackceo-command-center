@@ -20,6 +20,8 @@ import {
   PHASE_LABELS,
   DELIVERABLE_DERIVED_LABELS,
   PHASE_ACTIVITY_METADATA_KEY,
+  TELEPROMPTER_BASENAME,
+  isTeleprompterDeliverable,
   phaseIdOf,
   computePhaseProgress,
 } from '@/lib/presentation-phases';
@@ -214,6 +216,73 @@ describe('U060 — presentation-phases', () => {
     });
   });
 
+  describe('isTeleprompterDeliverable (FIX 50b)', () => {
+    it('TELEPROMPTER_BASENAME is the producer filename', () => {
+      expect(TELEPROMPTER_BASENAME).toBe('presenter-teleprompter.html');
+    });
+
+    it('matches an artifact row by basename of path', () => {
+      expect(
+        isTeleprompterDeliverable({
+          deliverable_type: 'artifact',
+          path: 'working/deliverables/presenter-teleprompter.html',
+        }),
+      ).toBe(true);
+    });
+
+    it('matches a file row with a bare basename', () => {
+      expect(
+        isTeleprompterDeliverable({
+          deliverable_type: 'file',
+          path: 'presenter-teleprompter.html',
+        }),
+      ).toBe(true);
+    });
+
+    it('matches through backslash separators', () => {
+      expect(
+        isTeleprompterDeliverable({
+          deliverable_type: 'file',
+          path: 'C:\\runs\\deck\\deliverables\\presenter-teleprompter.html',
+        }),
+      ).toBe(true);
+    });
+
+    it('matches a legacy type row even without a path', () => {
+      expect(isTeleprompterDeliverable({ deliverable_type: 'teleprompter' })).toBe(true);
+    });
+
+    it('does not match other basenames or other files in the same dir', () => {
+      expect(
+        isTeleprompterDeliverable({
+          deliverable_type: 'artifact',
+          path: 'working/deliverables/PRESENTER-GUIDE.pdf',
+        }),
+      ).toBe(false);
+      expect(
+        isTeleprompterDeliverable({
+          deliverable_type: 'artifact',
+          path: 'working/deliverables/presenter-teleprompter.html.bak',
+        }),
+      ).toBe(false);
+    });
+
+    it('does not match a prefix-extended basename (basename must be exact)', () => {
+      expect(
+        isTeleprompterDeliverable({
+          deliverable_type: 'url',
+          path: 'https://cdn.example.com/decks/old-presenter-teleprompter.html',
+        }),
+      ).toBe(false);
+    });
+
+    it('handles null / undefined / non-string paths without throwing', () => {
+      expect(isTeleprompterDeliverable({ deliverable_type: 'url', path: null })).toBe(false);
+      expect(isTeleprompterDeliverable({ deliverable_type: 'url', path: undefined })).toBe(false);
+      expect(isTeleprompterDeliverable({ deliverable_type: 'url' })).toBe(false);
+    });
+  });
+
   describe('computePhaseProgress', () => {
     it('returns 7 phases in PHASE_LABELS order', () => {
       const result = computePhaseProgress([], []);
@@ -284,6 +353,85 @@ describe('U060 — presentation-phases', () => {
       );
       const tp = result.phases.find((p) => p.label === 'Teleprompter')!;
       expect(tp.status).toBe('done');
+    });
+
+    // FIX 50b — basename detection. The registration enum has no
+    // 'teleprompter' type, so the REAL row is a file/artifact with the
+    // teleprompter's basename in `path`.
+    it('FIX 50b — Teleprompter is done from a basename match on path (artifact row)', () => {
+      const result = computePhaseProgress(
+        [],
+        [
+          { deliverable_type: 'artifact', path: 'working/deliverables/presenter-teleprompter.html' },
+        ],
+      );
+      const tp = result.phases.find((p) => p.label === 'Teleprompter')!;
+      expect(tp.status).toBe('done');
+    });
+
+    it('FIX 50b — Teleprompter done from a bare-filename path (url row, published)', () => {
+      const result = computePhaseProgress(
+        [],
+        [{ deliverable_type: 'url', path: 'presenter-teleprompter.html' }],
+      );
+      const tp = result.phases.find((p) => p.label === 'Teleprompter')!;
+      expect(tp.status).toBe('done');
+    });
+
+    it('FIX 50b — Teleprompter done when basename is the only path segment after a deep prefix', () => {
+      const result = computePhaseProgress(
+        [],
+        [
+          {
+            deliverable_type: 'file',
+            path: '/var/openclaw/runs/deck-12/working/deliverables/presenter-teleprompter.html',
+          },
+        ],
+      );
+      const tp = result.phases.find((p) => p.label === 'Teleprompter')!;
+      expect(tp.status).toBe('done');
+    });
+
+    it('FIX 50b — basename match tolerates surrounding whitespace in path', () => {
+      const result = computePhaseProgress(
+        [],
+        [
+          { deliverable_type: 'artifact', path: '  working/deliverables/presenter-teleprompter.html  ' },
+        ],
+      );
+      const tp = result.phases.find((p) => p.label === 'Teleprompter')!;
+      expect(tp.status).toBe('done');
+    });
+
+    it('FIX 50b — other basenames do NOT advance Teleprompter', () => {
+      const result = computePhaseProgress(
+        [],
+        [
+          { deliverable_type: 'artifact', path: 'working/deliverables/PRESENTER-GUIDE.pdf' },
+          { deliverable_type: 'file', path: 'out.pptx' },
+          { deliverable_type: 'url', path: 'https://teleprompter.example.com/presenter-teleprompter.htmlX' },
+        ],
+      );
+      const tp = result.phases.find((p) => p.label === 'Teleprompter')!;
+      expect(tp.status).toBe('not_started');
+    });
+
+    it('FIX 50b — a non-teleprompter row with no path stays not_started (no crash on null)', () => {
+      const result = computePhaseProgress(
+        [],
+        [{ deliverable_type: 'url', path: null }],
+      );
+      const tp = result.phases.find((p) => p.label === 'Teleprompter')!;
+      expect(tp.status).toBe('not_started');
+    });
+
+    it('FIX 50b — rows lacking a path field entirely do not crash the reducer', () => {
+      const result = computePhaseProgress(
+        [],
+        [{ deliverable_type: 'artifact' } as unknown as { deliverable_type: string; path?: string | null }],
+      );
+      const tp = result.phases.find((p) => p.label === 'Teleprompter')!;
+      expect(tp.status).toBe('not_started');
     });
 
     it('a P7 activity does NOT advance Teleprompter (unmapped only)', () => {

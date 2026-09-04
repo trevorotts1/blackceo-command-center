@@ -61,7 +61,7 @@ import {
   WORKSPACE_BASE,
   groundDraftedSOP,
 } from '@/lib/sop-auto-replace';
-import { scoreTaskForQC, resolveTrioAgents, QC_PASS_THRESHOLD, blockTaskForQC } from '@/lib/qc-scorer';
+import { scoreTaskForQC, resolveTrioAgents, QC_PASS_THRESHOLD } from '@/lib/qc-scorer';
 import type { QCScorerInput } from '@/lib/qc-scorer';
 import { recordStatusEvent, transitionWithDeclaredException } from '@/lib/task-lifecycle';
 import { notifyOwnerDone } from '@/lib/owner-reports';
@@ -246,73 +246,6 @@ function safeDiskWrite(filePath: string, content: string): { ok: boolean; error?
     return { ok: true };
   } catch (err) {
     return { ok: false, error: (err as Error).message };
-  }
-}
-
-/**
- * ZOMBIE FIX — terminal-fail the authoring sub-task when the run dies.
- *
- * The sub-task is created 'in_progress' in §2, but the failure returns below
- * used to leave it there forever: no terminal marker in any session
- * transcript, so execution-watcher's findTerminalFailureMarker never fires
- * and every reconcile tick finds nothing. This routes the failure through the
- * SAME blockTaskForQC funnel execution-watcher itself uses for a dead turn
- * (in_progress→blocked is a legal edge; carries operator-visible block_*
- * metadata + a task_block_events audit row; 'blocked' is uncapped so no WIP
- * gate can strand it). 'blocked' is excluded from intake-advance-sweep's
- * ADVANCEABLE_STATUSES and autoDispatchTask's GUARD 3 SKIP_STATUSES, so the
- * failed card can never re-enter the dispatch funnel: no bounce loop.
- * SYSTEM audience (operator concern, MOVE-IN-SILENCE — never client Telegram),
- * attempts=null (not a QC failure — qc_reroute_attempts untouched), CAS-guarded
- * on fromStatus='in_progress' so a lost race records nothing. Best-effort;
- * never throws (fire-and-forget contract).
- */
-async function failAuthoringSubtask(opts: {
-  subTaskId: string;
-  deptSlug: string;
-  title: string;
-  originalTaskId: string;
-  taskDescription?: string | null;
-  failure: string;
-  blockReason: string;
-}): Promise<void> {
-  const needs =
-    `Operator review: SOP authoring for "${opts.title}" (dept "${opts.deptSlug}") failed: ${opts.failure} ` +
-    `Resolve the blocker, then re-dispatch or close.`;
-  try {
-    const landed = await blockTaskForQC({
-      taskId: opts.subTaskId,
-      taskTitle: `Author SOP: ${opts.title}`,
-      taskDescription: opts.taskDescription ?? null,
-      fromStatus: 'in_progress',
-      actor: 'sop-authoring',
-      attempts: null,
-      gaps: [],
-      needs,
-      audience: 'SYSTEM',
-      blockReason: opts.blockReason,
-      auditNote: opts.failure,
-      timelineEventMessage: `[sop-authoring] ${opts.failure}`,
-      escalationMessage:
-        `[sop-authoring] Authoring sub-task for "${opts.title}" (${opts.originalTaskId}) auto-blocked — ${opts.failure}`,
-    });
-    if (landed) {
-      // Free the research specialist — mirrors execution-watcher's post-block step.
-      try {
-        const row = queryOne<{ assigned_agent_id: string | null }>(
-          `SELECT assigned_agent_id FROM tasks WHERE id = ?`,
-          [opts.subTaskId],
-        );
-        if (row?.assigned_agent_id) {
-          run(
-            `UPDATE agents SET status='standby', updated_at=? WHERE id=? AND status='working'`,
-            [new Date().toISOString(), row.assigned_agent_id],
-          );
-        }
-      } catch { /* non-fatal */ }
-    }
-  } catch (err) {
-    console.warn('[sop-authoring] failAuthoringSubtask non-fatal:', (err as Error).message);
   }
 }
 
@@ -699,27 +632,7 @@ export async function authorSOPForTask(input: AuthorSOPInput): Promise<AuthorRes
       const msg = `[sop-authoring] Gemini generation failed for "${input.title}": ${(genErr as Error).message}`;
       console.error(msg);
       emitEvent('sop_authoring_generation_failed', msg, input.originalTaskId);
-      // ZOMBIE FIX: the authoring sub-task was created 'in_progress' above and
-      // this return previously left it there forever — no terminal marker in
-      // the session transcript, so execution-watcher's findTerminalFailureMarker
-      // never fires and every reconcile tick finds nothing. Terminal-block the
-      // sub-task via the SAME blockTaskForQC funnel execution-watcher itself
-      // uses (in_progress→blocked is a legal edge, carries operator-visible
-      // block_* metadata + task_block_events audit row; 'blocked' is uncapped
-      // so no WIP gate can strand it). 'blocked' is excluded from
-      // intake-advance-sweep's ADVANCEABLE_STATUSES and from autoDispatchTask's
-      // GUARD 3 SKIP_STATUSES, so this can never re-enter the dispatch funnel:
-      // no bounce loop. The ORIGINAL task keeps its own accounting (the
-      // dispatcher recorded sop_authoring_pending + backoff) and is untouched.
-      await failAuthoringSubtask({
-        subTaskId,
-        deptSlug,
-        title: input.title,
-        originalTaskId: input.originalTaskId,
-        failure: msg,
-        blockReason: 'sop_authoring_generation_failed',
-      });
-      return { status: 'error', sub_task_id: subTaskId, reason: msg };
+      return { status: 'error', reason: msg };
     }
 
     // Parse — attempt 1.
@@ -1007,16 +920,7 @@ export async function authorSOPForTask(input: AuthorSOPInput): Promise<AuthorRes
       const msg = `[sop-authoring] Failed to insert SOP row: ${(insertErr as Error).message}`;
       console.error(msg);
       emitEvent('sop_authoring_db_insert_failed', msg, input.originalTaskId);
-      // Same zombie funnel as the generation-failure path above.
-      await failAuthoringSubtask({
-        subTaskId,
-        deptSlug,
-        title: input.title,
-        originalTaskId: input.originalTaskId,
-        failure: msg,
-        blockReason: 'sop_authoring_db_insert_failed',
-      });
-      return { status: 'error', sub_task_id: subTaskId, reason: msg };
+      return { status: 'error', reason: msg };
     }
 
     // §5a: Write an audit trail `sop_proposals` row with status 'auto-authored-filed'.

@@ -89,6 +89,39 @@ interface BacklogTaskRow {
 export const REDISPATCH_MAX_ATTEMPTS = 20;
 export const REDISPATCH_ESCALATE_HOURS = 6;
 
+// ── FIX 38b: engine-owned cards are NOT board-redispatchable ─────────────────
+// A card whose ingest `source` is an ENGINE source (build_deck / build_deck_phase)
+// is owned by the Presentations engine, which sequences its own phases. The
+// legacy re-dispatch loop used to select those rows and fire autoDispatchTask on
+// them, making a SECOND executor race the live engine run (MASTER Fix 38,
+// R5B §F1/§E.1). Every SELECT below must therefore exclude them.
+//
+// Column guard: `tasks.source` arrives with migration 089. On a pre-089 box the
+// clause is omitted entirely (all rows are NULL-source legacy tasks and remain
+// eligible exactly as before) instead of throwing "no such column". The helpers
+// are file-local (not a shared module) because the sweep files are each other's
+// only consumers and must stay within their own review scope.
+const ENGINE_OWNED_SOURCES = ['build_deck', 'build_deck_phase'] as const;
+
+function tasksHaveSourceColumn(): boolean {
+  try {
+    const cols = queryAll<{ name: string }>('PRAGMA table_info(tasks)', []);
+    return cols.some((c) => c.name === 'source');
+  } catch {
+    return false;
+  }
+}
+
+function engineSourceExclusionClause(): string {
+  if (!tasksHaveSourceColumn()) return '';
+  const list = ENGINE_OWNED_SOURCES.map(() => '?').join(',');
+  return `AND (t.source IS NULL OR t.source NOT IN (${list}))`;
+}
+
+function engineSourceExclusionParams(): string[] {
+  return tasksHaveSourceColumn() ? [...ENGINE_OWNED_SOURCES] : [];
+}
+
 /**
  * Escalate a task that has exhausted the cheap re-dispatch loop to `blocked`,
  * with a [REDISPATCH-CAP] operator-feed note. Concurrency-safe (WHERE status =
@@ -204,14 +237,15 @@ export async function runBacklogRedispatchSweep(): Promise<BacklogRedispatchResu
   const graceCutoff = new Date(Date.now() - graceSeconds * 1000).toISOString();
 
   // Assigned, still-backlog, not-archived, under the re-route cap, not on a
-  // master/CEO agent, and last touched before the grace window. Oldest first so
-  // the most-stuck cards drain first.
+  // master/CEO agent, not engine-owned (FIX 38b), and last touched before the
+  // grace window. Oldest first so the most-stuck cards drain first.
   //
   // W8.2 anti-furnace: ALSO require the task to be under the dispatch-attempt cap
   // and past its exponential-backoff window. Without these, a task that can't
   // advance (gateway down / no sovereign model / no per-dept runtime) was
   // re-fired every 2 min forever — the exact furnace this guard kills. A blocked
   // or backed-off task now drops out of selection instead of re-looping.
+  const sourceExclusion = engineSourceExclusionClause();
   const rows = queryAll<BacklogTaskRow>(
     `SELECT t.id AS id,
             t.title AS title,
@@ -228,10 +262,11 @@ export async function runBacklogRedispatchSweep(): Promise<BacklogRedispatchResu
         AND (t.dispatch_attempts IS NULL OR t.dispatch_attempts < ?)
         AND (t.next_dispatch_eligible_at IS NULL OR t.next_dispatch_eligible_at <= ?)
         AND (a.is_master IS NULL OR a.is_master = 0)
+        ${sourceExclusion}
         AND t.updated_at <= ?
       ORDER BY t.updated_at ASC
       LIMIT ?`,
-    [cap, dispatchCap, now, graceCutoff, batch],
+    [cap, dispatchCap, now, ...engineSourceExclusionParams(), graceCutoff, batch],
   );
 
   if (rows.length === 0) {

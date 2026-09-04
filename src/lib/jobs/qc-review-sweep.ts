@@ -225,6 +225,15 @@ export async function runQCReviewSweep(): Promise<QCReviewSweepResult> {
   // governed by the shorter deferred-retry window instead so it is re-scored the
   // moment the window elapses (auto-rescore on provider recovery).
   //
+  // FIX 39 ENGINE-OWNED EXCLUSION: a `build_deck_phase` card is owned by the
+  // deck pipeline (the engine writes its own phase attestations and re-dispatches
+  // its own phases). It must never enter this sweep — QC judging it can only
+  // produce false [QC-AF-I14] fails and blocks the engine never asked for. The
+  // runQCOnReview gate carries the same guard (defense in depth: a card that
+  // arrives via the PATCH path still gets one idempotent [QC-ENGINE-OWNED]
+  // event and no score), but excluding it here keeps the engine-owned card out
+  // of the candidate set entirely.
+  //
   // QC-02 PERMANENT EXCLUSION: a keyless box escalates a stuck no-key task ONCE
   // to a terminal [QC-HEURISTIC-FINAL] "needs-key / manual-promote" state (see
   // qc-scorer). Such a task can NEVER auto-advance, so re-scoring it every 10 min
@@ -236,6 +245,7 @@ export async function runQCReviewSweep(): Promise<QCReviewSweepResult> {
      FROM tasks t
      WHERE t.status = 'review'
        AND t.archived_at IS NULL
+       AND (t.source IS NULL OR t.source <> 'build_deck_phase')
        AND NOT EXISTS (
          SELECT 1 FROM events e
          WHERE e.task_id = t.id

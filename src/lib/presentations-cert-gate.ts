@@ -92,6 +92,59 @@ export function evaluatePresentationsDoneGate(
   input: PresentationsGateInput,
 ): PresentationsGateResult {
   const target = (input.targetStatus ?? '').toString();
+
+  // ── FIX 7 — REGISTRATION LEG AT REVIEW ─────────────────────────────────────
+  // The engine's close() (phases.py _board_register_close) PATCHes the parent
+  // card to `review` with the run's process_certificate_sha BEFORE any QC
+  // scoring. Until this leg existed, the gate returned {applies:false} for
+  // every non-terminal target, so the presented cert was never persisted and
+  // the card reached review with an empty anti-spoof slot — review→done could
+  // then never pass requiresRegisteredCertificate() (stored cert missing), so
+  // zero presentations cards ever reached done without a human PATCH.
+  //
+  // Registration (not matching): presenting a VALID sha on a review move where
+  // none is stored REGISTERS it. This does not weaken the no-skip proof —
+  // review→done still requires the registered cert through the U031 gate at
+  // transition() and the anti-spoof MATCH leg below at the PATCH route — it
+  // only moves the REGISTER step to the one place a producer legitimately
+  // presents a fresh cert.
+  //
+  // Fail-closed semantics preserved:
+  //   • junk presented (normCert → null) with nothing stored → {applies:false}
+  //     (a review move needs no cert at all; a junk value is simply not a
+  //     registration attempt, exactly as U033 treats it on done)
+  //   • DIFFERENT valid sha presented while one is already stored → MISMATCH
+  //     (anti-spoof applies from review onward: a card may not re-brand its
+  //     certificate mid-flight)
+  //   • same sha re-presented → idempotent no-op (persistCert null)
+  if (
+    target === 'review' &&
+    input.currentStatus !== target &&
+    canonicalDeptSlug(input.department || '') || false
+  ) {
+    const deptCanonReview =
+      canonicalDeptSlug(input.department || '') || (input.department ?? '');
+    if (deptCanonReview === 'presentations') {
+      const storedReview = normCert(input.storedCert);
+      const providedReview = normCert(input.providedCert);
+      if (storedReview && providedReview && providedReview !== storedReview) {
+        return {
+          applies: true,
+          ok: false,
+          code: 'process_certificate_mismatch',
+          error: 'Forbidden: process_certificate_sha does not match the certificate registered for this deck',
+          remediation:
+            `Present the registered process_certificate_sha, or clear the mismatch with the operator. ` +
+            `A presentations card may not re-brand its certificate on a review move.`,
+        };
+      }
+      if (providedReview && !storedReview) {
+        return { applies: true, ok: true, persistCert: providedReview };
+      }
+      return { applies: false, ok: true };
+    }
+  }
+
   const isTerminal = PRESENTATIONS_TERMINAL_STATUSES.has(target);
   const changing = input.currentStatus !== target;
   if (!isTerminal || !changing) return { applies: false, ok: true };

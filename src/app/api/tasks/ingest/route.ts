@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createHmac, createHash } from 'crypto';
+import { createHash } from 'crypto';
 import { queryOne, getDb, run } from '@/lib/db';
 import { v4 as uuidv4 } from 'uuid';
 import { runMigrations } from '@/lib/db/migrations';
@@ -21,6 +21,11 @@ import { boardWhereClause } from '@/lib/workspaces/board-query';
 // sole-writer subject key onto the card's `Ref:` line (see below). Import-safe
 // server-side: anthology-card.ts has no React / client-only imports.
 import { resolveIngestSourceRef } from '@/components/anthology/anthology-card';
+// FIX 56 — constant-time HMAC-SHA256 verification (shared with
+// /api/presentations/stage-timings and /api/tasks/[id]/status). Replaces this
+// route's local `===` digest compare, which leaked first-difference timing and
+// returned a 401 only after a length-mismatched compare could not happen.
+import { verifyWebhookSignature } from '@/lib/webhook-signature';
 // queryOne is still used for workspace resolution below.
 
 export const dynamic = 'force-dynamic';
@@ -92,6 +97,9 @@ let selfHealState: 'idle' | 'running' | 'done' = 'idle';
  *                                                            // into when there is no
  *                                                            // requester_chat_id
  *   "idempotency_key": "sha256(...)",                        // optional; primary dedupe key
+ *   "context_refs": ["path/to/doc.md"],                      // optional; FIX 56 (W4.1) — doc pointers
+ *                                                              // the CEO attaches; folded onto the card
+ *                                                              // and carried into the dispatch ContextPack
  *   "parent_task_id": "<uuid>"                                // optional; WI-15b — creates a per-phase
  *                                                              // CHILD card under this parent deck-run
  *                                                              // task (validated: same-company only)
@@ -184,17 +192,49 @@ interface IngestPayload {
   topic_persona_id?: unknown;
   task_persona_ids?: unknown;
   bundle_sha?: unknown;
+  /**
+   * FIX 52 (MASTER Part 8 / [R5A §H5]) — presentation deck-run slide count.
+   * The producer (cc_board.py / presentation_job.py) knows the deck size when
+   * it ingests each per-phase child card, so it sends the number here and the
+   * route stamps it onto the task row (migration 130 `tasks.slide_count`).
+   * Accepted as a finite non-negative integer; anything else (missing, non-
+   * numeric, negative, fractional) is dropped rather than 400'd — an absent
+   * count is the normal case for non-presentation ingest, and a malformed one
+   * must not block capture.
+   */
+  slide_count?: unknown;
+  /**
+   * FIX 52 (MASTER Part 8 / [R5A §H5]) — the explicit manifest phase id a
+   * presentation producer stamps on its per-phase CHILD card ("P4-COPY",
+   * "P4-RENDER", …). Persisted into the existing `tasks.stage_slug` column
+   * (migration 074; additive, presentation reuses it) so the children route's
+   * FIX 52 label resolver (childPhaseLabel, presentation-phases.ts) can derive
+   * the client-facing phase label ("Script") from DATA instead of guessing it
+   * from the child's title text — a child titled "anything" with phase_id
+   * P4-COPY must label Script.
+   *
+   * Accepted as a trimmed non-empty string (≤ 128 chars, matching
+   * UpdateTaskSchema.phase_id's bound). Anything else (missing, blank, wrong
+   * type, over-long) is dropped rather than 400'd — the phase id is
+   * decoration on a card that must never block capture. NOT a foreign key and
+   * NOT validated against PHASE_TO_LABEL here: an id the reducer does not
+   * know still deserves to be stored verbatim (childPhaseLabel falls back to
+   * the activity/title signals for unknown ids).
+   */
+  phase_id?: unknown;
+  /**
+   * FIX 52 — the phase id under its cc_board.py canonical key. The engine's
+   * per-phase producer stamps `stage` (ingest_child_task payload.stage =
+   * phase_id); `phase_id` is the accepted alias. Same validation as
+   * phase_id: trimmed non-empty string ≤ 128 chars, else dropped — never a
+   * 400. Declared here only so the parser's two-key read type-checks; the
+   * IngestPayload interface deliberately stays loose (unknown) because every
+   * field is validated inline before use.
+   */
+  stage?: unknown;
 }
 
 const VALID_PRIORITIES = new Set<TaskPriority>(['low', 'medium', 'high', 'critical']);
-
-function verifyWebhookSignature(signature: string | null, rawBody: string): boolean {
-  const webhookSecret = process.env.WEBHOOK_SECRET;
-  if (!webhookSecret) return true; // Dev mode — skip validation.
-  if (!signature) return false;
-  const expected = createHmac('sha256', webhookSecret).update(rawBody).digest('hex');
-  return signature === expected;
-}
 
 /**
  * W3.1 — INTERVIEW-COMPLETED ROUTING GATE (spec §3).
@@ -412,6 +452,8 @@ export async function POST(request: NextRequest) {
       }
     } else {
       const signature = request.headers.get('x-webhook-signature');
+      // FIX 56 — constant-time compare via the shared lib; a wrong-length
+      // signature is a clean false → 401 (no throw, no timing leak).
       if (!verifyWebhookSignature(signature, rawBody)) {
         console.warn('[INGEST] Invalid signature attempt');
         return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -504,7 +546,19 @@ export async function POST(request: NextRequest) {
     }
 
     const description = typeof body.description === 'string' ? body.description : undefined;
-    const source = typeof body.source === 'string' ? body.source.trim() : undefined;
+    // FIX 36 — the ingest route has never been source-GATED (producers tag
+    // provenance like 'telegram' | 'backfill' here, and Skill-6 callers may
+    // send a department-slug override), so unrecognized values still pass
+    // through untouched — they simply stamp a tasks.source the status route's
+    // gate will refuse to act on. What changes per FIX 36 is CASE: the value
+    // is lowercased here so the immutable tasks.source stamp is CANONICAL —
+    // a producer that sends "Build_Deck_Phase" (the Presentations engine's
+    // cc_board.py child-card source; "presentation-interview-app" is the
+    // interview app's) stamps exactly what src/lib/board-sources.ts recognizes,
+    // instead of a mixed-case near-miss the gate would 403. The membership
+    // check itself lives in normalizeBoardSource() and runs at the status
+    // route (fail-closed there, 403 for unknown values like "garbage").
+    const source = typeof body.source === 'string' ? body.source.trim().toLowerCase() : undefined;
     const sourceRef = typeof body.source_ref === 'string' ? body.source_ref.trim() : undefined;
     const departmentSlug =
       typeof body.department_slug === 'string' ? body.department_slug.trim() : undefined;
@@ -524,6 +578,11 @@ export async function POST(request: NextRequest) {
     const parentTaskIdRaw =
       typeof body.parent_task_id === 'string' ? body.parent_task_id.trim() : undefined;
     let parentTaskId: string | null = null;
+    // FIX 57 — the parent's description is fetched alongside its id because the
+    // parent's run identity (its `Ref:` provenance line, written by this route
+    // from the producer's source_ref) lives there. The mismatch hold below
+    // pairs the child's `Session:` line against it BEFORE any card is created.
+    let parentDescription: string | null = null;
     if (parentTaskIdRaw) {
       const db = getDb();
       const activeCompanyId = resolveActiveCompanyId(db);
@@ -535,10 +594,12 @@ export async function POST(request: NextRequest) {
       const scopePlaceholders = scopeIdList.map(() => '?').join(',');
       const parent = db
         .prepare(
-          `SELECT id FROM tasks
+          `SELECT id, description FROM tasks
             WHERE id = ? AND (workspace_id IS NULL OR workspace_id IN (${scopePlaceholders}))`,
         )
-        .get(parentTaskIdRaw, ...scopeIdList) as { id: string } | undefined;
+        .get(parentTaskIdRaw, ...scopeIdList) as
+        | { id: string; description: string | null }
+        | undefined;
       if (!parent) {
         console.warn(
           `[INGEST] WI-15b: parent_task_id="${parentTaskIdRaw}" not found or not in the active ` +
@@ -553,6 +614,104 @@ export async function POST(request: NextRequest) {
         );
       }
       parentTaskId = parent.id;
+      parentDescription = parent.description ?? null;
+    }
+
+    // ── FIX 57 (MASTER Part 8 / [R5B §E.4, §F10]) — per-run parent identity: ──
+    // a child phase card whose run identity disagrees with its parent's is
+    // HELD at the door, never silently attached.
+    //
+    // THE LIVE DEFECT: 47 of 49 child cards of a second deck job pointed at
+    // the FIRST job's parent. The producer cached parent_task_id
+    // process-wide instead of per run, so the second run's children ingested
+    // under the first run's parent id and the two runs' phases interleaved on
+    // one deck card. cc_board.py now caches parent_task_id per run_id and
+    // stamps every child's external_session_id (the card's `Session:`
+    // provenance line) with its OWN run's id, while the parent's source_ref
+    // (its `Ref:` line) is that same run id — so the pairing is checkable
+    // from the board itself, here, at ingest time.
+    //
+    // THE HOLD RULE — only fires on a FACT this request itself carries:
+    //   child source = build_deck_phase (the engine's per-phase child card),
+    //   child Session line present,
+    //   parent Ref line present,
+    //   and the two differ.
+    // When ANY input to the comparison is absent the hold stays silent — an
+    // absent identity is undeterminable here, never evidence of a mismatch
+    // (the same posture as task-dispatcher.ts's GUARD 4c deckPhaseRunIsInitialized:
+    // block only on what the board can establish, never on what it cannot
+    // observe). The legacy pairing (producer without run_id: child Session =
+    // `<parent_task_id>:<phase_id>`) also passes: it names its own parent,
+    // which is exactly the identity it is attached to.
+    //
+    // WHAT THE HOLD DOES: the child card is NOT created — creating it attached
+    // to the wrong run's parent is the defect itself, and a blocked orphan
+    // on the wrong deck would still be wrong parentage. Instead the ingest is
+    // rejected 409 (fail-soft on the producer side: it logs "non-OK" and the
+    // run continues) and ONE deduped `deck_run_identity_mismatch` event is
+    // recorded on the PARENT card so the operator sees which deck is being
+    // targeted by a foreign run's children.
+    const isDeckPhaseChild = source === 'build_deck_phase';
+    // externalSessionId is parsed below (line ~730, provenance section); the
+    // hold reads the raw body field directly so the check can run here, before
+    // any write, in the WI-15b parent-validation block where the parent row is
+    // already in hand.
+    const childSession =
+      typeof body.external_session_id === 'string' && body.external_session_id.trim() !== ''
+        ? body.external_session_id.trim()
+        : undefined;
+    const parentRefLine = (() => {
+      if (!parentDescription) return null;
+      const m = parentDescription.match(/^Ref:\s*(\S.*?)\s*$/m);
+      return m ? m[1] : null;
+    })();
+    if (isDeckPhaseChild && parentTaskId && childSession && parentRefLine && childSession !== parentRefLine) {
+      // Legacy pairing escape hatch: `<parent_task_id>:<phase_id>` — the child
+      // session names the very parent it is attached to, so the two values
+      // differing is EXPECTED (one is a run id, one is a parent-scoped phase
+      // anchor) and is not a mismatch.
+      const legacyPrefix = `${parentTaskId}:`;
+      if (!childSession.startsWith(legacyPrefix)) {
+        const mismatchDetail = `child session "${childSession}" does not match parent run ref "${parentRefLine}"`;
+        console.warn(
+          `[INGEST] FIX 57 deck_run_identity_mismatch: ${mismatchDetail} — child card for ` +
+            `parent_task_id="${parentTaskId}" HELD at ingest (not created, not patched).`,
+        );
+        try {
+          const db = getDb();
+          const now = new Date().toISOString();
+          const holdMsg =
+            `[deck_run_identity_mismatch] A child phase card naming session \`${childSession}\` was ` +
+            `offered against this deck (Ref: \`${parentRefLine}\`) and HELD at ingest — the child's ` +
+            `run identity does not match this deck's run. The card was not created and not patched. ` +
+            `If this child belongs here, re-ingest it with external_session_id = this deck's run id ` +
+            `(\`${parentRefLine}\`); if it belongs to another run, its producer is caching parent ` +
+            `task ids across runs and must be re-run from its own run directory.`;
+          run(
+            `INSERT INTO events (id, type, task_id, message, created_at)
+             SELECT ?, 'deck_run_identity_mismatch', ?, ?, ?
+              WHERE NOT EXISTS (SELECT 1 FROM events WHERE task_id = ? AND type = 'deck_run_identity_mismatch')`,
+            [uuidv4(), parentTaskId, holdMsg, now, parentTaskId],
+          );
+        } catch (holdEventErr) {
+          // The hold itself is enforced by the 409 below; the event write is
+          // observability and must never turn into a 500.
+          console.error(
+            '[INGEST] deck_run_identity_mismatch event write failed (non-fatal):',
+            holdEventErr,
+          );
+        }
+        return NextResponse.json(
+          {
+            ok: false,
+            error:
+              'Child phase card held: its Session (run identity) does not match the parent deck\'s Ref line.',
+            detail: 'deck_run_identity_mismatch',
+            parent_task_id: parentTaskId,
+          },
+          { status: 409 },
+        );
+      }
     }
 
     // ── Skill-6 survey job-type mapping (zero-migration) ──────────────────────
@@ -588,6 +747,21 @@ export async function POST(request: NextRequest) {
       typeof body.external_session_id === 'string' ? body.external_session_id.trim() : undefined;
     const idempotencyKey =
       typeof body.idempotency_key === 'string' ? body.idempotency_key.trim() : undefined;
+
+    // FIX 56 (W4.1) — context_refs FINALLY reaches createTaskCore. The field was
+    // declared on IngestPayload (and promised by context-pack.ts's W4.1
+    // integration note) but never read: a CEO/caller attaching doc pointers had
+    // them silently dropped. Accepted as a JSON array of strings or a single
+    // string; blank entries are dropped and the list is capped at 20 refs —
+    // pointers are decoration and must never block capture (same posture as
+    // slide_count / phase_id above: malformed → dropped, never a 400).
+    const contextRefsRaw = body.context_refs;
+    const contextRefs = (
+      Array.isArray(contextRefsRaw) ? contextRefsRaw : [contextRefsRaw]
+    )
+      .filter((r): r is string => typeof r === 'string' && r.trim().length > 0)
+      .map((r) => r.trim())
+      .slice(0, 20);
 
     // P1-04 (trust engine) — capture the originating client chat so the report-back
     // engine can acknowledge/progress/done into it. A chat id with no explicit
@@ -626,6 +800,51 @@ export async function POST(request: NextRequest) {
       priorityRaw && VALID_PRIORITIES.has(priorityRaw as TaskPriority)
         ? (priorityRaw as TaskPriority)
         : undefined;
+
+    // FIX 52 (migration 130) — presentation slide count. Accept only a finite,
+    // non-negative INTEGER; any other shape (string, float, negative, NaN,
+    // Infinity) is dropped, never a 400 — an absent/malformed count must not
+    // block task capture, it only loses the decoration.
+    const slideCountRaw = body.slide_count;
+    let slideCount: number | null = null;
+    if (
+      typeof slideCountRaw === 'number' &&
+      Number.isFinite(slideCountRaw) &&
+      Number.isInteger(slideCountRaw) &&
+      slideCountRaw >= 0
+    ) {
+      slideCount = slideCountRaw;
+    } else if (typeof slideCountRaw === 'string' && slideCountRaw.trim() !== '') {
+      const parsed = Number(slideCountRaw.trim());
+      if (Number.isInteger(parsed) && parsed >= 0) {
+        slideCount = parsed;
+      }
+    }
+    if (slideCount !== null) {
+      console.log(`[INGEST] slide_count=${slideCount} captured for "${title}" (FIX 52)`);
+    }
+
+    // FIX 52 (MASTER Part 8) — presentation phase id. The engine's per-phase
+    // producer (cc_board.py, ingest_child_task) stamps the manifest phase on
+    // the child payload as `stage` (its canonical key since the R5A rewrite);
+    // `phase_id` is the explicitly accepted alias (UpdateTaskSchema/route
+    // parity). Two shapes are honoured for a DIFFERENT reason than slide_count:
+    // the phase id is not decoration — it is the child's identity — but a
+    // malformed one must still NEVER block capture (the card exists either
+    // way; the label resolver falls back to activity metadata / title).
+    // Accepted as a trimmed non-empty string, max 128 (matching
+    // UpdateTaskSchema.phase_id's bound). Anything else -> null.
+    const phaseIdRaw =
+      typeof body.phase_id === 'string' && body.phase_id.trim() !== ''
+        ? body.phase_id.trim()
+        : typeof body.stage === 'string' && body.stage.trim() !== ''
+          ? body.stage.trim()
+          : undefined;
+    const phaseId =
+      phaseIdRaw !== undefined && phaseIdRaw.length <= 128 ? phaseIdRaw : undefined;
+    if (phaseId) {
+      console.log(`[INGEST] phase_id="${phaseId}" captured for "${title}" (FIX 52)`);
+    }
 
     // B-U7 — ingest parity. voice_persona_id GATES the whole group (mirrors
     // cc_board.py's own gate, and report_persona_used's voice-required rule):
@@ -820,6 +1039,12 @@ export async function POST(request: NextRequest) {
     if (source) provenanceLines.push(`Source: ${source}`);
     if (persona) provenanceLines.push(`From persona: ${persona}`);
     if (externalSessionId) provenanceLines.push(`Session: ${externalSessionId}`);
+    // FIX 56 (W4.1) — fold the caller's context_refs into the description as a
+    // "Context refs:" provenance line. The dispatch-time ContextPack
+    // assembler (src/lib/task-dispatcher.ts → buildContextPack) reads
+    // task.description; pointers captured at ingest must survive on the card to
+    // reach the receiving specialist, exactly like the Source/Session/Ref lines.
+    if (contextRefs.length > 0) provenanceLines.push(`Context refs: ${contextRefs.join(', ')}`);
     // ANTHOLOGY-CC: surface the anthology sole-writer subject key on the card.
     // The board's card parsers (extractSubject / resolveAnthologyAssembly) read
     // the anthology_id ONLY from this `Ref:` line. An explicit source_ref wins;
@@ -888,6 +1113,10 @@ export async function POST(request: NextRequest) {
         topic_persona_id: topicPersonaId ?? null,
         task_persona_ids: taskPersonaIds ?? null,
         bundle_sha: bundleSha ?? null,
+        // FIX 56 (W4.1) — the validated context_refs list, so createTaskCore can
+        // surface it on the card and the ContextPack assembler can carry the
+        // pointers into the dispatch handoff (buildContextPack input.contextRefs).
+        context_refs: contextRefs.length > 0 ? contextRefs : null,
       },
       { origin: request.headers.get('origin') }
     );
@@ -897,6 +1126,51 @@ export async function POST(request: NextRequest) {
     }
 
     const { task, deduped } = result;
+
+    // FIX 52 (migration 130) — stamp the presentation slide count onto the
+    // freshly created card. Done as a follow-up UPDATE rather than inside
+    // createTaskCore's INSERT because slide_count is presentation-specific
+    // decoration, not part of the canonical write path shared with the UI and
+    // every other ingest caller. Runs ONLY on a genuinely new card (deduped
+    // retries return the prior row untouched); a failed write is logged, never
+    // fatal — the card exists either way.
+    if (slideCount !== null && !deduped) {
+      try {
+        run('UPDATE tasks SET slide_count = ?, updated_at = updated_at WHERE id = ?', [
+          slideCount,
+          task.id,
+        ]);
+      } catch (slideErr) {
+        console.error(
+          '[INGEST] slide_count write failed (non-fatal, migration 130 may not be applied yet):',
+          slideErr,
+        );
+      }
+    }
+
+    // FIX 52 — stamp the presentation phase id onto the freshly created card as
+    // `tasks.stage_slug` (column from migration 074; presentation reuses it —
+    // it is the same "current stage" slot the department stages use, and the
+    // children route's FIX 52 label resolver childPhaseLabel reads it FIRST).
+    // Same shape as slide_count: follow-up UPDATE (createTaskCore's INSERT is
+    // the canonical shared write path and does not carry this field), only on
+    // a genuinely new card (deduped retries keep the prior row untouched), and
+    // a failed write is logged, never fatal — the card exists either way. A
+    // null phaseId means "producer sent nothing usable" and skips the write.
+    if (phaseId !== undefined && !deduped) {
+      try {
+        run('UPDATE tasks SET stage_slug = ?, updated_at = updated_at WHERE id = ?', [
+          phaseId,
+          task.id,
+        ]);
+      } catch (stageErr) {
+        console.error(
+          '[INGEST] stage_slug write failed (non-fatal; migration 074 column missing on an ' +
+            'out-of-date schema):',
+          stageErr,
+        );
+      }
+    }
 
     // TICKET 2 Fix A (L-14/L-18): the trust-coverage design (see the
     // humanDoorId comment above) treats an omitted requester_chat_id as
@@ -1076,6 +1350,7 @@ export async function GET() {
       target_agent: 'string (optional; owner-direct specialist pin — routes straight to the named AI, alias: specialist)',
       external_session_id: 'string (optional provenance)',
       idempotency_key: 'string (optional; primary dedupe key)',
+      context_refs: 'string | string[] (optional; FIX 56 W4.1 — doc-pointer references the CEO attaches; blank entries dropped, max 20; folded onto the card and carried into the dispatch ContextPack)',
       parent_task_id: 'string (optional; WI-15b — attaches this task as a per-phase CHILD of the named parent deck-run task. Validated: parent must exist AND be in this box\'s active company scope, else 400.)',
       requester_channel: 'string (optional; P1-04 trust engine — originating client channel, default telegram when requester_chat_id is present)',
       requester_chat_id: 'string (optional; P1-04 trust engine — client chat id the report-back loop acks/progress/done into)',

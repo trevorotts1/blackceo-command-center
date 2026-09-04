@@ -52,8 +52,9 @@
  * it landed" — rather than a category that skips the check entirely.
  */
 
-import { queryAll } from '@/lib/db';
+import { queryAll, queryOne } from '@/lib/db';
 import { existsSync, statSync, lstatSync, openSync, readSync, closeSync } from 'fs';
+import { guideFloorForTask } from '@/lib/presentation-deliverables';
 
 // ---------------------------------------------------------------------------
 // FIX 28 — CC-side bundle re-verification (mirrors build_deck.py postflight)
@@ -96,6 +97,15 @@ const SIG = (...stringsToBuffer: string[]): Buffer[] => stringsToBuffer.map((s) 
  * (floors + magics + md size-only). `webinar_mp4` (`*-WEBINAR.mp4`) is
  * deliberately ABSENT — produced_later in the client table, and its real
  * presence gate belongs to the phases that produce it.
+ *
+ * FIX 3: the guide_pdf entry's `floor` here is the LEGACY 34-slide calibration
+ * and is used only when the deck's slide count cannot be resolved. Every probe
+ * that runs against a task (all of them in the done/QC paths) passes the
+ * task's `slide_count` (Migration 130) through `guideFloor()` so a 12-slide
+ * deck's honest 21,749-byte guide passes with floor 19,200 instead of being
+ * rejected against the 51,200 34-slide number and re-running P8.2-GUIDE
+ * forever. Other floors are per-artifact-type constants, not per-deck, and
+ * stay flat.
  */
 const BUNDLE_SPECS: Array<{ match: (base: string) => boolean; spec: BundleSpec }> = [
   { match: (b) => b === 'PRESENTER-GUIDE.pdf', spec: { key: 'guide_pdf', floor: 51_200, signatures: SIG('%PDF') } },
@@ -153,8 +163,17 @@ function magicOk(head: Buffer, signatures: Buffer[]): boolean {
  * lstat size (never follow a link) against the floor, then leading magic bytes
  * (md size-only). Reads ONLY the header bytes needed — never the whole file.
  * Fail-closed: any error to probe is a rejection, never a pass.
+ *
+ * FIX 3: `slideCount` is the deck's slide count (tasks.slide_count,
+ * Migration 130). For the presenter guide it replaces the legacy flat
+ * 51,200 floor with max(1600 × n, 12000); when it is absent the legacy
+ * floor applies unchanged, so every existing call site (qc-scorer keeps a
+ * path-only signature) keeps its exact previous behavior.
  */
-export function verifyPresentationBundleDeliverable(rawPath: string | null | undefined): BundleProbeVerdict {
+export function verifyPresentationBundleDeliverable(
+  rawPath: string | null | undefined,
+  slideCount?: number | null,
+): BundleProbeVerdict {
   if (!rawPath || rawPath.trim() === '') {
     return { ok: false, status: 'ABSENT', reason: 'ABSENT: no path registered' };
   }
@@ -166,6 +185,8 @@ export function verifyPresentationBundleDeliverable(rawPath: string | null | und
     return { ok: true, reason: 'not bundle-managed', sizeBytes: undefined };
   }
   const { key, floor, signatures } = entry.spec;
+  // FIX 3: only the presenter guide scales with the deck.
+  const effectiveFloor = key === 'guide_pdf' ? guideFloorForTask(slideCount) : floor;
 
   let lstat: ReturnType<typeof lstatSync>;
   try {
@@ -180,8 +201,8 @@ export function verifyPresentationBundleDeliverable(rawPath: string | null | und
     return { ok: false, status: 'NOT_REGULAR', reason: `NOT_REGULAR: ${base} is not a regular file`, bundleKey: key };
   }
   const actual = lstat.size;
-  if (actual < floor) {
-    return { ok: false, status: 'UNDER_THRESHOLD', reason: `UNDER_THRESHOLD: ${base} is ${actual} bytes (min ${floor})`, sizeBytes: actual, bundleKey: key };
+  if (actual < effectiveFloor) {
+    return { ok: false, status: 'UNDER_THRESHOLD', reason: `UNDER_THRESHOLD: ${base} is ${actual} bytes (min ${effectiveFloor})`, sizeBytes: actual, bundleKey: key };
   }
   if (signatures && signatures.length > 0) {
     const want = Math.max(...signatures.map((s) => s.length)) + 8; // +8 covers BOM + leading WS
@@ -256,12 +277,39 @@ export function isUsableFile(rawPath: string | null | undefined): boolean {
   }
 }
 
+/**
+ * FIX 3: resolve the deck's slide count for a task so the presenter-guide
+ * floor can scale with the deck. tasks.slide_count (Migration 130) is
+ * nullable and absent on pre-migration DBs — both cases read as "unknown"
+ * and the legacy flat floor applies. Never throws: a broken read must not
+ * weaken the gate silently (unknown → legacy floor, which is the stricter
+ * 34-slide calibration).
+ */
+function slideCountForTask(taskId: string): number | null {
+  try {
+    const row = queryOne<{ slide_count: number | null }>(
+      'SELECT slide_count FROM tasks WHERE id = ?',
+      [taskId],
+    );
+    if (!row) return null;
+    const n = row.slide_count;
+    return typeof n === 'number' && Number.isFinite(n) && n > 0 ? Math.round(n) : null;
+  } catch {
+    return null;
+  }
+}
+
 // FIX 28: bundle-shaped deliverable names get the byte-level re-verification;
 // ordinary files keep the existence+non-empty rule unchanged.
-function isUsableFileForEvidence(rawPath: string | null | undefined): { usable: boolean; problem?: string } {
+// FIX 3: bundle-shaped probes receive the task's slide count so the
+// presenter-guide floor scales with the deck (legacy floor when unknown).
+function isUsableFileForEvidence(
+  rawPath: string | null | undefined,
+  slideCount?: number | null,
+): { usable: boolean; problem?: string } {
   const resolved = rawPath ? rawPath.replace(/^~/, process.env.HOME || '') : '';
   if (bundleReverifyEnabled() && isBundleDeliverablePath(rawPath)) {
-    const verdict = verifyPresentationBundleDeliverable(resolved);
+    const verdict = verifyPresentationBundleDeliverable(resolved, slideCount);
     if (verdict.ok) return { usable: true };
     return { usable: false, problem: verdict.reason ?? 'bundle verification failed' };
   }
@@ -300,6 +348,9 @@ export function collectCompletionEvidence(taskId: string): CompletionEvidence {
   const problems: string[] = [];
   let usable = 0;
 
+  // FIX 3: the deck's slide count scales the presenter-guide floor.
+  const slideCount = slideCountForTask(taskId);
+
   for (const row of rows) {
     if (row.deliverable_type === 'url') {
       if (isUsableUrl(row.path)) usable += 1;
@@ -307,7 +358,7 @@ export function collectCompletionEvidence(taskId: string): CompletionEvidence {
       continue;
     }
     // file | artifact | image — FIX 28: bundle-shaped names re-verify bytes.
-    const fileTry = isUsableFileForEvidence(row.path);
+    const fileTry = isUsableFileForEvidence(row.path, slideCount);
     if (fileTry.usable) usable += 1;
     else problems.push(`"${row.title}": ${fileTry.problem ?? `file missing or empty (${row.path ?? 'no path'})`}`);
   }

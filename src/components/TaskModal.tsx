@@ -990,8 +990,12 @@ export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskMod
           {activeTab === 'deliverables' && task && (
             <>
               {/* U063: Presentation deliverables checklist — rendered above the
-                  generic list for presentation-department tasks only. */}
-              {task.department === 'presentations' && (
+                  generic list for presentation-department tasks only.
+                  FIX 56: gated on canonicalDeptSlug() (the same canonicalizer
+                  PhaseStepper uses below) so 'dept-presentations' and other
+                  stored spellings still show the panel — the raw
+                  `task.department === 'presentations'` comparison hid it. */}
+              {canonicalDeptSlug(task.department) === 'presentations' && (
                 <PresentationDeliverablesPanel taskId={task.id} />
               )}
               <DeliverablesList taskId={task.id} engineLabel={engineLabel} />

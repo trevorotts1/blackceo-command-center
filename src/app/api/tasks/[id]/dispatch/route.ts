@@ -23,7 +23,7 @@ import {
   DUPLICATE_SUPPRESSED_EVENT_TYPE,
 } from '@/lib/dispatch-idempotency';
 import { checkTaskWriteAuth, renderWriteBackInstructions } from '@/lib/mc-auth';
-import { transition, recordStatusEvent, checkWipLimit, checkDispatchConcurrencyLimit } from '@/lib/task-lifecycle';
+import { transition, recordStatusEvent, checkWipLimit } from '@/lib/task-lifecycle';
 import {
   resolveAgentRuntimeModel,
   modelsMatch,
@@ -841,33 +841,6 @@ If you need help or clarification, ask the orchestrator.`;
       });
       return NextResponse.json(
         { success: false, held: true, reason: 'wip_limit_in_progress', message: wipViolation },
-        { status: 429 },
-      );
-    }
-
-    // ── FLEET-01: global agent-dispatch concurrency ceiling (PRE-SEND) ──────
-    // Opt-in via AGENT_DISPATCH_MAX_CONCURRENT (unset/invalid → always null →
-    // this never fires — identical to today's behaviour on every box that has
-    // not set it). Unlike the auto-advance sweep's GUARD 9 — which HOLDS a
-    // capacity-blocked card quietly in its lane for the next tick — a manual
-    // "Send to Agent" click is an explicit operator action and must be
-    // REFUSED with a clear, named reason rather than silently queued: the
-    // operator asked for a specific dispatch NOW and needs to know why it did
-    // not happen. checkDispatchConcurrencyLimit is GLOBAL (every workspace),
-    // not per-workspace like checkWipLimit above — see its doc comment in
-    // task-lifecycle.ts for why a provider's account-level cap does not
-    // respect workspace boundaries.
-    const concurrencyHold = checkDispatchConcurrencyLimit();
-    if (concurrencyHold) {
-      console.error(`[Dispatch] REFUSED task ${task.id}: ${concurrencyHold.message}`);
-      recordDispatchFailure(task.id, agent.id, {
-        reason: 'dispatch_concurrency_limit',
-        audience: 'SYSTEM',
-        needs: concurrencyHold.message,
-        context: 'manual-dispatch',
-      });
-      return NextResponse.json(
-        { success: false, held: true, reason: 'dispatch_concurrency_limit', message: concurrencyHold.message },
         { status: 429 },
       );
     }

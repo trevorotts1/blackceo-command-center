@@ -112,29 +112,6 @@ const RECONNECT_BACKOFF_MAX_MS = Math.max(
   parseInt(process.env.RECONNECT_BACKOFF_MAX_MS || '32000', 10),
 );
 
-/**
- * Thrown to reject an in-flight `call()` when the socket drops out from
- * under it (`ws.onclose`) rather than the RPC ever getting an answer.
- * Deliberately distinct from the generic `Request timeout: <method>` Error
- * `call()`'s own 30s timer throws, so a caller can tell "the connection
- * closed while this was in flight" apart from "the gateway stayed connected
- * but never answered" — `instanceof OpenClawConnectionClosedError` (or the
- * `name` string, if the error crosses a serialization boundary) is the
- * distinguisher.
- */
-export class OpenClawConnectionClosedError extends Error {
-  constructor(
-    public readonly method: string,
-    public readonly closeCode: number | null,
-  ) {
-    super(
-      `OpenClaw connection closed while waiting for: ${method}` +
-        (closeCode !== null ? ` (close code: ${closeCode})` : ''),
-    );
-    this.name = 'OpenClawConnectionClosedError';
-  }
-}
-
 export class OpenClawClient extends EventEmitter {
   private ws: SocketLike | null = null;
   private reconnectTimer: NodeJS.Timeout | null = null;
@@ -144,7 +121,7 @@ export class OpenClawClient extends EventEmitter {
    *  scheduleReconnect() stops retrying until resetReconnectBackoff() is called. */
   private reconnectBlocked = false;
   private messageId = 0;
-  private pendingRequests = new Map<string | number, { resolve: (value: unknown) => void; reject: (error: Error) => void; method: string }>();
+  private pendingRequests = new Map<string | number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
   private connected = false;
   private authenticated = false; // Track auth state separately from connection state
   private connecting: Promise<void> | null = null; // Lock to prevent multiple simultaneous connection attempts
@@ -380,12 +357,6 @@ export class OpenClawClient extends EventEmitter {
           this.authenticated = false;
           this.connecting = null;
           this.messageHandlers.clear(); // Clear handlers on disconnect
-          // Any RPC in flight when the socket drops is otherwise orphaned —
-          // never retried, never rejected, just left to sit until call()'s own
-          // hardcoded 30s timeout fires. Reject them now so a caller waiting on
-          // call() fails immediately with a distinguishable error instead of up
-          // to 30s of silent dead air.
-          this.rejectAllPending(event.code);
           // Note: globalProcessedEvents is NOT cleared as it's shared across all instances
           this.emit('disconnected');
           // Log close reason for debugging
@@ -497,7 +468,6 @@ export class OpenClawClient extends EventEmitter {
 
               // Set up response handler
               this.pendingRequests.set(requestId, {
-                method: 'connect',
                 resolve: () => {
                   this.connected = true;
                   this.authenticated = true;
@@ -511,17 +481,12 @@ export class OpenClawClient extends EventEmitter {
                 },
                 reject: (error: Error) => {
                   this.connecting = null;
-                  // This same reject callback now also fires from
-                  // rejectAllPending() when the socket drops mid-handshake
-                  // (this pendingRequests entry used to be orphaned there —
-                  // never resolved, never rejected, never removed from the
-                  // map). Distinguish that case: it is a dropped connection,
-                  // not the gateway actually rejecting this device's pairing,
-                  // so don't misreport it as one to the operator-facing status.
+                  // A rejected `connect` RPC almost always means the gateway
+                  // does not (yet) trust this operator device — i.e. pairing
+                  // is pending. Record a precise, actionable error so the
+                  // status route can tell the operator to approve the device.
                   this.recordConnectError(
-                    error instanceof OpenClawConnectionClosedError
-                      ? `Gateway connection closed while awaiting the device-pairing response (device ${this.deviceIdentity?.deviceId ?? 'unknown'}): ${error.message}`
-                      : `Gateway rejected device pairing (device ${this.deviceIdentity?.deviceId ?? 'unknown'}): ${error.message}`,
+                    `Gateway rejected device pairing (device ${this.deviceIdentity?.deviceId ?? 'unknown'}): ${error.message}`,
                   );
                   this.ws?.close();
                   reject(new Error(`Authentication failed: ${error.message}`));
@@ -729,27 +694,6 @@ export class OpenClawClient extends EventEmitter {
     return this.pairingAutoApprovedNote;
   }
 
-  /**
-   * Reject every in-flight `call()` and clear the map, so none are left
-   * orphaned to sit on a socket that just closed underneath them.
-   *
-   * Safe against double-rejection: `call()`'s own 30s timeout checks
-   * `pendingRequests.has(id)` before rejecting, and this method clears the
-   * map before rejecting, so that later check sees `false` and the timeout
-   * becomes a no-op instead of a second reject on an already-settled
-   * promise. `handleMessage()` is symmetric the other way — a response that
-   * arrives after this has already run finds nothing in the (now-empty)
-   * map and is dropped, same as today.
-   */
-  private rejectAllPending(closeCode: number | null): void {
-    if (this.pendingRequests.size === 0) return;
-    const pending = Array.from(this.pendingRequests.values());
-    this.pendingRequests.clear();
-    for (const { reject, method } of pending) {
-      reject(new OpenClawConnectionClosedError(method, closeCode));
-    }
-  }
-
   private handleMessage(data: OpenClawMessage & { type?: string; ok?: boolean; payload?: unknown }): void {
     // Handle OpenClaw ResponseFrame format (type: "res")
     if (data.type === 'res' && data.id !== undefined) {
@@ -855,12 +799,9 @@ export class OpenClawClient extends EventEmitter {
     const message = { type: 'req', id, method, params };
 
     return new Promise((resolve, reject) => {
-      this.pendingRequests.set(id, { resolve: resolve as (value: unknown) => void, reject, method });
+      this.pendingRequests.set(id, { resolve: resolve as (value: unknown) => void, reject });
 
-      // Timeout after 30 seconds. Guarded by the `has(id)` check so this is a
-      // no-op (never a double-reject) when the request was already settled —
-      // either by a real response (handleMessage) or by rejectAllPending()
-      // on an earlier socket close.
+      // Timeout after 30 seconds
       setTimeout(() => {
         if (this.pendingRequests.has(id)) {
           this.pendingRequests.delete(id);

@@ -7,6 +7,11 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getDb } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { CreateDeliverableSchema } from '@/lib/validation';
+import {
+  bundleReverifyEnabled,
+  isBundleDeliverablePath,
+  verifyPresentationBundleDeliverable,
+} from '@/lib/completion-evidence';
 import { existsSync, lstatSync, readFileSync } from 'fs';
 import { createHash } from 'crypto';
 import path from 'path';
@@ -40,6 +45,46 @@ export const revalidate = 0;
  */
 function pathValidationEnabled(): boolean {
   return process.env.DELIVERABLE_PATH_VALIDATION !== '0';
+}
+
+/**
+ * FIX 54 — bundle floors enforced AT REGISTRATION (see header below).
+ *
+ * FIX 27 rejects a path whose file does not exist. That still lets a decoy
+ * through: a 10-byte stub named PRESENTER-GUIDE.pdf exists, registers with a
+ * 201, and lies on the board until the done gate (FIX 28) probes the bytes
+ * much later. FIX 54 runs the SAME bundle probe the done gate would run —
+ * verifyPresentationBundleDeliverable() (completion-evidence.ts) — on any
+ * bundle-shaped path (PRESENTER-GUIDE.pdf, *-FINAL.pptx, infographic.png, …)
+ * BEFORE a row is written, and refuses with 422 naming the probe's status
+ * (UNDER_THRESHOLD / WRONG_TYPE / SYMLINK / …), the exact reason the done gate
+ * would give. A registration that survives this gate therefore survives the
+ * done gate for the same bytes — the row can no longer be a lie at birth.
+ *
+ * ROLLBACK: PRESENTATION_BUNDLE_REVERIFY=0 (the FIX 28 flag, read live) turns
+ * this probe off together with the done-gate re-verification, restoring the
+ * pre-FIX-54 behavior in one switch.
+ */
+function bundleRegistrationRejection(
+  deliverableType: string,
+  rawPath: string | null,
+): { status: number; body: Record<string, unknown> } | null {
+  if (!rawPath || rawPath.trim() === '') return null;
+  if (!bundleReverifyEnabled()) return null;
+  if (!isBundleDeliverablePath(rawPath)) return null;
+  const verdict = verifyPresentationBundleDeliverable(rawPath);
+  if (verdict.ok) return null;
+  console.warn(
+    `[DELIVERABLE] Rejected (FIX 54): '${deliverableType}' at ${rawPath} failed the bundle probe: ${verdict.status ?? 'FAILED'} — ${verdict.reason ?? 'bundle verification failed'}`,
+  );
+  return {
+    status: 422,
+    body: {
+      error: `Bundle deliverable rejected at registration: ${verdict.reason ?? 'bundle verification failed'}`,
+      status: verdict.status ?? 'FAILED',
+      path: rawPath,
+    },
+  };
 }
 
 /** FIX 27: the deliverable types whose `path` is a filesystem path. */
@@ -105,6 +150,15 @@ export async function POST(
     }
 
     const { deliverable_type, title, path, description } = validation.data;
+
+    // FIX 54 — bundle floors enforced at registration: a bundle-shaped path
+    // (PRESENTER-GUIDE.pdf, *-FINAL.pptx, infographic.png, …) that would fail
+    // the done gate's byte probe is refused HERE with 422 and the same reason
+    // the done gate would give. Runs before any row is written; no row lies.
+    const bundleReject = bundleRegistrationRejection(deliverable_type, path ?? null);
+    if (bundleReject) {
+      return NextResponse.json(bundleReject.body, { status: bundleReject.status });
+    }
 
     // FIX 27 — reachability at registration time (see PATH_VALIDATION_ENABLED
     // header above). Gate ON (default): an unreachable path/URL is a 422 and no

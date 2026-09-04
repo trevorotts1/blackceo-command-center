@@ -66,8 +66,8 @@ import { resolvePresentationRunRoots } from '@/lib/presentation-run-roots';
 // ~/Documents/Shared — a macOS TCC-protected dir where a raw open()/opendir()
 // blocks the qc-review-sweep event loop forever). Session reads under
 // ~/.openclaw are NOT protected and keep the direct fs.* calls above.
-import { safeReadFileUtf8, safeReadFileBuffer, safeReaddirNames } from '@/lib/fs/safe-fs';
-import { queryOne, queryAll, run } from '@/lib/db';
+import { safeReadFileUtf8, safeReadFileBuffer, safeReaddirNames, safeStatSync } from '@/lib/fs/safe-fs';
+import { queryOne, queryAll, run, sqlTime } from '@/lib/db';
 import { v4 as uuidv4 } from 'uuid';
 import { broadcast } from '@/lib/events';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
@@ -348,6 +348,136 @@ export async function blockTaskForQC(p: BlockTaskForQCParams): Promise<boolean> 
 }
 
 // ---------------------------------------------------------------------------
+// FIX 42 — ONE shared "reroute-or-block at the QC cap" primitive.
+//
+// The scorer's fail path makes two KINDS of stop decision, and they must never
+// disagree:
+//   1. A sub-cap FAIL returns the task to `backlog` (attempt counter
+//      incremented) so the executor re-runs it.
+//   2. A FAIL at/over the cap (attempts >= QC_MAX_REROUTES) blocks the task —
+//      through blockTaskForQC() with the scorer's OWN classified audience —
+//      because re-routing a capped task is how a 4th "3/3" reroute happened.
+//
+// Every instant-fail path (all-deliverables-missing, AF-I14) must make the
+// SAME decision as the ordinary llm-fail cap branch, so this helper is the ONE
+// place that increments-then-decides. blockTaskForQC() stays the ONE place
+// that turns an at-cap verdict into the real `blocked` state (status flip,
+// block_* columns, task_block_events row, exactly one escalation or owner
+// notify) — this helper never builds a second copy of that.
+// ---------------------------------------------------------------------------
+export type QCRerouteOutcome = 'rerouted' | 'blocked' | 'lost-race';
+
+export interface RerouteOrBlockParams {
+  taskId: string;
+  taskTitle: string;
+  taskDescription: string | null;
+  /** This pass's attempt number (already incremented by the caller). */
+  attempts: number;
+  cap: number;
+  score: number;
+  reason: string;
+  gaps: string[];
+  /** Full description-persisted kickback note, e.g. `[QC-FAIL] Score 2.0/10 (attempt 2/3). …`. */
+  kickbackNote: string;
+}
+
+/**
+ * Decide the FAIL outcome for a task on its `attempts`-th pass (already
+ * incremented):
+ *   - attempts < cap  → reroute review → backlog atomically (description +
+ *     qc_reroute_attempts via transition()'s extraColumns); returns
+ *     'rerouted'.
+ *   - attempts >= cap → block via blockTaskForQC() with the scorer's
+ *     OWNER/SYSTEM classification of gaps+reason; returns 'blocked'.
+ *   - CAS/transition failure → nothing recorded but the caller's audit event;
+ *     returns 'lost-race' (task already left review, or the move failed — a
+ *     verdict must never claim a move that did not land).
+ * Never throws. The qc_review verdict event stays the CALLER's to write (each
+ * path keeps its own distinctive audit text); the caller composes it from the
+ * returned outcome so it states the move the task actually took.
+ */
+export async function rerouteOrBlock(p: RerouteOrBlockParams): Promise<QCRerouteOutcome> {
+  if (p.attempts >= p.cap) {
+    // At/over cap: block with the scorer's classified audience — same
+    // construction as the ordinary llm-fail cap branch below.
+    const gapsAndReason = [...p.gaps, p.reason];
+    const blockAudience = classifyQCBlockAudience(gapsAndReason);
+    const blockNeeds = blockAudience === 'SYSTEM'
+      ? `System fix required: ${p.gaps.slice(0, 2).join('; ') || p.reason}. Route diagnosis to master orchestrator.`
+      : `Owner action required: ${p.gaps.slice(0, 2).join('; ') || p.reason}. Reply here to unblock or reassign.`;
+    const landed = await blockTaskForQC({
+      taskId: p.taskId,
+      taskTitle: p.taskTitle,
+      taskDescription: p.taskDescription,
+      fromStatus: 'review',
+      actor: 'qc-scorer',
+      attempts: p.attempts,
+      gaps: p.gaps,
+      needs: blockNeeds,
+      audience: blockAudience,
+      blockReason: `Failed QC ${p.attempts}x, last score ${p.score.toFixed(1)}/10`,
+      auditNote: p.kickbackNote,
+      timelineEventMessage: `[QC-BLOCKED] Task "${p.taskTitle}" blocked after ${p.attempts} QC-fail re-routes (cap: ${p.cap}). Audience: ${blockAudience}. ${blockAudience === 'SYSTEM' ? 'SYSTEM fix needed — escalating to master orchestrator.' : 'Human review required.'}`,
+      escalationMessage: `[QC-SYSTEM-BLOCK] "${p.taskTitle}" failed QC ${p.attempts} time(s) due to a SYSTEM issue the executor cannot fix. Score: ${p.score.toFixed(1)}/10. Root cause gaps: ${p.gaps.join('; ')}. Action needed: ${blockNeeds}`,
+      ownerNotifyMessage: `⚠️ A task is BLOCKED and needs your attention: "${p.taskTitle}".\nReason: ${p.gaps.length > 0 ? p.gaps.join('; ') : p.reason}\n\nThis task failed QC ${p.attempts} time(s) (score ${p.score.toFixed(1)}/10). Reply here to unblock or reassign.`,
+      // OWNER-audience audit signal, separate from the owner notification the
+      // shared helper also sends (mirrors the ordinary cap branch).
+      ownerReviewEventMessage: `[QC-BLOCKED] "${p.taskTitle}" failed QC ${p.attempts} time(s) and has been blocked. Score: ${p.score.toFixed(1)}/10. Owner attention needed.`,
+    });
+    if (!landed) {
+      console.warn(`[QCScorer] Task "${p.taskTitle}" (${p.taskId}): cap reached but block-transition lost a race (task already left review) — no further action`);
+      return 'lost-race';
+    }
+    if (blockAudience === 'SYSTEM') {
+      const sysNotify = admitSystemBlockNotify(p.taskId);
+      if (sysNotify.send) {
+        try {
+          notifySystem(
+            `[QC-SYSTEM-BLOCK] "${p.taskTitle}" (${p.taskId}) failed QC ${p.attempts} time(s) due to a SYSTEM issue the executor cannot fix. ` +
+              `Score: ${p.score.toFixed(1)}/10. Root cause gaps: ${p.gaps.join('; ')}. ` +
+              `Action needed: ${blockNeeds}.${sysNotify.coalescedNote}`,
+            { agent: 'qc-scorer', action: 'system_block' },
+          );
+        } catch (err) {
+          // Best-effort: the qc_escalation event above is the durable record.
+          console.warn(`[QCScorer] Task "${p.taskTitle}" (${p.taskId}): SYSTEM block notify failed: ${(err as Error).message}`);
+        }
+      }
+    }
+    console.warn(`[QCScorer] Task "${p.taskTitle}" (${p.taskId}): BLOCKED after ${p.attempts} QC-fail re-routes — audience: ${blockAudience}`);
+    return 'blocked';
+  }
+
+  // Sub-cap: reroute review → backlog atomically (description +
+  // qc_reroute_attempts land with the status flip via transition()'s
+  // extraColumns; the legal-transition guard + CAS run; task_events audit row
+  // + task_updated broadcast written by transition() itself). expectedFrom
+  // preserves the raw writer's `WHERE status = 'review'` CAS; a lost race is a
+  // normal concurrent advance — the caller's verdict event stands alone.
+  const rerouteDesc = p.taskDescription && p.taskDescription !== ''
+    ? `${p.taskDescription}\n\n${p.kickbackNote}`
+    : p.kickbackNote;
+  try {
+    await transition(p.taskId, 'backlog', {
+      actor: 'qc-scorer',
+      reason: p.kickbackNote,
+      expectedFrom: 'review',
+      extraColumns: {
+        description: rerouteDesc,
+        qc_reroute_attempts: p.attempts,
+      },
+    });
+    return 'rerouted';
+  } catch (txErr) {
+    if (!(txErr instanceof TransitionError && txErr.code === 'CAS_CONFLICT')) {
+      console.warn(`[QCScorer] QC reroute transition failed for ${p.taskId}:`, (txErr as Error).message);
+      recordStatusApplyFailure(p.taskId, 'backlog', txErr);
+    }
+    return 'lost-race';
+  }
+}
+
+// ---------------------------------------------------------------------------
 // AF-I14 — KIE.ai image-path guardrail for Presentations department
 //
 // Mandate: the dept-presentations runtime MUST generate all slide images via
@@ -368,12 +498,20 @@ export async function blockTaskForQC(p: BlockTaskForQCParams): Promise<boolean> 
 //                not generated via the mandated script at all
 //
 // Session trace lookup order:
-//   1. openclaw_sessions table: rows WHERE task_id = taskId AND agent_id
-//      resolves to 'dept-presentations', ordered by created_at DESC — pick
-//      the most recent openclaw_session_id.
-//   2. Filesystem: ~/.openclaw/agents/dept-presentations/sessions/<id>.jsonl
-//      Scan each line (JSON) for tool_use blocks, exec outputs, text content.
-//   3. If no session trace found: skip guardrail (cannot penalise absence of
+//   1. openclaw_sessions table: rows WHERE task_id = taskId, ordered by
+//      created_at DESC — pick the most recent openclaw_session_id.
+//   2. Filesystem, DETERMINISTIC id first (FIX 44): the assigned agent's
+//      session id is a pure function of its name (deterministicQCSessionId:
+//      `mission-control-<name-slug>`, identical to what the dispatcher stores),
+//      so ~/.openclaw/agents/<agent>/sessions/mission-control-<slug>.jsonl is
+//      probed by direct stat — NO directory enumeration at all.
+//   3. Filesystem, name-resolved: an agent id (not name) is resolved once via
+//      the agents table and the same deterministic file stat is retried.
+//   4. LAST RESORT ONLY: a full scan of every candidate sessions directory
+//      (readdirSync). This never runs when a deterministic session file exists,
+//      so a QC trace on a review card performs zero readdirSync of the agents
+//      root (FIX 44 proof condition).
+//   5. If no session trace found: skip guardrail (cannot penalise absence of
 //      evidence; the deny config already blocks image_generate at the tool
 //      layer from this point forward).
 //
@@ -392,9 +530,18 @@ const AF_I14_AGENT_IDS = new Set(['dept-presentations']);
  *
  * Hole-fix (v4.45.0): the guardrail was hard-scoped to dept-presentations only.
  * Any department that ships an image/deck deliverable must use the mandated
- * KIE.ai pipeline, so we now scan EVERY agent session directory under
- * ~/.openclaw/agents/<agentId>/sessions when the task carries an image/deck
- * deliverable. The presentations dir stays first for backward compatibility.
+ * KIE.ai pipeline, so every agent session directory under
+ * ~/.openclaw/agents/<agentId>/sessions is eligible when the task carries an
+ * image/deck deliverable. The presentations dir stays first for backward
+ * compatibility.
+ *
+ * FIX 44: this function is now SPLIT — the two direct roots below are always
+ * returned cheaply (pure path joins, no I/O), while the per-QC enumeration of
+ * every agent directory (the readdirSync of the agents root) moved to
+ * af_i14AllAgentSessionRoots() and is consulted ONLY by the last-resort scan
+ * after the deterministic session file check has failed. A QC pass on a review
+ * card whose deterministic session file exists therefore never enumerates the
+ * agents root at all.
  */
 function af_i14SessionRoots(agentId: string | null): string[] {
   const base = path.join(process.env.HOME || '~', '.openclaw', 'agents');
@@ -403,8 +550,21 @@ function af_i14SessionRoots(agentId: string | null): string[] {
   if (agentId) roots.push(path.join(base, agentId, 'sessions'));
   // Legacy presentations dir (kept first-class for AF-I14 history).
   roots.push(path.join(base, 'dept-presentations', 'sessions'));
-  // Last resort: scan every agent's sessions dir so a misattributed task is
-  // still caught. De-duped by the caller.
+  // De-dup preserving order.
+  return Array.from(new Set(roots));
+}
+
+/**
+ * FIX 44: the LAST-RESORT root list — every agent's sessions dir under
+ * ~/.openclaw/agents, so a misattributed task is still caught. This is the
+ * ONLY place the agents root is enumerated (readdirSync), and it is reached
+ * only when the openclaw_sessions lookup AND the deterministic session file
+ * check have both come up empty. Kept as its own function so the eager
+ * readdirSync can never run merely by computing the cheap root list above.
+ */
+function af_i14AllAgentSessionRoots(): string[] {
+  const base = path.join(process.env.HOME || '~', '.openclaw', 'agents');
+  const roots: string[] = [];
   try {
     if (existsSync(base)) {
       for (const entry of readdirSync(base)) {
@@ -413,8 +573,45 @@ function af_i14SessionRoots(agentId: string | null): string[] {
       }
     }
   } catch { /* ignore — best-effort enumeration */ }
-  // De-dup preserving order.
-  return Array.from(new Set(roots));
+  return roots;
+}
+
+/**
+ * FIX 44 — the deterministic session id for an agent, a PURE function of the
+ * agent name: `mission-control-<name-slug>`. MUST stay byte-identical to
+ * deterministicOpenclawSessionId() in task-dispatcher.ts (this module already
+ * imports task-dispatcher's sibling constants, and task-dispatcher imports a
+ * constant from here, so the pure slug is duplicated rather than cross-imported
+ * to avoid adding a new module cycle). The dispatcher / completion webhook /
+ * execution-watcher all re-derive this same id, so a QC scorer that stats
+ * `<sessions>/<id>.jsonl` resolves the trace with a single stat — no directory
+ * enumeration.
+ */
+function deterministicQCSessionId(agentName: string): string {
+  return `mission-control-${agentName.toLowerCase().replace(/\s+/g, '-')}`;
+}
+
+/**
+ * FIX 44: probe the DETERMINISTIC session file for the assigned agent —
+ * `<agentRoot>/<agentName-slug>/sessions/<deterministicQCSessionId>.jsonl` —
+ * plus the legacy dept-presentations location. Pure stat calls (existsSync),
+ * no readdirSync. Returns the session id when the file exists, else null.
+ */
+function af_i14DeterministicSessionFile(agentName: string | null): string | null {
+  if (!agentName) return null;
+  const sessionId = deterministicQCSessionId(agentName);
+  const agentRoot = path.join(process.env.HOME || '~', '.openclaw', 'agents');
+  const slug = agentName.toLowerCase().replace(/\s+/g, '-');
+  const candidates = [
+    path.join(agentRoot, slug, 'sessions', `${sessionId}.jsonl`),
+    path.join(agentRoot, 'dept-presentations', 'sessions', `${sessionId}.jsonl`),
+  ];
+  for (const file of candidates) {
+    try {
+      if (existsSync(file)) return sessionId;
+    } catch { /* stat failure — keep probing */ }
+  }
+  return null;
 }
 
 /**
@@ -449,6 +646,11 @@ export function describesDeckDeliverable(title: string, description: string | nu
  * structured JSON parsing of tool_use blocks AND a lowercased substring scan.
  * Searches every candidate session root for `${sessionId}.jsonl`.
  * Returns empty string if the file does not exist or cannot be read.
+ *
+ * FIX 44: the candidate roots are direct path joins (no enumeration). When the
+ * id came from the deterministic probe the file sits under one of these roots,
+ * so the read needs no readdirSync; only the last-resort scan path widens the
+ * root list (via af_i14AllAgentSessionRoots).
  */
 function readSessionTrace(sessionId: string, sessionRoots: string[]): string {
   for (const dir of sessionRoots) {
@@ -703,10 +905,35 @@ export function runAFI14Guardrail(
     // Table might not exist — fall through
   }
 
-  // If no session found via DB, scan EVERY candidate sessions directory for any
-  // .jsonl file containing the taskId string (best-effort, fleet-wide).
+  // FIX 44 — DETERMINISTIC SESSION FILE, before ANY directory scan. When the
+  // openclaw_sessions row is missing/purged, the assigned agent's session id is
+  // still a pure function of its name (`mission-control-<name-slug>`), so the
+  // trace file can be stat'd directly. Resolving the agent name costs one
+  // indexed DB read; the probe itself is a existsSync stat — zero readdirSync.
   if (!sessionId) {
-    for (const sessionDir of sessionRoots) {
+    let agentName: string | null = null;
+    if (agentId) {
+      try {
+        agentName = queryOne<{ name: string }>(
+          'SELECT name FROM agents WHERE id = ? LIMIT 1',
+          [agentId],
+        )?.name ?? null;
+      } catch { /* agents table unavailable — fall through */ }
+    }
+    const deterministicId = af_i14DeterministicSessionFile(agentName);
+    if (deterministicId) {
+      sessionId = deterministicId;
+    }
+  }
+
+  // LAST RESORT (FIX 44): only now — DB miss AND no deterministic session file
+  // — scan the candidate sessions directories for any .jsonl file containing
+  // the taskId string (best-effort, fleet-wide). The agents-root enumeration
+  // (af_i14AllAgentSessionRoots) runs here and ONLY here, so a QC trace that
+  // resolves deterministically never performs a readdirSync of the agents root.
+  if (!sessionId) {
+    const scanRoots = Array.from(new Set([...sessionRoots, ...af_i14AllAgentSessionRoots()]));
+    for (const sessionDir of scanRoots) {
       try {
         if (!existsSync(sessionDir)) continue;
         const files = readdirSync(sessionDir).filter((f) => f.endsWith('.jsonl') && !f.includes('trajectory'));
@@ -1147,6 +1374,15 @@ export interface TextProbe {
   contentNote?: string;
   /** Reason for invalidity (only when valid=false). */
   invalidReason?: string;
+  /**
+   * FIX 45 — true when the file EXISTS and has bytes but could not be READ
+   * right now (permission-000, TCC-gated dir, EBUSY…). That is a TRANSIENT
+   * I/O condition, not a verdict: the deliverable is deferred (stays in
+   * review, `[QC-DEFERRED-IO]` event, sweep retries) instead of failing the
+   * card. Mutually exclusive with a plain "not found"/"empty" invalidity —
+   * those are real fails and keep valid=false with ioDeferred unset.
+   */
+  ioDeferred?: boolean;
 }
 
 /**
@@ -1163,7 +1399,11 @@ export interface TextProbe {
  * just existence:
  *   • plain-text format  → excerpt + structural checks, valid on readable+non-empty;
  *   • unreadable file    → valid=false, named reason (FAIL-CLOSED — a genuine
- *                          I/O failure is never passed on byte count);
+ *                          I/O failure is never passed on byte count) — FIX 45:
+ *                          when the file EXISTS with bytes but the READ itself
+ *                          fails (permission-000 / TCC gate / EBUSY), the probe
+ *                          reports ioDeferred=true so the caller defers QC
+ *                          instead of failing the card; the sweep retries;
  *   • empty file         → valid=false;
  *   • unsupported format → valid on existence+size, but excerpt=null with a
  *                          "content not extractable" note, so the judge is not
@@ -1171,13 +1411,24 @@ export interface TextProbe {
  *                          fail-closed here: binary deliverables like PDF/DOCX/
  *                          video are legitimate; failing them would regress the
  *                          image/media pipeline. The note keeps scoring honest.)
+ *
+ * FIX 45 — the read goes through safeReadFileBuffer (TCC-safe) instead of a raw
+ * openSync/readSync pair. A deliverable living in ~/Documents or ~/Downloads
+ * (both TCC-protected) made the RAW call throw EPERM — 34 live QC bounces were
+ * exactly this, cards failed on an I/O limitation masquerading as a quality
+ * verdict. safeReadFileBuffer never blocks the loop on a TCC path and returns
+ * null for an unreadable file; the stat-then-null distinction below separates
+ * "file genuinely absent/empty" (a real fail) from "file exists but cannot be
+ * read right now" (an I/O deferral).
  */
 export function probeTextFile(filePath: string): TextProbe {
   if (!existsSync(filePath)) {
     return { valid: false, sizeBytes: 0, excerpt: null, structuralChecks: null, invalidReason: `File not found: ${filePath}` };
   }
-  let sz = 0;
-  try { sz = statSync(filePath).size; } catch { /* ignore */ }
+  // FIX 45: safeStatSync — metadata is measured-safe even on TCC dirs; a raw
+  // statSync can still throw on a permission-000 file.
+  const st = safeStatSync(filePath);
+  const sz = st?.size ?? 0;
   if (sz === 0) {
     return { valid: false, sizeBytes: 0, excerpt: null, structuralChecks: null, invalidReason: `File is empty (0 bytes): ${filePath}` };
   }
@@ -1193,26 +1444,24 @@ export function probeTextFile(filePath: string): TextProbe {
       contentNote: `content not extractable for format '${ext}' — scored on existence/size only`,
     };
   }
-  let content: string;
-  try {
-    const fd = openSync(filePath, 'r');
-    try {
-      const buf = Buffer.alloc(Math.min(sz, CONTENT_EXCERPT_MAX_BYTES));
-      const bytesRead = readSync(fd, buf, 0, buf.length, 0);
-      content = buf.subarray(0, bytesRead).toString('utf8');
-    } finally {
-      closeSync(fd);
-    }
-  } catch (err) {
-    // FAIL-CLOSED: a deliverable we cannot read is not passed on byte count.
+  // FIX 45: TCC-safe read. null = absent, unreadable, or probe timed out.
+  const buf = safeReadFileBuffer(filePath);
+  if (buf === null) {
+    // The file EXISTS (existsSync passed above) with sz > 0 bytes but the read
+    // did not land — permission-000, TCC handoff, EBUSY. This is a TRANSIENT
+    // I/O condition, NOT a quality verdict: report ioDeferred so the caller
+    // defers the card (stays in review, [QC-DEFERRED-IO], sweep retries)
+    // instead of failing it.
     return {
       valid: false,
       sizeBytes: sz,
       excerpt: null,
       structuralChecks: null,
-      invalidReason: `File unreadable: ${filePath} (${err instanceof Error ? err.message : String(err)})`,
+      ioDeferred: true,
+      invalidReason: `File unreadable (I/O deferred — will retry): ${filePath}`,
     };
   }
+  const content = buf.subarray(0, Math.min(buf.length, CONTENT_EXCERPT_MAX_BYTES)).toString('utf8');
   const excerpt = content.slice(0, CONTENT_EXCERPT_MAX_CHARS);
   const structuralChecks: TextStructuralChecks = {
     lines: content.split('\n').length,
@@ -1248,6 +1497,14 @@ export interface DeliverableManifestItem {
   structuralChecks?: TextStructuralChecks | null;
   /** U082 — note when content was not extractable (e.g. binary format). */
   contentNote?: string;
+  /**
+   * FIX 45 — true when this deliverable EXISTS with bytes but could not be READ
+   * right now (permission-000 / TCC gate / transient I/O). A manifest whose
+   * invalid items are ALL ioDeferred is a deferral, not a fail: the card stays
+   * in review with a `[QC-DEFERRED-IO]` event, the reroute counter is untouched,
+   * and the sweep retries.
+   */
+  ioDeferred?: boolean;
 }
 
 export interface QCScorerInput {
@@ -4545,6 +4802,325 @@ function verifyProducerScorecardFile(scorecardPath: string): boolean {
  *
  * @returns QCResult | null (null = QC was disabled or errored)
  */
+// ---------------------------------------------------------------------------
+// FIX 7 — engine-owned deck-parent QC lane (deterministic artifact checklist)
+// ---------------------------------------------------------------------------
+
+interface EngineOwnedDeckRow {
+  id: string;
+  title: string;
+  description: string | null;
+  department: string | null;
+  source: string | null;
+  status: string;
+  qc_reroute_attempts: number | null;
+}
+
+/**
+ * FIX 7 — score an engine-owned deck PARENT card on the deterministic artifact
+ * checklist ONLY, and on a pass with a registered process certificate promote
+ * review→done with actor `qc-scorer`.
+ *
+ * Called from runQCOnReview AFTER the build_deck_phase child skip and BEFORE
+ * any LLM-judge machinery. The generic lanes stay untouched for every other
+ * card; this lane exists because the judge has never passed a deck (260
+ * scored, average 2.8, zero pass) and the fix's HOW names the deterministic
+ * artifact path (`hasRenderGates` criteria through evaluateCriteria) as the
+ * promotion path for engine-owned cards.
+ *
+ * Manifest: built the same way the generic invariant-A block builds it —
+ * registered deliverables of evidence-bearing types, each probed (bundle
+ * re-verification included) so a decoy cannot ride the checklist. Zero
+ * registered deliverables is the engine's own failure to register, not the
+ * judge's: fail the pass with an explicit [QC-DECK-NO-EVIDENCE] event and
+ * reroute-or-block like any artifact miss (never silently hold).
+ *
+ * Promotion: requiresRegisteredCertificate() pre-check (U031 contract) —
+ * without the registered certificate the card is HELD in review with a loud
+ * event (the same F14 posture the generic path uses). With it, transition()
+ * performs the CAS'd review→done; a CAS conflict is a lost race, not an error.
+ *
+ * Task status is only ever touched through transition() — never a raw UPDATE.
+ */
+export async function runEngineOwnedDeckQC(
+  task: EngineOwnedDeckRow,
+  taskId: string,
+  now: string,
+): Promise<QCResult> {
+  // ── 1. Build the deliverable manifest (generic-path semantics) ────────────
+  interface DeliverableRow7 {
+    id: string;
+    title: string;
+    path: string | null;
+    deliverable_type: string;
+  }
+  let deliverableManifest: DeliverableManifestItem[] | null = null;
+  let noEvidence = false;
+  try {
+    const delivRows = queryAll<DeliverableRow7>(
+      `SELECT id, title, path, deliverable_type FROM task_deliverables WHERE task_id = ?`,
+      [taskId],
+    );
+    const fileRows = delivRows.filter(
+      (d) => EVIDENCE_DELIVERABLE_TYPES.has(d.deliverable_type) && d.path,
+    );
+    if (fileRows.length === 0) {
+      noEvidence = true;
+    } else {
+      deliverableManifest = fileRows.map((d): DeliverableManifestItem => {
+        if (d.deliverable_type === 'url') {
+          const href = d.path!.trim();
+          const ok = isUsableUrl(href);
+          return {
+            title: d.title,
+            path: href,
+            type: 'url',
+            sizeBytes: null,
+            dimensions: null,
+            valid: ok,
+            invalidReason: ok ? undefined : `Not a valid http(s) URL: ${href}`,
+          };
+        }
+        const rawPath = d.path!.replace(/^~/, process.env.HOME || '');
+        const ext = rawPath.slice(rawPath.lastIndexOf('.')).toLowerCase();
+        const isImage = IMAGE_EXTENSIONS.has(ext);
+        if (bundleReverifyEnabled() && !isImage && isBundleDeliverablePath(rawPath)) {
+          const verdict = verifyPresentationBundleDeliverable(rawPath);
+          if (!verdict.ok) {
+            return {
+              title: d.title,
+              path: rawPath,
+              type: 'file',
+              sizeBytes: verdict.sizeBytes ?? null,
+              dimensions: null,
+              valid: false,
+              invalidReason: verdict.reason ?? `bundle re-verification failed: ${rawPath}`,
+              contentNote: 'bundle re-verification refused this artifact before content scoring (magic-byte/size/symlink check)',
+            };
+          }
+        }
+        if (isImage) {
+          const probe = probeImageFile(rawPath);
+          if (!probe.valid) {
+            return {
+              title: d.title,
+              path: rawPath,
+              type: 'image',
+              sizeBytes: null,
+              dimensions: null,
+              valid: false,
+              invalidReason: probe.reason,
+            };
+          }
+          return {
+            title: d.title,
+            path: rawPath,
+            type: 'image',
+            sizeBytes: probe.sizeBytes,
+            dimensions: null,
+            valid: true,
+          };
+        }
+        const probe = probeTextFile(rawPath);
+        return {
+          title: d.title,
+          path: rawPath,
+          type: 'file',
+          sizeBytes: probe.valid ? probe.sizeBytes : null,
+          dimensions: null,
+          valid: probe.valid,
+          invalidReason: probe.invalidReason,
+          contentExcerpt: probe.excerpt,
+          structuralChecks: probe.structuralChecks,
+          contentNote: probe.contentNote,
+          ioDeferred: probe.ioDeferred === true ? true : undefined,
+        };
+      });
+
+      const allInvalid = deliverableManifest.every((d) => !d.valid);
+      const allIoDeferred =
+        allInvalid && deliverableManifest.every((d) => d.ioDeferred === true);
+      if (allIoDeferred) {
+        // Transient I/O — same hold-in-review posture as the generic path.
+        const deferredReasons = deliverableManifest.map(
+          (d) => d.invalidReason ?? `unreadable: ${d.path}`,
+        );
+        run(
+          `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
+          [
+            uuidv4(),
+            'qc_review',
+            taskId,
+            `[QC-DEFERRED-IO] Deck deliverable(s) exist but could not be read (transient I/O). Held in review; will retry — NOT a quality fail. Paths: ${deferredReasons.join('; ')}`,
+            now,
+          ],
+        );
+        return {
+          score: 0,
+          pass: false,
+          reason: `Deliverable I/O deferred — file(s) exist but could not be read: ${deferredReasons.join('; ')}`,
+          gaps: deferredReasons,
+          scoringPath: 'llm',
+        };
+      }
+      if (allInvalid) {
+        noEvidence = true;
+      }
+    }
+  } catch (manifestErr) {
+    console.warn(
+      '[QCScorer] FIX 7 deck manifest build failed (non-fatal, treated as no-evidence):',
+      (manifestErr as Error).message,
+    );
+    deliverableManifest = null;
+    noEvidence = true;
+  }
+
+  if (noEvidence || !deliverableManifest) {
+    // Engine registered nothing reachable — a structural miss on the producer
+    // side. Same increment-then-decide contract as the generic instant-fail.
+    const noEvReason =
+      'No reachable deck artifact registered: the engine closed to review without a valid deliverable on the card (bundle re-verification failed or nothing registered).';
+    run(
+      `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
+      [
+        uuidv4(),
+        'qc_review',
+        taskId,
+        `[QC-DECK-NO-EVIDENCE] Score: 2.0/10 | FAIL | ${noEvReason}`,
+        now,
+      ],
+    );
+    const newAttempts = (task.qc_reroute_attempts ?? 0) + 1;
+    await rerouteOrBlock({
+      taskId,
+      taskTitle: task.title,
+      taskDescription: task.description,
+      attempts: newAttempts,
+      cap: QC_MAX_REROUTES,
+      score: 2.0,
+      reason: noEvReason,
+      gaps: ['no reachable deck artifact registered'],
+      kickbackNote: `[QC-FAIL] Score 2.0/10 (attempt ${newAttempts}/${QC_MAX_REROUTES}). ${noEvReason}`,
+    });
+    return {
+      score: 2.0,
+      pass: false,
+      reason: noEvReason,
+      gaps: ['no reachable deck artifact registered'],
+      scoringPath: 'llm',
+    };
+  }
+
+  // ── 2. Deterministic artifact checklist ONLY ───────────────────────────────
+  const criteria = deriveAcceptanceCriteria(task.title, task.description);
+  const criteriaResult = await evaluateCriteria(criteria, deliverableManifest);
+  const failedCriteria = criteriaResult.results.filter((r) => !r.pass && !r.skipped);
+  const failReasons = failedCriteria.map((r) => `${r.id}: ${r.reason}`);
+  const passReasons = criteriaResult.results.filter((r) => r.pass).map((r) => r.id);
+
+  let result: QCResult = {
+    score: criteriaResult.score,
+    pass: criteriaResult.pass,
+    reason: criteriaResult.pass
+      ? `FIX 7 deterministic artifact checklist PASS (${passReasons.join(', ')})${criteriaResult.visionSkipped ? ' [vision-check skipped: no LLM key]' : ''}`
+      : `FIX 7 deterministic artifact checklist FAIL: ${failReasons.join('; ')}`,
+    gaps: failReasons,
+    scoringPath: 'llm',
+  };
+  console.log(
+    `[QCScorer] Task "${task.title}" (${taskId}): FIX 7 engine-owned deck checklist ${criteriaResult.score.toFixed(1)}/10 (${criteriaResult.pass ? 'PASS' : 'FAIL'})`,
+  );
+
+  // ── 3. Persist the QC result row (same table the grading module reads) ─────
+  try {
+    let deptSlug: string | null = task.department ?? null;
+    if (deptSlug) deptSlug = canonicalDeptSlug(deptSlug) || deptSlug;
+    const attemptNum = (task.qc_reroute_attempts ?? 0) + 1;
+    const passed = result.scoringPath === 'llm' && result.score >= QC_PASS_THRESHOLD ? 1 : 0;
+    run(
+      `INSERT INTO task_qc_results
+         (id, task_id, workspace_id, department_slug, score, passed, scoring_path, attempt, scored_at)
+       VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?)`,
+      [uuidv4(), taskId, deptSlug, result.score, passed, result.scoringPath, attemptNum, now],
+    );
+  } catch (qcPersistErr) {
+    console.warn('[QCScorer] FIX 7 task_qc_results INSERT failed (non-fatal):', (qcPersistErr as Error).message);
+  }
+
+  // ── 4. FAIL → increment-then-decide reroute/block, same as generic path ────
+  if (!result.pass) {
+    const newAttempts = (task.qc_reroute_attempts ?? 0) + 1;
+    const kickbackNote = `[QC-FAIL] Score ${result.score.toFixed(1)}/10 (attempt ${newAttempts}/${QC_MAX_REROUTES}). ${result.reason}`;
+    await rerouteOrBlock({
+      taskId,
+      taskTitle: task.title,
+      taskDescription: task.description,
+      attempts: newAttempts,
+      cap: QC_MAX_REROUTES,
+      score: result.score,
+      reason: result.reason,
+      gaps: result.gaps,
+      kickbackNote,
+    });
+    return result;
+  }
+
+  // ── 5. PASS → registered certificate required, then review→done ────────────
+  const certReg = requiresRegisteredCertificate({
+    department: task.department,
+    source: task.source,
+    currentStatus: task.status,
+    targetStatus: 'done',
+    storedCert:
+      queryOne<{ process_certificate_sha: string | null }>(
+        'SELECT process_certificate_sha FROM tasks WHERE id = ?',
+        [taskId],
+      )?.process_certificate_sha ?? null,
+    sopAuthoringForTaskId: null,
+  });
+  if (certReg.applies && !certReg.ok) {
+    const holdMsg =
+      `[QC-AUTO] Score ${result.score.toFixed(1)}/10 PASS but held in review: ` +
+      `${certReg.error} ${certReg.remediation ?? ''}`.trim();
+    run(
+      `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
+      [uuidv4(), 'qc_review', taskId, holdMsg, now],
+    );
+    console.warn(
+      `[QCScorer] Task "${task.title}" (${taskId}): FIX 7 checklist PASS but held in review — process certificate not registered`,
+    );
+    return result;
+  }
+
+  const eventMessage =
+    `[QC-AUTO] Score: ${result.score.toFixed(1)}/10 | PASS → moved to Done (FIX 7 deterministic deck lane) | ${result.reason} [path:llm][scorer:qc-scorer]`;
+  run(
+    `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
+    [uuidv4(), 'qc_review', taskId, eventMessage, now],
+  );
+
+  try {
+    await transition(taskId, 'done', {
+      actor: 'qc-scorer',
+      reason: `FIX 7: deterministic artifact checklist PASS (${result.score.toFixed(1)}/10 ≥ ${QC_PASS_THRESHOLD}) with registered process certificate`,
+      expectedFrom: 'review',
+    });
+  } catch (txErr) {
+    if (txErr instanceof TransitionError && txErr.code === 'CAS_CONFLICT') {
+      console.warn(
+        `[QCScorer] Task ${taskId}: FIX 7 review→done CAS conflict (already advanced) — skipping done write`,
+      );
+      return result;
+    }
+    throw txErr;
+  }
+  console.log(
+    `[QCScorer] Task "${task.title}" (${taskId}): FIX 7 deck parent PASS ${result.score.toFixed(1)}/10 → done (actor qc-scorer)`,
+  );
+  return result;
+}
+
 export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
   if (DISABLE_QC_SCORER) {
     console.log('[QCScorer] DISABLE_QC_AUTO_SCORER is set, skipping auto-QC');
@@ -4594,6 +5170,80 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
     if (task.status !== 'review') {
       console.log(`[QCScorer] Task ${taskId} is not in review (status: ${task.status}) — skipping`);
       return null;
+    }
+
+    // FIX 39 — ENGINE-OWNED SKIP: a `build_deck_phase` card is one phase of a
+    // Presentations deck owned by the engine pipeline, not by a free agent.
+    // The engine writes its own phase attestations and re-dispatches its own
+    // phases; QC judging it (and failing it) can only produce [QC-AF-I14]
+    // false-fails, reroute loops, and blocks the engine never asked for.
+    // Skip BEFORE any deliverable/manifest logic: write one loud
+    // [QC-ENGINE-OWNED] event (idempotent per pass — only when absent for this
+    // pass), leave status untouched, and return without scoring.
+    if (task.source === 'build_deck_phase') {
+      const recentEngineOwned = queryOne<{ id: string }>(
+        `SELECT id FROM events
+         WHERE task_id = ? AND type = 'qc_review' AND message LIKE '%[QC-ENGINE-OWNED]%'
+           AND ${sqlTime('created_at')} >= datetime('now', '-11 minutes')`,
+        [taskId],
+      );
+      if (!recentEngineOwned) {
+        console.warn(`[QCScorer] Task "${task.title}" (${taskId}): engine-owned phase card (source=build_deck_phase) — QC skips it, status unchanged`);
+        run(
+          `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
+          [
+            uuidv4(),
+            'qc_review',
+            taskId,
+            `[QC-ENGINE-OWNED] Skipped QC: this card is engine-owned (source=build_deck_phase). The deck pipeline owns phase attestations and re-dispatch; independent QC does not judge it.`,
+            new Date().toISOString(),
+          ],
+        );
+      }
+      return null;
+    }
+
+    // ── FIX 7 — ENGINE-OWNED PARENT: deterministic artifact checklist lane ─────
+    // A `build_deck` (or legacy `presentations`) PARENT card is minted by the
+    // deck engine's own ingest (cc_board.py ingest_deck_task, payload.source
+    // "build_deck") and is closed to `review` by the engine's close() with the
+    // run's process certificate registered (phases.py _board_register_close →
+    // PATCH /api/tasks/{id} {status:"review", process_certificate_sha}).
+    //
+    // THE DEFECT: the generic lanes below score a review card with the LLM
+    // judge (Mode A rubric / Mode B description text). The board scorer has
+    // never passed a deck through those lanes (260 scored, average 2.8, zero
+    // pass — the judge reads prose, never the ten-file bundle), so the parent
+    // card parked in review forever and the pipeline never produced a done.
+    //
+    // THE LANE (per FIX 7's HOW): for an engine-owned parent, run ONLY the
+    // deterministic artifact checklist — deriveAcceptanceCriteria's deck gates
+    // (existence / valid_image / AF-LANG / AF-NUM / AF-SPELL skipped-by-key,
+    // pipeline_complete and coverage which are pure filesystem reads) through
+    // evaluateCriteria() against the deliverable manifest the engine
+    // registered. No Mode B, no producer-confirmation detour, no AF-I14
+    // session-trace demand keyed on a run the board cannot see.
+    //
+    // CERT + PROMOTION: on a checklist PASS, review→done additionally requires
+    // the registered process certificate (requiresRegisteredCertificate — the
+    // U031 registration gate transition() itself enforces on done). A missing
+    // certificate HOLDS the card in review with an explicit event (never a
+    // throw, mirroring the generic path's F14 pre-check). On a pass WITH the
+    // certificate, transition review→done with actor `qc-scorer` — the same
+    // one-authoritative-lifecycle-path the generic promote uses.
+    //
+    // The fix's contract: "the board promotes engine-owned cards on the
+    // deterministic artifact path". Children stay excluded (FIX 39 skip above
+    // + Fix 39's sweep exclusion); this branch covers the PARENT only.
+    const deptCanon7 = task.department
+      ? (canonicalDeptSlug(task.department) || task.department)
+      : null;
+    const isEngineOwnedDeck =
+      task.source === 'build_deck' ||
+      task.source === 'presentations' ||
+      (deptCanon7 === 'presentations' && task.source === null);
+    if (isEngineOwnedDeck) {
+      return await runEngineOwnedDeckQC(task, taskId, new Date().toISOString());
     }
 
     // Resolve per-department QC agent (name-agnostic, canonical-slug-safe)
@@ -4918,6 +5568,9 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
           // identically to a finished deliverable. probeTextFile reads a bounded
           // excerpt and computes line/word/non-empty-char counts so the judge
           // scores CONTENT, not just existence.
+          // FIX 45: probe.ioDeferred (exists-but-unreadable) rides through to
+          // the manifest so the all-invalid branch can tell a deferral from a
+          // genuine fail.
           const probe = probeTextFile(rawPath);
           return {
             title: d.title,
@@ -4930,12 +5583,49 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
             contentExcerpt: probe.excerpt,
             structuralChecks: probe.structuralChecks,
             contentNote: probe.contentNote,
+            ioDeferred: probe.ioDeferred === true ? true : undefined,
           };
         });
 
         // Early-exit: if ALL deliverables are missing/invalid, fail immediately
         // without spending an LLM call — the reason is structural, not qualitative.
+        // FIX 45 — UNREADABLE ≠ FAILED: when every invalid item is ioDeferred
+        // (the file exists with bytes but could not be READ — permission-000,
+        // TCC gate, EBUSY), that is a TRANSIENT I/O condition, not a quality
+        // verdict. Failing it wrote "File unreadable" bounces and burned reroute
+        // attempts on 34 live cards whose deliverables sat in a TCC-protected
+        // directory. Instead: write ONE [QC-DEFERRED-IO] event, leave the card
+        // in review, touch NO counter, and return — the qc-review-sweep's
+        // standard 10-minute window re-scores it and a later read that lands
+        // (permission granted, file moved out of the gated dir, mount back)
+        // proceeds to a real verdict. A later pass that still cannot read
+        // re-writes the deferral marker, which is the same short-cadence
+        // retry-and-hold contract the [QC-DEFERRED-PROVIDER-DOWN] lane uses.
         const allInvalid = deliverableManifest.every((d) => !d.valid);
+        const allIoDeferred = allInvalid && deliverableManifest.every((d) => d.ioDeferred === true);
+        if (allIoDeferred) {
+          const deferredReasons = deliverableManifest.map((d) => d.invalidReason ?? `unreadable: ${d.path}`);
+          console.warn(
+            `[QCScorer] Task "${task.title}" (${taskId}): deliverable(s) exist but unreadable (I/O) — DEFERRED in review, no transition, no counter bump: ${deferredReasons.join('; ')}`,
+          );
+          run(
+            `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
+            [
+              uuidv4(),
+              'qc_review',
+              taskId,
+              `[QC-DEFERRED-IO] Deliverable(s) exist but could not be read (transient I/O — permission or TCC gate). Held in review; will retry — NOT a quality fail, qc_reroute_attempts unchanged (${task.qc_reroute_attempts ?? 0}). Paths: ${deferredReasons.join('; ')}`,
+              new Date().toISOString(),
+            ],
+          );
+          return {
+            score: 0,
+            pass: false,
+            reason: `Deliverable I/O deferred — file(s) exist but could not be read: ${deferredReasons.join('; ')}`,
+            gaps: deferredReasons,
+            scoringPath: 'llm',
+          };
+        }
         if (allInvalid) {
           const missingReasons = deliverableManifest.map((d) => d.invalidReason ?? `missing: ${d.path}`);
           console.warn(`[QCScorer] Task "${task.title}" (${taskId}): all deliverables missing/invalid — instant fail`);
@@ -4957,37 +5647,30 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
               now,
             ],
           );
-          const prevAttempts = task.qc_reroute_attempts ?? 0;
-          const newAttempts = prevAttempts + 1;
+          const newAttempts = (task.qc_reroute_attempts ?? 0) + 1;
           const kickbackNote = `[QC-FAIL] Score 2.0/10 (attempt ${newAttempts}/${QC_MAX_REROUTES}). Missing deliverables: ${missingReasons.join('; ')}`;
-          // fix2(MR-04): route through transition() with extraColumns so the
-          // description + qc_reroute_attempts land atomically with the status
-          // flip AND the legal-transition guard + CAS run (review→backlog is
-          // legal). The raw compound UPDATE this replaces bypassed the state
-          // machine; transition() also writes the task_events audit row + the
-          // task_updated broadcast itself. expectedFrom preserves the raw
-          // writer's `WHERE status = 'review'` CAS; a lost race is a normal
-          // concurrent advance (the task already left review) — return the
-          // fail result without a duplicate broadcast.
-          const missingDesc = task.description && task.description !== ''
-            ? `${task.description}\n\n${kickbackNote}`
-            : kickbackNote;
-          try {
-            await transition(taskId, 'backlog', {
-              actor: 'qc-scorer',
-              reason: kickbackNote,
-              expectedFrom: 'review',
-              extraColumns: {
-                description: missingDesc,
-                qc_reroute_attempts: newAttempts,
-              },
-            });
-          } catch (txErr) {
-            if (!(txErr instanceof TransitionError && txErr.code === 'CAS_CONFLICT')) {
-              console.warn(`[QCScorer] missing-deliverables kickback transition failed for ${taskId}:`, (txErr as Error).message);
-              recordStatusApplyFailure(taskId, 'backlog', txErr);
-            }
-          }
+          // FIX 42: this instant-fail path must make the SAME increments-then-
+          // decide call as the ordinary llm-fail cap branch — rerouteOrBlock()
+          // reroutes review→backlog atomically (description + qc_reroute_attempts
+          // via transition()'s extraColumns) when sub-cap, and BLOCKS through
+          // blockTaskForQC() with the scorer's classified audience when
+          // attempts >= cap. Before this rewire a capped card failing here was
+          // rerouted a 4th time and left for intake-advance's task_capped prose
+          // path — exactly the FIX 42 failure shape. The [QC-AUTO] verdict event
+          // above is this path's caller-owned audit; a lost CAS race is the
+          // caller's "return the fail result without a duplicate broadcast"
+          // contract — identical to what this block replaced.
+          await rerouteOrBlock({
+            taskId,
+            taskTitle: task.title,
+            taskDescription: task.description,
+            attempts: newAttempts,
+            cap: QC_MAX_REROUTES,
+            score: failResult.score,
+            reason: failResult.reason,
+            gaps: failResult.gaps,
+            kickbackNote,
+          });
           return failResult;
         }
       }
@@ -5016,8 +5699,17 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
     // evidence of a violation (the runtime may not record OpenClaw sessions at all),
     // so a legitimate, independently-QC'd artifact is not blocked by fail-close.
     const hasImageOrDeckIntent = describesImageOrDeckDeliverable(task.title, task.description);
+    // FIX 43 (AF-I14): the guardrail fires on a REAL image or deck artifact only —
+    // a valid manifest item whose type is 'image', or whose extension is a deck
+    // format (.pptx/.pdf). A .json/.md/data sidecar no longer counts as an
+    // image/deck ship, so a card whose only deliverable is .json is scored with
+    // no [QC-AF-I14] event; a valid .pptx (or image) still triggers it.
+    const afi14ImageOrDeckRe = /\.(pptx|pdf)$/i;
     const shippedValidImageOrDeck =
-      !!deliverableManifest && deliverableManifest.some((m) => m.valid);
+      !!deliverableManifest &&
+      deliverableManifest.some(
+        (m) => m.valid && (m.type === 'image' || afi14ImageOrDeckRe.test(m.path)),
+      );
     if (hasImageOrDeckIntent && shippedValidImageOrDeck) {
       const deptCanon = task.department
         ? canonicalDeptSlug(task.department) || task.department.toLowerCase()
@@ -5042,46 +5734,37 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
           [uuidv4(), 'qc_review', taskId, afi14Msg, nowAf],
         );
 
-        // Increment reroute counter and return task to backlog
-        const prevAttempts = task.qc_reroute_attempts ?? 0;
-        const newAttempts = prevAttempts + 1;
+        // FIX 42: increment-then-decide via the shared rerouteOrBlock() helper —
+        // sub-cap reroutes review→backlog atomically (description +
+        // qc_reroute_attempts via transition()'s extraColumns, legal-transition
+        // guard + CAS run); at/over the cap it BLOCKS through blockTaskForQC()
+        // with the scorer's classified audience instead of rerouting a 4th time
+        // and leaving the card to intake-advance's task_capped prose path. The
+        // [QC-AF-I14] verdict event above is this path's caller-owned audit; a
+        // lost CAS race is this path's pre-existing "return the fail result
+        // without a duplicate broadcast" contract.
+        const newAttempts = (task.qc_reroute_attempts ?? 0) + 1;
         const kickbackNote = `[QC-AF-I14 FAIL] AF-I14 violations (attempt ${newAttempts}/${QC_MAX_REROUTES}): ${afi14.violations.join('; ')}`;
-        // fix2(MR-04): route through transition() with extraColumns so the
-        // description + qc_reroute_attempts land atomically with the status
-        // flip AND the legal-transition guard + CAS run (review→backlog is
-        // legal). The raw compound UPDATE this replaces bypassed the state
-        // machine; transition() also writes the task_events audit row + the
-        // task_updated broadcast itself. expectedFrom preserves the raw
-        // writer's `WHERE status = 'review'` CAS; a lost race is a normal
-        // concurrent advance — return the fail result without a duplicate
-        // broadcast.
-        const afi14Desc = task.description && task.description !== ''
-          ? `${task.description}\n\n${kickbackNote}`
-          : kickbackNote;
-        try {
-          await transition(taskId, 'backlog', {
-            actor: 'qc-scorer',
-            reason: kickbackNote,
-            expectedFrom: 'review',
-            extraColumns: {
-              description: afi14Desc,
-              qc_reroute_attempts: newAttempts,
-            },
-          });
-        } catch (txErr) {
-          if (!(txErr instanceof TransitionError && txErr.code === 'CAS_CONFLICT')) {
-            console.warn(`[QCScorer] AF-I14 kickback transition failed for ${taskId}:`, (txErr as Error).message);
-            recordStatusApplyFailure(taskId, 'backlog', txErr);
-          }
-        }
-
-        return {
+        const afi14FailResult: QCResult = {
           score: 1.0,
           pass: false,
           reason: `AF-I14 guardrail: ${afi14.violations.length} image-path mandate violation(s) detected in session trace.`,
           gaps: afi14.violations,
           scoringPath: 'llm',
         };
+        await rerouteOrBlock({
+          taskId,
+          taskTitle: task.title,
+          taskDescription: task.description,
+          attempts: newAttempts,
+          cap: QC_MAX_REROUTES,
+          score: afi14FailResult.score,
+          reason: afi14FailResult.reason,
+          gaps: afi14FailResult.gaps,
+          kickbackNote,
+        });
+
+        return afi14FailResult;
       }
       if (afi14.traceFound) {
         console.log(`[QCScorer] AF-I14 guardrail PASS for task "${task.title}" (session: ${afi14.sessionId ?? 'unknown'}) — KIE.ai path confirmed, no native image_generate calls detected`);
@@ -5924,8 +6607,13 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
 
       // FAIL: return to backlog with gap notes, then re-dispatch — unless the
       // infinite-loop cap has been reached.
+      //
+      // FIX 42: `>=` not `>`. The cap names the MAXIMUM number of reroutes —
+      // at QC_MAX_REROUTES attempts the loop must STOP, so the Nth failure
+      // (attempt === cap) blocks rather than reroutes a 4th time (attempt
+      // cap+1) with "3/3" in its own log line. Third failure blocks.
 
-      if (newAttempts > QC_MAX_REROUTES) {
+      if (newAttempts >= QC_MAX_REROUTES) {
         // Cap reached → classify the block and set task to `blocked`.
         //
         // BLOCK-TRANSPARENCY-001 (v4.44.0):

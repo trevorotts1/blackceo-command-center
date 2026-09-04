@@ -70,6 +70,7 @@ function hasEdgeProvenance(headers: Headers): boolean {
 /** Hostname → clients-row id. One line per remote client served by this CC. */
 const REMOTE_CLIENT_HOSTS: Record<string, string> = {
   'janet.zerohumanworkforce.com': 'client-janet-pinkney',
+  'donna.zerohumanworkforce.com': 'client-donna-izzard',
 };
 
 /** The operator's own CC hostnames — canonical files, never a client row. */

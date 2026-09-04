@@ -93,6 +93,23 @@ export function ActivityLog({ taskId, engineLabel }: ActivityLogProps) {
         return '📄';
       case 'status_changed':
         return '🔄';
+      // FIX 37 (W16a-B2) — the presentations engine's producer activity types
+      // (validation.ts widened the POST gate so these rows now actually land).
+      case 'comment':
+        return '💬';
+      case 'progress':
+        return '⏳';
+      case 'phase_started':
+        return '▶️';
+      case 'phase_completed':
+        return '🏁';
+      case 'error':
+        return '🚨';
+      // Present in the types.ts ActivityType union already; fell through to 📝
+      case 'owner_message':
+        return '👤';
+      case 'agent_message':
+        return '🤖';
       // P2-02 — the trust engine's client report-back trail.
       case 'trust_ack':
         return '📨';

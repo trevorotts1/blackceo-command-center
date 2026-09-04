@@ -204,6 +204,13 @@ CREATE TABLE IF NOT EXISTS tasks (
   -- nothing to address and the report-back loop fell silent. Nullable +
   -- additive; the chat id still wins when both are present.
   requester_session_key TEXT,
+  -- FIX 52 (MASTER Part 8 / [R5A §H5]) — migration 130 owns this for existing
+  -- DBs; this base CREATE covers fresh installs. Presentation deck-run cards
+  -- carry the deck's slide count so the board and the re-ingest gate can show
+  -- and compare progress without re-reading the producer manifest. Nullable +
+  -- additive: no DEFAULT, no CHECK, so the ALTER can never fail on existing
+  -- data; every non-presentation task keeps slide_count NULL.
+  slide_count INTEGER,
   ack_sent_at TEXT,
   progress_last_sent_at TEXT,
   eta_estimate TEXT,

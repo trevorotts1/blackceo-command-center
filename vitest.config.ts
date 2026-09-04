@@ -221,6 +221,13 @@ export default defineConfig({
       'tests/unit/fix25-review-artifact-gate.test.ts',
       'tests/unit/fix27-deliverable-path-reject.test.ts',
       'tests/unit/fix28-bundle-reverify.test.ts',
+      // FIX 54 — bundle floors enforced at registration: a bundle-shaped
+      // deliverable whose bytes would fail the done gate's probe (10-byte
+      // PRESENTER-GUIDE.pdf → UNDER_THRESHOLD, decoy PNG → WRONG_TYPE) is
+      // refused 422 by the REAL POST /api/tasks/[id]/deliverables handler
+      // before any row is written. DB-backed vitest suite (vitest globals +
+      // dynamic route import), so vitest-only, never the tsx --test glob.
+      'tests/unit/fix54-registration-bundle-probe.test.ts',
       // FIX 35 (spec REV 3, Phase D data lane) — synthetic-row purge gate +
       // audit-backfill route. Hygiene script is driven as a subprocess against
       // an isolated temp DB; the route suite imports the real handler. Uses
@@ -233,19 +240,13 @@ export default defineConfig({
   // discriminated. Parse + fixture files only — the deploy script is never
   // executed.
   'tests/unit/fix34-db-backup-verify.test.ts',
-      // FIX-TIMEOUT-DETECT — execution-watcher terminal-failure detection
-      // (openclaw:prompt-error / "chat run timed out" with no TASK_COMPLETE).
-      // Drives the REAL runExecutionCompletionReconcile() against an isolated
-      // DB with both '@/lib/planning-utils' and '@/lib/openclaw/client' mocked
-      // (no network), same technique as fix25-review-artifact-gate.test.ts —
-      // vitest-only, never the tsx --test glob (see package.json).
-      'tests/unit/fix-timeout-detect-terminal-failure.test.ts',
-      // FIX-DISPATCH-COUNTER — intake-advance-sweep's `dispatched` counter must
-      // only count a REAL advance (status -> in_progress), not every
-      // successfully-awaited (but possibly no-op) autoDispatchTask call.
-      // Mocks '@/lib/task-dispatcher' at the module boundary — vitest-only,
-      // never the tsx --test glob (see package.json).
-      'tests/unit/fix-dispatch-counter-intake-advance.test.ts',
+    // FIX 37 (W16a-B2) — widened activity enum: drives the REAL POST
+    // /api/tasks/[id]/activities handler against an isolated DB and proves
+    // {activity_type: comment} → 201 + a task_activities row (the QC.md FIX 37
+    // proof), all five widened types, the five legacy types un-regressed, and a
+    // bogus-type 400 negative control. Vitest globals, so vitest-only, never
+    // the tsx --test glob (see package.json).
+    'tests/unit/fix37-activity-enum.test.ts',
     ],
     env: {
       NODE_ENV: 'test',
