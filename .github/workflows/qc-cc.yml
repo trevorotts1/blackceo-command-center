@@ -545,7 +545,15 @@ jobs:
           # detection is exercised without any real client roster. The denylisted
           # literal lives only in the self-excluded fixture, never inline here.
           TMP="$(mktemp -d)"
+          # The gate's authoritative scan walks TRACKED files (git ls-files), so
+          # the temp root must be a git repo with the leak tracked — a bare dir
+          # yields an empty file list and the gate passes vacuously (the exact
+          # failure this self-test exists to catch, measured on main CI
+          # 2026-09-03/04: 'fatal: not a git repository' → 0 files → PASS).
+          git -C "$TMP" init -q
           cp tests/fixtures/no-client-names/planted-client-name.txt "$TMP/leak.ts"
+          git -C "$TMP" add leak.ts
+          git -C "$TMP" -c user.email=ci@example.com -c user.name=ci commit -qm "planted leak fixture"
           if OPENCLAW_CLIENT_ROSTER="$PWD/scripts/client-roster.example.txt" \
                bash scripts/qc-assert-no-client-names.sh --repo-root "$TMP"; then
             echo "ERROR: gate passed on a planted placeholder name — the check is broken"
