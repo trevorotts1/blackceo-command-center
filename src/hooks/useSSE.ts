@@ -22,9 +22,9 @@ interface UseSSEOptions {
 
 export function useSSE(options?: UseSSEOptions) {
   const eventSourceRef = useRef<EventSource | null>(null);
-  const reconnectTimeoutRef = useRef<NodeJS.Timeout>();
+  const reconnectTimeoutRef = useRef<NodeJS.Timeout | undefined>(undefined);
   // Use ref to track selectedTask ID without causing re-renders
-  const selectedTaskIdRef = useRef<string | undefined>();
+  const selectedTaskIdRef = useRef<string | undefined>(undefined);
   // MSG-07: distinguishes the first connect (page already loaded a fresh
   // snapshot) from a genuine reconnect (deltas may have been missed while down).
   const hasConnectedRef = useRef(false);

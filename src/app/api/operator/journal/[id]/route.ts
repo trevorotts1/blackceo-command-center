@@ -36,15 +36,15 @@ function resolveEntry(idOrDate: string) {
   return getJournalEntryById(idOrDate);
 }
 
-export async function GET(_req: NextRequest, ctx: { params: { id: string } }) {
-  const entry = resolveEntry(ctx.params.id);
+export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const entry = resolveEntry((await ctx.params).id);
   if (!entry) {
     return NextResponse.json({ error: 'not_found' }, { status: 404 });
   }
   return NextResponse.json(entry);
 }
 
-export async function PATCH(req: NextRequest, ctx: { params: { id: string } }) {
+export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   let parsed;
   try {
     const json = await req.json();
@@ -55,7 +55,7 @@ export async function PATCH(req: NextRequest, ctx: { params: { id: string } }) {
       { status: 400 }
     );
   }
-  const existing = resolveEntry(ctx.params.id);
+  const existing = resolveEntry((await ctx.params).id);
   if (!existing) {
     return NextResponse.json({ error: 'not_found' }, { status: 404 });
   }
@@ -71,14 +71,14 @@ export async function PATCH(req: NextRequest, ctx: { params: { id: string } }) {
   }
 }
 
-export async function DELETE(_req: NextRequest, ctx: { params: { id: string } }) {
+export async function DELETE(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   // Deletion is by primary key only. Date deletion would be too easy to do
   // accidentally from a deep link.
-  if (isValidEntryDate(ctx.params.id)) {
+  if (isValidEntryDate((await ctx.params).id)) {
     return NextResponse.json({ error: 'delete_requires_uuid' }, { status: 400 });
   }
   try {
-    const removed = deleteJournalEntry(ctx.params.id);
+    const removed = deleteJournalEntry((await ctx.params).id);
     if (!removed) {
       return NextResponse.json({ error: 'not_found' }, { status: 404 });
     }

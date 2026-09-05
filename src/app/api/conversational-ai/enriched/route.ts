@@ -21,7 +21,7 @@ export const revalidate = 0;
  */
 export async function GET() {
   try {
-    const interview = getInterviewState();
+    const interview = await getInterviewState();
     if (!interview.complete) {
       return NextResponse.json({
         ok: true,

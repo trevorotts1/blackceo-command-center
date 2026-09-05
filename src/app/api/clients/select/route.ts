@@ -11,7 +11,7 @@ export const dynamic = 'force-dynamic';
  */
 export async function GET() {
   try {
-    const selected = getClientContext();
+    const selected = await getClientContext();
     return NextResponse.json({
       ok: true,
       selected: selected ? toPublicClient(selected) : null,
@@ -36,12 +36,12 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'id is required' }, { status: 400 });
     }
 
-    const ok = setSelectedClient(id);
+    const ok = await setSelectedClient(id);
     if (!ok) {
       return NextResponse.json({ error: 'Unknown client id' }, { status: 404 });
     }
 
-    const selected = getClientContext();
+    const selected = await getClientContext();
     return NextResponse.json({
       ok: true,
       selected: selected ? toPublicClient(selected) : null,

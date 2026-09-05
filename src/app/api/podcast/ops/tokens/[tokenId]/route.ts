@@ -12,10 +12,8 @@ const NO_STORE = { 'Cache-Control': 'no-store' };
  * on the next request because sessions re-validate against the token row
  * every time (design 11.3, acceptance criterion 7).
  */
-export async function DELETE(
-  req: NextRequest,
-  { params }: { params: { tokenId: string } }
-): Promise<NextResponse> {
+export async function DELETE(req: NextRequest, props: { params: Promise<{ tokenId: string }> }): Promise<NextResponse> {
+  const params = await props.params;
   const viewer = viewerFromRequest(req);
   if (viewer.kind !== 'operator') {
     return NextResponse.json({ error: 'Access unavailable' }, { status: 401, headers: NO_STORE });

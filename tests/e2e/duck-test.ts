@@ -227,7 +227,7 @@ async function startAppServer(): Promise<{ port: number; proc: ChildProcess }> {
   // Use the same node binary, run next via node_modules
   const proc = spawn(
     path.join(REPO_ROOT, 'node_modules/.bin/next'),
-    [mode, '--port', String(port)],
+    [mode, ...(mode === 'dev' ? ['--webpack'] : []), '--port', String(port)],
     { cwd: REPO_ROOT, env: serverEnv, stdio: ['ignore', 'pipe', 'pipe'] },
   );
 

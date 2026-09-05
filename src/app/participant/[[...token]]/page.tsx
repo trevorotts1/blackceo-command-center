@@ -71,13 +71,14 @@ function resolve(params: { token?: string[] }, searchParams: SearchParams): Reso
   return { view: serializeFailure('invalid') };
 }
 
-export default function ParticipantPage({
-  params,
-  searchParams,
-}: {
-  params: { token?: string[] };
-  searchParams: SearchParams;
-}) {
+export default async function ParticipantPage(
+  props: {
+    params: Promise<{ token?: string[] }>;
+    searchParams: Promise<SearchParams>;
+  }
+) {
+  const searchParams = await props.searchParams;
+  const params = await props.params;
   const resolved = resolve(params, searchParams);
 
   return (

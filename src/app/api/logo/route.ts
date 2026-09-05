@@ -126,7 +126,7 @@ export async function POST(request: NextRequest) {
 
   // Persist on the selected client tenant record.
   try {
-    const client = getClientContext();
+    const client = await getClientContext();
     if (client) {
       updateClient(client.id, { logo_url: finalUrl });
     }

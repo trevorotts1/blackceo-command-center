@@ -285,7 +285,7 @@ export async function goalsOnTrackCheck(): Promise<OnTrackResult> {
     return { ok: true, activeGoals: 0, assessment: 'No active goals to check.' };
   }
 
-  const client = getClientContext();
+  const client = await getClientContext();
   if (!client) {
     return { ok: false, activeGoals: active.length, reason: 'no client selected' };
   }

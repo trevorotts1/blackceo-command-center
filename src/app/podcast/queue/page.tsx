@@ -10,10 +10,10 @@ export const dynamic = 'force-dynamic';
  * hold"), the 60-day age meter, and the collapsed Expired group (design
  * Section 8.2). Display only; the engine owns every queue mutation.
  */
-export default function PodcastQueuePage() {
+export default async function PodcastQueuePage() {
   const viewer = resolveViewer(
-    headers(),
-    cookies().get(PODCAST_SESSION_COOKIE)?.value ?? null
+    await headers(),
+    (await cookies()).get(PODCAST_SESSION_COOKIE)?.value ?? null
   );
   return (
     <div>

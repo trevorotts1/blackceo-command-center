@@ -16,11 +16,11 @@ export const revalidate = 0;
 
 export async function GET(
   _req: NextRequest,
-  ctx: { params: { id: string } }
+  ctx: { params: Promise<{ id: string }> }
 ) {
-  const job = await loadJob(ctx.params.id);
+  const job = await loadJob((await ctx.params).id);
   if (!job) {
-    return NextResponse.json({ error: 'job_not_found', id: ctx.params.id }, { status: 404 });
+    return NextResponse.json({ error: 'job_not_found', id: (await ctx.params).id }, { status: 404 });
   }
   return NextResponse.json({ job });
 }

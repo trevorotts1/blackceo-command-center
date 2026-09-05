@@ -75,14 +75,14 @@ const requestSchema = z.object({
  * Returns '' only when neither is available — the caller then refuses with 401
  * rather than recording a decision with un-honorable (empty) provenance.
  */
-function resolveOwnerId(req: NextRequest): string {
+async function resolveOwnerId(req: NextRequest): Promise<string> {
   const email =
     req.headers.get('Cf-Access-Authenticated-User-Email') ||
     req.headers.get('x-operator-email');
   if (email && email.trim()) return email.trim();
 
   try {
-    const client = getClientContext();
+    const client = await getClientContext();
     if (client?.id && client.id.trim()) return client.id.trim();
   } catch {
     // DB not seeded / outside request scope — fall through to the 401 refusal.

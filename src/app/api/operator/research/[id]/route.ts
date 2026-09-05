@@ -12,8 +12,8 @@ import { getResearchSearch } from '@/lib/research-store';
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
-export async function GET(_req: NextRequest, ctx: { params: { id: string } }) {
-  const id = ctx.params.id;
+export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const id = (await ctx.params).id;
   if (!id) {
     return NextResponse.json({ error: 'missing_id' }, { status: 400 });
   }

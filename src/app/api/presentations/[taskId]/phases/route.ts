@@ -21,10 +21,8 @@ import { boardWhereClause } from '@/lib/workspaces/board-query';
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
-export async function GET(
-  _request: NextRequest,
-  { params }: { params: { taskId: string } },
-) {
+export async function GET(_request: NextRequest, props: { params: Promise<{ taskId: string }> }) {
+  const params = await props.params;
   try {
     const { taskId } = params;
     const db = getDb();

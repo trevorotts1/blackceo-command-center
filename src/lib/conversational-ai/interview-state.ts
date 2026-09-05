@@ -52,9 +52,9 @@ export type StandardReadyState = typeof STANDARD_READY;
  * table yet / outside a request scope). null = unknown → caller defaults the
  * banner to HIDDEN. Never throws.
  */
-function clientFlagSignal(): boolean | null {
+async function clientFlagSignal(): Promise<boolean | null> {
   try {
-    const client = getClientContext();
+    const client = await getClientContext();
     if (!client) return null;
     return client.interview_complete;
   } catch {
@@ -229,11 +229,11 @@ function tryBackfillClientFlag(clientId: string | null): void {
  * correctly be detected as complete. The DB flag is backfilled automatically
  * so the false-gating disappears on the next status poll.
  */
-export function getInterviewState(): InterviewState {
+export async function getInterviewState(): Promise<InterviewState> {
   const checkedAt = new Date().toISOString();
 
   // 1. Per-client DB flag (E3).
-  const clientFlag = clientFlagSignal();
+  const clientFlag = await clientFlagSignal();
   if (clientFlag === true) {
     return {
       complete: true,
@@ -251,7 +251,7 @@ export function getInterviewState(): InterviewState {
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { getSelectedClientId } = require('@/lib/clients') as typeof import('@/lib/clients');
-    selectedClientId = getSelectedClientId();
+    selectedClientId = await getSelectedClientId();
   } catch {
     // non-fatal
   }

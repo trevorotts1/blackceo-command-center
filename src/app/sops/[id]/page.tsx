@@ -16,6 +16,7 @@
 
 import { useEffect, useState } from 'react';
 import { useParams } from 'next/navigation';
+import Link from 'next/link';
 
 interface SopStep {
   name: string;
@@ -104,9 +105,9 @@ export default function SopDetailPage() {
   return (
     <div className="mx-auto max-w-4xl p-6">
       <div className="mb-4">
-        <a href="/sops/proposals" className="text-xs text-zinc-500 hover:text-zinc-300">
+        <Link href="/sops/proposals" className="text-xs text-zinc-500 hover:text-zinc-300">
           &larr; SOP library
-        </a>
+        </Link>
       </div>
 
       {state === 'loading' && (

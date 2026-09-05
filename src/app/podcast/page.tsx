@@ -11,10 +11,10 @@ export const dynamic = 'force-dynamic';
  * merely widens what an ALREADY authenticated operator sees, and the API
  * decides per request what it will actually serve.
  */
-export default function PodcastPage() {
+export default async function PodcastPage() {
   const viewer = resolveViewer(
-    headers(),
-    cookies().get(PODCAST_SESSION_COOKIE)?.value ?? null
+    await headers(),
+    (await cookies()).get(PODCAST_SESSION_COOKIE)?.value ?? null
   );
   return (
     <div>

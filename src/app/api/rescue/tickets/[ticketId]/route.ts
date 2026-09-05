@@ -25,10 +25,8 @@ export interface RescueTicketDetailResponse {
  * SPECIFIC ticket that does not exist is a genuine not-found, not an empty
  * state. A box with no store at all also 404s (there is nothing to show).
  */
-export function GET(
-  _req: NextRequest,
-  { params }: { params: { ticketId: string } },
-): NextResponse {
+export async function GET(_req: NextRequest, props: { params: Promise<{ ticketId: string }> }): Promise<NextResponse> {
+  const params = await props.params;
   const ticketId = decodeURIComponent(params.ticketId || '');
   if (!ticketId) {
     return NextResponse.json({ error: 'ticketId required' }, { status: 400, headers: NO_STORE });

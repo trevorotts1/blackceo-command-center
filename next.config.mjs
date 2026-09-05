@@ -1,5 +1,9 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  // Loopback browser fixtures use this host. Next 16 carries React's dev debug
+  // stream over HMR; rejecting its origin also prevents client hydration.
+  // This allowlist applies only to development resources, not production auth.
+  allowedDevOrigins: ['127.0.0.1'],
   // BUG-1 FIX (atomic-deploy.sh build isolation): honour NEXT_DIST_DIR so a
   // build can be pointed at a temp directory instead of the live .next. Next.js
   // resolves this via path.join(<project dir>, distDir), which does NOT
@@ -8,14 +12,8 @@ const nextConfig = {
   // never absolute. scripts/atomic-deploy.sh passes a relative temp-dir name
   // for exactly this reason. Falls back to the normal '.next' when unset.
   distDir: process.env.NEXT_DIST_DIR || '.next',
-  experimental: {
-    serverComponentsExternalPackages: ['better-sqlite3'],
-    // Required in Next 14.2 to load `src/instrumentation.ts` (this project uses
-    // a src/ dir, so Next loads the src-level file, not a root one) which runs
-    // boot-time wiring: DB init, provider-env hydration, Studio registry seed,
-    // in-process cron registration, and Bridge pairing bootstrap (v4.0.1 P0-6).
-    instrumentationHook: true,
-  },
+  // Instrumentation is stable; keep native SQLite outside the server bundle.
+  serverExternalPackages: ['better-sqlite3'],
   webpack: (config, { nextRuntime }) => {
     config.externals.push({
       'better-sqlite3': 'commonjs better-sqlite3',

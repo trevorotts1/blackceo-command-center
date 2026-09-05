@@ -87,15 +87,15 @@ export interface ReadClientDirResult {
  * self client when nothing is selected. Returns null only when the clients
  * table is empty (should not happen after migration 048 seeds self).
  */
-export function selectedClientPath(kind: ClientPathKind): { client: Client; resolved: ResolvedClientPath } | null {
-  const client = getClientContext();
+export async function selectedClientPath(kind: ClientPathKind): Promise<{ client: Client; resolved: ResolvedClientPath } | null> {
+  const client = await getClientContext();
   if (!client) return null;
   return { client, resolved: resolveClientPath(client, kind) };
 }
 
 /** True when the selected (or supplied) client's data lives on a remote box. */
-export function clientIsRemote(client?: Client | null): boolean {
-  const c = client ?? getClientContext();
+export async function clientIsRemote(client?: Client | null): Promise<boolean> {
+  const c = client ?? await getClientContext();
   return !!c && !c.is_self;
 }
 
@@ -207,7 +207,7 @@ export async function readClientDir(
   kind: ClientPathKind,
   opts: ReadClientDirOptions = {}
 ): Promise<ReadClientDirResult> {
-  const sel = selectedClientPath(kind);
+  const sel = await selectedClientPath(kind);
   if (!sel) {
     // Empty clients table — degrade, never throw.
     const stub: Client = {
@@ -381,7 +381,7 @@ export async function readClientFile(
   kind: ClientPathKind,
   relativePath: string
 ): Promise<ClientFile | RemoteError | null> {
-  const sel = selectedClientPath(kind);
+  const sel = await selectedClientPath(kind);
   if (!sel) return null;
   const { client, resolved } = sel;
 
@@ -428,7 +428,7 @@ export async function writeClientFile(
   relativePath: string,
   contents: string
 ): Promise<{ absPath: string; remote: boolean } | RemoteError | null> {
-  const sel = selectedClientPath(kind);
+  const sel = await selectedClientPath(kind);
   if (!sel) return null;
   const { client, resolved } = sel;
 

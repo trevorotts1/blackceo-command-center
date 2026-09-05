@@ -26,8 +26,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { globSync } from 'glob';
-import { readFileSync } from 'fs';
+import { readFileSync, readdirSync } from 'fs';
 import { resolve, relative } from 'path';
 import { BEARER_REQUIRED_WRITE_ROUTES, requiresBearerForWrite } from '../bearer-required-routes';
 
@@ -60,7 +59,9 @@ interface MutatingRoute {
 }
 
 function scanApiRoutes(): MutatingRoute[] {
-  const routeFiles = globSync('src/app/api/**/route.ts', { cwd: ROOT, nodir: true });
+  const routeFiles = readdirSync(resolve(ROOT, 'src/app/api'), { recursive: true, encoding: 'utf8' })
+    .filter((file) => file === 'route.ts' || file.endsWith('/route.ts'))
+    .map((file) => `src/app/api/${file}`);
   const results: MutatingRoute[] = [];
 
   for (const relPath of routeFiles) {
@@ -102,11 +103,9 @@ function scanInterfaceMutatingFetches(): InterfaceCall[] {
   const allowedExts = ['ts', 'tsx'];
   const allFiles: string[] = [];
   for (const ext of allowedExts) {
-    allFiles.push(...globSync(`src/**/*.${ext}`, {
-      cwd: ROOT,
-      nodir: true,
-      ignore: ['src/app/api/**'],
-    }));
+    allFiles.push(...readdirSync(resolve(ROOT, 'src'), { recursive: true, encoding: 'utf8' })
+      .filter((file) => file.endsWith(`.${ext}`) && !file.startsWith('app/api/'))
+      .map((file) => `src/${file}`));
   }
 
   const routeSet = new Map<string, Set<string>>();

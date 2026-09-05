@@ -100,10 +100,10 @@ function resetClientFlag() {
 
 // ── tests ─────────────────────────────────────────────────────────────────────
 
-test('getInterviewState: returns complete=false when no filesystem signals', () => {
+test('getInterviewState: returns complete=false when no filesystem signals', async () => {
   cleanFiles();
   resetClientFlag();
-  const state = getInterviewState();
+  const state = await getInterviewState();
   // No files exist, no DB flag.
   // configSignal depends on a company-config.json with real KPIs — on a fresh
   // clone this is empty so configSignal() returns false.
@@ -111,11 +111,11 @@ test('getInterviewState: returns complete=false when no filesystem signals', () 
   assert.equal(state.complete, false, 'no signal → complete must be false');
 });
 
-test('getInterviewState: interview-answers-file → complete:true', () => {
+test('getInterviewState: interview-answers-file → complete:true', async () => {
   cleanFiles();
   resetClientFlag();
   fs.writeFileSync(ANSWERS_FILE, '# AI Workforce Interview\nBusiness: Test Corp\n');
-  const state = getInterviewState();
+  const state = await getInterviewState();
   fs.unlinkSync(ANSWERS_FILE);
   resetClientFlag(); // undo auto-backfill
 
@@ -129,14 +129,14 @@ test('getInterviewState: interview-answers-file → complete:true', () => {
   );
 });
 
-test('getInterviewState: build-state stage=complete → complete:true', () => {
+test('getInterviewState: build-state stage=complete → complete:true', async () => {
   cleanFiles();
   resetClientFlag();
   fs.writeFileSync(
     BUILD_STATE_FILE,
     JSON.stringify({ stage: 'complete', documents_total: 5, documents_complete: 5 }),
   );
-  const state = getInterviewState();
+  const state = await getInterviewState();
   fs.unlinkSync(BUILD_STATE_FILE);
   resetClientFlag();
 
@@ -147,7 +147,7 @@ test('getInterviewState: build-state stage=complete → complete:true', () => {
   );
 });
 
-test('getInterviewState: build-progress.json interviewComplete=true → complete:true', () => {
+test('getInterviewState: build-progress.json interviewComplete=true → complete:true', async () => {
   cleanFiles();
   resetClientFlag();
   fs.mkdirSync(SUBDIR, { recursive: true });
@@ -155,7 +155,7 @@ test('getInterviewState: build-progress.json interviewComplete=true → complete
     BUILD_PROGRESS_FILE,
     JSON.stringify({ interviewComplete: true, documents_total: 3, documents_complete: 1 }),
   );
-  const state = getInterviewState();
+  const state = await getInterviewState();
   cleanFiles();
   resetClientFlag();
 
@@ -166,14 +166,14 @@ test('getInterviewState: build-progress.json interviewComplete=true → complete
   );
 });
 
-test('getInterviewState: documents_complete >= documents_total → complete:true', () => {
+test('getInterviewState: documents_complete >= documents_total → complete:true', async () => {
   cleanFiles();
   resetClientFlag();
   fs.writeFileSync(
     BUILD_STATE_FILE,
     JSON.stringify({ documents_total: 10, documents_complete: 10 }),
   );
-  const state = getInterviewState();
+  const state = await getInterviewState();
   fs.unlinkSync(BUILD_STATE_FILE);
   resetClientFlag();
 
@@ -184,14 +184,14 @@ test('getInterviewState: documents_complete >= documents_total → complete:true
   );
 });
 
-test('getInterviewState: partial build (5/10 docs) → complete:false', () => {
+test('getInterviewState: partial build (5/10 docs) → complete:false', async () => {
   cleanFiles();
   resetClientFlag();
   fs.writeFileSync(
     BUILD_STATE_FILE,
     JSON.stringify({ documents_total: 10, documents_complete: 5 }),
   );
-  const state = getInterviewState();
+  const state = await getInterviewState();
   fs.unlinkSync(BUILD_STATE_FILE);
 
   assert.equal(state.complete, false, 'partial build must not trigger complete');
@@ -207,12 +207,12 @@ test('getInterviewState: partial build (5/10 docs) → complete:false', () => {
 // In the old code, clientFlag===false caused an immediate return of complete:false.
 // In the fixed code, the filesystem signals are checked even when clientFlag===false.
 
-test('regression: interview-answers-file wins even when DB flag is false (0)', () => {
+test('regression: interview-answers-file wins even when DB flag is false (0)', async () => {
   cleanFiles();
   resetClientFlag(); // explicitly set interview_complete=0 in DB
 
   fs.writeFileSync(ANSWERS_FILE, '# Interview\nDone.\n');
-  const state = getInterviewState();
+  const state = await getInterviewState();
   fs.unlinkSync(ANSWERS_FILE);
   resetClientFlag(); // clean up backfill
 
@@ -223,7 +223,7 @@ test('regression: interview-answers-file wins even when DB flag is false (0)', (
   );
 });
 
-test('regression: build-state signal wins even when DB flag is false (0)', () => {
+test('regression: build-state signal wins even when DB flag is false (0)', async () => {
   cleanFiles();
   resetClientFlag();
 
@@ -231,7 +231,7 @@ test('regression: build-state signal wins even when DB flag is false (0)', () =>
     BUILD_STATE_FILE,
     JSON.stringify({ stage: 'done' }),
   );
-  const state = getInterviewState();
+  const state = await getInterviewState();
   fs.unlinkSync(BUILD_STATE_FILE);
   resetClientFlag();
 

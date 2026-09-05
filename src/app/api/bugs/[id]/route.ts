@@ -35,10 +35,8 @@ const PatchBugSchema = z.object({
   reason: z.string().optional(),
 });
 
-export async function PATCH(
-  request: NextRequest,
-  { params }: { params: { id: string } },
-): Promise<NextResponse> {
+export async function PATCH(request: NextRequest, props: { params: Promise<{ id: string }> }): Promise<NextResponse> {
+  const params = await props.params;
   const { id } = params;
 
   try {

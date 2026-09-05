@@ -20,8 +20,8 @@ import {
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
-export async function GET(_req: NextRequest, ctx: { params: { id: string } }) {
-  const id = ctx.params?.id;
+export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const id = (await ctx.params)?.id;
   if (!id) return NextResponse.json({ error: 'missing_id' }, { status: 400 });
 
   try {
@@ -39,8 +39,8 @@ export async function GET(_req: NextRequest, ctx: { params: { id: string } }) {
   }
 }
 
-export async function PATCH(req: NextRequest, ctx: { params: { id: string } }) {
-  const id = ctx.params?.id;
+export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const id = (await ctx.params)?.id;
   if (!id) return NextResponse.json({ error: 'missing_id' }, { status: 400 });
 
   let body: unknown;
@@ -91,8 +91,8 @@ export async function PATCH(req: NextRequest, ctx: { params: { id: string } }) {
   }
 }
 
-export async function DELETE(_req: NextRequest, ctx: { params: { id: string } }) {
-  const id = ctx.params?.id;
+export async function DELETE(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const id = (await ctx.params)?.id;
   if (!id) return NextResponse.json({ error: 'missing_id' }, { status: 400 });
 
   try {

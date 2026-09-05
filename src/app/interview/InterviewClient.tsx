@@ -870,7 +870,7 @@ function QaStage({
   onSend: () => void;
   onIDontKnow: (msg: string) => void;
   sending: boolean;
-  scrollRef: React.RefObject<HTMLDivElement>;
+  scrollRef: React.RefObject<HTMLDivElement | null>;
   transcriptReady: boolean;
   onContinueToDepartments: () => void;
 }) {

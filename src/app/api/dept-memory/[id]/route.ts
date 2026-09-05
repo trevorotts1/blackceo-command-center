@@ -6,10 +6,8 @@ export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
 // DELETE /api/dept-memory/[id] -- remove a memory
-export async function DELETE(
-  _request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function DELETE(_request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const { id } = params;
 
@@ -31,10 +29,8 @@ export async function DELETE(
 }
 
 // PATCH /api/dept-memory/[id] -- update importance or content
-export async function PATCH(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function PATCH(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const { id } = params;
     const body = (await request.json()) as UpdateDeptMemoryRequest;

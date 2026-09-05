@@ -4,7 +4,8 @@ import { getDb } from '@/lib/db';
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
-export async function POST(request: NextRequest, { params }: { params: { id: string } }) {
+export async function POST(request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   const db = getDb();
   const body = await request.json();
   const rating = parseInt(String(body.rating), 10);

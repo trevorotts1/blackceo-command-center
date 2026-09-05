@@ -468,7 +468,7 @@ export async function POST(req: NextRequest) {
   if (clientColumn) {
     const value = (brandColorHex ?? logoUrl ?? answer) as string;
     try {
-      const client = getClientContext();
+      const client = await getClientContext();
       if (!client?.id) {
         mirror = {
           column: clientColumn,

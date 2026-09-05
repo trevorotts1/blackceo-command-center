@@ -11,8 +11,8 @@ export const dynamic = 'force-dynamic';
  * Non-operators get a clean branded refusal with zero detail (fail closed),
  * and the ops nav entry never renders for them in the first place.
  */
-export default function PodcastOpsLayout({ children }: { children: React.ReactNode }) {
-  const { operator } = isOperatorRequest(headers());
+export default async function PodcastOpsLayout({ children }: { children: React.ReactNode }) {
+  const { operator } = isOperatorRequest(await headers());
   if (!operator) {
     return (
       <div className="flex min-h-[60vh] items-center justify-center px-4">

@@ -1,15 +1,15 @@
 {
   "name": "mission-control",
-  "version": "7.0.0",
+  "version": "7.1.0",
   "private": true,
   "engines": {
-    "node": ">=20.0.0"
+    "node": "^20.19.0 || ^22.13.0 || >=24"
   },
   "scripts": {
-    "dev": "next dev -p ${PORT:-4000}",
-    "build": "next build",
+    "dev": "next dev --webpack -p ${PORT:-4000}",
+    "build": "next build --webpack",
     "start": "bash scripts/cc-start.sh",
-    "lint": "next lint",
+    "lint": "eslint src",
     "test:unit": "node --import tsx --import ./tests/setup/no-owner-telegram.ts --test $(ls tests/unit/*.test.ts | grep -v -E 'deep-health\\.test\\.ts|cc-probe-pm2\\.test\\.ts|floor-department-invariant\\.test\\.ts|department-optout-board-wiring\\.test\\.ts|middleware-same-origin-board\\.test\\.ts|middleware-401-telemetry\\.test\\.ts|unauthorized-401-health-surface\\.test\\.ts|provider-key-auth-store\\.test\\.ts|ceo-chat-upload-validation\\.test\\.ts|ceo-chat-config\\.test\\.ts|ceo-chat-store\\.test\\.ts|trust-engine-ceo-chat-channel\\.test\\.ts|ceo-chat-gateway-forward\\.test\\.ts|ceo-chat-gateway-transport\\.test\\.ts|ceo-chat-gateway-session-isolation\\.test\\.ts|skill6-board-projection\\.test\\.ts|mc-board-producer-projection\\.test\\.ts|u12-a-persona-grounding-health\\.test\\.ts|u62-thinking-level-mapping\\.test\\.ts|ceo-chat-message-route-passthrough\\.test\\.ts|migration-110-ceo-chat-usage-columns\\.test\\.ts|presentation-deliverables\\.test\\.ts|interview-answers-encryption\\.test\\.ts|interview-skip-defer\\.test\\.ts|middleware-shell-lock-fallback\\.test\\.ts|presentation-phases\\.test\\.ts|u032-promote-identity-gate\\.test\\.ts|u036-department-canonical\\.test\\.ts|u039-sweep-killflag-sources\\.test\\.ts|workforce-health\\.test\\.ts|mr14-agent-sync-emoji\\.test\\.ts|mr21-reseed-dept-prefix-migration\\.test\\.ts|cc-agent-count-dedupe-scope\\.test\\.ts|middleware-bypass-replay\\.test\\.ts|task-phases\\.test\\.ts|mr-46-agent-status-dot\\.test\\.ts|fix5-stage-timings-ingest\\.test\\.ts|fix14-profile-judge\\.test\\.ts|fix25-review-artifact-gate\\.test\\.ts|fix27-deliverable-path-reject\\.test\\.ts|fix28-bundle-reverify\\.test\\.ts|fix20-presentation-db-hygiene\\.test\\.ts|fix34-db-backup-verify\\.test\\.ts|fix35-synthetic-purge-gate\\.test\\.ts|fix37-activity-enum\\.test\\.ts|fix53-phases-elapsed\\.test\\.ts|fix53-stage-timings-get\\.test\\.ts|fix54-registration-bundle-probe\\.test\\.ts')",
     "test:deep-health": "vitest run tests/unit/deep-health.test.ts",
     "test:skill6-board-projection": "vitest run tests/unit/skill6-board-projection.test.ts",
@@ -46,7 +46,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.98.0",
-    "@hello-pangea/dnd": "^17.0.0",
+    "@hello-pangea/dnd": "^18.0.1",
     "@types/node-cron": "^3.0.11",
     "better-sqlite3": "^12.10.0",
     "clsx": "^2.1.1",
@@ -56,11 +56,11 @@
     "framer-motion": "^12.38.0",
     "highlight.js": "^11.11.1",
     "lucide-react": "^0.468.0",
-    "next": "14.2.21",
+    "next": "16.3.4",
     "node-cron": "^4.2.1",
     "playwright": "^1.58.1",
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
     "react-markdown": "^9.1.0",
     "recharts": "^3.8.0",
     "rehype-highlight": "^7.0.2",
@@ -79,20 +79,20 @@
     "@types/better-sqlite3": "^7.6.12",
     "@types/css-tree": "^2.3.11",
     "@types/node": "^20.17.12",
-    "@types/react": "^18.2.79",
-    "@types/react-dom": "^18.2.25",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
     "@types/uuid": "^10.0.0",
     "@types/ws": "^8.5.13",
-    "@vitejs/plugin-react": "^4.3.4",
+    "@vitejs/plugin-react": "^4.7.0",
     "autoprefixer": "^10.4.20",
-    "eslint": "^8.57.0",
-    "eslint-config-next": "14.2.21",
+    "eslint": "^9.39.5",
+    "eslint-config-next": "16.3.4",
     "jsdom": "^25.0.1",
-    "postcss": "^8.4.49",
+    "postcss": "^8.5.28",
     "tailwindcss": "^3.4.17",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
-    "vite": "^5.4.19",
-    "vitest": "^2.1.9"
+    "vite": "^6.4.3",
+    "vitest": "^3.2.7"
   }
 }

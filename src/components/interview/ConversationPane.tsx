@@ -43,7 +43,7 @@ export interface ConversationPaneProps {
   /** Session ID for continued conversations (needed by IDontKnowButton). */
   sessionId: string | null;
   /** Ref to the scroll container for auto-scroll. */
-  scrollRef: React.RefObject<HTMLDivElement>;
+  scrollRef: React.RefObject<HTMLDivElement | null>;
   /** Optional: custom className for the root. */
   className?: string;
 }

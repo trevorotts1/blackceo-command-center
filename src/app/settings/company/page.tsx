@@ -25,7 +25,7 @@ export const revalidate = 0;
  * for an unset companyName, which would have changed this form's blank vs.
  * pre-filled behavior for that field).
  */
-export default function CompanySettingsPage() {
+export default async function CompanySettingsPage() {
   const configPath = ensureRuntimeConfigFile('company-config.json');
 
   let raw: Record<string, unknown> = {};
@@ -46,7 +46,7 @@ export default function CompanySettingsPage() {
   let clientBrandSecondaryColor: string | null = null;
   let clientLogoUrl: string | null = null;
   try {
-    const client = getClientContext();
+    const client = await getClientContext();
     clientBrandColor = client?.brand_color ?? null;
     clientBrandSecondaryColor = client?.brand_secondary_color ?? null;
     clientLogoUrl = client?.logo_url ?? null;
