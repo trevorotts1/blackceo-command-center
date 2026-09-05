@@ -11,10 +11,11 @@ export const dynamic = 'force-dynamic';
  * Section 8.1). Data loads through the same authenticated, serializer-gated
  * API as everything else.
  */
-export default function EpisodeDetailPage({ params }: { params: { job_id: string } }) {
+export default async function EpisodeDetailPage(props: { params: Promise<{ job_id: string }> }) {
+  const params = await props.params;
   const viewer = resolveViewer(
-    headers(),
-    cookies().get(PODCAST_SESSION_COOKIE)?.value ?? null
+    await headers(),
+    (await cookies()).get(PODCAST_SESSION_COOKIE)?.value ?? null
   );
   return (
     <div>

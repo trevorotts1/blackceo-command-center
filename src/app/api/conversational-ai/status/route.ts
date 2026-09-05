@@ -17,7 +17,7 @@ export const revalidate = 0;
  */
 export async function GET() {
   try {
-    const interview = getInterviewState();
+    const interview = await getInterviewState();
 
     const sources = ROUND3_DATA_CONTRACT.map((c) => {
       const found = c.kind === 'dir' ? resolveLogDir(c.name) : resolveLogFile(c.name);

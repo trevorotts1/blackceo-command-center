@@ -20,10 +20,8 @@ import type { TaskEventRow } from '@/lib/task-phases';
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
-export async function GET(
-  _request: NextRequest,
-  { params }: { params: { id: string } },
-) {
+export async function GET(_request: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const { id: taskId } = params;
     const db = getDb();

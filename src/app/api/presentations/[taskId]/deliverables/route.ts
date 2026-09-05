@@ -141,10 +141,8 @@ function getHonestSize(
   return { size_bytes: null, size_source: 'unknown', mime_type: del?.mime_type ?? null, sha256: del?.sha256 ?? null };
 }
 
-export async function GET(
-  _request: NextRequest,
-  { params }: { params: { taskId: string } },
-): Promise<NextResponse> {
+export async function GET(_request: NextRequest, props: { params: Promise<{ taskId: string }> }): Promise<NextResponse> {
+  const params = await props.params;
   try {
     const taskId = params.taskId;
     const db = getDb();

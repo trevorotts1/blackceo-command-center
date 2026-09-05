@@ -65,10 +65,10 @@ import { loadCompanyConfig } from '@/lib/company-config';
  * read-only here; template/default values are filtered out so the owner is
  * never asked to "confirm" a placeholder.
  */
-function readKnownContext(): Record<string, { value: string; source: string }> {
+async function readKnownContext(): Promise<Record<string, { value: string; source: string }>> {
   const known: Record<string, { value: string; source: string }> = {};
   try {
-    const client = getClientContext();
+    const client = await getClientContext();
     const name = (client?.name ?? '').trim();
     // Placeholder names (fresh-box auto-seed rows) are NOT known facts.
     const placeholderName = /^(default|this box(\s*\(operator\))?|operator)$/i.test(name);
@@ -331,7 +331,7 @@ export async function GET(request: NextRequest) {
         nextIndex: structured.nextIndex,
         complete: structured.complete,
       },
-      knownContext: readKnownContext(),
+      knownContext: await readKnownContext(),
 
       // Top-level lifecycle signals (drive the locked-shell + redirect logic).
       interviewComplete: snap.interviewComplete,

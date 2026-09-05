@@ -30,14 +30,11 @@ export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
 interface RouteContext {
-  params: Promise<{ id: string }> | { id: string };
+  params: Promise<{ id: string }>;
 }
 
 export async function GET(req: NextRequest, context: RouteContext) {
-  const resolved =
-    typeof (context.params as Promise<{ id: string }>).then === 'function'
-      ? await (context.params as Promise<{ id: string }>)
-      : (context.params as { id: string });
+  const resolved = await context.params;
   const sessionId = resolved.id;
   const session = getSession(sessionId);
   if (!session) {

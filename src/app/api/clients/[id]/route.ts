@@ -6,7 +6,8 @@ export const dynamic = 'force-dynamic';
 export const maxDuration = 120;
 
 /** GET /api/clients/[id] — one client (secrets stripped). */
-export async function GET(_req: NextRequest, { params }: { params: { id: string } }) {
+export async function GET(_req: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const client = getClient(params.id);
     if (!client) {
@@ -23,7 +24,8 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
  * PATCH /api/clients/[id] — update connection fields and/or interview_complete.
  * Only the provided fields are changed.
  */
-export async function PATCH(req: NextRequest, { params }: { params: { id: string } }) {
+export async function PATCH(req: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const existing = getClient(params.id);
     if (!existing) {

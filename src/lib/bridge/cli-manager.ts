@@ -161,7 +161,7 @@ function firstLine(s: string): string {
  */
 export async function detectCli(id: string, client?: Client | null): Promise<CliStatus> {
   const cli = getManagedCli(id);
-  const c = client ?? getClientContext();
+  const c = client ?? await getClientContext();
   const base = (cli && {
     id: cli.id,
     label: cli.label,
@@ -221,7 +221,7 @@ export async function detectCli(id: string, client?: Client | null): Promise<Cli
 
 /** Detect every managed CLI on the selected client in parallel. */
 export async function detectAllClis(client?: Client | null): Promise<CliStatus[]> {
-  const c = client ?? getClientContext();
+  const c = client ?? await getClientContext();
   return Promise.all(MANAGED_CLIS.map((cli) => detectCli(cli.id, c)));
 }
 
@@ -246,7 +246,7 @@ export async function runCliAction(
   client?: Client | null
 ): Promise<CliActionResult> {
   const cli = getManagedCli(id);
-  const c = client ?? getClientContext();
+  const c = client ?? await getClientContext();
   if (!cli) return { ok: false, id, action, output: '', reason: 'unknown cli id' };
   if (!c) return { ok: false, id, action, output: '', reason: 'no client selected' };
 

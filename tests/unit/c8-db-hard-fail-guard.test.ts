@@ -64,7 +64,9 @@ function runFixture(fixture: string, cwd: string) {
   // near this repo's own files) but the fixture still needs the REPO's
   // tsconfig so tsx can resolve the project's `@/...` path aliases — hence
   // `--tsconfig` pointed explicitly at the repo, independent of `cwd`.
-  return spawnSync('npx', ['tsx', '--tsconfig', path.join(REPO_ROOT, 'tsconfig.json'), fixture], {
+  // Resolve the reviewed, locked runner from this checkout. Running npx from
+  // the empty fixture directory can fetch an unrelated package from the network.
+  return spawnSync(process.execPath, [require.resolve('tsx/cli'), '--tsconfig', path.join(REPO_ROOT, 'tsconfig.json'), fixture], {
     cwd,
     env: envWithoutDbPath,
     encoding: 'utf-8',

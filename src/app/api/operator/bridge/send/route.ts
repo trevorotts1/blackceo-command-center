@@ -481,7 +481,7 @@ async function runGateway(args: {
   // NOT the loopback singleton, so the dispatch lands on the real per-client
   // box and its reply streams from there. Resolve the target ONCE so the catch
   // block reports the same client's device id.
-  const target = bridgeOpenClawTarget();
+  const target = await bridgeOpenClawTarget();
   try {
     const client = getOpenClawClient(target);
     // Establish the operator.admin session before dispatching. This makes the

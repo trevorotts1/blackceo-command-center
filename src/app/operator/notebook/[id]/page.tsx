@@ -14,9 +14,10 @@ export const metadata: Metadata = {
 };
 
 interface PageProps {
-  params: { id: string };
+  params: Promise<{ id: string }>;
 }
 
-export default function NotebookDetailPage({ params }: PageProps) {
+export default async function NotebookDetailPage(props: PageProps) {
+  const params = await props.params;
   return <NotebookDetail notebookId={params.id} />;
 }

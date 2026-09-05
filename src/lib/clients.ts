@@ -158,10 +158,10 @@ export function getSelfClient(): Client | null {
  * at a client that no longer exists. Never throws (in a non-request context the
  * cookie read fails gracefully and we fall back to self).
  */
-export function getSelectedClientId(): string | null {
+export async function getSelectedClientId(): Promise<string | null> {
   let cookieId: string | undefined;
   try {
-    cookieId = cookies().get(SELECTED_CLIENT_COOKIE)?.value;
+    cookieId = (await cookies()).get(SELECTED_CLIENT_COOKIE)?.value;
   } catch {
     // Called outside a request scope (e.g. a cron job). Fall back to self.
     cookieId = undefined;
@@ -178,8 +178,8 @@ export function getSelectedClientId(): string | null {
  * the self client. Returns null only when the clients table is empty (should
  * not happen after migration 048 seeds the self row).
  */
-export function getClientContext(): Client | null {
-  const id = getSelectedClientId();
+export async function getClientContext(): Promise<Client | null> {
+  const id = await getSelectedClientId();
   if (!id) return getSelfClient();
   return getClient(id) ?? getSelfClient();
 }
@@ -270,9 +270,9 @@ export function updateClient(id: string, patch: UpdateClientInput): Client | nul
  * Handler (anywhere `cookies()` is writable). Validates the id exists first.
  * Returns false when the id is unknown.
  */
-export function setSelectedClient(id: string): boolean {
+export async function setSelectedClient(id: string): Promise<boolean> {
   if (!getClient(id)) return false;
-  cookies().set(SELECTED_CLIENT_COOKIE, id, {
+  (await cookies()).set(SELECTED_CLIENT_COOKIE, id, {
     httpOnly: true,
     sameSite: 'lax',
     path: '/',
@@ -286,8 +286,8 @@ export function setSelectedClient(id: string): boolean {
  * client-scoped, unlike the host-wide filesystem detection in
  * `interview-state.ts`. Reads default to the selected client.
  */
-export function getInterviewComplete(clientId?: string): boolean {
-  const id = clientId ?? getSelectedClientId();
+export async function getInterviewComplete(clientId?: string): Promise<boolean> {
+  const id = clientId ?? await getSelectedClientId();
   if (!id) return false;
   return getClient(id)?.interview_complete ?? false;
 }
@@ -301,8 +301,8 @@ export function setInterviewComplete(clientId: string, complete = true): Client 
 }
 
 /** True when the given client (or the selected one) is the operator's own box. */
-export function isSelfClient(client?: Client | null): boolean {
-  const c = client ?? getClientContext();
+export async function isSelfClient(client?: Client | null): Promise<boolean> {
+  const c = client ?? await getClientContext();
   return !!c?.is_self;
 }
 

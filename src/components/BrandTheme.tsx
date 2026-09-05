@@ -21,11 +21,11 @@ import { buildThemeVars, BLACKCEO_GREEN } from '@/lib/branding';
  * Rendered once in the root layout. When no brand color is set the emitted
  * values equal the original BlackCEO scale, so the look is unchanged.
  */
-export default function BrandTheme() {
+export default async function BrandTheme() {
   let primary: string | null = null;
   let secondary: string | null = null;
   try {
-    const ctx = getClientContext();
+    const ctx = await getClientContext();
     primary = ctx?.brand_color ?? null;
     secondary = ctx?.brand_secondary_color ?? null;
   } catch {

@@ -4,7 +4,8 @@ import { getDb } from '@/lib/db';
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
-export async function GET(_req: NextRequest, { params }: { params: { id: string } }) {
+export async function GET(_req: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   const db = getDb();
   const campaign = db.prepare('SELECT * FROM campaigns WHERE id = ?').get(params.id);
   if (!campaign) {
@@ -13,7 +14,8 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
   return NextResponse.json({ campaign });
 }
 
-export async function PATCH(req: NextRequest, { params }: { params: { id: string } }) {
+export async function PATCH(req: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   const db = getDb();
   const body = await req.json();
   const allowed = ['name', 'description', 'status', 'department_ids', 'start_date', 'target_date'];
@@ -40,7 +42,8 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
   return NextResponse.json({ campaign });
 }
 
-export async function DELETE(_req: NextRequest, { params }: { params: { id: string } }) {
+export async function DELETE(_req: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   const db = getDb();
   const result = db.prepare('DELETE FROM campaigns WHERE id = ?').run(params.id);
   if (result.changes === 0) {

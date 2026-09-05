@@ -542,7 +542,7 @@ export async function hydrateProviderEnvForSelectedClient(
   let target = client ?? null;
   if (!target) {
     try {
-      target = getClientContext();
+      target = await getClientContext();
     } catch {
       target = null;
     }

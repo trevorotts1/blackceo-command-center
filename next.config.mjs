@@ -8,14 +8,8 @@ const nextConfig = {
   // never absolute. scripts/atomic-deploy.sh passes a relative temp-dir name
   // for exactly this reason. Falls back to the normal '.next' when unset.
   distDir: process.env.NEXT_DIST_DIR || '.next',
-  experimental: {
-    serverComponentsExternalPackages: ['better-sqlite3'],
-    // Required in Next 14.2 to load `src/instrumentation.ts` (this project uses
-    // a src/ dir, so Next loads the src-level file, not a root one) which runs
-    // boot-time wiring: DB init, provider-env hydration, Studio registry seed,
-    // in-process cron registration, and Bridge pairing bootstrap (v4.0.1 P0-6).
-    instrumentationHook: true,
-  },
+  // Instrumentation is stable; keep native SQLite outside the server bundle.
+  serverExternalPackages: ['better-sqlite3'],
   webpack: (config, { nextRuntime }) => {
     config.externals.push({
       'better-sqlite3': 'commonjs better-sqlite3',

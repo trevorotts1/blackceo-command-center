@@ -1,5 +1,5 @@
 /**
- * Next.js instrumentation hook (enabled via `experimental.instrumentationHook`
+ * Next.js instrumentation hook (stable since Next.js 15; previously enabled via `experimental.instrumentationHook`
  * in next.config.mjs). Runs once when the server process boots.
  *
  * IMPORTANT (Next.js 14.2 + src/ dir): with a `src/` directory present, Next.js

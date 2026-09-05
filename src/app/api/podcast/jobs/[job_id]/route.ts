@@ -19,10 +19,8 @@ const NO_STORE = { 'Cache-Control': 'no-store' };
  * Client sessions get the whitelist serialization and stage-transition
  * events only; operator sessions get the verbose shape (design Section 9).
  */
-export function GET(
-  req: NextRequest,
-  { params }: { params: { job_id: string } }
-): NextResponse {
+export async function GET(req: NextRequest, props: { params: Promise<{ job_id: string }> }): Promise<NextResponse> {
+  const params = await props.params;
   const viewer = viewerFromRequest(req);
   if (viewer.kind === 'none') {
     return NextResponse.json({ error: 'Access unavailable' }, { status: 401, headers: NO_STORE });

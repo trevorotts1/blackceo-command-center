@@ -16,7 +16,7 @@ export async function GET() {
     // Expose which client is currently selected so client-scoped UIs (e.g. the
     // E5 "Add API key" action) target the SAME box the refresh runs against,
     // not just the self client.
-    const selected_id = getSelectedClientId();
+    const selected_id = await getSelectedClientId();
     return NextResponse.json({ clients, selected_id });
   } catch (err) {
     console.error('[GET /api/clients] failed:', err);

@@ -9,10 +9,11 @@ export const metadata: Metadata = {
 };
 
 interface PageProps {
-  searchParams?: { date?: string };
+  searchParams?: Promise<{ date?: string }>;
 }
 
-export default function OperatorJournalPage({ searchParams }: PageProps) {
+export default async function OperatorJournalPage(props: PageProps) {
+  const searchParams = await props.searchParams;
   const initialDate = searchParams?.date && /^\d{4}-\d{2}-\d{2}$/.test(searchParams.date)
     ? searchParams.date
     : undefined;

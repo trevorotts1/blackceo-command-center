@@ -22,15 +22,15 @@ const patchSchema = z.object({
   sort_order: z.number().int().optional(),
 });
 
-export async function GET(_req: NextRequest, ctx: { params: { id: string } }) {
-  const goal = getGoal(ctx.params.id);
+export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const goal = getGoal((await ctx.params).id);
   if (!goal) {
     return NextResponse.json({ error: 'not_found' }, { status: 404 });
   }
   return NextResponse.json(goal);
 }
 
-export async function PATCH(req: NextRequest, ctx: { params: { id: string } }) {
+export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   let parsed;
   try {
     const json = await req.json();
@@ -42,7 +42,7 @@ export async function PATCH(req: NextRequest, ctx: { params: { id: string } }) {
     );
   }
   try {
-    const updated = updateGoal(ctx.params.id, parsed);
+    const updated = updateGoal((await ctx.params).id, parsed);
     if (!updated) {
       return NextResponse.json({ error: 'not_found' }, { status: 404 });
     }
@@ -56,9 +56,9 @@ export async function PATCH(req: NextRequest, ctx: { params: { id: string } }) {
   }
 }
 
-export async function DELETE(_req: NextRequest, ctx: { params: { id: string } }) {
+export async function DELETE(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   try {
-    const removed = deleteGoal(ctx.params.id);
+    const removed = deleteGoal((await ctx.params).id);
     if (!removed) {
       return NextResponse.json({ error: 'not_found' }, { status: 404 });
     }

@@ -21,9 +21,9 @@ export const dynamic = 'force-dynamic';
  * unauthenticated client because the API routes enforce the same check
  * independently (defense in depth, fail closed).
  */
-export default function PodcastLayout({ children }: { children: React.ReactNode }) {
-  const cookieValue = cookies().get(PODCAST_SESSION_COOKIE)?.value ?? null;
-  const viewer = resolveViewer(headers(), cookieValue);
+export default async function PodcastLayout({ children }: { children: React.ReactNode }) {
+  const cookieValue = (await cookies()).get(PODCAST_SESSION_COOKIE)?.value ?? null;
+  const viewer = resolveViewer(await headers(), cookieValue);
   const isOperator = viewer.kind === 'operator';
 
   return (

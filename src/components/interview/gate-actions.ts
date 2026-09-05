@@ -73,12 +73,12 @@ function deriveInterviewComplete(): boolean {
  * /interview when the cookie is absent/unverifiable.
  */
 export async function refreshInterviewGate(): Promise<void> {
-  const context=await resolveTenantContext({headers:new Headers(headers())});
+  const context=await resolveTenantContext({headers:new Headers(await headers())});
   const complete=context.kind==='self' ? deriveInterviewComplete() : getClient(context.clientId!)?.interview_complete===true;
   const scope=`${context.tenantId}:${context.installationId}:${context.host}`;
   const { value, maxAge } = await signInterviewToken(complete,scope);
   try {
-    cookies().set(INTERVIEW_COOKIE_NAME, value, {
+    (await cookies()).set(INTERVIEW_COOKIE_NAME, value, {
       httpOnly: true,
       sameSite: 'lax',
       path: '/',
@@ -89,14 +89,14 @@ export async function refreshInterviewGate(): Promise<void> {
     // when the main cookie is absent or expired (restart / tunnel reconnect).
     if (complete) {
       const latch = await signLatchToken(scope);
-      cookies().set(LATCH_COOKIE_NAME, latch.value, {
+      (await cookies()).set(LATCH_COOKIE_NAME, latch.value, {
         httpOnly: true,
         sameSite: 'lax',
         path: '/',
         maxAge: latch.maxAge,
         secure: process.env.NODE_ENV === 'production',
       });
-    } else { cookies().delete(LATCH_COOKIE_NAME); }
+    } else { (await cookies()).delete(LATCH_COOKIE_NAME); }
   } catch {
     // Non-fatal: cookies() may be read-only in some contexts; the middleware
     // fail-closed posture covers an unset cookie.
@@ -106,8 +106,8 @@ export async function refreshInterviewGate(): Promise<void> {
 /* U057 — Interview bypass ("Skip for now") */
 
 export async function skipInterviewForNow(): Promise<void> {
-  const context=await resolveTenantContext({headers:new Headers(headers())});
+  const context=await resolveTenantContext({headers:new Headers(await headers())});
   if(context.kind!=='self' || !context.subject.startsWith('operator:'))throw new Error('Operator identity required');
   const { value, maxAge } = await signInterviewBypassToken();
-  try { cookies().set(INTERVIEW_BYPASS_COOKIE_NAME, value, { httpOnly: true, sameSite: 'lax', path: '/', maxAge, secure: process.env.NODE_ENV === 'production' }); } catch { /* non-fatal */ }
+  try { (await cookies()).set(INTERVIEW_BYPASS_COOKIE_NAME, value, { httpOnly: true, sameSite: 'lax', path: '/', maxAge, secure: process.env.NODE_ENV === 'production' }); } catch { /* non-fatal */ }
 }

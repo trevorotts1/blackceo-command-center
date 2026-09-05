@@ -14,12 +14,13 @@ import ResearchHistory from '@/components/operator/ResearchHistory';
 import ResearchResult from '@/components/operator/ResearchResult';
 
 interface PageProps {
-  params: { id: string };
+  params: Promise<{ id: string }>;
 }
 
 export const dynamic = 'force-dynamic';
 
-export default function ResearchDetailPage({ params }: PageProps) {
+export default async function ResearchDetailPage(props: PageProps) {
+  const params = await props.params;
   const row = getResearchSearch(params.id);
   if (!row) {
     notFound();

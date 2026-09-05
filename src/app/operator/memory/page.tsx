@@ -8,10 +8,11 @@ export const metadata: Metadata = {
 };
 
 interface PageProps {
-  searchParams?: { q?: string };
+  searchParams?: Promise<{ q?: string }>;
 }
 
-export default function OperatorMemoryPage({ searchParams }: PageProps) {
+export default async function OperatorMemoryPage(props: PageProps) {
+  const searchParams = await props.searchParams;
   const initialQuery = searchParams?.q || '';
 
   return (

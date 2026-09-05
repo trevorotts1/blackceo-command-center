@@ -29,7 +29,8 @@ export const maxDuration = 300;
  * The response contains only the env-var NAME that was written and the refresh
  * outcome — never the secret value.
  */
-export async function POST(req: NextRequest, { params }: { params: { id: string } }) {
+export async function POST(req: NextRequest, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   try {
     const client = getClient(params.id);
     if (!client) {

@@ -41,7 +41,7 @@ export default async function OperatorBridgePage() {
   // Gemini, OpenClaw) on the SELECTED client's box WITH versions. For a remote
   // client this runs over the Cloudflare Access tunnel; failures degrade
   // softly into a per-CLI error state rather than throwing.
-  const client = getClientContext();
+  const client = await getClientContext();
   const clientName = client?.name ?? 'this box';
   const clientIsRemote = !!client && !client.is_self;
   const cliStatuses = await detectAllClis(client).catch(() => []);

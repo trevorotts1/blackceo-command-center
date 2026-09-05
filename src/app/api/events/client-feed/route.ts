@@ -37,7 +37,7 @@ export async function GET(request: NextRequest) {
   const limit = Math.min(parseInt(searchParams.get('limit') || '50', 10), 200);
   const since = searchParams.get('since'); // ISO timestamp for polling
 
-  const clientCtx = getClientContext();
+  const clientCtx = await getClientContext();
   const publicClient = clientCtx ? toPublicClient(clientCtx) : null;
 
   // ── Self / local client: read the DB directly ────────────────────────────

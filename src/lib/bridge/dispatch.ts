@@ -33,8 +33,8 @@ import { buildGoalsContext } from '@/lib/operator/goals';
  * Returns `undefined` only when the clients table is empty, in which case
  * `getOpenClawClient(undefined)` also yields the self singleton.
  */
-export function bridgeOpenClawTarget(): OpenClawTarget | undefined {
-  const client = getClientContext();
+export async function bridgeOpenClawTarget(): Promise<OpenClawTarget | undefined> {
+  const client = await getClientContext();
   return client ? clientToOpenClawTarget(client) : undefined;
 }
 

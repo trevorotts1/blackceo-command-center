@@ -16,16 +16,15 @@ import { getSession } from '@/lib/web-agent/runner';
 import WebAgentSession from '@/components/operator/WebAgentSession';
 
 interface PageProps {
-  params: Promise<{ id: string }> | { id: string };
+  params: Promise<{ id: string }>;
 }
 
 export const dynamic = 'force-dynamic';
 
-export default async function WebAgentSessionPage({ params }: PageProps) {
+export default async function WebAgentSessionPage(props: PageProps) {
+  const params = await props.params;
   const resolved =
-    typeof (params as Promise<{ id: string }>).then === 'function'
-      ? await (params as Promise<{ id: string }>)
-      : (params as { id: string });
+    params;
   const row = getSession(resolved.id);
   if (!row) {
     notFound();
