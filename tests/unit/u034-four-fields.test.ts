@@ -1,3 +1,4 @@
+import './_disable-qc';
 /**
  * u034-four-fields.test.ts — U034: Accept and persist the four fields
  * eight producers have been sending all along.

@@ -321,8 +321,8 @@ check "7.8" "qc-scorer: heuristic guard present — skips reroute loop (PRD 2.4)
 # (b) Live feed covers task_created / task_dispatched / task_completed.
 check "7.9" "tasks.ts emits task_created event" \
   "grep -q \"'task_created'\" src/lib/tasks.ts"
-check "7.10" "tasks.ts emits task_dispatched event for routed tasks" \
-  "grep -q \"'task_dispatched'\" src/lib/tasks.ts"
+check "7.10" "shared task-dispatcher emits task_dispatched after gateway acknowledgement" \
+  "grep -q \"'task_dispatched'\" src/lib/task-dispatcher.ts"
 check "7.11" "task done transition emits task_completed event (via task-lifecycle)" \
   "grep -q \"'task_completed'\" src/lib/task-lifecycle.ts"
 
@@ -773,10 +773,10 @@ check "14.6" "persona-dispatch.ts defines STYLE_INSPIRED_GUARDRAIL + renderBlend
 check "14.7" "ensureBlendGuardrail re-injects the style-inspired + impersonation clause (non-removable)" \
   "awk '/function ensureBlendGuardrail/,/^}/' src/lib/persona-dispatch.ts | grep -qi 'style-inspired' && awk '/function ensureBlendGuardrail/,/^}/' src/lib/persona-dispatch.ts | grep -qi 'impersonation'"
 
-# 14.8: the audience-confirm gate runs BEFORE the dispatcher's write step (CAS claim).
-check "14.8" "task-dispatcher: audience-confirm gate runs BEFORE the in_progress write step" \
-  "GATE=\$(grep -n evaluateAudienceConfirmGate src/lib/task-dispatcher.ts | head -1 | cut -d: -f1); WRITE=\$(grep -nE \"SET status = .in_progress., updated_at\" src/lib/task-dispatcher.ts | head -1 | cut -d: -f1); [ -n \"\$GATE\" ] && [ -n \"\$WRITE\" ] && [ \"\$GATE\" -lt \"\$WRITE\" ]" \
-  "call evaluateAudienceConfirmGate before the DISP-02 CAS claim in autoDispatchTask"
+# 14.8: both manual and automatic sends gate the current persona before reserving.
+check "14.8" "both dispatch rails gate current persona before durable reservation" \
+  "python3 scripts/check-persona-dispatch-order.py" \
+  "keep shared persona readiness before reservation on both dispatch rails"
 
 # 14.9: the gate helpers exist in tasks.ts (evaluate / hold / deadline / confirm).
 check "14.9" "tasks.ts exports the audience-confirm gate helpers" \
@@ -849,12 +849,11 @@ check "16.1" "persona-mismatch.ts exports recordPersonaUsedAndCompare + getOpenP
   "grep -q 'export function recordPersonaUsedAndCompare' src/lib/persona-mismatch.ts && grep -q 'export function getOpenPersonaMismatch' src/lib/persona-mismatch.ts && grep -q \"export const PERSONA_MISMATCH_EVENT_TYPE\" src/lib/persona-mismatch.ts" \
   "keep the B-U6 declared-vs-used comparator's exported surface intact"
 
-# 16.2: the comparator dedupes on the (task, declared, used) triple — never
-#       re-fires the SAME divergence, never fabricates a mismatch on a NULL
-#       declared/used side.
-check "16.2" "recordPersonaUsedAndCompare dedupes on (task, declared, used) and fail-softs on a missing declared/used voice" \
-  "awk '/export function recordPersonaUsedAndCompare/,/^}/' src/lib/persona-mismatch.ts | grep -q 'if (!declared || !used) return null' && awk '/export function recordPersonaUsedAndCompare/,/^}/' src/lib/persona-mismatch.ts | grep -q 'SELECT id FROM events'" \
-  "keep the fail-soft NULL-guard + the existing-event dedupe query"
+# 16.2: mutation proofs cover current root/scope role/hash evidence, stale input,
+# operator races, missing evidence, and resolution of an obsolete mismatch.
+check "16.2" "current persona evidence and execution ownership behavioral proof" \
+  "node --import tsx --import ./tests/setup/no-owner-telegram.ts --test tests/unit/persona-decision-ownership.test.ts tests/unit/execution-attempt-ownership.test.ts" \
+  "current manifest roles/hash/scope/artifacts and stale execution proofs must pass"
 
 # 16.3: tasks.ts exports the B-U7 producer-pin helper + the voice-gates-the-group contract.
 check "16.3" "tasks.ts exports pinProducerPersonaBundle; voice_persona_id gates the whole producer-pin group" \

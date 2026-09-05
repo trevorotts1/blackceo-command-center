@@ -35,6 +35,8 @@
  * EXECUTION_WATCHER_GATEWAY_DOWN_RECOVERY=0.
  */
 
+import { latestExecution, recoverExpiredExecutions, validateExecutionCompletion, completeExecution } from '@/lib/execution-attempts';
+import { throwIfJobLeaseLost } from './job-lease';
 import { queryAll, queryOne, run, timeNow, parseDbTime } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { getMessagesFromOpenClaw } from '@/lib/planning-utils';
@@ -78,6 +80,8 @@ interface InProgressRow {
  * costs only a cheap RPC on the drop-path.
  */
 export function candidateSessionKeys(task: InProgressRow): string[] {
+  const execution=latestExecution(task.id);
+  if(execution) return [execution.session_key];
   const sessionId = task.openclaw_session_id;
   if (!sessionId) return [];
   const keys: string[] = [];
@@ -128,8 +132,8 @@ export function upsertActiveSession(agentId: string | null, openclawSessionId: s
   try {
     const now = timeNow();
     const existing = queryOne<{ id: string }>(
-      `SELECT id FROM openclaw_sessions WHERE agent_id = ? AND status = 'active' AND deleted_at IS NULL LIMIT 1`,
-      [agentId],
+      `SELECT id FROM openclaw_sessions WHERE agent_id = ? AND task_id = ? AND status = 'active' AND deleted_at IS NULL LIMIT 1`,
+      [agentId, taskId],
     );
     if (existing) {
       run(
@@ -321,7 +325,9 @@ export async function probeSessionLiveness(
  * guard, precondition checks, and CAS all run. The previous raw write had no CAS
  * guard beyond only selecting in_progress tasks; transition() closes the TOCTOU.
  */
-async function advanceToReview(taskId: string, agentId: string | null, agentName: string | null, summary: string): Promise<boolean> {
+async function advanceToReview(taskId: string, agentId: string | null, agentName: string | null, summary: string, executionId?: string): Promise<boolean> {
+  throwIfJobLeaseLost();
+  if (validateExecutionCompletion(taskId,{executionId})) return false;
   // MR-16: migrated from raw UPDATE + recordStatusEvent to transition() for
   // DISP-09 atomicity — the status flip, task_events insert, and events insert
   // now commit as ONE transaction. No separate run() / recordStatusEvent() gap.
@@ -341,6 +347,7 @@ async function advanceToReview(taskId: string, agentId: string | null, agentName
     await transition(taskId, 'review', {
       actor: agentId ?? 'execution-watcher',
       reason: 'agent reported TASK_COMPLETE (reconcile)',
+      expectedExecutionId:executionId,
       // MR-12: exempt from the review-column WIP limit — reconciled completed
       // work must reach QC even when the column is full.
       operatorOverride: true,
@@ -369,6 +376,7 @@ async function advanceToReview(taskId: string, agentId: string | null, agentName
     throw err;
   }
 
+  completeExecution(taskId,executionId);
   // Post-commit: free the agent (transition() already handled broadcast +
   // events + task_events).
   if (agentId) {
@@ -393,6 +401,7 @@ export async function runExecutionCompletionReconcile(): Promise<void> {
     return; // Safety net explicitly disabled.
   }
 
+  recoverExpiredExecutions();
   // B5: include in_progress tasks that have NO active openclaw_sessions row (the
   // purge wiped 64 rows). The completion id is deterministic, so we derive it in
   // the loop instead of dropping the task — previously the `s.openclaw_session_id
@@ -405,7 +414,7 @@ export async function runExecutionCompletionReconcile(): Promise<void> {
             s.openclaw_session_id
      FROM tasks t
      LEFT JOIN agents a ON t.assigned_agent_id = a.id
-     LEFT JOIN openclaw_sessions s ON s.agent_id = t.assigned_agent_id AND s.status = 'active' AND s.deleted_at IS NULL
+     LEFT JOIN openclaw_sessions s ON s.id = (SELECT ss.id FROM openclaw_sessions ss WHERE ss.task_id=t.id AND ss.agent_id=t.assigned_agent_id AND ss.status='active' AND ss.deleted_at IS NULL ORDER BY ss.created_at DESC LIMIT 1)
      WHERE t.status = 'in_progress'
        AND t.assigned_agent_id IS NOT NULL`
   );
@@ -428,6 +437,9 @@ export async function runExecutionCompletionReconcile(): Promise<void> {
     process.env.EXECUTION_WATCHER_GATEWAY_DOWN_RECOVERY !== '0';
 
   for (const task of rows) {
+    throwIfJobLeaseLost();
+    const execution=latestExecution(task.id);
+    if(execution) task.openclaw_session_id=execution.session_id;
     // B5: derive the deterministic session id when the DB row is missing.
     if (!task.openclaw_session_id) {
       task.openclaw_session_id = sessionIdForTask(task);
@@ -468,7 +480,7 @@ export async function runExecutionCompletionReconcile(): Promise<void> {
         // committed. A PRECONDITION_EVIDENCE refusal (zero/unreachable
         // deliverables behind the TASK_COMPLETE marker) leaves the task in place
         // — the string alone is no longer completion.
-        const advanced = await advanceToReview(task.id, task.assigned_agent_id, task.assigned_agent_name, match)
+        const advanced = await advanceToReview(task.id, task.assigned_agent_id, task.assigned_agent_name, match, execution?.id)
           .catch((err: unknown) => {
             console.warn(`[execution-watcher] advanceToReview transition failed for task ${task.id}:`, (err as Error).message);
             return false;

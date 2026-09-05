@@ -1,3 +1,5 @@
+import { resolveInterviewTenant, refuseUnverifiedTenant } from '@/lib/interview/tenant';
+import { tenantAnswers } from '@/lib/interview/remote-store';
 /**
  * GET /api/interview/answers/export — the durable ANSWERS DOCUMENT, on demand.
  *
@@ -49,6 +51,17 @@ function filenameSlug(state: ReturnType<typeof readBuildState>): string {
 }
 
 export async function GET(req: NextRequest) {
+  const tenant = await resolveInterviewTenant(req);
+  const refused = refuseUnverifiedTenant(tenant); if (refused) return refused;
+  if (tenant.kind === 'client') {
+    try {
+      const answers=tenantAnswers(tenant.context!.tenantId);
+      if (!answers.length) return NextResponse.json({error:'no_answers_yet'}, {status:404});
+      const body='# Workforce Interview Answers\n\n'+answers.map(a=>`**Q:** ${a.question_text}\n**A:** ${a.answer_text}\n**Logged:** ${a.created_at}\n`).join('\n---\n\n');
+      return new NextResponse(body,{headers:{'content-type':'text/markdown; charset=utf-8','cache-control':'private, no-store','content-disposition':'attachment; filename="workforce-interview-answers.md"'}});
+    } catch { return NextResponse.json({error:'answers_unavailable'}, {status:503}); }
+  }
+
   try {
     const state = readBuildState();
     const info = readAnswers(state);

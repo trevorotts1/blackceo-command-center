@@ -384,6 +384,16 @@ export class OpenClawClient extends EventEmitter {
           try {
             const data = JSON.parse(String(event.data));
 
+            // RPC replies belong to one pending request on this connection.
+            // Identical payloads (including empty acknowledgements) are valid
+            // for different IDs; the global event cache must not swallow them.
+            const legacyResponse = data.type === undefined && data.id !== undefined &&
+              data.method === undefined && ('result' in data || 'error' in data);
+            if (data.type === 'res' || legacyResponse) {
+              this.handleMessage(data as OpenClawMessage);
+              return;
+            }
+
             // Generate unique event ID using content hashing for proper deduplication
             const eventId = this.generateEventId(data);
 
@@ -696,7 +706,8 @@ export class OpenClawClient extends EventEmitter {
 
   private handleMessage(data: OpenClawMessage & { type?: string; ok?: boolean; payload?: unknown }): void {
     // Handle OpenClaw ResponseFrame format (type: "res")
-    if (data.type === 'res' && data.id !== undefined) {
+    if (data.type === 'res') {
+      if (data.id === undefined) return;
       const requestId = data.id as string | number;
       const pending = this.pendingRequests.get(requestId);
       if (pending) {
@@ -708,8 +719,10 @@ export class OpenClawClient extends EventEmitter {
         } else {
           resolve(data.payload);
         }
-        return;
       }
+      // Unknown or already-consumed IDs are inert, never notifications or
+      // responses to a different pending request.
+      return;
     }
 
     // Handle legacy JSON-RPC responses
@@ -942,6 +955,7 @@ export class OpenClawClient extends EventEmitter {
 // zero-argument singleton behavior for all existing callers.
 const SELF_KEY = '__self__';
 const clientInstances = new Map<string, OpenClawClient>();
+const clientTargetVersions = new Map<string, string>();
 
 /**
  * Resolve an OpenClaw gateway client.
@@ -967,13 +981,16 @@ export function getOpenClawClient(target?: OpenClawClientTarget): OpenClawClient
 
   // Remote (or any explicitly-targeted) client → one cached instance per id.
   const key = target.id || target.url;
+  const version = JSON.stringify([target.url,target.token,target.cfAccessClientId,target.cfAccessClientSecret]);
   let inst = clientInstances.get(key);
+  if (inst && clientTargetVersions.get(key) !== version) { inst.disconnect(); clientInstances.delete(key); inst=undefined; }
   if (!inst) {
     inst = new OpenClawClient(target.url, target.token ?? '', {
       cfAccessClientId: target.cfAccessClientId ?? null,
       cfAccessClientSecret: target.cfAccessClientSecret ?? null,
     });
     clientInstances.set(key, inst);
+    clientTargetVersions.set(key, version);
   }
   return inst;
 }

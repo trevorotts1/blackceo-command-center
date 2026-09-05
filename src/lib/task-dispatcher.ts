@@ -1,3 +1,6 @@
+import { resolveOpenClawRuntimeRoot } from '@/lib/openclaw/runtime-root';
+import { capturePersonaSnapshot } from '@/lib/persona-state';
+import { renderPersonaConformanceInstructions } from '@/lib/persona-conformance';
 /**
  * task-dispatcher.ts — Server-only.
  *
@@ -44,6 +47,8 @@
  */
 
 import { v4 as uuidv4 } from 'uuid';
+import { beginExecutionSend, executionSessionId, reserveExecution, recordExecutionAcceptance, recordExecutionUnknown, type DispatchOutcome, type Execution } from '@/lib/execution-attempts';
+import { throwIfJobLeaseLost } from '@/lib/jobs/job-lease';
 import * as fs from 'fs';
 import * as path from 'path';
 import os from 'os';
@@ -466,10 +471,9 @@ export function resolveSpecialistSessionKey(
   // src/lib/context-pack.ts agentsRoot() / src/lib/platform.ts detectPlatform(): VPS
   // Docker keeps the `/data/.openclaw` persistent-volume marker; any home-relative
   // fallback goes through `os.homedir()`.
-  const homeDir = process.env.HOME || process.env.USERPROFILE || os.homedir();
-  const AGENTS_ROOT = detectPlatform() === 'vps-docker'
-    ? '/data/.openclaw/agents'
-    : path.join(homeDir, '.openclaw', 'agents');
+  let AGENTS_ROOT: string;
+  try { AGENTS_ROOT = path.join(resolveOpenClawRuntimeRoot(), 'agents'); }
+  catch { return null; }
 
   // Attempt 1: lookup workspace slug from DB.
   if (workspaceId) {
@@ -781,7 +785,8 @@ async function resolveSopForTask(
 export async function autoDispatchTask(
   taskId: string,
   context = 'auto-dispatch',
-): Promise<void> {
+): Promise<DispatchOutcome> {
+  let acknowledgedExecution: Execution | undefined;
   try {
     // ── Load task (join agent for is_master check) ──────────────────────────
     const task = queryOne<
@@ -796,7 +801,7 @@ export async function autoDispatchTask(
 
     if (!task) {
       console.warn(`[${context}] autoDispatchTask: task ${taskId} not found — skipping`);
-      return;
+      return { status: 'held', reason: 'dispatch_precondition' };
     }
 
     // F3.4 ANCHOR (U33 / C-02-b): the SOP the CREATION-TIME persona selection
@@ -811,7 +816,7 @@ export async function autoDispatchTask(
     // GUARD 1: must have an assigned agent.
     if (!task.assigned_agent_id) {
       console.warn(`[${context}] autoDispatchTask: task ${taskId} has no assigned_agent_id — skipping`);
-      return;
+      return { status: 'held', reason: 'dispatch_precondition' };
     }
 
     // GUARD 2: skip master/CEO agents — they are routing artifacts.
@@ -821,7 +826,7 @@ export async function autoDispatchTask(
       console.log(
         `[${context}] autoDispatchTask: task ${taskId} assigned to master/CEO — operator-click only`,
       );
-      return;
+      return { status: 'held', reason: 'dispatch_precondition' };
     }
 
     // GUARD 3: skip terminal statuses + archived tasks (DISP-12: archival is
@@ -830,13 +835,13 @@ export async function autoDispatchTask(
       console.log(
         `[${context}] autoDispatchTask: task ${taskId} already "${task.status}" — skip`,
       );
-      return;
+      return { status: 'held', reason: 'dispatch_precondition' };
     }
     if ((task as Task & { archived_at?: string | null }).archived_at) {
       console.log(
         `[${context}] autoDispatchTask: task ${taskId} is archived — skip`,
       );
-      return;
+      return { status: 'held', reason: 'dispatch_precondition' };
     }
 
     // GUARD 4: QC loop cap.
@@ -850,7 +855,7 @@ export async function autoDispatchTask(
       console.warn(
         `[${context}] autoDispatchTask: task ${taskId} hit QC cap (${qcAttempts}/${QC_MAX_REROUTES}) — blocked`,
       );
-      return;
+      return { status: 'held', reason: 'dispatch_precondition' };
     }
 
     // GUARD 4b (FIX-17 / Error 12 / Rule R12): OWNER-KILLED tasks are
@@ -866,7 +871,7 @@ export async function autoDispatchTask(
       console.warn(
         `[${context}] autoDispatchTask: task ${taskId} is OWNER-KILLED (Rule R12) — re-dispatch BLOCKED; task stays dead`,
       );
-      return;
+      return { status: 'held', reason: 'dispatch_precondition' };
     }
 
     // GUARD 4c: a Presentations deck phase is only executable if the card names
@@ -891,7 +896,7 @@ export async function autoDispatchTask(
       console.error(
         `[${context}] autoDispatchTask: phase ${taskId} HELD — deck names no run`,
       );
-      return;
+      return { status: 'held', reason: 'dispatch_precondition' };
     }
 
     // ── GUARD 4d (FIX 38a / R5B §F1): engine-owned cards are never dispatched ──
@@ -918,7 +923,7 @@ export async function autoDispatchTask(
         engineHoldMsg,
       );
       console.log(`[${context}] autoDispatchTask: ${engineHoldMsg}`);
-      return;
+      return { status: 'held', reason: 'dispatch_precondition' };
     }
 
     // GUARD 5 (PRD 2.12-cc): recursion guard — SOP-authoring sub-tasks MUST NOT
@@ -985,7 +990,7 @@ export async function autoDispatchTask(
             `was already healed by a concurrent caller — skipping`,
         );
       }
-      return;
+      return { status: 'held', reason: 'dispatch_precondition' };
     }
 
     // Double-check on the live agent row (covers stale JOIN snapshots).
@@ -993,7 +998,7 @@ export async function autoDispatchTask(
       console.log(
         `[${context}] autoDispatchTask: agent "${agent.name}" is_master=1 — skipping`,
       );
-      return;
+      return { status: 'held', reason: 'dispatch_precondition' };
     }
 
     const now = new Date().toISOString();
@@ -1059,7 +1064,7 @@ export async function autoDispatchTask(
           context,
           hardBlock: true,
         });
-        return; // HOLD + BLOCK: never dispatch a podcast task without an activated processor
+        return { status: 'held', reason: 'dispatch_precondition' }; // HOLD + BLOCK: never dispatch a podcast task without an activated processor
       }
     }
     // ── End GUARD 8 (capability manifest) ──────────────────────────────────────
@@ -1080,7 +1085,7 @@ export async function autoDispatchTask(
       console.log(
         `[${context}] autoDispatchTask: task ${taskId} in dispatch backoff until ${nextEligibleAt} — skip`,
       );
-      return;
+      return { status: 'held', reason: 'dispatch_precondition' };
     }
 
     // GUARD 7 (skill6-v2 U33 / C-02 — gate-consistency pin): the automatic
@@ -1215,7 +1220,7 @@ export async function autoDispatchTask(
           context,
           maxAttempts: TRIAD_HOLD_MAX_ATTEMPTS,
         });
-        return; // NOT claimable — held, loudly, never silently skipped
+        return { status: 'held', reason: 'dispatch_precondition' }; // NOT claimable — held, loudly, never silently skipped
       }
     }
 
@@ -1240,60 +1245,23 @@ export async function autoDispatchTask(
             '(it retries with backoff and stays visible until then).',
           context,
         });
-        return;
+        return { status: 'held', reason: 'dispatch_precondition' };
       }
     }
 
-    // ── Session: UPSERT keyed (agent_id, status='active') ───────────────────
-    // B5: the openclaw_sessions row is the fragile link in the completion chain.
-    // UPSERT it — reuse the agent's active session when present (refreshing its id
-    // to the deterministic form + binding the CURRENT task for attribution), else
-    // create it. Storing the deterministic id (identical to
-    // deterministicOpenclawSessionId) lets the webhook / watcher re-derive it if
-    // the row is ever purged.
-    const openclawSessionId = deterministicOpenclawSessionId(agent.name);
-    let session = queryOne<OpenClawSession>(
-      'SELECT * FROM openclaw_sessions WHERE agent_id = ? AND status = ? AND deleted_at IS NULL',
-      [agent.id, 'active'],
-    );
+    const { refreshPersonaDecisionIfNeeded } = await import('@/lib/tasks');
+    await refreshPersonaDecisionIfNeeded(task.id);
+    const refreshedTask=queryOne<Task>('SELECT * FROM tasks WHERE id=?',[task.id]);
+    const stableFields=['assigned_agent_id','workspace_id','department','assignment_version','status','source','killed_at','archived_at'];
+    if(!refreshedTask || stableFields.some(key=>(refreshedTask as unknown as Record<string,unknown>)[key] !== (task as unknown as Record<string,unknown>)[key])) { return {status:'held',reason:'assignment_or_state_changed'}; }
+    Object.assign(task,refreshedTask);
+    const personaSendSnapshot=capturePersonaSnapshot(task.id);
+    // Session identity is prepared without a DB write. Attribution and capacity
+    // are committed together only after every asynchronous preflight completes.
+    const executionId = uuidv4();
+    const openclawSessionId = executionSessionId(agent.id, executionId);
+    const session = { openclaw_session_id: openclawSessionId };
 
-    if (session) {
-      // Refresh the active session: pin the deterministic id (self-heals a drifted
-      // row) and bind task_id so completion webhook / execution-reconcile attribute
-      // this turn to the right task.
-      run(
-        `UPDATE openclaw_sessions SET openclaw_session_id = ?, task_id = ?, updated_at = ? WHERE id = ?`,
-        [openclawSessionId, task.id, now, session.id],
-      );
-      session = queryOne<OpenClawSession>('SELECT * FROM openclaw_sessions WHERE id = ?', [session.id]);
-    } else {
-      const sessionId = uuidv4();
-
-      // FIX 2: bind task_id so completion webhook / execution-reconcile can attribute the turn.
-      // The task_id column + idx_openclaw_sessions_task index already exist in schema.ts:213/360.
-      run(
-        `INSERT INTO openclaw_sessions (id, agent_id, openclaw_session_id, channel, status, task_id, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [sessionId, agent.id, openclawSessionId, 'mission-control', 'active', task.id, now, now],
-      );
-
-      session = queryOne<OpenClawSession>(
-        'SELECT * FROM openclaw_sessions WHERE id = ?',
-        [sessionId],
-      );
-
-      run(
-        `INSERT INTO events (id, type, agent_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
-        [uuidv4(), 'agent_status_changed', agent.id, `${agent.name} session created`, now],
-      );
-    }
-
-    if (!session) {
-      console.error(
-        `[${context}] autoDispatchTask: could not create session for agent ${agent.id}`,
-      );
-      return;
-    }
 
     // ── Intelligence resolution ─────────────────────────────────────────────
     console.log(`[dispatch-checkpoint] intelligence-resolution-start task=${task.id}`);
@@ -1351,7 +1319,7 @@ export async function autoDispatchTask(
         console.log(
           `[${context}] autoDispatchTask: task ${taskId} HELD for audience confirmation — write gated`,
         );
-        return; // write step gated — task stays claimable until confirmed/deadline
+        return { status: 'held', reason: 'dispatch_precondition' }; // write step gated — task stays claimable until confirmed/deadline
       }
       if (gate.state === 'deadline_fallback') {
         const dept = canonicalDeptSlug(task.department || task.workspace_id || '') || 'general';
@@ -1363,7 +1331,7 @@ export async function autoDispatchTask(
             `[${context}] autoDispatchTask: task ${taskId} audience unconfirmed past deadline in ` +
               `hard-hold department "${dept}" — BLOCKED for owner (no house-voice release)`,
           );
-          return; // write step gated — never dispatched under house voice
+          return { status: 'held', reason: 'dispatch_precondition' }; // write step gated — never dispatched under house voice
         }
         // NEVER-NAKED: unconfirmed past the deadline → dispatch under house-voice
         // governance only (buildPersonaBlock's fallback governs; the blend
@@ -1380,6 +1348,7 @@ export async function autoDispatchTask(
         `[${context}] audience-confirm gate non-fatal for task ${task.id}:`,
         (gateErr as Error).message,
       );
+      return { status: 'held', reason: 'persona_governance_unavailable' };
     }
     console.log(`[dispatch-checkpoint] audience-confirm-gate-done task=${task.id}`);
     // ── End audience-confirm gate ────────────────────────────────────────────
@@ -1448,7 +1417,7 @@ export async function autoDispatchTask(
         context,
         hardBlock: true,
       });
-      return;
+      return { status: 'held', reason: 'dispatch_precondition' };
     }
     // ── End AF-MODEL-SOVEREIGNTY gate ──────────────────────────────────────
 
@@ -1471,7 +1440,7 @@ export async function autoDispatchTask(
     const sopResolution = await resolveSopForTask(task, agent, context, sopAuthoringLink);
     console.log(`[dispatch-checkpoint] sop-resolution-done task=${task.id} outcome=${sopResolution.outcome}`);
     if (sopResolution.outcome === 'authoring') {
-      return; // HOLD: abort this dispatch; authorSOPForTask re-fires it.
+      return { status: 'held', reason: 'dispatch_precondition' }; // HOLD: abort this dispatch; authorSOPForTask re-fires it.
     }
     const resolvedSopId = sopResolution.sopId;
 
@@ -1542,6 +1511,7 @@ ${stepLines.join('\n')}
             deptForSelector,
             sopContext,
           );
+          if(rescored.failed) return {status:'held',reason:'persona_rescore_failed'};
           // Patch the in-memory row so buildPersonaBlock DELIVERS the rescored
           // persona in this same dispatch message (not just on the board).
           task.persona_id = rescored.persona_id;
@@ -1678,7 +1648,7 @@ ${stepLines.join('\n')}
           context,
           hardBlock: true,
         });
-        return; // HOLD: never dispatch a skill-less podcast session
+        return { status: 'held', reason: 'dispatch_precondition' }; // HOLD: never dispatch a skill-less podcast session
       }
     }
     // ── End Unit 3.6(b) assertion ───────────────────────────────────────────
@@ -1767,7 +1737,7 @@ ${sopBlock ? `${sopBlock}` : ''}**Agent Model:** ${settings.model}
 ${personaSection}
 **Specialist Type:** ${specialistType}
 ${renderOwnerMessagesSection(task.id)}${artifactFragment}${contextPack ? renderContextPackSection(contextPack) : ''}
-${renderWriteBackInstructions(missionControlUrl, task.id, 'artifact', `${taskArtifactDir}/filename.png`)}
+${renderWriteBackInstructions(missionControlUrl, task.id, 'artifact', `${taskArtifactDir}/filename.png`, executionId)}
 
 When complete, reply with:
 \`TASK_COMPLETE: [brief summary of what you did]\`
@@ -1846,7 +1816,7 @@ If you need help or clarification, ask the orchestrator.`;
         context,
         hardBlock: true,
       });
-      return;
+      return { status: 'held', reason: 'dispatch_precondition' };
     }
 
     // ── FAIL-LOUD write-back auth guard (PREVENTION, src/lib/mc-auth.ts) ──────
@@ -1874,7 +1844,7 @@ If you need help or clarification, ask the orchestrator.`;
         needs: writeAuth.reason,
         context,
       });
-      return;
+      return { status: 'held', reason: 'dispatch_precondition' };
     }
 
     // ── DISP-02: atomic CLAIM before send (close the SELECT→send TOCTOU) ────
@@ -1890,75 +1860,29 @@ If you need help or clarification, ask the orchestrator.`;
     // transition()'s single expectedFrom can't express); audited immediately
     // below via recordStatusEvent (DISP-10 / DATA-07 — closes the CROSS-LANE
     // note this same function used to carry).
-    console.log(`[dispatch-checkpoint] cas-claim-start task=${task.id}`);
-    const claim = run(
-      `UPDATE tasks SET status = 'in_progress', updated_at = ?
-         WHERE id = ? AND status IN ('backlog','inbox','planning','pending_dispatch','assigned')`,
-      [now, task.id],
-    );
-    console.log(`[dispatch-checkpoint] cas-claim-done task=${task.id} changes=${claim.changes}`);
-    if (claim.changes !== 1) {
-      console.log(
-        `[${context}] autoDispatchTask: task ${taskId} was already claimed by a concurrent ` +
-          `advancer (CAS matched ${claim.changes} rows) — skipping send to avoid a double dispatch`,
-      );
-      return;
-    }
-    recordStatusEvent(task.id, task.status, 'in_progress', {
-      actor: context,
-      reason: 'auto-dispatch claim (DISP-02)',
-    });
-
-    // DISP-01: stable idempotency key. Was `Date.now()`, which handed every
-    // re-fire — including two advancers racing the SAME window — a UNIQUE key,
-    // so the gateway could never dedup a concurrent double-send. Key on the
-    // attempt counter instead: genuine retries (after recordDispatchFailure
-    // bumps dispatch_attempts) get a fresh key, but two advancers in one window
-    // read the same counter → identical key → the gateway collapses them.
-    console.log(`[dispatch-checkpoint] chat-send-start task=${task.id}`);
+    const { checkPersonaDispatchReady } = await import('@/lib/tasks');
+    const personaReady = checkPersonaDispatchReady(task.id);
+    if (!personaReady.ready) return { status: 'held', reason: personaReady.reason };
+    throwIfJobLeaseLost();
+    const claim = reserveExecution({...task,persona_snapshot:personaSendSnapshot}, sessionKey, executionId);
+    if (!claim.execution) return { status: 'held', reason: claim.reason };
+    const execution = claim.execution;
+    if (!beginExecutionSend(execution)) return { status: 'held', reason: 'claim_superseded', executionId };
     try {
-      await client.call('chat.send', {
+      const response = await client.call('chat.send', {
         sessionKey,
-        message: taskMessage,
-        idempotencyKey: `auto-dispatch-${task.id}-${task.dispatch_attempts ?? 0}`,
+        message: `${taskMessage}\n\n${renderPersonaConformanceInstructions(task.id, executionId, agent.id, missionControlUrl)}\n\n**Execution ID:** ${execution.id}\nFor task completion, include execution_id: "${execution.id}" in the completion webhook JSON.`,
+        idempotencyKey: execution.idempotency_key,
         timeoutMs: 30000,
       });
-      console.log(`[dispatch-checkpoint] chat-send-done task=${task.id}`);
+      recordExecutionAcceptance(execution, response);
+      acknowledgedExecution = execution;
     } catch (sendErr) {
-      // DISP-02 send-failure rollback: we already CAS-claimed the card to
-      // in_progress; a failed send must NOT strand it there. Restore the prior
-      // status (only if we still hold the in_progress we set) so a sweep can
-      // re-select it, then account for the failed advance (backoff → cap) so it
-      // never re-fires every tick.
-      console.error(`[${context}] autoDispatchTask: chat.send failed for task ${task.id} — rolling back claim:`, sendErr);
-      const rollbackNow = new Date().toISOString();
-      // U99-RAW-STATUS-WRITER: restores the pre-claim status captured above
-      // (dynamic target — not a fixed literal transition() edge); audited
-      // immediately below via recordStatusEvent (DISP-10), gated on the CAS
-      // actually landing.
-      const rollbackRes = run(
-        `UPDATE tasks SET status = ?, updated_at = ? WHERE id = ? AND status = 'in_progress'`,
-        [task.status, rollbackNow, task.id],
-      );
-      if ((rollbackRes.changes ?? 0) > 0) {
-        recordStatusEvent(task.id, 'in_progress', task.status, {
-          actor: context,
-          reason: 'chat.send failed — rollback of DISP-02 claim',
-        });
-      }
-      try {
-        const rolledBack = queryOne<Task>('SELECT * FROM tasks WHERE id = ?', [task.id]);
-        if (rolledBack) broadcast({ type: 'task_updated', payload: rolledBack });
-      } catch { /* broadcast best-effort */ }
-      recordDispatchFailure(task.id, agent.id, {
-        reason: 'chat_send_failed',
-        audience: 'SYSTEM',
-        needs:
-          'OpenClaw chat.send failed at dispatch. The task was returned to the queue; it ' +
-          'retries with backoff and stays visible until it sends or hits the cap.',
-        context,
-      });
-      return;
+      // A transport failure may follow remote acceptance. Never roll back the
+      // task or mint a fresh key based solely on a missing acknowledgement.
+      recordExecutionUnknown(execution);
+      console.error(`[${context}] chat.send acknowledgement unknown for ${task.id}:`, sendErr);
+      return { status: 'unknown', reason: 'send_acceptance_unknown', executionId };
     }
 
     // ── Post-claim bookkeeping (status already advanced by the DISP-02 CAS) ──
@@ -2100,6 +2024,7 @@ If you need help or clarification, ask the orchestrator.`;
     console.log(
       `[${context}] autoDispatchTask: Task "${task.title}" (${task.id}) → "${agent.name}" → in_progress ✓`,
     );
+    return { status: 'acknowledged', reason: 'gateway_accepted', executionId };
   } catch (err) {
     // Fire-and-forget: NEVER throw — routing must succeed even if dispatch fails.
     const errMsg = (err as Error).message;
@@ -2135,4 +2060,7 @@ If you need help or clarification, ask the orchestrator.`;
       console.error(`[${context}] autoDispatchTask: dispatch_pipeline_error write failed:`, writeErr);
     }
   }
+    return acknowledgedExecution
+      ? { status: 'acknowledged', reason: 'accepted_bookkeeping_failed', executionId: acknowledgedExecution.id }
+      : { status: 'failed', reason: 'dispatch_pipeline_error' };
 }

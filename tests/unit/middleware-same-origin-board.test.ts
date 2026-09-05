@@ -1,3 +1,4 @@
+import { registerFixtureTenant, fixtureTenantCookie } from './_tenant-auth-fixture';
 /**
  * Middleware auth matrix — board same-origin reads vs external/ingest auth.
  *
@@ -50,6 +51,7 @@ const INGEST_WEBHOOK_APIS = [
 ];
 
 const ENV_KEYS = [
+  'MC_TENANT_REGISTRY_JSON',
   'NODE_ENV',
   'MC_API_TOKEN',
   'WEBHOOK_SECRET',
@@ -83,12 +85,14 @@ async function loadMiddleware(env: EnvOverrides): Promise<Middleware> {
     if (v === undefined) delete process.env[k];
     else process.env[k] = v;
   }
+  registerFixtureTenant(BOARD_HOST);
   vi.resetModules();
   const mod = await import('@/middleware');
   return mod.middleware as Middleware;
 }
 
 interface ReqOpts {
+  authenticated?: boolean;
   method?: string;
   sameOrigin?: boolean; // sets a same-origin Referer (the board's own fetch)
   origin?: string; // a raw cross-origin Origin header
@@ -106,7 +110,10 @@ function makeReq(path: string, opts: ReqOpts = {}): NextRequest {
     headers['cf-access-jwt-assertion'] = 'edge-verified-jwt';
     headers['cf-access-authenticated-user-email'] = 'operator@example.com';
   }
-  if (opts.csrf) headers['cookie'] = `${CSRF_COOKIE_NAME}=${opts.csrf}`;
+  const cookies=[];
+  if((opts.sameOrigin||opts.cf)&&opts.authenticated!==false)cookies.push(fixtureTenantCookie(BOARD_HOST));
+  if(opts.csrf)cookies.push(`${CSRF_COOKIE_NAME}=${opts.csrf}`);
+  headers.cookie=cookies.filter(Boolean).join('; ');
   return new NextRequest(`${BOARD_ORIGIN}${path}`, {
     method: opts.method ?? 'GET',
     headers,
@@ -261,10 +268,11 @@ describe('unprovisioned box (no MC_API_TOKEN / WEBHOOK_SECRET), production — f
     DEMO_MODE: undefined,
   };
 
-  it('same-origin board read still passes through even with NO secrets set', async () => {
+  it('same-origin board read fails closed with NO authentication secrets set', async () => {
     const mw = await loadMiddleware(ENV);
     const res = await mw(makeReq('/api/tasks', { sameOrigin: true }));
-    expect(isPassthrough(res)).toBe(true);
+    expect(isPassthrough(res)).toBe(false);
+    expect(isCredentialRejection(res)).toBe(true);
   });
 
   it('external read is fail-closed (503) when MC_API_TOKEN is unset', async () => {
@@ -292,11 +300,11 @@ describe('CF-Access-fronted box (opt-in REQUIRE_CF_ACCESS=true still enforces)',
 
   it('request WITHOUT a CF assertion is rejected at Layer 1 (401)', async () => {
     const mw = await loadMiddleware(ENV);
-    const res = await mw(makeReq('/api/tasks', { sameOrigin: true }));
-    expect(res.status).toBe(401);
+    const res = await mw(makeReq('/api/tasks', { sameOrigin: true, authenticated: false }));
+    expect(res.status).toBe(403);
   });
 
-  it('CF-verified same-origin board read passes through (200)', async () => {
+  it('verified signed browser membership passes the Access enforcement layer', async () => {
     const mw = await loadMiddleware(ENV);
     const res = await mw(makeReq('/api/tasks', { sameOrigin: true, cf: true }));
     expect(isPassthrough(res)).toBe(true);
@@ -348,7 +356,7 @@ describe('MR-23 direct-to-origin forgery — true security posture', () => {
     expect(token).toBeTruthy();
   });
 
-  it('RESIDUAL OPEN on plain tunnel: harvested cookie + forged same-origin header reaches a mutating route (no bearer, no CF)', async () => {
+  it('harvested CSRF cookie plus forged same-origin header cannot replace authenticated membership', async () => {
     const mw = await loadMiddleware(ENV);
     const token = await harvestCsrfCookie(mw);
     expect(token).toBeTruthy();
@@ -362,7 +370,7 @@ describe('MR-23 direct-to-origin forgery — true security posture', () => {
     });
     // Documents (does not endorse) that the direct-forgery residual persists
     // without CF Access. The signed cookie cannot defeat harvest-and-replay.
-    expect(isPassthrough(await mw(attack))).toBe(true);
+    expect(isPassthrough(await mw(attack))).toBe(false);
   });
 
   it('RESIDUAL CLOSED by REQUIRE_CF_ACCESS=true: the same harvest-and-replay is rejected at Layer 1', async () => {
@@ -380,7 +388,7 @@ describe('MR-23 direct-to-origin forgery — true security posture', () => {
     const res = await mw(attack);
     // No CF-Access assertion -> Layer 1 misconfiguration 401, before passthrough.
     expect(isPassthrough(res)).toBe(false);
-    expect(res.status).toBe(401);
+    expect(res.status).toBe(403);
   });
 });
 

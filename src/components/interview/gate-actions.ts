@@ -1,4 +1,7 @@
 'use server';
+import { verifiedBuild } from '@/lib/interview/build-verification';
+import { resolveTenantContext } from '@/lib/auth/tenant-context';
+import { getClient } from '@/lib/clients';
 
 /**
  * Node-runtime setter for the interview-mode shell lock (P0-5).
@@ -29,7 +32,7 @@
  *   single source of truth (read-only here).
  */
 
-import { cookies } from 'next/headers';
+import { cookies, headers } from 'next/headers';
 import { readBuildState, readStandardPrebuild } from '@/lib/interview/seam';
 import { INTERVIEW_COOKIE_NAME, INTERVIEW_BYPASS_COOKIE_NAME, LATCH_COOKIE_NAME, signInterviewToken, signInterviewBypassToken, signLatchToken } from '@/lib/interview/gate-cookie';
 
@@ -54,7 +57,7 @@ import { INTERVIEW_COOKIE_NAME, INTERVIEW_BYPASS_COOKIE_NAME, LATCH_COOKIE_NAME,
 function deriveInterviewComplete(): boolean {
   const bs = readBuildState();
   if (!bs) return false;
-  if (bs.buildCompletedAt) return true;
+  if (verifiedBuild(bs)) return true;
   if (bs.interviewComplete === true) return true;
   // STANDARD_READY (standardPrebuild done, interview incomplete) — this third
   // state is aware-but-not-complete: the shell lock holds, only /preview is
@@ -70,8 +73,10 @@ function deriveInterviewComplete(): boolean {
  * /interview when the cookie is absent/unverifiable.
  */
 export async function refreshInterviewGate(): Promise<void> {
-  const complete = deriveInterviewComplete();
-  const { value, maxAge } = await signInterviewToken(complete);
+  const context=await resolveTenantContext({headers:new Headers(headers())});
+  const complete=context.kind==='self' ? deriveInterviewComplete() : getClient(context.clientId!)?.interview_complete===true;
+  const scope=`${context.tenantId}:${context.installationId}:${context.host}`;
+  const { value, maxAge } = await signInterviewToken(complete,scope);
   try {
     cookies().set(INTERVIEW_COOKIE_NAME, value, {
       httpOnly: true,
@@ -83,7 +88,7 @@ export async function refreshInterviewGate(): Promise<void> {
     // U010: also set the persistent latch cookie as a fallback for the middleware
     // when the main cookie is absent or expired (restart / tunnel reconnect).
     if (complete) {
-      const latch = await signLatchToken();
+      const latch = await signLatchToken(scope);
       cookies().set(LATCH_COOKIE_NAME, latch.value, {
         httpOnly: true,
         sameSite: 'lax',
@@ -91,7 +96,7 @@ export async function refreshInterviewGate(): Promise<void> {
         maxAge: latch.maxAge,
         secure: process.env.NODE_ENV === 'production',
       });
-    }
+    } else { cookies().delete(LATCH_COOKIE_NAME); }
   } catch {
     // Non-fatal: cookies() may be read-only in some contexts; the middleware
     // fail-closed posture covers an unset cookie.
@@ -101,6 +106,8 @@ export async function refreshInterviewGate(): Promise<void> {
 /* U057 — Interview bypass ("Skip for now") */
 
 export async function skipInterviewForNow(): Promise<void> {
+  const context=await resolveTenantContext({headers:new Headers(headers())});
+  if(context.kind!=='self' || !context.subject.startsWith('operator:'))throw new Error('Operator identity required');
   const { value, maxAge } = await signInterviewBypassToken();
   try { cookies().set(INTERVIEW_BYPASS_COOKIE_NAME, value, { httpOnly: true, sameSite: 'lax', path: '/', maxAge, secure: process.env.NODE_ENV === 'production' }); } catch { /* non-fatal */ }
 }

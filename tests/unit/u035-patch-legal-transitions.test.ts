@@ -23,7 +23,7 @@ process.env.DISABLE_QC_AUTO_SCORER = '1';
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert';
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -40,6 +40,9 @@ before(async () => {
   const dir = mkdtempSync(join(tmpdir(), 'u035-test-'));
   dbPath = join(dir, 'test.db');
   process.env.DATABASE_PATH = dbPath;
+  process.env.WORKSPACE_BASE_PATH = dir;
+  mkdirSync(join(dir, 'coaching-personas'));
+  writeFileSync(join(dir, 'coaching-personas', 'persona-categories.json'), JSON.stringify({personas: {'test-persona-marketing': {author:'Fixture',book:'Fixture',domain:[],perspective:[],custom:[]}}}));
 
   const { getDb } = await ns('@/lib/db');
   const mod = await ns('@/lib/db');
@@ -52,6 +55,7 @@ before(async () => {
 
 after(() => {
   delete process.env.DATABASE_PATH;
+  delete process.env.WORKSPACE_BASE_PATH;
   delete process.env.DISABLE_QC_AUTO_SCORER;
   try { rmSync(join(dbPath, '..'), { recursive: true, force: true }); } catch {}
 });

@@ -56,7 +56,7 @@ function insertWorkspace(id: string, slug: string, name: string): void {
   run(
     `INSERT OR IGNORE INTO workspaces (id, name, slug, description, sort_order)
      VALUES (?, ?, ?, ?, ?)`,
-    [id, name, slug, 'Test dept', 900 + counter],
+    [id, name, `${slug}-${id}`, 'Test dept', 900 + counter],
   );
 }
 
@@ -172,8 +172,8 @@ test('[B-U7 a] createTaskCore: producer persona fields → pinned verbatim, reso
     ['hormozi-100m-offers', 'wiebe-copy-hackers'],
     'task_personas must carry the producer task_persona_ids verbatim, in order',
   );
-  assert.equal(parsed.rationale.bundle_sha, 'abc123def456', 'bundle_sha must be recorded on the bundle row');
-  assert.equal(bundleRow.confirm_state, 'not_required', 'a producer-pinned bundle is not_required (already resolved upstream)');
+  assert.equal(parsed.rationale.claimed_bundle_sha, 'abc123def456', 'bundle_sha must be recorded on the bundle row');
+  assert.equal(bundleRow.confirm_state, 'pending', 'IDs and a claimed hash cannot establish upstream confirmation');
 
   // A queryable producer-pin audit event.
   const evt = queryOne<{ message: string }>(
@@ -263,11 +263,6 @@ test('[B-U7] createTaskCore: topic_persona_id WITHOUT voice_persona_id → legac
 });
 
 // ── pinProducerPersonaBundle is fail-soft on a DB write error ────────────────
-test('[B-U7] pinProducerPersonaBundle: never throws, even for a nonexistent task row', () => {
-  assert.doesNotThrow(() => {
-    const id = pinProducerPersonaBundle('nonexistent-task-id-xyz', {
-      voice_persona_id: 'hormozi-100m-offers',
-    });
-    assert.equal(id, 'hormozi-100m-offers', 'must still return the pinned id even when the row read-back misses');
-  });
+test('[B-U7] pinProducerPersonaBundle refuses a nonexistent task instead of claiming success', () => {
+  assert.throws(()=>pinProducerPersonaBundle('nonexistent-task-id-xyz',{voice_persona_id:'hormozi-100m-offers'}),/persona_task_missing/);
 });

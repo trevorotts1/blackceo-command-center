@@ -24,6 +24,8 @@ import { canonicalDeptSlug } from './canonical-slug';
 export interface DepartmentConfig {
   /** Unique slug for this department (used in task.department field) */
   id: string;
+  /** Canonical board slug; workspace IDs may be UUIDs or prefixed identifiers. */
+  slug?: string;
   /** Display name */
   name: string;
   /**
@@ -1525,6 +1527,7 @@ function workspaceToDept(
     // Use the workspace's actual id/name — NOT the hardcoded canonical slug.
     // This is the key fix: the routing universe uses the CLIENT'S real names.
     id: ws.id,
+    slug: ws.slug,
     name: ws.name,
     purpose,
     keywords,
@@ -1551,7 +1554,7 @@ function workspaceToDept(
  *
  * Errors at each step are logged and the next step is tried.
  */
-export function loadDepartments(): DepartmentConfig[] {
+export function loadDepartments(companyId?: string): DepartmentConfig[] {
   // ── Step 1: external JSON override ────────────────────────────────────────
   const configPath = process.env.DEPARTMENTS_CONFIG_PATH;
   if (configPath) {
@@ -1573,7 +1576,12 @@ export function loadDepartments(): DepartmentConfig[] {
       }
 
       console.log(`[DepartmentConfig] Loaded ${parsed.length} departments from ${resolved}`);
-      return parsed;
+      if (!companyId) return parsed;
+      // Resolve lazily to avoid the configuration/database module cycle.
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { queryAll } = require('../db');
+      const ids = new Set((queryAll('SELECT id FROM workspaces WHERE company_id = ? AND archived_at IS NULL', [companyId]) as { id: string }[]).map(w => w.id));
+      return parsed.filter(d => ids.has(d.id));
     } catch (err) {
       console.warn(
         `[DepartmentConfig] Failed to load from DEPARTMENTS_CONFIG_PATH="${configPath}": ${(err as Error).message}. Falling back to DB.`,
@@ -1591,8 +1599,8 @@ export function loadDepartments(): DepartmentConfig[] {
     const db = getDb();
 
     const workspaces = db
-      .prepare('SELECT id, slug, name, description FROM workspaces ORDER BY name ASC')
-      .all() as { id: string; slug: string; name: string; description: string | null }[];
+      .prepare('SELECT id, slug, name, description FROM workspaces WHERE archived_at IS NULL' + (companyId ? ' AND company_id = ?' : '') + ' ORDER BY name ASC')
+      .all(...(companyId ? [companyId] : [])) as { id: string; slug: string; name: string; description: string | null }[];
 
     if (workspaces.length > 0) {
       const defaultMap = buildDefaultMap();
@@ -1604,12 +1612,15 @@ export function loadDepartments(): DepartmentConfig[] {
       return departments;
     }
 
+    if (companyId) return [];
     console.log('[DepartmentConfig] Workspaces table is empty — falling back to DEFAULT_DEPARTMENTS');
   } catch (err) {
     console.warn(
       `[DepartmentConfig] Could not query workspaces from DB: ${(err as Error).message}. Using DEFAULT_DEPARTMENTS.`,
     );
   }
+
+  if (companyId) return []; // Missing company configuration must fail closed.
 
   // ── Step 3: fallback to the vertical-derivation-guarded floor ──────────────
   // U107 (E5-2, closes G2a): this is the ONLY path that can hand a client all

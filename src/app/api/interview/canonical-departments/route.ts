@@ -1,3 +1,6 @@
+import { resolveInterviewTenant, refuseUnverifiedTenant } from '@/lib/interview/tenant';
+import { queueInterviewOperation } from '@/lib/interview/remote-store';
+import { deliverInterviewOperation } from '@/lib/interview/remote-protocol';
 /**
  * GET /api/interview/canonical-departments
  *
@@ -17,14 +20,21 @@
  *   500 { error, message } — unexpected script failure
  */
 
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { listCanonicalDepartments, InterviewScriptError } from '@/lib/interview/seam';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  const tenant=await resolveInterviewTenant(req); const refused=refuseUnverifiedTenant(tenant); if(refused)return refused;
+  if(tenant.kind==='client') {
+    try { const op=queueInterviewOperation(tenant.context!,'departments',{}); const delivery=await deliverInterviewOperation(tenant.context!,op);
+      return delivery.receipt ? NextResponse.json(delivery.receipt.result,{status:delivery.receipt.httpStatus}) : NextResponse.json({error:'remote_departments_unavailable',reason:delivery.reason},{status:503});
+    } catch { return NextResponse.json({error:'remote_departments_unavailable'},{status:503}); }
+  }
+
   try {
     const departments = await listCanonicalDepartments();
     return NextResponse.json(departments, { status: 200 });

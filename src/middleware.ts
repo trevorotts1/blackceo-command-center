@@ -1,3 +1,4 @@
+import { resolveTenantContext, tenantRegistration, requestHost } from '@/lib/auth/tenant-context';
 import { NextRequest, NextResponse } from 'next/server';
 import { recordCfAccessSeen } from '@/lib/probes/cloudflare-access-probe';
 import {
@@ -441,6 +442,19 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
     return response;
   }
 
+  // The invitation bootstrap shell has no tenant data; its APIs authenticate separately.
+  // This permits first-party enrollment even when Access enforcement is enabled.
+  if (pathname === '/interview' && (request.method === 'GET' || request.method === 'HEAD')) {
+    try { tenantRegistration(requestHost(request)); }
+    catch { return NextResponse.json({error:'unregistered_hostname'},{status:403}); }
+    const response=NextResponse.next();
+    await setCsrfCookieIfMissing(response,request);
+    return response;
+  }
+
+  // These routes verify narrow signed, expiry-bound capabilities themselves.
+  if (pathname === '/api/auth/interview-session' || pathname === '/api/interview/remote') return NextResponse.next();
+
   // Layer 1: Cloudflare Access.
   // When REQUIRE_CF_ACCESS is on, every non-health route must carry the CF
   // Access headers. Cloudflare populates these on its edge. Absence means
@@ -451,17 +465,8 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
   if (cfJwt) recordCfAccessSeen(cfEmail);
 
   if (REQUIRE_CF_ACCESS) {
-    if (!cfJwt || !cfEmail) {
-      // MISCONFIGURATION, not a credential failure — and it carries the DEFAULT
-      // 401 status, which is exactly why the telemetry guard discriminates on
-      // the signal rather than on the status code. This response must never
-      // touch the credential-failure counter.
-      return unauthorized(
-        request,
-        'This deployment is misconfigured. Cloudflare Access is not active on this subdomain. Contact the operator.',
-        'cf-access-misconfigured'
-      );
-    }
+    try { await resolveTenantContext(request); }
+    catch { return unauthorized(request, 'A verified tenant identity is required', 'cf-access-misconfigured', 403); }
   }
 
   // Layer 2: MC_API_TOKEN for /api/* external callers.
@@ -481,6 +486,27 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
         503
       );
     }
+
+    // All browser identities are tenant-bound, even when Origin/Referer is absent.
+    let apiTenant: Awaited<ReturnType<typeof resolveTenantContext>> | null = null;
+    try { apiTenant = await resolveTenantContext(request); } catch { /* legacy signed producer gates below still apply */ }
+    if (apiTenant?.kind === 'client' && !pathname.startsWith('/api/interview/') && !pathname.startsWith('/api/auth/') && !pathname.startsWith('/api/tenant-board/')) {
+      if (!isReadOnlyMethod(request.method) && apiTenant.subject !== 'operator:api' && !await verifyCsrfToken(request.cookies.get(CSRF_COOKIE_NAME)?.value)) {
+        return unauthorized(request, 'Unauthorized', 'missing-csrf-token');
+      }
+      const remote = request.nextUrl.clone();
+      remote.pathname = '/api/tenant-board/' + pathname.slice('/api/'.length);
+      return NextResponse.rewrite(remote);
+    }
+    const expectedInstallation = request.headers.get('x-expected-installation-id');
+    if (expectedInstallation && (!apiTenant || apiTenant.kind !== 'self' || expectedInstallation !== apiTenant.installationId || expectedInstallation !== process.env.MC_INSTALLATION_ID)) {
+      return NextResponse.json({error:'installation_mismatch'}, {status:403});
+    }
+    const authenticatedNext = () => {
+      const response = NextResponse.next();
+      if (apiTenant && process.env.MC_INSTALLATION_ID === apiTenant.installationId) response.headers.set('x-installation-id', apiTenant.installationId);
+      return response;
+    };
 
     // Same-origin passthrough — the board rendering its OWN data (v4.72.0).
     //
@@ -526,8 +552,9 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
     if (
       !isWebhookSecretRoute(pathname) &&
       !requiresBearerForWrite(pathname, request.method) &&
-      isSameOriginRequest(request)
+      (isSameOriginRequest(request) || (apiTenant !== null && apiTenant.subject !== 'operator:api'))
     ) {
+      if (!apiTenant) return unauthorized(request, 'A verified tenant identity is required', 'token-mismatch', 403);
       // MR-23: mutating methods require the signed CSRF cookie. This closes the
       // CROSS-SITE forgery vector (SameSite=Strict means a foreign site's request
       // never carries the cookie) and the unsigned-double-submit forgery vector
@@ -549,7 +576,7 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
           );
         }
       }
-      const passthrough = NextResponse.next();
+      const passthrough = authenticatedNext();
       if (cfEmail) passthrough.headers.set('x-operator-email', cfEmail);
       return passthrough;
     }
@@ -560,7 +587,7 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
     // closed (503) unless the operator explicitly opted into the open mode.
     if (!MC_API_TOKEN) {
       if (ALLOW_INSECURE_OPEN_API) {
-        const passthrough = NextResponse.next();
+        const passthrough = authenticatedNext();
         if (cfEmail) passthrough.headers.set('x-operator-email', cfEmail);
         return passthrough;
       }
@@ -584,7 +611,14 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
     if (pathname === '/api/events/stream') {
       const queryToken = request.nextUrl.searchParams.get('token');
       if (queryToken && timingSafeEqualStr(queryToken, MC_API_TOKEN)) {
-        return NextResponse.next();
+        // Legacy operator streaming remains confined to an explicitly registered
+        // self installation. A query token must not bypass client proxy routing.
+        const authenticatedHeaders = new Headers(request.headers);
+        authenticatedHeaders.set('authorization', `Bearer ${queryToken}`);
+        try { apiTenant = await resolveTenantContext({headers: authenticatedHeaders}); }
+        catch { return NextResponse.json({error:'unverified_tenant_registration'}, {status:403}); }
+        if (apiTenant.kind !== 'self') return NextResponse.json({error:'client_stream_requires_tenant_session'}, {status:403});
+        return authenticatedNext();
       }
     }
 
@@ -605,8 +639,9 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
     if (!timingSafeEqualStr(token, MC_API_TOKEN)) {
       return unauthorized(request, 'Unauthorized', 'token-mismatch');
     }
+    if (!apiTenant) return NextResponse.json({error:'unverified_tenant_registration'}, {status:403});
 
-    const passthrough = NextResponse.next();
+    const passthrough = authenticatedNext();
     if (cfEmail) passthrough.headers.set('x-operator-email', cfEmail);
     return passthrough;
   }
@@ -630,8 +665,11 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
     !isInterviewGateExempt(pathname)
   ) {
     const token = request.cookies.get(INTERVIEW_COOKIE_NAME)?.value;
-    const verdict = await verifyInterviewToken(token);
-    if (verdict.complete === true) {
+    let scope='unverified';
+    try { const tenant=await resolveTenantContext(request); scope=`${tenant.tenantId}:${tenant.installationId}:${tenant.host}`; }
+    catch { return NextResponse.redirect(new URL('/interview', request.url),302); }
+    const verdict = await verifyInterviewToken(token,scope);
+    if (verdict.complete === true && verdict.valid && await checkInterviewCompleteViaFallback(request.headers.get('host'))) {
       // Primary cookie is valid-complete — admit immediately.
     } else {
       // MR-17: admin escape hatches BEFORE the fallback chain. A corrupted
@@ -680,8 +718,8 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
       }
       const latchToken = request.cookies.get(LATCH_COOKIE_NAME)?.value;
       if (latchToken) {
-        const latchVerdict = await verifyInterviewToken(latchToken);
-        if (latchVerdict.complete === true && latchVerdict.valid) {
+        const latchVerdict = await verifyInterviewToken(latchToken,scope);
+        if (latchVerdict.complete === true && latchVerdict.valid && await checkInterviewCompleteViaFallback(request.headers.get('host'))) {
           admitted = true;
         }
       }
@@ -703,7 +741,7 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
         // U010: fallback admitted the request — mint a signed complete cookie on
         // the response so subsequent requests skip the HTTP fallback round-trip.
         // signInterviewToken is Edge-safe (WebCrypto only, no Node imports).
-        const { value, maxAge } = await signInterviewToken(true);
+        const { value, maxAge } = await signInterviewToken(true,scope);
         const response = NextResponse.next();
         response.cookies.set(INTERVIEW_COOKIE_NAME, value, {
           httpOnly: true,

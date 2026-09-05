@@ -2,6 +2,8 @@ import { NextResponse } from 'next/server';
 import { readFile } from 'fs/promises';
 import { join } from 'path';
 import { existsSync } from 'fs';
+import { resolveTenantContext } from '@/lib/auth/tenant-context';
+import { personaCompanyContext } from '@/lib/persona-company';
 import { zhcLibraryBaseDirs } from '@/lib/platform';
 
 export const dynamic = 'force-dynamic';
@@ -19,12 +21,13 @@ export const revalidate = 0;
  * `/data/.openclaw/workspace`); we probe `departments/persona-matrix.md` and
  * `persona-matrix.md` under each.
  */
-export async function GET() {
-  const candidatePaths: string[] = [];
-  for (const base of zhcLibraryBaseDirs()) {
-    candidatePaths.push(join(base, 'departments', 'persona-matrix.md'));
-    candidatePaths.push(join(base, 'persona-matrix.md'));
-  }
+export async function GET(request: Request) {
+  let candidatePaths: string[];
+  try {
+    const tenant=await resolveTenantContext(request);
+    const context=personaCompanyContext(tenant.companyId);
+    candidatePaths=[join(context.companyRoot,'departments','persona-matrix.md'),join(context.companyRoot,'persona-matrix.md')];
+  } catch { return NextResponse.json({success:false,message:'Company persona context unavailable'},{status:403}); }
 
   let filePath: string | null = null;
   for (const candidate of candidatePaths) {

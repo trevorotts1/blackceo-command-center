@@ -125,6 +125,7 @@ export const CreateTaskSchema = z.object({
 });
 
 export const UpdateTaskSchema = z.object({
+  execution_id: z.string().uuid().optional(),
   title: z.string().min(1).max(500).optional(),
   description: z.string().max(10000).optional(),
   status: TaskStatus.optional(),

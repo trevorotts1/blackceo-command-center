@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createHash } from 'crypto';
+import { TaskContextError, TaskRequestConflict, taskRequestFingerprint, taskRequestCompany } from '@/lib/task-request-identity';
 import { queryOne, getDb, run } from '@/lib/db';
 import { v4 as uuidv4 } from 'uuid';
 import { runMigrations } from '@/lib/db/migrations';
-import { createTaskCore } from '@/lib/tasks';
+import { createTaskCore, validateProducerPersonaBundle } from '@/lib/tasks';
+import type { PersonaBundle } from '@/lib/types';
 import { routeTask } from '@/lib/routing/department-router';
 import type { TaskPriority } from '@/lib/types';
 import { notifyOwnerSchemaError } from '@/lib/owner-reports';
@@ -15,8 +16,6 @@ import { normalizeRequesterSessionKey } from '@/lib/requester-session';
 // the SAME company-scope convention PR #262 established for
 // /api/presentations/children and /api/presentations/[taskId]/phases, so a
 // child card can never be attached to a parent outside the active company.
-import { resolveActiveCompanyId } from '@/lib/company';
-import { boardWhereClause } from '@/lib/workspaces/board-query';
 // ANTHOLOGY-CC — pure, framework-free helper that surfaces the anthology
 // sole-writer subject key onto the card's `Ref:` line (see below). Import-safe
 // server-side: anthology-card.ts has no React / client-only imports.
@@ -107,6 +106,7 @@ let selfHealState: 'idle' | 'running' | 'done' = 'idle';
  */
 
 interface IngestPayload {
+  persona_bundle?: unknown;
   title?: unknown;
   description?: unknown;
   priority?: unknown;
@@ -258,7 +258,7 @@ const VALID_PRIORITIES = new Set<TaskPriority>(['low', 'medium', 'high', 'critic
  * the ingest still captures the task (nothing is lost) but does NOT force it
  * through automatic department classification.
  */
-function isWorkforceProvisioned(): { provisioned: boolean; reason: string } {
+function isWorkforceProvisioned(companyId: string): { provisioned: boolean; reason: string } {
   // (2) Materialized, non-shell departments with a live specialist agent.
   const materialized = queryOne<{ n: number }>(
     `SELECT COUNT(DISTINCT w.id) AS n
@@ -267,12 +267,12 @@ function isWorkforceProvisioned(): { provisioned: boolean; reason: string } {
          ON a.workspace_id = w.id
         AND a.is_master = 0
         AND a.status != 'offline'
-      WHERE lower(w.slug) NOT IN
+      WHERE w.company_id = ? AND lower(w.slug) NOT IN
               ('master-orchestrator', 'ceo', 'dept-ceo',
                'general-task', 'dept-general-task', 'general')
         AND lower(w.name) NOT IN
               ('ceo', 'master orchestrator', 'general task', 'general')`,
-    [],
+    [companyId],
   );
   const hasMaterializedDepts = (materialized?.n ?? 0) > 0;
 
@@ -312,92 +312,20 @@ function isWorkforceProvisioned(): { provisioned: boolean; reason: string } {
  * hand off a real workspace_id (or null, which createTaskCore handles gracefully).
  * We NEVER return the bare 'default' literal unless it actually has a DB row.
  */
-function resolveWorkspaceId(
-  departmentSlug: string | undefined,
-  persona: string | undefined
-): { workspaceId: string | null; resolvedBy: string } {
-  // 1. department_slug → workspaces.slug (or id).
-  if (departmentSlug) {
-    const slug = departmentSlug.toLowerCase();
-    const bySlug = queryOne<{ id: string }>(
-      'SELECT id FROM workspaces WHERE lower(slug) = ? OR lower(id) = ? LIMIT 1',
-      [slug, slug]
-    );
-    if (bySlug) return { workspaceId: bySlug.id, resolvedBy: `department_slug:${departmentSlug}` };
+function resolveWorkspaceId(departmentSlug: string | undefined, persona: string | undefined, companyId: string): {workspaceId:string|null;resolvedBy:string} {
+  const rows = getDb().prepare('SELECT id,slug,name FROM workspaces WHERE company_id=? AND archived_at IS NULL ORDER BY sort_order,id')
+    .all(companyId) as {id:string;slug:string;name:string}[];
+  const match = departmentSlug ? rows.filter(w => w.slug.toLowerCase()===departmentSlug.toLowerCase() || w.id.toLowerCase()===departmentSlug.toLowerCase()) : [];
+  if (match.length===1) return {workspaceId:match[0].id,resolvedBy:`department_slug:${departmentSlug}`};
+  if (!departmentSlug && persona) {
+    const named=rows.filter(w => w.name.toLowerCase()===persona.toLowerCase());
+    if(named.length===1) return {workspaceId:named[0].id,resolvedBy:`persona:${persona}`};
   }
-
-  // 2. persona → workspaces.name (case-insensitive). Lets a caller route by the
-  //    department head/persona name without knowing the slug.
-  if (persona) {
-    const byName = queryOne<{ id: string }>(
-      'SELECT id FROM workspaces WHERE lower(name) = ? LIMIT 1',
-      [persona.toLowerCase()]
-    );
-    if (byName) return { workspaceId: byName.id, resolvedBy: `persona:${persona}` };
-  }
-
-  // INGEST-06 — EXPLICIT-but-unrecognized department slug.
-  // When the caller EXPLICITLY supplied a department_slug that resolved to no
-  // workspace (tier 1 missed) and no persona rescued it (tier 2 missed), we must
-  // NOT let it soft-fall into the CEO catch-all or the first arbitrary workspace
-  // below (P4 misroute): that silently drops a mis-tagged task onto a real,
-  // unrelated department and makes it look correctly routed. Instead route it to
-  // the honest `general-task` catch-all — tagged `unrecognized-slug->general` so a
-  // QC sweep can flag the mis-tag — or, if this box has no general-task workspace,
-  // leave workspace_id NULL (FK-safe; the card is still captured and visible in the
-  // All Tasks view) rather than guessing a department. `general-task` is the "we
-  // could not route this" bucket; it is NOT an arbitrary department.
-  if (departmentSlug) {
-    const general = queryOne<{ id: string }>(
-      `SELECT id FROM workspaces
-        WHERE lower(slug) IN ('general-task', 'dept-general-task', 'general')
-           OR lower(name) IN ('general task', 'general')
-        ORDER BY rowid ASC LIMIT 1`,
-      [],
-    );
-    if (general) return { workspaceId: general.id, resolvedBy: 'unrecognized-slug->general' };
-    return { workspaceId: null, resolvedBy: 'unrecognized-slug->unrouted' };
-  }
-
-  // 3. CEO catch-all. Match all canonical CEO/master-orchestrator slugs.
-  //    The canonical slug is `master-orchestrator` (migration 051 rewrites
-  //    legacy `ceo` / `dept-ceo` slugs on first boot), so we include all
-  //    three to work on both migrated and legacy databases.  Display name
-  //    is free text (the client's main-agent persona), so we match only
-  //    'ceo' and 'master orchestrator' as name fallbacks.
-  const ceo = queryOne<{ id: string }>(
-    `SELECT id FROM workspaces
-      WHERE lower(slug) IN ('master-orchestrator', 'ceo', 'dept-ceo')
-         OR lower(name) IN ('ceo', 'master orchestrator')
-      ORDER BY sort_order ASC LIMIT 1`,
-    []
-  );
-  if (ceo) return { workspaceId: ceo.id, resolvedBy: 'ceo-fallback' };
-
-  // 4. General-task workspace — the correct catch-all when no CEO is seeded.
-  //    Bare tasks that cannot be semantically routed land here rather than
-  //    erroring out.
-  const general = queryOne<{ id: string }>(
-    `SELECT id FROM workspaces
-      WHERE lower(slug) IN ('general-task', 'dept-general-task', 'general')
-         OR lower(name) IN ('general task', 'general')
-      ORDER BY rowid ASC LIMIT 1`,
-    []
-  );
-  if (general) return { workspaceId: general.id, resolvedBy: 'general-task-fallback' };
-
-  // 5. ANY workspace — last real resort so we never pass a nonexistent sentinel.
-  //    A bare install with at least one workspace seeded will always reach this.
-  const anyWs = queryOne<{ id: string }>(
-    `SELECT id FROM workspaces ORDER BY rowid ASC LIMIT 1`,
-    []
-  );
-  if (anyWs) return { workspaceId: anyWs.id, resolvedBy: 'first-workspace-fallback' };
-
-  // 6. Truly empty install (no workspaces at all) — pass null so createTaskCore
-  //    inserts without a workspace FK rather than crashing on a nonexistent id.
-  //    The task will be visible in the All Tasks board view.
-  return { workspaceId: null, resolvedBy: 'no-workspace-fallback' };
+  const namedGeneral=rows.filter(w => w.name.trim().toLowerCase()==='general task');
+  const general=rows.find(w => ['general-task','dept-general-task','general'].includes(w.slug.toLowerCase())) || (namedGeneral.length===1 ? namedGeneral[0] : undefined);
+  if(departmentSlug) return {workspaceId:general?.id??null,resolvedBy:general?'unrecognized-slug->general':'unrecognized-slug->unrouted'};
+  const ceo=rows.find(w => ['master-orchestrator','ceo','dept-ceo'].includes(w.slug.toLowerCase()));
+  return {workspaceId:general?.id??ceo?.id??null,resolvedBy:general?'general-task-fallback':ceo?'ceo-fallback':'no-workspace-fallback'};
 }
 
 export async function POST(request: NextRequest) {
@@ -475,6 +403,8 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'title must be 500 characters or less' }, { status: 400 });
     }
 
+    const ingestCompanyId = taskRequestCompany(getDb(), null, process.env.MC_COMPANY_ID);
+
     // FIX 3 — re-ingest loop gate.
     // When a caller passes existing_task_id and that task already exists with a
     // non-master assigned agent, reject immediately.  This is the hard stop for
@@ -485,9 +415,9 @@ export async function POST(request: NextRequest) {
       const existingTask = queryOne<{ id: string; assigned_agent_id: string | null; title: string }>(
         `SELECT t.id, t.assigned_agent_id, t.title
          FROM tasks t
-         WHERE t.id = ?
+         WHERE t.id = ? AND (EXISTS (SELECT 1 FROM workspaces w WHERE w.id=t.workspace_id AND w.company_id=?) OR EXISTS (SELECT 1 FROM task_request_keys k WHERE k.task_id=t.id AND k.company_id=?))
          LIMIT 1`,
-        [existingTaskId],
+        [existingTaskId, ingestCompanyId, ingestCompanyId],
       );
       if (existingTask) {
         // If assigned to any agent (specialist or master), this task already exists —
@@ -522,9 +452,9 @@ export async function POST(request: NextRequest) {
           `SELECT t.id, t.assigned_agent_id
            FROM tasks t
            LEFT JOIN agents a ON t.assigned_agent_id = a.id
-           WHERE t.id = ? AND a.is_master = 0
+           WHERE t.id = ? AND a.is_master = 0 AND (EXISTS (SELECT 1 FROM workspaces w WHERE w.id=t.workspace_id AND w.company_id=?) OR EXISTS (SELECT 1 FROM task_request_keys k WHERE k.task_id=t.id AND k.company_id=?))
            LIMIT 1`,
-          [embeddedTaskId],
+          [embeddedTaskId, ingestCompanyId, ingestCompanyId],
         );
         if (embeddedTask) {
           console.warn(
@@ -563,18 +493,8 @@ export async function POST(request: NextRequest) {
     const departmentSlug =
       typeof body.department_slug === 'string' ? body.department_slug.trim() : undefined;
 
-    // ── WI-15b (D1 Option B — NESTED subtasks): parent_task_id validation ──────
-    // A caller (the Presentations department engine's cc_board.py, per-phase)
-    // may attach this ingest to a parent deck-run row. Validate it BEFORE any
-    // write: the parent must exist AND resolve into the SAME company scope as
-    // this box's active company — reusing the EXACT resolveActiveCompanyId +
-    // boardWhereClause convention /api/presentations/children and
-    // /api/presentations/[taskId]/phases already use (PR #262), so a child
-    // card can never be linked to another company's parent. A missing/foreign
-    // parent_task_id is treated the same way those routes treat "not found":
-    // it never distinguishes "exists but not yours" from "doesn't exist" —
-    // both simply fail the ingest rather than silently attaching cross-company
-    // or silently dropping the link.
+    // Parent ownership must be proven by its workspace or durable creation identity.
+    // An unassigned workspace is not evidence that a task belongs to this company.
     const parentTaskIdRaw =
       typeof body.parent_task_id === 'string' ? body.parent_task_id.trim() : undefined;
     let parentTaskId: string | null = null;
@@ -585,19 +505,11 @@ export async function POST(request: NextRequest) {
     let parentDescription: string | null = null;
     if (parentTaskIdRaw) {
       const db = getDb();
-      const activeCompanyId = resolveActiveCompanyId(db);
-      const scope = boardWhereClause(activeCompanyId);
-      const scopedWorkspaceIds = (
-        db.prepare(`SELECT w.id FROM workspaces w ${scope.sql}`).all(...scope.params) as { id: string }[]
-      ).map((w) => w.id);
-      const scopeIdList = scopedWorkspaceIds.length > 0 ? scopedWorkspaceIds : ['__no_workspace__'];
-      const scopePlaceholders = scopeIdList.map(() => '?').join(',');
-      const parent = db
-        .prepare(
-          `SELECT id, description FROM tasks
-            WHERE id = ? AND (workspace_id IS NULL OR workspace_id IN (${scopePlaceholders}))`,
-        )
-        .get(parentTaskIdRaw, ...scopeIdList) as
+      const parent = db.prepare(`SELECT t.id, t.description FROM tasks t
+        WHERE t.id = ? AND (
+          EXISTS (SELECT 1 FROM workspaces w WHERE w.id=t.workspace_id AND w.company_id=?) OR
+          EXISTS (SELECT 1 FROM task_request_keys k WHERE k.task_id=t.id AND k.company_id=?)
+        )`).get(parentTaskIdRaw, ingestCompanyId, ingestCompanyId) as
         | { id: string; description: string | null }
         | undefined;
       if (!parent) {
@@ -869,30 +781,26 @@ export async function POST(request: NextRequest) {
         : undefined;
     const voicePersonaId = voicePersonaIdRaw || undefined;
 
-    // Deterministic dedupe key: idempotency_key wins, else source_ref, else a
-    // synthesized intrinsic key.
-    // NOTE: The actual idempotency check lives in createTaskCore (Layer 1). We
-    // pass the key through so createTaskCore embeds it in the event message AND
-    // checks it before inserting.
-    //
-    // INGEST-01 — a bare retry that supplies NEITHER an idempotency_key NOR a
-    // source_ref previously reached createTaskCore with no Layer-1 anchor, so two
-    // identical posts (a Telegram/backfill retry) each created a card. INGEST-02 —
-    // Layer 2's title window is workspace-scoped, so a retry that routed to a
-    // DIFFERENT workspace evaded it too. Synthesizing
-    // sha256(title | source | external_session_id) gives Layer 1 a
-    // workspace-INDEPENDENT anchor for every ingest, so an identical retry
-    // collapses onto the first card regardless of which workspace routing picked.
-    // Layer 2 in createTaskCore stays intact for other keyless callers (UI, plain
-    // Telegram) — this synthesis is scoped to the ingest front door only.
-    const syntheticDedupeKey =
-      'auto:' +
-      createHash('sha256')
-        .update(`${title}|${source ?? ''}|${externalSessionId ?? ''}`)
-        .digest('hex');
-    const dedupeKey = idempotencyKey || sourceRef || syntheticDedupeKey;
+    // New occurrences must remain distinct. Producers preserve operation IDs across retries.
+    const headerKey = request.headers.get('idempotency-key')?.trim();
+    if (headerKey && idempotencyKey && headerKey !== idempotencyKey) {
+      return NextResponse.json({ error: 'conflicting_idempotency_keys' }, { status: 400 });
+    }
+    const dedupeKey = headerKey || idempotencyKey || sourceRef || uuidv4();
+    if (dedupeKey.length > 512) return NextResponse.json({ error: 'idempotency_key_too_long' }, { status: 400 });
+    const { idempotency_key: _operationKey, ...semanticPayload } = body;
+    const requestFingerprint = taskRequestFingerprint(semanticPayload);
 
-    let { workspaceId, resolvedBy }: { workspaceId: string | null; resolvedBy: string } = resolveWorkspaceId(resolvedDeptSlug, persona);
+    let { workspaceId, resolvedBy }: { workspaceId: string | null; resolvedBy: string } = resolveWorkspaceId(resolvedDeptSlug, persona, ingestCompanyId);
+    let routingHoldReason: string | null = resolvedBy.startsWith('unrecognized-slug') ? `Requested department ${resolvedDeptSlug} is unavailable in this company.` : null;
+    const producerBundle = body.persona_bundle as PersonaBundle | undefined;
+    if (producerBundle && (!voicePersonaId || typeof producerBundle !== 'object' || Array.isArray(producerBundle))) {
+      return NextResponse.json({error:'invalid_persona_bundle'}, {status:400});
+    }
+    if (voicePersonaId) {
+      try { validateProducerPersonaBundle({voice_persona_id:voicePersonaId,topic_persona_id:topicPersonaId,task_persona_ids:taskPersonaIds,bundle_sha:bundleSha,persona_bundle:producerBundle}, ingestCompanyId); }
+      catch (error) { return NextResponse.json({error:'invalid_persona_bundle',message:error instanceof Error?error.message:'Invalid persona decision'}, {status:400}); }
+    }
     let resolvedDepartment: string | undefined = resolvedDeptSlug;
     // INGEST-06 — the explicit slug was unrecognized and got redirected to the
     // general-task catch-all (or left unrouted). Report the department we ACTUALLY
@@ -918,9 +826,11 @@ export async function POST(request: NextRequest) {
           description: description ?? '',
           priority: priority ?? 'medium',
           target_agent: targetAgent,
+          company_id: ingestCompanyId,
           workspace_id: undefined,
         });
         if (pin) {
+          routingHoldReason = null;
           pinnedAgentId = pin.agentId;
           resolvedDepartment = pin.department;
           resolvedBy = `owner-direct-specialist:${targetAgent}`;
@@ -935,14 +845,16 @@ export async function POST(request: NextRequest) {
               `(${pin.department}); bypassing department routing.`,
           );
         } else {
+          routingHoldReason = `The requested specialist ${targetAgent} is not available in this company.`;
           console.warn(
             `[INGEST] Owner named specialist "${targetAgent}" but no matching agent was ` +
-              `found — falling back to normal routing.`,
+              `found — holding for an explicit assignment.`,
           );
         }
       } catch (pinErr) {
+        routingHoldReason = `The requested specialist ${targetAgent} could not be verified.`;
         console.warn(
-          '[INGEST] Specialist-pin resolution failed (non-fatal), continuing with normal routing:',
+          '[INGEST] Specialist-pin resolution failed; holding for a verified assignment:',
           (pinErr as Error).message,
         );
       }
@@ -953,7 +865,7 @@ export async function POST(request: NextRequest) {
     // zero-human company (completed interview + materialized departments).
     // An interview-incomplete / shell box is EXEMPT: the task is still captured,
     // but we do NOT force it through department classification.
-    const provisioning = isWorkforceProvisioned();
+    const provisioning = isWorkforceProvisioned(ingestCompanyId);
     if (!provisioning.provisioned) {
       console.log(
         `[INGEST] Routing gate: box NOT workforce-provisioned (${provisioning.reason}) — ` +
@@ -973,7 +885,7 @@ export async function POST(request: NextRequest) {
     // behaviour introduced above (CEO / default fallback) is preserved exactly.
     // Tagged-task behaviour (department_slug present) is unchanged — we skip
     // this block entirely.
-    if (!departmentSlug && !pinnedAgentId && provisioning.provisioned) {
+    if (!departmentSlug && !pinnedAgentId && !routingHoldReason && provisioning.provisioned) {
       try {
         const routing = await routeTask({
           title,
@@ -990,20 +902,13 @@ export async function POST(request: NextRequest) {
           // department. (resolveWorkspaceId's value is still kept as the
           // fallback for when routeTask returns null.)
           workspace_id: undefined,
+          company_id: ingestCompanyId,
         });
         if (routing) {
           // Override the CEO/default workspace with the resolved department
           // workspace so the task lands on the right Kanban column.
-          const resolvedWs = queryOne<{ id: string }>(
-            `SELECT id FROM workspaces
-              WHERE lower(name) = ? OR lower(slug) = ?
-              LIMIT 1`,
-            [routing.department.toLowerCase(), routing.department.toLowerCase()],
-          );
-          if (resolvedWs) {
-            workspaceId = resolvedWs.id;
-            resolvedBy = `auto-route:${routing.department}`;
-          }
+          workspaceId = routing.workspaceId ?? null;
+          resolvedBy = `auto-route:${routing.department}`;
           resolvedDepartment = routing.department;
           console.log(
             `[INGEST] Auto-routed "${title}" → department "${routing.department}" (${routing.reason})`,
@@ -1013,10 +918,10 @@ export async function POST(request: NextRequest) {
           // 'general-task' slug so the task is never left unrouted in backlog.
           const generalWs = queryOne<{ id: string }>(
             `SELECT id FROM workspaces
-              WHERE lower(slug) IN ('general-task', 'dept-general-task')
-                 OR lower(name) IN ('general task', 'general')
+              WHERE company_id = ? AND archived_at IS NULL AND (lower(slug) IN ('general-task', 'dept-general-task')
+                 OR lower(name) IN ('general task', 'general'))
               LIMIT 1`,
-            [],
+            [ingestCompanyId],
           );
           if (generalWs) {
             workspaceId = generalWs.id;
@@ -1084,7 +989,11 @@ export async function POST(request: NextRequest) {
         eventMessage,
         // Pass idempotency key through so createTaskCore embeds it in the
         // task_created event AND checks it before writing a new row.
-        idempotency_key: dedupeKey ?? null,
+        idempotency_key: dedupeKey,
+        idempotency_payload_hash: requestFingerprint,
+        idempotency_company_id: ingestCompanyId,
+        routing_hold_reason: routingHoldReason,
+        persona_bundle: producerBundle,
         // INGEST-10: stamp the immutable tasks.source column from this
         // VALIDATED ingest source (line ~435: trimmed string or undefined —
         // never raw/unvalidated caller text). This is the authoritative,
@@ -1233,6 +1142,7 @@ export async function POST(request: NextRequest) {
         {
           ok: true,
           deduped: true,
+          operation_id: dedupeKey,
           task_id: task.id,
           workspace_id: task.workspace_id ?? workspaceId,
           resolved_by: resolvedBy,
@@ -1246,6 +1156,7 @@ export async function POST(request: NextRequest) {
       {
         ok: true,
         deduped: false,
+        operation_id: dedupeKey,
         task_id: task.id,
         workspace_id: workspaceId,
         resolved_by: resolvedBy,
@@ -1254,6 +1165,8 @@ export async function POST(request: NextRequest) {
       { status: 201 }
     );
   } catch (error) {
+    if (error instanceof TaskContextError) return NextResponse.json({error:error.message}, {status:error.status});
+    if (error instanceof TaskRequestConflict) return NextResponse.json({ error: 'idempotency_conflict', message: error.message }, { status: 409 });
     const msg = error instanceof Error ? error.message : String(error);
     console.error('[INGEST] Failed to ingest task:', error);
 

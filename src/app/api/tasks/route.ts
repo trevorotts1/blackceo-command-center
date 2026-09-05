@@ -1,3 +1,4 @@
+import { TaskContextError } from '@/lib/task-request-identity';
 import { NextRequest, NextResponse } from 'next/server';
 import { queryAll, queryOne } from '@/lib/db';
 import { CreateTaskSchema } from '@/lib/validation';
@@ -358,6 +359,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json(result.task, { status: 201 });
   } catch (error) {
+    if (error instanceof TaskContextError) return NextResponse.json({error:error.message}, {status:error.status});
     console.error('Failed to create task:', error);
     return NextResponse.json({ error: 'Failed to create task' }, { status: 500 });
   }

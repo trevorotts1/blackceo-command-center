@@ -131,16 +131,16 @@ test('create with workspace_id:"default" and no such row does NOT throw / 500 �
 });
 
 // ── Any other unresolvable workspace_id (not just the literal 'default')
-//    must be handled the same way. ───────────────────────────────────────────
-test('create with a random unresolvable workspace_id does NOT throw / 500', async () => {
+//    must be rejected without silently switching the requested company/lane. ───────────────────────────────────────────
+test('create with a random unresolvable workspace_id returns actionable 400', async () => {
   const res = await callCreate({
     title: `Untitled phantom-ws B ${RUN_ID}`,
     workspace_id: `ws-does-not-exist-${RUN_ID}`,
   });
-  const bodyText = await res.clone().text().catch(() => '<unreadable body>');
-  assert.equal(res.status, 201, `expected 201, got ${res.status}. Body: ${bodyText}`);
-  const body = (await res.json()) as { workspace_id: string | null };
-  assert.equal(body.workspace_id, null);
+  assert.equal(res.status,400);
+  const body=await res.json();
+  assert.match(body.error,/workspace is unavailable/);
+  assert.equal(queryOne('SELECT id FROM tasks WHERE title=?',[`Untitled phantom-ws B ${RUN_ID}`]),undefined);
 });
 
 // ── Guard: a REAL workspace_id must still resolve correctly (the fix must not

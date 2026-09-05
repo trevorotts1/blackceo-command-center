@@ -195,7 +195,11 @@ export function buildPersonaBlock(
   // A decided voice blend rides ON TOP of whichever persona branch fired, so the
   // audience-voice / topic-expertise directive (and its mandatory guardrail) reaches
   // the doer alongside the load contract. Absent on a non-blend task → base unchanged.
-  const directive = (task.blend_directive ?? '').trim();
+  const operatorLocked = settings.persona && settings.persona !== 'auto' &&
+    (settings.personaSource === 'role_override' || settings.personaSource === 'department_default');
+  // A legacy blend cannot contradict an explicit replacement lock. The shared
+  // dispatch gate holds governed content until the replacement is rescored.
+  const directive = operatorLocked && settings.persona !== task.persona_id ? '' : (task.blend_directive ?? '').trim();
   if (directive) {
     return `${base}\n${renderBlendDirective(directive)}`;
   }

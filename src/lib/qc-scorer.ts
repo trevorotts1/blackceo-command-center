@@ -1,3 +1,5 @@
+import { resolveOpenClawRuntimeRoot } from '@/lib/openclaw/runtime-root';
+import { throwIfJobLeaseLost } from '@/lib/jobs/job-lease';
 /**
  * QC Agent Auto-Scorer
  *
@@ -59,6 +61,7 @@
  * (human decides) and log a warning. Never crashes the PATCH route.
  */
 
+import { requirePersonaConformanceForCompletion } from '@/lib/persona-conformance';
 import { readFileSync, writeFileSync, renameSync, unlinkSync, existsSync, statSync, openSync, readSync, closeSync, readdirSync } from 'fs';
 import * as path from 'path';
 import { resolvePresentationRunRoots } from '@/lib/presentation-run-roots';
@@ -397,6 +400,7 @@ export interface RerouteOrBlockParams {
  * returned outcome so it states the move the task actually took.
  */
 export async function rerouteOrBlock(p: RerouteOrBlockParams): Promise<QCRerouteOutcome> {
+  throwIfJobLeaseLost();
   if (p.attempts >= p.cap) {
     // At/over cap: block with the scorer's classified audience — same
     // construction as the ordinary llm-fail cap branch below.
@@ -544,7 +548,8 @@ const AF_I14_AGENT_IDS = new Set(['dept-presentations']);
  * agents root at all.
  */
 function af_i14SessionRoots(agentId: string | null): string[] {
-  const base = path.join(process.env.HOME || '~', '.openclaw', 'agents');
+  let base: string;
+  try { base = path.join(resolveOpenClawRuntimeRoot(), 'agents'); } catch { return []; }
   const roots: string[] = [];
   // Most-specific first: the task's own assigned agent (any department).
   if (agentId) roots.push(path.join(base, agentId, 'sessions'));
@@ -563,7 +568,8 @@ function af_i14SessionRoots(agentId: string | null): string[] {
  * readdirSync can never run merely by computing the cheap root list above.
  */
 function af_i14AllAgentSessionRoots(): string[] {
-  const base = path.join(process.env.HOME || '~', '.openclaw', 'agents');
+  let base: string;
+  try { base = path.join(resolveOpenClawRuntimeRoot(), 'agents'); } catch { return []; }
   const roots: string[] = [];
   try {
     if (existsSync(base)) {
@@ -600,7 +606,8 @@ function deterministicQCSessionId(agentName: string): string {
 function af_i14DeterministicSessionFile(agentName: string | null): string | null {
   if (!agentName) return null;
   const sessionId = deterministicQCSessionId(agentName);
-  const agentRoot = path.join(process.env.HOME || '~', '.openclaw', 'agents');
+  let agentRoot: string;
+  try { agentRoot = path.join(resolveOpenClawRuntimeRoot(), 'agents'); } catch { return null; }
   const slug = agentName.toLowerCase().replace(/\s+/g, '-');
   const candidates = [
     path.join(agentRoot, slug, 'sessions', `${sessionId}.jsonl`),
@@ -5032,6 +5039,7 @@ export async function runEngineOwnedDeckQC(
     `[QCScorer] Task "${task.title}" (${taskId}): FIX 7 engine-owned deck checklist ${criteriaResult.score.toFixed(1)}/10 (${criteriaResult.pass ? 'PASS' : 'FAIL'})`,
   );
 
+  throwIfJobLeaseLost();
   // ── 3. Persist the QC result row (same table the grading module reads) ─────
   try {
     let deptSlug: string | null = task.department ?? null;
@@ -6103,6 +6111,11 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
     // ── End producer/judge agreement check + both-gates rule ──────────────────
 
     // ── PRD 2.10: Persist QC result to task_qc_results for grading module ─────
+    throwIfJobLeaseLost();
+    const personaConformance=requirePersonaConformanceForCompletion(taskId);
+    if(result.pass && !personaConformance.pass) result={...result,pass:false,
+      reason:`${result.reason} — ${personaConformance.reason}`,gaps:[...result.gaps,personaConformance.reason]};
+
     // CC-FIXTURE-003: the personable/QC fixture write guard — refuse a durable
     // task_qc_results row when the verdict came from a fixture (merged from
     // agent/cc-fixture-003-persona-qc-residuals).

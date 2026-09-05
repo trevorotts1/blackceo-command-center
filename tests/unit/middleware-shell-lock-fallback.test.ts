@@ -56,7 +56,7 @@ describe('U010 — middleware shell-lock fallback wiring (static source checks)'
     expect(
       src,
       'middleware must call signInterviewToken(true) when fallback admits',
-    ).toContain('signInterviewToken(true)');
+    ).toContain('signInterviewToken(true,scope)');
   });
 
   it('reads LATCH_COOKIE_NAME from cookies as fallback', () => {

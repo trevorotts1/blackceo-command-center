@@ -2,10 +2,14 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { checkedJson } from '@/lib/checked-json';
 import { CheckCircle2, Loader2, Building2 } from 'lucide-react';
 
 interface BuildProgress {
-  stage: 'idle' | 'manifest' | 'research' | 'departments' | 'roles' | 'qc' | 'assembly' | 'complete';
+  stage: 'idle' | 'manifest' | 'research' | 'departments' | 'roles' | 'qc' | 'assembly' | 'waiting' | 'failed' | 'validating' | 'complete';
+  completion_verified?: boolean;
+  build_id?: string;
+  company_id?: string;
   message: string;
   documents_total: number;
   documents_complete: number;
@@ -23,6 +27,9 @@ const STAGE_LABELS: Record<BuildProgress['stage'], string> = {
   roles:       'Generating role-level how-to documents...',
   qc:          'Quality reviewing every document...',
   assembly:    'Assembling org chart + persona matrix...',
+  waiting:     'Waiting for the next build step',
+  failed:      'Your build needs attention',
+  validating:  'Verifying your workforce...',
   complete:    'Your AI workforce is ready ✓',
 };
 
@@ -40,39 +47,51 @@ function stageLabel(progress: BuildProgress): string {
       return `Building ${n} department${n === 1 ? '' : 's'}...`;
     }
   }
-  return STAGE_LABELS[progress.stage];
+  return STAGE_LABELS[progress.stage] || 'Building your workforce...';
 }
 
 export default function OnboardingBuildingPage() {
   const router = useRouter();
   const [progress, setProgress] = useState<BuildProgress | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [retryGeneration, setRetryGeneration] = useState(0);
 
   useEffect(() => {
-    const interval: ReturnType<typeof setInterval> = setInterval(poll, 4000);
+    const controller = new AbortController();
+    let polling = false;
+    const interval = setInterval(poll, 4000);
     async function poll() {
+      if (polling || controller.signal.aborted) return;
+      polling = true;
       try {
-        const res = await fetch('/api/onboarding/build-status');
-        if (res.ok) {
-          const data = await res.json();
-          setProgress(data);
-          if (data.stage === 'complete') {
-            clearInterval(interval);
-          }
+        const data = await checkedJson<BuildProgress>('/api/onboarding/build-status', controller.signal);
+        if (!data || typeof data.stage !== 'string' || !Array.isArray(data.departments) ||
+            typeof data.documents_total !== 'number' || typeof data.documents_complete !== 'number') {
+          throw new Error('The build status response was incomplete. Please retry.');
         }
-      } catch {
-        // Continue polling
-      }
+        if (controller.signal.aborted) return;
+        if (data.stage === 'complete' && data.completion_verified !== true) {
+          data.stage = 'validating';
+          data.message = 'Waiting for verified completion evidence.';
+        }
+        setProgress(data);
+        setLoadError(null);
+        if (data.stage === 'complete' && data.completion_verified === true) clearInterval(interval);
+      } catch (error) {
+        if (!controller.signal.aborted) setLoadError(error instanceof Error ? error.message : 'Build status is unavailable. Please retry.');
+      } finally { polling = false; }
     }
-    poll();
-    return () => clearInterval(interval);
-  }, []);
+    void poll();
+    return () => { controller.abort(); clearInterval(interval); };
+  }, [retryGeneration]);
 
   if (!progress) {
     return (
       <div className="iv-root flex items-center justify-center">
         <div className="text-center">
-          <Loader2 className="h-12 w-12 text-brand-500 animate-spin mx-auto mb-4" />
-          <p className="text-gray-600">Connecting to build status...</p>
+          {!loadError && <Loader2 className="h-12 w-12 text-brand-500 animate-spin mx-auto mb-4" />}
+          <p className="text-gray-600" role={loadError ? 'alert' : undefined}>{loadError || 'Connecting to build status...'}</p>
+          {loadError && <button type="button" className="mt-4 underline" onClick={() => setRetryGeneration(n => n + 1)}>Retry build status</button>}
         </div>
       </div>
     );
@@ -82,11 +101,15 @@ export default function OnboardingBuildingPage() {
     ? Math.round((progress.documents_complete / progress.documents_total) * 100)
     : 0;
 
-  const isComplete = progress.stage === 'complete';
+  const isComplete = progress.stage === 'complete' && progress.completion_verified === true;
 
   return (
     <div className="iv-root p-8">
       <div className="max-w-3xl mx-auto">
+        {loadError && <div role="alert" className="mb-4 rounded-lg border border-amber-300 bg-amber-50 p-4 text-amber-900">
+          <p>{loadError} Displayed progress may be stale.</p>
+          <button type="button" className="mt-2 underline" onClick={() => setRetryGeneration(n => n + 1)}>Retry build status</button>
+        </div>}
         <div className="text-center mb-8">
           <div className="inline-flex items-center justify-center h-16 w-16 rounded-2xl bg-brand-50 mb-4">
             {isComplete
@@ -97,6 +120,7 @@ export default function OnboardingBuildingPage() {
             {isComplete ? 'Your AI workforce is ready' : 'Building your AI workforce...'}
           </h1>
           <p className="text-gray-600">{stageLabel(progress)}</p>
+          {progress.message && <p className="mt-2 text-sm text-gray-600">{progress.message}</p>}
         </div>
 
         <div className="bg-white rounded-2xl shadow-sm border p-6 mb-6">
@@ -167,7 +191,7 @@ export default function OnboardingBuildingPage() {
 
         {!isComplete && (
           <div className="text-center text-sm text-gray-500">
-            <p>You can close this tab. We&apos;ll Telegram you when it&apos;s done.</p>
+            <p>You can close this tab and return here to check your build status.</p>
           </div>
         )}
       </div>

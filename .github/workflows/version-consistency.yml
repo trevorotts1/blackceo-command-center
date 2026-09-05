@@ -146,6 +146,24 @@ jobs:
 
           # Check tag exists
           if ! git tag -l "$V_ROOT" | grep -qx "$V_ROOT"; then
+            # A version bundled with a fix PR is minted only after the reviewed
+            # code lands on main. Existing releases remain subject to every tag
+            # assertion below; only a strictly newer, unpublished PR version waits.
+            if [ "${GITHUB_EVENT_NAME:-}" = "pull_request" ]; then
+              BASE_VERSION=$(git show origin/main:version | head -1 | tr -d '[:space:]')
+              if python3 - "$V_ROOT" "$BASE_VERSION" <<'PENDING_TAG'
+          import re, sys
+          def version(value):
+              if not re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+', value):
+                  raise ValueError('invalid release version')
+              return tuple(map(int, value[1:].split('.')))
+          sys.exit(0 if version(sys.argv[1]) > version(sys.argv[2]) else 1)
+          PENDING_TAG
+              then
+                echo "Version $V_ROOT is prepared in this PR; its annotated tag is required after merge."
+                exit 0
+              fi
+            fi
             echo "❌ NO TAG for $V_ROOT"
             echo "   Every version-file change requires a matching annotated git tag."
             echo "   The Wave-1 CC chain introduced versions v4.16–v4.19 with no tags,"

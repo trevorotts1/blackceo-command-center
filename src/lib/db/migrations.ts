@@ -8,6 +8,9 @@
  */
 
 import Database from 'better-sqlite3';
+import { TASK_REQUEST_SCHEMA_SQL } from '../task-request-identity';
+import { EXECUTION_SCHEMA_SQL } from '../execution-schema';
+import { INTERVIEW_REMOTE_SCHEMA_SQL } from '../interview/remote-schema';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -6195,6 +6198,56 @@ export const migrations: Migration[] = [
       console.log('[Migration 131] idx_presentation_stage_timings_task ready');
     },
   },
+  {
+    id: '132',
+    name: 'reliable_company_requests_assignments_execution_and_interviews',
+    up: (db) => {
+      const taskColumns = new Set((db.prepare('PRAGMA table_info(tasks)').all() as {name:string}[]).map(c => c.name));
+      const additions: Record<string,string> = {
+        assignment_version: 'INTEGER NOT NULL DEFAULT 0',
+        dispatch_hold: 'INTEGER NOT NULL DEFAULT 0',
+        persona_revision: 'INTEGER NOT NULL DEFAULT 0',
+        persona_input_revision: 'INTEGER NOT NULL DEFAULT 0',
+        persona_contract_version: 'INTEGER NOT NULL DEFAULT 0',
+        routing_attempts: 'INTEGER NOT NULL DEFAULT 0',
+        last_routing_attempt_at: 'TEXT', next_routing_eligible_at: 'TEXT', routing_reason: 'TEXT',
+        routing_wait_owner: 'TEXT', routing_next_action: 'TEXT', routing_config_revision: 'TEXT',
+      };
+      if (taskColumns.size) {
+        for (const [column, type] of Object.entries(additions)) {
+          if (!taskColumns.has(column)) db.exec(`ALTER TABLE tasks ADD COLUMN ${column} ${type}`);
+        }
+        db.exec(TASK_REQUEST_SCHEMA_SQL);
+        db.exec(EXECUTION_SCHEMA_SQL);
+        db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_routing_eligibility ON tasks(next_routing_eligible_at,last_routing_attempt_at);
+          CREATE TRIGGER IF NOT EXISTS tasks_assignment_revision AFTER UPDATE OF assigned_agent_id,workspace_id,department ON tasks
+          WHEN NEW.assignment_version = OLD.assignment_version AND
+            (NEW.assigned_agent_id IS NOT OLD.assigned_agent_id OR NEW.workspace_id IS NOT OLD.workspace_id OR NEW.department IS NOT OLD.department)
+          BEGIN UPDATE tasks SET assignment_version = OLD.assignment_version + 1 WHERE id = NEW.id; END;
+          CREATE TRIGGER IF NOT EXISTS tasks_persona_input_revision AFTER UPDATE OF title,description,sop_id,assigned_agent_id,workspace_id,department ON tasks
+          WHEN NEW.persona_input_revision = OLD.persona_input_revision AND
+            (NEW.title IS NOT OLD.title OR NEW.description IS NOT OLD.description OR NEW.sop_id IS NOT OLD.sop_id OR
+             NEW.assigned_agent_id IS NOT OLD.assigned_agent_id OR NEW.workspace_id IS NOT OLD.workspace_id OR NEW.department IS NOT OLD.department)
+          BEGIN UPDATE tasks SET persona_input_revision = OLD.persona_input_revision + 1 WHERE id = NEW.id; END;
+          CREATE TRIGGER IF NOT EXISTS tasks_persona_decision_revision AFTER UPDATE OF persona_id,secondary_persona_id,voice_persona_id,topic_persona_id ON tasks
+          WHEN NEW.persona_revision = OLD.persona_revision AND
+            (NEW.persona_id IS NOT OLD.persona_id OR NEW.secondary_persona_id IS NOT OLD.secondary_persona_id OR
+             NEW.voice_persona_id IS NOT OLD.voice_persona_id OR NEW.topic_persona_id IS NOT OLD.topic_persona_id)
+          BEGIN UPDATE tasks SET persona_revision = OLD.persona_revision + 1 WHERE id = NEW.id; END;
+          CREATE TRIGGER IF NOT EXISTS tasks_routing_reconsider AFTER UPDATE OF title,description,assigned_agent_id,workspace_id,department,status ON tasks
+          WHEN NEW.title IS NOT OLD.title OR NEW.description IS NOT OLD.description OR NEW.assigned_agent_id IS NOT OLD.assigned_agent_id OR
+               NEW.workspace_id IS NOT OLD.workspace_id OR NEW.department IS NOT OLD.department OR NEW.status IS NOT OLD.status
+          BEGIN UPDATE tasks SET routing_wait_owner=NULL,routing_reason=NULL,next_routing_eligible_at=NULL WHERE id=NEW.id; END;
+        `);
+      }
+      const healthCols = new Set((db.prepare('PRAGMA table_info(job_liveness)').all() as {name:string}[]).map(c => c.name));
+      if (healthCols.size) for (const [column, type] of Object.entries({
+        last_started_at: 'TEXT', last_finished_at: 'TEXT', last_success_at: 'TEXT',
+        consecutive_failures: 'INTEGER NOT NULL DEFAULT 0', result_counts: 'TEXT', error_code: 'TEXT',
+      })) if (!healthCols.has(column)) db.exec(`ALTER TABLE job_liveness ADD COLUMN ${column} ${type}`);
+      db.exec(INTERVIEW_REMOTE_SCHEMA_SQL);
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner
@@ -7376,6 +7429,11 @@ export function resolveDepartmentsConfigPath(): string | null {
       if (isExistingFile(p)) return p;
     }
   }
+  // Tests isolate filesystem discovery as well as the database. Never read operator manifests.
+  if (process.env.CC_TEST_FIXTURE_ROOT) {
+    const candidate = path.join(process.env.CC_TEST_FIXTURE_ROOT, 'departments.json');
+    return isExistingFile(candidate) ? candidate : null;
+  }
   // 3. Discovered real ZHC company build — probed only now (LAZY), and BEFORE
   //    the generated runtime template so the newest client departments.json takes
   //    precedence over the demo config/departments.json checked into the repo.
@@ -7419,6 +7477,10 @@ export function resolveDepartmentsTreePath(): string | null {
   if (cfg) {
     const sibling = path.join(path.dirname(cfg), 'departments');
     if (isExistingDir(sibling)) return sibling;
+  }
+  if (process.env.CC_TEST_FIXTURE_ROOT) {
+    const candidate = path.join(process.env.CC_TEST_FIXTURE_ROOT, 'departments');
+    return fs.existsSync(candidate) ? candidate : null;
   }
   const newest = newestZhcChild('departments');
   if (newest && isExistingDir(newest)) return newest;

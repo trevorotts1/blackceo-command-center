@@ -160,8 +160,8 @@ function scanInterfaceMutatingFetches(): InterfaceCall[] {
   }
 
   const results: InterfaceCall[] = [];
-  for (const [route, methods] of routeSet) {
-    results.push({ route, methods: [...methods].sort() });
+  for (const [route, methods] of Array.from(routeSet.entries())) {
+    results.push({ route, methods: Array.from(methods).sort() });
   }
   return results;
 }
@@ -215,7 +215,7 @@ const webhookProtectedCount = allMutatingRoutes.filter((r) =>
   isWebhookSecretRouteTest(r.path)
 ).length;
 
-const reachableCount = allMutatingRoutes.length - webhookProtectedCount;
+const nonWebhookCount = allMutatingRoutes.length - webhookProtectedCount;
 
 // ---------------------------------------------------------------------------
 // TESTS
@@ -224,16 +224,16 @@ const reachableCount = allMutatingRoutes.length - webhookProtectedCount;
 describe('passthrough-write-scope — anti-rot lock (U052)', () => {
   // ---- Counts ------------------------------------------------------------
 
-  it('API routes exporting a mutating method: 110 (literal assertion)', () => {
-    expect(allMutatingRoutes.length).toBe(110);
+  it('API routes exporting a mutating method: 112 (literal assertion)', () => {
+    expect(allMutatingRoutes.length).toBe(112);
   });
 
   it('protected by isWebhookSecretRoute: 6', () => {
     expect(webhookProtectedCount).toBe(6);
   });
 
-  it('REACHABLE via forged same-origin: 104', () => {
-    expect(reachableCount).toBe(104);
+  it('non-webhook write routes: 106 (tenant authentication remains required)', () => {
+    expect(nonWebhookCount).toBe(106);
   });
 
   it('interface call templates found by multi-line scanner', () => {
@@ -297,7 +297,7 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
   it('no route matched by BEARER_REQUIRED_WRITE_ROUTES appears in the interface call set', () => {
     const overlap: string[] = [];
     // Check concrete route intersection
-    for (const route of bearerCoveredRoutes) {
+    for (const route of Array.from(bearerCoveredRoutes)) {
       if (interfaceRouteSet.has(route)) {
         overlap.push(route);
       }

@@ -1,3 +1,11 @@
+## [v6.1.0] — 2026-09-05 — Client interview, board and execution reliability
+
+Client interviews and board APIs now require a verified tenant identity and remain bound to their own installation. Encrypted answers, ordered remote handoff, resumable sessions and verified build/board progress replace cross-client fallbacks and premature completion. Register the tenant and persona contexts and verify the receiver before upgrading a client; see docs/tenant-interview-rollout.md.
+
+Task creation uses transactional company/operation identity, creation events and durable dispatch intent. Routing preserves canonical department/workspace ownership, revisits queued work fairly and exposes real waits. Dispatch and completion use durable attempt ownership, worker capacity, unique sessions and stale-update fences. Persona bundles, scoped assignments, operator overrides, audience approval and artifact conformance are committed and validated together. External presentation engines retain their specialized QC authority.
+
+Reviewed by separate Astra agents across implementation lanes. Verification includes concurrent tenant/session/task/worker fixtures, signed authentication, scope/receipt rejection, guarded retries, persona mutation/conformance and production build checks. Remote unknown acceptance remains held for evidence-based reconciliation; publication does not certify a live client rollout.
+
 ## [v6.0.99] — 2026-08-31 — Presentation rev2 batch 2 (CC-side): FIX 24 stall-window tightening
 
 ### What changed

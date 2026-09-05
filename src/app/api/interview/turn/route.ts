@@ -1,3 +1,6 @@
+import { ensureTenantInterview } from '@/lib/interview/remote-store';
+import { queryOne, run, timeNow } from '@/lib/db';
+import { randomUUID } from 'crypto';
 /**
  * POST /api/interview/turn
  *
@@ -146,9 +149,11 @@ async function waitForAgentReply(
   sessionId: string,
   baselineCount: number,
   deadlineMs: number,
+  signal?: AbortSignal,
 ): Promise<string | null> {
-  while (Date.now() < deadlineMs) {
+  while (Date.now() < deadlineMs && !signal?.aborted) {
     await sleep(REPLY_POLL_INTERVAL_MS);
+    if(signal?.aborted)return null;
     let texts: string[];
     try {
       texts = await agentTexts(client, sessionId);
@@ -184,7 +189,9 @@ async function connectOr503(req?: NextRequest): Promise<
   // THAT client's own gateway (its row's gateway_url + token), so the
   // interview runs on her box. Self keeps the historical local singleton.
   if (req) {
-    const tenant = resolveInterviewTenant(req);
+    const tenant = await resolveInterviewTenant(req);
+    if (tenant.kind === 'unverified') return {ok:false,response:NextResponse.json({error:'forbidden'},{status:403})};
+    if (tenant.kind === 'client' && !tenant.client?.gateway_url) return {ok:false,response:NextResponse.json({error:'client_gateway_not_configured'},{status:503})};
     if (tenant.kind === 'client' && tenant.client?.gateway_url) {
       const client = getOpenClawClient({
         id: tenant.client.id,
@@ -250,37 +257,29 @@ async function resolveSessionId(
   // read a prior session id from (/api/interview/state returned null for
   // clients), so every visit minted a NEW gateway session and the client met a
   // blank-slate interviewer that had forgotten the whole conversation.
-  const tenant = resolveInterviewTenant(req);
-  const clientId =
-    tenant.kind === 'client' && tenant.client ? tenant.client.id : null;
-
-  if (clientId) {
-    const stored = getClientInterviewState(clientId);
-
-    // SECURITY (2026-08-17) — session fixation. This branch previously adopted
-    // ANY browser-supplied sessionId and PERSISTED it against the client row
-    // (setClientInterviewSessionId(clientId, provided)) with no validation. A
-    // single forged request could therefore repoint a client's stored session
-    // permanently, so her next visit would silently join a session chosen by
-    // someone else — and every later turn would be relayed into it.
-    //
-    // Rule now: a caller-supplied id is honored ONLY when it already matches
-    // the id this server minted and stored for that client. A caller-supplied
-    // id is NEVER written to the store; only a server-minted id is (below).
-    if (provided && stored?.interviewSessionId === provided) return provided;
-    if (stored?.interviewSessionId) return stored.interviewSessionId;
-    // No stored session yet: fall through and MINT one. Any `provided` id is
-    // deliberately discarded here rather than adopted.
-  } else if (provided) {
-    // Self/operator path — unchanged historical behavior.
-    return provided;
+  const tenant = await resolveInterviewTenant(req);
+  if (!tenant.context) throw new Error('Verified interview context required');
+  const tenantId=tenant.context.tenantId;
+  const stored=ensureTenantInterview(tenantId);
+  if(stored.gateway_session_id) {
+    if(provided && provided!==stored.gateway_session_id)throw new Error('Foreign interview session');
+    return stored.gateway_session_id;
   }
-
-  const peer = req.headers.get('Cf-Access-Authenticated-User-Email') || undefined;
-  const session = await client.createSession('web', peer);
-  // Persist the mint so the NEXT visit rejoins this conversation.
-  if (clientId) setClientInterviewSessionId(clientId, session.id);
-  return session.id;
+  if(req.signal.aborted)throw new Error('Interview request was cancelled');
+  const reservation=randomUUID();
+  const cutoff=new Date(Date.now()-60_000).toISOString();
+  const claimed=run(`UPDATE tenant_interviews SET session_reservation=?,session_reserved_at=? WHERE tenant_id=? AND gateway_session_id IS NULL AND (session_reservation IS NULL OR session_reserved_at<?)`,[reservation,timeNow(),tenantId,cutoff]);
+  if(!claimed.changes)throw new Error('Interview session is being established; retry shortly');
+  try {
+    const session=await client.createSession('web',tenant.context.subject);
+    if(req.signal.aborted)throw new Error('Interview request was cancelled');
+    const saved=run(`UPDATE tenant_interviews SET gateway_session_id=?,session_reservation=NULL,session_reserved_at=NULL,updated_at=? WHERE tenant_id=? AND session_reservation=? AND gateway_session_id IS NULL`,[session.id,timeNow(),tenantId,reservation]);
+    if(!saved.changes)throw new Error('Session reservation expired; retry using the committed session');
+    return session.id;
+  } catch(err) {
+    run('UPDATE tenant_interviews SET session_reservation=NULL,session_reserved_at=NULL WHERE tenant_id=? AND session_reservation=?',[tenantId,reservation]);
+    throw err;
+  }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -302,10 +301,13 @@ function streamTurn(
   client: OpenClawClient,
   sessionId: string,
   content: string,
+  signal?: AbortSignal,
 ): Response {
+  let cancelled=false;
+  const enqueue=(controller:ReadableStreamDefaultController<Uint8Array>,chunk:Uint8Array)=>{if(!cancelled&&!signal?.aborted)controller.enqueue(chunk);};
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
-      controller.enqueue(sseEvent('session', { sessionId }));
+      enqueue(controller,sseEvent('session', { sessionId }));
 
       let baseline: number;
       try {
@@ -315,24 +317,26 @@ function streamTurn(
       }
 
       try {
+        if(cancelled||signal?.aborted)return;
         await client.sendMessage(sessionId, content);
       } catch (err) {
-        controller.enqueue(
+        enqueue(controller,
           sseEvent('error', {
             message: `Failed to reach the interviewer: ${
               err instanceof Error ? err.message : String(err)
             }`,
           }),
         );
-        controller.enqueue(sseEvent('done', { sessionId, pending: true }));
-        controller.close();
+        enqueue(controller,sseEvent('done', { sessionId, pending: true }));
+        if(!cancelled&&!signal?.aborted)controller.close();
         return;
       }
 
       const deadline = Date.now() + REPLY_TIMEOUT_MS;
       let emitted = baseline;
-      while (Date.now() < deadline) {
+      while (Date.now() < deadline && !cancelled && !signal?.aborted) {
         await sleep(REPLY_POLL_INTERVAL_MS);
+        if(cancelled||signal?.aborted)break;
         let texts: string[];
         try {
           texts = await agentTexts(client, sessionId);
@@ -341,18 +345,19 @@ function streamTurn(
         }
         if (texts.length > emitted) {
           for (const text of texts.slice(emitted)) {
-            controller.enqueue(sseEvent('delta', { text }));
+            enqueue(controller,sseEvent('delta', { text }));
           }
           emitted = texts.length;
           break; // one interviewer turn per owner turn
         }
       }
 
-      controller.enqueue(
+      enqueue(controller,
         sseEvent('done', { sessionId, pending: emitted === baseline }),
       );
-      controller.close();
+      if(!cancelled&&!signal?.aborted)controller.close();
     },
+    cancel(){cancelled=true;},
   });
 
   return new Response(stream, {
@@ -374,7 +379,7 @@ export async function POST(req: NextRequest) {
   // Fail closed BEFORE any work: a forged Host must never reach the relay,
   // the session store, or a client's gateway. Covers the nested
   // resolveInterviewTenant() calls in connectOr503() and resolveSessionId().
-  const refusedTenant = refuseUnverifiedTenant(resolveInterviewTenant(req));
+  const refusedTenant = refuseUnverifiedTenant(await resolveInterviewTenant(req));
   if (refusedTenant) return refusedTenant;
 
   let body: z.infer<typeof requestSchema>;
@@ -412,8 +417,10 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  if(req.signal.aborted)return NextResponse.json({error:'request_cancelled'},{status:499});
+
   if (wantsStream) {
-    return streamTurn(client, sessionId, body.content);
+    return streamTurn(client, sessionId, body.content, req.signal);
   }
 
   // Buffered JSON turn: snapshot the agent turns present, relay the message,
@@ -425,6 +432,7 @@ export async function POST(req: NextRequest) {
     baselineCount = 0;
   }
 
+  if(req.signal.aborted)return NextResponse.json({error:'request_cancelled'},{status:499});
   try {
     await client.sendMessage(sessionId, body.content);
   } catch (err) {
@@ -445,6 +453,7 @@ export async function POST(req: NextRequest) {
     sessionId,
     baselineCount,
     Date.now() + REPLY_TIMEOUT_MS,
+    req.signal,
   );
 
   return NextResponse.json({
@@ -478,7 +487,7 @@ export async function POST(req: NextRequest) {
 export async function GET(req: NextRequest) {
   // Same fail-closed gate as POST: polling a client's gateway session is
   // reading client data and must not be reachable via a forged Host.
-  const refusedTenant = refuseUnverifiedTenant(resolveInterviewTenant(req));
+  const refusedTenant = refuseUnverifiedTenant(await resolveInterviewTenant(req));
   if (refusedTenant) return refusedTenant;
 
   const url = new URL(req.url);
@@ -491,6 +500,11 @@ export async function GET(req: NextRequest) {
     );
   }
 
+  const tenant=await resolveInterviewTenant(req);
+  if(!tenant.context) return NextResponse.json({error:'forbidden'},{status:403});
+  const owned=queryOne<{gateway_session_id:string}>('SELECT gateway_session_id FROM tenant_interviews WHERE tenant_id=?',[tenant.context.tenantId]);
+  if(owned?.gateway_session_id!==sessionId)return NextResponse.json({error:'foreign_interview_session'},{status:403});
+
   const conn = await connectOr503(req);
   if (!conn.ok) return conn.response;
 
@@ -500,7 +514,7 @@ export async function GET(req: NextRequest) {
   } catch {
     // Older gateway without sessions.history — report "nothing yet" rather than
     // a crash; the UI keeps its calm waiting state.
-    return NextResponse.json({ sessionId, reply: null, agentCount: after });
+    return NextResponse.json({ error:'interview_history_unavailable', sessionId, retryable:true },{status:503});
   }
 
   const fresh = texts.length > after ? texts.slice(after).join('\n\n') : null;

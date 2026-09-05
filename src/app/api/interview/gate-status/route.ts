@@ -1,3 +1,4 @@
+import { verifiedBuild } from '@/lib/interview/build-verification';
 /**
  * GET /api/interview/gate-status (U010)
  *
@@ -48,11 +49,9 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   );
   const tenant = internalOk
     ? tenantForHost(request.headers.get('host'))
-    : resolveInterviewTenant(request);
-  if (!internalOk) {
-    const refusedTenant = refuseUnverifiedTenant(tenant);
-    if (refusedTenant) return refusedTenant;
-  }
+    : await resolveInterviewTenant(request);
+  const refusedTenant = refuseUnverifiedTenant(tenant);
+  if (refusedTenant) return refusedTenant;
   if (tenant.kind === 'client' && tenant.client) {
     return NextResponse.json({
       interviewComplete: tenant.client.interview_complete === true,
@@ -63,7 +62,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   const bs = readBuildState();
   return NextResponse.json({
     interviewComplete: bs?.interviewComplete === true,
-    buildCompleted: typeof bs?.buildCompletedAt === 'string',
+    buildCompleted: verifiedBuild(bs),
     standardReady: readStandardPrebuild(bs).standardReady,
   });
 }

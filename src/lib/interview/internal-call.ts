@@ -35,12 +35,14 @@ const DEV_FALLBACK_SECRET = 'mc-interview-gate-unsigned-dev-secret';
 export const INTERNAL_GATE_HEADER = 'x-mc-internal-gate';
 
 function internalSecret(): string {
-  return (
+  const value = (
     process.env.MC_INTERVIEW_COOKIE_SECRET ||
     process.env.MC_API_TOKEN ||
     process.env.WEBHOOK_SECRET ||
     DEV_FALLBACK_SECRET
   );
+  if (value === DEV_FALLBACK_SECRET && process.env.NODE_ENV === 'production') throw new Error('Internal gate secret not configured');
+  return value;
 }
 
 async function hmac(payload: string): Promise<string> {

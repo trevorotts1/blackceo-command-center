@@ -200,6 +200,8 @@ async function stubGateway(): Promise<{ sends: Array<{ method: string; params: R
   return { sends };
 }
 
+test.beforeEach(()=>{run("UPDATE task_executions SET state='succeeded' WHERE state IN ('reserved','sending','accepted','running','unknown')");run("UPDATE tasks SET status='done' WHERE id LIKE 'idem-%'");});
+
 test('[IDEM-1] rapid duplicate (same task, same agent, 5s after) is SUPPRESSED with a visible event — no second chat.send', async () => {
   const { sends } = await stubGateway();
   const taskId = 'idem-rapid-dup';
@@ -262,7 +264,7 @@ test('[IDEM-2] the same dispatch AFTER the window elapses dispatches normally', 
   assert.equal(suppressed.length, 0, 'no suppression event for a legitimate post-window dispatch');
 });
 
-test('[IDEM-3] an explicit { force: true } override ALWAYS dispatches, even inside the window', async () => {
+test('[IDEM-3] an explicit { force: true } override dispatches when worker capacity is available, even inside the window', async () => {
   const { sends } = await stubGateway();
   const taskId = 'idem-force-override';
   insertTask(taskId, AGENT_A);
@@ -273,7 +275,7 @@ test('[IDEM-3] an explicit { force: true } override ALWAYS dispatches, even insi
   const body = await res.json() as Record<string, unknown>;
 
   assert.equal(res.status, 200);
-  assert.equal(body.success, true, 'a deliberate force re-dispatch is never blocked');
+  assert.equal(body.success, true, 'force bypasses the historical window when no attempt owns capacity');
   assert.equal(sends.filter((s) => s.method === 'chat.send').length, 1, 'chat.send fired for the forced dispatch');
   assert.equal(body.suppressed, undefined);
 

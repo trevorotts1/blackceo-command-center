@@ -1,8 +1,11 @@
+import { capturePersonaSnapshot } from '@/lib/persona-state';
+import { renderPersonaConformanceInstructions } from '@/lib/persona-conformance';
 import { NextRequest, NextResponse } from 'next/server';
 import * as fs from 'fs';
 import * as path from 'path';
 import os from 'os';
 import { v4 as uuidv4 } from 'uuid';
+import { beginExecutionSend, executionSessionId, reserveExecution, recordExecutionAcceptance, recordExecutionUnknown } from '@/lib/execution-attempts';
 import { queryOne, queryAll, run } from '@/lib/db';
 import { getOpenClawClient } from '@/lib/openclaw/client';
 import { broadcast } from '@/lib/events';
@@ -464,46 +467,16 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
       }
     }
 
-    // Get or create OpenClaw session for this agent
-    let session = queryOne<OpenClawSession>(
-      'SELECT * FROM openclaw_sessions WHERE agent_id = ? AND status = ? AND deleted_at IS NULL',
-      [agent.id, 'active']
-    );
-
     const now = new Date().toISOString();
-
-    if (!session) {
-      // Create session record
-      const sessionId = uuidv4();
-      const openclawSessionId = `mission-control-${agent.name.toLowerCase().replace(/\s+/g, '-')}`;
-      
-      // FIX 2: bind task_id so completion webhook / execution-reconcile can attribute the turn.
-      // The task_id column + idx_openclaw_sessions_task index already exist in schema.ts:213/360.
-      run(
-        `INSERT INTO openclaw_sessions (id, agent_id, openclaw_session_id, channel, status, task_id, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [sessionId, agent.id, openclawSessionId, 'mission-control', 'active', id, now, now]
-      );
-
-      session = queryOne<OpenClawSession>(
-        'SELECT * FROM openclaw_sessions WHERE id = ?',
-        [sessionId]
-      );
-
-      // Log session creation
-      run(
-        `INSERT INTO events (id, type, agent_id, message, created_at)
-         VALUES (?, ?, ?, ?, ?)`,
-        [uuidv4(), 'agent_status_changed', agent.id, `${agent.name} session created`, now]
-      );
-    }
-
-    if (!session) {
-      return NextResponse.json(
-        { error: 'Failed to create agent session' },
-        { status: 500 }
-      );
-    }
+    const { refreshPersonaDecisionIfNeeded } = await import('@/lib/tasks');
+    await refreshPersonaDecisionIfNeeded(task.id);
+    const refreshedTask=queryOne<Task>('SELECT * FROM tasks WHERE id=?',[task.id]);
+    const stableFields=['assigned_agent_id','workspace_id','department','assignment_version','status','source','killed_at','archived_at'];
+    if(!refreshedTask || stableFields.some(key=>(refreshedTask as unknown as Record<string,unknown>)[key] !== (task as unknown as Record<string,unknown>)[key])) { return NextResponse.json({success:false,held:true,reason:'assignment_or_state_changed'},{status:409}); }
+    Object.assign(task,refreshedTask);
+    const personaSendSnapshot=capturePersonaSnapshot(task.id);
+    const executionId = uuidv4();
+    const session = { openclaw_session_id: executionSessionId(agent.id, executionId) };
 
     // --- INTELLIGENCE SETTINGS RESOLUTION ---
     // Resolve which model and persona this dispatch should use.
@@ -726,7 +699,7 @@ ${renderOwnerMessagesSection(task.id)}${skillsBlock}
 **OUTPUT DIRECTORY:** ${taskProjectDir}
 Create this directory and save all deliverables there.
 
-${renderWriteBackInstructions(missionControlUrl, task.id, 'file', `${taskProjectDir}/filename.html`)}
+${renderWriteBackInstructions(missionControlUrl, task.id, 'file', `${taskProjectDir}/filename.html`, executionId)}
 
 When complete, reply with:
 \`TASK_COMPLETE: [brief summary of what you did]\`
@@ -845,6 +818,14 @@ If you need help or clarification, ask the orchestrator.`;
       );
     }
 
+    const { checkPersonaDispatchReady } = await import('@/lib/tasks');
+    const personaReady = checkPersonaDispatchReady(task.id);
+    if (!personaReady.ready) return NextResponse.json({success:false,held:true,reason:personaReady.reason},{status:409});
+    const claim = reserveExecution({...task,persona_snapshot:personaSendSnapshot},sessionKey,executionId);
+    if (!claim.execution) return NextResponse.json({success:false,held:true,reason:claim.reason},{status:409});
+    const execution=claim.execution;
+    if (!beginExecutionSend(execution)) return NextResponse.json({success:false,held:true,reason:'claim_superseded'},{status:409});
+    let acknowledged = false;
     try {
       // Send message to agent's session using chat.send.
       //
@@ -866,12 +847,15 @@ If you need help or clarification, ask the orchestrator.`;
       // DISP-01: stable idempotency key (was `Date.now()`). Keyed on the attempt
       // counter so a genuine retry gets a fresh key while two sends racing the
       // same window share one → the gateway can dedup a concurrent double-send.
-      await client.call('chat.send', {
+      const acknowledgement = await client.call('chat.send', {
         sessionKey,
-        message: taskMessage,
-        idempotencyKey: `dispatch-${task.id}-${task.dispatch_attempts ?? 0}`,
+        message: `${taskMessage}\n\n${renderPersonaConformanceInstructions(task.id, executionId, agent.id, missionControlUrl)}\n\n**Execution ID:** ${executionId}\nInclude execution_id: "${executionId}" in completion webhook JSON.`,
+        idempotencyKey: execution.idempotency_key,
         timeoutMs: 30000,
       });
+
+      recordExecutionAcceptance(execution,acknowledgement);
+      acknowledged = true;
 
       // FIX-15 (Error 7 / R7 — model skew): pin the ACTUAL runtime model on the
       // task, not the CC's "intended" resolution. The gateway has no supported
@@ -1009,23 +993,11 @@ If you need help or clarification, ask the orchestrator.`;
         message: 'Task dispatched to agent'
       });
     } catch (err) {
-      console.error('Failed to send message to agent:', err);
-      // MR-24: mirror the auto-dispatch path's chat.send failure handling —
-      // record the failed advance attempt (backoff accounting + event) so
-      // repeated dispatch failures are surfaced and eventually escalate rather
-      // than producing an invisible uncapped re-loop with no audit trail.
-      recordDispatchFailure(task.id, agent.id, {
-        reason: 'chat_send_failed',
-        audience: 'SYSTEM',
-        needs:
-          'OpenClaw chat.send failed at manual dispatch. ' +
-          'The task was not advanced; retry or check gateway connectivity.',
-        context: 'manual-dispatch',
-      });
-      return NextResponse.json(
-        { error: 'chat.send failed — dispatch attempt recorded, task held in backlog' },
-        { status: 500 }
-      );
+      console.error('Dispatch acknowledgement/bookkeeping failed:', err);
+      if (acknowledged) return NextResponse.json({success:true,task_id:task.id,execution_id:executionId,warning:'accepted_bookkeeping_failed'});
+      recordExecutionUnknown(execution);
+      return NextResponse.json({success:false,task_id:task.id,execution_id:executionId,
+        reason:'send_acceptance_unknown',message:'Reconcile this execution before retrying.'},{status:202});
     }
   } catch (error) {
     console.error('Failed to dispatch task:', error);

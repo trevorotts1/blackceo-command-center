@@ -224,7 +224,7 @@ describe('AUD-71 defects 1 + 2 — the health surface reports a REAL count', () 
         headers: { host: 'board.example.com', authorization: `Bearer ${TOKEN}` },
       })
     );
-    expect(res.status).toBe(401);
+    expect(res.status).toBe(403);
     expect(res.headers.get('x-middleware-rewrite')).toBeNull();
 
     const { runAllProbes } = await import('@/lib/system-status');

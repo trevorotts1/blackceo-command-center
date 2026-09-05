@@ -95,7 +95,7 @@ test('B5: sessionIdForTask derives the id when the openclaw_sessions row is miss
   );
 });
 
-test('B5: upsertActiveSession inserts once then updates the single active row', () => {
+test('B5: upsertActiveSession preserves task attribution across different tasks', () => {
   const agentId = uuidv4();
   run('INSERT INTO agents (id, name, role, workspace_id, is_master, status) VALUES (?, ?, ?, ?, 0, ?)', [agentId, 'Engineering', 'Head', WS_ID, 'working']);
   const taskA = seedTask();
@@ -110,11 +110,11 @@ test('B5: upsertActiveSession inserts once then updates the single active row', 
   assert.equal(rows[0].task_id, taskA, 'bound to task A');
 
   // Second call updates (does NOT create a duplicate active row).
-  upsertActiveSession(agentId, 'mission-control-engineering', taskB);
+  upsertActiveSession(agentId, 'mission-control-engineering-b', taskB);
   rows = db.prepare("SELECT openclaw_session_id, task_id FROM openclaw_sessions WHERE agent_id = ? AND status='active'").all(agentId) as {
     openclaw_session_id: string;
     task_id: string;
   }[];
-  assert.equal(rows.length, 1, 'still exactly one active session (upsert, not duplicate)');
-  assert.equal(rows[0].task_id, taskB, 're-bound to task B');
+  assert.equal(rows.length, 2, 'separate task sessions preserve old attribution');
+  assert.deepEqual(rows.map(r=>r.task_id).sort(),[taskA,taskB].sort());
 });

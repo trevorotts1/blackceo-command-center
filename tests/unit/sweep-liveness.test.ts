@@ -69,12 +69,13 @@ function minutesAgoIso(mins: number): string {
 
 function clearFixtures(): void {
   run(`DELETE FROM job_liveness`);
-  run(`DELETE FROM events WHERE type = 'sweep_liveness_alert'`);
+  run(`DELETE FROM events WHERE type IN ('sweep_liveness_alert','sweep_liveness_alert_unavailable')`);
+  for (const name of Object.keys(WATCHED_JOB_CADENCE_MINUTES).filter(n=>!['intake-advance','qc-review-sweep'].includes(n))) recordJobTick(name,minutesAgoIso(0),'ok');
 }
 
 function alertEventCount(): number {
   return (
-    queryOne<{ n: number }>(`SELECT COUNT(*) AS n FROM events WHERE type = 'sweep_liveness_alert'`, [])?.n ?? 0
+    queryOne<{ n: number }>(`SELECT COUNT(*) AS n FROM events WHERE type IN ('sweep_liveness_alert','sweep_liveness_alert_unavailable')`, [])?.n ?? 0
   );
 }
 
@@ -82,6 +83,7 @@ function alertEventCount(): number {
 
 test('sweep-liveness: watched job with no row is reported stale (never observed is not evidence of health)', () => {
   clearFixtures();
+  run('DELETE FROM job_liveness');
   const rows = getWatchedJobLiveness();
   assert.equal(rows.length, Object.keys(WATCHED_JOB_CADENCE_MINUTES).length);
   for (const r of rows) {
@@ -147,7 +149,8 @@ test('runSweepLivenessSweep: records exactly one alert for a stale watched job, 
 
   try {
     const first = await runSweepLivenessSweep();
-    assert.equal(first.alerted, true);
+    assert.equal(first.alerted, false, 'unconfigured notifier must not claim delivery');
+    assert.equal(first.notificationStatus, 'unavailable');
     assert.deepEqual(first.staleJobs, ['intake-advance']);
     assert.equal(alertEventCount(), 1, 'exactly one operator alert recorded');
 
@@ -188,14 +191,15 @@ test('sweep-liveness: re-enabling (a fresh tick) clears the stale state on the v
 
 // ── 7: DISABLE_SWEEP_LIVENESS kill switch ───────────────────────────────────
 
-test('DISABLE_SWEEP_LIVENESS=1: check reports pass (disabled, never a false red) and the sweep never alerts', async () => {
+test('DISABLE_SWEEP_LIVENESS=1: check reports indeterminate (monitor disabled) and the sweep never alerts', async () => {
   clearFixtures();
   recordJobTick('intake-advance', minutesAgoIso(120), 'ok'); // would otherwise be stale
 
   process.env.DISABLE_SWEEP_LIVENESS = '1';
   try {
     const check = checkSweepLiveness();
-    assert.equal(check.pass, true);
+    assert.equal(check.pass, false);
+    assert.equal(check.indeterminate, true);
     assert.match(check.detail, /disabled/i);
 
     const sweep = await runSweepLivenessSweep();

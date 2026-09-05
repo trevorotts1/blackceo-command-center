@@ -31,6 +31,9 @@
  */
 
 import { v4 as uuidv4 } from 'uuid';
+import { createTaskOnce, taskRequestCompany, TaskContextError, taskRequestFingerprint } from '@/lib/task-request-identity';
+import { taskPersonaCompanyContext, personaCompanyContext } from '@/lib/persona-company';
+import { capturePersonaSnapshot, commitPersonaMutation, PersonaConflictError, personaBundleHash } from '@/lib/persona-state';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -44,6 +47,7 @@ import {
   loadSubtaskPersonas,
   broadcastPersonaPlan,
   persistPersonaBundle,
+  persistPersonaBundleScope,
   spawnRecordCompletion,
   DEFAULT_PERSONA_FALLBACK,
   GOVERNANCE_PERSONA_FALLBACK,
@@ -52,7 +56,6 @@ import {
 } from '@/lib/persona-selector';
 import { ensureBlendGuardrail } from '@/lib/persona-dispatch';
 import { getBestSOPForTask, getPersonaSlots, type PersonaSlot, type SOP } from '@/lib/sops';
-import { routeTask } from '@/lib/routing/department-router';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { autoDispatchTask, recordDispatchFailure } from '@/lib/task-dispatcher';
 import {
@@ -244,7 +247,9 @@ export function readCompanyConfigPersonaDefaults(): {
  * GOVERNANCE_PERSONA_FALLBACK constant. Always non-null — a mechanical task is
  * never "naked" of oversight even though it carries no full coaching persona.
  */
-export function resolveGovernancePersonaId(): string {
+export function resolveGovernancePersonaId(taskId?:string): string {
+  const company=taskId&&!process.env.PERSONA_FIXTURE_JSON?taskPersonaCompanyContext(taskId):null;
+  if(company)return JSON.parse(fs.readFileSync(company.companyConfig,'utf8')).governance_persona_id||GOVERNANCE_PERSONA_FALLBACK;
   return readCompanyConfigPersonaDefaults().governance_persona_id || GOVERNANCE_PERSONA_FALLBACK;
 }
 
@@ -269,8 +274,15 @@ export function resolveGovernancePersonaId(): string {
  */
 export function deriveDepartmentDefaultPersona(
   department: string | null | undefined,
+  taskId?: string,
 ): DepartmentDefaultPersona {
   const canon = canonicalDeptSlug(department || '') || 'general-task';
+  const scopedCompany = taskId && !process.env.PERSONA_FIXTURE_JSON ? taskPersonaCompanyContext(taskId) : null;
+  if(scopedCompany) {
+    const config=JSON.parse(fs.readFileSync(scopedCompany.companyConfig,'utf8'));
+    const configured=config.default_persona_id ?? DEFAULT_PERSONA_FALLBACK;
+    return {persona_id:configured,persona_name:humanizeSlug(configured),persona_mode:'leadership',source:'company-default'};
+  }
 
   // Tier 1 — department sticky lead.
   try {
@@ -402,6 +414,7 @@ export interface ProducerPersonaBundleInput {
   topic_persona_id?: string | null;
   task_persona_ids?: string[] | null;
   bundle_sha?: string | null;
+  persona_bundle?: PersonaBundle | null;
 }
 
 /**
@@ -427,98 +440,84 @@ export interface ProducerPersonaBundleInput {
  * degrade-honestly pattern `deriveDepartmentDefaultPersona`'s company-config
  * tier already uses for an id with no selector-returned name.
  *
- * `confirm_required: false` (not_required): a `voice_persona_id` reaching
- * this function has, by the B-U1 ladder's own contract, already cleared any
- * pending audience confirmation upstream (a genuinely pending bundle HOLDs
- * before it ever reaches ingest) — so no NEW confirm gate is invented here.
- *
- * Fail-soft: any DB error is caught and logged; task creation is never
- * blocked by a producer-pin failure.
+ * Full producer decisions require a matching hash, catalog and company evidence.
+ * IDs alone remain pending and cannot establish audience confirmation.
+ * A failed atomic pin throws instead of reporting a success that was not stored.
  *
  * Returns the pinned voice persona id.
  */
-export function pinProducerPersonaBundle(taskId: string, producer: ProducerPersonaBundleInput): string {
-  const voicePersonaId = producer.voice_persona_id.trim();
-  const personaName = humanizeSlug(voicePersonaId);
-
-  try {
-    writeLegacyPersonaMirror(
-      taskId,
-      { persona_id: voicePersonaId, persona_name: personaName, persona_mode: 'leadership' },
-      { fallback: false },
-    );
-  } catch (err) {
-    console.warn(`[createTaskCore] producer-pin legacy-column write failed for task ${taskId}:`, (err as Error).message);
+/** Validate before task creation as well as at the durable pin boundary. The
+ * ingest rail authenticates the producer; this validates what it attests. */
+export function validateProducerPersonaBundle(producer: ProducerPersonaBundleInput, companyId?: string): void {
+  const voiceId=producer.voice_persona_id.trim();
+  if(!/^[a-z0-9][a-z0-9-]{1,127}$/.test(voiceId) || SENTINEL_IDS.has(voiceId)) throw new Error('producer_persona_id_invalid');
+  const bundle=producer.persona_bundle;
+  if(!bundle) {
+    const claimed=[voiceId,producer.topic_persona_id,...(producer.task_persona_ids??[])].filter((id):id is string=>!!id);
+    if(claimed.some(id=>!/^[a-z0-9][a-z0-9-]{1,127}$/.test(id)||SENTINEL_IDS.has(id)))throw new Error('producer_persona_id_invalid');
+    if(companyId){const catalog=JSON.parse(fs.readFileSync(personaCompanyContext(companyId).personaCatalog,'utf8'));const known=Array.isArray(catalog.personas)?catalog.personas.map((p:{id:string})=>p.id):Object.keys(catalog.personas??{});if(claimed.some(id=>!known.includes(id)))throw new Error('producer_persona_catalog_mismatch');}
+    return; // Known legacy IDs remain unverified until a full decision lands.
   }
-
-  // The migration-090 bundle mirror — reuses persistPersonaBundle verbatim so
-  // this is the SAME write path resolvePersonaAndPin uses, never a fork.
-  const topicPersonaId = (producer.topic_persona_id || '').trim() || null;
-  const taskPersonaIds = (producer.task_persona_ids || [])
-    .map((p) => (p || '').trim())
-    .filter((p) => p.length > 0);
-  const bundleSha = (producer.bundle_sha || '').trim() || null;
-
-  const bundle: PersonaBundle = {
-    confirm_required: false,
-    voice: {
-      audience_persona: { id: voicePersonaId, why: 'producer-pinned at ingest (B-U7)' },
-      topic_persona: topicPersonaId ? { id: topicPersonaId, why: null } : null,
-      collapsed: false,
-    },
-    blend_directive: '',
-    task_personas: taskPersonaIds.map((persona_id, i) => ({ seq: i + 1, persona_id, why: null })),
-    rationale: { source: 'producer_pinned_ingest', bundle_sha: bundleSha },
-    catalog_version: null,
-  };
-  try {
-    persistPersonaBundle(taskId, bundle);
-  } catch (err) {
-    console.warn(`[createTaskCore] producer-pin bundle persist failed for task ${taskId}:`, (err as Error).message);
-  }
-
-  try {
-    run(
-      `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
-      [
-        uuidv4(),
-        'persona_producer_pinned',
-        taskId,
-        `[PERSONA-PRODUCER-PIN] ingest carried a resolved bundle — pinned "${voicePersonaId}" ` +
-          `directly (B-U7); no selector spawn.`,
-        new Date().toISOString(),
-      ],
-    );
-  } catch {
-    /* audit-only — never block the pin on it */
-  }
-
-  // Read-back + broadcast are best-effort telemetry — a failure here must
-  // never surface as a thrown error to the caller (createTaskCore calls this
-  // synchronously; an uncaught throw would crash task creation itself, unlike
-  // the async resolvePersonaAndPin path it replaces).
-  try {
-    const updatedTask = queryOne<Task>(
-      `SELECT t.*,
-          aa.name as assigned_agent_name,
-          aa.avatar_emoji as assigned_agent_emoji,
-          ca.name as created_by_agent_name,
-          ca.avatar_emoji as created_by_agent_emoji
-         FROM tasks t
-         LEFT JOIN agents aa ON t.assigned_agent_id = aa.id
-         LEFT JOIN agents ca ON t.created_by_agent_id = ca.id
-        WHERE t.id = ?`,
-      [taskId],
-    );
-    if (updatedTask) {
-      broadcast({ type: 'task_updated', payload: updatedTask });
-      console.log(`[createTaskCore] producer-pinned persona for task ${taskId}: ${voicePersonaId} (B-U7, no selector spawn)`);
+  const voice=bundle.voice;
+  const declared=(voice?.collapsed ? voice.collapsed_persona_id : voice?.audience_persona?.id) || voice?.topic_persona?.id;
+  if(declared!==voiceId || !bundle.blend_directive?.trim() || !bundle.catalog_version ||
+     !producer.bundle_sha || producer.bundle_sha!==personaBundleHash(bundle)) throw new Error('producer_persona_bundle_invalid');
+  const ids=[voiceId,voice?.topic_persona?.id,...(bundle.task_personas??[]).map(p=>p.persona_id)].filter((id):id is string=>!!id);
+  if(ids.some(id=>!/^[a-z0-9][a-z0-9-]{1,127}$/.test(id)||SENTINEL_IDS.has(id))) throw new Error('producer_persona_id_invalid');
+  if(producer.topic_persona_id && producer.topic_persona_id!==voice?.topic_persona?.id)throw new Error('producer_persona_mirrors_conflict');
+  if(producer.task_persona_ids && JSON.stringify([...producer.task_persona_ids].sort())!==JSON.stringify((bundle.task_personas??[]).map(p=>p.persona_id).sort()))throw new Error('producer_persona_mirrors_conflict');
+  if(companyId) {
+    const annotated=bundle as PersonaBundle & {company_id?:string;confirmation?:{actor_id?:string;confirmed_at?:string;audience_hash?:string}};
+    if(annotated.company_id!==companyId) throw new Error('producer_persona_company_mismatch');
+    const context=personaCompanyContext(companyId);
+    const catalog=JSON.parse(fs.readFileSync(context.personaCatalog,'utf8'));
+    const known=Array.isArray(catalog.personas)?catalog.personas.map((p:{id:string})=>p.id):Object.keys(catalog.personas??{});
+    if(String(catalog.version??catalog.catalog_version??'')!==String(bundle.catalog_version) || ids.some(id=>!known.includes(id))) throw new Error('producer_persona_catalog_mismatch');
+    if(!bundle.confirm_required) {
+      const c=annotated.confirmation;
+      if(!c?.actor_id || !c.confirmed_at || !Number.isFinite(Date.parse(c.confirmed_at)) ||
+        c.audience_hash!==personaBundleHash(bundle.resolved_audience)) throw new Error('producer_audience_confirmation_missing');
     }
-  } catch (err) {
-    console.warn(`[createTaskCore] producer-pin read-back/broadcast failed for task ${taskId}:`, (err as Error).message);
   }
+}
 
-  return voicePersonaId;
+export function pinProducerPersonaBundle(taskId: string, producer: ProducerPersonaBundleInput): string {
+  const snapshot=capturePersonaSnapshot(taskId);
+  let companyId:string|undefined;
+  if(!process.env.PERSONA_FIXTURE_JSON) companyId=taskPersonaCompanyContext(taskId)?.companyId;
+  validateProducerPersonaBundle(producer,companyId);
+  const voicePersonaId=producer.voice_persona_id.trim();
+  if(!/^[a-z0-9][a-z0-9-]{1,127}$/.test(voicePersonaId) || SENTINEL_IDS.has(voicePersonaId)) throw new Error('producer_persona_id_invalid');
+  const bundle=producer.persona_bundle;
+  if(bundle) {
+    const voice=bundle.voice;
+    const declared=(voice?.collapsed ? voice.collapsed_persona_id : voice?.audience_persona?.id) || voice?.topic_persona?.id;
+    if(declared!==voicePersonaId || !bundle.blend_directive?.trim() || !bundle.catalog_version ||
+       !producer.bundle_sha || producer.bundle_sha!==personaBundleHash(bundle)) throw new Error('producer_persona_bundle_invalid');
+    return commitPersonaMutation(snapshot,()=>{
+      writeLegacyPersonaMirror(taskId,{persona_id:voicePersonaId,persona_name:humanizeSlug(voicePersonaId),persona_mode:'leadership'},{fallback:false});
+      persistPersonaBundle(taskId,bundle);
+      run('INSERT INTO events(id,type,task_id,message,created_at) VALUES(?,?,?,?,?)',[uuidv4(),'persona_producer_pinned',taskId,`[PERSONA-PRODUCER-PIN] Verified full producer decision for ${voicePersonaId}`,new Date().toISOString()]);
+      console.log(`[createTaskCore] producer-pinned persona ${voicePersonaId} (verified bundle)`);
+      return voicePersonaId;
+    });
+  }
+  // IDs alone preserve legacy attribution but provide no confirmation evidence.
+  // Keep them visible as pending; a canonical selector/confirmed full bundle is
+  // required before sending newly governed content.
+  return commitPersonaMutation(snapshot,()=>{
+    writeLegacyPersonaMirror(taskId,{persona_id:voicePersonaId,persona_name:humanizeSlug(voicePersonaId),persona_mode:'leadership'},{fallback:false});
+    persistPersonaBundle(taskId,{
+      confirm_required:true,voice:{audience_persona:{id:voicePersonaId,why:'unverified producer IDs'},
+      topic_persona:producer.topic_persona_id?{id:producer.topic_persona_id,why:null}:null,collapsed:false},
+      blend_directive:'Producer supplied IDs only. Audience and complete persona decision require verification before writing.',
+      task_personas:(producer.task_persona_ids??[]).map((persona_id,i)=>({seq:i+1,persona_id,why:null})),
+      rationale:{source:'producer_ids_unverified',claimed_bundle_sha:producer.bundle_sha??null},catalog_version:null,
+    } as PersonaBundle);
+    run('INSERT INTO events(id,type,task_id,message,created_at) VALUES(?,?,?,?,?)',[uuidv4(),'persona_producer_pinned',taskId,`[PERSONA-PRODUCER-PIN] Unverified producer IDs for ${voicePersonaId}; full decision required`,new Date().toISOString()]);
+    console.log(`[createTaskCore] producer-pinned persona ${voicePersonaId} (unverified IDs)`);
+    return voicePersonaId;
+  });
 }
 
 // ─── SOP-AWARE MATCHING (F3.4) ──────────────────────────────────────────────
@@ -655,6 +654,10 @@ export async function resolvePersonaAndPin(
   // durable write — the refusal has to happen before the loop is entered.
   assertNoFixtureDerivedServerWrite('a tasks.persona_* pin');
 
+  // Resolve company before entering retry/fallback so ambiguity cannot degrade
+  // into a different company's process-global default.
+  if (!process.env.PERSONA_FIXTURE_JSON) taskPersonaCompanyContext(taskId);
+  const snapshot = capturePersonaSnapshot(taskId);
   for (let attempt = 1; attempt <= PERSONA_PIN_MAX_ATTEMPTS; attempt++) {
     try {
       const persona = await selectPersonaForTask(taskId, taskDescription, departmentForSelector, sopContext, {
@@ -680,7 +683,7 @@ export async function resolvePersonaAndPin(
           const governanceId =
             (persona.governance_persona_id && persona.governance_persona_id.trim())
               ? persona.governance_persona_id.trim()
-              : resolveGovernancePersonaId();
+              : resolveGovernancePersonaId(taskId);
           run(
             `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
             [
@@ -699,6 +702,8 @@ export async function resolvePersonaAndPin(
       }
 
       if (persona && persona.persona_id && !SENTINEL_IDS.has(persona.persona_id)) {
+        if (opts?.blend && !persona.bundle) throw new Error('persona_bundle_required');
+        return commitPersonaMutation(snapshot, () => {
         const personaSelectedAt = new Date().toISOString();
         run(
           `UPDATE tasks
@@ -707,7 +712,8 @@ export async function resolvePersonaAndPin(
                   persona_mode = ?,
                   persona_score = ?,
                   persona_version = ?,
-                  persona_selected_at = ?
+                  persona_selected_at = ?,
+                  secondary_persona_id = ?, secondary_persona_name = ?, secondary_persona_score = ?
             WHERE id = ?`,
           [
             persona.persona_id,
@@ -716,6 +722,7 @@ export async function resolvePersonaAndPin(
             persona.score ?? null,
             persona.persona_version ?? 1,
             personaSelectedAt,
+            persona.secondary_persona_id ?? null, persona.secondary_persona_name ?? null, persona.secondary_persona_score ?? null,
             taskId,
           ],
         );
@@ -747,11 +754,7 @@ export async function resolvePersonaAndPin(
         // the blend directive and gate the write on audience confirmation. NULL
         // bundle (legacy/non-content result) → no-op, no behaviour change.
         if (persona.bundle) {
-          try {
-            persistPersonaBundle(taskId, persona.bundle);
-          } catch (bundleErr) {
-            console.warn(`[resolvePersonaAndPin] bundle persist non-fatal for task ${taskId}:`, (bundleErr as Error).message);
-          }
+          persistPersonaBundle(taskId, persona.bundle);
         } else if (opts?.blend) {
           // P4-02 step 6 — THE SILENT-REGRESSION LOCK. The blend was REQUESTED
           // (`--blend`, i.e. isContentTask() was true at the call site) but the
@@ -764,13 +767,15 @@ export async function resolvePersonaAndPin(
         }
 
         if (updatedTask) {
-          broadcast({ type: 'task_updated', payload: updatedTask });
+          broadcast({ type: 'task_updated', payload: queryOne<Task>('SELECT * FROM tasks WHERE id=?', [taskId]) ?? updatedTask });
           console.log(`[resolvePersonaAndPin] Persona landed for task ${taskId}: ${persona.persona_id}`);
         }
         return persona.persona_id;
+        });
       }
       // null / sentinel-only result — transient; fall through to retry with backoff.
     } catch (err) {
+      if (err instanceof PersonaConflictError) return null;
       console.error(`[resolvePersonaAndPin] attempt ${attempt}/${PERSONA_PIN_MAX_ATTEMPTS} threw for task ${taskId}:`, err);
     }
     if (attempt < PERSONA_PIN_MAX_ATTEMPTS) {
@@ -782,14 +787,17 @@ export async function resolvePersonaAndPin(
   // flag it persona_fallback=true for audit so the board invariant ("EVERY task
   // carries a persona") holds. `no_persona_required` is handled ABOVE (returns
   // null early) and is intentionally left personaless.
+  if (opts?.blend) { emitPersonaBlendMissing(taskId, null); return null; }
   try {
-    const fallback = deriveDepartmentDefaultPersona(departmentForSelector);
+    return commitPersonaMutation(snapshot, () => {
+    const fallback = deriveDepartmentDefaultPersona(departmentForSelector, taskId);
     pinDepartmentDefaultPersona(taskId, fallback);
     console.warn(
       `[resolvePersonaAndPin] exhausted ${PERSONA_PIN_MAX_ATTEMPTS} attempts for task ${taskId} — ` +
       `pinned ${fallback.source} department-default persona "${fallback.persona_id}" (persona_fallback=true).`,
     );
     return fallback.persona_id;
+    });
   } catch (fbErr) {
     console.error(
       `[resolvePersonaAndPin] department-default fallback pin FAILED for task ${taskId} — left unpinned:`,
@@ -1045,6 +1053,7 @@ export async function resolvePersonaPlanAndPin(
   // only there would still let enforceRequiredSlots write first.
   assertNoFixtureDerivedServerWrite('a tasks.persona_* plan pin');
 
+  const snapshot=capturePersonaSnapshot(taskId);
   let plan;
   try {
     plan = await selectPersonaPlanForTask(taskId, taskDescription, departmentForSelector, { slots });
@@ -1063,6 +1072,9 @@ export async function resolvePersonaPlanAndPin(
     return resolvePersonaAndPin(taskId, taskDescription, departmentForSelector);
   }
 
+  try { return commitPersonaMutation(snapshot,()=>{
+  run('DELETE FROM task_subtask_persona WHERE task_id=?',[taskId]);
+  for(const row of plan.subtask_personas)run(`INSERT INTO task_subtask_persona(id,task_id,seq,subtask_text,persona_id,persona_name,score,department,task_category,slot) VALUES(?,?,?,?,?,?,?,?,?,?)`,[uuidv4(),taskId,row.seq,row.subtask_text,row.persona_id,row.persona_name,row.score,row.department,row.task_category,row.slot]);
   // FDN-1 REQUIRED-SLOT GUARANTEE: a REQUIRED slot may never be empty. When a
   // slot was declared required (slots[i]) but its sub-task came back persona-less
   // (no persona available — NOT a mechanical step), backfill the dept-default so
@@ -1114,7 +1126,8 @@ export async function resolvePersonaPlanAndPin(
   // primary field — which handles no_persona_required + the exhaustion fallback.
   broadcastPersonaPlan(taskId);
   console.log(`[resolvePersonaPlanAndPin] task ${taskId}: plan had no non-mechanical persona — single-persona fallback for primary`);
-  return resolvePersonaAndPin(taskId, taskDescription, departmentForSelector);
+  return null;
+  }); } catch(error) { if(error instanceof PersonaConflictError)return null; throw error; }
 }
 
 /**
@@ -1132,7 +1145,7 @@ function enforceRequiredSlots(
   if (slots.length === 0) return;
   const rows = loadSubtaskPersonas(taskId);
   const bySeq = new Map(rows.map((r) => [r.seq, r]));
-  const fallback = deriveDepartmentDefaultPersona(department);
+  const fallback = deriveDepartmentDefaultPersona(department, taskId);
   const now = new Date().toISOString();
 
   slots.forEach((slot, i) => {
@@ -1170,6 +1183,7 @@ function enforceRequiredSlots(
 // ─── F3.4 DISPATCH-TIME SOP RESCORE (DEP-2) ─────────────────────────────────
 
 export interface RescoreResult {
+  failed?: boolean;
   /** True when the rescore landed a DIFFERENT persona than the task already carried. */
   changed: boolean;
   persona_id: string | null;
@@ -1264,7 +1278,7 @@ function invalidateStaleBlendOnRescore(
  * a persona the task already carries — the existing pin is kept untouched. Only a
  * concrete, non-sentinel persona replaces the pin. Persists a queryable
  * `persona_rescored_at_dispatch` event and re-broadcasts the row. Never throws
- * (dispatch must proceed regardless).
+ * (dispatch holds when a required new decision cannot be computed).
  *
  * The persona currently on the row (for the never-downgrade guard + audit) is
  * read here, not passed in — the DB already knows it.
@@ -1278,6 +1292,8 @@ export async function rescorePersonaWithSOP(
   departmentForSelector: string,
   sopContext: SopSelectorContext,
 ): Promise<RescoreResult> {
+  const snapshot = capturePersonaSnapshot(taskId);
+  const wantsBlend = isContentTask(taskDescription);
   const prev = queryOne<{
     persona_id: string | null;
     persona_name: string | null;
@@ -1295,7 +1311,7 @@ export async function rescorePersonaWithSOP(
       taskDescription,
       departmentForSelector,
       sopContext,
-      { timeoutMs: PERSONA_RESCORE_TIMEOUT_MS },
+      { timeoutMs: PERSONA_RESCORE_TIMEOUT_MS, blend: wantsBlend, audienceOverride: queryOne<{audience_label:string;audience_source:string}>('SELECT audience_label,audience_source FROM tasks WHERE id=?',[taskId])?.audience_source === 'operator_confirmed' ? queryOne<{audience_label:string}>('SELECT audience_label FROM tasks WHERE id=?',[taskId])?.audience_label : undefined },
     );
 
     // Never-downgrade: a null / mechanical / sentinel result keeps the current pin.
@@ -1308,13 +1324,16 @@ export async function rescorePersonaWithSOP(
       return unchanged;
     }
 
+    if (wantsBlend && !persona.bundle) throw new Error('persona_bundle_required');
+    return commitPersonaMutation(snapshot, () => {
     const changed = persona.persona_id !== (prev?.persona_id ?? null);
     const now = new Date().toISOString();
 
     run(
       `UPDATE tasks
           SET persona_id = ?, persona_name = ?, persona_mode = ?,
-              persona_score = ?, persona_version = ?, persona_selected_at = ?
+              persona_score = ?, persona_version = ?, persona_selected_at = ?,
+              secondary_persona_id = ?, secondary_persona_name = ?, secondary_persona_score = ?
         WHERE id = ?`,
       [
         persona.persona_id,
@@ -1323,6 +1342,7 @@ export async function rescorePersonaWithSOP(
         persona.score ?? null,
         persona.persona_version ?? 1,
         now,
+        persona.secondary_persona_id ?? null,persona.secondary_persona_name ?? null,persona.secondary_persona_score ?? null,
         taskId,
       ],
     );
@@ -1352,9 +1372,8 @@ export async function rescorePersonaWithSOP(
 
     // D9: a CHANGED persona invalidates any stale blend directive riding the OLD
     // persona's voice/topic decision — see invalidateStaleBlendOnRescore above.
-    const blendDirective = changed
-      ? invalidateStaleBlendOnRescore(taskId, prev?.persona_id ?? null, persona.persona_id)
-      : undefined;
+    if (persona.bundle) persistPersonaBundle(taskId, persona.bundle);
+    const blendDirective = persona.bundle ? ensureBlendGuardrail(persona.bundle.blend_directive) : undefined;
 
     const updatedTask = queryOne<Task>(
       `SELECT t.*,
@@ -1382,12 +1401,13 @@ export async function rescorePersonaWithSOP(
       persona_mode: persona.interaction_mode,
       blend_directive: blendDirective,
     };
+    });
   } catch (err) {
     console.warn(
       `[rescorePersonaWithSOP] non-fatal for task ${taskId}:`,
       (err as Error).message,
     );
-    return unchanged;
+    return { ...unchanged, failed:true };
   }
 }
 
@@ -1440,7 +1460,7 @@ export function ensurePersonaForDispatch(
 
   // Naked at dispatch — heal deterministically (no stall). pinDepartmentDefaultPersona
   // writes the persona_fallback audit event + re-broadcasts the row.
-  const fb = deriveDepartmentDefaultPersona(departmentForSelector);
+  const fb = deriveDepartmentDefaultPersona(departmentForSelector, taskId);
   try {
     pinDepartmentDefaultPersona(taskId, fb);
     console.warn(
@@ -1531,6 +1551,101 @@ function buildAudiencePrompt(
  *                                                              deadline_fallback (NEVER-
  *                                                              NAKED house-voice release)
  */
+/** Shared final prerequisite for manual and scheduled sends. Technical failure
+ * never waives content governance. Legacy version-zero tasks remain explicit. */
+/** Refresh changed SOP/task context and confirmed-audience edits before either
+ * message builder reads the persona. Uses existing bounded selector paths. */
+/** An explicit Intelligence Settings lock changes the VOICE decision as one
+ * bundle mutation. Topic/task expertise and confirmed audience remain explicit. */
+export function applyPersonaOperatorLock(taskId:string):void {
+ const task=queryOne<Task>('SELECT * FROM tasks WHERE id=?',[taskId]);
+ if(!task) throw new Error('persona_task_missing');
+ const lock=queryOne<{value:string}>("SELECT value FROM agent_settings WHERE department_id=? AND setting_type='persona' AND (role_id=? OR role_id IS NULL) AND value!='auto' ORDER BY role_id IS NULL LIMIT 1",[task.workspace_id ?? task.department,task.assigned_agent_id]);
+ if(!lock || lock.value===task.persona_id) return;
+ if(!/^[a-z0-9][a-z0-9_-]*$/i.test(lock.value) || SENTINEL_IDS.has(lock.value)) throw new Error('persona_operator_lock_invalid');
+ const company=process.env.PERSONA_FIXTURE_JSON ? null : taskPersonaCompanyContext(taskId);
+ if(company){const catalog=JSON.parse(fs.readFileSync(company.personaCatalog,'utf8'));if(!(Array.isArray(catalog.personas)?catalog.personas.some((p:{id:string})=>p.id===lock.value):Object.prototype.hasOwnProperty.call(catalog.personas??{},lock.value)))throw new Error('persona_operator_lock_not_in_catalog');}
+ const snapshot=capturePersonaSnapshot(taskId);
+ const row=queryOne<{bundle_json:string}>('SELECT bundle_json FROM task_persona_bundle WHERE task_id=?',[taskId]);
+ commitPersonaMutation(snapshot,()=>{
+  run("UPDATE tasks SET persona_id=?,persona_name=?,persona_mode='leadership',secondary_persona_id=NULL,secondary_persona_name=NULL,secondary_persona_score=NULL,persona_selected_at=? WHERE id=?",[lock.value,humanizeSlug(lock.value),new Date().toISOString(),taskId]);
+  if(row){
+   const bundle=JSON.parse(row.bundle_json) as PersonaBundle;
+   const topic=bundle.voice?.topic_persona?.id ?? null;
+   bundle.voice={...bundle.voice,audience_persona:{id:lock.value,why:'Explicit operator persona lock'},collapsed:topic===lock.value,collapsed_persona_id:topic===lock.value?lock.value:undefined};
+   bundle.blend_directive=ensureBlendGuardrail(`Use persona ${lock.value} for audience voice (explicit operator lock). Audience: ${JSON.stringify(bundle.resolved_audience ?? {})}. Topic expertise: ${topic ?? 'none'}. Task expertise: ${JSON.stringify(bundle.task_personas ?? [])}. Goal: ${JSON.stringify((bundle as PersonaBundle & {resolved_goal?:unknown}).resolved_goal ?? null)}. Topic and task personas provide expertise without replacing the audience voice.`);
+   bundle.rationale={...(bundle.rationale??{}),operator_lock:lock.value};
+   persistPersonaBundle(taskId,bundle);
+  }
+ });
+}
+
+async function refreshPersonaScopesIfNeeded(taskId:string):Promise<void>{
+ const task=queryOne<Task & {persona_input_revision?:number}>('SELECT * FROM tasks WHERE id=?',[taskId]);
+ const root=queryOne<{bundle_json:string}>('SELECT bundle_json FROM task_persona_bundle WHERE task_id=?',[taskId]);
+ if(!task||!root)return;
+ const rootHash=personaBundleHash(JSON.parse(root.bundle_json));
+ const scopes=queryAll<{scope:string;bundle_json:string;page_role:string|null;conversion_goal:string|null}>('SELECT scope,bundle_json,page_role,conversion_goal FROM task_persona_bundle_scope WHERE task_id=? ORDER BY scope',[taskId]);
+ const stale=scopes.filter(r=>{const context=JSON.parse(r.bundle_json).decision_context;return context?.input_revision!==task.persona_input_revision||context?.root_bundle_sha!==rootHash;});
+ if(stale.length>10)throw new Error('persona_scope_refresh_requires_review');
+ // Bound concurrency and each selector subprocess; no scope writes
+ // until every result is ready and the original root/assignment snapshot still owns it.
+ const snapshot=capturePersonaSnapshot(taskId),resolved:{scope:string;bundle:PersonaBundle}[]=[];
+ for(let offset=0;offset<stale.length;offset+=4){
+  const group=await Promise.all(stale.slice(offset,offset+4).map(async scope=>{
+   const choice=await selectPersonaForTask(taskId,`${task.title} ${task.description??''}. Page scope: ${scope.scope}. Page role: ${scope.page_role??''}. Goal: ${scope.conversion_goal??''}.`,task.department??'general',task.sop_id?loadSopSelectorContextById(task.sop_id):null,{blend:true,audienceOverride:task.audience_label??undefined,timeoutMs:15_000});
+   if(!choice?.bundle)throw new Error('persona_scope_refresh_pending');
+   return {scope:scope.scope,bundle:{...choice.bundle,scope_hint:JSON.parse(scope.bundle_json).scope_hint}};
+  }));resolved.push(...group);
+ }
+ if(resolved.length)commitPersonaMutation(snapshot,()=>{for(const scope of resolved)if(!persistPersonaBundleScope(taskId,scope.scope,scope.bundle))throw new Error('persona_scope_refresh_failed');});
+}
+
+export async function refreshPersonaDecisionIfNeeded(taskId:string):Promise<void> {
+  const task=queryOne<Task & {persona_input_revision?:number;persona_contract_version?:number}>('SELECT * FROM tasks WHERE id=?',[taskId]);
+  if(!task) throw new Error('persona_task_missing');
+  const row=queryOne<{bundle_json:string}>('SELECT bundle_json FROM task_persona_bundle WHERE task_id=?',[taskId]);
+  if(!row) { applyPersonaOperatorLock(taskId); await refreshPersonaScopesIfNeeded(taskId); return; }
+  const bundle=JSON.parse(row.bundle_json) as PersonaBundle & {decision_context?:{input_revision?:number}};
+  const stale=task.persona_contract_version && bundle.decision_context?.input_revision!==task.persona_input_revision;
+  if(!stale && !(bundle.rationale as {refresh_pending?:boolean}|undefined)?.refresh_pending) { applyPersonaOperatorLock(taskId); await refreshPersonaScopesIfNeeded(taskId); return; }
+  const dept=canonicalDeptSlug(task.department ?? '') || 'general';
+  const description=`${task.title} ${task.description ?? ''}`;
+  if(task.audience_source==='operator_confirmed' && task.audience_label) {
+    const refreshed=await rescoreAudienceBlend(taskId,description,dept,task.audience_label);
+    if(!refreshed.rescored) throw new Error('persona_refresh_pending');
+  } else {
+    const persona=await resolvePersonaAndPin(taskId,description,dept,task.sop_id?loadSopSelectorContextById(task.sop_id):undefined,{blend:isContentTask(description)});
+    if(!persona) throw new Error('persona_refresh_pending');
+  }
+  applyPersonaOperatorLock(taskId);
+  await refreshPersonaScopesIfNeeded(taskId);
+}
+
+export function checkPersonaDispatchReady(taskId: string): { ready: boolean; reason: string } {
+  try {
+    const task = queryOne<Task & {persona_contract_version?:number}>('SELECT * FROM tasks WHERE id=?',[taskId]);
+    if (!task) return {ready:false,reason:'task_missing'};
+    const row = queryOne<{bundle_json:string;confirm_state:string}>('SELECT bundle_json,confirm_state FROM task_persona_bundle WHERE task_id=?',[taskId]);
+    if (!row) return task.persona_contract_version && isContentTask(`${task.title} ${task.description ?? ''}`)
+      ? {ready:false,reason:'persona_bundle_required'} : {ready:true,reason:'legacy_or_non_content'};
+    const bundle=JSON.parse(row.bundle_json) as PersonaBundle & {decision_context?:{input_revision?:number}};
+    if(task.persona_contract_version && bundle.decision_context?.input_revision!==(task as Task & {persona_input_revision?:number}).persona_input_revision) return {ready:false,reason:'persona_input_changed'};
+    if((bundle.rationale as {refresh_pending?:boolean}|undefined)?.refresh_pending) return {ready:false,reason:'persona_refresh_pending'};
+    for(const scope of queryAll<{bundle_json:string}>('SELECT bundle_json FROM task_persona_bundle_scope WHERE task_id=?',[taskId])) {
+      const context=JSON.parse(scope.bundle_json).decision_context;
+      if(context?.input_revision!==(task as Task & {persona_input_revision?:number}).persona_input_revision || context?.root_bundle_sha!==personaBundleHash(bundle))return {ready:false,reason:'persona_scope_revision_changed'};
+    }
+    if (!bundle.voice || !task.blend_directive) return {ready:false,reason:'persona_bundle_stale'};
+    const gate=evaluateAudienceConfirmGate(taskId);
+    if (gate.hold || (gate.state==='deadline_fallback' && row.confirm_state!=='deadline_fallback'))
+      return {ready:false,reason:gate.reason};
+    const setting = queryOne<{value:string}>("SELECT value FROM agent_settings WHERE department_id=? AND setting_type='persona' AND (role_id=? OR role_id IS NULL) AND value!='auto' ORDER BY role_id IS NULL LIMIT 1",[task.workspace_id ?? task.department,task.assigned_agent_id]);
+    if (setting?.value && setting.value!==task.persona_id) return {ready:false,reason:'persona_override_requires_blend_refresh'};
+    return {ready:true,reason:'persona_governance_ready'};
+  } catch { return {ready:false,reason:'persona_governance_unavailable'}; }
+}
+
 export function evaluateAudienceConfirmGate(
   taskId: string,
   nowMs: number = Date.now(),
@@ -1544,12 +1659,13 @@ export function evaluateAudienceConfirmGate(
   try {
     row = queryOne<TaskPersonaBundleRow>('SELECT * FROM task_persona_bundle WHERE task_id = ?', [taskId]);
   } catch {
-    return none; // pre-090 DB — no gate
+    return { ...none, hold: true, state: 'pending', reason: 'persona_governance_unavailable' };
   }
   if (!row) return none;
 
   let bundle: PersonaBundle | null = null;
   try { bundle = JSON.parse(row.bundle_json) as PersonaBundle; } catch { bundle = null; }
+  if((bundle?.rationale as {refresh_pending?:boolean}|undefined)?.refresh_pending) return {...none,hold:true,state:'pending',reason:'persona_refresh_pending',firstHold:false};
   const audience = bundle?.resolved_audience ?? null;
   const candidates = audience?.candidates ?? [];
   const audienceLabel = audience?.label ?? (candidates.length === 1 ? candidates[0] : null);
@@ -1931,32 +2047,25 @@ export function confirmTaskAudience(
   taskId: string,
   opts: { audienceId?: string | null; audienceLabel?: string | null; changed?: boolean } = {},
 ): void {
-  const now = new Date().toISOString();
-  try {
-    run(`UPDATE task_persona_bundle SET confirm_state = 'confirmed' WHERE task_id = ?`, [taskId]);
-  } catch { /* pre-090 tolerant */ }
-  try {
-    run(
-      `UPDATE tasks
-          SET audience_id = COALESCE(?, audience_id),
-              audience_label = COALESCE(?, audience_label),
-              audience_source = 'operator_confirmed'
-        WHERE id = ?`,
-      [opts.audienceId ?? null, opts.audienceLabel ?? null, taskId],
-    );
-  } catch { /* pre-090 tolerant */ }
-  try {
-    run(
-      `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
-      [uuidv4(), 'audience_confirmed', taskId,
-        `[AUDIENCE-CONFIRM] operator confirmed audience${opts.audienceLabel ? ` "${opts.audienceLabel}"` : ''}${opts.changed ? ' (changed — voice re-score recommended)' : ''}.`, now],
-    );
-  } catch { /* audit best-effort */ }
-  try {
-    const t = queryOne<Task>('SELECT * FROM tasks WHERE id = ?', [taskId]);
-    if (t) broadcast({ type: 'task_updated', payload: t });
-  } catch { /* broadcast best-effort */ }
+  const snapshot=capturePersonaSnapshot(taskId);
+  commitPersonaMutation(snapshot,()=>{
+    const row=queryOne<{bundle_json:string}>('SELECT bundle_json FROM task_persona_bundle WHERE task_id=?',[taskId]);
+    if(!row) throw new Error('persona_bundle_missing');
+    const bundle=JSON.parse(row.bundle_json) as PersonaBundle;
+    const label=opts.audienceLabel ?? bundle.resolved_audience?.label ?? null;
+    bundle.resolved_audience={...(bundle.resolved_audience ?? {confidence:1,candidates:[]}),id:opts.audienceId ?? bundle.resolved_audience?.id ?? null,
+      label,source:'operator_confirmed',candidates:label?[label]:[]};
+    // Confirmation is preserved, but writing waits until the new voice decision
+    // is rebuilt. Never release an old audience's blend during the async await.
+    const pending={...bundle,confirm_required:true,rationale:{...(bundle.rationale ?? {}),refresh_pending:true}};
+    persistPersonaBundle(taskId,pending);
+    run("UPDATE task_persona_bundle SET confirm_state='pending',created_at=? WHERE task_id=?",[new Date().toISOString(),taskId]);
+    run("UPDATE tasks SET audience_source='operator_confirmed' WHERE id=?",[taskId]);
+    run('INSERT INTO events(id,type,task_id,message,created_at) VALUES(?,?,?,?,?)',
+      [uuidv4(),'audience_confirmed',taskId,'Audience confirmed; refreshing the persona decision before dispatch.',new Date().toISOString()]);
+  });
 }
+
 
 /**
  * D3 — re-run the voice-first blend WITH the operator-confirmed audience so the
@@ -1966,16 +2075,14 @@ export function confirmTaskAudience(
  * not yet confirmed — draft in a neutral house voice" forever.
  *
  * Called by the audience-confirm API route AFTER confirmTaskAudience has
- * already flipped confirm_state -> 'confirmed' (so the dispatcher's gate
- * releases the write immediately even if THIS re-score is slow or fails —
- * never-naked; the confirmed audience_id/audience_label mirror columns already
- * stand regardless). Single-shot + bounded (PERSONA_RESCORE_TIMEOUT_MS) so the
+ * persisted the confirmed audience with a pending refresh flag. Dispatch stays
+ * held until the corresponding voice decision commits successfully. Single-shot + bounded (PERSONA_RESCORE_TIMEOUT_MS) so the
  * confirm action stays responsive. Never throws.
  *
  * @returns rescored:true + the new bundle when the re-run selector emitted a
  *          bundle (persisted); rescored:false (bundle:null) on any failure or
- *          a non-bundle (legacy) result — the caller proceeds regardless, the
- *          confirm itself already landed.
+ *          a non-bundle result — audience confirmation remains saved, while
+ *          dispatch waits for the matching decision.
  */
 export async function rescoreAudienceBlend(
   taskId: string,
@@ -1983,6 +2090,7 @@ export async function rescoreAudienceBlend(
   departmentForSelector: string,
   audienceLabel: string,
 ): Promise<{ rescored: boolean; bundle: PersonaBundle | null }> {
+  const snapshot=capturePersonaSnapshot(taskId);
   try {
     const persona = await selectPersonaForTask(taskId, taskDescription, departmentForSelector, null, {
       blend: true,
@@ -1993,7 +2101,10 @@ export async function rescoreAudienceBlend(
       console.warn(`[rescoreAudienceBlend] task ${taskId}: re-run selector returned no bundle — confirm stands, voice unchanged.`);
       return { rescored: false, bundle: null };
     }
-    persistPersonaBundle(taskId, persona.bundle);
+    const refreshedBundle=persona.bundle;
+    return commitPersonaMutation(snapshot,()=>{
+    refreshedBundle.rationale={...(refreshedBundle.rationale ?? {}),refresh_pending:false};
+    persistPersonaBundle(taskId, refreshedBundle);
     // persistPersonaBundle derives confirm_state from THIS bundle's own
     // `confirm_required` (correct for a fresh/creation-time bundle land) — and
     // an OPENCLAW_AUDIENCE-driven re-run legitimately reports
@@ -2020,7 +2131,8 @@ export async function rescoreAudienceBlend(
     );
     if (updatedTask) broadcast({ type: 'task_updated', payload: updatedTask });
     console.log(`[rescoreAudienceBlend] task ${taskId}: voice re-scored for confirmed audience "${audienceLabel}".`);
-    return { rescored: true, bundle: persona.bundle };
+    return { rescored: true, bundle: refreshedBundle };
+    });
   } catch (err) {
     console.warn(`[rescoreAudienceBlend] non-fatal for task ${taskId}:`, (err as Error).message);
     return { rescored: false, bundle: null };
@@ -2112,6 +2224,7 @@ export function recordPersonaCompletions(
   deptSlug: string | null | undefined,
   taskOutput?: string | null,
 ): void {
+  try { if(taskPersonaCompanyContext(taskId)) return; } catch { return; }
   const credits = collectCreditablePersonaIds(taskId, primaryPersonaId);
   for (const { personaId, role } of credits) {
     spawnRecordCompletion(taskId, personaId, deptSlug, taskOutput, role);
@@ -2208,6 +2321,11 @@ export function findDuplicateByTitleWindow(
 }
 
 export interface CreateTaskCoreInput {
+  /** Validated internal identity, never unchecked external tenant input. */
+  idempotency_company_id?: string | null;
+  idempotency_payload_hash?: string;
+  routing_hold_reason?: string | null;
+  persona_bundle?: PersonaBundle | null;
   title: string;
   description?: string | null;
   status?: string;
@@ -2388,50 +2506,7 @@ export async function createTaskCore(
   input: CreateTaskCoreInput,
   options: CreateTaskCoreOptions = {}
 ): Promise<CreateTaskCoreResult | undefined> {
-  // ── DEDUP LAYER 1: idempotency_key ────────────────────────────────────────
-  // Check for a prior task_created event carrying the [ingest:<key>] marker.
-  if (input.idempotency_key) {
-    // Escape LIKE metacharacters (% and _) — and the escape character itself (\)
-    // — so an idempotency_key that contains them cannot false-match unrelated
-    // events.  The outer %…% wildcards are intentional and must NOT be escaped.
-    const escapedKey = input.idempotency_key
-      .replace(/\\/g, '\\\\')
-      .replace(/%/g, '\\%')
-      .replace(/_/g, '\\_');
-    // FIX 40 — iterate ALL matching events NEWEST first and dedupe onto the
-    // first LIVE task. The old ORDER BY created_at ASC LIMIT 1 anchored on the
-    // oldest event, so a key whose earliest task had since been archived deduped
-    // onto a dead card (or blocked the key entirely) instead of onto the newest
-    // live match. A missing task row (event pointing at a deleted id) is skipped
-    // the same way. When NO live match exists, fall through to Layer 2 / insert
-    // instead of returning early — the fresh insert logs its own task_created
-    // event carrying [ingest:<key>], so a second ingest with the same key
-    // dedupes onto it.
-    const eventTaskIds = queryAll<{ task_id: string }>(
-      "SELECT task_id FROM events WHERE type = 'task_created' AND message LIKE ? ESCAPE '\\' AND task_id IS NOT NULL ORDER BY created_at DESC",
-      [`%[ingest:${escapedKey}]%`],
-    );
-    for (const { task_id } of eventTaskIds) {
-      const priorTask = queryOne<Task>(
-        `SELECT t.*,
-            aa.name  as assigned_agent_name,
-            aa.avatar_emoji as assigned_agent_emoji,
-            ca.name  as created_by_agent_name,
-            ca.avatar_emoji as created_by_agent_emoji
-         FROM tasks t
-         LEFT JOIN agents aa ON t.assigned_agent_id  = aa.id
-         LEFT JOIN agents ca ON t.created_by_agent_id = ca.id
-         WHERE t.id = ?`,
-        [task_id],
-      );
-      // DISP-12 doctrine: a task is archived iff `archived_at` IS NOT NULL —
-      // there is no 'archived' status value to compare against.
-      if (priorTask && !priorTask.archived_at) {
-        return { task: priorTask, deduped: true };
-      }
-    }
-  }
-
+  // Structured identity is reserved with the task/event transaction below.
   // ── DEDUP LAYER 2: title + workspace window ────────────────────────────────
   // Applies to the UI / Telegram create paths that carry NO idempotency key.
   //
@@ -2444,7 +2519,7 @@ export async function createTaskCore(
   // idempotency keys are distinct — Layer 2 must never merge those two onto one
   // task row.) So the title window is SKIPPED whenever an idempotency_key was
   // supplied; it still guards keyless callers against accidental duplicates.
-  if (!input.skipWindowDedup && !input.idempotency_key) {
+  if (!input.skipWindowDedup && !input.idempotency_key && input.workspace_id && input.workspace_id !== 'default') {
     const duplicate = findDuplicateByTitleWindow(
       input.title,
       input.workspace_id,
@@ -2512,51 +2587,20 @@ export async function createTaskCore(
   const _db = _getDb();
 
   if (workspaceId) {
-    // workspaceId was supplied by the caller (UI path: a UUID for UI-created
-    // workspaces, or already a slug for seed-created ones).  Resolve the slug
-    // so the persona selector gets the canonical department name.
-    //
-    // P2-03: the row lookup was previously write-only for `workspaceSlug` —
-    // when `ws` came back undefined (the exact TaskModal-on-/tasks/all case:
-    // it hardcodes `workspace_id: 'default'`, and no box seeds a workspace row
-    // with id 'default' outside the standalone `npm run db:seed` script),
-    // `workspaceId` itself was left holding the caller's PHANTOM id. It then
-    // flowed straight into the `INSERT INTO tasks` below, which throws an
-    // UNCAUGHT SQLITE_CONSTRAINT_FOREIGNKEY (workspace_id has no matching row)
-    // — an unhandled exception that bypasses route.ts's try/catch entirely and
-    // 500s with a framework error page instead of a JSON body. This directly
-    // reproduced the operator's "create task doesn't really work" report.
-    // Nulling workspaceId here on a miss is what the comment at this
-    // function's top ("we leave workspace_id NULL rather than inserting a
-    // nonexistent 'default' row") already claimed happened — now it does.
-    try {
-      const ws = _db.prepare('SELECT id, slug FROM workspaces WHERE id = ?').get(workspaceId) as { id: string; slug: string } | undefined;
-      if (ws) {
-        workspaceSlug = ws.slug;
-      } else {
-        workspaceId = null;
-      }
-    } catch {
-      // Lookup itself failed (e.g. no workspaces table yet) — fail safe to
-      // NULL rather than risk an FK crash on an unverified id.
-      workspaceId = null;
-    }
+    const ws = _db.prepare('SELECT id, slug, company_id FROM workspaces WHERE id = ? AND archived_at IS NULL')
+      .get(workspaceId) as { id: string; slug: string; company_id: string | null } | undefined;
+    if (ws) workspaceSlug = ws.slug;
+    else if (workspaceId === 'default') workspaceId = null; // Old UI's unspecified-lane sentinel.
+    else throw new TaskContextError('The requested task workspace is unavailable.');
   }
-
+  const creationCompanyId = taskRequestCompany(_db, workspaceId, input.idempotency_company_id || process.env.MC_COMPANY_ID);
   if (!workspaceId && input.department) {
     const canon = canonicalDeptSlug(input.department);
     if (canon) {
-      // Verify the workspace exists before stamping it; also capture the slug
-      // for the persona selector (PRD 1.5).
-      try {
-        const ws = _db.prepare('SELECT id, slug FROM workspaces WHERE id = ? OR slug = ?').get(canon, canon) as { id: string; slug: string } | undefined;
-        if (ws) {
-          workspaceId = ws.id;
-          workspaceSlug = ws.slug;
-        }
-      } catch {
-        // non-fatal — leave workspaceId null
-      }
+      const candidates = _db.prepare('SELECT id, slug FROM workspaces WHERE company_id = ? AND archived_at IS NULL AND (id = ? OR slug = ?) LIMIT 2')
+        .all(creationCompanyId, canon, canon) as { id: string; slug: string }[];
+      if (candidates.length === 1) { workspaceId = candidates[0].id; workspaceSlug = candidates[0].slug; }
+      else if (candidates.length > 1) throw new TaskContextError('Department workspace is ambiguous for this company.');
     }
   }
   const status = input.status || 'backlog';
@@ -2621,6 +2665,25 @@ export async function createTaskCore(
       ? (input.due_date || null)
       : computeDueDateSmartDefault(resolvedPriority, new Date(now));
 
+  const requestIdentity = {
+    companyId: creationCompanyId,
+    source: input.source || 'internal', operationId: input.idempotency_key || id,
+    fingerprint: input.idempotency_payload_hash || taskRequestFingerprint({
+      title: input.title, description: input.description ?? null,
+      department: input.department ?? null, workspace_id: input.workspace_id ?? null,
+      assigned_agent_id: input.assigned_agent_id ?? null, priority: input.priority ?? null,
+      due_date: input.due_date ?? null, sop_id: input.sop_id ?? null,
+      parent_task_id: input.parent_task_id ?? null, context_refs: input.context_refs ?? null,
+      requester_channel: input.requester_channel ?? null, requester_chat_id: input.requester_chat_id ?? null,
+      requester_session_key: input.requester_session_key ?? null,
+    }),
+  };
+  let creationMessage = input.eventMessage ?? `New task: ${input.title}`;
+  if (!input.eventMessage && input.created_by_agent_id) {
+    const creator = queryOne<Agent>('SELECT name FROM agents WHERE id = ?', [input.created_by_agent_id]);
+    if (creator) creationMessage = `${creator.name} created task: ${input.title}`;
+  }
+  const priorTaskId = createTaskOnce(_db, requestIdentity, id, now, () => {
   run(
     `INSERT INTO tasks (id, title, description, status, priority, assigned_agent_id, created_by_agent_id, workspace_id, business_id, department, due_date, sop_id, source, requester_channel, requester_chat_id, requester_session_key, parent_task_id, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -2655,6 +2718,18 @@ export async function createTaskCore(
     ]
   );
 
+    run(`INSERT INTO events (id, type, agent_id, task_id, message, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)`,
+      [uuidv4(), 'task_created', input.created_by_agent_id || null, id, creationMessage, now]);
+    run('UPDATE tasks SET persona_contract_version = 1 WHERE id = ?', [id]);
+    if (input.routing_hold_reason) run('UPDATE tasks SET dispatch_hold=1, routing_reason=?, routing_wait_owner=? WHERE id=?', [input.routing_hold_reason, 'SYSTEM', id]);
+  }, true);
+  if (priorTaskId) {
+    const prior = queryOne<Task>('SELECT * FROM tasks WHERE id = ?', [priorTaskId]);
+    if (!prior) throw new Error('Original operation task is unavailable; refusing a duplicate.');
+    return { task: prior, deduped: true };
+  }
+
   // --- INSTANT IN-PROCESS ROUTING (B4 / B8) ---
   // If no agent was explicitly assigned (UI quick-add, or any inbound
   // Telegram/Discord/Slack task via /api/tasks/ingest which always lands
@@ -2676,7 +2751,7 @@ export async function createTaskCore(
   let resolvedAgentId: string | null = input.assigned_agent_id || null;
   let routedDepartment: string | null = input.department || null;
   let routedReason: string | null = null;
-  if (!resolvedAgentId) {
+  if (!resolvedAgentId && !input.routing_hold_reason) {
     // Unit 3.4 — CAPABILITY MANIFEST gate BEFORE assigning: a podcast task must
     // NEVER be routed to (or stamped with) a podcast agent id on a box whose
     // Skill 58 processor is not activated. The dispatch-time guard in
@@ -2729,57 +2804,23 @@ export async function createTaskCore(
     }
     if (!podcastRoutingBlocked) {
       try {
-        // Pass workspace_id: null so routeTask considers agents across ALL
-        // departments, not just the workspace the task happened to land in. This
-        // is what lets a CEO/default-landed inbound task get delegated DOWN to
-        // the right department (B8) instead of staying stuck on the CEO. The
-        // winning department is stamped back onto the task below.
-        const routing = await routeTask({
-          title: input.title,
-          description: input.description ?? '',
-          priority: (input.priority as TaskPriority) || 'medium',
-          workspace_id: null,
-          department: input.department ?? undefined,
-        });
-        if (routing) {
-          resolvedAgentId = routing.agentId;
-          routedReason = routing.reason;
-          // comDispatch() (department-router.ts) returns `department` as the
-          // DepartmentConfig's DISPLAY name (e.g. "Marketing"), not its `.id`
-          // slug — the interface comment on DepartmentConfig.id says exactly
-          // that field is "used in task.department field", but comDispatch's
-          // five return sites all send `.name` instead. Persisting the raw
-          // name here would silently clobber the canonical-slug department
-          // backfill computed above (`resolvedDepartment`) the moment routing
-          // succeeds — breaking the board's department filter chip, which
-          // compares `task.department` against a workspace-slug string
-          // (C-10/U41). Resolve back to the real workspace slug the same way
-          // `workspaceSlug` was resolved above; fall back to
-          // canonicalDeptSlug's graceful degradation for department values
-          // with no workspace row (e.g. the CEO/COM last-resort sentinel).
-          if (routing.department) {
-            try {
-              const routedWs = _db
-                .prepare('SELECT slug FROM workspaces WHERE lower(name) = lower(?) OR slug = ? OR id = ?')
-                .get(routing.department, routing.department, routing.department) as
-                | { slug: string }
-                | undefined;
-              routedDepartment = routedWs ? routedWs.slug : canonicalDeptSlug(routing.department) || routedDepartment;
-            } catch {
-              routedDepartment = canonicalDeptSlug(routing.department) || routedDepartment;
-            }
+        const { routeTaskDecision } = await import('@/lib/routing/department-router');
+        const { commitIntakeAssignment } = await import('@/lib/jobs/intake-advance-sweep');
+        const snapshot = queryOne<Parameters<typeof commitIntakeAssignment>[0]>(
+          'SELECT t.*, w.company_id FROM tasks t LEFT JOIN workspaces w ON w.id=t.workspace_id WHERE t.id=?', [id]);
+        if (snapshot && !snapshot.assigned_agent_id) {
+          const decision = await routeTaskDecision({ ...snapshot, department: snapshot.department ?? undefined });
+          if (decision.status === 'assigned' && commitIntakeAssignment(snapshot, decision)) {
+            resolvedAgentId = decision.routing.agentId;
+            routedDepartment = decision.routing.department;
+            routedReason = decision.routing.reason;
+            workspaceId = decision.routing.workspaceId;
+            workspaceSlug = queryOne<{slug:string}>('SELECT slug FROM workspaces WHERE id=?', [workspaceId])?.slug ?? null;
+          } else if (decision.status !== 'assigned') {
+            run(`UPDATE tasks SET routing_reason=?, routing_wait_owner=?, routing_next_action=?
+              WHERE id=? AND assignment_version=? AND assigned_agent_id IS NULL AND archived_at IS NULL AND killed_at IS NULL`,
+              [decision.reason, decision.owner, 'Repair the department configuration or retry assignment.', id, snapshot.assignment_version]);
           }
-          run(
-            `UPDATE tasks SET assigned_agent_id = ?, department = ?, updated_at = ? WHERE id = ?`,
-            [resolvedAgentId, routedDepartment, now, id]
-          );
-          // Surface the routing decision so an operator can see why a task moved
-          // (comDispatch already produces a human-readable reason string).
-          run(
-            `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
-             VALUES (?, ?, ?, ?, ?, ?)`,
-            [uuidv4(), 'task_dispatched', resolvedAgentId, id, `Auto-routed: ${routedReason}`, now]
-          );
         }
       } catch (routeErr) {
         // Never fail task creation on a routing error — the task simply stays
@@ -2836,6 +2877,7 @@ export async function createTaskCore(
     personaPinPromise = Promise.resolve(
       pinProducerPersonaBundle(id, {
         voice_persona_id: producerVoicePersonaId,
+        persona_bundle: input.persona_bundle,
         topic_persona_id: input.topic_persona_id,
         task_persona_ids: input.task_persona_ids,
         bundle_sha: input.bundle_sha,
@@ -2902,21 +2944,7 @@ export async function createTaskCore(
   }
   // --- END AUTO-DISPATCH ---
 
-  // Log event. Caller may supply an explicit message (the ingest path embeds
-  // its idempotency/provenance marker here).
-  let eventMessage = input.eventMessage ?? `New task: ${input.title}`;
-  if (!input.eventMessage && input.created_by_agent_id) {
-    const creator = queryOne<Agent>('SELECT name FROM agents WHERE id = ?', [input.created_by_agent_id]);
-    if (creator) {
-      eventMessage = `${creator.name} created task: ${input.title}`;
-    }
-  }
-
-  run(
-    `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-    [uuidv4(), 'task_created', input.created_by_agent_id || null, id, eventMessage, now]
-  );
+  // Initial event and operation identity committed with the task above.
 
   // U94 (X.2.3) — trust-coverage instrumentation. ONLY written when the
   // calling route identifies itself as one of the three enumerated human-

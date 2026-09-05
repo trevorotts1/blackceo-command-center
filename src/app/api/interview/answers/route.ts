@@ -1,3 +1,5 @@
+import { resolveInterviewTenant, refuseUnverifiedTenant } from '@/lib/interview/tenant';
+import { tenantAnswers } from '@/lib/interview/remote-store';
 /**
  * GET /api/interview/answers  (P2-6 review read-back)
  *
@@ -35,7 +37,7 @@
  * editable:false so they keep their strict storeOn validation on the card path.
  */
 
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import {
   readBuildState,
   readAnswerBlocks,
@@ -166,7 +168,16 @@ function toGroups(blocks: AnswerBlock[]): AnswersGroup[] {
 /* handler                                                                     */
 /* -------------------------------------------------------------------------- */
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  const tenant = await resolveInterviewTenant(req);
+  const refused = refuseUnverifiedTenant(tenant); if (refused) return refused;
+  if (tenant.kind === 'client') {
+    try {
+      const answers = tenantAnswers(tenant.context!.tenantId).map(a=>({id:a.operation_id,questionId:a.question_id,question:a.question_text,answer:a.answer_text,loggedAt:a.created_at,editable:true}));
+      return NextResponse.json({groups:[{phase:'general',label:'Your answers',answers}],skipped:[]},{headers:{'cache-control':'private, no-store'}});
+    } catch { return NextResponse.json({error:'answers_unavailable'}, {status:503}); }
+  }
+
   try {
     const state = readBuildState();
     const blocks = readAnswerBlocks(state);

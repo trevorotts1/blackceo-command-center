@@ -1,3 +1,5 @@
+import { queueInterviewOperation, tenantAnswers } from '@/lib/interview/remote-store';
+import { deliverInterviewOperation } from '@/lib/interview/remote-protocol';
 /**
  * POST /api/interview/answer  (P1-2)
  *
@@ -273,11 +275,17 @@ export async function POST(req: NextRequest) {
   //     resume state, and returns here. Validation above (empty answer, bad
   //     color, bad logo URL) has already run, so a client gets the same
   //     rejections; only the write targets differ.
-  const tenant = resolveInterviewTenant(req);
+  const tenant = await resolveInterviewTenant(req);
   const refusedTenant = refuseUnverifiedTenant(tenant);
   if (refusedTenant) return refusedTenant;
   if (tenant.kind === 'client' && tenant.client) {
     const clientId = tenant.client.id;
+    let saved;
+    try {
+      saved = queueInterviewOperation(tenant.context!, 'answer', { ...body, prompt: questionText, answer: transcriptAnswer }, req.headers.get('idempotency-key') || undefined);
+    } catch { return NextResponse.json({error:'answer_not_saved',message:'Your answer could not be saved. Please retry.'},{status:503}); }
+    const delivery = await deliverInterviewOperation(tenant.context!, saved);
+
 
     // Resume position: remember WHICH question was answered (id only — the
     // answer text is never written to the operator's stores).
@@ -315,7 +323,10 @@ export async function POST(req: NextRequest) {
       tenant: 'client',
       clientId,
       questionId: question?.id ?? null,
-      answeredCount: answeredIds?.length ?? null,
+      answeredCount: new Set(tenantAnswers(tenant.context!.tenantId).map(a=>a.question_id)).size,
+      operationId: saved.operation_id,
+      saveStatus: delivery.state === 'acknowledged' ? 'synced' : 'saved_waiting_sync',
+      syncReason: delivery.reason,
       mirror: mirrored,
       // No operator transcript is written for a client tenant, so there is no
       // transcriptPath to report. Said plainly rather than faked.

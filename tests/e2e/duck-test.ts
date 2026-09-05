@@ -1,83 +1,13 @@
 /**
- * tests/e2e/duck-test.ts  — Headless duck pipeline end-to-end CI test
+ * Offline Duck pipeline: real authenticated Next routes, company routing,
+ * confirmed producer persona decision, SOP/model selection, durable dispatch to
+ * a local gateway stub, mocked PNG + session evidence, current-execution review,
+ * independent QC, event feed and artifact serving. No status-write substitute
+ * for a gateway send and no external provider calls.
  *
- * Guided by DUCK-PIPELINE-GUIDANCE.md §1.
- *
- * Test runner: node:test + tsx  (same harness as every unit test in this repo)
- * Start:       npm run test:unit -- tests/e2e/duck-test.ts
- *              OR: node --import tsx --test tests/e2e/duck-test.ts
- *
- * What this test does
- * ───────────────────
- * 1. Stands up a temp SQLite DB (migrated via the same schema/migration path
- *    every production install uses).  Seeds the structural minimum: a company
- *    row, a Graphics workspace, a master-orchestrator workspace, a specialist
- *    Graphics agent, and a CEO/master agent.
- *
- * 2. Patches the OpenClaw client singleton at module-load time via a minimal
- *    mock websocket server (EXECUTOR SEAM, see §3 below).
- *
- * 3. Starts the Next.js server on an ephemeral port.  Rationale: building the
- *    Next.js app takes ~90s; running `next start` against a pre-built .next is
- *    preferred but requires a build artifact.  We detect whether a .next build
- *    is present and use `next start` if so, otherwise fall back to `next dev`
- *    (slower but always works from a fresh checkout).
- *    For CI the build-smoke job in qc-cc.yml builds first, so `next start` is
- *    the expected path in practice.
- *
- * 4. Subscribes to /api/events/stream (SSE) BEFORE the ingest call so every
- *    subsequent broadcast lands in the captured list.
- *
- * 5. Asserts each pipeline step in order a–j.
- *
- * Executor seam
- * ─────────────
- * `getOpenClawClient()` is the only external I/O the dispatcher calls (besides
- * the DB which we own).  We replace it with a mock before the test server
- * starts by setting OPENCLAW_GATEWAY_URL to a local stub WS server that
- * accepts the connect/auth challenge and returns success.  The dispatcher's
- * `client.call('chat.send', ...)` succeeds against the stub, which means the
- * task reaches `in_progress` via the real `autoDispatchTask` code path.
- *
- * The actual "image generation" is performed by THIS test (the mock generator)
- * rather than a real KIE run:
- *   - After in_progress, the test writes a valid 64×64 gradient blue PNG to the artifact
- *     directory.
- *   - Registers a deliverable row via POST /api/tasks/:id/deliverables.
- *   - Advances the task to `review` via PATCH /api/tasks/:id.
- *   - The server's PATCH handler fires runQCOnReview automatically.
- *
- * This is structurally identical to what the real KIE agent does, so the test
- * exercises the full pipeline without any external credentials.
- *
- * Optional nightly variant: set DUCK_E2E_USE_REAL_KIE=1 to skip the mock
- * generator and use real KIE (requires KIE_API_KEY in env).
- *
- * Artifact location
- * ─────────────────
- * On main  (pre-§3 PR):  PROJECTS_PATH/<title-slug>/
- * After §3 PR (#80):     PROJECTS_PATH/task-artifacts/<task-id>/
- *
- * The test parameterises the expected directory via `expectedArtifactDir()` so
- * flipping to the §3 contract is a one-line change.
- *
- * TODO(§3-PR): once PR #80 merges, change ARTIFACT_PATH_VARIANT env to '80'
- * (or just update the single helper below) so the test asserts
- * artifacts/<task-id>/ instead.
- *
- * QC pass assertion
- * ─────────────────
- * On main without LLM keys the scorer falls back to heuristic mode (6–8.0,
- * never auto-passes).  With our mock PNG + deliverable the heuristic fires and
- * the task stays in `review`.  We assert QC ran and record its verdict.
- *
- * The full QC-pass assertion (`assert task reaches done`) is behind the
- * TODO-QC-PASS flag; it flips to green once PR #80 (artifact-mode QC) merges
- * AND an LLM key is present.  For now we assert the task is in `review` with
- * a QC event written — which is 100% correct against current main.
- *
- * TODO(§4-PR): once PR #80 merges and DUCK_E2E_ARTIFACT_QC=1 is set in CI,
- * flip the TODO-QC-PASS assertion to assert `done` status.
+ * CI builds .next and exercises next start. Local runs may use
+ * NEXT_DIST_DIR=.next-duck-e2e for an isolated next dev/build directory.
+ * Run: node --import tsx --test tests/e2e/duck-test.ts
  */
 
 import test from 'node:test';
@@ -88,7 +18,7 @@ import os from 'node:os';
 import { spawn, ChildProcess } from 'node:child_process';
 import net from 'node:net';
 import http from 'node:http';
-import { createHmac } from 'node:crypto';
+import { createHmac, createHash, generateKeyPairSync } from 'node:crypto';
 import { WebSocketServer } from 'ws';
 
 import { runMockGenerator } from '../fixtures/mock-generator';
@@ -133,26 +63,53 @@ const DB_PATH      = path.join(TMP_DIR, 'mission-control.test.db');
 const PROJECTS_DIR = path.join(TMP_DIR, 'projects');
 fs.mkdirSync(PROJECTS_DIR, { recursive: true });
 
-// ── Isolated OpenClaw HOME (AF-I14 session-trace seam) ────────────────────────
-// The qc-scorer AF-I14 guardrail (src/lib/qc-scorer.ts) fail-closes any task
-// whose title describes an image deliverable ("create a blue duck image" ⇒
-// describesImageOrDeckDeliverable === true) unless it can find an OpenClaw
-// session exec trace under `${process.env.HOME}/.openclaw/agents/<agentId>/sessions`
-// proving the mandated KIE.ai pipeline (scripts/kie_generate.py) was used.
-// The mock generator writes a PNG directly and produces NO such trace, so the
-// guardrail returns VIOLATION-C → status `backlog` (escalation to `blocked` is
-// deferred to the ceo-delegation-sweep cron, which does not run under
-// `next start`) → subtests g/h would observe `backlog` and fail.
-//
-// We point the server's HOME at a throwaway dir and seed a faithful KIE.ai
-// session trace there (see seedKieSessionTrace) — the same artefact a real
-// KIE-mode agent run produces. This isolates the trace from the operator's real
-// ~/.openclaw and keeps AF-I14 fully intact (no product/guardrail change).
-// NOTE: os.homedir() (used by platform/persona code) reads the OS passwd entry,
-// not process.env.HOME, so this override only affects process.env.HOME consumers
-// — of which the duck path's only one is AF-I14's af_i14SessionRoots().
-const OPENCLAW_HOME = path.join(TMP_DIR, 'home');
-fs.mkdirSync(OPENCLAW_HOME, { recursive: true });
+// Explicit filesystem/config roots keep all fixture state away from an installed
+// runtime. The real dispatch and QC guards use these same configured roots.
+const OPENCLAW_ROOT = path.join(TMP_DIR, 'openclaw');
+const COMPANY_ROOT = path.join(TMP_DIR, 'company');
+fs.mkdirSync(path.join(OPENCLAW_ROOT, 'agents', 'dept-graphics', 'sessions'), {recursive:true});
+fs.mkdirSync(COMPANY_ROOT, {recursive:true});
+fs.writeFileSync(path.join(OPENCLAW_ROOT,'openclaw.json'),JSON.stringify({agents:{list:[{id:'dept-graphics',name:'Pixel',model:{primary:'openai/gpt-4o'}}]}}));
+const COMPANY_CONFIG=path.join(COMPANY_ROOT,'company-config.json');
+const PERSONA_CATALOG=path.join(COMPANY_ROOT,'persona-categories.json');
+fs.writeFileSync(COMPANY_CONFIG,JSON.stringify({company_id:'default',company_slug:'default'}));
+fs.writeFileSync(PERSONA_CATALOG,JSON.stringify({version:'duck-v1',personas:{'duck-e2e-persona':{name:'Duck Graphics Specialist'}}}));
+fs.mkdirSync(path.join(TMP_DIR,'coaching-personas'),{recursive:true});
+fs.copyFileSync(PERSONA_CATALOG,path.join(TMP_DIR,'coaching-personas','persona-categories.json'));
+const FIXTURE_ENV:NodeJS.ProcessEnv={
+  CC_TEST_FIXTURE_ROOT:TMP_DIR, WORKSPACE_BASE_PATH:TMP_DIR,
+  OPENCLAW_ROOT, OPENCLAW_WORKSPACE_ROOT:TMP_DIR, OPENCLAW_COMPANY_ROOT:COMPANY_ROOT,
+  BCC_DEVICE_IDENTITY_DIR:path.join(TMP_DIR,'identity'),
+  OPENCLAW_SKILL23_SCRIPTS:path.join(TMP_DIR,'absent-scripts'),
+  OPENCLAW_CLI_BIN:'/usr/bin/false', OWNER_NOTIFY_TELEGRAM_DISABLED:'1',
+  DISABLE_CRON:'1',DISABLE_REGISTRY_BOOT_SEED:'1',DISABLE_BRIDGE_BOOTSTRAP:'1',DISABLE_AGENT_SYNC:'1',
+  MC_COMPANY_ID:'default',MC_INSTALLATION_ID:'duck-install',
+  MC_TENANT_REGISTRY_JSON:JSON.stringify({'127.0.0.1':{kind:'self',tenantId:'duck-tenant',companyId:'default',installationId:'duck-install'}}),
+  MC_PERSONA_COMPANY_CONTEXTS_JSON:JSON.stringify({default:{companyRoot:COMPANY_ROOT,companyConfig:COMPANY_CONFIG,companySlug:'default',personaCatalog:PERSONA_CATALOG}}),
+};
+// Preseed test-only device identity; device loader must never copy a live key.
+fs.mkdirSync(FIXTURE_ENV.BCC_DEVICE_IDENTITY_DIR!,{recursive:true});
+const pair=generateKeyPairSync('ed25519');
+fs.writeFileSync(path.join(FIXTURE_ENV.BCC_DEVICE_IDENTITY_DIR!,'device.json'),JSON.stringify({version:1,deviceId:'duck-fixture-device',publicKeyPem:pair.publicKey.export({type:'spki',format:'pem'}).toString(),privateKeyPem:pair.privateKey.export({type:'pkcs8',format:'pem'}).toString(),createdAtMs:Date.now()}),{mode:0o600});
+const BLOCK_EXTERNAL=path.join(TMP_DIR,'block-external.cjs');
+fs.writeFileSync(BLOCK_EXTERNAL,`
+const allowed=new Set(['127.0.0.1','localhost','::1','[::1]']);
+const ports=new Set((process.env.DUCK_ALLOWED_PORTS||'').split(','));
+const originalFetch=globalThis.fetch;
+globalThis.fetch=(url,...args)=>{if(!allowed.has(new URL(typeof url==='string'||url instanceof URL?url:url.url).hostname)||!ports.has(new URL(typeof url==='string'||url instanceof URL?url:url.url).port))return Promise.reject(new Error('duck fixture blocks external network'));return originalFetch(url,...args)};
+for(const mod of [require('http'),require('https')])for(const method of ['request','get']){const original=mod[method];mod[method]=function(input,...args){const hostname=typeof input==='string'||input instanceof URL?new URL(input).hostname:input.hostname||input.host||'localhost';const port=typeof input==='string'||input instanceof URL?new URL(input).port:String(input.port||'');if(!allowed.has(hostname)||!ports.has(port))throw new Error('duck fixture blocks external network');return original.call(this,input,...args)}};
+`);
+// Fill every provider-discovery slot with unusable fixture values so boot never
+// reads operator secret files. External network is independently blocked above.
+for(const key of ['KIE_API_KEY','KIEAI_API_KEY','KIE_AI_API_KEY','OPENAI_API_KEY','FAL_KEY','FAL_API_KEY','FAL_AI_API_KEY','GEMINI_API_KEY','GOOGLE_API_KEY','GOOGLE_GENERATIVE_AI_API_KEY','FISH_AUDIO_API_KEY','ELEVENLABS_API_KEY','REPLICATE_API_TOKEN','REPLICATE_API_KEY','LUMA_API_KEY','LUMAAI_API_KEY','STABILITY_API_KEY','STABILITY_AI_API_KEY','RUNWAY_API_KEY','RUNWAYML_API_SECRET','ANTHROPIC_API_KEY','OLLAMA_CLOUD_API_KEY','OLLAMA_API_KEY','X_AI_API_KEY','XAI_API_KEY','ZAI_API_KEY','ZHIPU_API_KEY','GLM_API_KEY','Z_AI_API_KEY','OPENROUTER_API_KEY','MOONSHOT_API_KEY','MINIMAX_API_KEY','XIAOMI_API_KEY'])FIXTURE_ENV[key]='isolated-duck-fixture-no-provider-access';
+const sentMessages:Record<string,unknown>[]=[];
+let executionId:string;
+async function producerDecision(){
+  const {personaBundleHash}=await import('../../src/lib/persona-state');
+  const audience={label:'General consumers',candidates:['General consumers'],source:'asked',confidence:1};
+  const bundle={company_id:'default',confirm_required:false,voice:{audience_persona:{id:'duck-e2e-persona',why:'Confirmed fixture voice'},topic_persona:{id:'duck-e2e-persona',why:'Graphics expertise'},collapsed:true,collapsed_persona_id:'duck-e2e-persona'},resolved_audience:audience,blend_directive:'Use the confirmed graphics specialist to create a clear blue duck image.',task_personas:[],catalog_version:'duck-v1',confirmation:{actor_id:'duck-owner',confirmed_at:new Date().toISOString(),audience_hash:personaBundleHash(audience)}};
+  return {voice_persona_id:'duck-e2e-persona',topic_persona_id:'duck-e2e-persona',task_persona_ids:[],persona_bundle:bundle,bundle_sha:personaBundleHash(bundle)};
+}
 
 // ── Stub WS server (executor seam) ───────────────────────────────────────────
 // We stand up a minimal WS server that speaks just enough of the OpenClaw
@@ -181,8 +138,9 @@ async function startOpenClawStub(): Promise<{ port: number; wss: WebSocketServer
           // Approve the connect handshake
           ws.send(JSON.stringify({ type: 'res', id: msg.id, ok: true, payload: {} }));
         } else if (msg.type === 'req') {
-          // Accept any other RPC (chat.send, etc.)
-          ws.send(JSON.stringify({ type: 'res', id: msg.id, ok: true, payload: {} }));
+          // Only the local stub receives the real dispatch.
+          if(msg.method==='chat.send')sentMessages.push(msg.params as Record<string,unknown>);
+          ws.send(JSON.stringify({ type: 'res', id: msg.id, ok: true, payload: {runId:`duck-${msg.id}`,sessions:[]} }));
         }
       } catch {
         // ignore malformed messages
@@ -214,7 +172,7 @@ let appBase: string;
 const REPO_ROOT = path.resolve(__dirname, '../..');
 
 function hasNextBuild(): boolean {
-  return fs.existsSync(path.join(REPO_ROOT, '.next', 'BUILD_ID'));
+  return fs.existsSync(path.join(REPO_ROOT, process.env.NEXT_DIST_DIR || '.next', 'BUILD_ID'));
 }
 
 async function startAppServer(): Promise<{ port: number; proc: ChildProcess }> {
@@ -224,12 +182,15 @@ async function startAppServer(): Promise<{ port: number; proc: ChildProcess }> {
   // Env for the test server: isolated DB + projects path + stub WS + no SOP fast-loop
   const serverEnv: NodeJS.ProcessEnv = {
     ...process.env,
+    ...FIXTURE_ENV,
+    NEXT_DIST_DIR: process.env.NEXT_DIST_DIR || '.next',
+    MISSION_CONTROL_URL:`http://127.0.0.1:${port}`,
+    NEXT_PUBLIC_APP_URL:`http://127.0.0.1:${port}`,
+    DUCK_ALLOWED_PORTS:`${port},${stubPort}`,
+    NODE_OPTIONS: `--require=${BLOCK_EXTERNAL}`,
     DATABASE_PATH:     DB_PATH,
     PORT:              String(port),
     PROJECTS_PATH:     PROJECTS_DIR,
-    // Redirect HOME so AF-I14's session-trace scan reads our isolated, seeded
-    // trace dir instead of the operator's real ~/.openclaw (see OPENCLAW_HOME).
-    HOME:              OPENCLAW_HOME,
     OPENCLAW_GATEWAY_URL:   `ws://127.0.0.1:${stubPort}`,
     OPENCLAW_GATEWAY_TOKEN: 'duck-test-token',
     // Disable side-channel calls that would fail with no API key
@@ -270,6 +231,10 @@ async function startAppServer(): Promise<{ port: number; proc: ChildProcess }> {
     { cwd: REPO_ROOT, env: serverEnv, stdio: ['ignore', 'pipe', 'pipe'] },
   );
 
+  appProc=proc;
+  const output=fs.createWriteStream(path.join(TMP_DIR,'server.log'));
+  proc.stdout?.pipe(output);proc.stderr?.pipe(output);
+  console.log(`[duck-e2e] Server log: ${path.join(TMP_DIR,'server.log')}`);
   // Wait until the server is accepting connections
   await waitForHttp(`http://127.0.0.1:${port}/api/health`, 60_000);
 
@@ -308,13 +273,14 @@ let sseCleanup: (() => void) | null = null;
 let sseConnected = false;
 
 function subscribeSSE(base: string): Promise<void> {
-  return new Promise((resolve) => {
+  return new Promise((resolve,reject) => {
     const url = `${base}/api/events/stream`;
     // /api/events/stream is MC_API_TOKEN-gated (middleware Gate B). A real
     // EventSource can only pass the token as a `?token=` query param, but this
     // raw-http subscriber can send the standard Bearer header, which the
     // middleware accepts on the fall-through path.
     const req = http.get(url, { headers: bearerHeader() }, (res) => {
+      if(res.statusCode!==200){res.resume();clearTimeout(timer);reject(new Error(`SSE refused: ${res.statusCode}`));return;}
       let buf = '';
       res.on('data', (chunk: Buffer) => {
         buf += chunk.toString();
@@ -324,6 +290,7 @@ function subscribeSSE(base: string): Promise<void> {
           // The SSE stream sends `: connected` as the first comment line.
           if (!sseConnected && line.startsWith(':')) {
             sseConnected = true;
+            clearTimeout(timer);
             resolve(); // signal: connection is established
           }
           if (line.startsWith('data: ')) {
@@ -338,8 +305,8 @@ function subscribeSSE(base: string): Promise<void> {
       });
     });
     sseCleanup = () => req.destroy();
-    // Resolve anyway after 2s in case the connect comment never arrives
-    setTimeout(() => { if (!sseConnected) { sseConnected = true; resolve(); } }, 2000);
+    const timer=setTimeout(()=>{req.destroy();reject(new Error('SSE did not connect'));},10_000);
+    req.on('error',error=>{clearTimeout(timer);reject(error);});
   });
 }
 
@@ -477,18 +444,7 @@ async function seedFixtures(): Promise<void> {
   // as process.env for the child server process; we also need it for OUR
   // direct DB queries above).
   process.env.DATABASE_PATH = DB_PATH;
-  // Isolate HOME for THIS (test) process the same way the child server does
-  // (OPENCLAW_HOME, a throwaway temp dir). getDb() runs migrations, and its
-  // autoSeedFromDepartmentsJson step resolves a departments.json across HOME-based
-  // candidate paths (~/Downloads/openclaw-master-files/…, ~/clawd/projects/…, …).
-  // On a box that actually has a real fleet departments.json (e.g. the operator's
-  // own machine), that auto-seed populates the default department roster, whose
-  // `master-orchestrator` / `graphics` slugs then collide (UNIQUE slug) with the
-  // fixtures seeded below — the colliding INSERT OR IGNORE is skipped, the fixture
-  // workspace id never exists, and the agent INSERT fails its workspace_id FK.
-  // Pointing HOME at the isolated temp home makes seeding deterministic (a clean
-  // board seeded by these fixtures only), on CI AND on a populated dev box.
-  process.env.HOME = OPENCLAW_HOME;
+  Object.assign(process.env,FIXTURE_ENV);
 
   const { getDb, closeDb, run, queryAll } = await import('../../src/lib/db') as typeof import('../../src/lib/db');
 
@@ -496,6 +452,7 @@ async function seedFixtures(): Promise<void> {
   getDb();
 
   const now = new Date().toISOString();
+  run("UPDATE workspaces SET slug=slug||'-seed' WHERE slug IN ('graphics','master-orchestrator')");
 
   run(
     `INSERT OR IGNORE INTO companies (id, name, slug, config, created_at, updated_at)
@@ -523,29 +480,32 @@ async function seedFixtures(): Promise<void> {
     run(
       `INSERT OR IGNORE INTO agents
          (id, name, role, description, avatar_emoji, status, is_master, workspace_id, specialist_type, role_type, created_at, updated_at)
-       VALUES ('agent-ceo', 'Stefanie', 'CEO', 'Master orchestrator', '🤖', 'standby', 1, 'ws-master', 'permanent', null, ?, ?)`,
+       VALUES ('d0000000-0000-4000-8000-000000000002', 'Stefanie', 'CEO', 'Master orchestrator', '🤖', 'standby', 1, 'ws-master', 'permanent', null, ?, ?)`,
       [now, now],
     );
     run(
       `INSERT OR IGNORE INTO agents
          (id, name, role, description, avatar_emoji, status, is_master, workspace_id, specialist_type, role_type, created_at, updated_at)
-       VALUES ('agent-graphics', 'Pixel', 'Graphics Specialist', 'Creates images and visual assets', '🎨', 'standby', 0, 'ws-graphics', 'permanent', null, ?, ?)`,
+       VALUES ('d0000000-0000-4000-8000-000000000001', 'Pixel', 'Graphics Specialist', 'Creates images and visual assets', '🎨', 'standby', 0, 'ws-graphics', 'permanent', null, ?, ?)`,
       [now, now],
     );
   } else {
     run(
       `INSERT OR IGNORE INTO agents
          (id, name, role, description, avatar_emoji, status, is_master, workspace_id, specialist_type, created_at, updated_at)
-       VALUES ('agent-ceo', 'Stefanie', 'CEO', 'Master orchestrator', '🤖', 'standby', 1, 'ws-master', 'permanent', ?, ?)`,
+       VALUES ('d0000000-0000-4000-8000-000000000002', 'Stefanie', 'CEO', 'Master orchestrator', '🤖', 'standby', 1, 'ws-master', 'permanent', ?, ?)`,
       [now, now],
     );
     run(
       `INSERT OR IGNORE INTO agents
          (id, name, role, description, avatar_emoji, status, is_master, workspace_id, specialist_type, created_at, updated_at)
-       VALUES ('agent-graphics', 'Pixel', 'Graphics Specialist', 'Creates images and visual assets', '🎨', 'standby', 0, 'ws-graphics', 'permanent', ?, ?)`,
+       VALUES ('d0000000-0000-4000-8000-000000000001', 'Pixel', 'Graphics Specialist', 'Creates images and visual assets', '🎨', 'standby', 0, 'ws-graphics', 'permanent', ?, ?)`,
       [now, now],
     );
   }
+
+  run("INSERT OR IGNORE INTO model_registry(model_id,label,provider,capabilities,status) VALUES('openai/gpt-4o','Fixture writer','openai','[\"text\",\"vision\"]','active')");
+  run("INSERT OR IGNORE INTO agent_settings(id,department_id,role_id,setting_type,value) VALUES('duck-model','ws-graphics','d0000000-0000-4000-8000-000000000001','model','openai/gpt-4o')");
 
   // Seed a Graphics SOP so the Triad Rule gate (description + sop_id + persona_id)
   // can be satisfied before the test advances the task out of backlog.
@@ -561,46 +521,11 @@ async function seedFixtures(): Promise<void> {
   closeDb();
 }
 
-/**
- * Satisfy the Triad Rule gate for a task so it can leave backlog.
- * Called after agent assignment, before the first status-change PATCH.
- *
- * The Triad requires: non-empty description (already set by ingest), a
- * non-deleted sop_id, and a non-sentinel persona_id. We write these directly
- * to the DB (the same channel the operator UI uses via PATCH /api/tasks/:id).
- */
-async function seedTriadForTask(taskId: string): Promise<void> {
-  const { run } = await import('../../src/lib/db') as typeof import('../../src/lib/db');
-  const now = new Date().toISOString();
-  run(
-    `UPDATE tasks SET sop_id = 'sop-duck-e2e', persona_id = 'duck-e2e-persona', updated_at = ? WHERE id = ?`,
-    [now, taskId],
-  );
-}
-
-/**
- * Seed an OpenClaw session exec trace proving the mandated KIE.ai image pipeline
- * was used for this task, so the AF-I14 guardrail (qc-scorer.ts) PASSES instead
- * of fail-closing the mock artifact to `backlog`.
- *
- * This faithfully simulates what a real KIE-mode agent run records and is the
- * same class of "test-harness bookkeeping" the suite already does for the Triad
- * (sop_id/persona_id). It does NOT weaken AF-I14 — the guardrail still runs in
- * full; we simply provide the legitimate trace it requires.
- *
- * The trace is written under the SERVER's isolated HOME (OPENCLAW_HOME) at
- * `${HOME}/.openclaw/agents/<agentId>/sessions/<sessionId>.jsonl`, which is one
- * of the roots af_i14SessionRoots(agentId) scans. The file:
- *   • contains the taskId  → AF-I14's filesystem scan attributes the trace to
- *     this task (qc-scorer.ts content.includes(taskId)),
- *   • contains a `python3 scripts/kie_generate.py …` call AND `api.kie.ai` →
- *     VIOLATION-C (no KIE.ai activity) is avoided,
- *   • contains NO native `image_generate` tool_use block → no VIOLATION-A,
- *   • contains NO `/api/v1/image/gpt-image` dead endpoint → no VIOLATION-B.
- */
+/** Mock executor evidence for the real AF-I14 parser, stored only below the
+ * explicit OPENCLAW_ROOT. It proves the fixture contract, not a real KIE run. */
 function seedKieSessionTrace(taskId: string, agentId: string): string {
-  const sessionId = `duck-e2e-session-${taskId}`;
-  const sessDir = path.join(OPENCLAW_HOME, '.openclaw', 'agents', agentId, 'sessions');
+  const sessionId = executionId;
+  const sessDir = path.join(OPENCLAW_ROOT, 'agents', agentId, 'sessions');
   fs.mkdirSync(sessDir, { recursive: true });
   const lines = [
     JSON.stringify({ type: 'message', role: 'user', content: `Task ${taskId}: create a blue duck image` }),
@@ -618,20 +543,23 @@ function seedKieSessionTrace(taskId: string, agentId: string): string {
 // ── Suite ─────────────────────────────────────────────────────────────────────
 
 test('duck pipeline end-to-end (mock generator)', { timeout: TEST_TIMEOUT_MS }, async (t) => {
+  t.after(async()=>{sseCleanup?.();appProc?.kill('SIGTERM');for(const client of stubWss?.clients??[])client.terminate();stubWss?.close();});
+  async function step(name:string,run:()=>Promise<void>){let failure:unknown;await t.test(name,async()=>{try{await run();}catch(error){failure=error;throw error;}});if(failure)throw failure;}
+
 
   // ── Setup: stub WS + DB seed + app server ─────────────────────────────────
-  await t.test('setup: seed fixtures', async () => {
+  await step('setup: seed fixtures', async () => {
     await seedFixtures();
   });
 
-  await t.test('setup: start OpenClaw stub WS', async () => {
+  await step('setup: start OpenClaw stub WS', async () => {
     const result = await startOpenClawStub();
     stubPort = result.port;
     stubWss  = result.wss;
     console.log(`[duck-e2e] OpenClaw stub listening on ws://127.0.0.1:${stubPort}`);
   });
 
-  await t.test('setup: start Next.js app server', async () => {
+  await step('setup: start Next.js app server', async () => {
     const result = await startAppServer();
     appPort = result.port;
     appProc = result.proc;
@@ -639,9 +567,9 @@ test('duck pipeline end-to-end (mock generator)', { timeout: TEST_TIMEOUT_MS }, 
     console.log(`[duck-e2e] App server at ${appBase}`);
   });
 
-  await t.test('setup: subscribe to SSE stream', async () => {
+  await step('setup: subscribe to SSE stream', async () => {
     // subscribeSSE returns a promise that resolves when the `: connected`
-    // comment arrives (or after 2s fallback).  This ensures registerClient()
+    // comment arrives. This ensures registerClient()
     // has run in the server process before we fire the ingest POST.
     await subscribeSSE(appBase);
     console.log(`[duck-e2e] SSE connected`);
@@ -652,13 +580,14 @@ test('duck pipeline end-to-end (mock generator)', { timeout: TEST_TIMEOUT_MS }, 
   let taskTitle: string;
   let ingestWorkspaceId: string;
 
-  await t.test('a. POST to /api/tasks/ingest → 201', async () => {
+  await step('a. POST to /api/tasks/ingest → 201', async () => {
     taskTitle = 'create a blue duck image';
     const res = await post(`${appBase}/api/tasks/ingest`, {
       title: taskTitle,
       description: 'Generate a high-quality image of a blue rubber duck.',
       source: 'e2e-test',
       department_slug: 'graphics',
+      ...await producerDecision(),
     });
     assert.equal(res.status, 201, `Expected 201 from ingest, got ${res.status}: ${JSON.stringify(res.json)}`);
     const body = res.json as Record<string, unknown>;
@@ -670,7 +599,7 @@ test('duck pipeline end-to-end (mock generator)', { timeout: TEST_TIMEOUT_MS }, 
   });
 
   // ── b. Task routed to graphics workspace ─────────────────────────────────
-  await t.test('b. task routed to graphics workspace', async () => {
+  await step('b. task routed to graphics workspace', async () => {
     const task = await pollTask(
       taskId,
       (t) => {
@@ -693,7 +622,7 @@ test('duck pipeline end-to-end (mock generator)', { timeout: TEST_TIMEOUT_MS }, 
   // We accept: model_id resolved OR assigned_agent_id present (agent carries model).
   // persona_id may not be set yet if the Python selector is not installed; we
   // assert the agent assignment (which IS deterministic) and note persona.
-  await t.test('c. agent assigned (persona/model seam verified)', async () => {
+  await step('c. agent assigned (persona/model seam verified)', async () => {
     const task = await pollTask(
       taskId,
       (t) => !!(t.assigned_agent_id),
@@ -704,77 +633,32 @@ test('duck pipeline end-to-end (mock generator)', { timeout: TEST_TIMEOUT_MS }, 
     // model_id may be null until dispatch fires; we verify it via DB row after dispatch
     console.log(`[duck-e2e] Agent assigned: ${task.assigned_agent_id}, model_id: ${task.model_id ?? '(pending dispatch)'}`);
 
-    // ── Triad seed: satisfy sop_id + persona_id before status transitions ──
-    // The Triad Rule (description + valid sop_id + valid persona_id) gates every
-    // status change out of backlog. The description is already set by ingest;
-    // we write sop_id + persona_id directly to the DB here (same path the
-    // operator UI uses, without going through an HTTP round-trip that would
-    // itself be subject to the gate). This is test-harness bookkeeping, not
-    // part of the duck pipeline logic under test.
-    // Placed inside step c so taskId is definitely assigned (TS strict flow).
-    await seedTriadForTask(taskId);
-    console.log(`[duck-e2e] Triad seed complete (sop_id=sop-duck-e2e, persona_id=duck-e2e-persona)`);
+    assert.equal(task.persona_id,'duck-e2e-persona','producer decision must be pinned');
+    assert.ok(task.sop_id,'a matching SOP must be selected before dispatch');
+    const {queryOne}=await import('../../src/lib/db');
+    const sop=queryOne<{department:string;deleted_at:string|null}>('SELECT department,deleted_at FROM sops WHERE id=?',[task.sop_id as string]);
+    assert.match(sop!.department.toLowerCase(),/graphics/);
+    assert.equal(sop!.deleted_at,null);
   });
 
-  // ── d. Auto-dispatch fired (dispatch activity/status transition) ─────────
-  // Evidence of auto-dispatch: the `task_dispatched` event is written in the
-  // `events` table by EITHER the instant-routing path (createTaskCore inserts
-  // a task_dispatched event on routing success) OR by `autoDispatchTask` after
-  // the OpenClaw chat.send completes.
-  //
-  // Status transitions to `in_progress` only after autoDispatchTask connects to
-  // OpenClaw AND chat.send succeeds. In CI the stub WS is local but may race
-  // with app startup. We poll for `in_progress` up to 20s; if still `backlog`
-  // after polling, we call POST /api/tasks/:id/dispatch directly as the
-  // test-harness executor (simulating what a real OpenClaw would do) and
-  // assert the status reaches `in_progress`.
-  await t.test('d. auto-dispatch fired → task in_progress', async () => {
-    // First: verify `task_dispatched` event was written (proof dispatch was attempted)
-    const dispatchEvents = await getEventsForTask(taskId);
-    const routingDispatch = dispatchEvents.find((e) =>
-      String(e.type ?? '').includes('dispatch') || String(e.message ?? '').toLowerCase().includes('auto-routed')
-    );
-    assert.ok(
-      routingDispatch,
-      `task_dispatched event must be present in events; events: ${JSON.stringify(dispatchEvents.map((e) => e.type))}`,
-    );
-    console.log(`[duck-e2e] Dispatch event: type=${routingDispatch.type} msg=${routingDispatch.message}`);
-
-    // Now poll for `in_progress` — autoDispatch should advance the task once
-    // the WS stub handshake completes in the server process.
-    // We only poll for 8s to stay well within the outer test timeout.
-    let taskNow: Record<string, unknown> | null = null;
-    const start = Date.now();
-    while (Date.now() - start < 8_000) {
-      const { json } = await get(`${appBase}/api/tasks/${taskId}`);
-      taskNow = json as Record<string, unknown>;
-      if (taskNow.status === 'in_progress') break;
-      await sleep(300);
-    }
-
-    // If autoDispatch did not advance to in_progress (OpenClaw WS connect failed
-    // in the server process — fire-and-forget silently absorbs the error), we
-    // advance manually via a direct PATCH.  This is the test harness acting as
-    // the executor — semantically identical to what autoDispatchTask does once
-    // the WS handshake succeeds.  The important gate is the routing event above.
-    if (!taskNow || taskNow.status !== 'in_progress') {
-      console.log(`[duck-e2e] autoDispatch did not advance to in_progress within 20s; PATCH-ing directly (test harness as executor)`);
-      const patchRes = await patch(`${appBase}/api/tasks/${taskId}`, { status: 'in_progress' });
-      assert.ok(
-        patchRes.status === 200 || patchRes.status === 201,
-        `PATCH in_progress must succeed; got ${patchRes.status}: ${JSON.stringify(patchRes.json)}`,
-      );
-    }
-
-    // Final assertion: task must be in_progress
-    const { json: finalJson } = await get(`${appBase}/api/tasks/${taskId}`);
-    const finalTask = finalJson as Record<string, unknown>;
-    assert.equal(finalTask.status, 'in_progress', `Expected in_progress, got: ${finalTask.status}`);
-    console.log(`[duck-e2e] Task reached in_progress`);
+  // Actual dispatch must reach the local WS stub, reserve one durable attempt,
+  // and commit in_progress. No direct status PATCH can substitute for a send.
+  await step('d. auto-dispatch sends exactly once and owns in_progress',async()=>{
+    await pollTask(taskId,t=>t.status==='in_progress','actual gateway dispatch',30_000);
+    const {queryAll}=await import('../../src/lib/db');
+    let attempts:Record<string,unknown>[]=[];
+    const deadline=Date.now()+15_000;
+    do {attempts=queryAll<Record<string,unknown>>('SELECT * FROM task_executions WHERE task_id=?',[taskId]);if(attempts[0]?.state==='accepted')break;await sleep(100);}while(Date.now()<deadline);
+    assert.equal(attempts.length,1,'one durable execution');
+    executionId=String(attempts[0].id);
+    assert.equal(attempts[0].state,'accepted');
+    assert.equal(sentMessages.length,1,'one remote chat.send');
+    assert.ok(JSON.stringify(sentMessages[0]).includes(executionId),'prompt carries current execution identity');
+    assert.ok((await getEventsForTask(taskId)).some(e=>e.type==='task_dispatched'),'actual dispatch event required');
   });
 
   // Check model_id after dispatch (intelligence-resolver stamps it)
-  await t.test('c2. model_id stamped on task row after dispatch', async () => {
+  await step('c2. model_id stamped on task row after dispatch', async () => {
     const row = await getTaskRow(taskId);
     assert.ok(row, 'task row must exist');
     // model_id is set by task-dispatcher after resolveAndLog; it may be null if
@@ -789,7 +673,7 @@ test('duck pipeline end-to-end (mock generator)', { timeout: TEST_TIMEOUT_MS }, 
   let artifactPath: string;
   let artifactFilename: string;
 
-  await t.test('e. mock generator writes valid PNG', async () => {
+  await step('e. mock generator writes valid PNG', async () => {
     const artifactDir = expectedArtifactDir(taskId, taskTitle);
     artifactFilename = 'blue-duck.png';
     artifactPath = path.join(artifactDir, artifactFilename);
@@ -822,7 +706,7 @@ test('duck pipeline end-to-end (mock generator)', { timeout: TEST_TIMEOUT_MS }, 
 
   // ── f. Artifact lands at the artifact-contract location ──────────────────
   // §3 contract: artifacts/<task-id>/ (task-lifecycle.ts artifactDir)
-  await t.test('f. artifact at contract location (§3: PROJECTS_PATH/artifacts/<task-id>/)', async () => {
+  await step('f. artifact at contract location (§3: PROJECTS_PATH/artifacts/<task-id>/)', async () => {
     const expectedDir = expectedArtifactDir(taskId, taskTitle);
     assert.ok(
       fs.existsSync(artifactPath),
@@ -838,7 +722,7 @@ test('duck pipeline end-to-end (mock generator)', { timeout: TEST_TIMEOUT_MS }, 
   // ── Register deliverable via API ──────────────────────────────────────────
   let deliverableId: string;
 
-  await t.test('register deliverable via POST /api/tasks/:id/deliverables', async () => {
+  await step('register deliverable via POST /api/tasks/:id/deliverables', async () => {
     const res = await post(`${appBase}/api/tasks/${taskId}/deliverables`, {
       deliverable_type: 'file',
       title: 'Blue Duck Image',
@@ -858,40 +742,53 @@ test('duck pipeline end-to-end (mock generator)', { timeout: TEST_TIMEOUT_MS }, 
 
   // ── Seed KIE.ai session trace so AF-I14 guardrail passes (see helper) ─────
   // Must run BEFORE the review PATCH (which fires runQCOnReview → AF-I14).
-  await t.test('seed KIE.ai session trace for AF-I14 guardrail', async () => {
+  await step('seed KIE.ai session trace for AF-I14 guardrail', async () => {
     const row = await getTaskRow(taskId);
-    const agentId = (row?.assigned_agent_id as string | undefined) ?? 'agent-graphics';
+    const agentId = (row?.assigned_agent_id as string | undefined) ?? 'd0000000-0000-4000-8000-000000000001';
+    const {queryOne}=await import('../../src/lib/db');
+    const attempt=queryOne<{session_id:string}>('SELECT session_id FROM task_executions WHERE id=?',[executionId])!;
     const sessionId = seedKieSessionTrace(taskId, agentId);
-    console.log(`[duck-e2e] AF-I14 trace seeded: agent=${agentId} session=${sessionId} home=${OPENCLAW_HOME}`);
+    const sessions=path.join(OPENCLAW_ROOT,'agents',agentId,'sessions');
+    fs.renameSync(path.join(sessions,`${sessionId}.jsonl`),path.join(sessions,`${attempt.session_id}.jsonl`));
+    const {runAFI14Guardrail}=await import('../../src/lib/qc-scorer');
+    const trace=runAFI14Guardrail(taskId,agentId,'graphics',true);
+    assert.equal(trace.traceFound,true,'mock execution trace is locatable under configured runtime');
+    assert.equal(trace.violated,false,'mock trace satisfies the real mandated-tool guard');
+    console.log(`[duck-e2e] AF-I14 trace seeded: agent=${agentId} session=${sessionId} runtime=${OPENCLAW_ROOT}`);
   });
 
   // ── Advance task to review (triggers QC) ─────────────────────────────────
-  await t.test('advance task to review via PATCH', async () => {
-    const res = await patch(`${appBase}/api/tasks/${taskId}`, { status: 'review' });
+  await step('advance task to review via PATCH', async () => {
+    const {queryOne}=await import('../../src/lib/db');
+    const {expectedPersonaManifest}=await import('../../src/lib/persona-conformance');
+    const bundle=JSON.parse(queryOne<{bundle_json:string}>('SELECT bundle_json FROM task_persona_bundle WHERE task_id=?',[taskId])!.bundle_json);
+    const task=await getTaskRow(taskId);
+    const evidence=await post(`${appBase}/api/tasks/${taskId}/activities`,{activity_type:'completed',agent_id:task!.assigned_agent_id,message:'Mock executor checked its persona and artifact.',metadata:{kind:'persona_used',execution_id:executionId,...expectedPersonaManifest(bundle),conformance_passed:true,artifacts:[{deliverable_id:deliverableId,sha256:createHash('sha256').update(fs.readFileSync(artifactPath)).digest('hex')}]}});
+    assert.equal(evidence.status,201,JSON.stringify(evidence.json));
+    const {requirePersonaConformanceForCompletion}=await import('../../src/lib/persona-conformance');
+    assert.equal(requirePersonaConformanceForCompletion(taskId).pass,true,'whole persona and artifact manifest verified');
+    const stale=await patch(`${appBase}/api/tasks/${taskId}`,{status:'review',execution_id:'dead0000-0000-4000-8000-000000000000'});
+    assert.equal(stale.status,409,'stale completion must be refused');
+    const res = await patch(`${appBase}/api/tasks/${taskId}`, { status: 'review',execution_id:executionId });
     assert.ok(
       res.status === 200 || res.status === 201,
       `Expected 200/201 from PATCH status=review, got ${res.status}: ${JSON.stringify(res.json)}`,
     );
     const body = res.json as Record<string, unknown>;
     console.log(`[duck-e2e] PATCH review → status: ${body.status}`);
+    assert.equal(queryOne<{state:string}>('SELECT state FROM task_executions WHERE id=?',[executionId])!.state,'succeeded','current worker execution released after accepted review');
   });
 
-  // ── g. QC runs in artifact mode and task reaches done (or owner-approval) ──
-  // §4 contract: artifact-mode QC derives criteria from "create a blue duck image",
-  // evaluates the 64×64 gradient PNG (existence ✓, valid_image ✓, min_resolution ✓,
-  // vision_match → skipped/pass when no LLM key), scores ≥8.5, and either:
-  //   (a) source != 'owner' → task moves to `done` (auto-approve)
-  //   (b) source == 'owner' → task stays in `review` with qc_owner_approval_pending event
-  //
-  // The e2e test uses source='e2e-test' (not 'owner'), so we expect `done`.
-  // Vision-check is skipped when no LLM key (non-blocking).
-  await t.test('g. QC ran in artifact mode and task reached done (§4)', async () => {
-    // Wait for a QC event and for the task to reach done or owner-approval-pending
+  // The mock proves executor/evidence plumbing. External vision is blocked,
+  // so independent QC must explicitly hold the image instead of claiming that
+  // a PNG header proves it depicts a duck. This is a deliberate negative control.
+  await step('g. independent QC explicitly holds unavailable visual verification', async () => {
+    // Wait for the explicit quality hold and its durable reason.
     let qcEventFound = false;
     let finalStatus = '';
+    let qcMessage = '';
     const start = Date.now();
-    // 45s gives CI enough time for up to 3 reroute cycles to resolve to blocked,
-    // or for artifact-mode QC to reach done/review on slower Ubuntu runners.
+    // Leave headroom for independent QC and reroute accounting on CI.
     while (Date.now() - start < 45_000) {
       const events = await getEventsForTask(taskId);
       const qcEvt = events.find((e) => {
@@ -901,70 +798,42 @@ test('duck pipeline end-to-end (mock generator)', { timeout: TEST_TIMEOUT_MS }, 
       });
       if (qcEvt) {
         qcEventFound = true;
+        qcMessage=String(qcEvt.message);
         console.log(`[duck-e2e] QC event found: type=${qcEvt.type} msg=${String(qcEvt.message).slice(0, 120)}`);
       }
       const { json } = await get(`${appBase}/api/tasks/${taskId}`);
       const taskNow = json as Record<string, unknown>;
       finalStatus = taskNow.status as string;
-      // Break as soon as any ACCEPTABLE_TERMINAL state is reached
-      if ((finalStatus === 'done' || finalStatus === 'review' || finalStatus === 'blocked') && qcEventFound) {
+      assert.notEqual(finalStatus,'done','unverified visual output cannot auto-pass QC');
+      if (finalStatus === 'blocked' && qcEventFound) {
         break;
       }
       await sleep(400);
     }
     assert.ok(qcEventFound, 'QC must have run (qc event in events table)');
-    // §4: non-owner task with valid artifact → should reach `done`
-    // If QC fires in heuristic mode (no LLM key), task stays in review — also acceptable.
-    const ACCEPTABLE_TERMINAL = new Set(['done', 'review', 'blocked']);
-    assert.ok(
-      ACCEPTABLE_TERMINAL.has(finalStatus),
-      `Expected done/review/blocked after artifact-mode QC, got: ${finalStatus}`,
+    assert.match(qcMessage,/vision_match/i,'hold names unavailable independent visual verification');
+    assert.equal(
+      finalStatus,'blocked',
+      `Expected explicit blocked state after unavailable independent vision, got: ${finalStatus}`,
     );
-    console.log(`[duck-e2e] §4 QC artifact-mode: final status = ${finalStatus} (done = full §4 pass; review = heuristic mode, also correct)`);
+    console.log(`[duck-e2e] Independent QC refused unverified visual claims: ${finalStatus}`);
   });
 
-  // ── h. Task reaches done OR documented terminal state ────────────────────
-  // §4: non-owner artifact tasks that pass criteria reach `done` (no LLM key →
-  // heuristic mode → stays in `review`, which is also the documented terminal state).
-  await t.test('h. task in terminal state (review or done) — §3/§4', async () => {
-    const { json } = await get(`${appBase}/api/tasks/${taskId}`);
-    const task = json as Record<string, unknown>;
-    const TERMINAL = new Set(['review', 'done', 'blocked']);
-    assert.ok(
-      TERMINAL.has(task.status as string),
-      `Expected terminal state (review/done/blocked), got: ${task.status}`,
-    );
-    console.log(`[duck-e2e] §3/§4 terminal state: ${task.status}`);
+  await step('h. offline vision hold remains visible on the board',async()=>{
+    const {json}=await get(`${appBase}/api/tasks/${taskId}`);
+    assert.equal((json as Record<string,unknown>).status,'blocked');
   });
 
-  // ── i. SSE / live-feed event stream covers every transition ──────────────
-  // The SSE broadcaster (events.ts) is an in-memory set — in Next.js dev mode
-  // hot-module-reload can cause the module to be re-initialised between
-  // requests, breaking the in-process publisher/subscriber link.  To make this
-  // assertion robust we check BOTH sides:
-  //
-  //   Side A: in-process SSE stream events captured by our HTTP client
-  //           (works reliably in production / `next start`; may miss events in
-  //           dev mode due to HMR).
-  //
-  //   Side B: the /api/events endpoint reads from the events DB table — the
-  //           same rows that are broadcast over SSE.  If the DB has
-  //           task_created + task_dispatched + task_completed for our task,
-  //           then the live-feed pipeline is structurally complete: any
-  //           connected SSE client would have received those broadcasts.
-  //
-  // The test passes when EITHER side proves the pipeline ran.  This matches
-  // the guidance §1.i: "the SSE/live-feed event stream contains every
-  // transition" — the DB events table IS the ground truth for what was
-  // broadcast.
-  await t.test('i. SSE/live-feed event stream contains every transition', async () => {
+  // Require real task-specific SSE frames as well as independent DB audit
+  // persistence. Durable rows alone do not prove the browser was notified.
+  await step('i. SSE/live-feed event stream contains every transition', async () => {
     // Side A: in-process SSE events captured by our subscriber
     const relevantTypes = new Set(['task_created', 'task_updated', 'deliverable_added']);
     const sideASse = sseEvents.filter((e) => relevantTypes.has(e.type));
     console.log(`[duck-e2e] SSE side-A events: ${sseEvents.map((e) => e.type).join(', ') || '(none)' }`);
 
     // Side B: DB events for this task (via HTTP — proves the broadcast pipeline)
-    const { json: eventsJson } = await get(`${appBase}/api/events?limit=100`);
+    const { json: eventsJson } = await get(`${appBase}/api/events?workspace_id=${ingestWorkspaceId}&limit=100`);
     const dbEvents = Array.isArray(eventsJson) ? eventsJson as Array<Record<string, unknown>> : [];
     const taskEvents = dbEvents.filter((e) => e.task_id === taskId);
     const taskEventTypes = taskEvents.map((e) => String(e.type ?? ''));
@@ -973,12 +842,13 @@ test('duck pipeline end-to-end (mock generator)', { timeout: TEST_TIMEOUT_MS }, 
     const hasCreated   = taskEventTypes.some((t) => t.includes('created') || t.includes('dispatched'));
     const hasCompleted = taskEventTypes.some((t) => t.includes('completed') || t.includes('qc') || t.includes('status'));
 
-    assert.ok(
-      sideASse.length > 0 || (hasCreated && hasCompleted),
-      `SSE/live-feed must contain pipeline transitions.\n` +
-      `Side-A (in-process SSE): ${sseEvents.map((e) => e.type).join(', ') || 'none'}\n` +
-      `Side-B (DB events for task ${taskId}): ${taskEventTypes.join(', ') || 'none'}`,
-    );
+    const received=(type:string)=>sseEvents.some(event=>event.type===type && (event.payload as Record<string,unknown>|undefined)?.id===taskId);
+    const deliverableReceived=()=>sseEvents.some(event=>event.type==='deliverable_added' && ((event.payload as Record<string,unknown>|undefined)?.task_id===taskId));
+    const sseDeadline=Date.now()+10_000;
+    while(Date.now()<sseDeadline && !(received('task_created')&&received('task_updated')&&deliverableReceived()))await sleep(100);
+    assert.ok(received('task_created'),'actual task_created SSE frame required for this task');
+    assert.ok(received('task_updated'),'actual task_updated SSE frame required for this task');
+    assert.ok(deliverableReceived(),'actual deliverable_added SSE frame required for this task');
 
     // Additional assertion: the DB events table proves every major transition fired
     assert.ok(hasCreated, `DB must contain a task_created or task_dispatched event; types: ${taskEventTypes.join(', ')}`);
@@ -990,7 +860,7 @@ test('duck pipeline end-to-end (mock generator)', { timeout: TEST_TIMEOUT_MS }, 
   // ── j. Artifact URL returns 200 with image/png ────────────────────────────
   // §3 contract: /api/artifacts/<task-id>/<file> serves the PNG with image/png.
   // Also assert /api/files/preview (extended by the cherry-picked PR #80).
-  await t.test('j. artifact URL returns 200 with image/png (§3 artifacts endpoint + preview)', async () => {
+  await step('j. artifact URL returns 200 with image/png (§3 artifacts endpoint + preview)', async () => {
     // §3 artifacts endpoint
     const artifactsUrl = `${appBase}/api/artifacts/${taskId}/blue-duck.png`;
     const res = await get(artifactsUrl);
@@ -1021,7 +891,7 @@ test('duck pipeline end-to-end (mock generator)', { timeout: TEST_TIMEOUT_MS }, 
   });
 
   // ── Teardown ──────────────────────────────────────────────────────────────
-  await t.test('teardown', async () => {
+  await step('teardown', async () => {
     if (sseCleanup) sseCleanup();
     if (appProc) appProc.kill('SIGTERM');
     if (stubWss) stubWss.close();

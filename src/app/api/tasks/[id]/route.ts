@@ -1,3 +1,4 @@
+import { validateExecutionCompletion, completeExecution } from '@/lib/execution-attempts';
 import { NextRequest, NextResponse } from 'next/server';
 import { v4 as uuidv4 } from 'uuid';
 import { queryOne, run, queryAll, getDb } from '@/lib/db';
@@ -128,6 +129,11 @@ export async function PATCH(
     const existing = queryOne<Task>('SELECT * FROM tasks WHERE id = ?', [id]);
     if (!existing) {
       return NextResponse.json({ error: 'Task not found' }, { status: 404 });
+    }
+
+    if (validatedData.status === 'review') {
+      const identityError = validateExecutionCompletion(id, {executionId:validatedData.execution_id});
+      if (identityError) return NextResponse.json({error:identityError}, {status:409});
     }
 
     const updates: string[] = [];
@@ -796,6 +802,7 @@ export async function PATCH(
           actor: actingAgentId ?? cfAccessEmail ?? 'operator',
           reason: `[PATCH /api/tasks/{id}] ${existing.status} → ${u035StatusTarget}`,
           expectedFrom: existing.status as LifecycleState,
+          ...(u035StatusTarget === 'review' ? {expectedExecutionId:validatedData.execution_id} : {}),
         });
       } catch (err) {
         if (err instanceof TransitionError) {
@@ -842,6 +849,8 @@ export async function PATCH(
         }
       }
     }
+
+    if (u035StatusTarget === 'review') completeExecution(id, validatedData.execution_id);
 
     // ── Supplementary UPDATE: fields transition() does not own ────────────────
     if (updates.length > 0 || u035StatusTarget !== null) {

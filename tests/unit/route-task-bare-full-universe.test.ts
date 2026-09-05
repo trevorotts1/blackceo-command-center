@@ -217,21 +217,10 @@ test('bare "Do something interesting" routes to General Task (genuine ambiguity)
   );
 });
 
-// ── Test 6: the EXACT bug path — scoped 'default' must NOT short-circuit ───────
-// Even if a caller passes the buggy scoped 'default' workspace, the router must
-// fall through to the full roster and route correctly (never blank to null /
-// General Task).
-test('bare deck task with buggy workspace_id="default" scope still routes to Presentations', async () => {
+// An explicit invalid workspace is an authorization constraint, never permission to search globally.
+test('an explicit missing default workspace holds instead of expanding the routing scope', async () => {
   const r = await routeBareScopedDefault('Build a 10-slide investor pitch deck');
-  assert.ok(
-    r !== null,
-    'routeTask must NOT short-circuit to null when a zero-agent "default" scope is passed',
-  );
-  assert.equal(
-    r!.department,
-    'Presentations',
-    `Expected Presentations even with default scope, got "${r!.department}" (reason: ${r!.reason})`,
-  );
+  assert.equal(r, null, 'unknown workspace must require an explicit correction');
 });
 
 // ── Test 7b: "client" name-token must NOT steal Sales/CRM tasks ───────────────

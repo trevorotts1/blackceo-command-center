@@ -1,3 +1,4 @@
+import { registerFixtureTenant, fixtureTenantCookie } from './_tenant-auth-fixture';
 /**
  * MR-17 fix2 — interview-bypass replay guard, exercised through the REAL
  * middleware (src/middleware.ts), not just the token helpers.
@@ -32,6 +33,7 @@ const TEST_SECRET = 'mr17-bypass-replay-test-secret';
 const BASE = 'https://cc.example.com';
 
 const ENV_KEYS = [
+  'MC_TENANT_REGISTRY_JSON',
   'NODE_ENV', 'MC_API_TOKEN', 'WEBHOOK_SECRET', 'REQUIRE_CF_ACCESS',
   'ALLOW_INSECURE_OPEN_API', 'DEMO_MODE', 'MC_INTERVIEW_COOKIE_SECRET',
 ] as const;
@@ -40,6 +42,7 @@ let savedEnv: Record<string, string | undefined> = {};
 beforeEach(() => { savedEnv = {}; for (const k of ENV_KEYS) savedEnv[k] = process.env[k]; });
 afterEach(() => {
   for (const k of ENV_KEYS) { if (savedEnv[k] === undefined) delete process.env[k]; else process.env[k] = savedEnv[k]; }
+  vi.restoreAllMocks();
   vi.resetModules();
 });
 
@@ -52,7 +55,9 @@ async function loadMiddleware(): Promise<Middleware> {
     DEMO_MODE: undefined, MC_INTERVIEW_COOKIE_SECRET: TEST_SECRET,
   };
   for (const k of ENV_KEYS) { const v = merged[k]; if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+  registerFixtureTenant('cc.example.com');
   vi.resetModules();
+  vi.spyOn(globalThis,'fetch').mockImplementation(async()=>new Response(JSON.stringify({interviewComplete:false}),{status:200}));
   const mod = await import('@/middleware');
   return mod.middleware as Middleware;
 }
@@ -70,8 +75,8 @@ async function mintCrossRealmToken(nonce: string, expOffsetSec = 3600): Promise<
 }
 
 function pageReq(path: string, opts: { cookie?: string; bypassParam?: string } = {}): NextRequest {
-  const headers = new Headers();
-  if (opts.cookie) headers.set('cookie', `${BYPASS_COOKIE}=${opts.cookie}`);
+  const headers = new Headers({host:"cc.example.com",cookie:fixtureTenantCookie("cc.example.com")});
+  if (opts.cookie) headers.set('cookie', `${fixtureTenantCookie('cc.example.com')}; ${BYPASS_COOKIE}=${opts.cookie}`);
   const url = new URL(path, BASE);
   if (opts.bypassParam) url.searchParams.set('bypass_interview', opts.bypassParam);
   return new NextRequest(url, { method: 'GET', headers });

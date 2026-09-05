@@ -1,3 +1,4 @@
+import { personaBundleHash } from '@/lib/persona-state';
 /**
  * Server-side persona selector for the Command Center.
  *
@@ -26,13 +27,14 @@
  * API responds in <500ms and the persona chip appears via a second task_updated
  * SSE event a few seconds later.
  */
+import { taskPersonaCompanyContext } from '@/lib/persona-company';
 import { promisify } from "util";
 import { execFile, spawn } from "child_process";
 import fs from "fs";
 import path from "path";
 import os from "os";
 import { v4 as uuidv4 } from "uuid";
-import { getDbPath, queryAll, queryOne, run } from "@/lib/db";
+import { getDb, getDbPath, queryAll, queryOne, run } from "@/lib/db";
 import { assertNoFixtureEnvInProduction } from "@/lib/fixture-guard";
 import { ensureRuntimeConfigFile } from "@/lib/runtime-config";
 import { broadcast } from "@/lib/events";
@@ -668,53 +670,39 @@ export function persistPersonaBundle(
   const commsAudienceSource = bundle.comms_audience_source ?? null;
   const commsType = bundle.comms_type ?? null;
 
-  let wrote = false;
-  try {
+  // One transaction: a mirror failure cannot report a successful bundle write.
+  // Preserve confirmation only for the same audience identity; a replacement
+  // audience starts its own deadline rather than inheriting created_at.
+  return getDb().transaction(() => {
+    const input=queryOne<{persona_input_revision?:number}>('SELECT persona_input_revision FROM tasks WHERE id=?',[taskId]);
+    const persistedBundle={...bundle,blend_directive:blendDirective,decision_context:{input_revision:input?.persona_input_revision ?? 0}};
+    const previous = queryOne<{ bundle_json: string; confirm_state: string; created_at: string }>(
+      'SELECT bundle_json,confirm_state,created_at FROM task_persona_bundle WHERE task_id=?', [taskId]);
+    let sameAudience = false;
+    if (previous) {
+      try {
+        const old = JSON.parse(previous.bundle_json) as PersonaBundle;
+        const identity = (b: PersonaBundle) => JSON.stringify([
+          b.resolved_audience?.id ?? null,
+          b.resolved_audience?.label ?? (b.resolved_audience?.candidates.length === 1 ? b.resolved_audience.candidates[0] : null),
+          (b as unknown as { resolved_goal?: unknown }).resolved_goal ?? null,
+        ]);
+        sameAudience = identity(old) === identity(bundle);
+      } catch { /* corrupt old decision cannot carry confirmation forward */ }
+    }
+    const state = sameAudience && previous?.confirm_state === 'confirmed' ? 'confirmed' : confirmState;
+    const requestedAt = sameAudience && previous ? previous.created_at : now;
     run(
-      `INSERT INTO task_persona_bundle (task_id, bundle_json, catalog_version, confirm_state, created_at)
-       VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT(task_id) DO UPDATE SET
-         bundle_json = excluded.bundle_json,
-         catalog_version = excluded.catalog_version,
-         confirm_state = excluded.confirm_state`,
-      [taskId, JSON.stringify({ ...bundle, blend_directive: blendDirective }), catalogVersion, confirmState, now],
-    );
-    wrote = true;
-  } catch (err) {
-    console.warn(`[persona-bundle] persist row failed for task ${taskId} (pre-090 DB?):`, (err as Error).message);
-  }
-
-  try {
-    run(
-      `UPDATE tasks
-          SET voice_persona_id = ?,
-              topic_persona_id = ?,
-              audience_id = ?,
-              audience_label = ?,
-              audience_source = ?,
-              voice_collapsed = ?,
-              blend_directive = ?,
-              comms_audience_source = ?,
-              comms_type = ?
-        WHERE id = ?`,
-      [
-        voicePersonaId,
-        topicPersonaId,
-        audienceId,
-        audienceLabel,
-        audienceSource,
-        voice.collapsed ? 1 : 0,
-        blendDirective,
-        commsAudienceSource,
-        commsType,
-        taskId,
-      ],
-    );
-  } catch (err) {
-    console.warn(`[persona-bundle] mirror-column update failed for task ${taskId} (pre-090/pre-108 DB?):`, (err as Error).message);
-  }
-
-  return wrote;
+      `INSERT INTO task_persona_bundle (task_id,bundle_json,catalog_version,confirm_state,created_at)
+       VALUES (?,?,?,?,?) ON CONFLICT(task_id) DO UPDATE SET bundle_json=excluded.bundle_json,
+       catalog_version=excluded.catalog_version,confirm_state=excluded.confirm_state,created_at=excluded.created_at`,
+      [taskId,JSON.stringify(persistedBundle),catalogVersion,state,requestedAt]);
+    run(`UPDATE tasks SET voice_persona_id=?,topic_persona_id=?,audience_id=?,audience_label=?,
+         audience_source=?,voice_collapsed=?,blend_directive=?,comms_audience_source=?,comms_type=? WHERE id=?`,
+      [voicePersonaId,topicPersonaId,audienceId,audienceLabel,state === 'confirmed' ? 'operator_confirmed' : audienceSource,
+       voice.collapsed ? 1 : 0,blendDirective,commsAudienceSource,commsType,taskId]);
+    return true;
+  })();
 }
 
 /**
@@ -811,7 +799,7 @@ export function persistPersonaBundleScope(
         conversionGoal,
         voicePersonaId,
         voicePersonaName,
-        JSON.stringify({ ...bundle, blend_directive: blendDirective }),
+        JSON.stringify({ ...bundle, blend_directive: blendDirective, decision_context:{input_revision:queryOne<{persona_input_revision:number}>('SELECT persona_input_revision FROM tasks WHERE id=?',[taskId])?.persona_input_revision??0,root_bundle_sha:personaBundleHash(JSON.parse(queryOne<{bundle_json:string}>('SELECT bundle_json FROM task_persona_bundle WHERE task_id=?',[taskId])?.bundle_json??'null'))} }),
         catalogVersion,
         scopeReason,
         partRole,
@@ -980,6 +968,9 @@ export async function selectPersonaForTask(
         interaction_mode: (fixture.interaction_mode as PersonaInteractionMode) || 'leadership',
         no_persona_required: fixture.no_persona_required,
         governance_persona_id: fixture.governance_persona_id ?? null,
+        secondary_persona_id: fixture.secondary_persona_id ?? null,
+        secondary_persona_name: fixture.secondary_persona_name ?? null,
+        secondary_persona_score: fixture.secondary_persona_score ?? null,
         bundle: parsePersonaBundle(fixture),
       };
     } catch {
@@ -1010,7 +1001,8 @@ export async function selectPersonaForTask(
     //    (so grounding doesn't neutralize to 0.6). It is passed via ENV, NOT as a
     //    `--company-config` flag: the script's strict argparse has no such flag and
     //    would crash on it.
-    const companyConfigHint = resolveCompanyConfigHint();
+    const companyContext=taskPersonaCompanyContext(taskId);
+    const companyConfigHint = companyContext?.companyConfig ?? resolveCompanyConfigHint();
     const timeoutMs = opts?.timeoutMs ?? PERSONA_SELECT_TIMEOUT_MS;
     // D3: an operator-confirmed audience is forwarded via ENV ONLY — the script's
     // strict argparse has no --audience flag (mirrors the OPENCLAW_COMPANY_CONFIG
@@ -1022,12 +1014,14 @@ export async function selectPersonaForTask(
       ...process.env,
       DASHBOARD_DB_PATH: getDbPath(),
       OPENCLAW_TASK_ID: taskId,
+      ...(companyContext ? {OPENCLAW_COMPANY_ID:companyContext.companyId,OPENCLAW_COMPANY_ROOT:companyContext.companyRoot,OPENCLAW_COMPANY_SLUG:companyContext.companySlug} : {}),
       ...(companyConfigHint ? { OPENCLAW_COMPANY_CONFIG: companyConfigHint } : {}),
       ...(audienceOverride ? { OPENCLAW_AUDIENCE: audienceOverride } : {}),
     };
 
     const runSelector = async (argv: string[]): Promise<string> => {
-      const { stdout } = await execFileAsync("python3", argv, {
+      const safeArgv=[...argv,"--no-record",...(companyContext?["--skip-stickiness","--no-variety"]:[])];
+      const { stdout } = await execFileAsync("python3", safeArgv, {
         encoding: "utf-8",
         timeout: timeoutMs,
         env: spawnEnv,
@@ -1171,14 +1165,16 @@ export async function selectPersonaPlanForTask(
     return null;
   }
   const dept = departmentId || "general";
-  const companyConfigHint = resolveCompanyConfigHint();
+  const companyContext = taskPersonaCompanyContext(taskId);
+  const companyConfigHint = companyContext?.companyConfig ?? resolveCompanyConfigHint();
   const slots = opts?.slots && opts.slots.length > 0 ? opts.slots : undefined;
 
-  const baseArgs = [scriptPath, "--task", taskDescription, "--department", dept, "--format", "json"];
+  const baseArgs = [scriptPath, "--task", taskDescription, "--department", dept, "--format", "json", "--no-record", ...(companyContext ? ["--no-variety"] : [])];
   const env = {
     ...process.env,
     DASHBOARD_DB_PATH: getDbPath(),
     OPENCLAW_TASK_ID: taskId,
+    ...(companyContext ? {OPENCLAW_COMPANY_ID:companyContext.companyId,OPENCLAW_COMPANY_ROOT:companyContext.companyRoot,OPENCLAW_COMPANY_SLUG:companyContext.companySlug} : {}),
     ...(companyConfigHint ? { OPENCLAW_COMPANY_CONFIG: companyConfigHint } : {}),
   };
 

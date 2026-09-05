@@ -24,6 +24,8 @@ import { NextRequest } from 'next/server';
 
 const WORKSPACE = fs.mkdtempSync(path.join(os.tmpdir(), 'bc-ivexport-ws-'));
 process.env.OPENCLAW_WORKSPACE_ROOT = WORKSPACE;
+process.env.MC_API_TOKEN = "export-fixture-token";
+process.env.MC_TENANT_REGISTRY_JSON = JSON.stringify({localhost: {tenantId:"export-self",companyId:"default",kind:"self",installationId:"export-install"}});
 
 const TRANSCRIPT = [
   '# Workforce Interview Answers',
@@ -50,7 +52,7 @@ type RouteModule = typeof import('../../src/app/api/interview/answers/export/rou
 let GET: RouteModule['GET'];
 
 function buildRequest(qs = ''): NextRequest {
-  return new NextRequest(`http://localhost/api/interview/answers/export${qs}`);
+  return new NextRequest(`http://localhost/api/interview/answers/export${qs}`, {headers: {host: "localhost", authorization: "Bearer export-fixture-token"}});
 }
 
 function writeTranscript(): void {
