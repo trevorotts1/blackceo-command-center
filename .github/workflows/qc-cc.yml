@@ -89,10 +89,14 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Set up Node (for package.json version probe)
+      - name: Set up Node for QC probes and behavioral proofs
         uses: actions/setup-node@v4
         with:
           node-version: "20"
+          cache: npm
+
+      - name: Install dependencies for QC behavioral proofs
+        run: npm ci
 
       - name: Ensure jq is available
         run: |
@@ -409,10 +413,14 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Set up Node (for package.json probe in check 11.10)
+      - name: Set up Node for QC probes and behavioral proofs
         uses: actions/setup-node@v4
         with:
           node-version: "20"
+          cache: npm
+
+      - name: Install dependencies for QC behavioral proofs
+        run: npm ci
 
       # Self-test: the planted fixture MUST fail checks 11.1 and 11.2.
       # If the grep pattern silently misses the fixture, the guard is broken.

@@ -9,6 +9,7 @@
 
 # next.js
 /.next/
+/.next-interview-lock/
 /out/
 
 # production

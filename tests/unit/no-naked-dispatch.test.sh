@@ -31,6 +31,9 @@ cleanup() { rm -rf "$TMP_DIR"; }
 trap cleanup EXIT
 
 export DATABASE_PATH="$TMP_DIR/no-naked.test.db"
+export CC_TEST_FIXTURE_ROOT="$TMP_DIR"
+export OPENCLAW_COMPANY_ROOT="$TMP_DIR"
+export WORKSPACE_BASE_PATH="$TMP_DIR"
 export REPO_ROOT
 # Never let a stale fixture from the caller's shell leak in.
 unset PERSONA_FIXTURE_JSON || true
@@ -67,6 +70,9 @@ function insertBacklog(id: string) {
 test.before(async () => {
   db = (await imp('src/lib/db/index.ts')) as DbMod;
   db.getDb(); // run the migration chain (persona columns, persona_fallback, etc.)
+  // This suite intentionally models a legacy single-company/no-company board.
+  // Its null-workspace tasks must not borrow migration-seeded tenant context.
+  db.run('UPDATE workspaces SET company_id=NULL');
   tasks = (await imp('src/lib/tasks.ts')) as TasksMod;
   resolver = (await imp('src/lib/intelligence-resolver.ts')) as ResolverMod;
 });

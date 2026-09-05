@@ -48,6 +48,7 @@ import {
   forgeCompleteCookie,
   forgeExpiredCompleteCookie,
   forgeForgedCookie,
+  signFixtureTenantGrant,
 } from './interview-lock.fixture';
 
 /** Non-exempt page routes that MUST be locked to /interview while incomplete. */
@@ -97,6 +98,28 @@ test.beforeAll(async () => {
 
 test.describe.configure({ mode: 'serial' });
 
+async function authenticatedContext(context:import('playwright/test').BrowserContext) {
+  await context.addCookies([{name:'mc_tenant_session',value:signFixtureTenantGrant(),url:BASE_URL,httpOnly:true,sameSite:'Strict'}]);
+}
+async function clearGateCookies(context:import('playwright/test').BrowserContext) {
+  await context.clearCookies();
+  await authenticatedContext(context);
+}
+test.beforeEach(async({context})=>authenticatedContext(context));
+
+test('registered invitation redeems once and authenticates browser interview access',async({context,page})=>{
+  writeBuildState(false);
+  await context.clearCookies();
+  const denied=await page.request.get('/api/interview/answers');
+  expect([401,403]).toContain(denied.status());
+  const ticket=signFixtureTenantGrant('enrollment');
+  const enrolled=await page.request.post('/api/auth/interview-session',{data:{ticket}});
+  expect(enrolled.status()).toBe(200);
+  expect((await context.cookies()).some(c=>c.name==='mc_tenant_session'&&c.httpOnly)).toBeTruthy();
+  expect((await page.request.post('/api/auth/interview-session',{data:{ticket}})).status()).toBe(409);
+  expect((await page.request.get('/api/interview/gate-status')).status()).toBe(200);
+});
+
 test.describe('Interview-mode shell lock (WG-9)', () => {
   // Keep the fixture in the LOCKED state for the lock/exempt tests. The unlock
   // test flips it and restores it in an afterEach below.
@@ -122,7 +145,7 @@ test.describe('Interview-mode shell lock (WG-9)', () => {
   }) => {
     // Visiting the exempt /interview fires the client shim (refreshInterviewGate),
     // which — with the fixture still incomplete — mints an INCOMPLETE cookie.
-    await page.goto('/interview', { waitUntil: 'networkidle' });
+    await page.goto('/interview', { waitUntil: 'domcontentloaded' });
 
     // The cookie may now exist, but it must NOT read as complete...
     const cookie = (await context.cookies()).find((c) => c.name === INTERVIEW_COOKIE_NAME);
@@ -184,14 +207,13 @@ test.describe('Interview-mode shell lock (WG-9)', () => {
     //    exact field (never a hand-forged cookie).
     writeBuildState(true);
 
-    // 2) Fire the sanctioned setter by loading an exempt page that mounts the
-    //    root layout's InterviewGateSync shim, and poll until the app itself has
-    //    minted a signature-valid "complete" cookie. The server action is
-    //    fire-and-forget, so we reload to re-fire until the cookie flips.
+    // 2) Load the exempt page once to mount InterviewGateSync, then observe its
+    //    asynchronous signed cookie. Completion can redirect into a polling
+    //    dashboard, so network-idle/repeated navigation is not a readiness signal.
+    await page.goto('/interview', { waitUntil: 'domcontentloaded' });
     await expect
       .poll(
         async () => {
-          await page.goto('/interview', { waitUntil: 'networkidle' });
           const cookie = (await context.cookies()).find(
             (c) => c.name === INTERVIEW_COOKIE_NAME,
           );
@@ -238,7 +260,7 @@ test.describe('Interview-mode shell lock — U010 fallback + latch', () => {
     // Prime the build-state as complete but clear ALL gate cookies so the
     // middleware must fall back to /api/interview/gate-status.
     writeBuildState(true);
-    await context.clearCookies();
+    await clearGateCookies(context);
 
     // Navigating to a gated page should resolve 200 (not 302 → /interview)
     // because the middleware's fallback fetch sees build-state says complete.
@@ -246,12 +268,11 @@ test.describe('Interview-mode shell lock — U010 fallback + latch', () => {
     expect(resp.status(), 'fallback path must admit when build-state is complete').toBe(200);
   });
 
-  test('U010-B: latch-only cookie → admitted', async ({ page, context }) => {
-    // Place ONLY a valid latch cookie (no main mc_interview_complete cookie).
-    // The middleware checks the main cookie first (absent → fail), then the
-    // latch (valid-complete → admit).
+  test('U010-B: latch-only cookie requires current canonical completion', async ({ page, context }) => {
+    // A valid latch alone cannot override current incomplete canonical state.
+    // Once canonical completion is verified, this authenticated session admits.
     writeBuildState(false);
-    await context.clearCookies();
+    await clearGateCookies(context);
     await context.addCookies([
       {
         name: LATCH_COOKIE_NAME,
@@ -264,14 +285,16 @@ test.describe('Interview-mode shell lock — U010 fallback + latch', () => {
     ]);
 
     const resp = await page.request.get('/operator', { maxRedirects: 0 });
-    expect(resp.status(), 'latch-only cookie must admit').toBe(200);
+    expect(isRedirectToInterview(resp.status(),resp.headers()['location']), 'stale latch cannot override incomplete canonical state').toBeTruthy();
+    writeBuildState(true);
+    expect((await page.request.get('/operator',{maxRedirects:0})).status()).toBe(200);
   });
 
   test('U010-C: forged cookie → 302', async ({ page, context }) => {
     // A cookie claiming complete=true but signed with the wrong HMAC must be
     // rejected — the middleware fails CLOSED to /interview.
     writeBuildState(false);
-    await context.clearCookies();
+    await clearGateCookies(context);
     await context.addCookies([
       {
         name: INTERVIEW_COOKIE_NAME,
@@ -291,12 +314,11 @@ test.describe('Interview-mode shell lock — U010 fallback + latch', () => {
     ).toBeTruthy();
   });
 
-  test('U010-D: expired-complete cookie → 200 (monotonic unlock)', async ({ page, context }) => {
-    // An expired-but-signature-valid "complete" cookie must still admit because
-    // completion is terminal — the middleware accepts it and the setter re-mints
-    // a fresh one on the next page load.
+  test('U010-D: expired completion does not override incomplete canonical state', async ({ page, context }) => {
+    // Historical signed completion is insufficient: an expired grant must not
+    // override the fixture's current incomplete canonical state.
     writeBuildState(false);
-    await context.clearCookies();
+    await clearGateCookies(context);
     await context.addCookies([
       {
         name: INTERVIEW_COOKIE_NAME,
@@ -309,9 +331,7 @@ test.describe('Interview-mode shell lock — U010 fallback + latch', () => {
     ]);
 
     const resp = await page.request.get('/operator', { maxRedirects: 0 });
-    expect(resp.status(), 'expired-complete cookie must still admit (completion is terminal)').toBe(
-      200,
-    );
+    expect(isRedirectToInterview(resp.status(),resp.headers()['location']), 'expired completion alone must not unlock').toBeTruthy();
   });
 
   test('U010-E: gate-status returns the two booleans', async ({ page }) => {
@@ -364,7 +384,7 @@ test.describe('Interview-mode shell lock — standard-first (standardReady + inc
   }) => {
     // No completion cookie can exist in this state; clear any leftover so the
     // middleware runs its full fail-closed chain.
-    await context.clearCookies();
+    await clearGateCookies(context);
 
     for (const path of GATED_PAGES) {
       const resp = await page.request.get(path, { maxRedirects: 0 });
@@ -381,7 +401,7 @@ test.describe('Interview-mode shell lock — standard-first (standardReady + inc
     page,
     context,
   }) => {
-    await context.clearCookies();
+    await clearGateCookies(context);
 
     // /interview renders.
     const interview = await page.request.get('/interview', { maxRedirects: 0 });
@@ -455,7 +475,7 @@ test.describe('Interview-mode shell lock — standard-first (standardReady + inc
     page,
     context,
   }) => {
-    await context.clearCookies();
+    await clearGateCookies(context);
     writeStandardPrebuildState(true);
 
     const resp = await page.request.get('/preview', { maxRedirects: 0 });

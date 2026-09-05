@@ -53,6 +53,7 @@ export const LATCH_COOKIE_NAME = 'mc_interview_gate_latch';
 function signForgePayload(complete: boolean, ttlSeconds: number): string {
   const payload = JSON.stringify({
     complete,
+    scope:'interview-lock-tenant:interview-lock-install:127.0.0.1',
     exp: Math.floor(Date.now() / 1000) + ttlSeconds,
   });
   const b64 = Buffer.from(payload, 'utf-8')
@@ -82,9 +83,8 @@ export function forgeCompleteCookie(): string {
 
 /**
  * Produce a validly-signed but EXPIRED "complete" cookie value.
- * The TTL is negative so `exp` is in the past — but `complete:true` is still
- * signed correctly, so the middleware's monotonic-unlock rule (accept an expired
- * complete token) admits it.
+ * The signature and scope are genuine, but the grant is expired. It must not
+ * unlock a fixture whose current canonical interview is incomplete.
  */
 export function forgeExpiredCompleteCookie(): string {
   return signForgePayload(true, -3600);
@@ -133,12 +133,41 @@ export const BASE_URL = `http://127.0.0.1:${PORT}`;
  * chosen-departments artifact — never the operator's live company build.
  */
 export function serverEnv(): Record<string, string> {
+  ensureWorkspace();
+  writeDepartmentsJson();
+  writeBuildState(false);
+  // Preseed an unpaired throwaway identity so client construction cannot copy
+  // the operator's legacy device key into this isolated fixture.
+  const identityDir=path.join(E2E_OUT_DIR,'identity');
+  fs.mkdirSync(identityDir,{recursive:true});
+  const pair=crypto.generateKeyPairSync('ed25519');
+  fs.writeFileSync(path.join(identityDir,'device.json'),JSON.stringify({version:1,deviceId:'unpaired-interview-fixture',publicKeyPem:pair.publicKey.export({type:'spki',format:'pem'}).toString(),privateKeyPem:pair.privateKey.export({type:'pkcs8',format:'pem'}).toString(),createdAtMs:Date.now()}),{mode:0o600});
   return {
+    ...Object.fromEntries(['KIE_API_KEY','KIEAI_API_KEY','KIE_AI_API_KEY','OPENAI_API_KEY','FAL_KEY','FAL_API_KEY','FAL_AI_API_KEY','GEMINI_API_KEY','GOOGLE_API_KEY','FISH_AUDIO_API_KEY','ELEVENLABS_API_KEY','REPLICATE_API_TOKEN','REPLICATE_API_KEY','LUMA_API_KEY','LUMAAI_API_KEY','STABILITY_API_KEY','STABILITY_AI_API_KEY','RUNWAY_API_KEY','RUNWAYML_API_SECRET'].map(key=>[key,'isolated-browser-fixture-no-provider-access'])),
     OPENCLAW_WORKSPACE_ROOT: WORKSPACE_DIR,
+    OPENCLAW_ROOT: path.join(E2E_OUT_DIR,'openclaw'),
+    BCC_DEVICE_IDENTITY_DIR: path.join(E2E_OUT_DIR,'identity'),
+    OPENCLAW_SKILL23_SCRIPTS: path.join(E2E_OUT_DIR,'absent-scripts'),
+    OPENCLAW_GATEWAY_URL: 'not-a-valid-url',
+    OPENCLAW_GATEWAY_TOKEN: '',
+    OPENCLAW_CLI_BIN: '/usr/bin/false',
+    OWNER_NOTIFY_TELEGRAM_DISABLED: '1',
+    DISABLE_CRON: '1',
+    DISABLE_REGISTRY_BOOT_SEED: '1',
+    DISABLE_BRIDGE_BOOTSTRAP: '1',
+    DISABLE_AGENT_SYNC: '1',
+    MC_API_TOKEN: 'interview-lock-machine-token',
+    MC_TENANT_SESSION_SECRET: COOKIE_SECRET,
+    MC_COMPANY_ID: 'default',
+    MC_INSTALLATION_ID: 'interview-lock-install',
+    MC_TENANT_REGISTRY_JSON: JSON.stringify({'127.0.0.1':{kind:'self',tenantId:'interview-lock-tenant',companyId:'default',installationId:'interview-lock-install'}}),
+    REQUIRE_CF_ACCESS: 'false',
+    CC_PORT: String(PORT),
     MC_INTERVIEW_COOKIE_SECRET: COOKIE_SECRET,
     DATABASE_PATH: DB_PATH,
     ZERO_HUMAN_COMPANY_DIR: COMPANY_DIR,
     PORT: String(PORT),
+    NEXT_DIST_DIR: ".next-interview-lock",
   };
 }
 
@@ -231,4 +260,10 @@ export function writeStandardPrebuildState(complete: boolean): void {
     source: 'tests/integration/interview-lock.fixture.ts',
   };
   fs.writeFileSync(BUILD_STATE_PATH, `${JSON.stringify(state, null, 2)}\n`, 'utf-8');
+}
+
+/** Real enrollment/session payload format, signed with the isolated server secret. */
+export function signFixtureTenantGrant(purpose:'enrollment'|'session'='session'):string {
+  const payload=Buffer.from(JSON.stringify({purpose,tenantId:'interview-lock-tenant',installationId:'interview-lock-install',host:'127.0.0.1',subject:'owner:fixture',nonce:crypto.randomUUID(),exp:Math.floor(Date.now()/1000)+3600})).toString('base64url');
+  return `${payload}.${crypto.createHmac('sha256',COOKIE_SECRET).update(payload).digest('base64url')}`;
 }

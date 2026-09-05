@@ -30,6 +30,7 @@ import { BASE_URL, serverEnv } from './tests/integration/interview-lock.fixture'
  */
 export default defineConfig({
   testDir: './tests/integration',
+  outputDir: './test-results/interview-lock-browser',
   testMatch: /interview-lock\.spec\.ts$/,
   timeout: 60_000,
   expect: { timeout: 15_000 },
@@ -45,6 +46,7 @@ export default defineConfig({
   use: {
     baseURL: BASE_URL,
     headless: true,
+    channel: process.env.INTERVIEW_LOCK_BROWSER_CHANNEL || undefined,
     // Capture a full Playwright trace + screenshot only when a test is retried
     // after a failure, so green runs stay cheap but any CI flake/regression is
     // debuggable from the uploaded artifact.
@@ -57,7 +59,7 @@ export default defineConfig({
     command: 'npm run dev',
     url: `${BASE_URL}/api/health`,
     env: serverEnv(),
-    reuseExistingServer: !process.env.CI,
+    reuseExistingServer: false,
     timeout: 180_000,
     stdout: 'pipe',
     stderr: 'pipe',
