@@ -972,9 +972,9 @@ If you need help or clarification, ask the orchestrator.`;
       const dispatchedAt = new Date().toISOString();
       const eventId = uuidv4();
       run(
-        `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-        [eventId, 'task_dispatched', agent.id, task.id, `Task "${task.title}" dispatched to ${agent.name}`, dispatchedAt]
+        `INSERT INTO events (id, type, agent_id, task_id, message, created_at, metadata)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [eventId, 'task_dispatched', agent.id, task.id, `Task "${task.title}" dispatched to ${agent.name}`, dispatchedAt, JSON.stringify({ execution_id: execution.id })]
       );
 
       // Log dispatch activity to task_activities table (for Activity tab)

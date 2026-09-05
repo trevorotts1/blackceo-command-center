@@ -107,6 +107,9 @@ function taskCompletedEvents(taskId: string): number {
 }
 
 beforeAll(() => {
+  vi.stubEnv('MC_API_TOKEN','fix25-fixture-token');
+  vi.stubEnv('MC_INSTALLATION_ID','fix25-fixture-install');
+  vi.stubEnv('MC_TENANT_REGISTRY_JSON',JSON.stringify({localhost:{kind:'self',tenantId:'fix25-fixture',companyId:'default',installationId:'fix25-fixture-install'}}));
   fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fix25-'));
   nonexistentPath = path.join(fixtureDir, 'never-created.pptx');
   workspaceId = 'presentations';
@@ -121,7 +124,7 @@ beforeAll(() => {
     getDb().prepare('INSERT INTO workspaces (id, name, slug, icon, sort_order) VALUES (?,?,?,?,?)')
       .run(workspaceId, 'Presentations', 'presentations', 'Presentation', 10);
   }
-  agentId = '00000000-0000-4000-8000-00000000f125'; // uuid-shaped: PATCH's updated_by_agent_id is z.string().uuid()
+  agentId = '00000000-0000-4000-8000-00000000f125'; // existing UUID-shaped agent ID remains supported
   getDb().prepare(
     `INSERT INTO agents (id, name, role, status, workspace_id) VALUES (?, ?, ?, ?, ?)`,
   ).run(agentId, 'FIX25 Builder', 'builder', 'working', workspaceId);
@@ -151,6 +154,7 @@ beforeAll(() => {
 });
 
 afterAll(() => {
+  vi.unstubAllEnvs();
   const db = getDb();
   // Children first (openclaw_sessions / task_activities reference tasks and
   // agents; onDelete cascades exist but the webhook also inserts legacy event
@@ -356,7 +360,7 @@ describe('FIX 25 door 4 — self-PATCH status=review is refused by the shared ga
     const { PATCH } = await import('../../src/app/api/tasks/[id]/route');
     const req = new NextRequest(`http://localhost/api/tasks/${unreachableTaskId}`, {
       method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', host:'localhost', authorization:'Bearer fix25-fixture-token' },
       body: JSON.stringify({ status: 'review', updated_by_agent_id: agentId }),
     });
     const res = await PATCH(req, { params: Promise.resolve({ id: unreachableTaskId }) });

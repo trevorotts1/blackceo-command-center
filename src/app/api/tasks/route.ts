@@ -1,4 +1,5 @@
 import { TaskContextError } from '@/lib/task-request-identity';
+import { assignmentCompany, TaskAgentAccessError } from '@/lib/task-agent-assignment';
 import { NextRequest, NextResponse } from 'next/server';
 import { queryAll, queryOne } from '@/lib/db';
 import { CreateTaskSchema } from '@/lib/validation';
@@ -286,6 +287,9 @@ export async function POST(request: NextRequest) {
 
     const validatedData = validation.data;
 
+    const agentCompanyId = validatedData.assigned_agent_id || validatedData.created_by_agent_id
+      ? await assignmentCompany(request) : undefined;
+
     // A task can never be CREATED directly in `blocked`. Blocked is a transition
     // state a task reaches only once it is in flight and waiting on a specific
     // human action (decision/approval/credential/payment) — and that transition
@@ -335,6 +339,7 @@ export async function POST(request: NextRequest) {
         status: validatedData.status,
         priority: validatedData.priority,
         assigned_agent_id: validatedData.assigned_agent_id,
+        idempotency_company_id: agentCompanyId,
         created_by_agent_id: validatedData.created_by_agent_id,
         business_id: validatedData.business_id,
         workspace_id: validatedData.workspace_id,
@@ -359,6 +364,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json(result.task, { status: 201 });
   } catch (error) {
+    if (error instanceof TaskAgentAccessError) return NextResponse.json({ error: error.message }, { status: error.status });
     if (error instanceof TaskContextError) return NextResponse.json({error:error.message}, {status:error.status});
     console.error('Failed to create task:', error);
     return NextResponse.json({ error: 'Failed to create task' }, { status: 500 });

@@ -42,6 +42,9 @@ const TMP_DB = path.join(
 );
 process.env.DATABASE_PATH = TMP_DB;
 process.env.OPENCLAW_ROOT = '/nonexistent/openclaw-root-for-tests';
+process.env.MC_API_TOKEN = 'null-fields-fixture-only';
+process.env.MC_INSTALLATION_ID = 'null-fields-fixture';
+process.env.MC_TENANT_REGISTRY_JSON = JSON.stringify({localhost:{tenantId:'null-fields',companyId:'default',kind:'self',installationId:'null-fields-fixture'}});
 // No embedding keys → SOP auto-suggest / persona selection stay on their
 // deterministic, network-free fallback paths.
 delete process.env.OPENAI_API_KEY;
@@ -75,7 +78,7 @@ function callCreate(overrides: Record<string, unknown> = {}): Promise<Response> 
   };
   const req = new NextRequest('http://localhost/api/tasks', {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', host: 'localhost', authorization: 'Bearer null-fields-fixture-only' },
     body: JSON.stringify(payload),
   });
   return POST(req) as unknown as Promise<Response>;

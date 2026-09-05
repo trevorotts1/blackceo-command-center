@@ -12,8 +12,8 @@
  * signals could each say something different for the same underlying
  * reality. This component replaces all of that with a single source of
  * truth: U46's criticality-tiered `overall` from `/api/system/status`,
- * rendered as exactly one of three states everywhere — Online / Degraded /
- * Offline — with a viewer-scoped presentation:
+ * combined with migration/embedding readiness and rendered as Healthy /
+ * Degraded / Unavailable / Checking / Unknown — with a viewer-scoped presentation:
  *
  *   - `operator`: clickable, opens the existing SystemStatusDrawer
  *     (regrouped Critical / Auxiliary / Model Providers per U46's tier).
@@ -25,22 +25,12 @@
  * Gateway pill's phone-width hiding is the exact defect this unit retires.
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { SystemStatusDrawer } from './SystemStatusDrawer';
-import type { SystemStatus, TieredProbeResult } from '@/lib/probes/types';
+import { parseReadiness, type HealthTier, type StatusPayload } from '@/lib/health-readiness';
+export type { HealthTier } from '@/lib/health-readiness';
 
 export type HealthIndicatorViewerRole = 'operator' | 'client';
-
-/** The three states this unit's spec names explicitly (H+L "what"). */
-export type HealthTier = 'online' | 'degraded' | 'offline' | 'checking';
-
-interface StatusPayload {
-  overall: SystemStatus;
-  probedAt: string;
-  components: TieredProbeResult[];
-  fromCache: boolean;
-  cacheAgeMs: number | null;
-}
 
 interface Props {
   viewerRole: HealthIndicatorViewerRole;
@@ -48,38 +38,28 @@ interface Props {
 
 const POLL_INTERVAL_MS = 30 * 1000;
 
-/**
- * Collapse U46's six-state-vocabulary `overall` (which by construction of
- * `computeOverallTiered` only ever returns 'live' | 'degraded' | 'offline')
- * down to this unit's three-state contract. `'unknown'` only appears before
- * the first successful poll resolves.
- */
-function toHealthTier(overall: SystemStatus | null): HealthTier {
-  if (overall === null) return 'checking';
-  if (overall === 'offline') return 'offline';
-  if (overall === 'degraded') return 'degraded';
-  return 'online';
-}
-
 const TIER_LABEL: Record<HealthTier, string> = {
-  online: 'Online',
+  healthy: 'Healthy',
   degraded: 'Degraded',
-  offline: 'Offline',
+  unavailable: 'Unavailable',
   checking: 'Checking…',
+  unknown: 'Unknown',
 };
 
 const TIER_DOT: Record<HealthTier, string> = {
-  online: 'bg-emerald-500 animate-pulse',
+  healthy: 'bg-emerald-500 animate-pulse',
   degraded: 'bg-orange-500',
-  offline: 'bg-red-500',
+  unavailable: 'bg-red-500',
   checking: 'bg-gray-400',
+  unknown: 'bg-gray-400',
 };
 
 const TIER_STYLE: Record<HealthTier, { bg: string; text: string; border: string }> = {
-  online: { bg: 'bg-emerald-50', text: 'text-emerald-700', border: 'border-emerald-200' },
+  healthy: { bg: 'bg-emerald-50', text: 'text-emerald-700', border: 'border-emerald-200' },
   degraded: { bg: 'bg-orange-50', text: 'text-orange-700', border: 'border-orange-200' },
-  offline: { bg: 'bg-red-50', text: 'text-red-700', border: 'border-red-200' },
+  unavailable: { bg: 'bg-red-50', text: 'text-red-700', border: 'border-red-200' },
   checking: { bg: 'bg-gray-50', text: 'text-gray-600', border: 'border-gray-200' },
+  unknown: { bg: 'bg-gray-50', text: 'text-gray-600', border: 'border-gray-200' },
 };
 
 export function HealthIndicator({ viewerRole }: Props) {
@@ -87,31 +67,55 @@ export function HealthIndicator({ viewerRole }: Props) {
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
 
+  const [tier, setTier] = useState<HealthTier>('checking');
+  const active = useRef<AbortController | null>(null);
+  const sequence = useRef(0);
+
   const fetchStatus = useCallback(async (force = false) => {
-    try {
-      setLoading(true);
-      const url = force ? '/api/system/status?force=1' : '/api/system/status';
-      const res = await fetch(url, { cache: 'no-store' });
-      if (res.ok) {
-        const data = (await res.json()) as StatusPayload;
-        setPayload(data);
-      }
-    } catch (err) {
-      // Never surface the raw error to a client-variant viewer; log for the
-      // operator console only.
-      console.error('[HealthIndicator] Failed to load system status:', err);
-    } finally {
+    active.current?.abort();
+    const controller = new AbortController();
+    active.current = controller;
+    const request = ++sequence.current;
+    setLoading(true);
+    const timeout = setTimeout(() => {
+      if (request !== sequence.current) return;
+      controller.abort();
+      setPayload(null);
+      setTier('unavailable');
       setLoading(false);
+    }, 10_000);
+    try {
+      const url = force ? '/api/system/status?force=1' : '/api/system/status';
+      const [statusResponse, healthResponse] = await Promise.all([
+        fetch(url, { cache: 'no-store', signal: controller.signal }),
+        fetch('/api/health', { cache: 'no-store', signal: controller.signal }),
+      ]);
+      if (!statusResponse.ok || !healthResponse.ok) throw new Error('Health request failed');
+      const [status, health] = await Promise.all([statusResponse.json(), healthResponse.json()]);
+      if (request !== sequence.current || controller.signal.aborted) return;
+      const next = parseReadiness(status, health);
+      setPayload(next.payload);
+      setTier(next.tier);
+    } catch {
+      if (request !== sequence.current || controller.signal.aborted) return;
+      setPayload(null);
+      setTier('unavailable');
+    } finally {
+      clearTimeout(timeout);
+      if (request === sequence.current) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    fetchStatus();
-    const id = setInterval(() => fetchStatus(), POLL_INTERVAL_MS);
-    return () => clearInterval(id);
+    void fetchStatus();
+    const id = setInterval(() => void fetchStatus(), POLL_INTERVAL_MS);
+    return () => {
+      clearInterval(id);
+      ++sequence.current;
+      active.current?.abort();
+    };
   }, [fetchStatus]);
 
-  const tier = toHealthTier(payload?.overall ?? null);
   const style = TIER_STYLE[tier];
 
   // Client variant: a dot + one plain word, never interactive, never a

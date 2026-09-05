@@ -20,7 +20,7 @@
  * AudienceConfirmPanel in TaskModal.
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, useRef } from 'react';
 import { Sparkles, UserCheck, AlertTriangle } from 'lucide-react';
 
 interface BundleVoiceDecision {
@@ -67,30 +67,37 @@ function whyLine(bundle: PersonaBundleDisplay): string {
 export function PersonaPickerPanel({ taskId, onConfirmed }: PersonaPickerPanelProps) {
   const [bundle, setBundle] = useState<PersonaBundleDisplay | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const loadSequence = useRef(0);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [audienceInput, setAudienceInput] = useState('');
   const [topicInput, setTopicInput] = useState('');
 
   const load = useCallback(async () => {
+    const sequence = ++loadSequence.current;
     setLoading(true);
+    setLoadError(null);
+    setBundle(null);
     try {
-      const res = await fetch(`/api/tasks/${taskId}/persona-bundle`);
-      if (res.ok) {
-        const data: PersonaBundleApiResponse = await res.json();
-        setBundle(data.bundle ?? null);
-      } else {
-        setBundle(null);
+      const res = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/persona-bundle`, { cache: 'no-store' });
+      if (!res.ok) throw new Error('Unable to load the persona assignment. Try again.');
+      const data: PersonaBundleApiResponse = await res.json();
+      if (!Object.prototype.hasOwnProperty.call(data, 'bundle') ||
+          (data.bundle !== null && (typeof data.bundle !== 'object' || Array.isArray(data.bundle)))) {
+        throw new Error('Invalid persona response');
       }
+      if (sequence === loadSequence.current) setBundle(data.bundle);
     } catch {
-      setBundle(null);
+      if (sequence === loadSequence.current) setLoadError('Unable to load the persona assignment. Try again.');
     } finally {
-      setLoading(false);
+      if (sequence === loadSequence.current) setLoading(false);
     }
   }, [taskId]);
 
   useEffect(() => {
-    load();
+    void load();
+    return () => { ++loadSequence.current; };
   }, [load]);
 
   const postChoice = useCallback(
@@ -121,8 +128,17 @@ export function PersonaPickerPanel({ taskId, onConfirmed }: PersonaPickerPanelPr
     [taskId, load, onConfirmed],
   );
 
-  // ── Fail-quiet: no bundle -> render nothing ─────────────────────────
-  if (loading || !bundle) return null;
+  if (loading) return <p role="status" className="mb-4 text-sm text-bcc-text-secondary">Loading persona assignment…</p>;
+  if (loadError) return (
+    <div role="alert" className="mb-4 rounded-xl border border-bcc-border p-4">
+      <p className="text-sm text-bcc-text">{loadError}</p>
+      <button type="button" onClick={() => void load()}
+        className="mt-2 rounded-lg border border-bcc-border px-3 py-1.5 text-sm text-bcc-text focus-visible:outline focus-visible:outline-2">
+        Retry persona assignment
+      </button>
+    </div>
+  );
+  if (!bundle) return <p className="mb-4 text-sm text-bcc-text-secondary">No persona assigned yet.</p>;
 
   const voicePersona = bundle.voice;
   const topicPersona = bundle.topic_persona;

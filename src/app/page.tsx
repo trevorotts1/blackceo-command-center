@@ -7,6 +7,7 @@ import { LayoutGrid, BarChart3, Kanban, ArrowRight, Activity, Brain, Settings, T
 import { useLogoUrl } from '@/hooks/useLogoUrl';
 import { useCompanyBrand } from '@/hooks/useCompanyBrand';
 import { format } from 'date-fns';
+import { HealthIndicator } from '@/components/HealthIndicator';
 import { Breadcrumb } from '@/components/Breadcrumb';
 import {
   WORKSPACES_RETRY_MS,
@@ -48,13 +49,6 @@ export default function HomePage() {
   const logoUrl = useLogoUrl();
   const brand = useCompanyBrand();
   const [currentTime, setCurrentTime] = useState(new Date());
-  // U47: renamed from the old `isOnline` state/setter pair — this is a
-  // page-local API-reachability ping, unrelated to the global store's
-  // retired `isOnline` field (now `isFeedConnected`, written only by
-  // useSSE.ts) and unrelated to the consolidated <HealthIndicator/>. Kept
-  // local + distinctly named so it can never again read as a second
-  // competing store writer.
-  const [apiReachable, setApiReachable] = useState(true);
   // PRD 3.7: initial state must be empty so white-label deployments never flash "BlackCEO".
   const [companyName, setCompanyName] = useState('');
   const [companyLoaded, setCompanyLoaded] = useState(false);
@@ -111,23 +105,6 @@ export default function HomePage() {
       }
     }
     fetchCompany();
-  }, []);
-
-  useEffect(() => {
-    async function checkConnection() {
-      try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 5000);
-        const res = await fetch('/api/health', { signal: controller.signal, cache: 'no-store' });
-        clearTimeout(timeoutId);
-        setApiReachable(res.ok);
-      } catch {
-        setApiReachable(false);
-      }
-    }
-    checkConnection();
-    const interval = setInterval(checkConnection, 60000);
-    return () => clearInterval(interval);
   }, []);
 
   useEffect(() => {
@@ -472,14 +449,7 @@ export default function HomePage() {
           <span className="text-gray-500 text-base font-mono">
             {format(currentTime, 'MMM d, HH:mm:ss')}
           </span>
-          <div className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium ${
-            apiReachable
-              ? 'bg-emerald-50 border border-emerald-200 text-emerald-700'
-              : 'bg-red-50 border border-red-200 text-red-700'
-          }`}>
-            <span className={`w-2 h-2 rounded-full ${apiReachable ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`} />
-            {apiReachable ? 'LIVE' : 'OFFLINE'}
-          </div>
+          <HealthIndicator viewerRole="client" />
         </div>
       </header>
 
@@ -596,7 +566,7 @@ export default function HomePage() {
           <motion.div className="mt-12 text-center" variants={cardVariants}>
             <div className="inline-flex items-center gap-2 px-4 py-2 bg-white border border-gray-200 rounded-full text-gray-500 text-sm">
               <Activity className="w-4 h-4 text-indigo-500" />
-              <span>{apiReachable ? 'All systems operational' : 'System check failed'}</span>
+              <HealthIndicator viewerRole="client" />
               {/* P1-03 step 3: version stamp — makes build-generation drift
                   diagnosable at a glance ("you're on v5.14.0, current is
                   v5.17.0"). Omitted entirely if /api/version hasn't resolved. */}

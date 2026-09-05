@@ -1,82 +1,43 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { timingSafeEqual } from 'crypto';
-import { queryOne } from '@/lib/db';
+import { requestHost, tenantRegistration, verifyTenantGrant, TENANT_SESSION_COOKIE } from '@/lib/auth/tenant-context';
+import { getDb, queryOne } from '@/lib/db';
+import { assertTaskCompany, TaskAgentAccessError } from '@/lib/task-agent-assignment';
 import type { PersonaBundle, TaskPersonaBundleRow } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
-/**
- * GET /api/tasks/[id]/persona-bundle — B-U1 (master id U15) rung 2 of the
- * persona-bundle-acquisition ladder in `06-ghl-install-pages/tools/
- * v2_dispatcher.py`'s `_resolve_persona_bundle`.
- *
- * The ladder's rung 1 (threaded) needs the Command Center dispatch payload to
- * carry `task_persona_bundle.bundle_json` directly (a separate, ONB-side
- * threading change — not this unit). Rung 2 is THIS endpoint: a read-only
- * fetch a standalone/offline-dispatched build can make against the Command
- * Center for a task id it already knows, so it gets the SAME blend bundle the
- * Command Center already resolved instead of re-selecting a second time.
- * Mirrors the `task_persona_bundle` row (migration 090) verbatim — this route
- * has no write path and no side effects.
- *
- * ── Auth: Bearer-only (NOT the full HMAC+Bearer webhook scheme) ────────────
- * The real, already-shipped caller — `fetch_persona_bundle()` in
- * `06-ghl-install-pages/tools/cc_board.py` — documents its own auth
- * explicitly: "Bearer only (same class as `post_activity` — a read endpoint,
- * no HMAC per-route layer)." It sends `Authorization: Bearer $MC_API_TOKEN`
- * and NEVER an `x-webhook-signature` header for this GET. `/api/tasks/[id]/
- * status`'s two-layer `authenticate()` (Bearer + HMAC-over-rawBody) is the
- * scheme for the WRITE/webhook family (ingest, status, agent-completion) —
- * mandating that same HMAC layer here would 401 this endpoint's one real
- * caller on any box with WEBHOOK_SECRET configured, since it never sends the
- * signature header for a read. So this route reuses ONLY Layer 1 of that
- * scheme (byte-identical constant-time Bearer comparison) — it is not a new,
- * invented auth path, it is the same Bearer check every other task-scoped GET
- * (`/activities`, `/deliverables`) already relies on via the global
- * middleware Gate B (`src/middleware.ts`). This route additionally enforces
- * that same Bearer check INLINE (not middleware-only) so the guard is
- * directly exercised by a route-level test without having to drive the Edge
- * middleware — defense in depth, identical actor (`MC_API_TOKEN`), same
- * skip-when-unset posture as every sibling route (dev / same-origin).
- * Consistent with this route NOT being listed in `WEBHOOK_SECRET_ROUTES` /
- * `WEBHOOK_SECRET_DYNAMIC_ROUTES` (middleware.ts): it stays in the
- * same-origin-passthrough-eligible, Bearer-gated-for-external-callers read
- * family, not the fail-closed-without-WEBHOOK_SECRET webhook family.
- */
-
-/**
- * Constant-time string comparison (byte-identical to `/api/tasks/[id]/
- * status/route.ts`'s `safeEqual`). Returns false without leaking timing
- * beyond length, since `timingSafeEqual` throws on unequal buffer lengths.
+/** Both producer bearer reads and browser sessions are tenant/company scoped.
+ * Origin, Referer and unsigned identity headers never authenticate this route.
+ * Shared-client reads belong at the registered receiver via tenant-board proxy.
  */
 function safeEqual(a: string, b: string): boolean {
   const ab = Buffer.from(a, 'utf8');
   const bb = Buffer.from(b, 'utf8');
-  if (ab.length !== bb.length) return false;
-  return timingSafeEqual(ab, bb);
+  return ab.length === bb.length && timingSafeEqual(ab, bb);
 }
 
-type AuthResult = { ok: true } | { ok: false; status: number; error: string };
-
-/**
- * Bearer-only auth — Layer 1 ONLY of the cc_board two-layer scheme (see file
- * header). Enforced only when MC_API_TOKEN is configured, matching every
- * sibling route's dev/same-origin posture.
- */
-function authenticate(request: NextRequest): AuthResult {
-  const token = process.env.MC_API_TOKEN;
-  if (!token) return { ok: true };
-
-  const authHeader = request.headers.get('authorization');
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return { ok: false, status: 401, error: 'Unauthorized' };
+async function authenticate(request: NextRequest): Promise<string | null> {
+  try {
+    const host = requestHost(request);
+    const registration = tenantRegistration(host);
+    const authorization = request.headers.get('authorization');
+    if (authorization) {
+      const token = process.env.MC_API_TOKEN;
+      if (!token || !authorization.startsWith('Bearer ') || !safeEqual(authorization.slice(7), token)) return null;
+    } else {
+      const grant = await verifyTenantGrant(request.cookies.get(TENANT_SESSION_COOKIE)?.value ?? null, host, 'session');
+      if (!grant) return null;
+    }
+    // Middleware proxies these requests; the local handler must not serve an
+    // operator DB when called directly with a shared-client registration.
+    return registration.kind === 'self' &&
+      (!process.env.MC_INSTALLATION_ID || registration.installationId === process.env.MC_INSTALLATION_ID)
+      ? registration.companyId : null;
+  } catch {
+    return null;
   }
-  const presented = authHeader.slice(7);
-  if (!safeEqual(presented, token)) {
-    return { ok: false, status: 401, error: 'Unauthorized' };
-  }
-  return { ok: true };
 }
 
 export async function GET(
@@ -84,17 +45,14 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> },
 ) {
   try {
-    const auth = authenticate(request);
-    if (!auth.ok) {
-      return NextResponse.json({ error: auth.error }, { status: auth.status });
+    const companyId = await authenticate(request);
+    if (!companyId) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
     const { id } = await params;
 
-    const task = queryOne<{ id: string }>('SELECT id FROM tasks WHERE id = ?', [id]);
-    if (!task) {
-      return NextResponse.json({ error: 'Task not found' }, { status: 404 });
-    }
+    assertTaskCompany(getDb(), id, companyId);
 
     const row = queryOne<TaskPersonaBundleRow>(
       'SELECT * FROM task_persona_bundle WHERE task_id = ?',
@@ -140,6 +98,7 @@ export async function GET(
       { status: 200 },
     );
   } catch (error) {
+    if (error instanceof TaskAgentAccessError) return NextResponse.json({ error: 'Task not found' }, { status: 404 });
     console.error('[tasks persona-bundle] Failed to read persona bundle:', error);
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }

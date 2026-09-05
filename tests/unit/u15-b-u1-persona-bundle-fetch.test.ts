@@ -34,6 +34,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { NextRequest } from 'next/server';
+import { signTenantGrant } from '../../src/lib/auth/tenant-context';
 
 // ── Isolated DB + auth secret (set BEFORE @/lib/db / route are imported) ────
 const TMP_DB = path.join(
@@ -44,6 +45,13 @@ process.env.DATABASE_PATH = TMP_DB;
 
 const MC_API_TOKEN = 'test-mc-token-persona-bundle-9f2c';
 process.env.MC_API_TOKEN = MC_API_TOKEN;
+process.env.MC_TENANT_SESSION_SECRET = 'persona-session-test-secret';
+process.env.MC_INSTALLATION_ID = 'persona-test-install';
+process.env.MC_TENANT_REGISTRY_JSON = JSON.stringify({
+  localhost: { kind: 'self', tenantId: 'persona-default', companyId: 'default', installationId: 'persona-test-install' },
+  'other.localhost': { kind: 'self', tenantId: 'persona-other', companyId: 'other', installationId: 'persona-test-install' },
+  'shared.localhost': { kind: 'client', tenantId: 'persona-shared', companyId: 'default', clientId: 'remote-client', installationId: 'persona-test-install' },
+});
 // Deliberately WEBHOOK_SECRET-configured too, to prove this route does NOT
 // require an x-webhook-signature header the way /status does — the real
 // caller (cc_board.py fetch_persona_bundle) never sends one.
@@ -82,7 +90,7 @@ const SAMPLE_BUNDLE = {
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function buildRequest(id: string, authorization?: string): NextRequest {
-  const headers: Record<string, string> = {};
+  const headers: Record<string, string> = { host: 'localhost' };
   if (authorization !== undefined) headers['authorization'] = authorization;
   return new NextRequest(`http://localhost/api/tasks/${id}/persona-bundle`, {
     method: 'GET',
@@ -227,4 +235,74 @@ test('[U15/B-U1] corrupt bundle_json in the DB -> 500, never hands back untrustw
   assert.equal(res.status, 500, 'a task whose stored bundle_json fails to parse must fail loud, not silently 200');
   const body = (await res.json()) as { error: string };
   assert.match(body.error, /malformed/i);
+});
+
+async function browserRead(id: string, host = 'localhost', token?: string): Promise<Response> {
+  const tenantId = host === 'other.localhost' ? 'persona-other' : host === 'shared.localhost' ? 'persona-shared' : 'persona-default';
+  const value = token ?? await signTenantGrant({purpose:'session',tenantId,subject:'browser:fixture',host,
+    installationId:'persona-test-install',exp:Date.now()/1000+60,nonce:'persona-read-fixture'});
+  return GET(new NextRequest(`http://${host}/api/tasks/${id}/persona-bundle`, {
+    headers:{host,cookie:`mc_tenant_session=${value}`},
+  }), {params:Promise.resolve({id})});
+}
+
+test('[FIX46] signed browser session reads own bundle while machine token is configured', async () => {
+  const response = await browserRead(TASK_WITH_BUNDLE);
+  assert.equal(response.status, 200);
+  assert.deepEqual((await response.json()).bundle, SAMPLE_BUNDLE);
+});
+
+test('[FIX46] foreign and absent tasks return identical nondisclosing responses', async () => {
+  const foreign = await browserRead(TASK_WITH_BUNDLE, 'other.localhost');
+  const absent = await browserRead('does-not-exist', 'other.localhost');
+  assert.equal(foreign.status, 404); assert.equal(absent.status, 404);
+  assert.deepEqual(await foreign.json(), await absent.json());
+  const ownMissing = await browserRead(TASK_NO_BUNDLE);
+  assert.equal(ownMissing.status, 200); assert.equal((await ownMissing.json()).bundle, null);
+});
+
+test('[FIX46] forged, expired, host-replayed and shared-client grants cannot read operator data', async () => {
+  for (const token of ['forged.identity', await signTenantGrant({purpose:'session',tenantId:'persona-default',
+    subject:'browser:fixture',host:'localhost',installationId:'persona-test-install',exp:1,nonce:'expired'})]) {
+    assert.equal((await browserRead(TASK_WITH_BUNDLE, 'localhost', token)).status, 401);
+  }
+  const replay = await signTenantGrant({purpose:'session',tenantId:'persona-default',subject:'browser:fixture',
+    host:'localhost',installationId:'persona-test-install',exp:Date.now()/1000+60,nonce:'replay'});
+  assert.equal((await browserRead(TASK_WITH_BUNDLE, 'other.localhost', replay)).status, 401);
+  assert.equal((await browserRead(TASK_WITH_BUNDLE, 'shared.localhost')).status, 401);
+});
+
+test('[FIX46] service bearer is company-scoped, and unset token never opens anonymous reads', async () => {
+  const request = new NextRequest(`http://other.localhost/api/tasks/${TASK_WITH_BUNDLE}/persona-bundle`, {
+    headers:{host:'other.localhost',authorization:`Bearer ${MC_API_TOKEN}`},
+  });
+  assert.equal((await GET(request, {params:Promise.resolve({id:TASK_WITH_BUNDLE})})).status, 404);
+  delete process.env.MC_API_TOKEN;
+  try { assert.equal((await callRoute(TASK_WITH_BUNDLE)).status, 401); }
+  finally { process.env.MC_API_TOKEN = MC_API_TOKEN; }
+});
+
+test('[FIX46] unowned legacy task is denied instead of borrowing the default company', async () => {
+  const id = `unowned-${RUN_ID}`;
+  run("INSERT INTO tasks (id,title,status,priority,workspace_id,business_id) VALUES (?, 'Unowned', 'backlog','low',NULL,NULL)", [id]);
+  assert.equal((await browserRead(id)).status, 404);
+});
+
+test('[FIX46] a second company can read its own bundle but cannot grant the first company access', async () => {
+  const ws = `ws-other-${RUN_ID}`, id = `task-other-${RUN_ID}`;
+  run("INSERT OR IGNORE INTO companies (id,name,slug,config) VALUES ('other','Other','other','{}')");
+  run("INSERT INTO workspaces (id,name,slug,company_id) VALUES (?,'Other',?,'other')", [ws,ws]);
+  run("INSERT INTO tasks (id,title,status,priority,workspace_id,business_id) VALUES (?,'Other task','backlog','low',?,NULL)", [id,ws]);
+  run("INSERT INTO task_persona_bundle (task_id,bundle_json,confirm_state) VALUES (?,?,'pending')", [id,JSON.stringify(SAMPLE_BUNDLE)]);
+  const own = await browserRead(id,'other.localhost');
+  assert.equal(own.status,200); assert.deepEqual((await own.json()).bundle,SAMPLE_BUNDLE);
+  assert.equal((await browserRead(id)).status,404);
+});
+
+test('[FIX46] Origin and unsigned tenant headers never grant bundle access', async () => {
+  const request = new NextRequest(`http://localhost/api/tasks/${TASK_WITH_BUNDLE}/persona-bundle`, {
+    headers:{host:'localhost',origin:'http://localhost',referer:'http://localhost/',
+      'x-tenant-id':'persona-default','x-company-id':'default','x-operator-email':'owner@example.invalid'},
+  });
+  assert.equal((await GET(request,{params:Promise.resolve({id:TASK_WITH_BUNDLE})})).status,401);
 });

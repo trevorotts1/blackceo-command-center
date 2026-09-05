@@ -3,7 +3,7 @@
  *
  * Proves the PersonaPickerPanel renders correctly:
  *
- *   - bundle: null → renders nothing (fail-quiet)
+ *   - bundle: null → reports no assignment
  *   - rationale.collapse set → that string appears
  *   - rationale absent → fallback sentence appears, no undefined/brace
  *   - firing the primary submit issues `action: 'reaim'`, NEVER `action: 'name-voice'`
@@ -76,28 +76,41 @@ function personaBundleData(overrides: Record<string, unknown> = {}): Record<stri
   };
 }
 
-// ── Fail-quiet: bundle null → renders nothing ─────────────────────────
+describe('persona load states', () => {
+  it('reports an empty successful bundle as unassigned', async () => {
+    mockFetchResponse({task_id:TASK_ID,bundle:null,confirm_state:null,catalog_version:null});
+    render(<PersonaPickerPanel taskId={TASK_ID} />);
+    expect(await screen.findByText('No persona assigned yet.')).toBeDefined();
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
 
-describe('fail-quiet (bundle null)', () => {
-  it('renders nothing when bundle is null', async () => {
-    mockFetchResponse({
-      task_id: TASK_ID,
-      bundle: null,
-      confirm_state: null,
-      catalog_version: null,
-    });
+  it.each([401,403,500])('shows HTTP %s failure and retries the real fetch', async status => {
+    mockFetchResponse({error:'Unauthorized'},status);
+    render(<PersonaPickerPanel taskId={TASK_ID} />);
+    expect(await screen.findByRole('alert')).toBeDefined();
+    expect(screen.queryByText('No persona assigned yet.')).toBeNull();
+    mockFetchResponse(personaBundleData());
+    await userEvent.click(screen.getByRole('button',{name:'Retry persona assignment'}));
+    expect(await screen.findByTestId('persona-picker-panel')).toBeDefined();
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
 
-    const { container } = render(
-      <PersonaPickerPanel taskId={TASK_ID} />,
-    );
+  it('shows network failure and lets retry resolve to a genuinely empty bundle', async () => {
+    mockFetchError();
+    render(<PersonaPickerPanel taskId={TASK_ID} />);
+    await screen.findByRole('alert');
+    mockFetchResponse({bundle:null});
+    await userEvent.click(screen.getByRole('button',{name:'Retry persona assignment'}));
+    expect(await screen.findByText('No persona assigned yet.')).toBeDefined();
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
 
-    await waitFor(() => {
-      // After loading completes, the component should have rendered nothing.
-      // The container should be empty.
-    });
-
-    // The panel should not be in the DOM at all (fail-quiet returns null).
-    expect(screen.queryByTestId('persona-picker-panel')).toBeNull();
+  it('does not misrepresent a malformed success response as unassigned', async () => {
+    mockFetchResponse({error:'not a bundle response'});
+    render(<PersonaPickerPanel taskId={TASK_ID} />);
+    expect(await screen.findByRole('alert')).toBeDefined();
+    expect(screen.queryByText('No persona assigned yet.')).toBeNull();
   });
 });
 

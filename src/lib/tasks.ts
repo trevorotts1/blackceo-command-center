@@ -11,7 +11,8 @@
  * tells the OpenClaw COM/CEO agent a task is now on the board.
  *
  * IMPORTANT (ingest safety): `assigned_agent_id` / `created_by_agent_id` are
- * FK columns into `agents` and are validated as `.uuid()` by CreateTaskSchema.
+ * FK columns into `agents`; UUID and stable slug keys are accepted only when
+ * they resolve to existing agents in the task's exact company.
  * An external OpenClaw payload cannot carry a Command Center agent UUID, so the
  * ingest endpoint MUST leave both NULL — never pass a raw external id here.
  *
@@ -32,6 +33,7 @@
 
 import { v4 as uuidv4 } from 'uuid';
 import { createTaskOnce, taskRequestCompany, TaskContextError, taskRequestFingerprint } from '@/lib/task-request-identity';
+import { assertAgentCompany } from '@/lib/task-agent-assignment';
 import { taskPersonaCompanyContext, personaCompanyContext } from '@/lib/persona-company';
 import { capturePersonaSnapshot, commitPersonaMutation, PersonaConflictError, personaBundleHash } from '@/lib/persona-state';
 import fs from 'fs';
@@ -2594,6 +2596,8 @@ export async function createTaskCore(
     else throw new TaskContextError('The requested task workspace is unavailable.');
   }
   const creationCompanyId = taskRequestCompany(_db, workspaceId, input.idempotency_company_id || process.env.MC_COMPANY_ID);
+  assertAgentCompany(_db, input.assigned_agent_id, creationCompanyId);
+  assertAgentCompany(_db, input.created_by_agent_id, creationCompanyId);
   if (!workspaceId && input.department) {
     const canon = canonicalDeptSlug(input.department);
     if (canon) {
@@ -2684,6 +2688,11 @@ export async function createTaskCore(
     if (creator) creationMessage = `${creator.name} created task: ${input.title}`;
   }
   const priorTaskId = createTaskOnce(_db, requestIdentity, id, now, () => {
+  // Recheck inside the task/event transaction: an agent can be moved while the
+  // asynchronous SOP resolution above is in flight.
+  taskRequestCompany(_db, workspaceId, creationCompanyId);
+  assertAgentCompany(_db, input.assigned_agent_id, creationCompanyId);
+  assertAgentCompany(_db, input.created_by_agent_id, creationCompanyId);
   run(
     `INSERT INTO tasks (id, title, description, status, priority, assigned_agent_id, created_by_agent_id, workspace_id, business_id, department, due_date, sop_id, source, requester_channel, requester_chat_id, requester_session_key, parent_task_id, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,

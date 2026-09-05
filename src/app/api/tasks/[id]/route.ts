@@ -1,4 +1,5 @@
 import { validateExecutionCompletion, completeExecution } from '@/lib/execution-attempts';
+import { assignmentCompany, assertAgentCompany, assertTaskCompany, TaskAgentAccessError } from '@/lib/task-agent-assignment';
 import { NextRequest, NextResponse } from 'next/server';
 import { v4 as uuidv4 } from 'uuid';
 import { queryOne, run, queryAll, getDb } from '@/lib/db';
@@ -125,6 +126,16 @@ export async function PATCH(
     }
 
     const validatedData = validation.data;
+
+    // Resolve authority before status checks or any writes. Both slug and UUID
+    // references must name real agents in this task's exact company.
+    const agentCompanyId = validatedData.assigned_agent_id !== undefined || validatedData.updated_by_agent_id !== undefined
+      ? await assignmentCompany(request) : undefined;
+    if (agentCompanyId) {
+      assertTaskCompany(getDb(), id, agentCompanyId);
+      assertAgentCompany(getDb(), validatedData.assigned_agent_id, agentCompanyId);
+      assertAgentCompany(getDb(), validatedData.updated_by_agent_id, agentCompanyId);
+    }
 
     const existing = queryOne<Task>('SELECT * FROM tasks WHERE id = ?', [id]);
     if (!existing) {
@@ -735,16 +746,6 @@ export async function PATCH(
       if (validatedData.assigned_agent_id) {
         const agent = queryOne<Agent>('SELECT name FROM agents WHERE id = ?', [validatedData.assigned_agent_id]);
         if (agent) {
-          run(
-            `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
-             VALUES (?, ?, ?, ?, ?, ?)`,
-            [uuidv4(), 'task_assigned', validatedData.assigned_agent_id, id, `"${existing.title}" assigned to ${agent.name}`, now]
-          );
-
-          // MR-36: Owner assignment notification for the PATCH assignment branch.
-          // Best-effort; gateway-routed; never throws into the PATCH handler.
-          try { notifyOwnerAssigned(id, { department: existing.department }); } catch { /* non-fatal */ }
-
           // Auto-dispatch if already in in_progress status or being moved to in_progress now
           if (existing.status === 'in_progress' || validatedData.status === 'in_progress') {
             shouldDispatch = true;
@@ -860,7 +861,23 @@ export async function PATCH(
         try { updates.push('last_progress_at = ?'); values.push(now); } catch {}
       }
       values.push(id);
-      run(`UPDATE tasks SET ${updates.join(', ')} WHERE id = ?`, values);
+      getDb().transaction(() => {
+        if (agentCompanyId) {
+          assertTaskCompany(getDb(), id, agentCompanyId);
+          assertAgentCompany(getDb(), validatedData.assigned_agent_id, agentCompanyId);
+          assertAgentCompany(getDb(), validatedData.updated_by_agent_id, agentCompanyId);
+        }
+        run(`UPDATE tasks SET ${updates.join(', ')} WHERE id = ?`, values);
+        if (validatedData.assigned_agent_id && validatedData.assigned_agent_id !== existing.assigned_agent_id) {
+          const agent = queryOne<Agent>('SELECT name FROM agents WHERE id = ?', [validatedData.assigned_agent_id]);
+          run(`INSERT INTO events (id, type, agent_id, task_id, message, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+            [uuidv4(), 'task_assigned', validatedData.assigned_agent_id, id, `"${existing.title}" assigned to ${agent!.name}`, now]);
+        }
+      }).immediate();
+      // Notify only after assignment and its audit event commit together.
+      if (validatedData.assigned_agent_id && validatedData.assigned_agent_id !== existing.assigned_agent_id) {
+        try { notifyOwnerAssigned(id, { department: existing.department }); } catch { /* non-fatal */ }
+      }
 
       // MR-30 — capture a block-history snapshot when the UPDATE just landed a
       // manual block (entering `blocked` with blocked_reason/blocked_on_human/ask).
@@ -1022,6 +1039,7 @@ export async function PATCH(
 
     return NextResponse.json(task);
   } catch (error) {
+    if (error instanceof TaskAgentAccessError) return NextResponse.json({ error: error.message }, { status: error.status });
     console.error('Failed to update task:', error);
     return NextResponse.json({ error: 'Failed to update task' }, { status: 500 });
   }
