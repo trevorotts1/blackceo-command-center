@@ -14,8 +14,8 @@ import { createHash } from 'crypto';
  *   non-in-flight tasks (inbox / backlog / planning / pending_dispatch /
  *   assigned), and for each:
  *     • if UNASSIGNED → routes it (routeTask across all departments) and stamps
- *       the winning agent + department, UNLESS it scores to the CEO/COM master
- *       (left for a human exec decision — the CEO is a dispatcher, not a worker);
+ *       the winning agent + department; a recognized, company-owned catch-all
+ *       may use a configured CEO executor when General is unavailable;
  *     • attaches it to its department's live campaign board (W8.4 feed);
  *     • fires autoDispatchTask, which advances it backlog→in_progress once the
  *       specialist actually starts.
@@ -40,6 +40,7 @@ import { broadcast } from '@/lib/events';
 import { notifySystem } from '@/lib/notify';
 import { autoDispatchTask } from '@/lib/task-dispatcher';
 import { blockDispatchIfOwnerKilled, loadKilledAtDefensive } from '@/lib/owner-killed';
+import { isCatchAllRoutingReason, isCatchAllWorkspace } from '@/lib/routing/catch-all-policy';
 import { routeTaskDecision, type RoutingDecision } from '@/lib/routing/department-router';
 import { throwIfJobLeaseLost } from '@/lib/jobs/job-lease';
 import { ensureCampaignForTask } from '@/lib/campaigns';
@@ -52,6 +53,22 @@ import type { Task, TaskPriority } from '@/lib/types';
 // Intake lanes this worker drains. Excludes in-flight/terminal statuses
 // (in_progress, testing, review, done, blocked, archived) — those are owned by
 // the execution / QC paths, not advancement.
+const ROUTING_POLICY_REVISION = 'catch-all-execution-v1';
+const ACTIVE_EXECUTIONS = "('reserved','sending','accepted','running','unknown')";
+
+/** A workspace-less task is owned only by one unambiguous durable request company.
+ * An archived/missing workspace is never silently replaced with another authority. */
+function taskCompanySql(alias: 't' | 'tasks'): string {
+  return `CASE WHEN ${alias}.workspace_id IS NOT NULL THEN
+    (SELECT owner.company_id FROM workspaces owner WHERE owner.id=${alias}.workspace_id AND owner.archived_at IS NULL)
+    ELSE (SELECT CASE WHEN COUNT(DISTINCT k.company_id)=1 THEN MIN(k.company_id) END
+      FROM task_request_keys k WHERE k.task_id=${alias}.id) END`;
+}
+
+function isHistoricalDepartmentHold(reason: string | null | undefined): boolean {
+  return typeof reason === 'string' && /^Requested department .+ is unavailable in this company\.$/.test(reason);
+}
+
 const ADVANCEABLE_STATUSES = ['inbox', 'backlog', 'planning', 'pending_dispatch', 'assigned'];
 
 // ── FIX 38b: engine-owned cards are NOT board-advanceable ────────────────────
@@ -127,6 +144,10 @@ interface IntakeTaskRow {
   routing_attempts: number;
   updated_at: string;
   routing_config_revision?: string | null;
+  routing_reason?: string | null;
+  dispatch_hold?: number;
+  workspace_slug?: string;
+  workspace_name?: string;
 }
 
 /** Persist every unsuccessful evaluation so the same oldest rows cannot monopolize each tick. */
@@ -138,8 +159,13 @@ function recordRoutingWait(task: IntakeTaskRow, reason: string, retryable: boole
   transaction(() => {
     const changed = run(`UPDATE tasks SET routing_attempts = ?, last_routing_attempt_at = ?,
       next_routing_eligible_at = ?, routing_reason = ?, routing_wait_owner = ?, routing_config_revision = ?, routing_next_action = ?
-      WHERE id = ? AND assignment_version = ? AND assigned_agent_id IS NULL AND archived_at IS NULL`,
-      [attempts, timeNow(), retryable && !exhausted ? next : null, reason, retryable && !exhausted ? null : 'SYSTEM', task.routing_config_revision || null, retryable && !exhausted ? 'Automatic routing retry scheduled' : 'Configure an eligible worker or edit the task assignment', task.id, task.assignment_version]);
+      WHERE id = ? AND assignment_version = ? AND assigned_agent_id IS NULL AND archived_at IS NULL
+      AND killed_at IS NULL AND status IN ('inbox','backlog','planning','pending_dispatch','assigned')
+      AND updated_at=? AND workspace_id IS ? AND routing_reason IS ? AND COALESCE(dispatch_hold,0)=?
+      AND upper(COALESCE(description,'')) NOT LIKE '%OWNER KILLED%'
+      AND (source IS NULL OR source NOT IN ('build_deck','build_deck_phase'))
+      AND NOT EXISTS(SELECT 1 FROM task_executions x WHERE x.task_id=tasks.id AND x.state IN ${ACTIVE_EXECUTIONS})`,
+      [attempts, timeNow(), retryable && !exhausted ? next : null, isHistoricalDepartmentHold(task.routing_reason) ? task.routing_reason : reason, retryable && !exhausted ? null : 'SYSTEM', task.routing_config_revision || null, retryable && !exhausted ? 'Automatic routing retry scheduled' : 'Configure an eligible worker or edit the task assignment', task.id, task.assignment_version, task.updated_at, task.workspace_id, task.routing_reason ?? null, task.dispatch_hold || 0]);
     if (changed.changes) run(`INSERT INTO events (id,type,task_id,message,created_at) VALUES (?,?,?,?,?)`,
       [uuidv4(), 'task_routing_wait', task.id, reason, timeNow()]);
   });
@@ -150,22 +176,61 @@ export function commitIntakeAssignment(task: IntakeTaskRow, decision: Extract<Ro
   throwIfJobLeaseLost();
   const routing = decision.routing;
   return transaction(() => {
-    const worker = queryOne<{ id: string; slug: string }>(`SELECT a.id, w.slug FROM agents a JOIN workspaces w ON w.id = a.workspace_id
+    if (!ADVANCEABLE_STATUSES.includes(task.status) || !task.company_id || task.company_id !== routing.companyId) return false;
+    const worker = queryOne<{ id: string; slug: string; name: string; is_master: number }>(`SELECT a.id, a.is_master, w.slug, w.name FROM agents a JOIN workspaces w ON w.id = a.workspace_id
       WHERE a.id = ? AND a.workspace_id = ? AND w.company_id = ? AND w.archived_at IS NULL
-      AND a.status != 'offline' AND a.is_master = 0`, [routing.agentId, routing.workspaceId, routing.companyId]);
-    if (!worker) return false;
+      AND a.status != 'offline'`, [routing.agentId, routing.workspaceId, routing.companyId]);
+    if (!worker || (worker.is_master && !(isCatchAllRoutingReason(routing.reason) && isCatchAllWorkspace(worker)))) return false;
+    if (task.assigned_agent_id && !isCatchAllRoutingReason(task.routing_reason) && !isHistoricalDepartmentHold(task.routing_reason)) return false;
+    if (task.dispatch_hold && !isHistoricalDepartmentHold(task.routing_reason)) return false;
     const now = timeNow();
-    const changed = run(`UPDATE tasks SET assigned_agent_id = ?, department = ?, workspace_id = ?,
+    // U99-RAW-STATUS-WRITER: status normalization is audited below within this transaction.
+    const targetStatus = ['inbox', 'planning', 'pending_dispatch'].includes(task.status) ? 'assigned' : task.status;
+    const changed = run(`UPDATE tasks SET assigned_agent_id = ?, department = ?, workspace_id = ?, status = ?, dispatch_hold = 0,
       assignment_version = assignment_version + 1, routing_attempts = routing_attempts + 1,
-      last_routing_attempt_at = ?, next_routing_eligible_at = NULL, routing_reason = ?, routing_wait_owner = NULL, updated_at = ?
-      WHERE id = ? AND assignment_version = ? AND assigned_agent_id IS NULL AND status = ?
+      last_routing_attempt_at = ?, next_routing_eligible_at = NULL, routing_reason = ?, routing_wait_owner = NULL,
+      routing_next_action = NULL, updated_at = ?
+      WHERE id = ? AND assignment_version = ? AND assigned_agent_id IS ? AND status = ?
+      AND workspace_id IS ? AND routing_reason IS ? AND COALESCE(dispatch_hold,0) = ?
       AND archived_at IS NULL AND killed_at IS NULL AND updated_at = ?
-      AND (source IS NULL OR source NOT IN ('build_deck', 'build_deck_phase'))`,
-      [routing.agentId, worker.slug, routing.workspaceId, now, routing.reason, now,
-        task.id, task.assignment_version, task.status, task.updated_at]);
+      AND upper(COALESCE(description,'')) NOT LIKE '%OWNER KILLED%'
+      AND (source IS NULL OR source NOT IN ('build_deck', 'build_deck_phase'))
+      AND NOT EXISTS(SELECT 1 FROM task_executions x WHERE x.task_id=tasks.id AND x.state IN ${ACTIVE_EXECUTIONS})
+      AND ${taskCompanySql('tasks')}=?`,
+      [routing.agentId, worker.slug, routing.workspaceId, targetStatus, now, routing.reason, now,
+        task.id, task.assignment_version, task.assigned_agent_id, task.status, task.workspace_id,
+        task.routing_reason ?? null, task.dispatch_hold || 0, task.updated_at, routing.companyId]);
     if (!changed.changes) return false;
+    // Migration 132's reconsider trigger clears reasons on assignment/status writes.
+    run('UPDATE tasks SET routing_reason=? WHERE id=?',[routing.reason,task.id]);
+    if (targetStatus !== task.status) run(`INSERT INTO task_events(id,task_id,from_status,to_status,actor,reason,created_at) VALUES(?,?,?,?,?,?,?)`,
+      [uuidv4(),task.id,task.status,targetStatus,'intake-advance-sweep','Routed intake ready for execution',now]);
     run(`INSERT INTO events (id,type,agent_id,task_id,message,created_at) VALUES (?,?,?,?,?,?)`,
       [uuidv4(), 'task_assigned', routing.agentId, task.id, `Intake-advance routed: ${routing.reason}`, now]);
+    return true;
+  });
+}
+
+/** Normalize existing assignments without altering ownership or releasing any hold. */
+export function normalizeIntakeForDispatch(taskId: string): boolean {
+  return transaction(() => {
+    const task = queryOne<{status:string;routing_reason:string|null;is_master:number;slug:string;name:string}>(`SELECT t.status,t.routing_reason,a.is_master,w.slug,w.name FROM tasks t
+      JOIN agents a ON a.id=t.assigned_agent_id JOIN workspaces w ON w.id=t.workspace_id
+      JOIN workspaces aw ON aw.id=a.workspace_id
+      WHERE t.id=? AND t.status IN ('inbox','planning','pending_dispatch','backlog','assigned')
+      AND a.workspace_id=t.workspace_id AND w.company_id=aw.company_id AND w.archived_at IS NULL AND aw.archived_at IS NULL
+      AND t.archived_at IS NULL AND t.killed_at IS NULL AND COALESCE(t.dispatch_hold,0)=0
+      AND upper(COALESCE(t.description,'')) NOT LIKE '%OWNER KILLED%'
+      AND (t.source IS NULL OR t.source NOT IN ('build_deck','build_deck_phase'))
+      AND NOT EXISTS(SELECT 1 FROM task_executions x WHERE x.task_id=t.id AND x.state IN ${ACTIVE_EXECUTIONS})`,[taskId]);
+    if (!task || (task.is_master && !(isCatchAllRoutingReason(task.routing_reason) && isCatchAllWorkspace(task)))) return false;
+    if (task.status === 'backlog' || task.status === 'assigned') return true;
+    const now=timeNow();
+    // U99-RAW-STATUS-WRITER: status transition and task_events audit share this transaction.
+    run(`UPDATE tasks SET status='assigned',updated_at=? WHERE id=? AND status=?`,[now,taskId,task.status]);
+    if (task.routing_reason) run('UPDATE tasks SET routing_reason=? WHERE id=?',[task.routing_reason,taskId]);
+    run(`INSERT INTO task_events(id,task_id,from_status,to_status,actor,reason,created_at) VALUES(?,?,?,?,?,?,?)`,
+      [uuidv4(),taskId,task.status,'assigned','intake-advance-sweep','Existing intake assignment ready for execution',now]);
     return true;
   });
 }
@@ -213,11 +278,16 @@ export async function runIntakeAdvanceSweep(dependencies: {
     FROM workspaces w LEFT JOIN agents a ON a.workspace_id=w.id ORDER BY w.id,a.id`);
   const configRevisions=new Map<string,string>();
   for(const company of Array.from(new Set(configRows.map(r=>String(r.company_id))))) {
-    const revision=createHash('sha256').update(JSON.stringify(configRows.filter(r=>String(r.company_id)===company))).digest('hex');
+    const revision=createHash('sha256').update(ROUTING_POLICY_REVISION).update(JSON.stringify(configRows.filter(r=>String(r.company_id)===company))).digest('hex');
     configRevisions.set(company,revision);
     run(`UPDATE tasks SET routing_wait_owner=NULL,next_routing_eligible_at=NULL WHERE routing_wait_owner='SYSTEM'
       AND (routing_config_revision IS NULL OR routing_config_revision != ?)
-      AND workspace_id IN (SELECT id FROM workspaces WHERE company_id=?)`,[revision,company]);
+      AND status IN ('inbox','backlog','planning','pending_dispatch','assigned')
+      AND archived_at IS NULL AND killed_at IS NULL AND assigned_agent_id IS NULL
+      AND (COALESCE(dispatch_hold,0)=0 OR routing_reason GLOB 'Requested department * is unavailable in this company.')
+      AND (source IS NULL OR source NOT IN ('build_deck','build_deck_phase'))
+      AND NOT EXISTS(SELECT 1 FROM task_executions x WHERE x.task_id=tasks.id AND x.state IN ${ACTIVE_EXECUTIONS})
+      AND ${taskCompanySql('tasks')}=?`,[revision,company]);
   }
 
   let rows: IntakeTaskRow[];
@@ -231,8 +301,9 @@ export async function runIntakeAdvanceSweep(dependencies: {
     rows = queryAll<IntakeTaskRow>(
       `SELECT * FROM (SELECT t.id, t.title, t.description, t.priority, t.status,
               t.department, t.workspace_id, t.assigned_agent_id, t.campaign_id,
-              w.company_id, t.assignment_version, t.routing_attempts, t.updated_at,
-              ROW_NUMBER() OVER (PARTITION BY w.company_id ORDER BY
+              ${taskCompanySql('t')} AS company_id, w.slug AS workspace_slug, w.name AS workspace_name, t.routing_reason, t.dispatch_hold,
+              t.assignment_version, t.routing_attempts, t.updated_at,
+              ROW_NUMBER() OVER (PARTITION BY ${taskCompanySql('t')} ORDER BY
                 MIN(4, CASE t.priority WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 ELSE 1 END + MAX(0, CAST((julianday('now') - julianday(t.created_at))*24 AS INTEGER))) DESC,
                 COALESCE(t.last_routing_attempt_at, t.created_at) ASC, t.id) AS company_rank
          FROM tasks t
@@ -247,7 +318,9 @@ export async function runIntakeAdvanceSweep(dependencies: {
           AND (t.qc_reroute_attempts IS NULL OR t.qc_reroute_attempts < ?)
           AND (t.dispatch_attempts IS NULL OR t.dispatch_attempts < ?)
           AND (t.next_dispatch_eligible_at IS NULL OR ${sqlTime('t.next_dispatch_eligible_at')} <= ${sqlTime('?')})
-          AND (t.assigned_agent_id IS NULL OR a.is_master IS NULL OR a.is_master = 0)
+          AND (a.is_master IS NULL OR a.is_master=0 OR t.routing_reason LIKE '[catch-all]%'
+            OR (COALESCE(t.dispatch_hold,0)=1 AND t.routing_reason GLOB 'Requested department * is unavailable in this company.'))
+          AND NOT EXISTS(SELECT 1 FROM task_executions x WHERE x.task_id=t.id AND x.state IN ${ACTIVE_EXECUTIONS})
           AND (t.sop_authoring_for_task_id IS NULL)
           AND ${sqlTime('t.updated_at')} <= ${sqlTime('?')}
         ) ORDER BY company_rank ASC, updated_at ASC
@@ -291,11 +364,21 @@ export async function runIntakeAdvanceSweep(dependencies: {
         continue;
       }
 
+      if (!task.company_id) {
+        if (!task.assigned_agent_id) recordRoutingWait(task,'A unique task company is required before intake routing',false);
+        waiting++; continue;
+      }
+      const catchAll = isCatchAllRoutingReason(task.routing_reason) && isCatchAllWorkspace({slug:task.workspace_slug,name:task.workspace_name});
+      if (task.dispatch_hold && !isHistoricalDepartmentHold(task.routing_reason)) { waiting++; continue; }
+      if (task.assigned_agent_id && !catchAll && !isHistoricalDepartmentHold(task.routing_reason)) {
+        const worker = queryOne<{is_master:number}>('SELECT is_master FROM agents WHERE id=?',[task.assigned_agent_id]);
+        if (worker?.is_master) { waiting++; continue; }
+      }
       let agentId = task.assigned_agent_id;
       let department = task.department;
 
       // ── Route UNASSIGNED intake-lane tasks ────────────────────────────────
-      if (!agentId) {
+      if (!agentId || catchAll || isHistoricalDepartmentHold(task.routing_reason)) {
         const decision = await (dependencies.route ?? routeTaskDecision)({
           title: task.title,
           description: task.description || '',
@@ -303,19 +386,24 @@ export async function runIntakeAdvanceSweep(dependencies: {
           workspace_id: task.workspace_id,
           company_id: task.company_id,
           department: task.department || undefined,
+          catch_all: catchAll,
         });
         throwIfJobLeaseLost();
         if (decision.status !== 'assigned') {
-          recordRoutingWait(task, decision.reason, decision.retryable);
+          if (!agentId) recordRoutingWait(task, decision.reason, decision.retryable);
           waiting++;
           continue;
         }
-        if (!commitIntakeAssignment(task, decision)) { waiting++; continue; }
+        const unchangedCatchAll = catchAll && decision.routing.companyId === task.company_id && task.assigned_agent_id === decision.routing.agentId
+          && task.workspace_id === decision.routing.workspaceId && !task.dispatch_hold;
+        if (!unchangedCatchAll && !commitIntakeAssignment(task, decision)) { waiting++; continue; }
         agentId = decision.routing.agentId;
         department = decision.routing.department;
         task.workspace_id = decision.routing.workspaceId;
-        routed++;
+        if (!unchangedCatchAll) routed++;
       }
+
+      if (!normalizeIntakeForDispatch(task.id)) { waiting++; continue; }
 
       // ── Feed the campaign board (W8.4) ────────────────────────────────────
       if (!task.campaign_id) {

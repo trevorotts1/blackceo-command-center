@@ -1307,6 +1307,21 @@ export async function rescorePersonaWithSOP(
     persona_name: prev?.persona_name ?? null,
     persona_mode: prev?.persona_mode ?? null,
   };
+  // A current, company-verified confirmed decision is authoritative. A late
+  // SOP lookup must not replace it with a selector fallback/house voice.
+  const savedBundle = queryOne<{bundle_json:string}>('SELECT bundle_json FROM task_persona_bundle WHERE task_id=?',[taskId]);
+  if (savedBundle && prev?.persona_id && checkPersonaDispatchReady(taskId).ready) {
+    try {
+      const bundle = JSON.parse(savedBundle.bundle_json) as PersonaBundle;
+      if (!bundle.confirm_required) {
+        const companyId = taskPersonaCompanyContext(taskId)?.companyId;
+        if (companyId) {
+          validateProducerPersonaBundle({voice_persona_id:prev.persona_id,persona_bundle:bundle,bundle_sha:personaBundleHash(bundle)},companyId);
+          return unchanged;
+        }
+      }
+    } catch { /* An unverified decision still requires the normal selector. */ }
+  }
   try {
     const persona = await selectPersonaForTask(
       taskId,
@@ -2818,8 +2833,8 @@ export async function createTaskCore(
         const snapshot = queryOne<Parameters<typeof commitIntakeAssignment>[0]>(
           'SELECT t.*, w.company_id FROM tasks t LEFT JOIN workspaces w ON w.id=t.workspace_id WHERE t.id=?', [id]);
         if (snapshot && !snapshot.assigned_agent_id) {
-          const decision = await routeTaskDecision({ ...snapshot, department: snapshot.department ?? undefined });
-          if (decision.status === 'assigned' && commitIntakeAssignment(snapshot, decision)) {
+          const decision = await routeTaskDecision({ ...snapshot, company_id: creationCompanyId, department: snapshot.department ?? undefined });
+          if (decision.status === 'assigned' && commitIntakeAssignment({ ...snapshot, company_id: creationCompanyId }, decision)) {
             resolvedAgentId = decision.routing.agentId;
             routedDepartment = decision.routing.department;
             routedReason = decision.routing.reason;
@@ -2836,6 +2851,17 @@ export async function createTaskCore(
         // unassigned in backlog for manual triage.
         console.warn('[createTaskCore] In-process routing failed (non-fatal):', routeErr);
       }
+    }
+  }
+  // Complete the actual fallback's SOP before persona selection snapshots its
+  // inputs. The requested (missing) department could not supply this at creation.
+  if (!sopId && resolvedAgentId && routedReason?.startsWith('[catch-all]')) {
+    const best = await getBestSOPForTask({title: input.title, description: input.description ?? undefined,
+      department: workspaceSlug ?? routedDepartment ?? undefined, workspace_id: workspaceId});
+    if (best) {
+      const updated = run('UPDATE tasks SET sop_id=? WHERE id=? AND sop_id IS NULL AND assigned_agent_id=?',
+        [best.id, id, resolvedAgentId]);
+      if (updated.changes) { sopId = best.id; sopContext = sopSelectorContextFromRow(best); }
     }
   }
   // --- END INSTANT ROUTING ---

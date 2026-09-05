@@ -6248,6 +6248,28 @@ export const migrations: Migration[] = [
       db.exec(INTERVIEW_REMOTE_SCHEMA_SQL);
     },
   },
+  {
+    id: '133',
+    name: 'explicit_executor_runtime_binding_and_catch_all_evidence',
+    up: (db) => {
+      const columns = new Set((db.prepare('PRAGMA table_info(agents)').all() as {name:string}[]).map(c => c.name));
+      if (!columns.has('openclaw_agent_id')) db.exec('ALTER TABLE agents ADD COLUMN openclaw_agent_id TEXT');
+      // Assignment writers supply a new routing reason atomically. Lifecycle-only
+      // changes must not erase the authorization for an existing catch-all executor.
+      db.exec(`DROP TRIGGER IF EXISTS tasks_routing_reconsider;
+        CREATE TRIGGER tasks_routing_reconsider AFTER UPDATE OF title,description,assigned_agent_id,workspace_id,department,status ON tasks
+        WHEN NEW.title IS NOT OLD.title OR NEW.description IS NOT OLD.description OR NEW.assigned_agent_id IS NOT OLD.assigned_agent_id OR
+          NEW.workspace_id IS NOT OLD.workspace_id OR NEW.department IS NOT OLD.department OR NEW.status IS NOT OLD.status
+        BEGIN UPDATE tasks SET routing_wait_owner=NULL,next_routing_eligible_at=NULL,
+          routing_reason=CASE
+            WHEN NEW.routing_reason IS NOT OLD.routing_reason THEN NEW.routing_reason
+            WHEN NEW.routing_reason LIKE '[catch-all]%' AND NEW.assigned_agent_id IS OLD.assigned_agent_id
+              AND NEW.workspace_id IS OLD.workspace_id AND NEW.department IS OLD.department THEN NEW.routing_reason
+            ELSE NULL END
+          WHERE id=NEW.id;
+        END;`);
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner

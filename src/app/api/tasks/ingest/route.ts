@@ -323,8 +323,8 @@ function resolveWorkspaceId(departmentSlug: string | undefined, persona: string 
   }
   const namedGeneral=rows.filter(w => w.name.trim().toLowerCase()==='general task');
   const general=rows.find(w => ['general-task','dept-general-task','general'].includes(w.slug.toLowerCase())) || (namedGeneral.length===1 ? namedGeneral[0] : undefined);
-  if(departmentSlug) return {workspaceId:general?.id??null,resolvedBy:general?'unrecognized-slug->general':'unrecognized-slug->unrouted'};
   const ceo=rows.find(w => ['master-orchestrator','ceo','dept-ceo'].includes(w.slug.toLowerCase()));
+  if(departmentSlug) return {workspaceId:general?.id??ceo?.id??null,resolvedBy:general?'unrecognized-slug->general':ceo?'unrecognized-slug->ceo':'unrecognized-slug->unrouted'};
   return {workspaceId:general?.id??ceo?.id??null,resolvedBy:general?'general-task-fallback':ceo?'ceo-fallback':'no-workspace-fallback'};
 }
 
@@ -792,7 +792,8 @@ export async function POST(request: NextRequest) {
     const requestFingerprint = taskRequestFingerprint(semanticPayload);
 
     let { workspaceId, resolvedBy }: { workspaceId: string | null; resolvedBy: string } = resolveWorkspaceId(resolvedDeptSlug, persona, ingestCompanyId);
-    let routingHoldReason: string | null = resolvedBy.startsWith('unrecognized-slug') ? `Requested department ${resolvedDeptSlug} is unavailable in this company.` : null;
+    // A missing department is an executable catch-all request, never a correction hold.
+    let routingHoldReason: string | null = null;
     const producerBundle = body.persona_bundle as PersonaBundle | undefined;
     if (producerBundle && (!voicePersonaId || typeof producerBundle !== 'object' || Array.isArray(producerBundle))) {
       return NextResponse.json({error:'invalid_persona_bundle'}, {status:400});
@@ -802,13 +803,8 @@ export async function POST(request: NextRequest) {
       catch (error) { return NextResponse.json({error:'invalid_persona_bundle',message:error instanceof Error?error.message:'Invalid persona decision'}, {status:400}); }
     }
     let resolvedDepartment: string | undefined = resolvedDeptSlug;
-    // INGEST-06 — the explicit slug was unrecognized and got redirected to the
-    // general-task catch-all (or left unrouted). Report the department we ACTUALLY
-    // landed in so the W5.2 owner-assignment notice never announces a department
-    // this box does not have.
-    if (resolvedBy.startsWith('unrecognized-slug')) {
-      resolvedDepartment = workspaceId ? 'general-task' : undefined;
-    }
+    // Preserve the requested department until the scoped router commits the actual
+    // fallback worker/workspace and its [catch-all] execution authorization.
 
     // ── W3.2: Owner-direct specialist pin (spec §3 owner-direct exception) ─────
     // When the OWNER names a specific AI/agent, the CEO routes STRAIGHT to it —
@@ -909,7 +905,8 @@ export async function POST(request: NextRequest) {
           // workspace so the task lands on the right Kanban column.
           workspaceId = routing.workspaceId ?? null;
           resolvedBy = `auto-route:${routing.department}`;
-          resolvedDepartment = routing.department;
+          resolvedDepartment = routing.method === 'general' || routing.method === 'escalation'
+            ? undefined : routing.department;
           console.log(
             `[INGEST] Auto-routed "${title}" → department "${routing.department}" (${routing.reason})`,
           );
@@ -926,7 +923,7 @@ export async function POST(request: NextRequest) {
           if (generalWs) {
             workspaceId = generalWs.id;
             resolvedBy = 'auto-route:general-task-fallback';
-            resolvedDepartment = 'general-task';
+            resolvedDepartment = undefined;
             console.log(`[INGEST] Auto-route returned null for "${title}" — falling back to general-task`);
           } else {
             console.log(`[INGEST] Auto-route returned null for "${title}" — no general-task workspace; keeping CEO/default fallback`);
@@ -942,6 +939,7 @@ export async function POST(request: NextRequest) {
     // intentionally leave the agent FK columns NULL.
     const provenanceLines: string[] = [];
     if (source) provenanceLines.push(`Source: ${source}`);
+    if (resolvedDeptSlug) provenanceLines.push(`Requested department: ${resolvedDeptSlug}`);
     if (persona) provenanceLines.push(`From persona: ${persona}`);
     if (externalSessionId) provenanceLines.push(`Session: ${externalSessionId}`);
     // FIX 56 (W4.1) — fold the caller's context_refs into the description as a

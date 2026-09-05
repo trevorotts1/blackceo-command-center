@@ -1,4 +1,5 @@
-import { resolveOpenClawRuntimeRoot } from '@/lib/openclaw/runtime-root';
+import { resolveSpecialistSessionKey } from '@/lib/routing/executor-runtime';
+import { isCatchAllRoutingReason, isCatchAllWorkspace } from '@/lib/routing/catch-all-policy';
 import { capturePersonaSnapshot } from '@/lib/persona-state';
 import { renderPersonaConformanceInstructions } from '@/lib/persona-conformance';
 /**
@@ -24,7 +25,7 @@ import { renderPersonaConformanceInstructions } from '@/lib/persona-conformance'
  *   to an OpenClaw connectivity issue.
  *
  * GUARDS (all inside autoDispatchTask):
- *   1. Master / CEO agents → skip (routing artifacts; CEO orchestrates, specialists execute).
+ *   1. Master / CEO agents execute only scoped, router-authorized catch-all assignments.
  *   2. No assigned_agent_id → skip.
  *   3. Already in_progress / review / done / blocked / archived → skip.
  *   4. QC loop cap: qc_reroute_attempts >= QC_MAX_REROUTES → skip (task already blocked).
@@ -49,15 +50,11 @@ import { renderPersonaConformanceInstructions } from '@/lib/persona-conformance'
 import { v4 as uuidv4 } from 'uuid';
 import { beginExecutionSend, executionSessionId, reserveExecution, recordExecutionAcceptance, recordExecutionUnknown, type DispatchOutcome, type Execution } from '@/lib/execution-attempts';
 import { throwIfJobLeaseLost } from '@/lib/jobs/job-lease';
-import * as fs from 'fs';
-import * as path from 'path';
-import os from 'os';
 import { queryOne, run } from '@/lib/db';
 import { getOpenClawClient } from '@/lib/openclaw/client';
 import { broadcast } from '@/lib/events';
 import { notifyOwner, notifySystem } from '@/lib/notify';
 import { getMissionControlUrl } from '@/lib/config';
-import { detectPlatform } from '@/lib/platform';
 import { resolveAndLog, resolveSpecialistType } from '@/lib/intelligence-resolver';
 import { buildPersonaBlock, buildPersonaPlanBlock } from '@/lib/persona-dispatch';
 import { renderOwnerMessagesSection } from '@/lib/owner-messages';
@@ -75,7 +72,7 @@ import {
 } from '@/lib/capability-manifest';
 import { isCanonicalContext, copyCanonicalSOPForTask, authorSOPForTask } from '@/lib/sop-authoring';
 import { recordBlockEvent } from '@/lib/block-events';
-import { canonicalDeptSlug, expandDeptSlugAliases } from '@/lib/routing/canonical-slug';
+import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { artifactDispatchPayload, recordStatusEvent } from '@/lib/task-lifecycle';
 import { healPhantomAgentAssignment } from '@/lib/jobs/heal-phantom-assignments';
 import {
@@ -426,168 +423,12 @@ export function deckPhaseRunIsInitialized(task: Task, context: string): boolean 
   return false;
 }
 
-/**
- * FIX 1 — resolveSpecialistSessionKey
- *
- * Every dispatch previously used the hardcoded prefix `agent:main:` which
- * always routes to the CEO orchestrator runtime (Stefanie / "main"). That
- * agent's prompt forbids building work — it re-ingests the task, creating an
- * infinite loop with zero artifacts.
- *
- * This function maps an assigned specialist agent to the correct OpenClaw
- * runtime key:
- *   • It reads the agent's workspace slug from the DB (via workspace_id).
- *   • It checks whether ~/.openclaw/agents/<slug>/ exists on disk — the
- *     presence of that directory proves a builder runtime is configured.
- *   • If found, returns `agent:<slug>:<openclaw_session_id>`.
- *   • Safe fallback: if no specialist runtime resolves (unknown dept, fresh
- *     install), keeps the legacy `agent:main:<id>` and logs a warning so
- *     no other department breaks silently.
- *
- * The dept-presentations builder runtime is one concrete example:
- *   ~/.openclaw/agents/dept-presentations/ → key agent:dept-presentations:<session>
- */
-/**
- * B5: the deterministic `openclaw_session_id` for an agent — a PURE function of
- * the agent name (`mission-control-<name-slug>`). The openclaw_sessions row is
- * purgeable (a hard-delete wiped 64 rows on the live box), but the id is not: the
- * dispatcher, the completion webhook, and the execution-watcher can all re-derive
- * it from the agent name so a completion reconciles even with NO session row.
- * This MUST match the string the dispatcher stores below exactly.
- */
 export function deterministicOpenclawSessionId(agentName: string): string {
   return `mission-control-${agentName.toLowerCase().replace(/\s+/g, '-')}`;
 }
 
-export function resolveSpecialistSessionKey(
-  agent: Agent,
-  openclawSessionId: string,
-  workspaceId: string | undefined,
-  context: string,
-): string | null {
-  // P1-5 FIX — no hardcoded operator home. Was `process.env.HOME ?? <hardcoded operator
-  // absolute path>`: on a box where HOME is unset (PM2/systemd/container contexts), a
-  // CLIENT box silently resolved the OPERATOR's own home path. Mirrors
-  // src/lib/context-pack.ts agentsRoot() / src/lib/platform.ts detectPlatform(): VPS
-  // Docker keeps the `/data/.openclaw` persistent-volume marker; any home-relative
-  // fallback goes through `os.homedir()`.
-  let AGENTS_ROOT: string;
-  try { AGENTS_ROOT = path.join(resolveOpenClawRuntimeRoot(), 'agents'); }
-  catch { return null; }
-
-  // Attempt 1: lookup workspace slug from DB.
-  if (workspaceId) {
-    try {
-      const ws = queryOne<{ slug: string }>(
-        'SELECT slug FROM workspaces WHERE id = ? LIMIT 1',
-        [workspaceId],
-      );
-      if (ws?.slug) {
-        const candidateSlug = ws.slug.toLowerCase();
-        // Check BOTH the bare slug dir AND the dept- prefixed dir.
-        // On live boxes the runtime dirs are dept-funnels / dept-web-development
-        // (bare ones do NOT exist), so we must probe the dept- prefix first.
-        const deptPrefixedSlug = `dept-${candidateSlug}`;
-        const deptPrefixedDir = path.join(AGENTS_ROOT, deptPrefixedSlug);
-        const bareDir = path.join(AGENTS_ROOT, candidateSlug);
-        if (fs.existsSync(deptPrefixedDir)) {
-          const key = `agent:${deptPrefixedSlug}:${openclawSessionId}`;
-          console.log(`[${context}] resolveSpecialistSessionKey: workspace slug "${candidateSlug}" → dept-prefixed runtime found → key ${key}`);
-          return key;
-        }
-        if (fs.existsSync(bareDir)) {
-          const key = `agent:${candidateSlug}:${openclawSessionId}`;
-          console.log(`[${context}] resolveSpecialistSessionKey: workspace slug "${candidateSlug}" → bare runtime found → key ${key}`);
-          return key;
-        }
-        // Attempt 1b — ALIAS-AWARE runtime resolution, BOTH directions.
-        //
-        // Two sub-cases, both closed by probing every RAW spelling that
-        // canonicalizes to the same department (expandDeptSlugAliases — the
-        // documented inverse of canonicalDeptSlug):
-        //   (a) legacy/aliased slug → CANONICAL runtime. A workspace slug
-        //       like `ceo` or `webdev` has its runtime dir under the
-        //       canonical name (`master-orchestrator`, `web-development`).
-        //   (b) an ALREADY-canonical slug → a LEGACY-ALIAS runtime still on
-        //       disk. A workspace slug that IS the canonical name (e.g.
-        //       `billing-finance`) can have its runtime dir provisioned
-        //       under a shorter legacy alias (`dept-billing`) instead of the
-        //       canonical dir.
-        // BUG (fixed here): the old guard (`canonicalSlug !== candidateSlug`)
-        // skipped this WHOLE block whenever the slug was already canonical —
-        // exactly sub-case (b) — so a canonical-slug workspace could NEVER
-        // find an alias-named runtime dir even when one existed on disk (a
-        // box with workspace `billing-finance` and runtime dir `dept-billing`
-        // could never dispatch, despite the runtime existing — resolution
-        // only ever ran alias → canonical, never canonical → alias). Probing
-        // every alias closes both directions with the same code path.
-        const canonicalSlug = canonicalDeptSlug(candidateSlug);
-        if (canonicalSlug) {
-          const aliasSlugs = expandDeptSlugAliases(candidateSlug).filter(
-            (s) => !s.startsWith('dept-') && s !== candidateSlug,
-          );
-          for (const alias of aliasSlugs) {
-            const aliasDeptDir = path.join(AGENTS_ROOT, `dept-${alias}`);
-            const aliasBareDir = path.join(AGENTS_ROOT, alias);
-            if (fs.existsSync(aliasDeptDir)) {
-              const key = `agent:dept-${alias}:${openclawSessionId}`;
-              console.log(`[${context}] resolveSpecialistSessionKey: slug "${candidateSlug}" (canonical "${canonicalSlug}") → alias "${alias}" → dept-prefixed runtime → key ${key}`);
-              return key;
-            }
-            if (fs.existsSync(aliasBareDir)) {
-              const key = `agent:${alias}:${openclawSessionId}`;
-              console.log(`[${context}] resolveSpecialistSessionKey: slug "${candidateSlug}" (canonical "${canonicalSlug}") → alias "${alias}" → bare runtime → key ${key}`);
-              return key;
-            }
-          }
-        }
-        console.warn(`[${context}] resolveSpecialistSessionKey: workspace slug "${candidateSlug}" (canonical "${canonicalSlug}") has no runtime dir at ${deptPrefixedDir} or ${bareDir} — trying agent role slug`);
-      }
-    } catch (err) {
-      console.warn(`[${context}] resolveSpecialistSessionKey: workspace lookup failed (non-fatal):`, (err as Error).message);
-    }
-  }
-
-  // Attempt 2: derive a slug from the agent's role field (e.g. "Presentations Lead" → "dept-presentations").
-  if (agent.role) {
-    const roleSlug = `dept-${agent.role.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '')}`;
-    const runtimeDir = path.join(AGENTS_ROOT, roleSlug);
-    if (fs.existsSync(runtimeDir)) {
-      const key = `agent:${roleSlug}:${openclawSessionId}`;
-      console.log(`[${context}] resolveSpecialistSessionKey: role slug "${roleSlug}" → runtime found → key ${key}`);
-      return key;
-    }
-  }
-
-  // Attempt 3: try agent name slug directly (e.g. agent named "dept-presentations").
-  const nameSlug = agent.name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
-  if (nameSlug) {
-    const runtimeDir = path.join(AGENTS_ROOT, nameSlug);
-    if (fs.existsSync(runtimeDir)) {
-      const key = `agent:${nameSlug}:${openclawSessionId}`;
-      console.log(`[${context}] resolveSpecialistSessionKey: name slug "${nameSlug}" → runtime found → key ${key}`);
-      return key;
-    }
-  }
-
-  // RESOLVER-DISPATCH FIX (Gap E): NO per-department runtime resolved.
-  //
-  // The legacy behavior silently returned `agent:main:<id>` — the CEO/Stefanie
-  // orchestrator, whose prompt FORBIDS building. That key re-ingests the task
-  // into the loop-gate, burns turns, and produces ZERO artifacts; worse, the
-  // silent fallback HIDES the misroute (the card looks dispatched but nothing
-  // is built). We refuse the agent:main fallback and return null so the caller
-  // can emit a loud, queryable 'routed but not dispatched' signal and HOLD the
-  // task (visible) instead of feeding the loop. This changes the loop-gate's
-  // VISIBILITY/AVOIDANCE only — not the loop-gate behavior itself.
-  console.error(
-    `[${context}] resolveSpecialistSessionKey: NO specialist runtime for agent "${agent.name}" ` +
-    `(workspace_id=${workspaceId ?? 'none'}, role=${agent.role ?? 'none'}). ` +
-    `REFUSING silent agent:main fallback — task will be held as 'routed but not dispatched'. ` +
-    `Add ~/.openclaw/agents/<dept-slug>/ to wire this department.`,
-  );
-  return null;
-}
+/** Shared runtime resolver is used by routing readiness and actual dispatch. */
+export { resolveSpecialistSessionKey } from '@/lib/routing/executor-runtime';
 
 /**
  * Outcome of {@link resolveSopForTask}.
@@ -819,10 +660,16 @@ export async function autoDispatchTask(
       return { status: 'held', reason: 'dispatch_precondition' };
     }
 
-    // GUARD 2: skip master/CEO agents — they are routing artifacts.
+    // Only a router-authorized catch-all may turn the CEO into an executor.
+    const catchAllWorkspace = queryOne<{slug:string;name:string;company_id:string}>(`SELECT w.slug,w.name,w.company_id
+      FROM workspaces w JOIN agents a ON a.workspace_id=w.id
+      WHERE a.id=? AND w.id=? AND w.archived_at IS NULL`, [task.assigned_agent_id, task.workspace_id]);
+    const catchAllExecution = isCatchAllRoutingReason((task as Task & {routing_reason?:string}).routing_reason)
+      && !!catchAllWorkspace && isCatchAllWorkspace(catchAllWorkspace);
+    // GUARD 2: ordinary CEO routing artifacts still require an explicit assignment.
     const isMaster =
       task.is_master === 1 || task.is_master === true;
-    if (isMaster) {
+    if (isMaster && !catchAllExecution) {
       console.log(
         `[${context}] autoDispatchTask: task ${taskId} assigned to master/CEO — operator-click only`,
       );
@@ -994,7 +841,7 @@ export async function autoDispatchTask(
     }
 
     // Double-check on the live agent row (covers stale JOIN snapshots).
-    if (agent.is_master) {
+    if (agent.is_master && !catchAllExecution) {
       console.log(
         `[${context}] autoDispatchTask: agent "${agent.name}" is_master=1 — skipping`,
       );
@@ -1733,6 +1580,7 @@ ${task.description ? `**Description:** ${task.description}\n` : ''}
 **Priority:** ${task.priority.toUpperCase()}
 ${task.due_date ? `**Due:** ${task.due_date}\n` : ''}
 **Task ID:** ${task.id}
+${catchAllExecution ? `**Execution assignment:** [catch-all]\n**Assigned agent:** ${agent.id}\n**Company ID:** ${catchAllWorkspace!.company_id}\n**Workspace ID:** ${task.workspace_id}\nCommand Center has assigned this existing task to you (${agent.id}) for execution. General Task or CEO owns the deliverable when the requested department is unavailable. Execute the work now using the supplied SOP, persona, and permitted tools. Do not re-ingest, create a duplicate card, or wait for department correction. Any necessary delegation must retain this task and execution identity; you remain responsible for the result.\n` : ''}
 ${sopBlock ? `${sopBlock}` : ''}**Agent Model:** ${settings.model}
 ${personaSection}
 **Specialist Type:** ${specialistType}
@@ -1753,10 +1601,10 @@ If you need help or clarification, ask the orchestrator.`;
     //   1. If agent.workspace_id matches a known ~/.openclaw/agents/<slug>
     //      directory we derive the runtime slug from the workspace slug and use
     //      agent:<slug>:<openclaw_session_id>.
-    //   2. Fallback: if no specialist runtime is resolvable we keep the legacy
-    //      agent:main:… key and log a warning so other departments are not broken.
+    //   2. Explicit same-installation runtime bindings may resolve main for an
+    //      authorized CEO execution. Missing runtimes never infer main.
     console.log(`[dispatch-checkpoint] session-key-resolve-start task=${task.id}`);
-    const sessionKey = resolveSpecialistSessionKey(agent, session.openclaw_session_id, task.workspace_id, context);
+    const sessionKey = resolveSpecialistSessionKey(agent, session.openclaw_session_id, task.workspace_id, context, catchAllExecution && Boolean(agent.is_master));
     console.log(`[dispatch-checkpoint] session-key-resolve-done task=${task.id} resolved=${Boolean(sessionKey)}`);
 
     // ── RESOLVER-DISPATCH gate (Gap E) ─────────────────────────────────────
@@ -1809,6 +1657,11 @@ If you need help or clarification, ask the orchestrator.`;
       // MAX_DISPATCH_ATTEMPTS× over ~33 min before blocking, leaving the card
       // stalled in the backlog with only a small dispatch_hold chip that the
       // operator can easily miss. Block + report on attempt 1 (hardBlock).
+      if (catchAllExecution) {
+        run(`UPDATE tasks SET routing_next_action=?, next_dispatch_eligible_at=? WHERE id=? AND assigned_agent_id=?`,
+          ['Automatic General/CEO runtime reassessment pending', new Date(Date.now() + 30_000).toISOString(), task.id, agent.id]);
+        return { status: 'held', reason: 'catch_all_runtime_unavailable' };
+      }
       recordDispatchFailure(task.id, agent.id, {
         reason: 'no_specialist_runtime',
         audience: 'SYSTEM',

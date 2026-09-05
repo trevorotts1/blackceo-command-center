@@ -80,9 +80,17 @@ export async function PATCH(
       );
     }
 
+    if (body.openclaw_agent_id != null && (typeof body.openclaw_agent_id !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(body.openclaw_agent_id))) {
+      return NextResponse.json({error:'invalid_runtime_binding'}, {status:400});
+    }
+
     const updates: string[] = [];
     const values: unknown[] = [];
 
+    if (body.openclaw_agent_id !== undefined) {
+      updates.push('openclaw_agent_id = ?');
+      values.push(body.openclaw_agent_id);
+    }
     if (body.name !== undefined) {
       updates.push('name = ?');
       values.push(body.name);

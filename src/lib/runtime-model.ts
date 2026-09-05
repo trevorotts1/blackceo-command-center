@@ -1,3 +1,4 @@
+import { runtimeRegistryEntries } from '@/lib/openclaw/runtime-registry';
 import path from 'path';
 import { resolveOpenClawRuntimeRoot } from '@/lib/openclaw/runtime-root';
 /**
@@ -77,6 +78,7 @@ interface OpenClawAgentConfigEntry {
 interface OpenClawConfigShape {
   agents?: {
     list?: OpenClawAgentConfigEntry[];
+    entries?: Record<string, OpenClawAgentConfigEntry>;
   };
 }
 
@@ -138,10 +140,10 @@ export function resolveRuntimeModelFromConfig(
   configPathOverride?: string,
 ): { model_id: string | null; configAgentId: string | null } | null {
   const config = readOpenClawConfig(configPathOverride);
-  const list = config?.agents?.list;
+  const list = runtimeRegistryEntries(config);
   if (!list || !Array.isArray(list) || list.length === 0) return null;
 
-  const candidates = runtimeSlugCandidates(agent, workspaceId);
+  const candidates = agent.openclaw_agent_id ? [agent.openclaw_agent_id] : runtimeSlugCandidates(agent, workspaceId);
 
   // Match by id: the config entry id (e.g. `dept-presentations`) is compared
   // against each candidate slug with AND without the `dept-` prefix. A bare
@@ -151,6 +153,7 @@ export function resolveRuntimeModelFromConfig(
   const entry = list.find((e) => {
     const id = e?.id;
     if (!id) return false;
+    if (agent.openclaw_agent_id) return id === agent.openclaw_agent_id;
     const lowered = id.toLowerCase();
     const bare = lowered.replace(/^dept-/, '');
     return candidates.some(
@@ -191,7 +194,7 @@ export async function resolveRuntimeModelFromGateway(
     const sessions = await client.listSessions();
     if (!Array.isArray(sessions)) return null;
 
-    const candidates = runtimeSlugCandidates(agent, workspaceId);
+    const candidates = agent.openclaw_agent_id ? [agent.openclaw_agent_id] : runtimeSlugCandidates(agent, workspaceId);
     // The session key is `agent:<slug>:<sessionId>`. Match the middle segment
     // to any candidate slug, and (when known) the trailing segment to the
     // agent's own OpenClaw session id.

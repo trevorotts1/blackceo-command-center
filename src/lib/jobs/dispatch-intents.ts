@@ -2,6 +2,7 @@
  * durable; active/unknown attempts exclude re-sends, and worker capacity is
  * reserved by the common dispatcher. Small concurrent workers avoid head blocking. */
 import { queryAll, run } from '@/lib/db';
+import { normalizeIntakeForDispatch } from './intake-advance-sweep';
 import { autoDispatchTask } from '@/lib/task-dispatcher';
 import { runLeasedJob, throwIfJobLeaseLost } from './job-lease';
 export async function runDispatchIntentSweep(): Promise<{ scanned:number; acknowledged:number; held:number; unknown:number; failed:number }> {
@@ -22,6 +23,7 @@ export async function runDispatchIntentSweep(): Promise<{ scanned:number; acknow
    const row=rows[cursor++];counts.scanned++;
    try {
     run('UPDATE task_dispatch_intents SET updated_at=? WHERE task_id=?',[new Date().toISOString(),row.task_id]);
+    if (!normalizeIntakeForDispatch(row.task_id)) { counts.held++; continue; }
     const result=await runLeasedJob(`dispatch-intent:${row.task_id}`,()=>autoDispatchTask(row.task_id,'dispatch-intents'),30_000);
     if(result.skipped || !result.result) counts.held++;
     else counts[result.result.status]++;

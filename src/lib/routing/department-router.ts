@@ -27,6 +27,8 @@ import { queryAll, queryOne } from '@/lib/db';
 import type { Agent, Task, TaskPriority } from '@/lib/types';
 import { loadDepartments, type DepartmentConfig } from './departments.config';
 import { canonicalDeptSlug } from './canonical-slug';
+import { isCatchAllWorkspace } from './catch-all-policy';
+import { resolveSpecialistSessionKey } from './executor-runtime';
 import {
   fetchEmbeddings,
   cosineSimilarity,
@@ -94,6 +96,7 @@ export type RoutingDecision =
   | { status: 'waiting' | 'ambiguous' | 'no_capable_worker'; reason: string; owner: 'SYSTEM'; retryable: boolean };
 
 export interface AgentWithLoad extends Agent {
+  role_type?: string | null;
   /** Number of tasks currently in_progress for this agent */
   active_tasks: number;
 }
@@ -105,9 +108,11 @@ export interface AgentWithLoad extends Agent {
 /** Eligible live workers are fetched only from the selected company's active workspaces. */
 function fetchAgentsWithLoad(companyId: string): AgentWithLoad[] {
   return queryAll<AgentWithLoad>(`
-    SELECT a.*, COUNT(t.id) AS active_tasks
+    SELECT a.*, MAX(
+      (SELECT COUNT(*) FROM tasks t WHERE t.assigned_agent_id = a.id AND t.status = 'in_progress' AND t.archived_at IS NULL),
+      (SELECT COUNT(*) FROM task_executions x WHERE x.agent_id = a.id AND x.state IN ('reserved','sending','accepted','running','unknown'))
+    ) AS active_tasks
     FROM agents a JOIN workspaces w ON w.id = a.workspace_id
-    LEFT JOIN tasks t ON t.assigned_agent_id = a.id AND t.status = 'in_progress'
     WHERE a.status != 'offline' AND w.company_id = ? AND w.archived_at IS NULL
     GROUP BY a.id ORDER BY a.is_master DESC, a.name ASC`, [companyId]);
 }
@@ -612,11 +617,11 @@ function resolveSpecialistPin(
  *      (name + purpose + keywords) using the CLIENT'S OWN OPENAI_API_KEY.
  *      LLM tiebreak when top-2 scores are within TIEBREAK_MARGIN.
  *   3. Keyword scoring — fallback when no embedding key is configured.
- *   4. Least-loaded master agent (CEO / COM) — router-only fallback.
+ *   4. Same-company General worker, then CEO / COM executable fallback.
  *
- * The CEO / COM agent is ALWAYS the router/dispatcher — it NEVER executes the
- * task itself. When no department-specific agent is found, the master agent
- * is returned so it can re-dispatch or escalate, not so it can execute.
+ * An owned, recognized CEO workspace can execute the existing task when no
+ * department worker is available. The fallback marker accompanies assignment
+ * through dispatch; it never grants access to another company.
  *
  * Async because semantic embedding requires an API call.
  */
@@ -658,12 +663,18 @@ export async function comDispatch(
   // Match by exact name (client's actual dept name) OR canonical slug
   if (task.department) {
     const taskDeptCanon = canonicalDeptSlug(task.department);
-    const dept = departments.find(
+    const matches = departments.filter(
       (d) =>
         d.name.toLowerCase() === task.department!.toLowerCase() ||
         canonicalDeptSlug(d.slug || d.id) === taskDeptCanon,
     );
+    if (matches.length > 1) return null;
+    const dept = matches[0];
     if (dept) {
+      const slug = canonicalDeptSlug(dept.slug || dept.id);
+      if (['general', 'general-task'].includes(slug) || ['general', 'general task'].includes(dept.name.trim().toLowerCase())) {
+        return catchAllAssignment(agents, departments, 'Explicit General Task request');
+      }
       const agent = pickBestAgent(agents, dept);
       if (agent) {
         return {
@@ -676,7 +687,7 @@ export async function comDispatch(
         };
       }
     }
-    return null; // An explicit department is a constraint, never a fallback hint.
+    return catchAllAssignment(agents, departments, `Department "${task.department}" is unavailable or has no eligible worker`);
   }
 
   // ── Step 2: Semantic (embedding) classification ───────────────────────────
@@ -727,6 +738,7 @@ export async function comDispatch(
           reason: `Semantic routing matched "${bestDept.name}" (similarity: ${similarity.toFixed(3)}) → least-loaded role-fit agent selected (load: ${agent.active_tasks} tasks)`,
         };
       }
+      return catchAllAssignment(agents, departments, `Matched department "${bestDept.name}" has no eligible worker`);
     }
   }
 
@@ -737,7 +749,7 @@ export async function comDispatch(
   const ranked = semanticRanked && semanticRanked[0]?.similarity < MIN_ROUTING_CONFIDENCE ? [] : rankDepartments(title, description, priority, departments);
 
   if (ranked.length > 0) {
-    for (const { department, score } of ranked) {
+    for (const { department, score } of ranked.slice(0, 1)) {
       const agent = pickBestAgent(agents, department);
       if (agent) {
         return {
@@ -759,65 +771,36 @@ export async function comDispatch(
     // Falls through to Step 3.5 below.
   }
 
-  // ── Step 3.5: General Task catch-all ──────────────────────────────────────
-  // Reached when:
-  //   a) Semantic similarity < MIN_ROUTING_CONFIDENCE (low-confidence catch), OR
-  //   b) Keyword-only mode and zero keyword hits.
-  // General Task is priority-1 / empty-keywords so it NEVER wins in steps 2–3
-  // on merit. This is the ONLY path that routes to it.
-  const generalTaskDept = departments.find(
-    (d) =>
-      canonicalDeptSlug(d.id) === 'general-task' ||
-      d.id === 'general-task' ||
-      // Name-agnostic safety net: when departments are loaded from the
-      // workspaces table the dept `id` is the workspace's row id (which may be
-      // a UUID or a client-specific scheme that doesn't canonicalize to
-      // 'general-task'). The display name is the reliable signal, so also match
-      // on the canonical 'General Task' name.
-      d.name.trim().toLowerCase() === 'general task',
-  );
-  if (generalTaskDept) {
-    const agent = pickBestAgent(agents, generalTaskDept);
-    if (agent) {
-      const sim = semanticRanked?.[0]?.similarity;
-      const reason = sim !== undefined
-        ? `Routing confidence below floor (sim ${sim.toFixed(3)} < ${MIN_ROUTING_CONFIDENCE}). Routed to General Task to avoid force-fitting to wrong department.`
-        : `No keyword hits in keyword-only mode. Routed to General Task catch-all.`;
-      return {
-        agentId: agent.id,
-        agentName: agent.name,
-        department: generalTaskDept.name,
-        score: sim ?? 0, method: 'general', confidence: sim ?? 0, workspaceId: agent.workspace_id,
-        reason,
-      };
-    }
-  }
-
-  // ── Step 4: CEO / COM router fallback ─────────────────────────────────────
-  // Degenerate case: General Task dept has no agent (misconfigured install).
-  // The master agent is the ROUTER of last resort — it will re-dispatch, NOT
-  // execute the task itself. This preserves the invariant that the CEO never
-  // does department work.
-  const masters = agents
-    .filter((a) => a.is_master && a.status !== 'offline')
-    .sort((a, b) => a.active_tasks - b.active_tasks);
-
-  if (masters[0]) {
-    return {
-      agentId: masters[0].id,
-      agentName: masters[0].name,
-      department: 'CEO / COM',
-      score: 0, method: 'escalation', confidence: 0, workspaceId: masters[0].workspace_id,
-      reason: `No department match found and General Task dept has no agent. Routed to CEO / COM master agent for re-dispatch (load: ${masters[0].active_tasks} tasks). CEO will route, not execute.`,
-    };
-  }
-
-  return null;
+  return catchAllAssignment(agents, departments, 'No eligible department match');
 }
 
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
+
+/** Candidates are already company-scoped; recognized workspaces constrain fallback roles. */
+function catchAllAssignment(agents: AgentWithLoad[], departments: DepartmentConfig[], reason: string): RoutingResult | null {
+  const eligible = agents.filter(agent => {
+    const workspace = departments.find(d => d.id === agent.workspace_id);
+    // Independent QC workers must never produce the work they will review.
+    if (agent.role_type === 'qc' || agent.status === 'offline' || !workspace || !isCatchAllWorkspace({slug:workspace.slug || workspace.id,name:workspace.name})) return false;
+    const general = ['general', 'general-task'].includes(canonicalDeptSlug(workspace.slug || workspace.id))
+      || ['general', 'general task'].includes(workspace.name.trim().toLowerCase());
+    return agent.is_master || general;
+ });
+  // A routable DB row can outlive its runtime. Prefer installed executors;
+  // retain an owned assignment when all runtimes are unavailable so recovery retries.
+  const ready = eligible.filter(agent => resolveSpecialistSessionKey(agent, 'routing-readiness', agent.workspace_id, 'CatchAllRouting', Boolean(agent.is_master)) !== null);
+  const candidates = ready.length ? ready : eligible;
+  const generals = candidates.filter(a => !a.is_master).sort((a,b) => a.active_tasks-b.active_tasks || a.id.localeCompare(b.id));
+  const masters = candidates.filter(a => a.is_master).sort((a,b) => a.active_tasks-b.active_tasks || a.id.localeCompare(b.id));
+  const agent = generals.find(a => a.active_tasks === 0) || masters.find(a => a.active_tasks === 0) || generals[0] || masters[0];
+  if (!agent) return null;
+  const workspace = departments.find(d => d.id === agent.workspace_id)!;
+  return {agentId:agent.id,agentName:agent.name,department:workspace.name,workspaceId:agent.workspace_id,
+    score:0,confidence:0,method:agent.is_master ? 'escalation' : 'general',
+    reason:`[catch-all] ${reason}. Assigned to ${agent.is_master ? 'CEO / orchestrator' : 'General worker'} for execution${agent.active_tasks ? ' when worker capacity is available' : ''}.`};
+}
 
 /**
  * Route a task to the best available agent.
@@ -833,6 +816,8 @@ export type RoutingTask = Pick<Task, 'title' | 'priority'> & {
   company_id?: string | null;
   department?: string;
   target_agent?: string | null;
+  /** Internal only: an already verified catch-all assignment needs a fresh worker choice. */
+  catch_all?: boolean;
 };
 
 /** Resolve company before any model call; an empty or ambiguous scope never expands globally. */
@@ -856,12 +841,18 @@ export async function routeTaskDecision(task: RoutingTask): Promise<RoutingDecis
   if (task.department) {
     const canon = canonicalDeptSlug(task.department);
     const matches = departments.filter(d => d.name.toLowerCase() === task.department!.toLowerCase() || canonicalDeptSlug(d.slug || d.id) === canon);
-    if (matches.length !== 1) return wait('Explicit department is missing or ambiguous within the task company', 'ambiguous');
+    if (matches.length > 1) return wait('Explicit department is missing or ambiguous within the task company', 'ambiguous');
   }
-  const routing = await comDispatch(task, agents, departments);
+  const routing = task.catch_all && !task.target_agent
+    ? catchAllAssignment(agents, departments, 'Reassessing queued catch-all executor')
+    : await comDispatch(task, agents, departments);
   if (!routing) return wait('No eligible worker for the requested department or specialist', 'no_capable_worker');
   const agent = agents.find(a => a.id === routing.agentId);
-  if (!agent || agent.is_master) return wait('Task requires an operator routing decision');
+  const workspaceConfig = departments.find(d => d.id === agent?.workspace_id);
+  if (!agent || (agent.is_master && (routing.method !== 'escalation' || !workspaceConfig ||
+      !isCatchAllWorkspace({slug:workspaceConfig.slug || workspaceConfig.id, name:workspaceConfig.name})))) {
+    return wait('Task requires an operator routing decision');
+  }
   return { status: 'assigned', routing: { ...routing, workspaceId: agent.workspace_id, companyId } };
 }
 

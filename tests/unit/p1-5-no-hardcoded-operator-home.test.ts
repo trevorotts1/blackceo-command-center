@@ -102,9 +102,9 @@ test('P1-5: dispatch route resolves AGENTS_ROOT via os.homedir(), not a literal 
   );
 });
 
-test('P1-5: task-dispatcher resolves AGENTS_ROOT via os.homedir(), not a literal fallback', () => {
+test('P1-5: shared executor resolver uses installation-scoped runtime root', () => {
   const src = fs.readFileSync(
-    path.resolve(__dirname, '../../src/lib/task-dispatcher.ts'),
+    path.resolve(__dirname, '../../src/lib/routing/executor-runtime.ts'),
     'utf8',
   );
   assert.ok(
@@ -117,7 +117,7 @@ test('P1-5: task-dispatcher resolves AGENTS_ROOT via os.homedir(), not a literal
   );
   assert.match(
     src,
-    /detectPlatform/,
+    /resolveOpenClawRuntimeRoot/,
     'task-dispatcher.ts should honor the platform.ts VPS/Mac convention for the agents root',
   );
 });
