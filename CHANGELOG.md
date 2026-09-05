@@ -1,3 +1,26 @@
+## [v7.0.0] — 2026-09-05 — Major reliability milestone
+
+### Release scope
+
+This user-requested major milestone gives the already-merged reliability batch a clear Command Center v7 release identity, paired with onboarding v25.0.0. The capabilities below were first published in v6.1.0. This cut changes release documentation and version metadata only; application runtime behavior, database migrations, dependency declarations and the resolved dependency tree are unchanged from v6.1.0. The major number marks the requested milestone and does not introduce an additional breaking runtime change.
+
+### Reliability capabilities carried forward from v6.1.0
+
+- **Tenant-bound interviews and board access:** verified installation identity, encrypted interview answers, ordered remote handoff and resumable sessions keep each client's work in its own scope. Build and board progress require verified evidence before completion is reported.
+- **Durable task creation and routing:** transactional company/operation identity, creation events and durable dispatch intent preserve task ownership. Canonical department/workspace routing, fair revisits to queued work and visible waits make execution state inspectable.
+- **Execution ownership and recovery:** durable attempt ownership, worker capacity limits, unique sessions and stale-update fences guard dispatch and completion. Remote requests with unknown acceptance remain held for evidence-based reconciliation rather than being blindly replayed.
+- **Persona and quality controls:** persona bundles, scoped assignments, operator overrides, audience approval and artifact conformance are committed and validated together. Specialized external presentation engines retain their own QC authority.
+
+### Rollout and known limitations
+
+Published code is not a client deployment. Publishing v7.0.0 does not certify installation, migration, configuration, receiver compatibility or live verification on any client box. Register tenant and persona contexts and verify the receiver before upgrading a client; follow [the tenant interview rollout guide](docs/tenant-interview-rollout.md). The paired onboarding milestone is v25.0.0; pairing release identities alone is not evidence of a successful deployment.
+
+The previously reported dependency debt remains **15 advisories, including 2 critical**. This metadata-only cut does not remediate those advisories or claim a fresh dependency audit.
+
+### Verification scope
+
+The v6.1.0 entry below records the implementation batch's concurrent tenant/session/task/worker fixtures, authentication and scope/receipt checks, guarded retries, persona conformance and production build verification. Validation for this release cut checks all five canonical version markers, whitespace and privacy gates, and confirms that the diff contains only documentation/version metadata with an unchanged dependency tree. Historical changelog entries and existing tags are preserved.
+
 ## [v6.1.0] — 2026-09-05 — Client interview, board and execution reliability
 
 Client interviews and board APIs now require a verified tenant identity and remain bound to their own installation. Encrypted answers, ordered remote handoff, resumable sessions and verified build/board progress replace cross-client fallbacks and premature completion. Register the tenant and persona contexts and verify the receiver before upgrading a client; see docs/tenant-interview-rollout.md.
