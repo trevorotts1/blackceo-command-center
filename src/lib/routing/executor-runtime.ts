@@ -1,3 +1,4 @@
+import { runtimeRegistryEntries } from '@/lib/openclaw/runtime-registry';
 import * as fs from 'fs';
 import * as path from 'path';
 import { queryOne } from '@/lib/db';
@@ -32,8 +33,8 @@ export function resolveSpecialistSessionKey(
     try {
       const configPath = path.join(resolveOpenClawRuntimeRoot(), 'openclaw.json');
       if (fs.statSync(configPath).size > 1024 * 1024) return null;
-      const config = JSON.parse(fs.readFileSync(configPath, 'utf8')) as {agents?: {list?: {id?: string}[]}};
-      if (Array.isArray(config.agents?.list) && config.agents.list.some(entry => entry.id === runtimeId)
+      const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+      if (runtimeRegistryEntries(config).some(entry => entry.id === runtimeId)
         && fs.statSync(path.join(AGENTS_ROOT, runtimeId)).isDirectory()) {
         return `agent:${runtimeId}:${openclawSessionId}`;
       }

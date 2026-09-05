@@ -128,3 +128,22 @@ test('all runtimes unavailable still produce an owned queued assignment',async()
   for(const worker of [general,ceo]) db.run('UPDATE agents SET openclaw_agent_id=? WHERE id=?',['runtime-not-installed',worker.id]);
   assigned(await route(f.task),general.id,f.company,general.workspace,'general');
 });
+
+test('idle alphabetically first General QC cannot displace busy doer or idle CEO',async()=>{
+  const f=fixture(),general=f.worker('general'),ceo=f.worker('ceo');
+  db.run("INSERT INTO agents(id,name,role,role_type,workspace_id,status,is_master) VALUES(?,?,?,'qc',?,'standby',0)",
+    [`aaa-qc-${serial}`,'Independent QC','Quality reviewer',general.workspace]);
+  db.run('INSERT INTO tasks(id,title,status,assigned_agent_id,workspace_id) VALUES(?,?,?,?,?)',
+    [`busy-${general.id}`,'Existing work','in_progress',general.id,general.workspace]);
+  assigned(await route(f.task),ceo.id,f.company,ceo.workspace,'escalation');
+});
+test('QC-only General uses CEO fallback',async()=>{
+  const f=fixture(),general=f.worker('general'),ceo=f.worker('ceo');
+  db.run("UPDATE agents SET role_type='qc' WHERE id=?",[general.id]);
+  assigned(await route(f.task),ceo.id,f.company,ceo.workspace,'escalation');
+});
+test('QC-only General without CEO remains unassigned',async()=>{
+  const f=fixture(),general=f.worker('general');
+  db.run("UPDATE agents SET role_type='qc' WHERE id=?",[general.id]);
+  assert.notEqual((await route(f.task)).status,'assigned');
+});

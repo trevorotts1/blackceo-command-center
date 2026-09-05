@@ -96,6 +96,7 @@ export type RoutingDecision =
   | { status: 'waiting' | 'ambiguous' | 'no_capable_worker'; reason: string; owner: 'SYSTEM'; retryable: boolean };
 
 export interface AgentWithLoad extends Agent {
+  role_type?: string | null;
   /** Number of tasks currently in_progress for this agent */
   active_tasks: number;
 }
@@ -781,7 +782,8 @@ export async function comDispatch(
 function catchAllAssignment(agents: AgentWithLoad[], departments: DepartmentConfig[], reason: string): RoutingResult | null {
   const eligible = agents.filter(agent => {
     const workspace = departments.find(d => d.id === agent.workspace_id);
-    if (agent.status === 'offline' || !workspace || !isCatchAllWorkspace({slug:workspace.slug || workspace.id,name:workspace.name})) return false;
+    // Independent QC workers must never produce the work they will review.
+    if (agent.role_type === 'qc' || agent.status === 'offline' || !workspace || !isCatchAllWorkspace({slug:workspace.slug || workspace.id,name:workspace.name})) return false;
     const general = ['general', 'general-task'].includes(canonicalDeptSlug(workspace.slug || workspace.id))
       || ['general', 'general task'].includes(workspace.name.trim().toLowerCase());
     return agent.is_master || general;

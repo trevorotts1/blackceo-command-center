@@ -45,3 +45,31 @@ test('path traversal in a stored runtime binding is refused',()=>{
  run("UPDATE agents SET openclaw_agent_id='../main' WHERE id='binding-worker'");
  assert.equal(resolve(),null);
 });
+test('entries registry uses authoritative keys for explicit main execution and model without external calls',async()=>{
+ run("UPDATE agents SET openclaw_agent_id='main' WHERE id='binding-worker'");
+ const input={agents:{entries:{main:{id:'ignored-value-id',model:{primary:'fixture/ceo-model'}}}}};
+ fs.writeFileSync(config,JSON.stringify(input));
+ const {runtimeRegistryEntries}=await import('../../src/lib/openclaw/runtime-registry');
+ const before=JSON.stringify(input);
+ assert.equal(runtimeRegistryEntries(input)[0].id,'main');
+ assert.equal(JSON.stringify(input),before,'normalization cannot mutate config');
+ const oldFetch=globalThis.fetch;let externalCalls=0;
+ globalThis.fetch=async()=>{externalCalls++;throw new Error('Runtime fixture forbids external calls');};
+ try {
+  assert.equal(resolve(),'agent:main:execution-unique');assert.equal(resolve(false),null);
+  const {resolveRuntimeModelFromConfig}=await import('../../src/lib/runtime-model');
+  const agent=queryOne<Agent>('SELECT * FROM agents WHERE id=?',['binding-worker'])!;
+  assert.deepEqual(resolveRuntimeModelFromConfig(agent,'binding-workspace',config),{model_id:'fixture/ceo-model',configAgentId:'main'});
+  assert.equal(externalCalls,0);
+ } finally {globalThis.fetch=oldFetch;}
+});
+test('conflicting dual registries cannot confer execution or model identity; equal dual entries work',async()=>{
+ const {resolveRuntimeModelFromConfig}=await import('../../src/lib/runtime-model');
+ const agent=queryOne<Agent>('SELECT * FROM agents WHERE id=?',['binding-worker'])!;
+ fs.writeFileSync(config,JSON.stringify({agents:{entries:{main:{model:{primary:'fixture/ceo'}}},list:[{id:'main',model:{primary:'fixture/foreign'}}]}}));
+ assert.equal(resolve(),null);
+ assert.equal(resolveRuntimeModelFromConfig(agent,'binding-workspace',config),null);
+ fs.writeFileSync(config,JSON.stringify({agents:{entries:{main:{model:{primary:'fixture/ceo'}}},list:[{model:{primary:'fixture/ceo'},id:'main'}]}}));
+ assert.equal(resolve(),'agent:main:execution-unique');
+ assert.deepEqual(resolveRuntimeModelFromConfig(agent,'binding-workspace',config),{model_id:'fixture/ceo',configAgentId:'main'});
+});
