@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { v4 as uuidv4 } from 'uuid';
 import { createHmac } from 'crypto';
+import { latestExecution, validateExecutionCompletion, completeExecution, type Execution } from '@/lib/execution-attempts';
 import { queryOne, queryAll, run } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { runQCOnReview } from '@/lib/qc-scorer';
@@ -142,6 +143,16 @@ export async function POST(request: NextRequest) {
 
     const body = JSON.parse(rawBody);
     const now = new Date().toISOString();
+    // Attempt sessions have immutable attribution, including after session-row purge.
+    if (body.session_id && !body.task_id) {
+      const execution=queryOne<Execution>('SELECT * FROM task_executions WHERE session_id=?',[body.session_id]);
+      if(execution) {
+        if(!/TASK_COMPLETE:\s*.+/i.test(String(body.message??'')))return NextResponse.json({error:'Invalid completion message format'},{status:400});
+        body.task_id=execution.task_id;
+        body.execution_id=execution.id;
+        body.summary=body.summary ?? String(body.message ?? '').match(/TASK_COMPLETE:\s*(.+)/i)?.[1];
+      }
+    }
 
     // Handle direct task_id completion
     if (body.task_id) {
@@ -157,6 +168,10 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ error: 'Task not found' }, { status: 404 });
       }
 
+      const executionError = validateExecutionCompletion(task.id,{executionId:body.execution_id,sessionId:body.session_id});
+      if(executionError) return NextResponse.json({error:executionError},{status:409});
+      const execution=latestExecution(task.id);
+      if(['review','done'].includes(task.status))return NextResponse.json({success:true,task_id:task.id,new_status:task.status,already_completed:true});
       // Only move to review if not already in review or done
       // (Don't overwrite user's approval)
       const movedToReview = task.status !== 'review' && task.status !== 'done';
@@ -195,6 +210,7 @@ export async function POST(request: NextRequest) {
           await transition(task.id, 'review', {
             actor: task.assigned_agent_id ?? 'agent-completion',
             reason: 'agent reported TASK_COMPLETE (webhook)',
+            expectedExecutionId:execution?.id,
             expectedFrom: task.status as 'in_progress',
             // MR-12: exempt from the review-column WIP limit — an agent's
             // finished work must reach QC even when the column is full; the
@@ -209,12 +225,12 @@ export async function POST(request: NextRequest) {
             broadcastTaskUpdate(task.id);
             return reviewEvidenceRefusalResponse(task.id, `/api/tasks/${task.id}/deliverables`);
           }
-          if (err instanceof Error && !err.message.includes('CAS_CONFLICT')) {
-            console.warn('[agent-completion] transition failed for task', task.id, err);
-          }
+          if(err instanceof TransitionError)return NextResponse.json({error:err.message,code:err.code},{status:409});
+          throw err;
         }
       }
 
+      if (['review','done'].includes(queryOne<{status:string}>('SELECT status FROM tasks WHERE id=?',[task.id])?.status ?? '')) completeExecution(task.id,execution?.id);
       // Log completion
       run(
         `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
@@ -232,7 +248,7 @@ export async function POST(request: NextRequest) {
       // Set agent back to standby
       if (task.assigned_agent_id) {
         run(
-          'UPDATE agents SET status = ?, updated_at = ? WHERE id = ?',
+          "UPDATE agents SET status = ?, updated_at = ? WHERE id = ? AND NOT EXISTS (SELECT 1 FROM task_executions WHERE agent_id=agents.id AND state IN ('reserved','sending','accepted','running','unknown')) AND NOT EXISTS (SELECT 1 FROM tasks WHERE assigned_agent_id=agents.id AND status='in_progress' AND archived_at IS NULL)",
           ['standby', now, task.assigned_agent_id]
         );
       }
@@ -344,6 +360,10 @@ export async function POST(request: NextRequest) {
         );
       }
 
+      const executionError = validateExecutionCompletion(task.id,{executionId:body.execution_id,sessionId:body.session_id});
+      if(executionError) return NextResponse.json({error:executionError},{status:409});
+      const sessionExecution=latestExecution(task.id);
+      if(['review','done'].includes(task.status))return NextResponse.json({success:true,task_id:task.id,new_status:task.status,already_completed:true});
       // Only move to review if not already in review or done
       // (Don't overwrite user's approval)
       const movedToReviewSession = task.status !== 'review' && task.status !== 'done';
@@ -378,6 +398,7 @@ export async function POST(request: NextRequest) {
           await transition(task.id, 'review', {
             actor: agentId ?? 'agent-completion',
             reason: 'agent reported TASK_COMPLETE (webhook, session path)',
+            expectedExecutionId:sessionExecution?.id,
             expectedFrom: task.status as 'in_progress',
             // MR-12: exempt from the review-column WIP limit (see sibling call).
             operatorOverride: true,
@@ -389,12 +410,12 @@ export async function POST(request: NextRequest) {
             broadcastTaskUpdate(task.id);
             return reviewEvidenceRefusalResponse(task.id, `/api/tasks/${task.id}/deliverables`);
           }
-          if (err instanceof Error && !err.message.includes('CAS_CONFLICT')) {
-            console.warn('[agent-completion] transition failed for task', task.id, err);
-          }
+          if(err instanceof TransitionError)return NextResponse.json({error:err.message,code:err.code},{status:409});
+          throw err;
         }
       }
 
+      completeExecution(task.id,sessionExecution?.id);
       // Log completion with summary
       run(
         `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
@@ -411,7 +432,7 @@ export async function POST(request: NextRequest) {
 
       // Set agent back to standby
       run(
-        'UPDATE agents SET status = ?, updated_at = ? WHERE id = ?',
+        "UPDATE agents SET status = ?, updated_at = ? WHERE id = ? AND NOT EXISTS (SELECT 1 FROM task_executions WHERE agent_id=agents.id AND state IN ('reserved','sending','accepted','running','unknown')) AND NOT EXISTS (SELECT 1 FROM tasks WHERE assigned_agent_id=agents.id AND status='in_progress' AND archived_at IS NULL)",
         ['standby', now, agentId]
       );
 

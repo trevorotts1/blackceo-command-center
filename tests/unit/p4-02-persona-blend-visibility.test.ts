@@ -189,7 +189,7 @@ test('step6: resolvePersonaAndPin(blend) emits persona_blend_missing on a no-bun
     const pinned = await resolvePersonaAndPin(id, 'write a marketing email', 'marketing', undefined, {
       blend: true,
     });
-    assert.equal(pinned, 'covey-7-habits'); // a persona WAS pinned
+    assert.equal(pinned, null, 'missing required content bundle must remain held'); // a persona WAS pinned
   } finally {
     delete process.env.PERSONA_FIXTURE_JSON;
   }

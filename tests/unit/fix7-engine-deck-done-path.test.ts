@@ -127,6 +127,7 @@ function seedDeckParent(opts: { cert?: string | null; status?: string }): string
       new Date().toISOString(),
     ],
   );
+  run('UPDATE tasks SET persona_contract_version=1 WHERE id=?',[id]);
   return id;
 }
 

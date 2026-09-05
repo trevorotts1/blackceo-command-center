@@ -1,3 +1,4 @@
+import { throwIfJobLeaseLost } from '@/lib/jobs/job-lease';
 /**
  * task-lifecycle.ts — AUTHORITATIVE transition funnel (THE sole status gate).
  *
@@ -82,6 +83,8 @@
  *                 allowed (no precondition)
  */
 
+import { requirePersonaConformanceForCompletion } from '@/lib/persona-conformance';
+import { validateExecutionCompletion } from '@/lib/execution-attempts';
 import { v4 as uuidv4 } from 'uuid';
 import path from 'path';
 import fs from 'fs';
@@ -310,6 +313,7 @@ export interface TransitionEvidence {
    * Independent of the always-on row-level CAS on the observed from-status.
    */
   expectedFrom?: LifecycleState;
+  expectedExecutionId?: string;
   /**
    * Extra columns to SET atomically alongside the status flip, inside the SAME
    * transaction as the audit writes (MR-16 / DISP-09 convergence).
@@ -763,6 +767,15 @@ export function transitionWithDeclaredException(args: {
   const now = new Date().toISOString();
 
   transaction(() => {
+    throwIfJobLeaseLost();
+    if(args.to==='done') {
+      const conformance=requirePersonaConformanceForCompletion(args.taskId);
+      if(!conformance.pass) throw new TransitionError('PRECONDITION_EVIDENCE',conformance.reason);
+    }
+    if (evidence.expectedExecutionId) {
+      const executionError=validateExecutionCompletion(args.taskId,{executionId:evidence.expectedExecutionId});
+      if(executionError) throw new TransitionError('CAS_CONFLICT',executionError);
+    }
     // Build the UPDATE with extraColumns (e.g. completed_at) and the mandatory
     // compare-and-swap guard.
     const extraCols = args.extraColumns ?? {};
@@ -937,6 +950,15 @@ export async function transition(
   // The SSE broadcast + owner notify are kept OUTSIDE the transaction (below) so
   // nothing is announced for a change that rolled back.
   transaction(() => {
+    throwIfJobLeaseLost();
+    if(to==='done') {
+      const conformance=requirePersonaConformanceForCompletion(taskId);
+      if(!conformance.pass) throw new TransitionError('PRECONDITION_EVIDENCE',conformance.reason);
+    }
+    if (evidence.expectedExecutionId) {
+      const executionError=validateExecutionCompletion(taskId,{executionId:evidence.expectedExecutionId});
+      if(executionError) throw new TransitionError('CAS_CONFLICT',executionError);
+    }
     // Build the UPDATE with optional extraColumns and the mandatory
     // compare-and-swap guard.
     const extraCols = evidence.extraColumns ?? {};

@@ -1,3 +1,4 @@
+import { taskPersonaCompanyContext } from '@/lib/persona-company';
 /**
  * Intelligence Settings Resolver
  *
@@ -468,6 +469,22 @@ export function resolveSettings(
 
   // Layer 5: needs_owner_input (model stays NEEDS_OWNER_INPUT — NEVER openrouter/free)
 
+  // An explicit non-auto operator setting is a lock, even when a task has a
+  // scored pin or a sticky category entry. Return it before those fallbacks.
+  const explicitRolePersona = queryOne<AgentSettingRow>(
+    "SELECT value FROM agent_settings WHERE department_id=? AND role_id=? AND setting_type='persona'", [departmentId,agentId]);
+  const explicitDeptPersona = queryOne<AgentSettingRow>(
+    "SELECT value FROM agent_settings WHERE department_id=? AND role_id IS NULL AND setting_type='persona'", [departmentId]);
+  const explicitPersona = explicitRolePersona?.value && explicitRolePersona.value !== 'auto'
+    ? explicitRolePersona.value : explicitDeptPersona?.value && explicitDeptPersona.value !== 'auto'
+      ? explicitDeptPersona.value : null;
+  if (explicitPersona) return {
+    model,modelSource,persona:explicitPersona,
+    personaSource:explicitRolePersona?.value === explicitPersona ? 'role_override' : 'department_default',
+    personaMode:null,taskCategory:null,required_modality:required_modality ?? null,
+    difficulty:difficulty ?? null,model_tier:model_tier ?? null,modality_downgraded,
+  };
+
   // --- PERSONA RESOLUTION ---
   // Hop 10 Step 1: task-pinned persona (written by persona-selector-v2.py to
   // tasks.persona_id / .persona_name / .persona_mode). Tolerant: skip if the
@@ -542,7 +559,9 @@ export function resolveSettings(
     }
 
     // EXACT (department_id, task_category) match — the selector's UNIQUE key.
-    if (stickyCategory) {
+    let sharedCompany = true;
+    try { sharedCompany = !!taskPersonaCompanyContext(taskId); } catch { /* unresolved company must not inherit global history */ }
+    if (stickyCategory && !sharedCompany) {
       try {
         stickyAssignment = queryOne<PersonaAssignmentRow>(
           `SELECT persona_id, persona_name, persona_mode, task_category

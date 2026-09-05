@@ -19,6 +19,9 @@
  * block/bounce.
  */
 
+import { latestExecution } from '@/lib/execution-attempts';
+import { isOwnerKilled } from '@/lib/owner-killed';
+import { throwIfJobLeaseLost } from './job-lease';
 import path from 'path';
 import { safeReaddirSync, safeStatSync } from '@/lib/fs/safe-fs';
 import { queryOne, queryAll, run } from '@/lib/db';
@@ -143,6 +146,11 @@ export async function recoverFinishedTaskToReview(
   task: RecoverableTask,
   actor: string,
 ): Promise<boolean> {
+  throwIfJobLeaseLost();
+  // New executions recover only from their unique callback/session evidence.
+  // Generic files or a previous attempt's deliverables cannot prove this run finished.
+  const current=queryOne<{killed_at:string|null;archived_at:string|null;description:string|null}>('SELECT killed_at,archived_at,description FROM tasks WHERE id=?',[task.id]);
+  if(!current || current.archived_at || isOwnerKilled(current).killed || latestExecution(task.id)) return false;
   const now = new Date().toISOString();
 
   // Signal 1 — a deliverable already registered is the strongest "it finished".

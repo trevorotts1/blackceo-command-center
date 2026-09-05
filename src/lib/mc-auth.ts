@@ -147,6 +147,7 @@ export function renderWriteBackInstructions(
   taskId: string,
   deliverableType: 'file' | 'artifact',
   outputPathHint: string,
+  executionId?: string,
 ): string {
   return `**IMPORTANT:** After completing work, you MUST call these APIs. Every
 call MUST authenticate with the Command Center bearer token from your
@@ -163,7 +164,7 @@ in_progress.
    Body: {"deliverable_type": "${deliverableType}", "title": "File name", "path": "${outputPathHint}"}
 3. Update status: PATCH ${missionControlUrl}/api/tasks/${taskId}
    Header: Authorization: Bearer $MC_API_TOKEN
-   Body: {"status": "review"}
+   Body: ${JSON.stringify({status:"review", ...(executionId ? {execution_id:executionId} : {})})}
 
 If any call returns 401/403, STOP and report a BLOCKED status with the reason
 "task-API write-back auth failed (MC_API_TOKEN)" instead of silently finishing —

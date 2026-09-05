@@ -10,6 +10,11 @@
  */
 import os from 'os';
 import path from 'path';
+import fs from 'node:fs';
+
+if (!process.env.CC_TEST_FIXTURE_ROOT) {
+  process.env.CC_TEST_FIXTURE_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-company-fixture-'));
+}
 
 const current = process.env.DATABASE_PATH ?? '';
 if (!current || current.endsWith('mission-control.db')) {

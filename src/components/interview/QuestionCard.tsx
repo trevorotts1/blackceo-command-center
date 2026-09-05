@@ -79,15 +79,20 @@ export type SubmitResult =
  * drift from the route schema again (the contract test pins both sides).
  * Returns a discriminated result; the caller renders `message` inline on failure.
  */
+const pendingAnswerIds = new Map<string,string>();
+
 export async function submitInterviewAnswer(
   req: AnswerRequest,
 ): Promise<SubmitResult> {
+  const payload=JSON.stringify(buildAnswerPayload(req));
+  const identity=pendingAnswerIds.get(payload) || crypto.randomUUID();
+  pendingAnswerIds.set(payload,identity);
   let res: Response;
   try {
     res = await fetch('/api/interview/answer', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(buildAnswerPayload(req)),
+      headers: { 'content-type': 'application/json', 'idempotency-key': identity },
+      body: payload,
     });
   } catch {
     return {
@@ -116,6 +121,7 @@ export async function submitInterviewAnswer(
     };
   }
 
+  pendingAnswerIds.delete(payload);
   return { ok: true, data };
 }
 

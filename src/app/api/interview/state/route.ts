@@ -1,3 +1,7 @@
+import { queryOne } from '@/lib/db';
+import { ensureTenantInterview, tenantAnswers } from '@/lib/interview/remote-store';
+import { readRemoteInterviewState, drainInterviewOperations } from '@/lib/interview/remote-protocol';
+import { updateClient } from '@/lib/clients';
 /**
  * GET /api/interview/state
  *
@@ -174,7 +178,7 @@ export async function GET(request: NextRequest) {
   // JANET-INTERVIEW-FIX: a remote client's hostname must be served from ITS
   // clients-row flag — never the operator's canonical files. Self reads the
   // canonical snapshot exactly as before (regression requirement).
-  const tenant = resolveInterviewTenant(request);
+  const tenant = await resolveInterviewTenant(request);
   const refusedTenant = refuseUnverifiedTenant(tenant);
   if (refusedTenant) return refusedTenant;
   if (tenant.kind === 'client' && tenant.client) {
@@ -182,7 +186,17 @@ export async function GET(request: NextRequest) {
     // this branch used to return. Before this, answeredIds was hardcoded to []
     // and nextIndex to 0, so a returning client restarted the deck at card 1
     // on every single page load no matter how much they had answered.
-    const stored = getClientInterviewState(tenant.client.id);
+    let persisted;
+    let savedAnswers;
+    try { persisted=ensureTenantInterview(tenant.context!.tenantId); savedAnswers=tenantAnswers(tenant.context!.tenantId); }
+    catch { return NextResponse.json({error:'interview_state_unavailable'},{status:503}); }
+    let remote: Record<string,any> | null = null;
+    try {
+      await drainInterviewOperations(tenant.context!,1);
+      remote=await readRemoteInterviewState(tenant.context!,persisted.interview_id);
+      updateClient(tenant.client.id,{interview_complete:remote!.interviewComplete===true});
+    } catch { /* Local durable answers remain usable while remote is unavailable. */ }
+    const stored = {answeredIds:savedAnswers.map(a=>a.question_id),interviewSessionId:persisted.gateway_session_id};
     const structured = computeStructuredResume(
       INTERVIEW_QUESTIONS,
       stored?.answeredIds ?? [],
@@ -198,10 +212,14 @@ export async function GET(request: NextRequest) {
         : 0;
     return NextResponse.json({
       ok: true,
-      interviewComplete: tenant.client.interview_complete === true,
-      buildCompleted: false,
-      qcStatus: 'pending',
-      session: { interviewSessionId: stored?.interviewSessionId ?? null },
+      interviewComplete: remote?.interviewComplete === true,
+      remoteAvailable: remote !== null,
+      remoteStatus: remote ? 'connected' : 'waiting_for_installation',
+      interviewId: persisted.interview_id,
+      revision: persisted.revision,
+      buildCompleted: remote?.buildCompleted === true,
+      qcStatus: remote?.qcStatus || 'pending',
+      session: { interviewSessionId: persisted.interview_id, gatewaySessionId: persisted.gateway_session_id },
       structured: {
         total: structured.total,
         answeredIds: structured.answeredIds,
@@ -226,14 +244,14 @@ export async function GET(request: NextRequest) {
         totalQuestionsAnswered: answeredCount,
         handoffExists: false,
       },
-      transcript: {
+      transcript: remote?.transcript || {
         exists: false,
         qBlockCount: 0,
         sizeBytes: 0,
         hasSyntheticHeader: false,
         genuine: false,
       },
-      decisionCoverage: {
+      decisionCoverage: remote?.decisionCoverage || {
         complete: false,
         expected: [],
         covered: [],
@@ -241,8 +259,8 @@ export async function GET(request: NextRequest) {
         declined: [],
         rejections: [],
       },
-      canonicalFloor: null,
-      flags: {
+      canonicalFloor: remote?.canonicalFloor || null,
+      flags: remote?.flags || {
         genuineTranscriptReady: false,
         decisionCoverageComplete: false,
         noUnprovenancedDeclines: false,
@@ -294,11 +312,15 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({
       ok: true,
+      companyId: tenant.context!.companyId,
+      installationId: tenant.context!.installationId,
+      buildId: snap.buildState?.buildId || null,
 
       // ── Stable session + structured resume + known context ───────────
       // interviewSessionId is READ-only here (never minted on a GET); the
       // client uses it to key its gateway-session persistence.
       session: {
+        gatewaySessionId: queryOne<{gateway_session_id:string | null}>('SELECT gateway_session_id FROM tenant_interviews WHERE tenant_id=?',[tenant.context!.tenantId])?.gateway_session_id ?? null,
         interviewSessionId:
           (snap.buildState?.interviewSessionId as string | undefined) ?? null,
       },

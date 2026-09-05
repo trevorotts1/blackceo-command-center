@@ -70,7 +70,7 @@ function insertWorkspace(id: string, slug: string, name: string): void {
   run(
     `INSERT OR IGNORE INTO workspaces (id, name, slug, description, sort_order)
      VALUES (?, ?, ?, ?, ?)`,
-    [id, name, slug, 'Test dept', 900 + counter],
+    [id, name, `${slug}-${id}`, 'Test dept', 900 + counter],
   );
 }
 
@@ -169,6 +169,9 @@ test('[B-U8 funnel] B-U7 ingest (fixture payload) -> declared bundle -> B-U6 com
   delete process.env.PERSONA_FIXTURE_JSON;
   assert.ok(result, 'createTaskCore must return a result for the B-U7 producer-pin path');
   const taskId = result!.task.id;
+  // These historic fixtures exercise version-zero report compatibility. Modern
+  // execution/hash/scope evidence is covered in persona-decision-ownership.
+  run('UPDATE tasks SET persona_contract_version=0 WHERE id=?',[taskId]);
 
   const selectorLines = lines.filter((l) => l.includes('[resolvePersonaAndPin]'));
   assert.deepEqual(selectorLines, [], `resolvePersonaAndPin must never spawn on the fixture-driven producer-pin path — got: ${JSON.stringify(selectorLines)}`);
@@ -204,6 +207,7 @@ test('[B-U8 funnel] B-U7 ingest (fixture payload) -> declared bundle -> B-U6 com
   insertWorkspace(wsId, 'funnels', 'Funnels Department');
   const ingestPayload = loadFixture<IngestPayloadFixture>('onb-emit-ingest-payload.json');
 
+  process.env.PERSONA_FIXTURE_JSON='{}';
   const result = await createTaskCore({
     title: 'B-U8 funnel: agreeing voice from ONB emit fixture',
     workspace_id: wsId,
@@ -215,6 +219,9 @@ test('[B-U8 funnel] B-U7 ingest (fixture payload) -> declared bundle -> B-U6 com
     bundle_sha: ingestPayload.bundle_sha,
   });
   const taskId = result!.task.id;
+  // These historic fixtures exercise version-zero report compatibility. Modern
+  // execution/hash/scope evidence is covered in persona-decision-ownership.
+  run('UPDATE tasks SET persona_contract_version=0 WHERE id=?',[taskId]);
 
   const usedReport = loadFixture<UsedReportFixture>('producer-used-report-agreeing.json');
   assert.equal(usedReport.voice_persona_id, ingestPayload.voice_persona_id, 'the agreeing fixture must actually agree with the ingest fixture for this control case to be meaningful');
@@ -250,6 +257,9 @@ test('[B-U8 funnel] legacy ingest (no persona fields) never produces a declared 
   });
   delete process.env.PERSONA_FIXTURE_JSON;
   const taskId = result!.task.id;
+  // These historic fixtures exercise version-zero report compatibility. Modern
+  // execution/hash/scope evidence is covered in persona-decision-ownership.
+  run('UPDATE tasks SET persona_contract_version=0 WHERE id=?',[taskId]);
 
   const usedReport = loadFixture<UsedReportFixture>('producer-used-report-divergent.json');
   const cmp = recordPersonaUsedAndCompare(taskId, usedReport);

@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server';
 import { getDb } from '@/lib/db';
-import { selectPersonaForTask, buildPersonaReason } from '@/lib/persona-selector';
+import { capturePersonaSnapshot, commitPersonaMutation, PersonaConflictError } from '@/lib/persona-state';
+import { isContentTask } from '@/lib/tasks';
+import { selectPersonaForTask, buildPersonaReason, persistPersonaBundle } from '@/lib/persona-selector';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -36,8 +38,9 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Task not found' }, { status: 404 });
     }
 
+    const snapshot=capturePersonaSnapshot(task.id);
     const textForScoring = [task.title, task.description].filter(Boolean).join('\n\n');
-    const result = await selectPersonaForTask(task.id, textForScoring, task.department);
+    const result = await selectPersonaForTask(task.id, textForScoring, task.department, null, {blend:isContentTask(textForScoring)});
 
     if (!result || !result.persona_id) {
       return NextResponse.json(
@@ -47,9 +50,12 @@ export async function POST(request: Request) {
     }
 
     if (autoAssign) {
+      commitPersonaMutation(snapshot, () => {
+      if(isContentTask(textForScoring) && !result.bundle) throw new Error('persona_bundle_required');
       db.prepare(
         `UPDATE tasks
           SET persona_id = ?, persona_name = ?, persona_mode = ?, persona_score = ?,
+              secondary_persona_id = ?, secondary_persona_name = ?, secondary_persona_score = ?,
               persona_selected_at = datetime('now'), updated_at = datetime('now')
           WHERE id = ?`
       ).run(
@@ -57,6 +63,7 @@ export async function POST(request: Request) {
         result.persona_name,
         result.interaction_mode,
         result.score,
+        result.secondary_persona_id ?? null,result.secondary_persona_name ?? null,result.secondary_persona_score ?? null,
         task.id
       );
 
@@ -71,6 +78,8 @@ export async function POST(request: Request) {
       } catch {
         // persona_reason is additive telemetry — never block the pin on it.
       }
+      if(result.bundle) persistPersonaBundle(task.id,result.bundle);
+      });
     }
 
     return NextResponse.json({
@@ -81,7 +90,7 @@ export async function POST(request: Request) {
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ success: false, error: message }, { status: 500 });
+    return NextResponse.json({ success: false, error: message }, { status: err instanceof PersonaConflictError ? 409 : 500 });
   }
 }
 

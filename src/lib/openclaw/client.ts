@@ -942,6 +942,7 @@ export class OpenClawClient extends EventEmitter {
 // zero-argument singleton behavior for all existing callers.
 const SELF_KEY = '__self__';
 const clientInstances = new Map<string, OpenClawClient>();
+const clientTargetVersions = new Map<string, string>();
 
 /**
  * Resolve an OpenClaw gateway client.
@@ -967,13 +968,16 @@ export function getOpenClawClient(target?: OpenClawClientTarget): OpenClawClient
 
   // Remote (or any explicitly-targeted) client → one cached instance per id.
   const key = target.id || target.url;
+  const version = JSON.stringify([target.url,target.token,target.cfAccessClientId,target.cfAccessClientSecret]);
   let inst = clientInstances.get(key);
+  if (inst && clientTargetVersions.get(key) !== version) { inst.disconnect(); clientInstances.delete(key); inst=undefined; }
   if (!inst) {
     inst = new OpenClawClient(target.url, target.token ?? '', {
       cfAccessClientId: target.cfAccessClientId ?? null,
       cfAccessClientSecret: target.cfAccessClientSecret ?? null,
     });
     clientInstances.set(key, inst);
+    clientTargetVersions.set(key, version);
   }
   return inst;
 }

@@ -16,7 +16,8 @@
  * and simply lives at the new path.
  */
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { checkedJson } from '@/lib/checked-json';
 import { Header } from '@/components/Header';
 import { AgentsSidebar } from '@/components/AgentsSidebar';
 import { MissionQueue } from '@/components/MissionQueue';
@@ -25,7 +26,6 @@ import { useMissionControl } from '@/lib/store';
 import { LiveFeed } from '@/components/LiveFeed';
 import { SSEDebugPanel } from '@/components/SSEDebugPanel';
 import { useSSE } from '@/hooks/useSSE';
-import { debug } from '@/lib/debug';
 import { Breadcrumb } from '@/components/Breadcrumb';
 import { unwrapAgents } from '@/lib/api-envelope';
 import type { Task } from '@/lib/types';
@@ -42,6 +42,9 @@ export default function AllTasksPage() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [retrying, setRetrying] = useState(false);
+  const [lastRefresh, setLastRefresh] = useState<string | null>(null);
+  const refreshRequest = useRef<AbortController | null>(null);
+  const refreshGeneration = useRef(0);
 
   // MR-44 (fix2): this board is cross-department (departmentFilter={null}), so
   // it resolves the GLOBAL "Tasks Due" filter window (env override / fleet
@@ -54,107 +57,50 @@ export default function AllTasksPage() {
     setSelectedDepartment(null);
   }, [setSelectedDepartment]);
 
-  useEffect(() => {
-    let cancelled = false;
-
-    async function loadData() {
-      try {
-        debug.api('Loading /tasks/all data');
-        const [agentsRes, tasksRes, eventsRes] = await Promise.all([
-          fetch('/api/agents'),
-          fetch('/api/tasks'),
-          fetch('/api/events'),
-        ]);
-
-        if (cancelled) return;
-
-        if (agentsRes.ok) setAgents(unwrapAgents(await agentsRes.json()));
-        if (tasksRes.ok) {
-          const tasksData = await tasksRes.json();
-          debug.api('Loaded all tasks', { count: tasksData.length });
-          setTasks(tasksData);
-        }
-        if (eventsRes.ok) setEvents(await eventsRes.json());
-        if (!cancelled) setLoadError(null);
-      } catch (error) {
-        console.error('Failed to load /tasks/all data:', error);
-        if (!cancelled) setLoadError('Failed to load task board data.');
-      } finally {
-        if (!cancelled) setIsLoading(false);
-      }
+  const loadData = useCallback(async () => {
+    refreshRequest.current?.abort();
+    const controller = new AbortController();
+    refreshRequest.current = controller;
+    const generation = ++refreshGeneration.current;
+    const results = await Promise.allSettled([
+      checkedJson<unknown>('/api/agents', controller.signal),
+      checkedJson<Task[]>('/api/tasks', controller.signal),
+      checkedJson<Parameters<typeof setEvents>[0]>('/api/events', controller.signal),
+    ]);
+    if (controller.signal.aborted || generation !== refreshGeneration.current) return;
+    const errors: string[] = [];
+    const labels = ['Agents', 'Tasks', 'Activity'];
+    results.forEach((result, index) => {
+      if (result.status === 'rejected') errors.push(`${labels[index]}: ${result.reason instanceof Error ? result.reason.message : 'Refresh failed. Please retry.'}`);
+    });
+    if (results[0].status === 'fulfilled') {
+      try { setAgents(unwrapAgents(results[0].value)); } catch { errors.push('Agents: invalid response.'); }
     }
-
-    loadData();
-
-    // SSE-fallback task refetch (mirrors src/app/workspace/[slug]/page.tsx):
-    // this page previously had no polling fallback at all for tasks — so if
-    // SSE was blocked (proxy/firewall) the cross-department board would go
-    // stale indefinitely with no way to self-heal short of a manual reload.
-    // Reconcile the store only when the fetched set actually differs (count
-    // or any status) to avoid needless re-renders. (U47: the old 60s
-    // /api/health ping that used to sit alongside this poll wrote to the
-    // now-retired global `isOnline` flag — removed, not replaced; overall
-    // health is sourced from <HealthIndicator/> / /api/system/status.)
-    const taskPoll = setInterval(async () => {
-      try {
-        const res = await fetch('/api/tasks');
-        if (res.ok) {
-          const newTasks: Task[] = await res.json();
-          const currentTasks = useMissionControl.getState().tasks;
-
-          // Compare count + updated_at timestamps so field changes beyond
-          // status (assigned_agent_id, dispatch_hold, block_reason, etc.) are
-          // detected and the board re-renders without a manual reload.
-          const hasChanges =
-            newTasks.length !== currentTasks.length ||
-            newTasks.some((t) => {
-              const current = currentTasks.find((ct) => ct.id === t.id);
-              if (!current) return true;
-              return current.status !== t.status || current.updated_at !== t.updated_at;
-            });
-
-          if (hasChanges) {
-            debug.api('[FALLBACK] Task changes detected via polling, updating store');
-            setTasks(newTasks);
-          }
-        }
-      } catch (error) {
-        console.error('Failed to poll tasks:', error);
-        setLoadError('Task poll failed — data may be stale.');
-      }
-    }, 60000);
-
-    return () => {
-      cancelled = true;
-      clearInterval(taskPoll);
-    };
+    if (results[1].status === 'fulfilled') {
+      if (Array.isArray(results[1].value)) {
+        setTasks(results[1].value);
+        setLastRefresh(new Date().toLocaleTimeString());
+      } else errors.push('Tasks: invalid response. Existing cards have been preserved.');
+    }
+    if (results[2].status === 'fulfilled') {
+      if (Array.isArray(results[2].value)) setEvents(results[2].value);
+      else errors.push('Activity: invalid response.');
+    }
+    setLoadError(errors.length ? errors.join(' ') : null);
+    setIsLoading(false);
+    setRetrying(false);
   }, [setAgents, setTasks, setEvents, setIsLoading]);
+
+  useEffect(() => {
+    void loadData();
+    const timer = setInterval(() => { void loadData(); }, 60_000);
+    return () => { clearInterval(timer); refreshRequest.current?.abort(); ++refreshGeneration.current; };
+  }, [loadData]);
 
   const handleRetry = () => {
     if (retrying) return;
     setRetrying(true);
-    setLoadError(null);
-    setIsLoading(true);
-    const doLoad = async () => {
-      try {
-        const [agentsRes, tasksRes, eventsRes] = await Promise.all([
-          fetch('/api/agents'),
-          fetch('/api/tasks'),
-          fetch('/api/events'),
-        ]);
-        if (agentsRes.ok) setAgents(unwrapAgents(await agentsRes.json()));
-        if (tasksRes.ok) setTasks(await tasksRes.json());
-        if (eventsRes.ok) setEvents(await eventsRes.json());
-        setLoadError(null);
-      } catch (error) {
-        console.error('Failed to load /tasks/all data:', error);
-        setLoadError('Failed to load task board data.');
-      } finally {
-        setIsLoading(false);
-        setTimeout(() => setRetrying(false), 5000);
-      }
-    };
-    doLoad();
+    void loadData();
   };
 
   return (
@@ -181,7 +127,7 @@ export default function AllTasksPage() {
         <AgentsSidebar navigateOnSelect isOpen={sidebarOpen} onClose={() => setSidebarOpen(false)} />
         <MissionQueue
           departmentFilter={null}
-          loadError={loadError}
+          loadError={loadError ? `${loadError} ${lastRefresh ? `Displayed data may be stale. Last task refresh: ${lastRefresh}.` : 'No successful task refresh yet.'}` : null}
           onRetry={() => handleRetry()}
           dueDateWindowDays={dueDateWindowDays}
         />

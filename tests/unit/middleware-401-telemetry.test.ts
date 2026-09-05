@@ -1,3 +1,4 @@
+import { registerFixtureTenant, fixtureTenantCookie } from './_tenant-auth-fixture';
 /**
  * FLEET-FIX 2.3 / AUD-71 — middleware 401 telemetry, END TO END.
  *
@@ -44,6 +45,7 @@ const TOKEN = 'mc-token-value';
 const UA = 'cc-dept-agent/1.0 (write-back probe)';
 
 const ENV_KEYS = [
+  'MC_TENANT_REGISTRY_JSON',
   'NODE_ENV',
   'MC_API_TOKEN',
   'WEBHOOK_SECRET',
@@ -94,6 +96,7 @@ async function loadPipeline(env: EnvOverrides): Promise<Pipeline> {
     if (v === undefined) delete process.env[k];
     else process.env[k] = v;
   }
+  registerFixtureTenant(HOST);
   vi.resetModules();
   const mwMod = await import('@/middleware');
   const sink = await import('@/app/api/internal/auth-rejected/route');
@@ -112,6 +115,7 @@ interface ReqOpts {
 
 function makeReq(path: string, opts: ReqOpts = {}): NextRequest {
   const headers: Record<string, string> = { host: HOST };
+  if(opts.sameOrigin||opts.cfAccess)headers.cookie=fixtureTenantCookie(HOST);
   if (opts.sameOrigin) headers['referer'] = `${ORIGIN}/`;
   if (opts.origin) headers['origin'] = opts.origin;
   if (opts.bearer) headers['authorization'] = `Bearer ${opts.bearer}`;
@@ -294,11 +298,11 @@ describe('AUD-71 defect 5 — the counter does NOT count misconfiguration 401s',
     // No CF headers -> the misconfiguration branch. It takes the DEFAULT status
     // (401) — this is the exact response the first cut mis-counted, because it
     // filtered on `status === 401` instead of on the signal.
-    const res = await mw(makeReq('/api/tasks', { bearer: TOKEN }));
+    const res = await mw(makeReq('/api/tasks', {}));
 
-    expect(res.status).toBe(401);
+    expect(res.status).toBe(403);
     expect(await res.json()).toMatchObject({
-      error: expect.stringContaining('Cloudflare Access is not active'),
+      error: expect.stringContaining('verified tenant identity'),
     });
 
     // The proof: no rewrite was emitted, so the Node sink is never reached...
@@ -311,18 +315,18 @@ describe('AUD-71 defect 5 — the counter does NOT count misconfiguration 401s',
   });
 
   it('a misconfiguration 401 mixed in with real credential failures leaves the count at exactly the real ones', async () => {
-    const { mw, sink, probe } = await loadPipeline({ ...BASE_ENV, REQUIRE_CF_ACCESS: 'true' });
+    const { mw, sink, probe } = await loadPipeline({ ...BASE_ENV, REQUIRE_CF_ACCESS: 'true', WEBHOOK_SECRET:'fixture-webhook' });
     vi.spyOn(console, 'error').mockImplementation(() => {});
 
     // Two REAL credential failures (CF headers present, so we get past Layer 1).
     for (const bearer of [undefined, 'wrong']) {
-      const req = makeReq('/api/tasks', { cfAccess: true, bearer });
+      const req = makeReq('/api/tasks/ingest', { method:'POST', cfAccess: true, bearer });
       await dispatchRewrite(await mw(req), sink, req);
     }
     // Three misconfiguration 401s (no CF headers).
     for (let i = 0; i < 3; i++) {
-      const res = await mw(makeReq('/api/tasks', { bearer: TOKEN }));
-      expect(res.status).toBe(401);
+      const res = await mw(makeReq('/api/tasks', {}));
+      expect(res.status).toBe(403);
       expect(rewriteTarget(res)).toBeNull();
     }
 

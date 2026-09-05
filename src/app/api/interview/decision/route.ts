@@ -1,3 +1,5 @@
+import { queueInterviewOperation } from '@/lib/interview/remote-store';
+import { deliverInterviewOperation, drainInterviewOperations } from '@/lib/interview/remote-protocol';
 /**
  * POST /api/interview/decision  (P2-4)
  *
@@ -93,19 +95,19 @@ export async function POST(req: NextRequest) {
   // presses record-dept-decision.sh against the OPERATOR's canonical build
   // state and resolves its client via getClientContext() (the self row), so a
   // remote client's department decision would be written as the operator's.
-  const tenant = resolveInterviewTenant(req);
+  const tenant = await resolveInterviewTenant(req);
   const refusedTenant = refuseUnverifiedTenant(tenant);
   if (refusedTenant) return refusedTenant;
   if (tenant.kind === 'client') {
-    return NextResponse.json(
-      {
-        error: 'not_implemented_for_client_tenant',
-        message:
-          'Recording department decisions from a client dashboard is not available yet. ' +
-          'Your answers are saved — your operator records these for you.',
-      },
-      { status: 501 },
-    );
+    try {
+      const raw=await req.text();
+      const payload=requestSchema.parse(raw.trim()?JSON.parse(raw):undefined) || {};
+      const op=queueInterviewOperation(tenant.context!, 'decision', payload, req.headers.get('idempotency-key') || undefined);
+      await drainInterviewOperations(tenant.context!);
+      const delivery=await deliverInterviewOperation(tenant.context!,op);
+      if(delivery.receipt)return NextResponse.json(delivery.receipt.result,{status:delivery.receipt.httpStatus});
+      return NextResponse.json({error:'decision_waiting_sync',message:'Your decision is saved and waiting to synchronize.',operationId:op.operation_id},{status:503});
+    } catch { return NextResponse.json({error:'decision_not_saved',message:'The request could not be saved. Please retry.'},{status:503}); }
   }
 
   // 1) Validate the body.
@@ -124,7 +126,7 @@ export async function POST(req: NextRequest) {
 
   // 2) Resolve provenance. An empty decidedBy is refused BEFORE any write so a
   //    "no" can never be recorded in a shape the enforcer would ignore.
-  const decidedBy = resolveOwnerId(req);
+  const decidedBy = tenant.context?.subject || null;
   if (!decidedBy) {
     return NextResponse.json(
       {

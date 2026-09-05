@@ -1,3 +1,4 @@
+import { registerFixtureTenant, fixtureTenantCookie, fixtureTenantScope } from '../unit/_tenant-auth-fixture';
 /**
  * No-redirect-loop integration test (U022 — hardening).
  *
@@ -30,6 +31,7 @@ const TEST_SECRET = 'u022-redirect-loop-test-secret';
 const BASE = 'https://cc.example.com';
 
 const ENV_KEYS = [
+  'MC_TENANT_REGISTRY_JSON',
   'NODE_ENV',
   'MC_API_TOKEN',
   'WEBHOOK_SECRET',
@@ -54,6 +56,7 @@ afterEach(() => {
     if (savedEnv[k] === undefined) delete process.env[k];
     else process.env[k] = savedEnv[k];
   }
+  vi.restoreAllMocks();
   vi.resetModules();
 });
 
@@ -80,6 +83,7 @@ async function loadMiddleware(env: EnvOverrides = {}): Promise<Middleware> {
     if (v === undefined) delete process.env[k];
     else process.env[k] = v;
   }
+  registerFixtureTenant('cc.example.com');
   vi.resetModules();
   const mod = await import('@/middleware');
   return mod.middleware as Middleware;
@@ -88,13 +92,13 @@ async function loadMiddleware(env: EnvOverrides = {}): Promise<Middleware> {
 /** Mint a REAL signed interview cookie (genuine sign/verify path). */
 async function mintCookie(complete: boolean): Promise<string> {
   const { signInterviewToken } = await import('@/lib/interview/gate-cookie');
-  const { value } = await signInterviewToken(complete);
+  const { value } = await signInterviewToken(complete, fixtureTenantScope("cc.example.com"));
   return value;
 }
 
 function pageRequest(path: string, cookie?: string): NextRequest {
-  const headers = new Headers();
-  if (cookie) headers.set('cookie', `${COOKIE_NAME}=${cookie}`);
+  const headers = new Headers({host:'cc.example.com',cookie:fixtureTenantCookie('cc.example.com')});
+  if (cookie) headers.set('cookie', `${fixtureTenantCookie('cc.example.com')}; ${COOKIE_NAME}=${cookie}`);
   return new NextRequest(new URL(path, BASE), { method: 'GET', headers });
 }
 
@@ -114,6 +118,7 @@ describe('interview shell-lock redirect invariants (U022)', () => {
   it('a valid complete cookie → no page redirects to /interview', async () => {
     const mw = await loadMiddleware();
     const cookie = await mintCookie(true);
+    vi.spyOn(globalThis,'fetch').mockImplementation(async()=>new Response(JSON.stringify({interviewComplete:true}),{status:200}));
     for (const path of ['/', '/tasks', '/departments', '/analytics']) {
       const res = await mw(pageRequest(path, cookie));
       expect(redirectTarget(res), `${path} must not redirect`).toBeNull();
@@ -154,7 +159,7 @@ describe('interview shell-lock redirect invariants (U022)', () => {
     }
   });
 
-  it('completion is terminal: an expired-but-signed complete token still unlocks', async () => {
+  it('completion is terminal: an expired-but-signed complete token fails closed until current completion verifies', async () => {
     const mw = await loadMiddleware();
     // The middleware gates on verdict.complete, NOT verdict.valid — completion
     // never reverts, so an expired-but-signature-valid "complete" token must
@@ -164,7 +169,7 @@ describe('interview shell-lock redirect invariants (U022)', () => {
     const crypto = await import('node:crypto');
     const b64url = (b: Buffer) =>
       b.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-    const payload = { complete: true, exp: Math.floor(Date.now() / 1000) - 3600 }; // expired 1h ago
+    const payload = { complete: true, scope:fixtureTenantScope("cc.example.com"), exp: Math.floor(Date.now() / 1000) - 3600 }; // expired 1h ago
     const payloadB64 = b64url(Buffer.from(JSON.stringify(payload)));
     const sig = b64url(
       crypto.createHmac('sha256', TEST_SECRET).update(payloadB64).digest(),
@@ -173,14 +178,13 @@ describe('interview shell-lock redirect invariants (U022)', () => {
 
     // Sanity: the token is signature-valid but expired.
     const { verifyInterviewToken } = await import('@/lib/interview/gate-cookie');
-    const verdict = await verifyInterviewToken(expiredComplete);
+    const verdict = await verifyInterviewToken(expiredComplete,fixtureTenantScope("cc.example.com"));
     expect(verdict.complete).toBe(true); // terminal — survives expiry
     expect(verdict.valid).toBe(false); // …but past exp
 
     // The middleware must NOT redirect: completion is terminal.
     const res = await mw(pageRequest('/', expiredComplete));
-    expect(redirectTarget(res), 'expired-but-valid complete token must unlock').toBeNull();
-    expect(res.status).toBe(200);
+    expect(redirectTarget(res), 'expired completion alone must not unlock').toBe('/interview');
   });
 
   it('fail-closed: a forged cookie redirects to /interview', async () => {

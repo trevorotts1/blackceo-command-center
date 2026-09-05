@@ -127,7 +127,7 @@ interface InterviewStateResponse {
   interviewComplete: boolean;
   buildCompleted: boolean;
   qcStatus: string;
-  session?: { interviewSessionId: string | null };
+  session?: { interviewSessionId: string | null; gatewaySessionId?: string | null };
   structured?: {
     total: number;
     answeredIds: string[];
@@ -222,7 +222,7 @@ const SKIPPED_KEY = 'iv-skipped-structured';
 
 /** localStorage key for the persisted gateway conversation session. */
 function gatewaySessionKey(interviewSessionId: string | null): string {
-  return `iv-gw-session:${interviewSessionId ?? 'default'}`;
+  return `iv-gw-session:${interviewSessionId ?? 'unresolved'}`;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -246,6 +246,7 @@ export default function InterviewClient() {
   // Server truth (progress rail + resume + gate flags + structured position).
   const [state, setState] = useState<InterviewStateResponse | null>(null);
   const [booting, setBooting] = useState(true);
+  const [stateError, setStateError] = useState<string | null>(null);
 
   // Structured answers recorded THIS session (merged with the server's set so a
   // just-answered card is skipped even before the next /state read lands).
@@ -304,7 +305,7 @@ export default function InterviewClient() {
 
   const persistSkipped = useCallback((ids: Set<string>) => {
     try {
-      sessionStorage.setItem(SKIPPED_KEY, JSON.stringify(Array.from(ids)));
+      sessionStorage.setItem(`${SKIPPED_KEY}:${interviewSessionId || 'unresolved'}`, JSON.stringify(Array.from(ids)));
     } catch {
       /* private mode — chips simply don't survive this tab */
     }
@@ -331,10 +332,14 @@ export default function InterviewClient() {
   const loadState = useCallback(async (): Promise<InterviewStateResponse | null> => {
     try {
       const res = await fetch('/api/interview/state', { cache: 'no-store' });
+      if (!res.ok) throw new Error(res.status === 403 || res.status === 401 ? 'Sign in using your invitation link to continue your interview.' : 'Your saved progress is temporarily unavailable. Please retry.');
       const data = (await res.json()) as InterviewStateResponse;
+      if (!data.structured || !data.session || !data.resume) throw new Error('Your saved progress could not be verified. Please retry.');
+      setStateError(null);
       setState(data);
       return data;
-    } catch {
+    } catch (error) {
+      setStateError(error instanceof Error ? error.message : 'Your progress is unavailable. Please retry.');
       // Non-fatal: the rail stays as-is and gates stay fail-closed until the next
       // successful read.
       return null;
@@ -347,6 +352,14 @@ export default function InterviewClient() {
   useEffect(() => {
     let cancelled = false;
     void (async () => {
+      const enrollment=new URLSearchParams(window.location.hash.slice(1)).get('enroll');
+      if(enrollment) {
+        window.history.replaceState(null,'',window.location.pathname+window.location.search);
+        try {
+          const response=await fetch('/api/auth/interview-session',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({ticket:enrollment})});
+          if(!response.ok) {setStateError('This invitation is expired or already used. Request a new invitation to continue.');setBooting(false);return;}
+        } catch {setStateError('Sign-in is temporarily unavailable. Please retry your invitation link.');setBooting(false);return;}
+      }
       const data = await loadState();
       // AI Workforce standard-first (PHASE 6 item 6): read the prebuilt-
       // foundation signal alongside the interview state. gate-status is the
@@ -368,7 +381,7 @@ export default function InterviewClient() {
 
       // Restore per-device skipped chips.
       try {
-        const raw = sessionStorage.getItem(SKIPPED_KEY);
+        const raw = sessionStorage.getItem(`${SKIPPED_KEY}:${data?.session?.interviewSessionId || 'unresolved'}`);
         if (raw) setSkippedIds(new Set(JSON.parse(raw) as string[]));
       } catch {
         /* ignore */
@@ -387,9 +400,7 @@ export default function InterviewClient() {
 
       // Restore the gateway conversation session for this interview.
       try {
-        const stored = localStorage.getItem(
-          gatewaySessionKey(data.session?.interviewSessionId ?? null),
-        );
+        const stored = data.session?.gatewaySessionId || null;
         if (stored) setSessionIdState(stored);
       } catch {
         /* ignore */
@@ -695,7 +706,9 @@ export default function InterviewClient() {
 
   let screen: React.ReactNode;
 
-  if (stage === 'milestone' && milestone) {
+  if (stateError) {
+    screen = <div role="alert" className="p-6"><p>{stateError}</p><button type="button" onClick={() => window.location.reload()}>Retry</button></div>;
+  } else if (stage === 'milestone' && milestone) {
     screen = (
       <MilestoneScreen
         phase={milestone.phase}

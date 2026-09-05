@@ -243,14 +243,14 @@ test('[gate] pending PAST deadline → NEVER-NAKED release (hold:false, deadline
   assert.equal(g.state, 'deadline_fallback');
 });
 
-test('[gate] confirmed → hold:false (write proceeds)', () => {
+test('[gate] audience confirmation waits for the refreshed voice bundle', () => {
   const id = nextId('gate-confirmed');
   insertTask(id);
   persistPersonaBundle(id, bundle({ confirm_required: true }));
   confirmTaskAudience(id, { audienceLabel: 'Founders' });
   const g = evaluateAudienceConfirmGate(id);
-  assert.equal(g.hold, false);
-  assert.equal(g.state, 'confirmed');
+  assert.equal(g.hold, true);
+  assert.equal(g.state, 'pending');
 });
 
 // ── D. Side effects ──────────────────────────────────────────────────────────
@@ -381,7 +381,7 @@ test('[confirm] confirmTaskAudience flips to confirmed + mirrors source=operator
   confirmTaskAudience(id, { audienceId: 'aud-founders', audienceLabel: 'Founders', changed: true });
 
   const row = queryOne<{ confirm_state: string }>('SELECT confirm_state FROM task_persona_bundle WHERE task_id = ?', [id]);
-  assert.equal(row?.confirm_state, 'confirmed');
+  assert.equal(row?.confirm_state, 'pending');
   const mirror = queryOne<{ audience_id: string | null; audience_label: string | null; audience_source: string | null }>(
     'SELECT audience_id, audience_label, audience_source FROM tasks WHERE id = ?',
     [id],
@@ -390,7 +390,7 @@ test('[confirm] confirmTaskAudience flips to confirmed + mirrors source=operator
   assert.equal(mirror?.audience_label, 'Founders');
   assert.equal(mirror?.audience_source, 'operator_confirmed');
   const evt = queryOne<{ message: string }>("SELECT message FROM events WHERE task_id = ? AND type = 'audience_confirmed'", [id]);
-  assert.ok(evt && /operator confirmed audience "Founders"/.test(evt.message));
+  assert.ok(evt && /Audience confirmed; refreshing/.test(evt.message));
 });
 
 // ── E. D5 — deadline fallback never ships the unconfirmed audience voice ────

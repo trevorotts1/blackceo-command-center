@@ -99,6 +99,8 @@ test.before(async () => {
   const db = await import('../../src/lib/db');
   ({ run, queryOne, queryAll, closeDb } = db);
   db.getDb(); // full migration chain incl. 090
+  run('UPDATE workspaces SET company_id=NULL');
+  for(const id of ['t-real-blend','t-real-nonblend','t-stale-blend','t-ancient-box','t-real-crash'])insertTask(id);
 
   run(
     `INSERT OR IGNORE INTO companies (id, name, slug, industry, config) VALUES (?, ?, ?, ?, ?)`,
@@ -170,6 +172,8 @@ function bundle(overrides: Partial<import('../../src/lib/types').PersonaBundle> 
 /** Writes a throwaway persona-selector-v2.py stub and returns its OPENCLAW_ROOT. */
 function makeStubOpenClawRoot(scriptBody: string): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bc-stub-openclaw-'));
+  const config=path.join(root,'company-config.json');fs.writeFileSync(config,JSON.stringify({company_id:'default'}));
+  process.env.MC_PERSONA_COMPANY_CONTEXTS_JSON=JSON.stringify({default:{companyRoot:root,companyConfig:config,companySlug:'test-company'}});
   const scriptsDir = path.join(root, 'skills', '23-ai-workforce-blueprint', 'scripts');
   fs.mkdirSync(scriptsDir, { recursive: true });
   fs.writeFileSync(path.join(scriptsDir, 'persona-selector-v2.py'), scriptBody, { mode: 0o755 });
@@ -803,7 +807,7 @@ test('[D3] POST /api/tasks/[id]/audience: never-naked — confirm applies even w
 
   const gate = await audienceGET(new NextRequest(`http://localhost/api/tasks/${id}/audience`), { params: Promise.resolve({ id }) });
   const gateBody = await gate.json();
-  assert.equal(gateBody.hold, false, 'the task is released regardless of the re-score outcome — never a NEW 30-min stall');
+  assert.equal(gateBody.hold, true, 'confirmed audience waits for its matching voice decision; stale copy cannot be dispatched');
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

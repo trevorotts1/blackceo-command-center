@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 /**
  * Intake-advance sweep (W8.1 — the consumer the board always lacked).
  *
@@ -34,13 +35,13 @@
  * Disable with INTAKE_ADVANCE_SWEEP_ENABLED=0.
  */
 
-import { queryAll, run, queryOne, sqlTime, timeNow } from '@/lib/db';
+import { queryAll, run, queryOne, sqlTime, timeNow, transaction } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { notifySystem } from '@/lib/notify';
 import { autoDispatchTask } from '@/lib/task-dispatcher';
 import { blockDispatchIfOwnerKilled, loadKilledAtDefensive } from '@/lib/owner-killed';
-import { routeTask } from '@/lib/routing/department-router';
-import { resolveDeptSlugForWrite } from '@/lib/routing/resolve-dept-slug-for-write';
+import { routeTaskDecision, type RoutingDecision } from '@/lib/routing/department-router';
+import { throwIfJobLeaseLost } from '@/lib/jobs/job-lease';
 import { ensureCampaignForTask } from '@/lib/campaigns';
 import { QC_MAX_REROUTES, blockTaskForQC } from '@/lib/qc-scorer';
 import type { LifecycleState } from '@/lib/task-lifecycle';
@@ -95,12 +96,16 @@ function sourceExclusionParams(): string[] {
 
 // Minimum routing score to auto-assign an UNASSIGNED task off the intake lane.
 // Below this we leave it unassigned for human triage (mirrors ceo-delegation).
-const ROUTE_MIN_SCORE = parseFloat(process.env.INTAKE_ROUTE_MIN_SCORE || '1');
+
 
 export interface IntakeAdvanceResult {
   scanned: number;
   routed: number;
   dispatched: number;
+  acknowledged?: number;
+  waiting?: number;
+  failed?: number;
+  unknown?: number;
   /** B6: tasks surfaced to the operator this tick for hitting the QC-reroute cap
    *  (fires exactly once per task via the `task_capped` event dedup). */
   capped?: number;
@@ -117,9 +122,58 @@ interface IntakeTaskRow {
   workspace_id: string | null;
   assigned_agent_id: string | null;
   campaign_id: string | null;
+  company_id: string | null;
+  assignment_version: number;
+  routing_attempts: number;
+  updated_at: string;
+  routing_config_revision?: string | null;
 }
 
-export async function runIntakeAdvanceSweep(): Promise<IntakeAdvanceResult> {
+/** Persist every unsuccessful evaluation so the same oldest rows cannot monopolize each tick. */
+function recordRoutingWait(task: IntakeTaskRow, reason: string, retryable: boolean): void {
+  throwIfJobLeaseLost();
+  const attempts = task.routing_attempts + 1;
+  const exhausted = attempts >= 5;
+  const next = new Date(Date.now() + Math.min(3600, 60 * 2 ** Math.min(attempts, 6)) * 1000).toISOString();
+  transaction(() => {
+    const changed = run(`UPDATE tasks SET routing_attempts = ?, last_routing_attempt_at = ?,
+      next_routing_eligible_at = ?, routing_reason = ?, routing_wait_owner = ?, routing_config_revision = ?, routing_next_action = ?
+      WHERE id = ? AND assignment_version = ? AND assigned_agent_id IS NULL AND archived_at IS NULL`,
+      [attempts, timeNow(), retryable && !exhausted ? next : null, reason, retryable && !exhausted ? null : 'SYSTEM', task.routing_config_revision || null, retryable && !exhausted ? 'Automatic routing retry scheduled' : 'Configure an eligible worker or edit the task assignment', task.id, task.assignment_version]);
+    if (changed.changes) run(`INSERT INTO events (id,type,task_id,message,created_at) VALUES (?,?,?,?,?)`,
+      [uuidv4(), 'task_routing_wait', task.id, reason, timeNow()]);
+  });
+}
+
+/** Atomic assignment and evidence, fenced against operator edits made while classification awaited. */
+export function commitIntakeAssignment(task: IntakeTaskRow, decision: Extract<RoutingDecision, {status: 'assigned'}>): boolean {
+  throwIfJobLeaseLost();
+  const routing = decision.routing;
+  return transaction(() => {
+    const worker = queryOne<{ id: string; slug: string }>(`SELECT a.id, w.slug FROM agents a JOIN workspaces w ON w.id = a.workspace_id
+      WHERE a.id = ? AND a.workspace_id = ? AND w.company_id = ? AND w.archived_at IS NULL
+      AND a.status != 'offline' AND a.is_master = 0`, [routing.agentId, routing.workspaceId, routing.companyId]);
+    if (!worker) return false;
+    const now = timeNow();
+    const changed = run(`UPDATE tasks SET assigned_agent_id = ?, department = ?, workspace_id = ?,
+      assignment_version = assignment_version + 1, routing_attempts = routing_attempts + 1,
+      last_routing_attempt_at = ?, next_routing_eligible_at = NULL, routing_reason = ?, routing_wait_owner = NULL, updated_at = ?
+      WHERE id = ? AND assignment_version = ? AND assigned_agent_id IS NULL AND status = ?
+      AND archived_at IS NULL AND killed_at IS NULL AND updated_at = ?
+      AND (source IS NULL OR source NOT IN ('build_deck', 'build_deck_phase'))`,
+      [routing.agentId, worker.slug, routing.workspaceId, now, routing.reason, now,
+        task.id, task.assignment_version, task.status, task.updated_at]);
+    if (!changed.changes) return false;
+    run(`INSERT INTO events (id,type,agent_id,task_id,message,created_at) VALUES (?,?,?,?,?,?)`,
+      [uuidv4(), 'task_assigned', routing.agentId, task.id, `Intake-advance routed: ${routing.reason}`, now]);
+    return true;
+  });
+}
+
+export async function runIntakeAdvanceSweep(dependencies: {
+  route?: typeof routeTaskDecision;
+  dispatch?: typeof autoDispatchTask;
+} = {}): Promise<IntakeAdvanceResult> {
   if (
     process.env.INTAKE_ADVANCE_SWEEP_ENABLED === '0' ||
     process.env.INTAKE_ADVANCE_SWEEP_ENABLED === 'false'
@@ -154,6 +208,18 @@ export async function runIntakeAdvanceSweep(): Promise<IntakeAdvanceResult> {
     console.warn('[intake-advance] phantom-assignment heal pass failed (non-fatal):', (err as Error).message);
   }
 
+  // Configuration changes wake deterministic waits without spending model calls every tick.
+  const configRows=queryAll<Record<string,unknown>>(`SELECT w.id,w.company_id,w.name,w.description,w.archived_at,a.id AS agent_id,a.role,a.status,a.is_master,a.updated_at
+    FROM workspaces w LEFT JOIN agents a ON a.workspace_id=w.id ORDER BY w.id,a.id`);
+  const configRevisions=new Map<string,string>();
+  for(const company of Array.from(new Set(configRows.map(r=>String(r.company_id))))) {
+    const revision=createHash('sha256').update(JSON.stringify(configRows.filter(r=>String(r.company_id)===company))).digest('hex');
+    configRevisions.set(company,revision);
+    run(`UPDATE tasks SET routing_wait_owner=NULL,next_routing_eligible_at=NULL WHERE routing_wait_owner='SYSTEM'
+      AND (routing_config_revision IS NULL OR routing_config_revision != ?)
+      AND workspace_id IN (SELECT id FROM workspaces WHERE company_id=?)`,[revision,company]);
+  }
+
   let rows: IntakeTaskRow[];
   try {
     // FIX 38b: exclude engine-owned sources (build_deck / build_deck_phase) from
@@ -163,22 +229,30 @@ export async function runIntakeAdvanceSweep(): Promise<IntakeAdvanceResult> {
     // matches the SQL text order.
     const sourceExclusion = sourceExclusionClause();
     rows = queryAll<IntakeTaskRow>(
-      `SELECT t.id, t.title, t.description, t.priority, t.status,
-              t.department, t.workspace_id, t.assigned_agent_id, t.campaign_id
+      `SELECT * FROM (SELECT t.id, t.title, t.description, t.priority, t.status,
+              t.department, t.workspace_id, t.assigned_agent_id, t.campaign_id,
+              w.company_id, t.assignment_version, t.routing_attempts, t.updated_at,
+              ROW_NUMBER() OVER (PARTITION BY w.company_id ORDER BY
+                MIN(4, CASE t.priority WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 ELSE 1 END + MAX(0, CAST((julianday('now') - julianday(t.created_at))*24 AS INTEGER))) DESC,
+                COALESCE(t.last_routing_attempt_at, t.created_at) ASC, t.id) AS company_rank
          FROM tasks t
+         LEFT JOIN workspaces w ON w.id = t.workspace_id
          LEFT JOIN agents a ON t.assigned_agent_id = a.id
         WHERE t.status IN (${placeholders})
           ${sourceExclusion}
           AND t.archived_at IS NULL
+          AND t.killed_at IS NULL
+          AND (t.assigned_agent_id IS NOT NULL OR t.routing_wait_owner IS NULL)
+          AND (t.next_routing_eligible_at IS NULL OR ${sqlTime('t.next_routing_eligible_at')} <= ${sqlTime('?')})
           AND (t.qc_reroute_attempts IS NULL OR t.qc_reroute_attempts < ?)
           AND (t.dispatch_attempts IS NULL OR t.dispatch_attempts < ?)
           AND (t.next_dispatch_eligible_at IS NULL OR ${sqlTime('t.next_dispatch_eligible_at')} <= ${sqlTime('?')})
           AND (t.assigned_agent_id IS NULL OR a.is_master IS NULL OR a.is_master = 0)
           AND (t.sop_authoring_for_task_id IS NULL)
           AND ${sqlTime('t.updated_at')} <= ${sqlTime('?')}
-        ORDER BY t.updated_at ASC
+        ) ORDER BY company_rank ASC, updated_at ASC
         LIMIT ?`,
-      [...ADVANCEABLE_STATUSES, ...sourceExclusionParams(), cap, dispatchCap, now, graceCutoff, batch],
+      [...ADVANCEABLE_STATUSES, ...sourceExclusionParams(), now, cap, dispatchCap, now, graceCutoff, batch],
     );
   } catch (err) {
     // Pre-migration DB (attempt-accounting columns absent) — skip cleanly.
@@ -190,8 +264,13 @@ export async function runIntakeAdvanceSweep(): Promise<IntakeAdvanceResult> {
   // from `rows`). The loop is a no-op on an empty set.
   let routed = 0;
   let dispatched = 0;
+  let waiting = 0;
+  let failed = 0;
+  let unknown = 0;
 
   for (const task of rows) {
+    task.routing_config_revision=configRevisions.get(String(task.company_id)) || null;
+    throwIfJobLeaseLost();
     try {
       // FIX-17 / Error 12 / Rule R12: an OWNER-KILLED task (killed_at column OR
       // the "OWNER KILLED" note marker) is terminal-for-dispatch. This advancer
@@ -217,30 +296,24 @@ export async function runIntakeAdvanceSweep(): Promise<IntakeAdvanceResult> {
 
       // ── Route UNASSIGNED intake-lane tasks ────────────────────────────────
       if (!agentId) {
-        const routing = await routeTask({
+        const decision = await (dependencies.route ?? routeTaskDecision)({
           title: task.title,
           description: task.description || '',
           priority: task.priority,
-          workspace_id: null, // consider all departments
+          workspace_id: task.workspace_id,
+          company_id: task.company_id,
           department: task.department || undefined,
         });
-
-        // No route, low confidence, or a CEO/COM master result → leave it
-        // unassigned for a human exec decision (do NOT churn the board).
-        if (!routing || routing.score < ROUTE_MIN_SCORE) continue;
-        if (/ceo|com/i.test(routing.department)) continue;
-
-        agentId = routing.agentId;
-        department = resolveDeptSlugForWrite(routing.department) || department;
-
-        run(
-          `UPDATE tasks SET assigned_agent_id = ?, department = ?, updated_at = ? WHERE id = ?`,
-          [agentId, department, now, task.id],
-        );
-        run(
-          `INSERT INTO events (id, type, agent_id, task_id, message, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-          [uuidv4(), 'task_dispatched', agentId, task.id, `Intake-advance routed: ${routing.reason}`, now],
-        );
+        throwIfJobLeaseLost();
+        if (decision.status !== 'assigned') {
+          recordRoutingWait(task, decision.reason, decision.retryable);
+          waiting++;
+          continue;
+        }
+        if (!commitIntakeAssignment(task, decision)) { waiting++; continue; }
+        agentId = decision.routing.agentId;
+        department = decision.routing.department;
+        task.workspace_id = decision.routing.workspaceId;
         routed++;
       }
 
@@ -256,8 +329,12 @@ export async function runIntakeAdvanceSweep(): Promise<IntakeAdvanceResult> {
       // ── Advance: fire the specialist invocation ───────────────────────────
       // autoDispatchTask is fire-and-forget internally, idempotent against
       // status (GUARD 3) and backoff (GUARD 6), and never throws.
-      await autoDispatchTask(task.id, 'intake-advance-sweep');
-      dispatched++;
+      throwIfJobLeaseLost();
+      const outcome = await (dependencies.dispatch ?? autoDispatchTask)(task.id, 'intake-advance-sweep');
+      if (outcome.status === 'acknowledged') dispatched++;
+      else if (outcome.status === 'failed') failed++;
+      else if (outcome.status === 'unknown') unknown++;
+      else waiting++;
 
       // Broadcast the (possibly) updated row so the board reflects the move.
       try {
@@ -269,6 +346,8 @@ export async function runIntakeAdvanceSweep(): Promise<IntakeAdvanceResult> {
         if (updated) broadcast({ type: 'task_updated', payload: updated });
       } catch { /* broadcast best-effort */ }
     } catch (err) {
+      if (!task.assigned_agent_id) recordRoutingWait(task, `Routing evaluation failed: ${(err as Error).name}`, true);
+      failed++;
       // Never let one task abort the sweep.
       console.warn(`[intake-advance] advance failed for task ${task.id}:`, (err as Error).message);
     }
@@ -377,5 +456,5 @@ export async function runIntakeAdvanceSweep(): Promise<IntakeAdvanceResult> {
     console.warn('[intake-advance] cap-out query failed (non-fatal):', (err as Error).message);
   }
 
-  return { scanned: rows.length, routed, dispatched, capped };
+  return { scanned: rows.length, routed, dispatched, acknowledged: dispatched, waiting, failed, unknown, capped };
 }

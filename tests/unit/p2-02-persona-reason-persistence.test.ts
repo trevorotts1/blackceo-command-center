@@ -41,6 +41,8 @@ test('persona_reason is written by a real pin path (persona-assignment) and surf
     persona_name: 'Russell Brunson',
     score: 0.82,
     interaction_mode: 'leadership',
+    voice:{audience_persona:{id:'russell-brunson',why:'Russell Brunson fits this audience'},topic_persona:{id:'russell-brunson',why:'topic fit'},collapsed:true,collapsed_persona_id:'russell-brunson'},
+    blend_directive:'Use Russell Brunson voice and expertise for the confirmed audience.',confirm_required:true,catalog_version:'fixture-v1',
   });
 
   // Import AFTER DATABASE_PATH is set so getDb() targets the temp DB.

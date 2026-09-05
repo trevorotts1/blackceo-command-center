@@ -16,6 +16,9 @@
  */
 
 import * as cron from 'node-cron';
+import { runLeasedJob } from './job-lease';
+import { runDispatchIntentSweep } from './dispatch-intents';
+import { runInterviewOutboxSweep } from './interview-outbox-sweep';
 import { refreshModels } from './refresh-models';
 import { ALL_PROVIDERS } from '@/lib/model-providers';
 import { resolveProviderApiKey } from '@/lib/provider-key-detection'; // MODEL-08 (usage-refresh key resolution)
@@ -99,20 +102,23 @@ function markRegistered(): void {
  * never rethrown. src/lib/jobs/sweep-liveness.ts reads this table to detect an
  * advancer (intake-advance) or qc-review-sweep gone silent.
  */
-export function recordJobTick(name: string, ranAt: string, status: 'ok' | 'error' | 'disabled', errorMessage?: string): void {
+export function recordJobTick(name: string, ranAt: string, status: 'ok' | 'error' | 'disabled', errorMessage?: string, result?: unknown): void {
+  const finishedAt = new Date().toISOString();
+  // Store bounded codes, never exception text that may include provider URLs/tokens.
+  const code = status === 'error' ? (errorMessage === 'scheduler_job_timeout' ? errorMessage : 'job_failed') : null;
+  const counts: Record<string,number> = {};
+  if(result && typeof result === 'object') for(const [key,value] of Object.entries(result))
+    if(typeof value === 'number' && Number.isFinite(value)) counts[key] = value;
   try {
-    run(
-      `INSERT INTO job_liveness (job_name, last_ran_at, last_status, last_error)
-       VALUES (?, ?, ?, ?)
-       ON CONFLICT(job_name) DO UPDATE SET
-         last_ran_at = excluded.last_ran_at,
-         last_status = excluded.last_status,
-         last_error = excluded.last_error`,
-      [name, ranAt, status, errorMessage ?? null],
-    );
-  } catch (err) {
-    console.warn(`[cron] ${name}: failed to record liveness tick:`, (err as Error).message);
-  }
+    run(`INSERT INTO job_liveness(job_name,last_ran_at,last_status,last_error,last_started_at,last_finished_at,last_success_at,consecutive_failures,result_counts,error_code)
+     VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(job_name) DO UPDATE SET
+     last_ran_at=excluded.last_ran_at,last_status=excluded.last_status,last_error=excluded.last_error,
+     last_started_at=excluded.last_started_at,last_finished_at=excluded.last_finished_at,
+     last_success_at=CASE WHEN excluded.last_status='ok' THEN excluded.last_success_at ELSE job_liveness.last_success_at END,
+     consecutive_failures=CASE WHEN excluded.last_status='error' THEN job_liveness.consecutive_failures+1 ELSE 0 END,
+     result_counts=excluded.result_counts,error_code=excluded.error_code`,
+     [name,ranAt,status,code,ranAt,finishedAt,status==='ok'?finishedAt:null,status==='error'?1:0,JSON.stringify(counts),code]);
+  } catch(err) { console.warn(`[cron] ${name}: liveness persistence failed`,(err as Error).message); }
 }
 
 /**
@@ -134,7 +140,13 @@ function wrap(name: string, fn: () => Promise<unknown> | unknown): () => Promise
     const startedAt = new Date().toISOString();
     try {
       console.log(`[cron] ${name} starting at ${startedAt}`);
-      const result = await fn();
+      const lease = await runLeasedJob(name, () => {
+        run(`INSERT INTO job_liveness(job_name,last_ran_at,last_status,last_started_at) VALUES(?,?,'ok',?)
+          ON CONFLICT(job_name) DO UPDATE SET last_started_at=excluded.last_started_at`,[name,startedAt,startedAt]);
+        return fn();
+      });
+      if (lease.skipped) return;
+      const result = lease.result;
       console.log(`[cron] ${name} finished`);
 
       // Detect disabled/skipped sweeps — a non-null skippedReason means the job
@@ -143,7 +155,7 @@ function wrap(name: string, fn: () => Promise<unknown> | unknown): () => Promise
       // the distinction instead of reporting a false green.
       const maybeSkipped = result as { skippedReason?: string } | undefined;
       const skipped = maybeSkipped && typeof maybeSkipped.skippedReason === 'string' && maybeSkipped.skippedReason.length > 0;
-      recordJobTick(name, startedAt, skipped ? 'disabled' : 'ok', skipped ? maybeSkipped.skippedReason : undefined);
+      recordJobTick(name, startedAt, skipped ? 'disabled' : 'ok', skipped ? maybeSkipped.skippedReason : undefined, result);
     } catch (error) {
       console.error(`[cron] ${name} failed:`, error);
       recordJobTick(name, startedAt, 'error', error instanceof Error ? error.message : String(error));
@@ -393,6 +405,8 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<unknown> | unk
   //
   // execution-reconcile: every 2 minutes, catch in_progress tasks whose
   // TASK_COMPLETE report never reached the webhook.
+  { name: 'interview-outbox', expr: '*/2 * * * *', fn: runInterviewOutboxSweep },
+  { name: 'dispatch-intents', expr: '*/2 * * * *', fn: runDispatchIntentSweep },
   { name: 'execution-reconcile', expr: '*/2 * * * *', fn: runExecutionCompletionReconcile },
   // qc-review-sweep: every 2 minutes, score any review-column task that has
   // not received a qc_review event in the last 10 minutes. Catches tasks that
@@ -801,7 +815,7 @@ export function registerCronJobs(): RegisteredJob[] {
       console.error(`[cron] invalid expression for ${job.name}: ${job.expr}`);
       continue;
     }
-    const scheduleOptions: { name: string; timezone?: string } = { name: job.name };
+    const scheduleOptions: { name: string; timezone?: string; noOverlap: boolean } = { name: job.name, noOverlap: true };
     if (job.timezone) scheduleOptions.timezone = job.timezone;
     cron.schedule(job.expr, wrap(job.name, job.fn), scheduleOptions);
   }

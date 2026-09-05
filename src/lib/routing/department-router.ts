@@ -23,7 +23,7 @@
  *   Semantic embeddings classify by MEANING against those real names.
  */
 
-import { queryAll } from '@/lib/db';
+import { queryAll, queryOne } from '@/lib/db';
 import type { Agent, Task, TaskPriority } from '@/lib/types';
 import { loadDepartments, type DepartmentConfig } from './departments.config';
 import { canonicalDeptSlug } from './canonical-slug';
@@ -82,7 +82,16 @@ export interface RoutingResult {
   department: string;
   score: number;
   reason: string;
+  /** Classification evidence, independent of task urgency and load ranking. */
+  method?: 'owner_pin' | 'explicit' | 'semantic' | 'keyword' | 'general' | 'escalation';
+  confidence?: number;
+  workspaceId?: string;
+  companyId?: string;
 }
+
+export type RoutingDecision =
+  | { status: 'assigned'; routing: RoutingResult & { workspaceId: string; companyId: string } }
+  | { status: 'waiting' | 'ambiguous' | 'no_capable_worker'; reason: string; owner: 'SYSTEM'; retryable: boolean };
 
 export interface AgentWithLoad extends Agent {
   /** Number of tasks currently in_progress for this agent */
@@ -93,45 +102,14 @@ export interface AgentWithLoad extends Agent {
 // Load balancing helpers
 // ---------------------------------------------------------------------------
 
-/**
- * Fetch all non-offline agents enriched with their active task count.
- * The count is used as a load-balancing tiebreaker.
- *
- * IMPORTANT — name-agnostic routing invariant:
- *   When `workspaceId` is supplied it is used ONLY as a soft pre-filter and
- *   ONLY when that workspace actually has agents. If the requested workspace
- *   has zero agents (e.g. the synthetic `'default'` bucket, or the CEO
- *   workspace before any dept agents are seeded), we fall back to the FULL
- *   agent roster across all workspaces so `comDispatch()` can still run its
- *   keyword/semantic department resolution over the whole universe instead of
- *   bailing to null. The passed workspace is a hint, never a hard gate that
- *   blanks out routing.
- */
-function fetchAgentsWithLoad(workspaceId?: string): AgentWithLoad[] {
-  const baseSql = `
-    SELECT
-      a.*,
-      COUNT(t.id) AS active_tasks
-    FROM agents a
-    LEFT JOIN tasks t
-      ON t.assigned_agent_id = a.id
-      AND t.status = 'in_progress'
-    WHERE a.status != 'offline'
-  `;
-  const groupOrder = " GROUP BY a.id ORDER BY a.is_master DESC, a.name ASC";
-
-  if (workspaceId) {
-    const scoped = queryAll<AgentWithLoad>(
-      baseSql + ' AND a.workspace_id = ?' + groupOrder,
-      [workspaceId],
-    );
-    // Only honour the scoped pre-filter when it actually has agents. A
-    // zero-agent workspace must NOT short-circuit routing — fall through to
-    // the full roster so the engine routes across all departments.
-    if (scoped.length > 0) return scoped;
-  }
-
-  return queryAll<AgentWithLoad>(baseSql + groupOrder, []);
+/** Eligible live workers are fetched only from the selected company's active workspaces. */
+function fetchAgentsWithLoad(companyId: string): AgentWithLoad[] {
+  return queryAll<AgentWithLoad>(`
+    SELECT a.*, COUNT(t.id) AS active_tasks
+    FROM agents a JOIN workspaces w ON w.id = a.workspace_id
+    LEFT JOIN tasks t ON t.assigned_agent_id = a.id AND t.status = 'in_progress'
+    WHERE a.status != 'offline' AND w.company_id = ? AND w.archived_at IS NULL
+    GROUP BY a.id ORDER BY a.is_master DESC, a.name ASC`, [companyId]);
 }
 
 /**
@@ -486,6 +464,7 @@ async function llmTiebreak(
         'Content-Type': 'application/json',
         Authorization: `Bearer ${apiKey}`,
       },
+      signal: AbortSignal.timeout(10_000),
       body: JSON.stringify({
         model: process.env.TIEBREAK_MODEL || 'gpt-4o-mini',
         messages: [
@@ -532,7 +511,7 @@ function pickBestAgent(
   agents: AgentWithLoad[],
   department: DepartmentConfig,
 ): AgentWithLoad | undefined {
-  const available = agents.filter((a) => a.status !== 'offline');
+  const available = agents.filter((a) => a.status !== 'offline' && !a.is_master && a.workspace_id === department.id);
 
   type AgentScore = { agent: AgentWithLoad; score: number };
   const deptCanon = canonicalDeptSlug(department.id);
@@ -585,7 +564,7 @@ function resolveSpecialistPin(
   const needle = targetAgent.trim().toLowerCase();
   if (!needle) return null;
 
-  const available = agents.filter((a) => a.status !== 'offline');
+  const available = agents.filter((a) => a.status !== 'offline' && !a.is_master);
 
   // Resolution precedence: id → exact name → exact persona → unique substring.
   let pinned =
@@ -613,7 +592,7 @@ function resolveSpecialistPin(
     agentId: pinned.id,
     agentName: pinned.name,
     department: departmentName,
-    score: 1,
+    score: 1, method: 'owner_pin', confidence: 1, workspaceId: pinned.workspace_id,
     reason:
       `Owner-direct specialist pin: owner named "${targetAgent}" → routed straight to ` +
       `${pinned.name} (${departmentName}), bypassing department classification and pickBestAgent.`,
@@ -642,7 +621,8 @@ function resolveSpecialistPin(
  * Async because semantic embedding requires an API call.
  */
 export async function comDispatch(
-  task: Pick<Task, 'title' | 'description' | 'priority'> & {
+  task: Pick<Task, 'title' | 'priority'> & {
+    description?: string | null;
     workspace_id?: string | null;
     department?: string;
     /**
@@ -671,10 +651,7 @@ export async function comDispatch(
       console.log(`[DepartmentRouter] ${pinned.reason}`);
       return pinned;
     }
-    console.warn(
-      `[DepartmentRouter] Owner named specialist "${task.target_agent}" but no matching ` +
-        `agent was found — falling back to department routing.`,
-    );
+    return null; // An unresolved owner pin requires an explicit correction.
   }
 
   // ── Step 1: Explicit department tag ───────────────────────────────────────
@@ -684,7 +661,7 @@ export async function comDispatch(
     const dept = departments.find(
       (d) =>
         d.name.toLowerCase() === task.department!.toLowerCase() ||
-        canonicalDeptSlug(d.id) === taskDeptCanon,
+        canonicalDeptSlug(d.slug || d.id) === taskDeptCanon,
     );
     if (dept) {
       const agent = pickBestAgent(agents, dept);
@@ -693,11 +670,13 @@ export async function comDispatch(
           agentId: agent.id,
           agentName: agent.name,
           department: dept.name,
+          method: 'explicit', confidence: 1, workspaceId: agent.workspace_id,
           score: dept.priority * urgencyMultiplier(priority) - loadPenalty(agent.active_tasks),
           reason: `Explicit department tag "${dept.name}" matched → role-fit agent selected (load: ${agent.active_tasks} tasks)`,
         };
       }
     }
+    return null; // An explicit department is a constraint, never a fallback hint.
   }
 
   // ── Step 2: Semantic (embedding) classification ───────────────────────────
@@ -743,6 +722,7 @@ export async function comDispatch(
           agentId: agent.id,
           agentName: agent.name,
           department: bestDept.name,
+          method: 'semantic', confidence: similarity, workspaceId: agent.workspace_id,
           score: similarity * urgencyMultiplier(priority) * (bestDept.priority / 10),
           reason: `Semantic routing matched "${bestDept.name}" (similarity: ${similarity.toFixed(3)}) → least-loaded role-fit agent selected (load: ${agent.active_tasks} tasks)`,
         };
@@ -754,7 +734,7 @@ export async function comDispatch(
   // Used when no embedding key is configured (zero configuration required).
   // General Task has empty keywords + priority=1 → always scores 0 → filtered
   // out here by the `score > 0` guard. It is NEVER reached by keyword scoring.
-  const ranked = rankDepartments(title, description, priority, departments);
+  const ranked = semanticRanked && semanticRanked[0]?.similarity < MIN_ROUTING_CONFIDENCE ? [] : rankDepartments(title, description, priority, departments);
 
   if (ranked.length > 0) {
     for (const { department, score } of ranked) {
@@ -764,7 +744,7 @@ export async function comDispatch(
           agentId: agent.id,
           agentName: agent.name,
           department: department.name,
-          score,
+          score, method: 'keyword', confidence: Math.min(1, keywordScore(taskText, department.keywords, department.name) / 3), workspaceId: agent.workspace_id,
           reason: `Keyword scoring matched department "${department.name}" (score: ${score.toFixed(2)}) → least-loaded role-fit agent selected (load: ${agent.active_tasks} tasks)`,
         };
       }
@@ -807,7 +787,7 @@ export async function comDispatch(
         agentId: agent.id,
         agentName: agent.name,
         department: generalTaskDept.name,
-        score: sim ?? 0,
+        score: sim ?? 0, method: 'general', confidence: sim ?? 0, workspaceId: agent.workspace_id,
         reason,
       };
     }
@@ -827,7 +807,7 @@ export async function comDispatch(
       agentId: masters[0].id,
       agentName: masters[0].name,
       department: 'CEO / COM',
-      score: 0,
+      score: 0, method: 'escalation', confidence: 0, workspaceId: masters[0].workspace_id,
       reason: `No department match found and General Task dept has no agent. Routed to CEO / COM master agent for re-dispatch (load: ${masters[0].active_tasks} tasks). CEO will route, not execute.`,
     };
   }
@@ -847,40 +827,48 @@ export async function comDispatch(
  * @param task - Partial task with at minimum title, priority, and workspace_id
  * @returns RoutingResult or null if no agent is available
  */
-export async function routeTask(
-  task: Pick<Task, 'title' | 'description' | 'priority'> & {
-    workspace_id?: string | null;
-    department?: string;
-    /** W3.2 — owner-direct specialist pin; routed straight to the named AI. */
-    target_agent?: string | null;
-  },
-): Promise<RoutingResult | null> {
-  const departments = loadDepartments();
-  // The passed workspace_id is at most a HINT. fetchAgentsWithLoad() only
-  // honours it as a pre-filter when that workspace has agents; otherwise it
-  // returns the FULL roster so comDispatch can run keyword/semantic resolution
-  // across ALL departments. This is the fix for bare-task routing: a scoped
-  // workspace with zero agents (e.g. 'default' / unseeded CEO) must fall
-  // through to full routing, NOT short-circuit to null.
-  const agents = fetchAgentsWithLoad(task.workspace_id ?? undefined);
+export type RoutingTask = Pick<Task, 'title' | 'priority'> & {
+    description?: string | null;
+  workspace_id?: string | null;
+  company_id?: string | null;
+  department?: string;
+  target_agent?: string | null;
+};
 
-  if (agents.length === 0) {
-    // Genuinely degenerate: the install has NO non-offline agents anywhere.
-    console.warn('[DepartmentRouter] No available agents found in any workspace');
-    return null;
+/** Resolve company before any model call; an empty or ambiguous scope never expands globally. */
+export async function routeTaskDecision(task: RoutingTask): Promise<RoutingDecision> {
+  const wait = (reason: string, status: 'waiting' | 'ambiguous' | 'no_capable_worker' = 'waiting'): RoutingDecision =>
+    ({ status, reason, owner: 'SYSTEM', retryable: false });
+  const workspace = task.workspace_id
+    ? queryOne<{ company_id: string; archived_at: string | null }>('SELECT company_id, archived_at FROM workspaces WHERE id = ?', [task.workspace_id])
+    : undefined;
+  if (task.workspace_id && (!workspace || workspace.archived_at)) return wait('Task workspace is missing or archived');
+  if (workspace && task.company_id && workspace.company_id !== task.company_id) return wait('Task company and workspace disagree', 'ambiguous');
+  let companyId = task.company_id || workspace?.company_id;
+  if (!companyId) {
+    const companies = queryAll<{ company_id: string }>('SELECT DISTINCT company_id FROM workspaces WHERE archived_at IS NULL');
+    if (companies.length !== 1) return wait('A unique task company is required', 'ambiguous');
+    companyId = companies[0].company_id;
   }
-
-  const result = await comDispatch(task, agents, departments);
-
-  if (result) {
-    console.log(
-      `[DepartmentRouter] Routed "${task.title}" → ${result.agentName} (${result.department}): ${result.reason}`,
-    );
-  } else {
-    console.warn(`[DepartmentRouter] Could not find a suitable agent for "${task.title}"`);
+  if (!companyId) return wait('Task company is missing', 'ambiguous');
+  const departments = loadDepartments(companyId);
+  const agents = fetchAgentsWithLoad(companyId);
+  if (task.department) {
+    const canon = canonicalDeptSlug(task.department);
+    const matches = departments.filter(d => d.name.toLowerCase() === task.department!.toLowerCase() || canonicalDeptSlug(d.slug || d.id) === canon);
+    if (matches.length !== 1) return wait('Explicit department is missing or ambiguous within the task company', 'ambiguous');
   }
+  const routing = await comDispatch(task, agents, departments);
+  if (!routing) return wait('No eligible worker for the requested department or specialist', 'no_capable_worker');
+  const agent = agents.find(a => a.id === routing.agentId);
+  if (!agent || agent.is_master) return wait('Task requires an operator routing decision');
+  return { status: 'assigned', routing: { ...routing, workspaceId: agent.workspace_id, companyId } };
+}
 
-  return result;
+/** Compatibility adapter: callers receive only executable, company-scoped assignments. */
+export async function routeTask(task: RoutingTask): Promise<RoutingResult | null> {
+  const decision = await routeTaskDecision(task);
+  return decision.status === 'assigned' ? decision.routing : null;
 }
 
 /**

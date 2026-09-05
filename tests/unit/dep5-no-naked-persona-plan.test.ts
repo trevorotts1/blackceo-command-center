@@ -40,6 +40,8 @@ const TMP_DB = path.join(
   'mission-control.test.db',
 );
 process.env.DATABASE_PATH = TMP_DB;
+process.env.CC_TEST_FIXTURE_ROOT=path.dirname(TMP_DB);
+process.env.OPENCLAW_COMPANY_ROOT=path.dirname(TMP_DB);
 
 type DbModule = typeof import('../../src/lib/db');
 let queryOne: DbModule['queryOne'];
@@ -58,6 +60,7 @@ test.before(async () => {
   ({ queryOne, queryAll, run, getDb, closeDb } = db);
   ({ resolvePersonaPlanAndPin } = await import('../../src/lib/tasks'));
   getDb();
+  run('UPDATE workspaces SET company_id=NULL');
 });
 
 test.after(() => {

@@ -248,6 +248,9 @@ test('[DEP2] rescorePersonaWithSOP: a concrete new persona re-pins + writes pers
 
   // SOP hints surface a copywriting specialist; the selector (fixture) returns it.
   process.env.PERSONA_FIXTURE_JSON = JSON.stringify({
+    ...testBundle(),
+    voice:{audience_persona:{id:'bly-copywriters-handbook',why:'SOP'},topic_persona:{id:'bly-copywriters-handbook',why:'SOP'},collapsed:true,collapsed_persona_id:'bly-copywriters-handbook'},
+    blend_directive:'Current SOP-aware blend for Bly.',
     persona_id: 'bly-copywriters-handbook',
     persona_name: 'Robert Bly',
     interaction_mode: 'leadership',
@@ -306,6 +309,9 @@ test('[D9] rescorePersonaWithSOP: a CHANGED rescore w/ an existing bundle row in
   assert.equal(before?.voice_persona_id, 'generic-leader');
 
   process.env.PERSONA_FIXTURE_JSON = JSON.stringify({
+    ...testBundle(),
+    voice:{audience_persona:{id:'bly-copywriters-handbook',why:'SOP'},topic_persona:{id:'bly-copywriters-handbook',why:'SOP'},collapsed:true,collapsed_persona_id:'bly-copywriters-handbook'},
+    blend_directive:'Current SOP-aware blend for Bly.',
     persona_id: 'bly-copywriters-handbook',
     persona_name: 'Robert Bly',
     interaction_mode: 'leadership',
@@ -319,27 +325,12 @@ test('[D9] rescorePersonaWithSOP: a CHANGED rescore w/ an existing bundle row in
 
   assert.equal(res.changed, true);
   assert.equal(res.persona_id, 'bly-copywriters-handbook');
-  assert.equal(res.blend_directive, null, 'D9: RescoreResult carries the neutralized (null) blend_directive for the caller to patch in-memory');
-
-  const after = queryOne<{
-    blend_directive: string | null; voice_persona_id: string | null; topic_persona_id: string | null; voice_collapsed: number | null;
-  }>('SELECT blend_directive, voice_persona_id, topic_persona_id, voice_collapsed FROM tasks WHERE id = ?', [id]);
-  assert.equal(after?.blend_directive, null, 'D9: stale blend_directive mirror is NULLed, never rides the new persona');
-  assert.equal(after?.voice_persona_id, null, 'D9: voice mirror NULLed');
-  assert.equal(after?.topic_persona_id, null, 'D9: topic mirror NULLed');
-  assert.equal(after?.voice_collapsed, 0);
-
-  const bundleRow = queryOne<{ confirm_state: string }>(
-    'SELECT confirm_state FROM task_persona_bundle WHERE task_id = ?', [id],
-  );
-  assert.equal(bundleRow?.confirm_state, 'not_required', 'D9: bundle confirm_state neutralized alongside the mirror columns');
-
-  const invalidateEvt = queryOne<{ message: string }>(
-    "SELECT message FROM events WHERE task_id = ? AND type = 'persona_blend_invalidated_by_rescore' ORDER BY created_at DESC LIMIT 1",
-    [id],
-  );
-  assert.ok(invalidateEvt, 'D9: persona_blend_invalidated_by_rescore audit event written');
-  assert.ok(/generic-leader/.test(invalidateEvt!.message) && /bly-copywriters-handbook/.test(invalidateEvt!.message));
+  assert.match(res.blend_directive??'',/Current SOP-aware blend/);
+  const after=queryOne<{blend_directive:string;voice_persona_id:string}>('SELECT blend_directive,voice_persona_id FROM tasks WHERE id=?',[id]);
+  assert.equal(after?.voice_persona_id,'bly-copywriters-handbook');
+  assert.match(after?.blend_directive??'',/Current SOP-aware blend/);
+  const stored=queryOne<{bundle_json:string}>('SELECT bundle_json FROM task_persona_bundle WHERE task_id=?',[id]);
+  assert.equal(JSON.parse(stored!.bundle_json).voice.collapsed_persona_id,'bly-copywriters-handbook');
 });
 
 test('[D9] rescorePersonaWithSOP: a CHANGED rescore w/ NO bundle row leaves blend_directive undefined (no regression for non-blend tasks)', async () => {
@@ -348,6 +339,9 @@ test('[D9] rescorePersonaWithSOP: a CHANGED rescore w/ NO bundle row leaves blen
   // No persistPersonaBundle call — this task never blended.
 
   process.env.PERSONA_FIXTURE_JSON = JSON.stringify({
+    ...testBundle(),
+    voice:{audience_persona:{id:'bly-copywriters-handbook',why:'SOP'},topic_persona:{id:'bly-copywriters-handbook',why:'SOP'},collapsed:true,collapsed_persona_id:'bly-copywriters-handbook'},
+    blend_directive:'Current SOP-aware blend for Bly.',
     persona_id: 'bly-copywriters-handbook',
     persona_name: 'Robert Bly',
     interaction_mode: 'leadership',
@@ -360,7 +354,7 @@ test('[D9] rescorePersonaWithSOP: a CHANGED rescore w/ NO bundle row leaves blen
   delete process.env.PERSONA_FIXTURE_JSON;
 
   assert.equal(res.changed, true);
-  assert.equal(res.blend_directive, undefined, 'no bundle → nothing to invalidate → undefined (caller leaves task.blend_directive untouched)');
+  assert.match(res.blend_directive??'',/Current SOP-aware blend/,'content gains a complete bundle even when it was previously absent');
 
   const evt = queryOne<{ n: number }>(
     "SELECT COUNT(*) as n FROM events WHERE task_id = ? AND type = 'persona_blend_invalidated_by_rescore'", [id],

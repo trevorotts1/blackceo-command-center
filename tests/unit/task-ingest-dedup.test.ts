@@ -487,3 +487,34 @@ test('keyless same-title within window STILL dedups (Layer 2 preserved for keyle
   assert.equal(r2!.deduped, true, 'keyless same-title within window MUST still dedupe (Layer 2 intact)');
   assert.equal(r2!.task.id, r1!.task.id, 'deduped result must point to the first task');
 });
+
+// Reliability batch: exercise the actual async creation function, not a mock deduper.
+test('twenty concurrent retries commit one task, creation event and dispatch intent', async () => {
+  const input = { title: `Concurrent operation ${RUN_ID}`, workspace_id: `ws-dedup-${RUN_ID}`,
+    status: 'backlog', idempotency_key: `concurrent-${RUN_ID}` };
+  const results = await Promise.all(Array.from({ length: 20 }, () => createTaskCoreImpl(input, { notifyGateway: false })));
+  assert.equal(new Set(results.map(r => r?.task.id)).size, 1);
+  assert.equal(results.filter(r => r?.deduped === false).length, 1);
+  const id = results[0]!.task.id;
+  assert.equal(queryAll<{n:number}>("SELECT COUNT(*) n FROM events WHERE task_id=? AND type='task_created'", [id])[0].n, 1);
+  assert.equal(queryAll<{n:number}>('SELECT COUNT(*) n FROM task_dispatch_intents WHERE task_id=?', [id])[0].n, 1);
+});
+
+test('conflicting operation reuse refuses changed instructions', async () => {
+  const input = { title: `Payload conflict ${RUN_ID}`, description: 'Original instructions',
+    workspace_id: `ws-dedup-${RUN_ID}`, idempotency_key: `conflict-${RUN_ID}` };
+  await createTaskCoreImpl(input, { notifyGateway: false });
+  await assert.rejects(createTaskCoreImpl({ ...input, description: 'Different instructions' }, { notifyGateway: false }), /different task instructions/);
+});
+
+test('archiving a recorded operation preserves retry identity; reruns use a new operation', async () => {
+  const input = { title: `Archived operation ${RUN_ID}`, workspace_id: `ws-dedup-${RUN_ID}`,
+    idempotency_key: `archive-operation-${RUN_ID}` };
+  const first = await createTaskCoreImpl(input, { notifyGateway: false });
+  run('UPDATE tasks SET archived_at=? WHERE id=?', [new Date().toISOString(), first!.task.id]);
+  const retry = await createTaskCoreImpl(input, { notifyGateway: false });
+  assert.equal(retry!.task.id, first!.task.id);
+  assert.equal(retry!.deduped, true);
+  const rerun = await createTaskCoreImpl({ ...input, idempotency_key: `${input.idempotency_key}-new` }, { notifyGateway: false });
+  assert.notEqual(rerun!.task.id, first!.task.id);
+});

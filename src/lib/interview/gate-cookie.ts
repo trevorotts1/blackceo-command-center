@@ -70,6 +70,7 @@ export const BYPASS_TTL_SECONDS = 60 * 60; // 1 hour
 interface GatePayload {
   /** true only when the interview is genuinely complete / build finished. */
   complete: boolean;
+  scope?: string;
   /** unix seconds this token expires. */
   exp: number;
 }
@@ -171,6 +172,7 @@ function timingSafeEqual(a: string, b: string): boolean {
  */
 export async function signInterviewToken(
   complete: boolean,
+  scope = 'legacy-local',
 ): Promise<{ value: string; maxAge: number }> {
   // DATA-13: never mint a token signed with the public dev fallback in prod —
   // it would be trivially forgeable. Fail loud so the setter surfaces the
@@ -184,7 +186,7 @@ export async function signInterviewToken(
   }
   const ttl = complete ? COMPLETE_TTL_SECONDS : INCOMPLETE_TTL_SECONDS;
   const exp = Math.floor(Date.now() / 1000) + ttl;
-  const payload: GatePayload = { complete: !!complete, exp };
+  const payload: GatePayload = { complete: !!complete, exp, scope };
   const payloadB64 = strToB64url(JSON.stringify(payload));
   const sig = await hmacB64url(payloadB64);
   return { value: `${payloadB64}.${sig}`, maxAge: ttl };
@@ -200,6 +202,7 @@ export async function signInterviewToken(
  */
 export async function verifyInterviewToken(
   value: string | undefined | null,
+  scope = 'legacy-local',
 ): Promise<GateVerdict> {
   const fail: GateVerdict = { valid: false, complete: false, expired: false };
   // DATA-13: on a production box whose secret is the public dev fallback, the
@@ -227,6 +230,7 @@ export async function verifyInterviewToken(
   } catch {
     return fail;
   }
+  if (payload.scope !== scope) return fail;
   const complete = payload.complete === true;
   const now = Math.floor(Date.now() / 1000);
   const expired = typeof payload.exp !== 'number' || payload.exp < now;
@@ -245,7 +249,7 @@ export async function verifyInterviewToken(
  * (completion is terminal and never reverts). Uses the same HMAC key as
  * signInterviewToken so the middleware can verify both with the same secret.
  */
-export async function signLatchToken(): Promise<{ value: string; maxAge: number }> {
+export async function signLatchToken(scope = 'legacy-local'): Promise<{ value: string; maxAge: number }> {
   if (devSecretInProduction()) {
     throw new Error(
       'DATA-13: interview cookie secret resolves to the public dev fallback in ' +
@@ -254,7 +258,7 @@ export async function signLatchToken(): Promise<{ value: string; maxAge: number 
     );
   }
   const exp = Math.floor(Date.now() / 1000) + LATCH_TTL_SECONDS;
-  const payload: GatePayload = { complete: true, exp };
+  const payload: GatePayload = { complete: true, exp, scope };
   const payloadB64 = strToB64url(JSON.stringify(payload));
   const sig = await hmacB64url(payloadB64);
   return { value: `${payloadB64}.${sig}`, maxAge: LATCH_TTL_SECONDS };

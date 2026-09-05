@@ -1,3 +1,5 @@
+import { queueInterviewOperation } from '@/lib/interview/remote-store';
+import { deliverInterviewOperation, drainInterviewOperations } from '@/lib/interview/remote-protocol';
 /**
  * POST /api/interview/complete
  *
@@ -202,19 +204,22 @@ export async function POST(req: NextRequest) {
   // OPERATOR's interview complete and start the OPERATOR's build from the
   // client's data. Refuse until a per-client build path exists; a 501 is
   // strictly better than running the wrong box's build.
-  const tenant = resolveInterviewTenant(req);
+  const tenant = await resolveInterviewTenant(req);
   const refusedTenant = refuseUnverifiedTenant(tenant);
   if (refusedTenant) return refusedTenant;
   if (tenant.kind === 'client') {
-    return NextResponse.json(
-      {
-        error: 'not_implemented_for_client_tenant',
-        message:
-          'Completing the interview from a client dashboard is not available yet. ' +
-          'Your answers are saved — your operator finishes the build for you.',
-      },
-      { status: 501 },
-    );
+    try {
+      const raw=await req.text();
+      const payload=requestSchema.parse(raw.trim()?JSON.parse(raw):undefined) || {};
+      const op=queueInterviewOperation(tenant.context!, 'complete', payload, req.headers.get('idempotency-key') || undefined);
+      await drainInterviewOperations(tenant.context!);
+      const delivery=await deliverInterviewOperation(tenant.context!,op);
+      if(delivery.receipt) {
+        if(delivery.receipt.result?.status==='pass' && !delivery.receipt.buildId)return NextResponse.json({status:'needs-review',message:'Your interview was acknowledged. We are waiting for your installation to identify the build.',operationId:op.operation_id},{status:202});
+        return NextResponse.json({...delivery.receipt.result,operationId:op.operation_id,buildId:delivery.receipt.buildId,installationId:delivery.receipt.installationId},{status:delivery.receipt.httpStatus});
+      }
+      return NextResponse.json({status:'needs-review',message:'Your request is saved and waiting for your installation to acknowledge it.',handoff:delivery,operationId:op.operation_id},{status:202});
+    } catch { return NextResponse.json({error:'complete_not_saved',message:'The request could not be saved. Please retry.'},{status:503}); }
   }
 
   // Body is optional; tolerate an empty/absent body.
