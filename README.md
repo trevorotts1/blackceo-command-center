@@ -1,6 +1,6 @@
 # Command Center
 
-**Current release: v7.1.1 (2026-09-05)** — missing departments now use the company's General Task or CEO executor, with durable queue recovery, confirmed persona preservation and the Kanban assignment/persona/health repairs. Pair with onboarding **v25.0.3**. See [fallback execution](docs/general-ceo-fallback-2026-09-05.md).
+**Current release: v7.1.1 (2026-09-05)** — missing departments now use the company's General Task or CEO executor, with durable queue recovery, confirmed persona preservation and the Kanban assignment/persona/health repairs. Pair with onboarding **v25.0.4**. See [fallback execution](docs/general-ceo-fallback-2026-09-05.md).
 
 The v7.1.0 dependency security remediation remains included; see the [security notes](docs/dependency-security-2026-09-05.md).
 

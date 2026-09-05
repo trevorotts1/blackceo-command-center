@@ -9,7 +9,7 @@
 
 ### Verification
 - Regression coverage includes tenant isolation, rejected assignment atomicity, persona access failures, health degradation/recovery and delayed or missing dispatch receipts.
-- Runtime validation uses isolated fixtures and a local executor stub. Pair with onboarding v25.0.3; publishing does not deploy client installations.
+- Runtime validation uses isolated fixtures and a local executor stub. Pair with onboarding v25.0.4; publishing does not deploy client installations.
 
 ## [v7.1.0] — 2026-09-05 — Dependency security remediation
 
