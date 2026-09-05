@@ -388,8 +388,11 @@ jobs:
           # Build needs a placeholder DB path; the e2e test uses its own temp DB
           DATABASE_PATH: /tmp/duck-e2e-build.db
 
-      - name: Run duck pipeline e2e test (mock generator mode)
-        run: node --import tsx --test tests/e2e/duck-test.ts
+      - name: Run specialist, General and CEO pipeline tests (mock generator)
+        run: |
+          node --import tsx --test tests/e2e/duck-test.ts
+          DUCK_CATCH_ALL=general node --import tsx --test tests/e2e/duck-test.ts
+          DUCK_CATCH_ALL=ceo node --import tsx --test tests/e2e/duck-test.ts
         timeout-minutes: 5
         env:
           # DUCK_E2E_USE_REAL_KIE: unset → mock generator (CI default)
