@@ -9,7 +9,7 @@
  *   3. comDispatch() routes a task to a custom-named dept when that dept's
  *      purpose matches the task meaning.
  *   4. Keyword fallback still routes correctly when no embedding key exists.
- *   5. The CEO / COM agent is NEVER the executor — it is the router fallback.
+ *   5. The CEO / COM agent can execute catch-all tasks in its recognized workspace.
  *
  * Runs via Node built-in test runner under tsx (`npm run test:unit`).
  * No network calls are made — embedding path is bypassed because
@@ -28,6 +28,10 @@ import './_isolated-db';
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import path from 'node:path';
+
+// Runtime readiness probes must stay inside this test's isolated fixture.
+process.env.OPENCLAW_ROOT = path.join(process.env.CC_TEST_FIXTURE_ROOT!, 'openclaw');
 
 // ---------------------------------------------------------------------------
 // Helpers to build in-memory test fixtures
@@ -215,11 +219,9 @@ test('custom-named dept "Revenue Ignition Engine" receives a sales task via keyw
 });
 
 // ---------------------------------------------------------------------------
-// Test 5: CEO / COM fallback is the ROUTER, not executor
-//         When no dept matches, master agent is returned — but the routing
-//         reason must say "re-dispatch" or "route", NOT "execute".
+// Test 5: CEO fallback executes in an explicitly recognized workspace.
 // ---------------------------------------------------------------------------
-test('CEO / COM fallback routes tasks to master agent with re-dispatch reason', async () => {
+test('CEO / COM fallback executes in a recognized orchestrator workspace', async () => {
   const genericDept = makeCustomDept(
     'some-dept',
     'Some Department',
@@ -253,19 +255,15 @@ test('CEO / COM fallback routes tasks to master agent with re-dispatch reason', 
       priority: 'medium',
     },
     [deptAgent, masterAgent],
-    [genericDept],
+    [genericDept, makeCustomDept('master-orchestrator', 'Master Orchestrator', 'Fallback execution')],
   );
 
   // Should fall through to the master agent
   assert.ok(result !== null, 'Should not return null — master agent should catch it');
   assert.equal(result.agentId, 'master-agent', 'CEO / COM master agent should be the fallback');
-  // The reason must indicate routing/re-dispatch, not execution
-  assert.ok(
-    result.reason.toLowerCase().includes('route') ||
-      result.reason.toLowerCase().includes('dispatch') ||
-      result.reason.toLowerCase().includes('re-dispatch'),
-    `Fallback reason should indicate routing behavior, got: "${result.reason}"`,
-  );
+  assert.equal(result.method, 'escalation');
+  assert.ok(result.reason.startsWith('[catch-all]'));
+  assert.ok(result.reason.includes('for execution'));
 });
 
 // ---------------------------------------------------------------------------

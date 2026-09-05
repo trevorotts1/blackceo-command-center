@@ -57,6 +57,13 @@ function webhookSignature(rawBody: string): string {
 // Next.js dev startup takes 20-60s; the full pipeline including server startup,
 // ingest, routing, dispatch, QC adds another ~30s. 180s gives headroom.
 const TEST_TIMEOUT_MS = 180_000;
+const CATCH_ALL = process.env.DUCK_CATCH_ALL;
+if (CATCH_ALL && !['general','ceo'].includes(CATCH_ALL)) throw new Error('DUCK_CATCH_ALL must be general or ceo');
+const EXPECTED_WORKSPACE = CATCH_ALL === 'ceo' ? 'ws-master' : CATCH_ALL === 'general' ? 'ws-general' : 'ws-graphics';
+const EXPECTED_AGENT = CATCH_ALL === 'ceo' ? 'd0000000-0000-4000-8000-000000000002' : 'd0000000-0000-4000-8000-000000000001';
+const EXPECTED_DEPARTMENT = CATCH_ALL === 'ceo' ? 'master-orchestrator' : CATCH_ALL === 'general' ? 'general-task' : 'Graphics';
+const EXPECTED_RUNTIME = CATCH_ALL === 'ceo' ? 'main' : CATCH_ALL === 'general' ? 'dept-general-task' : 'dept-graphics';
+
 
 // ── Temp directory setup ─────────────────────────────────────────────────────
 const TMP_DIR      = fs.mkdtempSync(path.join(os.tmpdir(), 'duck-e2e-'));
@@ -68,9 +75,9 @@ fs.mkdirSync(PROJECTS_DIR, { recursive: true });
 // runtime. The real dispatch and QC guards use these same configured roots.
 const OPENCLAW_ROOT = path.join(TMP_DIR, 'openclaw');
 const COMPANY_ROOT = path.join(TMP_DIR, 'company');
-fs.mkdirSync(path.join(OPENCLAW_ROOT, 'agents', 'dept-graphics', 'sessions'), {recursive:true});
+fs.mkdirSync(path.join(OPENCLAW_ROOT, 'agents', EXPECTED_RUNTIME, 'sessions'), {recursive:true});
 fs.mkdirSync(COMPANY_ROOT, {recursive:true});
-fs.writeFileSync(path.join(OPENCLAW_ROOT,'openclaw.json'),JSON.stringify({agents:{list:[{id:'dept-graphics',name:'Pixel',model:{primary:'openai/gpt-4o'}}]}}));
+fs.writeFileSync(path.join(OPENCLAW_ROOT,'openclaw.json'),JSON.stringify({agents:{list:[{id:EXPECTED_RUNTIME,name:CATCH_ALL === 'ceo' ? 'Stefanie' : 'Pixel',model:{primary:'openai/gpt-4o'}}]}}));
 const COMPANY_CONFIG=path.join(COMPANY_ROOT,'company-config.json');
 const PERSONA_CATALOG=path.join(COMPANY_ROOT,'persona-categories.json');
 fs.writeFileSync(COMPANY_CONFIG,JSON.stringify({company_id:'default',company_slug:'default'}));
@@ -460,7 +467,8 @@ async function seedFixtures(): Promise<void> {
   getDb();
 
   const now = new Date().toISOString();
-  run("UPDATE workspaces SET slug=slug||'-seed' WHERE slug IN ('graphics','master-orchestrator')");
+  run("UPDATE workspaces SET slug=slug||'-seed' WHERE slug IN ('graphics','master-orchestrator','general-task')");
+  if (CATCH_ALL) run("UPDATE agents SET status='offline'");
 
   run(
     `INSERT OR IGNORE INTO companies (id, name, slug, config, created_at, updated_at)
@@ -512,8 +520,19 @@ async function seedFixtures(): Promise<void> {
     );
   }
 
+  if (CATCH_ALL === 'general') {
+    run("INSERT INTO workspaces(id,name,slug,company_id) VALUES('ws-general','General Task','general-task','default')");
+    run("UPDATE agents SET workspace_id='ws-general',role='General Specialist',openclaw_agent_id=? WHERE id=?",[EXPECTED_RUNTIME,EXPECTED_AGENT]);
+  }
+  if (CATCH_ALL === 'ceo') {
+    run("UPDATE agents SET status='offline' WHERE id <> ?",[EXPECTED_AGENT]);
+    run("UPDATE agents SET openclaw_agent_id='main' WHERE id=?",[EXPECTED_AGENT]);
+  }
+
   run("INSERT OR IGNORE INTO model_registry(model_id,label,provider,capabilities,status) VALUES('openai/gpt-4o','Fixture writer','openai','[\"text\",\"vision\"]','active')");
   run("INSERT OR IGNORE INTO agent_settings(id,department_id,role_id,setting_type,value) VALUES('duck-model','ws-graphics','d0000000-0000-4000-8000-000000000001','model','openai/gpt-4o')");
+
+  if (CATCH_ALL) run("INSERT OR REPLACE INTO agent_settings(id,department_id,role_id,setting_type,value) VALUES('duck-model',?,?,'model','openai/gpt-4o')",[EXPECTED_WORKSPACE,EXPECTED_AGENT]);
 
   // Seed a Graphics SOP so the Triad Rule gate (description + sop_id + persona_id)
   // can be satisfied before the test advances the task out of backlog.
@@ -526,6 +545,7 @@ async function seedFixtures(): Promise<void> {
     [now, now],
   );
 
+  if (CATCH_ALL) run("UPDATE sops SET department=? WHERE id='sop-duck-e2e'",[EXPECTED_DEPARTMENT]);
   closeDb();
 }
 
@@ -594,7 +614,7 @@ test('duck pipeline end-to-end (mock generator)', { timeout: TEST_TIMEOUT_MS }, 
       title: taskTitle,
       description: 'Generate a high-quality image of a blue rubber duck.',
       source: 'e2e-test',
-      department_slug: 'graphics',
+      department_slug: CATCH_ALL ? 'missing-duck-department' : 'graphics',
       ...await producerDecision(),
     });
     assert.equal(res.status, 201, `Expected 201 from ingest, got ${res.status}: ${JSON.stringify(res.json)}`);
@@ -607,20 +627,20 @@ test('duck pipeline end-to-end (mock generator)', { timeout: TEST_TIMEOUT_MS }, 
   });
 
   // ── b. Task routed to graphics workspace ─────────────────────────────────
-  await step('b. task routed to graphics workspace', async () => {
+  await step(`b. task routed to ${EXPECTED_WORKSPACE}`, async () => {
     const task = await pollTask(
       taskId,
       (t) => {
         const wsId = t.workspace_id as string | undefined;
-        return !!(wsId && (wsId === 'ws-graphics' || wsId.includes('graphics')));
+        return wsId === EXPECTED_WORKSPACE;
       },
-      'workspace_id contains graphics',
+      `workspace_id equals ${EXPECTED_WORKSPACE}`,
       10_000,
     );
     const wsId = task.workspace_id as string;
     assert.ok(
-      wsId === 'ws-graphics' || wsId.toLowerCase().includes('graphics'),
-      `Expected graphics workspace, got: ${wsId}`,
+      wsId === EXPECTED_WORKSPACE,
+      `Expected ${EXPECTED_WORKSPACE}, got: ${wsId}`,
     );
     console.log(`[duck-e2e] Task workspace: ${wsId}`);
   });
@@ -633,9 +653,9 @@ test('duck pipeline end-to-end (mock generator)', { timeout: TEST_TIMEOUT_MS }, 
   await step('c. agent assigned (persona/model seam verified)', async () => {
     const task = await pollTask(
       taskId,
-      (t) => !!(t.assigned_agent_id),
-      'assigned_agent_id non-null',
-      10_000,
+      (t) => !!(t.assigned_agent_id && t.sop_id && t.persona_id),
+      'assigned executor, matching SOP, and confirmed persona persisted',
+      30_000,
     );
     assert.ok(task.assigned_agent_id, `assigned_agent_id must be non-null; got: ${JSON.stringify(task)}`);
     // model_id may be null until dispatch fires; we verify it via DB row after dispatch
@@ -645,7 +665,9 @@ test('duck pipeline end-to-end (mock generator)', { timeout: TEST_TIMEOUT_MS }, 
     assert.ok(task.sop_id,'a matching SOP must be selected before dispatch');
     const {queryOne}=await import('../../src/lib/db');
     const sop=queryOne<{department:string;deleted_at:string|null}>('SELECT department,deleted_at FROM sops WHERE id=?',[task.sop_id as string]);
-    assert.match(sop!.department.toLowerCase(),/graphics/);
+    assert.equal(sop!.department.toLowerCase(),EXPECTED_DEPARTMENT.toLowerCase());
+    assert.equal(task.assigned_agent_id,EXPECTED_AGENT,'correct same-company executor');
+    if(CATCH_ALL) assert.match(String(task.routing_reason),/^\[catch-all\]/);
     assert.equal(sop!.deleted_at,null);
   });
 
@@ -660,6 +682,13 @@ test('duck pipeline end-to-end (mock generator)', { timeout: TEST_TIMEOUT_MS }, 
     assert.equal(attempts.length,1,'one durable execution');
     executionId=String(attempts[0].id);
     assert.equal(attempts[0].state,'accepted');
+    assert.equal(attempts[0].agent_id,EXPECTED_AGENT);
+    assert.ok(String(attempts[0].session_key).startsWith(`agent:${EXPECTED_RUNTIME}:`),'explicit runtime session matches executor');
+    if(CATCH_ALL) {
+      const message=String(sentMessages[0]?.message ?? '');
+      assert.ok(message.includes('**Execution assignment:** [catch-all]'),'remote prompt carries execution assignment');
+      assert.ok(message.includes('Do not re-ingest'),'fallback must execute this task instead of looping through intake');
+    }
     assert.equal(sentMessages.length,1,'one remote chat.send');
     assert.ok(JSON.stringify(sentMessages[0]).includes(executionId),'prompt carries current execution identity');
     const receipt = await waitForDispatchReceipt({

@@ -2,6 +2,8 @@
 
 **Current release: v7.1.0 (2026-09-05)** — security dependency update following the v7.0.0 reliability milestone. Upgrades Next.js to 16.3.4, React to 19.2.8, and the affected build/test dependencies. The reviewed lockfile reports **zero npm advisories**, down from 15 affected packages (2 critical, 9 high, 3 moderate, 1 low). See the [dependency security notes](docs/dependency-security-2026-09-05.md).
 
+Unreleased main also adds [General Task / CEO execution fallback](docs/general-ceo-fallback-2026-09-05.md): missing departments route to an available company-owned executor, with automatic queue recovery and existing-task execution. Install the companion onboarding V3 policy with this change.
+
 Publishing this code does not deploy or verify it on client installations. Before a client upgrade, register tenant and persona contexts and verify the receiver using the [tenant interview rollout guide](docs/tenant-interview-rollout.md). Use Node 24 LTS for new installations; the dependency-compatible engine range is `^20.19.0 || ^22.13.0 || >=24`. Rebuild native dependencies with `npm ci` on the target runtime.
 
 ## Historical release highlights

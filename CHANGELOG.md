@@ -1,6 +1,7 @@
 ## [Unreleased] — 2026-09-05 — Command Center smoke-test repairs
 
 ### Fixed
+- FIX-49: unknown or unavailable departments automatically select this company's General Task or CEO executor. Runtime readiness, durable queue reassessment and exact historical department-hold recovery prevent department-correction parking. Migration 133 preserves catch-all evidence and adds verified runtime bindings; existing-task execution prompts prevent CEO re-ingestion loops. Fallback SOP selection precedes persona selection, and late rescoring preserves verified confirmed persona decisions.
 - FIX-45: task assignment accepts existing stable agent IDs and checks agent/workspace company ownership before saving.
 - FIX-46: authorized browser sessions can read their task persona bundles; failed requests show an error and retry instead of appearing unassigned.
 - FIX-47: home, departments and board share health reporting that distinguishes degraded, unknown and unavailable services from healthy ones.

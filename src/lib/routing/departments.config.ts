@@ -62,7 +62,7 @@ export const DEFAULT_DEPARTMENTS: DepartmentConfig[] = [
     id: 'master-orchestrator',
     name: 'CEO / COM',
     purpose:
-      'Strategic oversight, cross-department coordination, task dispatch, executive decision-making, and company mission control. Routes tasks; never executes them directly.',
+      'Strategic oversight, cross-department coordination, task dispatch, executive decision-making, and company mission control. Routes department work and executes same-company catch-all tasks when no department worker is available.',
     keywords: [
       'ceo',
       'com',

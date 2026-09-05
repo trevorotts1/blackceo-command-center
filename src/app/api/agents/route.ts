@@ -59,6 +59,10 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Name and role are required' }, { status: 400 });
     }
 
+    if (body.openclaw_agent_id != null && (typeof body.openclaw_agent_id !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(body.openclaw_agent_id))) {
+      return NextResponse.json({error:'invalid_runtime_binding'}, {status:400});
+    }
+
     const id = uuidv4();
     const now = new Date().toISOString();
     const workspaceId = (body as { workspace_id?: string }).workspace_id || 'default';
@@ -67,8 +71,8 @@ export async function POST(request: NextRequest) {
     const specialistType = body.is_master || workspaceId !== 'default' ? 'permanent' : 'on-call';
 
     run(
-      `INSERT INTO agents (id, name, role, description, avatar_emoji, is_master, workspace_id, soul_md, user_md, agents_md, tools_md, memory_md, model, specialist_type, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO agents (id, name, role, description, avatar_emoji, is_master, workspace_id, soul_md, user_md, agents_md, tools_md, memory_md, model, specialist_type, openclaw_agent_id, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         id,
         body.name,
@@ -84,6 +88,7 @@ export async function POST(request: NextRequest) {
         body.memory_md || null,
         body.model || null,
         specialistType,
+        body.openclaw_agent_id || null,
         now,
         now,
       ]

@@ -94,3 +94,46 @@ test('mapped canonical object catalog validates company identity, unknown IDs an
   const {personaCompanyContext}=await import('../../src/lib/persona-company');fs.writeFileSync(config,JSON.stringify({companyId:'another-company'}));assert.throws(()=>personaCompanyContext(company),/config_mismatch/);
  } finally {if(previousMap===undefined)delete process.env.MC_PERSONA_COMPANY_CONTEXTS_JSON;else process.env.MC_PERSONA_COMPANY_CONTEXTS_JSON=previousMap;if(previousFixture===undefined)delete process.env.PERSONA_FIXTURE_JSON;else process.env.PERSONA_FIXTURE_JSON=previousFixture;}
 });
+
+test('SOP rescoring preserves a current company-verified confirmed producer persona and exact bundle snapshot',async()=>{
+ const company='rescore-company',companyRoot=path.join(temp,company);
+ fs.mkdirSync(companyRoot);
+ const config=path.join(companyRoot,'company-config.json'),catalog=path.join(companyRoot,'persona-categories.json');
+ fs.writeFileSync(config,JSON.stringify({companyId:company,companySlug:company}));
+ fs.writeFileSync(catalog,JSON.stringify({version:'test-v1',personas:{'voice-one':{},'topic-one':{},'replacement-voice':{}}}));
+ const previousMap=process.env.MC_PERSONA_COMPANY_CONTEXTS_JSON,previousFixture=process.env.PERSONA_FIXTURE_JSON;
+ const oldFetch=globalThis.fetch;let networkCalls=0;
+ globalThis.fetch=async()=>{networkCalls++;throw new Error('SOP rescore fixture forbids external calls');};
+ try {
+  process.env.MC_PERSONA_COMPANY_CONTEXTS_JSON=JSON.stringify({[company]:{companyRoot,companyConfig:config,companySlug:company,personaCatalog:catalog}});
+  delete process.env.PERSONA_FIXTURE_JSON; // Pin through real company/catalog verification.
+  db.run('INSERT INTO companies(id,name,slug) VALUES(?,?,?)',[company,'Rescore Company',company]);
+  db.run('INSERT INTO workspaces(id,name,slug,company_id) VALUES(?,?,?,?)',['rescore-ws','General Task','rescore-ws',company]);
+  db.run("INSERT INTO sops(id,name,slug,steps) VALUES('rescore-sop','Write confirmed content','rescore-sop','[]')");
+  const id=task();
+  // Resolve SOP before pinning so the confirmed decision owns the current input revision.
+  db.run("UPDATE tasks SET workspace_id='rescore-ws',sop_id='rescore-sop' WHERE id=?",[id]);
+  const full=bundle();full.company_id=company;full.confirm_required=false;
+  full.confirmation={actor_id:'verified-producer',confirmed_at:new Date().toISOString(),audience_hash:state.personaBundleHash(full.resolved_audience)};
+  tasks.pinProducerPersonaBundle(id,{voice_persona_id:'voice-one',persona_bundle:full,bundle_sha:state.personaBundleHash(full)});
+  assert.equal(tasks.checkPersonaDispatchReady(id).ready,true);
+  const beforeTask=db.queryOne<any>('SELECT * FROM tasks WHERE id=?',[id]);
+  const beforeBundle=db.queryOne<any>('SELECT * FROM task_persona_bundle WHERE task_id=?',[id]);
+  const beforeSnapshot=state.capturePersonaSnapshot(id);
+  // If rescoring incorrectly invokes the selector, it returns a DIFFERENT valid
+  // voice locally; this fails the preservation assertions without spawning Python.
+  const replacement={...full,voice:{...full.voice,audience_persona:{id:'replacement-voice',why:'poison selector fixture'}}};
+  process.env.PERSONA_FIXTURE_JSON=JSON.stringify({persona_id:'replacement-voice',persona_name:'Replacement Voice',interaction_mode:'leadership',bundle:replacement});
+  const result=await tasks.rescorePersonaWithSOP(id,'Write email for Audience A','general-task',{slug:'rescore-sop',name:'Write confirmed content',hints:['replacement-voice']});
+  assert.deepEqual(result,{changed:false,persona_id:beforeTask.persona_id,persona_name:beforeTask.persona_name,persona_mode:beforeTask.persona_mode});
+  assert.deepEqual(db.queryOne('SELECT * FROM tasks WHERE id=?',[id]),beforeTask);
+  assert.deepEqual(db.queryOne('SELECT * FROM task_persona_bundle WHERE task_id=?',[id]),beforeBundle);
+  assert.deepEqual(state.capturePersonaSnapshot(id),beforeSnapshot);
+  assert.equal(tasks.checkPersonaDispatchReady(id).ready,true);
+  assert.equal(networkCalls,0);
+ } finally {
+  globalThis.fetch=oldFetch;
+  if(previousMap===undefined)delete process.env.MC_PERSONA_COMPANY_CONTEXTS_JSON;else process.env.MC_PERSONA_COMPANY_CONTEXTS_JSON=previousMap;
+  if(previousFixture===undefined)delete process.env.PERSONA_FIXTURE_JSON;else process.env.PERSONA_FIXTURE_JSON=previousFixture;
+ }
+});

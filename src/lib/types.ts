@@ -102,6 +102,8 @@ export type EventType =
 
 export interface Agent {
   id: string;
+  /** Explicit runtime identity, verified against this installation before dispatch. */
+  openclaw_agent_id?: string | null;
   name: string;
   role: string;
   description?: string;
@@ -675,6 +677,7 @@ export interface UpdateDeptMemoryRequest {
 
 // API request/response types
 export interface CreateAgentRequest {
+  openclaw_agent_id?: string | null;
   name: string;
   role: string;
   description?: string;
