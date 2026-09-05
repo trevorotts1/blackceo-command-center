@@ -1,4 +1,4 @@
-## [Unreleased] — 2026-09-05 — Command Center smoke-test repairs
+## [v7.1.1] — 2026-09-05 — General/CEO execution fallback and board repairs
 
 ### Fixed
 - FIX-49: unknown or unavailable departments automatically select this company's General Task or CEO executor. Runtime readiness, durable queue reassessment and exact historical department-hold recovery prevent department-correction parking. Migration 133 preserves catch-all evidence and adds verified runtime bindings; existing-task execution prompts prevent CEO re-ingestion loops. Fallback SOP selection precedes persona selection, and late rescoring preserves verified confirmed persona decisions.
@@ -9,7 +9,7 @@
 
 ### Verification
 - Regression coverage includes tenant isolation, rejected assignment atomicity, persona access failures, health degradation/recovery and delayed or missing dispatch receipts.
-- This batch does not change the published v7.1.0 tag. Runtime validation uses isolated fixtures and a local executor stub.
+- Runtime validation uses isolated fixtures and a local executor stub. Pair with onboarding v25.0.3; publishing does not deploy client installations.
 
 ## [v7.1.0] — 2026-09-05 — Dependency security remediation
 

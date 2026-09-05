@@ -20,6 +20,6 @@ Run the existing production pipeline with `DUCK_CATCH_ALL=general` and `DUCK_CAT
 
 ## Installation requirements
 
-Merge and installation are separate. Upgrade Command Center and the companion onboarding policy together, let migration 133 run, then apply the onboarding managed-policy and verified runtime-binding update. A working local executor, approved tools/credentials, applicable SOP and confirmed persona remain required. Missing credentials, unavailable providers and failed QC must stay visible as actual blockers; none is disguised as completed work. New work must not wait solely because its department label is unknown.
+Merge and installation are separate. Upgrade Command Center to v7.1.1 and onboarding to v25.0.3 together, let migration 133 run, then apply the onboarding managed-policy and verified runtime-binding update. A working local executor, approved tools/credentials, applicable SOP and confirmed persona remain required. Missing credentials, unavailable providers and failed QC must stay visible as actual blockers; none is disguised as completed work. New work must not wait solely because its department label is unknown.
 
 Local validation: 2,462/2,462 Node tests, 678/678 Vitest tests, 11/11 targeted persona ownership tests, production build/typecheck and 164 QC checks passed; ESLint reported zero errors with 132 existing warnings.
