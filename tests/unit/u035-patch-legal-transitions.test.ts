@@ -40,6 +40,9 @@ before(async () => {
   const dir = mkdtempSync(join(tmpdir(), 'u035-test-'));
   dbPath = join(dir, 'test.db');
   process.env.DATABASE_PATH = dbPath;
+  process.env.MC_API_TOKEN = 'u035-fixture-token';
+  process.env.MC_INSTALLATION_ID = 'u035-fixture-install';
+  process.env.MC_TENANT_REGISTRY_JSON = JSON.stringify({localhost:{kind:'self',tenantId:'u035-fixture',companyId:'default',installationId:'u035-fixture-install'}});
   process.env.WORKSPACE_BASE_PATH = dir;
   mkdirSync(join(dir, 'coaching-personas'));
   writeFileSync(join(dir, 'coaching-personas', 'persona-categories.json'), JSON.stringify({personas: {'test-persona-marketing': {author:'Fixture',book:'Fixture',domain:[],perspective:[],custom:[]}}}));
@@ -57,6 +60,9 @@ after(() => {
   delete process.env.DATABASE_PATH;
   delete process.env.WORKSPACE_BASE_PATH;
   delete process.env.DISABLE_QC_AUTO_SCORER;
+  delete process.env.MC_API_TOKEN;
+  delete process.env.MC_INSTALLATION_ID;
+  delete process.env.MC_TENANT_REGISTRY_JSON;
   try { rmSync(join(dbPath, '..'), { recursive: true, force: true }); } catch {}
 });
 
@@ -82,7 +88,7 @@ async function doPatch(taskId: string, body: Record<string, unknown>) {
   const { PATCH } = await ns('@/app/api/tasks/[id]/route');
   const req = {
     json: async () => body,
-    headers: { get: (k: string) => k.toLowerCase() === 'cf-access-authenticated-user-email' ? 'test@example.invalid' : null },
+    headers: new Headers({host:'localhost',authorization:'Bearer u035-fixture-token','cf-access-authenticated-user-email':'test@example.invalid'}),
   };
   const res = await PATCH(req as never, { params: Promise.resolve({ id: taskId }) } as never);
   const b = await res.json().catch(() => ({}));
@@ -140,10 +146,10 @@ describe('U035 — PATCH through transition()', () => {
   it('Q6 status + assigned_agent_id both land', async () => {
     // Use a strict UUID that passes validation
     const agId = '0e1e2e3e-4b5c-4d6e-8f7a-8b9c0d1e2f3a';
-    run("INSERT OR IGNORE INTO agents (id, name, role, created_at, updated_at) VALUES (?, ?, 'qc', datetime('now'), datetime('now'))", [agId, 'Test Agent']);
+    run("INSERT OR IGNORE INTO agents (id, name, role, workspace_id, created_at, updated_at) VALUES (?, ?, 'qc', 'default', datetime('now'), datetime('now'))", [agId, 'Test Agent']);
     const id = seedTask('backlog');
     // Pre-assign agent so transition()'s in_progress precondition is met
-    run('UPDATE tasks SET assigned_agent_id = ? WHERE id = ?', [agId, id]);
+    run('UPDATE tasks SET assigned_agent_id = ?, workspace_id = ? WHERE id = ?', [agId, 'default', id]);
     // This test's own purpose (per its name) is "status + assigned_agent_id both
     // land" — NOT the route's separate Triad auto-resolve path (getBestSOPForTask +
     // selectPersonaForTask, which shells out to persona-selector-v2.py). Leaving

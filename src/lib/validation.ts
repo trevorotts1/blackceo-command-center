@@ -90,6 +90,9 @@ const ActivityType = z.enum([
 const DeliverableType = z.enum(['file', 'url', 'artifact', 'image']);
 
 // Task validation schemas
+// Stored agent keys include both UUIDs and seeded stable slugs. Ownership and
+// existence are checked against the database before accepting a reference.
+export const TaskAgentId = z.string().min(1).max(200).regex(/^[A-Za-z0-9][A-Za-z0-9_-]*$/);
 export const CreateTaskSchema = z.object({
   title: z.string().min(1, 'Title is required').max(500, 'Title must be 500 characters or less'),
   description: z.string().max(10000, 'Description must be 10000 characters or less').optional(),
@@ -105,8 +108,8 @@ export const CreateTaskSchema = z.object({
   // explicit `null`, so every create with these left at default 400'd with
   // "Validation failed" — this was the actual cause of the operator's "create
   // task doesn't really work" report (root-cause outcome (ii) in P2-03).
-  assigned_agent_id: z.string().uuid().optional().nullable(),
-  created_by_agent_id: z.string().uuid().optional(),
+  assigned_agent_id: TaskAgentId.optional().nullable(),
+  created_by_agent_id: TaskAgentId.optional(),
   business_id: z.string().optional(),
   workspace_id: z.string().optional(),
   department: z.string().optional(),
@@ -130,9 +133,9 @@ export const UpdateTaskSchema = z.object({
   description: z.string().max(10000).optional(),
   status: TaskStatus.optional(),
   priority: TaskPriority.optional(),
-  assigned_agent_id: z.string().uuid().optional().nullable(),
+  assigned_agent_id: TaskAgentId.optional().nullable(),
   due_date: z.string().optional().nullable(),
-  updated_by_agent_id: z.string().uuid().optional(),
+  updated_by_agent_id: TaskAgentId.optional(),
   sop_id: z.string().uuid().optional().nullable(),
   sop_step_progress: z.string().optional().nullable(),
   // Blocked-column gate fields (N36 / migration 071).

@@ -1996,8 +1996,8 @@ If you need help or clarification, ask the orchestrator.`;
     // those feed sweep eligibility windows and are not this fix's business.)
     const dispatchedAt = new Date().toISOString();
     run(
-      `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO events (id, type, agent_id, task_id, message, created_at, metadata)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [
         uuidv4(),
         'task_dispatched',
@@ -2005,6 +2005,7 @@ If you need help or clarification, ask the orchestrator.`;
         task.id,
         `[${context}] Task "${task.title}" auto-dispatched to ${agent.name}`,
         dispatchedAt,
+        JSON.stringify({ execution_id: execution.id }),
       ],
     );
 

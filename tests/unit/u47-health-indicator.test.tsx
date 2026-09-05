@@ -25,7 +25,7 @@
  * npx vitest run --config vitest.component.config.ts
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
-import { render, screen, cleanup, waitFor, within, fireEvent } from '@testing-library/react';
+import { render, screen, cleanup, waitFor, within, fireEvent, act } from '@testing-library/react';
 
 import { HealthIndicator } from '../../src/components/HealthIndicator';
 
@@ -36,7 +36,7 @@ if (typeof Element !== 'undefined' && !Element.prototype.scrollIntoView) {
   Element.prototype.scrollIntoView = () => {};
 }
 
-afterEach(() => cleanup());
+afterEach(() => { cleanup(); vi.useRealTimers(); });
 
 const STATUS_URL = '/api/system/status';
 const FORCE_STATUS_URL = '/api/system/status?force=1';
@@ -105,6 +105,7 @@ function fixturePayload(overall: 'live' | 'degraded' | 'offline'): {
 function stubFetch(handlers: Record<string, () => Promise<Response> | Response>) {
   return vi.fn(async (input: RequestInfo | URL) => {
     const url = typeof input === 'string' ? input : input.toString();
+    if (url === '/api/health' && !handlers[url]) return jsonResponse({ status: 'ok', embeddings: { status: 'ok', degraded: false } });
     const handler = handlers[url];
     if (!handler) {
       throw new Error(`Unexpected fetch to unlisted URL in this test's stub: ${url}`);
@@ -133,7 +134,7 @@ describe('HealthIndicator — client variant', () => {
 
     render(<HealthIndicator viewerRole="client" />);
 
-    await waitFor(() => screen.getByText('Offline'));
+    await waitFor(() => screen.getByText('Unavailable'));
 
     const nodes = screen.getAllByTestId('health-indicator');
     expect(nodes).toHaveLength(1);
@@ -158,7 +159,7 @@ describe('HealthIndicator — client variant', () => {
     ]) {
       expect(text).not.toContain(banned);
     }
-    expect(text).toBe('Offline');
+    expect(text).toBe('Unavailable');
   });
 
   it('never applies a `hidden` class at any of the three health tiers (acceptance c)', async () => {
@@ -184,7 +185,7 @@ describe('HealthIndicator — client variant', () => {
     }) as unknown as typeof fetch;
 
     render(<HealthIndicator viewerRole="client" />);
-    await waitFor(() => screen.getByText('Online'));
+    await waitFor(() => screen.getByText('Healthy'));
 
     // SystemStatusDrawer renders a "System Status" heading when open. It
     // must never appear for the client variant, no matter what.
@@ -200,7 +201,7 @@ describe('HealthIndicator — operator variant', () => {
     }) as unknown as typeof fetch;
 
     render(<HealthIndicator viewerRole="operator" />);
-    await waitFor(() => screen.getByText('Offline'));
+    await waitFor(() => screen.getByText('Unavailable'));
 
     const button = screen.getByTestId('health-indicator');
     expect(button.tagName).toBe('BUTTON');
@@ -282,7 +283,7 @@ describe('HealthIndicator — operator variant', () => {
     }) as unknown as typeof fetch;
 
     render(<HealthIndicator viewerRole="operator" />);
-    await waitFor(() => screen.getByText('Online'));
+    await waitFor(() => screen.getByText('Healthy'));
     fireEvent.click(screen.getByTestId('health-indicator'));
     await waitFor(() => screen.getByText('System Status'));
 
@@ -295,5 +296,93 @@ describe('HealthIndicator — operator variant', () => {
     await waitFor(() => {
       expect(screen.getByText(/Bootstrap completed in/)).toBeTruthy();
     });
+  });
+});
+
+
+describe('FIX47 — readiness is truthful across client and board indicators', () => {
+  const ready = { status: 'ok', embeddings: { status: 'ok', degraded: false } };
+  for (const [name, system, health, expected] of [
+    ['healthy', fixturePayload('live'), ready, 'Healthy'],
+    ['embedding degradation in HTTP 200', fixturePayload('live'), { status: 'ok', embeddings: { status: 'degraded', degraded: true } }, 'Degraded'],
+    ['migration degradation', fixturePayload('live'), { ...ready, status: 'degraded' }, 'Degraded'],
+    ['disconnected gateway', fixturePayload('offline'), ready, 'Unavailable'],
+    ['unknown overall', { ...fixturePayload('live'), overall: 'unknown' }, ready, 'Unknown'],
+    ['malformed status', {}, ready, 'Unknown'],
+    ['empty subsystem results', { ...fixturePayload('live'), components: [] }, ready, 'Unknown'],
+    ['missing embedding result', fixturePayload('live'), { status: 'ok' }, 'Unknown'],
+  ] as const) {
+    it(name, async () => {
+      global.fetch = stubFetch({ [STATUS_URL]: () => jsonResponse(system), '/api/health': () => jsonResponse(health) }) as typeof fetch;
+      render(<><HealthIndicator viewerRole="client" /><HealthIndicator viewerRole="client" /><HealthIndicator viewerRole="operator" /></>);
+      await waitFor(() => {
+        const indicators = screen.getAllByTestId('health-indicator');
+        expect(indicators).toHaveLength(3);
+        for (const indicator of indicators) expect(indicator.textContent).toBe(expected);
+      });
+      expect(screen.queryByText('All systems operational')).toBeNull();
+    });
+  }
+
+  it('does not trust live overall when a returned required subsystem is degraded', async () => {
+    const status = fixturePayload('live');
+    status.components[1].status = 'degraded';
+    global.fetch = stubFetch({ [STATUS_URL]: () => jsonResponse(status) }) as typeof fetch;
+    render(<HealthIndicator viewerRole="client" />);
+    await waitFor(() => expect(screen.getByTestId('health-indicator').textContent).toBe('Degraded'));
+  });
+
+  it('clears stale healthy state on an HTTP error and recovers only on a verified result', async () => {
+    vi.useFakeTimers();
+    let response = jsonResponse(fixturePayload('live'));
+    global.fetch = stubFetch({ [STATUS_URL]: () => response }) as typeof fetch;
+    await act(async () => { render(<HealthIndicator viewerRole="client" />); });
+    expect(screen.getByTestId('health-indicator').textContent).toBe('Healthy');
+    response = jsonResponse({}, false);
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    expect(screen.getByTestId('health-indicator').textContent).toBe('Unavailable');
+    response = jsonResponse({});
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    expect(screen.getByTestId('health-indicator').textContent).toBe('Unknown');
+    response = jsonResponse(fixturePayload('live'));
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    expect(screen.getByTestId('health-indicator').textContent).toBe('Healthy');
+  });
+
+  it('times out a hanging response, ignores its late success, then recovers on the next poll', async () => {
+    vi.useFakeTimers();
+    let finish!: (response: Response) => void;
+    let hanging = true;
+    const slow = new Promise<Response>((resolve) => { finish = resolve; });
+    global.fetch = stubFetch({ [STATUS_URL]: () => hanging ? slow : jsonResponse(fixturePayload('live')) }) as typeof fetch;
+    await act(async () => { render(<HealthIndicator viewerRole="client" />); });
+    expect(screen.getByTestId('health-indicator').textContent).toBe('Checking…');
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(screen.getByTestId('health-indicator').textContent).toBe('Unavailable');
+    await act(async () => { finish(jsonResponse(fixturePayload('live'))); });
+    expect(screen.getByTestId('health-indicator').textContent).toBe('Unavailable');
+    hanging = false;
+    await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+    expect(screen.getByTestId('health-indicator').textContent).toBe('Healthy');
+  });
+
+  it('does not clear degraded readiness until the embedding check also recovers', async () => {
+    vi.useFakeTimers();
+    let resolveHealth!: (response: Response) => void;
+    let health: Response | Promise<Response> = jsonResponse({ status: 'ok', embeddings: { status: 'degraded', degraded: true } });
+    global.fetch = stubFetch({ [STATUS_URL]: () => jsonResponse(fixturePayload('live')), '/api/health': () => health }) as typeof fetch;
+    await act(async () => { render(<HealthIndicator viewerRole="client" />); });
+    expect(screen.getByTestId('health-indicator').textContent).toBe('Degraded');
+    health = new Promise<Response>((resolve) => { resolveHealth = resolve; });
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    expect(screen.getByTestId('health-indicator').textContent).toBe('Degraded');
+    await act(async () => { resolveHealth(jsonResponse(ready)); });
+    expect(screen.getByTestId('health-indicator').textContent).toBe('Healthy');
+  });
+
+  it('reports network errors without claiming healthy', async () => {
+    global.fetch = vi.fn().mockRejectedValue(new Error('offline'));
+    render(<HealthIndicator viewerRole="client" />);
+    await waitFor(() => expect(screen.getByTestId('health-indicator').textContent).toBe('Unavailable'));
   });
 });

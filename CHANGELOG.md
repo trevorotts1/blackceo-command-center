@@ -1,3 +1,15 @@
+## [Unreleased] — 2026-09-05 — Command Center smoke-test repairs
+
+### Fixed
+- FIX-45: task assignment accepts existing stable agent IDs and checks agent/workspace company ownership before saving.
+- FIX-46: authorized browser sessions can read their task persona bundles; failed requests show an error and retry instead of appearing unassigned.
+- FIX-47: home, departments and board share health reporting that distinguishes degraded, unknown and unavailable services from healthy ones.
+- FIX-48: automatic and manual dispatch audit events identify their execution. The pipeline test waits for that exact receipt and exercises delayed runtime-model resolution; missing receipts still fail with diagnostics.
+
+### Verification
+- Regression coverage includes tenant isolation, rejected assignment atomicity, persona access failures, health degradation/recovery and delayed or missing dispatch receipts.
+- This batch does not change the published v7.1.0 tag. Runtime validation uses isolated fixtures and a local executor stub.
+
 ## [v7.1.0] — 2026-09-05 — Dependency security remediation
 
 ### Fixed

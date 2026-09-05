@@ -22,6 +22,7 @@ import { createHmac, createHash, generateKeyPairSync } from 'node:crypto';
 import { WebSocketServer } from 'ws';
 
 import { runMockGenerator } from '../fixtures/mock-generator';
+import { waitForDispatchReceipt } from '../helpers/wait-for-dispatch-receipt';
 
 // ── Fail-closed API auth (v4.52.0 AUTH HARDEN) — test credentials ────────────
 // The 60-commit L1-L9 integration train made the API fail CLOSED: EXTERNAL
@@ -78,6 +79,7 @@ fs.mkdirSync(path.join(TMP_DIR,'coaching-personas'),{recursive:true});
 fs.copyFileSync(PERSONA_CATALOG,path.join(TMP_DIR,'coaching-personas','persona-categories.json'));
 const FIXTURE_ENV:NodeJS.ProcessEnv={
   CC_TEST_FIXTURE_ROOT:TMP_DIR, WORKSPACE_BASE_PATH:TMP_DIR,
+  WORKSPACE_ROOT:TMP_DIR, PERSONA_INDEX_DB:path.join(TMP_DIR,'persona-index.sqlite'),
   OPENCLAW_ROOT, OPENCLAW_WORKSPACE_ROOT:TMP_DIR, OPENCLAW_COMPANY_ROOT:COMPANY_ROOT,
   BCC_DEVICE_IDENTITY_DIR:path.join(TMP_DIR,'identity'),
   OPENCLAW_SKILL23_SCRIPTS:path.join(TMP_DIR,'absent-scripts'),
@@ -140,7 +142,13 @@ async function startOpenClawStub(): Promise<{ port: number; wss: WebSocketServer
         } else if (msg.type === 'req') {
           // Only the local stub receives the real dispatch.
           if(msg.method==='chat.send')sentMessages.push(msg.params as Record<string,unknown>);
-          ws.send(JSON.stringify({ type: 'res', id: msg.id, ok: true, payload: {runId:`duck-${msg.id}`,sessions:[]} }));
+          const respond = () => {
+            if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'res', id: msg.id, ok: true, payload: {runId:`duck-${msg.id}`,sessions:[]} }));
+          };
+          // Force the real post-acceptance runtime-model lookup to be delayed.
+          // Acceptance alone must not satisfy the separate dispatch-audit check.
+          if (msg.method === 'sessions.list' && sentMessages.length > 0) setTimeout(respond, 750);
+          else respond();
         }
       } catch {
         // ignore malformed messages
@@ -654,7 +662,21 @@ test('duck pipeline end-to-end (mock generator)', { timeout: TEST_TIMEOUT_MS }, 
     assert.equal(attempts[0].state,'accepted');
     assert.equal(sentMessages.length,1,'one remote chat.send');
     assert.ok(JSON.stringify(sentMessages[0]).includes(executionId),'prompt carries current execution identity');
-    assert.ok((await getEventsForTask(taskId)).some(e=>e.type==='task_dispatched'),'actual dispatch event required');
+    const receipt = await waitForDispatchReceipt({
+      taskId, executionId,
+      readEvents: () => getEventsForTask(taskId),
+      diagnostics: async () => ({
+        task: await getTaskRow(taskId),
+        attempts: queryAll('SELECT id,state,error_code FROM task_executions WHERE task_id=?',[taskId]),
+        gatewaySends: sentMessages.length,
+        serverLog: path.join(TMP_DIR, 'server.log'),
+      }),
+      timeoutMs: 15_000,
+    });
+    assert.equal(receipt.task_id,taskId,'dispatch receipt belongs to this task');
+    assert.equal(JSON.parse(String(receipt.metadata)).execution_id,executionId,'dispatch receipt belongs to this execution');
+    assert.equal(queryAll('SELECT id FROM task_executions WHERE task_id=?',[taskId]).length,1,'still one execution after audit');
+    assert.equal(sentMessages.length,1,'still one send after audit');
   });
 
   // Check model_id after dispatch (intelligence-resolver stamps it)

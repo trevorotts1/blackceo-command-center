@@ -185,3 +185,12 @@ test('U47: "Re-run bootstrap" admin action is still present, unmodified in its o
   assert.match(content, /Re-run bootstrap/);
   assert.match(content, /\/api\/system\/bootstrap/);
 });
+
+
+test('FIX47: home and departments use the same readiness indicator as the board', () => {
+  for (const relative of ['app/page.tsx', 'app/tasks/by-department/page.tsx']) {
+    const content = fs.readFileSync(path.join(SRC, relative), 'utf8');
+    assert.match(content, /<HealthIndicator viewerRole="client"/);
+    assert.doesNotMatch(content, /All systems operational|apiReachable/);
+  }
+});

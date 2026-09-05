@@ -19,6 +19,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { motion } from 'framer-motion';
 import { Building2, Users, BarChart3, ArrowRight, Activity, Loader2, Home, GripVertical, ListTodo } from 'lucide-react';
 import { useCompanyBrand } from '@/hooks/useCompanyBrand';
+import { HealthIndicator } from '@/components/HealthIndicator';
 import { Breadcrumb } from '@/components/Breadcrumb';
 import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea/dnd';
 
@@ -322,7 +323,7 @@ function DepartmentPickerInner() {
               <Activity className="w-4 h-4 text-indigo-500" />
               <span>{workspaces.length} departments</span>
               <span className="w-1 h-1 bg-gray-300 rounded-full" />
-              <span>All systems operational</span>
+              <HealthIndicator viewerRole="client" />
             </div>
           </div>
         </motion.div>
