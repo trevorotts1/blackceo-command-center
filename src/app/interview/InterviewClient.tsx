@@ -309,7 +309,7 @@ export default function InterviewClient() {
     } catch {
       /* private mode — chips simply don't survive this tab */
     }
-  }, []);
+  }, [interviewSessionId]);
 
   /* ---- gateway-session persistence (continuity across reloads) ---- */
 

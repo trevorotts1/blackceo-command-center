@@ -36,7 +36,8 @@
     "playwright.config.ts",
     "vitest.config.ts",
     ".next-fix53proof/types/**/*.ts",
-    ".next-interview-lock/types/**/*.ts"
+    ".next-interview-lock/types/**/*.ts",
+    ".next-duck-e2e/types/**/*.ts"
   ],
   "exclude": [
     "node_modules"

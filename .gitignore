@@ -129,3 +129,6 @@ client-roster.txt
 *.db.rogue-preserved*
 *.orig
 *.rej
+
+# Isolated mock Duck e2e Next build
+.next-duck-e2e/

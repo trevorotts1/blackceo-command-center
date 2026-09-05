@@ -1,3 +1,4 @@
+import { resolveOpenClawRuntimeRoot } from '@/lib/openclaw/runtime-root';
 import { capturePersonaSnapshot } from '@/lib/persona-state';
 import { renderPersonaConformanceInstructions } from '@/lib/persona-conformance';
 /**
@@ -470,10 +471,9 @@ export function resolveSpecialistSessionKey(
   // src/lib/context-pack.ts agentsRoot() / src/lib/platform.ts detectPlatform(): VPS
   // Docker keeps the `/data/.openclaw` persistent-volume marker; any home-relative
   // fallback goes through `os.homedir()`.
-  const homeDir = process.env.HOME || process.env.USERPROFILE || os.homedir();
-  const AGENTS_ROOT = detectPlatform() === 'vps-docker'
-    ? '/data/.openclaw/agents'
-    : path.join(homeDir, '.openclaw', 'agents');
+  let AGENTS_ROOT: string;
+  try { AGENTS_ROOT = path.join(resolveOpenClawRuntimeRoot(), 'agents'); }
+  catch { return null; }
 
   // Attempt 1: lookup workspace slug from DB.
   if (workspaceId) {

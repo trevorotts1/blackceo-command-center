@@ -1,3 +1,4 @@
+import { resolveOpenClawRuntimeRoot } from '@/lib/openclaw/runtime-root';
 import { throwIfJobLeaseLost } from '@/lib/jobs/job-lease';
 /**
  * QC Agent Auto-Scorer
@@ -547,7 +548,8 @@ const AF_I14_AGENT_IDS = new Set(['dept-presentations']);
  * agents root at all.
  */
 function af_i14SessionRoots(agentId: string | null): string[] {
-  const base = path.join(process.env.HOME || '~', '.openclaw', 'agents');
+  let base: string;
+  try { base = path.join(resolveOpenClawRuntimeRoot(), 'agents'); } catch { return []; }
   const roots: string[] = [];
   // Most-specific first: the task's own assigned agent (any department).
   if (agentId) roots.push(path.join(base, agentId, 'sessions'));
@@ -566,7 +568,8 @@ function af_i14SessionRoots(agentId: string | null): string[] {
  * readdirSync can never run merely by computing the cheap root list above.
  */
 function af_i14AllAgentSessionRoots(): string[] {
-  const base = path.join(process.env.HOME || '~', '.openclaw', 'agents');
+  let base: string;
+  try { base = path.join(resolveOpenClawRuntimeRoot(), 'agents'); } catch { return []; }
   const roots: string[] = [];
   try {
     if (existsSync(base)) {
@@ -603,7 +606,8 @@ function deterministicQCSessionId(agentName: string): string {
 function af_i14DeterministicSessionFile(agentName: string | null): string | null {
   if (!agentName) return null;
   const sessionId = deterministicQCSessionId(agentName);
-  const agentRoot = path.join(process.env.HOME || '~', '.openclaw', 'agents');
+  let agentRoot: string;
+  try { agentRoot = path.join(resolveOpenClawRuntimeRoot(), 'agents'); } catch { return null; }
   const slug = agentName.toLowerCase().replace(/\s+/g, '-');
   const candidates = [
     path.join(agentRoot, slug, 'sessions', `${sessionId}.jsonl`),

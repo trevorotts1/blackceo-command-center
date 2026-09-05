@@ -253,6 +253,13 @@ jobs:
   deep-health-probe-fixture:
     name: B.1 thin-probe fixture (cc-health-check.sh)
     runs-on: ubuntu-latest
+    env:
+      # Register the isolated installation at both build and runtime. The public
+      # enrollment shell exposes asset refs only on explicitly registered hosts.
+      # Health remains public; this does not grant anonymous access to board APIs.
+      MC_INSTALLATION_ID: thin-probe-fixture
+      MC_API_TOKEN: thin-probe-fixture-not-a-production-secret
+      MC_TENANT_REGISTRY_JSON: '{"127.0.0.1":{"kind":"self","tenantId":"thin-probe","companyId":"1","installationId":"thin-probe-fixture"}}'
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -286,7 +293,7 @@ jobs:
       - name: Write fixture company-config.json
         run: |
           mkdir -p config
-          echo '{"companyName":"Fixture Corp","slug":"fixture-corp"}' > config/company-config.json
+          echo '{"companyId":"1","companyName":"Fixture Corp","slug":"fixture-corp"}' > config/company-config.json
 
       - name: Write pre-rendered branded index.html (html_title check)
         run: |
@@ -310,19 +317,17 @@ jobs:
           for i in $(seq 1 30); do
             curl -sf http://127.0.0.1:4000/api/health && break || sleep 1
           done
+          curl --fail --silent --show-error --max-time 10 http://127.0.0.1:4000/api/health >/dev/null
+          # A healthy enrollment shell must render assets without weakening auth.
+          curl --fail --silent --show-error --max-time 10 http://127.0.0.1:4000/interview > /tmp/probe-interview.html
+          grep -q '/_next/static/' /tmp/probe-interview.html
+          UNKNOWN_CODE=$(curl --silent --max-time 10 -o /dev/null -w '%{http_code}' -H 'Host: unknown-fixture.invalid' http://127.0.0.1:4000/interview)
+          test "$UNKNOWN_CODE" = 403
         env:
           DATABASE_PATH: /tmp/probe-fixture.db
           PORT: 4000
-          # Cloudflare Access enforcement (DATA-10) is OPT-IN and defaults OFF on
-          # every box (v4.72.0), so this is belt-and-suspenders: there is NO
-          # Cloudflare edge in front of this fixture server to inject the
-          # Cf-Access-* headers, and setting it true would 401 every page GET
-          # (including cc-health-check.sh's CF public-URL probe and outside-in
-          # asset probe, which hit 127.0.0.1 directly) with "Cloudflare Access is
-          # not active on this subdomain" → the probe would read RED. Pinning it
-          # false keeps the fixture on the documented default posture regardless of
-          # any inherited env. No production code or the health-check script is
-          # modified.
+          # No Cloudflare edge exists in this local fixture. Tenant registration
+          # and API authentication remain enforced by the production middleware.
           REQUIRE_CF_ACCESS: "false"
 
       - name: Run cc-health-check.sh — expect GREEN (exit 0)
@@ -334,30 +339,28 @@ jobs:
 
       - name: Break the build — remove a static asset to simulate stale manifest
         run: |
-          ASSET=$(ls .next/static/chunks/*.js 2>/dev/null | head -1)
-          if [[ -n "$ASSET" ]]; then
-            rm -f "$ASSET"
-            echo "Removed asset: $ASSET"
-          else
-            echo "No .js asset found to remove — skipping stale-manifest fixture"
-          fi
+          # Select a reference the actual manifest checker reads, not an
+          # arbitrary chunk which might be absent from its checked references.
+          ASSET=$(node -e '
+            const fs = require("fs");
+            const manifest = JSON.parse(fs.readFileSync(".next/build-manifest.json", "utf8"));
+            const refs = Object.values(manifest).flatMap(v => Array.isArray(v) ? v : typeof v === "object" && v ? Object.values(v).flat() : []);
+            const ref = refs.find(v => typeof v === "string" && v.startsWith("static/") && v.endsWith(".js") && fs.existsSync(".next/" + v));
+            if (!ref) throw new Error("No manifest-referenced JavaScript asset found");
+            process.stdout.write(".next/" + ref);
+          ')
+          rm "$ASSET"
+          echo "Removed manifest asset: $ASSET"
 
       - name: cc-health-check.sh with broken asset — expect RED (exit 1)
         run: |
-          bash scripts/cc-health-check.sh --port 4000 --json-only && {
-            echo "ERROR: expected exit 1 (RED) but got exit 0 (GREEN) — stale-manifest check is broken"
+          CODE=0
+          bash scripts/cc-health-check.sh --port 4000 --json-only || CODE=$?
+          if [[ "$CODE" -ne 1 ]]; then
+            echo "ERROR: expected exit 1 (RED) for missing manifest asset, got $CODE"
             exit 1
-          } || {
-            CODE=$?
-            if [[ "$CODE" -eq 1 ]]; then
-              echo "OK: correctly returned exit 1 (RED) for stale manifest"
-            elif [[ "$CODE" -eq 3 ]]; then
-              echo "NOTE: returned exit 3 (UNKNOWN) — acceptable if asset removal did not affect served HTML refs"
-            else
-              echo "Unexpected exit code $CODE"
-              exit 1
-            fi
-          }
+          fi
+          echo "OK: correctly returned exit 1 (RED) for stale manifest"
 
   duck-e2e:
     name: Duck pipeline e2e (mock generator)

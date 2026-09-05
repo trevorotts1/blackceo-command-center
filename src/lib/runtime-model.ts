@@ -1,3 +1,5 @@
+import path from 'path';
+import { resolveOpenClawRuntimeRoot } from '@/lib/openclaw/runtime-root';
 /**
  * runtime-model.ts — Resolve the ACTUAL model an agent will run on.
  *
@@ -87,7 +89,7 @@ interface OpenClawConfigShape {
  */
 export function readOpenClawConfig(configPathOverride?: string): OpenClawConfigShape | null {
   try {
-    const p = configPathOverride || openclawConfigPath();
+    const p = configPathOverride || (process.env.OPENCLAW_ROOT !== undefined ? path.join(resolveOpenClawRuntimeRoot(),'openclaw.json') : openclawConfigPath());
     if (!fs.existsSync(p)) return null;
     const stat = fs.statSync(p);
     if (stat.size > MAX_CONFIG_SIZE_BYTES) return null;
