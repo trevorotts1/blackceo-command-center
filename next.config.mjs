@@ -1,5 +1,9 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  // Loopback browser fixtures use this host. Next 16 carries React's dev debug
+  // stream over HMR; rejecting its origin also prevents client hydration.
+  // This allowlist applies only to development resources, not production auth.
+  allowedDevOrigins: ['127.0.0.1'],
   // BUG-1 FIX (atomic-deploy.sh build isolation): honour NEXT_DIST_DIR so a
   // build can be pointed at a temp directory instead of the live .next. Next.js
   // resolves this via path.join(<project dir>, distDir), which does NOT

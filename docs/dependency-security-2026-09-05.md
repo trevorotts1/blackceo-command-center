@@ -32,7 +32,8 @@ Next.js, PostCSS and nanoid occur in the production graph. The other affected en
 4. Upgrade Vitest/Vite and vulnerable transitive parsers/build tools. Move ESLint to flat configuration and its direct CLI because Next 16 removes `next lint`. Preserve all 98 previously enforced rule severities; retain 14 new React Compiler recommendations as warnings. Repair the internal SOP navigation anchor with Next Link.
 5. Add `dependency-audit.yml` to install the exact graph and reject any known low-or-higher npm advisory on main pushes and pull requests, including development dependencies.
 6. Match the locked engine requirements: `^20.19.0 || ^22.13.0 || >=24`. Prefer Node 24 LTS for new deployments. On each target runtime run `npm ci` so better-sqlite3 is rebuilt for that runtime. An installation configured with `ignore-scripts=true` needs an explicit `npm rebuild better-sqlite3 --ignore-scripts=false` before runtime verification.
-7. Raise onboarding's Command Center minimum and expected release to 7.1.0 and enforce runtime compatibility before install/update work. Preserve its existing strategy of converging main while retaining local commits; do not reintroduce detached old-tag installs.
+7. Require the reviewed lockfile and `npm ci --engine-strict` in Command Center update.sh and both onboarding install paths. Remove npm install fallbacks and update-only continuation after dependency failure. Refuse unsupported Node before update mutations.
+8. Raise onboarding's Command Center minimum and expected release to 7.1.0 and enforce runtime compatibility before install/update work. Preserve its existing strategy of converging main while retaining local commits; do not reintroduce detached old-tag installs.
 
 ## Verification
 
@@ -46,7 +47,8 @@ Next.js, PostCSS and nanoid occur in the production graph. The other affected en
 - Production task pipeline: 20/20 passed, including authenticated task creation, assignment, dispatch, QC hold, SSE transitions and artifact access.
 - QC: 164 checks passed, 8 existing operational warnings.
 - CI-equivalent production build without DATABASE_PATH passed and created no database.
-- Browser interview verification is recorded below when completed.
+- Browser interview: 15/15 passed, including invitation redemption, completion/unlock, forged/expired-cookie rejection and read-only preview. Next 16 development RSC debug traffic requires the exact loopback origin to be allowed for hydration; only `127.0.0.1` was added to the development origin list. Production authentication is unchanged.
+- Updater: 27 focused/existing guards passed (including five new tests), and 32 actual updater shell checks passed. Unsupported Node, missing lock and failed npm ci stop before downstream migration/build/restart.
 
 ## Remaining maintenance and deployment limits
 

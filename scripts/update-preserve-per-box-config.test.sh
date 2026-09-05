@@ -48,6 +48,14 @@ exit 0
 FAKENPM
 chmod +x "$WORK/bin/npm"
 
+# Runtime preflight is real updater policy; keep this fixture deterministic
+# without exposing the host Node/npm or any live process manager.
+cat > "$WORK/bin/node" <<'FAKENODE'
+#!/bin/sh
+printf 'v24.0.0\n'
+FAKENODE
+chmod +x "$WORK/bin/node"
+
 # PATH: fake bin first, then system dirs ONLY — hides any real npm/pm2 so the
 # updater cannot touch a live process manager.
 FIXTURE_PATH="$WORK/bin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -67,6 +75,7 @@ git -C "$ORIGIN" config user.email "fixture@test.invalid"
 git -C "$ORIGIN" config user.name "Fixture"
 mkdir -p "$ORIGIN/config" "$ORIGIN/public" "$ORIGIN/scripts" "$ORIGIN/src"
 printf '{"name":"mission-control","version":"1.0.0"}\n' > "$ORIGIN/package.json"
+printf '{"name":"mission-control","version":"1.0.0","lockfileVersion":3,"packages":{"":{"name":"mission-control","version":"1.0.0"}}}\n' > "$ORIGIN/package-lock.json"
 printf '6.0.0\n' > "$ORIGIN/version"
 : > "$ORIGIN/next.config.mjs"
 : > "$ORIGIN/ecosystem.config.cjs"

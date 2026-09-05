@@ -250,6 +250,30 @@ fi
 
 cd "$INSTALL_DIR"
 
+# Node runtime preflight — before backup pruning or checkout mutations.
+# Keep this bootstrap check aligned with package.json engines. It cannot depend
+# on node_modules: the updater also handles fresh/pruned checkouts. npm ci below
+# additionally enforces the engine declarations of the newly merged lockfile.
+_cc_require_supported_node() {
+  local version major minor
+  command -v node >/dev/null 2>&1 \
+    || fatal "Node.js is missing. Install Node 24 LTS before updating; nothing was changed."
+  version=$(node --version 2>/dev/null) \
+    || fatal "Cannot read Node.js version. Install Node 24 LTS before updating; nothing was changed."
+  if [[ "$version" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+    major=$((10#${BASH_REMATCH[1]}))
+    minor=$((10#${BASH_REMATCH[2]}))
+    if [ "$major" -ge 24 ] \
+      || { [ "$major" -eq 22 ] && [ "$minor" -ge 13 ]; } \
+      || { [ "$major" -eq 20 ] && [ "$minor" -ge 19 ]; }; then
+      return 0
+    fi
+  fi
+  fatal "Unsupported Node.js $version. This release requires ^20.19.0 || ^22.13.0 || >=24. Install Node 24 LTS before updating; nothing was changed."
+}
+_cc_require_supported_node
+# End Node runtime preflight
+
 # ----------------------------------------------------------
 # Backup retention + disk pre-check (OPENCLAW-BACKUP-RETENTION-V1)
 # ----------------------------------------------------------
@@ -569,11 +593,12 @@ fi
 # Install dependencies
 # ----------------------------------------------------------
 step "Step 4: Install npm dependencies"
-if [ -f "package-lock.json" ]; then
-  npm ci --no-audit --no-fund 2>&1 || npm install --no-audit --no-fund 2>&1 || fatal "npm install failed"
-else
-  npm install --no-audit --no-fund 2>&1 || fatal "npm install failed"
-fi
+[ -f "package-lock.json" ] \
+  || fatal "Reviewed package-lock.json is missing. Restore it from the release and retry; migrations, build and restart were not run."
+# Never repair dependency resolution on a client box: npm install can silently
+# replace the reviewed graph after a missing/out-of-sync lock or failed npm ci.
+npm ci --engine-strict --no-audit --no-fund 2>&1 \
+  || fatal "npm ci failed. Fix the reported runtime, lockfile or registry error and retry. No npm install fallback is allowed; migrations, build and restart were not run."
 success "Dependencies installed"
 
 # ----------------------------------------------------------

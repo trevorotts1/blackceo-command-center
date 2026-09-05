@@ -5,6 +5,8 @@
 - Upgraded Next.js 14.2.21 to 16.3.4, React/React DOM to 19.2.8, React-compatible drag and drop, Vitest to 3.2.7 and Vite to 6.4.3, and refreshed vulnerable transitive dependencies without forced audit overrides.
 - Migrated request cookies, client selection/context helpers and dynamic route parameters to asynchronous APIs so tenant selection and authorization retain their existing behavior.
 - Preserved Webpack instrumentation/native SQLite integration explicitly; migrated ESLint to its flat configuration while preserving all 98 existing rule severities. Fourteen newly introduced React Compiler rules report warnings.
+- Required lockfile-based `npm ci --engine-strict` without `npm install` fallback in the updater; added an early Node compatibility check and executable failure-path regression tests.
+- Allowed the exact loopback development origin so Next 16 debug/HMR traffic can hydrate browser fixtures; production authentication remains unchanged.
 - Added a CI audit of the exact installed production and development dependency graph. Advertised Node compatibility now matches the locked dependencies: `^20.19.0 || ^22.13.0 || >=24`; prefer Node 24 LTS for new installations.
 
 ### Scope and verification
