@@ -1,3 +1,15 @@
+## [v7.1.4] — 2026-09-06 — Client department memory integrity
+
+### Fixed
+- Remove automatic fictional department goals from production memory reads and ordinary database seeding. Opening an empty department now returns its real empty memory list.
+- Require verified company identity for memory reads, creation, edits and deletion. Resolve workspace ownership in the database; reject foreign company and orphan memory IDs, and reject new memories in archived departments.
+- Restrict demo memory to explicit `DEMO_SEED=true` and a selected existing company (`MC_COMPANY_ID` for the seed command). Resolve unique active same-company department aliases to their actual workspace IDs, visibly mark inserted demo entries, and skip ambiguous, missing or already populated departments.
+- Preserve all existing memory, including historical entries: old unmarked sample content cannot safely be distinguished from client-authored material and is not automatically deleted.
+
+### Verification and scope
+- Real migrated-database regression covers read-only GET, repeated ordinary seed runs, explicit scoped demo seeding, alias/archived/duplicate handling, preserved real memory, authenticated CRUD, cross-company denial and signed browser sessions.
+- Pair with onboarding v25.0.7. Release publication does not deploy client installations or validate their external services.
+
 ## [v7.1.3] — 2026-09-06 — Portable fresh-client foundations
 
 ### Fixed
