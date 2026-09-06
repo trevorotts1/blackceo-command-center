@@ -146,7 +146,13 @@ test('minted operator invitation opens its fragment and loads own authenticated 
   expect(ownState.structured).toBeTruthy();
   await expect(page).toHaveURL(`${BASE_URL}/interview`);
   expect((await context.cookies()).some(cookie => cookie.name === 'mc_tenant_session' && cookie.httpOnly)).toBeTruthy();
-  await expect(page.getByRole('alert')).toHaveCount(0);
+  // The incomplete-interview banner is expected; enrollment/state errors are not.
+  await expect(page.getByRole('alert').filter({ hasText: /invitation.*(?:expired|already used)|sign[ -]in|progress.*unavailable/i })).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'Let’s tailor your company' })).toBeVisible();
+  const begin = page.getByRole('button', { name: 'Begin tailoring', exact: true });
+  await expect(begin).toBeDisabled();
+  await page.getByRole('radio', { name: /Yes — tailor it now/ }).click();
+  await expect(begin).toBeEnabled();
   const ticket = new URL(invitation.url).hash.slice('#enroll='.length);
   expect((await page.request.post('/api/auth/interview-session', { data: { ticket } })).status()).toBe(409);
   expect(JSON.parse(fs.readFileSync(BUILD_STATE_PATH, 'utf8')).interviewComplete).toBe(false);
