@@ -47,6 +47,16 @@ CREATE TABLE IF NOT EXISTS workspaces (
   updated_at TEXT DEFAULT (datetime('now'))
 );
 
+-- Migration 134: provenance and transactional backup for unused engine adoption.
+CREATE TABLE IF NOT EXISTS engine_workspace_bootstrap (
+  workspace_id TEXT PRIMARY KEY,
+  source_migration TEXT NOT NULL,
+  original_workspace_json TEXT NOT NULL,
+  adopted_company_id TEXT,
+  adoption_backup_json TEXT,
+  adopted_at TEXT
+);
+
 -- NOTE (v5.16.1 — the migration-deadlock class): NO CREATE INDEX for
 -- company_id / archived_at / archived_reason lives here, and none ever may.
 -- schema.ts is exec'd BEFORE runMigrations() (src/lib/db/index.ts), so on an

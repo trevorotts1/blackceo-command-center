@@ -342,4 +342,4 @@ _assert_fresh_build
 printf '[cc-start] Launching: next start -p %s -H 0.0.0.0 (cwd: %s)\n' "$CC_PORT" "$CC_DIR" >&2
 
 cd "$CC_DIR"
-exec npx next start -p "$CC_PORT" -H 0.0.0.0
+exec node "$CC_DIR/scripts/next-service-env.cjs" start -p "$CC_PORT" -H 0.0.0.0

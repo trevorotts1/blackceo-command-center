@@ -1,30 +1,5 @@
-/**
- * U019 — Company re-attribution engine workspace fix.
- *
- * The podcast + anthology workspaces are fleet-shared PRODUCER ENGINES, not
- * per-client departments. reseedWorkspacesFromConfig's UPSERT used to stamp
- * every NEW workspace with the resolved ACTIVE company's id, so on a
- * multi-client box a converge would attribute the shared podcast/anthology
- * engines to whichever client was active — and boardWhereClause() then hid them
- * from every OTHER client on the same box.
- *
- * The fix: engine slugs (podcast/anthology) ALWAYS carry company_id='default' —
- * both on the NEW-row INSERT and, as a self-heal, on the ON CONFLICT branch
- * (independent of the U017 migration). Non-engine workspaces still re-attribute
- * to the active company normally.
- *
- * Proves:
- *   1. A fresh converge with an active company set seeds podcast + anthology
- *      with company_id='default' (excluded from re-attribution).
- *   2. A non-engine workspace (marketing) IS re-attributed to the active company.
- *   3. A legacy-misattributed engine row (company_id=realco) is HEALED back to
- *      'default' on the next converge (the ON CONFLICT self-heal).
- *   4. A non-engine row's company_id is NEVER overwritten on conflict (the
- *      pre-existing attribution-wipe guard is preserved).
- *
- * Node built-in test runner under tsx (`npm run test:unit`). DB-backed, isolated.
- */
-
+/** Engine ownership regression: client-owned rows survive every converge;
+ * existing system/default queues remain byte-identical. Real migrated DB. */
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -110,7 +85,7 @@ function companyOf(slug: string): string | undefined {
 }
 
 // ── 1 + 2. Fresh converge: engines -> 'default', non-engine -> active company ──
-test('1+2 — converge seeds podcast/anthology as default but marketing as the active company', () => {
+test('existing system engines remain default and new marketing belongs to the client', () => {
   seedCompanies();
   reseedWorkspacesFromConfig(getDb(), { force: true });
 
@@ -124,18 +99,19 @@ test('1+2 — converge seeds podcast/anthology as default but marketing as the a
 });
 
 // ── 3. ON CONFLICT self-heal: a misattributed engine row is forced to default ──
-test('3 — a legacy-misattributed engine row is healed back to default on the next converge', () => {
+test('client-bound engine ownership survives repeated convergence and migrations', () => {
   const db = getDb();
-  // Simulate the pre-fix damage: podcast got re-attributed to the active client.
+  // Simulate a safely bound client engine, with its existing agent references.
   db.prepare(`UPDATE workspaces SET company_id = 'realco-id' WHERE slug = 'podcast'`).run();
-  assert.equal(companyOf('podcast'), 'realco-id', 'precondition: podcast is misattributed');
+  assert.equal(companyOf('podcast'), 'realco-id', 'precondition: podcast belongs to this client');
 
   reseedWorkspacesFromConfig(getDb(), { force: true });
 
+  reseedWorkspacesFromConfig(getDb(), { force: true });
   assert.equal(
     companyOf('podcast'),
-    'default',
-    'the ON CONFLICT self-heal must force the engine back to default',
+    'realco-id',
+    'converge must never erase a client binding',
   );
 });
 
@@ -156,4 +132,25 @@ test('4 — a non-engine workspace company_id is never overwritten on conflict',
     'otherco-id',
     'the attribution-wipe guard must keep a non-engine row company_id untouched on conflict',
   );
+});
+
+test('custom system engine row remains byte-identical across convergence', () => {
+  const db = getDb();
+  db.prepare("UPDATE workspaces SET name='System Anthology Queue', icon='S', sort_order=77 WHERE id='anthology'").run();
+  const before = db.prepare("SELECT * FROM workspaces WHERE id='anthology'").get();
+  reseedWorkspacesFromConfig(db, { force: true });
+  reseedWorkspacesFromConfig(db, { force: true });
+  assert.deepEqual(db.prepare("SELECT * FROM workspaces WHERE id='anthology'").get(), before);
+});
+
+test('new engine department uses active company instead of default', () => {
+  const db = getDb();
+  // A unique manifest engine spelling with no old shared queue: deleting an
+  // isolated fixture's unused anthology rows models a missing engine.
+  db.prepare("DELETE FROM agent_skills WHERE agent_id IN (SELECT id FROM agents WHERE workspace_id='anthology')").run();
+  db.prepare("UPDATE workspaces SET head_agent_id=NULL WHERE id='anthology'").run();
+  db.prepare("DELETE FROM agents WHERE workspace_id='anthology'").run();
+  db.prepare("DELETE FROM workspaces WHERE id='anthology'").run();
+  reseedWorkspacesFromConfig(db, { force: true });
+  assert.equal(companyOf('anthology'), 'realco-id');
 });

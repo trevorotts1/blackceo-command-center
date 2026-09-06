@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { createHash } from 'crypto';
-import { queryOne } from '@/lib/db';
+import { queryAll } from '@/lib/db';
 import { personaCompanyContext } from '@/lib/persona-company';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 
@@ -43,7 +43,15 @@ export function verifyStandardFoundation(state: Record<string, unknown> | null):
     }
     const slugs=receipt.workspaceSlugs;
     if (!Array.isArray(slugs) || !slugs.length || slugs.some(slug=>typeof slug!=='string' || !slug)) missing.push('foundation_workspace_manifest');
-    else if(slugs.length!==departments.length || new Set(slugs).size!==slugs.length || departments.some(slug=>!slugs.includes(slug)) || slugs.some(slug=>!queryOne('SELECT id FROM workspaces WHERE company_id=? AND slug=? AND archived_at IS NULL',[companyId,canonicalDeptSlug(slug)]))) missing.push('foundation_board_reconciliation');
+    else {
+      // Startup preserves canonical workspace IDs but may project display slugs
+      // such as master-orchestrator → ceo. Normalize both sides of this join;
+      // only active rows owned by the receipt's company can supply evidence.
+      const ownedSlugs = new Set(queryAll<{slug:string}>(
+        'SELECT slug FROM workspaces WHERE company_id=? AND archived_at IS NULL', [companyId],
+      ).map(row => canonicalDeptSlug(row.slug)));
+      if(slugs.length!==departments.length || new Set(slugs).size!==slugs.length || departments.some(slug=>!slugs.includes(slug)) || slugs.some(slug=>!ownedSlugs.has(canonicalDeptSlug(slug)))) missing.push('foundation_board_reconciliation');
+    }
   } catch {missing.push('foundation_company_context');}
   return {ready:missing.length===0,missing};
 }
