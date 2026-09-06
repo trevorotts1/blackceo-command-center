@@ -1,3 +1,22 @@
+# Engine ownership during onboarding (v7.1.3)
+
+Engine capability does not imply shared client data. Podcast, Anthology and
+Presentations department rows belong to the explicitly bound client. Convergence
+preserves existing company ownership, including manually repaired client rows.
+
+Historical migrations 113/114 seed default-owned bootstrap rows. Migration 134
+records narrowly matched candidates without changing ownership. Skill32 can bind
+one to its explicit company UUID only while it is unused, still matches its
+migration shape and contains only known standby generated agents. It backs up the
+workspace, agents and skill bindings atomically in `engine_workspace_bootstrap`;
+IDs and references are preserved. Existing work/history, runtime bindings, custom
+agents, altered rows or foreign ownership prevent adoption and yield a diagnostic.
+There is no blanket reassignment of default rows. An existing system queue is left
+untouched; it cannot masquerade as a newly provisioned client department.
+
+The historical engine-seeding contract below describes bootstrap discovery only;
+its default owner is not a permanent ownership mandate.
+
 # Adding a New Engine to the Command Center (U025)
 
 **Status:** normative — read this before shipping any new engine (a new

@@ -6270,6 +6270,40 @@ export const migrations: Migration[] = [
         END;`);
     },
   },
+
+  {
+    id: '134',
+    name: 'record_engine_bootstrap_candidates',
+    up: (db) => {
+      // A candidate is NOT permission to rehome a live queue. Skill32 must also
+      // prove it is still unused, preserve every generated agent and back up the
+      // complete rows atomically before binding it to the explicit client UUID.
+      db.exec(`CREATE TABLE IF NOT EXISTS engine_workspace_bootstrap (
+        workspace_id TEXT PRIMARY KEY,
+        source_migration TEXT NOT NULL,
+        original_workspace_json TEXT NOT NULL,
+        adopted_company_id TEXT,
+        adoption_backup_json TEXT,
+        adopted_at TEXT
+      )`);
+      for (const [slug, name, source, order] of [
+        ['podcast', 'Podcast', '113', 1100],
+        ['anthology', 'Anthology', '113', 1101],
+        ['presentations', 'Presentations', '114', 100],
+      ] as const) {
+        if (!db.prepare('SELECT 1 FROM _migrations WHERE id = ?').get(source)) continue;
+        const row = db.prepare(`SELECT * FROM workspaces WHERE id = ? AND slug = ?
+          AND company_id = 'default' AND name = ? AND description = ?
+          AND sort_order = ? AND archived_at IS NULL`).get(
+          slug, slug, name, `${name} production engine workspace.`, order,
+        );
+        if (row) db.prepare(`INSERT OR IGNORE INTO engine_workspace_bootstrap
+          (workspace_id, source_migration, original_workspace_json) VALUES (?, ?, ?)`)
+          .run(slug, source, JSON.stringify(row));
+      }
+    },
+  },
+
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner
@@ -7561,17 +7595,8 @@ export function isDepartmentOptedOut(dept: unknown): boolean {
  *
  * Returns counts of created + updated rows.
  */
-/**
- * U019: fleet-shared producer-engine workspace slugs. These are NOT per-client
- * departments — they are shared engines (the podcast + anthology producers) that
- * every client on a multi-client box sees. They must ALWAYS carry
- * company_id='default' so a converge with an active company set never
- * re-attributes them to that one client (which boardWhereClause() would then hide
- * from every OTHER client on the same box). Non-engine workspaces re-attribute to
- * the active company normally. Lowercase slugs, matched against the canonicalized
- * dept slug.
- */
-export const ENGINE_WORKSPACE_SLUGS: readonly string[] = ['podcast', 'anthology'];
+/** Engine capabilities can belong to a client or an existing system queue. */
+export const ENGINE_WORKSPACE_SLUGS: readonly string[] = ['podcast', 'anthology', 'presentations'];
 
 /**
  * U041 (audit E11). The `outcome` field exists because {created: 0, updated: 0}
@@ -7698,12 +7723,8 @@ export function reseedWorkspacesFromConfig(
     // rows keep their company_id; only display fields (name/slug/icon/sort_order)
     // re-sync. New-box seeding is unaffected: the INSERT still stamps company_id.
     //
-    // U019 EXCEPTION: fleet-shared engine workspaces (podcast/anthology) must
-    // ALWAYS be company_id='default'. The CASE below forces them back to
-    // 'default' on conflict (healing any legacy mis-attribution on every
-    // converge, independent of the U017 migration), while EVERY other slug keeps
-    // the attribution-wipe guard (company_id untouched).
-    const engineSlugInClause = ENGINE_WORKSPACE_SLUGS.map((s) => `'${s}'`).join(', ');
+    // Engine capabilities do not confer shared ownership. Every existing row
+    // keeps its company, including repaired client-owned podcast/anthology rows.
     const upsertStmt = db.prepare(`
       INSERT INTO workspaces (id, name, slug, description, icon, company_id, sort_order)
       VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -7711,11 +7732,7 @@ export function reseedWorkspacesFromConfig(
         name = excluded.name,
         slug = excluded.slug,
         icon = excluded.icon,
-        sort_order = excluded.sort_order,
-        company_id = CASE
-          WHEN excluded.slug IN (${engineSlugInClause}) THEN 'default'
-          ELSE workspaces.company_id
-        END
+        sort_order = excluded.sort_order
     `);
 
     const existsCheck = db.prepare('SELECT id FROM workspaces WHERE id = ?');
@@ -7843,14 +7860,16 @@ export function reseedWorkspacesFromConfig(
         }
       }
 
-      // U019: engine workspaces (podcast/anthology) are fleet-shared, never
-      // per-client — they seed with company_id='default' so a converge with an
-      // active company set can never re-attribute them to one client and hide
-      // them from every other client on the same multi-client box. Non-engine
-      // workspaces are attributed to the active company normally. (The ON
-      // CONFLICT branch above never touches company_id, so an existing engine
-      // row keeps whatever it has; this only governs the NEW-row INSERT.)
-      const insertCompanyId = (ENGINE_WORKSPACE_SLUGS.includes(slugLower) || ENGINE_WORKSPACE_SLUGS.includes(canonicalSlug)) ? 'default' : companyId;
+      // A genuine system engine or foreign company's workspace is not ours to
+      // personalize. Only the scoped onboarding adoption can claim an unused
+      // migration placeholder; convergence never infers ownership from a slug.
+      const owner = db.prepare('SELECT company_id FROM workspaces WHERE id = ?')
+        .get(canonicalId) as { company_id: string } | undefined;
+      if (ENGINE_WORKSPACE_SLUGS.includes(canonicalSlug) && owner && owner.company_id !== companyId) {
+        console.log(`[reseed] Preserving engine ${canonicalId} owned by ${owner.company_id}`);
+        continue;
+      }
+      const insertCompanyId = companyId;
 
       // Use the CANONICAL id for the workspace row so the sidebar and routing
       // can match against it. The manifest slug (raw) is preserved as the workspace

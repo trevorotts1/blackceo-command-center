@@ -1,3 +1,15 @@
+## [v7.1.3] — 2026-09-06 — Portable fresh-client foundations
+
+### Fixed
+- Preserve canonical client ownership for unused bootstrap engine workspaces through migration 134 and repeated convergence. Record exact bootstrap provenance and transactional adoption backups; preserve IDs and refuse adoption of active, customized, runtime-bound or foreign client work.
+- Load provisioning-generated service configuration without changing literal dollar signs in paths, credentials or registry data. The Next startup/build boundary prepares inherited values once while PM2 and database tools retain their original values.
+- Reconcile the CEO workspace alias after real startup reseeding so a valid same-client standard foundation can pass interview readiness; foreign, archived and unrelated workspaces remain rejected.
+- Pair with onboarding v25.0.7 for partial-install recovery, explicit database migration context and Mac/native Linux/Docker portability, including Hostinger and Contabo deployments.
+
+### Verification and scope
+- Full unit, Vitest, component and production build checks; real migration/seeder/convergence/restart regression; actual Next and PM2 configuration round trips. Browser acceptance uses isolated client resources and simulated provider transport.
+- Release publication does not upgrade live client installations or verify their Cloudflare, Telegram, model-provider or Notion services.
+
 ## [v7.1.2] — 2026-09-05 — Verified client interview launch
 
 ### Fixed
