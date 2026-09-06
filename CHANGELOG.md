@@ -5,6 +5,7 @@
 - Issue short-lived, one-use, client-bound enrollment links through an authenticated endpoint. The client redeems the invitation in the browser and resumes the same saved interview; replay and foreign-host access are rejected.
 - Verify the standard foundation from hashed company artifacts, selected departments and active same-company board workspaces before showing it ready. A stored done flag alone is insufficient.
 - Preserve per-client Q/A persistence, restart/resume, reference export and pending completion handoff with executable lifecycle regression coverage.
+- Keep the public pre-enrollment gate refresh locked without an expected-authentication server error; clear stale gate flags and never sign an unlock token before identity is verified.
 
 ### Verification and scope
 - Isolated tests cover real readiness/issuance/redemption routes, saved answers, cross-client rejection and foundation tampering. Pair with onboarding v25.0.5.

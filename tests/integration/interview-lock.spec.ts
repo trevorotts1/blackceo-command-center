@@ -139,7 +139,8 @@ test('minted operator invitation opens its fragment and loads own authenticated 
   expect(minted.status(), await minted.text()).toBe(200);
   const invitation = await minted.json();
   expect(invitation).toMatchObject({ protocol: 'interview-invitation.v1', companyId: 'default', tenantId: 'interview-lock-tenant', installationId: 'interview-lock-install', oneUse: true });
-  const loaded = page.waitForResponse(response => response.url().endsWith('/api/interview/state') && response.status() === 200, { timeout: 20000 });
+  // Cold Next compilation and hydration share this test's bounded 60-second budget.
+  const loaded = page.waitForResponse(response => response.url().endsWith('/api/interview/state') && response.status() === 200, { timeout: 60000 });
   await page.goto(invitation.url);
   const ownState = await (await loaded).json();
   expect(ownState.session).toBeTruthy();
@@ -151,6 +152,12 @@ test('minted operator invitation opens its fragment and loads own authenticated 
   await expect(page.getByRole('heading', { name: 'Let’s tailor your company' })).toBeVisible();
   const begin = page.getByRole('button', { name: 'Begin tailoring', exact: true });
   await expect(begin).toBeDisabled();
+  // A fresh browser gets the real first-run walkthrough. Dismiss it as a user
+  // would before choosing consent; do not force clicks through its modal.
+  const closeWalkthrough = page.getByRole('button', { name: 'Close walkthrough', exact: true });
+  await expect(closeWalkthrough).toBeVisible();
+  await closeWalkthrough.click();
+  await expect(closeWalkthrough).toBeHidden();
   await page.getByRole('radio', { name: /Yes — tailor it now/ }).click();
   await expect(begin).toBeEnabled();
   const ticket = new URL(invitation.url).hash.slice('#enroll='.length);

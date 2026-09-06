@@ -1,6 +1,6 @@
 'use server';
 import { verifiedBuild } from '@/lib/interview/build-verification';
-import { resolveTenantContext } from '@/lib/auth/tenant-context';
+import { resolveTenantContext, TenantAccessError } from '@/lib/auth/tenant-context';
 import { getClient } from '@/lib/clients';
 
 /**
@@ -73,7 +73,20 @@ function deriveInterviewComplete(): boolean {
  * /interview when the cookie is absent/unverifiable.
  */
 export async function refreshInterviewGate(): Promise<void> {
-  const context=await resolveTenantContext({headers:new Headers(await headers())});
+  let context;
+  try {
+    context = await resolveTenantContext({ headers: new Headers(await headers()) });
+  } catch (error) {
+    if (!(error instanceof TenantAccessError)) throw error;
+    // The public invitation shell mounts before its fragment is redeemed.
+    // No verified identity means locked: never read company state or mint a
+    // completion/bypass token, and discard stale gate cookies if writable.
+    try {
+      const jar = await cookies();
+      for (const name of [INTERVIEW_COOKIE_NAME, LATCH_COOKIE_NAME, INTERVIEW_BYPASS_COOKIE_NAME]) jar.delete(name);
+    } catch { /* An absent cookie also preserves the middleware's locked state. */ }
+    return;
+  }
   const complete=context.kind==='self' ? deriveInterviewComplete() : getClient(context.clientId!)?.interview_complete===true;
   const scope=`${context.tenantId}:${context.installationId}:${context.host}`;
   const { value, maxAge } = await signInterviewToken(complete,scope);
