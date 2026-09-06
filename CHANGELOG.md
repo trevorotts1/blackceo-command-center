@@ -8,7 +8,7 @@
 
 ### Verification and scope
 - Real migrated-database regression covers read-only GET, repeated ordinary seed runs, explicit scoped demo seeding, alias/archived/duplicate handling, preserved real memory, authenticated CRUD, cross-company denial and signed browser sessions.
-- Pair with onboarding v25.0.9. The companion onboarding release was renumbered from planned v25.0.7 because concurrent releases used v25.0.7 and v25.0.8; the Command Center v7.1.4 version and release tag remain unchanged. Release publication does not deploy client installations or validate their external services.
+- The portable installer companion is tracked in [onboarding PR #1043](https://github.com/trevorotts1/openclaw-onboarding/pull/1043). Concurrent onboarding releases changed the planned companion version; use that PR for its final release reference. The Command Center v7.1.4 version and release tag remain unchanged. Release publication does not deploy client installations or validate their external services.
 
 ## [v7.1.3] — 2026-09-06 — Portable fresh-client foundations
 
