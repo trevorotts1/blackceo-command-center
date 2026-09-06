@@ -1,6 +1,6 @@
 # Command Center
 
-**Current release: v7.1.4 (2026-09-06)** — department memory reads no longer manufacture fictional client goals, and memory reads and edits enforce authenticated company ownership. Demo memory is explicit, marked and bound to actual active department IDs; existing client memory is preserved. Pair with onboarding **v25.0.9** for Mac, native Linux and Docker install recovery, including Hostinger and Contabo. See [interview launch](docs/interview-launch-readiness.md).
+**Current release: v7.1.4 (2026-09-06)** — department memory reads no longer manufacture fictional client goals, and memory reads and edits enforce authenticated company ownership. Demo memory is explicit, marked and bound to actual active department IDs; existing client memory is preserved. The portable installer companion for Mac, native Linux and Docker recovery, including Hostinger and Contabo, is tracked in [onboarding PR #1043](https://github.com/trevorotts1/openclaw-onboarding/pull/1043). See [interview launch](docs/interview-launch-readiness.md).
 
 The v7.1.0 dependency security remediation remains included; see the [security notes](docs/dependency-security-2026-09-05.md).
 
