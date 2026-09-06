@@ -24,6 +24,7 @@
  * and the anti-rot lock test. One array, one source.
  */
 export const BEARER_REQUIRED_WRITE_ROUTES: RegExp[] = [
+  /^\/api\/auth\/interview-invitation$/,
   /^\/api\/ad-campaigns(\/[^/]+)?$/,
   /^\/api\/agents$/,
   /^\/api\/agents\/[^/]+\/memory-logs$/,

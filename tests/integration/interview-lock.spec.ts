@@ -37,8 +37,10 @@
  */
 
 import { test, expect, request, type APIRequestContext } from 'playwright/test';
+import fs from 'fs';
 import {
   BASE_URL,
+  BUILD_STATE_PATH,
   INTERVIEW_COOKIE_NAME,
   LATCH_COOKIE_NAME,
   STANDARD_READY_DEPTS,
@@ -118,6 +120,37 @@ test('registered invitation redeems once and authenticates browser interview acc
   expect((await context.cookies()).some(c=>c.name==='mc_tenant_session'&&c.httpOnly)).toBeTruthy();
   expect((await page.request.post('/api/auth/interview-session',{data:{ticket}})).status()).toBe(409);
   expect((await page.request.get('/api/interview/gate-status')).status()).toBe(200);
+});
+
+test('minted operator invitation opens its fragment and loads own authenticated state', async ({ context, page }) => {
+  writeDepartmentsJson();
+  writeStandardPrebuildState(false);
+  const state = JSON.parse(fs.readFileSync(BUILD_STATE_PATH, 'utf8'));
+  Object.assign(state, { tenantId: 'interview-lock-tenant', installationId: 'interview-lock-install' });
+  fs.writeFileSync(BUILD_STATE_PATH, JSON.stringify(state));
+  await context.clearCookies();
+  expect([401, 403]).toContain((await page.request.get('/api/interview/state')).status());
+  const launchReady = await page.request.get('/api/auth/interview-ready', { headers: { authorization: 'Bearer interview-lock-machine-token' } });
+  expect(launchReady.status(), await launchReady.text()).toBe(200);
+  const minted = await page.request.post('/api/auth/interview-invitation', {
+    headers: { authorization: 'Bearer interview-lock-machine-token' },
+    data: { recipientHash: 'a'.repeat(64) },
+  });
+  expect(minted.status(), await minted.text()).toBe(200);
+  const invitation = await minted.json();
+  expect(invitation).toMatchObject({ protocol: 'interview-invitation.v1', companyId: 'default', tenantId: 'interview-lock-tenant', installationId: 'interview-lock-install', oneUse: true });
+  const loaded = page.waitForResponse(response => response.url().endsWith('/api/interview/state') && response.status() === 200, { timeout: 20000 });
+  await page.goto(invitation.url);
+  const ownState = await (await loaded).json();
+  expect(ownState.session).toBeTruthy();
+  expect(ownState.structured).toBeTruthy();
+  await expect(page).toHaveURL(`${BASE_URL}/interview`);
+  expect((await context.cookies()).some(cookie => cookie.name === 'mc_tenant_session' && cookie.httpOnly)).toBeTruthy();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  const ticket = new URL(invitation.url).hash.slice('#enroll='.length);
+  expect((await page.request.post('/api/auth/interview-session', { data: { ticket } })).status()).toBe(409);
+  expect(JSON.parse(fs.readFileSync(BUILD_STATE_PATH, 'utf8')).interviewComplete).toBe(false);
+  writeBuildState(false);
 });
 
 test.describe('Interview-mode shell lock (WG-9)', () => {
