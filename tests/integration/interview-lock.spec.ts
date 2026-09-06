@@ -140,6 +140,10 @@ test('minted operator invitation opens its fragment and loads own authenticated 
   const invitation = await minted.json();
   expect(invitation).toMatchObject({ protocol: 'interview-invitation.v1', companyId: 'default', tenantId: 'interview-lock-tenant', installationId: 'interview-lock-install', oneUse: true });
   // Cold Next compilation and hydration share this test's bounded 60-second budget.
+  let redemptions = 0;
+  page.on('request', request => {
+    if (request.method() === 'POST' && request.url().endsWith('/api/auth/interview-session')) redemptions += 1;
+  });
   const loaded = page.waitForResponse(response => response.url().endsWith('/api/interview/state') && response.status() === 200, { timeout: 60000 });
   await page.goto(invitation.url);
   const ownState = await (await loaded).json();
@@ -160,6 +164,14 @@ test('minted operator invitation opens its fragment and loads own authenticated 
   await expect(closeWalkthrough).toBeHidden();
   await page.getByRole('radio', { name: /Yes — tailor it now/ }).click();
   await expect(begin).toBeEnabled();
+  expect(redemptions).toBe(1);
+  const resumed = page.waitForResponse(response => response.url().endsWith('/api/interview/state') && response.status() === 200);
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  const resumedState = await (await resumed).json();
+  expect(resumedState.session.interviewSessionId).toBe(ownState.session.interviewSessionId);
+  await expect(page).toHaveURL(`${BASE_URL}/interview`);
+  await expect(page.getByRole('heading', { name: 'Let’s tailor your company' })).toBeVisible();
+  expect(redemptions).toBe(1); // Reload must not replay the consumed ticket.
   const ticket = new URL(invitation.url).hash.slice('#enroll='.length);
   expect((await page.request.post('/api/auth/interview-session', { data: { ticket } })).status()).toBe(409);
   expect(JSON.parse(fs.readFileSync(BUILD_STATE_PATH, 'utf8')).interviewComplete).toBe(false);

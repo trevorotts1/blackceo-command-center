@@ -6,6 +6,7 @@
 - Verify the standard foundation from hashed company artifacts, selected departments and active same-company board workspaces before showing it ready. A stored done flag alone is insufficient.
 - Preserve per-client Q/A persistence, restart/resume, reference export and pending completion handoff with executable lifecycle regression coverage.
 - Keep the public pre-enrollment gate refresh locked without an expected-authentication server error; clear stale gate flags and never sign an unlock token before identity is verified.
+- Complete browser enrollment with a clean authenticated page load, preventing stale router actions from restoring a consumed access fragment. Strict Mode shares one redemption; reloading retains the valid session without replaying the ticket.
 
 ### Verification and scope
 - Isolated tests cover real readiness/issuance/redemption routes, saved answers, cross-client rejection and foundation tampering. Pair with onboarding v25.0.5.
