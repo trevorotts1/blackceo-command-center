@@ -1,8 +1,8 @@
-// Department Memory Seed Script
-// Seeds departments with 3-5 starter memories each
+// Explicit demo-only department memory. Never run as a production read side effect.
 
 import { v4 as uuidv4 } from 'uuid';
 import { getDb, closeDb } from './index';
+import { canonicalDeptSlug } from '../routing/canonical-slug';
 
 interface DeptSeed {
   id: string;
@@ -189,33 +189,38 @@ const DEPT_SEEDS: DeptSeed[] = [
   },
 ];
 
-export function seedDeptMemory(workspaceId: string = 'default'): number {
+export function seedDeptMemory(companyId = process.env.MC_COMPANY_ID): number {
+  // No DB access or mutation unless demo content was explicitly requested.
+  if (process.env.DEMO_SEED !== 'true') return 0;
+  if (!companyId?.trim() || (process.env.MC_COMPANY_ID && process.env.MC_COMPANY_ID !== companyId)) {
+    throw new Error('Demo department memory requires an explicit matching company ID');
+  }
   const db = getDb();
+  if (!db.prepare('SELECT 1 FROM companies WHERE id=?').get(companyId)) {
+    throw new Error('Demo department memory company does not exist');
+  }
   const now = new Date().toISOString();
-  let count = 0;
-
-  // Check if already seeded (look for any dept memory rows)
-  const existing = db.prepare(
-    'SELECT COUNT(*) as cnt FROM dept_memory'
-  ).get() as { cnt: number };
-
-  if (existing.cnt > 0) {
-    console.log(`[Seed] Dept memory already seeded (${existing.cnt} rows). Skipping.`);
-    return existing.cnt;
-  }
-
-  for (const dept of DEPT_SEEDS) {
-    for (const mem of dept.memories) {
-      db.prepare(
-        `INSERT INTO dept_memory (id, workspace_id, memory_type, content, created_by, importance, created_at, updated_at)
-         VALUES (?, ?, ?, ?, 'system', ?, ?, ?)`
-      ).run(uuidv4(), dept.id, mem.memory_type, mem.content, mem.importance, now, now);
-      count++;
+  return db.transaction(() => {
+    const workspaces = db.prepare('SELECT id,slug FROM workspaces WHERE company_id=? AND archived_at IS NULL')
+      .all(companyId) as { id:string; slug:string }[];
+    let count = 0;
+    for (const dept of DEPT_SEEDS) {
+      const matches = workspaces.filter(row => canonicalDeptSlug(row.slug) === canonicalDeptSlug(dept.id));
+      // Never invent a workspace, pick an arbitrary alias duplicate, overwrite
+      // real memory or let one company's populated table suppress another's demo.
+      if (matches.length !== 1) continue;
+      const workspaceId = matches[0].id;
+      if (db.prepare('SELECT 1 FROM dept_memory WHERE workspace_id=? LIMIT 1').get(workspaceId)) continue;
+      for (const mem of dept.memories) {
+        db.prepare(`INSERT INTO dept_memory
+          (id,workspace_id,memory_type,content,created_by,importance,created_at,updated_at)
+          VALUES (?,?,?,?, 'demo-seed',?,?,?)`)
+          .run(uuidv4(), workspaceId, mem.memory_type, '[DEMO] ' + mem.content, mem.importance, now, now);
+        count++;
+      }
     }
-  }
-
-  console.log(`[Seed] Seeded ${count} department memories across ${DEPT_SEEDS.length} departments for workspace '${workspaceId}'`);
-  return count;
+    return count;
+  })();
 }
 
 // Run directly

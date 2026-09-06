@@ -170,9 +170,6 @@ async function seed() {
     console.log(`   - Created Orchestrator (master agent): ${orchestratorId}`);
   }
 
-  // Seed department memories (structural, no demo content).
-  seedDeptMemory();
-
   if (!seedDemo) {
     console.log('DEMO_SEED not set — skipping demo agents, tasks, conversations, events.');
     console.log('Database seeded structurally (no demo content).');
@@ -183,6 +180,8 @@ async function seed() {
   // Demo seed (OPT-IN via DEMO_SEED=true). This is for the public demo
   // deployment only — real client installs leave DEMO_SEED unset.
   console.log('DEMO_SEED=true — inserting demo agents, tasks, and conversations.');
+  // Fictional department goals are demo content, never structural client data.
+  seedDeptMemory();
 
   const businessId = 'default';
 
