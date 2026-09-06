@@ -1,3 +1,4 @@
+import './_isolated-db';
 /**
  * resolve-interview-write-identity.test.ts
  *

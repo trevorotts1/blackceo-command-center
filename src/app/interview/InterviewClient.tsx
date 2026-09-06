@@ -231,6 +231,7 @@ function gatewaySessionKey(interviewSessionId: string | null): string {
 
 export default function InterviewClient() {
   const router = useRouter();
+  const enrollmentRef = useRef<Promise<string | null> | null>(null);
 
   // P3-2 live-rebrand hooks — the surface re-themes the instant branding answers
   // land (BrandTheme rewrites the --brand-* vars the iv-* tokens point at).
@@ -352,13 +353,34 @@ export default function InterviewClient() {
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const enrollment=new URLSearchParams(window.location.hash.slice(1)).get('enroll');
-      if(enrollment) {
-        window.history.replaceState(null,'',window.location.pathname+window.location.search);
-        try {
-          const response=await fetch('/api/auth/interview-session',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({ticket:enrollment})});
-          if(!response.ok) {setStateError('This invitation is expired or already used. Request a new invitation to continue.');setBooting(false);return;}
-        } catch {setStateError('Sign-in is temporarily unavailable. Please retry your invitation link.');setBooting(false);return;}
+      const enrollment = new URLSearchParams(window.location.hash.slice(1)).get('enroll');
+      if (enrollment && !enrollmentRef.current) {
+        const cleanUrl = window.location.pathname + window.location.search;
+        // Remove the bearer immediately. After redemption, replace the document
+        // so its router starts authenticated with a clean canonical URL; a
+        // pending action from this bootstrap cannot restore the consumed ticket.
+        window.history.replaceState(null, '', cleanUrl);
+        // StrictMode effect replay must await the same one-use redemption, never
+        // load unauthenticated state or submit this ticket a second time.
+        enrollmentRef.current = (async () => {
+          try {
+            const response = await fetch('/api/auth/interview-session', {
+              method: 'POST', headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ ticket: enrollment }),
+            });
+            if (!response.ok) return 'This invitation is expired or already used. Request a new invitation to continue.';
+            window.location.replace(cleanUrl);
+            return null;
+          } catch {
+            return 'Sign-in is temporarily unavailable. Please retry your invitation link.';
+          }
+        })();
+      }
+      if (enrollmentRef.current) {
+        const enrollmentError = await enrollmentRef.current;
+        if (cancelled) return;
+        if (enrollmentError) { setStateError(enrollmentError); setBooting(false); }
+        return; // Success hands off to the authenticated, fragment-free document.
       }
       const data = await loadState();
       // AI Workforce standard-first (PHASE 6 item 6): read the prebuilt-

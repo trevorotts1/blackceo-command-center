@@ -1,3 +1,4 @@
+import { verifyStandardFoundation } from '@/lib/interview/foundation-verification';
 /**
  * Interview seam — the single server-side module every /api/interview/* route
  * uses to talk to the Skill-23 interview brain's file/state layer (P0-1).
@@ -342,7 +343,7 @@ export function readStandardPrebuild(state?: BuildState | null): StandardPrebuil
     standardFirst: buildType === 'standard-first',
     present,
     status,
-    standardReady: status === 'done',
+    standardReady: status === 'done' && verifyStandardFoundation(s).ready,
     standardReadyAt:
       present && typeof block.standardReadyAt === 'string' && block.standardReadyAt.trim()
         ? block.standardReadyAt

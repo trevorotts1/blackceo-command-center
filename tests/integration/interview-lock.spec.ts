@@ -37,8 +37,10 @@
  */
 
 import { test, expect, request, type APIRequestContext } from 'playwright/test';
+import fs from 'fs';
 import {
   BASE_URL,
+  BUILD_STATE_PATH,
   INTERVIEW_COOKIE_NAME,
   LATCH_COOKIE_NAME,
   STANDARD_READY_DEPTS,
@@ -118,6 +120,62 @@ test('registered invitation redeems once and authenticates browser interview acc
   expect((await context.cookies()).some(c=>c.name==='mc_tenant_session'&&c.httpOnly)).toBeTruthy();
   expect((await page.request.post('/api/auth/interview-session',{data:{ticket}})).status()).toBe(409);
   expect((await page.request.get('/api/interview/gate-status')).status()).toBe(200);
+});
+
+test('minted operator invitation opens its fragment and loads own authenticated state', async ({ context, page }) => {
+  writeDepartmentsJson();
+  writeStandardPrebuildState(false);
+  const state = JSON.parse(fs.readFileSync(BUILD_STATE_PATH, 'utf8'));
+  Object.assign(state, { tenantId: 'interview-lock-tenant', installationId: 'interview-lock-install' });
+  fs.writeFileSync(BUILD_STATE_PATH, JSON.stringify(state));
+  await context.clearCookies();
+  expect([401, 403]).toContain((await page.request.get('/api/interview/state')).status());
+  const launchReady = await page.request.get('/api/auth/interview-ready', { headers: { authorization: 'Bearer interview-lock-machine-token' } });
+  expect(launchReady.status(), await launchReady.text()).toBe(200);
+  const minted = await page.request.post('/api/auth/interview-invitation', {
+    headers: { authorization: 'Bearer interview-lock-machine-token' },
+    data: { recipientHash: 'a'.repeat(64) },
+  });
+  expect(minted.status(), await minted.text()).toBe(200);
+  const invitation = await minted.json();
+  expect(invitation).toMatchObject({ protocol: 'interview-invitation.v1', companyId: 'default', tenantId: 'interview-lock-tenant', installationId: 'interview-lock-install', oneUse: true });
+  // Cold Next compilation and hydration share this test's bounded 60-second budget.
+  let redemptions = 0;
+  page.on('request', request => {
+    if (request.method() === 'POST' && request.url().endsWith('/api/auth/interview-session')) redemptions += 1;
+  });
+  const loaded = page.waitForResponse(response => response.url().endsWith('/api/interview/state') && response.status() === 200, { timeout: 60000 });
+  await page.goto(invitation.url);
+  const ownState = await (await loaded).json();
+  expect(ownState.session).toBeTruthy();
+  expect(ownState.structured).toBeTruthy();
+  await expect(page).toHaveURL(`${BASE_URL}/interview`);
+  expect((await context.cookies()).some(cookie => cookie.name === 'mc_tenant_session' && cookie.httpOnly)).toBeTruthy();
+  // The incomplete-interview banner is expected; enrollment/state errors are not.
+  await expect(page.getByRole('alert').filter({ hasText: /invitation.*(?:expired|already used)|sign[ -]in|progress.*unavailable/i })).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'Let’s tailor your company' })).toBeVisible();
+  const begin = page.getByRole('button', { name: 'Begin tailoring', exact: true });
+  await expect(begin).toBeDisabled();
+  // A fresh browser gets the real first-run walkthrough. Dismiss it as a user
+  // would before choosing consent; do not force clicks through its modal.
+  const closeWalkthrough = page.getByRole('button', { name: 'Close walkthrough', exact: true });
+  await expect(closeWalkthrough).toBeVisible();
+  await closeWalkthrough.click();
+  await expect(closeWalkthrough).toBeHidden();
+  await page.getByRole('radio', { name: /Yes — tailor it now/ }).click();
+  await expect(begin).toBeEnabled();
+  expect(redemptions).toBe(1);
+  const resumed = page.waitForResponse(response => response.url().endsWith('/api/interview/state') && response.status() === 200);
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  const resumedState = await (await resumed).json();
+  expect(resumedState.session.interviewSessionId).toBe(ownState.session.interviewSessionId);
+  await expect(page).toHaveURL(`${BASE_URL}/interview`);
+  await expect(page.getByRole('heading', { name: 'Let’s tailor your company' })).toBeVisible();
+  expect(redemptions).toBe(1); // Reload must not replay the consumed ticket.
+  const ticket = new URL(invitation.url).hash.slice('#enroll='.length);
+  expect((await page.request.post('/api/auth/interview-session', { data: { ticket } })).status()).toBe(409);
+  expect(JSON.parse(fs.readFileSync(BUILD_STATE_PATH, 'utf8')).interviewComplete).toBe(false);
+  writeBuildState(false);
 });
 
 test.describe('Interview-mode shell lock (WG-9)', () => {

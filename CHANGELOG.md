@@ -1,3 +1,17 @@
+## [v7.1.2] — 2026-09-05 — Verified client interview launch
+
+### Fixed
+- Add operator-authenticated interview readiness with exact company, tenant, installation, host, state, workspace and configured interviewer checks. A successful gateway page or generic health response cannot certify interview launch.
+- Issue short-lived, one-use, client-bound enrollment links through an authenticated endpoint. The client redeems the invitation in the browser and resumes the same saved interview; replay and foreign-host access are rejected.
+- Verify the standard foundation from hashed company artifacts, selected departments and active same-company board workspaces before showing it ready. A stored done flag alone is insufficient.
+- Preserve per-client Q/A persistence, restart/resume, reference export and pending completion handoff with executable lifecycle regression coverage.
+- Keep the public pre-enrollment gate refresh locked without an expected-authentication server error; clear stale gate flags and never sign an unlock token before identity is verified.
+- Complete browser enrollment with a clean authenticated page load, preventing stale router actions from restoring a consumed access fragment. Strict Mode shares one redemption; reloading retains the valid session without replaying the ticket.
+
+### Verification and scope
+- Isolated tests cover real readiness/issuance/redemption routes, saved answers, cross-client rejection and foundation tampering. Pair with onboarding v25.0.5.
+- Readiness verifies local configuration; provider liveness remains explicitly unverified. Publishing does not deploy client installations or create live Cloudflare/Telegram/Notion resources.
+
 ## [v7.1.1] — 2026-09-05 — General/CEO execution fallback and board repairs
 
 ### Fixed

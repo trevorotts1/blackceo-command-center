@@ -224,7 +224,7 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
   // ---- Counts ------------------------------------------------------------
 
   it('API routes exporting a mutating method: 112 (literal assertion)', () => {
-    expect(allMutatingRoutes.length).toBe(112);
+    expect(allMutatingRoutes.length).toBe(113);
   });
 
   it('protected by isWebhookSecretRoute: 6', () => {
@@ -232,7 +232,7 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
   });
 
   it('non-webhook write routes: 106 (tenant authentication remains required)', () => {
-    expect(nonWebhookCount).toBe(106);
+    expect(nonWebhookCount).toBe(107);
   });
 
   it('interface call templates found by multi-line scanner', () => {
@@ -249,12 +249,12 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
     expect(count).toBeGreaterThanOrEqual(40);
   });
 
-  it('routes covered by BEARER_REQUIRED_WRITE_ROUTES (40 routes via 37 patterns)', () => {
-    expect(bearerCoveredRoutes.size).toBe(40);
+  it('routes covered by BEARER_REQUIRED_WRITE_ROUTES (41 routes via 38 patterns)', () => {
+    expect(bearerCoveredRoutes.size).toBe(41);
   });
 
-  it('BEARER_REQUIRED_WRITE_ROUTES.length is 37, not 40 (checksum: 34 + 3×2 = 40)', () => {
-    expect(BEARER_REQUIRED_WRITE_ROUTES.length).toBe(37);
+  it('BEARER_REQUIRED_WRITE_ROUTES.length is 38, covering 41 routes (checksum: 35 + 3×2 = 41)', () => {
+    expect(BEARER_REQUIRED_WRITE_ROUTES.length).toBe(38);
   });
 
   it('route-list membership: BEARER_REQUIRED_WRITE_ROUTES includes /api/weight-profiles', () => {
@@ -262,6 +262,7 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
     // from src/lib/bearer-required-routes.ts) directly — removing a route from the
     // shared module reddens this test. No hand-copied duplicate.
     expect(requiresBearerForWrite('/api/weight-profiles', 'POST')).toBe(true);
+    expect(requiresBearerForWrite('/api/auth/interview-invitation', 'POST')).toBe(true);
     expect(requiresBearerForWrite('/api/bugs', 'POST')).toBe(true);
     expect(requiresBearerForWrite('/api/execution-queue/abc', 'DELETE')).toBe(true);
   });
@@ -323,6 +324,7 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
   it('requiresBearerForWrite returns true for mutating methods on listed routes', () => {
     expect(requiresBearerForWrite('/api/bugs', 'POST')).toBe(true);
     expect(requiresBearerForWrite('/api/weight-profiles', 'POST')).toBe(true);
+    expect(requiresBearerForWrite('/api/auth/interview-invitation', 'POST')).toBe(true);
     expect(requiresBearerForWrite('/api/ad-campaigns/123', 'PATCH')).toBe(true);
     expect(requiresBearerForWrite('/api/workspaces/abc', 'DELETE')).toBe(true);
     expect(requiresBearerForWrite('/api/sops/abc', 'PUT')).toBe(true);

@@ -21,6 +21,7 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import Database from 'better-sqlite3';
 
 /** Playwright is always invoked from the repo root (config lives there). */
 const REPO_ROOT = process.cwd();
@@ -142,13 +143,21 @@ export function serverEnv(): Record<string, string> {
   fs.mkdirSync(identityDir,{recursive:true});
   const pair=crypto.generateKeyPairSync('ed25519');
   fs.writeFileSync(path.join(identityDir,'device.json'),JSON.stringify({version:1,deviceId:'unpaired-interview-fixture',publicKeyPem:pair.publicKey.export({type:'spki',format:'pem'}).toString(),privateKeyPem:pair.privateKey.export({type:'pkcs8',format:'pem'}).toString(),createdAtMs:Date.now()}),{mode:0o600});
+  // Local prerequisites for the actual invitation endpoint; no provider is called.
+  const runtimeRoot=path.join(E2E_OUT_DIR,'openclaw');
+  const agentDir=path.join(runtimeRoot,'agents','main','agent');
+  const scripts=path.join(E2E_OUT_DIR,'interview-scripts');
+  fs.mkdirSync(agentDir,{recursive:true});fs.mkdirSync(scripts,{recursive:true});
+  fs.writeFileSync(path.join(runtimeRoot,'openclaw.json'),JSON.stringify({agents:{entries:{main:{workspace:WORKSPACE_DIR,agentDir,model:{primary:'fixture/no-provider'}}}}}));
+  for(const script of ['update-interview-state.sh','record-dept-decision.sh']) fs.writeFileSync(path.join(scripts,script),'#!/bin/sh\nexit 0\n',{mode:0o700});
+  fs.writeFileSync(path.join(scripts,'list-canonical-departments.py'),`import json\nprint(json.dumps({"mandatory":[],"optional":[],"conditional":[]}))\n`);
   return {
     ...Object.fromEntries(['KIE_API_KEY','KIEAI_API_KEY','KIE_AI_API_KEY','OPENAI_API_KEY','FAL_KEY','FAL_API_KEY','FAL_AI_API_KEY','GEMINI_API_KEY','GOOGLE_API_KEY','FISH_AUDIO_API_KEY','ELEVENLABS_API_KEY','REPLICATE_API_TOKEN','REPLICATE_API_KEY','LUMA_API_KEY','LUMAAI_API_KEY','STABILITY_API_KEY','STABILITY_AI_API_KEY','RUNWAY_API_KEY','RUNWAYML_API_SECRET'].map(key=>[key,'isolated-browser-fixture-no-provider-access'])),
     OPENCLAW_WORKSPACE_ROOT: WORKSPACE_DIR,
     OPENCLAW_ROOT: path.join(E2E_OUT_DIR,'openclaw'),
     BCC_DEVICE_IDENTITY_DIR: path.join(E2E_OUT_DIR,'identity'),
-    OPENCLAW_SKILL23_SCRIPTS: path.join(E2E_OUT_DIR,'absent-scripts'),
-    OPENCLAW_GATEWAY_URL: 'not-a-valid-url',
+    OPENCLAW_SKILL23_SCRIPTS: scripts,
+    OPENCLAW_GATEWAY_URL: 'ws://127.0.0.1:9',
     OPENCLAW_GATEWAY_TOKEN: '',
     OPENCLAW_CLI_BIN: '/usr/bin/false',
     OWNER_NOTIFY_TELEGRAM_DISABLED: '1',
@@ -157,8 +166,10 @@ export function serverEnv(): Record<string, string> {
     DISABLE_BRIDGE_BOOTSTRAP: '1',
     DISABLE_AGENT_SYNC: '1',
     MC_API_TOKEN: 'interview-lock-machine-token',
+    MC_TENANT_PUBLIC_URL: BASE_URL,
     MC_TENANT_SESSION_SECRET: COOKIE_SECRET,
     MC_COMPANY_ID: 'default',
+    MC_PERSONA_COMPANY_CONTEXTS_JSON: JSON.stringify({default:{companyRoot:COMPANY_DIR,companyConfig:path.join(COMPANY_DIR,'company-config.json'),companySlug:'fixture-company',personaCatalog:path.join(COMPANY_DIR,'catalog.json')}}),
     MC_INSTALLATION_ID: 'interview-lock-install',
     MC_TENANT_REGISTRY_JSON: JSON.stringify({'127.0.0.1':{kind:'self',tenantId:'interview-lock-tenant',companyId:'default',installationId:'interview-lock-install'}}),
     REQUIRE_CF_ACCESS: 'false',
@@ -209,6 +220,12 @@ export function ensureCompanyDir(): void {
  *  company_dir/departments.json (the canonical array-of-objects shape). */
 export function writeDepartmentsJson(): void {
   ensureCompanyDir();
+  fs.writeFileSync(path.join(COMPANY_DIR,'company-config.json'),JSON.stringify({companyId:'default',companySlug:'fixture-company'}));
+  fs.writeFileSync(path.join(COMPANY_DIR,'catalog.json'),JSON.stringify({personas:[{id:'fixture-canonical'}]}));
+  for(const dept of STANDARD_READY_DEPTS) {
+    const folder=path.join(COMPANY_DIR,'departments',dept.id);fs.mkdirSync(folder,{recursive:true});
+    fs.writeFileSync(path.join(folder,'IDENTITY.md'),`Fixture foundation for ${dept.id}\n`);
+  }
   fs.writeFileSync(
     DEPARTMENTS_JSON_PATH,
     `${JSON.stringify(STANDARD_READY_DEPTS, null, 2)}\n`,
@@ -247,12 +264,21 @@ export function writeBuildState(complete: boolean): void {
  */
 export function writeStandardPrebuildState(complete: boolean): void {
   ensureWorkspace();
+  // A ready foundation requires real same-company rows as well as files.
+  // The fixture database is already migrated by the test server's health probe.
+  const db=new Database(DB_PATH);
+  try {
+    for(const dept of STANDARD_READY_DEPTS) db.prepare('INSERT OR IGNORE INTO workspaces(id,name,slug,company_id) VALUES(?,?,?,?)').run(`interview-fixture-${dept.id}`,dept.name,dept.id,'default');
+  } finally {db.close();}
   const state: Record<string, unknown> = complete
     ? { interviewComplete: true, interviewCompletedAt: new Date().toISOString() }
     : { interviewComplete: false };
   state.buildType = 'standard-first';
+  state.companyId = 'default';
+  state.buildId = 'interview-lock-build';
   state.standardPrebuild = {
     status: 'done',
+    foundationVerification: {version:1,status:'verified',companyId:'default',buildId:'interview-lock-build',workspaceSlugs:STANDARD_READY_DEPTS.map(d=>d.id),artifacts:['departments.json',...STANDARD_READY_DEPTS.map(d=>`departments/${d.id}/IDENTITY.md`)].map(file=>({path:file,sha256:crypto.createHash('sha256').update(fs.readFileSync(path.join(COMPANY_DIR,file))).digest('hex')}))},
     standardReadyAt: new Date().toISOString(),
     floorVersion: 'naming-map-v2.7.0-e2e-fixture',
     prebuiltDepartments: STANDARD_READY_DEPTS.map((d) => d.id),
