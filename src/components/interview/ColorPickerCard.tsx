@@ -20,6 +20,7 @@
  * is not required, so an empty field can be skipped (when the parent allows it).
  */
 
+import { useInterviewDraft } from './useInterviewDraft';
 import { useCallback, useMemo, useState } from 'react';
 import { Check, Palette } from 'lucide-react';
 import { iv } from '@/components/interview/interview-theme';
@@ -32,6 +33,7 @@ import {
 
 export default function ColorPickerCard({
   question,
+  draftScope,
   sessionId,
   questionNumber,
   knownValue,
@@ -41,7 +43,7 @@ export default function ColorPickerCard({
   autoFocus,
 }: StructuredCardProps) {
   // Memory: prefill with the brand color already on file (confirm-or-correct).
-  const [raw, setRaw] = useState(knownValue ?? '');
+  const [raw, setRaw, clearDraft] = useInterviewDraft(draftScope, question.id, knownValue ?? '');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const required = question.required === true;
@@ -82,8 +84,9 @@ export default function ColorPickerCard({
       setError(result.message);
       return;
     }
+    clearDraft();
     onAnswered({ question, value: resolution.hex, data: result.data });
-  }, [busy, knownSource, knownValue, onAnswered, question, questionNumber, resolution.hex, sessionId, valid]);
+  }, [busy, clearDraft, knownSource, knownValue, onAnswered, question, questionNumber, resolution.hex, sessionId, valid]);
 
   return (
     <div className="iv-field-block">

@@ -2,7 +2,7 @@
  * Fixture + fixed config for the interview-mode shell-lock E2E (WG-6 / WG-10c).
  *
  * The command-center half of the lock proof stands up a REAL Next server (dev)
- * and drives the actual Edge middleware (src/middleware.ts) + the sanctioned
+ * or prebuilt production server and drives the actual Edge middleware + the sanctioned
  * Node cookie-setter (refreshInterviewGate) end-to-end. Determinism comes from
  * seeding interview state into a THROWAWAY fixture workspace under
  * test-results/ — never the operator's canonical files and never ~/.openclaw.
@@ -11,8 +11,8 @@
  * (test-results/interview-lock/…). The spawned server's OPENCLAW_WORKSPACE_ROOT
  * is pointed at that fixture so the app seam (readBuildState → buildStatePath →
  * resolveWorkspaceDir) reads the fixture build-state, not the live workspace.
- * Nothing here shells to a Skill-23 script, so no receipt/output path can reach
- * ~/.openclaw either — the lock path is pure file-read + WebCrypto HMAC.
+ * Answer-save prerequisites use only the local no-op Skill-23 fixture scripts
+ * below. No receipt/output path reaches ~/.openclaw or a client installation.
  *
  * Shared by playwright.interview-lock.config.ts (webServer env + globalSetup)
  * and interview-lock.spec.ts (flip the fixture build-state between phases).
@@ -119,14 +119,14 @@ export function forgeForgedCookie(): string {
 /** Dedicated port + base URL so this suite never collides with the port-4000
  *  smoke server. Override with INTERVIEW_LOCK_PORT if 4123 is taken in CI. */
 export const PORT = Number(process.env.INTERVIEW_LOCK_PORT || 4123);
-export const BASE_URL = `http://127.0.0.1:${PORT}`;
+export const PRODUCTION_MODE = process.env.INTERVIEW_LOCK_PRODUCTION === '1';
+export const BASE_URL = `${PRODUCTION_MODE ? 'https' : 'http'}://127.0.0.1:${PORT}`;
 
 /**
  * Env handed to the webServer child. Points BOTH state-resolution surfaces at the
- * fixture and pins the cookie secret. NODE_ENV is left unset on purpose: `next
- * dev` runs in development, so refreshInterviewGate mints a NON-`secure` cookie
- * that is delivered over plain http://127.0.0.1 (a `secure` cookie would be
- * dropped and the unlock could never be observed).
+ * fixture and pins the cookie secret. Development mode serves HTTP. The opt-in
+ * production runner serves loopback HTTPS with real Secure cookies and directs
+ * internal canonical-state checks to its separate HTTP application port.
  *
  * ZERO_HUMAN_COMPANY_DIR pins the departments.json resolution (migrations.ts
  * resolveDepartmentsConfigPath priority 1) at the FIXTURE company dir so the
@@ -290,6 +290,6 @@ export function writeStandardPrebuildState(complete: boolean): void {
 
 /** Real enrollment/session payload format, signed with the isolated server secret. */
 export function signFixtureTenantGrant(purpose:'enrollment'|'session'='session'):string {
-  const payload=Buffer.from(JSON.stringify({purpose,tenantId:'interview-lock-tenant',installationId:'interview-lock-install',host:'127.0.0.1',subject:'owner:fixture',nonce:crypto.randomUUID(),exp:Math.floor(Date.now()/1000)+3600})).toString('base64url');
+  const payload=Buffer.from(JSON.stringify({purpose,companyId:'default',tenantId:'interview-lock-tenant',installationId:'interview-lock-install',host:'127.0.0.1',subject:'owner:fixture',nonce:crypto.randomUUID(),exp:Math.floor(Date.now()/1000)+3600})).toString('base64url');
   return `${payload}.${crypto.createHmac('sha256',COOKIE_SECRET).update(payload).digest('base64url')}`;
 }

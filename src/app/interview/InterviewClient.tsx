@@ -65,6 +65,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { recoverInterviewAccess, verifiedProgress, resumePhase, interviewDraftScope, INTERVIEW_SIGN_IN_HELP, INTERVIEW_RETRY_HELP } from '@/lib/interview/browser-recovery';
+import { useInterviewDraft } from '@/components/interview/useInterviewDraft';
 import { AnimatePresence, MotionConfig, motion } from 'framer-motion';
 import { ArrowRight, Info, Lock, Sparkles } from 'lucide-react';
 
@@ -124,6 +126,9 @@ interface GateFlags {
 
 interface InterviewStateResponse {
   ok: boolean;
+  companyId?: string;
+  installationId?: string;
+  buildId?: string | null;
   interviewComplete: boolean;
   buildCompleted: boolean;
   qcStatus: string;
@@ -232,6 +237,8 @@ function gatewaySessionKey(interviewSessionId: string | null): string {
 export default function InterviewClient() {
   const router = useRouter();
   const enrollmentRef = useRef<Promise<string | null> | null>(null);
+  // Keep an unused invitation only in memory so a temporary outage can be retried.
+  const pendingEnrollmentRef = useRef<string | null>(null);
 
   // P3-2 live-rebrand hooks — the surface re-themes the instant branding answers
   // land (BrandTheme rewrites the --brand-* vars the iv-* tokens point at).
@@ -260,7 +267,8 @@ export default function InterviewClient() {
   // Conversation (free-form Q&A depth).
   const [currentQuestion, setCurrentQuestion] = useState('');
   const [currentReaction, setCurrentReaction] = useState('');
-  const [input, setInput] = useState('');
+  const draftScope = interviewDraftScope(state);
+  const [input, setInput, , draftAvailable] = useInterviewDraft(draftScope, 'conversation');
   const [sending, setSending] = useState(false);
   const [awaitingReply, setAwaitingReply] = useState(false);
   const [sessionId, setSessionIdState] = useState<string | null>(null);
@@ -333,9 +341,9 @@ export default function InterviewClient() {
   const loadState = useCallback(async (): Promise<InterviewStateResponse | null> => {
     try {
       const res = await fetch('/api/interview/state', { cache: 'no-store' });
-      if (!res.ok) throw new Error(res.status === 403 || res.status === 401 ? 'Sign in using your invitation link to continue your interview.' : 'Your saved progress is temporarily unavailable. Please retry.');
+      if (!res.ok) throw new Error(res.status === 403 || res.status === 401 ? INTERVIEW_SIGN_IN_HELP : INTERVIEW_RETRY_HELP);
       const data = (await res.json()) as InterviewStateResponse;
-      if (!data.structured || !data.session || !data.resume) throw new Error('Your saved progress could not be verified. Please retry.');
+      if (!verifiedProgress(data)) throw new Error(INTERVIEW_RETRY_HELP);
       setStateError(null);
       setState(data);
       return data;
@@ -347,6 +355,17 @@ export default function InterviewClient() {
     }
   }, []);
 
+  // Opening another invitation on this same page can be a fragment-only browser
+  // navigation. Reload into the normal bootstrap so it verifies the current
+  // sign-in and removes the bearer, just as a fresh navigation would.
+  useEffect(() => {
+    const onHashChange = () => {
+      if (new URLSearchParams(window.location.hash.slice(1)).has('enroll')) window.location.reload();
+    };
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
+  }, []);
+
   // On mount: read state once and route to the right screen. ANY prior answer —
   // structured card, conversational turn, or a Telegram block — routes to
   // WelcomeBack (never consent, never question 1).
@@ -355,6 +374,7 @@ export default function InterviewClient() {
     void (async () => {
       const enrollment = new URLSearchParams(window.location.hash.slice(1)).get('enroll');
       if (enrollment && !enrollmentRef.current) {
+        pendingEnrollmentRef.current = enrollment;
         const cleanUrl = window.location.pathname + window.location.search;
         // Remove the bearer immediately. After redemption, replace the document
         // so its router starts authenticated with a clean canonical URL; a
@@ -363,17 +383,10 @@ export default function InterviewClient() {
         // StrictMode effect replay must await the same one-use redemption, never
         // load unauthenticated state or submit this ticket a second time.
         enrollmentRef.current = (async () => {
-          try {
-            const response = await fetch('/api/auth/interview-session', {
-              method: 'POST', headers: { 'content-type': 'application/json' },
-              body: JSON.stringify({ ticket: enrollment }),
-            });
-            if (!response.ok) return 'This invitation is expired or already used. Request a new invitation to continue.';
-            window.location.replace(cleanUrl);
-            return null;
-          } catch {
-            return 'Sign-in is temporarily unavailable. Please retry your invitation link.';
-          }
+          const error = await recoverInterviewAccess(enrollment);
+          if (error) return error;
+          window.location.replace(cleanUrl);
+          return null;
         })();
       }
       if (enrollmentRef.current) {
@@ -521,6 +534,7 @@ export default function InterviewClient() {
           return;
         }
 
+        setInput((current) => current.trim() === text ? '' : current);
         if (data.reply && data.reply.trim()) {
           setCurrentQuestion(data.reply);
         } else if (data.pending) {
@@ -540,7 +554,7 @@ export default function InterviewClient() {
         void loadState();
       }
     },
-    [loadState, sending, sessionId, setSessionId, startRecoveryPoll],
+    [loadState, sending, sessionId, setSessionId, setInput, startRecoveryPoll],
   );
 
   /* ---- milestone helper (words only) ---- */
@@ -668,6 +682,8 @@ export default function InterviewClient() {
 
   const resumeInterview = useCallback(() => {
     const nextIdx = nextStructuredIndex(STRUCTURED_QUESTIONS, 0, answeredIds, skippedIds);
+    const phase = resumePhase(nextIdx, flags);
+    if (phase === 'departments' || phase === 'review') { setStage(phase); return; }
     if (nextIdx !== null) {
       // Structured set unfinished → back to the first unanswered card.
       setQaMode('structured');
@@ -684,7 +700,7 @@ export default function InterviewClient() {
         ? `I'm back to continue ${companyName}'s interview — let's pick up right where we left off. Please don't re-ask anything I've already answered.`
         : "I'm back — let's pick up right where we left off. Please don't re-ask anything I've already answered.",
     );
-  }, [answeredIds, companyName, sendTurn, skippedIds]);
+  }, [answeredIds, companyName, flags, sendTurn, skippedIds]);
 
   /** Circle back to a SKIPPED STRUCTURED question — re-opens that exact card. */
   const circleBackStructured = useCallback((questionId: string) => {
@@ -716,6 +732,16 @@ export default function InterviewClient() {
     [sendTurn],
   );
 
+  const retryAccess = useCallback(async () => {
+    const ticket = pendingEnrollmentRef.current;
+    if (!ticket) { window.location.reload(); return; }
+    setBooting(true);
+    const error = await recoverInterviewAccess(ticket);
+    if (error) { setStateError(error); setBooting(false); return; }
+    pendingEnrollmentRef.current = null;
+    window.location.replace(window.location.pathname + window.location.search);
+  }, []);
+
   /* ---- renders ---- */
 
   const brandStyle = brand.primaryColor
@@ -729,7 +755,12 @@ export default function InterviewClient() {
   let screen: React.ReactNode;
 
   if (stateError) {
-    screen = <div role="alert" className="p-6"><p>{stateError}</p><button type="button" onClick={() => window.location.reload()}>Retry</button></div>;
+    screen = <div className={iv.root}><div className={iv.stage} role="alert">
+      <h1 className={iv.question}>Continue your interview</h1>
+      <p className={iv.lede}>{stateError}</p>
+      <button type="button" className={iv.btnPrimary} disabled={booting} onClick={() => void retryAccess()}>{booting ? 'Checking…' : 'Check sign-in and retry'}</button>
+      <p className="mt-4 text-sm">Use this same interview page after signing in. Submitted answers stay saved; a fresh link does not start a new interview.</p>
+    </div></div>;
   } else if (stage === 'milestone' && milestone) {
     screen = (
       <MilestoneScreen
@@ -742,10 +773,11 @@ export default function InterviewClient() {
     );
   } else if (stage === 'welcome-back') {
     const nextIdx = nextStructuredIndex(STRUCTURED_QUESTIONS, 0, answeredIds, skippedIds);
-    const nextPrompt =
-      nextIdx !== null
-        ? personalizePrompt(STRUCTURED_QUESTIONS[nextIdx].prompt, companyName)
-        : null;
+    const phase = resumePhase(nextIdx, flags);
+    const nextPrompt = nextIdx !== null
+      ? personalizePrompt(STRUCTURED_QUESTIONS[nextIdx].prompt, companyName)
+      : phase === 'review' ? 'Review your answers and apply your customizations'
+      : phase === 'departments' ? 'Continue choosing your departments' : null;
     screen = (
       <WelcomeBack
         percent={state?.progress.percent ?? 0}
@@ -794,6 +826,8 @@ export default function InterviewClient() {
         answersSaved={answersSaved}
         lastSavedAt={lastSavedAt}
         mode={qaMode}
+        draftScope={draftScope}
+        draftAvailable={draftAvailable}
         question={qaMode === 'structured' ? question : undefined}
         questionNumber={structIndex + 1}
         knownValue={known?.value}
@@ -809,7 +843,6 @@ export default function InterviewClient() {
         onInput={setInput}
         onSend={() => {
           const text = input;
-          setInput('');
           void sendTurn(text);
         }}
         onIDontKnow={(msg) => void sendTurn(msg)}
@@ -851,6 +884,8 @@ function QaStage({
   answersSaved,
   lastSavedAt,
   mode,
+  draftScope,
+  draftAvailable,
   question,
   questionNumber,
   knownValue,
@@ -877,6 +912,8 @@ function QaStage({
   answersSaved: number;
   lastSavedAt: number | null;
   mode: QaMode;
+  draftScope: string | null;
+  draftAvailable: boolean;
   question?: InterviewQuestion;
   questionNumber: number;
   knownValue?: string;
@@ -907,6 +944,7 @@ function QaStage({
             <AnimatePresence mode="wait">
               <QuestionCard
                 key={question.id}
+                draftScope={draftScope}
                 question={question}
                 questionNumber={questionNumber}
                 knownValue={knownValue}
@@ -920,6 +958,7 @@ function QaStage({
             </AnimatePresence>
           ) : (
             <div>
+              <p className="mb-3 text-sm">{draftAvailable ? 'Unsent text is kept in this browser. Send your answer to save it to your interview.' : 'This browser could not keep your draft. Send your answer before closing the page.'}</p>
               <ConversationPane
                 currentReaction={currentReaction}
                 currentQuestion={currentQuestion}

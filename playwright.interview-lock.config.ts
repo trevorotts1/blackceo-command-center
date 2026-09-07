@@ -1,18 +1,22 @@
 import { defineConfig } from 'playwright/test';
-import { BASE_URL, serverEnv } from './tests/integration/interview-lock.fixture';
+import { BASE_URL, PRODUCTION_MODE, serverEnv } from './tests/integration/interview-lock.fixture';
 
 /**
  * Dedicated, self-contained Playwright config for the interview-mode shell-lock
  * E2E (WG-6 / WG-10c command-center half).
  *
  * Unlike playwright.config.ts (which assumes an already-running smoke server and
- * skips cleanly when none is up), this config STANDS UP its own Next dev server
+ * skips cleanly when none is up), this config starts its own Next server
  * with a controlled fixture workspace so the lock can be proven deterministically
  * in CI:
  *   • OPENCLAW_WORKSPACE_ROOT → a throwaway fixture (never ~/.openclaw), so the
  *     Node cookie-setter derives completion from a build-state WE seed.
  *   • MC_INTERVIEW_COOKIE_SECRET pinned so signer + Edge verifier agree.
  *   • A dedicated port (4123) so it never collides with the port-4000 smoke run.
+ * By default it runs development mode. INTERVIEW_LOCK_PRODUCTION=1 runs a
+ * prebuilt .next-interview-lock behind a loopback HTTPS fixture proxy, preserving
+ * real production Secure cookies and invitation-origin validation. CI builds
+ * with serverEnv() first, then uses this production mode for all cases.
  *
  * STANDARD-FIRST (AI Workforce standard-first redesign, PHASE 6b): the fixture
  * also seeds a throwaway COMPANY dir (ZERO_HUMAN_COMPANY_DIR →
@@ -46,6 +50,7 @@ export default defineConfig({
   use: {
     baseURL: BASE_URL,
     headless: true,
+    ignoreHTTPSErrors: PRODUCTION_MODE, // Isolated loopback fixture certificate only.
     channel: process.env.INTERVIEW_LOCK_BROWSER_CHANNEL || undefined,
     // Capture a full Playwright trace + screenshot only when a test is retried
     // after a failure, so green runs stay cheap but any CI flake/regression is
@@ -56,9 +61,10 @@ export default defineConfig({
   },
   webServer: {
     // `next dev -p ${PORT:-4000}` — PORT is supplied via env below.
-    command: 'npm run dev',
+    command: PRODUCTION_MODE ? 'node tests/integration/interview-lock.production-server.mjs' : 'npm run dev',
     url: `${BASE_URL}/api/health`,
     env: serverEnv(),
+    ignoreHTTPSErrors: PRODUCTION_MODE,
     reuseExistingServer: false,
     timeout: 180_000,
     stdout: 'pipe',

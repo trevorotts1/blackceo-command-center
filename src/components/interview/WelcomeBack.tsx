@@ -125,7 +125,7 @@ export default function WelcomeBack({
             style={{ color: 'var(--iv-accent-strong)' }}
           >
             <CheckCircle2 className="h-4 w-4 shrink-0" aria-hidden />
-            <span>Every answer is saved — you can leave anytime.</span>
+            <span>Your submitted answers are saved. Return to this page to continue.</span>
           </div>
           {nextUpPrompt ? (
             <p className="text-sm mt-3" style={{ color: 'var(--iv-ink-soft)' }}>

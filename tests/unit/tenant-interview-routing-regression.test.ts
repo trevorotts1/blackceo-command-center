@@ -59,6 +59,25 @@ for(const id of ['client-a','client-b'])run('INSERT OR IGNORE INTO clients(id,na
     await assert.rejects(resolveTenantContext(req('a.example','/api/interview/state',{'cf-access-jwt-assertion':make('subject-a','aud-b')})));
   }finally{globalThis.fetch=original;process.env.MC_TENANT_REGISTRY_JSON=JSON.stringify(registry);}
  });
+ test('client state supplies authenticated company and installation for isolated browser drafts',async()=>{
+  const {GET:state}=await import('../../src/app/api/interview/state/route');
+  const {interviewDraftScope}=await import('../../src/lib/interview/browser-recovery');
+  const scopes:string[]=[];
+  for(const host of ['a.example','b.example'] as const){
+    const reg=registry[host];
+    const token=await signTenantGrant({purpose:'session',tenantId:reg.tenantId,companyId:reg.companyId,host,installationId:reg.installationId,subject:'owner:fixture',exp:Date.now()/1000+60,nonce:randomUUID()});
+    const response=await state(req(host,'/api/interview/state?companyId=foreign&installationId=foreign',{cookie:`mc_tenant_session=${token}`}));
+    assert.equal(response.status,200);
+    const body=await response.json();
+    assert.equal(body.companyId,reg.companyId);
+    assert.equal(body.installationId,reg.installationId);
+    assert.equal(body.session.interviewSessionId,ensureTenantInterview(reg.tenantId).interview_id);
+    const scope=interviewDraftScope(body);
+    assert.ok(scope,'verified client state must enable browser draft persistence');
+    scopes.push(scope);
+  }
+  assert.notEqual(scopes[0],scopes[1],'different clients must never share a draft bucket');
+ });
  test('durable answers preserve content, revisions and tenant separation; retries are idempotent',async()=>{
   const a=await context(),b=await context('b.example');
   const first=queueInterviewOperation(a,'answer',{questionId:'vision',prompt:'What is your vision?',answer:'A_PRIVATE'},'fixture-answer-a');

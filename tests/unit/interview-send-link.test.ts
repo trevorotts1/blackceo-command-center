@@ -1,200 +1,215 @@
-/**
- * Unit tests for POST /api/interview/send-link — the OPERATOR-TRIGGERED
- * interview link delivery route. Runs under `npm run test:unit`.
- *
- * Strategy mirrors interview-nudge-sweep.test.ts + task-status-transition.test.ts:
- * isolated DATABASE_PATH + OPENCLAW_WORKSPACE_ROOT temp trees, env set BEFORE the
- * dynamic imports, OWNER_NOTIFY_TELEGRAM_DISABLED=1 so nothing real ever sends
- * (the route's 502 response still exposes the link + mode it WOULD have sent,
- * which is what we assert on).
- *
- * Verifies:
- *   1. Bearer auth: wrong/missing token → 401 (when MC_API_TOKEN set).
- *   2. Completed interview → 409 interview_complete (never re-invite).
- *   3. Fresh box (nothing answered) → START mode with the /interview link.
- *   4. Started interview (sessionId + handoff) → RESUME mode with the P0-7
- *      slug-contract link.
- *   5. Cooldown: a recorded send within the window → 409 cooldown; force:true
- *      bypasses it.
- *   6. Undeliverable owner → 502 owner_not_reachable and NO ledger row (retry
- *      is safe; no spam risk).
- */
-
+import './_isolated-db';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
 import { NextRequest } from 'next/server';
+import { createHash } from 'node:crypto';
 
-const WORKSPACE = fs.mkdtempSync(path.join(os.tmpdir(), 'bc-sendlink-ws-'));
-const TMP_DB = path.join(
-  fs.mkdtempSync(path.join(os.tmpdir(), 'bc-sendlink-db-')),
-  'mission-control.test.db',
-);
-
-process.env.DATABASE_PATH = TMP_DB;
-process.env.OPENCLAW_WORKSPACE_ROOT = WORKSPACE;
-process.env.OPENCLAW_DASHBOARD_URL = 'https://acme.zerohumanworkforce.com';
-process.env.OWNER_NOTIFY_TELEGRAM_DISABLED = '1'; // never send for real in tests
-delete process.env.OPENCLAW_OWNER_CHAT_ID;
-
-const MC_API_TOKEN = 'test-send-link-token';
-process.env.MC_API_TOKEN = MC_API_TOKEN;
-
-const SESSION_ID = 'sess-sendlink-1';
-
-type DbModule = typeof import('../../src/lib/db');
-let run: DbModule['run'];
-let queryOne: DbModule['queryOne'];
-
-type RouteModule = typeof import('../../src/app/api/interview/send-link/route');
-let POST: RouteModule['POST'];
-
-function buildRequest(body?: unknown, token: string | null = MC_API_TOKEN): NextRequest {
-  const headers: Record<string, string> = { 'content-type': 'application/json' };
-  if (token) headers.authorization = `Bearer ${token}`;
-  return new NextRequest('http://localhost/api/interview/send-link', {
-    method: 'POST',
-    headers,
-    body: body === undefined ? undefined : JSON.stringify(body),
+// Real routes, real SQLite, real gateway subprocess protocol against ONLY a
+// synthetic executable. Neither a live gateway nor a client config is reachable.
+const root = process.env.CC_TEST_FIXTURE_ROOT!;
+const workspace = path.join(root, 'workspace');
+const companyRoot = path.join(root, 'company');
+const runtimeRoot = path.join(root, 'runtime');
+const scripts = path.join(root, 'scripts');
+const bin = path.join(root, 'bin');
+const capture = path.join(root, 'synthetic-gateway-input.json');
+const owner = '5550001234';
+const token = 'fixture-operator-token';
+const originalPath = process.env.PATH;
+const originalFetch = globalThis.fetch;
+const statePath = path.join(workspace, '.workforce-build-state.json');
+const shellReceipt = path.join(workspace, 'company-discovery', '.interview-link-sends.log.receipt.json');
+const fresh = () => ({ tenantId: 'send-tenant', companyId: 'send-company', installationId: 'send-install',
+  interviewComplete: false, buildType: 'legacy', buildId: 'fixture-build' });
+Object.assign(process.env, { OPENCLAW_ROOT: runtimeRoot, OPENCLAW_WORKSPACE_ROOT: workspace,
+  OPENCLAW_WORKSPACE_PATH: workspace, OPENCLAW_SKILL23_SCRIPTS: scripts,
+  OPENCLAW_GATEWAY_URL: 'ws://127.0.0.1:1', MC_API_TOKEN: token,
+  MC_COMPANY_ID: 'send-company', MC_INSTALLATION_ID: 'send-install',
+  MC_TENANT_PUBLIC_URL: 'https://send.example', OPENCLAW_OWNER_CHAT_ID: owner });
+process.env.MC_TENANT_REGISTRY_JSON = JSON.stringify({ 'send.example': {
+  kind: 'self', tenantId: 'send-tenant', companyId: 'send-company', installationId: 'send-install',
+} });
+process.env.MC_PERSONA_COMPANY_CONTEXTS_JSON = JSON.stringify({ 'send-company': {
+  companyRoot, companyConfig: path.join(companyRoot, 'company-config.json'),
+  companySlug: 'send-company', personaCatalog: path.join(companyRoot, 'catalog.json'),
+} });
+let db: typeof import('../../src/lib/db');
+let POST: typeof import('../../src/app/api/interview/send-link/route')['POST'];
+function req(body?: unknown, bearer: string | null = token, host = 'send.example') {
+  return new NextRequest('http://127.0.0.1:4000/api/interview/send-link', { method: 'POST',
+    headers: { host, 'content-type': 'application/json', ...(bearer ? { authorization: `Bearer ${bearer}` } : {}) },
+    ...(body ? { body: JSON.stringify(body) } : {}),
   });
 }
-
-function writeBuildState(extra: Record<string, unknown> = {}): void {
-  fs.writeFileSync(
-    path.join(WORKSPACE, '.workforce-build-state.json'),
-    JSON.stringify(extra, null, 2),
-    'utf-8',
-  );
+function stub(behavior = 'accept') {
+  fs.writeFileSync(path.join(bin, 'openclaw'), `#!${process.execPath}\n` +
+    `const fs=require('fs');const a=process.argv.slice(2);fs.writeFileSync(${JSON.stringify(capture)},JSON.stringify(a));` +
+    (behavior === 'error' ? `process.stderr.write('synthetic failure '+a.join(' '));process.exit(1);` :
+      `console.log(JSON.stringify({ok:true,payload:{messageId:'fixture-msg',chatId:${JSON.stringify(behavior === 'foreign' ? '5559999999' : owner)},channel:'telegram'}}));`),
+    { mode: 0o700 });
 }
-
-function writeHandoff(): void {
-  const dir = path.join(WORKSPACE, 'company-discovery');
-  fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(
-    path.join(dir, 'interview-handoff.md'),
-    ['---', 'status: in_progress', 'next_question_number: 7', '---', ''].join('\n'),
-    'utf-8',
-  );
+function ledger() {
+  return db.queryAll<{ metadata: string; message: string }>("SELECT metadata,message FROM events WHERE type='interview_link_delivery'");
 }
-
-function clearWorkspace(): void {
-  fs.rmSync(path.join(WORKSPACE, '.workforce-build-state.json'), { force: true });
-  fs.rmSync(path.join(WORKSPACE, 'company-discovery'), { recursive: true, force: true });
+function sentMessage() {
+  const args: string[] = JSON.parse(fs.readFileSync(capture, 'utf8'));
+  assert.equal(args[args.indexOf('--target') + 1], owner);
+  return args[args.indexOf('--message') + 1];
 }
-
-function ledgerCount(): number {
-  const row = queryOne<{ c: number }>(
-    `SELECT COUNT(*) AS c FROM events WHERE type = 'interview_link_sent'`,
-  );
-  return row?.c ?? 0;
-}
-
 test.before(async () => {
-  const db = await import('../../src/lib/db');
-  db.getDb(); // run migrations so the events table exists
-  run = db.run;
-  queryOne = db.queryOne;
-  const mod = await import('../../src/app/api/interview/send-link/route');
-  POST = mod.POST;
+  for (const dir of [workspace, companyRoot, scripts, bin, path.join(runtimeRoot, 'agents/main/agent')]) fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(companyRoot, 'company-config.json'), JSON.stringify({ companyId: 'send-company', companySlug: 'send-company' }));
+  fs.writeFileSync(path.join(companyRoot, 'catalog.json'), JSON.stringify({ personas: { canonical: { name: 'Canonical Fixture' } } }));
+  for (const file of ['update-interview-state.sh', 'record-dept-decision.sh', 'list-canonical-departments.py']) fs.writeFileSync(path.join(scripts, file), '# fixture\n');
+  fs.writeFileSync(path.join(runtimeRoot, 'openclaw.json'), JSON.stringify({ agents: { entries: { main: { workspace, model: 'fixture/model' } } } }));
+  globalThis.fetch = async () => { throw new Error('No network allowed'); };
+  db = await import('../../src/lib/db'); db.getDb();
+  db.run("INSERT INTO companies(id,name,slug) VALUES('send-company','Send Fixture','send-company')");
+  db.run("INSERT INTO workspaces(id,name,slug,company_id) VALUES('send-ws','General Task','general-task','send-company')");
+  ({ POST } = await import('../../src/app/api/interview/send-link/route'));
 });
-
-test.after(() => {
-  fs.rmSync(WORKSPACE, { recursive: true, force: true });
-  fs.rmSync(path.dirname(TMP_DB), { recursive: true, force: true });
+test.beforeEach(() => {
+  db.run("DELETE FROM events WHERE type IN ('interview_link_delivery','interview_link_sent')");
+  fs.writeFileSync(statePath, JSON.stringify(fresh()));
+  fs.rmSync(capture, { force: true });
+  fs.rmSync(shellReceipt, { force: true }); stub();
+  process.env.PATH = bin; // real OpenClaw is impossible to execute
+  process.env.OWNER_NOTIFY_ALLOW_SEND_IN_TEST = '1';
+  delete process.env.OWNER_NOTIFY_TELEGRAM_DISABLED;
+  process.env.MC_API_TOKEN = token;
+  process.env.MC_TENANT_PUBLIC_URL = 'https://send.example';
+  process.env.OPENCLAW_OWNER_CHAT_ID = owner;
 });
+test.after(() => { process.env.PATH = originalPath; globalThis.fetch = originalFetch; db.closeDb(); });
 
-// ── 1. auth ───────────────────────────────────────────────────────────────────
-test('rejects a missing/wrong bearer token with 401', async () => {
-  clearWorkspace();
-  const resMissing = await POST(buildRequest(undefined, null));
-  assert.equal(resMissing.status, 401);
-  const resWrong = await POST(buildRequest(undefined, 'nope'));
-  assert.equal(resWrong.status, 401);
+test('operator auth remains mandatory with no token, wrong token, or unknown host', async () => {
+  for (const request of [req(undefined, null), req(undefined, 'wrong'), req(undefined, token, 'foreign.example')]) {
+    assert.equal((await POST(request)).status, 403);
+  }
+  delete process.env.MC_API_TOKEN;
+  assert.equal((await POST(req())).status, 403);
+  assert.equal(ledger().length, 0); assert.equal(fs.existsSync(capture), false);
 });
-
-// ── 2. completed interview → 409 ─────────────────────────────────────────────
-test('refuses to invite when the interview is already complete', async () => {
-  writeBuildState({ interviewComplete: true });
-  const res = await POST(buildRequest());
-  assert.equal(res.status, 409);
-  const body = await res.json();
-  assert.equal(body.error, 'interview_complete');
-  clearWorkspace();
-});
-
-// ── 3. START mode: fresh box → /interview link (send fails → 502, no ledger) ──
-test('fresh box builds the START link and records nothing on a failed send', async () => {
-  clearWorkspace();
-  const before = ledgerCount();
-  const res = await POST(buildRequest());
-  assert.equal(res.status, 502, 'owner unreachable in tests (send disabled)');
-  const body = await res.json();
-  assert.equal(body.error, 'owner_not_reachable');
-  assert.equal(body.mode, 'start');
-  assert.equal(body.link, 'https://acme.zerohumanworkforce.com/interview');
-  assert.equal(ledgerCount(), before, 'a failed send must not write the ledger');
-});
-
-// ── 4. RESUME mode: started interview → slug-contract resume link ────────────
-test('started interview builds the P0-7 resume link', async () => {
-  writeBuildState({ interviewSessionId: SESSION_ID });
-  writeHandoff();
-  const res = await POST(buildRequest());
-  assert.equal(res.status, 502);
-  const body = await res.json();
-  assert.equal(body.mode, 'resume');
-  assert.equal(
-    body.link,
-    `https://acme.zerohumanworkforce.com/onboarding/resume/${SESSION_ID}`,
-  );
-  clearWorkspace();
-});
-
-// ── 4b. an in-progress interview wins over a stale buildCompletedAt ───────────
-test('a reset-and-restarted interview is not blocked by an earlier buildCompletedAt', async () => {
-  // Real-world shape: an owner's company build finished once (buildCompletedAt
-  // is set from that run), then the interview was deliberately reset and is
-  // genuinely underway again (interviewComplete is back to false). The route
-  // must treat the in-progress interview as authoritative and still offer the
-  // resume link — buildCompletedAt alone must never 409 this.
-  writeBuildState({
-    interviewSessionId: SESSION_ID,
-    interviewComplete: false,
-    buildCompletedAt: '2026-06-19T00:00:00.000Z',
+test('fresh owner without Access gets a private 24-hour grant for configured public host; no ticket in response or ledger', async () => {
+  const response = await POST(req());
+  const body = await response.json(); assert.equal(response.status, 200, JSON.stringify(body));
+  assert.equal(body.mode, 'start'); assert.equal(body.bookmark, 'https://send.example/interview');
+  const message = sentMessage();
+  const url = new URL(message.match(/https:\/\/send\.example\/interview#enroll=\S+/)![0]);
+  const ticket = decodeURIComponent(url.hash.slice('#enroll='.length));
+  const { verifyTenantGrant } = await import('../../src/lib/auth/tenant-context');
+  const grant = await verifyTenantGrant(ticket, 'send.example', 'enrollment');
+  assert.equal(grant?.companyId, 'send-company');
+  assert.ok(grant!.exp - Date.now() / 1000 > 86390);
+  assert.match(message, /bookmark.*while you are signed in/);
+  assert.ok(!JSON.stringify(body).includes(ticket));
+  assert.ok(!JSON.stringify(ledger()).includes(ticket));
+  assert.equal(JSON.parse(ledger()[0].metadata).status, 'accepted');
+  assert.equal(await verifyTenantGrant(ticket, 'foreign.example', 'enrollment'), null);
+  const { POST: redeem } = await import('../../src/app/api/auth/interview-session/route');
+  const enrollment = () => new NextRequest('https://send.example/api/auth/interview-session', {
+    method: 'POST', headers: { host: 'send.example', 'content-type': 'application/json' },
+    body: JSON.stringify({ ticket }),
   });
-  writeHandoff();
-  const res = await POST(buildRequest());
-  assert.notEqual(res.status, 409, 'buildCompletedAt alone must not block a genuinely in-progress interview');
-  assert.equal(res.status, 502, 'owner unreachable in tests (send disabled)');
-  const body = await res.json();
-  assert.equal(body.mode, 'resume');
-  assert.equal(
-    body.link,
-    `https://acme.zerohumanworkforce.com/onboarding/resume/${SESSION_ID}`,
-  );
-  clearWorkspace();
+  const entered = await redeem(enrollment());
+  assert.equal(entered.status, 200, 'owner without Access can exchange delivered ticket');
+  assert.match(entered.headers.get('set-cookie')!, /HttpOnly/i);
+  assert.equal((await redeem(enrollment())).status, 409, 'one-use protection remains intact');
+});
+test('saved interview receives fresh enrollment with resume copy without resetting answers', async () => {
+  const saved = { ...fresh(), buildCompletedAt: '2026-01-01', interviewSessionId: 'saved-session', interviewProgress: { lastQuestionNumber: 4 }, answers: { q1: 'Saved answer' } };
+  fs.writeFileSync(statePath, JSON.stringify(saved)); const before = fs.readFileSync(statePath, 'utf8');
+  const response = await POST(req()); assert.equal(response.status, 200);
+  assert.equal((await response.json()).mode, 'resume');
+  assert.match(sentMessage(), /saved answers.*Continue your interview/);
+  assert.match(sentMessage(), /#enroll=/); assert.ok(!sentMessage().includes('/onboarding/resume/'));
+  assert.equal(fs.readFileSync(statePath, 'utf8'), before);
+});
+test('completed, foreign state, and unverified public origins never send', async () => {
+  fs.writeFileSync(statePath, JSON.stringify({ ...fresh(), interviewComplete: true }));
+  assert.equal((await POST(req())).status, 409);
+  fs.writeFileSync(statePath, JSON.stringify({ ...fresh(), companyId: 'foreign' }));
+  assert.equal((await POST(req())).status, 409);
+  fs.writeFileSync(statePath, JSON.stringify(fresh())); process.env.MC_TENANT_PUBLIC_URL = 'https://foreign.example';
+  assert.equal((await POST(req())).status, 409); assert.equal(fs.existsSync(capture), false);
+});
+test('concurrent triggers reserve once; confirmed cooldown needs explicit force', async () => {
+  const responses = await Promise.all([POST(req()), POST(req())]);
+  assert.deepEqual(responses.map(r => r.status).sort(), [200, 409]); assert.equal(ledger().length, 1);
+  const blocked = await POST(req()); assert.equal((await blocked.json()).error, 'cooldown');
+  assert.equal((await POST(req({ force: true }))).status, 200); assert.equal(ledger().length, 2);
+});
+test('uncertain gateway error is redacted and never force-retried', async () => {
+  stub('error'); const errors: unknown[][] = []; const savedError = console.error;
+  console.error = (...args) => { errors.push(args); };
+  try {
+    const response = await POST(req()); assert.equal(response.status, 502);
+    assert.equal((await response.json()).error, 'delivery_uncertain');
+    assert.equal((await (await POST(req({ force: true }))).json()).error, 'delivery_uncertain');
+    assert.equal(ledger().length, 1); assert.deepEqual(errors, []);
+    assert.ok(!JSON.stringify(ledger()).includes('#enroll='));
+  } finally { console.error = savedError; }
+});
+test('foreign acknowledgement stays uncertain and test suppression never dispatches', async () => {
+  stub('foreign'); assert.equal((await (await POST(req())).json()).error, 'delivery_uncertain');
+  db.run("DELETE FROM events WHERE type='interview_link_delivery'"); fs.rmSync(capture);
+  process.env.OWNER_NOTIFY_TELEGRAM_DISABLED = '1';
+  assert.equal((await POST(req())).status, 502); assert.equal(fs.existsSync(capture), false);
+  assert.equal(JSON.parse(ledger()[0].metadata).status, 'not-dispatched');
 });
 
-// ── 5. cooldown: a recent recorded send blocks; force bypasses ────────────────
-test('cooldown blocks a re-send within the window; force:true bypasses', async () => {
-  clearWorkspace();
-  run(
-    `INSERT INTO events (id, type, task_id, message, metadata, created_at)
-     VALUES (?, 'interview_link_sent', NULL, 'test send', '{}', datetime('now'))`,
-    [randomUUID()],
-  );
+test('owner change after binding refuses the private send without logging or escalation', async () => {
+  const { notifyOwnerPrivate } = await import('../../src/lib/notify');
+  process.env.OPENCLAW_OWNER_CHAT_ID = '5550005678';
+  assert.equal(await notifyOwnerPrivate({ companyId: 'send-company', expectedChatId: owner,
+    message: 'synthetic-private-ticket' }), 'not-dispatched');
+  assert.equal(fs.existsSync(capture), false);
+});
 
-  const blocked = await POST(buildRequest());
-  assert.equal(blocked.status, 409);
-  const blockedBody = await blocked.json();
-  assert.equal(blockedBody.error, 'cooldown');
-
-  // force:true bypasses the cooldown and proceeds to the (failing) send.
-  const forced = await POST(buildRequest({ force: true }));
-  assert.equal(forced.status, 502);
-  const forcedBody = await forced.json();
-  assert.equal(forcedBody.error, 'owner_not_reachable');
+function writeShellReceipt(overrides: Record<string, unknown> = {}) {
+  fs.mkdirSync(path.dirname(shellReceipt), { recursive: true });
+  fs.writeFileSync(shellReceipt, JSON.stringify({ companyId: 'send-company', tenantId: 'send-tenant',
+    installationId: 'send-install', origin: 'https://send.example',
+    recipientHash: createHash('sha256').update(owner).digest('hex'),
+    status: 'accepted', messageId: 'fixture-shell-message', epoch: Math.floor(Date.now() / 1000),
+    invitationExpiresAt: Math.floor(Date.now() / 1000) + 86400, ...overrides,
+  }));
+}
+test('shell sending and uncertain receipts block even forced requests before mint or delivery', async () => {
+  for (const status of ['sending', 'uncertain']) {
+    writeShellReceipt({ status });
+    for (const force of [false, true]) {
+      const response = await POST(req({ force }));
+      assert.equal(response.status, 409);
+      assert.equal((await response.json()).error, 'delivery_uncertain');
+      assert.equal(ledger().length, 0); assert.equal(fs.existsSync(capture), false);
+    }
+  }
+});
+test('foreign, wrong-recipient and malformed shell receipts fail closed without disclosure', async () => {
+  for (const field of ['companyId', 'tenantId', 'installationId', 'origin', 'recipientHash', 'status']) {
+    writeShellReceipt({ [field]: 'foreign-fixture-value' });
+    const response = await POST(req({ force: true }));
+    assert.equal(response.status, 409);
+    const text = await response.text(); assert.match(text, /delivery_receipt_unverified/);
+    assert.ok(!text.includes('foreign-fixture-value'));
+  }
+  for (const data of ['{', 'null', '[]', '{}']) {
+    fs.writeFileSync(shellReceipt, data);
+    assert.equal((await POST(req({ force: true }))).status, 409);
+  }
+  writeShellReceipt({ epoch: 'bad-time' });
+  assert.equal((await POST(req({ force: true }))).status, 409);
+  assert.equal(ledger().length, 0); assert.equal(fs.existsSync(capture), false);
+});
+test('recent accepted shell receipt shares cooldown while deliberate or expired renewal remains usable', async () => {
+  writeShellReceipt();
+  assert.equal((await (await POST(req())).json()).error, 'cooldown');
+  assert.equal(ledger().length, 0);
+  assert.equal((await POST(req({ force: true }))).status, 200);
+  db.run("DELETE FROM events WHERE type='interview_link_delivery'");
+  writeShellReceipt({ invitationExpiresAt: Math.floor(Date.now() / 1000) - 1 });
+  assert.equal((await POST(req())).status, 200);
 });

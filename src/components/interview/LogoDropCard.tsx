@@ -18,6 +18,7 @@
  * acceptance holds without a new backend.
  */
 
+import { useInterviewDraft } from './useInterviewDraft';
 import { useCallback, useMemo, useRef, useState } from 'react';
 import { ImagePlus, Link2, UploadCloud, X } from 'lucide-react';
 import { iv, ivcx } from '@/components/interview/interview-theme';
@@ -45,6 +46,7 @@ function isValidLogoUrl(value: string): boolean {
 
 export default function LogoDropCard({
   question,
+  draftScope,
   sessionId,
   questionNumber,
   knownValue,
@@ -54,7 +56,7 @@ export default function LogoDropCard({
   autoFocus,
 }: StructuredCardProps) {
   // Memory: prefill with the logo already on file (confirm-or-correct).
-  const [value, setValue] = useState(knownValue ?? '');
+  const [value, setValue, clearDraft] = useInterviewDraft(draftScope, question.id, knownValue ?? '');
   const [dragOver, setDragOver] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -82,7 +84,7 @@ export default function LogoDropCard({
     reader.onerror = () =>
       setError('We couldn’t read that file — try again or paste a link.');
     reader.readAsDataURL(file);
-  }, []);
+  }, [setValue]);
 
   const onDrop = useCallback(
     (e: React.DragEvent) => {
@@ -117,8 +119,9 @@ export default function LogoDropCard({
       setError(result.message);
       return;
     }
+    clearDraft();
     onAnswered({ question, value: value.trim(), data: result.data });
-  }, [busy, knownSource, knownValue, onAnswered, question, questionNumber, sessionId, value]);
+  }, [busy, clearDraft, knownSource, knownValue, onAnswered, question, questionNumber, sessionId, value]);
 
   const showPreview = valid && !previewFailed;
 
