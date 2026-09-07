@@ -43,7 +43,7 @@ export async function POST(req: NextRequest) {
     if (ready.status !== 200 || receipt.ready !== true || receipt.interviewComplete !== false) {
       return NextResponse.json({ error: 'interview_not_ready' }, { status: 409, headers });
     }
-    const expiresAt = Math.floor(Date.now() / 1000) + 900;
+    const expiresAt = Math.floor(Date.now() / 1000) + 86400;
     const ticket = await signTenantGrant({
       purpose: 'enrollment',
       tenantId: context.tenantId,
