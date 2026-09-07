@@ -937,10 +937,10 @@ export async function notifyOwnerPrivate(opts: {
   companyId: string;
   expectedChatId: string;
   message: string;
-}): Promise<'accepted' | 'uncertain' | 'not-dispatched'> {
+}): Promise<{ status: 'accepted'; messageId: string } | { status: 'uncertain' | 'not-dispatched' }> {
   if (ownerSendsSuppressed() || process.env.MC_COMPANY_ID !== opts.companyId ||
       !opts.expectedChatId || resolveOwnerChatId() !== opts.expectedChatId) {
-    return 'not-dispatched';
+    return { status: 'not-dispatched' };
   }
   return new Promise((resolve) => {
     try {
@@ -948,7 +948,7 @@ export async function notifyOwnerPrivate(opts: {
         '--target', opts.expectedChatId, '--message', opts.message, '--json'],
       { timeout: Math.min(OWNER_SEND_TIMEOUT_MS, 120_000), maxBuffer: 1024 * 1024 },
       (error, stdout) => {
-        if (error) { resolve('uncertain'); return; }
+        if (error) { resolve({ status: 'uncertain' }); return; }
         try {
           const payload = JSON.parse(stdout);
           const data = payload?.payload ?? payload?.result ?? payload;
@@ -961,10 +961,10 @@ export async function notifyOwnerPrivate(opts: {
             payload.dryRun !== true && data.dryRun !== true && !badStatus(payload) && !badStatus(data) &&
             ['string', 'number'].includes(typeof messageId) && String(messageId).trim() &&
             String(target) === opts.expectedChatId && channel === 'telegram';
-          resolve(accepted ? 'accepted' : 'uncertain');
-        } catch { resolve('uncertain'); }
+          resolve(accepted ? { status: 'accepted', messageId: String(messageId) } : { status: 'uncertain' });
+        } catch { resolve({ status: 'uncertain' }); }
       });
-    } catch { resolve('uncertain'); }
+    } catch { resolve({ status: 'uncertain' }); }
   });
 }
 

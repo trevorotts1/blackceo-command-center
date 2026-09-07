@@ -46,6 +46,8 @@ function req(body?: unknown, bearer: string | null = token, host = 'send.example
 function stub(behavior = 'accept') {
   fs.writeFileSync(path.join(bin, 'openclaw'), `#!${process.execPath}\n` +
     `const fs=require('fs');const a=process.argv.slice(2);fs.writeFileSync(${JSON.stringify(capture)},JSON.stringify(a));` +
+    `fs.writeFileSync(${JSON.stringify(path.join(root, 'pre-dispatch-receipt.json'))},fs.readFileSync(${JSON.stringify(shellReceipt)}));` +
+    (behavior === 'mirror-race' ? `fs.writeFileSync(${JSON.stringify(shellReceipt)},JSON.stringify({status:'sending',deliveryId:'another-attempt',companyId:'foreign'}));` : '') +
     (behavior === 'error' ? `process.stderr.write('synthetic failure '+a.join(' '));process.exit(1);` :
       `console.log(JSON.stringify({ok:true,payload:{messageId:'fixture-msg',chatId:${JSON.stringify(behavior === 'foreign' ? '5559999999' : owner)},channel:'telegram'}}));`),
     { mode: 0o700 });
@@ -107,6 +109,12 @@ test('fresh owner without Access gets a private 24-hour grant for configured pub
   assert.ok(!JSON.stringify(body).includes(ticket));
   assert.ok(!JSON.stringify(ledger()).includes(ticket));
   assert.equal(JSON.parse(ledger()[0].metadata).status, 'accepted');
+  const mirrored = JSON.parse(fs.readFileSync(shellReceipt, 'utf8'));
+  assert.equal(mirrored.status, 'accepted');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'pre-dispatch-receipt.json'), 'utf8')).status, 'sending', 'shell fence was durable before gateway started');
+  assert.equal(mirrored.messageId, 'fixture-msg', 'actual matched gateway acknowledgement');
+  assert.equal(mirrored.invitationExpiresAt, body.expiresAt);
+  assert.ok(!JSON.stringify(mirrored).includes(ticket));
   assert.equal(await verifyTenantGrant(ticket, 'foreign.example', 'enrollment'), null);
   const { POST: redeem } = await import('../../src/app/api/auth/interview-session/route');
   const enrollment = () => new NextRequest('https://send.example/api/auth/interview-session', {
@@ -149,12 +157,18 @@ test('uncertain gateway error is redacted and never force-retried', async () => 
     assert.equal((await response.json()).error, 'delivery_uncertain');
     assert.equal((await (await POST(req({ force: true }))).json()).error, 'delivery_uncertain');
     assert.equal(ledger().length, 1); assert.deepEqual(errors, []);
+    const mirrored = JSON.parse(fs.readFileSync(shellReceipt, 'utf8'));
+    assert.equal(mirrored.status, 'uncertain');
+    assert.equal(mirrored.companyId, 'send-company');
+    assert.equal(mirrored.recipientHash, createHash('sha256').update(owner).digest('hex'));
+    assert.ok(!JSON.stringify(mirrored).includes('#enroll='));
+    assert.equal(fs.statSync(shellReceipt).mode & 0o777, 0o600);
     assert.ok(!JSON.stringify(ledger()).includes('#enroll='));
   } finally { console.error = savedError; }
 });
 test('foreign acknowledgement stays uncertain and test suppression never dispatches', async () => {
   stub('foreign'); assert.equal((await (await POST(req())).json()).error, 'delivery_uncertain');
-  db.run("DELETE FROM events WHERE type='interview_link_delivery'"); fs.rmSync(capture);
+  db.run("DELETE FROM events WHERE type='interview_link_delivery'"); fs.rmSync(capture); fs.rmSync(shellReceipt);
   process.env.OWNER_NOTIFY_TELEGRAM_DISABLED = '1';
   assert.equal((await POST(req())).status, 502); assert.equal(fs.existsSync(capture), false);
   assert.equal(JSON.parse(ledger()[0].metadata).status, 'not-dispatched');
@@ -163,8 +177,8 @@ test('foreign acknowledgement stays uncertain and test suppression never dispatc
 test('owner change after binding refuses the private send without logging or escalation', async () => {
   const { notifyOwnerPrivate } = await import('../../src/lib/notify');
   process.env.OPENCLAW_OWNER_CHAT_ID = '5550005678';
-  assert.equal(await notifyOwnerPrivate({ companyId: 'send-company', expectedChatId: owner,
-    message: 'synthetic-private-ticket' }), 'not-dispatched');
+  assert.deepEqual(await notifyOwnerPrivate({ companyId: 'send-company', expectedChatId: owner,
+    message: 'synthetic-private-ticket' }), { status: 'not-dispatched' });
   assert.equal(fs.existsSync(capture), false);
 });
 
@@ -212,4 +226,15 @@ test('recent accepted shell receipt shares cooldown while deliberate or expired 
   db.run("DELETE FROM events WHERE type='interview_link_delivery'");
   writeShellReceipt({ invitationExpiresAt: Math.floor(Date.now() / 1000) - 1 });
   assert.equal((await POST(req())).status, 200);
+});
+
+test('changed receipt after gateway acknowledgement is preserved and DB reservation stays pending', async () => {
+  stub('mirror-race');
+  const response = await POST(req());
+  assert.equal(response.status, 503);
+  assert.equal((await response.json()).error, 'delivery_uncertain');
+  assert.equal(JSON.parse(ledger()[0].metadata).status, 'pending');
+  assert.deepEqual(JSON.parse(fs.readFileSync(shellReceipt, 'utf8')),
+    { status: 'sending', deliveryId: 'another-attempt', companyId: 'foreign' });
+  assert.equal((await POST(req({ force: true }))).status, 409);
 });

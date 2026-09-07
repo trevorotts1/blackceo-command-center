@@ -61,6 +61,31 @@ function shellDeliveryFence(context: TenantContext, recipientHash: string, force
   return null;
 }
 
+/** Atomic, private mirror understood by the canonical Python sender. No ticket
+ * is persisted. Outcome writes require our exact pre-dispatch receipt, so a
+ * changed receipt is never adopted or overwritten as our acknowledgement.
+ */
+function writeShellReceipt(receipt: Record<string, unknown>, completing = false) {
+  const file = path.join(resolveWorkspaceDir(), 'company-discovery', '.interview-link-sends.log.receipt.json');
+  if (completing) {
+    const current = JSON.parse(fs.readFileSync(file, 'utf8'));
+    for (const key of ['deliveryId', 'companyId', 'tenantId', 'installationId', 'origin', 'recipientHash']) {
+      if (current[key] !== receipt[key]) throw new Error('delivery_receipt_changed');
+    }
+    if (current.status !== 'sending') throw new Error('delivery_receipt_changed');
+  }
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  const temporary = `${file}.${randomUUID()}.tmp`;
+  try {
+    const descriptor = fs.openSync(temporary, 'wx', 0o600);
+    try {
+      fs.writeFileSync(descriptor, JSON.stringify(receipt));
+      fs.fsyncSync(descriptor);
+    } finally { fs.closeSync(descriptor); }
+    fs.renameSync(temporary, file);
+  } finally { fs.rmSync(temporary, { force: true }); }
+}
+
 /** Durable reservation precedes issuance and delivery. Force never bypasses an
  * uncertain attempt: a missing acknowledgement cannot certify non-delivery. */
 function reserve(context: TenantContext, recipientHash: string, mode: string, force: boolean) {
@@ -172,7 +197,20 @@ export async function POST(req: NextRequest) {
       finish(id, 'not-dispatched');
       return response({ ok: false, error: shellChanged, mode }, 409);
     }
-    const status = await notifyOwnerPrivate({ companyId: context.companyId, expectedChatId: target, message });
+    const shellReceipt = {
+      deliveryId: id, companyId: context.companyId, tenantId: context.tenantId,
+      installationId: context.installationId, origin: privateUrl.origin, recipientHash,
+      mode, epoch: Math.floor(Date.now() / 1000), invitationExpiresAt: invitation.expiresAt,
+    };
+    writeShellReceipt({ ...shellReceipt, status: 'sending' });
+    const delivery = await notifyOwnerPrivate({ companyId: context.companyId, expectedChatId: target, message });
+    const status = delivery.status;
+    // Persist cross-entry uncertainty/acceptance before completing the DB row.
+    // If this write fails, the sending receipt and pending row remain fences.
+    writeShellReceipt({ ...shellReceipt,
+      status: status === 'not-dispatched' ? 'rejected' : status,
+      ...(delivery.status === 'accepted' ? { messageId: delivery.messageId, channel: 'telegram' } : {}),
+    }, true);
     finish(id, status);
     if (status === 'accepted') return response({ ok: true, status, mode, bookmark, expiresAt: invitation.expiresAt, companyId: context.companyId, tenantId: context.tenantId, installationId: context.installationId });
     return response({ ok: false, error: status === 'uncertain' ? 'delivery_uncertain' : 'owner_not_reachable', mode }, 502);
