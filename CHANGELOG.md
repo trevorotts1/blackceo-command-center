@@ -1,3 +1,17 @@
+## [v7.1.5] — 2026-09-07 — Resume interviews without losing progress
+
+### Fixed
+- Retain 24-hour, single-use private enrollment links and issue separately bounded 30-day browser sessions. Bind new enrollment and session grants to the exact company as well as tenant, installation and host; reopening an interview does not extend the session expiry.
+- Recover an already authenticated browser before attempting to redeem an old invitation. Expired or consumed links no longer override valid access, and a fresh private link resumes the existing interview instead of resetting submitted answers.
+- Resume at the first unfinished structured question, department selection or final review according to verified saved progress. Explain sign-in recovery separately from temporary progress-loading failures.
+- Preserve unsent text, color and logo-URL drafts in the same browser under the verified company, installation and interview identity, with a 30-day limit. Drafts remain distinct from submitted answers, are cleared after successful saves, and are unavailable when browser storage is blocked or cleared.
+- Make operator-triggered link delivery issue a fresh private enrollment link for both start and resume, alongside a stable `/interview` bookmark that still requires authenticated access. Require exact client ownership and a matching gateway acknowledgement; reserve delivery durably before sending, enforce cooldown, and refuse blind retries after uncertain delivery. Tickets stay out of API responses, event records and notification error logs.
+
+### Compatibility and scope
+- Legacy grants without company binding require a fresh private link after upgrade. Submitted answers remain stored; reauthentication does not create a new interview. Local drafts are browser-specific and do not replace server-side answer storage.
+- The portable installer companion remains tracked in [onboarding PR #1043](https://github.com/trevorotts1/openclaw-onboarding/pull/1043). Release publication does not deploy client installations or verify their messaging, identity-provider or model-provider services.
+- Regression coverage uses isolated company records, synthetic gateway transport and browser fixtures for enrollment, saved progress, drafts, ownership isolation and retry behavior. No dependency changes.
+
 ## [v7.1.4] — 2026-09-06 — Client department memory integrity
 
 ### Fixed

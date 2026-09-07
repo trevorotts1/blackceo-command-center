@@ -1,255 +1,221 @@
-/**
- * POST /api/interview/send-link — OPERATOR-TRIGGERED interview link delivery.
- *
- * The one sanctioned way to hand the owner their AI Workforce Interview link
- * over Telegram: "when you're ready, start here". It exists so the operator
- * can trigger the invitation deliberately (from the box: curl with the
- * MC_API_TOKEN bearer) instead of the client ever being auto-spammed.
- *
- *   • START mode  — nothing answered yet → link to /interview with
- *                   "when you're ready, start here" copy.
- *   • RESUME mode — an interview is underway → the P0-7 slug-contract resume
- *                   link (/onboarding/resume/<sessionId>) with "pick up where
- *                   you left off" copy.
- *
- * DOCTRINE (do not violate):
- *   • OPERATOR-TRIGGERED ONLY. No cron calls this; nothing auto-fires it. The
- *     re-engagement cadence lives in the (separately gated) nudge sweep.
- *   • GATEWAY-ONLY. Delivery goes through notifyOwner → `openclaw message
- *     send` (the OpenClaw gateway). Never the Telegram Bot API directly.
- *   • NO SECRETS, NO CHAT IDS. The response and the ledger carry the link and
- *     the mode — never the resolved chat id, never any token.
- *   • FILES ARE THE SOURCE OF TRUTH. Interview state is read through the P0-1
- *     seam's pure fs readers; this route writes NO canonical artifact. Its only
- *     write is the `interview_link_sent` audit/cooldown row in `events`.
- *   • ANTI-SPAM. A confirmed send within the cooldown window (default 30 min)
- *     409s unless `force: true` — a double-pressed trigger never double-texts
- *     the owner.
- *
- * Auth: bearer MC_API_TOKEN (same gate as /api/system/converge|bootstrap).
- * When MC_API_TOKEN is unset (local dev) the gate is open, matching those
- * routes; the P0-5 middleware still rejects external callers fail-closed.
- */
-
+/** Operator-triggered private interview entry; never expose tickets in responses or logs. */
 import { NextRequest, NextResponse } from 'next/server';
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import { z } from 'zod';
-import { queryOne, run } from '@/lib/db';
-import { getMissionControlUrl } from '@/lib/config';
-import {
-  readBuildState,
-  readHandoff,
-  readInterviewProgress,
-  readStandardPrebuild,
-} from '@/lib/interview/seam';
-import { buildResumeLink } from '@/lib/jobs/interview-nudge-sweep';
-import { notifyOwner } from '@/lib/notify';
+import { queryOne, run, transaction } from '@/lib/db';
+import { resolveTenantContext, type TenantContext } from '@/lib/auth/tenant-context';
+import { createInterviewInvitation } from '@/lib/interview/invitation';
+import { resolveWorkspaceDir } from '@/lib/interview/paths';
+import { readBuildState, readHandoff, readInterviewProgress } from '@/lib/interview/seam';
+import { notifyOwnerPrivate, resolveOwnerChatId } from '@/lib/notify';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
-const LEDGER_EVENT_TYPE = 'interview_link_sent';
-/** Minimum minutes between confirmed sends (double-press / double-operator guard). */
-const COOLDOWN_MINUTES = 30;
+const EVENT_TYPE = 'interview_link_delivery';
+const HEADERS = { 'cache-control': 'private, no-store' };
+const requestSchema = z.object({ force: z.boolean().optional() }).strict();
+type DeliveryStatus = 'pending' | 'accepted' | 'uncertain' | 'not-dispatched';
 
-const requestSchema = z
-  .object({
-    /** Bypass the cooldown (a deliberate operator re-send). */
-    force: z.boolean().optional(),
-  })
-  .strict()
-  .optional();
-
-/** The public dashboard base (per-client URL when set), no trailing slash. */
-function dashboardBase(): string {
-  const base = process.env.OPENCLAW_DASHBOARD_URL || getMissionControlUrl();
-  return base.replace(/\/+$/, '');
+function response(body: Record<string, unknown>, status = 200) {
+  return NextResponse.json(body, { status, headers: HEADERS });
 }
 
-/** Jargon-free owner copy. The link must be the only "instruction".
- *
- *  AI Workforce standard-first (PHASE 6 item 7): on a standard-prebuilt box
- *  (standardPrebuild.status === "done" in build-state) the invitation framing
- *  changes from "we build your company from what you tell us" to the
- *  master-plan wording — the standard foundation already exists; the
- *  conversation TAILORS it. Legacy boxes (no standardPrebuild record) keep
- *  the original build-from-scratch wording byte-identical. */
-function startMessage(link: string, standardReady: boolean): string {
-  if (standardReady) {
-    const previewLink = link.replace(/\/interview$/, '/preview');
-    return (
-      'Your AI Workforce Interview is ready — and so is your company: the ' +
-      'standard foundation is already set up with your departments, ready to ' +
-      `review here: ${previewLink}\n\n` +
-      'This conversation tailors the foundation to you. When you are ready to ' +
-      `start the interview, go here: ${link}\n\n` +
-      'It works great on your phone. Every answer is saved as you go, so you ' +
-      'can pause anytime and pick up right where you left off.'
-    );
-  }
-  return (
-    'Your AI Workforce Interview is ready — a short conversation in your own ' +
-    'words, and we build your company from what you tell us. When you are ' +
-    `ready, start here: ${link}\n\n` +
-    'It works great on your phone. Every answer is saved as you go, so you ' +
-    'can pause anytime and pick up right where you left off.'
-  );
-}
-
-function resumeMessage(link: string): string {
-  return (
-    'Welcome back — your interview is saved exactly where you left off. ' +
-    `Continue here: ${link}\n\n` +
-    'It works great on your phone, and you can pause again anytime.'
-  );
-}
-
-/** Minutes since the last confirmed send, or null when never sent. */
-function minutesSinceLastSend(): number | null {
+/** Same receipt path as the canonical onboarding send-interview-link.sh.
+ * A retry through another entry point must not bypass unknown delivery or
+ * adopt a receipt belonging to another client, installation, host or owner.
+ */
+function shellDeliveryFence(context: TenantContext, recipientHash: string, force: boolean): string | null {
+  const file = path.join(resolveWorkspaceDir(), 'company-discovery', '.interview-link-sends.log.receipt.json');
+  let receipt: Record<string, unknown>;
   try {
-    const row = queryOne<{ last: string | null }>(
-      `SELECT MAX(created_at) AS last FROM events WHERE type = ?`,
-      [LEDGER_EVENT_TYPE],
-    );
-    if (!row?.last) return null;
-    const t = Date.parse(`${row.last}Z`) || Date.parse(row.last);
-    if (!Number.isFinite(t)) return null;
-    return (Date.now() - t) / 60_000;
-  } catch {
-    // Unreadable ledger → fail-closed (treat as just-sent) so a broken ledger
-    // can never turn into a spam vector.
-    return 0;
+    const stat = fs.lstatSync(file);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 64 * 1024) return 'delivery_receipt_unverified';
+    receipt = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? null : 'delivery_receipt_unverified';
   }
-}
-
-/** Record a confirmed delivery (audit + cooldown). Best-effort. */
-function recordSend(mode: 'start' | 'resume', link: string): void {
-  try {
-    run(
-      `INSERT INTO events (id, type, task_id, message, metadata, created_at)
-       VALUES (?, ?, NULL, ?, ?, datetime('now'))`,
-      [
-        randomUUID(),
-        LEDGER_EVENT_TYPE,
-        `Interview ${mode} link sent to owner (operator-triggered)`,
-        JSON.stringify({ mode, link }),
-      ],
-    );
-  } catch (err) {
-    console.warn('[interview-send-link] ledger write failed (non-fatal):', (err as Error).message);
+  if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)) return 'delivery_receipt_unverified';
+  let origin: string;
+  try { origin = new URL(process.env.MC_TENANT_PUBLIC_URL || '').origin; }
+  catch { return 'delivery_receipt_unverified'; }
+  if (receipt.companyId !== context.companyId || receipt.tenantId !== context.tenantId ||
+      receipt.installationId !== context.installationId || receipt.origin !== origin ||
+      new URL(origin).hostname !== context.host || receipt.recipientHash !== recipientHash) {
+    return 'delivery_receipt_unverified';
   }
-}
-
-// ── Auth gate (mirrors system/converge + system/bootstrap) ───────────────────
-function checkAuth(req: NextRequest): NextResponse | null {
-  const expectedToken = process.env.MC_API_TOKEN;
-  if (!expectedToken) {
-    console.warn(
-      '[/api/interview/send-link] MC_API_TOKEN not set, bearer auth disabled (local dev mode)',
-    );
-    return null;
-  }
-  const authHeader = req.headers.get('authorization') || '';
-  const token = authHeader.startsWith('Bearer ') ? authHeader.substring(7) : '';
-  if (token !== expectedToken) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  if (receipt.status === 'sending' || receipt.status === 'uncertain') return 'delivery_uncertain';
+  if (!['accepted', 'rejected'].includes(String(receipt.status))) return 'delivery_receipt_unverified';
+  if (receipt.status === 'accepted') {
+    if (typeof receipt.messageId !== 'string' || !receipt.messageId.trim() ||
+        typeof receipt.epoch !== 'number' || !Number.isFinite(receipt.epoch) ||
+        typeof receipt.invitationExpiresAt !== 'number' || !Number.isFinite(receipt.invitationExpiresAt)) {
+      return 'delivery_receipt_unverified';
+    }
+    const expired = receipt.invitationExpiresAt <= Date.now() / 1000;
+    if (!force && !expired && Date.now() / 1000 - receipt.epoch < 1800) return 'cooldown';
   }
   return null;
 }
 
-export async function POST(req: NextRequest) {
-  const authError = checkAuth(req);
-  if (authError) return authError;
+/** Atomic, private mirror understood by the canonical Python sender. No ticket
+ * is persisted. Outcome writes require our exact pre-dispatch receipt, so a
+ * changed receipt is never adopted or overwritten as our acknowledgement.
+ */
+function writeShellReceipt(receipt: Record<string, unknown>, completing = false) {
+  const file = path.join(resolveWorkspaceDir(), 'company-discovery', '.interview-link-sends.log.receipt.json');
+  if (completing) {
+    const current = JSON.parse(fs.readFileSync(file, 'utf8'));
+    for (const key of ['deliveryId', 'companyId', 'tenantId', 'installationId', 'origin', 'recipientHash']) {
+      if (current[key] !== receipt[key]) throw new Error('delivery_receipt_changed');
+    }
+    if (current.status !== 'sending') throw new Error('delivery_receipt_changed');
+  }
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  const temporary = `${file}.${randomUUID()}.tmp`;
+  try {
+    const descriptor = fs.openSync(temporary, 'wx', 0o600);
+    try {
+      fs.writeFileSync(descriptor, JSON.stringify(receipt));
+      fs.fsyncSync(descriptor);
+    } finally { fs.closeSync(descriptor); }
+    fs.renameSync(temporary, file);
+  } finally { fs.rmSync(temporary, { force: true }); }
+}
 
-  let body: z.infer<typeof requestSchema>;
+/** Durable reservation precedes issuance and delivery. Force never bypasses an
+ * uncertain attempt: a missing acknowledgement cannot certify non-delivery. */
+function reserve(context: TenantContext, recipientHash: string, mode: string, force: boolean) {
+  return transaction(() => {
+    const params = [context.companyId, context.tenantId, context.installationId, context.host];
+    const prior = queryOne<{ status: DeliveryStatus; created_at: string }>(
+      `SELECT json_extract(metadata,'$.status') AS status, created_at FROM events
+       WHERE type=? AND json_extract(metadata,'$.companyId')=?
+       AND json_extract(metadata,'$.tenantId')=? AND json_extract(metadata,'$.installationId')=?
+       AND json_extract(metadata,'$.host')=?
+       AND json_extract(metadata,'$.status') IN ('pending','uncertain','accepted')
+       ORDER BY created_at DESC, rowid DESC LIMIT 1`, [EVENT_TYPE, ...params]);
+    // An earlier uncertain attempt remains a blocker even after other rows.
+    const uncertain = queryOne(
+      `SELECT id FROM events WHERE type=? AND json_extract(metadata,'$.companyId')=?
+       AND json_extract(metadata,'$.tenantId')=? AND json_extract(metadata,'$.installationId')=?
+       AND json_extract(metadata,'$.host')=?
+       AND json_extract(metadata,'$.status') IN ('pending','uncertain') LIMIT 1`, [EVENT_TYPE, ...params]);
+    if (uncertain) return { error: 'delivery_uncertain' } as const;
+    const age = prior ? Date.now() - Date.parse(prior.created_at) : Infinity;
+    if (prior && (!Number.isFinite(age) || age < 30 * 60_000) && !force) {
+      return { error: 'cooldown' } as const;
+    }
+    // Honor recent pre-upgrade sends whose historical ledger had no tenant keys.
+    const legacy = queryOne(
+      "SELECT id FROM events WHERE type='interview_link_sent' AND created_at>datetime('now','-30 minutes') LIMIT 1");
+    if (legacy && !force) return { error: 'cooldown' } as const;
+    const id = randomUUID();
+    run(`INSERT INTO events(id,type,task_id,message,metadata,created_at) VALUES(?,?,NULL,?,?,?)`,
+      [id, EVENT_TYPE, 'Operator requested private interview entry', JSON.stringify({
+        companyId: context.companyId, tenantId: context.tenantId,
+        installationId: context.installationId, host: context.host,
+        recipientHash, mode, status: 'pending',
+      }), new Date().toISOString()]);
+    return { id } as const;
+  });
+}
+
+function finish(id: string, status: DeliveryStatus) {
+  run("UPDATE events SET metadata=json_set(metadata,'$.status',?) WHERE id=? AND type=?",
+    [status, id, EVENT_TYPE]);
+}
+
+export async function POST(req: NextRequest) {
+  let context: TenantContext;
+  try {
+    context = await resolveTenantContext(req);
+    if (context.subject !== 'operator:api' || context.kind !== 'self' ||
+        context.installationId !== process.env.MC_INSTALLATION_ID ||
+        context.companyId !== process.env.MC_COMPANY_ID) {
+      return response({ error: 'operator_required' }, 403);
+    }
+  } catch { return response({ error: 'operator_required' }, 403); }
+
+  let force = false;
   try {
     const text = await req.text();
-    body = text.trim() ? requestSchema.parse(JSON.parse(text)) : undefined;
-  } catch (err) {
-    return NextResponse.json(
-      { error: 'invalid_request', detail: err instanceof Error ? err.message : 'bad body' },
-      { status: 400 },
-    );
-  }
+    force = requestSchema.parse(text.trim() ? JSON.parse(text) : {}).force === true;
+  } catch { return response({ error: 'invalid_request' }, 400); }
 
-  // ── Read canonical interview state (pure fs; no scripts, no writes) ────────
-  // Block ONLY on the interview's own completion flag. `buildCompletedAt` is a
-  // separate historical fact (when the company build finished) that can
-  // legitimately coexist with `interviewComplete === false` — e.g. an
-  // interview that was reset for a redo after an earlier build already
-  // completed. Blocking on `buildCompletedAt` too conflated "the build once
-  // finished" with "the interview is finished", which left no sanctioned way
-  // to send a resume link to anyone whose interview was reset post-build.
-  // `interviewComplete` alone is the guard's original, correctly-scoped
-  // intent: never re-invite someone whose interview is actually done.
   const state = readBuildState();
-  if (state?.interviewComplete === true) {
-    return NextResponse.json(
-      {
-        ok: false,
-        error: 'interview_complete',
-        message: 'The interview is already complete — there is nothing to invite the owner to.',
-      },
-      { status: 409 },
-    );
+  if (!state || state.companyId !== context.companyId || state.tenantId !== context.tenantId ||
+      state.installationId !== context.installationId) {
+    return response({ error: 'interview_identity_unverified' }, 409);
   }
-
-  // Started = a handoff exists or a question has been stamped. The stable
-  // interviewSessionId gives the resume link its slug.
-  const handoff = readHandoff();
+  if (state.interviewComplete === true) return response({ error: 'interview_complete' }, 409);
   const progress = readInterviewProgress(state);
-  const sessionId =
-    state?.interviewSessionId && String(state.interviewSessionId).trim()
-      ? String(state.interviewSessionId).trim()
-      : '';
-  const started =
-    !!sessionId &&
-    (handoff.exists ||
-      (typeof progress.lastQuestionNumber === 'number' && progress.lastQuestionNumber > 0));
+  const started = !!state.interviewSessionId &&
+    (readHandoff().exists || (progress.lastQuestionNumber ?? 0) > 0);
+  const mode = started ? 'resume' : 'start';
+  const target = resolveOwnerChatId();
+  if (!target) return response({ error: 'owner_not_reachable', mode }, 502);
+  const recipientHash = createHash('sha256').update(target).digest('hex');
+  const shellBlock = shellDeliveryFence(context, recipientHash, force);
+  if (shellBlock) return response({ ok: false, error: shellBlock, mode }, 409);
 
-  const mode: 'start' | 'resume' = started ? 'resume' : 'start';
-  const link = started ? buildResumeLink(sessionId) : `${dashboardBase()}/interview`;
-
-  // ── Cooldown (double-press guard) ───────────────────────────────────────────
-  if (body?.force !== true) {
-    const mins = minutesSinceLastSend();
-    if (mins !== null && mins < COOLDOWN_MINUTES) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error: 'cooldown',
-          message: `An interview link was already sent ${Math.round(mins)} minute(s) ago. Pass { "force": true } to re-send deliberately.`,
-          link,
-          mode,
-        },
-        { status: 409 },
-      );
+  let reservation;
+  try {
+    reservation = reserve(context, recipientHash, mode, force);
+  } catch { return response({ error: 'delivery_ledger_unavailable' }, 503); }
+  if ('error' in reservation) return response({ ok: false, error: reservation.error, mode }, 409);
+  const { id } = reservation;
+  try {
+    const issued = await createInterviewInvitation(req, recipientHash);
+    if (issued.status !== 200) {
+      finish(id, 'not-dispatched');
+      return response({ error: 'interview_not_ready', mode }, 409);
     }
+    const invitation = await issued.json();
+    const privateUrl = new URL(invitation.url);
+    if (invitation.companyId !== context.companyId || invitation.tenantId !== context.tenantId ||
+        invitation.installationId !== context.installationId || privateUrl.hostname !== context.host ||
+        privateUrl.pathname !== '/interview' || !privateUrl.hash.startsWith('#enroll=')) {
+      finish(id, 'not-dispatched');
+      return response({ error: 'invitation_identity_unverified' }, 409);
+    }
+    const bookmark = `${privateUrl.origin}/interview`;
+    const message = (mode === 'resume'
+      ? 'Welcome back — your saved answers are still there. Continue your interview here: '
+      : 'Your AI Workforce Interview is ready. Start here: ') + invitation.url +
+      '\n\nThis private sign-in link can be used once within 24 hours. Keep it private. ' +
+      'After signing in, bookmark ' + bookmark +
+      '. The bookmark works while you are signed in; if asked to sign in again, request a fresh private link. ' +
+      'Each answer is saved when you press Continue or Send.';
+    // Issuance awaits signature/readiness work; recheck a shell attempt that
+    // became visible during that interval before touching the gateway.
+    const shellChanged = shellDeliveryFence(context, recipientHash, force);
+    if (shellChanged) {
+      finish(id, 'not-dispatched');
+      return response({ ok: false, error: shellChanged, mode }, 409);
+    }
+    const shellReceipt = {
+      deliveryId: id, companyId: context.companyId, tenantId: context.tenantId,
+      installationId: context.installationId, origin: privateUrl.origin, recipientHash,
+      mode, epoch: Math.floor(Date.now() / 1000), invitationExpiresAt: invitation.expiresAt,
+    };
+    writeShellReceipt({ ...shellReceipt, status: 'sending' });
+    const delivery = await notifyOwnerPrivate({ companyId: context.companyId, expectedChatId: target, message });
+    const status = delivery.status;
+    // Persist cross-entry uncertainty/acceptance before completing the DB row.
+    // If this write fails, the sending receipt and pending row remain fences.
+    writeShellReceipt({ ...shellReceipt,
+      status: status === 'not-dispatched' ? 'rejected' : status,
+      ...(delivery.status === 'accepted' ? { messageId: delivery.messageId, channel: 'telegram' } : {}),
+    }, true);
+    finish(id, status);
+    if (status === 'accepted') return response({ ok: true, status, mode, bookmark, expiresAt: invitation.expiresAt, companyId: context.companyId, tenantId: context.tenantId, installationId: context.installationId });
+    return response({ ok: false, error: status === 'uncertain' ? 'delivery_uncertain' : 'owner_not_reachable', mode }, 502);
+  } catch {
+    // Keep the pending row: exceptions after dispatch may hide a real delivery.
+    return response({ ok: false, error: 'delivery_uncertain', mode }, 503);
   }
-
-  // ── Deliver via the gateway (notifyOwner resolves the owner chat id and
-  //    rejects operator ids; we never see or return the chat id here). ────────
-  // Standard-first framing: the START invitation tells the owner the standard
-  // foundation is already set up when the box carries the STANDARD_READY
-  // record (read through the seam; the logic above is unchanged).
-  const standardReady = readStandardPrebuild(state).standardReady;
-  const message = mode === 'resume' ? resumeMessage(link) : startMessage(link, standardReady);
-  const delivered = notifyOwner(message);
-  if (!delivered) {
-    return NextResponse.json(
-      {
-        ok: false,
-        error: 'owner_not_reachable',
-        message:
-          'The owner has no reachable Telegram chat yet (not paired / not in allowFrom), or the gateway send failed. Nothing was recorded — safe to retry.',
-        link,
-        mode,
-      },
-      { status: 502 },
-    );
-  }
-
-  recordSend(mode, link);
-  return NextResponse.json({ ok: true, link, mode });
 }

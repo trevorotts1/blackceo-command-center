@@ -81,8 +81,8 @@ export default function ProgressRail({
   const savedLine = flash
     ? 'Saved just now ✓'
     : answersSaved > 0
-      ? `${answersSaved} answer${answersSaved === 1 ? '' : 's'} saved — you can leave anytime`
-      : 'Every answer saves automatically';
+      ? `${answersSaved} answer${answersSaved === 1 ? '' : 's'} saved — return here to continue`
+      : 'Answers save when you press Continue or Send';
 
   return (
     <div className="space-y-3">

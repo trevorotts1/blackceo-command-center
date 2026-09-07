@@ -30,6 +30,8 @@
  * remains the interviewer agent's job, not this card's.
  */
 
+import { useInterviewDraft } from './useInterviewDraft';
+import { INTERVIEW_SIGN_IN_HELP } from '@/lib/interview/browser-recovery';
 import { useCallback, useState } from 'react';
 import { motion } from 'framer-motion';
 import { HelpCircle, ShieldCheck } from 'lucide-react';
@@ -104,6 +106,7 @@ export async function submitInterviewAnswer(
   const data = (await res.json().catch(() => ({}))) as AnswerResponse;
 
   if (!res.ok) {
+    if (res.status === 401 || res.status === 403) return { ok: false, status: res.status, message: INTERVIEW_SIGN_IN_HELP };
     // SOFT success: the transcript append landed (`appended: true`) but the
     // progress stamp failed (script missing / non-zero exit → 502/503). The
     // answer is SAVED, so the owner advances instead of being dead-ended on a
@@ -130,6 +133,8 @@ export async function submitInterviewAnswer(
 /* -------------------------------------------------------------------------- */
 
 export interface StructuredCardProps {
+  /** Verified company/installation/interview scope; never the gateway session. */
+  draftScope?: string | null;
   /** The single question this card renders. */
   question: InterviewQuestion;
   /** Interview session to attribute the write to (optional). */
@@ -216,6 +221,7 @@ function textIsValid(value: string, required: boolean): boolean {
 
 function TextControl({
   question,
+  draftScope,
   sessionId,
   questionNumber,
   knownValue,
@@ -226,7 +232,7 @@ function TextControl({
 }: StructuredCardProps) {
   // Memory: prefill with the value already on file so the owner confirms
   // instead of re-typing. An untouched confirm records confirmed-from-context.
-  const [value, setValue] = useState(knownValue ?? '');
+  const [value, setValue, clearDraft] = useInterviewDraft(draftScope, question.id, knownValue ?? '');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const required = question.required === true;
@@ -258,9 +264,11 @@ function TextControl({
       setError(result.message);
       return;
     }
+    clearDraft();
     onAnswered({ question, value: trimmed, data: result.data });
   }, [
     busy,
+    clearDraft,
     hasKnown,
     knownSource,
     knownValue,

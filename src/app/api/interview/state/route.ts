@@ -212,6 +212,8 @@ export async function GET(request: NextRequest) {
         : 0;
     return NextResponse.json({
       ok: true,
+      companyId: tenant.context!.companyId,
+      installationId: tenant.context!.installationId,
       interviewComplete: remote?.interviewComplete === true,
       remoteAvailable: remote !== null,
       remoteStatus: remote ? 'connected' : 'waiting_for_installation',

@@ -38,9 +38,12 @@
 
 import { test, expect, request, type APIRequestContext } from 'playwright/test';
 import fs from 'fs';
+import path from 'path';
 import {
   BASE_URL,
+  PRODUCTION_MODE,
   BUILD_STATE_PATH,
+  WORKSPACE_DIR,
   INTERVIEW_COOKIE_NAME,
   LATCH_COOKIE_NAME,
   STANDARD_READY_DEPTS,
@@ -89,7 +92,7 @@ function cookieSaysComplete(value: string | undefined): boolean {
 // Fail LOUDLY (not skip) if the server the config stood up is unreachable — this
 // suite is meant to actually execute the lock in CI, never silently no-op.
 test.beforeAll(async () => {
-  const probe = await request.newContext({ baseURL: BASE_URL });
+  const probe = await request.newContext({ baseURL: BASE_URL, ignoreHTTPSErrors: PRODUCTION_MODE });
   try {
     const res = await probe.get('/api/health', { timeout: 10_000 });
     expect(res.ok(), `dev server not reachable at ${BASE_URL}/api/health`).toBeTruthy();
@@ -118,11 +121,15 @@ test('registered invitation redeems once and authenticates browser interview acc
   const enrolled=await page.request.post('/api/auth/interview-session',{data:{ticket}});
   expect(enrolled.status()).toBe(200);
   expect((await context.cookies()).some(c=>c.name==='mc_tenant_session'&&c.httpOnly)).toBeTruthy();
-  expect((await page.request.post('/api/auth/interview-session',{data:{ticket}})).status()).toBe(409);
+  expect((await page.request.post('/api/auth/interview-session',{data:{ticket}})).status()).toBe(200);
+  const freshBrowser = await request.newContext({ baseURL: BASE_URL, ignoreHTTPSErrors: PRODUCTION_MODE });
+  try { expect((await freshBrowser.post('/api/auth/interview-session', { data: { ticket } })).status()).toBe(409); } finally { await freshBrowser.dispose(); }
   expect((await page.request.get('/api/interview/gate-status')).status()).toBe(200);
 });
 
 test('minted operator invitation opens its fragment and loads own authenticated state', async ({ context, page }) => {
+  page.on('pageerror', error => console.error('[interview browser error]', error.stack || error.message));
+  page.on('requestfailed', failed => console.error('[interview browser request failed]', new URL(failed.url()).pathname, failed.failure()?.errorText));
   writeDepartmentsJson();
   writeStandardPrebuildState(false);
   const state = JSON.parse(fs.readFileSync(BUILD_STATE_PATH, 'utf8'));
@@ -173,9 +180,104 @@ test('minted operator invitation opens its fragment and loads own authenticated 
   await expect(page.getByRole('heading', { name: 'Let’s tailor your company' })).toBeVisible();
   expect(redemptions).toBe(1); // Reload must not replay the consumed ticket.
   const ticket = new URL(invitation.url).hash.slice('#enroll='.length);
-  expect((await page.request.post('/api/auth/interview-session', { data: { ticket } })).status()).toBe(409);
+  expect((await page.request.post('/api/auth/interview-session', { data: { ticket } })).status()).toBe(200);
+  await page.goto(invitation.url);
+  await expect(page).toHaveURL(`${BASE_URL}/interview`);
+  await expect(page.getByRole('heading', { name: 'Let’s tailor your company' })).toBeVisible();
+  expect(redemptions).toBe(1); // APIRequestContext calls are outside page events; reopening must not redeem in the browser.
   expect(JSON.parse(fs.readFileSync(BUILD_STATE_PATH, 'utf8')).interviewComplete).toBe(false);
   writeBuildState(false);
+});
+
+test('temporary state outage retains the unused invitation for an in-page retry', async ({ context, page }) => {
+  writeDepartmentsJson();
+  writeStandardPrebuildState(false);
+  const state = JSON.parse(fs.readFileSync(BUILD_STATE_PATH, 'utf8'));
+  Object.assign(state, { tenantId: 'interview-lock-tenant', installationId: 'interview-lock-install' });
+  fs.writeFileSync(BUILD_STATE_PATH, JSON.stringify(state));
+  await context.clearCookies();
+  const minted = await page.request.post('/api/auth/interview-invitation', {
+    headers: { authorization: 'Bearer interview-lock-machine-token' },
+    data: { recipientHash: 'b'.repeat(64) },
+  });
+  expect(minted.status(), await minted.text()).toBe(200);
+  const invitation = await minted.json();
+  let outage = true;
+  let redemptions = 0;
+  page.on('request', request => {
+    if (request.method() === 'POST' && request.url().endsWith('/api/auth/interview-session')) redemptions += 1;
+  });
+  await page.route('**/api/interview/state', route => outage
+    ? route.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"fixture_temporary_outage"}' })
+    : route.continue());
+  try {
+    await page.goto(invitation.url);
+    await expect(page).toHaveURL(`${BASE_URL}/interview`);
+    await expect(page.getByRole('alert').filter({ hasText: 'temporarily unavailable' })).toBeVisible();
+    expect(redemptions).toBe(0);
+    const closeWalkthrough = page.getByRole('button', { name: 'Close walkthrough', exact: true });
+    await expect(closeWalkthrough).toBeVisible();
+    await closeWalkthrough.click();
+    outage = false;
+    await page.getByRole('button', { name: 'Check sign-in and retry', exact: true }).click();
+    await expect(page.getByRole('heading', { name: 'Let’s tailor your company', exact: true })).toBeVisible();
+    expect(redemptions).toBe(1);
+    expect((await context.cookies()).some(cookie => cookie.name === 'mc_tenant_session' && cookie.httpOnly)).toBe(true);
+    expect((await page.request.get('/api/interview/state')).status()).toBe(200);
+  } finally {
+    await page.unroute('**/api/interview/state');
+    writeBuildState(false);
+  }
+});
+
+test('browser restores an unsent draft and resumes after a real submitted answer', async ({ page }) => {
+  const draftCompany = `Fixture Resume Company ${Date.now()}`;
+  writeDepartmentsJson();
+  writeStandardPrebuildState(false);
+  const transcriptFiles = ['workforce-interview-answers.md', 'workforce-interview-answers.md.enc', 'interview-handoff.md']
+    .map(name => path.join(WORKSPACE_DIR, 'company-discovery', name));
+  const originals = transcriptFiles.map(file => fs.existsSync(file) ? fs.readFileSync(file) : null);
+  for (const file of transcriptFiles) fs.rmSync(file, { force: true });
+  try {
+    await page.goto('/interview');
+    const closeWalkthrough = page.getByRole('button', { name: 'Close walkthrough', exact: true });
+    await expect(closeWalkthrough).toBeVisible();
+    await closeWalkthrough.click();
+    const begin = async () => {
+      await page.getByRole('radio', { name: /Yes — tailor it now/ }).click();
+      await page.getByRole('button', { name: 'Begin tailoring', exact: true }).click();
+      await expect(page.getByRole('textbox', { name: 'What is your company name?', exact: true })).toBeVisible();
+    };
+    await begin();
+    await page.getByRole('textbox').fill(draftCompany);
+    expect((await (await page.request.get('/api/interview/state')).json()).structured.answeredIds).not.toContain('company_name');
+    await page.reload();
+    await begin();
+    await expect(page.getByRole('textbox')).toHaveValue(draftCompany);
+    const saved = page.waitForResponse(response => response.url().endsWith('/api/interview/answer') && response.request().method() === 'POST');
+    await page.getByRole('button', { name: /^(Continue|Confirm & continue)$/ }).click();
+    const receipt = await saved;
+    expect(receipt.status(), await receipt.text()).toBe(200);
+    expect((await receipt.json()).appended).toBe(true);
+    await expect(page.getByRole('heading', { name: 'What industry are you in?', exact: true })).toBeVisible();
+    await page.getByRole('textbox').fill('Fixture unsent industry');
+    await page.reload();
+    await page.getByRole('button', { name: 'Continue where I left off', exact: true }).click();
+    await expect(page.getByRole('heading', { name: 'What industry are you in?', exact: true })).toBeVisible();
+    await expect(page.getByRole('textbox')).toHaveValue('Fixture unsent industry');
+    const progress = await (await page.request.get('/api/interview/state')).json();
+    expect(progress.structured.answeredIds).toContain('company_name');
+    expect(progress.structured.answeredIds).not.toContain('industry');
+    expect(progress.interviewComplete).toBe(false);
+    expect(progress.companyId).toBe('default');
+    expect(progress.installationId).toBe('interview-lock-install');
+  } finally {
+    transcriptFiles.forEach((file, index) => {
+      if (originals[index]) fs.writeFileSync(file, originals[index]!);
+      else fs.rmSync(file, { force: true });
+    });
+    writeBuildState(false);
+  }
 });
 
 test.describe('Interview-mode shell lock (WG-9)', () => {

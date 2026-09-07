@@ -703,13 +703,9 @@ jobs:
   # lock end-to-end: locked while the interview is incomplete, exempt routes open,
   # and the dashboard unlocks once completion is signalled the sanctioned way.
   #
-  # The suite is self-contained: playwright.interview-lock.config.ts stands up its
-  # OWN `next dev` server (webServer{}) against a THROWAWAY fixture workspace under
-  # test-results/ — never ~/.openclaw, never the operator's canonical files. It
-  # runs in dev on purpose (a production build would mint a `secure` cookie that
-  # http://127.0.0.1 drops, so the unlock could never be observed). GitHub Actions
-  # sets CI=true, so the config uses retries: 2 + trace-on-first-retry for flake
-  # control; the job timeout keeps a hung server from stalling the whole run.
+  # Builds and runs the production server against an isolated fixture over local
+  # HTTPS. This exercises secure enrollment cookies, pause/resume and gate locking
+  # without client credentials, external providers or the operator's workspace.
   interview-lock-e2e:
     name: Interview-unlock shell-lock e2e (Playwright)
     runs-on: ubuntu-latest
@@ -731,12 +727,25 @@ jobs:
         # pulls the apt libs the runner is missing so the browser launches.
         run: npx playwright install --with-deps chromium
 
-      - name: Run interview-unlock e2e (config boots its own dev server)
-        # `test:e2e:interview-lock` -> playwright test --config=playwright.interview-lock.config.ts
-        # Playwright's webServer{} builds-on-demand, starts `next dev` on :4123
-        # with the fixture env, waits for /api/health, runs the specs, then tears
-        # the server down. GitHub sets CI=true automatically (enables retries +
-        # reuseExistingServer:false). Job-level timeout guards against a stuck boot.
+      - name: Build production interview fixture
+        env:
+          INTERVIEW_LOCK_PRODUCTION: "1"
+        run: |
+          node --import tsx --input-type=module <<'NODE'
+          import * as fixture from './tests/integration/interview-lock.fixture.ts';
+          const { serverEnv } = fixture.default ?? fixture;
+          import { spawnSync } from 'node:child_process';
+          const result = spawnSync('npm', ['run', 'build'], {
+            env: { ...process.env, ...serverEnv(), NODE_ENV: 'production' },
+            stdio: 'inherit',
+          });
+          process.exit(result.status ?? 1);
+          NODE
+        timeout-minutes: 12
+
+      - name: Run production HTTPS interview and shell-lock e2e
+        env:
+          INTERVIEW_LOCK_PRODUCTION: "1"
         run: npm run test:e2e:interview-lock
         timeout-minutes: 12
 

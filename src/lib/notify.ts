@@ -929,6 +929,45 @@ function escalateUndeliverableOwner(reason: string, message: string): void {
   }
 }
 
+/** Private owner delivery never logs payloads or escalates them to another audience.
+ * Accepted requires a matching gateway acknowledgement; every attempted failure
+ * is uncertain because the gateway may have delivered before losing its reply.
+ */
+export async function notifyOwnerPrivate(opts: {
+  companyId: string;
+  expectedChatId: string;
+  message: string;
+}): Promise<{ status: 'accepted'; messageId: string } | { status: 'uncertain' | 'not-dispatched' }> {
+  if (ownerSendsSuppressed() || process.env.MC_COMPANY_ID !== opts.companyId ||
+      !opts.expectedChatId || resolveOwnerChatId() !== opts.expectedChatId) {
+    return { status: 'not-dispatched' };
+  }
+  return new Promise((resolve) => {
+    try {
+      execFile('openclaw', ['message', 'send', '--channel', 'telegram',
+        '--target', opts.expectedChatId, '--message', opts.message, '--json'],
+      { timeout: Math.min(OWNER_SEND_TIMEOUT_MS, 120_000), maxBuffer: 1024 * 1024 },
+      (error, stdout) => {
+        if (error) { resolve({ status: 'uncertain' }); return; }
+        try {
+          const payload = JSON.parse(stdout);
+          const data = payload?.payload ?? payload?.result ?? payload;
+          const badStatus = (value: { status?: string }) =>
+            ['suppressed', 'failed', 'partial', 'pending'].includes(value?.status ?? '');
+          const messageId = data?.messageId ?? data?.message_id;
+          const target = data?.chatId ?? data?.chat_id ?? data?.to ?? data?.target;
+          const channel = data?.channel ?? payload?.channel ?? 'telegram';
+          const accepted = payload && data && payload.ok !== false && data.ok !== false &&
+            payload.dryRun !== true && data.dryRun !== true && !badStatus(payload) && !badStatus(data) &&
+            ['string', 'number'].includes(typeof messageId) && String(messageId).trim() &&
+            String(target) === opts.expectedChatId && channel === 'telegram';
+          resolve(accepted ? { status: 'accepted', messageId: String(messageId) } : { status: 'uncertain' });
+        } catch { resolve({ status: 'uncertain' }); }
+      });
+    } catch { resolve({ status: 'uncertain' }); }
+  });
+}
+
 /**
  * Convenience: resolve the owner chat ID then send.
  *

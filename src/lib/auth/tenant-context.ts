@@ -39,21 +39,36 @@ async function signature(payload: string): Promise<Uint8Array> {
   return new Uint8Array(await crypto.subtle.sign('HMAC', key, enc.encode(payload)));
 }
 function equal(a: Uint8Array, b: Uint8Array): boolean { let diff = a.length ^ b.length; for (let i = 0; i < a.length; i++) diff |= a[i] ^ (b[i] ?? 0); return diff === 0; }
-export interface TenantGrant { purpose: 'session' | 'enrollment'; tenantId: string; subject: string; host: string; installationId: string; exp: number; nonce: string; }
+export interface TenantGrant { purpose: 'session' | 'enrollment'; tenantId: string; companyId?: string; subject: string; host: string; installationId: string; exp: number; nonce: string; }
 export async function signTenantGrant(grant: TenantGrant): Promise<string> {
-  const payload = b64(enc.encode(JSON.stringify(grant)));
+  // All newly signed grants carry company ownership. Serialized legacy grants
+  // without this claim must sign in again; registry changes cannot rebind them.
+  const bound = { ...grant, companyId: grant.companyId || tenantRegistration(grant.host).companyId };
+  const payload = b64(enc.encode(JSON.stringify(bound)));
   return `${payload}.${b64(await signature(payload))}`;
 }
-export async function verifyTenantGrant(token: string | null, host: string, purpose: TenantGrant['purpose']): Promise<TenantGrant | null> {
+async function verifyGrant(token: string | null, host: string, purpose: TenantGrant['purpose'], acceptExpiredEnrollment = false): Promise<TenantGrant | null> {
   try {
     if (!token) return null;
     const [payload, sig, extra] = token.split('.');
     if (!payload || !sig || extra || !equal(bytes(sig), await signature(payload))) return null;
     const grant = json(payload) as TenantGrant;
     const reg = tenantRegistration(host);
-    if (grant.purpose !== purpose || grant.host !== host || grant.tenantId !== reg.tenantId || grant.installationId !== reg.installationId || !grant.subject || !grant.nonce || !Number.isFinite(grant.exp) || grant.exp <= Date.now() / 1000) return null;
+    if (grant.purpose !== purpose || grant.host !== host || grant.tenantId !== reg.tenantId || grant.companyId !== reg.companyId || grant.installationId !== reg.installationId || !grant.subject || !grant.nonce || !Number.isFinite(grant.exp) || (!(acceptExpiredEnrollment && purpose === 'enrollment') && grant.exp <= Date.now() / 1000)) return null;
     return grant;
   } catch { return null; }
+}
+export async function verifyTenantGrant(token: string | null, host: string, purpose: TenantGrant['purpose']): Promise<TenantGrant | null> {
+  return verifyGrant(token, host, purpose);
+}
+/** Identity comparison only, after an independently verified LIVE session.
+ * This never authorizes enrollment or extends session lifetime. */
+export async function verifyEnrollmentIdentity(token: string | null, host: string): Promise<TenantGrant | null> {
+  return verifyGrant(token, host, 'enrollment', true);
+}
+export function tenantSessionToken(request: { headers: Headers }): string | null {
+  return request.headers.get('cookie')?.split(';').map(s => s.trim())
+    .find(s => s.startsWith(TENANT_SESSION_COOKIE + '='))?.slice(TENANT_SESSION_COOKIE.length + 1) || null;
 }
 const jwks = new Map<string, { expires: number; keys: JsonWebKey[] }>();
 async function verifyAccessJwt(token: string, reg: TenantRegistration): Promise<string | null> {
@@ -86,7 +101,7 @@ export async function resolveTenantContext(request: { headers: Headers }): Promi
   const bearer = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '');
   if (bearer && process.env.MC_API_TOKEN && equal(enc.encode(bearer), enc.encode(process.env.MC_API_TOKEN))) subject = 'operator:api';
   if (!subject) {
-    const cookie = request.headers.get('cookie')?.split(';').map(s => s.trim()).find(s => s.startsWith(TENANT_SESSION_COOKIE+'='))?.slice(TENANT_SESSION_COOKIE.length+1) || null;
+    const cookie = tenantSessionToken(request);
     subject = (await verifyTenantGrant(cookie, host, 'session'))?.subject || null;
   }
   if (!subject) subject = await verifyAccessJwt(request.headers.get('cf-access-jwt-assertion') || '', reg);
