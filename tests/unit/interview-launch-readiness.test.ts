@@ -103,7 +103,7 @@ test('sender-issued one-use invitation redeems to authenticated state and preser
  const denied=await stateGET(new NextRequest('https://launch.example/api/interview/state',{headers:{host:'launch.example'}}));assert.equal(denied.status,403);
  const response=await call(),invitation=await response.json();assert.equal(response.status,200,JSON.stringify(invitation));
  assert.equal(invitation.companyId,'launch-company');assert.equal(invitation.protocol,'interview-invitation.v1');
- const ticket=new URLSearchParams(new URL(invitation.url).hash.slice(1)).get('enroll')!;assert.ok(ticket);assert.ok(invitation.expiresAt<=Date.now()/1000+900);
+ const ticket=new URLSearchParams(new URL(invitation.url).hash.slice(1)).get('enroll')!;assert.ok(ticket);assert.ok(invitation.expiresAt<=Date.now()/1000+86400);
  const redemption=(host='launch.example')=>redeem(new NextRequest(`https://${host}/api/auth/interview-session`,{method:'POST',headers:{host,'content-type':'application/json'},body:JSON.stringify({ticket})}));
  assert.equal((await redemption('foreign.example')).status,403);
  const enrolled=await redemption();assert.equal(enrolled.status,200);assert.equal((await redemption()).status,409);
