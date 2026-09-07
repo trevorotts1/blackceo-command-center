@@ -732,7 +732,8 @@ jobs:
           INTERVIEW_LOCK_PRODUCTION: "1"
         run: |
           node --import tsx --input-type=module <<'NODE'
-          import { serverEnv } from './tests/integration/interview-lock.fixture.ts';
+          import * as fixture from './tests/integration/interview-lock.fixture.ts';
+          const { serverEnv } = fixture.default ?? fixture;
           import { spawnSync } from 'node:child_process';
           const result = spawnSync('npm', ['run', 'build'], {
             env: { ...process.env, ...serverEnv(), NODE_ENV: 'production' },
