@@ -6318,6 +6318,37 @@ export const migrations: Migration[] = [
     name: 'add_publish_queue_company_id',
     up: (db) => {
       console.log('[Migration 135] Adding company_id to publish_queue (F01)...');
+      // Guard the base table's existence before altering it. A database whose
+      // _migrations ledger claims 001-113 are applied but whose schema was
+      // created without publish_queue (test fixtures, partially restored
+      // backups) would otherwise fail the ALTER with "no such table".
+      // Migration 026 is the canonical creator; recreate its exact shape here
+      // only when the table is genuinely absent so the ALTERs below always
+      // have a target.
+      const tableExists = db
+        .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'publish_queue'`)
+        .get();
+      if (!tableExists) {
+        const sqlCreate = [
+          'CREATE TABLE publish_queue (',
+          '  id TEXT PRIMARY KEY,',
+          '  task_id TEXT,',
+          '  topic TEXT NOT NULL,',
+          '  platforms TEXT NOT NULL,',
+          '  schedule TEXT DEFAULT \'auto\',',
+          '  status TEXT NOT NULL DEFAULT \'queued\',',
+          '  run_id TEXT,',
+          '  requested_by TEXT,',
+          '  error TEXT,',
+          '  created_at TEXT DEFAULT (datetime(\'now\')),',
+          '  updated_at TEXT DEFAULT (datetime(\'now\')),',
+          '  started_at TEXT,',
+          '  completed_at TEXT',
+          ')',
+        ].join('\n');
+        db.prepare(sqlCreate).run();
+        console.log('[Migration 135] publish_queue table absent — created base shape (026 parity)');
+      }
       const info = db.prepare('PRAGMA table_info(publish_queue)').all() as { name: string }[];
       if (info.some((col) => col.name === 'company_id')) {
         console.log('[Migration 135] publish_queue.company_id already present — no-op');
