@@ -18,7 +18,7 @@ import {
   PHASE_LABELS,
 } from '@/lib/presentation-phases';
 import { resolveActiveCompanyId } from '@/lib/company';
-import { boardWhereClause } from '@/lib/workspaces/board-query';
+import { tenantTaskWhere } from '@/lib/presentation-tenant-scope';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -37,35 +37,28 @@ export async function GET(request: NextRequest) {
 
     const db = getDb();
 
-    // ── Company scope (closes cross-company read) ────────────────────────
-    // tasks carry no direct company_id — only workspaces.company_id does —
-    // so parent ownership is checked by joining through workspaces and
-    // applying the SAME boardWhereClause the Kanban board itself uses, via
-    // the SAME resolveActiveCompanyId + boardWhereClause convention
-    // /api/performance already established for task-scoped queries. A task
-    // whose workspace_id is NULL is the box's own unattributed data and
-    // stays visible (matches boardWhereClause's own posture); a task whose
-    // workspace resolves to an OUT-OF-SCOPE workspace (foreign company /
-    // archived / residue) is treated as not found, same as a parent_id that
-    // does not exist at all. Children are fetched below by parent_task_id,
-    // so verifying the PARENT here closes the read for its whole child set.
+    // ── Company scope (PRES-009: ingest-grade ownership predicate) ────────
+    // Parent ownership is proven by the SAME predicate the ingest front door
+    // uses (src/lib/presentation-tenant-scope.ts): a durably attributed
+    // workspace resolving to the active company, OR a durable
+    // task_request_keys creation identity. A NULL workspace alone is NOT
+    // proof — the old `workspace_id IS NULL` arm made an unattributed parent
+    // (and its whole child set) visible to EVERY active company. An
+    // out-of-scope or ambiguous parent is 404, same as a parent_id that does
+    // not exist at all. Children are fetched below by parent_task_id, so
+    // verifying the PARENT here closes the read for its whole child set.
     const activeCompanyId = resolveActiveCompanyId(db);
-    const scope = boardWhereClause(activeCompanyId);
-    const scopedWorkspaceIds = (
-      db.prepare(`SELECT w.id FROM workspaces w ${scope.sql}`).all(...scope.params) as { id: string }[]
-    ).map((w) => w.id);
-    const scopeIdList = scopedWorkspaceIds.length > 0 ? scopedWorkspaceIds : ['__no_workspace__'];
-    const scopePlaceholders = scopeIdList.map(() => '?').join(',');
+    const own = tenantTaskWhere(activeCompanyId);
 
     // Fetch parent row (company-scoped)
     const parent = db
       .prepare(
-        `SELECT id, title, status, priority, department,
-                process_certificate_sha, created_at
-         FROM tasks
-        WHERE id = ? AND (workspace_id IS NULL OR workspace_id IN (${scopePlaceholders}))`,
+        `SELECT t.id, t.title, t.status, t.priority, t.department,
+                t.process_certificate_sha, t.created_at
+         FROM tasks t
+        WHERE t.id = ? AND ${own.sql}`,
       )
-      .get(parentId, ...scopeIdList) as Record<string, unknown> | undefined;
+      .get(parentId, ...own.params) as Record<string, unknown> | undefined;
 
     if (!parent) {
       return NextResponse.json(
