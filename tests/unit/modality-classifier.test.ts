@@ -115,13 +115,14 @@ test('(d) a vision-classified task on a box with no active vision model downgrad
   assert.equal(sel.needs_owner_input, false, 'dispatch must proceed, not ask the owner');
   assert.equal(sel.model_id, 'ollama-cloud/llama3.3:70b', 'a text model must be selected');
 
-  // Pure helper: the downgrade decision itself.
+  // Pure helper: the downgrade decision itself. F37 added the `blocked` field
+  // to the return contract; non-strict calls never set it (stays false).
   const dg = applyModalityDowngrade('vision', [TEXT_MODEL]);
-  assert.deepEqual(dg, { modality: 'text', downgraded: true });
+  assert.deepEqual(dg, { modality: 'text', downgraded: true, blocked: false });
 
   // When a vision model IS active, NO downgrade — vision stays vision.
   const noDg = applyModalityDowngrade('vision', [TEXT_MODEL, VISION_MODEL]);
-  assert.deepEqual(noDg, { modality: 'vision', downgraded: false });
+  assert.deepEqual(noDg, { modality: 'vision', downgraded: false, blocked: false });
   const selVision = selectTaskModel({
     title: 'Look at this diagram',
     description: 'Describe the attached diagram.',
@@ -138,7 +139,7 @@ test('(d) a vision-classified task on a box with no active vision model downgrad
 test('(d-cont) a generation modality with no capable model is NOT downgraded (owner input)', () => {
   // image_generation cannot be faked by a text model — it must stay and ask the owner.
   const dg = applyModalityDowngrade('image_generation', [TEXT_MODEL]);
-  assert.deepEqual(dg, { modality: 'image_generation', downgraded: false });
+  assert.deepEqual(dg, { modality: 'image_generation', downgraded: false, blocked: false });
   const sel = selectTaskModel({
     title: 'Hero banner',
     description: 'Generate image of a mountain sunrise.',
