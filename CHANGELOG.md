@@ -1,3 +1,15 @@
+## [v7.1.6] — 2026-09-08 — Company-bound publish queue and strict model selection
+
+### Fixed
+- Bind the Skill 35 publish queue to the authenticated company. Every publish queue read, enqueue and mutation now resolves tenant and company context server-side; cross-company queue identifiers are rejected, existing rows are backfilled to `default` company context, and `sheet_id` is recorded for the publish target. The queue API no longer trusts client-supplied company context (F01).
+- Accept provider-verified full model slugs and their suffix variants for GLM 5.3 Flash in the model policy, kept in parity with the onboarding repo's verified slugs; new models become inventory edits instead of code changes. Selection order, no-silent-upgrade and fallback behavior are unchanged (F31).
+- A strict vision capability requirement (visual QC or explicit `requiresVision`) is no longer silently degraded to a text model. The task is blocked from dispatch and queued visibly, only a policy-approved capable vision fallback may serve it, and the dispatch receipt records the strict capability, block reason and asset input hash (F37).
+- Migration 135 guards the existence of `publish_queue` before altering it, recreating migration 026's exact base shape only when the table is genuinely absent. Databases whose migration ledger claims the queue's creator is already applied but whose schema lacks the table (test fixtures, partially restored backups) no longer fail startup with "no such table".
+
+### Compatibility and scope
+- Migration 135 is additive and idempotent: it adds `publish_queue.company_id` (default `default`) and `publish_queue.sheet_id` with a company index; no data is rewritten and no existing queue rows are dropped. Real installations that already have `publish_queue` from migration 026 are untouched.
+- No dependency changes. Publishing this release does not deploy or verify it on client installations.
+
 ## [v7.1.5] — 2026-09-07 — Resume interviews without losing progress
 
 ### Fixed
