@@ -200,6 +200,19 @@ function resolveTilde(p: string): string {
 }
 
 /**
+ * QC-SONNET-R2 (PRES-022 repair): genuine-PASS predicate for scorer verdict
+ * prose. PASS verdicts read '… PASS → moved to Done …'; hold notices read
+ * '… PASS but held in review …' (explicitly NOT a pass — the card stayed);
+ * FAIL verdicts read '… FAIL → …'. Only the first may seed proof.
+ */
+export function isPassVerdict(message: string): boolean {
+  if (!message.includes('PASS')) return false;
+  if (message.includes('held in review')) return false;
+  if (message.includes('FAIL')) return false;
+  return true;
+}
+
+/**
  * Recompute the deliverable evidence server-side from the REGISTERED
  * task_deliverables rows: every evidence-bearing row must be reachable, and
  * every bundle-shaped row must pass the full byte-level probe. A hash over a
@@ -256,6 +269,32 @@ export function recomputeDeliverableEvidence(taskId: string): {
   return { evidence, hashes, ok };
 }
 
+/**
+ * QC-SONNET-R3 (PRES-022 repair): newest filesystem mtime among the verified
+ * bundle artifacts, compared against the newest trusted QC verdict. Returns
+ * the offending artifact title when a file is NEWER than the QC pass (clock
+ * skew tolerated by 2s — a verdict written in the same second as the artifact
+ * still counts). URL rows have no filesystem bytes and are skipped.
+ */
+export function newestArtifactMtimeAfter(
+  hashes: DeliverableHash[], qcAtISO: string,
+): string | null {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires, @typescript-eslint/no-require-imports
+  const fs = require('fs') as typeof import('fs');
+  const qcMs = Date.parse(qcAtISO);
+  if (Number.isNaN(qcMs)) return null;
+  for (const h of hashes) {
+    if (h.deliverable_type === 'url' || h.verification === 'absent') continue;
+    try {
+      const st = fs.statSync(resolveTilde(h.path));
+      if (st.isFile() && !st.isSymbolicLink() && st.mtimeMs > qcMs + 2000) {
+        return h.title;
+      }
+    } catch { /* unreadable here means recompute already failed it */ }
+  }
+  return null;
+}
+
 function isUsableUrlRow(value: string | null): boolean {
   if (!value) return false;
   try {
@@ -294,6 +333,12 @@ export function recomputeQcReceipts(taskId: string): QcReceipt[] {
     // verified CF-Access email. A row that names NEITHER is not trusted identity.
     const isAuto = r.message.startsWith('[QC-AUTO]');
     if (!isAuto) continue;
+    // QC-SONNET-R2 (PRES-022 repair): only a genuine PASS verdict counts as a
+    // trusted QC receipt. A FAIL verdict ('FAIL →'), a hold notice ('held in
+    // review'), a kickback/reroute note or any other non-pass scoring event
+    // must never seed completion proof — otherwise one failed QC run would
+    // leave behind a receipt the next registration could ride on.
+    if (!isPassVerdict(r.message)) continue;
     let reviewer = 'qc-scorer';
     try {
       const a = queryOne<{ name: string }>('SELECT name FROM agents WHERE id = ?', [r.agent_id]);
@@ -423,6 +468,7 @@ export interface RegisterReceiptResult {
     | 'receipt_signature_invalid'
     | 'deliverable_evidence_failed'
     | 'no_qc_receipt'
+    | 'qc_stale'
     | 'stale_revision'
     | 'lease_mismatch'
     | 'registry_unavailable';
@@ -491,7 +537,21 @@ export function registerVerifiedReceipt(input: RegisterReceiptInput): RegisterRe
 
   // Post-proof mutation detection: the newest QC receipt must be NEWER than
   // every artifact mutation. A file changed after the QC pass stales the proof.
-  // (Applied at registration AND re-applied at gate time via qcIsCurrent.)
+  // Applied HERE at registration (pre-registration window: a repair that lands
+  // after the QC verdict but before registration must force a FRESH QC pass —
+  // QC-SONNET-R3) and re-applied at gate time via qcIsCurrent
+  // (post-registration window).
+  const newestQcAt = qcReceipts.reduce(
+    (m, q) => (q.scored_at > m ? q.scored_at : m), '');
+  if (newestQcAt) {
+    const mutatedAfterQc = newestArtifactMtimeAfter(recomputed.hashes, newestQcAt);
+    if (mutatedAfterQc) {
+      return {
+        ok: false, code: 'qc_stale',
+        error: `Refused: artifact "${mutatedAfterQc}" changed after the newest trusted QC pass (${newestQcAt}) — re-run QC over the current bytes, then register fresh proof.`,
+      };
+    }
+  }
 
   // Stale-worker / revision-rotation discipline.
   try {
@@ -686,6 +746,37 @@ export function qcIsCurrent(receipt: RegisteredReceipt | null): { current: boole
     }
   }
   return { current: true };
+}
+
+/**
+ * QC-SONNET-R7 (PRES-022 repair): trusted-server bootstrap helper. Called by
+ * the QC scorer on a presentations PASS when no CURRENT receipt is on record.
+ * Tries attempt 1 (first completion); when an active receipt already exists
+ * but the attempt-1 registration is refused as stale_revision (a repair
+ * changed the bytes after the prior approval), advances ONE forward revision
+ * (active.attempt + 1, same run/manifest axis) and registers the fresh proof
+ * there — the repaired bytes plus THIS scorer run's fresh PASS verdict are
+ * exactly the 'new proof + fresh QC' the repair path requires. History is
+ * retained (prior rows flip to invalidated, never deleted). Returns the
+ * registration result of whichever attempt ran last.
+ */
+export function bootstrapProofForPass(taskId: string): RegisterReceiptResult {
+  // Fast path: a CURRENT active receipt already proves this revision — no new
+  // row, no attempt inflation on repeat scorer runs.
+  const current = getActiveReceipt(taskId);
+  if (current && qcIsCurrent(current).current) {
+    return { ok: true, idempotent: true, receipt: current };
+  }
+  const first = registerVerifiedReceipt({ taskId, attempt: 1 });
+  if (first.ok || first.code !== 'stale_revision') return first;
+  const active = getActiveReceipt(taskId);
+  if (!active) return first;
+  return registerVerifiedReceipt({
+    taskId,
+    attempt: active.attempt + 1,
+    runId: active.run_id,
+    manifestRevision: active.manifest_revision,
+  });
 }
 
 /**

@@ -81,6 +81,7 @@ import { notifyOwner, notifySystem, resolveWorkspaceBase } from '@/lib/notify';
 import { notifyOwnerDone } from '@/lib/owner-reports';
 import { transition, TransitionError, type LifecycleState } from '@/lib/task-lifecycle';
 import { requiresRegisteredCertificate, requiresRegisteredProof } from '@/lib/presentations-cert-gate';
+import { bootstrapProofForPass } from '@/lib/presentation-proof-registry';
 import { recordBlockEvent } from '@/lib/block-events';
 import { assertNoFixtureEnvInProduction, assertNoFixtureDerivedServerWrite } from '@/lib/fixture-guard';
 import { EVIDENCE_DELIVERABLE_TYPES, isUsableUrl, collectCompletionEvidence, isBundleDeliverablePath, verifyPresentationBundleDeliverable, bundleReverifyEnabled } from '@/lib/completion-evidence';
@@ -5078,6 +5079,29 @@ export async function runEngineOwnedDeckQC(
   // PRES-022: requiresRegisteredProof composes the legacy registration check
   // with the verification-receipt registry leg — a stored sha alone no longer
   // promotes; the ACTIVE, CURRENT receipt must be on record.
+  //
+  // QC-SONNET-R1 (PRES-022 repair — bootstrap): NO production path registered
+  // receipts before this scorer ran (the engine PATCHes an identifier only,
+  // and the registry's trusted-QC leg reads the scorer's own verdict events),
+  // so without this step every passing deck would hold in review forever.
+  // The scorer is the same trust level as the qc_review events the registry
+  // reads (both are server-side), so on a PASS it records its verdict event
+  // FIRST, then registers the recomputed proof for this revision, then the
+  // proof check below decides. FAILs never reach here (step 4 returned), so a
+  // failed QC can never seed proof (R-CC2 enforces PASS-only at read time too).
+  const passVerdictAt = new Date().toISOString();
+  run(
+    `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
+    [uuidv4(), 'qc_review', taskId,
+      `[QC-AUTO] Score: ${result.score.toFixed(1)}/10 | PASS → moved to Done (FIX 7 deterministic deck lane) | ${result.reason} [path:llm][scorer:qc-scorer]`,
+      passVerdictAt],
+  );
+  const bootstrap = bootstrapProofForPass(taskId);
+  if (!bootstrap.ok) {
+    console.warn(
+      `[QCScorer] Task "${task.title}" (${taskId}): FIX 7 checklist PASS but proof registration refused (${bootstrap.code}: ${bootstrap.error}) — held in review`,
+    );
+  }
   const certReg = requiresRegisteredProof({
     taskId,
     department: task.department,
@@ -5105,12 +5129,8 @@ export async function runEngineOwnedDeckQC(
     return result;
   }
 
-  const eventMessage =
-    `[QC-AUTO] Score: ${result.score.toFixed(1)}/10 | PASS → moved to Done (FIX 7 deterministic deck lane) | ${result.reason} [path:llm][scorer:qc-scorer]`;
-  run(
-    `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
-    [uuidv4(), 'qc_review', taskId, eventMessage, now],
-  );
+  // (The PASS verdict event was already recorded above at bootstrap time —
+  // this block writes no second copy.)
 
   try {
     await transition(taskId, 'done', {
@@ -6468,8 +6488,32 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
       // the cert is missing, hold the card in review with an explicit event
       // naming exactly what is missing instead of throwing. Registration itself
       // happens at the PATCH route (the only presented-cert match point).
+      //
+      // QC-SONNET-R1 (PRES-022 repair — bootstrap, generic lane): same story as
+      // the FIX 7 lane above — on a presentations PASS with NO active receipt,
+      // record this verdict event first, then register the recomputed proof, so
+      // the proof check below (and transition()'s) can pass. Non-presentations
+      // tasks skip this (their gate needs no receipt). FAILs never reach here.
       {
-        const certReg = requiresRegisteredCertificate({
+        const deptCanonGeneric = canonicalDeptSlug(task.department || '') || (task.department ?? '');
+        if (deptCanonGeneric === 'presentations') {
+          const verdictAt = new Date().toISOString();
+          run(
+            `INSERT INTO events (id, type, task_id, message, created_at)
+             VALUES (?, ?, ?, ?, ?)`,
+            [uuidv4(), 'qc_review', taskId,
+              `[QC-AUTO] Score: ${result.score.toFixed(1)}/10 | PASS → moved to Done (generic lane) | ${result.reason} [path:${result.scoringPath}]`,
+              verdictAt],
+          );
+          const boot = bootstrapProofForPass(taskId);
+          if (!boot.ok) {
+            console.warn(
+              `[QCScorer] Task "${task.title}" (${taskId}): generic-lane PASS but proof registration refused (${boot.code}: ${boot.error}) — held in review`,
+            );
+          }
+        }
+        const certReg = requiresRegisteredProof({
+          taskId,
           department: task.department,
           source: task.source,
           currentStatus: task.status,

@@ -282,3 +282,71 @@ test('QC promotion path (requiresRegisteredProof) holds a task whose artifacts c
     assert.match(e.message, /stale/i);
   }
 });
+// ── QC-SONNET repairs: PASS-only receipts, pre-registration mutation ─────────
+
+test('a FAILED QC verdict never seeds proof (R-CC2: PASS-only receipts)', () => {
+  const id = seedTask();
+  // A failed scorer verdict + a hold notice both name [QC-AUTO] but are not passes.
+  run(
+    `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, 'qc_review', ?, ?, ?)`,
+    ['pres022-qc-' + uuidv4().slice(0, 8), id,
+      '[QC-AUTO] Score: 4.0/10 | FAIL → returned to Backlog for re-route | gaps [path:llm][scorer:qc-scorer]',
+      nowISO()],
+  );
+  run(
+    `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, 'qc_review', ?, ?, ?)`,
+    ['pres022-qc-' + uuidv4().slice(0, 8), id,
+      '[QC-AUTO] Score: 9.0/10 PASS but held in review: missing proof',
+      nowISO()],
+  );
+  seedDeliverable(id, makeRealArtifact(`failnoseed-${id}-DECK-FINAL.pptx`));
+  const reg = registerVerifiedReceipt({ taskId: id, attempt: 1 });
+  assert.equal(reg.ok, false);
+  assert.equal(reg.code, 'no_qc_receipt');
+});
+
+test('artifact mutated AFTER the QC verdict but BEFORE registration is refused (R-CC3: qc_stale)', async () => {
+  const id = seedTask();
+  seedQcReceipt(id, 'pre-registration mutation case');
+  const artifact = makeRealArtifact(`prereg-${id}-DECK-FINAL.pptx`);
+  seedDeliverable(id, artifact);
+  // Repair lands after the QC verdict: newest artifact mtime > newest QC verdict.
+  await new Promise((r) => setTimeout(r, 2100));
+  fs.writeFileSync(artifact, Buffer.concat([
+    Buffer.from('PK\x03\x04', 'binary'), Buffer.alloc(1_100_000, 0x46),
+  ]));
+  const reg = registerVerifiedReceipt({ taskId: id, attempt: 1 });
+  assert.equal(reg.ok, false);
+  assert.equal(reg.code, 'qc_stale');
+  // Fresh QC AFTER the mutation unblocks registration.
+  seedQcReceipt(id, 'post-mutation fresh QC');
+  const reg2 = registerVerifiedReceipt({ taskId: id, attempt: 1 });
+  assert.equal(reg2.ok, true, reg2.error);
+});
+
+test('repair in production: scorer bootstrap advances a forward revision after a stale approval (R7)', async () => {
+  const id = seedTask();
+  seedQcReceipt(id, 'original pass');
+  const artifact = makeRealArtifact(`r7-${id}-DECK-FINAL.pptx`);
+  seedDeliverable(id, artifact);
+  const r1 = registerVerifiedReceipt({ taskId: id, attempt: 1 });
+  assert.equal(r1.ok, true, r1.error);
+  // Repair mutates bytes (stales attempt-1 approval)...
+  fs.writeFileSync(artifact, Buffer.concat([
+    Buffer.from('PK\x03\x04', 'binary'), Buffer.alloc(1_100_000, 0x47),
+  ]));
+  assert.equal(qcIsCurrent(getActiveReceipt(id)).current, false);
+  // ...fresh QC verdict lands (what the scorer writes before bootstrapping)...
+  seedQcReceipt(id, 'post-repair fresh QC');
+  // ...and the production bootstrap (attempt 1 → stale → forward) registers
+  // the repaired bytes as attempt 2 and the task completes on the SAME task.
+  const { bootstrapProofForPass } = await import('../../src/lib/presentation-proof-registry');
+  const boot = bootstrapProofForPass(id);
+  assert.equal(boot.ok, true, boot.error);
+  assert.equal(boot.receipt!.attempt, 2);
+  const hist = getReceiptHistory(id);
+  assert.equal(hist.filter((h) => h.status === 'invalidated').length, 1);
+  assert.equal(hist.filter((h) => h.status === 'active').length, 1);
+  const result = await transition(id, 'done', { actor: 'qc-scorer', expectedFrom: 'review' });
+  assert.equal(result.status, 'done');
+});
