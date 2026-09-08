@@ -6375,10 +6375,16 @@ export const migrations: Migration[] = [
     // assetId must not serve A any bytes. `kind` distinguishes video posters
     // from image previews; `content_revision` pins which plan revision the
     // player serves (QC-F38: the player plays the CORRECT revision).
-    id: '136',
+    //
+    // ID HISTORY (D-F03-02/D-F33-01/D-F38-01 repair): this migration was first
+    // written as id 136, colliding with cc-wf05's 136 (F03 publish_queue
+    // execution contract) + 137 (F33 social_steps/provider_leases). Canonical
+    // merge order is F03+F33 first, then F38 — so this branch renumbered to
+    // 138: combined tree is 136=F03, 137=F33, 138=F38. No behavior change.
+    id: '138',
     name: 'social_media_assets',
     up: (db) => {
-      console.log('[Migration 136] Creating social_media_assets (F38)...');
+      console.log('[Migration 138] Creating social_media_assets (F38)...');
       db.exec(`CREATE TABLE IF NOT EXISTS social_media_assets (
         id TEXT PRIMARY KEY,
         company_id TEXT NOT NULL,
@@ -6397,7 +6403,7 @@ export const migrations: Migration[] = [
         `CREATE INDEX IF NOT EXISTS idx_social_media_assets_company
            ON social_media_assets(company_id)`,
       );
-      console.log('[Migration 136] social_media_assets ready');
+      console.log('[Migration 138] social_media_assets ready');
     },
   },
 

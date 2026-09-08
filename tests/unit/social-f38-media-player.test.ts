@@ -6,8 +6,8 @@
  * destination."
  *
  * Proven in-process against an isolated temp DB (real migration chain incl.
- * 136), the REAL route handlers and the REAL signed-token helpers:
- *   1. Migration 136 creates social_media_assets.
+ * 138), the REAL route handlers and the REAL signed-token helpers:
+ *   1. Migration 138 creates social_media_assets.
  *   2. Cross-company lookup rejected: company B's assetId answers 404 to
  *      company A with zero bytes and no existence oracle.
  *   3. Unauthenticated → 403.
@@ -39,7 +39,7 @@ import {
   upsertMediaAsset,
 } from '../../src/lib/social/media-assets';
 
-getDb(); // trigger the full migration chain (incl. 136) against the isolated temp DB
+getDb(); // trigger the full migration chain (incl. 138) against the isolated temp DB
 
 const SECRET = 'f38-test-secret';
 process.env.MC_TENANT_SESSION_SECRET = SECRET;
@@ -120,9 +120,9 @@ test.after(() => {
   try { closeDb(); } catch { /* ignore */ }
 });
 
-// ─── migration 136: the asset registry exists ────────────────────────────────
+// ─── migration 138: the asset registry exists ────────────────────────────────
 
-test('F38 migration 136: social_media_assets table with company binding', () => {
+test('F38 migration 138: social_media_assets table with company binding', () => {
   const db = getDb();
   const tables = db
     .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'social_media_assets'")
@@ -135,8 +135,8 @@ test('F38 migration 136: social_media_assets table with company binding', () => 
     'qc_state', 'created_at']) {
     assert.ok(cols.includes(col), `social_media_assets.${col} must exist`);
   }
-  const applied = queryOne<{ id: string }>("SELECT id FROM _migrations WHERE id = '136'");
-  assert.ok(applied, 'migration 136 must be recorded as applied');
+  const applied = queryOne<{ id: string }>("SELECT id FROM _migrations WHERE id = '138'");
+  assert.ok(applied, 'migration 138 must be recorded as applied');
 });
 
 // ─── company-bound lookup helpers ─────────────────────────────────────────────
@@ -250,6 +250,78 @@ test('F38 expired preview is rejected as renewable, and a fresh token re-verifie
   assert.equal(badRes.status, 401);
   const badBody = (await badRes.json()) as { renewable: boolean };
   assert.equal(badBody.renewable, true, 'expired preview must answer renewable, not fatal');
+});
+
+// ─── D-F38-02: POST register wires upsertMediaAsset into production ──────────
+
+test('F38 POST register: company-bound ingest writes the asset row under the caller company', async () => {
+  setTenantRegistry(HOST_A, HOST_B);
+  const registerReq = new NextRequest(`http://${HOST_A}${mediaPath('asset-reg-1')}`, {
+    method: 'POST',
+    headers: { host: HOST_A, cookie: tenantCookie(HOST_A, 'company-a'), 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      action: 'register',
+      asset: {
+        cycle_id: '2026-W37',
+        content_revision: 'r1',
+        kind: 'video',
+        preview_url: 'https://assets.cdn.filesafe.space/loc-a/media/reg-r1.mp4',
+        duration_seconds: 12.5,
+        ratio: '9:16',
+        qc_state: 'draft',
+      },
+    }),
+  });
+  const res = await mediaPOST(registerReq, { params: Promise.resolve({ assetId: 'asset-reg-1' }) });
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as { ok: boolean; asset: { id: string; company_id: string; content_revision: string | null } };
+  assert.equal(body.ok, true);
+  assert.equal(body.asset.id, 'asset-reg-1');
+  assert.equal(body.asset.company_id, 'company-a', 'row bound to the caller company, never the body');
+  assert.equal(body.asset.content_revision, 'r1');
+
+  // The registered asset is immediately playable through the same route.
+  const get = await mediaGET(
+    requestFor(HOST_A, 'company-a', mediaPath('asset-reg-1')),
+    { params: Promise.resolve({ assetId: 'asset-reg-1' }) },
+  );
+  assert.equal(get.status, 200);
+});
+
+test('F38 POST register: a B-company caller cannot read or overwrite an A asset', async () => {
+  setTenantRegistry(HOST_A, HOST_B);
+  seedAssetA();
+  // B registering the SAME assetId is REFUSED (409): the bare-id PRIMARY KEY
+  // means a naive upsert would overwrite A's row — the guarded upsert leaves
+  // the foreign row untouched and returns null instead.
+  const evilReq = new NextRequest(`http://${HOST_B}${mediaPath('asset-a-1')}`, {
+    method: 'POST',
+    headers: { host: HOST_B, cookie: tenantCookie(HOST_B, 'company-b'), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'register', asset: { preview_url: 'https://evil.example/x.mp4' } }),
+  });
+  const evilRes = await mediaPOST(evilReq, { params: Promise.resolve({ assetId: 'asset-a-1' }) });
+  assert.equal(evilRes.status, 409, 'foreign-id register refused without touching the row');
+  // A's own asset still resolves to A's row with A's preview URL.
+  const own = lookupMediaAsset('asset-a-1', 'company-a');
+  assert.ok(own);
+  assert.equal(own.preview_url, ASSET_A.preview_url, 'A row untouched by the B-company register');
+  // And B still cannot READ A's row through GET.
+  const bGet = await mediaGET(
+    requestFor(HOST_B, 'company-b', mediaPath('asset-a-1')),
+    { params: Promise.resolve({ assetId: 'asset-a-1' }) },
+  );
+  assert.equal(bGet.status, 404, 'B GET of the A assetId still 404s');
+});
+
+test('F38 POST register: invalid asset id rejected', async () => {
+  setTenantRegistry(HOST_A, HOST_B);
+  const badReq = new NextRequest(`http://${HOST_A}${mediaPath('x')}`, {
+    method: 'POST',
+    headers: { host: HOST_A, cookie: tenantCookie(HOST_A, 'company-a'), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'register', asset: {} }),
+  });
+  const badRes = await mediaPOST(badReq, { params: Promise.resolve({ assetId: '../escape' }) });
+  assert.equal(badRes.status, 400);
 });
 
 // ─── published URL separate from the draft player ─────────────────────────────

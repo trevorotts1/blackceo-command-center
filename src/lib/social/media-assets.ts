@@ -116,7 +116,15 @@ export async function verifyMediaPreviewToken(
   return timingSafeEqual(expected, sig);
 }
 
-/** Create/replace an asset row (the ONB writeback adapter's ingest seam). */
+/** Create/replace an asset row (the ONB writeback adapter's ingest seam).
+ *
+ * COMPANY-BINDING GUARD (D-F38-02 repair): the PRIMARY KEY is the bare `id`,
+ * so a naive upsert by id alone would let a B-company caller OVERWRITE an
+ * A-company row (company_id = excluded.company_id). The update arm is
+ * therefore scoped to the SAME company: a conflicting row owned by another
+ * company is left untouched and the write is refused (returns null) — the
+ * route answers 409, never silently hijacks or leaks the foreign row.
+ */
 export function upsertMediaAsset(asset: {
   id: string;
   company_id: string;
@@ -129,15 +137,14 @@ export function upsertMediaAsset(asset: {
   duration_seconds?: number | null;
   ratio?: string | null;
   qc_state?: string | null;
-}): SocialMediaAsset {
+}): SocialMediaAsset | null {
   const db = getDb();
-  db.prepare(
+  const result = db.prepare(
     `INSERT INTO social_media_assets
        (id, company_id, cycle_id, content_revision, kind, preview_url, original_url,
         poster_url, duration_seconds, ratio, qc_state)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
-       company_id = excluded.company_id,
        cycle_id = excluded.cycle_id,
        content_revision = excluded.content_revision,
        kind = excluded.kind,
@@ -146,7 +153,8 @@ export function upsertMediaAsset(asset: {
        poster_url = excluded.poster_url,
        duration_seconds = excluded.duration_seconds,
        ratio = excluded.ratio,
-       qc_state = excluded.qc_state`,
+       qc_state = excluded.qc_state
+     WHERE social_media_assets.company_id = excluded.company_id`,
   ).run(
     asset.id,
     asset.company_id,
@@ -160,5 +168,10 @@ export function upsertMediaAsset(asset: {
     asset.ratio ?? null,
     asset.qc_state ?? null,
   );
-  return lookupMediaAsset(asset.id, asset.company_id) as SocialMediaAsset;
+  // INSERT ... ON CONFLICT ... WHERE (no-op when a foreign company owns the
+  // id): changes === 0 means the row exists but belongs to someone else —
+  // refuse without touching it (the lookup below is company-scoped, so it
+  // can only ever return OUR row or null).
+  if (result.changes === 0) return null;
+  return lookupMediaAsset(asset.id, asset.company_id);
 }

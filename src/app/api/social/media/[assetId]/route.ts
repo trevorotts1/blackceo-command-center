@@ -5,6 +5,7 @@ import {
 import {
   lookupMediaAsset,
   signMediaPreviewToken,
+  upsertMediaAsset,
   verifyMediaPreviewToken,
 } from '@/lib/social/media-assets';
 
@@ -82,10 +83,19 @@ export async function GET(
 }
 
 /**
- * POST /api/social/media/[assetId] — verify a preview token (media-server
- * seam). Returns 200 when the token is valid for THIS company + asset + url;
- * 401 with `renewable: true` when expired so the player re-authenticates and
- * re-fetches metadata instead of failing.
+ * POST /api/social/media/[assetId] — asset registration (ingest) + preview
+ * token verification (media-server seam).
+ *
+ * D-F38-02 repair: upsertMediaAsset previously had no production caller (a
+ * documented-but-unwired ingest seam). It is now wired here:
+ *   - body { action: 'register', asset: {...} } → company-bound upsert of the
+ *     URL-path assetId UNDER THE CALLER'S company (a B-company caller can only
+ *     ever write B rows — the company_id comes from the verified identity,
+ *     never the body), then 200 with the stored row;
+ *   - otherwise (token/url body) → the original token-verification behavior:
+ *     200 when the token is valid for THIS company + asset + url, 401 with
+ *     `renewable: true` when expired so the player re-authenticates and
+ *     re-fetches metadata instead of failing.
  */
 export async function POST(
   request: NextRequest,
@@ -98,11 +108,52 @@ export async function POST(
   const { companyId } = identity.company;
   const { assetId } = await props.params;
 
-  let body: { token?: string; url?: string };
+  let body: {
+    action?: string;
+    token?: string;
+    url?: string;
+    asset?: {
+      cycle_id?: string | null;
+      content_revision?: string | null;
+      kind?: string;
+      preview_url?: string | null;
+      original_url?: string | null;
+      poster_url?: string | null;
+      duration_seconds?: number | null;
+      ratio?: string | null;
+      qc_state?: string | null;
+    };
+  };
   try {
-    body = (await request.json()) as { token?: string; url?: string };
+    body = (await request.json()) as typeof body;
   } catch {
     return NextResponse.json({ error: 'invalid JSON body' }, { status: 400 });
+  }
+
+  if (body.action === 'register') {
+    if (!assetId || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(assetId)) {
+      return NextResponse.json({ error: 'invalid asset id' }, { status: 400 });
+    }
+    const a = body.asset ?? {};
+    const stored = upsertMediaAsset({
+      id: assetId,
+      company_id: companyId,
+      cycle_id: a.cycle_id ?? null,
+      content_revision: a.content_revision ?? null,
+      kind: a.kind ?? 'video',
+      preview_url: a.preview_url ?? null,
+      original_url: a.original_url ?? null,
+      poster_url: a.poster_url ?? null,
+      duration_seconds: a.duration_seconds ?? null,
+      ratio: a.ratio ?? null,
+      qc_state: a.qc_state ?? null,
+    });
+    // Null = the id is owned by another company: refuse (409) without
+    // touching or revealing the foreign row (no existence oracle).
+    if (!stored) {
+      return NextResponse.json({ error: 'asset id already registered' }, { status: 409 });
+    }
+    return NextResponse.json({ ok: true, asset: stored });
   }
 
   const asset = lookupMediaAsset(assetId, companyId);
