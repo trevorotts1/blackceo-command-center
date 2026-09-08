@@ -94,6 +94,11 @@ export default defineConfig({
       // projection, primary-submit safety (action: 'reaim', never 'name-voice'),
       // data-testid coverage, real render proof.
       'tests/unit/persona-picker.test.tsx',
+      // F06 (D-F06-01 repair) — MarketingPublishButton default-path real
+      // render proof: bare render (no accounts prop) shows empty platforms +
+      // a hint (never the hardcoded quartet), accounts render derives
+      // platforms, self-fetch resolves the connected system.
+      'tests/unit/social-f06-default-path-render.test.tsx',
     ],
     env: { NODE_ENV: 'test' },
     testTimeout: 15000,
