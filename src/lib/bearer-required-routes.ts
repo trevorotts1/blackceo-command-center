@@ -77,6 +77,12 @@ export const BEARER_REQUIRED_WRITE_ROUTES: RegExp[] = [
   /^\/api\/sops\/import-role-library$/,
   /^\/api\/tasks\/[^/]+\/activities$/,
   /^\/api\/tasks\/[^/]+\/deliverables$/,
+  // PRES-010 — presentation run registration is a PRODUCER-ONLY surface (the
+  // presentation engine stamps its run root; the board UI never calls it). An
+  // unlisted write route would fall through the same-origin passthrough on a
+  // forged Origin/Referer (U052 residual); gating it here keeps registration
+  // reachable ONLY with the MC_API_TOKEN bearer, like ingest.
+  /^\/api\/presentations\/runs$/,
   /^\/api\/tasks\/[^/]+\/messages$/,
   /^\/api\/tasks\/[^/]+\/planning\/approve$/,
   /^\/api\/tasks\/[^/]+\/rating$/,

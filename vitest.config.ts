@@ -228,6 +228,12 @@ export default defineConfig({
       // before any row is written. DB-backed vitest suite (vitest globals +
       // dynamic route import), so vitest-only, never the tsx --test glob.
       'tests/unit/fix54-registration-bundle-probe.test.ts',
+      // PRES-010 — registered run bindings: seeded A/B runs with identical
+      // basenames never cross-select; foreign symlink refused; correct mapping
+      // returns the correct URL; relocation recovers; missing ledger honest
+      // pending. DB-backed vitest suite (vitest globals + dynamic route
+      // import), so vitest-only, never the tsx --test glob.
+      'tests/unit/pres010-run-bindings.test.ts',
       // FIX 35 (spec REV 3, Phase D data lane) — synthetic-row purge gate +
       // audit-backfill route. Hygiene script is driven as a subprocess against
       // an isolated temp DB; the route suite imports the real handler. Uses

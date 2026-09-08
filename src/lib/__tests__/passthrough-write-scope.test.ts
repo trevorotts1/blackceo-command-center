@@ -233,16 +233,16 @@ const nonWebhookCount = allMutatingRoutes.length - webhookProtectedCount;
 describe('passthrough-write-scope — anti-rot lock (U052)', () => {
   // ---- Counts ------------------------------------------------------------
 
-  it('API routes exporting a mutating method: 122 (literal assertion)', () => {
-    expect(allMutatingRoutes.length).toBe(122);
+  it('API routes exporting a mutating method: 123 (literal assertion)', () => {
+    expect(allMutatingRoutes.length).toBe(123);
   });
 
   it('protected by isWebhookSecretRoute: 6', () => {
     expect(webhookProtectedCount).toBe(6);
   });
 
-  it('non-webhook write routes: 116 (tenant authentication remains required)', () => {
-    expect(nonWebhookCount).toBe(116);
+  it('non-webhook write routes: 117 (tenant authentication remains required)', () => {
+    expect(nonWebhookCount).toBe(117);
   });
 
   it('interface call templates found by multi-line scanner', () => {
@@ -259,12 +259,12 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
     expect(count).toBeGreaterThanOrEqual(40);
   });
 
-  it('routes covered by BEARER_REQUIRED_WRITE_ROUTES (45 routes via 42 patterns)', () => {
-    expect(bearerCoveredRoutes.size).toBe(45);
+  it('routes covered by BEARER_REQUIRED_WRITE_ROUTES (46 routes via 43 patterns — +1: PRES-010 /api/presentations/runs)', () => {
+    expect(bearerCoveredRoutes.size).toBe(46);
   });
 
-  it('BEARER_REQUIRED_WRITE_ROUTES.length is 42, covering 45 routes (checksum: 39 + 3×2 = 45)', () => {
-    expect(BEARER_REQUIRED_WRITE_ROUTES.length).toBe(42);
+  it('BEARER_REQUIRED_WRITE_ROUTES.length is 43, covering 46 routes (checksum: 40 + 3×2 = 46; PRES-010 added /api/presentations/runs)', () => {
+    expect(BEARER_REQUIRED_WRITE_ROUTES.length).toBe(43);
   });
 
   it('route-list membership: BEARER_REQUIRED_WRITE_ROUTES includes /api/weight-profiles', () => {

@@ -7024,11 +7024,6 @@ export const migrations: Migration[] = [
       console.log('[Migration 142] Creating presentation_verification_receipts...');
       db.exec(`
         CREATE TABLE IF NOT EXISTS presentation_verification_receipts (
-          id TEXT PRIMARY KEY,
-          task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-          company_id TEXT,
-          presentation_id TEXT,
-          run_id TEXT,
           attempt INTEGER NOT NULL DEFAULT 1,
           manifest_revision TEXT,
           receipt_sha256 TEXT NOT NULL,
@@ -7060,6 +7055,47 @@ export const migrations: Migration[] = [
           ON presentation_verification_receipts (task_id, status)
       `);
       console.log('[Migration 142] presentation_verification_receipts ready');
+    },
+  },
+  {
+    // PRES-010 renumber (batch-CC-20260910-201841): HEAD already owns 137
+    // (orchestrator steps/leases). Writer cut before that merge and claimed
+    // 137 for the run-bindings registry. The runner applies in NUMERIC id
+    // order and DATA-03 forbids duplicate ids, so the registry lands here
+    // as the second id-142-adjacent entry; combined order is 141-WF12B,
+    // 141-social, 142-receipts, 142-bindings. Same renumber precedent as
+    // the 138/139/140 ID HISTORY comments above. No behavior change.
+    // Manual rollback if ever required:
+    //   DROP INDEX IF EXISTS idx_presentation_run_bindings_task;
+    //   DROP TABLE IF EXISTS presentation_run_bindings;
+    //   DELETE FROM _migrations WHERE id = '143';
+    id: '143',
+    name: 'add_presentation_run_bindings',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS presentation_run_bindings (
+          id TEXT PRIMARY KEY,
+          task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+          company_id TEXT,
+          presentation_id TEXT,
+          run_id TEXT,
+          run_root TEXT NOT NULL,
+          registered_by TEXT,
+          registered_at TEXT DEFAULT (datetime('now')),
+          updated_at TEXT DEFAULT (datetime('now'))
+        )
+      `);
+      // Unconditional (migration-128 ordering-suite rule: never index inside a
+      // column-absence guard). Newest-registration-wins lookup + history reads.
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_presentation_run_bindings_task
+          ON presentation_run_bindings (task_id, registered_at)
+      `);
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_presentation_run_bindings_run
+          ON presentation_run_bindings (run_id, presentation_id)
+      `);
+      console.log('[Migration 143] presentation_run_bindings ready');
     },
   },
 

@@ -15,7 +15,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { getDb } from '@/lib/db';
-import { existsSync, lstatSync, readdirSync, statSync } from 'fs';
+import { existsSync, lstatSync } from 'fs';
 import { readFileSync } from 'fs';
 import path from 'path';
 import {
@@ -33,7 +33,15 @@ import {
 } from '@/lib/presentation-verification';
 import { resolveActiveCompanyId } from '@/lib/company';
 import { tenantTaskWhere } from '@/lib/presentation-tenant-scope';
-import { resolvePresentationRunRoots } from '@/lib/presentation-run-roots';
+import {
+  resolveRunDirForTask,
+  joinGhlLedger,
+} from '@/lib/presentation-run-bindings';
+
+type RunResolutionShape =
+  | { kind: 'bound'; source: 'deliverable-path' | 'registry'; reason?: never; detail?: never; remediation?: never }
+  | { kind: 'unbound'; source?: undefined; reason: 'no-binding'; detail?: undefined; remediation: string }
+  | { kind: 'unavailable'; source?: undefined; reason: 'stale-root' | 'outside-approved-roots' | 'foreign-marker'; detail?: string; remediation: string };
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -239,7 +247,20 @@ export async function GET(_request: NextRequest, props: { params: Promise<{ task
       `SELECT * FROM task_deliverables WHERE task_id = ? ORDER BY created_at ASC`
     ).all(taskId) as DbDeliverable[];
 
-    // Find run directory for GHL ledger
+    // ── PRES-010: REGISTERED RUN-BINDING resolution (binding-first) ─────────
+    // The run dir is read ONLY through the task's registered binding
+    // (presentation_run_bindings, migration 137):
+    //   1. deliverable-path walk-up stays FIRST for rows that carry a path —
+    //      that path is registered on the task and remains the historical
+    //      resolution for pre-registry runs;
+    //   2. the PROJECTS_PATH artifacts/<taskId> probe stays (same registered
+    //      identity argument);
+    //   3. the first-directory run-root fallback is REMOVED — it chose the
+    //      first directory with a working/ marker across every configured root
+    //      with NO task/run/company test, so task A could surface run B's GHL
+    //      ledger. Without a binding the route answers run_resolution:
+    //      'unbound' with a recovery instruction; it NEVER selects another
+    //      run's directory.
     let runDir: string | null = null;
     for (const del of deliverables) {
       if (del.path) { runDir = findRunDir(expandTilde(del.path)); if (runDir) break; }
@@ -248,31 +269,17 @@ export async function GET(_request: NextRequest, props: { params: Promise<{ task
       const projectsPath = (process.env.PROJECTS_PATH || '~/Documents/Shared/projects').replace(/^~/, process.env.HOME || '');
       runDir = findRunDir(path.join(projectsPath, 'artifacts', taskId));
     }
-    // Run-root-agnostic fallback (2026-08-27): the run may live under any
-    // configured run root (PRESENTATION_RUNS_DIRS, e.g. ~/webinar-decks),
-    // not only beside the artifact/PROJECTS_PATH. Probe each configured root
-    // for a working/ subtree keyed to this task; first hit wins.
+    let runResolution: RunResolutionShape = { kind: 'bound', source: 'deliverable-path' };
     if (!runDir) {
-      for (const root of resolvePresentationRunRoots()) {
-        if (!existsSync(root)) continue; // unreadable/missing root: skip, never a verdict
-        try {
-          const entries = readdirSync(root);
-          for (const entry of entries) {
-            const candidate = path.join(root, entry);
-            try {
-              if (!statSync(candidate).isDirectory()) continue;
-            } catch { continue; }
-            if (
-              existsSync(path.join(candidate, 'working')) ||
-              existsSync(path.join(candidate, 'media_library.json')) ||
-              existsSync(path.join(candidate, 'working', 'checkpoints', 'media_library.json'))
-            ) {
-              runDir = candidate;
-              break;
-            }
-          }
-        } catch { /* unreadable root -- skip */ }
-        if (runDir) break;
+      // Binding-first resolution (walk-up + probe failed): newest binding only.
+      const resolved = resolveRunDirForTask(taskId);
+      if (resolved.kind === 'bound') {
+        runDir = resolved.runDir;
+        runResolution = { kind: 'bound', source: 'registry' };
+      } else if (resolved.kind === 'unbound') {
+        runResolution = { kind: 'unbound', reason: resolved.reason, remediation: resolved.remediation };
+      } else {
+        runResolution = { kind: 'unavailable', reason: resolved.reason, detail: resolved.detail, remediation: resolved.remediation };
       }
     }
 
@@ -301,13 +308,15 @@ export async function GET(_request: NextRequest, props: { params: Promise<{ task
       }
     }
 
-    // Build GHL URL lookup from uploaded[].local_path
+    // Build GHL URL lookup from uploaded[].local_path — joined by artifact
+    // IDENTITY (realpath containment inside the BOUND run dir), never by a
+    // bare basename or an unverified local path alone. A ledger record whose
+    // local_path resolves outside the bound run dir contributes nothing, so a
+    // foreign run's ledger cannot decorate this task's rows.
     const ghlByLocalPath = new Map<string, string>();
-    if (ledger?.uploaded) {
-      for (const rec of ledger.uploaded) {
-        if (rec.local_path && (rec.ghl_url || rec.public_url)) {
-          ghlByLocalPath.set(rec.local_path, rec.ghl_url || rec.public_url || '');
-        }
+    if (ledger?.uploaded && runDir) {
+      for (const [k, url] of joinGhlLedger(runDir, ledger.uploaded)) {
+        ghlByLocalPath.set(k, url);
       }
     }
 
@@ -427,7 +436,7 @@ export async function GET(_request: NextRequest, props: { params: Promise<{ task
       .filter((d) => d.path && !matchedPaths.has(d.path))
       .map((d) => ({ id: d.id, deliverable_type: d.deliverable_type, title: d.title, path: d.path, created_at: d.created_at }));
 
-    return NextResponse.json({ rows, extra: extras, ghl_ledger_present: ghlLedgerPresent });
+    return NextResponse.json({ rows, extra: extras, ghl_ledger_present: ghlLedgerPresent, run_resolution: runResolution });
   } catch (error) {
     console.error('Error fetching presentation deliverables:', error);
     return NextResponse.json({ error: 'Failed to fetch presentation deliverables' }, { status: 500 });
