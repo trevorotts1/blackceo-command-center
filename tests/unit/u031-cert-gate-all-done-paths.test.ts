@@ -12,6 +12,9 @@ import './_isolated-db';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { v4 as uuidv4 } from 'uuid';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { run, getDb } from '../../src/lib/db';
 import { runMigrations } from '../../src/lib/db/migrations';
 import { transition, TransitionError } from '../../src/lib/task-lifecycle';
@@ -145,6 +148,23 @@ function insertTask(opts: {
 }
 
 function insertDeliverable(taskId: string): void {
+  // PRES-022: proof registration requires a verified bundle artifact — seed a
+  // real PK-headered deck file so the registry's recomputed proof can pass.
+  // (The url row stays as the non-bundle evidence-bearing row the original
+  // helper covered.)
+  const deckPath = path.join(
+    fs.mkdtempSync(path.join(os.tmpdir(), 'u031-deck-')),
+    'U031-DECK-FINAL.pptx',
+  );
+  fs.writeFileSync(
+    deckPath,
+    Buffer.concat([Buffer.from('PK\x03\x04', 'binary'), Buffer.alloc(1_100_000, 0x41)]),
+  );
+  run(
+    'INSERT INTO task_deliverables (id, task_id, deliverable_type, title, path, created_at) ' +
+    "VALUES (?, ?, 'file', 'assembled deck', ?, ?)",
+    ['dfile-' + taskId + '-' + uuidv4().slice(0, 8), taskId, deckPath, nowISO()],
+  );
   run(
     'INSERT INTO task_deliverables (id, task_id, deliverable_type, title, path, created_at) ' +
     "VALUES (?, ?, 'url', 'probe', 'https://example.invalid/p', ?)",

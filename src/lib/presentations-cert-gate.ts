@@ -130,26 +130,45 @@ export function evaluatePresentationsCompletionGate(input: {
   storedCert: string | null | undefined;
   providedCert: string | null | undefined;
 }): PresentationsGateResult & { proofGate?: CompletionProofLegResult } {
-  const composed = evaluatePresentationsDoneGate({
-    department: input.department,
-    currentStatus: input.currentStatus,
-    targetStatus: input.targetStatus,
-    storedCert: input.storedCert,
-    providedCert: input.providedCert,
-  });
-  // Identifier leg refused (or not a presentations terminal move) — surface it.
-  if (composed.applies && !composed.ok) return composed;
-  if (!composed.applies) return composed;
+  const deptCanon =
+    canonicalDeptSlug(input.department || '') || (input.department ?? '');
+  const isTerminalMove =
+    PRESENTATIONS_TERMINAL_STATUSES.has((input.targetStatus ?? '').toString()) &&
+    input.currentStatus !== input.targetStatus &&
+    deptCanon === 'presentations';
 
-  // Terminal move on a presentations task with a consistent identifier: now
-  // require the VERIFIED PROOF leg.
-  if (
-    !PRESENTATIONS_TERMINAL_STATUSES.has((input.targetStatus ?? '').toString()) ||
-    input.currentStatus === input.targetStatus
-  ) {
-    return composed;
+  // ── ANTI-SPOOF leg (mismatch only) ────────────────────────────────────────
+  // A presented digest that DIFFERS from the stored one is a re-brand attempt:
+  // refused. Presenting nothing is NOT itself a refusal here anymore — under
+  // the registry the ACTIVE RECEIPT is the proof of record and the stored
+  // identifier is its mirror, so "stored, nothing presented" is the normal
+  // completion shape (the QC scorer, bulk and webhook paths present nothing).
+  const storedNorm = normCert(input.storedCert);
+  const providedNorm = normCert(input.providedCert);
+  if (isTerminalMove && storedNorm && providedNorm && providedNorm !== storedNorm) {
+    return {
+      applies: true,
+      ok: false,
+      code: 'process_certificate_mismatch',
+      error: 'Forbidden: process_certificate_sha does not match the certificate registered for this deck',
+      remediation:
+        `Present the registered process_certificate_sha, or clear the mismatch with the operator. ` +
+        `A presentations card may not re-brand its certificate on a terminal move.`,
+    };
   }
-  const proof = evaluatePresentationsCompletionProofShape({
+  // Rollback mode (registry disabled): the pure legacy contract governs verbatim.
+  if (!proofRegistryEnabled() || !isTerminalMove) {
+    return evaluatePresentationsDoneGate({
+      department: input.department,
+      currentStatus: input.currentStatus,
+      targetStatus: input.targetStatus,
+      storedCert: input.storedCert,
+      providedCert: input.providedCert,
+    });
+  }
+
+  // ── VERIFIED PROOF leg (registry): presence + currency + consistency ──────
+  const proof = evaluatePresentationsCompletionProofLeg({
     department: input.department,
     activeReceipt: getActiveReceipt(input.taskId),
     storedCert: input.storedCert,
@@ -164,7 +183,10 @@ export function evaluatePresentationsCompletionGate(input: {
       proofGate: proof,
     };
   }
-  return { ...composed, proofGate: proof };
+  // Both legs pass. Under the registry the identifier of record is the ACTIVE
+  // receipt's — nothing client-presented is persisted here (the registry
+  // already rotated tasks.process_certificate_sha atomically at registration).
+  return { applies: true, ok: true, persistCert: null, proofGate: proof };
 }
 
 /**

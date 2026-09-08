@@ -231,7 +231,7 @@ test('DONE on a presentations task with NO registered process_certificate_sha is
   assert.match(held.heldForMissingPostflight[0].detail, /process_certificate_sha/);
 });
 
-test('DONE on a presentations task WITH a registered process_certificate_sha sends normally', () => {
+test('DONE on a presentations task WITH a registered process_certificate_sha sends normally', async () => {
   // PRES-022: the notification gate is requiresRegisteredProof now — a stored
   // sha alone is only an identifier, so this test registers a VERIFIED receipt
   // through the registry (engine-trusted qc_review event + recomputed proof)
@@ -242,6 +242,16 @@ test('DONE on a presentations task WITH a registered process_certificate_sha sen
     `INSERT OR IGNORE INTO tasks (id, title, status, department, created_at, updated_at, workspace_id)
      VALUES ('t-cert-present', 'Trust cert task', 'done', 'presentations', ?, ?, ?)`,
     [now, now, ws ? ws.id : null],
+  );
+  // The proof requires a verified bundle artifact (PRES-022) — a URL alone
+  // proves no deck run. Seed a real PK-headered deck file on disk.
+  const fsMod = await import('node:fs');
+  const deckPath = path.join(fsMod.mkdtempSync(path.join(os.tmpdir(), 'te-deck-')), 'TRUST-DECK-FINAL.pptx');
+  fsMod.writeFileSync(deckPath, Buffer.concat([Buffer.from('PK\x03\x04', 'binary'), Buffer.alloc(1_100_000, 0x41)]));
+  db.run(
+    `INSERT OR IGNORE INTO task_deliverables (id, task_id, deliverable_type, title, path, created_at)
+     VALUES ('trust-cert-deliv-deck', 't-cert-present', 'file', 'assembled deck', ?, ?)`,
+    [deckPath, now],
   );
   db.run(
     `INSERT OR IGNORE INTO task_deliverables (id, task_id, deliverable_type, title, path, created_at)

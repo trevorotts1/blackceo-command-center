@@ -226,20 +226,31 @@ export function recomputeDeliverableEvidence(taskId: string): {
     }
     const resolved = resolveTilde(r.path ?? '');
     const verdict = verifyPresentationBundleDeliverable(resolved);
-    const probe = isBundleDeliverablePath(r.path)
-      ? { sha: fileSha256Head(resolved).sha, size: fileSha256Head(resolved).size }
-      : { sha: fileSha256Head(resolved).sha, size: fileSha256Head(resolved).size };
+    const probe = fileSha256Head(resolved);
     return {
       id: r.id,
       title: r.title,
       path: r.path ?? '',
       deliverable_type: r.deliverable_type,
       sha256: probe.sha,
-      verification: verdict.ok ? (verdict.bundleKey ? 'verified' : 'verified') : 'absent',
+      verification: verdict.ok ? 'verified' : 'absent',
       size_bytes: probe.size,
     };
   });
-  const ok = evidence.hasEvidence && hashes.every((h) => h.verification !== 'absent');
+  // PRES-022: the proof requires the EXACT PLANNED DELIVERABLE SET — a bare
+  // URL (a placeholder or a decision pointer) never satisfies a deck run. At
+  // least one bundle-managed artifact must be present and byte-verified;
+  // approved-optional outputs (page/VSL when the client declined) stay
+  // non-blocking exactly as the bundle probe's own semantics already allow.
+  const bundleVerified = hashes.some(
+    (h) => h.deliverable_type !== 'url' && isBundleDeliverablePath(h.path) && h.verification === 'verified',
+  );
+  const ok = evidence.hasEvidence && hashes.every((h) => h.verification !== 'absent') && bundleVerified;
+  if (!bundleVerified) {
+    evidence.problems.push(
+      'no bundle-managed deck artifact (e.g. {slug}-FINAL.pptx/pdf) is registered and verified — a URL alone does not prove a deck run',
+    );
+  }
   return { evidence, hashes, ok };
 }
 
