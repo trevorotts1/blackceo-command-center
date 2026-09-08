@@ -38,11 +38,11 @@
  * the row → 'failed' with the last error (visible, never silently re-looped).
  * Transient dispatch failures get exponential backoff via retry_at.
  *
- * OVERDUE: a stopped consumer cannot run, so no code marks rows overdue.
- * Instead the STATE DERIVATION is read-side: `deriveQueueItemState` computes
- * an actionable 'overdue' for a queued row older than the consumer cadence
- * × grace (default 10 min) — the publish route/UI reads it so a stopped
- * consumer surfaces "overdue", never indefinite "working".
+ * OVERDUE: `deriveQueueItemState` computes an actionable 'overdue' for a
+ * queued row older than the consumer cadence × grace (default 10 min), and
+ * `runSocialPublishOverdueSweep` requeues flagged rows (attempts remaining)
+ * to 'retrying' with retry_at=now so the next tick resumes them — or fails
+ * them visibly when the attempt cap is exhausted. No operator reset needed.
  *
  * LINK-FOLLOW: once a row carries cc_task_id, later ticks read the task's
  * status and mirror terminal outcomes: task done → row 'published' (the
@@ -413,41 +413,90 @@ export async function runSocialPublishDispatcherSweep(): Promise<{
 }
 
 /**
- * Overdue sweep — marks actionable overdue state durably (status 'overdue' +
- * overdue_since) for rows the derivation flags, and notifies the operator
- * ONCE per row (guarded by overdue_since). Read-side derivation stays the
- * source of truth for display; this makes the alert durable + notify-backed.
+ * Overdue sweep — makes overdue state actionable WITHOUT operator resets
+ * (D-F03-01 repair: overdue rows were terminal — status 'overdue' matched no
+ * claim path, so post-restart resume needed a manual UPDATE to queued).
+ *
+ * For each row the read-side derivation flags as overdue:
+ *   - attempts remaining → status back to 'retrying' with retry_at=now so the
+ *     very next dispatcher tick reclaims it (bounded by MAX_ATTEMPTS; the
+ *     lease is cleared so the CAS claim path can take it);
+ *   - attempts exhausted → terminal 'failed' with a visible error (never
+ *     silently re-looped, never silently dropped).
+ * overdue_since stamps the FIRST flag time (operator-alert dedup guard) and
+ * the operator is notified ONCE per row. Read-side derivation stays the
+ * source of truth for display.
  */
-export async function runSocialPublishOverdueSweep(): Promise<{ overdue: number }> {
+export async function runSocialPublishOverdueSweep(): Promise<{ overdue: number; requeued: number; exhausted: number }> {
   const now = new Date();
+  const nowIso = now.toISOString();
   const rows = queryAll<PublishQueueRow>(
-    `SELECT * FROM publish_queue WHERE status IN ('queued','running') ORDER BY created_at ASC LIMIT 100`,
+    `SELECT * FROM publish_queue WHERE status IN ('queued','running','retrying') ORDER BY created_at ASC LIMIT 100`,
   ) as unknown as PublishQueueRow[];
   let overdue = 0;
+  let requeued = 0;
+  let exhausted = 0;
   for (const row of rows) {
-    const derived = deriveQueueItemState({
-      status: row.status,
-      created_at: row.created_at,
-      lease_expires_at: row.lease_expires_at,
-      cc_task_id: row.cc_task_id,
-      retry_at: row.retry_at,
-      now,
-    });
-    if (derived !== 'overdue') continue;
+    let isOverdue =
+      deriveQueueItemState({
+        status: row.status,
+        created_at: row.created_at,
+        lease_expires_at: row.lease_expires_at,
+        cc_task_id: row.cc_task_id,
+        retry_at: row.retry_at,
+        now,
+      }) === 'overdue';
+    if (!isOverdue && row.status === 'retrying') {
+      // A retrying row past its deadline on an old intent means the consumer
+      // is stopped again (the live dispatcher claims these every tick).
+      const ageMs = now.getTime() - new Date(row.created_at).getTime();
+      const deadlinePassed = !row.retry_at || new Date(row.retry_at).getTime() <= now.getTime();
+      isOverdue = deadlinePassed && ageMs > OVERDUE_MINUTES * 60_000;
+    }
+    if (!isOverdue) continue;
+    const firstFlag = !row.overdue_since;
+    const attempts = row.attempt_count ?? 0;
+    if (attempts >= MAX_ATTEMPTS) {
+      const claimed = run(
+        `UPDATE publish_queue SET status = 'failed',
+           error = COALESCE(error, '') || ' [overdue: attempt cap exhausted]',
+           overdue_since = COALESCE(overdue_since, ?), updated_at = ?
+          WHERE id = ? AND status = ?`,
+        [nowIso, nowIso, row.id, row.status],
+      );
+      if (claimed.changes === 1) {
+        overdue++;
+        exhausted++;
+        if (firstFlag) {
+          try {
+            notifySystem(
+              `Skill 35 publish ${row.id} is OVERDUE and out of attempts — marked failed. Topic: "${row.topic}".`,
+              { agent: 'social-publish-dispatcher', action: 'publish_overdue_exhausted' },
+            );
+          } catch { /* best-effort */ }
+        }
+      }
+      continue;
+    }
     const claimed = run(
-      `UPDATE publish_queue SET status = 'overdue', overdue_since = COALESCE(overdue_since, ?), updated_at = ?
+      `UPDATE publish_queue SET status = 'retrying', retry_at = ?,
+         overdue_since = COALESCE(overdue_since, ?),
+         lease_owner = NULL, lease_expires_at = NULL, updated_at = ?
         WHERE id = ? AND status = ?`,
-      [now.toISOString(), now.toISOString(), row.id, row.status],
+      [nowIso, nowIso, nowIso, row.id, row.status],
     );
     if (claimed.changes === 1) {
       overdue++;
-      try {
-        notifySystem(
-          `Skill 35 publish ${row.id} is OVERDUE — the publish consumer is stopped or the dispatch stalled. Topic: "${row.topic}".`,
-          { agent: 'social-publish-dispatcher', action: 'publish_overdue' },
-        );
-      } catch { /* best-effort */ }
+      requeued++;
+      if (firstFlag) {
+        try {
+          notifySystem(
+            `Skill 35 publish ${row.id} is OVERDUE — the publish consumer is stopped or the dispatch stalled. Topic: "${row.topic}". Requeued for automatic resume.`,
+            { agent: 'social-publish-dispatcher', action: 'publish_overdue' },
+          );
+        } catch { /* best-effort */ }
+      }
     }
   }
-  return { overdue };
+  return { overdue, requeued, exhausted };
 }

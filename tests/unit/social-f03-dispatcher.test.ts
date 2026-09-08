@@ -162,7 +162,7 @@ test('[F03.1] one sweep → exactly one canonical task, persisted linkage, no du
 });
 
 // ── Stopped consumer → overdue alert state ──────────────────────────────────
-test('[F03.2] stopped consumer: queued row past grace → derived overdue + durable overdue sweep', async () => {
+test('[F03.2] stopped consumer: queued row past grace → derived overdue + durable overdue sweep requeues it', async () => {
   const { companyA } = ensureWorkspaces();
   const oldDate = new Date(Date.now() - 30 * 60_000).toISOString(); // 30 min old
   const id = enqueueRow({ companyA, createdAt: oldDate });
@@ -172,11 +172,13 @@ test('[F03.2] stopped consumer: queued row past grace → derived overdue + dura
 
   const res = await runSocialPublishOverdueSweep();
   assert.ok(res.overdue >= 1, 'the overdue sweep surfaces at least the stale row');
-  const row = queryOne<{ status: string; overdue_since: string | null }>(
-    'SELECT status, overdue_since FROM publish_queue WHERE id = ?', [id],
+  assert.equal(res.requeued, res.overdue, 'rows with attempts remaining requeue (D-F03-01)');
+  const row = queryOne<{ status: string; overdue_since: string | null; retry_at: string | null }>(
+    'SELECT status, overdue_since, retry_at FROM publish_queue WHERE id = ?', [id],
   );
-  assert.equal(row!.status, 'overdue', 'durable overdue status persisted');
+  assert.equal(row!.status, 'retrying', 'overdue row with attempts left is claimable retrying (D-F03-01)');
   assert.ok(row!.overdue_since, 'overdue_since stamped (operator alert dedup guard)');
+  assert.ok(row!.retry_at, 'retry_at=now so the next dispatcher tick reclaims it');
 
   // A fresh queued row is NOT overdue.
   const freshId = enqueueRow({ companyA });
@@ -186,6 +188,37 @@ test('[F03.2] stopped consumer: queued row past grace → derived overdue + dura
     'queued',
     'fresh row stays queued — only a stopped consumer produces overdue',
   );
+});
+
+// D-F03-01: overdue rows resume automatically — no manual status reset.
+test('[F03.7] overdue row with attempts remaining resumes via the next dispatcher sweep (no manual reset)', async () => {
+  const { companyA } = ensureWorkspaces();
+  const oldDate = new Date(Date.now() - 30 * 60_000).toISOString();
+  const id = enqueueRow({ companyA, createdAt: oldDate });
+
+  const sweep = await runSocialPublishOverdueSweep();
+  assert.ok(sweep.requeued >= 1, 'overdue sweep requeues the stale row');
+  await runSocialPublishDispatcherSweep();
+  const resumed = queryOne<{ cc_task_id: string | null; attempt_count: number }>(
+    'SELECT cc_task_id, attempt_count FROM publish_queue WHERE id = ?', [id],
+  );
+  assert.equal(resumed!.attempt_count, 1, 'resume claimed once');
+  assert.ok(resumed!.cc_task_id, 'resume produced the canonical task with no manual reset');
+});
+
+// D-F03-01: overdue rows past the attempt cap fail visibly, never re-loop.
+test('[F03.8] overdue row at the attempt cap is terminal failed, never requeued', async () => {
+  const { companyA } = ensureWorkspaces();
+  const oldDate = new Date(Date.now() - 30 * 60_000).toISOString();
+  const id = enqueueRow({ companyA, createdAt: oldDate });
+  run(`UPDATE publish_queue SET attempt_count = 5 WHERE id = ?`, [id]); // MAX_ATTEMPTS=5
+  const sweep = await runSocialPublishOverdueSweep();
+  assert.ok(sweep.exhausted >= 1, 'cap-exhausted overdue row counted as exhausted');
+  const row = queryOne<{ status: string; error: string | null }>(
+    'SELECT status, error FROM publish_queue WHERE id = ?', [id],
+  );
+  assert.equal(row!.status, 'failed', 'cap-exhausted overdue row is terminal failed');
+  assert.ok(row!.error && row!.error.length > 0, 'failure carries a visible error');
 });
 
 // ── Crash after enqueue before dispatch → resume once ───────────────────────
@@ -205,19 +238,18 @@ test('[F03.3] crash after enqueue: expired running lease without linkage is recl
     'expired running lease without task linkage is actionable overdue, not indefinite working',
   );
 
-  // Overdue sweep makes it durably visible…
+  // Overdue sweep requeues it to claimable retrying (D-F03-01 — overdue is
+  // no longer a terminal status) and stamps overdue_since for the alert.
   await runSocialPublishOverdueSweep();
   const durabled = queryOne<{ status: string; overdue_since: string | null }>(
     'SELECT status, overdue_since FROM publish_queue WHERE id = ?', [id],
   );
-  assert.equal(durabled!.status, 'overdue', 'crashed row durably overdue');
+  assert.equal(durabled!.status, 'retrying', 'crashed row requeued to claimable retrying');
+  assert.ok(durabled!.overdue_since, 'overdue flag stamped for the operator alert');
 
-  // …and the claim path can resume it exactly once: a queued-state resume via
-  // the dispatcher only claims queued/retrying. Operator-driven recovery (or a
-  // repair hook) resets status → queued; then one sweep dispatches once.
-  run(`UPDATE publish_queue SET status = 'queued', overdue_since = overdue_since, updated_at = ? WHERE id = ?`, [
-    new Date().toISOString(), id,
-  ]);
+  // …and the claim path resumes it automatically: the overdue sweep already
+  // requeued it to retrying (D-F03-01), so the next dispatcher tick claims it
+  // with no manual reset.
   await runSocialPublishDispatcherSweep();
   const resumed = queryOne<{ cc_task_id: string | null; attempt_count: number }>(
     'SELECT cc_task_id, attempt_count FROM publish_queue WHERE id = ?', [id],
