@@ -72,6 +72,7 @@ import path from 'node:path';
 import { run, queryOne, queryAll, getDb } from '../../src/lib/db';
 import { runQCOnReview } from '../../src/lib/qc-scorer';
 import { evaluatePresentationsDoneGate } from '../../src/lib/presentations-cert-gate';
+import { registerVerifiedReceipt } from '../../src/lib/presentation-proof-registry';
 
 const db = getDb(); // applies the full migration chain on the throwaway DB
 
@@ -219,6 +220,17 @@ test('FIX 7 full path: engine parent card reaches done via runQCOnReview with re
   const id = seedDeckParent({ cert: SHA_A });
   const { cleanup } = seedRunDirWithArtifacts(id, 12);
   try {
+    // PRES-022: promotion now requires the VERIFIED proof (active receipt) in
+    // addition to the registered identifier — register one for this revision.
+    // The registry's trusted-QC leg reads the qc_review event trail, so seed
+    // the engine-scorer receipt event the same way the real scorer emits it.
+    run(
+      `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, 'qc_review', ?, ?, ?)`,
+      [`fix7-qc-${Date.now()}`, id, '[QC-AUTO] Score: 10.0/10 PASS — FIX 7 fixture receipt', new Date().toISOString()],
+    );
+    const reg = registerVerifiedReceipt({ taskId: id, attempt: 1 });
+    assert.ok(reg.ok, `receipt registration failed: ${reg.error}`);
+    run('UPDATE tasks SET process_certificate_sha = ? WHERE id = ?', [reg.receipt!.receipt_sha256, id]);
     assert.equal(taskStatus(id), 'review', 'fixture: card starts in review (engine close landed)');
 
     const result = await runQCOnReview(id);

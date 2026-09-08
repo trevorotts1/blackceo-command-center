@@ -99,7 +99,20 @@ afterEach(() => {
  * End-to-end through the REAL gate: register deliverable rows then drive
  * transition(taskId, 'done') on a presentations task whose 64-hex certificate
  * IS registered — so the evidence gate is the only gate under test.
+ *
+ * PRES-022: reaching done additionally requires the ACTIVE VERIFIED receipt,
+ * so the helper registers a fresh receipt (attempt derived from a counter so
+ * each driveDone is its own revision; the engine-trusted qc_review event the
+ * registry reads is seeded once per revision). The refusal branches under
+ * test fire BEFORE the proof leg (PRECONDITION_EVIDENCE outranks it), so a
+ * missing receipt never masks what FIX 28 actually proves.
  */
+let driveAttempt = 0;
+async function seedQcEvent(): Promise<void> {
+  const db = getDb();
+  db.prepare('INSERT INTO events (id, type, task_id, message, created_at) VALUES (?,?,?,?,?)')
+    .run(`fix28-qc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, 'qc_review', taskId, '[QC-AUTO] Score: 9.0/10 PASS — fix28 receipt', new Date().toISOString());
+}
 async function driveDone(paths: Array<{ deliverable_type: string; title: string; path?: string }>): Promise<{ threw: boolean; code?: string; message?: string }> {
   const db = getDb();
   const ins = db.prepare(
@@ -108,6 +121,13 @@ async function driveDone(paths: Array<{ deliverable_type: string; title: string;
   paths.forEach((p, i) => {
     ins.run(`fix28-r-${Date.now()}-${i}`, taskId, p.deliverable_type, p.title, p.path ?? null, new Date().toISOString(), new Date().toISOString());
   });
+  // PRES-022: register the verified proof for THIS revision (only when the
+  // deliverable set can actually pass — the refusal branches are expected to
+  // fail registration, which is itself the evidence gate firing first).
+  driveAttempt += 1;
+  await seedQcEvent();
+  const { registerVerifiedReceipt } = await import('../../src/lib/presentation-proof-registry');
+  await registerVerifiedReceipt({ taskId, attempt: driveAttempt });
   try {
     await transition(taskId, 'done', { actor: 'qc-scorer', expectedFrom: 'review' });
     return { threw: false };
@@ -257,7 +277,12 @@ describe('FIX 28 — PROOF: decoy bundle does NOT reach done even with a registe
   });
 
   it('rollback PRESENTATION_BUNDLE_REVERIFY=0 restores pre-fix behavior verbatim', async () => {
+    // PRES-022 rollback parity: this test pins the FIX 28 rollback flag in
+    // isolation — the completion-PROOF registry has its own rollback
+    // (PRESENTATION_PROOF_REGISTRY=0), so disable it here too, restoring the
+    // exact pre-PRES-022 semantics this test was written to pin.
     process.env.PRESENTATION_BUNDLE_REVERIFY = '0';
+    process.env.PRESENTATION_PROOF_REGISTRY = '0';
     const decoy = path.join(fixtureDir, 'ACME-ROLL-FINAL.pptx');
     fs.writeFileSync(decoy, filler(0x41, 32, Buffer.from('JUNKX'))); // junk, tiny
     const res = await driveDone([

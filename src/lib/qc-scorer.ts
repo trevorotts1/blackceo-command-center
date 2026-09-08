@@ -80,7 +80,7 @@ import { missionControlAuthHeaders } from '@/lib/mc-auth';
 import { notifyOwner, notifySystem, resolveWorkspaceBase } from '@/lib/notify';
 import { notifyOwnerDone } from '@/lib/owner-reports';
 import { transition, TransitionError, type LifecycleState } from '@/lib/task-lifecycle';
-import { requiresRegisteredCertificate } from '@/lib/presentations-cert-gate';
+import { requiresRegisteredCertificate, requiresRegisteredProof } from '@/lib/presentations-cert-gate';
 import { recordBlockEvent } from '@/lib/block-events';
 import { assertNoFixtureEnvInProduction, assertNoFixtureDerivedServerWrite } from '@/lib/fixture-guard';
 import { EVIDENCE_DELIVERABLE_TYPES, isUsableUrl, collectCompletionEvidence, isBundleDeliverablePath, verifyPresentationBundleDeliverable, bundleReverifyEnabled } from '@/lib/completion-evidence';
@@ -5074,8 +5074,12 @@ export async function runEngineOwnedDeckQC(
     return result;
   }
 
-  // ── 5. PASS → registered certificate required, then review→done ────────────
-  const certReg = requiresRegisteredCertificate({
+  // ── 5. PASS → registered certificate + VERIFIED completion proof required, then review→done ──
+  // PRES-022: requiresRegisteredProof composes the legacy registration check
+  // with the verification-receipt registry leg — a stored sha alone no longer
+  // promotes; the ACTIVE, CURRENT receipt must be on record.
+  const certReg = requiresRegisteredProof({
+    taskId,
     department: task.department,
     source: task.source,
     currentStatus: task.status,

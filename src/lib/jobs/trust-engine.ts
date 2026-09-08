@@ -72,7 +72,7 @@ import { BACKLOG_COLUMN_SUBTITLE } from '@/lib/board-labels';
 import { CEO_CHAT_CHANNEL } from '@/lib/ceo-chat/config';
 import { appendTrustMessage } from '@/lib/ceo-chat/store';
 import { broadcast } from '@/lib/events';
-import { requiresRegisteredCertificate } from '@/lib/presentations-cert-gate';
+import { requiresRegisteredCertificate, requiresRegisteredProof } from '@/lib/presentations-cert-gate';
 
 // ── Tunables ──────────────────────────────────────────────────────────────
 /** After ingest, wait up to this long for the triad to advance a task past
@@ -500,7 +500,8 @@ export function planSends(tasks: TrustTaskRow[], ctx: PlanContext): PlannedSend[
       // post-hoc check), so this call asks "would THIS task, department, and
       // cert state be allowed to become done right now" rather than relying
       // on a transition that has, by definition, already happened.
-      const certGate = requiresRegisteredCertificate({
+      const certGate = requiresRegisteredProof({
+        taskId: task.id,
         department: task.department,
         currentStatus: 'review',
         targetStatus: 'done',

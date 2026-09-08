@@ -6986,6 +6986,80 @@ export const migrations: Migration[] = [
         PRIMARY KEY(queue_id,target)
       )`);
       db.exec(`CREATE INDEX IF NOT EXISTS idx_social_verification_retry ON social_publish_verifications(state,retry_at)`);
+      console.log('[Migration 141] social publication verification ownership ready');
+    },
+  },
+  {
+    // PRES-022 renumber (batch-CC-20260910-201841): mainline already owns 136
+    // (publish-queue execution contract), 137 (orchestrator steps), 138
+    // (media assets), 139 (cycle/theme union), 140 (measured outcomes) and
+    // 141 (WF12B idempotency receipts + social publication verification).
+    // The verification-receipts registry therefore lands as 142; rows carry
+    // the full revision axis so history is retained, never overwritten.
+    id: '142',
+    name: 'add_presentation_verification_receipts',
+    up: (db) => {
+      // PRES-022 — the trusted verification-receipt registry behind the
+      // presentations no-skip proof. tasks.process_certificate_sha (migration
+      // 080) stores ONLY an identifier; a SHA-shaped digest could previously be
+      // registered with no verified process provenance behind it, and a
+      // legitimate QC repair could not rotate the digest on the same task
+      // (repair deadlock). This table is the PROOF of record:
+      //
+      //   * one row per (task, company, presentation, run, attempt,
+      //     manifest_revision) — the exact revision axis a retry/repair moves
+      //     through, so history is retained, never overwritten;
+      //   * status 'active' | 'invalidated' — a legitimate retry/revision
+      //     invalidates the prior approval for the affected task while keeping
+      //     the audit row; only the CURRENT owner lease may register proof for
+      //     the active revision;
+      //   * deliverable_hashes / qc_receipts / delivery_evidence carry the
+      //     server-verified artifact set (exact planned deliverable set,
+      //     mode-dependent; QC receipts with reviewer identity + artifact SHAs;
+      //     persisted delivery evidence) — validated at registration time by
+      //     presentation-proof-registry.ts, never trusted from a client body.
+      //
+      // Additive + idempotent (CREATE TABLE IF NOT EXISTS); no existing row or
+      // route is touched by the migration itself.
+      console.log('[Migration 142] Creating presentation_verification_receipts...');
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS presentation_verification_receipts (
+          id TEXT PRIMARY KEY,
+          task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+          company_id TEXT,
+          presentation_id TEXT,
+          run_id TEXT,
+          attempt INTEGER NOT NULL DEFAULT 1,
+          manifest_revision TEXT,
+          receipt_sha256 TEXT NOT NULL,
+          verified_via TEXT NOT NULL DEFAULT 'recomputed',
+          worker_receipt_json TEXT,
+          deliverable_hashes TEXT,
+          qc_receipts TEXT,
+          delivery_evidence TEXT,
+          lease_owner TEXT,
+          status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','invalidated')),
+          invalidated_at TEXT,
+          invalidated_reason TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+      `);
+      // The registry is keyed by the full revision axis: ONE active row per
+      // (task, run, attempt, manifest_revision) — the atomic compare-and-swap
+      // constraint PRES-022 requires (a stale worker re-registering the same
+      // revision is an idempotent no-op on this key; a DIFFERENT proof for the
+      // SAME key cannot silently replace the registered one).
+      db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_pvr_active_revision
+          ON presentation_verification_receipts
+            (task_id, IFNULL(run_id,''), attempt, IFNULL(manifest_revision,''))
+          WHERE status = 'active'
+      `);
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_pvr_task_status
+          ON presentation_verification_receipts (task_id, status)
+      `);
+      console.log('[Migration 142] presentation_verification_receipts ready');
     },
   },
 

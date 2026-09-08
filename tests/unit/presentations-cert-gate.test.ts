@@ -8,6 +8,7 @@
  *   node --import tsx --test tests/unit/presentations-cert-gate.test.ts
  */
 
+import './_isolated-db'; // PRES-022: the gate chain reaches @/lib/db transitively — isolate.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { evaluatePresentationsDoneGate } from '../../src/lib/presentations-cert-gate';

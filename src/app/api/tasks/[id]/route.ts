@@ -26,7 +26,7 @@ import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { collectCompletionEvidence, noEvidenceMessage } from '@/lib/completion-evidence';
 import { notifyOwner } from '@/lib/notify';
 import { notifyOwnerAssigned, notifyOwnerDone } from '@/lib/owner-reports';
-import { evaluatePresentationsDoneGate, PROCESS_CERTIFICATE_SHA_RE } from '@/lib/presentations-cert-gate';
+import { evaluatePresentationsCompletionGate, PROCESS_CERTIFICATE_SHA_RE } from '@/lib/presentations-cert-gate';
 import { transition, TransitionError, type LifecycleState, LEGAL_TRANSITIONS, getArtifactDirLastActivity } from '@/lib/task-lifecycle';
 
 export const dynamic = 'force-dynamic';
@@ -640,8 +640,15 @@ export async function PATCH(
       // U031: transition() now enforces REGISTRATION for every opt-in caller
       // (task-lifecycle.ts checkPreconditions). This block remains the ONLY place a
       // PRESENTED certificate is matched and persisted — do not delete it as a duplicate.
+      //
+      // PRES-022: as of the verification-receipt registry, the presented digest is
+      // also matched against the ACTIVE receipt's identifier and the move to done
+      // additionally requires VERIFIED, CURRENT completion proof
+      // (evaluatePresentationsCompletionGate composes both legs in ONE gate —
+      // the same gate every other status-changing path consumes).
       {
-        const certGate = evaluatePresentationsDoneGate({
+        const certGate = evaluatePresentationsCompletionGate({
+          taskId: id,
           department: (existing as Task).department,
           currentStatus: existing.status,
           targetStatus: validatedData.status,

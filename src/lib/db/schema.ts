@@ -670,6 +670,41 @@ CREATE INDEX IF NOT EXISTS idx_qc_results_task ON task_qc_results(task_id, score
 CREATE INDEX IF NOT EXISTS idx_qc_results_dept ON task_qc_results(department_slug, scored_at DESC);
 CREATE INDEX IF NOT EXISTS idx_qc_results_workspace ON task_qc_results(workspace_id, scored_at DESC);
 
+-- Presentation verification-receipt registry (PRES-022 — migration 136 also
+-- creates this for existing DBs). The trusted PROOF of record behind the
+-- presentations no-skip completion gate: one row per exact
+-- (task, company, presentation, run, attempt, manifest_revision); status
+-- active|invalidated so a legitimate retry/repair invalidates the prior
+-- approval while retaining audit history. Validated/registered only through
+-- src/lib/presentation-proof-registry.ts — never trusted from a client body.
+-- SAFE to declare here AND in migration 136 — CREATE TABLE IF NOT EXISTS is idempotent.
+CREATE TABLE IF NOT EXISTS presentation_verification_receipts (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  company_id TEXT,
+  presentation_id TEXT,
+  run_id TEXT,
+  attempt INTEGER NOT NULL DEFAULT 1,
+  manifest_revision TEXT,
+  receipt_sha256 TEXT NOT NULL,
+  verified_via TEXT NOT NULL DEFAULT 'recomputed',
+  worker_receipt_json TEXT,
+  deliverable_hashes TEXT,
+  qc_receipts TEXT,
+  delivery_evidence TEXT,
+  lease_owner TEXT,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','invalidated')),
+  invalidated_at TEXT,
+  invalidated_reason TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pvr_active_revision
+  ON presentation_verification_receipts
+    (task_id, IFNULL(run_id,''), attempt, IFNULL(manifest_revision,''))
+  WHERE status = 'active';
+CREATE INDEX IF NOT EXISTS idx_pvr_task_status
+  ON presentation_verification_receipts (task_id, status);
+
 -- LSS Control Reviews table (PRD 2.14 — migration 069 also creates this for existing DBs)
 -- Persists monthly Lean Six Sigma control-review artifacts: company score/grade,
 -- defect/rework/waste summary, per-dept breakdown, and narrative markdown.

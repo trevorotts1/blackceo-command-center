@@ -28,7 +28,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { collectCompletionEvidence, noEvidenceMessage } from '@/lib/completion-evidence';
 import { queryOne, run } from '@/lib/db';
 import { broadcast } from '@/lib/events';
-import { evaluatePresentationsDoneGate } from '@/lib/presentations-cert-gate';
+import { evaluatePresentationsCompletionGate } from '@/lib/presentations-cert-gate';
 import { checkTriad } from '@/lib/sops';
 import { recordStatusEvent } from '@/lib/task-lifecycle';
 import type { Task, TaskStatus } from '@/lib/types';
@@ -133,8 +133,13 @@ export async function POST(request: NextRequest) {
             //    decision PATCH uses). Bulk move carries no presented cert, so the
             //    only legal path is stored-or-absent-department; without this check
             //    bulk move bypasses the cert gate entirely (F01).
+            //
+            //    PRES-022: the composed gate ALSO requires VERIFIED, CURRENT
+            //    completion proof (the active verification receipt) — bulk move
+            //    consumes the ONE gate every other status-changing path uses.
             if (targetStatus === 'done') {
-              const certGate = evaluatePresentationsDoneGate({
+              const certGate = evaluatePresentationsCompletionGate({
+                taskId,
                 department: existing.department,
                 currentStatus: existing.status,
                 targetStatus,
