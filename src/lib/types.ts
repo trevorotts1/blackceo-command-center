@@ -779,6 +779,11 @@ export type SSEEventType =
   | 'execution_queue_updated'
   | 'recommendation_outcome_recorded'
   | 'publish_queued'
+  // F01-D3 — per-company publish scope: the publish route broadcasts
+  // `publish_queued:<company_id>` so a client subscribing only to its own
+  // company's type never sees another tenant's queue payloads. The shared SSE
+  // fan-out infra is untouched; filtering happens by subscription.
+  | `publish_queued:${string}`
   | 'bug_updated'
   | 'bug_created'
   // U60/JM-U63c — My AI CEO Operations Rail: a trust-engine report-back
@@ -812,10 +817,15 @@ export interface SSEEvent {
   } | PublishQueueItem;
 }
 
-// Skill 35 publish-queue row (mirrors the publish_queue table from migration 022)
+// Skill 35 publish-queue row (mirrors the publish_queue table from migration 022;
+// company_id + sheet_id added by migration 135 — F01 tenant binding, 'default'
+// for legacy company rows; sheet_id null unless the request carried an
+// enforced registry sheet)
 export interface PublishQueueItem {
   id: string;
   task_id: string | null;
+  company_id: string;
+  sheet_id: string | null;
   topic: string;
   platforms: string[];                 // decoded from the stored JSON string
   schedule: 'auto' | 'now' | string;   // ISO 8601 also allowed

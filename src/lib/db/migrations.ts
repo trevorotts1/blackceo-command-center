@@ -6304,6 +6304,38 @@ export const migrations: Migration[] = [
     },
   },
 
+  {
+    // F01 (social/wf01-identity) — bind every Skill 35 publish request to its
+    // client. The queue previously carried no company binding, so the publish
+    // route could not scope GET/POST by tenant and a substituted task or sheet
+    // ID could cross companies. Existing rows predate the binding; they are
+    // stamped 'default' (the pre-existing single-tenant company) so the
+    // company-scoped queries keep returning them after the ALTER.
+    // F01-D1 repair (same new migration, additive only): also persist
+    // publish_queue.sheet_id so the enforced sheet-ownership check leaves a
+    // registry-resolvable binding on the row for downstream.
+    id: '135',
+    name: 'add_publish_queue_company_id',
+    up: (db) => {
+      console.log('[Migration 135] Adding company_id to publish_queue (F01)...');
+      const info = db.prepare('PRAGMA table_info(publish_queue)').all() as { name: string }[];
+      if (info.some((col) => col.name === 'company_id')) {
+        console.log('[Migration 135] publish_queue.company_id already present — no-op');
+      } else {
+        db.exec(`ALTER TABLE publish_queue ADD COLUMN company_id TEXT DEFAULT 'default'`);
+        console.log('[Migration 135] Added publish_queue.company_id');
+      }
+      if (info.some((col) => col.name === 'sheet_id')) {
+        console.log('[Migration 135] publish_queue.sheet_id already present — no-op');
+      } else {
+        db.exec(`ALTER TABLE publish_queue ADD COLUMN sheet_id TEXT`);
+        console.log('[Migration 135] Added publish_queue.sheet_id (F01-D1 repair)');
+      }
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_publish_queue_company ON publish_queue(company_id)`);
+      console.log('[Migration 135] publish_queue company binding ready');
+    },
+  },
+
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner
