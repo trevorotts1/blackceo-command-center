@@ -528,23 +528,25 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
     // HMAC over WEBHOOK_SECRET), even from a same-origin caller — so a forged
     // same-origin Origin/Referer can never reach them without auth.
     //
-    // U052: RESIDUAL (measured 2026-07-26). Origin/Referer are client-settable,
-    // so a non-browser caller reaching the origin directly can forge a same-origin
-    // header to reach ANY /api/* route not in isWebhookSecretRoute — 99 mutating
-    // routes plus every read route. The 38 routes in BEARER_REQUIRED_WRITE_ROUTES
-    // (routes the interface never calls) are now gated below; the 61 routes the
-    // interface DOES call cannot be closed here and are documented in
-    // docs/SECURITY-RESIDUALS.md. An operator who fronts the box with Cloudflare
-    // Access (REQUIRE_CF_ACCESS=true) closes even this residual at the edge for
+    // U052: RESIDUAL (measured 2026-07-26; counts re-derived 2026-09-08: 114
+    // mutating routes, 6 webhook-protected, 108 non-webhook). Origin/Referer are
+    // client-settable, so a non-browser caller reaching the origin directly can
+    // forge a same-origin header to reach ANY /api/* route not in
+    // isWebhookSecretRoute — 108 mutating routes plus every read route. The 42
+    // routes in BEARER_REQUIRED_WRITE_ROUTES (39 patterns; routes the interface
+    // never calls) are now gated below; the 66 routes the interface DOES call
+    // cannot be closed here and are documented in docs/SECURITY-RESIDUALS.md.
+    // An operator who fronts the box with Cloudflare Access
+    // (REQUIRE_CF_ACCESS=true) closes even this residual at the edge for
     // every route.
     //
     // U052: the passthrough trusts client-settable Origin/Referer (see
     // isSameOriginRequest). A forged header therefore reaches any /api/* route not
-    // in isWebhookSecretRoute — 99 mutating routes, measured 2026-07-26. Routes
-    // the interface itself never calls have no legitimate tokenless caller, so
-    // they fall through to the bearer check below instead of being waved past.
-    // The 61 routes the interface DOES call cannot be closed here; see
-    // docs/SECURITY-RESIDUALS.md.
+    // in isWebhookSecretRoute — 108 mutating routes (measured 2026-07-26, counts
+    // re-derived 2026-09-08). Routes the interface itself never calls have no
+    // legitimate tokenless caller, so they fall through to the bearer check below
+    // instead of being waved past. The 66 routes the interface DOES call cannot
+    // be closed here; see docs/SECURITY-RESIDUALS.md.
     //
     // MR-23: ALL mutating same-origin API calls now require a signed CSRF cookie
     // (mc_csrf_token, httpOnly + SameSite=Strict). Read-only methods (GET/HEAD/
