@@ -6367,6 +6367,40 @@ export const migrations: Migration[] = [
     },
   },
 
+  {
+    // F38 (social/wf08-media-player) — company-bound social media asset
+    // registry. Every planner video/preview asset gets a row here so the
+    // player route can resolve the asset THROUGH the caller's company identity
+    // (never from a bare, guessable asset id alone): a substituted B-company
+    // assetId must not serve A any bytes. `kind` distinguishes video posters
+    // from image previews; `content_revision` pins which plan revision the
+    // player serves (QC-F38: the player plays the CORRECT revision).
+    id: '136',
+    name: 'social_media_assets',
+    up: (db) => {
+      console.log('[Migration 136] Creating social_media_assets (F38)...');
+      db.exec(`CREATE TABLE IF NOT EXISTS social_media_assets (
+        id TEXT PRIMARY KEY,
+        company_id TEXT NOT NULL,
+        cycle_id TEXT,
+        content_revision TEXT,
+        kind TEXT NOT NULL DEFAULT 'video',
+        preview_url TEXT,
+        original_url TEXT,
+        poster_url TEXT,
+        duration_seconds REAL,
+        ratio TEXT,
+        qc_state TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+      )`);
+      db.exec(
+        `CREATE INDEX IF NOT EXISTS idx_social_media_assets_company
+           ON social_media_assets(company_id)`,
+      );
+      console.log('[Migration 136] social_media_assets ready');
+    },
+  },
+
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner
