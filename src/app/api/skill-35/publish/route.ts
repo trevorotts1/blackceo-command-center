@@ -2,6 +2,11 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getDb } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import type { PublishQueueItem } from '@/lib/types';
+import {
+  resolvePublishCompany,
+  assertTaskOwnedByCompany,
+  assertPlannerSheetOwnedByCompany,
+} from '@/lib/social/company-context';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -19,6 +24,8 @@ interface PublishRequestBody {
   platforms: string[];
   schedule?: string;
   requested_by?: string;
+  /** Registered planner spreadsheet this intent writes to (sheet_registry contract). */
+  sheet_id?: string;
 }
 
 function rowToItem(row: Record<string, unknown>): PublishQueueItem {
@@ -35,6 +42,8 @@ function rowToItem(row: Record<string, unknown>): PublishQueueItem {
   return {
     id: String(row.id),
     task_id: row.task_id ? String(row.task_id) : null,
+    company_id: row.company_id ? String(row.company_id) : 'default',
+    sheet_id: row.sheet_id ? String(row.sheet_id) : null,
     topic: String(row.topic ?? ''),
     platforms,
     schedule: (row.schedule as string) || 'auto',
@@ -59,14 +68,30 @@ function rowToItem(row: Record<string, unknown>): PublishQueueItem {
  *     platforms: string[],      // required — passed to --platforms (CSV)
  *     schedule?: string,        // 'auto' (default) | 'now' | ISO 8601
  *     requested_by?: string,    // audit field (agent id, user id, etc.)
+ *     sheet_id?: string,        // optional registered planner spreadsheet
  *   }
  *
- * Inserts a row into publish_queue, broadcasts a `publish_queued` SSE
- * event, and returns the queued item. A downstream worker / the OpenClaw
- * master orchestrator picks up `status = 'queued'` rows and invokes
- * 35-social-media-planner/scripts/run-publishing-cycle.sh.
+ * F01 company binding: the caller's company identity is resolved from the
+ * authenticated request context (bearer MC_API_TOKEN / signed tenant session
+ * / CF Access JWT) and every referenced resource is verified to belong to
+ * that company BEFORE anything is enqueued:
+ *   - task_id, when provided, must resolve (through its workspace) to this
+ *     company; a foreign/absent task_id answers 404 with zero writes,
+ *   - sheet_id, when provided, must be registered in this company's
+ *     social_sheet_registry; a foreign/unregistered sheet_id answers 404 with
+ *     zero writes, and the enforced sheet_id is persisted on the queue row,
+ *   - the queue row is stamped company_id and every read is company-scoped.
+ * A substituted B-company task or sheet identifier answers 404 with zero B
+ * writes. Tasks resolving to the 'default' company are not ownable by a
+ * verified non-default company (F01-D2).
  */
 export async function POST(request: NextRequest) {
+  const identity = await resolvePublishCompany(request);
+  if (!identity.ok) {
+    return NextResponse.json({ error: identity.error }, { status: identity.status });
+  }
+  const { companyId } = identity.company;
+
   let body: PublishRequestBody;
   try {
     body = (await request.json()) as PublishRequestBody;
@@ -105,8 +130,27 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'platforms produced an empty list after normalization' }, { status: 400 });
   }
 
-  const schedule = (body.schedule || 'auto').trim() || 'auto';
+  // F01 — task ownership: a task_id that is foreign or absent is rejected
+  // with 404 (indistinguishable, so existence is not an oracle) and nothing
+  // is written.
   const taskId = body.task_id || null;
+  const taskOwnership = assertTaskOwnedByCompany(taskId, companyId);
+  if (!taskOwnership.owned) {
+    return NextResponse.json({ error: 'task not found' }, { status: 404 });
+  }
+
+  // F01-D1 — sheet registration is ENFORCED: a sheet_id provided but not
+  // registered to THIS company answers 404 with zero writes (indistinguishable
+  // from a foreign task, so existence is not an oracle). Resolved from the
+  // company registry, not caller trust; the enforced sheet_id is persisted on
+  // the queue row so downstream resolves it from the registry.
+  const sheetId = body.sheet_id || null;
+  const sheetOwnership = assertPlannerSheetOwnedByCompany(sheetId, companyId);
+  if (sheetId && !sheetOwnership.sheet) {
+    return NextResponse.json({ error: 'sheet not found' }, { status: 404 });
+  }
+
+  const schedule = (body.schedule || 'auto').trim() || 'auto';
   const requestedBy = body.requested_by || null;
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
@@ -114,27 +158,48 @@ export async function POST(request: NextRequest) {
   const db = getDb();
   db.prepare(
     `INSERT INTO publish_queue
-      (id, task_id, topic, platforms, schedule, status, requested_by, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?)`,
-  ).run(id, taskId, topic, JSON.stringify(platforms), schedule, requestedBy, now, now);
+      (id, task_id, company_id, sheet_id, topic, platforms, schedule, status, requested_by, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)`,
+  ).run(id, taskId, companyId, sheetId, topic, JSON.stringify(platforms), schedule, requestedBy, now, now);
 
-  const row = db.prepare('SELECT * FROM publish_queue WHERE id = ?').get(id) as Record<string, unknown>;
+  const row = db.prepare('SELECT * FROM publish_queue WHERE id = ? AND company_id = ?')
+    .get(id, companyId) as Record<string, unknown>;
   const item = rowToItem(row);
 
-  broadcast({ type: 'publish_queued', payload: item });
+  // F01-D3 — per-company event scope: the tenant id rides on the event TYPE
+  // (publish_queued:<company_id>) so a client that only subscribes to its own
+  // company's type never sees another tenant's queue payloads. The shared SSE
+  // fan-out (src/lib/events.ts broadcast + the events stream route) is owned
+  // outside WF01 and is deliberately untouched; filtering happens by
+  // subscription, not by touching shared infra. Payload keeps company_id for
+  // belt-and-braces client-side checks.
+  broadcast({ type: `publish_queued:${companyId}`, payload: item });
 
-  return NextResponse.json({ publish: item }, { status: 201 });
+  return NextResponse.json({
+    publish: item,
+    sheet: sheetOwnership.sheet
+      ? { sheet_id: sheetOwnership.sheet.sheet_id, sharing: sheetOwnership.sheet.sharing }
+      : null,
+  }, { status: 201 });
 }
 
 /**
  * GET /api/skill-35/publish
  *
- * List queued publish intents. Optional filters:
- *   - ?task_id=<id>
+ * List queued publish intents FOR THE CALLER'S COMPANY (F01 — the list route
+ * is company-scoped; rows enqueued before migration 135 carry 'default').
+ * Optional filters:
+ *   - ?task_id=<id>   (must also be owned by this company)
  *   - ?status=queued|running|done|failed|cancelled
  *   - ?limit=<n>   (default 50, max 200)
  */
 export async function GET(request: NextRequest) {
+  const identity = await resolvePublishCompany(request);
+  if (!identity.ok) {
+    return NextResponse.json({ error: identity.error }, { status: identity.status });
+  }
+  const { companyId } = identity.company;
+
   const db = getDb();
   const { searchParams } = new URL(request.url);
   const taskId = searchParams.get('task_id');
@@ -143,8 +208,16 @@ export async function GET(request: NextRequest) {
   if (!Number.isFinite(limit) || limit <= 0) limit = 50;
   if (limit > 200) limit = 200;
 
-  const clauses: string[] = [];
-  const params: unknown[] = [];
+  // F01 — a substituted foreign task_id answers 404 before any row leaks.
+  if (taskId) {
+    const taskOwnership = assertTaskOwnedByCompany(taskId, companyId);
+    if (!taskOwnership.owned) {
+      return NextResponse.json({ error: 'task not found' }, { status: 404 });
+    }
+  }
+
+  const clauses: string[] = ['company_id = ?'];
+  const params: unknown[] = [companyId];
   if (taskId) {
     clauses.push('task_id = ?');
     params.push(taskId);
@@ -153,7 +226,7 @@ export async function GET(request: NextRequest) {
     clauses.push('status = ?');
     params.push(status);
   }
-  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+  const where = `WHERE ${clauses.join(' AND ')}`;
   const rows = db
     .prepare(`SELECT * FROM publish_queue ${where} ORDER BY created_at DESC LIMIT ?`)
     .all(...params, limit) as Record<string, unknown>[];

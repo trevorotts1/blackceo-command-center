@@ -316,19 +316,70 @@ export function inventoryServesModality(
  * active capable model on the box degrades to `text` (a text model attempts it)
  * instead of leaving the task undispatchable. Returns the effective modality plus
  * whether a downgrade occurred (the caller logs a `modality_downgraded` event).
+ *
+ * F37 — STRICT CAPABILITY REQUIREMENT: a task that must SEE an asset (visual QC
+ * of a generated image) can never degrade to a text attempt. When
+ * `strictCapability` is true and the modality has no capable model, the caller
+ * receives `downgraded: false` with the modality intact — and MUST treat the
+ * task as undispatchable-pending (queue it visibly), never dispatch it to a
+ * text model. `strictCapability` comes from task metadata
+ * (`metadata.requiresVision === true` for taskType `visual-qc`) and wins over
+ * the P1-01 leniency.
  */
 export function applyModalityDowngrade(
   modality: TaskModality,
   inventory: ModelRegistryEntry[],
-): { modality: TaskModality; downgraded: boolean } {
+  strictCapability = false,
+): { modality: TaskModality; downgraded: boolean; blocked: boolean } {
   if (
     modality !== 'text' &&
     DOWNGRADABLE_MODALITIES.has(modality) &&
     !inventoryServesModality(modality, inventory)
   ) {
-    return { modality: 'text', downgraded: true };
+    // F37: strict requirement — no downgrade is permitted.
+    if (strictCapability) {
+      return { modality, downgraded: false, blocked: true };
+    }
+    return { modality: 'text', downgraded: true, blocked: false };
   }
-  return { modality, downgraded: false };
+  return { modality, downgraded: false, blocked: false };
+}
+
+/**
+ * F31 — provider-verified FULL slug acceptance.
+ *
+ * Full provider-qualified model ids (suffix variants included: `-flash`,
+ * `-pro`, `-preview`, `:cloud`, …) that a provider has VERIFIED as exposed are
+ * accepted directly — selection never relies on version number alone. The
+ * set mirrors the Python side (`shared-utils/model-capabilities.json` ::
+ * `verified_slugs`; kept in parity — a new model slug is added to the
+ * inventory in BOTH repos, never to selector code). Callers may pass a
+ * superseding verified-slug set (e.g. loaded from a refreshed inventory).
+ */
+const VERIFIED_FULL_SLUGS_BASE: ReadonlySet<string> = new Set<string>([
+  'openrouter/z-ai/glm-5.3-flash',
+  'openrouter/z-ai/glm-5.3',
+  'openrouter/z-ai/glm-4.6',
+  'openrouter/z-ai/glm-4.6-flash',
+  'openrouter/deepseek/deepseek-v4-pro',
+  'openrouter/deepseek/deepseek-v4-flash',
+  'ollama/deepseek-v4-pro:cloud',
+  'ollama/kimi-k2.6:cloud',
+  'deepseek/deepseek-v4-pro',
+  'deepseek/deepseek-v4-flash',
+]);
+
+export function isProviderVerifiedSlug(
+  modelId: string,
+  verified?: ReadonlySet<string>,
+): boolean {
+  const set = verified ?? VERIFIED_FULL_SLUGS_BASE;
+  return set.has(modelId.trim().toLowerCase());
+}
+
+/** The built-in verified-slug inventory (for callers that need to union it). */
+export function baseVerifiedSlugs(): ReadonlySet<string> {
+  return VERIFIED_FULL_SLUGS_BASE;
 }
 
 // ─── Version tie-break ───────────────────────────────────────────────────────
@@ -428,7 +479,7 @@ export function canServeTextTask(entry: ModelRegistryEntry): boolean {
 export interface TaskModelSelection {
   model_id: string | typeof NEEDS_OWNER_INPUT;
   tier: ModelTier | null;
-  modelSource: 'task_selector';
+  modelSource: 'task_selector' | 'approved_capable_fallback';
   required_modality: TaskModality;
   difficulty: PurposeTier;
   candidates_considered: number;
@@ -439,6 +490,15 @@ export interface TaskModelSelection {
    * could still dispatch. `required_modality` already reflects the degraded value.
    */
   modality_downgraded: boolean;
+  /**
+   * F37 receipt fields: the modality the task actually requires, whether a
+   * STRICT capability requirement was honored (no text downgrade), whether the
+   * selection was blocked by that requirement (undispatchable — queue visibly),
+   * and the hash of the actual asset input the reviewer will see.
+   */
+  strict_capability: boolean;
+  capability_blocked: boolean;
+  asset_input_hash: string | null;
 }
 
 export interface SelectTaskModelInput {
@@ -449,19 +509,59 @@ export interface SelectTaskModelInput {
   required_modality?: TaskModality;
   /** Available models from model_registry (status='active', provider available). */
   inventory: ModelRegistryEntry[];
+  /**
+   * F37 — strict capability requirement. Set from task metadata
+   * (`metadata.requiresVision === true` for taskType `visual-qc`). When true,
+   * the vision→text P1-01 downgrade NEVER applies: with no capable model the
+   * task is undispatchable and must be queued visibly, never sent to a text
+   * model. Only a policy-approved capable vision fallback may serve it.
+   */
+  strict_capability?: boolean;
+  /**
+   * F37 — hash of the actual asset input (the generated image bytes/url the
+   * reviewer will inspect). Recorded on the selection result for the review
+   * receipt so the certificate proves the reviewer SAW this asset.
+   */
+  asset_input_hash?: string | null;
 }
 
 export function selectTaskModel(input: SelectTaskModelInput): TaskModelSelection {
   const difficulty = classifyDifficulty(input.title, input.description);
   const detected = input.required_modality ?? detectModality(input.title, input.description);
+  const strict = input.strict_capability === true;
 
   // P1-01 SAFETY NET: a would-be vision task on a box with no active vision model
-  // degrades to a text attempt rather than becoming undispatchable. required_modality
-  // below reflects the effective (possibly degraded) modality; modality_downgraded is
+  // degrades to a text attempt rather than becoming undispatchable — UNLESS the
+  // task carries a STRICT capability requirement (F37: visual QC of a generated
+  // image). Under strictCapability the downgrade NEVER fires; with no capable
+  // model the task is undispatchable and must be queued visibly. required_modality
+  // reflects the effective (possibly degraded) modality; modality_downgraded is
   // threaded to the caller so it can log a `modality_downgraded` event.
-  const downgrade = applyModalityDowngrade(detected, input.inventory);
+  const downgrade = applyModalityDowngrade(detected, input.inventory, strict);
   const required_modality = downgrade.modality;
   const modality_downgraded = downgrade.downgraded;
+  const capability_blocked = downgrade.blocked === true;
+  const asset_input_hash = input.asset_input_hash ?? null;
+
+  // F37: a strict requirement with no capable model returns no-selection
+  // (undispatchable) — the caller queues the task VISIBLY with a repair action.
+  // It never dispatches to a text model. The modality + asset hash are still
+  // recorded so the pending review receipt says exactly what is waiting.
+  if (capability_blocked) {
+    return {
+      model_id: NEEDS_OWNER_INPUT,
+      tier: null,
+      modelSource: 'task_selector',
+      required_modality,
+      difficulty,
+      candidates_considered: 0,
+      needs_owner_input: true,
+      modality_downgraded: false,
+      strict_capability: true,
+      capability_blocked: true,
+      asset_input_hash,
+    };
+  }
 
   // Step B: hard-filter by modality. text tasks accept any model.
   const modalityCapability = required_modality as ModelCapability;
@@ -486,6 +586,9 @@ export function selectTaskModel(input: SelectTaskModelInput): TaskModelSelection
       candidates_considered: input.inventory.length,
       needs_owner_input: true,
       modality_downgraded,
+      strict_capability: strict,
+      capability_blocked: false,
+      asset_input_hash,
     };
   }
 
@@ -501,12 +604,12 @@ export function selectTaskModel(input: SelectTaskModelInput): TaskModelSelection
       if (freeOnly.length === 0) continue;
       const best = pickBest(freeOnly, difficulty, required_modality, input.department);
       if (best) {
-        return { model_id: best.model_id, tier, modelSource: 'task_selector', required_modality, difficulty, candidates_considered, needs_owner_input: false, modality_downgraded };
+        return { model_id: best.model_id, tier, modelSource: 'task_selector', required_modality, difficulty, candidates_considered, needs_owner_input: false, modality_downgraded, strict_capability: strict, capability_blocked: false, asset_input_hash };
       }
     } else {
       const best = pickBest(inTier, difficulty, required_modality, input.department);
       if (best) {
-        return { model_id: best.model_id, tier, modelSource: 'task_selector', required_modality, difficulty, candidates_considered, needs_owner_input: false, modality_downgraded };
+        return { model_id: best.model_id, tier, modelSource: 'task_selector', required_modality, difficulty, candidates_considered, needs_owner_input: false, modality_downgraded, strict_capability: strict, capability_blocked: false, asset_input_hash };
       }
     }
   }
@@ -520,7 +623,43 @@ export function selectTaskModel(input: SelectTaskModelInput): TaskModelSelection
     candidates_considered,
     needs_owner_input: true,
     modality_downgraded,
+    strict_capability: strict,
+    capability_blocked: false,
+    asset_input_hash,
   };
+}
+
+/**
+ * F37 — approved capable fallback path. A strict visual-QC task whose primary
+ * selection is blocked may be served ONLY by a POLICY-approved capable vision
+ * fallback (never a text model, never an unapproved substitution).
+ *
+ * `approvedFallbacks` is the policy's permitted list (ordered — the first
+ * capable entry wins, mirroring the Python `social_model_policy.py` fallback
+ * order). Returns null when no approved fallback can serve the required
+ * modality: the task stays undispatchable-pending.
+ */
+export function selectApprovedCapableFallback(
+  required_modality: TaskModality,
+  approvedFallbacks: string[],
+  inventory: ModelRegistryEntry[],
+  capability: 'vision' = 'vision',
+): string | null {
+  const modalityCapability = capability as ModelCapability;
+  for (const fb of approvedFallbacks) {
+    const entry = inventory.find(
+      (m) => m.model_id.toLowerCase() === fb.trim().toLowerCase(),
+    );
+    if (!entry) continue;
+    if (isForbidden(entry.model_id)) continue;
+    if (!entry.capabilities.includes(modalityCapability)) continue;
+    if (capability === 'vision' && !inventoryServesModality('vision', inventory)) {
+      // The fallback declares vision but the inventory check failed — skip.
+      continue;
+    }
+    return entry.model_id;
+  }
+  return null;
 }
 
 function pickBest(
