@@ -245,8 +245,10 @@ export function recomputeDeliverableEvidence(taskId: string): {
   const bundleVerified = hashes.some(
     (h) => h.deliverable_type !== 'url' && isBundleDeliverablePath(h.path) && h.verification === 'verified',
   );
-  const ok = evidence.hasEvidence && hashes.every((h) => h.verification !== 'absent') && bundleVerified;
-  if (!bundleVerified) {
+  const ok = evidence.hasEvidence
+    && hashes.every((h) => h.verification !== 'absent')
+    && (bundleVerified || !bundleStrict());
+  if (!bundleVerified && bundleStrict()) {
     evidence.problems.push(
       'no bundle-managed deck artifact (e.g. {slug}-FINAL.pptx/pdf) is registered and verified — a URL alone does not prove a deck run',
     );
@@ -622,6 +624,17 @@ function leaseSuperseded(_prior: string, _current: string): boolean {
 
 function allowQcPending(): boolean {
   return process.env.PRESENTATION_PROOF_QC_PENDING === '1';
+}
+
+/**
+ * PRESENTATION_PROOF_BUNDLE_STRICT=0 relaxes the bundle-artifact requirement
+ * to the completion-evidence contract alone (non-deck work — documents,
+ * operations tasks that merely LIVE under the presentations dept — keeps the
+ * old evidence rules; FIX 28's non-overreach contract). Default ON: a deck
+ * run's completion proof requires a verified bundle-managed artifact.
+ */
+function bundleStrict(): boolean {
+  return process.env.PRESENTATION_PROOF_BUNDLE_STRICT !== '0';
 }
 
 // ---------------------------------------------------------------------------

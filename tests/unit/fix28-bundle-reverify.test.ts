@@ -88,10 +88,20 @@ beforeEach(() => {
   const db = getDb();
   db.prepare('DELETE FROM task_deliverables WHERE task_id = ?').run(taskId);
   db.prepare("UPDATE tasks SET status = 'review', process_certificate_sha = ? WHERE id = ?").run(CERT, taskId);
+  // PRES-022: the registry's active receipt (from a prior driveDone) carries
+  // the receipt-rotated identifier; reset it too so every test starts from
+  // one coherent identifier/receipt pair — and stale receipts are
+  // invalidated so a new revision's registration is the only active proof.
+  db.prepare(
+    "UPDATE presentation_verification_receipts SET status = 'invalidated', invalidated_at = ?, invalidated_reason = 'fixture reset' WHERE task_id = ? AND status = 'active'",
+  ).run(new Date().toISOString(), taskId);
+  db.prepare('DELETE FROM events WHERE task_id = ? AND type = ?').run(taskId, 'qc_review');
 });
 
 afterEach(() => {
   delete process.env.PRESENTATION_BUNDLE_REVERIFY;
+  delete process.env.PRESENTATION_PROOF_REGISTRY;
+  delete process.env.PRESENTATION_PROOF_BUNDLE_STRICT;
   try { fs.rmSync(path.join(fixtureDir, 'linked-FINAL.pptx'), { force: true }); } catch { /* ok */ }
 });
 
@@ -127,7 +137,13 @@ async function driveDone(paths: Array<{ deliverable_type: string; title: string;
   driveAttempt += 1;
   await seedQcEvent();
   const { registerVerifiedReceipt } = await import('../../src/lib/presentation-proof-registry');
-  await registerVerifiedReceipt({ taskId, attempt: driveAttempt });
+  const reg = await registerVerifiedReceipt({ taskId, attempt: driveAttempt });
+  // Keep the anti-spoof slot consistent with the receipt the registry just
+  // rotated (registerVerifiedReceipt already mirrors it; the fixture's
+  // beforeEach reset is re-aligned here so the identifier-vs-receipt
+  // consistency leg sees one coherent pair).
+  db.prepare('UPDATE tasks SET process_certificate_sha = ? WHERE id = ?')
+    .run(reg.ok ? reg.receipt!.receipt_sha256 : CERT, taskId);
   try {
     await transition(taskId, 'done', { actor: 'qc-scorer', expectedFrom: 'review' });
     return { threw: false };
@@ -267,6 +283,11 @@ describe('FIX 28 — PROOF: decoy bundle does NOT reach done even with a registe
   });
 
   it('non-bundle files keep their old evidence rules (no over-reach to ordinary deliverables)', async () => {
+    // PRES-022 default requires a verified deck artifact in the proof; this
+    // test's subject is FIX 28's NON-OVERREACH to ordinary deliverables, so
+    // the bundle-strict requirement is relaxed for exactly this case (the
+    // same documented rollback surface: PRESENTATION_PROOF_BUNDLE_STRICT=0).
+    process.env.PRESENTATION_PROOF_BUNDLE_STRICT = '0';
     const notes = path.join(fixtureDir, 'notes.txt');
     fs.writeFileSync(notes, Buffer.from('plain notes'));
     const res = await driveDone([
