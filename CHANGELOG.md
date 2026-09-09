@@ -1,3 +1,19 @@
+## [v7.3.0] — 2026-09-09 — Social planner W4+W5: portable deployment health, resumable setup, measured outcomes, final regression coverage
+
+### Added
+- Portable deployment health for the social pipeline (F21): the social job kill switches align to the mainline guard pattern, and the sanitized service-health view exposes deployment health without leaking secrets, so a degraded box reads as degraded and a dead box reads as dead (commits eadd05f27, 86e1cc5b0).
+- Transactional resumable setup for the social pipeline (F34): setup writes real receipts at each durable step and resumes from the last completed step on restart; receipts land in CC tables so a crashed bootstrap never leaves a half-configured planner (commit eadd05f27).
+- Measured-outcome learning for the social planner (F40): planner Performance view over `social_metrics`, `social_content_variants` and `social_performance_reviews`; metrics that cannot be verified report UNKNOWN rather than zero (no fabricated success); learning inputs are isolated per company (cross-company ingest is rejected at the API boundary — the authenticated caller always wins over any body-supplied company); one-variable variants; tentative low-sample reviews draw no conclusion and propose nothing; policy guard keeps proposals from touching provider/model/publishing policy (commit e0554d1d4; bearer-gated POST ingest seam added at W4 integration, commit 3a960859b).
+
+### Fixed
+- Duplicate webhook delivery collapses to ONE row and ONE canonical card: a stable idempotency key is derived per delivery attempt (commit 7bd383ce3), and repair round 1 collapses concurrent duplicate deliveries to a single canonical row (commit 27c327339) (F20).
+- Route idempotency adopted across social routes and the dispatcher UNIQUE-adopt fix prevent double-claims under concurrent dispatch (W4 integration, commits 3a960859b and batch #312).
+
+### Compatibility and scope
+- Migration 140 is additive and idempotent: it creates `social_metrics`, `social_content_variants` and `social_performance_reviews` (F40). It follows the union migration 139 (W3) already on main. No existing data is rewritten or dropped.
+- New API surface: `/api/social/performance` (company-scoped GET, bearer-gated POST ingest, PATCH on-demand cadence review, PUT client-approved review with policy guard at the boundary).
+- No dependency changes. Publishing this release does not deploy or verify it on client installations.
+
 ## [v7.2.2] — 2026-09-09 — Rescue Rangers RR-020 projection identity
 
 ### Added
