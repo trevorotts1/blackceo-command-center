@@ -137,7 +137,12 @@ test('source inventory and company-owned account are mandatory; later accounts a
  assert.equal(queryOne<{status:string}>("SELECT status FROM publish_queue WHERE id='inventory-proof'")!.status,'verification_required','foreign/unowned account cannot close');
  run("UPDATE social_connected_accounts SET company_id='verify-co' WHERE id='fixture-threads'");
  proof('inventory-proof','account:fixture-threads',now+363_000);
+ run("UPDATE tasks SET status='review' WHERE id='source-inventory-proof'");
  await runSocialVerificationSweep(now+363_000,adapters);
+ assert.equal(queryOne<{status:string}>("SELECT status FROM publish_queue WHERE id='inventory-proof'")!.status,'verification_required','reopened source QC prevents publication confirmation');
+ run("UPDATE tasks SET status='done' WHERE id='source-inventory-proof'");
+ proof('inventory-proof','account:fixture-threads',now+484_000);
+ await runSocialVerificationSweep(now+484_000,adapters);
  assert.equal(queryOne<{status:string}>("SELECT status FROM publish_queue WHERE id='inventory-proof'")!.status,'published','legacy source is accepted only with real canonical company/task binding');
 });
 
