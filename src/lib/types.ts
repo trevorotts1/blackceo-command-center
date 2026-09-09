@@ -784,6 +784,11 @@ export type SSEEventType =
   // company's type never sees another tenant's queue payloads. The shared SSE
   // fan-out infra is untouched; filtering happens by subscription.
   | `publish_queued:${string}`
+  // F03 (social/wf05-durable-exec) — the publish dispatcher broadcasts
+  // `publish_state:<company_id>` as a row moves through the execution
+  // lifecycle (dispatched → running → published|failed). Same per-company
+  // subscription scoping as publish_queued; fan-out infra untouched.
+  | `publish_state:${string}`
   | 'bug_updated'
   | 'bug_created'
   // U60/JM-U63c — My AI CEO Operations Rail: a trust-engine report-back
@@ -814,7 +819,17 @@ export interface SSEEvent {
     sessionId: string;
     kind: 'trust_ack' | 'trust_progress' | 'trust_done';
     message: string;
-  } | PublishQueueItem;
+  } | PublishQueueItem
+  // F03 — publish_state payload: a lightweight queue-row progress update
+  // emitted by the durable dispatcher (id + derived state + linkage when
+  // present). Kept as its own arm so the dispatcher never has to widen
+  // PublishQueueItem just to broadcast.
+  | {
+    id: string;
+    status: 'queued' | 'running' | 'published' | 'failed';
+    task_id?: string | null;
+    execution_id?: string | null;
+  };
 }
 
 // Skill 35 publish-queue row (mirrors the publish_queue table from migration 022;

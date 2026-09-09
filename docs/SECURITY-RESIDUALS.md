@@ -5,7 +5,9 @@
 
 ## What was closed
 
-**38 routes**, reachable with no credential via a forged same-origin header, are now gated by `BEARER_REQUIRED_WRITE_ROUTES` in `src/middleware.ts`. A caller without a valid `Authorization: Bearer` token receives a 401 on those routes. The exact 38 routes are listed in the `BEARER_REQUIRED_WRITE_ROUTES` array (35 regex patterns; three use the `(\/[^/]+)?` collection-or-item form and each covers two routes).
+**42 routes**, reachable with no credential via a forged same-origin header, are now gated by `BEARER_REQUIRED_WRITE_ROUTES` in `src/middleware.ts`. A caller without a valid `Authorization: Bearer` token receives a 401 on those routes. The exact 42 routes are listed in the `BEARER_REQUIRED_WRITE_ROUTES` array (39 regex patterns; three use the `(\/[^/]+)?` collection-or-item form and each covers two routes).
+
+> **Updated 2026-09-08 (F38, W2 batch).** One pattern added for `POST /api/social/media/{id}` (company-bound asset-register ingest; the browser player only ever GETs, so no legitimate tokenless POST caller exists). Closed set grows 38 -> 42; the anti-rot test at `src/lib/__tests__/passthrough-write-scope.test.ts` asserts the live census (114 mutating routes, 6 webhook-protected, 108 non-webhook).
 
 ## What remains open — 63 routes
 

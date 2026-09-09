@@ -48,6 +48,7 @@ import { runTrustEngineSweep } from './trust-engine';
 import { runBoardHygiene, BOARD_HYGIENE_CRON } from './board-hygiene';
 import { runSweepLivenessSweep } from './sweep-liveness';
 import { runPersonaGroundingHealthSweep } from './persona-grounding-sweep';
+import { runSocialPublishDispatcherSweep } from './social-publish-dispatcher';
 import {
   runOperatorColumnAgeDigest,
   OPERATOR_COLUMN_AGE_DIGEST_CRON_EXPR,
@@ -408,6 +409,30 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<unknown> | unk
   { name: 'interview-outbox', expr: '*/2 * * * *', fn: runInterviewOutboxSweep },
   { name: 'dispatch-intents', expr: '*/2 * * * *', fn: runDispatchIntentSweep },
   { name: 'execution-reconcile', expr: '*/2 * * * *', fn: runExecutionCompletionReconcile },
+  // social-publish-dispatcher: every 2 minutes — F03 (social/wf05-durable-exec).
+  // THE consumer for the Skill 35 publish queue: claims queued rows under
+  // atomic leases, creates the canonical company-bound task, dispatches it
+  // through autoDispatchTask, and persists task/execution linkage before
+  // acknowledgement. Attempt-capped with backoff; the overdue half
+  // (runSocialPublishOverdueSweep, folded into the same tick's link-follow
+  // cadence via the scheduler entry below) surfaces a stopped consumer as an
+  // actionable overdue state instead of indefinite "working".
+  {
+    name: 'social-publish-dispatcher',
+    expr: '*/2 * * * *',
+    fn: async () => {
+      const { runSocialPublishOverdueSweep } = await import('./social-publish-dispatcher');
+      const result = await runSocialPublishDispatcherSweep();
+      const overdue = await runSocialPublishOverdueSweep();
+      if (result.dispatched > 0 || result.retried > 0 || result.failed > 0 || overdue.overdue > 0) {
+        console.log(
+          `[cron] social-publish-dispatcher: scanned ${result.scanned}, dispatched ${result.dispatched}, ` +
+            `retried ${result.retried}, failed ${result.failed}, followed ${result.followed}, overdue ${overdue.overdue}`,
+        );
+      }
+      return { ...result, overdue: overdue.overdue };
+    },
+  },
   // qc-review-sweep: every 2 minutes, score any review-column task that has
   // not received a qc_review event in the last 10 minutes. Catches tasks that
   // arrived in review before the scorer was wired to the completion paths.

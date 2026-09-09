@@ -11,6 +11,11 @@
  * (\/[^/]+)? collection-or-item form and each covers two routes, so this array's
  * .length is 35, not 38. Checksum 32 + (3 x 2) = 38 routes, and 61 + 38 = 99.
  *
+ * 2026-09-08 (F38, W2 batch): +1 pattern for POST /api/social/media/{id}
+ * (company-bound asset-register ingest; the browser player only ever GETs, so
+ * no legitimate tokenless POST caller exists). Now 39 patterns covering 42
+ * routes; see the U052 lock test for the live census.
+ *
  * This list is NOT the whole fix. 61 routes -- including /api/system/converge,
  * /api/system/bootstrap and /api/clients/{id}/keys -- must stay open because the
  * interface calls them with no credential, and no route list can close them.
@@ -49,6 +54,7 @@ export const BEARER_REQUIRED_WRITE_ROUTES: RegExp[] = [
   /^\/api\/operator\/tts$/,
   /^\/api\/recommendations$/,
   /^\/api\/recommendations\/[^/]+\/outcome$/,
+  /^\/api\/social\/media\/[^/]+$/,
   /^\/api\/sops\/(?!feedback$|proposals$)[^/]+$/,
   /^\/api\/sops\/import-role-library$/,
   /^\/api\/tasks\/[^/]+\/activities$/,

@@ -6366,6 +6366,175 @@ export const migrations: Migration[] = [
       console.log('[Migration 135] publish_queue company binding ready');
     },
   },
+  {
+    // F03 (social/wf05-durable-exec) — make the publish queue EXECUTABLE. The
+    // queue previously had a consumer-shaped shape (status/run_id) but no
+    // execution contract: a consumer could not claim a row atomically, could
+    // not bound retries, could not fence a crashed claim, and could not
+    // reconcile a dispatch whose acknowledgement was lost mid-flight. Add the
+    // durable-execution columns the social-publish-dispatcher owns, without
+    // touching the base shape migration 026/135 created. WF00 owns the
+    // reserved-migration-ID ledger — 136 is the next free id after 135.
+    id: '136',
+    name: 'add_publish_queue_execution_contract',
+    up: (db) => {
+      console.log('[Migration 136] Adding execution contract to publish_queue (F03)...');
+      const tableExists = db
+        .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'publish_queue'`)
+        .get();
+      // Same guard migration 135 used: a fixture DB that skipped 026 must get
+      // the base shape before the ALTERs below can target it.
+      if (!tableExists) {
+        db.exec(`CREATE TABLE publish_queue (
+          id TEXT PRIMARY KEY,
+          task_id TEXT,
+          company_id TEXT DEFAULT 'default',
+          sheet_id TEXT,
+          topic TEXT NOT NULL,
+          platforms TEXT NOT NULL,
+          schedule TEXT DEFAULT 'auto',
+          status TEXT NOT NULL DEFAULT 'queued',
+          run_id TEXT,
+          requested_by TEXT,
+          error TEXT,
+          created_at TEXT DEFAULT (datetime('now')),
+          updated_at TEXT DEFAULT (datetime('now')),
+          started_at TEXT,
+          completed_at TEXT
+        )`);
+        console.log('[Migration 136] publish_queue table absent — created base shape (026/135 parity)');
+      }
+      const info = db.prepare('PRAGMA table_info(publish_queue)').all() as { name: string }[];
+      const has = (col: string) => info.some((c) => c.name === col);
+      const additions: Array<[string, string]> = [
+        // Canonical task ingest linkage: the CC task + execution the queued
+        // intent produced. Persisted BEFORE the dispatch is acknowledged so a
+        // crash between dispatch and ack never orphans the work.
+        ['cc_task_id', 'TEXT'],
+        ['cc_execution_id', 'TEXT'],
+        // Idempotency: company+task+topic+platforms hash — the single
+        // dedupe identity, unique per row so an enqueue retry collapses.
+        ['idempotency_key', 'TEXT'],
+        // Lease fencing (contract dispatch.json): owner + expiry so a stale
+        // consumer cannot commit after reassignment, plus attempt accounting
+        // and the deferred retry deadline.
+        ['lease_owner', 'TEXT'],
+        ['lease_expires_at', 'TEXT'],
+        ['attempt_count', 'INTEGER NOT NULL DEFAULT 0'],
+        ['last_attempt_at', 'TEXT'],
+        ['retry_at', 'TEXT'],
+        // Overdue bookkeeping: the consumer stopped → surfaced actionable
+        // state via status 'overdue' + first time it was flagged.
+        ['overdue_since', 'TEXT'],
+      ];
+      for (const [column, type] of additions) {
+        if (!has(column)) {
+          db.exec(`ALTER TABLE publish_queue ADD COLUMN ${column} ${type}`);
+          console.log(`[Migration 136] Added publish_queue.${column}`);
+        }
+      }
+      db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_publish_queue_idem
+        ON publish_queue(company_id, idempotency_key)
+        WHERE idempotency_key IS NOT NULL`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_publish_queue_claim ON publish_queue(status, retry_at)`);
+      console.log('[Migration 136] publish_queue execution contract ready');
+    },
+  },
+  {
+    // F33 (social/wf05-durable-exec) — durable step/lease tables for the
+    // dependency-aware Ultra orchestrator. Steps are a persisted DAG; the
+    // provider_leases table enforces per-provider semaphores and fencing per
+    // the W0 dispatch.json contract. WF00 owns the reserved-migration-ID
+    // ledger — 137 follows 136.
+    id: '137',
+    name: 'add_social_orchestrator_steps_and_leases',
+    up: (db) => {
+      console.log('[Migration 137] Creating social_steps and social_provider_leases (F33)...');
+      db.exec(`CREATE TABLE IF NOT EXISTS social_steps (
+        step_id TEXT NOT NULL,
+        company_id TEXT NOT NULL,
+        cycle_id TEXT NOT NULL,
+        depends_on TEXT NOT NULL DEFAULT '[]',
+        role TEXT NOT NULL DEFAULT 'worker',
+        provider TEXT NOT NULL DEFAULT '',
+        model TEXT,
+        estimated_cost REAL NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'pending',
+        mode TEXT NOT NULL DEFAULT 'standard',
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        last_attempt_at TEXT,
+        retry_at TEXT,
+        lease_owner TEXT,
+        lease_expires_at TEXT,
+        fencing_token INTEGER NOT NULL DEFAULT 0,
+        heartbeat_at TEXT,
+        output_summary TEXT,
+        error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (step_id, company_id, cycle_id)
+      )`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_social_steps_ready
+        ON social_steps(company_id, cycle_id, status, retry_at)`);
+      db.exec(`CREATE TABLE IF NOT EXISTS social_provider_leases (
+        lease_key TEXT PRIMARY KEY,
+        operation_key TEXT NOT NULL UNIQUE,
+        company_id TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        step_id TEXT,
+        worker_id TEXT NOT NULL,
+        fencing_token INTEGER NOT NULL DEFAULT 1,
+        lease_expires_at TEXT NOT NULL,
+        heartbeat_at TEXT NOT NULL,
+        retry_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_social_provider_leases_open
+        ON social_provider_leases(provider, lease_expires_at)`);
+      console.log('[Migration 137] social_steps and social_provider_leases ready');
+    },
+  },
+
+  {
+    // F38 (social/wf08-media-player) — company-bound social media asset
+    // registry. Every planner video/preview asset gets a row here so the
+    // player route can resolve the asset THROUGH the caller's company identity
+    // (never from a bare, guessable asset id alone): a substituted B-company
+    // assetId must not serve A any bytes. `kind` distinguishes video posters
+    // from image previews; `content_revision` pins which plan revision the
+    // player serves (QC-F38: the player plays the CORRECT revision).
+    //
+    // ID HISTORY (D-F03-02/D-F33-01/D-F38-01 repair): this migration was first
+    // written as id 136, colliding with cc-wf05's 136 (F03 publish_queue
+    // execution contract) + 137 (F33 social_steps/provider_leases). Canonical
+    // merge order is F03+F33 first, then F38 — so this branch renumbered to
+    // 138: combined tree is 136=F03, 137=F33, 138=F38. No behavior change.
+    id: '138',
+    name: 'social_media_assets',
+    up: (db) => {
+      console.log('[Migration 138] Creating social_media_assets (F38)...');
+      db.exec(`CREATE TABLE IF NOT EXISTS social_media_assets (
+        id TEXT PRIMARY KEY,
+        company_id TEXT NOT NULL,
+        cycle_id TEXT,
+        content_revision TEXT,
+        kind TEXT NOT NULL DEFAULT 'video',
+        preview_url TEXT,
+        original_url TEXT,
+        poster_url TEXT,
+        duration_seconds REAL,
+        ratio TEXT,
+        qc_state TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+      )`);
+      db.exec(
+        `CREATE INDEX IF NOT EXISTS idx_social_media_assets_company
+           ON social_media_assets(company_id)`,
+      );
+      console.log('[Migration 138] social_media_assets ready');
+    },
+  },
 
 ];
 
