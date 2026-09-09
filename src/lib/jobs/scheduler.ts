@@ -848,7 +848,12 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<unknown> | unk
     name: 'social-cycle',
     expr: SOCIAL_CYCLE_CRON,
     fn: async () => {
-      if (process.env.DISABLE_SOCIAL_CYCLE === '1') {
+      // Mainline kill-switch pattern (general-task-recurrence / port-integrity /
+      // model-refresh / env-audit): '1' || 'true', inside the job fn.
+      if (
+        process.env.DISABLE_SOCIAL_CYCLE === '1' ||
+        process.env.DISABLE_SOCIAL_CYCLE === 'true'
+      ) {
         console.log('[cron] social-cycle: DISABLE_SOCIAL_CYCLE set, skipping');
         return { skippedReason: 'disabled' };
       }
@@ -876,7 +881,11 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<unknown> | unk
     name: 'social-expiry-recovery',
     expr: '*/5 * * * *',
     fn: async () => {
-      if (process.env.DISABLE_SOCIAL_EXPIRY_RECOVERY === '1') {
+      // Mainline kill-switch pattern (see social-cycle above).
+      if (
+        process.env.DISABLE_SOCIAL_EXPIRY_RECOVERY === '1' ||
+        process.env.DISABLE_SOCIAL_EXPIRY_RECOVERY === 'true'
+      ) {
         console.log('[cron] social-expiry-recovery: DISABLE_SOCIAL_EXPIRY_RECOVERY set, skipping');
         return { skippedReason: 'disabled' };
       }
