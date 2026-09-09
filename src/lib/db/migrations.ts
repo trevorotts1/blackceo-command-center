@@ -6854,6 +6854,23 @@ export const migrations: Migration[] = [
     },
   },
 
+  {
+    id: '141',
+    name: 'social_publication_verification_ownership',
+    up: (db) => {
+      db.exec(`CREATE TABLE IF NOT EXISTS social_publish_verifications (
+        queue_id TEXT NOT NULL REFERENCES publish_queue(id) ON DELETE CASCADE,
+        target TEXT NOT NULL, company_id TEXT NOT NULL, platform TEXT NOT NULL,
+        account_id TEXT, task_id TEXT, state TEXT NOT NULL DEFAULT 'pending',
+        attempt_count INTEGER NOT NULL DEFAULT 0, retry_at TEXT NOT NULL,
+        receipt_sha256 TEXT, verified_at TEXT, error TEXT, escalated_at TEXT,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        PRIMARY KEY(queue_id,target)
+      )`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_social_verification_retry ON social_publish_verifications(state,retry_at)`);
+    },
+  },
+
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner
