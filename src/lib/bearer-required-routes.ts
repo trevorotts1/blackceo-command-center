@@ -73,6 +73,8 @@ export const BEARER_REQUIRED_WRITE_ROUTES: RegExp[] = [
   /^\/api\/social\/performance$/,
   /^\/api\/social-theme\/invitations$/,
   /^\/api\/social-theme\/renew$/,
+  /^\/api\/social-theme\/process$/,
+  /^\/api\/social-theme\/send-link$/,
   /^\/api\/sops\/(?!feedback$|proposals$)[^/]+$/,
   /^\/api\/sops\/import-role-library$/,
   /^\/api\/tasks\/[^/]+\/activities$/,
