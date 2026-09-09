@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# .githooks/post-checkout — PRES-047 advisory rebuild callback.
+#
+# After a checkout/branch switch (including `git pull` merges and worktree
+# checkouts), warn (stderr only, never blocking) when the checkout's
+# compile-affecting content has moved past the running build (.next/BUILD_ID),
+# and point at the canonical deploy procedure. Prefers the shared PRES-046
+# content validator when present.
+#
+# NEVER deploys, restarts, posts messages, or touches anything outside one
+# baseline marker under .next/. Always exits 0. See
+# .githooks/lib/build-freshness.sh and .githooks/README.md.
+
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+if [ -f "$HOOK_DIR/lib/build-freshness.sh" ]; then
+  # shellcheck source=.githooks/lib/build-freshness.sh
+  . "$HOOK_DIR/lib/build-freshness.sh"
+  bf_advisory_if_stale post-checkout "$@"
+fi
+
+# Advisory only: a post hook's exit code never blocks the checkout that already
+# happened, and we must not emit noise for unrelated tooling.
+exit 0
