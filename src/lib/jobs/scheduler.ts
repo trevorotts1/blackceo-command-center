@@ -49,6 +49,7 @@ import { runBoardHygiene, BOARD_HYGIENE_CRON } from './board-hygiene';
 import { runSweepLivenessSweep } from './sweep-liveness';
 import { runPersonaGroundingHealthSweep } from './persona-grounding-sweep';
 import { runSocialPublishDispatcherSweep } from './social-publish-dispatcher';
+import { runSocialPerformanceReviewSweep } from './social-performance-review';
 import {
   runSocialCycleSweep,
   claimEngineOwnership,
@@ -439,6 +440,26 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<unknown> | unk
         );
       }
       return { ...result, overdue: overdue.overdue };
+    },
+  },
+  // social-performance-review: every 6 hours — F40 (social/wf14-ready-cc).
+  // The measured-outcome feedback loop: per company it aggregates ONLY that
+  // company's own metric observations (missing stays UNKNOWN, never zero),
+  // records a cadence review whose recommendation cites the actual posts and
+  // windows, and keeps low-sample conclusions tentative. Proposals never
+  // touch provider/model or publishing policy (F31/F37 client choice).
+  // Actual review firing is cadence-gated inside the job (default weekly).
+  {
+    name: 'social-performance-review',
+    expr: '0 */6 * * *',
+    fn: async () => {
+      const result = await runSocialPerformanceReviewSweep();
+      if (result.reviewed > 0) {
+        console.log(
+          `[cron] social-performance-review: scanned ${result.scanned}, reviewed ${result.reviewed}, skipped ${result.skipped}`,
+        );
+      }
+      return result;
     },
   },
   // qc-review-sweep: every 2 minutes, score any review-column task that has
