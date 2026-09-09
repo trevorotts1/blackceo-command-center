@@ -853,7 +853,7 @@ If you need help or clarification, ask the orchestrator.`;
         idempotencyKey: execution.idempotency_key,
         // Omit the agent-run timeout: the gateway owns the configured runtime limit.
         // RPC acknowledgement deadlines must never become a 30-second worker cutoff.
-      });
+      }, 90_000);
 
       recordExecutionAcceptance(execution,acknowledgement);
       acknowledged = true;
