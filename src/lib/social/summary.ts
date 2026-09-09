@@ -30,10 +30,13 @@
  * reason) and retried on later calls for the same key, never silently
  * dropped; a per-key attempt cap stops infinite retry loops.
  *
- * MIGRATION NOTE (documented for WF00, no migration id consumed): the
- * social_notification_outbox table is created lazily by
- * ensureSocialOutboxTable() (CREATE TABLE IF NOT EXISTS) — same lazy-table
- * pattern as company_ghl_bindings.
+ * OUTBOX SCHEMA (W3 QC round 2 — migration-reconciliation.json): the
+ * social_notification_outbox table is owned by union migration 139 (wf11's
+ * richer schema: event_id / destination_ref / subject / body /
+ * delivery_state). notifyCompany() maps its (resource, event, message) triple
+ * onto that schema — event_id `${resource}:${event}`, subject the event
+ * class, body the message text. There is NO lazy CREATE here: the table must
+ * come from the migration chain so every box shares one schema.
  */
 
 import { getDb, queryOne, queryAll, run } from '@/lib/db';
@@ -459,49 +462,53 @@ export function loadCycleCloseSummary(companyId: string, cycleId: string): Cycle
 
 // ── Consolidated notifications (F30 step 3, no retry spam) ──────────────────
 
+/**
+ * Outbox row — union migration 139 schema (wf11). F30's consolidated
+ * notifier writes delivery_state (pending/sent/failed) and folds its
+ * (resource, event) key into event_id `${resource}:${event}`; the message
+ * text lives in body and the last send failure in body-adjacent subject? No —
+ * subject carries the event class; the error is returned to the caller and
+ * ALSO persisted in body on failure so the failure stays visible in the row.
+ */
 export interface SocialOutboxRow {
   id: string;
   company_id: string;
-  resource: string;
-  event: string;
+  event_id: string;
   dedupe_key: string;
-  message: string;
-  state: 'pending' | 'sent' | 'failed';
+  destination_ref: string;
+  subject: string;
+  body: string;
+  delivery_state: 'pending' | 'sent' | 'failed';
   attempt_count: number;
-  last_error: string | null;
   last_attempt_at: string | null;
-  sent_at: string | null;
+  retry_at: string | null;
   created_at: string;
   updated_at: string;
 }
 
+/**
+ * Back-compat view for readers/tests: the (resource, event, message, state)
+ * vocabulary F30's surface speaks, derived from the 139 row.
+ */
+export function outboxRowView(row: SocialOutboxRow): {
+  resource: string;
+  event: string;
+  message: string;
+  state: 'pending' | 'sent' | 'failed';
+} {
+  // event_id was written `${resource}:${event}`; resource itself may contain
+  // colons (e.g. 'publish:pq-1'), so split on the LAST colon.
+  const last = row.event_id.lastIndexOf(':');
+  return {
+    resource: last > 0 ? row.event_id.slice(0, last) : row.event_id,
+    event: last > 0 ? row.event_id.slice(last + 1) : '',
+    message: row.body,
+    state: row.delivery_state,
+  };
+}
+
 const OUTBOX_DEDUPE_WINDOW_MS = 30 * 60_000; // same event re-notified at most every 30 min
 const OUTBOX_MAX_ATTEMPTS = 5;
-
-let outboxEnsured = false;
-/** Lazy CREATE TABLE IF NOT EXISTS (no migration id; documented for WF00). */
-export function ensureSocialOutboxTable(): void {
-  if (outboxEnsured) return;
-  const db = getDb();
-  db.exec(`CREATE TABLE IF NOT EXISTS social_notification_outbox (
-    id TEXT PRIMARY KEY,
-    company_id TEXT NOT NULL,
-    resource TEXT NOT NULL,
-    event TEXT NOT NULL,
-    dedupe_key TEXT NOT NULL,
-    message TEXT NOT NULL,
-    state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending','sent','failed')),
-    attempt_count INTEGER NOT NULL DEFAULT 0,
-    last_error TEXT,
-    last_attempt_at TEXT,
-    sent_at TEXT,
-    created_at TEXT DEFAULT (datetime('now')),
-    updated_at TEXT DEFAULT (datetime('now'))
-  )`);
-  db.exec(`CREATE INDEX IF NOT EXISTS idx_social_outbox_dedupe
-    ON social_notification_outbox(company_id, dedupe_key, created_at DESC)`);
-  outboxEnsured = true;
-}
 
 export interface NotifyCompanyResult {
   id: string;
@@ -533,20 +540,20 @@ export async function notifyCompany(
   send: (message: string) => Promise<boolean> | boolean = defaultSend,
   nowMs: number = Date.now(),
 ): Promise<NotifyCompanyResult> {
-  ensureSocialOutboxTable();
-  const db = getDb();
+  // Table owned by union migration 139 — no lazy CREATE (single schema).
   const dedupeKey = `${input.resource}|${input.event}`;
+  const eventId = `${input.resource}:${input.event}`;
   const nowIso = new Date(nowMs).toISOString();
 
   // DEDUPE: a sent row for the same key inside the window absorbs the repeat.
   const recent = queryOne<SocialOutboxRow>(
     `SELECT * FROM social_notification_outbox
-      WHERE company_id = ? AND dedupe_key = ? AND state = 'sent'
+      WHERE company_id = ? AND dedupe_key = ? AND delivery_state = 'sent'
       ORDER BY created_at DESC LIMIT 1`,
     [input.companyId, dedupeKey],
   );
   if (recent) {
-    const age = nowMs - new Date(recent.sent_at || recent.created_at).getTime();
+    const age = nowMs - new Date(recent.last_attempt_at || recent.created_at).getTime();
     if (age >= 0 && age < OUTBOX_DEDUPE_WINDOW_MS) {
       return { id: recent.id, deduped: true, state: 'sent' };
     }
@@ -555,12 +562,12 @@ export async function notifyCompany(
   // Retry budget: a prior failed row for the same key retries (capped).
   const prior = queryOne<SocialOutboxRow>(
     `SELECT * FROM social_notification_outbox
-      WHERE company_id = ? AND dedupe_key = ? AND state IN ('pending','failed')
+      WHERE company_id = ? AND dedupe_key = ? AND delivery_state IN ('pending','failed')
       ORDER BY created_at DESC LIMIT 1`,
     [input.companyId, dedupeKey],
   );
   if (prior && prior.attempt_count >= OUTBOX_MAX_ATTEMPTS) {
-    return { id: prior.id, deduped: true, state: prior.state as SocialOutboxRow['state'], error: 'retry cap reached' };
+    return { id: prior.id, deduped: true, state: prior.delivery_state, error: 'retry cap reached' };
   }
 
   const id = prior?.id || crypto.randomUUID();
@@ -576,18 +583,19 @@ export async function notifyCompany(
 
   run(
     `INSERT INTO social_notification_outbox
-       (id, company_id, resource, event, dedupe_key, message, state, attempt_count, last_error, last_attempt_at, sent_at, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
+       (id, company_id, event_id, dedupe_key, destination_ref, subject, body, delivery_state, attempt_count, last_attempt_at, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
-       state = excluded.state,
+       event_id = excluded.event_id,
+       body = excluded.body,
+       delivery_state = excluded.delivery_state,
        attempt_count = attempt_count + 1,
-       last_error = excluded.last_error,
        last_attempt_at = excluded.last_attempt_at,
-       sent_at = excluded.sent_at,
        updated_at = excluded.updated_at`,
     [
-      id, input.companyId, input.resource, input.event, dedupeKey, input.message,
-      sent ? 'sent' : 'failed', error ?? null, nowIso, sent ? nowIso : null,
+      id, input.companyId, eventId, dedupeKey, `company:${input.companyId}`, input.event,
+      error ? `${input.message} [last_error: ${error}]` : input.message,
+      sent ? 'sent' : 'failed', nowIso,
       new Date(prior ? new Date(prior.created_at).getTime() : nowMs).toISOString(), nowIso,
     ],
   );
@@ -597,10 +605,9 @@ export async function notifyCompany(
 
 /** Failed deliveries that still need attention (visible, not swallowed). */
 export function listFailedNotifications(companyId: string): SocialOutboxRow[] {
-  ensureSocialOutboxTable();
   return queryAll<SocialOutboxRow>(
     `SELECT * FROM social_notification_outbox
-      WHERE company_id = ? AND state IN ('failed','pending')
+      WHERE company_id = ? AND delivery_state IN ('failed','pending')
       ORDER BY created_at DESC LIMIT 100`,
     [companyId],
   );

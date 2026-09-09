@@ -41,41 +41,12 @@ import {
   loadCycleCloseSummary,
   notifyCompany,
   listFailedNotifications,
-  ensureSocialOutboxTable,
+  outboxRowView,
 } from '../../src/lib/social/summary';
 import { GET as publishSummaryGET } from '../../src/app/api/tasks/[id]/publish-summary/route';
 
-getDb(); // full migration chain against the isolated temp DB
-ensureSocialOutboxTable();
-
-// WF10 (migration 139) owns social_cycles/social_deliveries/social_expiry_events;
-// until its CC batch lands on main, this suite provisions the F07/F30 shapes
-// itself (contract-parity columns only) so the theme-gate + cycle-close paths
-// are provable. CREATE IF NOT EXISTS keeps the suite green after WF10 lands.
-run(`CREATE TABLE IF NOT EXISTS social_cycles (
-  id TEXT PRIMARY KEY,
-  company_id TEXT NOT NULL,
-  week_start_local TEXT NOT NULL,
-  timezone TEXT NOT NULL DEFAULT 'America/New_York',
-  policy_revision INTEGER NOT NULL DEFAULT 1,
-  state TEXT NOT NULL DEFAULT 'draft',
-  invitation_sent_at TEXT,
-  invitation_token_hash TEXT,
-  invitation_channel TEXT,
-  reminder_count INTEGER NOT NULL DEFAULT 0,
-  reminder_due_at TEXT,
-  last_reminder_at TEXT,
-  response_state TEXT,
-  responded_at TEXT,
-  cutoff_at TEXT,
-  selected_fallback TEXT,
-  standing_approval TEXT,
-  skip_week INTEGER NOT NULL DEFAULT 0,
-  next_cycle_at TEXT,
-  disposition TEXT,
-  created_at TEXT DEFAULT (datetime('now')),
-  updated_at TEXT DEFAULT (datetime('now'))
-)`);
+getDb(); // full migration chain against the isolated temp DB (union 139 owns
+// social_cycles + social_notification_outbox; no lazy CREATE, no ad-hoc DDL).
 run(`CREATE TABLE IF NOT EXISTS social_deliveries (
   delivery_id TEXT PRIMARY KEY,
   company_id TEXT NOT NULL,
@@ -396,9 +367,18 @@ test('F30: failed notification delivery is VISIBLE in the outbox and retried on 
   assert.equal(fail1.state, 'failed');
   assert.ok(fail1.error);
 
-  // The failure is VISIBLE: a failed outbox row exists.
+  // The failure is VISIBLE: a failed outbox row exists (union-139 schema;
+  // resource/event read back through the back-compat view).
   const failedRows = listFailedNotifications('company-f30-a');
-  assert.ok(failedRows.some((r) => r.resource === 'publish:pq-2' && r.state === 'failed'));
+  assert.ok(failedRows.some((r) => {
+    const v = outboxRowView(r);
+    return v.resource === 'publish:pq-2' && v.state === 'failed';
+  }));
+  // The writer maps onto the union schema: event_id carries resource:event,
+  // delivery_state carries the send outcome.
+  const failedRow = failedRows.find((r) => r.event_id === 'publish:pq-2:publish_overdue');
+  assert.ok(failedRow, 'outbox row keyed by event_id resource:event');
+  assert.equal(failedRow.delivery_state, 'failed');
 
   // A later call for the same key retries (bounded), and succeeds.
   const retry = await notifyCompany(
@@ -419,14 +399,17 @@ test('F30: loadCycleCloseSummary reads persisted rows from the DB', () => {
        'published', ?, NULL, 'https://linkedin.com/post/db1')`,
     [now],
   );
+  // Week 2026-09-15: union migration 139 enforces UNIQUE(company_id,
+  // week_start_local), and the awaiting-theme test above already owns week
+  // 2026-09-08 for company-f30-a.
   run(
     `INSERT INTO social_cycles (id, company_id, week_start_local, state, response_state, responded_at, disposition, created_at, updated_at)
-     VALUES ('cycle-f30-db', 'company-f30-a', '2026-09-08', 'closed', 'theme_chosen', ?, 'theme_recorded', ?, ?)`,
+     VALUES ('cycle-f30-db', 'company-f30-a', '2026-09-15', 'closed', 'theme_chosen', ?, 'theme_recorded', ?, ?)`,
     [now, now, now],
   );
   const summary = loadCycleCloseSummary('company-f30-a', 'cycle-f30-db');
   assert.equal(summary.cycleId, 'cycle-f30-db');
-  assert.equal(summary.weekStart, '2026-09-08');
+  assert.equal(summary.weekStart, '2026-09-15');
   if (summary.publishedUrls.length > 0) {
     assert.equal(summary.publishedUrls[0].url, 'https://linkedin.com/post/db1');
   }
