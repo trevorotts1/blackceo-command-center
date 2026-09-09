@@ -6536,6 +6536,243 @@ export const migrations: Migration[] = [
     },
   },
 
+  {
+    // UNION 139 (W3 QC round 2 — migration-reconciliation.json): ONE superset
+    // migration replacing the two incompatible id-139 claims:
+    //   - cc-wf10 139 'add_social_cycle_service' (F07/F17/F35: cycle-service
+    //     social_cycles columns, social_engine_ownership, social_expiry_events,
+    //     social_delivery_pauses, social_connected_accounts, social_media_assets
+    //     base + repair_state/updated_at ALTERs, social_theme_drafts,
+    //     social_theme_outbox),
+    //   - cc-wf11 139 'social_theme_miniapp' (F27: miniapp social_cycles
+    //     columns, social_theme_sessions, social_invitations, social_policies,
+    //     social_notification_outbox).
+    // social_cycles carries the wf10 cycle-service column set PLUS wf11's
+    // next_action_at (both sides' INSERT/UPDATE/SELECT column lists are
+    // satisfied; extra columns default NULL). social_notification_outbox
+    // adopts wf11's richer schema; F30's summary.ts writer is adapted to it
+    // (resource/event/message/last_error folded into event_id/subject/body)
+    // and its lazy ensureSocialOutboxTable() CREATE is removed.
+    // social_theme_drafts (wf10 expiry tickets) and social_theme_sessions
+    // (wf11 client wizard) coexist — different producers, different keys.
+    id: '139',
+    name: 'union_social_cycle_and_theme_miniapp',
+    up: (db) => {
+      console.log('[Migration 139] Creating union cycle-service + theme-miniapp tables (F07/F17/F27/F35)...');
+      // social_cycles UNION: wf10 cycle-service set + wf11 next_action_at.
+      db.exec(`CREATE TABLE IF NOT EXISTS social_cycles (
+        id TEXT PRIMARY KEY,
+        company_id TEXT NOT NULL,
+        week_start_local TEXT NOT NULL,
+        timezone TEXT NOT NULL DEFAULT 'America/New_York',
+        policy_revision INTEGER NOT NULL DEFAULT 1,
+        state TEXT NOT NULL DEFAULT 'draft',
+        invitation_sent_at TEXT,
+        invitation_token_hash TEXT,
+        invitation_channel TEXT,
+        reminder_count INTEGER NOT NULL DEFAULT 0,
+        reminder_due_at TEXT,
+        last_reminder_at TEXT,
+        response_state TEXT,
+        responded_at TEXT,
+        cutoff_at TEXT,
+        selected_fallback TEXT,
+        standing_approval TEXT,
+        skip_week INTEGER NOT NULL DEFAULT 0,
+        pause_reminders INTEGER NOT NULL DEFAULT 0,
+        pause_reminders_until TEXT,
+        next_cycle_at TEXT,
+        next_action_at TEXT,
+        disposition TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now')),
+        UNIQUE (company_id, week_start_local)
+      )`);
+      db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_social_cycles_company_week
+        ON social_cycles(company_id, week_start_local)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_social_cycles_due
+        ON social_cycles(state, reminder_due_at, next_cycle_at)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_social_cycles_company_state
+        ON social_cycles(company_id, state, next_action_at)`);
+      // F17 — engine ownership: exactly one active engine + scheduler
+      // registration per company.
+      db.exec(`CREATE TABLE IF NOT EXISTS social_engine_ownership (
+        id TEXT PRIMARY KEY,
+        company_id TEXT NOT NULL,
+        engine TEXT NOT NULL,
+        scheduler_name TEXT NOT NULL,
+        scheduler_expr TEXT,
+        next_run_at TEXT,
+        state TEXT NOT NULL DEFAULT 'active',
+        superseded_by TEXT,
+        registered_at TEXT DEFAULT (datetime('now')),
+        verified_at TEXT
+      )`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_social_engine_owner
+        ON social_engine_ownership(company_id, state)`);
+      // F35 — expiry ledger: each kind of failure is its own row.
+      db.exec(`CREATE TABLE IF NOT EXISTS social_expiry_events (
+        id TEXT PRIMARY KEY,
+        company_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        error_type TEXT NOT NULL,
+        affected_resource TEXT NOT NULL,
+        affected_resource_id TEXT,
+        detail TEXT,
+        delivery_scope TEXT NOT NULL DEFAULT 'single',
+        status TEXT NOT NULL DEFAULT 'open',
+        retry_count INTEGER NOT NULL DEFAULT 0,
+        retry_at TEXT,
+        last_attempt_at TEXT,
+        recovered_at TEXT,
+        reconciliation TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now'))
+      )`);
+      db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_social_expiry_open
+        ON social_expiry_events(company_id, kind, affected_resource_id, status)
+        WHERE status = 'open'`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_social_expiry_retry
+        ON social_expiry_events(status, retry_at)`);
+      // F35 — explicit provider-scope delivery pause.
+      db.exec(`CREATE TABLE IF NOT EXISTS social_delivery_pauses (
+        id TEXT PRIMARY KEY,
+        company_id TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        reason TEXT,
+        paused_at TEXT,
+        resumed_at TEXT,
+        active INTEGER NOT NULL DEFAULT 1
+      )`);
+      db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_social_delivery_pauses
+        ON social_delivery_pauses(company_id, provider)`);
+      // F35 — connected-account health.
+      db.exec(`CREATE TABLE IF NOT EXISTS social_connected_accounts (
+        id TEXT PRIMARY KEY,
+        company_id TEXT NOT NULL,
+        platform TEXT,
+        account_name TEXT,
+        health TEXT NOT NULL DEFAULT 'ready',
+        health_reason TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now'))
+      )`);
+      // F35/F38 — asset registry base (same shape as 138) + repair_state /
+      // updated_at ALTERs guarded by PRAGMA for boxes that skipped 138.
+      db.exec(`CREATE TABLE IF NOT EXISTS social_media_assets (
+        id TEXT PRIMARY KEY,
+        company_id TEXT NOT NULL,
+        cycle_id TEXT,
+        content_revision TEXT,
+        kind TEXT NOT NULL DEFAULT 'video',
+        preview_url TEXT,
+        original_url TEXT,
+        poster_url TEXT,
+        duration_seconds REAL,
+        ratio TEXT,
+        qc_state TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+      )`);
+      const assetInfo = db.prepare('PRAGMA table_info(social_media_assets)').all() as { name: string }[];
+      if (!assetInfo.some((c) => c.name === 'repair_state')) {
+        db.exec(`ALTER TABLE social_media_assets ADD COLUMN repair_state TEXT`);
+        console.log('[Migration 139] Added social_media_assets.repair_state');
+      }
+      if (!assetInfo.some((c) => c.name === 'updated_at')) {
+        db.exec(`ALTER TABLE social_media_assets ADD COLUMN updated_at TEXT`);
+        console.log('[Migration 139] Added social_media_assets.updated_at');
+      }
+      // F35 — theme-intake saved drafts + renewal tickets.
+      db.exec(`CREATE TABLE IF NOT EXISTS social_theme_drafts (
+        id TEXT PRIMARY KEY,
+        company_id TEXT NOT NULL,
+        saved_answers TEXT,
+        ticket_token_hash TEXT,
+        ticket_expires_at TEXT,
+        ticket_renewed_at TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now'))
+      )`);
+      // F07/F27 — the registered notification channel's outbox.
+      db.exec(`CREATE TABLE IF NOT EXISTS social_theme_outbox (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        company_id TEXT NOT NULL,
+        cycle_id TEXT,
+        payload TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        delivered_at TEXT
+      )`);
+      // F27 — weekly theme mini app: sessions, invitations, policies.
+      db.exec(`CREATE TABLE IF NOT EXISTS social_theme_sessions (
+        id TEXT PRIMARY KEY,
+        company_id TEXT NOT NULL,
+        cycle_id TEXT NOT NULL,
+        questionnaire_version TEXT NOT NULL DEFAULT '1',
+        answers_json TEXT NOT NULL DEFAULT '{}',
+        revision INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'draft',
+        saved_at TEXT,
+        submitted_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (company_id, cycle_id)
+      )`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_social_theme_sessions_company
+        ON social_theme_sessions(company_id, status)`);
+      db.exec(`CREATE TABLE IF NOT EXISTS social_invitations (
+        id TEXT PRIMARY KEY,
+        token_hash TEXT NOT NULL UNIQUE,
+        purpose TEXT NOT NULL DEFAULT 'social-theme',
+        company_id TEXT NOT NULL,
+        cycle_id TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        used_at TEXT,
+        revoked_at TEXT,
+        created_at TEXT NOT NULL
+      )`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_social_invitations_session
+        ON social_invitations(company_id, session_id)`);
+      db.exec(`CREATE TABLE IF NOT EXISTS social_policies (
+        company_id TEXT PRIMARY KEY,
+        policy_revision INTEGER NOT NULL DEFAULT 1,
+        role_model TEXT,
+        provider TEXT,
+        mode TEXT NOT NULL DEFAULT 'standard',
+        budget_usd REAL,
+        reminder_day TEXT,
+        reminder_time TEXT,
+        reminders_paused INTEGER NOT NULL DEFAULT 0,
+        enabled_account_ids TEXT NOT NULL DEFAULT '[]',
+        approval_policy TEXT NOT NULL DEFAULT 'client-approve',
+        evergreen_policy TEXT NOT NULL DEFAULT 'off',
+        updated_at TEXT NOT NULL
+      )`);
+      // F27/F30 SHARED — canonical dispatch outbox (wf11's richer schema;
+      // F30's summary.ts notifyCompany writes event_id/delivery_state here).
+      db.exec(`CREATE TABLE IF NOT EXISTS social_notification_outbox (
+        id TEXT PRIMARY KEY,
+        company_id TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        dedupe_key TEXT NOT NULL,
+        destination_ref TEXT NOT NULL,
+        subject TEXT NOT NULL DEFAULT '',
+        body TEXT NOT NULL DEFAULT '',
+        delivery_state TEXT NOT NULL DEFAULT 'pending',
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        last_attempt_at TEXT,
+        retry_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (company_id, dedupe_key)
+      )`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_social_notification_outbox_pending
+        ON social_notification_outbox(delivery_state, retry_at)`);
+      console.log('[Migration 139] union cycle-service + theme-miniapp tables ready');
+    },
+  },
+
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner

@@ -16,6 +16,15 @@
  * no legitimate tokenless POST caller exists). Now 39 patterns covering 42
  * routes; see the U052 lock test for the live census.
  *
+ * 2026-09-09 (F27, W3 batch): +2 patterns — POST /api/social-theme/invitations
+ * and POST /api/social-theme/renew are OPERATOR/SERVICE surfaces (the browser
+ * mini-app client never calls them; delivery automation does), so they are
+ * bearer-gated. The five client-facing routes under /api/social-theme/* are
+ * deliberately NOT on this list: their browsers hold NO mc_tenant_session, the
+ * middleware exempts the namespace (routes verify their own narrow
+ * social-theme session capability), and each mutating route enforces MR-23
+ * CSRF + same-origin in its own handler. Now 41 patterns covering 44 routes.
+ *
  * This list is NOT the whole fix. 61 routes -- including /api/system/converge,
  * /api/system/bootstrap and /api/clients/{id}/keys -- must stay open because the
  * interface calls them with no credential, and no route list can close them.
@@ -55,6 +64,8 @@ export const BEARER_REQUIRED_WRITE_ROUTES: RegExp[] = [
   /^\/api\/recommendations$/,
   /^\/api\/recommendations\/[^/]+\/outcome$/,
   /^\/api\/social\/media\/[^/]+$/,
+  /^\/api\/social-theme\/invitations$/,
+  /^\/api\/social-theme\/renew$/,
   /^\/api\/sops\/(?!feedback$|proposals$)[^/]+$/,
   /^\/api\/sops\/import-role-library$/,
   /^\/api\/tasks\/[^/]+\/activities$/,

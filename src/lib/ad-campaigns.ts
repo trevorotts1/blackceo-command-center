@@ -253,6 +253,7 @@ export function createAdCampaign(input: CreateAdCampaignInput): CreateAdCampaign
   });
 
   // SSE broadcast AFTER the transaction commits (no broadcasts on rollback).
+  // W3QC-01 — broadcast() auto-scopes each card to its company.
   for (const t of insertedTasks) {
     broadcast({ type: 'task_created', payload: t });
   }

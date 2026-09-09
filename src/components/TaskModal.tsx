@@ -53,6 +53,7 @@ import {
 // typed copy map; presentation only, no change to any field's behavior.
 import { FieldHelp } from './ui/FieldHelp';
 import { TASK_FIELD_HELP } from '@/lib/task-field-help';
+import { TaskPublishSummaryPanel } from './TaskPublishSummaryPanel';
 import type { Task, TaskPriority, TaskStatus } from '@/lib/types';
 
 type TabType = 'overview' | 'planning' | 'activity' | 'deliverables' | 'sessions';
@@ -569,6 +570,11 @@ export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskMod
                   dispatch_hold well before the cap flips status to 'blocked';
                   the two panels render independently, off different fields). */}
               <DispatchHoldPanel task={task} />
+              {/* F30 — client completion + exception summary, derived from
+                  PERSISTED state only (publish_queue + task rows). Renders the
+                  truthful stage / next action / owner for social tasks; null
+                  (nothing) when no publish intent is linked. */}
+              <TaskPublishSummaryPanel taskId={task.id} />
               <BlockedReasonPanel task={task} />
               {/* U38 (C-07) — human-promote control, review cards the QC
                   heuristic fallback parked only ([QC-HEURISTIC] /

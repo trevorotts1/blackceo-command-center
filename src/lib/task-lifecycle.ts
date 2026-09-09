@@ -1016,6 +1016,8 @@ export async function transition(
   if (!updated) throw new TransitionError('NOT_FOUND', `Task ${taskId} not found after update`);
 
   // ── SSE broadcast (post-commit) ────────────────────────────────────────────
+  // W3QC-01 — broadcast() auto-scopes task-family events to the row's company
+  // (resolved through its workspace, never from the caller).
   broadcast({ type: 'task_updated', payload: updated });
 
   // W5.1/W5.4 — DONE owner notification: the single lifecycle funnel so every
