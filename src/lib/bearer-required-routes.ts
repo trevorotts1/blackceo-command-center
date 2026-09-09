@@ -23,7 +23,13 @@
  * deliberately NOT on this list: their browsers hold NO mc_tenant_session, the
  * middleware exempts the namespace (routes verify their own narrow
  * social-theme session capability), and each mutating route enforces MR-23
- * CSRF + same-origin in its own handler. Now 41 patterns covering 44 routes.
+ * CSRF + same-origin in its own handler.
+ *
+ * 2026-09-09 (F40, W4 batch, integration commit): +1 pattern for POST
+ * /api/social/performance — provider-metrics ingest seam (service-to-service,
+ * same class as F38's asset-register ingest). The browser interface never
+ * calls it (the review job reads the DB directly), so no legitimate tokenless
+ * POST caller exists. Now 42 patterns covering 45 routes.
  *
  * This list is NOT the whole fix. 61 routes -- including /api/system/converge,
  * /api/system/bootstrap and /api/clients/{id}/keys -- must stay open because the
@@ -64,6 +70,7 @@ export const BEARER_REQUIRED_WRITE_ROUTES: RegExp[] = [
   /^\/api\/recommendations$/,
   /^\/api\/recommendations\/[^/]+\/outcome$/,
   /^\/api\/social\/media\/[^/]+$/,
+  /^\/api\/social\/performance$/,
   /^\/api\/social-theme\/invitations$/,
   /^\/api\/social-theme\/renew$/,
   /^\/api\/sops\/(?!feedback$|proposals$)[^/]+$/,

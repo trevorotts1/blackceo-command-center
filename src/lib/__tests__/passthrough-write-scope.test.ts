@@ -12,7 +12,9 @@
  * re-derived 2026-09-08 for F38 social media asset route: 114 mutating,
  * 6 webhook-protected, 108 non-webhook; re-derived 2026-09-09 for F27
  * social-theme mini app: 121 mutating, 6 webhook-protected, 115
- * non-webhook — 44 routes via 41 bearer patterns; the 5 client-facing
+ * non-webhook — 44 routes via 41 bearer patterns; re-derived 2026-09-09
+ * for F40 measured-outcome ingest (W4 integration commit): 122 mutating,
+ * 6 webhook-protected, 116 non-webhook — 45 routes via 42 bearer patterns; the 5 client-facing
  * social-theme routes are middleware-exempt + route-level CSRF/same-origin):
  *   - API routes exporting a mutating method (export async function): 107
  *     (2026-08-31: +1 for FIX 35 — tasks/[id]/audit-backfill, POST, bearer-
@@ -231,16 +233,16 @@ const nonWebhookCount = allMutatingRoutes.length - webhookProtectedCount;
 describe('passthrough-write-scope — anti-rot lock (U052)', () => {
   // ---- Counts ------------------------------------------------------------
 
-  it('API routes exporting a mutating method: 121 (literal assertion)', () => {
-    expect(allMutatingRoutes.length).toBe(121);
+  it('API routes exporting a mutating method: 122 (literal assertion)', () => {
+    expect(allMutatingRoutes.length).toBe(122);
   });
 
   it('protected by isWebhookSecretRoute: 6', () => {
     expect(webhookProtectedCount).toBe(6);
   });
 
-  it('non-webhook write routes: 115 (tenant authentication remains required)', () => {
-    expect(nonWebhookCount).toBe(115);
+  it('non-webhook write routes: 116 (tenant authentication remains required)', () => {
+    expect(nonWebhookCount).toBe(116);
   });
 
   it('interface call templates found by multi-line scanner', () => {
@@ -257,12 +259,12 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
     expect(count).toBeGreaterThanOrEqual(40);
   });
 
-  it('routes covered by BEARER_REQUIRED_WRITE_ROUTES (44 routes via 41 patterns)', () => {
-    expect(bearerCoveredRoutes.size).toBe(44);
+  it('routes covered by BEARER_REQUIRED_WRITE_ROUTES (45 routes via 42 patterns)', () => {
+    expect(bearerCoveredRoutes.size).toBe(45);
   });
 
-  it('BEARER_REQUIRED_WRITE_ROUTES.length is 41, covering 44 routes (checksum: 38 + 3×2 = 44)', () => {
-    expect(BEARER_REQUIRED_WRITE_ROUTES.length).toBe(41);
+  it('BEARER_REQUIRED_WRITE_ROUTES.length is 42, covering 45 routes (checksum: 39 + 3×2 = 45)', () => {
+    expect(BEARER_REQUIRED_WRITE_ROUTES.length).toBe(42);
   });
 
   it('route-list membership: BEARER_REQUIRED_WRITE_ROUTES includes /api/weight-profiles', () => {
