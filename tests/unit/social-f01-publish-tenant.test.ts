@@ -35,7 +35,6 @@ import { createHmac } from 'node:crypto';
 import { NextRequest } from 'next/server';
 import { getDb, queryOne, run, closeDb } from '../../src/lib/db';
 import { POST as publishPOST, GET as publishGET } from '../../src/app/api/skill-35/publish/route';
-import { publishIdempotencyKey } from '../../src/lib/jobs/social-publish-dispatcher';
 import {
   resolvePublishCompany,
   assertTaskOwnedByCompany,
@@ -416,48 +415,47 @@ test('F01 valid company A request succeeds once, stamps company_id, GET is compa
 
 // ─── F20: duplicate webhook delivery — deterministic key, one side effect ───
 
-test('F20 duplicate webhook delivery: both deliveries derive ONE idempotency key', async () => {
+test('F20 duplicate webhook delivery: case/order-varied bodies collapse to ONE queue row', async () => {
   setTenantRegistry(HOST_A, HOST_B);
-  const body = JSON.stringify({ task_id: 'task-a-1', topic: 'Dup Delivery', platforms: ['linkedin', 'x'] });
+  const before = queueCount();
+  // The SAME logical request delivered twice with byte-different bodies
+  // (a webhook retry): topic case differs, platform order differs. Only
+  // correct normalization (lowercased topic, sorted platforms) can derive
+  // the same idempotency key — gut the normalization and the two deliveries
+  // stay DIFFERENT keys, so the row COLLAPSE (the one-registration punch)
+  // cannot happen and this test goes RED.
+  const firstBody = JSON.stringify({
+    task_id: 'task-a-1', topic: 'Dup Delivery', platforms: ['linkedin', 'x'],
+  });
+  const secondBody = JSON.stringify({
+    task_id: 'task-a-1', topic: 'dup delivery', platforms: ['x', 'linkedin'],
+  });
 
   const first = await publishPOST(requestFor(HOST_A, 'company-a', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body,
+    body: firstBody,
   }));
   assert.equal(first.status, 201);
-  // The SAME webhook delivered twice (a network retry of the SAME request).
+  const firstItem = ((await first.json()) as { publish: { id: string } }).publish;
   const second = await publishPOST(requestFor(HOST_A, 'company-a', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body,
+    body: secondBody,
   }));
-  assert.equal(second.status, 201);
+  assert.equal(second.status, 201, 'the replay is acknowledged, not dropped');
+  const secondItem = ((await second.json()) as { publish: { id: string } }).publish;
 
-  // The dedupe contract (F03.5): the deterministic key derives from
-  // company+task+topic+platforms — identical for both deliveries — so a
-  // double dispatch lands on exactly ONE canonical card, never two. If the
-  // key stops being stable (e.g. case-sensitive topic or sorted platforms
-  // drift) a duplicate delivery would double the side effects and this test
-  // turns RED.
-  const firstRow = queryOne<{ company_id: string; task_id: string | null; topic: string; platforms: string | null }>(
-    'SELECT company_id, task_id, topic, platforms FROM publish_queue ORDER BY created_at DESC LIMIT 2 OFFSET 1',
+  // THE one-registration consequence: a duplicate delivery must NOT create a
+  // second row — the old one-row-per-request behavior is defeated. Both
+  // deliveries are acknowledged with the SAME queue row.
+  assert.equal(firstItem.id, secondItem.id, 'duplicate deliveries collapse to ONE queue row');
+  assert.equal(queueCount(), before + 1, 'exactly one queue row from two deliveries');
+
+  const row = queryOne<{ idempotency_key: string | null }>(
+    'SELECT idempotency_key FROM publish_queue WHERE id = ?', [firstItem.id],
   );
-  const secondRow = queryOne<{ company_id: string; task_id: string | null; topic: string; platforms: string | null }>(
-    'SELECT company_id, task_id, topic, platforms FROM publish_queue ORDER BY created_at DESC LIMIT 1',
-  );
-  assert.ok(firstRow && secondRow, 'both deliveries must enqueue their own row');
-  const parsedFirst = JSON.parse(firstRow.platforms ?? '[]') as string[];
-  const parsedSecond = JSON.parse(secondRow.platforms ?? '[]') as string[];
-  const k1 = publishIdempotencyKey({
-    companyId: firstRow.company_id, taskId: firstRow.task_id,
-    topic: firstRow.topic, platforms: parsedFirst,
-  });
-  const k2 = publishIdempotencyKey({
-    companyId: secondRow.company_id, taskId: secondRow.task_id,
-    topic: secondRow.topic, platforms: parsedSecond,
-  });
-  assert.equal(k1, k2, 'duplicate deliveries must derive the SAME idempotency key (one card, one execution)');
+  assert.ok(row?.idempotency_key, 'the enqueued row carries the stamped idempotency key');
 });
 
 // ─── resolvePublishCompany: registry-bound identity ─────────────────────────

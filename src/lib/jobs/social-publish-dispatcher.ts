@@ -281,11 +281,50 @@ export async function runSocialPublishDispatcherSweep(): Promise<{
         });
 
       // Persist the key BEFORE ingest so any crash path still dedupes.
-      run(`UPDATE publish_queue SET idempotency_key = ?, updated_at = ? WHERE id = ?`, [
-        idempotencyKey,
-        nowIso,
-        row.id,
-      ]);
+      // F20 repair: a DUPLICATE delivery (same logical request enqueued twice
+      // — a webhook retry) derives the SAME key; the UNIQUE index on
+      // (company_id, idempotency_key) then refuses the second persist. That is
+      // the reconcile-before-append rule: adopt the EXISTING card instead of
+      // failing the row. Row 2 links to the SAME canonical task as row 1 (one
+      // card, one execution), never a second card.
+      try {
+        run(`UPDATE publish_queue SET idempotency_key = ?, updated_at = ? WHERE id = ?`, [
+          idempotencyKey,
+          nowIso,
+          row.id,
+        ]);
+      } catch (uniqueErr) {
+        const dupMsg = String((uniqueErr as Error).message);
+        if (!/UNIQUE/.test(dupMsg)) {
+          throw uniqueErr;
+        }
+        // Same logical request already dispatched under this key: find the
+        // row that owns it and adopt its canonical task (reconcile first).
+        const prior = queryOne<{ cc_task_id: string | null }>(
+          `SELECT cc_task_id FROM publish_queue
+            WHERE company_id = ? AND idempotency_key = ?
+            ORDER BY created_at ASC LIMIT 1`,
+          [row.company_id, idempotencyKey],
+        );
+        run(
+          `UPDATE publish_queue SET cc_task_id = ?,
+             lease_owner = NULL, lease_expires_at = NULL, retry_at = NULL,
+             error = NULL, status = 'running',
+             last_attempt_at = ?, updated_at = ?
+           WHERE id = ?`,
+          [prior?.cc_task_id ?? null, nowIso, nowIso, row.id],
+        );
+        broadcast({
+          type: `publish_state:${row.company_id}`,
+          payload: { id: row.id, status: 'running', task_id: prior?.cc_task_id ?? null },
+        });
+        if (prior?.cc_task_id) {
+          dispatched++;
+          continue;
+        }
+        // No prior card recorded (crash between the first row's key persist
+        // and its ingest): let THIS row own the key and proceed to ingest.
+      }
 
       let createdTaskId: string | null = row.task_id; // a pre-bound task is reused
       let deduped = false;
