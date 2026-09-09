@@ -18,6 +18,8 @@ import { useThemeDraftCore, type ServerDraft } from './useThemeDraft';
 import { SaveBadge, ConflictBanner } from './SaveBadge';
 
 export interface WizardState {
+  planner_url?: string | null;
+  handoff?: {state:string;task_id:string|null;error:string|null;budget_usd?:number|null}|null;
   company_id: string;
   cycle: { id: string; week_start_local: string; timezone: string; state: string };
   session: { id: string; revision: number; status: string; saved_at: string | null; submitted_at: string | null };
@@ -95,12 +97,16 @@ export function ThemeWizard({ initial }: { initial: WizardState }) {
     setSubmitting(true);
     setSubmitError(null);
     try {
-      await wizard.saveNow();
+      const savedRevision = await wizard.saveNow();
+      if (savedRevision === null) {
+        setSubmitError("Your draft needs attention. Resolve the save issue before submitting.");
+        return;
+      }
       const res = await fetch('/api/social-theme/submit', {
         method: 'POST',
         credentials: 'include',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ expected_revision: wizard.revision }),
+        body: JSON.stringify({ expected_revision: savedRevision }),
       });
       if (res.status === 409) {
         const body = (await res.json()) as { server?: ServerDraft };
@@ -198,12 +204,15 @@ export function ThemeWizard({ initial }: { initial: WizardState }) {
           </p>
         ) : (
           <p style={{ color: '#16a34a' }}>
-            Your answers were submitted{initial.session.submitted_at ? ` on ${new Date(initial.session.submitted_at).toLocaleString()}` : ''}. This week&apos;s plan is being produced.
+            Your answers were submitted{initial.session.submitted_at ? ` on ${new Date(initial.session.submitted_at).toLocaleString()}` : ''}. Your production request is saved.
           </p>
         )}
         <p style={{ color: '#555' }}>
-          Real production stage, previews and QC appear here and on your weekly video link once the first preview renders.
+          {initial.handoff?.error ? 'Your answers are saved, but the planner handoff needs attention.' : initial.handoff?.state === 'awaiting_budget' ? 'Your plan is on the board and needs an approved production budget before work can start.' : initial.handoff?.state === 'done' ? 'Your plan is complete and ready to review.' : initial.handoff?.state === 'in_progress' ? 'Your plan is being prepared. Open your planner to check progress.' : initial.handoff?.task_id ? 'Your plan is on the board. Production has not been confirmed complete.' : 'Your answers are saved. The planner handoff is pending.'}
         </p>
+        {initial.handoff?.budget_usd != null && <p>Approved production limit: ${initial.handoff.budget_usd} for this week.</p>}
+        <button type="button" onClick={() => window.location.reload()} style={btn}>Refresh status</button>
+        {initial.planner_url && <p><a href={initial.planner_url} target="_blank" rel="noopener noreferrer">Open your Google Sheets planner</a></p>}
         {/* F38 player reuse: the preview link (delivered in your invitation
             conversation) opens the company-bound HTML video player at
             /social/media/{assetId} — same component family, same session

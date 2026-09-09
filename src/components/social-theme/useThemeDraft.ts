@@ -65,6 +65,8 @@ export function useThemeDraftCore(
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const revisionRef = useRef(initialRevision);
   const answersRef = useRef(initialAnswers);
+  const saveQueueRef = useRef<Promise<number | null>>(Promise.resolve(initialRevision));
+  const conflictRef = useRef<ServerDraft | null>(null);
 
   // Local unsent cache per field (company/session-scoped).
   const cacheLocal = useCallback((field: string, value: string | null) => {
@@ -76,46 +78,55 @@ export function useThemeDraftCore(
     } catch { /* storage unavailable — server autosave still owns durability */ }
   }, [companyId, sessionId]);
 
-  const flush = useCallback(async (): Promise<void> => {
-    if (timerRef.current) {
-      clearTimeout(timerRef.current);
-      timerRef.current = null;
-    }
-    const dirty = dirtyRef.current;
-    if (!Object.keys(dirty).length) return;
-    dirtyRef.current = {};
-    setSaveState('saving');
-    try {
-      const res = await fetch('/api/social-theme/session', {
-        method: 'PATCH',
-        credentials: 'include',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ answers: dirty, expected_revision: revisionRef.current }),
-      });
-      if (res.status === 409) {
-        const body = (await res.json()) as { server?: ServerDraft };
-        setSaveState('conflict');
-        setConflict(body.server || null);
-        options.onConflict?.(body.server || { revision: revisionRef.current, answers: answersRef.current, saved_at: null });
-        return;
+  const flush = useCallback((): Promise<number | null> => {
+    const pending = saveQueueRef.current.then(async (): Promise<number | null> => {
+      if (conflictRef.current) return null;
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
       }
-      if (!res.ok) {
-        // Put the fields back in the dirty set — retry needed, nothing lost.
+      const dirty = dirtyRef.current;
+      if (!Object.keys(dirty).length) return revisionRef.current;
+      dirtyRef.current = {};
+      setSaveState('saving');
+      try {
+        const res = await fetch('/api/social-theme/session', {
+          method: 'PATCH',
+          credentials: 'include',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ answers: dirty, expected_revision: revisionRef.current }),
+        });
+        if (res.status === 409) {
+          const body = (await res.json()) as { server?: ServerDraft };
+          setSaveState('conflict');
+          dirtyRef.current = { ...dirty, ...dirtyRef.current };
+          conflictRef.current = body.server || { revision: revisionRef.current, answers: answersRef.current, saved_at: null };
+          setConflict(conflictRef.current);
+          options.onConflict?.(conflictRef.current);
+          return null;
+        }
+        if (!res.ok) {
+          // Put the fields back in the dirty set — retry needed, nothing lost.
+          dirtyRef.current = { ...dirty, ...dirtyRef.current };
+          setSaveState('retry');
+          return null;
+        }
+        const body = (await res.json()) as { revision: number; saved_at: string | null };
+        revisionRef.current = body.revision;
+        setRevision(body.revision);
+        setSaveState('saved');
+        for (const field of Object.keys(dirty)) {
+          if (!(field in dirtyRef.current)) cacheLocal(field, null);
+        }
+        return body.revision;
+      } catch {
         dirtyRef.current = { ...dirty, ...dirtyRef.current };
         setSaveState('retry');
-        return;
+        return null;
       }
-      const body = (await res.json()) as { revision: number; saved_at: string | null };
-      revisionRef.current = body.revision;
-      setRevision(body.revision);
-      setSaveState('saved');
-      for (const field of Object.keys(dirty)) {
-        cacheLocal(field, dirty[field] ? dirty[field] : null);
-      }
-    } catch {
-      dirtyRef.current = { ...dirty, ...dirtyRef.current };
-      setSaveState('retry');
-    }
+    });
+    saveQueueRef.current = pending;
+    return pending;
   }, [cacheLocal, options]);
 
   const onChange = useCallback((field: string, next: string) => {
@@ -170,6 +181,9 @@ export function useThemeDraftCore(
     revisionRef.current = server.revision;
     setRevision(server.revision);
     setAnswers(server.answers);
+    answersRef.current = server.answers;
+    dirtyRef.current = {};
+    conflictRef.current = null;
     setConflict(null);
     setSaveState('saved');
   }, []);
@@ -195,6 +209,9 @@ export function useThemeDraftCore(
         revisionRef.current = saved.revision;
         setRevision(saved.revision);
         setAnswers(merged);
+        answersRef.current = merged;
+        dirtyRef.current = {};
+        conflictRef.current = null;
         setConflict(null);
         setSaveState('saved');
       } else {
