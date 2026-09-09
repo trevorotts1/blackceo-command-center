@@ -218,6 +218,11 @@ function isInterviewGateExempt(pathname: string): boolean {
   // lock the operator out of /settings, which is the one place they could fix
   // configuration (env vars, build state, provisioning).
   if (pathname === '/settings' || pathname.startsWith('/settings/')) return true;
+  // F27 social-theme mini app: the client's weekly planner surface is
+  // reachable on its own invitation/session terms (purpose-bound cookie),
+  // exactly like /interview — the operator's AI-Workforce completion state
+  // must not gate a CLIENT's private mini app.
+  if (pathname === '/social-theme' || pathname.startsWith('/social-theme/')) return true;
   // The Anthology participant token page is a public, self-authenticating
   // surface for external co-authors (SPEC 11.3) — it must never be redirected
   // to the operator interview shell.
@@ -454,6 +459,17 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
 
   // These routes verify narrow signed, expiry-bound capabilities themselves.
   if (pathname === '/api/auth/interview-session' || pathname === '/api/interview/remote') return NextResponse.next();
+
+  // F27 social-theme mini app: every route under /api/social-theme/* verifies
+  // its own narrow, expiry-bound capability itself — the social-theme session
+  // cookie (HMAC grant bound to session+company+cycle, purpose
+  // 'social-theme-session') or operator/service bearer on the two operator
+  // surfaces. The tenant passthrough below cannot resolve these callers (a
+  // mini-app browser deliberately holds NO mc_tenant_session), so exempting
+  // them here is the same shape as the interview-session line above — the
+  // route-level authz is the only gate. Mutating routes additionally enforce
+  // same-origin + the signed CSRF cookie in their own handlers.
+  if (pathname === '/api/social-theme' || pathname.startsWith('/api/social-theme/')) return NextResponse.next();
 
   // Layer 1: Cloudflare Access.
   // When REQUIRE_CF_ACCESS is on, every non-health route must carry the CF

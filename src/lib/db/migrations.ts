@@ -6701,6 +6701,120 @@ export const migrations: Migration[] = [
     },
   },
 
+  {
+    // F27 (social/wf11-theme-miniapp) — the weekly theme mini app's durable
+    // state. Five tables, per the W0 frozen "weekly mini app data and API"
+    // contract:
+    //
+    //   social_cycles            — one row per (company_id, week_start_local),
+    //                              UNIQUE so week 2 can never overwrite week 1
+    //                              and client A can never see client B's week.
+    //   social_theme_sessions    — ONE current draft per cycle (UNIQUE
+    //                              company_id+cycle_id); answers_json +
+    //                              monotonic `revision` are the two-tab
+    //                              conflict currency: PATCH must carry the
+    //                              expected revision, 409 preserves both sides.
+    //   social_invitations       — SHA-256 token_hash ONLY (the raw token is
+    //                              minted once in the POST /invitations
+    //                              response and queued for delivery; it never
+    //                              lands in logs/analytics). purpose is
+    //                              'social-theme' — DISTINCT from the
+    //                              workforce-interview namespace so the two
+    //                              intake flows can never share a session.
+    //   social_policies          — role/provider/mode/budget choices, reminder
+    //                              preferences; policy_revision stamps cycles.
+    //   social_notification_outbox — the canonical dispatch record submit()
+    //                              writes inside the SAME transaction that
+    //                              seals the revision; dedupe_key unique so a
+    //                              double submit writes exactly one row.
+    //
+    // WF00 owns the reserved-migration-ID ledger — 139 is the next free id
+    // after 138 (F38 social_media_assets).
+    id: '139',
+    name: 'social_theme_miniapp',
+    up: (db) => {
+      console.log('[Migration 139] Creating social_cycles, social_theme_sessions, social_invitations, social_policies, social_notification_outbox (F27)...');
+      db.exec(`CREATE TABLE IF NOT EXISTS social_cycles (
+        id TEXT PRIMARY KEY,
+        company_id TEXT NOT NULL,
+        week_start_local TEXT NOT NULL,
+        timezone TEXT NOT NULL,
+        policy_revision INTEGER NOT NULL DEFAULT 1,
+        state TEXT NOT NULL DEFAULT 'draft',
+        next_action_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (company_id, week_start_local)
+      )`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_social_cycles_company_state
+        ON social_cycles(company_id, state, next_action_at)`);
+      db.exec(`CREATE TABLE IF NOT EXISTS social_theme_sessions (
+        id TEXT PRIMARY KEY,
+        company_id TEXT NOT NULL,
+        cycle_id TEXT NOT NULL,
+        questionnaire_version TEXT NOT NULL DEFAULT '1',
+        answers_json TEXT NOT NULL DEFAULT '{}',
+        revision INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'draft',
+        saved_at TEXT,
+        submitted_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (company_id, cycle_id)
+      )`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_social_theme_sessions_company
+        ON social_theme_sessions(company_id, status)`);
+      db.exec(`CREATE TABLE IF NOT EXISTS social_invitations (
+        id TEXT PRIMARY KEY,
+        token_hash TEXT NOT NULL UNIQUE,
+        purpose TEXT NOT NULL DEFAULT 'social-theme',
+        company_id TEXT NOT NULL,
+        cycle_id TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        used_at TEXT,
+        revoked_at TEXT,
+        created_at TEXT NOT NULL
+      )`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_social_invitations_session
+        ON social_invitations(company_id, session_id)`);
+      db.exec(`CREATE TABLE IF NOT EXISTS social_policies (
+        company_id TEXT PRIMARY KEY,
+        policy_revision INTEGER NOT NULL DEFAULT 1,
+        role_model TEXT,
+        provider TEXT,
+        mode TEXT NOT NULL DEFAULT 'standard',
+        budget_usd REAL,
+        reminder_day TEXT,
+        reminder_time TEXT,
+        reminders_paused INTEGER NOT NULL DEFAULT 0,
+        enabled_account_ids TEXT NOT NULL DEFAULT '[]',
+        approval_policy TEXT NOT NULL DEFAULT 'client-approve',
+        evergreen_policy TEXT NOT NULL DEFAULT 'off',
+        updated_at TEXT NOT NULL
+      )`);
+      db.exec(`CREATE TABLE IF NOT EXISTS social_notification_outbox (
+        id TEXT PRIMARY KEY,
+        company_id TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        dedupe_key TEXT NOT NULL,
+        destination_ref TEXT NOT NULL,
+        subject TEXT NOT NULL DEFAULT '',
+        body TEXT NOT NULL DEFAULT '',
+        delivery_state TEXT NOT NULL DEFAULT 'pending',
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        last_attempt_at TEXT,
+        retry_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (company_id, dedupe_key)
+      )`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_social_notification_outbox_pending
+        ON social_notification_outbox(delivery_state, retry_at)`);
+      console.log('[Migration 139] social theme mini app tables ready');
+    },
+  },
+
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner
