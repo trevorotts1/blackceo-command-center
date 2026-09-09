@@ -3,6 +3,18 @@
 import { useState } from 'react';
 import { Megaphone, Check, Loader2, AlertCircle } from 'lucide-react';
 import type { Task } from '@/lib/types';
+import type { SocialSummaryMessage } from '@/lib/social/summary';
+
+/**
+ * F30 — client completion + exception summary props. When `summary` is
+ * present (built from PERSISTED publish/task state by the caller), the status
+ * area renders the truthful stage + next action + owner instead of a bare
+ * "Queued" chip. Never an unsupported completion promise: the caller derives
+ * the summary via buildPublishMessage/buildTaskSummary from persisted rows.
+ */
+export interface PublishSummaryAreaProps {
+  summary?: SocialSummaryMessage | null;
+}
 
 /**
  * F06 — a connected-account row from the per-account plan (the Skill 57
@@ -41,6 +53,12 @@ interface MarketingPublishButtonProps {
    * Called after a successful queue POST (passes the new publish id).
    */
   onQueued?: (publishId: string) => void;
+  /**
+   * F30: the persisted-state client summary for this task's publish intent.
+   * Renders the truthful stage/next-action/owner line under the button when
+   * present.
+   */
+  summary?: SocialSummaryMessage | null;
 }
 
 /**
@@ -93,6 +111,7 @@ export function MarketingPublishButton({
   platforms,
   className,
   onQueued,
+  summary,
 }: MarketingPublishButtonProps) {
   const [state, setState] = useState<'idle' | 'queuing' | 'queued' | 'error'>('idle');
   const [error, setError] = useState<string | null>(null);
@@ -208,20 +227,56 @@ export function MarketingPublishButton({
   }
 
   return (
-    <button
-      type="button"
-      onClick={handleClick}
-      disabled={resolvedPlatforms.length === 0 && state !== 'error'}
-      title={
-        state === 'error' && error
-          ? `Failed: ${error}`
-          : emptyPlanHint ||
-            `Queue this topic for the Skill 35 publishing pipeline (platforms: ${resolvedPlatforms.join(', ') || 'none derived from the account plan'})`
-      }
-      className={[base, styles, className || ''].join(' ').trim()}
+    <span className="inline-flex flex-col gap-1">
+      <button
+        type="button"
+        onClick={handleClick}
+        disabled={resolvedPlatforms.length === 0 && state !== 'error'}
+        title={
+          state === 'error' && error
+            ? `Failed: ${error}`
+            : emptyPlanHint ||
+              `Queue this topic for the Skill 35 publishing pipeline (platforms: ${resolvedPlatforms.join(', ') || 'none derived from the account plan'})`
+        }
+        className={[base, styles, className || ''].join(' ').trim()}
+      >
+        {label}
+      </button>
+      {summary && <PublishSummaryArea summary={summary} />}
+    </span>
+  );
+}
+
+/**
+ * F30 — the status area under the Publish button. Renders the persisted-state
+ * summary verbatim: truthful stage, next action with owner, retry deadline
+ * when one exists. A queued job says queued; an unanswered theme says
+ * awaiting theme; scheduled posts say scheduled.
+ */
+export function PublishSummaryArea({ summary }: PublishSummaryAreaProps) {
+  if (!summary) return null;
+  const ownerLabel = summary.owner === 'client' ? 'Your move' : 'System';
+  return (
+    <span
+      data-testid="publish-summary-area"
+      className={`inline-flex flex-col text-xs leading-snug px-2 py-1 rounded ${
+        summary.stage === 'failed' || summary.stage === 'overdue'
+          ? 'bg-red-50 text-red-700'
+          : summary.owner === 'client'
+            ? 'bg-amber-50 text-amber-800'
+            : 'bg-gray-50 text-gray-600'
+      }`}
     >
-      {label}
-    </button>
+      <span className="font-semibold capitalize">{summary.stage}</span>
+      <span>{summary.nextAction}</span>
+      <span className="opacity-70">
+        {ownerLabel}
+        {summary.retryDeadline ? ` · retry by ${new Date(summary.retryDeadline).toLocaleTimeString()}` : ''}
+      </span>
+      {summary.failures.length > 0 && (
+        <span className="opacity-80">{summary.failures.join('; ')}</span>
+      )}
+    </span>
   );
 }
 
