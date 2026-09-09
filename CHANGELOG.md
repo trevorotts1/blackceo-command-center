@@ -1,3 +1,10 @@
+## [v7.3.1] — 2026-09-09 — Social planner ownership and truthful publication status
+
+- Prevent simultaneous workers and expired owners from completing the same social operation. Persist ownership, retries and completion across restarts; reserve provider capacity transactionally.
+- A completed agent task now requires publication verification instead of falsely reporting that a social post is live. A scheduler-owned, per-account readback queue uses registered, hashed production inventories, bounded retries and overdue escalation.
+- Isolate browser acceptance from live credentials/background jobs; verify saved-draft resume and company/week separation without silently skipping failed setup.
+- Validation: 153 social Node tests, 9 component tests, 2 Chromium tests; TypeScript and targeted lint passed. Real provider publication and fleet deployment still require separate installation evidence.
+
 ## [v7.3.0] — 2026-09-09 — Social planner W4+W5: portable deployment health, resumable setup, measured outcomes, final regression coverage
 
 ### Added

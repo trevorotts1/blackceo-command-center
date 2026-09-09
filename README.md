@@ -258,3 +258,12 @@ The model is resolved from `model_registry` for the selected provider when it ha
 ### Adding a provider
 
 Insert one entry into `RESEARCH_PROVIDERS` in **`src/lib/research/provider-discovery.ts`** at the right precedence (`envCandidates` in priority order, `slug`, `displayName`, `defaultModel`, `callSummary`), then add a normalizing adapter in **`src/lib/research/providers.ts`**. `GET /api/operator/research/availability` and the page pick it up automatically. Run the selection unit test with `npm run test:unit`.
+
+
+### Social planner reliability — v7.3.1
+
+Social tasks use durable ownership checks so expired workers cannot settle a
+new worker's operation. Completing an agent task does not prove a social post
+was published: the client sees that publication verification is required until
+there is actual provider evidence. Scheduled readback tasks keep verification owned, retry within limits, and escalate overdue work without reposting. Browser acceptance covers draft resume and
+company/week isolation using an isolated database and disabled background jobs.
