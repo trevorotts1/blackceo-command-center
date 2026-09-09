@@ -99,6 +99,10 @@ export default defineConfig({
       // a hint (never the hardcoded quartet), accounts render derives
       // platforms, self-fetch resolves the connected system.
       'tests/unit/social-f06-default-path-render.test.tsx',
+      // F30 — persisted-state client summary status area: queued says queued,
+      // awaiting theme owned by client, retry deadline + visible failure,
+      // no fabricated completion, bare button unchanged without a summary.
+      'tests/unit/social-f30-summary-area-render.test.tsx',
     ],
     env: { NODE_ENV: 'test' },
     testTimeout: 15000,
