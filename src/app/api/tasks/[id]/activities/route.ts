@@ -3,6 +3,7 @@
  * Endpoints for logging and retrieving task activities
  */
 
+import { createHash } from 'crypto';
 import { NextRequest, NextResponse } from 'next/server';
 import { getDb } from '@/lib/db';
 import { broadcast } from '@/lib/events';
@@ -104,6 +105,21 @@ export async function GET(request: NextRequest, props: { params: Promise<{ id: s
 /**
  * POST /api/tasks/[id]/activities
  * Log a new activity for a task
+ *
+ * PRES-040 (W3 WF12-B) — structured phase events are first-class, never
+ * silently strippable:
+ *   - `scores` (structured QC grades) is ACCEPTED and persisted to
+ *     task_activities.scores (migration 141); unknown-key 400/422 fallbacks
+ *     in producers must no longer drop it to report success.
+ *   - `metadata.event_id` + `metadata.schema_version` carry the producer's
+ *     event identity. The (task_id, event_id) key is claimed in
+ *     task_activity_events: a replay of the same key returns the ORIGINAL
+ *     activity (replay-once, no duplicate phase event). A changed payload on
+ *     the same key is a 409 conflict. Text notes without event_id are never
+ *     deduped — a human note is always a new row.
+ *   - Response echoes `structured_ack` (the event key claim) separately from
+ *     the note write, so a producer can distinguish "text landed" from
+ *     "structured event acknowledged" instead of conflating them.
  */
 export async function POST(request: NextRequest, props: { params: Promise<{ id: string }> }) {
   const params = await props.params;
@@ -120,29 +136,113 @@ export async function POST(request: NextRequest, props: { params: Promise<{ id: 
       );
     }
 
-    const { activity_type, message, agent_id, metadata } = validation.data;
+    const { activity_type, message, agent_id, metadata, scores } = validation.data;
 
     const db = getDb();
-    const id = crypto.randomUUID();
 
     // Normalize metadata to ONE JSON string for storage regardless of which
     // accepted shape arrived (object — the real-world shape every caller
     // sends — or a pre-stringified string; never double-encode the latter).
     const metadataStr =
       metadata == null ? null : typeof metadata === 'string' ? metadata : JSON.stringify(metadata);
+    const scoresStr =
+      scores == null ? null : typeof scores === 'string' ? scores : JSON.stringify(scores);
 
-    // Insert activity
-    db.prepare(`
-      INSERT INTO task_activities (id, task_id, agent_id, activity_type, message, metadata)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(
-      id,
-      taskId,
-      agent_id || null,
-      activity_type,
-      message,
-      metadataStr
-    );
+    // PRES-040 — derive the producer event identity from metadata WITHOUT
+    // trusting its shape: malformed JSON or a non-object yields no key (the
+    // row still writes as a plain text note).
+    let eventId: string | null = null;
+    if (typeof metadata === 'object' && metadata !== null) {
+      const v = (metadata as Record<string, unknown>).event_id;
+      if (typeof v === 'string' && v.length > 0 && v.length <= 128) eventId = v;
+    } else if (typeof metadataStr === 'string') {
+      try {
+        const parsed = JSON.parse(metadataStr) as unknown;
+        if (parsed && typeof parsed === 'object') {
+          const v = (parsed as Record<string, unknown>).event_id;
+          if (typeof v === 'string' && v.length > 0 && v.length <= 128) eventId = v;
+        }
+      } catch { /* malformed — no key */ }
+    }
+    const eventHash = (() => {
+      try {
+        return createHash('sha256').update(JSON.stringify({ activity_type, message, metadata: metadataStr, scores: scoresStr })).digest('hex');
+      } catch {
+        return '';
+      }
+    })();
+
+    const hasScoresCol = (() => {
+      try {
+        return (
+          db.prepare(`SELECT count(*) AS n FROM pragma_table_info('task_activities') WHERE name = 'scores'`).get() as { n: number }
+        ).n > 0;
+      } catch {
+        return false;
+      }
+    })();
+    const hasEventLedger = (() => {
+      try {
+        return (
+          db.prepare(`SELECT count(*) AS n FROM sqlite_master WHERE type='table' AND name='task_activity_events'`).get() as { n: number }
+        ).n > 0;
+      } catch {
+        return false;
+      }
+    })();
+
+    // Replay-once: the same (task, event) key returns the original row.
+    if (eventId && hasEventLedger) {
+      const prior = db
+        .prepare(`SELECT activity_id, event_hash FROM task_activity_events WHERE task_id = ? AND event_id = ?`)
+        .get(taskId, eventId) as { activity_id: string; event_hash: string } | undefined;
+      if (prior) {
+        if (prior.event_hash && eventHash && prior.event_hash !== eventHash) {
+          return NextResponse.json(
+            { error: `conflicting replay for activity event ${eventId}: payload differs from the acknowledged event` },
+            { status: 409 },
+          );
+        }
+        const original = db
+          .prepare(`SELECT * FROM task_activities WHERE id = ?`)
+          .get(prior.activity_id) as Record<string, unknown> | undefined;
+        if (original) {
+          return NextResponse.json(
+            { ...(original as object), structured_ack: { event_id: eventId, status: 'duplicate' } },
+            { status: 200 },
+          );
+        }
+      }
+    }
+
+    const id = crypto.randomUUID();
+
+    // Insert activity (transactional with the event-key claim so a crash
+    // between the two can never orphan a key or double-claim it).
+    const insertActivity = hasScoresCol
+      ? db.prepare(`
+        INSERT INTO task_activities (id, task_id, agent_id, activity_type, message, metadata, scores)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `)
+      : db.prepare(`
+        INSERT INTO task_activities (id, task_id, agent_id, activity_type, message, metadata)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `);
+    const claimEvent = hasEventLedger
+      ? db.prepare(`
+        INSERT INTO task_activity_events (task_id, event_id, activity_id, event_hash)
+        VALUES (?,?,?,?)
+      `)
+      : null;
+    const writeTx = db.transaction(() => {
+      if (hasScoresCol) {
+        insertActivity.run(id, taskId, agent_id || null, activity_type, message, metadataStr, scoresStr);
+      } else {
+        insertActivity.run(id, taskId, agent_id || null, activity_type, message, metadataStr);
+      }
+      if (claimEvent && eventId) claimEvent.run(taskId, eventId, id, eventHash);
+    });
+    writeTx();
 
     // B-U6 / U20 — declared-vs-used comparator. Only a `kind: 'persona_used'`
     // metadata payload (the onboarding producer's report of the personas it
@@ -163,10 +263,15 @@ export async function POST(request: NextRequest, props: { params: Promise<{ id: 
       recordPersonaUsedAndCompare(taskId, parsedMetadataForCompare);
     }
 
-    // Get the created activity with agent info
+    // Get the created activity with agent info. SELECT names every column
+    // explicitly — `a.*` on a pre-migration box has no scores column and a
+    // `scores` key must still be present (null) so producers parsing the ACK
+    // never branch on box version.
     const activity = db.prepare(`
-      SELECT 
-        a.*,
+      SELECT
+        a.id, a.task_id, a.agent_id, a.activity_type, a.message, a.metadata,
+        a.created_at,
+        ${hasScoresCol ? 'a.scores,' : 'NULL AS scores,'}
         ag.id as agent_id,
         ag.name as agent_name,
         ag.avatar_emoji as agent_avatar_emoji
@@ -203,7 +308,19 @@ export async function POST(request: NextRequest, props: { params: Promise<{ id: 
       payload: result,
     });
 
-    return NextResponse.json(result, { status: 201 });
+    // PRES-040 — the structured ACK rides ALONGSIDE the row (never instead
+    // of it): event_id echoes the claimed key, status 'accepted' marks the
+    // first claim. A producer holding this response knows BOTH the note
+    // landed AND the structured event is durable — the conflation that let
+    // stripped fallbacks report success is structurally impossible.
+    return NextResponse.json(
+      {
+        ...result,
+        scores: (activity as { scores?: string | null }).scores ?? null,
+        structured_ack: eventId ? { event_id: eventId, status: 'accepted' } : null,
+      },
+      { status: 201 },
+    );
   } catch (error) {
     console.error('Error creating activity:', error);
     return NextResponse.json(

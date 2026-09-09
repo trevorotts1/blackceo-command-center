@@ -13,6 +13,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getDb } from '@/lib/db';
 import {
+  activitySchemaInfo,
   childPhaseLabel,
   computePhaseProgress,
   PHASE_LABELS,
@@ -101,6 +102,14 @@ export async function GET(request: NextRequest) {
 
     // For each child, fetch its task_activities so the PhaseStepper can
     // derive per-label status from the 26 manifest phase ids.
+    //
+    // PRES-040 — degraded telemetry without blocking: each child's response
+    // carries telemetry { schema_version, event-backed, historical-only }.
+    // event-backed counts structured events (metadata.event_id on a known
+    // schema version); historical-only means the child's phases derive purely
+    // from legacy text notes with no structured key — visible to the CEO and
+    // client as repair-needed, while unrelated artifact production continues
+    // (this route never gates on it).
     const childrenWithPhases = children.map((child) => {
       const activities = db
         .prepare(
@@ -110,6 +119,15 @@ export async function GET(request: NextRequest) {
         activity_type: string;
         metadata?: string | null;
       }>;
+      let eventBacked = 0;
+      let historicalOnly = true;
+      let maxSchemaVersion: number | null = null;
+      for (const a of activities) {
+        const info = activitySchemaInfo(a);
+        if (info.version > 0) historicalOnly = false;
+        if (maxSchemaVersion == null || info.version > maxSchemaVersion) maxSchemaVersion = info.version;
+        if (info.eventId && info.known) eventBacked += 1;
+      }
 
       // FIX 50b — SELECT path alongside deliverable_type: the teleprompter is
       // detected by the basename of the registered path
@@ -146,6 +164,11 @@ export async function GET(request: NextRequest) {
         updated_at: child.updated_at,
         stage_slug: (child.stage_slug as string | null | undefined) ?? null,
         phase_label: phaseLabel,
+        telemetry: {
+          schema_version: maxSchemaVersion,
+          event_backed: eventBacked,
+          historical_only: historicalOnly,
+        },
         phases: progress.phases.map((p) => ({
           label: p.label,
           status: p.status,

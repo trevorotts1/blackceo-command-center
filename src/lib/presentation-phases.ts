@@ -91,6 +91,16 @@ export function isTeleprompterDeliverable(d: {
 
 export const PHASE_ACTIVITY_METADATA_KEY = 'phase_id';
 
+// PRES-040 (W3 WF12-B) — activity schema version the producer stamps in
+// metadata and the install preflight negotiates. Version 1 is the first
+// versioned shape: { phase_id, event_id, schema_version: 1, ... }. Unversioned
+// legacy rows (no schema_version) are read as version 0 — historical data,
+// never silently promoted to current. The consumer accepts 0 and 1; a future
+// version 2 event stays PENDING (not applied) until the consumer upgrades,
+// which is exactly the replay-after-upgrade path the producer outbox serves.
+export const ACTIVITY_SCHEMA_VERSION = 1;
+export const ACTIVITY_SCHEMA_KNOWN_VERSIONS: readonly number[] = [0, 1];
+
 /**
  * Extract the phase id from an activity's metadata. `metadata` may be a nested
  * object or a pre-stringified JSON string — validation.ts:152 accepts both.
@@ -98,6 +108,10 @@ export const PHASE_ACTIVITY_METADATA_KEY = 'phase_id';
  * An id that is NOT in PHASE_TO_LABEL is still RETURNED here; the reducer is
  * what records it in `unmapped`. Filtering unknown ids to null inside this
  * function reads as defensive and silently destroys `unmapped`.
+ *
+ * PRES-040: a caller that needs the version/event identity uses
+ * activitySchemaInfo() alongside — this function keeps its exact contract
+ * (phase id or null) so every existing reducer is untouched.
  */
 export function phaseIdOf(
   activity: { metadata?: string | Record<string, unknown> | null },
@@ -111,6 +125,31 @@ export function phaseIdOf(
   if (typeof obj !== 'object' || obj === null) return null;
   const v = (obj as Record<string, unknown>)[PHASE_ACTIVITY_METADATA_KEY];
   return typeof v === 'string' && v.length > 0 ? v : null;
+}
+
+/**
+ * PRES-040 companion to phaseIdOf: the structured identity of an activity
+ * row — schema version (0 when the producer stamped none), event id, and
+ * whether the consumer understands the version. Never throws. Malformed
+ * metadata yields { version: 0, eventId: null, known: true } — a historical
+ * text note, readable but never structured-verified.
+ */
+export function activitySchemaInfo(
+  activity: { metadata?: string | Record<string, unknown> | null },
+): { version: number; eventId: string | null; known: boolean } {
+  const raw = activity?.metadata;
+  if (raw == null) return { version: 0, eventId: null, known: true };
+  let obj: unknown = raw;
+  if (typeof raw === 'string') {
+    try { obj = JSON.parse(raw); } catch { return { version: 0, eventId: null, known: true }; }
+  }
+  if (typeof obj !== 'object' || obj === null) return { version: 0, eventId: null, known: true };
+  const rec = obj as Record<string, unknown>;
+  const v = rec.schema_version;
+  const version = typeof v === 'number' && Number.isFinite(v) ? Math.trunc(v) : 0;
+  const e = rec.event_id;
+  const eventId = typeof e === 'string' && e.length > 0 ? e : null;
+  return { version, eventId, known: (ACTIVITY_SCHEMA_KNOWN_VERSIONS as readonly number[]).includes(version) };
 }
 
 /**

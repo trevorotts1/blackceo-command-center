@@ -79,41 +79,83 @@ export async function GET(_request: NextRequest, props: { params: Promise<{ task
     // after the parent task, so child-card steppers resolve the same way.
     // On an un-migrated box the query still runs without task_id; elapsed_s
     // just stays null instead of crashing the whole endpoint (DATA-01).
+    // PRES-037 (W3 WF12-B) — current-registered-execution timing. The
+    // task's registered run is requester_session_key (set by the parent
+    // ingest when the producer supplies one); only that run's phase_exit
+    // rows feed the stepper, so out-of-order replays from an OLD run never
+    // move the current bars. Task-linked rows without a session key resolve
+    // via task_id (FIX 53 linkage). run_summary rows never feed per-label
+    // elapsed (same rule as before). Every SELECT is cooperative: a missing
+    // table/column (pre-migration box) degrades to null elapsed, never 500.
     let elapsed: Partial<Record<typeof PHASE_LABELS[number], number>> = {};
+    let timingBreakdown: Record<string, { wall_s: number; provider_s: number; queue_s: number; qc_s: number }> = {};
     try {
-      const hasTaskIdCol = (
-        db.prepare(
-          `SELECT count(*) AS n FROM pragma_table_info('presentation_stage_timings') WHERE name = 'task_id'`,
-        ).get() as { n: number }
-      ).n > 0;
-      if (hasTaskIdCol) {
-        const rows = db
-          .prepare(
-            `SELECT run_id, phase_id, duration_s
-               FROM presentation_stage_timings
-              WHERE task_id = ? AND event = 'phase_exit'
-              ORDER BY id ASC`,
-          )
-          .all(taskId) as Array<{
+      const timingCols = new Set(
+        (
+          db.prepare(`PRAGMA table_info(presentation_stage_timings)`).all() as { name: string }[]
+        ).map((c) => c.name),
+      );
+      if (timingCols.size > 0) {
+        const hasTaskIdCol = timingCols.has('task_id');
+        const hasSplit = timingCols.has('provider_s') && timingCols.has('queue_s') && timingCols.has('qc_s');
+        const selectSplit = hasSplit ? ', provider_s, queue_s, qc_s' : '';
+        type TimingRow = {
           run_id: string;
           phase_id: string | null;
           duration_s: number | null;
-        }>;
+          provider_s?: number | null;
+          queue_s?: number | null;
+          qc_s?: number | null;
+        };
+        let rows: TimingRow[] = [];
+        const registered = db
+          .prepare('SELECT requester_session_key FROM tasks WHERE id = ?')
+          .get(taskId) as { requester_session_key: string | null } | undefined;
+        const registeredRun = registered?.requester_session_key ?? null;
+        if (registeredRun) {
+          rows = db
+            .prepare(
+              `SELECT run_id, phase_id, duration_s${selectSplit}
+                 FROM presentation_stage_timings
+                WHERE run_id = ? AND event = 'phase_exit'
+                ORDER BY id ASC`,
+            )
+            .all(registeredRun) as TimingRow[];
+        } else if (hasTaskIdCol) {
+          rows = db
+            .prepare(
+              `SELECT run_id, phase_id, duration_s${selectSplit}
+                 FROM presentation_stage_timings
+                WHERE task_id = ? AND event = 'phase_exit'
+                ORDER BY id ASC`,
+            )
+            .all(taskId) as TimingRow[];
+        } else {
+          rows = db
+            .prepare(
+              `SELECT run_id, phase_id, duration_s${selectSplit}
+                 FROM presentation_stage_timings
+                WHERE run_id = ? AND event = 'phase_exit'
+                ORDER BY id ASC`,
+            )
+            .all(taskId) as TimingRow[];
+        }
         elapsed = phaseElapsedSeconds(rows);
-      } else {
-        const rows = db
-          .prepare(
-            `SELECT run_id, phase_id, duration_s
-               FROM presentation_stage_timings
-              WHERE run_id = ? AND event = 'phase_exit'
-              ORDER BY id ASC`,
-          )
-          .all(taskId) as Array<{
-          run_id: string;
-          phase_id: string | null;
-          duration_s: number | null;
-        }>;
-        elapsed = phaseElapsedSeconds(rows);
+        if (hasSplit) {
+          const acc = new Map<string, { wall_s: number; provider_s: number; queue_s: number; qc_s: number }>();
+          for (const r of rows) {
+            if (typeof r.phase_id !== 'string' || !r.phase_id) continue;
+            const label = PHASE_TO_LABEL[r.phase_id];
+            if (!label) continue;
+            const cur = acc.get(label) ?? { wall_s: 0, provider_s: 0, queue_s: 0, qc_s: 0 };
+            if (typeof r.duration_s === 'number' && Number.isFinite(r.duration_s)) cur.wall_s += r.duration_s;
+            if (typeof r.provider_s === 'number' && Number.isFinite(r.provider_s)) cur.provider_s += r.provider_s;
+            if (typeof r.queue_s === 'number' && Number.isFinite(r.queue_s)) cur.queue_s += r.queue_s;
+            if (typeof r.qc_s === 'number' && Number.isFinite(r.qc_s)) cur.qc_s += r.qc_s;
+            acc.set(label, cur);
+          }
+          timingBreakdown = Object.fromEntries(acc);
+        }
       }
     } catch (timingErr) {
       // Missing table (fresh box predating migration 127) or a transient
@@ -146,6 +188,11 @@ export async function GET(_request: NextRequest, props: { params: Promise<{ task
 
     // Per-step artifacts: count of deliverables per label (best-effort).
 
+    // PRES-037 — timing_breakdown is ADDITIVE: wall_s per label plus the
+    // provider/queue/QC split when the producer stamped it. Absent when the
+    // box predates migration 141 or no row carries a split ({} — never null,
+    // so the stepper can read breakdown[label] without a guard). elapsed_s
+    // keeps its exact FIX 53 meaning (wall seconds, null when unknown).
     return NextResponse.json({
       job_id: taskId,
       terminal,
@@ -162,6 +209,7 @@ export async function GET(_request: NextRequest, props: { params: Promise<{ task
         percent: step.status === 'done' ? 100 : step.status === 'in_progress' ? 50 : 0,
       })),
       unmapped: progress.unmapped,
+      timing_breakdown: timingBreakdown,
     });
   } catch (error) {
     console.error('[U060] GET /api/presentations/[taskId]/phases error:', error);

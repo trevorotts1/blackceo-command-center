@@ -18,12 +18,27 @@ import { FileText, ExternalLink, Download, AlertTriangle, CheckCircle, HelpCircl
 type Verification = 'verified' | 'size-only' | 'absent';
 type SizeSource = 'db' | 'stat' | 'unknown';
 
+// PRES-038 (W3 WF12-B) — lifecycle detail. status.* are independent facts
+// (registered/produced/qc_verified/uploaded/reachable/delivered); the badge
+// column renders produced vs registered/unavailable instead of trusting row
+// presence, and the GHL column renders the delivered-gated link with an
+// actionable retry affordance for uploaded-but-unconfirmed.
+interface DeliveryStatus {
+  registered: boolean; produced: boolean; qc_verified: boolean;
+  uploaded: boolean; reachable: boolean; delivered: boolean;
+  detail: string | null;
+}
+
 interface DeliveryRow {
   key: string; filename: string; label: string; min_bytes: number;
   present: boolean; produced_at: string | null; size_bytes: number | null;
   size_source: SizeSource; below_floor: boolean | null;
   mime_type: string | null; sha256: string | null;
   verification: Verification; ghl_url: string | null;
+  ghl_delivered_url?: string | null;
+  status?: DeliveryStatus;
+  ghl?: { url: string | null; reachable: boolean | null; checked_at: string | null };
+  qc?: { score: number | null; passed: boolean; scoring_path: string; attempt: number | null; scored_at: string } | null;
 }
 
 interface ExtraDeliverable { id: string; deliverable_type: string; title: string; path: string | null; created_at: string; }
@@ -76,12 +91,12 @@ export function PresentationDeliverablesPanel({ taskId }: PresentationDeliverabl
                 <tr key={row.key} className={`hover:bg-gray-50 ${!row.present ? 'opacity-60' : ''}`} data-testid={`presentation-deliverable-row-${row.key}`}>
                   <td className="px-4 py-2.5 text-gray-900 font-medium whitespace-nowrap">{row.label}</td>
                   <td className="px-4 py-2.5 text-gray-600 font-mono text-xs whitespace-nowrap">{row.filename}</td>
-                  <td className="px-4 py-2.5 whitespace-nowrap">{row.present ? <span className="inline-flex items-center gap-1 text-green-700 text-xs font-medium"><CheckCircle className="w-3.5 h-3.5" />Present</span> : <span className="inline-flex items-center gap-1 text-gray-400 text-xs font-medium"><Info className="w-3.5 h-3.5" />Not produced</span>}</td>
+                  <td className="px-4 py-2.5 whitespace-nowrap">{row.status ? (row.status.produced ? <span className="inline-flex items-center gap-1 text-green-700 text-xs font-medium"><CheckCircle className="w-3.5 h-3.5" />Produced</span> : row.status.registered ? <span className="inline-flex items-center gap-1 text-orange-700 text-xs font-medium" title={row.status.detail ?? 'Registered but currently unavailable'}><AlertTriangle className="w-3.5 h-3.5" />Registered/unavailable</span> : <span className="inline-flex items-center gap-1 text-gray-400 text-xs font-medium"><Info className="w-3.5 h-3.5" />Not produced</span>) : (row.present ? <span className="inline-flex items-center gap-1 text-green-700 text-xs font-medium"><CheckCircle className="w-3.5 h-3.5" />Present</span> : <span className="inline-flex items-center gap-1 text-gray-400 text-xs font-medium"><Info className="w-3.5 h-3.5" />Not produced</span>)}</td>
                   <td className="px-4 py-2.5 text-xs text-gray-500 whitespace-nowrap">{fmtTs(row.produced_at)}</td>
                   <td className="px-4 py-2.5 text-right whitespace-nowrap"><span className="text-xs text-gray-700">{fmtSize(row.size_bytes)}</span><span className="block text-[10px] text-gray-400">{srcLabel(row.size_source)}</span></td>
                   <td className="px-4 py-2.5 text-right whitespace-nowrap">{row.below_floor === true ? <span className="inline-flex items-center gap-1 text-orange-700 text-xs font-medium" data-testid={`below-floor-${row.key}`}><AlertTriangle className="w-3.5 h-3.5" />Below floor</span> : row.below_floor === false ? <span className="inline-flex items-center gap-1 text-green-700 text-xs font-medium"><CheckCircle className="w-3.5 h-3.5" />Above floor</span> : <span className="text-xs text-gray-400">—</span>}</td>
                   <td className="px-4 py-2.5 text-center whitespace-nowrap">{row.verification === 'verified' ? <span className="inline-flex items-center gap-1 text-green-700 text-xs font-medium" data-testid={`verification-${row.key}`}><CheckCircle className="w-3.5 h-3.5" />Verified</span> : row.verification === 'size-only' ? <span className="inline-flex items-center gap-1 text-blue-600 text-xs font-medium" data-testid={`verification-${row.key}`}><HelpCircle className="w-3.5 h-3.5" />Size-only</span> : <span className="text-xs text-gray-400" data-testid={`verification-${row.key}`}>—</span>}</td>
-                  <td className="px-4 py-2.5 text-center whitespace-nowrap">{row.ghl_url ? <a href={row.ghl_url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-indigo-600 hover:text-indigo-700 text-xs font-medium" data-testid={`ghl-link-${row.key}`}><ExternalLink className="w-3.5 h-3.5" />View</a> : <span className="text-xs text-gray-400" data-testid={`ghl-none-${row.key}`}>Not uploaded</span>}</td>
+                  <td className="px-4 py-2.5 text-center whitespace-nowrap">{(row.ghl_delivered_url ?? row.ghl_url) ? <a href={(row.ghl_delivered_url ?? row.ghl_url) as string} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-indigo-600 hover:text-indigo-700 text-xs font-medium" data-testid={`ghl-link-${row.key}`}><ExternalLink className="w-3.5 h-3.5" />View</a> : row.status?.uploaded ? <span className="text-xs text-orange-700" data-testid={`ghl-none-${row.key}`} title="Uploaded but readback unconfirmed — retry the GHL upload">Uploaded/unconfirmed — retry</span> : <span className="text-xs text-gray-400" data-testid={`ghl-none-${row.key}`}>Not uploaded</span>}</td>
                   <td className="px-4 py-2.5 text-center whitespace-nowrap">{isTp && row.present ? <div className="flex flex-col items-center gap-0.5"><a href={`/api/artifacts/${taskId}/${encodeURIComponent(row.filename)}`} className="inline-flex items-center gap-1 text-xs font-medium text-indigo-600 hover:text-indigo-700" data-testid="teleprompter-download"><Download className="w-3.5 h-3.5" />Download</a><span className="text-[10px] text-gray-400">In-app viewer ships in a later unit</span></div> : isTp && !row.present ? <span className="text-xs text-gray-400">—</span> : null}</td>
                 </tr>
               );

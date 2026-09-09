@@ -22,8 +22,15 @@ import {
   PRESENTATION_ARTIFACTS,
   MAGIC_VERIFIED_SET,
   SIZE_ONLY_SET,
+  guideFloorForTask,
   resolveFilename,
 } from '@/lib/presentation-deliverables';
+import {
+  identifyFile,
+  latestQcRevision,
+  readGhlLinkCheck,
+  verifyWithReceipt,
+} from '@/lib/presentation-verification';
 import { resolveActiveCompanyId } from '@/lib/company';
 import { tenantTaskWhere } from '@/lib/presentation-tenant-scope';
 import { resolvePresentationRunRoots } from '@/lib/presentation-run-roots';
@@ -33,6 +40,46 @@ export const revalidate = 0;
 
 type Verification = 'verified' | 'size-only' | 'absent';
 type SizeSource = 'db' | 'stat' | 'unknown';
+
+// PRES-038 — per-status lifecycle. Each flag is an independent fact with
+// its own evidence; the UI renders them separately instead of collapsing to
+// one `verified` badge:
+//   registered — a task_deliverables row names this artifact (claim exists).
+//   produced   — bytes on disk pass the shared bundle probe NOW (or size
+//                floor for size-only keys). A deleted/corrupt file flips this
+//                to false while registered stays true: registered/unavailable.
+//   qc_verified — a task_qc_results PASS exists AND the shared probe passes
+//                on the CURRENT bytes (revision + hash-bound, not row-bound).
+//   uploaded   — the GHL ledger names a URL for this artifact's path.
+//   reachable  — the last GHL readback for the CURRENT hash succeeded.
+//   delivered  — uploaded && reachable-current && produced. Only this state
+//                renders the green delivered link; uploaded-but-unconfirmed
+//                renders an actionable retry instead of a false delivered.
+interface DeliveryStatus {
+  registered: boolean;
+  produced: boolean;
+  qc_verified: boolean;
+  uploaded: boolean;
+  reachable: boolean;
+  delivered: boolean;
+  /** Machine-readable reason for the produced/qc/delivered negatives. */
+  detail: string | null;
+}
+
+interface QcInfo {
+  score: number | null;
+  passed: boolean;
+  scoring_path: string;
+  attempt: number | null;
+  scored_at: string;
+}
+
+interface GhlInfo {
+  url: string | null;
+  /** Last readback state for the CURRENT hash: true/false/null (never checked). */
+  reachable: boolean | null;
+  checked_at: string | null;
+}
 
 interface DeliveryRow {
   key: string;
@@ -47,6 +94,10 @@ interface DeliveryRow {
   mime_type: string | null;
   sha256: string | null;
   verification: Verification;
+  ghl_delivered_url: string | null;
+  status: DeliveryStatus;
+  qc: QcInfo | null;
+  ghl: GhlInfo;
   ghl_url: string | null;
 }
 
@@ -109,7 +160,12 @@ function readGhlLedger(runDir: string): GhlLedger | null {
   return null;
 }
 
-function computeVerification(key: string, present: boolean): Verification {
+// PRES-038 (W3 WF12-B) — legacy key-membership verdict. Kept ONLY for the
+// PRESENTATION_BUNDLE_REVERIFY=0 rollback path and for non-bundle names.
+// The live path derives verification from the shared hash-bound receipt
+// (verifyWithReceipt) so a stale/missing/corrupt file can never read
+// `verified`. Same truth table as before, called only where no probe runs.
+function computeVerificationLegacy(key: string, present: boolean): Verification {
   if (!present) return 'absent';
   if (SIZE_ONLY_SET.has(key)) return 'size-only';
   if (MAGIC_VERIFIED_SET.has(key)) return 'verified';
@@ -120,12 +176,20 @@ function expandTilde(p: string): string {
   return p.replace(/^~/, process.env.HOME || '');
 }
 
+// PRES-038 — live disk identity wins over the stored row: the row's
+// file_size_bytes/sha256 describe the bytes AT REGISTRATION, while the
+// receipt must bind to the bytes ON DISK NOW. Trusting the stale row here
+// is exactly how a deleted-then-replaced file kept a verified badge.
 function getHonestSize(
   del: DbDeliverable | null,
   expandedPath: string | null,
 ): { size_bytes: number | null; size_source: SizeSource; mime_type: string | null; sha256: string | null } {
+  // PRES-038 keeps the legacy precedence byte-identical (db row first, stat
+  // fallback): freshness is enforced by the hash-bound RECEIPT (which always
+  // probes live bytes), never by changing what size_source reports. A caller
+  // that needs live identity uses identifyFile() directly.
   if (del?.file_size_bytes != null) {
-    return { size_bytes: del.file_size_bytes, size_source: 'db', mime_type: del.mime_type ?? null, sha256: del.sha256 ?? null };
+    return { size_bytes: del.file_size_bytes, size_source: 'db', mime_type: del?.mime_type ?? null, sha256: del?.sha256 ?? null };
   }
   if (expandedPath && existsSync(expandedPath)) {
     try {
@@ -247,6 +311,16 @@ export async function GET(_request: NextRequest, props: { params: Promise<{ task
       }
     }
 
+    // Deck slide count for the scaled guide floor (migration 130).
+    let slideCount: number | null = null;
+    try {
+      const t = db.prepare('SELECT slide_count FROM tasks WHERE id = ?').get(taskId) as { slide_count: number | null } | undefined;
+      if (typeof t?.slide_count === 'number') slideCount = t.slide_count;
+    } catch { /* pre-migration box: scaled floor degrades to the legacy flat floor */ }
+    const guideFloor = guideFloorForTask(slideCount ?? undefined);
+
+    const qcRevision = latestQcRevision(db, taskId);
+
     // Build the nine rows
     const rows: DeliveryRow[] = [];
     const matchedPaths = new Set<string>();
@@ -254,9 +328,11 @@ export async function GET(_request: NextRequest, props: { params: Promise<{ task
       const del = byKey.get(art.key) || null;
       const present = del !== null;
       const concrete = resolveFilename(art, deckSlug);
-      const { size_bytes, size_source, mime_type, sha256 } = getHonestSize(del, del?.path ? expandTilde(del.path) : null);
+      const expanded = del?.path ? expandTilde(del.path) : null;
+      const { size_bytes, size_source, mime_type, sha256 } = getHonestSize(del, expanded);
 
-      const below_floor: boolean | null = size_source !== 'unknown' && size_bytes !== null ? size_bytes < art.min_bytes : null;
+      const floor = art.key === 'guide_pdf' ? guideFloor : art.min_bytes;
+      const below_floor: boolean | null = size_source !== 'unknown' && size_bytes !== null ? size_bytes < floor : null;
 
       let ghlUrl: string | null = null;
       if (del?.path) {
@@ -264,11 +340,83 @@ export async function GET(_request: NextRequest, props: { params: Promise<{ task
         if (ghlByLocalPath.has(ep)) ghlUrl = ghlByLocalPath.get(ep) || null;
       }
 
+      // PRES-038 — receipt-backed verdict. verifyWithReceipt returns null on
+      // the rollback path or for non-bundle names; there the legacy
+      // key-membership verdict applies unchanged (byte-identical response).
+      const receipt = del?.path ? verifyWithReceipt(db, taskId, art.key, del.path, slideCount) : null;
+      let verification: Verification;
+      let produced: boolean;
+      let producedDetail: string | null = null;
+      if (receipt) {
+        produced = receipt.status === 'verified';
+        producedDetail = receipt.detail;
+        // Size-only keys never reach the receipt (no probe runs for them):
+        // `produced` for them is floor-only, decided below. Magic keys bind
+        // `verified` to the receipt's CURRENT-bytes pass.
+        verification = art.key && SIZE_ONLY_SET.has(art.key) && !present
+          ? 'absent'
+          : receipt.status === 'verified'
+            ? (MAGIC_VERIFIED_SET.has(art.key) ? 'verified' : 'size-only')
+            : (present ? 'size-only' : 'absent');
+        if (receipt.status !== 'verified') verification = present ? 'size-only' : 'absent';
+      } else {
+        verification = computeVerificationLegacy(art.key, present);
+        produced = present && below_floor === false;
+        if (present && below_floor !== false) producedDetail = below_floor === true ? `below floor (${size_bytes} < ${floor})` : 'unmeasurable: no bytes available';
+      }
+      if (SIZE_ONLY_SET.has(art.key)) {
+        produced = present && below_floor === false;
+        if (present && below_floor !== false) producedDetail = below_floor === true ? `below floor (${size_bytes} < ${floor})` : 'unmeasurable: no bytes available';
+        verification = present ? 'size-only' : 'absent';
+      }
+      if (!present) {
+        produced = false;
+        producedDetail = producedDetail ?? 'not registered';
+      }
+
+      // QC-verified binds the PASS to the CURRENT bytes: the revision must
+      // exist, must have passed, and the shared probe must pass on what is
+      // on disk now (receipt.status). A good receipt from an older revision
+      // that the file has since outgrown re-probes above, so this cannot go
+      // stale.
+      const qcVerified = !!qcRevision && qcRevision.passed && produced && receipt?.status === 'verified';
+      // PRES-038 — bind the link check to the CURRENT bytes (receipt hash),
+      // never the row's registration-time sha256: seeded/legacy rows carry a
+      // stale sha while the receipt always reflects live disk identity. When
+      // no receipt ran (rollback path), fall back to the row sha.
+      const liveSha = receipt?.sha256 ?? sha256;
+      const ghlCheck = readGhlLinkCheck(db, taskId, art.key, liveSha);
+      const uploaded = ghlUrl !== null;
+      const reachableCurrent = ghlCheck && ghlCheck.current ? ghlCheck.ok : null;
+      const reachable = reachableCurrent === true;
+      const delivered = uploaded && reachable && produced;
+      // The green link renders ONLY on delivered (uploaded + readback-ok on
+      // the current hash + produced) via the NEW ghl_delivered_url field. An
+      // upload whose readback failed (or was never checked) keeps its URL in
+      // ghl.url for the retry affordance but ghl_delivered_url stays null so
+      // the UI cannot render a false delivered. ghl_url keeps its legacy
+      // ledger-join meaning byte-identical for existing consumers.
+      const deliveredUrl = delivered ? ghlUrl : null;
+
       rows.push({
         key: art.key, filename: concrete, label: art.label, min_bytes: art.min_bytes,
         present, produced_at: del?.created_at ?? null, size_bytes, size_source,
         below_floor, mime_type, sha256,
-        verification: computeVerification(art.key, present),
+        verification,
+        ghl_delivered_url: deliveredUrl,
+        status: {
+          registered: present,
+          produced,
+          qc_verified: qcVerified,
+          uploaded,
+          reachable,
+          delivered,
+          detail: produced ? (qcRevision && !qcRevision.passed ? `QC ${qcRevision.scoring_path} did not pass (attempt ${qcRevision.attempt ?? '?'})` : null) : producedDetail,
+        },
+        qc: qcRevision
+          ? { score: qcRevision.score, passed: qcRevision.passed, scoring_path: qcRevision.scoring_path, attempt: qcRevision.attempt, scored_at: qcRevision.scored_at }
+          : null,
+        ghl: { url: ghlUrl, reachable: reachableCurrent, checked_at: ghlCheck?.checked_at ?? null },
         ghl_url: ghlUrl,
       });
       if (del?.path) matchedPaths.add(del.path);

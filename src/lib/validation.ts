@@ -214,6 +214,15 @@ export const UpdateTaskSchema = z.object({
   .superRefine(rejectBlockedWithoutAsk);
 
 // Activity validation schema
+//
+// PRES-040 (W3 WF12-B): two ADDITIVE fields for structured phase events.
+// `scores` carries the producer's structured QC grades (per-gate average /
+// pass / autofails) — previously a non-schema key the producer's own
+// cc_board.py stripped on 400/422 fallback, permanently losing grades while
+// reporting success. Persisted to task_activities.scores (migration 141);
+// omitted by legacy callers with zero behavior change. `schema_version`
+// rides inside metadata (never a top-level column) as the producer/consumer
+// compatibility marker the preflight negotiates.
 export const CreateActivitySchema = z.object({
   activity_type: ActivityType,
   message: z.string().min(1, 'Message is required').max(5000, 'Message must be 5000 characters or less'),
@@ -227,6 +236,10 @@ export const CreateActivitySchema = z.object({
   // B-U12/U26 producer-scorecard contract. A pre-stringified string is still
   // accepted for back-compat with any caller that already serializes it itself.
   metadata: z.union([z.record(z.string(), z.unknown()), z.string()]).optional(),
+  // PRES-040: structured QC grades. Plain object or its pre-stringified form
+  // (same dual-shape convention as metadata); persisted to scores, echoed
+  // back on GET, and folded into the message tail ONLY as display text.
+  scores: z.union([z.record(z.string(), z.unknown()), z.string()]).optional(),
 });
 
 // Deliverable validation schema
@@ -257,6 +270,19 @@ const StageTimingExitSchema = z.object({
   // timings join back to the task and the stepper shows real elapsed times.
   // Optional — older producer builds omit it and stay valid.
   task_id: z.string().min(1).optional(),
+  // PRES-037 (W3 WF12-B) — producer event identity + timing split. ALL
+  // optional: legacy engine builds (phases.py run_phase_timed, which stamps
+  // no event keys) stay valid and take the legacy plain-insert path with no
+  // dedupe. Rows that carry event_id take the transactional idempotent path
+  // keyed on (company_id, run_id, event_id). provider_s/queue_s/qc_s split
+  // wall time so optimization targets the real bottleneck instead of
+  // mislabeling concurrent worker CPU totals as wall duration.
+  event_id: z.string().min(1).max(128).optional(),
+  attempt_id: z.string().min(1).max(128).optional(),
+  sequence: z.number().int().min(0).optional(),
+  provider_s: z.number().min(0).optional(),
+  queue_s: z.number().min(0).optional(),
+  qc_s: z.number().min(0).optional(),
 });
 
 const StageTimingSummarySchema = z.object({
