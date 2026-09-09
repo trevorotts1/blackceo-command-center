@@ -48,11 +48,15 @@ test('RR-020 case 1: two tenants sharing one display label stay separate', () =>
   assert.equal(labelOnly.route, 'operator-triage');
   assert.equal((labelOnly as { candidates: unknown[] }).candidates.length, 2);
   // Exact slug claims DO resolve, each to its own enrollment identity.
+  // The incident id is NEVER derived from the slug: two incidents on the same
+  // box must keep distinct runtime incident ids (caller fills from ticket row).
   const one = routeIdentity({ boxSlug: 'rescue-tenant-one' }, rows);
   assert.equal(one.kind, 'exact');
   const two = routeIdentity({ boxSlug: 'rescue-tenant-two' }, rows);
   assert.equal(two.kind, 'exact');
   assert.notEqual((one as { boxSlug: string }).boxSlug, (two as { boxSlug: string }).boxSlug);
+  assert.equal((one as { incidentId: string }).incidentId, '');
+  assert.equal((two as { incidentId: string }).incidentId, '');
 });
 
 // ---------------------------------------------------------------------------

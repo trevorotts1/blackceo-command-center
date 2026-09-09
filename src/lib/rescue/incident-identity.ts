@@ -210,9 +210,14 @@ export function routeIdentity(
   }
 
   // Exact enrollment-bound slug match wins ONLY when it is unambiguous.
+  // NOTE (RR-020): incidentId is intentionally left EMPTY here. The caller must
+  // fill it from the ticket row's immutable company enrollment runtime incident
+  // id (the ledger-minted ticket id). A box slug is an identity, never an
+  // incident id — defaulting one from the other would let two incidents on the
+  // same box share one key.
   const exact = candidates.filter((c) => c.matchedOn === 'box_slug');
   if (exact.length === 1) {
-    return { kind: 'exact', identityKey: exact[0].identityKey, boxSlug: exact[0].boxSlug, incidentId: exact[0].boxSlug };
+    return { kind: 'exact', identityKey: exact[0].identityKey, boxSlug: exact[0].boxSlug, incidentId: '' };
   }
 
   // Client-label matches are SUGGESTIONS: they never choose a target on their
