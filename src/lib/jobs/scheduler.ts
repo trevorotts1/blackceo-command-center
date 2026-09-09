@@ -50,6 +50,14 @@ import { runSweepLivenessSweep } from './sweep-liveness';
 import { runPersonaGroundingHealthSweep } from './persona-grounding-sweep';
 import { runSocialPublishDispatcherSweep } from './social-publish-dispatcher';
 import {
+  runSocialCycleSweep,
+  claimEngineOwnership,
+  recordOwnershipTick,
+  SOCIAL_CYCLE_CRON,
+} from './social-cycle';
+import { makeOutboxSenders } from './social-theme-nudge';
+import { runExpiryRecoverySweep } from './social-account-health';
+import {
   runOperatorColumnAgeDigest,
   OPERATOR_COLUMN_AGE_DIGEST_CRON_EXPR,
   OPERATOR_COLUMN_AGE_DIGEST_CRON_TIMEZONE,
@@ -823,6 +831,63 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<unknown> | unk
           `[cron] operator-column-age-digest: sent — ${result.departmentCount} department(s), ${result.totalTasks} task(s)`,
         );
       }
+    },
+  },
+
+  // social-cycle: every 5 minutes — F07/F17 (W3 union migration 139). THE
+  // durable weekly invitation cycle: per company, ensure the client-local
+  // week's cycle row, send the invitation through the theme-intake outbox,
+  // fire bounded reminders, apply cutoff dispositions, roll next week. SHORT
+  // row-at-a-time work. Also claims the F17 engine-ownership record (one
+  // active scheduler owner per company; legacy cron names become superseded)
+  // and stamps next_run_at so the ONB forwarding adapters VERIFY the durable
+  // engine owns the schedule. RESTORED (F21/WF13): the W3 integration dropped
+  // these entries from the JOBS array while keeping the modules — a box
+  // booted with no weekly cycle runner. Disable with DISABLE_SOCIAL_CYCLE=1.
+  {
+    name: 'social-cycle',
+    expr: SOCIAL_CYCLE_CRON,
+    fn: async () => {
+      if (process.env.DISABLE_SOCIAL_CYCLE === '1') {
+        console.log('[cron] social-cycle: DISABLE_SOCIAL_CYCLE set, skipping');
+        return { skippedReason: 'disabled' };
+      }
+      const senders = makeOutboxSenders();
+      const result = await runSocialCycleSweep({ send: senders.send, sendReminder: senders.sendReminder });
+      // F17: the durable engine asserts ownership + a future schedule each
+      // tick. next_run_at = now + cadence (the next node-cron tick window).
+      claimEngineOwnership(new Date(Date.now() + 5 * 60_000).toISOString());
+      recordOwnershipTick(new Date(Date.now() + 5 * 60_000).toISOString());
+      if (result.invited || result.reminded || result.cutoffs || result.nextCycles || result.errors) {
+        console.log(
+          `[cron] social-cycle: scanned ${result.scanned}, invited ${result.invited}, reminded ${result.reminded}, ` +
+            `cutoffs ${result.cutoffs}, next ${result.nextCycles}, errors ${result.errors}`,
+        );
+      }
+      return result;
+    },
+  },
+  // social-expiry-recovery: every 5 minutes — F35 backoff loop (W3 union).
+  // Retries TRANSIENT expiry rows on their backoff ladder; authentication/
+  // scope rows wait for reconnection (never blind-retried). The asset-repair
+  // branch runs inside the same tick via the asset sweep with a plain
+  // fetcher. Restore rationale identical to social-cycle above (F21/WF13).
+  {
+    name: 'social-expiry-recovery',
+    expr: '*/5 * * * *',
+    fn: async () => {
+      if (process.env.DISABLE_SOCIAL_EXPIRY_RECOVERY === '1') {
+        console.log('[cron] social-expiry-recovery: DISABLE_SOCIAL_EXPIRY_RECOVERY set, skipping');
+        return { skippedReason: 'disabled' };
+      }
+      const result = await runExpiryRecoverySweep();
+      if (result.retried || result.recovered || result.awaiting_reconnect) {
+        console.log(
+          `[cron] social-expiry-recovery: scanned ${result.scanned}, retried ${result.retried}, ` +
+            `recovered ${result.recovered}, awaiting_reconnect ${result.awaiting_reconnect}`,
+        );
+      }
+      return result;
     },
   },
 ];
