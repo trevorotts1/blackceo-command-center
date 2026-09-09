@@ -1,3 +1,16 @@
+## [v7.2.0] — 2026-09-08 — Per-account publish plans, durable publish executor, Ultra orchestrator and media player
+
+### Added
+- The Marketing publish button now derives its target platforms from the per-account plan instead of a fixed default set: the resolved plan's platform list drives the queue rows that are created, the plan is resolved server-side before enqueueing, and the request fails closed rather than POSTing empty platforms when no plan resolves (F06).
+- A durable publish-queue consumer executes queued posts end to end: rows are claimed through atomic leases, each attempt is bounded by an attempt cap and records an idempotency key, overdue queues surface in board state, and a crashed run resumes from the durable ledger instead of losing or double-publishing work (F03).
+- A dependency-aware "Ultra" orchestrator coordinates the social pipeline with per-provider semaphores that honor the Ollama Cloud 3-concurrent/10-parallel limits, a cumulative cycle budget that stops further dispatch when exhausted, and durable lease fencing backed by the `social_steps` and `social_provider_leases` tables so concurrent workers cannot double-run a step (F33).
+- A company-bound media asset registry stores generated images against the owning tenant and company, issues renewable, capability-scoped preview tokens, and serves a self-contained HTML player page for previews (F38).
+
+### Compatibility and scope
+- Migrations 136, 137 and 138 are additive and idempotent: 136 adds the publish-queue execution contract columns, 137 creates `social_steps` and `social_provider_leases` for Ultra lease fencing, and 138 creates `social_media_assets` for the media registry. No existing data is rewritten or dropped.
+- New API surface: `/api/social/media` (tenant-scoped) and its `[assetId]` subroute, plus the `/social/media/[assetId]` player page; preview tokens are required and tenant-scoped.
+- No dependency changes. Publishing this release does not deploy or verify it on client installations.
+
 ## [v7.1.6] — 2026-09-08 — Company-bound publish queue and strict model selection
 
 ### Fixed
