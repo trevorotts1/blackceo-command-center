@@ -8,6 +8,31 @@
 #
 # U014: added --remote mode (iterates registered clients, probes /api/health/deep
 # via each gateway) and --dry-run (prints probes, writes nothing).
+#
+# PRES-045 / CC-H1 (refusal protection): when HTTP is unreachable (curl could
+# not connect at all — code 000) this script no longer reports a blind
+# indeterminate. It now inspects the pm2 service state and the cc-start.sh
+# refusal receipt (PRES-045 receipt, written by scripts/cc-start.sh on a
+# deterministic stale-build refusal):
+#   - app stopped/errored, or a CURRENT matching refusal receipt → exit 1 RED.
+#   - a just-launched app (pm2_pm_id_path/restart_time within --startup-grace
+#     seconds, default 90) with no refusal receipt → exit 3 UNKNOWN
+#     ("startup grace"), documented and bounded.
+#   - HTTP unreachable with no usable service state for longer than
+#     --unknown-deadline seconds (default 300) → exit 1 RED with
+#     "persistent_unknown" as a separate actionable incident rather than
+#     infinite silence. The deadline is tracked by the caller via
+#     --unknown-since (a UTC ISO-8601 timestamp of the first UNKNOWN sighting);
+#     without it the script reports exit 3 but stamps the emitted JSON with
+#     "persistent_unknown":true once a receipt/state older than the deadline
+#     is visible, so watchdog-cc.sh can escalate on the next pass.
+#   - Recovery: when a refusal receipt exists and verified recovery is observed
+#     (target app online AND the receipt's build digest matches the current
+#     .next/BUILD_ID), the receipt is resolved/archived to <receipt>.resolved
+#     so an old marker never pins a healthy box RED forever. A receipt whose
+#     build digest no longer matches is treated as RESOLVED (stale receipt).
+# All service/refusal inspection is read-only (pm2 jlist + file reads); this
+# script never starts, stops or deletes anything.
 
 set -uo pipefail
 PORT="${CC_PORT:-4000}"; CANONICAL_DIR="${CC_CANONICAL_DIR:-}"; SKIP_PM2=0; JSON_ONLY=0
@@ -18,6 +43,14 @@ DATABASE_PATH="${DATABASE_PATH:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # "every CC-ish process on the box". Boxes legitimately run demo/staging CC
 # instances on other ports; those WARN, they never fail a production deploy.
 PM2_APP_NAME="${CC_PM2_APP_NAME:-mission-control}"
+# PRES-045: refusal receipt location. cc-start.sh writes this OUTSIDE .next so a
+# failed build directory cannot destroy the only diagnostic. The default points
+# at the CC install root's .cc-state directory; --receipt-path overrides it
+# (tests use isolated fixtures).
+REFUSAL_RECEIPT="${CC_REFUSAL_RECEIPT:-}"
+STARTUP_GRACE="${CC_STARTUP_GRACE:-90}"
+UNKNOWN_DEADLINE="${CC_UNKNOWN_DEADLINE:-300}"
+UNKNOWN_SINCE="${CC_UNKNOWN_SINCE:-}"
 # U51 build item: cc_port fact + override_ack_set fact, read-only, snapshotted
 # at invocation time — reported in every JSON shape this script emits so a
 # sweep can ledger "did this box report canonical port 4000 with no override
@@ -28,16 +61,20 @@ PORT_OVERRIDE_ACK_SET="false"
 [[ "${CC_PORT_OVERRIDE_ACK:-0}" == "1" ]] && PORT_OVERRIDE_ACK_SET="true"
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --port)          PORT="$2";          shift 2 ;;
-    --canonical-dir) CANONICAL_DIR="$2"; shift 2 ;;
-    --app-name)      PM2_APP_NAME="$2";  shift 2 ;;
-    --public-url)    PUBLIC_URL="$2";    shift 2 ;;
-    --disk-min-gb)                       shift 2 ;;
-    --skip-pm2)      SKIP_PM2=1;         shift   ;;
-    --json-only)     JSON_ONLY=1;        shift   ;;
-    --dry-run)       DRY_RUN=1;          shift   ;;
-    --remote)        REMOTE_MODE=1;      shift   ;;
-    --db-path)       DATABASE_PATH="$2"; shift 2 ;;
+    --port)             PORT="$2";             shift 2 ;;
+    --canonical-dir)    CANONICAL_DIR="$2";    shift 2 ;;
+    --app-name)         PM2_APP_NAME="$2";     shift 2 ;;
+    --public-url)       PUBLIC_URL="$2";       shift 2 ;;
+    --disk-min-gb)                             shift 2 ;;
+    --receipt-path)     REFUSAL_RECEIPT="$2";  shift 2 ;;
+    --startup-grace)    STARTUP_GRACE="$2";    shift 2 ;;
+    --unknown-deadline) UNKNOWN_DEADLINE="$2"; shift 2 ;;
+    --unknown-since)    UNKNOWN_SINCE="$2";    shift 2 ;;
+    --skip-pm2)         SKIP_PM2=1;            shift   ;;
+    --json-only)        JSON_ONLY=1;           shift   ;;
+    --dry-run)          DRY_RUN=1;             shift   ;;
+    --remote)           REMOTE_MODE=1;         shift   ;;
+    --db-path)          DATABASE_PATH="$2";    shift 2 ;;
     *) echo "Unknown flag: $1" >&2; exit 2 ;;
   esac
 done
@@ -227,8 +264,236 @@ DEEP_RAW=$(curl -s --max-time 15 --max-redirs 0 \
 DEEP_BODY=$(printf '%s\n' "$DEEP_RAW" | awk 'NR>1{print prev} {prev=$0}')
 HTTP_CODE=$(printf '%s\n' "$DEEP_RAW" | awk 'END{print}' | py "d.get('_http_code',0)" 0)
 
-if [[ "$HTTP_CODE" == "0" ]]; then
-  printf '{"pass":false,"indeterminate":true,"timestamp":"%s","checks":{},"detail":"server unreachable","cc_port":%s,"override_ack_set":%s}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${PORT:-null}" "$PORT_OVERRIDE_ACK_SET"
+# ── (a0) PRES-045 refusal/service inspection when HTTP is unreachable ────────
+# On curl code 000 (nothing answered at all — not a 5xx, not a bad body) the old
+# behavior was a blind exit 3 UNKNOWN. That is the exact silence CC-H1 forbids:
+# a stopped or refused app is a definitive RED, not a transient. Classify using
+# (1) the cc-start.sh refusal receipt, (2) pm2 jlist service state, and only
+# then fall back to the bounded startup-grace / persistent-unknown ladder.
+# Everything here is read-only.
+resolve_receipt_path() {
+  # Explicit --receipt-path / CC_REFUSAL_RECEIPT wins; otherwise the canonical
+  # install-root location (scripts/.. = repo root, .cc-state/ outside .next).
+  if [[ -n "$REFUSAL_RECEIPT" ]]; then printf '%s' "$REFUSAL_RECEIPT"; return; fi
+  local root
+  root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  printf '%s/.cc-state/cc-start-refused.json' "$root"
+}
+
+receipt_field() {
+  # receipt_field FILE FIELD — quoted value of FIELD in the receipt JSON.
+  # sed, not shell interpolation, so a path containing quotes/space cannot
+  # break out (CC-H1 QC: quoted paths give a valid receipt).
+  python3 -s - "$1" "$2" <<'PYEOF'
+import json, sys
+try:
+    with open(sys.argv[1], 'r', encoding='utf-8', errors='replace') as fh:
+        d = json.load(fh)
+    v = d.get(sys.argv[2])
+    print(v if v is not None else '')
+except Exception:
+    print('')
+PYEOF
+}
+
+receipt_age_seconds() {
+  # Age of the receipt in seconds, from its refused_at UTC timestamp. Empty on
+  # any parse failure — an unreadable timestamp must not silently read as "old".
+  # Accepts second and fractional-second ISO-8601 (cc-start.sh writes
+  # refused_at via node's toISOString, which carries milliseconds).
+  python3 -s - "$1" <<'PYEOF'
+import json, sys, datetime
+def _parse_ts(ts):
+    s = (ts or '').strip()
+    if not s:
+        raise ValueError('empty timestamp')
+    if s.endswith('Z'):
+        s = s[:-1] + '+00:00'
+    dt = datetime.datetime.fromisoformat(s)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt
+try:
+    with open(sys.argv[1], 'r', encoding='utf-8', errors='replace') as fh:
+        d = json.load(fh)
+    dt = _parse_ts(d.get('refused_at') or '')
+    age = (datetime.datetime.now(datetime.timezone.utc) - dt).total_seconds()
+    print(int(max(0, age)))
+except Exception:
+    print('')
+PYEOF
+}
+
+service_state_for_target() {
+  # Print "STATUS|pm_id|uptime_secs" for the target pm2 app, or "" when pm2
+  # cannot tell us anything (binary missing, daemon down, parse failure).
+  command -v pm2 >/dev/null 2>&1 || return 1
+  local j
+  j=$(pm2 jlist 2>/dev/null) || return 1
+  [[ -n "$j" ]] || return 1
+  python3 -s - "$j" "$PM2_APP_NAME" "$PORT" <<'PYEOF'
+import json, sys, time
+raw, target, port = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    apps = json.loads(raw)
+except Exception:
+    sys.exit(0)
+if not isinstance(apps, list):
+    sys.exit(0)
+import re
+for a in apps:
+    env = a.get('pm2_env') or {}
+    name = str(env.get('name') or a.get('name') or '')
+    args = env.get('args') or ''
+    if isinstance(args, list):
+        args = ' '.join(str(x) for x in args)
+    m = re.search(r'(?:--port|-p)(?:\s+|=)(\d+)', str(args))
+    dport = m.group(1) if m else ''
+    for key in ('CC_PORT', 'PORT'):
+        if not dport:
+            for layer in ('env_data', 'env'):
+                v = (env.get(layer) or {}).get(key)
+                if v:
+                    dport = str(v); break
+    if dport == port or (not dport and name.lower() == target.lower()):
+        st = env.get('status') or ''
+        pm_id = a.get('pm_id')
+        rt = env.get('pm_uptime') or 0
+        uptime = max(0, int(time.time() * 1000) - int(rt)) if rt else 0
+        print(f"{st}|{pm_id if pm_id is not None else ''}|{uptime // 1000}")
+        sys.exit(0)
+sys.exit(0)
+PYEOF
+}
+
+# Resolution: an existing refusal receipt is cleared ONLY on verified recovery —
+# the target app is online AND the receipt's build digest matches the live
+# .next/BUILD_ID (so a receipt from an OLD build cannot pin a healthy box RED).
+# The digest field is `build_id` (written by cc-start.sh's JSON encoder); the
+# legacy name `build_digest` is still accepted as a fallback.
+maybe_resolve_receipt() {
+  local receipt; receipt="$(resolve_receipt_path)"
+  [[ -f "$receipt" ]] || return 0
+  local dig
+  dig="$(receipt_field "$receipt" build_id)"
+  [[ -n "$dig" ]] || dig="$(receipt_field "$receipt" build_digest)"
+  [[ -n "$dig" ]] || return 0
+  local live=""
+  local nextdir
+  if [[ -n "$CANONICAL_DIR" ]]; then nextdir="$CANONICAL_DIR/.next/BUILD_ID"; else
+    nextdir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.next/BUILD_ID"
+  fi
+  [[ -f "$nextdir" ]] && live="$(head -c 4096 "$nextdir" 2>/dev/null | tr -d '[:space:]')"
+  [[ -n "$live" ]] || return 0
+  if [[ "$live" != "$dig" ]]; then
+    # Receipt describes a build that is no longer deployed — it is stale by
+    # definition; archive it so it cannot cause perpetual RED.
+    mv "$receipt" "${receipt}.resolved" 2>/dev/null || true
+    return 0
+  fi
+  local st; st="$(service_state_for_target)" || return 0
+  local status="${st%%|*}"
+  if [[ "$status" == "online" ]]; then
+    mv "$receipt" "${receipt}.resolved" 2>/dev/null || true
+  fi
+  return 0
+}
+maybe_resolve_receipt || true
+
+if [[ "$HTTP_CODE" == "0" || "$HTTP_CODE" == "000" ]]; then
+  _RECEIPT="$(resolve_receipt_path)"
+  _SVC="$(service_state_for_target || true)"
+  _SVC_STATUS="${_SVC%%|*}"
+  _RECEIPT_CURRENT="false"; _RECEIPT_PRESENT="false"
+  _RECEIPT_AGE=""; _RECEIPT_REASON=""; _RECEIPT_EXIT=""
+  if [[ -f "$_RECEIPT" ]]; then
+    _RECEIPT_PRESENT="true"
+    _RECEIPT_AGE="$(receipt_age_seconds "$_RECEIPT")"
+    _RECEIPT_REASON="$(receipt_field "$_RECEIPT" reason)"
+    _RECEIPT_EXIT="$(receipt_field "$_RECEIPT" exit)"
+    # "Current" = same refused build still deployed (digest matches live
+    # BUILD_ID) AND the target app is not online (online + matching digest is
+    # the verified-recovery case handled in maybe_resolve_receipt above).
+    # Digest field is `build_id` (cc-start.sh); legacy `build_digest` fallback.
+    _DIG="$(receipt_field "$_RECEIPT" build_id)"
+    [[ -n "$_DIG" ]] || _DIG="$(receipt_field "$_RECEIPT" build_digest)"
+    _NEXTDIR="${CANONICAL_DIR:+$CANONICAL_DIR/.next/BUILD_ID}"
+    [[ -z "$_NEXTDIR" ]] && _NEXTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.next/BUILD_ID"
+    if [[ -n "$_DIG" && -f "$_NEXTDIR" ]]; then
+      _LIVE="$(head -c 4096 "$_NEXTDIR" 2>/dev/null | tr -d '[:space:]')"
+      [[ "$_LIVE" == "$_DIG" ]] && _RECEIPT_CURRENT="true"
+    else
+      # Cannot verify the build — a present receipt from the same tool that
+      # exits 78 is evidence enough when the service is not running.
+      [[ "$_SVC_STATUS" != "online" ]] && _RECEIPT_CURRENT="true"
+    fi
+  fi
+
+  # 1) DEFINITIVE RED: stopped/errored service, or a current refusal receipt.
+  if [[ "$_SVC_STATUS" == "stopped" || "$_SVC_STATUS" == "errored" ]] || [[ "$_RECEIPT_CURRENT" == "true" ]]; then
+    _RED_REASON="service ${_SVC_STATUS:-unknown}"
+    [[ "$_RECEIPT_CURRENT" == "true" ]] && _RED_REASON="current refusal receipt (reason=${_RECEIPT_REASON:-unknown}, exit=${_RECEIPT_EXIT:-78}, age=${_RECEIPT_AGE:-unknown}s) plus service ${_SVC_STATUS:-unknown}"
+    log "RED: HTTP unreachable but classification is definitive — ${_RED_REASON}"
+    printf '{"pass":false,"indeterminate":false,"timestamp":"%s","checks":{},"detail":"server unreachable: %s","refusal":{"receipt_present":%s,"receipt_current":%s,"reason":"%s","exit":"%s","age_seconds":"%s"},"service_status":"%s","cc_port":%s,"override_ack_set":%s}\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_RED_REASON" "$_RECEIPT_PRESENT" "$_RECEIPT_CURRENT" "${_RECEIPT_REASON:-}" "${_RECEIPT_EXIT:-}" "${_RECEIPT_AGE:-}" "${_SVC_STATUS:-unknown}" "${PORT:-null}" "$PORT_OVERRIDE_ACK_SET"
+    exit 1
+  fi
+
+  # 2) STARTUP GRACE: app freshly launched (uptime within grace), nothing
+  #    refused yet — curl may have raced the bind. Bounded, documented UNKNOWN.
+  _UPTIME=""
+  [[ "$_SVC" == *"|"* ]] && _UPTIME="${_SVC##*|}"
+  if [[ -n "$_UPTIME" ]] && [[ "$_UPTIME" =~ ^[0-9]+$ ]] && [[ "$_UPTIME" -lt "$STARTUP_GRACE" ]]; then
+    log "UNKNOWN: HTTP unreachable but app launched ${_UPTIME}s ago (< --startup-grace ${STARTUP_GRACE}s) — documented startup grace"
+    printf '{"pass":false,"indeterminate":true,"timestamp":"%s","checks":{},"detail":"startup grace: app up %ss of %ss grace, HTTP not yet answering","startup_grace":true,"service_status":"%s","cc_port":%s,"override_ack_set":%s}\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_UPTIME" "$STARTUP_GRACE" "${_SVC_STATUS:-unknown}" "${PORT:-null}" "$PORT_OVERRIDE_ACK_SET"
+    exit 3
+  fi
+
+  # 3) PERSISTENT UNKNOWN: no definitive signal for >= deadline (measured by the
+  #    caller from its first UNKNOWN sighting via --unknown-since, or from a
+  #    refusal receipt age) → actionable incident, never infinite silence.
+  _PERSISTENT="false"
+  _PERSIST_REF=""
+  if [[ -n "$UNKNOWN_SINCE" ]]; then
+    _PERSIST_AGE=$(python3 -s -c "
+import sys, datetime
+def _parse_ts(ts):
+    s = (ts or '').strip()
+    if not s:
+        raise ValueError('empty timestamp')
+    if s.endswith('Z'):
+        s = s[:-1] + '+00:00'
+    dt = datetime.datetime.fromisoformat(s)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt
+try:
+    dt = _parse_ts(sys.argv[1])
+    print(int((datetime.datetime.now(datetime.timezone.utc) - dt).total_seconds()))
+except Exception:
+    print('0')
+" "$UNKNOWN_SINCE" 2>/dev/null || echo 0)
+    if [[ "$_PERSIST_AGE" -ge "$UNKNOWN_DEADLINE" ]]; then
+      _PERSISTENT="true"; _PERSIST_REF="unknown since ${UNKNOWN_SINCE} (${_PERSIST_AGE}s >= deadline ${UNKNOWN_DEADLINE}s)"
+    fi
+  fi
+  if [[ "$_PERSISTENT" != "true" && "$_RECEIPT_PRESENT" == "true" && -n "$_RECEIPT_AGE" && "$_RECEIPT_AGE" =~ ^[0-9]+$ ]]; then
+    if [[ "$_RECEIPT_AGE" -ge "$UNKNOWN_DEADLINE" ]]; then
+      _PERSISTENT="true"; _PERSIST_REF="unresolved refusal receipt aged ${_RECEIPT_AGE}s >= deadline ${UNKNOWN_DEADLINE}s"
+    fi
+  fi
+  if [[ "$_PERSISTENT" == "true" ]]; then
+    log "RED: persistent UNKNOWN is now an actionable incident — ${_PERSIST_REF}"
+    printf '{"pass":false,"indeterminate":false,"timestamp":"%s","checks":{},"detail":"persistent_unknown: HTTP unreachable, %s — actionable incident, manual inspection required","persistent_unknown":true,"refusal":{"receipt_present":%s,"receipt_current":%s},"service_status":"%s","cc_port":%s,"override_ack_set":%s}\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_PERSIST_REF" "$_RECEIPT_PRESENT" "$_RECEIPT_CURRENT" "${_SVC_STATUS:-unknown}" "${PORT:-null}" "$PORT_OVERRIDE_ACK_SET"
+    exit 1
+  fi
+
+  # 4) Default: nothing definitive within bounds — bounded UNKNOWN.
+  log "UNKNOWN: server unreachable, no refusal receipt, service status '${_SVC_STATUS:-unavailable}' — bounded UNKNOWN (persistent_unknown escalates once deadline passes)"
+  printf '{"pass":false,"indeterminate":true,"timestamp":"%s","checks":{},"detail":"server unreachable","refusal":{"receipt_present":%s,"receipt_current":%s},"service_status":"%s","cc_port":%s,"override_ack_set":%s}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_RECEIPT_PRESENT" "$_RECEIPT_CURRENT" "${_SVC_STATUS:-unknown}" "${PORT:-null}" "$PORT_OVERRIDE_ACK_SET"
   exit 3
 fi
 # FIX (Issue 2): 5xx from /api/health/deep → exit 3 UNKNOWN, not exit 1.

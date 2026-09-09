@@ -121,6 +121,13 @@ mkdir -p "$HOME/operator-scratch"
 #     cc-start.sh performs env-bleed strip + orphan-port kill before exec-ing next.
 #   - CC_PORT: "4000" in env (never PORT: — prevents OpenClaw gateway PORT bleed)
 #   - Circuit-breaker: min_uptime + exp_backoff_restart_delay + max_restarts=8 + kill_timeout
+#   - PRES-045 deterministic exit policy: stop_exit_codes: [78].
+#     scripts/cc-start.sh exits 78 (EX_CONFIG) for exactly one condition — a
+#     deterministically stale build — and pm2 must STOP the app on that code
+#     instead of restarting it (a restart loop on a deterministic refusal ran
+#     2,590 restarts over two days on 2026-09-06 while :4000 stayed dark).
+#     A transient crash exits non-78 and keeps its restarts and backoff.
+#     Change 78 only together with scripts/cc-start.sh's `exit 78`.
 #
 # NOTE: Never call `openclaw gateway restart` from this script — cc-start.sh
 # manages ONLY the CC node process, not the OpenClaw gateway (Mac launchd rule).
@@ -147,6 +154,7 @@ CANONICAL_ECOSYSTEM="module.exports = {
     min_uptime: 30000,
     max_restarts: 8,
     exp_backoff_restart_delay: 2000,
+    stop_exit_codes: [78],
     kill_timeout: 10000,
     watch: false,
     max_memory_restart: \"512M\"
@@ -161,11 +169,17 @@ if [ ! -f "$ECOSYSTEM_FILE" ]; then
 else
   # Idempotent-healing: check if the existing file matches canonical.
   # Compare the critical fields rather than byte-exact (comments may differ).
+  # PRES-045: stop_exit_codes is REQUIRED — an existing install without the
+  # exact exit policy is reconciled (backed up first, unrelated settings
+  # preserved by rewriting only through the canonical template; any custom
+  # fields beyond the canonical set are captured in the .bak before overwrite).
   NEEDS_UPDATE=0
   grep -q '"blackceo-command-center"' "$ECOSYSTEM_FILE" || NEEDS_UPDATE=1
   grep -q 'cc-start.sh' "$ECOSYSTEM_FILE" || NEEDS_UPDATE=1
   grep -q 'min_uptime' "$ECOSYSTEM_FILE" || NEEDS_UPDATE=1
   grep -q 'CC_PORT' "$ECOSYSTEM_FILE" || NEEDS_UPDATE=1
+  grep -q 'stop_exit_codes' "$ECOSYSTEM_FILE" || NEEDS_UPDATE=1
+  grep -q 'stop_exit_codes: \[78\]' "$ECOSYSTEM_FILE" || NEEDS_UPDATE=1
   # Also reconcile if a LEGACY app name is still present (mission-control or the
   # bare command-center), or the vulnerable literal PORT key — note the
   # '"command-center"' pattern's leading quote does NOT match
@@ -178,7 +192,7 @@ else
     echo "[8b/9] Reconciling stale/vulnerable PM2 ecosystem at $ECOSYSTEM_FILE (backing up to .bak)..."
     cp "$ECOSYSTEM_FILE" "${ECOSYSTEM_FILE}.bak"
     printf '%s\n' "$CANONICAL_ECOSYSTEM" > "$ECOSYSTEM_FILE"
-    echo "[8b/9] Ecosystem reconciled to canonical (blackceo-command-center + cc-start.sh + circuit-breaker)"
+    echo "[8b/9] Ecosystem reconciled to canonical (blackceo-command-center + cc-start.sh + circuit-breaker + stop_exit_codes [78])"
     # MR-40: Clean up the .bak sidecar now that the canonical file is in place.
     # The old ecosystem content is preserved in the git history of the bootstrap
     # script itself — the disk copy is a one-shot migration safety net only.
