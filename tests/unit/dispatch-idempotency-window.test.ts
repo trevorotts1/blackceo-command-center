@@ -255,6 +255,7 @@ test('[IDEM-2] the same dispatch AFTER the window elapses dispatches normally', 
   assert.equal(res.status, 200, 'post-window re-dispatch succeeds');
   assert.equal(body.success, true, 'a plain re-POST after the window dispatches exactly as before');
   assert.equal(sends.filter((s) => s.method === 'chat.send').length, 1, 'exactly one chat.send fires');
+  assert.equal(Object.hasOwn(sends.find((s) => s.method === 'chat.send')!.params!, 'timeoutMs'), false, 'manual dispatch must preserve the configured worker runtime limit');
   assert.equal(body.suppressed, undefined, 'a normal dispatch carries no suppression marker');
 
   const suppressed = queryAll<{ id: string }>(

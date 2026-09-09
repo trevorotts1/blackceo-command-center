@@ -208,7 +208,10 @@ test('autoDispatchTask actually dispatches a task in the billing-finance/dept-bi
   // alias-resolution code path without a live gateway.
   client.isConnected = () => true;
   // Stub the one external call this path makes past the fix: chat.send.
-  client.call = (async () => ({ ok: true })) as typeof client.call;
+  client.call = (async (method, params) => {
+    if (method === 'chat.send') assert.equal(Object.hasOwn(params ?? {}, 'timeoutMs'), false, 'automatic dispatch must preserve the configured worker runtime limit');
+    return { ok: true };
+  }) as typeof client.call;
 
   const taskId = 'task-billing-finance-reverse-probe-e2e';
   const now = new Date().toISOString();
