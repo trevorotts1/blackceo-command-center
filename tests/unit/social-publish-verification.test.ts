@@ -159,3 +159,38 @@ test('missing inventory placeholder is replaced when real owned account inventor
  await runSocialVerificationSweep(now+242_000,adapters);
  assert.equal(queryOne<{status:string}>("SELECT status FROM publish_queue WHERE id='placeholder'")!.status,'published','obsolete placeholder cannot stall concrete verified target');
 });
+
+test('source amendments invalidate accepted targets before remaining targets can close the queue',async()=>{
+ for(const acceptedState of ['published','scheduled']) {
+  const now=start+(acceptedState==='published'?360:420)*60_000;
+  const queue=`source-amendment-${acceptedState}`;
+  seed(queue,['mastodon','reddit'],now);
+  await runSocialVerificationSweep(now,adapters);
+  proof(queue,'account:fixture-mastodon',now+121_000,acceptedState);
+  await runSocialVerificationSweep(now+121_000,adapters);
+  const old=queryOne<{task_id:string;state:string}>("SELECT task_id,state FROM social_publish_verifications WHERE queue_id=? AND platform='mastodon'",[queue])!;
+  assert.equal(old.state,acceptedState);
+  const source=queryOne<{task_id:string;path:string}>("SELECT d.task_id,d.path FROM task_deliverables d JOIN publish_queue q ON q.cc_task_id=d.task_id WHERE q.id=?",[queue])!;
+  const inventory=JSON.parse(fs.readFileSync(source.path,'utf8'));
+  inventory.posts.push({...inventory.posts.find((p:any)=>p.platform==='mastodon'),post_id:`new-${queue}`});
+  inventory.planned_posts=inventory.posts.length;
+  fs.writeFileSync(source.path,JSON.stringify(inventory));
+  const sha=createHash('sha256').update(fs.readFileSync(source.path)).digest('hex');
+  // Keep the old immutable registration and register a new source revision.
+  run("INSERT INTO task_deliverables(id,task_id,deliverable_type,title,path,sha256) VALUES (?,?,'artifact','Revised source',?,?)",[`revised-${queue}`,source.task_id,source.path,sha]);
+  proof(queue,'account:fixture-reddit',now+242_000,'published',b=>{b.source_receipt_sha256=sha;});
+  await runSocialVerificationSweep(now+242_000,adapters);
+  assert.equal(queryOne<{status:string}>('SELECT status FROM publish_queue WHERE id=?',[queue])!.status,'verification_required','one remaining healthy account cannot certify newly added posts on an accepted account');
+  const fresh=queryOne<{state:string;task_id:string;attempt_count:number}>("SELECT * FROM social_publish_verifications WHERE queue_id=? AND platform='mastodon'",[queue])!;
+  assert.equal(fresh.state,'running','even future scheduled evidence must be rechecked on amendment');
+  assert.notEqual(fresh.task_id,old.task_id,'fresh readback ownership instead of reusing completed worker');
+  assert.equal(fresh.attempt_count,1,'bounded retry budget for new source revision');
+  assert.equal(queryOne<{state:string}>("SELECT state FROM social_publish_verifications WHERE queue_id=? AND platform='reddit'",[queue])!.state,'published','healthy target continues independently');
+  proof(queue,'account:fixture-mastodon',now+363_000,'published',b=>{
+   b.source_receipt_sha256=sha;b.planned_posts=2;b.created_posts=2;
+   b.posts.push({...b.posts[0],post_id:`new-${queue}`,readback:{...b.posts[0].readback,id:`new-${queue}`}});
+  });
+  await runSocialVerificationSweep(now+363_000,adapters);
+  assert.equal(queryOne<{status:string}>('SELECT status FROM publish_queue WHERE id=?',[queue])!.status,'published','only complete amended inventory readback closes the queue');
+ }
+});

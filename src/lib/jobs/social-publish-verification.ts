@@ -12,7 +12,7 @@ import { broadcast } from '@/lib/events';
 interface Verification {
   queue_id:string; target:string; company_id:string; platform:string; account_id:string|null;
   task_id:string|null; state:string; attempt_count:number; retry_at:string;
-  created_at:string; escalated_at:string|null;
+  created_at:string; updated_at:string; escalated_at:string|null;
 }
 const RETRY_MS=2*60_000;
 const MAX_ATTEMPTS=3;
@@ -34,6 +34,18 @@ function registeredReceipt(taskId:string):{body:any;sha:string}|null {
     return {body:JSON.parse(bytes.toString('utf8')),sha};
   } catch { /* Missing or changed evidence stays unresolved. */ }
   return null;
+}
+
+/** A previously accepted target cannot certify a revised production inventory. */
+function invalidateChangedEvidence(queueId:string, companyId:string, sourceTaskId:string|null, stamp:string):void {
+  const source=sourceTaskId?registeredReceipt(sourceTaskId):null;
+  const owner=sourceTaskId?queryOne<{company_id:string;status:string}>(`SELECT w.company_id,t.status FROM tasks t JOIN workspaces w ON w.id=t.workspace_id WHERE t.id=?`,[sourceTaskId]):null;
+  const accepted=queryAll<{target:string;task_id:string|null;receipt_sha256:string|null}>(`SELECT target,task_id,receipt_sha256 FROM social_publish_verifications WHERE queue_id=? AND company_id=? AND state IN ('published','scheduled')`,[queueId,companyId]);
+  for(const target of accepted) {
+    const receipt=target.task_id?registeredReceipt(target.task_id):null;
+    if(source && owner?.company_id===companyId && owner.status==='done' && receipt && receipt.sha===target.receipt_sha256 && receipt.body.source_receipt_sha256===source.sha) continue;
+    run(`UPDATE social_publish_verifications SET state='pending',task_id=NULL,attempt_count=0,retry_at=?,receipt_sha256=NULL,verified_at=NULL,error='Source or accepted evidence changed; new readback required, never republish',updated_at=? WHERE queue_id=? AND target=?`,[stamp,stamp,queueId,target.target]);
+  }
 }
 
 export function readPublicationProof(v:Verification, nowMs:number):{state:'published'|'scheduled';sha:string;retryAt:string}|null {
@@ -83,6 +95,7 @@ export async function runSocialVerificationSweep(nowMs=Date.now(), adapters=veri
         const targets=accounts.length?accounts.map(a=>({target:`account:${a.id}`,account:a.id})):[{target:`platform:${platform}`,account:null}];
         for(const t of targets) run(`INSERT OR IGNORE INTO social_publish_verifications(queue_id,target,company_id,platform,account_id,retry_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)`,[q.id,t.target,q.company_id,platform,t.account,stamp,stamp,stamp]);
       }
+      invalidateChangedEvidence(q.id,q.company_id,q.cc_task_id,stamp);
       const rows=queryAll<Verification>('SELECT * FROM social_publish_verifications WHERE queue_id=? AND company_id=? AND state<>\'superseded\'',[q.id,q.company_id]);
       for(const v of rows) {
         if(v.state==='published'||v.retry_at>stamp) continue;
@@ -111,7 +124,8 @@ export async function runSocialVerificationSweep(nowMs=Date.now(), adapters=veri
           let taskId=v.task_id;
           if(!task || task.status==='done' || v.state==='scheduled') {
             const generation=`${v.attempt_count+1}:${v.state==='scheduled'?v.retry_at:''}`;
-            const key=createHash('sha256').update(JSON.stringify([q.company_id,q.id,v.target,generation])).digest('hex');
+            const sourceSha=q.cc_task_id?registeredReceipt(q.cc_task_id)?.sha:null;
+            const key=createHash('sha256').update(JSON.stringify([q.company_id,q.id,v.target,generation,sourceSha,v.updated_at])).digest('hex');
             const result=await adapters.create({title:`Verify social publication: ${v.target}`,description:`READBACK ONLY. Never create, repost, edit or reschedule a post. Company ${q.company_id}; publish queue ${q.id}; target ${v.target}; platform ${v.platform}; source task ${q.cc_task_id??'unknown'}. Retrieve the existing publish-receipts.json and planned posts from the source task. Query provider status for every intended post on this target. Resolve unknown IDs/account connections visibly; do not invent them. Preserve healthy unrelated targets. Save publish-receipts.json in YOUR assigned artifact directory and register it through the existing task deliverables API; independent QC must check the provider readback before this verification task reaches done. Unknown account ownership must first be refreshed into this company's connected account registry. The production source must register its immutable publish-receipts.json with company_id, queue_id and complete posts inventory. Bind the verification receipt source_receipt_sha256 to that registered source SHA and verify the exact per-account source post ID set, rejecting omissions/extras. Receipt: company_id, queue_id, source_receipt_sha256, planned_posts, created_posts and posts[] with post_id,url,platform,account_id,scheduled_at when scheduled, readback:{id,account_id,status:published|scheduled,checked_at}. Preserve real provider responses as supporting artifacts. If proof is unavailable report the exact blocker; never label it published.`,status:'backlog',priority:'high',department:'social-media',assigned_agent_id:null,created_by_agent_id:null,workspace_id:null,idempotency_key:key,idempotency_company_id:q.company_id,source:'social-publish-verifier',eventMessage:`Readback ownership for ${q.id} ${v.target}`},{origin:'social-publish-verifier'});
             if(!result) throw new Error('Readback task creation failed');
             taskId=result.task.id;
@@ -125,6 +139,9 @@ export async function runSocialVerificationSweep(nowMs=Date.now(), adapters=veri
           run(`UPDATE social_publish_verifications SET attempt_count=MIN(attempt_count+1,3),retry_at=?,error=?,updated_at=? WHERE queue_id=? AND target=?`,[retry,String(error),stamp,q.id,v.target]);
         }
       }
+      // Dispatch awaits can span a source amendment. Recheck all accepted
+      // targets immediately before deciding the aggregate completion state.
+      invalidateChangedEvidence(q.id,q.company_id,q.cc_task_id,stamp);
       const states=queryAll<{state:string;retry_at:string;error:string|null}>('SELECT state,retry_at,error FROM social_publish_verifications WHERE queue_id=? AND state<>\'superseded\'',[q.id]);
       const state=states.length&&states.every(v=>v.state==='published')?'published':states.length&&states.every(v=>['published','scheduled'].includes(v.state))?'scheduled':'verification_required';
       run('UPDATE publish_queue SET status=?,retry_at=?,error=?,completed_at=?,updated_at=? WHERE id=? AND company_id=?',[state,state==='published'?null:states.filter(v=>v.state!=='published').map(v=>v.retry_at).sort()[0]??retry,state==='verification_required'?'Readback verification owned by per-target tasks; inspect social_publish_verifications for retry/worker/blocker details':null,state==='published'?stamp:null,stamp,q.id,q.company_id]);
