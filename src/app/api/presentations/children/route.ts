@@ -51,11 +51,32 @@ export async function GET(request: NextRequest) {
     const activeCompanyId = resolveActiveCompanyId(db);
     const own = tenantTaskWhere(activeCompanyId);
 
-    // Fetch parent row (company-scoped)
+    // Fetch parent row (company-scoped).
+    // PRES-021 — serve the block fields the standalone parent response type
+    // claims (reason/audience/next-retry/recovery-owner) plus the last-update
+    // timestamp, so the blocked panel is actionable without a second fetch.
+    // All columns are COALESCE-probed: pre-migration boxes lack some of them
+    // and must return nulls, never a 500 (DATA-01 posture).
+    const taskCols = (
+      db.prepare(`SELECT name FROM pragma_table_info('tasks')`).all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    const hasTaskCol = (name: string): boolean => taskCols.includes(name);
+    const blockCols = [
+      'block_reason',
+      'block_gaps',
+      'block_needs',
+      'block_audience',
+      'dispatch_attempts',
+      'next_dispatch_eligible_at',
+      'updated_at',
+    ]
+      .filter(hasTaskCol)
+      .map((c) => `, t.${c}`)
+      .join('');
     const parent = db
       .prepare(
         `SELECT t.id, t.title, t.status, t.priority, t.department,
-                t.process_certificate_sha, t.created_at
+                t.process_certificate_sha, t.created_at, t.assigned_agent_id${blockCols}
          FROM tasks t
         WHERE t.id = ? AND ${own.sql}`,
       )
@@ -250,6 +271,12 @@ export async function GET(request: NextRequest) {
       }
     }
 
+    // PRES-021 — recovery owner: the agent assigned to unstick this parent
+    // (board SELECT is t.*, so assigned_agent_id is the live value). Null
+    // when unassigned — the client then routes to the owner, never a name
+    // invented here.
+    const recoveryOwner = (parent.assigned_agent_id as string | null | undefined) ?? null;
+
     return NextResponse.json({
       parent: {
         id: parent.id,
@@ -259,6 +286,16 @@ export async function GET(request: NextRequest) {
         department: parent.department,
         process_certificate_sha: parent.process_certificate_sha,
         created_at: parent.created_at,
+        // PRES-021 — actionable block fields (null when the column or the
+        // value is absent — never fabricated, never a 500 on old boxes).
+        block_reason: (parent.block_reason as string | null | undefined) ?? null,
+        block_gaps: (parent.block_gaps as string | null | undefined) ?? null,
+        block_needs: (parent.block_needs as string | null | undefined) ?? null,
+        block_audience: (parent.block_audience as string | null | undefined) ?? null,
+        dispatch_attempts: (parent.dispatch_attempts as number | null | undefined) ?? null,
+        next_retry_at: (parent.next_dispatch_eligible_at as string | null | undefined) ?? null,
+        recovery_owner: recoveryOwner,
+        updated_at: (parent.updated_at as string | null | undefined) ?? null,
       },
       children: childrenWithPhases,
       aggregate: {

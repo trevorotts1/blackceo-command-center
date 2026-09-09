@@ -14,6 +14,7 @@ import {
   phaseElapsedSeconds,
   PHASE_LABELS,
   PHASE_TO_LABEL,
+  requiredPhaseIdsForLabel,
 } from '@/lib/presentation-phases';
 import { resolveActiveCompanyId } from '@/lib/company';
 import { tenantTaskWhere } from '@/lib/presentation-tenant-scope';
@@ -40,14 +41,25 @@ export async function GET(_request: NextRequest, props: { params: Promise<{ task
 
     const task = db
       .prepare(
-        `SELECT id, status FROM tasks t
+        `SELECT t.id, t.status, t.description FROM tasks t
           WHERE t.id = ? AND ${own.sql}`,
       )
-      .get(taskId, ...own.params) as { id: string; status: string } | undefined;
+      .get(taskId, ...own.params) as { id: string; status: string; description: string | null } | undefined;
 
     if (!task) {
       return NextResponse.json({ error: 'Task not found' }, { status: 404 });
     }
+
+    // PRES-020 — canonical execution record: the parent card's `Ref:` run
+    // identity (FIX 57) is the authoritative run id. It scopes both the
+    // activity reduction (stale run/attempt rows ignored) and the wall-clock
+    // attribution (canonical run wins over arrival order).
+    const canonicalRunId = (() => {
+      const desc = task.description;
+      if (typeof desc !== 'string') return null;
+      const m = desc.match(/^Ref:\s*(\S.*?)\s*$/m);
+      return m ? m[1] : null;
+    })();
 
     const activities = db
       .prepare(
@@ -68,7 +80,45 @@ export async function GET(_request: NextRequest, props: { params: Promise<{ task
       )
       .all(taskId) as Array<{ deliverable_type: string; path: string | null }>;
 
-    const progress = computePhaseProgress(activities, deliverables);
+    // PRES-020 — per-id completion receipts: a completion-typed activity
+    // proves its phase id ONLY when the matching producer QC scorecard row
+    // carries the scorecard contract with an explicit pass. Presence of a
+    // deliverable or a bare completion event without QC never completes the
+    // id — that is the "deliverable presence without QC" acceptance check.
+    // Fail-closed: a QC row the CC cannot parse counts as absent, never as
+    // proof. Scoped to the canonical run so a retry's fresh attempt does not
+    // inherit the superseded attempt's receipts.
+    const completionReceipts: Record<string, boolean> = {};
+    try {
+      const qcRows = db
+        .prepare(
+          `SELECT metadata FROM task_activities
+            WHERE task_id = ? AND activity_type = 'completed' AND metadata IS NOT NULL`,
+        )
+        .all(taskId) as Array<{ metadata: string | null }>;
+      for (const row of qcRows) {
+        if (typeof row.metadata !== 'string') continue;
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(row.metadata);
+        } catch {
+          continue;
+        }
+        if (typeof parsed !== 'object' || parsed === null) continue;
+        const rec = parsed as Record<string, unknown>;
+        const gate = typeof rec.qc_gate === 'string' ? rec.qc_gate : null;
+        if (gate == null || !(gate in PHASE_TO_LABEL)) continue;
+        if (rec.qc_passed === true) completionReceipts[gate] = true;
+      }
+    } catch {
+      // Best-effort: receipts stay empty and every completion-typed activity
+      // counts (legacy behavior) rather than failing the phases read.
+    }
+
+    const progress = computePhaseProgress(activities, deliverables, {
+      completionReceipts,
+      activeScope: canonicalRunId ? { run_id: canonicalRunId } : null,
+    });
 
     // ── FIX 53 (R5A §E, §H6) — per-label elapsed from stage timings ──────
     // The stage-timings ingest (W16b) lands the engine's phase_exit rows in
@@ -140,7 +190,7 @@ export async function GET(_request: NextRequest, props: { params: Promise<{ task
             )
             .all(taskId) as TimingRow[];
         }
-        elapsed = phaseElapsedSeconds(rows);
+        elapsed = phaseElapsedSeconds(rows, canonicalRunId);
         if (hasSplit) {
           const acc = new Map<string, { wall_s: number; provider_s: number; queue_s: number; qc_s: number }>();
           for (const r of rows) {
@@ -193,21 +243,42 @@ export async function GET(_request: NextRequest, props: { params: Promise<{ task
     // box predates migration 141 or no row carries a split ({} — never null,
     // so the stepper can read breakdown[label] without a guard). elapsed_s
     // keeps its exact FIX 53 meaning (wall seconds, null when unknown).
+    // PRES-020 — honest per-label progress. The old projection emitted a
+    // fabricated 50/100 with null started_at and empty artifacts: one id done
+    // out of five read as 100, a started label read as 50. Now:
+    //   - percent = doneIds/totalIds scaled (0 when nothing applies yet),
+    //   - units_completed/units_total expose the same fraction as integers so
+    //     the client never re-derives it from the rounded percent,
+    //   - started_at stays an honest null (task_activities carry no per-label
+    //     start timestamps; the route must not invent one) — wall-clock lives
+    //     in elapsed_s, and evidence links ride on `receipts`.
     return NextResponse.json({
       job_id: taskId,
       terminal,
       current_phase: (currentPhase ?? PHASE_LABELS[0]) as typeof PHASE_LABELS[number],
-      phases: progress.phases.map((step) => ({
-        id: step.label.toLowerCase(),
-        label: step.label,
-        status: step.status,
-        started_at: step.status !== 'not_started' ? null : null,
-        // FIX 53 — real wall-clock seconds per label from the stage-timings
-        // stream; null when that label has no timing row yet (stepper hides it).
-        elapsed_s: (elapsed[step.label] ?? null) as number | null,
-        artifacts: [] as string[],
-        percent: step.status === 'done' ? 100 : step.status === 'in_progress' ? 50 : 0,
-      })),
+      phases: progress.phases.map((step) => {
+        const total = step.totalIds;
+        const done = Math.min(step.doneIds, total);
+        const percent =
+          step.status === 'done' ? 100 : total > 0 ? Math.round((done / total) * 100) : 0;
+        const requiredIds = requiredPhaseIdsForLabel(step.label);
+        return {
+          id: step.label.toLowerCase(),
+          label: step.label,
+          status: step.status,
+          started_at: null,
+          // FIX 53 — real wall-clock seconds per label from the stage-timings
+          // stream; null when that label has no timing row yet (stepper hides it).
+          elapsed_s: (elapsed[step.label] ?? null) as number | null,
+          artifacts: [] as string[],
+          percent,
+          units_completed: done,
+          units_total: total,
+          receipts: requiredIds
+            .filter((id) => completionReceipts[id] === true)
+            .map((id) => ({ phase_id: id, verified: true as const })),
+        };
+      }),
       unmapped: progress.unmapped,
       timing_breakdown: timingBreakdown,
     });
