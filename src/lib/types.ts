@@ -844,7 +844,7 @@ export interface PublishQueueItem {
   topic: string;
   platforms: string[];                 // decoded from the stored JSON string
   schedule: 'auto' | 'now' | string;   // ISO 8601 also allowed
-  status: 'queued' | 'running' | 'done' | 'failed' | 'cancelled';
+  status: 'queued' | 'running' | 'retrying' | 'scheduled' | 'published' | 'verification_required' | 'overdue' | 'done' | 'failed' | 'cancelled';
   run_id: string | null;
   requested_by: string | null;
   error: string | null;

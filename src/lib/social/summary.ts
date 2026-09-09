@@ -49,7 +49,7 @@ export type ProviderState = 'draft' | 'scheduled' | 'published' | 'failed' | 'un
 /** publish_queue states the F03 dispatcher persists (W0 contract). */
 export type PublishQueueState =
   | 'queued' | 'running' | 'retrying' | 'scheduled' | 'published'
-  | 'failed' | 'overdue' | 'done' | 'cancelled';
+  | 'failed' | 'overdue' | 'done' | 'cancelled' | 'verification_required';
 
 export type SummaryOwner = 'system' | 'client';
 
@@ -221,8 +221,14 @@ export function buildPublishMessage(
       nextAction = 'Posts are scheduled and will publish at their scheduled times.';
       owner = 'system';
       break;
-    case 'published':
+    case 'verification_required':
     case 'done':
+      stage = 'verification required';
+      nextAction = 'The task finished. The system must verify provider results for each requested account before confirming publication. Healthy unrelated work continues.';
+      owner = 'system';
+      if (publish.error) failures.push(publish.error);
+      break;
+    case 'published':
       stage = 'published';
       nextAction = 'This cycle completed. See the cycle summary for the published links.';
       owner = 'system';
