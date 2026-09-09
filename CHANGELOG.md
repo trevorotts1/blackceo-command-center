@@ -1,3 +1,12 @@
+## [v7.3.1] — 2026-09-09 — Social planner ownership and truthful publication status
+
+- Prevent simultaneous workers and expired owners from completing the same social operation. Persist ownership, retries and completion across restarts; reserve provider capacity transactionally.
+- A completed agent task now requires publication verification instead of falsely reporting that a social post is live. A scheduler-owned, per-account readback queue uses registered, hashed production inventories, bounded retries and overdue escalation.
+- Invalidate accepted publication proof when the production inventory changes; verify amended post inventories before reporting completion.
+- Upgrade Vitest to 4.1.11 to remediate the reported test-tool advisory; dependency audit reports zero vulnerabilities.
+- Isolate browser acceptance from live credentials/background jobs; verify saved-draft resume and company/week separation without silently skipping failed setup.
+- Validation: 153 social Node tests and 2 Chromium tests; following the security upgrade, 245 component tests, 51 representative Vitest tests and 8 focused verification tests pass. TypeScript and targeted lint passed. Real provider publication and fleet deployment still require separate installation evidence.
+
 ## [v7.3.0] — 2026-09-09 — Social planner W4+W5: portable deployment health, resumable setup, measured outcomes, final regression coverage
 
 ### Added

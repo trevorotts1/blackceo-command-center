@@ -49,6 +49,7 @@ import { runBoardHygiene, BOARD_HYGIENE_CRON } from './board-hygiene';
 import { runSweepLivenessSweep } from './sweep-liveness';
 import { runPersonaGroundingHealthSweep } from './persona-grounding-sweep';
 import { runSocialPublishDispatcherSweep } from './social-publish-dispatcher';
+import { runSocialVerificationSweep } from './social-publish-verification';
 import { runSocialPerformanceReviewSweep } from './social-performance-review';
 import {
   runSocialCycleSweep,
@@ -433,6 +434,7 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<unknown> | unk
       const { runSocialPublishOverdueSweep } = await import('./social-publish-dispatcher');
       const result = await runSocialPublishDispatcherSweep();
       const overdue = await runSocialPublishOverdueSweep();
+      await runSocialVerificationSweep();
       if (result.dispatched > 0 || result.retried > 0 || result.failed > 0 || overdue.overdue > 0) {
         console.log(
           `[cron] social-publish-dispatcher: scanned ${result.scanned}, dispatched ${result.dispatched}, ` +

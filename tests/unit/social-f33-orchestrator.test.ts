@@ -192,11 +192,11 @@ test('[F33.7] cross-process lease fencing: a second worker holding the live dura
   // proceed (no double-run while live). Wall-clock expiry (120s) is not
   // advanced here — release-on-settle is the deterministic handoff.
   assert.ok(orchA.settle('s1', 'worker-a', leaseA.fencingToken), 'holder settles and releases the durable row');
-  assert.ok(orchB.claim('worker-b', 's1'), 'second process claims after the durable lease is released');
+  assert.equal(orchB.claim('worker-b', 's1'), null, 'completed durable step never reruns after coordinator restart');
 });
 
 // ── D-F33-02: in-memory fallback when the durable table is unavailable ──────
-test('[F33.8] no provider_leases table → in-memory coordination still works (best-effort fallback)', () => {
+test('[F33.8] explicit deterministic test clock can exercise memory-only fixture', () => {
   run(`ALTER TABLE social_provider_leases RENAME TO social_provider_leases_hidden`);
   try {
     const clock = fakeClock();
@@ -272,8 +272,9 @@ test('[F33.6] 429 parks the provider; circuit isolates failures; alternatives pr
   const orch2 = createSocialOrchestrator('ultra', plan2, clock2.now);
   for (let i = 0; i < 3; i++) {
     const l = orch2.claim('w', 'a-0')!;
-    if (!l) break;
+    assert.ok(l, 'retry becomes eligible after its explicit backoff');
     orch2.fail('a-0', 'w', l.fencingToken);
+    if (i < 2) clock2.advance(30 * (i + 1));
   }
   assert.equal(orch2.claim('w', 'a-1'), null, 'open circuit refuses claims for the failing provider');
   assert.ok(orch2.claim('w', 'b-0'), 'circuit isolates the failing provider only');

@@ -1,16 +1,15 @@
 import { defineConfig } from 'playwright/test';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 
-/**
- * Playwright config for the F27 social-theme mini app E2E (QC-F27 browser
- * half). Isolated from the shared smoke config: dedicated port, isolated
- * throwaway DB, controlled env so the exchange → wizard → submit happy path
- * is deterministic. Skips cleanly when the infra cannot boot (the runner
- * records NOT VERIFIED rather than failing the workflow).
- *
- * Run: npx playwright test --config=playwright.social-theme.config.ts
- */
-
-const baseURL = process.env.SOCIAL_THEME_BASE_URL || 'http://localhost:4127';
+// Fresh persistent fixture per run. Workers inherit this exact root. This
+// config never connects to a client service or skips a failed acceptance gate.
+const port = process.env.SOCIAL_THEME_E2E_PORT || '4127';
+if (!/^\d+$/.test(port) || Number(port) < 1024 || Number(port) > 65535) throw new Error('Invalid E2E port');
+const baseURL = `http://127.0.0.1:${port}`;
+process.env.SOCIAL_THEME_E2E_RUN_ROOT ||= mkdtempSync(path.join(tmpdir(), 'cc-social-e2e-'));
+process.env.SOCIAL_THEME_BASE_URL = baseURL;
 
 export default defineConfig({
   testDir: './tests/e2e',
@@ -22,30 +21,13 @@ export default defineConfig({
   workers: 1,
   fullyParallel: false,
   reporter: [['list']],
-  use: {
-    baseURL,
-    headless: true,
-    screenshot: 'only-on-failure',
-    trace: 'off',
-    video: 'off',
-  },
+  use: { baseURL, headless: true, screenshot: 'only-on-failure', trace: 'off', video: 'off' },
   webServer: {
-    command: 'npm run dev',
+    command: 'node scripts/social-theme-e2e-server.cjs',
     url: `${baseURL}/api/health`,
     timeout: 180_000,
     reuseExistingServer: false,
-    stdout: 'pipe',
-    stderr: 'pipe',
-    env: {
-      ...process.env,
-      PORT: '4127',
-      DATABASE_PATH: './.test-social-theme-f27.db',
-      MC_TENANT_SESSION_SECRET: 'f27-e2e-secret',
-      MC_API_TOKEN: 'f27-e2e-operator-token',
-      MC_INSTALLATION_ID: 'f27-e2e-install',
-      MC_TENANT_PUBLIC_URL: 'http://localhost:4127',
-      NODE_ENV: 'development',
-      OWNER_NOTIFY_TELEGRAM_DISABLED: '1',
-    },
+    stdout: 'pipe', stderr: 'pipe',
+    env: { SOCIAL_THEME_E2E_RUN_ROOT: process.env.SOCIAL_THEME_E2E_RUN_ROOT, SOCIAL_THEME_E2E_PORT: port },
   },
 });

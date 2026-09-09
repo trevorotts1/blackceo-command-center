@@ -45,8 +45,9 @@
  * them visibly when the attempt cap is exhausted. No operator reset needed.
  *
  * LINK-FOLLOW: once a row carries cc_task_id, later ticks read the task's
- * status and mirror terminal outcomes: task done → row 'published' (the
- * dashboard's own lifecycle 'done' naming for a publish), task blocked →
+ * status and mirror terminal outcomes: task done → 'verification_required'
+ * until actual provider readback is available; task completion alone never
+ * establishes publication. Task blocked →
  * row 'failed' with the block reason. In-progress/review keeps 'running'
  * with truthful linkage.
  */
@@ -92,6 +93,7 @@ export type PublishQueueState =
   | 'retrying'
   | 'scheduled'
   | 'published'
+  | 'verification_required'
   | 'failed'
   | 'overdue'
   | 'done'
@@ -219,11 +221,11 @@ export async function runSocialPublishDispatcherSweep(): Promise<{
     followed++;
     if (task.status === 'done') {
       run(
-        `UPDATE publish_queue SET status = 'published', completed_at = ?, updated_at = ?
+        `UPDATE publish_queue SET status = 'verification_required', error = ?, completed_at = NULL, updated_at = ?
           WHERE id = ? AND cc_task_id = ? AND status = 'running'`,
-        [nowIso, nowIso, row.id, row.cc_task_id],
+        ['Task completed; remote publication is not verified. Check each requested account against provider readback receipts before reporting publication.', nowIso, row.id, row.cc_task_id],
       );
-      broadcast({ type: `publish_state:${row.company_id}`, payload: { id: row.id, status: 'published' } });
+      broadcast({ type: `publish_state:${row.company_id}`, payload: { id: row.id, status: 'verification_required' } });
     } else if (task.status === 'blocked') {
       run(
         `UPDATE publish_queue SET status = 'failed', error = ?, completed_at = ?, updated_at = ?
