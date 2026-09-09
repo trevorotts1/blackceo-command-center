@@ -188,13 +188,13 @@ test.after(async () => {
 });
 
 /** Stub the gateway boundary (same pattern as the alias-reverse-probe suite). */
-async function stubGateway(): Promise<{ sends: Array<{ method: string; params: Record<string, unknown> | undefined }> }> {
+async function stubGateway(): Promise<{ sends: Array<{ method: string; params: Record<string, unknown> | undefined; receiptTimeoutMs?: number }> }> {
   const { getOpenClawClient } = await import('../../src/lib/openclaw/client');
   const client = getOpenClawClient();
-  const sends: Array<{ method: string; params: Record<string, unknown> | undefined }> = [];
+  const sends: Array<{ method: string; params: Record<string, unknown> | undefined; receiptTimeoutMs?: number }> = [];
   client.isConnected = () => true;
-  client.call = (async (method: string, params?: Record<string, unknown>) => {
-    sends.push({ method, params: params ?? {} });
+  client.call = (async (method: string, params?: Record<string, unknown>, receiptTimeoutMs?: number) => {
+    sends.push({ method, params: params ?? {}, receiptTimeoutMs });
     return { ok: true };
   }) as typeof client.call;
   return { sends };
@@ -255,6 +255,8 @@ test('[IDEM-2] the same dispatch AFTER the window elapses dispatches normally', 
   assert.equal(res.status, 200, 'post-window re-dispatch succeeds');
   assert.equal(body.success, true, 'a plain re-POST after the window dispatches exactly as before');
   assert.equal(sends.filter((s) => s.method === 'chat.send').length, 1, 'exactly one chat.send fires');
+  assert.equal(Object.hasOwn(sends.find((s) => s.method === 'chat.send')!.params!, 'timeoutMs'), false, 'manual dispatch must preserve the configured worker runtime limit');
+  assert.equal(sends.find((s) => s.method === 'chat.send')!.receiptTimeoutMs, 90_000, 'cold-start receipt wait is separate from the worker run budget');
   assert.equal(body.suppressed, undefined, 'a normal dispatch carries no suppression marker');
 
   const suppressed = queryAll<{ id: string }>(

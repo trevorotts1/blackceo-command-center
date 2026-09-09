@@ -52,12 +52,9 @@ import { runSocialPublishDispatcherSweep } from './social-publish-dispatcher';
 import { runSocialVerificationSweep } from './social-publish-verification';
 import { runSocialPerformanceReviewSweep } from './social-performance-review';
 import {
-  runSocialCycleSweep,
   claimEngineOwnership,
-  recordOwnershipTick,
   SOCIAL_CYCLE_CRON,
 } from './social-cycle';
-import { makeOutboxSenders } from './social-theme-nudge';
 import { runExpiryRecoverySweep } from './social-account-health';
 import {
   runOperatorColumnAgeDigest,
@@ -880,17 +877,12 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<unknown> | unk
         console.log('[cron] social-cycle: DISABLE_SOCIAL_CYCLE set, skipping');
         return { skippedReason: 'disabled' };
       }
-      const senders = makeOutboxSenders();
-      const result = await runSocialCycleSweep({ send: senders.send, sendReminder: senders.sendReminder });
-      // F17: the durable engine asserts ownership + a future schedule each
-      // tick. next_run_at = now + cadence (the next node-cron tick window).
-      claimEngineOwnership(new Date(Date.now() + 5 * 60_000).toISOString());
-      recordOwnershipTick(new Date(Date.now() + 5 * 60_000).toISOString());
-      if (result.invited || result.reminded || result.cutoffs || result.nextCycles || result.errors) {
-        console.log(
-          `[cron] social-cycle: scanned ${result.scanned}, invited ${result.invited}, reminded ${result.reminded}, ` +
-            `cutoffs ${result.cutoffs}, next ${result.nextCycles}, errors ${result.errors}`,
-        );
+      const { runWeeklySocialInvitations, localSocialBinding } = await import('@/lib/social-theme/delivery');
+      const { processSocialSubmission } = await import('@/lib/social-theme/submission-worker');
+      const handoff = await processSocialSubmission();
+      const result = { invitation: await runWeeklySocialInvitations(), handoff };
+      if (process.env.SOCIAL_THEME_AUTOPILOT_ENABLED === '1') {
+        claimEngineOwnership(localSocialBinding().clientId, new Date(Date.now() + 5 * 60_000).toISOString());
       }
       return result;
     },

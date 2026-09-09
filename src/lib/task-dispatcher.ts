@@ -1726,8 +1726,9 @@ If you need help or clarification, ask the orchestrator.`;
         sessionKey,
         message: `${taskMessage}\n\n${renderPersonaConformanceInstructions(task.id, executionId, agent.id, missionControlUrl)}\n\n**Execution ID:** ${execution.id}\nFor task completion, include execution_id: "${execution.id}" in the completion webhook JSON.`,
         idempotencyKey: execution.idempotency_key,
-        timeoutMs: 30000,
-      });
+        // Omit the agent-run timeout: the gateway owns the configured runtime limit.
+        // RPC acknowledgement deadlines must never become a 30-second worker cutoff.
+      }, 90_000);
       recordExecutionAcceptance(execution, response);
       acknowledgedExecution = execution;
     } catch (sendErr) {

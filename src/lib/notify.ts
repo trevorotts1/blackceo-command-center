@@ -9,7 +9,7 @@
  * Design contract:
  *   - BEST-EFFORT: a failed send NEVER throws.  The caller gets a boolean so
  *     it can log, but it must not roll back any DB state because of it.
- *   - GATEWAY-ONLY: every send goes through `openclaw message send` (the
+ *   - GATEWAY-ONLY: sends use the authenticated gateway RPC or `openclaw message send` (the
  *     OpenClaw gateway). Direct HTTP to api.telegram.org is FORBIDDEN — the
  *     same rule every onboarding-repo script follows.
  *   - Gate: set OWNER_NOTIFY_TELEGRAM_DISABLED=1 to suppress all sends (used
@@ -933,6 +933,10 @@ function escalateUndeliverableOwner(reason: string, message: string): void {
  * Accepted requires a matching gateway acknowledgement; every attempted failure
  * is uncertain because the gateway may have delivered before losing its reply.
  */
+export function resolvePrivateOwnerChatId(): string | null {
+  return resolveOwnerChatId() || (operatorIsOwnerBox() ? resolveOperatorChatId() : null);
+}
+
 export async function notifyOwnerPrivate(opts: {
   companyId: string;
   expectedChatId: string;
@@ -966,6 +970,39 @@ export async function notifyOwnerPrivate(opts: {
       });
     } catch { resolve({ status: 'uncertain' }); }
   });
+}
+
+/** Private planner delivery through the authenticated gateway with a recipient-bound receipt. */
+export async function notifySocialOwnerPrivate(opts: {
+  companyId: string;
+  expectedChatId: string;
+  message: string;
+}): Promise<{ status: 'accepted'; messageId: string } | { status: 'uncertain' | 'not-dispatched' }> {
+  if (ownerSendsSuppressed() || process.env.MC_COMPANY_ID !== opts.companyId ||
+      !opts.expectedChatId || resolvePrivateOwnerChatId() !== opts.expectedChatId) {
+    return { status: 'not-dispatched' };
+  }
+  let client: import('@/lib/openclaw/client').OpenClawClient;
+  try {
+    const { getOpenClawClient } = await import('@/lib/openclaw/client');
+    client = getOpenClawClient();
+    await client.connect();
+  } catch { return { status: 'not-dispatched' }; }
+  try {
+    const deliveryKey = createHash('sha256').update(`${opts.companyId}:${opts.expectedChatId}:${opts.message}`).digest('hex');
+    const payload = await client.call<Record<string, unknown>>('send', {
+      channel: 'telegram', to: opts.expectedChatId, message: opts.message, agentId: 'main',
+      idempotencyKey: deliveryKey,
+    });
+    const messageId = payload?.messageId;
+    if (payload?.channel === 'telegram' && payload?.runId === deliveryKey &&
+        (payload.chatId === undefined || String(payload.chatId) === opts.expectedChatId) &&
+        ['string', 'number'].includes(typeof messageId) && String(messageId).trim()) {
+      return { status: 'accepted', messageId: String(messageId) };
+    }
+    return { status: 'uncertain' };
+  } catch { return { status: 'uncertain' }; }
+
 }
 
 /**

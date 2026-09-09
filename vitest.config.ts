@@ -15,6 +15,9 @@ export default defineConfig({
     // (npm run test:unit via tsx --test) and produce "no test suite found" errors
     // when included here.
     include: [
+      'tests/vitest/social-link-delivery.test.ts',
+      'tests/vitest/social-private-transport.test.ts',
+      'tests/vitest/social-theme-autosave.test.tsx',
       'tests/unit/deep-health.test.ts',
       'tests/unit/cc-probe-pm2.test.ts',
       // Floor invariant: displayed departments == chosen manifest − opt-outs, for

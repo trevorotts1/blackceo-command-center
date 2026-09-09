@@ -113,7 +113,7 @@ export async function POST(req: NextRequest) {
       already_submitted: result.alreadySubmitted,
       // The real work-task stage is surfaced by the progress screen through
       // the campaign board's canonical task state (SPEC: one canonical task).
-      next_step: 'production_started',
+      next_step: 'handoff_pending',
     },
     { headers },
   );

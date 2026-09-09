@@ -803,7 +803,7 @@ export class OpenClawClient extends EventEmitter {
     return this.reconnectBlocked;
   }
 
-  async call<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T> {
+  async call<T = unknown>(method: string, params?: Record<string, unknown>, receiptTimeoutMs = 30_000): Promise<T> {
     if (!this.ws || !this.connected || !this.authenticated) {
       throw new Error('Not connected to OpenClaw Gateway');
     }
@@ -814,13 +814,13 @@ export class OpenClawClient extends EventEmitter {
     return new Promise((resolve, reject) => {
       this.pendingRequests.set(id, { resolve: resolve as (value: unknown) => void, reject });
 
-      // Timeout after 30 seconds
+      // Bound only the RPC receipt wait, independently of any agent-run timeout.
       setTimeout(() => {
         if (this.pendingRequests.has(id)) {
           this.pendingRequests.delete(id);
           reject(new Error(`Request timeout: ${method}`));
         }
-      }, 30000);
+      }, Math.max(1, Math.min(receiptTimeoutMs, 120_000)));
 
       this.ws!.send(JSON.stringify(message));
     });

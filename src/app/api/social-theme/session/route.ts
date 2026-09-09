@@ -26,6 +26,7 @@ import {
   type SocialThemeGrant,
 } from '@/lib/social-theme/theme-sessions';
 import { verifyCsrfToken } from '@/lib/csrf-protection';
+import { readSocialSubmission, readLocalPlannerUrl } from '@/lib/social-theme/submission-worker';
 import {
   getCycle,
   listCycles,
@@ -80,6 +81,8 @@ export async function GET(req: NextRequest) {
         submitted_at: session.submitted_at,
       },
       answers,
+      handoff: readSocialSubmission(session.company_id, session.cycle_id),
+      planner_url: readLocalPlannerUrl(session.company_id),
       // Client A can only ever see client A's approved history.
       suggestions: themeSuggestions(session.company_id),
       history: listCycles(session.company_id, 12).map((c) => ({

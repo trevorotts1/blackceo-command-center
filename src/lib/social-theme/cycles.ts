@@ -150,7 +150,7 @@ export function markCycleState(cycleId: string, companyId: string, state: CycleS
  * returned as-is (no new draft after submit — double submit is refused at
  * the API layer with the original receipt).
  */
-export function ensureDraftSession(cycle: SocialCycle): ThemeSession {
+export function ensureDraftSession(cycle: SocialCycle, markInvited = true): ThemeSession {
   const existing = queryOne<ThemeSession>(
     `SELECT * FROM social_theme_sessions WHERE company_id = ? AND cycle_id = ?`,
     [cycle.company_id, cycle.id],
@@ -164,7 +164,7 @@ export function ensureDraftSession(cycle: SocialCycle): ThemeSession {
     [id, cycle.company_id, cycle.id, now, now],
   );
   // Cycle moves draft → invited once an entry draft exists for it.
-  markCycleState(cycle.id, cycle.company_id, 'invited');
+  if (markInvited) markCycleState(cycle.id, cycle.company_id, 'invited');
   return queryOne<ThemeSession>(
     `SELECT * FROM social_theme_sessions WHERE id = ?`,
     [id],
