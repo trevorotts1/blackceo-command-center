@@ -163,10 +163,13 @@ export function ensureCampaignCompanyColumn(): boolean {
 /**
  * True iff the campaign is visible to this company. A campaign belongs to a
  * company through its company_id column (F36) OR its workspace's company_id
- * (pre-F36 rows created via POST /api/campaigns with only a workspace_id).
- * 'default' rows are the box's own unattributed legacy boards: a verified
- * non-default company never sees them (the F01-D2 posture — legacy rows are
- * not ownable across companies), while the 'default' tenant still owns them.
+ * (pre-F36 rows carry the lazy column's 'default' DEFAULT, not their real
+ * owner). Resolution: an explicitly non-default company_id wins outright; a
+ * 'default'/absent company_id resolves through the workspace when one exists
+ * (the pre-F36 attribution path), and only falls to the 'default' tenant when
+ * there is no workspace to inherit from. 'default'-only rows are the box's
+ * own unattributed legacy boards (F01-D2 posture): a verified non-default
+ * company never owns them.
  */
 export function assertCampaignOwnedByCompany(
   campaign: { id: string; workspace_id?: string | null; company_id?: string | null } | null | undefined,
@@ -177,11 +180,7 @@ export function assertCampaignOwnedByCompany(
   if (campaignCompany && campaignCompany !== 'default') {
     return { owned: campaignCompany === companyId };
   }
-  if (campaignCompany === 'default') {
-    return { owned: companyId === 'default' };
-  }
-  // Legacy row without company_id: resolve through the workspace, else treat
-  // as box-owned legacy ('default').
+  // 'default' or absent attribution: the workspace decides when present.
   if (campaign.workspace_id) {
     try {
       const row = getDb()
