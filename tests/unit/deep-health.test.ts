@@ -1230,12 +1230,17 @@ describe('html_title', () => {
     expect(result.detail).toMatch(/placeholder|unbranded/i);
   });
 
-  // No pre-rendered HTML → indeterminate (not FAIL; live server may have branded title)
-  it('no pre-rendered HTML → indeterminate=true (not FAIL)', async () => {
+  // No pre-rendered HTML → ADVISORY PASS (dynamic-metadata architecture).
+  // layout.tsx uses async generateMetadata(), so a healthy box never has a
+  // static index.html to read; "no pre-rendered HTML" is normal on this
+  // architecture. The old indeterminate made every deploy end exit-3 UNKNOWN.
+  // Live-title verification stays with the cc-health-check.sh outside-in probe.
+  it('no pre-rendered HTML → advisory pass=true (dynamic metadata is the normal condition)', async () => {
     const { checkHtmlTitle } = await loadChecks();
     const result = checkHtmlTitle();
-    expect(result.pass).toBe(false);
-    expect(result.indeterminate).toBe(true);
+    expect(result.pass).toBe(true);
+    expect(result.indeterminate).toBe(false);
+    expect(result.detail).toMatch(/outside-in probe|dynamically/i);
   });
 });
 

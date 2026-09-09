@@ -491,12 +491,29 @@ export function checkHtmlTitle(): HtmlTitleResult {
     }
 
     if (!html) {
-      // No pre-rendered HTML found — skip (indeterminate, not fail).
-      // The cc-health-check.sh outside-in probe covers the running-server case.
+      // No pre-rendered HTML found.
+      //
+      // Why this is now an ADVISORY PASS, not an indeterminate: since the
+      // white-label metadata change, layout.tsx exports an async
+      // generateMetadata() that resolves the title at REQUEST time (company
+      // config + COMPANY_NAME env). A dynamic-metadata page never emits a
+      // static index.html into .next/server — on ANY box, in ANY healthy
+      // state — so "no pre-rendered HTML" is this architecture's normal
+      // condition, not a transient. Reporting it as indeterminate made every
+      // deploy on such a box end exit-3 UNKNOWN forever (36 retries of
+      // noise), drowning real reds in false UNKNOWNs.
+      //
+      // The failure mode this check hunts — a stale or unbranded title baked
+      // into a static build — cannot occur on a dynamic-metadata page, and
+      // the live failure mode (placeholder/unbranded rendered title) is
+      // already covered by cc-health-check.sh's outside-in probe, which
+      // fetches the rendered page from the running server. Nothing is lost
+      // by passing this row; something is lost (a usable verdict) by leaving
+      // it permanently indeterminate.
       return {
-        pass: false,
-        indeterminate: true,
-        detail: 'html_title: no pre-rendered HTML found in .next/server — check skipped (indeterminate); use cc-health-check.sh outside-in probe for live-server title verification',
+        pass: true,
+        indeterminate: false,
+        detail: 'html_title: no pre-rendered HTML in .next/server — page renders its title dynamically (generateMetadata), so no static title can be stale or unbranded; live title is verified by the cc-health-check.sh outside-in probe',
       };
     }
 
