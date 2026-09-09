@@ -10,6 +10,7 @@ export default defineConfig({
   test: {
     environment: 'jsdom',
     globals: true,
+    setupFiles: ['./tests/setup/jsdom-storage.ts'],
     include: [
       'tests/unit/u55-company-health-render.test.tsx',
       // A-U5 acceptance (b) — PersonaScopeChips real render proof.

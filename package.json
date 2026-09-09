@@ -72,10 +72,10 @@
     "zustand": "^5.0.3"
   },
   "devDependencies": {
+    "@playwright/test": "^1.58.1",
     "@testing-library/dom": "^10.4.1",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",
-    "@playwright/test": "^1.58.1",
     "@types/better-sqlite3": "^7.6.12",
     "@types/css-tree": "^2.3.11",
     "@types/node": "^20.17.12",
@@ -93,6 +93,6 @@
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "vite": "^6.4.3",
-    "vitest": "^3.2.7"
+    "vitest": "^4.1.11"
   }
 }
