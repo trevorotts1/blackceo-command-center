@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getDb } from '@/lib/db';
 import { broadcast } from '@/lib/events';
+import { publishIdempotencyKey } from '@/lib/jobs/social-publish-dispatcher';
 import type { PublishQueueItem } from '@/lib/types';
 import {
   resolvePublishCompany,
@@ -155,15 +156,46 @@ export async function POST(request: NextRequest) {
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
 
+  // F20: stamp the deterministic idempotency key AT ENQUEUE, the same
+  // derivation the dispatcher uses (company + task + normalized topic +
+  // sorted platforms). A duplicate delivery (same logical request, byte-
+  // different body) therefore derives the SAME key here — one dedupe
+  // identity end-to-end, and the row is reconciled by the dispatcher's
+  // UNIQUE index instead of double-posting.
+  const idempotencyKey = publishIdempotencyKey({
+    companyId,
+    taskId,
+    topic,
+    platforms,
+  });
+
   const db = getDb();
-  db.prepare(
-    `INSERT INTO publish_queue
-      (id, task_id, company_id, sheet_id, topic, platforms, schedule, status, requested_by, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)`,
-  ).run(id, taskId, companyId, sheetId, topic, JSON.stringify(platforms), schedule, requestedBy, now, now);
+  // F20 duplicate-delivery collapse: the SAME logical request enqueued twice
+  // (a webhook retry, byte-different body) derives the SAME key, and the
+  // company-scoped UNIQUE index admits exactly one row — the replay is
+  // acknowledged with the EXISTING row, never a second queue row.
+  let insertedId = id;
+  try {
+    db.prepare(
+      `INSERT INTO publish_queue
+        (id, task_id, company_id, sheet_id, topic, platforms, schedule, status, requested_by, idempotency_key, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)`,
+    ).run(id, taskId, companyId, sheetId, topic, JSON.stringify(platforms), schedule, requestedBy, idempotencyKey, now, now);
+  } catch (insertErr) {
+    const msg = String((insertErr as Error).message);
+    if (!/UNIQUE/.test(msg)) throw insertErr;
+    // Duplicate delivery: adopt the existing row for the same key.
+    const existing = db.prepare(
+      `SELECT * FROM publish_queue
+        WHERE company_id = ? AND idempotency_key = ?
+        ORDER BY created_at ASC LIMIT 1`,
+    ).get(companyId, idempotencyKey) as Record<string, unknown> | undefined;
+    if (!existing) throw insertErr;
+    insertedId = String(existing.id);
+  }
 
   const row = db.prepare('SELECT * FROM publish_queue WHERE id = ? AND company_id = ?')
-    .get(id, companyId) as Record<string, unknown>;
+    .get(insertedId, companyId) as Record<string, unknown>;
   const item = rowToItem(row);
 
   // F01-D3 — per-company event scope: the tenant id rides on the event TYPE

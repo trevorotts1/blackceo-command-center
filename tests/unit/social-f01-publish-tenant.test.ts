@@ -413,6 +413,51 @@ test('F01 valid company A request succeeds once, stamps company_id, GET is compa
   assert.ok(!bRows.some((r) => r.id === item.id), 'B list must not contain A rows');
 });
 
+// ─── F20: duplicate webhook delivery — deterministic key, one side effect ───
+
+test('F20 duplicate webhook delivery: case/order-varied bodies collapse to ONE queue row', async () => {
+  setTenantRegistry(HOST_A, HOST_B);
+  const before = queueCount();
+  // The SAME logical request delivered twice with byte-different bodies
+  // (a webhook retry): topic case differs, platform order differs. Only
+  // correct normalization (lowercased topic, sorted platforms) can derive
+  // the same idempotency key — gut the normalization and the two deliveries
+  // stay DIFFERENT keys, so the row COLLAPSE (the one-registration punch)
+  // cannot happen and this test goes RED.
+  const firstBody = JSON.stringify({
+    task_id: 'task-a-1', topic: 'Dup Delivery', platforms: ['linkedin', 'x'],
+  });
+  const secondBody = JSON.stringify({
+    task_id: 'task-a-1', topic: 'dup delivery', platforms: ['x', 'linkedin'],
+  });
+
+  const first = await publishPOST(requestFor(HOST_A, 'company-a', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: firstBody,
+  }));
+  assert.equal(first.status, 201);
+  const firstItem = ((await first.json()) as { publish: { id: string } }).publish;
+  const second = await publishPOST(requestFor(HOST_A, 'company-a', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: secondBody,
+  }));
+  assert.equal(second.status, 201, 'the replay is acknowledged, not dropped');
+  const secondItem = ((await second.json()) as { publish: { id: string } }).publish;
+
+  // THE one-registration consequence: a duplicate delivery must NOT create a
+  // second row — the old one-row-per-request behavior is defeated. Both
+  // deliveries are acknowledged with the SAME queue row.
+  assert.equal(firstItem.id, secondItem.id, 'duplicate deliveries collapse to ONE queue row');
+  assert.equal(queueCount(), before + 1, 'exactly one queue row from two deliveries');
+
+  const row = queryOne<{ idempotency_key: string | null }>(
+    'SELECT idempotency_key FROM publish_queue WHERE id = ?', [firstItem.id],
+  );
+  assert.ok(row?.idempotency_key, 'the enqueued row carries the stamped idempotency key');
+});
+
 // ─── resolvePublishCompany: registry-bound identity ─────────────────────────
 
 test('F01 resolvePublishCompany binds tenant identity to its company', async () => {
