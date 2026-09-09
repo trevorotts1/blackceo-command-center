@@ -136,6 +136,112 @@ export function companyGhlLocationId(companyId: string): string | null {
   return row?.ghl_location_id || null;
 }
 
+// ── F36 — campaign board company scoping ────────────────────────────────────
+
+let campaignColumnEnsured = false;
+/**
+ * PRAGMA-guarded lazy ALTER adding campaigns.company_id (F36). Same pattern
+ * as ensureSocialBindingTables: idempotent, no migration id consumed
+ * (documented for WF00's reserved-ID ledger).
+ */
+export function ensureCampaignCompanyColumn(): boolean {
+  if (campaignColumnEnsured) return true;
+  try {
+    const db = getDb();
+    const info = db.prepare('PRAGMA table_info(campaigns)').all() as { name: string }[];
+    if (Array.isArray(info) && info.length > 0 && !info.some((c) => c.name === 'company_id')) {
+      db.exec(`ALTER TABLE campaigns ADD COLUMN company_id TEXT DEFAULT 'default'`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_campaigns_company ON campaigns(company_id)`);
+    }
+    campaignColumnEnsured = true;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * True iff the campaign is visible to this company. A campaign belongs to a
+ * company through its company_id column (F36) OR its workspace's company_id
+ * (pre-F36 rows created via POST /api/campaigns with only a workspace_id).
+ * 'default' rows are the box's own unattributed legacy boards: a verified
+ * non-default company never sees them (the F01-D2 posture — legacy rows are
+ * not ownable across companies), while the 'default' tenant still owns them.
+ */
+export function assertCampaignOwnedByCompany(
+  campaign: { id: string; workspace_id?: string | null; company_id?: string | null } | null | undefined,
+  companyId: string,
+): { owned: boolean } {
+  if (!campaign) return { owned: false };
+  const campaignCompany = (campaign.company_id || '').trim();
+  if (campaignCompany && campaignCompany !== 'default') {
+    return { owned: campaignCompany === companyId };
+  }
+  if (campaignCompany === 'default') {
+    return { owned: companyId === 'default' };
+  }
+  // Legacy row without company_id: resolve through the workspace, else treat
+  // as box-owned legacy ('default').
+  if (campaign.workspace_id) {
+    try {
+      const row = getDb()
+        .prepare('SELECT company_id FROM workspaces WHERE id = ?')
+        .get(campaign.workspace_id) as { company_id: string | null } | undefined;
+      const wsCompany = row?.company_id || 'default';
+      if (wsCompany === 'default' && companyId !== 'default') return { owned: false };
+      return { owned: wsCompany === companyId };
+    } catch {
+      return { owned: false };
+    }
+  }
+  return { owned: companyId === 'default' };
+}
+
+/**
+ * Resolve the authenticated company for a campaigns-API request. Same tenant
+ * chain as the publish route (bearer MC_API_TOKEN / signed tenant session /
+ * CF Access JWT). In non-production with no tenant configured, falls back to
+ * the box's active company (resolveActiveCompanyId) or 'default' so the
+ * dashboard keeps working on single-tenant boxes that have no registry.
+ */
+export async function resolveCampaignsCompany(
+  request: { headers: Headers },
+): Promise<PublishCompanyResult> {
+  try {
+    const tenant = await resolveTenantContext(request);
+    if (tenant.companyId) {
+      return {
+        ok: true,
+        company: { companyId: tenant.companyId, tenant, ghlLocationId: companyGhlLocationId(tenant.companyId) },
+      };
+    }
+  } catch (error) {
+    if (!(error instanceof TenantAccessError)) throw error;
+    // Unauthenticated in production → 403 (no identity, no board).
+    if (process.env.NODE_ENV === 'production') {
+      return { ok: false, status: 403, error: 'Verified company identity required' };
+    }
+  }
+  if (process.env.NODE_ENV === 'production') {
+    return { ok: false, status: 403, error: 'Verified company identity required' };
+  }
+  // Dev fallback: the box's own active company (single-tenant board).
+  const { resolveActiveCompanyId } = await import('@/lib/company');
+  const dev = getDb();
+  const active = resolveActiveCompanyId(dev) || 'default';
+  return {
+    ok: true,
+    company: {
+      companyId: active,
+      tenant: {
+        tenantId: 'self', companyId: active, clientId: null, kind: 'self',
+        subject: 'local:dashboard', host: '', installationId: 'local',
+      },
+      ghlLocationId: companyGhlLocationId(active),
+    },
+  };
+}
+
 let socialTablesEnsured = false;
 /**
  * Create the two F01 binding tables when missing. Kept idempotent and lazy so

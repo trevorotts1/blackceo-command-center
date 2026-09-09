@@ -1,10 +1,11 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ArrowLeft, Loader2, AlertCircle, Target } from 'lucide-react';
+import { ArrowLeft, Loader2, AlertCircle, Target, RefreshCw, WifiOff } from 'lucide-react';
 import { Breadcrumb } from '@/components/Breadcrumb';
+import { KANBAN_COLUMNS, STATUS_TO_COLUMN, columnForStatus, type KanbanColumn } from '@/lib/social/board-columns';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -25,6 +26,15 @@ interface Campaign {
   target_date: string | null;
 }
 
+interface PublishOverlay {
+  id: string;
+  task_id: string | null;
+  status: string;
+  error: string | null;
+  retry_at: string | null;
+  attempt_count?: number | null;
+}
+
 interface CampaignTask {
   id: string;
   title: string;
@@ -38,30 +48,126 @@ interface CampaignTask {
   secondary_persona_id: string | null;
   secondary_persona_name: string | null;
   assignedAgent?: { id: string; name: string; avatar_emoji: string } | null;
+  // F36 — canonical-task-derived board truth (no forked board state).
+  dispatch_attempts?: number | null;
+  block_reason?: string | null;
+  block_needs?: string | null;
+  parent_task_id?: string | null;
+  publish?: PublishOverlay | null;
 }
 
-type KanbanColumn = 'new' | 'queued' | 'in_progress' | 'review' | 'done';
+// Polling fallback cadence while the page is visible (F36: 15–30s band).
+const POLL_INTERVAL_MS = 20_000;
+// A last-sync older than this shows the stale banner.
+const STALE_AFTER_MS = 60_000;
 
-const KANBAN_COLUMNS: { key: KanbanColumn; label: string; color: string }[] = [
-  { key: 'new',         label: 'New',         color: 'bg-slate-100'  },
-  { key: 'queued',      label: 'Queued',      color: 'bg-blue-50'    },
-  { key: 'in_progress', label: 'In Progress', color: 'bg-amber-50'   },
-  { key: 'review',      label: 'Review',      color: 'bg-violet-50'  },
-  { key: 'done',        label: 'Done',        color: 'bg-emerald-50' },
-];
+// ---------------------------------------------------------------------------
+// Live sync hook — company-scoped task/publish events + polling fallback
+// ---------------------------------------------------------------------------
 
-const STATUS_TO_COLUMN: Partial<Record<TaskStatus, KanbanColumn>> = {
-  inbox: 'new', backlog: 'new', planning: 'queued', assigned: 'queued',
-  pending_dispatch: 'queued', in_progress: 'in_progress', testing: 'in_progress',
-  review: 'review', blocked: 'review', done: 'done',
-};
+interface LiveSyncState {
+  lastSyncedAt: number | null;
+  connected: boolean;
+  stale: boolean;
+}
 
-const PRIORITY_STYLES: Record<TaskPriority, { bg: string; text: string; label: string }> = {
-  critical: { bg: 'bg-red-100',    text: 'text-red-700',    label: 'Critical' },
-  high:     { bg: 'bg-orange-100', text: 'text-orange-700', label: 'High'     },
-  medium:   { bg: 'bg-yellow-100', text: 'text-yellow-700', label: 'Medium'   },
-  low:      { bg: 'bg-gray-100',   text: 'text-gray-600',   label: 'Low'      },
-};
+/**
+ * F36 live refresh: an SSE subscription to /api/events/stream filtered to the
+ * board-relevant event types, a refetch on every genuine (re)connect, and a
+ * visible-only polling fallback (~20s) so a worker transition appears without
+ * a browser refresh and missed deltas are reconciled on reconnect or by the
+ * next poll. `refresh` is a stable callback from the page.
+ */
+function useBoardLiveSync(refresh: () => Promise<void>, enabled: boolean): LiveSyncState {
+  const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(null);
+  const [connected, setConnected] = useState(false);
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
+
+  const markSynced = useCallback(() => setLastSyncedAt(Date.now()), []);
+
+  // SSE subscription with reconnect refetch.
+  useEffect(() => {
+    if (!enabled) return;
+    let hasConnected = false;
+    const es = new EventSource('/api/events/stream');
+
+    const isBoardEvent = (type: string, payload: unknown): boolean => {
+      if (
+        type === 'task_created' || type === 'task_updated' || type === 'task_deleted'
+      ) return true;
+      // F01-D3 per-company publish events carry company_id in the TYPE; the
+      // board shows every publish row the company-scoped overlay fetch returns,
+      // so any publish_state event triggers a refetch (the refetch itself is
+      // company-scoped — no cross-company data can land).
+      if (type.startsWith('publish_state:') || type.startsWith('publish_queued:')) return true;
+      void payload;
+      return false;
+    };
+
+    es.onopen = () => {
+      setConnected(true);
+      // Refetch on EVERY open (first + genuine reconnects): the refetch is a
+      // cheap company-scoped query and reconciles any deltas missed while down.
+      if (hasConnected) void refreshRef.current();
+      hasConnected = true;
+      void refreshRef.current().then(markSynced);
+    };
+    es.onmessage = (event) => {
+      try {
+        if (!event.data || event.data.startsWith(':')) return;
+        const sse = JSON.parse(event.data) as { type: string; payload?: unknown };
+        if (!isBoardEvent(sse.type, sse.payload)) return;
+        void refreshRef.current().then(markSynced);
+      } catch {
+        // malformed event — ignore; the poll reconciles.
+      }
+    };
+    es.onerror = () => {
+      // Native EventSource auto-reconnects; mark offline until it does.
+      setConnected(false);
+    };
+    return () => {
+      es.close();
+      setConnected(false);
+    };
+  }, [enabled, markSynced]);
+
+  // Polling fallback: fetch while the tab is visible, pause when hidden.
+  useEffect(() => {
+    if (!enabled) return;
+    let cancelled = false;
+    const poll = async () => {
+      if (document.visibilityState !== 'visible') return;
+      try {
+        await refreshRef.current();
+        if (!cancelled) markSynced();
+      } catch {
+        // fetch failure → stale banner via lastSyncedAt age; next poll retries.
+      }
+    };
+    poll();
+    const interval = setInterval(poll, POLL_INTERVAL_MS);
+    const onVisible = () => { if (document.visibilityState === 'visible') void poll(); };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [enabled, markSynced]);
+
+  // Staleness ticker + offline detection from lastSyncedAt age.
+  useEffect(() => {
+    const t = setInterval(() => setNowTick(Date.now()), 5_000);
+    return () => clearInterval(t);
+  }, []);
+
+  const stale = lastSyncedAt !== null && nowTick - lastSyncedAt > STALE_AFTER_MS;
+  const offline = connected === false && (lastSyncedAt === null || nowTick - lastSyncedAt > POLL_INTERVAL_MS * 2);
+  return { lastSyncedAt, connected, stale: stale || offline };
+}
 
 // ---------------------------------------------------------------------------
 // Page
@@ -74,24 +180,16 @@ export default function CampaignKanbanPage() {
 
   const [campaign, setCampaign] = useState<Campaign | null>(null);
   const [tasks, setTasks]       = useState<CampaignTask[]>([]);
+  const [publishRows, setPublishRows] = useState<PublishOverlay[]>([]);
   const [loading, setLoading]   = useState(true);
   const [error, setError]       = useState<string | null>(null);
   const [deptFilter, setDeptFilter] = useState<string>('all');
 
-  useEffect(() => {
-    if (!campaignId) return;
-    fetch(`/api/campaigns/${campaignId}`)
-      .then(r => r.json())
-      .then(data => setCampaign(data.campaign))
-      .catch(() => setError('Failed to load campaign'));
-  }, [campaignId]);
-
   const fetchTasks = useCallback(async () => {
     if (!campaignId) return;
     try {
-      setLoading(true);
       setError(null);
-      const res = await fetch(`/api/tasks?campaign_id=${campaignId}`);
+      const res = await fetch(`/api/tasks?campaign_id=${campaignId}`, { cache: 'no-store' });
       if (!res.ok) throw new Error('Failed to fetch tasks');
       const data: any = await res.json();
       const list: any[] = Array.isArray(data) ? data : (data.tasks || []);
@@ -102,18 +200,67 @@ export default function CampaignKanbanPage() {
         persona_mode: t.persona_mode, persona_score: t.persona_score,
         secondary_persona_id: t.secondary_persona_id,
         secondary_persona_name: t.secondary_persona_name,
+        dispatch_attempts: t.dispatch_attempts,
+        block_reason: t.block_reason,
+        block_needs: t.block_needs,
+        parent_task_id: t.parent_task_id,
         assignedAgent: t.assigned_agent
           ? { id: t.assigned_agent.id, name: t.assigned_agent.name, avatar_emoji: t.assigned_agent.avatar_emoji }
           : null,
       })));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error');
-    } finally {
-      setLoading(false);
     }
   }, [campaignId]);
 
-  useEffect(() => { fetchTasks(); }, [fetchTasks]);
+  // Company-scoped publish overlay (F03/F36): canonical publish_queue rows for
+  // this company, joined onto cards by task linkage — derived board state,
+  // never a fork.
+  const fetchPublishRows = useCallback(async () => {
+    try {
+      const res = await fetch('/api/skill-35/publish?limit=100', { cache: 'no-store' });
+      if (!res.ok) return;
+      const data: any = await res.json();
+      const rows: any[] = Array.isArray(data?.publishes) ? data.publishes : [];
+      setPublishRows(rows.map((r) => ({
+        id: r.id,
+        task_id: r.task_id ?? r.cc_task_id ?? null,
+        status: r.status,
+        error: r.error ?? null,
+        retry_at: r.retry_at ?? null,
+        attempt_count: r.attempt_count ?? null,
+      })));
+    } catch {
+      // Overlay is best-effort; board cards still render from canonical tasks.
+    }
+  }, []);
+
+  const refresh = useCallback(async () => {
+    await Promise.all([fetchTasks(), fetchPublishRows()]);
+    setLoading(false);
+  }, [fetchTasks, fetchPublishRows]);
+
+  useEffect(() => {
+    if (!campaignId) return;
+    fetch(`/api/campaigns/${campaignId}`)
+      .then(r => (r.ok ? r.json() : Promise.reject(new Error('Failed to load campaign'))))
+      .then(data => setCampaign(data.campaign))
+      .catch(() => setError('Failed to load campaign'));
+  }, [campaignId]);
+
+  useEffect(() => { void refresh(); }, [refresh]);
+
+  const live = useBoardLiveSync(refresh, Boolean(campaignId));
+  const nowTickRef = useRef(0);
+  nowTickRef.current = Date.now();
+
+  const publishByTask = useMemo(() => {
+    const map = new Map<string, PublishOverlay>();
+    for (const p of publishRows) {
+      if (p.task_id && !map.has(p.task_id)) map.set(p.task_id, p);
+    }
+    return map;
+  }, [publishRows]);
 
   const departments = useMemo(() => {
     const seen = new Set<string>();
@@ -128,10 +275,10 @@ export default function CampaignKanbanPage() {
 
   const columns = useMemo(() => {
     const result: Record<KanbanColumn, CampaignTask[]> = {
-      new: [], queued: [], in_progress: [], review: [], done: [],
+      new: [], queued: [], in_progress: [], attention: [], review: [], done: [],
     };
     for (const card of filteredTasks) {
-      const col = STATUS_TO_COLUMN[card.status] ?? 'new';
+      const col = columnForStatus(card.status);
       result[col].push(card);
     }
     return result;
@@ -139,9 +286,16 @@ export default function CampaignKanbanPage() {
 
   const progress = useMemo(() => {
     if (tasks.length === 0) return 0;
-    const done = tasks.filter(t => STATUS_TO_COLUMN[t.status] === 'done').length;
+    const done = tasks.filter(t => columnForStatus(t.status) === 'done').length;
     return Math.round((done / tasks.length) * 100);
   }, [tasks]);
+
+  const lastSyncLabel = useMemo(() => {
+    if (!live.lastSyncedAt) return null;
+    const secs = Math.max(0, Math.round((Date.now() - live.lastSyncedAt) / 1000));
+    return secs < 5 ? 'just now' : `${secs}s ago`;
+    // re-render cadence is driven by the live ticker (nowTick)
+  }, [live.lastSyncedAt, live.stale, nowTickRef.current]);
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -174,6 +328,29 @@ export default function CampaignKanbanPage() {
           </span>
         </div>
       </header>
+
+      {/* F36 — sync status strip: live/polling, last sync, stale/offline warning */}
+      <div className="bg-white border-b border-gray-100 px-6 py-2 flex items-center gap-3 text-xs">
+        {live.stale ? (
+          <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-red-50 text-red-700 font-medium">
+            <WifiOff className="h-3.5 w-3.5" /> Offline or stale — showing last known board
+          </span>
+        ) : (
+          <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 font-medium">
+            <span className={`h-2 w-2 rounded-full ${live.connected ? 'bg-emerald-500' : 'bg-amber-400'}`} />
+            {live.connected ? 'Live' : 'Polling'}
+          </span>
+        )}
+        <span className="text-gray-400">
+          Synced {lastSyncLabel || 'never'}
+        </span>
+        <button
+          onClick={() => void refresh()}
+          className="ml-auto inline-flex items-center gap-1 text-gray-500 hover:text-gray-800"
+        >
+          <RefreshCw className="h-3.5 w-3.5" /> Refresh
+        </button>
+      </div>
 
       <div className="bg-white border-b border-gray-100 px-6 py-3 flex items-center gap-6">
         <div className="flex items-center gap-3 flex-1 max-w-sm">
@@ -229,7 +406,7 @@ export default function CampaignKanbanPage() {
             <Loader2 className="h-10 w-10 animate-spin text-gray-400" />
           </div>
         ) : (
-          <div className="flex gap-4 h-[calc(100vh-11rem)]">
+          <div className="flex gap-4 h-[calc(100vh-11rem)] overflow-x-auto">
             {KANBAN_COLUMNS.map(col => {
               const cards = columns[col.key];
               return (
@@ -248,7 +425,13 @@ export default function CampaignKanbanPage() {
                       {cards.length === 0 ? (
                         <div className="text-xs text-gray-400 text-center py-6">No tasks</div>
                       ) : (
-                        cards.map(card => <CampaignTaskCard key={card.id} card={card} />)
+                        cards.map(card => (
+                          <CampaignTaskCard
+                            key={card.id}
+                            card={card}
+                            publish={publishByTask.get(card.id) ?? null}
+                          />
+                        ))
                       )}
                     </AnimatePresence>
                   </div>
@@ -262,8 +445,9 @@ export default function CampaignKanbanPage() {
   );
 }
 
-function CampaignTaskCard({ card }: { card: CampaignTask }) {
+function CampaignTaskCard({ card, publish }: { card: CampaignTask; publish: PublishOverlay | null }) {
   const priorityStyle = PRIORITY_STYLES[card.priority];
+  const isBlocked = card.status === 'blocked';
 
   return (
     <motion.div
@@ -284,6 +468,19 @@ function CampaignTaskCard({ card }: { card: CampaignTask }) {
         {card.department_id && (
           <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-indigo-50 text-indigo-700 capitalize">
             {card.department_id}
+          </span>
+        )}
+
+        {/* F36 — blocked cards show WHY + who must act, never a bare review lane */}
+        {isBlocked && card.block_reason && (
+          <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-red-100 text-red-700">
+            {card.block_reason}
+          </span>
+        )}
+
+        {(card.dispatch_attempts ?? 0) > 0 && (
+          <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-orange-50 text-orange-700">
+            retries: {card.dispatch_attempts}
           </span>
         )}
 
@@ -309,6 +506,31 @@ function CampaignTaskCard({ card }: { card: CampaignTask }) {
         )}
       </div>
 
+      {/* F36 — canonical publish overlay (per-account/delivery result), derived
+          from the company-scoped publish_queue rows, never a forked state. */}
+      {publish && (
+        <div className="mt-2 flex items-center gap-1.5 flex-wrap">
+          <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold ${
+            publish.status === 'published' || publish.status === 'done'
+              ? 'bg-emerald-100 text-emerald-700'
+              : publish.status === 'failed'
+                ? 'bg-red-100 text-red-700'
+                : 'bg-blue-50 text-blue-700'
+          }`}>
+            publish: {publish.status}
+          </span>
+          {publish.attempt_count ? (
+            <span className="text-xs text-gray-400">attempt {publish.attempt_count}</span>
+          ) : null}
+          {publish.retry_at && publish.status === 'retrying' ? (
+            <span className="text-xs text-gray-400">retry by {new Date(publish.retry_at).toLocaleTimeString()}</span>
+          ) : null}
+          {publish.error && publish.status === 'failed' ? (
+            <span className="text-xs text-red-500 truncate max-w-[12rem]" title={publish.error}>{publish.error}</span>
+          ) : null}
+        </div>
+      )}
+
       {card.assignedAgent && (
         <div className="flex items-center gap-2 mt-3 pt-2.5 border-t border-gray-100">
           <span className="text-base">{card.assignedAgent.avatar_emoji}</span>
@@ -318,3 +540,10 @@ function CampaignTaskCard({ card }: { card: CampaignTask }) {
     </motion.div>
   );
 }
+
+const PRIORITY_STYLES: Record<TaskPriority, { bg: string; text: string; label: string }> = {
+  critical: { bg: 'bg-red-100',    text: 'text-red-700',    label: 'Critical' },
+  high:     { bg: 'bg-orange-100', text: 'text-orange-700', label: 'High'     },
+  medium:   { bg: 'bg-yellow-100', text: 'text-yellow-700', label: 'Medium'   },
+  low:      { bg: 'bg-gray-100',   text: 'text-gray-600',   label: 'Low'      },
+};
