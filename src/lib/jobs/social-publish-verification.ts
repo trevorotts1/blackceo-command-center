@@ -1,7 +1,10 @@
 /** Readback-only ownership after production tasks complete. No posting API calls. */
-import { createHash } from 'node:crypto';
-import fs from 'node:fs';
-import path from 'node:path';
+// Match scheduler jobs' bare built-ins: instrumentation is also compiled for
+// Edge, though its NEXT_RUNTIME guard executes this consumer only on Node.
+// The Edge compilation supports bare fallbacks, not node: URI imports.
+import { createHash } from 'crypto';
+import fs from 'fs';
+import path from 'path';
 import { queryAll, queryOne, run } from '@/lib/db';
 import { createTaskCore } from '@/lib/tasks';
 import { autoDispatchTask } from '@/lib/task-dispatcher';
