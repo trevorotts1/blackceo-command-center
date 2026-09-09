@@ -42,9 +42,14 @@ const MAX_BODY = 256 * 1024; // 256 KB cap
 // webhook the poller uses). On action="answer" the Relay Brain posts the reply
 // into the Telegram group thread and closes the ticket. This is what makes the
 // ASYNC push path self-complete without the poller.
+//
+// RR-017 (2026-09-08): the old /webhook/rescue-rangers Relay path is RETIRED.
+// The default now points at the canonical rr-v2-intake; RESCUE_RELAY_URL still
+// overrides for a single-writer rollback, but anything left pointing at the
+// retired path is a false-pass trap (rr-reconcile.sh check 5).
 const RELAY_URL =
   process.env.RESCUE_RELAY_URL ||
-  "https://main.blackceoautomations.com/webhook/rescue-rangers";
+  "https://main.blackceoautomations.com/webhook/rr-v2-intake";
 
 function log(msg) {
   const line = `${new Date().toISOString()} ${msg}\n`;

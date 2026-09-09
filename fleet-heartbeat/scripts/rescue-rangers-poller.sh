@@ -24,7 +24,9 @@
 set -u
 set -o pipefail
 
-RELAY_URL="${RESCUE_RELAY_URL:-https://main.blackceoautomations.com/webhook/rescue-rangers}"
+# RR-017 (2026-09-08): /webhook/rescue-rangers is RETIRED. Canonical default is
+# rr-v2-intake; RESCUE_RELAY_URL overrides for a single-writer rollback only.
+RELAY_URL="${RESCUE_RELAY_URL:-https://main.blackceoautomations.com/webhook/rr-v2-intake}"
 PULL_LIMIT="${RESCUE_PULL_LIMIT:-10}"
 AGENT_TIMEOUT="${RESCUE_AGENT_TIMEOUT:-540}"
 OPENCLAW_BIN="${OPENCLAW_BIN:-$HOME/.local/bin/openclaw}"

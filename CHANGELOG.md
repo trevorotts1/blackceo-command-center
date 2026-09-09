@@ -1,3 +1,13 @@
+## [v7.2.1] — 2026-09-09 — Rescue Rangers RR-017 integration contract
+
+### Fixed
+- Published the public-safe Rescue dependency and ownership contract in this repo (`docs/RESCUE-INTEGRATION.md`): Command Center owns the read-only `/rescue` dashboard only, the private Fleet Operations manifest stays authoritative, the Relay webhook path stays retired with a load-bearing tombstone, and board availability stays a view, never a rescue gate (RR-017).
+- Pointed receiver, poller, and propagate defaults at the canonical `rr-v2-intake` webhook. Environment overrides stay for single-writer rollback; anything still naming the retired Relay path is a false-pass trap (RR-017).
+- Added the RR-017 contract integration battery (`tests/unit/rr017-rescue-contract-integration.test.ts`, 4 tests): integration doc labels, tombstone intact, no retired Relay defaults shipped, read-only dashboard contract.
+
+### Compatibility and scope
+- Additive only: one new doc, one new test file, three one-line webhook default changes. No dependency changes. No migration. Publishing this release does not deploy or verify it on client installations.
+
 ## [v7.2.0] — 2026-09-08 — Per-account publish plans, durable publish executor, Ultra orchestrator and media player
 
 ### Added

@@ -63,7 +63,8 @@ set -o pipefail
 VPS_ONLY=0
 MAC_ONLY=0
 DRY_RUN=0
-WEBHOOK_URL_DEFAULT="https://main.blackceoautomations.com/webhook/rescue-rangers"
+# RR-017 (2026-09-08): retired /webhook/rescue-rangers replaced by canonical rr-v2-intake.
+WEBHOOK_URL_DEFAULT="https://main.blackceoautomations.com/webhook/rr-v2-intake"
 WEBHOOK_URL=""
 
 for arg in "$@"; do
