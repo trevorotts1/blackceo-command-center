@@ -44,8 +44,8 @@ export function readPublicationProof(v:Verification, nowMs:number):{state:'publi
   const source=registeredReceipt(queue.cc_task_id),receipt=registeredReceipt(v.task_id);
   if(!source || !receipt) return null;
   const inventory=source.body,body=receipt.body;
-  const sourceOwner=queryOne<{company_id:string}>(`SELECT w.company_id FROM tasks t JOIN workspaces w ON w.id=t.workspace_id WHERE t.id=?`,[queue.cc_task_id]);
-  if(sourceOwner?.company_id!==v.company_id || (inventory.company_id!==undefined && inventory.company_id!==v.company_id) || (inventory.queue_id!==undefined && inventory.queue_id!==v.queue_id) || !Array.isArray(inventory.posts) || inventory.planned_posts!==inventory.posts.length) return null;
+  const sourceOwner=queryOne<{company_id:string;status:string}>(`SELECT w.company_id,t.status FROM tasks t JOIN workspaces w ON w.id=t.workspace_id WHERE t.id=?`,[queue.cc_task_id]);
+  if(sourceOwner?.company_id!==v.company_id || sourceOwner.status!=='done' || (inventory.company_id!==undefined && inventory.company_id!==v.company_id) || (inventory.queue_id!==undefined && inventory.queue_id!==v.queue_id) || !Array.isArray(inventory.posts) || inventory.planned_posts!==inventory.posts.length) return null;
   const expected=inventory.posts.filter((p:any)=>p.account_id===v.account_id&&p.platform===v.platform).map((p:any)=>p.post_id);
   if(!expected.length || expected.some((id:any)=>typeof id!=='string'||!id) || new Set(expected).size!==expected.length) return null;
   if(body.company_id!==v.company_id || body.queue_id!==v.queue_id || body.source_receipt_sha256!==source.sha || !Array.isArray(body.posts) || body.posts.length!==expected.length || body.created_posts!==body.posts.length || body.planned_posts!==body.posts.length) return null;
