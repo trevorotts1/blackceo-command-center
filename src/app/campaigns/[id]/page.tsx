@@ -82,8 +82,11 @@ function useBoardLiveSync(refresh: () => Promise<void>, enabled: boolean): LiveS
   const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(null);
   const [connected, setConnected] = useState(false);
   const [nowTick, setNowTick] = useState(() => Date.now());
+  // Keep the latest refresh callback WITHOUT touching it during render: the
+  // effect below reads it from the ref, and the ref is refreshed in an effect
+  // (the react-hooks/refs rule forbids ref writes during render).
   const refreshRef = useRef(refresh);
-  refreshRef.current = refresh;
+  useEffect(() => { refreshRef.current = refresh; }, [refresh]);
 
   const markSynced = useCallback(() => setLastSyncedAt(Date.now()), []);
 
@@ -248,11 +251,15 @@ export default function CampaignKanbanPage() {
       .catch(() => setError('Failed to load campaign'));
   }, [campaignId]);
 
-  useEffect(() => { void refresh(); }, [refresh]);
+  // Defer the initial refetch one tick so setLoading during the effect body
+  // never fires a cascading synchronous setState (react-hooks rule); the poll
+  // fallback inside useBoardLiveSync also refetches immediately on mount.
+  useEffect(() => {
+    const t = setTimeout(() => { void refresh(); }, 0);
+    return () => clearTimeout(t);
+  }, [refresh]);
 
   const live = useBoardLiveSync(refresh, Boolean(campaignId));
-  const nowTickRef = useRef(0);
-  nowTickRef.current = Date.now();
 
   const publishByTask = useMemo(() => {
     const map = new Map<string, PublishOverlay>();
@@ -290,12 +297,19 @@ export default function CampaignKanbanPage() {
     return Math.round((done / tasks.length) * 100);
   }, [tasks]);
 
-  const lastSyncLabel = useMemo(() => {
-    if (!live.lastSyncedAt) return null;
-    const secs = Math.max(0, Math.round((Date.now() - live.lastSyncedAt) / 1000));
-    return secs < 5 ? 'just now' : `${secs}s ago`;
-    // re-render cadence is driven by the live ticker (nowTick)
-  }, [live.lastSyncedAt, live.stale, nowTickRef.current]);
+  // The "Synced Ns ago" label: computed in an EFFECT (Date.now is impure and
+  // cannot run during render); renderPulse's 5s tick recomputes it.
+  const [lastSyncLabel, setLastSyncLabel] = useState<string | null>(null);
+  useEffect(() => {
+    const compute = () => {
+      if (!live.lastSyncedAt) { setLastSyncLabel(null); return; }
+      const secs = Math.max(0, Math.round((Date.now() - live.lastSyncedAt) / 1000));
+      setLastSyncLabel(secs < 5 ? 'just now' : `${secs}s ago`);
+    };
+    compute();
+    const t = setInterval(compute, 5_000);
+    return () => clearInterval(t);
+  }, [live.lastSyncedAt]);
 
   return (
     <div className="min-h-screen bg-gray-50">
