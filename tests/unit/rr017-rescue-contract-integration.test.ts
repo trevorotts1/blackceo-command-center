@@ -36,6 +36,8 @@ test('integration doc exists, is public-safe, and labels legacy paths correctly'
   assert.ok(!/[0-9a-f]{20,}/.test(raw), 'no hex table/credential shapes');
   assert.ok(!/X-Rescue-Secret:\s*\S/.test(raw.replace('X-Rescue-Secret`', '')), 'no secret header value');
   assert.ok(raw.includes('blackceo-fleet-ops'), 'doc points at the private manifest as authority');
+  // the legacy-path table must not contradict the shipped defaults
+  assert.ok(!/defaults still name it/.test(raw), 'doc must not claim defaults still name the retired path');
 });
 
 test('the tombstone is intact and no private store code was restored', () => {

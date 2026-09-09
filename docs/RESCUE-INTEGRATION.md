@@ -38,7 +38,7 @@ write as a precondition for working a ticket.
 | Path | Classification | CC-side rule |
 |---|---|---|
 | Public tombstone + `src/lib/rescue` read-only dashboard + receiver/poller/watchdog scripts | **active** | stays as-is; no private code may be copied into this public repo |
-| Old Relay webhook `/webhook/rescue-rangers` | **retired** | the receiver/poller defaults still name it; any deployment pointing there is a false-pass trap (see `rr-reconcile.sh` check 5). Canonical intake is `rr-v2-intake` |
+| Old Relay webhook `/webhook/rescue-rangers` | **retired** | receiver/poller/propagate defaults now point at canonical `rr-v2-intake` (env overrides preserved for single-writer rollback); any deployment still pointing at the retired path is a false-pass trap (see `rr-reconcile.sh` check 5) |
 | Python SQLite ledger (`rescue_ledger.py` / `rescue_cc_board.py`) | **compatibility-only** | never ships in this repo; never runs against production ticket state |
 
 ## External-rescue execution boundary (points at RR-018)
