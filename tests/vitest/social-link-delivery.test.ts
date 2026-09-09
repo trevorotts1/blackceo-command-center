@@ -56,7 +56,7 @@ describe('submitted questionnaire recovery',()=>{
   expect((await processSocialSubmission()).status).toBe('awaiting_budget');
   expect((await processSocialSubmission()).status).toBe('no_pending_submission');
   expect(state.task).toHaveBeenCalledTimes(1);
-  const task=state.task.mock.calls[0][0];expect(task.workspace_id).toBe('ws-a');expect(task.idempotency_company_id).toBe('a');expect(task.routing_hold_reason).toBe('social_budget_unconfigured');expect(task.description).toContain('Actual client answer');
+  const task=state.task.mock.calls[0][0];expect(task.workspace_id).toBe('ws-a');expect(task.idempotency_company_id).toBe('a');expect(task.routing_hold_reason).toBe('social_budget_unconfigured');expect(task.description).toContain('Actual client answer');expect(task.description).toContain('read back this cycle');expect(task.description).toContain('Report actual generation costs separately from ad spend');
   expect(state.db.prepare('select status from social_theme_sessions').get().status).toBe('submitted');
  });
 });

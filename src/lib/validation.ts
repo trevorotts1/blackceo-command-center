@@ -217,7 +217,7 @@ export const UpdateTaskSchema = z.object({
 export const CreateActivitySchema = z.object({
   activity_type: ActivityType,
   message: z.string().min(1, 'Message is required').max(5000, 'Message must be 5000 characters or less'),
-  agent_id: z.string().uuid().optional(),
+  agent_id: TaskAgentId.optional(),
   // B-U6 / U20 fix: every real caller (cc_board.py post_activity/post_qc_score,
   // src/lib/orchestration.ts logActivity) sends `metadata` as a nested JSON
   // OBJECT inside the request body — `z.string()` rejected every one of them
