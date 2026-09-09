@@ -1,3 +1,12 @@
+## [v7.2.2] — 2026-09-09 — Rescue Rangers RR-020 projection identity
+
+### Added
+- Added the RR-020 projection identity module (`src/lib/rescue/incident-identity.ts`, pure: no input/output, no credentials): company enrollment runtime incident id as the authorization and projection key, per-person notification budget separate from per-resource dedup fingerprint (canonical box slug plus failure signature), alias-suggestion rule that never chooses a foreign delivery target on ambiguity, unknown identities to isolated operator triage, and the operator board versus client projection policy pinned as a predicate (RR-020).
+- Added the RR-020 projection identity battery (`tests/unit/rr020-incident-identity.test.ts`, 7 tests): two tenants one label stay separate, two boxes same failure independently actionable, repeats dedupe onto the immutable id, ambiguous alias plus unknown client plus spoofed return address never cross contexts, budget versus dedup orthogonality, routing-key policy pinned, RR-017 read-only dashboard contract intact.
+
+### Compatibility and scope
+- Additive only: one new pure module, one new test file. No dependency changes. No migration. Publishing this release does not deploy or verify it on client installations.
+
 ## [v7.2.1] — 2026-09-09 — Rescue Rangers RR-017 integration contract
 
 ### Fixed
