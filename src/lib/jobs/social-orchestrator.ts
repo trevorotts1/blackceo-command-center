@@ -288,7 +288,21 @@ export class SocialOrchestrator {
     this.refreshDurableStates();
     const running = [...this.state.values()].filter((s) => s === 'running').length;
     if (running >= applicationCeiling(this.mode)) return null;
-    const sid = stepId ?? this.fairNext();
+    if (stepId === undefined) {
+      // A ready snapshot can lose durable capacity to another coordinator.
+      // Try each independent candidate once; one saturated provider or costly
+      // step must not hide another provider's useful work. Explicit requests
+      // never silently switch to a different step.
+      const candidates = this.readySteps().sort((a, b) =>
+        (this.providerRR.get(this.steps.get(a)!.provider) ?? 0) -
+        (this.providerRR.get(this.steps.get(b)!.provider) ?? 0) || a.localeCompare(b));
+      for (const candidate of candidates) {
+        const lease = this.claim(workerId, candidate);
+        if (lease) return lease;
+      }
+      return null;
+    }
+    const sid = stepId;
     if (!sid) return null;
     const step = this.steps.get(sid);
     if (!step) return null;
@@ -319,24 +333,6 @@ export class SocialOrchestrator {
     this.providerRR.set(step.provider, (this.providerRR.get(step.provider) ?? 0) + 1);
     this.budget.reserve(sid, step.estimated_cost, now);
     return { ...lease };
-  }
-
-  /** Fair-queue pick: round-robin across providers so one provider's backlog
-   * cannot starve another's. */
-  private fairNext(): string | null {
-    const candidates = this.readySteps();
-    if (!candidates.length) return null;
-    let best: string | null = null;
-    let bestCursor = Infinity;
-    for (const sid of candidates) {
-      const provider = this.steps.get(sid)!.provider;
-      const cursor = this.providerRR.get(provider) ?? 0;
-      if (cursor < bestCursor || (cursor === bestCursor && best !== null && sid < best)) {
-        best = sid;
-        bestCursor = cursor;
-      }
-    }
-    return best;
   }
 
   private durableState(stepId: string): DurableStep | undefined {

@@ -132,3 +132,31 @@ test('durable snapshot preserves costs and trusted dependency completion across 
  assert.ok(external.completeDependency('s1'));
  assert.ok(createSocialOrchestrator('ultra',{...plan,company_id:'external-proof'}).claim('next','s2'));
 });
+
+test('automatic claim passes a saturated durable provider without changing explicit requests',()=>{
+ const plan:SocialPlan={company_id:'fair-proof',cycle_id:'c',providers:{openrouter:{concurrency:1},deepseek:{concurrency:1}},steps:[{step_id:'a-running',depends_on:[],provider:'openrouter',estimated_cost:0},{step_id:'b-blocked-provider',depends_on:[],provider:'openrouter',estimated_cost:0},{step_id:'z-independent',depends_on:[],provider:'deepseek',estimated_cost:0}]};
+ const a=createSocialOrchestrator('ultra',plan),b=createSocialOrchestrator('ultra',plan);
+ const held=a.claim('a','a-running')!;
+ assert.ok(held);
+ assert.equal(b.claim('b','b-blocked-provider'),null,'explicit claim remains pinned');
+ const alternative=b.claim('b')!;
+ assert.equal(alternative.stepId,'z-independent');
+ assert.equal(b.claim('c'),null,'bounded pass ends when all remaining capacity is full');
+ const pending=getDb().prepare("SELECT status,attempt_count FROM social_steps WHERE company_id='fair-proof' AND step_id='b-blocked-provider'").get() as {status:string;attempt_count:number};
+ assert.equal(pending.status,'pending');assert.equal(pending.attempt_count,0);
+ assert.ok(a.settle('a-running','a',held.fencingToken));
+ assert.equal(b.claim('next')!.stepId,'b-blocked-provider');
+});
+
+test('automatic claim passes a durable budget refusal and preserves the expensive queued step',()=>{
+ const plan:SocialPlan={company_id:'fair-budget-proof',cycle_id:'c',cycle_budget_cap:10,providers:{openrouter:{concurrency:10}},steps:[{step_id:'a-held',depends_on:[],provider:'openrouter',estimated_cost:6},{step_id:'b-expensive',depends_on:[],provider:'openrouter',estimated_cost:7},{step_id:'z-cheap',depends_on:[],provider:'openrouter',estimated_cost:2}]};
+ const a=createSocialOrchestrator('ultra',plan),b=createSocialOrchestrator('ultra',plan);
+ const held=a.claim('a','a-held')!;assert.ok(held);
+ assert.equal(b.claim('b','b-expensive'),null);
+ assert.equal(b.claim('b')!.stepId,'z-cheap');
+ assert.equal(b.claim('c'),null);
+ const pending=getDb().prepare("SELECT status,attempt_count FROM social_steps WHERE company_id='fair-budget-proof' AND step_id='b-expensive'").get() as {status:string;attempt_count:number};
+ assert.equal(pending.status,'pending');assert.equal(pending.attempt_count,0);
+ assert.ok(a.fail('a-held','a',held.fencingToken,{permanent:true}));
+ assert.equal(b.claim('next')!.stepId,'b-expensive');
+});
