@@ -2,7 +2,7 @@
 import { randomUUID } from 'crypto';
 import { queryOne, run, transaction } from '@/lib/db';
 import { tenantRegistration } from '@/lib/auth/tenant-context';
-import { resolvePrivateOwnerChatId, notifyOwnerPrivate } from '@/lib/notify';
+import { resolvePrivateOwnerChatId, notifySocialOwnerPrivate } from '@/lib/notify';
 import { ensureCycle, ensureDraftSession, getPolicy } from './cycles';
 import { mintInvitationToken, SOCIAL_THEME_INVITATION_PURPOSE } from './theme-sessions';
 import { SOCIAL_THEME_INVITATION_TTL_SECONDS } from './session-policy';
@@ -63,7 +63,7 @@ export async function deliverSocialLink(input: { week: string; reminder?: boolea
   run('INSERT INTO social_invitations(id,token_hash,purpose,company_id,cycle_id,session_id,expires_at,created_at) VALUES(?,?,?,?,?,?,?,?)',
     [invitationId,tokenHash,SOCIAL_THEME_INVITATION_PURPOSE,binding.clientId,cycle.id,session.id,expires,now.toISOString()]);
   const url=`${binding.origin}/social-theme/welcome?ticket=${encodeURIComponent(raw)}`;
-  const receipt=await notifyOwnerPrivate({companyId:binding.companyId,expectedChatId:binding.owner,
+  const receipt=await notifySocialOwnerPrivate({companyId:binding.companyId,expectedChatId:binding.owner,
     message:`${input.reminder?'A reminder to finish':'Let’s plan'} your content for the week of ${cycle.week_start_local}. Choose your theme, offer and priorities here:\n${url}\n\nYour answers save as you go. This private link works once within 24 hours. If it expires, say “renew my social plan link.”`});
   const state=receipt.status==='accepted'?'sent':receipt.status==='not-dispatched'?'pending':'uncertain';
   run('UPDATE social_notification_outbox SET delivery_state=?,body=?,updated_at=? WHERE id=? AND delivery_state=\'sending\'',

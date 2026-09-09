@@ -1,8 +1,9 @@
+import '../unit/_isolated-db';
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
 import Database from 'better-sqlite3';
 const state=vi.hoisted(()=>({db:null as any,send:vi.fn(),task:vi.fn()}));
 vi.mock('@/lib/db',()=>({queryOne:(sql:string,p:any[]=[])=>state.db.prepare(sql).get(...p),run:(sql:string,p:any[]=[])=>state.db.prepare(sql).run(...p),transaction:(fn:any)=>state.db.transaction(fn)(),queryAll:(sql:string,p:any[]=[])=>state.db.prepare(sql).all(...p)}));
-vi.mock('@/lib/notify',()=>({resolvePrivateOwnerChatId:()=> 'owner-a',notifyOwnerPrivate:(x:any)=>state.send(x)}));
+vi.mock('@/lib/notify',()=>({resolvePrivateOwnerChatId:()=> 'owner-a',notifySocialOwnerPrivate:(x:any)=>state.send(x)}));
 import { deliverSocialLink, localWeek, runWeeklySocialInvitations } from '@/lib/social-theme/delivery';
 vi.mock('@/lib/tasks',()=>({createTaskCore:(...args:any[])=>state.task(...args)}));
 import { processSocialSubmission } from '@/lib/social-theme/submission-worker';
