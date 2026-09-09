@@ -6773,6 +6773,87 @@ export const migrations: Migration[] = [
     },
   },
 
+  {
+    // F40 (social/wf14-ready-cc) — measured-outcome learning. A completion
+    // certificate is not evidence content performed well: the planner needs a
+    // feedback loop that separates creation, publication and ACTUAL audience
+    // response. Three additive tables, all company-scoped (cross-client
+    // isolation is a hard requirement — client-specific memory is NEVER
+    // reused across companies):
+    //
+    //   social_metrics — provider-supported metric observations per post and
+    //     measurement window. `value` is NULL when the provider did not
+    //     report the metric; `is_unknown` makes that state EXPLICIT. Missing
+    //     analytics is UNKNOWN, never zero and never interpolated (QC-F40).
+    //
+    //   social_content_variants — baseline/trial variant registry. A trial
+    //     names the ONE major variable it changes (format|hook|timing|creative)
+    //     against its baseline variant, so a measured delta is attributable.
+    //     Change one major variable at a time when volume permits.
+    //
+    //   social_performance_reviews — the agreed-cadence review record: the
+    //     posts and windows the review actually read, the (tentative when
+    //     low-volume) recommendations, and the immutability guard proving no
+    //     provider/model/publishing-policy change rode along.
+    //
+    // ID HISTORY: 139 was taken by the W3 batch union (F07/F17/F35 + F27/F30
+    // superset, cc-20260909-w3). This branch was cut before that merge, so
+    // F40 takes 140: combined tree is 139=W3 union, 140=F40.
+    id: '140',
+    name: 'social_measured_outcomes',
+    up: (db) => {
+      console.log('[Migration 140] Creating social_metrics, social_content_variants, social_performance_reviews (F40)...');
+      db.exec(`CREATE TABLE IF NOT EXISTS social_metrics (
+        id TEXT PRIMARY KEY,
+        company_id TEXT NOT NULL,
+        account_id TEXT NOT NULL,
+        post_id TEXT NOT NULL,
+        platform TEXT NOT NULL DEFAULT '',
+        metric TEXT NOT NULL,
+        value REAL,
+        is_unknown INTEGER NOT NULL DEFAULT 1,
+        window_start TEXT,
+        window_end TEXT,
+        source TEXT NOT NULL DEFAULT '',
+        fetched_at TEXT NOT NULL
+      )`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_social_metrics_company_post
+        ON social_metrics(company_id, post_id, fetched_at DESC)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_social_metrics_company_window
+        ON social_metrics(company_id, window_end DESC)`);
+      db.exec(`CREATE TABLE IF NOT EXISTS social_content_variants (
+        id TEXT PRIMARY KEY,
+        company_id TEXT NOT NULL,
+        cycle_id TEXT,
+        variable TEXT NOT NULL CHECK (variable IN ('format', 'hook', 'timing', 'creative')),
+        role TEXT NOT NULL DEFAULT 'baseline',
+        label TEXT NOT NULL,
+        compared_to TEXT,
+        basis TEXT NOT NULL DEFAULT 'baseline-first',
+        created_at TEXT NOT NULL
+      )`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_social_variants_company
+        ON social_content_variants(company_id, created_at DESC)`);
+      db.exec(`CREATE TABLE IF NOT EXISTS social_performance_reviews (
+        id TEXT PRIMARY KEY,
+        company_id TEXT NOT NULL,
+        reviewed_at TEXT NOT NULL,
+        cadence TEXT NOT NULL DEFAULT 'weekly',
+        posts_reviewed TEXT NOT NULL DEFAULT '[]',
+        windows TEXT NOT NULL DEFAULT '[]',
+        sample_size INTEGER NOT NULL DEFAULT 0,
+        recommendation TEXT NOT NULL DEFAULT '',
+        tentative INTEGER NOT NULL DEFAULT 0,
+        proposals TEXT NOT NULL DEFAULT '[]',
+        policy_guard TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL
+      )`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_social_reviews_company
+        ON social_performance_reviews(company_id, reviewed_at DESC)`);
+      console.log('[Migration 140] measured-outcome tables ready');
+    },
+  },
+
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner
