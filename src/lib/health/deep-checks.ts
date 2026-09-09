@@ -29,7 +29,7 @@ import os from 'os';
 // 'node:' URI scheme (UnhandledSchemeError) but tolerates the bare
 // specifier — the same pattern src/lib/notify.ts (already reachable from
 // this exact import chain) already relies on.
-import { execFile } from 'child_process';
+import { execFile, spawnSync } from 'child_process';
 import { promisify } from 'util';
 import BetterSqlite3 from 'better-sqlite3';
 import { getDb, getMigrationStatus, getDbPath } from '@/lib/db';
@@ -221,6 +221,156 @@ export function checkAssetManifest(): CheckResult {
       detail: `asset_manifest: error reading build artifacts — ${err instanceof Error ? err.message : String(err)}`,
     };
   }
+}
+
+// ── check: build content inventory (PRES-046) ────────────────────────────────
+// Content identity of the served artifact vs the live source tree, via the ONE
+// canonical inventory (scripts/lib/build-inventory.sh) shared with atomic-
+// deploy.sh and cc-start.sh. mtimes are NEVER consulted: git pull re-stamps
+// source files and cp-r rollback re-stamps artifact files, so mtimes could
+// mislabel old code as current (the PRES-046 defect class).
+//
+// Verdict mapping (the helper prints {"verdict": "...", "build_id": "..."}):
+//   VERIFIED            → pass (artifact content == source content)
+//   MISMATCH + RECEIPT_OK (transaction-bound rollback receipt binding exactly
+//                         served artifact + current source)
+//                       → pass=true AND degraded=true, available_but_degraded.
+//                         Availability and target freshness stay SEPARATE: the
+//                         box is up on a genuine prior artifact, but this check
+//                         reports the mismatch so commandCenterLastUpdateVerified
+//                         never treats a rollback as a successful upgrade.
+//   MISMATCH (no receipt / stale receipt / invalid receipt) → fail
+//   MANIFEST_MISSING    → fail (artifact cannot be vouched for)
+//   MANIFEST_INVALID    → fail (truncated/tampered manifest never downgrades)
+//   OBSOLETE_INVENTORY  → fail (manifest computed over a different input set)
+export interface BuildContentResult extends CheckResult {
+  verdict?: string;
+  receipt_verdict?: string;
+  degraded?: boolean;
+  build_id?: string;
+}
+
+export function checkBuildContentInventory(): BuildContentResult {
+  const cwd = process.cwd();
+  const invLib = path.join(cwd, 'scripts', 'lib', 'build-inventory.sh');
+
+  if (!fs.existsSync(invLib)) {
+    return {
+      pass: false,
+      detail: 'build_content: scripts/lib/build-inventory.sh missing — content inventory unavailable (PRES-046); build cannot be verified against source',
+    };
+  }
+  if (!fs.existsSync(path.join(cwd, '.next', 'BUILD_ID'))) {
+    return {
+      pass: false,
+      detail: 'build_content: .next/BUILD_ID missing — no production build present',
+    };
+  }
+
+  try {
+    const verify = spawnHelper(invLib, ['--verify', cwd], 30_000);
+    let parsed: { verdict?: string; build_id?: string } = {};
+    try { parsed = JSON.parse(verify.stdout) as { verdict?: string; build_id?: string }; } catch { /* fallthrough */ }
+    const verdict = parsed.verdict ?? 'UNKNOWN';
+
+    if (verify.rc === 0 && verdict === 'VERIFIED') {
+      return {
+        pass: true,
+        degraded: false,
+        verdict,
+        build_id: parsed.build_id,
+        detail: `build_content: VERIFIED — served artifact content matches source tree (BUILD_ID=${parsed.build_id ?? 'unknown'})`,
+      };
+    }
+
+    if (verify.rc === 1 && verdict === 'MISMATCH') {
+      // Deliberate-rollback path: the receipt must bind exactly this pair.
+      const sourceInv = spawnHelper(invLib, ['--digest', cwd], 30_000).stdout.trim();
+      const rb = spawnHelper(invLib, ['--verify-rollback', cwd, path.join(cwd, '.next'), sourceInv], 30_000);
+      let rbParsed: { receipt_verdict?: string } = {};
+      try { rbParsed = JSON.parse(rb.stdout) as { receipt_verdict?: string }; } catch { /* fallthrough */ }
+      const rbVerdict = rbParsed.receipt_verdict ?? 'RECEIPT_INVALID';
+      if (rb.rc === 0 && rbVerdict === 'RECEIPT_OK') {
+        return {
+          pass: true,
+          degraded: true,
+          verdict,
+          receipt_verdict: rbVerdict,
+          build_id: parsed.build_id,
+          detail: 'build_content: MISMATCH vs source but transaction-bound rollback receipt VERIFIED — serving verified PRIOR artifact as AVAILABLE BUT DEGRADED (pending repair). Not target-current: commandCenterLastUpdateVerified must stay false until the failed target deploys green.',
+        };
+      }
+      return {
+        pass: false,
+        verdict,
+        receipt_verdict: rbVerdict,
+        build_id: parsed.build_id,
+        detail: `build_content: MISMATCH vs source and rollback receipt ${rbVerdict} — the receipt does not bind the served artifact to this source tree and cannot waive the mismatch (PRES-046). Rebuild: bash scripts/atomic-deploy.sh`,
+      };
+    }
+
+    if (verify.rc === 2 || verdict === 'MANIFEST_MISSING') {
+      // A legacy (pre-PRES-046) artifact has no manifest. Serving it is only
+      // legitimate inside the transaction-bound legacy-prior carve-out: the
+      // rollback receipt names it "(unattested)" and binds the failed target
+      // to this exact source tree. Anything else refuses.
+      const sourceInvMissing = spawnHelper(invLib, ['--digest', cwd], 30_000).stdout.trim();
+      const rbMissing = spawnHelper(invLib, ['--verify-rollback', cwd, path.join(cwd, '.next'), sourceInvMissing], 30_000);
+      let rbMissingParsed: { receipt_verdict?: string } = {};
+      try { rbMissingParsed = JSON.parse(rbMissing.stdout) as { receipt_verdict?: string }; } catch { /* fallthrough */ }
+      const rbMissingVerdict = rbMissingParsed.receipt_verdict ?? 'RECEIPT_INVALID';
+      if (rbMissing.rc === 0 && rbMissingVerdict === 'RECEIPT_OK') {
+        return {
+          pass: true,
+          degraded: true,
+          verdict,
+          receipt_verdict: rbMissingVerdict,
+          detail: 'build_content: artifact has NO manifest (pre-PRES-046 legacy artifact) but a transaction-bound rollback receipt binds it as the unattested prior of a failed deploy to THIS source tree — AVAILABLE BUT DEGRADED (pending repair, identity unattested). Rebuild to restore content verification: bash scripts/atomic-deploy.sh',
+        };
+      }
+      return {
+        pass: false,
+        verdict,
+        receipt_verdict: rbMissingVerdict,
+        detail: `build_content: build-inventory.json MISSING from .next and rollback receipt ${rbMissingVerdict} — artifact has no content manifest and nothing vouches for it (PRES-046). Rebuild: bash scripts/atomic-deploy.sh`,
+      };
+    }
+    if (verify.rc === 3 || verdict === 'MANIFEST_INVALID') {
+      return {
+        pass: false,
+        verdict,
+        detail: 'build_content: build-inventory.json INVALID (truncated/tampered) — a corrupt manifest never silently downgrades to mtime trust (PRES-046). Rebuild: bash scripts/atomic-deploy.sh',
+      };
+    }
+    if (verify.rc === 5 || verdict === 'OBSOLETE_INVENTORY') {
+      return {
+        pass: false,
+        verdict,
+        detail: 'build_content: OBSOLETE INVENTORY — manifest was computed over a different compile-affecting input set than this tree has now; the recorded inventory no longer covers what compiles (PRES-046). Rebuild: bash scripts/atomic-deploy.sh',
+      };
+    }
+    return {
+      pass: false,
+      verdict,
+      detail: `build_content: verification error (rc=${verify.rc}, verdict=${verdict})`,
+    };
+  } catch (err) {
+    return {
+      pass: false,
+      detail: `build_content: error running build-inventory.sh — ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+}
+
+/**
+ * Synchronous helper: run a shell command via spawnSync with an ARGUMENT ARRAY
+ * (no shell interpolation — arguments pass verbatim to bash), capture stdout +
+ * exit code, with a hard timeout so a wedged filesystem cannot hang the health
+ * endpoint.
+ */
+function spawnHelper(cmd: string, args: string[], timeoutMs: number): { stdout: string; rc: number } {
+  const res = spawnSync('bash', [cmd, ...args], { timeout: timeoutMs, encoding: 'utf8' });
+  return { stdout: res.stdout ?? '', rc: res.status ?? (res.error ? 1 : 1) };
 }
 
 // ── check: company branding ──────────────────────────────────────────────────

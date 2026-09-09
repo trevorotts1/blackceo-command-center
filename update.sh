@@ -703,13 +703,42 @@ if [ "$DEPLOY_OK" -ne 1 ]; then
   # `pm2 reload` would serve the OLD build (the BUILD-05 bug). Do an IN-PLACE
   # `next build` (which writes into .next WITHOUT the destructive `rm -rf .next`
   # window scripts/deploy.sh used), verify a BUILD_ID landed, then reload pm2.
+  #
+  # PRES-046: even this degraded path must keep the content contract. The build
+  # input inventory is captured BEFORE compilation and re-captured AFTER; any
+  # change in between FAILS the update (frozen-source rule — the served bytes
+  # could not be vouched for). A passing build then gets the SAME immutable
+  # build-inventory.json manifest atomic-deploy.sh writes, so cc-start.sh and
+  # /api/health/deep can verify the artifact no matter which path built it.
   warn "atomic-deploy.sh or bash 4+ not available — falling back to in-place build + reload (DEGRADED path)."
+  UPD_INV_LIB="$INSTALL_DIR/scripts/lib/build-inventory.sh"
+  UPD_BUILD_START=$(date +%s)
+  UPD_PRE_INV=""
+  if [ -f "$UPD_INV_LIB" ]; then
+    UPD_PRE_INV=$(bash "$UPD_INV_LIB" --digest "$INSTALL_DIR" 2>/dev/null || true)
+  fi
   set +e
   npm run build 2>&1 | tail -8
   BUILD_RC=${PIPESTATUS[0]}
   set -e
   [ "${BUILD_RC:-1}" -eq 0 ] || fatal "Build failed (exit ${BUILD_RC}) — refusing to reload onto a stale/broken build."
   [ -f "$INSTALL_DIR/.next/BUILD_ID" ] || fatal "Build produced no .next/BUILD_ID — refusing to reload onto an incomplete build."
+  if [ -f "$UPD_INV_LIB" ] && [ -n "$UPD_PRE_INV" ]; then
+    UPD_POST_INV=$(bash "$UPD_INV_LIB" --digest "$INSTALL_DIR" 2>/dev/null || true)
+    if [ -z "$UPD_POST_INV" ]; then
+      fatal "PRES-046: post-build content inventory computation failed — refusing to reload an unverifiable build."
+    fi
+    if [ "$UPD_POST_INV" != "$UPD_PRE_INV" ]; then
+      fatal "PRES-046 FROZEN-SOURCE VIOLATION: compile-affecting inputs changed DURING the degraded-path build (pre=$UPD_PRE_INV post=$UPD_POST_INV). The candidate is discarded — fix the concurrent modification and re-run."
+    fi
+    UPD_BUILD_ID=$(tr -d '[:space:]' < "$INSTALL_DIR/.next/BUILD_ID" 2>/dev/null || echo unknown)
+    if ! bash "$UPD_INV_LIB" --manifest "$INSTALL_DIR" "$INSTALL_DIR/.next" "$UPD_BUILD_ID" "$UPD_BUILD_START" >/dev/null 2>&1; then
+      fatal "PRES-046: failed to write build-inventory.json manifest — refusing to reload an unverifiable build."
+    fi
+    success "Frozen-source proof passed on degraded path (inventory $UPD_POST_INV); manifest written"
+  else
+    fatal "PRES-046: scripts/lib/build-inventory.sh unavailable — the degraded build path cannot produce a verifiable artifact. Update the checkout (scripts/lib must exist) and re-run."
+  fi
   success "Rebuild complete (.next/BUILD_ID present)"
 
   if command -v pm2 >/dev/null 2>&1; then

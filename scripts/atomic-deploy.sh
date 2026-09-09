@@ -608,6 +608,28 @@ _log "Building into temp dir: ${BUILD_TMP}"
 # by THIS build invocation, not carried over from the Phase 1c snapshot.
 BUILD_START_TS=$(date +%s 2>/dev/null || echo 0)
 
+# ── PRES-046: frozen-source content inventory ────────────────────────────────
+# Capture the canonical content inventory digest BEFORE compilation. It is
+# re-captured AFTER the build and the two must be IDENTICAL — inputs changed
+# during compilation reject the candidate (frozen-source rule). Content, not
+# mtime, is the freshness oracle (PRES-046: restored mtimes could mislabel old
+# code as current). The digest covers src/, public/, config/, package.json,
+# package-lock.json, next.config.*, tsconfig/tailwind/postcss configs — the
+# SAME canonical list the startup guard and health check use.
+BUILD_INVENTORY_LIB="${SCRIPT_DIR}/lib/build-inventory.sh"
+if [[ ! -f "$BUILD_INVENTORY_LIB" ]]; then
+  _err "scripts/lib/build-inventory.sh not found beside atomic-deploy.sh — content inventory unavailable."
+  _err "Refusing to build unverifiable artifacts (PRES-046)."
+  exit 2
+fi
+# shellcheck source=lib/build-inventory.sh
+source "$BUILD_INVENTORY_LIB"
+PRE_BUILD_INVENTORY="$(_ccbi_inventory_digest "$APP_DIR")" || {
+  _err "Failed to compute pre-build content inventory for ${APP_DIR}."
+  exit 2
+}
+_log "  Pre-build content inventory: ${PRE_BUILD_INVENTORY}"
+
 # Export NEXT output dir env var so Next.js writes to the temp dir instead of .next.
 # next.config.mjs now reads NEXT_DIST_DIR into `distDir` (BUG-1 FIX). Next.js
 # resolves distDir via path.join(<project dir>, distDir) -- NOT path.resolve --
@@ -729,6 +751,39 @@ fi
 
 BUILD_ID=$(cat "$BUILD_ID_FILE" 2>/dev/null || echo "unknown")
 _ok "Build succeeded. BUILD_ID: ${BUILD_ID}"
+
+# ── PRES-046: frozen-source proof + immutable manifest ───────────────────────
+# Re-capture the content inventory AFTER compilation. If ANY compile-affecting
+# input changed during the build, the candidate is DISCARDED (exit 2, live
+# .next untouched) — the served bytes would not match the checked-out source
+# and no receipt could vouch for them.
+POST_BUILD_INVENTORY="$(_ccbi_inventory_digest "$APP_DIR")" || {
+  _err "Failed to compute post-build content inventory for ${APP_DIR}."
+  rm -rf "$BUILD_TMP" 2>/dev/null || true
+  _preflight_abort_receipt "Post-build content inventory computation failed. Live .next was NOT swapped."
+  exit 2
+}
+if [[ "$POST_BUILD_INVENTORY" != "$PRE_BUILD_INVENTORY" ]]; then
+  _err "  FROZEN-SOURCE VIOLATION: content inventory changed DURING compilation."
+  _err "  Pre-build  inventory: ${PRE_BUILD_INVENTORY}"
+  _err "  Post-build inventory: ${POST_BUILD_INVENTORY}"
+  _err "  A compile-affecting input was modified while npm run build ran. The candidate"
+  _err "  is discarded — the served bytes could not be vouched for against the source."
+  rm -rf "$BUILD_TMP" 2>/dev/null || true
+  _preflight_abort_receipt "FROZEN-SOURCE VIOLATION (PRES-046): compile-affecting inputs changed during the build. Candidate discarded; live .next untouched."
+  exit 2
+fi
+_ok "  Frozen-source proof passed — content inventory unchanged during build (${POST_BUILD_INVENTORY})."
+
+# Write the IMMABLE per-artifact manifest INTO the build output BEFORE the swap,
+# so it travels with the artifact through .next, cp-r rollback and every restore.
+if ! _ccbi_write_manifest "$APP_DIR" "$BUILD_TMP" "$BUILD_ID" "$BUILD_START_TS"; then
+  _err "Failed to write build-inventory.json into ${BUILD_TMP}."
+  rm -rf "$BUILD_TMP" 2>/dev/null || true
+  _preflight_abort_receipt "Build manifest write failed. Live .next was NOT swapped."
+  exit 2
+fi
+_ok "  Immutable manifest written into build output: build-inventory.json (inventory ${POST_BUILD_INVENTORY})"
 
 ###############################################################################
 # ─── PHASE 3: ATOMIC SWAP ───────────────────────────────────────────────────
@@ -890,6 +945,23 @@ if [[ $HEALTH_EXIT -eq 0 ]]; then
     rm -rf "${APP_DIR}/.next.PREDEPLOY" 2>/dev/null || true
   fi
 
+  # ── PRES-046: clear the rollback receipt ONLY on a matching verified target ──
+  # A verified GREEN deploy of the EXACT content named as failed_target clears
+  # the pending-repair state. A deploy of DIFFERENT content (source moved on
+  # before the repair) must NOT silently clear an open rollback obligation —
+  # the receipt is then superseded (a newer receipt for the new failure mode
+  # would be written on the next rollback), never waived.
+  if [[ -f "${APP_DIR}/.deploy-rollback-state.json" ]]; then
+    _rs_target="$(_ccbi_json_field "${APP_DIR}/.deploy-rollback-state.json" failed_target_inventory_digest)"
+    if [[ -n "$_rs_target" && "$_rs_target" == "$POST_BUILD_INVENTORY" ]]; then
+      rm -f "${APP_DIR}/.deploy-rollback-state.json" \
+        && _ok "  Rollback receipt cleared — verified GREEN deploy of the exact failed-target content (${POST_BUILD_INVENTORY})." \
+        || _warn "  Could not remove .deploy-rollback-state.json — remove it manually after verifying this deploy."
+    else
+      _warn "  Rollback receipt NOT cleared: its failed_target (${_rs_target:-unknown}) does not match this deploy's content (${POST_BUILD_INVENTORY}). Pending-repair state stays open (supersede, never waive)."
+    fi
+  fi
+
   _success_receipt "$HEALTH_JSON" "$BUILD_ID"
   exit 0
 
@@ -923,6 +995,18 @@ else
   fi
 
   _log "Restoring .next.rollback → .next ..."
+  # ── PRES-046: capture rollback-artifact identity BEFORE the restore ─────────
+  # The receipt must bind the APPROVED PRIOR artifact (by content identity) to
+  # the FAILED TARGET (by content identity). Prior-artifact identity comes from
+  # the manifest that traveled with the artifact; if the prior artifact carries
+  # no manifest (pre-PRES-046 artifact), the receipt records that absence —
+  # serving it stays allowed (it was green when snapshotted) but the degraded
+  # state is louder because its identity is unattested.
+  ROLLBACK_INVENTORY="(unattested)"
+  if [[ -f "$ROLLBACK_DIR/build-inventory.json" ]]; then
+    _rb_inv="$(_ccbi_json_field "$ROLLBACK_DIR/build-inventory.json" inventory_digest)"
+    [[ -n "$_rb_inv" ]] && ROLLBACK_INVENTORY="$_rb_inv"
+  fi
   rm -rf "${APP_DIR}/.next" 2>/dev/null || true
   cp -r "$ROLLBACK_DIR" "${APP_DIR}/.next" 2>/dev/null || {
     _err "CRITICAL: Failed to restore .next from rollback artifact!"
@@ -946,8 +1030,25 @@ else
   _rollback_receipt "$FAILED_HEALTH_JSON" "$ROLLBACK_HEALTH_JSON" \
     "Health check exit ${HEALTH_EXIT}: NOT GREEN on new build (BUILD_ID: ${BUILD_ID:-unknown}); server rolled back to prior build"
 
+  # ── PRES-046: transaction-bound rollback receipt ─────────────────────────────
+  # Bind approved prior artifact + failed target + reason + timestamp + recovery
+  # obligation into ONE receipt. The startup guard accepts the content mismatch
+  # ONLY when this receipt's rolled_back_to digest matches the artifact being
+  # served AND its failed_target digest matches the current source tree — an
+  # arbitrary marker alone never authorizes stale code. There is no loose
+  # stale-bypass flag.
+  _ccbi_write_rollback_state \
+    "$APP_DIR" \
+    "$ROLLBACK_INVENTORY" \
+    "$PRE_BUILD_INVENTORY" \
+    "${BUILD_ID:-unknown}" \
+    "Health check exit ${HEALTH_EXIT} on target build ${BUILD_ID:-unknown}; auto-rolled back to prior artifact" \
+    && _ok "  Rollback receipt written: ${APP_DIR}/.deploy-rollback-state.json (prior=${ROLLBACK_INVENTORY})" \
+    || _err "  Failed to write rollback receipt — degraded state NOT recorded; startup guard will refuse the mismatch loudly."
+
   if [[ $ROLLBACK_HEALTH_EXIT -eq 0 ]]; then
-    _warn "Rollback complete. Server is GREEN on the prior build."
+    _warn "Rollback complete. Server is GREEN on the PRIOR build — AVAILABLE BUT DEGRADED (pending repair)."
+    _warn "This is NOT a successful upgrade: health output separates availability from target freshness."
     _warn "Investigate the failing health-check JSON above before re-deploying."
   else
     _err "ALERT: Rollback complete but server is still NOT GREEN (exit ${ROLLBACK_HEALTH_EXIT}) on the prior build."

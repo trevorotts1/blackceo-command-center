@@ -275,65 +275,189 @@ free_port() {
 
 free_port "$CC_PORT"
 
-# ── 2b. BUILD-ID FRESHNESS GUARD ──────────────────────────────────────────────
+# ── 2b. BUILD CONTENT FRESHNESS GUARD (PRES-046) ─────────────────────────────
 # BUILD-06: `next start` will happily boot onto a MISSING or STALE `.next` build.
 # When an updater pulls new code but never recompiles (BUILD-05 class), the
 # server keeps serving the OLD build — the dead client Kanban. This guard runs
 # on EVERY start path (ecosystem.config.cjs invokes this launcher) and:
 #
 #   1. FAIL-LOUD if `.next/BUILD_ID` is absent — there is no production build.
-#   2. FAIL-LOUD if the build is STALE — any file under src/ (or package.json /
-#      next.config.*) is NEWER than `.next/BUILD_ID`, meaning the code was
-#      updated after the last compile. `git reset --hard` (the updater's pull)
-#      re-stamps source mtimes, so an un-rebuilt update trips this cleanly.
+#   2. Verify the served build's CONTENT INVENTORY (PRES-046) against the
+#      current source tree. The old mtime heuristic is GONE: `git pull`
+#      re-stamps source mtimes and `cp -r` rollback re-stamps artifact mtimes,
+#      so mtimes could both FALSE-ALARM (fresh old code flagged stale) and
+#      FALSE-CLEAR (stale old code looks current). Content, never mtime, is
+#      the oracle: the artifact carries an immutable build-inventory.json
+#      manifest (written by atomic-deploy.sh pre-swap) whose inventory_digest
+#      must equal the digest of the live source tree.
 #
-# Exiting non-zero here makes PM2's circuit-breaker (min_uptime + max_restarts)
-# surface the problem LOUDLY (errored state + watchdog alert) instead of quietly
-# serving stale bytes. Rebuild with `bash scripts/atomic-deploy.sh` (preferred)
-# or `npm run build`, then the next restart clears the guard.
+#   3. On MISMATCH, the mismatch is refused UNLESS a transaction-bound
+#      rollback receipt ($CC_DIR/.deploy-rollback-state.json) binds EXACTLY
+#      this pair: its rolled_back_to digest == the served artifact's manifest
+#      digest AND its failed_target digest == the current source digest.
+#      That is the legitimate "health check failed on the new build, we
+#      deliberately restored the prior artifact" state — the box then serves
+#      AVAILABLE BUT DEGRADED with pending repair, never target-current.
+#      Any stale/tampered/foreign receipt is REFUSED (RECEIPT_INVALID /
+#      RECEIPT_STALE). There is NO loose stale-bypass flag: the old
+#      CC_ALLOW_STALE_BUILD=1 escape hatch is REMOVED — content identity
+#      cannot be waived by an environment variable, only by a matching
+#      receipt or a rebuild.
 #
-# Escape hatch (NOT recommended): CC_ALLOW_STALE_BUILD=1 downgrades the staleness
-# failure to a warning. The MISSING-build failure is never bypassable — there is
-# nothing to serve.
+# EXIT CODE CONTRACT (consumes the PRES-045 deterministic-refusal contract):
+# every refusal class below is DETERMINISTIC — restarting cannot fix a content
+# mismatch, so a plain exit 1 would restart-loop exactly like the PRES-045
+# stale-build loop (2,590 restarts measured on 2026-09-06). All content
+# refusals therefore exit 78 (EX_CONFIG) and write the SAME durable refusal
+# receipt PRES-045 defined ($CC_DIR/.cc-state/cc-start-refused.json, schema
+# cc-start-refusal/1) so health/watchdog consumers see a CURRENT refusal with
+# the content verdict as the reason. A transient crash still exits non-78
+# elsewhere in this launcher.
+#
+# MERGE NOTE (PRES-046 ↔ PRES-045): WF17's lane rewrites this same guard with
+# mtime staleness + exit 78 + _cc_refusal_receipt + _cc_delayed_self_stop +
+# stop_exit_codes in both ecosystem files. PRES-046 SUPERSEDES the mtime scan
+# with content verification (that is this unit's defect class). Compose at
+# merge time by keeping PRES-045's receipt writer / self-stop /
+# stop_exit_codes and replacing ONLY the staleness decision with the _ccbi
+# verification below. Until that merge lands on one branch, the duplicate
+# receipt writer here uses the identical schema and path, so consumers behave
+# the same either way.
 _assert_fresh_build() {
   local next_dir="$CC_DIR/.next"
   local build_id="$next_dir/BUILD_ID"
 
+  # _ccbi_content_refusal_receipt <reason> <detail> — durable refusal receipt,
+  # REAL JSON via node's encoder (same schema/path as the PRES-045 contract so
+  # health/watchdog consumers cannot tell the two refusal classes apart except
+  # by reason). Best-effort: a receipt write failure must never swallow the
+  # refusal itself.
+  _ccbi_content_refusal_receipt() {
+    local reason="$1" detail="$2"
+    local state_dir="$CC_DIR/.cc-state"
+    mkdir -p "$state_dir" 2>/dev/null || return 0
+    local tmp
+    tmp="$(mktemp "$state_dir/.cc-refusal.XXXXXX" 2>/dev/null)" || return 0
+    CCBI_REFUSAL_TMP="$tmp" CCBI_CC_DIR="$CC_DIR" CCBI_REASON="$reason" \
+    CCBI_DETAIL="$detail" node -e '
+      const fs = require("fs");
+      const buildId = (() => { try { return fs.readFileSync(process.env.CCBI_CC_DIR + "/.next/BUILD_ID", "utf8").trim(); } catch { return null; } })();
+      const doc = {
+        schema: "cc-start-refusal/1",
+        app: process.env.pm_id != null
+          ? { pm_id: Number(process.env.pm_id), name: process.env.name ?? null }
+          : { pm_id: null, name: process.env.name ?? null },
+        generation: process.env.pm_uptime != null ? { started_at_ms: Number(process.env.pm_uptime) } : null,
+        reason: process.env.CCBI_REASON,
+        detail: process.env.CCBI_DETAIL,
+        build_id: buildId,
+        exit: 78,
+        remedy: "bash scripts/atomic-deploy.sh",
+        refused_at: new Date().toISOString()
+      };
+      fs.writeFileSync(process.env.CCBI_REFUSAL_TMP, JSON.stringify(doc, null, 2) + "\n", { mode: 0o644 });
+    ' >/dev/null 2>&1 || { rm -f "$tmp"; return 0; }
+    mv -f "$tmp" "$state_dir/cc-start-refused.json" 2>/dev/null || rm -f "$tmp"
+    printf '[cc-start] Refusal receipt: %s\n' "$state_dir/cc-start-refused.json" >&2
+  }
+
+  _ccbi_refuse_deterministically() {
+    local reason="$1" detail="$2"
+    printf '[cc-start] FATAL: %s — %s\n' "$reason" "$detail" >&2
+    printf '[cc-start] This is a DETERMINISTIC refusal (exit 78): restarting cannot fix it.\n' >&2
+    printf '[cc-start] Rebuild before start: `bash scripts/atomic-deploy.sh` (preferred) or `npm run build`.\n' >&2
+    _ccbi_content_refusal_receipt "$reason" "$detail"
+    exit 78
+  }
+
+  # 1. MISSING build — deterministic, terminal (exit 78).
   if [[ ! -f "$build_id" ]]; then
-    printf '[cc-start] FATAL: no production build found (%s missing).\n' "$build_id" >&2
-    printf '[cc-start] `next start` requires a compiled build. Run `bash scripts/atomic-deploy.sh` (preferred)\n' >&2
-    printf '[cc-start] or `npm run build` first. Refusing to start onto a missing build so the PM2\n' >&2
-    printf '[cc-start] circuit-breaker surfaces this loudly instead of an opaque crash-loop.\n' >&2
-    exit 1
+    _ccbi_refuse_deterministically "missing-build" \
+      "no production build found ($build_id missing); refusing to start onto a missing build"
   fi
 
-  # Staleness: is any source input NEWER than the compiled BUILD_ID?
-  local newer=""
-  local _src
-  for _src in "$CC_DIR/src" "$CC_DIR/package.json" \
-              "$CC_DIR/next.config.js" "$CC_DIR/next.config.mjs" "$CC_DIR/next.config.ts"; do
-    [[ -e "$_src" ]] || continue
-    if [[ -n "$(find "$_src" -newer "$build_id" -print -quit 2>/dev/null)" ]]; then
-      newer="$_src"; break
-    fi
-  done
-
-  if [[ -n "$newer" ]]; then
-    if [[ "${CC_ALLOW_STALE_BUILD:-0}" == "1" ]]; then
-      printf '[cc-start] WARN: STALE build (%s is newer than .next/BUILD_ID) — starting anyway because CC_ALLOW_STALE_BUILD=1.\n' "$newer" >&2
-    else
-      printf '[cc-start] FATAL: STALE build — %s is newer than .next/BUILD_ID.\n' "$newer" >&2
-      printf '[cc-start] The running code was updated but never recompiled (BUILD-05/BUILD-06 dead-Kanban class).\n' >&2
-      printf '[cc-start] Rebuild before start: `bash scripts/atomic-deploy.sh` (preferred) or `npm run build`.\n' >&2
-      printf '[cc-start] To bypass for a single start (NOT recommended): CC_ALLOW_STALE_BUILD=1.\n' >&2
-      exit 1
-    fi
+  # PRES-046: content verification against the live source tree.
+  local inv_lib="$CC_DIR/scripts/lib/build-inventory.sh"
+  if [[ ! -f "$inv_lib" ]]; then
+    _ccbi_refuse_deterministically "inventory-lib-missing" \
+      "$inv_lib not found — content inventory unavailable (PRES-046); build cannot be verified against source"
   fi
+  # shellcheck source=lib/build-inventory.sh
+  # shellcheck disable=SC1090
+  source "$inv_lib"
 
-  printf '[cc-start] BUILD-ID freshness guard: .next/BUILD_ID present and fresh.\n' >&2
+  local verify_json verify_rc verdict served_bid
+  verify_json="$(bash "$inv_lib" --verify "$CC_DIR" 2>/dev/null)"
+  verify_rc=$?
+  verdict="$(printf '%s' "$verify_json" | sed -n 's/.*"verdict"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+  served_bid="$(printf '%s' "$verify_json" | sed -n 's/.*"build_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+
+  case "$verify_rc" in
+    0)
+      # VERIFIED — served artifact is exactly the current source content.
+      printf '[cc-start] BUILD freshness guard: content VERIFIED (BUILD_ID: %s).\n' "${served_bid:-unknown}" >&2
+      return 0
+      ;;
+    2)
+      # MANIFEST_MISSING: a legacy (pre-PRES-046) artifact legitimately remains
+      # servable ONLY via the legacy-prior carve-out — the rollback receipt
+      # written by the SAME deploy transaction that restored it binds it as
+      # "(unattested)" and names THIS source tree as the failed target.
+      local source_inv_missing rb_json_missing rb_rc_missing rb_verdict_missing
+      source_inv_missing="$(_ccbi_inventory_digest "$CC_DIR")"
+      rb_json_missing="$(bash "$inv_lib" --verify-rollback "$CC_DIR" "$next_dir" "$source_inv_missing" 2>/dev/null)"
+      rb_rc_missing=$?
+      rb_verdict_missing="$(printf '%s' "$rb_json_missing" | sed -n 's/.*"receipt_verdict"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+      if [[ "$rb_rc_missing" -eq 0 && "$rb_verdict_missing" == "RECEIPT_OK" ]]; then
+        printf '[cc-start] DEGRADED (legacy-prior): serving a pre-inventory artifact with NO manifest after a failed deploy.\n' >&2
+        printf '[cc-start] Rollback receipt VERIFIED (unattested prior, failed target = this source tree) — PRES-046.\n' >&2
+        printf '[cc-start] AVAILABLE BUT DEGRADED: identity unattested, pending repair. NOT a successful upgrade.\n' >&2
+        printf '[cc-start] Rebuild to restore content verification: bash scripts/atomic-deploy.sh.\n' >&2
+        return 0
+      fi
+      _ccbi_refuse_deterministically "build-manifest-missing" \
+        "$next_dir/build-inventory.json missing and rollback receipt ${rb_verdict_missing:-RECEIPT_INVALID} — nothing vouches for this artifact (PRES-046)"
+      ;;
+    3)
+      _ccbi_refuse_deterministically "build-manifest-invalid" \
+        "$next_dir/build-inventory.json truncated/tampered/corrupt — a corrupt manifest never silently downgrades to mtime trust (PRES-046)"
+      ;;
+    5)
+      _ccbi_refuse_deterministically "obsolete-inventory" \
+        "manifest was computed over a different compile-affecting input set than this tree has now — recorded inventory no longer covers what compiles (PRES-046)"
+      ;;
+    1)
+      # MISMATCH — the only legitimate path is a transaction-bound rollback receipt
+      # binding exactly this pair. Verify it.
+      local source_inv rb_json rb_rc rb_verdict
+      source_inv="$(_ccbi_inventory_digest "$CC_DIR")"
+      rb_json="$(bash "$inv_lib" --verify-rollback "$CC_DIR" "$next_dir" "$source_inv" 2>/dev/null)"
+      rb_rc=$?
+      rb_verdict="$(printf '%s' "$rb_json" | sed -n 's/.*"receipt_verdict"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+      if [[ "$rb_rc" -eq 0 && "$rb_verdict" == "RECEIPT_OK" ]]; then
+        printf '[cc-start] DEGRADED: serving the PRIOR artifact after a failed deploy (content mismatch vs source).\n' >&2
+        printf '[cc-start] Rollback receipt VERIFIED — prior artifact and failed target both match (PRES-046).\n' >&2
+        printf '[cc-start] AVAILABLE BUT DEGRADED: pending repair. This is NOT a successful upgrade and\n' >&2
+        printf '[cc-start] commandCenterLastUpdateVerified must NOT report target-current. Repair by\n' >&2
+        printf '[cc-start] rebuilding the failed target: bash scripts/atomic-deploy.sh.\n' >&2
+        return 0
+      elif [[ "$rb_rc" -eq 1 ]]; then
+        _ccbi_refuse_deterministically "content-mismatch-stale-receipt" \
+          "build/content MISMATCH vs source and rollback receipt ${rb_verdict:-STALE} — the receipt does not bind the served artifact to THIS source tree and cannot waive the mismatch (PRES-046)"
+      else
+        _ccbi_refuse_deterministically "content-mismatch-invalid-receipt" \
+          "build/content MISMATCH vs source and rollback receipt ${rb_verdict:-RECEIPT_INVALID} — a missing/tampered/foreign marker never authorizes stale code (PRES-046)"
+      fi
+      ;;
+    *)
+      _ccbi_refuse_deterministically "content-verification-error" \
+        "content verification failed with rc=$verify_rc (PRES-046)"
+      ;;
+  esac
 }
 
 _assert_fresh_build
+
 
 # ── 3. EXEC next start ────────────────────────────────────────────────────────
 # exec replaces this bash process so PM2's PID tracking points at the real node

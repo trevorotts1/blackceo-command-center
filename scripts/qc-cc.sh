@@ -519,6 +519,26 @@ check "10.16" "atomic-deploy.sh: pm2 save on green (CC + cloudflared persist for
 check "10.17" "deploy.sh: pm2 save on green (inline, or via the atomic-deploy.sh forward)" \
   "grep -q 'pm2 save' scripts/deploy.sh || grep -q 'atomic-deploy.sh' scripts/deploy.sh"
 
+# 10.18–10.22 PRES-046 content freshness contract (P0, W2 WF18).
+# The served build's CONTENT — never mtimes — is the freshness oracle; the
+# canonical inventory lives in scripts/lib/build-inventory.sh and is consumed
+# by atomic-deploy.sh (pre/post frozen-source proof + immutable per-artifact
+# manifest + transaction-bound rollback receipt), cc-start.sh (content
+# verification with deterministic exit-78 refusals), update.sh (degraded path
+# frozen-source rule) and /api/health/deep (gating build_content check).
+check "10.18" "build-inventory.sh: canonical content inventory lib exists" \
+  "[ -f scripts/lib/build-inventory.sh ]"
+check "10.19" "atomic-deploy.sh: frozen-source proof (pre/post inventory must match)" \
+  "grep -q 'PRE_BUILD_INVENTORY' scripts/atomic-deploy.sh && grep -q 'POST_BUILD_INVENTORY' scripts/atomic-deploy.sh && grep -q 'FROZEN-SOURCE VIOLATION' scripts/atomic-deploy.sh"
+check "10.20" "atomic-deploy.sh: immutable per-artifact manifest written into build output pre-swap" \
+  "grep -q '_ccbi_write_manifest' scripts/atomic-deploy.sh && grep -q 'BUILD_TMP' scripts/atomic-deploy.sh"
+check "10.21" "atomic-deploy.sh: rollback receipt clears ONLY on matching failed-target content" \
+  "grep -q 'failed_target_inventory_digest' scripts/atomic-deploy.sh && grep -q 'does not match this deploy' scripts/atomic-deploy.sh"
+check "10.22" "cc-start.sh: content verification guard present; no loose CC_ALLOW_STALE_BUILD bypass" \
+  "grep -q 'build-inventory.sh' scripts/cc-start.sh && ! grep -q 'CC_ALLOW_STALE_BUILD:-0' scripts/cc-start.sh"
+check "10.23" "PRES-046 behavior tests exist (content/mtime/rollback/receipt fixtures)" \
+  "[ -f tests/unit/pres046-content-inventory.test.sh ]"
+
 blue ""
 blue "── 11. Port-pin and env-bleed guard (v4.42.0+) ──"
 #
