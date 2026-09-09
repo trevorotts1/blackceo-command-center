@@ -250,11 +250,18 @@ export function buildPublishMessage(
   }
 
   // Theme gate (F07 contract): an unanswered cycle outranks everything — the
-  // client, not the system, owns the week's next action.
-  const cycle = queryOne<SummaryCycleRow>(
-    `SELECT * FROM social_cycles WHERE company_id = ? ORDER BY created_at DESC LIMIT 1`,
-    [publish.company_id],
-  );
+  // client, not the system, owns the week's next action. Tolerant of a
+  // pre-WF10 box whose migration 139 has not landed (no social_cycles table):
+  // that box has no theme gate to report, so the publish state speaks alone.
+  let cycle: SummaryCycleRow | null = null;
+  try {
+    cycle = queryOne<SummaryCycleRow>(
+      `SELECT * FROM social_cycles WHERE company_id = ? ORDER BY created_at DESC LIMIT 1`,
+      [publish.company_id],
+    ) ?? null;
+  } catch {
+    cycle = null; // table absent — no theme gate on this box
+  }
   if (cycle && (cycle.state === 'invited' || cycle.state === 'draft') && !cycle.response_state) {
     stage = 'awaiting theme';
     owner = 'client';
@@ -420,14 +427,24 @@ export function buildCycleCloseSummary(input: {
  */
 export function loadCycleCloseSummary(companyId: string, cycleId: string): CycleCloseSummary {
   const db = getDb();
-  const deliveries = queryAll<SummaryDeliveryRow>(
-    `SELECT * FROM social_deliveries WHERE company_id = ? AND cycle_id = ?`,
-    [companyId, cycleId],
-  );
-  const cycle = queryOne<SummaryCycleRow>(
-    'SELECT * FROM social_cycles WHERE id = ? AND company_id = ?',
-    [cycleId, companyId],
-  );
+  let deliveries: SummaryDeliveryRow[] = [];
+  try {
+    deliveries = queryAll<SummaryDeliveryRow>(
+      `SELECT * FROM social_deliveries WHERE company_id = ? AND cycle_id = ?`,
+      [companyId, cycleId],
+    );
+  } catch {
+    deliveries = []; // delivery table not provisioned on this box yet
+  }
+  let cycle: SummaryCycleRow | null = null;
+  try {
+    cycle = queryOne<SummaryCycleRow>(
+      'SELECT * FROM social_cycles WHERE id = ? AND company_id = ?',
+      [cycleId, companyId],
+    ) ?? null;
+  } catch {
+    cycle = null; // pre-WF10 box: no cycle table, the delivery rows still speak
+  }
   let expiryEvents: SummaryExpiryRow[] = [];
   try {
     expiryEvents = queryAll<SummaryExpiryRow>(
