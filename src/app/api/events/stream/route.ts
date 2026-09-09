@@ -18,13 +18,18 @@
  *   connection; it stops when the client disconnects or the keep-alive fails.
  */
 
-import { NextRequest } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import {
   registerClient,
   unregisterClient,
   enqueueWithBackpressure,
+  connectionMayReceive,
   SSE_PROCESS_ORIGIN,
 } from '@/lib/events';
+import {
+  resolveStreamCompany,
+  TenantAccessError,
+} from '@/lib/social/company-context';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -47,13 +52,31 @@ interface JournalRow {
 }
 
 export async function GET(request: NextRequest) {
+  // W3QC-01 — resolve the connection's company scope BEFORE opening the
+  // stream, using the same F01 company context every company-scoped route
+  // uses. Operator sessions (self-kind / bearer) stay unscoped and keep full
+  // visibility; client sessions are bound to their registered company. A
+  // production caller with no verifiable identity gets a 403 and no stream.
+  let connectionCompanyId: string | null = null;
+  try {
+    connectionCompanyId = await resolveStreamCompany(request);
+  } catch (error) {
+    if (error instanceof TenantAccessError) {
+      return NextResponse.json({ error: 'Verified company identity required' }, { status: 403 });
+    }
+    throw error;
+  }
+
   const encoder = new TextEncoder();
 
   // Create a readable stream for SSE
   const stream = new ReadableStream({
     start(controller) {
-      // Register this client for same-process push delivery
-      registerClient(controller);
+      // Register this client for same-process push delivery, bound to its
+      // resolved company scope. broadcast() drops events whose company scope
+      // does not match, so a Company A browser never receives Company B's
+      // task bytes over the in-memory path.
+      registerClient(controller, connectionCompanyId);
 
       // Send initial connection message
       const connectMsg = encoder.encode(`: connected\n\n`);
@@ -100,6 +123,21 @@ export async function GET(request: NextRequest) {
             lastJournalId = row.id;
             // Skip events this process already pushed on the in-memory path.
             if (row.origin === SSE_PROCESS_ORIGIN) continue;
+            // W3QC-01 — the journaled payload carries the broadcast scope as
+            // `companyId` (absent on legacy unscoped rows). Drop rows whose
+            // company does not match this connection's BEFORE enqueueing, so a
+            // Company A browser never receives Company B's task bytes over the
+            // cross-process path either. The cursor still advances past dropped
+            // rows — they are simply never delivered to THIS connection.
+            let rowCompanyId: string | null = null;
+            try {
+              const parsed = JSON.parse(row.payload) as { companyId?: unknown };
+              rowCompanyId =
+                typeof parsed.companyId === 'string' && parsed.companyId ? parsed.companyId : null;
+            } catch {
+              rowCompanyId = null; // malformed row: treat as legacy unscoped
+            }
+            if (!connectionMayReceive(connectionCompanyId, rowCompanyId)) continue;
             const data = `data: ${row.payload}\n\n`;
             // MSG-08 (fix2): route through the SAME backpressure guard
             // broadcast() uses. The previous direct controller.enqueue() bypassed

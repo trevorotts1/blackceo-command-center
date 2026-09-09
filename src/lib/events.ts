@@ -90,8 +90,11 @@ export function warnIfClustered(env: NodeJS.ProcessEnv = process.env): void {
 
 warnIfClustered();
 
-// Store active SSE client connections
-const clients = new Set<ReadableStreamDefaultController>();
+// Store active SSE client connections, keyed by the resolved company scope.
+// A connection whose scope is null is an operator (self-kind / bearer) session
+// and receives every event. A company-scoped connection receives only events
+// whose company matches, plus scope-free operator-level events.
+const clients = new Map<ReadableStreamDefaultController, { companyId: string | null }>();
 
 // MSG-08: a consumer whose stream queue is persistently full (a slow client,
 // or a dead TCP socket that has not yet surfaced an enqueue error) must not
@@ -103,10 +106,16 @@ const MAX_BACKPRESSURE_STRIKES = 5;
 const backpressureStrikes = new WeakMap<ReadableStreamDefaultController, number>();
 
 /**
- * Register a new SSE client connection
+ * Register a new SSE client connection with its resolved company scope.
+ * `companyId` null = operator (self-kind / bearer) session: sees everything.
+ * A non-null company id = client session: sees only that company's events
+ * plus scope-free operator-level events.
  */
-export function registerClient(controller: ReadableStreamDefaultController): void {
-  clients.add(controller);
+export function registerClient(
+  controller: ReadableStreamDefaultController,
+  companyId: string | null = null,
+): void {
+  clients.set(controller, { companyId });
 }
 
 /**
@@ -124,7 +133,7 @@ export function unregisterClient(controller: ReadableStreamDefaultController): v
  * useSSE's onopen catch-up (MSG-07) reconciles any missed deltas.
  */
 function dropClient(controller: ReadableStreamDefaultController): void {
-  clients.delete(controller);
+  clients.delete(controller); // Map.delete: also drops the connection's company scope.
   backpressureStrikes.delete(controller);
   try {
     controller.close();
@@ -202,7 +211,7 @@ export function enqueueWithBackpressure(
  * through to the mutation's caller. The in-memory path handles same-process
  * clients; the journal catches the rest on the next poll tick.
  */
-function journalEvent(event: SSEEvent): void {
+function journalEvent(event: SSEEvent & { companyId?: string | null }): void {
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires, @typescript-eslint/no-require-imports
     const { getDb } = require('@/lib/db') as typeof import('@/lib/db');
@@ -217,28 +226,200 @@ function journalEvent(event: SSEEvent): void {
 }
 
 /**
- * Broadcast an event to all connected SSE clients, AND journal it to the
+ * Optional company scope on an event. A null scope means operator-level:
+ * only operator (unscoped) connections receive it. A non-null scope means
+ * the event belongs to exactly one company: operator connections AND that
+ * company's connections receive it; every other company's connection drops it.
+ *
+ * Scope is OPTIONAL for backward compatibility: existing producers call
+ * broadcast(event) with no scope and land on every connected browser exactly
+ * as before. Callers that know the event's company (task mutations resolve it
+ * through the task's workspace; publish flows already carry company_id) pass
+ * it so the fan-out no longer crosses the company boundary.
+ */
+export interface BroadcastOptions {
+  companyId?: string | null;
+}
+
+/**
+ * W3QC-01 — derive the broadcast scope from the event itself, so every
+ * producer (all 40+ call sites across routes, libs, and sweeps) is scoped
+ * WITHOUT touching each site. Resolution is always server-side, never from
+ * the caller or the network:
+ *
+ *   - publish_queued:<company> / publish_state:<company> → the type suffix
+ *     (stamped by F01/F03 from the verified tenant, not from user input).
+ *   - task_created / task_updated → payload.workspace_id → workspaces, else
+ *     payload.id → tasks → workspaces (both single-row indexed lookups).
+ *   - task_deleted { id } → tasks → workspaces.
+ *   - task_message { task_id } → tasks → workspaces.
+ *   - activity_logged { task_id } → tasks → workspaces.
+ *   - deliverable_added { task_id } → tasks → workspaces.
+ *   - ceo_chat_task_status { taskId } → tasks → workspaces.
+ *   - agent_spawned / agent_completed { taskId } → tasks → workspaces.
+ *   - recommendation_* { task_id?, recommendation_id? } → recommendations →
+ *     tasks → workspaces when linkable, else unscoped (operator-level).
+ *   - bug_created / bug_updated → unscoped (bugs carry no company link;
+ *     operator-level visibility preserved).
+ *   - execution_queue_updated → payload.task_id → tasks when present, else
+ *     unscoped.
+ *   - anything else / unresolvable → null (legacy fan-out, unchanged).
+ *
+ * A forged payload workspace pointing at a foreign workspace only NARROWS
+ * delivery (attributes to the foreign company): the true owner's stream is
+ * unaffected and the forger's stream cannot gain rows it could not read.
+ * Unknown task ids resolve to 'default' (F01-D2 legacy posture) rather than
+ * unscoped, so a deleted-then-referenced row can never widen to everyone.
+ */
+export function scopeForEvent(event: SSEEvent): string | null {
+  try {
+    const type = event.type;
+    // F01/F03 namespaced publish events: scope rides on the type suffix.
+    if (type.startsWith('publish_queued:') || type.startsWith('publish_state:')) {
+      const suffix = type.slice(type.indexOf(':') + 1).trim();
+      return suffix || null;
+    }
+    // Same dynamic-require pattern journalEvent() uses (keeps better-sqlite3
+    // out of the edge-runtime bundle).
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { getDb } = require('@/lib/db') as typeof import('@/lib/db');
+    const db = getDb();
+    const companyForWorkspace = (workspaceId: unknown): string | null => {
+      if (typeof workspaceId !== 'string' || !workspaceId.trim()) return null;
+      try {
+        const row = db
+          .prepare('SELECT company_id FROM workspaces WHERE id = ?')
+          .get(workspaceId.trim()) as { company_id: string | null } | undefined;
+        return row?.company_id || null;
+      } catch {
+        return null;
+      }
+    };
+    const companyForTaskId = (taskId: unknown): string | null => {
+      if (typeof taskId !== 'string' || !taskId) return null;
+      try {
+        const row = db
+          .prepare(
+            `SELECT w.company_id AS company_id
+               FROM tasks t
+               LEFT JOIN workspaces w ON w.id = t.workspace_id
+              WHERE t.id = ?`,
+          )
+          .get(taskId) as { company_id: string | null } | undefined;
+        if (!row) return 'default'; // unknown row: legacy posture, never unscoped
+        return row.company_id || 'default';
+      } catch {
+        return 'default';
+      }
+    };
+    const p = event.payload as Record<string, unknown> | null | undefined;
+    if (!p || typeof p !== 'object') return null;
+    switch (type) {
+      case 'task_created':
+      case 'task_updated':
+        return companyForWorkspace(p.workspace_id) ?? companyForTaskId(p.id) ?? 'default';
+      case 'task_deleted':
+        return companyForTaskId(p.id) ?? 'default';
+      case 'task_message':
+      case 'activity_logged':
+      case 'deliverable_added':
+        return companyForTaskId((p as { task_id?: unknown }).task_id) ?? 'default';
+      case 'ceo_chat_task_status':
+      case 'agent_spawned':
+      case 'agent_completed': {
+        const tid = (p as { taskId?: unknown; task_id?: unknown }).taskId
+          ?? (p as { task_id?: unknown }).task_id;
+        return companyForTaskId(tid) ?? 'default';
+      }
+      case 'recommendation_created':
+      case 'recommendation_updated':
+      case 'recommendation_outcome_recorded': {
+        const direct = companyForTaskId((p as { task_id?: unknown }).task_id);
+        if (direct) return direct;
+        // recommendations link to tasks; resolve through the recommendation row.
+        const recId = (p as { recommendation_id?: unknown; id?: unknown }).recommendation_id
+          ?? (p as { id?: unknown }).id;
+        if (typeof recId === 'string' && recId) {
+          try {
+            const rec = db
+              .prepare('SELECT task_id FROM recommendations WHERE id = ?')
+              .get(recId) as { task_id: string | null } | undefined;
+            if (rec?.task_id) return companyForTaskId(rec.task_id) ?? 'default';
+          } catch {
+            // fall through to unscoped
+          }
+        }
+        return null;
+      }
+      case 'execution_queue_updated': {
+        const direct = companyForTaskId((p as { task_id?: unknown }).task_id);
+        if (direct) return direct;
+        return null;
+      }
+      default:
+        return null;
+    }
+  } catch {
+    return null; // scope resolution never breaks a broadcast
+  }
+}
+
+/**
+ * True iff a connection with the given scope may receive an event with the
+ * given scope. Operator connections (null) see everything; a company
+ * connection sees its own company's events plus scope-free operator-level
+ * events — never another company's.
+ */
+export function connectionMayReceive(
+  connectionCompanyId: string | null,
+  eventCompanyId: string | null,
+): boolean {
+  if (connectionCompanyId === null) return true; // operator session: full visibility
+  if (eventCompanyId === null) return true; // operator-level event: every connection sees it
+  return connectionCompanyId === eventCompanyId;
+}
+
+/**
+ * Broadcast an event to connected SSE clients, AND journal it to the
  * shared SQLite fan-out bus so cross-process clients see it on their next
  * poll tick.
+ *
+ * The optional `options.companyId` scopes delivery: the stream route resolves
+ * each connection's company the same way (F01 company context) and drops
+ * events whose scope does not match — including on the cross-process journal
+ * path, where the scope travels in the journaled payload. Unscoped legacy
+ * events keep the old fan-out-to-everyone behavior. The journaled row
+ * carries the scope so a Company A connection on process B never receives
+ * Company B's bytes journaled by process A.
  */
-export function broadcast(event: SSEEvent): void {
+export function broadcast(event: SSEEvent, options?: BroadcastOptions): void {
   const encoder = new TextEncoder();
-  const data = `data: ${JSON.stringify(event)}\n\n`;
+  // Explicit scope wins (null forces operator-level); otherwise derive from
+  // the event itself so every existing call site is filtered without being
+  // touched. Unresolvable events stay unscoped (legacy fan-out, unchanged).
+  const eventCompanyId: string | null = options?.companyId !== undefined
+    ? (options.companyId ?? null)
+    : scopeForEvent(event);
+  const wireEvent =
+    eventCompanyId === null ? event : { ...event, companyId: eventCompanyId };
+  const data = `data: ${JSON.stringify(wireEvent)}\n\n`;
   const encoded = encoder.encode(data);
 
-  // Send to all connected clients. MSG-08: enqueueWithBackpressure honours
+  // Send to in-scope connected clients. MSG-08: enqueueWithBackpressure honours
   // stream backpressure before enqueuing and drops persistently backed-up or
   // broken consumers, so a slow client cannot make the server buffer without
   // bound. The cross-process poll in the stream route routes through the same
   // helper so both delivery paths share one policy (and one strike budget).
-  const clientsArray = Array.from(clients);
-  for (const client of clientsArray) {
+  const clientsArray = Array.from(clients.entries());
+  for (const [client, conn] of clientsArray) {
+    if (!connectionMayReceive(conn.companyId, eventCompanyId)) continue;
     enqueueWithBackpressure(client, encoded);
   }
 
   // MR-10: dual-write to the shared SQLite journal so clients pinned to
-  // OTHER processes discover this event during their poll loop.
-  journalEvent(event);
+  // OTHER processes discover this event during their poll loop. The scope
+  // travels in the journaled payload so the cross-process path filters too.
+  journalEvent(eventCompanyId === null ? event : { ...event, companyId: eventCompanyId });
 
   console.log(`[SSE] Broadcast ${event.type} to ${clients.size} client(s)`);
 }
@@ -248,4 +429,14 @@ export function broadcast(event: SSEEvent): void {
  */
 export function getActiveConnectionCount(): number {
   return clients.size;
+}
+
+/**
+ * Test/observability helper: the resolved company scope of a registered
+ * connection (null = operator session). Undefined when not registered.
+ */
+export function connectionCompanyFor(
+  controller: ReadableStreamDefaultController,
+): string | null | undefined {
+  return clients.get(controller)?.companyId;
 }

@@ -41,6 +41,10 @@ import {
   type TenantContext,
 } from '@/lib/auth/tenant-context';
 
+// Re-exported so the SSE stream route resolves identity through this module
+// (the F01 company-context surface) rather than importing auth internals.
+export { TenantAccessError };
+
 export interface PublishCompany {
   companyId: string;
   tenant: TenantContext;
@@ -134,6 +138,116 @@ export function companyGhlLocationId(companyId: string): string | null {
     [companyId],
   );
   return row?.ghl_location_id || null;
+}
+
+// ── W3QC-01 — SSE stream company scoping ─────────────────────────────────────
+// The SSE stream route resolves each connection's company the same way every
+// other company-scoped route does: resolveTenantContext() (bearer
+// MC_API_TOKEN, signed tenant session cookie, or CF Access JWT). Operator
+// sessions — self-kind registrations (the box's own dashboard) and the
+// operator bearer — resolve to the box's own company AND keep full stream
+// visibility (they are how the operator watches the whole fleet). Client-kind
+// sessions resolve to their registered company and see only that company's
+// events plus scope-free operator-level events. Client sessions calling the
+// operator's own box-local host (unregistered host → TenantAccessError) are
+// treated as operator-visible: the route keeps them unscoped rather than
+// closing their stream, preserving the single-tenant dashboard with no
+// registry. Production callers with no verifiable identity at all get a 403
+// and no stream (same posture as the campaigns list route).
+
+/**
+ * Resolve the owning company for a task row WITHOUT trusting the caller.
+ * tasks.workspace_id → workspaces.company_id; workspace-less/legacy rows
+ * resolve to 'default' (F01-D2 posture: a verified non-default company never
+ * owns them — see assertTaskOwnedByCompany). Returns null when the task row
+ * is absent (nothing to attribute; callers should broadcast unscoped only
+ * for genuinely operator-level events, never as a task-event fallback).
+ */
+export function companyIdForTaskId(taskId: string | null | undefined): string | null {
+  if (!taskId) return null;
+  try {
+    const db = getDb();
+    const row = db
+      .prepare(
+        `SELECT w.company_id AS company_id
+           FROM tasks t
+           LEFT JOIN workspaces w ON w.id = t.workspace_id
+          WHERE t.id = ?`,
+      )
+      .get(taskId) as { company_id: string | null } | undefined;
+    if (!row) return null;
+    return row.company_id || 'default';
+  } catch {
+    return 'default';
+  }
+}
+
+/**
+ * Resolve the owning company for a task payload WITHOUT trusting the caller.
+ * Prefers the payload's workspace_id joined to workspaces (a forged payload
+ * workspace pointing at a foreign workspace attributes to the FOREIGN company
+ * — which only narrows delivery, never widens it: the true owner's stream is
+ * unaffected and the forger's own stream cannot gain rows it could not
+ * already read). Falls back to companyIdForTaskId(taskId) when the payload
+ * carries no workspace, and 'default' when the task is unknown.
+ */
+export function companyIdForTaskPayload(payload: {
+  id?: string;
+  workspace_id?: string | null;
+} | null | undefined): string | null {
+  if (!payload) return null;
+  const ws = typeof payload.workspace_id === 'string' ? payload.workspace_id.trim() : '';
+  if (ws) {
+    try {
+      const row = getDb()
+        .prepare('SELECT company_id FROM workspaces WHERE id = ?')
+        .get(ws) as { company_id: string | null } | undefined;
+      if (row?.company_id) return row.company_id;
+    } catch {
+      // fall through to the task-id lookup
+    }
+  }
+  if (typeof payload.id === 'string' && payload.id) {
+    return companyIdForTaskId(payload.id) || 'default';
+  }
+  return 'default';
+}
+
+/**
+ * Resolve the SSE stream connection scope for an incoming GET request.
+ * Returns the company the connection is bound to, or null for an operator
+ * (unscoped, sees everything) connection. Throws TenantAccessError only for
+ * a production caller with no verifiable identity at all (route answers 403,
+ * opens no stream).
+ */
+export async function resolveStreamCompany(
+  request: { headers: Headers },
+): Promise<string | null> {
+  let tenant: TenantContext;
+  try {
+    tenant = await resolveTenantContext(request);
+  } catch (error) {
+    if (error instanceof TenantAccessError) {
+      // Single-tenant box with no registry (dev dashboard, EventSource sends
+      // cookies but no bearer): keep the connection unscoped like the box's
+      // own operator session rather than closing the stream. Production
+      // callers with no identity get no stream — same posture as
+      // resolveCampaignsCompany.
+      if (process.env.NODE_ENV === 'production') throw error;
+      return null;
+    }
+    throw error;
+  }
+  // Operator sessions (self-kind dashboard, operator bearer) keep full
+  // visibility: the box's own company runs the board for the whole fleet.
+  if (tenant.kind === 'self') return null;
+  if (tenant.subject === 'operator:api') return null;
+  // Client-kind session: bound to its registered company.
+  if (tenant.companyId) return tenant.companyId;
+  if (process.env.NODE_ENV === 'production') {
+    throw new TenantAccessError('Verified company identity required');
+  }
+  return null;
 }
 
 // ── F36 — campaign board company scoping ────────────────────────────────────

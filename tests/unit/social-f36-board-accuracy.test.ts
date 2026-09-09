@@ -384,6 +384,98 @@ test('F36: stale/offline derivation — a last sync older than the threshold fla
   assert.ok(now - fresh <= STALE_AFTER_MS);
 });
 
+test('F36 W3QC-01: a Company A SSE connection receives A task events and never B bytes', async () => {
+  // Fakes the connection identity the stream route resolves (client-kind
+  // tenant sessions for two companies) and proves the fan-out contract: A
+  // receives its own company's task_created/task_updated/task_deleted bytes;
+  // B's full task rows never land on A's connection; the operator (unscoped)
+  // connection still sees everything. Covers both the in-memory push path
+  // (broadcast → registered controllers) and the cross-process journal path
+  // (the journaled payload carries the scope the stream route filters on).
+  const events = await import('../../src/lib/events');
+  const companyCtx = await import('../../src/lib/social/company-context');
+
+  seedWorkspace('ws-f36-sse-a', 'company-f36-a', 'sse-a');
+  seedWorkspace('ws-f36-sse-b', 'company-f36-b', 'sse-b');
+  seedTask('task-f36-sse-a', 'ws-f36-sse-a', 'in_progress');
+  seedTask('task-f36-sse-b', 'ws-f36-sse-b', 'in_progress');
+
+  // The connection identity the route binds: resolveStreamCompany over the
+  // same tenant sessions the route handlers use. Faked here at the resolver
+  // level (same headers the EventSource sends: host + session cookie).
+  const scopeA = await companyCtx.resolveStreamCompany(
+    requestFor('/api/events/stream', HOST_A, 'company-f36-a'),
+  );
+  const scopeB = await companyCtx.resolveStreamCompany(
+    requestFor('/api/events/stream', HOST_B, 'company-f36-b'),
+  );
+  assert.equal(scopeA, 'company-f36-a');
+  assert.equal(scopeB, 'company-f36-b');
+
+  const receivedA: string[] = [];
+  const receivedB: string[] = [];
+  const receivedOp: string[] = [];
+  const fakeController = (sink: string[]) => ({
+    get desiredSize() { return 1024; },
+    enqueue(chunk: Uint8Array) { sink.push(new TextDecoder().decode(chunk)); },
+    close() { /* test double */ },
+  }) as unknown as ReadableStreamDefaultController;
+
+  const ctrlA = fakeController(receivedA);
+  const ctrlB = fakeController(receivedB);
+  const ctrlOp = fakeController(receivedOp);
+  events.registerClient(ctrlA, scopeA);
+  events.registerClient(ctrlB, scopeB);
+  events.registerClient(ctrlOp, null); // operator session: unscoped
+  try {
+    const rowA = queryOne<Record<string, unknown>>('SELECT * FROM tasks WHERE id = ?', ['task-f36-sse-a']);
+    const rowB = queryOne<Record<string, unknown>>('SELECT * FROM tasks WHERE id = ?', ['task-f36-sse-b']);
+    events.broadcast({ type: 'task_updated', payload: rowA as never });
+    events.broadcast({ type: 'task_created', payload: rowB as never });
+    events.broadcast({ type: 'task_deleted', payload: { id: 'task-f36-sse-a' } });
+
+    // A receives its own company's events (updated + deleted)...
+    assert.equal(receivedA.length, 2);
+    assert.ok(receivedA.some((raw) => raw.includes('task-f36-sse-a') && raw.includes('task_updated')));
+    assert.ok(receivedA.some((raw) => raw.includes('task_deleted')));
+    // ...and never B's bytes: neither B's task id nor B's title cross over.
+    assert.ok(!receivedA.some((raw) => raw.includes('task-f36-sse-b')));
+    assert.ok(!receivedA.some((raw) => raw.includes('F36 task task-f36-sse-b')));
+
+    // Mirror image for B.
+    assert.equal(receivedB.length, 1);
+    assert.ok(receivedB[0].includes('task-f36-sse-b'));
+    assert.ok(!receivedB.some((raw) => raw.includes('task-f36-sse-a')));
+
+    // Operator still sees everything (backward compat for the box dashboard).
+    assert.equal(receivedOp.length, 3);
+
+    // Cross-process path: every journaled task row carries the scope the
+    // stream route's poll loop filters on. B's row must be droppable by an A
+    // connection via the same connectionMayReceive predicate the route uses.
+    const journaled = queryOne<{ payload: string }>(
+      `SELECT payload FROM sse_event_log WHERE event_type = 'task_created' ORDER BY id DESC LIMIT 1`,
+    );
+    assert.ok(journaled);
+    const parsed = JSON.parse(journaled.payload) as { companyId?: string };
+    assert.equal(parsed.companyId, 'company-f36-b');
+    assert.equal(events.connectionMayReceive(scopeA, parsed.companyId ?? null), false);
+    assert.equal(events.connectionMayReceive(scopeB, parsed.companyId ?? null), true);
+    assert.equal(events.connectionMayReceive(null, parsed.companyId ?? null), true);
+
+    // Legacy unscoped events (operator-level) still fan out to everyone.
+    const beforeA = receivedA.length;
+    const beforeB = receivedB.length;
+    events.broadcast({ type: 'bug_created', payload: { title: 'operator note' } as never });
+    assert.equal(receivedA.length, beforeA + 1);
+    assert.equal(receivedB.length, beforeB + 1);
+  } finally {
+    events.unregisterClient(ctrlA);
+    events.unregisterClient(ctrlB);
+    events.unregisterClient(ctrlOp);
+  }
+});
+
 test.after(() => {
   try { closeDb(); } catch { /* already closed */ }
 });
