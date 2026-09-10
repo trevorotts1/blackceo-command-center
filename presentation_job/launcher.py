@@ -108,6 +108,21 @@ CREDIT_AUTOFAIL_CODE = "AF-CREDIT-PREFLIGHT"
 #: the pre-fix warn-and-continue behavior).
 DISPATCH_NOTIFY_REFUSED = -7
 
+#: PRES-039: dispatch() refuses when the engine compatibility preflight
+#: fails (AF-ENGINE-STALE-DUPLICATE / AF-ENGINE-CONTRACT-DRIFT) -- joins
+#: the -1..-7 refusal family. Nothing spawned. A stale PYTHONPATH duplicate
+#: or a contract-drifted copy must never be silently imported at dispatch.
+DISPATCH_ENGINE_REFUSED = -8
+
+#: CLI exit code for DISPATCH_ENGINE_REFUSED (== state.EXIT_GATE_BLOCKED:
+#: a gate refused dispatch; distinct payload, same family).
+EXIT_ENGINE_REFUSED = 3
+
+ENGINE_AUTOFAIL_CODES = (
+    "AF-ENGINE-STALE-DUPLICATE",
+    "AF-ENGINE-CONTRACT-DRIFT",
+)
+
 #: CLI exit code for DISPATCH_NOTIFY_REFUSED.
 EXIT_NOTIFY_UNCONFIGURED = 8
 
@@ -576,6 +591,29 @@ def dispatch(
         print(f"launcher: engine entry not found at {engine_entry}", file=sys.stderr)
         return -1
 
+    # PRES-039: compatibility preflight BEFORE capacity/credit/notify argv —
+    # a stale PYTHONPATH duplicate or a contract-drifted copy refuses here
+    # (AF-ENGINE-STALE-DUPLICATE / AF-ENGINE-CONTRACT-DRIFT), never dispatch.
+    try:
+        try:
+            from . import engine_origin as _engine_origin
+        except ImportError:
+            import engine_origin as _engine_origin  # direct file run
+        _pf_code, _pf_report = _engine_origin.preflight()
+        print(f"launcher: {_engine_origin.format_origin_line(_pf_report['origin'])}",
+              flush=True)
+        if _pf_code != 0:
+            print(f"launcher: REFUSING to dispatch — "
+                  f"{_pf_report.get('autofail')}: {_pf_report.get('detail')}",
+                  file=sys.stderr)
+            return DISPATCH_ENGINE_REFUSED
+    except ImportError:
+        # engine_origin module absent (pre-PRES-039 tree): record UNDETERMINED,
+        # never silently claim provenance. Dispatch proceeds — the gate it
+        # would enforce did not exist when this copy was vendored.
+        print("launcher: engine origin UNDETERMINED (engine_origin module "
+              "absent, pre-PRES-039 copy)", flush=True)
+
     run_path = Path(run_dir).expanduser().resolve()
 
     # FIX 22 NOTIFY GATE -- before the capacity probe, before argv is built,
@@ -892,6 +930,8 @@ def main(argv: Optional[list] = None) -> int:
             return EXIT_UNKNOWN_DECK_TYPE
         if rc == DISPATCH_NOTIFY_REFUSED:
             return EXIT_NOTIFY_UNCONFIGURED
+        if rc == DISPATCH_ENGINE_REFUSED:
+            return EXIT_ENGINE_REFUSED
         return 0 if rc == 0 else 1
     pid = dispatch_resume(str(run_path), background=True,
                           requested_parallel=args.requested_parallel) if args.resume else \
@@ -906,6 +946,8 @@ def main(argv: Optional[list] = None) -> int:
         return EXIT_UNKNOWN_DECK_TYPE
     if pid == DISPATCH_NOTIFY_REFUSED:
         return EXIT_NOTIFY_UNCONFIGURED
+    if pid == DISPATCH_ENGINE_REFUSED:
+        return EXIT_ENGINE_REFUSED
     return 0 if pid > 0 else 1
 
 
