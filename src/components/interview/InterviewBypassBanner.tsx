@@ -4,19 +4,36 @@ import { X } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 
-async function isInterviewComplete(): Promise<boolean> {
+/**
+ * `null` means the browser could not read the interview state. Access failures
+ * must never be presented to an owner as an incomplete interview: completion
+ * is established by the server's canonical build record, not by a failed UI
+ * status request.
+ */
+async function getInterviewCompletion(): Promise<boolean | null> {
   try {
     const r = await fetch('/api/interview/state', { cache: 'no-store' });
-    if (!r.ok) return false;
-    const d = await r.json().catch(() => ({}));
+    if (!r.ok) return null;
+    const d = await r.json().catch(() => null);
+    if (!d || typeof d !== 'object') return null;
     return d.interviewComplete === true || d.buildCompleted === true;
-  } catch { return false; }
+  } catch { return null; }
 }
 
 export default function InterviewBypassBanner() {
   const router = useRouter();
   const [visible, setVisible] = useState(false);
-  useEffect(() => { let c = false; void (async () => { const v = !(await isInterviewComplete()); if (!c) setVisible(v); })(); return () => { c = true; }; }, []);
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const completion = await getInterviewCompletion();
+      // Only a successful, explicit `false` can show this warning. A 401,
+      // timeout, or malformed response is an access problem, not evidence
+      // that someone lost their completed interview.
+      if (!cancelled) setVisible(completion === false);
+    })();
+    return () => { cancelled = true; };
+  }, []);
   if (!visible) return null;
   return (
     <div role="alert" aria-live="polite" data-walkthrough="interview-bypass-banner"
