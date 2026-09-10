@@ -31,9 +31,14 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { spawnSync } from 'node:child_process';
 import BetterSqlite3 from 'better-sqlite3';
 
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+// Repo root captured at module load — before any beforeEach mocks process.cwd()
+// to a tmpDir. Used to locate scripts/lib/build-inventory.sh for PRES-046 sealing.
+const REPO_ROOT = process.cwd();
 
 /** Create a minimal .next build tree in a temp dir. */
 function makeNextBuild(dir: string, opts: {
@@ -81,6 +86,21 @@ function makeNextBuild(dir: string, opts: {
   } else if (withManifest) {
     const manifest = { pages: {}, polyfillFiles: [], lowPriorityFiles: [] };
     fs.writeFileSync(path.join(nextDir, 'build-manifest.json'), JSON.stringify(manifest));
+  }
+
+  // PRES-046 repair: this fixture tree doubles as its own app dir (the route
+  // tests mock cwd() to tmpDir), and checkBuildContentInventory() resolves
+  // the oracle as <cwd>/scripts/lib/build-inventory.sh. Stage the REAL
+  // script plus a real seal manifest so the fail-closed build_content check
+  // greens. scripts/ is outside the canonical digest inputs, so staging it
+  // never perturbs the VERIFIED verdict. Legacy-unattested refusal stays
+  // covered by the pres046 shell suites.
+  const lib = path.join(REPO_ROOT, 'scripts', 'lib', 'build-inventory.sh');
+  if (fs.existsSync(lib)) {
+    const stagedLibDir = path.join(dir, 'scripts', 'lib');
+    fs.mkdirSync(stagedLibDir, { recursive: true });
+    fs.copyFileSync(lib, path.join(stagedLibDir, 'build-inventory.sh'));
+    spawnSync('bash', [lib, '--manifest', dir, nextDir, 'abc123test', String(Math.floor(Date.now() / 1000))], { encoding: 'utf8' });
   }
 }
 
