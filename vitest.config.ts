@@ -247,6 +247,7 @@ export default defineConfig({
     // bogus-type 400 negative control. Vitest globals, so vitest-only, never
     // the tsx --test glob (see package.json).
     'tests/unit/fix37-activity-enum.test.ts',
+    'tests/unit/rr018-external-rescue-execution-contract.test.ts',
     ],
     env: {
       NODE_ENV: 'test',

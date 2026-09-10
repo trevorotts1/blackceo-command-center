@@ -4,6 +4,11 @@ import { queryOne, getDb, run } from '@/lib/db';
 import { v4 as uuidv4 } from 'uuid';
 import { runMigrations } from '@/lib/db/migrations';
 import { createTaskCore, validateProducerPersonaBundle } from '@/lib/tasks';
+import {
+  parseRescueIngestEnvelope,
+  planRescueIngest,
+  bindRescueExecution,
+} from '@/lib/rescue/execution-contract';
 import type { PersonaBundle } from '@/lib/types';
 import { routeTask } from '@/lib/routing/department-router';
 import type { TaskPriority } from '@/lib/types';
@@ -803,6 +808,63 @@ export async function POST(request: NextRequest) {
       catch (error) { return NextResponse.json({error:'invalid_persona_bundle',message:error instanceof Error?error.message:'Invalid persona decision'}, {status:400}); }
     }
     let resolvedDepartment: string | undefined = resolvedDeptSlug;
+
+    // ── RR-018: the supported external-rescue execution contract ──────────────
+    // A rescue caller sends a `rescue_observation` block carrying the incident
+    // id and the enrollment-bound identity. CC makes its EXPLICIT
+    // observation-vs-execution choice HERE, once, before the card exists:
+    //
+    //   • an incident an external runner already holds is OBSERVED. The card is
+    //     created with dispatch_hold=1 + a structured routing_reason — the exact
+    //     state reserveExecution(), beginExecutionSend(), autoDispatchTask()
+    //     GUARD 2 and the intake-advance sweep CAS all refuse — so ingest cannot
+    //     launch a second fixer. The guarantee is those four gates, not a
+    //     policy promise this route makes about itself.
+    //   • otherwise the rescue is CC-OWNED and must carry a REAL owner: the
+    //     rescue department, or the scoped General/CEO/operator fallback when
+    //     that department is not provisioned on this box. Authorized safe work
+    //     continues under a real owner; nothing is parked under a fictional one.
+    //
+    // A body with no rescue_observation block never enters this path, so every
+    // existing ingest caller is byte-identically unaffected.
+    const rescueEnvelope = parseRescueIngestEnvelope(body as unknown as Record<string, unknown>);
+    let rescuePlan: ReturnType<typeof planRescueIngest> | null = null;
+    if (rescueEnvelope) {
+      let ccOwnerResolvable = false;
+      try {
+        // A router that cannot answer has NOT proven an owner exists — that is
+        // the fallback case, and the fallback names a real owner either way.
+        ccOwnerResolvable = !!(await routeTask({
+          title,
+          description: description ?? '',
+          priority: priority ?? 'medium',
+          company_id: ingestCompanyId,
+          workspace_id: undefined,
+        }));
+      } catch {
+        ccOwnerResolvable = false;
+      }
+      rescuePlan = planRescueIngest({
+        envelope: rescueEnvelope,
+        companyId: ingestCompanyId,
+        workspaceRows: getDb()
+          .prepare('SELECT id, slug, name FROM workspaces WHERE company_id = ? AND archived_at IS NULL')
+          .all(ingestCompanyId) as { id: string; slug: string; name: string }[],
+        externalOwnerClaimed: !!rescueEnvelope.externalOwner,
+        ccOwnerResolvable,
+      });
+      if (rescuePlan.workspaceId) workspaceId = rescuePlan.workspaceId;
+      resolvedBy = rescuePlan.resolvedBy;
+      resolvedDepartment = rescuePlan.owner.startsWith('department:')
+        ? rescuePlan.owner.slice('department:'.length)
+        : undefined;
+      routingHoldReason = rescuePlan.routingHoldReason;
+      console.log(
+        `[INGEST] RR-018 rescue ${rescueEnvelope.incidentId}: ownership=${rescuePlan.decision.ownership} ` +
+          `owner=${rescuePlan.owner} resolvedBy=${rescuePlan.resolvedBy} ` +
+          `dispatchHold=${rescuePlan.routingHoldReason ? 'YES' : 'no'}`,
+      );
+    }
     // Preserve the requested department until the scoped router commits the actual
     // fallback worker/workspace and its [catch-all] execution authorization.
 
@@ -815,7 +877,17 @@ export async function POST(request: NextRequest) {
     // box is provisioned (it is an explicit owner instruction, not forced
     // routing) and regardless of any department_slug.
     let pinnedAgentId: string | null = null;
-    if (targetAgent) {
+    if (targetAgent && rescuePlan?.decision.holdDispatch) {
+      // RR-018: this incident is OBSERVED — an external runner holds the fixer.
+      // An owner-direct pin here would hand the same incident a SECOND fixer,
+      // which is the one outcome the observation choice exists to prevent, so
+      // the pin does not apply and the reason says why rather than silently
+      // dropping it.
+      console.warn(
+        `[INGEST] RR-018: owner-direct pin "${targetAgent}" IGNORED for observed incident ` +
+          `${rescuePlan.correlation.incidentId} — an external runner already holds the fixer.`,
+      );
+    } else if (targetAgent) {
       try {
         const pin = await routeTask({
           title,
@@ -1033,6 +1105,37 @@ export async function POST(request: NextRequest) {
     }
 
     const { task, deduped } = result;
+
+    // ── RR-018: persist company / task / execution / attempt correlation ──────
+    // Bound in the SAME ingest call that created the card, so a rescue card can
+    // never exist without its correlation. bindRescueExecution runs in one
+    // transaction and re-asserts the no-dispatch hold for an observed rescue,
+    // which is exactly what keeps ingest from later becoming a second fixer.
+    // Best-effort: a correlation write failure must not lose the card, and the
+    // failure is recorded rather than swallowed silently.
+    if (rescuePlan && !deduped) {
+      try {
+        bindRescueExecution({ taskId: task.id, ...rescuePlan.correlation });
+      } catch (corrErr) {
+        console.error('[INGEST] RR-018 rescue correlation write failed (card kept):', corrErr);
+        try {
+          run(
+            `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?,?,?,?,?)`,
+            [
+              uuidv4(),
+              'rescue_correlation_write_failed',
+              task.id,
+              `RR-018: rescue correlation could not be persisted (${(corrErr as Error).message}). ` +
+                `The card exists but is NOT correlated, so it must not be treated as an observed rescue ` +
+                `until the correlation is written.`,
+              new Date().toISOString(),
+            ],
+          );
+        } catch {
+          /* best-effort — the console error above is the record that matters */
+        }
+      }
+    }
 
     // FIX 52 (migration 130) — stamp the presentation slide count onto the
     // freshly created card. Done as a follow-up UPDATE rather than inside

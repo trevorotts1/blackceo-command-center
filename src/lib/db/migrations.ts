@@ -6871,6 +6871,124 @@ export const migrations: Migration[] = [
     },
   },
 
+  // RR-018 — the supported external-rescue execution contract. Additive only:
+  // three new tables, no existing column is altered or dropped, so no current
+  // guard changes behaviour and the U052 write-scope census is untouched (no
+  // route.ts is added or modified).
+  //
+  // rescue_execution_links persists the RR-018 correlation — company / task /
+  // execution / attempt identity — plus the EXPLICIT ownership decision
+  // (external_observed | cc_owned). An `external_observed` link is written
+  // together with tasks.dispatch_hold=1, which is the flag reserveExecution(),
+  // beginExecutionSend(), autoDispatchTask() GUARD 2 and the intake-advance
+  // sweep CAS already refuse on: ingest therefore cannot launch a second fixer.
+  //
+  // `enrollment_id` is the enrollment-bound identity. CC holds no enrollment
+  // table of its own; this column stores the identity the caller proved (the
+  // FLEET tenant/enrollment key), which is exactly the key RR-020's projection
+  // policy permits and the only one that may scope a client view. Display
+  // names and caller return addresses are NEVER written here — they cannot
+  // authorize or correlate work.
+  {
+    id: '142',
+    name: 'rescue_execution_contract_correlation',
+    up: (db) => {
+      db.exec(`CREATE TABLE IF NOT EXISTS rescue_execution_links (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        company_id TEXT NOT NULL,
+        enrollment_id TEXT NOT NULL,
+        runtime_id TEXT,
+        incident_id TEXT NOT NULL,
+        execution_ownership TEXT NOT NULL CHECK (execution_ownership IN ('external_observed','cc_owned')),
+        owner TEXT NOT NULL,
+        requested_department TEXT,
+        schema_version INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )`);
+      db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_rescue_links_task
+        ON rescue_execution_links(task_id)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_rescue_links_incident
+        ON rescue_execution_links(company_id, incident_id)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_rescue_links_enrollment
+        ON rescue_execution_links(enrollment_id)`);
+
+      // SPEC §2 milestones stay SEPARATE: transport delivery, actual repair,
+      // symptom verification, independent QC, client result and board
+      // projection each get their own row and their own evidence digest.
+      // before_state / after_state persist the transition the milestone
+      // describes, so a projector reads a recorded fact, never an inference.
+      db.exec(`CREATE TABLE IF NOT EXISTS rescue_execution_milestones (
+        id TEXT PRIMARY KEY,
+        link_id TEXT NOT NULL REFERENCES rescue_execution_links(id) ON DELETE CASCADE,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        milestone TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('pending','satisfied','failed')),
+        before_state TEXT,
+        after_state TEXT,
+        evidence_kind TEXT,
+        evidence_digest TEXT,
+        evidence_ref TEXT,
+        qc_actor TEXT,
+        qc_revision INTEGER,
+        actor TEXT NOT NULL,
+        schema_version INTEGER NOT NULL DEFAULT 1,
+        detail TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )`);
+      db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_rescue_milestones_link_milestone
+        ON rescue_execution_milestones(link_id, milestone)`);
+
+      // Structured blockers carry REASON + OWNER + REQUESTED ACTION. A machine
+      // fault is stored with recoverable=1, a bounded next_retry_at and NO
+      // human owner — it is recoverable work and must never become a fictional
+      // human blocker. `blocked_on_human` is non-null only for a genuine
+      // decision/approval/credential need, and that path carries a non-blank
+      // `ask` (the same invariant migration 104's triggers enforce on tasks).
+      db.exec(`CREATE TABLE IF NOT EXISTS rescue_execution_blockers (
+        id TEXT PRIMARY KEY,
+        link_id TEXT NOT NULL REFERENCES rescue_execution_links(id) ON DELETE CASCADE,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        blocker_class TEXT NOT NULL CHECK (blocker_class IN ('machine','human')),
+        reason TEXT NOT NULL,
+        owner TEXT NOT NULL,
+        requested_action TEXT NOT NULL,
+        attempt INTEGER NOT NULL DEFAULT 1,
+        next_retry_at TEXT,
+        recoverable INTEGER NOT NULL DEFAULT 0,
+        blocked_on_human TEXT CHECK (blocked_on_human IS NULL OR blocked_on_human IN ('owner','operator')),
+        ask TEXT,
+        actor TEXT,
+        schema_version INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        resolved_at TEXT
+      )`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_rescue_blockers_task
+        ON rescue_execution_blockers(task_id, resolved_at)`);
+
+      // Belt-and-braces mirror of the module rule: a row that names a human
+      // blocker without a real, non-blank instruction is refused at the DB
+      // level too, so no future writer can fabricate one.
+      db.exec(`CREATE TRIGGER IF NOT EXISTS trg_rescue_blocker_ask_required
+        BEFORE INSERT ON rescue_execution_blockers
+        FOR EACH ROW WHEN NEW.blocked_on_human IS NOT NULL
+          AND (NEW.ask IS NULL OR length(trim(NEW.ask)) = 0)
+        BEGIN
+          SELECT RAISE(ABORT, 'RR-018: a human blocker requires a non-blank ask (real requested action)');
+        END`);
+      db.exec(`CREATE TRIGGER IF NOT EXISTS trg_rescue_blocker_ask_required_update
+        BEFORE UPDATE OF blocked_on_human, ask ON rescue_execution_blockers
+        FOR EACH ROW WHEN NEW.blocked_on_human IS NOT NULL
+          AND (NEW.ask IS NULL OR length(trim(NEW.ask)) = 0)
+        BEGIN
+          SELECT RAISE(ABORT, 'RR-018: a human blocker requires a non-blank ask (real requested action)');
+        END`);
+    },
+  },
+
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner
