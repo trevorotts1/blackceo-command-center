@@ -1,6 +1,8 @@
 # Command Center
 
-**Current release: v7.2.2 (2026-09-09)** — Rescue Rangers RR-020 projection identity. Adds the pure projection identity module (`src/lib/rescue/incident-identity.ts`) with runtime incident ids, per-person budget versus per-resource dedup split, and the alias-suggestion rule, plus its 7-test battery (`tests/unit/rr020-incident-identity.test.ts`). Retains v7.2.1 RR-017 integration contract: public-safe dependency and ownership contract (`docs/RESCUE-INTEGRATION.md`), receiver, poller, and propagate defaults at the canonical `rr-v2-intake` webhook while keeping the retired Relay path tombstoned with single-writer rollback overrides, and the RR-017 contract integration gate (`tests/unit/rr017-rescue-contract-integration.test.ts`). Retains v7.2.0 per-account publish plans, durable publish executor, Ultra orchestrator and media player. The Marketing publish button derives its platforms from the per-account plan and fails closed rather than POSTing empty platforms (F06); a durable publish-queue consumer executes queued posts with atomic leases, attempt caps, idempotency keys, overdue surfacing and crash resume (F03); a dependency-aware Ultra orchestrator coordinates the pipeline with provider semaphores honoring the Ollama Cloud 3/10 limits, a cumulative cycle budget and durable lease fencing via social_steps/social_provider_leases (F33); a company-bound media asset registry with renewable preview tokens and an HTML player stores generated images (F38). Migrations 136, 137 and 138 are additive and idempotent. The v7.1.6 company-bound publish queue and strict model selection work remains included, as does the v7.1.5 interview resume work: 24-hour private entry links, bounded 30-day company-bound browser sessions, operator-triggered renewal with delivery safeguards, and legacy sign-in grants requiring a fresh link after upgrade. The portable installer companion remains tracked in [onboarding PR #1043](https://github.com/trevorotts1/openclaw-onboarding/pull/1043). See [interview launch](docs/interview-launch-readiness.md).
+**Current release: v7.3.2 (2026-09-11)** — Deploy guards stop vetoing their own builds and bricking client restarts. `config/` is no longer hashed into the PRES-046 compile-affecting inventory: it is runtime data the app itself rewrites (logo, company config, department edits) and the onboarding orchestrator syncs after deploy, so hashing it made ordinary client use invalidate the build attestation and `cc-start.sh` then refused to boot on the next `pm2` restart. `scripts/atomic-deploy.sh` now snapshots and restores the `tsconfig.json` `include` edit that `next build` makes for its temp dist dir, so the frozen-source proof no longer rejects every build atomic-deploy produces. See [build and restart guards](#build-and-restart-guards--v732) and [CHANGELOG.md](CHANGELOG.md).
+
+**Previous: v7.2.2 (2026-09-09)** — Rescue Rangers RR-020 projection identity. Adds the pure projection identity module (`src/lib/rescue/incident-identity.ts`) with runtime incident ids, per-person budget versus per-resource dedup split, and the alias-suggestion rule, plus its 7-test battery (`tests/unit/rr020-incident-identity.test.ts`). Retains v7.2.1 RR-017 integration contract: public-safe dependency and ownership contract (`docs/RESCUE-INTEGRATION.md`), receiver, poller, and propagate defaults at the canonical `rr-v2-intake` webhook while keeping the retired Relay path tombstoned with single-writer rollback overrides, and the RR-017 contract integration gate (`tests/unit/rr017-rescue-contract-integration.test.ts`). Retains v7.2.0 per-account publish plans, durable publish executor, Ultra orchestrator and media player. The Marketing publish button derives its platforms from the per-account plan and fails closed rather than POSTing empty platforms (F06); a durable publish-queue consumer executes queued posts with atomic leases, attempt caps, idempotency keys, overdue surfacing and crash resume (F03); a dependency-aware Ultra orchestrator coordinates the pipeline with provider semaphores honoring the Ollama Cloud 3/10 limits, a cumulative cycle budget and durable lease fencing via social_steps/social_provider_leases (F33); a company-bound media asset registry with renewable preview tokens and an HTML player stores generated images (F38). Migrations 136, 137 and 138 are additive and idempotent. The v7.1.6 company-bound publish queue and strict model selection work remains included, as does the v7.1.5 interview resume work: 24-hour private entry links, bounded 30-day company-bound browser sessions, operator-triggered renewal with delivery safeguards, and legacy sign-in grants requiring a fresh link after upgrade. The portable installer companion remains tracked in [onboarding PR #1043](https://github.com/trevorotts1/openclaw-onboarding/pull/1043). See [interview launch](docs/interview-launch-readiness.md).
 
 The v7.1.0 dependency security remediation remains included; see the [security notes](docs/dependency-security-2026-09-05.md).
 
@@ -8,7 +10,7 @@ Publishing this code does not deploy or verify it on client installations. Befor
 
 ## Historical release highlights
 
-The highlights below describe earlier releases. The current release is v7.2.2; the complete history is in [CHANGELOG.md](CHANGELOG.md).
+The highlights below describe earlier releases. The current release is v7.3.2; the complete history is in [CHANGELOG.md](CHANGELOG.md).
 
 > **v4.63.0 (2026-07-06)** is a full dashboard UX/design + functionality pass. **Kanban**: drag/move errors now surface in a toast and revert instead of silently snapping back; the **Blocked** column is finally reachable (a modal collects the required reason/audience/ask and persists them); a touch-friendly "Move task" menu makes the board usable on phones/tablets; real-time deletes, per-column create, a board search, empty-column hints, and a 60s stale-board refetch land too. The task **DELETE 500** (blocked by `persona_selection_log`/`persona_performance` FKs) is fixed, and UI-created tasks keep their department. **Settings** stop lying: Intelligence overrides can be cleared ("Reset to inherited"), lock (423) holders are named, provider badges read "Key present" (not "Configured"), the settings hub drops dead localStorage-only fields, and Company Settings reads brand state back + warns visibly when live branding isn't applied. **Models engine**: the Ollama-Cloud cascade actually selects (`tierOf` now recognizes `ollama-cloud/`), operator role/department model overrides now win over the auto-selector, and a hardcoded Anthropic id was removed from the Header (models load dynamically). **Health-rating**: no more fabricated `72`s or hardcoded `B` grades — the pulse strip, `resolve-department`, and CEO dashboard all use the real `grading.ts` engine and show "Insufficient data" honestly. **Responsive**: a real mobile bottom-nav, an app-wide Cmd+K navigate group, a responsive CEO-board header (with the Agents-tab 404 fixed), an AA-compliant muted-text token, and verified no-horizontal-overflow at mobile/tablet/desktop. A fresh-DB seed crash (`SQLITE_CONSTRAINT_FOREIGNKEY`) and an invalid-priority demo seed are also fixed. No new dependencies; no Anthropic ids in client-facing paths. See `CHANGELOG.md` for the full v4.63.0 entry.
 >
@@ -267,3 +269,39 @@ new worker's operation. Completing an agent task does not prove a social post
 was published: the client sees that publication verification is required until
 there is actual provider evidence. Scheduled readback tasks keep verification owned, retry within limits, and escalate overdue work without reposting. Browser acceptance covers draft resume and
 company/week isolation using an isolated database and disabled background jobs.
+
+### Build and restart guards — v7.3.2
+
+Two guards protect the served bundle: `scripts/atomic-deploy.sh` proves the
+source did not change while compiling (PRES-046 "frozen-source"), and
+`scripts/cc-start.sh` refuses to boot a `.next` that does not match the checked-out
+source. Both read one shared content inventory, `scripts/lib/build-inventory.sh`.
+
+**What is in the inventory:** `src/`, `public/`, `package.json`,
+`package-lock.json`, `next.config.*`, `tsconfig.json`, `tailwind.config.ts`,
+`postcss.config.mjs`, `middleware.ts`.
+
+**What is deliberately NOT:** `config/`. It is runtime data — nothing under
+`src/` imports it, and the app rewrites it during normal operation (a client
+saving a logo, editing company config, or changing a department), as does the
+onboarding orchestrator's post-deploy department sync. While it was hashed, any
+of those writes permanently invalidated the attestation and the box then refused
+to start on its next `pm2` restart, with no code change involved. Keep runtime
+data out of this digest.
+
+**If a box reports `verdict=MISMATCH` and will not start:** the build and the
+working tree genuinely disagree. Rebuild from the intact tree rather than
+reverting local work or deleting `.next`:
+
+```bash
+bash scripts/atomic-deploy.sh --app-dir /abs/path/command-center \
+  --pm2-app blackceo-command-center --port 4000 \
+  --public-url https://<their-verified-host>
+```
+
+Check the current verdict at any time with
+`bash scripts/lib/build-inventory.sh --verify "$PWD"`. Pass `--pm2-app` and
+`--port` explicitly: `ecosystem.cc-prod.config.cjs` otherwise captures pm2-app
+resolution as `cc-prod`. A `HEALTH CHECK UNKNOWN (exit 3)` outcome is not a
+rollback — exit 3 never rolls back, and a missing `--public-url` alone reports
+UNKNOWN because the Cloudflare probe has nothing to check.

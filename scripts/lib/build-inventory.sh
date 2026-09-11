@@ -113,11 +113,24 @@ _ccbi_sha256_file() {
 
 # ── inventory inputs ─────────────────────────────────────────────────────────
 # Canonical compile-affecting input set. Shared with the onboarding freshness
-# helper's input list (src public config + lockfile + ts/build configs) so
+# helper's input list (src public + lockfile + ts/build configs) so
 # build, startup, health and onboarding refresh all answer the same question.
 # package-lock.json is content-hashed → dependency identity. The sanitized
 # build-config digest covers runtime identity (node version) — see below.
-_CCBI_TOPLEVEL_INPUTS="src public config package.json package-lock.json next.config.mjs next.config.js next.config.ts tsconfig.json tailwind.config.ts postcss.config.mjs middleware.ts"
+#
+# `config/` IS DELIBERATELY EXCLUDED (fixed 2026-09-11). It is RUNTIME DATA, not
+# a compile input: nothing under src/ imports or requires a config/ file, so its
+# contents never reach the bundle. It IS, however, written during normal
+# operation — by the app itself (src/app/api/company/config/route.ts,
+# src/app/api/logo/route.ts, src/lib/routing/departments.config.ts) and by the
+# onboarding orchestrator's post-deploy department sync. While config/ was
+# hashed here, any of those ordinary writes permanently invalidated the build
+# attestation, and cc-start.sh's freshness guard then REFUSED TO BOOT the app on
+# the next pm2 restart — a client dashboard that had been serving fine for days
+# would die on its next restart with verdict=MISMATCH and no code change at all.
+# A client changing their logo must never brick their Command Center. Keep
+# runtime data OUT of this digest; it attests compiled bytes vs compiled source.
+_CCBI_TOPLEVEL_INPUTS="src public package.json package-lock.json next.config.mjs next.config.js next.config.ts tsconfig.json tailwind.config.ts postcss.config.mjs middleware.ts"
 
 # _ccbi_inventory_relpaths <dir> — print \n-separated, LC_ALL=C-sorted relative
 # paths of every compile-affecting input file. Deterministic across machines.
@@ -136,15 +149,15 @@ _ccbi_inventory_relpaths() {
       for p in $_CCBI_TOPLEVEL_INPUTS; do
         if [[ -f "$p" ]]; then printf '%s\0' "$p"; fi
       done
-      # `|| true` on the find: a MISSING src/public/config directory makes find
+      # `|| true` on the find: a MISSING src/public directory makes find
       # exit 1 ("No such file or directory" on the absent operand). Under
       # `set -o pipefail` that would fail the whole enumeration even though
       # the present directories enumerated fine. Partial presence is normal
       # (a bare fixture has only src/); absent EVERYWHERE yields an empty
       # stream which still hashes deterministically.
+      # config/ is intentionally NOT enumerated — see _CCBI_TOPLEVEL_INPUTS.
       { find src -type f -print0 2>/dev/null || true; } \
-        && { find public -type f -print0 2>/dev/null || true; } \
-        && { find config -type f -print0 2>/dev/null || true; } || true
+        && { find public -type f -print0 2>/dev/null || true; } || true
     } | LC_ALL=C sort -z -u | tr '\0' '\n'
   )
 }

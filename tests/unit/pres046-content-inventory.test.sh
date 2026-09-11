@@ -163,14 +163,32 @@ else
   fail "T8: truncated manifest must be rc=3, got rc=$T8_RC $T8_JSON"
 fi
 
-# ── T10: obsolete config inventory fails ─────────────────────────────────────
+# ── T10: obsolete inventory fails when a compile-affecting input appears ─────
 T10_DIR="$(make_app t10)"; seal_app "$T10_DIR"
-printf 'module.exports = { y: 2 };\n' > "$T10_DIR/config/new-config.mjs"   # input list grew
+printf 'export const b = 2;\n' > "$T10_DIR/src/new-module.ts"   # input list grew
 T10_JSON="$(bash "$INV_LIB" --verify "$T10_DIR")"; T10_RC=$?
 if [[ "$T10_RC" -eq 5 && "$T10_JSON" == *'"verdict":"OBSOLETE_INVENTORY"'* ]]; then
-  pass "T10: obsolete inventory (new compile-affecting config after build) → OBSOLETE_INVENTORY (rc=5)"
+  pass "T10: obsolete inventory (new compile-affecting source after build) → OBSOLETE_INVENTORY (rc=5)"
 else
   fail "T10: obsolete inventory must be rc=5, got rc=$T10_RC $T10_JSON"
+fi
+
+# ── T10b: config/ is RUNTIME DATA and must NEVER invalidate the build ────────
+# Regression guard (2026-09-11). config/ used to be hashed into the compile
+# inventory, so the app's own ordinary writes to it — a client saving a logo
+# (src/app/api/logo/route.ts), company config (src/app/api/company/config/
+# route.ts), a department edit (src/lib/routing/departments.config.ts) — or the
+# onboarding orchestrator's post-deploy department sync flipped the verdict to
+# MISMATCH, and cc-start.sh then REFUSED TO BOOT on the next pm2 restart. A
+# client changing their logo must never brick their Command Center.
+T10B_DIR="$(make_app t10b)"; seal_app "$T10B_DIR"
+printf 'module.exports = { y: 2 };\n' > "$T10B_DIR/config/settings.js"      # existing file changed
+printf 'module.exports = { z: 3 };\n' > "$T10B_DIR/config/new-config.mjs"  # new file added
+T10B_JSON="$(bash "$INV_LIB" --verify "$T10B_DIR")"; T10B_RC=$?
+if [[ "$T10B_RC" -eq 0 && "$T10B_JSON" == *'"verdict":"VERIFIED"'* ]]; then
+  pass "T10b: config/ writes after the build stay VERIFIED (runtime data, not a compile input)"
+else
+  fail "T10b: config/ must not affect the build attestation, got rc=$T10B_RC $T10B_JSON"
 fi
 
 # ── T11: unattested prior + receipt binding this source tree → degraded OK ───
@@ -209,14 +227,16 @@ else
 fi
 # Path B (onboarding tier-3 / cc_ensure_fresh_build): its build-input list must
 # cover the same canonical set as _CCBI_TOPLEVEL_INPUTS (source of truth in
-# run-full-install.sh: src public config + lockfile + ts/build configs).
+# run-full-install.sh: src public + lockfile + ts/build configs).
+# NOTE: `config` is deliberately absent from both lists since 2026-09-11 — it is
+# runtime data the app itself rewrites, never a compile input. See T10b.
 ONB_RUN_FULL=""
 for c in "$REPO_ROOT/../openclaw-onboarding/32-command-center-setup/scripts/run-full-install.sh" \
          "${HOME}/openclaw-onboarding/32-command-center-setup/scripts/run-full-install.sh"; do
   [[ -f "$c" ]] && { ONB_RUN_FULL="$c"; break; }
 done
 if [[ -n "$ONB_RUN_FULL" ]]; then
-  for _req in "public" "config" "package-lock.json" "tsconfig.json" "tailwind.config.ts" "postcss.config.mjs"; do
+  for _req in "public" "package-lock.json" "tsconfig.json" "tailwind.config.ts" "postcss.config.mjs"; do
     if grep -q "$_req" "$ONB_RUN_FULL"; then
       pass "T12b: onboarding freshness helper covers canonical input '$_req'"
     else
