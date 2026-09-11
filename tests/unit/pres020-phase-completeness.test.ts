@@ -22,6 +22,7 @@ import './_isolated-db';
 import { describe, it, expect, beforeAll } from 'vitest';
 import { NextRequest } from 'next/server';
 import { getDb } from '../../src/lib/db';
+import { resolveActiveCompanyId } from '../../src/lib/company';
 import {
   computePhaseProgress,
   phaseElapsedSeconds,
@@ -218,10 +219,14 @@ describe('PRES-020 — route emits honest percent/units/receipts', () => {
   beforeAll(() => {
     const db = getDb();
     const now = new Date().toISOString();
+    // PRES-009 requires durable ownership, including for presentation reads.
+    const workspaceId = `${TASK_ID}-workspace`;
+    db.prepare('INSERT INTO workspaces (id, name, slug, company_id) VALUES (?, ?, ?, ?)')
+      .run(workspaceId, 'PRES-020 fixture', workspaceId, resolveActiveCompanyId(db));
     db.prepare(
       `INSERT INTO tasks (id, title, status, department, workspace_id, created_at, updated_at)
-       VALUES (?, ?, 'in_progress', 'dept-presentations', NULL, ?, ?)`,
-    ).run(TASK_ID, 'PRES-020 proof run', now, now);
+       VALUES (?, ?, 'in_progress', 'dept-presentations', ?, ?, ?)`,
+    ).run(TASK_ID, 'PRES-020 proof run', workspaceId, now, now);
     const put = db.prepare(
       `INSERT INTO task_activities (id, task_id, activity_type, message, metadata)
        VALUES (?, ?, ?, ?, ?)`,

@@ -29,6 +29,7 @@ import './_isolated-db';
 import { describe, it, expect, beforeAll } from 'vitest';
 import { NextRequest } from 'next/server';
 import { getDb } from '../../src/lib/db';
+import { resolveActiveCompanyId } from '../../src/lib/company';
 
 const RUN = `p21-${Date.now().toString(36)}`;
 const PARENT_ID = `p21-parent-${RUN}`;
@@ -44,10 +45,14 @@ function insertTask(
   },
 ): void {
   const now = new Date().toISOString();
+  // PRES-009 requires durable ownership; NULL workspace alone proves none.
+  const workspaceId = `p21-workspace-${RUN}`;
+  db.prepare('INSERT OR IGNORE INTO workspaces (id, name, slug, company_id) VALUES (?, ?, ?, ?)')
+    .run(workspaceId, 'PRES-021 fixture', workspaceId, resolveActiveCompanyId(db));
   db.prepare(
     `INSERT INTO tasks (id, title, description, status, priority, workspace_id, business_id, department, source, parent_task_id, created_at, updated_at)
-     VALUES (?, ?, ?, ?, 'medium', NULL, 'default', 'presentations', 'build_deck', ?, ?, ?)`,
-  ).run(row.id, row.title, row.extra ?? 'Deck build.', row.status, row.parentId ?? null, now, now);
+     VALUES (?, ?, ?, ?, 'medium', ?, 'default', 'presentations', 'build_deck', ?, ?, ?)`,
+  ).run(row.id, row.title, row.extra ?? 'Deck build.', row.status, workspaceId, row.parentId ?? null, now, now);
 }
 
 async function getChildren(parentId: string): Promise<Response> {

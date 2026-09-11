@@ -235,6 +235,13 @@ jobs:
           # No DB or server needed — tests use mocks and temp dirs
           DATABASE_PATH: ""
 
+      # These Vitest suites are intentionally excluded from the Node runner.
+      - name: PRES-020 and PRES-021 presentation integration tests
+        run: npx vitest run --config vitest.pres020-021.config.ts
+        env:
+          NODE_ENV: test
+          DATABASE_PATH: ""
+
       - name: F3.1 no-naked-dispatch contract test (persona invariant)
         run: bash tests/unit/no-naked-dispatch.test.sh
         env:
