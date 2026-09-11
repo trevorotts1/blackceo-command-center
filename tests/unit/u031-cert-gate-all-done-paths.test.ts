@@ -12,6 +12,9 @@ import './_isolated-db';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { v4 as uuidv4 } from 'uuid';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { run, getDb } from '../../src/lib/db';
 import { runMigrations } from '../../src/lib/db/migrations';
 import { transition, TransitionError } from '../../src/lib/task-lifecycle';
@@ -19,6 +22,10 @@ import {
   requiresRegisteredCertificate,
   evaluatePresentationsDoneGate,
 } from '../../src/lib/presentations-cert-gate';
+import {
+  registerVerifiedReceipt,
+  getReceiptHistory,
+} from '../../src/lib/presentation-proof-registry';
 
 // ── Pure-function tests (no DB) ───────────────────────────────────────────
 
@@ -141,6 +148,23 @@ function insertTask(opts: {
 }
 
 function insertDeliverable(taskId: string): void {
+  // PRES-022: proof registration requires a verified bundle artifact — seed a
+  // real PK-headered deck file so the registry's recomputed proof can pass.
+  // (The url row stays as the non-bundle evidence-bearing row the original
+  // helper covered.)
+  const deckPath = path.join(
+    fs.mkdtempSync(path.join(os.tmpdir(), 'u031-deck-')),
+    'U031-DECK-FINAL.pptx',
+  );
+  fs.writeFileSync(
+    deckPath,
+    Buffer.concat([Buffer.from('PK\x03\x04', 'binary'), Buffer.alloc(1_100_000, 0x41)]),
+  );
+  run(
+    'INSERT INTO task_deliverables (id, task_id, deliverable_type, title, path, created_at) ' +
+    "VALUES (?, ?, 'file', 'assembled deck', ?, ?)",
+    ['dfile-' + taskId + '-' + uuidv4().slice(0, 8), taskId, deckPath, nowISO()],
+  );
   run(
     'INSERT INTO task_deliverables (id, task_id, deliverable_type, title, path, created_at) ' +
     "VALUES (?, ?, 'url', 'probe', 'https://example.invalid/p', ?)",
@@ -172,15 +196,103 @@ test('DB: operatorOverride does NOT waive the certificate gate', async () => {
   }
 });
 
-test('DB: presentations task with stored cert transitions successfully', async () => {
+test('DB: presentations task with stored cert + VERIFIED receipt transitions successfully', async () => {
   const id = insertTask({
     department: 'presentations',
     status: 'review',
     processCertificateSha: 'a'.repeat(64),
   });
   insertDeliverable(id);
+  // PRES-022: a stored bare sha is only an identifier. The transition also
+  // requires an ACTIVE VERIFIED receipt — register one through the registry
+  // (server-recomputed path; the QC receipt is engine-trusted only, so seed
+  // the qc_review event the registry reads).
+  run(
+    `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, 'qc_review', ?, ?, ?)`,
+    ['u031-qc-' + uuidv4(), id, '[QC-AUTO] Score: 9.0/10 PASS — registry test receipt', nowISO()],
+  );
+  const reg = registerVerifiedReceipt({ taskId: id, attempt: 1 });
+  assert.equal(reg.ok, true, `receipt registration failed: ${reg.error}`);
   const result = await transition(id, 'done', { actor: 'qc' });
   assert.equal(result.status, 'done');
+});
+
+test('DB: presentations task with a stored BARE sha and NO receipt is refused (PRES-022)', async () => {
+  const id = insertTask({
+    department: 'presentations',
+    status: 'review',
+    processCertificateSha: 'b'.repeat(64),
+  });
+  insertDeliverable(id);
+  try {
+    await transition(id, 'done', { actor: 'qc' });
+    assert.fail('Expected TransitionError: a bare sha256 no longer completes a presentations task');
+  } catch (e: any) {
+    assert.ok(e instanceof TransitionError);
+    assert.equal(e.code, 'PRECONDITION_PROCESS_CERTIFICATE');
+    assert.match(e.message, /VERIFIED completion proof/);
+  }
+});
+
+test('DB: repaired deck registers FRESH proof under a NEW attempt and completes (repair no deadlock)', async () => {
+  const id = insertTask({
+    department: 'presentations',
+    status: 'review',
+    processCertificateSha: 'c'.repeat(64),
+  });
+  insertDeliverable(id);
+  run(
+    `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, 'qc_review', ?, ?, ?)`,
+    ['u031-qc1-' + uuidv4(), id, '[QC-AUTO] Score: 9.0/10 PASS — first receipt', nowISO()],
+  );
+  const r1 = registerVerifiedReceipt({ taskId: id, attempt: 1 });
+  assert.equal(r1.ok, true);
+  // Repair: new proof under attempt 2 — the prior approval is invalidated,
+  // history retained, and the task can complete on the fresh revision.
+  const r2 = registerVerifiedReceipt({ taskId: id, attempt: 2 });
+  assert.equal(r2.ok, true, `repair registration failed: ${r2.error}`);
+  const history = getReceiptHistory(id);
+  assert.equal(history.filter((h) => h.status === 'invalidated').length, 1, 'prior approval must be invalidated, not deleted');
+  assert.equal(history.filter((h) => h.status === 'active').length, 1, 'exactly one active receipt');
+  const result = await transition(id, 'done', { actor: 'qc' });
+  assert.equal(result.status, 'done');
+});
+
+test('DB: STALE worker cannot re-register a superseded revision (PRES-022 CAS)', async () => {
+  const id = insertTask({
+    department: 'presentations',
+    status: 'review',
+    processCertificateSha: null,
+  });
+  insertDeliverable(id);
+  run(
+    `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, 'qc_review', ?, ?, ?)`,
+    ['u031-qcs-' + uuidv4(), id, '[QC-AUTO] Score: 9.0/10 PASS — stale-worker receipt', nowISO()],
+  );
+  const r2 = registerVerifiedReceipt({ taskId: id, attempt: 2 });
+  assert.equal(r2.ok, true);
+  const stale = registerVerifiedReceipt({ taskId: id, attempt: 1 });
+  assert.equal(stale.ok, false, 'a stale worker must not replace newer proof');
+  assert.equal(stale.code, 'stale_revision');
+});
+
+test('DB: random 64-hex presented at done with NO receipt never registers (identifier is not proof)', async () => {
+  const id = insertTask({
+    department: 'presentations',
+    status: 'review',
+    processCertificateSha: null,
+  });
+  insertDeliverable(id);
+  // The PATCH route's presented-cert persistence path writes the anti-spoof
+  // slot, but the registry still holds NO receipt: the transition must refuse.
+  run('UPDATE tasks SET process_certificate_sha = ? WHERE id = ?', ['d'.repeat(64), id]);
+  try {
+    await transition(id, 'done', { actor: 'qc' });
+    assert.fail('Expected TransitionError');
+  } catch (e: any) {
+    assert.ok(e instanceof TransitionError);
+    assert.equal(e.code, 'PRECONDITION_PROCESS_CERTIFICATE');
+  }
 });
 
 test('DB: marketing task with no cert transitions successfully', async () => {

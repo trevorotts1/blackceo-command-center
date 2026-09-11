@@ -72,6 +72,7 @@ import path from 'node:path';
 import { run, queryOne, queryAll, getDb } from '../../src/lib/db';
 import { runQCOnReview } from '../../src/lib/qc-scorer';
 import { evaluatePresentationsDoneGate } from '../../src/lib/presentations-cert-gate';
+import { registerVerifiedReceipt } from '../../src/lib/presentation-proof-registry';
 
 const db = getDb(); // applies the full migration chain on the throwaway DB
 
@@ -219,6 +220,17 @@ test('FIX 7 full path: engine parent card reaches done via runQCOnReview with re
   const id = seedDeckParent({ cert: SHA_A });
   const { cleanup } = seedRunDirWithArtifacts(id, 12);
   try {
+    // PRES-022: promotion now requires the VERIFIED proof (active receipt) in
+    // addition to the registered identifier — register one for this revision.
+    // The registry's trusted-QC leg reads the qc_review event trail, so seed
+    // the engine-scorer receipt event the same way the real scorer emits it.
+    run(
+      `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, 'qc_review', ?, ?, ?)`,
+      [`fix7-qc-${Date.now()}`, id, '[QC-AUTO] Score: 10.0/10 PASS — FIX 7 fixture receipt', new Date().toISOString()],
+    );
+    const reg = registerVerifiedReceipt({ taskId: id, attempt: 1 });
+    assert.ok(reg.ok, `receipt registration failed: ${reg.error}`);
+    run('UPDATE tasks SET process_certificate_sha = ? WHERE id = ?', [reg.receipt!.receipt_sha256, id]);
     assert.equal(taskStatus(id), 'review', 'fixture: card starts in review (engine close landed)');
 
     const result = await runQCOnReview(id);
@@ -257,9 +269,14 @@ test('FIX 7 full path: engine parent card reaches done via runQCOnReview with re
 });
 
 // ============================================================================
-// (2) PASS but NO registered certificate → HELD in review (fail-closed).
+// (2) PASS with NO pre-registered certificate → scorer BOOTSTRAPS proof and
+//     promotes (QC-SONNET-R1); PASS with NO bundle evidence → HELD in review.
+//     (Pre-PRES-022 this held on a missing identifier; under the registry the
+//     trusted scorer path registers the recomputed proof itself — a stored sha
+//     alone was never the proof. What still holds: a pass with nothing
+//     verifiable behind it.)
 // ============================================================================
-test('FIX 7 hold: checklist PASS without a registered certificate HOLDS the card in review', async () => {
+test('FIX 7 bootstrap: checklist PASS with no pre-registered certificate registers proof and reaches done', async () => {
   const id = seedDeckParent({ cert: null });
   const { cleanup } = seedRunDirWithArtifacts(id, 12);
   try {
@@ -267,17 +284,27 @@ test('FIX 7 hold: checklist PASS without a registered certificate HOLDS the card
     assert.ok(result?.pass, 'the checklist itself passes (artifact path is sound)');
     assert.equal(
       taskStatus(id),
-      'review',
-      'no registered certificate ⇒ the card is HELD in review, never silently promoted',
+      'done',
+      'scorer bootstrap (verdict event + recomputed proof) promotes a sound deck with no pre-registered certificate',
     );
     const qcEvents = eventsFor(id, 'qc_review').map((e) => e.message).join('\n');
-    assert.match(
-      qcEvents,
-      /PASS but held in review.*requires a registered process_certificate_sha/,
-      'the hold event names the missing registered certificate',
-    );
+    assert.match(qcEvents, /FIX 7 deterministic artifact checklist PASS/);
   } finally {
     cleanup();
+  }
+});
+
+test('FIX 7 hold: checklist PASS with no verifiable bundle evidence HOLDS the card in review', async () => {
+  const id = seedDeckParent({ cert: null });
+  try {
+    const result = await runQCOnReview(id);
+    assert.ok(result, 'scorer returns a verdict');
+    assert.equal(result?.pass, false, 'no reachable artifact ⇒ checklist FAILS');
+    assert.equal(taskStatus(id), 'backlog', 'a no-evidence parent never stays parked in review');
+    const qcEvents = eventsFor(id, 'qc_review').map((e) => e.message).join('\n');
+    assert.match(qcEvents, /\[QC-DECK-NO-EVIDENCE\]/);
+  } finally {
+    // nothing to clean
   }
 });
 

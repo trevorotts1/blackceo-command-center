@@ -125,6 +125,21 @@ export async function GET(request: NextRequest, props: { params: Promise<{ taskI
     // ── Resolve the run_ids that belong to this task ─────────────────────────
     const columns = stageTimingsColumns(db);
     const hasTaskIdColumn = columns.has('task_id');
+    // PRES-037 — expose the producer event identity + ACK state + timing
+    // split when the box carries migration 141. Cooperative: absent columns
+    // simply omit the fields (undefined), never 500.
+    const hasEventKeys = columns.has('event_id') && columns.has('attempt_id')
+      && columns.has('sequence') && columns.has('event_hash');
+    const hasSplit = columns.has('provider_s') && columns.has('queue_s') && columns.has('qc_s');
+    const hasAcks = (() => {
+      try {
+        return (
+          db.prepare(`SELECT count(*) AS n FROM sqlite_master WHERE type='table' AND name='presentation_stage_acks'`).get() as { n: number }
+        ).n > 0;
+      } catch {
+        return false;
+      }
+    })();
     const runIds = new Set<string>();
     const directRows: Record<string, unknown>[] = [];
 
@@ -182,8 +197,33 @@ export async function GET(request: NextRequest, props: { params: Promise<{ taskI
       )
       .slice(0, limit);
 
+    // PRES-037 — per-event ACK state + timing split for the CURRENT
+    // execution. ack: accepted (first write) / duplicate (idempotent replay)
+    // / pending (legacy row with no key — no ACK was ever written, producer
+    // outbox treats it as unacknowledged, NOT as failed). Out-of-order rows
+    // from older runs are present in `rows` (audit trail) but excluded from
+    // `current_execution` + totals, which key off the task's registered run.
+    let registeredRun: string | null = null;
+    try {
+      const t = db.prepare('SELECT requester_session_key FROM tasks WHERE id = ?').get(taskId) as { requester_session_key: string | null } | undefined;
+      registeredRun = t?.requester_session_key ?? null;
+    } catch { /* pre-migration box */ }
+    const ackOf = (r: Record<string, unknown>): string => {
+      if (!hasAcks || typeof r.event_id !== 'string' || !r.event_id) return 'pending';
+      try {
+        const activeId = resolveActiveCompanyId(db) ?? '';
+        const ack = db
+          .prepare(`SELECT status FROM presentation_stage_acks WHERE company_id = ? AND run_id = ? AND event_id = ?`)
+          .get(activeId, r.run_id as string, r.event_id) as { status: string } | undefined;
+        return ack?.status ?? 'pending';
+      } catch {
+        return 'pending';
+      }
+    };
+    const currentRows = registeredRun ? rows.filter((r) => r.run_id === registeredRun) : rows;
+
     // ── Shape the per-task summary the stepper/card consume ─────────────────
-    const phaseRows = rows.filter((r) => r.event === 'phase_exit');
+    const phaseRows = currentRows.filter((r) => r.event === 'phase_exit');
     const summaryRows = rows.filter((r) => r.event === 'run_summary');
     const totalWallS = summaryRows.reduce(
       (max, r) => Math.max(max, typeof r.total_wall_s === 'number' ? r.total_wall_s : 0),
@@ -201,12 +241,34 @@ export async function GET(request: NextRequest, props: { params: Promise<{ taskI
       ),
     );
 
+    // PRES-037 — current_execution + per-row ack/split are ADDITIVE: every
+    // pre-existing key keeps its exact meaning AND its exact scope (full
+    // history — counts/totals/rows are UNCHANGED so fix53 proofs hold).
+    // current_execution is the new current-run view; ack/split fields are
+    // undefined on pre-migration boxes (cooperative degrade, never null-guard
+    // branches in old consumers).
+    const splitOf = (r: Record<string, unknown>): Record<string, number> | undefined => {
+      if (!hasSplit) return undefined;
+      const out: Record<string, number> = {};
+      for (const k of ['provider_s', 'queue_s', 'qc_s'] as const) {
+        if (typeof r[k] === 'number' && Number.isFinite(r[k])) out[k] = r[k] as number;
+      }
+      return out;
+    };
     return NextResponse.json({
       task_id: taskId,
       run_ids: runIdList,
       counts: { phase_exits: phaseRows.length, run_summaries: summaryRows.length },
       totals: { wall_s: totalWallS || null, duration_s: totalDurationS || null },
       error_classes: errorClasses,
+      current_execution: registeredRun
+        ? {
+            run_id: registeredRun,
+            phase_exits: phaseRows.length,
+            duration_s: totalDurationS || null,
+            wall_s: totalWallS || null,
+          }
+        : null,
       rows: rows.map((r) => ({
         id: r.id,
         run_id: r.run_id,
@@ -224,6 +286,15 @@ export async function GET(request: NextRequest, props: { params: Promise<{ taskI
         phase_count: r.phase_count,
         slowest_3: r.slowest_3,
         created_at: r.created_at,
+        ...(hasEventKeys
+          ? {
+              event_id: (r.event_id as string | null) ?? null,
+              attempt_id: (r.attempt_id as string | null) ?? null,
+              sequence: (r.sequence as number | null) ?? null,
+              ack: ackOf(r),
+            }
+          : {}),
+        ...(splitOf(r) ? { timing_split: splitOf(r) } : {}),
       })),
     });
   } catch (error) {

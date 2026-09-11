@@ -15,6 +15,7 @@ from .state import (
     EXIT_GATE_BLOCKED,
 )
 from .manifest import Manifest, resolve_manifest
+from . import engine_origin as _engine_origin
 from .phases import Engine
 from .report import dispatch
 from .watchdog import watchdog as _run_watchdog
@@ -122,6 +123,17 @@ def cmd_new(args, scripts_dir: Path) -> int:
     manifest = Manifest(manifest_path)
     manifest.verify_source()
 
+    # PRES-039: fail the compatibility preflight BEFORE dispatch state is
+    # written — a stale PYTHONPATH duplicate or a contract-drifted copy must
+    # refuse here, never silently import below (Engine/BoardMirror import
+    # this same package; by then the wrong copy is already bound).
+    _pf_code, _pf_report = _engine_origin.preflight()
+    _origin = _pf_report["origin"]
+    if _pf_code != 0:
+        die(_pf_code,
+            f"{_pf_report.get('autofail')}: {_pf_report.get('detail')}\n"
+            f"  {_engine_origin.format_origin_line(_origin)}")
+
     state = {
         "schema_version": STATE_SCHEMA_VERSION,
         "job_id": "pj_" + sha256_text(f"{run_dir}{utcnow()}")[:26],
@@ -130,6 +142,8 @@ def cmd_new(args, scripts_dir: Path) -> int:
         "manifest_path": str(manifest_path),
         "manifest_version": manifest.version,
         "manifest_sha256": manifest.sha256,
+        # PRES-039: engine commit/package origin recorded in each run.
+        "engine_origin": _origin,
         "presentation_type": ptype,
         "requester": intake.get("requester") or {},
         "intake": intake,
@@ -151,6 +165,7 @@ def cmd_new(args, scripts_dir: Path) -> int:
     print(f"created {state['job_id']} in {run_dir}")
     print(f"  manifest v{manifest.version} ({len(manifest.phases)} phases) "
           f"pinned at {manifest.sha256[:12]}")
+    print(f"  {_engine_origin.format_origin_line(_origin)}")
     return EXIT_OK
 
 
@@ -163,6 +178,14 @@ def cmd_status(args) -> int:
     print(f"job      : {st['job_id']}")
     print(f"run dir  : {st['run_dir']}")
     print(f"manifest : v{st.get('manifest_version')} @ {str(st.get('manifest_sha256'))[:12]}")
+    _eo = st.get("engine_origin") or {}
+    if _eo:
+        print(f"engine   : distributor={_eo.get('distributor')} "
+              f"role={_eo.get('copy_role')} "
+              f"digest={str(_eo.get('package_digest'))[:12]} "
+              f"commit={str((_eo.get('distributor_commit') or {}).get('commit', '?'))[:12]}")
+    else:
+        print("engine   : origin NOT RECORDED (pre-PRES-039 run)")
     print(f"terminal : {st.get('terminal') or 'in progress'}")
     done = [p for p in st.get("phases", []) if p.get("status") == "done"]
     print(f"phases   : {len(done)} done")
@@ -579,9 +602,27 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.sweep_undeliverable:
         return cmd_sweep_undeliverable(args)
 
+    # PRES-039: compatibility preflight runs BEFORE the lock/state load so
+    # a stale shadow or drifted copy refuses identically for --run/--resume/
+    # --close (not only --new). Prints the recorded run origin when present.
+    _pf_code, _pf_report = _engine_origin.preflight()
+    if _pf_code != 0:
+        die(_pf_code,
+            f"{_pf_report.get('autofail')}: {_pf_report.get('detail')}\n"
+            f"  {_engine_origin.format_origin_line(_pf_report['origin'])}")
     with RunLock(run_dir):
         store = StateStore(run_dir)
         state = store.load()
+        _recorded = state.get("engine_origin") or {}
+        if _recorded:
+            print(_engine_origin.format_origin_line(
+                {**_pf_report["origin"],
+                 "package_digest": _recorded.get("package_digest",
+                                                _pf_report["origin"]["package_digest"]),
+                 "distributor_commit": _recorded.get("distributor_commit")},
+            ).replace("engine origin:", "engine origin (run recorded):"),
+                flush=True)
+        print(_engine_origin.format_origin_line(_pf_report["origin"]), flush=True)
         manifest_path = Path(state.get("manifest_path") or
                              resolve_manifest(args.manifest, run_dir, scripts_dir))
         if not manifest_path.is_file():

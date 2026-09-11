@@ -21,7 +21,14 @@
 
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
+
+/**
+ * PRES-021 — trailing-edge debounce for SSE/task-triggered child refreshes.
+ * Matches PhaseStepper's coalescing so a burst of worker events collapses to
+ * one children fetch per card instead of one request per event.
+ */
+const PRES21_PARENT_DEBOUNCE_MS = 400;
 import {
   ChevronDown,
   ChevronRight,
@@ -209,6 +216,17 @@ export default function PresentationParentCard({
   );
   const [loading, setLoading] = useState(!initialData);
   const [error, setError] = useState<string | null>(null);
+  // PRES-021 — timestamped stale/offline state. Last-known children are
+  // RETAINED (never reset to not_started); the banner below names the last
+  // successful refresh so a dropped stream reads as stale, not no-progress.
+  const [lastUpdatedAt, setLastUpdatedAt] = useState<string | null>(
+    initialData ? new Date().toISOString() : null,
+  );
+  const [stale, setStale] = useState(false);
+  const abortRef = useRef<AbortController | null>(null);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const taskIdRef = useRef(taskId);
+  taskIdRef.current = taskId;
   // Collapsed state — children are visible by default
   const [collapsed, setCollapsed] = useState(false);
 
@@ -229,38 +247,131 @@ export default function PresentationParentCard({
   // (the standalone children preview renders the card non-draggable).
   const dragEnabled = typeof onDragStart === 'function' && typeof onMove === 'function';
 
+  // PRES-021 — task/run-scoped live refresh. Subscribes to the SSE
+  // activity scope (useSSE stamps every activity_logged payload) plus the
+  // board task store (task_created/task_updated land there): a child created
+  // or completed after mount refreshes THIS parent's counts without reload.
+  // Debounced + coalesced, AbortController-cancelled, and guarded against
+  // late previous-task responses — see queueParentRefresh below.
+  const activityPulse = useMissionControl((s) => s.activityPulse);
+  const lastActivityScope = useMissionControl((s) => s.lastActivityScope);
+  const storeTasks = useMissionControl((s) => s.tasks);
+
   const fetchData = useCallback(async () => {
+    const mine = taskIdRef.current;
+    // Cancel the in-flight request: a slow fetch for a PREVIOUS task must
+    // never overwrite this task's state after a taskId change.
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
     try {
       const res = await fetch(
-        `/api/presentations/children?parent_id=${encodeURIComponent(taskId)}`,
-        { cache: 'no-store' },
+        `/api/presentations/children?parent_id=${encodeURIComponent(mine)}`,
+        { cache: 'no-store', signal: controller.signal },
       );
+      // Late response after a taskId change: drop it, keep current data.
+      if (taskIdRef.current !== mine) return;
       if (!res.ok) {
         setError(`Failed to load phases (HTTP ${res.status})`);
+        setStale(true);
         return;
       }
       const json = (await res.json()) as ChildrenResponse;
+      if (taskIdRef.current !== mine) return;
       setData(json);
       setError(null);
+      setStale(false);
+      setLastUpdatedAt(new Date().toISOString());
     } catch (err) {
-      setError((err as Error).message);
+      if ((err as Error)?.name === 'AbortError') return;
+      if (taskIdRef.current !== mine) return;
+      // Network drop: visible stale state, last-known data retained.
+      setError((err as Error)?.message ? `Phases offline: ${(err as Error).message}` : 'Phases offline');
+      setStale(true);
     } finally {
-      setLoading(false);
+      if (taskIdRef.current === mine) setLoading(false);
     }
-  }, [taskId]);
+  }, []);
+
+  // PRES-021 — debounced coalescing: burst of events collapses to one fetch.
+  const queueParentRefresh = useCallback(() => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => {
+      debounceRef.current = null;
+      void fetchData();
+    }, PRES21_PARENT_DEBOUNCE_MS);
+  }, [fetchData]);
 
   useEffect(() => {
     if (!initialData) {
       fetchData();
     }
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+      abortRef.current?.abort();
+    };
   }, [fetchData, initialData]);
 
   // Update when initialData changes on re-render (SSE refresh from board)
   useEffect(() => {
     if (initialData) {
       setData(initialData);
+      setError(null);
+      setStale(false);
+      setLastUpdatedAt(new Date().toISOString());
     }
   }, [initialData]);
+
+  // PRES-021 — refresh on SSE activity for THIS parent (or its children):
+  // the event's task scope names either the parent or a child row. Scopeless
+  // (legacy) events still refresh — an unknown scope is never evidence of
+  // irrelevance. task_updated/task_created for a child also arrive via the
+  // board store (parentTask prop updates), which the next effect covers.
+  useEffect(() => {
+    if (activityPulse > 0) {
+      const scopeTask = lastActivityScope?.taskId ?? null;
+      if (scopeTask == null) {
+        queueParentRefresh();
+      } else if (scopeTask === taskIdRef.current) {
+        queueParentRefresh();
+      } else {
+        // Maybe a child of this parent changed: check current data first;
+        // when children are unknown yet, refresh once rather than miss it.
+        const known = data?.children?.some((c) => c.id === scopeTask) ?? null;
+        if (known !== false) queueParentRefresh();
+      }
+    }
+    // data?.children intentionally read live, not as a dep: listing it would
+    // re-arm this effect on every refresh and loop under a worker burst.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activityPulse, lastActivityScope, queueParentRefresh]);
+
+  // PRES-021 — refresh when the board store shows a new/changed child of
+  // this parent (task_created/task_updated land in the store via useSSE even
+  // when the activity event itself is missed). Compares against rendered
+  // children so unrelated board churn causes zero requests.
+  const childrenSignature = (data?.children ?? [])
+    .map((c) => `${c.id}:${c.status}:${c.updated_at}`)
+    .join('|');
+  const signatureRef = useRef(childrenSignature);
+  useEffect(() => {
+    const mine = taskIdRef.current;
+    const mineChildren = storeTasks.filter(
+      (t) => (t.parent_task_id ?? null) === mine,
+    );
+    if (mineChildren.length === 0) return;
+    const storeSig = mineChildren
+      .map((t) => `${t.id}:${t.status}:${t.updated_at}`)
+      .sort()
+      .join('|');
+    const renderedSig = signatureRef.current.split('|').slice().sort().join('|');
+    if (storeSig !== renderedSig) {
+      queueParentRefresh();
+    }
+  }, [storeTasks, queueParentRefresh]);
+  useEffect(() => {
+    signatureRef.current = childrenSignature;
+  }, [childrenSignature]);
 
   // ── Loading skeleton ─────────────────────────────────────────────────
   if (loading) {
@@ -292,11 +403,42 @@ export default function PresentationParentCard({
         data-testid="presentation-parent-card-error"
       >
         <p className="text-xs text-red-600">{error}</p>
+        <button
+          type="button"
+          className="mt-2 text-xs font-semibold text-red-700 underline underline-offset-2 hover:text-red-900"
+          onClick={() => { setLoading(true); void fetchData(); }}
+          data-testid="presentation-parent-retry"
+        >
+          Retry
+        </button>
       </div>
     );
   }
 
   if (!data) return null;
+
+  // PRES-021 — stale/offline banner over RETAINED last-known data. Names the
+  // last successful refresh; retry refetches immediately. Never blanks the
+  // counts back to not_started on a dropped stream.
+  const staleBanner = (stale || error) ? (
+    <div
+      className="mx-4 lg:mx-5 mt-3 flex items-center gap-2 text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1"
+      data-testid="presentation-parent-stale"
+    >
+      <span>
+        {error ?? 'Child data may be stale'}
+        {lastUpdatedAt ? ` — last updated ${new Date(lastUpdatedAt).toLocaleTimeString()}` : ''}
+      </span>
+      <button
+        type="button"
+        className="font-semibold underline underline-offset-2 hover:text-amber-900"
+        onClick={() => { void fetchData(); }}
+        data-testid="presentation-parent-stale-retry"
+      >
+        Retry
+      </button>
+    </div>
+  ) : null;
 
   const { parent, children, aggregate } = data;
 
@@ -337,6 +479,7 @@ export default function PresentationParentCard({
       }`}
       data-testid="presentation-parent-card"
     >
+      {staleBanner}
       {/* ── Parent header ──────────────────────────────────────────────── */}
       <div
         className="px-4 lg:px-5 pt-4 lg:pt-5 pb-3 cursor-pointer"

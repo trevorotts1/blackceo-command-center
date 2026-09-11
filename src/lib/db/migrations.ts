@@ -6853,7 +6853,6 @@ export const migrations: Migration[] = [
       console.log('[Migration 140] measured-outcome tables ready');
     },
   },
-
   {
     id: '141',
     name: 'social_publication_verification_ownership',
@@ -6868,6 +6867,245 @@ export const migrations: Migration[] = [
         PRIMARY KEY(queue_id,target)
       )`);
       db.exec(`CREATE INDEX IF NOT EXISTS idx_social_verification_retry ON social_publish_verifications(state,retry_at)`);
+      console.log('[Migration 141] social publication verification ownership ready');
+    },
+  },
+  {
+    // PRES-022 renumber (batch-CC-20260910-201841): mainline already owns 136
+    // (publish-queue execution contract), 137 (orchestrator steps), 138
+    // (media assets), 139 (cycle/theme union), 140 (measured outcomes) and
+    // 141 (WF12B idempotency receipts + social publication verification).
+    // The verification-receipts registry therefore lands as 142; rows carry
+    // the full revision axis so history is retained, never overwritten.
+    id: '142',
+    name: 'add_presentation_verification_receipts',
+    up: (db) => {
+      // PRES-022 — the trusted verification-receipt registry behind the
+      // presentations no-skip proof. tasks.process_certificate_sha (migration
+      // 080) stores ONLY an identifier; a SHA-shaped digest could previously be
+      // registered with no verified process provenance behind it, and a
+      // legitimate QC repair could not rotate the digest on the same task
+      // (repair deadlock). This table is the PROOF of record:
+      //
+      //   * one row per (task, company, presentation, run, attempt,
+      //     manifest_revision) — the exact revision axis a retry/repair moves
+      //     through, so history is retained, never overwritten;
+      //   * status 'active' | 'invalidated' — a legitimate retry/revision
+      //     invalidates the prior approval for the affected task while keeping
+      //     the audit row; only the CURRENT owner lease may register proof for
+      //     the active revision;
+      //   * deliverable_hashes / qc_receipts / delivery_evidence carry the
+      //     server-verified artifact set (exact planned deliverable set,
+      //     mode-dependent; QC receipts with reviewer identity + artifact SHAs;
+      //     persisted delivery evidence) — validated at registration time by
+      //     presentation-proof-registry.ts, never trusted from a client body.
+      //
+      // Additive + idempotent (CREATE TABLE IF NOT EXISTS); no existing row or
+      // route is touched by the migration itself.
+      console.log('[Migration 142] Creating presentation_verification_receipts...');
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS presentation_verification_receipts (
+          id TEXT PRIMARY KEY,
+          task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+          company_id TEXT,
+          presentation_id TEXT,
+          run_id TEXT,
+          attempt INTEGER NOT NULL DEFAULT 1,
+          manifest_revision TEXT,
+          receipt_sha256 TEXT NOT NULL,
+          verified_via TEXT NOT NULL DEFAULT 'recomputed',
+          worker_receipt_json TEXT,
+          deliverable_hashes TEXT,
+          qc_receipts TEXT,
+          delivery_evidence TEXT,
+          lease_owner TEXT,
+          status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','invalidated')),
+          invalidated_at TEXT,
+          invalidated_reason TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+      `);
+      // The registry is keyed by the full revision axis: ONE active row per
+      // (task, run, attempt, manifest_revision) — the atomic compare-and-swap
+      // constraint PRES-022 requires (a stale worker re-registering the same
+      // revision is an idempotent no-op on this key; a DIFFERENT proof for the
+      // SAME key cannot silently replace the registered one).
+      db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_pvr_active_revision
+          ON presentation_verification_receipts
+            (task_id, IFNULL(run_id,''), attempt, IFNULL(manifest_revision,''))
+          WHERE status = 'active'
+      `);
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_pvr_task_status
+          ON presentation_verification_receipts (task_id, status)
+      `);
+      console.log('[Migration 142] presentation_verification_receipts ready');
+    },
+  },
+  {
+    // PRES-010 renumber (batch-CC-20260910-201841): HEAD already owns 137
+    // (orchestrator steps/leases). Writer cut before that merge and claimed
+    // 137 for the run-bindings registry. The runner applies in NUMERIC id
+    // order and DATA-03 forbids duplicate ids, so the registry lands here
+    // as the second id-142-adjacent entry; combined order is 141-WF12B,
+    // 141-social, 142-receipts, 142-bindings. Same renumber precedent as
+    // the 138/139/140 ID HISTORY comments above. No behavior change.
+    // Manual rollback if ever required:
+    //   DROP INDEX IF EXISTS idx_presentation_run_bindings_task;
+    //   DROP TABLE IF EXISTS presentation_run_bindings;
+    //   DELETE FROM _migrations WHERE id = '143';
+    id: '143',
+    name: 'add_presentation_run_bindings',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS presentation_run_bindings (
+          id TEXT PRIMARY KEY,
+          task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+          company_id TEXT,
+          presentation_id TEXT,
+          run_id TEXT,
+          run_root TEXT NOT NULL,
+          registered_by TEXT,
+          registered_at TEXT DEFAULT (datetime('now')),
+          updated_at TEXT DEFAULT (datetime('now'))
+        )
+      `);
+      // Unconditional (migration-128 ordering-suite rule: never index inside a
+      // column-absence guard). Newest-registration-wins lookup + history reads.
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_presentation_run_bindings_task
+          ON presentation_run_bindings (task_id, registered_at)
+      `);
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_presentation_run_bindings_run
+          ON presentation_run_bindings (run_id, presentation_id)
+      `);
+      console.log('[Migration 143] presentation_run_bindings ready');
+    },
+  },
+
+  {
+    // ID HISTORY (batch-CC-20260910-201841): writer claimed 141, colliding with
+    // mainline 141 social_publication_verification_ownership (DATA-03
+    // duplicate-id fail-fast). Renumbered 141->144; runner sorts numerically
+    // so tail order is 141-social, 142-receipts, 143-bindings, 144-WF12B.
+    //
+    // PRES-037/038/040 (W3 WF12-B) — idempotent ingest keys, per-event ACK
+    // outbox, delivery receipts, GHL link checks, structured activity scores.
+    //
+    // ALL ADDITIVE: new columns carry defaults, new tables are IF NOT EXISTS,
+    // every ALTER is PRAGMA-guarded (migration-131 convention) so minimal
+    // fixtures and half-migrated boxes heal instead of crashing. Safe under
+    // request-time self-heal (no destructive data moves, no defer flag needed).
+    //
+    // PRES-037: presentation_stage_timings gains the producer event identity
+    // (event_id / attempt_id / sequence), the company-scoped idempotency key
+    // (company_id, run_id, event_id), a canonical payload hash (event_hash)
+    // for identical-vs-changed replay decisions, and the provider/queue/QC
+    // timing split the read path reports. Legacy rows keep NULL event_ids —
+    // SQLite treats NULLs as distinct in a UNIQUE index, so they never
+    // conflict and need no backfill. presentation_stage_acks is the durable
+    // per-event ACK log the producer's outbox replays against after a lost ACK.
+    // PRES-038: presentation_delivery_receipts caches the shared verifier's
+    // hash-bound verdict per (task, artifact) so UI reads never rescan bytes;
+    // presentation_ghl_link_checks records the last GHL readback per artifact.
+    // PRES-040: task_activities gains scores (structured QC grades, no longer
+    // silently stripped). The (task, event) replay-once key lives on the
+    // durable task_activity_events sidecar (PK on (task_id, event_id)); plain
+    // text-only history has no event id and is untouched.
+    id: '144',
+    name: 'pres_wf12b_idempotency_receipts',
+    up: (db) => {
+      console.log('[Migration 144] Adding PRES-037/038/040 idempotency + receipt tables...');
+      const tableExists = (t: string): boolean =>
+        (db.prepare(`SELECT count(*) AS n FROM sqlite_master WHERE type='table' AND name=?`).get(t) as { n: number }).n > 0;
+      const columnExists = (t: string, c: string): boolean =>
+        (db.prepare(`SELECT count(*) AS n FROM pragma_table_info(?) WHERE name=?`).get(t, c) as { n: number }).n > 0;
+
+      if (tableExists('presentation_stage_timings')) {
+        const addTiming = (ddl: string) => { db.exec(`ALTER TABLE presentation_stage_timings ADD COLUMN ${ddl}`); };
+        if (!columnExists('presentation_stage_timings', 'company_id')) addTiming(`company_id TEXT NOT NULL DEFAULT ''`);
+        if (!columnExists('presentation_stage_timings', 'event_id')) addTiming('event_id TEXT');
+        if (!columnExists('presentation_stage_timings', 'attempt_id')) addTiming('attempt_id TEXT');
+        if (!columnExists('presentation_stage_timings', 'sequence')) addTiming('sequence INTEGER');
+        if (!columnExists('presentation_stage_timings', 'event_hash')) addTiming(`event_hash TEXT NOT NULL DEFAULT ''`);
+        if (!columnExists('presentation_stage_timings', 'provider_s')) addTiming('provider_s REAL');
+        if (!columnExists('presentation_stage_timings', 'queue_s')) addTiming('queue_s REAL');
+        if (!columnExists('presentation_stage_timings', 'qc_s')) addTiming('qc_s REAL');
+        db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_stage_timings_company_run_event
+          ON presentation_stage_timings (company_id, run_id, event_id)`);
+        console.log('[Migration 144] presentation_stage_timings event keys ready');
+      } else {
+        console.log('[Migration 144] presentation_stage_timings absent (minimal fixture); timing columns skipped');
+      }
+
+      db.exec(`CREATE TABLE IF NOT EXISTS presentation_stage_acks (
+        company_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('accepted','duplicate')),
+        event_hash TEXT NOT NULL,
+        ack_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (company_id, run_id, event_id)
+      )`);
+
+      if (tableExists('task_activities')) {
+        if (!columnExists('task_activities', 'scores')) {
+          db.exec('ALTER TABLE task_activities ADD COLUMN scores TEXT');
+        }
+        // PRES-040 replay-once key. STORED generated column is IMPOSSIBLE here:
+        // a durable column cannot be back-added to a live table (SQLite: "Cannot
+        // add a STORED column"), so the (task, event) key lives on a durable
+        // sidecar table instead (task_activity_events, created below). The
+        // read path derives the same key from metadata at query time.
+        console.log('[Migration 144] task_activities scores ready');
+      } else {
+        console.log('[Migration 144] task_activities absent (minimal fixture); activity columns skipped');
+      }
+
+      db.exec(`CREATE TABLE IF NOT EXISTS presentation_delivery_receipts (
+        task_id TEXT NOT NULL,
+        artifact_key TEXT NOT NULL,
+        path TEXT NOT NULL,
+        sha256 TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL,
+        mtime_ms INTEGER NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('verified','failed')),
+        verifier TEXT NOT NULL DEFAULT 'bundle-probe',
+        detail TEXT,
+        checked_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (task_id, artifact_key)
+      )`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_delivery_receipts_task
+        ON presentation_delivery_receipts (task_id)`);
+
+      db.exec(`CREATE TABLE IF NOT EXISTS presentation_ghl_link_checks (
+        task_id TEXT NOT NULL,
+        artifact_key TEXT NOT NULL,
+        url TEXT NOT NULL,
+        artifact_sha256 TEXT NOT NULL,
+        ok INTEGER NOT NULL,
+        checked_at TEXT NOT NULL DEFAULT (datetime('now')),
+        detail TEXT,
+        PRIMARY KEY (task_id, artifact_key)
+      )`);
+
+      // PRES-040 replay-once ledger. keyed BY THE PRODUCER's identity
+      // (task_id, event_id): the first structured POST claims the key and
+      // writes the task_activities row; a replay of the same key returns the
+      // original activity id without a second insert. No event id (plain
+      // text notes) means no key — those rows are never deduped here.
+      db.exec(`CREATE TABLE IF NOT EXISTS task_activity_events (
+        task_id TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        activity_id TEXT NOT NULL,
+        event_hash TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (task_id, event_id)
+      )`);
+
+      console.log('[Migration 144] WF12-B idempotency + receipt tables ready');
     },
   },
 

@@ -41,6 +41,9 @@ export function useSSE(options?: UseSSEOptions) {
     setSelectedTask,
     incrementActivityPulse,
   } = useMissionControl();
+  // PRES-021 — read live (getState) inside the event handler so the effect's
+  // dep array stays mount-stable; subscribing would tear the stream down on
+  // every activity event.
 
   // Update ref when selectedTask changes (outside the SSE effect)
   useEffect(() => {
@@ -163,12 +166,41 @@ export function useSSE(options?: UseSSEOptions) {
               removeTask((sseEvent.payload as { id: string }).id);
               break;
 
-            case 'activity_logged':
+            case 'activity_logged': {
               debug.sse('Activity logged', sseEvent.payload);
               // U060 — store the pulse so mounted PhaseStepper components
               // can react without a second real-time channel.
               incrementActivityPulse();
+              // PRES-021 — stamp the task/run scope of this event so parent
+              // cards and steppers refresh ONLY the affected card (debounced,
+              // coalesced) instead of every mounted instance fetching per
+              // event. Never throws: a malformed payload still pulses.
+              try {
+                const p = sseEvent.payload as {
+                  task_id?: unknown;
+                  metadata?: unknown;
+                };
+                const taskId = typeof p?.task_id === 'string' ? p.task_id : null;
+                let runId: string | null = null;
+                let attemptId: string | null = null;
+                const md = p?.metadata;
+                let obj: unknown = md;
+                if (typeof md === 'string') {
+                  try { obj = JSON.parse(md); } catch { obj = null; }
+                }
+                if (typeof obj === 'object' && obj !== null) {
+                  const rec = obj as Record<string, unknown>;
+                  if (typeof rec.run_id === 'string' && rec.run_id.length > 0) runId = rec.run_id;
+                  const att = rec.attempt_id;
+                  if (typeof att === 'string' && att.length > 0) attemptId = att;
+                  else if (typeof att === 'number' && Number.isFinite(att)) attemptId = String(att);
+                }
+                useMissionControl.getState().noteActivityScope({ taskId, runId, attemptId });
+              } catch {
+                /* malformed payload: pulse already recorded, scope stays stale */
+              }
               break;
+            }
 
             case 'deliverable_added':
               debug.sse('Deliverable added', sseEvent.payload);

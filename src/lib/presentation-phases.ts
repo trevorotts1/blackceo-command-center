@@ -91,6 +91,16 @@ export function isTeleprompterDeliverable(d: {
 
 export const PHASE_ACTIVITY_METADATA_KEY = 'phase_id';
 
+// PRES-040 (W3 WF12-B) — activity schema version the producer stamps in
+// metadata and the install preflight negotiates. Version 1 is the first
+// versioned shape: { phase_id, event_id, schema_version: 1, ... }. Unversioned
+// legacy rows (no schema_version) are read as version 0 — historical data,
+// never silently promoted to current. The consumer accepts 0 and 1; a future
+// version 2 event stays PENDING (not applied) until the consumer upgrades,
+// which is exactly the replay-after-upgrade path the producer outbox serves.
+export const ACTIVITY_SCHEMA_VERSION = 1;
+export const ACTIVITY_SCHEMA_KNOWN_VERSIONS: readonly number[] = [0, 1];
+
 /**
  * Extract the phase id from an activity's metadata. `metadata` may be a nested
  * object or a pre-stringified JSON string — validation.ts:152 accepts both.
@@ -98,6 +108,10 @@ export const PHASE_ACTIVITY_METADATA_KEY = 'phase_id';
  * An id that is NOT in PHASE_TO_LABEL is still RETURNED here; the reducer is
  * what records it in `unmapped`. Filtering unknown ids to null inside this
  * function reads as defensive and silently destroys `unmapped`.
+ *
+ * PRES-040: a caller that needs the version/event identity uses
+ * activitySchemaInfo() alongside — this function keeps its exact contract
+ * (phase id or null) so every existing reducer is untouched.
  */
 export function phaseIdOf(
   activity: { metadata?: string | Record<string, unknown> | null },
@@ -111,6 +125,31 @@ export function phaseIdOf(
   if (typeof obj !== 'object' || obj === null) return null;
   const v = (obj as Record<string, unknown>)[PHASE_ACTIVITY_METADATA_KEY];
   return typeof v === 'string' && v.length > 0 ? v : null;
+}
+
+/**
+ * PRES-040 companion to phaseIdOf: the structured identity of an activity
+ * row — schema version (0 when the producer stamped none), event id, and
+ * whether the consumer understands the version. Never throws. Malformed
+ * metadata yields { version: 0, eventId: null, known: true } — a historical
+ * text note, readable but never structured-verified.
+ */
+export function activitySchemaInfo(
+  activity: { metadata?: string | Record<string, unknown> | null },
+): { version: number; eventId: string | null; known: boolean } {
+  const raw = activity?.metadata;
+  if (raw == null) return { version: 0, eventId: null, known: true };
+  let obj: unknown = raw;
+  if (typeof raw === 'string') {
+    try { obj = JSON.parse(raw); } catch { return { version: 0, eventId: null, known: true }; }
+  }
+  if (typeof obj !== 'object' || obj === null) return { version: 0, eventId: null, known: true };
+  const rec = obj as Record<string, unknown>;
+  const v = rec.schema_version;
+  const version = typeof v === 'number' && Number.isFinite(v) ? Math.trunc(v) : 0;
+  const e = rec.event_id;
+  const eventId = typeof e === 'string' && e.length > 0 ? e : null;
+  return { version, eventId, known: (ACTIVITY_SCHEMA_KNOWN_VERSIONS as readonly number[]).includes(version) };
 }
 
 /**
@@ -186,11 +225,110 @@ function isPhaseCompletedActivity(activityType: string): boolean {
 export interface PhaseProgressStep {
   label: typeof PHASE_LABELS[number];
   status: PhaseStepStatus;
+  /** PRES-020 — how many required phase ids of this label are done. */
+  doneIds: number;
+  /** PRES-020 — how many required phase ids of this label apply here. */
+  totalIds: number;
+}
+
+/**
+ * PRES-020 — required phase ids per label. The defect: computePhaseProgress
+ * collected completed LABELS, so any single completion-typed activity (e.g.
+ * P4-COPY alone) flipped the whole Script label `done` before structure,
+ * copy QC, or speech ran. The fix: a label is `done` only when EVERY
+ * required phase id of that label has a completion signal. The required set
+ * is exactly the manifest table above, minus labels the caller explicitly
+ * excludes (optional / not-applicable phases, approved manifest only) via
+ * `excludedPhaseIds`. DELIVERABLE_DERIVED_LABELS (Teleprompter) never takes
+ * part: no manifest phase id maps to it, so it stays deliverable-derived.
+ */
+export function requiredPhaseIdsForLabel(
+  label: typeof PHASE_LABELS[number],
+  excludedPhaseIds?: ReadonlySet<string> | ReadonlyArray<string> | null,
+): string[] {
+  const excluded =
+    excludedPhaseIds instanceof Set
+      ? excludedPhaseIds
+      : new Set(excludedPhaseIds ?? []);
+  return Object.entries(PHASE_TO_LABEL)
+    .filter(([id, l]) => l === label && !excluded.has(id))
+    .map(([id]) => id);
 }
 
 export interface PhaseProgress {
   phases: PhaseProgressStep[];   // always 7, in PHASE_LABELS order
   unmapped: string[];            // phase ids seen that PHASE_TO_LABEL does not know
+}
+
+export interface PhaseActivityLite {
+  activity_type: string;
+  metadata?: string | Record<string, unknown> | null;
+  /**
+   * PRES-020 — the run/attempt this activity belongs to. Rows are compared
+   * as opaque strings: activities whose scope differs from the ACTIVE scope
+   * (see `activeScope` on the options) are obsolete — a late completion from
+   * an old attempt must not override a retry. Rows WITHOUT a scope stay
+   * visible for back-compat (the engine's phase rows never carried run
+   * identity; FIX 57 keeps it on the card's provenance lines instead).
+   */
+  run_id?: string | null;
+  attempt_id?: string | number | null;
+}
+
+export interface ComputePhaseProgressOptions {
+  /**
+   * PRES-020 — phase ids that do NOT apply to this run (approved manifest's
+   * optional / not-applicable set). A label with zero remaining required ids
+   * is `done` only when at least one completion touched the label — the
+   * exclusion is then real work the manifest waived, not an empty vacuous
+   * pass over a label the run never started.
+   */
+  excludedPhaseIds?: ReadonlySet<string> | ReadonlyArray<string> | null;
+  /**
+   * PRES-020 — completion receipts per phase id. A completion-typed activity
+   * marks the id done ONLY when its receipt validates (id present and
+   * explicitly true). Teleprompter completions still require the deliverable
+   * signal (see FIX 50b): presence alone never completes it. When omitted,
+   * every completion-typed activity counts (legacy behavior for callers that
+   * have no receipt source).
+   */
+  completionReceipts?: Record<string, boolean | null | undefined> | null;
+  /**
+   * PRES-020 — the authoritative run/attempt scope. When set, scoped rows
+   * outside it are obsolete and ignored; unscoped rows still count.
+   */
+  activeScope?: { run_id?: string | null; attempt_id?: string | number | null } | null;
+}
+
+function scopeOf(a: PhaseActivityLite): string | null {
+  const run = typeof a.run_id === 'string' && a.run_id.length > 0 ? a.run_id : null;
+  const att =
+    typeof a.attempt_id === 'string'
+      ? (a.attempt_id.length > 0 ? a.attempt_id : null)
+      : typeof a.attempt_id === 'number' && Number.isFinite(a.attempt_id)
+        ? String(a.attempt_id)
+        : null;
+  if (run == null && att == null) return null;
+  return JSON.stringify([run, att]);
+}
+
+function scopeActive(
+  rowScope: string | null,
+  active: { run_id?: string | null; attempt_id?: string | number | null } | null | undefined,
+): boolean {
+  // No authoritative scope: nothing is obsolete (legacy callers).
+  if (active == null) return true;
+  // Unscoped row: still visible (engine phase rows carry no run identity).
+  if (rowScope == null) return true;
+  const activeRun = typeof active.run_id === 'string' && active.run_id.length > 0 ? active.run_id : null;
+  const activeAtt =
+    typeof active.attempt_id === 'string'
+      ? (active.attempt_id.length > 0 ? active.attempt_id : null)
+      : typeof active.attempt_id === 'number' && Number.isFinite(active.attempt_id)
+        ? String(active.attempt_id)
+        : null;
+  if (activeRun == null && activeAtt == null) return true;
+  return rowScope === JSON.stringify([activeRun, activeAtt]);
 }
 
 /**
@@ -200,22 +338,34 @@ export interface PhaseProgress {
  * no duplicated reduction logic between the test and the route.
  */
 export function computePhaseProgress(
-  activities: Array<{ activity_type: string; metadata?: string | Record<string, unknown> | null }>,
+  activities: Array<PhaseActivityLite>,
   deliverables: Array<{ deliverable_type: string; path?: string | null }>,
+  options?: ComputePhaseProgressOptions,
 ): PhaseProgress {
-  const seen = new Set<string>();
-  const completed = new Set<string>();
+  const seenIds = new Set<string>();
+  const completedIds = new Set<string>();
+  const touchedLabels = new Set<string>();
   const unmapped: string[] = [];
+  const receipts = options?.completionReceipts ?? null;
+  const activeScope = options?.activeScope ?? null;
   for (const a of activities) {
     const id = phaseIdOf(a);
     if (id == null) continue;
     const label = PHASE_TO_LABEL[id];
     if (label == null) { if (!unmapped.includes(id)) unmapped.push(id); continue; }
-    seen.add(label);
-    // FIX 50a — a completion-typed activity marks the label done, not just
-    // started. Only a mapped label can be completed; an unmapped id is
-    // recorded in `unmapped` and never advances a bar.
-    if (isPhaseCompletedActivity(a.activity_type)) completed.add(label);
+    // PRES-020 — stale-scope rows are obsolete: a late completion from an
+    // old run/attempt must not flip the label, and stale starts must not
+    // hold it in_progress either. Unscoped rows still count.
+    if (!scopeActive(scopeOf(a), activeScope)) continue;
+    seenIds.add(id);
+    touchedLabels.add(label);
+    // PRES-020 — a completion-typed activity marks the PHASE ID done, never
+    // the whole label. With receipts, the id completes only when its receipt
+    // validates (explicit true). Without receipts, legacy behavior holds.
+    // Teleprompter has no phase ids; its only signal stays the deliverable.
+    if (isPhaseCompletedActivity(a.activity_type)) {
+      if (receipts == null || receipts[id] === true) completedIds.add(id);
+    }
   }
   // FIX 50b — teleprompter detected by basename (path column) OR the legacy
   // 'teleprompter' type. Callers must SELECT path; a row without one only
@@ -223,10 +373,36 @@ export function computePhaseProgress(
   const hasTeleprompterDeliverable = deliverables.some(isTeleprompterDeliverable);
   const phases: PhaseProgressStep[] = PHASE_LABELS.map((label) => {
     if (label === 'Teleprompter') {
-      return { label, status: hasTeleprompterDeliverable ? 'done' : 'not_started' };
+      return {
+        label,
+        status: hasTeleprompterDeliverable ? 'done' : 'not_started',
+        doneIds: hasTeleprompterDeliverable ? 1 : 0,
+        totalIds: 1,
+      };
     }
-    if (completed.has(label)) return { label, status: 'done' };
-    return { label, status: seen.has(label) ? 'in_progress' : 'not_started' };
+    const required = requiredPhaseIdsForLabel(label, options?.excludedPhaseIds);
+    const doneIds = required.filter((id) => completedIds.has(id)).length;
+    const seenCount = required.filter((id) => seenIds.has(id)).length;
+    // PRES-020 — done requires EVERY applicable required id done. An empty
+    // required set (whole label waived by the approved manifest) is done only
+    // when a completion actually touched the label — never vacuous.
+    if (required.length === 0) {
+      const touchedDone = [...completedIds].some((id) => PHASE_TO_LABEL[id] === label);
+      return {
+        label,
+        status: touchedDone ? 'done' : 'not_started',
+        doneIds: touchedDone ? 1 : 0,
+        totalIds: 0,
+      };
+    }
+    if (doneIds === required.length) {
+      return { label, status: 'done', doneIds, totalIds: required.length };
+    }
+    if (seenCount > 0 || doneIds > 0) {
+      return { label, status: 'in_progress', doneIds, totalIds: required.length };
+    }
+    void touchedLabels;
+    return { label, status: 'not_started', doneIds: 0, totalIds: required.length };
   });
   return { phases, unmapped };
 }
@@ -261,18 +437,39 @@ export type PhaseElapsedSeconds = Partial<
   Record<(typeof PHASE_LABELS)[number], number>
 >;
 
+/**
+ * PRES-020 — canonical run selection for wall-clock attribution. The defect:
+ * `phaseElapsedSeconds()` picked the latest INSERTED run, so delayed older
+ * events arriving late changed which run displayed. Prefer an explicit
+ * authoritative run id (the canonical execution record, e.g. the parent
+ * card's `Ref:` run identity / stage-timings task linkage); fall back to
+ * latest-inserted only when the caller names none. Never throws on junk.
+ */
+export function selectCanonicalRunId(
+  rows: StageTimingRowLite[],
+  authoritativeRunId?: string | null,
+): string | null {
+  if (typeof authoritativeRunId === 'string' && authoritativeRunId.length > 0) {
+    if (rows.some((r) => r.run_id === authoritativeRunId)) return authoritativeRunId;
+  }
+  let latest: string | null = null;
+  for (const r of rows) {
+    if (typeof r.run_id === 'string' && r.run_id.length > 0) latest = r.run_id;
+  }
+  return latest;
+}
+
 export function phaseElapsedSeconds(
   rows: StageTimingRowLite[],
+  authoritativeRunId?: string | null,
 ): PhaseElapsedSeconds {
   const elapsed: PhaseElapsedSeconds = {};
   if (rows.length === 0) return elapsed;
 
-  // Latest run = run_id of the last row that carries one (rows are inserted
-  // in engine emission order, and every row carries a NOT NULL run_id).
-  let latestRun: string | null = null;
-  for (const r of rows) {
-    if (typeof r.run_id === 'string' && r.run_id.length > 0) latestRun = r.run_id;
-  }
+  // PRES-020 — canonical run wins over arrival order: an authoritative run id
+  // (caller's execution record) keeps delayed older events from hijacking the
+  // display. Latest-inserted is only the fallback when none is named.
+  const latestRun = selectCanonicalRunId(rows, authoritativeRunId);
   if (latestRun == null) return elapsed;
 
   for (const r of rows) {

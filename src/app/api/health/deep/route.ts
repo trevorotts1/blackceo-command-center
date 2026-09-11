@@ -17,6 +17,16 @@
  *   "timestamp": "ISO-8601",
  *   "checks": {               // GATING — these determine the green/red verdict
  *     "asset_manifest":   { "pass": bool, "detail": string },
+ *     "build_content":    { "pass": bool, "detail": string, "degraded"?: bool,
+ *                           // PRES-046: content identity of the served artifact
+ *                           // vs the source tree (never mtimes). degraded=true
+ *                           // means a transaction-bound rollback receipt verified:
+ *                           // the box is AVAILABLE on the prior artifact but NOT
+ *                           // target-current (pending repair). pass stays true so
+ *                           // availability and target freshness remain separate;
+ *                           // consumers of `checks` may read degraded to refuse
+ *                           // "updated" claims.
+ *                         },
  *     "company_branding": { "pass": bool, "detail": string, "indeterminate"?: bool },
  *     "database_path":    { "pass": bool, "detail": string },
  *     "migrations":       { "pass": bool, "detail": string },
@@ -97,6 +107,7 @@
 import { NextResponse } from 'next/server';
 import {
   checkAssetManifest,
+  checkBuildContentInventory,
   checkCompanyBranding,
   checkHtmlTitle,
   checkDatabasePath,
@@ -120,9 +131,10 @@ export const revalidate = 0;
 
 export async function GET() {
   try {
-    const [assetManifest, companyBranding, htmlTitle, databasePath, migrations, diskHeadroom, appUrl] =
+    const [assetManifest, buildContent, companyBranding, htmlTitle, databasePath, migrations, diskHeadroom, appUrl] =
       await Promise.all([
         Promise.resolve(checkAssetManifest()),
+        Promise.resolve(checkBuildContentInventory()),
         Promise.resolve(checkCompanyBranding()),
         Promise.resolve(checkHtmlTitle()),
         Promise.resolve(checkDatabasePath()),
@@ -135,6 +147,7 @@ export async function GET() {
     // verdict that the deploy + heartbeat automation acts on.
     const checks = {
       asset_manifest: assetManifest,
+      build_content: buildContent,
       company_branding: companyBranding,
       html_title: htmlTitle,
       database_path: databasePath,

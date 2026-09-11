@@ -96,7 +96,7 @@ import { getProjectsPath } from '@/lib/config';
 import type { Task } from '@/lib/types';
 import { notifyOwnerDone } from '@/lib/owner-reports';
 import { collectCompletionEvidence, noEvidenceMessage } from '@/lib/completion-evidence';
-import { requiresRegisteredCertificate } from '@/lib/presentations-cert-gate';
+import { requiresRegisteredCertificate, requiresRegisteredProof } from '@/lib/presentations-cert-gate';
 
 // ---------------------------------------------------------------------------
 // State machine definition
@@ -518,8 +518,15 @@ function checkPreconditions(
   // not make a deck's process proof exist. Registration only — the anti-spoof
   // MATCH stays at the PATCH route, which is the only caller that receives a
   // presented value (TransitionEvidence has no field for one).
+  //
+  // PRES-022: for presentations `done` moves the U031 check is upgraded to
+  // requiresRegisteredProof — registration PLUS the ACTIVE VERIFIED receipt.
+  // Every transition() caller (PATCH, status route, webhook, QC scorer,
+  // promote) inherits the verification leg through this one precondition; the
+  // book-writer (marketing) lane keeps the identifier contract.
   {
-    const reg = requiresRegisteredCertificate({
+    const reg = requiresRegisteredProof({
+      taskId: task.id,
       department: task.department,
       source: task.source,
       currentStatus: task.status,

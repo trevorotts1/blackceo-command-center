@@ -17,6 +17,7 @@
  *   node --import tsx --test tests/unit/presentations-cert-contract.test.ts
  */
 
+import './_isolated-db'; // PRES-022: the gate chain reaches @/lib/db transitively — isolate.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { TaskStatus, UpdateTaskSchema } from '../../src/lib/validation';

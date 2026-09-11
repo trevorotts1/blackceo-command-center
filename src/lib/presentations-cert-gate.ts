@@ -27,6 +27,20 @@
  */
 
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
+import {
+  getActiveReceipt,
+  proofRegistryEnabled,
+} from '@/lib/presentation-proof-registry';
+
+/** The registry-leg gate's own result shape (structural, keeps this module's
+ * pure contract decoupled from the registry's imports at type level). */
+export interface CompletionProofLegResult {
+  applies: boolean;
+  ok: boolean;
+  code?: 'process_certificate_required' | 'process_proof_required' | 'process_proof_stale';
+  error?: string;
+  remediation?: string;
+}
 
 /**
  * The terminal status(es) a presentations task may transition INTO under the
@@ -83,6 +97,123 @@ function normCert(v: string | null | undefined): string | null {
   if (!t.length) return null;
   return PROCESS_CERTIFICATE_SHA_RE.test(t) ? t : null;
 }
+
+/**
+ * PRES-022 — THE single completion gate for a presentations terminal move.
+ * Composes, in one place, the two checks every status-changing path must
+ * satisfy before `done`:
+ *
+ *   1. VERIFIED PROOF (registry leg): an ACTIVE verification receipt must be
+ *      on record for the task, CURRENT against the artifacts it covered (a
+ *      post-proof mutation stales it), and CONSISTENT with the stored
+ *      anti-spoof identifier. A bare sha256 digest — however well-formed —
+ *      registers nothing and satisfies nothing.
+ *   2. ANTI-SPOOF (identifier leg): the legacy evaluatePresentationsDoneGate
+ *      contract for the presented-vs-stored identifier, unchanged.
+ *
+ * Every status-changing route (PATCH, bulk move, QC promotion, webhook
+ * epilogue, promote) calls THIS function — no path keeps a private door.
+ * The registry leg is fail-closed: an unavailable registry holds the task.
+ *
+ * Returns the composed decision; `proofGate` carries the registry leg's own
+ * code so a route can name whether the refusal was missing proof vs stale
+ * proof. Persisting a newly-presented identifier remains the pure function's
+ * `persistCert` contract — but under the registry the value persisted is the
+ * ACTIVE receipt's identifier (registerVerifiedReceipt writes it), never a
+ * client-presented digest alone.
+ */
+export function evaluatePresentationsCompletionGate(input: {
+  taskId: string;
+  department: string | null | undefined;
+  currentStatus: string | null | undefined;
+  targetStatus: string | null | undefined;
+  storedCert: string | null | undefined;
+  providedCert: string | null | undefined;
+}): PresentationsGateResult & { proofGate?: CompletionProofLegResult } {
+  const deptCanon =
+    canonicalDeptSlug(input.department || '') || (input.department ?? '');
+  const isTerminalMove =
+    PRESENTATIONS_TERMINAL_STATUSES.has((input.targetStatus ?? '').toString()) &&
+    input.currentStatus !== input.targetStatus &&
+    deptCanon === 'presentations';
+
+  // ── ANTI-SPOOF leg (mismatch only) ────────────────────────────────────────
+  // A presented digest that DIFFERS from the stored one is a re-brand attempt:
+  // refused. Presenting nothing is NOT itself a refusal here anymore — under
+  // the registry the ACTIVE RECEIPT is the proof of record and the stored
+  // identifier is its mirror, so "stored, nothing presented" is the normal
+  // completion shape (the QC scorer, bulk and webhook paths present nothing).
+  const storedNorm = normCert(input.storedCert);
+  const providedNorm = normCert(input.providedCert);
+  if (isTerminalMove && storedNorm && providedNorm && providedNorm !== storedNorm) {
+    return {
+      applies: true,
+      ok: false,
+      code: 'process_certificate_mismatch',
+      error: 'Forbidden: process_certificate_sha does not match the certificate registered for this deck',
+      remediation:
+        `Present the registered process_certificate_sha, or clear the mismatch with the operator. ` +
+        `A presentations card may not re-brand its certificate on a terminal move.`,
+    };
+  }
+  // Rollback mode (registry disabled): the pure legacy contract governs verbatim.
+  if (!proofRegistryEnabled() || !isTerminalMove) {
+    return evaluatePresentationsDoneGate({
+      department: input.department,
+      currentStatus: input.currentStatus,
+      targetStatus: input.targetStatus,
+      storedCert: input.storedCert,
+      providedCert: input.providedCert,
+    });
+  }
+
+  // ── VERIFIED PROOF leg (registry): presence + currency + consistency ──────
+  const proof = evaluatePresentationsCompletionProofLeg({
+    department: input.department,
+    activeReceipt: getActiveReceipt(input.taskId),
+    storedCert: input.storedCert,
+  });
+  if (proof.applies && !proof.ok) {
+    return {
+      applies: true,
+      ok: false,
+      code: 'process_certificate_required',
+      error: proof.error,
+      remediation: proof.remediation,
+      proofGate: proof,
+    };
+  }
+  // Both legs pass. Under the registry the identifier of record is the ACTIVE
+  // receipt's — nothing client-presented is persisted here (the registry
+  // already rotated tasks.process_certificate_sha atomically at registration).
+  return { applies: true, ok: true, persistCert: null, proofGate: proof };
+}
+
+/**
+ * The registry proof LEG, factored so the composed gate (and every route that
+ * needs the registry verdict alone) consumes ONE implementation.
+ * Delegates to the registry module when enabled; when the flag is off the leg
+ * applies trivially (rollback = pre-PRES-022 identifier-only contract).
+ */
+export function evaluatePresentationsCompletionProofLeg(input: {
+  department: string | null | undefined;
+  activeReceipt: ReturnType<typeof getActiveReceipt>;
+  storedCert: string | null | undefined;
+}): CompletionProofLegResult {
+  if (!proofRegistryEnabled()) {
+    const stored = typeof input.storedCert === 'string' ? input.storedCert.trim().toLowerCase() : '';
+    if (stored.length > 0) return { applies: true, ok: true };
+    return {
+      applies: true, ok: false, code: 'process_certificate_required',
+      error: 'a presentations task requires a registered process_certificate_sha to be marked done',
+    };
+  }
+  return evaluatePresentationsCompletionProofDelegate(input);
+}
+
+// Indirect import: keeps the registry module lazily loaded so this module stays
+// import-safe in pure (no-DB) unit tests.
+import { evaluatePresentationsCompletionProof as evaluatePresentationsCompletionProofDelegate } from '@/lib/presentation-proof-registry';
 
 /**
  * Decide whether a status change is allowed for a presentations task under the
@@ -244,5 +375,39 @@ export function requiresRegisteredCertificate(
         : `Generate the deck proof with prove-deck.py (it writes PROCESS-CERTIFICATE.json), then ` +
           `PATCH this task with {"status":"${target}","process_certificate_sha":"<sha256>"} so the ` +
           `certificate is registered on the card. Only then can any path mark it ${target}.`,
+  };
+}
+
+/**
+ * PRES-022 — the registration AND verification gate for presentations
+ * `done` promotion (the QC-scorer path and any raw writer that owns its own
+ * pre-checks). `requiresRegisteredCertificate` alone accepted ANY stored
+ * sha; this successor additionally requires the ACTIVE VERIFIED receipt via
+ * evaluatePresentationsCompletionProofLeg. The presentations dept falls
+ * through to the proof leg; book-writer (marketing) keeps the identifier
+ * contract until its own engine registers receipts.
+ */
+export function requiresRegisteredProof(
+  input: PresentationsRegistrationInput & { taskId?: string | null },
+): { applies: boolean; ok: boolean; code?: 'process_certificate_required'; error?: string; remediation?: string } {
+  const reg = requiresRegisteredCertificate(input);
+  if (!reg.applies) return reg;
+  if (!reg.ok) return reg;
+  // Registered identifier present. Presentations tasks now also need the
+  // verified, current proof leg.
+  const deptCanon = canonicalDeptSlug(input.department || '') || (input.department ?? '');
+  if (deptCanon !== 'presentations') return reg;
+  const proof = evaluatePresentationsCompletionProofLeg({
+    department: input.department,
+    activeReceipt: input.taskId ? getActiveReceipt(input.taskId) : null,
+    storedCert: input.storedCert,
+  });
+  if (proof.ok) return reg;
+  return {
+    applies: true,
+    ok: false,
+    code: 'process_certificate_required',
+    error: proof.error ?? 'verified completion proof required',
+    remediation: proof.remediation ?? reg.remediation,
   };
 }

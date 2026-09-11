@@ -13,12 +13,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getDb } from '@/lib/db';
 import {
+  activitySchemaInfo,
   childPhaseLabel,
   computePhaseProgress,
   PHASE_LABELS,
 } from '@/lib/presentation-phases';
 import { resolveActiveCompanyId } from '@/lib/company';
-import { boardWhereClause } from '@/lib/workspaces/board-query';
+import { tenantTaskWhere } from '@/lib/presentation-tenant-scope';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -37,35 +38,49 @@ export async function GET(request: NextRequest) {
 
     const db = getDb();
 
-    // ── Company scope (closes cross-company read) ────────────────────────
-    // tasks carry no direct company_id — only workspaces.company_id does —
-    // so parent ownership is checked by joining through workspaces and
-    // applying the SAME boardWhereClause the Kanban board itself uses, via
-    // the SAME resolveActiveCompanyId + boardWhereClause convention
-    // /api/performance already established for task-scoped queries. A task
-    // whose workspace_id is NULL is the box's own unattributed data and
-    // stays visible (matches boardWhereClause's own posture); a task whose
-    // workspace resolves to an OUT-OF-SCOPE workspace (foreign company /
-    // archived / residue) is treated as not found, same as a parent_id that
-    // does not exist at all. Children are fetched below by parent_task_id,
-    // so verifying the PARENT here closes the read for its whole child set.
+    // ── Company scope (PRES-009: ingest-grade ownership predicate) ────────
+    // Parent ownership is proven by the SAME predicate the ingest front door
+    // uses (src/lib/presentation-tenant-scope.ts): a durably attributed
+    // workspace resolving to the active company, OR a durable
+    // task_request_keys creation identity. A NULL workspace alone is NOT
+    // proof — the old `workspace_id IS NULL` arm made an unattributed parent
+    // (and its whole child set) visible to EVERY active company. An
+    // out-of-scope or ambiguous parent is 404, same as a parent_id that does
+    // not exist at all. Children are fetched below by parent_task_id, so
+    // verifying the PARENT here closes the read for its whole child set.
     const activeCompanyId = resolveActiveCompanyId(db);
-    const scope = boardWhereClause(activeCompanyId);
-    const scopedWorkspaceIds = (
-      db.prepare(`SELECT w.id FROM workspaces w ${scope.sql}`).all(...scope.params) as { id: string }[]
-    ).map((w) => w.id);
-    const scopeIdList = scopedWorkspaceIds.length > 0 ? scopedWorkspaceIds : ['__no_workspace__'];
-    const scopePlaceholders = scopeIdList.map(() => '?').join(',');
+    const own = tenantTaskWhere(activeCompanyId);
 
-    // Fetch parent row (company-scoped)
+    // Fetch parent row (company-scoped).
+    // PRES-021 — serve the block fields the standalone parent response type
+    // claims (reason/audience/next-retry/recovery-owner) plus the last-update
+    // timestamp, so the blocked panel is actionable without a second fetch.
+    // All columns are COALESCE-probed: pre-migration boxes lack some of them
+    // and must return nulls, never a 500 (DATA-01 posture).
+    const taskCols = (
+      db.prepare(`SELECT name FROM pragma_table_info('tasks')`).all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    const hasTaskCol = (name: string): boolean => taskCols.includes(name);
+    const blockCols = [
+      'block_reason',
+      'block_gaps',
+      'block_needs',
+      'block_audience',
+      'dispatch_attempts',
+      'next_dispatch_eligible_at',
+      'updated_at',
+    ]
+      .filter(hasTaskCol)
+      .map((c) => `, t.${c}`)
+      .join('');
     const parent = db
       .prepare(
-        `SELECT id, title, status, priority, department,
-                process_certificate_sha, created_at
-         FROM tasks
-        WHERE id = ? AND (workspace_id IS NULL OR workspace_id IN (${scopePlaceholders}))`,
+        `SELECT t.id, t.title, t.status, t.priority, t.department,
+                t.process_certificate_sha, t.created_at, t.assigned_agent_id${blockCols}
+         FROM tasks t
+        WHERE t.id = ? AND ${own.sql}`,
       )
-      .get(parentId, ...scopeIdList) as Record<string, unknown> | undefined;
+      .get(parentId, ...own.params) as Record<string, unknown> | undefined;
 
     if (!parent) {
       return NextResponse.json(
@@ -108,6 +123,14 @@ export async function GET(request: NextRequest) {
 
     // For each child, fetch its task_activities so the PhaseStepper can
     // derive per-label status from the 26 manifest phase ids.
+    //
+    // PRES-040 — degraded telemetry without blocking: each child's response
+    // carries telemetry { schema_version, event-backed, historical-only }.
+    // event-backed counts structured events (metadata.event_id on a known
+    // schema version); historical-only means the child's phases derive purely
+    // from legacy text notes with no structured key — visible to the CEO and
+    // client as repair-needed, while unrelated artifact production continues
+    // (this route never gates on it).
     const childrenWithPhases = children.map((child) => {
       const activities = db
         .prepare(
@@ -117,6 +140,15 @@ export async function GET(request: NextRequest) {
         activity_type: string;
         metadata?: string | null;
       }>;
+      let eventBacked = 0;
+      let historicalOnly = true;
+      let maxSchemaVersion: number | null = null;
+      for (const a of activities) {
+        const info = activitySchemaInfo(a);
+        if (info.version > 0) historicalOnly = false;
+        if (maxSchemaVersion == null || info.version > maxSchemaVersion) maxSchemaVersion = info.version;
+        if (info.eventId && info.known) eventBacked += 1;
+      }
 
       // FIX 50b — SELECT path alongside deliverable_type: the teleprompter is
       // detected by the basename of the registered path
@@ -153,6 +185,11 @@ export async function GET(request: NextRequest) {
         updated_at: child.updated_at,
         stage_slug: (child.stage_slug as string | null | undefined) ?? null,
         phase_label: phaseLabel,
+        telemetry: {
+          schema_version: maxSchemaVersion,
+          event_backed: eventBacked,
+          historical_only: historicalOnly,
+        },
         phases: progress.phases.map((p) => ({
           label: p.label,
           status: p.status,
@@ -234,6 +271,12 @@ export async function GET(request: NextRequest) {
       }
     }
 
+    // PRES-021 — recovery owner: the agent assigned to unstick this parent
+    // (board SELECT is t.*, so assigned_agent_id is the live value). Null
+    // when unassigned — the client then routes to the owner, never a name
+    // invented here.
+    const recoveryOwner = (parent.assigned_agent_id as string | null | undefined) ?? null;
+
     return NextResponse.json({
       parent: {
         id: parent.id,
@@ -243,6 +286,16 @@ export async function GET(request: NextRequest) {
         department: parent.department,
         process_certificate_sha: parent.process_certificate_sha,
         created_at: parent.created_at,
+        // PRES-021 — actionable block fields (null when the column or the
+        // value is absent — never fabricated, never a 500 on old boxes).
+        block_reason: (parent.block_reason as string | null | undefined) ?? null,
+        block_gaps: (parent.block_gaps as string | null | undefined) ?? null,
+        block_needs: (parent.block_needs as string | null | undefined) ?? null,
+        block_audience: (parent.block_audience as string | null | undefined) ?? null,
+        dispatch_attempts: (parent.dispatch_attempts as number | null | undefined) ?? null,
+        next_retry_at: (parent.next_dispatch_eligible_at as string | null | undefined) ?? null,
+        recovery_owner: recoveryOwner,
+        updated_at: (parent.updated_at as string | null | undefined) ?? null,
       },
       children: childrenWithPhases,
       aggregate: {

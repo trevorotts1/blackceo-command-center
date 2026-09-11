@@ -72,6 +72,14 @@ interface MissionControlState {
   // real-time channel. Process-local: same store, same SSE hook.
   activityPulse: number;
   incrementActivityPulse: () => void;
+  /**
+   * PRES-021 — the task/run scope of the LAST activity_logged payload
+   * (task_id + run/attempt identity parsed from its metadata), or null when
+   * the last payload carried none. Lets parent/stepper refresh ONLY the
+   * affected card instead of every mounted instance fetching per event.
+   */
+  lastActivityScope: { taskId: string | null; runId: string | null; attemptId: string | null } | null;
+  noteActivityScope: (scope: { taskId: string | null; runId: string | null; attemptId: string | null }) => void;
 
   // MR-45 — bulk selection state for the kanban board multi-select toolbar.
   // A Set of task IDs (not an array — lookups are O(1) and no duplicate guard
@@ -201,6 +209,9 @@ export const useMissionControl = create<MissionControlState>((set) => ({
   activityPulse: 0,
   incrementActivityPulse: () =>
     set((state) => ({ activityPulse: state.activityPulse + 1 })),
+  // PRES-021 — scoped refresh target for the last activity event.
+  lastActivityScope: null,
+  noteActivityScope: (scope) => set({ lastActivityScope: scope }),
 
   // MR-45 — bulk selection state
   selectedTaskIds: new Set<string>(),

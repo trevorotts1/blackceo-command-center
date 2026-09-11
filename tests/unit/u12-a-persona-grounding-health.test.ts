@@ -37,6 +37,11 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { spawnSync } from 'node:child_process';
+
+// Repo root captured at module load — before any cwd mocking. Used to locate
+// scripts/lib/build-inventory.sh for PRES-046 sealing of the gating fixture.
+const REPO_ROOT = process.cwd();
 
 let tmpDir: string;
 
@@ -265,6 +270,21 @@ function makeGatingGreenNextBuild(dir: string): void {
     path.join(serverDir, 'index.html'),
     '<!DOCTYPE html><html><head><title>Summit Retail Enterprises</title></head><body></body></html>',
   );
+
+  // PRES-046 repair: the route tests mock cwd() to tmpDir, and the
+  // fail-closed build_content check resolves its oracle as
+  // <cwd>/scripts/lib/build-inventory.sh. Stage the REAL script plus a real
+  // seal manifest (same oracle atomic-deploy.sh uses). scripts/ sits outside
+  // the canonical digest inputs, so staging never perturbs VERIFIED.
+  // Legacy-unattested refusal stays covered by the pres046 shell suites.
+  // The advisory persona_match probe is unaffected.
+  const lib = path.join(REPO_ROOT, 'scripts', 'lib', 'build-inventory.sh');
+  if (fs.existsSync(lib)) {
+    const stagedLibDir = path.join(dir, 'scripts', 'lib');
+    fs.mkdirSync(stagedLibDir, { recursive: true });
+    fs.copyFileSync(lib, path.join(stagedLibDir, 'build-inventory.sh'));
+    spawnSync('bash', [lib, '--manifest', dir, nextDir, 'abc123test', String(Math.floor(Date.now() / 1000))], { encoding: 'utf8' });
+  }
 }
 
 function greenGatingDbMock() {

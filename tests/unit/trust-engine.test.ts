@@ -18,12 +18,14 @@
  * claim-then-send idempotency is exercised for real.
  */
 
+import './_isolated-db'; // PRES-022: the gate chain reaches @/lib/db transitively — isolate.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { BACKLOG_COLUMN_SUBTITLE } from '../../src/lib/board-labels';
+import { registerVerifiedReceipt } from '../../src/lib/presentation-proof-registry';
 
 const TMP_DB = path.join(
   fs.mkdtempSync(path.join(os.tmpdir(), 'bc-trust-engine-')),
@@ -229,11 +231,44 @@ test('DONE on a presentations task with NO registered process_certificate_sha is
   assert.match(held.heldForMissingPostflight[0].detail, /process_certificate_sha/);
 });
 
-test('DONE on a presentations task WITH a registered process_certificate_sha sends normally', () => {
+test('DONE on a presentations task WITH a registered process_certificate_sha sends normally', async () => {
+  // PRES-022: the notification gate is requiresRegisteredProof now — a stored
+  // sha alone is only an identifier, so this test registers a VERIFIED receipt
+  // through the registry (engine-trusted qc_review event + recomputed proof)
+  // before asking the planner to send.
+  const now = new Date().toISOString();
+  const ws = db.queryOne<{ id: string }>('SELECT id FROM workspaces LIMIT 1');
+  db.run(
+    `INSERT OR IGNORE INTO tasks (id, title, status, department, created_at, updated_at, workspace_id)
+     VALUES ('t-cert-present', 'Trust cert task', 'done', 'presentations', ?, ?, ?)`,
+    [now, now, ws ? ws.id : null],
+  );
+  // The proof requires a verified bundle artifact (PRES-022) — a URL alone
+  // proves no deck run. Seed a real PK-headered deck file on disk.
+  const fsMod = await import('node:fs');
+  const deckPath = path.join(fsMod.mkdtempSync(path.join(os.tmpdir(), 'te-deck-')), 'TRUST-DECK-FINAL.pptx');
+  fsMod.writeFileSync(deckPath, Buffer.concat([Buffer.from('PK\x03\x04', 'binary'), Buffer.alloc(1_100_000, 0x41)]));
+  db.run(
+    `INSERT OR IGNORE INTO task_deliverables (id, task_id, deliverable_type, title, path, created_at)
+     VALUES ('trust-cert-deliv-deck', 't-cert-present', 'file', 'assembled deck', ?, ?)`,
+    [deckPath, now],
+  );
+  db.run(
+    `INSERT OR IGNORE INTO task_deliverables (id, task_id, deliverable_type, title, path, created_at)
+     VALUES ('trust-cert-deliv', 't-cert-present', 'url', 'deck pointer', 'https://example.invalid/deck', ?)`,
+    [now],
+  );
+  db.run(
+    `INSERT OR IGNORE INTO events (id, type, task_id, message, created_at) VALUES ('trust-cert-qc', 'qc_review', 't-cert-present', ?, ?)`,
+    ['[QC-AUTO] Score: 9.0/10 PASS — trust-engine receipt', now],
+  );
+  db.run('DELETE FROM presentation_verification_receipts WHERE task_id = ?', ['t-cert-present']);
+  const reg = registerVerifiedReceipt({ taskId: 't-cert-present', attempt: 1 });
+  assert.ok(reg.ok, `receipt registration failed: ${reg.error}`);
   const plans = engine.planSends(
     [mkTask({
       id: 't-cert-present', status: 'done', department: 'presentations',
-      process_certificate_sha: 'a'.repeat(64),
+      process_certificate_sha: reg.receipt!.receipt_sha256,
     })],
     { now: DAYTIME, deliverableFor: () => ({ location: '/tmp/deck.pptx', summary: 'Deck ready.' }) },
   );
