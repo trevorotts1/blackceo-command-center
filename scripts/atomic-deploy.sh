@@ -630,6 +630,47 @@ PRE_BUILD_INVENTORY="$(_ccbi_inventory_digest "$APP_DIR")" || {
 }
 _log "  Pre-build content inventory: ${PRE_BUILD_INVENTORY}"
 
+# ── tsconfig.json is mutated BY the build — snapshot it (fixed 2026-09-11) ────
+# `next build` rewrites tsconfig.json's `include` array to register the
+# generated type globs of whatever dist dir it is building into. Because this
+# script deliberately builds into a UNIQUE temp dir (.next.tmp.<ts>-<pid>), the
+# entry Next adds is NEW on every single run — so tsconfig.json, which is a
+# legitimate compile-affecting input and is hashed above, ALWAYS differed
+# between the pre- and post-build digests. Result: the frozen-source proof
+# below rejected every otherwise-perfect candidate with
+# "FROZEN-SOURCE VIOLATION", and a box where NEXT_DIST_DIR is honoured could
+# never deploy at all — the guard permanently vetoed its own build output.
+#
+# Next's edit is a BUILD ARTIFACT, not a source change, so it is snapshotted
+# here and restored immediately before the post-build digest. The guard keeps
+# full strength over every real input (src/, public/, lockfile, next.config.*,
+# tailwind/postcss, middleware.ts) INCLUDING genuine human edits to
+# tsconfig.json made while a build runs — those are reverted and therefore
+# cannot reach the served bundle unattested, which is exactly the intent.
+CCBI_TSCONFIG_SNAPSHOT=""
+if [[ -f "${APP_DIR}/tsconfig.json" ]]; then
+  CCBI_TSCONFIG_SNAPSHOT="$(mktemp "${TMPDIR:-/tmp}/ccbi-tsconfig-XXXXXX")" || {
+    _err "Failed to snapshot tsconfig.json before the build."
+    exit 2
+  }
+  cp -p "${APP_DIR}/tsconfig.json" "$CCBI_TSCONFIG_SNAPSHOT" || {
+    _err "Failed to copy tsconfig.json into its pre-build snapshot."
+    exit 2
+  }
+  # Several `exit 2` build-failure paths sit between here and the restore below.
+  # Without this trap a failed build would leave the checkout's tsconfig.json
+  # carrying a dead `.next.tmp.<ts>-<pid>` include entry (one more on every
+  # retry) and leak the snapshot file. The normal restore clears the variable,
+  # so on the success path this trap is already a no-op.
+  _ccbi_restore_tsconfig_on_exit() {
+    [[ -n "${CCBI_TSCONFIG_SNAPSHOT:-}" && -f "${CCBI_TSCONFIG_SNAPSHOT}" ]] || return 0
+    cp -p "$CCBI_TSCONFIG_SNAPSHOT" "${APP_DIR}/tsconfig.json" 2>/dev/null || true
+    rm -f "$CCBI_TSCONFIG_SNAPSHOT" 2>/dev/null || true
+    CCBI_TSCONFIG_SNAPSHOT=""
+  }
+  trap _ccbi_restore_tsconfig_on_exit EXIT
+fi
+
 # Export NEXT output dir env var so Next.js writes to the temp dir instead of .next.
 # next.config.mjs now reads NEXT_DIST_DIR into `distDir` (BUG-1 FIX). Next.js
 # resolves distDir via path.join(<project dir>, distDir) -- NOT path.resolve --
@@ -757,6 +798,19 @@ _ok "Build succeeded. BUILD_ID: ${BUILD_ID}"
 # input changed during the build, the candidate is DISCARDED (exit 2, live
 # .next untouched) — the served bytes would not match the checked-out source
 # and no receipt could vouch for them.
+# Undo `next build`'s own tsconfig.json `include` edit before digesting — see
+# the snapshot block next to PRE_BUILD_INVENTORY above.
+if [[ -n "${CCBI_TSCONFIG_SNAPSHOT:-}" && -f "${CCBI_TSCONFIG_SNAPSHOT}" ]]; then
+  if cmp -s "$CCBI_TSCONFIG_SNAPSHOT" "${APP_DIR}/tsconfig.json"; then
+    _log "  tsconfig.json unchanged by the build."
+  else
+    cp -p "$CCBI_TSCONFIG_SNAPSHOT" "${APP_DIR}/tsconfig.json" \
+      && _log "  tsconfig.json restored to pre-build content (build-generated type globs discarded)." \
+      || _warn "  Could not restore the tsconfig.json snapshot; the frozen-source proof below will report the difference."
+  fi
+  rm -f "$CCBI_TSCONFIG_SNAPSHOT" 2>/dev/null || true
+  CCBI_TSCONFIG_SNAPSHOT=""
+fi
 POST_BUILD_INVENTORY="$(_ccbi_inventory_digest "$APP_DIR")" || {
   _err "Failed to compute post-build content inventory for ${APP_DIR}."
   rm -rf "$BUILD_TMP" 2>/dev/null || true
