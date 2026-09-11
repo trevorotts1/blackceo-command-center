@@ -137,6 +137,8 @@ module.exports = {
     min_uptime: 10000,               // <10s uptime = a failed start
     max_restarts: 10,                // after 10 failed starts → errored, stop looping
     exp_backoff_restart_delay: 500,  // exponential backoff (500ms → 1s → 2s → …)
+    // Missing/stale builds exit 78: require a rebuild instead of endless restarts.
+    stop_exit_codes: [78],
     kill_timeout: 10000,
     watch: false,
     max_memory_restart: '512M'
