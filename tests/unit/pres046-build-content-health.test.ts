@@ -18,7 +18,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, cpSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 
@@ -115,9 +115,16 @@ test('PRES-046 receipt: garbage receipt cannot waive; binding receipt waives exa
     const sourceInvBefore = JSON.parse(runInv(['--verify', app]).stdout);
     void sourceInvBefore;
     // Rollback topology: artifact B was green, A failed health. .next holds B; source is A.
+    // Copy contents (not the dir entry) with cpSync — no shell, no GNU/BSD
+    // trailing-slash edge (`cp -R src/ dst/` may nest src inside dst on some
+    // coreutils builds, leaving rollbackDir/build-inventory.json absent).
     const rollbackDir = path.join(app, '.next.rollback');
     mkdirSync(rollbackDir, { recursive: true });
-    execFileSync('cp', ['-R', path.join(app, '.next') + '/', rollbackDir + '/']);
+    for (const entry of ['BUILD_ID', 'build-inventory.json'] as const) {
+      const src = path.join(app, '.next', entry);
+      if (existsSync(src)) cpSync(src, path.join(rollbackDir, entry));
+    }
+    assert.ok(existsSync(path.join(rollbackDir, 'build-inventory.json')), 'rollback snapshot carries served manifest');
     // source becomes "failed target" content:
     writeFileSync(path.join(app, 'src', 'a.ts'), 'export const a = 2;\n');
     const sourceInv = runInv(['--digest', app]).stdout.trim();
