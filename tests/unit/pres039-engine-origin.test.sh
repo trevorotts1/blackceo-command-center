@@ -118,8 +118,9 @@ EOF
 # fixture is generated from the live ONB canonical manifest byte-shape
 # (version + phase ids), never hand-counted.
 python3 - "$RUN_TMP/manifest.json" <<'EOF'
-import json, sys
-src = json.load(open('/Users/blackceomacmini/openclaw-onboarding/universal-sops/presentation-slide-craft/PIPELINE-MANIFEST.json'))
+import json, os, sys
+_src = os.path.join(os.environ.get("HOME", ""), "openclaw-onboarding/universal-sops/presentation-slide-craft/PIPELINE-MANIFEST.json")
+src = json.load(open(_src))
 json.dump({"manifest_version": src["manifest_version"],
            "phases": [{"id": p["id"], "order": p.get("order", 0)} for p in src["phases"]],
            "autofails": src.get("autofails", []),

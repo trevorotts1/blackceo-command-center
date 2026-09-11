@@ -6905,6 +6905,11 @@ export const migrations: Migration[] = [
       console.log('[Migration 142] Creating presentation_verification_receipts...');
       db.exec(`
         CREATE TABLE IF NOT EXISTS presentation_verification_receipts (
+          id TEXT PRIMARY KEY,
+          task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+          company_id TEXT,
+          presentation_id TEXT,
+          run_id TEXT,
           attempt INTEGER NOT NULL DEFAULT 1,
           manifest_revision TEXT,
           receipt_sha256 TEXT NOT NULL,

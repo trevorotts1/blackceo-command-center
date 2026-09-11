@@ -212,7 +212,7 @@ fi
 # run-full-install.sh: src public config + lockfile + ts/build configs).
 ONB_RUN_FULL=""
 for c in "$REPO_ROOT/../openclaw-onboarding/32-command-center-setup/scripts/run-full-install.sh" \
-         "/Users/blackceomacmini/openclaw-onboarding/32-command-center-setup/scripts/run-full-install.sh"; do
+         "${HOME}/openclaw-onboarding/32-command-center-setup/scripts/run-full-install.sh"; do
   [[ -f "$c" ]] && { ONB_RUN_FULL="$c"; break; }
 done
 if [[ -n "$ONB_RUN_FULL" ]]; then

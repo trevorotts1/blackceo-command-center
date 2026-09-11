@@ -278,6 +278,11 @@ jobs:
         env:
           DATABASE_PATH: /tmp/probe-fixture.db
 
+      - name: Seal build-content manifest (PRES-046)
+        run: |
+          BUILD_ID="$(cat .next/BUILD_ID 2>/dev/null || printf 'fixture-build')"
+          bash scripts/lib/build-inventory.sh --manifest "$PWD" "$PWD/.next" "$BUILD_ID" "$(date +%s)"
+
       - name: Seed fixture DB with branded company
         run: |
           node -e "
