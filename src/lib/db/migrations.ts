@@ -7108,6 +7108,40 @@ export const migrations: Migration[] = [
       console.log('[Migration 144] WF12-B idempotency + receipt tables ready');
     },
   },
+  {
+    id: '145',
+    name: 'rr019_board_sync_intent',
+    up: (db) => {
+      console.log('[Migration 145] RR-019 durable board-sync intent tables...');
+      // Additive-only: one new table + three nullable-shape task columns
+      // (DEFAULT-bearing, no CHECK). No existing table is rebuilt, no row is
+      // rewritten, no RR-018 hunk is touched.
+      db.exec(`CREATE TABLE IF NOT EXISTS board_sync_ops (
+        op_id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL CHECK (kind IN ('create_card','stamp_task_id','status','refresh_copies')),
+        scope TEXT NOT NULL DEFAULT '',
+        payload TEXT NOT NULL DEFAULT '{}',
+        owner TEXT NOT NULL DEFAULT 'operator-triage',
+        board_target TEXT NOT NULL DEFAULT 'cc-primary',
+        desired_rev INTEGER NOT NULL DEFAULT 0,
+        state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending','acked','superseded','failed','dead')),
+        attempts INTEGER NOT NULL DEFAULT 0,
+        next_retry_at TEXT,
+        last_error TEXT,
+        result TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_board_sync_ops_task ON board_sync_ops(task_id, state)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_board_sync_ops_due ON board_sync_ops(state, next_retry_at)`);
+      const cols = (db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[]).map((c) => c.name);
+      if (!cols.includes('desired_rev')) db.exec(`ALTER TABLE tasks ADD COLUMN desired_rev INTEGER NOT NULL DEFAULT 0`);
+      if (!cols.includes('acked_rev')) db.exec(`ALTER TABLE tasks ADD COLUMN acked_rev INTEGER NOT NULL DEFAULT 0`);
+      if (!cols.includes('board_sync_state')) db.exec(`ALTER TABLE tasks ADD COLUMN board_sync_state TEXT NOT NULL DEFAULT 'ok'`);
+      console.log('[Migration 145] board-sync intent ready');
+    },
+  },
 
 ];
 
