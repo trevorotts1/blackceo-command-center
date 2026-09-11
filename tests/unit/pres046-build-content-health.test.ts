@@ -18,7 +18,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { cpSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 
@@ -117,7 +117,14 @@ test('PRES-046 receipt: garbage receipt cannot waive; binding receipt waives exa
     // Rollback topology: artifact B was green, A failed health. .next holds B; source is A.
     const rollbackDir = path.join(app, '.next.rollback');
     mkdirSync(rollbackDir, { recursive: true });
-    execFileSync('cp', ['-R', path.join(app, '.next') + '/', rollbackDir + '/']);
+    // fs.cpSync copies directory contents consistently on Linux and macOS;
+    // shell cp -R with trailing slashes nests .next on GNU cp.
+    cpSync(path.join(app, '.next'), rollbackDir, { recursive: true });
+    assert.equal(
+      readFileSync(path.join(rollbackDir, 'build-inventory.json'), 'utf8'),
+      readFileSync(path.join(app, '.next', 'build-inventory.json'), 'utf8'),
+      'rollback copy preserves the sealed artifact manifest',
+    );
     // source becomes "failed target" content:
     writeFileSync(path.join(app, 'src', 'a.ts'), 'export const a = 2;\n');
     const sourceInv = runInv(['--digest', app]).stdout.trim();

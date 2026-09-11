@@ -273,6 +273,13 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Company configuration is a compile-affecting inventory input. Set it
+      # before building/sealing so the fixture serves exactly what was built.
+      - name: Write fixture company-config.json
+        run: |
+          mkdir -p config
+          echo '{"companyId":"1","companyName":"Fixture Corp","slug":"fixture-corp"}' > config/company-config.json
+
       - name: Build app for fixture
         run: npm run build
         env:
@@ -294,11 +301,6 @@ jobs:
             db.close();
             console.log('Fixture DB seeded');
           "
-
-      - name: Write fixture company-config.json
-        run: |
-          mkdir -p config
-          echo '{"companyId":"1","companyName":"Fixture Corp","slug":"fixture-corp"}' > config/company-config.json
 
       - name: Write pre-rendered branded index.html (html_title check)
         run: |
