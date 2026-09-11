@@ -48,6 +48,15 @@ PASS=0; FAIL=0
 ok()  { PASS=$((PASS+1)); printf '  ok   - %s\n' "$1"; }
 bad() { FAIL=$((FAIL+1)); printf '  FAIL - %s\n' "$1"; }
 
+# Checked-in launch configs must preserve the same refusal policy as installers.
+for config in ecosystem.config.cjs ecosystem.cc-prod.config.cjs; do
+  if node -e 'const c = require(process.argv[1]); const apps = c.apps.filter(a => /cc-start\.sh/.test(String(a.script) + " " + String(a.args))); if (!apps.length || apps.some(a => !a.stop_exit_codes?.includes(78))) process.exit(1)' "$REPO_ROOT/$config"; then
+    ok "checked-in $config stops deterministic exit 78"
+  else
+    bad "checked-in $config lacks deterministic refusal stop policy"
+  fi
+done
+
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/pres045-test.XXXXXX")"
 KEEP_WORK="${PRES045_KEEP_WORK:-}"
 cleanup() { [[ -n "$KEEP_WORK" ]] || rm -rf "$WORK"; }

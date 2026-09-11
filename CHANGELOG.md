@@ -1,3 +1,7 @@
+## [v7.3.4] — 2026-09-11 — Preserve presentation refusal restart policy
+
+Restore exit-code 78 stop handling in both checked-in process configurations. Deliberate missing/stale-build refusals now require repair instead of automatic restart loops. The existing refusal suite verifies both configurations; 51 checks pass.
+
 ## [v7.3.3] — 2026-09-11 — Manual dispatch could not reach departments auto-dispatch could
 
 ### Fixed

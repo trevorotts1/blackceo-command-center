@@ -121,6 +121,8 @@ module.exports = {
     // Exponential backoff (replaces fixed restart_delay) so rapid loops back off
     // instead of hammering port/disk at full speed.
     exp_backoff_restart_delay: 2000,
+    // Missing/stale builds exit 78: require a rebuild instead of endless restarts.
+    stop_exit_codes: [78],
     kill_timeout: 10000,
     watch: false,
     max_memory_restart: '512M'
