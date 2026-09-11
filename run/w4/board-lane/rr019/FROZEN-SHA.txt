@@ -1,2 +1,6 @@
 7e00a6fc6e697981df2b76f6a29a26bc8d3280ea  FLEET  rr/w4-board-rr019  (base origin/main 3bedab785f1490139e095da2a6b525ba4ff71ef1)
 164cabffa1c1bc0fd6a78de45397e1f46be157cf  CC  rr/w4-board-rr019-cc  (base origin/main 0309366c31ca248c479d90c91fc894bc5be4af04)
+
+Freeze commits (pushed refs, read back via git ls-remote):
+9bf56187c11f0acfb064fe174c5245cc1dcff0db  FLEET  rr/w4-board-rr019
+382131a867369ea572789b5d7593e3b84ba9096d  CC  rr/w4-board-rr019-cc
