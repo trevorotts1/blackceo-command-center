@@ -1,0 +1,22 @@
+$ git log --oneline -3 (FLEET worktree)
+7e00a6f RR-019: durable board-sync (incident acceptance, projection ops, op-ID recovery, coalesce, resume)
+3bedab7 Merge pull request #6 from trevorotts1/rr/w4-fleet-train-rr014-rr011-rr012-agg2
+3def289 FLEET aggregate: carry RR-014 alert-intent repairs + RR-011/RR-012 durable dispatch protocol
+---STAT---
+7e00a6fc6e697981df2b76f6a29a26bc8d3280ea RR-019: durable board-sync (incident acceptance, projection ops, op-ID recovery, coalesce, resume)
+
+ rescue/service/board-sync.mjs           | 822 ++++++++++++++++++++++++++++++++
+ rescue/tests/RR-019/board-sync.test.mjs | 329 +++++++++++++
+ 2 files changed, 1151 insertions(+)
+
+$ git log --oneline -3 (CC worktree)
+164cabffa RR-019: durable board-sync intake (migration 145, intent module, battery)
+0309366c3 Merge pull request #319 from trevorotts1/batch/cc-20260910-201841
+67ee0ff5b Stage exact standalone presentation candidate compatibility references
+---STAT---
+164cabffa1c1bc0fd6a78de45397e1f46be157cf RR-019: durable board-sync intake (migration 145, intent module, battery)
+
+ src/lib/db/migrations.ts            |  34 +++++
+ src/lib/rescue/board-sync-intent.ts | 272 ++++++++++++++++++++++++++++++++++++
+ tests/unit/rr019-board-sync.test.ts | 253 +++++++++++++++++++++++++++++++++
+ 3 files changed, 559 insertions(+)

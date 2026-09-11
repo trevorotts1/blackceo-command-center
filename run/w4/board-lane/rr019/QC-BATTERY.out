@@ -1,0 +1,647 @@
+==============================================================================
+FLEET BASE CONTROLS (pristine /tmp/rr019-basecheck @ 3bedab7 — every case FAILS, as required)
+==============================================================================
+BASE rr_board tables: 0
+BASE board-sync import: ERR_MODULE_NOT_FOUND
+BASE CONTROL 1 outage-accept => FAIL ( no intent table; no acceptRescue: outage intake cannot persist intent )
+BASE CONTROL 2 restore-one-card => FAIL ( no intent table; no restoreBoard: zero-card rebuild unwired )
+BASE CONTROL 3 lost-create-by-opid => FAIL ( no intent table; no op-id lookup: lost response mints dupes or zero )
+BASE CONTROL 4 stamp-retry => FAIL ( no intent table; no stamp retry: failed stamp dropped )
+BASE CONTROL 5 ooo-coalesce => FAIL ( no intent table; no coalesce: out-of-order overwrites history )
+BASE CONTROL 6 restart-resume => FAIL ( no intent table; no backfill: restart loses pending board work )
+BASE CONTROL 7 perm-owned => FAIL ( no intent table; no owned recovery for schema faults )
+BASE CONTROL 8 stale-keep-owner-due => FAIL ( no intent table; no stale handling: owner/due dropped )
+(CC base: no board_sync_ops table, no board-sync-intent module — migration 145 absent;
+ intent record/ack/restore paths unwired, so CC cases 1-8 likewise FAIL on base.)
+
+==============================================================================
+FLEET FIXED BATTERY: rescue/tests/RR-019/board-sync.test.mjs — 11/11 PASS
+==============================================================================
+✔ RR-019 (1): CC outage before intake permits authorized logged rescue with projection deferred (8.479833ms)
+✔ RR-019 (1b): acceptance refuses unauthenticated target and nameless owner (4.365458ms)
+✔ RR-019 (2): restoration reconstructs exactly one current card (7.43075ms)
+✔ RR-019 (2b): restoration dedupes twin cards to one current card (4.868584ms)
+✔ RR-019 (3): lost create response is recovered by operation ID, never re-minted (6.658125ms)
+✔ RR-019 (4): failed task-ID stamp retries with bounded backoff then acks (5.906291ms)
+✔ RR-019 (5): out-of-order status writes coalesce, newest applies, history intact (6.383833ms)
+✔ RR-019 (6): restart resumes orphaned intents and due retries (6.793416ms)
+✔ RR-019 (7): permanent schema error becomes owned recovery, never silent (5.345375ms)
+✔ RR-019 (8): stale intent coalesces without losing owner, due time, or history (5.367083ms)
+✔ RR-019 (degraded): sustained failure notifies operator once and clears on recovery (6.712125ms)
+ℹ tests 11
+ℹ suites 0
+ℹ pass 11
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 116.352917
+
+==============================================================================
+CC FIXED BATTERY: tests/unit/rr019-board-sync.test.ts — 10/10 PASS
+==============================================================================
+[DB] Running migration 001: initial_schema
+[Migration 001] Baseline schema marker
+[DB] Migration 001 completed
+[DB] Running migration 002: add_workspaces
+[Migration 002] Adding workspaces table and columns...
+[DB] Migration 002 completed
+[DB] Running migration 003: add_planning_tables
+[Migration 003] Adding planning tables...
+[DB] Migration 003 completed
+[DB] Running migration 004: add_planning_session_columns
+[Migration 004] Adding planning session columns to tasks...
+[DB] Migration 004 completed
+[DB] Running migration 005: add_agent_model_field
+[Migration 005] Adding model field to agents...
+[DB] Migration 005 completed
+[DB] Running migration 006: add_planning_dispatch_error_column
+[Migration 006] Adding planning_dispatch_error column to tasks...
+[DB] Migration 006 completed
+[DB] Running migration 007: add_agent_tools_memory_and_daily_logs
+[Migration 007] Adding tools_md, memory_md to agents; user_md to workspaces; agent_memory_logs table...
+[Migration 007] Created agent_memory_logs table
+[DB] Migration 007 completed
+[DB] Running migration 008: placeholder_for_legacy_gap
+[DB] Migration 008 completed
+[DB] Running migration 009: add_effectiveness_tracking
+[Migration 009] Adding effectiveness tracking...
+[Migration 009] Effectiveness tracking columns and outcomes table created
+[DB] Migration 009 completed
+[DB] Running migration 010: add_execution_queue
+[Migration 010] Adding execution_queue table...
+[Migration 010] Created execution_queue table
+[DB] Migration 010 completed
+[DB] Running migration 011: add_dept_memory
+[Migration 011] Adding dept_memory table...
+[Migration 011] Created dept_memory table
+[DB] Migration 011 completed
+[DB] Running migration 012: add_companies_table
+[Migration 012] Adding companies table and company_id to workspaces...
+[Migration 012] Schema ready. Workspaces populated by Skill 23 + seed script.
+[DB] Migration 012 completed
+[DB] Running migration 013: add_agent_settings
+[Migration 013] Adding agent_settings table...
+[Migration 013] Created agent_settings table
+[DB] Migration 013 completed
+[DB] Running migration 014: add_workspace_sort_order
+[Migration 014] Adding sort_order to workspaces...
+[Migration 014] sort_order column already exists, skipping
+[DB] Migration 014 completed
+[DB] Running migration 015: add_specialist_type_to_agents
+[Migration 015] Adding specialist_type column to agents...
+[Migration 015] specialist_type column already exists, skipping
+[DB] Migration 015 completed
+[DB] Running migration 016: add_task_persona_fields
+[Migration 016] Persona fields + persona_selection_log table ready
+[DB] Migration 016 completed
+[DB] Running migration 017: add_campaigns_and_campaign_id
+[Migration 017] Campaigns table + tasks.campaign_id ready
+[DB] Migration 017 completed
+[DB] Running migration 018: add_persona_performance
+[Migration 018] persona_performance + persona_weight_overrides ready
+[DB] Migration 018 completed
+[DB] Running migration 019: add_persona_assignment_and_version
+[Migration 019] persona_assignment + tasks.persona_version ready
+[DB] Migration 019 completed
+[DB] Running migration 020: add_da_challenges
+[Migration 020] da_challenges table ready
+[DB] Migration 020 completed
+[DB] Running migration 021: add_hybrid_task_secondary_persona
+[Migration 021] Hybrid task secondary persona fields ready
+[DB] Migration 021 completed
+[DB] Running migration 024: reconcile_da_challenges_shape
+[Migration 024] da_challenges reconciled from canonical shape -> PRD lifecycle (D15/D-J1 (ii)); 0 row(s) carried over; indexes replayed
+[DB] Migration 024 completed
+[DB] Running migration 025: sop_proposals_auto_replace_fields
+[Migration 025] Adding auto-replace fields to sop_proposals...
+[Migration 025] sop_proposals table created from scratch (fresh-install path)
+[DB] Migration 025 completed
+[DB] Running migration 026: add_skill_35_publish_queue
+[Migration 026] publish_queue table ready (Skill 35)
+[DB] Migration 026 completed
+[DB] Running migration 027: add_task_completed_at_and_history
+[Migration 027] Adding completed_at + task_history...
+[Migration 027] completed_at + task_history ready
+[DB] Migration 027 completed
+[DB] Running migration 028: add_workspace_head_agent
+[Migration 028] Adding head_agent_id to workspaces...
+[Migration 028] head_agent_id added + backfilled
+[DB] Migration 028 completed
+[DB] Running migration 029: add_agent_settings_lock_protocol
+[Migration 029] Adding model lock protocol columns to agent_settings...
+[Migration 029] agent_settings lock protocol ready
+[DB] Migration 029 completed
+[DB] Running migration 030: cleanup_demo_company_row
+[Migration 030] Cleaning up stray placeholder company row...
+[Migration 030] No real company yet, leaving placeholder in place
+[DB] Migration 030 completed
+[DB] Running migration 031: add_model_registry
+[Migration 031] Adding model_registry table for the dynamic model catalog...
+[Migration 031] model_registry + model_registry_refresh_log ready
+[DB] Migration 031 completed
+[DB] Running migration 032: add_cloudflare_access_config
+[Migration 032] Adding cloudflare_access_config table...
+[Migration 032] cloudflare_access_config ready
+[DB] Migration 032 completed
+[DB] Running migration 033: add_system_status_snapshots
+[Migration 033] Adding system_status_snapshots time-series table...
+[Migration 033] system_status_snapshots ready
+[DB] Migration 033 completed
+[DB] Running migration 034: expand_agents_status_busy_degraded
+[Migration 034] Expanding agents.status CHECK to include busy and degraded...
+[Migration 034] agents.status now accepts standby, working, busy, degraded, offline
+[DB] Migration 034 completed
+[DB] Running migration 035: add_client_platform
+[Migration 035] Adding client_platform single-row config table...
+[Migration 035] client_platform ready
+[DB] Migration 035 completed
+[DB] Running migration 036: add_operator_workspaces
+[Migration 036] Adding operator_workspaces table...
+[Migration 036] operator_workspaces ready
+[DB] Migration 036 completed
+[DB] Running migration 037: add_operator_console_tables
+[Migration 037] Adding operator_goals, operator_journal_entries, operator_chat_sessions, operator_chat_messages...
+[Migration 037] operator console tables ready
+[DB] Migration 037 completed
+[DB] Running migration 038: add_provider_credentials_and_usage
+[Migration 038] Adding provider_credentials and provider_usage tables...
+[Migration 038] provider_credentials + provider_usage ready
+[DB] Migration 038 completed
+[DB] Running migration 039: add_agent_settings_lock_flag
+[Migration 039] Adding lock flag column to agent_settings...
+[Migration 039] agent_settings.lock ready
+[DB] Migration 039 completed
+[DB] Running migration 040: add_notebooks_and_notebook_sources
+[Migration 040] Adding notebooks and notebook_sources tables...
+[Migration 040] notebooks + notebook_sources ready
+[DB] Migration 040 completed
+[DB] Running migration 041: add_cli_install_registry
+[Migration 041] Adding cli_install_registry table...
+[Migration 041] cli_install_registry ready
+[DB] Migration 041 completed
+[DB] Running migration 042: add_research_searches
+[Migration 042] Adding research_searches table (Track B7 Research sub-module)...
+[Migration 042] research_searches ready
+[DB] Migration 042 completed
+[DB] Running migration 043: add_web_agent_sessions
+[Migration 043] Adding web_agent_sessions table (Track B9 Web Agent sub-module)...
+[Migration 043] web_agent_sessions ready
+[DB] Migration 043 completed
+[DB] Running migration 044: add_task_model_id
+[Migration 044] Adding model_id column to tasks (v4.0.1 P0-7)...
+[Migration 044] Added model_id to tasks
+[DB] Migration 044 completed
+[DB] Running migration 045: cleanup_persona_log_orphans
+[Migration 045] Cleaning persona_selection_log orphans...
+[Migration 045] persona_selection_log is empty, nothing to clean
+[DB] Migration 045 completed
+[DB] Running migration 046: pin_ceo_department_first
+[Migration 046] Pinning CEO / master-orchestrator department to sort_order = 0...
+[Migration 046] Re-pinned 0 CEO/master-orchestrator workspace row(s) to sort_order = 0
+[DB] Migration 046 completed
+[DB] Running migration 047: add_kpi_snapshots
+[Migration 047] Creating kpi_snapshots table (fleet-wide latent-bug fix)...
+[Migration 047] kpi_snapshots table ready
+[DB] Migration 047 completed
+[DB] Running migration 048: add_clients_tenant_table
+[Migration 048] Adding clients tenant table + seeding the self row...
+[Migration 048] Seeded self client row
+[Migration 048] clients tenant table ready
+[DB] Migration 048 completed
+[DB] Running migration 049: add_client_branding_columns
+[Migration 049] Adding brand_color + logo_url columns to clients...
+[Migration 049] Added clients.brand_color
+[Migration 049] Added clients.logo_url
+[Migration 049] client branding columns ready
+[DB] Migration 049 completed
+[DB] Running migration 050: add_sops_role_and_source
+[Migration 050] Adding role + source columns to sops...
+[Migration 050] Added sops.role
+[Migration 050] Added sops.source
+[Migration 050] sops role/source columns ready
+[DB] Migration 050 completed
+[DB] Running migration 051: canonical_department_slug_migration
+[Migration 051] Canonical department slug migration...
+[Migration 051] Added workspaces.original_slug
+[Migration 051] Canonical slug reshape complete — FK check passed
+[DB] Migration 051 completed
+[DB] Running migration 052: backfill_is_master_master_orchestrator
+[Migration 052] Backfilling is_master=1 for master-orchestrator agents...
+[Migration 052] Set is_master=1 on 0 agent(s)
+[DB] Migration 052 completed
+[DB] Running migration 053: backfill_sop_id_on_backlog_tasks
+[Migration 053] Backfilling sop_id on backlog tasks with sop_id IS NULL...
+[Migration 053] sops table is empty, skipping backfill
+[DB] Migration 053 completed
+[DB] Running migration 054: add_persona_column_and_dispatch_rules
+[Migration 054] Adding agents.persona + dispatch_rules table...
+[Migration 054] Added agents.persona
+[Migration 054] Seeded 0 dispatch_rules from SOPs
+[Migration 054] agents.persona + dispatch_rules ready
+[DB] Migration 054 completed
+[DB] Running migration 055: add_workspace_purpose_for_intelligent_routing
+[Migration 055] Ensuring workspaces.description column for intelligent routing...
+[Migration 055] workspaces.description already present — skipping
+[Migration 055] Workspace purpose columns ready for intelligent routing
+[DB] Migration 055 completed
+[DB] Running migration 056: add_tasks_sop_id
+[Migration 056] Ensuring tasks.sop_id column exists...
+[Migration 056] tasks.sop_id already present — ensured index, nothing else to do
+[DB] Migration 056 completed
+[DB] Running migration 057: add_sop_embeddings_table
+[Migration 057] Creating sop_embeddings table...
+[Migration 057] sop_embeddings table ready
+[DB] Migration 057 completed
+[DB] Running migration 058: add_task_archived_at
+[Migration 058] Adding tasks.archived_at for weekly Done-clear...
+[Migration 058] tasks.archived_at already present, skipping column add
+[Migration 058] idx_tasks_archived_at index ready
+[DB] Migration 058 completed
+[DB] Running migration 059: pin_general_task_department_last
+[Migration 059] Pinning general-task department to sort_order = 99999...
+[Migration 059] Pinned 0 general-task workspace row(s) to sort_order = 99999
+[DB] Migration 059 completed
+[DB] Running migration 060: add_role_type_and_seed_qc_agents
+[Migration 060] Adding agents.role_type column + seeding per-dept QC Specialist agents...
+[Migration 060] Added agents.role_type column
+[Migration 060] No workspaces yet — QC agent seeding deferred to next boot
+[DB] Migration 060 completed
+[DB] Running migration 061: add_tasks_qc_reroute_attempts
+[Migration 061] Adding tasks.qc_reroute_attempts for QC loop guard...
+[Migration 061] tasks.qc_reroute_attempts already present, skipping column add
+[Migration 061] idx_tasks_qc_reroute index ready
+[DB] Migration 061 completed
+[DB] Running migration 062: add_clients_brand_secondary_color
+[Migration 062] Adding clients.brand_secondary_color...
+[Migration 062] clients.brand_secondary_color added
+[DB] Migration 062 completed
+[DB] Running migration 063: sop_embeddings_model_drift_index
+[Migration 063] Adding idx_sop_embeddings_model for model-drift detection...
+[Migration 063] idx_sop_embeddings_model ready
+[DB] Migration 063 completed
+[DB] Running migration 064: seed_default_company_sentinel
+[Migration 064] Seeding sentinel default company row (BUG 4 fix)...
+[Migration 064] Inserted sentinel companies row id='default'
+[DB] Migration 064 completed
+[DB] Running migration 065: seed_research_and_devils_advocate_agents
+[Migration 065] Seeding per-dept Research + Devil's Advocate agents (PRD 2.11)...
+[Migration 065] No workspaces yet — trio seeding deferred to next boot
+[DB] Migration 065 completed
+[DB] Running migration 066: add_tasks_sop_authoring_link
+[Migration 066] Adding tasks.sop_authoring_for_task_id (PRD 2.12-cc)...
+[Migration 066] tasks.sop_authoring_for_task_id already present, skipping
+[Migration 066] idx_tasks_sop_authoring ready
+[DB] Migration 066 completed
+[DB] Running migration 067: expand_sop_proposals_status_auto_authored
+[Migration 067] Expanding sop_proposals.status CHECK to include auto-authored-filed...
+[Migration 067] sop_proposals rebuilt with expanded status CHECK
+[DB] Migration 067 completed
+[DB] Running migration 068: add_task_qc_results
+[Migration 068] Creating task_qc_results table for grading module...
+[Migration 068] task_qc_results table + indexes ready
+[DB] Migration 068 completed
+[DB] Running migration 069: add_lss_control_reviews
+[Migration 069] Creating lss_control_reviews table...
+[Migration 069] lss_control_reviews table + index ready
+[DB] Migration 069 completed
+[DB] Running migration 070: task_events_artifact_contract
+[Migration 070] Creating task_events table + artifact columns on task_deliverables...
+[Migration 070] task_events table + task_deliverables columns ready
+[DB] Migration 070 completed
+[DB] Running migration 071: add_bug_tickets
+[Migration 071] Creating bug_tickets + bug_ticket_events tables...
+[Migration 071] bug_tickets + bug_ticket_events tables ready
+[DB] Migration 071 completed
+[DB] Running migration 072: blocked_fields_and_last_progress_at
+[Migration 072] Adding blocked fields + last_progress_at to tasks...
+[Migration 072] blocked fields + last_progress_at ready
+[DB] Migration 072 completed
+[DB] Running migration 073: block_transparency_fields
+[Migration 073] Adding block transparency columns to tasks...
+[Migration 073] Block transparency columns ready
+[DB] Migration 073 completed
+[DB] Running migration 074: add_tasks_stage_slug_for_ad_campaigns
+[Migration 074] Adding tasks.stage_slug + ad-campaign indexes...
+[Migration 074] tasks.stage_slug ready
+[DB] Migration 074 completed
+[DB] Running migration 075: intelligent_model_selector
+[Migration 075] Intelligent Model Selector schema...
+[Migration 075] Intelligent Model Selector schema ready
+[DB] Migration 075 completed
+[DB] Running migration 076: widen_tasks_status_check_to_10_board_statuses
+[Migration 076] tasks CHECK already widened (or table absent) — skip
+[DB] Migration 076 completed
+[DB] Running migration 077: add_dispatch_attempt_accounting
+[Migration 077] Adding tasks dispatch attempt-accounting columns...
+[Migration 077] dispatch attempt-accounting columns ready
+[DB] Migration 077 completed
+[DB] Running migration 078: add_block_reason
+[Migration 078] Adding tasks.block_reason column...
+[Migration 078] block_reason already present — skipping
+[DB] Migration 078 completed
+[DB] Running migration 079: ensure_tasks_stage_slug
+[Migration 079] Ensuring tasks.stage_slug column + ad-campaign indexes exist...
+[Migration 079] tasks.stage_slug already present — ensuring indexes only
+[Migration 079] tasks.stage_slug ready
+[DB] Migration 079 completed
+[DB] Running migration 080: add_tasks_process_certificate_sha
+[Migration 080] Adding tasks.process_certificate_sha column...
+[Migration 080] process_certificate_sha column added
+[DB] Migration 080 completed
+[DB] Running migration 081: dedupe_canonical_workspaces
+[Migration 081] De-duplicating canonical workspace rows...
+[Migration 081] merged 0 group(s), deleted 0 duplicate row(s), reassigned 0 referencing row(s)
+[DB] Migration 081 completed
+[DB] Running migration 082: reap_duplicate_open_authoring_tasks
+[Migration 082] Reaping duplicate open "Author SOP" tasks...
+[Migration 082] reaped 0 duplicate task(s) across 0 group(s)
+[DB] Migration 082 completed
+[DB] Running migration 083: add_task_persona_fallback
+[Migration 083] tasks.persona_fallback audit column ready
+[DB] Migration 083 completed
+[DB] Running migration 084: add_task_redispatch_count
+[Migration 084] tasks.redispatch_count accounting column ready
+[DB] Migration 084 completed
+[DB] Running migration 085: create_sop_feedback
+[Migration 085] Creating sop_feedback table...
+[Migration 085] sop_feedback table + indexes ready
+[DB] Migration 085 completed
+[DB] Running migration 086: remove_demo_seed_rows
+[Migration 086] De-duping masters + removing legacy demo seed rows...
+[Migration 086] Master orchestrator already unique — nothing to de-dupe
+[Migration 086] No real company yet — leaving any demo content in place
+[DB] Migration 086 completed
+[DB] Running migration 087: add_interview_sessions
+[Migration 087] Adding interview_sessions + interview_answers mirror tables...
+[Migration 087] interview_sessions + interview_answers ready
+[DB] Migration 087 completed
+[DB] Running migration 088: add_task_subtask_persona
+[Migration 088] Adding task_subtask_persona (multi-persona plan rows)...
+[Migration 088] task_subtask_persona + idx_subtask_persona_task ready
+[DB] Migration 088 completed
+[DB] Running migration 089: add_tasks_source_column
+[Migration 089] Adding tasks.source column (INGEST-10 authoritative scope column)...
+[Migration 089] tasks.source already present, skipping
+[DB] Migration 089 completed
+[DB] Running migration 090: add_persona_blend_bundle
+[Migration 090] Adding persona-blend mirror columns + task_persona_bundle...
+[Migration 090] persona-blend columns + task_persona_bundle ready
+[DB] Migration 090 completed
+[DB] Running migration 091: rekey_and_purge_ghost_sops
+[Migration 091] Re-keying legacy SOP rows + purging ghost residue (C2)...
+[Migration 091] re-keyed 0 row(s) to canonical slugs, retired 0 deprecated-dept row(s), purged 0 test-dept row(s)
+[DB] Migration 091 completed
+[DB] Running migration 092: dedupe_trio_agents_and_materialize_heads
+[Migration 092] De-duplicating trio agents + materialising department heads (C3)...
+[Migration 092] normalised 0 role_type alias(es); found 0 duplicated role slot(s); repointed 0 reference(s); removed 0 duplicate agent(s); kept 0 duplicate(s) whose references could not be repointed
+[Migration 092] promoted 0 existing agent(s) to head, materialised 0 new head agent(s), 0 workspace(s) still headless
+[DB] Migration 092 completed
+[DB] Running migration 093: purge_test_residue_workspaces
+[Migration 093] Purging test/fixture-residue workspaces (C8)...
+[Migration 093] purged 0 test workspace(s), skipped 0 (non-test task refs or FK conflict — left for manual review)
+[DB] Migration 093 completed
+[DB] Running migration 094: purge_test_residue_companies
+[Migration 094] Purging test/fixture-residue companies (C8)...
+[Migration 094] purged 0 test company row(s), skipped 0 (still referenced by a workspace — left for manual review)
+[DB] Migration 094 completed
+[DB] Running migration 095: add_workspace_archived_at
+[Migration 095] Adding workspaces.archived_at / archived_reason (C6)...
+[Migration 095] workspaces.archived_at already present, skipping
+[Migration 095] workspaces.archived_reason already present, skipping
+[Migration 095] idx_workspaces_archived_at index ready
+[DB] Migration 095 completed
+[DB] Running migration 096: reconcile_missing_indexes
+[Migration 096] Reconciling missing indexes...
+[Migration 096] All indexes already present — nothing to restore
+[DB] Migration 096 completed
+[DB] Running migration 097: reconcile_missing_dispatch_columns
+[Migration 097] Reconciling missing dispatch attempt-accounting columns...
+[Migration 097] All dispatch columns already present — nothing to restore
+[DB] Migration 097 completed
+[DB] Running migration 098: add_trust_engine_columns
+[Migration 098] Adding trust-engine report-back columns to tasks...
+[Migration 098] Created idx_tasks_requester_chat
+[Migration 098] All trust-engine columns already present — nothing to add
+[DB] Migration 098 completed
+[DB] Running migration 099: add_persona_reason_column
+[Migration 099] Adding persona_reason column to tasks...
+[Migration 099] persona_reason already present — nothing to add
+[DB] Migration 099 completed
+[DB] Running migration 100: add_env_auditor_and_auth_proof_tables
+[Migration 100] Adding env-auditor + auth-proof-cache tables...
+[Migration 100] provider_key_audit_suggestions + provider_auth_proof_cache ready
+[DB] Migration 100 completed
+[DB] Running migration 101: add_ceo_chat_messages_table
+[Migration 101] Adding ceo_chat_messages table...
+[Migration 101] ceo_chat_messages ready
+[DB] Migration 101 completed
+[DB] Running migration 102: add_job_liveness_table
+[Migration 102] Adding job_liveness table...
+[Migration 102] job_liveness ready
+[DB] Migration 102 completed
+[DB] Running migration 103: purge_demo_recommendations_seed
+[Migration 103] Purging DEMO_RECOMMENDATIONS seeded rows...
+[Migration 103] Deleted 0 seeded demo recommendation row(s)
+[DB] Migration 103 completed
+[DB] Running migration 104: reject_blocked_on_human_without_ask
+[Migration 104] Installing blocked_on_human⇒ask invariant triggers...
+[Migration 104] blocked_on_human⇒ask triggers ready
+[DB] Migration 104 completed
+[DB] Running migration 105: add_task_persona_bundle_scope
+[Migration 105] Adding task_persona_bundle_scope table...
+[Migration 105] task_persona_bundle_scope ready
+[DB] Migration 105 completed
+[DB] Running migration 106: add_provider_auth_proof_failure_kind
+[Migration 106] Adding provider_auth_proof_cache.failure_kind...
+[Migration 106] provider_auth_proof_cache.failure_kind ready
+[DB] Migration 106 completed
+[DB] Running migration 107: add_task_persona_bundle_scope_per_part_fields
+[Migration 107] Adding per-part governance columns to task_persona_bundle_scope...
+[Migration 107] task_persona_bundle_scope per-part columns ready
+[DB] Migration 107 completed
+[DB] Running migration 108: add_comms_audience_mirror_columns
+[Migration 108] Adding comms_audience_source + comms_type mirror columns...
+[Migration 108] comms_audience_source + comms_type ready
+[DB] Migration 108 completed
+[DB] Running migration 109: guard_general_task_display_name_stays_general_task
+[Migration 109] Normalizing general-task workspace display name to "General Task"...
+[Migration 109] Normalized 0 general-task workspace row(s) to "General Task"
+[DB] Migration 109 completed
+[DB] Running migration 110: add_ceo_chat_usage_columns
+[Migration 110] Adding usage_input/usage_output/usage_total to ceo_chat_messages...
+[Migration 110] ceo_chat_messages usage columns ready
+[DB] Migration 110 completed
+[DB] Running migration 111: seed_funnels_department_workspace
+[Migration 111] Backfilling the "funnels" department workspace...
+[Migration 111] No existing workspace to anchor company_id — skipping (fresh install seeds "funnels" normally)
+[DB] Migration 111 completed
+[DB] Running migration 112: heal_command_center_company_id_bug
+[Migration 112] Healing command-center company_id bug (Fable-5)...
+[Migration 112] No workspaces with company_id=command-center — no-op
+[DB] Migration 112 completed
+[DB] Running migration 113: seed_podcast_anthology_workspaces
+[Migration 113] Seeding podcast/anthology workspaces (U017)...
+[Migration 113] Seeded workspaces — podcast=1 anthology=1 (0 = already present)
+[DB] Migration 113 completed
+[DB] Running migration 114: engine_workspace_identity_and_presentations_seed
+[Migration 114] Engine workspace identity + presentations seed (U037)...
+[Migration 114] renamed=0 seeded=1 (0 = already correct / already present)
+[DB] Migration 114 completed
+[DB] Running migration 115: add_trust_engine_phase_columns
+[Migration 115] Adding trust-engine phase-progress columns to tasks...
+[Migration 115] Added columns: blocked_notice_sent_at, phase_progress_sent_at, last_reported_phase_label
+[DB] Migration 115 completed
+[DB] Running migration 116: u064_client_persona_choice
+[DB] Migration 116 completed
+[DB] Running migration 117: add_disabled_to_job_liveness_status
+[Migration 117] Widening job_liveness.last_status CHECK to include disabled...
+[Migration 117] job_liveness CHECK widened to (ok, error, disabled)
+[DB] Migration 117 completed
+[DB] Running migration 118: mr10_sse_event_log
+[DB] Migration 118 completed
+[DB] Running migration 119: mr06_backfill_blocked_ask
+[Migration 119] MR-06 backfilling blocked_on_human + ask on legacy blocked rows...
+[Migration 119] Backfilled blocked_on_human + ask on 0 legacy blocked row(s)
+[DB] Migration 119 completed
+[DB] Running migration 120: mr30_add_task_block_events
+[DB] Migration 120 completed
+[DB] Running migration 121: add_openclaw_sessions_deleted_at
+[DB] Migration 121 completed
+[DB] Running migration 122: seed_podcast_editor_skills_and_qc_judge
+[Migration 122] Seeding Podcast Editor specialist + skills/agent_skills + QC judge model...
+[Migration 122] Seeded podcast specialists — editor=1 producer=1 showNotes=1 (0 = already present); skills tables ready; QC judge model=ollama-cloud/qwen3-coder (writer=ollama-cloud/llama-3.3-70b-versatile)
+[DB] Migration 122 completed
+[DB] Running migration 123: add_tasks_killed_at
+[Migration 123] Adding killed_at to tasks...
+[Migration 123] tasks.killed_at ready
+[DB] Migration 123 completed
+[DB] Running migration 124: add_parent_task_id
+[Migration 124] Adding parent_task_id to tasks...
+[Migration 124] Created idx_tasks_parent_task_id
+[Migration 124] parent_task_id ready
+[DB] Migration 124 completed
+[DB] Running migration 125: add_client_interview_tenant
+[Migration 125] no CC_SEED_REMOTE_CLIENT_* env; remote-client seed skipped
+[DB] Migration 125 completed
+[DB] Running migration 126: add_client_interview_state
+[Migration 126] client_interview_state ready
+[DB] Migration 126 completed
+[DB] Running migration 127: add_presentation_stage_timings
+[Migration 127] presentation_stage_timings ready
+[DB] Migration 127 completed
+[DB] Running migration 128: add_events_task_type_index
+[Migration 128] idx_events_task_type ready
+[DB] Migration 128 completed
+[DB] Running migration 129: add_task_requester_session_key
+[Migration 129] Adding requester_session_key to tasks...
+[Migration 129] tasks.requester_session_key already present
+[Migration 129] Created idx_tasks_requester_session
+[DB] Migration 129 completed
+[DB] Running migration 130: add_tasks_slide_count
+[Migration 130] Adding tasks.slide_count...
+[Migration 130] tasks.slide_count already present
+[DB] Migration 130 completed
+[DB] Running migration 131: add_presentation_stage_timings_task_id
+[Migration 131] Adding presentation_stage_timings.task_id...
+[Migration 131] Added presentation_stage_timings.task_id
+[Migration 131] idx_presentation_stage_timings_task ready
+[DB] Migration 131 completed
+[DB] Running migration 132: reliable_company_requests_assignments_execution_and_interviews
+[DB] Migration 132 completed
+[DB] Running migration 133: explicit_executor_runtime_binding_and_catch_all_evidence
+[DB] Migration 133 completed
+[DB] Running migration 134: record_engine_bootstrap_candidates
+[DB] Migration 134 completed
+[DB] Running migration 135: add_publish_queue_company_id
+[Migration 135] Adding company_id to publish_queue (F01)...
+[Migration 135] Added publish_queue.company_id
+[Migration 135] Added publish_queue.sheet_id (F01-D1 repair)
+[Migration 135] publish_queue company binding ready
+[DB] Migration 135 completed
+[DB] Running migration 136: add_publish_queue_execution_contract
+[Migration 136] Adding execution contract to publish_queue (F03)...
+[Migration 136] Added publish_queue.cc_task_id
+[Migration 136] Added publish_queue.cc_execution_id
+[Migration 136] Added publish_queue.idempotency_key
+[Migration 136] Added publish_queue.lease_owner
+[Migration 136] Added publish_queue.lease_expires_at
+[Migration 136] Added publish_queue.attempt_count
+[Migration 136] Added publish_queue.last_attempt_at
+[Migration 136] Added publish_queue.retry_at
+[Migration 136] Added publish_queue.overdue_since
+[Migration 136] publish_queue execution contract ready
+[DB] Migration 136 completed
+[DB] Running migration 137: add_social_orchestrator_steps_and_leases
+[Migration 137] Creating social_steps and social_provider_leases (F33)...
+[Migration 137] social_steps and social_provider_leases ready
+[DB] Migration 137 completed
+[DB] Running migration 138: social_media_assets
+[Migration 138] Creating social_media_assets (F38)...
+[Migration 138] social_media_assets ready
+[DB] Migration 138 completed
+[DB] Running migration 139: union_social_cycle_and_theme_miniapp
+[Migration 139] Creating union cycle-service + theme-miniapp tables (F07/F17/F27/F35)...
+[Migration 139] Added social_media_assets.repair_state
+[Migration 139] Added social_media_assets.updated_at
+[Migration 139] union cycle-service + theme-miniapp tables ready
+[DB] Migration 139 completed
+[DB] Running migration 140: social_measured_outcomes
+[Migration 140] Creating social_metrics, social_content_variants, social_performance_reviews (F40)...
+[Migration 140] measured-outcome tables ready
+[DB] Migration 140 completed
+[DB] Running migration 141: social_publication_verification_ownership
+[Migration 141] social publication verification ownership ready
+[DB] Migration 141 completed
+[DB] Running migration 142: add_presentation_verification_receipts
+[Migration 142] Creating presentation_verification_receipts...
+[Migration 142] presentation_verification_receipts ready
+[DB] Migration 142 completed
+[DB] Running migration 143: add_presentation_run_bindings
+[Migration 143] presentation_run_bindings ready
+[DB] Migration 143 completed
+[DB] Running migration 144: pres_wf12b_idempotency_receipts
+[Migration 144] Adding PRES-037/038/040 idempotency + receipt tables...
+[Migration 144] presentation_stage_timings event keys ready
+[Migration 144] task_activities scores ready
+[Migration 144] WF12-B idempotency + receipt tables ready
+[DB] Migration 144 completed
+[DB] Running migration 145: rr019_board_sync_intent
+[Migration 145] RR-019 durable board-sync intent tables...
+[Migration 145] board-sync intent ready
+[DB] Migration 145 completed
+[reseed] Using departments.json: /Users/blackceomacmini/Downloads/openclaw-master-files/zero-human-company/blackceo/departments.json
+[branding-seed] company-config.json companyName is the unpopulated template ("Your Company") — box is MISCONFIGURED (never branded); seed aborted (partial-config)
+[reseed] Aborting workspace reseed: partial/template company config (fail-closed, no mis-attribution)
+[Auto-seed Trio] Seeded 2 QC + 3 Research + 3 Devil's Advocate agent(s) across 3 workspace(s); 1 role slot(s) already filled (role_type-aware skip)
+[Auto-seed Heads] Promoted 1 + materialised 2 department head(s)
+[Auto-seed SOPs] Seeded starter SOP library: inserted 16, skipped 0 (of 16)
+[DB] New database created at: /var/folders/yf/zc5k46g93zs1dp56646v91rm0000gn/T/bc-rr019-UbNAWK/mission-control.test.db
+✔ RR-019 CC (0): migration 145 applied board-sync tables + task columns (164.5115ms)
+✔ RR-019 CC (1): outage-shaped intake persists authorized logged intent, projection deferred (0.816625ms)
+✔ RR-019 CC (1b): intent refuses unknown task and unknown op kind (0.227708ms)
+✔ RR-019 CC (2): restoration verifies one card, dedupes twins, creates exactly one (0.766917ms)
+✔ RR-019 CC (3): replay of the same op_id returns the original receipt (0.316458ms)
+✔ RR-019 CC (4): failed stamp retries with backoff then acks (0.444375ms)
+✔ RR-019 CC (5): out-of-order status coalesces, newest applies, history intact (0.423625ms)
+✔ RR-019 CC (6): pending intent rows are durable and resumable (restart-shaped) (0.340042ms)
+✔ RR-019 CC (7): permanent schema error owned, owner/due kept, never silent (0.46075ms)
+✔ RR-019 CC (8): stale op coalesces, owner/due kept, replay never inflates revision (0.610791ms)
+ℹ tests 10
+ℹ suites 0
+ℹ pass 10
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 282.972958
+
+==============================================================================
+FLEET NEIGHBOURS (post-change worktree)
+==============================================================================
+RR-006 ledger-transitions: tests 18 pass 18 fail 0
+RR-004 claim-fencing: tests 17 pass 17 fail 0
+RR-014 heartbeat-truth: tests 16 pass 16 fail 0
+RR-014 negative-controls: tests 4 pass 4 fail 0
+RR-021 admission-atomicity: tests 11 pass 11 fail 0
+CC neighbours: rr018 contract file absent on origin/main base (nothing to re-run; untouched).
