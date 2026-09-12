@@ -34,6 +34,26 @@ const DEV_FALLBACK_SECRET = 'mc-interview-gate-unsigned-dev-secret';
 
 export const INTERNAL_GATE_HEADER = 'x-mc-internal-gate';
 
+/**
+ * The tenant host this internal call is claiming.
+ *
+ * WHY THIS EXISTS (Next 16 / Node middleware runtime):
+ * the fallback used to forward the browser's host by setting the `host` header
+ * on its loopback fetch. `Host` is a FORBIDDEN header name in the Fetch spec,
+ * and Node's fetch (undici) silently DROPS it — no error, no warning. The
+ * Edge runtime tolerated it, so the trick worked until middleware moved to the
+ * Node runtime, at which point gate-status only ever saw `127.0.0.1:4000`,
+ * the HMAC (bound to the PUBLIC host) no longer matched what it verified
+ * against, and every client tenant 403'd -> fail-closed -> 302 /interview.
+ *
+ * Carrying the claimed host in a normal `x-` header survives undici. It is NOT
+ * a trust downgrade: the host is only honored when the accompanying
+ * {@link INTERNAL_GATE_HEADER} token — an HMAC over `host|expiry` keyed with the
+ * box secret — verifies for that EXACT host. Anyone can spoof this header;
+ * nobody can mint the matching signature without the secret.
+ */
+export const INTERNAL_HOST_HEADER = 'x-mc-internal-host';
+
 function internalSecret(): string {
   const value = (
     process.env.MC_INTERVIEW_COOKIE_SECRET ||

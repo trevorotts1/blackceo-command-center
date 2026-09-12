@@ -13,7 +13,7 @@
  * only (crypto.subtle) — available in both Edge and Node.
  */
 
-import { INTERNAL_GATE_HEADER, mintInternalGateToken } from '@/lib/interview/internal-call';
+import { INTERNAL_GATE_HEADER, INTERNAL_HOST_HEADER, mintInternalGateToken } from '@/lib/interview/internal-call';
 
 /** Path of the gate-status Node endpoint (appended to the internal loopback URL). */
 const GATE_STATUS_PATH = '/api/interview/gate-status';
@@ -54,6 +54,12 @@ export async function checkInterviewCompleteViaFallback(host?: string | null): P
     // would be forgeable by anything that can reach the origin.
     const headers: Record<string, string> = {};
     if (host) {
+      // `Host` is a FORBIDDEN header in the Fetch spec: Node's fetch (undici)
+      // silently DROPS it, so on the Node middleware runtime the receiver only
+      // ever saw 127.0.0.1 and the host-bound HMAC could never match. Send the
+      // claimed host in a normal x- header, which survives; keep `host` too so
+      // an Edge-runtime build keeps behaving exactly as before.
+      headers[INTERNAL_HOST_HEADER] = host;
       headers.host = host;
       headers[INTERNAL_GATE_HEADER] = await mintInternalGateToken(host);
     }

@@ -831,6 +831,38 @@ async function setCsrfCookieIfMissing(
 }
 
 /**
+ * RUNTIME: Node.js — load-bearing, do NOT remove (see below).
+ *
+ * Next 16 (v7.1.0 migrated 14.2.21 -> 16.3.4) does NOT hand arbitrary
+ * non-`NEXT_PUBLIC_` env vars to the EDGE runtime. Only variables Next inlines
+ * at build time reach an edge bundle; everything else is `undefined` there.
+ * Under Next 14 this middleware got them, so the regression is invisible in
+ * source review and only appears the first time a box REBUILDS.
+ *
+ * That silently broke the interview gate on every rebuilt box:
+ *   cookieSecret() / internalSecret() resolve
+ *     MC_INTERVIEW_COOKIE_SECRET -> MC_API_TOKEN -> WEBHOOK_SECRET -> dev fallback.
+ *   All three are undefined on edge  ->  the PUBLIC dev fallback wins
+ *     ->  devSecretInProduction() === true  ->  DATA-13 hard-lock
+ *     ->  verifyInterviewToken() fails EVERY token (no cookie can ever unlock)
+ *     ->  mintInternalGateToken() throws, so checkInterviewCompleteViaFallback()
+ *         catches and returns false
+ *     ->  every GET/HEAD page 302s to /interview, permanently, for a client
+ *         whose interview was long since complete.
+ *
+ * Node middleware runtime is stable since Next 15.5.0 and is the DEFAULT for
+ * Proxy in 16.x; declaring it here gives this file a normal `process.env` at
+ * request time. Every module it imports is already Edge-safe (WebCrypto +
+ * Web-standard globals only), and Edge-safe is a strict subset of Node, so
+ * nothing else has to change.
+ *
+ * Deliberately NOT fixed via next.config `env:` — that inlines the signing
+ * secrets as literals into build artifacts on disk. Reading them at runtime
+ * keeps secrets out of the bundle.
+ */
+export const runtime = 'nodejs';
+
+/**
  * Matcher: every route except Next.js internals, static assets, and
  * favicon. `/api/health` is bypassed inside the middleware body so it stays
  * matched (we want this code to run, just to early-return for it).

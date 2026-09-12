@@ -27,7 +27,7 @@ import { verifiedBuild } from '@/lib/interview/build-verification';
 import { NextRequest, NextResponse } from 'next/server';
 import { readBuildState, readStandardPrebuild } from '@/lib/interview/seam';
 import { resolveInterviewTenant, refuseUnverifiedTenant, tenantForHost } from '@/lib/interview/tenant';
-import { INTERNAL_GATE_HEADER, verifyInternalGateToken } from '@/lib/interview/internal-call';
+import { INTERNAL_GATE_HEADER, INTERNAL_HOST_HEADER, verifyInternalGateToken } from '@/lib/interview/internal-call';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -43,12 +43,23 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   // which would 302 every client tenant to /interview even with a completed
   // interview. It instead proves it holds the box's HMAC secret; an attacker
   // that can reach the origin cannot mint that token.
+  // The host this call CLAIMS to be for. Node's fetch (undici) drops a `host`
+  // header set by the caller, so the loopback fallback also sends it as
+  // INTERNAL_HOST_HEADER; prefer that and fall back to the real Host for
+  // Edge-runtime builds and any other caller.
+  //
+  // NOT a trust downgrade: the claimed host is only ever honored when the
+  // accompanying token — an HMAC over `host|expiry` keyed with the box secret —
+  // verifies for that exact host. A spoofed header without a matching signature
+  // fails verification and falls through to full tenant resolution below.
+  const claimedHost =
+    request.headers.get(INTERNAL_HOST_HEADER) || request.headers.get('host');
   const internalOk = await verifyInternalGateToken(
     request.headers.get(INTERNAL_GATE_HEADER),
-    request.headers.get('host'),
+    claimedHost,
   );
   const tenant = internalOk
-    ? tenantForHost(request.headers.get('host'))
+    ? tenantForHost(claimedHost)
     : await resolveInterviewTenant(request);
   const refusedTenant = refuseUnverifiedTenant(tenant);
   if (refusedTenant) return refusedTenant;
