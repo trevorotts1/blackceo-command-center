@@ -163,6 +163,7 @@ const WEBHOOK_SECRET_ROUTES = [
  */
 const WEBHOOK_SECRET_DYNAMIC_ROUTES: RegExp[] = [
   /^\/api\/tasks\/[^/]+\/status$/, // /api/tasks/{id}/status
+  /^\/api\/tasks\/[^/]+\/operator-preengine-recovery$/,
 ];
 
 /**

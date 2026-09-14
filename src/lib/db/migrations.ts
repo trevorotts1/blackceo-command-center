@@ -7124,6 +7124,25 @@ export const migrations: Migration[] = [
       )`);
     },
   },
+  {
+    id: '146',
+    name: 'presentation_operator_preengine_recoveries',
+    up: (db) => {
+      db.exec(`CREATE TABLE IF NOT EXISTS presentation_operator_preengine_recoveries (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id) ON DELETE CASCADE,
+        execution_id TEXT NOT NULL,
+        contract_sha256 TEXT NOT NULL,
+        prior_dispatch_attempts INTEGER NOT NULL,
+        repair_key TEXT NOT NULL,
+        prior_failure_code TEXT NOT NULL,
+        bridge_state TEXT NOT NULL,
+        bridge_retry_attempt INTEGER NOT NULL,
+        dispatch_started_at TEXT,
+        created_at TEXT NOT NULL
+      )`);
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner
