@@ -75,7 +75,7 @@
 import { queryAll, queryOne, run, sqlTime, parseDbTime, timeNow } from '@/lib/db';
 import { notifyOwner, notifySystem, notifyTelegram } from '@/lib/notify';
 import { runQCOnReview } from '@/lib/qc-scorer';
-import { isContentTask } from '@/lib/tasks';
+import { shouldUsePersonaBlend } from '@/lib/tasks';
 import { resolveSlaThreshold, minPossibleSlaThreshold } from '@/lib/board-slas';
 import { checkTriad } from '@/lib/sops';
 import { triadMissingPillText, type TriadMissingKey } from '@/lib/board-labels';
@@ -781,10 +781,10 @@ function processBlendRegressionCheck(result: BoardHygieneResult): void {
   }
 
   // Content tasks created in the window (semantic filter in TS, not SQL LIKE).
-  let created: Array<{ id: string; title: string; description: string | null }>;
+  let created: Array<{ id: string; title: string; description: string | null; department: string | null }>;
   try {
-    created = queryAll<{ id: string; title: string; description: string | null }>(
-      `SELECT id, title, description FROM tasks
+    created = queryAll<{ id: string; title: string; description: string | null; department: string | null }>(
+      `SELECT id, title, description, department FROM tasks
         WHERE archived_at IS NULL
           AND ${sqlTime('created_at')} >= datetime('now', ?)`,
       [windowExpr],
@@ -795,7 +795,7 @@ function processBlendRegressionCheck(result: BoardHygieneResult): void {
   }
 
   const contentTasks = created.filter((t) =>
-    isContentTask(`${t.title}${t.description ? ` ${t.description}` : ''}`),
+    shouldUsePersonaBlend(`${t.title}${t.description ? ` ${t.description}` : ''}`, t.department),
   );
 
   result.blendWindowContentTasks = contentTasks.length;
