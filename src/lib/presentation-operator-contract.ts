@@ -35,11 +35,17 @@ export function saveOperatorPresentationContract(taskId: string, contract: Opera
   if (contract.task_id !== taskId) throw new Error('presentation_intake task_id does not match created task');
   const task = queryOne<{ id: string; source: string | null }>('SELECT id, source FROM tasks WHERE id = ?', [taskId]);
   if (!task || task.source !== 'operator-delegated') throw new Error('presentation_intake requires an operator-delegated task record');
+  const serialized = JSON.stringify(contract);
+  const existing = queryOne<{ execution_id: string; contract_json: string }>(
+    'SELECT execution_id, contract_json FROM presentation_operator_contracts WHERE task_id = ?', [taskId]);
+  if (existing) {
+    if (existing.execution_id !== contract.execution_id || existing.contract_json !== serialized) {
+      throw new Error('presentation_intake is immutable after first accepted contract');
+    }
+    return;
+  }
   run(`INSERT INTO presentation_operator_contracts (task_id, execution_id, contract_json, created_at)
-       VALUES (?, ?, ?, datetime('now'))
-       ON CONFLICT(task_id) DO UPDATE SET execution_id = excluded.execution_id, contract_json = excluded.contract_json
-       WHERE presentation_operator_contracts.contract_json = excluded.contract_json`,
-      [taskId, contract.execution_id, JSON.stringify(contract)]);
+       VALUES (?, ?, ?, datetime('now'))`, [taskId, contract.execution_id, serialized]);
 }
 export function loadOperatorPresentationContract(taskId: string): OperatorPresentationContract | null {
   const row = queryOne<{ contract_json: string }>('SELECT contract_json FROM presentation_operator_contracts WHERE task_id = ?', [taskId]);
