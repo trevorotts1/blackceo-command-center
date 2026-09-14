@@ -4,7 +4,7 @@ import { promisify } from 'util';
 import { mkdir, mkdtemp, writeFile } from 'fs/promises';
 import os from 'os';
 import path from 'path';
-import { loadOperatorPresentationContract } from '@/lib/presentation-operator-contract';
+import { bridgeReceipt, loadOperatorPresentationContract } from '@/lib/presentation-operator-contract';
 import { DEPARTMENT_PRESENTATIONS_RUNS } from '@/lib/presentation-run-roots';
 
 const execFileAsync = promisify(execFile);
@@ -25,7 +25,7 @@ export async function launchOperatorPresentationContract(taskId: string): Promis
   await mkdir(root, { recursive: true });
   const temp = await mkdtemp(path.join(os.tmpdir(), 'cc-presentation-contract-'));
   const contractFile = path.join(temp, 'contract.json');
-  await writeFile(contractFile, JSON.stringify(contract), { encoding: 'utf8', mode: 0o600 });
+  await writeFile(contractFile, JSON.stringify(bridgeReceipt(contract)), { encoding: 'utf8', mode: 0o600 });
   const { stdout } = await execFileAsync('python3', [bridgePath(), 'operator-contract', '--contract-file', contractFile, '--run-dir', runDir], { timeout: 30_000, maxBuffer: 64 * 1024 });
   return { runDir, output: stdout.trim() };
 }

@@ -60,6 +60,7 @@ import { ensureBlendGuardrail } from '@/lib/persona-dispatch';
 import { getBestSOPForTask, getPersonaSlots, type PersonaSlot, type SOP } from '@/lib/sops';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { autoDispatchTask, recordDispatchFailure } from '@/lib/task-dispatcher';
+import { bindOperatorPresentationContract, saveOperatorPresentationContract, type OperatorPresentationIntake } from '@/lib/presentation-operator-contract';
 import {
   isPodcastTask,
   podcastProcessorActivationStatus,
@@ -2386,6 +2387,8 @@ export function findDuplicateByTitleWindow(
 }
 
 export interface CreateTaskCoreInput {
+  /** Validated at the authenticated ingest door; bound and persisted with the task before dispatch. */
+  presentation_operator_intake?: OperatorPresentationIntake | null;
   /** Validated internal identity, never unchecked external tenant input. */
   idempotency_company_id?: string | null;
   idempotency_payload_hash?: string;
@@ -2794,6 +2797,9 @@ export async function createTaskCore(
       VALUES (?, ?, ?, ?, ?, ?)`,
       [uuidv4(), 'task_created', input.created_by_agent_id || null, id, creationMessage, now]);
     run('UPDATE tasks SET persona_contract_version = 1 WHERE id = ?', [id]);
+    if (input.presentation_operator_intake) {
+      saveOperatorPresentationContract(id, bindOperatorPresentationContract(id, input.presentation_operator_intake));
+    }
     if (input.routing_hold_reason) run('UPDATE tasks SET dispatch_hold=1, routing_reason=?, routing_wait_owner=? WHERE id=?', [input.routing_hold_reason, 'SYSTEM', id]);
   }, true);
   if (priorTaskId) {

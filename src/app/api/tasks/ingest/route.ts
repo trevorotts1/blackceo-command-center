@@ -4,7 +4,7 @@ import { queryOne, getDb, run } from '@/lib/db';
 import { v4 as uuidv4 } from 'uuid';
 import { runMigrations } from '@/lib/db/migrations';
 import { createTaskCore, validateProducerPersonaBundle } from '@/lib/tasks';
-import { parseOperatorPresentationContract, saveOperatorPresentationContract } from '@/lib/presentation-operator-contract';
+import { parseOperatorPresentationContract, ensureOperatorPresentationContract } from '@/lib/presentation-operator-contract';
 import type { PersonaBundle } from '@/lib/types';
 import { routeTask } from '@/lib/routing/department-router';
 import type { TaskPriority } from '@/lib/types';
@@ -498,6 +498,7 @@ export async function POST(request: NextRequest) {
     // check itself lives in normalizeBoardSource() and runs at the status
     // route (fail-closed there, 403 for unknown values like "garbage").
     const source = typeof body.source === 'string' ? body.source.trim().toLowerCase() : undefined;
+    if (presentationIntake && source !== 'operator-delegated') return NextResponse.json({ error: 'presentation_intake requires source=operator-delegated' }, { status: 400 });
     const sourceRef = typeof body.source_ref === 'string' ? body.source_ref.trim() : undefined;
     const departmentSlug =
       typeof body.department_slug === 'string' ? body.department_slug.trim() : undefined;
@@ -1008,6 +1009,7 @@ export async function POST(request: NextRequest) {
         // now reads first, before falling back to the legacy (forgeable)
         // description marker for pre-migration rows.
         source: source ?? null,
+        presentation_operator_intake: presentationIntake,
         // P1-04: the originating client channel so the trust engine reports back.
         requester_channel: requesterChannel ?? null,
         requester_chat_id: requesterChatId ?? null,
@@ -1042,9 +1044,15 @@ export async function POST(request: NextRequest) {
     }
 
     const { task, deduped } = result;
-    if (presentationIntake && !deduped) {
-      try { saveOperatorPresentationContract(task.id, { ...presentationIntake, task_id: task.id }); }
-      catch (err) { return NextResponse.json({ error: `presentation_intake persistence failed: ${(err as Error).message}` }, { status: 500 }); }
+    if (presentationIntake && deduped) {
+      try { ensureOperatorPresentationContract(task.id, presentationIntake); }
+      catch (err) {
+        const message = (err as Error).message;
+        return NextResponse.json(
+          { error: `presentation_intake persistence failed: ${message}` },
+          { status: message.includes('immutable') ? 409 : 500 },
+        );
+      }
     }
 
     // FIX 52 (migration 130) — stamp the presentation slide count onto the
