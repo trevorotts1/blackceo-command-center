@@ -4,6 +4,7 @@ import { queryOne, getDb, run } from '@/lib/db';
 import { v4 as uuidv4 } from 'uuid';
 import { runMigrations } from '@/lib/db/migrations';
 import { createTaskCore, validateProducerPersonaBundle } from '@/lib/tasks';
+import { parseOperatorPresentationContract, saveOperatorPresentationContract } from '@/lib/presentation-operator-contract';
 import type { PersonaBundle } from '@/lib/types';
 import { routeTask } from '@/lib/routing/department-router';
 import type { TaskPriority } from '@/lib/types';
@@ -203,6 +204,8 @@ interface IngestPayload {
    * must not block capture.
    */
   slide_count?: unknown;
+  /** Signed, operator-delegated structured Presentations execution request. */
+  presentation_intake?: unknown;
   /**
    * FIX 52 (MASTER Part 8 / [R5A §H5]) — the explicit manifest phase id a
    * presentation producer stamps on its per-phase CHILD card ("P4-COPY",
@@ -396,6 +399,12 @@ export async function POST(request: NextRequest) {
     }
 
     const title = typeof body.title === 'string' ? body.title.trim() : '';
+    let presentationIntake: ReturnType<typeof parseOperatorPresentationContract> | null = null;
+    if (body.presentation_intake !== undefined) {
+      try { presentationIntake = parseOperatorPresentationContract(body.presentation_intake); }
+      catch (err) { return NextResponse.json({ error: (err as Error).message }, { status: 400 }); }
+      if (presentationIntake.title !== title) return NextResponse.json({ error: 'presentation_intake title must match task title' }, { status: 400 });
+    }
     if (!title) {
       return NextResponse.json({ error: 'title is required' }, { status: 400 });
     }
@@ -1033,6 +1042,10 @@ export async function POST(request: NextRequest) {
     }
 
     const { task, deduped } = result;
+    if (presentationIntake && !deduped) {
+      try { saveOperatorPresentationContract(task.id, { ...presentationIntake, task_id: task.id }); }
+      catch (err) { return NextResponse.json({ error: `presentation_intake persistence failed: ${(err as Error).message}` }, { status: 500 }); }
+    }
 
     // FIX 52 (migration 130) — stamp the presentation slide count onto the
     // freshly created card. Done as a follow-up UPDATE rather than inside

@@ -1,0 +1,47 @@
+/**
+ * Server-side contract for a trusted operator-delegated Presentations intake.
+ * This is deliberately distinct from task messages and approvals: it records
+ * only the execution request already authenticated at task ingest.
+ */
+import { queryOne, run } from '@/lib/db';
+
+export const OPERATOR_PRESENTATION_CONTRACT_VERSION = 1;
+export type OperatorPresentationContract = {
+  version: 1; source: 'operator-delegated'; task_id: string; execution_id: string;
+  title: string; presentation_type: 'from_scratch'; run_mode: 'ultra' | 'standard' | 'quick';
+  workhorse_model: 'deepseek-flash@deepseek-direct'; slide_count: number;
+  pitch_included: boolean; want_sales_checkout: 'yes' | 'no'; want_vsl_page: 'yes' | 'no';
+  answers: Record<string, string>;
+};
+
+function uuid(value: unknown, name: string): string {
+  if (typeof value !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) throw new Error(`${name} must be a UUID`);
+  return value;
+}
+export function parseOperatorPresentationContract(value: unknown): OperatorPresentationContract {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('presentation_intake must be an object');
+  const raw = value as Record<string, unknown>;
+  if (raw.version !== OPERATOR_PRESENTATION_CONTRACT_VERSION || raw.source !== 'operator-delegated') throw new Error('presentation_intake requires current operator-delegated source');
+  const title = typeof raw.title === 'string' ? raw.title.trim() : '';
+  if (!title || title.length > 500) throw new Error('presentation_intake title is invalid');
+  if (raw.presentation_type !== 'from_scratch' || (raw.run_mode !== 'ultra' && raw.run_mode !== 'standard' && raw.run_mode !== 'quick') || raw.workhorse_model !== 'deepseek-flash@deepseek-direct') throw new Error('presentation_intake contains unsupported execution selection');
+  if (!Number.isInteger(raw.slide_count) || (raw.slide_count as number) < 1 || (raw.slide_count as number) > 200) throw new Error('presentation_intake slide_count is invalid');
+  if (typeof raw.pitch_included !== 'boolean' || (raw.want_sales_checkout !== 'yes' && raw.want_sales_checkout !== 'no') || (raw.want_vsl_page !== 'yes' && raw.want_vsl_page !== 'no')) throw new Error('presentation_intake applicability fields are invalid');
+  if (!raw.answers || typeof raw.answers !== 'object' || Array.isArray(raw.answers) || Object.values(raw.answers).some(v => typeof v !== 'string' || v.length > 4000)) throw new Error('presentation_intake answers are invalid');
+  return { version: 1, source: 'operator-delegated', task_id: uuid(raw.task_id, 'task_id'), execution_id: uuid(raw.execution_id, 'execution_id'), title, presentation_type: 'from_scratch', run_mode: raw.run_mode, workhorse_model: 'deepseek-flash@deepseek-direct', slide_count: raw.slide_count as number, pitch_included: raw.pitch_included, want_sales_checkout: raw.want_sales_checkout, want_vsl_page: raw.want_vsl_page, answers: raw.answers as Record<string, string> };
+}
+
+export function saveOperatorPresentationContract(taskId: string, contract: OperatorPresentationContract): void {
+  if (contract.task_id !== taskId) throw new Error('presentation_intake task_id does not match created task');
+  const task = queryOne<{ id: string; source: string | null }>('SELECT id, source FROM tasks WHERE id = ?', [taskId]);
+  if (!task || task.source !== 'operator-delegated') throw new Error('presentation_intake requires an operator-delegated task record');
+  run(`INSERT INTO presentation_operator_contracts (task_id, execution_id, contract_json, created_at)
+       VALUES (?, ?, ?, datetime('now'))
+       ON CONFLICT(task_id) DO UPDATE SET execution_id = excluded.execution_id, contract_json = excluded.contract_json
+       WHERE presentation_operator_contracts.contract_json = excluded.contract_json`,
+      [taskId, contract.execution_id, JSON.stringify(contract)]);
+}
+export function loadOperatorPresentationContract(taskId: string): OperatorPresentationContract | null {
+  const row = queryOne<{ contract_json: string }>('SELECT contract_json FROM presentation_operator_contracts WHERE task_id = ?', [taskId]);
+  return row ? parseOperatorPresentationContract(JSON.parse(row.contract_json)) : null;
+}
