@@ -79,6 +79,8 @@ let parsePersonaBundle: SelectorModule['parsePersonaBundle'];
 
 type TasksModule = typeof import('../../src/lib/tasks');
 let isContentTask: TasksModule['isContentTask'];
+let isStandardInformationalPresentationRequest: TasksModule['isStandardInformationalPresentationRequest'];
+let shouldUsePersonaBlend: TasksModule['shouldUsePersonaBlend'];
 let resolvePersonaAndPin: TasksModule['resolvePersonaAndPin'];
 let createTaskCore: TasksModule['createTaskCore'];
 let rescoreAudienceBlend: TasksModule['rescoreAudienceBlend'];
@@ -112,7 +114,7 @@ test.before(async () => {
 
   const tasks = await import('../../src/lib/tasks');
   ({
-    isContentTask, resolvePersonaAndPin, createTaskCore, rescoreAudienceBlend,
+    isContentTask, isStandardInformationalPresentationRequest, shouldUsePersonaBlend, resolvePersonaAndPin, createTaskCore, rescoreAudienceBlend,
     confirmTaskAudience, evaluateAudienceConfirmGate,
   } = tasks);
 
@@ -416,6 +418,26 @@ test('[D1] isContentTask: false for ops/mechanical tasks, including incidental s
   assert.equal(isContentTask('read the deployment logs'), false, '"read" must NOT match content word "ad"');
   assert.equal(isContentTask('run compost analytics on the download admin panel'), false, '"compost"/"download"/"admin" must NOT match "post"/"ad"');
   assert.equal(isContentTask(''), false, 'empty text');
+});
+
+const STANDARD_INFORMATIONAL_PRESENTATION = `
+Request: Produce about 8 slides for an informational department demonstration.
+Intake mapping: presentation_type=from_scratch; deck_type=webinar; creation_mode=from_scratch; mode=general; main-deck pitch_included=false.
+Select all compatible extras, including VSL and sales/checkout outputs where compatible; keep those optional outputs separate from the informational main deck.
+`;
+
+test('[PD-022] a fully classified informational presentation does not blend optional-output routing instructions', () => {
+  assert.equal(isContentTask(STANDARD_INFORMATIONAL_PRESENTATION), true, 'legacy content vocabulary still detects VSL/sales/copy');
+  assert.equal(isStandardInformationalPresentationRequest(STANDARD_INFORMATIONAL_PRESENTATION, 'presentations'), true);
+  assert.equal(shouldUsePersonaBlend(STANDARD_INFORMATIONAL_PRESENTATION, 'presentations'), false, 'single normal persona path');
+});
+
+test('[PD-022] signature, pitch, missing, duplicate, or wrong-department markers fail closed to voice blending', () => {
+  assert.equal(shouldUsePersonaBlend(STANDARD_INFORMATIONAL_PRESENTATION.replace('pitch_included=false', 'pitch_included=true'), 'presentations'), true, 'pitch deck remains governed');
+  assert.equal(shouldUsePersonaBlend(STANDARD_INFORMATIONAL_PRESENTATION.replace('deck_type=webinar', 'deck_type=signature'), 'presentations'), true, 'signature deck remains governed');
+  assert.equal(shouldUsePersonaBlend(STANDARD_INFORMATIONAL_PRESENTATION.replace('mode=general; ', ''), 'presentations'), true, 'missing classification cannot bypass');
+  assert.equal(shouldUsePersonaBlend(`${STANDARD_INFORMATIONAL_PRESENTATION} mode=general;`, 'presentations'), true, 'duplicate classification cannot bypass');
+  assert.equal(shouldUsePersonaBlend(STANDARD_INFORMATIONAL_PRESENTATION, 'marketing'), true, 'wrong department cannot bypass');
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

@@ -5,7 +5,7 @@ import { openSync, closeSync, readSync, fstatSync } from 'fs';
 import { getDb } from '@/lib/db';
 import { latestExecution } from '@/lib/execution-attempts';
 import { personaBundleHash } from '@/lib/persona-state';
-import { isContentTask } from '@/lib/tasks';
+import { shouldUsePersonaBlend } from '@/lib/tasks';
 import type Database from 'better-sqlite3';
 
 export interface PersonaConformanceResult { pass: boolean; reason: string }
@@ -57,7 +57,7 @@ export function requirePersonaConformanceForCompletion(taskId:string,db:Database
   }
   if(!task.persona_contract_version)return {pass:true,reason:'legacy_contract'};
   const row=db.prepare('SELECT bundle_json FROM task_persona_bundle WHERE task_id=?').get(taskId) as {bundle_json:string}|undefined;
-  if(!row)return isContentTask(`${task.title} ${task.description??''}`)?{pass:false,reason:'persona_bundle_required'}:{pass:true,reason:'non_content'};
+  if(!row)return shouldUsePersonaBlend(`${task.title} ${task.description??''}`, task.department)?{pass:false,reason:'persona_bundle_required'}:{pass:true,reason:'non_content'};
   const bundle=JSON.parse(row.bundle_json);
   if(bundle.decision_context?.input_revision!==task.persona_input_revision)return {pass:false,reason:'persona_input_changed'};
   const execution=latestExecution(taskId,db);

@@ -40,7 +40,7 @@
 
 import { queryAll, queryOne, run } from '@/lib/db';
 import { v4 as uuidv4 } from 'uuid';
-import { resolvePersonaAndPin, isContentTask } from '@/lib/tasks';
+import { resolvePersonaAndPin, shouldUsePersonaBlend } from '@/lib/tasks';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 
 export interface PersonaBackfillResult {
@@ -255,7 +255,7 @@ export async function runPersonaBlendBackfill(
 
   // Semantic content filter in TS (never grep-as-content-judge — meta-rule 2.4).
   const contentRows = rows.filter((r) =>
-    isContentTask(`${r.title}${r.description ? ` ${r.description}` : ''}`),
+    shouldUsePersonaBlend(`${r.title}${r.description ? ` ${r.description}` : ''}`, r.department || r.workspace_id),
   );
 
   let blendBackfilled = 0;

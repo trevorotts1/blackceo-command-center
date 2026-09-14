@@ -999,6 +999,54 @@ export function isContentTask(taskText: string): boolean {
 }
 
 /**
+ * A signed presentation-intake request may include implementation language such
+ * as “copy”, “VSL”, and “sales/checkout” while asking for a general,
+ * informational main deck. That language describes optional engine outputs; it
+ * must not turn the main deck into a marketing voice blend. Keep this parser
+ * deliberately narrow and fail closed: every canonical intake field must occur
+ * exactly once and agree with the standard informational-webinar profile.
+ *
+ * The raw description remains the source of persona scoring. This only selects
+ * the selector mode; it does not create an audience confirmation or waive any
+ * presentation/QC gate.
+ */
+export function isStandardInformationalPresentationRequest(
+  taskText: string,
+  department: string | null | undefined,
+): boolean {
+  if (canonicalDeptSlug(department ?? '') !== 'presentations') return false;
+  const text = taskText.toLowerCase();
+  const values = (field: string): string[] => {
+    const escaped = field.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return Array.from(text.matchAll(new RegExp(`\\b${escaped}\\s*=\\s*([a-z_]+)\\b`, 'g'))).map((match) => match[1]);
+  };
+  const exactly = (field: string, expected: string) => {
+    const found = values(field);
+    return found.length === 1 && found[0] === expected;
+  };
+  return (
+    exactly('presentation_type', 'from_scratch') &&
+    exactly('deck_type', 'webinar') &&
+    exactly('creation_mode', 'from_scratch') &&
+    exactly('mode', 'general') &&
+    exactly('pitch_included', 'false')
+  );
+}
+
+/**
+ * Presentation intake is an explicit product classification, so do not infer a
+ * marketing voice blend from optional-output vocabulary in a standard
+ * informational webinar request. Missing, duplicate, or conflicting markers
+ * preserve the existing content-governance path.
+ */
+export function shouldUsePersonaBlend(
+  taskText: string,
+  department: string | null | undefined,
+): boolean {
+  return isContentTask(taskText) && !isStandardInformationalPresentationRequest(taskText, department);
+}
+
+/**
  * Decide whether a task should run multi-persona decomposition, and gather the
  * SOP-declared slots. Pure + free (no subprocess). Exported for the contract test.
  */
@@ -1295,7 +1343,7 @@ export async function rescorePersonaWithSOP(
   sopContext: SopSelectorContext,
 ): Promise<RescoreResult> {
   const snapshot = capturePersonaSnapshot(taskId);
-  const wantsBlend = isContentTask(taskDescription);
+  const wantsBlend = shouldUsePersonaBlend(taskDescription, departmentForSelector);
   const prev = queryOne<{
     persona_id: string | null;
     persona_name: string | null;
@@ -1632,7 +1680,7 @@ export async function refreshPersonaDecisionIfNeeded(taskId:string):Promise<void
     const refreshed=await rescoreAudienceBlend(taskId,description,dept,task.audience_label);
     if(!refreshed.rescored) throw new Error('persona_refresh_pending');
   } else {
-    const persona=await resolvePersonaAndPin(taskId,description,dept,task.sop_id?loadSopSelectorContextById(task.sop_id):undefined,{blend:isContentTask(description)});
+    const persona=await resolvePersonaAndPin(taskId,description,dept,task.sop_id?loadSopSelectorContextById(task.sop_id):undefined,{blend:shouldUsePersonaBlend(description, dept)});
     if(!persona) throw new Error('persona_refresh_pending');
   }
   applyPersonaOperatorLock(taskId);
@@ -1644,7 +1692,7 @@ export function checkPersonaDispatchReady(taskId: string): { ready: boolean; rea
     const task = queryOne<Task & {persona_contract_version?:number}>('SELECT * FROM tasks WHERE id=?',[taskId]);
     if (!task) return {ready:false,reason:'task_missing'};
     const row = queryOne<{bundle_json:string;confirm_state:string}>('SELECT bundle_json,confirm_state FROM task_persona_bundle WHERE task_id=?',[taskId]);
-    if (!row) return task.persona_contract_version && isContentTask(`${task.title} ${task.description ?? ''}`)
+    if (!row) return task.persona_contract_version && shouldUsePersonaBlend(`${task.title} ${task.description ?? ''}`, task.department)
       ? {ready:false,reason:'persona_bundle_required'} : {ready:true,reason:'legacy_or_non_content'};
     const bundle=JSON.parse(row.bundle_json) as PersonaBundle & {decision_context?:{input_revision?:number}};
     if(task.persona_contract_version && bundle.decision_context?.input_revision!==(task as Task & {persona_input_revision?:number}).persona_input_revision) return {ready:false,reason:'persona_input_changed'};
@@ -2936,7 +2984,11 @@ export async function createTaskCore(
     // too would double-decompose the same task. Non-content tasks are entirely
     // unaffected — decideMultiPersona still governs them exactly as before.
     const personaSlots = loadSopPersonaSlots(sopId);
-    const contentTask = isContentTask(personaTaskDescription);
+    const standardInformationalPresentation = isStandardInformationalPresentationRequest(
+      personaTaskDescription,
+      personaDepartment,
+    );
+    const contentTask = shouldUsePersonaBlend(personaTaskDescription, personaDepartment);
     const { combined: useCombinedPersona, reason: decompReason } = decideMultiPersona(
       personaTaskDescription,
       personaSlots,
@@ -2944,7 +2996,7 @@ export async function createTaskCore(
     if (contentTask) {
       console.log(`[createTaskCore] task ${id}: content task — routing to --blend (voice-first audience+topic, D1)`);
       personaPinPromise = resolvePersonaAndPin(id, personaTaskDescription, personaDepartment, sopContext, { blend: true });
-    } else if (useCombinedPersona) {
+    } else if (useCombinedPersona && !standardInformationalPresentation) {
       console.log(`[createTaskCore] task ${id}: multi-persona decomposition (${decompReason})`);
       personaPinPromise = resolvePersonaPlanAndPin(id, personaTaskDescription, personaDepartment, personaSlots);
     } else {

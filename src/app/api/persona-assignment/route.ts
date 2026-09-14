@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getDb } from '@/lib/db';
 import { capturePersonaSnapshot, commitPersonaMutation, PersonaConflictError } from '@/lib/persona-state';
-import { isContentTask } from '@/lib/tasks';
+import { shouldUsePersonaBlend } from '@/lib/tasks';
 import { selectPersonaForTask, buildPersonaReason, persistPersonaBundle } from '@/lib/persona-selector';
 
 export const dynamic = 'force-dynamic';
@@ -40,7 +40,7 @@ export async function POST(request: Request) {
 
     const snapshot=capturePersonaSnapshot(task.id);
     const textForScoring = [task.title, task.description].filter(Boolean).join('\n\n');
-    const result = await selectPersonaForTask(task.id, textForScoring, task.department, null, {blend:isContentTask(textForScoring)});
+    const result = await selectPersonaForTask(task.id, textForScoring, task.department, null, {blend:shouldUsePersonaBlend(textForScoring, task.department)});
 
     if (!result || !result.persona_id) {
       return NextResponse.json(
@@ -51,7 +51,7 @@ export async function POST(request: Request) {
 
     if (autoAssign) {
       commitPersonaMutation(snapshot, () => {
-      if(isContentTask(textForScoring) && !result.bundle) throw new Error('persona_bundle_required');
+      if(shouldUsePersonaBlend(textForScoring, task.department) && !result.bundle) throw new Error('persona_bundle_required');
       db.prepare(
         `UPDATE tasks
           SET persona_id = ?, persona_name = ?, persona_mode = ?, persona_score = ?,
