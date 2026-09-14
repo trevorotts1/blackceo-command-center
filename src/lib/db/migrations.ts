@@ -7143,6 +7143,73 @@ export const migrations: Migration[] = [
       )`);
     },
   },
+  {
+    // PD-TEST-050: the recovery receipt must be unique per (task_id, repair_key),
+    // NOT per task_id.
+    //
+    // Migration 146 declared `task_id TEXT NOT NULL UNIQUE`, which made the FIRST
+    // pre-engine recovery the LAST one for that task. On 2026-09-14T23:38Z the one
+    // permitted receipt (repair_key `pd038-notify-env-and-pd039-recovery-counter`)
+    // was legitimately consumed and the engine then died on a DIFFERENT
+    // deterministic pre-engine defect (PD-TEST-049). With the row present a
+    // different repair_key drew 409 `pre_engine_recovery_already_issued`, the same
+    // repair_key replayed idempotently without re-dispatching, and both ordinary
+    // sweeps gate on `dispatch_attempts < MAX_DISPATCH_ATTEMPTS` while the counter
+    // had moved 5 -> 6: no supported re-drive path existed.
+    //
+    // SQLite cannot drop an inline UNIQUE constraint, so this is a 12-step table
+    // rebuild: same columns, same types, same FK, UNIQUE moved to
+    // (task_id, repair_key). Every existing receipt row is COPIED ACROSS
+    // UNCHANGED — no recovery, submission or attempt history is deleted, and no
+    // task's `dispatch_attempts` is touched. The COPY runs before the DROP, both
+    // inside one transaction, so a failure mid-rebuild leaves the old table
+    // intact. `useOuterTransaction: false` because PRAGMA foreign_keys cannot be
+    // toggled inside an open transaction (see the Migration interface note).
+    id: '147',
+    name: 'presentation_operator_preengine_recoveries_per_repair_key',
+    useOuterTransaction: false,
+    up: (db) => {
+      const fkRow = db.prepare('PRAGMA foreign_keys').get() as { foreign_keys: number } | undefined;
+      const fkWasOn = fkRow?.foreign_keys === 1;
+      db.exec('PRAGMA foreign_keys = OFF');
+      try {
+        const rebuild = db.transaction(() => {
+          db.exec('DROP TABLE IF EXISTS presentation_operator_preengine_recoveries_147');
+          db.exec(`CREATE TABLE presentation_operator_preengine_recoveries_147 (
+            id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+            execution_id TEXT NOT NULL,
+            contract_sha256 TEXT NOT NULL,
+            prior_dispatch_attempts INTEGER NOT NULL,
+            repair_key TEXT NOT NULL,
+            prior_failure_code TEXT NOT NULL,
+            bridge_state TEXT NOT NULL,
+            bridge_retry_attempt INTEGER NOT NULL,
+            dispatch_started_at TEXT,
+            created_at TEXT NOT NULL,
+            UNIQUE(task_id, repair_key)
+          )`);
+          // Copy-on-rebuild. INSERT OR IGNORE cannot silently drop a row unless a
+          // duplicate (task_id, repair_key) pair already exists — impossible under
+          // 146, whose task_id UNIQUE is strictly stronger. Verified after the fact
+          // by the row-count assertion below.
+          const before = (db.prepare('SELECT COUNT(*) AS n FROM presentation_operator_preengine_recoveries').get() as { n: number }).n;
+          db.exec(`INSERT INTO presentation_operator_preengine_recoveries_147
+            (id, task_id, execution_id, contract_sha256, prior_dispatch_attempts, repair_key, prior_failure_code, bridge_state, bridge_retry_attempt, dispatch_started_at, created_at)
+            SELECT id, task_id, execution_id, contract_sha256, prior_dispatch_attempts, repair_key, prior_failure_code, bridge_state, bridge_retry_attempt, dispatch_started_at, created_at
+            FROM presentation_operator_preengine_recoveries`);
+          const after = (db.prepare('SELECT COUNT(*) AS n FROM presentation_operator_preengine_recoveries_147').get() as { n: number }).n;
+          if (after !== before) throw new Error(`[Migration 147] recovery receipt copy lost rows (${before} -> ${after}); refusing to drop the original table`);
+          db.exec('DROP TABLE presentation_operator_preengine_recoveries');
+          db.exec('ALTER TABLE presentation_operator_preengine_recoveries_147 RENAME TO presentation_operator_preengine_recoveries');
+        });
+        rebuild();
+      } finally {
+        if (fkWasOn) db.exec('PRAGMA foreign_keys = ON');
+      }
+      console.log('[Migration 147] presentation_operator_preengine_recoveries is now UNIQUE(task_id, repair_key) — receipts preserved');
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner
