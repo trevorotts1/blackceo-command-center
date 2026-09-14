@@ -7109,6 +7109,21 @@ export const migrations: Migration[] = [
     },
   },
 
+
+  {
+    // Mainline owns 142–144. This additive operator-contract table must receive
+    // its own applied-state key or existing boxes silently skip it.
+    id: '145',
+    name: 'presentation_operator_contracts',
+    up: (db) => {
+      db.exec(`CREATE TABLE IF NOT EXISTS presentation_operator_contracts (
+        task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+        execution_id TEXT NOT NULL UNIQUE,
+        contract_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      )`);
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner

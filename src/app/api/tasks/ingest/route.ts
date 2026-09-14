@@ -4,6 +4,7 @@ import { queryOne, getDb, run } from '@/lib/db';
 import { v4 as uuidv4 } from 'uuid';
 import { runMigrations } from '@/lib/db/migrations';
 import { createTaskCore, validateProducerPersonaBundle } from '@/lib/tasks';
+import { parseOperatorPresentationContract, ensureOperatorPresentationContract } from '@/lib/presentation-operator-contract';
 import type { PersonaBundle } from '@/lib/types';
 import { routeTask } from '@/lib/routing/department-router';
 import type { TaskPriority } from '@/lib/types';
@@ -203,6 +204,8 @@ interface IngestPayload {
    * must not block capture.
    */
   slide_count?: unknown;
+  /** Signed, operator-delegated structured Presentations execution request. */
+  presentation_intake?: unknown;
   /**
    * FIX 52 (MASTER Part 8 / [R5A §H5]) — the explicit manifest phase id a
    * presentation producer stamps on its per-phase CHILD card ("P4-COPY",
@@ -396,6 +399,12 @@ export async function POST(request: NextRequest) {
     }
 
     const title = typeof body.title === 'string' ? body.title.trim() : '';
+    let presentationIntake: ReturnType<typeof parseOperatorPresentationContract> | null = null;
+    if (body.presentation_intake !== undefined) {
+      try { presentationIntake = parseOperatorPresentationContract(body.presentation_intake); }
+      catch (err) { return NextResponse.json({ error: (err as Error).message }, { status: 400 }); }
+      if (presentationIntake.title !== title) return NextResponse.json({ error: 'presentation_intake title must match task title' }, { status: 400 });
+    }
     if (!title) {
       return NextResponse.json({ error: 'title is required' }, { status: 400 });
     }
@@ -489,6 +498,7 @@ export async function POST(request: NextRequest) {
     // check itself lives in normalizeBoardSource() and runs at the status
     // route (fail-closed there, 403 for unknown values like "garbage").
     const source = typeof body.source === 'string' ? body.source.trim().toLowerCase() : undefined;
+    if (presentationIntake && source !== 'operator-delegated') return NextResponse.json({ error: 'presentation_intake requires source=operator-delegated' }, { status: 400 });
     const sourceRef = typeof body.source_ref === 'string' ? body.source_ref.trim() : undefined;
     const departmentSlug =
       typeof body.department_slug === 'string' ? body.department_slug.trim() : undefined;
@@ -999,6 +1009,7 @@ export async function POST(request: NextRequest) {
         // now reads first, before falling back to the legacy (forgeable)
         // description marker for pre-migration rows.
         source: source ?? null,
+        presentation_operator_intake: presentationIntake,
         // P1-04: the originating client channel so the trust engine reports back.
         requester_channel: requesterChannel ?? null,
         requester_chat_id: requesterChatId ?? null,
@@ -1033,6 +1044,16 @@ export async function POST(request: NextRequest) {
     }
 
     const { task, deduped } = result;
+    if (presentationIntake && deduped) {
+      try { ensureOperatorPresentationContract(task.id, presentationIntake); }
+      catch (err) {
+        const message = (err as Error).message;
+        return NextResponse.json(
+          { error: `presentation_intake persistence failed: ${message}` },
+          { status: message.includes('immutable') ? 409 : 500 },
+        );
+      }
+    }
 
     // FIX 52 (migration 130) — stamp the presentation slide count onto the
     // freshly created card. Done as a follow-up UPDATE rather than inside

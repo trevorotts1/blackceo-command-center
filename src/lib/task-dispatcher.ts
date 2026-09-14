@@ -83,6 +83,7 @@ import {
   type RuntimeModelResolution,
 } from '@/lib/runtime-model';
 import { blockDispatchIfOwnerKilled } from '@/lib/owner-killed';
+import { launchOperatorPresentationContract } from '@/lib/presentation-operator-launcher';
 
 import type { SOP, SOPStep } from '@/lib/sops';
 import type { Task, Agent, OpenClawSession } from '@/lib/types';
@@ -758,6 +759,40 @@ export async function autoDispatchTask(
     // GUARD 5 and all session/gateway work) so EVERY caller — create-time
     // dispatch and every sweep — shares one fail-closed path. See the GUARD 4c
     // comment above for why 4c must run first.
+    // PD025: signed operator-delegated Presentations requests have a structured
+    // intake contract. Hand it to the local bridge before any generic agent chat;
+    // the bridge owns the lease and canonical engine launcher.
+    if ((task as Task & { source?: string | null }).source === 'operator-delegated' &&
+        (task.department === 'presentations' || task.workspace_id === 'presentations')) {
+      const handedOff = await launchOperatorPresentationContract(task.id);
+      if (handedOff?.kind === 'acknowledged') {
+        recordDeckGateEvent('presentation_operator_contract_handed_off', task.id, task.assigned_agent_id ?? null,
+          `[presentation_operator_contract_handed_off] ${task.id} launched canonical bridge run ${handedOff.runDir}`);
+        recordDispatchSuccess(task.id);
+        return { status: 'acknowledged', reason: 'presentation_operator_handoff' };
+      }
+      if (handedOff?.kind === 'blocked') {
+        recordDispatchFailure(task.id, task.assigned_agent_id ?? null, {
+          reason: 'presentation_operator_bridge_blocked', audience: 'SYSTEM',
+          needs: handedOff.detail, context, hardBlock: true,
+        });
+        return { status: 'held', reason: 'dispatch_precondition' };
+      }
+      if (handedOff) {
+        recordDispatchFailure(task.id, task.assigned_agent_id ?? null, {
+          reason: handedOff.kind === 'deferred' ? 'presentation_operator_bridge_deferred' : 'presentation_operator_bridge_retryable',
+          audience: 'SYSTEM', needs: handedOff.detail, context,
+        });
+        return { status: 'failed', reason: 'dispatch_pipeline_error' };
+      }
+      recordDispatchFailure(task.id, task.assigned_agent_id ?? null, {
+        reason: 'presentation_operator_contract_missing', audience: 'SYSTEM',
+        needs: 'Restore the signed operator presentation contract before retrying this task.', context,
+        hardBlock: true,
+      });
+      return { status: 'held', reason: 'dispatch_precondition' };
+    }
+
     if (isEngineOwnedSource((task as Task & { source?: string | null }).source)) {
       const engineHoldMsg =
         `[engine_owned_card_not_dispatched] Task "${task.title}" (${task.id}) has engine-owned ` +
