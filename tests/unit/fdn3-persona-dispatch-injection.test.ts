@@ -28,6 +28,7 @@ import assert from 'node:assert/strict';
 import {
   buildPersonaBlock,
   personaBlueprintPath,
+  PERSONA_ROUTER_PATH,
   GOVERNANCE_PERSONA_FALLBACK,
   renderBlendDirective,
   ensureBlendGuardrail,
@@ -81,6 +82,8 @@ test('F4.1 — assigned persona (single) is delivered, not self-selected', () =>
   assert.ok(block.includes('Section 4 (A–D)'), 'Section 4 A–D load instruction present');
   assert.ok(block.includes('§7B'), '§7B load instruction present');
   assert.ok(block.includes('[+APPENDIX]'), '[+APPENDIX] pointer present');
+  assert.ok(block.includes(PERSONA_ROUTER_PATH), 'router uses the installed Skill-22 path');
+  assert.ok(!block.includes('workspace/data/coaching-personas/PERSONA-ROUTER.md'), 'router is not misdirected into workspace data');
 });
 
 test('F4.1 — task.persona_id wins even when settings.persona disagrees', () => {

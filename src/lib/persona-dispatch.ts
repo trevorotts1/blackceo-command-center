@@ -93,6 +93,10 @@ export function personaBlueprintPath(personaId: string): string {
   return `coaching-personas/personas/${personaId}/persona-blueprint.md`;
 }
 
+/** Canonical installed Skill-22 router; it is not workspace persona data. */
+export const PERSONA_ROUTER_PATH =
+  '~/.openclaw/skills/22-book-to-persona-coaching-leadership-system/PERSONA-ROUTER.md';
+
 /**
  * Minimal task shape this module reads. All fields optional/nullable so it is
  * tolerant of older DB rows (persona columns absent) and of columns added by
@@ -139,7 +143,7 @@ function loadContract(personaId: string, mode: string): string {
   return `**Persona load contract (MANDATORY — before any work):**
 1. Read the blueprint: ${personaBlueprintPath(personaId)}
 2. Internalize Section 4 (A–D) and §7B — this is the voice, methodology, and decision lens you operate under for THIS task.
-3. If PERSONA-ROUTER.md flags this persona for an appendix, ALSO load its [+APPENDIX] block.
+3. If ${PERSONA_ROUTER_PATH} flags this persona for an appendix, ALSO load its [+APPENDIX] block. Do not look for the router under workspace data/coaching-personas/.
 Operate AS this persona (${mode} mode). Do NOT run any self-selection protocol — the persona is already assigned.`;
 }
 
