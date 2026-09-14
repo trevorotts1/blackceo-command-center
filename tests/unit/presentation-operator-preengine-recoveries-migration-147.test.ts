@@ -147,3 +147,75 @@ test('a fresh database boots straight to the (task_id, repair_key) shape', () =>
     db.close();
   }
 });
+
+/**
+ * HALF-MIGRATED BOOT — the class migration 144's header names ("every ALTER is
+ * PRAGMA-guarded … so minimal fixtures and half-migrated boxes heal instead of
+ * crashing") and that has been observed on this very box: `_migrations` holding
+ * a later id while the table that id's predecessors create is ABSENT.
+ *
+ * Before the existence guard, migration 147 threw
+ * `SqliteError: no such table: presentation_operator_preengine_recoveries`
+ * on such a database, and because getDb() is fail-closed
+ * (src/lib/db/index.ts:197-211) the Command Center refused to serve — on every
+ * boot, persistently. This test boots that exact database.
+ */
+test('a half-migrated database (146 recorded, table ABSENT) still boots to the per-repair-key shape', () => {
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cc-mig147-half-')), 'half.db');
+  const db = new Database(file);
+  try {
+    db.exec(schema);
+    // `_migrations` records 146 as applied, but nothing ever created the table.
+    db.exec(`CREATE TABLE IF NOT EXISTS _migrations (id TEXT PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT DEFAULT (datetime('now')))`);
+    db.prepare(`INSERT INTO _migrations (id, name) VALUES ('146', 'presentation_operator_preengine_recoveries')`).run();
+    assert.equal(
+      (db.prepare(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='presentation_operator_preengine_recoveries'`).get() as { n: number }).n,
+      0,
+      'fixture precondition: the receipt table really is absent',
+    );
+
+    // The boot must NOT throw.
+    runMigrations(db);
+
+    const ddl = (db.prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='presentation_operator_preengine_recoveries'`).get() as { sql: string }).sql;
+    assert.match(ddl, /UNIQUE\s*\(\s*task_id\s*,\s*repair_key\s*\)/i, 'the half-migrated boot must land on the new shape');
+    assert.doesNotMatch(ddl, /task_id TEXT NOT NULL UNIQUE/i);
+    assert.match(ddl, /REFERENCES tasks\(id\) ON DELETE CASCADE/i, 'the FK is present on the created table');
+    assert.equal((db.prepare(`SELECT COUNT(*) AS n FROM _migrations WHERE id='147'`).get() as { n: number }).n, 1);
+    assert.equal(
+      (db.prepare(`SELECT COUNT(*) AS n FROM sqlite_master WHERE name LIKE '%_147'`).get() as { n: number }).n,
+      0,
+      'no scratch table is left behind',
+    );
+
+    // The healed table is fully functional: two DISTINCT repairs for one task,
+    // and same-(task, repair) still unique. (The migration set itself seeds
+    // 'default' company/workspace, hence INSERT OR IGNORE.)
+    db.prepare(`INSERT OR IGNORE INTO companies (id, name, slug) VALUES ('default', 'Default', 'default')`).run();
+    db.prepare(`INSERT OR IGNORE INTO workspaces (id, name, slug) VALUES ('default', 'Default', 'default')`).run();
+    const taskId = uuidv4();
+    db.prepare(`INSERT INTO tasks (id, title, status, workspace_id) VALUES (?, 'PD-TEST-050', 'blocked', 'default')`).run(taskId);
+    const insert = db.prepare(`INSERT INTO presentation_operator_preengine_recoveries
+      (id, task_id, execution_id, contract_sha256, prior_dispatch_attempts, repair_key, prior_failure_code, bridge_state, bridge_retry_attempt, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'F', 'launch_pending', 1, ?)`);
+    const executionId = uuidv4();
+    insert.run(uuidv4(), taskId, executionId, 'a'.repeat(64), 5, 'repair-one', new Date().toISOString());
+    insert.run(uuidv4(), taskId, executionId, 'a'.repeat(64), 6, 'repair-two', new Date().toISOString());
+    assert.equal((db.prepare('SELECT COUNT(*) AS n FROM presentation_operator_preengine_recoveries WHERE task_id=?').get(taskId) as { n: number }).n, 2);
+    assert.throws(() => insert.run(uuidv4(), taskId, executionId, 'a'.repeat(64), 6, 'repair-two', new Date().toISOString()), /UNIQUE/i);
+
+    assert.deepEqual(db.pragma('foreign_key_check'), []);
+
+    // Re-running the whole migration set (the crash-between-commit-and-record
+    // window) is a no-op that still conserves the rows.
+    db.prepare(`DELETE FROM _migrations WHERE id='147'`).run();
+    runMigrations(db);
+    assert.equal((db.prepare('SELECT COUNT(*) AS n FROM presentation_operator_preengine_recoveries WHERE task_id=?').get(taskId) as { n: number }).n, 2);
+    assert.match(
+      (db.prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='presentation_operator_preengine_recoveries'`).get() as { sql: string }).sql,
+      /UNIQUE\s*\(\s*task_id\s*,\s*repair_key\s*\)/i,
+    );
+  } finally {
+    db.close();
+  }
+});

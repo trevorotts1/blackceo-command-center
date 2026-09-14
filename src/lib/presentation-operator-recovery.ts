@@ -128,19 +128,29 @@ export function preEngineRecoveryBudget(): number {
  * refusal changes its code. What this probe adds is everything those two miss:
  * a state.json with no execution row and no receipt, a terminal
  * (succeeded/failed) execution row, and an invalidated receipt.
+ *
+ * FAIL-CLOSED, NOT FAIL-OPEN. A missing registry table (a pre-migration DB) is
+ * the only tolerable absence, and it is detected explicitly through
+ * sqlite_master rather than by swallowing whatever the query throws. Any other
+ * failure — a corrupt or unreadable registry — PROPAGATES so the request is
+ * refused with a 500 instead of being quietly read as "no engine work". This is
+ * the one place in the gate where a silent degradation would hand back exactly
+ * the unbounded retry budget the gate exists to deny.
  */
 export function preEngineRecoveryEngineArtifacts(taskId: string): PreEngineArtifactKind[] {
   const found: PreEngineArtifactKind[] = [];
-  try {
-    if (existsSync(path.join(operatorPresentationRunDir(taskId), 'state.json'))) found.push('state_json');
-  } catch { /* an unresolvable run root is not engine work */ }
-  try {
-    if (queryOne<{ id: string }>('SELECT id FROM task_executions WHERE task_id=? LIMIT 1', [taskId])) found.push('task_execution');
-  } catch { /* pre-migration DB: no execution table to consult */ }
-  try {
-    if (queryOne<{ id: string }>('SELECT id FROM presentation_verification_receipts WHERE task_id=? LIMIT 1', [taskId])) found.push('engine_receipt');
-  } catch { /* pre-migration DB: no receipt table to consult */ }
+  if (existsSync(path.join(operatorPresentationRunDir(taskId), 'state.json'))) found.push('state_json');
+  if (tableExists('task_executions')
+    && queryOne<{ id: string }>('SELECT id FROM task_executions WHERE task_id=? LIMIT 1', [taskId])) found.push('task_execution');
+  if (tableExists('presentation_verification_receipts')
+    && queryOne<{ id: string }>('SELECT id FROM presentation_verification_receipts WHERE task_id=? LIMIT 1', [taskId])) found.push('engine_receipt');
   return found;
+}
+
+/** Does `name` exist as a table in this database? (No swallow: errors propagate.) */
+function tableExists(name: string): boolean {
+  const row = queryOne<{ n: number }>("SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name=?", [name]);
+  return (row?.n ?? 0) > 0;
 }
 
 export function operatorContractSha256(contract: unknown): string {

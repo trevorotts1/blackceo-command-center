@@ -7165,6 +7165,16 @@ export const migrations: Migration[] = [
     // inside one transaction, so a failure mid-rebuild leaves the old table
     // intact. `useOuterTransaction: false` because PRAGMA foreign_keys cannot be
     // toggled inside an open transaction (see the Migration interface note).
+    //
+    // The rebuild is GUARDED on the old table actually existing (see the
+    // existence guard in `up`): on a half-migrated box whose `_migrations`
+    // records 146 while the table is gone, this migration CREATES the table in
+    // the new shape instead of throwing `no such table` — which, on a fail-closed
+    // boot (src/lib/db/index.ts:197-211), would stop the Command Center serving
+    // on every boot. It is also safe to re-run: a death between the rebuild
+    // commit and the runner recording the id simply rebuilds again, and the
+    // `DROP TABLE IF EXISTS …_147` + copy conserve every row (proven by the
+    // migration suite).
     id: '147',
     name: 'presentation_operator_preengine_recoveries_per_repair_key',
     useOuterTransaction: false,
@@ -7189,18 +7199,36 @@ export const migrations: Migration[] = [
             created_at TEXT NOT NULL,
             UNIQUE(task_id, repair_key)
           )`);
-          // Copy-on-rebuild. INSERT OR IGNORE cannot silently drop a row unless a
-          // duplicate (task_id, repair_key) pair already exists — impossible under
-          // 146, whose task_id UNIQUE is strictly stronger. Verified after the fact
-          // by the row-count assertion below.
-          const before = (db.prepare('SELECT COUNT(*) AS n FROM presentation_operator_preengine_recoveries').get() as { n: number }).n;
-          db.exec(`INSERT INTO presentation_operator_preengine_recoveries_147
-            (id, task_id, execution_id, contract_sha256, prior_dispatch_attempts, repair_key, prior_failure_code, bridge_state, bridge_retry_attempt, dispatch_started_at, created_at)
-            SELECT id, task_id, execution_id, contract_sha256, prior_dispatch_attempts, repair_key, prior_failure_code, bridge_state, bridge_retry_attempt, dispatch_started_at, created_at
-            FROM presentation_operator_preengine_recoveries`);
-          const after = (db.prepare('SELECT COUNT(*) AS n FROM presentation_operator_preengine_recoveries_147').get() as { n: number }).n;
-          if (after !== before) throw new Error(`[Migration 147] recovery receipt copy lost rows (${before} -> ${after}); refusing to drop the original table`);
-          db.exec('DROP TABLE presentation_operator_preengine_recoveries');
+          // EXISTENCE GUARD (migration-131 convention — "every ALTER is
+          // PRAGMA/if-exists-guarded so minimal fixtures and half-migrated boxes
+          // heal instead of crashing"; migration 144's header states it, and 146
+          // itself is CREATE TABLE IF NOT EXISTS). This database class is real,
+          // not theoretical: `_migrations` has been observed on THIS box
+          // recording a later id while earlier table-creating ids were absent
+          // (145 recorded with 142-144 missing). Without this guard, a box whose
+          // `_migrations` holds 146 while the table is gone would throw
+          // `no such table` here, and because getDb() is fail-closed
+          // (src/lib/db/index.ts:197-211) the whole Command Center would refuse
+          // to serve — persistently, on every boot.
+          const tableExists = (db.prepare(
+            `SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='presentation_operator_preengine_recoveries'`,
+          ).get() as { n: number }).n > 0;
+          if (tableExists) {
+            // Copy-on-rebuild. The copy is a PLAIN `INSERT ... SELECT`, never
+            // `INSERT OR IGNORE`: a duplicate must ABORT the rebuild loudly
+            // rather than be silently dropped. Under 146 a duplicate
+            // (task_id, repair_key) pair is impossible (task_id UNIQUE is
+            // strictly stronger); the row-count assertion below re-proves it
+            // after the fact.
+            const before = (db.prepare('SELECT COUNT(*) AS n FROM presentation_operator_preengine_recoveries').get() as { n: number }).n;
+            db.exec(`INSERT INTO presentation_operator_preengine_recoveries_147
+              (id, task_id, execution_id, contract_sha256, prior_dispatch_attempts, repair_key, prior_failure_code, bridge_state, bridge_retry_attempt, dispatch_started_at, created_at)
+              SELECT id, task_id, execution_id, contract_sha256, prior_dispatch_attempts, repair_key, prior_failure_code, bridge_state, bridge_retry_attempt, dispatch_started_at, created_at
+              FROM presentation_operator_preengine_recoveries`);
+            const after = (db.prepare('SELECT COUNT(*) AS n FROM presentation_operator_preengine_recoveries_147').get() as { n: number }).n;
+            if (after !== before) throw new Error(`[Migration 147] recovery receipt copy lost rows (${before} -> ${after}); refusing to drop the original table`);
+            db.exec('DROP TABLE presentation_operator_preengine_recoveries');
+          }
           db.exec('ALTER TABLE presentation_operator_preengine_recoveries_147 RENAME TO presentation_operator_preengine_recoveries');
         });
         rebuild();
