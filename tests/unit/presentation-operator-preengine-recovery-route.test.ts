@@ -46,6 +46,9 @@ import { POST } from '../../src/app/api/tasks/[id]/operator-preengine-recovery/r
 import { POST as resumeTask } from '../../src/app/api/tasks/[id]/resume/route';
 
 process.env.WEBHOOK_SECRET = 'preengine-recovery-test-secret';
+// The deployed route requires BOTH layers when MC_API_TOKEN is set (Bearer +
+// HMAC-SHA256 of the exact raw bytes), so the suite runs with both configured.
+process.env.MC_API_TOKEN = 'preengine-recovery-test-token';
 process.env.MAX_DISPATCH_ATTEMPTS = '5';
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-preengine-recovery-'));
 const bridge = path.join(root, 'bridge.py');
@@ -136,10 +139,23 @@ function evidenceFor(contract: { execution_id: string }, over: Record<string, un
   };
 }
 
-function request(id: string, body: object) {
-  const raw = JSON.stringify(body);
+function signatureFor(body: object, secret = process.env.WEBHOOK_SECRET!): string {
+  return createHmac('sha256', secret).update(JSON.stringify(body)).digest('hex');
+}
+
+function rawRequest(id: string, body: object, headers: Record<string, string> = {}) {
   return new NextRequest(`http://localhost/api/tasks/${id}/operator-preengine-recovery`, {
-    method: 'POST', headers: { 'content-type': 'application/json', 'x-webhook-signature': createHmac('sha256', process.env.WEBHOOK_SECRET!).update(raw).digest('hex') }, body: raw,
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...headers },
+    body: JSON.stringify(body),
+  });
+}
+
+/** The deployed contract: valid Bearer + valid HMAC over the exact raw bytes. */
+function request(id: string, body: object) {
+  return rawRequest(id, body, {
+    authorization: `Bearer ${process.env.MC_API_TOKEN}`,
+    'x-webhook-signature': signatureFor(body),
   });
 }
 
@@ -227,6 +243,75 @@ test('non-operator scope and a non-exhausted budget are refused — the endpoint
   assert.equal(bridgeCalls().length, 0);
 });
 
+test('both auth layers are required — unsigned, foreign bearer and wrong HMAC are refused without consuming the recovery', async () => {
+  newBridgeLog();
+  const { id, contract } = createOperatorTask();
+  const evidence = evidenceFor(contract);
+
+  const unsigned = await POST(rawRequest(id, evidence), { params: Promise.resolve({ id }) });
+  assert.equal(unsigned.status, 401);
+  const foreignBearer = await POST(
+    rawRequest(id, evidence, { authorization: 'Bearer not-the-configured-token', 'x-webhook-signature': signatureFor(evidence) }),
+    { params: Promise.resolve({ id }) },
+  );
+  assert.equal(foreignBearer.status, 401);
+  const wrongHmac = await POST(
+    rawRequest(id, evidence, { authorization: `Bearer ${process.env.MC_API_TOKEN}`, 'x-webhook-signature': signatureFor(evidence, 'wrong-secret') }),
+    { params: Promise.resolve({ id }) },
+  );
+  assert.equal(wrongHmac.status, 401);
+
+  assert.equal(queryAll('SELECT * FROM presentation_operator_preengine_recoveries WHERE task_id=?', [id]).length, 0);
+  assert.equal(bridgeCalls().length, 0);
+  assert.equal(attemptsOf(id), 5);
+  // ...and the fully authenticated request is still authorized exactly once.
+  const ok = await POST(request(id, evidence), { params: Promise.resolve({ id }) });
+  assert.equal(ok.status, 200);
+  assert.equal(callsForTask(id).length, 1);
+});
+
+test('pre-engine state guards hold — unknown task, non-blocked task, active execution, engine proof', async () => {
+  newBridgeLog();
+  const missingId = uuidv4();
+  const missing = await POST(request(missingId, evidenceFor({ execution_id: uuidv4() })), { params: Promise.resolve({ id: missingId }) });
+  assert.equal(missing.status, 404);
+  assert.equal((await missing.json()).error, 'task_not_found');
+
+  // An exhausted operator task that is not blocked is out of scope for recovery.
+  const open = createOperatorTask({ status: 'backlog' });
+  const notBlocked = await POST(request(open.id, evidenceFor(open.contract)), { params: Promise.resolve({ id: open.id }) });
+  assert.equal(notBlocked.status, 422);
+  assert.equal((await notBlocked.json()).error, 'blocked_task_required');
+
+  // No recovery while the engine already has an in-flight execution…
+  const running = createOperatorTask();
+  const now = new Date().toISOString();
+  run(
+    `INSERT INTO task_executions (id, task_id, assignment_version, agent_id, workspace_id, generation, session_key, session_id, state, lease_owner, lease_expires_at, idempotency_key, created_at, updated_at)
+     VALUES (?, ?, 0, 'presentation-worker', 'default', 1, ?, ?, 'running', 'test-lease', ?, ?, ?, ?)`,
+    [uuidv4(), running.id, `sess-${running.id}`, `sid-${running.id}`, now, `idem-${running.id}`, now, now],
+  );
+  const activeExecution = await POST(request(running.id, evidenceFor(running.contract)), { params: Promise.resolve({ id: running.id }) });
+  assert.equal(activeExecution.status, 422);
+  assert.equal((await activeExecution.json()).error, 'active_execution_exists');
+
+  // …nor once engine proof exists for the task.
+  const proved = createOperatorTask();
+  run(`INSERT INTO presentation_verification_receipts (id, task_id, receipt_sha256, status) VALUES (?, ?, ?, 'active')`, [uuidv4(), proved.id, 'a'.repeat(64)]);
+  const engineProof = await POST(request(proved.id, evidenceFor(proved.contract)), { params: Promise.resolve({ id: proved.id }) });
+  assert.equal(engineProof.status, 422);
+  assert.equal((await engineProof.json()).error, 'engine_proof_exists');
+
+  // Every refusal wrote zero recovery rows and launched nothing.
+  assert.equal(
+    queryAll('SELECT * FROM presentation_operator_preengine_recoveries WHERE task_id IN (?, ?, ?)', [open.id, running.id, proved.id]).length,
+    0,
+  );
+  assert.equal(bridgeCalls().length, 0);
+  assert.equal(attemptsOf(running.id), 5);
+  assert.equal(attemptsOf(proved.id), 5);
+});
+
 test('a consumed recovery cannot be re-bound to a different repair key', async () => {
   newBridgeLog();
   const { id, contract } = createOperatorTask();
@@ -251,14 +336,25 @@ test('concurrent submissions cannot launch the bridge twice or reset the counter
   try {
     const { id, contract } = createOperatorTask();
     const evidence = evidenceFor(contract);
-    const [r1, r2] = await Promise.all([
+    // Three truly concurrent submissions, then one replay of the same evidence.
+    const responses = await Promise.all([
+      POST(request(id, evidence), { params: Promise.resolve({ id }) }),
       POST(request(id, evidence), { params: Promise.resolve({ id }) }),
       POST(request(id, evidence), { params: Promise.resolve({ id }) }),
     ]);
-    assert.equal(r1.status, 200);
-    assert.equal(r2.status, 200);
-    const bodies = [await r1.json(), await r2.json()];
-    assert.ok(bodies.some((b) => b.dispatch?.status === 'acknowledged'), 'exactly one concurrent caller performs the dispatch');
+    const bodies = [];
+    for (const response of responses) {
+      assert.equal(response.status, 200);
+      bodies.push(await response.json());
+    }
+    const replay = await POST(request(id, evidence), { params: Promise.resolve({ id }) });
+    assert.equal(replay.status, 200);
+    bodies.push(await replay.json());
+
+    assert.equal(bodies.filter((b) => b.dispatch?.status === 'acknowledged').length, 1, 'exactly one of the four callers performs the dispatch');
+    // The winner is whichever caller wins the atomic claim (not necessarily the
+    // one that inserted the row), so the other three are idempotent replays.
+    assert.ok(bodies.filter((b) => b.idempotent === true).length >= 3, 'every losing caller returns an idempotent replay');
     assert.equal(queryAll('SELECT * FROM presentation_operator_preengine_recoveries WHERE task_id=?', [id]).length, 1);
     const claim = queryOne<{ dispatch_started_at: string | null }>('SELECT dispatch_started_at FROM presentation_operator_preengine_recoveries WHERE task_id=?', [id]);
     assert.ok(claim?.dispatch_started_at, 'the single-use claim is stamped');
@@ -289,10 +385,26 @@ test('the live intake-advance sweep cannot re-launch a recovered task, but still
   const past = '2026-09-14T00:00:00.000Z';
   run('UPDATE tasks SET updated_at=? WHERE id IN (?, ?)', [past, recovered.id, control.id]);
 
-  const swept = await runIntakeAdvanceSweep();
-  assert.equal(swept.scanned, 1, 'only the task below the dispatch cap is selected');
-  assert.equal(swept.dispatched, 1);
-  assert.equal(callsForTask(recovered.id).length, 1, 'the exhausted recovered task is never re-selected by the live advancer');
+  // A dispatch spy over the sweep's documented dependency seam: it records every
+  // task the LIVE advancer actually re-selects for dispatch, then delegates to
+  // the real autoDispatchTask so no behaviour is faked.
+  const selected: string[] = [];
+  const swept = await runIntakeAdvanceSweep({
+    dispatch: (taskId, context) => {
+      selected.push(taskId);
+      return autoDispatchTask(taskId, context);
+    },
+  });
+  // The live advancer's own invariant: every card it selects is below the cap.
+  assert.equal(
+    selected.filter((taskId) => (attemptsOf(taskId) ?? 0) >= 5).length,
+    0,
+    'the live advancer never selects a card at/over the dispatch cap',
+  );
+  assert.ok(selected.includes(control.id), 'the otherwise-identical below-cap control card IS advanced');
+  assert.ok(!selected.includes(recovered.id), 'the live advancer re-selects the recovered task ZERO times');
+  assert.ok(swept.dispatched >= 1);
+  assert.equal(callsForTask(recovered.id).length, 1, 'the exhausted recovered task is never re-launched by the live advancer');
   assert.equal(callsForTask(control.id).length, 1);
   assert.equal(attemptsOf(recovered.id), 5);
   // Ordinary (non-recovery) acknowledgement keeps its documented behaviour.
@@ -311,6 +423,28 @@ test('ordinary retry policy is unchanged — U061 /resume preserves the counter 
   assert.equal(queryOne<{ status: string }>('SELECT status FROM tasks WHERE id=?', [id])?.status, 'backlog');
   assert.equal(attemptsOf(id), 5, 'U061 resume preserves dispatch_attempts — it must not zero the exhausted budget');
   assert.equal(bridgeCalls().length, 0, 'resume itself never launches the bridge');
+
+  // The resumed card is inert in the live advancer, exactly as before — proven
+  // against a control card in the same DB that the same sweep DOES advance.
+  const control = createOperatorTask({ status: 'backlog', dispatch_attempts: 0 });
+  const past = '2026-09-14T00:00:00.000Z';
+  run('UPDATE tasks SET updated_at=? WHERE id IN (?, ?)', [past, id, control.id]);
+  const selected: string[] = [];
+  await runIntakeAdvanceSweep({
+    dispatch: (taskId, context) => {
+      selected.push(taskId);
+      return autoDispatchTask(taskId, context);
+    },
+  });
+  assert.equal(
+    selected.filter((taskId) => (attemptsOf(taskId) ?? 0) >= 5).length,
+    0,
+    'a resumed-but-exhausted card is never selected by the live advancer',
+  );
+  assert.ok(selected.includes(control.id), 'the below-cap control card is still advanced by the same sweep');
+  assert.ok(!selected.includes(id), 'the resumed task is selected zero times');
+  assert.equal(attemptsOf(id), 5);
+  assert.equal(callsForTask(id).length, 0);
 });
 
 test('ordinary acknowledgement outside the recovery context still clears the counter (default behaviour untouched)', async () => {
