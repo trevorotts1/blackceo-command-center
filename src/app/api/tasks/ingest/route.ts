@@ -658,6 +658,10 @@ export async function POST(request: NextRequest) {
         ? 'web-development'
         : departmentSlug;
 
+    if (presentationIntake && resolvedDeptSlug?.toLowerCase() !== 'presentations') {
+      return NextResponse.json({ error: 'presentation_intake requires department_slug=presentations' }, { status: 400 });
+    }
+
     const persona = typeof body.persona === 'string' ? body.persona.trim() : undefined;
     // W3.2 — owner-direct specialist pin. `target_agent` wins; `specialist` is
     // an accepted alias. Empty strings collapse to undefined.
@@ -799,7 +803,10 @@ export async function POST(request: NextRequest) {
     const dedupeKey = headerKey || idempotencyKey || sourceRef || uuidv4();
     if (dedupeKey.length > 512) return NextResponse.json({ error: 'idempotency_key_too_long' }, { status: 400 });
     const { idempotency_key: _operationKey, ...semanticPayload } = body;
-    const requestFingerprint = taskRequestFingerprint(semanticPayload);
+    // Hash the parsed canonical intake rather than caller spelling so a harmless
+    // JSON key-order/whitespace retry stays the same operation, while a changed
+    // selected deliverable is an idempotency conflict.
+    const requestFingerprint = taskRequestFingerprint({ ...semanticPayload, presentation_intake: presentationIntake ?? body.presentation_intake });
 
     let { workspaceId, resolvedBy }: { workspaceId: string | null; resolvedBy: string } = resolveWorkspaceId(resolvedDeptSlug, persona, ingestCompanyId);
     // A missing department is an executable catch-all request, never a correction hold.
