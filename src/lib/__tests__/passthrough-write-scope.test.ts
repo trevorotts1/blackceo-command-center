@@ -14,7 +14,12 @@
  * social-theme mini app: 121 mutating, 6 webhook-protected, 115
  * non-webhook — 44 routes via 41 bearer patterns; re-derived 2026-09-09
  * for F40 measured-outcome ingest (W4 integration commit): 122 mutating,
- * 6 webhook-protected, 116 non-webhook — 45 routes via 42 bearer patterns; the 5 client-facing
+ * 6 webhook-protected, 116 non-webhook — 45 routes via 42 bearer patterns;
+ * re-derived 2026-09-14 for UPDATE-014 / Issue39 (operator pre-engine recovery,
+ * POST /api/tasks/{id}/operator-preengine-recovery — an operator-only, Bearer +
+ * HMAC surface the browser interface never calls): 124 mutating,
+ * 6 webhook-protected, 118 non-webhook — 47 routes via 44 bearer patterns
+ * (41 single + 3 collection-or-item x2; 41 + 3x2 = 47); the 5 client-facing
  * social-theme routes are middleware-exempt + route-level CSRF/same-origin):
  *   - API routes exporting a mutating method (export async function): 107
  *     (2026-08-31: +1 for FIX 35 — tasks/[id]/audit-backfill, POST, bearer-
@@ -233,16 +238,16 @@ const nonWebhookCount = allMutatingRoutes.length - webhookProtectedCount;
 describe('passthrough-write-scope — anti-rot lock (U052)', () => {
   // ---- Counts ------------------------------------------------------------
 
-  it('API routes exporting a mutating method: 123 (literal assertion)', () => {
-    expect(allMutatingRoutes.length).toBe(123);
+  it('API routes exporting a mutating method: 124 (literal assertion)', () => {
+    expect(allMutatingRoutes.length).toBe(124);
   });
 
   it('protected by isWebhookSecretRoute: 6', () => {
     expect(webhookProtectedCount).toBe(6);
   });
 
-  it('non-webhook write routes: 117 (tenant authentication remains required)', () => {
-    expect(nonWebhookCount).toBe(117);
+  it('non-webhook write routes: 118 (tenant authentication remains required)', () => {
+    expect(nonWebhookCount).toBe(118);
   });
 
   it('interface call templates found by multi-line scanner', () => {
@@ -259,12 +264,12 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
     expect(count).toBeGreaterThanOrEqual(40);
   });
 
-  it('routes covered by BEARER_REQUIRED_WRITE_ROUTES (46 routes via 43 patterns — +1: PRES-010 /api/presentations/runs)', () => {
-    expect(bearerCoveredRoutes.size).toBe(46);
+  it('routes covered by BEARER_REQUIRED_WRITE_ROUTES (47 routes via 44 patterns — +1: PRES-010 /api/presentations/runs, +1: UPDATE-014 /api/tasks/{id}/operator-preengine-recovery)', () => {
+    expect(bearerCoveredRoutes.size).toBe(47);
   });
 
-  it('BEARER_REQUIRED_WRITE_ROUTES.length is 43, covering 46 routes (checksum: 40 + 3×2 = 46; PRES-010 added /api/presentations/runs)', () => {
-    expect(BEARER_REQUIRED_WRITE_ROUTES.length).toBe(43);
+  it('BEARER_REQUIRED_WRITE_ROUTES.length is 44, covering 47 routes (checksum: 41 + 3×2 = 47; PRES-010 added /api/presentations/runs, UPDATE-014 added /api/tasks/{id}/operator-preengine-recovery)', () => {
+    expect(BEARER_REQUIRED_WRITE_ROUTES.length).toBe(44);
   });
 
   it('route-list membership: BEARER_REQUIRED_WRITE_ROUTES includes /api/weight-profiles', () => {
