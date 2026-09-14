@@ -8,11 +8,18 @@ import { v4 as uuidv4 } from 'uuid';
 import { queryOne, run, transaction } from '@/lib/db';
 
 export const OPERATOR_PRESENTATION_CONTRACT_VERSION = 1;
+type YesNo = 'yes' | 'no';
+type DeliveryDestinations = string | string[];
 export type OperatorPresentationIntake = {
   version: 1; source: 'operator-delegated';
-  title: string; presentation_type: 'from_scratch'; run_mode: 'ultra' | 'standard' | 'quick';
+  title: string; presentation_type: 'from_scratch'; run_mode: 'ultra' | 'standard' | 'economy';
   workhorse_model: 'deepseek-flash@deepseek-direct'; slide_count: number;
-  pitch_included: boolean; want_sales_checkout: 'yes' | 'no'; want_vsl_page: 'yes' | 'no';
+  pitch_included: boolean;
+  deliverable_set: string;
+  want_teleprompter: YesNo; want_speech_script: YesNo;
+  want_audio_deliverable: YesNo; want_audio_demo: boolean;
+  want_ghl_upload: YesNo; delivery_destinations: DeliveryDestinations;
+  want_sales_checkout: YesNo; want_vsl_page: YesNo;
   answers: Record<string, string>;
 };
 export type OperatorPresentationContract = OperatorPresentationIntake & { task_id: string; execution_id: string };
@@ -27,12 +34,22 @@ export function parseOperatorPresentationContract(value: unknown): OperatorPrese
   if (raw.version !== OPERATOR_PRESENTATION_CONTRACT_VERSION || raw.source !== 'operator-delegated') throw new Error('presentation_intake requires current operator-delegated source');
   const title = typeof raw.title === 'string' ? raw.title.trim() : '';
   if (!title || title.length > 500) throw new Error('presentation_intake title is invalid');
-  if (raw.presentation_type !== 'from_scratch' || (raw.run_mode !== 'ultra' && raw.run_mode !== 'standard' && raw.run_mode !== 'quick') || raw.workhorse_model !== 'deepseek-flash@deepseek-direct') throw new Error('presentation_intake contains unsupported execution selection');
+  if (raw.presentation_type !== 'from_scratch' || (raw.run_mode !== 'ultra' && raw.run_mode !== 'standard' && raw.run_mode !== 'economy') || raw.workhorse_model !== 'deepseek-flash@deepseek-direct') throw new Error('presentation_intake contains unsupported execution selection');
   if (!Number.isInteger(raw.slide_count) || (raw.slide_count as number) < 1 || (raw.slide_count as number) > 200) throw new Error('presentation_intake slide_count is invalid');
-  if (typeof raw.pitch_included !== 'boolean' || (raw.want_sales_checkout !== 'yes' && raw.want_sales_checkout !== 'no') || (raw.want_vsl_page !== 'yes' && raw.want_vsl_page !== 'no')) throw new Error('presentation_intake applicability fields are invalid');
+  const yesNo = (field: string): YesNo => {
+    const fieldValue = raw[field];
+    if (fieldValue !== 'yes' && fieldValue !== 'no') throw new Error(`presentation_intake ${field} is invalid`);
+    return fieldValue;
+  };
+  const deliverableSet = typeof raw.deliverable_set === 'string' ? raw.deliverable_set.trim() : '';
+  if (!deliverableSet || deliverableSet.length > 500) throw new Error('presentation_intake deliverable_set is invalid');
+  const destinations = raw.delivery_destinations;
+  const validDestination = (item: unknown): item is string => typeof item === 'string' && item.trim().length > 0 && item.trim().length <= 500;
+  if (!(validDestination(destinations) || (Array.isArray(destinations) && destinations.length > 0 && destinations.length <= 20 && destinations.every(validDestination)))) throw new Error('presentation_intake delivery_destinations is invalid');
+  if (typeof raw.pitch_included !== 'boolean' || typeof raw.want_audio_demo !== 'boolean') throw new Error('presentation_intake applicability fields are invalid');
   if (!raw.answers || typeof raw.answers !== 'object' || Array.isArray(raw.answers) || Object.values(raw.answers).some(v => typeof v !== 'string' || v.length > 4000)) throw new Error('presentation_intake answers are invalid');
   if ('task_id' in raw || 'execution_id' in raw) throw new Error('presentation_intake task_id and execution_id are server-issued');
-  return { version: 1, source: 'operator-delegated', title, presentation_type: 'from_scratch', run_mode: raw.run_mode, workhorse_model: 'deepseek-flash@deepseek-direct', slide_count: raw.slide_count as number, pitch_included: raw.pitch_included, want_sales_checkout: raw.want_sales_checkout, want_vsl_page: raw.want_vsl_page, answers: raw.answers as Record<string, string> };
+  return { version: 1, source: 'operator-delegated', title, presentation_type: 'from_scratch', run_mode: raw.run_mode, workhorse_model: 'deepseek-flash@deepseek-direct', slide_count: raw.slide_count as number, pitch_included: raw.pitch_included, deliverable_set: deliverableSet, want_teleprompter: yesNo('want_teleprompter'), want_speech_script: yesNo('want_speech_script'), want_audio_deliverable: yesNo('want_audio_deliverable'), want_audio_demo: raw.want_audio_demo, want_ghl_upload: yesNo('want_ghl_upload'), delivery_destinations: Array.isArray(destinations) ? destinations.map(item => item.trim()) : destinations.trim(), want_sales_checkout: yesNo('want_sales_checkout'), want_vsl_page: yesNo('want_vsl_page'), answers: raw.answers as Record<string, string> };
 }
 
 export function bindOperatorPresentationContract(taskId: string, intake: OperatorPresentationIntake): OperatorPresentationContract {

@@ -7,6 +7,7 @@ import path from 'node:path';
 import { queryOne } from '../../src/lib/db';
 import { createTaskCore } from '../../src/lib/tasks';
 import { bridgeReceipt, loadOperatorPresentationContract, parseOperatorPresentationContract, ensureOperatorPresentationContract } from '../../src/lib/presentation-operator-contract';
+import { launchOperatorPresentationContract } from '../../src/lib/presentation-operator-launcher';
 
 process.env.WEBHOOK_SECRET = 'operator-contract-test-secret';
 const TEST_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-operator-contract-'));
@@ -24,6 +25,7 @@ marker = os.environ['TEST_BRIDGE_MARKER']
 tmp = marker + '.tmp'
 with open(tmp, 'w') as output: json.dump(receipt, output)
 os.replace(tmp, marker)
+print(json.dumps({'status': 'worker_acknowledged', 'bridge': {'_rc': 0, 'detail': 'test accepted'}}))
 `);
 process.env.PRESENTATION_OPERATOR_RUNS_DIR = path.join(TEST_ROOT, 'runs');
 process.env.PRESENTATION_INTAKE_BRIDGE = TEST_BRIDGE;
@@ -32,7 +34,11 @@ const intake = {
   version: 1 as const, source: 'operator-delegated' as const, title: 'How Presentations Work',
   presentation_type: 'from_scratch' as const, run_mode: 'ultra' as const,
   workhorse_model: 'deepseek-flash@deepseek-direct' as const, slide_count: 8,
-  pitch_included: false, want_sales_checkout: 'no' as const, want_vsl_page: 'no' as const,
+  pitch_included: false, deliverable_set: 'deck, teleprompter, speech, audio',
+  want_teleprompter: 'yes' as const, want_speech_script: 'yes' as const,
+  want_audio_deliverable: 'yes' as const, want_audio_demo: true,
+  want_ghl_upload: 'yes' as const, delivery_destinations: ['local presentation folder', 'GoHighLevel'],
+  want_sales_checkout: 'yes' as const, want_vsl_page: 'yes' as const,
   answers: { goal: 'Explain the department.' },
 };
 
@@ -60,6 +66,69 @@ test('client cannot claim server task/execution ids and an undispatched legacy r
   const retry = ensureOperatorPresentationContract(result!.task.id, replay);
   assert.equal(retry.execution_id, first.execution_id);
   assert.throws(() => ensureOperatorPresentationContract(result!.task.id, { ...replay, pitch_included: true }), /immutable/);
+});
+
+test('canonical full deliverable selection is preserved and quick is refused', () => {
+  const parsed = parseOperatorPresentationContract(intake);
+  assert.deepEqual(parsed.delivery_destinations, ['local presentation folder', 'GoHighLevel']);
+  assert.equal(parsed.want_teleprompter, 'yes');
+  assert.equal(parsed.want_speech_script, 'yes');
+  assert.equal(parsed.want_audio_deliverable, 'yes');
+  assert.equal(parsed.want_audio_demo, true);
+  assert.equal(parsed.want_ghl_upload, 'yes');
+  assert.throws(() => parseOperatorPresentationContract({ ...intake, run_mode: 'quick' }), /unsupported execution selection/);
+});
+
+test('a deferred bridge result remains retryable rather than becoming a handoff', async () => {
+  const title = `${intake.title} deferred`;
+  const created = await createTaskCore({ title, source: 'operator-delegated', department: 'presentations', routing_hold_reason: 'test hold', presentation_operator_intake: { ...intake, title } }, { notifyGateway: false });
+  assert.ok(created);
+  fs.writeFileSync(TEST_BRIDGE, "import json, sys\nprint(json.dumps({'status':'launch_pending','bridge':{'_rc':7,'detail':'lease held'}}))\nsys.exit(7)\n");
+  const deferred = await launchOperatorPresentationContract(created!.task.id);
+  assert.deepEqual(deferred, { kind: 'deferred', detail: 'lease held' });
+  fs.writeFileSync(TEST_BRIDGE, `import json, os, sys
+assert sys.argv[1] == 'operator-contract'
+args = sys.argv
+contract_file = args[args.index('--contract-file') + 1]
+receipt = json.load(open(contract_file))
+assert receipt['receipt_version'] == 1
+assert set(receipt) == {'receipt_version', 'contract', 'receipt_hmac'}
+assert len(receipt['receipt_hmac']) == 64
+marker = os.environ['TEST_BRIDGE_MARKER']
+tmp = marker + '.tmp'
+with open(tmp, 'w') as output: json.dump(receipt, output)
+os.replace(tmp, marker)
+print(json.dumps({'status': 'worker_acknowledged', 'bridge': {'_rc': 0, 'detail': 'test accepted'}}))
+`);
+});
+
+test('dispatcher maps a deferred bridge exit to the durable retry ladder', async () => {
+  fs.writeFileSync(TEST_BRIDGE, "import json, sys\nprint(json.dumps({'status':'launch_pending','bridge':{'_rc':7,'detail':'lease held'}}))\nsys.exit(7)\n");
+  const title = `${intake.title} dispatch deferred`;
+  const created = await createTaskCore({ title, source: 'operator-delegated', department: 'presentations', presentation_operator_intake: { ...intake, title }, idempotency_key: `operator-contract-deferred-${Date.now()}` }, { notifyGateway: false });
+  assert.ok(created);
+  const deadline = Date.now() + 5000;
+  let retry = queryOne<{ dispatch_attempts: number; next_dispatch_eligible_at: string | null }>('SELECT dispatch_attempts, next_dispatch_eligible_at FROM tasks WHERE id=?', [created!.task.id]);
+  while ((!retry?.next_dispatch_eligible_at || retry.dispatch_attempts !== 1) && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 25));
+    retry = queryOne<{ dispatch_attempts: number; next_dispatch_eligible_at: string | null }>('SELECT dispatch_attempts, next_dispatch_eligible_at FROM tasks WHERE id=?', [created!.task.id]);
+  }
+  assert.equal(retry?.dispatch_attempts, 1);
+  assert.ok(retry?.next_dispatch_eligible_at);
+  fs.writeFileSync(TEST_BRIDGE, `import json, os, sys
+assert sys.argv[1] == 'operator-contract'
+args = sys.argv
+contract_file = args[args.index('--contract-file') + 1]
+receipt = json.load(open(contract_file))
+assert receipt['receipt_version'] == 1
+assert set(receipt) == {'receipt_version', 'contract', 'receipt_hmac'}
+assert len(receipt['receipt_hmac']) == 64
+marker = os.environ['TEST_BRIDGE_MARKER']
+tmp = marker + '.tmp'
+with open(tmp, 'w') as output: json.dump(receipt, output)
+os.replace(tmp, marker)
+print(json.dumps({'status': 'worker_acknowledged', 'bridge': {'_rc': 0, 'detail': 'test accepted'}}))
+`);
 });
 
 test('the persisted binding is handed off before dispatch and carries the signed receipt', async () => {

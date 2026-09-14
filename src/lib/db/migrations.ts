@@ -7111,7 +7111,9 @@ export const migrations: Migration[] = [
 
 
   {
-    id: '142',
+    // Mainline owns 142–144. This additive operator-contract table must receive
+    // its own applied-state key or existing boxes silently skip it.
+    id: '145',
     name: 'presentation_operator_contracts',
     up: (db) => {
       db.exec(`CREATE TABLE IF NOT EXISTS presentation_operator_contracts (
