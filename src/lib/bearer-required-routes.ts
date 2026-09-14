@@ -93,6 +93,7 @@ export const BEARER_REQUIRED_WRITE_ROUTES: RegExp[] = [
   // browser interface never calls it). Bearer-gated so the destructive-
   // confirmation backfill is reachable ONLY with MC_API_TOKEN + HMAC.
   /^\/api\/tasks\/[^/]+\/audit-backfill$/,
+  /^\/api\/tasks\/[^/]+\/operator-preengine-recovery$/,
   /^\/api\/weight-profiles$/,
   /^\/api\/workspaces\/[^/]+$/,
 ];

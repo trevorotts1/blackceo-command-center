@@ -290,12 +290,17 @@ export function recordDispatchFailure(
 }
 
 /** Clear attempt-accounting after a task successfully advances to in_progress. */
-function recordDispatchSuccess(taskId: string): void {
+function recordDispatchSuccess(taskId: string, opts: { preserveAttempts?: boolean } = {}): void {
   try {
-    run(
-      `UPDATE tasks SET dispatch_attempts = 0, next_dispatch_eligible_at = NULL, last_dispatch_attempt_at = ? WHERE id = ?`,
-      [new Date().toISOString(), taskId],
-    );
+    const now = new Date().toISOString();
+    if (opts.preserveAttempts) {
+      // A pre-engine recovery is a one-shot, separately receipted bridge retry.
+      // Its exhausted historical dispatch budget stays on the task so a later
+      // ordinary backlog sweep cannot turn this exception into a fresh budget.
+      run(`UPDATE tasks SET next_dispatch_eligible_at = NULL, last_dispatch_attempt_at = ? WHERE id = ?`, [now, taskId]);
+    } else {
+      run(`UPDATE tasks SET dispatch_attempts = 0, next_dispatch_eligible_at = NULL, last_dispatch_attempt_at = ? WHERE id = ?`, [now, taskId]);
+    }
   } catch { /* pre-migration tolerant */ }
 }
 
@@ -768,7 +773,7 @@ export async function autoDispatchTask(
       if (handedOff?.kind === 'acknowledged') {
         recordDeckGateEvent('presentation_operator_contract_handed_off', task.id, task.assigned_agent_id ?? null,
           `[presentation_operator_contract_handed_off] ${task.id} launched canonical bridge run ${handedOff.runDir}`);
-        recordDispatchSuccess(task.id);
+        recordDispatchSuccess(task.id, { preserveAttempts: context === 'operator-preengine-recovery' });
         return { status: 'acknowledged', reason: 'presentation_operator_handoff' };
       }
       if (handedOff?.kind === 'blocked') {

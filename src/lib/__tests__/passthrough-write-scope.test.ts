@@ -14,8 +14,18 @@
  * social-theme mini app: 121 mutating, 6 webhook-protected, 115
  * non-webhook — 44 routes via 41 bearer patterns; re-derived 2026-09-09
  * for F40 measured-outcome ingest (W4 integration commit): 122 mutating,
- * 6 webhook-protected, 116 non-webhook — 45 routes via 42 bearer patterns; the 5 client-facing
- * social-theme routes are middleware-exempt + route-level CSRF/same-origin):
+ * 6 webhook-protected, 116 non-webhook — 45 routes via 42 bearer patterns;
+ * re-derived 2026-09-14 for UPDATE-014 / Issue39 (operator pre-engine recovery,
+ * POST /api/tasks/{id}/operator-preengine-recovery — an operator-only surface
+ * the browser interface never calls, gated by BOTH the Bearer pattern in
+ * src/lib/bearer-required-routes.ts AND middleware's webhook-secret dynamic
+ * list at src/middleware.ts:166): 124 mutating, 7 webhook-protected (5 static +
+ * 2 dynamic), 117 non-webhook — 44 bearer patterns match 47 route templates
+ * (41 single-route + 3 collection-or-item x2; 41 + 3x2 = 47), of which the one
+ * new recovery template is webhook-gated as well, leaving 46 bearer-ONLY
+ * covered. Templates and bearer-only coverage are DIFFERENT numbers here; the 5
+ * client-facing social-theme routes are middleware-exempt + route-level
+ * CSRF/same-origin):
  *   - API routes exporting a mutating method (export async function): 107
  *     (2026-08-31: +1 for FIX 35 — tasks/[id]/audit-backfill, POST, bearer-
  *      gated in BEARER_REQUIRED_WRITE_ROUTES; hygiene-job-only, never called
@@ -179,6 +189,12 @@ function scanInterfaceMutatingFetches(): InterfaceCall[] {
 // 3. isWebhookSecretRoute re-implementation (independent of middleware.ts)
 // ---------------------------------------------------------------------------
 
+// MIRROR — the two arrays below re-implement src/middleware.ts's
+// WEBHOOK_SECRET_ROUTES + WEBHOOK_SECRET_DYNAMIC_ROUTES by hand (this lock
+// deliberately does NOT import the middleware module). A route added to the
+// middleware lists therefore MUST be added here in the same change, or the
+// census below silently classifies it as non-webhook and asserts a stale
+// picture. See src/middleware.ts:164-167 for the live lists.
 const WEBHOOK_SECRET_ROUTES = [
   '/api/tasks/ingest',
   '/api/webhooks/agent-completion',
@@ -191,6 +207,11 @@ const WEBHOOK_SECRET_ROUTES = [
 ];
 const WEBHOOK_SECRET_DYNAMIC_ROUTES: RegExp[] = [
   /^\/api\/tasks\/[^/]+\/status$/,
+  // UPDATE-014 / Issue39: the operator pre-engine recovery route joined
+  // middleware's WEBHOOK_SECRET_DYNAMIC_ROUTES (src/middleware.ts:166), so it is
+  // webhook-gated AS WELL AS bearer-gated. It must not be counted below as a
+  // bearer-ONLY-covered route.
+  /^\/api\/tasks\/[^/]+\/operator-preengine-recovery$/,
 ];
 
 function matchesRoute(pathname: string, prefix: string): boolean {
@@ -233,15 +254,15 @@ const nonWebhookCount = allMutatingRoutes.length - webhookProtectedCount;
 describe('passthrough-write-scope — anti-rot lock (U052)', () => {
   // ---- Counts ------------------------------------------------------------
 
-  it('API routes exporting a mutating method: 123 (literal assertion)', () => {
-    expect(allMutatingRoutes.length).toBe(123);
+  it('API routes exporting a mutating method: 124 (literal assertion)', () => {
+    expect(allMutatingRoutes.length).toBe(124);
   });
 
-  it('protected by isWebhookSecretRoute: 6', () => {
-    expect(webhookProtectedCount).toBe(6);
+  it('protected by isWebhookSecretRoute: 7 (5 static + 2 dynamic — middleware src/middleware.ts:137-167)', () => {
+    expect(webhookProtectedCount).toBe(7);
   });
 
-  it('non-webhook write routes: 117 (tenant authentication remains required)', () => {
+  it('non-webhook write routes: 117 (124 mutating − 7 webhook-protected; tenant authentication remains required)', () => {
     expect(nonWebhookCount).toBe(117);
   });
 
@@ -259,12 +280,12 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
     expect(count).toBeGreaterThanOrEqual(40);
   });
 
-  it('routes covered by BEARER_REQUIRED_WRITE_ROUTES (46 routes via 43 patterns — +1: PRES-010 /api/presentations/runs)', () => {
+  it('bearer-ONLY-covered routes: 46 (44 patterns match 47 templates; 1 of them — UPDATE-014 /api/tasks/{id}/operator-preengine-recovery — is webhook-gated, so 47 − 1 = 46)', () => {
     expect(bearerCoveredRoutes.size).toBe(46);
   });
 
-  it('BEARER_REQUIRED_WRITE_ROUTES.length is 43, covering 46 routes (checksum: 40 + 3×2 = 46; PRES-010 added /api/presentations/runs)', () => {
-    expect(BEARER_REQUIRED_WRITE_ROUTES.length).toBe(43);
+  it('BEARER_REQUIRED_WRITE_ROUTES.length is 44, matching 47 route templates (checksum: 41 + 3×2 = 47; PRES-010 added /api/presentations/runs; UPDATE-014 added /api/tasks/{id}/operator-preengine-recovery, which is webhook-gated as well)', () => {
+    expect(BEARER_REQUIRED_WRITE_ROUTES.length).toBe(44);
   });
 
   it('route-list membership: BEARER_REQUIRED_WRITE_ROUTES includes /api/weight-profiles', () => {
