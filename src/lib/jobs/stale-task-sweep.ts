@@ -55,6 +55,9 @@ import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 // past it (see the capped-skip guard in the blocked branch and the no-increment
 // rule on from-blocked returns in returnToOrchestrator below).
 import { QC_MAX_REROUTES } from '@/lib/qc-scorer';
+// PD-TEST-063: the dispatch cap, from the SAME exported constant the dispatcher
+// blocks at — see the dispatch-budget end-state guard in the blocked branch.
+import { MAX_DISPATCH_ATTEMPTS } from '@/lib/task-dispatcher';
 import { transition, recordStatusEvent } from '@/lib/task-lifecycle';
 import { blockDispatchIfOwnerKilled } from '@/lib/owner-killed';
 import { v4 as uuidv4 } from 'uuid';
@@ -167,6 +170,13 @@ interface StaleTaskRow {
   last_progress_at: string | null;
   updated_at: string;
   qc_reroute_attempts: number | null;
+  /**
+   * PD-TEST-063: consumed dispatch budget (migration 077). Read so the blocked
+   * branch can tell an ordinary stale card (remaining budget → return to
+   * backlog) from an END-STATED one (exhausted budget → never launder it into a
+   * fresh one). Absent on a pre-077 box; the SELECT substitutes NULL there.
+   */
+  dispatch_attempts: number | null;
   /** FIX-17: owner-kill timestamp (migration 123). Absent on pre-123 DBs. */
   killed_at?: string | null;
 }
@@ -179,6 +189,19 @@ export interface StaleSweepResult {
    *  registered) instead of being bounced to backlog (SWEEP-RECOVER). */
   recovered?: number;
   recoveredIds?: string[];
+  /**
+   * PD-TEST-063: blocked tasks whose DISPATCH budget was already exhausted, and
+   * which were therefore kept OUT of backlog (never laundered into a fresh
+   * budget) and escalated to their named human instead. This counts the
+   * END-STATE DECISION for this tick, so it is incremented even when the
+   * escalation itself is deduped — `repinged` is the count of escalations that
+   * actually went out. Counting them separately keeps the two decisions
+   * distinguishable in the cron log: "this card was re-pinged in the ordinary
+   * 2h window" vs "this card is END-STATED and will never be auto-re-dispatched
+   * again without explicit human budget".
+   */
+  budgetEndStated?: number;
+  budgetEndStatedIds?: string[];
   skippedReason?: string;
 }
 
@@ -354,6 +377,45 @@ async function repingBlockedHuman(task: StaleTaskRow): Promise<void> {
 }
 
 /**
+ * SWEEP-DEDUP: escalate a still-blocked task to its named human, AT MOST ONCE per
+ * window, and write the event row that is also the dedup key the next tick reads.
+ *
+ * Extracted (PD-TEST-063) so the end-stated branch below escalates through the
+ * exact same path — same dedup, same audit row, same failure modes — instead of
+ * duplicating it. Returns true when this call actually escalated.
+ *
+ * We are DEDUPING, not muting: a still-stuck task escalates again on the next
+ * window, and the dedup guard fails OPEN, so no escalation is ever lost to a
+ * query error.
+ */
+async function repingBlockedOnce(task: StaleTaskRow, ageHours: number): Promise<boolean> {
+  if (wasRecentlyRepinged(task.id)) return false;
+
+  // First threshold: re-ping the named human.
+  await repingBlockedHuman(task);
+  // Audit trail AND the dedup key the check above reads. Written on BOTH
+  // branches (operator → notifySystem, owner → /api/events) because this
+  // INSERT is common to both — that is what makes the dedup cover the
+  // operator path, which previously wrote NO dedupable key at all.
+  const now = new Date().toISOString();
+  try {
+    run(
+      `INSERT INTO events (id, type, task_id, message, created_at)
+       VALUES (?, 'stale_blocked_repinged', ?, ?, ?)`,
+      [uuidv4(), task.id, `Re-pinged ${task.blocked_on_human ?? 'owner'} on blocked task (stale ${Math.round(ageHours)}h)`, now],
+    );
+  } catch (err) {
+    // events table issue -- non-fatal for THIS tick, but it means no dedup
+    // key was written, so the next tick will escalate again (fail-open).
+    console.warn(
+      `[stale-task-sweep] failed to write re-ping dedup key for ${task.id}:`,
+      (err as Error).message,
+    );
+  }
+  return true;
+}
+
+/**
  * Return a stale non-Blocked task to the orchestrator.
  * Mirrors the POST /api/tasks/[id]/return-to-orchestrator logic inline
  * so the sweep does not depend on an HTTP round-trip to itself.
@@ -374,8 +436,21 @@ async function returnToOrchestrator(task: StaleTaskRow, reason: string): Promise
   // A from-blocked stale return therefore never increments — the counter stays
   // exactly what the QC cap path (or the owner) left it.
   const currentAttempts = task.qc_reroute_attempts ?? 0;
+  // PD-TEST-063: the consumed DISPATCH budget is part of the handback record.
+  // The counter itself survives on the row (above); this puts the number in
+  // front of the orchestrator/human reading the card, so a re-opened card shows
+  // how much budget it already burned instead of looking brand new.
+  const currentDispatchAttempts = task.dispatch_attempts ?? 0;
+  const accounting = [
+    currentAttempts > 0 ? `qc_reroute_attempts=${currentAttempts}` : null,
+    currentDispatchAttempts > 0
+      ? `dispatch_attempts=${currentDispatchAttempts}/${MAX_DISPATCH_ATTEMPTS} PRESERVED`
+      : null,
+  ]
+    .filter(Boolean)
+    .join(', ');
   const handbackNote = [
-    `[STALE-RETURN] ${now}${currentAttempts > 0 ? ` (qc_reroute_attempts=${currentAttempts})` : ''}`,
+    `[STALE-RETURN] ${now}${accounting ? ` (${accounting})` : ''}`,
     `Problem: ${reason}`,
     `Tried: stale sweep detected no progress`,
     `Needs: orchestrator re-route or human triage`,
@@ -385,27 +460,49 @@ async function returnToOrchestrator(task: StaleTaskRow, reason: string): Promise
     ? `${handbackNote}\n\n---\n\n${task.description}`
     : handbackNote;
 
-  // SWEEP-03 (drag-back trap): a task returning to backlog FROM blocked would
-  // otherwise keep dispatch_attempts >= cap and a stale backoff window, so every
-  // advancer (intake-advance / backlog-redispatch) would filter it out and it
-  // would rot in backlog forever. Reset the dispatch accounting ONLY on the
-  // from-blocked transition — a non-blocked stale return (in_progress/review →
-  // backlog) is left untouched so a genuinely looping task still stays capped.
+  // SWEEP-03 (drag-back trap) — CORRECTED BY PD-TEST-063.
+  //
+  // The TRAP is real and still guarded against: a blocked card returned to
+  // backlog that still carries `dispatch_attempts >= MAX_DISPATCH_ATTEMPTS`
+  // would be filtered out by every advancer (intake-advance / backlog-redispatch
+  // both gate on `dispatch_attempts < cap`), so it would rot in backlog with no
+  // way back — `resume` only accepts blocked cards. SWEEP-03 "fixed" that by
+  // zeroing the counter, which is what PD-TEST-063 is about: it also DESTROYED
+  // the record of the consumed budget and handed the card a brand-new one.
+  //
+  // The trap is now fixed at the SOURCE instead: runStaleTaskSweep's blocked
+  // branch never routes an exhausted card here at all (see the dispatch-budget
+  // end-state guard), so an exhausted budget can never reach this function. What
+  // is left here is the one thing SWEEP-03 got right — clearing the stale
+  // BACKOFF WINDOW so a legitimately re-routed card is not held behind an
+  // expired timer. That is a TIME gate, not a BUDGET: it does not change the
+  // count, the count still increments on the next failure, and the card still
+  // blocks at the cap.
+  //
+  // The counter itself is deliberately NOT written here — same rule FIX 41
+  // applied to qc_reroute_attempts: the stale sweep is a WATCHDOG, not a
+  // dispatch attempt, so it must never mint retry budget. The decision recorded
+  // in the U061 ticket is PRESERVE (src/app/api/tasks/[id]/resume/route.ts:15-17:
+  // "A Resume that resets dispatch_attempts to 0 would turn a capped retry loop
+  // into an unbounded one"), and recordDispatchSuccess({preserveAttempts}) states
+  // the same contract for the pre-engine recovery path — "so a later ordinary
+  // backlog sweep cannot turn this exception into a fresh budget"
+  // (src/lib/task-dispatcher.ts:304-308). A watchdog has strictly less
+  // authority than the human Resume path, so it cannot reset what Resume preserves.
   const fromBlocked = task.status === 'blocked';
 
   try {
     // MR-04: route through transition() with extraColumns so the compound
     // UPDATE goes through the legal-transition guard + preconditions + CAS
     // atomically, instead of a raw SQL write with no guard.
-    // FIX 41: qc_reroute_attempts is deliberately ABSENT from extraColumns —
-    // transition() writes only the columns listed, so the counter passes
-    // through untouched on every stale return, from-blocked or not.
+    // FIX 41 + PD-TEST-063: NEITHER qc_reroute_attempts NOR dispatch_attempts
+    // appears in extraColumns — transition() writes only the columns listed, so
+    // both counters pass through untouched on every stale return.
     const extraCols: Record<string, string | number | null> = {
       description: updatedDescription,
       last_progress_at: now,
     };
     if (fromBlocked) {
-      extraCols.dispatch_attempts = 0;
       extraCols.next_dispatch_eligible_at = null;
     }
     await transition(task.id, 'backlog', {
@@ -417,7 +514,7 @@ async function returnToOrchestrator(task: StaleTaskRow, reason: string): Promise
     run(
       `INSERT INTO events (id, type, task_id, message, created_at)
        VALUES (?, 'task_returned', ?, ?, ?)`,
-      [uuidv4(), task.id, `[STALE-RETURN] ${reason}`, now],
+      [uuidv4(), task.id, `[STALE-RETURN] ${reason}${accounting ? ` (${accounting})` : ''}`, now],
     );
 
     broadcast({ type: 'task_updated', payload: { id: task.id, status: 'backlog' } });
@@ -457,15 +554,26 @@ export async function runStaleTaskSweep(): Promise<StaleSweepResult> {
   // and only include it when present. A pre-123 box keeps working with the
   // TEXT-MARKER kill path only (the structured column arrives with the migration).
   let hasKilledAt = false;
+  // PD-TEST-063: dispatch_attempts arrives with migration 077 — AFTER the 071
+  // last_progress_at column this sweep already requires — but a box mid-roll can
+  // still be missing it, and an unguarded reference would throw "no such column"
+  // and kill the whole sweep. Probe it exactly like the other two: absent ⇒
+  // every row reads 0 attempts, which disables the end-state guard below and
+  // leaves behaviour identical to the pre-077 board (no accounting exists there,
+  // so there is no budget to preserve).
+  let hasDispatchAttempts = false;
   try {
     const cols = queryAll<{ name: string }>('PRAGMA table_info(tasks)', []);
     hasKilledAt = cols.some((c) => c.name === 'killed_at');
+    hasDispatchAttempts = cols.some((c) => c.name === 'dispatch_attempts');
   } catch {
     hasKilledAt = false;
+    hasDispatchAttempts = false;
   }
 
   const progressCol = 'COALESCE(last_progress_at, updated_at)';
   const killedAtCol = hasKilledAt ? ', killed_at' : '';
+  const dispatchAttemptsCol = hasDispatchAttempts ? 'dispatch_attempts' : 'NULL AS dispatch_attempts';
 
   // U101: query at the TIGHTEST possible per-column threshold across the
   // global default AND every configured department override, so a
@@ -489,7 +597,8 @@ export async function runStaleTaskSweep(): Promise<StaleSweepResult> {
     candidates = queryAll<StaleTaskRow>(
       `SELECT id, title, status, description, department, workspace_id,
               assigned_agent_id, blocked_reason, blocked_on_human, ask,
-              last_progress_at, updated_at, qc_reroute_attempts${killedAtCol}
+              last_progress_at, updated_at, qc_reroute_attempts,
+              ${dispatchAttemptsCol}${killedAtCol}
        FROM tasks
        WHERE archived_at IS NULL
          AND status NOT IN ('done')
@@ -506,6 +615,10 @@ export async function runStaleTaskSweep(): Promise<StaleSweepResult> {
   let repinged = 0;
   let recovered = 0;
   const recoveredIds: string[] = [];
+  // PD-TEST-063: blocked cards with an exhausted dispatch budget that were
+  // re-escalated instead of being laundered back onto the dispatch conveyor.
+  let budgetEndStated = 0;
+  const budgetEndStatedIds: string[] = [];
 
   for (const task of candidates) {
     try {
@@ -570,44 +683,52 @@ export async function runStaleTaskSweep(): Promise<StaleSweepResult> {
           continue;
         }
 
+        // PD-TEST-063 (the dispatch-budget end-state guard): a blocked card that
+        // has ALREADY burned its whole dispatch budget is end-stated for the same
+        // reason the QC-capped card above is — the cap path blocked it on purpose,
+        // the dispatch ladder is exhausted, and a human owes the next move.
+        //
+        // THE DEFECT this closes: pre-fix, the 6h return below routed such a card
+        // through returnToOrchestrator, which zeroed dispatch_attempts (SWEEP-03).
+        // Live evidence, task 1d269693-ff54-4b1f-b45a-61dc7d8ca4d4: event
+        // 6e1ffc5c blocked it at "8 failed" attempts (00:47Z), event d3d7f3ce
+        // swept blocked→backlog at 06:50Z (actor stale-task-sweep, the 6h window),
+        // and event 22b564a8 re-dispatched it at 06:52Z — two minutes later, on a
+        // budget it had just been handed back. The 8 consumed attempts were gone
+        // and the card was dispatchable again.
+        //
+        // So: do NOT return it to backlog (that is what launders the budget — the
+        // RETURN is the only writer that can clear the accounting), and do NOT
+        // drop it silently (that would leave a stuck card with no escalation at
+        // all — the trap the other direction). Keep escalating to the named human
+        // on the ordinary deduped window, so the card keeps reaching a person
+        // until someone actually answers. The counter is never touched.
+        //
+        // The cap is read from the same MAX_DISPATCH_ATTEMPTS the dispatcher
+        // blocks at and the advancers gate on — not a re-derived copy.
+        const dispatchBudgetExhausted = (task.dispatch_attempts ?? 0) >= MAX_DISPATCH_ATTEMPTS;
+
         if (ageHours >= returnThreshold) {
-          // Second threshold passed: return to orchestrator.
-          returnToOrchestrator(task, `Blocked task stale for ${Math.round(ageHours)}h with no human response to: "${task.ask ?? '(no ask)'}"`).catch(err =>
+          if (dispatchBudgetExhausted) {
+            if (await repingBlockedOnce(task, ageHours)) repinged++;
+            budgetEndStated++;
+            budgetEndStatedIds.push(task.id);
+            continue;
+          }
+          // Second threshold passed: return to orchestrator. The consumed
+          // dispatch budget rides along in the reason so the audit row itself
+          // records what the card had already spent (PD-TEST-063 (c)).
+          returnToOrchestrator(
+            task,
+            `Blocked task stale for ${Math.round(ageHours)}h with no human response to: "${task.ask ?? '(no ask)'}"` +
+              ` (dispatch_attempts=${task.dispatch_attempts ?? 0}/${MAX_DISPATCH_ATTEMPTS} PRESERVED; ` +
+              `qc_reroute_attempts=${task.qc_reroute_attempts ?? 0})`,
+          ).catch(err =>
             console.warn(`[stale-task-sweep] returnToOrchestrator failed for ${task.id}:`, (err as Error).message),
           );
           returned++;
         } else if (ageHours >= repingThreshold) {
-          // SWEEP-DEDUP: re-ping AT MOST ONCE PER WINDOW, not once per 10-min tick.
-          // Without this gate the whole 72h→144h blocked window re-escalates every
-          // single tick (see STALE_REPING_DEDUP_HOURS). We are DEDUPING, not muting:
-          // a still-stuck task escalates again on the next window, and the guard
-          // fails OPEN, so no escalation is ever lost to a query error.
-          if (wasRecentlyRepinged(task.id)) {
-            continue;
-          }
-
-          // First threshold: re-ping the named human.
-          await repingBlockedHuman(task);
-          // Audit trail AND the dedup key the check above reads. Written on BOTH
-          // branches (operator → notifySystem, owner → /api/events) because this
-          // INSERT is common to both — that is what makes the dedup cover the
-          // operator path, which previously wrote NO dedupable key at all.
-          const now = new Date().toISOString();
-          try {
-            run(
-              `INSERT INTO events (id, type, task_id, message, created_at)
-               VALUES (?, 'stale_blocked_repinged', ?, ?, ?)`,
-              [uuidv4(), task.id, `Re-pinged ${task.blocked_on_human ?? 'owner'} on blocked task (stale ${Math.round(ageHours)}h)`, now],
-            );
-          } catch (err) {
-            // events table issue -- non-fatal for THIS tick, but it means no dedup
-            // key was written, so the next tick will escalate again (fail-open).
-            console.warn(
-              `[stale-task-sweep] failed to write re-ping dedup key for ${task.id}:`,
-              (err as Error).message,
-            );
-          }
-          repinged++;
+          if (await repingBlockedOnce(task, ageHours)) repinged++;
         }
         continue;
       }
@@ -675,5 +796,5 @@ export async function runStaleTaskSweep(): Promise<StaleSweepResult> {
     }
   }
 
-  return { scanned: candidates.length, returned, repinged, recovered, recoveredIds };
+  return { scanned: candidates.length, returned, repinged, recovered, recoveredIds, budgetEndStated, budgetEndStatedIds };
 }

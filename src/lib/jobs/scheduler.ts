@@ -660,9 +660,15 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<unknown> | unk
         console.log(`[cron] stale-task-sweep: skipped -- ${result.skippedReason}`);
       } else if (result.scanned > 0 || result.returned > 0 || result.repinged > 0 || (result.recovered ?? 0) > 0) {
         const rec = result.recovered ?? 0;
+        // PD-TEST-063: an END-STATED card (dispatch budget exhausted) is surfaced
+        // explicitly — it is re-escalated rather than returned to backlog, and it
+        // will never be auto-re-dispatched until a human grants fresh budget.
+        const endStated = result.budgetEndStated ?? 0;
         console.log(
           `[cron] stale-task-sweep: scanned ${result.scanned}, returned ${result.returned}, ` +
-          `repinged ${result.repinged}, recovered ${rec}${rec > 0 ? ` (${(result.recoveredIds ?? []).join(', ')})` : ''}`,
+          `repinged ${result.repinged}, recovered ${rec}${rec > 0 ? ` (${(result.recoveredIds ?? []).join(', ')})` : ''}, ` +
+          `budget-end-stated ${endStated}` +
+          `${endStated > 0 ? ` (${(result.budgetEndStatedIds ?? []).join(', ')})` : ''}`,
         );
       }
     },

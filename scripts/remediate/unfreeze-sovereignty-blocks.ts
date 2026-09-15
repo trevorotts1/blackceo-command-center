@@ -52,6 +52,16 @@ async function main(): Promise<void> {
     // Exact P1-01 unfreeze: reset attempt-accounting + return to backlog. Also
     // clears the now-stale block metadata (block_needs/block_audience) so the card
     // is a clean backlog item, not a half-blocked one.
+    //
+    // PD-TEST-063 — THIS IS A SANCTIONED BUDGET GRANT: one of only TWO places in
+    // the shipped tree allowed to zero `dispatch_attempts` (the other is
+    // recordDispatchSuccess in src/lib/task-dispatcher.ts, on a genuine successful
+    // advance). It is legitimate because a HUMAN runs it — dry-run by default,
+    // requiring an explicit --apply, for one named rollout defect class
+    // (model_sovereignty blocks) rather than as an automatic sweep. The automated
+    // stale-task-sweep is deliberately NOT allowed to do this: with no human in the
+    // loop it would launder an exhausted budget into a fresh one. Pinned by
+    // tests/unit/pd063-stale-sweep-budget.test.ts (d).
     const res = run(
       `UPDATE tasks
          SET dispatch_attempts = 0,
