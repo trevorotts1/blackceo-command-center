@@ -78,6 +78,32 @@ for(const id of ['client-a','client-b'])run('INSERT OR IGNORE INTO clients(id,na
   }
   assert.notEqual(scopes[0],scopes[1],'different clients must never share a draft bucket');
  });
+ test('a stale remote read cannot erase a completed client interview',async()=>{
+  const {GET:state}=await import('../../src/app/api/interview/state/route');
+  const originalFetch=globalThis.fetch;
+  const originalRegistry=process.env.MC_TENANT_REGISTRY_JSON;
+  run("UPDATE clients SET interview_complete=1 WHERE id='client-a'");
+  run("UPDATE interview_remote_operations SET state='acknowledged' WHERE tenant_id='tenant-a'");
+  process.env.MC_TENANT_REGISTRY_JSON=JSON.stringify({...registry,'a.example':{...registry['a.example'],remoteUrl:'https://receiver-a.example',remoteSecret:'fixture-secret'}});
+  globalThis.fetch=async(_input:any,init:any)=>{
+    const request=JSON.parse(String(init?.body || '{}'));
+    assert.equal(request.type,'state');
+    return Response.json({
+      protocol:'interview.v1', tenantId:'tenant-a', installationId:'install-a',
+      operationId:request.operationId, httpStatus:200, state:'acknowledged',
+      result:{interviewComplete:false,buildCompleted:false},
+    });
+  };
+  try {
+    const response=await state(req('a.example','/api/interview/state',{authorization:'Bearer fixture-api-token'}));
+    assert.equal(response.status,200);
+    assert.equal((await response.json()).interviewComplete,true,'completed mirror remains complete when remote is stale');
+    assert.equal(queryOne<{interview_complete:number}>('SELECT interview_complete FROM clients WHERE id=?',['client-a'])!.interview_complete,1);
+  } finally {
+    globalThis.fetch=originalFetch;
+    process.env.MC_TENANT_REGISTRY_JSON=originalRegistry;
+  }
+ });
  test('durable answers preserve content, revisions and tenant separation; retries are idempotent',async()=>{
   const a=await context(),b=await context('b.example');
   const first=queueInterviewOperation(a,'answer',{questionId:'vision',prompt:'What is your vision?',answer:'A_PRIVATE'},'fixture-answer-a');

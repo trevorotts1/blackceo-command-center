@@ -1,7 +1,7 @@
 import { queryOne } from '@/lib/db';
 import { ensureTenantInterview, tenantAnswers } from '@/lib/interview/remote-store';
 import { readRemoteInterviewState, drainInterviewOperations } from '@/lib/interview/remote-protocol';
-import { updateClient } from '@/lib/clients';
+import { getSelfClient, updateClient } from '@/lib/clients';
 /**
  * GET /api/interview/state
  *
@@ -21,9 +21,12 @@ import { updateClient } from '@/lib/clients';
  *
  * DOCTRINE: reads the canonical FILES (.workforce-build-state.json,
  * interview-handoff.md, workforce-interview-answers.md) via the P0-1 seam, NOT a
- * divergent DB copy. It NEVER writes interviewComplete or a decision — this is a
- * pure read. All gate math (coverage, provenance, the live canonical floor) lives
- * in the seam so the UI gate can never drift from the build-side enforcer.
+ * divergent DB copy. It never changes canonical interview completion or a
+ * decision. When canonical or remote evidence confirms completion, it may repair
+ * the per-client database mirror; a stale or unavailable read can never clear a
+ * completion that was already proved. All gate math (coverage, provenance, the
+ * live canonical floor) lives in the seam so the UI gate can never drift from
+ * the build-side enforcer.
  *
  * The percent is DERIVED (schema stores none): min(100, round(q/planned*100)),
  * where "planned" is the interview's OWN questionCountPlanned (falls back to 30
@@ -193,9 +196,20 @@ export async function GET(request: NextRequest) {
     let remote: Record<string,any> | null = null;
     try {
       await drainInterviewOperations(tenant.context!,1);
-      remote=await readRemoteInterviewState(tenant.context!,persisted.interview_id);
-      updateClient(tenant.client.id,{interview_complete:remote!.interviewComplete===true});
+      const freshRemote=await readRemoteInterviewState(tenant.context!,persisted.interview_id);
+      remote=freshRemote;
+      // Completion is terminal. A remote read that is stale, incomplete, or
+      // temporarily unavailable must never erase a completion already recorded
+      // for this client. Only verified terminal evidence may advance the mirror.
+      const remoteComplete = freshRemote.interviewComplete === true || freshRemote.buildCompleted === true;
+      if (remoteComplete && !tenant.client.interview_complete) {
+        updateClient(tenant.client.id,{interview_complete:true});
+      }
     } catch { /* Local durable answers remain usable while remote is unavailable. */ }
+    const interviewComplete =
+      tenant.client.interview_complete === true ||
+      remote?.interviewComplete === true ||
+      remote?.buildCompleted === true;
     const stored = {answeredIds:savedAnswers.map(a=>a.question_id),interviewSessionId:persisted.gateway_session_id};
     const structured = computeStructuredResume(
       INTERVIEW_QUESTIONS,
@@ -214,7 +228,7 @@ export async function GET(request: NextRequest) {
       ok: true,
       companyId: tenant.context!.companyId,
       installationId: tenant.context!.installationId,
-      interviewComplete: remote?.interviewComplete === true,
+      interviewComplete,
       remoteAvailable: remote !== null,
       remoteStatus: remote ? 'connected' : 'waiting_for_installation',
       interviewId: persisted.interview_id,
@@ -272,6 +286,15 @@ export async function GET(request: NextRequest) {
 
   try {
     const snap = await getInterviewGateSnapshot({ customDeptIds, implicitYesCustomIds });
+    const canonicalComplete = snap.interviewComplete || snap.buildCompleted;
+
+    // The canonical self record wins over the database mirror. This repairs a
+    // newly seeded or migrated self row that defaulted to incomplete even though
+    // the completed interview state remains intact on disk.
+    if (canonicalComplete) {
+      const self = getSelfClient();
+      if (self && !self.interview_complete) updateClient(self.id, { interview_complete: true });
+    }
 
     // READ-MIRROR refresh (P2-2). Re-sync the interview_sessions/interview_answers
     // index FROM the canonical files this GET just read. READ-ONLY on the session
@@ -299,7 +322,7 @@ export async function GET(request: NextRequest) {
         ? snap.progress.questionCountPlanned
         : null;
 
-    const percent = snap.interviewComplete
+    const percent = canonicalComplete
       ? 100
       : derivedPercent(lastQuestionNumber, questionCountPlanned);
 
@@ -336,7 +359,7 @@ export async function GET(request: NextRequest) {
       knownContext: await readKnownContext(),
 
       // Top-level lifecycle signals (drive the locked-shell + redirect logic).
-      interviewComplete: snap.interviewComplete,
+      interviewComplete: canonicalComplete,
       buildCompleted: snap.buildCompleted,
       qcStatus: snap.qcStatus,
 
