@@ -31,6 +31,14 @@
  * calls it (the review job reads the DB directly), so no legitimate tokenless
  * POST caller exists. Now 42 patterns covering 45 routes.
  *
+ * 2026-09-14 (WS-C, Skill 69 archify): +1 collection-or-item pattern for
+ * POST /api/archify-runs + PATCH /api/archify-runs/{id} — the Skill 69 archify
+ * diagram producer's board door (structural mirror of /api/ad-campaigns). An
+ * external Node CLI drives it; the browser interface never calls it, so no
+ * legitimate tokenless caller exists. The list is now 45 patterns covering 49
+ * routes (41 single + 4 collection-or-item x2); the U052 lock test
+ * (src/lib/__tests__/passthrough-write-scope.test.ts) carries the live census.
+ *
  * This list is NOT the whole fix. 61 routes -- including /api/system/converge,
  * /api/system/bootstrap and /api/clients/{id}/keys -- must stay open because the
  * interface calls them with no credential, and no route list can close them.
@@ -46,6 +54,12 @@
 export const BEARER_REQUIRED_WRITE_ROUTES: RegExp[] = [
   /^\/api\/auth\/interview-invitation$/,
   /^\/api\/ad-campaigns(\/[^/]+)?$/,
+  // Skill 69 (archify) producer surfaces: POST /api/archify-runs and
+  // PATCH /api/archify-runs/{id}. Service-to-service (an external diagram
+  // assembly line driving the board); the browser interface never calls them,
+  // so there is no legitimate tokenless caller. Collection-or-item, like
+  // ad-campaigns above.
+  /^\/api\/archify-runs(\/[^/]+)?$/,
   /^\/api\/agents$/,
   /^\/api\/agents\/[^/]+\/memory-logs$/,
   /^\/api\/agents\/[^/]+\/openclaw$/,
