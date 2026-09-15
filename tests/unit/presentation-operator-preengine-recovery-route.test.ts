@@ -584,26 +584,22 @@ test('PD-TEST-050: the pre-engine ledger is bounded — outstanding receipts, sp
 });
 
 /**
- * REWRITE of the pre-PR#330 test "a consumed recovery cannot be re-bound to a
- * different repair key" (present on main at the PR base d41cd73f1, introduced by
- * cfe5bbc08). That test demanded `409 pre_engine_recovery_already_issued` for ANY
- * different `repair_key` once a receipt existed — which is precisely the
- * behaviour PD-TEST-050 exists to change, because it left a run whose single
- * receipt was consumed by repair A with no supported re-drive when a DIFFERENT
+ * RESTORED GUARD — refusal half, under the ORIGINAL test name.
+ *
+ * This test is present on main at this PR's base (d41cd73f1, introduced by
+ * cfe5bbc08). Its original body demanded `409 pre_engine_recovery_already_issued`
+ * for ANY different `repair_key` once a receipt existed, which is precisely the
+ * behaviour PD-TEST-050 exists to change: it left a run whose single receipt had
+ * been consumed by repair A with no supported re-drive when a DIFFERENT
  * deterministic pre-engine defect (PD-TEST-049) surfaced.
  *
- * The guard is NOT retired — it is restated against the new contract. This one
- * test now establishes the complete rule for re-binding after a consumed receipt:
- *
- *   ADMITTED  ⟺ prior receipts all claimed ∧ the task is blocked again by a
- *               genuinely NEW recorded dispatch failure (dispatch_attempts
- *               strictly above the prior receipts' high-water mark) ∧ the
- *               artifact gate is clean;
- *   IDEMPOTENT for the same key after a claimed receipt (no re-dispatch);
- *   REFUSED with `pre_engine_recovery_already_issued` while a prior receipt is
- *   still UNCLAIMED.
+ * The guard is NOT retired — it is restated against the new contract. This half
+ * proves the name is still true in the new world: after a consumed receipt, a
+ * different `repair_key` is NOT obtainable by asking again, and NOT by merely
+ * re-blocking the card. The admission half — what DOES legitimately re-bind a
+ * consumed recovery — is the companion test immediately below.
  */
-test('a consumed recovery can only be re-bound under the ledger gates', async () => {
+test('a consumed recovery cannot be re-bound to a different repair key', async () => {
   newBridgeLog();
   const { id, contract } = createOperatorTask();
   const firstKey = 'pd038-notify-env-and-pd039-recovery-counter';
@@ -616,24 +612,17 @@ test('a consumed recovery can only be re-bound under the ledger gates', async ()
   assert.equal(callsForTask(id).length, 1);
   assert.ok(recoveryRows(id)[0].dispatch_started_at, 'the receipt is claimed');
 
-  // ── SAME key after a claimed receipt: idempotent, and it does NOT re-dispatch
-  const replay = await POST(request(id, evidenceFor(contract, { repair_key: firstKey })), { params: Promise.resolve({ id }) });
-  assert.equal(replay.status, 200);
-  assert.equal((await replay.json()).idempotent, true);
-  assert.equal(recoveryRows(id).length, 1, 'no second receipt for a replayed key');
-  assert.equal(callsForTask(id).length, 1, 'a replayed key never launches the bridge again');
-
-  // ── a DIFFERENT key is NOT admitted merely because the first was consumed:
+  // ── a DIFFERENT key is NOT re-bound merely because the first was consumed:
   //    the recovery left the task in `backlog`, so there is no blocked card to
   //    re-drive yet.
   const notBlocked = await POST(request(id, evidenceFor(contract, { repair_key: secondKey })), { params: Promise.resolve({ id }) });
   assert.equal(notBlocked.status, 422);
   assert.equal((await notBlocked.json()).error, 'blocked_task_required');
-  assert.equal(recoveryRows(id).length, 1);
-  assert.equal(callsForTask(id).length, 1);
+  assert.equal(recoveryRows(id).length, 1, 'no second receipt');
+  assert.equal(callsForTask(id).length, 1, 'no second bridge launch');
 
   // ── re-blocked, but WITHOUT a new recorded dispatch failure: still refused.
-  //    Re-blocking a card is not a repair.
+  //    Re-blocking a card is not a repair, so it cannot buy a new receipt.
   run(`UPDATE tasks SET status='blocked' WHERE id=?`, [id]);
   assert.equal(attemptsOf(id), 5);
   const unpaid = await POST(request(id, evidenceFor(contract, { repair_key: secondKey })), { params: Promise.resolve({ id }) });
@@ -642,8 +631,56 @@ test('a consumed recovery can only be re-bound under the ledger gates', async ()
   assert.equal(recoveryRows(id).length, 1, 'an unpaid re-block mints no receipt');
   assert.equal(callsForTask(id).length, 1);
 
+  // ── an UNCLAIMED prior receipt also refuses a new key with the original code,
+  //    because the caller already holds a receipt it must replay.
+  const outstanding = createOperatorTask();
+  run(
+    `INSERT INTO presentation_operator_preengine_recoveries
+       (id, task_id, execution_id, contract_sha256, prior_dispatch_attempts, repair_key, prior_failure_code, bridge_state, bridge_retry_attempt, created_at)
+     VALUES (?, ?, ?, ?, 5, ?, 'AF-NOTIFY-UNCONFIGURED', 'launch_pending', 1, ?)`,
+    [uuidv4(), outstanding.id, outstanding.contract.execution_id, operatorContractSha256(outstanding.contract), firstKey, new Date().toISOString()],
+  );
+  const unclaimed = await POST(request(outstanding.id, evidenceFor(outstanding.contract, { repair_key: secondKey })), { params: Promise.resolve({ id: outstanding.id }) });
+  assert.equal(unclaimed.status, 409);
+  assert.equal((await unclaimed.json()).error, 'pre_engine_recovery_already_issued');
+  assert.equal(recoveryRows(outstanding.id).length, 1, 'the outstanding receipt is replayed, never duplicated');
+  assert.equal(callsForTask(outstanding.id).length, 0, 'and nothing is launched while it is outstanding');
+});
+
+/**
+ * RESTORED GUARD — admission half, under a new name.
+ *
+ * Same guard, other direction: this is what DOES legitimately re-bind a
+ * consumed recovery. Together with the test above it establishes the complete
+ * rule for re-binding after a consumed receipt:
+ *
+ *   ADMITTED  ⟺ prior receipts all claimed ∧ the task is blocked again by a
+ *               genuinely NEW recorded dispatch failure (dispatch_attempts
+ *               strictly above the prior receipts' high-water mark) ∧ the
+ *               artifact gate is clean;
+ *   IDEMPOTENT for the same key after a claimed receipt (no re-dispatch).
+ */
+test('a consumed recovery can only be re-bound under the ledger gates', async () => {
+  newBridgeLog();
+  const { id, contract } = createOperatorTask();
+  const firstKey = 'pd038-notify-env-and-pd039-recovery-counter';
+  const secondKey = 'pd049-f1-requester-shape';
+
+  const consumed = await POST(request(id, evidenceFor(contract, { repair_key: firstKey })), { params: Promise.resolve({ id }) });
+  assert.equal(consumed.status, 200);
+  assert.equal(callsForTask(id).length, 1);
+
+  // ── SAME key after a claimed receipt: idempotent, and it does NOT re-dispatch
+  const replay = await POST(request(id, evidenceFor(contract, { repair_key: firstKey })), { params: Promise.resolve({ id }) });
+  assert.equal(replay.status, 200);
+  assert.equal((await replay.json()).idempotent, true);
+  assert.equal(recoveryRows(id).length, 1, 'no second receipt for a replayed key');
+  assert.equal(callsForTask(id).length, 1, 'a replayed key never launches the bridge again');
+
   // ── a genuinely NEW recorded dispatch failure (the product's own accounting)
-  //    is what pays for the re-bind.
+  //    is what pays for the re-bind. (The refusal half of this rule — unblocked,
+  //    re-blocked-without-a-failure, and unclaimed-receipt — is the companion
+  //    test above.)
   recordPostRecoveryFailure(id);
   assert.equal(queryOne<{ status: string }>('SELECT status FROM tasks WHERE id=?', [id])?.status, 'blocked');
   assert.equal(attemptsOf(id), 6, 'the recorded failure moved the counter above the prior receipt high-water mark (5)');
@@ -673,21 +710,6 @@ test('a consumed recovery can only be re-bound under the ledger gates', async ()
   assert.equal((await gatedSecond.json()).error, 'pre_engine_recovery_engine_artifacts_present');
   assert.equal(recoveryRows(gated.id).length, 1, 'the engine\'s own state.json keeps the lane closed');
   assert.equal(callsForTask(gated.id).length, 1);
-
-  // ── the UNCLAIMED prior receipt case: a new key is refused with the original
-  //    code, because the caller already holds a receipt it must replay.
-  const outstanding = createOperatorTask();
-  run(
-    `INSERT INTO presentation_operator_preengine_recoveries
-       (id, task_id, execution_id, contract_sha256, prior_dispatch_attempts, repair_key, prior_failure_code, bridge_state, bridge_retry_attempt, created_at)
-     VALUES (?, ?, ?, ?, 5, ?, 'AF-NOTIFY-UNCONFIGURED', 'launch_pending', 1, ?)`,
-    [uuidv4(), outstanding.id, outstanding.contract.execution_id, operatorContractSha256(outstanding.contract), firstKey, new Date().toISOString()],
-  );
-  const unclaimed = await POST(request(outstanding.id, evidenceFor(outstanding.contract, { repair_key: secondKey })), { params: Promise.resolve({ id: outstanding.id }) });
-  assert.equal(unclaimed.status, 409);
-  assert.equal((await unclaimed.json()).error, 'pre_engine_recovery_already_issued');
-  assert.equal(recoveryRows(outstanding.id).length, 1, 'the outstanding receipt is replayed, never duplicated');
-  assert.equal(callsForTask(outstanding.id).length, 0, 'and nothing is launched while it is outstanding');
 });
 
 test('concurrent submissions cannot launch the bridge twice or reset the counter', async () => {
