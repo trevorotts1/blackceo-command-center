@@ -226,7 +226,7 @@ export const UpdateTaskSchema = z.object({
 export const CreateActivitySchema = z.object({
   activity_type: ActivityType,
   message: z.string().min(1, 'Message is required').max(5000, 'Message must be 5000 characters or less'),
-  agent_id: z.string().uuid().optional(),
+  agent_id: TaskAgentId.optional(),
   // B-U6 / U20 fix: every real caller (cc_board.py post_activity/post_qc_score,
   // src/lib/orchestration.ts logActivity) sends `metadata` as a nested JSON
   // OBJECT inside the request body — `z.string()` rejected every one of them
@@ -424,4 +424,67 @@ export const UpdateAdCampaignStageSchema = z.object({
 })
   // Same poison-state gate as UpdateTaskSchema: an ad stage card parked on a
   // human with no ask is just as unanswerable as a board card.
+  .superRefine(rejectBlockedWithoutAsk);
+
+// ---------------------------------------------------------------------------
+// Archify-run schemas (Skill 69 archify → board)
+//
+// Same shape (and the same reasoning) as the ad-campaign schemas above: the
+// producer owns the phase list, the server owns legality. The diagram type is
+// a strict enum so a typo cannot create a grouping whose type no renderer
+// understands.
+// ---------------------------------------------------------------------------
+
+const ArchifyPhaseSlug = z.string().min(1).max(64);
+
+const ArchifyDiagramType = z.enum([
+  'architecture',
+  'workflow',
+  'sequence',
+  'dataflow',
+  'lifecycle',
+]);
+
+export const CreateArchifyRunSchema = z.object({
+  // Idempotency key. Optional: when omitted, external_run_id deterministically
+  // derives the grouping id; when BOTH are omitted the server mints one and no
+  // dedupe is possible (a keyless create is a create).
+  run_id: z.string().min(1).max(128).optional(),
+  external_run_id: z.string().min(1).max(200).optional(),
+  title: z.string().min(1).max(500),
+  diagram_type: ArchifyDiagramType,
+  owner: z.string().max(200).optional(),
+  department: z.string().max(100).optional(),
+  workspace: z.string().max(200).optional(),
+  agent_id: z.string().max(200).optional(), // OpenClaw id; provenance ONLY — never assigned_agent_id
+  source_path: z.string().max(1000).optional(),
+  phases: z
+    .array(z.object({ slug: ArchifyPhaseSlug, title: z.string().max(500).optional() }))
+    .max(50)
+    .optional(),
+});
+
+// LOCKSTEP: archify phase cards have their OWN narrower status set
+// (ArchifyCardStatus in src/lib/archify-runs.ts) — NOT the full 10-status board
+// TaskStatus, exactly as AdCardStatus above is pinned. Reusing TaskStatus would
+// let a phase card be set to a board-only status (inbox/planning/assigned/
+// testing/pending_dispatch) that moveArchifyPhase() cannot accept.
+const ArchifyCardStatus = z.enum(['backlog', 'in_progress', 'review', 'blocked', 'done']);
+
+export const UpdateArchifyRunPhaseSchema = z.object({
+  phase_slug: ArchifyPhaseSlug,
+  status: ArchifyCardStatus, // backlog | in_progress | review | blocked | done
+  // Progress note + where the phase's work landed. artifact_url must be a valid
+  // http(s) URL or an existing non-empty path on the CC box, because the
+  // review/done gates require registered, REACHABLE evidence (FIX 25 / T0-01).
+  note: z.string().max(2000).optional().nullable(),
+  artifact_url: z.string().max(2000).optional().nullable(),
+  reason: z.string().max(2000).optional(),
+  actor: z.string().max(200).optional(),
+  blocked_reason: z.enum(['decision', 'approval', 'credential', 'payment']).optional().nullable(),
+  blocked_on_human: z.enum(['owner', 'operator']).optional().nullable(),
+  ask: z.string().max(500).optional().nullable(),
+})
+  // Same poison-state gate: a phase card parked on a human with no ask is just
+  // as unanswerable as a board card.
   .superRefine(rejectBlockedWithoutAsk);

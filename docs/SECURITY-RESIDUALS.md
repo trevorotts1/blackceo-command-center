@@ -5,9 +5,11 @@
 
 ## What was closed
 
-**42 routes**, reachable with no credential via a forged same-origin header, are now gated by `BEARER_REQUIRED_WRITE_ROUTES` in `src/middleware.ts`. A caller without a valid `Authorization: Bearer` token receives a 401 on those routes. The exact 42 routes are listed in the `BEARER_REQUIRED_WRITE_ROUTES` array (39 regex patterns; three use the `(\/[^/]+)?` collection-or-item form and each covers two routes).
+**49 route templates**, reachable with no credential via a forged same-origin header, are now gated by `BEARER_REQUIRED_WRITE_ROUTES` in `src/middleware.ts`. A caller without a valid `Authorization: Bearer` token receives a 401 on those routes. The exact templates are listed in the `BEARER_REQUIRED_WRITE_ROUTES` array (45 regex patterns; four use the `(\/[^/]+)?` collection-or-item form and each covers two templates: 41 single + 4 × 2 = 49). One of the 49 — `/api/tasks/{id}/operator-preengine-recovery` — is webhook-gated as well, so 48 templates are bearer-ONLY covered.
 
 > **Updated 2026-09-08 (F38, W2 batch).** One pattern added for `POST /api/social/media/{id}` (company-bound asset-register ingest; the browser player only ever GETs, so no legitimate tokenless POST caller exists). Closed set grows 38 -> 42; the anti-rot test at `src/lib/__tests__/passthrough-write-scope.test.ts` asserts the live census (114 mutating routes, 6 webhook-protected, 108 non-webhook).
+>
+> **Updated 2026-09-14 (WS-C, Skill 69 archify).** One collection-or-item pattern added for `POST /api/archify-runs` + `PATCH /api/archify-runs/{id}` (the Skill 69 archify diagram producer's board door, a structural mirror of `/api/ad-campaigns`; an external Node CLI drives it, the browser interface never calls it). Adding this feature's two route files required re-deriving the U052 census. The lock test was GREEN on the pre-feature base (124 mutating, 7 webhook-protected, 117 non-webhook; 44 patterns → 47 templates, 46 bearer-ONLY) and is GREEN 20/20 again at the re-derived literals: **126 mutating `/api/*` routes, 7 webhook-protected (5 static + 2 dynamic), 119 non-webhook; 45 patterns → 49 templates (41 single + 4 collection-or-item × 2), one of them webhook-gated, leaving 48 bearer-ONLY covered.** The prose counts above this note had drifted stale independently of this change — they still read 42 routes via 39 patterns while the base array already held 44 patterns → 47 templates — and are corrected to the measured numbers.
 
 ## What remains open — 63 routes
 
