@@ -7173,63 +7173,81 @@ export const migrations: Migration[] = [
     // boot (src/lib/db/index.ts:197-211), would stop the Command Center serving
     // on every boot. It is also safe to re-run: a death between the rebuild
     // commit and the runner recording the id simply rebuilds again, and the
-    // `DROP TABLE IF EXISTS …_147` + copy conserve every row (proven by the
-    // migration suite).
+    // copy-and-restore below conserves every row (proven by the migration suite).
+    //
+    // DELIBERATELY NO `ALTER TABLE … RENAME TO`. SQLite's rename path re-parses
+    // and re-resolves EVERY trigger and view in the schema, so one PRE-EXISTING
+    // broken object elsewhere in the database turns this migration into a
+    // hard boot failure — a constraint rebuild must not depend on unrelated
+    // schema objects being valid. That is not theoretical: migration 132 creates
+    // `tasks_persona_decision_revision`, whose body references `NEW.persona_id`
+    // (added by migrations 016/021), so on any box where those were skipped —
+    // every minimal/partial fixture that pre-marks 001–113, and the U55 CI sweep
+    // — the trigger is latently invalid. Renaming `…_147` over the real name
+    // therefore died with `error in trigger tasks_persona_decision_revision:
+    // no such column: NEW.persona_id` and failed `boot path warns and does not
+    // crash on empty manifest` plus three migration-114 tests. The rebuild is
+    // instead: copy out to the scratch table, DROP the original, recreate it
+    // under its own name, copy back, drop the scratch. CREATE/DROP never
+    // re-resolve other objects (verified against that same fixture).
     id: '147',
     name: 'presentation_operator_preengine_recoveries_per_repair_key',
     useOuterTransaction: false,
     up: (db) => {
+      const RECEIPTS = 'presentation_operator_preengine_recoveries';
+      const SCRATCH = 'presentation_operator_preengine_recoveries_147';
+      const COLUMNS = 'id, task_id, execution_id, contract_sha256, prior_dispatch_attempts, repair_key, prior_failure_code, bridge_state, bridge_retry_attempt, dispatch_started_at, created_at';
+      const ddl = (name: string) => `CREATE TABLE ${name} (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        execution_id TEXT NOT NULL,
+        contract_sha256 TEXT NOT NULL,
+        prior_dispatch_attempts INTEGER NOT NULL,
+        repair_key TEXT NOT NULL,
+        prior_failure_code TEXT NOT NULL,
+        bridge_state TEXT NOT NULL,
+        bridge_retry_attempt INTEGER NOT NULL,
+        dispatch_started_at TEXT,
+        created_at TEXT NOT NULL,
+        UNIQUE(task_id, repair_key)
+      )`;
       const fkRow = db.prepare('PRAGMA foreign_keys').get() as { foreign_keys: number } | undefined;
       const fkWasOn = fkRow?.foreign_keys === 1;
       db.exec('PRAGMA foreign_keys = OFF');
       try {
         const rebuild = db.transaction(() => {
-          db.exec('DROP TABLE IF EXISTS presentation_operator_preengine_recoveries_147');
-          db.exec(`CREATE TABLE presentation_operator_preengine_recoveries_147 (
-            id TEXT PRIMARY KEY,
-            task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-            execution_id TEXT NOT NULL,
-            contract_sha256 TEXT NOT NULL,
-            prior_dispatch_attempts INTEGER NOT NULL,
-            repair_key TEXT NOT NULL,
-            prior_failure_code TEXT NOT NULL,
-            bridge_state TEXT NOT NULL,
-            bridge_retry_attempt INTEGER NOT NULL,
-            dispatch_started_at TEXT,
-            created_at TEXT NOT NULL,
-            UNIQUE(task_id, repair_key)
-          )`);
           // EXISTENCE GUARD (migration-131 convention — "every ALTER is
           // PRAGMA/if-exists-guarded so minimal fixtures and half-migrated boxes
           // heal instead of crashing"; migration 144's header states it, and 146
           // itself is CREATE TABLE IF NOT EXISTS). This database class is real,
           // not theoretical: `_migrations` has been observed on THIS box
           // recording a later id while earlier table-creating ids were absent
-          // (145 recorded with 142-144 missing). Without this guard, a box whose
-          // `_migrations` holds 146 while the table is gone would throw
-          // `no such table` here, and because getDb() is fail-closed
-          // (src/lib/db/index.ts:197-211) the whole Command Center would refuse
-          // to serve — persistently, on every boot.
+          // (145 recorded with 142-144 missing). Absent table ⇒ create it
+          // directly in the new shape; there is nothing to rebuild or preserve.
           const tableExists = (db.prepare(
-            `SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='presentation_operator_preengine_recoveries'`,
-          ).get() as { n: number }).n > 0;
-          if (tableExists) {
-            // Copy-on-rebuild. The copy is a PLAIN `INSERT ... SELECT`, never
-            // `INSERT OR IGNORE`: a duplicate must ABORT the rebuild loudly
-            // rather than be silently dropped. Under 146 a duplicate
-            // (task_id, repair_key) pair is impossible (task_id UNIQUE is
-            // strictly stronger); the row-count assertion below re-proves it
-            // after the fact.
-            const before = (db.prepare('SELECT COUNT(*) AS n FROM presentation_operator_preengine_recoveries').get() as { n: number }).n;
-            db.exec(`INSERT INTO presentation_operator_preengine_recoveries_147
-              (id, task_id, execution_id, contract_sha256, prior_dispatch_attempts, repair_key, prior_failure_code, bridge_state, bridge_retry_attempt, dispatch_started_at, created_at)
-              SELECT id, task_id, execution_id, contract_sha256, prior_dispatch_attempts, repair_key, prior_failure_code, bridge_state, bridge_retry_attempt, dispatch_started_at, created_at
-              FROM presentation_operator_preengine_recoveries`);
-            const after = (db.prepare('SELECT COUNT(*) AS n FROM presentation_operator_preengine_recoveries_147').get() as { n: number }).n;
-            if (after !== before) throw new Error(`[Migration 147] recovery receipt copy lost rows (${before} -> ${after}); refusing to drop the original table`);
-            db.exec('DROP TABLE presentation_operator_preengine_recoveries');
+            `SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name=?`,
+          ).get(RECEIPTS) as { n: number }).n > 0;
+          if (!tableExists) {
+            db.exec(ddl(RECEIPTS));
+            return;
           }
-          db.exec('ALTER TABLE presentation_operator_preengine_recoveries_147 RENAME TO presentation_operator_preengine_recoveries');
+          db.exec(`DROP TABLE IF EXISTS ${SCRATCH}`);
+          db.exec(ddl(SCRATCH));
+          // Copies are PLAIN `INSERT ... SELECT`, never `INSERT OR IGNORE`: a
+          // duplicate must ABORT the rebuild loudly rather than be silently
+          // dropped. Under 146 a duplicate (task_id, repair_key) pair is
+          // impossible (task_id UNIQUE is strictly stronger); the row-count
+          // assertions re-prove it after each copy.
+          const before = (db.prepare(`SELECT COUNT(*) AS n FROM ${RECEIPTS}`).get() as { n: number }).n;
+          db.exec(`INSERT INTO ${SCRATCH} (${COLUMNS}) SELECT ${COLUMNS} FROM ${RECEIPTS}`);
+          const copied = (db.prepare(`SELECT COUNT(*) AS n FROM ${SCRATCH}`).get() as { n: number }).n;
+          if (copied !== before) throw new Error(`[Migration 147] recovery receipt copy lost rows (${before} -> ${copied}); refusing to drop the original table`);
+          db.exec(`DROP TABLE ${RECEIPTS}`);
+          db.exec(ddl(RECEIPTS));
+          db.exec(`INSERT INTO ${RECEIPTS} (${COLUMNS}) SELECT ${COLUMNS} FROM ${SCRATCH}`);
+          const restored = (db.prepare(`SELECT COUNT(*) AS n FROM ${RECEIPTS}`).get() as { n: number }).n;
+          if (restored !== before) throw new Error(`[Migration 147] recovery receipt restore lost rows (${before} -> ${restored})`);
+          db.exec(`DROP TABLE ${SCRATCH}`);
         });
         rebuild();
       } finally {
