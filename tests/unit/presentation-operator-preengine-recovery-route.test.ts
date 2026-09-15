@@ -1,7 +1,7 @@
 /**
  * UPDATE-014 / Issue39 — POST /api/tasks/[id]/operator-preengine-recovery.
  *
- * THE DEFECT THIS FILE LOCKS DOWN
+ * THE DEFECT THIS FILE LOCKS DOWN (Issue39 / UPDATE-014)
  *   A successful acknowledgement through autoDispatchTask() calls
  *   recordDispatchSuccess(), which reset the REAL `tasks.dispatch_attempts` to 0.
  *   Preserving the exhausted budget only inside the recovery row did NOT preserve
@@ -14,15 +14,37 @@
  *   Against that unmodified candidate the counter assertion below fails with
  *   `0 !== 5` (raw run captured in the Worker B evidence bundle).
  *
+ * PD-TEST-050 — ONE RECEIPTED ATTEMPT PER DISTINCT REPAIR, NOT ONE PER TASK
+ *   Migration 146 keyed the receipt on `task_id` alone. On 2026-09-14T23:38Z the
+ *   one permitted receipt (row 96932757, repair_key
+ *   `pd038-notify-env-and-pd039-recovery-counter`) was legitimately consumed and
+ *   the engine then died on a DIFFERENT deterministic pre-engine defect
+ *   (PD-TEST-049, the F1 requester-shape bug) with NO engine artifacts. A
+ *   different repair_key drew 409 `pre_engine_recovery_already_issued`, the same
+ *   repair_key replayed idempotently without re-dispatching, and both sweeps gate
+ *   on `dispatch_attempts < MAX_DISPATCH_ATTEMPTS` while the counter had already
+ *   moved 5 -> 6. The run had no supported re-drive path.
+ *
+ *   Migration 147 moves uniqueness to (task_id, repair_key) and the library adds
+ *   a bounded ledger gate plus a server-side engine-artifact proof. The
+ *   PD-TEST-050 tests below cover: (a) a second DISTINCT repair is authorized
+ *   when the first produced no engine artifacts; (b) it is REFUSED once the run
+ *   produced any (state.json / execution row / receipt); (c) the same repair_key
+ *   still replays idempotently; (e) single-use still holds per receipt row;
+ *   (f) the counter is preserved on success and incremented by the product's own
+ *   failure path; and the ledger bound that stops repair_key invention from
+ *   becoming an unbounded retry budget.
+ *
  * WHAT IS EXERCISED FOR REAL (nothing reimplemented)
  *   - the real route handler,
  *   - the real issuePreEngineRecovery / claimPreEngineRecoveryDispatch library,
  *   - the real launchOperatorPresentationContract(),
  *   - the real autoDispatchTask() operator-delegated branch,
- *   - the real recordDispatchSuccess() accounting,
+ *   - the real recordDispatchSuccess()/recordDispatchFailure() accounting,
  *   - the real runIntakeAdvanceSweep() selection/dispatch path,
  *   - the real U061 /resume route,
- *   - a real SQLite DB (isolated per file) and the real contracts table.
+ *   - a real SQLite DB (isolated per file) with the real migration 147 shape and
+ *     the real contracts table.
  *   Only the OUT-OF-PROCESS bridge transport is stubbed: PRESENTATION_INTAKE_BRIDGE
  *   points at a python stub that records each invocation and answers with the
  *   bridge's documented `worker_acknowledged` JSON. No gateway, no network.
@@ -39,8 +61,8 @@ import { NextRequest } from 'next/server';
 import { getDb, queryAll, queryOne, run } from '../../src/lib/db';
 import { schema } from '../../src/lib/db/schema';
 import { bindOperatorPresentationContract, parseOperatorPresentationContract, saveOperatorPresentationContract } from '../../src/lib/presentation-operator-contract';
-import { operatorContractSha256 } from '../../src/lib/presentation-operator-recovery';
-import { autoDispatchTask } from '../../src/lib/task-dispatcher';
+import { claimPreEngineRecoveryDispatch, operatorContractSha256, preEngineRecoveryEngineArtifacts } from '../../src/lib/presentation-operator-recovery';
+import { autoDispatchTask, recordDispatchFailure } from '../../src/lib/task-dispatcher';
 import { runIntakeAdvanceSweep } from '../../src/lib/jobs/intake-advance-sweep';
 import { POST } from '../../src/app/api/tasks/[id]/operator-preengine-recovery/route';
 import { POST as resumeTask } from '../../src/app/api/tasks/[id]/resume/route';
@@ -161,6 +183,53 @@ function request(id: string, body: object) {
 
 function attemptsOf(id: string): number | undefined {
   return queryOne<{ dispatch_attempts: number }>('SELECT dispatch_attempts FROM tasks WHERE id=?', [id])?.dispatch_attempts;
+}
+
+/** The operator bridge's run directory — same definition the server uses. */
+function runDirFor(taskId: string): string {
+  return path.join(process.env.PRESENTATION_OPERATOR_RUNS_DIR!, `pres-operator-${taskId}`);
+}
+
+/**
+ * PD-TEST-050: the engine's own pinned state file. A real run writes it; the
+ * PD-TEST-049 pre-engine death wrote .mode-plan/.model-plan/.credit-preflight
+ * and the OCR probe receipt but NO state.json.
+ */
+function writeEngineState(taskId: string): void {
+  fs.mkdirSync(runDirFor(taskId), { recursive: true });
+  fs.writeFileSync(path.join(runDirFor(taskId), 'state.json'), JSON.stringify({ phase: 'P1', manifest_sha256: 'deadbeef' }));
+}
+
+/** A terminal (non-active) execution row — engine work that has FINISHED. */
+function insertTerminalExecution(taskId: string): void {
+  const now = new Date().toISOString();
+  run(
+    `INSERT INTO task_executions (id, task_id, assignment_version, agent_id, workspace_id, generation, session_key, session_id, state, lease_owner, lease_expires_at, idempotency_key, created_at, updated_at)
+     VALUES (?, ?, 0, 'presentation-worker', 'default', 1, ?, ?, 'failed', 'test-lease', ?, ?, ?, ?)`,
+    [uuidv4(), taskId, `sess-${uuidv4()}`, `sid-${uuidv4()}`, now, `idem-${uuidv4()}`, now, now],
+  );
+}
+
+/**
+ * The recorded dispatch failure that follows a consumed recovery on the real
+ * path: the bridge accepted the launch, the engine died pre-engine, the
+ * dispatcher recorded the failure and the counter moved up (5 -> 6). Uses the
+ * REAL recordDispatchFailure so the counter move is the product's own.
+ */
+function recordPostRecoveryFailure(taskId: string): void {
+  recordDispatchFailure(taskId, 'presentation-worker', {
+    reason: 'presentation_operator_bridge_deferred',
+    audience: 'SYSTEM',
+    needs: 'Deterministic pre-engine prerequisite still failing (PD-TEST-050 regression).',
+    context: 'operator-preengine-recovery',
+  });
+}
+
+function recoveryRows(taskId: string): Array<{ id: string; repair_key: string; dispatch_started_at: string | null; prior_dispatch_attempts: number }> {
+  return queryAll<{ id: string; repair_key: string; dispatch_started_at: string | null; prior_dispatch_attempts: number }>(
+    'SELECT id, repair_key, dispatch_started_at, prior_dispatch_attempts FROM presentation_operator_preengine_recoveries WHERE task_id=? ORDER BY created_at ASC',
+    [taskId],
+  );
 }
 
 test('verified pre-engine repair retains the REAL exhausted counter and launches the bridge exactly once', async () => {
@@ -312,22 +381,335 @@ test('pre-engine state guards hold — unknown task, non-blocked task, active ex
   assert.equal(attemptsOf(proved.id), 5);
 });
 
-test('a consumed recovery cannot be re-bound to a different repair key', async () => {
+/**
+ * PD-TEST-050 case (a) + (f) + (e).
+ *
+ * The exact live sequence: the one authorised recovery was consumed by repair A
+ * (row 96932757), the engine then died on a DIFFERENT deterministic pre-engine
+ * defect (PD-TEST-049) producing NO engine artifacts, and the counter moved
+ * 5 -> 6. A second, distinct repair must now be authorizable — while every
+ * historical attempt and the first receipt row stay intact.
+ */
+test('PD-TEST-050(a,f,e): a second DISTINCT repair is authorized while the first produced no engine artifacts; the counter is preserved', async () => {
   newBridgeLog();
   const { id, contract } = createOperatorTask();
-  const first = await POST(request(id, evidenceFor(contract)), { params: Promise.resolve({ id }) });
-  assert.equal(first.status, 200);
+  const first = evidenceFor(contract, { repair_key: 'pd038-notify-env-and-pd039-recovery-counter' });
+  const firstResponse = await POST(request(id, first), { params: Promise.resolve({ id }) });
+  assert.equal(firstResponse.status, 200);
+  const firstBody = await firstResponse.json();
+  assert.equal(firstBody.idempotent, false);
+  assert.equal(firstBody.dispatch.status, 'acknowledged');
   assert.equal(callsForTask(id).length, 1);
+  assert.equal(attemptsOf(id), 5, 'the acknowledged recovery still preserves the exhausted counter');
 
+  // The engine dies pre-engine and the dispatcher records the failure — the
+  // product's own accounting, not a hand-edited counter.
+  recordPostRecoveryFailure(id);
+  assert.equal(queryOne<{ status: string }>('SELECT status FROM tasks WHERE id=?', [id])?.status, 'blocked');
+  assert.equal(attemptsOf(id), 6, 'the post-recovery failure increments 5 -> 6');
+
+  // The NEW distinct repair.
+  const second = evidenceFor(contract, { repair_key: 'pd049-f1-requester-shape', prior_failure_code: 'F1-NO-REQUESTER-CHAT-ID' });
+  const secondResponse = await POST(request(id, second), { params: Promise.resolve({ id }) });
+  assert.equal(secondResponse.status, 200);
+  const secondBody = await secondResponse.json();
+  assert.equal(secondBody.authorized, true);
+  assert.equal(secondBody.idempotent, false, 'a genuinely new repair is NOT reported as a replay');
+  assert.equal(secondBody.dispatch.status, 'acknowledged');
+  assert.equal(callsForTask(id).length, 2, 'the second repair claims exactly one further bridge dispatch');
+
+  // History preserved: two receipt rows, five historical attempts still counted,
+  // no counter reset.
+  const rows = recoveryRows(id);
+  assert.equal(rows.length, 2);
+  assert.deepEqual(rows.map((row) => row.repair_key), ['pd038-notify-env-and-pd039-recovery-counter', 'pd049-f1-requester-shape']);
+  assert.deepEqual(rows.map((row) => row.prior_dispatch_attempts), [5, 6]);
+  assert.ok(rows.every((row) => row.dispatch_started_at), 'both receipts were claimed');
+  assert.equal(attemptsOf(id), 6, 'a second recovery still preserves the exhausted counter');
+  assert.equal(
+    queryAll('SELECT * FROM task_activities WHERE task_id=? AND activity_type=?', [id, 'operator_preengine_recovery_issued']).length,
+    2,
+    'each issuance is audited once, and the first audit row is not overwritten',
+  );
+
+  // (c) same repair_key still replays idempotently without a second dispatch.
+  const replay = await POST(request(id, second), { params: Promise.resolve({ id }) });
+  assert.equal(replay.status, 200);
+  assert.equal((await replay.json()).idempotent, true);
+  assert.equal(callsForTask(id).length, 2, 'replaying the SAME repair_key never launches again');
+
+  // (e) single-use holds per ROW: a claimed receipt can never be claimed again.
+  assert.equal(claimPreEngineRecoveryDispatch(rows[1].id), false, 'a claimed recovery row is single-use');
+  assert.equal(claimPreEngineRecoveryDispatch(rows[0].id), false, 'the older claimed row stays single-use');
+
+  // …and the unchanged readback: the same repair_key bound to a foreign
+  // contract/execution is still refused, not replayed.
   const rebound = await POST(
-    request(id, evidenceFor(contract, { repair_key: 'pd038-notification-env-store' })),
+    request(id, { ...first, contract_sha256: '0'.repeat(64) }),
     { params: Promise.resolve({ id }) },
   );
   assert.equal(rebound.status, 409);
   assert.equal((await rebound.json()).error, 'pre_engine_recovery_already_issued');
-  assert.equal(queryAll('SELECT * FROM presentation_operator_preengine_recoveries WHERE task_id=?', [id]).length, 1);
-  assert.equal(callsForTask(id).length, 1, 'a re-bound repair key must not mint a second bridge launch');
+  assert.equal(callsForTask(id).length, 2);
+});
+
+/**
+ * PD-TEST-050 case (b): the artifact gate. A further repair is REFUSED the
+ * moment the run has produced ANY engine work, whatever the repair_key is.
+ */
+test('PD-TEST-050(b): once the run produced engine artifacts the recovery lane is closed for that task', async () => {
+  newBridgeLog();
+
+  // (b1) state.json in the operator run dir, with NO execution row and NO
+  // receipt: exactly the shape the existing gates do not catch. Refused even for
+  // a FIRST receipt, because `no_engine_artifacts: true` in the body is a claim
+  // and the server now proves it.
+  const stateful = createOperatorTask();
+  writeEngineState(stateful.id);
+  assert.deepEqual(preEngineRecoveryEngineArtifacts(stateful.id), ['state_json']);
+  const firstRefusal = await POST(request(stateful.id, evidenceFor(stateful.contract)), { params: Promise.resolve({ id: stateful.id }) });
+  assert.equal(firstRefusal.status, 409);
+  assert.equal((await firstRefusal.json()).error, 'pre_engine_recovery_engine_artifacts_present');
+  assert.equal(recoveryRows(stateful.id).length, 0, 'a refused recovery writes no receipt row');
+  assert.equal(callsForTask(stateful.id).length, 0, 'a refused recovery launches nothing');
+
+  // (b2) a TERMINAL execution row (state 'failed' — so `active_execution_exists`
+  // does NOT fire) after a legitimately consumed first receipt.
+  const executed = createOperatorTask();
+  const consumed = await POST(request(executed.id, evidenceFor(executed.contract)), { params: Promise.resolve({ id: executed.id }) });
+  assert.equal(consumed.status, 200);
+  assert.equal(callsForTask(executed.id).length, 1);
+  recordPostRecoveryFailure(executed.id);
+  insertTerminalExecution(executed.id);
+  assert.deepEqual(preEngineRecoveryEngineArtifacts(executed.id), ['task_execution']);
+  const terminalRefusal = await POST(
+    request(executed.id, evidenceFor(executed.contract, { repair_key: 'pd049-f1-requester-shape' })),
+    { params: Promise.resolve({ id: executed.id }) },
+  );
+  assert.equal(terminalRefusal.status, 409);
+  assert.equal((await terminalRefusal.json()).error, 'pre_engine_recovery_engine_artifacts_present');
+  assert.equal(recoveryRows(executed.id).length, 1, 'the historical receipt survives the refusal');
+  assert.equal(callsForTask(executed.id).length, 1, 'no further launch');
+
+  // (b3) an INVALIDATED receipt: the engine produced a proof that was later
+  // invalidated, so `engine_proof_exists` (active-only) does not fire — the
+  // artifact probe does.
+  const invalidated = createOperatorTask();
+  run(
+    `INSERT INTO presentation_verification_receipts (id, task_id, receipt_sha256, status, invalidated_at, invalidated_reason) VALUES (?, ?, ?, 'invalidated', ?, ?)`,
+    [uuidv4(), invalidated.id, 'b'.repeat(64), new Date().toISOString(), 'regression fixture'],
+  );
+  const invalidatedRefusal = await POST(request(invalidated.id, evidenceFor(invalidated.contract)), { params: Promise.resolve({ id: invalidated.id }) });
+  assert.equal(invalidatedRefusal.status, 409);
+  assert.equal((await invalidatedRefusal.json()).error, 'pre_engine_recovery_engine_artifacts_present');
+
+  // (b4) contrast, unchanged: an ACTIVE receipt still answers the pre-existing
+  // `engine_proof_exists` 422 — the new gate did not take over that refusal.
+  const proved = createOperatorTask();
+  run(`INSERT INTO presentation_verification_receipts (id, task_id, receipt_sha256, status) VALUES (?, ?, ?, 'active')`, [uuidv4(), proved.id, 'c'.repeat(64)]);
+  const provedRefusal = await POST(request(proved.id, evidenceFor(proved.contract)), { params: Promise.resolve({ id: proved.id }) });
+  assert.equal(provedRefusal.status, 422);
+  assert.equal((await provedRefusal.json()).error, 'engine_proof_exists');
+
+  assert.equal(bridgeCalls().length, 1, 'only the one legitimately consumed receipt ever reached the bridge');
+});
+
+/**
+ * PD-TEST-050 case: the ledger is bounded. Inventing repair_key strings does not
+ * buy attempts — each further receipt must be paid for, and the per-task receipt
+ * budget is finite.
+ */
+test('PD-TEST-050: the pre-engine ledger is bounded — outstanding receipts, spent budgets and unpaid re-blocks are all refused', async () => {
+  newBridgeLog();
+
+  // (1) An ISSUED but UNCLAIMED receipt is outstanding: minting a different key
+  //     is refused; the caller must replay the key it already holds.
+  const outstanding = createOperatorTask();
+  const outstandingReceipt = evidenceFor(outstanding.contract);
+  run(
+    `INSERT INTO presentation_operator_preengine_recoveries
+       (id, task_id, execution_id, contract_sha256, prior_dispatch_attempts, repair_key, prior_failure_code, bridge_state, bridge_retry_attempt, created_at)
+     VALUES (?, ?, ?, ?, 5, ?, 'AF-NOTIFY-UNCONFIGURED', 'launch_pending', 1, ?)`,
+    [uuidv4(), outstanding.id, outstanding.contract.execution_id, operatorContractSha256(outstanding.contract), outstandingReceipt.repair_key, new Date().toISOString()],
+  );
+  const stillOutstanding = await POST(
+    request(outstanding.id, evidenceFor(outstanding.contract, { repair_key: 'pd049-f1-requester-shape' })),
+    { params: Promise.resolve({ id: outstanding.id }) },
+  );
+  assert.equal(stillOutstanding.status, 409);
+  assert.equal((await stillOutstanding.json()).error, 'pre_engine_recovery_already_issued');
+  assert.equal(callsForTask(outstanding.id).length, 0, 'the outstanding receipt is replayed, never duplicated');
+
+  // (2) A task that is blocked again WITHOUT a new recorded dispatch failure
+  //     buys nothing: re-blocking is not a repair.
+  const unpaid = createOperatorTask();
+  const consumed = await POST(request(unpaid.id, evidenceFor(unpaid.contract)), { params: Promise.resolve({ id: unpaid.id }) });
+  assert.equal(consumed.status, 200);
+  run(`UPDATE tasks SET status='blocked' WHERE id=?`, [unpaid.id]);
+  assert.equal(attemptsOf(unpaid.id), 5);
+  const unpaidRefusal = await POST(
+    request(unpaid.id, evidenceFor(unpaid.contract, { repair_key: 'pd049-f1-requester-shape' })),
+    { params: Promise.resolve({ id: unpaid.id }) },
+  );
+  assert.equal(unpaidRefusal.status, 409);
+  assert.equal((await unpaidRefusal.json()).error, 'pre_engine_recovery_no_new_dispatch_failure');
+  assert.equal(callsForTask(unpaid.id).length, 1);
+
+  // (3) The per-task receipt budget is finite: with the budget set to 2, a THIRD
+  //     distinct repair is refused even though it is otherwise perfectly valid.
+  process.env.PREENGINE_RECOVERY_MAX_PER_TASK = '2';
+  try {
+    const capped = createOperatorTask();
+    for (const [index, key] of ['repair-one', 'repair-two'].entries()) {
+      if (index > 0) recordPostRecoveryFailure(capped.id);
+      const response = await POST(
+        request(capped.id, evidenceFor(capped.contract, { repair_key: key })),
+        { params: Promise.resolve({ id: capped.id }) },
+      );
+      assert.equal(response.status, 200, `receipt ${index + 1} must be issuable inside the budget`);
+    }
+    recordPostRecoveryFailure(capped.id);
+    const spent = await POST(
+      request(capped.id, evidenceFor(capped.contract, { repair_key: 'repair-three' })),
+      { params: Promise.resolve({ id: capped.id }) },
+    );
+    assert.equal(spent.status, 409);
+    assert.equal((await spent.json()).error, 'pre_engine_recovery_budget_exhausted');
+    assert.equal(recoveryRows(capped.id).length, 2, 'the spent budget mints no third receipt');
+    assert.equal(callsForTask(capped.id).length, 2, 'and launches nothing further');
+    assert.equal(attemptsOf(capped.id), 7, 'even the refused attempt leaves the counter where the dispatcher put it');
+  } finally {
+    delete process.env.PREENGINE_RECOVERY_MAX_PER_TASK;
+  }
+});
+
+/**
+ * RESTORED GUARD — refusal half, under the ORIGINAL test name.
+ *
+ * This test is present on main at this PR's base (d41cd73f1, introduced by
+ * cfe5bbc08). Its original body demanded `409 pre_engine_recovery_already_issued`
+ * for ANY different `repair_key` once a receipt existed, which is precisely the
+ * behaviour PD-TEST-050 exists to change: it left a run whose single receipt had
+ * been consumed by repair A with no supported re-drive when a DIFFERENT
+ * deterministic pre-engine defect (PD-TEST-049) surfaced.
+ *
+ * The guard is NOT retired — it is restated against the new contract. This half
+ * proves the name is still true in the new world: after a consumed receipt, a
+ * different `repair_key` is NOT obtainable by asking again, and NOT by merely
+ * re-blocking the card. The admission half — what DOES legitimately re-bind a
+ * consumed recovery — is the companion test immediately below.
+ */
+test('a consumed recovery cannot be re-bound to a different repair key', async () => {
+  newBridgeLog();
+  const { id, contract } = createOperatorTask();
+  const firstKey = 'pd038-notify-env-and-pd039-recovery-counter';
+  const secondKey = 'pd049-f1-requester-shape';
+
+  // ── the consumed receipt ──────────────────────────────────────────────────
+  const consumed = await POST(request(id, evidenceFor(contract, { repair_key: firstKey })), { params: Promise.resolve({ id }) });
+  assert.equal(consumed.status, 200);
+  assert.equal((await consumed.json()).idempotent, false);
+  assert.equal(callsForTask(id).length, 1);
+  assert.ok(recoveryRows(id)[0].dispatch_started_at, 'the receipt is claimed');
+
+  // ── a DIFFERENT key is NOT re-bound merely because the first was consumed:
+  //    the recovery left the task in `backlog`, so there is no blocked card to
+  //    re-drive yet.
+  const notBlocked = await POST(request(id, evidenceFor(contract, { repair_key: secondKey })), { params: Promise.resolve({ id }) });
+  assert.equal(notBlocked.status, 422);
+  assert.equal((await notBlocked.json()).error, 'blocked_task_required');
+  assert.equal(recoveryRows(id).length, 1, 'no second receipt');
+  assert.equal(callsForTask(id).length, 1, 'no second bridge launch');
+
+  // ── re-blocked, but WITHOUT a new recorded dispatch failure: still refused.
+  //    Re-blocking a card is not a repair, so it cannot buy a new receipt.
+  run(`UPDATE tasks SET status='blocked' WHERE id=?`, [id]);
   assert.equal(attemptsOf(id), 5);
+  const unpaid = await POST(request(id, evidenceFor(contract, { repair_key: secondKey })), { params: Promise.resolve({ id }) });
+  assert.equal(unpaid.status, 409);
+  assert.equal((await unpaid.json()).error, 'pre_engine_recovery_no_new_dispatch_failure');
+  assert.equal(recoveryRows(id).length, 1, 'an unpaid re-block mints no receipt');
+  assert.equal(callsForTask(id).length, 1);
+
+  // ── an UNCLAIMED prior receipt also refuses a new key with the original code,
+  //    because the caller already holds a receipt it must replay.
+  const outstanding = createOperatorTask();
+  run(
+    `INSERT INTO presentation_operator_preengine_recoveries
+       (id, task_id, execution_id, contract_sha256, prior_dispatch_attempts, repair_key, prior_failure_code, bridge_state, bridge_retry_attempt, created_at)
+     VALUES (?, ?, ?, ?, 5, ?, 'AF-NOTIFY-UNCONFIGURED', 'launch_pending', 1, ?)`,
+    [uuidv4(), outstanding.id, outstanding.contract.execution_id, operatorContractSha256(outstanding.contract), firstKey, new Date().toISOString()],
+  );
+  const unclaimed = await POST(request(outstanding.id, evidenceFor(outstanding.contract, { repair_key: secondKey })), { params: Promise.resolve({ id: outstanding.id }) });
+  assert.equal(unclaimed.status, 409);
+  assert.equal((await unclaimed.json()).error, 'pre_engine_recovery_already_issued');
+  assert.equal(recoveryRows(outstanding.id).length, 1, 'the outstanding receipt is replayed, never duplicated');
+  assert.equal(callsForTask(outstanding.id).length, 0, 'and nothing is launched while it is outstanding');
+});
+
+/**
+ * RESTORED GUARD — admission half, under a new name.
+ *
+ * Same guard, other direction: this is what DOES legitimately re-bind a
+ * consumed recovery. Together with the test above it establishes the complete
+ * rule for re-binding after a consumed receipt:
+ *
+ *   ADMITTED  ⟺ prior receipts all claimed ∧ the task is blocked again by a
+ *               genuinely NEW recorded dispatch failure (dispatch_attempts
+ *               strictly above the prior receipts' high-water mark) ∧ the
+ *               artifact gate is clean;
+ *   IDEMPOTENT for the same key after a claimed receipt (no re-dispatch).
+ */
+test('a consumed recovery can only be re-bound under the ledger gates', async () => {
+  newBridgeLog();
+  const { id, contract } = createOperatorTask();
+  const firstKey = 'pd038-notify-env-and-pd039-recovery-counter';
+  const secondKey = 'pd049-f1-requester-shape';
+
+  const consumed = await POST(request(id, evidenceFor(contract, { repair_key: firstKey })), { params: Promise.resolve({ id }) });
+  assert.equal(consumed.status, 200);
+  assert.equal(callsForTask(id).length, 1);
+
+  // ── SAME key after a claimed receipt: idempotent, and it does NOT re-dispatch
+  const replay = await POST(request(id, evidenceFor(contract, { repair_key: firstKey })), { params: Promise.resolve({ id }) });
+  assert.equal(replay.status, 200);
+  assert.equal((await replay.json()).idempotent, true);
+  assert.equal(recoveryRows(id).length, 1, 'no second receipt for a replayed key');
+  assert.equal(callsForTask(id).length, 1, 'a replayed key never launches the bridge again');
+
+  // ── a genuinely NEW recorded dispatch failure (the product's own accounting)
+  //    is what pays for the re-bind. (The refusal half of this rule — unblocked,
+  //    re-blocked-without-a-failure, and unclaimed-receipt — is the companion
+  //    test above.)
+  recordPostRecoveryFailure(id);
+  assert.equal(queryOne<{ status: string }>('SELECT status FROM tasks WHERE id=?', [id])?.status, 'blocked');
+  assert.equal(attemptsOf(id), 6, 'the recorded failure moved the counter above the prior receipt high-water mark (5)');
+  const admitted = await POST(request(id, evidenceFor(contract, { repair_key: secondKey })), { params: Promise.resolve({ id }) });
+  assert.equal(admitted.status, 200);
+  const admittedBody = await admitted.json();
+  assert.equal(admittedBody.idempotent, false, 'a genuinely new repair is not a replay');
+  assert.equal(admittedBody.dispatch.status, 'acknowledged');
+  assert.equal(callsForTask(id).length, 2, 'the re-bind claims exactly one further bridge dispatch');
+  assert.deepEqual(
+    recoveryRows(id).map((row) => [row.repair_key, row.prior_dispatch_attempts]),
+    [[firstKey, 5], [secondKey, 6]],
+    'both receipts survive, each recording the counter it was issued against',
+  );
+  assert.equal(attemptsOf(id), 6, 'the re-bind still preserves the exhausted counter');
+  assert.ok(recoveryRows(id).every((row) => row.dispatch_started_at), 'each receipt is single-use and now claimed');
+
+  // ── …and the artifact gate can still veto the re-bind, even with a claimed
+  //    prior receipt AND a new recorded failure.
+  const gated = createOperatorTask();
+  const gatedFirst = await POST(request(gated.id, evidenceFor(gated.contract, { repair_key: firstKey })), { params: Promise.resolve({ id: gated.id }) });
+  assert.equal(gatedFirst.status, 200);
+  recordPostRecoveryFailure(gated.id);
+  writeEngineState(gated.id);
+  const gatedSecond = await POST(request(gated.id, evidenceFor(gated.contract, { repair_key: secondKey })), { params: Promise.resolve({ id: gated.id }) });
+  assert.equal(gatedSecond.status, 409);
+  assert.equal((await gatedSecond.json()).error, 'pre_engine_recovery_engine_artifacts_present');
+  assert.equal(recoveryRows(gated.id).length, 1, 'the engine\'s own state.json keeps the lane closed');
+  assert.equal(callsForTask(gated.id).length, 1);
 });
 
 test('concurrent submissions cannot launch the bridge twice or reset the counter', async () => {

@@ -7143,6 +7143,119 @@ export const migrations: Migration[] = [
       )`);
     },
   },
+  {
+    // PD-TEST-050: the recovery receipt must be unique per (task_id, repair_key),
+    // NOT per task_id.
+    //
+    // Migration 146 declared `task_id TEXT NOT NULL UNIQUE`, which made the FIRST
+    // pre-engine recovery the LAST one for that task. On 2026-09-14T23:38Z the one
+    // permitted receipt (repair_key `pd038-notify-env-and-pd039-recovery-counter`)
+    // was legitimately consumed and the engine then died on a DIFFERENT
+    // deterministic pre-engine defect (PD-TEST-049). With the row present a
+    // different repair_key drew 409 `pre_engine_recovery_already_issued`, the same
+    // repair_key replayed idempotently without re-dispatching, and both ordinary
+    // sweeps gate on `dispatch_attempts < MAX_DISPATCH_ATTEMPTS` while the counter
+    // had moved 5 -> 6: no supported re-drive path existed.
+    //
+    // SQLite cannot drop an inline UNIQUE constraint, so this is a 12-step table
+    // rebuild: same columns, same types, same FK, UNIQUE moved to
+    // (task_id, repair_key). Every existing receipt row is COPIED ACROSS
+    // UNCHANGED — no recovery, submission or attempt history is deleted, and no
+    // task's `dispatch_attempts` is touched. The COPY runs before the DROP, both
+    // inside one transaction, so a failure mid-rebuild leaves the old table
+    // intact. `useOuterTransaction: false` because PRAGMA foreign_keys cannot be
+    // toggled inside an open transaction (see the Migration interface note).
+    //
+    // The rebuild is GUARDED on the old table actually existing (see the
+    // existence guard in `up`): on a half-migrated box whose `_migrations`
+    // records 146 while the table is gone, this migration CREATES the table in
+    // the new shape instead of throwing `no such table` — which, on a fail-closed
+    // boot (src/lib/db/index.ts:197-211), would stop the Command Center serving
+    // on every boot. It is also safe to re-run: a death between the rebuild
+    // commit and the runner recording the id simply rebuilds again, and the
+    // copy-and-restore below conserves every row (proven by the migration suite).
+    //
+    // DELIBERATELY NO `ALTER TABLE … RENAME TO`. SQLite's rename path re-parses
+    // and re-resolves EVERY trigger and view in the schema, so one PRE-EXISTING
+    // broken object elsewhere in the database turns this migration into a
+    // hard boot failure — a constraint rebuild must not depend on unrelated
+    // schema objects being valid. That is not theoretical: migration 132 creates
+    // `tasks_persona_decision_revision`, whose body references `NEW.persona_id`
+    // (added by migrations 016/021), so on any box where those were skipped —
+    // every minimal/partial fixture that pre-marks 001–113, and the U55 CI sweep
+    // — the trigger is latently invalid. Renaming `…_147` over the real name
+    // therefore died with `error in trigger tasks_persona_decision_revision:
+    // no such column: NEW.persona_id` and failed `boot path warns and does not
+    // crash on empty manifest` plus three migration-114 tests. The rebuild is
+    // instead: copy out to the scratch table, DROP the original, recreate it
+    // under its own name, copy back, drop the scratch. CREATE/DROP never
+    // re-resolve other objects (verified against that same fixture).
+    id: '147',
+    name: 'presentation_operator_preengine_recoveries_per_repair_key',
+    useOuterTransaction: false,
+    up: (db) => {
+      const RECEIPTS = 'presentation_operator_preengine_recoveries';
+      const SCRATCH = 'presentation_operator_preengine_recoveries_147';
+      const COLUMNS = 'id, task_id, execution_id, contract_sha256, prior_dispatch_attempts, repair_key, prior_failure_code, bridge_state, bridge_retry_attempt, dispatch_started_at, created_at';
+      const ddl = (name: string) => `CREATE TABLE ${name} (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        execution_id TEXT NOT NULL,
+        contract_sha256 TEXT NOT NULL,
+        prior_dispatch_attempts INTEGER NOT NULL,
+        repair_key TEXT NOT NULL,
+        prior_failure_code TEXT NOT NULL,
+        bridge_state TEXT NOT NULL,
+        bridge_retry_attempt INTEGER NOT NULL,
+        dispatch_started_at TEXT,
+        created_at TEXT NOT NULL,
+        UNIQUE(task_id, repair_key)
+      )`;
+      const fkRow = db.prepare('PRAGMA foreign_keys').get() as { foreign_keys: number } | undefined;
+      const fkWasOn = fkRow?.foreign_keys === 1;
+      db.exec('PRAGMA foreign_keys = OFF');
+      try {
+        const rebuild = db.transaction(() => {
+          // EXISTENCE GUARD (migration-131 convention — "every ALTER is
+          // PRAGMA/if-exists-guarded so minimal fixtures and half-migrated boxes
+          // heal instead of crashing"; migration 144's header states it, and 146
+          // itself is CREATE TABLE IF NOT EXISTS). This database class is real,
+          // not theoretical: `_migrations` has been observed on THIS box
+          // recording a later id while earlier table-creating ids were absent
+          // (145 recorded with 142-144 missing). Absent table ⇒ create it
+          // directly in the new shape; there is nothing to rebuild or preserve.
+          const tableExists = (db.prepare(
+            `SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name=?`,
+          ).get(RECEIPTS) as { n: number }).n > 0;
+          if (!tableExists) {
+            db.exec(ddl(RECEIPTS));
+            return;
+          }
+          db.exec(`DROP TABLE IF EXISTS ${SCRATCH}`);
+          db.exec(ddl(SCRATCH));
+          // Copies are PLAIN `INSERT ... SELECT`, never `INSERT OR IGNORE`: a
+          // duplicate must ABORT the rebuild loudly rather than be silently
+          // dropped. Under 146 a duplicate (task_id, repair_key) pair is
+          // impossible (task_id UNIQUE is strictly stronger); the row-count
+          // assertions re-prove it after each copy.
+          const before = (db.prepare(`SELECT COUNT(*) AS n FROM ${RECEIPTS}`).get() as { n: number }).n;
+          db.exec(`INSERT INTO ${SCRATCH} (${COLUMNS}) SELECT ${COLUMNS} FROM ${RECEIPTS}`);
+          const copied = (db.prepare(`SELECT COUNT(*) AS n FROM ${SCRATCH}`).get() as { n: number }).n;
+          if (copied !== before) throw new Error(`[Migration 147] recovery receipt copy lost rows (${before} -> ${copied}); refusing to drop the original table`);
+          db.exec(`DROP TABLE ${RECEIPTS}`);
+          db.exec(ddl(RECEIPTS));
+          db.exec(`INSERT INTO ${RECEIPTS} (${COLUMNS}) SELECT ${COLUMNS} FROM ${SCRATCH}`);
+          const restored = (db.prepare(`SELECT COUNT(*) AS n FROM ${RECEIPTS}`).get() as { n: number }).n;
+          if (restored !== before) throw new Error(`[Migration 147] recovery receipt restore lost rows (${before} -> ${restored})`);
+          db.exec(`DROP TABLE ${SCRATCH}`);
+        });
+        rebuild();
+      } finally {
+        if (fkWasOn) db.exec('PRAGMA foreign_keys = ON');
+      }
+      console.log('[Migration 147] presentation_operator_preengine_recoveries is now UNIQUE(task_id, repair_key) — receipts preserved');
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner

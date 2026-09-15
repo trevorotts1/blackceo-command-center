@@ -32,7 +32,16 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     try { issued = issuePreEngineRecovery(id, evidence); }
     catch (error) {
       const code = (error as Error).message;
-      const status = code === 'task_not_found' ? 404 : code === 'pre_engine_recovery_already_issued' ? 409 : 422;
+      // PD-TEST-050: the three new ledger/artifact refusals are CONFLICTS with
+      // durable recorded state (an outstanding receipt, a spent receipt budget,
+      // a run that already produced engine work), so they answer 409 like
+      // `pre_engine_recovery_already_issued`; every pre-existing 404/409/422
+      // mapping is untouched.
+      const conflict = code === 'pre_engine_recovery_already_issued'
+        || code === 'pre_engine_recovery_budget_exhausted'
+        || code === 'pre_engine_recovery_no_new_dispatch_failure'
+        || code === 'pre_engine_recovery_engine_artifacts_present';
+      const status = code === 'task_not_found' ? 404 : conflict ? 409 : 422;
       return NextResponse.json({ error: code }, { status });
     }
     const task = queryOne<Task>('SELECT * FROM tasks WHERE id=?', [id]);

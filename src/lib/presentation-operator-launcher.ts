@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, writeFile } from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import { bridgeReceipt, loadOperatorPresentationContract } from '@/lib/presentation-operator-contract';
-import { DEPARTMENT_PRESENTATIONS_RUNS } from '@/lib/presentation-run-roots';
+import { operatorPresentationRunDir } from '@/lib/presentation-run-roots';
 
 const execFileAsync = promisify(execFile);
 function bridgePath(): string {
@@ -29,9 +29,8 @@ export type OperatorBridgeLaunch =
 export async function launchOperatorPresentationContract(taskId: string): Promise<OperatorBridgeLaunch | null> {
   const contract = loadOperatorPresentationContract(taskId);
   if (!contract) return null;
-  const root = process.env.PRESENTATION_OPERATOR_RUNS_DIR?.trim() || DEPARTMENT_PRESENTATIONS_RUNS;
-  const runDir = path.join(root, `pres-operator-${taskId}`);
-  await mkdir(root, { recursive: true });
+  const runDir = operatorPresentationRunDir(taskId);
+  await mkdir(path.dirname(runDir), { recursive: true });
   const temp = await mkdtemp(path.join(os.tmpdir(), 'cc-presentation-contract-'));
   const contractFile = path.join(temp, 'contract.json');
   await writeFile(contractFile, JSON.stringify(bridgeReceipt(contract)), { encoding: 'utf8', mode: 0o600 });
