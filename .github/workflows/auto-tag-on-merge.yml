@@ -1,0 +1,58 @@
+name: Auto-tag on merge to main
+
+# Cuts + pushes the annotated release tag the INSTANT a version bump lands on
+# main -- no agent has to remember to run scripts/push-version-tag.sh by hand.
+#
+# WHY THIS EXISTS (measured 2026-09-15, the v7.4.0 Skill 69 archify release)
+# -------------------------------------------------------------------------
+# This repo previously had NO auto-tagging and its version-consistency guard
+# had no wait, so every release turned main red on a correct release: the guard
+# sampled the tag set at checkout, the tag did not exist yet, and nothing would
+# ever create it automatically. v7.4.0 reported "NO TAG for v7.4.0" at
+# 01:14:38; the tag was pushed by hand at ~01:16 and the job passed immediately
+# on re-run. The failure carried no signal about the code — it only measured
+# scheduling order, and it recurred on every single release.
+#
+# Companion change in the same PR: version-consistency.yml now WAITS (bounded
+# 300s, re-fetching tags inside the loop) for this workflow on push events,
+# because this job races that one on the same push.
+#
+# Security note: this workflow triggers on push to main ONLY (never
+# pull_request, never a fork), consumes only repo file content + git metadata
+# (no untrusted PR title/body/commit-message event fields), and its one write
+# action is fully delegated to push-version-tag.sh, which independently refuses
+# to publish any tag whose target is not an ancestor of origin/main and refuses
+# to move an already-published tag. So even a malicious /version edit cannot
+# make this workflow push a tag pointing off of main, and it can never
+# overwrite a tag that already exists at a different commit.
+
+on:
+  push:
+    branches: [main]
+
+# This repo's default workflow token is READ-ONLY, so the write scope must be
+# requested explicitly or the tag push fails with 403.
+permissions:
+  contents: write
+
+concurrency:
+  group: auto-tag-on-merge
+  cancel-in-progress: false
+
+jobs:
+  auto-tag:
+    name: Cut the annotated tag if /version changed on this push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history + tags
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set git identity for the tag step
+        run: |
+          git config user.name "Trevor Otts"
+          git config user.email "trevor@blackceo.com"
+
+      - name: Cut + push the tag if /version changed (delegates to push-version-tag.sh)
+        run: bash scripts/auto-tag-if-version-changed.sh --remote origin

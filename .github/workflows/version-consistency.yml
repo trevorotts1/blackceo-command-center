@@ -146,6 +146,32 @@ jobs:
 
           # Check tag exists
           if ! git tag -l "$V_ROOT" | grep -qx "$V_ROOT"; then
+            # ── Bounded wait for auto-tag-on-merge.yml (PUSH only) ────────────
+            # The tag for a version bump is cut by auto-tag-on-merge.yml, which
+            # fires on THIS SAME push event and therefore races this job. Without
+            # a wait, a completely correct release fails here purely on
+            # scheduling order -- measured on v7.4.0: this guard reported
+            # "NO TAG for v7.4.0" at 01:14:38 and passed immediately once the
+            # tag was pushed by hand ~90s later.
+            #
+            # THE FETCH INSIDE THE LOOP IS LOAD-BEARING. actions/checkout
+            # fetched the tag set ONCE at job start, so a tag pushed after
+            # checkout is invisible to every iteration without it, and the loop
+            # degrades into a 300s sleep followed by the very false negative it
+            # exists to absorb. (The onboarding repo shipped exactly that no-op
+            # in its G1b and false-failed its own v25.1.0 release before fixing
+            # it in the same way.)
+            if [ "${GITHUB_EVENT_NAME:-}" = "push" ]; then
+              echo "No tag for $V_ROOT yet — waiting for auto-tag-on-merge.yml (bounded 300s) ..."
+              for _i in $(seq 1 60); do
+                git fetch --tags --quiet origin 2>/dev/null || true
+                if git tag -l "$V_ROOT" | grep -qx "$V_ROOT"; then
+                  echo "✅ Tag $V_ROOT appeared after ~$((_i * 5))s."
+                  break
+                fi
+                sleep 5
+              done
+            fi
             # A version bundled with a fix PR is minted only after the reviewed
             # code lands on main. Existing releases remain subject to every tag
             # assertion below; only a strictly newer, unpublished PR version waits.
