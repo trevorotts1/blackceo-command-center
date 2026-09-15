@@ -123,7 +123,15 @@ function importWithTimeout<T>(loader: () => Promise<T>, label: string, ms = 10_0
 // no per-dept runtime) got re-fired every 2-5 min forever. We now record EVERY
 // failed advance attempt, back off exponentially, and after MAX_DISPATCH_ATTEMPTS
 // hard-block the task (visible + reported) so it is NEVER silently re-looped.
-const MAX_DISPATCH_ATTEMPTS = Math.max(
+// PD-TEST-063: EXPORTED so the watchdog sweeps gate on the SAME number this
+// dispatcher blocks at, instead of re-deriving their own copy. The sweeps'
+// `dispatch_attempts < dispatchCap` filter and this block-at-cap threshold must
+// be one value: if a sweep's copy drifted lower, an exhausted card would pass
+// the dispatcher's filter; if higher, a card the dispatcher already end-stated
+// would keep being re-fired. A sweep must never instead ZERO the counter to
+// "unstick" a card — that launders an exhausted budget into a fresh one (see
+// src/lib/jobs/stale-task-sweep.ts PD-TEST-063).
+export const MAX_DISPATCH_ATTEMPTS = Math.max(
   1,
   parseInt(process.env.MAX_DISPATCH_ATTEMPTS || '5', 10),
 );
