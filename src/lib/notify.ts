@@ -1127,9 +1127,19 @@ export function notifySystem(
     // never be a reason NOT to escalate.
     const identity = resolveBoxIdentity();
     // Fire-and-forget: do not await; swallow any error (best-effort, never throws).
+    // AUTH HEADER (2026-09-16): RR-01-intake's webhook auth rejects requests without
+    // X-Rescue-Secret (observed live: the CC was the top unauthenticated caller at a 5-min
+    // cadence, every POST ending at 'Respond - Unauthorized'). The secret is read from the
+    // env var the fleet propagator already provisions (fleet-heartbeat/scripts/
+    // propagate-rescue-webhook.sh) and is never logged or hardcoded. When it is unset the
+    // POST still fires (best-effort contract) and the receiver rejects it fail-closed.
+    const rescueSecret = process.env.RESCUE_RANGERS_WEBHOOK_SECRET || '';
     void fetch(webhookUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(rescueSecret ? { 'X-Rescue-Secret': rescueSecret } : {}),
+      },
       body: JSON.stringify({
         action: meta?.action ?? 'escalate',
         // `agent` is kept for backward compatibility with the existing receiver;
