@@ -14,8 +14,10 @@
 # THE INVARIANTS UNDER TEST (the out-of-process half of the fix):
 #   W1  classify_red() returns `scheduler-stalled` when the health JSON carries
 #       checks.scheduler_liveness.pass == false.
-#   W2  an INDETERMINATE scheduler_liveness (the boot warm-up window) is NOT
-#       classified as a stall.
+#   W2  an INDETERMINATE scheduler_liveness is NOT classified as a stall. The
+#       check reports UNKNOWN when job_liveness itself is unreadable, which is
+#       a broken instrument rather than a broken scheduler, and restarting the
+#       app would repair neither.
 #   W3  with WATCHDOG_SELF_HEAL=1, a scheduler-stalled RED performs exactly ONE
 #       `pm2 restart <allowlisted name> --update-env` and never a rebuild.
 #   W4  a second pass inside the backoff window does NOT restart again.
@@ -106,12 +108,13 @@ json_stalled() {
  "scheduler_liveness":{"pass":false,"detail":"scheduler_liveness: in-app scheduler appears STALLED, 4 watched job(s) silent"}}}
 JSON
 }
-# Same, but inside the documented boot warm-up window (UNKNOWN, not a stall).
+# Same shape, but UNKNOWN: the check reports this when job_liveness cannot be
+# read, so silence is not evidence of anything. A restart repairs neither.
 json_warmup() {
   cat <<'JSON'
 {"pass":false,"indeterminate":true,"service_status":"online","pm2_topology":{"app_count":1},
  "checks":{"disk_headroom":{"pass":true,"detail":"ok"},
- "scheduler_liveness":{"pass":false,"indeterminate":true,"detail":"scheduler_liveness: warm-up window"}}}
+ "scheduler_liveness":{"pass":false,"indeterminate":true,"detail":"scheduler_liveness: job_liveness is unreadable"}}}
 JSON
 }
 # Control: scheduler is fine, the service is stopped.
@@ -167,8 +170,8 @@ echo "[W2] an indeterminate scheduler_liveness is never classified as a stall"
 reset_state
 run_watchdog json_warmup 1 "$WORK/w2.err"
 grep -q 'incident: scheduler-stalled' "$WORK/w2.err" \
-  && bad "W2: warm-up UNKNOWN was misclassified as a stall" \
-  || ok "W2: warm-up UNKNOWN is not a stall"
+  && bad "W2: an UNKNOWN scheduler_liveness was misclassified as a stall" \
+  || ok "W2: an UNKNOWN scheduler_liveness is not a stall"
 
 # ── W3: one bounded restart, no rebuild ──────────────────────────────────────
 echo "[W3] self-heal performs exactly one bounded pm2 restart and never a rebuild"

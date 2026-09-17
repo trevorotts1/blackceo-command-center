@@ -37,8 +37,10 @@
  *                           // GATING on `stale` only (no tick inside a watched
  *                           // job's cadence x STALE_MULTIPLIER window), never on
  *                           // a job that ticks but fails or is kill-flagged.
- *                           // INDETERMINATE inside the boot warm-up window so a
- *                           // fresh process or a deploy probe never rolls back.
+ *                           // Inside the boot warm-up window silence PASSES (a
+ *                           // fresh process has not ticked yet and that is not
+ *                           // evidence of a stall); UNKNOWN is reserved for an
+ *                           // unreadable job_liveness table.
  *                           // advisory.sweep_liveness keeps reporting all three
  *                           // states (stale / failed / disabled) un-gated.
  *                         }

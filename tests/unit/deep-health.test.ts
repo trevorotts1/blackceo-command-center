@@ -2342,29 +2342,47 @@ describe('scheduler_liveness (ISSUE-04, GATING)', () => {
     for (const job of WATCHED_JOBS) expect(result.detail).toContain(job);
   });
 
-  it('the same stall INSIDE the warm-up window → INDETERMINATE, never a definitive fail', async () => {
-    // atomic-deploy.sh retries exit 3 and never rolls back on it, so this is
-    // what keeps a deploy health probe from rolling back a fresh process.
+  it('the same silence INSIDE the warm-up window PASSES, and is never UNKNOWN', async () => {
+    // Measured on a real CI probe of a freshly started server: at 0m uptime all
+    // four watched jobs read "never observed". Reporting UNKNOWN there flips the
+    // whole deep response to indeterminate, cc-health-check.sh exits 3, and a
+    // run of exit 3 past the deadline is escalated as a persistent-unknown RED.
+    // Inside the window silence is the EXPECTED state of a fresh process, not
+    // weak evidence of a stall, so there is no adverse signal to report.
     const rows = allHealthy(1);
     rows['intake-advance'] = healthyRow(45);
     mockJobLivenessRows(rows);
     const { checkSchedulerLiveness } = await loadSchedulerLiveness();
     const result = checkSchedulerLiveness(5 * 60); // 5 minutes of uptime
-    expect(result.pass).toBe(false);
-    expect(result.indeterminate).toBe(true);
+    expect(result.pass).toBe(true);
+    expect(result.indeterminate).not.toBe(true);
     expect(result.detail).toMatch(/warm-up/);
+    expect(result.detail).toMatch(/intake-advance/);
   });
 
-  it('a brand-new box with no job_liveness rows at all is UNKNOWN while warming, FAIL after', async () => {
+  it('a brand-new box with no job_liveness rows passes while warming, then FAILS definitively', async () => {
+    // The cost of the rule above, stated plainly: a box whose scheduler never
+    // starts reads green for the length of the window. No evidence of ticking
+    // can exist before the first cadence elapses, so nothing can close it.
     mockJobLivenessRows({});
     const { checkSchedulerLiveness } = await loadSchedulerLiveness();
     const warming = checkSchedulerLiveness(60);
-    expect(warming.pass).toBe(false);
-    expect(warming.indeterminate).toBe(true);
+    expect(warming.pass).toBe(true);
+    expect(warming.indeterminate).not.toBe(true);
     const settled = checkSchedulerLiveness(UPTIME_PAST_WARMUP);
     expect(settled.pass).toBe(false);
     expect(settled.indeterminate).not.toBe(true);
     expect(settled.detail).toMatch(/never observed/);
+  });
+
+  it('a freshly booted process never turns the deep response indeterminate', async () => {
+    // The exact CI regression this replaces: 0m uptime, nothing has ticked, and
+    // the box must still read green rather than UNKNOWN.
+    mockJobLivenessRows({});
+    const { checkSchedulerLiveness } = await loadSchedulerLiveness();
+    const atBoot = checkSchedulerLiveness(0);
+    expect(atBoot.pass).toBe(true);
+    expect(atBoot.indeterminate).not.toBe(true);
   });
 
   it('a job that TICKS but keeps failing does NOT gate (it proves the loop is alive)', async () => {

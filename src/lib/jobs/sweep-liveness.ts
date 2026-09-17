@@ -77,12 +77,26 @@ export async function runSweepLivenessSweep():Promise<SweepLivenessSweepResult> 
  *     non-gating `advisory.sweep_liveness`, which reports all three states.
  *
  * WARM-UP WINDOW: for the first (max staleThresholdMinutes + 1) minutes of
- * process uptime a would-be failure reports INDETERMINATE instead. A freshly
- * booted process has legitimately not ticked yet, and atomic-deploy.sh treats
- * exit 3 as retry-never-rollback, so a deploy health probe can never roll a
- * box back on a job that simply has not had time to run. A HEALTHY result is
- * never downgraded to indeterminate: reporting UNKNOWN on a green signal would
- * yellow every box for the whole window after every restart.
+ * process uptime, silence PASSES, with the silent jobs named in the detail.
+ *
+ * It does NOT report UNKNOWN, and that is a deliberate correction. UNKNOWN is
+ * a real state in this system with real consequences: it flips the whole
+ * /api/health/deep response to indeterminate, cc-health-check.sh exits 3, and
+ * a run of exit 3 past the deadline is escalated by cc-health-check.sh itself
+ * as a persistent-unknown RED. Measured on a real CI probe of a freshly
+ * started server: every one of the four watched jobs reads "never observed" at
+ * 0m uptime, the box reports indeterminate, and the health probe exits 3. So
+ * spending UNKNOWN on a boot would yellow every box for 16 minutes after every
+ * restart, report every deploy as unverified, and open a path to a RED that
+ * describes nothing but the clock.
+ *
+ * Inside the window a silent job is not weak evidence of a stall. It is the
+ * EXPECTED state of a process that has just started, so there is no adverse
+ * signal to report. What it costs is real and bounded: a box whose scheduler
+ * never starts at all reads green for the length of the window. Nothing can
+ * close that gap, because no evidence of ticking can exist before the first
+ * cadence elapses. The moment uptime passes the window, a still-silent job is
+ * a definitive failure.
  *
  * MONITORING DISABLED: DISABLE_SWEEP_LIVENESS is an operator opt-out, so the
  * gating check PASSES and says so. Making it indeterminate would park the box
@@ -128,6 +142,6 @@ export function checkSchedulerLiveness(uptimeSeconds:number=process.uptime()):Sc
  const warmup=schedulerLivenessWarmupMinutes(watched);
  const uptimeMinutes=uptimeSeconds/60;
  if(uptimeMinutes<warmup)
-  return {pass:false,indeterminate:true,detail:`scheduler_liveness: ${silent.length} watched job(s) silent but process uptime is ${Math.round(uptimeMinutes)}m of the ${warmup}m warm-up window, UNKNOWN rather than a stall: ${names}`};
+  return {pass:true,detail:`scheduler_liveness: ${silent.length} watched job(s) have not ticked yet, but process uptime is only ${Math.round(uptimeMinutes)}m of the ${warmup}m warm-up window, so this is a boot and not a stall: ${names}`};
  return {pass:false,detail:`scheduler_liveness: in-app scheduler appears STALLED, ${silent.length} watched job(s) silent past their thresholds after ${Math.round(uptimeMinutes)}m uptime: ${names}`};
 }
