@@ -196,7 +196,7 @@ RC=$?
 [[ $RC -eq 0 ]] && ok "I5: installer exits 0" || bad "I5: installer exited $RC: $(cat "$WORK/i5.out")"
 grep -q 'BEGIN blackceo watchdog-cc' "$FAKE_CRONTAB_FILE" \
   && ok "I5: the marker block is present" || bad "I5: no marker block in the crontab"
-bash "$INSTALLER" --port 4100 --pm2-app blackceo-command-center --public-url 'https://cc.example.test' >/dev/null 2>&1
+bash "$INSTALLER" --port 4200 --pm2-app blackceo-command-center --public-url 'https://cc.example.test' >/dev/null 2>&1
 grep -q "CC_PUBLIC_URL='https://cc.example.test'" "$FAKE_CRONTAB_FILE" \
   && ok "I5: the crontab line carries CC_PUBLIC_URL" || bad "I5: CC_PUBLIC_URL missing from the crontab line"
 grep -q '^\*/5 \* \* \* \* .*watchdog-cc.sh' "$FAKE_CRONTAB_FILE" \
