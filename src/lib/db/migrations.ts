@@ -7256,6 +7256,52 @@ export const migrations: Migration[] = [
       console.log('[Migration 147] presentation_operator_preengine_recoveries is now UNIQUE(task_id, repair_key) — receipts preserved');
     },
   },
+  {
+    // FLOOD-01 — indexes the stage-timings flood breaker counts on.
+    //
+    // 2026-09-16 incident: presentation_stage_timings grew from ~3,400 rows to
+    // 1,481,914 (539 MB table, ~100 MB indexes, 875 MB database) because a
+    // crash-looping presentation runner POSTed a phase_exit event ~50 times a
+    // second for two days. src/lib/presentations/stage-timings-guard.ts now
+    // refuses a run that exceeds a rate window or a lifetime ceiling, and it
+    // must answer "how many rows does run X already have?" on EVERY ingest
+    // POST. Migration 127's index is (run_id, event) and 131's is
+    // (task_id, event) — neither serves a `run_id = ? AND created_at >= ?`
+    // count, so without this the breaker would scan every row the flooding run
+    // already wrote, on every request, precisely when the table is at its
+    // worst.
+    //
+    // idx_..._run_created covers the per-run window count and the lifetime
+    // count (run_id is the leading column). idx_..._created is for time-ranged
+    // maintenance over the whole table — retention pruning and "what landed in
+    // the last hour" triage — which has no run id to seek on.
+    //
+    // Additive and idempotent: CREATE INDEX IF NOT EXISTS, guarded on the table
+    // existing (migration-131 convention) so a minimal fixture or a
+    // half-migrated box heals instead of crashing a fail-closed boot.
+    id: '148',
+    name: 'presentation_stage_timings_flood_breaker_indexes',
+    up: (db) => {
+      const tableExists = (db.prepare(
+        `SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name=?`,
+      ).get('presentation_stage_timings') as { n: number }).n > 0;
+      if (!tableExists) {
+        console.log(
+          '[Migration 148] presentation_stage_timings absent (minimal fixture); flood-breaker indexes skipped',
+        );
+        return;
+      }
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_presentation_stage_timings_run_created
+          ON presentation_stage_timings (run_id, created_at)
+      `);
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_presentation_stage_timings_created
+          ON presentation_stage_timings (created_at)
+      `);
+      console.log('[Migration 148] stage-timings flood-breaker indexes ready');
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner
