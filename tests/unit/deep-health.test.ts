@@ -2229,9 +2229,11 @@ describe('company_branding — leftover default seed row (C-03)', () => {
 // hours with no card moving.
 //
 // These tests pin the contract the out-of-process repair path depends on:
-// pass when the jobs tick, INDETERMINATE inside the boot warm-up window (so a
-// deploy probe can never roll back a process that has simply not run yet),
+// pass when the jobs tick, pass inside the boot warm-up window (a process that
+// has just started has not ticked yet, and that is not evidence of a stall),
 // definitive FAIL after it, and a clean PASS when monitoring is opted out.
+// UNKNOWN is reserved for an unreadable job_liveness table: a broken
+// instrument rather than a broken scheduler.
 // The one thing it must never do is fail for a job that ticks but errors, or
 // for one an operator kill-flagged: those still prove the loop is alive and
 // stay on the un-gated advisory.

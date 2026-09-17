@@ -165,7 +165,7 @@ grep -q '"incident":"scheduler-stalled"' "$WORK/alerts.log" \
   && ok "W1: incident key reaches the alert log" \
   || bad "W1: alert log missing the scheduler-stalled incident key"
 
-# ── W2: warm-up INDETERMINATE is not a stall ─────────────────────────────────
+# ── W2: an INDETERMINATE scheduler_liveness is not a stall ───────────────────
 echo "[W2] an indeterminate scheduler_liveness is never classified as a stall"
 reset_state
 run_watchdog json_warmup 1 "$WORK/w2.err"
