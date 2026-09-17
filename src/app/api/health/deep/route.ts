@@ -30,7 +30,18 @@
  *     "company_branding": { "pass": bool, "detail": string, "indeterminate"?: bool },
  *     "database_path":    { "pass": bool, "detail": string },
  *     "migrations":       { "pass": bool, "detail": string },
- *     "disk_headroom":    { "pass": bool, "detail": string }
+ *     "disk_headroom":    { "pass": bool, "detail": string },
+ *     "scheduler_liveness": { "pass": bool, "detail": string, "indeterminate"?: bool
+ *                           // ISSUE-04: the in-app node-cron scheduler is the
+ *                           // one subsystem that cannot report its own death.
+ *                           // GATING on `stale` only (no tick inside a watched
+ *                           // job's cadence x STALE_MULTIPLIER window), never on
+ *                           // a job that ticks but fails or is kill-flagged.
+ *                           // INDETERMINATE inside the boot warm-up window so a
+ *                           // fresh process or a deploy probe never rolls back.
+ *                           // advisory.sweep_liveness keeps reporting all three
+ *                           // states (stale / failed / disabled) un-gated.
+ *                         }
  *   },
  *   "advisory": {             // NON-GATING — reported side-by-side, never gates
  *     "anthology_board_projection": { "pass": bool, "detail": string, ...,
@@ -78,6 +89,15 @@
  *   an advancer gone silent is an operational alert (routed separately,
  *   cooldown-guarded, via sweep-liveness.ts's own scheduler.ts cron entry),
  *   never a reason to auto-rollback a healthy deploy or halt the heartbeat.
+ *   ISSUE-04 splits ONE signal out of it into `checks.scheduler_liveness`:
+ *   not "a sweep is unhappy" but "no sweep has ticked at all", which means the
+ *   in-process node-cron loop is gone. That one cannot stay advisory, because
+ *   the cron job that reports it is itself registered on the loop that died,
+ *   and its only side effect is a Telegram notify that therefore never fires.
+ *   Gating it is what lets an OUT-OF-PROCESS consumer (cc-health-check.sh into
+ *   scripts/watchdog-cc.sh) see the stall and restart the app. Everything else
+ *   sweep_liveness reports (a ticking job that fails, a kill-flagged job)
+ *   stays advisory exactly as before.
  *   `notification_failures_log` (U102 / C12.3 item 10b) is the same posture
  *   again: the size of the MSG-07 undeliverable ledger is an operational
  *   signal (something downstream of notify.ts needs attention), never a
@@ -124,7 +144,7 @@ import {
   checkPersonaGrounding,
   checkFixtureEnvVars,
 } from '@/lib/health/deep-checks';
-import { checkSweepLiveness } from '@/lib/jobs/sweep-liveness';
+import { checkSweepLiveness, checkSchedulerLiveness } from '@/lib/jobs/sweep-liveness';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -143,6 +163,28 @@ export async function GET() {
         Promise.resolve(checkNextPublicAppUrl()),
       ]);
 
+    // ISSUE-04 - GATING scheduler liveness. Resolved outside the Promise.all
+    // above only so its own failure mode stays readable: this is the ONE
+    // gating check whose subject is the process serving this request, so a
+    // throw inside it is degraded to a self-describing UNKNOWN rather than
+    // reaching the outer catch (which returns 500 + pass:false and can trip
+    // auto-rollback). UNKNOWN on a gating check is the documented transient
+    // channel; a stalled scheduler reports pass:false with the silent jobs
+    // named, and cc-health-check.sh turns that into a definitive RED that
+    // scripts/watchdog-cc.sh classifies as `scheduler-stalled`.
+    let schedulerLiveness: { pass: boolean; detail: string; indeterminate?: boolean };
+    try {
+      schedulerLiveness = checkSchedulerLiveness();
+    } catch (schedErr) {
+      schedulerLiveness = {
+        pass: false,
+        indeterminate: true,
+        detail: `scheduler_liveness: probe unavailable (${
+          schedErr instanceof Error ? schedErr.message : String(schedErr)
+        }); UNKNOWN`,
+      };
+    }
+
     // GATING checks — these, and only these, feed the pass/indeterminate
     // verdict that the deploy + heartbeat automation acts on.
     const checks = {
@@ -154,6 +196,7 @@ export async function GET() {
       migrations: migrations,
       disk_headroom: diskHeadroom,
       next_public_app_url: appUrl,
+      scheduler_liveness: schedulerLiveness,
     };
 
     const gatingChecks = Object.values(checks);

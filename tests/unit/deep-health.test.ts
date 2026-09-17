@@ -1603,6 +1603,12 @@ describe('GET /api/health/deep — response shape', () => {
   // confirmed drift exists, then asserts the drift is reported as a NON-GATING
   // advisory while the top-level verdict stays green.
   function greenGatingDbMock() {
+    // ISSUE-04: a GREEN box is one whose in-process scheduler is ticking, so
+    // this fixture now answers the job_liveness reads too. Before the gating
+    // scheduler_liveness check existed, `queryOne` was simply absent from this
+    // mock and sweep-liveness saw every watched job as never observed, which
+    // was invisible only because nothing gated on it.
+    const freshTick = new Date().toISOString();
     return {
       getDb: () => ({
         prepare: (sql: string) => ({
@@ -1616,6 +1622,27 @@ describe('GET /api/health/deep — response shape', () => {
           all: () => [],
         }),
       }),
+      queryOne: (sql: string) => {
+        if (sql.includes('job_liveness')) {
+          return {
+            ok: 1,
+            last_ran_at: freshTick,
+            last_status: 'ok',
+            last_started_at: freshTick,
+            last_finished_at: freshTick,
+            last_success_at: freshTick,
+            consecutive_failures: 0,
+            error_code: null,
+            result_counts: '{}',
+          };
+        }
+        return undefined;
+      },
+      queryAll: () => [],
+      run: () => undefined,
+      timeNow: () => freshTick,
+      sqlTime: (col: string) => col,
+      parseDbTime: (value: unknown) => (value ? new Date(String(value)).getTime() : NaN),
       getMigrationStatus: () => ({ applied: ['001'], pending: [] }),
       getDbPath: () => path.join(tmpDir, 'test.db'),
     };
@@ -2188,5 +2215,212 @@ describe('company_branding — leftover default seed row (C-03)', () => {
     const result = withoutCompanyEnv(() => checkCompanyBranding());
     expect(result.pass).toBe(false);
     db.close();
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// ISSUE-04: scheduler_liveness, the GATING half of the sweep-liveness signal
+//
+// THE DEFECT: every sweep is a node-cron job registered in-process, and the
+// sweep-liveness watchdog is itself one of them, so it dies with the loop it
+// watches. checkSweepLiveness() reached /api/health/deep only as
+// advisory.sweep_liveness, which the gating aggregation excludes and
+// scripts/cc-health-check.sh never reads. A live box sat "healthy" for 41
+// hours with no card moving.
+//
+// These tests pin the contract the out-of-process repair path depends on:
+// pass when the jobs tick, INDETERMINATE inside the boot warm-up window (so a
+// deploy probe can never roll back a process that has simply not run yet),
+// definitive FAIL after it, and a clean PASS when monitoring is opted out.
+// The one thing it must never do is fail for a job that ticks but errors, or
+// for one an operator kill-flagged: those still prove the loop is alive and
+// stay on the un-gated advisory.
+// ────────────────────────────────────────────────────────────────────────────
+
+/** Load sweep-liveness.ts fresh, against whatever '@/lib/db' mock is active. */
+async function loadSchedulerLiveness() {
+  vi.resetModules();
+  return await import('../../src/lib/jobs/sweep-liveness.js') as typeof import('../../src/lib/jobs/sweep-liveness');
+}
+
+/**
+ * Mock '@/lib/db' so `SELECT * FROM job_liveness WHERE job_name=?` answers
+ * from `rows` (keyed by job name). A job absent from the map returns
+ * undefined, which is the real "never observed" shape.
+ */
+function mockJobLivenessRows(rows: Record<string, Record<string, unknown>>) {
+  vi.doMock('@/lib/db', () => ({
+    queryOne: (_sql: string, params: unknown[] = []) => rows[String(params[0])],
+    queryAll: () => [],
+    run: () => undefined,
+    timeNow: () => new Date().toISOString(),
+    sqlTime: (col: string) => col,
+    parseDbTime: (value: unknown) =>
+      value ? new Date(String(value)).getTime() : NaN,
+    getDb: () => ({ prepare: () => ({ get: () => undefined, all: () => [] }) }),
+    getMigrationStatus: () => ({ applied: ['001'], pending: [] }),
+    getDbPath: () => path.join(tmpDir, 'test.db'),
+  }));
+}
+
+/** An ISO timestamp `minutes` in the past. */
+function minutesAgo(minutes: number): string {
+  return new Date(Date.now() - minutes * 60_000).toISOString();
+}
+
+/** A healthy job_liveness row: ticked `ageMinutes` ago, finished, status ok. */
+function healthyRow(ageMinutes: number): Record<string, unknown> {
+  const at = minutesAgo(ageMinutes);
+  return {
+    last_ran_at: at,
+    last_status: 'ok',
+    last_started_at: at,
+    last_finished_at: at,
+    last_success_at: at,
+    consecutive_failures: 0,
+    error_code: null,
+    result_counts: '{}',
+  };
+}
+
+const WATCHED_JOBS = ['intake-advance', 'qc-review-sweep', 'execution-reconcile', 'stuck-in-progress-sweep'];
+
+/** All four watched jobs healthy at the same age. */
+function allHealthy(ageMinutes: number): Record<string, Record<string, unknown>> {
+  const out: Record<string, Record<string, unknown>> = {};
+  for (const job of WATCHED_JOBS) out[job] = healthyRow(ageMinutes);
+  return out;
+}
+
+describe('scheduler_liveness (ISSUE-04, GATING)', () => {
+  const UPTIME_PAST_WARMUP = 60 * 60; // 60 minutes, well past the 16m window
+
+  afterEach(() => {
+    delete process.env.DISABLE_SWEEP_LIVENESS;
+  });
+
+  it('all watched jobs ticking → pass=true, never indeterminate', async () => {
+    mockJobLivenessRows(allHealthy(1));
+    const { checkSchedulerLiveness } = await loadSchedulerLiveness();
+    const result = checkSchedulerLiveness(UPTIME_PAST_WARMUP);
+    expect(result.pass).toBe(true);
+    expect(result.indeterminate).not.toBe(true);
+    expect(result.detail).toMatch(/OK/);
+  });
+
+  it('a healthy box is NOT downgraded to indeterminate inside the warm-up window', async () => {
+    // Otherwise every box would report UNKNOWN for 16 minutes after every
+    // restart, which is a worse signal than the one this check replaces.
+    mockJobLivenessRows(allHealthy(1));
+    const { checkSchedulerLiveness } = await loadSchedulerLiveness();
+    const result = checkSchedulerLiveness(30); // 30 seconds of uptime
+    expect(result.pass).toBe(true);
+    expect(result.indeterminate).not.toBe(true);
+  });
+
+  it('a job silent past its threshold, past the warm-up window → definitive FAIL naming the job', async () => {
+    const rows = allHealthy(1);
+    // intake-advance: cadence 2m, threshold 6m. 45m of silence is a stall.
+    rows['intake-advance'] = healthyRow(45);
+    mockJobLivenessRows(rows);
+    const { checkSchedulerLiveness } = await loadSchedulerLiveness();
+    const result = checkSchedulerLiveness(UPTIME_PAST_WARMUP);
+    expect(result.pass).toBe(false);
+    expect(result.indeterminate).not.toBe(true);
+    expect(result.detail).toMatch(/STALLED/);
+    expect(result.detail).toMatch(/intake-advance/);
+  });
+
+  it('every job silent (the real 41-hour stall) → definitive FAIL', async () => {
+    const rows: Record<string, Record<string, unknown>> = {};
+    for (const job of WATCHED_JOBS) rows[job] = healthyRow(41 * 60);
+    mockJobLivenessRows(rows);
+    const { checkSchedulerLiveness } = await loadSchedulerLiveness();
+    const result = checkSchedulerLiveness(41 * 60 * 60);
+    expect(result.pass).toBe(false);
+    expect(result.indeterminate).not.toBe(true);
+    for (const job of WATCHED_JOBS) expect(result.detail).toContain(job);
+  });
+
+  it('the same stall INSIDE the warm-up window → INDETERMINATE, never a definitive fail', async () => {
+    // atomic-deploy.sh retries exit 3 and never rolls back on it, so this is
+    // what keeps a deploy health probe from rolling back a fresh process.
+    const rows = allHealthy(1);
+    rows['intake-advance'] = healthyRow(45);
+    mockJobLivenessRows(rows);
+    const { checkSchedulerLiveness } = await loadSchedulerLiveness();
+    const result = checkSchedulerLiveness(5 * 60); // 5 minutes of uptime
+    expect(result.pass).toBe(false);
+    expect(result.indeterminate).toBe(true);
+    expect(result.detail).toMatch(/warm-up/);
+  });
+
+  it('a brand-new box with no job_liveness rows at all is UNKNOWN while warming, FAIL after', async () => {
+    mockJobLivenessRows({});
+    const { checkSchedulerLiveness } = await loadSchedulerLiveness();
+    const warming = checkSchedulerLiveness(60);
+    expect(warming.pass).toBe(false);
+    expect(warming.indeterminate).toBe(true);
+    const settled = checkSchedulerLiveness(UPTIME_PAST_WARMUP);
+    expect(settled.pass).toBe(false);
+    expect(settled.indeterminate).not.toBe(true);
+    expect(settled.detail).toMatch(/never observed/);
+  });
+
+  it('a job that TICKS but keeps failing does NOT gate (it proves the loop is alive)', async () => {
+    const rows = allHealthy(1);
+    rows['qc-review-sweep'] = { ...healthyRow(1), last_status: 'error', consecutive_failures: 9, error_code: 'job_failed' };
+    mockJobLivenessRows(rows);
+    const { checkSchedulerLiveness, checkSweepLiveness } = await loadSchedulerLiveness();
+    expect(checkSchedulerLiveness(UPTIME_PAST_WARMUP).pass).toBe(true);
+    // ...and the advisory still reports it, so the signal is not lost.
+    expect(checkSweepLiveness().pass).toBe(false);
+  });
+
+  it('a kill-flagged (disabled) job does NOT gate either', async () => {
+    const rows = allHealthy(1);
+    rows['stuck-in-progress-sweep'] = { ...healthyRow(1), last_status: 'disabled' };
+    mockJobLivenessRows(rows);
+    const { checkSchedulerLiveness, checkSweepLiveness } = await loadSchedulerLiveness();
+    expect(checkSchedulerLiveness(UPTIME_PAST_WARMUP).pass).toBe(true);
+    expect(checkSweepLiveness().pass).toBe(false);
+  });
+
+  it('DISABLE_SWEEP_LIVENESS makes the gating check PASS, never a permanent UNKNOWN', async () => {
+    // A permanent indeterminate would be escalated by cc-health-check.sh as a
+    // persistent-unknown RED: a false red produced by an operator setting.
+    process.env.DISABLE_SWEEP_LIVENESS = '1';
+    mockJobLivenessRows({});
+    const { checkSchedulerLiveness } = await loadSchedulerLiveness();
+    const result = checkSchedulerLiveness(UPTIME_PAST_WARMUP);
+    expect(result.pass).toBe(true);
+    expect(result.indeterminate).not.toBe(true);
+    expect(result.detail).toMatch(/disabled/);
+  });
+
+  it('an unreadable job_liveness table is UNKNOWN, never a definitive red', async () => {
+    vi.doMock('@/lib/db', () => ({
+      queryOne: () => { throw new Error('database is locked'); },
+      queryAll: () => [],
+      run: () => undefined,
+      timeNow: () => new Date().toISOString(),
+      sqlTime: (col: string) => col,
+      parseDbTime: () => NaN,
+      getDb: () => ({ prepare: () => ({ get: () => undefined, all: () => [] }) }),
+      getMigrationStatus: () => ({ applied: ['001'], pending: [] }),
+      getDbPath: () => path.join(tmpDir, 'test.db'),
+    }));
+    const { checkSchedulerLiveness } = await loadSchedulerLiveness();
+    const result = checkSchedulerLiveness(UPTIME_PAST_WARMUP);
+    expect(result.pass).toBe(false);
+    expect(result.indeterminate).toBe(true);
+  });
+
+  it('the warm-up window is derived from the widest watched threshold, not hardcoded', async () => {
+    mockJobLivenessRows(allHealthy(1));
+    const { getWatchedJobLiveness, schedulerLivenessWarmupMinutes } = await loadSchedulerLiveness();
+    const watched = getWatchedJobLiveness();
+    const widest = Math.max(...watched.map((w) => w.staleThresholdMinutes));
+    expect(schedulerLivenessWarmupMinutes(watched)).toBe(widest + 1);
   });
 });
