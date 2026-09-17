@@ -86,31 +86,47 @@ test('updater npm ci failure never falls back to npm install or later actions', 
   assert.deepEqual(result.log, ['checkout-mutation', 'npm ci --engine-strict --no-audit --no-fund']);
 });
 
-// ISSUE-09: the accepted set is now EXACTLY Node 24, not the old
-// ^20.19.0 || ^22.13.0 || >=24. That range admitted both halves of the mismatch
-// it needed to detect: `npm ci` and postinstall's `npm rebuild better-sqlite3`
-// compiled the native module for the UPDATE shell's node while pm2 loaded it
-// under its own, so a box could run the app on ABI 137 with a module built for
-// ABI 147 and crash-loop after every update. v20.19.0, v22.13.0 and v25.0.0
-// used to pass this gate and must now be rejected: that is the fix, and these
-// three cases are the ones that would silently regress if the range came back.
-test('updater rejects every Node major but 24, before checkout mutation or dependency installation', () => {
-  for (const nodeVersion of [
-    'v20.18.3', 'v20.19.0', 'v21.7.0', 'v22.12.0', 'v22.13.0', 'v23.11.0',
-    'v25.0.0', 'v26.8.1', 'unexpected',
-  ]) {
+// ISSUE-09. The preflight now does TWO things in order: resolve the ONE node
+// this box uses (identity), then check THAT node against the declared engines
+// range (support). The fixture has no scripts/lib/node-runtime.sh, so identity
+// falls through to ambient node, which is exactly the path these cases cover.
+//
+// The accepted set is deliberately the ORIGINAL range, not a Node 24 pin. An
+// earlier revision of this branch required major 24; measured against the live
+// fleet that would have refused Command Center updates on most boxes, since two
+// client machines and the operator Mac run v26.7.0 or v26.8.1 with no node@24
+// present. ABI drift is a consistency problem between the node that rebuilds
+// the native module and the node that runs the server, not a version problem,
+// and it is closed by reusing the SAME binary rather than by narrowing which
+// versions may update.
+test('updater rejects a Node below the supported range, before checkout mutation or dependency installation', () => {
+  for (const nodeVersion of ['v18.20.4', 'v20.18.3', 'v22.12.0', 'unexpected']) {
     const result = runFixture({ nodeVersion });
     assert.equal(result.status, 1, nodeVersion);
-    assert.match(result.stdout, /Install Node 24 LTS before updating/);
+    assert.match(result.stdout, /Unsupported Node\.js|Cannot read the version/);
     assert.deepEqual(result.log, [], nodeVersion);
   }
   assert.ok(updater.indexOf('# Node runtime preflight') < updater.indexOf('# Backup retention + disk pre-check'));
 });
 
 test('updater bootstrap Node floor matches package engines at supported boundaries', () => {
-  assert.equal(JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8')).engines.node, '>=24 <25');
-  for (const nodeVersion of ['v24.0.0', 'v24.13.7']) {
+  assert.equal(
+    JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8')).engines.node,
+    '^20.19.0 || ^22.13.0 || >=24',
+  );
+  // The boundaries of the declared range, plus the majors the fleet actually
+  // runs. v25 and v26 are the load-bearing cases: a Node 24 pin rejected them
+  // and would have locked most of the fleet out of updating.
+  for (const nodeVersion of ['v20.19.0', 'v22.13.0', 'v24.0.0', 'v25.6.1', 'v26.8.1']) {
     const result = runFixture({ nodeVersion });
     assert.equal(result.status, 0, `${nodeVersion}: ${result.stderr}`);
   }
+});
+
+test('updater checks the RESOLVED node, and reports it by path', () => {
+  // The identity half: whatever node the preflight settled on is the one whose
+  // version is checked and the one exported as CC_NODE_BIN for npm ci.
+  const result = runFixture({ nodeVersion: 'v26.8.1' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Node runtime: \S+ \(v26\.8\.1/);
 });

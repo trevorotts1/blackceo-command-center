@@ -487,9 +487,9 @@ _assert_fresh_build
 # ecosystem.config.cjs supplied neither an interpreter nor a PATH, so the node
 # that ran the server was whatever pm2 happened to inherit. Meanwhile
 # `postinstall` compiles better-sqlite3 against whichever node ran npm. Client
-# boxes ran the app on node@24 (module ABI 137) while cron and update shells
-# resolved Node 26 (ABI 147), and every update reintroduced a
-# NODE_MODULE_VERSION crash loop that no health check could name.
+# the node that rebuilt the native module and the node that ran the server were
+# routinely different, so better-sqlite3 threw NODE_MODULE_VERSION on every boot
+# and no health check could name the cause.
 #
 # Two changes close it. The exec below uses "$CC_NODE_BIN", resolved by
 # scripts/lib/node-runtime.sh (and normally handed down by the ecosystem config

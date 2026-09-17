@@ -49,9 +49,9 @@ const CC_PORT = process.env.CC_PORT || '4000';
 // happened to inherit. On a Mac that is launchd's minimal PATH at boot and the
 // operator's interactive PATH after `pm2 restart --update-env`, which are not
 // the same node. Meanwhile `postinstall` compiles better-sqlite3 against
-// whichever node ran npm. Client boxes ended up running the app on node@24
-// (ABI 137) while cron and update shells resolved Node 26 (ABI 147), so every
-// update reintroduced a NODE_MODULE_VERSION crash loop.
+// whichever node ran npm. The node that rebuilt the native module and the node
+// that ran the server were routinely different, so better-sqlite3 threw
+// NODE_MODULE_VERSION on every boot and it recurred after every update.
 //
 // scripts/lib/node-runtime.sh is now the single place that decides, and it is
 // asked HERE so the resolved binary reaches the pm2 child env. CC_NODE_BIN is
@@ -119,7 +119,9 @@ module.exports = {
     cwd: INSTALL_DIR,
     env: {
       NODE_ENV: 'production',
-      // ISSUE-09: the resolved fleet runtime, and a PATH that finds it first.
+      // ISSUE-09: the ONE resolved node this box uses, and a PATH that finds it
+      // first. Resolved for consistency, not by version: see
+      // scripts/lib/node-runtime.sh for the order.
       // cc-start.sh execs "$CC_NODE_BIN" and refuses (exit 78, refusal receipt)
       // when its module ABI does not match the one recorded in the served
       // artifact's build-inventory.json.

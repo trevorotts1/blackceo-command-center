@@ -32,7 +32,10 @@
 #     "build_id": "<.next/BUILD_ID contents>",
 #     "build_started_epoch": "<seconds>",
 #     "build_finished_epoch": "<seconds>",
-#     "node_runtime": "<node -v output or unknown>"
+#     "node_runtime": "<node -v output or unknown>",
+#     "node_version": "<node -v output or unknown>",
+#     "node_abi":     "<process.versions.modules or unknown>",
+#     "node_bin":     "<absolute path of the node that built this, or empty>"
 #   }
 #
 # inventory_inputs_digest is the OBSOLESCENCE GUARD: it pins WHICH input list
@@ -269,11 +272,19 @@ _ccbi_write_manifest() {
   inv="$(_ccbi_inventory_digest "$app_dir")"   || return 4
   inv_in="$(_ccbi_inventory_inputs_digest "$app_dir")" || return 4
   cfg="$(_ccbi_build_config_digest "$app_dir")" || return 4
-  # ISSUE-09: record the node that BUILT this artifact, by version AND by
-  # native module ABI. The version string is for humans; `node_abi` is the
-  # field cc-start.sh compares against its own runtime before exec, because it
-  # is the ABI, not the version, that decides whether better-sqlite3 loads.
-  # Prefer the resolved fleet runtime (CC_NODE_BIN, normally exported by
+  # ISSUE-09: record the node that BUILT this artifact, by absolute PATH, by
+  # version, and by native module ABI.
+  #
+  # `node_bin` is the continuity field. scripts/lib/node-runtime.sh reads it as
+  # its second resolution step, so the next `npm ci`, `npm rebuild` and build
+  # reuse the very binary that produced what is on disk. That is what stops ABI
+  # drift: not a version rule, but the same node every time.
+  #
+  # `node_abi` is what cc-start.sh compares against its own runtime before it
+  # execs, because it is the ABI, not the version, that decides whether
+  # better-sqlite3 loads. `node_version` is for humans.
+  #
+  # Prefer the resolved runtime (CC_NODE_BIN, normally exported by
   # atomic-deploy.sh) over ambient `node`, so the recorded identity is the one
   # the build actually used rather than whatever this shell happens to find.
   node_bin="${CC_NODE_BIN:-}"
@@ -299,7 +310,8 @@ _ccbi_write_manifest() {
   "build_finished_epoch": "$finished",
   "node_runtime": "$node_v",
   "node_version": "$node_v",
-  "node_abi": "$node_abi"
+  "node_abi": "$node_abi",
+  "node_bin": "$node_bin"
 }
 EOF
   mv -f "$tmpf" "$mf" || { rm -f "$tmpf"; return 4; }

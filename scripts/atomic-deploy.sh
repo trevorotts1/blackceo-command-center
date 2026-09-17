@@ -136,10 +136,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # NODE_MODULE_VERSION crash loop survived every deploy meant to catch it.
 #
 # scripts/lib/node-runtime.sh is the single place that decides which node the
-# Command Center runs on. Resolving it here and exporting it means the gates,
-# `npm ci`, `npm run build`, every `npm rebuild` and the server's own exec all
-# agree, and the manifest lib/build-inventory.sh writes records THIS node's
-# module ABI for cc-start.sh to compare against before it execs.
+# Command Center uses. It resolves for CONSISTENCY, not by version: the node
+# recorded in the served artifact's manifest, then the node the live pm2
+# process runs on, before any pin or PATH. Resolving it here and exporting it
+# means the gates, `npm ci`, `npm run build`, every `npm rebuild` and the
+# server's own exec all agree, and the manifest lib/build-inventory.sh writes
+# records THIS node's path and module ABI, so the next update reuses the same
+# binary and cc-start.sh can check the artifact against the runtime.
 #
 # Non-fatal on failure: an older checkout may not carry the resolver, and this
 # script must stay able to deploy it. The fallback is the previous behaviour
@@ -149,7 +152,7 @@ if [[ -f "${SCRIPT_DIR}/lib/node-runtime.sh" ]]; then
     CC_NODE_BIN="$_cc_node_resolved"
     export CC_NODE_BIN
   else
-    _warn "lib/node-runtime.sh could not resolve a Node ${CC_NODE_REQUIRED_MAJOR:-24} runtime (see above)."
+    _warn "lib/node-runtime.sh could not resolve any usable node (see above)."
     _warn "Falling back to the deploy shell's own node. The build and the server may disagree on native ABI."
   fi
 else
@@ -688,8 +691,27 @@ _ccbi_native_gate() {
   return 0
 }
 
+# ISSUE-09 follow-up: prove a rebuild actually produced a loadable binary.
+# `npm rebuild <mod>` REPORTS SUCCESS WITHOUT PRODUCING A BINARY. Measured on
+# the operator Mac: `npm rebuild better-sqlite3` printed "rebuilt dependencies
+# successfully" and exited 0 while node_modules/better-sqlite3 held no .node
+# file at all, so every subsequent `new Database()` threw "Could not locate the
+# bindings file". A step that claims to have done something it did not is the
+# same defect class as the ABI drift this unit exists to close, so assert the
+# ARTIFACT, never the exit code.
+_ccbi_assert_rebuild_produced_binary() {  # <app_dir> <module>
+  local _dir="$1" _mod="$2" _lib="$1/node_modules/$2/build/Release/$2.node"
+  if [[ ! -f "$_lib" ]]; then
+    _preflight_abort_receipt "npm rebuild ${_mod} reported success but produced NO binary at ${_lib}. A rebuild that compiles nothing and still exits 0 is a silent success, not a repair. Run 'cd ${_dir}/node_modules/${_mod} && npx node-gyp rebuild' and re-run the updater. Old build untouched."
+  fi
+  if ! _ccbi_native_gate "$_dir"; then
+    _preflight_abort_receipt "npm rebuild ${_mod} produced ${_lib}, but it does not load under ${CC_NODE_BIN}. Old build untouched."
+  fi
+  _ok "  Rebuild of ${_mod} verified: binary present and loadable under ${CC_NODE_BIN}."
+}
+
 # ISSUE-09: a failing PRE-FLIGHT gate is repaired ONCE before aborting. The
-# usual cause is an ABI mismatch between the live node_modules and the pinned
+# usual cause is an ABI mismatch between the live node_modules and the resolved
 # runtime, which is exactly what `npm rebuild` fixes, and aborting handed the
 # operator a manual command for a repair this script can perform itself. One
 # attempt, then re-gate; a second failure still aborts, so a genuinely broken
@@ -700,11 +722,9 @@ if ! _ccbi_native_gate "$APP_DIR"; then
   _warn "  Pre-flight native gate failed; attempting ONE rebuild against ${CC_NODE_BIN} (module ABI $("$CC_NODE_BIN" -p process.versions.modules 2>/dev/null || echo unknown)) ..."
   for _nat_mod in "${NATIVE_MODULE_GATES[@]}"; do
     ( cd "${APP_DIR}" && npm rebuild "${_nat_mod}" ) >/dev/null 2>&1 || true
+    _ccbi_assert_rebuild_produced_binary "${APP_DIR}" "${_nat_mod}"
   done
-  if ! _ccbi_native_gate "$APP_DIR"; then
-    _preflight_abort_receipt "Native-module pre-flight gate still fails after one automatic rebuild against ${CC_NODE_BIN}; the running dependencies cannot open the database. Old build untouched."
-  fi
-  _ok "  Pre-flight native gate repaired by one rebuild."
+  _ok "  Pre-flight native gate repaired by one verified rebuild."
 fi
 _ok "Phase 1 pre-flight passed (including native-module gates)."
 

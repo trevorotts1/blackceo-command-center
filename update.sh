@@ -252,61 +252,87 @@ cd "$INSTALL_DIR"
 
 # Node runtime preflight — before backup pruning or checkout mutations.
 #
-# ISSUE-09: this gate used to accept ^20.19.0 || ^22.13.0 || >=24, which is
-# every node the fleet could plausibly have. That is exactly how a box ended up
-# running the app on node@24 (module ABI 137) while its cron and update shells
-# resolved Node 26 (ABI 147): `npm ci` and postinstall's
-# `npm rebuild better-sqlite3` compiled the native module for the UPDATE shell,
-# pm2 then loaded it under its own node, and the box crash-looped on
-# NODE_MODULE_VERSION after every single update. A range wide enough to admit
-# both halves of a mismatch cannot detect the mismatch.
+# ISSUE-09. This gate used to run a bare `node --version` against the declared
+# range, and that is how a box ended up running the app on one node while its
+# cron and update shells used another: `npm ci` and postinstall's
+# `npm rebuild better-sqlite3` compiled the native module for whichever node
+# the UPDATE SHELL happened to resolve, pm2 then loaded it under the node the
+# SERVER was on, and better-sqlite3 threw NODE_MODULE_VERSION on every boot.
 #
-# THE FLEET RUNTIME IS NODE 24, and this gate now says so. It is also no longer
-# a bare `node` check: scripts/lib/node-runtime.sh is the single resolver every
-# layer asks (both ecosystem configs, cc-start.sh, atomic-deploy.sh), and the
-# resolved binary's directory is prepended to PATH for the rest of this script
-# so `npm ci` and its lifecycle scripts build against the runtime the server
-# will actually exec.
+# The defect is DRIFT between those two nodes, not the version of either. An
+# earlier revision of this file tried to fix it by requiring major 24, which
+# measured against the live fleet would have refused updates on most boxes:
+# two client machines and the operator Mac run v26.7.0 or v26.8.1 with no
+# node@24 installed at all. Locking the majority of the fleet out of updating
+# is not a fix.
+#
+# So this gate now does two separate things, in the right order:
+#
+#   IDENTITY  scripts/lib/node-runtime.sh resolves the ONE node this box uses,
+#             preferring the node recorded in the served artifact's manifest
+#             and then the node the live pm2 process runs on, so an update
+#             rebuilds with the same binary that produced what is on disk.
+#             That resolved binary is exported as CC_NODE_BIN and leads PATH,
+#             so `npm ci` and its lifecycle scripts compile against the node
+#             the server will actually exec.
+#
+#   SUPPORT   the RESOLVED node is then checked against package.json engines.
+#             Checking the resolved node rather than ambient `node` is the
+#             point: the thing that must be supported is the thing that will
+#             build and run the app.
 _cc_require_supported_node() {
-  local version major resolver resolved
+  local version major minor resolver resolved
   # ${INSTALL_DIR:-.} rather than $INSTALL_DIR: this whole section is extracted
   # and executed on its own by tests/unit/update-locked-dependencies.test.ts,
   # where INSTALL_DIR is unset and `set -u` would abort before a single
   # assertion ran. In the real updater INSTALL_DIR is always resolved above.
   resolver="${INSTALL_DIR:-.}/scripts/lib/node-runtime.sh"
 
+  # ── IDENTITY ──────────────────────────────────────────────────────────────
+  CC_NODE_BIN=""
   if [ -f "$resolver" ]; then
     if resolved=$(bash "$resolver"); then
       CC_NODE_BIN="$resolved"
-      export CC_NODE_BIN
-      # Same rule as scripts/atomic-deploy.sh: lead PATH with the runtime
-      # directory ONLY when PATH would otherwise find a different node. That
-      # directory also holds an npm, so an unconditional prepend overrides
-      # whatever npm PATH deliberately pointed at, and when the resolved node is
-      # already the one PATH finds, rewriting PATH can only do harm.
-      if [ "$(command -v node 2>/dev/null || true)" != "$CC_NODE_BIN" ]; then
-        export PATH="$(dirname "$CC_NODE_BIN"):$PATH"
-      fi
-      success "Node runtime: $CC_NODE_BIN ($("$CC_NODE_BIN" --version 2>/dev/null || echo unknown), module ABI $("$CC_NODE_BIN" -p process.versions.modules 2>/dev/null || echo unknown))"
-      return 0
+    else
+      fatal "No usable node binary found (see the resolver output above). Install Node, or set CC_NODE_BIN to an absolute path; nothing was changed."
     fi
-    fatal "No Node 24 runtime found (see the resolver output above). This release requires Node 24 LTS; nothing was changed."
+  else
+    # The checkout predates the resolver (first update onto this release).
+    # Ambient node is the only identity available, and it is still checked
+    # against the declared range below.
+    command -v node >/dev/null 2>&1 \
+      || fatal "Node.js is missing. Install a supported Node before updating; nothing was changed."
+    CC_NODE_BIN="$(command -v node)"
+  fi
+  export CC_NODE_BIN
+
+  # Lead PATH with the runtime directory ONLY when PATH would otherwise find a
+  # different node. That directory also holds an npm, so an unconditional
+  # prepend overrides whatever npm PATH deliberately pointed at, and when the
+  # resolved node is already the one PATH finds, rewriting PATH can only do
+  # harm. Same rule as scripts/atomic-deploy.sh.
+  if [ "$(command -v node 2>/dev/null || true)" != "$CC_NODE_BIN" ]; then
+    export PATH="$(dirname "$CC_NODE_BIN"):$PATH"
   fi
 
-  # The checkout predates the resolver (first update onto this release). Fall
-  # back to the same rule applied to ambient node, so the gate never silently
-  # weakens just because the helper has not landed yet.
-  command -v node >/dev/null 2>&1 \
-    || fatal "Node.js is missing. Install Node 24 LTS before updating; nothing was changed."
-  version=$(node --version 2>/dev/null) \
-    || fatal "Cannot read Node.js version. Install Node 24 LTS before updating; nothing was changed."
+  # ── SUPPORT: the RESOLVED node against package.json engines ───────────────
+  # Keep this rule aligned with the engines field
+  # (^20.19.0 || ^22.13.0 || >=24). It cannot read package.json here: the
+  # updater also handles fresh/pruned checkouts, and npm ci below additionally
+  # enforces the engine declarations of the newly merged lockfile.
+  version=$("$CC_NODE_BIN" --version 2>/dev/null) \
+    || fatal "Cannot read the version of $CC_NODE_BIN. Install a supported Node before updating; nothing was changed."
   if [[ "$version" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
     major=$((10#${BASH_REMATCH[1]}))
-    if [ "$major" -eq 24 ]; then
+    minor=$((10#${BASH_REMATCH[2]}))
+    if [ "$major" -ge 24 ] \
+      || { [ "$major" -eq 22 ] && [ "$minor" -ge 13 ]; } \
+      || { [ "$major" -eq 20 ] && [ "$minor" -ge 19 ]; }; then
+      success "Node runtime: $CC_NODE_BIN ($version, module ABI $("$CC_NODE_BIN" -p process.versions.modules 2>/dev/null || echo unknown))"
       return 0
     fi
   fi
-  fatal "Unsupported Node.js $version. This release requires Node 24 (>=24 <25) so the build, the native modules and the pm2 runtime cannot disagree on ABI. Install Node 24 LTS before updating; nothing was changed."
+  fatal "Unsupported Node.js $version at $CC_NODE_BIN. This release requires ^20.19.0 || ^22.13.0 || >=24. Install a supported Node before updating; nothing was changed."
 }
 _cc_require_supported_node
 # End Node runtime preflight
@@ -642,6 +668,38 @@ step "Step 4: Install npm dependencies"
 npm ci --engine-strict --no-audit --no-fund 2>&1 \
   || fatal "npm ci failed. Fix the reported runtime, lockfile or registry error and retry. No npm install fallback is allowed; migrations, build and restart were not run."
 success "Dependencies installed"
+
+# ISSUE-09 follow-up: prove postinstall's rebuild actually produced a loadable
+# binary. package.json runs `npm rebuild better-sqlite3` on postinstall, and
+# that command REPORTS SUCCESS WITHOUT PRODUCING A BINARY. Measured on the
+# operator Mac: it printed "rebuilt dependencies successfully" and exited 0
+# while node_modules/better-sqlite3 held no .node file at all, so every later
+# `new Database()` threw "Could not locate the bindings file". npm ci's exit
+# code therefore says nothing about whether the app can open its database.
+#
+# Check the two things that matter, under the RESOLVED runtime rather than
+# ambient node: the compiled binary exists, and it loads. Fail loud here, where
+# the remedy is one command and nothing has been rebuilt or restarted yet,
+# rather than letting the box crash-loop after the deploy.
+_cc_assert_native_module_usable() {
+  local mod="$1"
+  local lib="$INSTALL_DIR/node_modules/$mod/build/Release/$mod.node"
+  if [ ! -f "$lib" ]; then
+    fatal "npm ci completed but $mod has no compiled binary at $lib. postinstall's 'npm rebuild $mod' exits 0 even when it compiles nothing, so its success is not evidence. Run 'cd $INSTALL_DIR/node_modules/$mod && npx node-gyp rebuild' and re-run the updater; migrations, build and restart were not run."
+  fi
+  if ! "$CC_NODE_BIN" -e "
+    const { createRequire } = require('module');
+    const req = createRequire(process.argv[1] + '/node_modules/');
+    let M = req(process.argv[2]);
+    if (M && typeof M !== 'function') M = M.default || M;
+    const db = new M(':memory:');
+    try { if (db.prepare('SELECT 42 AS a').get().a !== 42) process.exit(3); } finally { db.close(); }
+  " "$INSTALL_DIR" "$mod" >/dev/null 2>&1; then
+    fatal "$mod is present at $lib but cannot be loaded and used by $CC_NODE_BIN ($("$CC_NODE_BIN" --version 2>/dev/null || echo unknown), module ABI $("$CC_NODE_BIN" -p process.versions.modules 2>/dev/null || echo unknown)). This is the native ABI mismatch that crash-loops the Command Center. Run 'cd $INSTALL_DIR/node_modules/$mod && npx node-gyp rebuild' with that same node and re-run the updater; migrations, build and restart were not run."
+  fi
+  success "Native module $mod verified: compiled binary present and usable by $CC_NODE_BIN"
+}
+_cc_assert_native_module_usable better-sqlite3
 
 # ----------------------------------------------------------
 # Run any database migrations (if seed files changed)

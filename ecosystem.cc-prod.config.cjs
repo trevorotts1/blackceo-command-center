@@ -51,9 +51,9 @@ const CC_PORT = process.env.CC_PORT || '4000';
 // happened to inherit. On a Mac that is launchd's minimal PATH at boot and the
 // operator's interactive PATH after `pm2 restart --update-env`, which are not
 // the same node. Meanwhile `postinstall` compiles better-sqlite3 against
-// whichever node ran npm. Client boxes ended up running the app on node@24
-// (ABI 137) while cron and update shells resolved Node 26 (ABI 147), so every
-// update reintroduced a NODE_MODULE_VERSION crash loop.
+// whichever node ran npm. The node that rebuilt the native module and the node
+// that ran the server were routinely different, so better-sqlite3 threw
+// NODE_MODULE_VERSION on every boot and it recurred after every update.
 //
 // scripts/lib/node-runtime.sh is now the single place that decides, and it is
 // asked HERE so the resolved binary reaches the pm2 child env. CC_NODE_BIN is
@@ -108,7 +108,7 @@ module.exports = {
       NODE_ENV: 'production',
       CC_PORT: CC_PORT,
       DATABASE_PATH: DB_PATH,
-      // ISSUE-09: the resolved fleet runtime. Its directory is prepended to the
+      // ISSUE-09: the ONE resolved node this box uses. Its directory leads the
       // pinned PATH below, so `node` there is the same binary cc-start.sh execs.
       CC_NODE_BIN: CC_NODE_BIN,
 
@@ -172,11 +172,11 @@ module.exports = {
       //
       // ISSUE-09: CC_NODE_DIR goes FIRST. The entries below list /usr/local/bin
       // and /opt/homebrew/bin, either of which can hold a node of the wrong
-      // major, and whichever came first used to win. The resolved fleet runtime
-      // now precedes both, so every tool this process shells out to sees the
-      // same node the app itself runs on.
+      // major, and whichever came first used to win. The resolved node now
+      // precedes both, so every tool this process shells out to sees the same
+      // node the app itself runs on.
       PATH: [
-        CC_NODE_DIR,                                    // ISSUE-09: fleet runtime
+        CC_NODE_DIR,                                    // ISSUE-09: the resolved node
         path.join(process.env.HOME, '.npm-global/bin'), // openclaw, npx
         path.join(process.env.HOME, '.local/bin'),      // openclaw (symlink)
         '/usr/local/bin',
