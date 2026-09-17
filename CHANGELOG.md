@@ -1,3 +1,8 @@
+## [v7.4.2] — 2026-09-17 — A sweep switched off on purpose is not a fault
+
+### Fixed
+- **The sweep-liveness watchdog no longer pages the operator for a sweep that was deliberately switched off.** A sweep behind a kill flag (`INTAKE_ADVANCE_SWEEP_ENABLED=0`, `DISABLE_QC_REVIEW_SWEEP=1`) still ticks on schedule and records `disabled`, which the watchdog counted as unhealthy alongside stale and failed. On the operator box, where both sweeps are off by decision, that produced one `[SWEEP-LIVENESS] ... DISABLED` Telegram alert per cooldown window, about 23 a day since 2026-09-04, none of them describing a fault. `checkSweepLiveness` now treats `disabled` as an operator decision: it passes, and the OK detail names the job as `(disabled on this box)` so the state is still visible on `/api/health/deep`. A disabled sweep that STOPS ticking is still reported `silent` and still alerts, because a scheduler that has died looks the same whether or not its jobs were switched off. The gating `checks.scheduler_liveness` is unchanged.
+
 ## [v7.4.1] — 2026-09-17 — Scheduler-stall detection, one Node runtime identity, podcast SOP fallback
 
 Three defects that each let a box look healthy while it was not doing its job. The scheduler could stop and nothing could tell; the node the app ran on was whatever PATH happened to hold; and a podcast task on a box with no podcast SOP bounced to a human forever.

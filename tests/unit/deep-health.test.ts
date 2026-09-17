@@ -2397,13 +2397,15 @@ describe('scheduler_liveness (ISSUE-04, GATING)', () => {
     expect(checkSweepLiveness().pass).toBe(false);
   });
 
-  it('a kill-flagged (disabled) job does NOT gate either', async () => {
+  it('a kill-flagged (disabled) job does NOT gate either, and the advisory treats it as an operator decision (pass, named in detail)', async () => {
     const rows = allHealthy(1);
     rows['stuck-in-progress-sweep'] = { ...healthyRow(1), last_status: 'disabled' };
     mockJobLivenessRows(rows);
     const { checkSchedulerLiveness, checkSweepLiveness } = await loadSchedulerLiveness();
     expect(checkSchedulerLiveness(UPTIME_PAST_WARMUP).pass).toBe(true);
-    expect(checkSweepLiveness().pass).toBe(false);
+    const advisory = checkSweepLiveness();
+    expect(advisory.pass).toBe(true);
+    expect(advisory.detail).toMatch(/stuck-in-progress-sweep \(disabled on this box\)/);
   });
 
   it('DISABLE_SWEEP_LIVENESS makes the gating check PASS, never a permanent UNKNOWN', async () => {

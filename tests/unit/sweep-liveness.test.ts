@@ -189,6 +189,40 @@ test('sweep-liveness: re-enabling (a fresh tick) clears the stale state on the v
   assert.equal(checkSweepLiveness().pass, true, 'the very next tick must clear the red state — no stale caching');
 });
 
+// ── 6b: intentionally disabled sweeps are not faults ────────────────────────
+
+test('checkSweepLiveness: a sweep ticking with status disabled (kill flag set) passes and is named in the OK detail', async () => {
+  clearFixtures();
+  recordJobTick('intake-advance', minutesAgoIso(0.2), 'disabled', 'INTAKE_ADVANCE_SWEEP_ENABLED=0');
+  recordJobTick('qc-review-sweep', minutesAgoIso(0.2), 'disabled', 'DISABLE_QC_REVIEW_SWEEP env is set');
+
+  const check = checkSweepLiveness();
+  assert.equal(check.pass, true);
+  assert.match(check.detail, /intake-advance \(disabled on this box\)/);
+  assert.match(check.detail, /qc-review-sweep \(disabled on this box\)/);
+
+  const sweep = await runSweepLivenessSweep();
+  assert.equal(sweep.alerted, false);
+  assert.deepEqual(sweep.disabledJobs, ['intake-advance', 'qc-review-sweep']);
+  assert.equal(alertEventCount(), 0);
+});
+
+test('checkSweepLiveness: a disabled sweep that stops ticking is still reported silent (scheduler death is not masked)', async () => {
+  clearFixtures();
+  recordJobTick('intake-advance', minutesAgoIso(0.2), 'disabled');
+  recordJobTick('qc-review-sweep', minutesAgoIso(30), 'disabled'); // 3x cadence is 6 min
+
+  const check = checkSweepLiveness();
+  assert.equal(check.pass, false);
+  assert.match(check.detail, /qc-review-sweep silent/);
+  assert.doesNotMatch(check.detail, /intake-advance/);
+
+  const sweep = await runSweepLivenessSweep();
+  assert.deepEqual(sweep.staleJobs, ['qc-review-sweep']);
+  assert.ok(sweep.notificationStatus === 'queued' || sweep.notificationStatus === 'unavailable'); // an alert event is written either way
+  assert.equal(alertEventCount(), 1);
+});
+
 // ── 7: DISABLE_SWEEP_LIVENESS kill switch ───────────────────────────────────
 
 test('DISABLE_SWEEP_LIVENESS=1: check reports indeterminate (monitor disabled) and the sweep never alerts', async () => {

@@ -33,8 +33,11 @@ export interface SweepLivenessCheckResult {pass:boolean;detail:string;indetermin
 export function checkSweepLiveness():SweepLivenessCheckResult {
  if(disabled())return {pass:false,indeterminate:true,detail:'sweep_liveness: monitoring disabled on this box',watched:[]};
  const watched=getWatchedJobLiveness();
- const unhealthy=watched.filter(w=>w.stale||w.disabled||w.failed);
- return {pass:unhealthy.length===0,watched,detail:unhealthy.length?`sweep_liveness: ${unhealthy.map(w=>`${w.jobName} ${w.disabled?'DISABLED':w.failed?'FAILED':'silent'} (${w.consecutiveFailures} consecutive failures; ${w.ageMinutes===null?'never observed':Math.round(w.ageMinutes)+'m since tick'})`).join('; ')}`:`sweep_liveness: OK — ${watched.map(w=>w.jobName).join(', ')}`};
+ // A job switched off on purpose (kill flag / *_ENABLED=0) records 'disabled' on every tick.
+ // That is an operator decision, not a fault: it is reported in the OK detail but never alerts.
+ // A disabled job that STOPS TICKING is still a fault (the scheduler itself may be dead) — stale wins.
+ const unhealthy=watched.filter(w=>w.stale||(!w.disabled&&w.failed));
+ return {pass:unhealthy.length===0,watched,detail:unhealthy.length?`sweep_liveness: ${unhealthy.map(w=>`${w.jobName} ${w.stale?'silent':'FAILED'} (${w.consecutiveFailures} consecutive failures; ${w.ageMinutes===null?'never observed':Math.round(w.ageMinutes)+'m since tick'})`).join('; ')}`:`sweep_liveness: OK — ${watched.map(w=>w.disabled?`${w.jobName} (disabled on this box)`:w.jobName).join(', ')}`};
 }
 export interface SweepLivenessSweepResult {ranAt:string;skippedReason?:string;staleJobs:string[];disabledJobs:string[];failedJobs?:string[];alerted:boolean;notificationStatus?:'queued'|'unavailable'|'cooldown';}
 export async function runSweepLivenessSweep():Promise<SweepLivenessSweepResult> {
