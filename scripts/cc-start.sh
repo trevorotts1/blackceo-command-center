@@ -387,7 +387,7 @@ _assert_fresh_build() {
   source "$inv_lib"
 
   local verify_json verify_rc verdict served_bid
-  verify_json="$(bash "$inv_lib" --verify "$CC_DIR" 2>/dev/null)"
+  verify_json="$(bash "$inv_lib" --verify "$CC_DIR" 2>/dev/null)" || true
   verify_rc=$?
   verdict="$(printf '%s' "$verify_json" | sed -n 's/.*"verdict"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
   served_bid="$(printf '%s' "$verify_json" | sed -n 's/.*"build_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
