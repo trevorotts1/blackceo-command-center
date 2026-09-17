@@ -1,3 +1,8 @@
+## [v7.6.1] — 2026-09-17 — The box watchdog is never blind
+
+### Fixed
+- **The box watchdog carries the Command Center's public URL, so it can act.** `cc-health-check.sh` reports row 27 UNKNOWN (exit 3) whenever `CC_PUBLIC_URL` is unset, and `watchdog-cc.sh` by contract never acts on exit 3. Measured on the operator Mac minutes after v7.6.0 installed the schedule: every run was UNKNOWN, so the self-heal it had just been given could never fire. `watchdog-cc.sh` now reads `CC_PUBLIC_URL` from the app's own `.env.local` (then `.env`) when the caller did not set it, and passes it to the health check explicitly. `install-watchdog-cc.sh` accepts `--public-url` and `--app-dir` (reading the URL from the app's env file), carries it into the launchd plist or crontab line, logs only whether it is set, and warns when it is not. `atomic-deploy.sh` passes both. Regression: `tests/unit/install-watchdog-cc.test.sh` (49 assertions).
+
 ## [v7.6.0] — 2026-09-17 — The system checks itself
 
 The owner's rule, verbatim: "I'm not checking this. You did it. You check it." An alert that ends with "Check the command center process" hands a person a chore. This release makes the Command Center do that check and that repair on its own, and makes its messages say what it did.
