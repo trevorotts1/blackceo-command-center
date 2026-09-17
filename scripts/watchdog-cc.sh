@@ -10,6 +10,8 @@
 # Schedule (crontab): */5 * * * *  /path/to/scripts/watchdog-cc.sh
 # Env: WATCHDOG_PORT  WATCHDOG_CANONICAL_DIR  WATCHDOG_ALERT_LOG  WATCHDOG_ALERT_HOOK
 #      WATCHDOG_SELF_HEAL   (default: 0 — set to 1 to enable self-healing on RED)
+#      WATCHDOG_CC_APP_NAMES  WATCHDOG_SCHEDULER_MAX_ATTEMPTS
+#      WATCHDOG_SCHEDULER_BACKOFF_BASE   (ISSUE-04 scheduler-stall restart)
 #
 # PRES-045 / CC-H1 (refusal protection, this revision):
 #
@@ -34,6 +36,20 @@
 #   The legacy zombie self-heal (duplicate/legacy-name convergence) is
 #   RETAINED but hardened: it still clears only the three CC app names and
 #   recreates the canonical one; `pm2 delete all` remains forbidden.
+#
+#   SCHEDULER-STALL RESTART (ISSUE-04, this revision): a RED classified
+#   `scheduler-stalled` (checks.scheduler_liveness.pass == false in the health
+#   JSON: the app answers HTTP, everything else is green, and its in-process
+#   node-cron loop has stopped ticking) is repaired by AT MOST ONE bounded
+#   `pm2 restart <name> --update-env` per incident per backoff window, on an
+#   allowlisted CC app name that pm2 already knows (WATCHDOG_CC_APP_NAMES).
+#   It is NEVER a rebuild, NEVER `pm2 restart all`, and NEVER a name taken
+#   from the health JSON. Its attempt budget lives in its own state file and
+#   resets on the GREEN recovery pass, so it is per-incident and not a
+#   lifetime cap. A restart is the only possible repair for this class: the
+#   cron loop is registered once at process start, so nothing inside the
+#   running process can revive it, and the sweep that would have alerted on
+#   the stall is itself on the loop that died.
 #
 #   NEVER acts on exit 3 (UNKNOWN) — preserves the exit-3=no-action contract;
 #   persistent-unknown escalation is produced by cc-health-check.sh itself
@@ -62,6 +78,15 @@ WATCHDOG_REBUILD_MAX_ATTEMPTS="${WATCHDOG_REBUILD_MAX_ATTEMPTS:-3}"
 # atomic deploy; it must be a REBUILD, never a bare `pm2 start` of the same
 # stale tree (CC-H1: "never repeatedly start the unchanged build").
 WATCHDOG_REBUILD_CMD="${WATCHDOG_REBUILD_CMD:-bash scripts/atomic-deploy.sh}"
+# ISSUE-04 scheduler-stall restart budget. Deliberately separate knobs from the
+# rebuild budget above: a restart is far cheaper than a rebuild, but it is also
+# the action most likely to be wrong, so it stays bounded and backed off.
+WATCHDOG_SCHEDULER_MAX_ATTEMPTS="${WATCHDOG_SCHEDULER_MAX_ATTEMPTS:-3}"
+WATCHDOG_SCHEDULER_BACKOFF_BASE="${WATCHDOG_SCHEDULER_BACKOFF_BASE:-900}"
+# The ONLY pm2 app names this script will ever restart. `pm2 restart all` and
+# any name discovered at runtime are forbidden: a wrong name here restarts the
+# OpenClaw gateway or a client worker on the same box.
+WATCHDOG_CC_APP_NAMES="${WATCHDOG_CC_APP_NAMES:-blackceo-command-center cc-prod command-center mission-control}"
 
 if [[ ! -x "$HEALTH_CHECK" ]]; then
   printf 'FATAL: cc-health-check.sh not found at %s\n' "$HEALTH_CHECK" >&2; exit 1
@@ -71,6 +96,9 @@ mkdir -p "$WATCHDOG_STATE_DIR" 2>/dev/null || true
 STATE_FILE="$WATCHDOG_STATE_DIR/incidents.json"
 REBUILD_LOCK="$WATCHDOG_STATE_DIR/rebuild.lock"
 REBUILD_STATE="$WATCHDOG_STATE_DIR/rebuild-state.json"
+# ISSUE-04: separate bookkeeping for the scheduler-stall restart, so it can
+# never consume or reset the stale-build rebuild budget above.
+SCHED_STATE="$WATCHDOG_STATE_DIR/scheduler-restart-state.json"
 
 TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
@@ -133,6 +161,15 @@ elif 'unreachable' in detail:
     print("unreachable")
 elif d.get('pm2_topology', {}).get('app_count', 0) == 0:
     print("no-pm2-app")
+elif (d.get('checks') or {}).get('scheduler_liveness', {}).get('pass') is False \
+        and (d.get('checks') or {}).get('scheduler_liveness', {}).get('indeterminate') is not True:
+    # ISSUE-04: the app answers HTTP and every other gating check is fine, but
+    # its in-process node-cron loop has stopped ticking. Ranked BELOW every
+    # class above on purpose: a stopped service, a refusal receipt or a missing
+    # pm2 app all explain a silent scheduler, and their own repair paths are
+    # the correct ones. This class is only for the case where the box looks
+    # alive and the scheduler alone is dead.
+    print("scheduler-stalled")
 else:
     print("red")
 PYEOF
@@ -151,6 +188,15 @@ if [[ "$RESULT_EXIT" -eq 0 ]]; then
     printf '[watchdog-cc] RECOVERY at %s — incident "%s" cleared (verified GREEN after RED)\n' "$TS" "$OPEN" >&2
     printf '{"watchdog_recovery":true,"timestamp":"%s","incident":"%s","port":%s}\n' "$TS" "$OPEN" "$WATCHDOG_PORT" >> "$WATCHDOG_ALERT_LOG"
     state_set "$STATE_FILE" open_incident ''
+    # ISSUE-04: a verified GREEN after a scheduler-stall incident means the
+    # restart worked, so that incident's restart budget is spent and closed.
+    # Without this reset the attempt counter would be a LIFETIME cap, and the
+    # fourth stall a year later would find the budget already exhausted.
+    if [[ "$OPEN" == "scheduler-stalled" ]]; then
+      state_set "$SCHED_STATE" scheduler_restart_attempts 0
+      state_set "$SCHED_STATE" scheduler_recovered_at "$TS"
+      printf '[watchdog-cc] SCHEDULER: sweeps are ticking again; restart budget reset for the next incident\n' >&2
+    fi
     # Refusal receipt resolution on verified recovery is the health check's
     # job (it verifies build digest + online state); the watchdog only
     # archives its own incident bookkeeping here.
@@ -286,6 +332,90 @@ except Exception: print('yes')" "$REBUILD_STATE" "$WATCHDOG_REBUILD_MAX_ATTEMPTS
     fi
   fi
 
+  # ── SCHEDULER-STALL RESTART (opt-in, ISSUE-04) ─────────────────────────────
+  # The app answers HTTP, every other gating check passes, and its in-process
+  # node-cron loop has stopped ticking. A restart is the ONLY repair: the loop
+  # is registered at process start (src/instrumentation.ts), so nothing inside
+  # the running process can bring it back, and the cron job that would have
+  # alerted on the stall is itself on the dead loop.
+  #
+  # BOUNDED, exactly like the rebuild path above and for the same reason:
+  #   * ONE restart per incident per backoff window, attempts counted durably
+  #   * exponential backoff from the last attempt (capped at 24h)
+  #   * a hard attempt cap, after which a human is required
+  #   * ONLY a pm2 app name from WATCHDOG_CC_APP_NAMES, and only one that pm2
+  #     already knows about. Never `pm2 restart all`, never a name read out of
+  #     the health JSON, never a rebuild.
+  # The counter resets on the GREEN recovery pass, so a stall months later
+  # still gets its own budget.
+  if [[ "$WATCHDOG_SELF_HEAL" == "1" && "$KEY" == "scheduler-stalled" ]]; then
+    SCHED_ATTEMPTS=$(python3 -s -c "import json,sys
+try: print(int(json.load(open(sys.argv[1])).get('scheduler_restart_attempts', 0)))
+except Exception: print(0)" "$SCHED_STATE" 2>/dev/null || echo 0)
+    SCHED_OK=$(python3 -s -c "
+import json, sys
+try: print('yes' if int(json.load(open(sys.argv[1])).get('scheduler_restart_attempts', 0)) < int(sys.argv[2]) else 'no')
+except Exception: print('yes')" "$SCHED_STATE" "$WATCHDOG_SCHEDULER_MAX_ATTEMPTS" 2>/dev/null || echo yes)
+    SCHED_DUE=$(python3 -s -c "
+import sys, datetime, json
+def _parse_ts(ts):
+    s = (ts or '').strip()
+    if not s:
+        raise ValueError('empty timestamp')
+    if s.endswith('Z'):
+        s = s[:-1] + '+00:00'
+    dt = datetime.datetime.fromisoformat(s)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt
+try:
+    with open(sys.argv[1]) as fh: d = json.load(fh)
+    n = int(d.get('scheduler_restart_attempts', 0))
+    if n == 0: print('yes'); sys.exit(0)
+    dt = _parse_ts(d.get('last_scheduler_restart_at', ''))
+    age = int((datetime.datetime.now(datetime.timezone.utc) - dt).total_seconds())
+    base = int(sys.argv[2])
+    backoff = min(base * (2 ** (n - 1)), 86400)
+    print('yes' if age >= backoff else 'no')
+except Exception:
+    print('yes')" "$SCHED_STATE" "$WATCHDOG_SCHEDULER_BACKOFF_BASE" 2>/dev/null || echo yes)
+
+    if [[ "$SCHED_OK" != "yes" ]]; then
+      printf '[watchdog-cc] SCHEDULER: restart cap %s reached; the scheduler keeps stalling after restarts; human review required\n' "$WATCHDOG_SCHEDULER_MAX_ATTEMPTS" >&2
+    elif [[ "$SCHED_DUE" != "yes" ]]; then
+      printf '[watchdog-cc] SCHEDULER: backoff window not yet elapsed; no restart this pass\n' >&2
+    elif ! command -v pm2 >/dev/null 2>&1; then
+      printf '[watchdog-cc] SCHEDULER: pm2 not on PATH; cannot restart; human review required\n' >&2
+    else
+      # Resolve the target: the FIRST allowlisted name pm2 actually knows.
+      # WATCHDOG_CC_APP_NAMES is intentionally unquoted here for word splitting
+      # (bash 3.2 safe: no arrays, no mapfile).
+      SCHED_TARGET=""
+      for _cc_name in $WATCHDOG_CC_APP_NAMES; do
+        if pm2 describe "$_cc_name" >/dev/null 2>&1; then
+          SCHED_TARGET="$_cc_name"
+          break
+        fi
+      done
+      if [[ -z "$SCHED_TARGET" ]]; then
+        printf '[watchdog-cc] SCHEDULER: no allowlisted CC app found in pm2 (looked for: %s); refusing to restart anything else\n' "$WATCHDOG_CC_APP_NAMES" >&2
+      else
+        SCHED_NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+        state_set "$SCHED_STATE" scheduler_restart_attempts "$((SCHED_ATTEMPTS + 1))"
+        state_set "$SCHED_STATE" last_scheduler_restart_at "$SCHED_NOW"
+        state_set "$SCHED_STATE" scheduler_restart_incident "$KEY"
+        state_set "$SCHED_STATE" scheduler_restart_target "$SCHED_TARGET"
+        printf '[watchdog-cc] SCHEDULER: in-app cron loop is stalled; restarting pm2 app "%s" (attempt %s/%s, bounded, no rebuild)\n' \
+          "$SCHED_TARGET" "$((SCHED_ATTEMPTS + 1))" "$WATCHDOG_SCHEDULER_MAX_ATTEMPTS" >&2
+        if pm2 restart "$SCHED_TARGET" --update-env >/dev/null 2>&1; then
+          printf '[watchdog-cc] SCHEDULER: pm2 restart "%s" OK; next pass verifies whether the sweeps resumed\n' "$SCHED_TARGET" >&2
+        else
+          printf '[watchdog-cc] SCHEDULER: pm2 restart "%s" FAILED; no further attempts until the backoff window elapses\n' "$SCHED_TARGET" >&2
+        fi
+      fi
+    fi
+  fi
+
   # ── Legacy zombie self-heal (RETAINED, hardened) ────────────────────────────
   # Only runs when WATCHDOG_SELF_HEAL=1 AND the failure pattern indicates a
   # zombie/orphan/crash-loop that cc-start.sh can resolve.
@@ -294,7 +424,7 @@ except Exception: print('yes')" "$REBUILD_STATE" "$WATCHDOG_REBUILD_MAX_ATTEMPTS
   # are ever deleted, only before their own recreation; refusal-receipt REDs
   # are handled by the REBUILD path above, not by a bare `pm2 start` of the
   # same stale tree.
-  if [[ "$WATCHDOG_SELF_HEAL" == "1" && "$KEY" != "refusal-receipt" ]]; then
+  if [[ "$WATCHDOG_SELF_HEAL" == "1" && "$KEY" != "refusal-receipt" && "$KEY" != "scheduler-stalled" ]]; then
     HEAL_TRIGGER=0
     if printf '%s' "$RESULT_JSON" | grep -q '"app_count":[2-9]'; then
       HEAL_TRIGGER=1

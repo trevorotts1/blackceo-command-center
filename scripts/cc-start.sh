@@ -361,7 +361,7 @@ _assert_fresh_build() {
     local tmp
     tmp="$(mktemp "$state_dir/.cc-refusal.XXXXXX" 2>/dev/null)" || return 0
     CCBI_REFUSAL_TMP="$tmp" CCBI_CC_DIR="$CC_DIR" CCBI_REASON="$reason" \
-    CCBI_DETAIL="$detail" node -e '
+    CCBI_DETAIL="$detail" "${CC_NODE_BIN:-node}" -e '
       const fs = require("fs");
       const buildId = (() => { try { return fs.readFileSync(process.env.CCBI_CC_DIR + "/.next/BUILD_ID", "utf8").trim(); } catch { return null; } })();
       const doc = {
@@ -481,6 +481,84 @@ _assert_fresh_build() {
 _assert_fresh_build
 
 
+# ── 2b. NODE RUNTIME IDENTITY + NATIVE ABI GUARD (ISSUE-09) ───────────────────
+#
+# THE DEFECT: this launcher exec'd a BARE `node` off the ambient PATH, and
+# ecosystem.config.cjs supplied neither an interpreter nor a PATH, so the node
+# that ran the server was whatever pm2 happened to inherit. Meanwhile
+# `postinstall` compiles better-sqlite3 against whichever node ran npm. Client
+# the node that rebuilt the native module and the node that ran the server were
+# routinely different, so better-sqlite3 threw NODE_MODULE_VERSION on every boot
+# and no health check could name the cause.
+#
+# Two changes close it. The exec below uses "$CC_NODE_BIN", resolved by
+# scripts/lib/node-runtime.sh (and normally handed down by the ecosystem config
+# so the pm2 child and this launcher agree). And before exec, a DETERMINISTIC
+# comparison: the artifact's build-inventory.json records the module ABI of the
+# node that built it, and this process must match it.
+#
+# A mismatch is deterministic, exactly like a stale build: restarting cannot
+# fix it, only a rebuild can. So it takes the SAME path as every other content
+# refusal in this file: a durable receipt with reason `native-abi-mismatch`,
+# remedy `bash scripts/atomic-deploy.sh`, and exit 78. pm2's stop_exit_codes
+# stops the loop instead of hammering, and watchdog-cc.sh's existing
+# refusal-receipt class repairs it with one locked atomic deploy. The crash
+# loop becomes a named, self-repairing refusal.
+#
+# The guard NEVER fires on missing evidence. A legacy artifact whose manifest
+# predates the node_abi field, or an unreadable manifest, cannot be compared,
+# and an uncomparable pair is not a mismatch. atomic-deploy.sh's native-module
+# gates cover that case; refusing here on an absent field would brick every
+# box carrying a pre-ISSUE-09 artifact.
+if [[ -z "${CC_NODE_BIN:-}" ]]; then
+  # Not handed down (a manual start, or an ecosystem file predating ISSUE-09).
+  # Resolve it here so every start path agrees on one runtime.
+  if [[ -x "$SCRIPT_DIR/lib/node-runtime.sh" || -f "$SCRIPT_DIR/lib/node-runtime.sh" ]]; then
+    # stdout ONLY. The resolver writes warnings to stderr on the SUCCESS path
+    # (an override pinning a non-fleet major), and folding those into the
+    # capture would set CC_NODE_BIN to a warning banner.
+    _cc_resolved_node="$(bash "$SCRIPT_DIR/lib/node-runtime.sh")" && CC_NODE_BIN="$_cc_resolved_node" || {
+      printf '[cc-start] FATAL: no supported Node runtime; refusing to start on an unknown one.\n' >&2
+      exit 78
+    }
+    export CC_NODE_BIN
+  fi
+fi
+CC_NODE_BIN="${CC_NODE_BIN:-node}"
+printf '[cc-start] Node runtime: %s (%s)\n' "$CC_NODE_BIN" "$("$CC_NODE_BIN" --version 2>/dev/null || echo 'version unreadable')" >&2
+
+_assert_native_abi_matches() {
+  local manifest="$CC_DIR/.next/build-inventory.json"
+  local recorded runtime_abi
+  [[ -f "$manifest" ]] || {
+    printf '[cc-start] ABI guard: no build-inventory.json to compare against; skipping (atomic-deploy native gates cover this).\n' >&2
+    return 0
+  }
+  recorded="$(sed -n 's/.*"node_abi"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest" 2>/dev/null | head -1 || true)"
+  if [[ -z "$recorded" || "$recorded" == "unknown" ]]; then
+    printf '[cc-start] ABI guard: artifact records no node_abi (pre-ISSUE-09 manifest); nothing to compare, proceeding.\n' >&2
+    return 0
+  fi
+  runtime_abi="$("$CC_NODE_BIN" -p process.versions.modules 2>/dev/null || true)"
+  if [[ -z "$runtime_abi" ]]; then
+    printf '[cc-start] ABI guard: %s could not report process.versions.modules; nothing to compare, proceeding.\n' "$CC_NODE_BIN" >&2
+    return 0
+  fi
+  if [[ "$recorded" != "$runtime_abi" ]]; then
+    local detail
+    detail="native module ABI mismatch: this artifact was built by a node with module ABI ${recorded}, but the runtime ${CC_NODE_BIN} reports ABI ${runtime_abi}. better-sqlite3 cannot load across that boundary, so the server would crash-loop on its first DB call"
+    printf '[cc-start] FATAL: native-abi-mismatch: %s\n' "$detail" >&2
+    printf '[cc-start] This is a DETERMINISTIC refusal (exit 78): restarting cannot fix it.\n' >&2
+    printf '[cc-start] Rebuild against this runtime: `bash scripts/atomic-deploy.sh`.\n' >&2
+    _ccbi_content_refusal_receipt "native-abi-mismatch" "$detail"
+    exit 78
+  fi
+  printf '[cc-start] ABI guard: artifact and runtime agree on module ABI %s.\n' "$runtime_abi" >&2
+}
+
+_assert_native_abi_matches
+
+
 # ── 3. EXEC next start ────────────────────────────────────────────────────────
 # exec replaces this bash process so PM2's PID tracking points at the real node
 # child — cc-health-check.sh pm2-analyze-cc.py regex `(--port|-p)\s+PORT` still
@@ -488,4 +566,4 @@ _assert_fresh_build
 printf '[cc-start] Launching: next start -p %s -H 0.0.0.0 (cwd: %s)\n' "$CC_PORT" "$CC_DIR" >&2
 
 cd "$CC_DIR"
-exec node "$CC_DIR/scripts/next-service-env.cjs" start -p "$CC_PORT" -H 0.0.0.0
+exec "$CC_NODE_BIN" "$CC_DIR/scripts/next-service-env.cjs" start -p "$CC_PORT" -H 0.0.0.0

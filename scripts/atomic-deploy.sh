@@ -128,6 +128,63 @@ _banner() { printf '\n%s═══ %s ═══%s\n' "${BOLD}" "$*" "${RESET}" >&
 # Resolve the script's own directory so we can call cc-health-check.sh portably
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# ── ISSUE-09: pin the node this deploy uses ──────────────────────────────────
+# The native gate below already takes CCBI_NODE_BIN, but nothing ever set it,
+# so it fell through to `command -v node`: the DEPLOY SHELL's node, not the one
+# pm2 will exec. A gate that loads better-sqlite3 under a different ABI than
+# the runtime proves nothing about the runtime, which is how the
+# NODE_MODULE_VERSION crash loop survived every deploy meant to catch it.
+#
+# scripts/lib/node-runtime.sh is the single place that decides which node the
+# Command Center uses. It resolves for CONSISTENCY, not by version: the node
+# recorded in the served artifact's manifest, then the node the live pm2
+# process runs on, before any pin or PATH. Resolving it here and exporting it
+# means the gates, `npm ci`, `npm run build`, every `npm rebuild` and the
+# server's own exec all agree, and the manifest lib/build-inventory.sh writes
+# records THIS node's path and module ABI, so the next update reuses the same
+# binary and cc-start.sh can check the artifact against the runtime.
+#
+# Non-fatal on failure: an older checkout may not carry the resolver, and this
+# script must stay able to deploy it. The fallback is the previous behaviour
+# (the deploy shell's node), announced loudly rather than assumed.
+if [[ -f "${SCRIPT_DIR}/lib/node-runtime.sh" ]]; then
+  if _cc_node_resolved="$(bash "${SCRIPT_DIR}/lib/node-runtime.sh")"; then
+    CC_NODE_BIN="$_cc_node_resolved"
+    export CC_NODE_BIN
+  else
+    _warn "lib/node-runtime.sh could not resolve any usable node (see above)."
+    _warn "Falling back to the deploy shell's own node. The build and the server may disagree on native ABI."
+  fi
+else
+  _warn "lib/node-runtime.sh not found beside atomic-deploy.sh; using the deploy shell's own node."
+fi
+CC_NODE_BIN="${CC_NODE_BIN:-$(command -v node 2>/dev/null || printf 'node')}"
+CC_NODE_DIR="$(dirname "$CC_NODE_BIN")"
+# Feed the existing native-module gate hook, so it stops falling through to
+# `command -v node`.
+export CCBI_NODE_BIN="${CCBI_NODE_BIN:-$CC_NODE_BIN}"
+# Put the runtime directory first ONLY when PATH would otherwise resolve a
+# DIFFERENT node, which is the only case where the prepend changes anything.
+#
+# An unconditional prepend is too blunt and was measured to break things. That
+# directory holds an `npm` as well as a `node`, so pushing it to the front also
+# overrides whatever npm PATH deliberately pointed at. The B.2 atomic-deploy
+# fixtures put a stub npm on PATH (their staged `npm ci` fabricates a fake
+# better-sqlite3 rather than installing anything); an unconditional prepend
+# shadowed that stub with the runner's real npm, the staging directory got no
+# node_modules, and ten deploy tests failed on a promotion step that had nothing
+# to do with this change. It passed locally only because this machine's node
+# directory happens to contain no npm, so nothing was shadowed.
+#
+# When the resolved node is already the one PATH finds, PATH is correct as it
+# stands and rewriting it can only do harm.
+_cc_path_node="$(command -v node 2>/dev/null || printf '')"
+if [[ "$_cc_path_node" != "$CC_NODE_BIN" ]]; then
+  export PATH="${CC_NODE_DIR}:${PATH}"
+  _log "  PATH now leads with ${CC_NODE_DIR} (it previously resolved node to ${_cc_path_node:-<none>})."
+fi
+_log "Node runtime for this deploy: ${CC_NODE_BIN} ($("$CC_NODE_BIN" --version 2>/dev/null || echo 'version unreadable'), module ABI $("$CC_NODE_BIN" -p process.versions.modules 2>/dev/null || echo unknown))"
+
 # Backup retention + disk pre-check (OPENCLAW-BACKUP-RETENTION-V1). Always
 # ships beside this script. If a checkout somehow lacks it, define no-ops so a
 # deploy is never blocked by a missing helper — but say so loudly, because a
@@ -634,8 +691,40 @@ _ccbi_native_gate() {
   return 0
 }
 
+# ISSUE-09 follow-up: prove a rebuild actually produced a loadable binary.
+# `npm rebuild <mod>` REPORTS SUCCESS WITHOUT PRODUCING A BINARY. Measured on
+# the operator Mac: `npm rebuild better-sqlite3` printed "rebuilt dependencies
+# successfully" and exited 0 while node_modules/better-sqlite3 held no .node
+# file at all, so every subsequent `new Database()` threw "Could not locate the
+# bindings file". A step that claims to have done something it did not is the
+# same defect class as the ABI drift this unit exists to close, so assert the
+# ARTIFACT, never the exit code.
+_ccbi_assert_rebuild_produced_binary() {  # <app_dir> <module>
+  local _dir="$1" _mod="$2" _lib="$1/node_modules/$2/build/Release/$2.node"
+  if [[ ! -f "$_lib" ]]; then
+    _preflight_abort_receipt "npm rebuild ${_mod} reported success but produced NO binary at ${_lib}. A rebuild that compiles nothing and still exits 0 is a silent success, not a repair. Run 'cd ${_dir}/node_modules/${_mod} && npx node-gyp rebuild' and re-run the updater. Old build untouched."
+  fi
+  if ! _ccbi_native_gate "$_dir"; then
+    _preflight_abort_receipt "npm rebuild ${_mod} produced ${_lib}, but it does not load under ${CC_NODE_BIN}. Old build untouched."
+  fi
+  _ok "  Rebuild of ${_mod} verified: binary present and loadable under ${CC_NODE_BIN}."
+}
+
+# ISSUE-09: a failing PRE-FLIGHT gate is repaired ONCE before aborting. The
+# usual cause is an ABI mismatch between the live node_modules and the resolved
+# runtime, which is exactly what `npm rebuild` fixes, and aborting handed the
+# operator a manual command for a repair this script can perform itself. One
+# attempt, then re-gate; a second failure still aborts, so a genuinely broken
+# toolchain is never papered over. Deliberately NOT applied to the staged-deps
+# or post-build gates: those trees were just installed by this run, and a
+# failure there is a real defect in the candidate, not drift to be repaired.
 if ! _ccbi_native_gate "$APP_DIR"; then
-  _preflight_abort_receipt "Native-module pre-flight gate failed — the running dependencies cannot open the database. Old build untouched."
+  _warn "  Pre-flight native gate failed; attempting ONE rebuild against ${CC_NODE_BIN} (module ABI $("$CC_NODE_BIN" -p process.versions.modules 2>/dev/null || echo unknown)) ..."
+  for _nat_mod in "${NATIVE_MODULE_GATES[@]}"; do
+    ( cd "${APP_DIR}" && npm rebuild "${_nat_mod}" ) >/dev/null 2>&1 || true
+    _ccbi_assert_rebuild_produced_binary "${APP_DIR}" "${_nat_mod}"
+  done
+  _ok "  Pre-flight native gate repaired by one verified rebuild."
 fi
 _ok "Phase 1 pre-flight passed (including native-module gates)."
 
@@ -791,7 +880,11 @@ echo "2" > "$BUILD_EXIT_FILE"   # Pre-set to failure; overwritten only on clean 
 
 export BUILD_EXIT_FILE
 
-_log "Running: npm run build  (output: ${BUILD_TMP})"
+# ISSUE-09: PATH was prepended with CC_NODE_DIR at the top of this script, so
+# this build, the native gates above and the server's own exec all run on one
+# node. Before that, the build could compile against ABI 147 while pm2 started
+# the result under ABI 137.
+_log "Running: npm run build  (output: ${BUILD_TMP}, node: ${CC_NODE_BIN})"
 (
   NEXT_DIST_DIR="$BUILD_TMP_NAME" npm run build 2>&1
   echo $? > "$BUILD_EXIT_FILE"

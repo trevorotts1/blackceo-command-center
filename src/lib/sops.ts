@@ -48,6 +48,89 @@ import { isKnownPersonaId } from '@/lib/persona-library';
  */
 const SOP_FIREWALL_CATCH_ALL = 'general-task';
 
+/**
+ * ISSUE-12 (CC half) - the sibling-department carve-out.
+ *
+ * THE DEFECT: `podcast` and `audio` are two separate canonical departments
+ * (canonical-slug.ts CANONICAL_SLUGS), with no alias between them. The firewall
+ * above admits only SOPs whose department canonicalizes to the task's, so a
+ * podcast task on a box that was seeded with audio SOPs but no podcast SOPs has
+ * an EMPTY candidate pool. `getBestSOPForTask` returns null, the dispatcher
+ * writes `sop_library_gap`, and the card bounces to the human with
+ * "Missing: SOP" forever. Nothing on the box can clear it.
+ *
+ * WHY NOT AN ALIAS: mapping `podcast` to `audio` in canonical-slug.ts would
+ * collapse the podcast workspace that migrations 113 and 122 seed, taking its
+ * Kanban lane with it. The two departments must stay distinct; only the SOP
+ * LOOKUP widens, and only when it would otherwise find nothing.
+ *
+ * SCOPE: the widening is deliberately narrow. It applies ONLY when the owning
+ * pool is completely empty, ONLY to the departments listed here, and it is
+ * symmetric so an audio task on a podcast-only box is repaired the same way.
+ * An unrelated department is never widened: a marketing task with no marketing
+ * SOP still resolves to null and still bounces, which is the correct answer
+ * when no sibling craft exists.
+ */
+export const SOP_SIBLING_DEPARTMENTS: Record<string, string[]> = {
+  podcast: ['audio'],
+  audio: ['podcast'],
+};
+
+/** The marker reason recorded on every SOP admitted by the widening above. */
+export const SOP_SIBLING_FALLBACK_REASON = 'sibling-department-fallback';
+
+export interface EligibleSopPool<T extends SOP> {
+  /** The SOPs that may be scored for this task. */
+  eligible: T[];
+  /** True when the owning-department pool was empty and siblings were admitted. */
+  widened: boolean;
+  /** The task's canonical owning department ('' when it has none). */
+  owningDepartment: string;
+  /** The sibling departments admitted by the widening (empty when not widened). */
+  siblingDepartments: string[];
+}
+
+/**
+ * Resolve the SOP pool a task may be scored against, applying the FIX-16
+ * owning-department firewall first and the ISSUE-12 sibling widening only if
+ * that leaves nothing at all.
+ */
+export function resolveEligibleSops<T extends SOP>(
+  sops: T[],
+  task: Pick<Task, 'title' | 'description'> & {
+    department?: string | null;
+    workspace_id?: string | null;
+  },
+): EligibleSopPool<T> {
+  const taskDeptCanon = canonicalDeptSlug(task.department ?? task.workspace_id ?? '');
+  if (!taskDeptCanon || taskDeptCanon === SOP_FIREWALL_CATCH_ALL) {
+    return { eligible: sops, widened: false, owningDepartment: taskDeptCanon, siblingDepartments: [] };
+  }
+  const owning = sops.filter((sop) => {
+    const sopDeptCanon = canonicalDeptSlug(sop.department ?? '');
+    // Department-less SOP: not a cross-dept SOP — keep it as the fallback floor.
+    if (!sopDeptCanon) return true;
+    // Explicitly-declared department: must equal the task's owning department.
+    return sopDeptCanon === taskDeptCanon;
+  });
+  if (owning.length > 0) {
+    return { eligible: owning, widened: false, owningDepartment: taskDeptCanon, siblingDepartments: [] };
+  }
+
+  const siblings = SOP_SIBLING_DEPARTMENTS[taskDeptCanon] ?? [];
+  if (siblings.length === 0) {
+    // No sibling craft to fall back on. An empty pool is the correct answer:
+    // getBestSOPForTask returns null and the dispatcher's sop_library_gap path
+    // holds the card for a human, exactly as before.
+    return { eligible: owning, widened: false, owningDepartment: taskDeptCanon, siblingDepartments: [] };
+  }
+  const widenedPool = sops.filter((sop) => siblings.includes(canonicalDeptSlug(sop.department ?? '')));
+  if (widenedPool.length === 0) {
+    return { eligible: owning, widened: false, owningDepartment: taskDeptCanon, siblingDepartments: [] };
+  }
+  return { eligible: widenedPool, widened: true, owningDepartment: taskDeptCanon, siblingDepartments: siblings };
+}
+
 export function filterSopsToOwningDepartment<T extends SOP>(
   sops: T[],
   task: Pick<Task, 'title' | 'description'> & {
@@ -55,15 +138,7 @@ export function filterSopsToOwningDepartment<T extends SOP>(
     workspace_id?: string | null;
   },
 ): T[] {
-  const taskDeptCanon = canonicalDeptSlug(task.department ?? task.workspace_id ?? '');
-  if (!taskDeptCanon || taskDeptCanon === SOP_FIREWALL_CATCH_ALL) return sops;
-  return sops.filter((sop) => {
-    const sopDeptCanon = canonicalDeptSlug(sop.department ?? '');
-    // Department-less SOP: not a cross-dept SOP — keep it as the fallback floor.
-    if (!sopDeptCanon) return true;
-    // Explicitly-declared department: must equal the task's owning department.
-    return sopDeptCanon === taskDeptCanon;
-  });
+  return resolveEligibleSops(sops, task).eligible;
 }
 
 /**
@@ -280,7 +355,12 @@ export function scoreSOPForTask(
     workspace_id?: string | null;
     /** Optional: the assigned agent's role slug. When supplied, sop.role matching adds +0.5. */
     agentRoleSlug?: string | null;
-  }
+  },
+  /**
+   * ISSUE-12: set ONLY by the sibling-department widening, and only when the
+   * owning pool was empty. Scoring is otherwise byte-for-byte unchanged.
+   */
+  opts: { siblingDepartments?: string[] } = {}
 ): { score: number; reasons: string[] } {
   let score = 0;
   const reasons: string[] = [];
@@ -293,6 +373,20 @@ export function scoreSOPForTask(
   if (sopDeptCanon && taskDeptCanon && sopDeptCanon === taskDeptCanon) {
     score += 0.5;
     reasons.push(`department match (${sopDeptCanon})`);
+  } else if (
+    sopDeptCanon &&
+    taskDeptCanon &&
+    (opts.siblingDepartments ?? []).includes(sopDeptCanon)
+  ) {
+    // A sibling credit, deliberately BELOW the 0.5 owning-department credit so
+    // an owning SOP always outranks a sibling head to head. Without a credit
+    // here the widening would be cosmetic: a sibling SOP can earn at most 0.5
+    // from keywords, and getBestSOPForTask's 0.5 threshold would reject nearly
+    // every one of them, so the card would keep bouncing with "Missing: SOP".
+    // With it, one keyword hit is enough to clear the threshold and a sibling
+    // SOP with NO textual relevance at all still correctly resolves to null.
+    score += 0.4;
+    reasons.push(`${SOP_SIBLING_FALLBACK_REASON} (${taskDeptCanon} -> ${sopDeptCanon})`);
   }
 
   if (sop.task_keywords) {
@@ -346,10 +440,13 @@ export function suggestSOPsForTaskKeyword(
   );
   // FIX-16: the owning-department firewall runs BEFORE scoring — a cross-dept
   // SOP is removed from the candidate pool and can never win on keywords.
-  const eligible = filterSopsToOwningDepartment(sops, task);
+  // ISSUE-12: and only if that pool is EMPTY, a sibling craft is admitted.
+  const pool = resolveEligibleSops(sops, task);
+  const eligible = pool.eligible;
+  const scoreOpts = pool.widened ? { siblingDepartments: pool.siblingDepartments } : {};
   const scored = eligible
     .map((sop) => {
-      const { score, reasons } = scoreSOPForTask(sop, task);
+      const { score, reasons } = scoreSOPForTask(sop, task, scoreOpts);
       return { sop, score, reasons };
     })
     .filter((s) => s.score > 0)
@@ -385,10 +482,14 @@ export async function suggestSOPsForTask(
   // FIX-16: the owning-department firewall runs BEFORE scoring on BOTH paths
   // (semantic + keyword fallback) so a cross-dept SOP can never surface, even
   // when it is the strongest semantic neighbor.
-  const eligible = filterSopsToOwningDepartment(sops, task);
+  // ISSUE-12: and only if that pool is EMPTY, a sibling craft is admitted, on
+  // both paths for the same reason.
+  const pool = resolveEligibleSops(sops, task);
+  const eligible = pool.eligible;
+  const scoreOpts = pool.widened ? { siblingDepartments: pool.siblingDepartments } : {};
   const keywordMap = new Map<string, { score: number; reasons: string[] }>();
   for (const sop of eligible) {
-    const { score, reasons } = scoreSOPForTask(sop, task);
+    const { score, reasons } = scoreSOPForTask(sop, task, scoreOpts);
     keywordMap.set(sop.id, { score, reasons });
   }
 
@@ -438,7 +539,7 @@ export async function suggestSOPsForTask(
     .map((sop) => {
       const { score, reasons } = keywordMap.get(sop.id)
         ? { ...keywordMap.get(sop.id)! }
-        : scoreSOPForTask(sop, task);
+        : scoreSOPForTask(sop, task, scoreOpts);
       return { sop, score, reasons };
     })
     .filter((s) => s.score > 0)
@@ -457,7 +558,17 @@ export async function getBestSOPForTask(
   const suggestions = await suggestSOPsForTask(task, 1);
   if (suggestions.length === 0) return null;
   if (suggestions[0].score < threshold) return null;
-  return suggestions[0].sop;
+  const best = suggestions[0];
+  // ISSUE-12: record WHY a cross-department SOP was allowed to win. Without
+  // this line the only visible evidence would be a podcast card carrying an
+  // audio SOP, which reads as the firewall having failed rather than as a
+  // deliberate, pool-empty fallback.
+  if (best.reasons.some((reason) => reason.startsWith(SOP_SIBLING_FALLBACK_REASON))) {
+    console.log(
+      `[sops] ${SOP_SIBLING_FALLBACK_REASON}: no SOP in the owning department, matched a sibling department instead (sop ${best.sop.slug}, score ${best.score.toFixed(3)})`
+    );
+  }
+  return best.sop;
 }
 
 /**

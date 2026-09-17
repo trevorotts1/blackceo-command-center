@@ -43,6 +43,59 @@ const DB_PATH = process.env.DATABASE_PATH || path.join(INSTALL_DIR, '../data/mis
 // OpenClaw gateway or Hostinger container-injected PORT. qc-cc.sh enforces this.
 const CC_PORT = process.env.CC_PORT || '4000';
 
+// ── ISSUE-09: NODE RUNTIME IDENTITY (resolved at config load) ────────────────
+// This config used to run `script: 'bash'` with no interpreter and no PATH,
+// and scripts/cc-start.sh then exec'd a BARE `node` off whatever PATH pm2
+// happened to inherit. On a Mac that is launchd's minimal PATH at boot and the
+// operator's interactive PATH after `pm2 restart --update-env`, which are not
+// the same node. Meanwhile `postinstall` compiles better-sqlite3 against
+// whichever node ran npm. The node that rebuilt the native module and the node
+// that ran the server were routinely different, so better-sqlite3 threw
+// NODE_MODULE_VERSION on every boot and it recurred after every update.
+//
+// scripts/lib/node-runtime.sh is now the single place that decides, and it is
+// asked HERE so the resolved binary reaches the pm2 child env. CC_NODE_BIN is
+// what cc-start.sh execs; its directory is prepended to PATH so any tool the
+// app shells out to resolves the same node.
+//
+// FAIL LOUD, never fall back. A config that silently defaults to bare `node`
+// is exactly the defect: pm2 would start, the app would load a native module
+// built for a different ABI, and the box would crash-loop with a message that
+// names neither the config nor the runtime. Throwing here surfaces the real
+// problem, with the install command, before anything starts.
+// spawnSync rather than execFileSync: stderr has to be CAPTURED so the
+// resolver's remedy can be folded into the thrown Error (pm2 surfaces a
+// config-load throw, but does not reliably surface a child's inherited
+// stderr), AND re-emitted on the success path so a warning about an override
+// pinning the wrong major is never silent. Only spawnSync gives both.
+const { spawnSync } = require('child_process');
+
+function resolveCcNodeBin() {
+  const resolver = path.join(__dirname, 'scripts', 'lib', 'node-runtime.sh');
+  const proc = spawnSync('bash', [resolver], { encoding: 'utf8' });
+  const stderr = String((proc && proc.stderr) || '').trim();
+  if (proc.error || proc.status !== 0) {
+    const detail = stderr || String((proc.error && proc.error.message) || 'resolver exited ' + proc.status);
+    throw new Error(
+      'BlackCEO Command Center: cannot resolve the Node runtime, refusing to start.\n' +
+      detail + '\n' +
+      'Resolver: ' + resolver + '\n' +
+      'Set CC_NODE_BIN to an explicit node path to override.'
+    );
+  }
+  if (stderr) process.stderr.write(stderr + '\n');
+  const resolved = String(proc.stdout || '').trim();
+  if (!resolved) {
+    throw new Error(
+      'BlackCEO Command Center: ' + resolver + ' exited 0 but named no node binary. Refusing to start.'
+    );
+  }
+  return resolved;
+}
+
+const CC_NODE_BIN = resolveCcNodeBin();
+const CC_NODE_DIR = path.dirname(CC_NODE_BIN);
+
 module.exports = {
   apps: [{
     // FLEET-CANONICAL PM2 APP NAME — do not rename without updating every other
@@ -66,6 +119,14 @@ module.exports = {
     cwd: INSTALL_DIR,
     env: {
       NODE_ENV: 'production',
+      // ISSUE-09: the ONE resolved node this box uses, and a PATH that finds it
+      // first. Resolved for consistency, not by version: see
+      // scripts/lib/node-runtime.sh for the order.
+      // cc-start.sh execs "$CC_NODE_BIN" and refuses (exit 78, refusal receipt)
+      // when its module ABI does not match the one recorded in the served
+      // artifact's build-inventory.json.
+      CC_NODE_BIN: CC_NODE_BIN,
+      PATH: CC_NODE_DIR + ':' + (process.env.PATH || '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'),
       // CC_PORT: canonical port variable; cc-start.sh reads this, strips PORT,
       // then re-exports PORT=CC_PORT before exec. Never set PORT here directly.
       CC_PORT: CC_PORT,
