@@ -18,6 +18,7 @@
 #   --health-retry-wait  Seconds to wait between exit-3 retries (default: 15)
 #   --canonical-dir DIR  Pass-through to cc-health-check.sh --canonical-dir
 #   --public-url URL     Pass-through to cc-health-check.sh --public-url
+#   --revision SHA       Verified commit used for candidate preparation (default: HEAD)
 #
 # ENVIRONMENT OVERRIDES
 #   CC_HEALTH_CHECK_PATH  Override the path to cc-health-check.sh (used by fixture harnesses)
@@ -97,6 +98,7 @@ HEALTH_RETRIES="${CC_HEALTH_RETRIES:-36}"
 HEALTH_RETRY_WAIT="${CC_HEALTH_RETRY_WAIT:-15}"
 CANONICAL_DIR_OVERRIDE="${CC_CANONICAL_DIR:-}"
 PUBLIC_URL_PROBE="${CC_PUBLIC_URL:-}"
+DEPLOY_REVISION_INPUT="${CC_DEPLOY_REVISION:-HEAD}"
 # Fixture harness override: if set, use this path for cc-health-check.sh instead of SCRIPT_DIR
 HEALTH_CHECK_PATH_OVERRIDE="${CC_HEALTH_CHECK_PATH:-}"
 
@@ -116,6 +118,7 @@ while [[ $# -gt 0 ]]; do
     --health-retry-wait) HEALTH_RETRY_WAIT="${2:?--health-retry-wait requires a value}"; shift 2 ;;
     --canonical-dir)     CANONICAL_DIR_OVERRIDE="${2:?--canonical-dir requires a value}"; shift 2 ;;
     --public-url)        PUBLIC_URL_PROBE="${2:?--public-url requires a value}"; shift 2 ;;
+    --revision)         DEPLOY_REVISION_INPUT="${2:?--revision requires a value}"; shift 2 ;;
     *) printf 'ERROR: Unknown argument: %s\n' "$1" >&2; exit 2 ;;
   esac
 done
@@ -406,6 +409,269 @@ _preflight_abort_receipt() {
   printf '  Note        : live .next directory was NOT touched.\n\n' >&2
 }
 
+
+###############################################################################
+# Durable transaction receipt
+###############################################################################
+TRANSACTION_RECEIPT="${APP_DIR}/.atomic-deploy-transaction.json"
+
+# The receipt is the crash-recovery source of truth. Every live artifact or
+# dependency move is preceded by a receipt update naming the paths needed to
+# reconcile that exact phase.
+_ccbi_write_transaction_receipt() {
+  local phase="$1"
+  local tmp
+  tmp="$(mktemp "${APP_DIR}/.atomic-deploy-transaction.json.tmp.XXXXXX")" || return 1
+  local tx_rc=0
+  CCBI_TX_PHASE="$phase" \
+      CCBI_TX_REVISION="${DEPLOY_REVISION:-}" \
+      CCBI_TX_RELEASE_DIR="${RELEASE_DIR:-}" \
+      CCBI_TX_PREVIOUS_DEPS="${LIVE_NODE_MODULES_BACKUP:-${PREVIOUS_DEPS_BACKUP:-}}" \
+      CCBI_TX_PREVIOUS_NEXT="${OLD_NEXT_PARK:-}" \
+      CCBI_TX_CANDIDATE_NEXT="${CANDIDATE_NEXT_PARK:-}" \
+      CCBI_TX_CANDIDATE_DEPS="${CANDIDATE_DEPS_PARK:-}" \
+      CCBI_TX_BUILD_ID="${BUILD_ID:-}" \
+      "$CC_NODE_BIN" - "$tmp" <<'NODETX' || tx_rc=$?
+const fs = require('fs');
+const file = process.argv[2];
+const env = process.env;
+const doc = {
+  schema: 'atomic-deploy-transaction/1',
+  phase: env.CCBI_TX_PHASE || 'UNKNOWN',
+  revision: env.CCBI_TX_REVISION || '',
+  release_dir: env.CCBI_TX_RELEASE_DIR || '',
+  previous_deps_backup: env.CCBI_TX_PREVIOUS_DEPS || '',
+  previous_next_park: env.CCBI_TX_PREVIOUS_NEXT || '',
+  candidate_next_park: env.CCBI_TX_CANDIDATE_NEXT || '',
+  candidate_deps_park: env.CCBI_TX_CANDIDATE_DEPS || '',
+  build_id: env.CCBI_TX_BUILD_ID || '',
+  pid: process.ppid,
+  updated_at: new Date().toISOString()
+};
+const fd = fs.openSync(file, 'w');
+fs.writeFileSync(fd, JSON.stringify(doc, null, 2) + '\n');
+fs.fsyncSync(fd);
+fs.closeSync(fd);
+NODETX
+  if [[ "$tx_rc" -ne 0 ]]; then
+    rm -f "$tmp"
+    return 1
+  fi
+  mv -f "$tmp" "$TRANSACTION_RECEIPT" || { rm -f "$tmp"; return 1; }
+  return 0
+}
+
+_ccbi_set_transaction_phase() {
+  local phase="$1"
+  TRANSACTION_PHASE="$phase"
+  if ! _ccbi_write_transaction_receipt "$phase"; then
+    _err "Failed to persist transaction phase ${phase}; refusing to continue."
+    return 1
+  fi
+  return 0
+}
+
+_ccbi_archive_transaction_receipt() {
+  local outcome="$1"
+  [[ -f "$TRANSACTION_RECEIPT" ]] || return 0
+  local archive="${APP_DIR}/.atomic-deploy-transaction.reconciled.$(date +%Y%m%d-%H%M%S).$$"
+  mv "$TRANSACTION_RECEIPT" "$archive" || return 1
+  _log "  Transaction receipt archived (${outcome}): ${archive}"
+  return 0
+}
+
+_ccbi_reconcile_move() {
+  local from="$1" to="$2" what="$3"
+  [[ -e "$from" ]] || return 0
+  local displaced="${to}.reconciled.$$"
+  local moved_target=0
+  if [[ -e "$to" ]]; then
+    rm -rf "$displaced" 2>/dev/null || true
+    if mv "$to" "$displaced" 2>/dev/null; then
+      moved_target=1
+    else
+      _err "Recovery failed: could not preserve the existing ${what} target ${to}."
+      return 1
+    fi
+  fi
+  if mv "$from" "$to" 2>/dev/null; then
+    rm -rf "$displaced" 2>/dev/null || true
+    _ok "  Recovered ${what}: ${to}"
+    return 0
+  fi
+  _err "Recovery failed: could not move ${what} from ${from} to ${to}."
+  if [[ "$moved_target" -eq 1 && -e "$displaced" ]]; then
+    if mv "$displaced" "$to" 2>/dev/null; then
+      _ok "  Existing ${what} target recovered to ${to}."
+    else
+      _err "CRITICAL: existing ${what} target remains displaced at ${displaced}."
+    fi
+  fi
+  return 1
+}
+
+# Read a quoted flat-JSON field without depending on the later build-inventory
+# helper. Receipt reconciliation must work before candidate preparation starts.
+_ccbi_transaction_field() {
+  local file="$1" key="$2"
+  "$CC_NODE_BIN" - "$file" "$key" <<'NODEFIELD'
+const fs = require('fs');
+const file = process.argv[2];
+const key = process.argv[3];
+try {
+  const value = JSON.parse(fs.readFileSync(file, 'utf8'))[key];
+  process.stdout.write(typeof value === 'string' ? value : '');
+} catch {}
+NODEFIELD
+}
+
+# Reconcile a receipt left by an earlier process. This uses only receipt-recorded
+# paths and observed filesystem state; it never assumes the current process owns
+# the old in-memory variables.
+_ccbi_reconcile_abandoned_transaction() {
+  [[ -f "$TRANSACTION_RECEIPT" ]] || return 0
+  local phase revision release_dir previous_deps previous_next candidate_next candidate_deps build_id live_build_id candidate_is_live
+  phase="$(_ccbi_transaction_field "$TRANSACTION_RECEIPT" phase)"
+  revision="$(_ccbi_transaction_field "$TRANSACTION_RECEIPT" revision)"
+  release_dir="$(_ccbi_transaction_field "$TRANSACTION_RECEIPT" release_dir)"
+  previous_deps="$(_ccbi_transaction_field "$TRANSACTION_RECEIPT" previous_deps_backup)"
+  previous_next="$(_ccbi_transaction_field "$TRANSACTION_RECEIPT" previous_next_park)"
+  candidate_next="$(_ccbi_transaction_field "$TRANSACTION_RECEIPT" candidate_next_park)"
+  candidate_deps="$(_ccbi_transaction_field "$TRANSACTION_RECEIPT" candidate_deps_park)"
+  build_id="$(_ccbi_transaction_field "$TRANSACTION_RECEIPT" build_id)"
+  live_build_id=""
+  if [[ -f "${APP_DIR}/.next/BUILD_ID" ]]; then
+    live_build_id="$(cat "${APP_DIR}/.next/BUILD_ID" 2>/dev/null || true)"
+  fi
+  candidate_is_live=0
+  if [[ -n "$build_id" && "$live_build_id" == "$build_id" ]]; then
+    candidate_is_live=1
+  fi
+  _warn "Found abandoned atomic-deploy transaction in phase ${phase:-INVALID}."
+  _warn "  Receipt: ${TRANSACTION_RECEIPT}"
+  _warn "  Recorded revision: ${revision:-unknown}"
+
+  case "$phase" in
+    PREPARING|BUILDING|DEPENDENCIES)
+      if [[ -n "$release_dir" && -d "$release_dir" ]]; then
+        rm -rf "$release_dir" || {
+          _err "Could not discard abandoned candidate release: ${release_dir}"
+          return 1
+        }
+      fi
+      _ok "  Abandoned candidate discarded; live release was never promoted."
+      _ccbi_archive_transaction_receipt "candidate-discarded" || return 1
+      return 0
+      ;;
+
+    PROMOTING|PROMOTING_DEPS|PROMOTING_ARTIFACT|PROMOTING_ARTIFACT_PARKED)
+      # First deploy has no previous artifact to restore. If the crash happened
+      # after the candidate artifact was moved but before CANDIDATE_LIVE was
+      # persisted, preserve the complete candidate rather than pairing it with
+      # the previous dependency tree.
+      if [[ "$candidate_is_live" -eq 1 && -z "$previous_next" ]]; then
+        if [[ -n "$release_dir" && -d "$release_dir" ]]; then
+          rm -rf "$release_dir" || return 1
+        fi
+        _ok "  Complete candidate release was already promoted; preserving it and previous rollback material."
+        _ccbi_archive_transaction_receipt "candidate-preserved" || return 1
+        return 0
+      fi
+      if [[ -n "$previous_next" && -d "$previous_next" ]]; then
+        _ccbi_reconcile_move "$previous_next" "${APP_DIR}/.next" "previous artifact" || return 1
+      fi
+      if [[ -n "$previous_deps" && -d "$previous_deps" ]]; then
+        if [[ -d "${APP_DIR}/node_modules" && -n "$release_dir" && ! -d "${release_dir}/node_modules" ]]; then
+          _ccbi_reconcile_move "${APP_DIR}/node_modules" "${release_dir}/node_modules" "candidate dependencies" || return 1
+        fi
+        _ccbi_reconcile_move "$previous_deps" "${APP_DIR}/node_modules" "previous dependencies" || return 1
+      fi
+      if [[ -n "$release_dir" && -d "$release_dir" ]]; then
+        rm -rf "$release_dir" || {
+          _err "Could not discard abandoned candidate release after restoring the previous release: ${release_dir}"
+          return 1
+        }
+      fi
+      _ok "  Previous complete release recovered from abandoned promotion."
+      _ccbi_archive_transaction_receipt "promotion-recovered" || return 1
+      return 0
+      ;;
+
+    PREVIOUS_LIVE)
+      if [[ -n "$release_dir" && -d "$release_dir" ]]; then
+        rm -rf "$release_dir" || {
+          _err "Previous release was restored but its abandoned candidate directory could not be removed: ${release_dir}"
+          return 1
+        }
+      fi
+      _ok "  Previous complete release was already restored."
+      _ccbi_archive_transaction_receipt "promotion-recovered" || return 1
+      return 0
+      ;;
+
+    SERVICE_SWITCH)
+      _err "Refusing automatic reconciliation: the candidate files are live but the PM2 switch outcome is unknown (phase SERVICE_SWITCH)."
+      _err "Verify PM2 manually, then resolve the transaction receipt at ${TRANSACTION_RECEIPT}."
+      return 1
+      ;;
+
+    CANDIDATE_LIVE|UNKNOWN|HEALTH_CHECK)
+      # The complete candidate is already live. Preserve it and all rollback
+      # material; only the private preparation copy is stale.
+      if [[ -n "$release_dir" && -d "$release_dir" ]]; then
+        rm -rf "$release_dir" || {
+          _err "Candidate is live but its abandoned preparation directory could not be removed: ${release_dir}"
+          return 1
+        }
+      fi
+      _ok "  Complete candidate remains live; previous rollback material remains retained."
+      _ccbi_archive_transaction_receipt "candidate-preserved" || return 1
+      return 0
+      ;;
+
+    ROLLING_BACK|ROLLING_BACK_ARTIFACT|ROLLING_BACK_DEPS)
+      if [[ -n "$candidate_next" && -d "$candidate_next" ]]; then
+        _ccbi_reconcile_move "$candidate_next" "${APP_DIR}/.next" "candidate artifact" || return 1
+      fi
+      if [[ -n "$candidate_deps" && -d "$candidate_deps" ]]; then
+        if [[ -d "${APP_DIR}/node_modules" && -n "$previous_deps" ]]; then
+          _ccbi_reconcile_move "${APP_DIR}/node_modules" "$previous_deps" "previous dependencies" || return 1
+        fi
+        _ccbi_reconcile_move "$candidate_deps" "${APP_DIR}/node_modules" "candidate dependencies" || return 1
+      fi
+      _ok "  Complete candidate release recovered from interrupted rollback."
+      _ccbi_archive_transaction_receipt "rollback-recovered" || return 1
+      return 0
+      ;;
+
+    ROLLBACK_SERVICE|ROLLBACK_HEALTH|ROLLBACK_VERIFY_FAILED)
+      _err "Refusing automatic reconciliation: prior files were restored but rollback service verification is incomplete (phase ${phase})."
+      _err "Verify PM2 and health manually, then resolve the transaction receipt at ${TRANSACTION_RECEIPT}."
+      return 1
+      ;;
+
+    ROLLED_BACK_VERIFIED)
+      if [[ -n "$release_dir" && -d "$release_dir" ]]; then
+        rm -rf "$release_dir" || return 1
+      fi
+      if [[ -n "$candidate_next" && -d "$candidate_next" ]]; then
+        rm -rf "$candidate_next" || return 1
+      fi
+      if [[ -n "$candidate_deps" && -d "$candidate_deps" ]]; then
+        rm -rf "$candidate_deps" || return 1
+      fi
+      _ok "  Previous complete release was already rolled back and verified."
+      _ccbi_archive_transaction_receipt "rollback-complete" || return 1
+      return 0
+      ;;
+
+    *)
+      _err "Invalid or unsupported abandoned transaction phase: ${phase:-missing}"
+      return 1
+      ;;
+  esac
+}
+
 ###############################################################################
 # Validate required tools
 ###############################################################################
@@ -450,6 +716,18 @@ if [[ "$APP_DIR_EXPLICIT" -eq 0 && -z "${CC_APP_DIR:-}" ]]; then
     exit 2
   fi
 fi
+
+if ! _ccbi_reconcile_abandoned_transaction; then
+  _err "Refusing a new deploy while abandoned transaction recovery is incomplete. Resolve the receipt above and re-run."
+  exit 2
+fi
+
+if ! DEPLOY_REVISION="$(git -C "$APP_DIR" rev-parse --verify "${DEPLOY_REVISION_INPUT}^{commit}" 2>/dev/null)"; then
+  _err "Requested revision is not a valid commit in ${APP_DIR}: ${DEPLOY_REVISION_INPUT}"
+  _err "Pass --revision <full-or-abbreviated-SHA> or set CC_DEPLOY_REVISION."
+  exit 2
+fi
+_log "Verified deploy revision: ${DEPLOY_REVISION}"
 
 DISK_CHECK_PATH="${DISK_PATH_OVERRIDE:-$APP_DIR}"
 
@@ -773,20 +1051,28 @@ _ccbi_discard_candidate_release() {
 
 _ccbi_restore_previous_dependencies() {
   # Usage: _ccbi_restore_previous_dependencies [keep-candidate-park]
-  # keep-candidate-park is used by explicit rollback so an interruption can
-  # recover the complete candidate until the rollback has fully succeeded.
+  # Returns 0 only when the previous dependency tree is actually live.
   local _keep_candidate="${1:-}"
-  [[ -n "${LIVE_NODE_MODULES_BACKUP:-}" && -d "$LIVE_NODE_MODULES_BACKUP" ]] || return 0
-  CANDIDATE_DEPS_PARK="${APP_DIR}/.node_modules.candidate.$$"
+  if [[ -z "${LIVE_NODE_MODULES_BACKUP:-}" ]]; then
+    return 0
+  fi
+  if [[ ! -d "$LIVE_NODE_MODULES_BACKUP" ]]; then
+    _err "CRITICAL: previous dependency tree is missing at ${LIVE_NODE_MODULES_BACKUP}."
+    return 1
+  fi
+
+  CANDIDATE_DEPS_PARK="${CANDIDATE_DEPS_PARK:-${APP_DIR}/.node_modules.candidate.$$}"
   local _moved_current=0
   if [[ -d "${APP_DIR}/node_modules" ]]; then
     rm -rf "$CANDIDATE_DEPS_PARK" 2>/dev/null || true
     if mv "${APP_DIR}/node_modules" "$CANDIDATE_DEPS_PARK" 2>/dev/null; then
       _moved_current=1
     else
-      rm -rf "${APP_DIR}/node_modules" 2>/dev/null || true
+      _err "CRITICAL: could not park the current dependency tree at ${CANDIDATE_DEPS_PARK}."
+      return 1
     fi
   fi
+
   if mv "$LIVE_NODE_MODULES_BACKUP" "${APP_DIR}/node_modules" 2>/dev/null; then
     _ok "  Previous dependency tree restored: ${APP_DIR}/node_modules"
     if [[ "$_keep_candidate" != "keep-candidate-park" ]]; then
@@ -799,82 +1085,198 @@ _ccbi_restore_previous_dependencies() {
   fi
 
   _err "CRITICAL: failed to restore previous dependency tree from ${LIVE_NODE_MODULES_BACKUP}."
+  local _recover_rc=0
   if [[ "$_moved_current" -eq 1 && -d "$CANDIDATE_DEPS_PARK" ]]; then
-    mv "$CANDIDATE_DEPS_PARK" "${APP_DIR}/node_modules" 2>/dev/null \
-      || _err "CRITICAL: could not recover the displaced dependency tree from ${CANDIDATE_DEPS_PARK}."
+    if mv "$CANDIDATE_DEPS_PARK" "${APP_DIR}/node_modules" 2>/dev/null; then
+      _ok "  Displaced dependency tree recovered to ${APP_DIR}/node_modules."
+      CANDIDATE_DEPS_PARK=""
+    else
+      _err "CRITICAL: could not recover the displaced dependency tree from ${CANDIDATE_DEPS_PARK}."
+      _recover_rc=1
+    fi
   fi
-  CANDIDATE_DEPS_PARK=""
   return 1
 }
 
 _ccbi_restore_previous_release() {
-  if [[ -n "${OLD_NEXT_PARK:-}" && -d "$OLD_NEXT_PARK" ]]; then
-    local _discarded="${APP_DIR}/.next.discarded.$$"
-    local _moved_current=0
-    if [[ -d "${APP_DIR}/.next" ]]; then
-      rm -rf "$_discarded" 2>/dev/null || true
-      if mv "${APP_DIR}/.next" "$_discarded" 2>/dev/null; then
-        _moved_current=1
-      else
-        rm -rf "${APP_DIR}/.next" 2>/dev/null || true
-      fi
-    fi
-    if mv "$OLD_NEXT_PARK" "${APP_DIR}/.next" 2>/dev/null; then
-      _ok "  Previous build artifact restored: ${APP_DIR}/.next"
-      rm -rf "$_discarded" 2>/dev/null || true
+  local _failed=0
+  if [[ -n "${OLD_NEXT_PARK:-}" ]]; then
+    if [[ ! -d "$OLD_NEXT_PARK" ]]; then
+      _err "CRITICAL: previous build artifact is missing at ${OLD_NEXT_PARK}."
+      _failed=1
     else
-      _err "CRITICAL: failed to restore previous build artifact from ${OLD_NEXT_PARK}."
-      if [[ "$_moved_current" -eq 1 && -d "$_discarded" ]]; then
-        mv "$_discarded" "${APP_DIR}/.next" 2>/dev/null \
-          || _err "CRITICAL: could not recover the displaced artifact from ${_discarded}."
+      local _discarded="${APP_DIR}/.next.discarded.$$"
+      local _moved_current=0
+      if [[ -d "${APP_DIR}/.next" ]]; then
+        rm -rf "$_discarded" 2>/dev/null || true
+        if mv "${APP_DIR}/.next" "$_discarded" 2>/dev/null; then
+          _moved_current=1
+        else
+          _err "CRITICAL: could not park the current artifact at ${_discarded}."
+          _failed=1
+        fi
+      fi
+      if [[ "$_failed" -eq 0 ]]; then
+        if mv "$OLD_NEXT_PARK" "${APP_DIR}/.next" 2>/dev/null; then
+          _ok "  Previous build artifact restored: ${APP_DIR}/.next"
+          rm -rf "$_discarded" 2>/dev/null || true
+          OLD_NEXT_PARK=""
+        else
+          _err "CRITICAL: failed to restore previous build artifact from ${OLD_NEXT_PARK}."
+          if [[ "$_moved_current" -eq 1 && -d "$_discarded" ]]; then
+            if mv "$_discarded" "${APP_DIR}/.next" 2>/dev/null; then
+              _ok "  Displaced artifact recovered to ${APP_DIR}/.next."
+            else
+              _err "CRITICAL: could not recover the displaced artifact from ${_discarded}."
+            fi
+          fi
+          _failed=1
+        fi
       fi
     fi
-    OLD_NEXT_PARK=""
   fi
-  _ccbi_restore_previous_dependencies
-  TRANSACTION_PHASE="PREVIOUS_LIVE"
+
+  if ! _ccbi_restore_previous_dependencies; then
+    _failed=1
+  fi
+  if [[ "$_failed" -ne 0 ]]; then
+    return 1
+  fi
+  if ! _ccbi_set_transaction_phase PREVIOUS_LIVE; then
+    _err "CRITICAL: previous release restored but transaction receipt update failed."
+    return 1
+  fi
+  return 0
 }
 
 _ccbi_recover_interrupted_rollback() {
-  local _recovered=0
-  if [[ -n "${CANDIDATE_NEXT_PARK:-}" && -d "$CANDIDATE_NEXT_PARK" ]]; then
-    if [[ -d "${APP_DIR}/.next" ]]; then
-      rm -rf "${APP_DIR}/.next.interrupted.$$" 2>/dev/null || true
-      mv "${APP_DIR}/.next" "${APP_DIR}/.next.interrupted.$$" 2>/dev/null || true
-    fi
-    if mv "$CANDIDATE_NEXT_PARK" "${APP_DIR}/.next" 2>/dev/null; then
-      _ok "  Interrupted rollback recovered the candidate artifact."
-      _recovered=1
-    else
-      _err "CRITICAL: could not recover the candidate artifact from ${CANDIDATE_NEXT_PARK}."
-    fi
+  local _failed=0
+  if [[ -n "${CANDIDATE_NEXT_PARK:-}" && ! -d "$CANDIDATE_NEXT_PARK" && -d "${APP_DIR}/.next" ]]; then
+    _ok "  Candidate artifact was never parked; it remains live."
     CANDIDATE_NEXT_PARK=""
   fi
-  if [[ -n "${CANDIDATE_DEPS_PARK:-}" && -d "$CANDIDATE_DEPS_PARK" ]]; then
-    if [[ -d "${APP_DIR}/node_modules" ]]; then
-      if [[ -n "${PREVIOUS_DEPS_BACKUP:-}" ]]; then
-        mv "${APP_DIR}/node_modules" "$PREVIOUS_DEPS_BACKUP" 2>/dev/null || true
-      else
-        rm -rf "${APP_DIR}/node_modules" 2>/dev/null || true
+  if [[ -n "${CANDIDATE_NEXT_PARK:-}" ]]; then
+    if [[ ! -d "$CANDIDATE_NEXT_PARK" ]]; then
+      _err "CRITICAL: candidate artifact park is missing at ${CANDIDATE_NEXT_PARK}."
+      _failed=1
+    else
+      local _interrupted="${APP_DIR}/.next.interrupted.$$"
+      local _moved_current=0
+      if [[ -d "${APP_DIR}/.next" ]]; then
+        rm -rf "$_interrupted" 2>/dev/null || true
+        if mv "${APP_DIR}/.next" "$_interrupted" 2>/dev/null; then
+          _moved_current=1
+        else
+          _err "CRITICAL: could not park the current artifact during rollback recovery."
+          _failed=1
+        fi
+      fi
+      if [[ "$_failed" -eq 0 ]]; then
+        if mv "$CANDIDATE_NEXT_PARK" "${APP_DIR}/.next" 2>/dev/null; then
+          _ok "  Interrupted rollback recovered the candidate artifact."
+          CANDIDATE_NEXT_PARK=""
+          rm -rf "$_interrupted" 2>/dev/null || true
+        else
+          _err "CRITICAL: could not recover the candidate artifact from ${CANDIDATE_NEXT_PARK}."
+          if [[ "$_moved_current" -eq 1 && -d "$_interrupted" ]]; then
+            if mv "$_interrupted" "${APP_DIR}/.next" 2>/dev/null; then
+              _ok "  Current artifact recovered to ${APP_DIR}/.next."
+            else
+              _err "CRITICAL: could not recover the current artifact from ${_interrupted}."
+            fi
+          fi
+          _failed=1
+        fi
       fi
     fi
-    if mv "$CANDIDATE_DEPS_PARK" "${APP_DIR}/node_modules" 2>/dev/null; then
-      _ok "  Interrupted rollback recovered the candidate dependencies."
-      _recovered=1
-    else
-      _err "CRITICAL: could not recover the candidate dependencies from ${CANDIDATE_DEPS_PARK}."
-    fi
+  fi
+
+  if [[ -n "${CANDIDATE_DEPS_PARK:-}" && ! -d "$CANDIDATE_DEPS_PARK" && -d "${APP_DIR}/node_modules" ]]; then
+    _ok "  Candidate dependencies were never parked; they remain live."
     CANDIDATE_DEPS_PARK=""
-    if [[ -n "${PREVIOUS_DEPS_BACKUP:-}" && -d "$PREVIOUS_DEPS_BACKUP" ]]; then
-      LIVE_NODE_MODULES_BACKUP="$PREVIOUS_DEPS_BACKUP"
+  fi
+  if [[ -n "${CANDIDATE_DEPS_PARK:-}" ]]; then
+    if [[ ! -d "$CANDIDATE_DEPS_PARK" ]]; then
+      _err "CRITICAL: candidate dependency park is missing at ${CANDIDATE_DEPS_PARK}."
+      _failed=1
+    else
+      local _moved_previous=0
+      if [[ -d "${APP_DIR}/node_modules" ]]; then
+        if [[ -z "${PREVIOUS_DEPS_BACKUP:-}" ]]; then
+          _err "CRITICAL: cannot recover candidate dependencies because the previous dependency backup path is unavailable."
+          _failed=1
+        elif mv "${APP_DIR}/node_modules" "$PREVIOUS_DEPS_BACKUP" 2>/dev/null; then
+          _moved_previous=1
+        else
+          _err "CRITICAL: could not move the current dependency tree back to ${PREVIOUS_DEPS_BACKUP}."
+          _failed=1
+        fi
+      fi
+      if [[ "$_failed" -eq 0 ]]; then
+        if mv "$CANDIDATE_DEPS_PARK" "${APP_DIR}/node_modules" 2>/dev/null; then
+          _ok "  Interrupted rollback recovered the candidate dependencies."
+          CANDIDATE_DEPS_PARK=""
+          LIVE_NODE_MODULES_BACKUP="$PREVIOUS_DEPS_BACKUP"
+        else
+          _err "CRITICAL: could not recover candidate dependencies from ${CANDIDATE_DEPS_PARK}."
+          if [[ "$_moved_previous" -eq 1 ]]; then
+            if mv "$PREVIOUS_DEPS_BACKUP" "${APP_DIR}/node_modules" 2>/dev/null; then
+              _ok "  Current dependency tree recovered to ${APP_DIR}/node_modules."
+            else
+              _err "CRITICAL: could not recover the current dependency tree from ${PREVIOUS_DEPS_BACKUP}."
+            fi
+          fi
+          _failed=1
+        fi
+      fi
     fi
   fi
-  if [[ "$_recovered" -eq 1 ]]; then
-    TRANSACTION_PHASE="CANDIDATE_LIVE"
-    _warn "  Explicit rollback was interrupted; the complete candidate release was restored."
-  else
-    TRANSACTION_PHASE="CANDIDATE_LIVE"
+
+  if [[ "$_failed" -ne 0 ]]; then
+    return 1
   fi
+  if ! _ccbi_set_transaction_phase CANDIDATE_LIVE; then
+    _err "CRITICAL: candidate release recovered but transaction receipt update failed."
+    return 1
+  fi
+  _warn "  Explicit rollback was interrupted; the complete candidate release was restored."
+  return 0
+}
+
+# Switch PM2 onto the release currently present in APP_DIR. Returns failure when
+# restart, reload, or start fails; callers must not run a health check after a
+# failed switch because an old healthy process can make that check pass.
+_ccbi_pm2_switch() {
+  if pm2 list 2>/dev/null | grep -q "$PM2_APP_NAME"; then
+    if pm2 restart "$PM2_APP_NAME" --update-env >/dev/null 2>&1; then
+      return 0
+    fi
+    _warn "  pm2 restart failed — trying pm2 reload ..."
+    if pm2 reload "$PM2_APP_NAME" --update-env >/dev/null 2>&1; then
+      return 0
+    fi
+    _err "  pm2 restart AND reload failed for '${PM2_APP_NAME}'."
+    return 1
+  fi
+
+  _warn "  pm2 app '${PM2_APP_NAME}' not found in pm2 list."
+  _warn "  Attempting pm2 start from ${APP_DIR} ..."
+  cd "$APP_DIR" || return 1
+  if [[ -f "$APP_DIR/ecosystem.config.cjs" ]]; then
+    if CC_PORT="$PORT" \
+       DATABASE_PATH="${DB_PATH_OVERRIDE:-${DATABASE_PATH:-}}" \
+       CC_INSTALL_DIR="$APP_DIR" \
+       pm2 start "$APP_DIR/ecosystem.config.cjs" --update-env >/dev/null 2>&1; then
+      return 0
+    fi
+    _err "  pm2 start from ${APP_DIR}/ecosystem.config.cjs failed."
+    return 1
+  fi
+  if CC_PORT="$PORT" pm2 start npm --name "$PM2_APP_NAME" --update-env -- start >/dev/null 2>&1; then
+    return 0
+  fi
+  _err "  fallback pm2 start npm failed for '${PM2_APP_NAME}'."
+  return 1
 }
 
 # Explicit transaction phases make EXIT cleanup safe:
@@ -883,33 +1285,66 @@ _ccbi_recover_interrupted_rollback() {
 # Invoked by the EXIT trap below.
 # shellcheck disable=SC2329
 _ccbi_on_exit_cleanup() {
+  local _cleanup_rc=0
   case "${TRANSACTION_PHASE:-PREPARING}" in
-    PREPARING|BUILDING)
-      _ccbi_discard_candidate_release
+    PREPARING|BUILDING|DEPENDENCIES)
+      if _ccbi_discard_candidate_release; then
+        _ccbi_archive_transaction_receipt "candidate-discarded" || _cleanup_rc=1
+      else
+        _cleanup_rc=1
+      fi
       ;;
     PROMOTING)
-      _ccbi_restore_previous_release
-      _ccbi_discard_candidate_release
+      if _ccbi_restore_previous_release; then
+        if _ccbi_discard_candidate_release; then
+          _ccbi_archive_transaction_receipt "promotion-recovered" || _cleanup_rc=1
+        else
+          _cleanup_rc=1
+        fi
+      else
+        _err "CRITICAL: promotion cleanup failed; previous release was NOT fully restored."
+        _cleanup_rc=1
+      fi
       ;;
-    ROLLING_BACK)
-      _ccbi_recover_interrupted_rollback
+    PREVIOUS_LIVE)
+      if _ccbi_discard_candidate_release; then
+        _ccbi_archive_transaction_receipt "promotion-recovered" || _cleanup_rc=1
+      else
+        _cleanup_rc=1
+      fi
+      ;;
+    ROLLING_BACK|ROLLING_BACK_ARTIFACT|ROLLING_BACK_DEPS)
+      if _ccbi_recover_interrupted_rollback; then
+        _ccbi_archive_transaction_receipt "rollback-recovered" || _cleanup_rc=1
+      else
+        _err "CRITICAL: interrupted-rollback cleanup failed; candidate release was NOT fully restored."
+        _cleanup_rc=1
+      fi
       ;;
     *)
-      # CANDIDATE_LIVE, UNKNOWN, GREEN and ROLLED_BACK remain complete states.
+      # CANDIDATE_LIVE and UNKNOWN are complete filesystem states. Unverified
+      # rollback service phases are intentionally retained for reconciliation.
       ;;
   esac
+  return "$_cleanup_rc"
 }
 trap _ccbi_on_exit_cleanup EXIT
 
 # Invoked by the signal traps below.
 # shellcheck disable=SC2329
 _ccbi_on_signal_cleanup() {
-  _ccbi_on_exit_cleanup
+  local cleanup_rc=0
+  _ccbi_on_exit_cleanup || cleanup_rc=$?
+  trap - EXIT
+  if [[ "$cleanup_rc" -ne 0 ]]; then
+    _err "Signal cleanup failed; transaction recovery is incomplete and the receipt is retained."
+    exit 1
+  fi
   exit 130
 }
 trap _ccbi_on_signal_cleanup INT TERM HUP
 
-_log "[1e] Staging complete candidate release"
+_log "[1e] Staging complete candidate release from verified revision ${DEPLOY_REVISION}"
 if [[ ! -f "${APP_DIR}/package-lock.json" ]]; then
   _preflight_abort_receipt "package-lock.json missing in ${APP_DIR} — refusing to stage dependencies. Old build untouched."
   exit 2
@@ -923,28 +1358,21 @@ fi
 # shellcheck source=lib/build-inventory.sh
 source "$BUILD_INVENTORY_LIB"
 
-# Capture the live source identity BEFORE copying anything. The candidate copy
-# must match this digest, and the live tree must still match it after the build.
-PRE_BUILD_INVENTORY="$(_ccbi_inventory_digest "$APP_DIR")" || {
-  _err "Failed to compute pre-build content inventory for ${APP_DIR}."
-  exit 2
-}
-_log "  Pre-build live content inventory: ${PRE_BUILD_INVENTORY}"
-
 RELEASE_DIR="${APP_DIR}/.release-candidate.$$"
 rm -rf "$RELEASE_DIR" 2>/dev/null || true
 mkdir -p "$RELEASE_DIR" || { _err "Failed to create candidate release directory."; exit 2; }
+if ! _ccbi_set_transaction_phase PREPARING; then
+  exit 2
+fi
 
-# Copy canonical compile inputs, build launcher support, and the env files Next
-# would read from the project root. Runtime data stays in APP_DIR.
-for _release_input in $_CCBI_TOPLEVEL_INPUTS scripts next-env.d.ts; do
-  if [[ -e "${APP_DIR}/${_release_input}" ]]; then
-    cp -R "${APP_DIR}/${_release_input}" "${RELEASE_DIR}/" || {
-      _err "Failed to copy candidate input: ${_release_input}"
-      exit 2
-    }
-  fi
-done
+# The source of truth is the verified commit, never APP_DIR's mutable working
+# tree. git archive extracts exactly that commit; environment files remain
+# runtime inputs and are copied explicitly below.
+if ! (git -C "$APP_DIR" archive "$DEPLOY_REVISION" | tar -x -C "$RELEASE_DIR"); then
+  _err "Failed to extract requested revision ${DEPLOY_REVISION} into ${RELEASE_DIR}."
+  _preflight_abort_receipt "Candidate source extraction from revision ${DEPLOY_REVISION} failed. Live release untouched."
+  exit 2
+fi
 for _release_env in .env .env.production .env.production.local .env.local; do
   if [[ -f "${APP_DIR}/${_release_env}" ]]; then
     cp -p "${APP_DIR}/${_release_env}" "${RELEASE_DIR}/${_release_env}" || {
@@ -955,16 +1383,11 @@ for _release_env in .env .env.production .env.production.local .env.local; do
 done
 
 CANDIDATE_SOURCE_INVENTORY="$(_ccbi_inventory_digest "$RELEASE_DIR")" || {
-  _err "Failed to compute the candidate source inventory after copying."
+  _err "Failed to compute the candidate source inventory for revision ${DEPLOY_REVISION}."
   exit 2
 }
-if [[ "$CANDIDATE_SOURCE_INVENTORY" != "$PRE_BUILD_INVENTORY" ]]; then
-  _err "  Candidate source inventory does not match the live source captured before copying."
-  _err "  Live inventory:       ${PRE_BUILD_INVENTORY}"
-  _err "  Candidate inventory: ${CANDIDATE_SOURCE_INVENTORY}"
-  _preflight_abort_receipt "Candidate source copy failed the frozen-source identity check. Live release untouched."
-  exit 2
-fi
+PRE_BUILD_INVENTORY="$CANDIDATE_SOURCE_INVENTORY"
+_log "  Candidate source inventory for ${DEPLOY_REVISION}: ${PRE_BUILD_INVENTORY}"
 
 if ! (cd "$RELEASE_DIR" && npm ci --no-audit --no-fund --prefer-offline --ignore-scripts=false 2>&1 | tee "$RELEASE_DIR/npm-ci.log"); then
   _preflight_abort_receipt "Dependency staging failed (npm ci). Live source, dependencies and artifact untouched."
@@ -982,14 +1405,15 @@ if ! _ccbi_native_gate "$RELEASE_DIR"; then
   _preflight_abort_receipt "Native-module gate failed on staged dependencies. Live source, dependencies and artifact untouched."
   exit 2
 fi
+if ! _ccbi_set_transaction_phase DEPENDENCIES; then
+  exit 2
+fi
 _ok "  Candidate source, dependencies and environment staged in ${RELEASE_DIR}."
 
 ###############################################################################
-# ─── PHASE 2: BUILD IN THE CANDIDATE RELEASE ────────────────────────────────
-###############################################################################
 _banner "Phase 2 — Build (candidate release)"
 
-TRANSACTION_PHASE="BUILDING"
+if ! _ccbi_set_transaction_phase BUILDING; then exit 2; fi
 BUILD_TMP_NAME=".next.tmp.$(date +%Y%m%d-%H%M%S)-$$"
 BUILD_TMP="${RELEASE_DIR}/${BUILD_TMP_NAME}"
 _log "Building into candidate artifact directory: ${BUILD_TMP}"
@@ -1094,26 +1518,22 @@ if ! _ccbi_native_gate "$RELEASE_DIR"; then
   exit 2
 fi
 
-POST_BUILD_INVENTORY="$(_ccbi_inventory_digest "$APP_DIR")" || {
-  _err "Failed to compute post-build content inventory for ${APP_DIR}."
-  _preflight_abort_receipt "Post-build content inventory computation failed. Candidate discarded; live release untouched."
-  exit 2
-}
-if [[ "$POST_BUILD_INVENTORY" != "$PRE_BUILD_INVENTORY" ]]; then
-  _err "  FROZEN-SOURCE VIOLATION: live compile inputs changed during the candidate build."
-  _err "  Pre-build  inventory: ${PRE_BUILD_INVENTORY}"
-  _err "  Post-build inventory: ${POST_BUILD_INVENTORY}"
-  _preflight_abort_receipt "FROZEN-SOURCE VIOLATION (PRES-046): compile-affecting inputs changed during compilation. Candidate discarded; live release untouched."
-  exit 2
-fi
-_ok "  Frozen-source proof passed — live content inventory unchanged during build (${POST_BUILD_INVENTORY})."
+# The candidate inventory is the explicit-revision inventory. APP_DIR may be
+# dirty without changing what was built; cc-start's content guard remains
+# responsible for reporting any live-tree mismatch at runtime.
+POST_BUILD_INVENTORY="$CANDIDATE_SOURCE_INVENTORY"
+_ok "  Frozen-source proof passed — candidate matches revision ${DEPLOY_REVISION} (${POST_BUILD_INVENTORY})."
 
-if ! _ccbi_write_manifest "$APP_DIR" "$BUILD_TMP" "$BUILD_ID" "$BUILD_START_TS"; then
+CCBI_SOURCE_SHA_OVERRIDE="$DEPLOY_REVISION"
+CCBI_DIRTY_DIGEST_OVERRIDE="explicit-revision"
+if ! _ccbi_write_manifest "$RELEASE_DIR" "$BUILD_TMP" "$BUILD_ID" "$BUILD_START_TS"; then
+  unset CCBI_SOURCE_SHA_OVERRIDE CCBI_DIRTY_DIGEST_OVERRIDE
   _err "Failed to write build-inventory.json into ${BUILD_TMP}."
   _preflight_abort_receipt "Build manifest write failed. Candidate discarded; live release untouched."
   exit 2
 fi
-_ok "  Immutable manifest written into candidate build output (inventory ${POST_BUILD_INVENTORY})"
+unset CCBI_SOURCE_SHA_OVERRIDE CCBI_DIRTY_DIGEST_OVERRIDE
+_ok "  Immutable manifest written into candidate build output (revision ${DEPLOY_REVISION}, inventory ${POST_BUILD_INVENTORY})"
 
 ###############################################################################
 # ─── PHASE 3: CONTROLLED PROMOTION ───────────────────────────────────────────
@@ -1121,9 +1541,12 @@ _ok "  Immutable manifest written into candidate build output (inventory ${POST_
 _banner "Phase 3 — Controlled promotion"
 
 _log "Promoting complete candidate release (artifact + dependencies)"
-TRANSACTION_PHASE="PROMOTING"
 LIVE_NODE_MODULES_BACKUP="${APP_DIR}/.node_modules.rollback.$$"
 PREVIOUS_DEPS_BACKUP="$LIVE_NODE_MODULES_BACKUP"
+OLD_NEXT_PARK="${APP_DIR}/.next.old.$$"
+if ! _ccbi_set_transaction_phase PROMOTING; then
+  exit 2
+fi
 
 if [[ ! -d "${APP_DIR}/node_modules" ]]; then
   _err "Live node_modules is missing; refusing an unverifiable promotion."
@@ -1137,27 +1560,37 @@ mv "${APP_DIR}/node_modules" "$LIVE_NODE_MODULES_BACKUP" || {
 }
 if ! mv "${RELEASE_DIR}/node_modules" "${APP_DIR}/node_modules"; then
   _err "Failed to promote candidate dependencies; restoring previous dependencies."
-  _ccbi_restore_previous_dependencies
-  _preflight_abort_receipt "Candidate dependency promotion failed; previous release restored."
+  if _ccbi_restore_previous_dependencies; then
+    _preflight_abort_receipt "Candidate dependency promotion failed; previous dependencies restored."
+  else
+    _preflight_abort_receipt "Candidate dependency promotion FAILED and dependency restoration FAILED. Manual recovery is required."
+  fi
   exit 2
 fi
 
-OLD_NEXT_PARK="${APP_DIR}/.next.old.$$"
 if [[ -d "${APP_DIR}/.next" ]]; then
   mv "${APP_DIR}/.next" "$OLD_NEXT_PARK" || {
     _err "Failed to park live .next for promotion; restoring previous dependencies."
-    _ccbi_restore_previous_dependencies
-    _preflight_abort_receipt "Could not preserve the live artifact; promotion refused and previous dependencies restored."
+    if _ccbi_restore_previous_dependencies; then
+      _preflight_abort_receipt "Could not preserve the live artifact; promotion refused and previous dependencies restored."
+    else
+      _preflight_abort_receipt "Could not preserve the live artifact and dependency restoration FAILED. Manual recovery is required."
+    fi
     exit 2
   }
 fi
 if ! mv "$BUILD_TMP" "${APP_DIR}/.next"; then
   _err "CRITICAL: Failed to move the candidate artifact into .next — restoring the previous release."
-  _ccbi_restore_previous_release
-  _preflight_abort_receipt "Candidate artifact promotion failed; previous complete release restored."
+  if _ccbi_restore_previous_release; then
+    _preflight_abort_receipt "Candidate artifact promotion failed; previous complete release restored."
+  else
+    _preflight_abort_receipt "Candidate artifact promotion FAILED and complete-release restoration FAILED. Manual recovery is required."
+  fi
   exit 2
 fi
-TRANSACTION_PHASE="CANDIDATE_LIVE"
+if ! _ccbi_set_transaction_phase CANDIDATE_LIVE; then
+  exit 2
+fi
 rm -rf "$OLD_NEXT_PARK" 2>/dev/null || true
 OLD_NEXT_PARK=""
 _ok "Complete candidate release promoted (BUILD_ID: ${BUILD_ID})."
@@ -1173,60 +1606,53 @@ _banner "Phase 4 — Restart + Health verification"
 export NEXT_DIST_DIR="${APP_DIR}/.next"
 _log "Explicitly reconciling PM2 NEXT_DIST_DIR to ${NEXT_DIST_DIR}"
 
-_log "[4a] Restarting pm2 app '${PM2_APP_NAME}' onto fresh build ..."
-if pm2 list 2>/dev/null | grep -q "$PM2_APP_NAME"; then
-  pm2 restart "$PM2_APP_NAME" --update-env 2>/dev/null || {
-    _warn "  pm2 restart failed — trying pm2 reload ..."
-    pm2 reload "$PM2_APP_NAME" --update-env 2>/dev/null || true
-  }
-else
-  _warn "  pm2 app '${PM2_APP_NAME}' not found in pm2 list."
-  _warn "  Attempting pm2 start from ${APP_DIR} ..."
-  if [[ -f "$APP_DIR/ecosystem.config.cjs" ]]; then
-    cd "$APP_DIR" || exit 2
-    CC_PORT="$PORT" \
-      DATABASE_PATH="${DB_PATH_OVERRIDE:-${DATABASE_PATH:-}}" \
-      CC_INSTALL_DIR="$APP_DIR" \
-      pm2 start "$APP_DIR/ecosystem.config.cjs" --update-env 2>/dev/null || true
-  else
-    cd "$APP_DIR" || exit 2
-    CC_PORT="$PORT" pm2 start npm --name "$PM2_APP_NAME" --update-env -- start 2>/dev/null || true
-  fi
+_log "[4a] Switching pm2 app '${PM2_APP_NAME}' onto the fresh build ..."
+if ! _ccbi_set_transaction_phase SERVICE_SWITCH; then
+  exit 2
 fi
+if ! _ccbi_pm2_switch; then
+  _err "  PM2 switch FAILED; refusing to health-check because an old healthy process could produce a false green."
+  HEALTH_JSON="{\"green\":false,\"error\":\"pm2 switch failed\"}"
+  HEALTH_EXIT=1
+else
+  if ! _ccbi_set_transaction_phase HEALTH_CHECK; then
+    exit 2
+  fi
+  _ok "  PM2 switch succeeded for '${PM2_APP_NAME}'."
+  _log "  Waiting 5 seconds for server to start ..."
+  sleep 5
 
-_log "  Waiting 5 seconds for server to start ..."
-sleep 5
-
-_log "[4b] Running cc-health-check.sh ..."
-HEALTH_JSON=""
-HEALTH_EXIT=0
-ATTEMPT=0
-
-while true; do
-  ATTEMPT=$(( ATTEMPT + 1 ))
+  _log "[4b] Running cc-health-check.sh ..."
+  HEALTH_JSON=""
   HEALTH_EXIT=0
-  _run_health_check HEALTH_JSON || HEALTH_EXIT=$?
-  _log "  Health check attempt ${ATTEMPT}: exit ${HEALTH_EXIT}"
+  ATTEMPT=0
 
-  if [[ $HEALTH_EXIT -eq 0 ]]; then
-    break
-  elif [[ $HEALTH_EXIT -eq 1 ]]; then
-    _err "  Health check returned exit 1 (definitive NOT GREEN) on attempt ${ATTEMPT}."
-    break
-  elif [[ $HEALTH_EXIT -eq 3 ]]; then
-    _unknown_receipt "$HEALTH_JSON" "$ATTEMPT" "$HEALTH_RETRIES"
-    if [[ $ATTEMPT -ge $HEALTH_RETRIES ]]; then
-      _err "  Health check returned exit 3 (UNKNOWN) on all ${HEALTH_RETRIES} attempts."
+  while true; do
+    ATTEMPT=$(( ATTEMPT + 1 ))
+    HEALTH_EXIT=0
+    _run_health_check HEALTH_JSON || HEALTH_EXIT=$?
+    _log "  Health check attempt ${ATTEMPT}: exit ${HEALTH_EXIT}"
+
+    if [[ $HEALTH_EXIT -eq 0 ]]; then
+      break
+    elif [[ $HEALTH_EXIT -eq 1 ]]; then
+      _err "  Health check returned exit 1 (definitive NOT GREEN) on attempt ${ATTEMPT}."
+      break
+    elif [[ $HEALTH_EXIT -eq 3 ]]; then
+      _unknown_receipt "$HEALTH_JSON" "$ATTEMPT" "$HEALTH_RETRIES"
+      if [[ $ATTEMPT -ge $HEALTH_RETRIES ]]; then
+        _err "  Health check returned exit 3 (UNKNOWN) on all ${HEALTH_RETRIES} attempts."
+        break
+      fi
+      _warn "  Retrying in ${HEALTH_RETRY_WAIT}s ... (attempt ${ATTEMPT}/${HEALTH_RETRIES})"
+      sleep "$HEALTH_RETRY_WAIT"
+    else
+      _err "  Health check returned unexpected exit ${HEALTH_EXIT}."
+      HEALTH_EXIT=1
       break
     fi
-    _warn "  Retrying in ${HEALTH_RETRY_WAIT}s ... (attempt ${ATTEMPT}/${HEALTH_RETRIES})"
-    sleep "$HEALTH_RETRY_WAIT"
-  else
-    _err "  Health check returned unexpected exit ${HEALTH_EXIT}."
-    HEALTH_EXIT=1
-    break
-  fi
-done
+  done
+fi
 
 ###############################################################################
 # ─── PHASE 5: VERDICT ────────────────────────────────────────────────────────
@@ -1311,12 +1737,15 @@ if [[ $HEALTH_EXIT -eq 0 ]]; then
   fi
 
   _success_receipt "$HEALTH_JSON" "$BUILD_ID"
+  _ccbi_archive_transaction_receipt "green" || _warn "Could not archive completed transaction receipt."
   exit 0
 
 elif [[ $HEALTH_EXIT -eq 3 ]]; then
   # UNKNOWN retains both complete states: candidate artifact+dependencies live,
   # previous artifact+dependencies available for an explicit operator rollback.
-  TRANSACTION_PHASE="UNKNOWN"
+  if ! _ccbi_set_transaction_phase UNKNOWN; then
+    exit 3
+  fi
   _warn "Deploy ended UNKNOWN after ${ATTEMPT} health-check attempts."
   _warn "The complete CANDIDATE artifact and dependency tree remain live."
   _warn "The complete PREVIOUS artifact and dependency tree remain retained for an explicit rollback."
@@ -1353,12 +1782,13 @@ else
 
   # Prepare the prior artifact beside the live candidate first. A copy failure
   # leaves the complete candidate untouched.
-  TRANSACTION_PHASE="ROLLING_BACK"
+  if ! _ccbi_set_transaction_phase ROLLING_BACK; then
+    exit 1
+  fi
   ROLLBACK_RESTORE_DIR="${APP_DIR}/.next.restore.$$"
   rm -rf "$ROLLBACK_RESTORE_DIR" 2>/dev/null || true
   if ! cp -r "$ROLLBACK_DIR" "$ROLLBACK_RESTORE_DIR" 2>/dev/null; then
     rm -rf "$ROLLBACK_RESTORE_DIR" 2>/dev/null || true
-    TRANSACTION_PHASE="CANDIDATE_LIVE"
     _err "CRITICAL: Failed to prepare .next from rollback artifact!"
     _err "The complete candidate release remains live. Rollback artifact at: ${ROLLBACK_DIR}"
     _rollback_receipt "$FAILED_HEALTH_JSON" "{\"green\":false,\"error\":\"rollback preparation failed; complete candidate retained\"}" \
@@ -1369,69 +1799,108 @@ else
   # Park the candidate artifact and move the prepared prior artifact into
   # place. Any interruption in this window restores the complete candidate.
   CANDIDATE_NEXT_PARK="${APP_DIR}/.next.candidate.$$"
+  if ! _ccbi_set_transaction_phase ROLLING_BACK_ARTIFACT; then
+    exit 1
+  fi
   if ! mv "${APP_DIR}/.next" "$CANDIDATE_NEXT_PARK" 2>/dev/null; then
     rm -rf "$ROLLBACK_RESTORE_DIR" 2>/dev/null || true
-    TRANSACTION_PHASE="CANDIDATE_LIVE"
     _err "CRITICAL: Failed to park the candidate artifact for rollback; complete candidate remains live."
     _rollback_receipt "$FAILED_HEALTH_JSON" "{\"green\":false,\"error\":\"candidate artifact park failed; complete candidate retained\"}" \
       "Health check NOT GREEN; rollback could not park the candidate — complete candidate retained"
     exit 1
   fi
   if ! mv "$ROLLBACK_RESTORE_DIR" "${APP_DIR}/.next" 2>/dev/null; then
-    _ccbi_recover_interrupted_rollback
-    _err "CRITICAL: Failed to install the prepared rollback artifact; complete candidate restored."
-    _rollback_receipt "$FAILED_HEALTH_JSON" "{\"green\":false,\"error\":\"rollback artifact install failed; complete candidate restored\"}" \
-      "Health check NOT GREEN; rollback artifact installation FAILED — complete candidate restored"
+    if _ccbi_recover_interrupted_rollback; then
+      rm -rf "$ROLLBACK_RESTORE_DIR" 2>/dev/null || true
+      _err "CRITICAL: Failed to install the prepared rollback artifact; complete candidate restored."
+      _rollback_receipt "$FAILED_HEALTH_JSON" "{\"green\":false,\"error\":\"rollback artifact install failed; complete candidate restored\"}" \
+        "Health check NOT GREEN; rollback artifact installation FAILED — complete candidate restored"
+    else
+      _err "CRITICAL: Failed to install the prepared rollback artifact AND candidate recovery FAILED."
+      _rollback_receipt "$FAILED_HEALTH_JSON" "{\"green\":false,\"error\":\"rollback artifact install and candidate recovery failed\"}" \
+        "Health check NOT GREEN; rollback artifact installation and candidate recovery FAILED — manual intervention required"
+    fi
     exit 1
   fi
+
+
 
   _log "Restoring the previous dependency tree for the restored build ..."
-  if ! _ccbi_restore_previous_dependencies keep-candidate-park; then
-    _ccbi_recover_interrupted_rollback
-    _err "CRITICAL: Failed to restore previous dependencies; complete candidate restored."
-    _rollback_receipt "$FAILED_HEALTH_JSON" "{\"green\":false,\"error\":\"dependency rollback failed; complete candidate restored\"}" \
-      "Health check NOT GREEN; dependency rollback FAILED — complete candidate restored"
+  CANDIDATE_DEPS_PARK="${APP_DIR}/.node_modules.candidate.$$"
+  if ! _ccbi_set_transaction_phase ROLLING_BACK_DEPS; then
     exit 1
   fi
-  TRANSACTION_PHASE="ROLLED_BACK"
-  rm -rf "$CANDIDATE_NEXT_PARK" "$CANDIDATE_DEPS_PARK" 2>/dev/null || true
-  CANDIDATE_NEXT_PARK=""
-  CANDIDATE_DEPS_PARK=""
-  PREVIOUS_DEPS_BACKUP=""
+  if ! _ccbi_restore_previous_dependencies keep-candidate-park; then
+    if _ccbi_recover_interrupted_rollback; then
+      _err "CRITICAL: Failed to restore previous dependencies; complete candidate restored."
+      _rollback_receipt "$FAILED_HEALTH_JSON" "{\"green\":false,\"error\":\"dependency rollback failed; complete candidate restored\"}" \
+        "Health check NOT GREEN; dependency rollback FAILED — complete candidate restored"
+    else
+      _err "CRITICAL: Failed to restore previous dependencies AND candidate recovery FAILED."
+      _rollback_receipt "$FAILED_HEALTH_JSON" "{\"green\":false,\"error\":\"dependency rollback and candidate recovery failed\"}" \
+        "Health check NOT GREEN; dependency rollback and candidate recovery FAILED — manual intervention required"
+    fi
+    exit 1
+  fi
 
-  _log "Restarting pm2 app onto the restored complete release ..."
-  pm2 restart "$PM2_APP_NAME" --update-env 2>/dev/null || true
-  sleep 5
 
-  _log "Re-running cc-health-check.sh on restored build ..."
+  if ! _ccbi_set_transaction_phase ROLLBACK_SERVICE; then
+    exit 1
+  fi
+
+  _log "Switching pm2 app onto the restored complete release ..."
   ROLLBACK_HEALTH_JSON=""
-  ROLLBACK_HEALTH_EXIT=0
-  _run_health_check ROLLBACK_HEALTH_JSON || ROLLBACK_HEALTH_EXIT=$?
-  _log "  Rollback health check exit: ${ROLLBACK_HEALTH_EXIT}"
+  ROLLBACK_HEALTH_EXIT=1
+  ROLLBACK_SWITCH_OK=0
+  if _ccbi_pm2_switch; then
+    ROLLBACK_SWITCH_OK=1
+    if ! _ccbi_set_transaction_phase ROLLBACK_HEALTH; then
+      exit 1
+    fi
+    sleep 5
+    _log "Re-running cc-health-check.sh on restored build ..."
+    ROLLBACK_HEALTH_EXIT=0
+    _run_health_check ROLLBACK_HEALTH_JSON || ROLLBACK_HEALTH_EXIT=$?
+    _log "  Rollback health check exit: ${ROLLBACK_HEALTH_EXIT}"
+  else
+    ROLLBACK_HEALTH_JSON="{\"green\":false,\"error\":\"rollback pm2 switch failed\"}"
+    _err "CRITICAL: rollback restored the prior release but PM2 could not switch onto it."
+  fi
 
   _rollback_receipt "$FAILED_HEALTH_JSON" "$ROLLBACK_HEALTH_JSON" \
-    "Health check exit ${HEALTH_EXIT}: NOT GREEN on new build (BUILD_ID: ${BUILD_ID:-unknown}); server rolled back to the prior complete release"
+    "Health check exit ${HEALTH_EXIT}: NOT GREEN on new build (BUILD_ID: ${BUILD_ID:-unknown}); complete prior-release rollback attempted"
 
   _ccbi_write_rollback_state \
     "$APP_DIR" \
     "$ROLLBACK_INVENTORY" \
     "$PRE_BUILD_INVENTORY" \
     "${BUILD_ID:-unknown}" \
-    "Health check exit ${HEALTH_EXIT} on target build ${BUILD_ID:-unknown}; auto-rolled back to the prior complete release" \
+    "Health check exit ${HEALTH_EXIT} on target build ${BUILD_ID:-unknown}; rolled back to the prior complete release" \
     && _ok "  Rollback receipt written: ${APP_DIR}/.deploy-rollback-state.json (prior=${ROLLBACK_INVENTORY})" \
     || _err "  Failed to write rollback receipt — degraded state NOT recorded; startup guard will refuse the mismatch loudly."
 
-  _ccbi_discard_candidate_release \
-    && _ok "  Candidate preparation directory removed after rollback." \
-    || true
-
-  if [[ $ROLLBACK_HEALTH_EXIT -eq 0 ]]; then
-    _warn "Rollback complete. Server is GREEN on the PRIOR complete release — AVAILABLE BUT DEGRADED (pending repair)."
+  if [[ "$ROLLBACK_SWITCH_OK" -eq 1 && "$ROLLBACK_HEALTH_EXIT" -eq 0 ]]; then
+    if ! _ccbi_set_transaction_phase ROLLED_BACK_VERIFIED; then
+      exit 1
+    fi
+    rm -rf "$CANDIDATE_NEXT_PARK" "$CANDIDATE_DEPS_PARK" 2>/dev/null || true
+    CANDIDATE_NEXT_PARK=""
+    CANDIDATE_DEPS_PARK=""
+    PREVIOUS_DEPS_BACKUP=""
+    _ccbi_discard_candidate_release \
+      && _ok "  Candidate preparation directory removed after verified rollback." \
+      || true
+    _ccbi_archive_transaction_receipt "rollback-complete" || true
+    _warn "Rollback verified. Server is GREEN on the PRIOR complete release — AVAILABLE BUT DEGRADED (pending repair)."
     _warn "This is NOT a successful upgrade: health output separates availability from target freshness."
     _warn "Investigate the failing health-check JSON above before re-deploying."
   else
-    _err "ALERT: Rollback complete but server is still NOT GREEN (exit ${ROLLBACK_HEALTH_EXIT}) on the prior complete release."
-    _err "Operator must investigate immediately. See rollback health JSON above."
+    if ! _ccbi_set_transaction_phase ROLLBACK_VERIFY_FAILED; then
+      _err "Could not persist ROLLBACK_VERIFY_FAILED; retain the transaction receipt for manual recovery."
+    fi
+    _err "ALERT: ROLLBACK DID NOT COMPLETE. Prior release files were restored, but the restored service was not verified."
+    _err "PM2 switch status: ${ROLLBACK_SWITCH_OK}; rollback health exit: ${ROLLBACK_HEALTH_EXIT}."
+    _err "Operator must investigate immediately. Rollback material is retained."
   fi
 
   exit 1

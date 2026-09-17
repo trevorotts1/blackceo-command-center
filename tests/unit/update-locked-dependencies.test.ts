@@ -123,6 +123,25 @@ test('updater bootstrap Node floor matches package engines at supported boundari
   }
 });
 
+
+test('updater passes the resolved merge commit as the explicit atomic-deploy revision', () => {
+  assert.match(
+    updater,
+    /DEPLOY_REVISION="\$\(git -C "\$INSTALL_DIR" rev-parse HEAD/,
+    'update.sh must resolve the exact merged commit before invoking atomic-deploy.sh',
+  );
+  assert.match(
+    updater,
+    /ADEPLOY_ARGS\+=\(--revision "\$DEPLOY_REVISION"\)/,
+    'update.sh must pass the resolved commit explicitly to atomic-deploy.sh',
+  );
+  assert.match(
+    updater,
+    /Atomic deploy source revision: \$DEPLOY_REVISION/,
+    'update.sh must report the exact revision used for the atomic deployment',
+  );
+});
+
 test('updater checks the RESOLVED node, and reports it by path', () => {
   // The identity half: whatever node the preflight settled on is the one whose
   // version is checked and the one exported as CC_NODE_BIN for npm ci.
