@@ -592,7 +592,41 @@ else
   _ok "  No non-canonical pm2 app is bound to or declared on port ${PORT}."
 fi
 
-_ok "Phase 1 pre-flight passed."
+# NATIVE-MODULE GATE: the running server must be able to load every native
+# module it requires (better-sqlite3 class) BEFORE the build starts. npm ci can
+# silently drop a platform binary; discovering that after the health check
+# already failed wastes the whole deploy and forces a manual recovery.
+NATIVE_MODULE_GATES=( "better-sqlite3" )
+for _nat_mod in "${NATIVE_MODULE_GATES[@]}"; do
+  _nat_lib="${APP_DIR}/node_modules/${_nat_mod}/build/Release/${_nat_mod}.node"
+  if [[ -f "${_nat_lib}" ]]; then
+    if ! node -e "require('${_nat_lib}')" >/dev/null 2>&1; then
+      _preflight_abort_receipt "Native module ${_nat_mod} exists but fails to load with the CURRENT node. Run 'cd ${APP_DIR}/node_modules/${_nat_mod} && npx prebuild-install || npm rebuild ${_nat_mod}' and re-run the updater. Old build untouched."
+    fi
+    _ok "  Native module ${_nat_mod} loads."
+  else
+    _warn "  Native module ${_nat_mod} binary not found at ${_nat_lib} — deploy continues but the post-build gate below will check the candidate."
+  fi
+done
+# Post-build gate: the candidate node_modules must load every native module.
+_ccbi_native_candidate_gate() {
+  for _nat_mod in "${NATIVE_MODULE_GATES[@]}"; do
+    local _cand_lib="${APP_DIR}/node_modules/${_nat_mod}/build/Release/${_nat_mod}.node"
+    if [[ ! -f "${_cand_lib}" ]]; then
+      _err "Post-build: ${_nat_mod} binary missing from node_modules. Building would produce a server that cannot open the DB."
+      return 1
+    fi
+    if ! node -e "require('${_cand_lib}')" >/dev/null 2>&1; then
+      _err "Post-build: ${_nat_mod} binary exists but fails to load. The candidate would crash-loop at health-check time."
+      return 1
+    fi
+  done
+  return 0
+}
+if ! _ccbi_native_candidate_gate; then
+  _preflight_abort_receipt "Native-module candidate gate failed — candidate would produce an unhealthy server. Old build untouched."
+fi
+_ok "Phase 1 pre-flight passed (including native-module gates)."
 
 ###############################################################################
 # ─── PHASE 2: BUILD TO TEMP DIR ─────────────────────────────────────────────
