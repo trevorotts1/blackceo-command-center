@@ -1159,7 +1159,7 @@ exit 0
     const manifest = JSON.parse(readFileSync(path.join(fixture.appDir, '.next', 'build-inventory.json'), 'utf8')) as Record<string, string>;
     assert.strictEqual(manifest.source_sha, targetRevision,
       'The sealed manifest must record the exact requested commit SHA.');
-    const verify = spawnSync('/opt/homebrew/bin/bash', [
+    const verify = spawnSync('bash', [
       path.join(process.cwd(), 'scripts', 'lib', 'build-inventory.sh'),
       '--verify', fixture.appDir,
     ], { encoding: 'utf8' });
