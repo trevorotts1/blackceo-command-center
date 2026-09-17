@@ -1240,7 +1240,9 @@ if [[ $HEALTH_EXIT -eq 0 ]]; then
   #    remembered. WATCHDOG_SELF_HEAL=1 enables only the bounded repairs
   #    watchdog-cc.sh already implements; this changes none of its repair logic.
   _log "[5] Installing the box watchdog schedule (scripts/install-watchdog-cc.sh) ..."
-  if bash "${SCRIPT_DIR}/install-watchdog-cc.sh" --port "$PORT" --pm2-app "$PM2_APP_NAME"; then
+  _wd_args=(--port "$PORT" --pm2-app "$PM2_APP_NAME" --app-dir "$APP_DIR")
+  [[ -n "$PUBLIC_URL_PROBE" ]] && _wd_args+=(--public-url "$PUBLIC_URL_PROBE")
+  if bash "${SCRIPT_DIR}/install-watchdog-cc.sh" "${_wd_args[@]}"; then
     _ok "  Box watchdog scheduled — it checks this CC every 5 minutes and repairs the failures it is allowed to repair."
   else
     _warn "  Box watchdog schedule NOT installed. Nothing out-of-process will restart this CC if it stops answering. Install it with: bash ${SCRIPT_DIR}/install-watchdog-cc.sh --port ${PORT} --pm2-app ${PM2_APP_NAME}"

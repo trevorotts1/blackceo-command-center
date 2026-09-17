@@ -62,6 +62,8 @@ MARKER_END="# END blackceo watchdog-cc"
 
 PORT="4000"
 PM2_APP=""
+PUBLIC_URL=""
+APP_DIR=""
 MODE="install"
 
 _log()  { printf '[install-watchdog-cc] %s\n' "$*" >&2; }
@@ -73,12 +75,27 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --port)      PORT="${2:?--port requires a value}"; shift 2 ;;
     --pm2-app)   PM2_APP="${2:?--pm2-app requires a value}"; shift 2 ;;
+    --public-url) PUBLIC_URL="${2:?--public-url requires a value}"; shift 2 ;;
+    --app-dir)   APP_DIR="${2:?--app-dir requires a value}"; shift 2 ;;
     --check)     MODE="check"; shift ;;
     --uninstall) MODE="uninstall"; shift ;;
     -h|--help)   sed -n '2,40p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *)           _err "unknown argument: $1"; exit 2 ;;
   esac
 done
+
+# CC_PUBLIC_URL: without it cc-health-check.sh reports row 27 UNKNOWN and the
+# watchdog never acts (measured on the operator Mac 2026-09-17). Take it from
+# --public-url, else from the app's own env file under --app-dir. Never printed.
+if [[ -z "$PUBLIC_URL" && -n "$APP_DIR" ]]; then
+  for _envf in "${APP_DIR}/.env.local" "${APP_DIR}/.env"; do
+    if [[ -f "$_envf" ]]; then
+      PUBLIC_URL="$(grep -E '^CC_PUBLIC_URL=' "$_envf" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"'"'"' ' || true)"
+      [[ -n "$PUBLIC_URL" ]] && break
+    fi
+  done
+  unset _envf
+fi
 
 PLATFORM="${WATCHDOG_INSTALL_PLATFORM:-$(uname -s)}"
 case "$PLATFORM" in
@@ -106,6 +123,13 @@ _mac_write_plist() {
         <string>${PM2_APP}</string>
 "
   fi
+  local public_url_entry=""
+  if [[ -n "$PUBLIC_URL" ]]; then
+    local _pub_xml="${PUBLIC_URL//&/&amp;}"
+    public_url_entry="        <key>CC_PUBLIC_URL</key>
+        <string>${_pub_xml}</string>
+"
+  fi
   cat > "$PLIST_PATH" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -124,7 +148,7 @@ _mac_write_plist() {
         <string>1</string>
         <key>WATCHDOG_PORT</key>
         <string>${PORT}</string>
-${app_names_entry}    </dict>
+${app_names_entry}${public_url_entry}    </dict>
     <key>StartInterval</key>
     <integer>${INTERVAL_SECONDS}</integer>
     <key>RunAtLoad</key>
@@ -160,7 +184,7 @@ _mac_reload() {
 
 _mac_install() {
   _mac_write_plist || { _err "could not write ${PLIST_PATH}"; return 1; }
-  _ok "wrote ${PLIST_PATH} — runs ${WATCHDOG_SCRIPT} every ${INTERVAL_SECONDS}s with WATCHDOG_SELF_HEAL=1, WATCHDOG_PORT=${PORT}${PM2_APP:+, WATCHDOG_CC_APP_NAMES=${PM2_APP}}"
+  _ok "wrote ${PLIST_PATH} — runs ${WATCHDOG_SCRIPT} every ${INTERVAL_SECONDS}s with WATCHDOG_SELF_HEAL=1, WATCHDOG_PORT=${PORT}${PM2_APP:+, WATCHDOG_CC_APP_NAMES=${PM2_APP}}, CC_PUBLIC_URL=$([[ -n "$PUBLIC_URL" ]] && echo set || echo 'NOT SET (health rows needing the public URL will read UNKNOWN)')"
   _log "log: ${MAC_LOG}"
   _mac_reload
 }
@@ -206,6 +230,7 @@ _mac_uninstall() {
 _cron_line() {
   local envs="WATCHDOG_SELF_HEAL=1 WATCHDOG_PORT=${PORT}"
   [[ -n "$PM2_APP" ]] && envs="${envs} WATCHDOG_CC_APP_NAMES=${PM2_APP}"
+  [[ -n "$PUBLIC_URL" ]] && envs="${envs} CC_PUBLIC_URL='${PUBLIC_URL//\'/}'"
   printf '*/5 * * * * %s bash %s >> %s 2>&1' "$envs" "$WATCHDOG_SCRIPT" "$LINUX_LOG"
 }
 
