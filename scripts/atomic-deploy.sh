@@ -29,6 +29,14 @@
 #   3 — UNKNOWN / indeterminate — health check returned 3 after all retries; deploy NOT rolled back
 #       (the box is in an unknown state; operator must investigate)
 #
+# PHASE 5 SELF-MAINTENANCE (best-effort, never changes the deploy's exit code)
+#   Every green deploy also (a) installs + pins pm2-logrotate so pm2 logs cannot
+#   fill the disk, and (b) installs the */5 schedule for scripts/watchdog-cc.sh
+#   via scripts/install-watchdog-cc.sh with WATCHDOG_SELF_HEAL=1. Until this
+#   existed, the box watchdog documented a crontab schedule that nothing in the
+#   repo ever installed, so on a box where the CC stopped answering there was
+#   no out-of-process repair at all. Both steps are idempotent.
+#
 # INVARIANTS (from B.2 spec)
 #   Never partial     — the live .next is replaced by a single atomic rename/move
 #   Never unverified  — every deploy is followed by cc-health-check.sh
@@ -197,6 +205,17 @@ else
   oc_backup_size_kb() { echo 0; }
   oc_backup_precheck_disk() { return 0; }
   oc_backup_prune() { return 0; }
+fi
+
+# pm2 log rotation (Phase 5). Same posture as backup retention above: always
+# ships beside this script, and a checkout without it degrades to a no-op with
+# a loud warning rather than failing a deploy over log hygiene.
+if [[ -f "${SCRIPT_DIR}/lib/pm2-logrotate.sh" ]]; then
+  # shellcheck source=lib/pm2-logrotate.sh
+  source "${SCRIPT_DIR}/lib/pm2-logrotate.sh"
+else
+  _warn "lib/pm2-logrotate.sh not found beside atomic-deploy.sh — pm2 logs will NOT be rotated on this box."
+  oc_ensure_pm2_logrotate() { return 0; }
 fi
 
 # CC_HEALTH_CHECK_PATH env var allows fixture harnesses to inject a stub
@@ -1199,6 +1218,33 @@ if [[ $HEALTH_EXIT -eq 0 ]]; then
   pm2 save >/dev/null 2>&1 \
     && _ok "  pm2 process list saved — CC app + cloudflared connector will auto-resurrect after restart/OOM." \
     || _warn "  pm2 save FAILED — process list NOT persisted. Run 'pm2 save' manually so this box survives a reboot."
+
+  # ── The box keeps checking and repairing itself after this deploy ──────────
+  # Both steps are BEST-EFFORT by design: neither may change the exit code of
+  # an otherwise-green deploy. A failure here is a warning an operator can act
+  # on, never a rollback.
+  #
+  # 1. pm2 log rotation. pm2 appends to ~/.pm2/logs forever; on a long-running
+  #    box that is a disk-full incident in waiting, and disk-full takes the
+  #    whole CC down. Idempotent: an already-correct box writes nothing.
+  _log "[5] Ensuring pm2 log rotation is installed and pinned ..."
+  oc_ensure_pm2_logrotate || _warn "  pm2 log rotation setup reported a problem — pm2 logs may grow unbounded on this box."
+
+  # 2. The box watchdog's SCHEDULE. scripts/watchdog-cc.sh is the only thing
+  #    that can restart a command center that has stopped answering, and its
+  #    header has documented "*/5 * * * *" for as long as it has existed —
+  #    while nothing in this repo ever installed that schedule. Measured on the
+  #    operator Mac: no crontab, no launchd job, its log untouched since
+  #    2026-09-09. Installing it from the deploy is what makes "the system
+  #    checks itself" true on every box instead of only where someone
+  #    remembered. WATCHDOG_SELF_HEAL=1 enables only the bounded repairs
+  #    watchdog-cc.sh already implements; this changes none of its repair logic.
+  _log "[5] Installing the box watchdog schedule (scripts/install-watchdog-cc.sh) ..."
+  if bash "${SCRIPT_DIR}/install-watchdog-cc.sh" --port "$PORT" --pm2-app "$PM2_APP_NAME"; then
+    _ok "  Box watchdog scheduled — it checks this CC every 5 minutes and repairs the failures it is allowed to repair."
+  else
+    _warn "  Box watchdog schedule NOT installed. Nothing out-of-process will restart this CC if it stops answering. Install it with: bash ${SCRIPT_DIR}/install-watchdog-cc.sh --port ${PORT} --pm2-app ${PM2_APP_NAME}"
+  fi
 
   # ── Cleanup rollback + parked build artefacts ──────────────────────────
   # MR-40: On a green deploy the rollback snapshot and any parked

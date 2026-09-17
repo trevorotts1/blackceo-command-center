@@ -12,9 +12,14 @@
  *   OFF      ticking and short-circuiting on an operator kill flag. This is a
  *            DECISION, not a fault: it is named in the OK detail and never alerts.
  *
- * When something is wrong it sends ONE Telegram message per cooldown window
- * (default 60 minutes). Messages are written for a human who has just been
- * paged and does not know this codebase.
+ * When a watched job is SILENT the watchdog REPAIRS it: it restarts the command
+ * center process (the only repair possible for an in-process node-cron loop)
+ * under a warm-up guard, a cooldown and a three-in-six-hours circuit breaker,
+ * and the Telegram message states what it did. See the SELF-REPAIR block below.
+ *
+ * It sends ONE Telegram message per cooldown window (default 60 minutes).
+ * Messages are written for a human who has just been paged, does not know this
+ * codebase, and is being TOLD what happened — never handed a chore.
  *
  * Task-processing health is separate from process liveness: recent failures are unhealthy.
  */
@@ -92,11 +97,34 @@ function naturalList(items:string[]):string {
  if(items.length<2)return items[0]||'';
  return `${items.slice(0,-1).join(', ')} and ${items[items.length-1]}`;
 }
-/** One problem, in plain English, for someone who has just been paged. */
+/** Small counts read as words inside a sentence someone is being paged with.
+ *  Rendered FROM the constants they describe, so a changed budget can never
+ *  leave the message quoting a number the code no longer enforces. */
+const NUMBER_WORDS=['zero','one','two','three','four','five','six','seven','eight','nine','ten','eleven','twelve'];
+function numberWord(n:number):string { return NUMBER_WORDS[n]??String(n); }
+
+/** "has not run for 17 minutes" / "has never run since the command center started". */
+function silentAgeClause(w:WatchedJobLiveness):string {
+ return w.ageMinutes===null?'has never run since the command center started':`has not run for ${plural(Math.round(w.ageMinutes),'minute')}`;
+}
+/** The opening sentence of every silent-job message. */
+function describeSilent(w:WatchedJobLiveness):string {
+ return w.ageMinutes===null?`${w.jobName} ${silentAgeClause(w)}.`:`${w.jobName} ${silentAgeClause(w)} (it should run every ${plural(w.cadenceMinutes,'minute')}).`;
+}
+/** A job that is TICKING but whose body keeps throwing. The loop is alive, so a
+ *  restart repairs nothing: the message says what the system is already doing
+ *  about it (retrying on the job's own cadence) instead of handing over a chore. */
+function describeFailing(w:WatchedJobLiveness):string {
+ return `${w.jobName} has failed ${plural(w.consecutiveFailures,'run')} in a row (last error: ${w.errorCode||'unknown'}). The job keeps being retried every ${plural(w.cadenceMinutes,'minute')}.`;
+}
+/** One problem, in plain English, for the NON-GATING advisory surface. That
+ *  surface is a pure read and knows nothing about any repair, so it describes
+ *  the CONDITION only; runBoardJobsWatchdog() below replaces the silent
+ *  sentence with what the system actually DID about it. */
 function describeProblem(w:WatchedJobLiveness):string {
- if(w.ageMinutes===null)return `${w.jobName} has never run since the command center started.`;
- if(w.stale)return `${w.jobName} has not run for ${plural(Math.round(w.ageMinutes),'minute')} (it should run every ${plural(w.cadenceMinutes,'minute')}). The background loop that moves tasks may have stopped. Check the command center process.`;
- return `${w.jobName} has failed ${plural(w.consecutiveFailures,'run')} in a row (last error: ${w.errorCode||'unknown'}). Check the command center logs.`;
+ if(!w.stale)return describeFailing(w);
+ if(w.ageMinutes===null)return describeSilent(w);
+ return `${describeSilent(w)} The background loop that moves tasks may have stopped.`;
 }
 
 export interface BoardJobsWatchdogCheckResult {pass:boolean;detail:string;indeterminate?:boolean;watched:WatchedJobLiveness[];}
@@ -111,17 +139,160 @@ export function checkBoardJobsWatchdog():BoardJobsWatchdogCheckResult {
  const off=watched.filter(w=>w.disabled).map(w=>w.jobName);
  return {pass:true,watched,detail:`board_jobs_watchdog: all ${watched.length} background jobs are running on schedule.${off.length?` ${naturalList(off)} ${off.length===1?'is':'are'} switched off on this box.`:''}`};
 }
-export interface BoardJobsWatchdogRunResult {ranAt:string;skippedReason?:string;staleJobs:string[];disabledJobs:string[];failedJobs?:string[];alerted:boolean;notificationStatus?:'queued'|'unavailable'|'cooldown';}
-export async function runBoardJobsWatchdog():Promise<BoardJobsWatchdogRunResult> {
+
+/**
+ * SELF-REPAIR — "I'm not checking this. You did it. You check it."
+ *
+ * The alert this watchdog used to send ended by telling the reader to go and
+ * inspect the command center process themselves. That is a chore handed to a
+ * person for a fault the system can both detect and fix, and on the box that
+ * proved it that chore was the ONLY thing
+ * standing between a dead loop and a dead board: the out-of-process repair
+ * (scripts/watchdog-cc.sh) was never installed on any schedule by anything in
+ * this repo, so nothing was ever going to restart that loop. Two independent
+ * layers now perform the repair, and the message states what was done:
+ *
+ *   IN-PROCESS (here): the cron loop is dead but the process is alive and
+ *     still answering HTTP. node-cron registrations are made ONCE at boot, so
+ *     nothing inside a running process can revive them. The only repair
+ *     available from inside is to exit and let pm2 start it again with fresh
+ *     timers.
+ *   OUT-OF-PROCESS (scripts/watchdog-cc.sh, installed on a schedule by
+ *     scripts/install-watchdog-cc.sh from the deploy): covers what this layer
+ *     cannot — a process that is gone, wedged, or not answering at all.
+ *
+ * A self-restart is loud and destructive of in-flight work, so every guard
+ * below is a hard precondition, never a heuristic:
+ *
+ *   WARM-UP     every liveness row reads silent right after a start, so a
+ *               restart inside the warm-up window would feed on itself. The
+ *               window is computed by the SAME function the gating
+ *               scheduler_liveness check uses (schedulerLivenessWarmupMinutes),
+ *               so the restarting layer and the gating layer cannot drift.
+ *   COOLDOWN    at most one self-restart per
+ *               BOARD_JOBS_WATCHDOG_RESTART_COOLDOWN_MINUTES (default 60),
+ *               proved by an `events` row written BEFORE the exit, so the
+ *               evidence survives the restart it is about to cause.
+ *   BREAKER     three restarts inside six hours is proof that restarting is
+ *               not the repair. The watchdog stops restarting and says so.
+ *   SILENT ONLY a `failed` job is still TICKING (its body throws) and a
+ *               `disabled` job is an operator's decision. Neither is a stalled
+ *               loop, and restarting for either would destroy work for a fault
+ *               a restart cannot fix. A job that is disabled AND has stopped
+ *               ticking is deliberately left to the out-of-process watchdog,
+ *               whose gating signal (checkSchedulerLiveness) keys on `stale`
+ *               alone and so still covers it.
+ *
+ * EXIT CODE 75 (EX_TEMPFAIL, "temporary failure — retry"):
+ * ecosystem.config.cjs sets `stop_exit_codes: [78]`, so 78 is the one code pm2
+ * will NOT restart — it is cc-start.sh's deterministic refusal receipt for a
+ * missing/stale build, and using it here would leave the box DOWN instead of
+ * recovered. With `autorestart: true` every other code is restarted, so 75 is
+ * picked because it means exactly what is happening, and it is distinct from 0
+ * and 1 in `pm2 logs` so a self-restart is identifiable after the fact. By the
+ * time the warm-up guard allows this, the process has been up far longer than
+ * min_uptime (30s), so pm2 counts it as a clean restart and it does not consume
+ * the max_restarts circuit-breaker budget.
+ */
+export const BOARD_JOBS_WATCHDOG_RESTART_EVENT='board_jobs_watchdog_restart';
+export const BOARD_JOBS_WATCHDOG_RESTART_EXIT_CODE=75;
+export const BOARD_JOBS_WATCHDOG_RESTART_MAX_IN_WINDOW=3;
+export const BOARD_JOBS_WATCHDOG_RESTART_WINDOW_HOURS=6;
+/** Long enough for notifySystem()'s write and the log line to land before the
+ *  process goes away; short enough that the board is back on its feet fast. */
+const BOARD_JOBS_WATCHDOG_RESTART_DELAY_MS=500;
+
+/** Read per call, exactly like disabled() and cooldownMinutes(), so a box that
+ *  changes its env does not have to be restarted for the change to be read. */
+const restartCooldownMinutes=()=>Math.max(1,Number(readEnv('BOARD_JOBS_WATCHDOG_RESTART_COOLDOWN_MINUTES'))||60);
+const selfRestartEnabled=()=>!['0','false'].includes((readEnv('BOARD_JOBS_WATCHDOG_SELF_RESTART')??'1').trim().toLowerCase());
+
+/** The exit is injectable so tests can prove the restart decision WITHOUT
+ *  killing the test runner. Production wiring is process.exit and nothing else. */
+let exitFn:(code:number)=>void=(code:number)=>{process.exit(code);};
+let restartScheduled=false;
+export function setBoardJobsWatchdogExitFn(fn:(code:number)=>void):void { exitFn=fn; restartScheduled=false; }
+export function resetBoardJobsWatchdogExitFn():void { exitFn=(code:number)=>{process.exit(code);}; restartScheduled=false; }
+
+export type SelfRestartOutcome='none'|'warmup'|'restarted'|'cooldown'|'breaker'|'switched-off'|'unknown-history';
+interface SelfRestartDecision {outcome:SelfRestartOutcome;minutesSinceRestart?:number;warmupMinutes?:number;uptimeMinutes?:number;restartsInWindow?:number;reason?:string;}
+
+function decideSelfRestart(watched:WatchedJobLiveness[],uptimeSeconds:number):SelfRestartDecision {
+ if(!selfRestartEnabled())return {outcome:'switched-off'};
+ const warmupMinutes=schedulerLivenessWarmupMinutes(watched),uptimeMinutes=uptimeSeconds/60;
+ if(uptimeMinutes<warmupMinutes)return {outcome:'warmup',warmupMinutes,uptimeMinutes};
+ // The restart history is the EVIDENCE for both remaining guards. If it cannot
+ // be read the guards cannot be proved, and an unreadable history is never
+ // read as "no restarts yet" — that would turn a locked DB into a restart loop.
+ let restartsInWindow:number, lastRestartAt:string|null;
+ try {
+  restartsInWindow=queryOne<{n:number}>(`SELECT COUNT(*) AS n FROM events WHERE type=? AND ${sqlTime('created_at')} >= datetime('now',?)`,[BOARD_JOBS_WATCHDOG_RESTART_EVENT,`-${BOARD_JOBS_WATCHDOG_RESTART_WINDOW_HOURS} hours`])?.n||0;
+  lastRestartAt=queryOne<{created_at:string}>(`SELECT created_at FROM events WHERE type=? ORDER BY ${sqlTime('created_at')} DESC LIMIT 1`,[BOARD_JOBS_WATCHDOG_RESTART_EVENT])?.created_at??null;
+ } catch(err) { return {outcome:'unknown-history',reason:err instanceof Error?err.message:String(err)}; }
+ // Breaker BEFORE cooldown: once three restarts have failed to fix it, the
+ // honest message is "restarting is not working and has stopped", not "wait
+ // and see". The third restart is normally still inside the cooldown window,
+ // so checking cooldown first would hide the breaker for an hour.
+ if(restartsInWindow>=BOARD_JOBS_WATCHDOG_RESTART_MAX_IN_WINDOW)return {outcome:'breaker',restartsInWindow};
+ const sinceMinutes=lastRestartAt?(Date.now()-parseDbTime(lastRestartAt))/60000:Number.POSITIVE_INFINITY;
+ if(lastRestartAt&&!Number.isFinite(sinceMinutes))return {outcome:'unknown-history',reason:`the last restart timestamp is unreadable (${lastRestartAt})`};
+ if(Number.isFinite(sinceMinutes)&&sinceMinutes<restartCooldownMinutes())return {outcome:'cooldown',minutesSinceRestart:Math.max(0,Math.round(sinceMinutes))};
+ return {outcome:'restarted'};
+}
+
+/** What the system DID about this silent job, in the words an operator reads. */
+function describeSilentWithOutcome(w:WatchedJobLiveness,d:SelfRestartDecision):string {
+ switch(d.outcome) {
+  case 'restarted': return `${describeSilent(w)} The command center restarted itself to recover it. If this message repeats within the hour, the restart did not fix it.`;
+  case 'cooldown': return `${w.jobName} is still not running ${plural(d.minutesSinceRestart??0,'minute')} after the command center restarted itself. The restart did not fix it.`;
+  case 'breaker': return `${w.jobName} ${silentAgeClause(w)} and ${numberWord(BOARD_JOBS_WATCHDOG_RESTART_MAX_IN_WINDOW)} automatic restarts in ${numberWord(BOARD_JOBS_WATCHDOG_RESTART_WINDOW_HOURS)} hours did not fix it. The command center has stopped restarting itself. A person needs to look at this box.`;
+  case 'switched-off': return `${describeSilent(w)} Automatic restart is switched off on this box (BOARD_JOBS_WATCHDOG_SELF_RESTART=0).`;
+  case 'unknown-history': return `${describeSilent(w)} The command center could not read its own restart history (${d.reason}), so it did not restart itself.`;
+  default: return describeProblem(w);
+ }
+}
+
+export interface BoardJobsWatchdogRunResult {ranAt:string;skippedReason?:string;staleJobs:string[];disabledJobs:string[];failedJobs?:string[];alerted:boolean;notificationStatus?:'queued'|'unavailable'|'cooldown'|'warmup';selfRestart?:SelfRestartOutcome;}
+export async function runBoardJobsWatchdog(uptimeSeconds:number=process.uptime()):Promise<BoardJobsWatchdogRunResult> {
  const ranAt=timeNow();
  if(disabled())return {ranAt,skippedReason:'DISABLE_BOARD_JOBS_WATCHDOG set',staleJobs:[],disabledJobs:[],failedJobs:[],alerted:false};
  const check=checkBoardJobsWatchdog(),watched=check.watched;
  const result:BoardJobsWatchdogRunResult={ranAt,staleJobs:watched.filter(w=>w.stale).map(w=>w.jobName),disabledJobs:watched.filter(w=>w.disabled&&!w.stale).map(w=>w.jobName),failedJobs:watched.filter(w=>w.failed).map(w=>w.jobName),alerted:false};
  if(check.pass)return result;
+
+ // SILENT, and not switched off by an operator — the only state a restart can repair.
+ const silent=watched.filter(w=>w.stale&&!w.disabled);
+ const decision:SelfRestartDecision=silent.length?decideSelfRestart(watched,uptimeSeconds):{outcome:'none'};
+ result.selfRestart=decision.outcome;
+
+ // WARM-UP: the process has just started, so silence is the EXPECTED state and
+ // there is no adverse signal to report. Logged, never sent: a Telegram here
+ // would page a person after every single deploy.
+ if(decision.outcome==='warmup') {
+  console.log(`[board-jobs-watchdog] ${naturalList(silent.map(w=>w.jobName))} ${silent.length===1?'has':'have'} not ticked yet, but this process has been up for only ${Math.round(decision.uptimeMinutes??0)} of the ${decision.warmupMinutes} warm-up minutes. That is a boot and not a stall: no restart, no alert.`);
+  return {...result,notificationStatus:'warmup'};
+ }
+
+ const unhealthy=watched.filter(w=>w.stale||(!w.disabled&&w.failed));
+ const detail=unhealthy.map(w=>w.stale&&!w.disabled?describeSilentWithOutcome(w,decision):describeProblem(w)).join(' | ');
+
+ if(decision.outcome==='restarted') {
+  // The receipt is written BEFORE the exit, on purpose: it is the evidence the
+  // cooldown and the breaker read AFTER the restart, and a row written after
+  // process.exit() would never exist. It also bypasses the ordinary alert
+  // cooldown — an alert saying "I restarted myself" is a new fact every time.
+  run('INSERT INTO events(id,type,task_id,message,created_at) VALUES(?,?,NULL,?,?)',[uuidv4(),BOARD_JOBS_WATCHDOG_RESTART_EVENT,`board_jobs_watchdog: self-restart (exit ${BOARD_JOBS_WATCHDOG_RESTART_EXIT_CODE}) — ${detail}`,ranAt]);
+  const queued=notifySystem(`[BOARD JOBS WATCHDOG] ${detail}`,{agent:'board-jobs-watchdog',action:'escalate'});
+  run('INSERT INTO events(id,type,task_id,message,created_at) VALUES(?,?,NULL,?,?)',[uuidv4(),queued?BOARD_JOBS_WATCHDOG_ALERT_EVENT:BOARD_JOBS_WATCHDOG_ALERT_UNAVAILABLE_EVENT,`board_jobs_watchdog: ${detail}; notification ${queued?'queued (delivery not confirmed)':'unavailable'}`,ranAt]);
+  console.warn(`[board-jobs-watchdog] SELF-RESTART: ${detail} Exiting ${BOARD_JOBS_WATCHDOG_RESTART_EXIT_CODE} so pm2 starts this process again with fresh timers.`);
+  if(!restartScheduled){restartScheduled=true;setTimeout(()=>{exitFn(BOARD_JOBS_WATCHDOG_RESTART_EXIT_CODE);},BOARD_JOBS_WATCHDOG_RESTART_DELAY_MS);}
+  return {...result,alerted:queued,notificationStatus:queued?'queued':'unavailable'};
+ }
+
  const recent=queryOne<{n:number}>(`SELECT COUNT(*) AS n FROM events WHERE type IN (${COOLDOWN_EVENT_TYPES.map(()=>'?').join(',')}) AND ${sqlTime('created_at')} >= datetime('now',?)`,[...COOLDOWN_EVENT_TYPES,`-${cooldownMinutes()} minutes`])?.n||0;
  if(recent)return {...result,notificationStatus:'cooldown'};
- const queued=notifySystem(`[BOARD JOBS WATCHDOG] ${check.detail.replace(/^board_jobs_watchdog: /,'')}`,{agent:'board-jobs-watchdog',action:'escalate'});
- run('INSERT INTO events(id,type,task_id,message,created_at) VALUES(?,?,NULL,?,?)',[uuidv4(),queued?BOARD_JOBS_WATCHDOG_ALERT_EVENT:BOARD_JOBS_WATCHDOG_ALERT_UNAVAILABLE_EVENT,`${check.detail}; notification ${queued?'queued (delivery not confirmed)':'unavailable'}`,ranAt]);
+ const queued=notifySystem(`[BOARD JOBS WATCHDOG] ${detail}`,{agent:'board-jobs-watchdog',action:'escalate'});
+ run('INSERT INTO events(id,type,task_id,message,created_at) VALUES(?,?,NULL,?,?)',[uuidv4(),queued?BOARD_JOBS_WATCHDOG_ALERT_EVENT:BOARD_JOBS_WATCHDOG_ALERT_UNAVAILABLE_EVENT,`board_jobs_watchdog: ${detail}; notification ${queued?'queued (delivery not confirmed)':'unavailable'}`,ranAt]);
  return {...result,alerted:queued,notificationStatus:queued?'queued':'unavailable'};
 }
 

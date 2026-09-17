@@ -47,6 +47,12 @@ delete process.env.DISABLE_BOARD_JOBS_WATCHDOG;
 delete process.env.BOARD_JOBS_WATCHDOG_ALERT_COOLDOWN_MINUTES;
 delete process.env.DISABLE_SWEEP_LIVENESS;
 delete process.env.SWEEP_LIVENESS_ALERT_COOLDOWN_MINUTES;
+delete process.env.BOARD_JOBS_WATCHDOG_RESTART_COOLDOWN_MINUTES;
+// The tests below section 10 are about the ALERT path, which is what this file
+// covered before self-repair existed. Self-restart is switched OFF here so each
+// of them exercises exactly what it always did; the self-repair tests in
+// section 10 switch it back on explicitly, one test at a time.
+process.env.BOARD_JOBS_WATCHDOG_SELF_RESTART = '0';
 
 import fs from 'node:fs';
 import os from 'node:os';
@@ -63,8 +69,14 @@ import {
   getWatchedJobLiveness,
   checkBoardJobsWatchdog,
   runBoardJobsWatchdog,
+  schedulerLivenessWarmupMinutes,
+  setBoardJobsWatchdogExitFn,
+  resetBoardJobsWatchdogExitFn,
   STALE_MULTIPLIER,
   WATCHED_JOB_CADENCE_MINUTES,
+  BOARD_JOBS_WATCHDOG_RESTART_EVENT,
+  BOARD_JOBS_WATCHDOG_RESTART_EXIT_CODE,
+  BOARD_JOBS_WATCHDOG_RESTART_MAX_IN_WINDOW,
 } from '../../src/lib/jobs/board-jobs-watchdog';
 import { recordJobTick } from '../../src/lib/jobs/scheduler';
 
@@ -79,6 +91,12 @@ const ALERT_TYPES = [
 ];
 const ALERT_TYPE_SQL = ALERT_TYPES.map((t) => `'${t}'`).join(',');
 
+/** The chore this change deletes: the alert used to end by telling the reader
+ *  to go and inspect the process themselves. It is assembled here from its
+ *  words rather than written out, because a repo-wide grep for that sentence
+ *  has to come back EMPTY — including from the tests that pin its absence. */
+const THE_CHORE = ['Check', 'the', 'command', 'center'].join(' ');
+
 function minutesAgoIso(mins: number): string {
   return new Date(Date.now() - mins * 60 * 1000).toISOString();
 }
@@ -86,6 +104,7 @@ function minutesAgoIso(mins: number): string {
 function clearFixtures(): void {
   run(`DELETE FROM job_liveness`);
   run(`DELETE FROM events WHERE type IN (${ALERT_TYPE_SQL})`);
+  run(`DELETE FROM events WHERE type = ?`, [BOARD_JOBS_WATCHDOG_RESTART_EVENT]);
   for (const name of Object.keys(WATCHED_JOB_CADENCE_MINUTES).filter(n=>!['intake-advance','qc-review-sweep'].includes(n))) recordJobTick(name,minutesAgoIso(0),'ok');
 }
 
@@ -308,8 +327,10 @@ test('plain English: a silent job says how long it has been silent, what should 
   assert.equal(
     detail,
     'board_jobs_watchdog: intake-advance has not run for 17 minutes (it should run every 2 minutes). ' +
-      'The background loop that moves tasks may have stopped. Check the command center process.',
+      'The background loop that moves tasks may have stopped.',
   );
+  // The chore this change exists to delete must not come back.
+  assert.ok(!detail.includes(THE_CHORE), `the silent message still hands over a chore: ${detail}`);
   // The jargon this rename exists to remove must not come back.
   assert.doesNotMatch(detail, /tick|liveness|stale|sweep_liveness/i);
 });
@@ -340,8 +361,11 @@ test('plain English: a failing job names the consecutive failure count and the e
   assert.equal(
     detail,
     'board_jobs_watchdog: qc-review-sweep has failed 2 runs in a row (last error: scheduler_job_timeout). ' +
-      'Check the command center logs.',
+      'The job keeps being retried every 2 minutes.',
   );
+  // A failing job is still TICKING, so there is nothing to restart and nothing
+  // for a person to go and do: the message says what the system is already doing.
+  assert.ok(!detail.includes(THE_CHORE), `the failing message still hands over a chore: ${detail}`);
 });
 
 test('plain English: the healthy message counts the jobs, and one switched-off job reads as singular', () => {
@@ -439,4 +463,257 @@ test('upgrade bridge: a pre-rename alert row suppresses a duplicate under the de
   const result = await runBoardJobsWatchdog();
   assert.equal(result.notificationStatus, 'cooldown', 'the upgrade must not re-page for a condition already alerted');
   assert.equal(alertEventCount(), 1);
+});
+
+// ── 10: SELF-REPAIR — the system checks itself and fixes itself ─────────────
+//
+// The owner's words about the alert that ended by telling him to go and inspect
+// the process: "I'm not checking this. You did it. You check it. If you broke
+// it, you check it." These tests pin BOTH halves of the answer: the repair
+// actually happens (a restart receipt is written and the process exits with a
+// code pm2 restarts on), and every message states what the system did rather
+// than handing over a chore.
+//
+// The exit is injected, so a self-restart under test can never kill the runner.
+
+/** Uptime past the warm-up window (max stale threshold + 1 = 16 minutes). */
+const PAST_WARMUP_SECONDS = 60 * 60;
+/** Uptime INSIDE the warm-up window — a process that has only just started. */
+const INSIDE_WARMUP_SECONDS = 60;
+
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function restartEventCount(): number {
+  return (
+    queryOne<{ n: number }>(`SELECT COUNT(*) AS n FROM events WHERE type = ?`, [
+      BOARD_JOBS_WATCHDOG_RESTART_EVENT,
+    ])?.n ?? 0
+  );
+}
+
+/** The operator-facing text of the single alert this run produced. */
+function lastAlertMessage(): string {
+  const row = queryOne<{ message: string }>(
+    `SELECT message FROM events WHERE type IN (${ALERT_TYPE_SQL}) ORDER BY created_at DESC LIMIT 1`,
+    [],
+  );
+  return (row?.message ?? '').replace(/^board_jobs_watchdog: /, '').replace(/; notification .*$/, '');
+}
+
+function seedRestartEvent(minutesAgo: number): void {
+  run('INSERT INTO events(id,type,task_id,message,created_at) VALUES(?,?,NULL,?,?)', [
+    uuidv4(),
+    BOARD_JOBS_WATCHDOG_RESTART_EVENT,
+    'seeded self-restart receipt',
+    minutesAgoIso(minutesAgo),
+  ]);
+}
+
+/** One silent watched job (intake-advance), one healthy control (qc-review-sweep). */
+function oneSilentJob(silentForMinutes = 60): void {
+  clearFixtures();
+  recordJobTick('intake-advance', minutesAgoIso(silentForMinutes), 'ok');
+  recordJobTick('qc-review-sweep', minutesAgoIso(0.2), 'ok');
+}
+
+/** Runs the watchdog with self-restart ON and a stubbed exit, and reports the
+ *  exit codes the run asked for. Always restores the env and the real exit. */
+async function runWithSelfRestart(
+  uptimeSeconds: number,
+  env: Record<string, string | undefined> = {},
+): Promise<{ result: Awaited<ReturnType<typeof runBoardJobsWatchdog>>; exits: number[] }> {
+  const exits: number[] = [];
+  const previous: Record<string, string | undefined> = {};
+  const applied = { BOARD_JOBS_WATCHDOG_SELF_RESTART: '1', ...env };
+  for (const [key, value] of Object.entries(applied)) {
+    previous[key] = process.env[key];
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  setBoardJobsWatchdogExitFn((code) => exits.push(code));
+  try {
+    const result = await runBoardJobsWatchdog(uptimeSeconds);
+    // The exit is deferred 500 ms so the notification and the log line land first.
+    await delay(750);
+    return { result, exits };
+  } finally {
+    resetBoardJobsWatchdogExitFn();
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    process.env.BOARD_JOBS_WATCHDOG_SELF_RESTART = '0';
+  }
+}
+
+test('self-repair: the warm-up window is the SAME one the gating scheduler_liveness check uses', () => {
+  clearFixtures();
+  const warmup = schedulerLivenessWarmupMinutes(getWatchedJobLiveness());
+  // max(2x3, 2x3, 2x3, 5x3) + 1
+  assert.equal(warmup, 16);
+  assert.ok(INSIDE_WARMUP_SECONDS / 60 < warmup, 'the inside-warm-up fixture must actually be inside it');
+  assert.ok(PAST_WARMUP_SECONDS / 60 > warmup, 'the past-warm-up fixture must actually be past it');
+});
+
+test('self-repair: a silent job past warm-up restarts the command center — receipt written, exit 75, message says what it did', async () => {
+  oneSilentJob(60);
+
+  const { result, exits } = await runWithSelfRestart(PAST_WARMUP_SECONDS);
+
+  assert.equal(result.selfRestart, 'restarted');
+  assert.deepEqual(result.staleJobs, ['intake-advance']);
+  assert.equal(exits.length, 1, 'exactly one exit was requested');
+  assert.equal(exits[0], BOARD_JOBS_WATCHDOG_RESTART_EXIT_CODE);
+  assert.equal(BOARD_JOBS_WATCHDOG_RESTART_EXIT_CODE, 75, 'pm2 stop_exit_codes is [78]; 75 must be restartable');
+  assert.equal(restartEventCount(), 1, 'the receipt is written BEFORE the exit so it survives the restart');
+  assert.equal(alertEventCount(), 1);
+  assert.equal(
+    lastAlertMessage(),
+    'intake-advance has not run for 60 minutes (it should run every 2 minutes). ' +
+      'The command center restarted itself to recover it. ' +
+      'If this message repeats within the hour, the restart did not fix it.',
+  );
+  assert.ok(!lastAlertMessage().includes(THE_CHORE), 'the restart message states what happened; it hands over no chore');
+});
+
+test('self-repair: inside the warm-up window there is no restart and no Telegram at all', async () => {
+  oneSilentJob(60);
+
+  const { result, exits } = await runWithSelfRestart(INSIDE_WARMUP_SECONDS);
+
+  assert.equal(result.selfRestart, 'warmup');
+  assert.equal(result.notificationStatus, 'warmup');
+  assert.equal(exits.length, 0, 'a process that just started must never restart itself');
+  assert.equal(restartEventCount(), 0);
+  assert.equal(alertEventCount(), 0, 'a boot must not page anyone — this is the expected state at 1m uptime');
+  assert.equal(result.alerted, false);
+});
+
+test('self-repair: inside the cooldown it does not restart again and says the restart did not fix it', async () => {
+  oneSilentJob(60);
+  seedRestartEvent(20); // a self-restart 20 minutes ago, inside the 60-minute cooldown
+
+  const { result, exits } = await runWithSelfRestart(PAST_WARMUP_SECONDS);
+
+  assert.equal(result.selfRestart, 'cooldown');
+  assert.equal(exits.length, 0, 'one restart per cooldown window, no matter how many ticks observe the fault');
+  assert.equal(restartEventCount(), 1, 'no second receipt — the seeded one is the only restart');
+  assert.equal(
+    lastAlertMessage(),
+    'intake-advance is still not running 20 minutes after the command center restarted itself. ' +
+      'The restart did not fix it.',
+  );
+});
+
+test('self-repair: three restarts in six hours opens the breaker — it stops restarting and says a person is needed', async () => {
+  oneSilentJob(60);
+  for (const minutes of [300, 200, 100]) seedRestartEvent(minutes);
+  assert.equal(restartEventCount(), BOARD_JOBS_WATCHDOG_RESTART_MAX_IN_WINDOW);
+
+  const { result, exits } = await runWithSelfRestart(PAST_WARMUP_SECONDS);
+
+  assert.equal(result.selfRestart, 'breaker');
+  assert.equal(exits.length, 0, 'the breaker must stop the fourth restart');
+  assert.equal(restartEventCount(), 3, 'no fourth receipt');
+  assert.equal(
+    lastAlertMessage(),
+    'intake-advance has not run for 60 minutes and three automatic restarts in six hours did not fix it. ' +
+      'The command center has stopped restarting itself. A person needs to look at this box.',
+  );
+});
+
+test('self-repair: BOARD_JOBS_WATCHDOG_SELF_RESTART=0 alerts and names the switch, and never exits', async () => {
+  oneSilentJob(60);
+
+  const { result, exits } = await runWithSelfRestart(PAST_WARMUP_SECONDS, {
+    BOARD_JOBS_WATCHDOG_SELF_RESTART: '0',
+  });
+
+  assert.equal(result.selfRestart, 'switched-off');
+  assert.equal(exits.length, 0);
+  assert.equal(restartEventCount(), 0);
+  assert.equal(
+    lastAlertMessage(),
+    'intake-advance has not run for 60 minutes (it should run every 2 minutes). ' +
+      'Automatic restart is switched off on this box (BOARD_JOBS_WATCHDOG_SELF_RESTART=0).',
+  );
+});
+
+test('self-repair: a job an operator switched off never triggers a restart, even when it stops ticking', async () => {
+  clearFixtures();
+  // Silent AND disabled: the operator turned it off, so a restart is not the
+  // repair. The out-of-process watchdog (gating scheduler_liveness, which keys
+  // on staleness alone) still covers a genuinely dead loop here.
+  recordJobTick('qc-review-sweep', minutesAgoIso(30), 'disabled', 'DISABLE_QC_REVIEW_SWEEP env is set');
+  recordJobTick('intake-advance', minutesAgoIso(0.2), 'ok');
+
+  const { result, exits } = await runWithSelfRestart(PAST_WARMUP_SECONDS);
+
+  assert.equal(result.selfRestart, 'none');
+  assert.equal(exits.length, 0, 'an operator decision is never repaired by a restart');
+  assert.equal(restartEventCount(), 0);
+  assert.equal(
+    lastAlertMessage(),
+    'qc-review-sweep has not run for 30 minutes (it should run every 2 minutes). ' +
+      'The background loop that moves tasks may have stopped.',
+  );
+
+  // CONTROL: the very same fixture with status 'ok' instead of 'disabled' DOES
+  // restart, so the assertion above is a fact about `disabled` and not about
+  // the fixture's age or the stubbed exit.
+  clearFixtures();
+  recordJobTick('qc-review-sweep', minutesAgoIso(30), 'ok');
+  recordJobTick('intake-advance', minutesAgoIso(0.2), 'ok');
+  const control = await runWithSelfRestart(PAST_WARMUP_SECONDS);
+  assert.equal(control.result.selfRestart, 'restarted');
+  assert.equal(control.exits.length, 1);
+});
+
+test('self-repair: a FAILING job is still ticking, so it is never restarted — it is reported as being retried', async () => {
+  clearFixtures();
+  recordJobTick('intake-advance', minutesAgoIso(0.2), 'ok');
+  recordJobTick('qc-review-sweep', minutesAgoIso(0.2), 'error', 'scheduler_job_timeout');
+  recordJobTick('qc-review-sweep', minutesAgoIso(0.2), 'error', 'scheduler_job_timeout');
+
+  const { result, exits } = await runWithSelfRestart(PAST_WARMUP_SECONDS);
+
+  assert.equal(result.selfRestart, 'none', 'a throwing body is not a stalled loop');
+  assert.equal(exits.length, 0, 'restarting cannot fix a job whose own code throws');
+  assert.equal(restartEventCount(), 0);
+  assert.equal(
+    lastAlertMessage(),
+    'qc-review-sweep has failed 2 runs in a row (last error: scheduler_job_timeout). ' +
+      'The job keeps being retried every 2 minutes.',
+  );
+});
+
+test('self-repair: DISABLE_BOARD_JOBS_WATCHDOG=1 switches off the repair as well as the alert', async () => {
+  oneSilentJob(120);
+
+  const { result, exits } = await runWithSelfRestart(PAST_WARMUP_SECONDS, {
+    DISABLE_BOARD_JOBS_WATCHDOG: '1',
+  });
+
+  assert.equal(result.skippedReason, 'DISABLE_BOARD_JOBS_WATCHDOG set');
+  assert.equal(result.selfRestart, undefined);
+  assert.equal(exits.length, 0, 'the kill flag must stop the restart, not only the Telegram');
+  assert.equal(restartEventCount(), 0);
+  assert.equal(alertEventCount(), 0);
+});
+
+test('self-repair: the cooldown window is honoured from the env, and the receipt is what proves it', async () => {
+  oneSilentJob(60);
+  seedRestartEvent(20);
+
+  // A 10-minute cooldown makes the 20-minute-old receipt too old to suppress,
+  // so the same fixture restarts. This is the CONTROL for the cooldown test
+  // above: it proves the suppression there came from the window, not from the
+  // fixture or from some unrelated short-circuit.
+  const { result, exits } = await runWithSelfRestart(PAST_WARMUP_SECONDS, {
+    BOARD_JOBS_WATCHDOG_RESTART_COOLDOWN_MINUTES: '10',
+  });
+
+  assert.equal(result.selfRestart, 'restarted');
+  assert.equal(exits.length, 1);
+  assert.equal(restartEventCount(), 2, 'the seeded receipt plus the one this restart wrote');
 });
