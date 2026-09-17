@@ -279,7 +279,14 @@ _cc_require_supported_node() {
     if resolved=$(bash "$resolver"); then
       CC_NODE_BIN="$resolved"
       export CC_NODE_BIN
-      export PATH="$(dirname "$CC_NODE_BIN"):$PATH"
+      # Same rule as scripts/atomic-deploy.sh: lead PATH with the runtime
+      # directory ONLY when PATH would otherwise find a different node. That
+      # directory also holds an npm, so an unconditional prepend overrides
+      # whatever npm PATH deliberately pointed at, and when the resolved node is
+      # already the one PATH finds, rewriting PATH can only do harm.
+      if [ "$(command -v node 2>/dev/null || true)" != "$CC_NODE_BIN" ]; then
+        export PATH="$(dirname "$CC_NODE_BIN"):$PATH"
+      fi
       success "Node runtime: $CC_NODE_BIN ($("$CC_NODE_BIN" --version 2>/dev/null || echo unknown), module ABI $("$CC_NODE_BIN" -p process.versions.modules 2>/dev/null || echo unknown))"
       return 0
     fi

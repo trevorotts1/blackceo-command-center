@@ -44,6 +44,10 @@
 #       gate's own CCBI_NODE_BIN hook (which nothing ever set, so it fell
 #       through to ambient `node`), and repairs a failing PRE-FLIGHT gate with
 #       one rebuild rather than aborting with a manual command.
+#   D2  the PATH prepend is CONDITIONAL: it rewrites PATH only when PATH would
+#       otherwise resolve a different node, so it can never shadow an npm that
+#       PATH deliberately pointed at. Regression guard for a defect this branch
+#       shipped and CI caught.
 #
 # KNOWN-GOOD CONTROL (R0): the resolver, pointed at a fixture whose ambient node
 # IS the required major, must return that path and exit 0. Without it, a
@@ -304,6 +308,82 @@ grep -q 'still fails after one automatic rebuild' "$AD" \
 grep -q 'export PATH="${CC_NODE_DIR}:${PATH}"' "$AD" \
   && ok "D1: the deploy PATH leads with the resolved runtime (npm ci, build, rebuild)" \
   || bad "D1: the deploy PATH is not pinned to the resolved runtime"
+
+# D2: the prepend must be CONDITIONAL. An unconditional one shipped on this
+# branch and CI caught it: the runtime directory holds an `npm` as well as a
+# `node`, so pushing it to the front of PATH also overrode the npm PATH
+# deliberately pointed at. The B.2 atomic-deploy fixtures put a stub npm on
+# PATH; the real npm shadowed it, the staged dependency tree was never created,
+# and ten deploy tests failed on a promotion step unrelated to this change.
+#
+# It passed locally because this machine's node directory contains no npm, so
+# nothing was shadowed. That is exactly why the behavioural check below exists
+# and why it builds its own directory holding BOTH binaries: it reproduces the
+# runner's toolcache layout instead of trusting whatever this box happens to
+# have.
+echo "[D2] the PATH prepend is conditional, so it cannot shadow a deliberate npm"
+grep -q 'if \[\[ "$_cc_path_node" != "$CC_NODE_BIN" \]\]; then' "$AD" \
+  && ok "D2: PATH is only rewritten when it would otherwise resolve a different node" \
+  || bad "D2: the PATH prepend is unconditional; it will shadow a deliberate npm"
+
+D2_DIR="$WORK/toolcache/bin"
+mkdir -p "$D2_DIR"
+make_fake_node "$D2_DIR" "v24.8.0" 137
+cat > "$D2_DIR/npm" <<'FAKENPM'
+#!/usr/bin/env bash
+printf 'REAL-NPM
+'
+FAKENPM
+chmod +x "$D2_DIR/npm"
+STUB_DIR="$WORK/fixture-stubs"
+mkdir -p "$STUB_DIR"
+cat > "$STUB_DIR/npm" <<'STUBNPM'
+#!/usr/bin/env bash
+printf 'STUB-NPM
+'
+STUBNPM
+chmod +x "$STUB_DIR/npm"
+
+# Reproduce the fixture's own layout: stubs first, then a toolcache-shaped
+# directory holding both node and npm. The resolved runtime IS the node that
+# PATH already finds, so the rule must leave PATH alone and the stub must win.
+D2_WHICH="$(
+  PATH="$STUB_DIR:$D2_DIR:/usr/bin:/bin" \
+  CC_NODE_BIN="$D2_DIR/node" \
+  bash -c '
+    CC_NODE_DIR="$(dirname "$CC_NODE_BIN")"
+    _cc_path_node="$(command -v node 2>/dev/null || printf "")"
+    if [[ "$_cc_path_node" != "$CC_NODE_BIN" ]]; then
+      export PATH="${CC_NODE_DIR}:${PATH}"
+    fi
+    npm
+  '
+)"
+if [[ "$D2_WHICH" == "STUB-NPM" ]]; then
+  ok "D2: a stub npm already on PATH still wins when the runtime is already first"
+else
+  bad "D2: the runtime directory shadowed a deliberate npm (got '$D2_WHICH'); this is the CI failure"
+fi
+
+# And the prepend MUST still happen when PATH really does resolve a different
+# node, otherwise the rule above would have disabled the fix it guards.
+D2_NODE="$(
+  PATH="$WORK/path26:/usr/bin:/bin" \
+  CC_NODE_BIN="$D2_DIR/node" \
+  bash -c '
+    CC_NODE_DIR="$(dirname "$CC_NODE_BIN")"
+    _cc_path_node="$(command -v node 2>/dev/null || printf "")"
+    if [[ "$_cc_path_node" != "$CC_NODE_BIN" ]]; then
+      export PATH="${CC_NODE_DIR}:${PATH}"
+    fi
+    command -v node
+  '
+)"
+if [[ "$D2_NODE" == "$D2_DIR/node" ]]; then
+  ok "D2: PATH IS rewritten when it would otherwise resolve the wrong node"
+else
+  bad "D2: the conditional disabled the fix; node still resolves to '$D2_NODE'"
+fi
 
 # ── update.sh ────────────────────────────────────────────────────────────────
 echo "[U1] update.sh requires the fleet major and pins PATH for npm ci"

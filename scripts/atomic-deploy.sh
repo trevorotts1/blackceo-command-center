@@ -160,10 +160,26 @@ CC_NODE_DIR="$(dirname "$CC_NODE_BIN")"
 # Feed the existing native-module gate hook, so it stops falling through to
 # `command -v node`.
 export CCBI_NODE_BIN="${CCBI_NODE_BIN:-$CC_NODE_BIN}"
-# Prepend it so `npm`, `npx` and every lifecycle script (the staged `npm ci`
-# and postinstall's `npm rebuild better-sqlite3` above all) compile against the
-# same runtime.
-export PATH="${CC_NODE_DIR}:${PATH}"
+# Put the runtime directory first ONLY when PATH would otherwise resolve a
+# DIFFERENT node, which is the only case where the prepend changes anything.
+#
+# An unconditional prepend is too blunt and was measured to break things. That
+# directory holds an `npm` as well as a `node`, so pushing it to the front also
+# overrides whatever npm PATH deliberately pointed at. The B.2 atomic-deploy
+# fixtures put a stub npm on PATH (their staged `npm ci` fabricates a fake
+# better-sqlite3 rather than installing anything); an unconditional prepend
+# shadowed that stub with the runner's real npm, the staging directory got no
+# node_modules, and ten deploy tests failed on a promotion step that had nothing
+# to do with this change. It passed locally only because this machine's node
+# directory happens to contain no npm, so nothing was shadowed.
+#
+# When the resolved node is already the one PATH finds, PATH is correct as it
+# stands and rewriting it can only do harm.
+_cc_path_node="$(command -v node 2>/dev/null || printf '')"
+if [[ "$_cc_path_node" != "$CC_NODE_BIN" ]]; then
+  export PATH="${CC_NODE_DIR}:${PATH}"
+  _log "  PATH now leads with ${CC_NODE_DIR} (it previously resolved node to ${_cc_path_node:-<none>})."
+fi
 _log "Node runtime for this deploy: ${CC_NODE_BIN} ($("$CC_NODE_BIN" --version 2>/dev/null || echo 'version unreadable'), module ABI $("$CC_NODE_BIN" -p process.versions.modules 2>/dev/null || echo unknown))"
 
 # Backup retention + disk pre-check (OPENCLAW-BACKUP-RETENTION-V1). Always
