@@ -120,7 +120,7 @@ export async function runBoardJobsWatchdog():Promise<BoardJobsWatchdogRunResult>
  if(check.pass)return result;
  const recent=queryOne<{n:number}>(`SELECT COUNT(*) AS n FROM events WHERE type IN (${COOLDOWN_EVENT_TYPES.map(()=>'?').join(',')}) AND ${sqlTime('created_at')} >= datetime('now',?)`,[...COOLDOWN_EVENT_TYPES,`-${cooldownMinutes()} minutes`])?.n||0;
  if(recent)return {...result,notificationStatus:'cooldown'};
- const queued=notifySystem(`[BOARD JOBS WATCHDOG] ${check.detail}`,{agent:'board-jobs-watchdog',action:'escalate'});
+ const queued=notifySystem(`[BOARD JOBS WATCHDOG] ${check.detail.replace(/^board_jobs_watchdog: /,'')}`,{agent:'board-jobs-watchdog',action:'escalate'});
  run('INSERT INTO events(id,type,task_id,message,created_at) VALUES(?,?,NULL,?,?)',[uuidv4(),queued?BOARD_JOBS_WATCHDOG_ALERT_EVENT:BOARD_JOBS_WATCHDOG_ALERT_UNAVAILABLE_EVENT,`${check.detail}; notification ${queued?'queued (delivery not confirmed)':'unavailable'}`,ranAt]);
  return {...result,alerted:queued,notificationStatus:queued?'queued':'unavailable'};
 }
