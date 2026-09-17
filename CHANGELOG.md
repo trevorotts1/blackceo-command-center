@@ -1,3 +1,5 @@
+## [v7.6.2] — 2026-09-17 — fix(cc): integrate RR14 launcher, deploy, and credential repairs
+
 ## [v7.6.1] — 2026-09-17 — The box watchdog is never blind
 
 ### Fixed
