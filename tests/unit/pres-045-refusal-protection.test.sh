@@ -49,8 +49,16 @@ ok()  { PASS=$((PASS+1)); printf '  ok   - %s\n' "$1"; }
 bad() { FAIL=$((FAIL+1)); printf '  FAIL - %s\n' "$1"; }
 
 # Checked-in launch configs must preserve the same refusal policy as installers.
+#
+# ISSUE-09: both configs now resolve the fleet Node runtime at load and THROW
+# when none is found, rather than silently letting the launcher exec a bare
+# `node`. That is the intended behaviour, but it means merely requiring the
+# config needs a resolvable runtime. This assertion is about stop_exit_codes,
+# not about runtime resolution, so it pins CC_NODE_BIN to whatever node is
+# running this suite. Runtime resolution has its own coverage in
+# tests/unit/issue09-node-runtime-identity.test.sh.
 for config in ecosystem.config.cjs ecosystem.cc-prod.config.cjs; do
-  if node -e 'const c = require(process.argv[1]); const apps = c.apps.filter(a => /cc-start\.sh/.test(String(a.script) + " " + String(a.args))); if (!apps.length || apps.some(a => !a.stop_exit_codes?.includes(78))) process.exit(1)' "$REPO_ROOT/$config"; then
+  if CC_NODE_BIN="$(command -v node)" node -e 'const c = require(process.argv[1]); const apps = c.apps.filter(a => /cc-start\.sh/.test(String(a.script) + " " + String(a.args))); if (!apps.length || apps.some(a => !a.stop_exit_codes?.includes(78))) process.exit(1)' "$REPO_ROOT/$config" 2>/dev/null; then
     ok "checked-in $config stops deterministic exit 78"
   else
     bad "checked-in $config lacks deterministic refusal stop policy"

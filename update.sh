@@ -251,25 +251,55 @@ fi
 cd "$INSTALL_DIR"
 
 # Node runtime preflight — before backup pruning or checkout mutations.
-# Keep this bootstrap check aligned with package.json engines. It cannot depend
-# on node_modules: the updater also handles fresh/pruned checkouts. npm ci below
-# additionally enforces the engine declarations of the newly merged lockfile.
+#
+# ISSUE-09: this gate used to accept ^20.19.0 || ^22.13.0 || >=24, which is
+# every node the fleet could plausibly have. That is exactly how a box ended up
+# running the app on node@24 (module ABI 137) while its cron and update shells
+# resolved Node 26 (ABI 147): `npm ci` and postinstall's
+# `npm rebuild better-sqlite3` compiled the native module for the UPDATE shell,
+# pm2 then loaded it under its own node, and the box crash-looped on
+# NODE_MODULE_VERSION after every single update. A range wide enough to admit
+# both halves of a mismatch cannot detect the mismatch.
+#
+# THE FLEET RUNTIME IS NODE 24, and this gate now says so. It is also no longer
+# a bare `node` check: scripts/lib/node-runtime.sh is the single resolver every
+# layer asks (both ecosystem configs, cc-start.sh, atomic-deploy.sh), and the
+# resolved binary's directory is prepended to PATH for the rest of this script
+# so `npm ci` and its lifecycle scripts build against the runtime the server
+# will actually exec.
 _cc_require_supported_node() {
-  local version major minor
+  local version major resolver resolved
+  # ${INSTALL_DIR:-.} rather than $INSTALL_DIR: this whole section is extracted
+  # and executed on its own by tests/unit/update-locked-dependencies.test.ts,
+  # where INSTALL_DIR is unset and `set -u` would abort before a single
+  # assertion ran. In the real updater INSTALL_DIR is always resolved above.
+  resolver="${INSTALL_DIR:-.}/scripts/lib/node-runtime.sh"
+
+  if [ -f "$resolver" ]; then
+    if resolved=$(bash "$resolver"); then
+      CC_NODE_BIN="$resolved"
+      export CC_NODE_BIN
+      export PATH="$(dirname "$CC_NODE_BIN"):$PATH"
+      success "Node runtime: $CC_NODE_BIN ($("$CC_NODE_BIN" --version 2>/dev/null || echo unknown), module ABI $("$CC_NODE_BIN" -p process.versions.modules 2>/dev/null || echo unknown))"
+      return 0
+    fi
+    fatal "No Node 24 runtime found (see the resolver output above). This release requires Node 24 LTS; nothing was changed."
+  fi
+
+  # The checkout predates the resolver (first update onto this release). Fall
+  # back to the same rule applied to ambient node, so the gate never silently
+  # weakens just because the helper has not landed yet.
   command -v node >/dev/null 2>&1 \
     || fatal "Node.js is missing. Install Node 24 LTS before updating; nothing was changed."
   version=$(node --version 2>/dev/null) \
     || fatal "Cannot read Node.js version. Install Node 24 LTS before updating; nothing was changed."
   if [[ "$version" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
     major=$((10#${BASH_REMATCH[1]}))
-    minor=$((10#${BASH_REMATCH[2]}))
-    if [ "$major" -ge 24 ] \
-      || { [ "$major" -eq 22 ] && [ "$minor" -ge 13 ]; } \
-      || { [ "$major" -eq 20 ] && [ "$minor" -ge 19 ]; }; then
+    if [ "$major" -eq 24 ]; then
       return 0
     fi
   fi
-  fatal "Unsupported Node.js $version. This release requires ^20.19.0 || ^22.13.0 || >=24. Install Node 24 LTS before updating; nothing was changed."
+  fatal "Unsupported Node.js $version. This release requires Node 24 (>=24 <25) so the build, the native modules and the pm2 runtime cannot disagree on ABI. Install Node 24 LTS before updating; nothing was changed."
 }
 _cc_require_supported_node
 # End Node runtime preflight
@@ -597,6 +627,11 @@ step "Step 4: Install npm dependencies"
   || fatal "Reviewed package-lock.json is missing. Restore it from the release and retry; migrations, build and restart were not run."
 # Never repair dependency resolution on a client box: npm install can silently
 # replace the reviewed graph after a missing/out-of-sync lock or failed npm ci.
+# ISSUE-09: PATH was prepended with the resolved Node 24 directory by
+# _cc_require_supported_node above, so npm, npx and postinstall's
+# `npm rebuild better-sqlite3` all compile against the runtime pm2 will exec.
+# Previously this ran on whatever node the cron/update shell resolved, which is
+# how the rebuilt native module came out with the wrong ABI.
 npm ci --engine-strict --no-audit --no-fund 2>&1 \
   || fatal "npm ci failed. Fix the reported runtime, lockfile or registry error and retry. No npm install fallback is allowed; migrations, build and restart were not run."
 success "Dependencies installed"

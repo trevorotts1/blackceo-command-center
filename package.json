@@ -3,7 +3,7 @@
   "version": "7.4.0",
   "private": true,
   "engines": {
-    "node": "^20.19.0 || ^22.13.0 || >=24"
+    "node": ">=24 <25"
   },
   "scripts": {
     "dev": "next dev --webpack -p ${PORT:-4000}",

@@ -261,7 +261,7 @@ _ccbi_write_manifest() {
   local app_dir="$1" out_dir="$2" build_id="$3" started="$4"
   local mf="$out_dir/build-inventory.json" tmpf="$out_dir/.build-inventory.json.tmp.$$"
   [[ -d "$out_dir" ]] || return 4
-  local finished built_at source_sha dirty inv inv_in cfg node_v
+  local finished built_at source_sha dirty inv inv_in cfg node_v node_bin node_abi
   finished="$(date +%s)"
   built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf 'unknown')"
   source_sha="$(_ccbi_git_head "$app_dir")"
@@ -269,8 +269,22 @@ _ccbi_write_manifest() {
   inv="$(_ccbi_inventory_digest "$app_dir")"   || return 4
   inv_in="$(_ccbi_inventory_inputs_digest "$app_dir")" || return 4
   cfg="$(_ccbi_build_config_digest "$app_dir")" || return 4
-  node_v="unknown"
-  command -v node >/dev/null 2>&1 && node_v="$(node --version 2>/dev/null || printf 'unknown')"
+  # ISSUE-09: record the node that BUILT this artifact, by version AND by
+  # native module ABI. The version string is for humans; `node_abi` is the
+  # field cc-start.sh compares against its own runtime before exec, because it
+  # is the ABI, not the version, that decides whether better-sqlite3 loads.
+  # Prefer the resolved fleet runtime (CC_NODE_BIN, normally exported by
+  # atomic-deploy.sh) over ambient `node`, so the recorded identity is the one
+  # the build actually used rather than whatever this shell happens to find.
+  node_bin="${CC_NODE_BIN:-}"
+  if [[ -z "$node_bin" ]] || [[ ! -x "$node_bin" ]]; then
+    node_bin="$(command -v node 2>/dev/null || printf '')"
+  fi
+  node_v="unknown"; node_abi="unknown"
+  if [[ -n "$node_bin" ]]; then
+    node_v="$("$node_bin" --version 2>/dev/null || printf 'unknown')"
+    node_abi="$("$node_bin" -p process.versions.modules 2>/dev/null || printf 'unknown')"
+  fi
   cat > "$tmpf" <<EOF
 {
   "manifest_version": "1",
@@ -283,7 +297,9 @@ _ccbi_write_manifest() {
   "build_id": "$build_id",
   "build_started_epoch": "$started",
   "build_finished_epoch": "$finished",
-  "node_runtime": "$node_v"
+  "node_runtime": "$node_v",
+  "node_version": "$node_v",
+  "node_abi": "$node_abi"
 }
 EOF
   mv -f "$tmpf" "$mf" || { rm -f "$tmpf"; return 4; }

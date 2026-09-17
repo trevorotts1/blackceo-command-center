@@ -288,6 +288,13 @@ function makeGatingGreenNextBuild(dir: string): void {
 }
 
 function greenGatingDbMock() {
+  // ISSUE-04: /api/health/deep now carries a GATING `scheduler_liveness` check
+  // that reads job_liveness through queryOne. A GREEN box is one whose in-process
+  // scheduler is ticking, so this fixture answers those reads with a fresh tick.
+  // Without them the route reports a stalled scheduler and the box is no longer
+  // green, which would make every assertion in this file fail for a reason that
+  // has nothing to do with persona grounding.
+  const freshTick = new Date().toISOString();
   return {
     getDb: () => ({
       prepare: (sql: string) => ({
@@ -299,6 +306,27 @@ function greenGatingDbMock() {
         all: () => [],
       }),
     }),
+    queryOne: (sql: string) => {
+      if (sql.includes('job_liveness')) {
+        return {
+          ok: 1,
+          last_ran_at: freshTick,
+          last_status: 'ok',
+          last_started_at: freshTick,
+          last_finished_at: freshTick,
+          last_success_at: freshTick,
+          consecutive_failures: 0,
+          error_code: null,
+          result_counts: '{}',
+        };
+      }
+      return undefined;
+    },
+    queryAll: () => [],
+    run: () => undefined,
+    timeNow: () => freshTick,
+    sqlTime: (col: string) => col,
+    parseDbTime: (value: unknown) => (value ? new Date(String(value)).getTime() : NaN),
     getMigrationStatus: () => ({ applied: ['001'], pending: [] }),
     getDbPath: () => path.join(tmpDir, 'test.db'),
   };
