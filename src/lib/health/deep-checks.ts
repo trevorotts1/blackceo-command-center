@@ -2009,7 +2009,7 @@ export function checkSkill35CycleProjection(): ProducerBoardProjectionResult {
 // reports every other posture check — no shell access required.
 //
 // DESIGN NOTE — same posture as every other advisory check in this file
-// (anthology/skill6 board projection, sweep_liveness): non-gating. A pile of
+// (anthology/skill6 board projection, board_jobs_watchdog): non-gating. A pile of
 // undeliverable records is an OPERATIONAL signal (something downstream —
 // Telegram config, an operator chat id — needs attention), never a Command
 // Center correctness fault, so it must never flip the top-level pass/
@@ -2261,7 +2261,7 @@ function isValidPersonaMatchShape(v: unknown): v is Partial<PersonaMatchDistribu
  * must place this under `advisory`, mirroring every other check in this
  * file's posture. `pass: false` here reflects a confirmed grounding
  * degrade for the field's OWN value only (same posture as
- * checkSweepLiveness's `pass: false` on a stale watcher) — it carries no
+ * checkBoardJobsWatchdog's `pass: false` on a silent job) — it carries no
  * gating weight because `advisory` is structurally excluded from
  * `gatingChecks` in the route.
  */

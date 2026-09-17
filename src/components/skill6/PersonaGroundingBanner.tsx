@@ -18,7 +18,7 @@
  * DESIGN DECISION (A-U12 acceptance (c), "restoring it clears the chip"):
  * the `persona_grounding_degraded` EVENT lands on the `events` feed-of-record
  * as a durable, cooldown-guarded row (persona-grounding-sweep.ts) exactly
- * like persona_blend_regression / sweep_liveness_alert — that feed is
+ * like persona_blend_regression / board_jobs_watchdog_alert — that feed is
  * append-only and never clears a row. The CHIP therefore does NOT read the
  * event feed; it renders from the LIVE probe state on every poll, so it
  * clears the moment a probe cycle reports grounding healthy again — no

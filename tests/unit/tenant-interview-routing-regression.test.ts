@@ -10,7 +10,7 @@ import { resolveTenantContext, signTenantGrant, verifyTenantGrant } from '../../
 import { queueInterviewOperation, tenantAnswers, ensureTenantInterview } from '../../src/lib/interview/remote-store';
 import { verifyRemoteBody, signRemoteBody, deliverInterviewOperation } from '../../src/lib/interview/remote-protocol';
 import { routeTaskDecision, comDispatch, type AgentWithLoad } from '../../src/lib/routing/department-router';
-import { checkSweepLiveness, WATCHED_JOB_CADENCE_MINUTES } from '../../src/lib/jobs/sweep-liveness';
+import { checkBoardJobsWatchdog, WATCHED_JOB_CADENCE_MINUTES } from '../../src/lib/jobs/board-jobs-watchdog';
 import { runIntakeAdvanceSweep } from '../../src/lib/jobs/intake-advance-sweep';
 
 process.env.MC_API_TOKEN='fixture-api-token';
@@ -114,9 +114,9 @@ for(const id of ['client-a','client-b'])run('INSERT OR IGNORE INTO clients(id,na
  });
  test('fresh error ticks fail health and recovery restores it',()=>{
   for(const name of Object.keys(WATCHED_JOB_CADENCE_MINUTES))run(`INSERT INTO job_liveness(job_name,last_ran_at,last_status,consecutive_failures,last_success_at) VALUES(?,?,'error',2,?) ON CONFLICT(job_name) DO UPDATE SET last_ran_at=excluded.last_ran_at,last_status='error',consecutive_failures=2,last_success_at=excluded.last_success_at`,[name,new Date().toISOString(),new Date().toISOString()]);
-  assert.equal(checkSweepLiveness().pass,false);
+  assert.equal(checkBoardJobsWatchdog().pass,false);
   run("UPDATE job_liveness SET last_status='ok',consecutive_failures=0,last_finished_at=last_ran_at,last_success_at=last_ran_at");
-  assert.equal(checkSweepLiveness().pass,true);
+  assert.equal(checkBoardJobsWatchdog().pass,true);
  });
  test('25 unroutable oldest rows do not starve the 26th and dispatch counts are honest',async()=>{
   run("INSERT OR IGNORE INTO workspaces(id,name,slug,company_id) VALUES('fixture-intake-ws','Communications','fixture-intake-ws','company-a')");

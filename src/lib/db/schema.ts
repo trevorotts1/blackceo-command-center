@@ -329,7 +329,7 @@ CREATE INDEX IF NOT EXISTS idx_ceo_chat_session ON ceo_chat_messages(session_id,
 -- Cron job liveness ledger (C-09 / U40 -- "watch the watchers"). Migration 102
 -- also creates this for existing DBs; CREATE TABLE IF NOT EXISTS is idempotent.
 -- One row per registered scheduler.ts job name, upserted on every tick (success
--- or failure) by wrap(). src/lib/jobs/sweep-liveness.ts reads this to detect an
+-- or failure) by wrap(). src/lib/jobs/board-jobs-watchdog.ts reads this to detect an
 -- advancer (intake-advance) or qc-review-sweep gone silent for 3x its cadence.
 CREATE TABLE IF NOT EXISTS job_liveness (
   job_name TEXT PRIMARY KEY,

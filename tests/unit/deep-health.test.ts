@@ -1606,7 +1606,7 @@ describe('GET /api/health/deep — response shape', () => {
     // ISSUE-04: a GREEN box is one whose in-process scheduler is ticking, so
     // this fixture now answers the job_liveness reads too. Before the gating
     // scheduler_liveness check existed, `queryOne` was simply absent from this
-    // mock and sweep-liveness saw every watched job as never observed, which
+    // mock and the board jobs watchdog saw every watched job as never observed, which
     // was invisible only because nothing gated on it.
     const freshTick = new Date().toISOString();
     return {
@@ -2219,12 +2219,12 @@ describe('company_branding — leftover default seed row (C-03)', () => {
 });
 
 // ────────────────────────────────────────────────────────────────────────────
-// ISSUE-04: scheduler_liveness, the GATING half of the sweep-liveness signal
+// ISSUE-04: scheduler_liveness, the GATING half of the board jobs watchdog signal
 //
 // THE DEFECT: every sweep is a node-cron job registered in-process, and the
-// sweep-liveness watchdog is itself one of them, so it dies with the loop it
-// watches. checkSweepLiveness() reached /api/health/deep only as
-// advisory.sweep_liveness, which the gating aggregation excludes and
+// board jobs watchdog is itself one of them, so it dies with the loop it
+// watches. checkBoardJobsWatchdog() reached /api/health/deep only as
+// advisory.board_jobs_watchdog, which the gating aggregation excludes and
 // scripts/cc-health-check.sh never reads. A live box sat "healthy" for 41
 // hours with no card moving.
 //
@@ -2239,10 +2239,10 @@ describe('company_branding — leftover default seed row (C-03)', () => {
 // stay on the un-gated advisory.
 // ────────────────────────────────────────────────────────────────────────────
 
-/** Load sweep-liveness.ts fresh, against whatever '@/lib/db' mock is active. */
+/** Load board-jobs-watchdog.ts fresh, against whatever '@/lib/db' mock is active. */
 async function loadSchedulerLiveness() {
   vi.resetModules();
-  return await import('../../src/lib/jobs/sweep-liveness.js') as typeof import('../../src/lib/jobs/sweep-liveness');
+  return await import('../../src/lib/jobs/board-jobs-watchdog.js') as typeof import('../../src/lib/jobs/board-jobs-watchdog');
 }
 
 /**
@@ -2298,7 +2298,8 @@ describe('scheduler_liveness (ISSUE-04, GATING)', () => {
   const UPTIME_PAST_WARMUP = 60 * 60; // 60 minutes, well past the 16m window
 
   afterEach(() => {
-    delete process.env.DISABLE_SWEEP_LIVENESS;
+    delete process.env.DISABLE_BOARD_JOBS_WATCHDOG;
+    delete process.env.DISABLE_SWEEP_LIVENESS; // pre-rename alias, still honoured
   });
 
   it('all watched jobs ticking → pass=true, never indeterminate', async () => {
@@ -2391,27 +2392,27 @@ describe('scheduler_liveness (ISSUE-04, GATING)', () => {
     const rows = allHealthy(1);
     rows['qc-review-sweep'] = { ...healthyRow(1), last_status: 'error', consecutive_failures: 9, error_code: 'job_failed' };
     mockJobLivenessRows(rows);
-    const { checkSchedulerLiveness, checkSweepLiveness } = await loadSchedulerLiveness();
+    const { checkSchedulerLiveness, checkBoardJobsWatchdog } = await loadSchedulerLiveness();
     expect(checkSchedulerLiveness(UPTIME_PAST_WARMUP).pass).toBe(true);
     // ...and the advisory still reports it, so the signal is not lost.
-    expect(checkSweepLiveness().pass).toBe(false);
+    expect(checkBoardJobsWatchdog().pass).toBe(false);
   });
 
   it('a kill-flagged (disabled) job does NOT gate either, and the advisory treats it as an operator decision (pass, named in detail)', async () => {
     const rows = allHealthy(1);
     rows['stuck-in-progress-sweep'] = { ...healthyRow(1), last_status: 'disabled' };
     mockJobLivenessRows(rows);
-    const { checkSchedulerLiveness, checkSweepLiveness } = await loadSchedulerLiveness();
+    const { checkSchedulerLiveness, checkBoardJobsWatchdog } = await loadSchedulerLiveness();
     expect(checkSchedulerLiveness(UPTIME_PAST_WARMUP).pass).toBe(true);
-    const advisory = checkSweepLiveness();
+    const advisory = checkBoardJobsWatchdog();
     expect(advisory.pass).toBe(true);
-    expect(advisory.detail).toMatch(/stuck-in-progress-sweep \(disabled on this box\)/);
+    expect(advisory.detail).toMatch(/stuck-in-progress-sweep is switched off on this box/);
   });
 
-  it('DISABLE_SWEEP_LIVENESS makes the gating check PASS, never a permanent UNKNOWN', async () => {
+  it('DISABLE_BOARD_JOBS_WATCHDOG makes the gating check PASS, never a permanent UNKNOWN', async () => {
     // A permanent indeterminate would be escalated by cc-health-check.sh as a
     // persistent-unknown RED: a false red produced by an operator setting.
-    process.env.DISABLE_SWEEP_LIVENESS = '1';
+    process.env.DISABLE_BOARD_JOBS_WATCHDOG = '1';
     mockJobLivenessRows({});
     const { checkSchedulerLiveness } = await loadSchedulerLiveness();
     const result = checkSchedulerLiveness(UPTIME_PAST_WARMUP);

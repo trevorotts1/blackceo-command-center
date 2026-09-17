@@ -200,7 +200,7 @@ test('FIX-5: an unbranded box still escalates — anonymously, never silently', 
   const cap = captureWebhook();
   try {
     const notify = await freshNotify();
-    const dispatched = notify.notifySystem('gateway down', { agent: 'sweep-liveness' });
+    const dispatched = notify.notifySystem('gateway down', { agent: 'board-jobs-watchdog' });
 
     assert.equal(dispatched, true, 'FAIL-OPEN: identity must NEVER be a reason not to escalate');
     assert.equal(cap.posts.length, 1, 'the escalation still goes out');
