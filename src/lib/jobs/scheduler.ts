@@ -31,6 +31,12 @@ import {
   WEEKLY_DONE_CLEAR_CRON_TIMEZONE,
 } from './weekly-done-clear';
 import {
+  runDbRetention,
+  formatDbRetentionSummary,
+  DB_RETENTION_CRON_EXPR,
+  DB_RETENTION_CRON_TIMEZONE,
+} from './db-retention';
+import {
   runLssControlReview,
   LSS_CONTROL_REVIEW_CRON_EXPR,
   LSS_CONTROL_REVIEW_CRON_TIMEZONE,
@@ -736,6 +742,29 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<unknown> | unk
           ? `[cron] weekly-done-clear: skipped — ${result.skippedReason}`
           : `[cron] weekly-done-clear: archived ${result.archivedCount} done task(s)`,
       );
+    },
+  },
+
+  // db-retention: 03:40 daily America/New_York — age out append-only diagnostic
+  // rows (presentation_stage_timings, sse_event_log, events, task_activities) so
+  // the database stops growing without bound. Never touches tasks, task_events,
+  // task_deliverables, persona/SOP tables or job_liveness, and never deletes a
+  // row belonging to a live card. Bounded batches under a 60s budget; no VACUUM.
+  // Disable with DISABLE_DB_RETENTION=1.
+  {
+    name: 'db-retention',
+    expr: DB_RETENTION_CRON_EXPR,
+    timezone: DB_RETENTION_CRON_TIMEZONE,
+    fn: async () => {
+      const result = await runDbRetention();
+      console.log(
+        result.skippedReason
+          ? `[cron] db-retention: skipped — ${result.skippedReason}`
+          : `[cron] db-retention: ${formatDbRetentionSummary(result)}`,
+      );
+      // MR-31: return the result so wrap() sees skippedReason and records the
+      // job_liveness tick as 'disabled' rather than a false-green 'ok'.
+      return result;
     },
   },
 
