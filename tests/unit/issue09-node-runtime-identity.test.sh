@@ -425,6 +425,45 @@ grep -q '_cc_assert_native_module_usable' "$US" \
   && ok "D3: update.sh asserts the same after npm ci (where postinstall rebuilds)" \
   || bad "D3: update.sh trusts npm ci's exit code for the native module"
 
+# Behavioural, not just a grep: extract update.sh's own assertion and run it
+# against the three states that matter. The middle case is the defect; the
+# first is why the check is scoped to INSTALLED packages (an absent package is
+# npm ci's failure to report, and firing on it would mean no environment with a
+# stubbed npm could ever run the updater, which is a worse trade than the
+# coverage it buys).
+D3_FN="$(sed -n '/^_cc_assert_native_module_usable() {/,/^}/p' "$US")"
+if [[ -z "$D3_FN" ]]; then
+  bad "D3: could not extract _cc_assert_native_module_usable from update.sh"
+else
+  d3_run() {  # d3_run <case>; prints SKIP | FATAL | OK
+    local mode="$1" dir="$WORK/d3-$1"
+    rm -rf "$dir"; mkdir -p "$dir"
+    case "$mode" in
+      absent)  : ;;  # no node_modules at all
+      nobinary) mkdir -p "$dir/node_modules/better-sqlite3" ;;
+      good)    mkdir -p "$dir/node_modules/better-sqlite3/build/Release"
+               : > "$dir/node_modules/better-sqlite3/build/Release/better-sqlite3.node" ;;
+    esac
+    INSTALL_DIR="$dir" CC_NODE_BIN="$WORK/onpath/node" bash -c '
+      set -uo pipefail
+      fatal()   { printf "FATAL\n"; exit 1; }
+      warn()    { printf "SKIP\n"; }
+      success() { printf "OK\n"; }
+      '"$D3_FN"'
+      _cc_assert_native_module_usable better-sqlite3
+    ' 2>/dev/null | head -1
+  }
+  [[ "$(d3_run absent)" == "SKIP" ]] \
+    && ok "D3: a package that is not installed at all is skipped, not fataled" \
+    || bad "D3: an absent package fataled; a stubbed-npm environment could never update"
+  [[ "$(d3_run nobinary)" == "FATAL" ]] \
+    && ok "D3: a package present with NO compiled binary is fatal (the silent-success defect)" \
+    || bad "D3: an installed package with no .node file was accepted"
+  [[ "$(d3_run good)" == "OK" ]] \
+    && ok "D3: a package with a loadable binary passes" \
+    || bad "D3: a good install was rejected"
+fi
+
 # ── U1: update.sh ────────────────────────────────────────────────────────────
 echo "[U1] update.sh resolves identity, then checks the RESOLVED node against engines"
 grep -q 'node-runtime.sh' "$US" \

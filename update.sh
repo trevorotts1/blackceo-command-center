@@ -683,7 +683,18 @@ success "Dependencies installed"
 # rather than letting the box crash-loop after the deploy.
 _cc_assert_native_module_usable() {
   local mod="$1"
-  local lib="$INSTALL_DIR/node_modules/$mod/build/Release/$mod.node"
+  local pkg="$INSTALL_DIR/node_modules/$mod"
+  local lib="$pkg/build/Release/$mod.node"
+  # The defect class is narrow and worth stating: a package that IS installed
+  # whose native binary is silently absent. A package that is not installed at
+  # all is a different failure, and one npm ci already owns with a non-zero
+  # exit that this script fatals on above. Firing here on an absent package
+  # would also mean any environment with a stubbed npm could never run the
+  # updater, which is a worse trade than the coverage it buys.
+  if [ ! -d "$pkg" ]; then
+    warn "$mod is not present under $INSTALL_DIR/node_modules -- skipping the native-module check (npm ci reported success, so nothing claims it should be there)."
+    return 0
+  fi
   if [ ! -f "$lib" ]; then
     fatal "npm ci completed but $mod has no compiled binary at $lib. postinstall's 'npm rebuild $mod' exits 0 even when it compiles nothing, so its success is not evidence. Run 'cd $INSTALL_DIR/node_modules/$mod && npx node-gyp rebuild' and re-run the updater; migrations, build and restart were not run."
   fi
