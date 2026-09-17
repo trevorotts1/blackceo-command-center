@@ -41,6 +41,19 @@ function rmTmpDir(dir: string): void {
   try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
 }
 
+function initializeFixtureGit(appDir: string): string {
+  const git = (args: string[]) => {
+    const result = spawnSync('git', ['-C', appDir, ...args], { encoding: 'utf8' });
+    assert.strictEqual(result.status, 0,
+      `git ${args.join(' ')} failed in fixture ${appDir}: ${result.stderr}`);
+    return (result.stdout ?? '').trim();
+  };
+  git(['init']);
+  git(['add', 'package.json', 'package-lock.json', 'src']);
+  git(['-c', 'user.name=Command Center Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-m', 'fixture baseline']);
+  return git(['rev-parse', 'HEAD']);
+}
+
 interface Fx { baseDir: string; appDir: string; binDir: string; healthStub: string; deploy: string; cleanup(): void; }
 
 function buildFixture(opts: {
@@ -65,6 +78,7 @@ function buildFixture(opts: {
   writeFileSync(path.join(appDir, 'src', 'a.ts'), 'export const a = 1;\n');
   writeFileSync(path.join(appDir, 'package.json'), '{"name":"fixture","version":"1.0.0","build":"next build"}\n');
   writeFileSync(path.join(appDir, 'package-lock.json'), '{"name":"fixture","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{}}\n');
+  initializeFixtureGit(appDir);
   // Stub native module gate: the deploy gate requires a usable better-sqlite3
   // from the app and from the staged dependency tree.
   const createSqliteStub = (dir: string) => {
@@ -214,9 +228,14 @@ test('PRES-046 F3: health-fail rollback writes a binding receipt; matching redep
     const mf1 = JSON.parse(readFileSync(path.join(fixture.appDir, '.next', 'build-inventory.json'), 'utf8')) as Record<string, string>;
     const invX = mf1.inventory_digest;
 
-    // Step 2: change source to Y, deploy again with health failing → auto-rollback to X.
-    // The rollback receipt must bind: rolled_back_to=X (served prior), failed_target=Y.
+    // Step 2: commit content Y, then deploy that explicit revision with health
+    // failing → auto-rollback to X. The rollback receipt must bind:
+    // rolled_back_to=X (served prior), failed_target=Y.
     writeFileSync(path.join(fixture.appDir, 'src', 'a.ts'), 'export const a = 2;\n');
+    let gitResult = spawnSync('git', ['-C', fixture.appDir, 'add', 'src/a.ts'], { encoding: 'utf8' });
+    assert.strictEqual(gitResult.status, 0, gitResult.stderr);
+    gitResult = spawnSync('git', ['-C', fixture.appDir, '-c', 'user.name=Command Center Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-m', 'content Y'], { encoding: 'utf8' });
+    assert.strictEqual(gitResult.status, 0, gitResult.stderr);
     // capture content-Y inventory via the lib (same oracle the deploy uses)
     const invY = execFileSync('bash', [path.join(process.cwd(), 'scripts', 'lib', 'build-inventory.sh'), '--digest', fixture.appDir], { encoding: 'utf8' }).trim();
     const healthStubPath = fixture.healthStub;

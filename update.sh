@@ -792,6 +792,10 @@ done
 DEPLOY_OK=0
 if [ -f "$ATOMIC_DEPLOY" ] && [ -n "$BASH4" ]; then
   ADEPLOY_ARGS=(--app-dir "$INSTALL_DIR" --pm2-app "$CC_PM2_NAME")
+  DEPLOY_REVISION="$(git -C "$INSTALL_DIR" rev-parse HEAD 2>/dev/null)" \
+    || fatal "Could not resolve the merged commit SHA for atomic deployment."
+  ADEPLOY_ARGS+=(--revision "$DEPLOY_REVISION")
+  success "Atomic deploy source revision: $DEPLOY_REVISION"
   [ -n "${CC_PORT:-}" ] && ADEPLOY_ARGS+=(--port "$CC_PORT")
   # set -e is active for the updater; suspend it around the deploy so we can
   # inspect its exit-contract code (0 green / 1 rolled-back / 2 pre-flight / 3 unknown).

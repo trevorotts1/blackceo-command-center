@@ -267,8 +267,16 @@ _ccbi_write_manifest() {
   local finished built_at source_sha dirty inv inv_in cfg node_v node_bin node_abi
   finished="$(date +%s)"
   built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf 'unknown')"
-  source_sha="$(_ccbi_git_head "$app_dir")"
-  dirty="$(_ccbi_dirty_digest "$app_dir")"     || return 4
+  # atomic-deploy.sh builds from a verified explicit commit. When it provides
+  # that identity, seal the manifest against the extracted candidate rather
+  # than the mutable live checkout.
+  if [[ -n "${CCBI_SOURCE_SHA_OVERRIDE:-}" ]]; then
+    source_sha="$CCBI_SOURCE_SHA_OVERRIDE"
+    dirty="${CCBI_DIRTY_DIGEST_OVERRIDE:-explicit-revision}"
+  else
+    source_sha="$(_ccbi_git_head "$app_dir")"
+    dirty="$(_ccbi_dirty_digest "$app_dir")"   || return 4
+  fi
   inv="$(_ccbi_inventory_digest "$app_dir")"   || return 4
   inv_in="$(_ccbi_inventory_inputs_digest "$app_dir")" || return 4
   cfg="$(_ccbi_build_config_digest "$app_dir")" || return 4
@@ -415,30 +423,88 @@ _ccbi_verify_rollback_receipt() {
   printf 'RECEIPT_OK\n'; return 0
 }
 
+# Extract a commit to a private tree and compute the canonical inventory over
+# exactly that revision. Used by atomic-deploy manifests sealed with
+# dirty_digest=explicit-revision; dirty working-tree files do not redefine the
+# source that was deployed.
+_ccbi_commit_inventory_digest() {
+  local app_dir="$1" commit="$2"
+  local tmp
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/ccbi-commit-inv-XXXXXX")" || return 4
+  if ! git -C "$app_dir" archive "$commit" | tar -x -C "$tmp" 2>/dev/null; then
+    rm -rf "$tmp"
+    return 4
+  fi
+  local inv
+  inv="$(_ccbi_inventory_digest "$tmp")" || { rm -rf "$tmp"; return 4; }
+  rm -rf "$tmp"
+  printf '%s' "$inv"
+}
+
+_ccbi_commit_inventory_inputs_digest() {
+  local app_dir="$1" commit="$2"
+  local tmp
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/ccbi-commit-inv-XXXXXX")" || return 4
+  if ! git -C "$app_dir" archive "$commit" | tar -x -C "$tmp" 2>/dev/null; then
+    rm -rf "$tmp"
+    return 4
+  fi
+  local inv
+  inv="$(_ccbi_inventory_inputs_digest "$tmp")" || { rm -rf "$tmp"; return 4; }
+  rm -rf "$tmp"
+  printf '%s' "$inv"
+}
+
 # ── verification ─────────────────────────────────────────────────────────────
 # _ccbi_verify_tree_against_manifest <app_dir> <manifest_path>
 # Prints one of: VERIFIED | MISMATCH | MANIFEST_MISSING | MANIFEST_INVALID |
 #                OBSOLETE_INVENTORY
 # and returns 0/1/2/3/5 respectively. Content-only: mtimes are irrelevant.
 _ccbi_verify_tree_against_manifest() {
-  local app_dir="$1" manifest="$2" current recorded recorded_inputs current_inputs
+  local app_dir="$1" manifest="$2"
+  local current recorded recorded_inputs current_inputs
   if [[ ! -f "$manifest" ]]; then
     printf 'MANIFEST_MISSING\n'; return 2
   fi
   # Truncated/invalid manifest: required fields absent → INVALID (exact
   # failure; a corrupt manifest must never silently downgrade to mtime trust).
   recorded="$(_ccbi_json_field "$manifest" inventory_digest)"
-  local bid
+  local bid source_sha dirty_digest current_head
   bid="$(_ccbi_json_field "$manifest" build_id)"
+  source_sha="$(_ccbi_json_field "$manifest" source_sha)"
+  dirty_digest="$(_ccbi_json_field "$manifest" dirty_digest)"
   recorded_inputs="$(_ccbi_json_field "$manifest" inventory_inputs_digest)"
   if [[ -z "$recorded" || -z "$bid" || -z "$recorded_inputs" \
         || "$recorded" == *' '* || "${#recorded}" -lt 8 ]]; then
     printf 'MANIFEST_INVALID\n'; return 3
   fi
-  # Obsolescence guard: the manifest pins the input LIST it was computed over.
-  # If the canonical compile-affecting input set has changed since (new config
-  # file, extended canonical list), the recorded inventory no longer covers
-  # what compiles today — exact failure, never a silent pass.
+
+  # New atomic-deploy artifacts are sealed against an explicit commit. Their
+  # source of truth is that commit, not a dirty checkout. Require the live HEAD
+  # to still equal the recorded SHA, then compare the manifest to the commit's
+  # own canonical inventory.
+  if [[ "$dirty_digest" == "explicit-revision" ]]; then
+    if [[ -z "$source_sha" || "$source_sha" == "non-git" ]]; then
+      printf 'MANIFEST_INVALID\n'; return 3
+    fi
+    current_head="$(_ccbi_git_head "$app_dir")"
+    if [[ -z "$current_head" || "$current_head" != "$source_sha" ]]; then
+      printf 'MISMATCH\n'; return 1
+    fi
+    current_inputs="$(_ccbi_commit_inventory_inputs_digest "$app_dir" "$source_sha")" \
+      || { printf 'MANIFEST_INVALID\n'; return 3; }
+    if [[ "$current_inputs" != "$recorded_inputs" ]]; then
+      printf 'OBSOLETE_INVENTORY\n'; return 5
+    fi
+    current="$(_ccbi_commit_inventory_digest "$app_dir" "$source_sha")" \
+      || { printf 'MANIFEST_INVALID\n'; return 3; }
+    if [[ "$current" == "$recorded" ]]; then
+      printf 'VERIFIED\n'; return 0
+    fi
+    printf 'MISMATCH\n'; return 1
+  fi
+
+  # Legacy manifests continue to verify against the live working tree.
   current_inputs="$(_ccbi_inventory_inputs_digest "$app_dir")" \
     || { printf 'MANIFEST_INVALID\n'; return 3; }
   if [[ "$current_inputs" != "$recorded_inputs" ]]; then

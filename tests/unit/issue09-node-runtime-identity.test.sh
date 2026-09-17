@@ -418,9 +418,9 @@ echo "[D3] a rebuild is verified by its artifact, not its exit code"
 grep -q '_ccbi_assert_rebuild_produced_binary' "$AD" \
   && ok "D3: atomic-deploy asserts the rebuild produced a binary" \
   || bad "D3: atomic-deploy still trusts npm rebuild's exit code"
-grep -q 'reported success but produced NO binary' "$AD" \
-  && ok "D3: the failure names the silent-success class" \
-  || bad "D3: no silent-success language in the abort path"
+grep -q 'the resolved package does not load and execute SQLite' "$AD" \
+  && ok "D3: the failure names the resolved functional artifact" \
+  || bad "D3: no resolved-package functional language in the abort path"
 grep -q '_cc_assert_native_module_usable' "$US" \
   && ok "D3: update.sh asserts the same after npm ci (where postinstall rebuilds)" \
   || bad "D3: update.sh trusts npm ci's exit code for the native module"
