@@ -80,6 +80,11 @@ import { scoreTaskForQC } from '@/lib/qc-scorer';
 import { queryAll, run } from '@/lib/db';
 import type { QCScorerInput } from '@/lib/qc-scorer';
 
+/** Last observed set of deliberately switched-off board jobs, as a sorted
+ *  signature. `null` means "not yet observed in this process", so the first
+ *  tick always logs. See the board-jobs-watchdog registration below. */
+let lastBoardJobsDisabledSignature: string | null = null;
+
 export interface RegisteredJob {
   name: string;
   cron: string;
@@ -539,10 +544,22 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<unknown> | unk
       const result = await runBoardJobsWatchdog();
       if (result.skippedReason) {
         console.log(`[cron] board-jobs-watchdog: skipped — ${result.skippedReason}`);
-      } else if (result.staleJobs.length > 0 || result.disabledJobs.length > 0) {
-        const parts: string[] = [];
-        if (result.staleJobs.length > 0) parts.push(`NOT RUNNING — ${result.staleJobs.join(', ')}`);
-        if (result.disabledJobs.length > 0) parts.push(`SWITCHED OFF — ${result.disabledJobs.join(', ')}`);
+        return;
+      }
+      // A job an operator switched off is a STANDING STATE, not an event. Logging
+      // it on every 2-minute tick wrote the same line ~720 times a day and filled
+      // the pm2 error log on boxes where the sweeps are disabled on purpose — the
+      // noise that hides the one line that matters. It is therefore logged on the
+      // FIRST observation and then only when the SET of switched-off jobs changes.
+      // Silence (NOT RUNNING) is a live fault and still warns on every tick.
+      const offSignature = result.disabledJobs.slice().sort().join(',');
+      const offChanged = offSignature !== lastBoardJobsDisabledSignature;
+      lastBoardJobsDisabledSignature = offSignature;
+      const parts: string[] = [];
+      if (result.staleJobs.length > 0) parts.push(`NOT RUNNING — ${result.staleJobs.join(', ')}`);
+      if (result.disabledJobs.length > 0 && offChanged) parts.push(`SWITCHED OFF — ${result.disabledJobs.join(', ')}`);
+      if (result.selfRestart && result.selfRestart !== 'none') parts.push(`self-restart: ${result.selfRestart}`);
+      if (parts.length > 0) {
         console.warn(
           `[cron] board-jobs-watchdog: ${parts.join(' | ')}${result.alerted ? ' (alerted)' : ' (cooldown, already alerted)'}`,
         );
