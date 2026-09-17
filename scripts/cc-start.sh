@@ -76,12 +76,20 @@ printf '[cc-start] ENV-BLEED GUARD: pinned PORT=%s (NODE_ENV=%s)\n' "$CC_PORT" "
 # escalation is rejected. Source the operator secret store when it exists so
 # manual and launchd start paths both carry it. Never print or hardcode the value.
 if [[ -z "${RESCUE_RANGERS_WEBHOOK_SECRET:-}" && -f "${HOME}/.openclaw/secrets/.env" ]]; then
-  _rr_secret_line="$(grep -E '^RESCUE_RANGERS_WEBHOOK_SECRET=' "${HOME}/.openclaw/secrets/.env" 2>/dev/null | tail -1 || true)"
-  if [[ -n "$_rr_secret_line" ]]; then
-    export "${_rr_secret_line}"
+  _rr_secret_value="$(sed -n -E 's/^RESCUE_RANGERS_WEBHOOK_SECRET=//p' "${HOME}/.openclaw/secrets/.env" 2>/dev/null | tail -1 || true)"
+  if [[ -n "$_rr_secret_value" ]]; then
+    # dotenv semantics: strip ONE matching pair of surrounding quotes, preserve
+    # inner characters, and never evaluate the value.
+    _rr_q="${_rr_secret_value:0:1}"
+    if [[ "$_rr_q" == "\"" || "$_rr_q" == "'" ]]; then
+      if [[ "${_rr_secret_value: -1}" == "$_rr_q" && "${#_rr_secret_value}" -ge 2 ]]; then
+        _rr_secret_value="${_rr_secret_value:1:${#_rr_secret_value}-2}"
+      fi
+    fi
+    export RESCUE_RANGERS_WEBHOOK_SECRET="$_rr_secret_value"
     printf '[cc-start] RESCUE-RANGERS-AUTH: X-Rescue-Secret provisioned from the operator secret store.\n' >&2
   fi
-  unset _rr_secret_line
+  unset _rr_secret_value _rr_q
 fi
 
 # ── 1b. NON-4000 DRIFT ACK GUARD (P1-02 Unit B, item 4) ───────────────────────

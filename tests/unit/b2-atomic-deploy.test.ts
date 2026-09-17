@@ -160,6 +160,14 @@ function buildFixture(cfg: FixtureConfig = {}): Fixture {
 
   // Fake DB
   writeFixtureDb(path.join(appDir, 'mission-control.db'));
+  writeFileSync(path.join(appDir, 'package.json'), '{"name":"fixture","version":"1.0.0","build":"next build"}\n');
+  writeFileSync(path.join(appDir, 'package-lock.json'), '{"name":"fixture","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{}}\n');
+  const createSqliteStub = (dir: string) => {
+    mkdirSync(path.join(dir, 'node_modules', 'better-sqlite3'), { recursive: true });
+    writeFileSync(path.join(dir, 'node_modules', 'better-sqlite3', 'package.json'), '{"name":"better-sqlite3","version":"0.0.0","main":"index.js"}\n');
+    writeFileSync(path.join(dir, 'node_modules', 'better-sqlite3', 'index.js'), 'module.exports = class FakeDatabase { prepare() { return { get: () => ({ answer: 42 }) }; } close() {} };\n');
+  };
+  createSqliteStub(appDir);
 
   // Existing live .next
   if (liveNextExists) {
@@ -183,6 +191,12 @@ function buildFixture(cfg: FixtureConfig = {}): Fixture {
   // - always write the exit code to BUILD_EXIT_FILE (the temp file the script reads)
   const npmStub = `#!/usr/bin/env bash
 # Stub npm for B.2 fixture tests
+if [[ "$1" == "ci" ]]; then
+  mkdir -p node_modules/better-sqlite3
+  printf '%s\n' '{"name":"better-sqlite3","version":"0.0.0","main":"index.js"}' > node_modules/better-sqlite3/package.json
+  printf '%s\n' 'module.exports = class FakeDatabase { prepare() { return { get: () => ({ answer: 42 }) }; } close() {} };' > node_modules/better-sqlite3/index.js
+  exit 0
+fi
 if [[ "$1" == "run" && "$2" == "build" ]]; then
   if [[ "${buildExitCode}" -eq 0 && -n "\${NEXT_DIST_DIR:-}" ]]; then
     mkdir -p "$NEXT_DIST_DIR"
@@ -700,6 +714,14 @@ test('Spec Verify (g): NEXT_DIST_DIR bypass + npm exits non-zero → exit 2, APP
 
   // Fake DB
   writeFixtureDb(path.join(appDir, 'mission-control.db'));
+  writeFileSync(path.join(appDir, 'package.json'), '{"name":"fixture","version":"1.0.0","build":"next build"}\n');
+  writeFileSync(path.join(appDir, 'package-lock.json'), '{"name":"fixture","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{}}\n');
+  const createSqliteStub = (dir: string) => {
+    mkdirSync(path.join(dir, 'node_modules', 'better-sqlite3'), { recursive: true });
+    writeFileSync(path.join(dir, 'node_modules', 'better-sqlite3', 'package.json'), '{"name":"better-sqlite3","version":"0.0.0","main":"index.js"}\n');
+    writeFileSync(path.join(dir, 'node_modules', 'better-sqlite3', 'index.js'), 'module.exports = class FakeDatabase { prepare() { return { get: () => ({ answer: 42 }) }; } close() {} };\n');
+  };
+  createSqliteStub(appDir);
 
   // Existing live .next with a BUILD_ID that will be "fresh" (mtime guard passes
   // because we touch it just before the script runs — the fixture harness runs
@@ -711,6 +733,12 @@ test('Spec Verify (g): NEXT_DIST_DIR bypass + npm exits non-zero → exit 2, APP
   // It also writes BUILD_ID to APP_DIR/.next to simulate the NEXT_DIST_DIR-ignored path,
   // and writes exit code 1 to BUILD_EXIT_FILE.
   const npmStub = `#!/usr/bin/env bash
+if [[ "$1" == "ci" ]]; then
+  mkdir -p node_modules/better-sqlite3
+  printf '%s\n' '{"name":"better-sqlite3","version":"0.0.0","main":"index.js"}' > node_modules/better-sqlite3/package.json
+  printf '%s\n' 'module.exports = class FakeDatabase { prepare() { return { get: () => ({ answer: 42 }) }; } close() {} };' > node_modules/better-sqlite3/index.js
+  exit 0
+fi
 if [[ "$1" == "run" && "$2" == "build" ]]; then
   # Simulate Next.js ignoring NEXT_DIST_DIR — write fresh BUILD_ID to APP_DIR/.next
   # (it was already there; just touch it so mtime == now, making the guard pass)
@@ -1093,6 +1121,12 @@ function buildDataPathFixture(cfg: FixtureConfig = {}): Fixture {
   // Patch the npm stub in binDir to write to NEXT_DIST_DIR under the new path
   const buildExitCode = cfg.buildExitCode ?? 0;
   const npmStub = `#!/usr/bin/env bash
+if [[ "$1" == "ci" ]]; then
+  mkdir -p node_modules/better-sqlite3
+  printf '%s\n' '{"name":"better-sqlite3","version":"0.0.0","main":"index.js"}' > node_modules/better-sqlite3/package.json
+  printf '%s\n' 'module.exports = class FakeDatabase { prepare() { return { get: () => ({ answer: 42 }) }; } close() {} };' > node_modules/better-sqlite3/index.js
+  exit 0
+fi
 if [[ "$1" == "run" && "$2" == "build" ]]; then
   if [[ "${buildExitCode}" -eq 0 && -n "\${NEXT_DIST_DIR:-}" ]]; then
     mkdir -p "$NEXT_DIST_DIR"
@@ -1336,7 +1370,7 @@ test('1d e2e REGRESSION GUARD: deploy on the live-box roster (canonical cc-prod)
       'The port-blind bug deleted blackceo-cc-demo-interview and blackceo-cc-demo-dashboard here. ' +
       `No delete/stop may be issued when nothing fights for the canonical port. Got: ${JSON.stringify(kills)}`);
 
-    assert.ok(calls.some((c) => c === 'restart cc-prod'),
+    assert.ok(calls.some((c) => c === 'restart cc-prod --update-env'),
       `Phase 4 must restart the canonical app. pm2 calls: ${JSON.stringify(calls)}`);
   } finally {
     fixture.cleanup();

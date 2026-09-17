@@ -64,12 +64,28 @@ function buildFixture(opts: {
   mkdirSync(path.join(appDir, 'src'), { recursive: true });
   writeFileSync(path.join(appDir, 'src', 'a.ts'), 'export const a = 1;\n');
   writeFileSync(path.join(appDir, 'package.json'), '{"name":"fixture","version":"1.0.0","build":"next build"}\n');
+  writeFileSync(path.join(appDir, 'package-lock.json'), '{"name":"fixture","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{}}\n');
+  // Stub native module gate: the deploy gate requires a usable better-sqlite3
+  // from the app and from the staged dependency tree.
+  const createSqliteStub = (dir: string) => {
+    mkdirSync(path.join(dir, 'node_modules', 'better-sqlite3'), { recursive: true });
+    writeFileSync(path.join(dir, 'node_modules', 'better-sqlite3', 'package.json'), '{"name":"better-sqlite3","version":"0.0.0","main":"index.js"}\n');
+    writeFileSync(path.join(dir, 'node_modules', 'better-sqlite3', 'index.js'), 'module.exports = class FakeDatabase { prepare() { return { get: () => ({ answer: 42 }) }; } close() {} };\n');
+  };
+  createSqliteStub(appDir);
 
   // existing live .next
   mkdirSync(path.join(appDir, '.next'), { recursive: true });
   writeFileSync(path.join(appDir, '.next', 'BUILD_ID'), 'old-build-id');
 
   const npmStub = `#!/usr/bin/env bash
+if [[ "$1" == "ci" ]]; then
+  # Stage a minimal usable dependency tree in the npm cwd.
+  mkdir -p node_modules/better-sqlite3
+  printf '%s\n' '{"name":"better-sqlite3","version":"0.0.0","main":"index.js"}' > node_modules/better-sqlite3/package.json
+  printf '%s\n' 'module.exports = class FakeDatabase { prepare() { return { get: () => ({ answer: 42 }) }; } close() {} };' > node_modules/better-sqlite3/index.js
+  exit 0
+fi
 if [[ "$1" == "run" && "$2" == "build" ]]; then
   # cwd IS the app dir (atomic-deploy.sh cd's into APP_DIR before building).
   ${npmBody}
