@@ -1,3 +1,8 @@
+## [v7.4.3] — 2026-09-17 — The stale-task sweep no longer "returns" a backlog card to backlog every tick
+
+### Fixed
+- **A backlog card past the stale threshold is counted, not returned.** `runStaleTaskSweep` treated a `backlog` card older than 48h like any other stale card and called `returnToOrchestrator`, whose `transition(id, 'backlog')` is an idempotent no-op when the card is already there: it returns the row and writes none of the extraColumns, so `last_progress_at` stayed frozen and the card qualified again on the very next tick. Every stale backlog card produced one `task_returned` event plus one board broadcast every 10 minutes, forever. Measured on the operator box, where intake-advance is switched off and backlog never drains: about 30 cards, about 4,300 events a day, ages reported as 49 to 53 hours and never resetting. The sweep now skips a card whose status is already `backlog` before the return, reports the count as `alreadyInBacklog` and in one log line per run, and writes nothing. Cards in `review`, `in_progress`, `todo` and `blocked` follow the same paths as before. Regression test: `tests/unit/stale-task-sweep-backlog-loop.test.ts` (fails on the previous code, passes now).
+
 ## [v7.4.2] — 2026-09-17 — A sweep switched off on purpose is not a fault
 
 ### Fixed

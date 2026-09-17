@@ -189,6 +189,9 @@ export interface StaleSweepResult {
    *  registered) instead of being bounced to backlog (SWEEP-RECOVER). */
   recovered?: number;
   recoveredIds?: string[];
+  /** SWEEP-LOOP: backlog cards past the stale threshold that are already with
+   *  the orchestrator. Counted, never "returned" (no transition, no event). */
+  alreadyInBacklog?: number;
   /**
    * PD-TEST-063: blocked tasks whose DISPATCH budget was already exhausted, and
    * which were therefore kept OUT of backlog (never laundered into a fresh
@@ -614,6 +617,7 @@ export async function runStaleTaskSweep(): Promise<StaleSweepResult> {
   let returned = 0;
   let repinged = 0;
   let recovered = 0;
+  let alreadyInBacklog = 0;
   const recoveredIds: string[] = [];
   // PD-TEST-063: blocked cards with an exhausted dispatch budget that were
   // re-escalated instead of being laundered back onto the dispatch conveyor.
@@ -783,6 +787,17 @@ export async function runStaleTaskSweep(): Promise<StaleSweepResult> {
             console.error(`[stale-task-sweep] recovery check failed for ${task.id}:`, (err as Error).message);
           }
         }
+        // SWEEP-LOOP: a task already in backlog IS with the orchestrator — there is
+        // nothing to return it to. transition('backlog'→'backlog') is an idempotent
+        // no-op that writes none of the extraColumns (last_progress_at stays
+        // frozen), so pre-fix the sweep re-"returned" the same card on EVERY tick:
+        // a task_returned event + broadcast every 10 min per stale backlog card,
+        // forever (measured: ~30 cards × 144/day on a box with intake-advance off).
+        // Count it, name it once per run, write nothing.
+        if (task.status === 'backlog') {
+          alreadyInBacklog++;
+          continue;
+        }
         returnToOrchestrator(
           task,
           `Task stale in '${task.status}' for ${Math.round(ageHours)}h (threshold: ${thresholdHours}h) with no progress`,
@@ -796,5 +811,8 @@ export async function runStaleTaskSweep(): Promise<StaleSweepResult> {
     }
   }
 
-  return { scanned: candidates.length, returned, repinged, recovered, recoveredIds, budgetEndStated, budgetEndStatedIds };
+  if (alreadyInBacklog > 0) {
+    console.log(`[stale-task-sweep] ${alreadyInBacklog} backlog card(s) past the stale threshold are already with the orchestrator — nothing to return (no event written)`);
+  }
+  return { scanned: candidates.length, returned, repinged, recovered, recoveredIds, budgetEndStated, budgetEndStatedIds, alreadyInBacklog };
 }
