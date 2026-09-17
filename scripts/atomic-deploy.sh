@@ -719,14 +719,16 @@ _ccbi_native_gate() {
 # same defect class as the ABI drift this unit exists to close, so assert the
 # ARTIFACT, never the exit code.
 _ccbi_assert_rebuild_produced_binary() {  # <app_dir> <module>
-  local _dir="$1" _mod="$2" _lib="$1/node_modules/$2/build/Release/$2.node"
-  if [[ ! -f "$_lib" ]]; then
-    _preflight_abort_receipt "npm rebuild ${_mod} reported success but produced NO binary at ${_lib}. A rebuild that compiles nothing and still exits 0 is a silent success, not a repair. Run 'cd ${_dir}/node_modules/${_mod} && npx node-gyp rebuild' and re-run the updater. Old build untouched."
-  fi
+  local _dir="$1" _mod="$2"
+  # The package resolver is authoritative. Native package names and binding
+  # filenames do not have a stable 1:1 mapping (better-sqlite3 builds
+  # better_sqlite3.node), so guessing a file name can reject a successful
+  # rebuild before its functional probe runs. Resolving the package and
+  # opening SQLite through it proves the real binding loads and executes.
   if ! _ccbi_native_gate "$_dir"; then
-    _preflight_abort_receipt "npm rebuild ${_mod} produced ${_lib}, but it does not load under ${CC_NODE_BIN}. Old build untouched."
+    _preflight_abort_receipt "npm rebuild ${_mod} reported success, but the resolved package does not load and execute SQLite under ${CC_NODE_BIN}. Old build untouched."
   fi
-  _ok "  Rebuild of ${_mod} verified: binary present and loadable under ${CC_NODE_BIN}."
+  _ok "  Rebuild of ${_mod} verified: the resolved package loads and executes SQLite under ${CC_NODE_BIN}."
 }
 
 # ISSUE-09: a failing PRE-FLIGHT gate is repaired ONCE before aborting. The
@@ -747,162 +749,272 @@ if ! _ccbi_native_gate "$APP_DIR"; then
 fi
 _ok "Phase 1 pre-flight passed (including native-module gates)."
 
-# ── 1e. Stage candidate dependencies from the lockfile ───────────────────────
-# The build and runtime must not silently depend on whatever happens to be in
-# the live node_modules. Install a fresh, lockfile-pinned dependency tree into
-# a staging directory, probe it, and only then swap it into place. The prior
-# tree is preserved for rollback and restored on every failure path.
-_log "[1e] Staging candidate dependencies"
+# ── 1e. Stage a complete candidate release ──────────────────────────────────
+# Candidate preparation must never mutate the live release. The candidate gets
+# its own source copy, lockfile-pinned dependencies, generated files and build
+# artifact. Nothing in APP_DIR is swapped until the candidate has built and
+# passed its runtime gates.
+TRANSACTION_PHASE="PREPARING"
+RELEASE_DIR=""
+LIVE_NODE_MODULES_BACKUP=""
+PREVIOUS_DEPS_BACKUP=""
+OLD_NEXT_PARK=""
+CANDIDATE_NEXT_PARK=""
+CANDIDATE_DEPS_PARK=""
+
+_ccbi_discard_candidate_release() {
+  [[ -n "${RELEASE_DIR:-}" && -d "$RELEASE_DIR" ]] || return 0
+  rm -rf "$RELEASE_DIR" 2>/dev/null || {
+    _warn "Could not remove candidate release directory: ${RELEASE_DIR}"
+    return 1
+  }
+  return 0
+}
+
+_ccbi_restore_previous_dependencies() {
+  # Usage: _ccbi_restore_previous_dependencies [keep-candidate-park]
+  # keep-candidate-park is used by explicit rollback so an interruption can
+  # recover the complete candidate until the rollback has fully succeeded.
+  local _keep_candidate="${1:-}"
+  [[ -n "${LIVE_NODE_MODULES_BACKUP:-}" && -d "$LIVE_NODE_MODULES_BACKUP" ]] || return 0
+  CANDIDATE_DEPS_PARK="${APP_DIR}/.node_modules.candidate.$$"
+  local _moved_current=0
+  if [[ -d "${APP_DIR}/node_modules" ]]; then
+    rm -rf "$CANDIDATE_DEPS_PARK" 2>/dev/null || true
+    if mv "${APP_DIR}/node_modules" "$CANDIDATE_DEPS_PARK" 2>/dev/null; then
+      _moved_current=1
+    else
+      rm -rf "${APP_DIR}/node_modules" 2>/dev/null || true
+    fi
+  fi
+  if mv "$LIVE_NODE_MODULES_BACKUP" "${APP_DIR}/node_modules" 2>/dev/null; then
+    _ok "  Previous dependency tree restored: ${APP_DIR}/node_modules"
+    if [[ "$_keep_candidate" != "keep-candidate-park" ]]; then
+      rm -rf "$CANDIDATE_DEPS_PARK" 2>/dev/null || true
+      CANDIDATE_DEPS_PARK=""
+      PREVIOUS_DEPS_BACKUP=""
+    fi
+    LIVE_NODE_MODULES_BACKUP=""
+    return 0
+  fi
+
+  _err "CRITICAL: failed to restore previous dependency tree from ${LIVE_NODE_MODULES_BACKUP}."
+  if [[ "$_moved_current" -eq 1 && -d "$CANDIDATE_DEPS_PARK" ]]; then
+    mv "$CANDIDATE_DEPS_PARK" "${APP_DIR}/node_modules" 2>/dev/null \
+      || _err "CRITICAL: could not recover the displaced dependency tree from ${CANDIDATE_DEPS_PARK}."
+  fi
+  CANDIDATE_DEPS_PARK=""
+  return 1
+}
+
+_ccbi_restore_previous_release() {
+  if [[ -n "${OLD_NEXT_PARK:-}" && -d "$OLD_NEXT_PARK" ]]; then
+    local _discarded="${APP_DIR}/.next.discarded.$$"
+    local _moved_current=0
+    if [[ -d "${APP_DIR}/.next" ]]; then
+      rm -rf "$_discarded" 2>/dev/null || true
+      if mv "${APP_DIR}/.next" "$_discarded" 2>/dev/null; then
+        _moved_current=1
+      else
+        rm -rf "${APP_DIR}/.next" 2>/dev/null || true
+      fi
+    fi
+    if mv "$OLD_NEXT_PARK" "${APP_DIR}/.next" 2>/dev/null; then
+      _ok "  Previous build artifact restored: ${APP_DIR}/.next"
+      rm -rf "$_discarded" 2>/dev/null || true
+    else
+      _err "CRITICAL: failed to restore previous build artifact from ${OLD_NEXT_PARK}."
+      if [[ "$_moved_current" -eq 1 && -d "$_discarded" ]]; then
+        mv "$_discarded" "${APP_DIR}/.next" 2>/dev/null \
+          || _err "CRITICAL: could not recover the displaced artifact from ${_discarded}."
+      fi
+    fi
+    OLD_NEXT_PARK=""
+  fi
+  _ccbi_restore_previous_dependencies
+  TRANSACTION_PHASE="PREVIOUS_LIVE"
+}
+
+_ccbi_recover_interrupted_rollback() {
+  local _recovered=0
+  if [[ -n "${CANDIDATE_NEXT_PARK:-}" && -d "$CANDIDATE_NEXT_PARK" ]]; then
+    if [[ -d "${APP_DIR}/.next" ]]; then
+      rm -rf "${APP_DIR}/.next.interrupted.$$" 2>/dev/null || true
+      mv "${APP_DIR}/.next" "${APP_DIR}/.next.interrupted.$$" 2>/dev/null || true
+    fi
+    if mv "$CANDIDATE_NEXT_PARK" "${APP_DIR}/.next" 2>/dev/null; then
+      _ok "  Interrupted rollback recovered the candidate artifact."
+      _recovered=1
+    else
+      _err "CRITICAL: could not recover the candidate artifact from ${CANDIDATE_NEXT_PARK}."
+    fi
+    CANDIDATE_NEXT_PARK=""
+  fi
+  if [[ -n "${CANDIDATE_DEPS_PARK:-}" && -d "$CANDIDATE_DEPS_PARK" ]]; then
+    if [[ -d "${APP_DIR}/node_modules" ]]; then
+      if [[ -n "${PREVIOUS_DEPS_BACKUP:-}" ]]; then
+        mv "${APP_DIR}/node_modules" "$PREVIOUS_DEPS_BACKUP" 2>/dev/null || true
+      else
+        rm -rf "${APP_DIR}/node_modules" 2>/dev/null || true
+      fi
+    fi
+    if mv "$CANDIDATE_DEPS_PARK" "${APP_DIR}/node_modules" 2>/dev/null; then
+      _ok "  Interrupted rollback recovered the candidate dependencies."
+      _recovered=1
+    else
+      _err "CRITICAL: could not recover the candidate dependencies from ${CANDIDATE_DEPS_PARK}."
+    fi
+    CANDIDATE_DEPS_PARK=""
+    if [[ -n "${PREVIOUS_DEPS_BACKUP:-}" && -d "$PREVIOUS_DEPS_BACKUP" ]]; then
+      LIVE_NODE_MODULES_BACKUP="$PREVIOUS_DEPS_BACKUP"
+    fi
+  fi
+  if [[ "$_recovered" -eq 1 ]]; then
+    TRANSACTION_PHASE="CANDIDATE_LIVE"
+    _warn "  Explicit rollback was interrupted; the complete candidate release was restored."
+  else
+    TRANSACTION_PHASE="CANDIDATE_LIVE"
+  fi
+}
+
+# Explicit transaction phases make EXIT cleanup safe:
+# PREPARING/BUILDING discards only the private candidate; PROMOTING restores the
+# complete previous release; a live candidate is never partially rolled back.
+# Invoked by the EXIT trap below.
+# shellcheck disable=SC2329
+_ccbi_on_exit_cleanup() {
+  case "${TRANSACTION_PHASE:-PREPARING}" in
+    PREPARING|BUILDING)
+      _ccbi_discard_candidate_release
+      ;;
+    PROMOTING)
+      _ccbi_restore_previous_release
+      _ccbi_discard_candidate_release
+      ;;
+    ROLLING_BACK)
+      _ccbi_recover_interrupted_rollback
+      ;;
+    *)
+      # CANDIDATE_LIVE, UNKNOWN, GREEN and ROLLED_BACK remain complete states.
+      ;;
+  esac
+}
+trap _ccbi_on_exit_cleanup EXIT
+
+# Invoked by the signal traps below.
+# shellcheck disable=SC2329
+_ccbi_on_signal_cleanup() {
+  _ccbi_on_exit_cleanup
+  exit 130
+}
+trap _ccbi_on_signal_cleanup INT TERM HUP
+
+_log "[1e] Staging complete candidate release"
 if [[ ! -f "${APP_DIR}/package-lock.json" ]]; then
   _preflight_abort_receipt "package-lock.json missing in ${APP_DIR} — refusing to stage dependencies. Old build untouched."
   exit 2
 fi
-DEPS_STAGE_ROOT="${APP_DIR}/.deps-candidate.$$"
-LIVE_NODE_MODULES_BACKUP="${APP_DIR}/.node_modules.rollback.$$"
-mkdir -p "$DEPS_STAGE_ROOT" || { _err "Failed to create dependency staging directory."; exit 2; }
-cp "${APP_DIR}/package.json" "${DEPS_STAGE_ROOT}/package.json" || { _err "Failed to copy package.json into staging."; exit 2; }
-cp "${APP_DIR}/package-lock.json" "${DEPS_STAGE_ROOT}/package-lock.json" || { _err "Failed to copy package-lock.json into staging."; exit 2; }
-
-if ! (cd "$DEPS_STAGE_ROOT" && npm ci --no-audit --no-fund --prefer-offline --ignore-scripts=false 2>&1 | tee "$DEPS_STAGE_ROOT/npm-ci.log"); then
-  rm -rf "$DEPS_STAGE_ROOT" 2>/dev/null || true
-  _preflight_abort_receipt "Dependency staging failed (npm ci). Old build untouched."
-  exit 2
-fi
-
-if ! _ccbi_native_gate "$DEPS_STAGE_ROOT"; then
-  rm -rf "$DEPS_STAGE_ROOT" 2>/dev/null || true
-  _preflight_abort_receipt "Native-module gate failed on staged dependencies. Old build untouched."
-  exit 2
-fi
-_ok "  Staged dependencies pass the native-module gate."
-
-# Swap the candidate dependency tree into place for the build. Preserve the
-# live tree; restore it on any failure path and on health-failed rollback.
-LIVE_NODE_MODULES_BACKUP="${APP_DIR}/.node_modules.rollback.$$"
-mv "${APP_DIR}/node_modules" "$LIVE_NODE_MODULES_BACKUP" || { _err "Failed to back up live node_modules."; exit 2; }
-mv "${DEPS_STAGE_ROOT}/node_modules" "${APP_DIR}/node_modules" || { _err "Failed to promote staged node_modules."; mv "$LIVE_NODE_MODULES_BACKUP" "${APP_DIR}/node_modules" 2>/dev/null || true; exit 2; }
-rm -rf "$DEPS_STAGE_ROOT" 2>/dev/null || true
-NODE_MODULES_SWAP_DONE=1
-_ok "  Candidate dependencies promoted for build and runtime."
-
-_ccbi_restore_node_modules() {
-  [[ "${NODE_MODULES_SWAP_DONE:-0}" -eq 1 && -d "${LIVE_NODE_MODULES_BACKUP:-}" ]] || return 0
-  if [[ -d "${APP_DIR}/node_modules" ]]; then
-    rm -rf "${APP_DIR}/.node_modules.discarded.$$" 2>/dev/null || true
-    mv "${APP_DIR}/node_modules" "${APP_DIR}/.node_modules.discarded.$$" 2>/dev/null || rm -rf "${APP_DIR}/node_modules" 2>/dev/null || true
-  fi
-  mv "$LIVE_NODE_MODULES_BACKUP" "${APP_DIR}/node_modules" 2>/dev/null || true
-  rm -rf "${APP_DIR}/.node_modules.discarded.$$" 2>/dev/null || true
-  NODE_MODULES_SWAP_DONE=0
-}
-
-# On any exit path, if the candidate dependency tree was promoted but the
-# deploy did not reach a verified green state, restore the prior tree.
-_ccbi_on_exit_cleanup() {
-  _ccbi_restore_node_modules
-  _ccbi_restore_tsconfig_on_exit
-}
-trap _ccbi_on_exit_cleanup EXIT
-
-###############################################################################
-# ─── PHASE 2: BUILD TO TEMP DIR ─────────────────────────────────────────────
-###############################################################################
-_banner "Phase 2 — Build (temp dir)"
-
-BUILD_TMP_NAME=".next.tmp.$(date +%Y%m%d-%H%M%S)-$$"
-BUILD_TMP="${APP_DIR}/${BUILD_TMP_NAME}"
-_log "Building into temp dir: ${BUILD_TMP}"
-
-# Record build start time (seconds since epoch) for mtime guard below.
-# We compare BUILD_ID mtime against this value to ensure the file was written
-# by THIS build invocation, not carried over from the Phase 1c snapshot.
-BUILD_START_TS=$(date +%s 2>/dev/null || echo 0)
-
-# ── PRES-046: frozen-source content inventory ────────────────────────────────
-# Capture the canonical content inventory digest BEFORE compilation. It is
-# re-captured AFTER the build and the two must be IDENTICAL — inputs changed
-# during compilation reject the candidate (frozen-source rule). Content, not
-# mtime, is the freshness oracle (PRES-046: restored mtimes could mislabel old
-# code as current). The digest covers src/, public/, config/, package.json,
-# package-lock.json, next.config.*, tsconfig/tailwind/postcss configs — the
-# SAME canonical list the startup guard and health check use.
 BUILD_INVENTORY_LIB="${SCRIPT_DIR}/lib/build-inventory.sh"
 if [[ ! -f "$BUILD_INVENTORY_LIB" ]]; then
   _err "scripts/lib/build-inventory.sh not found beside atomic-deploy.sh — content inventory unavailable."
-  _err "Refusing to build unverifiable artifacts (PRES-046)."
+  _err "Refusing to build an unverifiable artifact (PRES-046)."
   exit 2
 fi
 # shellcheck source=lib/build-inventory.sh
 source "$BUILD_INVENTORY_LIB"
+
+# Capture the live source identity BEFORE copying anything. The candidate copy
+# must match this digest, and the live tree must still match it after the build.
 PRE_BUILD_INVENTORY="$(_ccbi_inventory_digest "$APP_DIR")" || {
   _err "Failed to compute pre-build content inventory for ${APP_DIR}."
   exit 2
 }
-_log "  Pre-build content inventory: ${PRE_BUILD_INVENTORY}"
+_log "  Pre-build live content inventory: ${PRE_BUILD_INVENTORY}"
 
-# ── tsconfig.json is mutated BY the build — snapshot it (fixed 2026-09-11) ────
-# `next build` rewrites tsconfig.json's `include` array to register the
-# generated type globs of whatever dist dir it is building into. Because this
-# script deliberately builds into a UNIQUE temp dir (.next.tmp.<ts>-<pid>), the
-# entry Next adds is NEW on every single run — so tsconfig.json, which is a
-# legitimate compile-affecting input and is hashed above, ALWAYS differed
-# between the pre- and post-build digests. Result: the frozen-source proof
-# below rejected every otherwise-perfect candidate with
-# "FROZEN-SOURCE VIOLATION", and a box where NEXT_DIST_DIR is honoured could
-# never deploy at all — the guard permanently vetoed its own build output.
-#
-# Next's edit is a BUILD ARTIFACT, not a source change, so it is snapshotted
-# here and restored immediately before the post-build digest. The guard keeps
-# full strength over every real input (src/, public/, lockfile, next.config.*,
-# tailwind/postcss, middleware.ts) INCLUDING genuine human edits to
-# tsconfig.json made while a build runs — those are reverted and therefore
-# cannot reach the served bundle unattested, which is exactly the intent.
-CCBI_TSCONFIG_SNAPSHOT=""
-if [[ -f "${APP_DIR}/tsconfig.json" ]]; then
-  CCBI_TSCONFIG_SNAPSHOT="$(mktemp "${TMPDIR:-/tmp}/ccbi-tsconfig-XXXXXX")" || {
-    _err "Failed to snapshot tsconfig.json before the build."
-    exit 2
-  }
-  cp -p "${APP_DIR}/tsconfig.json" "$CCBI_TSCONFIG_SNAPSHOT" || {
-    _err "Failed to copy tsconfig.json into its pre-build snapshot."
-    exit 2
-  }
-  # Several `exit 2` build-failure paths sit between here and the restore below.
-  # Without this trap a failed build would leave the checkout's tsconfig.json
-  # carrying a dead `.next.tmp.<ts>-<pid>` include entry (one more on every
-  # retry) and leak the snapshot file. The normal restore clears the variable,
-  # so on the success path this trap is already a no-op.
-  _ccbi_restore_tsconfig_on_exit() {
-    [[ -n "${CCBI_TSCONFIG_SNAPSHOT:-}" && -f "${CCBI_TSCONFIG_SNAPSHOT}" ]] || return 0
-    cp -p "$CCBI_TSCONFIG_SNAPSHOT" "${APP_DIR}/tsconfig.json" 2>/dev/null || true
-    rm -f "$CCBI_TSCONFIG_SNAPSHOT" 2>/dev/null || true
-    CCBI_TSCONFIG_SNAPSHOT=""
-  }
-  trap _ccbi_on_exit_cleanup EXIT
+RELEASE_DIR="${APP_DIR}/.release-candidate.$$"
+rm -rf "$RELEASE_DIR" 2>/dev/null || true
+mkdir -p "$RELEASE_DIR" || { _err "Failed to create candidate release directory."; exit 2; }
+
+# Copy canonical compile inputs, build launcher support, and the env files Next
+# would read from the project root. Runtime data stays in APP_DIR.
+for _release_input in $_CCBI_TOPLEVEL_INPUTS scripts next-env.d.ts; do
+  if [[ -e "${APP_DIR}/${_release_input}" ]]; then
+    cp -R "${APP_DIR}/${_release_input}" "${RELEASE_DIR}/" || {
+      _err "Failed to copy candidate input: ${_release_input}"
+      exit 2
+    }
+  fi
+done
+for _release_env in .env .env.production .env.production.local .env.local; do
+  if [[ -f "${APP_DIR}/${_release_env}" ]]; then
+    cp -p "${APP_DIR}/${_release_env}" "${RELEASE_DIR}/${_release_env}" || {
+      _err "Failed to copy candidate environment file: ${_release_env}"
+      exit 2
+    }
+  fi
+done
+
+CANDIDATE_SOURCE_INVENTORY="$(_ccbi_inventory_digest "$RELEASE_DIR")" || {
+  _err "Failed to compute the candidate source inventory after copying."
+  exit 2
+}
+if [[ "$CANDIDATE_SOURCE_INVENTORY" != "$PRE_BUILD_INVENTORY" ]]; then
+  _err "  Candidate source inventory does not match the live source captured before copying."
+  _err "  Live inventory:       ${PRE_BUILD_INVENTORY}"
+  _err "  Candidate inventory: ${CANDIDATE_SOURCE_INVENTORY}"
+  _preflight_abort_receipt "Candidate source copy failed the frozen-source identity check. Live release untouched."
+  exit 2
 fi
 
-# NEXT output dir env var is scoped to the build subprocess only. The shell
-# parent must not carry NEXT_DIST_DIR into later pm2 operations: a stale
-# .next.tmp.* distDir would break every subsequent start (BUILD-06 class).
-# The npm build subshell sets it only for `npm run build` and does not export
-# it to the rest of the script.
-cd "$APP_DIR"
+if ! (cd "$RELEASE_DIR" && npm ci --no-audit --no-fund --prefer-offline --ignore-scripts=false 2>&1 | tee "$RELEASE_DIR/npm-ci.log"); then
+  _preflight_abort_receipt "Dependency staging failed (npm ci). Live source, dependencies and artifact untouched."
+  exit 2
+fi
+CANDIDATE_SOURCE_INVENTORY="$(_ccbi_inventory_digest "$RELEASE_DIR")" || {
+  _err "Failed to re-check the candidate source inventory after npm ci."
+  exit 2
+}
+if [[ "$CANDIDATE_SOURCE_INVENTORY" != "$PRE_BUILD_INVENTORY" ]]; then
+  _preflight_abort_receipt "npm ci changed a compile-affecting candidate input. Live release untouched."
+  exit 2
+fi
+if ! _ccbi_native_gate "$RELEASE_DIR"; then
+  _preflight_abort_receipt "Native-module gate failed on staged dependencies. Live source, dependencies and artifact untouched."
+  exit 2
+fi
+_ok "  Candidate source, dependencies and environment staged in ${RELEASE_DIR}."
 
-# ── Capture npm exit code before the pipe ────────────────────────────────────
-# IMPORTANT: piping npm run build through a while-read loop MASKS the exit
-# code because the pipe's last command (the loop) returns 0. We work around
-# this by writing npm's exit code to a temp file inside the subshell and
-# reading it back after the pipe drains. This is the only portable approach
-# that also preserves streaming build output.
+###############################################################################
+# ─── PHASE 2: BUILD IN THE CANDIDATE RELEASE ────────────────────────────────
+###############################################################################
+_banner "Phase 2 — Build (candidate release)"
+
+TRANSACTION_PHASE="BUILDING"
+BUILD_TMP_NAME=".next.tmp.$(date +%Y%m%d-%H%M%S)-$$"
+BUILD_TMP="${RELEASE_DIR}/${BUILD_TMP_NAME}"
+_log "Building into candidate artifact directory: ${BUILD_TMP}"
+BUILD_START_TS=$(date +%s 2>/dev/null || echo 0)
+
+# The live source tree captured above is the freshness oracle. The build runs
+# in the private candidate copy, so APP_DIR remains untouched while still
+# being attested after the build.
+cd "$RELEASE_DIR" || exit 2
+CCBI_TSCONFIG_SNAPSHOT=""
+if [[ -f "$RELEASE_DIR/tsconfig.json" ]]; then
+  CCBI_TSCONFIG_SNAPSHOT="$(mktemp "${TMPDIR:-/tmp}/ccbi-candidate-tsconfig-XXXXXX")" || {
+    _err "Failed to snapshot the candidate tsconfig.json before build."
+    exit 2
+  }
+  cp -p "$RELEASE_DIR/tsconfig.json" "$CCBI_TSCONFIG_SNAPSHOT" || {
+    _err "Failed to copy the candidate tsconfig.json snapshot."
+    exit 2
+  }
+fi
+
 BUILD_EXIT_FILE=$(mktemp "${TMPDIR:-/tmp}/atomic-build-exit-XXXXXX")
-echo "2" > "$BUILD_EXIT_FILE"   # Pre-set to failure; overwritten only on clean exit
-
+echo "2" > "$BUILD_EXIT_FILE"
 export BUILD_EXIT_FILE
 
-# ISSUE-09: PATH was prepended with CC_NODE_DIR at the top of this script, so
-# this build, the native gates above and the server's own exec all run on one
-# node. Before that, the build could compile against ABI 147 while pm2 started
-# the result under ABI 137.
 _log "Running: npm run build  (output: ${BUILD_TMP}, node: ${CC_NODE_BIN})"
 (
   NEXT_DIST_DIR="$BUILD_TMP_NAME" npm run build 2>&1
@@ -910,218 +1022,157 @@ _log "Running: npm run build  (output: ${BUILD_TMP}, node: ${CC_NODE_BIN})"
 ) | while IFS= read -r line; do
   printf '%s[build] %s%s\n' "${CYAN}" "${RESET}" "$line" >&2
 done
-
 BUILD_EXIT=$(cat "$BUILD_EXIT_FILE" 2>/dev/null || echo 2)
 rm -f "$BUILD_EXIT_FILE"
 _log "  npm run build exited: ${BUILD_EXIT}"
 
-# Any failure before a healthy promotion must restore the prior dependency
-# tree. The EXIT trap also covers later unexpected exits.
-if [[ "$BUILD_EXIT" -ne 0 ]]; then
-  _ccbi_restore_node_modules
-fi
-
-# ── Validate output: BUILD_ID must exist AND be fresh (mtime > BUILD_START_TS) ──
-# The mtime guard prevents the Phase 1c cp artefact (old BUILD_ID copied into
-# APP_DIR/.next) from being accepted as a fresh build result. A BUILD_ID whose
-# mtime is <= BUILD_START_TS was NOT written by this build invocation.
-#
-# Rule: treat any scenario where BUILD_TMP/BUILD_ID is absent (or stale) after
-# build as exit 2 unconditionally — regardless of APP_DIR/.next/BUILD_ID state.
 BUILD_ID_FILE="${BUILD_TMP}/BUILD_ID"
-
-# If NEXT_DIST_DIR is not respected (some Next.js versions ignore it), fall back:
-# build output may still have gone to .next. Detect which happened.
-if [[ ! -f "$BUILD_ID_FILE" && -f "${APP_DIR}/.next/BUILD_ID" ]]; then
-  _warn "  NEXT_DIST_DIR not respected by this Next.js version — build went to .next directly."
-
-  # Mtime guard: reject the BUILD_ID if it predates the build start.
-  # A stale BUILD_ID here means Phase 1c wrote it (it's the old build artefact);
-  # npm produced no new output at all — treat as build failure.
-  NEXT_BUILD_ID_MTIME=$(stat -c%Y "${APP_DIR}/.next/BUILD_ID" 2>/dev/null \
-    || stat -f%m "${APP_DIR}/.next/BUILD_ID" 2>/dev/null \
+# The fallback for Next versions that ignore NEXT_DIST_DIR is also private to the
+# candidate release and cannot touch the live artifact.
+if [[ ! -f "$BUILD_ID_FILE" && -f "${RELEASE_DIR}/.next/BUILD_ID" ]]; then
+  _warn "  NEXT_DIST_DIR not respected by this Next.js version — build went to the candidate .next directory."
+  NEXT_BUILD_ID_MTIME=$(stat -c%Y "${RELEASE_DIR}/.next/BUILD_ID" 2>/dev/null \
+    || stat -f%m "${RELEASE_DIR}/.next/BUILD_ID" 2>/dev/null \
     || echo 0)
   if (( NEXT_BUILD_ID_MTIME < BUILD_START_TS )); then
-    _err "  BUILD_ID mtime (${NEXT_BUILD_ID_MTIME}) predates build start (${BUILD_START_TS})."
-    _err "  This BUILD_ID is the Phase 1c snapshot copy, not a fresh build artefact."
-    _err "  Treating as build failure — live .next is untouched."
-    rm -rf "$BUILD_TMP" 2>/dev/null || true
-    _ccbi_restore_node_modules
-  _preflight_abort_receipt "Build failed: BUILD_ID in .next is stale (mtime predates build start). npm run build produced no new output."
+    _preflight_abort_receipt "Build failed: candidate BUILD_ID is stale. Live source, dependencies and artifact untouched."
     exit 2
   fi
-
-  _warn "  Moving ${APP_DIR}/.next to ${BUILD_TMP} as the temp build artifact (mtime guard passed)."
-  mv "${APP_DIR}/.next" "$BUILD_TMP" 2>/dev/null || {
-    _err "  Failed to move .next to temp dir. Aborting."
-    # Restore rollback if we disturbed .next
-    if [[ $ROLLBACK_EXISTS -eq 1 ]]; then
-      cp -r "$ROLLBACK_DIR" "${APP_DIR}/.next" 2>/dev/null || true
-    fi
-    _preflight_abort_receipt "Failed to move .next to temp build dir after NEXT_DIST_DIR bypass."
+  mv "${RELEASE_DIR}/.next" "$BUILD_TMP" 2>/dev/null || {
+    _preflight_abort_receipt "Failed to move candidate .next output to the build artifact directory. Live release untouched."
     exit 2
   }
   BUILD_ID_FILE="${BUILD_TMP}/BUILD_ID"
 fi
 
-# Final check: BUILD_ID must exist in BUILD_TMP AND be fresh.
-# No fallback to APP_DIR/.next/BUILD_ID — absent BUILD_ID in BUILD_TMP = exit 2.
 if [[ ! -f "$BUILD_ID_FILE" ]]; then
-  _err "Build FAILED — BUILD_ID not present in output directory (${BUILD_TMP})."
-  _err "No fallback accepted: live .next was NOT touched."
-  rm -rf "$BUILD_TMP" 2>/dev/null || true
-  _ccbi_restore_node_modules
-  _preflight_abort_receipt "Build exited ${BUILD_EXIT} or BUILD_ID absent. Live .next was NOT swapped."
+  _err "Build FAILED — BUILD_ID not present in candidate output (${BUILD_TMP})."
+  _preflight_abort_receipt "Build exited ${BUILD_EXIT} or BUILD_ID absent. Live source, dependencies and artifact untouched."
   exit 2
 fi
-
-# Mtime guard on the primary build path: BUILD_ID must be newer than build start.
 BUILD_ID_MTIME=$(stat -c%Y "$BUILD_ID_FILE" 2>/dev/null \
   || stat -f%m "$BUILD_ID_FILE" 2>/dev/null \
   || echo 0)
 if (( BUILD_ID_MTIME < BUILD_START_TS )); then
-  _err "  BUILD_ID mtime (${BUILD_ID_MTIME}) < build start (${BUILD_START_TS})."
-  _err "  This BUILD_ID predates the build — stale artefact in BUILD_TMP."
-  rm -rf "$BUILD_TMP" 2>/dev/null || true
-  _ccbi_restore_node_modules
-  _preflight_abort_receipt "Build failed: BUILD_ID in BUILD_TMP is stale (mtime predates build start)."
+  _err "  BUILD_ID mtime (${BUILD_ID_MTIME}) predates build start (${BUILD_START_TS})."
+  _preflight_abort_receipt "Build failed: candidate BUILD_ID is stale. Live source, dependencies and artifact untouched."
   exit 2
 fi
-
-# npm exit code must be 0 for a successful build.
-if [[ $BUILD_EXIT -ne 0 ]]; then
+if [[ "$BUILD_EXIT" -ne 0 ]]; then
   _err "Build FAILED — npm run build exited ${BUILD_EXIT}."
-  _ccbi_restore_node_modules
-  # DATA-LOSS GUARD: if this is the NEXT_DIST_DIR-bypass path (APP_DIR/.next was moved
-  # into BUILD_TMP at the mtime check above), we must restore it before cleaning up
-  # BUILD_TMP — otherwise we leave APP_DIR/.next MISSING and break the live server.
-  # The .next.rollback snapshot is intact; restore from it to honour the exit-2 contract:
-  # "old build untouched".
-  if [[ -d "$BUILD_TMP" && ! -d "${APP_DIR}/.next" && $ROLLBACK_EXISTS -eq 1 ]]; then
-    _warn "  NEXT_DIST_DIR bypass path: restoring APP_DIR/.next from rollback snapshot before cleanup ..."
-    cp -r "$ROLLBACK_DIR" "${APP_DIR}/.next" 2>/dev/null || \
-      _err "  CRITICAL: failed to restore APP_DIR/.next from rollback snapshot — manual intervention required."
-  fi
-  rm -rf "$BUILD_TMP" 2>/dev/null || true
-  _ccbi_restore_node_modules
-  _preflight_abort_receipt "npm run build exited ${BUILD_EXIT}. Live .next was NOT swapped."
+  _preflight_abort_receipt "npm run build exited ${BUILD_EXIT}. Live source, dependencies and artifact untouched."
   exit 2
 fi
-
 BUILD_ID=$(cat "$BUILD_ID_FILE" 2>/dev/null || echo "unknown")
 _ok "Build succeeded. BUILD_ID: ${BUILD_ID}"
 
-# Candidate dependencies must be usable by the exact runtime Node before
-# promotion. This is the REAL post-build gate: it runs only after the candidate
-# build exists and before the .next swap, using the promoted candidate tree.
-if ! _ccbi_native_gate "$APP_DIR"; then
-  _err "Post-build: candidate dependencies cannot load or use the native modules."
-  _ccbi_restore_node_modules
-  _preflight_abort_receipt "Post-build native-module gate failed — candidate would produce an unhealthy server. Old build untouched."
-  exit 2
-fi
-
-# ── PRES-046: frozen-source proof + immutable manifest ───────────────────────
-# Re-capture the content inventory AFTER compilation. If ANY compile-affecting
-# input changed during the build, the candidate is DISCARDED (exit 2, live
-# .next untouched) — the served bytes would not match the checked-out source
-# and no receipt could vouch for them.
-# Undo `next build`'s own tsconfig.json `include` edit before digesting — see
-# the snapshot block next to PRE_BUILD_INVENTORY above.
-if [[ -n "${CCBI_TSCONFIG_SNAPSHOT:-}" && -f "${CCBI_TSCONFIG_SNAPSHOT}" ]]; then
-  if cmp -s "$CCBI_TSCONFIG_SNAPSHOT" "${APP_DIR}/tsconfig.json"; then
-    _log "  tsconfig.json unchanged by the build."
-  else
-    cp -p "$CCBI_TSCONFIG_SNAPSHOT" "${APP_DIR}/tsconfig.json" \
-      && _log "  tsconfig.json restored to pre-build content (build-generated type globs discarded)." \
-      || _warn "  Could not restore the tsconfig.json snapshot; the frozen-source proof below will report the difference."
-  fi
+# Undo Next's legitimate build-generated tsconfig edit in the private candidate,
+# then prove that every compile-affecting candidate input still matches the live
+# source captured before copying. A build stub that mutates candidate source is
+# rejected even when APP_DIR itself remained unchanged.
+if [[ -n "${CCBI_TSCONFIG_SNAPSHOT:-}" && -f "$CCBI_TSCONFIG_SNAPSHOT" ]]; then
+  cp -p "$CCBI_TSCONFIG_SNAPSHOT" "$RELEASE_DIR/tsconfig.json" 2>/dev/null || true
   rm -f "$CCBI_TSCONFIG_SNAPSHOT" 2>/dev/null || true
   CCBI_TSCONFIG_SNAPSHOT=""
 fi
+CANDIDATE_SOURCE_INVENTORY="$(_ccbi_inventory_digest "$RELEASE_DIR")" || {
+  _err "Failed to re-check the candidate source inventory after the build."
+  _preflight_abort_receipt "Post-build candidate content inventory computation failed. Candidate discarded; live release untouched."
+  exit 2
+}
+if [[ "$CANDIDATE_SOURCE_INVENTORY" != "$PRE_BUILD_INVENTORY" ]]; then
+  _err "  FROZEN-SOURCE VIOLATION: candidate compile inputs changed during the build."
+  _err "  Live inventory:       ${PRE_BUILD_INVENTORY}"
+  _err "  Candidate inventory: ${CANDIDATE_SOURCE_INVENTORY}"
+  _preflight_abort_receipt "FROZEN-SOURCE VIOLATION (PRES-046): candidate compile-affecting inputs changed during compilation. Candidate discarded; live release untouched."
+  exit 2
+fi
+
+if ! _ccbi_native_gate "$RELEASE_DIR"; then
+  _err "Post-build: candidate dependencies cannot load or use the native modules."
+  _preflight_abort_receipt "Post-build native-module gate failed — candidate discarded; live release untouched."
+  exit 2
+fi
+
 POST_BUILD_INVENTORY="$(_ccbi_inventory_digest "$APP_DIR")" || {
   _err "Failed to compute post-build content inventory for ${APP_DIR}."
-  rm -rf "$BUILD_TMP" 2>/dev/null || true
-  _ccbi_restore_node_modules
-  _preflight_abort_receipt "Post-build content inventory computation failed. Live .next was NOT swapped."
+  _preflight_abort_receipt "Post-build content inventory computation failed. Candidate discarded; live release untouched."
   exit 2
 }
 if [[ "$POST_BUILD_INVENTORY" != "$PRE_BUILD_INVENTORY" ]]; then
-  _err "  FROZEN-SOURCE VIOLATION: content inventory changed DURING compilation."
+  _err "  FROZEN-SOURCE VIOLATION: live compile inputs changed during the candidate build."
   _err "  Pre-build  inventory: ${PRE_BUILD_INVENTORY}"
   _err "  Post-build inventory: ${POST_BUILD_INVENTORY}"
-  _err "  A compile-affecting input was modified while npm run build ran. The candidate"
-  _err "  is discarded — the served bytes could not be vouched for against the source."
-  rm -rf "$BUILD_TMP" 2>/dev/null || true
-  _ccbi_restore_node_modules
-  _preflight_abort_receipt "FROZEN-SOURCE VIOLATION (PRES-046): compile-affecting inputs changed during the build. Candidate discarded; live .next untouched."
+  _preflight_abort_receipt "FROZEN-SOURCE VIOLATION (PRES-046): compile-affecting inputs changed during compilation. Candidate discarded; live release untouched."
   exit 2
 fi
-_ok "  Frozen-source proof passed — content inventory unchanged during build (${POST_BUILD_INVENTORY})."
+_ok "  Frozen-source proof passed — live content inventory unchanged during build (${POST_BUILD_INVENTORY})."
 
-# Write the IMMABLE per-artifact manifest INTO the build output BEFORE the swap,
-# so it travels with the artifact through .next, cp-r rollback and every restore.
 if ! _ccbi_write_manifest "$APP_DIR" "$BUILD_TMP" "$BUILD_ID" "$BUILD_START_TS"; then
   _err "Failed to write build-inventory.json into ${BUILD_TMP}."
-  rm -rf "$BUILD_TMP" 2>/dev/null || true
-  _ccbi_restore_node_modules
-  _preflight_abort_receipt "Build manifest write failed. Live .next was NOT swapped."
+  _preflight_abort_receipt "Build manifest write failed. Candidate discarded; live release untouched."
   exit 2
 fi
-_ok "  Immutable manifest written into build output: build-inventory.json (inventory ${POST_BUILD_INVENTORY})"
+_ok "  Immutable manifest written into candidate build output (inventory ${POST_BUILD_INVENTORY})"
 
 ###############################################################################
-# ─── PHASE 3: ATOMIC SWAP ───────────────────────────────────────────────────
+# ─── PHASE 3: CONTROLLED PROMOTION ───────────────────────────────────────────
 ###############################################################################
-_banner "Phase 3 — Atomic swap"
+_banner "Phase 3 — Controlled promotion"
 
-_log "Swapping ${BUILD_TMP} → ${APP_DIR}/.next (single rename)"
+_log "Promoting complete candidate release (artifact + dependencies)"
+TRANSACTION_PHASE="PROMOTING"
+LIVE_NODE_MODULES_BACKUP="${APP_DIR}/.node_modules.rollback.$$"
+PREVIOUS_DEPS_BACKUP="$LIVE_NODE_MODULES_BACKUP"
 
-# Atomically replace .next with the new build using rename.
-# mv on the same filesystem is atomic at the kernel level (rename syscall).
-# We park the old .next aside to a temp name first, then rename the new build in.
-# This ensures there is NO window where .next does not exist.
+if [[ ! -d "${APP_DIR}/node_modules" ]]; then
+  _err "Live node_modules is missing; refusing an unverifiable promotion."
+  _preflight_abort_receipt "Cannot promote a candidate without a live dependency tree to preserve."
+  exit 2
+fi
+mv "${APP_DIR}/node_modules" "$LIVE_NODE_MODULES_BACKUP" || {
+  _err "Failed to park live node_modules for promotion."
+  _preflight_abort_receipt "Could not preserve the live dependency tree; promotion refused."
+  exit 2
+}
+if ! mv "${RELEASE_DIR}/node_modules" "${APP_DIR}/node_modules"; then
+  _err "Failed to promote candidate dependencies; restoring previous dependencies."
+  _ccbi_restore_previous_dependencies
+  _preflight_abort_receipt "Candidate dependency promotion failed; previous release restored."
+  exit 2
+fi
+
 OLD_NEXT_PARK="${APP_DIR}/.next.old.$$"
-
 if [[ -d "${APP_DIR}/.next" ]]; then
-  mv "${APP_DIR}/.next" "$OLD_NEXT_PARK" 2>/dev/null || {
-    _err "Failed to park old .next — aborting swap."
-    rm -rf "$BUILD_TMP" 2>/dev/null || true
-    _preflight_abort_receipt "mv ${APP_DIR}/.next to park path failed. Old build untouched."
+  mv "${APP_DIR}/.next" "$OLD_NEXT_PARK" || {
+    _err "Failed to park live .next for promotion; restoring previous dependencies."
+    _ccbi_restore_previous_dependencies
+    _preflight_abort_receipt "Could not preserve the live artifact; promotion refused and previous dependencies restored."
     exit 2
   }
 fi
-
-mv "$BUILD_TMP" "${APP_DIR}/.next" 2>/dev/null || {
-  _err "CRITICAL: Failed to move new build into .next — attempting to restore old build."
-  # Try to put old build back
-  if [[ -d "$OLD_NEXT_PARK" ]]; then
-    mv "$OLD_NEXT_PARK" "${APP_DIR}/.next" 2>/dev/null || {
-      _err "DOUBLE FAILURE: could not restore old build. Manual intervention required."
-      _err "Old build parked at: ${OLD_NEXT_PARK}"
-      _err "New build at: ${BUILD_TMP}"
-    }
-  fi
-  _ccbi_restore_node_modules
-  _preflight_abort_receipt "Atomic swap of new build into .next failed."
+if ! mv "$BUILD_TMP" "${APP_DIR}/.next"; then
+  _err "CRITICAL: Failed to move the candidate artifact into .next — restoring the previous release."
+  _ccbi_restore_previous_release
+  _preflight_abort_receipt "Candidate artifact promotion failed; previous complete release restored."
   exit 2
-}
-
-# Clean up parked old build (it's now superseded by .next.rollback)
+fi
+TRANSACTION_PHASE="CANDIDATE_LIVE"
 rm -rf "$OLD_NEXT_PARK" 2>/dev/null || true
-
-_ok "Atomic swap complete. .next is now the fresh build (BUILD_ID: ${BUILD_ID})"
-
-# The parent shell never had NEXT_DIST_DIR in this implementation. If an older
-# deploy leaked it into pm2, `--update-env` below removes that stale binding
-# during restart; a plain `unset` alone cannot clean persisted process state.
+OLD_NEXT_PARK=""
+_ok "Complete candidate release promoted (BUILD_ID: ${BUILD_ID})."
 
 ###############################################################################
-# ─── PHASE 4: RESTART + HEALTH VERIFICATION ─────────────────────────────────
+# ─── PHASE 4: RESTART + HEALTH VERIFICATION ───────────────────────────────────
 ###############################################################################
 _banner "Phase 4 — Restart + Health verification"
 
-# Restart the server onto the fresh build.
+# PM2 --update-env MERGES the caller environment into the persisted process
+# environment; omitting a key does not delete it. Pin the artifact directory so
+# the stale value is explicitly reconciled.
+export NEXT_DIST_DIR="${APP_DIR}/.next"
+_log "Explicitly reconciling PM2 NEXT_DIST_DIR to ${NEXT_DIST_DIR}"
+
 _log "[4a] Restarting pm2 app '${PM2_APP_NAME}' onto fresh build ..."
 if pm2 list 2>/dev/null | grep -q "$PM2_APP_NAME"; then
   pm2 restart "$PM2_APP_NAME" --update-env 2>/dev/null || {
@@ -1131,28 +1182,21 @@ if pm2 list 2>/dev/null | grep -q "$PM2_APP_NAME"; then
 else
   _warn "  pm2 app '${PM2_APP_NAME}' not found in pm2 list."
   _warn "  Attempting pm2 start from ${APP_DIR} ..."
-  # PORT-FIX-2: launch through the canonical ecosystem.config.cjs (CC_PORT-only
-  # pin, env-bleed strip via cc-start.sh, circuit-breaker, canonical app name) —
-  # NEVER `pm2 start npm --name ... -- start`, which bypasses the ecosystem and
-  # re-opens the non-4000 launch path. Forward the resolved DB path so a
-  # DATABASE_PATH pinned in .env.local is honoured (DATA-08 decoy-DB parity).
   if [[ -f "$APP_DIR/ecosystem.config.cjs" ]]; then
-    cd "$APP_DIR"
+    cd "$APP_DIR" || exit 2
     CC_PORT="$PORT" \
       DATABASE_PATH="${DB_PATH_OVERRIDE:-${DATABASE_PATH:-}}" \
       CC_INSTALL_DIR="$APP_DIR" \
       pm2 start "$APP_DIR/ecosystem.config.cjs" --update-env 2>/dev/null || true
   else
-    cd "$APP_DIR"
-    CC_PORT="$PORT" pm2 start npm --name "$PM2_APP_NAME" -- start --update-env 2>/dev/null || true
+    cd "$APP_DIR" || exit 2
+    CC_PORT="$PORT" pm2 start npm --name "$PM2_APP_NAME" --update-env -- start 2>/dev/null || true
   fi
 fi
 
-# Brief settle window before probing (server needs a few seconds to bind the port)
 _log "  Waiting 5 seconds for server to start ..."
 sleep 5
 
-# Run health check with retry loop for exit code 3 (UNKNOWN)
 _log "[4b] Running cc-health-check.sh ..."
 HEALTH_JSON=""
 HEALTH_EXIT=0
@@ -1162,18 +1206,14 @@ while true; do
   ATTEMPT=$(( ATTEMPT + 1 ))
   HEALTH_EXIT=0
   _run_health_check HEALTH_JSON || HEALTH_EXIT=$?
-
   _log "  Health check attempt ${ATTEMPT}: exit ${HEALTH_EXIT}"
 
   if [[ $HEALTH_EXIT -eq 0 ]]; then
-    # Green — success
     break
   elif [[ $HEALTH_EXIT -eq 1 ]]; then
-    # Definitive not-green — proceed to rollback
     _err "  Health check returned exit 1 (definitive NOT GREEN) on attempt ${ATTEMPT}."
     break
   elif [[ $HEALTH_EXIT -eq 3 ]]; then
-    # UNKNOWN/transient
     _unknown_receipt "$HEALTH_JSON" "$ATTEMPT" "$HEALTH_RETRIES"
     if [[ $ATTEMPT -ge $HEALTH_RETRIES ]]; then
       _err "  Health check returned exit 3 (UNKNOWN) on all ${HEALTH_RETRIES} attempts."
@@ -1182,7 +1222,6 @@ while true; do
     _warn "  Retrying in ${HEALTH_RETRY_WAIT}s ... (attempt ${ATTEMPT}/${HEALTH_RETRIES})"
     sleep "$HEALTH_RETRY_WAIT"
   else
-    # exit 2 (usage error from health check) or unexpected — treat as definitive fail
     _err "  Health check returned unexpected exit ${HEALTH_EXIT}."
     HEALTH_EXIT=1
     break
@@ -1190,30 +1229,23 @@ while true; do
 done
 
 ###############################################################################
-# ─── PHASE 5: VERDICT ───────────────────────────────────────────────────────
+# ─── PHASE 5: VERDICT ────────────────────────────────────────────────────────
 ###############################################################################
 _banner "Phase 5 — Verdict"
 
 if [[ $HEALTH_EXIT -eq 0 ]]; then
-  # ── SUCCESS ─────────────────────────────────────────────────────────────────
-  _ok "Deploy is GREEN on the new build."
-
-  # The candidate dependency tree has now served a verified green build.
-  # The prior dependency tree is no longer needed.
-  if [[ "${NODE_MODULES_SWAP_DONE:-0}" -eq 1 && -d "${LIVE_NODE_MODULES_BACKUP:-}" ]]; then
-    rm -rf "$LIVE_NODE_MODULES_BACKUP" "${APP_DIR}"/.node_modules.discarded.* 2>/dev/null || true
-    NODE_MODULES_SWAP_DONE=0
+  _ok "Deploy is GREEN on the complete candidate release."
+  if [[ -n "${LIVE_NODE_MODULES_BACKUP:-}" && -d "$LIVE_NODE_MODULES_BACKUP" ]]; then
+    rm -rf "$LIVE_NODE_MODULES_BACKUP" 2>/dev/null \
+      && _ok "  Previous dependency tree removed after verified green promotion." \
+      || _warn "Could not remove previous dependency tree: ${LIVE_NODE_MODULES_BACKUP}"
+    LIVE_NODE_MODULES_BACKUP=""
+    PREVIOUS_DEPS_BACKUP=""
   fi
+  _ccbi_discard_candidate_release \
+    && _ok "  Candidate preparation directory removed." \
+    || true
 
-  # Persist the live pm2 process list so BOTH the CC app and the co-resident
-  # cloudflared tunnel connector land in the pm2 dump and auto-resurrect after an
-  # OOM/reboot. This is the persistence gap that took a client dashboard dark:
-  # the app was (re)started under pm2 but the dump was never saved, so on the next
-  # OOM `pm2 resurrect` restored nothing → Cloudflare 1033 "tunnel has no healthy
-  # origin". `pm2 save` snapshots whatever is currently running; it is additive
-  # (never removes a running process) and idempotent, so it is safe to run on
-  # every green deploy. Non-fatal: a save failure must not fail an otherwise-green
-  # deploy, but it is surfaced loudly so an operator can persist manually.
   _log "[5] Persisting pm2 process list (pm2 save) so CC + cloudflared survive OOM/reboot ..."
   pm2 save >/dev/null 2>&1 \
     && _ok "  pm2 process list saved — CC app + cloudflared connector will auto-resurrect after restart/OOM." \
@@ -1262,22 +1294,11 @@ if [[ $HEALTH_EXIT -eq 0 ]]; then
       && _ok "  Rollback snapshot removed: ${ROLLBACK_DIR}" \
       || _warn "  Could not remove rollback snapshot: ${ROLLBACK_DIR}"
   fi
-  # Sweep any stale .next.old.* park dirs left by interrupted prior deploys.
   find "$APP_DIR" -maxdepth 1 -type d -name '.next.old.*' -exec rm -rf {} + 2>/dev/null || true
-  # Sweep legacy .next.PREDEPLOY from the pre-atomic-deploy era
-  # (deploy.sh used to rename .next to .next.PREDEPLOY before a
-  # non-atomic build — that script is gone, but the relic may still
-  # litter long-running boxes).
   if [[ -d "${APP_DIR}/.next.PREDEPLOY" ]]; then
     rm -rf "${APP_DIR}/.next.PREDEPLOY" 2>/dev/null || true
   fi
 
-  # ── PRES-046: clear the rollback receipt ONLY on a matching verified target ──
-  # A verified GREEN deploy of the EXACT content named as failed_target clears
-  # the pending-repair state. A deploy of DIFFERENT content (source moved on
-  # before the repair) must NOT silently clear an open rollback obligation —
-  # the receipt is then superseded (a newer receipt for the new failure mode
-  # would be written on the next rollback), never waived.
   if [[ -f "${APP_DIR}/.deploy-rollback-state.json" ]]; then
     _rs_target="$(_ccbi_json_field "${APP_DIR}/.deploy-rollback-state.json" failed_target_inventory_digest)"
     if [[ -n "$_rs_target" && "$_rs_target" == "$POST_BUILD_INVENTORY" ]]; then
@@ -1285,7 +1306,7 @@ if [[ $HEALTH_EXIT -eq 0 ]]; then
         && _ok "  Rollback receipt cleared — verified GREEN deploy of the exact failed-target content (${POST_BUILD_INVENTORY})." \
         || _warn "  Could not remove .deploy-rollback-state.json — remove it manually after verifying this deploy."
     else
-      _warn "  Rollback receipt NOT cleared: its failed_target (${_rs_target:-unknown}) does not match this deploy's content (${POST_BUILD_INVENTORY}). Pending-repair state stays open (supersede, never waive)."
+      _warn "  Rollback receipt NOT cleared: its failed_target (${_rs_target:-unknown}) does not match this deploy's content (${POST_BUILD_INVENTORY}). Pending-repair state stays open."
     fi
   fi
 
@@ -1293,11 +1314,13 @@ if [[ $HEALTH_EXIT -eq 0 ]]; then
   exit 0
 
 elif [[ $HEALTH_EXIT -eq 3 ]]; then
-  # ── UNKNOWN — pause/retry exhausted; DO NOT rollback ────────────────────────
-  # Per B.2 spec: exit 3 → pause/retry N times; NEVER rollback on exit 3.
+  # UNKNOWN retains both complete states: candidate artifact+dependencies live,
+  # previous artifact+dependencies available for an explicit operator rollback.
+  TRANSACTION_PHASE="UNKNOWN"
   _warn "Deploy ended UNKNOWN after ${ATTEMPT} health-check attempts."
-  _warn "The new build is live but the health check could not confirm green."
-  _warn "Operator must investigate. DO NOT use auto-rollback on exit 3."
+  _warn "The complete CANDIDATE artifact and dependency tree remain live."
+  _warn "The complete PREVIOUS artifact and dependency tree remain retained for an explicit rollback."
+  _warn "Operator must investigate. Automatic rollback is disabled on UNKNOWN."
   printf '\n%s╔══════════════════════════════════════════════════════════╗%s\n' "$YELLOW" "$RESET" >&2
   printf '%s║  ATOMIC DEPLOY — UNKNOWN (exit 3 after all retries)     ║%s\n' "$YELLOW" "$RESET" >&2
   printf '%s╚══════════════════════════════════════════════════════════╝%s\n' "$YELLOW" "$RESET" >&2
@@ -1305,48 +1328,78 @@ elif [[ $HEALTH_EXIT -eq 3 ]]; then
   printf '  Attempts     : %s / %s\n' "$ATTEMPT" "$HEALTH_RETRIES" >&2
   printf '  App dir      : %s\n' "$APP_DIR" >&2
   printf '  Build ID     : %s\n' "${BUILD_ID:-unknown}" >&2
+  printf '  Candidate deps: promoted\n' >&2
+  printf '  Previous deps : %s\n' "${LIVE_NODE_MODULES_BACKUP:-not retained}" >&2
   printf '  Health JSON  :\n%s\n\n' "$HEALTH_JSON" >&2
   exit 3
 
 else
-  # ── ROLLBACK ─────────────────────────────────────────────────────────────────
-  _err "Health check NOT GREEN (exit ${HEALTH_EXIT}). Executing auto-rollback ..."
+  _err "Health check NOT GREEN (exit ${HEALTH_EXIT}). Executing explicit complete-release rollback ..."
   FAILED_HEALTH_JSON="$HEALTH_JSON"
 
   if [[ $ROLLBACK_EXISTS -eq 0 ]]; then
     _err "CRITICAL: No rollback artifact exists (.next.rollback not present)."
-    _err "Cannot roll back — this is a first-deploy or the snapshot was not taken."
-    _rollback_receipt "$FAILED_HEALTH_JSON" "{\"green\":false,\"error\":\"no rollback artifact\"}" \
-      "Health check exit ${HEALTH_EXIT}: NOT GREEN; no rollback artifact available"
+    _err "The complete candidate release remains live; dependencies were not partially restored."
+    _rollback_receipt "$FAILED_HEALTH_JSON" "{\"green\":false,\"error\":\"no rollback artifact; complete candidate retained\"}" \
+      "Health check exit ${HEALTH_EXIT}: NOT GREEN; no prior artifact available, so the complete candidate remains live"
     exit 1
   fi
 
-  _log "Restoring .next.rollback → .next ..."
-  # ── PRES-046: capture rollback-artifact identity BEFORE the restore ─────────
-  # The receipt must bind the APPROVED PRIOR artifact (by content identity) to
-  # the FAILED TARGET (by content identity). Prior-artifact identity comes from
-  # the manifest that traveled with the artifact; if the prior artifact carries
-  # no manifest (pre-PRES-046 artifact), the receipt records that absence —
-  # serving it stays allowed (it was green when snapshotted) but the degraded
-  # state is louder because its identity is unattested.
   ROLLBACK_INVENTORY="(unattested)"
   if [[ -f "$ROLLBACK_DIR/build-inventory.json" ]]; then
     _rb_inv="$(_ccbi_json_field "$ROLLBACK_DIR/build-inventory.json" inventory_digest)"
     [[ -n "$_rb_inv" ]] && ROLLBACK_INVENTORY="$_rb_inv"
   fi
-  rm -rf "${APP_DIR}/.next" 2>/dev/null || true
-  cp -r "$ROLLBACK_DIR" "${APP_DIR}/.next" 2>/dev/null || {
-    _err "CRITICAL: Failed to restore .next from rollback artifact!"
-    _err "The live .next directory is MISSING. Manual intervention required."
-    _err "Rollback artifact at: ${ROLLBACK_DIR}"
-    _rollback_receipt "$FAILED_HEALTH_JSON" "{\"green\":false,\"error\":\"rollback restore failed\"}" \
-      "Health check NOT GREEN; rollback restore FAILED — manual intervention required"
-    exit 1
-  }
 
-  _log "Restoring the prior dependency tree for the restored build ..."
-  _ccbi_restore_node_modules
-  _log "Restarting pm2 app onto restored build ..."
+  # Prepare the prior artifact beside the live candidate first. A copy failure
+  # leaves the complete candidate untouched.
+  TRANSACTION_PHASE="ROLLING_BACK"
+  ROLLBACK_RESTORE_DIR="${APP_DIR}/.next.restore.$$"
+  rm -rf "$ROLLBACK_RESTORE_DIR" 2>/dev/null || true
+  if ! cp -r "$ROLLBACK_DIR" "$ROLLBACK_RESTORE_DIR" 2>/dev/null; then
+    rm -rf "$ROLLBACK_RESTORE_DIR" 2>/dev/null || true
+    TRANSACTION_PHASE="CANDIDATE_LIVE"
+    _err "CRITICAL: Failed to prepare .next from rollback artifact!"
+    _err "The complete candidate release remains live. Rollback artifact at: ${ROLLBACK_DIR}"
+    _rollback_receipt "$FAILED_HEALTH_JSON" "{\"green\":false,\"error\":\"rollback preparation failed; complete candidate retained\"}" \
+      "Health check NOT GREEN; rollback preparation FAILED — complete candidate retained"
+    exit 1
+  fi
+
+  # Park the candidate artifact and move the prepared prior artifact into
+  # place. Any interruption in this window restores the complete candidate.
+  CANDIDATE_NEXT_PARK="${APP_DIR}/.next.candidate.$$"
+  if ! mv "${APP_DIR}/.next" "$CANDIDATE_NEXT_PARK" 2>/dev/null; then
+    rm -rf "$ROLLBACK_RESTORE_DIR" 2>/dev/null || true
+    TRANSACTION_PHASE="CANDIDATE_LIVE"
+    _err "CRITICAL: Failed to park the candidate artifact for rollback; complete candidate remains live."
+    _rollback_receipt "$FAILED_HEALTH_JSON" "{\"green\":false,\"error\":\"candidate artifact park failed; complete candidate retained\"}" \
+      "Health check NOT GREEN; rollback could not park the candidate — complete candidate retained"
+    exit 1
+  fi
+  if ! mv "$ROLLBACK_RESTORE_DIR" "${APP_DIR}/.next" 2>/dev/null; then
+    _ccbi_recover_interrupted_rollback
+    _err "CRITICAL: Failed to install the prepared rollback artifact; complete candidate restored."
+    _rollback_receipt "$FAILED_HEALTH_JSON" "{\"green\":false,\"error\":\"rollback artifact install failed; complete candidate restored\"}" \
+      "Health check NOT GREEN; rollback artifact installation FAILED — complete candidate restored"
+    exit 1
+  fi
+
+  _log "Restoring the previous dependency tree for the restored build ..."
+  if ! _ccbi_restore_previous_dependencies keep-candidate-park; then
+    _ccbi_recover_interrupted_rollback
+    _err "CRITICAL: Failed to restore previous dependencies; complete candidate restored."
+    _rollback_receipt "$FAILED_HEALTH_JSON" "{\"green\":false,\"error\":\"dependency rollback failed; complete candidate restored\"}" \
+      "Health check NOT GREEN; dependency rollback FAILED — complete candidate restored"
+    exit 1
+  fi
+  TRANSACTION_PHASE="ROLLED_BACK"
+  rm -rf "$CANDIDATE_NEXT_PARK" "$CANDIDATE_DEPS_PARK" 2>/dev/null || true
+  CANDIDATE_NEXT_PARK=""
+  CANDIDATE_DEPS_PARK=""
+  PREVIOUS_DEPS_BACKUP=""
+
+  _log "Restarting pm2 app onto the restored complete release ..."
   pm2 restart "$PM2_APP_NAME" --update-env 2>/dev/null || true
   sleep 5
 
@@ -1357,30 +1410,27 @@ else
   _log "  Rollback health check exit: ${ROLLBACK_HEALTH_EXIT}"
 
   _rollback_receipt "$FAILED_HEALTH_JSON" "$ROLLBACK_HEALTH_JSON" \
-    "Health check exit ${HEALTH_EXIT}: NOT GREEN on new build (BUILD_ID: ${BUILD_ID:-unknown}); server rolled back to prior build"
+    "Health check exit ${HEALTH_EXIT}: NOT GREEN on new build (BUILD_ID: ${BUILD_ID:-unknown}); server rolled back to the prior complete release"
 
-  # ── PRES-046: transaction-bound rollback receipt ─────────────────────────────
-  # Bind approved prior artifact + failed target + reason + timestamp + recovery
-  # obligation into ONE receipt. The startup guard accepts the content mismatch
-  # ONLY when this receipt's rolled_back_to digest matches the artifact being
-  # served AND its failed_target digest matches the current source tree — an
-  # arbitrary marker alone never authorizes stale code. There is no loose
-  # stale-bypass flag.
   _ccbi_write_rollback_state \
     "$APP_DIR" \
     "$ROLLBACK_INVENTORY" \
     "$PRE_BUILD_INVENTORY" \
     "${BUILD_ID:-unknown}" \
-    "Health check exit ${HEALTH_EXIT} on target build ${BUILD_ID:-unknown}; auto-rolled back to prior artifact" \
+    "Health check exit ${HEALTH_EXIT} on target build ${BUILD_ID:-unknown}; auto-rolled back to the prior complete release" \
     && _ok "  Rollback receipt written: ${APP_DIR}/.deploy-rollback-state.json (prior=${ROLLBACK_INVENTORY})" \
     || _err "  Failed to write rollback receipt — degraded state NOT recorded; startup guard will refuse the mismatch loudly."
 
+  _ccbi_discard_candidate_release \
+    && _ok "  Candidate preparation directory removed after rollback." \
+    || true
+
   if [[ $ROLLBACK_HEALTH_EXIT -eq 0 ]]; then
-    _warn "Rollback complete. Server is GREEN on the PRIOR build — AVAILABLE BUT DEGRADED (pending repair)."
+    _warn "Rollback complete. Server is GREEN on the PRIOR complete release — AVAILABLE BUT DEGRADED (pending repair)."
     _warn "This is NOT a successful upgrade: health output separates availability from target freshness."
     _warn "Investigate the failing health-check JSON above before re-deploying."
   else
-    _err "ALERT: Rollback complete but server is still NOT GREEN (exit ${ROLLBACK_HEALTH_EXIT}) on the prior build."
+    _err "ALERT: Rollback complete but server is still NOT GREEN (exit ${ROLLBACK_HEALTH_EXIT}) on the prior complete release."
     _err "Operator must investigate immediately. See rollback health JSON above."
   fi
 

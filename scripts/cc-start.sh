@@ -39,6 +39,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CC_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# Shared non-evaluating dotenv loader and service-identity store resolver.
+source "$SCRIPT_DIR/lib/rescue-credentials.sh"
+
+# PM2 can retain a stale NEXT_DIST_DIR across restarts. Pin the real runtime
+# artifact before any Next code can observe the inherited environment.
+export NEXT_DIST_DIR="${CC_DIR}/.next"
+
 # ── CLI flag parsing ───────────────────────────────────────────────────────────
 ARG_PORT=""
 while [[ $# -gt 0 ]]; do
@@ -72,25 +79,23 @@ printf '[cc-start] ENV-BLEED GUARD: pinned PORT=%s (NODE_ENV=%s)\n' "$CC_PORT" "
 
 # RESCUE-RANGERS-AUTH: notifySystem() posts to RESCUE_RANGERS_WEBHOOK_URL with an
 # X-Rescue-Secret header read from RESCUE_RANGERS_WEBHOOK_SECRET. The receiver
-# (RR-01-intake webhook) is fail-closed; a missing secret means every CC
-# escalation is rejected. Source the operator secret store when it exists so
-# manual and launchd start paths both carry it. Never print or hardcode the value.
-if [[ -z "${RESCUE_RANGERS_WEBHOOK_SECRET:-}" && -f "${HOME}/.openclaw/secrets/.env" ]]; then
-  _rr_secret_value="$(sed -n -E 's/^RESCUE_RANGERS_WEBHOOK_SECRET=//p' "${HOME}/.openclaw/secrets/.env" 2>/dev/null | tail -1 || true)"
-  if [[ -n "$_rr_secret_value" ]]; then
-    # dotenv semantics: strip ONE matching pair of surrounding quotes, preserve
-    # inner characters, and never evaluate the value.
-    _rr_q="${_rr_secret_value:0:1}"
-    if [[ "$_rr_q" == "\"" || "$_rr_q" == "'" ]]; then
-      if [[ "${_rr_secret_value: -1}" == "$_rr_q" && "${#_rr_secret_value}" -ge 2 ]]; then
-        _rr_secret_value="${_rr_secret_value:1:${#_rr_secret_value}-2}"
-      fi
-    fi
-    export RESCUE_RANGERS_WEBHOOK_SECRET="$_rr_secret_value"
-    printf '[cc-start] RESCUE-RANGERS-AUTH: X-Rescue-Secret provisioned from the operator secret store.\n' >&2
+# (RR-01-intake webhook) is fail-closed; a missing or empty secret means every
+# CC escalation is rejected. The shared loader parses the allowlisted key without
+# evaluation and resolves the store from the configured service identity rather
+# than inherited HOME. Never print or hardcode the value.
+if [[ -z "${RESCUE_RANGERS_WEBHOOK_SECRET:-}" ]]; then
+  _rr_load_status=0
+  rescue_load_webhook_secret || _rr_load_status=$?
+  if [[ "$_rr_load_status" -eq 0 ]]; then
+    printf '[cc-start] RESCUE-RANGERS-AUTH: X-Rescue-Secret provisioned from the service secret store.\n' >&2
+  elif [[ "$_rr_load_status" -eq 2 ]]; then
+    printf '[cc-start] RESCUE-RANGERS-AUTH: configured secret is empty; X-Rescue-Secret remains unset.\n' >&2
+  else
+    printf '[cc-start] RESCUE-RANGERS-AUTH: no usable configured secret store/key; X-Rescue-Secret remains unset.\n' >&2
   fi
-  unset _rr_secret_value _rr_q
+  unset _rr_load_status
 fi
+unset RESCUE_DOTENV_VALUE RESCUE_SECRET_STORE_PATH RESCUE_SERVICE_HOME RESCUE_TRIMMED 2>/dev/null || true
 
 # ── 1b. NON-4000 DRIFT ACK GUARD (P1-02 Unit B, item 4) ───────────────────────
 # Port 4000 is the ONE canonical CC port fleet-wide — the Cloudflare tunnel
