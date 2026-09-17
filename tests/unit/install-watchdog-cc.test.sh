@@ -149,6 +149,21 @@ grep -q '4100' "$WORK/i3.out" && ok "I3: it reports the port it is watching" || 
 # --check must not write: the plist mtime and content are unchanged by it.
 grep -q 'watchdog-cc.sh' "$PLIST" && ok "I3: --check left the plist in place" || bad "I3: --check damaged the plist"
 
+# ── I8: CC_PUBLIC_URL reaches the agent (explicit flag, then from the app's env file) ──
+echo "[I8] --public-url lands in the plist; --app-dir reads it from .env.local; the value is never logged"
+bash "$INSTALLER" --port 4100 --pm2-app blackceo-command-center --public-url 'https://cc.example.test/x?a=1&b=2' >"$WORK/i8a.out" 2>&1
+grep -A1 'CC_PUBLIC_URL' "$PLIST" | grep -q 'https://cc.example.test/x?a=1&amp;b=2' \
+  && ok "I8: --public-url is in the plist (XML-escaped)" || bad "I8: CC_PUBLIC_URL missing from plist"
+grep -q 'cc.example.test' "$WORK/i8a.out" && bad "I8: the URL value was printed to the log" || ok "I8: the URL value is not printed"
+grep -q 'CC_PUBLIC_URL=set' "$WORK/i8a.out" && ok "I8: the log says the URL is set" || bad "I8: log does not say CC_PUBLIC_URL=set"
+mkdir -p "$WORK/app"; printf 'OTHER=1\nCC_PUBLIC_URL="https://from-env.example.test"\n' > "$WORK/app/.env.local"
+bash "$INSTALLER" --port 4100 --app-dir "$WORK/app" >"$WORK/i8b.out" 2>&1
+grep -A1 'CC_PUBLIC_URL' "$PLIST" | grep -q 'https://from-env.example.test' \
+  && ok "I8: --app-dir picks CC_PUBLIC_URL up from .env.local" || bad "I8: .env.local value not picked up"
+bash "$INSTALLER" --port 4100 --app-dir "$WORK/nowhere" >"$WORK/i8c.out" 2>&1
+grep -q 'CC_PUBLIC_URL' "$PLIST" && bad "I8: stale CC_PUBLIC_URL left in plist when none is known" || ok "I8: no CC_PUBLIC_URL when none is known"
+grep -q 'NOT SET' "$WORK/i8c.out" && ok "I8: the log warns when the URL is not set" || bad "I8: no NOT SET warning"
+
 # ── I4: --uninstall ─────────────────────────────────────────────────────────
 echo "[I4] --uninstall removes the agent"
 : > "$LAUNCHCTL_CALL_LOG"
@@ -181,6 +196,9 @@ RC=$?
 [[ $RC -eq 0 ]] && ok "I5: installer exits 0" || bad "I5: installer exited $RC: $(cat "$WORK/i5.out")"
 grep -q 'BEGIN blackceo watchdog-cc' "$FAKE_CRONTAB_FILE" \
   && ok "I5: the marker block is present" || bad "I5: no marker block in the crontab"
+bash "$INSTALLER" --port 4100 --pm2-app blackceo-command-center --public-url 'https://cc.example.test' >/dev/null 2>&1
+grep -q "CC_PUBLIC_URL='https://cc.example.test'" "$FAKE_CRONTAB_FILE" \
+  && ok "I5: the crontab line carries CC_PUBLIC_URL" || bad "I5: CC_PUBLIC_URL missing from the crontab line"
 grep -q '^\*/5 \* \* \* \* .*watchdog-cc.sh' "$FAKE_CRONTAB_FILE" \
   && ok "I5: the schedule is */5" || bad "I5: no */5 line: $(cat "$FAKE_CRONTAB_FILE")"
 grep -q 'WATCHDOG_SELF_HEAL=1' "$FAKE_CRONTAB_FILE" \

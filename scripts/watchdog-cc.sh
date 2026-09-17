@@ -70,6 +70,21 @@ WATCHDOG_ALERT_HOOK="${WATCHDOG_ALERT_HOOK:-}"
 WATCHDOG_SELF_HEAL="${WATCHDOG_SELF_HEAL:-0}"
 # PRES-045: durable state dir for incident dedupe + recovery + rebuild lock.
 CC_ROOT_DEFAULT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# Public-URL fallback (2026-09-17): cc-health-check.sh reports row 27 UNKNOWN
+# (exit 3) when CC_PUBLIC_URL is unset, and this watchdog NEVER acts on exit 3.
+# Measured on the operator Mac: every scheduled run was UNKNOWN, so a stalled
+# scheduler could never be repaired. The app already knows its public URL — it
+# is in its own env file — so read it from there when the caller did not set it.
+# The value is never printed.
+if [[ -z "${CC_PUBLIC_URL:-}" ]]; then
+  for _envf in "${CC_ROOT_DEFAULT}/.env.local" "${CC_ROOT_DEFAULT}/.env"; do
+    if [[ -f "$_envf" ]]; then
+      _pub="$(grep -E '^CC_PUBLIC_URL=' "$_envf" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"'"'"' ' || true)"
+      if [[ -n "$_pub" ]]; then CC_PUBLIC_URL="$_pub"; export CC_PUBLIC_URL; break; fi
+    fi
+  done
+  unset _envf _pub
+fi
 WATCHDOG_STATE_DIR="${WATCHDOG_STATE_DIR:-${CC_ROOT_DEFAULT}/.cc-state}"
 WATCHDOG_MIN_FREE_MB="${WATCHDOG_MIN_FREE_MB:-2048}"
 WATCHDOG_REBUILD_BACKOFF_BASE="${WATCHDOG_REBUILD_BACKOFF_BASE:-300}"
@@ -176,6 +191,7 @@ PYEOF
 }
 
 ARGS=(--port "$WATCHDOG_PORT" --json-only)
+[[ -n "${CC_PUBLIC_URL:-}" ]] && ARGS+=(--public-url "$CC_PUBLIC_URL")
 [[ -n "$WATCHDOG_CANONICAL_DIR" ]] && ARGS+=(--canonical-dir "$WATCHDOG_CANONICAL_DIR")
 
 RESULT_JSON=""; RESULT_EXIT=0
