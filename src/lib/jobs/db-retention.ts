@@ -80,6 +80,8 @@
  * loop, table by table, under a total wall-clock budget of
  * DB_RETENTION_BUDGET_SECONDS (default 60). When the budget runs out the job
  * stops where it is and reports `budgetExhausted: true`; the next night picks up
+ * (each table gets an equal share of whatever budget remains when its turn comes,
+ * so one huge backlog cannot starve the others)
  * the remainder. This is what keeps the first run on a 539 MB database from
  * locking the live app behind one enormous DELETE.
  *
@@ -255,6 +257,17 @@ function pruneInBatches(
 }
 
 /**
+ * Fair share of the remaining budget for the next table: what is left, divided
+ * by the tables still to run. A million-row backlog in the first table cannot
+ * starve the other three of their nightly pass; whatever it does not finish
+ * resumes the next night.
+ */
+function shareDeadline(deadlineMs: number, tablesRemaining: number): number {
+  const remaining = Math.max(0, deadlineMs - Date.now());
+  return Date.now() + Math.floor(remaining / Math.max(1, tablesRemaining));
+}
+
+/**
  * Nightly retention pass. Idempotent: a second run in the same night deletes
  * nothing new because every eligible row is already gone.
  */
@@ -290,7 +303,7 @@ export async function runDbRetention(): Promise<DbRetentionResult> {
         LIMIT ?`,
       intEnv('STAGE_TIMINGS_RETENTION_DAYS', STAGE_TIMINGS_RETENTION_DAYS_DEFAULT),
       batchSize,
-      deadlineMs,
+      shareDeadline(deadlineMs, 4),
     );
     deleted.presentation_stage_timings = r.deleted;
     budgetExhausted ||= r.budgetExhausted;
@@ -305,7 +318,7 @@ export async function runDbRetention(): Promise<DbRetentionResult> {
         LIMIT ?`,
       intEnv('SSE_EVENT_LOG_RETENTION_DAYS', SSE_EVENT_LOG_RETENTION_DAYS_DEFAULT),
       batchSize,
-      deadlineMs,
+      shareDeadline(deadlineMs, 3),
     );
     deleted.sse_event_log = r.deleted;
     budgetExhausted ||= r.budgetExhausted;
@@ -330,7 +343,7 @@ export async function runDbRetention(): Promise<DbRetentionResult> {
         LIMIT ?`,
       intEnv('EVENTS_RETENTION_DAYS', EVENTS_RETENTION_DAYS_DEFAULT),
       batchSize,
-      deadlineMs,
+      shareDeadline(deadlineMs, 2),
     );
     deleted.events = r.deleted;
     budgetExhausted ||= r.budgetExhausted;
@@ -353,7 +366,7 @@ export async function runDbRetention(): Promise<DbRetentionResult> {
         LIMIT ?`,
       intEnv('TASK_ACTIVITIES_RETENTION_DAYS', TASK_ACTIVITIES_RETENTION_DAYS_DEFAULT),
       batchSize,
-      deadlineMs,
+      shareDeadline(deadlineMs, 1),
     );
     deleted.task_activities = r.deleted;
     budgetExhausted ||= r.budgetExhausted;
