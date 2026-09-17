@@ -97,6 +97,14 @@ module.exports = {
       // an unset value never overrides the .env.local layer (never blanks it).
       ...(process.env.MC_API_TOKEN ? { MC_API_TOKEN: process.env.MC_API_TOKEN } : {}),
       ...(process.env.WEBHOOK_SECRET ? { WEBHOOK_SECRET: process.env.WEBHOOK_SECRET } : {}),
+      // RESCUE-RANGERS-AUTH (2026-09-17): pass the rescue webhook URL and its
+      // auth secret into the pm2 child env explicitly. notifySystem() posts to
+      // RESCUE_RANGERS_WEBHOOK_URL and reads the secret for the X-Rescue-Secret
+      // header; RR-01-intake's webhook auth is fail-closed, so a missing secret
+      // means every CC escalation is rejected live. Conditional spread so an
+      // unset value never overrides the .env.local layer.
+      ...(process.env.RESCUE_RANGERS_WEBHOOK_URL ? { RESCUE_RANGERS_WEBHOOK_URL: process.env.RESCUE_RANGERS_WEBHOOK_URL } : {}),
+      ...(process.env.RESCUE_RANGERS_WEBHOOK_SECRET ? { RESCUE_RANGERS_WEBHOOK_SECRET: process.env.RESCUE_RANGERS_WEBHOOK_SECRET } : {}),
       // QC JUDGE (master plan unit 3.3): the podcast QC judge is resolved by
       // resolveClientJudgeModel (qc-scorer.ts) from the dept QC agent's model OR
       // QC_JUDGE_MODEL, and scored via the CLIENT's OWN OLLAMA_CLOUD_API_KEY.

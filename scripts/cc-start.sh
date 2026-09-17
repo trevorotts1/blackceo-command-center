@@ -70,6 +70,20 @@ export NODE_ENV="${NODE_ENV:-production}"
 
 printf '[cc-start] ENV-BLEED GUARD: pinned PORT=%s (NODE_ENV=%s)\n' "$CC_PORT" "$NODE_ENV" >&2
 
+# RESCUE-RANGERS-AUTH: notifySystem() posts to RESCUE_RANGERS_WEBHOOK_URL with an
+# X-Rescue-Secret header read from RESCUE_RANGERS_WEBHOOK_SECRET. The receiver
+# (RR-01-intake webhook) is fail-closed; a missing secret means every CC
+# escalation is rejected. Source the operator secret store when it exists so
+# manual and launchd start paths both carry it. Never print or hardcode the value.
+if [[ -z "${RESCUE_RANGERS_WEBHOOK_SECRET:-}" && -f "${HOME}/.openclaw/secrets/.env" ]]; then
+  _rr_secret_line="$(grep -E '^RESCUE_RANGERS_WEBHOOK_SECRET=' "${HOME}/.openclaw/secrets/.env" 2>/dev/null | tail -1 || true)"
+  if [[ -n "$_rr_secret_line" ]]; then
+    export "${_rr_secret_line}"
+    printf '[cc-start] RESCUE-RANGERS-AUTH: X-Rescue-Secret provisioned from the operator secret store.\n' >&2
+  fi
+  unset _rr_secret_line
+fi
+
 # ── 1b. NON-4000 DRIFT ACK GUARD (P1-02 Unit B, item 4) ───────────────────────
 # Port 4000 is the ONE canonical CC port fleet-wide — the Cloudflare tunnel
 # ingress → cloudflared → localhost:PORT → pm2 → Next.js chain only holds
