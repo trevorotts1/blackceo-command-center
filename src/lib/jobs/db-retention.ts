@@ -65,8 +65,14 @@
  *     (default 30) and already restricted to `t.status = 'done'`. At the default
  *     the prune boundary and the reader boundary coincide exactly, so no row the
  *     default grade window reads is ever deleted. Raise the env on a box using a
- *     longer grading window. The stale/stuck sweeps read RECENT activity only
- *     (src/lib/jobs/stale-task-sweep.ts:262-274, 24h) and never reach past a day.
+ *     longer grading window.
+ *     No sweep reads task_activities as a liveness signal — the stale sweep's
+ *     hasRecentTaskActivity() (src/lib/jobs/stale-task-sweep.ts:262-274) queries
+ *     `events` for the task over a 24h window despite its name, and 24h is far
+ *     inside both retention rules. weekly-done-clear reads task_activities only
+ *     as an EXISTS test with no time bound (src/lib/jobs/weekly-done-clear.ts:111),
+ *     and it is an orphan-card guard on backlog/inbox cards — never a done or
+ *     archived one — so no row this job deletes can flip that guard's answer.
  *
  * BOUNDED WORK
  * ------------
