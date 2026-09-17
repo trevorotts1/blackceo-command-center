@@ -592,41 +592,109 @@ else
   _ok "  No non-canonical pm2 app is bound to or declared on port ${PORT}."
 fi
 
-# NATIVE-MODULE GATE: the running server must be able to load every native
-# module it requires (better-sqlite3 class) BEFORE the build starts. npm ci can
-# silently drop a platform binary; discovering that after the health check
-# already failed wastes the whole deploy and forces a manual recovery.
+# NATIVE-MODULE GATE: the running server must be able to LOAD and USE every
+# native module it requires (better-sqlite3 class) BEFORE the build starts.
+# npm ci can silently drop a platform binary; discovering that after the
+# health check already failed wastes the whole deploy and forces manual
+# recovery. The gate resolves the package from the app's own node_modules,
+# then opens an in-memory SQLite database and executes a query, so a binary
+# that merely exists but cannot load or execute is still rejected.
 NATIVE_MODULE_GATES=( "better-sqlite3" )
-for _nat_mod in "${NATIVE_MODULE_GATES[@]}"; do
-  _nat_lib="${APP_DIR}/node_modules/${_nat_mod}/build/Release/${_nat_mod}.node"
-  if [[ -f "${_nat_lib}" ]]; then
-    if ! node -e "require('${_nat_lib}')" >/dev/null 2>&1; then
-      _preflight_abort_receipt "Native module ${_nat_mod} exists but fails to load with the CURRENT node. Run 'cd ${APP_DIR}/node_modules/${_nat_mod} && npx prebuild-install || npm rebuild ${_nat_mod}' and re-run the updater. Old build untouched."
-    fi
-    _ok "  Native module ${_nat_mod} loads."
-  else
-    _warn "  Native module ${_nat_mod} binary not found at ${_nat_lib} — deploy continues but the post-build gate below will check the candidate."
+
+_ccbi_native_gate() {
+  # Usage: _ccbi_native_gate <directory-containing-node_modules>
+  local _gate_dir="$1"
+  local _gate_node="${CCBI_NODE_BIN:-$(command -v node)}"
+  local _gate_mod
+  if [[ -z "${_gate_node}" || ! -x "${_gate_node}" ]]; then
+    _err "Native-module gate: Node executable not found or not executable (CCBI_NODE_BIN=${CCBI_NODE_BIN:-unset})."
+    return 2
   fi
-done
-# Post-build gate: the candidate node_modules must load every native module.
-_ccbi_native_candidate_gate() {
-  for _nat_mod in "${NATIVE_MODULE_GATES[@]}"; do
-    local _cand_lib="${APP_DIR}/node_modules/${_nat_mod}/build/Release/${_nat_mod}.node"
-    if [[ ! -f "${_cand_lib}" ]]; then
-      _err "Post-build: ${_nat_mod} binary missing from node_modules. Building would produce a server that cannot open the DB."
+  for _gate_mod in "${NATIVE_MODULE_GATES[@]}"; do
+    if ! (cd "$_gate_dir" && "$_gate_node" -e '
+      const { createRequire } = require("module");
+      const req = createRequire(process.argv[1] + "/node_modules/");
+      let NativeModule = req(process.argv[2]);
+      if (NativeModule && typeof NativeModule !== "function") NativeModule = NativeModule.default || NativeModule.NativeModule;
+      if (typeof NativeModule !== "function") process.exit(4);
+      const db = new NativeModule(":memory:");
+      try {
+        const row = db.prepare("SELECT 42 AS answer").get();
+        if (!row || row.answer !== 42) process.exit(3);
+      } finally {
+        db.close();
+      }
+    ' "$_gate_dir" "$_gate_mod" >/dev/null 2>&1); then
+      _err "Native-module gate failed for ${_gate_mod} in ${_gate_dir} (with ${_gate_node})."
+      _err "Run 'cd ${_gate_dir} && npm rebuild ${_gate_mod}' and re-run the updater. Old build untouched."
       return 1
     fi
-    if ! node -e "require('${_cand_lib}')" >/dev/null 2>&1; then
-      _err "Post-build: ${_nat_mod} binary exists but fails to load. The candidate would crash-loop at health-check time."
-      return 1
-    fi
+    _ok "  Native module ${_gate_mod} loads and opens SQLite."
   done
   return 0
 }
-if ! _ccbi_native_candidate_gate; then
-  _preflight_abort_receipt "Native-module candidate gate failed — candidate would produce an unhealthy server. Old build untouched."
+
+if ! _ccbi_native_gate "$APP_DIR"; then
+  _preflight_abort_receipt "Native-module pre-flight gate failed — the running dependencies cannot open the database. Old build untouched."
 fi
 _ok "Phase 1 pre-flight passed (including native-module gates)."
+
+# ── 1e. Stage candidate dependencies from the lockfile ───────────────────────
+# The build and runtime must not silently depend on whatever happens to be in
+# the live node_modules. Install a fresh, lockfile-pinned dependency tree into
+# a staging directory, probe it, and only then swap it into place. The prior
+# tree is preserved for rollback and restored on every failure path.
+_log "[1e] Staging candidate dependencies"
+if [[ ! -f "${APP_DIR}/package-lock.json" ]]; then
+  _preflight_abort_receipt "package-lock.json missing in ${APP_DIR} — refusing to stage dependencies. Old build untouched."
+  exit 2
+fi
+DEPS_STAGE_ROOT="${APP_DIR}/.deps-candidate.$$"
+LIVE_NODE_MODULES_BACKUP="${APP_DIR}/.node_modules.rollback.$$"
+mkdir -p "$DEPS_STAGE_ROOT" || { _err "Failed to create dependency staging directory."; exit 2; }
+cp "${APP_DIR}/package.json" "${DEPS_STAGE_ROOT}/package.json" || { _err "Failed to copy package.json into staging."; exit 2; }
+cp "${APP_DIR}/package-lock.json" "${DEPS_STAGE_ROOT}/package-lock.json" || { _err "Failed to copy package-lock.json into staging."; exit 2; }
+
+if ! (cd "$DEPS_STAGE_ROOT" && npm ci --no-audit --no-fund --prefer-offline --ignore-scripts=false 2>&1 | tee "$DEPS_STAGE_ROOT/npm-ci.log"); then
+  rm -rf "$DEPS_STAGE_ROOT" 2>/dev/null || true
+  _preflight_abort_receipt "Dependency staging failed (npm ci). Old build untouched."
+  exit 2
+fi
+
+if ! _ccbi_native_gate "$DEPS_STAGE_ROOT"; then
+  rm -rf "$DEPS_STAGE_ROOT" 2>/dev/null || true
+  _preflight_abort_receipt "Native-module gate failed on staged dependencies. Old build untouched."
+  exit 2
+fi
+_ok "  Staged dependencies pass the native-module gate."
+
+# Swap the candidate dependency tree into place for the build. Preserve the
+# live tree; restore it on any failure path and on health-failed rollback.
+LIVE_NODE_MODULES_BACKUP="${APP_DIR}/.node_modules.rollback.$$"
+mv "${APP_DIR}/node_modules" "$LIVE_NODE_MODULES_BACKUP" || { _err "Failed to back up live node_modules."; exit 2; }
+mv "${DEPS_STAGE_ROOT}/node_modules" "${APP_DIR}/node_modules" || { _err "Failed to promote staged node_modules."; mv "$LIVE_NODE_MODULES_BACKUP" "${APP_DIR}/node_modules" 2>/dev/null || true; exit 2; }
+rm -rf "$DEPS_STAGE_ROOT" 2>/dev/null || true
+NODE_MODULES_SWAP_DONE=1
+_ok "  Candidate dependencies promoted for build and runtime."
+
+_ccbi_restore_node_modules() {
+  [[ "${NODE_MODULES_SWAP_DONE:-0}" -eq 1 && -d "${LIVE_NODE_MODULES_BACKUP:-}" ]] || return 0
+  if [[ -d "${APP_DIR}/node_modules" ]]; then
+    rm -rf "${APP_DIR}/.node_modules.discarded.$$" 2>/dev/null || true
+    mv "${APP_DIR}/node_modules" "${APP_DIR}/.node_modules.discarded.$$" 2>/dev/null || rm -rf "${APP_DIR}/node_modules" 2>/dev/null || true
+  fi
+  mv "$LIVE_NODE_MODULES_BACKUP" "${APP_DIR}/node_modules" 2>/dev/null || true
+  rm -rf "${APP_DIR}/.node_modules.discarded.$$" 2>/dev/null || true
+  NODE_MODULES_SWAP_DONE=0
+}
+
+# On any exit path, if the candidate dependency tree was promoted but the
+# deploy did not reach a verified green state, restore the prior tree.
+_ccbi_on_exit_cleanup() {
+  _ccbi_restore_node_modules
+  _ccbi_restore_tsconfig_on_exit
+}
+trap _ccbi_on_exit_cleanup EXIT
 
 ###############################################################################
 # ─── PHASE 2: BUILD TO TEMP DIR ─────────────────────────────────────────────
@@ -702,21 +770,14 @@ if [[ -f "${APP_DIR}/tsconfig.json" ]]; then
     rm -f "$CCBI_TSCONFIG_SNAPSHOT" 2>/dev/null || true
     CCBI_TSCONFIG_SNAPSHOT=""
   }
-  trap _ccbi_restore_tsconfig_on_exit EXIT
+  trap _ccbi_on_exit_cleanup EXIT
 fi
 
-# Export NEXT output dir env var so Next.js writes to the temp dir instead of .next.
-# next.config.mjs now reads NEXT_DIST_DIR into `distDir` (BUG-1 FIX). Next.js
-# resolves distDir via path.join(<project dir>, distDir) -- NOT path.resolve --
-# so an ABSOLUTE value here would be silently concatenated onto APP_DIR instead
-# of replacing it (verified: path.join('/a/b','/a/b/x') -> '/a/b/a/b/x', not
-# '/a/b/x'), producing a build directory nobody checks and every deploy would
-# spuriously "fail" at the BUILD_ID check below. We build the same absolute
-# BUILD_TMP the rest of this script already uses for its own bookkeeping (mv,
-# rm -rf, existence checks), but export only the RELATIVE name so Next.js's
-# path.join(APP_DIR, NEXT_DIST_DIR) resolves to exactly that same absolute path.
-export NEXT_DIST_DIR="$BUILD_TMP_NAME"
-
+# NEXT output dir env var is scoped to the build subprocess only. The shell
+# parent must not carry NEXT_DIST_DIR into later pm2 operations: a stale
+# .next.tmp.* distDir would break every subsequent start (BUILD-06 class).
+# The npm build subshell sets it only for `npm run build` and does not export
+# it to the rest of the script.
 cd "$APP_DIR"
 
 # ── Capture npm exit code before the pipe ────────────────────────────────────
@@ -732,7 +793,7 @@ export BUILD_EXIT_FILE
 
 _log "Running: npm run build  (output: ${BUILD_TMP})"
 (
-  npm run build 2>&1
+  NEXT_DIST_DIR="$BUILD_TMP_NAME" npm run build 2>&1
   echo $? > "$BUILD_EXIT_FILE"
 ) | while IFS= read -r line; do
   printf '%s[build] %s%s\n' "${CYAN}" "${RESET}" "$line" >&2
@@ -741,6 +802,12 @@ done
 BUILD_EXIT=$(cat "$BUILD_EXIT_FILE" 2>/dev/null || echo 2)
 rm -f "$BUILD_EXIT_FILE"
 _log "  npm run build exited: ${BUILD_EXIT}"
+
+# Any failure before a healthy promotion must restore the prior dependency
+# tree. The EXIT trap also covers later unexpected exits.
+if [[ "$BUILD_EXIT" -ne 0 ]]; then
+  _ccbi_restore_node_modules
+fi
 
 # ── Validate output: BUILD_ID must exist AND be fresh (mtime > BUILD_START_TS) ──
 # The mtime guard prevents the Phase 1c cp artefact (old BUILD_ID copied into
@@ -767,7 +834,8 @@ if [[ ! -f "$BUILD_ID_FILE" && -f "${APP_DIR}/.next/BUILD_ID" ]]; then
     _err "  This BUILD_ID is the Phase 1c snapshot copy, not a fresh build artefact."
     _err "  Treating as build failure — live .next is untouched."
     rm -rf "$BUILD_TMP" 2>/dev/null || true
-    _preflight_abort_receipt "Build failed: BUILD_ID in .next is stale (mtime predates build start). npm run build produced no new output."
+    _ccbi_restore_node_modules
+  _preflight_abort_receipt "Build failed: BUILD_ID in .next is stale (mtime predates build start). npm run build produced no new output."
     exit 2
   fi
 
@@ -790,6 +858,7 @@ if [[ ! -f "$BUILD_ID_FILE" ]]; then
   _err "Build FAILED — BUILD_ID not present in output directory (${BUILD_TMP})."
   _err "No fallback accepted: live .next was NOT touched."
   rm -rf "$BUILD_TMP" 2>/dev/null || true
+  _ccbi_restore_node_modules
   _preflight_abort_receipt "Build exited ${BUILD_EXIT} or BUILD_ID absent. Live .next was NOT swapped."
   exit 2
 fi
@@ -802,6 +871,7 @@ if (( BUILD_ID_MTIME < BUILD_START_TS )); then
   _err "  BUILD_ID mtime (${BUILD_ID_MTIME}) < build start (${BUILD_START_TS})."
   _err "  This BUILD_ID predates the build — stale artefact in BUILD_TMP."
   rm -rf "$BUILD_TMP" 2>/dev/null || true
+  _ccbi_restore_node_modules
   _preflight_abort_receipt "Build failed: BUILD_ID in BUILD_TMP is stale (mtime predates build start)."
   exit 2
 fi
@@ -809,6 +879,7 @@ fi
 # npm exit code must be 0 for a successful build.
 if [[ $BUILD_EXIT -ne 0 ]]; then
   _err "Build FAILED — npm run build exited ${BUILD_EXIT}."
+  _ccbi_restore_node_modules
   # DATA-LOSS GUARD: if this is the NEXT_DIST_DIR-bypass path (APP_DIR/.next was moved
   # into BUILD_TMP at the mtime check above), we must restore it before cleaning up
   # BUILD_TMP — otherwise we leave APP_DIR/.next MISSING and break the live server.
@@ -820,12 +891,23 @@ if [[ $BUILD_EXIT -ne 0 ]]; then
       _err "  CRITICAL: failed to restore APP_DIR/.next from rollback snapshot — manual intervention required."
   fi
   rm -rf "$BUILD_TMP" 2>/dev/null || true
+  _ccbi_restore_node_modules
   _preflight_abort_receipt "npm run build exited ${BUILD_EXIT}. Live .next was NOT swapped."
   exit 2
 fi
 
 BUILD_ID=$(cat "$BUILD_ID_FILE" 2>/dev/null || echo "unknown")
 _ok "Build succeeded. BUILD_ID: ${BUILD_ID}"
+
+# Candidate dependencies must be usable by the exact runtime Node before
+# promotion. This is the REAL post-build gate: it runs only after the candidate
+# build exists and before the .next swap, using the promoted candidate tree.
+if ! _ccbi_native_gate "$APP_DIR"; then
+  _err "Post-build: candidate dependencies cannot load or use the native modules."
+  _ccbi_restore_node_modules
+  _preflight_abort_receipt "Post-build native-module gate failed — candidate would produce an unhealthy server. Old build untouched."
+  exit 2
+fi
 
 # ── PRES-046: frozen-source proof + immutable manifest ───────────────────────
 # Re-capture the content inventory AFTER compilation. If ANY compile-affecting
@@ -848,6 +930,7 @@ fi
 POST_BUILD_INVENTORY="$(_ccbi_inventory_digest "$APP_DIR")" || {
   _err "Failed to compute post-build content inventory for ${APP_DIR}."
   rm -rf "$BUILD_TMP" 2>/dev/null || true
+  _ccbi_restore_node_modules
   _preflight_abort_receipt "Post-build content inventory computation failed. Live .next was NOT swapped."
   exit 2
 }
@@ -858,6 +941,7 @@ if [[ "$POST_BUILD_INVENTORY" != "$PRE_BUILD_INVENTORY" ]]; then
   _err "  A compile-affecting input was modified while npm run build ran. The candidate"
   _err "  is discarded — the served bytes could not be vouched for against the source."
   rm -rf "$BUILD_TMP" 2>/dev/null || true
+  _ccbi_restore_node_modules
   _preflight_abort_receipt "FROZEN-SOURCE VIOLATION (PRES-046): compile-affecting inputs changed during the build. Candidate discarded; live .next untouched."
   exit 2
 fi
@@ -868,6 +952,7 @@ _ok "  Frozen-source proof passed — content inventory unchanged during build (
 if ! _ccbi_write_manifest "$APP_DIR" "$BUILD_TMP" "$BUILD_ID" "$BUILD_START_TS"; then
   _err "Failed to write build-inventory.json into ${BUILD_TMP}."
   rm -rf "$BUILD_TMP" 2>/dev/null || true
+  _ccbi_restore_node_modules
   _preflight_abort_receipt "Build manifest write failed. Live .next was NOT swapped."
   exit 2
 fi
@@ -905,6 +990,7 @@ mv "$BUILD_TMP" "${APP_DIR}/.next" 2>/dev/null || {
       _err "New build at: ${BUILD_TMP}"
     }
   fi
+  _ccbi_restore_node_modules
   _preflight_abort_receipt "Atomic swap of new build into .next failed."
   exit 2
 }
@@ -914,11 +1000,9 @@ rm -rf "$OLD_NEXT_PARK" 2>/dev/null || true
 
 _ok "Atomic swap complete. .next is now the fresh build (BUILD_ID: ${BUILD_ID})"
 
-# NEXT_DIST_DIR was needed only for the build subprocess. It must NOT leak into
-# pm2's persisted environment: next.config.mjs reads it into distDir, so a stale
-# .next.tmp.* path here would make every subsequent start look for a build in a
-# directory that was already cleaned up (BUILD-06 dead-kanban class).
-unset NEXT_DIST_DIR
+# The parent shell never had NEXT_DIST_DIR in this implementation. If an older
+# deploy leaked it into pm2, `--update-env` below removes that stale binding
+# during restart; a plain `unset` alone cannot clean persisted process state.
 
 ###############################################################################
 # ─── PHASE 4: RESTART + HEALTH VERIFICATION ─────────────────────────────────
@@ -928,9 +1012,9 @@ _banner "Phase 4 — Restart + Health verification"
 # Restart the server onto the fresh build.
 _log "[4a] Restarting pm2 app '${PM2_APP_NAME}' onto fresh build ..."
 if pm2 list 2>/dev/null | grep -q "$PM2_APP_NAME"; then
-  pm2 restart "$PM2_APP_NAME" 2>/dev/null || {
+  pm2 restart "$PM2_APP_NAME" --update-env 2>/dev/null || {
     _warn "  pm2 restart failed — trying pm2 reload ..."
-    pm2 reload "$PM2_APP_NAME" 2>/dev/null || true
+    pm2 reload "$PM2_APP_NAME" --update-env 2>/dev/null || true
   }
 else
   _warn "  pm2 app '${PM2_APP_NAME}' not found in pm2 list."
@@ -945,10 +1029,10 @@ else
     CC_PORT="$PORT" \
       DATABASE_PATH="${DB_PATH_OVERRIDE:-${DATABASE_PATH:-}}" \
       CC_INSTALL_DIR="$APP_DIR" \
-      pm2 start "$APP_DIR/ecosystem.config.cjs" 2>/dev/null || true
+      pm2 start "$APP_DIR/ecosystem.config.cjs" --update-env 2>/dev/null || true
   else
     cd "$APP_DIR"
-    CC_PORT="$PORT" pm2 start npm --name "$PM2_APP_NAME" -- start 2>/dev/null || true
+    CC_PORT="$PORT" pm2 start npm --name "$PM2_APP_NAME" -- start --update-env 2>/dev/null || true
   fi
 fi
 
@@ -1001,6 +1085,14 @@ _banner "Phase 5 — Verdict"
 if [[ $HEALTH_EXIT -eq 0 ]]; then
   # ── SUCCESS ─────────────────────────────────────────────────────────────────
   _ok "Deploy is GREEN on the new build."
+
+  # The candidate dependency tree has now served a verified green build.
+  # The prior dependency tree is no longer needed.
+  if [[ "${NODE_MODULES_SWAP_DONE:-0}" -eq 1 && -d "${LIVE_NODE_MODULES_BACKUP:-}" ]]; then
+    rm -rf "$LIVE_NODE_MODULES_BACKUP" "${APP_DIR}"/.node_modules.discarded.* 2>/dev/null || true
+    NODE_MODULES_SWAP_DONE=0
+  fi
+
   # Persist the live pm2 process list so BOTH the CC app and the co-resident
   # cloudflared tunnel connector land in the pm2 dump and auto-resurrect after an
   # OOM/reboot. This is the persistence gap that took a client dashboard dark:
@@ -1111,8 +1203,10 @@ else
     exit 1
   }
 
+  _log "Restoring the prior dependency tree for the restored build ..."
+  _ccbi_restore_node_modules
   _log "Restarting pm2 app onto restored build ..."
-  pm2 restart "$PM2_APP_NAME" 2>/dev/null || true
+  pm2 restart "$PM2_APP_NAME" --update-env 2>/dev/null || true
   sleep 5
 
   _log "Re-running cc-health-check.sh on restored build ..."
