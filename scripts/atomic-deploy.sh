@@ -880,6 +880,12 @@ rm -rf "$OLD_NEXT_PARK" 2>/dev/null || true
 
 _ok "Atomic swap complete. .next is now the fresh build (BUILD_ID: ${BUILD_ID})"
 
+# NEXT_DIST_DIR was needed only for the build subprocess. It must NOT leak into
+# pm2's persisted environment: next.config.mjs reads it into distDir, so a stale
+# .next.tmp.* path here would make every subsequent start look for a build in a
+# directory that was already cleaned up (BUILD-06 dead-kanban class).
+unset NEXT_DIST_DIR
+
 ###############################################################################
 # ─── PHASE 4: RESTART + HEALTH VERIFICATION ─────────────────────────────────
 ###############################################################################

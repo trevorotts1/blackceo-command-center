@@ -387,8 +387,8 @@ _assert_fresh_build() {
   source "$inv_lib"
 
   local verify_json verify_rc verdict served_bid
-  verify_json="$(bash "$inv_lib" --verify "$CC_DIR" 2>/dev/null)" || true
-  verify_rc=$?
+  verify_rc=0
+  verify_json="$(bash "$inv_lib" --verify "$CC_DIR" 2>/dev/null)" || verify_rc=$?
   verdict="$(printf '%s' "$verify_json" | sed -n 's/.*"verdict"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
   served_bid="$(printf '%s' "$verify_json" | sed -n 's/.*"build_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
 
@@ -404,9 +404,9 @@ _assert_fresh_build() {
       # written by the SAME deploy transaction that restored it binds it as
       # "(unattested)" and names THIS source tree as the failed target.
       local source_inv_missing rb_json_missing rb_rc_missing rb_verdict_missing
-      source_inv_missing="$(_ccbi_inventory_digest "$CC_DIR")"
-      rb_json_missing="$(bash "$inv_lib" --verify-rollback "$CC_DIR" "$next_dir" "$source_inv_missing" 2>/dev/null)"
-      rb_rc_missing=$?
+      source_inv_missing="$(_ccbi_inventory_digest "$CC_DIR")" || true
+      rb_rc_missing=0
+      rb_json_missing="$(bash "$inv_lib" --verify-rollback "$CC_DIR" "$next_dir" "$source_inv_missing" 2>/dev/null)" || rb_rc_missing=$?
       rb_verdict_missing="$(printf '%s' "$rb_json_missing" | sed -n 's/.*"receipt_verdict"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
       if [[ "$rb_rc_missing" -eq 0 && "$rb_verdict_missing" == "RECEIPT_OK" ]]; then
         printf '[cc-start] DEGRADED (legacy-prior): serving a pre-inventory artifact with NO manifest after a failed deploy.\n' >&2
@@ -430,9 +430,9 @@ _assert_fresh_build() {
       # MISMATCH — the only legitimate path is a transaction-bound rollback receipt
       # binding exactly this pair. Verify it.
       local source_inv rb_json rb_rc rb_verdict
-      source_inv="$(_ccbi_inventory_digest "$CC_DIR")"
-      rb_json="$(bash "$inv_lib" --verify-rollback "$CC_DIR" "$next_dir" "$source_inv" 2>/dev/null)"
-      rb_rc=$?
+      source_inv="$(_ccbi_inventory_digest "$CC_DIR")" || true
+      rb_rc=0
+      rb_json="$(bash "$inv_lib" --verify-rollback "$CC_DIR" "$next_dir" "$source_inv" 2>/dev/null)" || rb_rc=$?
       rb_verdict="$(printf '%s' "$rb_json" | sed -n 's/.*"receipt_verdict"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
       if [[ "$rb_rc" -eq 0 && "$rb_verdict" == "RECEIPT_OK" ]]; then
         printf '[cc-start] DEGRADED: serving the PRIOR artifact after a failed deploy (content mismatch vs source).\n' >&2
