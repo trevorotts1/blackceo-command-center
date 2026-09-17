@@ -115,6 +115,19 @@ write_env 'OTHER_KEY=dummy-only' missing-key.env
 rescue_read_dotenv_key RESCUE_RANGERS_WEBHOOK_SECRET "$TMP_DIR/missing-key.env"
 assert_status 'missing key is unavailable' 1 "$?"
 
+# Bash [[ == ]] honors an inherited nocasematch option, which would turn a
+# lower-case decoy into an exact-key match. The parser must remain case-sensitive.
+shopt -s nocasematch
+write_env 'RESCUE_RANGERS_WEBHOOK_SECRET=dummy-exact-key' exact-key.env
+rescue_read_dotenv_key RESCUE_RANGERS_WEBHOOK_SECRET "$TMP_DIR/exact-key.env"
+assert_value 'exact-key match is case-sensitive while nocasematch is enabled' \
+  'dummy-exact-key' "$RESCUE_DOTENV_VALUE"
+
+write_env 'rescue_rangers_webhook_secret=dummy-lowercase-decoy' lowercase-decoy.env
+rescue_read_dotenv_key RESCUE_RANGERS_WEBHOOK_SECRET "$TMP_DIR/lowercase-decoy.env"
+assert_status 'lower-case decoy is rejected while nocasematch is enabled' 1 "$?"
+shopt -u nocasematch
+
 # Service identity and configured-root resolution.
 if rescue_service_home; then
   if [[ -n "$RESCUE_SERVICE_HOME" ]]; then

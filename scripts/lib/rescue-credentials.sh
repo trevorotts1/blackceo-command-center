@@ -129,7 +129,8 @@ rescue_read_dotenv_key() {
     key="${line%%=*}"
     _rescue_trim "$key"
     key="$RESCUE_TRIMMED"
-    [[ "$key" == "$wanted_key" ]] || continue
+    # POSIX test is case-sensitive even when the caller inherited nocasematch.
+    [ "$key" = "$wanted_key" ] || continue
     value_part="${line#*=}"
     _rescue_parse_dotenv_value "$value_part" || return 1
     RESCUE_DOTENV_VALUE="$RESCUE_DOTENV_VALUE"
