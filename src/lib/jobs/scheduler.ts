@@ -46,7 +46,7 @@ import { runIntakeAdvanceSweep } from './intake-advance-sweep';
 import { runPortIntegrityCheck } from './port-integrity';
 import { runTrustEngineSweep } from './trust-engine';
 import { runBoardHygiene, BOARD_HYGIENE_CRON } from './board-hygiene';
-import { runSweepLivenessSweep } from './sweep-liveness';
+import { runBoardJobsWatchdog } from './board-jobs-watchdog';
 import { runPersonaGroundingHealthSweep } from './persona-grounding-sweep';
 import { runSocialPublishDispatcherSweep } from './social-publish-dispatcher';
 import { runSocialVerificationSweep } from './social-publish-verification';
@@ -110,7 +110,7 @@ function markRegistered(): void {
  * scheduler loop itself is alive, not proof the job's own logic succeeded;
  * failures are already logged separately below). Best-effort: a write failure
  * here must never affect the job's own outcome, so it is caught and logged,
- * never rethrown. src/lib/jobs/sweep-liveness.ts reads this table to detect an
+ * never rethrown. src/lib/jobs/board-jobs-watchdog.ts reads this table to detect an
  * advancer (intake-advance) or qc-review-sweep gone silent.
  */
 export function recordJobTick(name: string, ranAt: string, status: 'ok' | 'error' | 'disabled', errorMessage?: string, result?: unknown): void {
@@ -139,7 +139,7 @@ export function recordJobTick(name: string, ranAt: string, status: 'ok' | 'error
  *
  * MR-31: `wrap()` previously recorded `'ok'` for EVERY resolution that did
  * not throw — including a sweep that returned instantly because its kill flag
- * was set (skippedReason).  The sweep-liveness watchdog then saw a "healthy"
+ * was set (skippedReason).  The board jobs watchdog then saw a "healthy"
  * tick for a job doing zero work — a blind "watch the watchers" layer.  Now
  * `wrap()` inspects the return value for a `skippedReason` string and records
  * `'disabled'` instead, so the watchdog can distinguish "ticking and working"
@@ -517,28 +517,28 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<unknown> | unk
     },
   },
 
-  // sweep-liveness: every 2 minutes — C-09 / U40 "watch the watchers". Reads
-  // the job_liveness ticks wrap() persists for every job and, when the
-  // intake-advance or qc-review-sweep advancer has gone silent for 3x its own
+  // board-jobs-watchdog: every 2 minutes — C-09 / U40 "watch the watchers".
+  // Reads the job_liveness ticks wrap() persists for every job and, when one of
+  // the board-maintenance background jobs has gone silent for 3x its own
   // cadence, fires ONE cooldown-guarded notifySystem() alert (SYSTEM audience
   // only). The same underlying computation is exposed read-only, non-gating,
-  // via /api/health/deep's advisory.sweep_liveness (checkSweepLiveness in
-  // sweep-liveness.ts) so the board stays green overall while this chip goes
-  // red — same posture as the anthology board-projection drift banner (A7).
-  // Disable with DISABLE_SWEEP_LIVENESS=1.
+  // via /api/health/deep's advisory.board_jobs_watchdog (checkBoardJobsWatchdog
+  // in board-jobs-watchdog.ts) so the board stays green overall while this chip
+  // goes red — same posture as the anthology board-projection drift banner (A7).
+  // Disable with DISABLE_BOARD_JOBS_WATCHDOG=1.
   {
-    name: 'sweep-liveness',
+    name: 'board-jobs-watchdog',
     expr: '*/2 * * * *',
     fn: async () => {
-      const result = await runSweepLivenessSweep();
+      const result = await runBoardJobsWatchdog();
       if (result.skippedReason) {
-        console.log(`[cron] sweep-liveness: skipped — ${result.skippedReason}`);
+        console.log(`[cron] board-jobs-watchdog: skipped — ${result.skippedReason}`);
       } else if (result.staleJobs.length > 0 || result.disabledJobs.length > 0) {
         const parts: string[] = [];
-        if (result.staleJobs.length > 0) parts.push(`STALE — ${result.staleJobs.join(', ')}`);
-        if (result.disabledJobs.length > 0) parts.push(`DISABLED — ${result.disabledJobs.join(', ')}`);
+        if (result.staleJobs.length > 0) parts.push(`NOT RUNNING — ${result.staleJobs.join(', ')}`);
+        if (result.disabledJobs.length > 0) parts.push(`SWITCHED OFF — ${result.disabledJobs.join(', ')}`);
         console.warn(
-          `[cron] sweep-liveness: ${parts.join(' | ')}${result.alerted ? ' (alerted)' : ' (cooldown, already alerted)'}`,
+          `[cron] board-jobs-watchdog: ${parts.join(' | ')}${result.alerted ? ' (alerted)' : ' (cooldown, already alerted)'}`,
         );
       }
     },
@@ -551,7 +551,7 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<unknown> | unk
   // underlying probe is exposed read-only, non-gating, via /api/health/deep's
   // advisory.persona_match (checkPersonaGrounding in deep-checks.ts) — the
   // box stays green overall while the board chip goes amber, same posture as
-  // the sweep-liveness entry above. Disable with
+  // the board-jobs-watchdog entry above. Disable with
   // DISABLE_PERSONA_GROUNDING_SWEEP=1.
   {
     name: 'persona-grounding-health',

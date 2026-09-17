@@ -3,10 +3,10 @@
 # issue04-scheduler-liveness-watchdog.test.sh
 #
 # THE DEFECT (ISSUE-04): every sweep in the Command Center is a node-cron job
-# registered in-process. The sweep-liveness watchdog is itself one of those
+# registered in-process. The board jobs watchdog is itself one of those
 # jobs, so when the scheduler loop dies the watchdog dies with it, and its only
-# side effect (a Telegram notify) never fires. checkSweepLiveness() was exposed
-# on /api/health/deep as advisory.sweep_liveness, which nothing gates on, and
+# side effect (a Telegram notify) never fires. checkBoardJobsWatchdog() was
+# exposed on /api/health/deep as advisory.board_jobs_watchdog, which nothing gates on, and
 # scripts/cc-health-check.sh reads only checks.*. A live client box therefore
 # reported "healthy" for 41 hours with no card moving until a human ran
 # `pm2 restart`.

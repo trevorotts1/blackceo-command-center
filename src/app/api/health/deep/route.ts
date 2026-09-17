@@ -41,8 +41,9 @@
  *                           // fresh process has not ticked yet and that is not
  *                           // evidence of a stall); UNKNOWN is reserved for an
  *                           // unreadable job_liveness table.
- *                           // advisory.sweep_liveness keeps reporting all three
- *                           // states (stale / failed / disabled) un-gated.
+ *                           // advisory.board_jobs_watchdog keeps reporting all
+ *                           // three states (silent / failing / switched off)
+ *                           // un-gated.
  *                         }
  *   },
  *   "advisory": {             // NON-GATING — reported side-by-side, never gates
@@ -65,7 +66,7 @@
  *     "mc_board_56_sales_page_assets_projection":    { "pass": bool, "detail": string, ... }, // U100
  *     "mc_board_57_social_media_in_a_box_projection":{ "pass": bool, "detail": string, ... }, // U100
  *     "skill35_cycle_projection":    { "pass": bool, "detail": string, ... }, // U100
- *     "sweep_liveness":             { "pass": bool, "detail": string, ... },
+ *     "board_jobs_watchdog":        { "pass": bool, "detail": string, ... },
  *     "notification_failures_log":  { "pass": bool, "detail": string, ... }, // U102 / C12.3 item 10b
  *     "trust_coverage":             { "pass": bool, "detail": string, ... }, // U94 / X.2.3
  *     "persona_match":              { "pass": bool, "detail": string, "persona_match"?: {...}, "grounding"?: {...} }, // A-U12
@@ -87,9 +88,9 @@
  *   a Command Center correctness fault, so it must NEVER trip auto-rollback or
  *   halt the heartbeat — the very thing A7 (and its Skill-6 clone, U27) exists
  *   to detect cannot be allowed to disable the box that detects it.
- *   `sweep_liveness` (C-09 / U40 — "watch the watchers") is the same posture:
- *   an advancer gone silent is an operational alert (routed separately,
- *   cooldown-guarded, via sweep-liveness.ts's own scheduler.ts cron entry),
+ *   `board_jobs_watchdog` (C-09 / U40 — "watch the watchers") is the same
+ *   posture: an advancer gone silent is an operational alert (routed separately,
+ *   cooldown-guarded, via board-jobs-watchdog.ts's own scheduler.ts cron entry),
  *   never a reason to auto-rollback a healthy deploy or halt the heartbeat.
  *   ISSUE-04 splits ONE signal out of it into `checks.scheduler_liveness`:
  *   not "a sweep is unhappy" but "no sweep has ticked at all", which means the
@@ -98,7 +99,7 @@
  *   and its only side effect is a Telegram notify that therefore never fires.
  *   Gating it is what lets an OUT-OF-PROCESS consumer (cc-health-check.sh into
  *   scripts/watchdog-cc.sh) see the stall and restart the app. Everything else
- *   sweep_liveness reports (a ticking job that fails, a kill-flagged job)
+ *   board_jobs_watchdog reports (a ticking job that fails, a kill-flagged job)
  *   stays advisory exactly as before.
  *   `notification_failures_log` (U102 / C12.3 item 10b) is the same posture
  *   again: the size of the MSG-07 undeliverable ledger is an operational
@@ -146,7 +147,7 @@ import {
   checkPersonaGrounding,
   checkFixtureEnvVars,
 } from '@/lib/health/deep-checks';
-import { checkSweepLiveness, checkSchedulerLiveness } from '@/lib/jobs/sweep-liveness';
+import { checkBoardJobsWatchdog, checkSchedulerLiveness } from '@/lib/jobs/board-jobs-watchdog';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -287,17 +288,17 @@ export async function GET() {
       };
     }
 
-    // C-09 / U40 — sweep-liveness advisory. Own try/catch for the same reason
+    // C-09 / U40 — board jobs watchdog advisory. Own try/catch for the same reason
     // as the block above: a throw here must NEVER reach the outer catch (which
     // would return 500 + pass:false and could trip auto-rollback/heartbeat-gate
     // consumers that only read d.pass / d.indeterminate).
     try {
-      advisory.sweep_liveness = checkSweepLiveness();
+      advisory.board_jobs_watchdog = checkBoardJobsWatchdog();
     } catch (advErr) {
-      advisory.sweep_liveness = {
+      advisory.board_jobs_watchdog = {
         pass: true,
         indeterminate: true,
-        detail: `sweep_liveness: advisory probe unavailable — ${
+        detail: `board_jobs_watchdog: advisory probe unavailable — ${
           advErr instanceof Error ? advErr.message : String(advErr)
         } (UNKNOWN; non-gating)`,
       };
