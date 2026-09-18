@@ -695,6 +695,13 @@ if [[ -n "$PUBLIC_URL" ]]; then
   CF_HTTP="${CF_WO%% *}"; CF_LOC="${CF_WO#* }"
   CF_BODY=$(cat "$_CF" 2>/dev/null || echo ""); rm -f "$_CF"
   if   [[ "$CF_HTTP" == "000" ]]; then CF_INDET=true; CF_DETAIL="CF tunnel unreachable (row 27: UNKNOWN)"
+  # 2026-09-18: HTTP 530 is Cloudflare's own edge answer (error 1033) when NO
+  # cloudflared connector is registered for the hostname — the tunnel process
+  # on the box is down or its credentials are gone. That is a tunnel fault the
+  # deploy cannot cause or cure; scoring it FAIL rolled a healthy build back on
+  # a Mac and the rollback then refused its pre-inventory artifact (CC down).
+  # Same class as 000: reachable-by-nobody → UNKNOWN, reported, never RED.
+  elif [[ "$CF_HTTP" == "530" ]]; then CF_INDET=true; CF_DETAIL="CF public URL → HTTP 530: Cloudflare has no connector for this hostname — the box's cloudflared tunnel is down (row 27: UNKNOWN; fix the tunnel, not the build)"
   elif [[ "$CF_HTTP" =~ ^3 ]]; then
     # Wave-5 interview-lock reconciliation: a SAME-ORIGIN 302 to a middleware-exempt
     # in-app path (/interview, /onboarding) means the app is UP and correctly gating
