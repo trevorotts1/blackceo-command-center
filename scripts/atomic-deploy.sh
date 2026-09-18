@@ -1578,8 +1578,10 @@ _banner "Phase 4 — Restart + Health verification"
 # PM2 --update-env MERGES the caller environment into the persisted process
 # environment; omitting a key does not delete it. Pin the artifact directory so
 # the stale value is explicitly reconciled.
-export NEXT_DIST_DIR="${APP_DIR}/.next"
-_log "Explicitly reconciling PM2 NEXT_DIST_DIR to ${NEXT_DIST_DIR}"
+# RELATIVE, never absolute: next.config.mjs path.join()s this onto the project
+# dir, so an absolute value makes `next start` miss the build (see cc-start.sh).
+export NEXT_DIST_DIR=".next"
+_log "Explicitly reconciling PM2 NEXT_DIST_DIR to ${NEXT_DIST_DIR} (relative to ${APP_DIR})"
 
 _log "[4a] Switching pm2 app '${PM2_APP_NAME}' onto the fresh build ..."
 if ! _ccbi_set_transaction_phase SERVICE_SWITCH; then
