@@ -771,10 +771,20 @@ fi
 # (--db-path, then a shell DATABASE_PATH whose directory exists, then
 # DATABASE_PATH from .env.local, then the non-empty DB found in 1b) and export
 # it so the restart, the health check and the app all agree on one file.
+_abs_under_app() {
+  # A relative database path is always relative to the app directory: the app
+  # refuses a non-absolute DATABASE_PATH (deep-check database_path), and a
+  # relative --db-path copied verbatim from .env.local rolled a client Mac back
+  # and left its Command Center down on 2026-09-18.
+  case "$1" in
+    /*) printf '%s\n' "$1" ;;
+    *)  printf '%s\n' "${APP_DIR}/$1" ;;
+  esac
+}
 _configured_db_path() {
   local from_env_local
   if [[ -n "$DB_PATH_OVERRIDE" ]]; then
-    printf '%s\n' "$DB_PATH_OVERRIDE"; return 0
+    _abs_under_app "$DB_PATH_OVERRIDE"; return 0
   fi
   if [[ -n "${DATABASE_PATH:-}" ]]; then
     if [[ -d "$(dirname "$DATABASE_PATH")" ]]; then
@@ -785,10 +795,7 @@ _configured_db_path() {
   if [[ -f "${APP_DIR}/.env.local" ]]; then
     from_env_local="$(sed -n -E 's/^[[:space:]]*(export[[:space:]]+)?DATABASE_PATH[[:space:]]*=[[:space:]]*//p' "${APP_DIR}/.env.local" | head -n 1 | sed -E "s/^[\"']//; s/[\"'][[:space:]]*$//")"
     if [[ -n "$from_env_local" ]]; then
-      case "$from_env_local" in
-        /*) printf '%s\n' "$from_env_local" ;;
-        *)  printf '%s\n' "${APP_DIR}/${from_env_local}" ;;
-      esac
+      _abs_under_app "$from_env_local"
       return 0
     fi
   fi
