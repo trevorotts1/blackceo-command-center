@@ -980,7 +980,11 @@ _ccbi_native_gate() {
       }
     ' "$_gate_dir" "$_gate_mod" >/dev/null 2>&1); then
       _err "Native-module gate failed for ${_gate_mod} in ${_gate_dir} (with ${_gate_node})."
-      _err "Run 'cd ${_gate_dir} && npm rebuild ${_gate_mod}' and re-run the updater. Old build untouched."
+      if [[ "$_gate_dir" == "$APP_DIR" ]]; then
+        _err "The live release remains untouched. Do NOT run npm rebuild against the live tree; the isolated candidate is the only repair vehicle."
+      else
+        _err "The candidate is discarded and the live release remains untouched; the candidate must install a loadable native package."
+      fi
       return 1
     fi
     _ok "  Native module ${_gate_mod} loads and opens SQLite."
@@ -996,7 +1000,7 @@ if ! _ccbi_native_gate "$APP_DIR"; then
   _warn "  Pre-flight native gate failed: the currently installed runtime is degraded."
   _warn "  The live runtime will NOT be modified in place; the isolated candidate is the only repair vehicle."
 fi
-_ok "Phase 1 pre-flight passed (candidate preparation may proceed)."
+_ok "Phase 1 pre-flight completed; live native gate status recorded, candidate preparation may proceed."
 
 # ── 1e. Stage a complete candidate release ──────────────────────────────────
 # Candidate preparation must never mutate the live release. The candidate gets

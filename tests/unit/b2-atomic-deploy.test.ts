@@ -1390,6 +1390,14 @@ exit 0
       `The no-in-place-repair diagnostic must appear in stderr.\nstderr:\n${stderr}`,
     );
     assert.ok(
+      stderr.includes('Do NOT run npm rebuild against the live tree'),
+      `The gate must never advise an in-place live-tree repair.\nstderr:\n${stderr}`,
+    );
+    assert.ok(
+      !stderr.includes('Phase 1 pre-flight passed'),
+      `A failed live native gate must not be reported as pre-flight passed.\nstderr:\n${stderr}`,
+    );
+    assert.ok(
       !readFileSync(npmCallsLog, 'utf8').includes('rebuild'),
       `npm rebuild must not be invoked. npm calls:\n${readFileSync(npmCallsLog, 'utf8')}`,
     );
