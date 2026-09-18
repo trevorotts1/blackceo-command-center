@@ -44,6 +44,7 @@
  */
 
 import fs from 'fs';
+import { execFileSync } from 'child_process';
 import path from 'path';
 
 const LOCK_FILENAME = 'mission-control.lock';
@@ -79,6 +80,43 @@ function isTestProcess(): boolean {
  * On Windows: not supported (CC does not run on Windows in production).
  * Returns false so the stale-detection path degrades to a warning.
  */
+/**
+ * Best-effort command line of a live process, for the pid-reuse check below.
+ * Linux: /proc/<pid>/cmdline (NUL-separated). macOS: `ps -o command= -p`.
+ * Returns null when it cannot be read — the caller then treats the holder as
+ * a real Command Center (conservative: never steal on missing evidence).
+ */
+function holderCommand(pid: number): string | null {
+  try {
+    if (process.platform === 'linux') {
+      const raw = fs.readFileSync(`/proc/${pid}/cmdline`);
+      const cmd = raw.toString('utf8').replace(/\0/g, ' ').trim();
+      return cmd || null;
+    }
+    const out = execFileSync('ps', ['-o', 'command=', '-p', String(pid)], { encoding: 'utf8', timeout: 3000 });
+    const cmd = out.trim();
+    return cmd || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A live pid is only a real lock holder if it is running a Command Center (a
+ * node/next process). PIDs are reused: measured 2026-09-18 on a client box, the
+ * lock named pid 326, which had become the pm2 God Daemon after a container
+ * restart, so `kill(pid, 0)` said "alive" and the app crash-looped for eleven
+ * days behind a lock nobody held. Unknown command line => assume it IS a
+ * Command Center (never steal on missing evidence).
+ */
+function holderLooksLikeCommandCenter(pid: number): { verdict: boolean; command: string | null } {
+  const command = holderCommand(pid);
+  if (command === null) return { verdict: true, command };
+  const c = command.toLowerCase();
+  const looksLikeCc = c.includes('next') || c.includes('node') || c.includes('cc-start') || c.includes('mission-control') || c.includes('command-center');
+  return { verdict: looksLikeCc, command };
+}
+
 function isPidAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -227,11 +265,16 @@ export function claimStartupLock(dbDir: string): boolean {
     return claimStartupLock(dbDir); // retry once
   }
 
-  if (!isPidAlive(holderPid)) {
-    // Stale lock: holder PID is dead. Remove the stale file and retry.
+  const holderAlive = isPidAlive(holderPid);
+  const identity = holderAlive ? holderLooksLikeCommandCenter(holderPid) : { verdict: false, command: null };
+  if (!holderAlive || !identity.verdict) {
+    // Stale lock: holder PID is dead, OR alive but not a Command Center (pid reuse).
     console.warn(
-      `[startup-lock] stale lock detected: pid ${holderPid} is not alive. ` +
-        `Removing stale lock file and retrying.`,
+      holderAlive
+        ? `[startup-lock] stale lock detected: pid ${holderPid} is alive but is not a Command Center ` +
+          `(command: ${JSON.stringify(identity.command)}) — the pid was reused. Removing stale lock file and retrying.`
+        : `[startup-lock] stale lock detected: pid ${holderPid} is not alive. ` +
+          `Removing stale lock file and retrying.`,
     );
     try {
       fs.unlinkSync(filePath);

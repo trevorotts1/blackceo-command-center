@@ -1,3 +1,24 @@
+import path from 'node:path';
+
+/**
+ * distDir MUST be relative to the project root: Next resolves it with
+ * path.join(<project dir>, distDir), which concatenates an absolute second
+ * argument instead of replacing it. An absolute NEXT_DIST_DIR (v7.6.2 pinned
+ * "<CC_DIR>/.next" in cc-start.sh) therefore made `next start` look for
+ * <dir>/<dir>/.next and refuse with "Could not find a production build" on every
+ * restart (operator Mac, 2026-09-18, 71 pm2 restarts). Normalize defensively:
+ * an absolute value inside the project becomes its relative form; anything
+ * outside the project (or unparseable) falls back to '.next'.
+ */
+function resolveDistDir() {
+  const raw = process.env.NEXT_DIST_DIR;
+  if (!raw) return '.next';
+  if (!path.isAbsolute(raw)) return raw;
+  const rel = path.relative(process.cwd(), raw);
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return '.next';
+  return rel;
+}
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   // Loopback browser fixtures use this host. Next 16 carries React's dev debug
@@ -11,7 +32,7 @@ const nextConfig = {
   // replacing) -- so this value must be a path RELATIVE to the project root,
   // never absolute. scripts/atomic-deploy.sh passes a relative temp-dir name
   // for exactly this reason. Falls back to the normal '.next' when unset.
-  distDir: process.env.NEXT_DIST_DIR || '.next',
+  distDir: resolveDistDir(),
   // Instrumentation is stable; keep native SQLite outside the server bundle.
   serverExternalPackages: ['better-sqlite3'],
   webpack: (config, { nextRuntime }) => {
