@@ -1,3 +1,12 @@
+## [v7.6.23] — 2026-09-18 — The release-tag guard's bounded wait now decides the verdict it waits for
+
+### Fixed
+- **`version-consistency.yml` re-tests the tag after its bounded wait.** The guard waits up to 300 seconds for `auto-tag-on-merge.yml` to publish the release tag, because both workflows fire on the same push and race. The wait loop `break`s the moment it sees the tag, but a `break` leaves the `for` loop, not the enclosing `if` block, and nothing re-tested the condition afterwards. Control fell straight into the failure path even on the runs where the loop had just found the tag and said so. Measured on the v7.6.21 release push (merge `0b5cbdabc`): a single run logged `waiting for auto-tag-on-merge.yml`, then `Tag v7.6.21 appeared after ~5s`, then `NO TAG for v7.6.21`, then exit 1, in that order. So the wait failed every release it raced, which is every release it was added to rescue, and main went red on correct releases while the log itself said the tag was there. The guard now asks git again rather than trusting a flag set inside the loop, so the loop and the verdict cannot drift apart, and a tag landing between the loop's last poll and the check is still seen. A genuinely absent tag still fails, a lightweight tag still fails, and a tag on the wrong commit still fails, all unchanged.
+
+### Tests
+- `tests/unit/version-consistency-tag-wait.test.sh` (new): extracts the guard's own step body out of the workflow and **executes** it against a fake git that withholds the tag for a chosen number of polls, so the race is reproduced rather than described. A tag already present, or landing on the first, seventh or sixtieth poll, passes; a tag that never lands still fails; a pull request whose version is not newer than main's still fails; a pull request preparing a newer version is still allowed. It also asserts the log can never say the tag appeared and that there is no tag in the same run, which was the live failure's signature. It ends with a mutation proof: the re-test is stripped back out and the raced cases must all fail again, so the test cannot pass vacuously. Verified to fail on the unpatched workflow (5 of 13 assertions red) and pass on the fixed one (13 of 13).
+- The test runs inside `version-consistency.yml` itself, immediately before the guard it covers, so the guard proves itself on every push and pull request rather than relying on a suite nobody runs on the release path.
+
 ## [v7.6.22] — 2026-09-18 — Eight released versions get the changelog entry they shipped without
 
 ### Fixed
