@@ -1,4 +1,4 @@
-## [v7.6.13] — 2026-09-18 — The interview link is valid until the interview is complete, not for 24 hours
+## [v7.6.18] — 2026-09-18 — The interview link is valid until the interview is complete, not for 24 hours
 
 ### Changed
 - **An interview enrollment link no longer expires on a clock.** It was minted with a 24-hour `exp` (900 seconds before v7.6.x) and refused the moment that passed, so a client who opened their Telegram link the next morning was turned away from an interview nobody had finished, and someone had to mint and send another one. Validity is now the interview itself: `verifyGrant` in `src/lib/auth/tenant-context.ts` enforces `exp` for browser SESSION grants only, and `POST /api/auth/interview-session` refuses an enrollment ticket for exactly one reason — `src/lib/interview/enrollment-window.ts` reads the canonical build state and finds `interviewComplete`, or a recorded `buildCompletedAt`, for this grant's company. Everything else about a ticket is checked exactly as before: HMAC signature, purpose, host, tenant, company, installation, subject, nonce, and the one-use redemption ledger.
