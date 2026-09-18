@@ -1,3 +1,8 @@
+## [v7.6.11] — 2026-09-18 — A branding name mismatch is degraded, not down
+
+### Fixed
+- **`company_branding` no longer gates on a config-name vs DB-name mismatch.** When `config/company-config.json` and the `companies` row spell the client's name differently, the app serves and the board moves; the only effect is which spelling appears. The check returned `pass: false` for it, which the deploy's health check read as definitive NOT GREEN. Measured 2026-09-18 on a client VPS (Dr. Tola): `atomic-deploy.sh` rolled the artifact back to a pre-inventory build, `cc-start.sh` refused that build for lacking a manifest, and the Command Center was down over two spellings of the practice name. The mismatch is now `pass: true, degraded: true` with a `DEGRADED` detail so it stays visible; placeholder and unbranded cases still fail. Test added in `tests/unit/deep-health.test.ts`.
+
 ## [v7.6.10] — 2026-09-18 — A box with no public URL is not "unknown", and deploy artefacts are ignored
 
 ### Fixed

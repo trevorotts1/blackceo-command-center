@@ -537,15 +537,22 @@ export function checkCompanyBranding(): CompanyBrandingResult {
     };
   }
 
-  // Consistency check: if both exist, they must match
+  // Consistency check: if both exist, they should match. A mismatch is a
+  // BRANDING inconsistency, not a broken install: the app serves, the board
+  // moves, the client sees one of two names. It is reported (degraded: true)
+  // but it must not gate. Measured 2026-09-18 on a client VPS: the deploy's
+  // health check returned exit 1 on this row alone, atomic-deploy rolled the
+  // artifact back to a pre-inventory build, and the new cc-start refused that
+  // build — the box was DOWN because two spellings of the practice name differed.
   if (configName && dbName && configName.toLowerCase() !== dbName.toLowerCase()) {
     return {
-      pass: false,
+      pass: true,
       indeterminate: false,
+      degraded: true,
       config_exists: true,
       config_name: configName,
       db_name: dbName,
-      detail: `company_branding: config name ("${configName}") does not match DB name ("${dbName}") — inconsistent branding`,
+      detail: `company_branding: DEGRADED — config name ("${configName}") does not match DB name ("${dbName}"); branding inconsistent, app serving (advisory, non-gating)`,
     };
   }
 

@@ -550,6 +550,35 @@ describe('company_branding — config file rules', () => {
   });
 });
 
+describe('company_branding — config/DB name mismatch is advisory (non-gating)', () => {
+  // Measured 2026-09-18 on a client VPS: this row alone returned exit 1 to the
+  // deploy's health check, atomic-deploy rolled back to a pre-inventory build,
+  // and the new cc-start refused it — the box was DOWN over two spellings of
+  // the practice name. A mismatch is reported as DEGRADED and never gates.
+  it('config name != DB name → pass=true, degraded=true, detail says DEGRADED', async () => {
+    writeCompanyConfig(tmpDir, { companyName: 'Dr. Tola Wellness Practice' });
+    vi.doMock('@/lib/db', () => ({
+      getDb: () => ({
+        prepare: (sql: string) => ({
+          get: () => {
+            if (sql.includes('sqlite_master')) return { name: 'companies' };
+            if (sql.includes('SELECT name FROM companies')) return { name: "Dr. Tola T'Sarumi MD" };
+            return undefined;
+          },
+          all: () => [],
+        }),
+      }),
+      getMigrationStatus: () => ({ applied: ['001'], pending: [] }),
+      getDbPath: () => '/tmp/test.db',
+    }));
+    const { checkCompanyBranding } = await loadChecks();
+    const result = checkCompanyBranding() as { pass: boolean; degraded?: boolean; detail: string };
+    expect(result.pass).toBe(true);
+    expect(result.degraded).toBe(true);
+    expect(result.detail).toMatch(/DEGRADED/);
+  });
+});
+
 describe('company_branding — DB branding checks', () => {
   // Row 4 variant: DB company row = "Command Center" → FAIL
   // FALSE-GREEN CONFIRMED on feat/b1-cc-health-check (old branch, line 1125):
