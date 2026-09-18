@@ -1696,6 +1696,15 @@ fi
 ###############################################################################
 _banner "Phase 5 — Verdict"
 
+# PHASE-5 CWD (2026-09-18): Phase 2 moved this shell into the private candidate
+# directory (cd "$RELEASE_DIR") and Phase 5 removes that directory. Every hook
+# that runs afterwards from a deleted cwd breaks in ways that look unrelated:
+# `pm2 save` died with "ENOENT: process.cwd failed" on EVERY box (so no box's
+# process list was persisted by a deploy), the pm2-logrotate install reported
+# "offline npm" because npm could not start, and install-watchdog-cc.sh printed
+# getcwd errors. Return to the live app directory before any verdict-time hook.
+cd "$APP_DIR" || _warn "  Could not return to ${APP_DIR} before Phase 5 hooks; pm2 save / log rotation may fail."
+
 if [[ $HEALTH_EXIT -eq 0 ]]; then
   _ok "Deploy is GREEN on the complete candidate release."
   if [[ -n "${LIVE_NODE_MODULES_BACKUP:-}" && -d "$LIVE_NODE_MODULES_BACKUP" ]]; then
