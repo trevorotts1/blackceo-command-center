@@ -26,7 +26,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-CC_START="$REPO_ROOT/scripts/cc-start.sh"
+CC_START="${CC_LAUNCHER_MATRIX_SCRIPT:-$REPO_ROOT/scripts/cc-start.sh}"
 INV_LIB="$REPO_ROOT/scripts/lib/build-inventory.sh"
 
 if [[ ! -f "$CC_START" || ! -f "$INV_LIB" ]]; then
@@ -169,19 +169,36 @@ record_case() {
   local receipt_file="$RECEIPTS_DIR/$case_name.json"
   local timestamp
   timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  "$REAL_NODE" -e '
+  if ! "$REAL_NODE" -e '
     const fs = require("node:fs");
+    const path = require("node:path");
     const [out, caseName, exitCode, launched, receiptPath, timestamp] = process.argv.slice(1);
+    let refusalReceipt = null;
+    let refusalReceiptFile = null;
+    if (receiptPath !== "null") {
+      if (!fs.existsSync(receiptPath)) {
+        process.stderr.write(`[launcher-matrix] FATAL: refusal receipt missing before durable copy: ${receiptPath}\n`);
+        process.exit(1);
+      }
+      refusalReceiptFile = path.join(path.dirname(out), `${caseName}.refusal.json`);
+      fs.copyFileSync(receiptPath, refusalReceiptFile);
+      refusalReceipt = JSON.parse(fs.readFileSync(refusalReceiptFile, "utf8"));
+    }
     fs.writeFileSync(out, JSON.stringify({
-      schema: "cc-start-launcher-matrix/1",
+      schema: "cc-start-launcher-matrix/2",
       case: caseName,
       exit_code: Number(exitCode),
       launched: launched === "true",
       receipt_path: receiptPath === "null" ? null : receiptPath,
       receipt_exists: receiptPath !== "null" && fs.existsSync(receiptPath),
+      refusal_receipt_file: refusalReceiptFile,
+      refusal_receipt: refusalReceipt,
       timestamp
     }, null, 2) + "\n");
-  ' "$receipt_file" "$case_name" "$exit_code" "$launched" "$receipt_path" "$timestamp"
+  ' "$receipt_file" "$case_name" "$exit_code" "$launched" "$receipt_path" "$timestamp"; then
+    printf '[launcher-matrix] FATAL: failed to persist durable case evidence: %s\n' "$receipt_file" >&2
+    exit 1
+  fi
   if [[ ! -f "$receipt_file" ]]; then
     printf '[launcher-matrix] FATAL: failed to write durable receipt: %s\n' "$receipt_file" >&2
     exit 1

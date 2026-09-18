@@ -403,20 +403,37 @@ function runDeploy(
  */
 function useCandidateDependencyMarkerNpmStub(
   fixture: Fixture,
-  opts: { buildExitCode?: number; observeLiveDependenciesTo?: string } = {},
+  opts: {
+    buildExitCode?: number;
+    ciExitCode?: number;
+    observeLiveDependenciesTo?: string;
+    npmCallsLog?: string;
+  } = {},
 ): void {
   const buildExitCode = opts.buildExitCode ?? 0;
+  const ciExitCode = opts.ciExitCode ?? 0;
+  const observeLiveDependenciesTo = opts.observeLiveDependenciesTo ?? '';
+  const npmCallsLog = opts.npmCallsLog ?? '';
   const npmStub = `#!/usr/bin/env bash
+if [[ -n "${npmCallsLog}" ]]; then
+  printf '%s\n' "$*" >> "${npmCallsLog}"
+fi
 if [[ "$1" == "ci" ]]; then
+  if [[ -n "${observeLiveDependenciesTo}" ]]; then
+    cat "${fixture.appDir}/node_modules/dependency-marker" > "${observeLiveDependenciesTo}"
+  fi
   mkdir -p node_modules/better-sqlite3
-  printf '%s\\n' '{"name":"better-sqlite3","version":"0.0.0","main":"index.js"}' > node_modules/better-sqlite3/package.json
-  printf '%s\\n' 'module.exports = class FakeDatabase { prepare() { return { get: () => ({ answer: 42 }) }; } close() {} };' > node_modules/better-sqlite3/index.js
-  printf '%s\\n' 'candidate' > node_modules/dependency-marker
+  printf '%s\n' '{"name":"better-sqlite3","version":"0.0.0","main":"index.js"}' > node_modules/better-sqlite3/package.json
+  printf '%s\n' 'module.exports = class FakeDatabase { prepare() { return { get: () => ({ answer: 42 }) }; } close() {} };' > node_modules/better-sqlite3/index.js
+  printf '%s\n' 'candidate' > node_modules/dependency-marker
+  if [[ "${ciExitCode}" -ne 0 ]]; then
+    exit ${ciExitCode}
+  fi
   exit 0
 fi
 if [[ "$1" == "run" && "$2" == "build" ]]; then
-  if [[ -n "\${CC_TEST_OBSERVE_LIVE_DEPS:-}" ]]; then
-    cat "\${CC_TEST_APP_DIR}/node_modules/dependency-marker" > "\${CC_TEST_OBSERVE_LIVE_DEPS}"
+  if [[ -n "${observeLiveDependenciesTo}" ]]; then
+    cat "${fixture.appDir}/node_modules/dependency-marker" > "${observeLiveDependenciesTo}"
   fi
   if [[ "${buildExitCode}" -eq 0 && -n "\${NEXT_DIST_DIR:-}" ]]; then
     mkdir -p "$NEXT_DIST_DIR"
@@ -1338,6 +1355,68 @@ esac
       calls.includes('start npm --name fallback-app --update-env -- start'),
       `--update-env belongs to PM2, before the -- separator. Calls: ${JSON.stringify(calls)}`,
     );
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test('RR14: broken live native module plus failed candidate preparation leaves the live release untouched', async () => {
+  const fixture = buildFixture({ buildExitCode: 0, healthExitCode: 0, liveNextExists: true });
+  const brokenIndex = path.join(fixture.appDir, 'node_modules', 'better-sqlite3', 'index.js');
+  const brokenModuleContents =
+    'module.exports = class BrokenNative { constructor() { throw new Error("fixture native failure"); } };\n';
+  const liveSource = path.join(fixture.appDir, 'src', 'live-marker.ts');
+  const liveBuildId = path.join(fixture.appDir, '.next', 'BUILD_ID');
+  const liveDependencyMarker = dependencyMarkerPath(fixture.appDir);
+  const observedLiveDependencies = path.join(fixture.baseDir, 'ci-time-live-node_modules.txt');
+  const npmCallsLog = path.join(fixture.baseDir, 'failed-candidate-npm-calls.log');
+  try {
+    writeFileSync(brokenIndex, brokenModuleContents);
+    writeFileSync(liveSource, 'export const liveSource = "before";\n');
+    writeFileSync(liveBuildId, 'old-build-id');
+    writeFileSync(liveDependencyMarker, 'live\n');
+    useCandidateDependencyMarkerNpmStub(fixture, {
+      ciExitCode: 1,
+      observeLiveDependenciesTo: observedLiveDependencies,
+      npmCallsLog,
+    });
+    const { exitCode, stderr } = runDeploy(fixture, {
+      CC_TEST_APP_DIR: fixture.appDir,
+      CC_TEST_OBSERVE_LIVE_DEPS: observedLiveDependencies,
+    });
+    assert.strictEqual(exitCode, 2,
+      `A failed candidate with a broken live native module must abort before promotion. Exit was ${exitCode}.\nstderr:\n${stderr}`);
+    assert.ok(
+      stderr.includes('the currently installed runtime is degraded'),
+      `The degraded-live-runtime diagnostic must appear in stderr.\nstderr:\n${stderr}`,
+    );
+    assert.ok(
+      stderr.includes('The live runtime will NOT be modified in place'),
+      `The no-in-place-repair diagnostic must appear in stderr.\nstderr:\n${stderr}`,
+    );
+    assert.ok(
+      stderr.includes('Dependency staging failed (npm ci). Live source, dependencies and artifact untouched.'),
+      `A failed candidate preparation must emit the exact live-release-untouched receipt.\nstderr:\n${stderr}`,
+    );
+    assert.strictEqual(
+      readFileSync(observedLiveDependencies, 'utf8').trim(),
+      'live',
+      'The live dependency marker must still be the live value while candidate preparation fails.',
+    );
+    assert.strictEqual(readFileSync(brokenIndex, 'utf8'), brokenModuleContents,
+      'The live broken native module must remain byte-for-byte unchanged after failed candidate preparation.');
+    assert.strictEqual(readFileSync(liveSource, 'utf8'), 'export const liveSource = "before";\n',
+      'The live source marker must remain unchanged after failed candidate preparation.');
+    assert.strictEqual(readFileSync(liveBuildId, 'utf8'), 'old-build-id',
+      'The live BUILD_ID must remain unchanged after failed candidate preparation.');
+    assert.strictEqual(readFileSync(liveDependencyMarker, 'utf8').trim(), 'live',
+      'The live dependency marker must remain unchanged after failed candidate preparation.');
+    const npmCalls = existsSync(npmCallsLog) ? readFileSync(npmCallsLog, 'utf8') : '';
+    assert.ok(
+      npmCalls.includes('ci --no-audit --no-fund --prefer-offline --ignore-scripts=false'),
+      `The candidate npm ci call must be observed so the no-rebuild assertion is meaningful. npm calls:\n${npmCalls}`,
+    );
+    assert.ok(!npmCalls.includes('rebuild'), `No live-tree npm rebuild may occur. npm calls:\n${npmCalls}`);
   } finally {
     fixture.cleanup();
   }
