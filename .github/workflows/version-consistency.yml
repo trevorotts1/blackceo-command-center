@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
   check-version-drift:
@@ -72,6 +73,16 @@ jobs:
       - name: Self-test the tag guard's bounded wait (+ mutation proof)
         shell: bash
         run: bash tests/unit/version-consistency-tag-wait.test.sh
+
+      # A dropped push event is not hypothetical here: the v7.6.22 merge
+      # (3737ed4) produced zero workflow runs while its predecessor produced
+      # nine, and with no workflow_dispatch anywhere in .github/workflows there
+      # was no way to run the gates on main without inventing a commit. That
+      # release shipped unverified. This keeps every main-gating workflow
+      # manually runnable.
+      - name: Every workflow gating main stays manually runnable (+ mutation proof)
+        shell: bash
+        run: bash tests/unit/workflows-manually-runnable.test.sh
 
       - name: Verify annotated tag exists for current version
         shell: bash
