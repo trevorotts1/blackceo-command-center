@@ -642,9 +642,19 @@ if [[ "$ROOT_CODE" =~ ^3 ]] && is_interview_gate_redirect "$ROOT_LOC" "$BASE_URL
   log "outside-in: / 302→${PROBE_PATH} (interview lock); probing gated page for asset refs"
 fi
 ROOT_HTML=$(curl -s --max-time 10 --max-redirs 0 "${BASE_URL}${PROBE_PATH}" 2>/dev/null || echo "")
+PROBE_CODE=$(curl -s --max-time 10 --max-redirs 0 -o /dev/null -w '%{http_code}' "${BASE_URL}${PROBE_PATH}" 2>/dev/null || echo "000")
 ASSET_REF=$(printf '%s' "$ROOT_HTML" | grep -oE '/_next/static/[^"'"'"' >]+\.(js|css)' | head -1 || echo "")
 ASSET_PASS="skip"; ASSET_INDET=false
-if [[ -n "$ASSET_REF" ]]; then
+# TENANT WALL (2026-09-18): the app itself refusing its own loopback probe with
+# 403 {"error":"unregistered_hostname"} is not "verified nothing" — it is a
+# definite, deterministic fault (no tenant registry / public URL configured for
+# this installation) that every browser hits too. UNKNOWN here retried 36 times
+# and left the wall live; RED makes the deploy roll back to the last build that
+# served the client, and the watchdog can act on it.
+if [[ "$PROBE_CODE" == "403" ]] && printf '%s' "$ROOT_HTML" | grep -q 'unregistered_hostname'; then
+  log "FAIL: ${PROBE_PATH} → HTTP 403 unregistered_hostname — the tenant middleware has no registration for this host (row 33: TENANT WALL). Remedy: set CC_PUBLIC_URL (implicit self registration) or MC_TENANT_REGISTRY_JSON in .env.local, then restart."
+  ASSET_PASS="fail"
+elif [[ -n "$ASSET_REF" ]]; then
   ASSET_CODE=$(curl -s --max-time 10 --max-redirs 0 -w '%{http_code}' -o /dev/null "${BASE_URL}${ASSET_REF}" 2>/dev/null || echo "000")
   ASSET_CT=$(curl -s --max-time 10 --max-redirs 0 -I "${BASE_URL}${ASSET_REF}" 2>/dev/null | grep -i 'content-type:' | head -1 || echo "")
   if [[ "$ASSET_CODE" == "200" ]] && printf '%s' "$ASSET_CT" | grep -qiE 'javascript|css|text'; then

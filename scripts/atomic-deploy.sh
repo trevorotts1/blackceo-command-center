@@ -758,6 +758,52 @@ else
   _ok "  Disk gate passed: ${FREE_GB_BEFORE} GB free"
 fi
 
+# ── 1b'. Pin the runtime DATABASE_PATH for the restart ─────────────────────
+# `pm2 restart --update-env` (Phase 4) copies THIS shell's environment into the
+# app, but a variable this shell does not set keeps whatever value was baked
+# into the pm2 process at its very first launch. On 2026-09-18 a VPS box kept
+# DATABASE_PATH=/data/projects/data/mission-control.db (a directory that never
+# existed) through every restart for weeks: the real 100 MB DB sat at
+# <APP_DIR>/mission-control.db, the deploy backed THAT file up in 1b, then
+# restarted the app with the stale path, health failed on `database_path`,
+# the rollback failed the same way, and cc-start refused the old build.
+# Resolve the runtime path ONCE here, the same way ecosystem.config.cjs does
+# (--db-path, then a shell DATABASE_PATH whose directory exists, then
+# DATABASE_PATH from .env.local, then the non-empty DB found in 1b) and export
+# it so the restart, the health check and the app all agree on one file.
+_configured_db_path() {
+  local from_env_local
+  if [[ -n "$DB_PATH_OVERRIDE" ]]; then
+    printf '%s\n' "$DB_PATH_OVERRIDE"; return 0
+  fi
+  if [[ -n "${DATABASE_PATH:-}" ]]; then
+    if [[ -d "$(dirname "$DATABASE_PATH")" ]]; then
+      printf '%s\n' "$DATABASE_PATH"; return 0
+    fi
+    _warn "  Shell DATABASE_PATH=${DATABASE_PATH} points into a directory that does not exist — ignoring it for the restart."
+  fi
+  if [[ -f "${APP_DIR}/.env.local" ]]; then
+    from_env_local="$(sed -n -E 's/^[[:space:]]*(export[[:space:]]+)?DATABASE_PATH[[:space:]]*=[[:space:]]*//p' "${APP_DIR}/.env.local" | head -n 1 | sed -E "s/^[\"']//; s/[\"'][[:space:]]*$//")"
+    if [[ -n "$from_env_local" ]]; then
+      case "$from_env_local" in
+        /*) printf '%s\n' "$from_env_local" ;;
+        *)  printf '%s\n' "${APP_DIR}/${from_env_local}" ;;
+      esac
+      return 0
+    fi
+  fi
+  return 1
+}
+_resolve_runtime_db_path() {
+  local configured
+  configured="$(_configured_db_path || true)"
+  if [[ -n "$configured" ]]; then printf '%s\n' "$configured"; return 0; fi
+  if [[ -n "$DB_FILE" && -s "$DB_FILE" ]]; then
+    printf '%s\n' "$DB_FILE"; return 0
+  fi
+  return 1
+}
+
 # ── 1b. DB backup ─────────────────────────────────────────────────────────────
 _log "[1b] Database backup"
 DB_FILE=""
@@ -770,7 +816,12 @@ else
   #   1. LIVEDB (the real ~135MB WAL-mode DB) is tried first;
   #   2. every candidate additionally requires a NON-ZERO size (-s), so a
   #      decoy can never satisfy the match even if it wins the ordering.
+  # 2026-09-18: the CONFIGURED path comes first. Contabo boxes keep the DB at
+  # the path named in .env.local (e.g. <root>/workspace/mission-control.db or
+  # <root>/data/openclaw.db); none of the fixed heuristics below matched, so
+  # those boxes deployed with NO pre-deploy backup for months.
   for _candidate in \
+    "$(_configured_db_path || true)" \
     "${HOME}/command-center/data/mission-control.db" \
     "/data/mission-control/mission-control.db" \
     "/data/projects/command-center/mission-control.db" \
@@ -870,45 +921,7 @@ PYRESTORE
   oc_backup_prune "$(dirname "$DB_BACKUP")" "$(basename "$DB_FILE").backup.autodeploy." "$DB_BACKUP"
 fi
 
-# ── 1b'. Pin the runtime DATABASE_PATH for the restart ─────────────────────
-# `pm2 restart --update-env` (Phase 4) copies THIS shell's environment into the
-# app, but a variable this shell does not set keeps whatever value was baked
-# into the pm2 process at its very first launch. On 2026-09-18 a VPS box kept
-# DATABASE_PATH=/data/projects/data/mission-control.db (a directory that never
-# existed) through every restart for weeks: the real 100 MB DB sat at
-# <APP_DIR>/mission-control.db, the deploy backed THAT file up in 1b, then
-# restarted the app with the stale path, health failed on `database_path`,
-# the rollback failed the same way, and cc-start refused the old build.
-# Resolve the runtime path ONCE here, the same way ecosystem.config.cjs does
-# (--db-path, then a shell DATABASE_PATH whose directory exists, then
-# DATABASE_PATH from .env.local, then the non-empty DB found in 1b) and export
-# it so the restart, the health check and the app all agree on one file.
-_resolve_runtime_db_path() {
-  local from_env_local
-  if [[ -n "$DB_PATH_OVERRIDE" ]]; then
-    printf '%s\n' "$DB_PATH_OVERRIDE"; return 0
-  fi
-  if [[ -n "${DATABASE_PATH:-}" ]]; then
-    if [[ -d "$(dirname "$DATABASE_PATH")" ]]; then
-      printf '%s\n' "$DATABASE_PATH"; return 0
-    fi
-    _warn "  Shell DATABASE_PATH=${DATABASE_PATH} points into a directory that does not exist — ignoring it for the restart."
-  fi
-  if [[ -f "${APP_DIR}/.env.local" ]]; then
-    from_env_local="$(sed -n -E 's/^[[:space:]]*(export[[:space:]]+)?DATABASE_PATH[[:space:]]*=[[:space:]]*//p' "${APP_DIR}/.env.local" | head -n 1 | sed -E "s/^[\"']//; s/[\"'][[:space:]]*$//")"
-    if [[ -n "$from_env_local" ]]; then
-      case "$from_env_local" in
-        /*) printf '%s\n' "$from_env_local" ;;
-        *)  printf '%s\n' "${APP_DIR}/${from_env_local}" ;;
-      esac
-      return 0
-    fi
-  fi
-  if [[ -n "$DB_FILE" && -s "$DB_FILE" ]]; then
-    printf '%s\n' "$DB_FILE"; return 0
-  fi
-  return 1
-}
+# ── 1b''. Export the pinned runtime DATABASE_PATH (see the resolver above 1b) ──
 RUNTIME_DB_PATH="$(_resolve_runtime_db_path || true)"
 if [[ -n "$RUNTIME_DB_PATH" ]]; then
   export DATABASE_PATH="$RUNTIME_DB_PATH"
@@ -1697,9 +1710,9 @@ if [[ $HEALTH_EXIT -eq 0 ]]; then
     || true
 
   _log "[5] Persisting pm2 process list (pm2 save) so CC + cloudflared survive OOM/reboot ..."
-  pm2 save >/dev/null 2>&1 \
+  _pm2_save_out="$(pm2 save 2>&1)" \
     && _ok "  pm2 process list saved — CC app + cloudflared connector will auto-resurrect after restart/OOM." \
-    || _warn "  pm2 save FAILED — process list NOT persisted. Run 'pm2 save' manually so this box survives a reboot."
+    || _warn "  pm2 save FAILED (rc=$?; pm2=$(command -v pm2 2>/dev/null || echo '?'); PM2_HOME=${PM2_HOME:-<unset>}) — process list NOT persisted. Output: $(printf '%s' "$_pm2_save_out" | tr '\n' ' ' | cut -c1-300). Run 'pm2 save' manually so this box survives a reboot."
 
   # ── The box keeps checking and repairing itself after this deploy ──────────
   # Both steps are BEST-EFFORT by design: neither may change the exit code of
