@@ -1,3 +1,9 @@
+## [v7.6.4] — 2026-09-18 — Dispatched agent runs get their full time budget (ported from a box hot-fix)
+
+### Fixed
+- **`chat.send` no longer carries `timeoutMs: 30000`, so a dispatched run is no longer killed at two to three minutes.** The gateway reads `timeoutMs` on `chat.send` as the WHOLE agent-run budget, not as an acknowledgement bound: it feeds `resolveAgentTimeoutMs({ overrideMs })` into `resolveChatRunExpiresAtMs`, whose hard floor is 120 s, so 30 s + 60 s grace = 90 s fell under the floor and every dispatched run was killed at roughly 120–180 s. Omitting the field falls back to `agents.defaults.timeoutSeconds` (3600 s), the intended budget; the RPC envelope keeps the gateway's own 30 s default. Both dispatch sites (`task-dispatcher.ts` and `POST /api/tasks/[id]/dispatch`) are changed. This is the `[RUN-BUDGET-FIX 2026-09-15]` that was applied by hand on one client box (openclaw-c54p) and never reached main; found during the 2026-09-17 fleet roll, ported verbatim so that box can fast-forward without losing it.
+- **The lease reaper no longer reaps `accepted` or `running` executions.** `expireStaleLeases` reaped every state whose lease had lapsed, which with the budget bug above turned a long, healthy run into a reaped one. It now reaps only `reserved` and `sending` (the states that can be silently abandoned before a worker owns them); running work is supervised by `stuck-in-progress-sweep` and the hard ceiling instead.
+
 ## [v7.6.3] — 2026-09-18 — A client's brand colours no longer block Command Center updates
 
 ### Fixed
