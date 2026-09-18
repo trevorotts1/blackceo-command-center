@@ -133,6 +133,11 @@ _ccbi_sha256_file() {
 # would die on its next restart with verdict=MISMATCH and no code change at all.
 # A client changing their logo must never brick their Command Center. Keep
 # runtime data OUT of this digest; it attests compiled bytes vs compiled source.
+# public/logo-config.json is EXCLUDED too (2026-09-18): it is per-box runtime config
+# (update.sh PER_BOX_CONFIG_FILES) that src/app/api/logo/route.ts creates at module
+# load via ensureRuntimeConfigFile — and `next build` evaluates that module, so the
+# build itself wrote the file into the release candidate and every deploy on a box
+# without it failed FROZEN-SOURCE (measured on the operator Mac, v7.6.5 deploy).
 # public/brand.css is EXCLUDED from the inventory (2026-09-18): it is a per-box
 # GENERATED asset (generate-brand-css.py writes the client's colours into it, and
 # cc-start.sh seeds the shipped default when it is absent). A generated file in the
@@ -166,7 +171,7 @@ _ccbi_inventory_relpaths() {
       # stream which still hashes deterministically.
       # config/ is intentionally NOT enumerated — see _CCBI_TOPLEVEL_INPUTS.
       { find src -type f -print0 2>/dev/null || true; } \
-        && { find public -type f ! -name 'brand.css' -print0 2>/dev/null || true; } || true
+        && { find public -type f ! -name 'brand.css' ! -name 'logo-config.json' -print0 2>/dev/null || true; } || true
     } | LC_ALL=C sort -z -u | tr '\0' '\n'
   )
 }
