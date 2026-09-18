@@ -15,6 +15,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { existsSync } from 'node:fs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const fixture = path.join(here, 'cc-start-launcher-matrix.fixture.sh');
@@ -30,5 +31,18 @@ test('cc-start real-launcher matrix holds all seven build-state contracts', () =
   assert.match(output, /ALL PASS/);
   const durable = output.match(/durable evidence directory: (\S+)/);
   assert.ok(durable, `durable evidence directory must be printed:\n${output}`);
-  assert.match(output, /summary receipt: \S+summary\.json/);
+  const evidenceDir = durable[1];
+  assert.ok(existsSync(`${evidenceDir}/summary.json`), `summary receipt must exist after cleanup: ${evidenceDir}/summary.json`);
+  const expectedCases = [
+    'valid-manifest',
+    'missing-manifest',
+    'corrupt-manifest',
+    'mismatched-manifest-content',
+    'verifier-unavailable-fail-closed',
+    'legitimate-rollback-receipt',
+    'stale-rollback-receipt',
+  ];
+  for (const caseName of expectedCases) {
+    assert.ok(existsSync(`${evidenceDir}/${caseName}.json`), `case receipt must exist after cleanup: ${evidenceDir}/${caseName}.json`);
+  }
 });
