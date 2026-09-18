@@ -41,7 +41,45 @@ const path = require('path');
 const INSTALL_DIR = process.env.CC_INSTALL_DIR || process.cwd();
 // Canonical absolute DB path — identical to .env.local and the previously
 // working cc-prod pm2 env, so a restart always opens the same database.
-const DB_PATH = process.env.DATABASE_PATH || path.join(process.env.HOME, 'command-center/data/mission-control.db');
+// B.4 HARDENING (decoy-DB fix, 2026-09-06): four-tier DATABASE_PATH resolution
+// anchored on __dirname -- this config file's OWN directory -- never on
+// process.cwd(), which becomes the CALLER's cwd when watchdog-cc.sh or
+// atomic-deploy run `pm2 start <abs>/ecosystem.cc-prod.config.cjs` without
+// cd-ing into the install dir. That cwd bug is what resolved DB_PATH to a decoy
+// path and made the Command Center silently serve an empty database.
+//   1) shell env DATABASE_PATH
+//   2) DATABASE_PATH parsed out of <__dirname>/.env.local (quotes stripped; a
+//      relative value is resolved to an ABSOLUTE path against __dirname)
+//   3) <__dirname>/mission-control.db when that file exists
+//   4) the ORIGINAL fallback, kept LAST so nothing regresses
+function __ccDbResolveFromEnvLocal(dir) {
+  const ccfs = require('fs');
+  try {
+    const f = path.join(dir, '.env.local');
+    if (!ccfs.existsSync(f)) return null;
+    const m = ccfs.readFileSync(f, 'utf8')
+      .match(/^[ \t]*(?:export[ \t]+)?DATABASE_PATH[ \t]*=[ \t]*(.*)$/m);
+    if (!m) return null;
+    let v = m[1].trim().replace(/\s+#.*$/, '').trim();
+    if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
+      v = v.slice(1, -1);
+    }
+    v = v.trim();
+    if (!v) return null;
+    return path.isAbsolute(v) ? v : path.resolve(dir, v);
+  } catch (e) { return null; }
+}
+function __ccDbLocalFile(dir) {
+  const ccfs = require('fs');
+  try {
+    const p = path.join(dir, 'mission-control.db');
+    return ccfs.existsSync(p) ? p : null;
+  } catch (e) { return null; }
+}
+const DB_PATH = process.env.DATABASE_PATH
+  || __ccDbResolveFromEnvLocal(__dirname)
+  || __ccDbLocalFile(__dirname)
+  || path.join(process.env.HOME, 'command-center/data/mission-control.db');
 // CC_PORT ONLY — cc-start.sh reads this, strips ambient PORT, then re-exports it.
 const CC_PORT = process.env.CC_PORT || '4000';
 

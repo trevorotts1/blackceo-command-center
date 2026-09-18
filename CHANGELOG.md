@@ -1,3 +1,8 @@
+## [v7.6.9] — 2026-09-18 — pm2 configs resolve DATABASE_PATH from the checkout's own .env.local (ported from the fleet's hand fix)
+
+### Fixed
+- **`ecosystem.config.cjs` and `ecosystem.cc-prod.config.cjs` no longer fall through to a decoy database when the caller's shell did not export `DATABASE_PATH`.** A restart from `watchdog-cc.sh`, `atomic-deploy.sh` or `pm2 resurrect` runs the config with the caller's cwd and environment, and the old one-tier `process.env.DATABASE_PATH || <relative fallback>` silently served an empty database. Resolution is now four-tier and anchored on the config file's own directory: shell `DATABASE_PATH`, then `DATABASE_PATH` parsed out of `<dir>/.env.local` (quotes stripped, a relative value resolved against that directory), then `<dir>/mission-control.db` when it exists, then the original fallback last. This is the "B.4 HARDENING (decoy-DB fix, 2026-09-06)" that was applied by hand on at least six Mac client boxes (six different file hashes, five different base commits) and never reached main; found during the 2026-09-17 fleet roll and ported from Karen Vaughn's box as the canonical form, so those boxes can fast-forward without losing it. Test: `tests/unit/ecosystem-db-path-env-local.test.ts`.
+
 ## [v7.6.8] — 2026-09-18 — Two more classes closed at the source: absolute distDir, pid-reused startup lock
 
 ### Fixed

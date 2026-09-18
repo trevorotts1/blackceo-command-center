@@ -38,7 +38,37 @@
 
 const path = require('path');
 const INSTALL_DIR = process.env.CC_INSTALL_DIR || process.cwd();
-const DB_PATH = process.env.DATABASE_PATH || path.join(INSTALL_DIR, '../data/mission-control.db');
+// B.4 HARDENING: three-tier DATABASE_PATH resolution.
+//   1) shell env DATABASE_PATH (exported start paths)
+//   2) DATABASE_PATH parsed out of <INSTALL_DIR>/.env.local (or this file's own
+//      directory) -- covers `pm2 resurrect`, watchdog-cc.sh and atomic-deploy,
+//      which start with NO exported DATABASE_PATH
+//   3) the original relative fallback, kept last so nothing regresses on a box
+//      that has neither
+function __ccDbPathFromEnvLocal(dirs) {
+  const fs = require('fs');
+  for (const d of dirs) {
+    if (!d) continue;
+    try {
+      const f = path.join(d, '.env.local');
+      if (!fs.existsSync(f)) continue;
+      const m = fs.readFileSync(f, 'utf8')
+        .match(/^[ \t]*(?:export[ \t]+)?DATABASE_PATH[ \t]*=[ \t]*(.*)$/m);
+      if (!m) continue;
+      let v = m[1].trim().replace(/\s+#.*$/, '').trim();
+      if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
+        v = v.slice(1, -1);
+      }
+      v = v.trim();
+      // A relative value is anchored on the directory that holds the .env.local, never on the caller's cwd.
+      if (v) return path.isAbsolute(v) ? v : path.resolve(d, v);
+    } catch (e) { /* unreadable .env.local -> fall through to next tier */ }
+  }
+  return null;
+}
+const DB_PATH = process.env.DATABASE_PATH
+  || __ccDbPathFromEnvLocal([INSTALL_DIR, __dirname])
+  || path.join(INSTALL_DIR, '../data/mission-control.db');
 // Use CC_PORT ONLY — never read process.env.PORT to prevent env-bleed from
 // OpenClaw gateway or Hostinger container-injected PORT. qc-cc.sh enforces this.
 const CC_PORT = process.env.CC_PORT || '4000';
