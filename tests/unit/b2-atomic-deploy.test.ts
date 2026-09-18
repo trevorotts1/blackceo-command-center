@@ -1279,7 +1279,9 @@ test('RR14: deploy explicitly reconciles PM2 NEXT_DIST_DIR and an ordinary resta
   const fixture = buildFixture({ buildExitCode: 0, healthExitCode: 0, liveNextExists: true });
   const appName = 'mission-control';
   const { observedValuesPath } = usePersistedNextDistDirPm2Stub(fixture, appName);
-  const expectedNextDir = path.join(fixture.appDir, '.next');
+  // RELATIVE by contract: next.config.mjs path.join()s distDir onto the project
+  // dir, so an absolute value is concatenated and `next start` cannot find the build.
+  const expectedNextDir = '.next';
   try {
     const { exitCode, stderr } = runDeploy(fixture, {
       NEXT_DIST_DIR: '/stale/.next.tmp.20260917',
@@ -1304,7 +1306,7 @@ test('RR14: deploy explicitly reconciles PM2 NEXT_DIST_DIR and an ordinary resta
 
     const launcher = readFileSync(path.join(process.cwd(), 'scripts', 'cc-start.sh'), 'utf8');
     assert.ok(
-      launcher.includes('export NEXT_DIST_DIR="${CC_DIR}/.next"'),
+      launcher.includes('export NEXT_DIST_DIR=".next"'),
       'cc-start.sh must explicitly sanitize NEXT_DIST_DIR before starting Next, so ordinary restarts cannot inherit a stale PM2 value.',
     );
   } finally {

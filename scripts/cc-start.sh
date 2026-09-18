@@ -44,7 +44,13 @@ source "$SCRIPT_DIR/lib/rescue-credentials.sh"
 
 # PM2 can retain a stale NEXT_DIST_DIR across restarts. Pin the real runtime
 # artifact before any Next code can observe the inherited environment.
-export NEXT_DIST_DIR="${CC_DIR}/.next"
+# RELATIVE, never absolute (2026-09-18): next.config.mjs feeds this straight
+# into `distDir`, and Next resolves distDir with path.join(<project dir>, distDir),
+# which CONCATENATES an absolute second argument instead of replacing. The
+# absolute form ("${CC_DIR}/.next") made `next start` look for
+# <CC_DIR>/<CC_DIR>/.next and refuse with "Could not find a production build" on
+# every restart — measured on the operator Mac: 71 pm2 restarts, app down.
+export NEXT_DIST_DIR=".next"
 
 # ── CLI flag parsing ───────────────────────────────────────────────────────────
 ARG_PORT=""

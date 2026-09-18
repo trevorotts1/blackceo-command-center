@@ -1,3 +1,8 @@
+## [v7.6.7] — 2026-09-18 — NEXT_DIST_DIR is relative again, so `next start` finds the build
+
+### Fixed
+- **`scripts/cc-start.sh` and `scripts/atomic-deploy.sh` export `NEXT_DIST_DIR=".next"`, not an absolute path.** v7.6.2 pinned `NEXT_DIST_DIR="${CC_DIR}/.next"` in the start script (and the deploy's Phase 4) to stop pm2 inheriting a stale build-time value. `next.config.mjs` feeds that straight into `distDir`, and Next resolves `path.join(<project dir>, distDir)`, which concatenates an absolute second argument instead of replacing it, so every restart looked for `<dir>/<dir>/.next` and died with "Could not find a production build". Measured on the operator Mac after the v7.6.6 deploy: 71 pm2 restarts, app down, while `node scripts/next-service-env.cjs start` by hand (no NEXT_DIST_DIR) served the same build fine. Both scripts now pin the relative `.next`; `tests/unit/next-dist-dir-relative.test.sh` fails on any absolute form (with a detection control), and the RR14 deploy test now asserts the relative contract.
+
 ## [v7.6.6] — 2026-09-18 — Per-box runtime config is outside the content inventory
 
 ### Fixed
