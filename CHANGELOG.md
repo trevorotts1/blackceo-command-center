@@ -1,3 +1,8 @@
+## [v7.6.12] — 2026-09-18 — Ignore the deploy's candidate dependency trees
+
+### Fixed
+- **`.node_modules.candidate.*/` is git-ignored.** A failed `atomic-deploy.sh` attempt leaves its candidate dependency tree beside the checkout (measured on a client VPS after two failed attempts: two 681 MB folders), and untracked it read as dirty, blocking the updater's fast-forward, the same class closed for the other transaction artefacts in v7.6.10.
+
 ## [v7.6.11] — 2026-09-18 — A branding name mismatch is degraded, not down
 
 ### Fixed
