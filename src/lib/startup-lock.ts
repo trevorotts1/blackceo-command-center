@@ -113,7 +113,14 @@ function holderLooksLikeCommandCenter(pid: number): { verdict: boolean; command:
   const command = holderCommand(pid);
   if (command === null) return { verdict: true, command };
   const c = command.toLowerCase();
-  const looksLikeCc = c.includes('next') || c.includes('node') || c.includes('cc-start') || c.includes('mission-control') || c.includes('command-center');
+  // A Command Center is a Next.js server (`next start` / `next-server`) launched
+  // by cc-start.sh from a mission-control / command-center checkout. A bare
+  // `node` match is NOT enough: on 2026-09-18 a Contabo box's lock named a pid
+  // that had been reused by the GHL community MCP server
+  // (/usr/local/bin/node /home/node/.openclaw/mcp-servers/.../main.js) — every
+  // node process on a box whose home is /home/node matched, and the real CC
+  // crash-looped 64 times against a lock nobody held.
+  const looksLikeCc = c.includes('next') || c.includes('cc-start') || c.includes('mission-control') || c.includes('command-center');
   return { verdict: looksLikeCc, command };
 }
 

@@ -23,11 +23,30 @@ export function tenantRegistration(host: string): TenantRegistration {
   const registrations = JSON.parse(process.env.MC_TENANT_REGISTRY_JSON || '{}') as Record<string, TenantRegistration>;
   const reg = registrations[host];
   if (reg && reg.tenantId && reg.companyId && reg.installationId && (reg.kind === 'self' || (reg.kind === 'client' && reg.clientId))) return reg;
+  const implicitSelf = (): TenantRegistration => ({ tenantId: 'self', companyId: process.env.MC_COMPANY_ID || 'default', kind: 'self', installationId: process.env.MC_INSTALLATION_ID || 'local' });
+  const loopback = ['localhost', '127.0.0.1', '[::1]', '::1'].includes(host);
   // Explicit local development mode only. Production requires a registered hostname.
-  if (process.env.NODE_ENV !== 'production' && ['localhost', '127.0.0.1', '[::1]'].includes(host)) {
-    return { tenantId: 'self', companyId: process.env.MC_COMPANY_ID || 'default', kind: 'self', installationId: process.env.MC_INSTALLATION_ID || 'local' };
+  if (process.env.NODE_ENV !== 'production' && loopback) return implicitSelf();
+  // Implicit self registration (2026-09-18): a production box with NO registry
+  // configured at all is an unprovisioned single-tenant installation, not a
+  // multi-tenant host. Before the registry existed such a box served exactly one
+  // tenant (itself) on its own public hostname and on loopback; refusing both
+  // turned every unprovisioned box into a 403 wall (measured on VPS + Mac boxes
+  // upgraded 2026-09-18) and blinded the loopback health probes. Only two hosts
+  // qualify: loopback (reachable from the box alone) and the hostname of the
+  // box's own configured public URL. Every other host still has no tenant, and a
+  // box WITH a registry keeps the strict behaviour above unchanged.
+  if (Object.keys(registrations).length === 0) {
+    if (loopback) return implicitSelf();
+    const own = ownPublicHost();
+    if (own && own === host) return implicitSelf();
   }
   throw new TenantAccessError('Hostname has no configured tenant');
+}
+function ownPublicHost(): string | null {
+  const raw = process.env.CC_PUBLIC_URL || process.env.MC_TENANT_PUBLIC_URL || '';
+  if (!raw) return null;
+  try { return new URL(raw).hostname.toLowerCase(); } catch { return null; }
 }
 function secret(): string {
   const value = process.env.MC_TENANT_SESSION_SECRET || process.env.MC_INTERVIEW_COOKIE_SECRET || process.env.MC_API_TOKEN;
