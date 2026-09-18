@@ -1424,7 +1424,11 @@ CANDIDATE_SOURCE_INVENTORY="$(_ccbi_inventory_digest "$RELEASE_DIR")" || {
 PRE_BUILD_INVENTORY="$CANDIDATE_SOURCE_INVENTORY"
 _log "  Candidate source inventory for ${DEPLOY_REVISION}: ${PRE_BUILD_INVENTORY}"
 
-if ! (cd "$RELEASE_DIR" && npm ci --no-audit --no-fund --prefer-offline --ignore-scripts=false 2>&1 | tee "$RELEASE_DIR/npm-ci.log"); then
+# --include=dev (2026-09-18): a container that exports NODE_ENV=production makes
+# npm default to omit=dev, so tailwindcss / typescript / postcss never reach the
+# candidate and `next build` fails with "Cannot find module tailwindcss" /
+# "Can't resolve @/components/...". The build needs dev dependencies; say so.
+if ! (cd "$RELEASE_DIR" && npm ci --no-audit --no-fund --prefer-offline --ignore-scripts=false --include=dev 2>&1 | tee "$RELEASE_DIR/npm-ci.log"); then
   _preflight_abort_receipt "Dependency staging failed (npm ci). Live source, dependencies and artifact untouched."
   exit 2
 fi
