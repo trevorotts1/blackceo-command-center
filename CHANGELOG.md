@@ -1,3 +1,8 @@
+## [v7.6.6] — 2026-09-18 — Per-box runtime config is outside the content inventory
+
+### Fixed
+- **`public/logo-config.json` is excluded from the PRES-046 content inventory.** It is per-box runtime config (`update.sh` PER_BOX_CONFIG_FILES) that `src/app/api/logo/route.ts` creates at module load through `ensureRuntimeConfigFile`, and `next build` evaluates that module, so the build wrote the file into the release candidate and the post-build digest never matched the pre-build one. Measured on the operator Mac: the v7.6.5 deploy failed FROZEN-SOURCE with no file named; a controlled build of a clean archive showed exactly two digested files changing, `tsconfig.json` (already restored by the deploy) and `public/logo-config.json`. Regression test PRES-046 F0 now covers both per-box files.
+
 ## [v7.6.5] — 2026-09-18 — The generated brand.css is outside the content inventory
 
 ### Fixed

@@ -178,7 +178,7 @@ function runDeploy(fixture: Fx, extraEnv: Record<string, string> = {}): { exitCo
   return { exitCode: result.status ?? 1, stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
 }
 
-test('PRES-046 F0: public/brand.css is a generated asset and is NOT in the content inventory', () => {
+test('PRES-046 F0: per-box generated files (public/brand.css, public/logo-config.json) are NOT in the content inventory', () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'ccbi-brand-'));
   try {
     mkdirSync(path.join(dir, 'public'), { recursive: true });
@@ -186,13 +186,16 @@ test('PRES-046 F0: public/brand.css is a generated asset and is NOT in the conte
     writeFileSync(path.join(dir, 'src', 'a.ts'), 'export const a = 1;\n');
     writeFileSync(path.join(dir, 'public', 'brand.css'), ':root{--brand:#123456}\n');
     writeFileSync(path.join(dir, 'public', 'logo.svg'), '<svg/>\n');
+    writeFileSync(path.join(dir, 'public', 'logo-config.json'), '{"logoUrl":"a"}\n');
     const lib = path.join(process.cwd(), 'scripts', 'lib', 'build-inventory.sh');
     const list = execFileSync('bash', ['-c', `source "${lib}"; _ccbi_inventory_relpaths "${dir}"`], { encoding: 'utf8' });
     assert.ok(list.includes('public/logo.svg'), 'other public files are digested');
     assert.ok(list.includes('src/a.ts'), 'src files are digested');
     assert.ok(!list.includes('public/brand.css'), 'brand.css must not be digested');
+    assert.ok(!list.includes('public/logo-config.json'), 'logo-config.json (per-box runtime config, written at build) must not be digested');
     const d1 = execFileSync('bash', ['-c', `source "${lib}"; _ccbi_inventory_digest "${dir}"`], { encoding: 'utf8' }).trim();
     writeFileSync(path.join(dir, 'public', 'brand.css'), ':root{--brand:#abcdef}\n');
+    writeFileSync(path.join(dir, 'public', 'logo-config.json'), '{"logoUrl":"b"}\n');
     const d2 = execFileSync('bash', ['-c', `source "${lib}"; _ccbi_inventory_digest "${dir}"`], { encoding: 'utf8' }).trim();
     assert.equal(d1, d2, 'changing brand.css must not change the inventory digest');
   } finally {
