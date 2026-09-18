@@ -1,3 +1,9 @@
+## [v7.6.8] — 2026-09-18 — Two more classes closed at the source: absolute distDir, pid-reused startup lock
+
+### Fixed
+- **`next.config.mjs` normalizes `NEXT_DIST_DIR`.** An absolute value inside the project becomes its relative form; a value outside the project, or an empty one, falls back to `.next`. Next resolves `distDir` with `path.join(<project dir>, distDir)`, which concatenates an absolute second argument, so the v7.6.2 absolute export made `next start` miss the build on every restart (v7.6.7 fixed the exporters; this makes the config itself immune). Test: `tests/unit/next-config-distdir.test.ts`.
+- **The startup lock recognises a pid-reused holder.** `claimStartupLock` treated any live pid as a real holder. Measured on a client box (Donna Izzard, Contabo): the lock named pid 326, which after a container restart had become the pm2 God Daemon, so `kill(pid, 0)` reported "alive" and the Command Center crash-looped 3,600 times over eleven days behind a lock nobody held. The holder's command line is now read (`/proc/<pid>/cmdline` on Linux, `ps -o command=` on macOS); a live holder that is not a node/next/Command Center process is logged as pid reuse and the lock is taken over. An unreadable command line still counts as a real holder, so the guard never steals on missing evidence. Test: `tests/unit/startup-lock-pid-reuse.test.ts` (a live `sleep` holder is taken over; a live node holder is honoured).
+
 ## [v7.6.7] — 2026-09-18 — NEXT_DIST_DIR is relative again, so `next start` finds the build
 
 ### Fixed
