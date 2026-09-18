@@ -133,6 +133,12 @@ _ccbi_sha256_file() {
 # would die on its next restart with verdict=MISMATCH and no code change at all.
 # A client changing their logo must never brick their Command Center. Keep
 # runtime data OUT of this digest; it attests compiled bytes vs compiled source.
+# public/brand.css is EXCLUDED from the inventory (2026-09-18): it is a per-box
+# GENERATED asset (generate-brand-css.py writes the client's colours into it, and
+# cc-start.sh seeds the shipped default when it is absent). A generated file in the
+# digest made every branded box read as "content MISMATCH vs source" on its next
+# restart, and a restart loop that re-seeded it during a deploy produced a
+# FROZEN-SOURCE VIOLATION on the operator Mac. It never affects what compiles.
 _CCBI_TOPLEVEL_INPUTS="src public package.json package-lock.json next.config.mjs next.config.js next.config.ts tsconfig.json tailwind.config.ts postcss.config.mjs middleware.ts"
 
 # _ccbi_inventory_relpaths <dir> — print \n-separated, LC_ALL=C-sorted relative
@@ -160,7 +166,7 @@ _ccbi_inventory_relpaths() {
       # stream which still hashes deterministically.
       # config/ is intentionally NOT enumerated — see _CCBI_TOPLEVEL_INPUTS.
       { find src -type f -print0 2>/dev/null || true; } \
-        && { find public -type f -print0 2>/dev/null || true; } || true
+        && { find public -type f ! -name 'brand.css' -print0 2>/dev/null || true; } || true
     } | LC_ALL=C sort -z -u | tr '\0' '\n'
   )
 }
