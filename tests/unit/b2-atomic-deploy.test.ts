@@ -358,7 +358,7 @@ function runDeploy(
 } {
   const result = spawnSync(
     (() => {
-      try { return execSync('which bash').toString().trim(); } catch { return '/opt/homebrew/bin/bash'; }
+      try { return execSync('/opt/homebrew/bin/bash --version >/dev/null 2>&1 && printf %s /opt/homebrew/bin/bash || command -v bash').toString().trim(); } catch { return '/opt/homebrew/bin/bash'; }
     })(),
     [fixture.deployScript,
       '--app-dir', fixture.appDir,
@@ -1341,13 +1341,16 @@ esac
   }
 });
 
-test('RR14: a real better_sqlite3 rebuild is accepted by the native gate', async () => {
+test('RR14: a broken live native module is repaired only by the isolated candidate', async () => {
   const fixture = buildFixture({ buildExitCode: 0, healthExitCode: 0, liveNextExists: true });
   const brokenModuleDir = path.join(fixture.appDir, 'node_modules', 'better-sqlite3');
+  const brokenIndex = path.join(brokenModuleDir, 'index.js');
+  const brokenModuleContents =
+    'module.exports = class BrokenNative { constructor() { throw new Error("fixture native failure"); } };\n';
+  const npmCallsLog = path.join(fixture.baseDir, 'npm-calls.log');
+  const liveIndexAtCandidateBuild = path.join(fixture.baseDir, 'live-index-at-candidate-build.txt');
   try {
-    // The pre-flight gate must enter its one-shot rebuild path.
-    writeFileSync(path.join(brokenModuleDir, 'index.js'),
-      'module.exports = class BrokenNative { constructor() { throw new Error("fixture native failure"); } };\n');
+    writeFileSync(brokenIndex, brokenModuleContents);
 
     const npmStub = `#!/usr/bin/env bash
 copy_real_sqlite() {
@@ -1357,15 +1360,13 @@ copy_real_sqlite() {
   cp -R "${REAL_BINDINGS_DIR}/." node_modules/bindings/
   cp -R "${REAL_FILE_URI_TO_PATH_DIR}/." node_modules/file-uri-to-path/
 }
+printf '%s\n' "$*" >> "${npmCallsLog}"
 if [[ "$1" == "ci" ]]; then
   copy_real_sqlite
   exit 0
 fi
-if [[ "$1" == "rebuild" && "$2" == "better-sqlite3" ]]; then
-  copy_real_sqlite
-  exit 0
-fi
 if [[ "$1" == "run" && "$2" == "build" ]]; then
+  cp "${fixture.appDir}/node_modules/better-sqlite3/index.js" "${liveIndexAtCandidateBuild}"
   if [[ -n "\${NEXT_DIST_DIR:-}" ]]; then
     mkdir -p "$NEXT_DIST_DIR"
     echo "new-build-id" > "$NEXT_DIST_DIR/BUILD_ID"
@@ -1379,10 +1380,31 @@ exit 0
 
     const { exitCode, stderr } = runDeploy(fixture);
     assert.strictEqual(exitCode, 0,
-      `A successful rebuild of the real better_sqlite3 package must pass the native gate, got ${exitCode}.\nstderr:\n${stderr}`);
+      `A candidate with a real better_sqlite3 package must deploy successfully even when the live module is broken. Exit was ${exitCode}.\nstderr:\n${stderr}`);
     assert.ok(
-      stderr.includes('Rebuild of better-sqlite3 verified'),
-      `The verified-rebuild receipt must appear after a real rebuild.\nstderr:\n${stderr}`,
+      stderr.includes('the currently installed runtime is degraded'),
+      `The degraded-live-runtime diagnostic must appear in stderr.\nstderr:\n${stderr}`,
+    );
+    assert.ok(
+      stderr.includes('The live runtime will NOT be modified in place'),
+      `The no-in-place-repair diagnostic must appear in stderr.\nstderr:\n${stderr}`,
+    );
+    assert.ok(
+      stderr.includes('Do NOT run npm rebuild against the live tree'),
+      `The gate must never advise an in-place live-tree repair.\nstderr:\n${stderr}`,
+    );
+    assert.ok(
+      !stderr.includes('Phase 1 pre-flight passed'),
+      `A failed live native gate must not be reported as pre-flight passed.\nstderr:\n${stderr}`,
+    );
+    assert.ok(
+      !readFileSync(npmCallsLog, 'utf8').includes('rebuild'),
+      `npm rebuild must not be invoked. npm calls:\n${readFileSync(npmCallsLog, 'utf8')}`,
+    );
+    assert.strictEqual(
+      readFileSync(liveIndexAtCandidateBuild, 'utf8'),
+      brokenModuleContents,
+      'The live broken native module must remain untouched while the candidate is prepared and built.',
     );
   } finally {
     fixture.cleanup();
@@ -1566,7 +1588,7 @@ esac
   try {
     const result = spawnSync(
       (() => {
-        try { return execSync('which bash').toString().trim(); } catch { return '/opt/homebrew/bin/bash'; }
+        try { return execSync('/opt/homebrew/bin/bash --version >/dev/null 2>&1 && printf %s /opt/homebrew/bin/bash || command -v bash').toString().trim(); } catch { return '/opt/homebrew/bin/bash'; }
       })(),
       [deployScript,
         '--app-dir', appDir,
