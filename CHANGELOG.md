@@ -1,3 +1,8 @@
+## [v7.6.22] — 2026-09-18 — CHANGELOG: the eight releases between v7.6.12 and v7.6.21
+
+### Fixed
+- **`CHANGELOG.md` records v7.6.13 through v7.6.20.** Eight releases were cut, tagged and rolled to the fleet on 2026-09-18 with no CHANGELOG entry of any kind, so the file jumped from v7.6.21 straight to v7.6.12 and the only record of what shipped that morning was the pull requests themselves (#365, and #367 through #373). Anyone reading the changelog to find out why a box's deploy, health check or npm install behaves differently than it did at v7.6.12 found nothing between those two headings. Documentation only; no code changed. Each entry below is reconstructed from its own release tag's diff and the pull request merged at that tag, and dated from the tag.
+
 ## [v7.6.21] — 2026-09-18 — The interview link is valid until the interview is complete: no clock, no burn-on-use
 
 ### Changed
@@ -19,6 +24,53 @@
 - `tests/unit/interview-launch-readiness.test.ts`: the minted receipt carries `validUntil`, keeps `oneUse`, and keeps `expiresAt` inside the deployed validator's 86410-second bound; issuance is refused once the interview is complete.
 
 Companion bump for onboarding v25.1.50.
+
+## [v7.6.20] — 2026-09-18 — The asset probe moves to /interview when the root is tenant-gated
+
+### Fixed
+- **`scripts/cc-health-check.sh` probes `/interview` when an unauthenticated loopback `GET /` answers 401 or 403.** On a box whose tenant registry carries Cloudflare Access settings, that request answers `403 {"error":"A verified tenant identity is required"}` rather than the same-origin 302 to `/interview` the probe already knew how to follow. The app is up and gating correctly, but the outside-in asset probe then read an empty page and scored UNKNOWN: a healthy v7.6.17 VPS box sat through 36 attempts that way on 2026-09-18. The probe now moves to the lock-exempt `/interview` shell on 401/403 exactly as it does for the 302 case. A 403 on the probed page itself is still the TENANT WALL, and still RED. Test: `tests/unit/cc-health-check-tenant-gated-root.test.sh`.
+
+## [v7.6.19] — 2026-09-18 — A relative database path is anchored under the app directory
+
+### Fixed
+- **`scripts/atomic-deploy.sh` anchors a non-absolute database path under `APP_DIR` before it reaches the restart or the health check.** The app refuses a non-absolute `DATABASE_PATH` (deep-check `database_path`). A fleet lane copied a relative value out of `.env.local` into `--db-path` verbatim, the override won, health failed on that check, the rollback failed the same way, and the client's Command Center was down (measured 2026-09-18 on a Mac). The `.env.local` branch had been anchoring its own value since v7.6.13; the new `_abs_under_app` helper applies the same rule to the `--db-path` override, so both sources agree. Test: `tests/unit/atomic-deploy-runtime-db-path.test.sh` (10 checks).
+
+## [v7.6.18] — 2026-09-18 — The candidate build installs dev dependencies even under NODE_ENV=production
+
+### Fixed
+- **`scripts/atomic-deploy.sh` runs `npm ci --include=dev`.** A container that exports `NODE_ENV=production` makes npm default to `omit=dev`, so tailwindcss, typescript and postcss never reached the release candidate and `next build` failed with "Cannot find module 'tailwindcss'" and "Can't resolve @/components/...". Measured 2026-09-18 on a Contabo box running npm 11.19, with `omit=dev` confirmed by `npm config`. A candidate build needs dev dependencies, so the deploy now says so explicitly instead of inheriting whatever the container decided. Test: `tests/unit/atomic-deploy-npm-ci-include-dev.test.sh`.
+
+## [v7.6.17] — 2026-09-18 — The npm install-script policy lives in package.json
+
+### Fixed
+- **`package.json` declares its own install-script policy, and the postinstall clears an inherited `allow-scripts`.** npm 11.19 and npm 12 block dependency install scripts unless the root `package.json` lists them under `allowScripts`, and refuse an allow-scripts policy supplied on the command line or in the environment during any project-scoped install. `npm ci` exports its configuration to lifecycle children as `npm_config_*`, so a user-level `~/.npmrc` carrying `allow-scripts=<pkg>`, left behind by an unrelated global install on a client Mac, reached our postinstall's nested `npm rebuild better-sqlite3` and the deploy aborted with `EALLOWSCRIPTS` (measured 2026-09-18). The policy now names better-sqlite3, esbuild, unrs-resolver and fsevents, unpinned so a dependency bump cannot silently drop the native build, and the postinstall sets `npm_config_allow_scripts=` before nesting npm. Older npm ignores the field, so nothing changes there. Test: `tests/unit/npm-allow-scripts-policy.test.ts`.
+
+## [v7.6.16] — 2026-09-18 — A Cloudflare 530 is a tunnel fault, not a failed deploy
+
+### Fixed
+- **`scripts/cc-health-check.sh`: HTTP 530 is row 27 UNKNOWN with the remedy named, not FAIL.** Cloudflare answers 530 (error 1033) from its own edge when no cloudflared connector is registered for the hostname, which means the tunnel process on the box is down or its credentials are gone. A deploy can neither cause nor cure that. Scoring it FAIL rolled a healthy v7.6.14 build back on a Mac whose tunnel was down, and the rollback then refused its pre-inventory artifact, so the Command Center went down over a fault that had nothing to do with the build. It now joins 000 in the same class: reachable by nobody, reported, never RED. Origin errors (500, 502, 503) still score FAIL. Test: `tests/unit/cc-health-check-cf-530.test.sh`.
+
+### Added
+- **`scripts/ingest-task.sh`**, the generic form of a helper that had been committed by hand on a client Mac. Its path and port are derived from the checkout instead of hardcoded, so the main agent's command-line ingest keeps working once that checkout is brought back to main, and the tree stays clean for the updater.
+
+## [v7.6.15] — 2026-09-18 — The deploy returns to the app directory before its Phase 5 hooks
+
+### Fixed
+- **`scripts/atomic-deploy.sh` runs `cd "$APP_DIR"` before any verdict-time hook.** Phase 2 moves the deploy shell into the private candidate directory and Phase 5 deletes it, so `pm2 save`, the pm2-logrotate install and the watchdog install all ran from a working directory that no longer existed. Measured 2026-09-18 on every box: `pm2 save` reported `ENOENT: process.cwd failed`, meaning no deploy had ever persisted a process list; pm2-logrotate reported "offline npm" because npm could not start; and `install-watchdog-cc.sh` emitted getcwd errors. Test: `tests/unit/atomic-deploy-phase5-cwd.test.sh`.
+
+## [v7.6.14] — 2026-09-18 — A box with no tenant registry is a single-tenant installation
+
+### Fixed
+- **`src/lib/auth/tenant-context.ts`: a production box with no tenant registry configured resolves loopback and its own public hostname to an implicit self identity** (`tenantId` `self`, `companyId` from `MC_COMPANY_ID` or `default`, `installationId` from `MC_INSTALLATION_ID` or `local`). The hostname is read from `CC_PUBLIC_URL` or `MC_TENANT_PUBLIC_URL`. Exactly two hosts qualify, and every other host still has no tenant; a box that does have a registry keeps the strict behaviour unchanged. Measured 2026-09-18: two VPS boxes and a Mac upgraded to v7.6.x with no registry answered `403 unregistered_hostname` to every browser and to the loopback health probes, which is the whole box walled off over a registry that had never been written. Test: `tests/unit/tenant-implicit-self.test.ts`.
+- **`scripts/cc-health-check.sh`: `403 unregistered_hostname` on the gated page is RED, never UNKNOWN.** It is row 33, TENANT WALL, with the remedy named, so a deploy rolls back to the last build that served the client instead of retrying 36 times with the wall live. Test: `tests/unit/cc-health-check-tenant-wall.test.sh`.
+- **The startup lock no longer honours a holder that is merely a node process.** On a Contabo box the lock's pid had been reused by the GoHighLevel community MCP server and the Command Center crash-looped 64 times against a lock nobody held. This narrows the v7.6.8 pid-reuse guard, which accepted any node process as a real holder. Next.js server, `cc-start`, `mission-control` and `command-center` command lines are still honoured, and an unreadable command line still counts as a real holder. Test: `tests/unit/startup-lock-pid-reuse.test.ts`.
+- **`scripts/atomic-deploy.sh` says why `pm2 save` failed**, printing its return code, binary, `PM2_HOME` and output, and the configured `DATABASE_PATH` is now the first pre-deploy backup candidate. Contabo boxes matched none of the heuristic paths and had been deploying with no backup at all. Test: `tests/unit/atomic-deploy-runtime-db-path.test.sh` (extended).
+
+## [v7.6.13] — 2026-09-18 — The deploy pins the runtime database path, and box-runtime files are ignored
+
+### Fixed
+- **`scripts/atomic-deploy.sh` resolves the runtime `DATABASE_PATH` once in Phase 1 and exports it**, in this order: `--db-path`, then a shell value whose directory exists, then the value in `.env.local`, then the database the backup step actually found. Exporting it is what makes `pm2 restart --update-env` replace the value baked into the process at its first launch. Measured 2026-09-18 on a VPS box: the app carried `DATABASE_PATH=/data/projects/data/mission-control.db`, a directory that had never existed, through every restart; the deploy backed up the real database in the checkout root, restarted with the stale path, failed health on `database_path`, failed the rollback the same way, and `cc-start.sh` then refused the old build. The Command Center was down until the path was corrected by hand. This is the deploy-side half of the v7.6.9 pm2-config fix: that release taught the pm2 configs to read `.env.local`, this one stops the already-running process from keeping the old value. Test: `tests/unit/atomic-deploy-runtime-db-path.test.sh` (7 checks, running the real resolver extracted from the script).
+- **Five more box-runtime paths are git-ignored**: `/.device-identity/`, `/.env.local.write.lock`, `/AGENTS.md`, `/memory/` and `/.eslintrc.json`, all observed in checkout roots on Contabo and Mac boxes. Any porcelain line makes the updater treat the checkout as dirty and refuse to refresh the Command Center, the same class closed for build and deploy artefacts in v7.6.10 and v7.6.12.
 
 ## [v7.6.12] — 2026-09-18 — Ignore the deploy's candidate dependency trees
 
