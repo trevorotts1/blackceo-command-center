@@ -640,6 +640,15 @@ ROOT_CODE="${ROOT_WO%% *}"; ROOT_LOC="${ROOT_WO#* }"
 if [[ "$ROOT_CODE" =~ ^3 ]] && is_interview_gate_redirect "$ROOT_LOC" "$BASE_URL"; then
   PROBE_PATH="$(url_path "$ROOT_LOC")"
   log "outside-in: / 302→${PROBE_PATH} (interview lock); probing gated page for asset refs"
+elif [[ "$ROOT_CODE" == "401" || "$ROOT_CODE" == "403" ]]; then
+  # TENANT-GATED ROOT (2026-09-18): on a box whose tenant registry carries
+  # Cloudflare Access settings, an unauthenticated loopback GET / answers
+  # 401/403 {"error":"A verified tenant identity is required"} instead of a
+  # same-origin 302. The app is up and gating correctly; the page that carries
+  # the /_next/static refs is the lock-exempt /interview shell, so probe that
+  # (a VPS box sat UNKNOWN through 36 attempts with a healthy 7.6.17 build).
+  PROBE_PATH="/interview"
+  log "outside-in: / answered ${ROOT_CODE} (tenant-gated root); probing ${PROBE_PATH} for asset refs"
 fi
 ROOT_HTML=$(curl -s --max-time 10 --max-redirs 0 "${BASE_URL}${PROBE_PATH}" 2>/dev/null || echo "")
 PROBE_CODE=$(curl -s --max-time 10 --max-redirs 0 -o /dev/null -w '%{http_code}' "${BASE_URL}${PROBE_PATH}" 2>/dev/null || echo "000")
