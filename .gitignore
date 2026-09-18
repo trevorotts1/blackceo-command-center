@@ -162,3 +162,13 @@ client-roster.txt
 /.next.tmp.*/
 /.next.discarded.*/
 /.node_modules.candidate.*/
+
+# Box-runtime files that live in the checkout root but are never repo content
+# (measured 2026-09-18 on Contabo/Mac boxes). Every one of them made
+# `git status --porcelain` non-empty, and the updater treats ANY porcelain
+# line as a dirty checkout and refuses to refresh the Command Center.
+/.device-identity/
+/.env.local.write.lock
+/AGENTS.md
+/memory/
+/.eslintrc.json
