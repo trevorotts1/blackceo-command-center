@@ -150,3 +150,14 @@ client-roster.txt
 /*.verify-backup-*
 /.deploy-rollback-state.json
 /.local-mods-backup-*/
+
+# atomic-deploy.sh transaction artefacts (v7.6.2+ deploy): retained on an UNKNOWN
+# verdict "for explicit rollback", pruned by the next green deploy. Untracked
+# they made every deployed checkout read as dirty again (measured on eight VPS
+# boxes 2026-09-18), which blocks the updater's fast-forward.
+/.atomic-deploy-transaction.json
+/.atomic-deploy-transaction.reconciled.*
+/.release-candidate.*/
+/.node_modules.rollback.*/
+/.next.tmp.*/
+/.next.discarded.*/

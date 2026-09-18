@@ -667,7 +667,14 @@ fi
 # this script's own interview-lock check could ever see it — the old code
 # scored that as row-26 FAIL (indistinguishable from a dead origin). Reachable
 # + correctly gated by Access is a real security improvement, not an outage.
-CF_PASS="skip"; CF_INDET=false; CF_DETAIL="public URL not configured (row 27: UNKNOWN)"
+# NOT CONFIGURED is a known state, not an indeterminate one (2026-09-18): with
+# CC_PUBLIC_URL unset this probe used to force the whole verdict to UNKNOWN
+# (exit 3), so on every box without a public URL — all nine Hostinger VPS
+# containers — every atomic-deploy burned 36 health retries and ended UNKNOWN
+# with its rollback material retained, and watchdog-cc.sh (which never acts on
+# exit 3) could never repair anything. Unset → row 27 N/A (skip). A CONFIGURED
+# URL that is unreachable is still UNKNOWN below.
+CF_PASS="skip"; CF_INDET=false; CF_DETAIL="public URL not configured (row 27: N/A — set CC_PUBLIC_URL to probe the tunnel)"
 if [[ -n "$PUBLIC_URL" ]]; then
   _CF=$(mktemp /tmp/cf_probe_XXXXXX.html)
   # Capture BOTH the status code and the redirect target (Location resolved to an
@@ -697,7 +704,7 @@ if [[ -n "$PUBLIC_URL" ]]; then
     CF_INDET=true; CF_DETAIL="CF Access policy misconfigured: public URL returns CF challenge (UNKNOWN)"
   elif [[ "$CF_HTTP" == "200" ]]; then CF_PASS="pass"; CF_DETAIL="CF public URL → HTTP 200: PASS"
   else CF_PASS="fail"; CF_DETAIL="CF public URL → HTTP ${CF_HTTP}: FAIL"; fi
-else CF_INDET=true; fi
+fi
 [[ "$CF_INDET" == "true" ]] && log "UNKNOWN: ${CF_DETAIL}" || log "CF probe: ${CF_PASS} — ${CF_DETAIL}"
 
 # ── (d) dual-store embedding health (F2.3 / DEP-11) — NON-GATING WARN ─────────
