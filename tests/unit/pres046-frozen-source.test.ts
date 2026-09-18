@@ -178,6 +178,28 @@ function runDeploy(fixture: Fx, extraEnv: Record<string, string> = {}): { exitCo
   return { exitCode: result.status ?? 1, stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
 }
 
+test('PRES-046 F0: public/brand.css is a generated asset and is NOT in the content inventory', () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'ccbi-brand-'));
+  try {
+    mkdirSync(path.join(dir, 'public'), { recursive: true });
+    mkdirSync(path.join(dir, 'src'), { recursive: true });
+    writeFileSync(path.join(dir, 'src', 'a.ts'), 'export const a = 1;\n');
+    writeFileSync(path.join(dir, 'public', 'brand.css'), ':root{--brand:#123456}\n');
+    writeFileSync(path.join(dir, 'public', 'logo.svg'), '<svg/>\n');
+    const lib = path.join(process.cwd(), 'scripts', 'lib', 'build-inventory.sh');
+    const list = execFileSync('bash', ['-c', `source "${lib}"; _ccbi_inventory_relpaths "${dir}"`], { encoding: 'utf8' });
+    assert.ok(list.includes('public/logo.svg'), 'other public files are digested');
+    assert.ok(list.includes('src/a.ts'), 'src files are digested');
+    assert.ok(!list.includes('public/brand.css'), 'brand.css must not be digested');
+    const d1 = execFileSync('bash', ['-c', `source "${lib}"; _ccbi_inventory_digest "${dir}"`], { encoding: 'utf8' }).trim();
+    writeFileSync(path.join(dir, 'public', 'brand.css'), ':root{--brand:#abcdef}\n');
+    const d2 = execFileSync('bash', ['-c', `source "${lib}"; _ccbi_inventory_digest "${dir}"`], { encoding: 'utf8' }).trim();
+    assert.equal(d1, d2, 'changing brand.css must not change the inventory digest');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('PRES-046 F1: input mutated during build → FROZEN-SOURCE VIOLATION, exit 2, live .next untouched', () => {
   const fixture = buildFixture({
     npmBody: `# mutate a compile-affecting input DURING the build (old mtime: content is the oracle)

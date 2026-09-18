@@ -1,3 +1,8 @@
+## [v7.6.5] — 2026-09-18 — The generated brand.css is outside the content inventory
+
+### Fixed
+- **`public/brand.css` is excluded from the PRES-046 content inventory.** The inventory digests every file under `public/`, and brand.css is generated per box (`generate-brand-css.py` writes the client's colours; since v7.6.3 `cc-start.sh` seeds the shipped default when it is absent). Two measured consequences: a branded box reads as "build/content MISMATCH vs source" on its next restart and refuses to start (exit 78, `content-mismatch-invalid-receipt`), and on the operator Mac a restart loop that re-seeded the file while `atomic-deploy.sh` was digesting the tree produced a FROZEN-SOURCE VIOLATION and a discarded candidate. The file never affects what compiles. `_ccbi_inventory_relpaths` now skips it; regression test PRES-046 F0 proves changing it leaves the inventory digest unchanged while other `public/` files are still digested.
+
 ## [v7.6.4] — 2026-09-18 — Dispatched agent runs get their full time budget (ported from a box hot-fix)
 
 ### Fixed
