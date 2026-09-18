@@ -11,7 +11,7 @@
 #   2 missing-manifest
 #   3 corrupt-manifest
 #   4 mismatched-manifest-content
-#   5 failed-verifier-execution
+#   5 verifier-unavailable-fail-closed
 #   6 legitimate-rollback-receipt
 #   7 stale-rollback-receipt
 #
@@ -41,12 +41,19 @@ if [[ -z "$REAL_NODE" ]]; then
 fi
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/cc-start-launcher-matrix.XXXXXX")"
+
+# Durable evidence directory. Receipts survive cleanup so the operator can audit
+# every case after the throwaway app trees and markers are gone. Override with
+# CC_LAUNCHER_MATRIX_RECEIPT_DIR to write to a specific evidence location.
+RECEIPTS_DIR="${CC_LAUNCHER_MATRIX_RECEIPT_DIR:-${TMPDIR:-/tmp}/cc-start-launcher-matrix-receipts/run-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+mkdir -p "$RECEIPTS_DIR"
+
 cleanup() {
   "$REAL_NODE" -e 'const fs=require("node:fs"); fs.rmSync(process.argv[1],{recursive:true,force:true});' "$WORK"
 }
 trap cleanup EXIT
 
-mkdir -p "$WORK/bin" "$WORK/bin-verifier-failure" "$WORK/markers" "$WORK/receipts" "$WORK/apps"
+mkdir -p "$WORK/bin" "$WORK/bin-verifier-failure" "$WORK/markers" "$WORK/apps"
 
 # Fake Node/next wrapper. -e delegates to real Node for the launcher's durable
 # receipt writer; the final server exec writes a marker instead of starting.
@@ -152,7 +159,7 @@ write_rollback_receipt() {
 
 record_case() {
   local case_name="$1" exit_code="$2" launched="$3" receipt_path="$4"
-  local receipt_file="$WORK/receipts/$case_name.json"
+  local receipt_file="$RECEIPTS_DIR/$case_name.json"
   local timestamp
   timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   "$REAL_NODE" -e '
@@ -264,9 +271,9 @@ printf 'export const launcherMatrix = 2;\n' > "$APP4/src/a.ts"
 run_case mismatched-manifest-content "$APP4" 78 false
 
 printf '[launcher-matrix] case 5: failed verifier execution\n'
-APP5="$(make_app failed-verifier-execution)"
+APP5="$(make_app verifier-unavailable-fail-closed)"
 seal_app "$APP5"
-run_case failed-verifier-execution "$APP5" 78 false "$WORK/bin-verifier-failure"
+run_case verifier-unavailable-fail-closed "$APP5" 78 false "$WORK/bin-verifier-failure"
 
 printf '[launcher-matrix] case 6: legitimate rollback receipt\n'
 APP6="$(make_app legitimate-rollback-receipt)"
@@ -295,7 +302,7 @@ printf '[launcher-matrix] writing summary\n'
     "missing-manifest",
     "corrupt-manifest",
     "mismatched-manifest-content",
-    "failed-verifier-execution",
+    "verifier-unavailable-fail-closed",
     "legitimate-rollback-receipt",
     "stale-rollback-receipt"
   ];
@@ -306,8 +313,9 @@ printf '[launcher-matrix] writing summary\n'
     cases: rows,
     timestamp: new Date().toISOString()
   }, null, 2) + "\n");
-' "$WORK/receipts"
-printf '  summary receipt: %s\n' "$WORK/receipts/summary.json"
+' "$RECEIPTS_DIR"
+printf '  summary receipt: %s\n' "$RECEIPTS_DIR/summary.json"
+printf '[launcher-matrix] durable evidence directory: %s\n' "$RECEIPTS_DIR"
 
 printf '[launcher-matrix] %d passed, %d failed\n' "$PASS" "$FAIL"
 if (( FAIL > 0 )); then
