@@ -1,3 +1,9 @@
+## [v7.6.3] — 2026-09-18 — A client's brand colours no longer block Command Center updates
+
+### Fixed
+- **`public/brand.css` is no longer tracked.** It is generated per box by `generate-brand-css.py` with the client's colours, yet the repo tracked it, so the moment a box generated it the checkout was "dirty", `update-skills.sh` refused to fast-forward, and that box's Command Center could never update again. Measured 2026-09-17 across the first eight VPS boxes: five on 7.1.4, one on 7.3.4, two on 7.4.0, all reporting `state=dirty`. The shipped default now lives at `public/brand.default.css`; `scripts/cc-start.sh` copies it to `public/brand.css` only when the box has none, so a fresh box gets a stylesheet and a branded box keeps its own file untouched across updates.
+- **Runtime files the app drops in its own checkout are ignored.** `mission-control.lock*`, `.cc-state/`, parked `.next.*` / `.next-*` build folders, `_deploy*.log`, `ecosystem.config.cjs.*` copies, `*.verify-backup-*`, `.deploy-rollback-state.json` and the `.local-mods-backup-*/` folders the fleet fix writes. Each of these alone made `git status --porcelain` non-empty, which the updater reads as dirty.
+
 ## [v7.6.2] — 2026-09-17 — fix(cc): integrate RR14 launcher, deploy, and credential repairs
 
 ## [v7.6.1] — 2026-09-17 — The box watchdog is never blind

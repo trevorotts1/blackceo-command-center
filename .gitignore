@@ -132,3 +132,21 @@ client-roster.txt
 
 # Isolated mock Duck e2e Next build
 .next-duck-e2e/
+
+# Generated / runtime files that a box writes into its own checkout (2026-09-18).
+# Measured across the fleet: these made every Command Center checkout "dirty", and
+# the updater refuses to fast-forward a dirty checkout, so client boxes sat on
+# 7.1.4 for weeks. brand.css is generated per box by generate-brand-css.py; the
+# tracked default lives at public/brand.default.css and cc-start.sh copies it in
+# only when brand.css is absent.
+/public/brand.css
+/mission-control.lock
+/mission-control.lock.*
+/.cc-state/
+/.next.*/
+/.next-*/
+/_deploy*.log
+/ecosystem.config.cjs.*
+/*.verify-backup-*
+/.deploy-rollback-state.json
+/.local-mods-backup-*/

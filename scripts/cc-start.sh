@@ -571,4 +571,11 @@ _assert_native_abi_matches
 printf '[cc-start] Launching: next start -p %s -H 0.0.0.0 (cwd: %s)\n' "$CC_PORT" "$CC_DIR" >&2
 
 cd "$CC_DIR"
+# brand.css is a per-box generated file (generate-brand-css.py) and is no longer
+# tracked; lay down the shipped default only when the box has none, so a fresh
+# box has a stylesheet and a branded box keeps its own colours across updates.
+if [ ! -f "$CC_DIR/public/brand.css" ] && [ -f "$CC_DIR/public/brand.default.css" ]; then
+  cp "$CC_DIR/public/brand.default.css" "$CC_DIR/public/brand.css" 2>/dev/null \
+    && printf '[cc-start] public/brand.css absent — seeded from brand.default.css\n' >&2
+fi
 exec "$CC_NODE_BIN" "$CC_DIR/scripts/next-service-env.cjs" start -p "$CC_PORT" -H 0.0.0.0
