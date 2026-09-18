@@ -1,3 +1,9 @@
+## [v7.6.10] — 2026-09-18 — A box with no public URL is not "unknown", and deploy artefacts are ignored
+
+### Fixed
+- **`cc-health-check.sh`: an unconfigured public URL is row 27 N/A, not UNKNOWN.** With `CC_PUBLIC_URL` unset the probe forced the whole verdict to UNKNOWN (exit 3). Measured 2026-09-18 on the first eight VPS boxes of the Command Center fix wave: every `atomic-deploy.sh` run ended "UNKNOWN after 36 health-check attempts" (nine minutes each) with rollback material retained, and `watchdog-cc.sh`, which by contract never acts on exit 3, could never repair those boxes. Not configured is a known state. A configured URL that is unreachable, or one that returns a Cloudflare challenge, is still UNKNOWN. Test: `tests/unit/cc-health-check-no-public-url.test.sh`.
+- **The deploy's transaction artefacts are ignored by git.** `.atomic-deploy-transaction.json`, its `.reconciled.*` receipts, `.release-candidate.*/`, `.node_modules.rollback.*/`, `.next.tmp.*/` and `.next.discarded.*/` are retained on an UNKNOWN verdict "for explicit rollback" and pruned by the next green deploy; untracked, they made every freshly deployed checkout read as dirty again, which is exactly the condition that blocks the updater's fast-forward.
+
 ## [v7.6.9] — 2026-09-18 — pm2 configs resolve DATABASE_PATH from the checkout's own .env.local (ported from the fleet's hand fix)
 
 ### Fixed
