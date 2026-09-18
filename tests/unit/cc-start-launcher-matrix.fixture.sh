@@ -46,7 +46,14 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/cc-start-launcher-matrix.XXXXXX")"
 # every case after the throwaway app trees and markers are gone. Override with
 # CC_LAUNCHER_MATRIX_RECEIPT_DIR to write to a specific evidence location.
 RECEIPTS_DIR="${CC_LAUNCHER_MATRIX_RECEIPT_DIR:-${TMPDIR:-/tmp}/cc-start-launcher-matrix-receipts/run-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
-mkdir -p "$RECEIPTS_DIR"
+if ! mkdir -p "$RECEIPTS_DIR" 2>/dev/null; then
+  printf '[launcher-matrix] FATAL: cannot create durable evidence directory: %s\n' "$RECEIPTS_DIR" >&2
+  exit 1
+fi
+if [[ ! -w "$RECEIPTS_DIR" ]]; then
+  printf '[launcher-matrix] FATAL: durable evidence directory is not writable: %s\n' "$RECEIPTS_DIR" >&2
+  exit 1
+fi
 
 cleanup() {
   "$REAL_NODE" -e 'const fs=require("node:fs"); fs.rmSync(process.argv[1],{recursive:true,force:true});' "$WORK"
@@ -175,6 +182,10 @@ record_case() {
       timestamp
     }, null, 2) + "\n");
   ' "$receipt_file" "$case_name" "$exit_code" "$launched" "$receipt_path" "$timestamp"
+  if [[ ! -f "$receipt_file" ]]; then
+    printf '[launcher-matrix] FATAL: failed to write durable receipt: %s\n' "$receipt_file" >&2
+    exit 1
+  fi
   printf '  receipt: %s\n' "$receipt_file"
 }
 
@@ -314,6 +325,10 @@ printf '[launcher-matrix] writing summary\n'
     timestamp: new Date().toISOString()
   }, null, 2) + "\n");
 ' "$RECEIPTS_DIR"
+if [[ ! -f "$RECEIPTS_DIR/summary.json" ]]; then
+  printf '[launcher-matrix] FATAL: failed to write durable summary receipt: %s\n' "$RECEIPTS_DIR/summary.json" >&2
+  exit 1
+fi
 printf '  summary receipt: %s\n' "$RECEIPTS_DIR/summary.json"
 printf '[launcher-matrix] durable evidence directory: %s\n' "$RECEIPTS_DIR"
 
