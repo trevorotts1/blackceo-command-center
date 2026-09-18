@@ -66,14 +66,24 @@ export async function signTenantGrant(grant: TenantGrant): Promise<string> {
   const payload = b64(enc.encode(JSON.stringify(bound)));
   return `${payload}.${b64(await signature(payload))}`;
 }
-async function verifyGrant(token: string | null, host: string, purpose: TenantGrant['purpose'], acceptExpiredEnrollment = false): Promise<TenantGrant | null> {
+/** Enrollment tickets carry NO clock expiry: an interview invitation stays
+ * valid until the interview itself is complete, so a client who opens the link
+ * days or weeks later is never locked out of an unfinished interview. The
+ * completion check lives at the redemption route (interview-session), which is
+ * the only place that knows the build state. `exp` is still required to be a
+ * finite number, so a truncated or tampered payload fails here, and it is still
+ * enforced exactly as before for browser SESSION grants. */
+function grantExpired(grant: TenantGrant): boolean {
+  return grant.purpose === 'session' && grant.exp <= Date.now() / 1000;
+}
+async function verifyGrant(token: string | null, host: string, purpose: TenantGrant['purpose']): Promise<TenantGrant | null> {
   try {
     if (!token) return null;
     const [payload, sig, extra] = token.split('.');
     if (!payload || !sig || extra || !equal(bytes(sig), await signature(payload))) return null;
     const grant = json(payload) as TenantGrant;
     const reg = tenantRegistration(host);
-    if (grant.purpose !== purpose || grant.host !== host || grant.tenantId !== reg.tenantId || grant.companyId !== reg.companyId || grant.installationId !== reg.installationId || !grant.subject || !grant.nonce || !Number.isFinite(grant.exp) || (!(acceptExpiredEnrollment && purpose === 'enrollment') && grant.exp <= Date.now() / 1000)) return null;
+    if (grant.purpose !== purpose || grant.host !== host || grant.tenantId !== reg.tenantId || grant.companyId !== reg.companyId || grant.installationId !== reg.installationId || !grant.subject || !grant.nonce || !Number.isFinite(grant.exp) || grantExpired(grant)) return null;
     return grant;
   } catch { return null; }
 }
@@ -83,7 +93,7 @@ export async function verifyTenantGrant(token: string | null, host: string, purp
 /** Identity comparison only, after an independently verified LIVE session.
  * This never authorizes enrollment or extends session lifetime. */
 export async function verifyEnrollmentIdentity(token: string | null, host: string): Promise<TenantGrant | null> {
-  return verifyGrant(token, host, 'enrollment', true);
+  return verifyGrant(token, host, 'enrollment');
 }
 export function tenantSessionToken(request: { headers: Headers }): string | null {
   return request.headers.get('cookie')?.split(';').map(s => s.trim())

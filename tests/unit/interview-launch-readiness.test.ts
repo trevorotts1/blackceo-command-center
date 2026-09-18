@@ -103,7 +103,13 @@ test('sender-issued one-use invitation redeems to authenticated state and preser
  const denied=await stateGET(new NextRequest('https://launch.example/api/interview/state',{headers:{host:'launch.example'}}));assert.equal(denied.status,403);
  const response=await call(),invitation=await response.json();assert.equal(response.status,200,JSON.stringify(invitation));
  assert.equal(invitation.companyId,'launch-company');assert.equal(invitation.protocol,'interview-invitation.v1');
- const ticket=new URLSearchParams(new URL(invitation.url).hash.slice(1)).get('enroll')!;assert.ok(ticket);assert.ok(invitation.expiresAt<=Date.now()/1000+86400);
+ const ticket=new URLSearchParams(new URL(invitation.url).hash.slice(1)).get('enroll')!;assert.ok(ticket);
+ // The receipt's validity is completion. `expiresAt` survives only so an
+ // onboarding validator already deployed on a fleet box, which bound-checks it
+ // against 24h plus 10s of skew, still accepts a link minted here.
+ assert.equal(invitation.validUntil,'interview-complete');
+ assert.equal(invitation.oneUse,true);
+ assert.ok(invitation.expiresAt>Date.now()/1000&&invitation.expiresAt<=Date.now()/1000+86410,'legacy expiresAt must stay inside the deployed validator bound');
  const redemption=(host='launch.example')=>redeem(new NextRequest(`https://${host}/api/auth/interview-session`,{method:'POST',headers:{host,'content-type':'application/json'},body:JSON.stringify({ticket})}));
  assert.equal((await redemption('foreign.example')).status,403);
  const enrolled=await redemption();assert.equal(enrolled.status,200);assert.equal((await redemption()).status,409);
@@ -111,6 +117,10 @@ test('sender-issued one-use invitation redeems to authenticated state and preser
  const state=await stateGET(new NextRequest('https://launch.example/api/interview/state',{headers:{host:'launch.example',cookie}}));assert.equal(state.status,200,await state.text());
  assert.equal(JSON.parse(fs.readFileSync(statePath,'utf8')).interviewProgress.savedAnswer,'Keep this answer');
  const freshInvitation=await call();assert.equal(freshInvitation.status,200);assert.notEqual((await freshInvitation.json()).url,invitation.url,'fresh invitation preserves tenant answers with a new one-use token');
+ // Completion is the one state that closes issuance, exactly as it closes
+ // redemption. Nothing about elapsed time does.
+ writeState({...fresh(),interviewComplete:true});
+ const afterCompletion=await call();assert.equal(afterCompletion.status,409);assert.equal((await afterCompletion.json()).error,'interview_not_ready');
  writeState(fresh());
 });
 

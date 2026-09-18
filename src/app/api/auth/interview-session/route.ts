@@ -3,6 +3,7 @@ import { randomUUID } from 'crypto';
 import { run } from '@/lib/db';
 import { requestHost, verifyTenantGrant, verifyEnrollmentIdentity, signTenantGrant, tenantSessionToken, TENANT_SESSION_COOKIE } from '@/lib/auth/tenant-context';
 import { INTERVIEW_SESSION_TTL_SECONDS } from '@/lib/interview/session-policy';
+import { enrollmentWindowClosed } from '@/lib/interview/enrollment-window';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 const headers = { 'cache-control': 'private, no-store' };
@@ -33,6 +34,12 @@ export async function POST(req: NextRequest) {
     }
     const grant = await verifyTenantGrant(ticket, host, 'enrollment');
     if (!grant) return NextResponse.json({ error: 'invalid_enrollment' }, { status: 403, headers });
+    // The invitation never times out. Completing the interview is what ends it,
+    // so this is the only reason a well-formed, correctly signed ticket is
+    // turned away here.
+    if (enrollmentWindowClosed(grant.companyId)) {
+      return NextResponse.json({ error: 'interview_already_complete' }, { status: 403, headers });
+    }
     const expiresAt = Math.floor(Date.now() / 1000) + INTERVIEW_SESSION_TTL_SECONDS;
     // Prepare the cookie before consuming the nonce so signing failure cannot
     // burn an otherwise valid entry ticket.

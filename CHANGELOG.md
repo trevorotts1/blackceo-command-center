@@ -1,3 +1,19 @@
+## [v7.6.13] — 2026-09-18 — The interview link is valid until the interview is complete, not for 24 hours
+
+### Changed
+- **An interview enrollment link no longer expires on a clock.** It was minted with a 24-hour `exp` (900 seconds before v7.6.x) and refused the moment that passed, so a client who opened their Telegram link the next morning was turned away from an interview nobody had finished, and someone had to mint and send another one. Validity is now the interview itself: `verifyGrant` in `src/lib/auth/tenant-context.ts` enforces `exp` for browser SESSION grants only, and `POST /api/auth/interview-session` refuses an enrollment ticket for exactly one reason — `src/lib/interview/enrollment-window.ts` reads the canonical build state and finds `interviewComplete`, or a recorded `buildCompletedAt`, for this grant's company. Everything else about a ticket is checked exactly as before: HMAC signature, purpose, host, tenant, company, installation, subject, nonce, and the one-use redemption ledger.
+- **Undetermined is not complete.** An absent, unparseable, or foreign-company build state never closes an invitation. Locking an owner out of an interview nobody has proven is over is the failure this change exists to prevent, and issuance already refuses once the interview is complete.
+- **`expiresAt` survives in the `interview-invitation.v1` receipt as a compatibility field only.** Onboarding validators already deployed across the fleet bound-check it against 24 hours plus 10 seconds of skew before they will deliver a link, so it is still stamped inside that bound and a box running the older validator keeps working untouched. The truthful field is the new `validUntil: "interview-complete"`, which the paired onboarding release reads to decide there is no deadline to enforce or to quote to the client. Nothing in redemption reads either one.
+
+### Fixed
+- **`tests/unit/interview-session-resume.test.ts` pinned no workspace.** With redemption now reading the canonical build state, the unpinned resolver walked to the real `~/.openclaw/workspace` of whatever box ran the suite, and that box's own completed interview refused every enrollment in the file. It now writes and pins a workspace of its own fixture.
+
+### Tests
+- `tests/unit/interview-link-no-expiry.test.ts` (new): a link 1, 30 and 365 days old still signs the owner in; it is refused once `interviewComplete` or `buildCompletedAt` is recorded; a missing or corrupt state never refuses; another company's completed interview never closes it; tampered signature, foreign host and a registry rebind are all still refused; browser sessions still expire on the clock.
+- `tests/unit/interview-launch-readiness.test.ts`: the minted receipt carries `validUntil`, keeps `oneUse`, and keeps `expiresAt` inside the deployed validator's 86410-second bound; issuance is refused once the interview is complete.
+
+Companion bump for onboarding v25.1.49.
+
 ## [v7.6.12] — 2026-09-18 — Ignore the deploy's candidate dependency trees
 
 ### Fixed

@@ -2,6 +2,8 @@ import './_isolated-db';
 import test, { beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHmac, randomUUID } from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import { NextRequest } from 'next/server';
 import { getDb, closeDb, queryOne } from '../../src/lib/db';
 import { POST, GET } from '../../src/app/api/auth/interview-session/route';
@@ -10,6 +12,15 @@ import { INTERVIEW_INVITATION_TTL_SECONDS, INTERVIEW_SESSION_TTL_SECONDS } from 
 
 const host = 'resume-owner.example';
 const registration = { tenantId: 'resume-tenant', companyId: 'resume-company', installationId: 'resume-install', kind: 'self' };
+// Redemption now reads the canonical build state to decide whether the
+// interview is over. Pin a workspace of this fixture's own: unpinned, the
+// resolver walks to the REAL ~/.openclaw/workspace of whatever box runs the
+// suite, and that box's own completed interview would refuse every enrollment
+// here.
+const workspace = path.join(process.env.CC_TEST_FIXTURE_ROOT!, 'resume-workspace');
+fs.mkdirSync(workspace, { recursive: true });
+process.env.OPENCLAW_WORKSPACE_ROOT = workspace;
+fs.writeFileSync(path.join(workspace, '.workforce-build-state.json'), JSON.stringify({ ...registration, interviewComplete: false }));
 process.env.MC_API_TOKEN = 'fixture-session-api';
 process.env.MC_TENANT_SESSION_SECRET = 'fixture-session-signing';
 process.env.DISABLE_CRON = '1';
@@ -35,7 +46,7 @@ async function atTime<T>(timestamp: number, body: () => Promise<T>) {
   try { return await body(); } finally { Date.now = original; }
 }
 
-test('24h ticket and 30-day cookie/JWT expiry remain separate and exact', async () => {
+test('legacy 24h receipt field and 30-day cookie/JWT expiry remain separate and exact', async () => {
   assert.equal(INTERVIEW_INVITATION_TTL_SECONDS, 86400);
   assert.equal(INTERVIEW_SESSION_TTL_SECONDS, 2592000);
   const start = now(); const { response, cookie } = await enroll();
@@ -57,21 +68,39 @@ test('redeemed link resumes with live matching cookie but remains single-use wit
   assert.equal(resumed.headers.get('cache-control'), 'private, no-store');
 });
 
-test('expired link resumes matching browser session but cannot enroll another browser', async () => {
+test('a long-dormant link resumes its browser session and is only ever refused as already used', async () => {
   const start = Date.now(); const { token, cookie } = await enroll();
   await atTime(start + 2 * 86400 * 1000, async () => {
     assert.equal((await POST(request(token, cookie))).status, 200);
-    assert.equal((await POST(request(token))).status, 403);
+    // Age is not a reason: the ticket is refused because it was redeemed, and
+    // says so, rather than reporting an expiry it no longer has.
+    const replay = await POST(request(token));
+    assert.equal(replay.status, 409);
+    assert.equal((await replay.json()).error, 'enrollment_already_used');
     assert.equal((await GET(request(undefined, cookie))).status, 200);
   });
 });
 
-test('expired session cannot be renewed with its consumed ticket', async () => {
+test('a ticket minted long ago still enrolls while the interview is unfinished', async () => {
+  const start = Date.now();
+  const stale = await ticket(now() - 45 * 86400);
+  await atTime(start + 60 * 86400 * 1000, async () => {
+    const response = await POST(request(stale));
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).resumed, false);
+  });
+});
+
+test('an expired browser session falls back to the link, which no clock has invalidated', async () => {
   const start = Date.now(); const { token, cookie } = await enroll();
   await atTime(start + (INTERVIEW_SESSION_TTL_SECONDS + 2) * 1000, async () => {
-    assert.equal((await POST(request(token, cookie))).status, 403);
     assert.equal((await GET(request(undefined, cookie))).status, 403);
     await assert.rejects(resolveTenantContext(request(undefined, cookie)));
+    // The dead cookie drops through to the enrollment branch, where the ticket
+    // itself is still cryptographically and temporally acceptable.
+    assert.equal((await POST(request(token, cookie))).status, 409);
+    const fresh = await POST(request(await ticket(now() - 90 * 86400), cookie));
+    assert.equal(fresh.status, 200);
   });
 });
 
