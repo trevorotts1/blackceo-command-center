@@ -11,7 +11,8 @@ bad() { FAIL=$((FAIL+1)); printf '  FAIL - %s\n' "$1"; }
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 # Extract the resolver function verbatim from the script so the test runs the
 # real code, not a copy.
-sed -n '/^_configured_db_path() {/,/^}/p' scripts/atomic-deploy.sh > "$TMP/fn.sh"
+sed -n '/^_abs_under_app() {/,/^}/p' scripts/atomic-deploy.sh > "$TMP/fn.sh"
+sed -n '/^_configured_db_path() {/,/^}/p' scripts/atomic-deploy.sh >> "$TMP/fn.sh"
 sed -n '/^_resolve_runtime_db_path() {/,/^}/p' scripts/atomic-deploy.sh >> "$TMP/fn.sh"
 [[ -s "$TMP/fn.sh" ]] && ok "resolver function found in scripts/atomic-deploy.sh" || bad "resolver function missing"
 _warn() { :; }
@@ -22,6 +23,9 @@ DB_FILE="$APP_DIR/mission-control.db"
 # 1. --db-path wins over everything
 DB_PATH_OVERRIDE="/o/verride.db"; DATABASE_PATH="/nope/x.db"
 [[ "$(_resolve_runtime_db_path)" == "/o/verride.db" ]] && ok "--db-path wins" || bad "--db-path did not win"
+# 1b. a RELATIVE --db-path is anchored under APP_DIR (never handed to the app as-is)
+DB_PATH_OVERRIDE="mission-control.db"; DATABASE_PATH=""
+[[ "$(_resolve_runtime_db_path)" == "$APP_DIR/mission-control.db" ]] && ok "relative --db-path is anchored under APP_DIR" || bad "relative --db-path not anchored: $(_resolve_runtime_db_path)"
 # 2. shell DATABASE_PATH with an EXISTING directory is kept
 DB_PATH_OVERRIDE=""; DATABASE_PATH="$TMP/live.db"
 [[ "$(_resolve_runtime_db_path)" == "$TMP/live.db" ]] && ok "shell DATABASE_PATH with existing dir is kept" || bad "existing-dir shell value not kept"
