@@ -12,7 +12,7 @@
 - `tests/unit/interview-link-no-expiry.test.ts` (new): a link 1, 30 and 365 days old still signs the owner in; it is refused once `interviewComplete` or `buildCompletedAt` is recorded; a missing or corrupt state never refuses; another company's completed interview never closes it; tampered signature, foreign host and a registry rebind are all still refused; browser sessions still expire on the clock.
 - `tests/unit/interview-launch-readiness.test.ts`: the minted receipt carries `validUntil`, keeps `oneUse`, and keeps `expiresAt` inside the deployed validator's 86410-second bound; issuance is refused once the interview is complete.
 
-Companion bump for onboarding v25.1.49.
+Companion bump for onboarding v25.1.50.
 
 ## [v7.6.12] — 2026-09-18 — Ignore the deploy's candidate dependency trees
 
