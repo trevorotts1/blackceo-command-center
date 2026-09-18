@@ -172,12 +172,14 @@ for(const id of ['client-a','client-b'])run('INSERT OR IGNORE INTO clients(id,na
   const current=queryOne<any>("SELECT assigned_agent_id,killed_at FROM tasks WHERE id='cancel-during-route'");
   assert.ok(current.killed_at);assert.equal(current.assigned_agent_id,null);assert.equal(sends,0);
  });
- test('enrollment is one use and readiness validates the installed identity',async()=>{
+ test('enrollment re-opens while the interview is unfinished and readiness validates the installed identity',async()=>{
   const {POST:enroll}=await import('../../src/app/api/auth/interview-session/route');
   const ticket=await signTenantGrant({purpose:'enrollment',tenantId:'tenant-a',subject:'owner:a',host:'a.example',installationId:'install-a',exp:Date.now()/1000+60,nonce:randomUUID()});
   const request=()=>new NextRequest('https://a.example/api/auth/interview-session',{method:'POST',headers:{host:'a.example','content-type':'application/json'},body:JSON.stringify({ticket})});
   assert.equal((await enroll(request())).status,200);
-  assert.equal((await enroll(request())).status,409);
+  // The link is re-openable until the interview is complete, so a second open
+  // from a browser with no cookie signs the same owner in again.
+  assert.equal((await enroll(request())).status,200);
   const {GET:ready}=await import('../../src/app/api/auth/tenant-ready/route');
   process.env.MC_INSTALLATION_ID='wrong-install';
   assert.equal((await ready(req('self.example','/api/auth/tenant-ready',{authorization:'Bearer fixture-api-token'}))).status,503);

@@ -47,7 +47,9 @@ async function enroll(owner: string) {
   assert.equal(response.status, 200);
   const cookie = response.headers.get('set-cookie')!.split(';')[0];
   assert.match(cookie, /^mc_tenant_session=/);
-  assert.equal((await POST(request(owner, '/api/auth/interview-session', '', { ticket }))).status, 409);
+  // Re-opening the same link is how a second device or a lapsed cookie gets
+  // back in, so it must succeed while the interview is unfinished.
+  assert.equal((await POST(request(owner, '/api/auth/interview-session', '', { ticket }))).status, 200);
   return cookie;
 }
 

@@ -13,10 +13,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { NextRequest } from 'next/server';
-import { getDb } from '../../src/lib/db';
+import { getDb, queryOne } from '../../src/lib/db';
 import { POST, GET } from '../../src/app/api/auth/interview-session/route';
 import { signTenantGrant, verifyTenantGrant } from '../../src/lib/auth/tenant-context';
-import { INTERVIEW_INVITATION_VALID_UNTIL, INTERVIEW_SESSION_TTL_SECONDS } from '../../src/lib/interview/session-policy';
+import { INTERVIEW_INVITATION_VALID_UNTIL, INTERVIEW_INVITATION_REDEEMABLE, INTERVIEW_SESSION_TTL_SECONDS } from '../../src/lib/interview/session-policy';
 import { interviewFinished } from '../../src/lib/interview/enrollment-window';
 
 const root = process.env.CC_TEST_FIXTURE_ROOT!;
@@ -128,6 +128,44 @@ test('browser sessions still expire on the clock; only the link stopped doing so
   } finally { Date.now = original; }
 });
 
-test('the published validity contract is completion, not a duration', () => {
+test('the same link opens on a second device, and a third, while the interview is unfinished', async () => {
+  const token = await ticket(10);
+  const opens = [await redeem(token), await redeem(token), await redeem(token)];
+  for (const [i, response] of opens.entries()) {
+    assert.equal(response.status, 200, `open ${i + 1} must succeed`);
+    assert.equal((await response.json()).resumed, false);
+    assert.ok(response.headers.get('set-cookie'), 'each open issues its own browser session');
+  }
+  // Re-opening is not an identity widening: every session belongs to the
+  // subject the ticket was signed for.
+  for (const response of opens) {
+    const cookie = response.headers.get('set-cookie')!.split(';')[0];
+    const grant = await verifyTenantGrant(cookie.split('=')[1], host, 'session');
+    assert.equal(grant?.subject, 'invited-owner:' + 'a'.repeat(64));
+  }
+});
+
+test('the first open is recorded once, as an audit trail and never as a gate', async () => {
+  const token = await ticket();
+  const nonce = JSON.parse(Buffer.from(token.split('.')[0], 'base64url').toString()).nonce;
+  assert.equal(queryOne('SELECT nonce FROM interview_enrollment_uses WHERE nonce=?', [nonce]), undefined);
+  assert.equal((await redeem(token)).status, 200);
+  assert.ok(queryOne('SELECT nonce FROM interview_enrollment_uses WHERE nonce=?', [nonce]), 'the first open is recorded');
+  assert.equal((await redeem(token)).status, 200);
+  assert.equal(queryOne<{ n: number }>('SELECT COUNT(*) AS n FROM interview_enrollment_uses WHERE nonce=?', [nonce])!.n, 1);
+});
+
+test('a link already opened is still refused the moment the interview completes', async () => {
+  const token = await ticket();
+  assert.equal((await redeem(token)).status, 200);
+  writeState({ ...registration, interviewComplete: true });
+  const refused = await redeem(token);
+  assert.equal(refused.status, 403);
+  assert.equal((await refused.json()).error, 'interview_already_complete');
+  assert.equal(refused.headers.get('set-cookie'), null);
+});
+
+test('the published contract is completion for validity and for redemption, never a duration', () => {
   assert.equal(INTERVIEW_INVITATION_VALID_UNTIL, 'interview-complete');
+  assert.equal(INTERVIEW_INVITATION_REDEEMABLE, 'until-interview-complete');
 });

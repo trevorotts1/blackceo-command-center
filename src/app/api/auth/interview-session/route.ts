@@ -24,8 +24,8 @@ export async function POST(req: NextRequest) {
     const host = requestHost(req);
     const active = await verifyTenantGrant(tenantSessionToken(req), host, 'session');
     if (active) {
-      // An already authenticated browser may reopen its one-use link. Verify
-      // signature AND ownership even after ticket expiry; never switch owners.
+      // An already authenticated browser may reopen its link. Verify signature
+      // AND ownership; never switch owners.
       const identity = await verifyEnrollmentIdentity(ticket, host);
       if (!identity || identity.subject !== active.subject) {
         return NextResponse.json({ error: 'enrollment_session_mismatch' }, { status: 403, headers });
@@ -41,11 +41,18 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'interview_already_complete' }, { status: 403, headers });
     }
     const expiresAt = Math.floor(Date.now() / 1000) + INTERVIEW_SESSION_TTL_SECONDS;
-    // Prepare the cookie before consuming the nonce so signing failure cannot
-    // burn an otherwise valid entry ticket.
     const token = await signTenantGrant({ ...grant, purpose: 'session', exp: expiresAt, nonce: randomUUID() });
-    const used = run('INSERT OR IGNORE INTO interview_enrollment_uses (nonce,used_at) VALUES (?,?)', [grant.nonce, new Date().toISOString()]);
-    if (!used.changes) return NextResponse.json({ error: 'enrollment_already_used' }, { status: 409, headers });
+    // The link is RE-OPENABLE until the interview is complete. Burning the nonce
+    // on first redemption locked a client out of an unfinished interview the
+    // moment they switched device, cleared cookies, or came back after the
+    // browser session lapsed — a second way for the link to die early, which the
+    // ruling forbids just as it forbids the clock. The first use is still
+    // recorded, now as an audit trail rather than a gate.
+    //
+    // Identity does not widen. Every redemption issues a session for the subject
+    // the ticket was signed for, so re-opening cannot switch owners, and the
+    // completion check above is the one thing that ends the link.
+    run('INSERT OR IGNORE INTO interview_enrollment_uses (nonce,used_at) VALUES (?,?)', [grant.nonce, new Date().toISOString()]);
     const response = NextResponse.json({ ok: true, resumed: false, expiresAt }, { headers });
     response.cookies.set(TENANT_SESSION_COOKIE, token, {
       httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'strict',

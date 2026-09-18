@@ -94,7 +94,7 @@ test('ambient systemAgent selection wins; ownerless multi-agent fleet cannot gue
  } finally {fs.writeFileSync(configPath,original);}
 });
 
-test('sender-issued one-use invitation redeems to authenticated state and preserves answers',async()=>{
+test('sender-issued invitation redeems to authenticated state, re-opens, and preserves answers',async()=>{
  const {POST:issue}=await import('../../src/app/api/auth/interview-invitation/route');
  const {POST:redeem}=await import('../../src/app/api/auth/interview-session/route');
  const {GET:stateGET}=await import('../../src/app/api/interview/state/route');
@@ -108,15 +108,16 @@ test('sender-issued one-use invitation redeems to authenticated state and preser
  // onboarding validator already deployed on a fleet box, which bound-checks it
  // against 24h plus 10s of skew, still accepts a link minted here.
  assert.equal(invitation.validUntil,'interview-complete');
- assert.equal(invitation.oneUse,true);
+ assert.equal(invitation.redeemable,'until-interview-complete');
+ assert.equal(invitation.oneUse,true,'legacy wire constant kept so already-deployed onboarding validators still accept the receipt');
  assert.ok(invitation.expiresAt>Date.now()/1000&&invitation.expiresAt<=Date.now()/1000+86410,'legacy expiresAt must stay inside the deployed validator bound');
  const redemption=(host='launch.example')=>redeem(new NextRequest(`https://${host}/api/auth/interview-session`,{method:'POST',headers:{host,'content-type':'application/json'},body:JSON.stringify({ticket})}));
  assert.equal((await redemption('foreign.example')).status,403);
- const enrolled=await redemption();assert.equal(enrolled.status,200);assert.equal((await redemption()).status,409);
+ const enrolled=await redemption();assert.equal(enrolled.status,200);assert.equal((await redemption()).status,200,'the delivered link re-opens on a second device');
  const cookie=enrolled.headers.get('set-cookie')!.split(';')[0];
  const state=await stateGET(new NextRequest('https://launch.example/api/interview/state',{headers:{host:'launch.example',cookie}}));assert.equal(state.status,200,await state.text());
  assert.equal(JSON.parse(fs.readFileSync(statePath,'utf8')).interviewProgress.savedAnswer,'Keep this answer');
- const freshInvitation=await call();assert.equal(freshInvitation.status,200);assert.notEqual((await freshInvitation.json()).url,invitation.url,'fresh invitation preserves tenant answers with a new one-use token');
+ const freshInvitation=await call();assert.equal(freshInvitation.status,200);assert.notEqual((await freshInvitation.json()).url,invitation.url,'fresh invitation preserves tenant answers with a new token');
  // Completion is the one state that closes issuance, exactly as it closes
  // redemption. Nothing about elapsed time does.
  writeState({...fresh(),interviewComplete:true});
