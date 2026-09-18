@@ -2,10 +2,11 @@ import { NextRequest, NextResponse } from 'next/server';
 import { randomUUID } from 'crypto';
 import { resolveTenantContext, signTenantGrant } from '@/lib/auth/tenant-context';
 import { GET as readiness } from '@/app/api/auth/interview-ready/route';
-import { INTERVIEW_INVITATION_TTL_SECONDS } from './session-policy';
+import { INTERVIEW_INVITATION_TTL_SECONDS, INTERVIEW_INVITATION_VALID_UNTIL, INTERVIEW_INVITATION_REDEEMABLE } from './session-policy';
 
 
-/** Operator-authorized issuance; one-use redemption stays in interview-session. */
+/** Operator-authorized issuance. Redemption, and the completion check that is
+ *  the only thing which ends a link, stay in interview-session. */
 export async function createInterviewInvitation(req: NextRequest, recipientHash: string) {
   const headers = { 'cache-control': 'private, no-store' };
   try {
@@ -41,6 +42,11 @@ export async function createInterviewInvitation(req: NextRequest, recipientHash:
     if (ready.status !== 200 || receipt.ready !== true || receipt.interviewComplete !== false) {
       return NextResponse.json({ error: 'interview_not_ready' }, { status: 409, headers });
     }
+    // `expiresAt` is a legacy compatibility field, not this link's lifetime.
+    // The link is valid until the interview is complete; redemption enforces
+    // that and ignores `exp` entirely. The value is kept inside the 24h bound
+    // the already-deployed onboarding validators insist on, so a fleet box
+    // running the older validator still delivers a link minted here.
     const expiresAt = Math.floor(Date.now() / 1000) + INTERVIEW_INVITATION_TTL_SECONDS;
     const ticket = await signTenantGrant({
       purpose: 'enrollment',
@@ -59,6 +65,15 @@ export async function createInterviewInvitation(req: NextRequest, recipientHash:
       installationId: context.installationId,
       host: context.host,
       expiresAt,
+      validUntil: INTERVIEW_INVITATION_VALID_UNTIL,
+      redeemable: INTERVIEW_INVITATION_REDEEMABLE,
+      // LEGACY WIRE CONSTANT, not a description of behaviour. Onboarding
+      // validators already deployed across the fleet refuse any receipt whose
+      // `oneUse` is not exactly true, so dropping it would stop those boxes
+      // delivering links at all. Redemption is no longer single-use: the link
+      // is re-openable until the interview is complete, and `redeemable` above
+      // is the field that says so truthfully. Remove this only once no fleet
+      // box runs a validator that requires it.
       oneUse: true,
       url: `${publicUrl.origin}/interview#enroll=${encodeURIComponent(ticket)}`,
     }, { headers });

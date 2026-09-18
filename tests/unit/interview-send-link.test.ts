@@ -124,7 +124,7 @@ test('fresh owner without Access gets a private 24-hour grant for configured pub
   const entered = await redeem(enrollment());
   assert.equal(entered.status, 200, 'owner without Access can exchange delivered ticket');
   assert.match(entered.headers.get('set-cookie')!, /HttpOnly/i);
-  assert.equal((await redeem(enrollment())).status, 409, 'one-use protection remains intact');
+  assert.equal((await redeem(enrollment())).status, 200, 'the same link re-opens while the interview is unfinished');
 });
 test('saved interview receives fresh enrollment with resume copy without resetting answers', async () => {
   const saved = { ...fresh(), buildCompletedAt: '2026-01-01', interviewSessionId: 'saved-session', interviewProgress: { lastQuestionNumber: 4 }, answers: { q1: 'Saved answer' } };

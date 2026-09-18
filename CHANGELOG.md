@@ -1,3 +1,25 @@
+## [v7.6.21] — 2026-09-18 — The interview link is valid until the interview is complete: no clock, no burn-on-use
+
+### Changed
+- **An interview enrollment link no longer expires on a clock.** It was minted with a 24-hour `exp` (900 seconds before v7.6.x) and refused the moment that passed, so a client who opened their Telegram link the next morning was turned away from an interview nobody had finished, and someone had to mint and send another one. Validity is now the interview itself: `verifyGrant` in `src/lib/auth/tenant-context.ts` enforces `exp` for browser SESSION grants only, and `POST /api/auth/interview-session` refuses an enrollment ticket for exactly one reason — `src/lib/interview/enrollment-window.ts` reads the canonical build state and finds `interviewComplete`, or a recorded `buildCompletedAt`, for this grant's company. Everything else about a ticket is checked exactly as before: HMAC signature, purpose, host, tenant, company, installation, subject, nonce, and the one-use redemption ledger.
+- **Undetermined is not complete.** An absent, unparseable, or foreign-company build state never closes an invitation. Locking an owner out of an interview nobody has proven is over is the failure this change exists to prevent, and issuance already refuses once the interview is complete.
+- **`expiresAt` survives in the `interview-invitation.v1` receipt as a compatibility field only.** Onboarding validators already deployed across the fleet bound-check it against 24 hours plus 10 seconds of skew before they will deliver a link, so it is still stamped inside that bound and a box running the older validator keeps working untouched. The truthful field is the new `validUntil: "interview-complete"`, which the paired onboarding release reads to decide there is no deadline to enforce or to quote to the client. Nothing in redemption reads either one.
+
+- **A link is no longer spent by being used.** `POST /api/auth/interview-session` inserted the ticket's nonce into `interview_enrollment_uses` and answered `409 enrollment_already_used` on any second open, so the moment a client opened their link on a phone and later reached for a laptop, cleared cookies, or came back after the 30-day browser session lapsed, the same link refused them on an interview nobody had finished. That is the same failure as an expiry reached by another route. The nonce is still recorded, once, as an audit trail rather than a gate, and the link re-opens until the interview is complete.
+- **Re-opening cannot widen identity.** Every redemption issues a session for the subject the ticket was signed for, so a second open signs in the same invited owner and never switches owners. Signature, purpose, host, tenant, company and installation binding are unchanged.
+- **The browser session stays bounded at 30 days, and no longer strands anyone.** A lapsed cookie now falls back to re-opening the same link instead of dead-ending on a consumed nonce, so the bound can stay without being a lockout.
+- **The receipt gained `redeemable: "until-interview-complete"`.** `oneUse: true` is retained as a legacy wire constant, and is explicitly documented as no longer describing behaviour: onboarding validators already deployed across the fleet refuse any receipt whose `oneUse` is not exactly `true`, so dropping it would stop those boxes delivering links at all. Remove it only once no fleet box runs a validator that requires it.
+
+### Fixed
+- **`tests/unit/interview-session-resume.test.ts` pinned no workspace.** With redemption now reading the canonical build state, the unpinned resolver walked to the real `~/.openclaw/workspace` of whatever box ran the suite, and that box's own completed interview refused every enrollment in the file. It now writes and pins a workspace of its own fixture.
+
+### Tests
+- `tests/unit/interview-link-no-expiry.test.ts` (new): a link 1, 30 and 365 days old still signs the owner in; the same link opens on a second device and a third, each time as the same invited owner; the first open is recorded once and never becomes a gate; it is refused once `interviewComplete` or `buildCompletedAt` is recorded, including a link already opened; a missing or corrupt state never refuses; another company's completed interview never closes it; tampered signature, foreign host and a registry rebind are all still refused; browser sessions still expire on the clock.
+- `tests/unit/interview-session-resume.test.ts`: a redeemed link resumes on its own browser and re-opens on a fresh one; an expired browser session is recovered by re-opening the very same link; the first-use audit row survives a database close/reopen and is written once, not once per open.
+- `tests/unit/interview-launch-readiness.test.ts`: the minted receipt carries `validUntil`, keeps `oneUse`, and keeps `expiresAt` inside the deployed validator's 86410-second bound; issuance is refused once the interview is complete.
+
+Companion bump for onboarding v25.1.50.
+
 ## [v7.6.12] — 2026-09-18 — Ignore the deploy's candidate dependency trees
 
 ### Fixed

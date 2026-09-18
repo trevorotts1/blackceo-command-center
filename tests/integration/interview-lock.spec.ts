@@ -112,7 +112,7 @@ async function clearGateCookies(context:import('playwright/test').BrowserContext
 }
 test.beforeEach(async({context})=>authenticatedContext(context));
 
-test('registered invitation redeems once and authenticates browser interview access',async({context,page})=>{
+test('registered invitation authenticates browser interview access and re-opens on a fresh browser',async({context,page})=>{
   writeBuildState(false);
   await context.clearCookies();
   const denied=await page.request.get('/api/interview/answers');
@@ -122,8 +122,21 @@ test('registered invitation redeems once and authenticates browser interview acc
   expect(enrolled.status()).toBe(200);
   expect((await context.cookies()).some(c=>c.name==='mc_tenant_session'&&c.httpOnly)).toBeTruthy();
   expect((await page.request.post('/api/auth/interview-session',{data:{ticket}})).status()).toBe(200);
+  // A second device with no cookie is the case a burned nonce used to lock
+  // out. While the interview is unfinished the same link signs the owner in.
   const freshBrowser = await request.newContext({ baseURL: BASE_URL, ignoreHTTPSErrors: PRODUCTION_MODE });
-  try { expect((await freshBrowser.post('/api/auth/interview-session', { data: { ticket } })).status()).toBe(409); } finally { await freshBrowser.dispose(); }
+  try {
+    expect((await freshBrowser.post('/api/auth/interview-session', { data: { ticket } })).status()).toBe(200);
+    // Completion is the one thing that ends it, on that fresh browser too.
+    writeBuildState(true);
+    const afterCompletion = await request.newContext({ baseURL: BASE_URL, ignoreHTTPSErrors: PRODUCTION_MODE });
+    try {
+      const refused = await afterCompletion.post('/api/auth/interview-session', { data: { ticket } });
+      expect(refused.status()).toBe(403);
+      expect((await refused.json()).error).toBe('interview_already_complete');
+    } finally { await afterCompletion.dispose(); }
+    writeBuildState(false);
+  } finally { await freshBrowser.dispose(); }
   expect((await page.request.get('/api/interview/gate-status')).status()).toBe(200);
 });
 
@@ -145,7 +158,7 @@ test('minted operator invitation opens its fragment and loads own authenticated 
   });
   expect(minted.status(), await minted.text()).toBe(200);
   const invitation = await minted.json();
-  expect(invitation).toMatchObject({ protocol: 'interview-invitation.v1', companyId: 'default', tenantId: 'interview-lock-tenant', installationId: 'interview-lock-install', oneUse: true });
+  expect(invitation).toMatchObject({ protocol: 'interview-invitation.v1', companyId: 'default', tenantId: 'interview-lock-tenant', installationId: 'interview-lock-install', validUntil: 'interview-complete', redeemable: 'until-interview-complete', oneUse: true });
   // Cold Next compilation and hydration share this test's bounded 60-second budget.
   let redemptions = 0;
   page.on('request', request => {
@@ -178,13 +191,13 @@ test('minted operator invitation opens its fragment and loads own authenticated 
   expect(resumedState.session.interviewSessionId).toBe(ownState.session.interviewSessionId);
   await expect(page).toHaveURL(`${BASE_URL}/interview`);
   await expect(page.getByRole('heading', { name: 'Let’s tailor your company' })).toBeVisible();
-  expect(redemptions).toBe(1); // Reload must not replay the consumed ticket.
+  expect(redemptions).toBe(1); // Reload must not re-POST the ticket, whether or not a second open would be accepted.
   const ticket = new URL(invitation.url).hash.slice('#enroll='.length);
   expect((await page.request.post('/api/auth/interview-session', { data: { ticket } })).status()).toBe(200);
   await page.goto(invitation.url);
   await expect(page).toHaveURL(`${BASE_URL}/interview`);
   await expect(page.getByRole('heading', { name: 'Let’s tailor your company' })).toBeVisible();
-  expect(redemptions).toBe(1); // APIRequestContext calls are outside page events; reopening must not redeem in the browser.
+  expect(redemptions).toBe(1); // APIRequestContext calls are outside page events; reopening the URL must not redeem again from the browser.
   expect(JSON.parse(fs.readFileSync(BUILD_STATE_PATH, 'utf8')).interviewComplete).toBe(false);
   writeBuildState(false);
 });
