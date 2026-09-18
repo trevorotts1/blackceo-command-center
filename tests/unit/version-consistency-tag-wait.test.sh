@@ -91,6 +91,23 @@ expect "a PR whose version is not newer still fails"      1 "$TMP/step.sh" 999 p
 echo "  -- pull-request behaviour is unchanged --"
 expect "a PR preparing a newer version is allowed"        0 "$TMP/step.sh" 999 pull_request v9.9.8
 expect "a PR whose tag already exists passes"             0 "$TMP/step.sh" 0   pull_request v9.9.8
+echo "  -- manual re-runs (workflow_dispatch) --"
+# Every workflow here gained workflow_dispatch so a dropped push event can be
+# re-run on main without inventing a commit (measured: the v7.6.22 merge
+# 3737ed4 fired zero workflows, and with no manual trigger the release could
+# not be verified at all). A manual run is not a release race: the tag it is
+# checking already exists, so the bounded wait must NOT engage. If it ever
+# did, a manual re-run on a genuinely untagged tree would burn 300 seconds
+# before reporting what it already knew.
+expect "a manual run on a tagged tree passes"             0 "$TMP/step.sh" 0   workflow_dispatch
+expect "a manual run with no tag fails without waiting"   1 "$TMP/step.sh" 999 workflow_dispatch
+run_step "$TMP/step.sh" 999 workflow_dispatch
+if grep -q "waiting for auto-tag-on-merge" "$TMP/out.txt"; then
+  bad "a manual run entered the 300s release-race wait"
+else
+  ok "a manual run never enters the release-race wait"
+fi
+
 
 # The success message and the verdict must never contradict each other, which
 # is the exact signature the live failure left in its log.

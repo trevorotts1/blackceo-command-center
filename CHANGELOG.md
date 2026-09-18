@@ -1,3 +1,17 @@
+## [v7.6.24] — 2026-09-18 — Every workflow that gates main can be run by hand
+
+### Fixed
+- **All ten workflows in `.github/workflows/` accept `workflow_dispatch`.** GitHub does not guarantee that a push produces workflow runs, and it did not here: the v7.6.22 merge `3737ed4` fired zero runs, with `check_suites=0` and `actions/runs=0`, while its own predecessor `0b5cbdabc` shows 11 and 9 on the same queries. None of the ten workflows accepted a manual trigger, so there was then no way to run the gates on main at all. That release shipped with no CI verdict and its annotated tag had to be cut by hand, and the only other route to a verdict was to invent a commit purely to make the gates fire. Each workflow gains the trigger and nothing else: no `on:` key was removed, reordered or re-scoped, no path filter changed, and no job was touched. `update-main-convergence-guard.yml` keeps its path filters, which a manual run deliberately bypasses, since bypassing them is the entire point of a manual re-run.
+- **A manual run is not a release race.** `version-consistency.yml`'s bounded 300-second wait for `auto-tag-on-merge.yml` stays scoped to `push`, so a hand-triggered run on an untagged tree reports that immediately instead of burning five minutes waiting for a tag no push is about to cut.
+
+### Tests
+- `tests/unit/workflows-manually-runnable.test.sh` (new): asserts that every workflow declaring `push` to `main` also declares `workflow_dispatch`, so this cannot silently regress into the state that made v7.6.22 unverifiable. It parses the `on:` block directly rather than through PyYAML, so it cannot fail on a runner whose python lacks the module, and it refuses to pass vacuously: it fails if no workflow files are found, fails if none is detected as gating main, and ends with a mutation proof that strips the trigger back out and requires the check to notice. Verified to fail on the previous tree with 10 of 13 assertions red, and pass on this one with 13 of 13.
+- `tests/unit/version-consistency-tag-wait.test.sh`: three cases added for the new trigger. A manual run on a tagged tree passes, a manual run with no tag fails without waiting, and the log is asserted never to enter the release-race wait on a manual run. 16 assertions, all green.
+- Both run inside `version-consistency.yml` itself, which now also accepts `workflow_dispatch`, so the guards are reachable by hand on exactly the occasions they are needed.
+
+### Note
+The main run of this release is the CI verdict for the current tree, which includes everything v7.6.22 introduced. No hand re-run of `3737ed4` is needed or possible.
+
 ## [v7.6.23] — 2026-09-18 — The release-tag guard's bounded wait now decides the verdict it waits for
 
 ### Fixed

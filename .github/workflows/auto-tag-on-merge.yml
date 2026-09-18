@@ -29,6 +29,7 @@ name: Auto-tag on merge to main
 on:
   push:
     branches: [main]
+  workflow_dispatch:
 
 # This repo's default workflow token is READ-ONLY, so the write scope must be
 # requested explicitly or the tag push fails with 403.
