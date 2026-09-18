@@ -1774,7 +1774,15 @@ If you need help or clarification, ask the orchestrator.`;
         sessionKey,
         message: `${taskMessage}\n\n${renderPersonaConformanceInstructions(task.id, executionId, agent.id, missionControlUrl)}\n\n**Execution ID:** ${execution.id}\nFor task completion, include execution_id: "${execution.id}" in the completion webhook JSON.`,
         idempotencyKey: execution.idempotency_key,
-        timeoutMs: 30000,
+        // [RUN-BUDGET-FIX 2026-09-15] Deliberately NO timeoutMs here.
+        // The gateway reads chat.send timeoutMs as the WHOLE AGENT RUN budget,
+        // not as an acknowledgement bound: chat-send-handler resolves
+        // resolveAgentTimeoutMs({ cfg, overrideMs: p.timeoutMs }) and feeds it into
+        // resolveChatRunExpiresAtMs, whose hard floor is 120 s. Passing 30000 gave
+        // 30s + 60s grace = 90 s, under that floor, so every dispatched run was
+        // killed at ~120-180 s. Omitting the field falls back to
+        // agents.defaults.timeoutSeconds (3600 = 1 h), the intended budget.
+        // The RPC envelope still uses the gateway default (30 s) -- unchanged.
       });
       recordExecutionAcceptance(execution, response);
       acknowledgedExecution = execution;

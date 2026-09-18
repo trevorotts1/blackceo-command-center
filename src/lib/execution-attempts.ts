@@ -132,7 +132,7 @@ export function completeExecution(taskId: string, executionId?: string, db = get
  * are safe to fail; sending/accepted work is quarantined until positive evidence. */
 export function recoverExpiredExecutions(db = getDb(), now = new Date().toISOString()): number {
  return db.transaction(() => {
-  const rows = db.prepare(`SELECT * FROM task_executions WHERE lease_expires_at < ? AND state IN ('reserved','sending','accepted','running')`).all(now) as Execution[];
+  const rows = db.prepare(`SELECT * FROM task_executions WHERE lease_expires_at < ? AND state IN ('reserved','sending')`).all(now) as Execution[];
   for (const row of rows) {
    db.prepare('UPDATE task_executions SET state=?,error_code=?,updated_at=? WHERE id=? AND lease_owner=?')
     .run(row.state === 'reserved' ? 'failed' : 'unknown', 'execution_lease_expired', now, row.id,row.lease_owner);
