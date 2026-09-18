@@ -60,6 +60,19 @@ jobs:
           fi
           echo "✅ All 5 version locations agree at $V_ROOT"
 
+      # The guard proves itself before it judges anything. The bounded wait
+      # below is unobservable in a normal run -- it only engages when this job
+      # races auto-tag-on-merge.yml on a release push, which is precisely when
+      # nobody is watching the log. It was broken for exactly that reason: the
+      # `break` in its poll loop left the FOR loop, not the enclosing IF, so
+      # the failure path ran anyway and every raced release went red while the
+      # log said the tag had been found. This self-test replays that race
+      # against a fake git, in about a second, and carries its own mutation
+      # proof so it cannot pass vacuously.
+      - name: Self-test the tag guard's bounded wait (+ mutation proof)
+        shell: bash
+        run: bash tests/unit/version-consistency-tag-wait.test.sh
+
       - name: Verify annotated tag exists for current version
         shell: bash
         run: |
@@ -190,16 +203,34 @@ jobs:
                 exit 0
               fi
             fi
-            echo "❌ NO TAG for $V_ROOT"
-            echo "   Every version-file change requires a matching annotated git tag."
-            echo "   The Wave-1 CC chain introduced versions v4.16–v4.19 with no tags,"
-            echo "   which is what this guard prevents going forward."
-            echo ""
-            echo "FIX: create and push an annotated tag at the version-bump commit:"
-            echo "   git tag -a $V_ROOT -m 'Release $V_ROOT' <sha-of-version-bump-commit>"
-            echo "   git push origin $V_ROOT"
-            echo "   Or use: ./scripts/bump-version.sh $V_ROOT --tag  (after bumping files)"
-            exit 1
+            # RE-TEST THE TAG. This is what makes the bounded wait above mean
+            # anything. `break` leaves the FOR loop, not this IF block, so
+            # before this guard existed control fell straight through into the
+            # failure path below even on the runs where the loop had just found
+            # the tag and announced it. Measured on the v7.6.21 release push
+            # (merge 0b5cbdabc): one run logged "waiting for
+            # auto-tag-on-merge.yml", then "Tag v7.6.21 appeared after ~5s",
+            # then "NO TAG for v7.6.21" and exit 1, in that order. So the wait
+            # failed every release it raced, which is every release it was
+            # added to rescue, and main went red on correct releases while the
+            # log itself said the tag was there.
+            #
+            # The re-test asks git again rather than trusting a flag set inside
+            # the loop, so the loop and the verdict cannot drift apart, and a
+            # tag that lands between the loop's last poll and this line is
+            # still seen. A genuinely absent tag still falls through and fails.
+            if ! git tag -l "$V_ROOT" | grep -qx "$V_ROOT"; then
+              echo "❌ NO TAG for $V_ROOT"
+              echo "   Every version-file change requires a matching annotated git tag."
+              echo "   The Wave-1 CC chain introduced versions v4.16–v4.19 with no tags,"
+              echo "   which is what this guard prevents going forward."
+              echo ""
+              echo "FIX: create and push an annotated tag at the version-bump commit:"
+              echo "   git tag -a $V_ROOT -m 'Release $V_ROOT' <sha-of-version-bump-commit>"
+              echo "   git push origin $V_ROOT"
+              echo "   Or use: ./scripts/bump-version.sh $V_ROOT --tag  (after bumping files)"
+              exit 1
+            fi
           fi
 
           # Confirm it is an annotated tag object, not a lightweight tag
