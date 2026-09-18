@@ -988,44 +988,15 @@ _ccbi_native_gate() {
   return 0
 }
 
-# ISSUE-09 follow-up: prove a rebuild actually produced a loadable binary.
-# `npm rebuild <mod>` REPORTS SUCCESS WITHOUT PRODUCING A BINARY. Measured on
-# the operator Mac: `npm rebuild better-sqlite3` printed "rebuilt dependencies
-# successfully" and exited 0 while node_modules/better-sqlite3 held no .node
-# file at all, so every subsequent `new Database()` threw "Could not locate the
-# bindings file". A step that claims to have done something it did not is the
-# same defect class as the ABI drift this unit exists to close, so assert the
-# ARTIFACT, never the exit code.
-_ccbi_assert_rebuild_produced_binary() {  # <app_dir> <module>
-  local _dir="$1" _mod="$2"
-  # The package resolver is authoritative. Native package names and binding
-  # filenames do not have a stable 1:1 mapping (better-sqlite3 builds
-  # better_sqlite3.node), so guessing a file name can reject a successful
-  # rebuild before its functional probe runs. Resolving the package and
-  # opening SQLite through it proves the real binding loads and executes.
-  if ! _ccbi_native_gate "$_dir"; then
-    _preflight_abort_receipt "npm rebuild ${_mod} reported success, but the resolved package does not load and execute SQLite under ${CC_NODE_BIN}. Old build untouched."
-  fi
-  _ok "  Rebuild of ${_mod} verified: the resolved package loads and executes SQLite under ${CC_NODE_BIN}."
-}
-
-# ISSUE-09: a failing PRE-FLIGHT gate is repaired ONCE before aborting. The
-# usual cause is an ABI mismatch between the live node_modules and the resolved
-# runtime, which is exactly what `npm rebuild` fixes, and aborting handed the
-# operator a manual command for a repair this script can perform itself. One
-# attempt, then re-gate; a second failure still aborts, so a genuinely broken
-# toolchain is never papered over. Deliberately NOT applied to the staged-deps
-# or post-build gates: those trees were just installed by this run, and a
-# failure there is a real defect in the candidate, not drift to be repaired.
+# A failing live pre-flight gate is a diagnostic, not a repair operation.
+# Candidate preparation must never mutate the live release. The isolated
+# candidate runs `npm ci` and its own native gate; if that candidate gate fails,
+# the existing abort path leaves the live release untouched.
 if ! _ccbi_native_gate "$APP_DIR"; then
-  _warn "  Pre-flight native gate failed; attempting ONE rebuild against ${CC_NODE_BIN} (module ABI $("$CC_NODE_BIN" -p process.versions.modules 2>/dev/null || echo unknown)) ..."
-  for _nat_mod in "${NATIVE_MODULE_GATES[@]}"; do
-    ( cd "${APP_DIR}" && npm rebuild "${_nat_mod}" ) >/dev/null 2>&1 || true
-    _ccbi_assert_rebuild_produced_binary "${APP_DIR}" "${_nat_mod}"
-  done
-  _ok "  Pre-flight native gate repaired by one verified rebuild."
+  _warn "  Pre-flight native gate failed: the currently installed runtime is degraded."
+  _warn "  The live runtime will NOT be modified in place; the isolated candidate is the only repair vehicle."
 fi
-_ok "Phase 1 pre-flight passed (including native-module gates)."
+_ok "Phase 1 pre-flight passed (candidate preparation may proceed)."
 
 # ── 1e. Stage a complete candidate release ──────────────────────────────────
 # Candidate preparation must never mutate the live release. The candidate gets
