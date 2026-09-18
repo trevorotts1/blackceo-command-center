@@ -1,3 +1,8 @@
+## [v7.6.22] — 2026-09-18 — Eight released versions get the changelog entry they shipped without
+
+### Fixed
+- **`CHANGELOG.md` covers v7.6.13 through v7.6.20.** `/version` had run ahead of the changelog for eight consecutive releases: main read v7.6.21 while the top entry read v7.6.12, so anyone auditing this repo by changelog saw no record of what shipped in between, and the release notes for a third of the v7.6 series did not exist. Each entry is reconstructed from that version's own tagged commit, and the tags themselves were already correct and annotated. No code is touched by this change.
+
 ## [v7.6.21] — 2026-09-18 — The interview link is valid until the interview is complete: no clock, no burn-on-use
 
 ### Changed
@@ -19,6 +24,51 @@
 - `tests/unit/interview-launch-readiness.test.ts`: the minted receipt carries `validUntil`, keeps `oneUse`, and keeps `expiresAt` inside the deployed validator's 86410-second bound; issuance is refused once the interview is complete.
 
 Companion bump for onboarding v25.1.50.
+
+## [v7.6.20] — 2026-09-18 — A tenant-gated root is probed at /interview, not called down
+
+### Fixed
+- **`cc-health-check.sh` probes `/interview` when `GET /` answers 401 or 403.** A box whose root is tenant-gated returned an auth status to the health probe, which read as a fault rather than as a correctly guarded origin.
+
+## [v7.6.19] — 2026-09-18 — A relative --db-path is anchored under the app directory
+
+### Fixed
+- **`scripts/atomic-deploy.sh` resolves a relative `--db-path` against the app directory.** Resolved against the caller's cwd instead, the deploy addressed a database that was not the installation's.
+
+## [v7.6.18] — 2026-09-18 — npm ci --include=dev so a production container can still build
+
+### Fixed
+- **`scripts/atomic-deploy.sh` passes `npm ci --include=dev`.** With `NODE_ENV=production` set in the container, `npm ci` omitted devDependencies and the Next build then had no toolchain to build with.
+
+## [v7.6.17] — 2026-09-18 — The install-script policy is declared in package.json
+
+### Fixed
+- **`package.json` declares the install-script policy, and `postinstall` clears an inherited allow-scripts setting.** An inherited setting decided which dependency install scripts ran, which is not a decision a deploy should inherit from its environment.
+
+## [v7.6.16] — 2026-09-18 — HTTP 530 from the public URL is a tunnel fault, not a dead app
+
+### Fixed
+- **`cc-health-check.sh` classifies HTTP 530 as UNKNOWN, not RED.** 530 comes from the edge when the tunnel has no healthy origin; reading it as RED blamed the application for its tunnel and triggered a rollback of a build that was fine.
+- **Adds `scripts/ingest-task.sh`,** a generic task-ingest caller.
+
+## [v7.6.15] — 2026-09-18 — Phase 5 hooks run from the app directory
+
+### Fixed
+- **`scripts/atomic-deploy.sh` returns to the app directory before its Phase 5 hooks.** The hooks ran from wherever the previous phase left the shell, so every relative path in them addressed the wrong tree.
+
+## [v7.6.14] — 2026-09-18 — An unprovisioned box has an implicit self tenant, and the tenant wall is RED
+
+### Fixed
+- **An unprovisioned box resolves an implicit self tenant** instead of failing to resolve one at all.
+- **The tenant wall reports RED** rather than passing quietly.
+- **The startup lock ignores non-Command-Center node pids,** so an unrelated node process could no longer be mistaken for a running instance holding the lock.
+- **Deploy diagnostics added.**
+
+## [v7.6.13] — 2026-09-18 — The pm2 restart gets a pinned runtime DATABASE_PATH
+
+### Fixed
+- **`scripts/atomic-deploy.sh` pins the runtime `DATABASE_PATH` for the pm2 restart,** so the restarted process addresses the installation's own database rather than resolving one from its environment.
+- **Box-runtime files are git-ignored,** so a deployed checkout stops reading as dirty and blocking the updater's fast-forward.
 
 ## [v7.6.12] — 2026-09-18 — Ignore the deploy's candidate dependency trees
 
