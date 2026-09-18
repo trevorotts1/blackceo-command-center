@@ -161,3 +161,4 @@ client-roster.txt
 /.node_modules.rollback.*/
 /.next.tmp.*/
 /.next.discarded.*/
+/.node_modules.candidate.*/
