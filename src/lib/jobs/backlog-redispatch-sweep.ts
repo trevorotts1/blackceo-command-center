@@ -101,7 +101,7 @@ export const REDISPATCH_ESCALATE_HOURS = 6;
 // eligible exactly as before) instead of throwing "no such column". The helpers
 // are file-local (not a shared module) because the sweep files are each other's
 // only consumers and must stay within their own review scope.
-const ENGINE_OWNED_SOURCES = ['build_deck', 'build_deck_phase'] as const;
+const ENGINE_OWNED_SOURCES = ['build_deck', 'build_deck_phase', 'podcast-engine'] as const;
 
 function tasksHaveSourceColumn(): boolean {
   try {

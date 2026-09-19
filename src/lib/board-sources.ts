@@ -38,6 +38,8 @@
  *     (presentations/scripts/cc_board.py payload.source; FIX 36)
  *   presentation-interview-app — Presentations intake interview-app cards
  *     (intake/interview-app/bridge/intake_writer.py payload.source; FIX 36)
+ *   podcast-engine — Skill 58 state-machine mirror cards. They are status
+ *     producers only; Command Center must never become a second executor.
  */
 export const RECOGNIZED_BOARD_SOURCES: Set<string> = new Set([
   'funnel',
@@ -48,6 +50,7 @@ export const RECOGNIZED_BOARD_SOURCES: Set<string> = new Set([
   'presentations',
   'build_deck_phase',
   'presentation-interview-app',
+  'podcast-engine',
 ]);
 
 /**

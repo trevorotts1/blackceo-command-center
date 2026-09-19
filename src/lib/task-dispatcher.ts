@@ -342,7 +342,7 @@ const DECK_RUN_REASON = 'deck_run_identity_missing';
 // executor. (FIX 36's planned board-sources.ts module is not in the tree yet;
 // this set is self-contained here so W17 does not depend on W16's landing.
 // When board-sources.ts exists, re-point this helper at its export.)
-const ENGINE_OWNED_SOURCES = new Set(['build_deck', 'build_deck_phase']);
+const ENGINE_OWNED_SOURCES = new Set(['build_deck', 'build_deck_phase', 'podcast-engine']);
 
 /** True when a task's ingest `source` is owned by the Presentations engine. */
 function isEngineOwnedSource(source: string | null | undefined): boolean {

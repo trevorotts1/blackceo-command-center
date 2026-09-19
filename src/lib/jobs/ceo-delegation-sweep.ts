@@ -53,7 +53,7 @@ const CONFIDENCE_THRESHOLD = parseFloat(process.env.CEO_DELEGATION_MIN_SCORE || 
 // eligible exactly as before) instead of throwing "no such column". File-local
 // helpers, same shape as the sibling sweeps (intake-advance-sweep,
 // backlog-redispatch-sweep) so the vocabulary cannot drift.
-const ENGINE_OWNED_SOURCES = ['build_deck', 'build_deck_phase'] as const;
+const ENGINE_OWNED_SOURCES = ['build_deck', 'build_deck_phase', 'podcast-engine'] as const;
 
 function tasksHaveSourceColumn(): boolean {
   try {
