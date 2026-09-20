@@ -390,6 +390,7 @@ export interface TransitionEvidence {
 interface TaskRowForLifecycle {
   id: string;
   title: string;
+  description?: string | null;
   status: string;
   assigned_agent_id: string | null;
   model_id: string | null;
@@ -468,11 +469,20 @@ function reviewEvidenceRefusalMessage(taskId: string, evidence: { problems: stri
   );
 }
 
+/** Sandboxed podcast canaries may prove intake and research only. */
+export function isSandboxCanaryTask(task: Pick<TaskRowForLifecycle, 'source' | 'title' | 'description'>): boolean {
+  return task.source === 'podcast-engine' && /\bsandbox-canary\b/i.test(`${task.title}\n${task.description ?? ''}`);
+}
+
 function checkPreconditions(
   task: TaskRowForLifecycle,
   to: LifecycleState,
   evidence: TransitionEvidence,
 ): void {
+  if (to === 'done' && isSandboxCanaryTask(task)) {
+    throw new TransitionError('SANDBOX_COMPLETION_PROHIBITED',
+      `Sandbox canary task ${task.id} may record research handoff only; completion is prohibited.`);
+  }
   // ── COMPLETION-EVIDENCE INVARIANT (T0-01 / T0-42) ────────────────────────
   // Deliberately placed ABOVE the operatorOverride bail-out, and it is the one
   // precondition an override cannot skip.
@@ -724,7 +734,7 @@ export function transitionWithDeclaredException(args: {
   // Include fields U031 will add (department, process_certificate_sha,
   // sop_authoring_for_task_id) so the merge is clean when U031 lands.
   const task = queryOne<TaskRowForLifecycle>(
-    `SELECT t.id, t.title, t.status, t.assigned_agent_id, t.model_id,
+    `SELECT t.id, t.title, t.description, t.status, t.assigned_agent_id, t.model_id,
             t.persona_id, t.workspace_id, t.qc_reroute_attempts,
             t.department, t.source, t.process_certificate_sha, t.sop_authoring_for_task_id,
             a.specialist_type
@@ -865,7 +875,7 @@ export async function transition(
   evidence: TransitionEvidence = {},
 ): Promise<Task> {
   const task = queryOne<TaskRowForLifecycle>(
-    `SELECT t.id, t.title, t.status, t.assigned_agent_id, t.model_id,
+    `SELECT t.id, t.title, t.description, t.status, t.assigned_agent_id, t.model_id,
             t.persona_id, t.workspace_id, t.qc_reroute_attempts,
             t.department, t.source, t.process_certificate_sha, t.sop_authoring_for_task_id,
             a.specialist_type

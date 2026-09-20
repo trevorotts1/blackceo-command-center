@@ -337,14 +337,14 @@ function recordDispatchSuccess(taskId: string, opts: { preserveAttempts?: boolea
 const DECK_RUN_REASON = 'deck_run_identity_missing';
 
 // ── FIX 38a (R5B §F1): engine-owned source vocabulary ────────────────────────
-// Sources the Presentations engine writes and advances ITSELF. The board's
+// Sources an engine writes and advances ITSELF (Presentations or Skill 58 podcast). The board's
 // auto-advancers must never dispatch these cards — the engine is the single
 // executor. (FIX 36's planned board-sources.ts module is not in the tree yet;
 // this set is self-contained here so W17 does not depend on W16's landing.
 // When board-sources.ts exists, re-point this helper at its export.)
 const ENGINE_OWNED_SOURCES = new Set(['build_deck', 'build_deck_phase', 'podcast-engine']);
 
-/** True when a task's ingest `source` is owned by the Presentations engine. */
+/** True when a task's ingest `source` is owned by an engine (never board-dispatched). */
 function isEngineOwnedSource(source: string | null | undefined): boolean {
   return typeof source === 'string' && ENGINE_OWNED_SOURCES.has(source.trim().toLowerCase());
 }
@@ -761,8 +761,8 @@ export async function autoDispatchTask(
     }
 
     // ── GUARD 4d (FIX 38a / R5B §F1): engine-owned cards are never dispatched ──
-    // An engine-owned card (source ∈ {build_deck, build_deck_phase}) is written
-    // and advanced by the Presentations engine itself. Every auto-advancer that
+    // An engine-owned card (source ∈ {build_deck, build_deck_phase, podcast-engine}) is written
+    // and advanced by its owning engine itself. Every auto-advancer that
     // re-fired dispatch on one created the "146 claims, three sweeps, second
     // executor" defect — the engine and the board both driving the same phase.
     // The advancer must NEVER claim these; the engine is the single executor.
@@ -810,7 +810,7 @@ export async function autoDispatchTask(
       const engineHoldMsg =
         `[engine_owned_card_not_dispatched] Task "${task.title}" (${task.id}) has engine-owned ` +
         `source "${(task as Task & { source?: string | null }).source}" — NOT dispatched by the board ` +
-        `advancer. The Presentations engine is the single executor for this card.`;
+        `advancer. The owning engine is the single executor for this card.`;
       recordDeckGateEvent(
         'engine_owned_card_not_dispatched',
         task.id,
