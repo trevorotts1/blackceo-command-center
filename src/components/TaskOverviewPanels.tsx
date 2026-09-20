@@ -50,7 +50,7 @@ function formatScore(score?: number | null): string | null {
  * from src/lib/board-sources.ts per FIX 36): Skill 6 (funnel/survey/
  * web-development), the Anthology Engine (anthology), and the Presentations
  * engine (build_deck / presentations / build_deck_phase /
- * presentation-interview-app). Producer-ingested
+ * presentation-interview-app / podcast-engine). Producer-ingested
  * cards are NOT routed through the CC selector the way an organic task is
  * (C+I.0 point 13 / D-C3 grounding: producer cards move themselves, no CC
  * dispatch routing fires from this card family), so the generic "one is
@@ -72,6 +72,8 @@ const RECOGNIZED_ENGINE_SOURCES: Record<string, string> = {
   // interview app's own cards.
   build_deck_phase: 'a presentations deck phase build',
   'presentation-interview-app': 'the presentations interview app',
+  // Skill 58 podcast engine mirror cards (status producers only).
+  'podcast-engine': 'the Podcast Engine',
 };
 
 const LEGACY_ENGINE_SOURCE_MARKER = /^Source:\s*(funnel|survey|web-development|anthology)\s*$/m;
