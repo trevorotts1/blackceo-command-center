@@ -22,8 +22,16 @@ grep -qE 'npm ci [^|]*--ignore-scripts=false' scripts/atomic-deploy.sh \
   && ok "atomic-deploy keeps --ignore-scripts=false" || bad "atomic-deploy npm ci lacks --ignore-scripts=false"
 grep -qE 'npm rebuild better-sqlite3 --ignore-scripts=false|rebuild better-sqlite3 --ignore-scripts=false' scripts/repair-command-center.sh \
   && ok "repair-command-center rebuilds with --ignore-scripts=false" || bad "repair rebuild lacks --ignore-scripts=false"
-grep -q 'npm rebuild better-sqlite3 --ignore-scripts=false' package.json \
-  && ok "package.json postinstall rebuild carries the flag" || bad "postinstall rebuild lacks the flag"
+# package.json's postinstall is deliberately NOT touched. It clears
+# npm_config_allow_scripts before nesting npm (tests/unit/npm-allow-scripts-policy.test.ts
+# pins the exact string, after an EALLOWSCRIPTS deploy failure on a client Mac
+# 2026-09-18), and an outer `npm ci --ignore-scripts=false` already runs it —
+# proven by the behavioural fixture below. Whether the NESTED rebuild also needs
+# the flag is UNDETERMINED: the fixture built to measure it returned the same
+# negative on its no-npmrc control, so it measured nothing.
+grep -q 'npm_config_allow_scripts= npm rebuild better-sqlite3"' package.json \
+  && ok "package.json postinstall is left exactly as its own policy test pins it" \
+  || bad "postinstall string drifted from npm-allow-scripts-policy.test.ts"
 printf 'npm ci --no-audit --no-fund\n' | grep -qE 'npm ci [^|]*--ignore-scripts=false' \
   && bad "control: the pattern matched a line without the flag" || ok "control: the pattern requires the flag"
 
