@@ -1,3 +1,4 @@
+import { companyScope } from '@/lib/company-scope';
 import { NextResponse } from 'next/server';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -265,6 +266,12 @@ export async function GET() {
       // a full pool is a queue and an unknown balance is an operational fact, so
       // neither moves the top-level `status`.
       capacity: { pools: poolUsage(db), providers: capacityBlock() },
+      // COMPANY SCOPE: which company id this box is configured for, which one
+      // actually owns the most active workspaces, and the full split. A client
+      // box carried three ids for one client and every reader scoped to the
+      // configured one saw an empty board. ADDITIVE — a split is an operational
+      // fact, so it never moves the top-level `status`.
+      company: companyScope(db, process.env.MC_COMPANY_ID),
     });
   } catch (error) {
     // DATA-02: if THIS getDb() call is what surfaced the DB-init / migration

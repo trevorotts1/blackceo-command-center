@@ -437,6 +437,11 @@ def _aliased_dept_slug(slug):
     return _DEPT_ALIASES.get(s, s)
 
 
+def _normalized_company_name(name):
+    """Lowercase, punctuation-collapsed company name, for duplicate matching."""
+    return re.sub(r"[^a-z0-9]+", " ", (name or "").lower()).strip()
+
+
 def _ensure_archive_columns(cur):
     """Make sure workspaces carries archived_at / archived_reason.
 
@@ -671,17 +676,38 @@ def reseed_workspaces(db_path, departments, company_info, prune=False):
         "accent": company_info["brand_accent"],
         "text": company_info["brand_text"],
     }})
-    existing_company = cur.execute(
-        "SELECT id FROM companies WHERE slug=?", (slug,)).fetchone()
-    if existing_company:
-        cur.execute(
-            "UPDATE companies SET name=?, industry=?, config=? WHERE slug=?",
-            (company_info["name"], company_info["industry"], company_config, slug))
-    else:
+    # Match an existing company by id, then slug, then NORMALIZED NAME before
+    # inserting. The v7.6.26 roll inserted a THIRD companies row
+    # ('wake-up-happy-sis') beside 'default' (slug 'wuhs') and 'wakeuphappysis',
+    # all three carrying the SAME name -- and the workspaces then split across
+    # three ids, which is what makes phase 6b refuse. On a name match the
+    # existing row WINS: the one owning the most workspaces, so the sync lands
+    # where the board's departments already live.
+    rows = cur.execute("SELECT id, slug, name FROM companies ORDER BY id").fetchall()
+    company_id = next((r[0] for r in rows if r[0] == slug or r[1] == slug), None)
+    if company_id is None:
+        want = _normalized_company_name(company_info["name"])
+        named = [r for r in rows if want and _normalized_company_name(r[2]) == want]
+        if named:
+            named.sort(key=lambda r: (-cur.execute(
+                "SELECT COUNT(*) FROM workspaces WHERE company_id=?", (r[0],)
+            ).fetchone()[0], r[0]))
+            company_id = named[0][0]
+            print(f"  [sync] company {slug!r} matches existing row {company_id!r} "
+                  f"by name {named[0][2]!r} -- REUSING it (owns the most workspaces "
+                  f"of {[r[0] for r in named]}), not inserting a duplicate")
+    if company_id is None:
         cur.execute(
             "INSERT INTO companies (id, name, slug, industry, config) "
             "VALUES (?, ?, ?, ?, ?)",
             (slug, company_info["name"], slug, company_info["industry"], company_config))
+        company_id = slug
+    else:
+        cur.execute(
+            "UPDATE companies SET name=?, industry=?, config=? WHERE id=?",
+            (company_info["name"], company_info["industry"], company_config, company_id))
+    # Everything below homes workspaces to the company this run resolved to.
+    slug = company_id
 
     _print_company_scope(cur, slug)
 
