@@ -85,7 +85,6 @@ import {
   reconcileTaskModelRecord,
   type RuntimeModelResolution,
 } from '@/lib/runtime-model';
-import { providerLabel, providerOf } from '@/lib/capacity/provider-pools';
 import { blockDispatchIfOwnerKilled } from '@/lib/owner-killed';
 import { launchOperatorPresentationContract } from '@/lib/presentation-operator-launcher';
 
@@ -388,64 +387,30 @@ function recordWorkerCapacityHold(
 }
 
 /**
- * EVERY pool this agent can reach is full — its primary subscription and every
- * fallback its own config declares. Same queue-not-fault contract as the worker
+ * The agent's PRIMARY provider pool is full — the only pool a dispatch debits,
+ * because the run always attempts the primary model and the runtime falls back
+ * only after that attempt fails. Same queue-not-fault contract as the worker
  * hold: no dispatch attempt is spent, and the sweep re-selects the card the
- * moment any one of those pools frees a slot. The summary names each pool and
- * its depth, so the card says which subscription to upgrade rather than just
- * "busy". Deduped on the summary so a CHANGED picture writes a new row.
+ * moment the pool frees a slot.
+ *
+ * The summary carries the actionable half for the owner-ask layer: which of the
+ * agent's OWN declared fallbacks currently have room. That is a fact about the
+ * box, not a promise about this run — nothing here re-points the agent.
  */
-function recordAllPoolsFullHold(
+function recordProviderCapacityHold(
   taskId: string,
   agentId: string | null,
   summary: string,
   context: string,
 ): void {
-  console.warn(`[${context}] autoDispatchTask: QUEUED task ${taskId} — every provider pool full (${summary})`);
+  console.warn(`[${context}] autoDispatchTask: QUEUED task ${taskId} — ${summary}`);
   recordDispatchHoldActivity(
     taskId,
     agentId,
-    `%all provider pools full: ${summary}%`,
-    `[${context}] all provider pools full: ${summary}`,
+    `%provider pool pressure: ${summary}%`,
+    `[${context}] provider pool pressure: ${summary}`,
     context,
   );
-}
-
-/**
- * The primary subscription was full, so the reserve took a fallback the agent
- * ALREADY declares. Recorded, never silent: the operator should be able to see
- * that a plan is saturating before the board slows down.
- *
- * This is a PREDICTION, not an instruction. The gateway's `chat.send` rejects a
- * `model` parameter (see the contract note in the dispatch route), so the
- * Command Center cannot force the fallback — but the OpenClaw runtime walks
- * this same `model.fallbacks` list itself and treats `rate_limit` as a failover
- * reason, so a genuinely saturated primary lands the run on this model anyway.
- */
-function recordPoolOverflow(
-  taskId: string,
-  agentId: string | null,
-  primaryModel: string,
-  overflowModel: string,
-  context: string,
-): void {
-  console.warn(`[${context}] autoDispatchTask: OVERFLOW task ${taskId} — ${primaryModel} pool full, expecting ${overflowModel}`);
-  try {
-    run(
-      `INSERT INTO task_activities (id, task_id, agent_id, activity_type, message, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [uuidv4(), taskId, agentId, PERSONA_HOLD_ACTIVITY_TYPE,
-        `[${context}] overflowed to ${overflowModel} (${providerLabel(providerOf(primaryModel))} pool full)`,
-        new Date().toISOString()],
-    );
-    run(
-      `INSERT INTO events (id, type, agent_id, task_id, message, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-      [uuidv4(), 'provider_pool_overflow', agentId, taskId,
-        `Primary ${primaryModel} pool full; this run is expected on ${overflowModel}.`, new Date().toISOString()],
-    );
-  } catch (err) {
-    console.warn(`[${context}] pool overflow activity non-fatal:`, (err as Error).message);
-  }
 }
 
 /** Clear attempt-accounting after a task successfully advances to in_progress. */
@@ -1925,24 +1890,26 @@ If you need help or clarification, ask the orchestrator.`;
     }
     throwIfJobLeaseLost();
     // PROVIDER POOL: resolve the agent's OWN ordered model list before reserving
-    // — primary first, then the fallbacks its runtime config declares — so the
-    // reservation is counted against the right subscription and can overflow to
-    // a model the agent already has when the primary plan is saturated. The
-    // config read is the synchronous half of the FIX-15 resolver; the gateway
-    // half needs a live session, which does not exist until after this claim.
-    // `agents.model` is the fallback only because a box with no runtime entry
-    // still has to land in some pool.
+    // — primary first, then the fallbacks its runtime config declares. The
+    // reservation is counted against the PRIMARY, which is the model the run
+    // will actually attempt; the fallbacks are probed only so a refusal can say
+    // where there is room. The config read is the synchronous half of the
+    // FIX-15 resolver; the gateway half needs a live session, which does not
+    // exist until after this claim. `agents.model` is the fallback only because
+    // a box with no runtime entry still has to land in some pool.
     const modelChain = resolveRuntimeModelChainFromConfig(agent, task.workspace_id ?? undefined);
     const effectiveChain = modelChain.length ? modelChain : (agent.model ? [agent.model] : []);
 
     // RESOURCE-AWARE ROUTING: score that SAME chain on the two dimensions the
     // pool logic has no way to see — money and the card's deadline — plus this
-    // box's own measured latency per provider. It does NOT reorder the chain:
-    // the debit is a prediction of what the OpenClaw runtime will do and the
-    // runtime walks `model.fallbacks` in CONFIG order, so a re-ordered chain
-    // would debit a pool the run was never going to use. What it produces is
-    // the sentence the CARD carries and the `askWorthy` fact the ask gate
-    // reads. Best-effort throughout — scoring never blocks a dispatch.
+    // box's own measured latency per provider. It does NOT reorder the chain
+    // and it does not choose a provider: the reserve debits the PRIMARY, which
+    // is the model the run will actually attempt, and the runtime reaches a
+    // fallback only if that attempt fails. What the scorer produces is the
+    // sentence the CARD carries and the `askWorthy` fact the ask gate reads —
+    // so a queued card can say which subscription it is waiting on and what the
+    // alternatives would cost, without any of that moving the accounting.
+    // Best-effort throughout — scoring never blocks a dispatch.
     let routeDecision: RouteDecision | null = null;
     try {
       routeDecision = scoreRoute({
@@ -1965,20 +1932,17 @@ If you need help or clarification, ask the orchestrator.`;
       // Every one of these is a QUEUE, not a fault: none spends a dispatch attempt.
       if (claim.reason === 'worker_at_capacity') {
         recordWorkerCapacityHold(task.id, agent.id, claim.running ?? 0, claim.limit ?? 1, context);
-      } else if (claim.reason === 'all_pools_full') {
-        recordAllPoolsFullHold(task.id, agent.id, claim.summary ?? 'every provider pool', context);
+      } else if (claim.reason === 'provider_at_capacity') {
+        recordProviderCapacityHold(task.id, agent.id, claim.summary ?? 'provider pool full', context);
       }
       // Say WHY on the card, in live numbers, so a queued card reads as a queue
       // with a cause instead of a card that looks stuck. Only for the capacity
       // refusals: the other reasons are state changes, not resource decisions,
       // and the scorer has nothing to say about them.
-      if (routeDecision && (claim.reason === 'all_pools_full' || claim.reason === 'worker_at_capacity')) {
+      if (routeDecision && (claim.reason === 'provider_at_capacity' || claim.reason === 'worker_at_capacity')) {
         recordRoutingReason(task.id, routeDecision.reason);
       }
       return { status: 'held', reason: claim.reason };
-    }
-    if (claim.overflowModel && claim.primaryModel) {
-      recordPoolOverflow(task.id, agent.id, claim.primaryModel, claim.overflowModel, context);
     }
     const execution = claim.execution;
     if (!beginExecutionSend(execution)) return { status: 'held', reason: 'claim_superseded', executionId };

@@ -7,7 +7,7 @@ import { getDb } from '@/lib/db';
 import { isOwnerKilled } from '@/lib/owner-killed';
 import { ACTIVE_EXECUTION_STATES_SQL } from '@/lib/execution-schema';
 import {
-  choosePool, isRateLimitError, noteProviderRateLimit, poolsFullSummary, providerOf,
+  isRateLimitError, noteProviderRateLimit, poolPressureSummary, probeChain, providerOf,
   type PoolProbe,
 } from '@/lib/capacity/provider-pools';
 import type Database from 'better-sqlite3';
@@ -106,17 +106,15 @@ function agentModelChainFallback(agentId: string, db: Database.Database): string
 
 export interface ReserveResult {
  execution?: Execution; reason: string; running?: number; limit?: number;
- /** Pool this reserve drew on, or the primary pool on an `all_pools_full` refusal. */
+ /** The PRIMARY pool — the only pool a reserve ever debits. */
  provider?: string;
- /** Every pool tried, in the agent's own model order — the refusal's evidence. */
- probes?: PoolProbe[];
- /** "Ollama Cloud 3/3, OpenRouter 100/100" — what the card shows. */
+ /** The agent's own fallback pools, probed for VISIBILITY on a refusal. Never
+  * debited: the runtime only reaches them if the primary attempt fails. */
+ fallbacks?: PoolProbe[];
+ /** Which of those fallback pools have room, for the owner-ask layer. */
+ fallbacksWithRoom?: string[];
+ /** "Ollama Cloud 3/3 full; Agnes AI 1/50 have room" — what the card shows. */
  summary?: string;
- /** Set when the PRIMARY pool was full and the reserve landed on a fallback of
-  * the agent's own. The model the run is expected to end up on. */
- overflowModel?: string;
- /** The primary that was full, when `overflowModel` is set. */
- primaryModel?: string;
 }
 
 export function reserveExecution(snapshot: DispatchSnapshot, sessionKey: string, executionId: string,
@@ -151,24 +149,28 @@ export function reserveExecution(snapshot: DispatchSnapshot, sessionKey: string,
   // Counted inside this same BEGIN IMMEDIATE, so it serializes against every
   // other reserver exactly as the worker count does.
   //
-  // OVERFLOW: a full primary pool is NOT a refusal while the agent still has a
-  // fallback of its OWN with room. The chain comes from the agent's own runtime
-  // config and nothing is ever added to it. Only when every model in that list
-  // is at capacity does the reserve refuse — see `all_pools_full` below.
+  // THE PRIMARY IS THE ONLY POOL DEBITED. The run always ATTEMPTS the agent's
+  // primary model — the gateway takes no per-run model override, and the
+  // runtime advances its own fallback chain only after an attempt FAILS, never
+  // pre-emptively on capacity. So a full primary is a refusal, not a cue to
+  // debit someone else: crediting a fallback here while the run still hits the
+  // primary would under-count the one subscription the pool protects.
+  //
+  // The agent's own fallbacks are still probed, for VISIBILITY: the refusal
+  // names which of them have room so the owner can act on it.
   const chain = (snapshot.model_chain?.length ? [...snapshot.model_chain] : agentModelChainFallback(task.assigned_agent_id, db));
+  const pool = providerOf(chain[0]);
   const poolTracked = hasProviderColumn(db);
-  let pool = providerOf(chain[0]);
-  let overflow: { overflowModel: string; primaryModel: string } | undefined;
   if (poolTracked) {
-   const { chosen, probes } = choosePool(chain, db, task.id);
-   if (!chosen) {
-    // Every pool this agent can reach is full or cooling. A QUEUE, not a
-    // fault: the caller holds and spends no dispatch attempt.
-    return { reason: 'all_pools_full', provider: probes[0]?.provider, probes, summary: poolsFullSummary(probes) };
-   }
-   pool = chosen.provider;
-   if (probes.length > 1 && chosen.model && chain[0]) {
-    overflow = { overflowModel: chosen.model, primaryModel: chain[0] };
+   const { primary, fallbacks } = probeChain(chain, db, task.id);
+   if (!primary.room) {
+    // A QUEUE, not a fault: the caller holds and spends no dispatch attempt.
+    return {
+     reason: 'provider_at_capacity', provider: primary.provider,
+     running: primary.running, limit: primary.limit,
+     fallbacks, fallbacksWithRoom: fallbacks.filter((p) => p.room).map((p) => p.provider),
+     summary: poolPressureSummary(primary, fallbacks),
+    };
    }
   }
   // PER-AGENT ceiling: OPTIONAL since the pool became the limit. null means the
@@ -205,7 +207,7 @@ export function reserveExecution(snapshot: DispatchSnapshot, sessionKey: string,
   db.prepare(`INSERT INTO openclaw_sessions
    (id,agent_id,openclaw_session_id,channel,status,task_id,created_at,updated_at)
    VALUES (?,?,?,'mission-control','active',?,?,?)`).run(randomUUID(), task.assigned_agent_id, sessionId, task.id, now, now);
-  return { execution: latestExecution(task.id, db), reason: 'reserved', provider: pool, ...overflow };
+  return { execution: latestExecution(task.id, db), reason: 'reserved', provider: pool };
  }).immediate();
 }
 
