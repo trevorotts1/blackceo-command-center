@@ -7638,6 +7638,69 @@ export const migrations: Migration[] = [
       );
     },
   },
+  {
+    // ASK-AT-CAPACITY — the ledger behind an owner decision.
+    //
+    // A saturated pool overflows onto the agent's next declared model silently,
+    // which is right almost always. It is wrong when the alternative costs the
+    // owner real money, misses their deadline, or spends the last of a balance:
+    // in those cases the box has been quietly making a spending decision on
+    // their behalf. So it asks — rarely, with numbers, and with a default that
+    // runs the work if nobody answers.
+    //
+    //   provider_choice_asks  one row per card that was asked about. `batch_id`
+    //                         groups the cards that arrived after the hourly
+    //                         message budget was spent; answering the one
+    //                         question that was SENT answers all of them.
+    //                         `delivered` records the route ('telegram',
+    //                         'session', 'batched', 'send_failed'), so a
+    //                         question nobody could receive is visible rather
+    //                         than looking answered.
+    //   routing_corrections   'just answer that' / 'route that' from the owner.
+    //                         Evidence for the intake's thresholds; task_id is
+    //                         NULLABLE because a correction on a message that
+    //                         never became a card has no task to point at.
+    //   tasks.provider_choice the answer, remembered, so the same question is
+    //                         never asked twice about one card.
+    //
+    // Additive and idempotent.
+    id: '156',
+    name: 'ask_at_capacity',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS provider_choice_asks (
+          id TEXT PRIMARY KEY,
+          task_id TEXT NOT NULL,
+          batch_id TEXT NOT NULL,
+          question TEXT NOT NULL,
+          recommendation TEXT,
+          triggers TEXT,
+          asked_at TEXT NOT NULL,
+          delivered TEXT,
+          answered_at TEXT,
+          answer TEXT
+        )
+      `);
+      db.exec('CREATE INDEX IF NOT EXISTS idx_provider_choice_asks_task ON provider_choice_asks(task_id, asked_at DESC)');
+      db.exec('CREATE INDEX IF NOT EXISTS idx_provider_choice_asks_open ON provider_choice_asks(answered_at, asked_at DESC)');
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS routing_corrections (
+          id TEXT PRIMARY KEY,
+          task_id TEXT,
+          from_lane TEXT,
+          to_lane TEXT NOT NULL,
+          note TEXT,
+          created_at TEXT NOT NULL
+        )
+      `);
+      db.exec('CREATE INDEX IF NOT EXISTS idx_routing_corrections_created ON routing_corrections(created_at DESC)');
+      const columns = new Set((db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[]).map((c) => c.name));
+      if (columns.size && !columns.has('provider_choice')) {
+        db.exec('ALTER TABLE tasks ADD COLUMN provider_choice TEXT');
+      }
+      console.log('[Migration 156] ask-at-capacity ready — asks, batches, owner answers and lane corrections');
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner

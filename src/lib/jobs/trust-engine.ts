@@ -232,6 +232,34 @@ export function sendRequesterAudienceAsk(
 }
 
 /**
+ * Ask the OWNER a capacity question about one card.
+ *
+ * Deliberately a DIFFERENT recipient from `sendRequesterAudienceAsk` above. An
+ * audience question belongs to whoever requested the work; a question about
+ * money and subscriptions belongs to the person who PAYS for them, which is the
+ * box's owner — and on a card an internal producer created there is no
+ * requester to ask at all.
+ *
+ * Returns the same delivery labels the audience ask uses, so both are readable
+ * the same way in an events row: a question nobody could receive is recorded as
+ * such rather than silently looking asked.
+ */
+export function sendProviderChoiceAsk(
+  taskId: string,
+  question: string,
+  notifier: RequesterAudienceAskNotifier = notifyTelegram,
+  resolveOwner: () => string | null = resolveOwnerChatId,
+): RequesterAudienceAskDelivery {
+  try {
+    const chatId = resolveOwner();
+    if (!chatId) return 'none (no requester_chat_id)';
+    return notifier({ chatId, message: question }) ? 'telegram' : 'send_failed';
+  } catch {
+    return 'send_failed';
+  }
+}
+
+/**
  * The resolved address for one task's requester, and the lane that reaches it.
  *
  * ONE precedence rule, applied in ONE place, so the planner, the audience ask

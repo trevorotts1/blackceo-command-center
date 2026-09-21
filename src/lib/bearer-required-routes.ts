@@ -70,6 +70,12 @@ export const BEARER_REQUIRED_WRITE_ROUTES: RegExp[] = [
   /^\/api\/companies$/,
   /^\/api\/cron\/sop-learning$/,
   /^\/api\/da-challenges$/,
+  // Ask-at-capacity: the owner's answer to a provider question, and the lane
+  // corrections the intake reports. Both are service-to-service — the answer
+  // arrives from the agent that delivered the question, the corrections from
+  // the intake itself — and the browser interface calls neither, so there is no
+  // legitimate tokenless caller.
+  /^\/api\/routing-corrections$/,
   /^\/api\/departments\/[^/]+\/config$/,
   /^\/api\/execution-queue(\/[^/]+)?$/,
   /^\/api\/files\/upload$/,
@@ -107,6 +113,7 @@ export const BEARER_REQUIRED_WRITE_ROUTES: RegExp[] = [
   // browser interface never calls it). Bearer-gated so the destructive-
   // confirmation backfill is reachable ONLY with MC_API_TOKEN + HMAC.
   /^\/api\/tasks\/[^/]+\/audit-backfill$/,
+  /^\/api\/tasks\/[^/]+\/provider-choice$/,
   /^\/api\/tasks\/[^/]+\/operator-preengine-recovery$/,
   /^\/api\/weight-profiles$/,
   /^\/api\/workspaces\/[^/]+$/,

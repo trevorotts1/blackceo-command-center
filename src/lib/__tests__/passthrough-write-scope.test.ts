@@ -27,6 +27,16 @@
  * client-facing social-theme routes are middleware-exempt + route-level
  * CSRF/same-origin):
  *
+ * re-derived 2026-09-21 for ask-at-capacity: the owner's answer to a provider
+ * question (POST /api/tasks/{id}/provider-choice) and the intake's lane
+ * corrections (POST /api/routing-corrections). Both are service-to-service —
+ * the answer arrives from the agent that delivered the question, the
+ * corrections from the intake itself — and the browser interface calls
+ * neither: 128 mutating, 7 webhook-protected (5 static + 2 dynamic), 121
+ * non-webhook — 47 bearer patterns match 51 route templates (43 single-route +
+ * 4 collection-or-item x2; 43 + 4x2 = 51), of which the pre-engine recovery
+ * template is webhook-gated as well, leaving 50 bearer-ONLY covered.
+ *
  * re-derived 2026-09-14 for WS-C Skill 69 archify (POST /api/archify-runs +
  * PATCH /api/archify-runs/{id} — service-to-service; the browser interface never
  * calls them): 126 mutating, 7 webhook-protected (5 static + 2 dynamic), 119
@@ -264,16 +274,16 @@ const nonWebhookCount = allMutatingRoutes.length - webhookProtectedCount;
 describe('passthrough-write-scope — anti-rot lock (U052)', () => {
   // ---- Counts ------------------------------------------------------------
 
-  it('API routes exporting a mutating method: 126 (literal assertion)', () => {
-    expect(allMutatingRoutes.length).toBe(126);
+  it('API routes exporting a mutating method: 128 (literal assertion)', () => {
+    expect(allMutatingRoutes.length).toBe(128);
   });
 
   it('protected by isWebhookSecretRoute: 7 (5 static + 2 dynamic — middleware src/middleware.ts:137-167)', () => {
     expect(webhookProtectedCount).toBe(7);
   });
 
-  it('non-webhook write routes: 119 (126 mutating − 7 webhook-protected; tenant authentication remains required)', () => {
-    expect(nonWebhookCount).toBe(119);
+  it('non-webhook write routes: 121 (128 mutating − 7 webhook-protected; tenant authentication remains required)', () => {
+    expect(nonWebhookCount).toBe(121);
   });
 
   it('interface call templates found by multi-line scanner', () => {
@@ -290,12 +300,12 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
     expect(count).toBeGreaterThanOrEqual(40);
   });
 
-  it('bearer-ONLY-covered routes: 48 (45 patterns match 49 templates; 1 of them — UPDATE-014 /api/tasks/{id}/operator-preengine-recovery — is webhook-gated, so 49 − 1 = 48)', () => {
-    expect(bearerCoveredRoutes.size).toBe(48);
+  it('bearer-ONLY-covered routes: 50 (47 patterns match 51 templates; 1 of them — UPDATE-014 /api/tasks/{id}/operator-preengine-recovery — is webhook-gated, so 51 − 1 = 50)', () => {
+    expect(bearerCoveredRoutes.size).toBe(50);
   });
 
-  it('BEARER_REQUIRED_WRITE_ROUTES.length is 45, matching 49 route templates (checksum: 41 + 4×2 = 49; PRES-010 added /api/presentations/runs; UPDATE-014 added /api/tasks/{id}/operator-preengine-recovery, which is webhook-gated as well; Skill 69 archify added the collection-or-item /api/archify-runs)', () => {
-    expect(BEARER_REQUIRED_WRITE_ROUTES.length).toBe(45);
+  it('BEARER_REQUIRED_WRITE_ROUTES.length is 47, matching 51 route templates (checksum: 43 + 4×2 = 51; ask-at-capacity added /api/routing-corrections and /api/tasks/{id}/provider-choice, both single-route service-to-service surfaces)', () => {
+    expect(BEARER_REQUIRED_WRITE_ROUTES.length).toBe(47);
   });
 
   it('route-list membership: BEARER_REQUIRED_WRITE_ROUTES includes /api/weight-profiles', () => {
