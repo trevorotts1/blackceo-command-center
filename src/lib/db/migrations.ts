@@ -7302,6 +7302,50 @@ export const migrations: Migration[] = [
       console.log('[Migration 148] stage-timings flood-breaker indexes ready');
     },
   },
+  {
+    // PER-WORKER CONCURRENCY — a worker may run more than one execution at once.
+    //
+    // reserveExecution refused a dispatch if the agent had ANY active execution,
+    // and `task_execution_worker_capacity` (a UNIQUE partial index on agent_id)
+    // enforced that same one-at-a-time rule in the database. The gateway itself
+    // runs `agents.defaults.maxConcurrent` (12 on a stock box) runs per agent, so
+    // a department with one worker was serialized by the Command Center alone —
+    // and a single quarantined `unknown` row starved that department outright
+    // (observed live: one row held a worker for four days).
+    //
+    // The limit becomes a per-agent number instead of a constraint:
+    //   • agents.max_concurrent_executions INTEGER NOT NULL DEFAULT 1 — DEFAULT 1
+    //     so every existing box keeps today's behaviour until an operator raises it.
+    //   • the UNIQUE worker index is dropped; a limit above 1 cannot be expressed
+    //     as uniqueness. reserveExecution now COUNTS the worker's live executions
+    //     inside its BEGIN IMMEDIATE transaction, which serializes the read and the
+    //     insert against every other reserver, in this process or another.
+    //   • idx_task_executions_agent_state serves that count.
+    //
+    // The PER-TASK rule is untouched: `task_execution_active_task` still makes a
+    // second live execution for one card impossible at the database level.
+    //
+    // Additive and idempotent, guarded on the table existing (migration-131
+    // convention) so a minimal fixture heals instead of crashing a fail-closed boot.
+    id: '149',
+    name: 'per_worker_execution_concurrency',
+    up: (db) => {
+      const agentColumns = new Set((db.prepare('PRAGMA table_info(agents)').all() as { name: string }[]).map((c) => c.name));
+      if (agentColumns.size && !agentColumns.has('max_concurrent_executions')) {
+        db.exec('ALTER TABLE agents ADD COLUMN max_concurrent_executions INTEGER NOT NULL DEFAULT 1');
+      }
+      const executionsExist = (db.prepare(
+        `SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name=?`,
+      ).get('task_executions') as { n: number }).n > 0;
+      if (!executionsExist) {
+        console.log('[Migration 149] task_executions absent (minimal fixture); worker-capacity index untouched');
+        return;
+      }
+      db.exec('DROP INDEX IF EXISTS task_execution_worker_capacity');
+      db.exec('CREATE INDEX IF NOT EXISTS idx_task_executions_agent_state ON task_executions(agent_id, state)');
+      console.log('[Migration 149] per-worker concurrency ready — worker capacity is counted against agents.max_concurrent_executions (default 1)');
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner

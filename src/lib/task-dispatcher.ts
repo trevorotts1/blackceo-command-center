@@ -305,31 +305,32 @@ export const PERSONA_HOLD_ACTIVITY_DEDUPE_HOURS = 6;
 export const PERSONA_HOLD_ACTIVITY_TYPE = 'dispatch_held';
 
 /**
- * Make a persona-gate hold VISIBLE (task-dispatcher persona gate).
+ * Make a dispatch hold VISIBLE on the card's Activity tab.
  *
- * The gate returns `{status:'held'}` every tick a content task has no persona
- * bundle. Held is not an error state anywhere upstream — the sweep counts it as
- * "waiting" — so an un-healable hold looked identical to a task that was about
- * to dispatch. One console.warn per tick plus ONE `task_activities` row per
- * (task, reason) per PERSONA_HOLD_ACTIVITY_DEDUPE_HOURS: enough for the Activity
- * tab to name the stall, never enough to spam it every 5 minutes.
+ * A hold is not an error state anywhere upstream — the sweeps count it as
+ * "waiting" — so a card that cannot clear a gate looked identical to one about
+ * to dispatch, and the board stayed green while nothing moved. ONE
+ * `task_activities` row per (task, dedupeLike) per
+ * PERSONA_HOLD_ACTIVITY_DEDUPE_HOURS: enough to name the stall, never enough to
+ * spam the tab every five minutes. `dedupeLike` is the LIKE pattern that decides
+ * what counts as "the same hold" — the callers below own their own wording.
  *
- * Best-effort: a pre-migration DB or any write failure degrades to the log line.
- * Never throws into the dispatch path.
+ * Best-effort: a pre-migration DB or any write failure degrades to the caller's
+ * log line. Never throws into the dispatch path.
  */
-function recordPersonaHoldActivity(
+function recordDispatchHoldActivity(
   taskId: string,
   agentId: string | null,
-  reason: string,
+  dedupeLike: string,
+  message: string,
   context: string,
 ): void {
-  console.warn(`[${context}] autoDispatchTask: HELD task ${taskId} — persona gate: ${reason}`);
   try {
     const last = queryOne<{ created_at: string }>(
       `SELECT created_at FROM task_activities
         WHERE task_id = ? AND activity_type = ? AND message LIKE ?
         ORDER BY created_at DESC LIMIT 1`,
-      [taskId, PERSONA_HOLD_ACTIVITY_TYPE, `%persona gate: ${reason}%`],
+      [taskId, PERSONA_HOLD_ACTIVITY_TYPE, dedupeLike],
     );
     const lastMs = parseEventTimestamp(last?.created_at);
     if (lastMs !== null && Date.now() - lastMs < PERSONA_HOLD_ACTIVITY_DEDUPE_HOURS * 3_600_000) {
@@ -338,18 +339,49 @@ function recordPersonaHoldActivity(
     run(
       `INSERT INTO task_activities (id, task_id, agent_id, activity_type, message, created_at)
        VALUES (?, ?, ?, ?, ?, ?)`,
-      [
-        uuidv4(),
-        taskId,
-        agentId,
-        PERSONA_HOLD_ACTIVITY_TYPE,
-        `[${context}] persona gate: ${reason}`,
-        new Date().toISOString(),
-      ],
+      [uuidv4(), taskId, agentId, PERSONA_HOLD_ACTIVITY_TYPE, message, new Date().toISOString()],
     );
   } catch (err) {
-    console.warn(`[${context}] persona hold activity non-fatal:`, (err as Error).message);
+    console.warn(`[${context}] dispatch hold activity non-fatal:`, (err as Error).message);
   }
+}
+
+/** The persona governance gate held this card (no persona bundle yet). */
+function recordPersonaHoldActivity(
+  taskId: string,
+  agentId: string | null,
+  reason: string,
+  context: string,
+): void {
+  console.warn(`[${context}] autoDispatchTask: HELD task ${taskId} — persona gate: ${reason}`);
+  recordDispatchHoldActivity(taskId, agentId, `%persona gate: ${reason}%`, `[${context}] persona gate: ${reason}`, context);
+}
+
+/**
+ * Make a WORKER-AT-CAPACITY hold visible (per-worker concurrency, migration 149).
+ *
+ * reserveExecution refuses while the worker already runs its limit. That is a
+ * QUEUE, not a fault: the sweep re-selects the card next tick and it dispatches
+ * the moment a slot frees. Without a row it is indistinguishable on the board
+ * from a card that is genuinely stuck, which is exactly the confusion the live
+ * stall caused. Same dedupe window and same best-effort contract as the persona
+ * hold; the message names the queue depth so the card reads "queued behind N".
+ */
+function recordWorkerCapacityHold(
+  taskId: string,
+  agentId: string | null,
+  running: number,
+  limit: number,
+  context: string,
+): void {
+  console.warn(`[${context}] autoDispatchTask: QUEUED task ${taskId} — worker at capacity (${running}/${limit} running)`);
+  recordDispatchHoldActivity(
+    taskId,
+    agentId,
+    '%worker at capacity%',
+    `[${context}] worker at capacity: queued behind ${running} running (limit ${limit})`,
+    context,
+  );
 }
 
 /** Clear attempt-accounting after a task successfully advances to in_progress. */
@@ -1829,7 +1861,12 @@ If you need help or clarification, ask the orchestrator.`;
     }
     throwIfJobLeaseLost();
     const claim = reserveExecution({...task,persona_snapshot:personaSendSnapshot}, sessionKey, executionId);
-    if (!claim.execution) return { status: 'held', reason: claim.reason };
+    if (!claim.execution) {
+      if (claim.reason === 'worker_at_capacity') {
+        recordWorkerCapacityHold(task.id, agent.id, claim.running ?? 0, claim.limit ?? 1, context);
+      }
+      return { status: 'held', reason: claim.reason };
+    }
     const execution = claim.execution;
     if (!beginExecutionSend(execution)) return { status: 'held', reason: 'claim_superseded', executionId };
     try {

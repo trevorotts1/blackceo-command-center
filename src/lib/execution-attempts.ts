@@ -41,8 +41,30 @@ function auditExecutionStatus(taskId:string,from:string,to:string,reason:string,
  else db.prepare('INSERT INTO events(id,type,task_id,message,created_at) VALUES(?,?,?,?,?)').run(randomUUID(),'task_status_changed',taskId,`${from} → ${to}: ${reason}`,now);
 }
 
+/** Default per-worker parallelism when the agent row does not set its own.
+ * 1 = one job per worker, exactly how every box behaved before the column existed. */
+export const WORKER_MAX_CONCURRENT_FALLBACK = 1;
+
+/** How many executions this worker may run at once.
+ *
+ * `agents.max_concurrent_executions` (migration 149) when it is set and
+ * positive, else WORKER_MAX_CONCURRENT_DEFAULT from the environment, else 1.
+ * A pre-migration database has no such column: the read throws, is caught, and
+ * the fallback applies — so an un-migrated box keeps the old behaviour instead
+ * of failing a dispatch. */
+export function workerConcurrencyLimit(agentId: string, db: Database.Database = getDb()): number {
+ const envRaw = Number.parseInt(process.env.WORKER_MAX_CONCURRENT_DEFAULT ?? '', 10);
+ const fallback = Number.isFinite(envRaw) && envRaw > 0 ? envRaw : WORKER_MAX_CONCURRENT_FALLBACK;
+ let configured = 0;
+ try {
+  const row = db.prepare('SELECT max_concurrent_executions FROM agents WHERE id=?').get(agentId) as { max_concurrent_executions?: number | null } | undefined;
+  configured = Number(row?.max_concurrent_executions ?? 0);
+ } catch { /* pre-migration DB: the column is absent; the fallback is the answer. */ }
+ return Number.isFinite(configured) && configured > 0 ? configured : fallback;
+}
+
 export function reserveExecution(snapshot: DispatchSnapshot, sessionKey: string, executionId: string,
- db: Database.Database = getDb()): { execution?: Execution; reason: string } {
+ db: Database.Database = getDb()): { execution?: Execution; reason: string; running?: number; limit?: number } {
  return db.transaction(() => {
   const task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(snapshot.id) as DispatchSnapshot | undefined;
   if (!task || !['backlog','assigned','blocked','in_progress'].includes(task.status) || task.status !== snapshot.status || task.assigned_agent_id !== snapshot.assigned_agent_id ||
@@ -51,11 +73,28 @@ export function reserveExecution(snapshot: DispatchSnapshot, sessionKey: string,
       task.source !== snapshot.source || task.archived_at || isOwnerKilled(task).killed || task.dispatch_hold ||
       !task.assigned_agent_id || ['build_deck','build_deck_phase'].includes(String(task.source ?? '').trim().toLowerCase())) return { reason: 'assignment_or_state_changed' };
   if(snapshot.persona_snapshot && capturePersonaSnapshot(task.id,db).fingerprint!==snapshot.persona_snapshot.fingerprint)return {reason:'dispatch_prompt_context_changed'};
-  const active = db.prepare(`SELECT id FROM task_executions WHERE (task_id = ? OR agent_id = ?) AND state IN ${ACTIVE} LIMIT 1`)
-    .get(task.id, task.assigned_agent_id);
-  if (active) return { reason: 'execution_or_worker_busy' };
-  // Legacy shared-session workers also consume capacity until their old task finishes.
-  if (db.prepare("SELECT id FROM tasks WHERE assigned_agent_id = ? AND id <> ? AND status = 'in_progress' AND archived_at IS NULL LIMIT 1")
+  // PER-TASK rule, unchanged: one live attempt per card, ever. Still backed by
+  // the `task_execution_active_task` unique partial index.
+  if (db.prepare(`SELECT id FROM task_executions WHERE task_id = ? AND state IN ${ACTIVE} LIMIT 1`).get(task.id))
+    return { reason: 'execution_or_worker_busy' };
+  // PER-WORKER capacity: COUNT the worker's other live executions against its
+  // configured limit instead of refusing on the first one. The old rule was a
+  // hard one-job-per-worker even though the gateway runs many per agent, so a
+  // department with one worker processed its queue strictly serially — and a
+  // single quarantined row starved it completely. The DB-level UNIQUE index that
+  // used to encode the limit is dropped by migration 149 (a limit above 1 cannot
+  // be a uniqueness constraint); the count below is the rule now, and it is read
+  // inside this BEGIN IMMEDIATE transaction, which serializes it against every
+  // other reserver, in this process or another.
+  const limit = workerConcurrencyLimit(task.assigned_agent_id, db);
+  const running = (db.prepare(`SELECT COUNT(*) AS n FROM task_executions WHERE agent_id = ? AND task_id <> ? AND state IN ${ACTIVE}`)
+    .get(task.assigned_agent_id, task.id) as { n: number }).n;
+  if (running >= limit) return { reason: 'worker_at_capacity', running, limit };
+  // Legacy shared-session workers also consume capacity until their old task
+  // finishes. That check exists because those workers SHARED one session; every
+  // session is per-execution now, so above limit 1 it would silently cancel the
+  // parallelism the operator just asked for. Kept verbatim at limit 1.
+  if (limit === 1 && db.prepare("SELECT id FROM tasks WHERE assigned_agent_id = ? AND id <> ? AND status = 'in_progress' AND archived_at IS NULL LIMIT 1")
     .get(task.assigned_agent_id, task.id)) return { reason: 'worker_busy_legacy_task' };
   const context=workerContext(task.assigned_agent_id,db);
   if(!context)return {reason:'worker_missing'};
@@ -130,6 +169,39 @@ export function completeExecution(taskId: string, executionId?: string, db = get
 }
 /** How long a quarantined `unknown` row keeps holding worker capacity (ms). */
 export const UNKNOWN_QUARANTINE_MS = 24 * 60 * 60 * 1000;
+
+/** POSITIVE EVIDENCE (2026-09): the gateway's own session history contains the
+ * dispatched message for this execution, so the send DID land and the missing
+ * acknowledgement was a transport artefact. Promote the quarantine to a live
+ * state rather than waiting out UNKNOWN_QUARANTINE_MS. Guarded on `unknown` so
+ * a late acknowledgement or completion that already moved the row wins. */
+export function recordExecutionEvidence(executionId: string, state: 'accepted' | 'running', db = getDb()): boolean {
+ return db.prepare("UPDATE task_executions SET state=?,error_code=NULL,updated_at=? WHERE id=? AND state='unknown'")
+  .run(state, new Date().toISOString(), executionId).changes === 1;
+}
+
+/** NEGATIVE EVIDENCE: the gateway was reachable, its history for this session
+ * does NOT contain the dispatched message, and the quarantine is past the
+ * resolve window. Release the capacity and hand the card back to the same
+ * worker — the same guard the expired-reservation path uses (assignment_version
+ * + agent + still in_progress), so a reassigned, killed or archived task is
+ * never rewound. No new idempotency key is ever minted. */
+export function failUnknownExecutionWithoutEvidence(executionId: string, db = getDb()): { failed: boolean; taskReset: boolean } {
+ return db.transaction(() => {
+  const row = db.prepare("SELECT * FROM task_executions WHERE id=? AND state='unknown'").get(executionId) as Execution | undefined;
+  if (!row) return { failed: false, taskReset: false };
+  const now = new Date().toISOString();
+  db.prepare("UPDATE task_executions SET state='failed',error_code='execution_unknown_no_evidence',updated_at=? WHERE id=? AND state='unknown'").run(now, executionId);
+  // U99-RAW-STATUS-WRITER: the same CAS-guarded in_progress→assigned restore the
+  // expired-reservation path above performs, audited by auditExecutionStatus in
+  // this same transaction. transition()'s single expectedFrom cannot express the
+  // assignment_version + agent + kill/archive guard this CAS carries.
+  const changed = db.prepare("UPDATE tasks SET status='assigned',updated_at=? WHERE id=? AND assignment_version=? AND assigned_agent_id=? AND status='in_progress' AND killed_at IS NULL AND archived_at IS NULL")
+   .run(now, row.task_id, row.assignment_version, row.agent_id).changes;
+  if (changed) auditExecutionStatus(row.task_id, 'in_progress', 'assigned', 'Quarantined execution had no gateway evidence', db);
+  return { failed: true, taskReset: changed === 1 };
+ }).immediate();
+}
 
 /** Process-restart reconciliation never creates a new key. Expired reservations
  * are safe to fail; sending/accepted work is quarantined until positive evidence.

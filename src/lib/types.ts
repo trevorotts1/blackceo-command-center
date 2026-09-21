@@ -121,6 +121,8 @@ export interface Agent {
   persona?: string;
   /** "permanent" = full-time team member, "on-call" = spawned when needed */
   specialist_type?: 'permanent' | 'on-call';
+  /** How many executions this worker runs at once (migration 149). Default 1. */
+  max_concurrent_executions?: number;
   created_at: string;
   updated_at: string;
 }
@@ -690,6 +692,8 @@ export interface CreateAgentRequest {
   memory_md?: string;
   model?: string;
   specialist_type?: 'permanent' | 'on-call';
+  /** Per-worker parallelism, 1-64. Omitted leaves the stored value alone. */
+  max_concurrent_executions?: number;
 }
 
 export interface UpdateAgentRequest extends Partial<CreateAgentRequest> {

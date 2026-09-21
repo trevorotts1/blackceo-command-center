@@ -35,7 +35,7 @@
  * EXECUTION_WATCHER_GATEWAY_DOWN_RECOVERY=0.
  */
 
-import { latestExecution, recoverExpiredExecutions, validateExecutionCompletion, completeExecution } from '@/lib/execution-attempts';
+import { latestExecution, recoverExpiredExecutions, validateExecutionCompletion, completeExecution, recordExecutionEvidence, failUnknownExecutionWithoutEvidence } from '@/lib/execution-attempts';
 import { throwIfJobLeaseLost } from './job-lease';
 import { queryAll, queryOne, run, timeNow, parseDbTime } from '@/lib/db';
 import { broadcast } from '@/lib/events';
@@ -225,6 +225,183 @@ export async function readSessionHistory(sessionKey: string): Promise<RawHistory
 }
 
 /**
+ * EVIDENCE-BASED `unknown` RESOLUTION (2026-09).
+ *
+ * A dispatch whose chat.send acknowledgement never arrived is quarantined as
+ * state='unknown', and that row holds the worker's capacity — deliberately:
+ * a missing acknowledgement is not evidence the remote work did not start.
+ * Nothing ever ASKED the gateway, though, so the quarantine could only end by
+ * ageing out after UNKNOWN_QUARANTINE_MS (24 h). On a live box one such row held
+ * a department's only worker for four days.
+ *
+ * The gateway can answer the question directly. Every execution owns a unique
+ * session key, and the dispatched message embeds `**Execution ID:** <id>`, so
+ * the id appearing anywhere in that session's chat.history is POSITIVE PROOF the
+ * send landed:
+ *
+ *   • id present → the gateway has the work. Promote to `running` when the agent
+ *     has already answered, `accepted` when it has not. The quarantine is over
+ *     and the row behaves like any other live execution.
+ *   • id absent, gateway REACHABLE, row older than UNKNOWN_RESOLVE_AFTER_MS
+ *     (default 15 min) → the send did not land. Fail as
+ *     `execution_unknown_no_evidence`, release the capacity, and hand the card
+ *     back to the same worker (guarded on assignment_version + agent + still
+ *     in_progress, exactly like the expired-reservation path).
+ *   • gateway UNREACHABLE → do NOTHING. A down gateway returns an empty history
+ *     for every session; treating that as absence would fail every quarantined
+ *     row at once and re-dispatch work that may well be running. The negative
+ *     leg requires a reachable instrument, never a blind read.
+ *
+ * The 24 h age-out in recoverExpiredExecutions stays as the backstop for a
+ * gateway that is never reachable again. No new idempotency key is ever minted.
+ */
+
+/** Rows examined per tick. Bounded so one reconcile cannot outrun its job lease. */
+export const UNKNOWN_RECONCILE_BATCH = 20;
+
+/** Per-call bound on the history RPC (the client's own timeout is 30 s). */
+const UNKNOWN_HISTORY_TIMEOUT_MS = 10_000;
+
+/** How long a quarantine survives with no evidence before it is failed (ms). */
+export function unknownResolveAfterMs(): number {
+  const raw = Number.parseInt(process.env.UNKNOWN_RESOLVE_AFTER_MS ?? '', 10);
+  return Number.isFinite(raw) && raw > 0 ? raw : 15 * 60_000;
+}
+
+/** Resolve to `fallback` if the promise has not settled in `ms`. The timer is
+ *  unref'd so a best-effort probe never keeps a short-lived process alive. */
+async function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const guard = new Promise<T>((resolve) => {
+    timer = setTimeout(() => resolve(fallback), ms);
+    (timer as { unref?: () => void }).unref?.();
+  });
+  try {
+    return await Promise.race([promise, guard]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/** chat.history carries `content` as a plain string on some gateway versions and
+ *  as a block array on others. Serialize either shape so an id match works on
+ *  both — the execution id is a uuid, so a substring hit cannot collide. */
+function messageHaystack(m: RawHistoryMessage): string {
+  const content = (m as { content?: unknown }).content;
+  if (typeof content === 'string') return content;
+  if (content == null) return '';
+  try {
+    return JSON.stringify(content);
+  } catch {
+    return '';
+  }
+}
+
+interface UnknownExecutionRow {
+  id: string;
+  task_id: string;
+  agent_id: string;
+  session_key: string;
+  updated_at: string;
+}
+
+export interface UnknownReconcileResult {
+  /** Rows the gateway proved it received — promoted to accepted/running. */
+  evidenced: number;
+  /** Rows with no evidence past the window — failed, capacity released. */
+  failed: number;
+  /** Rows left alone (too young, or the gateway could not be asked). */
+  waiting: number;
+}
+
+export async function reconcileUnknownExecutions(
+  opts: { reader?: SessionHistoryReader; gatewayConnected?: boolean; now?: number } = {},
+): Promise<UnknownReconcileResult> {
+  const result: UnknownReconcileResult = { evidenced: 0, failed: 0, waiting: 0 };
+  const rows = queryAll<UnknownExecutionRow>(
+    `SELECT id, task_id, agent_id, session_key, updated_at
+       FROM task_executions WHERE state = 'unknown'
+      ORDER BY updated_at ASC LIMIT ?`,
+    [UNKNOWN_RECONCILE_BATCH],
+  );
+  if (rows.length === 0) return result;
+
+  const reader = opts.reader ?? readSessionHistory;
+  const connected = opts.gatewayConnected ?? getOpenClawClient().isConnected();
+  const now = opts.now ?? Date.now();
+  const cutoff = now - unknownResolveAfterMs();
+
+  for (const row of rows) {
+    throwIfJobLeaseLost();
+    let messages: RawHistoryMessage[] = [];
+    if (connected) {
+      try {
+        messages = await withTimeout(reader(row.session_key), UNKNOWN_HISTORY_TIMEOUT_MS, []);
+      } catch (err) {
+        // A reachable gateway that refuses this session is absence, not silence —
+        // the age check below still gates the destructive leg.
+        console.warn(`[execution-watcher] unknown-reconcile history read failed (${row.session_key}):`, (err as Error).message);
+      }
+    }
+
+    if (messages.some((m) => messageHaystack(m).includes(row.id))) {
+      const state = messages.some((m) => m.role === 'assistant') ? 'running' : 'accepted';
+      if (recordExecutionEvidence(row.id, state)) {
+        result.evidenced++;
+        console.log(`[execution-watcher] unknown-reconcile: gateway history proves execution ${row.id} landed → ${state}`);
+        recordReconcileActivity(
+          row,
+          `Gateway session history contains this dispatch; execution resolved from unknown to ${state}.`,
+        );
+      } else {
+        result.waiting++; // Another writer moved it first — leave it to them.
+      }
+      continue;
+    }
+
+    if (!connected) {
+      result.waiting++; // Never conclude absence from an instrument we could not reach.
+      continue;
+    }
+    const updatedMs = parseDbTime(row.updated_at);
+    if (Number.isNaN(updatedMs) || updatedMs > cutoff) {
+      result.waiting++; // Young enough that a late acknowledgement is still plausible.
+      continue;
+    }
+    const outcome = failUnknownExecutionWithoutEvidence(row.id);
+    if (!outcome.failed) {
+      result.waiting++;
+      continue;
+    }
+    result.failed++;
+    console.warn(
+      `[execution-watcher] unknown-reconcile: no gateway evidence for execution ${row.id} (task ${row.task_id}) ` +
+        `after ${Math.round((now - updatedMs) / 60_000)} min — failed, worker capacity released` +
+        (outcome.taskReset ? ', task returned to assigned' : ''),
+    );
+    recordReconcileActivity(
+      row,
+      'Gateway session history does not contain this dispatch; execution failed as execution_unknown_no_evidence and the worker slot was released' +
+        (outcome.taskReset ? '. The task is back in assigned for re-dispatch.' : '.'),
+    );
+  }
+  return result;
+}
+
+/** Name the reconcile on the card's Activity tab. Best-effort, never throws. */
+function recordReconcileActivity(row: UnknownExecutionRow, message: string): void {
+  try {
+    run(
+      `INSERT INTO task_activities (id, task_id, agent_id, activity_type, message, created_at)
+       VALUES (?, ?, ?, 'execution_reconciled_from_gateway', ?, ?)`,
+      [uuidv4(), row.task_id, row.agent_id, message, timeNow()],
+    );
+  } catch (err) {
+    console.warn('[execution-watcher] reconcile activity non-fatal:', (err as Error).message);
+  }
+}
+
+/**
  * B3: probe an agent's OpenClaw session for genuine forward-progress BEFORE the
  * stuck-sweep force-blocks it. The `events` table has NO mid-turn agent-activity
  * type, so a legitimately long-running turn leaves no `events` row and is falsely
@@ -402,6 +579,10 @@ export async function runExecutionCompletionReconcile(): Promise<void> {
   }
 
   recoverExpiredExecutions();
+  // EVIDENCE PASS: ask the gateway what actually happened to every quarantined
+  // `unknown` row before the 24 h age-out would have to guess. Runs first so a
+  // row this tick resolves frees its worker for the very next dispatch sweep.
+  await reconcileUnknownExecutions();
   // B5: include in_progress tasks that have NO active openclaw_sessions row (the
   // purge wiped 64 rows). The completion id is deterministic, so we derive it in
   // the loop instead of dropping the task — previously the `s.openclaw_session_id
