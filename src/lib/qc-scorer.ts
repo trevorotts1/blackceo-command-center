@@ -77,6 +77,7 @@ import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { TRIO_ROLE_ALIASES } from '@/lib/db/migrations';
 import { getMissionControlUrl } from '@/lib/config';
 import { missionControlAuthHeaders } from '@/lib/mc-auth';
+import { autoRouteTask } from '@/lib/routing/auto-route';
 import { notifyOwner, notifySystem, resolveWorkspaceBase } from '@/lib/notify';
 import { notifyOwnerDone } from '@/lib/owner-reports';
 import { transition, TransitionError, type LifecycleState } from '@/lib/task-lifecycle';
@@ -6844,16 +6845,21 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
         ],
       );
 
-      // ── Fix: use getMissionControlUrl() (port 4000) not NEXTAUTH_URL (port 3000) ──
-      // This was the root cause of "fetch failed" — NEXTAUTH_URL defaults to
-      // port 3000 but the app runs on port 4000.
-      const baseUrl = getMissionControlUrl();
-      fetch(`${baseUrl}/api/webhooks/auto-route`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ taskId, workspaceId: task.workspace_id }),
-      }).then(async (resp) => {
-        if (resp.ok) {
+      // ── The re-route runs IN PROCESS, not over HTTP ──────────────────────
+      // This used to `fetch` our own /api/webhooks/auto-route with no
+      // credentials. That route is in the middleware's WEBHOOK_SECRET_ROUTES
+      // family, which is deliberately excluded from the same-origin
+      // passthrough, so the call was rejected at the gate before the handler
+      // ran: every QC-failed card logged `Auto-route returned 401 ... stays in
+      // backlog` and waited out the 5-minute ceo-delegation sweep. Signing it
+      // would have meant reproducing BOTH layers the route demands of an
+      // EXTERNAL caller (Bearer MC_API_TOKEN + an HMAC of the raw body over
+      // WEBHOOK_SECRET) and guessing our own base URL — the port-3000/4000 bug
+      // this comment used to describe — all to reach the same process. The
+      // routing decision is a callable now; there is no request to
+      // authenticate.
+      autoRouteTask(taskId, task.workspace_id).then(async (routing) => {
+        if (routing.routed) {
           // Auto-route succeeded: move the task to in_progress so it leaves backlog.
           // fix2(MR-04): route through transition(). This .then() callback is
           // already async, so the async transition() can be awaited directly
@@ -6881,7 +6887,7 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
             }
           }
         } else {
-          console.warn(`[QCScorer] Auto-route returned ${resp.status} for task ${taskId} — stays in backlog for ceo-delegation-sweep`);
+          console.warn(`[QCScorer] Auto-route did not route task ${taskId} (${routing.failure}: ${routing.reason}) — stays in backlog for ceo-delegation-sweep`);
         }
       }).catch(err => console.warn('[QCScorer] Auto-route trigger failed (non-fatal):', (err as Error).message));
 
