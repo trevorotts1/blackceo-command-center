@@ -1,3 +1,11 @@
+## [v7.6.50] — 2026-09-21 — An explicit null is a state, not a missing argument (fixes the long-red u107 case)
+
+### Fixed
+- **`declaredVerticalPacks(null)` no longer reads this machine's own build-state.** The reader did `state ?? readBuildState()`, and `??` treats an explicit `null` as "argument omitted" — so a caller saying "I have no state" silently fell through to the live `<workspace>/.workforce-build-state.json`. Only an OMITTED argument means "read the live file" now; an explicit null is a state, and it is empty. Every production caller calls it with no argument at all (`seam.ts` line 872, `departments.config.ts` lines 1112 and 1138), so nothing that ships changes behaviour — this only closes the seam the guard's own "FAIL CLOSED" doctrine already claimed was closed.
+- **The test that was supposed to catch this was vacuous on CI.** `tests/unit/vertical-derivation-guard-u107.test.ts` asserted `declaredVerticalPacks(null)` is `[]`, which is true on any machine with no build-state file — every CI runner — and false on a developer box whose own build-state declares a pack. That is why this case was red on the operator Mac (which declares `real-estate`) and green in CI for weeks. The case now points `OPENCLAW_WORKSPACE_ROOT` at a scratch dir holding a REAL build-state and asserts both directions: an omitted argument still reads it, an explicit null does not.
+
+### Not changed
+- `readInterviewProgress()` and `readStandardPrebuild()` in the same file carry the identical `state ?? readBuildState()` pattern. They are left alone deliberately: this change was scoped to the u107 defect, and neither has a caller that passes an explicit null today.
 ## [v7.6.49] — 2026-09-21 — The starter card stops behaving like real work, and a task creation stops calling itself
 
 ### Fixed
