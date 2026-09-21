@@ -112,6 +112,23 @@ interface IngestPayload {
   title?: unknown;
   description?: unknown;
   priority?: unknown;
+  /**
+   * RESOURCE-AWARE ROUTING. All four are OPTIONAL and descriptive; a producer
+   * that sends none creates exactly the card it always did.
+   *   need_by        ISO-8601 deadline. Stored on the EXISTING `due_date`
+   *                  column — the meaning is identical and a second column
+   *                  would be two fields that must agree forever.
+   *   lane           'route' | 'heavy' (an 'answer' is replied to in chat and
+   *                  never routed, so it should not arrive here).
+   *   effort_steps   the intake's own step estimate.
+   *   depts_touched  how many departments the work spans.
+   * A malformed value is DROPPED, never guessed at: a bad date must not become
+   * a deadline nobody set, and a bad number must not become an effort estimate.
+   */
+  need_by?: unknown;
+  lane?: unknown;
+  effort_steps?: unknown;
+  depts_touched?: unknown;
   source?: unknown;
   source_ref?: unknown;
   department_slug?: unknown;
@@ -690,6 +707,18 @@ export async function POST(request: NextRequest) {
       normalizeRequesterSessionKey(externalSessionId) ??
       undefined;
 
+    // RESOURCE-AWARE ROUTING intake fields. Each parses or is dropped.
+    const needByRaw = typeof body.need_by === 'string' ? body.need_by.trim() : '';
+    const needBy = needByRaw && Number.isFinite(Date.parse(needByRaw)) ? new Date(needByRaw).toISOString() : null;
+    const laneRaw = typeof body.lane === 'string' ? body.lane.trim().toLowerCase() : '';
+    const lane = ['answer', 'route', 'heavy'].includes(laneRaw) ? laneRaw : null;
+    const positiveIntOrNull = (v: unknown): number | null => {
+      const n = typeof v === 'number' ? v : Number.parseInt(String(v ?? ''), 10);
+      return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
+    };
+    const effortSteps = positiveIntOrNull(body.effort_steps);
+    const deptsTouched = positiveIntOrNull(body.depts_touched);
+
     const priorityRaw = typeof body.priority === 'string' ? body.priority.trim() : undefined;
     const priority: TaskPriority | undefined =
       priorityRaw && VALID_PRIORITIES.has(priorityRaw as TaskPriority)
@@ -1011,6 +1040,15 @@ export async function POST(request: NextRequest) {
         // surface it on the card and the ContextPack assembler can carry the
         // pointers into the dispatch handoff (buildContextPack input.contextRefs).
         context_refs: contextRefs.length > 0 ? contextRefs : null,
+        // RESOURCE-AWARE ROUTING: the deadline rides the EXISTING due_date
+        // column. `undefined` (not null) when the caller sent none, because
+        // createTaskCore applies its department SLA default only when the key
+        // is absent entirely — passing null would suppress that default and
+        // silently strip every card's SLA.
+        due_date: needBy ?? undefined,
+        route_lane: lane,
+        effort_steps: effortSteps,
+        depts_touched: deptsTouched,
       },
       { origin: request.headers.get('origin') }
     );

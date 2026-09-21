@@ -7531,6 +7531,48 @@ export const migrations: Migration[] = [
       console.log('[Migration 152] provider pools self-calibrate — a 429 lowers the limit, quiet time grows it back');
     },
   },
+  {
+    // THE INTAKE LANE AND THE SHAPE OF THE WORK.
+    //
+    // Every card reaching the board looked the same size to the router. A
+    // question the CEO could have answered in chat, a one-line ordinary task
+    // and a twelve-step cross-department build were all just "a task", so the
+    // only decision the box could make about capacity was "dispatch or refuse".
+    //
+    // The intake now says which lane a message was classified into and roughly
+    // how big the work is, and the card keeps it:
+    //   route_lane      'answer' | 'route' | 'heavy' — the ANSWER lane never
+    //                   reaches here (the agent replies in chat instead), so a
+    //                   stored 'answer' is a correction, not a normal card.
+    //   effort_steps    the intake's own step estimate, when it made one.
+    //   depts_touched   how many departments the work spans.
+    // All three are NULLABLE and purely descriptive: a caller that sends none —
+    // every producer shipped before this — creates exactly the card it always
+    // did. Nothing refuses a card for lacking them.
+    //
+    // The DEADLINE deliberately does NOT get a column: `tasks.due_date` has
+    // existed since the initial schema and already carries exactly this meaning.
+    // A second `need_by` column would be two fields that must agree forever.
+    //
+    // Additive and idempotent.
+    id: '153',
+    name: 'task_intake_lane_and_effort',
+    up: (db) => {
+      const columns = new Set((db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[]).map((c) => c.name));
+      if (!columns.size) {
+        console.log('[Migration 153] tasks absent (minimal fixture); intake-lane columns untouched');
+        return;
+      }
+      for (const [column, type] of Object.entries({
+        route_lane: 'TEXT',
+        effort_steps: 'INTEGER',
+        depts_touched: 'INTEGER',
+      })) {
+        if (!columns.has(column)) db.exec(`ALTER TABLE tasks ADD COLUMN ${column} ${type}`);
+      }
+      console.log('[Migration 153] intake lane + effort recorded on the card (deadline stays on the existing due_date)');
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner

@@ -57,6 +57,7 @@ import { broadcast } from '@/lib/events';
 import { notifyOwner, notifySystem } from '@/lib/notify';
 import { getMissionControlUrl } from '@/lib/config';
 import { resolveAndLog, resolveSpecialistType } from '@/lib/intelligence-resolver';
+import { scoreRoute, recordRoutingReason, type RouteDecision } from '@/lib/capacity/route-scorer';
 import { buildPersonaBlock, buildPersonaPlanBlock } from '@/lib/persona-dispatch';
 import { renderOwnerMessagesSection } from '@/lib/owner-messages';
 import { loadSubtaskPersonas } from '@/lib/persona-selector';
@@ -1932,8 +1933,32 @@ If you need help or clarification, ask the orchestrator.`;
     // `agents.model` is the fallback only because a box with no runtime entry
     // still has to land in some pool.
     const modelChain = resolveRuntimeModelChainFromConfig(agent, task.workspace_id ?? undefined);
+    const effectiveChain = modelChain.length ? modelChain : (agent.model ? [agent.model] : []);
+
+    // RESOURCE-AWARE ROUTING: score that SAME chain on the two dimensions the
+    // pool logic has no way to see — money and the card's deadline — plus this
+    // box's own measured latency per provider. It does NOT reorder the chain:
+    // the debit is a prediction of what the OpenClaw runtime will do and the
+    // runtime walks `model.fallbacks` in CONFIG order, so a re-ordered chain
+    // would debit a pool the run was never going to use. What it produces is
+    // the sentence the CARD carries and the `askWorthy` fact the ask gate
+    // reads. Best-effort throughout — scoring never blocks a dispatch.
+    let routeDecision: RouteDecision | null = null;
+    try {
+      routeDecision = scoreRoute({
+        agent,
+        workspaceId: task.workspace_id,
+        title: task.title,
+        department: task.department,
+        needBy: (task as { due_date?: string | null }).due_date ?? null,
+        candidateModels: effectiveChain,
+      });
+    } catch (scoreErr) {
+      console.warn(`[${context}] route scoring failed for task ${task.id}:`, (scoreErr as Error).message);
+    }
+
     const claim = reserveExecution(
-      {...task,persona_snapshot:personaSendSnapshot,model_chain:modelChain.length ? modelChain : (agent.model ? [agent.model] : [])},
+      {...task,persona_snapshot:personaSendSnapshot,model_chain:effectiveChain},
       sessionKey, executionId,
     );
     if (!claim.execution) {
@@ -1942,6 +1967,13 @@ If you need help or clarification, ask the orchestrator.`;
         recordWorkerCapacityHold(task.id, agent.id, claim.running ?? 0, claim.limit ?? 1, context);
       } else if (claim.reason === 'all_pools_full') {
         recordAllPoolsFullHold(task.id, agent.id, claim.summary ?? 'every provider pool', context);
+      }
+      // Say WHY on the card, in live numbers, so a queued card reads as a queue
+      // with a cause instead of a card that looks stuck. Only for the capacity
+      // refusals: the other reasons are state changes, not resource decisions,
+      // and the scorer has nothing to say about them.
+      if (routeDecision && (claim.reason === 'all_pools_full' || claim.reason === 'worker_at_capacity')) {
+        recordRoutingReason(task.id, routeDecision.reason);
       }
       return { status: 'held', reason: claim.reason };
     }
@@ -2055,6 +2087,12 @@ If you need help or clarification, ask the orchestrator.`;
     // W8.2: task advanced — clear attempt-accounting so a future re-queue starts
     // from a clean slate (only CONSECUTIVE failures accumulate toward the cap).
     recordDispatchSuccess(task.id);
+
+    // The routing explanation is written HERE, after every status write this
+    // path makes. `tasks_routing_reconsider` (migration 133) erases
+    // routing_reason on any update that also touches status, so a reason
+    // written before the claim would be wiped by the claim itself.
+    if (routeDecision) recordRoutingReason(task.id, routeDecision.reason);
 
     // W5.3 — START owner notification (spec §5): persona + dept + specialist + SOP + role.
     // All five values are in local scope at this point. Best-effort; gateway-routed; never throws.
