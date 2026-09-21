@@ -91,7 +91,11 @@ log "Node $NODE_VERSION (major $NODE_MAJOR), ABI $("$NODE_BIN" -p 'process.versi
 
 # ── (a) Rebuild better-sqlite3 ──────────────────────────────────────────────
 log "(a) Rebuilding better-sqlite3 against Node ABI $("$NODE_BIN" -p 'process.versions.modules') ..."
-if "$NPM_BIN" rebuild better-sqlite3 2>&1; then
+# --ignore-scripts=false: a user or global npmrc with ignore-scripts=true (an
+# operator hardening, measured on the canary Mac) makes a bare `npm rebuild`
+# print "rebuilt dependencies successfully" and build NOTHING. The flag on the
+# command line beats the npmrc; without it this repair silently repairs nothing.
+if "$NPM_BIN" rebuild better-sqlite3 --ignore-scripts=false 2>&1; then
   # Verify the module actually loads after rebuild
   if "$NODE_BIN" -e "
     const db = require('./node_modules/better-sqlite3');

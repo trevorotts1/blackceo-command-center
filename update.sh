@@ -700,7 +700,41 @@ step "Step 4: Install npm dependencies"
 # `npm rebuild better-sqlite3` all compile against the runtime pm2 will exec.
 # Previously this ran on whatever node the cron/update shell resolved, which is
 # how the rebuilt native module came out with the wrong ABI.
-npm ci --engine-strict --no-audit --no-fund 2>&1 \
+#
+# --ignore-scripts=false: npm ci WIPES node_modules first, and a user or global
+# npmrc setting `ignore-scripts=true` (an operator hardening, measured on the
+# canary Mac) then suppresses postinstall — so better-sqlite3's native build
+# never runs and the box is left with no binding at all. The flag on the command
+# line beats any npmrc, which is the only place this can be enforced from; the
+# same flag is already on scripts/atomic-deploy.sh's npm ci for this reason.
+#
+# NODE_MODULES SURVIVAL: because npm ci wipes first, a failure here used to leave
+# the box with NO node_modules. The live app kept serving only because the
+# running process held the deleted files open; any restart would have
+# crash-looped. So the previous tree is moved aside first and swapped back if
+# anything between here and the native-module verdict fails.
+# Paths are relative to the install directory, which is the working directory
+# here and the one npm ci itself installs into.
+_cc_nm_prev=""
+_cc_restore_node_modules() {
+  [ -n "$_cc_nm_prev" ] || return 0
+  if [ -d "$_cc_nm_prev" ]; then
+    echo "  ⚠ Restoring the previous node_modules so the running app survives a restart."
+    rm -rf node_modules
+    mv "$_cc_nm_prev" node_modules
+  fi
+  _cc_nm_prev=""
+}
+trap _cc_restore_node_modules EXIT
+if [ -d node_modules ]; then
+  rm -rf node_modules.prev
+  if mv node_modules node_modules.prev; then
+    _cc_nm_prev="node_modules.prev"
+  else
+    fatal "Could not move node_modules aside; refusing to run npm ci, which would wipe it. Migrations, build and restart were not run."
+  fi
+fi
+npm ci --engine-strict --no-audit --no-fund --ignore-scripts=false 2>&1 \
   || fatal "npm ci failed. Fix the reported runtime, lockfile or registry error and retry. No npm install fallback is allowed; migrations, build and restart were not run."
 success "Dependencies installed"
 
@@ -762,6 +796,12 @@ _cc_assert_native_module_usable() {
   fatal "$mod is present at $lib but cannot be loaded and used by $CC_NODE_BIN ($("$CC_NODE_BIN" --version 2>/dev/null || echo unknown), module ABI $("$CC_NODE_BIN" -p process.versions.modules 2>/dev/null || echo unknown)). This is the native ABI mismatch that crash-loops the Command Center. Run 'cd $INSTALL_DIR/node_modules/$mod && npx node-gyp rebuild' with that same node and re-run the updater; migrations, build and restart were not run."
 }
 _cc_assert_native_module_usable better-sqlite3
+
+# The new tree is proven loadable. Drop the safety copy and disarm the restore;
+# everything after this point fails forward onto a working node_modules.
+rm -rf "$_cc_nm_prev"
+_cc_nm_prev=""
+trap - EXIT
 
 # ----------------------------------------------------------
 # Run any database migrations (if seed files changed)
