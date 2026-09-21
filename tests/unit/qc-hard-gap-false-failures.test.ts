@@ -253,6 +253,36 @@ test('a QC kickback note does not bump persona_input_revision; a real edit still
   assert.equal(revision(), before + 1, 'CONTROL: a real input change must still bump the revision');
 });
 
+test('a QC BLOCK does not advance persona_input_revision either', async () => {
+  // The re-route paths were guarded in v7.6.43; the block path was not. On the
+  // live box all seven blocked cards sat exactly one revision ahead of their
+  // bundle, because the block appends its audit note to `description` and the
+  // migration-132 trigger fires on that write — so re-scoring a blocked card
+  // failed `persona_input_changed` and it could never be recovered.
+  const card = dispatchedCard('voice-one');
+  const revision = () => db.queryOne<{ persona_input_revision: number }>('SELECT persona_input_revision FROM tasks WHERE id=?', [card.id])!.persona_input_revision;
+  const before = revision();
+
+  const landed = await qc.blockTaskForQC({
+    taskId: card.id, taskTitle: 'Write the launch email', taskDescription: 'Draft the announcement email.',
+    fromStatus: 'review', actor: 'qc-scorer', attempts: 3, gaps: ['persona_voice_mismatch'],
+    needs: 'System fix required', audience: 'SYSTEM',
+    blockReason: 'Failed QC 3x, last score 10.0/10',
+    auditNote: '[QC-BLOCKED] Task failed QC 3 time(s) (cap: 3). Last score: 10.0/10.',
+    timelineEventMessage: '[QC-BLOCKED] blocked after 3 QC-fail re-routes.',
+  });
+  assert.equal(landed, true);
+  const after = db.queryOne<{ status: string; description: string }>('SELECT status,description FROM tasks WHERE id=?', [card.id])!;
+  assert.equal(after.status, 'blocked');
+  assert.match(after.description, /\[QC-BLOCKED\]/, 'the audit note must still land — the write is preserved, only its side effect is undone');
+  assert.equal(revision(), before, 'a QC block is QC annotating its own card, not a change to the persona inputs');
+
+  // MUTATION PROOF: the trigger is live on this row, so the assertion above is
+  // discriminating rather than vacuous.
+  db.run("UPDATE tasks SET title='A different brief entirely' WHERE id=?", [card.id]);
+  assert.equal(revision(), before + 1, 'CONTROL: a real input change must still bump the revision');
+});
+
 // ── 6. The provider pool is debited from the RUNTIME model ──────────────────
 
 test('pool selection follows the runtime model, not the Command Center intent', () => {

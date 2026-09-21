@@ -1,3 +1,11 @@
+## [v7.6.46] — 2026-09-21 — A QC block no longer strands the card one persona revision ahead
+
+### Fixed
+- **`blockTaskForQC` was the one persona-revision-bump path v7.6.43 missed.** That release stopped both QC re-route paths from inventing a persona revision by wrapping their kickback-note write; `blockTaskForQC` appends its own audit note to `tasks.description` the same way, which fires the same migration-132 `tasks_persona_input_revision` trigger, and was not wrapped. Box evidence: all seven blocked cards on the client board sat at bundle revision + 1, so a card QC blocked could never be recovered by re-scoring it — the moment it was re-scored it failed the `persona_input_changed` gate against a bundle it had never actually diverged from. `blockTaskForQC` now uses the same `withoutSelfInflictedPersonaBump` wrapper #397 introduced: the audit note still lands, only the trigger's side effect is undone, and a real input change (title, audience, persona, a new assignee) still bumps the revision because none of those happen inside the wrapper. A lost CAS race restores nothing.
+
+### Tests
+- `tests/unit/qc-hard-gap-false-failures.test.ts` (+1 case, 8 total): a QC block lands its note and leaves `persona_input_revision` where it was, with an inline control proving the trigger is live on that row so the assertion cannot pass vacuously. Mutation-proved: unwrapping the block path again turns the new case red; restored, all 8 pass. `tsc`, `eslint` and `npm run build` clean; unit suite 3118 pass / 1 fail, the known pre-existing `vertical-derivation-guard-u107`.
+
 ## [v7.6.45] — 2026-09-21 — The gateway contract is checked before a deploy trusts it, and three silent wire defects are fixed
 
 ### Added
