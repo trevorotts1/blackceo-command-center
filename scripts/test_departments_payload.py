@@ -48,6 +48,15 @@ DEPTS = [
 ]
 ENVELOPE = {"company": "Acme", "total_departments": 2, "total_roles": 18, "departments": DEPTS}
 METADATA_ONLY = {"company": "Acme", "total_departments": 34, "total_roles": 416}
+# The shape verified on a client box: the 'departments' KEY holds a dict of
+# department objects keyed by slug, not a list.
+KEYED_ENVELOPE = {
+    "company": "Acme", "total_departments": 2, "total_roles": 18,
+    "departments": {
+        "account-management-dept": {"name": "Account Management"},
+        "app-development-dept": {"name": "App Development"},
+    },
+}
 
 
 # ── the normalizer itself: the three shapes ────────────────────────────────
@@ -75,8 +84,41 @@ def test_dict_without_departments_is_refused_naming_path_and_type():
 
 def test_dict_of_dicts_keyed_by_slug_is_folded():
     assert normalize_departments({"marketing": {"name": "Marketing"}}) == [
-        {"name": "Marketing", "id": "marketing"}
+        {"name": "Marketing", "id": "marketing", "slug": "marketing"}
     ]
+
+
+def test_departments_key_holding_a_dict_of_dicts_is_folded():
+    # The shape a real client box ships: the 'departments' KEY holds a MAP of 34
+    # objects keyed by department slug, not a list. v7.6.29 refused this with
+    # "'departments' key holds dict, expected a list" and failed Phase 6c.
+    assert normalize_departments(KEYED_ENVELOPE) == [
+        {"name": "Account Management", "id": "account-management-dept",
+         "slug": "account-management-dept"},
+        {"name": "App Development", "id": "app-development-dept",
+         "slug": "app-development-dept"},
+    ]
+
+
+def test_folding_keeps_an_entrys_own_id_and_only_fills_what_is_missing():
+    assert normalize_departments(
+        {"departments": {"marketing": {"id": "dept-marketing", "name": "Marketing"}}}
+    ) == [{"id": "dept-marketing", "name": "Marketing", "slug": "marketing"}]
+    assert normalize_departments(
+        {"departments": {"marketing": {"id": "dept-marketing", "slug": "mktg"}}}
+    ) == [{"id": "dept-marketing", "slug": "mktg"}]
+
+
+@pytest.mark.parametrize("payload", [
+    {"departments": {"marketing": "yes"}},  # a value that is not an object
+    {"departments": {"marketing": ["a"]}},  # a list is not a department object
+    {"departments": {}},                    # empty is not a department map
+    {"departments": 42},
+])
+def test_departments_key_holding_a_non_map_is_still_refused(payload):
+    with pytest.raises(MalformedDepartmentsError) as exc:
+        normalize_departments(payload, path="/tmp/departments.json")
+    assert "'departments' key holds" in str(exc.value)
 
 
 def test_departments_or_empty_never_raises():
@@ -95,6 +137,13 @@ def _write(tmp_path, payload):
 @pytest.mark.parametrize("payload", [DEPTS, ENVELOPE])
 def test_sync_read_json_returns_the_list_for_both_shapes(tmp_path, payload):
     assert _sync._read_json(_write(tmp_path, payload)) == DEPTS
+
+
+def test_sync_read_json_reads_the_slug_keyed_envelope(tmp_path):
+    # Phase 6c's load boundary. This is the payload that made v7.6.29 print
+    # "[sync] FATAL: departments.json: 'departments' key holds dict, expected a list".
+    got = _sync._read_json(_write(tmp_path, KEYED_ENVELOPE))
+    assert [d["id"] for d in got] == ["account-management-dept", "app-development-dept"]
 
 
 def test_sync_read_json_refuses_a_metadata_envelope(tmp_path):

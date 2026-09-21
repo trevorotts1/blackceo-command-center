@@ -38,6 +38,17 @@ const DEPTS = [
 ];
 const ENVELOPE = { company: 'Acme', total_departments: 2, total_roles: 18, departments: DEPTS };
 const METADATA_ONLY = { company: 'Acme', total_departments: 34, total_roles: 416 };
+// The shape verified on a client box: the `departments` KEY holds an object of
+// department objects keyed by slug, not an array.
+const KEYED_ENVELOPE = {
+  company: 'Acme',
+  total_departments: 2,
+  total_roles: 18,
+  departments: {
+    'account-management-dept': { name: 'Account Management' },
+    'app-development-dept': { name: 'App Development' },
+  },
+};
 
 // ── the three shapes ───────────────────────────────────────────────────────
 
@@ -68,7 +79,33 @@ test('an object with NO departments list is refused, naming the path and the typ
 test('a dict-of-dicts keyed by slug is folded, with the key as the id', () => {
   const result = normalizeDepartmentsPayload({ marketing: { name: 'Marketing' } });
   assert.equal(result.ok, true);
-  assert.deepEqual(result.ok && result.departments, [{ name: 'Marketing', id: 'marketing' }]);
+  assert.deepEqual(result.ok && result.departments, [
+    { name: 'Marketing', id: 'marketing', slug: 'marketing' },
+  ]);
+});
+
+test("a 'departments' key holding a dict-of-dicts is folded the same way", () => {
+  // The shape a real client box ships. v7.6.29 refused it with "'departments'
+  // key holds dict, expected a list" and failed Phase 6c of the sync.
+  const result = normalizeDepartmentsPayload(KEYED_ENVELOPE);
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.ok && result.departments, [
+    { name: 'Account Management', id: 'account-management-dept', slug: 'account-management-dept' },
+    { name: 'App Development', id: 'app-development-dept', slug: 'app-development-dept' },
+  ]);
+});
+
+test("folding keeps an entry's own id and only fills what is missing", () => {
+  const withId = normalizeDepartmentsPayload({
+    departments: { marketing: { id: 'dept-marketing', name: 'Marketing' } },
+  });
+  assert.deepEqual(withId.ok && withId.departments, [
+    { id: 'dept-marketing', name: 'Marketing', slug: 'marketing' },
+  ]);
+  const withBoth = normalizeDepartmentsPayload({
+    departments: { marketing: { id: 'dept-marketing', slug: 'mktg' } },
+  });
+  assert.deepEqual(withBoth.ok && withBoth.departments, [{ id: 'dept-marketing', slug: 'mktg' }]);
 });
 
 test('an empty object is refused — the shipped empty default is [], never {}', () => {
@@ -76,10 +113,18 @@ test('an empty object is refused — the shipped empty default is [], never {}',
   assert.equal(normalizeDepartmentsPayload([]).ok, true);
 });
 
-test("a 'departments' key holding a non-array is refused", () => {
-  const result = normalizeDepartmentsPayload({ departments: { marketing: {} } });
-  assert.equal(result.ok, false);
-  assert.match(!result.ok ? result.reason : '', /'departments' key holds/);
+test("a 'departments' key holding something that is neither an array nor a department map is refused", () => {
+  for (const wrapped of [
+    { marketing: 'yes' }, // a value that is not an object
+    { marketing: ['a'] }, // an array is not a department object
+    {}, // empty is not a department map
+    42,
+    'marketing',
+  ]) {
+    const result = normalizeDepartmentsPayload({ departments: wrapped }, '/tmp/departments.json');
+    assert.equal(result.ok, false, `expected a refusal for ${JSON.stringify(wrapped)}`);
+    assert.match(!result.ok ? result.reason : '', /'departments' key holds/);
+  }
 });
 
 test('non-object, non-array payloads are refused', () => {

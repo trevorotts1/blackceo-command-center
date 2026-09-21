@@ -3,7 +3,7 @@
  * `departments.json` uses.
  *
  * MIRRORED, RULE FOR RULE, from `shared-utils/departments_payload.py` (itself a
- * mirror of openclaw-onboarding v25.1.57). The Python installer scripts and this
+ * mirror of openclaw-onboarding's copy). The Python installer scripts and this
  * app read the SAME artifact off the SAME box, so they must agree on its shape;
  * change one only by re-mirroring the others.
  *
@@ -16,6 +16,11 @@
  *   2. an OBJECT wrapping that list under a `departments` key — the retirement
  *      script's `{removedWithProvenance, departments}` audit trail, and the
  *      build's `{company, total_departments, total_roles, departments}` envelope.
+ *
+ * That `departments` key holds an ARRAY in some builds and a MAP KEYED BY
+ * DEPARTMENT SLUG in others — `{"account-management-dept": {…},
+ * "app-development-dept": {…}, …}` is what a real 34-department client box
+ * ships. Both are valid; the map is folded into an array here.
  *
  * Every reader handled shape 2 wrong, in one of two ways:
  *
@@ -54,15 +59,49 @@ function describe(data: unknown): string {
 }
 
 /**
+ * True when `value` is a NON-EMPTY plain object whose every value is a plain
+ * object. A scalar value (a company name, a role count) marks the object as a
+ * metadata envelope, never a department map. An EMPTY object is not one either:
+ * the shipped empty default is `[]`, and the provisioning completeness gate
+ * treats `{}` as invalid on purpose.
+ */
+function isDepartmentMap(value: unknown): value is Record<string, Record<string, unknown>> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const values = Object.values(value as Record<string, unknown>);
+  return (
+    values.length > 0 &&
+    values.every((v) => v !== null && typeof v === 'object' && !Array.isArray(v))
+  );
+}
+
+/**
+ * Fold a slug-keyed department map into a list, PRESERVING key order. The key is
+ * the department's slug, so it fills `id` and `slug` — but only when the entry
+ * carries none of its own. An entry's own `id` always wins.
+ */
+function foldKeyed(map: Record<string, Record<string, unknown>>): unknown[] {
+  return Object.entries(map).map(([key, value]) => ({
+    ...value,
+    id: value.id ?? key,
+    slug: value.slug ?? key,
+  }));
+}
+
+/**
  * Return the department list a parsed `departments.json` payload carries.
  *
  * Accepted shapes, mirroring `normalize_departments()`:
- *   - `[entry, ...]`                      → the list itself
- *   - `{ departments: [entry, ...], … }`  → the wrapped list
- *   - `{ "<slug>": {…}, … }`              → folded to a list with the key as `id`,
- *     ONLY when the object is non-empty and EVERY value is an object. A scalar
- *     value (a company name, a role count) marks the object as a metadata
+ *   - `[entry, ...]`                          → the list itself
+ *   - `{ departments: [entry, ...], … }`      → the wrapped list
+ *   - `{ departments: { "<slug>": {…}, … }, … }` → the wrapped department MAP,
+ *     folded by the same rule as a top-level one
+ *   - `{ "<slug>": {…}, … }`                  → folded to a list with the key as
+ *     `id`, ONLY when the object is non-empty and EVERY value is an object. A
+ *     scalar value (a company name, a role count) marks the object as a metadata
  *     envelope, never a department map.
+ *
+ * Folding fills `id` and `slug` from the key, but only when the entry carries
+ * none of its own — an entry's own `id` always wins. Key order is preserved.
  *
  * Anything else is refused. `path` is echoed into the reason so an operator can
  * find the file.
@@ -78,22 +117,26 @@ export function normalizeDepartmentsPayload(data: unknown, path?: string): Depar
     if ('departments' in obj) {
       const wrapped = obj.departments;
       if (Array.isArray(wrapped)) return { ok: true, departments: wrapped };
+      // The envelope a real client box ships carries its 34 departments as a
+      // MAP KEYED BY SLUG under this key, not as an array. Fold it by the same
+      // rule as a top-level map — one rule, so the two cannot drift.
+      if (isDepartmentMap(wrapped)) return { ok: true, departments: foldKeyed(wrapped) };
+      if (wrapped !== null && typeof wrapped === 'object' && !Array.isArray(wrapped)) {
+        return {
+          ok: false,
+          reason:
+            `departments.json: 'departments' key holds an object that is not a department ` +
+            `map (it is empty, or a value is not an object); expected an array, or an ` +
+            `object keyed by department slug whose values are all objects${where}`,
+        };
+      }
       return {
         ok: false,
         reason: `departments.json: 'departments' key holds ${describe(wrapped)}, expected an array${where}`,
       };
     }
 
-    const values = Object.values(obj);
-    if (values.length > 0 && values.every((v) => v !== null && typeof v === 'object' && !Array.isArray(v))) {
-      return {
-        ok: true,
-        departments: Object.entries(obj).map(([key, value]) => ({
-          ...(value as Record<string, unknown>),
-          id: (value as Record<string, unknown>).id ?? key,
-        })),
-      };
-    }
+    if (isDepartmentMap(obj)) return { ok: true, departments: foldKeyed(obj) };
   }
 
   return {
