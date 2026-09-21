@@ -18,6 +18,7 @@ import importlib.util
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 
 import pytest
@@ -222,3 +223,154 @@ def test_seed_seeded_metadata_keys_before_the_fix(tmp_path):
     # walks its keys, so the guard above is doing real work.
     with pytest.raises(TypeError, match="string indices must be integers"):
         _seed.seed(str(tmp_path / "raw.db"), METADATA_ONLY, "Acme")
+
+
+# ── the WRITE paths: what actually lands in config/departments.json ────────
+#
+# Ground truth from a client box's installer backups: cc-backup-20260921-091809
+# held a clean LIST of 34 departments; cc-backup-20260921-093039, taken after a
+# v7.6.26 update run, held the raw object shape
+# `{company, total_departments: 34, total_roles, departments: {<slug>: {...}}}`.
+#
+# The writer was NOT the `--merge` path. `merge_config()` forces its accumulator
+# to a list (`if not isinstance(existing, list): existing = []`) and dumps only
+# that accumulator, at v7.6.26 byte for byte as today, so it cannot emit a
+# non-list at any version — pinned below. The writer was the DEFAULT overwrite
+# path, `write_config()`, which dumps its argument straight through: install
+# PHASE 6c and the updater's Command Center refresh both run the sync with NO
+# `--merge` flag, and before v7.6.29 the load boundary handed that argument over
+# unnormalized. The normalizer at `_read_json` is what closes it; these pin that
+# it stays closed on both paths.
+
+SYNC_SCRIPT = os.path.join(_SCRIPTS, "sync-departments-from-build-state.py")
+FIXTURE_SLUG = "zzz-pytest-fixture-co"
+
+# 34 departments keyed by slug under the `departments` key — the client's shape.
+KEYED_34 = {
+    f"department-{i:02d}-dept": {"name": f"Department {i:02d}", "emoji": "\U0001f4c1"}
+    for i in range(1, 35)
+}
+CLIENT_ARTIFACT_34 = {
+    "company": "Acme", "total_departments": 34, "total_roles": 416,
+    "departments": KEYED_34,
+}
+# The local config as it stood BEFORE the corrupting run: the first 33 of those
+# departments as a flat list, plus one department the box owner added by hand.
+CUSTOM_ENTRY = {"id": "custom-ops-dept", "name": "Custom Ops", "emoji": "\u2699\ufe0f"}
+EXISTING_33_PLUS_CUSTOM = [
+    {"id": k, "name": v["name"], "emoji": v["emoji"]}
+    for k, v in list(KEYED_34.items())[:33]
+] + [CUSTOM_ENTRY]
+
+
+def _run_sync(tmp_path, artifact, *extra_args, existing=EXISTING_33_PLUS_CUSTOM):
+    """Drive the real sync CLI against a hermetic ZHC root. Returns (proc, config_path).
+
+    `MASTER_FILES_DIR` is the same override the resolver honors, and `HOME` and
+    the working directory are redirected into the tmp tree, so no root this
+    scans and no database candidate can reach a real box's files.
+    """
+    company = tmp_path / "master-files" / "zero-human-company" / FIXTURE_SLUG
+    company.mkdir(parents=True)
+    (company / "departments.json").write_text(json.dumps(artifact))
+
+    home = tmp_path / "home"
+    home.mkdir()
+    config = tmp_path / "cc" / "config" / "departments.json"
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps(existing, indent=2) + "\n")
+
+    env = dict(os.environ)
+    env["MASTER_FILES_DIR"] = str(tmp_path / "master-files")
+    env["HOME"] = str(home)
+    for k in ("DASHBOARD_DB_PATH", "DATABASE_PATH", "COMPANY_SLUG"):
+        env.pop(k, None)
+
+    proc = subprocess.run(
+        [sys.executable, SYNC_SCRIPT, "--config", str(config),
+         "--company-slug", FIXTURE_SLUG, *extra_args],
+        cwd=str(home), env=env, capture_output=True, text=True, timeout=180)
+    return proc, config
+
+
+def test_merge_writes_a_list_from_the_slug_keyed_artifact_and_keeps_custom_entries(tmp_path):
+    proc, config = _run_sync(tmp_path, CLIENT_ARTIFACT_34, "--merge")
+    assert proc.returncode == 0, proc.stderr
+
+    written = json.loads(config.read_text())
+    assert isinstance(written, list), f"config must be a LIST, got {type(written).__name__}"
+    # 33 updated in place + the 34th appended + the owner's custom department kept.
+    assert len(written) == 35
+    ids = [e["id"] for e in written]
+    assert set(ids) == set(KEYED_34) | {"custom-ops-dept"}
+    assert len(ids) == len(set(ids)), "no duplicate ids"
+    # the appended one carries the KEY as its id and the value's name
+    appended = next(e for e in written if e["id"] == "department-34-dept")
+    assert appended["name"] == "Department 34"
+    # the custom department the box owner added is untouched
+    assert CUSTOM_ENTRY in written
+    # and none of the envelope's metadata keys became a department
+    assert not {"company", "total_departments", "total_roles", "departments"} & set(ids)
+
+
+def test_the_default_overwrite_path_also_writes_a_list_from_the_same_artifact(tmp_path):
+    # PHASE 6c and the updater's CC refresh run the sync with NO --merge, and this
+    # is the path that wrote the object shape on the client box before v7.6.29.
+    proc, config = _run_sync(tmp_path, CLIENT_ARTIFACT_34)
+    assert proc.returncode == 0, proc.stderr
+
+    written = json.loads(config.read_text())
+    assert isinstance(written, list), f"config must be a LIST, got {type(written).__name__}"
+    assert [e["id"] for e in written] == list(KEYED_34)
+
+
+@pytest.mark.parametrize("bad", [
+    METADATA_ONLY,                            # no departments key at all
+    {"departments": {"marketing": "yes"}},    # a value that is not an object
+    {"departments": {}},                      # empty is not a department map
+])
+@pytest.mark.parametrize("flags", [(), ("--merge",)])
+def test_a_refused_artifact_leaves_the_config_byte_identical(tmp_path, bad, flags):
+    # The control for the two above: a shape the normalizer refuses must abort
+    # BEFORE any write, on both paths. A partial write here would be worse than
+    # the crash it replaced.
+    before = json.dumps(EXISTING_33_PLUS_CUSTOM, indent=2) + "\n"
+    proc, config = _run_sync(tmp_path, bad, *flags)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "[sync] FATAL" in proc.stderr
+    assert config.read_text() == before, "a refused artifact must not touch the config file"
+
+
+def test_merge_config_cannot_write_a_non_list_even_handed_the_raw_object(tmp_path):
+    # Evidence that the --merge path was never the writer of the corrupted file:
+    # handed the RAW unnormalized object, iterating it yields string keys, every
+    # one is skipped, and the accumulator it dumps is the local list unchanged.
+    config = tmp_path / "config" / "departments.json"
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps(EXISTING_33_PLUS_CUSTOM))
+    _sync.merge_config(str(config), CLIENT_ARTIFACT_34)
+
+    written = json.loads(config.read_text())
+    assert isinstance(written, list)
+    assert written == EXISTING_33_PLUS_CUSTOM
+
+
+def test_without_the_normalizer_the_object_shape_reaches_the_config_file(tmp_path, monkeypatch):
+    # Mutation proof, and the v7.6.26 repro. Flip exactly one thing — the
+    # normalizer at the load boundary — and the default write path dumps the raw
+    # object into config/departments.json, which is what the installer backups
+    # caught. With the real normalizer the same two calls write a list, so the
+    # tests above cannot be passing for any other reason.
+    monkeypatch.setattr(_sync, "normalize_departments", lambda data, path=None: data)
+    unnormalized = _sync._read_json(_write(tmp_path, CLIENT_ARTIFACT_34))
+    corrupted = tmp_path / "corrupted" / "departments.json"
+    _sync.write_config(str(corrupted), unnormalized)
+    assert json.loads(corrupted.read_text()) == CLIENT_ARTIFACT_34
+
+    monkeypatch.undo()
+    normalized = _sync._read_json(_write(tmp_path, CLIENT_ARTIFACT_34))
+    healthy = tmp_path / "healthy" / "departments.json"
+    _sync.write_config(str(healthy), normalized)
+    written = json.loads(healthy.read_text())
+    assert isinstance(written, list)
+    assert [e["id"] for e in written] == list(KEYED_34)
