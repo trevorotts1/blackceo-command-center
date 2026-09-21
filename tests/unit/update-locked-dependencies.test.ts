@@ -149,3 +149,27 @@ test('updater checks the RESOLVED node, and reports it by path', () => {
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Node runtime: \S+ \(v26\.8\.1/);
 });
+
+test('the native-module guard names node-gyp\'s artifact, not the npm package', () => {
+  // node-gyp names the compiled file after binding.gyp's `target_name`, so
+  // better-sqlite3 produces build/Release/better_sqlite3.node. update.sh used
+  // to derive "$mod.node" from the package name, a path that exists on no
+  // correctly installed box, and the guard fataled fleet-wide before
+  // migrations, build and restart (ed3bcf55a, 2026-09-17).
+  assert.match(
+    updater,
+    /build\/Release\/\$\{mod\/\/-\/_\}\.node/,
+    'update.sh must map hyphens to underscores when deriving the node-gyp artifact name',
+  );
+  assert.ok(
+    !updater.includes('build/Release/$mod.node'),
+    'update.sh must not derive the artifact name straight from the package name',
+  );
+  // Loading the module is the verdict; the derived path only picks the remedy.
+  // A guessed path must never again be able to fail a working install.
+  const guard = section('_cc_assert_native_module_usable() {', '_cc_assert_native_module_usable better-sqlite3');
+  assert.ok(
+    guard.indexOf('"$CC_NODE_BIN" -e') < guard.indexOf('if [ ! -f "$lib" ]'),
+    'the load test must run before the artifact-path check, so a working module is never fataled on a bad guess',
+  );
+});

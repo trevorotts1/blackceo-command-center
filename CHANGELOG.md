@@ -1,3 +1,13 @@
+## [v7.6.26] — 2026-09-21 — The updater stops refusing to run on correctly installed boxes
+
+### Fixed
+- **`update.sh`'s native-module guard named a file that exists on no box.** `_cc_assert_native_module_usable` derived the compiled artifact's path from the npm package name, giving `node_modules/better-sqlite3/build/Release/better-sqlite3.node`. node-gyp names the artifact after `binding.gyp`'s `target_name`, which for this package is `better_sqlite3`, so the real file is `better_sqlite3.node`. The guard therefore fataled on every correctly installed box in the fleet and the updater aborted before migrations, build and restart, from `ed3bcf55a` (2026-09-17) until now. Confirmed on the operator checkout and on a client box: the underscored file is present at about 1.9 MB and `require('better-sqlite3')` loads it. The derivation now maps hyphens to underscores.
+- **A guessed path can no longer fail a working install.** Deriving a filename is a guess about someone else's build configuration, and getting it wrong is exactly what caused this outage. The guard now asks the resolved node whether the module loads and executes SQLite, and treats that answer as the verdict; a box that answers yes passes even if its binary sits outside `build/Release`, which is where a prebuild can legitimately land it. The derived path is consulted only afterwards, to choose which of the two remedies the operator is handed. Both failure messages, the missing-binary one and the ABI-mismatch one, are unchanged in substance.
+
+### Tests
+- `tests/unit/update-locked-dependencies.test.ts`: a case asserting the artifact name is derived with hyphens mapped to underscores, that the package-name spelling is gone, and that the load test runs before the artifact-path check. This file runs in `npm run test:unit`, so the invariant is now enforced on every push. It fails against the previous `update.sh`.
+- `tests/unit/issue09-node-runtime-identity.test.sh`: the D3 fixture created `better-sqlite3.node`, mirroring the same wrong assumption as the code, which is why the defect passed its own behavioural test. The fixture now writes the real `better_sqlite3.node`, the no-binary case is driven with a stub node that genuinely cannot load the module rather than one that says yes to everything, and four D3b assertions were added: the remedy names the real artifact, the hyphenated spelling is absent, a correctly installed box passes, and a module that loads is accepted with no artifact at the derived path. All four fail against the previous `update.sh`.
+
 ## [v7.6.25] — 2026-09-21 — A content task no longer waits forever for a persona bundle that never comes
 
 ### Fixed
