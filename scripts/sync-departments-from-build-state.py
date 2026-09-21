@@ -40,6 +40,7 @@ Idempotent: re-running refreshes config/departments.json and upserts workspaces
 (never duplicates). Safe to call from run-full-install.sh on every install/resume.
 """
 import argparse
+from datetime import datetime, timezone
 import json
 import os
 import re
@@ -390,6 +391,99 @@ def _table_exists(cur, name):
     return row is not None
 
 
+# Mirrored from src/lib/routing/canonical-slug.ts's ALIAS_MAP. Used ONLY to
+# MATCH an existing workspace row before inserting a new one -- never by
+# _canonical_dept_slug() below, whose dedupe grouping must stay prefix-only (an
+# alias-level merge there would collapse two departments a client deliberately
+# chose, which is why 'app-development' is absent from this table as a KEY).
+_DEPT_ALIASES = {
+    "ceo": "master-orchestrator",
+    "ceo-com": "master-orchestrator",
+    "com": "master-orchestrator",
+    "central-operations": "master-orchestrator",
+    "billing": "billing-finance",
+    "webdev": "web-development",
+    "web-dev": "web-development",
+    "web": "web-development",
+    "appdev": "app-development",
+    "app-dev": "app-development",
+    "mobile": "app-development",
+    "software-development": "engineering",
+    "software-dev": "engineering",
+    "apps": "engineering",
+    "video-production": "video",
+    "audio-production": "audio",
+    "legal-compliance": "legal",
+    "compliance": "legal",
+    "support": "customer-support",
+    "customer-service": "customer-support",
+    "comms": "communications",
+    "communication": "communications",
+    "social": "social-media",
+    "paid-ads": "paid-advertisement",
+    "paid-advertising": "paid-advertisement",
+    "openclaw": "openclaw-maintenance",
+    "general": "general-task",
+    "misc": "general-task",
+    "catch-all": "general-task",
+    "catchall": "general-task",
+    "unclassified": "general-task",
+}
+
+
+def _aliased_dept_slug(slug):
+    """`_canonical_dept_slug` plus the alias remap. MATCHING ONLY."""
+    s = _canonical_dept_slug(slug)
+    return _DEPT_ALIASES.get(s, s)
+
+
+def _ensure_archive_columns(cur):
+    """Make sure workspaces carries archived_at / archived_reason.
+
+    Migration 095 adds them on a box the CC app has booted; this script also
+    runs BEFORE that (bootstrap installs create the table here), and it must
+    never fall back to deleting because a column is missing.
+    """
+    cols = [r[1] for r in cur.execute("PRAGMA table_info(workspaces)").fetchall()]
+    if "archived_at" not in cols:
+        cur.execute("ALTER TABLE workspaces ADD COLUMN archived_at TEXT")
+    if "archived_reason" not in cols:
+        cur.execute("ALTER TABLE workspaces ADD COLUMN archived_reason TEXT")
+
+
+def _archive_workspace(cur, wid, reason):
+    """Soft-archive one workspace row. THIS SCRIPT NEVER DELETES ONE.
+
+    A hard DELETE here removed 22 archived rows from a client board during the
+    v7.6.35 roll. A workspace row is the anchor for a department's whole task and
+    agent history; losing it loses that history with no audit trail, and the
+    board's own archive view is a display state, not a tombstone. Archiving is
+    reversible by an operator, a delete is not.
+
+    Already-archived rows are left exactly as they are -- the original
+    archived_at / archived_reason is the audit trail.
+    """
+    cur.execute(
+        "UPDATE workspaces SET archived_at=?, archived_reason=? "
+        "WHERE id=? AND (archived_at IS NULL OR archived_at='')",
+        (datetime.now(timezone.utc).isoformat(), reason, wid))
+    return cur.rowcount > 0
+
+
+def _print_company_scope(cur, target_slug):
+    """One line naming every company id in the DB and the one this run targets.
+
+    A client box carried three ('default' plus two spellings of the same client)
+    and the mismatch is what makes phase 6b refuse; the operator could not see it
+    without opening the database by hand.
+    """
+    companies = [r[0] for r in cur.execute("SELECT id FROM companies ORDER BY id")]
+    in_use = [(r[0] or "") for r in cur.execute(
+        "SELECT DISTINCT company_id FROM workspaces ORDER BY 1")]
+    print(f"  [sync] company ids -- companies table: {companies or ['(none)']}; "
+          f"on workspaces: {in_use or ['(none)']}; this run targets: {target_slug!r}")
+
+
 def _canonical_dept_slug(slug):
     """Minimal, prefix-only canonicalization mirroring this script's own
     dept-id normalization two lines above (dept_id = raw_id[5:] if it starts
@@ -450,17 +544,21 @@ def dedupe_canonical_workspaces(cur):
     the same department; two rows that each carry a DIFFERENT real
     (non-default) company_id must never merge into each other.
 
-    A loser row is a true duplicate SHELL by the time it is deleted -- every
+    A loser row is a true duplicate SHELL by the time it is retired -- every
     workspace_id-bearing row that pointed at it was just reassigned to the
-    keeper above, so nothing unique is lost (same B8/AUD-46 rationale
-    task-dedup.ts's assertArchivedBeforeHardDelete documents; this script has
-    no equivalent audit-trail helper to route through, so the delete is
-    direct).
+    keeper above. It is ARCHIVED, never deleted: task-dedup.ts routes its own
+    hard delete through assertArchivedBeforeHardDelete, and this script has no
+    equivalent audit-trail helper, so it stops at the archive.
 
-    Returns (groups_merged, rows_deleted). Never raises on a row-level
+    Returns (groups_merged, rows_archived). Never raises on a row-level
     problem for one canonical group -- logs and continues with the rest.
     """
-    rows = cur.execute("SELECT rowid, id, slug, company_id FROM workspaces").fetchall()
+    # Already-archived rows are invisible to the dedupe: they are a tombstone,
+    # not a duplicate to collapse, and re-touching one would rewrite its audit
+    # trail. They are also never chosen as a keeper.
+    rows = cur.execute(
+        "SELECT rowid, id, slug, company_id FROM workspaces "
+        "WHERE archived_at IS NULL OR archived_at=''").fetchall()
     by_canon = {}
     for rowid, wid, slug, company_id in rows:
         canon = _canonical_dept_slug(slug) or (slug or "").lower()
@@ -497,7 +595,7 @@ def dedupe_canonical_workspaces(cur):
     has_tasks = _table_exists(cur, "tasks")
     ws_tables = _tables_with_workspace_id(cur)
     groups_merged = 0
-    rows_deleted = 0
+    rows_archived = 0
 
     for canon, members in merge_groups:
         if len(members) < 2:
@@ -536,16 +634,17 @@ def dedupe_canonical_workspaces(cur):
         for loser in losers:
             for table in ws_tables:
                 cur.execute(f"UPDATE {table} SET workspace_id=? WHERE workspace_id=?", (keeper["id"], loser["id"]))
-            cur.execute("DELETE FROM workspaces WHERE id=?", (loser["id"],))
-            rows_deleted += 1
-            print(f"  [sync] merged duplicate workspace '{loser['id']}' into '{keeper['id']}' (canonical '{canon}')")
+            _archive_workspace(cur, loser["id"], f"deduped: loser of {keeper['id']}")
+            rows_archived += 1
+            print(f"  [sync] merged duplicate workspace '{loser['id']}' into "
+                  f"'{keeper['id']}' (canonical '{canon}') -- loser ARCHIVED, not deleted")
 
         if keeper["slug"].lower() != canon:
             cur.execute("UPDATE workspaces SET slug=? WHERE id=?", (canon, keeper["id"]))
 
         groups_merged += 1
 
-    return groups_merged, rows_deleted
+    return groups_merged, rows_archived
 
 
 def reseed_workspaces(db_path, departments, company_info, prune=False):
@@ -563,6 +662,8 @@ def reseed_workspaces(db_path, departments, company_info, prune=False):
             description TEXT, icon TEXT, company_id TEXT DEFAULT 'default'
         )
     """)
+
+    _ensure_archive_columns(cur)
 
     slug = company_info["slug"]
     company_config = json.dumps({"brand": {
@@ -582,8 +683,47 @@ def reseed_workspaces(db_path, departments, company_info, prune=False):
             "VALUES (?, ?, ?, ?, ?)",
             (slug, company_info["name"], slug, company_info["industry"], company_config))
 
+    _print_company_scope(cur, slug)
+
+    live_rows = cur.execute(
+        "SELECT id, company_id, slug, name FROM workspaces "
+        "WHERE archived_at IS NULL OR archived_at=''").fetchall()
     existing = {row[0]: row[1] for row in cur.execute(
         "SELECT id, company_id FROM workspaces").fetchall()}
+
+    live_by_id = {r[0]: r for r in live_rows}
+    live_rows_scoped = [
+        {"id": r[0], "company_id": r[1], "slug": r[2] or "", "name": r[3] or ""}
+        for r in live_rows if not r[1] or r[1] in ("default", slug)
+    ]
+
+    def _match_existing(dept_id, name):
+        """The row this department already IS, or None to insert a new one.
+
+        Order: exact id, then canonicalized slug, then case-insensitive NAME,
+        then the alias table. Anything but an exact id match is confined to this
+        company's own rows plus unattributed ones, so a shared box never splices
+        one client's department onto another's (the 2026-08-04 incident).
+
+        ARCHIVED rows are not candidates. An archived workspace is an operator's
+        decision; a later sync must not silently bring it back to life, so a
+        build entry for an archived department inserts a fresh row instead.
+        """
+        if dept_id in live_by_id:
+            return dept_id
+        want_canon = _canonical_dept_slug(dept_id)
+        want_alias = _aliased_dept_slug(dept_id)
+        want_name = (name or "").strip().lower()
+        for by in (
+            lambda r: _canonical_dept_slug(r["slug"]) == want_canon,
+            lambda r: (r["name"] or "").strip().lower() == want_name and want_name,
+            lambda r: _aliased_dept_slug(r["slug"]) == want_alias,
+        ):
+            for row in live_rows_scoped:
+                if by(row):
+                    return row["id"]
+        return None
+
     build_ids = set()
     inserted = updated = 0
     for dept in departments:
@@ -591,11 +731,21 @@ def reseed_workspaces(db_path, departments, company_info, prune=False):
         dept_id = raw_id[5:] if raw_id.startswith("dept-") else raw_id
         if not dept_id:
             continue
-        build_ids.add(dept_id)
         name = dept["name"]
         description = f"{name} department workspace"
         icon = dept.get("emoji", "\U0001f4c1")
-        if dept_id in existing:
+        matched = _match_existing(dept_id, name)
+        # An exact-id match may have its slug normalized to the id; a row matched
+        # by NAME or ALIAS keeps its own slug -- rewriting it to the build's id is
+        # what would create the duplicate this match exists to avoid, and it can
+        # collide with the UNIQUE(slug) index besides.
+        normalize_slug = matched == dept_id
+        if matched and matched != dept_id:
+            print(f"  [sync] matched build department {dept_id!r} to existing "
+                  f"workspace {matched!r} -- updating it instead of inserting a duplicate")
+            dept_id = matched
+        build_ids.add(dept_id)
+        if matched:
             # R-39: fleet-shared engine workspaces (podcast/anthology)
             # must ALWAYS stay company_id='default' -- never re-home
             # them to the client slug. The TS reseedWorkspacesFromConfig
@@ -605,16 +755,20 @@ def reseed_workspaces(db_path, departments, company_info, prune=False):
             if dept_id.lower() in ENGINE_WORKSPACE_IDS:
                 cur.execute("""
                     UPDATE workspaces
-                    SET name=?, slug=?, description=?, icon=?
+                    SET name=?, description=?, icon=?
                     WHERE id=?
-                """, (name, dept_id, description, icon, dept_id))
+                """, (name, description, icon, dept_id))
+                if normalize_slug:
+                    cur.execute("UPDATE workspaces SET slug=? WHERE id=?", (dept_id, dept_id))
                 updated += 1
             else:
                 cur.execute("""
                     UPDATE workspaces
-                    SET name=?, slug=?, description=?, icon=?, company_id=?
+                    SET name=?, description=?, icon=?, company_id=?
                     WHERE id=?
-                """, (name, dept_id, description, icon, slug, dept_id))
+                """, (name, description, icon, slug, dept_id))
+                if normalize_slug:
+                    cur.execute("UPDATE workspaces SET slug=? WHERE id=?", (dept_id, dept_id))
                 updated += 1
                 if existing[dept_id] != slug:
                     print(f"  [sync] re-homed workspace {dept_id}: company_id "
@@ -632,18 +786,24 @@ def reseed_workspaces(db_path, departments, company_info, prune=False):
     # before pruning -- so the stale-department check below operates on the
     # already-deduped set. Runs on every call (not opt-in): a true no-op on a
     # board with no duplicates.
-    dedupe_groups, dedupe_deleted = dedupe_canonical_workspaces(cur)
+    dedupe_groups, dedupe_archived = dedupe_canonical_workspaces(cur)
     if dedupe_groups:
         print(f"  [sync] healed {dedupe_groups} duplicate workspace group(s) "
-              f"({dedupe_deleted} row(s) merged away)")
+              f"({dedupe_archived} row(s) archived)")
 
     pruned = kept_nonempty = 0
     if prune:
         has_tasks = _table_exists(cur, "tasks")
+        already_archived = {r[0] for r in cur.execute(
+            "SELECT id FROM workspaces WHERE archived_at IS NOT NULL AND archived_at<>''")}
         for wid, _cid in list(existing.items()):
             if wid in build_ids:
                 continue
             if wid.lower() in RESERVED_WORKSPACE_IDS:
+                continue
+            if wid in already_archived:
+                # Already retired. Its archived_at/archived_reason is the audit
+                # trail of WHY, and re-stamping it would erase that.
                 continue
             task_count = 0
             if has_tasks:
@@ -655,9 +815,9 @@ def reseed_workspaces(db_path, departments, company_info, prune=False):
                 print(f"  [sync] KEPT stale workspace {wid!r} (not in build) -- "
                       f"has {task_count} task(s); operator review needed")
                 continue
-            cur.execute("DELETE FROM workspaces WHERE id=?", (wid,))
+            _archive_workspace(cur, wid, "pruned: absent from build-state")
             pruned += 1
-            print(f"  [sync] pruned stale workspace: {wid}")
+            print(f"  [sync] pruned stale workspace: {wid} (ARCHIVED, not deleted)")
 
     conn.commit()
     conn.close()
@@ -675,7 +835,7 @@ def main():
     ap.add_argument("--config", default=None,
                     help="Path to config/departments.json to regenerate")
     ap.add_argument("--prune", action="store_true", default=False,
-                    help="Delete stale workspaces no longer in the build "
+                    help="ARCHIVE stale workspaces no longer in the build "
                          "(skips reserved system workspaces and any workspace "
                          "that still holds tasks). Default OFF; enable from "
                          "run-full-install Phase 6c.")
