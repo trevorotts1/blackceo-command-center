@@ -66,7 +66,7 @@ test('updater installs only the locked graph with strict engines, then permits l
   const result = runFixture();
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(result.log, [
-    'checkout-mutation', 'npm ci --engine-strict --no-audit --no-fund',
+    'checkout-mutation', 'npm ci --engine-strict --no-audit --no-fund --ignore-scripts=false',
     'migrations', 'build', 'restart',
   ]);
 });
@@ -83,7 +83,7 @@ test('updater npm ci failure never falls back to npm install or later actions', 
   assert.equal(result.status, 1);
   assert.match(result.stdout, /npm ci failed/);
   assert.match(result.stdout, /Fix the reported runtime, lockfile or registry error/);
-  assert.deepEqual(result.log, ['checkout-mutation', 'npm ci --engine-strict --no-audit --no-fund']);
+  assert.deepEqual(result.log, ['checkout-mutation', 'npm ci --engine-strict --no-audit --no-fund --ignore-scripts=false']);
 });
 
 // ISSUE-09. The preflight now does TWO things in order: resolve the ONE node
