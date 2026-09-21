@@ -15,9 +15,10 @@
  *
  * They FAIL on pre-fix code (count goes 1 → 2, and no dedupe event is written).
  *
- * No network: TAVILY_API_KEY is unset below, so the authoring run aborts at the
- * research step — AFTER the point where the pre-fix code would have inserted the
- * duplicate card. What we assert is the CARD COUNT, not the run's outcome.
+ * No network: the Tavily key is made unresolvable below, so the authoring run
+ * aborts at the research step — AFTER the point where the pre-fix code would
+ * have inserted the duplicate card. What we assert is the CARD COUNT, not the
+ * run's outcome.
  *
  *   node --import tsx --test tests/unit/sop-authoring-natural-key-idempotency.test.ts
  */
@@ -25,6 +26,9 @@
 import './_isolated-db'; // MUST be first: points DATABASE_PATH at a throwaway DB.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { v4 as uuidv4 } from 'uuid';
 import { getDb, run, queryOne } from '../../src/lib/db';
 import { autoSeedTrioAgents } from '../../src/lib/db';
@@ -33,8 +37,19 @@ import { authorSOPForTask } from '../../src/lib/sop-authoring';
 // Keep the authoring run OFFLINE and deterministic: with no Tavily key and no
 // fixture, the research step throws and the run returns `error` — which happens
 // strictly AFTER sub-task creation, so the duplicate-card assertion is unaffected.
+//
+// Emptying `process.env` is NOT enough on a real box: `resolveTavilyApiKey()`
+// also reads the OpenClaw secret stores (that is the whole point of the key
+// resolution fix), and a developer machine HAS a Tavily key in
+// `~/.openclaw/secrets/.env` — which would turn this offline test into a live,
+// billed Tavily call. Point every store the resolver probes at an empty scratch
+// home, and force the Mac platform so the Docker `/data/.openclaw` paths (which
+// a fake home cannot stand in for) are never scanned.
 delete process.env.TAVILY_API_KEY;
 delete process.env.TAVILY_FIXTURE_JSON_PATH;
+delete process.env.OPENCLAW_PROJECT_DIR;
+process.env.OPENCLAW_PLATFORM = 'mac-mini';
+process.env.HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'sop-authoring-nohome-'));
 
 const db = getDb();
 

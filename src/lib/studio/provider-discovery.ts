@@ -348,7 +348,24 @@ export function candidateEnvFiles(): string[] {
  * now present.
  */
 export function hydrateProviderEnvFromOpenClaw(): string[] {
-  const wanted = allKnownEnvVars();
+  return hydrateEnvVarsFromOpenClaw(allKnownEnvVars());
+}
+
+/**
+ * The same OpenClaw secret-store read, for an ARBITRARY set of env-var names.
+ *
+ * `hydrateProviderEnvFromOpenClaw()` above is this function applied to the
+ * model-provider key set. Anything else on a box that reads a key out of
+ * `process.env` — a research API key, a search API key — needs the identical
+ * store precedence (host `$OPENCLAW_PROJECT_DIR/.env`, the Docker
+ * `/data/.openclaw` files, `~/.openclaw/.env`, `~/.openclaw/secrets/.env`,
+ * `openclaw.json` `env`/`env.vars` and `models.providers[].apiKey`) and must
+ * NOT re-implement the parsing or the file discovery. Call this instead.
+ *
+ * Same contract as its caller: `process.env` wins and is never overwritten,
+ * never throws, idempotent, returns the names newly hydrated from a store.
+ */
+export function hydrateEnvVarsFromOpenClaw(wanted: string[]): string[] {
   const hydrated: string[] = [];
 
   const missing = () => wanted.filter((k) => !process.env[k]);

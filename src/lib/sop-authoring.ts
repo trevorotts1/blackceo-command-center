@@ -379,6 +379,11 @@ export interface AuthorSOPInput {
  * NEVER throws — all side effects are fire-and-forget-safe.
  */
 export async function authorSOPForTask(input: AuthorSOPInput): Promise<AuthorResult> {
+  // Hoisted out of the try below on purpose: the outer catch must be able to
+  // BLOCK the authoring card it created. Before this, an unexpected throw
+  // (the live one: Tavily key unresolvable) was logged and swallowed, and the
+  // "Author SOP: X" card sat in_progress forever with no visible cause.
+  let subTaskId: string | undefined;
   try {
     // §1.1 HARD REFUSAL: canonical departments never enter generation.
     const ctx = isCanonicalContext(input.department, input.agentRoleSlug);
@@ -527,7 +532,7 @@ export async function authorSOPForTask(input: AuthorSOPInput): Promise<AuthorRes
     }
 
     // §2: Create the linked authoring sub-task — exactly once per natural key.
-    let subTaskId = existingAuthoring?.id ?? uuidv4();
+    subTaskId = existingAuthoring?.id ?? uuidv4();
     const now = new Date().toISOString();
 
     if (existingAuthoring) {
@@ -1035,6 +1040,53 @@ export async function authorSOPForTask(input: AuthorSOPInput): Promise<AuthorRes
     // Fire-and-forget contract: NEVER throw.
     const msg = `[sop-authoring] Unexpected error for task ${input.originalTaskId}: ${(err as Error).message}`;
     console.error(msg);
+    emitEvent('sop_authoring_failed', msg, input.originalTaskId);
+    await blockStrandedAuthoringCard(subTaskId, (err as Error).message);
     return { status: 'error', reason: msg };
+  }
+}
+
+/**
+ * An unexpected throw between §2 (card minted `in_progress`) and §6 leaves the
+ * "Author SOP: X" card running-with-nothing-running. The sweep then re-enters,
+ * the idempotency guard sees an OPEN card and returns `deduped` — so the board
+ * shows a busy card forever and the real fault (an unresolvable research key, a
+ * dead store) is only ever a console line on a box nobody is tailing.
+ *
+ * Park it instead: one `task_activities` row naming the error on the card's
+ * Activity tab, then `blocked` via the dispatcher's existing block writer
+ * (`hardBlock` — a missing key is not a thing a retry ladder cures), which
+ * writes block_reason / block_needs / block_audience plus the status-event and
+ * block-event audit rows. The import is deferred because task-dispatcher.ts
+ * imports THIS module (§6 defers for the same reason).
+ *
+ * Best-effort throughout: this runs inside the never-throw catch.
+ */
+async function blockStrandedAuthoringCard(subTaskId: string | undefined, error: string): Promise<void> {
+  if (!subTaskId) return;
+  try {
+    run(
+      `INSERT INTO task_activities (id, task_id, activity_type, message, created_at)
+       VALUES (?, ?, ?, ?, ?)`,
+      [
+        uuidv4(),
+        subTaskId,
+        'error',
+        `[sop-authoring] SOP authoring failed: ${error}`,
+        new Date().toISOString(),
+      ],
+    );
+  } catch { /* pre-migration DB or any write failure — the block below still lands */ }
+  try {
+    const { recordDispatchFailure } = await import('@/lib/task-dispatcher');
+    recordDispatchFailure(subTaskId, null, {
+      reason: 'sop_authoring_failed',
+      audience: 'SYSTEM',
+      needs: `SOP authoring failed and cannot self-heal: ${error}`.slice(0, 500),
+      context: 'sop-authoring',
+      hardBlock: true,
+    });
+  } catch (blockErr) {
+    console.error('[sop-authoring] failed to block stranded authoring card:', (blockErr as Error).message);
   }
 }
