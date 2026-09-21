@@ -47,9 +47,14 @@ import { groundDraftedSOP } from '../../src/lib/sop-auto-replace';
 
 const PROVIDER_ENV = [
   'OLLAMA_FIXTURE_JSON_PATH', 'PERPLEXITY_FIXTURE_JSON_PATH', 'TAVILY_FIXTURE_JSON_PATH',
+  'BRAVE_FIXTURE_JSON_PATH', 'EXA_FIXTURE_JSON_PATH', 'SERPER_FIXTURE_JSON_PATH',
+  'SERPAPI_FIXTURE_JSON_PATH', 'MARGINALIA_FIXTURE_JSON_PATH',
   'OLLAMA_CLOUD_API_KEY', 'OLLAMA_API_KEY', 'PERPLEXITY_API_KEY', 'PPLX_API_KEY',
   'TAVILY_API_KEY', 'OPENAI_API_KEY', 'X_AI_API_KEY', 'XAI_API_KEY',
-  'RESEARCH_PROVIDER_ORDER', 'OPENCLAW_PROJECT_DIR', 'HOME', 'OPENCLAW_PLATFORM',
+  'BRAVE_API_KEY', 'BRAVE_SEARCH_API_KEY', 'EXA_API_KEY', 'SERPER_API_KEY',
+  'SERPAPI_API_KEY', 'SERPAPI_KEY', 'MARGINALIA_API_KEY',
+  'RESEARCH_PROVIDER_ORDER', 'RESEARCH_ALLOW_MARGINALIA',
+  'OPENCLAW_PROJECT_DIR', 'HOME', 'OPENCLAW_PLATFORM',
 ];
 
 /**
@@ -67,6 +72,10 @@ async function withProviders(vars: Record<string, string>, fn: () => Promise<voi
   const emptyHome = fs.mkdtempSync(path.join(os.tmpdir(), 'sop-research-home-'));
   process.env.HOME = emptyHome;
   process.env.OPENCLAW_PLATFORM = 'mac-mini';
+  // Marginalia is KEYLESS, so "no keys" no longer means "no provider" — the
+  // chain would reach it and make a LIVE call from a unit test. Off by default
+  // here; the cases that exercise it turn it back on with a fixture.
+  process.env.RESEARCH_ALLOW_MARGINALIA = '0';
   for (const [k, v] of Object.entries(vars)) process.env[k] = v;
   try {
     await fn();
@@ -94,16 +103,23 @@ function seedTask(label: string): { taskId: string; wsId: string; dept: string }
 
 // ── The preference order ───────────────────────────────────────────────────
 
-test('the default order is ollama → perplexity → tavily, and RESEARCH_PROVIDER_ORDER overrides it', async () => {
+test('the default order is the operator chain, and RESEARCH_PROVIDER_ORDER overrides it', async () => {
+  // Canonical slugs: the documented default is written `ollama-cloud`, which
+  // resolves to the `ollama` adapter. Marginalia is filtered out here by the
+  // harness's kill switch; research-search-providers.test.ts pins the full chain.
   await withProviders({}, async () => {
-    assert.deepEqual(researchProviderOrder(), ['ollama', 'perplexity', 'tavily']);
+    assert.deepEqual(researchProviderOrder(), [
+      'perplexity', 'ollama', 'brave', 'exa', 'serper', 'serpapi', 'tavily',
+    ]);
   });
   await withProviders({ RESEARCH_PROVIDER_ORDER: 'tavily, perplexity' }, async () => {
     assert.deepEqual(researchProviderOrder(), ['tavily', 'perplexity']);
   });
   // A blank override is not an order — fall back rather than resolve nothing.
   await withProviders({ RESEARCH_PROVIDER_ORDER: '  ' }, async () => {
-    assert.deepEqual(researchProviderOrder(), ['ollama', 'perplexity', 'tavily']);
+    assert.deepEqual(researchProviderOrder(), [
+      'perplexity', 'ollama', 'brave', 'exa', 'serper', 'serpapi', 'tavily',
+    ]);
   });
 });
 
@@ -141,7 +157,7 @@ test('tavily is reached even when it is last in the order and the others have no
 
 // ── (b) No provider at all ─────────────────────────────────────────────────
 
-test('(b) with NO provider, the search reports none rather than throwing', async () => {
+test('(b) with NO provider at all (keyless rung off), the search reports none rather than throwing', async () => {
   await withProviders({}, async () => {
     const result = await researchForSop('anything at all');
     assert.equal(result.provider, null, 'no provider is a reported state, not an error');

@@ -108,6 +108,11 @@ test('empty env yields no provider (honest empty-state)', () => {
       'OPENAI_API_KEY',
       'OLLAMA_CLOUD_API_KEY',
       'X_AI_API_KEY',
+      'BRAVE_API_KEY',
+      'EXA_API_KEY',
+      'SERPER_API_KEY',
+      'SERPAPI_API_KEY',
+      'MARGINALIA_API_KEY',
     ]);
   });
 });
@@ -152,9 +157,12 @@ test('researchAvailability reports per-provider presence + selected provider', (
 
 // 8) The provider list is well-formed (4 providers, ordered, each with candidates).
 test('RESEARCH_PROVIDERS is well-formed and in preference order', () => {
+  // The chat-shaped providers lead, then the pure search APIs, then the
+  // keyless rung. The Operator Console selects by THIS order (key-only); the
+  // SOP authoring chain has its own operator-set order in sop-research.ts.
   assert.deepEqual(
     RESEARCH_PROVIDERS.map((p) => p.slug),
-    ['perplexity', 'openai', 'ollama', 'xai']
+    ['perplexity', 'openai', 'ollama', 'xai', 'brave', 'exa', 'serper', 'serpapi', 'marginalia']
   );
   for (const p of RESEARCH_PROVIDERS) {
     assert.ok(p.envCandidates.length > 0, `${p.slug} must have env candidates`);
