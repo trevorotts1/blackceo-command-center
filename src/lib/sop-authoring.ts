@@ -5,7 +5,10 @@
  * 24-slug canonical ZHC set (i.e. it is a CUSTOM department), this module:
  *   1. Guards against canonical departments (HARD REFUSAL — copy from library instead).
  *   2. Creates a linked "Author SOP" sub-task routed to the dept's research specialist.
- *   3. Researches via Tavily (Tier-1 mandate) and synthesizes via Gemini.
+ *   3. Researches via the shared research layer (src/lib/research/sop-research.ts —
+ *      ollama → perplexity → tavily, order overridable with RESEARCH_PROVIDER_ORDER)
+ *      and synthesizes via Gemini. Research is BEST-EFFORT: a box with no provider
+ *      key still authors, with a "no research available" line in place of sources.
  *   4. Runs QC at the 8.5 gate (per-dept QC agent; heuristic → human review).
  *   5. Files the SOP to BOTH the `sops` table (source=NULL) AND the on-disk
  *      workspace layer (`<OPENCLAW_WORKSPACE_PATH>/departments/<dept>/<role>/how-to.md`).
@@ -49,7 +52,7 @@ const ROLE_LIBRARY_SOURCE = 'role-library' as const;
 import { scoreSOPForTask } from '@/lib/sops';
 import type { SOP } from '@/lib/sops';
 import type { Task } from '@/lib/types';
-import { tavilySearch } from '@/lib/tavily';
+import { researchForSop, NO_RESEARCH_SOURCE_LINE, type SopResearchResult } from '@/lib/research/sop-research';
 import { geminiGenerate } from '@/lib/gemini';
 import { assertNoFixtureDerivedServerWrite } from '@/lib/fixture-guard';
 import {
@@ -226,6 +229,19 @@ function getRecentAuthoringAttemptCount(deptSlug: string, titleKeyword: string):
   }
 }
 
+/**
+ * The `sources` list a SOP (and its proposal row) records for one research run.
+ *
+ * When NO provider had a key on this box the list is not empty — it carries a
+ * single un-linked line saying so. An empty Research Sources section reads as
+ * "the author found nothing"; this reads as "this box cannot research", which
+ * is the fact an operator needs to see on the SOP itself.
+ */
+function researchSources(research: SopResearchResult): Array<{ title: string; url: string }> {
+  if (research.provider === null) return [{ title: NO_RESEARCH_SOURCE_LINE, url: '' }];
+  return research.results.slice(0, 5).map((r) => ({ title: r.title, url: r.url }));
+}
+
 /** Write a loud event to the events table. */
 function emitEvent(type: string, message: string, taskId?: string): void {
   try {
@@ -283,7 +299,10 @@ function sopToHowToMd(opts: {
 
   if (opts.sources?.length) {
     lines.push(`## Research Sources`);
-    for (const src of opts.sources) lines.push(`- [${src.title}](${src.url})`);
+    // A source with no url is the "no provider on this box" line, not a link.
+    for (const src of opts.sources) {
+      lines.push(src.url ? `- [${src.title}](${src.url})` : `- ${src.title}`);
+    }
   }
 
   return lines.join('\n');
@@ -374,14 +393,14 @@ export interface AuthorSOPInput {
  * Author a new SOP for a custom-department task that has no SOP match.
  *
  * Gate: canonical → refused.
- * Flow: safety cap → sub-task → Tavily research → Gemini synthesis → QC@8.5 → file (DB + disk) → attach → re-dispatch.
+ * Flow: safety cap → sub-task → research (best-effort) → Gemini synthesis → QC@8.5 → file (DB + disk) → attach → re-dispatch.
  *
  * NEVER throws — all side effects are fire-and-forget-safe.
  */
 export async function authorSOPForTask(input: AuthorSOPInput): Promise<AuthorResult> {
   // Hoisted out of the try below on purpose: the outer catch must be able to
   // BLOCK the authoring card it created. Before this, an unexpected throw
-  // (the live one: Tavily key unresolvable) was logged and swallowed, and the
+  // (the live one: an unreachable provider) was logged and swallowed, and the
   // "Author SOP: X" card sat in_progress forever with no visible cause.
   let subTaskId: string | undefined;
   try {
@@ -612,18 +631,20 @@ export async function authorSOPForTask(input: AuthorSOPInput): Promise<AuthorRes
       }
     }
 
-    // §4: Research (Tavily, fixture-gated).
+    // §4: Research (shared provider layer, fixture-gated). A box with NO
+    // provider key is not an error: `provider` comes back null, the SOP is
+    // still authored, and it says so in its Research Sources section.
     const year = new Date().getFullYear();
     const researchQuery = `${deptSlug} ${input.title} best practices ${year}`.trim();
-    const tavily = await tavilySearch(researchQuery, { max_results: 5 });
+    const research = await researchForSop(researchQuery, { maxResults: 5 });
 
     // §5: Synthesize (Gemini, fixture-gated).
     const { soul, user } = readSoulAndUser();
     const synthesisPrompt = buildSynthesisPrompt({
       soul,
       user,
-      tavilyResults: tavily.results,
-      tavilyAnswer: tavily.answer,
+      researchResults: research.results,
+      researchAnswer: research.answer,
       noV1: true,
       deptSlug,
       agentRoleSlug: input.agentRoleSlug ?? undefined,
@@ -637,6 +658,12 @@ export async function authorSOPForTask(input: AuthorSOPInput): Promise<AuthorRes
       const msg = `[sop-authoring] Gemini generation failed for "${input.title}": ${(genErr as Error).message}`;
       console.error(msg);
       emitEvent('sop_authoring_generation_failed', msg, input.originalTaskId);
+      // Same contract as the outer catch (v7.6.28): a run that ends in `error`
+      // must never leave its authoring card sitting in_progress. This branch
+      // returns early, so it needs the park explicitly. It became far more
+      // reachable in v7.6.33: a box with no research provider no longer throws
+      // at §4, so a missing Gemini key is now the FIRST thing that can fail.
+      await blockStrandedAuthoringCard(subTaskId, (genErr as Error).message);
       return { status: 'error', reason: msg };
     }
 
@@ -659,7 +686,7 @@ export async function authorSOPForTask(input: AuthorSOPInput): Promise<AuthorRes
         emitEvent('sop_authoring_parse_failed_twice', msg, input.originalTaskId);
         // Create a pending proposal with the raw text so a human can review.
         const failProposalId = uuidv4();
-        const sources = tavily.results.slice(0, 5).map((r) => ({ title: r.title, url: r.url }));
+        const sources = researchSources(research);
         try {
           run(
             `INSERT INTO sop_proposals
@@ -685,7 +712,7 @@ export async function authorSOPForTask(input: AuthorSOPInput): Promise<AuthorRes
 
     // §4: QC gate at 8.5.
     const sopStepsJson = JSON.stringify(drafted.steps);
-    const qcCriteria = drafted.success_criteria || `Complete, Tier-1-cited, actionable SOP for ${deptSlug}${input.agentRoleSlug ? ' / ' + input.agentRoleSlug : ''}`;
+    const qcCriteria = drafted.success_criteria || `Complete, actionable SOP for ${deptSlug}${input.agentRoleSlug ? ' / ' + input.agentRoleSlug : ''}`;
 
     // Resolve the dept's QC agent.
     const qcAgent = trio.qc;
@@ -708,7 +735,7 @@ export async function authorSOPForTask(input: AuthorSOPInput): Promise<AuthorRes
     // §4 Heuristic guard: no auto-file — file as pending for human review.
     if (qcResult.scoringPath === 'heuristic') {
       const heuristicProposalId = uuidv4();
-      const sources = tavily.results.slice(0, 5).map((r) => ({ title: r.title, url: r.url }));
+      const sources = researchSources(research);
       const evidence = [
         `[QC-HEURISTIC] SOP draft needs human review (heuristic score: ${qcResult.score.toFixed(1)}/10).`,
         `No LLM key configured — cannot auto-file. Please review and approve manually.`,
@@ -772,7 +799,7 @@ export async function authorSOPForTask(input: AuthorSOPInput): Promise<AuthorRes
     // After redo: still < 8.5 AND not heuristic → file as pending proposal.
     if (!finalQcResult.pass && finalQcResult.scoringPath !== 'heuristic') {
       const failedProposalId = uuidv4();
-      const sources2 = tavily.results.slice(0, 5).map((r) => ({ title: r.title, url: r.url }));
+      const sources2 = researchSources(research);
       const failEvidence = [
         `[QC-FAIL ${finalQcResult.score.toFixed(1)}/10 — needs rework]`,
         `Score: ${finalQcResult.score.toFixed(1)}/10 after redo. Gaps: ${finalQcResult.gaps.join('; ') || finalQcResult.reason}`,
@@ -814,10 +841,12 @@ export async function authorSOPForTask(input: AuthorSOPInput): Promise<AuthorRes
     // with no research / sub-floor confidence). Such a draft must never become
     // QC-authoritative ('auto-authored-filed'). If it fails the grounding gate,
     // file it as a pending proposal for human review instead of auto-filing.
-    const grounding = groundDraftedSOP(finalDrafted, tavily.results);
+    const grounding = groundDraftedSOP(finalDrafted, research.results, {
+      researchUnavailable: research.provider === null,
+    });
     if (!grounding.grounded) {
       const ungroundedProposalId = uuidv4();
-      const sourcesG = tavily.results.slice(0, 5).map((r) => ({ title: r.title, url: r.url }));
+      const sourcesG = researchSources(research);
       const ungroundedEvidence = [
         `[QC-UNGROUNDED — needs human review]`,
         `QC score ${finalQcResult.score.toFixed(1)}/10 passed, but the draft failed the grounding gate.`,
@@ -880,7 +909,7 @@ export async function authorSOPForTask(input: AuthorSOPInput): Promise<AuthorRes
     );
     const stepsJson = JSON.stringify(stepsWithSlots);
 
-    const sources3 = tavily.results.slice(0, 5).map((r) => ({ title: r.title, url: r.url }));
+    const sources3 = researchSources(research);
     const evidenceSummary = [
       `[QC-PASS ${finalQcResult.score.toFixed(1)}/10]`,
       `Auto-authored SOP for task "${input.title}" (dept: ${finalDept}).`,
@@ -893,7 +922,7 @@ export async function authorSOPForTask(input: AuthorSOPInput): Promise<AuthorRes
     // a row in the canonical `sops` table, filed with source=NULL so it looks
     // organically produced, auto-authored with NO operator approval, after which
     // live tasks are re-pointed at it. Its steps and `evidenceSummary` come from
-    // geminiGenerate() + tavilySearch(); with a fixture env var active in the
+    // geminiGenerate() + researchForSop(); with a fixture env var active in the
     // live server process those are canned. Refuse the write.
     //
     // Deliberately OUTSIDE the try below — that catch swallows insert errors

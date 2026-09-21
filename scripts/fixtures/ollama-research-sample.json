@@ -1,0 +1,17 @@
+{
+  "id": "chatcmpl-ollama-research-fixture",
+  "model": "gpt-oss:120b",
+  "choices": [
+    {
+      "message": {
+        "role": "assistant",
+        "content": "Widget forging best practice in 2026 centres on documented tolerance checks at each heat, a single-owner sign-off per batch, and post-quench hardness sampling. [1][2]"
+      }
+    }
+  ],
+  "citations": [
+    { "url": "https://example.com/forging-tolerance-standards-2026", "title": "Forging Tolerance Standards 2026" },
+    { "url": "https://example.com/heat-treat-qa-handbook", "title": "Heat Treat QA Handbook" }
+  ],
+  "usage": { "total_tokens": 812 }
+}

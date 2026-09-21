@@ -12,7 +12,7 @@
  *   3. Operator approves on `/sops/proposals` → atomically inserts a v2
  *      SOP and re-points every task referencing the deleted v1.
  *
- * Side-effects (Tavily, Gemini, Telegram) are gated by env vars so tests
+ * Side-effects (web research, Gemini, Telegram) are gated by env vars so tests
  * can run end-to-end on fixtures at $0 cost.
  */
 
@@ -22,7 +22,7 @@ import fs from 'fs';
 import path from 'path';
 import { queryAll, queryOne, run, transaction } from '@/lib/db';
 import { parseAndValidateSteps, type SOP, type SOPStep } from '@/lib/sops';
-import { tavilySearch, type TavilyResult } from '@/lib/tavily';
+import { researchForSop, NO_RESEARCH_SOURCE_LINE, type ResearchResultItem } from '@/lib/research/sop-research';
 import { geminiGenerate } from '@/lib/gemini';
 import { assertNoFixtureDerivedServerWrite } from '@/lib/fixture-guard';
 
@@ -89,15 +89,18 @@ export function buildResearchQueryForSOP(sop: SOP): string {
  *
  * When `noV1` is true (dispatch-time case) the "deleted v1" section is
  * replaced with a positive mandate: author a brand-new SOP for this role/dept
- * under the Tier-1 research mandate (McKinsey/HBR/IBISWorld/Statista-grade).
+ * Research is BEST-EFFORT, not mandatory: `researchResults` may be empty when
+ * no provider has a key on this box (see src/lib/research/sop-research.ts).
+ * The prompt then says so plainly and asks for an un-cited but honest draft,
+ * rather than inviting the model to invent citations to satisfy a mandate.
  */
 export function buildSynthesisPrompt(opts: {
   /** Track S: the deleted SOP to replace (requires noV1=false or omitted). */
   deletedSop?: SOP;
   soul: string;
   user: string;
-  tavilyResults: TavilyResult[];
-  tavilyAnswer?: string;
+  researchResults: ResearchResultItem[];
+  researchAnswer?: string;
   /** 2.12 dispatch path: no v1 exists, author from scratch. */
   noV1?: boolean;
   /** 2.12 dispatch path: dept + role hints for the mandate. */
@@ -105,20 +108,26 @@ export function buildSynthesisPrompt(opts: {
   agentRoleSlug?: string;
   taskTitle?: string;
 }): string {
-  const { deletedSop, soul, user, tavilyResults, tavilyAnswer, noV1, deptSlug, agentRoleSlug, taskTitle } = opts;
-  const research = tavilyResults
-    .slice(0, 5)
-    .map((r, i) => `[${i + 1}] ${r.title}\n${r.url}\n${(r.content || '').slice(0, 600)}`)
-    .join('\n\n');
+  const { deletedSop, soul, user, researchResults, researchAnswer, noV1, deptSlug, agentRoleSlug, taskTitle } = opts;
+  const hasResearch = researchResults.length > 0;
+  const research = hasResearch
+    ? researchResults
+        .slice(0, 5)
+        .map((r, i) => `[${i + 1}] ${r.title}\n${r.url}\n${(r.snippet || '').slice(0, 600)}`)
+        .join('\n\n')
+    : `(${NO_RESEARCH_SOURCE_LINE}. Do NOT invent citations — write from established practice and keep confidence honest.)`;
 
   const v1Section = noV1
     ? [
-        `### Authoring mandate (NEW SOP — Tier-1 research required)`,
+        `### Authoring mandate (NEW SOP)`,
         `You are authoring a BRAND NEW SOP for department: "${deptSlug || 'unknown'}"${agentRoleSlug ? `, role: "${agentRoleSlug}"` : ''}.`,
         taskTitle ? `Triggered by task: "${taskTitle}"` : '',
-        `TIER-1 RESEARCH MANDATE: Your SOP MUST be grounded in current best practices from`,
-        `authoritative sources (McKinsey, HBR, IBISWorld, Statista, or equivalent industry`,
-        `leaders). Each step should cite or reference at least one of the sources provided below.`,
+        hasResearch
+          ? `RESEARCH GROUNDING: prefer current best practices from authoritative sources ` +
+            `(McKinsey, HBR, IBISWorld, Statista, or equivalent). Each step should cite or ` +
+            `reference at least one of the sources provided below.`
+          : `NO WEB RESEARCH WAS AVAILABLE on this box. Write from established professional ` +
+            `practice and cite NOTHING you were not given.`,
         `Do not fabricate citations. Your confidence score should reflect source quality.`,
       ].filter(Boolean).join('\n')
     : [
@@ -130,7 +139,7 @@ export function buildSynthesisPrompt(opts: {
 
   return [
     noV1
-      ? `You are authoring a new SOP from scratch based on Tier-1 research.`
+      ? `You are authoring a new SOP from scratch.`
       : `You are drafting a v2 SOP to replace one an operator just deleted.`,
     `Your output MUST be a single JSON object matching this schema (no markdown, no commentary):`,
     `{`,
@@ -151,8 +160,8 @@ export function buildSynthesisPrompt(opts: {
     `### Client values / operator (USER.md excerpt)`,
     user ? user : '(no USER.md available)',
     ``,
-    `### Tavily research results`,
-    tavilyAnswer ? `Summary: ${tavilyAnswer}\n` : '',
+    `### Research results`,
+    researchAnswer ? `Summary: ${researchAnswer}\n` : '',
     research,
     ``,
     `### Drafting rules`,
@@ -264,28 +273,36 @@ export interface GroundingVerdict {
   confidence: number | null;
   /** step names with no anchor to the research corpus. */
   ungroundedSteps: string[];
-  /** number of Tavily results the draft was researched against. */
+  /** number of research results the draft was researched against. */
   researchCount: number;
 }
 
 /**
- * Compute the grounding verdict for a drafted SOP against its Tavily research.
+ * Compute the grounding verdict for a drafted SOP against its research.
  * A step is "anchored" when it carries a citation marker ([n]-style or a source
  * domain) OR shares >= 1 significant term with the research corpus.
+ *
+ * `researchUnavailable` says NO provider had a key on this box, which is not
+ * the same fault as a provider that answered with nothing. With no corpus in
+ * existence there is nothing to anchor against, so the two corpus-dependent
+ * blocks below would condemn every draft on such a box and no SOP could ever
+ * be authored there. They are skipped in that case; the confidence floor and
+ * the has-steps block still apply, and the SOP records that it has no sources.
  */
 export function groundDraftedSOP(
   drafted: Pick<DraftedSOP, 'steps' | 'success_criteria' | 'confidence'>,
-  tavilyResults: TavilyResult[],
+  researchResults: ResearchResultItem[],
+  opts: { researchUnavailable?: boolean } = {},
 ): GroundingVerdict {
   const confidence = typeof drafted.confidence === 'number' ? drafted.confidence : null;
-  const results = Array.isArray(tavilyResults) ? tavilyResults : [];
+  const results = Array.isArray(researchResults) ? researchResults : [];
   const researchCount = results.length;
 
   // Build the research corpus term set + citable source domains.
   const corpus = new Set<string>();
   const domains: string[] = [];
   for (const r of results) {
-    for (const t of significantTerms(`${r.title || ''} ${r.content || ''}`)) corpus.add(t);
+    for (const t of significantTerms(`${r.title || ''} ${r.snippet || ''}`)) corpus.add(t);
     try {
       const host = new URL(r.url).hostname.replace(/^www\./, '').toLowerCase();
       if (host && !domains.includes(host)) domains.push(host);
@@ -317,14 +334,15 @@ export function groundDraftedSOP(
 
   // HARD blocks — these mean the draft is NOT safe to become QC-authoritative:
   const blocks: string[] = [];
-  if (researchCount < 1) blocks.push('no research results (nothing to ground against)');
+  const noCorpus = Boolean(opts.researchUnavailable);
+  if (!noCorpus && researchCount < 1) blocks.push('no research results (nothing to ground against)');
   if (confidence === null) blocks.push('draft reported no confidence score');
   else if (confidence < AUTO_FILE_CONFIDENCE_FLOOR) {
     blocks.push(`confidence ${confidence.toFixed(2)} < floor ${AUTO_FILE_CONFIDENCE_FLOOR}`);
   }
   if (steps.length === 0) blocks.push('draft has no steps');
   // Zero anchored steps against real research = fluent hallucination.
-  else if (anchored === 0) blocks.push('no step is anchored to any research result (ungrounded)');
+  else if (!noCorpus && anchored === 0) blocks.push('no step is anchored to any research result (ungrounded)');
 
   const grounded = blocks.length === 0;
   const gradeNote = weaklyGrounded
@@ -333,7 +351,9 @@ export function groundDraftedSOP(
   return {
     grounded,
     reason: grounded
-      ? `grounded: ${anchored}/${steps.length} steps anchored, confidence ${confidence?.toFixed(2)}, ${researchCount} sources${gradeNote}`
+      ? noCorpus
+        ? `grounded (no research provider on this box): ${steps.length} steps, confidence ${confidence?.toFixed(2)}, 0 sources`
+        : `grounded: ${anchored}/${steps.length} steps anchored, confidence ${confidence?.toFixed(2)}, ${researchCount} sources${gradeNote}`
       : `NOT auto-file-grounded: ${blocks.join('; ')}`,
     groundedStepFraction,
     weaklyGrounded,
@@ -346,7 +366,7 @@ export function groundDraftedSOP(
 export function getRecentAttemptCount(deletedSop: SOP): number {
   // "Same slug" = same department + name match within the last 7 days.
   // Counts both successful auto-research proposals AND rejected ones —
-  // a rejected proposal still consumed Tavily + Gemini budget.
+  // a rejected proposal still consumed research + Gemini budget.
   const namePattern = `%${deletedSop.name.split(/\s+/).slice(0, 3).join(' ')}%`;
   const row = queryOne<{ n: number }>(
     `SELECT COUNT(*) AS n FROM sop_proposals
@@ -439,13 +459,13 @@ export async function enqueueAutoReplace(
   // ----- Research + synthesis -----
   const { soul, user } = readSoulAndUser();
   const query = buildResearchQueryForSOP(deletedSop);
-  const tavily = await tavilySearch(query, { max_results: 5 });
+  const research = await researchForSop(query, { maxResults: 5 });
   const synthesisPrompt = buildSynthesisPrompt({
     deletedSop,
     soul,
     user,
-    tavilyResults: tavily.results,
-    tavilyAnswer: tavily.answer,
+    researchResults: research.results,
+    researchAnswer: research.answer,
     noV1: false,
   });
   // QC-07: temperature 0 for deterministic, grounded SOP synthesis (belt-and-
@@ -457,13 +477,15 @@ export async function enqueueAutoReplace(
   // review-gated (writes 'auto-generated-pending-review'), so we do NOT block
   // here — but we surface the verdict so the operator sees whether the draft is
   // actually anchored to the sources before approving.
-  const grounding = groundDraftedSOP(drafted, tavily.results);
+  const grounding = groundDraftedSOP(drafted, research.results, {
+    researchUnavailable: research.provider === null,
+  });
 
-  const sources = tavily.results.slice(0, 5).map((r) => ({ title: r.title, url: r.url }));
+  const sources = research.results.slice(0, 5).map((r) => ({ title: r.title, url: r.url }));
   const evidenceSummary = [
     `Auto-researched replacement for deleted SOP "${deletedSop.name}".`,
-    `Tavily query: ${query}`,
-    tavily.answer ? `Synthesis hint: ${tavily.answer}` : '',
+    `Research query: ${query} (provider: ${research.provider ?? 'none'})`,
+    research.answer ? `Synthesis hint: ${research.answer}` : '',
     `Grounding: ${grounding.reason}`,
     grounding.ungroundedSteps.length > 0
       ? `Ungrounded steps (verify against sources): ${grounding.ungroundedSteps.join('; ')}`
@@ -477,7 +499,7 @@ export async function enqueueAutoReplace(
     .join('\n');
 
   // CC-fixture-002 — the `evidenceSummary` and `research_sources` above come
-  // from tavilySearch() + geminiGenerate(). If a TAVILY_/GEMINI_FIXTURE_JSON_PATH
+  // from researchForSop() + geminiGenerate(). If a TAVILY_/GEMINI_FIXTURE_JSON_PATH
   // is active in the live server process, those "sources" are canned and this
   // proposal would be filed as `auto-generated-pending-review` — the operator's
   // approval then promotes it into the canonical `sops` table. Refuse at the

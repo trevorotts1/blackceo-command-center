@@ -120,7 +120,7 @@ test('resolveTavilyApiKey() prefers process.env over the stores', async () => {
 
 // ── 4. A failed authoring run parks its card instead of stranding it ────────
 
-test('authorSOPForTask blocks its authoring card when research fails (no silent in_progress)', async () => {
+test('authorSOPForTask blocks its authoring card when a CONFIGURED provider fails (no silent in_progress)', async () => {
   const db = getDb();
   const dept = 'widget-forging-custom'; // custom (non-canonical) dept
   const wsId = `${dept}-${uuidv4()}`;
@@ -132,9 +132,18 @@ test('authorSOPForTask blocks its authoring card when research fails (no silent 
     orig, 'Forge a custom widget', wsId, 'backlog',
   ]);
 
-  // No key in ANY store → tavilySearch throws → the outer catch must park the card.
+  // v7.6.33: a MISSING key is no longer an error — authoring proceeds with no
+  // web sources. What must still park the card is a provider that is
+  // CONFIGURED and then FAILS. A fixture path pointing at a file that does not
+  // exist is exactly that, and it fails offline.
   let result: Awaited<ReturnType<typeof authorSOPForTask>> | undefined;
+  const savedOrder = process.env.RESEARCH_PROVIDER_ORDER;
+  process.env.RESEARCH_PROVIDER_ORDER = 'tavily';
+  try {
   await withIsolatedStores({}, async () => {
+    // Set INSIDE the callback: withIsolatedStores deletes this var on entry,
+    // which is exactly what keeps its other cases off the network.
+    process.env.TAVILY_FIXTURE_JSON_PATH = '/nonexistent/tavily-fixture-for-this-test.json';
     result = await authorSOPForTask({
       originalTaskId: orig,
       title: 'Forge a custom widget',
@@ -144,8 +153,12 @@ test('authorSOPForTask blocks its authoring card when research fails (no silent 
       workspaceId: wsId,
     });
   });
+  } finally {
+    if (savedOrder === undefined) delete process.env.RESEARCH_PROVIDER_ORDER;
+    else process.env.RESEARCH_PROVIDER_ORDER = savedOrder;
+  }
 
-  assert.equal(result!.status, 'error', 'the run failed (no research key anywhere)');
+  assert.equal(result!.status, 'error', 'the run failed (the configured provider threw)');
 
   const card = queryOne<{ id: string; status: string; block_reason: string | null; block_audience: string | null; ask: string | null }>(
     `SELECT id, status, block_reason, block_audience, ask FROM tasks WHERE sop_authoring_for_task_id = ?`,
@@ -163,5 +176,5 @@ test('authorSOPForTask blocks its authoring card when research fails (no silent 
     [card!.id],
   );
   assert.ok(activity, 'the failure is visible on the card Activity tab');
-  assert.match(activity!.message, /TAVILY_API_KEY is not set/);
+  assert.match(activity!.message, /nonexistent\/tavily-fixture-for-this-test\.json|ENOENT/);
 });
