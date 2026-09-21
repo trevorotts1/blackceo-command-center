@@ -70,6 +70,7 @@ import { recordBlockEvent } from '@/lib/block-events';
 import { isBlankAsk } from '@/lib/blocked-ask';
 import { isUsableFile, isUsableUrl, bundleReverifyEnabled, isBundleDeliverablePath, verifyPresentationBundleDeliverable } from '@/lib/completion-evidence';
 import type { Task } from '@/lib/types';
+import { linkDeliverableToExecution } from '@/lib/execution-attempts';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -370,14 +371,17 @@ function registerArtifactEvidence(cardId: string, artifact: string, phaseSlug: s
     'SELECT id FROM task_deliverables WHERE task_id = ? AND path = ?',
     [cardId, trimmed],
   );
-  if (existing) return;
+  // Attribute the row to the current attempt either way — a re-run re-claiming
+  // the same path is registering it for ITS attempt (execution-attempts.ts).
+  if (existing) { linkDeliverableToExecution(cardId, existing.id); return; }
 
   const now = new Date().toISOString();
+  const deliverableId = uuidv4();
   run(
     `INSERT INTO task_deliverables (id, task_id, deliverable_type, title, path, description, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     [
-      uuidv4(),
+      deliverableId,
       cardId,
       deliverableType,
       `archify ${phaseSlug} artifact`,
@@ -387,6 +391,7 @@ function registerArtifactEvidence(cardId: string, artifact: string, phaseSlug: s
       now,
     ],
   );
+  linkDeliverableToExecution(cardId, deliverableId);
 }
 
 /** Append a progress note to the card's provenance block (bounded, never overwrites). */

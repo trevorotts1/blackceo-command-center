@@ -19,7 +19,7 @@
  * block/bounce.
  */
 
-import { latestExecution } from '@/lib/execution-attempts';
+import { latestExecution, linkDeliverableToExecution } from '@/lib/execution-attempts';
 import { isOwnerKilled } from '@/lib/owner-killed';
 import { throwIfJobLeaseLost } from './job-lease';
 import path from 'path';
@@ -166,15 +166,17 @@ export async function recoverFinishedTaskToReview(
   // Redeliver the on-disk output as a deliverable when the 401 lost it.
   if (recoveredPath) {
     try {
+      const deliverableId = uuidv4();
       run(
         `INSERT INTO task_deliverables (id, task_id, deliverable_type, title, path, description)
          VALUES (?, ?, 'file', ?, ?, ?)`,
         [
-          uuidv4(), task.id, 'Recovered output', recoveredPath,
+          deliverableId, task.id, 'Recovered output', recoveredPath,
           `Auto-registered by ${actor}: on-disk output found for a stalled ` +
           'in_progress task whose write-back had failed (likely MC_API_TOKEN 401).',
         ],
       );
+      linkDeliverableToExecution(task.id, deliverableId);
     } catch (err) {
       console.warn(`[${actor}] recover: deliverable register skipped for ${task.id}:`, (err as Error).message);
     }

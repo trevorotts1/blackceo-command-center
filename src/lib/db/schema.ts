@@ -468,9 +468,14 @@ CREATE TABLE IF NOT EXISTS task_activities (
 
 -- Task deliverables table (files, URLs, artifacts)
 -- NOTE: mime_type, file_size_bytes, sha256 added by migration 070 on existing DBs.
+-- NOTE: execution_id added by migration 158 on existing DBs. It names the
+-- attempt that registered the row, so the persona artifact-snapshot gate can
+-- ask a producer to account for ITS OWN artifacts and not for the ones earlier
+-- QC re-routes left behind (see persona-conformance.ts).
 CREATE TABLE IF NOT EXISTS task_deliverables (
   id TEXT PRIMARY KEY,
   task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  execution_id TEXT,
   deliverable_type TEXT NOT NULL,
   title TEXT NOT NULL,
   path TEXT,
