@@ -16,7 +16,7 @@ export const revalidate = 0;
  * ONLY TWO ANSWERS EXIST, because only two are honest. The gateway takes no
  * per-run model, so "run it on X" is not an instruction this box can carry out:
  *
- *   overflow_ok   proceed now; the run takes whichever pool in the agent's own
+ *   overflow_now   proceed now; the run takes whichever pool in the agent's own
  *                 chain has room. This is also what a silent owner gets when
  *                 the answer window lapses.
  *   primary_only  do NOT run while the agent's own primary is blocked. The
@@ -35,11 +35,11 @@ export const revalidate = 0;
  * rejected before this handler runs.
  *
  * GET  → the open question for this card, for a board panel to render.
- * POST → { choice: 'overflow_ok' | 'primary_only' }
+ * POST → { choice: 'overflow_now' | 'primary_only' }
  */
 
 const ChoiceSchema = z.object({
-  choice: z.enum(['overflow_ok', 'primary_only']),
+  choice: z.enum(['overflow_now', 'primary_only']),
 });
 
 interface RouteParams {
@@ -85,7 +85,7 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
   const parsed = ChoiceSchema.safeParse(body);
   if (!parsed.success) {
     return NextResponse.json(
-      { error: 'choice must be "overflow_ok" or "primary_only"', detail: parsed.error.issues },
+      { error: 'choice must be "overflow_now" or "primary_only"', detail: parsed.error.issues },
       { status: 400 },
     );
   }

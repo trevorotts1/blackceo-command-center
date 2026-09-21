@@ -311,7 +311,7 @@ test('one answer clears every card batched behind the same question', () => {
     .prepare("SELECT task_id FROM provider_choice_asks WHERE batch_id = ? AND delivered <> 'batched'")
     .get(batchedRow.batch_id) as { task_id: string };
 
-  const applied = applyProviderChoice(sibling.task_id, 'overflow_ok', now);
+  const applied = applyProviderChoice(sibling.task_id, 'overflow_now', now);
   assert.ok(applied.includes(batchedRow.task_id), 'the batched card must be released by the one answer');
   const stillOpen = getDb()
     .prepare('SELECT COUNT(*) n FROM provider_choice_asks WHERE batch_id = ? AND answered_at IS NULL')
@@ -368,19 +368,19 @@ test('an unanswered ask holds inside the window and expires after it', () => {
   assert.equal(askExpired(ask, asked + ASK_TIMEOUT_MS), true);
 });
 
-test('overflow_ok releases the card; primary_only keeps it waiting and is remembered', () => {
+test('overflow_now releases the card; primary_only keeps it waiting and is remembered', () => {
   resetAsks();
   const db = getDb();
   seedTask('ask-answer-1');
   seedTask('ask-answer-2');
   const now = Date.parse('2026-09-21T12:00:00.000Z');
 
-  applyProviderChoice('ask-answer-1', 'overflow_ok', now);
+  applyProviderChoice('ask-answer-1', 'overflow_now', now);
   const go = db.prepare('SELECT provider_choice, next_dispatch_eligible_at FROM tasks WHERE id=?').get('ask-answer-1') as {
     provider_choice: string;
     next_dispatch_eligible_at: string | null;
   };
-  assert.equal(go.provider_choice, 'overflow_ok');
+  assert.equal(go.provider_choice, 'overflow_now');
   assert.equal(go.next_dispatch_eligible_at, null, 'GO must release the card immediately');
 
   applyProviderChoice('ask-answer-2', 'primary_only', now);
@@ -399,7 +399,7 @@ test('an answered card is never asked again', () => {
     taskId: 'ask-once-1',
     taskTitle: 't',
     routeLane: 'heavy',
-    existingChoice: 'overflow_ok',
+    existingChoice: 'overflow_now',
     decision: decision({ allBlocked: true }),
   });
   assert.equal(gate.hold, false);

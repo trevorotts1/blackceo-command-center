@@ -58,7 +58,7 @@ import { notifyOwner, notifySystem } from '@/lib/notify';
 import { getMissionControlUrl } from '@/lib/config';
 import { resolveAndLog, resolveSpecialistType } from '@/lib/intelligence-resolver';
 import { scoreRoute, recordRoutingReason, isBlocked, type RouteDecision } from '@/lib/capacity/route-scorer';
-import { providerLabel } from '@/lib/capacity/provider-pools';
+import { providerLabel, providerOf } from '@/lib/capacity/provider-pools';
 import { evaluateAskGate, holdForProviderChoice } from '@/lib/capacity/ask-at-capacity';
 import { sendProviderChoiceAsk } from '@/lib/jobs/trust-engine';
 import { buildPersonaBlock, buildPersonaPlanBlock } from '@/lib/persona-dispatch';
@@ -442,6 +442,31 @@ function recordOwnerWaitsForPrimary(
       `Waiting for ${providerLabel(primary)} because you asked me to hold it there rather than run it elsewhere.`,
     );
   } catch { /* the explanation is never worth failing a hold */ }
+}
+
+/**
+ * A placement the gateway REFUSED. Recorded, never silent: the operator should
+ * see that the box tried to place a run on a declared fallback and was told no
+ * — most often because the model is absent from
+ * `agents.defaults.modelPolicy.allow`, which is a config fact somebody can fix.
+ * The card then queues on its primary exactly as it would without placement.
+ */
+function recordPlacementRefused(
+  taskId: string,
+  agentId: string | null,
+  model: string,
+  reason: string,
+  context: string,
+): void {
+  try {
+    run(
+      `INSERT INTO events (id, type, agent_id, task_id, message, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+      [uuidv4(), 'provider_placement_refused', agentId, taskId,
+        `Gateway refused to place this run on ${model}: ${reason.slice(0, 300)}`, new Date().toISOString()],
+    );
+  } catch (err) {
+    console.warn(`[${context}] placement-refused event non-fatal:`, (err as Error).message);
+  }
 }
 
 /** Clear attempt-accounting after a task successfully advances to in_progress. */
@@ -1993,8 +2018,57 @@ If you need help or clarification, ask the orchestrator.`;
       }
     }
 
+    // PLACEMENT. When the agent's own primary cannot take this run and the
+    // scorer names a declared fallback that can, pin THAT model on this
+    // execution's gateway session before reserving.
+    //
+    // `chat.send` has no `model` field, so this is the only hook that exists:
+    // `sessions.create {key, model}` sets the session's modelOverride and the
+    // run serves on it (verified live — see the contract note on
+    // OpenClawClient.createSession). Pinning BEFORE the reserve is deliberate:
+    // a refused override must never leave a debited slot behind, so nothing is
+    // claimed until the placement is known to have taken.
+    //
+    // SOVEREIGNTY: only a model already in this agent's own declared chain is
+    // ever pinned. A refusal is NEVER answered with a substitute — the run
+    // falls back to the ordinary primary path, which queues the card with its
+    // reason, exactly as a box without placement would.
+    let placedModel: string | null = null;
+    // `primary_only` is the owner saying this card waits for its own
+    // subscription. It is handled above (the card never reaches here while the
+    // primary is blocked), and re-read here so no later edit can turn an
+    // owner's "wait" into a placement by accident.
+    const ownerChoice = (task as { provider_choice?: string | null }).provider_choice ?? null;
+    const wantPlacement =
+      ownerChoice !== 'primary_only'
+      && routeDecision?.preferred
+      && isBlocked(routeDecision.preferred)
+      && routeDecision.overflowTo
+      && effectiveChain.includes(routeDecision.overflowTo.modelId)
+        ? routeDecision.overflowTo.modelId
+        : null;
+    if (wantPlacement) {
+      try {
+        await client.createSession('mission-control', undefined, {
+          key: sessionKey,
+          model: wantPlacement,
+        });
+        placedModel = wantPlacement;
+        console.log(`[${context}] PLACED task ${task.id} on ${wantPlacement} (${providerLabel(providerOf(wantPlacement))})`);
+      } catch (placeErr) {
+        // The commonest cause is the gateway's own allowlist
+        // (agents.defaults.modelPolicy.allow), which REFUSES an id it does not
+        // carry rather than silently swapping one in. Either way placement is
+        // unavailable and the card queues on its primary.
+        console.warn(
+          `[${context}] placement refused for task ${task.id} on ${wantPlacement}: ${(placeErr as Error).message}`,
+        );
+        recordPlacementRefused(task.id, agent.id, wantPlacement, (placeErr as Error).message, context);
+      }
+    }
+
     const claim = reserveExecution(
-      {...task,persona_snapshot:personaSendSnapshot,model_chain:effectiveChain},
+      {...task,persona_snapshot:personaSendSnapshot,model_chain:effectiveChain,placed_model:placedModel},
       sessionKey, executionId,
     );
     if (!claim.execution) {
@@ -2070,6 +2144,24 @@ If you need help or clarification, ask the orchestrator.`;
     );
     const intendedModel = settings.model || null;
     const runtimeModel = runtimeResolved.model_id || intendedModel;
+
+    // PLACEMENT READBACK. The resolver above already asks the gateway what this
+    // session is actually running — no second call. If a model was pinned, that
+    // answer is the evidence: 1 when the gateway agrees, 0 when it reports
+    // something else, and left NULL when it could not be asked at all. A
+    // placement nobody confirmed is not evidence, and a 0 is the signal that a
+    // pool was debited for a run that went somewhere else.
+    if (placedModel) {
+      const confirmed = runtimeResolved.model_id ? (modelsMatch(placedModel, runtimeResolved.model_id) ? 1 : 0) : null;
+      try {
+        run('UPDATE task_executions SET placement_confirmed=? WHERE id=?', [confirmed, execution.id]);
+      } catch { /* pre-157 box */ }
+      if (confirmed === 0) {
+        console.warn(
+          `[${context}] PLACEMENT NOT CONFIRMED task ${task.id}: pinned="${placedModel}" gateway reports "${runtimeResolved.model_id}"`,
+        );
+      }
+    }
     const skew = !!(intendedModel && runtimeModel && !modelsMatch(intendedModel, runtimeModel));
     if (skew) {
       console.warn(
@@ -2125,7 +2217,18 @@ If you need help or clarification, ask the orchestrator.`;
     // path makes. `tasks_routing_reconsider` (migration 133) erases
     // routing_reason on any update that also touches status, so a reason
     // written before the claim would be wiped by the claim itself.
-    if (routeDecision) recordRoutingReason(task.id, routeDecision.reason);
+    // The card names the model the run was PLACED on when one was pinned, so
+    // the sentence an owner reads matches where the work actually went.
+    if (routeDecision) {
+      recordRoutingReason(
+        task.id,
+        placedModel
+          ? `${routeDecision.preferred ? `${providerLabel(routeDecision.preferred.provider)} was full, so ` : ''}` +
+            `this run was placed on ${placedModel} (${providerLabel(providerOf(placedModel))}), ` +
+            `one of this agent's own declared models.`
+          : routeDecision.reason,
+      );
+    }
 
     // W5.3 — START owner notification (spec §5): persona + dept + specialist + SOP + role.
     // All five values are in local scope at this point. Best-effort; gateway-routed; never throws.

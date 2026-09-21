@@ -56,13 +56,21 @@
  *
  * WHAT AN ANSWER CAN ACTUALLY DO
  * ------------------------------
- * Only two things, because only two are honest. The gateway takes no per-run
- * model, so "run it on X" is not an instruction this box can carry out:
- *   • `overflow_ok`  — proceed; the run takes whatever pool has room.
+ * Two things, and both are now REAL actions rather than shades of "proceed":
+ *   • `overflow_now`  — place this run on the named declared fallback, now.
+ *                      The session is created with that model pinned
+ *                      (sessions.create {model}), so the run genuinely serves
+ *                      there and the pool debit follows it.
  *   • `primary_only` — do NOT run while the agent's own primary is blocked;
- *                      keep waiting for that subscription.
+ *                      keep waiting for that subscription, and never place.
  * Both are enforced on the dispatch path, and `primary_only` is remembered on
  * the card so it is honoured on every later tick without re-asking.
+ *
+ * `overflow_now` replaces the vaguer `overflow_ok` this module shipped with
+ * before placement existed. That answer could only ever mean "stop asking and
+ * carry on queueing", because `chat.send` takes no model and the box had no way
+ * to put a run anywhere but the primary. It now names a model and moves the
+ * work, which is what an owner was being asked to approve all along.
  */
 
 import { randomUUID } from 'crypto';
@@ -103,7 +111,7 @@ export function alwaysAskDepartments(): string[] {
 }
 
 /** What the owner decided for one card. */
-export type ProviderChoice = 'overflow_ok' | 'primary_only';
+export type ProviderChoice = 'overflow_now' | 'primary_only';
 
 export interface AskTrigger {
   /** Short machine name, recorded on the ask row. */
@@ -207,8 +215,10 @@ export function buildQuestion(
   const preferred = decision.preferred;
   const overflow = decision.overflowTo;
   const why = triggers.map((t) => t.detail).join('; ');
+  // The recommendation is what silence buys. It names the model, not just the
+  // provider, because that model is what will actually be pinned.
   const recommendation = overflow
-    ? `run it on ${providerLabel(overflow.provider)} now`
+    ? `place it on ${overflow.modelId} (${providerLabel(overflow.provider)})`
     : 'keep waiting for a slot';
 
   if (!overflow) {
@@ -223,8 +233,9 @@ export function buildQuestion(
   return {
     question:
       `"${taskTitle}" is waiting on ${providerLabel(preferred?.provider ?? 'the primary provider')}. ` +
-      `I can run it on ${providerLabel(overflow.provider)} instead — ${why}. ` +
-      `Reply GO to run it there now, or WAIT to hold it for ${providerLabel(preferred?.provider ?? 'the primary')}. ` +
+      `I can place it on ${overflow.modelId} (${providerLabel(overflow.provider)}) instead` +
+      `${overflow.slotsFree !== null ? `, which has ${overflow.slotsFree} slot(s) free` : ''} — ${why}. ` +
+      `Reply GO to place it there now, or WAIT to hold it for ${providerLabel(preferred?.provider ?? 'the primary')}. ` +
       `No answer in ${Math.round(ASK_TIMEOUT_MS / 60_000)} minutes and I will ${recommendation}.`,
     recommendation,
   };
@@ -445,12 +456,12 @@ export function applyProviderChoice(taskId: string, choice: ProviderChoice, nowM
   }
   for (const id of ids) {
     try {
-      // `overflow_ok` releases the card immediately; `primary_only` leaves it
+      // `overflow_now` releases the card immediately; `primary_only` leaves it
       // deferred and is re-read on every later tick, so the owner is never
       // asked the same question twice.
       run('UPDATE tasks SET provider_choice = ?, next_dispatch_eligible_at = ? WHERE id = ?', [
         choice,
-        choice === 'overflow_ok' ? null : new Date(nowMs + ASK_TIMEOUT_MS).toISOString(),
+        choice === 'overflow_now' ? null : new Date(nowMs + ASK_TIMEOUT_MS).toISOString(),
         id,
       ]);
     } catch {
