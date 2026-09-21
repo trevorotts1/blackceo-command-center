@@ -2527,13 +2527,13 @@ export interface CreateTaskCoreResult {
 
 export interface CreateTaskCoreOptions {
   /**
-   * Fire the outbound `/api/webhooks/task-created` notify to the OpenClaw
-   * gateway. Defaults to true so ingested tasks announce themselves exactly
-   * like UI-created ones. The base URL is derived from `origin` (falling back
-   * to NEXT_PUBLIC_APP_URL / localhost:4000).
+   * @deprecated ACCEPTED AND IGNORED. This used to fire an outbound
+   * `/api/webhooks/task-created` notify; that self-call is gone (see the note
+   * where it used to run, after the task_created broadcast). Both fields stay
+   * on the interface so the ~30 existing call sites keep compiling unchanged.
    */
   notifyGateway?: boolean;
-  /** Request origin used to build the absolute webhook URL. */
+  /** @deprecated ACCEPTED AND IGNORED — see `notifyGateway`. */
   origin?: string | null;
 }
 
@@ -2587,6 +2587,9 @@ export async function createTaskCore(
   input: CreateTaskCoreInput,
   options: CreateTaskCoreOptions = {}
 ): Promise<CreateTaskCoreResult | undefined> {
+  // Both fields of `options` are accepted and ignored since the gateway
+  // self-POST was deleted; the parameter stays so call sites compile unchanged.
+  void options;
   // Structured identity is reserved with the task/event transaction below.
   // ── DEDUP LAYER 2: title + workspace window ────────────────────────────────
   // Applies to the UI / Telegram create paths that carry NO idempotency key.
@@ -3120,39 +3123,22 @@ export async function createTaskCore(
     payload: task,
   });
 
-  // Notify the OpenClaw gateway asynchronously — don't block.
-  // NOTE (B4): routing now happens IN-PROCESS above via routeTask(), so this
-  // outbound notify is no longer the routing mechanism (the old
-  // /api/webhooks/task-created HTTP-to-WS-gateway call was a silent no-op). It
-  // is retained only as a best-effort "a task exists" announcement and is fully
-  // non-fatal; routing does not depend on it.
-  if (options.notifyGateway !== false) {
-    const origin =
-      options.origin || process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:4000';
-    const webhookUrl = `${origin}/api/webhooks/task-created`;
-    (async () => {
-      try {
-        const webhookResponse = await fetch(webhookUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            taskId: task.id,
-            title: task.title,
-            description: task.description,
-            department: task.department,
-            priority: task.priority,
-            workspaceId: task.workspace_id,
-          }),
-        });
-        if (!webhookResponse.ok) {
-          console.error('[createTaskCore] Webhook notification failed:', await webhookResponse.text());
-        }
-      } catch (webhookError) {
-        // Log but never fail the task creation.
-        console.error('[createTaskCore] Failed to trigger webhook:', webhookError);
-      }
-    })();
-  }
+  // NO GATEWAY SELF-POST HERE — deleted deliberately, do not restore.
+  //
+  // Every task creation used to fire an unauthenticated POST from this process
+  // back into this same process at `/api/webhooks/task-created`. It did nothing:
+  // routing moved IN-PROCESS to routeTask() above (B4), and the comment this
+  // replaces already recorded that the HTTP-to-WS-gateway call "was a silent
+  // no-op … retained only as a best-effort announcement". What it did produce
+  // was one `middleware_401` per created task — the request carries no webhook
+  // signature, so the middleware rejects it before the route runs. A no-op that
+  // only emits auth failures is noise with a security smell, not an
+  // announcement.
+  //
+  // The board already learns about the card from the `task_created` SSE
+  // broadcast directly above, which is the real notification path.
+  // `/api/webhooks/task-created` itself is untouched — it stays for genuine
+  // EXTERNAL callers that sign their requests.
 
   // ── ASYNC PERSONA SELECTION (PRD 1.6 / G10-TRIAD-PERSONA-RESOLVE) ─────────────
   // Persona selection + pin + task_updated SSE re-broadcast are owned by
