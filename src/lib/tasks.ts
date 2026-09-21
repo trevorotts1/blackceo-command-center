@@ -2405,6 +2405,18 @@ export interface CreateTaskCoreInput {
   workspace_id?: string | null;
   department?: string | null;
   due_date?: string | null;
+  /**
+   * INTAKE LANE (migration 153). What the intake classified this message as —
+   * 'route' for ordinary work, 'heavy' for work that spans departments, carries
+   * a deadline or is large. 'answer' should never arrive here: that lane is
+   * answered in chat and never routed, so an 'answer' card is a correction.
+   * Descriptive only; nothing refuses a card for omitting it.
+   */
+  route_lane?: string | null;
+  /** The intake's own step estimate for the work, when it made one. */
+  effort_steps?: number | null;
+  /** How many departments the work spans, per the intake. */
+  depts_touched?: number | null;
   sop_id?: string | null;
   /**
    * WI-15b (D1 Option B — NESTED subtasks, migration 124). The parent row id
@@ -2802,6 +2814,21 @@ export async function createTaskCore(
       saveOperatorPresentationContract(id, bindOperatorPresentationContract(id, input.presentation_operator_intake));
     }
     if (input.routing_hold_reason) run('UPDATE tasks SET dispatch_hold=1, routing_reason=?, routing_wait_owner=? WHERE id=?', [input.routing_hold_reason, 'SYSTEM', id]);
+    // INTAKE LANE (migration 153) — written after the insert, the same shape
+    // routing_hold_reason uses, so the canonical INSERT column list stays as it
+    // was and a pre-153 box simply ignores the write. Only touched when the
+    // caller actually supplied something: a producer that sends none leaves
+    // three NULLs, exactly the row it created before these columns existed.
+    if (input.route_lane != null || input.effort_steps != null || input.depts_touched != null) {
+      try {
+        run('UPDATE tasks SET route_lane=?, effort_steps=?, depts_touched=? WHERE id=?', [
+          input.route_lane ?? null,
+          input.effort_steps ?? null,
+          input.depts_touched ?? null,
+          id,
+        ]);
+      } catch { /* pre-153 box: the lane is descriptive, never worth failing a create */ }
+    }
   }, true);
   if (priorTaskId) {
     const prior = queryOne<Task>('SELECT * FROM tasks WHERE id = ?', [priorTaskId]);
