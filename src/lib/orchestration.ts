@@ -407,7 +407,12 @@ export async function completeSubAgentSession(sessionId: string, summary?: strin
  */
 export async function getDeliverables(taskId: string): Promise<any[]> {
   try {
-    const response = await fetch(`${MISSION_CONTROL_URL}/api/tasks/${taskId}/deliverables`);
+    // Same write-back auth as logActivity above: a server-side loopback fetch
+    // is an EXTERNAL caller to the middleware (no same-origin Origin/Referer),
+    // so even this READ needs the bearer or Gate B 401s it.
+    const response = await fetch(`${MISSION_CONTROL_URL}/api/tasks/${taskId}/deliverables`, {
+      headers: missionControlAuthHeaders(),
+    });
     if (!response.ok) {
       throw new Error(`Failed to fetch deliverables: ${response.statusText}`);
     }
