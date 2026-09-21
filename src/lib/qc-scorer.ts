@@ -271,12 +271,18 @@ export async function blockTaskForQC(p: BlockTaskForQCParams): Promise<boolean> 
   }
 
   try {
-    await transition(p.taskId, 'blocked', {
+    // Same self-inflicted bump the re-route paths already guard against: this
+    // write appends QC's own audit note to `description`, which fires the
+    // migration-132 `tasks_persona_input_revision` trigger. On the live box
+    // every blocked card sat exactly one revision ahead of its bundle, so the
+    // moment it was re-scored it failed `persona_input_changed` — a card
+    // blocked by QC could never be recovered by re-scoring it.
+    await withoutSelfInflictedPersonaBump(p.taskId, () => transition(p.taskId, 'blocked', {
       actor: p.actor,
       reason: auditNote,
       expectedFrom: p.fromStatus,
       extraColumns,
-    });
+    }));
   } catch (txErr) {
     if (!(txErr instanceof TransitionError && txErr.code === 'CAS_CONFLICT')) {
       console.warn(`[blockTaskForQC] transition failed for ${p.taskId}:`, (txErr as Error).message);
