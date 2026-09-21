@@ -24,6 +24,7 @@ import {
   safeStatSync,
 } from '../fs/safe-fs';
 import { seedCompanyGuarded, resolveSeedingCompanyId } from './branding-seed';
+import { normalizeDepartmentsPayload } from '../departments-payload';
 import { ensureRuntimeConfigFile } from '../runtime-config';
 import { BLOCKED_ASK_TRIGGER_SQL } from '../blocked-ask';
 import {
@@ -8695,6 +8696,23 @@ export function reseedWorkspacesFromConfig(
       return { created, updated, outcome: 'unreadable', configPath, manifestEntries: 0 };
     }
     depts = JSON.parse(raw);
+
+    // SHAPE: departments.json is EITHER a bare array OR an object wrapping that
+    // array under a "departments" key (the retirement script's
+    // {removedWithProvenance, departments} audit trail, and the build's
+    // {company, total_departments, total_roles, departments} envelope). The
+    // Array.isArray gate below used to report a perfectly valid wrapped artifact
+    // as 'malformed', so a healthy box rendered NO department columns. Unwrap it
+    // here, through the one normalizer the preview page and the Python installer
+    // scripts also use. A refusal still falls through to the 'malformed' branch,
+    // which stays fail-closed: an object whose keys are metadata is NEVER folded
+    // in as departments.
+    const shape = normalizeDepartmentsPayload(depts, configPath);
+    if (shape.ok) {
+      depts = shape.departments;
+    } else {
+      console.error(`[reseed] ${shape.reason}`);
+    }
 
     // U041 (audit E11). This branch used to be the ONLY exit in this function
     // that returned without logging anything, and it is the exit that means "we

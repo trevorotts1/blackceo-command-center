@@ -57,6 +57,21 @@ try:
 except ImportError:
     _HAS_SHARED_RESOLVER = False
 
+# departments.json ships in TWO legitimate top-level shapes: a bare list, and an
+# object wrapping that list under a "departments" key (the retire-script's
+# {removedWithProvenance, departments} audit trail, and the build's
+# {company, total_departments, total_roles, departments} envelope). This script
+# iterated whatever it loaded, so an envelope handed `reseed_workspaces()` the
+# dict's KEYS -- which seeded four bogus workspaces literally named Company /
+# Total Departments / Total Roles / Departments on a client box (2026-08-07) and
+# later crashed Phase 6c with `AttributeError: 'str' object has no attribute
+# 'get'`. The ONE normalizer decides the shape; a dict's metadata keys are never
+# departments.
+from departments_payload import (  # type: ignore  # noqa: E402
+    MalformedDepartmentsError,
+    normalize_departments,
+)
+
 
 def _oc_root():
     if Path("/data/.openclaw").is_dir():
@@ -184,13 +199,24 @@ def find_departments(company_slug=None):
 
 
 def _read_json(path):
+    """Load a departments.json and return its department LIST, or None.
+
+    The single load boundary for this script, so the shape is decided exactly
+    once. A read/parse failure is skippable (the scan moves to the next
+    candidate file). A MALFORMED payload is NOT: skipping it would silently
+    fall through to a different company's departments.json and sync the wrong
+    client's board. So it propagates, naming the path and the top-level type.
+    (MalformedDepartmentsError subclasses ValueError, but json.JSONDecodeError
+    is a distinct subclass, so the except below does not swallow it.)
+    """
     try:
         with open(path) as f:
             data = json.load(f)
-        return data if data else None
     except (OSError, json.JSONDecodeError) as e:
         print(f"  [sync] skipping {path}: {e}", file=sys.stderr)
         return None
+    departments = normalize_departments(data, path=str(path))
+    return departments if departments else None
 
 
 def find_db(explicit=None):
@@ -659,7 +685,16 @@ def main():
                          "update-flow use (unlike the default overwrite).")
     args = ap.parse_args()
 
-    departments, source = find_departments(args.company_slug)
+    # A malformed payload must stop the sync with a readable line, not a
+    # traceback and not a silent fallback to another company's file.
+    try:
+        departments, source = find_departments(args.company_slug)
+    except MalformedDepartmentsError as e:
+        print(f"[sync] FATAL: {e}", file=sys.stderr)
+        print("[sync] Refusing to sync: a departments.json whose shape cannot be read "
+              "would seed bogus workspaces onto this board. Fix the artifact and re-run.",
+              file=sys.stderr)
+        sys.exit(1)
     if not departments:
         print("[sync] No ZHC departments.json found. "
               "Run Skill 23 (AI Workforce Blueprint) first. Nothing to sync.",
