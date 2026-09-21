@@ -70,8 +70,39 @@ const COOLDOWN_EVENT_TYPES=[BOARD_JOBS_WATCHDOG_ALERT_EVENT,BOARD_JOBS_WATCHDOG_
 
 export interface WatchedJobLiveness {
  jobName:string;cadenceMinutes:number;lastRanAt:string|null;lastStatus:string|null;ageMinutes:number|null;staleThresholdMinutes:number;stale:boolean;disabled:boolean;
- failed:boolean;running:boolean;lastSuccessAt:string|null;consecutiveFailures:number;errorCode:string|null;resultCounts:Record<string,number>;
+ failed:boolean;running:boolean;leaseHeld:boolean;lastSuccessAt:string|null;consecutiveFailures:number;errorCode:string|null;resultCounts:Record<string,number>;
 }
+
+/**
+ * A LIVE, UNEXPIRED scheduler lease for `jobName` — the proof that a tick is
+ * still RUNNING rather than stalled.
+ *
+ * WHY THIS READ EXISTS. `stale` used to fire for any job whose current run had
+ * been going longer than cadence x STALE_MULTIPLIER, and for the qc-review-sweep
+ * that window is SIX MINUTES. A legitimate QC sweep that takes longer than six
+ * minutes was therefore reported as a stalled scheduler, and because a silent
+ * job is the one state the watchdog repairs, it restarted the whole command
+ * center process (exit 75) out from under the sweep that was still working —
+ * observed twice in one day on one box. The restart then killed the run, which
+ * guaranteed the next tick looked silent too.
+ *
+ * A running job HOLDS a `scheduler_leases` row (job-lease.ts: inserted before
+ * the body runs, DELETEd when it settles) whose `expires_at` is bounded by the
+ * job's own timeout budget. So the lease answers exactly the question `stale`
+ * was guessing at: is a process still working on this, right now? A crashed
+ * process leaves its lease behind, but only until `expires_at` passes — which
+ * is why the lease is a LIVENESS signal and not an excuse: once it expires, an
+ * overrunning job is stale again on the ordinary threshold.
+ *
+ * An unreadable leases table returns false, which restores the previous
+ * (stricter) behaviour rather than suppressing a real stall.
+ */
+function leaseHeldFor(jobName:string):boolean {
+ try {
+  return !!queryOne<{job_name:string}>('SELECT job_name FROM scheduler_leases WHERE job_name=? AND expires_at>?',[jobName,new Date().toISOString()]);
+ } catch { return false; /* missing schema / locked DB is not proof of a live lease */ }
+}
+
 export function getWatchedJobLiveness():WatchedJobLiveness[] {
  return Object.entries(WATCHED_JOB_CADENCE_MINUTES).map(([jobName,cadenceMinutes])=>{
   const staleThresholdMinutes=cadenceMinutes*STALE_MULTIPLIER;
@@ -83,10 +114,22 @@ export function getWatchedJobLiveness():WatchedJobLiveness[] {
   const lastSuccessAt=row?.last_success_at || (row?.last_status==='ok' && !running ? row.last_ran_at : null);
   const successAge=(Date.now()-parseDbTime(lastSuccessAt))/60000;
   let counts:Record<string,number>={};try{counts=JSON.parse(row?.result_counts||'{}');}catch{/* malformed diagnostics */}
+  // NO PROGRESS: neither a finished tick nor the current run has advanced inside
+  // the job's own cadence x STALE_MULTIPLIER window. `last_ran_at` is only moved
+  // by a FINISHED tick, so an overrunning run trips both halves at once.
+  const noProgress=age>staleThresholdMinutes || (running && (Date.now()-started)/60000>staleThresholdMinutes);
+  // A running tick is ALIVE while it holds an unexpired lease. Only when the
+  // lease has expired AND nothing has progressed is it a stall.
+  const leaseHeld=running && leaseHeldFor(jobName);
   return {jobName,cadenceMinutes,lastRanAt:row?.last_ran_at||null,lastStatus:row?.last_status||null,ageMinutes:Number.isFinite(age)?age:null,staleThresholdMinutes,
-   stale:!row || !Number.isFinite(age) || age>staleThresholdMinutes || (running && (Date.now()-started)/60000>staleThresholdMinutes),
-   disabled:row?.last_status==='disabled',failed:row?.last_status==='error' || (row?.consecutive_failures||0)>0 || (!!lastSuccessAt && successAge>staleThresholdMinutes),
-   running,lastSuccessAt,consecutiveFailures:row?.consecutive_failures||0,errorCode:row?.error_code||null,resultCounts:counts};
+   stale:!row || !Number.isFinite(age) || (noProgress && !leaseHeld),
+   // The "no recent success" half of `failed` is the SAME misreading as `stale`
+   // one line up: a job that is still running holds its lease and has simply not
+   // finished yet, which is not a failure. Real failure evidence (an error
+   // status, a non-zero consecutive-failure count) is unaffected — only the
+   // time-since-success inference defers to the live lease.
+   disabled:row?.last_status==='disabled',failed:row?.last_status==='error' || (row?.consecutive_failures||0)>0 || (!!lastSuccessAt && successAge>staleThresholdMinutes && !leaseHeld),
+   running,leaseHeld,lastSuccessAt,consecutiveFailures:row?.consecutive_failures||0,errorCode:row?.error_code||null,resultCounts:counts};
  });
 }
 

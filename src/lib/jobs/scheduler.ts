@@ -53,7 +53,7 @@ import { runIntakeAdvanceSweep } from './intake-advance-sweep';
 import { runPortIntegrityCheck } from './port-integrity';
 import { runTrustEngineSweep } from './trust-engine';
 import { runBoardHygiene, BOARD_HYGIENE_CRON } from './board-hygiene';
-import { runBoardJobsWatchdog } from './board-jobs-watchdog';
+import { runBoardJobsWatchdog, type BoardJobsWatchdogRunResult } from './board-jobs-watchdog';
 import { runPersonaGroundingHealthSweep } from './persona-grounding-sweep';
 import { runSocialPublishDispatcherSweep } from './social-publish-dispatcher';
 import { runSocialVerificationSweep } from './social-publish-verification';
@@ -589,24 +589,10 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<unknown> | unk
         console.log(`[cron] board-jobs-watchdog: skipped — ${result.skippedReason}`);
         return;
       }
-      // A job an operator switched off is a STANDING STATE, not an event. Logging
-      // it on every 2-minute tick wrote the same line ~720 times a day and filled
-      // the pm2 error log on boxes where the sweeps are disabled on purpose — the
-      // noise that hides the one line that matters. It is therefore logged on the
-      // FIRST observation and then only when the SET of switched-off jobs changes.
-      // Silence (NOT RUNNING) is a live fault and still warns on every tick.
       const offSignature = result.disabledJobs.slice().sort().join(',');
-      const offChanged = offSignature !== lastBoardJobsDisabledSignature;
+      const line = boardJobsWatchdogLogLine(result, offSignature !== lastBoardJobsDisabledSignature);
       lastBoardJobsDisabledSignature = offSignature;
-      const parts: string[] = [];
-      if (result.staleJobs.length > 0) parts.push(`NOT RUNNING — ${result.staleJobs.join(', ')}`);
-      if (result.disabledJobs.length > 0 && offChanged) parts.push(`SWITCHED OFF — ${result.disabledJobs.join(', ')}`);
-      if (result.selfRestart && result.selfRestart !== 'none') parts.push(`self-restart: ${result.selfRestart}`);
-      if (parts.length > 0) {
-        console.warn(
-          `[cron] board-jobs-watchdog: ${parts.join(' | ')}${result.alerted ? ' (alerted)' : ' (cooldown, already alerted)'}`,
-        );
-      }
+      if (line) console.warn(line);
     },
   },
 
@@ -1028,6 +1014,53 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<unknown> | unk
 /**
  * Register every job. Safe to call multiple times.
  */
+/**
+ * The one operator-facing log line for a board-jobs-watchdog tick, or null when
+ * there is nothing true to say. Pure, exported, and tested — because every
+ * defect this function has had was a defect in a SENTENCE, and a sentence is
+ * only checkable if something can call it.
+ *
+ * A job an operator switched off is a STANDING STATE, not an event. Logging it
+ * on every 2-minute tick wrote the same line ~720 times a day and filled the pm2
+ * error log on boxes where the sweeps are disabled on purpose — the noise that
+ * hides the one line that matters. It is therefore logged on the FIRST
+ * observation and then only when the SET of switched-off jobs changes. Silence
+ * (NOT RUNNING) is a live fault and still warns on every tick.
+ *
+ * TWO FALSE STATEMENTS THIS FIXES, both in the old suffix:
+ *
+ *   WARM-UP. Right after a start every liveness row reads silent, so
+ *     `staleJobs` is non-empty and `alerted` is false, and the line came out as
+ *     "NOT RUNNING — intake-advance, qc-review-sweep (cooldown, already
+ *     alerted)". Both halves were untrue: nothing had alerted, and the jobs had
+ *     not stopped — they had not started yet. runBoardJobsWatchdog() has already
+ *     logged the honest boot line ("that is a boot and not a stall") by the time
+ *     it returns this status, so there is nothing left to say and this returns
+ *     null.
+ *   UNAVAILABLE. `alerted` is also false when the notification could not be
+ *     sent at all, and "already alerted" is the opposite of what happened: NOBODY
+ *     was told. That case now says so, which is the difference between an
+ *     operator ignoring a duplicate and an operator learning their alerting is
+ *     down.
+ */
+export function boardJobsWatchdogLogLine(
+  result: BoardJobsWatchdogRunResult,
+  offChanged: boolean,
+): string | null {
+  if (result.notificationStatus === 'warmup') return null;
+  const parts: string[] = [];
+  if (result.staleJobs.length > 0) parts.push(`NOT RUNNING — ${result.staleJobs.join(', ')}`);
+  if (result.disabledJobs.length > 0 && offChanged) parts.push(`SWITCHED OFF — ${result.disabledJobs.join(', ')}`);
+  if (result.selfRestart && result.selfRestart !== 'none') parts.push(`self-restart: ${result.selfRestart}`);
+  if (parts.length === 0) return null;
+  const suffix = result.alerted
+    ? ' (alerted)'
+    : result.notificationStatus === 'unavailable'
+      ? ' (NOT alerted — the notification channel is unavailable)'
+      : ' (cooldown, already alerted)';
+  return `[cron] board-jobs-watchdog: ${parts.join(' | ')}${suffix}`;
+}
+
 export function registerCronJobs(): RegisteredJob[] {
   if (alreadyRegistered()) {
     return listJobs();

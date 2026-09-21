@@ -827,8 +827,31 @@ export class OpenClawClient extends EventEmitter {
   }
 
   // Session management methods
+
+  /**
+   * `sessions.list` returns an ENVELOPE, not an array:
+   * `{ts, path, count, totalCount, defaults, sessions: [...]}` — built by the
+   * gateway's own `buildSessionsListResult()`. This method used to return that
+   * object straight through while its return type claimed an array, so every
+   * caller was silently handed the wrong shape and TypeScript could not see it:
+   *   - runtime-model.ts's `Array.isArray(sessions)` guard was ALWAYS false, so
+   *     the live runtime model resolved to null on every dispatch;
+   *   - the status route reported `sessions.length` as undefined;
+   *   - the client feed's `.map()` and the by-id route's `.find()` would throw.
+   * Unwrapping here fixes all of them at once — no caller changes, because the
+   * array is what every caller already believed it was getting.
+   *
+   * The envelope is tolerated defensively rather than demanded: an older or
+   * patched gateway that returns a bare array still works, and anything else
+   * yields an empty list instead of throwing into a caller that has no way to
+   * tell a shape change from a dead gateway. `scripts/openclaw-contract-check.mjs`
+   * is what makes the envelope's disappearance LOUD; this method stays quiet.
+   */
   async listSessions(): Promise<OpenClawSessionInfo[]> {
-    return this.call<OpenClawSessionInfo[]>('sessions.list');
+    const result = await this.call<unknown>('sessions.list');
+    if (Array.isArray(result)) return result as OpenClawSessionInfo[];
+    const sessions = (result as { sessions?: unknown } | null)?.sessions;
+    return Array.isArray(sessions) ? (sessions as OpenClawSessionInfo[]) : [];
   }
 
   /**
@@ -842,12 +865,45 @@ export class OpenClawClient extends EventEmitter {
     return this.call<OpenClawAgentsList>('agents.list', {});
   }
 
-  async getSessionHistory(sessionId: string): Promise<unknown[]> {
-    return this.call<unknown[]>('sessions.history', { session_id: sessionId });
+  /**
+   * THERE IS NO `sessions.history` RPC. It was never a method on any gateway
+   * version this repo has run against: a search of the installed 2026.9.4 dist
+   * and of the published 2026.9.5 tarball finds ZERO references to the name,
+   * while `chat.history` is registered in both. Every call this method made was
+   * answered with an unknown-method error, which the interview turn route then
+   * reported as "the agent did not reply".
+   *
+   * The real method takes `{sessionKey}` (closed schema, `sessionKey` required)
+   * and answers with an envelope `{sessionKey, sessionId, messages, ...}`. The
+   * caller's argument is passed through unchanged as the session key, and the
+   * messages array is unwrapped so callers keep the array they already expect.
+   *
+   * NO `limit` IS SENT, deliberately. The gateway defaults to 200 entries
+   * (`Math.min(CHAT_HISTORY_MAX_ENTRIES, limit ?? 200)`), which is already
+   * bounded. /api/interview/turn counts the agent turns in this history to form
+   * a baseline and then waits for the count to GROW, so a tight window would
+   * silently break new-reply detection on a long interview: once the window is
+   * full, a new turn pushes an old one out and the count never moves. Other call
+   * sites that ask for `limit: 50` are doing one-shot reads where that does not
+   * apply. Do not add a limit here without fixing that route first.
+   */
+  async getSessionHistory(sessionKey: string): Promise<unknown[]> {
+    const result = await this.call<unknown>('chat.history', { sessionKey });
+    if (Array.isArray(result)) return result;
+    const messages = (result as { messages?: unknown } | null)?.messages;
+    return Array.isArray(messages) ? messages : [];
   }
 
-  async sendMessage(sessionId: string, content: string): Promise<void> {
-    await this.call('sessions.send', { session_id: sessionId, content });
+  /**
+   * `sessions.send` takes `{key, message}` — a CLOSED schema whose `required`
+   * is exactly those two fields. This method used to send `{session_id, content}`,
+   * so the gateway rejected every send outright for unexpected properties AND
+   * missing required ones: the interview turn, the operator bridge dispatch and
+   * the goals nudge all failed at the wire, not in any code path this repo could
+   * see. The argument values are unchanged; only the field names were wrong.
+   */
+  async sendMessage(sessionKey: string, content: string): Promise<void> {
+    await this.call('sessions.send', { key: sessionKey, message: content });
   }
 
   /**

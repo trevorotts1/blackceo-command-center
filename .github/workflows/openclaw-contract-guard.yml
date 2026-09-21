@@ -1,0 +1,122 @@
+name: OpenClaw contract guard
+
+# The gateway client in src/lib/openclaw/client.ts is written against an
+# UNVERSIONED wire contract that lives only inside the installed `openclaw`
+# package. A change there breaks nothing at build time and everything at
+# runtime, which is how three defects shipped and stayed: sessions.list
+# returning an envelope the client read as an array, sessions.send being sent
+# {session_id,content} against a closed {key,message} schema, and
+# sessions.history having no handler on any published version.
+#
+# This job installs openclaw into a throwaway prefix and asserts the contract
+# against it. TWO versions, in a matrix:
+#   pinned  — the version the fleet runs today. A failure here means MAIN is
+#             broken right now, for boxes already in the field.
+#   latest  — whatever `npm view openclaw version` resolves to at run time. A
+#             failure here is ADVANCE WARNING: upstream changed something and
+#             the next fleet roll will break. It is allowed to fail the job so
+#             the signal is real, and is reported separately from pinned by the
+#             matrix so the two are never confused.
+#
+# The pinned version is the ONE place to bump when the fleet moves.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Upstream can publish on any day; a weekly run turns "we found out during a
+    # fleet roll" into "we found out on Monday".
+    - cron: '0 7 * * 1'
+  workflow_dispatch:
+
+jobs:
+  contract:
+    name: openclaw ${{ matrix.channel }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - channel: pinned
+            version: "2026.9.4"
+          - channel: latest
+            version: ""
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      # Node 24, NOT the 20 the rest of this repo's CI uses. openclaw's own
+      # preinstall script refuses to install on anything outside
+      # `>=24.16.0 <25 || >=26.1.0` (true of 2026.9.4 and 2026.9.5 alike), so on
+      # Node 20 this job died at `npm install` and reported a red that had
+      # nothing to do with any contract -- an install refusal wearing a contract
+      # failure's name. Nothing here builds or imports the app, only the
+      # standalone check script, so this version is free to track openclaw's
+      # requirement rather than the repo's. Do NOT harmonise it back to 20.
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Resolve the version to check
+        id: resolve
+        run: |
+          set -euo pipefail
+          if [ -n "${{ matrix.version }}" ]; then
+            VERSION="${{ matrix.version }}"
+          else
+            # The registry is the source of truth for "latest"; never guessed.
+            VERSION="$(npm view openclaw version)"
+            [ -n "$VERSION" ] || { echo "npm view openclaw version returned nothing"; exit 1; }
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Checking the wire contract against openclaw $VERSION (${{ matrix.channel }})"
+
+      # A red job must say which of two very different things went wrong: the
+      # CONTRACT changed, or this job could not install the thing it checks. The
+      # engine range is read from the registry and compared to the runner FIRST,
+      # so an upstream Node bump produces one legible line instead of a raw npm
+      # preinstall error buried under sixty EBADENGINE warnings.
+      - name: Check the runner satisfies openclaw's engine range
+        run: |
+          set -euo pipefail
+          RANGE="$(npm view "openclaw@${{ steps.resolve.outputs.version }}" engines.node 2>/dev/null || true)"
+          echo "openclaw ${{ steps.resolve.outputs.version }} requires Node: ${RANGE:-<unspecified>}"
+          echo "this runner has Node: $(node --version)"
+          if [ -n "$RANGE" ] && ! npx --yes semver --range "$RANGE" "$(node --version)" >/dev/null 2>&1; then
+            echo "::error::This job's Node ($(node --version)) is outside openclaw ${{ steps.resolve.outputs.version }}'s engine range ($RANGE). This is NOT a contract failure -- the contract was never checked. Bump node-version in this workflow."
+            exit 1
+          fi
+
+      - name: Install openclaw into a throwaway prefix
+        run: |
+          set -euo pipefail
+          # A temp prefix, never the runner's global one: this install exists
+          # only to be read, and must not leak into any other step.
+          npm install --prefix "$RUNNER_TEMP/oc" --no-audit --no-fund --no-save \
+            "openclaw@${{ steps.resolve.outputs.version }}"
+          DIST="$RUNNER_TEMP/oc/node_modules/openclaw/dist"
+          [ -d "$DIST" ] || { echo "openclaw installed but $DIST does not exist"; exit 1; }
+          echo "OPENCLAW_DIST=$DIST" >> "$GITHUB_ENV"
+
+      - name: Self-test — the guard must be able to FAIL
+        # A gate that cannot bite proves nothing about the tree it just passed.
+        # Point it at a directory that is not an openclaw dist and require a
+        # non-zero exit before trusting the real run below.
+        run: |
+          set -uo pipefail
+          mkdir -p "$RUNNER_TEMP/not-a-dist"
+          OPENCLAW_DIST="$RUNNER_TEMP/not-a-dist" node scripts/openclaw-contract-check.mjs && {
+            echo "SELF-TEST FAILED: the contract check passed against a directory that is not an openclaw dist."
+            exit 1
+          }
+          echo "Self-test OK: the guard exits non-zero when it cannot read a real dist."
+
+      - name: Verify the wire contract
+        run: node scripts/openclaw-contract-check.mjs
+
+      - name: Record the result as JSON (readable in the run log)
+        if: always()
+        run: node scripts/openclaw-contract-check.mjs --json || true

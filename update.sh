@@ -653,6 +653,41 @@ else
 fi
 
 # ----------------------------------------------------------
+# OpenClaw wire-contract guard (runs BEFORE anything is installed or built)
+# ----------------------------------------------------------
+# Every gateway call in src/lib/openclaw/client.ts is written against an
+# unversioned, undocumented contract that lives only inside the installed
+# `openclaw` package. When upstream renames a field, drops a handler or
+# re-shapes a result, NOTHING in this repo fails: the call still compiles, still
+# type-checks, still ships, and then returns the wrong thing forever at runtime.
+# Three live defects were found that way on one box -- sessions.list returning an
+# envelope the client read as an array, sessions.send being sent the wrong field
+# names, and sessions.history having no handler at all.
+#
+# So the contract is checked against the openclaw ACTUALLY INSTALLED ON THIS BOX,
+# here, before npm ci / migrations / build / restart -- where a failure costs a
+# refusal instead of a silently wrong dashboard. It names the contract that broke.
+#
+# Set OPENCLAW_CONTRACT_CHECK=0 to bypass (an emergency deploy against a gateway
+# you have already reasoned about). Skipped, loudly, when no openclaw is
+# installed: a box with no gateway has no contract to break.
+step "Step 3b: Verify the OpenClaw gateway wire contract"
+_CONTRACT_CHECK="$INSTALL_DIR/scripts/openclaw-contract-check.mjs"
+if [ "${OPENCLAW_CONTRACT_CHECK:-1}" = "0" ]; then
+  warn "OPENCLAW_CONTRACT_CHECK=0 -- gateway wire contract NOT verified for this update."
+elif [ ! -f "$_CONTRACT_CHECK" ]; then
+  warn "scripts/openclaw-contract-check.mjs not found in the updated checkout -- gateway wire contract was NOT verified."
+elif ! command -v openclaw >/dev/null 2>&1 && [ -z "${OPENCLAW_DIST:-}" ]; then
+  warn "No openclaw on PATH and OPENCLAW_DIST is unset -- no gateway to check against; skipping the contract guard."
+else
+  if node "$_CONTRACT_CHECK"; then
+    success "OpenClaw gateway wire contract verified"
+  else
+    fatal "OpenClaw gateway wire contract FAILED (see the named contract above). The dashboard's gateway client would silently misbehave against this openclaw version. Fix src/lib/openclaw/client.ts, or re-run with OPENCLAW_CONTRACT_CHECK=0 to deploy anyway. Dependencies, migrations, build and restart were NOT run."
+  fi
+fi
+
+# ----------------------------------------------------------
 # Install dependencies
 # ----------------------------------------------------------
 step "Step 4: Install npm dependencies"
