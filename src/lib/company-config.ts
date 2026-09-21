@@ -68,6 +68,14 @@ export interface CompanyConfig {
   brandPrimaryColor: string;
   brandSecondaryColor: string;
   logoUrl: string;
+  /**
+   * Per-box concurrency overrides, keyed by provider (`{"ollama": 8}`) — see
+   * src/lib/capacity/provider-pools.ts. This is the ONE setting a plan upgrade
+   * changes: raising it lets every agent on the box take more work at once, with
+   * no agent row edited. `PROVIDER_CONCURRENCY_<PROVIDER>` in the environment
+   * outranks it. Absent on most boxes, which then run on the default table.
+   */
+  provider_concurrency?: Record<string, number>;
 }
 
 /** Cached config to avoid repeated file reads */
@@ -130,6 +138,10 @@ export function loadCompanyConfig(): CompanyConfig {
     departments: Array.isArray(raw.departments) && raw.departments.length > 0
       ? raw.departments
       : [],
+    provider_concurrency:
+      raw.provider_concurrency && typeof raw.provider_concurrency === 'object'
+        ? raw.provider_concurrency
+        : undefined,
     brandPrimaryColor: raw.brandPrimaryColor || raw.branding?.primaryColor || '',
     brandSecondaryColor: raw.brandSecondaryColor || raw.branding?.secondaryColor || '',
     logoUrl: raw.logoUrl || raw.branding?.logoUrl || '',

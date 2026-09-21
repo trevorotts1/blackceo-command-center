@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import { getDb, getMigrationStatus, getDbInitFailure, getDbPath } from '@/lib/db';
 import type { DbInitFailure } from '@/lib/db';
 import { getSOPEmbeddingHealth, resolveEmbeddingProvider } from '@/lib/sop-embeddings';
+import { poolUsage } from '@/lib/capacity/provider-pools';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -227,6 +228,11 @@ export async function GET() {
         gap: pending.length,
       },
       embeddings,
+      // PROVIDER CAPACITY: how much of each provider plan this box is using right
+      // now, and whether a pool is shut after a 429. One GROUP BY plus one small
+      // table read, so a watchdog can poll it. ADDITIVE — a full pool is a queue,
+      // never a downed box, so it does not move the top-level `status`.
+      capacity: { pools: poolUsage(db) },
     });
   } catch (error) {
     // DATA-02: if THIS getDb() call is what surfaced the DB-init / migration
@@ -257,6 +263,7 @@ export async function GET() {
           persona_index: null,
           sop_index: null,
         },
+        capacity: { pools: {} },
         error: error instanceof Error ? error.message : 'unknown',
       },
       { status: 200 }

@@ -6,17 +6,20 @@ import { EXECUTION_SCHEMA_SQL } from '../../src/lib/execution-schema';
 import { reserveExecution,beginExecutionSend,recordExecutionUnknown,recordExecutionAcceptance,latestExecution,recoverExpiredExecutions,validateExecutionCompletion,completeExecution,executionSessionId,UNKNOWN_QUARANTINE_MS,type DispatchSnapshot } from '../../src/lib/execution-attempts';
 import { runLeasedJob,throwIfJobLeaseLost } from '../../src/lib/jobs/job-lease';
 function fixture(){const db=new Database(':memory:');db.exec(`
- CREATE TABLE agents(id TEXT PRIMARY KEY,name TEXT); INSERT INTO agents VALUES('a','Same Name'),('b','Same Name');
+ CREATE TABLE agents(id TEXT PRIMARY KEY,name TEXT,max_concurrent_executions INTEGER); INSERT INTO agents(id,name,max_concurrent_executions) VALUES('a','Same Name',1),('b','Same Name',1);
  CREATE TABLE tasks(id TEXT PRIMARY KEY,assigned_agent_id TEXT,assignment_version INTEGER DEFAULT 0,status TEXT,workspace_id TEXT,department TEXT,source TEXT,killed_at TEXT,archived_at TEXT,description TEXT,updated_at TEXT);
  CREATE TABLE openclaw_sessions(id TEXT PRIMARY KEY,agent_id TEXT,openclaw_session_id TEXT,channel TEXT,status TEXT,task_id TEXT,created_at TEXT,updated_at TEXT);
  CREATE TABLE events(id TEXT,type TEXT,task_id TEXT,agent_id TEXT,message TEXT,created_at TEXT);
  INSERT INTO tasks(id,assigned_agent_id,status,workspace_id,department) VALUES('t1','a','assigned','ws','engineering'),('t2','a','assigned','ws','engineering'),('t3','b','assigned','ws','engineering');`);db.exec(EXECUTION_SCHEMA_SQL);return db;}
 const snap=(db:Database.Database,id:string)=>db.prepare('SELECT * FROM tasks WHERE id=?').get(id) as DispatchSnapshot;
 const claim=(db:Database.Database,id:string,eid:string)=>reserveExecution(snap(db,id),`agent:engineering:${executionSessionId(snap(db,id).assigned_agent_id!,eid)}`,eid,db);
-// The refusal reason for a BUSY WORKER is now `worker_at_capacity` (per-worker
+// The refusal reason for a BUSY WORKER is `worker_at_capacity` (per-worker
 // concurrency, migration 149) — `execution_or_worker_busy` still names the
-// per-TASK rule. This fixture's agents table predates max_concurrent_executions,
-// so the limit falls back to 1: one job per worker, exactly as before.
+// per-TASK rule. These tests are about ATTEMPT OWNERSHIP, not about capacity
+// policy: they use a busy worker as the instrument for proving that a
+// quarantined row keeps holding its slot. Since migration 150 the agent ceiling
+// is OPTIONAL and the provider POOL is the default limit, so the fixture pins
+// each agent to 1 explicitly — which is now how "one job per worker" is said.
 test('one worker capacity and duplicate names have independent stable attempt sessions',()=>{const db=fixture();try{assert.ok(claim(db,'t1','e1').execution);assert.equal(claim(db,'t2','e2').reason,'worker_at_capacity');assert.ok(claim(db,'t3','e3').execution);assert.notEqual(latestExecution('t1',db)!.session_id,latestExecution('t3',db)!.session_id);assert.equal(db.prepare('SELECT COUNT(*) n FROM openclaw_sessions').get() && (db.prepare('SELECT COUNT(*) n FROM openclaw_sessions').get() as {n:number}).n,2);}finally{db.close();}});
 test('delayed preflight cannot overwrite assignment, kill, archive or engine ownership',()=>{for(const mutation of ["assigned_agent_id='b',assignment_version=1","killed_at='now'","archived_at='now'","source='build_deck_phase'"]){const db=fixture();try{const old=snap(db,'t1');db.exec(`UPDATE tasks SET ${mutation} WHERE id='t1'`);assert.equal(reserveExecution(old,'key','e',db).execution,undefined);assert.equal((db.prepare('SELECT status FROM tasks WHERE id=?').get('t1') as {status:string}).status,'assigned');}finally{db.close();}}});
 test('lost acknowledgement retains attempt and worker capacity; acknowledgement reconciles same key',()=>{const db=fixture();try{const e=claim(db,'t1','e1').execution!;assert.equal(beginExecutionSend(e,db),true);recordExecutionUnknown(e,db);assert.equal(claim(db,'t2','e2').execution,undefined);assert.equal(latestExecution('t1',db)!.state,'unknown');recordExecutionAcceptance(e,{runId:'remote-one'},db);assert.equal(latestExecution('t1',db)!.idempotency_key,e.idempotency_key);assert.equal(latestExecution('t1',db)!.remote_run_id,'remote-one');}finally{db.close();}});

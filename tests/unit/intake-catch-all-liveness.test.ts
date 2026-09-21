@@ -34,8 +34,12 @@ function fixture(status='inbox') {
   db.run('INSERT INTO companies(id,name,slug) VALUES(?,?,?)',[company,'Fixture Company',company]);
   for(const [ws,name] of [[workspace,'General Task'],[ceoWs,'Master Orchestrator']])
     db.run('INSERT INTO workspaces(id,name,slug,company_id) VALUES(?,?,?,?)',[ws,name,ws,company]);
-  db.run('INSERT INTO agents(id,name,role,workspace_id,is_master,status) VALUES(?,?,?,?,0,?)',[general,'General','Worker',workspace,'standby']);
-  db.run('INSERT INTO agents(id,name,role,workspace_id,is_master,status) VALUES(?,?,?,?,1,?)',[ceo,'main','CEO',ceoWs,'standby']);
+  // A provider-prefixed model, as every real agent carries: reserveExecution
+  // counts a reservation against its provider POOL (migration 150), and these
+  // fixtures share one database, so an agent with no resolvable provider would
+  // put every worker in this file into the small `default` pool together.
+  db.run('INSERT INTO agents(id,name,role,workspace_id,is_master,status,model) VALUES(?,?,?,?,0,?,?)',[general,'General','Worker',workspace,'standby','deepseek/deepseek-v4-flash']);
+  db.run('INSERT INTO agents(id,name,role,workspace_id,is_master,status,model) VALUES(?,?,?,?,1,?,?)',[ceo,'main','CEO',ceoWs,'standby','deepseek/deepseek-v4-flash']);
   db.run("UPDATE agents SET openclaw_agent_id='main' WHERE id=?",[ceo]);
   db.run(`INSERT INTO tasks(id,title,status,workspace_id,department,created_at,updated_at) VALUES(?,?,?,?,?,'2020-01-01','2020-01-01')`,[id,'Intake fixture',status,workspace,'missing-department']);
   function decision(worker=ceo,reason='[catch-all] unavailable department'):Extract<RoutingDecision,{status:'assigned'}> {

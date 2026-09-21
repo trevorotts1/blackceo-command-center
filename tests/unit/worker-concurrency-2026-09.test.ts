@@ -1,16 +1,20 @@
 /**
- * worker-concurrency-2026-09.test.ts — PER-WORKER PARALLELISM.
+ * worker-concurrency-2026-09.test.ts — the OPTIONAL per-agent ceiling.
  *
  * reserveExecution used to refuse a dispatch whenever the agent had ANY active
  * execution, and a UNIQUE partial index on task_executions(agent_id) enforced
  * the same one-at-a-time rule in the database. The gateway runs many concurrent
  * runs per agent, so the Command Center — not the runtime — was what serialized
- * a department to one card at a time.
+ * a department to one card at a time. Migration 149 replaced that with
+ * `agents.max_concurrent_executions`, defaulting to 1.
  *
- * The limit is now `agents.max_concurrent_executions` (migration 149, DEFAULT 1
- * so every existing box keeps today's behaviour), with the
- * WORKER_MAX_CONCURRENT_DEFAULT environment variable as the fallback and 1 as
- * the floor. The PER-TASK rule is untouched: one live execution per card, ever.
+ * Migration 150 then moved the DEFAULT limit off the agent entirely: capacity
+ * is a property of the client's provider PLAN (provider-capacity-pools-2026-09
+ * .test.ts covers the pools). `agents.max_concurrent_executions` survives as an
+ * OPTIONAL pin — NULL means "no agent ceiling, the pool is the limit" — and
+ * that pin is what this file covers. Every fixture agent therefore runs on a
+ * DeepSeek Direct model, whose pool of 50 is never the binding constraint here.
+ * The PER-TASK rule is untouched: one live execution per card, ever.
  *
  *   node --import tsx --test tests/unit/worker-concurrency-2026-09.test.ts
  */
@@ -27,12 +31,12 @@ import {
   type DispatchSnapshot,
 } from '../../src/lib/execution-attempts';
 
-/** Mirrors the post-migration-149 shape: agents carry their own limit. */
+/** Mirrors the post-migration-150 shape: the agent ceiling is nullable and unset. */
 function fixture() {
   const db = new Database(':memory:');
   db.exec(`
-   CREATE TABLE agents(id TEXT PRIMARY KEY,name TEXT,max_concurrent_executions INTEGER NOT NULL DEFAULT 1);
-   INSERT INTO agents(id,name) VALUES('a','Marketing Lead'),('b','Ops Lead');
+   CREATE TABLE agents(id TEXT PRIMARY KEY,name TEXT,model TEXT,max_concurrent_executions INTEGER);
+   INSERT INTO agents(id,name,model) VALUES('a','Marketing Lead','deepseek/deepseek-v4-flash'),('b','Ops Lead','deepseek/deepseek-v4-flash');
    CREATE TABLE tasks(id TEXT PRIMARY KEY,assigned_agent_id TEXT,assignment_version INTEGER DEFAULT 0,status TEXT,workspace_id TEXT,department TEXT,source TEXT,killed_at TEXT,archived_at TEXT,description TEXT,updated_at TEXT);
    CREATE TABLE openclaw_sessions(id TEXT PRIMARY KEY,agent_id TEXT,openclaw_session_id TEXT,channel TEXT,status TEXT,task_id TEXT,created_at TEXT,updated_at TEXT);
    CREATE TABLE events(id TEXT,type TEXT,task_id TEXT,agent_id TEXT,message TEXT,created_at TEXT);
@@ -52,13 +56,26 @@ const claim = (db: Database.Database, id: string, eid: string) =>
     eid,
     db,
   );
-const setLimit = (db: Database.Database, agentId: string, n: number) =>
+const setLimit = (db: Database.Database, agentId: string, n: number | null) =>
   db.prepare('UPDATE agents SET max_concurrent_executions=? WHERE id=?').run(n, agentId);
 
-test('limit 1 (the default): one live execution per worker, refused as worker_at_capacity', () => {
+test('no ceiling is the default: an agent is bounded by its pool, not by itself', () => {
   const db = fixture();
   try {
-    assert.equal(workerConcurrencyLimit('a', db), 1, 'the column default is the old behaviour');
+    assert.equal(workerConcurrencyLimit('a', db), null, 'migration 150 leaves the pin unset');
+    assert.ok(claim(db, 't1', 'e1').execution);
+    assert.ok(claim(db, 't2', 'e2').execution, 'ONE agent, two live jobs');
+    assert.ok(claim(db, 't3', 'e3').execution);
+  } finally {
+    db.close();
+  }
+});
+
+test('a pin of 1: one live execution per worker, refused as worker_at_capacity', () => {
+  const db = fixture();
+  try {
+    setLimit(db, 'a', 1);
+    assert.equal(workerConcurrencyLimit('a', db), 1);
     assert.ok(claim(db, 't1', 'e1').execution);
     const refused = claim(db, 't2', 'e2');
     assert.equal(refused.execution, undefined);
@@ -109,6 +126,7 @@ test('the per-task single-execution rule survives any limit', () => {
 test('a legacy in_progress task only blocks the worker at limit 1', () => {
   const db = fixture();
   try {
+    setLimit(db, 'a', 1);
     // A shared-session worker whose old card is still running, with no execution row.
     db.prepare("UPDATE tasks SET status='in_progress' WHERE id='t3'").run();
     assert.equal(claim(db, 't1', 'e1').reason, 'worker_busy_legacy_task');
@@ -119,11 +137,11 @@ test('a legacy in_progress task only blocks the worker at limit 1', () => {
   }
 });
 
-test('WORKER_MAX_CONCURRENT_DEFAULT covers a pre-migration agents table', () => {
+test('WORKER_MAX_CONCURRENT_DEFAULT is the box-wide fallback for the pin, and is unset by default', () => {
   const db = fixture();
   try {
-    db.exec('DROP TABLE agents; CREATE TABLE agents(id TEXT PRIMARY KEY,name TEXT); INSERT INTO agents VALUES(\'a\',\'Marketing Lead\'),(\'b\',\'Ops Lead\')');
-    assert.equal(workerConcurrencyLimit('a', db), 1, 'no column, no env → one job per worker');
+    db.exec('DROP TABLE agents; CREATE TABLE agents(id TEXT PRIMARY KEY,name TEXT,model TEXT); INSERT INTO agents(id,name,model) VALUES(\'a\',\'Marketing Lead\',\'deepseek/deepseek-v4-flash\'),(\'b\',\'Ops Lead\',\'deepseek/deepseek-v4-flash\')');
+    assert.equal(workerConcurrencyLimit('a', db), null, 'no column, no env → no agent ceiling (a pre-migration box dispatches, bounded by its pool)');
     process.env.WORKER_MAX_CONCURRENT_DEFAULT = '3';
     try {
       assert.equal(workerConcurrencyLimit('a', db), 3);
@@ -134,7 +152,7 @@ test('WORKER_MAX_CONCURRENT_DEFAULT covers a pre-migration agents table', () => 
     } finally {
       delete process.env.WORKER_MAX_CONCURRENT_DEFAULT;
     }
-    assert.equal(workerConcurrencyLimit('a', db), 1, 'unset → back to the floor');
+    assert.equal(workerConcurrencyLimit('a', db), null, 'unset → no ceiling');
   } finally {
     db.close();
   }
