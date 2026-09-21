@@ -23,6 +23,7 @@ import { refreshModels } from './refresh-models';
 import { ALL_PROVIDERS } from '@/lib/model-providers';
 import { resolveProviderApiKey } from '@/lib/provider-key-detection'; // MODEL-08 (usage-refresh key resolution)
 import { runExecutionCompletionReconcile } from './execution-watcher';
+import { refreshProviderBalances } from '@/lib/capacity/resource-ledger';
 import { runCeoDelegationSweep } from './ceo-delegation-sweep';
 import { detectPatternsAndPropose } from '@/lib/sop-learning';
 import {
@@ -443,6 +444,29 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<unknown> | unk
   { name: 'interview-outbox', expr: '*/2 * * * *', fn: runInterviewOutboxSweep },
   { name: 'dispatch-intents', expr: '*/2 * * * *', fn: runDispatchIntentSweep },
   { name: 'execution-reconcile', expr: '*/2 * * * *', fn: runExecutionCompletionReconcile },
+  // provider-ledger: every 5 minutes — refresh each provider's remaining
+  // balance from that vendor's OWN documented endpoint (resource-ledger.ts
+  // carries a doc URL per provider). A provider that publishes no balance is
+  // never probed and stays null; a probe that fails records why. Only stale
+  // rows are re-probed, so a steady box makes at most one call per provider
+  // per window. Disable with DISABLE_PROVIDER_LEDGER_CRON=1.
+  {
+    name: 'provider-ledger',
+    expr: '*/5 * * * *',
+    fn: async () => {
+      if (process.env.DISABLE_PROVIDER_LEDGER_CRON === '1' || process.env.DISABLE_PROVIDER_LEDGER_CRON === 'true') {
+        return { skippedReason: 'DISABLE_PROVIDER_LEDGER_CRON set' };
+      }
+      const result = await refreshProviderBalances();
+      if (result.probed > 0) {
+        console.log(
+          `[cron] provider-ledger: probed ${result.probed}, ${result.withBalance} returned a balance, ` +
+            `${result.errors} error(s), ${result.skipped} still fresh`,
+        );
+      }
+      return result;
+    },
+  },
   // social-publish-dispatcher: every 2 minutes — F03 (social/wf05-durable-exec).
   // THE consumer for the Skill 35 publish queue: claims queued rows under
   // atomic leases, creates the canonical company-bound task, dispatches it
