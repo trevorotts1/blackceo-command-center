@@ -51,6 +51,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { beginExecutionSend, executionSessionId, reserveExecution, recordExecutionAcceptance, recordExecutionUnknown, type DispatchOutcome, type Execution } from '@/lib/execution-attempts';
 import { throwIfJobLeaseLost } from '@/lib/jobs/job-lease';
 import { queryOne, run } from '@/lib/db';
+import { parseEventTimestamp } from '@/lib/dispatch-idempotency';
 import { getOpenClawClient } from '@/lib/openclaw/client';
 import { broadcast } from '@/lib/events';
 import { notifyOwner, notifySystem } from '@/lib/notify';
@@ -294,6 +295,60 @@ export function recordDispatchFailure(
     // Pre-migration DB (no attempt-accounting columns) or any other failure —
     // never throw on the fire-and-forget dispatch path.
     console.warn(`[${opts.context}] recordDispatchFailure non-fatal:`, (err as Error).message);
+  }
+}
+
+/** How long one (task, reason) persona hold suppresses a repeat activity row. */
+export const PERSONA_HOLD_ACTIVITY_DEDUPE_HOURS = 6;
+
+/** Activity type written when the persona governance gate holds a dispatch. */
+export const PERSONA_HOLD_ACTIVITY_TYPE = 'dispatch_held';
+
+/**
+ * Make a persona-gate hold VISIBLE (task-dispatcher persona gate).
+ *
+ * The gate returns `{status:'held'}` every tick a content task has no persona
+ * bundle. Held is not an error state anywhere upstream — the sweep counts it as
+ * "waiting" — so an un-healable hold looked identical to a task that was about
+ * to dispatch. One console.warn per tick plus ONE `task_activities` row per
+ * (task, reason) per PERSONA_HOLD_ACTIVITY_DEDUPE_HOURS: enough for the Activity
+ * tab to name the stall, never enough to spam it every 5 minutes.
+ *
+ * Best-effort: a pre-migration DB or any write failure degrades to the log line.
+ * Never throws into the dispatch path.
+ */
+function recordPersonaHoldActivity(
+  taskId: string,
+  agentId: string | null,
+  reason: string,
+  context: string,
+): void {
+  console.warn(`[${context}] autoDispatchTask: HELD task ${taskId} — persona gate: ${reason}`);
+  try {
+    const last = queryOne<{ created_at: string }>(
+      `SELECT created_at FROM task_activities
+        WHERE task_id = ? AND activity_type = ? AND message LIKE ?
+        ORDER BY created_at DESC LIMIT 1`,
+      [taskId, PERSONA_HOLD_ACTIVITY_TYPE, `%persona gate: ${reason}%`],
+    );
+    const lastMs = parseEventTimestamp(last?.created_at);
+    if (lastMs !== null && Date.now() - lastMs < PERSONA_HOLD_ACTIVITY_DEDUPE_HOURS * 3_600_000) {
+      return; // Already reported this exact hold inside the window.
+    }
+    run(
+      `INSERT INTO task_activities (id, task_id, agent_id, activity_type, message, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [
+        uuidv4(),
+        taskId,
+        agentId,
+        PERSONA_HOLD_ACTIVITY_TYPE,
+        `[${context}] persona gate: ${reason}`,
+        new Date().toISOString(),
+      ],
+    );
+  } catch (err) {
+    console.warn(`[${context}] persona hold activity non-fatal:`, (err as Error).message);
   }
 }
 
@@ -1763,7 +1818,15 @@ If you need help or clarification, ask the orchestrator.`;
     // note this same function used to carry).
     const { checkPersonaDispatchReady } = await import('@/lib/tasks');
     const personaReady = checkPersonaDispatchReady(task.id);
-    if (!personaReady.ready) return { status: 'held', reason: personaReady.reason };
+    if (!personaReady.ready) {
+      // NEVER SILENT (live stall 2026-09): this gate returned 'held' with no log
+      // and no row. The sweep counts 'held' as "waiting", so a task whose persona
+      // bundle never landed (persona_bundle_required) was re-held every tick
+      // forever while the board stayed green. Say it out loud, once per reason
+      // per PERSONA_HOLD_ACTIVITY_DEDUPE_HOURS, so the operator can see it.
+      recordPersonaHoldActivity(task.id, agent.id, personaReady.reason, context);
+      return { status: 'held', reason: personaReady.reason };
+    }
     throwIfJobLeaseLost();
     const claim = reserveExecution({...task,persona_snapshot:personaSendSnapshot}, sessionKey, executionId);
     if (!claim.execution) return { status: 'held', reason: claim.reason };

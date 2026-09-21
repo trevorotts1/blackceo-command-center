@@ -83,7 +83,18 @@ export const GOVERNANCE_PERSONA_FALLBACK = "covey-7-habits";
 // box, so a 30s cap turned a slow-but-valid selection into a null result (naked
 // task). 60s gives the real selection room to land before the retry/fallback
 // chain engages.
-export const PERSONA_SELECT_TIMEOUT_MS = 60_000;
+//
+// Raised 60s -> 300s (live stall 2026-09): the --blend path makes ~20+ SEQUENTIAL
+// LLM scoring calls and was measured at 47s, 206s and 258s on a loaded client box.
+// At 60s the CC killed a selection that WOULD have landed and pinned a fallback
+// persona with NO bundle (persona_blend_missing), leaving the content task stuck
+// behind the persona_bundle_required dispatch gate forever. A kill must mean
+// "genuinely hung", not "slower than a fast box".
+// Env: PERSONA_SELECT_TIMEOUT_MS (ms; non-numeric / 0 → the 300s default).
+// NOTE: any leased job that drives the selector must budget for this — the
+// persona-backfill job carries an explicit 30-minute lease (jobs/scheduler.ts).
+export const PERSONA_SELECT_TIMEOUT_MS =
+  parseInt(process.env.PERSONA_SELECT_TIMEOUT_MS || '', 10) || 300_000;
 
 /**
  * D8 — true only when `filePath` exists, is readable, AND parses as valid JSON.

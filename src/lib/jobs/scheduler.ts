@@ -156,8 +156,18 @@ export function recordJobTick(name: string, ranAt: string, status: 'ok' | 'error
  * `'disabled'` instead, so the watchdog can distinguish "ticking and working"
  * from "ticking but disabled" at a glance without polling every kill flag
  * itself.
+ *
+ * `timeoutMs` (optional) is the job's LEASE budget. Omitted → runLeasedJob's
+ * 90s default, which is right for every sweep that only touches the DB. A job
+ * that drives a long external process (the persona selector's --blend path runs
+ * up to PERSONA_SELECT_TIMEOUT_MS per task) must declare its own, or the lease
+ * expires mid-run and every late write throws `scheduler_lease_lost`.
  */
-function wrap(name: string, fn: () => Promise<unknown> | unknown): () => Promise<void> {
+function wrap(
+  name: string,
+  fn: () => Promise<unknown> | unknown,
+  timeoutMs?: number,
+): () => Promise<void> {
   return async () => {
     const startedAt = new Date().toISOString();
     try {
@@ -166,7 +176,7 @@ function wrap(name: string, fn: () => Promise<unknown> | unknown): () => Promise
         run(`INSERT INTO job_liveness(job_name,last_ran_at,last_status,last_started_at) VALUES(?,?,'ok',?)
           ON CONFLICT(job_name) DO UPDATE SET last_started_at=excluded.last_started_at`,[name,startedAt,startedAt]);
         return fn();
-      });
+      }, timeoutMs);
       if (lease.skipped) return;
       const result = lease.result;
       console.log(`[cron] ${name} finished`);
@@ -400,7 +410,10 @@ async function runSopLearning(): Promise<void> {
 // hand its result — including a skippedReason — back up to wrap(), which reads
 // it to record 'disabled' vs 'ok' in job_liveness. wrap() already accepts
 // () => Promise<unknown> | unknown, so this just aligns the declared type.
-const JOBS: Array<{ name: string; expr: string; fn: () => Promise<unknown> | unknown; timezone?: string }> = [
+// `timeoutMs` (optional) overrides runLeasedJob's 90s default lease for a job
+// whose body can legitimately run longer (see wrap()). Leave it off everywhere
+// else — a long lease on a fast job only delays recovery after a crash.
+const JOBS: Array<{ name: string; expr: string; fn: () => Promise<unknown> | unknown; timezone?: string; timeoutMs?: number }> = [
   // model-refresh: Sundays 03:00 server local. DESTRUCTIVE — it can deprecate
   // catalog rows. Kill switch: DISABLE_MODEL_REFRESH_CRON=1 (see runModelRefresh).
   { name: 'model-refresh', expr: '0 3 * * 0', fn: runModelRefresh },
@@ -645,9 +658,15 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<unknown> | unk
   // design. Furnace/loop-proof: one attempt per task ever (guarded by a
   // persona_backfill_attempt event), a 120s grace window, and a batch cap.
   // Disable with PERSONA_BACKFILL_SWEEP_ENABLED=0.
+  // LEASE: 30 min, not the 90s default. This job processes up to
+  // PERSONA_BACKFILL_BATCH (10) tasks SEQUENTIALLY and each one can drive the
+  // python selector for up to PERSONA_SELECT_TIMEOUT_MS (5 min default). At 90s
+  // the lease expired mid-batch and every subsequent write threw
+  // `scheduler_lease_lost` — the storm seen on a live box.
   {
     name: 'persona-backfill',
     expr: '*/5 * * * *',
+    timeoutMs: 1_800_000,
     fn: async () => {
       const result = await runPersonaBackfillSweep();
       if (result.skippedReason) {
@@ -991,7 +1010,7 @@ export function registerCronJobs(): RegisteredJob[] {
     }
     const scheduleOptions: { name: string; timezone?: string; noOverlap: boolean } = { name: job.name, noOverlap: true };
     if (job.timezone) scheduleOptions.timezone = job.timezone;
-    cron.schedule(job.expr, wrap(job.name, job.fn), scheduleOptions);
+    cron.schedule(job.expr, wrap(job.name, job.fn, job.timeoutMs), scheduleOptions);
   }
 
   markRegistered();

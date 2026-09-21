@@ -128,8 +128,22 @@ export function completeExecution(taskId: string, executionId?: string, db = get
  db.prepare(`UPDATE task_executions SET state='succeeded',progress_at=?,updated_at=? WHERE task_id=? AND id=? AND state IN ${ACTIVE}`)
   .run(new Date().toISOString(),new Date().toISOString(),taskId,executionId);
 }
+/** How long a quarantined `unknown` row keeps holding worker capacity (ms). */
+export const UNKNOWN_QUARANTINE_MS = 24 * 60 * 60 * 1000;
+
 /** Process-restart reconciliation never creates a new key. Expired reservations
- * are safe to fail; sending/accepted work is quarantined until positive evidence. */
+ * are safe to fail; sending/accepted work is quarantined until positive evidence.
+ *
+ * QUARANTINE EXPIRY (live stall 2026-09): a row that was `sending` at lease
+ * expiry becomes state='unknown', error_code='execution_lease_expired' — and
+ * nothing ever reconciled it. reserveExecution counts `unknown` as ACTIVE per
+ * agent, so one such row blocked that worker permanently (a client box had one
+ * stuck for 4 days). The quarantine is meant to outlive a plausible late
+ * acknowledgement, not the agent: after UNKNOWN_QUARANTINE_MS with no
+ * acceptance, heartbeat or completion, the row is failed as
+ * `execution_unknown_stale` and the capacity is released. Semantics preserved:
+ * no new idempotency key is ever minted, and the task row is untouched (the
+ * remote run may have happened — only the CC-side reservation is released). */
 export function recoverExpiredExecutions(db = getDb(), now = new Date().toISOString()): number {
  return db.transaction(() => {
   const rows = db.prepare(`SELECT * FROM task_executions WHERE lease_expires_at < ? AND state IN ('reserved','sending')`).all(now) as Execution[];
@@ -142,6 +156,12 @@ export function recoverExpiredExecutions(db = getDb(), now = new Date().toISOStr
     if(changed)auditExecutionStatus(row.task_id,'in_progress','assigned','Unsent execution reservation expired',db);
    }
   }
-  return rows.length;
+  // Release quarantine held past UNKNOWN_QUARANTINE_MS. Rows failed above keep
+  // updated_at=now, so this pass can never re-flip what it just wrote.
+  const parsedNow = Date.parse(now);
+  const staleBefore = new Date((Number.isNaN(parsedNow) ? Date.now() : parsedNow) - UNKNOWN_QUARANTINE_MS).toISOString();
+  const stale = db.prepare(`UPDATE task_executions SET state='failed',error_code='execution_unknown_stale',updated_at=?
+    WHERE state='unknown' AND error_code='execution_lease_expired' AND updated_at < ?`).run(now,staleBefore).changes;
+  return rows.length + stale;
  }).immediate();
 }
