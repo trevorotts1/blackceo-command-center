@@ -147,11 +147,12 @@ export const SENTINEL_IDS = new Set([
 // kicks this off concurrently, then gates autoDispatchTask on it for a bounded
 // budget so board persona == runtime persona without blocking the API response.
 //
-// F3.1 / FDN-2: the per-spawn timeout is 60s (PERSONA_SELECT_TIMEOUT_MS) and the
-// policy is "1 retry after 5s" — one real attempt, a 5s cool-off, then one retry
-// (2 spawns total) before the deterministic TS fallback chain engages. A
-// slow-but-valid selection now has 60s to land; a genuinely broken selector fails
-// over in bounded time instead of hammering the box. The retry is off the hot
+// F3.1 / FDN-2: the per-spawn timeout is PERSONA_SELECT_TIMEOUT_MS (300s default,
+// raised from 60s in the 2026-09 dispatch-stall fix — the --blend path was measured
+// at 206s and 258s on a loaded box) and the policy is "1 retry after 5s" — one real
+// attempt, a 5s cool-off, then one retry (2 spawns total) before the deterministic
+// TS fallback chain engages. A slow-but-valid selection gets to land; a genuinely
+// broken selector fails over in bounded time instead of hammering the box. The retry is off the hot
 // path — autoDispatchTask only waits PERSONA_PIN_DISPATCH_BUDGET_MS and the
 // dispatch gate heals anything still naked, so the 5s cool-off never stalls a board.
 export const PERSONA_PIN_MAX_ATTEMPTS = 2;

@@ -25,6 +25,10 @@
  *      `persona_backfill_attempt` audit event, and the selection query EXCLUDES any
  *      task that already has one. So a genuinely mechanical task (which correctly
  *      stays NULL) is attempted exactly once and then drops out — it never loops.
+ *      (The PHASE-2 blend backfill below is windowed instead of once-ever: its
+ *      marker only suppresses a re-attempt for PERSONA_BACKFILL_RETRY_HOURS,
+ *      because a blend attempt that FAILED leaves the task undispatchable
+ *      forever — see runPersonaBlendBackfill.)
  *   2. Grace window: only tasks older than PERSONA_BACKFILL_GRACE_SECONDS (default
  *      120s) are eligible, so a just-created task whose create-time selection is
  *      still in flight is not double-fired.
@@ -71,6 +75,19 @@ interface NakedTaskRow {
 
 // Statuses for which a persona no longer matters (finished / parked work).
 const TERMINAL_STATUSES = ['done', 'archived', 'review', 'blocked'];
+
+/** Default retry window for a FAILED blend backfill attempt (hours). */
+export const PERSONA_BACKFILL_RETRY_HOURS_DEFAULT = 6;
+
+/**
+ * How long a `blend_backfilled` marker suppresses a re-attempt.
+ * Env: PERSONA_BACKFILL_RETRY_HOURS (non-numeric / negative → the default;
+ * a huge value restores the old never-retry behavior).
+ */
+function blendRetryHours(): number {
+  const raw = parseInt(process.env.PERSONA_BACKFILL_RETRY_HOURS ?? '', 10);
+  return Number.isNaN(raw) || raw < 0 ? PERSONA_BACKFILL_RETRY_HOURS_DEFAULT : raw;
+}
 
 export async function runPersonaBackfillSweep(): Promise<PersonaBackfillResult> {
   if (
@@ -205,10 +222,15 @@ interface BlendCandidateRow {
  *   1. Never overwrite a non-null bundle: a task that ALREADY has a
  *      `task_persona_bundle` row is excluded at the SQL layer — the blend it
  *      already computed (possibly operator-confirmed) is never clobbered.
- *   2. ONE attempt per task, ever: each processed task gets a queryable
+ *   2. ONE attempt per RETRY WINDOW: each processed task gets a queryable
  *      `blend_backfilled` audit event, and the selection query EXCLUDES any task
- *      that already has one — so a task whose selector legitimately returns no
- *      bundle (non-content edge, stale install) is attempted once and drops out.
+ *      whose newest one is younger than PERSONA_BACKFILL_RETRY_HOURS (default 6).
+ *      An attempt that FAILED (selector timeout — the live stall: the content task
+ *      never got a `task_persona_bundle` row, so checkPersonaDispatchReady returned
+ *      `persona_bundle_required` on every dispatch tick FOREVER) is therefore
+ *      retried on the next window instead of being excluded for the life of the
+ *      box; a task whose selector legitimately returns no bundle (non-content edge,
+ *      stale install) costs one cheap attempt per window, not a loop.
  *   3. Content-only: `isContentTask()` is an LLM-free semantic classifier (never
  *      a grep-as-content-judge — 2.4); a non-content task is skipped (its
  *      `blend_directive` staying NULL is correct, not a defect).
@@ -220,6 +242,7 @@ export async function runPersonaBlendBackfill(
   graceCutoff: string,
 ): Promise<{ blendScanned: number; blendBackfilled: number }> {
   const placeholders = TERMINAL_STATUSES.map(() => '?').join(', ');
+  const retryCutoff = new Date(Date.now() - blendRetryHours() * 3_600_000).toISOString();
 
   let rows: BlendCandidateRow[];
   try {
@@ -242,10 +265,11 @@ export async function runPersonaBlendBackfill(
           AND NOT EXISTS (
             SELECT 1 FROM events e
              WHERE e.task_id = t.id AND e.type = 'blend_backfilled'
+               AND e.created_at > ?
           )
         ORDER BY t.created_at ASC
         LIMIT ?`,
-      [...TERMINAL_STATUSES, graceCutoff, batch],
+      [...TERMINAL_STATUSES, graceCutoff, retryCutoff, batch],
     );
   } catch (err) {
     // Pre-090 DB (no blend_directive / task_persona_bundle) — nothing to heal.

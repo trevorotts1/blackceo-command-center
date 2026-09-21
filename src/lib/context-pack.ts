@@ -60,10 +60,13 @@ import os from 'os';
 import { queryAll, queryOne } from '@/lib/db';
 import { detectPlatform, vaultRoot, zhcLibraryBaseDirs } from '@/lib/platform';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
+import { createHash } from 'crypto';
 import {
   getEmbeddingApiKey,
   fetchEmbeddings,
   cosineSimilarity,
+  type EmbeddingResult,
+  type EmbeddingVector,
 } from '@/lib/sop-embeddings';
 import type { SOP } from '@/lib/sops';
 import type { Agent, Task } from '@/lib/types';
@@ -675,6 +678,81 @@ const SKILL_MATCH_FLOOR: number = (() => {
   return 0.55;
 })();
 
+/**
+ * Process-lifetime embedding cache for the skill matcher.
+ *
+ * WHY (live dispatch stall 2026-09): every dispatch embedded the task text PLUS
+ * `name. description` for EVERY installed SKILL.md. fetchEmbeddings' Google path
+ * is a sequential loop with a 250 ms sleep per text and no cache, so ~80 skills
+ * cost ~40 s of pure API latency per dispatch — past the 90 s scheduler job lease,
+ * which surfaced as a `scheduler_lease_lost` storm. The skill corpus is static
+ * between installs, so the same ~80 strings were re-embedded on every single
+ * dispatch. Cache them by sha256(text): the first dispatch pays, the rest embed
+ * only the task text.
+ *
+ * Deliberately in-process and unbounded in time (no TTL): a SKILL.md edit is
+ * picked up on the next restart, and the CC restarts on every deploy. Capacity is
+ * capped at EMBEDDING_CACHE_MAX with oldest-first eviction.
+ * ponytail: insertion-order eviction, not LRU — swap in an LRU only if the
+ * corpus ever exceeds the cap in normal operation.
+ */
+const EMBEDDING_CACHE_MAX = 2_000;
+const embeddingCache = new Map<string, EmbeddingVector>();
+
+function embeddingCacheKey(text: string): string {
+  return createHash('sha256').update(text).digest('hex');
+}
+
+/**
+ * Embed `texts`, reusing cached vectors and calling `fetcher` ONLY for the texts
+ * that are not cached yet (deduped within the call). Returns vectors in the same
+ * order as `texts`, or null when the fetcher returns a short/unusable batch —
+ * the caller then falls back to keyword scoring exactly as before.
+ *
+ * `fetcher` is injectable for tests; production always uses fetchEmbeddings.
+ */
+export async function embedTextsCached(
+  texts: string[],
+  fetcher: (t: string[]) => Promise<EmbeddingResult[]> = fetchEmbeddings,
+): Promise<EmbeddingVector[] | null> {
+  const keys = texts.map(embeddingCacheKey);
+  const missKeys: string[] = [];
+  const missTexts: string[] = [];
+  const seen = new Set<string>();
+  keys.forEach((key, i) => {
+    if (embeddingCache.has(key) || seen.has(key)) return;
+    seen.add(key);
+    missKeys.push(key);
+    missTexts.push(texts[i]);
+  });
+
+  if (missTexts.length > 0) {
+    const fetched = await fetcher(missTexts);
+    if (!fetched || fetched.length !== missTexts.length) return null;
+    for (let i = 0; i < missKeys.length; i++) {
+      embeddingCache.set(missKeys[i], fetched[i].embedding);
+    }
+    while (embeddingCache.size > EMBEDDING_CACHE_MAX) {
+      const oldest = embeddingCache.keys().next().value;
+      if (oldest === undefined) break;
+      embeddingCache.delete(oldest);
+    }
+  }
+
+  const out: EmbeddingVector[] = [];
+  for (const key of keys) {
+    const vec = embeddingCache.get(key);
+    if (!vec) return null; // Evicted mid-assembly (corpus > cap) — keyword fallback.
+    out.push(vec);
+  }
+  return out;
+}
+
+/** Test-only: drop every cached vector. */
+export function clearEmbeddingCache(): void {
+  embeddingCache.clear();
+}
+
 /** Global-scope tokens in the skill-department-map (skill available to all depts). */
 const SKILL_GLOBAL_TOKENS = new Set(['*', 'all', 'global', 'any', 'core', 'shared']);
 
@@ -1084,11 +1162,13 @@ export async function matchSkillsForTask(
         const texts = [taskText, ...candidates.map((c) => `${c.name}. ${c.description}`.trim())].map(
           (t) => (t.length > 8_000 ? t.slice(0, 8_000) : t),
         );
-        const emb = await fetchEmbeddings(texts);
+        // Cached: the ~80 static skill texts are embedded once per process, so a
+        // dispatch pays for the task text only (see embedTextsCached).
+        const emb = await embedTextsCached(texts);
         if (emb && emb.length === texts.length) {
-          const taskVec = emb[0].embedding;
+          const taskVec = emb[0];
           const scored = candidates
-            .map((c, i) => ({ c, score: cosineSimilarity(taskVec, emb[i + 1].embedding) }))
+            .map((c, i) => ({ c, score: cosineSimilarity(taskVec, emb[i + 1]) }))
             .filter((s) => s.score >= SKILL_MATCH_FLOOR)
             .sort((a, b) => b.score - a.score)
             .slice(0, limit);
