@@ -257,11 +257,13 @@ export async function GET() {
       },
       embeddings,
       // PROVIDER CAPACITY: how much of each provider plan this box is using right
-      // now, and whether a pool is shut after a 429. One GROUP BY plus one small
-      // table read, so a watchdog can poll it. `providers` adds the money half —
-      // remaining balance and price per provider, read from the stored ledger and
-      // never probed here. ADDITIVE — a full pool is a queue and an unknown
-      // balance is an operational fact, so neither moves the top-level `status`.
+      // now, what the plan allows (`configured_limit`) versus what is in force
+      // after self-calibration (`limit`), and whether a pool is shut after a 429.
+      // One GROUP BY plus one small table read, so a watchdog can poll it.
+      // `providers` adds the money half — remaining balance and price per
+      // provider, read from the stored ledger and never probed here. ADDITIVE —
+      // a full pool is a queue and an unknown balance is an operational fact, so
+      // neither moves the top-level `status`.
       capacity: { pools: poolUsage(db), providers: capacityBlock() },
     });
   } catch (error) {

@@ -4,19 +4,27 @@
  * v7.6.27 gave each agent its own ceiling (`agents.max_concurrent_executions`,
  * default 1). That is the wrong unit. What actually limits throughput on a box
  * is the plan the client pays for: Ollama Cloud Pro allows 3 concurrent
- * requests, Ollama Cloud Max allows 10 (the operator ceiling is 8), DeepSeek
- * Direct documents 2,500, and OpenRouter is effectively unbounded. An agent is
- * not the thing that runs out — the subscription is. Encoding the limit per
- * agent meant a plan upgrade had to be re-entered on every agent row before the
- * box could use what was just bought, and a box running four agents on one
- * Ollama subscription could exceed that subscription without any single agent
+ * requests, Max allows 10 (the operator ceiling is 8), DeepSeek Direct
+ * documents 2,500, and OpenRouter is effectively unbounded. An agent is not the
+ * thing that runs out — the subscription is. Encoding the limit per agent meant
+ * a plan upgrade had to be re-entered on every agent row before the box could
+ * use what was just bought, and a box running four agents on one Ollama
+ * subscription could exceed that subscription without any single agent
  * exceeding its own ceiling.
  *
  * So the limit lives here, keyed by the PROVIDER PREFIX of the runtime model id
  * (`ollama/deepseek-v4.1-flash:cloud` → `ollama`). Every client box has exactly
  * one of each subscription, so one pool per provider per box is the whole model.
- * Upgrading a plan is ONE setting — an environment variable or one key in
- * `company-config.json` — and every agent on the box immediately takes more work.
+ *
+ * THREE WAYS THE LIMIT MOVES, cheapest first:
+ *   • a PLAN TIER — `PROVIDER_PLAN_OLLAMA=max` — the friendly spelling of an
+ *     upgrade, so nobody has to remember that Max means 8;
+ *   • a raw number — `PROVIDER_CONCURRENCY_OLLAMA=8` — which always wins over
+ *     the tier, for a plan the tier table does not know about;
+ *   • SELF-CALIBRATION — the pool shrinks itself when the provider says 429 and
+ *     grows back on its own once the provider has been quiet. A published
+ *     ceiling is not always the ceiling you get, and a table in this file cannot
+ *     know what a given account is actually being allowed today.
  *
  * Nothing here is per-client: the table is defaults for the products themselves,
  * and a box that pays for more says so in its own config.
@@ -32,29 +40,40 @@ import type Database from 'better-sqlite3';
 /**
  * Default concurrent executions per provider pool, per box.
  *
- * These are deliberately CONSERVATIVE against each product's published ceiling:
- * the Command Center is not the only thing on the box that may be talking to a
- * provider, and being refused by the provider is worse than queueing here.
- *   ollama      3 — Ollama Cloud Pro. A Max box raises it to 8 in its own config.
- *   openrouter 20 — effectively unlimited upstream; 20 is a sanity bound, not a plan.
- *   deepseek   50 — DeepSeek Direct documents 2,500; 50 is what one box will ever want.
- *   9router     8 — the local router fans out to whatever it proxies.
- *   google      8
- *   agnes       4
- *   xiaomi      4
- *   moonshot    4
- *   default     2 — an unrecognised or bare (un-prefixed) model id.
+ *   ollama      3 — Ollama Cloud Pro. A Max box says `PROVIDER_PLAN_OLLAMA=max`.
+ *   openrouter 100 — effectively unlimited upstream.
+ *   deepseek   500 — DeepSeek Direct documents 2,500.
+ *   agnes       50 — every Agnes client runs agnes-3.0-flash.
+ *   9router      8 — the local router fans out to whatever it proxies.
+ *   google       8
+ *   xiaomi       4
+ *   moonshot     4
+ *   default      2 — an unrecognised or bare (un-prefixed) model id.
  */
 export const DEFAULT_PROVIDER_CONCURRENCY: Readonly<Record<string, number>> = Object.freeze({
   ollama: 3,
-  openrouter: 20,
-  deepseek: 50,
-  agnes: 4,
+  openrouter: 100,
+  deepseek: 500,
+  agnes: 50,
   '9router': 8,
   google: 8,
   xiaomi: 4,
   moonshot: 4,
   default: 2,
+});
+
+/**
+ * Plan names, so an upgrade is spelled the way it was bought rather than as a
+ * number somebody has to look up.
+ *
+ * Ollama Cloud Max documents 10 concurrent; `max` maps to the OPERATOR CEILING
+ * of 8, deliberately under it, because the Command Center is not the only thing
+ * on a box that may be talking to the subscription and being refused by the
+ * provider is worse than queueing here. A box that really wants all 10 says
+ * `PROVIDER_CONCURRENCY_OLLAMA=10` and owns that decision.
+ */
+export const PROVIDER_PLAN_TIERS: Readonly<Record<string, Readonly<Record<string, number>>>> = Object.freeze({
+  ollama: Object.freeze({ pro: 3, max: 8 }),
 });
 
 /** The pool a model id with no provider prefix, or an unreadable one, belongs to. */
@@ -115,9 +134,9 @@ export function providerOf(modelId: string | null | undefined): string {
   return canonicalProvider(s.slice(0, slash));
 }
 
-/** `ollama` → `PROVIDER_CONCURRENCY_OLLAMA`; `9router` → `PROVIDER_CONCURRENCY_9ROUTER`. */
-function envKeyFor(provider: string): string {
-  return `PROVIDER_CONCURRENCY_${provider.toUpperCase().replace(/[^A-Z0-9]/g, '_')}`;
+/** `ollama` → `OLLAMA`; `9router` → `9ROUTER`. */
+function envSuffix(provider: string): string {
+  return provider.toUpperCase().replace(/[^A-Z0-9]/g, '_');
 }
 
 function positiveInt(value: unknown): number | null {
@@ -125,49 +144,73 @@ function positiveInt(value: unknown): number | null {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
 }
 
-/**
- * Per-box `provider_concurrency` overrides out of `company-config.json`.
- * Never throws: the config loader touches the filesystem, and a capacity read
- * happens on the dispatch path where a missing config file must not be fatal.
- */
-function configuredOverrides(): Record<string, number> {
-  const out: Record<string, number> = {};
+/** A plan name → its concurrency, or null when the provider has no tier table
+ * or the name is not one of its plans. A misspelled plan is said out loud once
+ * rather than silently resolving to the default. */
+function tierLimit(provider: string, plan: unknown): number | null {
+  const name = String(plan ?? '').trim().toLowerCase();
+  if (!name) return null;
+  const tiers = PROVIDER_PLAN_TIERS[provider];
+  if (!tiers) {
+    console.warn(`[provider-pools] "${provider}" has no plan tiers; use PROVIDER_CONCURRENCY_${envSuffix(provider)}=<n>`);
+    return null;
+  }
+  const limit = tiers[name];
+  if (!limit) {
+    console.warn(`[provider-pools] unknown ${provider} plan "${name}"; known plans: ${Object.keys(tiers).join(', ')}`);
+    return null;
+  }
+  return limit;
+}
+
+/** Per-box overrides out of `company-config.json`. Never throws: the config
+ * loader touches the filesystem, and a capacity read happens on the dispatch
+ * path where a missing config file must not be fatal. */
+function companyOverrides(): { concurrency: Record<string, number>; plans: Record<string, unknown> } {
+  const concurrency: Record<string, number> = {};
+  const plans: Record<string, unknown> = {};
   try {
-    const raw = loadCompanyConfig().provider_concurrency;
-    if (!raw || typeof raw !== 'object') return out;
-    for (const [key, value] of Object.entries(raw)) {
+    const config = loadCompanyConfig();
+    for (const [key, value] of Object.entries(config.provider_concurrency ?? {})) {
       const n = positiveInt(value);
-      if (n !== null) out[canonicalProvider(key)] = n;
+      if (n !== null) concurrency[canonicalProvider(key)] = n;
     }
+    for (const [key, value] of Object.entries(config.provider_plans ?? {})) plans[canonicalProvider(key)] = value;
   } catch {
     /* no config on this box, or it is unreadable — defaults stand. */
   }
-  return out;
+  return { concurrency, plans };
 }
 
 /**
- * How many executions this provider's pool may run at once on this box.
- *
- * Precedence, highest first: the `PROVIDER_CONCURRENCY_<PROVIDER>` environment
- * variable, `provider_concurrency` in `company-config.json`, the default table,
- * and finally the `default` pool's own limit for a provider nobody has named.
- * A plan upgrade is exactly one of those two settings.
+ * The CONFIGURED limit for this pool — what the plan allows, before any
+ * self-calibration. Precedence, highest first: a raw number in the environment,
+ * a plan tier in the environment, a raw number in `company-config.json`, a plan
+ * tier in `company-config.json`, the default table, and finally the `default`
+ * pool's own limit for a provider nobody has named.
  */
 export function poolLimit(provider: string): number {
   const pool = canonicalProvider(provider);
-  const fromEnv = positiveInt(process.env[envKeyFor(pool)]);
+  const suffix = envSuffix(pool);
+  const fromEnv = positiveInt(process.env[`PROVIDER_CONCURRENCY_${suffix}`]);
   if (fromEnv !== null) return fromEnv;
-  const fromConfig = configuredOverrides()[pool];
-  if (fromConfig) return fromConfig;
+  const fromEnvPlan = tierLimit(pool, process.env[`PROVIDER_PLAN_${suffix}`]);
+  if (fromEnvPlan !== null) return fromEnvPlan;
+  const overrides = companyOverrides();
+  if (overrides.concurrency[pool]) return overrides.concurrency[pool];
+  const fromConfigPlan = tierLimit(pool, overrides.plans[pool]);
+  if (fromConfigPlan !== null) return fromConfigPlan;
   const fromTable = DEFAULT_PROVIDER_CONCURRENCY[pool];
   if (fromTable) return fromTable;
-  return positiveInt(process.env[envKeyFor(DEFAULT_POOL)]) ?? DEFAULT_PROVIDER_CONCURRENCY[DEFAULT_POOL];
+  return positiveInt(process.env[`PROVIDER_CONCURRENCY_${envSuffix(DEFAULT_POOL)}`]) ?? DEFAULT_PROVIDER_CONCURRENCY[DEFAULT_POOL];
 }
 
-// ── Rate-limit backoff ───────────────────────────────────────────────────────
+// ── Self-calibration ─────────────────────────────────────────────────────────
 
 /** How long a pool stays shut after the provider answered 429 (ms). */
 export const PROVIDER_COOLDOWN_MS = positiveInt(process.env.PROVIDER_COOLDOWN_MS) ?? 30_000;
+/** How quiet a provider must be before the pool grows back by one (ms). */
+export const PROVIDER_RECOVERY_MS = positiveInt(process.env.PROVIDER_RECOVERY_MS) ?? 15 * 60_000;
 
 /**
  * True when a failure text is the provider saying "slow down".
@@ -179,23 +222,63 @@ export function isRateLimitError(text: unknown): boolean {
   return /429|rate.?limit|too many requests/i.test(s);
 }
 
-/** Shut this pool until now + PROVIDER_COOLDOWN_MS. Never throws. */
+interface PoolStateRow {
+  provider: string;
+  effective_limit: number | null;
+  last_429_at: string | null;
+  cooling_until: string | null;
+}
+
+function poolState(provider: string, db: Database.Database): PoolStateRow | undefined {
+  try {
+    return db.prepare('SELECT * FROM provider_pool_state WHERE provider=?').get(provider) as PoolStateRow | undefined;
+  } catch {
+    return undefined; // pre-migration box: no state table, so no calibration.
+  }
+}
+
+/**
+ * The limit actually in force: the configured limit, lowered by whatever the
+ * provider has taught us. Clamped to the configured value so LOWERING a plan
+ * takes effect at once rather than waiting for a 429, and floored at 1 so a
+ * pool can never calibrate itself shut.
+ */
+export function effectiveLimit(provider: string, db: Database.Database = getDb()): number {
+  const pool = canonicalProvider(provider);
+  const configured = poolLimit(pool);
+  const learned = poolState(pool, db)?.effective_limit;
+  if (typeof learned !== 'number' || !Number.isFinite(learned) || learned <= 0) return configured;
+  return Math.max(1, Math.min(configured, Math.floor(learned)));
+}
+
+/**
+ * The provider refused for rate: shut the pool for PROVIDER_COOLDOWN_MS AND
+ * lower the effective limit by one. The cooldown handles the next few seconds;
+ * the lowered limit is what stops us walking back into the same wall in ten
+ * minutes' time. Never throws.
+ */
 export function noteProviderRateLimit(
   provider: string | null | undefined,
   db: Database.Database = getDb(),
   nowMs = Date.now(),
-): string | null {
+): { until: string; effective_limit: number } | null {
   const pool = canonicalProvider(provider);
+  const now = new Date(nowMs).toISOString();
   const until = new Date(nowMs + PROVIDER_COOLDOWN_MS).toISOString();
   try {
+    const current = effectiveLimit(pool, db);
+    const lowered = Math.max(1, current - 1);
     db.prepare(
-      `INSERT INTO provider_cooldowns(provider,until,updated_at) VALUES(?,?,?)
-       ON CONFLICT(provider) DO UPDATE SET until=excluded.until,updated_at=excluded.updated_at
-       WHERE excluded.until > provider_cooldowns.until`,
-    ).run(pool, until, new Date(nowMs).toISOString());
-    return until;
+      `INSERT INTO provider_pool_state(provider,effective_limit,last_429_at,cooling_until,updated_at) VALUES(?,?,?,?,?)
+       ON CONFLICT(provider) DO UPDATE SET
+         effective_limit=excluded.effective_limit,
+         last_429_at=excluded.last_429_at,
+         cooling_until=MAX(COALESCE(provider_pool_state.cooling_until,''),excluded.cooling_until),
+         updated_at=excluded.updated_at`,
+    ).run(pool, lowered, now, until, now);
+    return { until, effective_limit: lowered };
   } catch {
-    return null; // pre-migration box: no cooldown table, so no cooldown.
+    return null; // pre-migration box: no state table, so no cooldown.
   }
 }
 
@@ -205,27 +288,141 @@ export function providerCoolingUntil(
   db: Database.Database = getDb(),
   now = new Date().toISOString(),
 ): string | null {
+  const until = poolState(canonicalProvider(provider), db)?.cooling_until ?? null;
+  return until && until > now ? until : null;
+}
+
+/**
+ * Grow every calibrated-down pool back by one, for providers that have been
+ * quiet for PROVIDER_RECOVERY_MS. Returns how many pools were raised.
+ *
+ * ONE step per call on purpose: the shrink is evidence (a real 429) and the
+ * growth is a guess, so the guess walks back slowly and re-shrinks instantly
+ * if it was wrong. A row that has climbed back to its configured limit is
+ * deleted rather than left behind, so a pool with nothing to say holds no row.
+ *
+ * Rides the existing execution-reconcile tick — no new job, no new lease. The
+ * quiet window is enforced by `last_429_at`, not by the cron cadence, so a
+ * faster tick only notices sooner, it never grows faster.
+ */
+export function growProviderPools(db: Database.Database = getDb(), nowMs = Date.now()): number {
+  let raised = 0;
   try {
-    const row = db
-      .prepare('SELECT until FROM provider_cooldowns WHERE provider=? AND until > ?')
-      .get(canonicalProvider(provider), now) as { until?: string } | undefined;
-    return row?.until ?? null;
+    const quietBefore = new Date(nowMs - PROVIDER_RECOVERY_MS).toISOString();
+    const rows = db
+      .prepare('SELECT * FROM provider_pool_state WHERE effective_limit IS NOT NULL AND (last_429_at IS NULL OR last_429_at < ?)')
+      .all(quietBefore) as PoolStateRow[];
+    const now = new Date(nowMs).toISOString();
+    for (const row of rows) {
+      const configured = poolLimit(row.provider);
+      const current = Math.max(1, Math.min(configured, row.effective_limit ?? configured));
+      if (current >= configured) {
+        db.prepare('DELETE FROM provider_pool_state WHERE provider=? AND (cooling_until IS NULL OR cooling_until < ?)').run(row.provider, now);
+        continue;
+      }
+      db.prepare('UPDATE provider_pool_state SET effective_limit=?,updated_at=? WHERE provider=?').run(current + 1, now, row.provider);
+      raised += 1;
+    }
   } catch {
-    return null;
+    /* pre-migration box: nothing to grow. */
   }
+  return raised;
+}
+
+// ── Choosing a pool (primary, then the agent's own fallbacks) ────────────────
+
+export interface PoolProbe {
+  /** Pool key. */
+  provider: string;
+  /** The model id from the agent's own list that put us in this pool. */
+  model: string | null;
+  running: number;
+  /** The limit in force — already calibrated. */
+  limit: number;
+  cooling_until: string | null;
+  room: boolean;
+}
+
+/** Live occupancy of ONE pool. Reads through the caller's `db`, so when that
+ * caller is inside BEGIN IMMEDIATE this count is serialized with its insert. */
+export function probePool(
+  provider: string,
+  db: Database.Database,
+  excludeTaskId?: string,
+  model: string | null = null,
+): PoolProbe {
+  const pool = canonicalProvider(provider);
+  const limit = effectiveLimit(pool, db);
+  const cooling = providerCoolingUntil(pool, db);
+  let running = 0;
+  try {
+    running = (db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM task_executions
+          WHERE provider = ? AND state IN ${ACTIVE_EXECUTION_STATES_SQL}${excludeTaskId ? ' AND task_id <> ?' : ''}`,
+      )
+      .get(...(excludeTaskId ? [pool, excludeTaskId] : [pool])) as { n: number }).n;
+  } catch {
+    /* pre-migration box: no provider column, so nothing is attributed yet. */
+  }
+  return { provider: pool, model, running, limit, cooling_until: cooling, room: !cooling && running < limit };
+}
+
+/**
+ * Walk the agent's OWN model list — primary first, then its configured
+ * fallbacks — and take the first pool with room.
+ *
+ * SOVEREIGNTY: the chain comes from the agent's own OpenClaw config. No model
+ * is ever added to it here, and no model outside it is ever chosen.
+ *
+ * WHY OVERFLOW IS SOUND WITHOUT A PER-RUN MODEL OVERRIDE: the gateway's
+ * `chat.send` rejects a `model` parameter outright (see the contract note in
+ * the dispatch route), so the Command Center cannot force the fallback. It does
+ * not have to. The OpenClaw runtime walks THIS SAME `model.fallbacks` list
+ * itself, and `rate_limit` is one of its own failover reasons — so when the
+ * primary is genuinely at its plan limit the run lands on the first fallback
+ * anyway. Choosing that pool here is therefore a PREDICTION of what the runtime
+ * will do, not an instruction to it, and it is right exactly when the pool model
+ * is right. The alternative — refusing to dispatch at all while the agent holds
+ * a perfectly good fallback — stalls work for no gain.
+ */
+export function choosePool(
+  chain: readonly string[],
+  db: Database.Database,
+  excludeTaskId?: string,
+): { chosen: PoolProbe | null; probes: PoolProbe[]; overflow: boolean } {
+  const models = chain.length ? chain : [''];
+  const probes: PoolProbe[] = [];
+  for (const model of models) {
+    const probe = probePool(providerOf(model), db, excludeTaskId, model || null);
+    probes.push(probe);
+    if (probe.room) return { chosen: probe, probes, overflow: probes.length > 1 };
+  }
+  return { chosen: null, probes, overflow: false };
+}
+
+/** "Ollama Cloud 3/3, OpenRouter 100/100" — what the operator sees on the card. */
+export function poolsFullSummary(probes: readonly PoolProbe[]): string {
+  return probes
+    .map((p) => `${providerLabel(p.provider)} ${p.running}/${p.limit}${p.cooling_until ? ' (cooling)' : ''}`)
+    .join(', ');
 }
 
 // ── Observability ────────────────────────────────────────────────────────────
 
 export interface PoolStatus {
   running: number;
+  /** What the plan allows. */
+  configured_limit: number;
+  /** What is in force after self-calibration — lower than configured after a 429. */
   limit: number;
   cooling_until: string | null;
+  last_429_at: string | null;
 }
 
 /**
  * Live pool occupancy for `/api/health` — ONE GROUP BY over the active
- * executions plus one read of the cooldown table, so polling it is cheap.
+ * executions plus one read of the state table, so polling it is cheap.
  * Executions written before the provider column existed carry NULL and are
  * counted into no pool: an unknown provider is not evidence of load on any
  * particular one, and those rows drain within a lease.
@@ -243,34 +440,42 @@ export function poolUsage(db: Database.Database = getDb()): Record<string, PoolS
   } catch {
     /* pre-migration box: no provider column, so nothing is attributed yet. */
   }
-  let cooldowns: { provider: string; until: string }[] = [];
+  let states: PoolStateRow[] = [];
   try {
-    cooldowns = db.prepare('SELECT provider,until FROM provider_cooldowns').all() as {
-      provider: string;
-      until: string;
-    }[];
+    states = db.prepare('SELECT * FROM provider_pool_state').all() as PoolStateRow[];
   } catch {
-    /* pre-migration box: no cooldown table. */
+    /* pre-migration box: no state table. */
   }
 
   const now = new Date().toISOString();
   const running = new Map<string, number>();
   for (const row of counts) running.set(canonicalProvider(row.provider), row.n);
-  const cooling = new Map<string, string>();
-  for (const row of cooldowns) if (row.until > now) cooling.set(canonicalProvider(row.provider), row.until);
+  const stateByPool = new Map<string, PoolStateRow>();
+  for (const row of states) stateByPool.set(canonicalProvider(row.provider), row);
 
+  const overrides = companyOverrides();
   const pools = new Set<string>([
     ...Object.keys(DEFAULT_PROVIDER_CONCURRENCY),
-    ...Object.keys(configuredOverrides()),
+    ...Object.keys(overrides.concurrency),
+    ...Object.keys(overrides.plans),
     ...running.keys(),
-    ...cooling.keys(),
+    ...stateByPool.keys(),
   ]);
   const out: Record<string, PoolStatus> = {};
   for (const pool of Array.from(pools).sort()) {
+    const configured = poolLimit(pool);
+    const state = stateByPool.get(pool);
+    const learned = state?.effective_limit;
+    const cooling = state?.cooling_until && state.cooling_until > now ? state.cooling_until : null;
     out[pool] = {
       running: running.get(pool) ?? 0,
-      limit: poolLimit(pool),
-      cooling_until: cooling.get(pool) ?? null,
+      configured_limit: configured,
+      limit:
+        typeof learned === 'number' && Number.isFinite(learned) && learned > 0
+          ? Math.max(1, Math.min(configured, Math.floor(learned)))
+          : configured,
+      cooling_until: cooling,
+      last_429_at: state?.last_429_at ?? null,
     };
   }
   return out;

@@ -76,6 +76,14 @@ export interface CompanyConfig {
    * outranks it. Absent on most boxes, which then run on the default table.
    */
   provider_concurrency?: Record<string, number>;
+  /**
+   * Per-box PLAN names, keyed by provider (`{"ollama": "max"}`) — the friendly
+   * spelling of `provider_concurrency`, so an upgrade is entered as the plan
+   * that was bought rather than as a number somebody has to look up. A raw
+   * `provider_concurrency` entry for the same provider outranks it, and both
+   * are outranked by the environment.
+   */
+  provider_plans?: Record<string, string>;
 }
 
 /** Cached config to avoid repeated file reads */
@@ -142,6 +150,8 @@ export function loadCompanyConfig(): CompanyConfig {
       raw.provider_concurrency && typeof raw.provider_concurrency === 'object'
         ? raw.provider_concurrency
         : undefined,
+    provider_plans:
+      raw.provider_plans && typeof raw.provider_plans === 'object' ? raw.provider_plans : undefined,
     brandPrimaryColor: raw.brandPrimaryColor || raw.branding?.primaryColor || '',
     brandSecondaryColor: raw.brandSecondaryColor || raw.branding?.secondaryColor || '',
     logoUrl: raw.logoUrl || raw.branding?.logoUrl || '',

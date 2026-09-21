@@ -36,6 +36,7 @@
  */
 
 import { latestExecution, recoverExpiredExecutions, validateExecutionCompletion, completeExecution, recordExecutionEvidence, failUnknownExecutionWithoutEvidence } from '@/lib/execution-attempts';
+import { growProviderPools } from '@/lib/capacity/provider-pools';
 import { throwIfJobLeaseLost } from './job-lease';
 import { queryAll, queryOne, run, timeNow, parseDbTime } from '@/lib/db';
 import { broadcast } from '@/lib/events';
@@ -579,6 +580,18 @@ export async function runExecutionCompletionReconcile(): Promise<void> {
   }
 
   recoverExpiredExecutions();
+  // POOL RECOVERY: a provider pool that lowered its own limit after a 429 grows
+  // back one step per tick once that provider has been quiet for
+  // PROVIDER_RECOVERY_MS. This rides the existing tick deliberately — the quiet
+  // window is enforced by the recorded `last_429_at`, not by the cron cadence,
+  // so hosting it here costs one indexed read and needs no second job or lease.
+  try {
+    const raised = growProviderPools();
+    if (raised) console.log(`[execution-watcher] grew ${raised} provider pool limit(s) back toward configured`);
+  } catch (err) {
+    // Capacity bookkeeping must never take down the completion reconcile.
+    console.warn('[execution-watcher] provider pool recovery non-fatal:', (err as Error).message);
+  }
   // EVIDENCE PASS: ask the gateway what actually happened to every quarantined
   // `unknown` row before the 24 h age-out would have to guess. Runs first so a
   // row this tick resolves frees its worker for the very next dispatch sweep.

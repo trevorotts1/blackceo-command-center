@@ -7477,6 +7477,60 @@ export const migrations: Migration[] = [
       console.log('[Migration 151] provider_ledger ready — per-provider balance, currency, freshness and last probe error');
     },
   },
+  {
+    // SELF-CALIBRATING POOLS — what the provider has TAUGHT us, per pool.
+    //
+    // Migration 150 gave each provider a fixed limit out of a table in this
+    // repo plus whatever the box configured, and a `provider_cooldowns` row
+    // that shut a pool for a few seconds after a 429. A published ceiling is
+    // not always the ceiling an account actually gets, and a table here cannot
+    // know what a given subscription is being allowed today — so a cooldown
+    // alone just walks back into the same wall a minute later.
+    //
+    // `provider_pool_state` supersedes `provider_cooldowns` and carries three
+    // facts per pool instead of one: the cooldown (`cooling_until`, the same
+    // column under a clearer name), the LEARNED limit (`effective_limit`,
+    // lowered by one on every rate-limit refusal and floored at 1), and when
+    // the provider last refused (`last_429_at`), which is what the recovery
+    // pass waits on before growing the limit back one step at a time. A pool
+    // with nothing to say holds no row, so a healthy box carries an empty table.
+    //
+    // Any live cooldown is carried across rather than dropped: a pool that is
+    // shut right now must stay shut across the upgrade.
+    //
+    // Additive and idempotent, and safe on a box that never had migration 150's
+    // table at all.
+    id: '152',
+    name: 'provider_pool_self_calibration',
+    up: (db) => {
+      db.exec(`CREATE TABLE IF NOT EXISTS provider_pool_state (
+        provider TEXT PRIMARY KEY,
+        effective_limit INTEGER,
+        last_429_at TEXT,
+        cooling_until TEXT,
+        updated_at TEXT NOT NULL
+      )`);
+      const legacyExists = (db.prepare(
+        `SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name=?`,
+      ).get('provider_cooldowns') as { n: number }).n > 0;
+      if (legacyExists) {
+        // A pool that is shut right now stays shut. `effective_limit` is left
+        // NULL — the old table recorded no learned limit, and NULL means
+        // "nothing learned yet, use the configured limit".
+        // OR IGNORE, not ON CONFLICT: SQLite cannot parse an ON CONFLICT clause
+        // after a SELECT source (it reads the `ON` as a join), and this needs no
+        // upsert anyway — a pool that already has state knows more than the old
+        // table did.
+        const carried = db.prepare(
+          `INSERT OR IGNORE INTO provider_pool_state(provider,effective_limit,last_429_at,cooling_until,updated_at)
+             SELECT provider,NULL,NULL,until,updated_at FROM provider_cooldowns`,
+        ).run().changes;
+        db.exec('DROP TABLE provider_cooldowns');
+        console.log(`[Migration 152] provider_cooldowns folded into provider_pool_state (${carried} cooldown row(s) carried)`);
+      }
+      console.log('[Migration 152] provider pools self-calibrate — a 429 lowers the limit, quiet time grows it back');
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner
