@@ -24,8 +24,11 @@ CREATE TABLE IF NOT EXISTS task_executions (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS task_execution_active_task ON task_executions(task_id)
  WHERE state IN ('reserved','sending','accepted','running','unknown');
-CREATE UNIQUE INDEX IF NOT EXISTS task_execution_worker_capacity ON task_executions(agent_id)
- WHERE state IN ('reserved','sending','accepted','running','unknown');
+-- Worker capacity is COUNTED, not uniquely indexed: agents.max_concurrent_executions
+-- (migration 149) may allow more than one live execution per worker, which a UNIQUE
+-- index cannot express. reserveExecution does the count inside BEGIN IMMEDIATE.
+-- Migration 149 drops the old unique index on databases that already have it.
+CREATE INDEX IF NOT EXISTS idx_task_executions_agent_state ON task_executions(agent_id, state);
 CREATE TABLE IF NOT EXISTS scheduler_leases (
  job_name TEXT PRIMARY KEY,
  owner TEXT NOT NULL,
