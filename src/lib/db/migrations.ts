@@ -7441,6 +7441,42 @@ export const migrations: Migration[] = [
       console.log('[Migration 150] provider capacity pools ready — concurrency is counted per provider plan, per box');
     },
   },
+  {
+    // PROVIDER RESOURCE LEDGER — the money half of a routing decision.
+    //
+    // Capacity pools answer "is a slot free". They cannot answer "can this
+    // provider afford the job", and nothing on the box stored the answer: every
+    // balance lived in a vendor dashboard a human had to open. So a routing
+    // choice between two providers was made on slots alone, and a provider
+    // three dollars from empty looked identical to one with three hundred.
+    //
+    // One row per provider, written ONLY by a probe against that vendor's own
+    // documented balance endpoint (see src/lib/capacity/resource-ledger.ts for
+    // each URL). `balance` stays NULL whenever the provider publishes no such
+    // endpoint, no key resolves, or the call failed — a null here means
+    // UNDETERMINED and is never to be read as zero. `last_probe_error` carries
+    // why, so "no number" and "the probe broke" stay distinguishable.
+    //
+    // No key or secret is ever stored here: a probe sends the key in an
+    // Authorization header and writes back only the number it got.
+    //
+    // Additive and idempotent.
+    id: '151',
+    name: 'provider_resource_ledger',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS provider_ledger (
+          provider TEXT PRIMARY KEY,
+          balance REAL,
+          balance_currency TEXT,
+          balance_as_of TEXT,
+          last_probe_error TEXT,
+          updated_at TEXT NOT NULL
+        )
+      `);
+      console.log('[Migration 151] provider_ledger ready — per-provider balance, currency, freshness and last probe error');
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner

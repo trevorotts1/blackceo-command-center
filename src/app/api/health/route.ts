@@ -7,6 +7,7 @@ import { getDb, getMigrationStatus, getDbInitFailure, getDbPath } from '@/lib/db
 import type { DbInitFailure } from '@/lib/db';
 import { getSOPEmbeddingHealth, resolveEmbeddingProvider } from '@/lib/sop-embeddings';
 import { poolUsage } from '@/lib/capacity/provider-pools';
+import { readResourceLedger } from '@/lib/capacity/resource-ledger';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -193,6 +194,33 @@ async function getEmbeddingsBlock(): Promise<Record<string, unknown>> {
   }
 }
 
+/**
+ * The resource ledger, compactly, so a single health poll shows whether this
+ * box can actually pay for the work it is being handed. READ-ONLY: it never
+ * probes a vendor (the `provider-ledger` cron owns that), so it cannot slow a
+ * health check down or turn a vendor outage into a red box. Degradation here
+ * never flips the top-level `status` — an unknown balance is an operational
+ * fact, not a downed box. Full detail, including why a number is missing, is
+ * at /api/capacity.
+ */
+function capacityBlock() {
+  try {
+    return readResourceLedger().map((entry) => ({
+      provider: entry.provider,
+      slotsFree: entry.slotsFree,
+      slotsLimit: entry.slotsLimit,
+      balance: entry.balance,
+      balanceCurrency: entry.balanceCurrency,
+      balanceAsOf: entry.balanceAsOf,
+      lastProbeError: entry.lastProbeError,
+    }));
+  } catch {
+    // A pre-migration box has no ledger table yet. Report nothing rather than
+    // failing a health check over a table that heals on the next boot.
+    return [];
+  }
+}
+
 export async function GET() {
   // DATA-02: fail CLOSED on a captured DB-init / migration failure BEFORE
   // touching getDb() again. Reading the durable snapshot (rather than
@@ -230,9 +258,11 @@ export async function GET() {
       embeddings,
       // PROVIDER CAPACITY: how much of each provider plan this box is using right
       // now, and whether a pool is shut after a 429. One GROUP BY plus one small
-      // table read, so a watchdog can poll it. ADDITIVE — a full pool is a queue,
-      // never a downed box, so it does not move the top-level `status`.
-      capacity: { pools: poolUsage(db) },
+      // table read, so a watchdog can poll it. `providers` adds the money half —
+      // remaining balance and price per provider, read from the stored ledger and
+      // never probed here. ADDITIVE — a full pool is a queue and an unknown
+      // balance is an operational fact, so neither moves the top-level `status`.
+      capacity: { pools: poolUsage(db), providers: capacityBlock() },
     });
   } catch (error) {
     // DATA-02: if THIS getDb() call is what surfaced the DB-init / migration
@@ -263,7 +293,7 @@ export async function GET() {
           persona_index: null,
           sop_index: null,
         },
-        capacity: { pools: {} },
+        capacity: { pools: {}, providers: [] },
         error: error instanceof Error ? error.message : 'unknown',
       },
       { status: 200 }
