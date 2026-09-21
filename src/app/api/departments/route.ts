@@ -204,9 +204,25 @@ function createDepartmentInDbDirect(args: {
     } else {
       const requesterChannel = args.requesterChatId ? (args.requesterChannel || 'telegram') : null;
       const requesterChatId = args.requesterChatId || null;
+      // dispatch_hold = 1: THE STARTER CARD IS A PLACEHOLDER, NOT WORK.
+      //
+      // It carries a head agent and sits in `backlog`, which made it
+      // indistinguishable from a real card to every dispatch path. Measured on a
+      // client box: a department re-sync dropped 10 of these, each one parked at
+      // the triad gate for want of a matching SOP, and five of them spawned a
+      // dead "Author SOP: Welcome to <dept>" sub-task — the fast loop fires at
+      // DISPATCH time (src/lib/sop-authoring.ts), so a card that never
+      // dispatches never triggers it.
+      //
+      // `reserveExecution()` (src/lib/execution-attempts.ts) is the single
+      // chokepoint that mints an execution and it refuses outright on
+      // `dispatch_hold`, so one column stops both halves — never auto-dispatched,
+      // and therefore never SOP-authored. `intake-advance-sweep` honors it too.
+      // The card stays fully editable: the moment an operator assigns or edits
+      // it, the normal routing path clears the hold.
       db.prepare(`
-        INSERT INTO tasks (id, workspace_id, department, title, description, status, priority, assigned_agent_id, created_by_agent_id, requester_channel, requester_chat_id)
-        VALUES (?, ?, ?, ?, ?, 'backlog', 'medium', ?, ?, ?, ?)
+        INSERT INTO tasks (id, workspace_id, department, title, description, status, priority, assigned_agent_id, created_by_agent_id, requester_channel, requester_chat_id, dispatch_hold)
+        VALUES (?, ?, ?, ?, ?, 'backlog', 'medium', ?, ?, ?, ?, 1)
       `).run(
         taskId, wsId, args.slug,
         `Welcome to ${args.name}`,
