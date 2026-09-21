@@ -299,7 +299,11 @@ export function readInterviewQcStatus(state?: BuildState | null): string {
  * missing/garbage build-state file never grants an implicit vertical.
  */
 export function declaredVerticalPacks(state?: BuildState | null): string[] {
-  const s = state ?? readBuildState();
+  // `??` would treat an explicit `null` as "argument omitted" and fall through
+  // to the LIVE build-state file — so a caller saying "I have no state" got
+  // whatever this machine happens to declare. Only an OMITTED argument means
+  // "read the live file"; an explicit null is a state, and it is empty.
+  const s = state === undefined ? readBuildState() : state;
   const detected = s?.verticalPacks?.detectedPacks;
   if (!Array.isArray(detected)) return [];
   const packs = new Set<string>();
