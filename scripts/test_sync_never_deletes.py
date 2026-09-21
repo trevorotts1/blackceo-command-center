@@ -36,7 +36,7 @@ COMPANY = {"slug": "acme", "name": "Acme", "industry": "Widgets",
            "brand_primary": "#000", "brand_accent": "#111", "brand_text": "#222"}
 
 
-def _db(tmp_path, workspaces=(), tasks=()):
+def _db(tmp_path, workspaces=(), tasks=(), companies=()):
     """A fixture board: the real schema this script writes, plus rows."""
     path = str(tmp_path / "mission-control.db")
     conn = sqlite3.connect(path)
@@ -46,8 +46,14 @@ def _db(tmp_path, workspaces=(), tasks=()):
         archived_at TEXT, archived_reason TEXT)""")
     conn.execute("""CREATE TABLE tasks (
         id TEXT PRIMARY KEY, workspace_id TEXT, status TEXT)""")
+    conn.execute("""CREATE TABLE companies (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, slug TEXT UNIQUE NOT NULL,
+        industry TEXT, config TEXT DEFAULT '{}')""")
     conn.execute("""CREATE TABLE agents (
         id TEXT PRIMARY KEY, workspace_id TEXT)""")
+    for c in companies:
+        conn.execute("INSERT INTO companies (id, name, slug) VALUES (?, ?, ?)",
+                     (c["id"], c["name"], c.get("slug", c["id"])))
     for w in workspaces:
         conn.execute(
             "INSERT INTO workspaces (id, name, slug, company_id, archived_at, archived_reason) "
@@ -251,3 +257,52 @@ def test_app_development_is_never_aliased_away_to_engineering():
     # The 2026-07-08 lesson: a client who chose BOTH must keep BOTH lanes.
     assert _sync._aliased_dept_slug("app-development") == "app-development"
     assert _sync._aliased_dept_slug("engineering") == "engineering"
+
+
+# ── the companies table: never a third row for the same client ─────────────
+
+def _companies(path):
+    conn = sqlite3.connect(path)
+    out = {r[0]: r[1] for r in conn.execute("SELECT id, name FROM companies")}
+    conn.close()
+    return out
+
+
+def test_a_same_name_company_is_reused_not_duplicated(tmp_path):
+    # The v7.6.26 roll inserted a THIRD row, 'wake-up-happy-sis', beside these
+    # two, all three named the same, and the workspaces then split across ids.
+    db = _db(
+        tmp_path,
+        companies=[{"id": "default", "name": "Wake Up Happy Sis", "slug": "wuhs"},
+                   {"id": "wakeuphappysis", "name": "Wake Up Happy Sis"}],
+        workspaces=[{"id": "marketing", "company_id": "wakeuphappysis"},
+                    {"id": "sales", "company_id": "wakeuphappysis"},
+                    {"id": "hr", "company_id": "default"}])
+    company = dict(COMPANY, slug="wake-up-happy-sis", name="Wake Up Happy Sis")
+    _sync.reseed_workspaces(db, [_dept("marketing")], company)
+
+    assert set(_companies(db)) == {"default", "wakeuphappysis"}, "no third row"
+    # The reused row is the one already owning the most workspaces, so the sync
+    # lands where the board's departments actually live.
+    assert _rows(db)["marketing"]["company_id"] == "wakeuphappysis"
+
+
+def test_the_name_match_ignores_case_and_punctuation(tmp_path):
+    db = _db(tmp_path, companies=[{"id": "acme-co", "name": "  ACME,  Inc. "}])
+    _sync.reseed_workspaces(db, [_dept("marketing")],
+                            dict(COMPANY, slug="acme-inc", name="acme inc"))
+    assert set(_companies(db)) == {"acme-co"}
+    assert _rows(db)["marketing"]["company_id"] == "acme-co"
+
+
+def test_an_exact_slug_match_still_wins_over_a_name_match(tmp_path):
+    db = _db(tmp_path, companies=[{"id": "other", "name": "Acme"},
+                                  {"id": "acme", "name": "Acme"}])
+    _sync.reseed_workspaces(db, [_dept("marketing")], dict(COMPANY, slug="acme", name="Acme"))
+    assert _rows(db)["marketing"]["company_id"] == "acme"
+
+
+def test_a_genuinely_new_company_is_still_inserted(tmp_path):
+    db = _db(tmp_path, companies=[{"id": "other-co", "name": "Different Client"}])
+    _sync.reseed_workspaces(db, [_dept("marketing")], dict(COMPANY, slug="acme", name="Acme"))
+    assert set(_companies(db)) == {"other-co", "acme"}

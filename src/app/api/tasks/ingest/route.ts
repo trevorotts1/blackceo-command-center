@@ -25,6 +25,7 @@ import { resolveIngestSourceRef } from '@/components/anthology/anthology-card';
 // /api/presentations/stage-timings and /api/tasks/[id]/status). Replaces this
 // route's local `===` digest compare, which leaked first-difference timing and
 // returned a 401 only after a length-mismatched compare could not happen.
+import { resolveWorkspaceId } from '@/lib/company-scope';
 import { verifyWebhookSignature } from '@/lib/webhook-signature';
 // queryOne is still used for workspace resolution below.
 
@@ -297,38 +298,6 @@ function isWorkforceProvisioned(companyId: string): { provisioned: boolean; reas
     `interview=${interviewComplete === null ? 'unknown' : interviewComplete}, ` +
     `materialized_depts=${hasMaterializedDepts}`;
   return { provisioned, reason };
-}
-
-/**
- * Resolve the target workspace id. Tries department_slug, then persona/name,
- * then falls back to the CEO workspace — the CEO agent runs all other
- * departments, so it is the correct catch-all owner for unrouted work. Returns
- * { workspaceId, resolvedBy } so the caller can record how routing happened.
- *
- * BARE-TASK RESILIENCE (v4.44.0 — BARE-INGEST-001):
- * When no slug is supplied and the CEO/master-orchestrator workspace is not yet
- * seeded (fresh install), we used to return workspaceId='default' which is a
- * sentinel string that has NO row in the workspaces table. createTaskCore would
- * then fail the FK constraint and the whole ingest route would 500.
- *
- * The fix: resolve the first real workspace we can find from the DB so we always
- * hand off a real workspace_id (or null, which createTaskCore handles gracefully).
- * We NEVER return the bare 'default' literal unless it actually has a DB row.
- */
-function resolveWorkspaceId(departmentSlug: string | undefined, persona: string | undefined, companyId: string): {workspaceId:string|null;resolvedBy:string} {
-  const rows = getDb().prepare('SELECT id,slug,name FROM workspaces WHERE company_id=? AND archived_at IS NULL ORDER BY sort_order,id')
-    .all(companyId) as {id:string;slug:string;name:string}[];
-  const match = departmentSlug ? rows.filter(w => w.slug.toLowerCase()===departmentSlug.toLowerCase() || w.id.toLowerCase()===departmentSlug.toLowerCase()) : [];
-  if (match.length===1) return {workspaceId:match[0].id,resolvedBy:`department_slug:${departmentSlug}`};
-  if (!departmentSlug && persona) {
-    const named=rows.filter(w => w.name.toLowerCase()===persona.toLowerCase());
-    if(named.length===1) return {workspaceId:named[0].id,resolvedBy:`persona:${persona}`};
-  }
-  const namedGeneral=rows.filter(w => w.name.trim().toLowerCase()==='general task');
-  const general=rows.find(w => ['general-task','dept-general-task','general'].includes(w.slug.toLowerCase())) || (namedGeneral.length===1 ? namedGeneral[0] : undefined);
-  const ceo=rows.find(w => ['master-orchestrator','ceo','dept-ceo'].includes(w.slug.toLowerCase()));
-  if(departmentSlug) return {workspaceId:general?.id??ceo?.id??null,resolvedBy:general?'unrecognized-slug->general':ceo?'unrecognized-slug->ceo':'unrecognized-slug->unrouted'};
-  return {workspaceId:general?.id??ceo?.id??null,resolvedBy:general?'general-task-fallback':ceo?'ceo-fallback':'no-workspace-fallback'};
 }
 
 export async function POST(request: NextRequest) {
