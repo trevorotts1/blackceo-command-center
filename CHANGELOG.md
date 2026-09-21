@@ -1,4 +1,4 @@
-## [Unreleased] — A restart stops seeding agents into departments nobody can see
+## [v7.6.44] — 2026-09-21 — A restart stops seeding agents into departments nobody can see
 
 ### Fixed
 - **Every Command Center restart minted a head + QC + research + devil's-advocate into each ARCHIVED workspace.** Measured on a client box: 48 agent rows across 12 soft-archived departments, `created_at` matching the process restart to the second. The archived rows were the audit trail v7.6.38's sync script leaves when it prunes or de-dupes a department (`pruned: absent from build-state`, `deduped: loser of <id>`), plus the owner's own declines — rows kept for their history and hidden from the board. Every boot-time seeder read `SELECT … FROM workspaces` with no archive filter, so each one of those rows looked exactly like a live department. The agents were invisible on the board, counted by every workforce total, and dispatchable by nothing.
