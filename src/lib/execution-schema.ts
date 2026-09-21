@@ -38,6 +38,14 @@ CREATE TABLE IF NOT EXISTS task_executions (
  -- re-reading openclaw.json on every reserve. NULL on rows written before the
  -- column existed; those count toward no pool.
  provider TEXT,
+ -- PERSONA DISPATCH SNAPSHOT (migration 154): the persona bundle sha this
+ -- execution was actually HANDED at dispatch, as
+ -- {"root":"<sha>","scopes":{"<scope>":"<sha>"}}. The completion conformance
+ -- check measures the producer's report against THIS, never against the live
+ -- bundle row, which a QC re-route rebuilds after the work is done. NULL on a
+ -- row written before the column existed; that execution skips the revision
+ -- check rather than failing it.
+ persona_bundle_shas TEXT,
  created_at TEXT NOT NULL,
  updated_at TEXT NOT NULL,
  UNIQUE(task_id, generation)

@@ -7573,6 +7573,24 @@ export const migrations: Migration[] = [
       console.log('[Migration 153] intake lane + effort recorded on the card (deadline stays on the existing due_date)');
     },
   },
+  {
+    id: '154',
+    name: 'persona_bundle_sha_snapshot_per_execution',
+    up: (db) => {
+      const columns = new Set((db.prepare('PRAGMA table_info(task_executions)').all() as {name:string}[]).map((c) => c.name));
+      if (!columns.size) {
+        console.log('[Migration 154] task_executions absent — nothing to snapshot');
+        return;
+      }
+      if (!columns.has('persona_bundle_shas')) db.exec('ALTER TABLE task_executions ADD COLUMN persona_bundle_shas TEXT');
+      // Deliberately NOT backfilled. What an already-dispatched execution was
+      // handed is not recoverable — the bundle may have been rebuilt since, and
+      // guessing it from the current row is exactly the defect this closes. A
+      // NULL means "no snapshot", which SKIPS the revision check rather than
+      // failing a producer for a revision nobody recorded.
+      console.log('[Migration 154] executions now carry the persona bundle sha they were dispatched with');
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner
