@@ -40,8 +40,14 @@ import {
   canonicalProvider,
   providerCoolingUntil,
   isRateLimitError,
+  effectiveLimit,
+  growProviderPools,
+  noteProviderRateLimit,
+  choosePool,
+  poolsFullSummary,
   DEFAULT_PROVIDER_CONCURRENCY,
   PROVIDER_COOLDOWN_MS,
+  PROVIDER_RECOVERY_MS,
 } from '../../src/lib/capacity/provider-pools';
 import { invalidateCompanyConfigCache } from '../../src/lib/company-config';
 import { migrations } from '../../src/lib/db/migrations';
@@ -70,14 +76,17 @@ function fixture() {
 const snap = (db: Database.Database, id: string) =>
   db.prepare('SELECT * FROM tasks WHERE id=?').get(id) as DispatchSnapshot;
 
-/** Reserve `id` on the pool `provider`, or let reserveExecution resolve one. */
-const claim = (db: Database.Database, id: string, eid: string, provider?: string) =>
-  reserveExecution(
-    { ...snap(db, id), ...(provider === undefined ? {} : { provider }) },
+/** Reserve `id` on a model chain, or let reserveExecution resolve one.
+ * A bare provider name is accepted as a one-model chain for readability. */
+const claim = (db: Database.Database, id: string, eid: string, chain?: string | string[]) => {
+  const models = chain === undefined ? undefined : Array.isArray(chain) ? chain : [`${chain}/fixture-model`];
+  return reserveExecution(
+    { ...snap(db, id), ...(models === undefined ? {} : { model_chain: models }) },
     `agent:pool:${executionSessionId(snap(db, id).assigned_agent_id!, eid)}`,
     eid,
     db,
   );
+};
 
 const setCeiling = (db: Database.Database, agentId: string, n: number | null) =>
   db.prepare('UPDATE agents SET max_concurrent_executions=? WHERE id=?').run(n, agentId);
@@ -109,10 +118,9 @@ test('a pool admits up to its limit and refuses beyond it, naming the pool and t
     assert.ok(claim(db, 't3', 'e3', 'ollama').execution, 'slot 3 — three agents-worth of work on one agent');
     const refused = claim(db, 't4', 'e4', 'ollama');
     assert.equal(refused.execution, undefined);
-    assert.equal(refused.reason, 'provider_at_capacity');
+    assert.equal(refused.reason, 'all_pools_full', 'one model in the chain, so a full pool IS every pool');
     assert.equal(refused.provider, 'ollama');
-    assert.equal(refused.running, 3);
-    assert.equal(refused.limit, 3);
+    assert.equal(refused.summary, 'Ollama Cloud 3/3');
   } finally {
     db.close();
   }
@@ -121,7 +129,7 @@ test('a pool admits up to its limit and refuses beyond it, naming the pool and t
 test('the provider is persisted on the execution row, so the count never re-reads a config', () => {
   const db = fixture();
   try {
-    assert.ok(claim(db, 't1', 'e1', 'ollama-cloud').execution);
+    assert.ok(claim(db, 't1', 'e1', ['ollama-cloud/mistral-large-3:675b']).execution);
     assert.equal(latestExecution('t1', db)!.provider, 'ollama', 'stored canonicalised, not verbatim');
   } finally {
     db.close();
@@ -149,7 +157,7 @@ test('two providers are independent: a full Ollama pool does not touch DeepSeek'
     for (const [taskId, eid] of [['t1', 'e1'], ['t2', 'e2'], ['t3', 'e3']]) {
       assert.ok(claim(db, taskId, eid, 'ollama').execution);
     }
-    assert.equal(claim(db, 't4', 'e4', 'ollama').reason, 'provider_at_capacity');
+    assert.equal(claim(db, 't4', 'e4', 'ollama').reason, 'all_pools_full');
     assert.ok(claim(db, 't5', 'e5', 'deepseek').execution, 'DeepSeek Direct has its own, far larger plan');
     assert.ok(claim(db, 't6', 'e6', 'deepseek').execution);
   } finally {
@@ -166,7 +174,7 @@ test('an unset agent ceiling is NO ceiling — the agent takes the whole pool', 
     assert.ok(claim(db, 't1', 'e1', 'ollama').execution);
     assert.ok(claim(db, 't2', 'e2', 'ollama').execution, 'ONE agent, two live jobs — impossible under v7.6.27');
     assert.ok(claim(db, 't3', 'e3', 'ollama').execution);
-    assert.equal(claim(db, 't4', 'e4', 'ollama').reason, 'provider_at_capacity', 'the pool, not the agent, is what stops it');
+    assert.equal(claim(db, 't4', 'e4', 'ollama').reason, 'all_pools_full', 'the pool, not the agent, is what stops it');
   } finally {
     db.close();
   }
@@ -247,13 +255,13 @@ test('a 429 from the gateway shuts the whole pool, and it reopens on its own', (
     );
 
     const refused = claim(db, 't2', 'e2', 'ollama');
-    assert.equal(refused.reason, 'provider_cooling_down');
+    assert.equal(refused.reason, 'all_pools_full');
     assert.equal(refused.provider, 'ollama');
-    assert.equal(refused.until, until);
+    assert.match(refused.summary!, /cooling/, 'the card says the pool is cooling, not merely busy');
     // A DIFFERENT pool is untouched by one provider's refusal.
     assert.ok(claim(db, 't5', 'e5', 'deepseek').execution);
 
-    db.prepare("UPDATE provider_cooldowns SET until='2000-01-01T00:00:00.000Z' WHERE provider='ollama'").run();
+    db.prepare("UPDATE provider_pool_state SET cooling_until='2000-01-01T00:00:00.000Z' WHERE provider='ollama'").run();
     assert.equal(providerCoolingUntil('ollama', db), null, 'a past cooldown is an open pool');
     assert.ok(claim(db, 't2', 'e2b', 'ollama').execution, 'the pool admits again once the cooldown elapses');
   } finally {
@@ -273,7 +281,7 @@ test('an ordinary send failure is not a rate limit and shuts nothing', () => {
     recordExecutionUnknown(execution, db, new Error('socket hang up'));
     assert.equal(providerCoolingUntil('ollama', db), null);
     assert.equal(
-      (db.prepare("SELECT COUNT(*) AS n FROM provider_cooldowns").get() as { n: number }).n,
+      (db.prepare("SELECT COUNT(*) AS n FROM provider_pool_state").get() as { n: number }).n,
       0,
     );
   } finally {
@@ -344,14 +352,16 @@ test('poolUsage reports live occupancy per pool for /api/health', () => {
     assert.ok(claim(db, 't1', 'e1', 'ollama').execution);
     assert.ok(claim(db, 't2', 'e2', 'ollama').execution);
     assert.ok(claim(db, 't5', 'e5', 'deepseek').execution);
-    db.prepare("INSERT INTO provider_cooldowns(provider,until,updated_at) VALUES('agnes','2999-01-01T00:00:00.000Z','2026-09-21T00:00:00.000Z')").run();
+    db.prepare("INSERT INTO provider_pool_state(provider,effective_limit,last_429_at,cooling_until,updated_at) VALUES('agnes',NULL,NULL,'2999-01-01T00:00:00.000Z','2026-09-21T00:00:00.000Z')").run();
 
     const pools = poolUsage(db);
-    assert.deepEqual(pools.ollama, { running: 2, limit: 3, cooling_until: null });
-    assert.deepEqual(pools.deepseek, { running: 1, limit: DEFAULT_PROVIDER_CONCURRENCY.deepseek, cooling_until: null });
+    assert.deepEqual(pools.ollama, { running: 2, configured_limit: 3, limit: 3, cooling_until: null, last_429_at: null });
+    assert.equal(pools.deepseek.running, 1);
+    assert.equal(pools.deepseek.limit, DEFAULT_PROVIDER_CONCURRENCY.deepseek);
     assert.equal(pools.agnes.running, 0);
     assert.equal(pools.agnes.cooling_until, '2999-01-01T00:00:00.000Z');
     assert.equal(pools.openrouter.running, 0, 'a pool with no traffic is still reported');
+    assert.equal(pools.openrouter.limit, 100);
   } finally {
     db.close();
   }
@@ -399,7 +409,7 @@ test('migration 150 nulls the v7.6.27 default of 1 and preserves every other cei
   }
 });
 
-test('migration 150 adds the provider column and the cooldown table, and is idempotent', () => {
+test('migration 150 adds the provider column and is idempotent', () => {
   const db = legacy149Agents();
   try {
     db.exec(`CREATE TABLE task_executions(id TEXT PRIMARY KEY, state TEXT, agent_id TEXT);`);
@@ -408,10 +418,6 @@ test('migration 150 adds the provider column and the cooldown table, and is idem
 
     const columns = (db.prepare('PRAGMA table_info(task_executions)').all() as { name: string }[]).map((c) => c.name);
     assert.ok(columns.includes('provider'));
-    assert.equal(
-      (db.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='provider_cooldowns'").get() as { n: number }).n,
-      1,
-    );
     assert.equal(
       (db.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type='index' AND name='idx_task_executions_provider_state'").get() as { n: number }).n,
       1,
@@ -439,7 +445,7 @@ test('a pre-migration database still dispatches — it is bounded by nothing new
       EXECUTION_SCHEMA_SQL
         .replace(/^ provider TEXT,$/m, '')
         .replace(/^CREATE INDEX IF NOT EXISTS idx_task_executions_provider_state .*$/m, '')
-        .replace(/CREATE TABLE IF NOT EXISTS provider_cooldowns \([\s\S]*?\);/, ''),
+        .replace(/CREATE TABLE IF NOT EXISTS provider_pool_state \([\s\S]*?\);/, ''),
     );
     assert.equal(
       (db.prepare("SELECT COUNT(*) AS n FROM pragma_table_info('task_executions') WHERE name='provider'").get() as { n: number }).n,
@@ -448,7 +454,285 @@ test('a pre-migration database still dispatches — it is bounded by nothing new
     );
     assert.ok(claim(db, 't1', 'e1', 'ollama').execution);
     assert.ok(claim(db, 't2', 'e2', 'ollama').execution, 'no pool is enforced where no pool can be counted');
-    assert.deepEqual(poolUsage(db).ollama, { running: 0, limit: 3, cooling_until: null }, 'health reports zero, not a crash');
+    assert.deepEqual(
+      poolUsage(db).ollama,
+      { running: 0, configured_limit: 3, limit: 3, cooling_until: null, last_429_at: null },
+      'health reports zero, not a crash',
+    );
+  } finally {
+    db.close();
+  }
+});
+
+// ── Plan tiers (v7.6.37 A) ───────────────────────────────────────────────────
+
+test('a PLAN TIER is the friendly spelling of an upgrade, and a raw number still wins', () => {
+  assert.equal(poolLimit('ollama'), 3, 'Pro is the default');
+  process.env.PROVIDER_PLAN_OLLAMA = 'max';
+  try {
+    assert.equal(poolLimit('ollama'), 8, 'Max maps to the operator ceiling of 8, under the documented 10');
+    process.env.PROVIDER_PLAN_OLLAMA = 'MAX';
+    assert.equal(poolLimit('ollama'), 8, 'plan names are case-insensitive');
+    process.env.PROVIDER_PLAN_OLLAMA = 'pro';
+    assert.equal(poolLimit('ollama'), 3);
+    // A box that really wants all 10 says so as a number and owns it.
+    process.env.PROVIDER_CONCURRENCY_OLLAMA = '10';
+    try {
+      assert.equal(poolLimit('ollama'), 10, 'the raw number outranks the tier');
+    } finally {
+      delete process.env.PROVIDER_CONCURRENCY_OLLAMA;
+    }
+    // An unknown plan name must not silently become some other number.
+    process.env.PROVIDER_PLAN_OLLAMA = 'ultra-platinum';
+    assert.equal(poolLimit('ollama'), 3, 'an unknown plan falls back to the default, never to a guess');
+    // A provider with no tier table at all is unaffected by a plan name.
+    process.env.PROVIDER_PLAN_DEEPSEEK = 'max';
+    assert.equal(poolLimit('deepseek'), DEFAULT_PROVIDER_CONCURRENCY.deepseek);
+  } finally {
+    delete process.env.PROVIDER_PLAN_OLLAMA;
+    delete process.env.PROVIDER_PLAN_DEEPSEEK;
+  }
+  assert.equal(poolLimit('ollama'), 3);
+});
+
+test('Agnes is 50 flat — every Agnes client runs agnes-3.0-flash, so there is no tier to pick', () => {
+  assert.equal(DEFAULT_PROVIDER_CONCURRENCY.agnes, 50);
+  assert.equal(poolLimit('agnes'), 50);
+  process.env.PROVIDER_CONCURRENCY_AGNES = '12';
+  try {
+    assert.equal(poolLimit('agnes'), 12, 'the raw override still works');
+  } finally {
+    delete process.env.PROVIDER_CONCURRENCY_AGNES;
+  }
+});
+
+test('company-config provider_plans works too, and provider_concurrency outranks it', () => {
+  const cwd = process.cwd();
+  const box = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-pool-plans-'));
+  fs.mkdirSync(path.join(box, 'config'), { recursive: true });
+  const write = (body: unknown) => {
+    fs.writeFileSync(path.join(box, 'config', 'company-config.json'), JSON.stringify(body));
+    invalidateCompanyConfigCache();
+  };
+  process.chdir(box);
+  try {
+    write({ companyName: 'Fixture', provider_plans: { 'ollama-cloud': 'max' } });
+    assert.equal(poolLimit('ollama'), 8, 'the plan key is canonicalised like every other');
+    write({ companyName: 'Fixture', provider_plans: { ollama: 'max' }, provider_concurrency: { ollama: 5 } });
+    assert.equal(poolLimit('ollama'), 5, 'a raw number in the file outranks a plan in the file');
+    process.env.PROVIDER_PLAN_OLLAMA = 'pro';
+    try {
+      assert.equal(poolLimit('ollama'), 3, 'the environment outranks the whole file');
+    } finally {
+      delete process.env.PROVIDER_PLAN_OLLAMA;
+    }
+  } finally {
+    process.chdir(cwd);
+    invalidateCompanyConfigCache();
+  }
+});
+
+// ── Self-calibration (v7.6.37 B) ─────────────────────────────────────────────
+
+test('a 429 lowers the pool limit as well as shutting it, and the floor is 1', () => {
+  const db = fixture();
+  try {
+    assert.equal(effectiveLimit('ollama', db), 3, 'nothing learned yet, so the configured limit stands');
+    for (let i = 3; i >= 1; i -= 1) {
+      const noted = noteProviderRateLimit('ollama', db)!;
+      assert.equal(noted.effective_limit, Math.max(1, i - 1));
+      assert.equal(effectiveLimit('ollama', db), Math.max(1, i - 1));
+    }
+    noteProviderRateLimit('ollama', db);
+    assert.equal(effectiveLimit('ollama', db), 1, 'a pool can never calibrate itself shut');
+    assert.equal(effectiveLimit('deepseek', db), DEFAULT_PROVIDER_CONCURRENCY.deepseek, 'one pool learning teaches the others nothing');
+  } finally {
+    db.close();
+  }
+});
+
+test('the learned limit is what reserveExecution enforces', () => {
+  const db = fixture();
+  try {
+    noteProviderRateLimit('ollama', db); // 3 -> 2
+    db.prepare("UPDATE provider_pool_state SET cooling_until='2000-01-01T00:00:00.000Z' WHERE provider='ollama'").run();
+    assert.equal(effectiveLimit('ollama', db), 2);
+    assert.ok(claim(db, 't1', 'e1', 'ollama').execution);
+    assert.ok(claim(db, 't2', 'e2', 'ollama').execution);
+    const refused = claim(db, 't3', 'e3', 'ollama');
+    assert.equal(refused.reason, 'all_pools_full');
+    assert.equal(refused.summary, 'Ollama Cloud 2/2', 'the card shows the LEARNED limit, not the brochure one');
+  } finally {
+    db.close();
+  }
+});
+
+test('a quiet provider grows its pool back one step per pass, and the row is dropped at the top', () => {
+  const db = fixture();
+  try {
+    noteProviderRateLimit('ollama', db);
+    noteProviderRateLimit('ollama', db); // 3 -> 1
+    assert.equal(effectiveLimit('ollama', db), 1);
+
+    // Still inside the quiet window: growth must NOT happen yet.
+    assert.equal(growProviderPools(db), 0, 'a provider that just refused is not quiet');
+    assert.equal(effectiveLimit('ollama', db), 1);
+
+    // Age the last refusal past the recovery window.
+    const quiet = new Date(Date.now() - PROVIDER_RECOVERY_MS - 60_000).toISOString();
+    db.prepare('UPDATE provider_pool_state SET last_429_at=?,cooling_until=? WHERE provider=?').run(quiet, quiet, 'ollama');
+
+    assert.equal(growProviderPools(db), 1);
+    assert.equal(effectiveLimit('ollama', db), 2, 'one step per pass — the shrink is evidence, the growth is a guess');
+    assert.equal(growProviderPools(db), 1);
+    assert.equal(effectiveLimit('ollama', db), 3, 'back to the configured limit');
+    assert.equal(growProviderPools(db), 0, 'nothing left to grow');
+    assert.equal(
+      (db.prepare("SELECT COUNT(*) AS n FROM provider_pool_state WHERE provider='ollama'").get() as { n: number }).n,
+      0,
+      'a pool with nothing to say holds no row',
+    );
+  } finally {
+    db.close();
+  }
+});
+
+test('lowering the configured plan takes effect at once, without waiting for a 429', () => {
+  const db = fixture();
+  try {
+    process.env.PROVIDER_CONCURRENCY_OLLAMA = '8';
+    try {
+      assert.equal(effectiveLimit('ollama', db), 8);
+      db.prepare("INSERT INTO provider_pool_state(provider,effective_limit,updated_at) VALUES('ollama',8,'2026-09-21T00:00:00.000Z')").run();
+      assert.equal(effectiveLimit('ollama', db), 8);
+    } finally {
+      delete process.env.PROVIDER_CONCURRENCY_OLLAMA;
+    }
+    assert.equal(effectiveLimit('ollama', db), 3, 'the learned limit is clamped to the configured one');
+  } finally {
+    db.close();
+  }
+});
+
+// ── Fallback overflow (v7.6.37 C) ────────────────────────────────────────────
+
+const CHAIN = ['ollama/deepseek-v4.1-flash:cloud', 'agnes/agnes-3.0-flash', 'openrouter/meta/muse-spark-1.3-contributor'];
+
+test('a full PRIMARY pool overflows to the agent own next model, it does not refuse', () => {
+  const db = fixture();
+  try {
+    // Fill Ollama with three other cards.
+    for (const [taskId, eid] of [['t1', 'e1'], ['t2', 'e2'], ['t3', 'e3']]) {
+      assert.ok(claim(db, taskId, eid, 'ollama').execution);
+    }
+    const overflowed = claim(db, 't4', 'e4', CHAIN);
+    assert.ok(overflowed.execution, 'work does not stall while the agent holds a usable fallback');
+    assert.equal(overflowed.provider, 'agnes', 'the FIRST fallback with room wins');
+    assert.equal(overflowed.overflowModel, 'agnes/agnes-3.0-flash');
+    assert.equal(overflowed.primaryModel, 'ollama/deepseek-v4.1-flash:cloud');
+    assert.equal(latestExecution('t4', db)!.provider, 'agnes', 'and it is DEBITED to the pool it will actually use');
+  } finally {
+    db.close();
+  }
+});
+
+test('overflow skips a full fallback and takes the first one with room', () => {
+  const db = fixture();
+  try {
+    // Ollama full (3/3) AND Agnes calibrated down to 1 and already occupied.
+    for (const [taskId, eid] of [['t1', 'e1'], ['t2', 'e2'], ['t3', 'e3']]) {
+      assert.ok(claim(db, taskId, eid, 'ollama').execution);
+    }
+    db.prepare("INSERT INTO provider_pool_state(provider,effective_limit,updated_at) VALUES('agnes',1,'2026-09-21T00:00:00.000Z')").run();
+    assert.ok(claim(db, 't5', 'e5', 'agnes').execution, 'the one Agnes slot');
+
+    const overflowed = claim(db, 't4', 'e4', CHAIN);
+    assert.ok(overflowed.execution);
+    assert.equal(overflowed.provider, 'openrouter', 'past the full primary AND the full first fallback');
+    assert.equal(overflowed.overflowModel, 'openrouter/meta/muse-spark-1.3-contributor');
+  } finally {
+    db.close();
+  }
+});
+
+test('no overflow is reported when the primary had room all along', () => {
+  const db = fixture();
+  try {
+    const normal = claim(db, 't1', 'e1', CHAIN);
+    assert.ok(normal.execution);
+    assert.equal(normal.provider, 'ollama');
+    assert.equal(normal.overflowModel, undefined, 'the ordinary path is not an overflow');
+    assert.equal(normal.primaryModel, undefined);
+  } finally {
+    db.close();
+  }
+});
+
+test('a cooling primary overflows rather than stalling', () => {
+  const db = fixture();
+  try {
+    noteProviderRateLimit('ollama', db);
+    assert.ok(providerCoolingUntil('ollama', db), 'the primary is shut');
+    const overflowed = claim(db, 't1', 'e1', CHAIN);
+    assert.ok(overflowed.execution, 'a shut primary is a reason to move, not a reason to stop');
+    assert.equal(overflowed.provider, 'agnes');
+  } finally {
+    db.close();
+  }
+});
+
+test('sovereignty: overflow never leaves the agent own list', () => {
+  const db = fixture();
+  try {
+    // A one-model agent. Its pool is full, and there is nowhere legitimate to go.
+    for (const [taskId, eid] of [['t1', 'e1'], ['t2', 'e2'], ['t3', 'e3']]) {
+      assert.ok(claim(db, taskId, eid, 'ollama').execution);
+    }
+    const refused = claim(db, 't4', 'e4', ['ollama/deepseek-v4.1-flash:cloud']);
+    assert.equal(refused.execution, undefined, 'no model is ever invented to keep the board moving');
+    assert.equal(refused.reason, 'all_pools_full');
+    assert.equal(refused.probes!.length, 1, 'exactly one pool was tried, because exactly one was allowed');
+  } finally {
+    db.close();
+  }
+});
+
+// ── Refusal only when everything is full (v7.6.37 D) ─────────────────────────
+
+test('all_pools_full names every pool and its depth, so the card says what to upgrade', () => {
+  const db = fixture();
+  try {
+    process.env.PROVIDER_CONCURRENCY_AGNES = '1';
+    process.env.PROVIDER_CONCURRENCY_OPENROUTER = '1';
+    try {
+      assert.ok(claim(db, 't1', 'e1', 'ollama').execution);
+      assert.ok(claim(db, 't2', 'e2', 'ollama').execution);
+      assert.ok(claim(db, 't3', 'e3', 'ollama').execution);
+      assert.ok(claim(db, 't5', 'e5', 'agnes').execution);
+      assert.ok(claim(db, 't6', 'e6', 'openrouter').execution);
+
+      const refused = claim(db, 't4', 'e4', CHAIN);
+      assert.equal(refused.execution, undefined);
+      assert.equal(refused.reason, 'all_pools_full');
+      assert.equal(refused.provider, 'ollama', 'the PRIMARY pool is named first');
+      assert.equal(refused.summary, 'Ollama Cloud 3/3, Agnes AI 1/1, OpenRouter 1/1');
+      assert.equal(refused.probes!.length, 3, 'every model in the chain was tried before refusing');
+    } finally {
+      delete process.env.PROVIDER_CONCURRENCY_AGNES;
+      delete process.env.PROVIDER_CONCURRENCY_OPENROUTER;
+    }
+  } finally {
+    db.close();
+  }
+});
+
+test('the summary marks a cooling pool differently from a merely busy one', () => {
+  const db = fixture();
+  try {
+    noteProviderRateLimit('ollama', db);
+    const probes = choosePool(['ollama/x'], db).probes;
+    assert.match(poolsFullSummary(probes), /^Ollama Cloud 0\/2 \(cooling\)$/,
+      'shut with nothing running, and the 429 already lowered the limit to 2');
   } finally {
     db.close();
   }

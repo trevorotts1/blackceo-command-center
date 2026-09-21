@@ -78,13 +78,13 @@ import { artifactDispatchPayload, recordStatusEvent } from '@/lib/task-lifecycle
 import { healPhantomAgentAssignment } from '@/lib/jobs/heal-phantom-assignments';
 import {
   resolveAgentRuntimeModel,
-  resolveRuntimeModelFromConfig,
+  resolveRuntimeModelChainFromConfig,
   modelsMatch,
   recordModelSkewEvent,
   reconcileTaskModelRecord,
   type RuntimeModelResolution,
 } from '@/lib/runtime-model';
-import { providerOf, providerLabel } from '@/lib/capacity/provider-pools';
+import { providerLabel, providerOf } from '@/lib/capacity/provider-pools';
 import { blockDispatchIfOwnerKilled } from '@/lib/owner-killed';
 import { launchOperatorPresentationContract } from '@/lib/presentation-operator-launcher';
 
@@ -387,48 +387,64 @@ function recordWorkerCapacityHold(
 }
 
 /**
- * The card is queued behind its PROVIDER POOL, not behind its worker — every
- * agent on this box that runs on this provider shares the one subscription the
- * client pays for. Same queue-not-fault contract as the worker hold: no
- * dispatch attempt is spent, and the sweep re-selects the card the moment a
- * slot frees. Deduped per provider so two full pools are two separate rows.
+ * EVERY pool this agent can reach is full — its primary subscription and every
+ * fallback its own config declares. Same queue-not-fault contract as the worker
+ * hold: no dispatch attempt is spent, and the sweep re-selects the card the
+ * moment any one of those pools frees a slot. The summary names each pool and
+ * its depth, so the card says which subscription to upgrade rather than just
+ * "busy". Deduped on the summary so a CHANGED picture writes a new row.
  */
-function recordProviderCapacityHold(
+function recordAllPoolsFullHold(
   taskId: string,
   agentId: string | null,
-  provider: string,
-  running: number,
-  limit: number,
+  summary: string,
   context: string,
 ): void {
-  const label = providerLabel(provider);
-  console.warn(`[${context}] autoDispatchTask: QUEUED task ${taskId} — ${label} pool full (${running}/${limit} running)`);
+  console.warn(`[${context}] autoDispatchTask: QUEUED task ${taskId} — every provider pool full (${summary})`);
   recordDispatchHoldActivity(
     taskId,
     agentId,
-    `%${label} pool full%`,
-    `[${context}] ${label} pool full: ${running} of ${limit} running`,
+    `%all provider pools full: ${summary}%`,
+    `[${context}] all provider pools full: ${summary}`,
     context,
   );
 }
 
-/** The provider itself answered 429, so its whole pool is shut until `until`. */
-function recordProviderCooldownHold(
+/**
+ * The primary subscription was full, so the reserve took a fallback the agent
+ * ALREADY declares. Recorded, never silent: the operator should be able to see
+ * that a plan is saturating before the board slows down.
+ *
+ * This is a PREDICTION, not an instruction. The gateway's `chat.send` rejects a
+ * `model` parameter (see the contract note in the dispatch route), so the
+ * Command Center cannot force the fallback — but the OpenClaw runtime walks
+ * this same `model.fallbacks` list itself and treats `rate_limit` as a failover
+ * reason, so a genuinely saturated primary lands the run on this model anyway.
+ */
+function recordPoolOverflow(
   taskId: string,
   agentId: string | null,
-  provider: string,
-  until: string,
+  primaryModel: string,
+  overflowModel: string,
   context: string,
 ): void {
-  const label = providerLabel(provider);
-  console.warn(`[${context}] autoDispatchTask: QUEUED task ${taskId} — ${label} rate-limited until ${until}`);
-  recordDispatchHoldActivity(
-    taskId,
-    agentId,
-    `%${label} rate-limited%`,
-    `[${context}] ${label} rate-limited: pool cooling down until ${until}`,
-    context,
-  );
+  console.warn(`[${context}] autoDispatchTask: OVERFLOW task ${taskId} — ${primaryModel} pool full, expecting ${overflowModel}`);
+  try {
+    run(
+      `INSERT INTO task_activities (id, task_id, agent_id, activity_type, message, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [uuidv4(), taskId, agentId, PERSONA_HOLD_ACTIVITY_TYPE,
+        `[${context}] overflowed to ${overflowModel} (${providerLabel(providerOf(primaryModel))} pool full)`,
+        new Date().toISOString()],
+    );
+    run(
+      `INSERT INTO events (id, type, agent_id, task_id, message, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+      [uuidv4(), 'provider_pool_overflow', agentId, taskId,
+        `Primary ${primaryModel} pool full; this run is expected on ${overflowModel}.`, new Date().toISOString()],
+    );
+  } catch (err) {
+    console.warn(`[${context}] pool overflow activity non-fatal:`, (err as Error).message);
+  }
 }
 
 /** Clear attempt-accounting after a task successfully advances to in_progress. */
@@ -1907,27 +1923,30 @@ If you need help or clarification, ask the orchestrator.`;
       return { status: 'held', reason: personaReady.reason };
     }
     throwIfJobLeaseLost();
-    // PROVIDER POOL: resolve the provider the RUNTIME will actually use before
-    // reserving, so the reservation is counted against the right subscription.
-    // The config read is the synchronous half of the FIX-15 resolver
-    // (openclaw.json `model.primary`); the gateway half needs a live session,
-    // which does not exist until after this claim. `agents.model` is the
-    // fallback only because a box with no runtime entry still has to land in
-    // some pool.
-    const dispatchProvider = providerOf(
-      resolveRuntimeModelFromConfig(agent, task.workspace_id ?? undefined)?.model_id ?? agent.model,
+    // PROVIDER POOL: resolve the agent's OWN ordered model list before reserving
+    // — primary first, then the fallbacks its runtime config declares — so the
+    // reservation is counted against the right subscription and can overflow to
+    // a model the agent already has when the primary plan is saturated. The
+    // config read is the synchronous half of the FIX-15 resolver; the gateway
+    // half needs a live session, which does not exist until after this claim.
+    // `agents.model` is the fallback only because a box with no runtime entry
+    // still has to land in some pool.
+    const modelChain = resolveRuntimeModelChainFromConfig(agent, task.workspace_id ?? undefined);
+    const claim = reserveExecution(
+      {...task,persona_snapshot:personaSendSnapshot,model_chain:modelChain.length ? modelChain : (agent.model ? [agent.model] : [])},
+      sessionKey, executionId,
     );
-    const claim = reserveExecution({...task,persona_snapshot:personaSendSnapshot,provider:dispatchProvider}, sessionKey, executionId);
     if (!claim.execution) {
       // Every one of these is a QUEUE, not a fault: none spends a dispatch attempt.
       if (claim.reason === 'worker_at_capacity') {
         recordWorkerCapacityHold(task.id, agent.id, claim.running ?? 0, claim.limit ?? 1, context);
-      } else if (claim.reason === 'provider_at_capacity') {
-        recordProviderCapacityHold(task.id, agent.id, claim.provider ?? dispatchProvider, claim.running ?? 0, claim.limit ?? 0, context);
-      } else if (claim.reason === 'provider_cooling_down') {
-        recordProviderCooldownHold(task.id, agent.id, claim.provider ?? dispatchProvider, claim.until ?? '', context);
+      } else if (claim.reason === 'all_pools_full') {
+        recordAllPoolsFullHold(task.id, agent.id, claim.summary ?? 'every provider pool', context);
       }
       return { status: 'held', reason: claim.reason };
+    }
+    if (claim.overflowModel && claim.primaryModel) {
+      recordPoolOverflow(task.id, agent.id, claim.primaryModel, claim.overflowModel, context);
     }
     const execution = claim.execution;
     if (!beginExecutionSend(execution)) return { status: 'held', reason: 'claim_superseded', executionId };

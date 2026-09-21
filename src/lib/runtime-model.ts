@@ -68,18 +68,41 @@ export interface RuntimeModelResolution {
 /** Maximum bytes of `openclaw.json` we will read — mirrors `/api/openclaw/models`. */
 const MAX_CONFIG_SIZE_BYTES = 1024 * 1024;
 
+/** The runtime accepts either a bare model id or `{primary, fallbacks}`. */
+type OpenClawModelConfig = string | { primary?: string; fallbacks?: string[] };
+
 interface OpenClawAgentConfigEntry {
   id?: string;
-  model?: {
-    primary?: string;
-  };
+  model?: OpenClawModelConfig;
 }
 
 interface OpenClawConfigShape {
   agents?: {
+    defaults?: { model?: OpenClawModelConfig };
     list?: OpenClawAgentConfigEntry[];
     entries?: Record<string, OpenClawAgentConfigEntry>;
   };
+}
+
+/** The primary model id out of either accepted shape. */
+function primaryOf(model: OpenClawModelConfig | undefined): string | null {
+  if (typeof model === 'string') return model.trim() || null;
+  const primary = model?.primary;
+  return typeof primary === 'string' && primary.trim() ? primary.trim() : null;
+}
+
+/**
+ * The fallback list that goes WITH a primary, mirroring the runtime's own rule
+ * (`resolveSelectedModelFallbacksOverride` in the installed OpenClaw dist):
+ * an entry that resolves a primary OWNS its fallback list, even when that list
+ * is empty or absent — a bare string model means "this model, no fallbacks",
+ * not "inherit the defaults". Only an entry with no primary at all falls
+ * through to `agents.defaults.model`.
+ */
+function fallbacksOf(model: OpenClawModelConfig | undefined): string[] {
+  if (typeof model === 'string' || !model) return [];
+  const list = model.fallbacks;
+  return Array.isArray(list) ? list.filter((m): m is string => typeof m === 'string' && !!m.trim()).map((m) => m.trim()) : [];
 }
 
 /**
@@ -134,39 +157,81 @@ export function runtimeSlugCandidates(agent: Agent, workspaceId?: string): strin
  * Resolve the runtime model for an agent from its OpenClaw config entry.
  * Returns null when no entry or no `model.primary` is found.
  */
-export function resolveRuntimeModelFromConfig(
+/**
+ * The agent's own entry in a parsed `openclaw.json`, or undefined.
+ *
+ * Match by id: the config entry id (e.g. `dept-presentations`) is compared
+ * against each candidate slug with AND without the `dept-` prefix. A bare
+ * candidate `presentations` therefore matches a config id of either
+ * `presentations` or `dept-presentations`; a dept-prefixed candidate
+ * `dept-funnels` matches `funnels` or `dept-funnels`. Registry order wins.
+ *
+ * ONE matcher for both the model read and the model-CHAIN read: two copies of
+ * this rule would be two copies to keep in step with the dispatch routes.
+ */
+function matchRuntimeEntry(
   agent: Agent,
-  workspaceId?: string,
-  configPathOverride?: string,
-): { model_id: string | null; configAgentId: string | null } | null {
-  const config = readOpenClawConfig(configPathOverride);
+  workspaceId: string | undefined,
+  config: OpenClawConfigShape | null,
+): OpenClawAgentConfigEntry | undefined {
   const list = runtimeRegistryEntries(config);
-  if (!list || !Array.isArray(list) || list.length === 0) return null;
-
+  if (!Array.isArray(list) || list.length === 0) return undefined;
   const candidates = agent.openclaw_agent_id ? [agent.openclaw_agent_id] : runtimeSlugCandidates(agent, workspaceId);
-
-  // Match by id: the config entry id (e.g. `dept-presentations`) is compared
-  // against each candidate slug with AND without the `dept-` prefix. A bare
-  // candidate `presentations` therefore matches a config id of either
-  // `presentations` or `dept-presentations`; a dept-prefixed candidate
-  // `dept-funnels` matches `funnels` or `dept-funnels`. Order in `list` wins.
-  const entry = list.find((e) => {
+  return list.find((e) => {
     const id = e?.id;
     if (!id) return false;
     if (agent.openclaw_agent_id) return id === agent.openclaw_agent_id;
     const lowered = id.toLowerCase();
     const bare = lowered.replace(/^dept-/, '');
-    return candidates.some(
-      (c) => c === lowered || c === bare || c === `dept-${bare}`,
-    );
-  });
+    return candidates.some((c) => c === lowered || c === bare || c === `dept-${bare}`);
+  }) as OpenClawAgentConfigEntry | undefined;
+}
 
+export function resolveRuntimeModelFromConfig(
+  agent: Agent,
+  workspaceId?: string,
+  configPathOverride?: string,
+): { model_id: string | null; configAgentId: string | null } | null {
+  const entry = matchRuntimeEntry(agent, workspaceId, readOpenClawConfig(configPathOverride));
   if (!entry) return null;
-  const primary = entry.model?.primary ?? null;
+  const primary = primaryOf(entry.model);
   if (!primary) {
     return { model_id: null, configAgentId: entry.id ?? null };
   }
   return { model_id: primary, configAgentId: entry.id ?? null };
+}
+
+/**
+ * The agent's OWN ordered model list: its primary followed by its configured
+ * fallbacks, exactly as the OpenClaw runtime would walk them.
+ *
+ * This is what the provider-capacity pools overflow along — when the primary's
+ * subscription is at its limit, the next model in THIS list is where the run is
+ * going to land, because the runtime walks the same list on a `rate_limit`
+ * failover. Nothing is ever ADDED to the list here: a model the agent does not
+ * already declare is never a candidate.
+ *
+ * An agent whose config entry resolves no primary inherits `agents.defaults
+ * .model` whole (primary and fallbacks together), which is how the runtime
+ * treats it. Returns [] when neither resolves — the caller then falls back to
+ * the CC's own `agents.model` column. Never throws.
+ */
+export function resolveRuntimeModelChainFromConfig(
+  agent: Agent,
+  workspaceId?: string,
+  configPathOverride?: string,
+): string[] {
+  const config = readOpenClawConfig(configPathOverride);
+  if (!config) return [];
+  const entry = matchRuntimeEntry(agent, workspaceId, config);
+  const source: OpenClawModelConfig | undefined = primaryOf(entry?.model) ? entry?.model : config.agents?.defaults?.model;
+  const primary = primaryOf(source);
+  if (!primary) return [];
+  // De-duped, order preserved: a fallback that repeats the primary is not a
+  // second chance at the same pool.
+  const chain: string[] = [primary];
+  for (const model of fallbacksOf(source)) if (!chain.includes(model)) chain.push(model);
+  return chain;
 }
 
 /**

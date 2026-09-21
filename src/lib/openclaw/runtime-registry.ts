@@ -3,7 +3,9 @@
  * are excluded rather than granting authority to either representation. */
 export interface RuntimeRegistryEntry {
   id: string;
-  model?: { primary?: string };
+  /** The runtime accepts either a bare model id or `{primary, fallbacks}`.
+   * A bare string means "this model, no fallbacks" — not "inherit them". */
+  model?: string | { primary?: string; fallbacks?: string[] };
   [key: string]: unknown;
 }
 const object = (value: unknown): value is Record<string, unknown> =>

@@ -329,7 +329,7 @@ test('pool slots come from the capacity pools, and a cooldown is carried through
   const db = getDb();
   resetLedger();
   db.exec("DELETE FROM task_executions WHERE id LIKE 'ledger-exec-%'");
-  db.exec("DELETE FROM provider_cooldowns WHERE provider = 'ollama'");
+  db.exec("DELETE FROM provider_pool_state WHERE provider = 'ollama'");
 
   const agent = db.prepare('SELECT id FROM agents LIMIT 1').get() as { id: string };
   assert.ok(agent, 'the fixture seeds agents; without one this case would pass vacuously');
@@ -353,11 +353,12 @@ test('pool slots come from the capacity pools, and a cooldown is carried through
   ).run('ledger-exec-1', taskRow.id, agent.id, 'ledger-sk-1', 'ledger-sid-1', now, 'ledger-idem-1', now, now);
 
   const until = new Date(Date.now() + 60_000).toISOString();
-  db.prepare('INSERT OR REPLACE INTO provider_cooldowns (provider,until,updated_at) VALUES (?,?,?)').run(
-    'ollama',
-    until,
-    now,
-  );
+  // provider_pool_state supersedes provider_cooldowns (migration 152); the
+  // cooldown is its `cooling_until` column. effective_limit stays NULL so this
+  // case still measures the CONFIGURED limit, as it always did.
+  db.prepare(
+    'INSERT OR REPLACE INTO provider_pool_state (provider,effective_limit,last_429_at,cooling_until,updated_at) VALUES (?,NULL,NULL,?,?)',
+  ).run('ollama', until, now);
 
   const snapshot = poolSnapshots()('ollama-cloud'); // the REGISTRY spelling resolves to the ollama pool
   assert.equal(typeof snapshot.slotsLimit, 'number');
@@ -369,7 +370,7 @@ test('pool slots come from the capacity pools, and a cooldown is carried through
   assert.equal(snapshot.coolingUntil, until, 'a shut pool must say so through the ledger too');
 
   db.exec("DELETE FROM task_executions WHERE id LIKE 'ledger-exec-%'");
-  db.exec("DELETE FROM provider_cooldowns WHERE provider = 'ollama'");
+  db.exec("DELETE FROM provider_pool_state WHERE provider = 'ollama'");
   db.exec("DELETE FROM tasks WHERE id = 'ledger-task-1'");
 });
 

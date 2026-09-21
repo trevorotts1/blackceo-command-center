@@ -7,8 +7,8 @@ import { getDb } from '@/lib/db';
 import { isOwnerKilled } from '@/lib/owner-killed';
 import { ACTIVE_EXECUTION_STATES_SQL } from '@/lib/execution-schema';
 import {
-  canonicalProvider, isRateLimitError, noteProviderRateLimit, poolLimit,
-  providerCoolingUntil, providerOf,
+  choosePool, isRateLimitError, noteProviderRateLimit, poolsFullSummary, providerOf,
+  type PoolProbe,
 } from '@/lib/capacity/provider-pools';
 import type Database from 'better-sqlite3';
 
@@ -24,11 +24,12 @@ export interface DispatchSnapshot {
  workspace_id?: string | null; department?: string | null; status: string;
  source?: string | null; dispatch_hold?: unknown; killed_at?: string | null;
  archived_at?: string | null; description?: string | null;
- /** Provider pool this dispatch will draw on, resolved by the caller from the
-  * agent's RUNTIME model (FIX-15: openclaw.json `model.primary`, not the CC's
-  * intended model). Absent — a caller that has not resolved one — falls back to
-  * the `agents.model` column inside reserveExecution. */
- provider?: string | null;
+ /** The agent's OWN ordered model list — primary first, then its configured
+  * fallbacks — resolved by the caller from the RUNTIME config (FIX-15:
+  * openclaw.json, not the CC's intended model). reserveExecution takes the
+  * first pool in this list with room. Absent — a caller that has not resolved
+  * one — falls back to the `agents.model` column inside reserveExecution. */
+ model_chain?: readonly string[] | null;
 }
 // The capacity-owning states. Shared with capacity/provider-pools.ts via the
 // schema module so the two counters can never drift apart.
@@ -90,24 +91,32 @@ function hasProviderColumn(db: Database.Database): boolean {
  } catch { return false; }
 }
 
-/** Last-resort provider resolution when the caller did not supply one.
+/** Last-resort model chain when the caller did not supply one.
  * `agents.model` is the CC's own pinned model, which FIX-15 established is NOT
  * necessarily what the runtime loads — so a dispatcher that knows the runtime
- * model should always pass it. This keeps a caller that does not (a test, a
- * background dispatcher) attributed to SOME pool rather than none. */
-function agentProviderFallback(agentId: string, db: Database.Database): string {
+ * chain should always pass it. This keeps a caller that does not (a test, a
+ * background dispatcher) attributed to SOME pool rather than none. A single
+ * model is a chain of one: no fallback is ever invented here. */
+function agentModelChainFallback(agentId: string, db: Database.Database): string[] {
  try {
   const row = db.prepare('SELECT model FROM agents WHERE id=?').get(agentId) as { model?: string | null } | undefined;
-  return providerOf(row?.model);
- } catch { return providerOf(null); }
+  return row?.model ? [row.model] : [];
+ } catch { return []; }
 }
 
 export interface ReserveResult {
  execution?: Execution; reason: string; running?: number; limit?: number;
- /** Pool this reserve drew on — present on every provider-scoped refusal. */
+ /** Pool this reserve drew on, or the primary pool on an `all_pools_full` refusal. */
  provider?: string;
- /** When a `provider_cooling_down` pool reopens. */
- until?: string;
+ /** Every pool tried, in the agent's own model order — the refusal's evidence. */
+ probes?: PoolProbe[];
+ /** "Ollama Cloud 3/3, OpenRouter 100/100" — what the card shows. */
+ summary?: string;
+ /** Set when the PRIMARY pool was full and the reserve landed on a fallback of
+  * the agent's own. The model the run is expected to end up on. */
+ overflowModel?: string;
+ /** The primary that was full, when `overflowModel` is set. */
+ primaryModel?: string;
 }
 
 export function reserveExecution(snapshot: DispatchSnapshot, sessionKey: string, executionId: string,
@@ -141,18 +150,26 @@ export function reserveExecution(snapshot: DispatchSnapshot, sessionKey: string,
   // exceed a 3-concurrent plan without any of them exceeding an agent ceiling.
   // Counted inside this same BEGIN IMMEDIATE, so it serializes against every
   // other reserver exactly as the worker count does.
-  const pool = canonicalProvider(snapshot.provider ?? agentProviderFallback(task.assigned_agent_id, db));
+  //
+  // OVERFLOW: a full primary pool is NOT a refusal while the agent still has a
+  // fallback of its OWN with room. The chain comes from the agent's own runtime
+  // config and nothing is ever added to it. Only when every model in that list
+  // is at capacity does the reserve refuse — see `all_pools_full` below.
+  const chain = (snapshot.model_chain?.length ? [...snapshot.model_chain] : agentModelChainFallback(task.assigned_agent_id, db));
   const poolTracked = hasProviderColumn(db);
+  let pool = providerOf(chain[0]);
+  let overflow: { overflowModel: string; primaryModel: string } | undefined;
   if (poolTracked) {
-   // A pool the provider itself just 429'd is SHUT: dispatching into it would
-   // only earn another refusal. This is not a fault of the card and never
-   // counts against its dispatch attempts — the caller holds, it does not fail.
-   const coolingUntil = providerCoolingUntil(pool, db);
-   if (coolingUntil) return { reason: 'provider_cooling_down', provider: pool, until: coolingUntil };
-   const poolMax = poolLimit(pool);
-   const poolRunning = (db.prepare(`SELECT COUNT(*) AS n FROM task_executions WHERE provider = ? AND task_id <> ? AND state IN ${ACTIVE}`)
-     .get(pool, task.id) as { n: number }).n;
-   if (poolRunning >= poolMax) return { reason: 'provider_at_capacity', provider: pool, running: poolRunning, limit: poolMax };
+   const { chosen, probes } = choosePool(chain, db, task.id);
+   if (!chosen) {
+    // Every pool this agent can reach is full or cooling. A QUEUE, not a
+    // fault: the caller holds and spends no dispatch attempt.
+    return { reason: 'all_pools_full', provider: probes[0]?.provider, probes, summary: poolsFullSummary(probes) };
+   }
+   pool = chosen.provider;
+   if (probes.length > 1 && chosen.model && chain[0]) {
+    overflow = { overflowModel: chosen.model, primaryModel: chain[0] };
+   }
   }
   // PER-AGENT ceiling: OPTIONAL since the pool became the limit. null means the
   // agent has no ceiling of its own and takes as much as its pool allows.
@@ -188,7 +205,7 @@ export function reserveExecution(snapshot: DispatchSnapshot, sessionKey: string,
   db.prepare(`INSERT INTO openclaw_sessions
    (id,agent_id,openclaw_session_id,channel,status,task_id,created_at,updated_at)
    VALUES (?,?,?,'mission-control','active',?,?,?)`).run(randomUUID(), task.assigned_agent_id, sessionId, task.id, now, now);
-  return { execution: latestExecution(task.id, db), reason: 'reserved' };
+  return { execution: latestExecution(task.id, db), reason: 'reserved', provider: pool, ...overflow };
  }).immediate();
 }
 
@@ -226,10 +243,10 @@ export function recordExecutionUnknown(execution: Execution, db = getDb(), error
    .run(randomUUID(),'dispatch_acceptance_unknown',execution.task_id,execution.agent_id,
    'Gateway acknowledgement missing. This execution retains worker capacity; reconcile its session before retrying.',new Date().toISOString());
  if (error !== undefined && execution.provider && isRateLimitError(error)) {
-  const until = noteProviderRateLimit(execution.provider, db);
-  if (until) db.prepare(`INSERT INTO events(id,type,task_id,agent_id,message,created_at) VALUES(?,?,?,?,?,?)`)
+  const noted = noteProviderRateLimit(execution.provider, db);
+  if (noted) db.prepare(`INSERT INTO events(id,type,task_id,agent_id,message,created_at) VALUES(?,?,?,?,?,?)`)
     .run(randomUUID(),'provider_rate_limited',execution.task_id,execution.agent_id,
-    `Provider "${execution.provider}" reported a rate limit; its pool is shut until ${until}.`,new Date().toISOString());
+    `Provider "${execution.provider}" reported a rate limit; its pool is shut until ${noted.until} and its limit is now ${noted.effective_limit}.`,new Date().toISOString());
  }
 }
 

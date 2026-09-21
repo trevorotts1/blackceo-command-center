@@ -51,11 +51,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS task_execution_active_task ON task_executions(
 CREATE INDEX IF NOT EXISTS idx_task_executions_agent_state ON task_executions(agent_id, state);
 -- Provider capacity is counted the same way, against the same ACTIVE set.
 CREATE INDEX IF NOT EXISTS idx_task_executions_provider_state ON task_executions(provider, state);
--- A provider that answered 429 is shut for PROVIDER_COOLDOWN_MS. One row per
--- pool; a past 'until' means the pool is open.
-CREATE TABLE IF NOT EXISTS provider_cooldowns (
+-- What each provider pool has TAUGHT us, one row per pool. A pool with nothing
+-- to say holds no row at all. effective_limit is the configured limit lowered
+-- by observed 429s; cooling_until shuts the pool outright for a few seconds
+-- after one; last_429_at is what the recovery sweep waits on before growing the
+-- limit back. A past cooling_until means the pool is open.
+CREATE TABLE IF NOT EXISTS provider_pool_state (
  provider TEXT PRIMARY KEY,
- until TEXT NOT NULL,
+ effective_limit INTEGER,
+ last_429_at TEXT,
+ cooling_until TEXT,
  updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS scheduler_leases (

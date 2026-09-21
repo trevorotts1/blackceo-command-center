@@ -29,13 +29,12 @@ import { checkTaskWriteAuth, renderWriteBackInstructions } from '@/lib/mc-auth';
 import { transition, recordStatusEvent, checkWipLimit } from '@/lib/task-lifecycle';
 import {
   resolveAgentRuntimeModel,
-  resolveRuntimeModelFromConfig,
+  resolveRuntimeModelChainFromConfig,
   modelsMatch,
   recordModelSkewEvent,
   reconcileTaskModelRecord,
   type RuntimeModelResolution,
 } from '@/lib/runtime-model';
-import { providerOf } from '@/lib/capacity/provider-pools';
 import type { SOP, SOPStep } from '@/lib/sops';
 import type { Task, Agent, OpenClawSession } from '@/lib/types';
 import { notifyOwnerStarted } from '@/lib/owner-reports';
@@ -845,13 +844,16 @@ If you need help or clarification, ask the orchestrator.`;
     const personaReady = checkPersonaDispatchReady(task.id);
     if (!personaReady.ready) return NextResponse.json({success:false,held:true,reason:personaReady.reason},{status:409});
     // PROVIDER POOL: the reservation is counted against the subscription the
-    // RUNTIME will use, resolved from openclaw.json the same way FIX-15 resolves
-    // it after the send (the gateway half needs a session that does not exist yet).
-    const dispatchProvider = providerOf(
-      resolveRuntimeModelFromConfig(agent, task.workspace_id ?? undefined)?.model_id ?? agent.model,
+    // RUNTIME will use, and may overflow to a fallback the agent already
+    // declares when the primary plan is saturated. Resolved from openclaw.json
+    // the same way FIX-15 resolves the model after the send (the gateway half
+    // needs a session that does not exist yet).
+    const modelChain = resolveRuntimeModelChainFromConfig(agent, task.workspace_id ?? undefined);
+    const claim = reserveExecution(
+      {...task,persona_snapshot:personaSendSnapshot,model_chain:modelChain.length ? modelChain : (agent.model ? [agent.model] : [])},
+      sessionKey,executionId,
     );
-    const claim = reserveExecution({...task,persona_snapshot:personaSendSnapshot,provider:dispatchProvider},sessionKey,executionId);
-    if (!claim.execution) return NextResponse.json({success:false,held:true,reason:claim.reason,provider:claim.provider,running:claim.running,limit:claim.limit,until:claim.until},{status:409});
+    if (!claim.execution) return NextResponse.json({success:false,held:true,reason:claim.reason,provider:claim.provider,running:claim.running,limit:claim.limit,pools:claim.summary},{status:409});
     const execution=claim.execution;
     if (!beginExecutionSend(execution)) return NextResponse.json({success:false,held:true,reason:'claim_superseded'},{status:409});
     let acknowledged = false;
