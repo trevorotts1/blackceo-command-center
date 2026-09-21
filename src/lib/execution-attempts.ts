@@ -5,6 +5,11 @@ import { capturePersonaSnapshot, type PersonaSnapshot } from '@/lib/persona-stat
 import { randomUUID } from 'crypto';
 import { getDb } from '@/lib/db';
 import { isOwnerKilled } from '@/lib/owner-killed';
+import { ACTIVE_EXECUTION_STATES_SQL } from '@/lib/execution-schema';
+import {
+  canonicalProvider, isRateLimitError, noteProviderRateLimit, poolLimit,
+  providerCoolingUntil, providerOf,
+} from '@/lib/capacity/provider-pools';
 import type Database from 'better-sqlite3';
 
 export type DispatchOutcome = { status: 'acknowledged' | 'held' | 'failed' | 'unknown'; reason: string; executionId?: string };
@@ -12,15 +17,22 @@ export interface Execution {
  id: string; task_id: string; assignment_version: number; agent_id: string;
  workspace_id: string | null; generation: number; session_key: string; session_id: string;
  worker_context: string; remote_run_id: string | null; state: string; lease_owner: string; lease_expires_at: string;
- idempotency_key: string; created_at: string;
+ idempotency_key: string; provider: string | null; created_at: string;
 }
 export interface DispatchSnapshot {
  persona_snapshot?:PersonaSnapshot; id: string; assigned_agent_id?: string | null; assignment_version?: number;
  workspace_id?: string | null; department?: string | null; status: string;
  source?: string | null; dispatch_hold?: unknown; killed_at?: string | null;
  archived_at?: string | null; description?: string | null;
+ /** Provider pool this dispatch will draw on, resolved by the caller from the
+  * agent's RUNTIME model (FIX-15: openclaw.json `model.primary`, not the CC's
+  * intended model). Absent — a caller that has not resolved one — falls back to
+  * the `agents.model` column inside reserveExecution. */
+ provider?: string | null;
 }
-const ACTIVE = "('reserved','sending','accepted','running','unknown')";
+// The capacity-owning states. Shared with capacity/provider-pools.ts via the
+// schema module so the two counters can never drift apart.
+const ACTIVE = ACTIVE_EXECUTION_STATES_SQL;
 export function executionSessionId(agentId: string, executionId: string): string {
  return `mission-control-${agentId}-${executionId}`;
 }
@@ -41,30 +53,65 @@ function auditExecutionStatus(taskId:string,from:string,to:string,reason:string,
  else db.prepare('INSERT INTO events(id,type,task_id,message,created_at) VALUES(?,?,?,?,?)').run(randomUUID(),'task_status_changed',taskId,`${from} → ${to}: ${reason}`,now);
 }
 
-/** Default per-worker parallelism when the agent row does not set its own.
- * 1 = one job per worker, exactly how every box behaved before the column existed. */
-export const WORKER_MAX_CONCURRENT_FALLBACK = 1;
-
-/** How many executions this worker may run at once.
+/** An OPTIONAL per-agent ceiling, or null when this agent has none.
  *
- * `agents.max_concurrent_executions` (migration 149) when it is set and
- * positive, else WORKER_MAX_CONCURRENT_DEFAULT from the environment, else 1.
+ * v7.6.27 made this a required per-agent number defaulting to 1, which made the
+ * AGENT the unit of capacity. It is not: the client's provider PLAN is (see
+ * capacity/provider-pools.ts), and an agent ceiling of 1 silently capped every
+ * box at one job per worker no matter what the subscription allowed. Migration
+ * 150 therefore nulls every row still carrying that v7.6.27 default, and this
+ * reads NULL/0 as "no ceiling — the pool is the limit".
+ *
+ * An explicitly set value still wins, so an operator can pin one agent down
+ * without touching the pool. `WORKER_MAX_CONCURRENT_DEFAULT` remains as a
+ * box-wide fallback for that pin and is UNSET by default.
+ *
  * A pre-migration database has no such column: the read throws, is caught, and
- * the fallback applies — so an un-migrated box keeps the old behaviour instead
- * of failing a dispatch. */
-export function workerConcurrencyLimit(agentId: string, db: Database.Database = getDb()): number {
- const envRaw = Number.parseInt(process.env.WORKER_MAX_CONCURRENT_DEFAULT ?? '', 10);
- const fallback = Number.isFinite(envRaw) && envRaw > 0 ? envRaw : WORKER_MAX_CONCURRENT_FALLBACK;
+ * the answer is "no ceiling" — so an un-migrated box is bounded by its pool
+ * rather than failing a dispatch. */
+export function workerConcurrencyLimit(agentId: string, db: Database.Database = getDb()): number | null {
  let configured = 0;
  try {
   const row = db.prepare('SELECT max_concurrent_executions FROM agents WHERE id=?').get(agentId) as { max_concurrent_executions?: number | null } | undefined;
   configured = Number(row?.max_concurrent_executions ?? 0);
- } catch { /* pre-migration DB: the column is absent; the fallback is the answer. */ }
- return Number.isFinite(configured) && configured > 0 ? configured : fallback;
+ } catch { /* pre-migration DB: the column is absent; there is no agent ceiling. */ }
+ if (Number.isFinite(configured) && configured > 0) return configured;
+ const envRaw = Number.parseInt(process.env.WORKER_MAX_CONCURRENT_DEFAULT ?? '', 10);
+ return Number.isFinite(envRaw) && envRaw > 0 ? envRaw : null;
+}
+
+/** True when this database carries the migration-150 `provider` column.
+ * Cheap (a PRAGMA off the schema cache) and read inside the reserve
+ * transaction, so a box whose migrations have not run yet keeps dispatching on
+ * the v7.6.27 rules instead of throwing on every reserve. */
+function hasProviderColumn(db: Database.Database): boolean {
+ try {
+  return (db.prepare('PRAGMA table_info(task_executions)').all() as { name: string }[]).some((c) => c.name === 'provider');
+ } catch { return false; }
+}
+
+/** Last-resort provider resolution when the caller did not supply one.
+ * `agents.model` is the CC's own pinned model, which FIX-15 established is NOT
+ * necessarily what the runtime loads — so a dispatcher that knows the runtime
+ * model should always pass it. This keeps a caller that does not (a test, a
+ * background dispatcher) attributed to SOME pool rather than none. */
+function agentProviderFallback(agentId: string, db: Database.Database): string {
+ try {
+  const row = db.prepare('SELECT model FROM agents WHERE id=?').get(agentId) as { model?: string | null } | undefined;
+  return providerOf(row?.model);
+ } catch { return providerOf(null); }
+}
+
+export interface ReserveResult {
+ execution?: Execution; reason: string; running?: number; limit?: number;
+ /** Pool this reserve drew on — present on every provider-scoped refusal. */
+ provider?: string;
+ /** When a `provider_cooling_down` pool reopens. */
+ until?: string;
 }
 
 export function reserveExecution(snapshot: DispatchSnapshot, sessionKey: string, executionId: string,
- db: Database.Database = getDb()): { execution?: Execution; reason: string; running?: number; limit?: number } {
+ db: Database.Database = getDb()): ReserveResult {
  return db.transaction(() => {
   const task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(snapshot.id) as DispatchSnapshot | undefined;
   if (!task || !['backlog','assigned','blocked','in_progress'].includes(task.status) || task.status !== snapshot.status || task.assigned_agent_id !== snapshot.assigned_agent_id ||
@@ -86,10 +133,35 @@ export function reserveExecution(snapshot: DispatchSnapshot, sessionKey: string,
   // be a uniqueness constraint); the count below is the rule now, and it is read
   // inside this BEGIN IMMEDIATE transaction, which serializes it against every
   // other reserver, in this process or another.
+  // PROVIDER-POOL capacity, checked FIRST because it is the real constraint:
+  // concurrency is a property of the client's provider PLAN, not of the agent
+  // (capacity/provider-pools.ts). Every agent on this box that runs on Ollama
+  // draws on the ONE Ollama subscription the client pays for, so the count is
+  // per provider per box, not per agent — four agents at one job each could
+  // exceed a 3-concurrent plan without any of them exceeding an agent ceiling.
+  // Counted inside this same BEGIN IMMEDIATE, so it serializes against every
+  // other reserver exactly as the worker count does.
+  const pool = canonicalProvider(snapshot.provider ?? agentProviderFallback(task.assigned_agent_id, db));
+  const poolTracked = hasProviderColumn(db);
+  if (poolTracked) {
+   // A pool the provider itself just 429'd is SHUT: dispatching into it would
+   // only earn another refusal. This is not a fault of the card and never
+   // counts against its dispatch attempts — the caller holds, it does not fail.
+   const coolingUntil = providerCoolingUntil(pool, db);
+   if (coolingUntil) return { reason: 'provider_cooling_down', provider: pool, until: coolingUntil };
+   const poolMax = poolLimit(pool);
+   const poolRunning = (db.prepare(`SELECT COUNT(*) AS n FROM task_executions WHERE provider = ? AND task_id <> ? AND state IN ${ACTIVE}`)
+     .get(pool, task.id) as { n: number }).n;
+   if (poolRunning >= poolMax) return { reason: 'provider_at_capacity', provider: pool, running: poolRunning, limit: poolMax };
+  }
+  // PER-AGENT ceiling: OPTIONAL since the pool became the limit. null means the
+  // agent has no ceiling of its own and takes as much as its pool allows.
   const limit = workerConcurrencyLimit(task.assigned_agent_id, db);
-  const running = (db.prepare(`SELECT COUNT(*) AS n FROM task_executions WHERE agent_id = ? AND task_id <> ? AND state IN ${ACTIVE}`)
-    .get(task.assigned_agent_id, task.id) as { n: number }).n;
-  if (running >= limit) return { reason: 'worker_at_capacity', running, limit };
+  if (limit !== null) {
+   const running = (db.prepare(`SELECT COUNT(*) AS n FROM task_executions WHERE agent_id = ? AND task_id <> ? AND state IN ${ACTIVE}`)
+     .get(task.assigned_agent_id, task.id) as { n: number }).n;
+   if (running >= limit) return { reason: 'worker_at_capacity', running, limit };
+  }
   // Legacy shared-session workers also consume capacity until their old task
   // finishes. That check exists because those workers SHARED one session; every
   // session is per-execution now, so above limit 1 it would silently cancel the
@@ -108,10 +180,10 @@ export function reserveExecution(snapshot: DispatchSnapshot, sessionKey: string,
   const sessionId = executionSessionId(task.assigned_agent_id, executionId);
   const owner = randomUUID();
   db.prepare(`INSERT INTO task_executions
-   (id,task_id,assignment_version,agent_id,workspace_id,generation,worker_context,session_key,session_id,state,lease_owner,lease_expires_at,idempotency_key,created_at,updated_at)
-   VALUES (?,?,?,?,?,?,?,?,?,'reserved',?,?,?,?,?)`).run(executionId, task.id, claimed.assignment_version,
+   (id,task_id,assignment_version,agent_id,workspace_id,generation,worker_context,session_key,session_id,state,lease_owner,lease_expires_at,idempotency_key,${poolTracked ? 'provider,' : ''}created_at,updated_at)
+   VALUES (?,?,?,?,?,?,?,?,?,'reserved',?,?,?,${poolTracked ? '?,' : ''}?,?)`).run(executionId, task.id, claimed.assignment_version,
     task.assigned_agent_id, task.workspace_id ?? null, generation, context, sessionKey, sessionId, owner,
-    new Date(Date.now()+120_000).toISOString(), `execution-${executionId}`, now, now);
+    new Date(Date.now()+120_000).toISOString(), `execution-${executionId}`, ...(poolTracked ? [pool] : []), now, now);
   // Never rebind an existing session. Each attempt has immutable attribution.
   db.prepare(`INSERT INTO openclaw_sessions
    (id,agent_id,openclaw_session_id,channel,status,task_id,created_at,updated_at)
@@ -142,12 +214,23 @@ export function recordExecutionAcceptance(execution: Execution, response: unknow
  if(changed && db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='task_dispatch_intents'").get())db.prepare("UPDATE task_dispatch_intents SET state='acknowledged',updated_at=? WHERE task_id=? AND state='pending'").run(new Date().toISOString(),execution.task_id);
  }).immediate();
 }
-export function recordExecutionUnknown(execution: Execution, db = getDb()): void {
+/** The send did not acknowledge. `error` is the failure the gateway raised, when
+ * the caller has it: a 429 in that text is the PROVIDER refusing more work, so
+ * the whole pool goes into cooldown rather than the next card walking straight
+ * into the same refusal. The execution row itself is unchanged by that — it
+ * still retains capacity until it is reconciled. */
+export function recordExecutionUnknown(execution: Execution, db = getDb(), error?: unknown): void {
  db.prepare("UPDATE task_executions SET state='unknown',error_code='send_acceptance_unknown',updated_at=? WHERE id=? AND lease_owner=? AND state='sending'")
    .run(new Date().toISOString(), execution.id, execution.lease_owner);
  db.prepare(`INSERT INTO events(id,type,task_id,agent_id,message,created_at) VALUES(?,?,?,?,?,?)`)
    .run(randomUUID(),'dispatch_acceptance_unknown',execution.task_id,execution.agent_id,
    'Gateway acknowledgement missing. This execution retains worker capacity; reconcile its session before retrying.',new Date().toISOString());
+ if (error !== undefined && execution.provider && isRateLimitError(error)) {
+  const until = noteProviderRateLimit(execution.provider, db);
+  if (until) db.prepare(`INSERT INTO events(id,type,task_id,agent_id,message,created_at) VALUES(?,?,?,?,?,?)`)
+    .run(randomUUID(),'provider_rate_limited',execution.task_id,execution.agent_id,
+    `Provider "${execution.provider}" reported a rate limit; its pool is shut until ${until}.`,new Date().toISOString());
+ }
 }
 
 /** New attempts require execution identity, or their unique session ID. Legacy

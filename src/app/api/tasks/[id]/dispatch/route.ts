@@ -29,11 +29,13 @@ import { checkTaskWriteAuth, renderWriteBackInstructions } from '@/lib/mc-auth';
 import { transition, recordStatusEvent, checkWipLimit } from '@/lib/task-lifecycle';
 import {
   resolveAgentRuntimeModel,
+  resolveRuntimeModelFromConfig,
   modelsMatch,
   recordModelSkewEvent,
   reconcileTaskModelRecord,
   type RuntimeModelResolution,
 } from '@/lib/runtime-model';
+import { providerOf } from '@/lib/capacity/provider-pools';
 import type { SOP, SOPStep } from '@/lib/sops';
 import type { Task, Agent, OpenClawSession } from '@/lib/types';
 import { notifyOwnerStarted } from '@/lib/owner-reports';
@@ -842,8 +844,14 @@ If you need help or clarification, ask the orchestrator.`;
     const { checkPersonaDispatchReady } = await import('@/lib/tasks');
     const personaReady = checkPersonaDispatchReady(task.id);
     if (!personaReady.ready) return NextResponse.json({success:false,held:true,reason:personaReady.reason},{status:409});
-    const claim = reserveExecution({...task,persona_snapshot:personaSendSnapshot},sessionKey,executionId);
-    if (!claim.execution) return NextResponse.json({success:false,held:true,reason:claim.reason},{status:409});
+    // PROVIDER POOL: the reservation is counted against the subscription the
+    // RUNTIME will use, resolved from openclaw.json the same way FIX-15 resolves
+    // it after the send (the gateway half needs a session that does not exist yet).
+    const dispatchProvider = providerOf(
+      resolveRuntimeModelFromConfig(agent, task.workspace_id ?? undefined)?.model_id ?? agent.model,
+    );
+    const claim = reserveExecution({...task,persona_snapshot:personaSendSnapshot,provider:dispatchProvider},sessionKey,executionId);
+    if (!claim.execution) return NextResponse.json({success:false,held:true,reason:claim.reason,provider:claim.provider,running:claim.running,limit:claim.limit,until:claim.until},{status:409});
     const execution=claim.execution;
     if (!beginExecutionSend(execution)) return NextResponse.json({success:false,held:true,reason:'claim_superseded'},{status:409});
     let acknowledged = false;
@@ -1024,7 +1032,8 @@ If you need help or clarification, ask the orchestrator.`;
     } catch (err) {
       console.error('Dispatch acknowledgement/bookkeeping failed:', err);
       if (acknowledged) return NextResponse.json({success:true,task_id:task.id,execution_id:executionId,warning:'accepted_bookkeeping_failed'});
-      recordExecutionUnknown(execution);
+      // The error travels so a 429 shuts the provider pool (see recordExecutionUnknown).
+      recordExecutionUnknown(execution, undefined, err);
       return NextResponse.json({success:false,task_id:task.id,execution_id:executionId,
         reason:'send_acceptance_unknown',message:'Reconcile this execution before retrying.'},{status:202});
     }

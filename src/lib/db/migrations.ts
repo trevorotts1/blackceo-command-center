@@ -7347,6 +7347,100 @@ export const migrations: Migration[] = [
       console.log('[Migration 149] per-worker concurrency ready — worker capacity is counted against agents.max_concurrent_executions (default 1)');
     },
   },
+  {
+    // PROVIDER CAPACITY POOLS — concurrency belongs to the client's provider
+    // PLAN, not to the agent.
+    //
+    // Migration 149 made the limit a per-agent number defaulting to 1. That is
+    // the wrong unit. What runs out on a box is the subscription: Ollama Cloud
+    // Pro allows 3 concurrent requests and Max allows 10, DeepSeek Direct
+    // documents 2,500, OpenRouter is effectively unbounded. Two consequences
+    // followed from encoding it per agent. Upgrading a plan raised nothing until
+    // every agent row had been edited by hand, and four agents each holding a
+    // ceiling of 1 could together exceed a 3-concurrent plan without any single
+    // agent exceeding its own limit.
+    //
+    // This migration moves the accounting to the pool:
+    //   • task_executions.provider — the provider prefix of the runtime model the
+    //     execution was dispatched on, denormalised onto the row so
+    //     reserveExecution counts a pool inside BEGIN IMMEDIATE without joining
+    //     back through agents and re-reading openclaw.json on every reserve.
+    //     NULL on rows written before this column; they count toward no pool and
+    //     drain within a lease. idx_task_executions_provider_state serves the count.
+    //   • provider_cooldowns — one row per pool. A provider that answers 429 shuts
+    //     its whole pool for PROVIDER_COOLDOWN_MS instead of letting the next card
+    //     walk into the same refusal.
+    //   • agents.max_concurrent_executions becomes OPTIONAL: NULL/absent means
+    //     "no agent ceiling, the pool is the limit". Every row still carrying the
+    //     migration-149 default of exactly 1 is nulled, because that 1 was never a
+    //     decision anybody made — it was the old unit of capacity. An explicitly
+    //     set OTHER value is a decision and is preserved verbatim.
+    //
+    // SQLite cannot alter a column's NOT NULL/DEFAULT in place, so the column is
+    // dropped and re-added as nullable (DROP COLUMN, SQLite 3.35+; migration 149
+    // put no index, trigger or view on it, so nothing depends on it) and the
+    // preserved values are written back. If DROP COLUMN is refused on some box,
+    // the fallback writes 0 instead — which workerConcurrencyLimit has always
+    // read as "unset" — so the semantics land either way.
+    //
+    // Additive and idempotent throughout, guarded on each table existing
+    // (migration-131 convention) so a minimal fixture heals instead of crashing.
+    id: '150',
+    name: 'provider_capacity_pools',
+    up: (db) => {
+      const tableExists = (name: string) => (db.prepare(
+        `SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name=?`,
+      ).get(name) as { n: number }).n > 0;
+
+      if (tableExists('task_executions')) {
+        const executionColumns = new Set((db.prepare('PRAGMA table_info(task_executions)').all() as { name: string }[]).map((c) => c.name));
+        if (!executionColumns.has('provider')) db.exec('ALTER TABLE task_executions ADD COLUMN provider TEXT');
+        db.exec('CREATE INDEX IF NOT EXISTS idx_task_executions_provider_state ON task_executions(provider, state)');
+      } else {
+        console.log('[Migration 150] task_executions absent (minimal fixture); provider column skipped');
+      }
+
+      db.exec(`CREATE TABLE IF NOT EXISTS provider_cooldowns (
+        provider TEXT PRIMARY KEY,
+        until TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )`);
+
+      const agentColumns = new Set((db.prepare('PRAGMA table_info(agents)').all() as { name: string }[]).map((c) => c.name));
+      if (!agentColumns.size || !agentColumns.has('max_concurrent_executions')) {
+        console.log('[Migration 150] provider capacity pools ready — agents carry no concurrency column on this box');
+        return;
+      }
+      const ceilingColumn = (db.prepare('PRAGMA table_info(agents)').all() as { name: string; notnull: number; dflt_value: unknown }[])
+        .find((c) => c.name === 'max_concurrent_executions');
+      // Already nullable with no default — this migration has run, or the column
+      // was created in its post-150 shape. Only the row heal below is needed.
+      const needsRebuild = !!ceilingColumn && (ceilingColumn.notnull === 1 || ceilingColumn.dflt_value !== null);
+      // Anything that is not the migration-149 default of 1 is somebody's decision.
+      const preserved = db.prepare(
+        'SELECT id, max_concurrent_executions AS n FROM agents WHERE max_concurrent_executions IS NOT NULL AND max_concurrent_executions <> 1',
+      ).all() as { id: string; n: number }[];
+      if (needsRebuild) {
+        try {
+          db.exec('ALTER TABLE agents DROP COLUMN max_concurrent_executions');
+          db.exec('ALTER TABLE agents ADD COLUMN max_concurrent_executions INTEGER');
+          const restore = db.prepare('UPDATE agents SET max_concurrent_executions=? WHERE id=?');
+          for (const row of preserved) restore.run(row.n, row.id);
+          console.log(`[Migration 150] agents.max_concurrent_executions is now OPTIONAL (NULL = no agent ceiling); ${preserved.length} explicit ceiling(s) preserved`);
+        } catch (err) {
+          // DROP COLUMN refused (an index, trigger or view we do not know about).
+          // 0 is read as "unset" by workerConcurrencyLimit, so the semantics are
+          // the same; only the stored spelling differs.
+          db.prepare('UPDATE agents SET max_concurrent_executions=0 WHERE max_concurrent_executions=1').run();
+          console.log(`[Migration 150] agents.max_concurrent_executions kept NOT NULL (${(err as Error).message}); the v7.6.27 default of 1 was zeroed instead — 0 means no agent ceiling`);
+        }
+      } else {
+        db.prepare('UPDATE agents SET max_concurrent_executions=NULL WHERE max_concurrent_executions=1').run();
+        console.log('[Migration 150] agents.max_concurrent_executions already optional; v7.6.27 default rows nulled');
+      }
+      console.log('[Migration 150] provider capacity pools ready — concurrency is counted per provider plan, per box');
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner

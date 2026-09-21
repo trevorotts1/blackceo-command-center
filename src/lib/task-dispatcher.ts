@@ -78,11 +78,13 @@ import { artifactDispatchPayload, recordStatusEvent } from '@/lib/task-lifecycle
 import { healPhantomAgentAssignment } from '@/lib/jobs/heal-phantom-assignments';
 import {
   resolveAgentRuntimeModel,
+  resolveRuntimeModelFromConfig,
   modelsMatch,
   recordModelSkewEvent,
   reconcileTaskModelRecord,
   type RuntimeModelResolution,
 } from '@/lib/runtime-model';
+import { providerOf, providerLabel } from '@/lib/capacity/provider-pools';
 import { blockDispatchIfOwnerKilled } from '@/lib/owner-killed';
 import { launchOperatorPresentationContract } from '@/lib/presentation-operator-launcher';
 
@@ -380,6 +382,51 @@ function recordWorkerCapacityHold(
     agentId,
     '%worker at capacity%',
     `[${context}] worker at capacity: queued behind ${running} running (limit ${limit})`,
+    context,
+  );
+}
+
+/**
+ * The card is queued behind its PROVIDER POOL, not behind its worker — every
+ * agent on this box that runs on this provider shares the one subscription the
+ * client pays for. Same queue-not-fault contract as the worker hold: no
+ * dispatch attempt is spent, and the sweep re-selects the card the moment a
+ * slot frees. Deduped per provider so two full pools are two separate rows.
+ */
+function recordProviderCapacityHold(
+  taskId: string,
+  agentId: string | null,
+  provider: string,
+  running: number,
+  limit: number,
+  context: string,
+): void {
+  const label = providerLabel(provider);
+  console.warn(`[${context}] autoDispatchTask: QUEUED task ${taskId} — ${label} pool full (${running}/${limit} running)`);
+  recordDispatchHoldActivity(
+    taskId,
+    agentId,
+    `%${label} pool full%`,
+    `[${context}] ${label} pool full: ${running} of ${limit} running`,
+    context,
+  );
+}
+
+/** The provider itself answered 429, so its whole pool is shut until `until`. */
+function recordProviderCooldownHold(
+  taskId: string,
+  agentId: string | null,
+  provider: string,
+  until: string,
+  context: string,
+): void {
+  const label = providerLabel(provider);
+  console.warn(`[${context}] autoDispatchTask: QUEUED task ${taskId} — ${label} rate-limited until ${until}`);
+  recordDispatchHoldActivity(
+    taskId,
+    agentId,
+    `%${label} rate-limited%`,
+    `[${context}] ${label} rate-limited: pool cooling down until ${until}`,
     context,
   );
 }
@@ -1860,10 +1907,25 @@ If you need help or clarification, ask the orchestrator.`;
       return { status: 'held', reason: personaReady.reason };
     }
     throwIfJobLeaseLost();
-    const claim = reserveExecution({...task,persona_snapshot:personaSendSnapshot}, sessionKey, executionId);
+    // PROVIDER POOL: resolve the provider the RUNTIME will actually use before
+    // reserving, so the reservation is counted against the right subscription.
+    // The config read is the synchronous half of the FIX-15 resolver
+    // (openclaw.json `model.primary`); the gateway half needs a live session,
+    // which does not exist until after this claim. `agents.model` is the
+    // fallback only because a box with no runtime entry still has to land in
+    // some pool.
+    const dispatchProvider = providerOf(
+      resolveRuntimeModelFromConfig(agent, task.workspace_id ?? undefined)?.model_id ?? agent.model,
+    );
+    const claim = reserveExecution({...task,persona_snapshot:personaSendSnapshot,provider:dispatchProvider}, sessionKey, executionId);
     if (!claim.execution) {
+      // Every one of these is a QUEUE, not a fault: none spends a dispatch attempt.
       if (claim.reason === 'worker_at_capacity') {
         recordWorkerCapacityHold(task.id, agent.id, claim.running ?? 0, claim.limit ?? 1, context);
+      } else if (claim.reason === 'provider_at_capacity') {
+        recordProviderCapacityHold(task.id, agent.id, claim.provider ?? dispatchProvider, claim.running ?? 0, claim.limit ?? 0, context);
+      } else if (claim.reason === 'provider_cooling_down') {
+        recordProviderCooldownHold(task.id, agent.id, claim.provider ?? dispatchProvider, claim.until ?? '', context);
       }
       return { status: 'held', reason: claim.reason };
     }
@@ -1889,7 +1951,9 @@ If you need help or clarification, ask the orchestrator.`;
     } catch (sendErr) {
       // A transport failure may follow remote acceptance. Never roll back the
       // task or mint a fresh key based solely on a missing acknowledgement.
-      recordExecutionUnknown(execution);
+      // The error travels so a 429 can shut the pool instead of the next card
+      // walking into the same refusal.
+      recordExecutionUnknown(execution, undefined, sendErr);
       console.error(`[${context}] chat.send acknowledgement unknown for ${task.id}:`, sendErr);
       return { status: 'unknown', reason: 'send_acceptance_unknown', executionId };
     }
