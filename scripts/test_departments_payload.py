@@ -51,11 +51,15 @@ ENVELOPE = {"company": "Acme", "total_departments": 2, "total_roles": 18, "depar
 METADATA_ONLY = {"company": "Acme", "total_departments": 34, "total_roles": 416}
 # The shape verified on a client box: the 'departments' KEY holds a dict of
 # department objects keyed by slug, not a list.
+# The client's real entries name their own folder; the map key carries a
+# "-dept" suffix that is NOT the department's slug.
 KEYED_ENVELOPE = {
     "company": "Acme", "total_departments": 2, "total_roles": 18,
     "departments": {
-        "account-management-dept": {"name": "Account Management"},
-        "app-development-dept": {"name": "App Development"},
+        "account-management-dept": {"name": "Account Management",
+                                    "folder": "account-management"},
+        "app-development-dept": {"name": "App Development",
+                                 "folder": "app-development"},
     },
 }
 
@@ -89,22 +93,65 @@ def test_dict_of_dicts_keyed_by_slug_is_folded():
     ]
 
 
+def test_the_entrys_own_folder_beats_a_dept_suffixed_map_key():
+    # The client shape that put 34 duplicate workspace rows on a board: the map
+    # is keyed "<name>-dept" while the entry names its real folder. The ENTRY wins.
+    assert normalize_departments(
+        {"account-management-dept": {"name": "Account Management",
+                                     "folder": "account-management",
+                                     "emoji": "\U0001f91d"}}
+    ) == [{"name": "Account Management", "folder": "account-management",
+           "emoji": "\U0001f91d", "id": "account-management",
+           "slug": "account-management"}]
+
+
+def test_slug_precedence_is_id_then_slug_then_folder_then_key():
+    def one(entry, key="account-management-dept"):
+        return normalize_departments({key: entry})[0]
+
+    assert one({"id": "own-id", "slug": "own-slug", "folder": "own-folder"})["slug"] == "own-slug"
+    assert one({"id": "own-id", "slug": "own-slug", "folder": "own-folder"})["id"] == "own-id"
+    assert one({"slug": "own-slug", "folder": "own-folder"})["id"] == "own-slug"
+    assert one({"folder": "own-folder"})["id"] == "own-folder"
+    assert one({"folder": "own-folder"})["slug"] == "own-folder"
+    # nothing of its own: the key, with its "-dept" suffix stripped
+    assert one({"name": "Account Management"})["id"] == "account-management"
+    # an empty string is not an identity
+    assert one({"id": "", "folder": "own-folder"})["id"] == "own-folder"
+
+
+def test_a_dept_suffix_is_stripped_only_when_the_slug_came_from_the_key():
+    # from the key: stripped
+    assert normalize_departments({"billing-dept": {"name": "Billing"}})[0]["slug"] == "billing"
+    # the entry's OWN value is never rewritten, suffix and all
+    assert normalize_departments(
+        {"billing-dept": {"folder": "billing-dept"}})[0]["slug"] == "billing-dept"
+    assert normalize_departments(
+        {"billing-dept": {"slug": "billing-dept"}})[0]["id"] == "billing-dept"
+    # a key that is only the suffix is left alone
+    assert normalize_departments({"-dept": {"name": "Odd"}})[0]["id"] == "-dept"
+
+
+def test_a_key_only_entry_still_keeps_a_plain_key():
+    assert normalize_departments({"marketing": {"name": "Marketing"}})[0]["id"] == "marketing"
+
+
 def test_departments_key_holding_a_dict_of_dicts_is_folded():
     # The shape a real client box ships: the 'departments' KEY holds a MAP of 34
     # objects keyed by department slug, not a list. v7.6.29 refused this with
     # "'departments' key holds dict, expected a list" and failed Phase 6c.
     assert normalize_departments(KEYED_ENVELOPE) == [
-        {"name": "Account Management", "id": "account-management-dept",
-         "slug": "account-management-dept"},
-        {"name": "App Development", "id": "app-development-dept",
-         "slug": "app-development-dept"},
+        {"name": "Account Management", "folder": "account-management",
+         "id": "account-management", "slug": "account-management"},
+        {"name": "App Development", "folder": "app-development",
+         "id": "app-development", "slug": "app-development"},
     ]
 
 
 def test_folding_keeps_an_entrys_own_id_and_only_fills_what_is_missing():
     assert normalize_departments(
         {"departments": {"marketing": {"id": "dept-marketing", "name": "Marketing"}}}
-    ) == [{"id": "dept-marketing", "name": "Marketing", "slug": "marketing"}]
+    ) == [{"id": "dept-marketing", "name": "Marketing", "slug": "dept-marketing"}]
     assert normalize_departments(
         {"departments": {"marketing": {"id": "dept-marketing", "slug": "mktg"}}}
     ) == [{"id": "dept-marketing", "slug": "mktg"}]
@@ -144,7 +191,7 @@ def test_sync_read_json_reads_the_slug_keyed_envelope(tmp_path):
     # Phase 6c's load boundary. This is the payload that made v7.6.29 print
     # "[sync] FATAL: departments.json: 'departments' key holds dict, expected a list".
     got = _sync._read_json(_write(tmp_path, KEYED_ENVELOPE))
-    assert [d["id"] for d in got] == ["account-management-dept", "app-development-dept"]
+    assert [d["id"] for d in got] == ["account-management", "app-development"]
 
 
 def test_sync_read_json_refuses_a_metadata_envelope(tmp_path):
@@ -246,10 +293,19 @@ SYNC_SCRIPT = os.path.join(_SCRIPTS, "sync-departments-from-build-state.py")
 FIXTURE_SLUG = "zzz-pytest-fixture-co"
 
 # 34 departments keyed by slug under the `departments` key — the client's shape.
+# Department 07's folder deliberately does NOT match its key minus "-dept", so
+# these cases fail if the fold falls back to the key for an entry that names its
+# own folder. Every other entry mirrors the client artifact exactly.
 KEYED_34 = {
-    f"department-{i:02d}-dept": {"name": f"Department {i:02d}", "emoji": "\U0001f4c1"}
+    f"department-{i:02d}-dept": {
+        "name": f"Department {i:02d}",
+        "folder": ("department-07-renamed" if i == 7 else f"department-{i:02d}"),
+        "emoji": "\U0001f4c1",
+    }
     for i in range(1, 35)
 }
+# The bare slug each entry actually owns — what both readers must agree on.
+BARE_34 = [v["folder"] for v in KEYED_34.values()]
 CLIENT_ARTIFACT_34 = {
     "company": "Acme", "total_departments": 34, "total_roles": 416,
     "departments": KEYED_34,
@@ -258,12 +314,13 @@ CLIENT_ARTIFACT_34 = {
 # departments as a flat list, plus one department the box owner added by hand.
 CUSTOM_ENTRY = {"id": "custom-ops-dept", "name": "Custom Ops", "emoji": "\u2699\ufe0f"}
 EXISTING_33_PLUS_CUSTOM = [
-    {"id": k, "name": v["name"], "emoji": v["emoji"]}
-    for k, v in list(KEYED_34.items())[:33]
+    {"id": v["folder"], "name": v["name"], "emoji": v["emoji"]}
+    for v in list(KEYED_34.values())[:33]
 ] + [CUSTOM_ENTRY]
 
 
-def _run_sync(tmp_path, artifact, *extra_args, existing=EXISTING_33_PLUS_CUSTOM):
+def _run_sync(tmp_path, artifact, *extra_args, existing=EXISTING_33_PLUS_CUSTOM,
+              db=None, times=1):
     """Drive the real sync CLI against a hermetic ZHC root. Returns (proc, config_path).
 
     `MASTER_FILES_DIR` is the same override the resolver honors, and `HOME` and
@@ -286,10 +343,13 @@ def _run_sync(tmp_path, artifact, *extra_args, existing=EXISTING_33_PLUS_CUSTOM)
     for k in ("DASHBOARD_DB_PATH", "DATABASE_PATH", "COMPANY_SLUG"):
         env.pop(k, None)
 
-    proc = subprocess.run(
-        [sys.executable, SYNC_SCRIPT, "--config", str(config),
-         "--company-slug", FIXTURE_SLUG, *extra_args],
-        cwd=str(home), env=env, capture_output=True, text=True, timeout=180)
+    argv = [sys.executable, SYNC_SCRIPT, "--config", str(config),
+            "--company-slug", FIXTURE_SLUG, *extra_args]
+    if db is not None:
+        argv += ["--db", str(db)]
+    for _ in range(times):
+        proc = subprocess.run(argv, cwd=str(home), env=env,
+                              capture_output=True, text=True, timeout=180)
     return proc, config
 
 
@@ -302,10 +362,11 @@ def test_merge_writes_a_list_from_the_slug_keyed_artifact_and_keeps_custom_entri
     # 33 updated in place + the 34th appended + the owner's custom department kept.
     assert len(written) == 35
     ids = [e["id"] for e in written]
-    assert set(ids) == set(KEYED_34) | {"custom-ops-dept"}
+    assert set(ids) == set(BARE_34) | {"custom-ops-dept"}
     assert len(ids) == len(set(ids)), "no duplicate ids"
-    # the appended one carries the KEY as its id and the value's name
-    appended = next(e for e in written if e["id"] == "department-34-dept")
+    # every id is the entry's own folder, never the "-dept" map key
+    assert not [i for i in ids if i.endswith("-dept") and i != "custom-ops-dept"]
+    appended = next(e for e in written if e["id"] == "department-34")
     assert appended["name"] == "Department 34"
     # the custom department the box owner added is untouched
     assert CUSTOM_ENTRY in written
@@ -321,7 +382,7 @@ def test_the_default_overwrite_path_also_writes_a_list_from_the_same_artifact(tm
 
     written = json.loads(config.read_text())
     assert isinstance(written, list), f"config must be a LIST, got {type(written).__name__}"
-    assert [e["id"] for e in written] == list(KEYED_34)
+    assert [e["id"] for e in written] == BARE_34
 
 
 @pytest.mark.parametrize("bad", [
@@ -373,4 +434,25 @@ def test_without_the_normalizer_the_object_shape_reaches_the_config_file(tmp_pat
     _sync.write_config(str(healthy), normalized)
     written = json.loads(healthy.read_text())
     assert isinstance(written, list)
-    assert [e["id"] for e in written] == list(KEYED_34)
+    assert [e["id"] for e in written] == BARE_34
+
+
+def test_the_sync_cli_seeds_bare_slugs_and_is_idempotent_across_two_runs(tmp_path):
+    """End to end on a hermetic tree: the workspaces table gets ONE row per
+    department, slugged from the entry's own folder, and a second identical run
+    adds nothing. Folding on the "-dept" map key put a second row beside every
+    existing bare-slug row — 40 board columns became 74 — and `_canonical_dept_slug`
+    strips only a `dept-` PREFIX, so nothing collapsed the pair.
+    """
+    db = tmp_path / "mission-control.db"
+    proc, _ = _run_sync(tmp_path, CLIENT_ARTIFACT_34, existing=[], db=db, times=2)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    conn = sqlite3.connect(str(db))
+    slugs = [r[0] for r in conn.execute("SELECT id FROM workspaces").fetchall()]
+    conn.close()
+
+    assert sorted(slugs) == sorted(BARE_34), f"expected the 34 bare slugs, got {sorted(slugs)}"
+    assert len(slugs) == len(set(slugs)), "a second run must not duplicate a workspace row"
+    assert not [s for s in slugs if s.endswith("-dept")], (
+        "no workspace may be slugged from the '-dept' map key")

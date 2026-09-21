@@ -74,17 +74,53 @@ function isDepartmentMap(value: unknown): value is Record<string, Record<string,
   );
 }
 
+const DEPT_SUFFIX = '-dept';
+
+/** The first value that is a non-empty string, trimmed. `null` if none is. */
+function firstSlug(...values: unknown[]): string | null {
+  for (const v of values) {
+    if (typeof v === 'string' && v.trim()) return v.trim();
+  }
+  return null;
+}
+
 /**
- * Fold a slug-keyed department map into a list, PRESERVING key order. The key is
- * the department's slug, so it fills `id` and `slug` — but only when the entry
- * carries none of its own. An entry's own `id` always wins.
+ * Fold a slug-keyed department map into a list, PRESERVING key order.
+ *
+ * The ENTRY'S OWN IDENTITY WINS, in this precedence:
+ *
+ *     id  ->  slug  ->  folder  ->  the map key
+ *
+ * The map key is used ONLY when the entry carries none of the three, and a slug
+ * taken FROM THE KEY has a trailing `-dept` removed. An entry's own value is
+ * NEVER rewritten — not trimmed, not stripped.
+ *
+ * Why the key loses: a real client artifact is keyed `<name>-dept` while each
+ * entry names its actual folder, e.g. key `account-management-dept` holding
+ * `{"name": "Account Management", "folder": "account-management", …}`. Folding
+ * on the key alone slugged all 34 departments `…-dept` while seed-workspaces.py
+ * read the bare slug off the entry — two readers, two slugs for one department,
+ * and since only a `dept-` PREFIX is canonicalized away, nothing collapsed the
+ * pair: the board gained a duplicate workspace row per department (40 → 74).
+ *
+ * `id` and `slug` are filled from the resolved slug only when the entry carries
+ * none of its own.
  */
 function foldKeyed(map: Record<string, Record<string, unknown>>): unknown[] {
-  return Object.entries(map).map(([key, value]) => ({
-    ...value,
-    id: value.id ?? key,
-    slug: value.slug ?? key,
-  }));
+  return Object.entries(map).map(([key, value]) => {
+    let resolved = firstSlug(value.id, value.slug, value.folder);
+    if (resolved === null) {
+      resolved = key.trim();
+      if (resolved.endsWith(DEPT_SUFFIX) && resolved.length > DEPT_SUFFIX.length) {
+        resolved = resolved.slice(0, -DEPT_SUFFIX.length);
+      }
+    }
+    return {
+      ...value,
+      id: firstSlug(value.id) === null ? resolved : value.id,
+      slug: firstSlug(value.slug) === null ? resolved : value.slug,
+    };
+  });
 }
 
 /**
@@ -95,13 +131,13 @@ function foldKeyed(map: Record<string, Record<string, unknown>>): unknown[] {
  *   - `{ departments: [entry, ...], … }`      → the wrapped list
  *   - `{ departments: { "<slug>": {…}, … }, … }` → the wrapped department MAP,
  *     folded by the same rule as a top-level one
- *   - `{ "<slug>": {…}, … }`                  → folded to a list with the key as
- *     `id`, ONLY when the object is non-empty and EVERY value is an object. A
- *     scalar value (a company name, a role count) marks the object as a metadata
- *     envelope, never a department map.
+ *   - `{ "<slug>": {…}, … }`                  → folded to a list, ONLY when the
+ *     object is non-empty and EVERY value is an object. A scalar value (a
+ *     company name, a role count) marks the object as a metadata envelope, never
+ *     a department map.
  *
- * Folding fills `id` and `slug` from the key, but only when the entry carries
- * none of its own — an entry's own `id` always wins. Key order is preserved.
+ * Folding resolves each entry's slug as `id` → `slug` → `folder` → the map key,
+ * so the ENTRY's own identity wins; see `foldKeyed`. Key order is preserved.
  *
  * Anything else is refused. `path` is echoed into the reason so an operator can
  * find the file.

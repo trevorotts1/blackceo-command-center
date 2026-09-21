@@ -45,8 +45,8 @@ const KEYED_ENVELOPE = {
   total_departments: 2,
   total_roles: 18,
   departments: {
-    'account-management-dept': { name: 'Account Management' },
-    'app-development-dept': { name: 'App Development' },
+    'account-management-dept': { name: 'Account Management', folder: 'account-management' },
+    'app-development-dept': { name: 'App Development', folder: 'app-development' },
   },
 };
 
@@ -90,9 +90,70 @@ test("a 'departments' key holding a dict-of-dicts is folded the same way", () =>
   const result = normalizeDepartmentsPayload(KEYED_ENVELOPE);
   assert.equal(result.ok, true);
   assert.deepEqual(result.ok && result.departments, [
-    { name: 'Account Management', id: 'account-management-dept', slug: 'account-management-dept' },
-    { name: 'App Development', id: 'app-development-dept', slug: 'app-development-dept' },
+    {
+      name: 'Account Management',
+      folder: 'account-management',
+      id: 'account-management',
+      slug: 'account-management',
+    },
+    {
+      name: 'App Development',
+      folder: 'app-development',
+      id: 'app-development',
+      slug: 'app-development',
+    },
   ]);
+});
+
+test("the entry's own folder beats a '-dept' suffixed map key", () => {
+  // The client shape that put 34 duplicate workspace rows on a board: the map is
+  // keyed "<name>-dept" while the entry names its real folder. The ENTRY wins.
+  const result = normalizeDepartmentsPayload({
+    'account-management-dept': { name: 'Account Management', folder: 'account-management' },
+  });
+  assert.deepEqual(result.ok && result.departments, [
+    {
+      name: 'Account Management',
+      folder: 'account-management',
+      id: 'account-management',
+      slug: 'account-management',
+    },
+  ]);
+});
+
+test('slug precedence is id, then slug, then folder, then the map key', () => {
+  const one = (entry: Record<string, unknown>, key = 'account-management-dept') => {
+    const r = normalizeDepartmentsPayload({ [key]: entry });
+    return (r.ok ? r.departments[0] : {}) as Record<string, unknown>;
+  };
+  const all = { id: 'own-id', slug: 'own-slug', folder: 'own-folder' };
+  assert.equal(one(all).id, 'own-id');
+  assert.equal(one(all).slug, 'own-slug');
+  assert.equal(one({ slug: 'own-slug', folder: 'own-folder' }).id, 'own-slug');
+  assert.equal(one({ folder: 'own-folder' }).id, 'own-folder');
+  assert.equal(one({ folder: 'own-folder' }).slug, 'own-folder');
+  // nothing of its own: the key, with its '-dept' suffix stripped
+  assert.equal(one({ name: 'Account Management' }).id, 'account-management');
+  // an empty string is not an identity
+  assert.equal(one({ id: '', folder: 'own-folder' }).id, 'own-folder');
+});
+
+test("a '-dept' suffix is stripped only when the slug came from the key", () => {
+  const slugOf = (payload: unknown) => {
+    const r = normalizeDepartmentsPayload(payload);
+    return (r.ok ? (r.departments[0] as Record<string, unknown>).slug : undefined);
+  };
+  assert.equal(slugOf({ 'billing-dept': { name: 'Billing' } }), 'billing');
+  // the entry's OWN value is never rewritten, suffix and all
+  assert.equal(slugOf({ 'billing-dept': { folder: 'billing-dept' } }), 'billing-dept');
+  assert.equal(slugOf({ 'billing-dept': { slug: 'billing-dept' } }), 'billing-dept');
+  // a key that is only the suffix is left alone
+  assert.equal(slugOf({ '-dept': { name: 'Odd' } }), '-dept');
+});
+
+test('a key-only entry still keeps a plain key', () => {
+  const r = normalizeDepartmentsPayload({ marketing: { name: 'Marketing' } });
+  assert.equal(r.ok && (r.departments[0] as Record<string, unknown>).id, 'marketing');
 });
 
 test("folding keeps an entry's own id and only fills what is missing", () => {
@@ -100,7 +161,7 @@ test("folding keeps an entry's own id and only fills what is missing", () => {
     departments: { marketing: { id: 'dept-marketing', name: 'Marketing' } },
   });
   assert.deepEqual(withId.ok && withId.departments, [
-    { id: 'dept-marketing', name: 'Marketing', slug: 'marketing' },
+    { id: 'dept-marketing', name: 'Marketing', slug: 'dept-marketing' },
   ]);
   const withBoth = normalizeDepartmentsPayload({
     departments: { marketing: { id: 'dept-marketing', slug: 'mktg' } },
