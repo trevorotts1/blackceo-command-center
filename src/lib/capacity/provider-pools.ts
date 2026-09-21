@@ -369,43 +369,59 @@ export function probePool(
 }
 
 /**
- * Walk the agent's OWN model list — primary first, then its configured
- * fallbacks — and take the first pool with room.
+ * Probe the agent's OWN model list — primary first, then its configured
+ * fallbacks — WITHOUT choosing among them.
  *
- * SOVEREIGNTY: the chain comes from the agent's own OpenClaw config. No model
- * is ever added to it here, and no model outside it is ever chosen.
+ * THE ACCOUNTING STAYS ON THE PRIMARY. An earlier draft of this module let a
+ * full primary pool "overflow": it debited the first fallback pool with room and
+ * dispatched anyway, on the theory that the runtime would land the run there
+ * because the primary was saturated. That theory does not survive contact with
+ * the runtime. The OpenClaw runtime advances its fallback chain ONLY on
+ * `candidate_failed` or `skip_candidate` (read from the installed dist), i.e.
+ * only after an attempt actually fails — it has no knowledge of this box's
+ * pools and cannot pre-empt on capacity. So the run always ATTEMPTS the primary
+ * first, and it falls back only if that attempt is refused.
  *
- * WHY OVERFLOW IS SOUND WITHOUT A PER-RUN MODEL OVERRIDE: the gateway's
- * `chat.send` rejects a `model` parameter outright (see the contract note in
- * the dispatch route), so the Command Center cannot force the fallback. It does
- * not have to. The OpenClaw runtime walks THIS SAME `model.fallbacks` list
- * itself, and `rate_limit` is one of its own failover reasons — so when the
- * primary is genuinely at its plan limit the run lands on the first fallback
- * anyway. Choosing that pool here is therefore a PREDICTION of what the runtime
- * will do, not an instruction to it, and it is right exactly when the pool model
- * is right. The alternative — refusing to dispatch at all while the agent holds
- * a perfectly good fallback — stalls work for no gain.
+ * That makes the overflow debit a lie in exactly the case the pool exists to
+ * catch. Our limit is a number in this repo, not the provider's; when it is
+ * conservative, the primary accepts the run, the primary now carries one more
+ * concurrent request than we configured, and our books credit that load to a
+ * fallback that is doing nothing. The pool would under-count the one
+ * subscription it is meant to protect — and the error is anti-conservative,
+ * not safe.
+ *
+ * So the fallbacks are read for VISIBILITY only: a refusal names which of them
+ * have room, which is what the owner needs in order to act (re-point the
+ * agent's primary, or raise the plan). Nothing is ever added to the list, and
+ * no pool but the primary is ever debited.
  */
-export function choosePool(
+export function probeChain(
   chain: readonly string[],
   db: Database.Database,
   excludeTaskId?: string,
-): { chosen: PoolProbe | null; probes: PoolProbe[]; overflow: boolean } {
+): { primary: PoolProbe; fallbacks: PoolProbe[] } {
   const models = chain.length ? chain : [''];
-  const probes: PoolProbe[] = [];
-  for (const model of models) {
-    const probe = probePool(providerOf(model), db, excludeTaskId, model || null);
-    probes.push(probe);
-    if (probe.room) return { chosen: probe, probes, overflow: probes.length > 1 };
-  }
-  return { chosen: null, probes, overflow: false };
+  const probes = models.map((model) => probePool(providerOf(model), db, excludeTaskId, model || null));
+  return { primary: probes[0], fallbacks: probes.slice(1) };
 }
 
-/** "Ollama Cloud 3/3, OpenRouter 100/100" — what the operator sees on the card. */
-export function poolsFullSummary(probes: readonly PoolProbe[]): string {
-  return probes
-    .map((p) => `${providerLabel(p.provider)} ${p.running}/${p.limit}${p.cooling_until ? ' (cooling)' : ''}`)
-    .join(', ');
+/**
+ * What the operator sees on a queued card: why the primary is refusing, and
+ * where there IS room among the models this agent already declares.
+ *
+ * "Ollama Cloud 3/3 full; Agnes AI 1/50 and OpenRouter 0/100 have room" — the
+ * second half is the actionable part, and it is deliberately NOT a promise that
+ * the run will go there.
+ */
+export function poolPressureSummary(primary: PoolProbe, fallbacks: readonly PoolProbe[]): string {
+  const head = `${providerLabel(primary.provider)} ${primary.running}/${primary.limit}${primary.cooling_until ? ' (cooling)' : ' full'}`;
+  const open = fallbacks.filter((p) => p.room);
+  if (!open.length) {
+    return fallbacks.length
+      ? `${head}; no fallback has room (${fallbacks.map((p) => `${providerLabel(p.provider)} ${p.running}/${p.limit}`).join(', ')})`
+      : `${head}; this agent declares no fallback`;
+  }
+  return `${head}; ${open.map((p) => `${providerLabel(p.provider)} ${p.running}/${p.limit}`).join(' and ')} have room`;
 }
 
 // ── Observability ────────────────────────────────────────────────────────────

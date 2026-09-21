@@ -43,8 +43,8 @@ import {
   effectiveLimit,
   growProviderPools,
   noteProviderRateLimit,
-  choosePool,
-  poolsFullSummary,
+  probeChain,
+  poolPressureSummary,
   DEFAULT_PROVIDER_CONCURRENCY,
   PROVIDER_COOLDOWN_MS,
   PROVIDER_RECOVERY_MS,
@@ -118,9 +118,11 @@ test('a pool admits up to its limit and refuses beyond it, naming the pool and t
     assert.ok(claim(db, 't3', 'e3', 'ollama').execution, 'slot 3 — three agents-worth of work on one agent');
     const refused = claim(db, 't4', 'e4', 'ollama');
     assert.equal(refused.execution, undefined);
-    assert.equal(refused.reason, 'all_pools_full', 'one model in the chain, so a full pool IS every pool');
+    assert.equal(refused.reason, 'provider_at_capacity');
     assert.equal(refused.provider, 'ollama');
-    assert.equal(refused.summary, 'Ollama Cloud 3/3');
+    assert.equal(refused.running, 3);
+    assert.equal(refused.limit, 3);
+    assert.equal(refused.summary, 'Ollama Cloud 3/3 full; this agent declares no fallback');
   } finally {
     db.close();
   }
@@ -157,7 +159,7 @@ test('two providers are independent: a full Ollama pool does not touch DeepSeek'
     for (const [taskId, eid] of [['t1', 'e1'], ['t2', 'e2'], ['t3', 'e3']]) {
       assert.ok(claim(db, taskId, eid, 'ollama').execution);
     }
-    assert.equal(claim(db, 't4', 'e4', 'ollama').reason, 'all_pools_full');
+    assert.equal(claim(db, 't4', 'e4', 'ollama').reason, 'provider_at_capacity');
     assert.ok(claim(db, 't5', 'e5', 'deepseek').execution, 'DeepSeek Direct has its own, far larger plan');
     assert.ok(claim(db, 't6', 'e6', 'deepseek').execution);
   } finally {
@@ -174,7 +176,7 @@ test('an unset agent ceiling is NO ceiling — the agent takes the whole pool', 
     assert.ok(claim(db, 't1', 'e1', 'ollama').execution);
     assert.ok(claim(db, 't2', 'e2', 'ollama').execution, 'ONE agent, two live jobs — impossible under v7.6.27');
     assert.ok(claim(db, 't3', 'e3', 'ollama').execution);
-    assert.equal(claim(db, 't4', 'e4', 'ollama').reason, 'all_pools_full', 'the pool, not the agent, is what stops it');
+    assert.equal(claim(db, 't4', 'e4', 'ollama').reason, 'provider_at_capacity', 'the pool, not the agent, is what stops it');
   } finally {
     db.close();
   }
@@ -255,7 +257,7 @@ test('a 429 from the gateway shuts the whole pool, and it reopens on its own', (
     );
 
     const refused = claim(db, 't2', 'e2', 'ollama');
-    assert.equal(refused.reason, 'all_pools_full');
+    assert.equal(refused.reason, 'provider_at_capacity');
     assert.equal(refused.provider, 'ollama');
     assert.match(refused.summary!, /cooling/, 'the card says the pool is cooling, not merely busy');
     // A DIFFERENT pool is untouched by one provider's refusal.
@@ -560,8 +562,9 @@ test('the learned limit is what reserveExecution enforces', () => {
     assert.ok(claim(db, 't1', 'e1', 'ollama').execution);
     assert.ok(claim(db, 't2', 'e2', 'ollama').execution);
     const refused = claim(db, 't3', 'e3', 'ollama');
-    assert.equal(refused.reason, 'all_pools_full');
-    assert.equal(refused.summary, 'Ollama Cloud 2/2', 'the card shows the LEARNED limit, not the brochure one');
+    assert.equal(refused.reason, 'provider_at_capacity');
+    assert.equal(refused.limit, 2, 'the LEARNED limit is what bites, not the brochure one');
+    assert.match(refused.summary!, /^Ollama Cloud 2\/2 full/);
   } finally {
     db.close();
   }
@@ -614,109 +617,74 @@ test('lowering the configured plan takes effect at once, without waiting for a 4
   }
 });
 
-// ── Fallback overflow (v7.6.37 C) ────────────────────────────────────────────
+// ── The accounting stays on the PRIMARY (v7.6.40 correction) ────────────────
+//
+// An earlier draft let a full primary pool "overflow": it debited the first
+// fallback pool with room and dispatched anyway, betting the runtime would land
+// the run there. The runtime does not work that way. It advances its fallback
+// chain only on `candidate_failed` / `skip_candidate` — after an attempt FAILS
+// — and knows nothing about this box's pools, so every run attempts the primary
+// first. Debiting a fallback while the run hits the primary under-counts the one
+// subscription the pool protects, and errs in the UNSAFE direction.
 
 const CHAIN = ['ollama/deepseek-v4.1-flash:cloud', 'agnes/agnes-3.0-flash', 'openrouter/meta/muse-spark-1.3-contributor'];
 
-test('a full PRIMARY pool overflows to the agent own next model, it does not refuse', () => {
+test('a reserve always debits the PRIMARY pool, never a fallback', () => {
   const db = fixture();
   try {
-    // Fill Ollama with three other cards.
+    const reserved = claim(db, 't1', 'e1', CHAIN);
+    assert.ok(reserved.execution);
+    assert.equal(reserved.provider, 'ollama', 'the primary is what the run will attempt');
+    assert.equal(latestExecution('t1', db)!.provider, 'ollama');
+    assert.equal(
+      (db.prepare("SELECT COUNT(*) AS n FROM task_executions WHERE provider='agnes'").get() as { n: number }).n,
+      0,
+      'a fallback pool is never debited for a run that has not failed over to it',
+    );
+  } finally {
+    db.close();
+  }
+});
+
+test('a full PRIMARY refuses even when a fallback has room — and says where the room is', () => {
+  const db = fixture();
+  try {
     for (const [taskId, eid] of [['t1', 'e1'], ['t2', 'e2'], ['t3', 'e3']]) {
       assert.ok(claim(db, taskId, eid, 'ollama').execution);
     }
-    const overflowed = claim(db, 't4', 'e4', CHAIN);
-    assert.ok(overflowed.execution, 'work does not stall while the agent holds a usable fallback');
-    assert.equal(overflowed.provider, 'agnes', 'the FIRST fallback with room wins');
-    assert.equal(overflowed.overflowModel, 'agnes/agnes-3.0-flash');
-    assert.equal(overflowed.primaryModel, 'ollama/deepseek-v4.1-flash:cloud');
-    assert.equal(latestExecution('t4', db)!.provider, 'agnes', 'and it is DEBITED to the pool it will actually use');
+    const refused = claim(db, 't4', 'e4', CHAIN);
+    assert.equal(refused.execution, undefined, 'dispatching here would put a 4th run on a 3-slot plan');
+    assert.equal(refused.reason, 'provider_at_capacity');
+    assert.equal(refused.provider, 'ollama');
+    assert.equal(refused.running, 3);
+    assert.equal(refused.limit, 3);
+    assert.deepEqual(refused.fallbacksWithRoom, ['agnes', 'openrouter'], 'the owner-ask layer reads this');
+    assert.equal(refused.summary, 'Ollama Cloud 3/3 full; Agnes AI 0/50 and OpenRouter 0/100 have room');
+    assert.equal(
+      (db.prepare("SELECT COUNT(*) AS n FROM task_executions WHERE task_id='t4'").get() as { n: number }).n,
+      0,
+      'nothing was reserved anywhere',
+    );
   } finally {
     db.close();
   }
 });
 
-test('overflow skips a full fallback and takes the first one with room', () => {
-  const db = fixture();
-  try {
-    // Ollama full (3/3) AND Agnes calibrated down to 1 and already occupied.
-    for (const [taskId, eid] of [['t1', 'e1'], ['t2', 'e2'], ['t3', 'e3']]) {
-      assert.ok(claim(db, taskId, eid, 'ollama').execution);
-    }
-    db.prepare("INSERT INTO provider_pool_state(provider,effective_limit,updated_at) VALUES('agnes',1,'2026-09-21T00:00:00.000Z')").run();
-    assert.ok(claim(db, 't5', 'e5', 'agnes').execution, 'the one Agnes slot');
-
-    const overflowed = claim(db, 't4', 'e4', CHAIN);
-    assert.ok(overflowed.execution);
-    assert.equal(overflowed.provider, 'openrouter', 'past the full primary AND the full first fallback');
-    assert.equal(overflowed.overflowModel, 'openrouter/meta/muse-spark-1.3-contributor');
-  } finally {
-    db.close();
-  }
-});
-
-test('no overflow is reported when the primary had room all along', () => {
-  const db = fixture();
-  try {
-    const normal = claim(db, 't1', 'e1', CHAIN);
-    assert.ok(normal.execution);
-    assert.equal(normal.provider, 'ollama');
-    assert.equal(normal.overflowModel, undefined, 'the ordinary path is not an overflow');
-    assert.equal(normal.primaryModel, undefined);
-  } finally {
-    db.close();
-  }
-});
-
-test('a cooling primary overflows rather than stalling', () => {
-  const db = fixture();
-  try {
-    noteProviderRateLimit('ollama', db);
-    assert.ok(providerCoolingUntil('ollama', db), 'the primary is shut');
-    const overflowed = claim(db, 't1', 'e1', CHAIN);
-    assert.ok(overflowed.execution, 'a shut primary is a reason to move, not a reason to stop');
-    assert.equal(overflowed.provider, 'agnes');
-  } finally {
-    db.close();
-  }
-});
-
-test('sovereignty: overflow never leaves the agent own list', () => {
-  const db = fixture();
-  try {
-    // A one-model agent. Its pool is full, and there is nowhere legitimate to go.
-    for (const [taskId, eid] of [['t1', 'e1'], ['t2', 'e2'], ['t3', 'e3']]) {
-      assert.ok(claim(db, taskId, eid, 'ollama').execution);
-    }
-    const refused = claim(db, 't4', 'e4', ['ollama/deepseek-v4.1-flash:cloud']);
-    assert.equal(refused.execution, undefined, 'no model is ever invented to keep the board moving');
-    assert.equal(refused.reason, 'all_pools_full');
-    assert.equal(refused.probes!.length, 1, 'exactly one pool was tried, because exactly one was allowed');
-  } finally {
-    db.close();
-  }
-});
-
-// ── Refusal only when everything is full (v7.6.37 D) ─────────────────────────
-
-test('all_pools_full names every pool and its depth, so the card says what to upgrade', () => {
+test('the refusal reports a fallback that is ALSO full as having no room', () => {
   const db = fixture();
   try {
     process.env.PROVIDER_CONCURRENCY_AGNES = '1';
     process.env.PROVIDER_CONCURRENCY_OPENROUTER = '1';
     try {
-      assert.ok(claim(db, 't1', 'e1', 'ollama').execution);
-      assert.ok(claim(db, 't2', 'e2', 'ollama').execution);
-      assert.ok(claim(db, 't3', 'e3', 'ollama').execution);
+      for (const [taskId, eid] of [['t1', 'e1'], ['t2', 'e2'], ['t3', 'e3']]) {
+        assert.ok(claim(db, taskId, eid, 'ollama').execution);
+      }
       assert.ok(claim(db, 't5', 'e5', 'agnes').execution);
       assert.ok(claim(db, 't6', 'e6', 'openrouter').execution);
-
       const refused = claim(db, 't4', 'e4', CHAIN);
-      assert.equal(refused.execution, undefined);
-      assert.equal(refused.reason, 'all_pools_full');
-      assert.equal(refused.provider, 'ollama', 'the PRIMARY pool is named first');
-      assert.equal(refused.summary, 'Ollama Cloud 3/3, Agnes AI 1/1, OpenRouter 1/1');
-      assert.equal(refused.probes!.length, 3, 'every model in the chain was tried before refusing');
+      assert.equal(refused.reason, 'provider_at_capacity');
+      assert.deepEqual(refused.fallbacksWithRoom, []);
+      assert.equal(refused.summary, 'Ollama Cloud 3/3 full; no fallback has room (Agnes AI 1/1, OpenRouter 1/1)');
     } finally {
       delete process.env.PROVIDER_CONCURRENCY_AGNES;
       delete process.env.PROVIDER_CONCURRENCY_OPENROUTER;
@@ -726,13 +694,59 @@ test('all_pools_full names every pool and its depth, so the card says what to up
   }
 });
 
-test('the summary marks a cooling pool differently from a merely busy one', () => {
+test('an agent with no fallback says so, rather than implying one exists', () => {
+  const db = fixture();
+  try {
+    for (const [taskId, eid] of [['t1', 'e1'], ['t2', 'e2'], ['t3', 'e3']]) {
+      assert.ok(claim(db, taskId, eid, 'ollama').execution);
+    }
+    const refused = claim(db, 't4', 'e4', ['ollama/deepseek-v4.1-flash:cloud']);
+    assert.equal(refused.reason, 'provider_at_capacity');
+    assert.deepEqual(refused.fallbacksWithRoom, []);
+    assert.equal(refused.summary, 'Ollama Cloud 3/3 full; this agent declares no fallback');
+  } finally {
+    db.close();
+  }
+});
+
+test('a COOLING primary refuses too, and the summary says cooling rather than full', () => {
   const db = fixture();
   try {
     noteProviderRateLimit('ollama', db);
-    const probes = choosePool(['ollama/x'], db).probes;
-    assert.match(poolsFullSummary(probes), /^Ollama Cloud 0\/2 \(cooling\)$/,
-      'shut with nothing running, and the 429 already lowered the limit to 2');
+    const refused = claim(db, 't1', 'e1', CHAIN);
+    assert.equal(refused.execution, undefined);
+    assert.equal(refused.reason, 'provider_at_capacity');
+    assert.match(refused.summary!, /^Ollama Cloud 0\/2 \(cooling\); /);
+    assert.deepEqual(refused.fallbacksWithRoom, ['agnes', 'openrouter']);
+  } finally {
+    db.close();
+  }
+});
+
+test('probeChain reads the whole list but selects nothing', () => {
+  const db = fixture();
+  try {
+    const { primary, fallbacks } = probeChain(CHAIN, db);
+    assert.equal(primary.provider, 'ollama');
+    assert.deepEqual(fallbacks.map((p) => p.provider), ['agnes', 'openrouter']);
+    assert.equal(
+      poolPressureSummary(primary, fallbacks),
+      'Ollama Cloud 0/3 full; Agnes AI 0/50 and OpenRouter 0/100 have room',
+    );
+  } finally {
+    db.close();
+  }
+});
+
+test('sovereignty: the refusal never names a provider outside the agent own list', () => {
+  const db = fixture();
+  try {
+    for (const [taskId, eid] of [['t1', 'e1'], ['t2', 'e2'], ['t3', 'e3']]) {
+      assert.ok(claim(db, taskId, eid, 'ollama').execution);
+    }
+    const refused = claim(db, 't4', 'e4', ['ollama/x', 'agnes/y']);
+    assert.deepEqual(refused.fallbacks!.map((p) => p.provider), ['agnes']);
+    assert.ok(!refused.summary!.includes('DeepSeek'), 'a provider the agent never declared is never suggested');
   } finally {
     db.close();
   }

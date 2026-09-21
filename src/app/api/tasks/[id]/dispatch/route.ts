@@ -843,17 +843,17 @@ If you need help or clarification, ask the orchestrator.`;
     const { checkPersonaDispatchReady } = await import('@/lib/tasks');
     const personaReady = checkPersonaDispatchReady(task.id);
     if (!personaReady.ready) return NextResponse.json({success:false,held:true,reason:personaReady.reason},{status:409});
-    // PROVIDER POOL: the reservation is counted against the subscription the
-    // RUNTIME will use, and may overflow to a fallback the agent already
-    // declares when the primary plan is saturated. Resolved from openclaw.json
-    // the same way FIX-15 resolves the model after the send (the gateway half
-    // needs a session that does not exist yet).
+    // PROVIDER POOL: the reservation is counted against the PRIMARY subscription
+    // — the model the run will actually attempt. Resolved from openclaw.json the
+    // same way FIX-15 resolves the model after the send (the gateway half needs
+    // a session that does not exist yet). The agent's declared fallbacks ride
+    // along only so a refusal can report where there IS room.
     const modelChain = resolveRuntimeModelChainFromConfig(agent, task.workspace_id ?? undefined);
     const claim = reserveExecution(
       {...task,persona_snapshot:personaSendSnapshot,model_chain:modelChain.length ? modelChain : (agent.model ? [agent.model] : [])},
       sessionKey,executionId,
     );
-    if (!claim.execution) return NextResponse.json({success:false,held:true,reason:claim.reason,provider:claim.provider,running:claim.running,limit:claim.limit,pools:claim.summary},{status:409});
+    if (!claim.execution) return NextResponse.json({success:false,held:true,reason:claim.reason,provider:claim.provider,running:claim.running,limit:claim.limit,pools:claim.summary,fallbacksWithRoom:claim.fallbacksWithRoom},{status:409});
     const execution=claim.execution;
     if (!beginExecutionSend(execution)) return NextResponse.json({success:false,held:true,reason:'claim_superseded'},{status:409});
     let acknowledged = false;
