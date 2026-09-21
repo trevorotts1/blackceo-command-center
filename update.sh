@@ -684,7 +684,15 @@ success "Dependencies installed"
 _cc_assert_native_module_usable() {
   local mod="$1"
   local pkg="$INSTALL_DIR/node_modules/$mod"
-  local lib="$pkg/build/Release/$mod.node"
+  # node-gyp names the compiled artifact after binding.gyp's `target_name`, NOT
+  # after the npm package name. better-sqlite3's target_name is
+  # `better_sqlite3`, so the real file is build/Release/better_sqlite3.node.
+  # The original "$mod.node" spelling therefore pointed at a path that has
+  # never existed on ANY correctly installed box, and this guard fataled on
+  # every single one of them — the updater aborted before migrations, build and
+  # restart, fleet-wide, from ed3bcf55a (2026-09-17) until this fix. Map the
+  # hyphens to underscores to name the real artifact.
+  local lib="$pkg/build/Release/${mod//-/_}.node"
   # The defect class is narrow and worth stating: a package that IS installed
   # whose native binary is silently absent. A package that is not installed at
   # all is a different failure, and one npm ci already owns with a non-zero
@@ -695,10 +703,14 @@ _cc_assert_native_module_usable() {
     warn "$mod is not present under $INSTALL_DIR/node_modules -- skipping the native-module check (npm ci reported success, so nothing claims it should be there)."
     return 0
   fi
-  if [ ! -f "$lib" ]; then
-    fatal "npm ci completed but $mod has no compiled binary at $lib. postinstall's 'npm rebuild $mod' exits 0 even when it compiles nothing, so its success is not evidence. Run 'cd $INSTALL_DIR/node_modules/$mod && npx node-gyp rebuild' and re-run the updater; migrations, build and restart were not run."
-  fi
-  if ! "$CC_NODE_BIN" -e "
+  # LOADING IT IS THE VERDICT. A derived path is a guess about someone else's
+  # build config — the guess above is now right for better-sqlite3, but getting
+  # it wrong is exactly what caused this outage, so it must not be able to
+  # cause another. Ask the resolved node whether the module actually loads and
+  # executes SQLite; a box that answers yes is a working box no matter where
+  # its binary sits (a prebuild can land outside build/Release). $lib is only
+  # consulted afterwards, to choose which remedy the operator is handed.
+  if "$CC_NODE_BIN" -e "
     const { createRequire } = require('module');
     const req = createRequire(process.argv[1] + '/node_modules/');
     let M = req(process.argv[2]);
@@ -706,9 +718,13 @@ _cc_assert_native_module_usable() {
     const db = new M(':memory:');
     try { if (db.prepare('SELECT 42 AS a').get().a !== 42) process.exit(3); } finally { db.close(); }
   " "$INSTALL_DIR" "$mod" >/dev/null 2>&1; then
-    fatal "$mod is present at $lib but cannot be loaded and used by $CC_NODE_BIN ($("$CC_NODE_BIN" --version 2>/dev/null || echo unknown), module ABI $("$CC_NODE_BIN" -p process.versions.modules 2>/dev/null || echo unknown)). This is the native ABI mismatch that crash-loops the Command Center. Run 'cd $INSTALL_DIR/node_modules/$mod && npx node-gyp rebuild' with that same node and re-run the updater; migrations, build and restart were not run."
+    success "Native module $mod verified: loads and executes SQLite under $CC_NODE_BIN"
+    return 0
   fi
-  success "Native module $mod verified: compiled binary present and usable by $CC_NODE_BIN"
+  if [ ! -f "$lib" ]; then
+    fatal "npm ci completed but $mod has no compiled binary at $lib and does not load. postinstall's 'npm rebuild $mod' exits 0 even when it compiles nothing, so its success is not evidence. Run 'cd $INSTALL_DIR/node_modules/$mod && npx node-gyp rebuild' and re-run the updater; migrations, build and restart were not run."
+  fi
+  fatal "$mod is present at $lib but cannot be loaded and used by $CC_NODE_BIN ($("$CC_NODE_BIN" --version 2>/dev/null || echo unknown), module ABI $("$CC_NODE_BIN" -p process.versions.modules 2>/dev/null || echo unknown)). This is the native ABI mismatch that crash-loops the Command Center. Run 'cd $INSTALL_DIR/node_modules/$mod && npx node-gyp rebuild' with that same node and re-run the updater; migrations, build and restart were not run."
 }
 _cc_assert_native_module_usable better-sqlite3
 

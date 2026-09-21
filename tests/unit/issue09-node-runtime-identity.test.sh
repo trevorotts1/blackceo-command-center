@@ -426,42 +426,78 @@ grep -q '_cc_assert_native_module_usable' "$US" \
   || bad "D3: update.sh trusts npm ci's exit code for the native module"
 
 # Behavioural, not just a grep: extract update.sh's own assertion and run it
-# against the three states that matter. The middle case is the defect; the
-# first is why the check is scoped to INSTALLED packages (an absent package is
-# npm ci's failure to report, and firing on it would mean no environment with a
-# stubbed npm could ever run the updater, which is a worse trade than the
-# coverage it buys).
+# against the states that matter. The `absent` case is why the check is scoped
+# to INSTALLED packages (an absent package is npm ci's failure to report, and
+# firing on it would mean no environment with a stubbed npm could ever run the
+# updater, which is a worse trade than the coverage it buys).
+#
+# D3b (2026-09-21 regression lock): the `good` fixture below used to create
+# build/Release/better-sqlite3.node, mirroring the hyphenated name update.sh
+# derived from the package name. node-gyp names the artifact after binding.gyp's
+# target_name, which is `better_sqlite3`, so BOTH the code and this fixture
+# named a file that has never existed on a real box. The guard consequently
+# fataled on every correctly installed box in the fleet and the updater aborted
+# before migrations, build and restart. The fixture now writes the REAL
+# artifact name, so it fails against the pre-fix update.sh and passes with it.
+#
+# The stub node decides whether the module "loads": update.sh treats loading as
+# the verdict and the artifact path only as the choice of remedy, so the
+# no-binary case is driven with a node that CANNOT load it — which is what a
+# real node does when nothing was compiled.
+make_fake_node "$WORK/noload" "v26.8.1" 147
+cat > "$WORK/noload/node" <<'NOLOAD'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version) printf 'v26.8.1\n' ;;
+  -p) printf '147\n' ;;
+  -e) exit 1 ;;   # require() of the native module throws: nothing compiled
+  *) exit 0 ;;
+esac
+NOLOAD
+chmod +x "$WORK/noload/node"
+
 D3_FN="$(sed -n '/^_cc_assert_native_module_usable() {/,/^}/p' "$US")"
 if [[ -z "$D3_FN" ]]; then
   bad "D3: could not extract _cc_assert_native_module_usable from update.sh"
 else
-  d3_run() {  # d3_run <case>; prints SKIP | FATAL | OK
-    local mode="$1" dir="$WORK/d3-$1"
+  d3_run() {  # d3_run <case> [node dir]; prints SKIP | FATAL | OK + the message
+    local mode="$1" node="${2:-$WORK/onpath}" dir="$WORK/d3-$1-$(basename "${2:-onpath}")"
     rm -rf "$dir"; mkdir -p "$dir"
     case "$mode" in
       absent)  : ;;  # no node_modules at all
       nobinary) mkdir -p "$dir/node_modules/better-sqlite3" ;;
       good)    mkdir -p "$dir/node_modules/better-sqlite3/build/Release"
-               : > "$dir/node_modules/better-sqlite3/build/Release/better-sqlite3.node" ;;
+               # The REAL node-gyp artifact name (binding.gyp target_name).
+               : > "$dir/node_modules/better-sqlite3/build/Release/better_sqlite3.node" ;;
     esac
-    INSTALL_DIR="$dir" CC_NODE_BIN="$WORK/onpath/node" bash -c '
+    INSTALL_DIR="$dir" CC_NODE_BIN="$node/node" bash -c '
       set -uo pipefail
-      fatal()   { printf "FATAL\n"; exit 1; }
-      warn()    { printf "SKIP\n"; }
-      success() { printf "OK\n"; }
+      fatal()   { printf "FATAL %s\n" "$*"; exit 1; }
+      warn()    { printf "SKIP %s\n" "$*"; }
+      success() { printf "OK %s\n" "$*"; }
       '"$D3_FN"'
       _cc_assert_native_module_usable better-sqlite3
     ' 2>/dev/null | head -1
   }
-  [[ "$(d3_run absent)" == "SKIP" ]] \
+  [[ "$(d3_run absent)" == SKIP* ]] \
     && ok "D3: a package that is not installed at all is skipped, not fataled" \
     || bad "D3: an absent package fataled; a stubbed-npm environment could never update"
-  [[ "$(d3_run nobinary)" == "FATAL" ]] \
+  D3_NOBIN="$(d3_run nobinary "$WORK/noload")"
+  [[ "$D3_NOBIN" == FATAL* ]] \
     && ok "D3: a package present with NO compiled binary is fatal (the silent-success defect)" \
     || bad "D3: an installed package with no .node file was accepted"
-  [[ "$(d3_run good)" == "OK" ]] \
-    && ok "D3: a package with a loadable binary passes" \
-    || bad "D3: a good install was rejected"
+  [[ "$D3_NOBIN" == *better_sqlite3.node* ]] \
+    && ok "D3b: the remedy names the REAL node-gyp artifact (better_sqlite3.node)" \
+    || bad "D3b: the remedy names '$D3_NOBIN' — the hyphenated guess is back"
+  [[ "$D3_NOBIN" != *better-sqlite3.node* ]] \
+    && ok "D3b: the hyphenated package-name spelling is gone from the artifact path" \
+    || bad "D3b: update.sh still derives build/Release/better-sqlite3.node"
+  [[ "$(d3_run good)" == OK* ]] \
+    && ok "D3b: a REAL install (better_sqlite3.node) passes — the fleet-wide false fatal is fixed" \
+    || bad "D3b: a correctly installed box was rejected; the updater still aborts fleet-wide"
+  [[ "$(d3_run nobinary)" == OK* ]] \
+    && ok "D3b: a module that LOADS is accepted even with no artifact at the derived path" \
+    || bad "D3b: a working module was fataled because a guessed path did not match"
 fi
 
 # ── U1: update.sh ────────────────────────────────────────────────────────────
