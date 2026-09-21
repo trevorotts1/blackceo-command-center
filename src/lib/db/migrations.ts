@@ -7701,6 +7701,42 @@ export const migrations: Migration[] = [
       console.log('[Migration 156] ask-at-capacity ready — asks, batches, owner answers and lane corrections');
     },
   },
+  {
+    // THE MODEL A RUN WAS ACTUALLY PLACED ON.
+    //
+    // Until now the Command Center could only ever attempt an agent's own
+    // `model.primary`: `chat.send` has no `model` field, so a full primary pool
+    // was a refusal and the card queued. `sessions.create` DOES take a model
+    // (verified live against OpenClaw 2026.9.4 — the entry comes back with
+    // providerOverride/modelOverride and `modelOverrideSource: "user"`, and the
+    // run serves on it), so a run can now be PLACED on one of the agent's own
+    // declared fallbacks instead of waiting.
+    //
+    // `placed_model` records which model the session was pinned to, NULL when
+    // the run took the ordinary primary path. It is what makes the pool debit
+    // auditable: a row debited to Agnes must carry the Agnes model it was
+    // pinned to, or the accounting is a claim with nothing behind it.
+    //
+    // `placement_confirmed` is the READBACK, written after the send from the
+    // model the gateway itself reports for the session (the existing FIX-15
+    // resolver, no new call): 1 when the gateway agreed, 0 when it reported
+    // something else, NULL when it could not be asked. A placement nobody
+    // confirmed is not evidence.
+    //
+    // Additive and idempotent.
+    id: '157',
+    name: 'execution_placed_model',
+    up: (db) => {
+      const columns = new Set((db.prepare('PRAGMA table_info(task_executions)').all() as { name: string }[]).map((c) => c.name));
+      if (!columns.size) {
+        console.log('[Migration 157] task_executions absent (minimal fixture); placement columns untouched');
+        return;
+      }
+      if (!columns.has('placed_model')) db.exec('ALTER TABLE task_executions ADD COLUMN placed_model TEXT');
+      if (!columns.has('placement_confirmed')) db.exec('ALTER TABLE task_executions ADD COLUMN placement_confirmed INTEGER');
+      console.log('[Migration 157] executions record the model they were placed on, and whether the gateway confirmed it');
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner

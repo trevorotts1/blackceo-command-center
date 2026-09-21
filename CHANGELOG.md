@@ -1,3 +1,25 @@
+## [v7.6.51] — 2026-09-21 — A run can be placed on one of the agent's own fallbacks instead of waiting
+
+### Added
+- **Real placement, not a prediction.** `chat.send` has no `model` field, so until now a full primary pool meant the card queued and nothing else was possible. `sessions.create` DOES take one — verified live against the installed OpenClaw 2026.9.4 on 2026-09-21: the created entry comes back carrying `providerOverride`, `modelOverride` and `modelOverrideSource: "user"`, a following `chat.send` runs on it, and `chat.history` reports `modelProvider`/`model` as the override while the same payload's `defaults` block still shows the agent's own primary. `OpenClawClient.createSession` now accepts `{key, agentId, model}` and sends them; a fully-qualified `agent:<id>:<session>` key is passed through verbatim (also verified live).
+- **The dispatcher pins before it reserves.** When the agent's own primary cannot take the run and the scorer names a declared fallback that can, the execution's session is created with that model pinned, and only then is the execution reserved. The order matters: a refused override must never leave a debited slot behind.
+- **Migration 157** — `task_executions.placed_model` (which model the session was pinned to, NULL on the ordinary primary path) and `task_executions.placement_confirmed` (the readback: 1 when the gateway agreed, 0 when it reported something else, NULL when it could not be asked). The readback reuses the existing FIX-15 resolver, so it costs no extra call.
+- **The ask gate's answer is now a real action.** `overflow_now` replaces the vaguer `overflow_ok`, which could only ever mean "stop asking and carry on queueing" because the box had no way to put a run anywhere but the primary. The question and the recommendation both name the MODEL that will be pinned, not just the provider, and the recommendation is what silence buys.
+
+### Changed
+- **The pool debited is the pool the run will ATTEMPT.** Ordinarily that is still the chain head — v7.6.42's rule is untouched on the unpinned path, and a full primary with no pin refuses exactly as before. When a pin exists, the run genuinely serves on that model, so debiting the primary would under-count the subscription actually being spent. This is not a re-litigation of v7.6.42: that change was right precisely because the debit was a guess about the runtime's failover. It is not a guess any more.
+
+### Invariant
+- **Only a model the agent itself declares is ever pinned.** The dispatcher checks chain membership before it pins, and `reserveExecution` checks it AGAIN before it honours one — a pin naming a model outside the agent's own chain is ignored and the primary rule applies. Sovereignty cannot be bypassed by whoever constructs the snapshot.
+- **A refusal is never answered with a substitute.** A model outside `agents.defaults.modelPolicy.allow` makes `sessions.create` throw `model not allowed: <id>` (verified live), never silently swap one in. The dispatcher records a `provider_placement_refused` event and falls back to the ordinary primary path, which queues the card with its reason.
+- **A pin is not a bypass.** If the pinned pool is also full, the reserve still refuses, and the refusal names the pool that was actually asked for.
+- **An owner who chose to wait is never overflowed.** `primary_only` suppresses placement, re-read at the pin site so no later edit can turn a "wait" into a placement by accident.
+
+### Tests
+- `tests/unit/provider-placement-2026-09.test.ts` (new, 8 cases, all green): what `createSession` puts on the wire with and without placement options (an unpinned create proven byte-identical to the old call); a full primary with NO pin still refusing and still naming where there is room; a pin moving the debit to the pinned pool and writing the model onto the row that justifies it; an undeclared pin ignored; a pinned-but-also-full pool still refusing; and migration 157's columns.
+- Mutation-proofed, four flips: honouring a pin without chain membership, debiting the chain head anyway, probing the chain head instead of the attempted model, and dropping the model in the client — each turns its own case red.
+
+## [Unreleased] — ask-at-capacity — version assigned at merge — When the overflow costs the owner something, the box asks first
 ## [v7.6.50] — 2026-09-21 — An explicit null is a state, not a missing argument (fixes the long-red u107 case)
 
 ### Fixed

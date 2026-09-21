@@ -922,9 +922,35 @@ export class OpenClawClient extends EventEmitter {
    * session routing/addressing (routing continuity, where needed, already
    * happens by the caller reusing a previously-returned session id, not by
    * re-deriving it from `peer` on every call).
+   *
+   * `opts` carries the three fields a PINNED session needs. `model` is the
+   * whole point: `chat.send` has no `model` field (its params schema is a
+   * closed object without one), so the ONLY way the Command Center can decide
+   * which model serves a run is to set it when the session is created.
+   * Verified live against the installed gateway (OpenClaw 2026.9.4) on
+   * 2026-09-21: `sessions.create {key, agentId, model}` returns an entry
+   * carrying `providerOverride`, `modelOverride` and `modelOverrideSource:
+   * "user"`, a following `chat.send` runs on it, and `chat.history` reports
+   * `modelProvider`/`model` as the override while the same payload's
+   * `defaults` block still shows the agent's own primary. A fully-qualified
+   * `agent:<id>:<session>` key is accepted verbatim, so a caller that already
+   * holds one passes it straight through.
+   *
+   * A model outside `agents.defaults.modelPolicy.allow` is REFUSED — the call
+   * throws `model not allowed: <id>` — never silently replaced. Callers must
+   * treat that throw as "placement is unavailable", never as success.
    */
-  async createSession(channel: string, peer?: string): Promise<OpenClawSessionInfo> {
-    return this.call<OpenClawSessionInfo>('sessions.create', peer ? { label: peer } : {});
+  async createSession(
+    channel: string,
+    peer?: string,
+    opts?: { key?: string; agentId?: string; model?: string },
+  ): Promise<OpenClawSessionInfo> {
+    const params: Record<string, unknown> = {};
+    if (peer) params.label = peer;
+    if (opts?.key) params.key = opts.key;
+    if (opts?.agentId) params.agentId = opts.agentId;
+    if (opts?.model) params.model = opts.model;
+    return this.call<OpenClawSessionInfo>('sessions.create', params);
   }
 
   // Node methods (device capabilities)

@@ -30,6 +30,11 @@ export interface DispatchSnapshot {
   * first pool in this list with room. Absent — a caller that has not resolved
   * one — falls back to the `agents.model` column inside reserveExecution. */
  model_chain?: readonly string[] | null;
+ /** The model the caller has ALREADY pinned on this execution's gateway session
+  *  (sessions.create {model}). When set, it is the model the run will attempt,
+  *  so it — not the chain head — is the pool this reserve debits. Unset is the
+  *  ordinary path and behaves exactly as before. */
+ placed_model?: string | null;
 }
 // The capacity-owning states. Shared with capacity/provider-pools.ts via the
 // schema module so the two counters can never drift apart.
@@ -115,6 +120,10 @@ export interface ReserveResult {
  fallbacksWithRoom?: string[];
  /** "Ollama Cloud 3/3 full; Agnes AI 1/50 have room" — what the card shows. */
  summary?: string;
+ /** The model this execution's session was pinned to, when the caller pinned
+  *  one and it is genuinely in the agent's own chain. Undefined on the ordinary
+  *  primary path. */
+ placedModel?: string;
 }
 
 export function reserveExecution(snapshot: DispatchSnapshot, sessionKey: string, executionId: string,
@@ -159,10 +168,27 @@ export function reserveExecution(snapshot: DispatchSnapshot, sessionKey: string,
   // The agent's own fallbacks are still probed, for VISIBILITY: the refusal
   // names which of them have room so the owner can act on it.
   const chain = (snapshot.model_chain?.length ? [...snapshot.model_chain] : agentModelChainFallback(task.assigned_agent_id, db));
-  const pool = providerOf(chain[0]);
+  // THE POOL DEBITED IS THE POOL THE RUN WILL ATTEMPT.
+  //
+  // Ordinarily that is the chain head, because the run attempts the agent's own
+  // primary and the runtime reaches a fallback only after an attempt FAILS.
+  // But when the caller has PINNED a model on this execution's session
+  // (sessions.create {model} — the gateway honours it, `chat.send` cannot), the
+  // run attempts THAT model, and debiting the primary would under-count the
+  // subscription actually being spent. A pin is only ever one of the agent's
+  // own declared models; the caller enforces that before it pins.
+  const attemptedModel = (snapshot.placed_model && chain.includes(snapshot.placed_model))
+    ? snapshot.placed_model
+    : chain[0];
+  const pool = providerOf(attemptedModel);
   const poolTracked = hasProviderColumn(db);
   if (poolTracked) {
-   const { primary, fallbacks } = probeChain(chain, db, task.id);
+   // Probe with the ATTEMPTED model first, so `primary` is the pool that must
+   // have room for this particular run.
+   const orderedChain = attemptedModel === chain[0]
+     ? chain
+     : [attemptedModel, ...chain.filter((m) => m !== attemptedModel)];
+   const { primary, fallbacks } = probeChain(orderedChain, db, task.id);
    if (!primary.room) {
     // A QUEUE, not a fault: the caller holds and spends no dispatch attempt.
     return {
@@ -207,7 +233,20 @@ export function reserveExecution(snapshot: DispatchSnapshot, sessionKey: string,
   db.prepare(`INSERT INTO openclaw_sessions
    (id,agent_id,openclaw_session_id,channel,status,task_id,created_at,updated_at)
    VALUES (?,?,?,'mission-control','active',?,?,?)`).run(randomUUID(), task.assigned_agent_id, sessionId, task.id, now, now);
-  return { execution: latestExecution(task.id, db), reason: 'reserved', provider: pool };
+  // Record the pin on the row, so a debit to a non-primary pool always carries
+  // the model that justifies it. Separate from the templated INSERT above so a
+  // pre-157 box simply skips it instead of failing the whole reserve.
+  if (snapshot.placed_model && attemptedModel === snapshot.placed_model) {
+    try {
+      db.prepare('UPDATE task_executions SET placed_model=? WHERE id=?').run(snapshot.placed_model, executionId);
+    } catch { /* pre-157 box: the debit stands, the annotation is best-effort */ }
+  }
+  return {
+    execution: latestExecution(task.id, db),
+    reason: 'reserved',
+    provider: pool,
+    placedModel: snapshot.placed_model && attemptedModel === snapshot.placed_model ? snapshot.placed_model : undefined,
+  };
  }).immediate();
 }
 
