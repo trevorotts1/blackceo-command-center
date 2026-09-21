@@ -22,6 +22,13 @@ try:
 except ImportError:
     _HAS_SHARED_RESOLVER = False
 
+# Same shape trap as sync-departments-from-build-state.py: departments.json is
+# EITHER a bare list OR an object wrapping the list under "departments". This
+# loader returned whatever it parsed, so `seed()` iterated an envelope's KEYS
+# and inserted workspaces named Company / Total Departments / Total Roles /
+# Departments. One normalizer, shared with the sync script.
+from departments_payload import departments_or_empty  # type: ignore  # noqa: E402
+
 
 def find_db():
     # DATA-08: honor the app's DB path FIRST — DASHBOARD_DB_PATH (forwarded by the
@@ -59,8 +66,13 @@ def find_departments_config():
         if p.exists():
             with open(p) as f:
                 data = json.load(f)
-            if data:  # Not empty
-                return data, str(p)
+            # Lenient on purpose: this reader already falls back to scanning
+            # Skill 23 workspace folders when it finds nothing, so a malformed
+            # artifact degrades to that path with a loud line rather than
+            # aborting. It must NEVER fold an envelope's keys in as departments.
+            departments = departments_or_empty(data, path=str(p))
+            if departments:  # Not empty
+                return departments, str(p)
     return None, None
 
 def scan_skill23_workspaces():

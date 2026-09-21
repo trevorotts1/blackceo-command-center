@@ -492,9 +492,15 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<unknown> | unk
   // not received a qc_review event in the last 10 minutes. Catches tasks that
   // arrived in review before the scorer was wired to the completion paths.
   // Disable with DISABLE_QC_REVIEW_SWEEP=1.
+  // LEASE: 10 min, not the 90s default. One tick judges SEVERAL review cards
+  // and each judgement is a model call, so under load the sweep ran past 90s
+  // and runLeasedJob killed it (`[cron] qc-review-sweep failed: Error:
+  // scheduler_job_timeout`); every write after the kill threw
+  // `scheduler_lease_lost` and the cards it was judging stayed in review.
   {
     name: 'qc-review-sweep',
     expr: '*/2 * * * *',
+    timeoutMs: 600_000,
     fn: async () => {
       const result = await runQCReviewSweep();
       if (result.skippedReason) {
