@@ -7636,6 +7636,9 @@ export const migrations: Migration[] = [
             ? ` (${r.kept.map((k) => `${k.id}@${k.workspaceId}:${k.refs}ref`).join(', ')})`
             : ''),
       );
+    },
+  },
+  {
     // ASK-AT-CAPACITY — the ledger behind an owner decision.
     //
     // A saturated pool overflows onto the agent's next declared model silently,
