@@ -57,7 +57,10 @@ import { broadcast } from '@/lib/events';
 import { notifyOwner, notifySystem } from '@/lib/notify';
 import { getMissionControlUrl } from '@/lib/config';
 import { resolveAndLog, resolveSpecialistType } from '@/lib/intelligence-resolver';
-import { scoreRoute, recordRoutingReason, type RouteDecision } from '@/lib/capacity/route-scorer';
+import { scoreRoute, recordRoutingReason, isBlocked, type RouteDecision } from '@/lib/capacity/route-scorer';
+import { providerLabel } from '@/lib/capacity/provider-pools';
+import { evaluateAskGate, holdForProviderChoice } from '@/lib/capacity/ask-at-capacity';
+import { sendProviderChoiceAsk } from '@/lib/jobs/trust-engine';
 import { buildPersonaBlock, buildPersonaPlanBlock } from '@/lib/persona-dispatch';
 import { renderOwnerMessagesSection } from '@/lib/owner-messages';
 import { loadSubtaskPersonas } from '@/lib/persona-selector';
@@ -411,6 +414,34 @@ function recordProviderCapacityHold(
     `[${context}] provider pool pressure: ${summary}`,
     context,
   );
+}
+
+/**
+ * Make a STANDING OWNER CHOICE visible: this card waits for its own primary
+ * subscription because the owner said so, not because anything is broken. Same
+ * dedupe window and best-effort contract as the other capacity holds.
+ */
+function recordOwnerWaitsForPrimary(
+  taskId: string,
+  agentId: string | null,
+  decision: RouteDecision,
+  context: string,
+): void {
+  const primary = decision.preferred?.provider ?? 'its primary provider';
+  console.warn(`[${context}] autoDispatchTask: WAITING task ${taskId} — owner chose to wait for ${primary}`);
+  recordDispatchHoldActivity(
+    taskId,
+    agentId,
+    '%owner chose to wait%',
+    `[${context}] owner chose to wait for ${providerLabel(primary)} rather than overflow`,
+    context,
+  );
+  try {
+    recordRoutingReason(
+      taskId,
+      `Waiting for ${providerLabel(primary)} because you asked me to hold it there rather than run it elsewhere.`,
+    );
+  } catch { /* the explanation is never worth failing a hold */ }
 }
 
 /** Clear attempt-accounting after a task successfully advances to in_progress. */
@@ -1922,6 +1953,44 @@ If you need help or clarification, ask the orchestrator.`;
       });
     } catch (scoreErr) {
       console.warn(`[${context}] route scoring failed for task ${task.id}:`, (scoreErr as Error).message);
+    }
+
+    // ASK-AT-CAPACITY. Two separate owner-facing rules, in this order:
+    //
+    //   1. A standing `primary_only` answer. The owner has already said this
+    //      card waits for its own primary subscription rather than overflowing,
+    //      so while that primary is blocked the card defers instead of
+    //      dispatching. Checked FIRST so an answered card is never re-asked.
+    //   2. A NEW question, when the preferred model cannot serve the card AND
+    //      something material is at stake (cost, time, the last of a balance, a
+    //      deadline, or nothing available at all). The hold is a DEFERRAL: no
+    //      answer inside the window and the card dispatches on the
+    //      recommendation, so silence never strands work.
+    if (routeDecision?.preferred && isBlocked(routeDecision.preferred)) {
+      const existingChoice = (task as { provider_choice?: string | null }).provider_choice ?? null;
+      if (existingChoice === 'primary_only') {
+        recordOwnerWaitsForPrimary(task.id, agent.id, routeDecision, context);
+        return { status: 'held', reason: 'owner_waits_for_primary' };
+      }
+      try {
+        const gate = evaluateAskGate({
+          taskId: task.id,
+          taskTitle: task.title,
+          department: task.department,
+          routeLane: (task as { route_lane?: string | null }).route_lane ?? null,
+          existingChoice,
+          decision: routeDecision,
+        });
+        if (gate.hold) {
+          holdForProviderChoice(task.id, gate, sendProviderChoiceAsk);
+          recordRoutingReason(task.id, gate.question ?? routeDecision.reason);
+          return { status: 'held', reason: 'provider_choice_pending' };
+        }
+      } catch (askErr) {
+        // An ask that cannot be evaluated must never block the work. Fall
+        // through and dispatch exactly as a box without this gate would.
+        console.warn(`[${context}] ask-at-capacity gate failed for task ${task.id}:`, (askErr as Error).message);
+      }
     }
 
     const claim = reserveExecution(
