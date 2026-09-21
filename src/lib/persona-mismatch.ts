@@ -29,7 +29,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { queryOne, queryAll, run } from '@/lib/db';
 import { latestExecution } from '@/lib/execution-attempts';
-import { comparePersonaManifest, type PersonaManifest } from '@/lib/persona-conformance';
+import { comparePersonaManifest, dispatchedPersonaShas, personaId, type PersonaManifest } from '@/lib/persona-conformance';
 
 export const PERSONA_MISMATCH_EVENT_TYPE = 'persona_mismatch';
 
@@ -53,9 +53,10 @@ export interface PersonaMismatchInfo {
   page: string | null;
 }
 
-function clean(v: unknown): string | null {
-  return typeof v === 'string' && v.trim() ? v.trim() : null;
-}
+/** ONE normalisation rule, shared with the conformance comparator: blank, and
+ * the literal texts "null"/"undefined", are non-declarations — never values to
+ * compare against each other. */
+const clean = personaId;
 
 /** True when an activity's parsed metadata carries the B-U6 producer-report
  * contract (the explicit `kind` discriminator avoids sniffing arbitrary
@@ -88,7 +89,11 @@ export function recordPersonaUsedAndCompare(
       const execution=latestExecution(taskId);
       if(!execution || report.execution_id!==execution.id)return null;
       const row=page?queryOne<{bundle_json:string}>('SELECT bundle_json FROM task_persona_bundle_scope WHERE task_id=? AND scope=?',[taskId,page]):queryOne<{bundle_json:string}>('SELECT bundle_json FROM task_persona_bundle WHERE task_id=?',[taskId]);
-      mismatch=row?comparePersonaManifest(JSON.parse(row.bundle_json),report):'persona_scope_unregistered';
+      // ONE rule, one comparison: the chip and the QC gap both come from
+      // comparePersonaManifest, measured against the bundle sha THIS execution
+      // was handed at dispatch. Never a second, differently-spelled comparison.
+      const dispatched=dispatchedPersonaShas(report.execution_id);
+      mismatch=row?comparePersonaManifest(JSON.parse(row.bundle_json),report,page?dispatched?.scopes[page]:dispatched?.root):'persona_scope_unregistered';
     } else if(!declared||!used)return null;
     const mismatchKey=JSON.stringify([report.execution_id??'legacy',page??'root']);
     if(!mismatch){

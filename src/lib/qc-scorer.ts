@@ -401,6 +401,36 @@ export interface RerouteOrBlockParams {
  * path keeps its own distinctive audit text); the caller composes it from the
  * returned outcome so it states the move the task actually took.
  */
+/** A QC kickback note appended to the description is QC's OWN annotation, not a
+ * change to the task's persona inputs — but the migration-132
+ * `tasks_persona_input_revision` trigger bumps the revision on ANY description
+ * write. That self-inflicted bump invalidates the persona bundle the NEXT
+ * execution is measured against: on a live box (2026-09-21) the re-route
+ * rebuilt the bundle and then failed the re-run for
+ * `persona_bundle_revision_mismatch` against a revision the re-route itself had
+ * just created. Restore the revision the card carried before the kickback. A
+ * REAL input change still bumps it — a new title, audience, persona, or the
+ * assignee auto-route picks next — because none of those happen in here.
+ * Writing `persona_input_revision` alone fires no trigger. Only a write that
+ * actually lands is undone; a lost CAS race restores nothing. */
+async function withoutSelfInflictedPersonaBump<T>(taskId: string, write: () => Promise<T>): Promise<T> {
+  let before: number | null = null;
+  try {
+    before = queryOne<{ persona_input_revision: number }>(
+      'SELECT persona_input_revision FROM tasks WHERE id = ?', [taskId],
+    )?.persona_input_revision ?? null;
+  } catch { /* pre-migration DB has no such column — nothing to preserve */ }
+  const out = await write();
+  if (before !== null) {
+    try {
+      run('UPDATE tasks SET persona_input_revision = ? WHERE id = ?', [before, taskId]);
+    } catch (err) {
+      console.warn(`[QCScorer] persona_input_revision restore failed for ${taskId} (non-fatal):`, (err as Error).message);
+    }
+  }
+  return out;
+}
+
 export async function rerouteOrBlock(p: RerouteOrBlockParams): Promise<QCRerouteOutcome> {
   throwIfJobLeaseLost();
   if (p.attempts >= p.cap) {
@@ -464,7 +494,7 @@ export async function rerouteOrBlock(p: RerouteOrBlockParams): Promise<QCReroute
     ? `${p.taskDescription}\n\n${p.kickbackNote}`
     : p.kickbackNote;
   try {
-    await transition(p.taskId, 'backlog', {
+    await withoutSelfInflictedPersonaBump(p.taskId, () => transition(p.taskId, 'backlog', {
       actor: 'qc-scorer',
       reason: p.kickbackNote,
       expectedFrom: 'review',
@@ -472,7 +502,7 @@ export async function rerouteOrBlock(p: RerouteOrBlockParams): Promise<QCReroute
         description: rerouteDesc,
         qc_reroute_attempts: p.attempts,
       },
-    });
+    }));
     return 'rerouted';
   } catch (txErr) {
     if (!(txErr instanceof TransitionError && txErr.code === 'CAS_CONFLICT')) {
@@ -5047,7 +5077,12 @@ export async function runEngineOwnedDeckQC(
     let deptSlug: string | null = task.department ?? null;
     if (deptSlug) deptSlug = canonicalDeptSlug(deptSlug) || deptSlug;
     const attemptNum = (task.qc_reroute_attempts ?? 0) + 1;
-    const passed = result.scoringPath === 'llm' && result.score >= QC_PASS_THRESHOLD ? 1 : 0;
+    // ONE verdict, not two. This used to re-derive the verdict from the score
+    // alone, so every gate that can turn a PASS into a FAIL (persona
+    // conformance, comms conformance, the producer/judge both-gates rule) was
+    // invisible here: the durable row said passed=1 while the qc_review event
+    // said FAIL and the card was re-routed. `result.pass` IS the verdict.
+    const passed = result.scoringPath === 'llm' && result.pass ? 1 : 0;
     run(
       `INSERT INTO task_qc_results
          (id, task_id, workspace_id, department_slug, score, passed, scoring_path, attempt, scored_at)
@@ -6163,7 +6198,11 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
         deptSlug = canonicalDeptSlug(deptSlug) || deptSlug;
       }
       const attemptNum = (task.qc_reroute_attempts ?? 0) + 1;
-      const passed = result.scoringPath === 'llm' && result.score >= QC_PASS_THRESHOLD ? 1 : 0;
+      // ONE verdict, not two — see the FIX 7 lane above. Re-deriving from the
+      // score alone is what wrote passed=1 next to a FAIL verdict on a live box
+      // (2026-09-21): the score was 10.0, a fail-soft persona gap had flipped
+      // result.pass to false, and the two records disagreed.
+      const passed = result.scoringPath === 'llm' && result.pass ? 1 : 0;
 
       run(
         `INSERT INTO task_qc_results
@@ -6780,7 +6819,7 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
         : kickbackNote;
       let rerouteLanded = false;
       try {
-        await transition(taskId, 'backlog', {
+        await withoutSelfInflictedPersonaBump(taskId, () => transition(taskId, 'backlog', {
           actor: 'qc-scorer',
           reason: kickbackNote,
           expectedFrom: 'review',
@@ -6788,7 +6827,7 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
             description: rerouteDesc,
             qc_reroute_attempts: newAttempts,
           },
-        });
+        }));
         rerouteLanded = true;
       } catch (txErr) {
         if (!(txErr instanceof TransitionError && txErr.code === 'CAS_CONFLICT')) {
