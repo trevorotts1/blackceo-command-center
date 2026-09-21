@@ -2548,15 +2548,24 @@ export const migrations: Migration[] = [
         VALUES (?, ?, 'QC Specialist', ?, '🔍', 'standby', 0, ?, 'permanent', 'qc', datetime('now'), datetime('now'))
       `);
 
+      // An archived workspace never receives agents. (On a fresh climb this set
+      // is empty — migration 095 adds archived_at AFTER this one — so ordering
+      // costs nothing; on a re-run against a modern schema it is load-bearing.)
+      const archived = archivedWorkspaces(db);
+
       let seeded = 0;
       for (const ws of workspaces) {
+        if (archived.has(ws.id)) continue;
         const agentId = `qc-agent-${ws.id}`;
         const agentName = `${ws.name} QC Specialist`;
         const description = `Quality control specialist for the ${ws.name} department. Reviews completed tasks against SOP success criteria and decides whether work moves to Done or back to In Progress.`;
         insertQC.run(agentId, agentName, description, ws.id);
         seeded++;
       }
-      console.log(`[Migration 060] Seeded/verified ${seeded} QC Specialist agent(s) across ${workspaces.length} workspace(s)`);
+      console.log(
+        `[Migration 060] Seeded/verified ${seeded} QC Specialist agent(s) across ${workspaces.length} workspace(s)` +
+          `${archived.size ? ` (${archived.size} archived workspace(s) skipped)` : ''}`,
+      );
     },
   },
 
@@ -5651,6 +5660,17 @@ export const migrations: Migration[] = [
       }
       const wsId = podcastWs.id;
 
+      // An ARCHIVED podcast workspace never receives agents. A box that declined
+      // or retired the podcast engine keeps the row for its history; seeding an
+      // editor/producer/QC into it would resurrect a workforce for a department
+      // the board does not show.
+      if (archivedWorkspaces(db).has(wsId)) {
+        console.log(
+          `[Migration 122] podcast workspace "${wsId}" is archived — skipping specialist/QC seed`,
+        );
+        return;
+      }
+
       const writerModel =
         process.env.PODCAST_WRITER_MODEL ||
         'ollama-cloud/llama-3.3-70b-versatile';
@@ -7591,6 +7611,33 @@ export const migrations: Migration[] = [
       console.log('[Migration 154] executions now carry the persona bundle sha they were dispatched with');
     },
   },
+  {
+    id: '155',
+    name: 'delete_stray_agents_in_archived_workspaces',
+    // DESTRUCTIVE data cleanup (deletes agent rows). Deferred during the
+    // request-time additive self-heal for the same reason as 091/092/093 — it
+    // runs on the next controlled boot instead of racing live ingest.
+    deferInAdditiveSelfHeal: true,
+    up: (db) => {
+      // The one-time sweep for the create-side leak this release closes: every
+      // boot re-ran the trio and head seeders across ALL workspaces, archived
+      // ones included, so an archived department accumulated a head + QC +
+      // research + devil's-advocate it can never use. Only rows nothing
+      // references are removed; anything with a surviving reference is kept and
+      // named in the log for an operator to judge.
+      console.log('[Migration 155] Sweeping stray agents out of archived workspaces...');
+      const r = cleanupAgentsInArchivedWorkspaces(db);
+      console.log(
+        `[Migration 155] archived workspaces=${r.archivedWorkspaces}; ` +
+          `cleared ${r.headPointersCleared} archived head pointer(s); ` +
+          `deleted ${r.agentsDeleted} unreferenced stray agent(s); ` +
+          `kept ${r.agentsKept} referenced agent(s)` +
+          (r.kept.length
+            ? ` (${r.kept.map((k) => `${k.id}@${k.workspaceId}:${k.refs}ref`).join(', ')})`
+            : ''),
+      );
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner
@@ -7813,11 +7860,12 @@ export function autoSeedTrioAgents(db: Database.Database): void {
 
     const seeded = seedTrioForWorkspaces(db, workspaces);
     const total = seeded.qc + seeded.research + seeded.devilsAdvocate;
-    if (total > 0) {
+    if (total > 0 || seeded.skippedArchived > 0) {
       console.log(
         `[Auto-seed Trio] Seeded ${seeded.qc} QC + ${seeded.research} Research + ` +
           `${seeded.devilsAdvocate} Devil's Advocate agent(s) across ${workspaces.length} workspace(s); ` +
-          `${seeded.skipped} role slot(s) already filled (role_type-aware skip)`,
+          `${seeded.skipped} role slot(s) already filled (role_type-aware skip); ` +
+          `${seeded.skippedArchived} archived workspace(s) skipped (never seeded)`,
       );
     }
   } catch (err) {
@@ -7896,16 +7944,66 @@ function isCcGeneratedTrioId(id: string): boolean {
 }
 
 /**
+ * Every SOFT-ARCHIVED workspace, mapped id → `archived_reason`.
+ *
+ * THE ARCHIVED-WORKSPACE SEED LEAK. An archived department is a decision that
+ * has already been made — by the owner's provenanced decline ('declined'), by
+ * U108's opt-out record ('department-optout'), by the retire path ('retired'),
+ * by an operator ('operator'), or by the build-state sync
+ * (`pruned: absent from build-state` / `deduped: loser of <id>`, both written by
+ * scripts/sync-departments-from-build-state.py since v7.6.38, which archives
+ * rather than deletes). The row survives for its history; the board hides it.
+ *
+ * Nothing that CREATES agents may act on one. Every seeder here used to read
+ * `SELECT ... FROM workspaces` with no archive filter, so on a client box
+ * carrying 12 archived duplicate/pruned workspaces a Command Center restart
+ * minted a head + QC + research + devil's-advocate into each of them — 48 agent
+ * rows attached to departments no one can see, counted by every workforce total
+ * and dispatchable by nothing.
+ *
+ * Returns an EMPTY map on a pre-migration-095 database (no `archived_at`
+ * column): that schema has no archive concept, so every workspace is live and
+ * behaviour is unchanged. Never throws — a seeder must not be the thing that
+ * crashes boot.
+ */
+export function archivedWorkspaces(db: Database.Database): Map<string, string | null> {
+  const out = new Map<string, string | null>();
+  try {
+    const cols = (db.prepare('PRAGMA table_info(workspaces)').all() as { name: string }[]).map(
+      (c) => c.name,
+    );
+    if (!cols.includes('archived_at')) return out;
+    const hasReason = cols.includes('archived_reason');
+    const rows = db
+      .prepare(
+        `SELECT id, ${hasReason ? 'archived_reason' : 'NULL AS archived_reason'} FROM workspaces
+          WHERE archived_at IS NOT NULL AND archived_at <> ''`,
+      )
+      .all() as { id: string; archived_reason: string | null }[];
+    for (const r of rows) out.set(r.id, r.archived_reason ?? null);
+  } catch {
+    /* pre-095 / table absent — no archive concept, every workspace is live */
+  }
+  return out;
+}
+
+/**
  * Seed the trio (QC + Research + Devil's Advocate) for the given workspaces,
  * skipping any ROLE SLOT that is already filled by ANY agent — whatever its id or
  * alias spelling. This is the C3 create-side guard: it makes re-provisioning
  * converge instead of multiply.
+ *
+ * An ARCHIVED workspace is skipped outright (see `archivedWorkspaces`): it never
+ * receives a trio, however it got into the caller's list. The guard lives HERE,
+ * in the one primitive both trio-seeding callers route through (migration 065
+ * and `autoSeedTrioAgents`), so neither can reintroduce the leak.
  */
 export function seedTrioForWorkspaces(
   db: Database.Database,
   workspaces: { id: string; name: string }[],
-): { qc: number; research: number; devilsAdvocate: number; skipped: number } {
-  const result = { qc: 0, research: 0, devilsAdvocate: 0, skipped: 0 };
+): { qc: number; research: number; devilsAdvocate: number; skipped: number; skippedArchived: number } {
+  const result = { qc: 0, research: 0, devilsAdvocate: 0, skipped: 0, skippedArchived: 0 };
+  const archived = archivedWorkspaces(db);
 
   const insert = db.prepare(`
     INSERT OR IGNORE INTO agents
@@ -7942,6 +8040,10 @@ export function seedTrioForWorkspaces(
   });
 
   for (const ws of workspaces) {
+    if (archived.has(ws.id)) {
+      result.skippedArchived++;
+      continue;
+    }
     const specs = spec(ws);
     for (const role of TRIO_ROLE_TYPES) {
       const aliases = aliasesFor(role);
@@ -8009,11 +8111,21 @@ export function findDuplicateTrioAgents(db: Database.Database): DuplicateTrioGro
   return Array.from(groups.values()).filter((g) => g.agentIds.length > 1);
 }
 
-/** Workspaces with no head agent — the thing that must always be zero. */
+/**
+ * LIVE workspaces with no head agent — the thing that must always be zero.
+ *
+ * An ARCHIVED workspace is excluded, not reported: it is hidden from the board
+ * by design, so "it has no head" is not a defect and materialising one for it is
+ * exactly the leak this exclusion closes. `ensureWorkspaceHeadAgents()` — the
+ * only repair path — reads this list, so the filter here is what stops a boot
+ * from minting a Department Head into an archived department AND from stamping
+ * `head_agent_id` on an archived row.
+ */
 export function findHeadlessWorkspaces(db: Database.Database): { id: string; slug: string }[] {
   const cols = (db.prepare('PRAGMA table_info(workspaces)').all() as { name: string }[]).map((c) => c.name);
   if (!cols.includes('head_agent_id')) return [];
-  return db
+  const archived = archivedWorkspaces(db);
+  const rows = db
     .prepare(
       `SELECT w.id, w.slug FROM workspaces w
         WHERE w.head_agent_id IS NULL OR w.head_agent_id = ''
@@ -8021,6 +8133,7 @@ export function findHeadlessWorkspaces(db: Database.Database): { id: string; slu
         ORDER BY w.slug ASC`,
     )
     .all() as { id: string; slug: string }[];
+  return rows.filter((r) => !archived.has(r.id));
 }
 
 /** Every column in the schema that is a FOREIGN KEY onto agents(id). */
@@ -8255,6 +8368,171 @@ export function ensureWorkspaceHeadAgents(db: Database.Database): HeadAgentResul
     }
     setHead.run(headId, ws.id);
     result.created++;
+  }
+
+  return result;
+}
+
+/** Every column in the schema that can hold an `agents.id` value. */
+function agentReferenceColumns(db: Database.Database): { table: string; column: string }[] {
+  const seen = new Set<string>();
+  const out: { table: string; column: string }[] = [];
+  const push = (table: string, column: string) => {
+    if (table === 'agents') return; // the agents table's own columns are not references to it
+    const key = `${table}.${column}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push({ table, column });
+  };
+
+  for (const fk of agentFkColumns(db)) push(fk.table, fk.column);
+
+  // Declared foreign keys are not the whole story: several tables carry an agent
+  // id by CONVENTION with no REFERENCES clause (task_qc_results.qc_agent_id,
+  // sop_feedback.agent_id, and the operator_* Bridge tables). Enumerate them
+  // from the LIVE schema rather than hardcoding a list that rots as tables are
+  // added. Over-inclusion is safe by construction: a column this scan sweeps in
+  // that does not really hold a workforce agent id (operator_workspaces.agent_id
+  // holds a CLI slug) can only make the cleanup MORE conservative — it keeps an
+  // agent it might have deleted, never the reverse.
+  let tables: { name: string }[] = [];
+  try {
+    tables = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+      .all() as { name: string }[];
+  } catch {
+    return out;
+  }
+  for (const t of tables) {
+    try {
+      const cols = db.prepare(`PRAGMA table_info("${t.name}")`).all() as { name: string }[];
+      for (const c of cols) {
+        if (c.name === 'agent_id' || c.name.endsWith('_agent_id')) push(t.name, c.name);
+      }
+    } catch {
+      /* table vanished mid-iteration — skip */
+    }
+  }
+  return out;
+}
+
+export interface ArchivedWorkspaceAgentCleanup {
+  /** How many workspaces are archived on this box. */
+  archivedWorkspaces: number;
+  /** Archived workspaces whose own head pointer was cleared before the sweep. */
+  headPointersCleared: number;
+  /** Stray agent rows deleted (archived workspace + zero references anywhere). */
+  agentsDeleted: number;
+  /** Agents left in place because something still references them. */
+  agentsKept: number;
+  /** The kept ones, named, so the operator can audit rather than guess. */
+  kept: { id: string; workspaceId: string; refs: number }[];
+}
+
+/**
+ * Delete the agent rows the seeders leaked into ARCHIVED workspaces — and ONLY
+ * the ones nothing anywhere references.
+ *
+ * The create-side leak is fixed above (`seedTrioForWorkspaces`,
+ * `findHeadlessWorkspaces`, the reseed's archive skip), but a box that has
+ * already booted carries the rows: one client board held 48 of them across 12
+ * archived departments. They are invisible on the board, they inflate every
+ * workforce count, and nothing can ever dispatch to them.
+ *
+ * WHAT IS SAFE TO DELETE, exactly:
+ *   • the agent's workspace is archived, AND
+ *   • the agent is not the master orchestrator (`is_master`), AND
+ *   • NO column in the live schema that can hold an agents.id still holds this
+ *     one (`agentReferenceColumns` — declared FKs plus every conventional
+ *     `*agent_id` column, read from the schema, never a hardcoded list).
+ *
+ * The archived workspace's OWN `head_agent_id` is cleared first, but only when
+ * it points at a candidate: that pointer is the seeder's own leftover, not
+ * history. A LIVE workspace's head pointer is never touched, so an agent that
+ * heads a live department is counted as referenced and kept.
+ *
+ * Anything with a single surviving reference is KEPT and REPORTED. A duplicate
+ * row is recoverable; a destroyed foreign key is not — the same posture
+ * `dedupeTrioAgents` takes.
+ *
+ * Idempotent: a second run finds no candidates. A box with no archived
+ * workspaces is a total no-op.
+ */
+export function cleanupAgentsInArchivedWorkspaces(
+  db: Database.Database,
+): ArchivedWorkspaceAgentCleanup {
+  const result: ArchivedWorkspaceAgentCleanup = {
+    archivedWorkspaces: 0,
+    headPointersCleared: 0,
+    agentsDeleted: 0,
+    agentsKept: 0,
+    kept: [],
+  };
+
+  const archived = archivedWorkspaces(db);
+  result.archivedWorkspaces = archived.size;
+  if (archived.size === 0) return result;
+
+  const ids = Array.from(archived.keys());
+  const placeholders = ids.map(() => '?').join(',');
+
+  const agentCols = (db.prepare('PRAGMA table_info(agents)').all() as { name: string }[]).map(
+    (c) => c.name,
+  );
+  if (!agentCols.includes('workspace_id')) return result;
+  // Never delete the master orchestrator, whatever workspace it is parked in.
+  const masterGuard = agentCols.includes('is_master') ? 'AND (is_master IS NULL OR is_master = 0)' : '';
+
+  const candidates = db
+    .prepare(
+      `SELECT id, workspace_id FROM agents WHERE workspace_id IN (${placeholders}) ${masterGuard}`,
+    )
+    .all(...ids) as { id: string; workspace_id: string }[];
+  if (candidates.length === 0) return result;
+  const candidateIds = new Set(candidates.map((c) => c.id));
+
+  const wsCols = (db.prepare('PRAGMA table_info(workspaces)').all() as { name: string }[]).map(
+    (c) => c.name,
+  );
+  if (wsCols.includes('head_agent_id')) {
+    const heads = db
+      .prepare(
+        `SELECT id, head_agent_id FROM workspaces
+          WHERE id IN (${placeholders}) AND head_agent_id IS NOT NULL AND head_agent_id <> ''`,
+      )
+      .all(...ids) as { id: string; head_agent_id: string }[];
+    const clearHead = db.prepare('UPDATE workspaces SET head_agent_id = NULL WHERE id = ?');
+    for (const h of heads) {
+      if (!candidateIds.has(h.head_agent_id)) continue;
+      clearHead.run(h.id);
+      result.headPointersCleared++;
+    }
+  }
+
+  const refCols = agentReferenceColumns(db);
+  const del = db.prepare('DELETE FROM agents WHERE id = ?');
+
+  for (const a of candidates) {
+    let refs = 0;
+    for (const rc of refCols) {
+      try {
+        const row = db
+          .prepare(`SELECT count(*) AS c FROM "${rc.table}" WHERE "${rc.column}" = ?`)
+          .get(a.id) as { c: number } | undefined;
+        refs += row?.c ?? 0;
+      } catch {
+        // A column we cannot READ is a column we cannot clear: count it as a
+        // reference so the agent is kept. Never delete on an unanswered question.
+        refs++;
+      }
+    }
+    if (refs > 0) {
+      result.agentsKept++;
+      result.kept.push({ id: a.id, workspaceId: a.workspace_id, refs });
+      continue;
+    }
+    del.run(a.id);
+    result.agentsDeleted++;
   }
 
   return result;
@@ -9041,6 +9319,27 @@ export function reseedWorkspacesFromConfig(
 
     const existsCheck = db.prepare('SELECT id FROM workspaces WHERE id = ?');
 
+    // An ARCHIVED workspace is not re-seeded from the manifest. The UPSERT below
+    // deliberately never touched `archived_at`, so it could not un-archive a row
+    // — but it DID keep re-syncing an archived row's display fields on every
+    // boot and every converge, reporting it as `updated`, and it handed the
+    // freshly-touched row straight to the trio/head seeders that follow. The
+    // manifest still listing a department the sync archived
+    // (`pruned: absent from build-state`, `deduped: loser of <id>`) or the owner
+    // declined is the NORMAL state, not a fault: the archive is the newer
+    // decision and it wins.
+    //
+    // Deliberately NOT done here: creating a FRESH live row for an archived
+    // slug. That would mint a second row for one department — the exact
+    // duplicate-column disease the FM-6 guard, migration 081 and
+    // dedupeCanonicalWorkspaces exist to heal. Restoring an archived department
+    // is an explicit act with its own owners: DELETE /api/workspaces/<id>/archive
+    // for an operator archive, or the reason-scoped reversal in
+    // syncDeclinedWorkspaceArchive / syncDepartmentOptoutArchive when the owner
+    // flips NO → YES. Once un-archived, the very next boot seeds its trio and
+    // head normally.
+    const archivedRows = archivedWorkspaces(db);
+
     for (const dept of depts) {
       // Robustness guard (mirrors autoSeedFromDepartmentsJson): a bare-string or
       // slug/id-less entry would throw and abort the whole reseed, dropping every
@@ -9093,6 +9392,22 @@ export function reseedWorkspacesFromConfig(
       const rawSlug = String(dept.slug || rawId);
       const canonicalId = normalizeDeptPrefixedId(rawId);
       const canonicalSlug = normalizeDeptPrefixedId(rawSlug);
+
+      // ARCHIVE WINS. Check BOTH spellings: a pre-MR-21 box carries the row
+      // under the raw `dept-<slug>` id while the manifest entry canonicalizes to
+      // the bare id, and the sync script archives whichever one it pruned.
+      const archivedId = archivedRows.has(canonicalId)
+        ? canonicalId
+        : archivedRows.has(rawId)
+          ? rawId
+          : null;
+      if (archivedId) {
+        console.log(
+          `[reseed] Skipping "${rawId || rawSlug}" — workspace "${archivedId}" is archived ` +
+            `(reason=${archivedRows.get(archivedId) ?? 'unspecified'}); left archived, no agents seeded`,
+        );
+        continue;
+      }
 
       const slugLower = rawSlug.toLowerCase();
       const isCeo = canonicalSlug === 'master-orchestrator' || slugLower === 'ceo' || slugLower === 'dept-ceo' || rawId === 'ceo';
