@@ -6,6 +6,53 @@ import { resolveOpenClawRuntimeRoot } from '@/lib/openclaw/runtime-root';
 import { canonicalDeptSlug, expandDeptSlugAliases } from '@/lib/routing/canonical-slug';
 import type { Agent } from '@/lib/types';
 
+/**
+ * LOG DEDUPE — one "no runtime dir" warning per distinct miss per window.
+ *
+ * This resolver is called on the drop-path of a sweep that runs every two
+ * minutes, once per in-flight task. When a task's department has no runtime dir
+ * on the box the miss is PERMANENT: nothing about it changes between ticks, and
+ * every tick logged the same sentence again. One box logged it 7,788 times for a
+ * SINGLE task that had never produced an execution. That volume does not make
+ * the condition more visible; it buries every other line in the error log, which
+ * is where a real fault has to be legible.
+ *
+ * The condition still warns — it is a real misconfiguration — but at most once
+ * per (caller, slug, agent) per RESOLVE_WARN_INTERVAL_MS. The key deliberately
+ * includes the agent id so a SECOND task hitting the same missing runtime is
+ * still reported rather than hidden behind the first, and the caller `context`
+ * so a dispatch miss is never swallowed by an earlier watcher miss.
+ *
+ * In-process rather than durable on purpose: there is no artifact here, only a
+ * log line, so a restart re-logging once is correct — the operator reading a
+ * fresh log should see the condition. This mirrors the triad-hold dedupe in
+ * task-dispatcher.ts, which uses a durable `events` row only because that row is
+ * itself the audit record. Nothing here needs to outlive the process.
+ */
+const RESOLVE_WARN_INTERVAL_MS = Math.max(
+  0,
+  parseInt(process.env.RESOLVE_WARN_INTERVAL_MS || String(6 * 60 * 60 * 1000), 10),
+);
+const lastResolveWarnAt = new Map<string, number>();
+
+/** True when this exact miss has not been warned about inside the window. */
+function shouldWarnResolveMiss(key: string): boolean {
+  const now = Date.now();
+  const last = lastResolveWarnAt.get(key);
+  if (last !== undefined && now - last < RESOLVE_WARN_INTERVAL_MS) return false;
+  lastResolveWarnAt.set(key, now);
+  // The map is keyed by (context, slug, agent) and a box has a bounded number of
+  // each, so it cannot grow without limit. The sweep drops entries that have
+  // aged out anyway, which keeps it small on a long-lived process.
+  if (lastResolveWarnAt.size > 512) {
+    for (const [k, t] of lastResolveWarnAt) if (now - t >= RESOLVE_WARN_INTERVAL_MS) lastResolveWarnAt.delete(k);
+  }
+  return true;
+}
+
+/** Test seam: clear the dedupe window so a test can observe the warn again. */
+export function resetResolveWarnDedupe(): void { lastResolveWarnAt.clear(); }
+
 export function resolveSpecialistSessionKey(
   agent: Agent,
   openclawSessionId: string,
@@ -108,7 +155,9 @@ export function resolveSpecialistSessionKey(
             }
           }
         }
-        console.warn(`[${context}] resolveSpecialistSessionKey: workspace slug "${candidateSlug}" (canonical "${canonicalSlug}") has no runtime dir at ${deptPrefixedDir} or ${bareDir} — trying agent role slug`);
+        if (shouldWarnResolveMiss(`${context}|${candidateSlug}|${agent.id}`)) {
+          console.warn(`[${context}] resolveSpecialistSessionKey: workspace slug "${candidateSlug}" (canonical "${canonicalSlug}") has no runtime dir at ${deptPrefixedDir} or ${bareDir} — trying agent role slug. Further identical misses are suppressed for ${Math.round(RESOLVE_WARN_INTERVAL_MS / 3600000)}h.`);
+        }
       }
     } catch (err) {
       console.warn(`[${context}] resolveSpecialistSessionKey: workspace lookup failed (non-fatal):`, (err as Error).message);

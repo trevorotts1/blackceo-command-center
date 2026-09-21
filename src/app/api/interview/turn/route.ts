@@ -21,10 +21,12 @@ import { randomUUID } from 'crypto';
  *
  * Recipe copied from src/app/api/openclaw/sessions/route.ts
  * (dynamic='force-dynamic', getOpenClawClient() + connect()-or-503,
- * sendMessage). The reply is read back with the documented
- * getSessionHistory (sessions.history) RPC — the same one the
+ * sendMessage). The reply is read back with getSessionHistory, which calls the
+ * gateway's `chat.history` RPC — the same one the
  * /api/openclaw/sessions/[id]/history route uses — so we never guess an
- * undocumented gateway event name.
+ * undocumented gateway event name. (It used to call `sessions.history`, a
+ * method no gateway version has ever registered; every readback failed and the
+ * route reported it as "the agent did not reply". See client.ts.)
  *
  * Gateway coupling is tolerated by design: on an unreachable gateway this
  * returns 503 and the UI falls back to structured cards (branding +

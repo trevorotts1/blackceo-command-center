@@ -14,9 +14,9 @@
  * that chose Ollama Cloud as their sovereign provider had ZERO models register
  * (and silently ran on another provider). Fixed: the base is the bare host.
  *
- * NOTE: there is no `/v1/usage` endpoint upstream (404). `fetchUsage()` therefore
- * has no working upstream and is left AS-IS — it was equally broken before this
- * fix, so leaving it is not a regression.
+ * NOTE: there is no `/v1/usage` endpoint upstream (404). `fetchUsage()` used to
+ * dial it anyway on every usage-refresh tick, so the job logged a 404 for this
+ * provider forever. It no longer probes: see fetchUsage() below.
  *
  * Auth: Bearer token in the `Authorization` header.
  *
@@ -71,7 +71,6 @@ export function getOllamaCloudBaseUrl(): string {
 }
 
 const modelsEndpoint = () => `${getOllamaCloudBaseUrl()}/v1/models`;
-const usageEndpoint = () => `${getOllamaCloudBaseUrl()}/v1/usage`;
 
 /** The exact endpoint the QC judge dials. Exported so a failure can NAME it. */
 export function getOllamaCloudChatEndpoint(): string {
@@ -99,15 +98,6 @@ interface OllamaCloudModelRow {
 interface OllamaCloudModelsResponse {
   object?: string;
   data?: OllamaCloudModelRow[];
-}
-
-interface OllamaCloudUsageResponse {
-  gpu_seconds_used_5h?: number;
-  gpu_seconds_limit_5h?: number;
-  gpu_seconds_used_7d?: number;
-  gpu_seconds_limit_7d?: number;
-  plan_tier?: string;
-  [key: string]: unknown;
 }
 
 function authHeaders(apiKey: string): Record<string, string> {
@@ -237,30 +227,39 @@ export async function fetchModels(apiKey: string): Promise<ProviderModel[]> {
 }
 
 /**
- * Returns the operator's current Ollama Cloud usage and quota snapshot.
+ * Ollama Cloud publishes NO usage or quota endpoint, so there is no balance to
+ * report and this makes no network call.
  *
- * Ollama bills GPU-seconds in two rolling windows (5h and 7d) on the
- * flat-rate plans. We surface both so the System Status panel can show
- * approaching-limit warnings.
+ * It used to GET `/v1/usage` — an address this file's own header comment has
+ * said does not exist since the connector was written. The usage-refresh job
+ * runs on a schedule and calls every connector that exposes `fetchUsage()`, so
+ * that line produced a guaranteed 404 on every tick, forever, on every box with
+ * an Ollama Cloud key. A probe whose only possible outcome is a 404 is not
+ * monitoring; it is noise that trains an operator to ignore the usage-refresh
+ * log, which is where a REAL provider's quota failure would appear.
+ *
+ * The method is kept rather than dropped because the absence of a quota is
+ * itself the honest answer for this provider: Ollama Cloud is a flat-rate
+ * subscription, not a metered balance. The snapshot therefore carries no
+ * numbers — every quota field is left undefined, which every consumer of
+ * UsageSnapshot already treats as "not reported" — and `raw` names the reason
+ * so a reader is not left wondering whether the fetch merely failed.
+ *
+ * If Ollama ever ships a usage endpoint, restore the fetch here; nothing else
+ * needs touching.
  */
 export async function fetchUsage(apiKey: string): Promise<UsageSnapshot> {
   if (!apiKey) {
     throw new Error('Ollama Cloud fetchUsage called without an apiKey (set OLLAMA_CLOUD_API_KEY)');
   }
-  const payload = await fetchJson<OllamaCloudUsageResponse>(usageEndpoint(), {
-    method: 'GET',
-    headers: authHeaders(apiKey),
-  });
-
   return {
     provider: PROVIDER_SLUG,
     taken_at: new Date().toISOString(),
-    gpu_seconds_used_5h: payload.gpu_seconds_used_5h,
-    gpu_seconds_limit_5h: payload.gpu_seconds_limit_5h,
-    gpu_seconds_used_7d: payload.gpu_seconds_used_7d,
-    gpu_seconds_limit_7d: payload.gpu_seconds_limit_7d,
-    plan_tier: payload.plan_tier,
-    raw: payload,
+    plan_tier: 'flat_rate_subscription',
+    raw: {
+      usage_reporting: 'unavailable',
+      reason: 'Ollama Cloud exposes no usage or quota endpoint; the plan is a flat-rate subscription with no metered balance.',
+    },
   };
 }
 

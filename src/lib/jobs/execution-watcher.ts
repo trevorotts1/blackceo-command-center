@@ -80,12 +80,47 @@ interface InProgressRow {
  * is harmless (chat.history returns nothing / the call is caught), so trying both
  * costs only a cheap RPC on the drop-path.
  */
+/**
+ * Tasks whose specialist key could not be resolved, keyed by task id and valued
+ * by the ASSIGNMENT the miss was measured against.
+ *
+ * A task with no execution row re-enters this function on every reconcile tick.
+ * `resolveSpecialistSessionKey` answers it by stat-ing runtime directories on
+ * disk, and when the department has no runtime dir the answer is the same miss
+ * every time — the same miss that produced 7,788 identical log lines on one box
+ * for one task. Recording the miss against the assignment that produced it lets
+ * the next tick skip the whole filesystem walk and go straight to the legacy key.
+ *
+ * The value is the assignment SIGNATURE, not a bare flag, so the skip expires
+ * exactly when it should: re-assign the task, move it to another workspace or
+ * give it a new session id and the signature changes, the memo misses, and the
+ * resolver runs again. A runtime dir that appears later is picked up on the next
+ * process start or the next assignment change — acceptable for a path whose
+ * fallback (`agent:main:<id>`) is tried on every tick regardless.
+ */
+const unresolvableTaskAssignments = new Map<string, string>();
+
+/** The resolver's own inputs, in one comparable string. */
+function assignmentSignature(task: InProgressRow): string {
+  return [task.assigned_agent_id, task.assigned_agent_name, task.assigned_agent_role, task.workspace_id, task.openclaw_session_id]
+    .map((v) => v ?? '')
+    .join('|');
+}
+
+/** Test seam: forget every recorded miss. */
+export function resetUnresolvableTaskMemo(): void { unresolvableTaskAssignments.clear(); }
+
 export function candidateSessionKeys(task: InProgressRow): string[] {
   const execution=latestExecution(task.id);
-  if(execution) return [execution.session_key];
+  // An execution exists, so any earlier miss is history: drop it so a later
+  // re-assignment is never judged against a stale signature.
+  if(execution) { unresolvableTaskAssignments.delete(task.id); return [execution.session_key]; }
   const sessionId = task.openclaw_session_id;
   if (!sessionId) return [];
   const keys: string[] = [];
+  const signature = assignmentSignature(task);
+  // Same task, same assignment, already proved unresolvable — skip the disk walk.
+  if (unresolvableTaskAssignments.get(task.id) === signature) return [`agent:main:${sessionId}`];
   try {
     // resolveSpecialistSessionKey only reads .name/.role/.workspace_id — pass a
     // minimal agent shim (cast is localized + runtime-safe).
@@ -102,7 +137,13 @@ export function candidateSessionKeys(task: InProgressRow): string[] {
       'execution-watcher',
     );
     if (resolved) keys.push(resolved);
+    else {
+      if (unresolvableTaskAssignments.size > 2048) unresolvableTaskAssignments.clear();
+      unresolvableTaskAssignments.set(task.id, signature);
+    }
   } catch (err) {
+    // A THROW is not a proved miss — the resolver never reached a verdict — so
+    // it is not memoised. Only a clean `null` return records one.
     console.warn(`[execution-watcher] session-key resolve failed for ${task.id} (non-fatal):`, (err as Error).message);
   }
   const legacy = `agent:main:${sessionId}`;
