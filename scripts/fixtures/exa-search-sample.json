@@ -1,0 +1,8 @@
+{
+  "requestId": "exa-fixture-1",
+  "resolvedSearchType": "neural",
+  "results": [
+    { "id": "e1", "title": "Forging Tolerance Standards 2026", "url": "https://example.com/exa-forging-standards", "publishedDate": "2026-02-01", "text": "Tolerance checks at each heat, single-owner sign-off per batch, post-quench hardness sampling." },
+    { "id": "e2", "title": "Heat Treat QA Handbook", "url": "https://example.com/exa-heat-treat-qa", "text": "Documentation requirements for hardness sampling." }
+  ]
+}

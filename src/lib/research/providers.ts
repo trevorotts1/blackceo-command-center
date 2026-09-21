@@ -65,6 +65,13 @@ import type { ResearchProviderSlug } from './provider-discovery';
 export interface ResearchCitation {
   url: string;
   title?: string;
+  /**
+   * Result extract. The chat-shaped providers above answer in prose and cite
+   * bare URLs, so they leave this empty. A pure SEARCH API (Brave, Exa,
+   * Serper, SerpAPI, Marginalia) has no answer at all — the snippet IS its
+   * substance, and dropping it would hand synthesis a naked link list.
+   */
+  snippet?: string;
 }
 
 export interface ResearchProviderResult {
@@ -155,9 +162,9 @@ async function readFixture<T>(envVar: string): Promise<FixtureRead<T> | null> {
  * Stamp the fixture provenance onto a provider result so it travels with the
  * payload. Returns the result unchanged when the call was live.
  */
-function tagFixture(
+function tagFixture<T>(
   result: ResearchProviderResult,
-  fixture: FixtureRead<ChatEnvelope> | null,
+  fixture: FixtureRead<T> | null,
 ): ResearchProviderResult {
   if (!fixture) return result;
   return { ...result, isFixtureDerived: true, fixtureEnvVar: fixture.envVar };
@@ -171,6 +178,35 @@ async function postJson(url: string, apiKey: string, body: unknown, timeoutMs: n
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` },
       body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new Error(`${res.status} ${text.slice(0, 400)}`);
+    }
+    return await res.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * One request, arbitrary method and headers, same timeout/abort/error contract
+ * as postJson above. The five search APIs below each authenticate with their
+ * own header name and two of them are GET, so postJson's hardcoded
+ * POST + `Authorization: Bearer` does not fit them.
+ */
+async function httpJson(
+  url: string,
+  opts: { method?: 'GET' | 'POST'; headers: Record<string, string>; body?: unknown; timeoutMs: number },
+): Promise<unknown> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), opts.timeoutMs);
+  try {
+    const res = await fetch(url, {
+      method: opts.method || 'GET',
+      headers: opts.body ? { 'content-type': 'application/json', ...opts.headers } : opts.headers,
+      body: opts.body ? JSON.stringify(opts.body) : undefined,
       signal: controller.signal,
     });
     if (!res.ok) {
@@ -367,11 +403,200 @@ async function runXai(p: RunSearchParams): Promise<ResearchProviderResult> {
   );
 }
 
+
+// ---------------------------------------------------------------------------
+// Pure SEARCH-API adapters (Brave / Exa / Serper / SerpAPI / Marginalia).
+//
+// These are not chat models: they return ranked results with extracts and NO
+// synthesized answer, so `answer` stays empty and every result's text rides on
+// `citation.snippet`. `p.model` is meaningless for them and is ignored.
+//
+// EXTENSION POINT — keyless providers. Marginalia is the only keyless general
+// web search this repo has verified as legitimate. Jina now requires a key
+// (401 verified), DuckDuckGo html/lite is bot-challenged with no automation
+// permission, public SearXNG instances block automation (self-host only), and
+// DDG instant answers returns no web results. Add another keyless provider
+// HERE, with `keyless: true` on its RESEARCH_PROVIDERS entry, only after
+// verifying its terms permit automated use.
+// ---------------------------------------------------------------------------
+
+/** Number of results a pure search API is asked for. Matches `breadth()`. */
+function searchCount(depth: 'shallow' | 'deep'): number {
+  return breadth(depth).maxResults;
+}
+
+interface BraveEnvelope { web?: { results?: Array<{ url?: string; title?: string; description?: string }> } }
+
+/**
+ * Brave Web Search.
+ * Docs: https://api-dashboard.search.brave.com/app/documentation/web-search/get-started
+ * GET https://api.search.brave.com/res/v1/web/search?q=&count=
+ * Header: X-Subscription-Token. Results at `web.results[]` = {title,url,description}.
+ */
+async function runBrave(p: RunSearchParams): Promise<ResearchProviderResult> {
+  const fixture = await readFixture<BraveEnvelope>('BRAVE_FIXTURE_JSON_PATH');
+  const { timeoutMs } = breadth(p.depth);
+  const url =
+    `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(p.query)}` +
+    `&count=${searchCount(p.depth)}`;
+  const env = (fixture?.data ??
+    (await httpJson(url, {
+      headers: { accept: 'application/json', 'X-Subscription-Token': p.apiKey },
+      timeoutMs,
+    }))) as BraveEnvelope;
+  return tagFixture(
+    {
+      answer: '',
+      citations: (env.web?.results || [])
+        .filter((r) => r.url)
+        .map((r) => ({ url: r.url as string, title: r.title || (r.url as string), snippet: r.description })),
+    },
+    fixture,
+  );
+}
+
+interface ExaEnvelope { results?: Array<{ url?: string; title?: string; text?: string; summary?: string }> }
+
+/**
+ * Exa.
+ * Docs: https://exa.ai/docs/reference/search (docs.exa.ai 307-redirects here)
+ * POST https://api.exa.ai/search  Header: x-api-key
+ * Body {query, numResults, contents:{text:true}}; results[] = {title,url,text,...}.
+ */
+async function runExa(p: RunSearchParams): Promise<ResearchProviderResult> {
+  const fixture = await readFixture<ExaEnvelope>('EXA_FIXTURE_JSON_PATH');
+  const { timeoutMs } = breadth(p.depth);
+  const env = (fixture?.data ??
+    (await httpJson('https://api.exa.ai/search', {
+      method: 'POST',
+      headers: { 'x-api-key': p.apiKey },
+      body: { query: p.query, numResults: searchCount(p.depth), contents: { text: true } },
+      timeoutMs,
+    }))) as ExaEnvelope;
+  return tagFixture(
+    {
+      answer: '',
+      citations: (env.results || [])
+        .filter((r) => r.url)
+        .map((r) => ({
+          url: r.url as string,
+          title: r.title || (r.url as string),
+          // `text` is the full page extract — cap it so one result cannot
+          // swallow the synthesis prompt.
+          snippet: (r.summary || r.text || '').slice(0, 1200),
+        })),
+    },
+    fixture,
+  );
+}
+
+interface SerperEnvelope { organic?: Array<{ link?: string; title?: string; snippet?: string }> }
+
+/**
+ * Serper (Google SERP proxy).
+ * Response shape verified from https://serper.dev/ (organic[] = {title,link,snippet,position}).
+ * Request shape: POST https://google.serper.dev/search, header X-API-KEY, body {q,num}.
+ * NOTE: docs.serper.dev does not resolve and the playground is cookie-walled, so
+ * the REQUEST shape here is not vendor-doc-verified — only the response is.
+ */
+async function runSerper(p: RunSearchParams): Promise<ResearchProviderResult> {
+  const fixture = await readFixture<SerperEnvelope>('SERPER_FIXTURE_JSON_PATH');
+  const { timeoutMs } = breadth(p.depth);
+  const env = (fixture?.data ??
+    (await httpJson('https://google.serper.dev/search', {
+      method: 'POST',
+      headers: { 'X-API-KEY': p.apiKey },
+      body: { q: p.query, num: searchCount(p.depth) },
+      timeoutMs,
+    }))) as SerperEnvelope;
+  return tagFixture(
+    {
+      answer: '',
+      citations: (env.organic || [])
+        .filter((r) => r.link)
+        .map((r) => ({ url: r.link as string, title: r.title || (r.link as string), snippet: r.snippet })),
+    },
+    fixture,
+  );
+}
+
+interface SerpApiEnvelope { organic_results?: Array<{ link?: string; title?: string; snippet?: string }> }
+
+/**
+ * SerpAPI.
+ * Docs: https://serpapi.com/search-api
+ * GET https://serpapi.com/search.json?engine=google&q=&api_key=&num=
+ * Results at `organic_results[]` = {position,title,link,snippet,displayed_link}.
+ */
+async function runSerpApi(p: RunSearchParams): Promise<ResearchProviderResult> {
+  const fixture = await readFixture<SerpApiEnvelope>('SERPAPI_FIXTURE_JSON_PATH');
+  const { timeoutMs } = breadth(p.depth);
+  const url =
+    `https://serpapi.com/search.json?engine=google&q=${encodeURIComponent(p.query)}` +
+    `&num=${searchCount(p.depth)}&api_key=${encodeURIComponent(p.apiKey)}`;
+  const env = (fixture?.data ?? (await httpJson(url, { headers: { accept: 'application/json' }, timeoutMs }))) as SerpApiEnvelope;
+  return tagFixture(
+    {
+      answer: '',
+      citations: (env.organic_results || [])
+        .filter((r) => r.link)
+        .map((r) => ({ url: r.link as string, title: r.title || (r.link as string), snippet: r.snippet })),
+    },
+    fixture,
+  );
+}
+
+interface MarginaliaEnvelope {
+  license?: string;
+  results?: Array<{ url?: string; title?: string; description?: string }>;
+}
+
+/** Attribution the SOP must carry when Marginalia served its research. */
+export const MARGINALIA_ATTRIBUTION = 'Sources via Marginalia Search (CC-BY-NC-SA 4.0)';
+
+/**
+ * Marginalia — the KEYLESS last rung.
+ * Docs: https://about.marginalia-search.com/article/api
+ * GET https://api2.marginalia-search.com/search?query=<urlencoded>
+ * Header: `API-Key`, value `public` (shared, rate-limited) unless the box has
+ * its own free non-commercial key in MARGINALIA_API_KEY.
+ * Response: {license, query, results[] = {url,title,description}}.
+ * Results are CC-BY-NC-SA 4.0, which is why callers must attribute — see
+ * MARGINALIA_ATTRIBUTION.
+ *
+ * 10s timeout regardless of depth: the public key shares one rate limit across
+ * every consumer on earth, so a slow answer here must not hold up authoring.
+ */
+async function runMarginalia(p: RunSearchParams): Promise<ResearchProviderResult> {
+  const fixture = await readFixture<MarginaliaEnvelope>('MARGINALIA_FIXTURE_JSON_PATH');
+  const url = `https://api2.marginalia-search.com/search?query=${encodeURIComponent(p.query)}`;
+  const env = (fixture?.data ??
+    (await httpJson(url, {
+      headers: { accept: 'application/json', 'API-Key': p.apiKey || 'public' },
+      timeoutMs: 10_000,
+    }))) as MarginaliaEnvelope;
+  return tagFixture(
+    {
+      answer: '',
+      citations: (env.results || [])
+        .filter((r) => r.url)
+        .slice(0, searchCount(p.depth))
+        .map((r) => ({ url: r.url as string, title: r.title || (r.url as string), snippet: r.description })),
+    },
+    fixture,
+  );
+}
+
 const ADAPTERS: Record<ResearchProviderSlug, (p: RunSearchParams) => Promise<ResearchProviderResult>> = {
   perplexity: runPerplexity,
   openai: runOpenAI,
   ollama: runOllama,
   xai: runXai,
+  brave: runBrave,
+  exa: runExa,
+  serper: runSerper,
+  serpapi: runSerpApi,
+  marginalia: runMarginalia,
 };
 
 /** Run the live search for the given provider slug. Throws on provider error. */

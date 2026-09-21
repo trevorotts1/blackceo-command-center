@@ -54,6 +54,17 @@ const SEARCH_CAPABLE: Record<ResearchProviderSlug, RegExp[]> = {
   // xAI: Live Search is enabled per request via `search_parameters.mode="on"`
   // on the grok chat models. https://docs.x.ai/api
   xai: [/^grok(?:$|[-:])/i],
+
+  // Pure SEARCH APIs. Every call IS a live web search — there is no model to
+  // choose and no chat model that could be substituted in, so the recogniser
+  // matches the `web-search` label their registry entries carry and nothing
+  // else. An empty list here would be wrong in the other direction: it would
+  // read as "this provider has no search-capable model".
+  brave: [/^web-search$/i],
+  exa: [/^web-search$/i],
+  serper: [/^web-search$/i],
+  serpapi: [/^web-search$/i],
+  marginalia: [/^web-search$/i],
 };
 
 /** Strip a `provider/` namespace from a registry model id. */

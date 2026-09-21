@@ -48,6 +48,10 @@ import { authorSOPForTask } from '../../src/lib/sop-authoring';
 delete process.env.TAVILY_API_KEY;
 delete process.env.TAVILY_FIXTURE_JSON_PATH;
 delete process.env.OPENCLAW_PROJECT_DIR;
+// v7.6.34: Marginalia is KEYLESS, so emptying the stores no longer empties the
+// research chain — it would reach the keyless rung and make a LIVE call from
+// this offline test. Turn that rung off explicitly.
+process.env.RESEARCH_ALLOW_MARGINALIA = '0';
 process.env.OPENCLAW_PLATFORM = 'mac-mini';
 process.env.HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'sop-authoring-nohome-'));
 

@@ -52,7 +52,12 @@ const ROLE_LIBRARY_SOURCE = 'role-library' as const;
 import { scoreSOPForTask } from '@/lib/sops';
 import type { SOP } from '@/lib/sops';
 import type { Task } from '@/lib/types';
-import { researchForSop, NO_RESEARCH_SOURCE_LINE, type SopResearchResult } from '@/lib/research/sop-research';
+import {
+  researchForSop,
+  researchAttribution,
+  NO_RESEARCH_SOURCE_LINE,
+  type SopResearchResult,
+} from '@/lib/research/sop-research';
 import { geminiGenerate } from '@/lib/gemini';
 import { assertNoFixtureDerivedServerWrite } from '@/lib/fixture-guard';
 import {
@@ -239,7 +244,13 @@ function getRecentAuthoringAttemptCount(deptSlug: string, titleKeyword: string):
  */
 function researchSources(research: SopResearchResult): Array<{ title: string; url: string }> {
   if (research.provider === null) return [{ title: NO_RESEARCH_SOURCE_LINE, url: '' }];
-  return research.results.slice(0, 5).map((r) => ({ title: r.title, url: r.url }));
+  const sources = research.results.slice(0, 5).map((r) => ({ title: r.title, url: r.url }));
+  // Marginalia's results are CC-BY-NC-SA 4.0 — using them obliges us to say so
+  // on the artifact itself, not just in a log line. Same url-less shape as the
+  // no-research line, so the renderer emits it as plain text.
+  const attribution = researchAttribution(research.provider);
+  if (attribution) sources.push({ title: attribution, url: '' });
+  return sources;
 }
 
 /** Write a loud event to the events table. */
