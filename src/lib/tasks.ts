@@ -32,6 +32,7 @@
  */
 
 import { v4 as uuidv4 } from 'uuid';
+import { stopCardPermanently } from '@/lib/stop-card';
 import { createTaskOnce, taskRequestCompany, TaskContextError, taskRequestFingerprint } from '@/lib/task-request-identity';
 import { assertAgentCompany } from '@/lib/task-agent-assignment';
 import { taskPersonaCompanyContext, personaCompanyContext } from '@/lib/persona-company';
@@ -75,7 +76,6 @@ import {
 } from '@/lib/jobs/trust-engine';
 import { normalizeRequesterSessionKey } from '@/lib/requester-session';
 import { transition, recordStatusEvent, type LifecycleState } from '@/lib/task-lifecycle';
-import { recordBlockEvent } from '@/lib/block-events';
 import { assertNoFixtureDerivedServerWrite } from '@/lib/fixture-guard';
 import type { Task, TaskPriority, Agent, PersonaBundle, TaskPersonaBundleRow } from '@/lib/types';
 
@@ -1859,39 +1859,27 @@ export async function blockForOwnerConfirm(
   // CAS_CONFLICT rather than a silent overwrite.
   const current = queryOne<{ status: string }>('SELECT status FROM tasks WHERE id = ?', [taskId]);
   if (!current || current.status === 'blocked') return; // already blocked — idempotent no-op
-  let blocked = false;
-  try {
-    await transition(taskId, 'blocked', {
-      actor: 'audience-confirm',
-      reason: `hard-hold department "${department}" unconfirmed past deadline`,
-      operatorOverride: true,
-      expectedFrom: current.status as LifecycleState,
-      extraColumns: {
-        block_reason: `[AUDIENCE-CONFIRM] Unconfirmed past the deadline in build department "${department}" — HARD-HOLD, never house-voice.`,
-        block_needs: `Owner action required: ${prompt}`,
-        block_audience: 'OWNER',
-      },
-    });
-    blocked = true;
-  } catch (err) {
-    // CAS_CONFLICT (concurrent writer won the read→write race) — non-fatal, and
-    // we must NOT emit a duplicate event/notify. Anything else is worth a warn.
-    if (err instanceof Error && !err.message.includes('CAS_CONFLICT')) {
-      console.warn(`[audience-confirm] blockForOwnerConfirm transition failed for task ${taskId}:`, err);
-    }
-  }
-  if (!blocked) return; // transition aborted (CAS lost / illegal / error) — no duplicate event/notify
-  // MR-30: snapshot block metadata for the block-history audit trail.
-  // (transition() already writes the task_events audit; this is the companion
-  // block-snapshot the task-detail modal reads for the 'Previously blocked'
-  // panel.)
-  recordBlockEvent({
+  // NO-SILENT-STOP: the transition, the block_* metadata, the block-history
+  // snapshot AND the owner notice all run through the one chokepoint. Before
+  // this, the owner notice here was a notifySystem() to the OPERATOR lane plus
+  // a hope that the trust engine's periodic sweep would eventually reach the
+  // owner — which it only did if the card still carried block_audience='OWNER'
+  // and the sweep ran. The chokepoint sends it now, once, and stamps the claim.
+  const blockedResult = await stopCardPermanently({
     taskId,
-    blockReason: `[AUDIENCE-CONFIRM] Unconfirmed past the deadline in build department "${department}" — HARD-HOLD, never house-voice.`,
-    blockNeeds: `Owner action required: ${prompt}`,
-    blockAudience: 'OWNER',
-    actor: 'audience-confirm',
+    source: 'audience-confirm',
+    reason:
+      `We need you to confirm who this is for before we write it, and the confirmation window has passed. ` +
+      `Work in "${department}" is never written on a guess about the audience, so it is waiting on you.`,
+    needs: prompt,
+    audience: 'OWNER',
+    expectedFrom: current.status as LifecycleState,
+    operatorOverride: true,
+    machineDetail:
+      `[AUDIENCE-CONFIRM] Unconfirmed past the deadline in build department "${department}" — HARD-HOLD, never house-voice.`,
   });
+  const blocked = blockedResult.blocked;
+  if (!blocked) return; // transition aborted (CAS lost / illegal / error) — no duplicate event/notify
   try {
     run(
       `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
@@ -1901,6 +1889,9 @@ export async function blockForOwnerConfirm(
     );
   } catch { /* audit best-effort */ }
   try {
+    // The OPERATOR-lane copy is retained deliberately: the owner is told by the
+    // chokepoint above, and the operator still needs to see a hard-hold land on
+    // their own board. This one is an echo, not the notice, so it is unstamped.
     notifySystem(
       `[AUDIENCE-CONFIRM] Task ${taskId} (department: ${department}) BLOCKED for owner sign-off — confirm-window expired and this department never silently releases under house voice. ${prompt}`,
       { agent: 'audience-confirm', action: 'blocked_owner' },

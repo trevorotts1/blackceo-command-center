@@ -55,7 +55,7 @@ import { queryOne, run } from '@/lib/db';
 import { parseEventTimestamp } from '@/lib/dispatch-idempotency';
 import { getOpenClawClient } from '@/lib/openclaw/client';
 import { broadcast } from '@/lib/events';
-import { notifyOwner, notifySystem } from '@/lib/notify';
+import { notifySystem } from '@/lib/notify';
 import { getMissionControlUrl } from '@/lib/config';
 import { resolveAndLog, resolveSpecialistType } from '@/lib/intelligence-resolver';
 import { scoreRoute, recordRoutingReason, isBlocked, type RouteDecision } from '@/lib/capacity/route-scorer';
@@ -78,6 +78,7 @@ import {
 } from '@/lib/capability-manifest';
 import { isCanonicalContext, copyCanonicalSOPForTask, authorSOPForTask } from '@/lib/sop-authoring';
 import { recordBlockEvent } from '@/lib/block-events';
+import { stopCardPermanently } from '@/lib/stop-card';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { artifactDispatchPayload, recordStatusEvent } from '@/lib/task-lifecycle';
 import { healPhantomAgentAssignment } from '@/lib/jobs/heal-phantom-assignments';
@@ -302,18 +303,41 @@ export function recordDispatchFailure(
         const updated = queryOne<Task>('SELECT * FROM tasks WHERE id = ?', [taskId]);
         if (updated) broadcast({ type: 'task_updated', payload: updated });
       } catch { /* broadcast best-effort */ }
-      try {
-        // MSG-06 / SWEEP-06: a SYSTEM-audience block is an OPERATOR concern —
-        // it must NEVER reach the client's Telegram (MOVE-IN-SILENCE). Route it
-        // through notifySystem() (Rescue Rangers / server log); only a genuine
-        // OWNER-audience block goes to the client's own chat.
-        const blockMsg = `Task blocked: "${row?.title ?? taskId}" — ${opts.needs}`;
-        if (opts.audience === 'SYSTEM') {
-          notifySystem(blockMsg, { agent: opts.context, action: 'escalate' });
-        } else {
-          notifyOwner(`🚫 ${blockMsg}`);
-        }
-      } catch { /* notify best-effort */ }
+      // NO-SILENT-STOP: the notice is no longer this path's own notifySystem/
+      // notifyOwner pair. It routes through stopCardPermanently(), which stamps
+      // blocked_notice_sent_at as an atomic claim — so a redispatch that blocks
+      // the same card twice, or a restart mid-send, produces ONE message, not
+      // two and not none. MSG-06 / SWEEP-06 routing is unchanged and enforced
+      // inside the chokepoint: a SYSTEM-audience block still never reaches the
+      // client's Telegram (MOVE-IN-SILENCE); only OWNER goes to their own chat.
+      //
+      // applyBlock:false — the compound UPDATE above already landed the status
+      // flip together with the dispatch accounting and block_* metadata, a CAS
+      // (`status NOT IN ('done') AND archived_at IS NULL`) that transition()'s
+      // single expectedFrom cannot express.
+      //
+      // Fire-and-forget with a catch, matching the best-effort notify it
+      // replaces: recordDispatchFailure is synchronous and void-returning, and
+      // a notification must never be able to fail a dispatch attempt.
+      void stopCardPermanently({
+        taskId,
+        source: opts.context,
+        // Plain English only. `opts.reason` is a machine string ('triad_incomplete',
+        // 'sop_authoring_failed') and belongs in the `task_blocked` events row
+        // above and in the block_reason column, not read out to an owner.
+        reason: opts.hardBlock
+          ? 'We could not start this work, and it is not something retrying will fix.'
+          : `We tried to start this work ${attempts} time(s) and it did not go through, so it has stopped.`,
+        needs: opts.needs,
+        audience: opts.audience,
+        retriesExhausted: !opts.hardBlock,
+        // No machineDetail: this path writes its OWN `task_blocked` events row
+        // carrying `blockNote` a few lines above, and a second copy from the
+        // chokepoint would double every block announcement on the card.
+        applyBlock: false,
+      }).catch((notifyErr: unknown) => {
+        console.error('[task-dispatcher] stop notice failed (non-fatal):', (notifyErr as Error).message);
+      });
       console.warn(`[${opts.context}] recordDispatchFailure: task ${taskId} BLOCKED (${opts.reason})`);
     } else {
       run(

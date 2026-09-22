@@ -67,6 +67,7 @@ import { queryOne, queryAll, run, transaction } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { transition, TransitionError } from '@/lib/task-lifecycle';
 import { recordBlockEvent } from '@/lib/block-events';
+import { stopCardPermanently } from '@/lib/stop-card';
 import { isBlankAsk } from '@/lib/blocked-ask';
 import { isUsableFile, isUsableUrl, bundleReverifyEnabled, isBundleDeliverablePath, verifyPresentationBundleDeliverable } from '@/lib/completion-evidence';
 import type { Task } from '@/lib/types';
@@ -599,6 +600,24 @@ export async function moveArchifyPhase(
       [input.blocked_reason, input.blocked_on_human || 'operator', input.ask, now, card.id],
     );
     const updated = await transition(card.id, 'blocked', { actor, reason, operatorOverride: true });
+    // NO-SILENT-STOP: a phase card parked on a named human is a card that will not
+    // move again until that human acts — a permanent stop by any definition, and
+    // until now one that told nobody. The producer that called this API knows;
+    // the person named in `blocked_on_human` did not. The chokepoint stamps the
+    // claim and sends exactly one notice, on the lane that person belongs to.
+    // applyBlock:false — the transition and the block_* metadata landed above.
+    await stopCardPermanently({
+      taskId: card.id,
+      source: actor,
+      reason:
+        `This step is waiting on a person before it can go any further` +
+        `${input.blocked_reason ? ` (${input.blocked_reason})` : ''}. ` +
+        `Nothing else will happen on it until that is answered.`,
+      needs: input.ask ?? 'Answer the question on the card so the work can continue.',
+      audience: (input.blocked_on_human || 'operator') === 'owner' ? 'OWNER' : 'SYSTEM',
+      machineDetail: reason ?? `phase stage parked: ${input.blocked_reason}`,
+      applyBlock: false,
+    });
     // Snapshot the block metadata so the history survives the unblock. Gated on
     // a genuine entry into blocked: transition() is idempotent for same-state,
     // so a re-sent block on an already-blocked card writes no duplicate row.
@@ -623,7 +642,8 @@ export async function moveArchifyPhase(
     run(
       `UPDATE tasks
           SET blocked_reason = NULL, blocked_on_human = NULL, ask = NULL,
-              block_reason = NULL, block_needs = NULL, block_audience = NULL
+              block_reason = NULL, block_needs = NULL, block_audience = NULL,
+              blocked_notice_sent_at = NULL
         WHERE id = ?`,
       [card.id],
     );

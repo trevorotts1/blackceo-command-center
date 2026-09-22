@@ -1,0 +1,86 @@
+name: Silent terminal-stop guard
+
+# THE OPERATOR'S RULE: "if it's stopped permanently because it failed the
+# prerequisite amount of times, it should not be silent."
+#
+# Measured on a live client box (2026-09-22): an episode card failed at
+# 08:26:27, and eleven hours later `blocked_notice_sent_at` was NULL,
+# `block_reason` was NULL, status was `backlog` so the board showed ordinary
+# queued work, and the failure existed only as an internal `error` activity
+# row. The gateway log for 08:20–08:40 recorded ZERO outbound sends against a
+# control of 58 sends across the rest of that same day, so the log records
+# sends, the search works, and the silence was real.
+#
+# The defect was never one broken function: "does this notify?" was a per-path
+# decision made independently in eight places, so the answer drifted to "no"
+# wherever nobody was looking. src/lib/stop-card.ts::stopCardPermanently() is
+# now the ONE function every terminal stop calls. This workflow is the part
+# that survives the next author: a new write that parks a card in `blocked`
+# without routing through the chokepoint — or without a written
+# `SILENT-STOP-EXEMPT:` reason — fails CI.
+#
+# Standalone workflow, deliberately NOT folded into qc-cc.yml, mirroring
+# raw-status-writer-guard.yml's own convention (independently readable and
+# debuggable, never collides with that workflow's edit history).
+#
+# Two jobs:
+#   1. static-guard — runs the mutation proof FIRST (a planted silent block
+#                     must FAIL the guard, and PASS once removed, routed
+#                     through the chokepoint, or annotated), THEN the guard
+#                     directly against the real tree.
+#   2. behavioral   — proves the chokepoint itself: one notice per stop, no
+#                     re-send on a second tick, a plain-English reason, the
+#                     machine detail persisted, a waiting card never notified,
+#                     and the claim released when the card leaves blocked.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  static-guard:
+    name: Static call-site guard (+ mutation proof)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Mutation proof + real-tree pass (silent-terminal-stop-guard.test.ts)
+        run: |
+          node --import tsx --test tests/unit/silent-terminal-stop-guard.test.ts
+
+      - name: Run the guard directly against the tree (belt-and-braces)
+        run: npx tsx scripts/guard-silent-terminal-stops.ts
+
+  behavioral:
+    name: Behavioral proof — one notice per permanent stop, never zero, never two
+    runs-on: ubuntu-latest
+    needs: static-guard
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Behavioral proof (stop-card-permanently.test.ts)
+        run: |
+          node --import tsx --import ./tests/setup/no-owner-telegram.ts --test tests/unit/stop-card-permanently.test.ts
