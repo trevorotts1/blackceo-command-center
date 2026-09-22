@@ -130,9 +130,14 @@ CREATE TABLE IF NOT EXISTS tasks (
   completed_at TEXT,
   archived_at TEXT,
   -- QC loop guard (migration 061): counts how many times this task has been
-  -- returned to backlog by the QC scorer. Capped at QC_MAX_REROUTES (default 3)
+  -- returned to backlog by the QC scorer. Capped at QC_MAX_REROUTES (default 5)
   -- before the task is set to blocked status and the CEO is notified.
   qc_reroute_attempts INTEGER DEFAULT 0,
+  -- QC cap-alert marker (migration 159): the attempt count at which the owner
+  -- was last told this card had STOPPED retrying. NULL = never alerted. Guards
+  -- the alert against sweep ticks and restarts; a resumed card that fails again
+  -- arrives with a higher attempt count and earns one more alert.
+  qc_cap_alert_attempts INTEGER,
   -- PRD 2.12-cc dispatch-time SOP authoring link (migration 066 owns this for
   -- existing DBs; this base CREATE covers fresh installs). When set, this task
   -- is the "Author SOP" sub-task for the referenced original task. The fast-loop
@@ -483,6 +488,10 @@ CREATE TABLE IF NOT EXISTS task_deliverables (
   mime_type TEXT,
   file_size_bytes INTEGER,
   sha256 TEXT,
+  -- Retired by a later attempt (migration 161). NEVER deleted: a client's file
+  -- record survives, it simply stops counting as the current attempt's output.
+  superseded_at TEXT,
+  superseded_by_execution_id TEXT,
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
 );

@@ -23,6 +23,7 @@
  */
 
 import type Database from 'better-sqlite3';
+import { QC_MAX_REROUTES } from '@/lib/qc-cap';
 
 // ---------------------------------------------------------------------------
 // Re-exported primitives (grade-calculator.ts imports these as a shim)
@@ -564,9 +565,11 @@ function computeStaleLoopsKilled(
   workspaceId: string,
   windowDays: number,
 ): number {
-  // QC_MAX_REROUTES default is 3 (from env QC_MAX_REROUTES or default 3)
-  // We use 3 as the hard-coded floor here — matches qc-scorer.ts default.
-  const QC_MAX_REROUTES_FLOOR = parseInt(process.env.QC_MAX_REROUTES || '3', 10);
+  // The cap comes from @/lib/qc-cap — the ONE default, shared with the scorer
+  // and the handback endpoint. It used to be re-parsed here with its own '3'
+  // literal, so raising the scorer's cap silently left this metric counting
+  // cards that had not stopped retrying at all.
+  const QC_MAX_REROUTES_FLOOR = QC_MAX_REROUTES;
 
   const row = db.prepare(
     `SELECT COUNT(*) AS cnt

@@ -46,6 +46,40 @@ export function latestExecution(taskId: string, db = getDb()): Execution | undef
  return db.prepare('SELECT * FROM task_executions WHERE task_id = ? ORDER BY generation DESC LIMIT 1').get(taskId) as Execution | undefined;
 }
 
+/** Retire the deliverable rows of every attempt but the current one.
+ *
+ * QC-DELIVERABLE-HOUSEKEEPING-20260922. `task_deliverables` grows without
+ * bound: each re-route registers its output beside everything earlier attempts
+ * left, and nothing ever retires a row — one live card held 27 rows for 5 real
+ * files. This does NOT block a card (migration 158 + `currentExecutionDeliverables`
+ * already scope the conformance gate to the current attempt), so it is
+ * housekeeping, and housekeeping never destroys a client's file record: rows
+ * are STAMPED, never deleted, and every existing reader still sees them.
+ *
+ * Rows with a NULL `execution_id` are left alone — they predate the linkage and
+ * cannot be attributed to an attempt, so retiring them would be a guess.
+ * Best-effort: a re-route must never fail because tidying failed.
+ *
+ * @returns how many rows were retired.
+ */
+export function supersedeStaleDeliverables(taskId: string, keepExecutionId: string, db = getDb()): number {
+  try {
+    const cols = new Set((db.prepare('PRAGMA table_info(task_deliverables)').all() as { name: string }[]).map((c) => c.name));
+    if (!cols.has('superseded_at') || !cols.has('execution_id')) return 0;
+    const res = db.prepare(
+      `UPDATE task_deliverables
+          SET superseded_at = ?, superseded_by_execution_id = ?
+        WHERE task_id = ?
+          AND superseded_at IS NULL
+          AND execution_id IS NOT NULL
+          AND execution_id <> ?`,
+    ).run(new Date().toISOString(), keepExecutionId, taskId, keepExecutionId);
+    return res.changes;
+  } catch {
+    return 0;
+  }
+}
+
 /** Name the attempt that registered a deliverable (migration 158).
  *
  * A card's `task_deliverables` rows ACCUMULATE across QC re-routes: every

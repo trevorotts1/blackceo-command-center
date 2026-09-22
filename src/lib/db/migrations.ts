@@ -2458,7 +2458,7 @@ export const migrations: Migration[] = [
     name: 'add_tasks_qc_reroute_attempts',
     // Adds tasks.qc_reroute_attempts INTEGER column used by the QC scorer
     // (v4.12.0) to track how many times a task has been returned to backlog
-    // after failing QC. When the count reaches QC_MAX_REROUTES (default 3),
+    // after failing QC. When the count reaches QC_MAX_REROUTES (default 5),
     // the scorer stops re-dispatching, sets the task to `blocked`, and writes
     // a CEO-addressed event to surface the loop for human review.
     // Additive + idempotent: safe against any existing DB.
@@ -7757,6 +7757,120 @@ export const migrations: Migration[] = [
       // and falls back to the pre-158 whole-card rule only when the current
       // attempt registered nothing of its own (see persona-conformance.ts).
       console.log('[Migration 158] deliverables now name the execution that registered them');
+    },
+  },
+  {
+    id: '159',
+    name: 'qc_cap_alert_marker',
+    // QC-CAP-ALERT-20260922: the attempt count at which this card's LAST
+    // "stopped retrying" alert was sent to the owner. The alert fires only when
+    // the current attempt count exceeds this, so a repeated sweep tick, a lost
+    // CAS race, or a process restart cannot re-send it, while a card that is
+    // resumed and fails again (attempts keep climbing — unblocking clears the
+    // block_* columns but never resets qc_reroute_attempts) earns exactly one
+    // more. NULL = never alerted.
+    up: (db) => {
+      const tasksExists = db
+        .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks'")
+        .get();
+      if (!tasksExists) {
+        console.log('[Migration 159] tasks table absent — nothing to add');
+        return;
+      }
+      const cols = new Set((db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[]).map((c) => c.name));
+      if (!cols.has('qc_cap_alert_attempts')) {
+        db.exec('ALTER TABLE tasks ADD COLUMN qc_cap_alert_attempts INTEGER');
+        console.log('[Migration 159] tasks.qc_cap_alert_attempts added');
+        return;
+      }
+      console.log('[Migration 159] tasks.qc_cap_alert_attempts already present');
+    },
+  },
+  {
+    id: '160',
+    name: 'qc_results_carry_the_reason',
+    // QC-VERDICT-RECORD-20260922: `task_qc_results` stored id, task_id,
+    // workspace_id, department_slug, score, passed, scoring_path, qc_agent_id,
+    // attempt, scored_at — and nothing about WHY. Measured on a client box: a
+    // card failed twice at 9.5 and 9.0 against an 8.5 threshold and the reason
+    // was not recoverable from the database OR from both pm2 logs, because the
+    // scorer only ever logged the score. These two nullable columns make a
+    // verdict answerable after the fact. Existing rows stay NULL, which reads
+    // as "scored before the reason was kept".
+    up: (db) => {
+      const exists = db
+        .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_qc_results'")
+        .get();
+      if (!exists) {
+        console.log('[Migration 160] task_qc_results absent — nothing to record');
+        return;
+      }
+      const cols = new Set((db.prepare('PRAGMA table_info(task_qc_results)').all() as { name: string }[]).map((c) => c.name));
+      const added: string[] = [];
+      if (!cols.has('reason')) { db.exec('ALTER TABLE task_qc_results ADD COLUMN reason TEXT'); added.push('reason'); }
+      if (!cols.has('gaps')) { db.exec('ALTER TABLE task_qc_results ADD COLUMN gaps TEXT'); added.push('gaps'); }
+      console.log(`[Migration 160] task_qc_results verdict columns: ${added.length > 0 ? added.join(', ') : 'none (already present)'}`);
+    },
+  },
+  {
+    id: '161',
+    name: 'supersede_stale_task_deliverables',
+    // QC-DELIVERABLE-HOUSEKEEPING-20260922: `task_deliverables` rows accumulate
+    // across QC re-routes and nothing ever retires them — one live card held 27
+    // rows for 5 real files. This is NOT a correctness fault: migration 158 plus
+    // `currentExecutionDeliverables` already scope the conformance gate to the
+    // current execution, and a card with 15 unlinked rows passed at 9.0/10 on a
+    // build carrying that scoping. It is unbounded growth, so the fix retires
+    // rows rather than deleting them: a client's file record is never destroyed.
+    //
+    // The one-time backfill applies the same rule the re-route now applies —
+    // everything attributed to an execution that is no longer the task's current
+    // one is superseded — so a box carrying an existing pile-up self-heals on
+    // upgrade. Rows with a NULL execution_id (registered before migration 158)
+    // are LEFT ALONE: they cannot be attributed to an attempt, and retiring them
+    // on a guess would discard the only record of a file.
+    up: (db) => {
+      const exists = db
+        .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_deliverables'")
+        .get();
+      if (!exists) {
+        console.log('[Migration 161] task_deliverables absent — nothing to supersede');
+        return;
+      }
+      const cols = new Set((db.prepare('PRAGMA table_info(task_deliverables)').all() as { name: string }[]).map((c) => c.name));
+      if (!cols.has('superseded_at')) db.exec('ALTER TABLE task_deliverables ADD COLUMN superseded_at TEXT');
+      if (!cols.has('superseded_by_execution_id')) db.exec('ALTER TABLE task_deliverables ADD COLUMN superseded_by_execution_id TEXT');
+
+      // The backfill needs the execution linkage (158) to know what is stale.
+      const hasExecColumn = new Set(
+        (db.prepare('PRAGMA table_info(task_deliverables)').all() as { name: string }[]).map((c) => c.name),
+      ).has('execution_id');
+      const hasExecTable = db
+        .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_executions'")
+        .get();
+      if (!hasExecColumn || !hasExecTable) {
+        console.log('[Migration 161] columns ready; no execution linkage to backfill against');
+        return;
+      }
+
+      const now = new Date().toISOString();
+      const result = db.prepare(`
+        UPDATE task_deliverables
+           SET superseded_at = ?,
+               superseded_by_execution_id = (
+                 SELECT e.id FROM task_executions e
+                  WHERE e.task_id = task_deliverables.task_id
+                  ORDER BY e.generation DESC LIMIT 1
+               )
+         WHERE superseded_at IS NULL
+           AND execution_id IS NOT NULL
+           AND execution_id <> (
+                 SELECT e.id FROM task_executions e
+                  WHERE e.task_id = task_deliverables.task_id
+                  ORDER BY e.generation DESC LIMIT 1
+               )
+      `).run(now);
+      console.log(`[Migration 161] superseded ${result.changes} stale deliverable row(s) — none deleted`);
     },
   },
 ];
