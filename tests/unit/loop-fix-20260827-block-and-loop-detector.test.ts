@@ -423,3 +423,62 @@ test('intake-advance-sweep: a legacy task_capped event dedups only the notice, n
   );
   assert.equal(cappedEvents?.c, 1, 'the notification/event remains deduplicated');
 });
+
+// ─── 5. The loop window starts at the most recent re-queue ──────────────────
+//
+// v7.6.43 made `task_qc_results.passed` honest, which left every repaired card
+// carrying real `passed=0` rows from the false-fail era. On a live box those
+// three identical historical rows tripped the loop detector the instant the
+// card was re-queued — before the scorer could run even once — so a card that
+// had just been repaired could never be re-scored to prove it. A loop is a
+// claim about the CURRENT attempt repeating itself.
+
+/** Failing `llm` rows with an identical (score, passed, path) triple. */
+function insertIdenticalFailures(taskId: string, count: number, startMs: number, tag: string) {
+  for (let i = 0; i < count; i++) {
+    run(
+      `INSERT INTO task_qc_results (id, task_id, workspace_id, department_slug, score, passed, scoring_path, qc_agent_id, attempt, scored_at)
+       VALUES (?, ?, NULL, NULL, ?, 0, 'llm', NULL, ?, ?)`,
+      [`qcr-${taskId}-${tag}-${i}`, taskId, 2.8, i + 1, new Date(startMs + i * 1000).toISOString()],
+    );
+  }
+}
+
+/** The audit row a re-queue writes when the card leaves `blocked`. */
+function insertUnblock(taskId: string, atMs: number) {
+  run(
+    `INSERT INTO task_events (id, task_id, from_status, to_status, actor, reason, created_at)
+     VALUES (?, ?, 'blocked', 'backlog', 'operator', 'Resumed', ?)`,
+    [`ev-${taskId}-unblock`, taskId, new Date(atMs).toISOString()],
+  );
+}
+
+test('qc-review-sweep loop detector: repaired history before a re-queue is NOT a loop', () => {
+  const id = nextId('loop-requeued-safe');
+  insertTask(id, 'review');
+  const base = Date.now() - 600_000;
+  insertIdenticalFailures(id, 3, base, 'old');          // the false-fail era
+  insertUnblock(id, base + 60_000);                      // operator re-queues
+  insertIdenticalFailures(id, 1, base + 120_000, 'new'); // one honest run since
+
+  assert.equal(
+    detectIdenticalQCResultLoop(id, 3), null,
+    'three rows the repair predates cannot make the one run since it a loop',
+  );
+});
+
+test('qc-review-sweep loop detector: three identical results AFTER the re-queue still trip it', () => {
+  // MUTATION PROOF for the window: drop the boundary and the test above passes
+  // for the wrong reason; drop the detector and THIS one fails.
+  const id = nextId('loop-requeued-real');
+  insertTask(id, 'review');
+  const base = Date.now() - 600_000;
+  insertIdenticalFailures(id, 3, base, 'old');
+  insertUnblock(id, base + 60_000);
+  insertIdenticalFailures(id, 3, base + 120_000, 'new');
+
+  const loop = detectIdenticalQCResultLoop(id, 3);
+  assert.ok(loop, 'a card repeating itself since the re-queue is still stuck');
+  assert.equal(loop!.passed, 0);
+  assert.equal(loop!.scoring_path, 'llm');
+});

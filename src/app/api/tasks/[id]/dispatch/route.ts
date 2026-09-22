@@ -840,7 +840,22 @@ If you need help or clarification, ask the orchestrator.`;
       );
     }
 
-    const { checkPersonaDispatchReady } = await import('@/lib/tasks');
+    // AUDIENCE CONFIRM — take the GATE's verdict, not the raw column.
+    //
+    // evaluateAudienceConfirmGate releases a card whose confirm deadline has
+    // passed (hold=false, state='deadline_fallback'), but the release is only
+    // durable once `task_persona_bundle.confirm_state` is flipped — which the
+    // auto-dispatcher does and this route never did. So checkPersonaDispatchReady
+    // read a column still saying 'pending' and refused with 409: on a live box
+    // an operator could not hand-dispatch a card the gate had already let go.
+    // Flip it here exactly as the sweep does. A hard-hold build department is
+    // NOT released this way (A-U4 / D23) — it stays refused for the owner.
+    const { checkPersonaDispatchReady, evaluateAudienceConfirmGate, markAudienceDeadlineFallback, isHardHoldConfirmDepartment } = await import('@/lib/tasks');
+    const audienceGate = evaluateAudienceConfirmGate(task.id);
+    if (!audienceGate.hold && audienceGate.state === 'deadline_fallback'
+        && !isHardHoldConfirmDepartment(canonicalDeptSlug(task.department || task.workspace_id || '') || 'general')) {
+      markAudienceDeadlineFallback(task.id);
+    }
     const personaReady = checkPersonaDispatchReady(task.id);
     if (!personaReady.ready) return NextResponse.json({success:false,held:true,reason:personaReady.reason},{status:409});
     // PROVIDER POOL: the reservation is counted against the PRIMARY subscription

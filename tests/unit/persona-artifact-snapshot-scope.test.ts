@@ -237,3 +237,72 @@ test('a card with NO attributed row at all is still measured whole (the pre-158 
     'CONTROL: the fallback cannot become a hole — an unreported row still fails');
   assert.ok(hidden.id);
 });
+
+
+// ── 4. Evidence is resolved by id, then by the bytes themselves ─────────────
+
+/** A root report whose artifacts entries are written verbatim — used to
+ * reproduce what the live producer actually posted. */
+function rawReport(taskId: string, agent: string, executionId: string, artifacts: { deliverable_id: string; sha256: string }[]) {
+  const stored = JSON.parse(db.queryOne<{ bundle_json: string }>('SELECT bundle_json FROM task_persona_bundle WHERE task_id=?', [taskId])!.bundle_json);
+  db.run("INSERT INTO task_activities(id,task_id,agent_id,activity_type,message,metadata) VALUES(?,?,?,'completed','Persona evidence',?)", [
+    randomUUID(), taskId, agent,
+    JSON.stringify({ kind: 'persona_used', execution_id: executionId, ...conformance.expectedPersonaManifest(stored), conformance_passed: true, artifacts }),
+  ]);
+  db.run("UPDATE tasks SET status='review' WHERE id=?", [taskId]);
+}
+
+test('a FRESH card whose producer reported the FILENAME where the UUID belongs still passes', () => {
+  // The live shape: one execution, one deliverable, bytes matching exactly, and
+  // `deliverable_id` carrying `SMOKE-V7643-20260921.md` instead of the row's id.
+  const { id, agent } = card();
+  const execution = attempt(id, agent);
+  const mine = deliverable(id, 'smoke', execution);
+  const filename = path.basename(db.queryOne<{ path: string }>('SELECT path FROM task_deliverables WHERE id=?', [mine.id])!.path);
+  assert.notEqual(filename, mine.id, 'fixture must report a name that is NOT the row id');
+  rawReport(id, agent, execution, [{ deliverable_id: filename, sha256: mine.sha256 }]);
+  settle(execution);
+
+  const verdict = conformance.requirePersonaConformanceForCompletion(id);
+  assert.equal(verdict.pass, true, `byte-identical evidence is a snapshot whatever it was keyed on: ${verdict.reason}`);
+});
+
+test('a report carrying UUIDs that match no current row still passes on the bytes', () => {
+  const { id, agent } = card();
+  const execution = attempt(id, agent);
+  const mine = Array.from({ length: 3 }, (_, i) => deliverable(id, `stale-key-${i}`, execution));
+  // Every id belongs to a row that no longer exists; only the hashes are real.
+  rawReport(id, agent, execution, mine.map((a) => ({ deliverable_id: randomUUID(), sha256: a.sha256 })));
+  settle(execution);
+
+  assert.equal(conformance.requirePersonaConformanceForCompletion(id).pass, true);
+});
+
+test('CONTROL: a report whose sha does not match the bytes still fails', () => {
+  const { id, agent } = card();
+  const execution = attempt(id, agent);
+  const mine = deliverable(id, 'wrong-bytes', execution);
+  const filename = path.basename(db.queryOne<{ path: string }>('SELECT path FROM task_deliverables WHERE id=?', [mine.id])!.path);
+  // Right NAME, wrong digest — the name lane must not wave it through.
+  rawReport(id, agent, execution, [{ deliverable_id: filename, sha256: 'a'.repeat(64) }]);
+  settle(execution);
+  assert.equal(conformance.requirePersonaConformanceForCompletion(id).reason, 'persona_artifact_revision_changed');
+
+  // And evidence that matches on NOTHING is still the missing-snapshot gap.
+  const other = card();
+  const otherExecution = attempt(other.id, other.agent);
+  deliverable(other.id, 'unmatched', otherExecution);
+  rawReport(other.id, other.agent, otherExecution, [{ deliverable_id: randomUUID(), sha256: 'b'.repeat(64) }]);
+  settle(otherExecution);
+  assert.equal(conformance.requirePersonaConformanceForCompletion(other.id).reason, 'persona_artifact_snapshot_missing');
+});
+
+test('the dispatch instruction names the 201 registration id as the deliverable_id to echo', () => {
+  const { id, agent } = card();
+  const execution = attempt(id, agent);
+  const text = conformance.renderPersonaConformanceInstructions(id, execution, agent, 'http://localhost:4000');
+  settle(execution);
+  assert.match(text, /201 response/, 'the producer must be told where deliverable_id comes from');
+  assert.match(text, /it is NOT the filename/, 'and told the mistake the live box actually made');
+  assert.match(text, /EXACTLY the deliverables you registered in THIS execution/);
+});

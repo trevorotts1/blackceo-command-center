@@ -58,6 +58,9 @@ let markAudienceDeadlineFallback: TasksModule['markAudienceDeadlineFallback'];
 let confirmTaskAudience: TasksModule['confirmTaskAudience'];
 let AUDIENCE_CONFIRM_DEADLINE_MS: TasksModule['AUDIENCE_CONFIRM_DEADLINE_MS'];
 
+let checkPersonaDispatchReady: TasksModule['checkPersonaDispatchReady'];
+let isHardHoldConfirmDepartment: TasksModule['isHardHoldConfirmDepartment'];
+
 type TrustEngineModule = typeof import('../../src/lib/jobs/trust-engine');
 let sendRequesterAudienceAsk: TrustEngineModule['sendRequesterAudienceAsk'];
 
@@ -111,6 +114,8 @@ test.before(async () => {
   markAudienceDeadlineFallback = tasks.markAudienceDeadlineFallback;
   confirmTaskAudience = tasks.confirmTaskAudience;
   AUDIENCE_CONFIRM_DEADLINE_MS = tasks.AUDIENCE_CONFIRM_DEADLINE_MS;
+  checkPersonaDispatchReady = tasks.checkPersonaDispatchReady;
+  isHardHoldConfirmDepartment = tasks.isHardHoldConfirmDepartment;
   ({ sendRequesterAudienceAsk } = await import('../../src/lib/jobs/trust-engine'));
 });
 
@@ -454,4 +459,69 @@ test('[D5] markAudienceDeadlineFallback: no bundle row → no-op (pre-existing t
   const id = nextId('d5-nobundle');
   insertTask(id);
   assert.doesNotThrow(() => markAudienceDeadlineFallback(id));
+});
+
+// ── E. A released card can actually be hand-dispatched ──────────────────────
+//
+// The gate releases a card whose confirm deadline has passed (hold:false,
+// state 'deadline_fallback'), but the release is only durable once
+// `confirm_state` is flipped. The auto-dispatcher flips it; the manual dispatch
+// route never did, and checkPersonaDispatchReady reads the COLUMN — so on a
+// live box the board's dispatch answered 409 `persona_*` for a card the gate
+// had already let go, and no operator could hand-dispatch it.
+
+/** Back-date the bundle so the confirm deadline has passed on the real clock. */
+function expireConfirmWindow(taskId: string): void {
+  run('UPDATE task_persona_bundle SET created_at = ? WHERE task_id = ?', [
+    new Date(Date.now() - AUDIENCE_CONFIRM_DEADLINE_MS - 60_000).toISOString(), taskId,
+  ]);
+}
+
+test('[dispatch] a past-deadline card is refused while confirm_state lags, and ready once flipped', () => {
+  const id = nextId('dispatch-deadline');
+  insertTask(id);
+  persistPersonaBundle(id, bundle({ confirm_required: true }));
+  expireConfirmWindow(id);
+
+  const gate = evaluateAudienceConfirmGate(id);
+  assert.equal(gate.hold, false, 'the gate has already released this card');
+  assert.equal(gate.state, 'deadline_fallback');
+  assert.equal(
+    queryOne<{ confirm_state: string }>('SELECT confirm_state FROM task_persona_bundle WHERE task_id = ?', [id])!.confirm_state,
+    'pending', 'but the column still says pending — the live 409',
+  );
+  assert.equal(checkPersonaDispatchReady(id).ready, false, 'reproduces the refusal an operator hit');
+
+  // The one call the dispatch route now makes, exactly as the sweep does.
+  markAudienceDeadlineFallback(id);
+  assert.equal(checkPersonaDispatchReady(id).ready, true, 'the released card is now hand-dispatchable');
+});
+
+test('[dispatch] a hard-hold build department is NOT released this way', () => {
+  // The route guards the flip on this predicate, so D23 survives the fix.
+  assert.equal(isHardHoldConfirmDepartment('funnels'), true);
+  assert.equal(isHardHoldConfirmDepartment('web-development'), true);
+  assert.equal(isHardHoldConfirmDepartment('marketing'), false, 'CONTROL: an ordinary department still releases');
+
+  const id = nextId('dispatch-hardhold');
+  insertTask(id);
+  run("UPDATE tasks SET department = 'funnels' WHERE id = ?", [id]);
+  persistPersonaBundle(id, bundle({ confirm_required: true }));
+  expireConfirmWindow(id);
+  // No flip happens for this department, so the refusal stands.
+  assert.equal(checkPersonaDispatchReady(id).ready, false, 'a build department still waits for the owner');
+});
+
+test('[dispatch] the manual dispatch route takes the gate verdict, not the raw column', () => {
+  // The behaviour above lives in three lines of the route; pin them so a future
+  // edit cannot quietly drop back to reading confirm_state directly.
+  const source = fs.readFileSync(
+    path.resolve(__dirname, '..', '..', 'src/app/api/tasks/[id]/dispatch/route.ts'), 'utf8',
+  );
+  const gateCall = source.indexOf('evaluateAudienceConfirmGate(task.id)');
+  const flipCall = source.indexOf('markAudienceDeadlineFallback(task.id)');
+  const readyCall = source.indexOf('checkPersonaDispatchReady(task.id)');
+  assert.ok(gateCall > 0 && flipCall > gateCall, 'the route must consult the gate and flip on its verdict');
+  assert.ok(readyCall > flipCall, 'and it must flip BEFORE the readiness check reads the column');
+  assert.ok(source.includes('isHardHoldConfirmDepartment('), 'the hard-hold departments must stay excluded');
 });
