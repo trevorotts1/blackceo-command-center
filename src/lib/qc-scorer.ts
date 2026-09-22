@@ -1795,7 +1795,12 @@ export interface DeliverableManifestItem {
   title: string;
   path: string;
   type: 'image' | 'file' | 'url';
-  /** null when file is missing or unreadable */
+  /**
+   * Measured size in bytes, or null when the size is UNKNOWN — the file is
+   * missing/unreadable, or the deliverable is a URL whose content could not be
+   * retrieved. null is NEVER a measurement of zero: renderers must print it as
+   * UNKNOWN and gates must not treat it as empty.
+   */
   sizeBytes: number | null;
   /** Set for images: WxH string or null if not determinable */
   dimensions: string | null;
@@ -1821,6 +1826,344 @@ export interface DeliverableManifestItem {
    * and the sweep retries.
    */
   ioDeferred?: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// URL deliverable probing (URL-SIZE fix)
+// ---------------------------------------------------------------------------
+
+/**
+ * A URL deliverable used to reach the judge as `sizeBytes: null`, and the
+ * prompt renderer interpolated that straight into `EXISTS — ${sizeBytes} bytes`
+ * — so EVERY url deliverable was described to the judge as the literal string
+ * "EXISTS — null bytes". Good work was scored as an empty deliverable and the
+ * card burned its whole reroute budget on a measurement that was never taken.
+ *
+ * This probe establishes REAL evidence where it can, and says UNDETERMINED
+ * where it genuinely cannot. It never reports zero for "not measured": a size
+ * the system does not know is `null`, and `null` now renders as UNKNOWN (see
+ * `buildQCPrompt`) and is never treated as empty (see `evaluateCriteria`).
+ *
+ * Retrieval rules:
+ *   • docs.google.com document/spreadsheet links are rewritten to their public
+ *     plain-text/CSV export endpoint. Fetching the `/edit` URL would measure the
+ *     editor's JavaScript shell — a number that is identical for an empty doc
+ *     and a finished one, which is a FALSE measurement, worse than none.
+ *   • a login redirect or 401/403 is an auth wall: UNDETERMINED, named as such.
+ *   • a text/markdown/csv/json body is real content: measured, excerpted and
+ *     structurally counted exactly like a local text deliverable.
+ *   • an text/html body proves reachability but may be an application shell,
+ *     so it is measured AND labelled as such so the judge scores honestly.
+ *   • any network/timeout/DNS failure is UNDETERMINED, never zero.
+ *
+ * Fail-safe by construction: every failure path returns "unknown", so a QC run
+ * can never be made worse by the network. `QC_URL_PROBE=off` disables retrieval
+ * entirely (syntax validation still runs).
+ */
+const URL_PROBE_MAX_BYTES = 262_144;
+const URL_PROBE_TIMEOUT_MS = Number(process.env.QC_URL_PROBE_TIMEOUT_MS ?? 8000);
+
+/** Hosts that mean "you were bounced to a login page", not "here is the doc". */
+const AUTH_WALL_HOSTS = new Set([
+  'accounts.google.com',
+  'login.microsoftonline.com',
+  'login.live.com',
+  'appleid.apple.com',
+]);
+
+/** Content types whose body IS the deliverable's content. */
+const URL_CONTENT_TYPES = ['text/plain', 'text/markdown', 'text/csv', 'application/json', 'text/x-markdown'];
+
+export interface UrlProbe {
+  /** Syntactically a usable http(s) URL. */
+  valid: boolean;
+  /**
+   * Measured body size in bytes, or null when the content could not be
+   * retrieved. null means UNKNOWN — never "empty".
+   */
+  sizeBytes: number | null;
+  excerpt: string | null;
+  structuralChecks: TextStructuralChecks | null;
+  /** Always set — how the size was established, or why it could not be. */
+  contentNote: string;
+  invalidReason?: string;
+}
+
+/** True for hosts we refuse to fetch from QC (SSRF guard on agent-supplied URLs). */
+export function isPrivateProbeHost(hostname: string): boolean {
+  const h = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local') || h.endsWith('.internal')) return true;
+  if (h === '::1' || h === '::' || h.startsWith('fc') || h.startsWith('fd') || h.startsWith('fe80:')) return true;
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+  if (!m) return false;
+  const [a, b] = [Number(m[1]), Number(m[2])];
+  if (a === 10 || a === 127 || a === 0) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 169 && b === 254) return true; // link-local / cloud metadata
+  return false;
+}
+
+/**
+ * Rewrite a Google Docs/Sheets editor link to its plain-content export URL.
+ * Returns the input unchanged for anything else.
+ */
+export function googleExportUrl(href: string): string {
+  try {
+    const u = new URL(href);
+    if (u.hostname !== 'docs.google.com') return href;
+    const doc = /^\/document\/d\/([^/]+)/.exec(u.pathname);
+    if (doc) return `https://docs.google.com/document/d/${doc[1]}/export?format=txt`;
+    const sheet = /^\/spreadsheets\/d\/([^/]+)/.exec(u.pathname);
+    if (sheet) return `https://docs.google.com/spreadsheets/d/${sheet[1]}/export?format=csv`;
+    return href;
+  } catch {
+    return href;
+  }
+}
+
+/** Read at most `cap` bytes of a response body; never buffers more. */
+async function readBoundedBody(resp: Response, cap: number): Promise<{ buf: Buffer; truncated: boolean }> {
+  if (!resp.body) return { buf: Buffer.from(await resp.arrayBuffer()).subarray(0, cap), truncated: false };
+  const reader = resp.body.getReader();
+  const chunks: Buffer[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(Buffer.from(value));
+      total += value.byteLength;
+      if (total > cap) {
+        await reader.cancel().catch(() => {});
+        return { buf: Buffer.concat(chunks).subarray(0, cap), truncated: true };
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return { buf: Buffer.concat(chunks), truncated: false };
+}
+
+function unknownUrlProbe(note: string): UrlProbe {
+  return { valid: true, sizeBytes: null, excerpt: null, structuralChecks: null, contentNote: note };
+}
+
+export async function probeUrlDeliverable(href: string): Promise<UrlProbe> {
+  const trimmed = href.trim();
+  if (!isUsableUrl(trimmed)) {
+    return {
+      valid: false,
+      sizeBytes: null,
+      excerpt: null,
+      structuralChecks: null,
+      contentNote: 'not a valid http(s) URL',
+      invalidReason: `Not a valid http(s) URL: ${trimmed}`,
+    };
+  }
+  if ((process.env.QC_URL_PROBE ?? '').toLowerCase() === 'off') {
+    return unknownUrlProbe('URL content UNDETERMINED — retrieval disabled (QC_URL_PROBE=off); link is well-formed');
+  }
+
+  let target: URL;
+  try {
+    target = new URL(googleExportUrl(trimmed));
+  } catch {
+    return unknownUrlProbe('URL content UNDETERMINED — link could not be parsed for retrieval');
+  }
+  if (isPrivateProbeHost(target.hostname)) {
+    return unknownUrlProbe(`URL content UNDETERMINED — refused to fetch a private/loopback host (${target.hostname})`);
+  }
+
+  try {
+    const resp = await fetch(target.toString(), {
+      redirect: 'follow',
+      signal: AbortSignal.timeout(URL_PROBE_TIMEOUT_MS),
+      headers: { accept: 'text/plain, text/markdown, text/csv, application/json, text/html;q=0.5, */*;q=0.1' },
+    });
+
+    const finalHost = (() => {
+      try { return new URL(resp.url || target.toString()).hostname.toLowerCase(); } catch { return target.hostname; }
+    })();
+    if (AUTH_WALL_HOSTS.has(finalHost) && finalHost !== target.hostname) {
+      return unknownUrlProbe(
+        `URL content UNDETERMINED — retrieval was redirected to a sign-in page (${finalHost}); the link is well-formed and may hold real content that QC cannot read without credentials`,
+      );
+    }
+    if (resp.status === 401 || resp.status === 403 || resp.status === 407) {
+      return unknownUrlProbe(
+        `URL content UNDETERMINED — retrieval returned HTTP ${resp.status} (authentication required); the link is well-formed and may hold real content that QC cannot read without credentials`,
+      );
+    }
+    if (!resp.ok) {
+      return unknownUrlProbe(`URL content UNDETERMINED — retrieval returned HTTP ${resp.status}`);
+    }
+
+    // Bounded read. The URL comes from an agent, so an unbounded arrayBuffer()
+    // would let one deliverable pull an arbitrarily large body into the QC loop.
+    // A body over the cap still yields a HONEST size when the server declared
+    // one, and is reported as capped otherwise — never as a smaller number
+    // dressed up as the real measurement.
+    const declared = Number(resp.headers.get('content-length') ?? '');
+    const { buf, truncated } = await readBoundedBody(resp, URL_PROBE_MAX_BYTES);
+    const bodyBytes = truncated
+      ? (Number.isFinite(declared) && declared > 0 ? declared : null)
+      : buf.length;
+    const contentType = (resp.headers.get('content-type') ?? '').toLowerCase();
+
+    if (truncated) {
+      return {
+        valid: true,
+        sizeBytes: bodyBytes,
+        excerpt: buf.subarray(0, CONTENT_EXCERPT_MAX_BYTES).toString('utf8').slice(0, CONTENT_EXCERPT_MAX_CHARS),
+        structuralChecks: null,
+        contentNote: bodyBytes === null
+          ? `URL is reachable and returned more than the ${URL_PROBE_MAX_BYTES}-byte probe cap; exact size UNDETERMINED but the deliverable is demonstrably non-empty`
+          : `URL is reachable and declares ${bodyBytes} bytes (${contentType || 'unknown type'}) — body read was capped at ${URL_PROBE_MAX_BYTES} bytes`,
+      };
+    }
+    const isTextContent = URL_CONTENT_TYPES.some((t) => contentType.startsWith(t));
+    const isHtml = contentType.startsWith('text/html');
+
+    // Past the truncated branch the whole body is in hand, so the size is exact.
+    const measured = buf.length;
+    if (measured === 0) {
+      return unknownUrlProbe('URL content UNDETERMINED — retrieval succeeded but returned an empty body (may be an access or export limitation, not an empty deliverable)');
+    }
+
+    if (isTextContent) {
+      const text = buf.subarray(0, Math.min(measured, CONTENT_EXCERPT_MAX_BYTES)).toString('utf8');
+      return {
+        valid: true,
+        sizeBytes: measured,
+        excerpt: text.slice(0, CONTENT_EXCERPT_MAX_CHARS),
+        structuralChecks: {
+          lines: text.split('\n').length,
+          words: text.split(/\s+/).filter(Boolean).length,
+          nonEmptyChars: text.replace(/\s/g, '').length,
+        },
+        contentNote: `URL content retrieved and measured (${contentType || 'text'}) — ${measured} bytes of actual content`,
+      };
+    }
+
+    return {
+      valid: true,
+      sizeBytes: measured,
+      excerpt: null,
+      structuralChecks: null,
+      contentNote: isHtml
+        ? `URL is reachable and returned ${measured} bytes of HTML — this is the HTTP response body and may be an application shell rather than the document text, so treat the byte count as reachability evidence, NOT as a content measurement`
+        : `URL is reachable and returned ${measured} bytes (${contentType || 'unknown type'}) — content not text-extractable, scored on retrieval only`,
+    };
+  } catch (err) {
+    return unknownUrlProbe(
+      `URL content UNDETERMINED — retrieval failed (${(err as Error).message}); the link is well-formed and this is NOT evidence the deliverable is empty`,
+    );
+  }
+}
+
+/**
+ * Build one manifest item from a registered deliverable row.
+ *
+ * Single source of truth for BOTH manifest builders (the engine-owned deck lane
+ * and the generic review lane) — they carried byte-identical copies of this
+ * logic, so the url bug had to be fixed twice or it would drift back.
+ */
+export async function buildDeliverableManifestItem(
+  d: { title: string; path: string | null; deliverable_type: string },
+): Promise<DeliverableManifestItem> {
+  // URL deliverables carry a link in `path`, not a filesystem path — they must
+  // be validated and RETRIEVED as URLs, never stat()ed (a stat would always
+  // fail and report a genuine deliverable as "file not found").
+  if (d.deliverable_type === 'url') {
+    const href = d.path!.trim();
+    const probe = await probeUrlDeliverable(href);
+    return {
+      title: d.title,
+      path: href,
+      type: 'url',
+      sizeBytes: probe.sizeBytes,
+      dimensions: null,
+      valid: probe.valid,
+      invalidReason: probe.invalidReason,
+      contentExcerpt: probe.excerpt,
+      structuralChecks: probe.structuralChecks,
+      contentNote: probe.contentNote,
+    };
+  }
+
+  const rawPath = d.path!.replace(/^~/, process.env.HOME || '');
+  const ext = rawPath.slice(rawPath.lastIndexOf('.')).toLowerCase();
+  const isImage = IMAGE_EXTENSIONS.has(ext);
+
+  // FIX 28: a bundle-shaped deliverable (deck/guide/speech/audio/infographic/
+  // teleprompter names mirrored from build_deck.py's DELIVERABLES_REQUIRED) is
+  // re-verified BYTE-LEVEL — presence, symlink rejection, size floor, leading
+  // magic — so a right-sized decoy can never reach the judge as a valid
+  // manifest item. The evidence gate (collectCompletionEvidence) enforces the
+  // same probe at done; this makes the QC verdict certify the same bytes.
+  if (bundleReverifyEnabled() && !isImage && isBundleDeliverablePath(rawPath)) {
+    const verdict = verifyPresentationBundleDeliverable(rawPath);
+    if (!verdict.ok) {
+      return {
+        title: d.title,
+        path: rawPath,
+        type: 'file',
+        sizeBytes: verdict.sizeBytes ?? null,
+        dimensions: null,
+        valid: false,
+        invalidReason: verdict.reason ?? `bundle re-verification failed: ${rawPath}`,
+        contentNote: 'bundle re-verification refused this artifact before content scoring (magic-byte/size/symlink check)',
+      };
+    }
+    // Bundle-verified: manifest item is valid on the verified bytes; size-only
+    // members (md) still carry structural content via the text probe below only
+    // when they are text formats.
+  }
+
+  if (isImage) {
+    const probe = probeImageFile(rawPath);
+    if (!probe.valid) {
+      return {
+        title: d.title,
+        path: rawPath,
+        type: 'image',
+        sizeBytes: null,
+        dimensions: null,
+        valid: false,
+        invalidReason: probe.reason,
+      };
+    }
+    return {
+      title: d.title,
+      path: rawPath,
+      type: 'image',
+      sizeBytes: probe.sizeBytes,
+      dimensions: null, // dimensions require image decode; skip for now
+      valid: true,
+    };
+  }
+
+  // Non-image file: extract bounded content + structural checks (U082). The old
+  // code validated by byte count alone — a placeholder scored identically to a
+  // finished deliverable. probeTextFile reads a bounded excerpt and computes
+  // line/word/non-empty-char counts so the judge scores CONTENT, not existence.
+  // FIX 45: probe.ioDeferred (exists-but-unreadable) rides through to the
+  // manifest so the all-invalid branch can tell a deferral from a genuine fail.
+  const probe = probeTextFile(rawPath);
+  return {
+    title: d.title,
+    path: rawPath,
+    type: 'file',
+    sizeBytes: probe.valid ? probe.sizeBytes : null,
+    dimensions: null,
+    valid: probe.valid,
+    invalidReason: probe.invalidReason,
+    contentExcerpt: probe.excerpt,
+    structuralChecks: probe.structuralChecks,
+    contentNote: probe.contentNote,
+    ioDeferred: probe.ioDeferred === true ? true : undefined,
+  };
 }
 
 export interface QCScorerInput {
@@ -2061,7 +2404,7 @@ function heuristicScore(input: QCScorerInput): QCResult {
  * When a per-department QC agent is available, its identity is used as the
  * QC persona so the model scores from that specialist's perspective.
  */
-function buildQCPrompt(input: QCScorerInput): string {
+export function buildQCPrompt(input: QCScorerInput): string {
   const agentIdentity = input.qcAgentName
     ? `You are ${input.qcAgentName}, the QC Specialist for the ${input.departmentSlug ?? 'General'} department.`
     : `You are a QC agent scoring a completed task for the ${input.departmentSlug ?? 'General'} department.`;
@@ -2070,8 +2413,16 @@ function buildQCPrompt(input: QCScorerInput): string {
   const manifest = input.deliverableManifest;
   if (manifest && manifest.length > 0) {
     const manifestLines = manifest.map((d, i) => {
+      // A size the system does not know must read as UNKNOWN — never as a
+      // number, and never as the literal "null bytes". Interpolating a null
+      // sizeBytes described every url deliverable to the judge as "EXISTS —
+      // null bytes", which read as empty and failed finished work.
+      const sizeLabel =
+        d.sizeBytes === null
+          ? 'SIZE UNKNOWN (not measured — this is NOT a measurement of zero and is NOT evidence the deliverable is empty)'
+          : `${d.sizeBytes} bytes`;
       const status = d.valid
-        ? `EXISTS — ${d.sizeBytes} bytes${d.dimensions ? `, ${d.dimensions}` : ''}`
+        ? `EXISTS — ${sizeLabel}${d.dimensions ? `, ${d.dimensions}` : ''}`
         : `MISSING/INVALID — ${d.invalidReason ?? 'unknown reason'}`;
       let line = `  ${i + 1}. "${d.title}" [${d.type}] path=${d.path} → ${status}`;
       // U082: surface a bounded content excerpt + deterministic structural
@@ -2122,6 +2473,16 @@ ${sopSection}
    chars, or whose excerpt is a placeholder / template / truncated stub that does
    not address the request, is NOT a finished deliverable — score it low (≤4.0)
    and name the gap, even though the file exists and is non-empty.
+5. "SIZE UNKNOWN" means the system could not measure this deliverable — most
+   often a URL whose content needs credentials QC does not hold. It is NOT a
+   size of zero and NOT evidence of an empty deliverable. NEVER score a
+   deliverable as missing, empty or unfinished because its size is UNKNOWN, and
+   never list "unknown size" or "empty file" as a gap for such an item. A
+   deliverable marked EXISTS with an UNKNOWN size is present; judge it on its
+   note, excerpt and title, and if there is genuinely nothing to judge, say the
+   content could not be verified rather than asserting it is empty.
+6. A deliverable is never missing or empty merely because it is a link rather
+   than a file path. [url] items are delivered artifacts.
 
 **Gate:** ≥8.5 = PASS (auto-approve), <8.5 = RETURN (kick back for rework).
 
@@ -4002,12 +4363,23 @@ export async function evaluateCriteria(
       }
 
       case 'existence': {
-        const anyValid = manifest.some((m) => m.valid && (m.sizeBytes ?? 0) > 0);
+        // `sizeBytes === null` means the size is UNKNOWN, not zero. Coercing it
+        // to 0 here failed every url deliverable — whose content is never
+        // stat()able — as an empty artifact. A deliverable that resolved (valid)
+        // but whose size could not be measured is UNDETERMINED, and UNDETERMINED
+        // never fails this gate: the emptiness was never established.
+        const nonEmpty = manifest.filter((m) => m.valid && (m.sizeBytes ?? 1) > 0);
+        const anyValid = nonEmpty.length > 0;
+        const unmeasured = nonEmpty.filter((m) => m.sizeBytes === null);
         results.push({
           id: c.id,
           description: c.description,
           pass: anyValid,
-          reason: anyValid ? 'File exists and is non-empty' : 'No valid non-empty artifact found',
+          reason: anyValid
+            ? unmeasured.length === nonEmpty.length
+              ? `Deliverable resolved but its size could not be measured (${unmeasured.map((m) => m.path).join('; ')}) — UNDETERMINED, not empty`
+              : 'File exists and is non-empty'
+            : 'No valid non-empty artifact found',
         });
         break;
       }
@@ -4027,7 +4399,9 @@ export async function evaluateCriteria(
         // We don't decode image dimensions in the current manifest (no heavy decoder).
         // Pass through: if file is valid image and size is reasonable (>1KB), accept.
         const minSizeHeuristic = 1024; // 1KB — smallest valid non-trivial PNG
-        const meetsSize = manifest.some((m) => m.valid && (m.sizeBytes ?? 0) >= minSizeHeuristic);
+        // Same rule as `existence`: an unmeasured size is UNKNOWN, not zero, so
+        // it can never be the thing that proves an artifact "too small".
+        const meetsSize = manifest.some((m) => m.valid && (m.sizeBytes === null || m.sizeBytes >= minSizeHeuristic));
         results.push({
           id: c.id,
           description: c.description,
@@ -5183,75 +5557,7 @@ export async function runEngineOwnedDeckQC(
     if (fileRows.length === 0) {
       noEvidence = true;
     } else {
-      deliverableManifest = fileRows.map((d): DeliverableManifestItem => {
-        if (d.deliverable_type === 'url') {
-          const href = d.path!.trim();
-          const ok = isUsableUrl(href);
-          return {
-            title: d.title,
-            path: href,
-            type: 'url',
-            sizeBytes: null,
-            dimensions: null,
-            valid: ok,
-            invalidReason: ok ? undefined : `Not a valid http(s) URL: ${href}`,
-          };
-        }
-        const rawPath = d.path!.replace(/^~/, process.env.HOME || '');
-        const ext = rawPath.slice(rawPath.lastIndexOf('.')).toLowerCase();
-        const isImage = IMAGE_EXTENSIONS.has(ext);
-        if (bundleReverifyEnabled() && !isImage && isBundleDeliverablePath(rawPath)) {
-          const verdict = verifyPresentationBundleDeliverable(rawPath);
-          if (!verdict.ok) {
-            return {
-              title: d.title,
-              path: rawPath,
-              type: 'file',
-              sizeBytes: verdict.sizeBytes ?? null,
-              dimensions: null,
-              valid: false,
-              invalidReason: verdict.reason ?? `bundle re-verification failed: ${rawPath}`,
-              contentNote: 'bundle re-verification refused this artifact before content scoring (magic-byte/size/symlink check)',
-            };
-          }
-        }
-        if (isImage) {
-          const probe = probeImageFile(rawPath);
-          if (!probe.valid) {
-            return {
-              title: d.title,
-              path: rawPath,
-              type: 'image',
-              sizeBytes: null,
-              dimensions: null,
-              valid: false,
-              invalidReason: probe.reason,
-            };
-          }
-          return {
-            title: d.title,
-            path: rawPath,
-            type: 'image',
-            sizeBytes: probe.sizeBytes,
-            dimensions: null,
-            valid: true,
-          };
-        }
-        const probe = probeTextFile(rawPath);
-        return {
-          title: d.title,
-          path: rawPath,
-          type: 'file',
-          sizeBytes: probe.valid ? probe.sizeBytes : null,
-          dimensions: null,
-          valid: probe.valid,
-          invalidReason: probe.invalidReason,
-          contentExcerpt: probe.excerpt,
-          structuralChecks: probe.structuralChecks,
-          contentNote: probe.contentNote,
-          ioDeferred: probe.ioDeferred === true ? true : undefined,
-        };
-      });
+      deliverableManifest = await Promise.all(fileRows.map(buildDeliverableManifestItem));
 
       const allInvalid = deliverableManifest.every((d) => !d.valid);
       const allIoDeferred =
@@ -5843,100 +6149,7 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
       // ── End invariant A ──────────────────────────────────────────────────────
 
       if (fileRows.length > 0) {
-        deliverableManifest = fileRows.map((d): DeliverableManifestItem => {
-          // URL deliverables carry a link in `path`, not a filesystem path — they
-          // must be validated as URLs, never stat()ed (a stat would always fail
-          // and report a genuine deliverable as "file not found").
-          if (d.deliverable_type === 'url') {
-            const href = d.path!.trim();
-            const ok = isUsableUrl(href);
-            return {
-              title: d.title,
-              path: href,
-              type: 'url',
-              sizeBytes: null,
-              dimensions: null,
-              valid: ok,
-              invalidReason: ok ? undefined : `Not a valid http(s) URL: ${href}`,
-            };
-          }
-
-          const rawPath = d.path!.replace(/^~/, process.env.HOME || '');
-          const ext = rawPath.slice(rawPath.lastIndexOf('.')).toLowerCase();
-          const isImage = IMAGE_EXTENSIONS.has(ext);
-
-          // FIX 28: a bundle-shaped deliverable (deck/guide/speech/audio/
-          // infographic/teleprompter names mirrored from build_deck.py's
-          // DELIVERABLES_REQUIRED) is re-verified BYTE-LEVEL — presence,
-          // symlink rejection, size floor, leading magic — so a right-sized
-          // decoy can never reach the judge as a valid manifest item. The
-          // evidence gate (collectCompletionEvidence) enforces the same probe
-          // at done; this makes the QC verdict certify the same bytes.
-          if (bundleReverifyEnabled() && !isImage && isBundleDeliverablePath(rawPath)) {
-            const verdict = verifyPresentationBundleDeliverable(rawPath);
-            if (!verdict.ok) {
-              return {
-                title: d.title,
-                path: rawPath,
-                type: 'file',
-                sizeBytes: verdict.sizeBytes ?? null,
-                dimensions: null,
-                valid: false,
-                invalidReason: verdict.reason ?? `bundle re-verification failed: ${rawPath}`,
-                contentNote: 'bundle re-verification refused this artifact before content scoring (magic-byte/size/symlink check)',
-              };
-            }
-            // Bundle-verified: manifest item is valid on the verified bytes;
-            // size-only members (md) still carry structural content via the
-            // text probe below only when they are text formats.
-          }
-
-          if (isImage) {
-            const probe = probeImageFile(rawPath);
-            if (!probe.valid) {
-              return {
-                title: d.title,
-                path: rawPath,
-                type: 'image',
-                sizeBytes: null,
-                dimensions: null,
-                valid: false,
-                invalidReason: probe.reason,
-              };
-            }
-            return {
-              title: d.title,
-              path: rawPath,
-              type: 'image',
-              sizeBytes: probe.sizeBytes,
-              dimensions: null, // dimensions require image decode; skip for now
-              valid: true,
-            };
-          }
-
-          // Non-image file: extract bounded content + structural checks (U082).
-          // The old code validated by byte count alone — a placeholder scored
-          // identically to a finished deliverable. probeTextFile reads a bounded
-          // excerpt and computes line/word/non-empty-char counts so the judge
-          // scores CONTENT, not just existence.
-          // FIX 45: probe.ioDeferred (exists-but-unreadable) rides through to
-          // the manifest so the all-invalid branch can tell a deferral from a
-          // genuine fail.
-          const probe = probeTextFile(rawPath);
-          return {
-            title: d.title,
-            path: rawPath,
-            type: 'file',
-            sizeBytes: probe.valid ? probe.sizeBytes : null,
-            dimensions: null,
-            valid: probe.valid,
-            invalidReason: probe.invalidReason,
-            contentExcerpt: probe.excerpt,
-            structuralChecks: probe.structuralChecks,
-            contentNote: probe.contentNote,
-            ioDeferred: probe.ioDeferred === true ? true : undefined,
-          };
-        });
+        deliverableManifest = await Promise.all(fileRows.map(buildDeliverableManifestItem));
 
         // Early-exit: if ALL deliverables are missing/invalid, fail immediately
         // without spending an LLM call — the reason is structural, not qualitative.
