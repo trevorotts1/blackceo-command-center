@@ -135,9 +135,14 @@ export function currentExecutionDeliverables(taskId:string,executionId:string,db
  // column that does not exist would throw inside the caller's catch and turn a
  // healthy un-migrated box into `persona_conformance_unavailable`. Absent reads
  // as undefined, which is simply "not this execution".
- const all=db.prepare('SELECT * FROM task_deliverables WHERE task_id=?').all(taskId) as (DeliverableRow&{execution_id?:string|null})[];
+ const all=db.prepare('SELECT * FROM task_deliverables WHERE task_id=?').all(taskId) as (DeliverableRow&{execution_id?:string|null;superseded_at?:string|null})[];
  const mine=all.filter(r=>r.execution_id===executionId);
- return mine.length?mine:all;
+ if(mine.length)return mine;
+ // FALLBACK (this attempt registered nothing of its own): a row an earlier
+ // attempt retired is not something THIS attempt can be held to. Migration 161
+ // stamps those; a pre-161 row reads undefined and still counts, so the rule is
+ // exactly as strict as it was before superseding existed.
+ return all.filter(r=>!r.superseded_at);
 }
 export function requirePersonaConformanceForCompletion(taskId:string,db:Database.Database=getDb()):PersonaConformanceResult {
  try {

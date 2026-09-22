@@ -488,6 +488,10 @@ CREATE TABLE IF NOT EXISTS task_deliverables (
   mime_type TEXT,
   file_size_bytes INTEGER,
   sha256 TEXT,
+  -- Retired by a later attempt (migration 161). NEVER deleted: a client's file
+  -- record survives, it simply stops counting as the current attempt's output.
+  superseded_at TEXT,
+  superseded_by_execution_id TEXT,
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
 );

@@ -7786,6 +7786,93 @@ export const migrations: Migration[] = [
       console.log('[Migration 159] tasks.qc_cap_alert_attempts already present');
     },
   },
+  {
+    id: '160',
+    name: 'qc_results_carry_the_reason',
+    // QC-VERDICT-RECORD-20260922: `task_qc_results` stored id, task_id,
+    // workspace_id, department_slug, score, passed, scoring_path, qc_agent_id,
+    // attempt, scored_at — and nothing about WHY. Measured on a client box: a
+    // card failed twice at 9.5 and 9.0 against an 8.5 threshold and the reason
+    // was not recoverable from the database OR from both pm2 logs, because the
+    // scorer only ever logged the score. These two nullable columns make a
+    // verdict answerable after the fact. Existing rows stay NULL, which reads
+    // as "scored before the reason was kept".
+    up: (db) => {
+      const exists = db
+        .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_qc_results'")
+        .get();
+      if (!exists) {
+        console.log('[Migration 160] task_qc_results absent — nothing to record');
+        return;
+      }
+      const cols = new Set((db.prepare('PRAGMA table_info(task_qc_results)').all() as { name: string }[]).map((c) => c.name));
+      const added: string[] = [];
+      if (!cols.has('reason')) { db.exec('ALTER TABLE task_qc_results ADD COLUMN reason TEXT'); added.push('reason'); }
+      if (!cols.has('gaps')) { db.exec('ALTER TABLE task_qc_results ADD COLUMN gaps TEXT'); added.push('gaps'); }
+      console.log(`[Migration 160] task_qc_results verdict columns: ${added.length > 0 ? added.join(', ') : 'none (already present)'}`);
+    },
+  },
+  {
+    id: '161',
+    name: 'supersede_stale_task_deliverables',
+    // QC-DELIVERABLE-HOUSEKEEPING-20260922: `task_deliverables` rows accumulate
+    // across QC re-routes and nothing ever retires them — one live card held 27
+    // rows for 5 real files. This is NOT a correctness fault: migration 158 plus
+    // `currentExecutionDeliverables` already scope the conformance gate to the
+    // current execution, and a card with 15 unlinked rows passed at 9.0/10 on a
+    // build carrying that scoping. It is unbounded growth, so the fix retires
+    // rows rather than deleting them: a client's file record is never destroyed.
+    //
+    // The one-time backfill applies the same rule the re-route now applies —
+    // everything attributed to an execution that is no longer the task's current
+    // one is superseded — so a box carrying an existing pile-up self-heals on
+    // upgrade. Rows with a NULL execution_id (registered before migration 158)
+    // are LEFT ALONE: they cannot be attributed to an attempt, and retiring them
+    // on a guess would discard the only record of a file.
+    up: (db) => {
+      const exists = db
+        .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_deliverables'")
+        .get();
+      if (!exists) {
+        console.log('[Migration 161] task_deliverables absent — nothing to supersede');
+        return;
+      }
+      const cols = new Set((db.prepare('PRAGMA table_info(task_deliverables)').all() as { name: string }[]).map((c) => c.name));
+      if (!cols.has('superseded_at')) db.exec('ALTER TABLE task_deliverables ADD COLUMN superseded_at TEXT');
+      if (!cols.has('superseded_by_execution_id')) db.exec('ALTER TABLE task_deliverables ADD COLUMN superseded_by_execution_id TEXT');
+
+      // The backfill needs the execution linkage (158) to know what is stale.
+      const hasExecColumn = new Set(
+        (db.prepare('PRAGMA table_info(task_deliverables)').all() as { name: string }[]).map((c) => c.name),
+      ).has('execution_id');
+      const hasExecTable = db
+        .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_executions'")
+        .get();
+      if (!hasExecColumn || !hasExecTable) {
+        console.log('[Migration 161] columns ready; no execution linkage to backfill against');
+        return;
+      }
+
+      const now = new Date().toISOString();
+      const result = db.prepare(`
+        UPDATE task_deliverables
+           SET superseded_at = ?,
+               superseded_by_execution_id = (
+                 SELECT e.id FROM task_executions e
+                  WHERE e.task_id = task_deliverables.task_id
+                  ORDER BY e.generation DESC LIMIT 1
+               )
+         WHERE superseded_at IS NULL
+           AND execution_id IS NOT NULL
+           AND execution_id <> (
+                 SELECT e.id FROM task_executions e
+                  WHERE e.task_id = task_deliverables.task_id
+                  ORDER BY e.generation DESC LIMIT 1
+               )
+      `).run(now);
+      console.log(`[Migration 161] superseded ${result.changes} stale deliverable row(s) — none deleted`);
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner

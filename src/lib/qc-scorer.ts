@@ -61,7 +61,8 @@ import { throwIfJobLeaseLost } from '@/lib/jobs/job-lease';
  * (human decides) and log a warning. Never crashes the PATCH route.
  */
 
-import { requirePersonaConformanceForCompletion } from '@/lib/persona-conformance';
+import { requirePersonaConformanceForCompletion, currentExecutionDeliverables } from '@/lib/persona-conformance';
+import { latestExecution, supersedeStaleDeliverables } from '@/lib/execution-attempts';
 import { readFileSync, writeFileSync, renameSync, unlinkSync, existsSync, statSync, openSync, readSync, closeSync, readdirSync } from 'fs';
 import * as path from 'path';
 import { resolvePresentationRunRoots } from '@/lib/presentation-run-roots';
@@ -240,6 +241,81 @@ export interface QCCapAlert {
   send?: (message: string) => boolean;
 }
 
+/**
+ * How a FAILING verdict's score stands against the pass bar, said honestly.
+ *
+ * The board event for a re-routed card formatted this as
+ * `score X/10 < ${QC_PASS_THRESHOLD}` UNCONDITIONALLY, so a card that scored
+ * 9.0 and failed on a mandatory gap published "9.0/10 < 8.5" — a false
+ * comparison, and (with no stored verdict reason) the only line a human ever
+ * saw. A score can be at or above the bar and still fail: persona conformance,
+ * comms conformance and the artifact gates all turn a PASS into a FAIL without
+ * touching the number. Every site that states the score of a failing verdict
+ * uses this, so none of them can drift back into asserting `<` about a number
+ * that is not.
+ */
+export function qcScoreVerdictClause(score: number): string {
+  return score >= QC_PASS_THRESHOLD
+    ? `score ${score.toFixed(1)}/10 PASSED the ${QC_PASS_THRESHOLD} bar — a mandatory gap failed it`
+    : `score ${score.toFixed(1)}/10 < ${QC_PASS_THRESHOLD}`;
+}
+
+// ---------------------------------------------------------------------------
+// QC-REWORK-REUSE-20260922 — a re-route asks for the GAPS, not the whole job.
+//
+// The kickback appends the gap list to the description and re-dispatches, and
+// the agent reads that as "do it again". In the observed case a bookkeeping gap
+// sent an agent back to regenerate 21 days of content that was already on disk
+// and already acceptable. Nothing told it otherwise.
+//
+// So the note now NAMES the files the last attempt left that still exist, and
+// says to re-register them rather than produce them again. That needs no new
+// agent-facing API: registering a deliverable always INSERTs a fresh row and
+// `linkDeliverableToExecution` attributes it to the CURRENT execution, so
+// POSTing the same path again is exactly how an attempt takes ownership of a
+// file it did not regenerate.
+//
+// ponytail: this is instruction only — nothing enforces that the agent obeys
+// it. Enforcing partial rework means the gate knowing which gap maps to which
+// file, which is a redesign, not this fix.
+// ---------------------------------------------------------------------------
+
+/** Files the last attempt left that are still on disk, as a rework instruction. */
+export function reuseInstruction(taskId: string, deliverablesFn = liveDeliverablesForTask): string {
+  const live = deliverablesFn(taskId);
+  if (live.length === 0) return '';
+  const named = live.map((d) => d.path).join(', ');
+  return `\n\nAlready delivered and STILL VALID — do NOT regenerate: ${named}. `
+    + `Re-register each one for this attempt (POST /api/tasks/${taskId}/deliverables with the same path) `
+    + `so it counts as this attempt's output. Produce ONLY what the gaps above name.`;
+}
+
+/** The current attempt's registered deliverables whose files still exist. */
+function liveDeliverablesForTask(taskId: string): { path: string }[] {
+  try {
+    const execution = latestExecution(taskId);
+    if (!execution) return [];
+    return currentExecutionDeliverables(taskId, execution.id)
+      .filter((d) => typeof d.path === 'string' && d.path.trim() !== '')
+      // A url/link deliverable has no local file to check; a file/artifact does,
+      // and naming one that has since been deleted would send the agent looking
+      // for something that is not there.
+      .filter((d) => (d.deliverable_type === 'file' || d.deliverable_type === 'artifact')
+        ? existsSync(d.path)
+        : true)
+      .map((d) => ({ path: d.path }));
+  } catch {
+    // Never let a rework HINT fail a re-route. No list is simply the old note.
+    return [];
+  }
+}
+
+/** Every gap a verdict named, for a one-line summary. Falls back to the reason. */
+export function qcGapSummary(gaps: string[], reason: string): string {
+  const named = gaps.filter((g) => g && g.trim() !== '');
+  return named.length > 0 ? named.join('; ') : reason;
+}
+
 /** The one gap a one-line summary can carry. Falls back to the verdict reason. */
 function primaryGap(gaps: string[], reason: string): string {
   return gaps.find((g) => g && g.trim() !== '')?.trim() ?? reason;
@@ -254,10 +330,7 @@ function primaryGap(gaps: string[], reason: string): string {
  * mandatory gap.
  */
 export function qcCapBlockReason(p: { attempts: number; score: number; gaps: string[]; reason: string }): string {
-  const scored = p.score >= QC_PASS_THRESHOLD
-    ? `score ${p.score.toFixed(1)}/10 PASSED the ${QC_PASS_THRESHOLD} bar — blocked on a gap`
-    : `last score ${p.score.toFixed(1)}/10 (below the ${QC_PASS_THRESHOLD} bar)`;
-  return `Failed QC ${p.attempts}x — stopped retrying. ${scored}: ${primaryGap(p.gaps, p.reason)}`;
+  return `Failed QC ${p.attempts}x — stopped retrying. ${qcScoreVerdictClause(p.score)}: ${primaryGap(p.gaps, p.reason)}`;
 }
 
 /**
@@ -281,6 +354,30 @@ export function qcCapAlertMessage(p: { taskTitle: string } & Omit<QCCapAlert, 's
     '',
     'Nothing further will run on this card until you act. Reply here to unblock it, reassign it, or tell me to drop the requirement.',
   ].join('\n');
+}
+
+/** The gaps the DURABLE verdict recorded for this card (migration 160).
+ *
+ * The owner alert quotes what the database will still say tomorrow, not a
+ * value that lived only in the process that sent it — so an owner reading the
+ * alert and an operator reading `task_qc_results` see the same reason. Null
+ * when the row is missing or predates the column, in which case the caller
+ * falls back to the verdict in hand: the persist is best-effort and an alert
+ * must never lose its gaps to a failed INSERT. */
+export function storedVerdictGaps(taskId: string): string[] | null {
+  try {
+    const row = queryOne<{ gaps: string | null }>(
+      'SELECT gaps FROM task_qc_results WHERE task_id = ? ORDER BY scored_at DESC, rowid DESC LIMIT 1',
+      [taskId],
+    );
+    if (!row?.gaps) return null;
+    const parsed: unknown = JSON.parse(row.gaps);
+    if (!Array.isArray(parsed)) return null;
+    const named = parsed.map((g) => String(g)).filter((g) => g.trim() !== '');
+    return named.length > 0 ? named : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -486,7 +583,11 @@ export async function blockTaskForQC(p: BlockTaskForQCParams): Promise<boolean> 
       console.log(`[blockTaskForQC] cap alert for ${p.taskId} already sent at attempt ${capAlert.attempts} — not re-sending`);
     } else {
       const message = capAlert
-        ? qcCapAlertMessage({ taskTitle: p.taskTitle, ...capAlert })
+        ? qcCapAlertMessage({
+            taskTitle: p.taskTitle,
+            ...capAlert,
+            gaps: storedVerdictGaps(p.taskId) ?? capAlert.gaps,
+          })
         : (p.ownerNotifyMessage ?? p.timelineEventMessage);
       let delivered = false;
       try {
@@ -586,6 +687,23 @@ async function withoutSelfInflictedPersonaBump<T>(taskId: string, write: () => P
   return out;
 }
 
+
+/** Retire the deliverable rows of every attempt but the one that just ran.
+ *
+ * Called on a landed re-route, from BOTH re-route implementations, so the row
+ * count of a looping card stays the size of one attempt instead of growing by
+ * one attempt per failure. Nothing is deleted (execution-attempts.ts). */
+function tidyDeliverablesAfterReroute(taskId: string): void {
+  try {
+    const execution = latestExecution(taskId);
+    if (!execution) return;
+    const retired = supersedeStaleDeliverables(taskId, execution.id);
+    if (retired > 0) {
+      console.log(`[QCScorer] ${taskId}: retired ${retired} deliverable row(s) from earlier attempts (none deleted)`);
+    }
+  } catch { /* housekeeping must never fail a re-route */ }
+}
+
 export async function rerouteOrBlock(p: RerouteOrBlockParams): Promise<QCRerouteOutcome> {
   throwIfJobLeaseLost();
   if (p.attempts >= p.cap) {
@@ -659,6 +777,7 @@ export async function rerouteOrBlock(p: RerouteOrBlockParams): Promise<QCReroute
         qc_reroute_attempts: p.attempts,
       },
     }));
+    tidyDeliverablesAfterReroute(p.taskId);
     return 'rerouted';
   } catch (txErr) {
     if (!(txErr instanceof TransitionError && txErr.code === 'CAS_CONFLICT')) {
@@ -5241,11 +5360,15 @@ export async function runEngineOwnedDeckQC(
     // invisible here: the durable row said passed=1 while the qc_review event
     // said FAIL and the card was re-routed. `result.pass` IS the verdict.
     const passed = result.scoringPath === 'llm' && result.pass ? 1 : 0;
+    // QC-VERDICT-RECORD-20260922: the WHY rides with the score (migration 160).
+    // Without it a card that failed twice at 9.5 and 9.0 against an 8.5 bar was
+    // unanswerable from the database and from both pm2 logs.
     run(
       `INSERT INTO task_qc_results
-         (id, task_id, workspace_id, department_slug, score, passed, scoring_path, attempt, scored_at)
-       VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?)`,
-      [uuidv4(), taskId, deptSlug, result.score, passed, result.scoringPath, attemptNum, now],
+         (id, task_id, workspace_id, department_slug, score, passed, scoring_path, attempt, scored_at, reason, gaps)
+       VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [uuidv4(), taskId, deptSlug, result.score, passed, result.scoringPath, attemptNum, now,
+        result.reason ?? null, JSON.stringify(result.gaps ?? [])],
     );
   } catch (qcPersistErr) {
     console.warn('[QCScorer] FIX 7 task_qc_results INSERT failed (non-fatal):', (qcPersistErr as Error).message);
@@ -5254,7 +5377,9 @@ export async function runEngineOwnedDeckQC(
   // ── 4. FAIL → increment-then-decide reroute/block, same as generic path ────
   if (!result.pass) {
     const newAttempts = (task.qc_reroute_attempts ?? 0) + 1;
-    const kickbackNote = `[QC-FAIL] Score ${result.score.toFixed(1)}/10 (attempt ${newAttempts}/${QC_MAX_REROUTES}). ${result.reason}`;
+    const kickbackNote = `[QC-FAIL] ${qcScoreVerdictClause(result.score)} (attempt ${newAttempts}/${QC_MAX_REROUTES}). `
+      + `Rework needed: ${qcGapSummary(result.gaps, result.reason)}`
+      + reuseInstruction(taskId);
     await rerouteOrBlock({
       taskId,
       taskTitle: task.title,
@@ -6362,10 +6487,11 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
       // result.pass to false, and the two records disagreed.
       const passed = result.scoringPath === 'llm' && result.pass ? 1 : 0;
 
+      // QC-VERDICT-RECORD-20260922: the WHY rides with the score (migration 160).
       run(
         `INSERT INTO task_qc_results
-           (id, task_id, workspace_id, department_slug, score, passed, scoring_path, qc_agent_id, attempt, scored_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           (id, task_id, workspace_id, department_slug, score, passed, scoring_path, qc_agent_id, attempt, scored_at, reason, gaps)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           uuidv4(),
           taskId,
@@ -6377,6 +6503,8 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
           qcAgent?.id ?? null,
           attemptNum,
           now,
+          result.reason ?? null,
+          JSON.stringify(result.gaps ?? []),
         ],
       );
     } catch (qcPersistErr) {
@@ -6966,9 +7094,9 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
       }
       // ── End of loop guard ────────────────────────────────────────────────
 
-      const kickbackNote = result.gaps.length > 0
-        ? `[QC-FAIL] Score ${result.score.toFixed(1)}/10 (attempt ${newAttempts}/${QC_MAX_REROUTES}). Rework needed: ${result.gaps.join('; ')}`
-        : `[QC-FAIL] Score ${result.score.toFixed(1)}/10 (attempt ${newAttempts}/${QC_MAX_REROUTES}). ${result.reason}`;
+      const kickbackNote = `[QC-FAIL] ${qcScoreVerdictClause(result.score)} (attempt ${newAttempts}/${QC_MAX_REROUTES}). `
+        + `Rework needed: ${qcGapSummary(result.gaps, result.reason)}`
+        + reuseInstruction(taskId);
 
       // fix2(MR-04): route through transition() with extraColumns so the
       // description + qc_reroute_attempts land atomically with the status flip
@@ -6994,6 +7122,7 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
           },
         }));
         rerouteLanded = true;
+        tidyDeliverablesAfterReroute(taskId);
       } catch (txErr) {
         if (!(txErr instanceof TransitionError && txErr.code === 'CAS_CONFLICT')) {
           console.warn(`[QCScorer] reroute-to-backlog transition failed for ${taskId}:`, (txErr as Error).message);
@@ -7013,14 +7142,14 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
         `INSERT INTO events (id, type, task_id, message, created_at)
          VALUES (?, ?, ?, ?, ?)`,
         [uuidv4(), 'task_status_changed', taskId,
-          `[QC-AUTO] Task "${task.title}" returned to Backlog — score ${result.score.toFixed(1)}/10 < ${QC_PASS_THRESHOLD} (attempt ${newAttempts}/${QC_MAX_REROUTES}). ${result.reason}`,
+          `[QC-AUTO] Task "${task.title}" returned to Backlog — ${qcScoreVerdictClause(result.score)} (attempt ${newAttempts}/${QC_MAX_REROUTES}). ${qcGapSummary(result.gaps, result.reason)}`,
           now],
       );
 
       // Write CEO-addressed reroute event so the master-orchestrator knows to
       // re-assign / re-route the task back to the correct department.
       const ceoDept = task.department ?? task.workspace_id ?? 'unknown';
-      const gapsSummary = result.gaps.length > 0 ? result.gaps.join('; ') : result.reason;
+      const gapsSummary = qcGapSummary(result.gaps, result.reason);
 
       // Resolve master-orchestrator/CEO agent for the event author field.
       let ceoAgentId: string | null = null;
