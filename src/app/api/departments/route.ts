@@ -7,7 +7,7 @@ import { findCanonicalWorkspaceId } from '@/lib/db/task-dedup';
 import { getSession } from '@/lib/interview/store';
 import { normalizeDeptPrefixedId } from '@/lib/routing/canonical-slug';
 import { resolveActiveCompanyId } from '@/lib/company';
-import { boardWhereClause } from '@/lib/workspaces/board-query';
+import { boardWhereClause, assertBoardNotSilentlyEmpty, BoardScopeError } from '@/lib/workspaces/board-query';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -38,7 +38,8 @@ interface DepartmentEntry {
 export async function GET() {
   try {
     const db = getDb();
-    const scope = boardWhereClause(resolveActiveCompanyId(db), { includeArchived: false });
+    const activeCompanyId = resolveActiveCompanyId(db);
+    const scope = boardWhereClause(activeCompanyId, { includeArchived: false });
 
     // LEFT JOIN the head agent so headTitle carries the REAL per-client agent
     // name (PRD 2.9(e)) — same derivation as resolveDepartment(), never ''.
@@ -51,6 +52,11 @@ export async function GET() {
         ORDER BY w.sort_order ASC, w.name ASC
     `).all(...scope.params) as { id: string; name: string; icon: string; slug: string; head_agent_name: string | null }[];
 
+    // Same refusal as /api/workspaces: the defect emptied the department list and
+    // the board together, so the guard belongs on both reads, not just the one
+    // that happened to get reported.
+    assertBoardNotSilentlyEmpty(db, activeCompanyId, workspaces.length, { includeArchived: false });
+
     const departments: DepartmentEntry[] = workspaces.map((ws) => ({
       id: ws.id,
       emoji: ws.icon || '📁',
@@ -60,6 +66,19 @@ export async function GET() {
 
     return NextResponse.json({ success: true, departments });
   } catch (err) {
+    if (err instanceof BoardScopeError) {
+      console.error('[GET /api/departments] refusing to render an empty department list:', err.message);
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'board_company_scope_owns_no_workspaces',
+          message: err.message,
+          activeCompanyId: err.activeCompanyId,
+          activeWorkspacesByCompany: err.activeWorkspacesByCompany,
+        },
+        { status: 500 }
+      );
+    }
     console.error('[GET /api/departments] failed to query workspaces:', err);
     return NextResponse.json(
       { success: false, message: 'Failed to load departments configuration.' },

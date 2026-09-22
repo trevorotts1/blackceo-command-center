@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getDb } from '@/lib/db';
 import { resolveActiveCompanyId } from '@/lib/company';
-import { boardWhereClause } from '@/lib/workspaces/board-query';
+import { boardWhereClause, assertBoardNotSilentlyEmpty, BoardScopeError } from '@/lib/workspaces/board-query';
 import type { Workspace, WorkspaceStats, TaskStatus } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
@@ -60,7 +60,8 @@ export async function GET(request: NextRequest) {
 
   try {
     const db = getDb();
-    const scope = boardWhereClause(resolveActiveCompanyId(db), { includeArchived });
+    const activeCompanyId = resolveActiveCompanyId(db);
+    const scope = boardWhereClause(activeCompanyId, { includeArchived });
 
     if (includeStats) {
       // Get workspaces + dept-head agent details in one query so the dashboard
@@ -74,6 +75,8 @@ export async function GET(request: NextRequest) {
           ${scope.sql}
           ORDER BY w.sort_order ASC, w.name ASC
       `).all(...scope.params) as Array<Workspace & { head_agent_name: string | null; head_agent_avatar: string | null }>;
+
+      assertBoardNotSilentlyEmpty(db, activeCompanyId, workspaces.length, { includeArchived });
 
       const stats: WorkspaceStats[] = workspaces.map(workspace => {
         // Get task counts by status
@@ -130,9 +133,25 @@ export async function GET(request: NextRequest) {
         LEFT JOIN agents a ON a.id = w.head_agent_id
         ${scope.sql}
         ORDER BY w.sort_order ASC, w.name ASC
-    `).all(...scope.params);
+    `).all(...scope.params) as unknown[];
+    assertBoardNotSilentlyEmpty(db, activeCompanyId, workspaces.length, { includeArchived });
     return NextResponse.json(workspaces);
   } catch (error) {
+    // A board scoped to zero rows while the tenant's rows are right there is the
+    // one failure this route must NOT paper over: an empty 200 is what a client
+    // sat looking at for a full session. Surface it, name it, and log the split.
+    if (error instanceof BoardScopeError) {
+      console.error('[GET /api/workspaces] refusing to render an empty board:', error.message);
+      return NextResponse.json(
+        {
+          error: 'board_company_scope_owns_no_workspaces',
+          message: error.message,
+          activeCompanyId: error.activeCompanyId,
+          activeWorkspacesByCompany: error.activeWorkspacesByCompany,
+        },
+        { status: 500 },
+      );
+    }
     console.error('Failed to fetch workspaces:', error);
     return NextResponse.json({ error: 'Failed to fetch workspaces' }, { status: 500 });
   }
