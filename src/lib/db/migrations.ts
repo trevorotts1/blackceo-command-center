@@ -2458,7 +2458,7 @@ export const migrations: Migration[] = [
     name: 'add_tasks_qc_reroute_attempts',
     // Adds tasks.qc_reroute_attempts INTEGER column used by the QC scorer
     // (v4.12.0) to track how many times a task has been returned to backlog
-    // after failing QC. When the count reaches QC_MAX_REROUTES (default 3),
+    // after failing QC. When the count reaches QC_MAX_REROUTES (default 5),
     // the scorer stops re-dispatching, sets the task to `blocked`, and writes
     // a CEO-addressed event to surface the loop for human review.
     // Additive + idempotent: safe against any existing DB.
@@ -7757,6 +7757,33 @@ export const migrations: Migration[] = [
       // and falls back to the pre-158 whole-card rule only when the current
       // attempt registered nothing of its own (see persona-conformance.ts).
       console.log('[Migration 158] deliverables now name the execution that registered them');
+    },
+  },
+  {
+    id: '159',
+    name: 'qc_cap_alert_marker',
+    // QC-CAP-ALERT-20260922: the attempt count at which this card's LAST
+    // "stopped retrying" alert was sent to the owner. The alert fires only when
+    // the current attempt count exceeds this, so a repeated sweep tick, a lost
+    // CAS race, or a process restart cannot re-send it, while a card that is
+    // resumed and fails again (attempts keep climbing — unblocking clears the
+    // block_* columns but never resets qc_reroute_attempts) earns exactly one
+    // more. NULL = never alerted.
+    up: (db) => {
+      const tasksExists = db
+        .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks'")
+        .get();
+      if (!tasksExists) {
+        console.log('[Migration 159] tasks table absent — nothing to add');
+        return;
+      }
+      const cols = new Set((db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[]).map((c) => c.name));
+      if (!cols.has('qc_cap_alert_attempts')) {
+        db.exec('ALTER TABLE tasks ADD COLUMN qc_cap_alert_attempts INTEGER');
+        console.log('[Migration 159] tasks.qc_cap_alert_attempts added');
+        return;
+      }
+      console.log('[Migration 159] tasks.qc_cap_alert_attempts already present');
     },
   },
 ];

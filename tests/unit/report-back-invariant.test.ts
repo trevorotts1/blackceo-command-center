@@ -19,7 +19,7 @@
  *   (b) BEHAVIORALLY — a worker completing/failing a fixture task produces
  *       ZERO client-lane sends outside the trust engine's own stamped plan,
  *       and a worker failure path goes through return-to-orchestrator
- *       (task_returned event + backlog transition + reroute-cap-3
+ *       (task_returned event + backlog transition + at-cap reroute
  *       escalation, per that route's own header contract).
  *
  * SAFETY OF THIS TEST ITSELF: Section B never lets the real `openclaw`
@@ -47,6 +47,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { NextRequest } from 'next/server';
 import { v4 as uuidv4 } from 'uuid';
+import { QC_MAX_REROUTES } from '../../src/lib/qc-cap';
 
 import './_isolated-db'; // MUST precede any '@/lib/db' import: throwaway DATABASE_PATH.
 
@@ -248,12 +249,15 @@ function handback(id: string, note: string) {
   );
 }
 
-test('[BEHAVIOR] worker FAILURE path (return-to-orchestrator) never messages the client directly — task_returned + backlog every time, cap-3 escalation, ZERO client-lane sends', async () => {
+test('[BEHAVIOR] worker FAILURE path (return-to-orchestrator) never messages the client directly — task_returned + backlog every time, at-cap escalation, ZERO client-lane sends', async () => {
   process.env.PATH = SHIM_DIR; // real `openclaw` unreachable — belt-and-braces.
   resetSentinel();
   const id = insertFixtureTask('in_progress');
 
-  for (let attempt = 1; attempt <= 3; attempt++) {
+  // The shared cap (src/lib/qc-cap.ts), not a literal: this case is about the
+  // handback AT the cap, whatever the cap currently is.
+  const cap = QC_MAX_REROUTES;
+  for (let attempt = 1; attempt <= cap; attempt++) {
     const res = (await handback(id, `attempt ${attempt} failed`)) as unknown as Response;
     assert.equal(res.status, 200, `handback ${attempt} must succeed`);
     const body = (await res.json()) as { status: string; reroute_attempts: number; cap_reached: boolean };
@@ -277,12 +281,12 @@ test('[BEHAVIOR] worker FAILURE path (return-to-orchestrator) never messages the
       `SELECT id FROM events WHERE task_id = ? AND type = 'task_escalated'`,
       [id],
     );
-    if (attempt < 3) {
+    if (attempt < cap) {
       assert.equal(escalated, undefined, `handback ${attempt}: no operator escalation before the cap`);
       assert.equal(body.cap_reached, false);
     } else {
-      assert.ok(escalated, 'handback 3 (the cap, MAX_REROUTES default): a task_escalated event must be recorded');
-      assert.equal(body.cap_reached, true, 'the route must report cap_reached at attempt 3');
+      assert.ok(escalated, `handback ${cap} (the cap, MAX_REROUTES default): a task_escalated event must be recorded`);
+      assert.equal(body.cap_reached, true, `the route must report cap_reached at attempt ${cap}`);
     }
   }
 
@@ -304,7 +308,7 @@ test('[BEHAVIOR] worker FAILURE path (return-to-orchestrator) never messages the
   assert.equal(
     await sentinelAppeared(500),
     false,
-    'the worker-failure path (3 handbacks, including the cap-3 escalation) must NEVER invoke the client-messaging gateway',
+    `the worker-failure path (${cap} handbacks, including the at-cap escalation) must NEVER invoke the client-messaging gateway`,
   );
 
   process.env.PATH = REAL_PATH;

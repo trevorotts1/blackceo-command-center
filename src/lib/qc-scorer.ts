@@ -79,6 +79,7 @@ import { getMissionControlUrl } from '@/lib/config';
 import { missionControlAuthHeaders } from '@/lib/mc-auth';
 import { autoRouteTask } from '@/lib/routing/auto-route';
 import { notifyOwner, notifySystem, resolveWorkspaceBase } from '@/lib/notify';
+import { QC_MAX_REROUTES } from '@/lib/qc-cap';
 import { notifyOwnerDone } from '@/lib/owner-reports';
 import { transition, TransitionError, type LifecycleState } from '@/lib/task-lifecycle';
 import { requiresRegisteredCertificate, requiresRegisteredProof } from '@/lib/presentations-cert-gate';
@@ -205,6 +206,128 @@ export function classifyQCBlockAudience(gapsAndReason: string[], forceSystem = f
   return QC_BLOCK_SYSTEM_SIGNALS.some((p) => p.test(text)) ? 'SYSTEM' : 'OWNER';
 }
 
+// ---------------------------------------------------------------------------
+// QC-CAP-ALERT-20260922 — the retry cap STOPS, and it says so out loud.
+//
+// INCIDENT (live client box, 2026-09-22): a card sat `blocked` carrying
+// `block_reason = "Failed QC 3x, last score 9.0/10"`. 9.0 is ABOVE the 8.5
+// pass bar — the card failed on a mandatory gap, not on its score — and the
+// only way anyone learned about it was by reading the database. Two separate
+// defects:
+//
+//   1. The block_reason named the SCORE, which had passed, and never named the
+//      GAP, which had not. Read on the board it is nonsense.
+//   2. The owner notice that blockTaskForQC() does send is generic ("a task is
+//      BLOCKED and needs your attention") — no attempt count, no cap, no
+//      threshold, and no statement that retrying has STOPPED.
+//
+// So the cap now produces a purpose-built alert: what stopped, how many times
+// it tried, what the score was, what the bar is, and the actual gap. Sent ONCE
+// per landed at-cap block through the sender the OWNER branch already uses
+// (notifyOwner → resolveOwnerChatId → the gateway), marked durably on the card
+// so neither a restart nor a repeated sweep tick can re-send it.
+// ---------------------------------------------------------------------------
+
+export interface QCCapAlert {
+  /** This pass's attempt number (already incremented). */
+  attempts: number;
+  /** The cap it hit — QC_MAX_REROUTES unless a caller overrides it. */
+  cap: number;
+  score: number;
+  gaps: string[];
+  reason: string;
+  /** Injected so tests never reach a phone. Defaults to notifyOwner. */
+  send?: (message: string) => boolean;
+}
+
+/** The one gap a one-line summary can carry. Falls back to the verdict reason. */
+function primaryGap(gaps: string[], reason: string): string {
+  return gaps.find((g) => g && g.trim() !== '')?.trim() ?? reason;
+}
+
+/**
+ * `block_reason` for a card that stopped at the cap.
+ *
+ * Names the gap, not just the score — and when the score is at or above the
+ * pass bar, says so explicitly, because "Failed QC 5x, last score 9.0/10" on a
+ * board with an 8.5 bar reads as a bug in the scorer rather than a real
+ * mandatory gap.
+ */
+export function qcCapBlockReason(p: { attempts: number; score: number; gaps: string[]; reason: string }): string {
+  const scored = p.score >= QC_PASS_THRESHOLD
+    ? `score ${p.score.toFixed(1)}/10 PASSED the ${QC_PASS_THRESHOLD} bar — blocked on a gap`
+    : `last score ${p.score.toFixed(1)}/10 (below the ${QC_PASS_THRESHOLD} bar)`;
+  return `Failed QC ${p.attempts}x — stopped retrying. ${scored}: ${primaryGap(p.gaps, p.reason)}`;
+}
+
+/**
+ * The owner-facing alert for a card that has stopped retrying.
+ *
+ * PURE — builds text, sends nothing — so the wording is testable without a
+ * sender. Every element the operator asked for is load-bearing: the title, the
+ * attempt count against the cap, the last score against the threshold, and the
+ * gap that actually failed it.
+ */
+export function qcCapAlertMessage(p: { taskTitle: string } & Omit<QCCapAlert, 'send'>): string {
+  const gapList = p.gaps.filter((g) => g && g.trim() !== '');
+  const scoreLine = p.score >= QC_PASS_THRESHOLD
+    ? `Its last QC score was ${p.score.toFixed(1)}/10, which PASSES the ${QC_PASS_THRESHOLD}/10 bar. The score is not what failed it — it was blocked on a requirement QC treats as mandatory:`
+    : `Its last QC score was ${p.score.toFixed(1)}/10, under the ${QC_PASS_THRESHOLD}/10 pass bar. What failed it:`;
+  return [
+    `\u26d4 "${p.taskTitle}" has STOPPED retrying after ${p.attempts} failed QC attempts (limit ${p.cap}).`,
+    '',
+    scoreLine,
+    ...(gapList.length > 0 ? gapList.map((g) => `\u2022 ${g}`) : [`\u2022 ${p.reason}`]),
+    '',
+    'Nothing further will run on this card until you act. Reply here to unblock it, reassign it, or tell me to drop the requirement.',
+  ].join('\n');
+}
+
+/**
+ * Has this card already been alerted for this attempt count?
+ *
+ * The marker is `tasks.qc_cap_alert_attempts` (migration 159) — the attempt
+ * number of the last cap alert SENT. A re-block at the same attempt count is
+ * silent; a card that is resumed and fails again arrives with a HIGHER attempt
+ * count (unblocking clears the block_* columns but never resets
+ * qc_reroute_attempts) and so earns exactly one more alert.
+ *
+ * Fail-OPEN on a read error: a pre-migration DB, or an unreadable column, must
+ * lose the marker rather than the alert. A duplicate notice is recoverable; a
+ * card that stops working and tells nobody is the defect this closes.
+ */
+function capAlertAlreadySent(taskId: string, attempts: number): boolean {
+  try {
+    const row = queryOne<{ qc_cap_alert_attempts: number | null }>(
+      'SELECT qc_cap_alert_attempts FROM tasks WHERE id = ?', [taskId],
+    );
+    return (row?.qc_cap_alert_attempts ?? 0) >= attempts;
+  } catch {
+    return false;
+  }
+}
+
+/** Stamp the marker and write the audit row. Best-effort — never fails a block. */
+function recordCapAlert(taskId: string, attempts: number, message: string, delivered: boolean): void {
+  try {
+    run('UPDATE tasks SET qc_cap_alert_attempts = ? WHERE id = ?', [attempts, taskId]);
+  } catch (err) {
+    // Marker lost: the alert may repeat on a later at-cap block. Still better
+    // than suppressing it, and the event below keeps the audit trail intact.
+    console.warn(`[blockTaskForQC] cap-alert marker write failed for ${taskId} (non-fatal):`, (err as Error).message);
+  }
+  try {
+    run(
+      `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
+      [uuidv4(), 'qc_cap_alert', taskId,
+        `[QC-CAP-ALERT] attempt ${attempts} — owner alert ${delivered ? 'sent' : 'NOT delivered'}: ${message}`,
+        new Date().toISOString()],
+    );
+  } catch (err) {
+    console.warn(`[blockTaskForQC] cap-alert audit event failed for ${taskId} (non-fatal):`, (err as Error).message);
+  }
+}
+
 export interface BlockTaskForQCParams {
   taskId: string;
   taskTitle: string;
@@ -233,6 +356,13 @@ export interface BlockTaskForQCParams {
   ownerNotifyMessage?: string;
   /** OWNER audience: optional CEO-attributed qc_review event retained by the QC cap path. */
   ownerReviewEventMessage?: string;
+  /**
+   * Set ONLY by the at-cap callers (this block is the END of retrying, not one
+   * more attempt). Replaces the generic owner notice with the cap alert, sent
+   * at most once per attempt count per card. Absent for every other block —
+   * an un-reroutable verdict or a loop-detector block is not a cap stop.
+   */
+  capAlert?: QCCapAlert;
 }
 
 /**
@@ -348,10 +478,27 @@ export async function blockTaskForQC(p: BlockTaskForQCParams): Promise<boolean> 
       );
     }
 
-    try {
-      notifyOwner(p.ownerNotifyMessage ?? p.timelineEventMessage);
-    } catch (notifyErr) {
-      console.error('[blockTaskForQC] BLOCKED owner notify error (non-fatal):', (notifyErr as Error).message);
+    // QC-CAP-ALERT-20260922: an at-cap block sends the purpose-built alert
+    // (attempts, cap, score, threshold, gap) INSTEAD of the generic notice, and
+    // sends it once. Every other block keeps the notice it always sent.
+    const capAlert = p.capAlert;
+    if (capAlert && capAlertAlreadySent(p.taskId, capAlert.attempts)) {
+      console.log(`[blockTaskForQC] cap alert for ${p.taskId} already sent at attempt ${capAlert.attempts} — not re-sending`);
+    } else {
+      const message = capAlert
+        ? qcCapAlertMessage({ taskTitle: p.taskTitle, ...capAlert })
+        : (p.ownerNotifyMessage ?? p.timelineEventMessage);
+      let delivered = false;
+      try {
+        delivered = (capAlert?.send ?? notifyOwner)(message);
+      } catch (notifyErr) {
+        console.error('[blockTaskForQC] BLOCKED owner notify error (non-fatal):', (notifyErr as Error).message);
+      }
+      // Stamped on an UNDELIVERED alert too: notifyOwner already escalates an
+      // undeliverable owner message to the operator lane (MSG-07), so retrying
+      // it on the next at-cap block would only repeat a failure that has
+      // already been reported.
+      if (capAlert) recordCapAlert(p.taskId, capAlert.attempts, message, delivered);
     }
   }
 
@@ -388,8 +535,10 @@ export interface RerouteOrBlockParams {
   score: number;
   reason: string;
   gaps: string[];
-  /** Full description-persisted kickback note, e.g. `[QC-FAIL] Score 2.0/10 (attempt 2/3). …`. */
+  /** Full description-persisted kickback note, e.g. `[QC-FAIL] Score 2.0/10 (attempt 2/5). …`. */
   kickbackNote: string;
+  /** Cap-alert sender. Injected so tests never reach a phone; defaults to notifyOwner. */
+  send?: (message: string) => boolean;
 }
 
 /**
@@ -457,8 +606,9 @@ export async function rerouteOrBlock(p: RerouteOrBlockParams): Promise<QCReroute
       gaps: p.gaps,
       needs: blockNeeds,
       audience: blockAudience,
-      blockReason: `Failed QC ${p.attempts}x, last score ${p.score.toFixed(1)}/10`,
+      blockReason: qcCapBlockReason({ attempts: p.attempts, score: p.score, gaps: p.gaps, reason: p.reason }),
       auditNote: p.kickbackNote,
+      capAlert: { attempts: p.attempts, cap: p.cap, score: p.score, gaps: p.gaps, reason: p.reason, send: p.send },
       timelineEventMessage: `[QC-BLOCKED] Task "${p.taskTitle}" blocked after ${p.attempts} QC-fail re-routes (cap: ${p.cap}). Audience: ${blockAudience}. ${blockAudience === 'SYSTEM' ? 'SYSTEM fix needed — escalating to master orchestrator.' : 'Human review required.'}`,
       escalationMessage: `[QC-SYSTEM-BLOCK] "${p.taskTitle}" failed QC ${p.attempts} time(s) due to a SYSTEM issue the executor cannot fix. Score: ${p.score.toFixed(1)}/10. Root cause gaps: ${p.gaps.join('; ')}. Action needed: ${blockNeeds}`,
       ownerNotifyMessage: `⚠️ A task is BLOCKED and needs your attention: "${p.taskTitle}".\nReason: ${p.gaps.length > 0 ? p.gaps.join('; ') : p.reason}\n\nThis task failed QC ${p.attempts} time(s) (score ${p.score.toFixed(1)}/10). Reply here to unblock or reassign.`,
@@ -1097,11 +1247,13 @@ export function runAFI14Guardrail(
 export const QC_PASS_THRESHOLD = 8.5;
 
 /**
- * Maximum number of times a task can be re-routed after QC failure before the
- * loop is capped and the task is set to `blocked` for human review.
- * Override with QC_MAX_REROUTES env var. Default: 3.
+ * Maximum number of times a task can FAIL QC before the loop is capped, the
+ * task is set to `blocked`, and the owner is alerted once. Default 5, override
+ * with the QC_MAX_REROUTES env var. Defined in `@/lib/qc-cap` (a leaf module
+ * `grading.ts` can import without dragging the scorer into the client bundle)
+ * and re-exported here so every existing importer is unchanged.
  */
-export const QC_MAX_REROUTES = parseInt(process.env.QC_MAX_REROUTES || '3', 10);
+export { QC_MAX_REROUTES };
 
 /**
  * FIX 21 (presentation rev2): how long a SYSTEM-blocked card stays muted after
@@ -6760,11 +6912,18 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
           gaps: result.gaps,
           needs: blockNeeds,
           audience: blockAudience,
-          blockReason: `Failed QC ${newAttempts}x, last score ${result.score.toFixed(1)}/10`,
+          blockReason: qcCapBlockReason({ attempts: newAttempts, score: result.score, gaps: result.gaps, reason: result.reason }),
           // Keep main's complete cap/audience/reason audit text in both the
           // description and transition history; blockReason remains concise
           // machine-readable metadata.
           auditNote: blockedNote,
+          capAlert: {
+            attempts: newAttempts,
+            cap: QC_MAX_REROUTES,
+            score: result.score,
+            gaps: result.gaps,
+            reason: result.reason,
+          },
           timelineEventMessage: `[QC-BLOCKED] Task "${task.title}" blocked after ${newAttempts} QC-fail re-routes (cap: ${QC_MAX_REROUTES}). Audience: ${blockAudience}. ${isSystemBlock ? 'SYSTEM fix needed — escalating to master orchestrator.' : 'Human review required.'}`,
           escalationMessage: `[QC-SYSTEM-BLOCK] "${task.title}" failed QC ${newAttempts} time(s) due to a SYSTEM issue the executor cannot fix. Score: ${result.score.toFixed(1)}/10. Root cause gaps: ${result.gaps.join('; ')}. Action needed: ${blockNeeds}`,
           ownerNotifyMessage: `⚠️ A task is BLOCKED and needs your attention: "${task.title}".\nReason: ${result.gaps.length > 0 ? result.gaps.join('; ') : result.reason}\n\nThis task failed QC ${newAttempts} time(s) (score ${result.score.toFixed(1)}/10). Reply here to unblock or reassign.`,

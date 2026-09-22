@@ -397,9 +397,12 @@ export interface Task {
   // IS NOT NULL = task has been archived; NULL = live on the board.
   archived_at?: string | null;
   // QC loop guard (migration 061): number of times the QC scorer has returned
-  // this task to backlog after a FAIL. Capped at QC_MAX_REROUTES (default 3)
-  // before the task is set to `blocked` for human review.
+  // this task to backlog after a FAIL. Capped at QC_MAX_REROUTES (default 5)
+  // before the task is set to `blocked` and the owner is alerted once.
   qc_reroute_attempts?: number | null;
+  // QC cap-alert marker (migration 159): attempt count of the last "stopped
+  // retrying" alert sent to the owner. NULL = never alerted.
+  qc_cap_alert_attempts?: number | null;
   // Dispatch attempt-accounting (migration 077 / W8 anti-furnace). Incremented on
   // EVERY failed advance attempt (gateway down / sovereignty / no-runtime). Drives
   // exponential backoff (next_dispatch_eligible_at) and the block-on-N cap so an
