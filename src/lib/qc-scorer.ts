@@ -84,6 +84,7 @@ import { transition, TransitionError, type LifecycleState } from '@/lib/task-lif
 import { requiresRegisteredCertificate, requiresRegisteredProof } from '@/lib/presentations-cert-gate';
 import { bootstrapProofForPass } from '@/lib/presentation-proof-registry';
 import { recordBlockEvent } from '@/lib/block-events';
+import { stopCardPermanently } from '@/lib/stop-card';
 import { assertNoFixtureEnvInProduction, assertNoFixtureDerivedServerWrite } from '@/lib/fixture-guard';
 import { EVIDENCE_DELIVERABLE_TYPES, isUsableUrl, collectCompletionEvidence, isBundleDeliverablePath, verifyPresentationBundleDeliverable, bundleReverifyEnabled } from '@/lib/completion-evidence';
 import { getProvider } from '@/lib/model-providers';
@@ -249,6 +250,14 @@ export interface BlockTaskForQCParams {
  */
 export async function blockTaskForQC(p: BlockTaskForQCParams): Promise<boolean> {
   const now = new Date().toISOString();
+  // NO-SILENT-STOP: the plain-English sentence a non-technical owner reads.
+  // `blockReason` stays the machine string the board and the audit trail use
+  // ("Failed QC 3x, last score 4.2/10"); this is the same fact said in words,
+  // and it is what stopCardPermanently() sends.
+  const plainReason =
+    `This work did not pass our quality check${p.attempts !== null ? ` after ${p.attempts} attempt(s)` : ''}` +
+    `, so it has stopped rather than go out wrong.` +
+    (p.gaps.length > 0 ? ` What was wrong: ${p.gaps.slice(0, 3).join('; ')}.` : '');
   const blockedOnHuman = p.audience === 'SYSTEM' ? 'operator' : 'owner';
   const ask = p.needs.slice(0, 500);
   const blockGapsJson = JSON.stringify(p.gaps);
@@ -326,6 +335,15 @@ export async function blockTaskForQC(p: BlockTaskForQCParams): Promise<boolean> 
       `INSERT INTO events (id, type, agent_id, task_id, message, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
       [uuidv4(), 'qc_escalation', ceoAgentId, p.taskId, p.escalationMessage ?? p.timelineEventMessage, now],
     );
+    // NO-SILENT-STOP — DELIBERATELY NOT a second send here. The SYSTEM lane
+    // already has exactly one owner of its operator notification: FIX 21's
+    // rate-limited notifySystem() in the QC cap path (see
+    // admitSystemBlockNotify — it coalesces repeat blocks of the same card
+    // inside a cooldown window, which is what stopped the operator furnace).
+    // Routing this branch through the chokepoint as well produced TWO operator
+    // pages per SYSTEM block, which is a different defect, not a fix. The
+    // OWNER branch below is the one that had no reliable sender, and that is
+    // the one the chokepoint now owns.
   } else {
     // OWNER block: preserve the QC cap path's CEO-authored Live Feed event,
     // then fire Telegram immediately (trust-engine's blocked_notice_sent_at
@@ -348,11 +366,23 @@ export async function blockTaskForQC(p: BlockTaskForQCParams): Promise<boolean> 
       );
     }
 
-    try {
-      notifyOwner(p.ownerNotifyMessage ?? p.timelineEventMessage);
-    } catch (notifyErr) {
-      console.error('[blockTaskForQC] BLOCKED owner notify error (non-fatal):', (notifyErr as Error).message);
-    }
+    // NO-SILENT-STOP: the owner notice is no longer this path's own
+    // notifyOwner() call. It routes through stopCardPermanently(), which stamps
+    // blocked_notice_sent_at as an atomic claim so a re-scored card, a restart
+    // mid-send, or two concurrent scorers collapse to ONE message.
+    // applyBlock:false — the transition above already landed, with the
+    // description write and persona-revision restore this path owns.
+    await stopCardPermanently({
+      taskId: p.taskId,
+      source: p.actor,
+      reason: plainReason,
+      needs: p.needs,
+      audience: 'OWNER',
+      gaps: p.gaps,
+      retriesExhausted: p.attempts !== null,
+      machineDetail: p.ownerNotifyMessage ?? p.timelineEventMessage,
+      applyBlock: false,
+    });
   }
 
   return true;

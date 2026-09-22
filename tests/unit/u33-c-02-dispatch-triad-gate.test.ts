@@ -321,7 +321,24 @@ test('[TRIAD-PARK d] parking has NO requester-facing side effect', () => {
     [taskId],
   );
   assert.equal(trustEngineWouldSelect.length, 0, 'the trust engine must never select a Triad-parked card');
-  assert.equal(row?.blocked_notice_sent_at, null, 'no blocked notice was ever sent to the requester');
+
+  // NO-SILENT-STOP (2026-09-22): `blocked_notice_sent_at` no longer means "the
+  // requester was messaged". It is now the exactly-once CAS claim
+  // stopCardPermanently() (src/lib/stop-card.ts) takes for ANY permanent stop,
+  // on whichever lane that stop belongs to — so a SYSTEM-audience park stamps
+  // it too, and the operator is paged once rather than once per sweep tick.
+  //
+  // This assertion therefore moved from the column (a proxy) to the thing the
+  // test actually cares about: which LANE was used. A SYSTEM park must have no
+  // requester-facing delivery at all, which the two assertions above prove
+  // directly against the trust engine's own selection condition. What remains
+  // to prove here is that the stop WAS claimed — because an unclaimed stop is
+  // the defect (a card parked and nobody told), not the safe state.
+  assert.equal(row?.block_audience, 'SYSTEM', 'the park stays on the operator lane');
+  assert.ok(
+    row?.blocked_notice_sent_at,
+    'the park must be CLAIMED — a permanent stop that stamps nothing is a stop nobody was told about',
+  );
 });
 
 test('[TRIAD-PARK e] a TELEGRAM-sourced parked card plans NO requester-facing block notice', async () => {

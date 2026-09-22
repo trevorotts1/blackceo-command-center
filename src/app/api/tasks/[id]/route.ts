@@ -504,6 +504,11 @@ export async function PATCH(
       // SAME UPDATE so the unblock is atomic.
       updates.push('block_reason = ?', 'block_needs = ?', 'block_audience = ?');
       values.push(null, null, null);
+      // NO-SILENT-STOP: release the stop-notice claim too. Left set, it made
+      // blocked_notice_sent_at a once-per-card flag, so the NEXT permanent stop
+      // on this card would find the claim already taken and say nothing.
+      updates.push('blocked_notice_sent_at = ?');
+      values.push(null);
     }
 
     // Track if we need to dispatch task
