@@ -8,6 +8,7 @@ import { personaCompanyContext } from '@/lib/persona-company';
 import { readBuildState } from '@/lib/interview/seam';
 import { buildStatePath, resolveWorkspaceDir, updateInterviewStateScript, recordDeptDecisionScript, listCanonicalDepartmentsScript } from '@/lib/interview/paths';
 import { hasCanonicalPersonaCatalog, verifyStandardFoundation } from '@/lib/interview/foundation-verification';
+import { classifyStateIdentity, stampStateIdentity } from '@/lib/interview/state-identity';
 import { resolveOpenClawRuntimeRoot } from '@/lib/openclaw/runtime-root';
 import { runtimeRegistryEntries } from '@/lib/openclaw/runtime-registry';
 export const runtime='nodejs';
@@ -25,8 +26,15 @@ export async function GET(req:NextRequest) {
     if(!queryOne('SELECT id FROM companies WHERE id=?',[context.companyId])) missing.push('company_record');
     if(!queryOne('SELECT id FROM workspaces WHERE company_id=? AND archived_at IS NULL',[context.companyId])) missing.push('company_workspace');
     const state=readBuildState();
-    let stateReady=!!state && typeof state.interviewComplete==='boolean' && state.companyId===context.companyId && state.installationId===context.installationId && state.tenantId===context.tenantId;
-    if(!stateReady) missing.push('scoped_interview_state');
+    const flagged=!!state && typeof state.interviewComplete==='boolean';
+    // An interview completed BEFORE the identity stamps existed is COMPLETE, not
+    // incomplete. Self-stamp it from the verified context instead of reporting an
+    // unknown flag and telling the client her finished interview never happened.
+    // A PRESENT stamp that disagrees is still a scope violation and still fails.
+    let identity=classifyStateIdentity(state,context);
+    if(identity==='unstamped' && flagged && stampStateIdentity(context)) identity='scoped';
+    let stateReady=flagged && identity==='scoped';
+    if(!stateReady) missing.push(identity==='mismatched'?'interview_state_identity_mismatch':identity==='unstamped'?'interview_state_unstamped':'scoped_interview_state');
     try {fs.accessSync(buildStatePath(),fs.constants.R_OK|fs.constants.W_OK);fs.accessSync(path.dirname(buildStatePath()),fs.constants.W_OK);} catch {stateReady=false;missing.push('interview_state_access');}
     try {
       const persona=personaCompanyContext(context.companyId);
@@ -73,6 +81,6 @@ export async function GET(req:NextRequest) {
     if(!enrollment) missing.push('enrollment_secret');
     const foundation=verifyStandardFoundation(state);
     if(state?.buildType==='standard-first' && !foundation.ready) missing.push('standard_foundation_unverified');
-    return NextResponse.json({protocol,stage:'interview',ready:missing.length===0,tenantId:context.tenantId,companyId:context.companyId,installationId:context.installationId,host:context.host,interviewComplete:stateReady?state!.interviewComplete:null,capabilities:{state:stateReady,localInterviewPrerequisites:prerequisites.length===0,enrollment,providerLiveness:'unverified'},foundation,missing},{status:missing.length?503:200,headers});
+    return NextResponse.json({protocol,stage:'interview',ready:missing.length===0,tenantId:context.tenantId,companyId:context.companyId,installationId:context.installationId,host:context.host,interviewComplete:flagged&&identity!=='mismatched'?state!.interviewComplete:null,capabilities:{state:stateReady,localInterviewPrerequisites:prerequisites.length===0,enrollment,providerLiveness:'unverified'},foundation,missing},{status:missing.length?503:200,headers});
   } catch {return NextResponse.json({ready:false,protocol,error:'tenant_registration_or_identity_unverified'},{status:403,headers});}
 }
