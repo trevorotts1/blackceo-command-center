@@ -87,6 +87,32 @@ export function dispatchedPersonaShas(executionId:string|undefined,db:Database.D
  } catch { return null; }
 }
 export interface DeliverableRow { id:string; path:string; sha256:string|null; deliverable_type:string }
+/** Find the producer's evidence for one registered deliverable.
+ *
+ * The manifest is keyed on `deliverable_id`, which is the UUID the registration
+ * endpoint returns in its 201 — a value the producer only learns by reading
+ * that response. On a live box (2026-09-21) a FRESH single-execution card
+ * failed `persona_artifact_snapshot_missing` with the bytes matching exactly:
+ * the row was `5da67569-…` and the producer had reported the FILENAME in the
+ * `deliverable_id` field. Another card reported UUIDs belonging to rows that no
+ * longer existed. A lookup by id alone reads both as "this artifact was never
+ * snapshotted", which is false — the producer hashed the right bytes.
+ *
+ * So identity is resolved in the order the evidence is trustworthy: the id it
+ * was given, then the SHA-256 of the bytes themselves, then the path or
+ * basename it may have used as a name instead. A byte-identical hash IS the
+ * snapshot — no id can be more authoritative about which artifact was hashed
+ * than the hash. What cannot be recovered is still a hard gap: evidence that
+ * matches nothing, or matches by name with a different digest, fails as before.
+ * The instruction in renderPersonaConformanceInstructions now names the 201
+ * `id` explicitly, so the id lane is the one future reports take. */
+export function matchArtifactEvidence(file:DeliverableRow,digest:string,artifacts:{deliverable_id:string;sha256:string}[]|undefined):{deliverable_id:string;sha256:string}|undefined {
+ if(!artifacts?.length)return undefined;
+ const base=file.path?file.path.split('/').pop():undefined;
+ return artifacts.find(r=>r.deliverable_id===file.id)
+  ?? artifacts.find(r=>r.sha256===digest)
+  ?? artifacts.find(r=>r.deliverable_id===file.path||(!!base&&r.deliverable_id===base));
+}
 /** The deliverables THIS attempt must account for.
  *
  * `task_deliverables` accumulates across QC re-routes — attempt 2 registers its
@@ -151,11 +177,12 @@ export function requirePersonaConformanceForCompletion(taskId:string,db:Database
   const deliverables=currentExecutionDeliverables(taskId,execution.id,db);
   if(!deliverables.length)return {pass:false,reason:'persona_artifact_snapshot_missing'};
   for(const file of deliverables){
-   const evidence=root.artifacts?.find(r=>r.deliverable_id===file.id);
-   if(!evidence)return {pass:false,reason:'persona_artifact_snapshot_missing'};
    // URLs are immutable report identities, not a claim that remote bytes were fetched.
    const digest=file.deliverable_type==='url'?createHash('sha256').update(file.path).digest('hex'):hashLocalArtifact(file.path);
-   if(evidence.sha256!==digest||(file.sha256&&file.sha256!==digest))return {pass:false,reason:'persona_artifact_revision_changed'};
+   if(file.sha256&&file.sha256!==digest)return {pass:false,reason:'persona_artifact_revision_changed'};
+   const evidence=matchArtifactEvidence(file,digest,root.artifacts);
+   if(!evidence)return {pass:false,reason:'persona_artifact_snapshot_missing'};
+   if(evidence.sha256!==digest)return {pass:false,reason:'persona_artifact_revision_changed'};
   }
   return {pass:true,reason:'current_persona_declaration_verified'};
  } catch {return {pass:false,reason:'persona_conformance_unavailable'};}
@@ -174,5 +201,5 @@ export function renderPersonaConformanceInstructions(taskId:string,executionId:s
   root:reports[0]?.bundle_sha??null,
   scopes:Object.fromEntries(reports.slice(1).map(r=>[String(r.scope),r.bundle_sha])),
  },db);
- return `**Persona evidence required before review:** After registering all deliverables, POST to ${baseUrl}/api/tasks/${taskId}/activities with bearer $MC_API_TOKEN, activity_type "completed", agent_id "${agentId}" and metadata for EACH decision below. Metadata must include kind "persona_used", execution_id "${executionId}", the decision's scope (omit for root), bundle_sha, voice_persona_id, topic_persona_id, task_persona_ids, and conformance_passed (true ONLY after checking your output actually follows that decision). The root report must include artifacts: [{deliverable_id,sha256}] for EVERY registered deliverable, using SHA-256 of local file bytes (or SHA-256 of the exact URL string for URL registrations). Report the personas actually used; deviations must be corrected or reported as false. Independent QC evaluates quality. Current decisions: ${JSON.stringify(reports)}. Include execution_id "${executionId}" in both PATCH status:review and completion-webhook requests.`;
+ return `**Persona evidence required before review:** After registering all deliverables, POST to ${baseUrl}/api/tasks/${taskId}/activities with bearer $MC_API_TOKEN, activity_type "completed", agent_id "${agentId}" and metadata for EACH decision below. Metadata must include kind "persona_used", execution_id "${executionId}", the decision's scope (omit for root), bundle_sha, voice_persona_id, topic_persona_id, task_persona_ids, and conformance_passed (true ONLY after checking your output actually follows that decision). The root report must include artifacts: [{deliverable_id,sha256}] covering EXACTLY the deliverables you registered in THIS execution, using SHA-256 of local file bytes (or SHA-256 of the exact URL string for URL registrations). deliverable_id is the \`id\` field returned in the 201 response when you POST the deliverable to /api/tasks/${taskId}/deliverables — keep that id from each response and echo it here; it is NOT the filename. Report the personas actually used; deviations must be corrected or reported as false. Independent QC evaluates quality. Current decisions: ${JSON.stringify(reports)}. Include execution_id "${executionId}" in both PATCH status:review and completion-webhook requests.`;
 }

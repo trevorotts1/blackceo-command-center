@@ -62,7 +62,7 @@
  * Structure mirrors weekly-done-clear.ts / general-task-recurrence.ts.
  */
 
-import { queryAll, queryOne, sqlTime, timeNow } from '@/lib/db';
+import { parseDbTime, queryAll, queryOne, sqlTime, timeNow } from '@/lib/db';
 import { runQCOnReview, blockTaskForQC, classifyQCBlockAudience } from '@/lib/qc-scorer';
 
 /**
@@ -84,6 +84,40 @@ interface QCResultLoopRow {
 }
 
 /**
+ * When the work currently under review began. QC rows older than this are the
+ * card's HISTORY, not evidence of a loop.
+ *
+ * v7.6.43 made `task_qc_results.passed` honest, which had the side effect of
+ * leaving repaired cards carrying real `passed=0` rows from the false-fail era.
+ * On a live box those three identical rows tripped the loop detector the moment
+ * the card was re-queued — before the scorer ever ran — so a card that had just
+ * been repaired could never be re-scored to prove it. A loop is a claim about
+ * the CURRENT attempt repeating itself, so the window starts at the later of
+ * the newest execution and the newest departure from `blocked`. Each source is
+ * read independently: a pre-migration box missing either table simply
+ * contributes no boundary, and with no boundary at all the whole history counts
+ * exactly as it did before.
+ */
+function currentAttemptBoundaryMs(taskId: string): number {
+  const marks: number[] = [];
+  try {
+    const row = queryOne<{ at: string | null }>(
+      'SELECT MAX(created_at) AS at FROM task_executions WHERE task_id = ?', [taskId],
+    );
+    const ms = parseDbTime(row?.at);
+    if (!Number.isNaN(ms)) marks.push(ms);
+  } catch { /* no task_executions on this box — contributes no boundary */ }
+  try {
+    const row = queryOne<{ at: string | null }>(
+      "SELECT MAX(created_at) AS at FROM task_events WHERE task_id = ? AND from_status = 'blocked'", [taskId],
+    );
+    const ms = parseDbTime(row?.at);
+    if (!Number.isNaN(ms)) marks.push(ms);
+  } catch { /* no task_events on this box — contributes no boundary */ }
+  return marks.length ? Math.max(...marks) : NaN;
+}
+
+/**
  * Returns the shared (score, passed, scoring_path) triple when the most
  * most recent `threshold` failing task_qc_results rows for `taskId` are all
  * identical AND all scored via the `llm` path, else null. Never throws — a query failure
@@ -95,13 +129,18 @@ export function detectIdenticalQCResultLoop(
   threshold: number = QC_RESULT_LOOP_THRESHOLD,
 ): QCResultLoopRow | null {
   try {
-    const rows = queryAll<QCResultLoopRow>(
-      `SELECT score, passed, scoring_path FROM task_qc_results
+    const boundary = currentAttemptBoundaryMs(taskId);
+    // Filtered here rather than in SQL: `scored_at` and `created_at` are written
+    // in two different formats across this codebase, so they are compared
+    // through parseDbTime, never lexicographically. A card has a handful of QC
+    // rows; reading them all and slicing is cheaper than getting that wrong.
+    const rows = queryAll<QCResultLoopRow & { scored_at: string }>(
+      `SELECT score, passed, scoring_path, scored_at FROM task_qc_results
        WHERE task_id = ? AND passed = 0
-       ORDER BY scored_at DESC, id DESC
-       LIMIT ?`,
-      [taskId, threshold],
-    );
+       ORDER BY scored_at DESC, id DESC`,
+      [taskId],
+    ).filter((r) => Number.isNaN(boundary) || parseDbTime(r.scored_at) > boundary)
+      .slice(0, threshold);
     if (rows.length < threshold) return null;
     const [first, ...rest] = rows;
     if (first.scoring_path !== 'llm') return null;
