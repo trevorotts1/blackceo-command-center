@@ -446,6 +446,23 @@ export async function runIntakeAdvanceSweep(dependencies: {
   // filtered out of the advanceable selection above and then rots invisibly in
   // backlog forever — the "silent cap-out rot" half of the review-churn defect.
   //
+  // STRANDED-01: the DISPATCH-attempt cap had the identical hole and no
+  // surfacing at all. The selection above also drops every card with
+  // `dispatch_attempts >= MAX_DISPATCH_ATTEMPTS`, and since SWEEP-01 paused
+  // backlog-redispatch this sweep is the ONLY live advancer — so such a card is
+  // looked at by nothing, forever, while it sits in an intake lane looking like
+  // ordinary queued work. recordDispatchFailure blocks a card the moment its
+  // own counter reaches the cap, but two live paths put a card back into an
+  // intake lane with the counter already at/over it, deliberately preserved:
+  // POST /api/tasks/[id]/resume (U061 decision PRESERVE — a Resume that zeroed
+  // the counter would turn a capped retry loop into an unbounded one) and the
+  // operator pre-engine recovery route. Live evidence: card d5635f63 sat 10.5h
+  // in backlog with 5/5 attempts, no hold and no backoff, after its last
+  // auto-route died with `dispatch_pipeline_error: [auto-route]
+  // scheduler_lease_lost`. The PRESERVE decision stands untouched; what changes
+  // is that its consequence is now stated out loud — the card is blocked with
+  // an honest reason and the operator is told ONCE — instead of disappearing.
+  //
   // LOOP-FIX-20260827: this used to be PROSE-ONLY — it wrote a `task_capped`
   // event and called notifySystem(), but never actually changed task.status.
   // Live evidence (task 9e5925c5, 2026-08-27): the operator-feed said "[CAP] ...
@@ -470,27 +487,47 @@ export async function runIntakeAdvanceSweep(dependencies: {
       description: string | null;
       status: string;
       qc_reroute_attempts: number | null;
+      dispatch_attempts: number | null;
     }>(
-      `SELECT t.id, t.title, t.description, t.status, t.qc_reroute_attempts
+      `SELECT t.id, t.title, t.description, t.status, t.qc_reroute_attempts, t.dispatch_attempts
          FROM tasks t
         WHERE t.status IN (${placeholders})
           ${cappedSourceExclusion}
           AND t.archived_at IS NULL
-          AND t.qc_reroute_attempts IS NOT NULL
-          AND t.qc_reroute_attempts >= ?
+          AND ((t.qc_reroute_attempts IS NOT NULL AND t.qc_reroute_attempts >= ?)
+            OR (t.dispatch_attempts IS NOT NULL AND t.dispatch_attempts >= ?))
+          AND upper(COALESCE(t.description, '')) NOT LIKE '%OWNER KILLED%'
           AND (t.sop_authoring_for_task_id IS NULL)
         LIMIT 50`,
-      [...ADVANCEABLE_STATUSES, ...sourceExclusionParams(), cap],
+      [...ADVANCEABLE_STATUSES, ...sourceExclusionParams(), cap, dispatchCap],
     );
     for (const t of cappedRows) {
       try {
-        // A prior task_capped event only deduplicates the alert. It must never
+        // Which cap did this row trip? A QC-reroute cap-out and a dispatch
+        // budget cap-out are DIFFERENT facts for the operator — one says the
+        // work kept failing review, the other says the card could never be
+        // handed to a worker at all — so each gets its own event type (and
+        // therefore its own alert dedup) and its own honest wording. A row that
+        // trips both is reported as the QC cap-out, which is the older and more
+        // specific signal.
+        const qcCapped = (t.qc_reroute_attempts ?? 0) >= cap;
+        const attemptsShown = qcCapped
+          ? `${t.qc_reroute_attempts ?? cap}/${cap}`
+          : `${t.dispatch_attempts ?? dispatchCap}/${dispatchCap}`;
+        const capEventType = qcCapped ? 'task_capped' : 'task_dispatch_capped';
+        const capLabel = qcCapped ? 'QC-reroute cap' : 'dispatch-attempt cap';
+        const capFix = qcCapped
+          ? 'Promote, re-scope, or close it.'
+          : 'Fix what was failing dispatch (gateway, runtime, model, or scheduler health) before resuming it — '
+            + 'a Resume preserves the exhausted attempt budget, so the card stops here again until the cause is cleared.';
+
+        // A prior cap event only deduplicates the alert. It must never
         // exclude a legacy capped task from the real block transition below.
         let alreadyNotified = false;
         try {
           alreadyNotified = Boolean(queryOne<{ id: string }>(
-            `SELECT id FROM events WHERE task_id = ? AND type = 'task_capped' LIMIT 1`,
-            [t.id],
+            `SELECT id FROM events WHERE task_id = ? AND type = ? LIMIT 1`,
+            [t.id, capEventType],
           ));
         } catch (err) {
           // A notification-dedup read must never starve the real block
@@ -499,19 +536,20 @@ export async function runIntakeAdvanceSweep(dependencies: {
         }
         if (!alreadyNotified) {
           run(
-            `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, 'task_capped', ?, ?, ?)`,
+            `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
             [
               uuidv4(),
+              capEventType,
               t.id,
-              `[CAP] Task "${t.title}" reached the QC-reroute cap (${t.qc_reroute_attempts ?? cap}/${cap}) — ` +
+              `[CAP] Task "${t.title}" reached the ${capLabel} (${attemptsShown}) — ` +
                 `held for operator review; auto-advancement stopped.`,
               now,
             ],
           );
           notifySystem(
-            `[qc-cap] Task "${t.title}" (id ${t.id}) hit the QC-reroute cap ` +
-              `(${t.qc_reroute_attempts ?? cap}/${cap}) and can no longer auto-advance. ` +
-              `It is held for operator triage (promote, re-scope, or close).`,
+            `[${qcCapped ? 'qc-cap' : 'dispatch-cap'}] Task "${t.title}" (id ${t.id}) hit the ${capLabel} ` +
+              `(${attemptsShown}) and can no longer auto-advance. ` +
+              `It is held for operator triage. ${capFix}`,
             { agent: 'intake-advance-sweep', action: 'escalate' },
           );
           capped++;
@@ -525,14 +563,14 @@ export async function runIntakeAdvanceSweep(dependencies: {
           actor: 'intake-advance-sweep',
           attempts: null, // already at/over cap — do not touch the counter here
           gaps: [],
-          needs: `System fix required: task hit the QC-reroute cap (${t.qc_reroute_attempts ?? cap}/${cap}) and can no longer auto-advance. Promote, re-scope, or close it.`,
+          needs: `System fix required: task hit the ${capLabel} (${attemptsShown}) and can no longer auto-advance. ${capFix}`,
           audience: 'SYSTEM',
-          blockReason: `QC-reroute cap reached (${t.qc_reroute_attempts ?? cap}/${cap}) while advancing from ${t.status}`,
-          timelineEventMessage: `[CAP-BLOCKED] Task "${t.title}" reached the QC-reroute cap (${t.qc_reroute_attempts ?? cap}/${cap}) and has been blocked for operator triage.`,
-          escalationMessage: `[CAP-BLOCKED] "${t.title}" hit the QC-reroute cap (${t.qc_reroute_attempts ?? cap}/${cap}) while stuck in ${t.status} and can no longer auto-advance. Promote, re-scope, or close it.`,
+          blockReason: `${capLabel} reached (${attemptsShown}) while advancing from ${t.status}`,
+          timelineEventMessage: `[CAP-BLOCKED] Task "${t.title}" reached the ${capLabel} (${attemptsShown}) and has been blocked for operator triage.`,
+          escalationMessage: `[CAP-BLOCKED] "${t.title}" hit the ${capLabel} (${attemptsShown}) while stuck in ${t.status} and can no longer auto-advance. ${capFix}`,
         });
         if (!landed) {
-          console.warn(`[intake-advance] cap-block transition lost a race for ${t.id} (task already left ${t.status}) — task_capped event still recorded`);
+          console.warn(`[intake-advance] cap-block transition lost a race for ${t.id} (task already left ${t.status}) — cap event still recorded`);
         }
 
       } catch (err) {

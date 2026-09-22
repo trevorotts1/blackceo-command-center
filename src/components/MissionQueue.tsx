@@ -17,6 +17,7 @@ import { BoardToastStack, type BoardToastMessage } from './kanban/BoardToast';
 import { BlockTaskModal, type BlockTaskDetails } from './kanban/BlockTaskModal';
 import { MoveTaskMenu } from './kanban/MoveTaskMenu';
 import { StatusPill } from './kanban/StatusPill';
+import { engineOwnedWaitingLabel } from '@/lib/board-sources';
 import { BlockedPanel } from './kanban/BlockedPanel';
 // WI-15b (D1 Option B — NESTED subtasks): the parent+children card replaces
 // flat TaskCard rendering for the presentations department.
@@ -1651,6 +1652,26 @@ export function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted, 
               title={`Why is this here? "${BACKLOG_COLUMN_LABEL}" means it's still missing part of the Triad (description + SOP + persona) it needs before it can start.`}
             >
               🧩 {triadMissingPillText(missingTriad)}
+            </span>
+          );
+        })()}
+
+        {/* STRANDED-02 — engine-owned waiting chip. A card an ENGINE owns is
+            refused by every board advancer by design (the engine is its only
+            executor), and that refusal used to be invisible: the card sat in
+            Backlog looking exactly like ordinary queued work while its engine
+            had died hours earlier. Derived from source+status, so it can never
+            disagree with the refusal and it clears itself the moment the engine
+            advances the card. */}
+        {(() => {
+          const engineWaiting = engineOwnedWaitingLabel(task.source, task.status);
+          if (!engineWaiting) return null;
+          return (
+            <span
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-slate-100 text-slate-700 border border-slate-300"
+              title={`${engineWaiting}. The owning engine creates, runs and completes this card itself — the board will never start it. If it has not moved in hours, the engine is stalled, not the board.`}
+            >
+              ⚙️ {engineWaiting}
             </span>
           );
         })()}

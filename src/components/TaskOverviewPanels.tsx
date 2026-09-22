@@ -20,7 +20,7 @@ import type { Task } from '@/lib/types';
 // ONE canonical module (src/lib/board-sources.ts) shared with
 // /api/tasks/[id]/status, so the 403 gate and this panel's honest empty-copy
 // can never drift apart again. The panel adds only the human LABELS on top.
-import { RECOGNIZED_BOARD_SOURCES, normalizeBoardSource } from '@/lib/board-sources';
+import { RECOGNIZED_BOARD_SOURCES, normalizeBoardSource, BOARD_SOURCE_LABELS } from '@/lib/board-sources';
 // U42 (C-11) — reuse the EXACT card-face chip components for the modal's
 // multi-persona plan + per-page/per-part scoped-blend rows. Single source: the
 // modal must never re-derive or restate what the board card already renders,
@@ -60,21 +60,11 @@ function formatScore(score?: number | null): string | null {
  * (falls back to the legacy `Source: <value>` description marker for a
  * pre-migration row, same fallback order `resolveBoardSource` uses).
  */
-const RECOGNIZED_ENGINE_SOURCES: Record<string, string> = {
-  funnel: 'a Skill 6 funnel build',
-  survey: 'a Skill 6 survey build',
-  'web-development': 'a Skill 6 web-development build',
-  anthology: 'the Anthology Engine',
-  // U030 (audit E1) — the presentations deck-build producer.
-  build_deck: 'the presentations deck build',
-  // FIX 36 — the two engine sources the status route already recognizes but
-  // this panel's label map was missing: per-phase child cards and the
-  // interview app's own cards.
-  build_deck_phase: 'a presentations deck phase build',
-  'presentation-interview-app': 'the presentations interview app',
-  // Skill 58 podcast engine mirror cards (status producers only).
-  'podcast-engine': 'the Podcast Engine',
-};
+// STRANDED-02: the label map moved to src/lib/board-sources.ts, next to the
+// RECOGNIZED_BOARD_SOURCES set it labels, so the board-hygiene job can name the
+// owning engine without importing this 'use client' module. Re-exported here
+// under its original name so every existing consumer is unchanged.
+const RECOGNIZED_ENGINE_SOURCES: Record<string, string> = BOARD_SOURCE_LABELS;
 
 const LEGACY_ENGINE_SOURCE_MARKER = /^Source:\s*(funnel|survey|web-development|anthology)\s*$/m;
 

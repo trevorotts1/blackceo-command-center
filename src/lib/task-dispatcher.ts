@@ -50,6 +50,7 @@ import { renderPersonaConformanceInstructions } from '@/lib/persona-conformance'
 import { v4 as uuidv4 } from 'uuid';
 import { beginExecutionSend, executionSessionId, reserveExecution, recordExecutionAcceptance, recordExecutionUnknown, type DispatchOutcome, type Execution } from '@/lib/execution-attempts';
 import { throwIfJobLeaseLost } from '@/lib/jobs/job-lease';
+import { boardSourceLabel } from '@/lib/board-sources';
 import { queryOne, run } from '@/lib/db';
 import { parseEventTimestamp } from '@/lib/dispatch-idempotency';
 import { getOpenClawClient } from '@/lib/openclaw/client';
@@ -171,6 +172,41 @@ const TRIAD_HOLD_LOG_INTERVAL_SECONDS = Math.max(
 );
 
 type DispatchBlockAudience = 'OWNER' | 'SYSTEM';
+
+// ── STRANDED-01: a tick that loses its scheduler lease must not strand the card ─
+// `throwIfJobLeaseLost()` (src/lib/jobs/job-lease.ts) throws `scheduler_lease_lost`
+// when the sweep that is driving this dispatch outran its 90s lease (or was
+// aborted). That throw lands in autoDispatchTask's outer catch, which recorded it
+// ONLY as a `dispatch_pipeline_error` event: no attempt accounting, no backoff,
+// no block, no alert. The card kept whatever `dispatch_attempts` it already
+// carried and stayed in its intake lane — and intake-advance, the SINGLE live
+// advancer since SWEEP-01 paused backlog-redispatch, selects only cards with
+// `dispatch_attempts < MAX_DISPATCH_ATTEMPTS`. A card already at the cap was
+// therefore never looked at again by anything, with nobody told.
+//
+// A lost lease is a TRANSIENT INFRASTRUCTURE failure, not a defect in the card,
+// so it is recorded through the SAME recordDispatchFailure path every other
+// transient failure uses: a bounded exponential backoff while under the cap (the
+// live advancer re-claims the card once the window elapses) and, at the cap, a
+// block carrying an honest reason plus ONE operator alert via notifySystem — the
+// same sender the audience-confirm gate uses (src/lib/tasks.ts). No new
+// notification path, no hardcoded chat id.
+//
+// Lanes only. The lease we lost may have been taken over by a live owner that
+// already claimed and advanced this card; a backoff stamp or a block must never
+// land on work that is now running.
+const PRE_DISPATCH_STATUSES = new Set([
+  'inbox',
+  'backlog',
+  'planning',
+  'pending_dispatch',
+  'assigned',
+]);
+
+/** True when a dispatch aborted because its scheduler lease was lost/aborted. */
+function isLostLeaseAbort(errMsg: string): boolean {
+  return errMsg.includes('scheduler_lease_lost');
+}
 
 /**
  * Record a FAILED advance attempt for a task. Increments dispatch_attempts,
@@ -385,6 +421,49 @@ function recordWorkerCapacityHold(
     agentId,
     '%worker at capacity%',
     `[${context}] worker at capacity: queued behind ${running} running (limit ${limit})`,
+    context,
+  );
+}
+
+/**
+ * STRANDED-02 — the board REFUSES to dispatch an engine-owned card, and says so
+ * on the card.
+ *
+ * GUARD 4d below is correct and stays: a card whose ingest `source` belongs to
+ * an engine (build_deck / build_deck_phase / podcast-engine) is created,
+ * sequenced and completed by that engine, and a board dispatch would put a
+ * SECOND executor on the same work (FIX 38a, R5B §F1). What was wrong is that
+ * the refusal was INVISIBLE: it wrote one `engine_owned_card_not_dispatched`
+ * row into `events` and nothing else, so on the board the card was
+ * indistinguishable from ordinary queued work. Live evidence: card e9393e31
+ * (source=podcast-engine) sat in backlog looking normal while its owning
+ * engine's last run had failed hours earlier — a client saw a card that never
+ * moved and no explanation.
+ *
+ * This writes the reason where a human actually reads it: the card's Activity
+ * tab, through the SAME dedup-guarded helper the persona and capacity holds
+ * use, so it names the stall once instead of every tick. The board card face
+ * carries the matching label (src/components/MissionQueue.tsx), and the stale
+ * alert lives in board-hygiene.
+ *
+ * Exported because the hygiene job writes the same row for an engine card that
+ * never reached this guard at all — an engine card with no assigned agent is
+ * never handed to autoDispatchTask, and every advancer excludes it in its
+ * SELECT, so it is refused without ever being refused HERE.
+ */
+export function recordEngineOwnedHoldActivity(
+  taskId: string,
+  agentId: string | null,
+  source: string,
+  context: string,
+): void {
+  const owner = boardSourceLabel(source) ?? source;
+  recordDispatchHoldActivity(
+    taskId,
+    agentId,
+    '%waiting on%the board does not dispatch this card%',
+    `[${context}] waiting on ${owner} — the board does not dispatch this card. ` +
+      `The owning engine is its only executor; the board will not start, claim, or advance it.`,
     context,
   );
 }
@@ -988,6 +1067,14 @@ export async function autoDispatchTask(
         task.id,
         task.assigned_agent_id ?? null,
         engineHoldMsg,
+      );
+      // STRANDED-02: the refusal is correct — make it visible on the card, not
+      // just in the events table. See recordEngineOwnedHoldActivity above.
+      recordEngineOwnedHoldActivity(
+        task.id,
+        task.assigned_agent_id ?? null,
+        (task as Task & { source?: string | null }).source ?? '',
+        context,
       );
       console.log(`[${context}] autoDispatchTask: ${engineHoldMsg}`);
       return { status: 'held', reason: 'dispatch_precondition' };
@@ -2325,6 +2412,36 @@ If you need help or clarification, ask the orchestrator.`;
       // Last resort: even the failure-visibility write failed (e.g. pre-migration
       // DB) — still never throw out of a fire-and-forget dispatch.
       console.error(`[${context}] autoDispatchTask: dispatch_pipeline_error write failed:`, writeErr);
+    }
+
+    // STRANDED-01: a lost lease is transient — account for it, back off, and
+    // block + alert at the cap, instead of leaving the card unaccounted for in
+    // its intake lane where no advancer will look at it again. See
+    // PRE_DISPATCH_STATUSES above for why this is scoped to pre-dispatch lanes.
+    try {
+      if (isLostLeaseAbort(errMsg)) {
+        const current = queryOne<{ status: string; assigned_agent_id: string | null }>(
+          'SELECT status, assigned_agent_id FROM tasks WHERE id = ?',
+          [taskId],
+        );
+        if (current && PRE_DISPATCH_STATUSES.has(current.status)) {
+          recordDispatchFailure(taskId, current.assigned_agent_id, {
+            reason: 'scheduler_lease_lost',
+            audience: 'SYSTEM',
+            needs:
+              'The scheduler tick lost its lease mid-dispatch (a transient infrastructure failure: the sweep ' +
+              'outran its lease, most often a slow or stalled gateway). The card was re-queued with a bounded ' +
+              'backoff on each attempt and has now used its whole dispatch budget. Check gateway/scheduler ' +
+              'health, then Resume the card.',
+            context,
+          });
+        }
+      }
+    } catch (recoverErr) {
+      console.warn(
+        `[${context}] autoDispatchTask: lost-lease recovery non-fatal:`,
+        (recoverErr as Error).message,
+      );
     }
   }
     return acknowledgedExecution
