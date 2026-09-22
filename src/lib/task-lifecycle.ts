@@ -810,6 +810,23 @@ export function transitionWithDeclaredException(args: {
       params.push(now);
     }
 
+    // NO-SILENT-STOP: leaving `blocked` releases the stop-notice claim.
+    //
+    // `blocked_notice_sent_at` is the CAS token stopCardPermanently()
+    // (src/lib/stop-card.ts) claims to guarantee exactly ONE notification per
+    // permanent stop. Nothing in this codebase ever cleared it, so it behaved as
+    // a once-per-card-lifetime flag: a card blocked, unblocked and blocked again
+    // was permanently silent on its second stop — and the trust engine's own
+    // blocked re-ping was likewise throttled against a stamp from a block that
+    // had already been resolved. Clearing it here, in the one funnel every
+    // status change routes through, makes it a per-BLOCK claim in every caller
+    // at once, including the ones (resume, operator recovery) that clear no
+    // block columns of their own. A caller that explicitly supplies the column
+    // still wins.
+    if (from === 'blocked' && args.to !== 'blocked' && !('blocked_notice_sent_at' in extraCols)) {
+      setClauses.push('blocked_notice_sent_at = NULL');
+    }
+
     params.push(args.taskId);
     params.push(from); // compare-and-swap guard
 
@@ -991,6 +1008,15 @@ export async function transition(
     if (!('updated_at' in extraCols)) {
       setClauses.push('updated_at = ?');
       params.push(now);
+    }
+
+    // NO-SILENT-STOP: leaving `blocked` releases the stop-notice claim. Same
+    // reasoning as the sibling writer in transitionWithDeclaredException above —
+    // `blocked_notice_sent_at` is the CAS token stopCardPermanently() claims to
+    // guarantee one notification per permanent stop, and nothing ever cleared
+    // it, so a card blocked twice was silent the second time.
+    if (from === 'blocked' && to !== 'blocked' && !('blocked_notice_sent_at' in extraCols)) {
+      setClauses.push('blocked_notice_sent_at = NULL');
     }
 
     params.push(taskId);

@@ -178,8 +178,26 @@ test('[block] sets status=blocked, block_audience=OWNER, writes one event, idemp
   );
   assert.equal(row?.status, 'blocked');
   assert.equal(row?.block_audience, 'OWNER');
-  assert.ok(row?.block_reason && /HARD-HOLD/.test(row.block_reason));
   assert.ok(row?.block_needs && /Confirm the audience/.test(row.block_needs));
+
+  // NO-SILENT-STOP (2026-09-22): `block_reason` is now the PLAIN-ENGLISH
+  // sentence a non-technical owner reads on the card, not the machine string.
+  // The old assertion here pinned the machine text ("HARD-HOLD"), which is
+  // exactly the jargon the owner-facing column had to stop carrying. Both
+  // halves are asserted: the owner gets words they can act on, AND the machine
+  // string is still recoverable for diagnosis from the durable events record.
+  assert.ok(row?.block_reason, 'a permanent stop always writes a reason');
+  assert.match(row!.block_reason!, /confirm who this is for/i, 'the owner-facing reason is plain English');
+  assert.doesNotMatch(row!.block_reason!, /HARD-HOLD|AUDIENCE-CONFIRM/, 'no machine jargon in the owner-facing reason');
+
+  const machineDetail = queryAll<{ message: string }>(
+    "SELECT message FROM events WHERE task_id = ? AND type = 'task_blocked'",
+    [id],
+  );
+  assert.ok(
+    machineDetail.some((e) => /HARD-HOLD/.test(e.message)),
+    'the HARD-HOLD machine detail must remain recoverable from the database for diagnosis',
+  );
 
   const events = queryAll<{ id: string }>(
     "SELECT id FROM events WHERE task_id = ? AND type = 'audience_confirm_blocked_owner'",

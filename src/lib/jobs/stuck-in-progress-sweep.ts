@@ -54,9 +54,9 @@
 
 import { queryAll, queryOne, run, parseDbTime } from '@/lib/db';
 import { broadcast } from '@/lib/events';
-import { notifyByAudience } from '@/lib/notify';
 import { transition, TransitionError, recordStatusEvent } from '@/lib/task-lifecycle';
 import { recordBlockEvent } from '@/lib/block-events';
+import { stopCardPermanently } from '@/lib/stop-card';
 import { probeSessionLiveness } from './execution-watcher';
 import { recoverFinishedTaskToReview } from './finished-work-recovery';
 import { v4 as uuidv4 } from 'uuid';
@@ -258,17 +258,27 @@ async function blockStuckTask(task: StuckRow, ageMinutes: number): Promise<void>
     if (updated) broadcast({ type: 'task_updated', payload: updated });
   } catch { /* broadcast best-effort */ }
 
-  // 5. Operator alert (fires exactly once: the task is 'blocked' now).
-  //    SWEEP-06: SYSTEM audience — goes to the operator (Rescue Rangers) or the
-  //    server log, NEVER the client Telegram. The previous notifyOwner fallback
-  //    pushed a silent-failure diagnostic to the client's Telegram, a
-  //    MOVE-IN-SILENCE breach; notifyByAudience('SYSTEM') closes it.
-  const message =
-    `[silent-failure] Task "${task.title}" (id ${task.id}) auto-blocked by stuck-in-progress ` +
-    `sweep — ${reason}`;
-  try {
-    await notifyByAudience({ audience: 'SYSTEM', message });
-  } catch { /* operator alert best-effort */ }
+  // 5. Operator alert — NO-SILENT-STOP: through the one chokepoint, so it is
+  //    claimed via blocked_notice_sent_at and sent exactly once no matter how
+  //    many sweep ticks observe the same wedged card. "Fires exactly once
+  //    because the task is 'blocked' now" was only true while nothing else
+  //    could re-enter; a restart between the status flip and the alert dropped
+  //    it entirely. SWEEP-06 routing is unchanged and enforced inside the
+  //    chokepoint: SYSTEM audience reaches the operator, never the client.
+  //    applyBlock:false — the status flip and block_* metadata landed above.
+  await stopCardPermanently({
+    taskId: task.id,
+    source: 'stuck-in-progress-sweep',
+    reason:
+      `This work was picked up but then went quiet for ${Math.round(ageMinutes)} minutes without ` +
+      `finishing or reporting a problem, so it has been stopped rather than left looking busy.`,
+    needs,
+    audience: 'SYSTEM',
+    retriesExhausted: true,
+    machineDetail:
+      `[silent-failure] Task "${task.title}" (id ${task.id}) auto-blocked by stuck-in-progress sweep — ${reason}`,
+    applyBlock: false,
+  });
 
   console.warn(
     `[stuck-in-progress-sweep] task ${task.id} BLOCKED (${Math.round(ageMinutes)}min no progress, agent ${agentLabel})`,
