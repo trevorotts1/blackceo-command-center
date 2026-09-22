@@ -79,6 +79,7 @@ import { shouldUsePersonaBlend } from '@/lib/tasks';
 import { resolveSlaThreshold, minPossibleSlaThreshold } from '@/lib/board-slas';
 import { checkTriad } from '@/lib/sops';
 import { triadMissingPillText, type TriadMissingKey } from '@/lib/board-labels';
+import { boardSourceLabel, engineOwnedWaitingLabel } from '@/lib/board-sources';
 import { v4 as uuidv4 } from 'uuid';
 import { listPendingHarvestCards, resolveHarvestClientId, resolveWorkspaceBase } from '@/lib/winner-harvest';
 
@@ -94,6 +95,12 @@ const STALE_BACKLOG_NUDGE_DAYS = numEnv('BOARD_HYGIENE_STALE_BACKLOG_NUDGE_DAYS'
 const STALE_BACKLOG_ARCHIVE_AFTER_NUDGE_DAYS = numEnv('BOARD_HYGIENE_STALE_ARCHIVE_AFTER_NUDGE_DAYS', 7);
 // skill6-v2 U33 / C-02 — Triad-stall alert threshold (day-0→day-21 dead zone).
 const TRIAD_STALL_HOURS = numEnv('BOARD_HYGIENE_TRIAD_STALL_HOURS', 48);
+// STRANDED-02 — how long an ENGINE-OWNED card may sit in a board waiting lane,
+// refused by the advancers and untouched by its owning engine, before the
+// operator is told once. Hours, not days: the board refuses these cards by
+// design, so the ONLY signal that the owning engine has died is that its card
+// stopped moving. Env-overridable like every other threshold in this file.
+const ENGINE_OWNED_STALL_HOURS = numEnv('BOARD_HYGIENE_ENGINE_OWNED_STALL_HOURS', 4);
 
 // Re-fire cooldowns — not individually specified by the spec beyond the
 // explicit "max once/48h" on the owner re-ping (rule 1); the same cadence is
@@ -141,6 +148,12 @@ const EVT_STALE_NUDGED = 'board_hygiene_stale_nudged';
 const EVT_STALE_ARCHIVED = 'auto_archived_stale';
 // skill6-v2 U33 / C-02 — Triad-stall alert.
 const EVT_TRIAD_STALLED = 'board_hygiene_triad_stalled';
+// STRANDED-02 — the engine-owned stall alert. Deduped per STALL EPISODE rather
+// than on a clock: an alert row suppresses further alerts only while it is
+// NEWER than the card's own updated_at, so the moment the owning engine touches
+// the card the suppression lifts by itself and a later stall can be reported
+// again. Persisted in `events`, so a restart can never re-send.
+const EVT_ENGINE_OWNED_STALLED = 'board_hygiene_engine_owned_stalled';
 // P4-02 step 6 — the board-level silent-blend-regression lock.
 const EVT_BLEND_REGRESSION = 'persona_blend_regression';
 
@@ -178,6 +191,15 @@ export interface BoardHygieneResult {
    *  Triad-incomplete) grooming state this run. */
   triadStalled: number;
   triadStalledIds: string[];
+  /** STRANDED-02 — engine-owned cards whose visible "waiting on <engine>"
+   *  reason was written on the card this run (first refusal seen here). */
+  engineOwnedSurfaced: number;
+  engineOwnedSurfacedIds: string[];
+  /** STRANDED-02 — engine-owned cards the operator was alerted about this run
+   *  for sitting past ENGINE_OWNED_STALL_HOURS with the engine not advancing
+   *  them. Exactly one alert per stall episode. */
+  engineOwnedStalled: number;
+  engineOwnedStalledIds: string[];
   operatorDigestSent: boolean;
   /** P4-02 step 6 — true when the trailing window had content tasks created but
    *  ZERO persona bundles written (the D1 silent-regression signal fired). */
@@ -221,6 +243,10 @@ function emptyResult(ranAt: string, skippedReason?: string): BoardHygieneResult 
     staleArchivedIds: [],
     triadStalled: 0,
     triadStalledIds: [],
+    engineOwnedSurfaced: 0,
+    engineOwnedSurfacedIds: [],
+    engineOwnedStalled: 0,
+    engineOwnedStalledIds: [],
     operatorDigestSent: false,
     blendRegressionFlagged: false,
     blendWindowContentTasks: 0,
@@ -752,6 +778,149 @@ function processTriadStallLane(result: BoardHygieneResult): void {
   }
 }
 
+// ── Rule 6b (STRANDED-02): an engine-owned card is never silently stranded ──
+//
+// A card whose ingest `source` belongs to an engine (build_deck /
+// build_deck_phase / podcast-engine) is refused by every board advancer, and
+// that refusal is CORRECT: the owning engine creates, sequences and completes
+// its own cards, and a board dispatch would put a second executor on the same
+// work (FIX 38a/38b). The defect was that the refusal was INVISIBLE. The
+// advancers exclude these rows in their SELECT, so they emit nothing per tick,
+// and the one `engine_owned_card_not_dispatched` event GUARD 4d writes only
+// fires when something actually calls autoDispatchTask — never for a card that
+// was ingested without an assigned agent. Live evidence: card e9393e31
+// (source=podcast-engine) sat in backlog looking exactly like ordinary queued
+// work while its owning engine's last run had failed hours earlier with a
+// file-lock deadlock, and nobody was told.
+//
+// This lane keeps the refusal and makes it legible, in two steps:
+//   1. Every refused engine card gets the reason written ON the card (a
+//      task_activities row, through the dispatcher's own dedup-guarded helper,
+//      so a card refused thousands of times carries one row, not thousands).
+//      The board card face carries the matching label, derived from
+//      source+status so it clears itself the moment the engine advances the
+//      card (engineOwnedWaitingLabel, src/lib/board-sources.ts).
+//   2. A card still waiting past ENGINE_OWNED_STALL_HOURS, with no execution
+//      running, earns ONE operator alert naming the owning engine and the last
+//      recorded failure on the card if there is one. Deduped per stall episode
+//      (see EVT_ENGINE_OWNED_STALLED) and persisted in `events`, so a restart
+//      cannot re-send it and a card the engine later runs re-arms by itself.
+//
+// Operator lane only (notifySystem) — MOVE-IN-SILENCE: the client is never
+// messaged about an engine's internal health.
+interface EngineOwnedCardRow {
+  id: string;
+  title: string;
+  source: string | null;
+  status: string;
+  updated_at: string;
+  assigned_agent_id: string | null;
+}
+
+/** The last recorded failure on a card, for naming it in the alert. */
+function lastRecordedFailure(taskId: string): { type: string; message: string } | null {
+  try {
+    return (
+      queryOne<{ type: string; message: string }>(
+        `SELECT type, message FROM events
+          WHERE task_id = ?
+            AND (type LIKE '%error%' OR type LIKE '%fail%' OR type = 'task_blocked')
+          ORDER BY ${sqlTime('created_at')} DESC LIMIT 1`,
+        [taskId],
+      ) ?? null
+    );
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * True while an alert for the CURRENT stall episode already exists: an
+ * EVT_ENGINE_OWNED_STALLED row no older than the card's own updated_at. Once
+ * the owning engine touches the card, updated_at moves past the alert and the
+ * suppression lifts on its own — no row is ever deleted.
+ */
+function alertedThisStallEpisode(taskId: string, updatedAt: string): boolean {
+  const row = queryOne<{ n: number }>(
+    `SELECT COUNT(*) AS n FROM events
+      WHERE task_id = ? AND type = ?
+        AND ${sqlTime('created_at')} >= ${sqlTime('?')}`,
+    [taskId, EVT_ENGINE_OWNED_STALLED, updatedAt],
+  );
+  return (row?.n ?? 0) > 0;
+}
+
+async function processEngineOwnedLane(result: BoardHygieneResult): Promise<void> {
+  let rows: EngineOwnedCardRow[];
+  try {
+    rows = queryAll<EngineOwnedCardRow>(
+      `SELECT t.id, t.title, t.source, t.status, t.updated_at, t.assigned_agent_id
+         FROM tasks t
+        WHERE t.status IN ('inbox', 'backlog', 'planning', 'pending_dispatch', 'assigned')
+          AND t.archived_at IS NULL
+          AND t.source IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM task_executions x
+                           WHERE x.task_id = t.id
+                             AND x.state IN ('reserved', 'sending', 'accepted', 'running', 'unknown'))`,
+      [],
+    );
+  } catch (err) {
+    // Pre-089 DB (no `source` column) or pre-executions DB — nothing to do.
+    console.warn('[board-hygiene] engine-owned query failed (non-fatal):', (err as Error).message);
+    return;
+  }
+
+  const { recordEngineOwnedHoldActivity } = await import('@/lib/task-dispatcher');
+
+  for (const task of rows) {
+    try {
+      const label = engineOwnedWaitingLabel(task.source, task.status);
+      if (!label) continue; // not an engine-owned card, or already moving
+
+      // Step 1 — the reason, on the card. Deduped inside the helper, so this is
+      // a cheap no-op for a card that already carries it.
+      const before = queryOne<{ n: number }>(
+        `SELECT COUNT(*) AS n FROM task_activities
+          WHERE task_id = ? AND message LIKE '%the board does not dispatch this card%'`,
+        [task.id],
+      );
+      recordEngineOwnedHoldActivity(task.id, task.assigned_agent_id, task.source ?? '', 'board-hygiene');
+      const after = queryOne<{ n: number }>(
+        `SELECT COUNT(*) AS n FROM task_activities
+          WHERE task_id = ? AND message LIKE '%the board does not dispatch this card%'`,
+        [task.id],
+      );
+      if ((after?.n ?? 0) > (before?.n ?? 0)) {
+        result.engineOwnedSurfaced++;
+        result.engineOwnedSurfacedIds.push(task.id);
+      }
+
+      // Step 2 — the stale alert, once per stall episode.
+      const updatedMs = parseDbTime(task.updated_at);
+      if (Number.isNaN(updatedMs)) continue;
+      const waitingHours = (Date.now() - updatedMs) / (1000 * 60 * 60);
+      if (waitingHours < ENGINE_OWNED_STALL_HOURS) continue;
+      if (alertedThisStallEpisode(task.id, task.updated_at)) continue;
+
+      const owner = boardSourceLabel(task.source) ?? task.source ?? 'its owning engine';
+      const failure = lastRecordedFailure(task.id);
+      const failureLine = failure
+        ? ` Last recorded failure on this card: [${failure.type}] ${failure.message.slice(0, 300)}`
+        : ' No failure is recorded on this card — check the engine itself.';
+      const message =
+        `[BOARD-HYGIENE] "${task.title}" has waited ${Math.round(waitingHours)}h in ${task.status} for ` +
+        `${owner}. The board refuses to dispatch this card by design — the owning engine is its only ` +
+        `executor — so a card that stops moving means the engine stopped, not the board.${failureLine}`;
+      notifySystem(message, { agent: 'board-hygiene', action: 'engine_owned_stall' });
+      writeEvent(task.id, EVT_ENGINE_OWNED_STALLED, message);
+      result.engineOwnedStalled++;
+      result.engineOwnedStalledIds.push(task.id);
+    } catch (err) {
+      console.warn(`[board-hygiene] engine-owned processing failed for ${task.id}:`, (err as Error).message);
+    }
+  }
+}
+
 // ── Rule 7: Persona-blend silent-regression check (P4-02 step 6) ────────────
 //
 // The D1 bug ("--blend never passed → duality dead in prod") was invisible: a
@@ -1032,6 +1201,9 @@ export async function runBoardHygiene(): Promise<BoardHygieneResult> {
   }
   if (!(process.env.DISABLE_BOARD_HYGIENE_TRIAD === '1')) {
     processTriadStallLane(result);
+  }
+  if (!(process.env.DISABLE_BOARD_HYGIENE_ENGINE_OWNED === '1')) {
+    await processEngineOwnedLane(result);
   }
   if (!(process.env.DISABLE_BOARD_HYGIENE_BLEND_REGRESSION === '1')) {
     processBlendRegressionCheck(result);
