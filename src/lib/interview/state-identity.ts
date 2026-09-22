@@ -1,7 +1,7 @@
 /**
  * Build-state identity classification (2026-09-22).
  *
- * WHY THIS EXISTS — measured on a client box (rescue-leanne-dolce):
+ * WHY THIS EXISTS — measured on a live client box:
  * `.workforce-build-state.json` carried `interviewComplete: true` written in
  * June, months before the tenant identity stamps (companyId/installationId/
  * tenantId) were ever added to that file. Every call site that verifies scope
@@ -9,9 +9,9 @@
  *
  *     state.companyId===context.companyId && state.installationId===… && …
  *
- * `undefined === 'wakeuphappysis'` is false, so a COMPLETED interview was
+ * `undefined === '<the box company id>'` is false, so a COMPLETED interview was
  * indistinguishable from an ABSENT one: /api/auth/interview-ready reported
- * `interviewComplete: null` and the client was told her AI Workforce interview
+ * `interviewComplete: null` and the client was told the AI Workforce interview
  * was not complete when it demonstrably was.
  *
  * "Not yet stamped" and "stamped for someone else" are different facts and must
