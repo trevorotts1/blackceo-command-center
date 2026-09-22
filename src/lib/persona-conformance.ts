@@ -86,6 +86,33 @@ export function dispatchedPersonaShas(executionId:string|undefined,db:Database.D
   return {root:parsed.root??null,scopes:parsed.scopes??{}};
  } catch { return null; }
 }
+export interface DeliverableRow { id:string; path:string; sha256:string|null; deliverable_type:string }
+/** The deliverables THIS attempt must account for.
+ *
+ * `task_deliverables` accumulates across QC re-routes — attempt 2 registers its
+ * output beside everything attempt 1 left — while a producer report only ever
+ * covers the artifacts of the attempt that wrote it. Measuring one against the
+ * other blocked a live card (2026-09-21) at 13 registered deliverables versus 6
+ * in its latest root report: a perfect score, `persona_artifact_snapshot_missing`,
+ * and every re-execution widening the gap it was sent to close. So the question
+ * is scoped to the rows migration 158 attributes to the CURRENT execution.
+ *
+ * FALLBACK, and why it cannot weaken the gate: a row registered before that
+ * linkage existed carries NULL. When the current execution has NOT attributed a
+ * single row of its own — a pre-158 attempt finishing right after an upgrade —
+ * the whole card is measured exactly as it was before this change. That is the
+ * STRICTER of the two rules, never the looser one, and it cannot hide a real
+ * gap: the moment this attempt registers anything, its own rows are what it is
+ * held to, and one of them missing from the report is still a hard failure. */
+export function currentExecutionDeliverables(taskId:string,executionId:string,db:Database.Database=getDb()):DeliverableRow[] {
+ // SELECT * on purpose: a pre-158 database has no `execution_id`, and naming a
+ // column that does not exist would throw inside the caller's catch and turn a
+ // healthy un-migrated box into `persona_conformance_unavailable`. Absent reads
+ // as undefined, which is simply "not this execution".
+ const all=db.prepare('SELECT * FROM task_deliverables WHERE task_id=?').all(taskId) as (DeliverableRow&{execution_id?:string|null})[];
+ const mine=all.filter(r=>r.execution_id===executionId);
+ return mine.length?mine:all;
+}
 export function requirePersonaConformanceForCompletion(taskId:string,db:Database.Database=getDb()):PersonaConformanceResult {
  try {
   const task=db.prepare('SELECT * FROM tasks WHERE id=?').get(taskId) as any;
@@ -121,7 +148,7 @@ export function requirePersonaConformanceForCompletion(taskId:string,db:Database
    const mismatch=comparePersonaManifest(JSON.parse(scope.bundle_json),report,dispatched?.scopes[scope.scope]);
    if(mismatch)return {pass:false,reason:`scope_${mismatch}`};
   }
-  const deliverables=db.prepare('SELECT id,path,sha256,deliverable_type FROM task_deliverables WHERE task_id=?').all(taskId) as {id:string;path:string;sha256:string|null;deliverable_type:string}[];
+  const deliverables=currentExecutionDeliverables(taskId,execution.id,db);
   if(!deliverables.length)return {pass:false,reason:'persona_artifact_snapshot_missing'};
   for(const file of deliverables){
    const evidence=root.artifacts?.find(r=>r.deliverable_id===file.id);

@@ -7737,6 +7737,28 @@ export const migrations: Migration[] = [
       console.log('[Migration 157] executions record the model they were placed on, and whether the gateway confirmed it');
     },
   },
+  {
+    // 157 is taken by the placement migration; this is the next free id.
+    id: '158',
+    name: 'deliverable_execution_attribution',
+    up: (db) => {
+      const columns = new Set((db.prepare('PRAGMA table_info(task_deliverables)').all() as {name:string}[]).map((c) => c.name));
+      if (!columns.size) {
+        console.log('[Migration 158] task_deliverables absent — nothing to attribute');
+        return;
+      }
+      if (!columns.has('execution_id')) db.exec('ALTER TABLE task_deliverables ADD COLUMN execution_id TEXT');
+      // Deliberately NOT backfilled. Which attempt registered an existing row is
+      // not recoverable — `created_at` is written in two different formats on a
+      // live box (SQLite `datetime('now')` on some paths, ISO-8601 on others),
+      // so any timestamp guess would be wrong on exactly the cards this closes.
+      // NULL means "registered before this linkage existed"; the artifact
+      // snapshot gate reads that as "not attributable to the current attempt",
+      // and falls back to the pre-158 whole-card rule only when the current
+      // attempt registered nothing of its own (see persona-conformance.ts).
+      console.log('[Migration 158] deliverables now name the execution that registered them');
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner

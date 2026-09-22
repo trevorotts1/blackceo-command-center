@@ -46,6 +46,34 @@ export function latestExecution(taskId: string, db = getDb()): Execution | undef
  return db.prepare('SELECT * FROM task_executions WHERE task_id = ? ORDER BY generation DESC LIMIT 1').get(taskId) as Execution | undefined;
 }
 
+/** Name the attempt that registered a deliverable (migration 158).
+ *
+ * A card's `task_deliverables` rows ACCUMULATE across QC re-routes: every
+ * re-execution registers its own output beside everything earlier attempts
+ * left. The persona artifact-snapshot gate asks a producer to account for the
+ * card's deliverables, and a producer report can only ever cover the artifacts
+ * of its OWN attempt — so on a live box (2026-09-21) a card reached 13
+ * registered deliverables against 6 in the latest report and blocked with a
+ * perfect score, un-reroutable, because each further attempt only widened the
+ * gap. The linkage written here is what lets that gate scope the question.
+ *
+ * Called from every path that registers a row, INCLUDING the idempotent
+ * "already registered at this path" branches — a re-execution re-claiming the
+ * same path is registering it for THIS attempt, and the row must say so.
+ *
+ * Fail-soft: a pre-158 database has no such column, the UPDATE throws, and the
+ * row stays unattributed. That is the state the gate reads as "registered
+ * before this linkage existed", never as a failure. */
+export function linkDeliverableToExecution(taskId:string,deliverableId:string,db:Database.Database=getDb()):void {
+ try {
+  const execution=latestExecution(taskId,db);
+  if(!execution)return;
+  db.prepare('UPDATE task_deliverables SET execution_id=? WHERE id=?').run(execution.id,deliverableId);
+ } catch (err) {
+  console.warn(`[execution-attempts] deliverable ${deliverableId} not attributed to an execution (non-fatal):`,(err as Error).message);
+ }
+}
+
 function workerContext(agentId:string,db:Database.Database):string|null {
  const agent=db.prepare('SELECT * FROM agents WHERE id=?').get(agentId) as Record<string,unknown>|undefined;
  if(!agent)return null;
@@ -235,11 +263,11 @@ export function reserveExecution(snapshot: DispatchSnapshot, sessionKey: string,
    VALUES (?,?,?,'mission-control','active',?,?,?)`).run(randomUUID(), task.assigned_agent_id, sessionId, task.id, now, now);
   // Record the pin on the row, so a debit to a non-primary pool always carries
   // the model that justifies it. Separate from the templated INSERT above so a
-  // pre-157 box simply skips it instead of failing the whole reserve.
+  // pre-158 box simply skips it instead of failing the whole reserve.
   if (snapshot.placed_model && attemptedModel === snapshot.placed_model) {
     try {
       db.prepare('UPDATE task_executions SET placed_model=? WHERE id=?').run(snapshot.placed_model, executionId);
-    } catch { /* pre-157 box: the debit stands, the annotation is best-effort */ }
+    } catch { /* pre-158 box: the debit stands, the annotation is best-effort */ }
   }
   return {
     execution: latestExecution(task.id, db),

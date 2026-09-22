@@ -1,4 +1,4 @@
-import { validateExecutionCompletion, completeExecution } from '@/lib/execution-attempts';
+import { validateExecutionCompletion, completeExecution, linkDeliverableToExecution } from '@/lib/execution-attempts';
 import { assignmentCompany, assertAgentCompany, assertTaskCompany, TaskAgentAccessError } from '@/lib/task-agent-assignment';
 import { NextRequest, NextResponse } from 'next/server';
 import { v4 as uuidv4 } from 'uuid';
@@ -791,14 +791,19 @@ export async function PATCH(
           'SELECT id FROM task_deliverables WHERE task_id = ? AND path = ?',
           [id, u034Url],
         );
+        // The row is attributed to the CURRENT attempt either way: a
+        // re-execution PATCHing the same URL is claiming it for ITS attempt,
+        // and the persona artifact-snapshot gate reads that attribution.
+        const deliverableId = dup?.id ?? uuidv4();
         if (!dup) {
           run(
             `INSERT INTO task_deliverables
                (id, task_id, deliverable_type, title, path, created_at)
              VALUES (?, ?, 'url', ?, ?, ?)`,
-            [uuidv4(), id, (validatedData as unknown as { phase_id?: string }).phase_id || 'deliverable', u034Url, now],
+            [deliverableId, id, (validatedData as unknown as { phase_id?: string }).phase_id || 'deliverable', u034Url, now],
           );
         }
+        linkDeliverableToExecution(id, deliverableId);
       } catch (err) {
         console.warn('[tasks PATCH] U034 deliverable_url register skipped:', (err as Error).message);
       }

@@ -84,7 +84,7 @@ import { throwIfJobLeaseLost } from '@/lib/jobs/job-lease';
  */
 
 import { requirePersonaConformanceForCompletion } from '@/lib/persona-conformance';
-import { validateExecutionCompletion } from '@/lib/execution-attempts';
+import { validateExecutionCompletion, linkDeliverableToExecution } from '@/lib/execution-attempts';
 import { v4 as uuidv4 } from 'uuid';
 import path from 'path';
 import fs from 'fs';
@@ -1156,7 +1156,9 @@ export function registerDeliverable(
     'SELECT id FROM task_deliverables WHERE task_id = ? AND path = ?',
     [taskId, reg.path],
   );
-  if (existing) return existing.id;
+  // A re-execution re-registering the same path is claiming it for ITS attempt,
+  // so the attribution is refreshed on the idempotent branch too.
+  if (existing) { linkDeliverableToExecution(taskId, existing.id); return existing.id; }
 
   const id = uuidv4();
   const now = new Date().toISOString();
@@ -1183,6 +1185,7 @@ export function registerDeliverable(
       now,
     ],
   );
+  linkDeliverableToExecution(taskId, id);
 
   return id;
 }
