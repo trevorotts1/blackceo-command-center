@@ -9,6 +9,7 @@ import { resolveTenantContext, type TenantContext } from '@/lib/auth/tenant-cont
 import { createInterviewInvitation } from '@/lib/interview/invitation';
 import { resolveWorkspaceDir } from '@/lib/interview/paths';
 import { readBuildState, readHandoff, readInterviewProgress } from '@/lib/interview/seam';
+import { classifyStateIdentity } from '@/lib/interview/state-identity';
 import { notifyOwnerPrivate, resolveOwnerChatId } from '@/lib/notify';
 
 export const runtime = 'nodejs';
@@ -147,8 +148,11 @@ export async function POST(req: NextRequest) {
   } catch { return response({ error: 'invalid_request' }, 400); }
 
   const state = readBuildState();
-  if (!state || state.companyId !== context.companyId || state.tenantId !== context.tenantId ||
-      state.installationId !== context.installationId) {
+  // A legacy state that predates the identity stamps is not a foreign tenant:
+  // refusing it here left a client unable to be sent her own interview link.
+  // A stamp that is PRESENT and disagrees still fails closed.
+  const identity = classifyStateIdentity(state, context);
+  if (!state || identity === 'mismatched') {
     return response({ error: 'interview_identity_unverified' }, 409);
   }
   if (state.interviewComplete === true) return response({ error: 'interview_complete' }, 409);

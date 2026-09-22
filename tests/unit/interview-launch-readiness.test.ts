@@ -38,7 +38,7 @@ test('fresh scoped shell proves prerequisites before answers without claiming pr
 });
 test('unknown host, missing enrollment authorization and conflicting installation fail closed',async()=>{
  assert.equal((await GET(req('foreign.example'))).status,403);assert.equal((await GET(req('launch.example','wrong'))).status,403);
- for(const field of ['companyId','installationId','tenantId']){writeState({...fresh(),[field]:'foreign'});const response=await GET(req());assert.equal(response.status,503);assert.ok((await response.json()).missing.includes('scoped_interview_state'));}
+ for(const field of ['companyId','installationId','tenantId']){writeState({...fresh(),[field]:'foreign'});const response=await GET(req());assert.equal(response.status,503);assert.ok((await response.json()).missing.includes('interview_state_identity_mismatch'));}
  writeState(fresh());
 });
 test('empty catalogs, absent state, missing scripts and invalid runtime cannot pass',async()=>{
@@ -138,4 +138,53 @@ test('invitation uses configured public origin behind an internal proxy and reje
   if(previousOrigin===undefined)delete process.env.MC_TENANT_PUBLIC_URL;else process.env.MC_TENANT_PUBLIC_URL=previousOrigin;
   if(previousMode===undefined)delete process.env.NODE_ENV;else Object.assign(process.env,{NODE_ENV:previousMode});
  }
+});
+
+// An interview finished before the identity stamps existed must not be reported
+// as never having happened. Measured on a client box whose build state carried
+// interviewComplete:true from June and none of the three stamps.
+test('interview completed before the identity stamps existed reads complete and self-stamps',async()=>{
+ writeState({interviewComplete:true,buildType:'legacy',buildId:'build-one'});
+ const before=JSON.parse(fs.readFileSync(statePath,'utf8'));
+ assert.deepEqual(['companyId','installationId','tenantId'].filter(key=>key in before),[],'fixture must genuinely start unstamped or this test proves nothing');
+ const response=await GET(req());const body=await response.json();
+ assert.equal(response.status,200,JSON.stringify(body));
+ assert.equal(body.interviewComplete,true,'a finished interview is never reported as unknown');
+ assert.equal(body.capabilities.state,true);assert.deepEqual(body.missing,[]);
+ const after=JSON.parse(fs.readFileSync(statePath,'utf8'));
+ assert.deepEqual([after.companyId,after.installationId,after.tenantId],['launch-company','launch-install','launch-tenant'],'the stamps are written back so the next read is already scoped');
+ assert.equal(after.interviewComplete,true);assert.equal(after.buildId,'build-one','backfill preserves every other key');
+ writeState(fresh());
+});
+
+test('a stamp that names another tenant still fails closed and is never backfilled over',async()=>{
+ writeState({interviewComplete:true,buildType:'legacy',companyId:'foreign-company'});
+ const response=await GET(req());const body=await response.json();
+ assert.equal(response.status,503);
+ assert.ok(body.missing.includes('interview_state_identity_mismatch'),JSON.stringify(body.missing));
+ assert.ok(!body.missing.includes('interview_state_unstamped'),'a real mismatch is not reported as merely unstamped');
+ assert.equal(body.interviewComplete,null,'a flag stamped for another tenant is not this tenant answer');
+ assert.equal(JSON.parse(fs.readFileSync(statePath,'utf8')).companyId,'foreign-company','a present foreign stamp is never overwritten');
+ writeState(fresh());
+});
+
+test('an unstamped state with no completion flag still reads incomplete',async()=>{
+ writeState({buildType:'legacy'});
+ const response=await GET(req());const body=await response.json();
+ assert.equal(response.status,503);
+ assert.ok(body.missing.includes('interview_state_unstamped'),JSON.stringify(body.missing));
+ assert.equal(body.interviewComplete,null);assert.equal(body.capabilities.state,false);
+ assert.equal(JSON.parse(fs.readFileSync(statePath,'utf8')).companyId,undefined,'nothing is stamped without a completion flag to trust');
+ writeState(fresh());
+});
+
+test('the login gate admits an unstamped but completed interview',async()=>{
+ const {GET:gateStatus}=await import('../../src/app/api/interview/gate-status/route');
+ writeState({interviewComplete:true,buildType:'legacy'});
+ const admitted=await gateStatus(req() as never);
+ assert.equal((await admitted.json()).interviewComplete,true,'the shell lock reads the flag itself, so a missing stamp never locks a client out');
+ writeState({interviewComplete:false,buildType:'legacy'});
+ const refused=await gateStatus(req() as never);
+ assert.equal((await refused.json()).interviewComplete,false,'and an unfinished interview is still locked');
+ writeState(fresh());
 });
