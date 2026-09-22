@@ -272,12 +272,19 @@ test('block_reason falls back to the verdict reason when there are no gaps', () 
 // ─── 6. The cap is env-overridable ───────────────────────────────────────────
 
 test('QC_MAX_REROUTES=3 restores the old cap', () => {
+  // The namespace shape depends on whether tsx hands back ESM or transpiled
+  // CJS for this Node version — read BOTH, and print the keys so a third shape
+  // names itself in the failure message instead of just reading `undefined`.
+  const PROBE =
+    "import('./src/lib/qc-cap.ts').then((m) => {" +
+    " const v = m.QC_MAX_REROUTES ?? m.default?.QC_MAX_REROUTES;" +
+    " console.log('CAP=' + v + ' KEYS=' + Object.keys(m).join(',')); })";
   const readCap = (env: NodeJS.ProcessEnv): string =>
-    execFileSync(
-      process.execPath,
-      ['--import', 'tsx', '-e', "import('./src/lib/qc-cap.ts').then((m) => console.log('CAP=' + m.QC_MAX_REROUTES))"],
-      { cwd: REPO_ROOT, env, encoding: 'utf8' },
-    ).trim();
+    execFileSync(process.execPath, ['--import', 'tsx', '-e', PROBE], {
+      cwd: REPO_ROOT,
+      env,
+      encoding: 'utf8',
+    }).trim();
 
   const overridden = readCap({ ...process.env, QC_MAX_REROUTES: '3' });
   assert.ok(overridden.includes('CAP=3'), `QC_MAX_REROUTES=3 must yield 3, got: ${overridden}`);
