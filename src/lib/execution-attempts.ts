@@ -344,30 +344,43 @@ export const UNKNOWN_QUARANTINE_MS = 24 * 60 * 60 * 1000;
  * acknowledgement was a transport artefact. Promote the quarantine to a live
  * state rather than waiting out UNKNOWN_QUARANTINE_MS. Guarded on `unknown` so
  * a late acknowledgement or completion that already moved the row wins. */
-export function recordExecutionEvidence(executionId: string, state: 'accepted' | 'running', db = getDb()): boolean {
- return db.prepare("UPDATE task_executions SET state=?,error_code=NULL,updated_at=? WHERE id=? AND state='unknown'")
-  .run(state, new Date().toISOString(), executionId).changes === 1;
+export function recordExecutionEvidence(executionId: string, state: 'accepted' | 'running', fromState = 'unknown', db = getDb()): boolean {
+ return db.prepare("UPDATE task_executions SET state=?,error_code=NULL,updated_at=? WHERE id=? AND state=?")
+  .run(state, new Date().toISOString(), executionId, fromState).changes === 1;
 }
 
-/** NEGATIVE EVIDENCE: the gateway was reachable, its history for this session
- * does NOT contain the dispatched message, and the quarantine is past the
- * resolve window. Release the capacity and hand the card back to the same
- * worker — the same guard the expired-reservation path uses (assignment_version
- * + agent + still in_progress), so a reassigned, killed or archived task is
- * never rewound. No new idempotency key is ever minted. */
-export function failUnknownExecutionWithoutEvidence(executionId: string, db = getDb()): { failed: boolean; taskReset: boolean } {
+/** NEGATIVE EVIDENCE: the gateway was reachable and it has no record of this
+ * run — for a quarantined `unknown` row, its history does not contain the
+ * dispatched message; for an `accepted`/`running` row, the session shows no
+ * agent activity at all and is not reported finished. Either way the row is
+ * past its resolve window and is holding a worker slot and a provider pool slot
+ * for work nobody is doing. Release the capacity and hand the card back to the
+ * same worker — the same guard the expired-reservation path uses
+ * (assignment_version + agent + still in_progress), so a reassigned, killed or
+ * archived task is never rewound. No new idempotency key is ever minted.
+ *
+ * `fromState` is the state the caller READ, so the CAS can only ever fail a row
+ * that has not moved since; `errorCode` names which of the two absences it was. */
+export function failExecutionWithoutEvidence(
+ executionId: string,
+ opts: { fromState?: string; errorCode?: string; reason?: string } = {},
+ db = getDb(),
+): { failed: boolean; taskReset: boolean } {
+ const fromState = opts.fromState ?? 'unknown';
+ const errorCode = opts.errorCode ?? 'execution_unknown_no_evidence';
+ const reason = opts.reason ?? 'Quarantined execution had no gateway evidence';
  return db.transaction(() => {
-  const row = db.prepare("SELECT * FROM task_executions WHERE id=? AND state='unknown'").get(executionId) as Execution | undefined;
+  const row = db.prepare("SELECT * FROM task_executions WHERE id=? AND state=?").get(executionId, fromState) as Execution | undefined;
   if (!row) return { failed: false, taskReset: false };
   const now = new Date().toISOString();
-  db.prepare("UPDATE task_executions SET state='failed',error_code='execution_unknown_no_evidence',updated_at=? WHERE id=? AND state='unknown'").run(now, executionId);
+  db.prepare("UPDATE task_executions SET state='failed',error_code=?,updated_at=? WHERE id=? AND state=?").run(errorCode, now, executionId, fromState);
   // U99-RAW-STATUS-WRITER: the same CAS-guarded in_progress→assigned restore the
   // expired-reservation path above performs, audited by auditExecutionStatus in
   // this same transaction. transition()'s single expectedFrom cannot express the
   // assignment_version + agent + kill/archive guard this CAS carries.
   const changed = db.prepare("UPDATE tasks SET status='assigned',updated_at=? WHERE id=? AND assignment_version=? AND assigned_agent_id=? AND status='in_progress' AND killed_at IS NULL AND archived_at IS NULL")
    .run(now, row.task_id, row.assignment_version, row.agent_id).changes;
-  if (changed) auditExecutionStatus(row.task_id, 'in_progress', 'assigned', 'Quarantined execution had no gateway evidence', db);
+  if (changed) auditExecutionStatus(row.task_id, 'in_progress', 'assigned', reason, db);
   return { failed: true, taskReset: changed === 1 };
  }).immediate();
 }
