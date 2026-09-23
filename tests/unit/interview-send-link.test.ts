@@ -30,6 +30,7 @@ Object.assign(process.env, { OPENCLAW_ROOT: runtimeRoot, OPENCLAW_WORKSPACE_ROOT
   MC_TENANT_PUBLIC_URL: 'https://send.example', OPENCLAW_OWNER_CHAT_ID: owner });
 process.env.MC_TENANT_REGISTRY_JSON = JSON.stringify({ 'send.example': {
   kind: 'self', tenantId: 'send-tenant', companyId: 'send-company', installationId: 'send-install',
+  issuer: 'https://send-access.example', audience: 'send-audience', subjects: ['owner:send'],
 } });
 process.env.MC_PERSONA_COMPANY_CONTEXTS_JSON = JSON.stringify({ 'send-company': {
   companyRoot, companyConfig: path.join(companyRoot, 'company-config.json'),
@@ -94,18 +95,21 @@ test('operator auth remains mandatory with no token, wrong token, or unknown hos
   assert.equal((await POST(req())).status, 403);
   assert.equal(ledger().length, 0); assert.equal(fs.existsSync(capture), false);
 });
-test('fresh owner without Access gets a private 24-hour grant for configured public host; no ticket in response or ledger', async () => {
+test('fresh owner without Access gets a private re-openable grant for configured public host; no ticket in response or ledger', async () => {
   const response = await POST(req());
   const body = await response.json(); assert.equal(response.status, 200, JSON.stringify(body));
   assert.equal(body.mode, 'start'); assert.equal(body.bookmark, 'https://send.example/interview');
   const message = sentMessage();
-  const url = new URL(message.match(/https:\/\/send\.example\/interview#enroll=\S+/)![0]);
-  const ticket = decodeURIComponent(url.hash.slice('#enroll='.length));
+  const url = new URL(message.match(/https:\/\/send\.example\/interview\?enroll=\S+/)![0]);
+  const ticket = decodeURIComponent(url.searchParams.get('enroll')!);
   const { verifyTenantGrant } = await import('../../src/lib/auth/tenant-context');
   const grant = await verifyTenantGrant(ticket, 'send.example', 'enrollment');
   assert.equal(grant?.companyId, 'send-company');
   assert.ok(grant!.exp - Date.now() / 1000 > 86390);
   assert.match(message, /bookmark.*while you are signed in/);
+  // Truthful validity: re-openable until complete, never single-use/24h.
+  assert.match(message, /stays valid until your interview is complete/);
+  assert.ok(!/can be used once within 24 hours/.test(message));
   assert.ok(!JSON.stringify(body).includes(ticket));
   assert.ok(!JSON.stringify(ledger()).includes(ticket));
   assert.equal(JSON.parse(ledger()[0].metadata).status, 'accepted');
@@ -132,8 +136,22 @@ test('saved interview receives fresh enrollment with resume copy without resetti
   const response = await POST(req()); assert.equal(response.status, 200);
   assert.equal((await response.json()).mode, 'resume');
   assert.match(sentMessage(), /saved answers.*Continue your interview/);
-  assert.match(sentMessage(), /#enroll=/); assert.ok(!sentMessage().includes('/onboarding/resume/'));
+  assert.match(sentMessage(), /[?&]enroll=/); assert.ok(!sentMessage().includes('/onboarding/resume/'));
   assert.equal(fs.readFileSync(statePath, 'utf8'), before);
+});
+test('unregistered Access identity refuses issuance with a safe compatibility error', async () => {
+  const saved = process.env.MC_TENANT_REGISTRY_JSON;
+  process.env.MC_TENANT_REGISTRY_JSON = JSON.stringify({ 'send.example': {
+    kind: 'self', tenantId: 'send-tenant', companyId: 'send-company', installationId: 'send-install',
+  } });
+  try {
+    const response = await POST(req());
+    assert.equal(response.status, 409);
+    assert.equal((await response.json()).error, 'interview_not_ready');
+    assert.equal(fs.existsSync(capture), false);
+  } finally {
+    process.env.MC_TENANT_REGISTRY_JSON = saved;
+  }
 });
 test('completed, foreign state, and unverified public origins never send', async () => {
   fs.writeFileSync(statePath, JSON.stringify({ ...fresh(), interviewComplete: true }));
@@ -161,9 +179,9 @@ test('uncertain gateway error is redacted and never force-retried', async () => 
     assert.equal(mirrored.status, 'uncertain');
     assert.equal(mirrored.companyId, 'send-company');
     assert.equal(mirrored.recipientHash, createHash('sha256').update(owner).digest('hex'));
-    assert.ok(!JSON.stringify(mirrored).includes('#enroll='));
+    assert.ok(!JSON.stringify(mirrored).includes('enroll='));
     assert.equal(fs.statSync(shellReceipt).mode & 0o777, 0o600);
-    assert.ok(!JSON.stringify(ledger()).includes('#enroll='));
+    assert.ok(!JSON.stringify(ledger()).includes('enroll='));
   } finally { console.error = savedError; }
 });
 test('foreign acknowledgement stays uncertain and test suppression never dispatches', async () => {

@@ -2,11 +2,18 @@
 export interface TenantContext {
   tenantId: string; companyId: string; clientId: string | null;
   kind: 'self' | 'client'; subject: string; host: string; installationId: string;
+  /** Verified owner email from the cryptographically verified Access JWT claim.
+   *  Null unless the identity was proven via RS256/JWKS above. Never a raw header. */
+  email?: string | null;
 }
 export interface TenantRegistration {
   tenantId: string; companyId: string; clientId?: string;
   kind: 'self' | 'client'; installationId: string; subjects?: string[];
   issuer?: string; audience?: string;
+  /** Exact owner emails allowed via the verified Access JWT `email` claim.
+   *  Checked ONLY against the signed claim, never a header. When absent, any
+   *  email on a valid JWT is accepted and only `subjects` gates identity. */
+  allowedEmails?: string[];
   remoteUrl?: string; remoteSecret?: string; remoteApiToken?: string;
 }
 export class TenantAccessError extends Error { status = 403; }
@@ -95,12 +102,15 @@ export async function verifyTenantGrant(token: string | null, host: string, purp
 export async function verifyEnrollmentIdentity(token: string | null, host: string): Promise<TenantGrant | null> {
   return verifyGrant(token, host, 'enrollment');
 }
-export function tenantSessionToken(request: { headers: Headers }): string | null {
-  return request.headers.get('cookie')?.split(';').map(s => s.trim())
+export function tenantSessionToken(request: { headers: Headers }): string | null {  return request.headers.get('cookie')?.split(';').map(s => s.trim())
     .find(s => s.startsWith(TENANT_SESSION_COOKIE + '='))?.slice(TENANT_SESSION_COOKIE.length + 1) || null;
 }
 const jwks = new Map<string, { expires: number; keys: JsonWebKey[] }>();
-async function verifyAccessJwt(token: string, reg: TenantRegistration): Promise<string | null> {
+/** Verified Access identity: subject plus the signed email claim. The `email`
+ *  header is attacker-controlled and never read — only the JWT claim inside a
+ *  signature-verified, issuer/audience/expiry/claim-checked RS256 token. */
+export interface VerifiedAccessIdentity { sub: string; email: string | null; }
+async function verifyAccessJwt(token: string, reg: TenantRegistration): Promise<VerifiedAccessIdentity | null> {
   if (!reg.issuer || !reg.audience || !reg.subjects?.length) return null;
   try {
     const issuer = new URL(reg.issuer);
@@ -109,6 +119,11 @@ async function verifyAccessJwt(token: string, reg: TenantRegistration): Promise<
     if (extra || !sig) return null;
     const header = json(headerRaw), claims = json(payloadRaw);
     if (header.alg !== 'RS256' || !header.kid || claims.iss !== reg.issuer || !Number.isFinite(claims.exp) || claims.exp <= Date.now()/1000 || (claims.nbf && claims.nbf > Date.now()/1000) || ![claims.aud].flat().includes(reg.audience) || !reg.subjects.includes(claims.sub)) return null;
+    // Exact allowed-email allowlist, enforced ONLY on the signed `email` claim.
+    // Unsigned headers never participate. When configured, a valid JWT whose
+    // signed email is not listed is rejected — identity without authorization.
+    const signedEmail = typeof claims.email === 'string' && claims.email.trim() ? claims.email.trim() : null;
+    if (reg.allowedEmails?.length && (!signedEmail || !reg.allowedEmails.map(e => e.toLowerCase()).includes(signedEmail.toLowerCase()))) return null;
     let cached = jwks.get(reg.issuer);
     if (!cached || cached.expires <= Date.now()) {
       const response = await fetch(new URL('/cdn-cgi/access/certs', issuer), { signal: AbortSignal.timeout(5000), redirect: 'error' });
@@ -121,20 +136,33 @@ async function verifyAccessJwt(token: string, reg: TenantRegistration): Promise<
     const keyData = cached.keys.find(k => (k as JsonWebKey & {kid?: string}).kid === header.kid);
     if (!keyData || keyData.kty !== 'RSA') return null;
     const key = await crypto.subtle.importKey('jwk', keyData, {name: 'RSASSA-PKCS1-v1_5', hash:'SHA-256'}, false, ['verify']);
-    return await crypto.subtle.verify('RSASSA-PKCS1-v1_5', key, bytes(sig), enc.encode(`${headerRaw}.${payloadRaw}`)) ? claims.sub : null;
+    if (!await crypto.subtle.verify('RSASSA-PKCS1-v1_5', key, bytes(sig), enc.encode(`${headerRaw}.${payloadRaw}`))) return null;
+    return { sub: claims.sub as string, email: signedEmail };
   } catch { return null; }
 }
 export async function resolveTenantContext(request: { headers: Headers }): Promise<TenantContext> {
   const host = requestHost(request), reg = tenantRegistration(host);
   let subject: string | null = null;
+  let email: string | null = null;
   const bearer = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '');
   if (bearer && process.env.MC_API_TOKEN && equal(enc.encode(bearer), enc.encode(process.env.MC_API_TOKEN))) subject = 'operator:api';
   if (!subject) {
     const cookie = tenantSessionToken(request);
     subject = (await verifyTenantGrant(cookie, host, 'session'))?.subject || null;
   }
-  if (!subject) subject = await verifyAccessJwt(request.headers.get('cf-access-jwt-assertion') || '', reg);
+  // Cloudflare Access owner login, cryptographically verified in-process:
+  // RS256/JWKS signature, issuer, audience, expiry/nbf, exact subject and —
+  // when configured — exact signed-email allowlist. The unsigned email/header
+  // values are never trusted; only the claims inside a verified token identify
+  // the owner. No public slug fallback, no fake bearer: boxes without
+  // issuer/audience/subjects configured cannot verify (verifyAccessJwt nulls)
+  // and fall through to the refusal below. JWT `sub`s keep existing behavior:
+  // only exact-registered subjects verify, no email-as-subject invention.
+  if (!subject) {
+    const verified = await verifyAccessJwt(request.headers.get('cf-access-jwt-assertion') || '', reg);
+    if (verified) { subject = verified.sub; email = verified.email; }
+  }
   if (!subject && process.env.NODE_ENV !== 'production' && process.env.INTERVIEW_TENANT_TRUST_LOCAL === 'true' && ['localhost','127.0.0.1'].includes(host)) subject = 'development:local';
   if (!subject) throw new TenantAccessError('A verified tenant identity is required');
-  return { tenantId: reg.tenantId, companyId: reg.companyId, clientId: reg.clientId || null, kind: reg.kind, subject, host, installationId: reg.installationId };
+  return { tenantId: reg.tenantId, companyId: reg.companyId, clientId: reg.clientId || null, kind: reg.kind, subject, host, installationId: reg.installationId, email };
 }

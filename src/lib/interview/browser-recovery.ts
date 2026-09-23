@@ -1,5 +1,8 @@
 /** Browser-only recovery decisions. Saved server progress is authoritative. */
-export const INTERVIEW_SIGN_IN_HELP = 'Your sign-in has expired or this invitation has already been used. Your saved answers are still there. In your Telegram conversation with your AI assistant, send “resume my interview” for a fresh private link. Open it and continue where you left off.';
+/** The link is re-openable until the interview is complete — never single-use,
+ *  never a 24h clock. Sign-in help must never promise or imply a fresh link is
+ *  needed when re-opening the same one works. */
+export const INTERVIEW_SIGN_IN_HELP = 'Your sign-in has expired. Your saved answers are still there. Re-open your private interview link to sign in again and continue where you left off — the same link works until your interview is complete, on any device. If that link no longer opens, send “resume my interview” in your Telegram conversation with your AI assistant for a fresh one.';
 export const INTERVIEW_RETRY_HELP = 'Your saved progress is temporarily unavailable. Please retry; there is no need to start over.';
 
 export function verifiedProgress(value: unknown): boolean {

@@ -182,17 +182,24 @@ export async function POST(req: NextRequest) {
     const privateUrl = new URL(invitation.url);
     if (invitation.companyId !== context.companyId || invitation.tenantId !== context.tenantId ||
         invitation.installationId !== context.installationId || privateUrl.hostname !== context.host ||
-        privateUrl.pathname !== '/interview' || !privateUrl.hash.startsWith('#enroll=')) {
+        privateUrl.pathname !== '/interview' || !privateUrl.searchParams.get('enroll') || privateUrl.hash) {
       finish(id, 'not-dispatched');
       return response({ error: 'invitation_identity_unverified' }, 409);
     }
     const bookmark = `${privateUrl.origin}/interview`;
+    // Truthful validity copy (ISR-001): the enrollment link is re-openable
+    // until the interview itself is complete — never single-use, never a 24h
+    // clock. The legacy `expiresAt` wire field stays in the receipt for
+    // fleet-validator compatibility but is NOT this link's lifetime and is
+    // never quoted to the owner.
     const message = (mode === 'resume'
       ? 'Welcome back — your saved answers are still there. Continue your interview here: '
       : 'Your AI Workforce Interview is ready. Start here: ') + invitation.url +
-      '\n\nThis private sign-in link can be used once within 24 hours. Keep it private. ' +
+      '\n\nThis private sign-in link stays valid until your interview is complete, ' +
+      'and you can open it again whenever you like, on any device. Keep it private. ' +
       'After signing in, bookmark ' + bookmark +
-      '. The bookmark works while you are signed in; if asked to sign in again, request a fresh private link. ' +
+      '. The bookmark works while you are signed in; if asked to sign in again, re-open this same link — ' +
+      'no fresh link needed unless your interview is already complete. ' +
       'Each answer is saved when you press Continue or Send.';
     // Issuance awaits signature/readiness work; recheck a shell attempt that
     // became visible during that interval before touching the gateway.

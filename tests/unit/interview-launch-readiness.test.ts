@@ -8,7 +8,7 @@ import {NextRequest} from 'next/server';
 const root=process.env.CC_TEST_FIXTURE_ROOT!;
 const companyRoot=path.join(root,'company'),workspace=path.join(root,'workspace'),runtimeRoot=path.join(root,'runtime'),scripts=path.join(root,'scripts');
 Object.assign(process.env,{OPENCLAW_GATEWAY_URL:'ws://127.0.0.1:1',OPENCLAW_ROOT:runtimeRoot,OPENCLAW_WORKSPACE_ROOT:workspace,OPENCLAW_SKILL23_SCRIPTS:scripts,MC_API_TOKEN:'launch-fixture-token',MC_INSTALLATION_ID:'launch-install',MC_COMPANY_ID:'launch-company',DISABLE_CRON:'1',DISABLE_BRIDGE_BOOTSTRAP:'1'});
-process.env.MC_TENANT_REGISTRY_JSON=JSON.stringify({'launch.example':{kind:'self',tenantId:'launch-tenant',companyId:'launch-company',installationId:'launch-install'}});
+process.env.MC_TENANT_REGISTRY_JSON=JSON.stringify({'launch.example':{kind:'self',tenantId:'launch-tenant',companyId:'launch-company',installationId:'launch-install',issuer:'https://launch-access.example',audience:'launch-audience',subjects:['owner:launch']}});
 process.env.MC_PERSONA_COMPANY_CONTEXTS_JSON=JSON.stringify({'launch-company':{companyRoot,companyConfig:path.join(companyRoot,'company-config.json'),companySlug:'launch-company',personaCatalog:path.join(companyRoot,'catalog.json')}});
 let db:typeof import('../../src/lib/db');let GET:typeof import('../../src/app/api/auth/interview-ready/route')['GET'];
 let seam:typeof import('../../src/lib/interview/seam');
@@ -103,7 +103,10 @@ test('sender-issued invitation redeems to authenticated state, re-opens, and pre
  const denied=await stateGET(new NextRequest('https://launch.example/api/interview/state',{headers:{host:'launch.example'}}));assert.equal(denied.status,403);
  const response=await call(),invitation=await response.json();assert.equal(response.status,200,JSON.stringify(invitation));
  assert.equal(invitation.companyId,'launch-company');assert.equal(invitation.protocol,'interview-invitation.v1');
- const ticket=new URLSearchParams(new URL(invitation.url).hash.slice(1)).get('enroll')!;assert.ok(ticket);
+ // Query (?enroll=) and legacy fragment (#enroll=) ticket extraction stay
+ // compatible: the sender emits the short query link, older tooling may still
+ // hand back the fragment form, and both must redeem.
+ const ticket=new URL(invitation.url).searchParams.get('enroll')!;assert.ok(ticket);
  // The receipt's validity is completion. `expiresAt` survives only so an
  // onboarding validator already deployed on a fleet box, which bound-checks it
  // against 24h plus 10s of skew, still accepts a link minted here.
@@ -131,7 +134,7 @@ test('invitation uses configured public origin behind an internal proxy and reje
  const call=()=>issue(new NextRequest('http://127.0.0.1:4000/api/auth/interview-invitation',{method:'POST',headers:{host:'launch.example',authorization:'Bearer launch-fixture-token','content-type':'application/json','x-forwarded-host':'foreign.example','x-forwarded-proto':'http'},body:JSON.stringify({recipientHash:'a'.repeat(64)})}));
  try {
   Object.assign(process.env,{NODE_ENV:'production',MC_TENANT_PUBLIC_URL:'https://launch.example'});
-  const response=await call();assert.equal(response.status,200);assert.ok((await response.json()).url.startsWith('https://launch.example/interview#enroll='));
+  const response=await call();assert.equal(response.status,200);assert.ok((await response.json()).url.startsWith('https://launch.example/interview?enroll='));
   process.env.MC_TENANT_PUBLIC_URL='https://foreign.example';assert.equal((await call()).status,409);
   delete process.env.MC_TENANT_PUBLIC_URL;assert.equal((await call()).status,409);
  } finally {

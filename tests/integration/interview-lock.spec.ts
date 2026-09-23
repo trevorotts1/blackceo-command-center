@@ -192,7 +192,9 @@ test('minted operator invitation opens its fragment and loads own authenticated 
   await expect(page).toHaveURL(`${BASE_URL}/interview`);
   await expect(page.getByRole('heading', { name: 'Let’s tailor your company' })).toBeVisible();
   expect(redemptions).toBe(1); // Reload must not re-POST the ticket, whether or not a second open would be accepted.
-  const ticket = new URL(invitation.url).hash.slice('#enroll='.length);
+  const invitationUrl = new URL(invitation.url);
+  // Sender emits canonical ?enroll=; legacy issuers emit #enroll= — accept either.
+  const ticket = invitationUrl.searchParams.get('enroll') ?? invitationUrl.hash.slice('#enroll='.length);
   expect((await page.request.post('/api/auth/interview-session', { data: { ticket } })).status()).toBe(200);
   await page.goto(invitation.url);
   await expect(page).toHaveURL(`${BASE_URL}/interview`);

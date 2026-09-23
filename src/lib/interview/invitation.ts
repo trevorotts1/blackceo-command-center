@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { randomUUID } from 'crypto';
-import { resolveTenantContext, signTenantGrant } from '@/lib/auth/tenant-context';
+import { resolveTenantContext, signTenantGrant, tenantRegistration } from '@/lib/auth/tenant-context';
 import { GET as readiness } from '@/app/api/auth/interview-ready/route';
 import { INTERVIEW_INVITATION_TTL_SECONDS, INTERVIEW_INVITATION_VALID_UNTIL, INTERVIEW_INVITATION_REDEEMABLE } from './session-policy';
 
@@ -42,11 +42,19 @@ export async function createInterviewInvitation(req: NextRequest, recipientHash:
     if (ready.status !== 200 || receipt.ready !== true || receipt.interviewComplete !== false) {
       return NextResponse.json({ error: 'interview_not_ready' }, { status: 409, headers });
     }
-    // `expiresAt` is a legacy compatibility field, not this link's lifetime.
-    // The link is valid until the interview is complete; redemption enforces
-    // that and ignores `exp` entirely. The value is kept inside the 24h bound
-    // the already-deployed onboarding validators insist on, so a fleet box
-    // running the older validator still delivers a link minted here.
+    // Registration gate (ISR-001): the invitation URL is a short same-origin
+    // path that works WITHOUT a prior tenant cookie (the exchange route sets
+    // the HttpOnly session cookie), so it must be issuable ONLY when the box
+    // can actually verify the owner who opens it. That means a registered
+    // Access identity: the host's registry entry carries issuer + audience +
+    // exact subjects — the same triple verifyAccessJwt enforces. Boxes without
+    // it get a safe-compatibility refusal here, never a link that cannot
+    // verify. The parent provisions the real per-host issuer/audience/identity;
+    // this gate only stages the contract (no secret changes).
+    const registration = tenantRegistration(context.host);
+    if (!registration.issuer || !registration.audience || !registration.subjects?.length) {
+      return NextResponse.json({ error: 'access_identity_unregistered' }, { status: 409, headers });
+    }
     const expiresAt = Math.floor(Date.now() / 1000) + INTERVIEW_INVITATION_TTL_SECONDS;
     const ticket = await signTenantGrant({
       purpose: 'enrollment',
@@ -75,7 +83,7 @@ export async function createInterviewInvitation(req: NextRequest, recipientHash:
       // is the field that says so truthfully. Remove this only once no fleet
       // box runs a validator that requires it.
       oneUse: true,
-      url: `${publicUrl.origin}/interview#enroll=${encodeURIComponent(ticket)}`,
+      url: `${publicUrl.origin}/interview?enroll=${encodeURIComponent(ticket)}`,
     }, { headers });
   } catch {
     return NextResponse.json({ error: 'invitation_unavailable' }, { status: 403, headers });

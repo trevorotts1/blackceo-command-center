@@ -35,6 +35,7 @@ import {
   answersFilePath,
   answersEncFilePath,
   buildStatePath,
+  departmentLossWarningScript,
   handoffFilePath,
   listCanonicalDepartmentsScript,
   recordDeptDecisionScript,
@@ -789,6 +790,11 @@ export interface RecordDeptDecisionArgs {
   by: string;
   session?: string;
   source?: string;
+  /** Floor-decline loss confirmation. Pass true ONLY after the owner was shown
+   *  the authoritative loss warning (lossWarningFor / decision-route `warning`)
+   *  and explicitly acknowledged it. The writer still fails closed (exit 2)
+   *  without it; this flag is the explicit ack, never an auto-confirm. */
+  confirmLoss?: boolean;
 }
 
 /**
@@ -825,6 +831,11 @@ export async function recordDeptDecision(
     by,
     '--session',
     session,
+    // Explicit owner acknowledgement of the opt-out loss. Passed ONLY when the
+    // route already showed the authoritative warning and the owner confirmed;
+    // never auto-added. Without it the writer exits 2 for a floor decline
+    // (fail-closed) and the route surfaces the warning instead of a write.
+    ...(args.confirmLoss ? ['--confirm-loss'] : []),
     // Pin the writer to the EXACT file paths.ts resolves. record-dept-decision.sh
     // supports --state; in production (no OPENCLAW_WORKSPACE_ROOT override) this
     // equals the script's own /data-else-$HOME resolution, so it is a no-op there —
@@ -835,6 +846,70 @@ export async function recordDeptDecision(
     buildStatePath(),
   ];
   return runScript(recordDeptDecisionScript(), 'bash', argv);
+}
+
+/** Authoritative opt-out loss reader (ISR-001). Shells department-loss-warning.py
+ *  for one department and returns the wire shape the decision route confirms:
+ *    • rc 0 + text  → floor department: decline requires explicit confirmation
+ *    • rc 3          → conclusively non-floor: no warning, no confirmation needed
+ *    • rc 4 / crash / missing reader → INDETERMINATE: fail closed, confirmation
+ *      alone is not proof the warning was shown (route must refuse or demand the
+ *      override with the map restored, never silently proceed).
+ *  Never throws: every failure degrades to `{ indeterminate: true }`. */
+export interface LossWarningResult {
+  /** Exact loss_warning text from the naming map, or null. */
+  warning: string | null;
+  /** True when the dept is NOT conclusively a floor dept (no warning to show). */
+  nonFloor: boolean;
+  /** True when floor status could not be determined (map unreadable, reader
+   *  missing/crashed). Callers must fail closed, not treat this as non-floor. */
+  indeterminate: boolean;
+  /** Map stderr / failure reason, when indeterminate. */
+  reason?: string;
+}
+
+export async function lossWarningFor(dept: string): Promise<LossWarningResult> {
+  const script = departmentLossWarningScript();
+  if (!scriptExists(script)) {
+    return { warning: null, nonFloor: false, indeterminate: true, reason: `loss-warning reader missing: ${script}` };
+  }
+  const id = (dept ?? '').trim();
+  if (!id) return { warning: null, nonFloor: false, indeterminate: true, reason: 'empty department id' };
+  try {
+    const { stdout } = await execFileAsync('python3', [script, '--dept', id, '--json'], {
+      encoding: 'utf-8',
+      timeout: SCRIPT_TIMEOUT_MS,
+      maxBuffer: 8 * 1024 * 1024,
+    });
+    const parsed = JSON.parse(stdout ?? '') as { loss_warning?: string | null; is_floor_department?: boolean | null; indeterminate?: boolean; reason?: string };
+    if (parsed.indeterminate === true) {
+      return { warning: null, nonFloor: false, indeterminate: true, reason: parsed.reason || 'naming map unreadable' };
+    }
+    if (typeof parsed.loss_warning === 'string' && parsed.loss_warning.trim()) {
+      return { warning: parsed.loss_warning.trim(), nonFloor: false, indeterminate: false };
+    }
+    return { warning: null, nonFloor: true, indeterminate: false };
+  } catch (err) {
+    const e = err as NodeJS.ErrnoException & { code?: number | string; stdout?: string; stderr?: string };
+    // The reader exits 3 for a conclusive non-floor verdict — still on stdout
+    // (--json prints the verdict on both exit codes). Recover it instead of
+    // treating the refusal as a crash.
+    if (e.stdout) {
+      try {
+        const parsed = JSON.parse(e.stdout) as { loss_warning?: string | null; is_floor_department?: boolean | null; indeterminate?: boolean; reason?: string };
+        if (parsed.indeterminate === true) {
+          return { warning: null, nonFloor: false, indeterminate: true, reason: parsed.reason || 'naming map unreadable' };
+        }
+        if (typeof parsed.loss_warning === 'string' && parsed.loss_warning.trim()) {
+          return { warning: parsed.loss_warning.trim(), nonFloor: false, indeterminate: false };
+        }
+        return { warning: null, nonFloor: true, indeterminate: false };
+      } catch {
+        // fall through to fail-closed below
+      }
+    }
+    return { warning: null, nonFloor: false, indeterminate: true, reason: (e.stderr || e.message || 'loss-warning reader failed').trim().split('\n').slice(-1)[0] };
+  }
 }
 
 /**

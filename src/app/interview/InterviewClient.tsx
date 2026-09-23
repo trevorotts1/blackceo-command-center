@@ -355,15 +355,25 @@ export default function InterviewClient() {
     }
   }, []);
 
-  // Opening another invitation on this same page can be a fragment-only browser
-  // navigation. Reload into the normal bootstrap so it verifies the current
-  // sign-in and removes the bearer, just as a fresh navigation would.
+  // Opening another invitation on this same page can be a query or legacy
+  // fragment navigation. Query (?enroll=) is the canonical short link (it
+  // survives Cloudflare Access login); fragment (#enroll=) stays accepted so
+  // tickets issued before the query migration still bootstrap. Reload into
+  // the normal bootstrap so it verifies the current sign-in, just as a fresh
+  // navigation would.
   useEffect(() => {
-    const onHashChange = () => {
-      if (new URLSearchParams(window.location.hash.slice(1)).has('enroll')) window.location.reload();
+    const hasEnrollment = () =>
+      new URLSearchParams(window.location.search).has('enroll') ||
+      new URLSearchParams(window.location.hash.slice(1)).has('enroll');
+    const onSearchChange = () => {
+      if (hasEnrollment()) window.location.reload();
     };
-    window.addEventListener('hashchange', onHashChange);
-    return () => window.removeEventListener('hashchange', onHashChange);
+    window.addEventListener('popstate', onSearchChange);
+    window.addEventListener('hashchange', onSearchChange);
+    return () => {
+      window.removeEventListener('popstate', onSearchChange);
+      window.removeEventListener('hashchange', onSearchChange);
+    };
   }, []);
 
   // On mount: read state once and route to the right screen. ANY prior answer —
@@ -372,19 +382,28 @@ export default function InterviewClient() {
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const enrollment = new URLSearchParams(window.location.hash.slice(1)).get('enroll');
+      const params = new URLSearchParams(window.location.search);
+      // Canonical short links carry ?enroll= (survives Cloudflare Access
+      // login); legacy links carry #enroll= — accept either, query first.
+      const enrollment =
+        params.get('enroll') ??
+        new URLSearchParams(window.location.hash.slice(1)).get('enroll');
+      let bootstrapPath = window.location.pathname + window.location.search;
       if (enrollment && !enrollmentRef.current) {
         pendingEnrollmentRef.current = enrollment;
-        const cleanUrl = window.location.pathname + window.location.search;
-        // Remove the bearer immediately. After redemption, replace the document
-        // so its router starts authenticated with a clean canonical URL; a
-        // pending action from this bootstrap cannot restore the consumed ticket.
-        window.history.replaceState(null, '', cleanUrl);
-        // StrictMode effect replay must await the same one-use redemption, never
+        // Keep ?enroll= until the exchange below issues the session cookie:
+        // POST /api/auth/interview-session sets the HttpOnly cookie, so a
+        // short link works with NO prior tenant cookie. Only after a
+        // successful exchange is the query stripped (expired/invalid links
+        // stay visible so the owner can copy or re-request them).
+        // StrictMode effect replay must await the same exchange, never
         // load unauthenticated state or submit this ticket a second time.
         enrollmentRef.current = (async () => {
           const error = await recoverInterviewAccess(enrollment);
           if (error) return error;
+          const cleanUrl = window.location.pathname;
+          window.history.replaceState(null, '', cleanUrl);
+          bootstrapPath = cleanUrl;
           window.location.replace(cleanUrl);
           return null;
         })();
@@ -393,7 +412,7 @@ export default function InterviewClient() {
         const enrollmentError = await enrollmentRef.current;
         if (cancelled) return;
         if (enrollmentError) { setStateError(enrollmentError); setBooting(false); }
-        return; // Success hands off to the authenticated, fragment-free document.
+        return; // Success hands off to the authenticated, query-free document.
       }
       const data = await loadState();
       // AI Workforce standard-first (PHASE 6 item 6): read the prebuilt-
@@ -739,7 +758,7 @@ export default function InterviewClient() {
     const error = await recoverInterviewAccess(ticket);
     if (error) { setStateError(error); setBooting(false); return; }
     pendingEnrollmentRef.current = null;
-    window.location.replace(window.location.pathname + window.location.search);
+    window.location.replace(window.location.pathname);
   }, []);
 
   /* ---- renders ---- */

@@ -51,6 +51,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
+  Check,
   Loader2,
   RefreshCw,
   Plus,
@@ -356,12 +357,53 @@ export default function DepartmentBoard({
     }
   }, [boardComplete, onCoverageChange]);
 
+  // Pending floor-decline loss confirmation (ISR-001). When the route refuses a
+  // "no" with 409 confirm_loss_required + the authoritative warning text, the
+  // board holds the write and shows THAT text with explicit Confirm/Cancel —
+  // never auto-confirming. Cancel leaves state untouched (optimistic verb
+  // rolled back, the floor default keeps the dept). Confirm re-posts the SAME
+  // decline with confirmLoss:true, which the writer still re-checks (exit 2).
+  const [lossPrompt, setLossPrompt] = useState<{ id: string; verb: DeptVerb; warning: string } | null>(null);
+
+  const postDecision = useCallback(
+    async (id: string, verb: DeptVerb, confirmLoss: boolean): Promise<{ ok: boolean; confirmPrompt?: { id: string; verb: DeptVerb; warning: string }; message?: string }> => {
+      let res: Response;
+      try {
+        res = await fetch('/api/interview/decision', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            dept: id,
+            decision: verb,
+            sessionId: sessionId ?? undefined,
+            ...(verb === 'no' && confirmLoss ? { confirmLoss: true } : {}),
+          }),
+        });
+      } catch {
+        return { ok: false, message: 'Network error — please try again.' };
+      }
+      if (res.ok) return { ok: true };
+      const data = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        message?: string;
+        warning?: string;
+        confirmLossRequired?: boolean;
+      };
+      if (res.status === 409 && data.error === 'confirm_loss_required' && data.warning) {
+        return { ok: false, confirmPrompt: { id, verb, warning: data.warning } };
+      }
+      return { ok: false, message: data.message ?? 'That didn’t save — please try again.' };
+    },
+    [sessionId],
+  );
+
   /* ---- record a YES / NO / LATER (the ONLY sanctioned writer) ---- */
 
   const decide = useCallback(
     async (id: string, verb: DeptVerb) => {
       if (busyDept) return;
       setBusyDept(id);
+      setLossPrompt((prev) => (prev && prev.id === id ? null : prev));
       setCardErrors((prev) => {
         const next = { ...prev };
         delete next[id];
@@ -370,13 +412,20 @@ export default function DepartmentBoard({
       // Optimistic — reconciled by the /state read below.
       setLocalDecisions((prev) => ({ ...prev, [id]: verb }));
       try {
-        const res = await fetch('/api/interview/decision', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ dept: id, decision: verb, sessionId: sessionId ?? undefined }),
-        });
-        if (!res.ok) {
-          const data = (await res.json().catch(() => ({}))) as { message?: string };
+        const result = await postDecision(id, verb, false);
+        if (result.confirmPrompt) {
+          // Floor decline without an acknowledged loss: hold the write, roll
+          // back the optimistic verb, and show the authoritative warning for
+          // explicit confirmation. Nothing was recorded server-side.
+          setLocalDecisions((prev) => {
+            const next = { ...prev };
+            delete next[id];
+            return next;
+          });
+          setLossPrompt(result.confirmPrompt);
+          return;
+        }
+        if (!result.ok) {
           // Roll back the optimistic verb; surface a per-card message.
           setLocalDecisions((prev) => {
             const next = { ...prev };
@@ -385,7 +434,7 @@ export default function DepartmentBoard({
           });
           setCardErrors((prev) => ({
             ...prev,
-            [id]: data.message ?? 'That didn’t save — please try again.',
+            [id]: result.message ?? 'That didn’t save — please try again.',
           }));
           return;
         }
@@ -404,8 +453,63 @@ export default function DepartmentBoard({
       // authoritative state, never the optimistic guess.
       await loadState();
     },
-    [busyDept, loadState, sessionId],
+    [busyDept, loadState, postDecision],
   );
+
+  /* ---- confirmed floor-decline retry (explicit owner acknowledgement) ---- */
+
+  const confirmLossDecline = useCallback(async () => {
+    if (!lossPrompt || busyDept) return;
+    const { id, verb } = lossPrompt;
+    setBusyDept(id);
+    setCardErrors((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+    // Owner explicitly acknowledged the shown warning — record the decline
+    // with confirmLoss:true. The writer re-verifies independently.
+    setLocalDecisions((prev) => ({ ...prev, [id]: verb }));
+    try {
+      const result = await postDecision(id, verb, true);
+      if (!result.ok) {
+        setLocalDecisions((prev) => {
+          const next = { ...prev };
+          delete next[id];
+          return next;
+        });
+        if (result.confirmPrompt) {
+          // Map changed mid-flight (new warning text) — show the fresh text.
+          setLossPrompt(result.confirmPrompt);
+        } else {
+          setLossPrompt(null);
+          setCardErrors((prev) => ({
+            ...prev,
+            [id]: result.message ?? 'That didn’t save — please try again.',
+          }));
+        }
+        return;
+      }
+      setLossPrompt(null);
+    } catch {
+      setLocalDecisions((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+      setCardErrors((prev) => ({ ...prev, [id]: 'Network error — please try again.' }));
+      return;
+    } finally {
+      setBusyDept(null);
+    }
+    await loadState();
+  }, [lossPrompt, busyDept, loadState, postDecision]);
+
+  const cancelLossDecline = useCallback(() => {
+    // Cancel leaves state untouched: the optimistic verb was already rolled
+    // back when the prompt was raised, and the floor default keeps the dept.
+    setLossPrompt(null);
+  }, []);
 
   /* ---- add / merge / remove a custom department ---- */
 
@@ -659,6 +763,22 @@ export default function DepartmentBoard({
           />
         )}
       </AnimatePresence>
+
+      {/* ── floor-decline loss confirmation (ISR-001) ───────────────────────
+          Shown ONLY after the route refused the write with the authoritative
+          warning text. Confirm re-posts with explicit acknowledgement; cancel
+          leaves everything untouched (the floor default keeps the dept). */}
+      <AnimatePresence>
+        {lossPrompt && (
+          <LossConfirmDialog
+            deptId={lossPrompt.id}
+            warning={lossPrompt.warning}
+            busy={busyDept === lossPrompt.id}
+            onConfirm={() => void confirmLossDecline()}
+            onCancel={cancelLossDecline}
+          />
+        )}
+      </AnimatePresence>
     </div>
   );
 }
@@ -886,6 +1006,78 @@ function MergeKeepDialog({
           </button>
           <button type="button" onClick={onCancel} className={iv.btnQuiet}>
             Cancel
+          </button>
+        </div>
+      </motion.div>
+    </motion.div>
+  );
+}
+
+/** Floor-decline loss confirmation (ISR-001). Renders the AUTHORITATIVE warning
+ *  text the decision route returned — never invented copy — with explicit
+ *  Confirm / Keep choices. Cancel (or backdrop click) leaves state untouched:
+ *  the floor default keeps the department and nothing is written. */
+function LossConfirmDialog({
+  deptId,
+  warning,
+  busy,
+  onConfirm,
+  onCancel,
+}: {
+  deptId: string;
+  warning: string;
+  busy: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Confirm removing ${deptId}`}
+      onClick={onCancel}
+      style={{
+        position: 'fixed',
+        inset: 0,
+        background: 'rgba(6, 8, 12, 0.6)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: '1.5rem',
+        zIndex: 60,
+      }}
+    >
+      <motion.div
+        initial={{ scale: 0.96, y: 8 }}
+        animate={{ scale: 1, y: 0 }}
+        exit={{ scale: 0.96, y: 8 }}
+        onClick={(e) => e.stopPropagation()}
+        className={ivcx(iv.dark, iv.panelCard)}
+        style={{ maxWidth: '30rem', width: '100%', display: 'flex', flexDirection: 'column', gap: '1rem' }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+          <AlertTriangle className="h-5 w-5" aria-hidden style={{ color: '#F0B429' }} />
+          <h3 style={{ margin: 0, fontSize: '1.05rem', fontWeight: 600, color: 'var(--iv-ink)' }}>
+            Removing this department means losing something
+          </h3>
+        </div>
+        <p style={{ margin: 0, fontSize: '0.9rem', lineHeight: 1.5, color: 'var(--iv-ink-soft)' }}>
+          Without it: {warning}
+        </p>
+        <p style={{ margin: 0, fontSize: '0.85rem', lineHeight: 1.5, color: 'var(--iv-ink-faint)' }}>
+          This is your call — but it needs your confirmation. Otherwise the department stays in your workforce.
+        </p>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
+          <button type="button" onClick={onConfirm} disabled={busy} className={iv.btnPrimary}>
+            {busy ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <X className="h-4 w-4" aria-hidden />}
+            Yes, remove it
+          </button>
+          <button type="button" onClick={onCancel} disabled={busy} className={iv.btnGhost}>
+            <Check className="h-4 w-4" aria-hidden />
+            Keep it
           </button>
         </div>
       </motion.div>

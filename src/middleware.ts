@@ -30,11 +30,13 @@ import {
  *
  *   1. Cloudflare Access (page + API). Cloudflare sits in front of the
  *      subdomain and gates ALL traffic. Authenticated requests arrive with
- *      `Cf-Access-Jwt-Assertion` and `Cf-Access-Authenticated-User-Email`
- *      headers populated. The Next.js app never validates the JWT itself
- *      (Cloudflare already did that), it just checks that the headers are
- *      present and surfaces the email to downstream code via the request
- *      headers.
+ *      `Cf-Access-Jwt-Assertion` populated. The app cryptographically verifies
+ *      that JWT itself (RS256/JWKS, issuer, audience, expiry, exact subjects —
+ *      see lib/auth/tenant-context.ts); the unsigned email header is never
+ *      trusted and is never forwarded as identity. The verified subject (and,
+ *      when present, the signed email claim) is what downstream code reads via
+ *      the tenant context — the `x-operator-email` mirror below carries ONLY
+ *      that verified value, never the raw header.
  *
  *   2. MC_API_TOKEN (API only). A long-lived bearer token used by external
  *      integrations (CLIs, scripts, OpenClaw, SSE consumers) that cannot go
@@ -596,7 +598,11 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
         }
       }
       const passthrough = authenticatedNext();
-      if (cfEmail) passthrough.headers.set('x-operator-email', cfEmail);
+      // Identity mirror (ISR-001): carry ONLY the cryptographically verified
+      // tenant subject/email from resolveTenantContext — never the raw
+      // Cf-Access-Authenticated-User-Email header, which is attacker-controlled
+      // when the edge assertion is absent or unverified.
+      if (apiTenant?.email) passthrough.headers.set('x-operator-email', apiTenant.email);
       return passthrough;
     }
 
@@ -607,7 +613,10 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
     if (!MC_API_TOKEN) {
       if (ALLOW_INSECURE_OPEN_API) {
         const passthrough = authenticatedNext();
-        if (cfEmail) passthrough.headers.set('x-operator-email', cfEmail);
+        // Verified-only mirror (ISR-001): the raw CF email header is never
+        // forwarded. apiTenant here resolved pre-bearer (same-origin/session
+        // or verified Access JWT), so its email is already verified-or-absent.
+        if (apiTenant?.email) passthrough.headers.set('x-operator-email', apiTenant.email);
         return passthrough;
       }
       return unauthorized(
@@ -661,7 +670,8 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
     if (!apiTenant) return NextResponse.json({error:'unverified_tenant_registration'}, {status:403});
 
     const passthrough = authenticatedNext();
-    if (cfEmail) passthrough.headers.set('x-operator-email', cfEmail);
+    // Verified-only mirror (ISR-001) — see the passthrough block above.
+    if (apiTenant.email) passthrough.headers.set('x-operator-email', apiTenant.email);
     return passthrough;
   }
 
@@ -685,7 +695,8 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
   ) {
     const token = request.cookies.get(INTERVIEW_COOKIE_NAME)?.value;
     let scope='unverified';
-    try { const tenant=await resolveTenantContext(request); scope=`${tenant.tenantId}:${tenant.installationId}:${tenant.host}`; }
+    let gateEmail: string | null = null;
+    try { const tenant=await resolveTenantContext(request); scope=`${tenant.tenantId}:${tenant.installationId}:${tenant.host}`; gateEmail=tenant.email ?? null; }
     catch { return NextResponse.redirect(new URL('/interview', request.url),302); }
     const verdict = await verifyInterviewToken(token,scope);
     if (verdict.complete === true && verdict.valid && await checkInterviewCompleteViaFallback(request.headers.get('host'))) {
@@ -753,7 +764,8 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
       }
       if (!admitted) {
         const redirect = NextResponse.redirect(new URL('/interview', request.url), 302);
-        if (cfEmail) redirect.headers.set('x-operator-email', cfEmail);
+        // Verified-only mirror (ISR-001) — never the raw CF email header.
+        if (gateEmail) redirect.headers.set('x-operator-email', gateEmail);
         return redirect;
       }
       if (needCookie) {
@@ -772,7 +784,8 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
         // MR-23: set signed CSRF cookie on page responses so mutating API calls
         // from the browser carry the token.
         await setCsrfCookieIfMissing(response, request);
-        if (cfEmail) response.headers.set('x-operator-email', cfEmail);
+        // Verified-only mirror (ISR-001) — never the raw CF email header.
+        if (gateEmail) response.headers.set('x-operator-email', gateEmail);
         return response;
       }
     }
@@ -783,7 +796,15 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
   // MR-23: set signed CSRF cookie on page responses so mutating API calls
   // from the browser carry the token.
   await setCsrfCookieIfMissing(response, request);
-  if (cfEmail) response.headers.set('x-operator-email', cfEmail);
+  // Verified-only identity mirror (ISR-001): the shell-lock block resolved the
+  // tenant above only for gated paths; page paths resolve here so the mirror
+  // still carries ONLY a verified subject/email, never the raw header.
+  try {
+    const pageTenant = await resolveTenantContext(request);
+    if (pageTenant.email) response.headers.set('x-operator-email', pageTenant.email);
+  } catch {
+    // Unverified page visitor — no identity mirror (fail-closed downstream).
+  }
   return response;
 }
 

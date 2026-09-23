@@ -19,8 +19,16 @@ export async function GET(req: NextRequest) {
 
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json();
-    const ticket = typeof body?.ticket === 'string' ? body.ticket : null;
+    const raw = await req.text();
+    if (raw.length > 4096) return NextResponse.json({ error: 'invalid_enrollment' }, { status: 403, headers });
+    let ticket: string | null = null;
+    try {
+      const body = raw.trim() ? JSON.parse(raw) : null;
+      ticket = typeof body?.ticket === 'string' ? body.ticket : null;
+    } catch {
+      return NextResponse.json({ error: 'invalid_enrollment' }, { status: 403, headers });
+    }
+    if (!ticket || ticket.length > 2048) return NextResponse.json({ error: 'invalid_enrollment' }, { status: 403, headers });
     const host = requestHost(req);
     const active = await verifyTenantGrant(tenantSessionToken(req), host, 'session');
     if (active) {

@@ -161,6 +161,13 @@ export function listCanonicalDepartmentsScript(): string {
   return path.join(resolveSkillScriptsDir(), 'list-canonical-departments.py');
 }
 
+/** Absolute path to department-loss-warning.py — the authoritative opt-out loss
+ *  reader the decision route shells for the floor-decline confirmation (ISR-001).
+ *  Resolves through the same scripts dir as every other Skill-23 dependency. */
+export function departmentLossWarningScript(): string {
+  return path.join(resolveSkillScriptsDir(), 'department-loss-warning.py');
+}
+
 /**
  * Absolute path to vertical-derivation-guard.py (U107 / E5-2, closes G2a) —
  * the independent auditor that asserts a vertical-specific department is
