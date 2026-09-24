@@ -26,8 +26,52 @@ export function requestHost(request: { headers: Headers }): string {
   const raw = request.headers.get('host') || '';
   try { return new URL(`http://${raw}`).hostname.toLowerCase(); } catch { throw new TenantAccessError('Invalid hostname'); }
 }
+/**
+ * Parse the tenant registry defensively. A malformed MC_TENANT_REGISTRY_JSON
+ * must never become a 403 wall: it logs loudly and is treated as unconfigured,
+ * so the implicit-self path below still serves the box's own host. Never throws.
+ */
+function readTenantRegistry(): Record<string, TenantRegistration> {
+  const raw = process.env.MC_TENANT_REGISTRY_JSON;
+  if (!raw || !raw.trim()) return {};
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('registry must be a JSON object keyed by hostname');
+    }
+    return parsed as Record<string, TenantRegistration>;
+  } catch (err) {
+    console.error(
+      '[tenant] MC_TENANT_REGISTRY_JSON is malformed; treating as unconfigured (implicit-self still applies):',
+      err instanceof Error ? err.message : String(err),
+    );
+    return {};
+  }
+}
+
+/**
+ * Shared public-origin resolver (CC_PUBLIC_URL-first).
+ *
+ * The box's own public URL is read from CC_PUBLIC_URL, falling back to the
+ * legacy MC_TENANT_PUBLIC_URL. invitation.ts, the send-link fence, and the
+ * implicit-self check below all resolve through here so the three can never
+ * disagree about which host is "self". Returns null when unconfigured or
+ * unparseable — callers decide whether that is fatal (issuance) or a fence
+ * failure (delivery receipts). Never throws, never prints the value.
+ */
+export function configuredPublicOrigin(): URL | null {
+  const raw = (process.env.CC_PUBLIC_URL || process.env.MC_TENANT_PUBLIC_URL || '').trim();
+  if (!raw) return null;
+  try {
+    return new URL(raw);
+  } catch {
+    console.error('[tenant] configured public origin is not a valid URL; treating as unconfigured');
+    return null;
+  }
+}
+
 export function tenantRegistration(host: string): TenantRegistration {
-  const registrations = JSON.parse(process.env.MC_TENANT_REGISTRY_JSON || '{}') as Record<string, TenantRegistration>;
+  const registrations = readTenantRegistry();
   const reg = registrations[host];
   if (reg && reg.tenantId && reg.companyId && reg.installationId && (reg.kind === 'self' || (reg.kind === 'client' && reg.clientId))) return reg;
   const implicitSelf = (): TenantRegistration => ({ tenantId: 'self', companyId: process.env.MC_COMPANY_ID || 'default', kind: 'self', installationId: process.env.MC_INSTALLATION_ID || 'local' });
@@ -45,20 +89,39 @@ export function tenantRegistration(host: string): TenantRegistration {
   // box WITH a registry keeps the strict behaviour above unchanged.
   if (Object.keys(registrations).length === 0) {
     if (loopback) return implicitSelf();
-    const own = ownPublicHost();
+    const own = configuredPublicOrigin()?.hostname.toLowerCase() ?? null;
     if (own && own === host) return implicitSelf();
   }
   throw new TenantAccessError('Hostname has no configured tenant');
 }
-function ownPublicHost(): string | null {
-  const raw = process.env.CC_PUBLIC_URL || process.env.MC_TENANT_PUBLIC_URL || '';
-  if (!raw) return null;
-  try { return new URL(raw).hostname.toLowerCase(); } catch { return null; }
-}
+let _fallbackWarned = false;
 function secret(): string {
-  const value = process.env.MC_TENANT_SESSION_SECRET || process.env.MC_INTERVIEW_COOKIE_SECRET || process.env.MC_API_TOKEN;
-  if (!value) throw new TenantAccessError('Tenant authentication is not configured');
-  return value;
+  // Item (2): the MC_API_TOKEN fallback is load-bearing — boxes that never set
+  // a dedicated tenant secret still sign/verify through the one secret they
+  // have. Dropping it would 403-lock every working box on the next deploy, so
+  // it stays; but a box that NEEDS it now says so on every boot and the
+  // readiness endpoint reports `enrollment_secret_fallback` instead of a bare
+  // pass, so the gap is visible until the operator provisions a dedicated
+  // secret. Never prints the secret itself.
+  const dedicated = process.env.MC_TENANT_SESSION_SECRET || process.env.MC_INTERVIEW_COOKIE_SECRET || '';
+  if (dedicated.trim()) return dedicated;
+  const fallback = process.env.MC_API_TOKEN || '';
+  if (fallback.trim()) {
+    if (!_fallbackWarned) {
+      _fallbackWarned = true;
+      console.warn(
+        '[tenant] no dedicated tenant signing secret set (MC_TENANT_SESSION_SECRET / MC_INTERVIEW_COOKIE_SECRET); ' +
+        'using MC_API_TOKEN fallback. Provision a dedicated secret.',
+      );
+    }
+    return fallback;
+  }
+  throw new TenantAccessError('Tenant authentication is not configured');
+}
+
+/** Item (2): true when signing runs on the MC_API_TOKEN fallback (no dedicated secret). */
+export function tenantSecretIsFallback(): boolean {
+  return !(process.env.MC_TENANT_SESSION_SECRET || process.env.MC_INTERVIEW_COOKIE_SECRET || '').trim();
 }
 async function signature(payload: string): Promise<Uint8Array> {
   const key = await crypto.subtle.importKey('raw', enc.encode(secret()), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
@@ -134,14 +197,30 @@ async function verifyAccessJwt(token: string, reg: TenantRegistration): Promise<
     if (reg.allowedEmails?.length && (!signedEmail || !reg.allowedEmails.map(e => e.toLowerCase()).includes(signedEmail.toLowerCase()))) return null;
     let cached = jwks.get(reg.issuer);
     if (!cached || cached.expires <= Date.now()) {
-      const response = await fetch(new URL('/cdn-cgi/access/certs', issuer), { signal: AbortSignal.timeout(5000), redirect: 'error' });
-      if (!response.ok) return null;
-      const body = await response.json();
-      if (!Array.isArray(body.keys)) return null;
-      cached = { expires: Date.now() + 300_000, keys: body.keys };
-      jwks.set(reg.issuer, cached);
+      // Item (6): the cached key set survives a failed refresh. A JWKS fetch
+      // that errors (edge blip, rotation race) previously nulled the whole
+      // verification even though a key we already trusted minutes ago was good
+      // enough to check this signature. The stale set is now kept as fallback
+      // and only replaced on success; when neither fresh nor stale keys verify,
+      // the caller still fails closed below. Never throws.
+      try {
+        const response = await fetch(new URL('/cdn-cgi/access/certs', issuer), { signal: AbortSignal.timeout(5000), redirect: 'error' });
+        if (!response.ok) throw new Error(`jwks refresh status ${response.status}`);
+        const body = await response.json();
+        if (!Array.isArray(body.keys)) throw new Error('jwks refresh returned no key set');
+        cached = { expires: Date.now() + 300_000, keys: body.keys };
+        jwks.set(reg.issuer, cached);
+      } catch (err) {
+        console.error(
+          '[tenant] JWKS refresh failed; falling back to cached keys:',
+          err instanceof Error ? err.message : String(err),
+        );
+        const stale = jwks.get(reg.issuer);
+        if (!stale) return null;
+        cached = stale;
+      }
     }
-    const keyData = cached.keys.find(k => (k as JsonWebKey & {kid?: string}).kid === header.kid);
+    const keyData = cached?.keys.find(k => (k as JsonWebKey & {kid?: string}).kid === header.kid);
     if (!keyData || keyData.kty !== 'RSA') return null;
     const key = await crypto.subtle.importKey('jwk', keyData, {name: 'RSASSA-PKCS1-v1_5', hash:'SHA-256'}, false, ['verify']);
     if (!await crypto.subtle.verify('RSASSA-PKCS1-v1_5', key, bytes(sig), enc.encode(`${headerRaw}.${payloadRaw}`))) return null;

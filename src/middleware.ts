@@ -194,6 +194,40 @@ function isWebhookSecretRoute(pathname: string): boolean {
 }
 
 /**
+ * Item (7): 403 answer-safety. A tenant refusal on a page NAVIGATION (a real
+ * browser loading a document — its Accept always includes text/html) renders
+ * a friendly sign-in page the client can act on — re-open the link, no fresh
+ * link needed — instead of a bare JSON blob. Everything else (anything under
+ * /api/, fetches, tests, curl, requests with no Accept header) keeps the
+ * machine-readable `{"error": ...}` JSON so clients and the InterviewClient
+ * exchange logic never have to parse HTML. Same status, same error code,
+ * different envelope; the refusal itself is never weakened (still 403, still
+ * fail-closed). Backward compatible by construction: only a client that
+ * explicitly asks for HTML gets HTML.
+ */
+function tenantRefusalResponse(request: NextRequest, body: { error: string; message: string }): NextResponse {
+  const headers = { 'cache-control': 'private, no-store' };
+  if (!isDocumentNavigation(request)) return NextResponse.json(body, { status: 403, headers });
+  const safe = body.message.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  return new NextResponse(
+    `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">` +
+    `<title>Sign in required</title></head><body style="font-family:system-ui,sans-serif;max-width:40rem;margin:4rem auto;padding:0 1rem">` +
+    `<h1>Sign in required</h1><p>${safe}</p>` +
+    `<p>Re-open your private interview link to sign in again and continue where you left off — ` +
+    `the same link works until your interview is complete, on any device. ` +
+    `If that link no longer opens, ask your operator for a fresh one.</p></body></html>`,
+    { status: 403, headers: { ...headers, 'content-type': 'text/html; charset=utf-8' } },
+  );
+}
+
+/** True only for a real document navigation: non-API path + client asks for HTML. */
+function isDocumentNavigation(request: NextRequest): boolean {
+  if (request.nextUrl.pathname.startsWith('/api/')) return false;
+  const accept = request.headers.get('accept') || '';
+  return accept.includes('text/html');
+}
+
+/**
  * Routes exempt from the interview-mode shell lock (P0-5 / WG-9). While the
  * interview is incomplete the middleware 302s every OTHER page route to
  * /interview, so the client only ever sees the interview until closeout.
@@ -454,7 +488,7 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
   // This permits first-party enrollment even when Access enforcement is enabled.
   if (pathname === '/interview' && (request.method === 'GET' || request.method === 'HEAD')) {
     try { tenantRegistration(requestHost(request)); }
-    catch { return NextResponse.json({error:'unregistered_hostname'},{status:403}); }
+    catch { return tenantRefusalResponse(request, { error: 'unregistered_hostname', message: 'This interview link does not match a registered host. Re-open your private interview link to sign in.' }); }
     const response=NextResponse.next();
     await setCsrfCookieIfMissing(response,request);
     return response;
@@ -697,7 +731,7 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
     let scope='unverified';
     let gateEmail: string | null = null;
     try { const tenant=await resolveTenantContext(request); scope=`${tenant.tenantId}:${tenant.installationId}:${tenant.host}`; gateEmail=tenant.email ?? null; }
-    catch { return NextResponse.json({ error: 'tenant_access_required', message: 'Sign in with an authorized account. If access still fails, contact your operator. This is an access issue, not an incomplete interview.' }, { status: 403, headers: { 'cache-control': 'private, no-store' } }); }
+    catch { return tenantRefusalResponse(request, { error: 'tenant_access_required', message: 'Sign in with an authorized account. If access still fails, contact your operator. This is an access issue, not an incomplete interview.' }); }
     const verdict = await verifyInterviewToken(token,scope);
     if (verdict.complete === true && verdict.valid && await checkInterviewCompleteViaFallback(request.headers.get('host'))) {
       // Primary cookie is valid-complete — admit immediately.

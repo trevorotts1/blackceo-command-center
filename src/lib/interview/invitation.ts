@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { randomUUID } from 'crypto';
-import { resolveTenantContext, signTenantGrant, tenantRegistration } from '@/lib/auth/tenant-context';
+import { resolveTenantContext, signTenantGrant, tenantRegistration, configuredPublicOrigin } from '@/lib/auth/tenant-context';
 import { GET as readiness } from '@/app/api/auth/interview-ready/route';
 import { INTERVIEW_INVITATION_TTL_SECONDS, INTERVIEW_INVITATION_VALID_UNTIL, INTERVIEW_INVITATION_REDEEMABLE } from './session-policy';
 
@@ -23,7 +23,10 @@ export async function createInterviewInvitation(req: NextRequest, recipientHash:
 
     // A reverse proxy may give Next an internal HTTP URL. Use this installation's
     // configured public origin, never an unverified forwarded-host/proto header.
-    const configuredOrigin = process.env.MC_TENANT_PUBLIC_URL;
+    // Item (4): resolved through the shared CC_PUBLIC_URL-first resolver, so
+    // issuance can never disagree with the delivery fence or the implicit-self
+    // check about which host is "self". No MC_TENANT_PUBLIC_URL special case.
+    const configuredOrigin = configuredPublicOrigin()?.origin ?? '';
     if (!configuredOrigin && process.env.NODE_ENV === 'production') {
       return NextResponse.json({ error: 'public_origin_unconfigured' }, { status: 409, headers });
     }
