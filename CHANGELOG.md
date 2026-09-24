@@ -1,3 +1,15 @@
+## [v7.6.64] — 2026-09-24 — Three red checks on main were tests reaching outside their own fixtures
+
+### Fixed
+- **The client-name scan and the floor-decline unit test failed for the same reason.** `tests/unit/isr001-interview-repair.test.ts` pointed `OPENCLAW_SKILL23_SCRIPTS` at the operator's own Mac checkout of Skill 23. The scan correctly flagged the operator path, and on CI, where that path does not exist, the decision route correctly answered 503 `loss_warning_unavailable` instead of the 409 the test expects. The test now writes contract fixtures of the two Skill-23 legs it shells (the read-only loss reader and `record-dept-decision.sh`) into its own lane dir. Every assertion is unchanged, and a mutation that stops the route relaying `--confirm-loss` turns the test red.
+- **Three unrelated unit tests reported a fixture company as the box's company.** The same file's structured-answer case saves a `company_name` answer, and `mirrorCompanyAnswer()` writes it to `<cwd>/config/company-config.json`. Under `npm run test:unit` the cwd is the checkout, so every test file that ran afterwards read "ISR Fixture Company" as the configured company: `notify-escalation-attribution` (FIX-5, unbranded box) and two `u019-engine-workspace-reattribution` cases failed on it. The case now runs from its lane dir and restores the cwd afterwards. The mirror still runs; it writes into the fixture.
+- **The interview-lock Playwright fixture predated the invitation registration gate.** v7.6.63's follow-up (`ed01bd5c`) made `createInterviewInvitation()` refuse with `access_identity_unregistered` unless the host's registry entry carries issuer + audience + subjects, and updated the unit fixtures that mint invitations, but not `tests/integration/interview-lock.fixture.ts`. The fixture's registry entry now carries a synthetic identity in the same shape. The gate is unchanged.
+- **The next e2e case was stale too, hidden behind the first.** The suite runs serially, so on main 16 cases never ran. `temporary state outage retains the unused invitation for an in-page retry` still expected the address bar to be cleaned before redemption, which was true of the old `#enroll=` fragment. `ed01bd5c` deliberately keeps `?enroll=` until a successful exchange so an unused or expired link stays visible. The case now asserts that contract: the invitation is still in the URL during the outage, and the URL is clean `/interview` after the successful retry (a check it did not have before).
+- **Real client names removed from tracked files.** The roster-backed scan (which the roster-less CI runner cannot run) found client names in three older CHANGELOG entries and two `deep-health.test.ts` fixtures. They now read as neutral placeholders with the same meaning.
+
+### Not changed
+- No application code. No test was skipped, deleted or loosened, and no allowlist entry was added.
+
 ## [v7.6.63] — 2026-09-22 — A wrong company row can no longer blank a client's whole board
 
 ### Fixed
