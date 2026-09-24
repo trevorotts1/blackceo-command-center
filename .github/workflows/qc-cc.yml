@@ -734,6 +734,14 @@ jobs:
   interview-lock-e2e:
     name: Interview-unlock shell-lock e2e (Playwright)
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # ILG-003: the SAME interview-lock spec on desktop + phone surfaces.
+        # webkit-iphone runs the iPhone 15 project (real Mobile Safari agent,
+        # touch, 390x844); chromium-pixel7 runs Pixel 7 (Android Chrome agent,
+        # touch, 412x915); chromium-desktop is today’s gate, unchanged.
+        project: [chromium-desktop, webkit-iphone, chromium-pixel7]
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -747,10 +755,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Install Playwright browser (Chromium + OS deps)
-        # Only Chromium is needed (config runs headless Chromium); --with-deps
-        # pulls the apt libs the runner is missing so the browser launches.
-        run: npx playwright install --with-deps chromium
+      - name: Install Playwright browsers (Chromium + WebKit + OS deps)
+        # Chromium covers the desktop + Pixel 7 projects; WebKit covers the
+        # iPhone 15 project. --with-deps pulls the apt libs the runner is
+        # missing so the browsers launch.
+        run: npx playwright install --with-deps chromium webkit
 
       - name: Build production interview fixture
         env:
@@ -768,17 +777,17 @@ jobs:
           NODE
         timeout-minutes: 12
 
-      - name: Run production HTTPS interview and shell-lock e2e
+      - name: Run production HTTPS interview and shell-lock e2e (${{ matrix.project }})
         env:
           INTERVIEW_LOCK_PRODUCTION: "1"
-        run: npm run test:e2e:interview-lock
+        run: npm run test:e2e:interview-lock -- --project=${{ matrix.project }}
         timeout-minutes: 12
 
       - name: Upload Playwright trace + fixture artifacts on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: interview-lock-e2e-traces
+          name: interview-lock-e2e-traces-${{ matrix.project }}
           path: |
             test-results/
             playwright-report/
