@@ -697,7 +697,7 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
     let scope='unverified';
     let gateEmail: string | null = null;
     try { const tenant=await resolveTenantContext(request); scope=`${tenant.tenantId}:${tenant.installationId}:${tenant.host}`; gateEmail=tenant.email ?? null; }
-    catch { return NextResponse.redirect(new URL('/interview', request.url),302); }
+    catch { return NextResponse.json({ error: 'tenant_access_required', message: 'Sign in with an authorized account. If access still fails, contact your operator. This is an access issue, not an incomplete interview.' }, { status: 403, headers: { 'cache-control': 'private, no-store' } }); }
     const verdict = await verifyInterviewToken(token,scope);
     if (verdict.complete === true && verdict.valid && await checkInterviewCompleteViaFallback(request.headers.get('host'))) {
       // Primary cookie is valid-complete — admit immediately.

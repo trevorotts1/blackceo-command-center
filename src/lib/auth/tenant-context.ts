@@ -118,7 +118,7 @@ async function verifyAccessJwt(token: string, reg: TenantRegistration): Promise<
     const [headerRaw, payloadRaw, sig, extra] = token.split('.');
     if (extra || !sig) return null;
     const header = json(headerRaw), claims = json(payloadRaw);
-    if (header.alg !== 'RS256' || !header.kid || claims.iss !== reg.issuer || !Number.isFinite(claims.exp) || claims.exp <= Date.now()/1000 || (claims.nbf && claims.nbf > Date.now()/1000) || ![claims.aud].flat().includes(reg.audience) || !reg.subjects.includes(claims.sub)) return null;
+    if (header.alg !== 'RS256' || !header.kid || claims.iss !== reg.issuer || !Number.isFinite(claims.exp) || claims.exp <= Date.now()/1000 || (claims.nbf && claims.nbf > Date.now()/1000) || ![claims.aud].flat().includes(reg.audience) || typeof claims.sub !== 'string' || !claims.sub.trim()) return null;
     // Exact allowed-email allowlist, enforced ONLY on the signed `email` claim.
     // Unsigned headers never participate. When configured, a valid JWT whose
     // signed email is not listed is rejected — identity without authorization.
@@ -137,6 +137,12 @@ async function verifyAccessJwt(token: string, reg: TenantRegistration): Promise<
     if (!keyData || keyData.kty !== 'RSA') return null;
     const key = await crypto.subtle.importKey('jwk', keyData, {name: 'RSASSA-PKCS1-v1_5', hash:'SHA-256'}, false, ['verify']);
     if (!await crypto.subtle.verify('RSASSA-PKCS1-v1_5', key, bytes(sig), enc.encode(`${headerRaw}.${payloadRaw}`))) return null;
+    // Legacy provisioning stored emails in subjects. Match those only against
+    // the signature-verified email claim; opaque subjects still match sub exactly.
+    const authorized = reg.subjects.some(subject => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(subject)
+      ? signedEmail !== null && subject.toLowerCase() === signedEmail.toLowerCase()
+      : subject === claims.sub);
+    if (!authorized) return null;
     return { sub: claims.sub as string, email: signedEmail };
   } catch { return null; }
 }
@@ -156,8 +162,8 @@ export async function resolveTenantContext(request: { headers: Headers }): Promi
   // values are never trusted; only the claims inside a verified token identify
   // the owner. No public slug fallback, no fake bearer: boxes without
   // issuer/audience/subjects configured cannot verify (verifyAccessJwt nulls)
-  // and fall through to the refusal below. JWT `sub`s keep existing behavior:
-  // only exact-registered subjects verify, no email-as-subject invention.
+  // and fall through to the refusal below. Opaque subjects match sub exactly;
+  // legacy email entries match only the cryptographically verified email claim.
   if (!subject) {
     const verified = await verifyAccessJwt(request.headers.get('cf-access-jwt-assertion') || '', reg);
     if (verified) { subject = verified.sub; email = verified.email; }

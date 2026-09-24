@@ -1,4 +1,5 @@
 'use server';
+import { priorCompletion } from '@/lib/interview/prior-completion';
 import { verifiedBuild } from '@/lib/interview/build-verification';
 import { resolveTenantContext, TenantAccessError } from '@/lib/auth/tenant-context';
 import { getClient } from '@/lib/clients';
@@ -87,7 +88,7 @@ export async function refreshInterviewGate(): Promise<void> {
     } catch { /* An absent cookie also preserves the middleware's locked state. */ }
     return;
   }
-  const complete=context.kind==='self' ? deriveInterviewComplete() : getClient(context.clientId!)?.interview_complete===true;
+  const complete=priorCompletion(context) !== null || (context.kind==='self' ? deriveInterviewComplete() : getClient(context.clientId!)?.interview_complete===true);
   const scope=`${context.tenantId}:${context.installationId}:${context.host}`;
   const { value, maxAge } = await signInterviewToken(complete,scope);
   try {

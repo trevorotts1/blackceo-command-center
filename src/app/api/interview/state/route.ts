@@ -1,3 +1,4 @@
+import { priorCompletion } from '@/lib/interview/prior-completion';
 import { queryOne } from '@/lib/db';
 import { ensureTenantInterview, tenantAnswers } from '@/lib/interview/remote-store';
 import { readRemoteInterviewState, drainInterviewOperations } from '@/lib/interview/remote-protocol';
@@ -181,6 +182,9 @@ export async function GET(request: NextRequest) {
   const tenant = await resolveInterviewTenant(request);
   const refusedTenant = refuseUnverifiedTenant(tenant);
   if (refusedTenant) return refusedTenant;
+  let priorCompletionDeclared: boolean;
+  try { priorCompletionDeclared = priorCompletion(tenant.context!) !== null; }
+  catch { return NextResponse.json({ error: 'completion_state_unavailable' }, { status: 503 }); }
   if (tenant.kind === 'client' && tenant.client) {
     // The client's OWN state — never the operator's files, and never the stub
     // this branch used to return. Before this, answeredIds was hardcoded to []
@@ -194,7 +198,8 @@ export async function GET(request: NextRequest) {
     try {
       await drainInterviewOperations(tenant.context!,1);
       remote=await readRemoteInterviewState(tenant.context!,persisted.interview_id);
-      updateClient(tenant.client.id,{interview_complete:remote!.interviewComplete===true});
+      // Completion is terminal; stale/partial remote reads cannot clear it.
+      if (remote?.interviewComplete === true) updateClient(tenant.client.id,{interview_complete:true});
     } catch { /* Local durable answers remain usable while remote is unavailable. */ }
     const stored = {answeredIds:savedAnswers.map(a=>a.question_id),interviewSessionId:persisted.gateway_session_id};
     const structured = computeStructuredResume(
@@ -214,7 +219,8 @@ export async function GET(request: NextRequest) {
       ok: true,
       companyId: tenant.context!.companyId,
       installationId: tenant.context!.installationId,
-      interviewComplete: remote?.interviewComplete === true,
+      priorCompletionDeclared,
+      interviewComplete: tenant.client.interview_complete === true || remote?.interviewComplete === true,
       remoteAvailable: remote !== null,
       remoteStatus: remote ? 'connected' : 'waiting_for_installation',
       interviewId: persisted.interview_id,
@@ -336,6 +342,7 @@ export async function GET(request: NextRequest) {
       knownContext: await readKnownContext(),
 
       // Top-level lifecycle signals (drive the locked-shell + redirect logic).
+      priorCompletionDeclared,
       interviewComplete: snap.interviewComplete,
       buildCompleted: snap.buildCompleted,
       qcStatus: snap.qcStatus,
@@ -399,6 +406,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.json(
       {
         ok: false,
+        priorCompletionDeclared,
         session: { interviewSessionId: null },
         structured: {
           total: INTERVIEW_QUESTIONS.length,

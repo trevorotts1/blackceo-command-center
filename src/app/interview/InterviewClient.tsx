@@ -130,6 +130,7 @@ interface InterviewStateResponse {
   installationId?: string;
   buildId?: string | null;
   interviewComplete: boolean;
+  priorCompletionDeclared?: boolean;
   buildCompleted: boolean;
   qcStatus: string;
   session?: { interviewSessionId: string | null; gatewaySessionId?: string | null };
@@ -255,6 +256,8 @@ export default function InterviewClient() {
   const [state, setState] = useState<InterviewStateResponse | null>(null);
   const [booting, setBooting] = useState(true);
   const [stateError, setStateError] = useState<string | null>(null);
+  const [declaringCompletion, setDeclaringCompletion] = useState(false);
+  const [declarationError, setDeclarationError] = useState<string | null>(null);
 
   // Structured answers recorded THIS session (merged with the server's set so a
   // just-answered card is skipped even before the next /state read lands).
@@ -343,7 +346,7 @@ export default function InterviewClient() {
       const res = await fetch('/api/interview/state', { cache: 'no-store' });
       if (!res.ok) throw new Error(res.status === 403 || res.status === 401 ? INTERVIEW_SIGN_IN_HELP : INTERVIEW_RETRY_HELP);
       const data = (await res.json()) as InterviewStateResponse;
-      if (!verifiedProgress(data)) throw new Error(INTERVIEW_RETRY_HELP);
+      if (!verifiedProgress(data) && data.priorCompletionDeclared !== true) throw new Error(INTERVIEW_RETRY_HELP);
       setStateError(null);
       setState(data);
       return data;
@@ -447,7 +450,7 @@ export default function InterviewClient() {
       // counts — the owner is done; route straight to the dashboard (already
       // unlocked by the gate cookie once interviewComplete is true). Checked
       // FIRST, ahead of the answeredCount branch below.
-      if (data.interviewComplete === true) {
+      if (data.interviewComplete === true || data.buildCompleted === true || data.priorCompletionDeclared === true) {
         router.replace('/');
         return;
       }
@@ -761,6 +764,27 @@ export default function InterviewClient() {
     window.location.replace(window.location.pathname);
   }, []);
 
+  const declareCompleted = useCallback(async () => {
+    if (declaringCompletion) return;
+    setDeclaringCompletion(true);
+    setDeclarationError(null);
+    try {
+      const response = await fetch('/api/interview/prior-completion', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ confirmed: true }),
+      });
+      const result = await response.json();
+      if (!response.ok || result.priorCompletionDeclared !== true) {
+        throw new Error(response.status === 401 || response.status === 403
+          ? INTERVIEW_SIGN_IN_HELP : 'Your declaration was not saved. Please retry.');
+      }
+      window.location.assign('/');
+    } catch (error) {
+      setDeclarationError(error instanceof Error ? error.message : 'Your declaration was not saved. Please retry.');
+      setDeclaringCompletion(false);
+    }
+  }, [declaringCompletion]);
+
   /* ---- renders ---- */
 
   const brandStyle = brand.primaryColor
@@ -775,7 +799,7 @@ export default function InterviewClient() {
 
   if (stateError) {
     screen = <div className={iv.root}><div className={iv.stage} role="alert">
-      <h1 className={iv.question}>Continue your interview</h1>
+      <h1 className={iv.question}>Check your access</h1>
       <p className={iv.lede}>{stateError}</p>
       <button type="button" className={iv.btnPrimary} disabled={booting} onClick={() => void retryAccess()}>{booting ? 'Checking…' : 'Check sign-in and retry'}</button>
       <p className="mt-4 text-sm">Use this same interview page after signing in. Submitted answers stay saved; a fresh link does not start a new interview.</p>
@@ -888,7 +912,18 @@ export default function InterviewClient() {
   }
 
   // Respect the OS reduced-motion preference across every interview animation.
-  return <MotionConfig reducedMotion="user">{screen}</MotionConfig>;
+  return <MotionConfig reducedMotion="user">{screen}
+    {!booting && !state?.interviewComplete && !state?.buildCompleted && !state?.priorCompletionDeclared && (
+      <section className="mx-auto w-full max-w-2xl px-5 pb-8" aria-label="Previously completed interview">
+        <button type="button" className={iv.btnSecondary} disabled={declaringCompletion}
+          aria-describedby="prior-completion-help" onClick={() => void declareCompleted()}>
+          {declaringCompletion ? 'Saving your declaration…' : 'I have already completed the interview'}
+        </button>
+        <p id="prior-completion-help" className="mt-3 text-sm">This saves your declaration that you previously completed the interview and stops repeat prompts across sign-ins. It does not create answers or mark your workforce build complete.</p>
+        {declarationError && <p role="alert" className="mt-3 text-sm">{declarationError}</p>}
+      </section>
+    )}
+  </MotionConfig>;
 }
 
 /* -------------------------------------------------------------------------- */
