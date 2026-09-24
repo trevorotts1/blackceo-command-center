@@ -15,12 +15,12 @@ Set `MC_INSTALLATION_ID` to the installation's stable ID and provide `MC_API_TOK
     "installationId": "installation-stable-id",
     "issuer": "https://your-team.cloudflareaccess.com",
     "audience": "access-application-audience",
-    "subjects": ["verified-access-subject-id"]
+    "subjects": ["owner@company.example.com"]
   }
 }
 ```
 
-Company IDs and installation IDs are identifiers verified against the installation, not guessed slugs or names. Cloudflare authentication validates RS256 signatures from the pinned issuer certificate endpoint, issuer, audience, expiry, and the registered subject list. Trusting `cf-ray`, an email, or an unsigned JWT is insufficient. Ensure the origin is reachable only through the intended ingress as an independent protection. Never commit live credentials or tokens in registry examples.
+Company IDs and installation IDs are identifiers verified against the installation, not guessed slugs or names. Cloudflare authentication validates RS256 signatures from the pinned issuer certificate endpoint, issuer, audience, expiry, and the registered subject list. A subject is either the Access `sub` or the owner email; an email subject matches only the signed JWT `email` claim (exact, case-insensitive), so Google and one-time-code sign-in resolve to the same owner on every device. Trusting `cf-ray`, an email, or an unsigned JWT is insufficient. Ensure the origin is reachable only through the intended ingress as an independent protection. Never commit live credentials or tokens in registry examples.
 
 An alternative browser login is an operator-issued one-use invitation. With protected signing configuration loaded on the operator machine, run:
 
