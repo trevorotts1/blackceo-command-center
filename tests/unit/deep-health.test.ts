@@ -556,13 +556,13 @@ describe('company_branding — config/DB name mismatch is advisory (non-gating)'
   // and the new cc-start refused it — the box was DOWN over two spellings of
   // the practice name. A mismatch is reported as DEGRADED and never gates.
   it('config name != DB name → pass=true, degraded=true, detail says DEGRADED', async () => {
-    writeCompanyConfig(tmpDir, { companyName: 'Dr. Tola Wellness Practice' });
+    writeCompanyConfig(tmpDir, { companyName: 'Example Wellness Practice' });
     vi.doMock('@/lib/db', () => ({
       getDb: () => ({
         prepare: (sql: string) => ({
           get: () => {
             if (sql.includes('sqlite_master')) return { name: 'companies' };
-            if (sql.includes('SELECT name FROM companies')) return { name: "Dr. Tola T'Sarumi MD" };
+            if (sql.includes('SELECT name FROM companies')) return { name: "Dr. Example Client MD" };
             return undefined;
           },
           all: () => [],
