@@ -35,6 +35,13 @@ import {
   getEmbeddingApiKey,
   type EmbeddingVector,
 } from '@/lib/sop-embeddings';
+import {
+  authorizedTiebreak,
+  resolveTiebreakModel,
+  resolveTiebreakPermission,
+  type TiebreakFn,
+  type TiebreakPermission,
+} from './tiebreak-adapter';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -434,73 +441,71 @@ async function semanticRankDepartments(
 }
 
 /**
- * LLM tiebreak: when the top-2 semantic scores are within TIEBREAK_MARGIN,
- * ask the orchestrator model to pick the correct department.
+ * JEV-014 — tie-break seam (spec section 6.5).
  *
- * Uses the client's own OPENAI_API_KEY. Falls back silently on any error
- * (returns the embedding-ranked top result).
+ * The old autonomous branch (env-read key + direct provider call + own
+ * timeout) is ELIMINATED: this function now delegates to the single
+ * authorized tie-break adapter, which runs at most one call under an explicit
+ * config {model from TIEBREAK_MODEL or approved client config, deadline
+ * inherited from the routing root budget, permission context}. With no
+ * permitted model or no permission, the adapter resolves evidence-only with
+ * zero network calls and the embedding-ranked top result stays.
+ *
+ * Exposed for tests via __tiebreakTestSeams: callers and tests inject a
+ * TiebreakFn (call-count spy). Optional tiebreakConfig carries the explicit
+ * {model override, deadlineMs left on the root budget, company scope,
+ * permission override}; production plumbs company scope only.
  */
+export interface TiebreakSeamConfig {
+  tiebreak?: TiebreakFn;
+  model?: string | null;
+  deadlineMs?: number;
+  companyId?: string;
+  permissionOverride?: boolean;
+}
+
+export const __tiebreakTestSeams = {
+  permissionFor(input: {
+    companyId?: string;
+    model: string | null;
+    override?: boolean;
+  }): TiebreakPermission {
+    return resolveTiebreakPermission(input);
+  },
+};
+
 async function llmTiebreak(
   taskText: string,
   candidates: SemanticScore[],
+  seam: TiebreakSeamConfig = {},
 ): Promise<DepartmentConfig> {
   const top = candidates[0].department;
 
-  try {
-    const apiKey = process.env.OPENAI_API_KEY;
-    if (!apiKey) return top;
+  const model = seam.model !== undefined ? seam.model : resolveTiebreakModel();
+  const permission = __tiebreakTestSeams.permissionFor({
+    companyId: seam.companyId,
+    model,
+    override: seam.permissionOverride,
+  });
+  const runTiebreak: TiebreakFn = seam.tiebreak ?? authorizedTiebreak;
 
-    const deptList = candidates
-      .slice(0, 5)
-      .map((c, i) => `${i + 1}. ${c.department.name} — ${c.department.purpose}`)
-      .join('\n');
+  const result = await runTiebreak({
+    taskText,
+    candidates: candidates.slice(0, 5).map((c) => ({
+      id: c.department.id,
+      name: c.department.name,
+      purpose: c.department.purpose,
+    })),
+    companyId: seam.companyId,
+    model,
+    deadlineMs: seam.deadlineMs,
+    permission,
+  });
 
-    const systemPrompt =
-      'You are a task routing assistant. Given a task and a list of departments, ' +
-      'reply with ONLY the exact department name (no other text) that best handles the task.';
-
-    const userPrompt =
-      `Task: "${taskText}"\n\nDepartments:\n${deptList}\n\n` +
-      'Which single department should handle this task? Reply with only the department name.';
-
-    const resp = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
-      },
-      signal: AbortSignal.timeout(10_000),
-      body: JSON.stringify({
-        model: process.env.TIEBREAK_MODEL || 'gpt-4o-mini',
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt },
-        ],
-        max_tokens: 50,
-        temperature: 0,
-      }),
-    });
-
-    if (!resp.ok) return top;
-
-    const data = (await resp.json()) as {
-      choices?: { message?: { content?: string } }[];
-    };
-
-    const picked = data.choices?.[0]?.message?.content?.trim() ?? '';
-    if (!picked) return top;
-
-    const match = candidates.find(
-      (c) =>
-        c.department.name.toLowerCase() === picked.toLowerCase() ||
-        picked.toLowerCase().includes(c.department.name.toLowerCase()),
-    );
-
-    return match?.department ?? top;
-  } catch (err) {
-    console.debug('[DepartmentRouter] LLM tiebreak failed:', (err as Error).message);
+  if (!result.decided || !result.departmentId) {
     return top;
   }
+  return candidates.find((c) => c.department.id === result.departmentId)?.department ?? top;
 }
 
 // ---------------------------------------------------------------------------
@@ -639,6 +644,7 @@ export async function comDispatch(
   },
   agents: AgentWithLoad[],
   departments: DepartmentConfig[],
+  tiebreakSeam: TiebreakSeamConfig = {},
 ): Promise<RoutingResult | null> {
   const title = task.title || '';
   const description = task.description || '';
@@ -718,7 +724,7 @@ export async function comDispatch(
         semanticRanked.length >= 2 &&
         rawTopSimilarity - semanticRanked[1].similarity < TIEBREAK_MARGIN
       ) {
-        bestDept = await llmTiebreak(taskText, semanticRanked);
+        bestDept = await llmTiebreak(taskText, semanticRanked, tiebreakSeam);
         console.log(
           `[DepartmentRouter] Semantic scores within tiebreak margin (${rawTopSimilarity.toFixed(3)} vs ${semanticRanked[1].similarity.toFixed(3)}) — LLM tiebreak selected "${bestDept.name}"`,
         );
