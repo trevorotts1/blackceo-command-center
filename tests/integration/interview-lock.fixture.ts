@@ -171,7 +171,7 @@ export function serverEnv(): Record<string, string> {
     MC_COMPANY_ID: 'default',
     MC_PERSONA_COMPANY_CONTEXTS_JSON: JSON.stringify({default:{companyRoot:COMPANY_DIR,companyConfig:path.join(COMPANY_DIR,'company-config.json'),companySlug:'fixture-company',personaCatalog:path.join(COMPANY_DIR,'catalog.json')}}),
     MC_INSTALLATION_ID: 'interview-lock-install',
-    MC_TENANT_REGISTRY_JSON: JSON.stringify({'127.0.0.1':{kind:'self',tenantId:'interview-lock-tenant',companyId:'default',installationId:'interview-lock-install'}}),
+    MC_TENANT_REGISTRY_JSON: JSON.stringify({'127.0.0.1':{kind:'self',tenantId:'interview-lock-tenant',companyId:'default',installationId:'interview-lock-install',issuer:'https://interview-lock-access.example',audience:'interview-lock-audience',subjects:['owner:interview-lock']}}),
     REQUIRE_CF_ACCESS: 'false',
     CC_PORT: String(PORT),
     MC_INTERVIEW_COOKIE_SECRET: COOKIE_SECRET,

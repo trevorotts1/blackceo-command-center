@@ -227,8 +227,10 @@ test('temporary state outage retains the unused invitation for an in-page retry'
     : route.continue());
   try {
     await page.goto(invitation.url);
-    await expect(page).toHaveURL(`${BASE_URL}/interview`);
     await expect(page.getByRole('alert').filter({ hasText: 'temporarily unavailable' })).toBeVisible();
+    // ?enroll= is stripped only after a successful exchange, so the unused
+    // invitation is still in the address bar while the outage lasts.
+    await expect(page).toHaveURL(invitation.url);
     expect(redemptions).toBe(0);
     const closeWalkthrough = page.getByRole('button', { name: 'Close walkthrough', exact: true });
     await expect(closeWalkthrough).toBeVisible();
@@ -236,6 +238,7 @@ test('temporary state outage retains the unused invitation for an in-page retry'
     outage = false;
     await page.getByRole('button', { name: 'Check sign-in and retry', exact: true }).click();
     await expect(page.getByRole('heading', { name: 'Let’s tailor your company', exact: true })).toBeVisible();
+    await expect(page).toHaveURL(`${BASE_URL}/interview`);
     expect(redemptions).toBe(1);
     expect((await context.cookies()).some(cookie => cookie.name === 'mc_tenant_session' && cookie.httpOnly)).toBe(true);
     expect((await page.request.get('/api/interview/state')).status()).toBe(200);

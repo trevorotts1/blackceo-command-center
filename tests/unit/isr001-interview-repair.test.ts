@@ -6,9 +6,10 @@ import './_isolated-db';
  *
  * Isolated: throwaway DATABASE_PATH (via _isolated-db), fixture workspace and
  * script dirs under the OS temp dir, stubbed JWKS fetch, no live gateway, no
- * network, no production writes. The dept writer legs shell the READ-ONLY
- * Skill-23 loss reader plus record-dept-decision.sh with --state pinned to the
- * fixture file and the rate-limit ledger pinned to the fixture dir.
+ * network, no production writes. The dept writer legs shell contract fixtures
+ * of the READ-ONLY Skill-23 loss reader plus record-dept-decision.sh with
+ * --state pinned to the fixture file and the rate-limit ledger pinned to the
+ * fixture dir.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -248,9 +249,40 @@ test('existing enrollment tickets still exchange and re-open', async () => {
 });
 
 test('dept decline warns first, cancel keeps state, confirm records, keep restores', async () => {
-  const realScripts = '/Users/blackceomacmini/.openclaw/skills/23-ai-workforce-blueprint/scripts';
+  // Contract fixtures for the two Skill-23 legs this route shells. The real
+  // scripts ship in openclaw-onboarding, not in this repo or on CI, so the test
+  // owns a copy of their contract: the read-only loss reader prints the floor
+  // warning (rc 0) or a non-floor verdict (rc 3); the writer refuses an
+  // unacknowledged floor decline (exit 2), stamps lossWarning + lossWarningAck
+  // on an acknowledged one, and writes the provenanced object into --state.
+  const deciderScripts = path.join(laneRoot, 'decider-scripts');
+  const floorWarning = 'no dedicated owner for brand awareness, demand generation, or getting your name in front of new people';
+  fs.mkdirSync(deciderScripts, { recursive: true });
+  fs.writeFileSync(path.join(deciderScripts, 'department-loss-warning.py'), [
+    'import json, sys',
+    'dept = sys.argv[sys.argv.index("--dept") + 1]',
+    `warning = ${JSON.stringify(floorWarning)} if dept == "marketing" else None`,
+    'print(json.dumps({"dept": dept, "is_floor_department": warning is not None, "loss_warning": warning}))',
+    'sys.exit(0 if warning else 3)',
+  ].join('\n'));
+  fs.writeFileSync(path.join(deciderScripts, 'record-dept-decision.sh'), [
+    'exec python3 - "$@" <<\'PY\'',
+    'import datetime, json, sys',
+    'a = sys.argv[1:]',
+    'opt = lambda k: a[a.index(k) + 1]',
+    'dept, decision, state = opt("--dept"), opt("--decision"), opt("--state")',
+    'floor_decline = decision == "no" and dept == "marketing"',
+    'if floor_decline and "--confirm-loss" not in a: sys.exit(2)',
+    'entry = {"decision": decision, "source": opt("--source"), "decidedBy": opt("--by"),',
+    '         "sessionId": opt("--session"), "decidedAt": datetime.datetime.now(datetime.timezone.utc).isoformat()}',
+    `if floor_decline: entry.update(lossWarning=${JSON.stringify(floorWarning)}, lossWarningAck=True)`,
+    's = json.load(open(state))',
+    's.setdefault("canonicalReconciliation", {}).setdefault("decisions", {})[dept] = entry',
+    'json.dump(s, open(state, "w"))',
+    'PY',
+  ].join('\n'));
   const savedScripts = process.env.OPENCLAW_SKILL23_SCRIPTS;
-  process.env.OPENCLAW_SKILL23_SCRIPTS = realScripts;
+  process.env.OPENCLAW_SKILL23_SCRIPTS = deciderScripts;
   try {
     const cookie = await sessionCookie('owner:isr001');
     const { POST: decide } = await import('../../src/app/api/interview/decision/route');
@@ -314,7 +346,13 @@ test('forged CSRF and cross-origin decision writes are refused', async () => {
   assert.equal(crossOrigin.status, 403);
 });
 
-test('structured answer saves and resume position survives reload', async () => {
+test('structured answer saves and resume position survives reload', async (t) => {
+  // The company_name answer is mirrored into <cwd>/config/company-config.json.
+  // Run from the lane dir so it never lands in the checkout, where every later
+  // test file in the same run would read this fixture as the box's company.
+  const repoCwd = process.cwd();
+  process.chdir(laneRoot);
+  t.after(() => process.chdir(repoCwd));
   const cookie = await sessionCookie('owner:isr001');
   const { POST: answer } = await import('../../src/app/api/interview/answer/route');
   const { GET: state } = await import('../../src/app/api/interview/state/route');
