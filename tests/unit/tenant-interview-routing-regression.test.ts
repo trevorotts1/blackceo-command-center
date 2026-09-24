@@ -59,6 +59,32 @@ for(const id of ['client-a','client-b'])run('INSERT OR IGNORE INTO clients(id,na
     await assert.rejects(resolveTenantContext(req('a.example','/api/interview/state',{'cf-access-jwt-assertion':make('subject-a','aud-b')})));
   }finally{globalThis.fetch=original;process.env.MC_TENANT_REGISTRY_JSON=JSON.stringify(registry);}
  });
+ test('registered owner email matches only the signed email claim, whatever the sign-in method',async()=>{
+  const {privateKey,publicKey}=generateKeyPairSync('rsa',{modulusLength:2048});
+  const jwk={...publicKey.export({format:'jwk'}),kid:'fixture-key',alg:'RS256'};
+  const original=globalThis.fetch; // own issuer: the 5-minute JWKS cache is keyed by issuer and holds the previous test's key
+  process.env.MC_TENANT_REGISTRY_JSON=JSON.stringify({...registry,'a.example':{...registry['a.example'],issuer:'https://fixture-email.cloudflareaccess.com',audience:'aud-a',subjects:['Owner@Example.test'],allowedEmails:['owner@example.test']}});
+  globalThis.fetch=async()=>new Response(JSON.stringify({keys:[jwk]}),{status:200});
+  const make=(claims:Record<string,unknown>)=>{
+    const content=Buffer.from(JSON.stringify({alg:'RS256',kid:'fixture-key'})).toString('base64url')+'.'+Buffer.from(JSON.stringify({iss:'https://fixture-email.cloudflareaccess.com',aud:['aud-a'],exp:Date.now()/1000+60,...claims})).toString('base64url');
+    return content+'.'+sign('RSA-SHA256',Buffer.from(content),privateKey).toString('base64url');
+  };
+  const as=(token:string,extra:Record<string,string>={})=>resolveTenantContext(req('a.example','/api/interview/state',{'cf-access-jwt-assertion':token,...extra}));
+  try{
+    // Google and one-time-code logins carry different opaque `sub`s but the same signed email.
+    for(const sub of [randomUUID(),randomUUID()]){
+      const ctx=await as(make({sub,email:'owner@example.test'}));
+      assert.equal(ctx.subject,'Owner@Example.test');
+      assert.equal(ctx.email,'owner@example.test');
+    }
+    await assert.rejects(as(make({sub:randomUUID(),email:'intruder@example.test'})));
+    await assert.rejects(as(make({sub:randomUUID()}),{'cf-access-authenticated-user-email':'owner@example.test'}));
+    await assert.rejects(as(make({sub:'owner@example.test'.replace('@','-'),email:'Owner@Example.test.evil'})));
+    const forged=make({sub:randomUUID(),email:'intruder@example.test'}).split('.');
+    forged[1]=Buffer.from(JSON.stringify({iss:'https://fixture-email.cloudflareaccess.com',aud:['aud-a'],exp:Date.now()/1000+60,sub:randomUUID(),email:'owner@example.test'})).toString('base64url');
+    await assert.rejects(as(forged.join('.')));
+  }finally{globalThis.fetch=original;process.env.MC_TENANT_REGISTRY_JSON=JSON.stringify(registry);}
+ });
  test('client state supplies authenticated company and installation for isolated browser drafts',async()=>{
   const {GET:state}=await import('../../src/app/api/interview/state/route');
   const {interviewDraftScope}=await import('../../src/lib/interview/browser-recovery');

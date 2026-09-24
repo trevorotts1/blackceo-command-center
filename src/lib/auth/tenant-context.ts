@@ -118,11 +118,19 @@ async function verifyAccessJwt(token: string, reg: TenantRegistration): Promise<
     const [headerRaw, payloadRaw, sig, extra] = token.split('.');
     if (extra || !sig) return null;
     const header = json(headerRaw), claims = json(payloadRaw);
-    if (header.alg !== 'RS256' || !header.kid || claims.iss !== reg.issuer || !Number.isFinite(claims.exp) || claims.exp <= Date.now()/1000 || (claims.nbf && claims.nbf > Date.now()/1000) || ![claims.aud].flat().includes(reg.audience) || !reg.subjects.includes(claims.sub)) return null;
+    if (header.alg !== 'RS256' || !header.kid || claims.iss !== reg.issuer || !Number.isFinite(claims.exp) || claims.exp <= Date.now()/1000 || (claims.nbf && claims.nbf > Date.now()/1000) || ![claims.aud].flat().includes(reg.audience)) return null;
+    const signedEmail = typeof claims.email === 'string' && claims.email.trim() ? claims.email.trim() : null;
+    // A registered subject is either the Access user id (`sub`) or the owner's
+    // email. Access `sub` is an opaque per-account id the installer cannot know
+    // before first login, so the email form is what registries actually hold;
+    // it matches ONLY the signed `email` claim, exactly (case-insensitive), and
+    // is identical whether the owner signed in with Google or a one-time code.
+    const matched = reg.subjects.includes(claims.sub) ? claims.sub as string
+      : signedEmail ? reg.subjects.find(s => s.includes('@') && s.toLowerCase() === signedEmail.toLowerCase()) : undefined;
+    if (!matched) return null;
     // Exact allowed-email allowlist, enforced ONLY on the signed `email` claim.
     // Unsigned headers never participate. When configured, a valid JWT whose
     // signed email is not listed is rejected — identity without authorization.
-    const signedEmail = typeof claims.email === 'string' && claims.email.trim() ? claims.email.trim() : null;
     if (reg.allowedEmails?.length && (!signedEmail || !reg.allowedEmails.map(e => e.toLowerCase()).includes(signedEmail.toLowerCase()))) return null;
     let cached = jwks.get(reg.issuer);
     if (!cached || cached.expires <= Date.now()) {
@@ -137,7 +145,7 @@ async function verifyAccessJwt(token: string, reg: TenantRegistration): Promise<
     if (!keyData || keyData.kty !== 'RSA') return null;
     const key = await crypto.subtle.importKey('jwk', keyData, {name: 'RSASSA-PKCS1-v1_5', hash:'SHA-256'}, false, ['verify']);
     if (!await crypto.subtle.verify('RSASSA-PKCS1-v1_5', key, bytes(sig), enc.encode(`${headerRaw}.${payloadRaw}`))) return null;
-    return { sub: claims.sub as string, email: signedEmail };
+    return { sub: matched, email: signedEmail };
   } catch { return null; }
 }
 export async function resolveTenantContext(request: { headers: Headers }): Promise<TenantContext> {
@@ -156,8 +164,8 @@ export async function resolveTenantContext(request: { headers: Headers }): Promi
   // values are never trusted; only the claims inside a verified token identify
   // the owner. No public slug fallback, no fake bearer: boxes without
   // issuer/audience/subjects configured cannot verify (verifyAccessJwt nulls)
-  // and fall through to the refusal below. JWT `sub`s keep existing behavior:
-  // only exact-registered subjects verify, no email-as-subject invention.
+  // and fall through to the refusal below. Only exact-registered subjects
+  // verify: the Access `sub`, or the owner email matched against the signed claim.
   if (!subject) {
     const verified = await verifyAccessJwt(request.headers.get('cf-access-jwt-assertion') || '', reg);
     if (verified) { subject = verified.sub; email = verified.email; }
