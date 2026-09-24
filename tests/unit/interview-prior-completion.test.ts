@@ -119,7 +119,7 @@ test('legacy email selector requires signed email; opaque subject and all JWT ch
   const realFetch = globalThis.fetch;
   globalThis.fetch = (async () => new Response(JSON.stringify({ keys: [jwk] }))) as typeof fetch;
   try {
-    assert.equal((await resolve(jwt())).subject, 'owner-uuid');
+    assert.equal((await resolve(jwt())).subject, 'owner@example.com');
     for (const claims of [{ email: 'stranger@example.com' }, { email: undefined }, { sub: '' }, { iss: 'https://foreign.example' }, { aud: ['foreign'] }, { exp: 1 }, { nbf: Date.now()/1000 + 999 }]) await assert.rejects(resolve(jwt(claims)));
     const parts = jwt().split('.');
     parts[1] = Buffer.from(JSON.stringify({ sub: 'owner-uuid', email: 'owner@example.com', iss: reg.issuer, aud: [reg.audience], exp: Date.now()/1000 + 999 })).toString('base64url');
