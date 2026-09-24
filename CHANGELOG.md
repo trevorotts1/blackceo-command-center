@@ -8,7 +8,7 @@
 ### Tests
 
 - `OPENCLAW_DIST=<2026.9.6 dist> node scripts/openclaw-contract-check.mjs` → all 10 hard contracts hold; same against 2026.9.4.
-- `npx vitest run src/lib/__tests__/passthrough-write-scope.test.ts` → 20 passed (unchanged census: 128 mutating, 50 bearer-only — the prior-completion POST is interface-called, no re-derivation).
+- `npx vitest run src/lib/__tests__/passthrough-write-scope.test.ts` → 18 passed, 2 failed on stale literals (true census re-measured at this head: 129 mutating = 128 + v7.6.65 `POST /api/interview/prior-completion`, 7 webhook-protected, 122 non-webhook; bearer-only still 50, patterns still 47 — the new POST is interface-called (`src/app/interview/InterviewClient.tsx:772`), so no bearer re-derivation; the two literal assertions still pin 128/121 and fail identically on `origin/main`, test re-derivation pending).
 - `npx playwright test --config=playwright.interview-lock.config.ts --list` → 18 tests × 3 projects.
 
 ## [v7.6.65] — 2026-09-24 — Interview prior-completion declaration: an owner can record that the interview was already done
