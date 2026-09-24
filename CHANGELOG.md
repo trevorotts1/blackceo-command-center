@@ -1,3 +1,25 @@
+## [v7.6.65] — 2026-09-24 — Interview prior-completion declaration: an owner can record that the interview was already done
+
+### Added
+
+- **A durable owner declaration that the interview was already completed.** New installation-scoped table `interview_prior_completion_declarations` (migration 162, `src/lib/db/migrations.ts`) stores a single row per tenant/company/installation with source pinned to `owner-self-attestation` via a CHECK constraint. `src/lib/interview/prior-completion.ts` performs an idempotent `INSERT OR IGNORE` then re-reads the durable row — no process-local or browser latch. `POST /api/interview/prior-completion` (`src/app/api/interview/prior-completion/route.ts`) requires a verified owner session, CSRF and same-origin; it answers 403/400 on any missing identity, 503 when the store write fails, and 200 with the saved declaration on success.
+- **Shell admission from the declaration.** `GET /api/interview/gate-status` now returns `priorCompletionDeclared`, and the browser may declare via the new "I have already completed the interview" action in `src/app/interview/InterviewClient.tsx` + `src/components/interview/InterviewBypassBanner.tsx` even when a state read fails, so the declaration is reachable in the failure mode that motivated it. `src/lib/interview/gate-fallback.ts` and `src/lib/conversational-ai/interview-state.ts` honor the durable row: the gate answers open, `getInterviewState(context?)` reports `complete` with signal `owner-self-attestation`, without ever creating answers.
+- **Stale remote state cannot hide a genuine completion.** `GET /api/interview/state` now clears a stale/partial `interview_complete` flag from a remote result when the tenant row proves completion, so a true completion and the declaration both survive a flaky remote.
+
+### Changed
+
+- **Tenant-access refusals are no longer silent redirects.** `src/middleware.ts` answers the interview redirect with a 403 `tenant_access_required` JSON body instead of a 302 loop, so clients can read the refusal reason.
+- **Email-form registry subjects resolve to the registered email.** The legacy email-subject matching in `src/lib/auth/tenant-context.ts` (from #418/#419) was merged with this release's stricter JWT checks: the token must still carry a non-empty, string `sub`, and email-form subjects match ONLY the signature-verified signed `email` claim while opaque subjects match `sub` exactly. The campaign unit test's first legacy assertion now expects the registered email (matching `tests/unit/tenant-interview-routing-regression.test.ts`), with every security property unchanged and still asserted.
+
+### Tests
+
+- `tests/unit/interview-prior-completion.test.ts` (new, 3 cases): declaration persistence/isolation, stale-remote survival, and the full JWT check battery.
+- `tests/integration/prior-completion-proof.spec.ts` + `playwright.prior-completion-proof.config.ts` (new): a failed state load still permits the declaration, and the unlocked gate survives a fresh browser AND a server restart — proof evidence written under `test-results/prior-completion-proof/`.
+
+### Not changed
+
+- The declaration is shell-admission evidence only: it never creates interview answers, never marks the workforce build complete, and is never transcript/QC evidence. Migration 162 deploys via the separate lane, not this repo.
+
 ## [v7.6.64] — 2026-09-24 — Three red checks on main were tests reaching outside their own fixtures
 
 ### Fixed
