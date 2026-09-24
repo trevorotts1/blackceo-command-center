@@ -346,7 +346,13 @@ test('forged CSRF and cross-origin decision writes are refused', async () => {
   assert.equal(crossOrigin.status, 403);
 });
 
-test('structured answer saves and resume position survives reload', async () => {
+test('structured answer saves and resume position survives reload', async (t) => {
+  // The company_name answer is mirrored into <cwd>/config/company-config.json.
+  // Run from the lane dir so it never lands in the checkout, where every later
+  // test file in the same run would read this fixture as the box's company.
+  const repoCwd = process.cwd();
+  process.chdir(laneRoot);
+  t.after(() => process.chdir(repoCwd));
   const cookie = await sessionCookie('owner:isr001');
   const { POST: answer } = await import('../../src/app/api/interview/answer/route');
   const { GET: state } = await import('../../src/app/api/interview/state/route');
