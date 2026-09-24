@@ -55,15 +55,20 @@ Multiple operator emails are supported by listing them after the subdomain.
 3. **Creates (or updates) a self-hosted Access Application** bound to the
    subdomain with a 336-hour (14-day) session duration and `allowed_idps`
    set to whichever of One-Time PIN / Google are available. If an app for
-   that exact domain already exists and Google has newly become available
-   since it was created, the script attaches Google to it. **Ownership
-   note:** that attach call is a Cloudflare `PUT /apps/{id}`, which REPLACES
-   the app record with exactly the fields the script sends (name, domain,
-   type, session_duration, allowed_idps) -- any option set by hand in the
-   dashboard on that app (app launcher visibility, a custom deny page, CORS,
-   etc.) is reset to Cloudflare's default by this call. This script owns and
-   re-asserts only those 5 fields on every app it touches; re-apply any
-   hand-set option after running the script if one is needed.
+   that exact domain already exists and is missing either login method
+   (for example a Google-only app), the script adds the missing one --
+   so every client can sign in with an emailed code even when Google
+   refuses them (a Google OAuth client left "Internal" answers personal
+   Gmail addresses with `Error 403: org_internal`). **Ownership note:** a
+   Cloudflare `PUT /apps/{id}` replaces the whole record, so the script
+   GETs the app first and PUTs back the SAME record with only
+   `allowed_idps` extended -- hand-set dashboard options (name, session
+   length, app launcher visibility, a custom deny page, CORS, etc.) are
+   kept. The one other field it may change: `auto_redirect_to_identity`
+   is turned off when the app ends up with more than one login method,
+   because Cloudflare rejects auto-redirect with more than one (error
+   12130). An app whose `allowed_idps` is empty already allows every
+   login method and is never touched.
 4. **Attaches an Allow policy** named "Allowed users" that includes the
    supplied operator email(s). The policy does not restrict login method --
    that is enforced once, at the app level, via `allowed_idps` above. If a
@@ -79,12 +84,13 @@ Multiple operator emails are supported by listing them after the subdomain.
 Safe to re-run. The script checks for the existing IdP, Application,
 Application `allowed_idps`, and Policy before any create/update call. On a
 second run for the same subdomain you will see "already exists" /
-"already has Google attached" / "no login_method restriction to remove"
-lines on stderr and the same Application UUID + AUD on stdout. The only
-mutations on an already-existing app are: attaching Google to
-`allowed_idps` the first time it becomes available at the account level,
-and removing a stale `login_method` require clause from the "Allowed
-users" policy if one is found and Google is available to attach.
+"already offers every available login method" / "no login_method
+restriction to remove" lines on stderr and the same Application UUID +
+AUD on stdout. The only mutations on an already-existing app are: adding
+whichever of One-Time PIN / Google its `allowed_idps` is missing (GET-merge
+PUT, see step 3), and removing a stale `login_method` require clause from
+the "Allowed users" policy if one is found and Google is available to
+attach.
 
 **Residue on apps provisioned before this fix:** pulling this fix into the
 repo does not change anything on a box until the script is actually run

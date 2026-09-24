@@ -413,8 +413,8 @@ test('P1-08 step 2b (c): existing app without Google + Google now available at a
     assert.ok(attachBody.allowed_idps.includes('otp-111'), 'the PUT body must retain the One-Time PIN id');
 
     assert.ok(
-      stderr.includes('Attaching Google IdP to Access App app-existing'),
-      'must log that it is attaching Google to the pre-existing app',
+      stderr.includes('Adding Google to existing Access App app-existing'),
+      'must log that it is adding Google to the pre-existing app',
     );
 
     // The policy already existed ("Allowed users") — must be left alone,
@@ -478,7 +478,7 @@ test('P1-08 step 2b (d): existing app already has Google attached → no redunda
       (c) => c.method === 'PUT' && (c.url ?? '').includes('/apps/app-full') && !(c.url ?? '').includes('policies'),
     );
     assert.strictEqual(attachCall, undefined, 'must NOT issue a redundant PUT when Google is already attached');
-    assert.ok(stderr.includes('already has Google attached'), 'must log that no update was needed');
+    assert.ok(stderr.includes('already offers every available login method'), 'must log that no update was needed');
   } finally {
     fixture.cleanup();
   }
@@ -596,6 +596,128 @@ test('P1-08 policy reconciliation: existing app + stale login_method:onetimepin 
       stderr.includes('stale login_method:onetimepin require clause'),
       'must log that it detected and is removing the stale clause',
     );
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+// ─── Scenario F: existing Google-ONLY app → One-Time PIN added by GET-merge PUT ──
+// Google refuses personal @gmail.com owners while the OAuth client is
+// internal-only (Error 403: org_internal). A Google-only app then has no
+// working sign-in at all. The script must add One-Time PIN, keep every
+// hand-set field from the app's own GET, and turn off auto-redirect
+// (Cloudflare rejects auto_redirect_to_identity=true with >1 IdP, code 12130).
+
+test('email code (f): existing Google-only app → PUT adds One-Time PIN, preserves hand-set fields, turns off auto-redirect', () => {
+  const routes: RouteFixture[] = [
+    {
+      method: 'GET',
+      urlContains: '/identity_providers',
+      body: {
+        success: true,
+        result: [
+          { id: 'otp-111', type: 'onetimepin', name: 'One-time PIN login' },
+          { id: 'goog-222', type: 'google', name: 'Google Workspace' },
+        ],
+      },
+    },
+    {
+      method: 'GET',
+      urlContains: '/apps?per_page=1000',
+      body: { success: true, result: [{ id: 'app-goog', domain: 'goog.zerohumanworkforce.com' }] },
+    },
+    {
+      method: 'GET',
+      urlContains: '/apps/app-goog',
+      body: {
+        success: true,
+        result: {
+          id: 'app-goog',
+          aud: 'aud-goog',
+          uid: 'uid-goog',
+          created_at: '2026-01-01T00:00:00Z',
+          updated_at: '2026-01-02T00:00:00Z',
+          policies: [{ id: 'pol-goog' }],
+          name: 'Hand-named app',
+          domain: 'goog.zerohumanworkforce.com',
+          type: 'self_hosted',
+          session_duration: '24h',
+          app_launcher_visible: false,
+          custom_deny_message: 'hand-set deny page',
+          auto_redirect_to_identity: true,
+          allowed_idps: ['goog-222'],
+        },
+      },
+    },
+    { method: 'PUT', urlContains: '/apps/app-goog', body: { success: true, result: { id: 'app-goog' } } },
+    {
+      method: 'GET',
+      urlContains: '/apps/app-goog/policies',
+      body: { success: true, result: [{ id: 'pol-goog', name: 'Allowed users', decision: 'allow', include: [] }] },
+    },
+  ];
+
+  const fixture = buildFixture(routes) as any;
+  try {
+    const { exitCode, stderr } = runSetupScript(fixture, ['goog.zerohumanworkforce.com', 'owner@gmail.com']);
+    assert.strictEqual(exitCode, 0, `Expected exit 0 but got ${exitCode}.\nstderr:\n${stderr}`);
+
+    const log = fixture.readCallLog();
+    const putCall = log.find(
+      (c) => c.method === 'PUT' && (c.url ?? '').includes('/apps/app-goog') && !(c.url ?? '').includes('policies'),
+    );
+    assert.ok(putCall, 'must PUT /apps/app-goog to add One-Time PIN');
+    const body = parseData(putCall);
+    assert.deepStrictEqual(body.allowed_idps, ['goog-222', 'otp-111'], 'keeps Google, adds One-Time PIN');
+    assert.strictEqual(body.auto_redirect_to_identity, false, 'auto-redirect must be off once two IdPs are allowed');
+    assert.strictEqual(body.name, 'Hand-named app', 'hand-set name must survive (GET-merge)');
+    assert.strictEqual(body.session_duration, '24h', 'hand-set session length must survive (GET-merge)');
+    assert.strictEqual(body.app_launcher_visible, false, 'hand-set launcher visibility must survive');
+    assert.strictEqual(body.custom_deny_message, 'hand-set deny page', 'hand-set deny page must survive');
+    for (const k of ['id', 'aud', 'uid', 'created_at', 'updated_at', 'policies']) {
+      assert.strictEqual(k in body, false, `read-only field ${k} must not be sent back`);
+    }
+    assert.ok(stderr.includes('Adding One-Time PIN to existing Access App app-goog'), 'must log the One-Time PIN add');
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+// ─── Scenario G: existing app with EMPTY allowed_idps → untouched ──
+// Empty allowed_idps means Cloudflare already offers every account IdP
+// (email code included). Writing a list would NARROW it, so no PUT.
+
+test('email code (g): existing app with empty allowed_idps (all methods) → no PUT', () => {
+  const routes: RouteFixture[] = [
+    {
+      method: 'GET',
+      urlContains: '/identity_providers',
+      body: { success: true, result: [{ id: 'otp-111', type: 'onetimepin', name: 'One-time PIN login' }] },
+    },
+    {
+      method: 'GET',
+      urlContains: '/apps?per_page=1000',
+      body: { success: true, result: [{ id: 'app-all', domain: 'all.zerohumanworkforce.com' }] },
+    },
+    {
+      method: 'GET',
+      urlContains: '/apps/app-all',
+      body: { success: true, result: { id: 'app-all', aud: 'aud-all', domain: 'all.zerohumanworkforce.com', allowed_idps: [] } },
+    },
+    {
+      method: 'GET',
+      urlContains: '/apps/app-all/policies',
+      body: { success: true, result: [{ id: 'pol-all', name: 'Allowed users', decision: 'allow', include: [] }] },
+    },
+  ];
+
+  const fixture = buildFixture(routes) as any;
+  try {
+    const { exitCode, stderr } = runSetupScript(fixture, ['all.zerohumanworkforce.com', 'owner@all.com']);
+    assert.strictEqual(exitCode, 0, `Expected exit 0 but got ${exitCode}.\nstderr:\n${stderr}`);
+    const log = fixture.readCallLog();
+    assert.strictEqual(log.some((c) => c.method === 'PUT'), false, 'an all-methods app must never be narrowed');
+    assert.ok(stderr.includes('already offers every available login method'), 'must log that no update was needed');
   } finally {
     fixture.cleanup();
   }

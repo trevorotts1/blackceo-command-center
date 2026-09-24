@@ -13,8 +13,9 @@
 #      attached when it already exists.
 #   2. Create (or update) a self-hosted Access Application for the subdomain
 #      (336h / 14-day session) whose allowed_idps lists One-Time PIN plus
-#      Google when available -- attaching Google to an already-existing app
-#      the first time it becomes available at the account level.
+#      Google when available -- and adding whichever of One-Time PIN / Google
+#      an already-existing app is missing (GET-merge PUT, Step 2b), so every
+#      client can sign in with an emailed code even if Google refuses them.
 #   3. Attach an "Allow" policy for the supplied emails. The policy no longer
 #      hardcodes a login-method requirement -- which of the app's allowed_idps
 #      a user authenticates through is enforced at the app level (step 2), not
@@ -245,54 +246,52 @@ APP_DETAIL=$(cf_call GET "/apps/${APP_ID}")
 APP_AUD=$(echo "$APP_DETAIL" | json_extract aud)
 
 # ---------------------------------------------------------------------------
-# Step 2b (P1-08): attach Google to an EXISTING app if it just became
-# available and isn't wired yet. GET-check-then-create-only-missing, applied
-# to the app's allowed_idps rather than to the app record itself: never
-# touches an app that already lists every currently-known IdP.
+# Step 2b: make sure an EXISTING app offers every available login method.
 #
-# KNOWN RESIDUE (documented per spec Section 2.7, not GET-merged here): a
-# Cloudflare PUT /apps/{id} REPLACES the app record with exactly the fields
-# in the body. This script sends only name/domain/type/session_duration/
-# allowed_idps, so if an app had any hand-set options in the Cloudflare
-# dashboard (app_launcher_visible, custom deny/block-page messages, CORS
-# headers, custom_non_identity_deny_url, etc.) BEFORE this PUT ran, those
-# options are reset to Cloudflare defaults by this call -- the script owns
-# and re-asserts only the 5 fields listed above on every app it touches.
-# Remediation if a box needs a hand-set option preserved: re-apply that
-# option in the dashboard AFTER this script runs (it is idempotent and will
-# not touch the app again once allowed_idps already matches), or extend this
-# PUT to GET-merge the full app record (`cf_call GET "/apps/${APP_ID}"`,
-# override only `allowed_idps` on the returned object, PUT the merged
-# object back) if per-app hand-set options become common enough to need
-# in-script preservation.
+# An app created by hand (or by an older script) can list only Google in
+# allowed_idps. Google sign-in fails for personal @gmail.com users while the
+# Google OAuth client is internal-only (Error 403: org_internal), so a client
+# with no email-code option is locked out. This step adds whatever of
+# One-Time PIN / Google the app is missing. It never removes an IdP the app
+# already lists, and never touches an app whose allowed_idps is empty (empty
+# means Cloudflare already offers every account IdP, including email code).
+#
+# Cloudflare's PUT /apps/{id} REPLACES the whole record, so the body is the
+# app's own GET result with only allowed_idps changed (GET-merge): hand-set
+# dashboard options (launcher visibility, deny pages, CORS, ...) survive.
+# Cloudflare also rejects auto_redirect_to_identity=true when more than one
+# IdP is allowed (API error 12130), so that flag is turned off in the same
+# PUT when the merged list has more than one entry.
 # ---------------------------------------------------------------------------
 
-if [ -n "$GOOGLE_IDP_ID" ]; then
-  APP_HAS_GOOGLE=$(echo "$APP_DETAIL" | GOOGLE_IDP_ID="$GOOGLE_IDP_ID" python3 -c "
+MERGE_RESULT=$(echo "$APP_DETAIL" | WANTED_IDPS="$ALLOWED_IDPS_JSON" OTP_IDP_ID="$OTP_IDP_ID" python3 -c "
 import json, os, sys
-target = os.environ.get('GOOGLE_IDP_ID', '')
+wanted = json.loads(os.environ['WANTED_IDPS'])
+otp = os.environ['OTP_IDP_ID']
 data = json.load(sys.stdin)
-result = data.get('result', data) if isinstance(data, dict) else data
-ids = (result.get('allowed_idps') or []) if isinstance(result, dict) else []
-print('yes' if target in ids else 'no')
-" || echo "no")
+app = data.get('result', data) if isinstance(data, dict) else {}
+current = app.get('allowed_idps') or []
+missing = [i for i in wanted if i not in current]
+if not current or not missing:
+    print(json.dumps({'missing': []}))
+    sys.exit(0)
+body = {k: v for k, v in app.items() if k not in ('id', 'aud', 'uid', 'created_at', 'updated_at', 'policies')}
+body['allowed_idps'] = current + missing
+if len(body['allowed_idps']) > 1 and body.get('auto_redirect_to_identity'):
+    body['auto_redirect_to_identity'] = False
+names = ['One-Time PIN' if i == otp else 'Google' for i in missing]
+print(json.dumps({'missing': names, 'body': body}))
+")
 
-  if [ "$APP_HAS_GOOGLE" = "no" ]; then
-    echo "==> Attaching Google IdP to Access App ${APP_ID} (already existed, Google newly available)..." >&2
-    cf_call PUT "/apps/${APP_ID}" "$(cat <<EOF
-{
-  "name": "${SUBDOMAIN} Command Center",
-  "domain": "${SUBDOMAIN}",
-  "type": "self_hosted",
-  "session_duration": "336h",
-  "allowed_idps": ${ALLOWED_IDPS_JSON}
-}
-EOF
-)" >/dev/null
-    echo "    Google IdP attached to ${APP_ID} alongside One-Time PIN." >&2
-  else
-    echo "    Access App ${APP_ID} already has Google attached. Skipping update." >&2
-  fi
+MISSING_IDP_NAMES=$(echo "$MERGE_RESULT" | python3 -c "import json,sys; print(', '.join(json.load(sys.stdin)['missing']))")
+
+if [ -n "$MISSING_IDP_NAMES" ]; then
+  echo "==> Adding ${MISSING_IDP_NAMES} to existing Access App ${APP_ID} (GET-merge PUT; nothing else changes)..." >&2
+  MERGED_APP_BODY=$(echo "$MERGE_RESULT" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['body']))")
+  cf_call PUT "/apps/${APP_ID}" "$MERGED_APP_BODY" >/dev/null
+  echo "    ${MISSING_IDP_NAMES} added to ${APP_ID}." >&2
+else
+  echo "    Access App ${APP_ID} already offers every available login method. Skipping update." >&2
 fi
 
 # ---------------------------------------------------------------------------
