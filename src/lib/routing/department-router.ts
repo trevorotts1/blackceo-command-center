@@ -30,6 +30,11 @@ import { canonicalDeptSlug } from './canonical-slug';
 import { isCatchAllWorkspace } from './catch-all-policy';
 import { resolveSpecialistSessionKey } from './executor-runtime';
 import {
+  selectRoleWorker,
+  workerProfileFromAgent,
+  type RoleSelectionTask,
+} from './role-selection';
+import {
   fetchEmbeddings,
   cosineSimilarity,
   getEmbeddingApiKey,
@@ -512,33 +517,44 @@ async function llmTiebreak(
  * Prefers agents whose role matches the department's agentRoles list,
  * then breaks ties by workspace_id match and load (fewer active_tasks wins).
  */
+export interface PickTaskContext {
+  title?: string | null;
+  description?: string | null;
+  outcome?: string | null;
+  artifactType?: string | null;
+  constraints?: string | null;
+  sopContext?: string | null;
+}
+
+/**
+ * JEV-015 seam: delegates to src/lib/routing/role-selection.ts.
+ * Two-stage pick (suitability gate, then deterministic capacity/load) over the
+ * department-scoped pool. Masters stay excluded here (legacy floor); the module
+ * owns offline/QC-only/unauthorized/foreign exclusions, task-aware fit, stable
+ * id tie-breaks, and busy-qualified queueing. Queued still returns the worker
+ * (existing capacity policy retains the assignment); none-suitable → undefined.
+ */
 function pickBestAgent(
   agents: AgentWithLoad[],
   department: DepartmentConfig,
+  task?: PickTaskContext | null,
 ): AgentWithLoad | undefined {
-  const available = agents.filter((a) => a.status !== 'offline' && !a.is_master && a.workspace_id === department.id);
-
-  type AgentScore = { agent: AgentWithLoad; score: number };
-  const deptCanon = canonicalDeptSlug(department.id);
-  const scored: AgentScore[] = available.map((agent) => {
-    const roleMatch = department.agentRoles.some((r) =>
-      agent.role.toLowerCase().includes(r.toLowerCase()),
-    )
-      ? 1
-      : 0;
-    // Direct workspace_id match (client's real id) OR canonical slug match
-    const workspaceMatch =
-      agent.workspace_id &&
-      (agent.workspace_id === department.id ||
-        canonicalDeptSlug(agent.workspace_id) === deptCanon)
-        ? 0.2
-        : 0;
-    const score = roleMatch + workspaceMatch - loadPenalty(agent.active_tasks);
-    return { agent, score };
-  });
-
-  scored.sort((a, b) => b.score - a.score);
-  return scored[0]?.agent;
+  const inDept = agents.filter((a) => !a.is_master && a.workspace_id === department.id);
+  if (inDept.length === 0) return undefined;
+  const pool = inDept.map((a) => workerProfileFromAgent(a));
+  const taskCtx: RoleSelectionTask = {
+    title: task?.title ?? '',
+    description: task?.description ?? null,
+    outcome: task?.outcome ?? null,
+    artifactType: task?.artifactType ?? null,
+    constraints: task?.constraints ?? null,
+    departmentId: department.id,
+    departmentName: department.name,
+    sopContext: task?.sopContext ?? null,
+  };
+  const result = selectRoleWorker(pool, taskCtx, { roleHint: department.agentRoles });
+  if (!result.worker) return undefined;
+  return inDept.find((a) => a.id === result.worker!.id);
 }
 
 // ---------------------------------------------------------------------------
@@ -675,7 +691,7 @@ export async function comDispatch(
       if (['general', 'general-task'].includes(slug) || ['general', 'general task'].includes(dept.name.trim().toLowerCase())) {
         return catchAllAssignment(agents, departments, 'Explicit General Task request');
       }
-      const agent = pickBestAgent(agents, dept);
+      const agent = pickBestAgent(agents, dept, task);
       if (agent) {
         return {
           agentId: agent.id,
@@ -726,7 +742,7 @@ export async function comDispatch(
         bestDept = semanticRanked[0].department;
       }
 
-      const agent = pickBestAgent(agents, bestDept);
+      const agent = pickBestAgent(agents, bestDept, task);
       if (agent) {
         const similarity = semanticRanked.find((s) => s.department === bestDept)?.similarity ?? 0;
         return {
@@ -750,7 +766,7 @@ export async function comDispatch(
 
   if (ranked.length > 0) {
     for (const { department, score } of ranked.slice(0, 1)) {
-      const agent = pickBestAgent(agents, department);
+      const agent = pickBestAgent(agents, department, { title, description });
       if (agent) {
         return {
           agentId: agent.id,
