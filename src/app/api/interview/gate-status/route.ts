@@ -1,3 +1,5 @@
+import { priorCompletion } from '@/lib/interview/prior-completion';
+import { tenantRegistration } from '@/lib/auth/tenant-context';
 import { verifiedBuild } from '@/lib/interview/build-verification';
 /**
  * GET /api/interview/gate-status (U010)
@@ -63,8 +65,16 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     : await resolveInterviewTenant(request);
   const refusedTenant = refuseUnverifiedTenant(tenant);
   if (refusedTenant) return refusedTenant;
+  let priorCompletionDeclared: boolean;
+  try {
+    const scope = internalOk ? tenantRegistration(new URL(`http://${claimedHost}`).hostname) : tenant.context!;
+    priorCompletionDeclared = priorCompletion(scope) !== null;
+  } catch {
+    return NextResponse.json({ error: 'completion_state_unavailable' }, { status: 503 });
+  }
   if (tenant.kind === 'client' && tenant.client) {
     return NextResponse.json({
+      priorCompletionDeclared,
       interviewComplete: tenant.client.interview_complete === true,
       buildCompleted: false,
       standardReady: false,
@@ -72,6 +82,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   }
   const bs = readBuildState();
   return NextResponse.json({
+    priorCompletionDeclared,
     interviewComplete: bs?.interviewComplete === true,
     buildCompleted: verifiedBuild(bs),
     standardReady: readStandardPrebuild(bs).standardReady,

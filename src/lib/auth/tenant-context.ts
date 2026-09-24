@@ -118,7 +118,7 @@ async function verifyAccessJwt(token: string, reg: TenantRegistration): Promise<
     const [headerRaw, payloadRaw, sig, extra] = token.split('.');
     if (extra || !sig) return null;
     const header = json(headerRaw), claims = json(payloadRaw);
-    if (header.alg !== 'RS256' || !header.kid || claims.iss !== reg.issuer || !Number.isFinite(claims.exp) || claims.exp <= Date.now()/1000 || (claims.nbf && claims.nbf > Date.now()/1000) || ![claims.aud].flat().includes(reg.audience)) return null;
+    if (header.alg !== 'RS256' || !header.kid || claims.iss !== reg.issuer || !Number.isFinite(claims.exp) || claims.exp <= Date.now()/1000 || (claims.nbf && claims.nbf > Date.now()/1000) || ![claims.aud].flat().includes(reg.audience) || typeof claims.sub !== 'string' || !claims.sub.trim()) return null;
     const signedEmail = typeof claims.email === 'string' && claims.email.trim() ? claims.email.trim() : null;
     // A registered subject is either the Access user id (`sub`) or the owner's
     // email. Access `sub` is an opaque per-account id the installer cannot know

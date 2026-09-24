@@ -7873,6 +7873,18 @@ export const migrations: Migration[] = [
       console.log(`[Migration 161] superseded ${result.changes} stale deliverable row(s) — none deleted`);
     },
   },
+  {
+    id: '162',
+    name: 'interview_prior_completion_declarations',
+    up: (db) => {
+      db.exec(`CREATE TABLE IF NOT EXISTS interview_prior_completion_declarations (
+        tenant_id TEXT NOT NULL, company_id TEXT NOT NULL, installation_id TEXT NOT NULL,
+        declared_by TEXT NOT NULL, declared_at TEXT NOT NULL,
+        source TEXT NOT NULL CHECK (source = 'owner-self-attestation'),
+        PRIMARY KEY (tenant_id, company_id, installation_id)
+      )`);
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner

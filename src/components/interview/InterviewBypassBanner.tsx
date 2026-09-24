@@ -9,7 +9,7 @@ async function isInterviewComplete(): Promise<boolean> {
     const r = await fetch('/api/interview/state', { cache: 'no-store' });
     if (!r.ok) return false;
     const d = await r.json().catch(() => ({}));
-    return d.interviewComplete === true || d.buildCompleted === true;
+    return d.interviewComplete === true || d.buildCompleted === true || d.priorCompletionDeclared === true;
   } catch { return false; }
 }
 

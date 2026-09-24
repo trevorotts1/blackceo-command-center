@@ -30,6 +30,9 @@
  */
 
 import path from 'path';
+import { headers } from 'next/headers';
+import { resolveTenantContext, type TenantContext } from '@/lib/auth/tenant-context';
+import { priorCompletion } from '@/lib/interview/prior-completion';
 import { loadCompanyConfig } from '@/lib/company-config';
 import { safeReadFileUtf8, safeReaddirNames } from '@/lib/fs/safe-fs';
 import { candidateWorkspaceRoots, resolveLogFile } from './sources';
@@ -77,6 +80,7 @@ export interface InterviewState {
    *  STANDARD_READY is the one non-completion signal: it marks the prebuilt-
    *  foundation state while `complete` stays false. */
   signal:
+    | 'owner-self-attestation'
     | 'client-flag'
     | 'company-config-kpis'
     | 'interview-answers-file'
@@ -229,8 +233,18 @@ function tryBackfillClientFlag(clientId: string | null): void {
  * correctly be detected as complete. The DB flag is backfilled automatically
  * so the false-gating disappears on the next status poll.
  */
-export async function getInterviewState(): Promise<InterviewState> {
+export async function getInterviewState(context?: TenantContext): Promise<InterviewState> {
   const checkedAt = new Date().toISOString();
+  // Same durable, installation-bound declaration as the shell gate. Never
+  // backfill build/transcript evidence from an owner's self-attestation.
+  try {
+    const owner = context ?? await resolveTenantContext({ headers: new Headers(await headers()) });
+    if (priorCompletion(owner)) return {
+      complete: true, known: true, signal: 'owner-self-attestation',
+      detail: 'Owner declared prior interview completion; no answers or build evidence were created.',
+      checkedAt, standardReady: false,
+    };
+  } catch { /* No verified request scope: do not infer a declaration from host alone. */ }
 
   // 1. Per-client DB flag (E3).
   const clientFlag = await clientFlagSignal();
