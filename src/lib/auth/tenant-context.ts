@@ -215,11 +215,12 @@ async function verifyAccessJwt(token: string, reg: TenantRegistration): Promise<
           '[tenant] JWKS refresh failed; falling back to cached keys:',
           err instanceof Error ? err.message : String(err),
         );
-        cached = jwks.get(reg.issuer) ?? null;
-        if (!cached) return null;
+        const stale = jwks.get(reg.issuer);
+        if (!stale) return null;
+        cached = stale;
       }
     }
-    const keyData = cached!.keys.find(k => (k as JsonWebKey & {kid?: string}).kid === header.kid);
+    const keyData = cached?.keys.find(k => (k as JsonWebKey & {kid?: string}).kid === header.kid);
     if (!keyData || keyData.kty !== 'RSA') return null;
     const key = await crypto.subtle.importKey('jwk', keyData, {name: 'RSASSA-PKCS1-v1_5', hash:'SHA-256'}, false, ['verify']);
     if (!await crypto.subtle.verify('RSASSA-PKCS1-v1_5', key, bytes(sig), enc.encode(`${headerRaw}.${payloadRaw}`))) return null;
