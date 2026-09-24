@@ -55,6 +55,7 @@ import {
 } from '@/lib/interview/seam';
 import { refreshInterviewMirror } from '@/lib/interview/mirror';
 import { answersFilePath, answersEncFilePath } from '@/lib/interview/paths';
+import { isEncryptedEnvelope, readEncryptedFile } from '@/lib/interview/crypto';
 import { readTranscriptText } from '@/lib/interview/seam';
 import { writeEncryptedFile } from '@/lib/interview/crypto';
 import { mirrorCompanyAnswer } from '@/lib/interview/company-mirror';
@@ -131,6 +132,44 @@ function isHttpUrl(value: string): boolean {
  *
  * Returns the resolved encrypted transcript path (for the response / logging).
  */
+/**
+ * Item (1), in-lane half: quarantine a transcript whose encrypted store exists
+ * but no longer decrypts, BEFORE appendAnswerBlock would append to a blank
+ * slate and re-encrypt over it. A decrypt failure with an `.enc` file present
+ * means either the key rotated under the data or the file is corrupt — in both
+ * cases appending a fresh transcript and renaming over the old `.enc` would
+ * destroy answers that are still recoverable (old key, backup, operator
+ * repair). So the route refuses with `answers_unreadable` (500) and renames
+ * the suspect file to `<enc>.quarantine-<epoch>` for forensics, leaving the
+ * plaintext fallback path (no `.enc` at all) untouched. The seam.ts proper
+ * fix (decrypt_failed distinct state) is ILF-005-owned, CROSS-LANE.
+ */
+function quarantineUnreadableTranscript(): string | null {
+  try {
+    const encPath = answersEncFilePath();
+    const plainPath = answersFilePath();
+    if (encPath === plainPath) return null;
+    if (!fs.existsSync(encPath)) return null;
+    let envelope: string;
+    try {
+      envelope = fs.readFileSync(encPath, 'utf-8');
+    } catch {
+      return null;
+    }
+    if (!isEncryptedEnvelope(envelope)) return null;
+    if (readEncryptedFile(encPath) !== null) return null;
+    const quarantined = `${encPath}.quarantine-${Date.now()}`;
+    try {
+      fs.renameSync(encPath, quarantined);
+    } catch {
+      return encPath;
+    }
+    return quarantined;
+  } catch {
+    return null;
+  }
+}
+
 function appendAnswerBlock(args: {
   question: string;
   answer: string;
@@ -139,6 +178,13 @@ function appendAnswerBlock(args: {
   const encPath = answersEncFilePath();
   const plainPath = answersFilePath();
   fs.mkdirSync(path.dirname(encPath), { recursive: true });
+
+  // Item (1): quarantine before read. File exists but decrypt fails = refuse
+  // with 500 in the caller, never append-over-corrupt.
+  const quarantined = quarantineUnreadableTranscript();
+  if (quarantined) {
+    throw new Error(`refusing to append: encrypted transcript unreadable, quarantined to ${quarantined}`);
+  }
 
   // 1. Read existing transcript (handles .enc, plaintext, and merge cases).
   const { text: existing, exists } = readTranscriptText();
@@ -343,12 +389,21 @@ export async function POST(req: NextRequest) {
       confirmedFromContext: body.confirmedFromContext,
     });
   } catch (err) {
+    // Item (1): quarantine refusal surfaces as a distinct code so the client
+    // knows answers are preserved, not lost — retry after the operator repairs
+    // the key/file, do not start over.
+    const quarantined = err instanceof Error && err.message.startsWith('refusing to append: encrypted transcript unreadable');
     return NextResponse.json(
-      {
-        error: 'answers_write_failed',
-        message: 'Your answer could not be saved to the interview transcript. Please try again.',
-        detail: err instanceof Error ? err.message : 'unknown error',
-      },
+      quarantined
+        ? {
+          error: 'answers_unreadable',
+          message: 'Your saved answers are temporarily unreadable, so this answer was not saved on top of them. They are preserved for repair — please retry later, do not start over.',
+        }
+        : {
+          error: 'answers_write_failed',
+          message: 'Your answer could not be saved to the interview transcript. Please try again.',
+          detail: err instanceof Error ? err.message : 'unknown error',
+        },
       { status: 500 },
     );
   }
