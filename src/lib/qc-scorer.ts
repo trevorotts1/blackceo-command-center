@@ -3358,18 +3358,147 @@ export interface AcceptanceCriterion {
  * This function is deterministic (no LLM call) so it can be called at task
  * creation time without latency cost.
  */
+/**
+ * KAN-003: strip machine-written audit annotations, provenance trailers,
+ * prior-state history, URLs and filesystem paths from task text BEFORE
+ * image/deck detection.
+ *
+ * Every QC kickback, cap block and stale-sweep handback is PREPENDED to
+ * `tasks.description`, so after a few loops the description is mostly audit
+ * history. Raw text then matches the image/deck regexes on words the owner
+ * never wrote — `valid_image` / `language_match` inside a pasted QC gap list,
+ * `concept deck at <path>` inside a PRIOR-STATE already-produced note — and
+ * derive mints render gates (AF-LANG / AF-NUM / AF-SPELL / pipeline /
+ * coverage) for a markdown-only card. Those gates fail closed (2.8/10 →
+ * QC-UNROUTEABLE → blocked) on work that was never a render.
+ *
+ * Detection text only — the stored description is untouched.
+ *
+ * ponytail: marker list is EN-only and audit-format-specific; if briefs gain
+ * new machine prefixes, add them here — or split stored provenance/history
+ * into their own columns so detection never sees them.
+ */
+export function cleanDetectionText(title: string, description?: string | null): string {
+  const combined = [title, description].filter(Boolean).join('\n');
+  const lines = combined.split('\n').filter((line) => {
+    const t = line.trim();
+    if (!t) return false;
+    if (/^\[(STALE-RETURN|QC-[^\]]*|RETURN)\]/.test(t)) return false;
+    if (/^(Problem|Tried|Needs|Suggested dept):/i.test(t)) return false;
+    if (/^---\s*$/.test(t)) return false;
+    return true;
+  });
+  let text = lines.join('\n');
+  // Inline audit verdicts appended mid-line by the kickback / cap-block paths
+  // (append, not newline-bracket, so the line filter above never sees them).
+  // Gap text pasted here carries standalone trigger words the owner never
+  // wrote ("File is a valid image ...", "Deck pipeline records ...").
+  text = text.replace(/\[(QC-FAIL|QC-BLOCKED|QC-CAP-ALERT)[^\n]*/gi, ' ');
+  text = text.replace(/QC-UNROUTEABLE:[^.]*\./gi, ' ');
+  text = text.replace(/Failed QC \d+x[^.]*\./gi, ' ');
+  text = text.replace(/\bscore \d+(\.\d+)?\/10[^.]*\./gi, ' ');
+  // URLs + path tokens FIRST: extensions inside paths (deck.pptx) must not
+  // count as types, and stripping them first lets the provenance sentence
+  // patterns below match cleanly ("PRIOR STATE: concept deck at <path>
+  // already produced" would otherwise leave "pptx already produced" behind
+  // after the sentence cut at the path's first period).
+  text = text.replace(/https?:\/\/\S+/gi, ' ');
+  text = text
+    .split(/\s+/)
+    .filter((tok) => tok && !tok.includes('/'))
+    .join(' ');
+  // Prior-state history is provenance, never the current brief.
+  text = text.replace(/\bPRIOR STATE:[^.]*\./gi, ' ');
+  text = text.replace(/\bArtifacts?\s+already\s+(produced|delivered|shipped|completed|attached)[^.]*\./gi, ' ');
+  // Rework-reuse trailer appended by the kickback path ("Already delivered
+  // and STILL VALID — do NOT regenerate: <paths>...") — names files the last
+  // attempt left, not new render intent.
+  text = text.replace(/\bAlready\s+(delivered|produced|shipped|completed|attached)\b[^.]*\./gi, ' ');
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+// ---------------------------------------------------------------------------
+// ART-001: select render gates from the SHIPPED artifact type, not the brief.
+//
+// deriveAcceptanceCriteria mints gates from request TEXT. Text lies: audit
+// history, prior-state notes, paths and aspirational words ("deck", "slide",
+// "render") mint valid_image / vision_match / AF-LANG / AF-NUM / AF-SPELL /
+// pipeline_complete / coverage for a card whose only artifact is a .md
+// concepts doc. Those gates fail closed on markdown, so the card burns its
+// reroute budget on checks its artifact type can never answer (the
+// badge-journey-week1-concepts shape: 2.8/10 QC-UNROUTEABLE loop).
+//
+// criteriaForManifest narrows text-derived criteria to the gates the manifest
+// can answer: image-class gates stay only with a valid image item, deck-class
+// gates only with a valid deck file (.pptx/.pdf/.key). Baseline
+// (deliverable_registered) + existence always stay — a markdown artifact draws
+// markdown-appropriate checks and keeps SOP-rubric content review (Mode A),
+// never vision/slide-count gates. Genuine failures survive: no deck file on a
+// deck card still fails content review, evidence, and cert gates; stripping a
+// gate the artifact cannot answer is not passing it.
+//
+// ponytail: .pdf counts as deck-shaped (matches the AF-I14 convention); a pdf
+// REPORT on a slide-mentioning card keeps deck gates. Split report-pdf from
+// deck-pdf when a case proves it matters.
+const IMAGE_GATE_TYPES: ReadonlySet<string> = new Set([
+  'valid_image',
+  'min_resolution',
+  'vision_match',
+  'language_match',
+  'numeric_fidelity',
+  'spelling_fidelity',
+]);
+const DECK_GATE_TYPES: ReadonlySet<string> = new Set(['pipeline_complete', 'coverage']);
+
+/** True when the manifest holds a valid image artifact. */
+export function manifestHasImageArtifact(manifest: DeliverableManifestItem[]): boolean {
+  return manifest.some((m) => m.valid && m.type === 'image');
+}
+
+/** True when the manifest holds a valid deck file. */
+export function manifestHasDeckArtifact(manifest: DeliverableManifestItem[]): boolean {
+  return manifest.some((m) => m.valid && !!m.path && /\.(pptx|pdf|key)$/i.test(m.path));
+}
+
+/**
+ * Narrow text-derived criteria to the gates the shipped artifacts can answer.
+ * Pure. Null/empty manifest returns criteria unchanged (no evidence to select
+ * from; invariant A owns that shape).
+ */
+export function criteriaForManifest(
+  criteria: AcceptanceCriterion[],
+  manifest: DeliverableManifestItem[] | null,
+): AcceptanceCriterion[] {
+  if (!manifest || manifest.length === 0) return criteria;
+  const hasImage = manifestHasImageArtifact(manifest);
+  const hasDeck = manifestHasDeckArtifact(manifest);
+  if (hasImage && hasDeck) return criteria;
+  return criteria.filter((c) => {
+    if (IMAGE_GATE_TYPES.has(c.type) && !hasImage) return false;
+    if (DECK_GATE_TYPES.has(c.type) && !hasDeck) return false;
+    return true;
+  });
+}
+
 export function deriveAcceptanceCriteria(
   title: string,
   description?: string | null,
 ): AcceptanceCriterion[] {
-  const text = [title, description].filter(Boolean).join(' ').toLowerCase();
+  // KAN-003: detect on CLEANED text only. Raw descriptions accumulate audit
+  // history (QC kickbacks, cap blocks, stale handbacks), URLs and filesystem
+  // paths — all of which contain words the owner never wrote ("valid_image",
+  // "language_match", "concept deck at <path>") that mint render gates for a
+  // markdown-only card. The stored description is untouched; only detection
+  // sees the cleaned text.
+  const detectionSource = cleanDetectionText(title, description);
+  const text = detectionSource.toLowerCase();
 
   // Detect image / deck tasks. Decks/presentations are artifact tasks too — they
   // ship rendered slide images + a .pptx and must carry the AF-LANG/AF-NUM/
   // AF-SPELL render gates AND (deck-only) the AF-PIPELINE-COMPLETE gate.
   const isImageTask =
     /\b(image|picture|photo|png|jpg|jpeg|gif|illustration|render|graphic|logo|banner|thumbnail|duck|draw|generate.*image|create.*image)\b/.test(text);
-  const isDeckTask = describesDeckDeliverable(title, description ?? null);
+  const isDeckTask = describesDeckDeliverable(title, detectionSource);
 
   // ── BASELINE CRITERION — applies to EVERY task, no exceptions (T0-01) ──────
   // This function used to `return []` here for anything that was not an image
@@ -3439,7 +3568,7 @@ export function deriveAcceptanceCriteria(
   }
 
   // Vision match: does the image depict what was requested?
-  const subjectText = [title, description].filter(Boolean).join('. ');
+  const subjectText = detectionSource;
   criteria.push({
     id: 'vision_match',
     description: `Image depicts the requested subject: "${subjectText}"`,
@@ -3470,7 +3599,7 @@ export function deriveAcceptanceCriteria(
   // render money tokens are diffed against it. Any rendered money amount not in
   // the spec is a HARD FAIL. Carries the spec copy so the comparison is
   // self-contained (no extra plumbing through the manifest).
-  const specCopy = [title, description].filter(Boolean).join('\n');
+  const specCopy = detectionSource;
   criteria.push({
     id: 'numeric_fidelity',
     description:
@@ -3502,7 +3631,13 @@ export function deriveAcceptanceCriteria(
   // upload. The required records are looked up on disk at evaluation time
   // (the run dir is resolved from the deck artifact path); if any is absent the
   // deck is NOT done. Fail-closed: an unreadable/missing run dir blocks too.
-  if (describesDeckDeliverable(title, description ?? null)) {
+  // KAN-003: deck-only gates key on the SAME cleaned-text verdict as the
+  // image/deck split above (isDeckTask), never on raw description. Raw text
+  // accumulates PRIOR-STATE already-produced notes ("concept deck at <path>")
+  // that would otherwise mint pipeline_complete/coverage for a card the
+  // cleaned split already ruled non-deck — including a genuine IMAGE task,
+  // which must carry render gates but no deck-pipeline gates.
+  if (isDeckTask) {
     criteria.push({
       id: 'pipeline_complete',
       description:
@@ -5678,7 +5813,13 @@ export async function runEngineOwnedDeckQC(
   }
 
   // ── 2. Deterministic artifact checklist ONLY ───────────────────────────────
-  const criteria = deriveAcceptanceCriteria(task.title, task.description);
+  // ART-001: narrow to the gates the SHIPPED artifacts can answer. Text minting
+  // render gates for a markdown-only card is the badge-journey misclassification;
+  // the deck-cert and pipeline content gates below stay untouched.
+  const criteria = criteriaForManifest(
+    deriveAcceptanceCriteria(task.title, task.description),
+    deliverableManifest,
+  );
   const criteriaResult = await evaluateCriteria(criteria, deliverableManifest);
   const failedCriteria = criteriaResult.results.filter((r) => !r.pass && !r.skipped);
   const failReasons = failedCriteria.map((r) => `${r.id}: ${r.reason}`);
@@ -6434,8 +6575,13 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
     }
 
     if (deliverableManifest && deliverableManifest.length > 0) {
-      // Artifact mode: use the pre-computed criteria (derived above for invariant A).
-      const criteria = artifactCriteriaForTitle;
+      // Artifact mode: use the pre-computed criteria (derived above for invariant A),
+      // narrowed (ART-001) to the gates the SHIPPED artifacts can answer: a .md
+      // concepts doc draws baseline + existence (+ Mode A content review below),
+      // never valid_image / vision / AF-LANG / AF-NUM / AF-SPELL / pipeline /
+      // coverage. Image and deck artifacts keep their full gate sets, so genuine
+      // render failures still fail here.
+      const criteria = criteriaForManifest(artifactCriteriaForTitle, deliverableManifest);
 
       // ── Which checklist can actually JUDGE this deliverable? (T0-01) ────────
       // Branch on the RENDER gates, not on `criteria.length`. Every task now
