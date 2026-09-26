@@ -455,6 +455,16 @@ const TRANSCRIPT_LOCK_WAIT_MS = 10_000;
  */
 export function withTranscriptLock<T>(encPath: string, fn: () => T): T {
   const lock = transcriptLockPath(encPath);
+  // ILJ-011: the lockdir's parent may not exist pre-first-answer (no
+  // company-discovery/ dir). Without this, mkdir fails ENOENT — not EEXIST —
+  // and the catch below mistakes it for contention, wedging the event loop on
+  // Atomics.wait for the full 10s deadline on every read-only path.
+  try {
+    fs.mkdirSync(path.dirname(encPath), { recursive: true });
+  } catch {
+    // Best-effort: if the parent truly cannot be created, the lock mkdir
+    // below fails and the ENOENT guard breaks out immediately.
+  }
   const deadline = Date.now() + TRANSCRIPT_LOCK_WAIT_MS;
   let held = false;
   for (;;) {
@@ -462,7 +472,12 @@ export function withTranscriptLock<T>(encPath: string, fn: () => T): T {
       fs.mkdirSync(lock);
       held = true;
       break;
-    } catch {
+    } catch (err) {
+      // ILJ-011: ENOENT = missing parent, never contention. Break out
+      // immediately instead of spinning to the deadline.
+      if ((err as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') {
+        throw new Error(`transcript lock parent missing, refusing to spin: ${encPath}`);
+      }
       let stale = false;
       try {
         const age = Date.now() - fs.statSync(lock).mtimeMs;
