@@ -471,6 +471,44 @@ _ccbi_set_transaction_phase() {
   return 0
 }
 
+# _ccbi_sync_worktree_to_deploy_revision — Phase 3 tail, strictly bounded.
+# Moves the live APP_DIR worktree onto DEPLOY_REVISION so the served artifact
+# and the source tree agree for the startup content guard. Hard preconditions:
+#   * HEAD already == DEPLOY_REVISION → nothing to do (return 0).
+#   * DIRTY tracked worktree (staged or unstaged changes) → ABORT the SYNC
+#     ONLY (rc 1): the promoted artifact + dependencies stay in place; the
+#     caller exits 2 with a loud receipt. Discarding dirty work is forbidden.
+#   * Detached HEAD or any branch → both fine; the sync lands on the deployed
+#     commit, which is exactly the state the guard attests.
+# Untracked files are NOT dirt for this check (--untracked-files=no): the
+# private candidate dir (.release-candidate.<pid> inside APP_DIR) is itself
+# untracked, and untracked files neither affect the explicit-revision verify
+# (it compares the COMMIT's inventory, not the worktree's) nor block
+# `git checkout` unless a tracked file collides — in which case the checkout
+# below fails and the sync still aborts loudly (rc 1).
+# The move itself is `git checkout <sha>` on a proven-clean tree: it can only
+# land on the verified commit or fail; on failure the sync aborts (rc 1).
+_ccbi_sync_worktree_to_deploy_revision() {
+  local live_head pre_dirty
+  live_head="$(git -C "$APP_DIR" rev-parse HEAD 2>/dev/null || true)"
+  if [[ -n "$live_head" && "$live_head" == "$DEPLOY_REVISION" ]]; then
+    _ok "  Live worktree already at deployed revision ${DEPLOY_REVISION}; no sync needed."
+    return 0
+  fi
+  pre_dirty="$(git -C "$APP_DIR" status --porcelain --untracked-files=no 2>/dev/null || echo 'unknown')"
+  if [[ -n "$pre_dirty" ]]; then
+    _preflight_abort_receipt "Live worktree is DIRTY (uncommitted changes) so it cannot be synced to deployed revision ${DEPLOY_REVISION}. The candidate artifact and dependencies are PROMOTED; the startup content guard will refuse (exit 78) until the tree is synced by hand: commit or shelve the live-tree changes, then run: git -C ${APP_DIR} checkout ${DEPLOY_REVISION}. Dirty state that blocked the sync:"
+    printf '%s\n' "$pre_dirty" | head -20 >&2
+    return 1
+  fi
+  if git -C "$APP_DIR" checkout "$DEPLOY_REVISION" 2>&1; then
+    _ok "  Live worktree synced to deployed revision ${DEPLOY_REVISION} (was ${live_head:-unknown})."
+    return 0
+  fi
+  _preflight_abort_receipt "Could not sync the live worktree to deployed revision ${DEPLOY_REVISION} (was ${live_head:-unknown}). The candidate artifact and dependencies are PROMOTED; sync by hand: git -C ${APP_DIR} checkout ${DEPLOY_REVISION}."
+  return 1
+}
+
 _ccbi_archive_transaction_receipt() {
   local outcome="$1"
   [[ -f "$TRANSACTION_RECEIPT" ]] || return 0
@@ -1564,9 +1602,11 @@ if ! _ccbi_native_gate "$RELEASE_DIR"; then
   exit 2
 fi
 
-# The candidate inventory is the explicit-revision inventory. APP_DIR may be
-# dirty without changing what was built; cc-start's content guard remains
-# responsible for reporting any live-tree mismatch at runtime.
+# The candidate inventory is the explicit-revision inventory. The live worktree
+# is synced to the deployed revision at the Phase 3 head (below) when it names
+# a different revision than HEAD, so cc-start.sh's content guard verifies the
+# served artifact against the tree it was built from; cc-start.sh itself is
+# unchanged and still refuses any genuine artifact-vs-tree mismatch.
 POST_BUILD_INVENTORY="$CANDIDATE_SOURCE_INVENTORY"
 _ok "  Frozen-source proof passed — candidate matches revision ${DEPLOY_REVISION} (${POST_BUILD_INVENTORY})."
 
@@ -1635,6 +1675,13 @@ if ! mv "$BUILD_TMP" "${APP_DIR}/.next"; then
   exit 2
 fi
 if ! _ccbi_set_transaction_phase CANDIDATE_LIVE; then
+  exit 2
+fi
+# Phase 3 tail: the promoted artifact was built from DEPLOY_REVISION. Sync the
+# live worktree onto that same commit so the startup content guard compares the
+# artifact against the tree it came from. Bounded: already-there is a no-op;
+# a dirty tree aborts the sync loudly (exit 2) without discarding any work.
+if ! _ccbi_sync_worktree_to_deploy_revision; then
   exit 2
 fi
 rm -rf "$OLD_NEXT_PARK" 2>/dev/null || true
