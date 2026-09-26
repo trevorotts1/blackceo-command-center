@@ -27,6 +27,10 @@ import { resolveIngestSourceRef } from '@/components/anthology/anthology-card';
 // returned a 401 only after a length-mismatched compare could not happen.
 import { resolveWorkspaceId } from '@/lib/company-scope';
 import { verifyWebhookSignature } from '@/lib/webhook-signature';
+// A13 (spec 12.2) — raw conversational intake is classified through the
+// EXISTING JEV-010 intake module (classify + the creation gate); this route
+// wires that module, it never re-implements a classifier.
+import { classify, assertTaskCreationAllowed, normalizeIntakeMessage, type Classification } from '@/lib/intake';
 // queryOne is still used for workspace resolution below.
 
 export const dynamic = 'force-dynamic';
@@ -110,6 +114,16 @@ let selfHealState: 'idle' | 'running' | 'done' = 'idle';
 interface IngestPayload {
   persona_bundle?: unknown;
   title?: unknown;
+  /**
+   * A13 (spec 12.2) — RAW conversational intake. Read ONLY when `title` is
+   * absent: the text is classified by the EXISTING intake module (classify)
+   * and must pass the creation gate before a card exists. Only task_request /
+   * mixed_answer_and_task create a card; the card's operation id is derived
+   * deterministically from the message hash, so re-ingesting the same message
+   * creates no second card. A typed payload carrying `title` never enters this
+   * door and is never re-classified (spec 4.2).
+   */
+  message?: unknown;
   description?: unknown;
   priority?: unknown;
   /**
@@ -384,12 +398,44 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
     }
 
-    const title = typeof body.title === 'string' ? body.title.trim() : '';
+    let title = typeof body.title === 'string' ? body.title.trim() : '';
     let presentationIntake: ReturnType<typeof parseOperatorPresentationContract> | null = null;
     if (body.presentation_intake !== undefined) {
       try { presentationIntake = parseOperatorPresentationContract(body.presentation_intake); }
       catch (err) { return NextResponse.json({ error: (err as Error).message }, { status: 400 }); }
       if (presentationIntake.title !== title) return NextResponse.json({ error: 'presentation_intake title must match task title' }, { status: 400 });
+    }
+    // ── A13 (spec 12.2): the RAW conversational door ─────────────────────────
+    // A payload with no `title` but a `message` is conversational intake, not a
+    // typed command: it goes through the EXISTING intake module — classify()
+    // then the creation gate — before any card can exist. Only a work-bearing
+    // verdict (task_request / mixed_answer_and_task) creates a card, exactly
+    // once: the operation id below is derived from the message hash, so the
+    // same message re-ingested finds its prior card instead of minting a
+    // second. A typed payload (title present) never enters this branch and is
+    // never re-classified (spec 4.2).
+    let rawIntake: { classification: Classification; message: string } | null = null;
+    if (!title && typeof body.message === 'string' && body.message.trim()) {
+      const message = body.message.trim();
+      const classification = await classify(message);
+      if (classification.intent !== 'task_request' && classification.intent !== 'mixed_answer_and_task') {
+        // answer_only / existing_task_control / clarification_response /
+        // social_conversation / unresolved — no card (spec 16.2 A11/A13).
+        return NextResponse.json(
+          { ok: true, created: false, intent: classification.intent, task_id: null },
+          { status: 200 },
+        );
+      }
+      if (!classification.bypassAllowed || classification.controlProbe) {
+        // The module's own control-probe verdict: untrusted material, never a
+        // creation authorization (spec 4.4 last row).
+        return NextResponse.json({ error: 'control_probe_never_creates', intent: classification.intent }, { status: 403 });
+      }
+      assertTaskCreationAllowed({ kind: 'raw', message, classification });
+      rawIntake = { classification, message };
+      // The card title is the message itself; the 500-char boundary is the
+      // route's existing title ceiling (MAX_TITLE_CHARS in the intake module).
+      title = normalizeIntakeMessage(message).slice(0, 500);
     }
     if (!title) {
       return NextResponse.json({ error: 'title is required' }, { status: 400 });
@@ -798,7 +844,14 @@ export async function POST(request: NextRequest) {
     if (headerKey && idempotencyKey && headerKey !== idempotencyKey) {
       return NextResponse.json({ error: 'conflicting_idempotency_keys' }, { status: 400 });
     }
-    const dedupeKey = headerKey || idempotencyKey || sourceRef || uuidv4();
+    const dedupeKey =
+      headerKey ||
+      idempotencyKey ||
+      sourceRef ||
+      // A13: a raw-conversational card's operation id IS the message hash, so
+      // re-ingesting the same message is the same operation (dedupe hit, no
+      // second card) while a different message is a different card.
+      (rawIntake ? `intake-msg:${rawIntake.classification.messageHash}` : uuidv4());
     if (dedupeKey.length > 512) return NextResponse.json({ error: 'idempotency_key_too_long' }, { status: 400 });
     const { idempotency_key: _operationKey, ...semanticPayload } = body;
     // Hash the parsed canonical intake rather than caller spelling so a harmless
