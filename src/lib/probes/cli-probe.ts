@@ -74,8 +74,11 @@ const loginPathDirs = (() => {
         timeout: 1000,
         stdio: ['ignore', 'pipe', 'ignore'],
       });
+      // QR-012: rc banners precede the PATH, so take the last line.
       cached = out
         .trim()
+        .split(/\r?\n/)
+        .pop()!
         .split(path.delimiter)
         .filter((dir) => dir.length > 0 && path.isAbsolute(dir));
     } catch {
