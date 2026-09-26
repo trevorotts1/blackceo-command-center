@@ -89,23 +89,27 @@ export async function submitInterviewAnswer(
   const payload=JSON.stringify(buildAnswerPayload(req));
   const identity=pendingAnswerIds.get(payload) || crypto.randomUUID();
   pendingAnswerIds.set(payload,identity);
-  let res: Response;
-  try {
-    res = await fetch('/api/interview/answer', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'idempotency-key': identity },
-      body: payload,
-    });
-  } catch {
-    return {
-      ok: false,
-      message: 'Network hiccup — that answer did not save. Please try again.',
-    };
-  }
 
-  const data = (await res.json().catch(() => ({}))) as AnswerResponse;
+  // The single POST path both the first attempt and the one retry share:
+  // IDENTICAL body, IDENTICAL 'idempotency-key'. Null = transport failure.
+  const postAnswer = async (): Promise<Response | null> => {
+    try {
+      return await fetch('/api/interview/answer', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'idempotency-key': identity },
+        body: payload,
+      });
+    } catch {
+      return null;
+    }
+  };
 
-  if (!res.ok) {
+  const readData = async (res: Response): Promise<AnswerResponse> =>
+    (await res.json().catch(() => ({}))) as AnswerResponse;
+
+  // Today's response-shape handling, untouched: 401/403 sign-in help, SOFT
+  // success on appended:true, message fallback otherwise.
+  const toFailure = (res: Response, data: AnswerResponse): SubmitResult => {
     if (res.status === 401 || res.status === 403) return { ok: false, status: res.status, message: INTERVIEW_SIGN_IN_HELP };
     // SOFT success: the transcript append landed (`appended: true`) but the
     // progress stamp failed (script missing / non-zero exit → 502/503). The
@@ -122,10 +126,60 @@ export async function submitInterviewAnswer(
         data.error ??
         'Something went wrong saving that. Please try again.',
     };
+  };
+
+  const succeed = (res: Response, data: AnswerResponse): SubmitResult => {
+    pendingAnswerIds.delete(payload);
+    return { ok: true, data };
+  };
+
+  const first = await postAnswer();
+  if (!first) {
+    return {
+      ok: false,
+      message: 'Network hiccup — that answer did not save. Please try again.',
+    };
+  }
+  if (first.ok) return succeed(first, await readData(first));
+  if (first.status !== 401) return toFailure(first, await readData(first));
+
+  // WHY this retry exists: the mc_csrf_token cookie lives 1 hour
+  // (csrf-protection.ts CSRF_COOKIE_TTL_SECONDS) and is re-minted on page
+  // load, so a long interview sitting outlives it and the next answer POST
+  // 401s at the middleware CSRF gate — with the typed answer still on screen.
+  // A 401 here is CSRF-expiry class: the answer route itself never emits 401
+  // (only 400/403/500/502/503/429), so the middleware refused BEFORE the
+  // route ran and the first attempt never wrote anything. A same-origin GET
+  // to /api/interview/gate-status heals the stale cookie (cheap JSON ping,
+  // auth-bypassed so the heal itself can never 401/302 — never the /interview
+  // document, which is a heavy HTML navigation subject to shell-lock gating),
+  // then the POST is retried EXACTLY ONCE with the SAME idempotency-key, so a
+  // double-submit is safe (client-tenant path dedupes on operation_id in
+  // queueInterviewOperation; operator path never executed the first attempt).
+  // Hard bound: 2 answer-route POSTs total, never a loop. 403 is a tenant /
+  // identity refusal, not a stale cookie, so it is never retried. The typed
+  // answer is never cleared here — clearDraft() still runs only on success in
+  // the card submit callbacks, so ANY failure keeps the draft intact.
+  try {
+    await fetch('/api/interview/gate-status', {
+      method: 'GET',
+      credentials: 'same-origin',
+      cache: 'no-store',
+    });
+  } catch {
+    // Best-effort heal ping: even if it fails, the single bounded retry below
+    // is still safe (same idempotency key), so attempt it regardless.
   }
 
-  pendingAnswerIds.delete(payload);
-  return { ok: true, data };
+  const second = await postAnswer();
+  if (!second) {
+    return {
+      ok: false,
+      message: 'Network hiccup — that answer did not save. Please try again.',
+    };
+  }
+  if (second.ok) return succeed(second, await readData(second));
+  return toFailure(second, await readData(second));
 }
 
 /* -------------------------------------------------------------------------- */

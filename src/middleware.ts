@@ -20,6 +20,7 @@ import {
   CSRF_COOKIE_ATTRIBUTES,
   signCsrfToken,
   verifyCsrfToken,
+  isExpiredAuthenticCsrfToken,
   isReadOnlyMethod,
 } from '@/lib/csrf-protection';
 
@@ -402,6 +403,34 @@ function unauthorized(
 }
 
 /**
+ * CSF-002: re-mint CSRF ONLY for authentic-but-expired tokens.
+ *
+ * WHY: re-minting requires presenting a genuinely signed token that lapsed, so
+ * an attacker gains nothing they did not already get from an unauthenticated
+ * page-load mint. Re-minting for forged/absent tokens would hand a free token
+ * to any direct-to-origin caller. FORGED, ABSENT, or WRONG-ROLE tokens return
+ * the plain 401 with NO cookie — narrow mint surface.
+ */
+async function unauthorizedWithCsrfSelfHeal(
+  request: NextRequest,
+  csrfToken: string | undefined,
+): Promise<NextResponse> {
+  const rejection = unauthorized(request, 'Unauthorized', 'missing-csrf-token');
+  if (await isExpiredAuthenticCsrfToken(csrfToken)) {
+    try {
+      const { value, maxAge } = await signCsrfToken();
+      rejection.cookies.set(CSRF_COOKIE_NAME, value, {
+        ...CSRF_COOKIE_ATTRIBUTES,
+        maxAge,
+      });
+    } catch {
+      // Dev-secret hard-lock: keep the plain 401 (fail-safe).
+    }
+  }
+  return rejection;
+}
+
+/**
  * Constant-time string comparison (DATA-11).
  *
  * `===` on a secret short-circuits on the first differing byte, leaking
@@ -545,7 +574,7 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
     try { apiTenant = await resolveTenantContext(request); } catch { /* legacy signed producer gates below still apply */ }
     if (apiTenant?.kind === 'client' && !pathname.startsWith('/api/interview/') && !pathname.startsWith('/api/auth/') && !pathname.startsWith('/api/tenant-board/')) {
       if (!isReadOnlyMethod(request.method) && apiTenant.subject !== 'operator:api' && !await verifyCsrfToken(request.cookies.get(CSRF_COOKIE_NAME)?.value)) {
-        return unauthorized(request, 'Unauthorized', 'missing-csrf-token');
+        return unauthorizedWithCsrfSelfHeal(request, request.cookies.get(CSRF_COOKIE_NAME)?.value);
       }
       const remote = request.nextUrl.clone();
       remote.pathname = '/api/tenant-board/' + pathname.slice('/api/'.length);
@@ -624,11 +653,7 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
         const csrfToken = request.cookies.get(CSRF_COOKIE_NAME)?.value;
         const csrfValid = await verifyCsrfToken(csrfToken);
         if (!csrfValid) {
-          return unauthorized(
-            request,
-            'Unauthorized',
-            'missing-csrf-token',
-          );
+          return unauthorizedWithCsrfSelfHeal(request, csrfToken);
         }
       }
       const passthrough = authenticatedNext();
@@ -637,6 +662,12 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
       // Cf-Access-Authenticated-User-Email header, which is attacker-controlled
       // when the edge assertion is absent or unverified.
       if (apiTenant?.email) passthrough.headers.set('x-operator-email', apiTenant.email);
+      // CSF-002 EDIT A: mint CSRF on same-origin API passthrough. Token minted
+      // only on page responses, so sitting longer than CSRF_COOKIE_TTL_SECONDS
+      // (3600s) keeps sending stale token 401s on next answer.
+      // setCsrfCookieIfMissing no-ops when presented token verifies, so this
+      // costs one HMAC verify per call.
+      await setCsrfCookieIfMissing(passthrough, request);
       return passthrough;
     }
 

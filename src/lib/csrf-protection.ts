@@ -42,6 +42,14 @@
  *
  * EDGE-SAFETY: This module imports only Web-standard globals (globalThis.crypto.subtle,
  * TextEncoder, btoa/atob). It is safe for import from src/middleware.ts.
+ *
+ * CSF-001 — authentic-but-expired predicate:
+ *   verifyCsrfToken() returns false for BOTH forged and expired tokens. The
+ *   middleware needs that distinction so a long-lived visitor whose genuine
+ *   token aged out can be safely re-minted, while a forged/absent token never
+ *   is (re-minting those would hand an attacker a valid token).
+ *   isExpiredAuthenticCsrfToken() answers exactly that; both predicates share
+ *   one classifier (csrfTokenStatus) so they can never diverge.
  */
 
 /* ── Constants ────────────────────────────────────────────────────────────── */
@@ -146,6 +154,53 @@ function timingSafeEqual(a: string, b: string): boolean {
   return diff === 0;
 }
 
+/* ── Token status (shared by verify + expired-authentic) ──────────────── */
+
+type CsrfTokenStatus = 'live' | 'expired' | 'invalid';
+
+/**
+ * Classify a CSRF cookie value.
+ *
+ *   - 'live':    signature valid, role 'csrf', not expired (verify passes).
+ *   - 'expired': signature valid, role 'csrf', but past exp — the presenter
+ *     once held a genuine server-minted token. Safe to re-mint for.
+ *   - 'invalid': everything else (absent, malformed, forged signature, wrong
+ *     role, bad exp, dev-fallback hard-lock). NEVER re-mint for these: minting
+ *     on a forged/absent token would hand an attacker a valid token.
+ */
+async function csrfTokenStatus(
+  value: string | undefined | null,
+): Promise<CsrfTokenStatus> {
+  if (devSecretInProduction()) return 'invalid';
+  if (!value || typeof value !== 'string') return 'invalid';
+
+  const dot = value.lastIndexOf('.');
+  if (dot <= 0 || dot === value.length - 1) return 'invalid';
+  const payloadB64 = value.slice(0, dot);
+  const sig = value.slice(dot + 1);
+
+  let expected: string;
+  try {
+    expected = await hmacB64url(payloadB64);
+  } catch {
+    return 'invalid';
+  }
+  if (!timingSafeEqual(sig, expected)) return 'invalid';
+
+  let payload: CsrfPayload;
+  try {
+    payload = JSON.parse(b64urlToStr(payloadB64)) as CsrfPayload;
+  } catch {
+    return 'invalid';
+  }
+
+  if (payload.role !== 'csrf') return 'invalid';
+  if (typeof payload.exp !== 'number') return 'invalid';
+  if (payload.exp < Math.floor(Date.now() / 1000)) return 'expired';
+
+  return 'live';
+}
+
 /* ── Public API ───────────────────────────────────────────────────────────── */
 
 /**
@@ -189,34 +244,30 @@ export async function signCsrfToken(): Promise<{ value: string; maxAge: number }
 export async function verifyCsrfToken(
   value: string | undefined | null,
 ): Promise<boolean> {
-  if (devSecretInProduction()) return false;
-  if (!value || typeof value !== 'string') return false;
+  return (await csrfTokenStatus(value)) === 'live';
+}
 
-  const dot = value.lastIndexOf('.');
-  if (dot <= 0 || dot === value.length - 1) return false;
-  const payloadB64 = value.slice(0, dot);
-  const sig = value.slice(dot + 1);
-
-  let expected: string;
-  try {
-    expected = await hmacB64url(payloadB64);
-  } catch {
-    return false;
-  }
-  if (!timingSafeEqual(sig, expected)) return false;
-
-  let payload: CsrfPayload;
-  try {
-    payload = JSON.parse(b64urlToStr(payloadB64)) as CsrfPayload;
-  } catch {
-    return false;
-  }
-
-  if (payload.role !== 'csrf') return false;
-  if (typeof payload.exp !== 'number') return false;
-  if (payload.exp < Math.floor(Date.now() / 1000)) return false;
-
-  return true;
+/**
+ * Authentic-but-expired predicate (CSF-001).
+ *
+ * Returns true IFF the value carries a VALID HMAC-SHA256 signature over a
+ * well-formed payload with role 'csrf' whose exp is in the past — i.e. the
+ * presenter once held a genuine server-minted token that has since expired.
+ * The middleware uses this to safely re-mint ONLY such visitors: re-minting
+ * on live tokens is unnecessary, and re-minting on forged/absent tokens
+ * would hand an attacker a valid token.
+ *
+ * Returns false (NEGATIVE CONTROLS — never re-mint) for: absent / empty /
+ * undefined values, malformed values, forged signatures, wrong role, bad
+ * exp, and the dev-fallback production hard-lock.
+ *
+ * Edge-safe: Web-standard only (globalThis.crypto.subtle, TextEncoder,
+ * btoa/atob) — same path as verifyCsrfToken.
+ */
+export async function isExpiredAuthenticCsrfToken(
+  value: string | undefined | null,
+): Promise<boolean> {
+  return (await csrfTokenStatus(value)) === 'expired';
 }
 
 /**
