@@ -37,6 +37,10 @@ How to edit:
   docker exec <container> pm2 restart blackceo-command-center --update-env
   ```
 
+  Install-time converge: `scripts/install/vps-docker-bootstrap.sh` step 8c
+  reconciles the in-container env file ADDITIVELY from the repo `.env.example`
+  template (missing keys appended, operator keys untouched, `.env.bak` first).
+
 Why the dashboard reads from here and not from process env: the dashboard intentionally re-reads the env file at boot from disk rather than relying on the env vars baked into the container at start time. This gives the operator the ability to change configuration without recreating the container. PM2's `--update-env` flag picks up changes from the file.
 
 ### 2b. Host-level env file (Hostinger Docker Manager UI)

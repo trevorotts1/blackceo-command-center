@@ -1,5 +1,5 @@
 import { priorCompletion } from '@/lib/interview/prior-completion';
-import { queryOne } from '@/lib/db';
+import { queryAll, queryOne, run } from '@/lib/db';
 import { ensureTenantInterview, tenantAnswers } from '@/lib/interview/remote-store';
 import { readRemoteInterviewState, drainInterviewOperations } from '@/lib/interview/remote-protocol';
 import { updateClient } from '@/lib/clients';
@@ -49,6 +49,7 @@ import { refreshInterviewMirror } from '@/lib/interview/mirror';
 import {
   computeAnsweredIds,
   computeStructuredResume,
+  mergeSkippedIds,
 } from '@/lib/interview/structured-progress';
 import { INTERVIEW_QUESTIONS } from '@/lib/interview-questions';
 import { getClientContext } from '@/lib/clients';
@@ -154,6 +155,154 @@ export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
+/**
+ * ILJ-004: server-side skip marks for tenant interview sessions.
+ *
+ * WHY NOT client_interview_state / tenant_interview_answers / an handoff edit:
+ *   • client_interview_state is the OPERATOR-box per-client resume table for the
+ *     SELF tenant kind — a client tenant session never writes it, and the seam's
+ *     interview-handoff.md is the operator's file (writing it would mix stores).
+ *   • tenant_interview_answers is an ENCRYPTED answer mirror — a skip carries no
+ *     answer text, so recording one there would fabricate transcript-shaped rows.
+ *   • Question ids are structural metadata, not secrets (same class as the
+ *     answeredIds the state route already serves): stored PLAINTEXT so the state
+ *     GET can read them with zero key material, exactly like answeredIds.
+ *
+ * Schema: tenant_interview_skips(tenant_id, interview_id, question_id, created_at)
+ * PK(tenant_id, interview_id, question_id) — the composite key scopes one
+ * tenant's skip set to ONE interview session: a reissued/skipped deck can never
+ * leak marks into the next session. Writes go through ensureTenantInterview so
+ * the interview_id is always the session's canonical id, never caller-supplied.
+ */
+export const SKIP_TABLE_DDL =
+  'CREATE TABLE IF NOT EXISTS tenant_interview_skips (' +
+  'tenant_id TEXT NOT NULL, interview_id TEXT NOT NULL, question_id TEXT NOT NULL, ' +
+  'created_at TEXT NOT NULL, PRIMARY KEY (tenant_id, interview_id, question_id))';
+
+function ensureSkipTable(): void {
+  try {
+    run(SKIP_TABLE_DDL);
+  } catch {
+    /* fail-soft: reads below degrade to the pre-ILJ-004 empty set */
+  }
+}
+
+/** Known structured question ids (INTERVIEW_QUESTIONS is the deck contract). */
+function knownStructuredIds(): Set<string> {
+  return new Set(INTERVIEW_QUESTIONS.map((q) => q.id));
+}
+
+/**
+ * Read one session's server skip set (sanitized: known ids only, unanswered
+ * only). Answered ids are supplied by the caller (the tenant's own answers);
+ * answering a question clears its skip — an answer always wins.
+ */
+export function readSessionSkips(
+  tenantId: string,
+  interviewId: string,
+  answeredIds: readonly string[] = [],
+): string[] {
+  ensureSkipTable();
+  const answered = new Set(answeredIds);
+  try {
+    const rows = queryAll<{ question_id: string }>(
+      'SELECT question_id FROM tenant_interview_skips WHERE tenant_id = ? AND interview_id = ?',
+      [tenantId, interviewId],
+    );
+    return mergeSkippedIds(
+      INTERVIEW_QUESTIONS,
+      rows.map((r) => r.question_id),
+      [],
+      Array.from(answered),
+    );
+  } catch {
+    return [];
+  }
+}
+
+/** Record one skip mark. Idempotent (INSERT OR IGNORE); fail-soft → false. */
+export function recordSessionSkip(
+  tenantId: string,
+  interviewId: string,
+  questionId: string,
+): boolean {
+  if (!tenantId || !interviewId || !questionId) return false;
+  if (!knownStructuredIds().has(questionId)) return false;
+  ensureSkipTable();
+  try {
+    run(
+      'INSERT OR IGNORE INTO tenant_interview_skips (tenant_id, interview_id, question_id, created_at) VALUES (?, ?, ?, datetime(\'now\'))',
+      [tenantId, interviewId, questionId],
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Clear one skip mark (answering a skipped question). Fail-soft. */
+export function clearSessionSkip(
+  tenantId: string,
+  interviewId: string,
+  questionId: string,
+): void {
+  ensureSkipTable();
+  try {
+    run('DELETE FROM tenant_interview_skips WHERE tenant_id = ? AND interview_id = ? AND question_id = ?',
+      [tenantId, interviewId, questionId]);
+  } catch {
+    /* fail-soft */
+  }
+}
+
+/** POST /api/interview/state — record (or clear) one structured-question skip. */
+export async function POST(request: NextRequest) {
+  const tenant = await resolveInterviewTenant(request);
+  const refusedTenant = refuseUnverifiedTenant(tenant);
+  if (refusedTenant) return refusedTenant;
+  if (tenant.kind !== 'client' || !tenant.client || !tenant.context) {
+    // Self tenants read their resume from the operator's canonical files, not
+    // the tenant skip store — never write a skip for them here.
+    return NextResponse.json({ error: 'not_applicable_for_self' }, { status: 400 });
+  }
+  let body: { questionId?: unknown; skipped?: unknown };
+  try {
+    body = (await request.json()) as { questionId?: unknown; skipped?: unknown };
+  } catch {
+    return NextResponse.json({ error: 'invalid_request', detail: 'bad body' }, { status: 400 });
+  }
+  const questionId = typeof body.questionId === 'string' ? body.questionId.trim() : '';
+  if (!questionId || !knownStructuredIds().has(questionId)) {
+    return NextResponse.json({ error: 'unknown_question', detail: 'questionId must be a known structured question id' }, { status: 400 });
+  }
+  const persisted = ensureTenantInterview(tenant.context.tenantId);
+  // `skipped: false` clears the mark (circle-back without answering yet keeps
+  // the card out of the skipped queue on this device; the server forgets it).
+  if (body.skipped === false) {
+    clearSessionSkip(tenant.context.tenantId, persisted.interview_id, questionId);
+    const skippedIds = readSessionSkips(
+      tenant.context.tenantId,
+      persisted.interview_id,
+      tenantAnswers(tenant.context.tenantId).map((a) => a.question_id),
+    );
+    return NextResponse.json({ ok: true, questionId, skipped: false, skippedIds });
+  }
+  // Never persist a skip for an already-answered question — an answer wins.
+  const savedAnswers = tenantAnswers(tenant.context.tenantId);
+  if (savedAnswers.some((a) => a.question_id === questionId)) {
+    return NextResponse.json({ error: 'already_answered', detail: 'this question already has an answer; the skip is not needed' }, { status: 409 });
+  }
+  if (!recordSessionSkip(tenant.context.tenantId, persisted.interview_id, questionId)) {
+    return NextResponse.json({ error: 'skip_not_saved' }, { status: 503 });
+  }
+  const skippedIds = readSessionSkips(
+    tenant.context.tenantId,
+    persisted.interview_id,
+    savedAnswers.map((a) => a.question_id),
+  );
+  return NextResponse.json({ ok: true, questionId, skippedIds });
+}
+
 /** Parse a comma-separated query param into a trimmed, de-duped string list. */
 function parseIdList(raw: string | null): string[] {
   if (!raw) return [];
@@ -202,10 +351,24 @@ export async function GET(request: NextRequest) {
       if (remote?.interviewComplete === true) updateClient(tenant.client.id,{interview_complete:true});
     } catch { /* Local durable answers remain usable while remote is unavailable. */ }
     const stored = {answeredIds:savedAnswers.map(a=>a.question_id),interviewSessionId:persisted.gateway_session_id};
+    // ILJ-004: server-side skip marks for this session (sanitized to known,
+    // unanswered ids). An answer clears its skip — answering always wins — so a
+    // skipped card that later got answered never shows in either set.
+    const skippedStructuredIds = readSessionSkips(
+      tenant.context!.tenantId,
+      persisted.interview_id,
+      stored.answeredIds,
+    );
     const structured = computeStructuredResume(
       INTERVIEW_QUESTIONS,
       stored?.answeredIds ?? [],
+      skippedStructuredIds,
     );
+    // Circle-back queue: skipped AND still unanswered ids, in deck order.
+    const skippedSet = new Set(skippedStructuredIds);
+    const skippedQueueIds = INTERVIEW_QUESTIONS.filter(
+      (q) => skippedSet.has(q.id) && !structured.answeredIds.includes(q.id),
+    ).map((q) => q.id);
     // Percent tracks the structured deck the client is actually working; a
     // client whose deck is complete reads 100 even though the operator-side
     // canonical files (which this tenant never writes) know nothing about it.
@@ -234,7 +397,11 @@ export async function GET(request: NextRequest) {
         remainingIds: structured.remainingIds,
         nextIndex: structured.nextIndex,
         complete: structured.complete,
+        skippedIds: skippedQueueIds,
       },
+      // ILJ-004: circle-back queue as 1-based card numbers — the additive wire
+      // shape the WelcomeBack queue renders. Numbered (conversational) skips keep
+      // their existing `resume.skippedQuestions` slot unchanged.
       // Known facts come from the CLIENT's own row — asking her to "confirm"
       // the operator's company name is exactly the leak this fix closes.
       knownContext: readClientKnownContext(tenant.client),
@@ -316,7 +483,12 @@ export async function GET(request: NextRequest) {
     // its mirrored question set — a refresh can never restart the deck.
     const blocks = readAnswerBlocks(snap.buildState);
     const answeredIds = computeAnsweredIds(blocks, INTERVIEW_QUESTIONS);
-    const structured = computeStructuredResume(INTERVIEW_QUESTIONS, answeredIds);
+    // ILJ-004: self tenants have no server skip store (operator resume lives in
+    // the canonical files). The structured.skippedIds wire shape still exists —
+    // empty — so every consumer reads one contract. The comment above the client
+    // branch explains the placement; this is scope, not a silent no-op.
+    const structured = computeStructuredResume(INTERVIEW_QUESTIONS, answeredIds, []);
+    const skippedQueueIds: string[] = [];
 
     return NextResponse.json({
       ok: true,
@@ -338,7 +510,11 @@ export async function GET(request: NextRequest) {
         remainingIds: structured.remainingIds,
         nextIndex: structured.nextIndex,
         complete: structured.complete,
+        skippedIds: skippedQueueIds,
       },
+      // ILJ-004: circle-back queue as 1-based card numbers — the additive wire
+      // shape the WelcomeBack queue renders. Numbered (conversational) skips keep
+      // their existing `resume.skippedQuestions` slot unchanged.
       knownContext: await readKnownContext(),
 
       // Top-level lifecycle signals (drive the locked-shell + redirect logic).

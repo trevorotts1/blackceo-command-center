@@ -97,7 +97,16 @@ function parseTs(v: unknown): number | null {
 
 /** The resume-link base: the per-client public dashboard URL, else the CC URL. No trailing slash. */
 function resumeBase(): string {
-  const base = process.env.OPENCLAW_DASHBOARD_URL || getMissionControlUrl();
+  // Tenant-public first: OPENCLAW_DASHBOARD_URL is the per-client public base.
+  // CC_PUBLIC_URL / MC_TENANT_PUBLIC_URL are the box's own public origin (the
+  // same resolver invitation issuance uses). MISSION_CONTROL_URL is last: it
+  // defaults to http://localhost:4000, which is never a working link for an
+  // owner on another device, so it must never win while a public base exists.
+  const base =
+    process.env.OPENCLAW_DASHBOARD_URL ||
+    process.env.CC_PUBLIC_URL ||
+    process.env.MC_TENANT_PUBLIC_URL ||
+    getMissionControlUrl();
   return base.replace(/\/+$/, '');
 }
 
