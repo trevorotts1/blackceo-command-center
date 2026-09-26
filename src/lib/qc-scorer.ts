@@ -3383,9 +3383,9 @@ export function cleanDetectionText(title: string, description?: string | null): 
   // QR-007: a handback field line (Problem/Tried/Needs/Suggested dept) is
   // machine-written ONLY underneath its machine header, and every writer
   // emits the two together, header first:
-  //   qc-scorer.ts:6259  `[QC-NO-ARTIFACT HANDBACK] <ts>` + fields
-  //   return-to-orchestrator/route.ts:91  `[HANDBACK #n/m] <ts>` + fields
-  //   stale-task-sweep.ts:456  `[STALE-RETURN] <ts>` + fields
+  //   qc-scorer.ts `runQCOnReview`  `[QC-NO-ARTIFACT HANDBACK] <ts>` + fields
+  //   return-to-orchestrator/route.ts `POST`  `[HANDBACK #n/m] <ts>` + fields
+  //   stale-task-sweep.ts `returnToOrchestrator`  `[STALE-RETURN] <ts>` + fields
   // Dropping those four words on sight also deleted OWNER prose ("Needs:
   // update pricing $997/mo"), which then vanished from the AF-NUM/AF-SPELL
   // spec copy and from gate detection. So the field run is only stripped
