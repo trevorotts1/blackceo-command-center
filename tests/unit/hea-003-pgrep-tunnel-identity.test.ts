@@ -28,7 +28,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 const HELPER_A =
-  '/opt/homebrew/bin/cloudflared access ssh --hostname rescue-karen-vaughn.zerohumanworkforce.com';
+  '/opt/homebrew/bin/cloudflared access ssh --hostname rescue-a.zerohumanworkforce.com';
 const HELPER_B =
   '/opt/homebrew/bin/cloudflared access tcp --hostname rescue-x.zerohumanworkforce.com --url localhost:2222';
 const TUNNEL =
