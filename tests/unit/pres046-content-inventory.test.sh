@@ -26,6 +26,17 @@
 #       degraded path in update.sh refuses unverifiable builds (static
 #       contract check) and the tier-3 legacy helper's inputs list matches the
 #       canonical _CCBI_TOPLEVEL_INPUTS (same question everywhere).
+#   T15 Explicit-revision manifest (dirty_digest=explicit-revision, sealed
+#       against commit R) VERIFIES while live HEAD names R — even with a dirty
+#       worktree — because the explicit path compares R's own canonical
+#       inventory, not the worktree's. This is the state the deploy-path sync
+#       produces: artifact and tree agree on the deployed commit.
+#   T16 The SAME explicit-revision manifest MISMATCHES once live HEAD moves to
+#       a different commit. Genuine artifact-vs-tree disagreement still refuses.
+#   T17 atomic-deploy.sh syncs the live worktree onto the deployed revision at
+#       the Phase 3 tail, bounded (already-there no-op, dirty aborts loudly,
+#       checkout never reset --hard). Normal non-explicit deploys (revision =
+#       HEAD) always take the no-op path: unchanged behavior.
 #
 # Run: bash tests/unit/pres046-content-inventory.test.sh
 # (Also wired into qc-cc.sh section 12.)
@@ -140,6 +151,57 @@ receipt_case "$T5_DIR" '' 0 "T5b: receipt binding exactly (served artifact, curr
 # Source moves on → receipt now stale (failed_target no longer matches).
 printf 'export const a = 888;\n' > "$T5_DIR/src/a.ts"
 receipt_case "$T5_DIR" '' 1 "T5c: receipt left behind after source moved on → RECEIPT_STALE"
+
+# ── T15: explicit-revision artifact VERIFIES when HEAD names its commit ────
+# Dirty worktree notwithstanding: the explicit path compares the COMMIT's own
+# canonical inventory, so a dirty tree at the same commit still verifies. This
+# is exactly the state atomic-deploy.sh's Phase 3 tail produces: it moves the
+# live worktree onto DEPLOY_REVISION (clean) before any restart.
+T15_DIR="$(make_app t15)"
+git -C "$T15_DIR" init -q 2>/dev/null
+git -C "$T15_DIR" add src package.json 2>/dev/null
+git -C "$T15_DIR" -c user.name=pres046 -c user.email=t15@example.invalid commit -qm baseline 2>/dev/null
+T15_REV="$(git -C "$T15_DIR" rev-parse HEAD 2>/dev/null)"
+# Seal while the tree is CLEAN (same bytes as the commit — exactly what
+# atomic-deploy.sh does when it seals the manifest inside the extracted
+# candidate). THEN dirty the live worktree.
+CCBI_SOURCE_SHA_OVERRIDE="$T15_REV" CCBI_DIRTY_DIGEST_OVERRIDE="explicit-revision" \
+  bash "$INV_LIB" --manifest "$T15_DIR" "$T15_DIR/.next" "fixture-build-id" "$(date +%s)"
+printf 'export const a = 999;\n' > "$T15_DIR/src/a.ts"   # DIRTY the worktree
+T15_JSON="$(bash "$INV_LIB" --verify "$T15_DIR")"; T15_RC=$?
+if [[ -n "$T15_REV" && "$T15_RC" -eq 0 && "$T15_JSON" == *'"verdict":"VERIFIED"'* ]]; then
+  pass "T15: explicit-revision manifest VERIFIES while HEAD names its commit (dirty worktree tolerated)"
+else
+  fail "T15: explicit-revision manifest must VERIFY at its own commit, got rc=$T15_RC $T15_JSON (rev=$T15_REV)"
+fi
+
+# ── T16: SAME manifest MISMATCHES after HEAD moves to another commit ─────────
+# Genuine artifact-vs-tree disagreement still refuses — the sync is not a
+# bypass: it changes the tree, never the guard.
+git -C "$T15_DIR" add src/a.ts 2>/dev/null
+git -C "$T15_DIR" -c user.name=pres046 -c user.email=t16@example.invalid commit -qm movedon 2>/dev/null
+T16_JSON="$(bash "$INV_LIB" --verify "$T15_DIR")"; T16_RC=$?
+if [[ "$T16_RC" -eq 1 && "$T16_JSON" == *'"verdict":"MISMATCH"'* ]]; then
+  pass "T16: same explicit-revision manifest MISMATCHES after HEAD moved on (guard intact)"
+else
+  fail "T16: explicit-revision manifest at a foreign HEAD must be MISMATCH rc=1, got rc=$T16_RC $T16_JSON"
+fi
+
+# ── T17: deploy-path sync markers (static contract) ──────────────────────────
+# atomic-deploy.sh must carry the bounded Phase 3 tail sync (already-there
+# no-op, dirty aborts loudly) and must NEVER use `git reset --hard` or touch
+# cc-start.sh's guard lines to achieve agreement — the tree moves, never the
+# guard. (T16 above proves the guard itself still refuses at file level; F4 in
+# pres046-frozen-source.test.ts proves the sync end-to-end through a real
+# explicit-revision deploy.)
+if grep -q "_ccbi_sync_worktree_to_deploy_revision" "$ATOMIC_DEPLOY" \
+   && grep -q "Live worktree already at deployed revision" "$ATOMIC_DEPLOY" \
+   && grep -q "Live worktree is DIRTY" "$ATOMIC_DEPLOY" \
+   && ! grep -q "reset --hard" "$ATOMIC_DEPLOY"; then
+  pass "T17: atomic-deploy.sh carries the bounded Phase 3 tail sync (no reset --hard)"
+else
+  fail "T17: atomic-deploy.sh missing Phase 3 tail sync markers or contains reset --hard"
+fi
 
 # ── T7: missing manifest fails ────────────────────────────────────────────────
 T7_DIR="$(make_app t7)"

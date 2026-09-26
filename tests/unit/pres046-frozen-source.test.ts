@@ -323,3 +323,57 @@ exit 0
     fixture.cleanup();
   }
 });
+
+// ILJ-007 F4: explicit-revision deploy at an OLD commit syncs the live
+// worktree onto that commit, so the artifact and the tree agree for the
+// startup content guard. The F3 test above already proves the genuine
+// mismatch still refuses (MISMATCH) through the same verify path.
+test('PRES-046 F4 (ILJ-007): explicit-revision deploy syncs the live worktree to the deployed commit', () => {
+  const fixture = buildFixture({
+    npmBody: `if [[ -n "\${NEXT_DIST_DIR:-}" ]]; then mkdir -p "$NEXT_DIST_DIR"; echo "new-build-id" > "$NEXT_DIST_DIR/BUILD_ID"; fi
+`,
+  });
+  try {
+    // Commit content X, deploy it (HEAD deploy), then commit content Y on top
+    // so live HEAD is AHEAD of the deployed artifact.
+    const revX = execSync(`git -C ${fixture.appDir} rev-parse HEAD`).toString().trim();
+    const first = runDeploy(fixture);
+    assert.equal(first.exitCode, 0, `baseline HEAD deploy must exit 0\nstderr:\n${first.stderr}`);
+    writeFileSync(path.join(fixture.appDir, 'src', 'a.ts'), 'export const a = 2;\n');
+    let gitResult = spawnSync('git', ['-C', fixture.appDir, 'add', 'src/a.ts'], { encoding: 'utf8' });
+    assert.strictEqual(gitResult.status, 0, gitResult.stderr);
+    gitResult = spawnSync('git', ['-C', fixture.appDir, '-c', 'user.name=Command Center Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-m', 'content Y (ahead of artifact)'], { encoding: 'utf8' });
+    assert.strictEqual(gitResult.status, 0, gitResult.stderr);
+
+    // Re-deploy the OLD revision X explicitly: the artifact is built from X
+    // while live HEAD names Y. The Phase 3 tail must move the live worktree
+    // back onto X so the pair agrees.
+    const second = runDeploy(fixture, { CC_DEPLOY_REVISION: revX });
+    assert.equal(second.exitCode, 0, `explicit-revision deploy must exit 0\nstderr:\n${second.stderr}`);
+    const liveHead = execSync(`git -C ${fixture.appDir} rev-parse HEAD`).toString().trim();
+    assert.equal(liveHead, revX, 'live worktree must be synced onto the deployed revision');
+    const verify = spawnSync('bash', [
+      path.join(process.cwd(), 'scripts', 'lib', 'build-inventory.sh'),
+      '--verify', fixture.appDir,
+    ], { encoding: 'utf8' });
+    assert.strictEqual(verify.status, 0,
+      `explicit-revision artifact must VERIFY once the tree is synced\n${verify.stdout ?? ''}`);
+    assert.match(verify.stdout ?? '', /"verdict":"VERIFIED"/);
+
+    // Dirty guard: uncommitted tracked edits must abort the SYNC loudly
+    // (exit 2) without discarding the operator's work.
+    writeFileSync(path.join(fixture.appDir, 'src', 'a.ts'), 'export const a = 3; // operator edit\n');
+    gitResult = spawnSync('git', ['-C', fixture.appDir, 'add', 'src/a.ts'], { encoding: 'utf8' });
+    assert.strictEqual(gitResult.status, 0, gitResult.stderr);
+    gitResult = spawnSync('git', ['-C', fixture.appDir, '-c', 'user.name=Command Center Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-m', 'content Z'], { encoding: 'utf8' });
+    assert.strictEqual(gitResult.status, 0, gitResult.stderr);
+    writeFileSync(path.join(fixture.appDir, 'src', 'a.ts'), 'export const a = Z-dirty;\n');
+    const third = runDeploy(fixture, { CC_DEPLOY_REVISION: revX });
+    assert.equal(third.exitCode, 2, `deploy with a dirty tree must abort the sync (exit 2), got ${third.exitCode}\nstderr:\n${third.stderr}`);
+    assert.ok(third.stderr.includes('DIRTY'), 'abort receipt must name the dirty worktree');
+    assert.ok(readFileSync(path.join(fixture.appDir, 'src', 'a.ts'), 'utf8').includes('Z-dirty'),
+      'the sync must never discard dirty tracked work');
+  } finally {
+    fixture.cleanup();
+  }
+});
