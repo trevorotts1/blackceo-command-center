@@ -1,3 +1,8 @@
+## [v7.6.68] — 2026-09-26 — interview transcript lock correctness (ILJ-003 + ILJ-011)
+
+- ILJ-003: seam atomic merge + `decrypt_failed` surfaced; answer route appends under the transcript lock
+- ILJ-011: lock creates its parent dir and treats `ENOENT` as missing-parent, never spinning the 10 s deadline
+
 ## [v7.6.67] — 2026-09-26 — interview link reliability (ILJ wave 2)
 
 - ILJ-001: additive env-file reconcile in vps-docker-bootstrap step 8c
