@@ -56,8 +56,7 @@ import {
 import { refreshInterviewMirror } from '@/lib/interview/mirror';
 import { answersFilePath, answersEncFilePath } from '@/lib/interview/paths';
 import { isEncryptedEnvelope, readEncryptedFile } from '@/lib/interview/crypto';
-import { readTranscriptText } from '@/lib/interview/seam';
-import { writeEncryptedFile } from '@/lib/interview/crypto';
+import { appendTranscriptTextAtomic, readTranscriptText } from '@/lib/interview/seam';
 import { mirrorCompanyAnswer } from '@/lib/interview/company-mirror';
 import {
   answerRequestSchema,
@@ -124,15 +123,15 @@ function isHttpUrl(value: string): boolean {
  * ENCRYPTED at rest in the `.enc` file. The plaintext `.md` is never the
  * primary write target — it is only a derived export artifact.
  *
- * Read-modify-write cycle:
- *   1. Read existing transcript (readTranscriptText handles .enc/plaintext/merge)
- *   2. Append the new Q/A block
- *   3. Write the full transcript encrypted to the .enc file
- *   4. Remove any plaintext .md (it is now stale)
+ * ILJ-003: the read (with tail-merge), append, and re-encrypt happen inside
+ * one transcript lock hold (appendTranscriptTextAtomic), so parallel writers
+ * serialize and no answer is lost to a read-modify-write race. A
+ * present-but-undecryptable `.enc` store returns decrypt_failed and writes
+ * nothing; the quarantine refusal below keeps the answers_unreadable (500)
+ * response contract unchanged.
  *
  * Returns the resolved encrypted transcript path (for the response / logging).
- */
-/**
+ *
  * Item (1), in-lane half: quarantine a transcript whose encrypted store exists
  * but no longer decrypts, BEFORE appendAnswerBlock would append to a blank
  * slate and re-encrypt over it. A decrypt failure with an `.enc` file present
@@ -186,41 +185,39 @@ function appendAnswerBlock(args: {
     throw new Error(`refusing to append: encrypted transcript unreadable, quarantined to ${quarantined}`);
   }
 
-  // 1. Read existing transcript (handles .enc, plaintext, and merge cases).
-  const { text: existing, exists } = readTranscriptText();
-
-  // 2. Build the new content.
-  let content: string;
-  if (!exists) {
-    // Fresh transcript → GENUINE header only. Guard against ever writing the
-    // synthetic header (it would poison the genuineness gate).
-    const header = `${GENUINE_HEADER}\n\nStarted: ${humanNow()}\n\n---\n\n`;
-    if (header.includes(SYNTHETIC_HEADER)) {
-      throw new Error('refusing to write synthetic non-interactive header');
-    }
-    content = header;
-  } else {
-    content = existing;
-  }
-
+  // Build the Q/A block byte-shape (mirrors build-workforce.log_answer).
   let block = `**Q:** ${args.question}\n**A:** ${args.answer}\n`;
   if (args.confirmedFromContext && args.confirmedFromContext.trim()) {
     block += `**Provenance:** confirmed-from-context: ${args.confirmedFromContext.trim()}\n`;
   }
   block += `**Logged:** ${humanNow()}\n\n---\n\n`;
-  content += block;
 
-  // 3. Write encrypted.
-  writeEncryptedFile(encPath, content);
-
-  // 4. Remove stale plaintext (it is now superseded by the encrypted store).
-  try {
-    if (fs.existsSync(plainPath)) fs.unlinkSync(plainPath);
-  } catch {
-    // Non-fatal: the plaintext will be cleaned up on the next read.
+  // Fresh transcript → GENUINE header only. Guard against ever writing the
+  // synthetic header (it would poison the genuineness gate). The header vs
+  // append decision happens INSIDE appendTranscriptTextAtomic's lock hold
+  // (freshPrefix callback), so two concurrent first-writers cannot both see
+  // "empty" and double-stamp or interleave the header.
+  const header = `${GENUINE_HEADER}\n\nStarted: ${humanNow()}\n\n---\n\n`;
+  if (header.includes(SYNTHETIC_HEADER)) {
+    throw new Error('refusing to write synthetic non-interactive header');
   }
 
-  return encPath;
+  // Atomic locked write: locked read (with tail-merge) + fresh-prefix-or-append
+  // + re-encrypt inside one transcript lock hold, so parallel writers serialize
+  // and no answer is lost. A present-but-undecryptable store returns
+  // decrypt_failed and writes nothing — surfaced below as the unchanged
+  // answers_unreadable refusal, never an append over a blank slate.
+  const appended = appendTranscriptTextAtomic(block, undefined, { freshPrefix: header });
+  if (appended.decrypt === 'decrypt_failed') {
+    throw new Error(
+      `refusing to append: encrypted transcript unreadable, quarantined to ${appended.path}`,
+    );
+  }
+  if (!appended.exists) {
+    throw new Error('refusing to append: transcript write did not persist');
+  }
+
+  return appended.path;
 }
 
 export async function POST(req: NextRequest) {
