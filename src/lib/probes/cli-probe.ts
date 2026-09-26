@@ -11,6 +11,9 @@
  */
 
 import { spawn } from 'child_process';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { getDb } from '@/lib/db';
 import {
   PROBE_TIMEOUT_MS,
@@ -36,22 +39,65 @@ interface PerCliResult {
 
 const PER_CLI_TIMEOUT_MS = 2000;
 
+/**
+ * HEA-001: PATH fallback for a registered binary. The registry stores the
+ * absolute path captured at install time (`/opt/homebrew/bin/claude`); when
+ * the entry's stored path is missing, stale, or not executable (reinstall to
+ * a new prefix, `~/.local/bin` vs brew drift), we retry by bare name against
+ * the server's login PATH before calling it a failure. Returns the resolved
+ * executable path, or null when the binary is genuinely absent. Absolute-path
+ * probing is a direct `spawn` (no shell); the name lookup uses the login
+ * shell so brew/npm shims resolve exactly as they do for the operator.
+ * Exported for tests.
+ */
+export function resolveCliBinary(
+  binaryPath: string | null,
+  cliName: string
+): string | null {
+  if (binaryPath) {
+    try {
+      fs.accessSync(binaryPath, fs.constants.X_OK);
+      return binaryPath;
+    } catch {
+      // Stored path stale — fall through to PATH lookup.
+    }
+  }
+  const home = os.homedir();
+  const bare = binaryPath ? path.basename(binaryPath) : cliName;
+  for (const candidate of [
+    path.join(home, '.local', 'bin', bare),
+    `/opt/homebrew/bin/${bare}`,
+    `/usr/local/bin/${bare}`,
+  ]) {
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return candidate;
+    } catch {
+      // Not here — keep looking.
+    }
+  }
+  return null;
+}
+
 async function runVersion(name: string, binaryPath: string | null): Promise<PerCliResult> {
   const started = Date.now();
-  if (!binaryPath) {
+  const resolved = resolveCliBinary(binaryPath, name);
+  if (!resolved) {
     return {
       name,
-      binaryPath: null,
+      binaryPath,
       ok: false,
       exitCode: null,
-      error: 'no binary path registered',
+      error: binaryPath
+        ? `registered path missing and ${path.basename(binaryPath)} not found on PATH`
+        : 'no binary path registered',
       durationMs: 0,
     };
   }
 
   return new Promise<PerCliResult>((resolve) => {
     let settled = false;
-    const child = spawn(binaryPath, ['--version'], {
+    const child = spawn(resolved, ['--version'], {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
@@ -126,13 +172,23 @@ export async function probeCli(): Promise<ProbeResult> {
       }
 
       if (rows.length === 0) {
+        // HEA-001: empty registry is an INSTALLATION fault (nothing ever
+        // seeded this box — bootstrap/repair never wrote here), not a
+        // repository defect. Report `unknown` (never `offline`): the probe
+        // cannot distinguish "box has no CLIs" from "registry write never
+        // ran", so it must not certify either. `detail.next` names the heal.
         return {
           component: 'cli',
           label: 'Operator CLIs',
-          status: 'offline',
+          status: 'unknown',
           latencyMs: Date.now() - start,
-          error: 'no CLIs registered in cli_install_registry',
-          detail: { registered: 0, breakdown: [] },
+          error: 'no CLIs registered in cli_install_registry (registry never seeded on this box)',
+          detail: {
+            registered: 0,
+            breakdown: [],
+            cause: 'installation-fault',
+            next: 'run scripts/install/mac-mini-bootstrap.sh (or repair-command-center.sh) to seed cli_install_registry',
+          },
           probedAt: new Date().toISOString(),
         };
       }
