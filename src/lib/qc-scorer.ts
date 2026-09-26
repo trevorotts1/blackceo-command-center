@@ -3380,11 +3380,34 @@ export interface AcceptanceCriterion {
  */
 export function cleanDetectionText(title: string, description?: string | null): string {
   const combined = [title, description].filter(Boolean).join('\n');
+  // QR-007: a handback field line (Problem/Tried/Needs/Suggested dept) is
+  // machine-written ONLY underneath its machine header, and every writer
+  // emits the two together, header first:
+  //   qc-scorer.ts:6259  `[QC-NO-ARTIFACT HANDBACK] <ts>` + fields
+  //   return-to-orchestrator/route.ts:91  `[HANDBACK #n/m] <ts>` + fields
+  //   stale-task-sweep.ts:456  `[STALE-RETURN] <ts>` + fields
+  // Dropping those four words on sight also deleted OWNER prose ("Needs:
+  // update pricing $997/mo"), which then vanished from the AF-NUM/AF-SPELL
+  // spec copy and from gate detection. So the field run is only stripped
+  // while it is inside a machine block: header seen, and no blank / `---` /
+  // owner line since. A line with no header above it survives.
+  const MACHINE_BLOCK_HEADER = /^\[(STALE-RETURN|QC-[^\]]*|RETURN|HANDBACK)/;
+  const MACHINE_BLOCK_FIELD = /^(Problem|Tried|Needs|Suggested dept):/i;
+  let inMachineBlock = false;
   const lines = combined.split('\n').filter((line) => {
     const t = line.trim();
-    if (!t) return false;
-    if (/^\[(STALE-RETURN|QC-[^\]]*|RETURN)\]/.test(t)) return false;
-    if (/^(Problem|Tried|Needs|Suggested dept):/i.test(t)) return false;
+    if (!t) {
+      inMachineBlock = false;
+      return false;
+    }
+    if (MACHINE_BLOCK_HEADER.test(t)) {
+      inMachineBlock = true;
+      return false;
+    }
+    if (inMachineBlock) {
+      if (MACHINE_BLOCK_FIELD.test(t)) return false;
+      inMachineBlock = false;
+    }
     if (/^---\s*$/.test(t)) return false;
     return true;
   });
@@ -3615,7 +3638,16 @@ export function deriveAcceptanceCriteria(
   // render money tokens are diffed against it. Any rendered money amount not in
   // the spec is a HARD FAIL. Carries the spec copy so the comparison is
   // self-contained (no extra plumbing through the manifest).
-  const specCopy = detectionSource;
+  // QR-007: the spec copy is the OWNER'S brief, so it is built from the raw
+  // title+description — the same expression cleanDetectionText consumes — not
+  // from its cleaned output. Cleaning exists to stop audit words MINTING gates
+  // (KAN-003); it is not a licence to compare a render against a brief with the
+  // owner's own lines deleted. On cleaned text, an owner line shaped like a
+  // handback field ("Needs: update pricing to $997/mo") disappeared from the
+  // spec, so a render printing exactly the owner's $997/$11,964 was reported
+  // fabricated by AF-NUM (REVL-006 D2; measured base pass=true vs tip
+  // pass=false). Detection still reads the cleaned text.
+  const specCopy = [title, description].filter(Boolean).join('\n');
   criteria.push({
     id: 'numeric_fidelity',
     description:
