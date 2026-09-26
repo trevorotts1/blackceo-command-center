@@ -44,11 +44,16 @@ const PER_CLI_TIMEOUT_MS = 2000;
  * absolute path captured at install time (`/opt/homebrew/bin/claude`); when
  * the entry's stored path is missing, stale, or not executable (reinstall to
  * a new prefix, `~/.local/bin` vs brew drift), we retry by bare name against
- * the server's login PATH before calling it a failure. Returns the resolved
- * executable path, or null when the binary is genuinely absent. Absolute-path
- * probing is a direct `spawn` (no shell); the name lookup uses the login
- * shell so brew/npm shims resolve exactly as they do for the operator.
- * Exported for tests.
+ * a fixed list of well-known install directories before calling it a failure.
+ * QR-002: that list must cover the npm global prefix too — `pm2` (and other
+ * `npm install -g` tools) live in `~/.npm-global/bin` on this box, which the
+ * original three-directory list missed, so a tool that was both installed and
+ * running was reported absent. That directory is appended LAST, so the three
+ * directories that preceded it keep resolving exactly as before and this is
+ * strictly additive rather than a reordering. Returns the resolved path, or null
+ * when the binary is genuinely absent. Every candidate is checked statically
+ * with `fs.accessSync(..., X_OK)`; NO shell is ever spawned here, and the
+ * caller's `spawn` remains argument-static. Exported for tests.
  */
 export function resolveCliBinary(
   binaryPath: string | null,
@@ -68,6 +73,11 @@ export function resolveCliBinary(
     path.join(home, '.local', 'bin', bare),
     `/opt/homebrew/bin/${bare}`,
     `/usr/local/bin/${bare}`,
+    // Last: strictly additive. A tool found in one of the three directories
+    // above resolves exactly as it did before, so adding this cannot change an
+    // existing verdict; it only rescues `npm install -g` tools (pm2 and
+    // friends) that live nowhere else.
+    path.join(home, '.npm-global', 'bin', bare),
   ]) {
     try {
       fs.accessSync(candidate, fs.constants.X_OK);
@@ -187,7 +197,7 @@ export async function probeCli(): Promise<ProbeResult> {
             registered: 0,
             breakdown: [],
             cause: 'installation-fault',
-            next: 'run scripts/install/mac-mini-bootstrap.sh (or repair-command-center.sh) to seed cli_install_registry',
+            next: 'cli_install_registry has no in-repo seeder — scripts/install/mac-mini-bootstrap.sh installs the CLIs but never writes this table, and repair-command-center.sh only seeds SOPs; seed the registry explicitly before this probe can report CLI health',
           },
           probedAt: new Date().toISOString(),
         };
