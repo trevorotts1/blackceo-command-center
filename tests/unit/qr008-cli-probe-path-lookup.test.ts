@@ -21,6 +21,7 @@
  *     node --import tsx --test tests/unit/qr008-cli-probe-path-lookup.test.ts
  */
 
+import './_isolated-db';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
