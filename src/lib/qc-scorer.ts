@@ -3426,12 +3426,43 @@ export function cleanDetectionText(title: string, description?: string | null): 
   // already produced" would otherwise leave "pptx already produced" behind
   // after the sentence cut at the path's first period).
   text = text.replace(/https?:\/\/\S+/gi, ' ');
-  // QR-013: a slash token is a filesystem path ONLY when it is shaped like
-  // one (leading `/`, an extension/dot, a drive prefix, or multiple slashes).
-  // A bare `a/b` word is owner prose (`1080/4k`, `hd/4k`, `and/or`) — split it
-  // on the slash so each half reaches the gate regexes below. Dropping it
-  // deleted the `min_resolution` mint for slash-written briefs (10.0 PASS on a
-  // sub-floor image vs 6.7 FAIL for the same words spaced out).
+  // QZ-001: which slash tokens are owner PROSE? QR-013 (9b3cbcf01) split every
+  // single-slash token that was not obviously a path, so the halves of a mime
+  // type or of a relative path reached the detector regexes below:
+  // `image/png`, `outputs/deck`, `notes/slides` mint image/deck render gates
+  // for a card whose owner named a transfer format or a folder (REVL-016-D1) —
+  // measured 10.0 PASS -> 6.3/4.2 FAIL on legitimately delivered .md work.
+  //
+  // The measured class boundary is NOT the slash. Of every slash token the W36
+  // lenses recorded, the only prose class whose halves are gate-bearing is the
+  // resolution class (`1080/4k`, `hd/4k`, `hd/4k/render`); every other slash
+  // prose (`and/or`, `N/A`, `24/7`) has gate-free halves, so splitting it and
+  // dropping it derive byte-identical criteria (REVR-020 41-token matrix). So a
+  // slash token is kept as prose only when it reads as a resolution phrase, and
+  // dropped otherwise — which is gate-neutral for the prose it removes and is
+  // the fix for the mime / relative-path class:
+  //   · path shapes always drop: leading `/`, drive prefix, a `//` run, a `.`
+  //     or `..` segment, an extension-bearing segment (`deck.pptx`,
+  //     `shots/1080/hero.png`), a dotted path/host segment (`cdn.example.com`)
+  //   · single slash: admit on ONE resolution word (`1080/4k.v2`, `1.5x/1080`,
+  //     `v1.2/1080`, `x.com/4k`) — the dot no longer disqualifies prose
+  //     (REVR-020-R1: it made slash prose 10.0 PASS where its spaced-out
+  //     control scored 6.7 FAIL)
+  //   · multi-slash chain: admit on TWO (`hd/4k/render`) — a lone resolution
+  //     word inside a longer chain (`a/b/c/1080`) is path scaffolding
+  // Measured scope of the symmetry this buys, stated precisely because the
+  // broader claim is false: WITHIN the resolution-prose class the slash form and
+  // its spaced-out control derive IDENTICAL criteria (28 of 41 fuzz tokens,
+  // including `1080/4k`, `1080/4k.v2`, `1.5x/1080`, `v1.2/1080`, `x.com/4k`,
+  // `hd/4k/render`, `render/1080`) — so for prose, a slash neither creates nor
+  // deletes a render gate. For path and mime shapes the drop is DELIBERATE, and
+  // the two forms are not the same input written two ways: `a/deck` drops the
+  // deck gates that the spaced sentence "Deliver a deck asset." mints, and
+  // `deck.pptx/1080` drops the gates "Deliver deck.pptx 1080 asset." mints — the
+  // spaced forms name a deck in prose while the slash forms name a PATH. Those
+  // 13 divergences are the requirement, not a residue.
+  const RESOLUTION_WORD = /\b(high.?quality|large|high.?res|hd|4k|1080|resolution)\b/gi;
+  const PATH_SEGMENT = /^\.{1,2}$|\.{2,}|\.(png|jpe?g|gif|svg|webp|bmp|tiff?|pdf|pptx?|docx?|xlsx?|key|md|txt|csv|mp[34]|mov|wav|zip|json|ya?ml|html?)$/i;
   text = text
     .split(/\s+/)
     .flatMap((tok) => {
@@ -3439,9 +3470,16 @@ export function cleanDetectionText(title: string, description?: string | null): 
       if (!tok.includes('/')) return [tok];
       const probe = tok.replace(/[.,;:!?)"']+$/, '');
       if (!probe.includes('/')) return [tok];
-      if (probe.startsWith('/') || probe.includes('.') || /^[A-Za-z]:\//.test(probe) || (probe.match(/\//g) ?? []).length > 1)
-        return [];
-      const parts = probe.split('/');
+      const slashes = (probe.match(/\//g) ?? []).length;
+      const segments = probe.split('/').filter(Boolean);
+      const pathShaped =
+        probe.startsWith('/') ||
+        /^[A-Za-z]:\//.test(probe) ||
+        probe.includes('//') ||
+        segments.some((s) => PATH_SEGMENT.test(s));
+      const resolutionWords = (segments.join(' ').match(RESOLUTION_WORD) ?? []).length;
+      if (pathShaped || resolutionWords < (slashes > 1 ? 2 : 1)) return [];
+      const parts = segments.length > 0 ? segments : [probe];
       const tail = tok.slice(probe.length); // trailing punctuation, reattached
       parts[parts.length - 1] += tail;
       return parts;
@@ -3504,6 +3542,26 @@ export function manifestHasDeckArtifact(manifest: DeliverableManifestItem[]): bo
  * Narrow text-derived criteria to the gates the shipped artifacts can answer.
  * Pure. Null/empty manifest returns criteria unchanged (no evidence to select
  * from; invariant A owns that shape).
+ *
+ * QZ-001 MEASURED REACHABILITY. This function is IDENTITY on every derivable
+ * criteria set — it never strips anything. Measured at the tip: an exhaustive
+ * 12,282-combination sweep (all 2,047 non-empty subsets of the 11 criterion
+ * types x 6 manifest shapes) produced 0 strip events, output always equal to
+ * input. The reason is structural, not incidental: `demandsImage` and
+ * `demandsDeck` are computed over the same array being filtered, so a criterion
+ * can only reach a clause when its OWN type is in that set — which makes the
+ * clause's `!demandsX` conjunct false by construction. Both clauses are
+ * therefore unreachable-true, and the two `return false` lines below are
+ * retained ONLY as fail-closed guards for a future derivation that re-opens an
+ * existence-only residue; they are not live narrowing. Do not read them as
+ * evidence that stripping happens here. The genuine narrowing this function was
+ * built for now happens upstream, in deriveAcceptanceCriteria: detection runs on
+ * KAN-003's cleaned text and QZ-001's resolution-only slash admission, so a
+ * markdown card never derives render gates to strip in the first place. The
+ * QR-010 hole (3dec3ac31) is closed on that side — an image-demanding card still
+ * derives the full image set and still FAILs on `valid_image` when no image
+ * shipped (measured 6.3 FALSE); do not "fix" this function by removing the
+ * `!demandsImage` conjunct, which would re-open it.
  */
 export function criteriaForManifest(
   criteria: AcceptanceCriterion[],
@@ -3524,12 +3582,27 @@ export function criteriaForManifest(
   // FAILed the same case on the genuine deck gates (pipeline_complete /
   // coverage, both fail-closed with no deck artifact path). The narrowing must
   // not manufacture render-gate presence out of a set that stripping emptied.
-  // The ART-001 markdown shape is untouched: KAN-003's cleaning keeps a concepts
-  // .md card from deriving deck gates at all, so there is nothing to strip and
-  // it still draws baseline + existence + Mode A content review. QR-010 mirrors
-  // the rule to the image half: deriving image gates from request text already
-  // means the card demands an image deliverable, so a missing image is a
-  // genuine FAIL — not "a gate the artifact cannot answer".
+  //
+  // QZ-001: the clauses below are UNREACHABLE-TRUE, and the two comments that
+  // used to sit here claimed narrowing this function cannot perform. Measured
+  // at the tip: 12,282 combinations (all 2,047 non-empty subsets of the 11
+  // criterion types x 6 manifest shapes) -> 0 strip events, output always equal
+  // to input. `demandsDeck` / `demandsImage` are computed over the array being
+  // filtered, so a criterion of type X only reaches its clause when X is in the
+  // set, making `!demandsX` false by construction. The lines stay as
+  // fail-closed guards for a future derivation that re-opens an existence-only
+  // residue — they are NOT live narrowing and must not be cited as evidence that
+  // stripping happens here. The genuine selection happens upstream:
+  // deriveAcceptanceCriteria detects on KAN-003's cleaned text with QZ-001's
+  // resolution-only slash admission, so the ART-001 markdown shape (a concepts
+  // .md card, no image/deck word in the brief) derives the baseline criterion
+  // alone and takes Mode A content review with the manifest attached — measured
+  // score 10 pass=true on a reachable .md, where the tip scored 6.3 FALSE on the
+  // full image set. QR-010 mirrors the rule to the image half: deriving image
+  // gates from request text already means the card demands an image deliverable,
+  // so a missing image is a genuine FAIL — not "a gate the artifact cannot
+  // answer". Measured after this repair: an image-demanding card with no image
+  // still derives all 7 image criteria and still FAILs 6.3 on `valid_image`.
   const demandsDeck = criteria.some((c) => DECK_GATE_TYPES.has(c.type));
   const demandsImage = criteria.some((c) => IMAGE_GATE_TYPES.has(c.type));
   return criteria.filter((c) => {
@@ -3555,8 +3628,21 @@ export function deriveAcceptanceCriteria(
   // Detect image / deck tasks. Decks/presentations are artifact tasks too — they
   // ship rendered slide images + a .pptx and must carry the AF-LANG/AF-NUM/
   // AF-SPELL render gates AND (deck-only) the AF-PIPELINE-COMPLETE gate.
+  //
+  // QZ-001 / REVP-018-F1: the bare verb `render` is deliberately NOT in this
+  // list. It names the ACTION, not the deliverable, and every real image brief
+  // names its artifact (image / logo / banner / png / graphic / illustration /
+  // thumbnail / duck / draw / "generate|create ... image"), all still here — so
+  // dropping it costs no genuine image detection. What it cost was the ART-001
+  // markdown shape: "Ops report render" / "Render the weekly ops report as a
+  // markdown file for the team." matched on the verb alone, minted the full
+  // image gate set, and — because hasRenderGates then reads true — skipped
+  // Mode A content review and failed the legitimately-delivered .md 6.3 on
+  // `valid_image`, burning qc_reroute_attempts to cap (measured tip c1633e799:
+  // 6.3 FALSE; with `render` removed the card derives baseline only and takes
+  // Mode A content review, which is ART-001's stated intent).
   const isImageTask =
-    /\b(image|picture|photo|png|jpg|jpeg|gif|illustration|render|graphic|logo|banner|thumbnail|duck|draw|generate.*image|create.*image)\b/.test(text);
+    /\b(image|picture|photo|png|jpg|jpeg|gif|illustration|graphic|logo|banner|thumbnail|duck|draw|generate.*image|create.*image)\b/.test(text);
   const isDeckTask = describesDeckDeliverable(title, detectionSource);
 
   // ── BASELINE CRITERION — applies to EVERY task, no exceptions (T0-01) ──────
@@ -6643,12 +6729,21 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
     }
 
     if (deliverableManifest && deliverableManifest.length > 0) {
-      // Artifact mode: use the pre-computed criteria (derived above for invariant A),
-      // narrowed (ART-001) to the gates the SHIPPED artifacts can answer: a .md
-      // concepts doc draws baseline + existence (+ Mode A content review below),
-      // never valid_image / vision / AF-LANG / AF-NUM / AF-SPELL / pipeline /
-      // coverage. Image and deck artifacts keep their full gate sets, so genuine
-      // render failures still fail here.
+      // Artifact mode: use the pre-computed criteria (derived above for invariant A).
+      //
+      // QZ-001: this used to read "narrowed (ART-001) to the gates the SHIPPED
+      // artifacts can answer ... a .md concepts doc draws baseline + existence".
+      // That claim is measurably false and is corrected here rather than left to
+      // mislead the next reader. Measured at the tip: criteriaForManifest is
+      // IDENTITY (12,282-combination sweep, 0 strip events), and a .md concepts
+      // card draws the baseline criterion ALONE — not "baseline + existence" —
+      // when its brief names no image/deck word (measured: full=[deliverable_
+      // registered], hasRenderGates=false, Mode A content review, 10 pass). A
+      // brief that does name an image or deck word keeps its full gate set and
+      // correctly fails closed on the missing artifact (measured: `valid_image`
+      // plus the AF gates, 6.3 FALSE). That selection is made upstream, in
+      // deriveAcceptanceCriteria, by KAN-003's cleaned-text detection with
+      // QZ-001's resolution-only slash admission — not by narrowing here.
       const criteria = criteriaForManifest(artifactCriteriaForTitle, deliverableManifest);
 
       // ── Which checklist can actually JUDGE this deliverable? (T0-01) ────────

@@ -231,3 +231,187 @@ test('QR-007 non-regression: ART-001 / KAN-003 audit history derives no deck gat
   );
   console.log('  [QR-007 regress-2] criteria: %s', types.join(','));
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// QZ-001 — slash-token admission, both arms (REVL-016-D1 over-admission +
+// REVR-020-R1 under-admission), the bare-verb `render` misclassification
+// (REVP-018-F1 lifecycle shape), and the never-true clause comments.
+//
+// The class boundary is measured, not asserted by eye: of every slash token the
+// W36 lenses recorded, the only prose class whose halves are gate-bearing is the
+// resolution class, so admission keys on resolution words. The tests below pin
+// BOTH sides of that boundary plus the shapes that must not move at all.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('QZ-001 (i) a brief naming a mime type mints NO render gate and PASSES', async () => {
+  const mdOnly = [mk({ title: 'report.md', path: '/tmp/x/report.md' })];
+  for (const [title, desc] of [
+    ['Write the weekly report', 'Attach the chart as image/png to the report.'],
+    ['Write the weekly report', 'Accepted formats: application/pdf, image/png, text/plain.'],
+    ['Write the launch email', 'Use the image/word pairing from the brief.'],
+  ] as [string, string][]) {
+    const full = deriveAcceptanceCriteria(title, desc);
+    const types = full.map((c) => c.type);
+    assert.deepEqual(
+      types,
+      ['deliverable_registered'],
+      `REVL-016-D1: a mime type must not mint render gates, got [${types.join(',')}] for "${desc}"`,
+    );
+    const narrowed = criteriaForManifest(full, mdOnly);
+    const ev = await evaluateCriteria(narrowed, mdOnly);
+    assert.equal(ev.pass, true, `REVL-016-D1: "${desc}" delivered as .md must PASS, got ${ev.score}`);
+    console.log('  [QZ-001 i] "%s" -> [%s] score=%s pass=%s', desc, types.join(','), ev.score, ev.pass);
+  }
+});
+
+test('QZ-001 (ii) a single-slash relative path whose halves are detector keywords mints NO render gate', async () => {
+  const mdOnly = [mk({ title: 'report.md', path: '/tmp/x/report.md' })];
+  for (const [title, desc] of [
+    ['Write the weekly report', 'Copy lives in outputs/deck for reference.'],
+    ['Write the weekly report', 'Draft is at notes/slides and needs review.'],
+    ['Update the runbook', 'Working dir: runs/deck'],
+  ] as [string, string][]) {
+    const full = deriveAcceptanceCriteria(title, desc);
+    const types = full.map((c) => c.type);
+    assert.deepEqual(
+      types,
+      ['deliverable_registered'],
+      `REVL-016-D1: a relative path segment must not mint render gates, got [${types.join(',')}] for "${desc}"`,
+    );
+    const narrowed = criteriaForManifest(full, mdOnly);
+    const ev = await evaluateCriteria(narrowed, mdOnly);
+    assert.equal(ev.pass, true, `REVL-016-D1: "${desc}" delivered as .md must PASS, got ${ev.score}`);
+    console.log('  [QZ-001 ii] "%s" -> [%s] score=%s pass=%s', desc, types.join(','), ev.score, ev.pass);
+  }
+});
+
+test('QZ-001 (iii) dot-arm slash prose and its spaced control derive the SAME criteria and score the SAME', async () => {
+  const tinyImage = [mk({ title: 'banner.png', path: '/tmp/x/banner.png', type: 'image', sizeBytes: 512 })];
+  for (const [slashDesc, plainDesc] of [
+    ['Build a 1080/4k.v2 hero banner.', 'Build a 1080p 4k v2 hero banner.'],
+    ['Build a 1.5x/1080 hero banner.', 'Build a 1.5x 1080 hero banner.'],
+    ['Build a v1.2/1080 hero banner.', 'Build a v1.2 1080 hero banner.'],
+  ] as [string, string][]) {
+    const slash = deriveAcceptanceCriteria('Hero banner', slashDesc).map((c) => c.type);
+    const plain = deriveAcceptanceCriteria('Hero banner', plainDesc).map((c) => c.type);
+    assert.deepEqual(slash, plain, `REVR-020-R1: "${slashDesc}" must derive the same gates as "${plainDesc}"`);
+    assert.ok(slash.includes('min_resolution'), `REVR-020-R1: "${slashDesc}" must mint min_resolution, got [${slash.join(',')}]`);
+    const sev = await evaluateCriteria(criteriaForManifest(deriveAcceptanceCriteria('Hero banner', slashDesc), tinyImage), tinyImage);
+    const pev = await evaluateCriteria(criteriaForManifest(deriveAcceptanceCriteria('Hero banner', plainDesc), tinyImage), tinyImage);
+    assert.equal(
+      sev.pass,
+      pev.pass,
+      `REVR-020-R1: slash and spaced forms must score the same — ${sev.score}/${sev.pass} vs ${pev.score}/${pev.pass}`,
+    );
+    assert.equal(sev.pass, false, `REVR-020-R1: a sub-floor image must FAIL, not auto-pass ${sev.score}`);
+    console.log('  [QZ-001 iii] "%s" vs "%s" -> %s | %s/%s both', slashDesc, plainDesc, slash.join(','), sev.score, pev.score);
+  }
+});
+
+test('QZ-001 (iv) the multi-slash arm behaves like its spaced control', async () => {
+  const tinyImage = [mk({ title: 'banner.png', path: '/tmp/x/banner.png', type: 'image', sizeBytes: 512 })];
+  const slash = deriveAcceptanceCriteria('Hero banner', 'Build a hd/4k/render hero banner.').map((c) => c.type);
+  const plain = deriveAcceptanceCriteria('Hero banner', 'Build a hd 4k render hero banner.').map((c) => c.type);
+  assert.deepEqual(slash, plain, 'REVR-020-R1: "hd/4k/render" must derive the same gates as "hd 4k render"');
+  assert.ok(slash.includes('min_resolution'), `REVR-020-R1: multi-slash resolution chain must mint min_resolution, got [${slash.join(',')}]`);
+  const sev = await evaluateCriteria(
+    criteriaForManifest(deriveAcceptanceCriteria('Hero banner', 'Build a hd/4k/render hero banner.'), tinyImage), tinyImage);
+  const pev = await evaluateCriteria(
+    criteriaForManifest(deriveAcceptanceCriteria('Hero banner', 'Build a hd 4k render hero banner.'), tinyImage), tinyImage);
+  assert.equal(sev.pass, pev.pass, `multi-slash arm must score like its control — ${sev.score} vs ${pev.score}`);
+  assert.equal(sev.pass, false, 'multi-slash arm on a sub-floor image must FAIL, not auto-pass');
+  console.log('  [QZ-001 iv] hd/4k/render vs hd 4k render -> %s | %s both', slash.join(','), sev.score);
+});
+
+test('QZ-001 (v) genuine absolute, drive and URL paths still mint nothing', () => {
+  for (const desc of [
+    'Build a banner from /tmp/x/1080.png',
+    'Build a banner from C:/work/1080.png',
+    'Build a banner per https://cdn.example.com/shots/1080/hero.png spec.',
+    'Deliver a/b/c/1080 asset.',
+    'Deliver shots/1080/hero.png asset.',
+    'Deliver deck.pptx/1080 asset.',
+  ]) {
+    const types = deriveAcceptanceCriteria('Banner', desc).map((c) => c.type);
+    assert.ok(
+      !types.includes('min_resolution'),
+      `QZ-001: a genuine path/URL must not mint min_resolution, got [${types.join(',')}] for "${desc}"`,
+    );
+    console.log('  [QZ-001 v] "%s" -> [%s]', desc, types.join(','));
+  }
+});
+
+test('QZ-001 (vi) ART-001 markdown brief and the and/or + N/A controls hold', async () => {
+  const mdOnly = [mk({ title: 'concepts.md', path: '/tmp/x/concepts.md' })];
+
+  // ART-001: a markdown concepts file is not a proven deck and must not be
+  // deck-gated. With the bare verb `render` no longer an image signal, the
+  // lifecycle shape that burned qc_reroute_attempts takes Mode A content review.
+  for (const [title, desc] of [
+    ['badge-journey-week1-concepts', 'Write the week 1 concepts markdown file.'],
+    ['Ops report render', 'Render the weekly ops report as a markdown file for the team.'],
+  ] as [string, string][]) {
+    const full = deriveAcceptanceCriteria(title, desc);
+    assert.deepEqual(
+      full.map((c) => c.type),
+      ['deliverable_registered'],
+      `ART-001: a markdown-only brief must not mint render gates, got [${full.map((c) => c.type).join(',')}]`,
+    );
+    const narrowed = criteriaForManifest(full, mdOnly);
+    assert.equal(
+      narrowed.some((c) => c.type !== 'deliverable_registered'),
+      false,
+      'ART-001: the Markdown concepts shape must take Mode A content review, not the checklist path',
+    );
+    const ev = await evaluateCriteria(narrowed, mdOnly);
+    assert.equal(ev.pass, true, `ART-001: a reachable .md must PASS, got ${ev.score}`);
+  }
+
+  // Controls whose slash halves are gate-free: unchanged, no resolution gate.
+  for (const desc of ['Approve cash and/or accrual.', 'Use N/A placeholders.']) {
+    const types = deriveAcceptanceCriteria('Approval', desc).map((c) => c.type);
+    assert.deepEqual(types, ['deliverable_registered'], `control "${desc}" must stay gate-free, got [${types.join(',')}]`);
+    console.log('  [QZ-001 vi] control "%s" -> [%s]', desc, types.join(','));
+  }
+  console.log('  [QZ-001 vi] ART-001 markdown shapes take Mode A content review');
+});
+
+test('QZ-001 (vii) QR-010 hole stays closed: an image-demanding card with no image still FAILS', async () => {
+  const mdOnly = [mk({ title: 'notes.md', path: '/tmp/x/notes.md' })];
+  const full = deriveAcceptanceCriteria('Logo for Acme', 'Create a logo for Acme. Brand colors: blue.');
+  const types = full.map((c) => c.type);
+  assert.ok(types.includes('valid_image'), `QR-010: an image-demanding card must keep its image gates, got [${types.join(',')}]`);
+  const narrowed = criteriaForManifest(full, mdOnly);
+  assert.deepEqual(
+    narrowed.map((c) => c.type),
+    types,
+    'QZ-001: criteriaForManifest is identity — it must strip nothing and not mask the missing image',
+  );
+  const ev = await evaluateCriteria(narrowed, mdOnly);
+  assert.equal(ev.pass, false, `QR-010: a .md-only manifest for an image card must FAIL, got ${ev.score}`);
+  assert.ok(
+    ev.results.some((r) => r.id === 'valid_image' && !r.pass),
+    'QR-010: the FAIL must be on valid_image, not an incidental gate',
+  );
+  console.log('  [QZ-001 vii] image card + .md only -> [%s] score=%s pass=%s', types.join(','), ev.score, ev.pass);
+});
+
+test('QZ-001 (viii) bare verb render alone no longer classifies a card as an image task', () => {
+  const withVerb = deriveAcceptanceCriteria('Ops report render', 'Render the weekly ops report as a markdown file.').map((c) => c.type);
+  const withoutVerb = deriveAcceptanceCriteria('Ops report', 'Write the weekly ops report as a markdown file.').map((c) => c.type);
+  assert.deepEqual(
+    withVerb,
+    withoutVerb,
+    'REVP-018-F1: the bare verb render must not add render gates the same brief without it does not have',
+  );
+  // But a real image noun must still classify — the root cause fix must not
+  // cost genuine image detection.
+  for (const [title, desc] of [
+    ['Create a company logo image', 'A simple logo, PNG.'],
+    ['Render a hero banner image for Acme', 'Render a hero banner image for Acme homepage.'],
+  ] as [string, string][]) {
+    const types = deriveAcceptanceCriteria(title, desc).map((c) => c.type);
+    assert.ok(types.includes('valid_image'), `genuine image detection must survive, got [${types.join(',')}] for "${title}"`);
+  }
+  console.log('  [QZ-001 viii] render-verb brief [%s] == no-verb brief [%s]', withVerb.join(','), withoutVerb.join(','));
+});
