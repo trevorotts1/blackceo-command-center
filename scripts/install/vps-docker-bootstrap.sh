@@ -210,6 +210,87 @@ else
 fi
 
 #
+# Step 8c: Additive env-file reconcile (canonical in-container env store)
+#
+# Step 8b converges the launcher; this step converges the CONFIG the launcher
+# serves. A box installed months ago lacks keys the current template ships
+# (new toggles, new provider keys), and a blind overwrite would wipe keys the
+# operator already set. So: ADDITIVE ONLY — append keys present as ACTIVE
+# (uncommented KEY=...) lines in the repo .env.example template but absent
+# from the live file; never modify, reorder, or delete an existing line.
+# Commented-only template lines are opt-in tunables and are NOT activated.
+# Backup to .env.bak before writing (same .bak convention as step 8b).
+# Values are never echoed — key names and counts only (never print secrets).
+# Non-fatal by design: a missing template warns and returns 0 so bootstrap
+# still completes step 9.
+#
+# ponytail: no explicit fsync here (bash has none); same-dir temp + rename(2)
+# is still atomic — readers see old or new, never half-written. Upgrade path:
+# python3 fsync of temp + dir before mv when power-loss durability matters.
+#
+# Test seam: template/target are positional args defaulting to the canonical
+# paths, so tests/unit/vps-bootstrap-env-reconcile.test.sh drives the REAL
+# function against temp dirs.
+#
+_ilj_env_key_of_line() {
+  local line="$1" rest key
+  rest="$(printf '%s' "$line" | sed -E 's/^[[:space:]]+//')"
+  case "$rest" in
+    ''|\#*) return 1 ;;
+  esac
+  case "$rest" in
+    export[[:space:]]*)
+      rest="$(printf '%s' "$rest" | sed -E 's/^export[[:space:]]+//')" ;;
+  esac
+  case "$rest" in
+    [A-Za-z_]*=*)
+      key="${rest%%=*}"
+      key="$(printf '%s' "$key" | sed -E 's/[[:space:]]+$//')" ;;
+    *) return 1 ;;
+  esac
+  case "$key" in
+    ''|*[!A-Za-z0-9_]*|'export') return 1 ;;
+  esac
+  printf '%s' "$key"
+}
+
+reconcile_env_file_additive() {
+  local template="${1:-${ILJ_ENV_TEMPLATE:-$ECOSYSTEM_DIR/.env.example}}"
+  local target="${2:-${ILJ_ENV_TARGET:-/data/.openclaw/.env}}"
+  if [[ ! -f "$template" ]]; then
+    echo "[8c/9] Env template not found at $template — skipping env reconcile (non-fatal)"
+    return 0
+  fi
+  mkdir -p "$(dirname "$target")"
+  if [[ ! -f "$target" ]]; then
+    echo "[8c/9] Seeding env file at $target from template..."
+    cp -p "$template" "$target"
+    chmod 600 "$target"
+    return 0
+  fi
+  cp -p "$target" "${target}.bak"
+  chmod 600 "${target}.bak"
+  local tmp added key line
+  added=0
+  tmp="$(mktemp "$(dirname "$target")/.env.tmp.XXXXXX")"
+  cp -p "$target" "$tmp"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    key="$(_ilj_env_key_of_line "$line")" || continue
+    if ! grep -q -E "^[[:space:]]*(export[[:space:]]+)?${key}[[:space:]]*=" "$target"; then
+      printf '%s\n' "$line" >> "$tmp"
+      added=$((added+1))
+    fi
+  done < "$template" || true
+  chmod 600 "$tmp"
+  mv -f "$tmp" "$target"
+  echo "[8c/9] Env reconcile: $added missing key(s) appended to $target (existing keys untouched, backup at ${target}.bak)"
+  return 0
+}
+
+echo "[8c/9] Reconciling in-container env file (additive, operator keys preserved)..."
+reconcile_env_file_additive || echo "[8c/9] WARNING: env reconcile failed — continuing (PM2 reconcile already applied)"
+
+#
 # Step 9: PM2 systemd startup so PM2-managed processes survive restart
 #
 echo "[9/9] Configuring PM2 systemd startup..."
