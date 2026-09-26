@@ -67,7 +67,7 @@ import { renderOwnerMessagesSection } from '@/lib/owner-messages';
 import { loadSubtaskPersonas } from '@/lib/persona-selector';
 import { checkModelSovereignty, detectModality, type ModelSovereigntyViolation } from '@/lib/model-selector';
 import { listModels } from '@/lib/model-registry';
-import { getBestSOPForTask, checkTriad } from '@/lib/sops';
+import { getBestSOPForTask, checkTriad, isLiveSopId } from '@/lib/sops';
 import { triadMissingPillText, type TriadMissingKey } from '@/lib/board-labels';
 import { QC_MAX_REROUTES } from '@/lib/qc-scorer';
 import {
@@ -776,8 +776,15 @@ async function resolveSopForTask(
 ): Promise<SopResolution> {
   const taskId = task.id;
 
-  // Idempotence gate: an SOP is already attached — no pull, no copy, no authoring.
-  if (task.sop_id) return { outcome: 'already', sopId: task.sop_id };
+  // Idempotence gate: a LIVE SOP is already attached — no pull, no copy, no
+  // authoring. KAN-003: the old gate fired on any truthy sop_id, including a
+  // DEAD one (row missing or soft-deleted after a re-ingest). A dead id fell
+  // through as 'already', so GUARD 7's `checkTriad` (which correctly treats it
+  // as missing) held the card while the only engine that could cure it refused
+  // to run. A dead id now falls THROUGH to the pull below: a department fit
+  // re-pulls and (with persistFill) is written back; a genuine library gap
+  // still ends 'library_gap'/'unresolved' and the caller holds.
+  if (task.sop_id && isLiveSopId(task.sop_id)) return { outcome: 'already', sopId: task.sop_id };
 
   // ── SOP pull ────────────────────────────────────────────────────────────
   let resolvedSopId: string | null = null;
