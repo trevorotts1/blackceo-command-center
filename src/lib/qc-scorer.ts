@@ -3473,9 +3473,25 @@ export function criteriaForManifest(
   const hasImage = manifestHasImageArtifact(manifest);
   const hasDeck = manifestHasDeckArtifact(manifest);
   if (hasImage && hasDeck) return criteria;
+  // QR-001: the DECK gates are never stripped. Deriving them from request text
+  // already means the card demands a deck deliverable, so a missing deck file is
+  // a genuine FAIL — not "a gate the artifact cannot answer". Stripping them
+  // left a deck-class card with no deck file holding exactly
+  // {deliverable_registered, existence}; `existence` is not
+  // `deliverable_registered`, so the caller's render-gate test read that residue
+  // as "real gates present" and the existence-only checklist passed a merely-
+  // reachable .md 10/10 — where base adc4398b4543568f63de5514f2f094b7a42df5cc
+  // FAILed the same case on the genuine deck gates (pipeline_complete /
+  // coverage, both fail-closed with no deck artifact path). The narrowing must
+  // not manufacture render-gate presence out of a set that stripping emptied.
+  // The ART-001 markdown shape is untouched: KAN-003's cleaning keeps a concepts
+  // .md card from deriving deck gates at all, so there is nothing to strip and
+  // it still draws baseline + existence + Mode A content review. Image-side
+  // narrowing is unchanged, so a valid-deck card's passing path is identical.
+  const demandsDeck = criteria.some((c) => DECK_GATE_TYPES.has(c.type));
   return criteria.filter((c) => {
     if (IMAGE_GATE_TYPES.has(c.type) && !hasImage) return false;
-    if (DECK_GATE_TYPES.has(c.type) && !hasDeck) return false;
+    if (DECK_GATE_TYPES.has(c.type) && !hasDeck && !demandsDeck) return false;
     return true;
   });
 }
