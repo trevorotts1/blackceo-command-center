@@ -3426,9 +3426,26 @@ export function cleanDetectionText(title: string, description?: string | null): 
   // already produced" would otherwise leave "pptx already produced" behind
   // after the sentence cut at the path's first period).
   text = text.replace(/https?:\/\/\S+/gi, ' ');
+  // QR-013: a slash token is a filesystem path ONLY when it is shaped like
+  // one (leading `/`, an extension/dot, a drive prefix, or multiple slashes).
+  // A bare `a/b` word is owner prose (`1080/4k`, `hd/4k`, `and/or`) — split it
+  // on the slash so each half reaches the gate regexes below. Dropping it
+  // deleted the `min_resolution` mint for slash-written briefs (10.0 PASS on a
+  // sub-floor image vs 6.7 FAIL for the same words spaced out).
   text = text
     .split(/\s+/)
-    .filter((tok) => tok && !tok.includes('/'))
+    .flatMap((tok) => {
+      if (!tok) return [];
+      if (!tok.includes('/')) return [tok];
+      const probe = tok.replace(/[.,;:!?)"']+$/, '');
+      if (!probe.includes('/')) return [tok];
+      if (probe.startsWith('/') || probe.includes('.') || /^[A-Za-z]:\//.test(probe) || (probe.match(/\//g) ?? []).length > 1)
+        return [];
+      const parts = probe.split('/');
+      const tail = tok.slice(probe.length); // trailing punctuation, reattached
+      parts[parts.length - 1] += tail;
+      return parts;
+    })
     .join(' ');
   // Prior-state history is provenance, never the current brief.
   text = text.replace(/\bPRIOR STATE:[^.]*\./gi, ' ');

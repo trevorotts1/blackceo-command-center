@@ -173,6 +173,51 @@ test('QR-010 non-regression: card that never demanded an image still narrows wit
   console.log('  [QR-010 regress] narrowed: %s', narrowed.map((c) => c.type).join(','));
 });
 
+test('QR-013 (a) slash-written resolution brief on a sub-floor image mints min_resolution and FAILS', async () => {
+  const full = deriveAcceptanceCriteria('Hero banner', 'Build a 1080/4k hero banner for the sale.');
+  const types = full.map((c) => c.type);
+  assert.ok(
+    types.includes('min_resolution'),
+    `a '1080/4k' brief must mint min_resolution, got [${types.join(',')}]`,
+  );
+  const tinyImage = [mk({ title: 'banner.png', path: '/tmp/x/banner.png', type: 'image', sizeBytes: 512 })];
+  const narrowed = criteriaForManifest(full, tinyImage);
+  assert.ok(
+    narrowed.some((c) => c.type === 'min_resolution'),
+    'min_resolution must survive manifest narrowing for an image manifest',
+  );
+  const ev = await evaluateCriteria(narrowed, tinyImage);
+  assert.equal(ev.pass, false, 'QR-013: a 512-byte image against a 1080/4k brief must FAIL, not pass existence-only');
+  console.log('  [QR-013 a] narrowed: %s | score: %s | pass: %s', narrowed.map((c) => c.type).join(','), ev.score, ev.pass);
+});
+
+test('QR-013 (b) 1080/4k and 1080p 4k derive the SAME criteria set', () => {
+  const slash = deriveAcceptanceCriteria('Hero banner', 'Build a 1080/4k hero banner for the sale.').map((c) => c.type);
+  const plain = deriveAcceptanceCriteria('Hero banner', 'Build a 1080p 4k hero banner for the sale.').map((c) => c.type);
+  assert.deepEqual(slash, plain, 'slash-written and space-written resolution demands must mint identical gates');
+  console.log('  [QR-013 b] criteria: %s', slash.join(','));
+});
+
+test('QR-013 (c) a brief with no gate words gains no gates from the slash change', () => {
+  const slash = deriveAcceptanceCriteria('Banner', 'Deliver a banner with N/A placeholders.').map((c) => c.type);
+  const plain = deriveAcceptanceCriteria('Banner', 'Deliver a banner with placeholders.').map((c) => c.type);
+  assert.deepEqual(slash, plain, 'a slash token carrying no gate words must not add gates');
+  assert.ok(!slash.includes('min_resolution'), 'no resolution demand, no min_resolution gate');
+  console.log('  [QR-013 c] criteria: %s', slash.join(','));
+});
+
+test('QR-013 (d) a bare URL with a slash path still mints no gate', () => {
+  const types = deriveAcceptanceCriteria(
+    'Banner',
+    'Build a banner per https://cdn.example.com/shots/1080/hero.png spec.',
+  ).map((c) => c.type);
+  assert.ok(
+    !types.includes('min_resolution'),
+    `a 1080 inside a URL path must not mint min_resolution, got [${types.join(',')}]`,
+  );
+  console.log('  [QR-013 d] criteria: %s', types.join(','));
+});
+
 test('QR-007 non-regression: ART-001 / KAN-003 audit history derives no deck gates', () => {
   const types = deriveAcceptanceCriteria(
     'badge-journey-week1-concepts',
