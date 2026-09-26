@@ -10,7 +10,7 @@
  * can show the operator which binary went sideways.
  */
 
-import { spawn } from 'child_process';
+import { execFileSync, spawn } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -40,20 +40,74 @@ interface PerCliResult {
 const PER_CLI_TIMEOUT_MS = 2000;
 
 /**
+ * QR-008: the login-shell PATH, harvested ONCE per process by asking the
+ * user's own interactive login shell to print $PATH. The static directory list
+ * alone was the reviewed defect: a CLI living anywhere else on the login PATH
+ * (~/bin, ~/.bun/bin, /opt/pmk/env/global/bin, …) was reported absent, because
+ * a probe inside a pm2/Next process never sees the operator's PATH — pm2
+ * pins a minimal one (see ecosystem.cc-prod.config.cjs).
+ *
+ * Cached because resolveCliBinary is called once per registered CLI; spawning
+ * a shell per call would put ~20 redundant forks inside a 3s probe budget.
+ * The cache is a Map so a failed harvest (shell missing, spawn error) memoizes
+ * the empty result rather than re-spawning for every remaining CLI.
+ *
+ * This is the ONLY place a shell is ever spawned here, it takes no arguments,
+ * and its output is treated purely as a list of directory strings — the
+ * caller's `spawn` of the resolved binary remains argument-static.
+ */
+const loginPathDirs = (() => {
+  let cached: string[] | null = null;
+  return (): string[] => {
+    if (cached) return cached;
+    cached = [];
+    const shell = process.env.SHELL || '/bin/sh';
+    try {
+      // -lic: interactive+login, so the user's rc files (which is where the
+      // PATH exports live) are sourced exactly as they are at a real prompt.
+      // 1000ms: the measured interactive shell on this box answers in ~90ms,
+      // so this is a 10x ceiling. It has to stay well under PROBE_TIMEOUT_MS
+      // (3000): the harvest is blocking-synchronous and runs inside the probe,
+      // and a shell that hangs must not eat the budget the CLIs need.
+      const out = execFileSync(shell, ['-lic', 'printf %s "$PATH"'], {
+        encoding: 'utf8',
+        timeout: 1000,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      cached = out
+        .trim()
+        .split(path.delimiter)
+        .filter((dir) => dir.length > 0 && path.isAbsolute(dir));
+    } catch {
+      // No usable shell / it hung: the fixed list still works, so this stays a
+      // silently degraded lookup rather than a probe failure.
+    }
+    return cached;
+  };
+})();
+
+/**
  * HEA-001: PATH fallback for a registered binary. The registry stores the
  * absolute path captured at install time (`/opt/homebrew/bin/claude`); when
  * the entry's stored path is missing, stale, or not executable (reinstall to
- * a new prefix, `~/.local/bin` vs brew drift), we retry by bare name against
- * a fixed list of well-known install directories before calling it a failure.
- * QR-002: that list must cover the npm global prefix too — `pm2` (and other
- * `npm install -g` tools) live in `~/.npm-global/bin` on this box, which the
- * original three-directory list missed, so a tool that was both installed and
- * running was reported absent. That directory is appended LAST, so the three
- * directories that preceded it keep resolving exactly as before and this is
- * strictly additive rather than a reordering. Returns the resolved path, or null
- * when the binary is genuinely absent. Every candidate is checked statically
- * with `fs.accessSync(..., X_OK)`; NO shell is ever spawned here, and the
- * caller's `spawn` remains argument-static. Exported for tests.
+ * a new prefix, `~/.local/bin` vs brew drift), we retry by bare name before
+ * calling it a failure.
+ * QR-002: that lookup must cover the npm global prefix too — `pm2` (and other
+ * `npm install -g` tools) live in `~/.npm-global/bin` on this box, so a tool
+ * that was both installed and running was reported absent.
+ * QR-008: the lookup now walks the REAL PATH, not only a frozen list. Search
+ * order is: the four fixed directories FIRST (so every QR-002 verdict is
+ * byte-identical to before — `pm2` still resolves to `~/.npm-global/bin/pm2`
+ * even if some other directory on PATH also holds a `pm2`), then process.env.PATH,
+ * then the login shell's PATH. Adds directories only; removes none, and no
+ * candidate that resolved before resolves differently now.
+ *
+ * A registered path that still EXISTS is returned verbatim before any of this
+ * runs — a stale registration is never silently swapped for a same-named
+ * binary found elsewhere, because that substitution would need evidence this
+ * function does not have. Returns the resolved path, or null when the binary
+ * is genuinely absent. Every candidate is checked statically with
+ * `fs.accessSync(..., X_OK)`. Exported for tests.
  */
 export function resolveCliBinary(
   binaryPath: string | null,
@@ -69,16 +123,32 @@ export function resolveCliBinary(
   }
   const home = os.homedir();
   const bare = binaryPath ? path.basename(binaryPath) : cliName;
-  for (const candidate of [
-    path.join(home, '.local', 'bin', bare),
-    `/opt/homebrew/bin/${bare}`,
-    `/usr/local/bin/${bare}`,
-    // Last: strictly additive. A tool found in one of the three directories
-    // above resolves exactly as it did before, so adding this cannot change an
-    // existing verdict; it only rescues `npm install -g` tools (pm2 and
-    // friends) that live nowhere else.
-    path.join(home, '.npm-global', 'bin', bare),
-  ]) {
+
+  const dirs: string[] = [
+    path.join(home, '.local', 'bin'),
+    '/opt/homebrew/bin',
+    '/usr/local/bin',
+    // Last of the fixed four: strictly additive. A tool found in one of the
+    // three directories above resolves exactly as it did before, so this
+    // cannot change an existing verdict; it only rescues `npm install -g`
+    // tools (pm2 and friends) that live nowhere else.
+    path.join(home, '.npm-global', 'bin'),
+    // QR-008: then the PATHs the process actually has — the inherited env
+    // first (a caller may pass a richer one), then the login shell's.
+    ...(process.env.PATH ? process.env.PATH.split(path.delimiter) : []),
+    ...loginPathDirs(),
+  ];
+
+  const seen = new Set<string>();
+  for (const dir of dirs) {
+    if (!dir || seen.has(dir)) continue;
+    seen.add(dir);
+
+    // Skip directory entries that are not absolute — a relative PATH entry
+    // would resolve against the server's cwd and turn this into a different
+    // question ("what is in my cwd") than the one being asked.
+    const candidate = path.isAbsolute(dir) ? path.join(dir, bare) : null;
+    if (!candidate) continue;
     try {
       fs.accessSync(candidate, fs.constants.X_OK);
       return candidate;
