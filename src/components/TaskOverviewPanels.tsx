@@ -318,6 +318,16 @@ export function TaskSopPanel({
   // machinery broke — and it must never render as a bare "Missing: SOP" with
   // no way forward. A 500/network failure is the opposite: unknown state, so
   // the panel says the title could not be verified and keeps the id visible.
+  //
+  // CRT-002: a 404 alone is NOT the whole dead-pointer set. GET /api/sops/[id]
+  // has no deleted_at filter and DELETE only stamps deleted_at, so a
+  // SOFT-DELETED SOP comes back 200 with its row — and this panel would render
+  // it as an ordinary live link while the Triad banner (checkTriad /
+  // isLiveSopId, src/lib/sops.ts) already called it missing. The liveness
+  // predicate is the row's own `deleted_at`, the same column and polarity
+  // isLiveSopId() reads (`!!row && !row.deleted_at`); it is checked on the row
+  // this same fetch already carries, so the panel and the Triad banner cannot
+  // drift apart again.
   const [sopMissing, setSopMissing] = useState(false);
   const [sopUnverified, setSopUnverified] = useState(false);
 
@@ -348,6 +358,13 @@ export function TaskSopPanel({
         if (cancelled || !data) return;
         // /api/sops/[id] returns the SOP row (or { sop }) — tolerate both shapes.
         const sop = data?.sop ?? data;
+        // CRT-002: the GET carries deleted_at (SELECT *), so a soft-deleted row
+        // arrives here as 200. Same predicate as isLiveSopId(): a row whose
+        // deleted_at is set is NOT live, whatever the status code said.
+        if (sop && typeof sop === 'object' && (sop as { deleted_at?: string | null }).deleted_at) {
+          setSopMissing(true);
+          return;
+        }
         setSopTitle(sop?.title || sop?.name || null);
       })
       .catch(() => {
