@@ -149,6 +149,30 @@ test('QR-007 non-regression: QR-001 deck-class card with no deck file still FAIL
   console.log('  [QR-007 regress-1] narrowed: %s | score: %s', narrowed.map((c) => c.type).join(','), ev.score);
 });
 
+test('QR-010: image-demanding card with no image file keeps its image gates and FAILS', async () => {
+  const full = deriveAcceptanceCriteria('Render a hero banner image for Acme', 'Render a hero banner image for Acme homepage.');
+  const mdOnly = [mk({ title: 'notes.md', path: '/tmp/x/notes.md' })];
+  const narrowed = criteriaForManifest(full, mdOnly);
+  assert.ok(
+    narrowed.some((c) => c.type === 'valid_image'),
+    'QR-010: image-demanding criteria must keep their image gates when the manifest holds no image file',
+  );
+  const ev = await evaluateCriteria(narrowed, mdOnly);
+  assert.equal(ev.pass, false, 'QR-010: a .md-only manifest for an image card must FAIL, not pass existence-only');
+  console.log('  [QR-010] narrowed: %s | score: %s', narrowed.map((c) => c.type).join(','), ev.score);
+});
+
+test('QR-010 non-regression: card that never demanded an image still narrows without image gates', () => {
+  const full = deriveAcceptanceCriteria('Week 1 concepts doc', 'Write the Week 1 concepts doc.');
+  const mdOnly = [mk({ title: 'concepts.md', path: '/tmp/x/concepts.md' })];
+  const narrowed = criteriaForManifest(full, mdOnly);
+  assert.ok(
+    !narrowed.some((c) => c.type === 'valid_image'),
+    'ART-001/KAN-003: a card that never demanded an image must not mint image gates',
+  );
+  console.log('  [QR-010 regress] narrowed: %s', narrowed.map((c) => c.type).join(','));
+});
+
 test('QR-007 non-regression: ART-001 / KAN-003 audit history derives no deck gates', () => {
   const types = deriveAcceptanceCriteria(
     'badge-journey-week1-concepts',

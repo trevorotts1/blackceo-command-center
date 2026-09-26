@@ -3509,11 +3509,14 @@ export function criteriaForManifest(
   // not manufacture render-gate presence out of a set that stripping emptied.
   // The ART-001 markdown shape is untouched: KAN-003's cleaning keeps a concepts
   // .md card from deriving deck gates at all, so there is nothing to strip and
-  // it still draws baseline + existence + Mode A content review. Image-side
-  // narrowing is unchanged, so a valid-deck card's passing path is identical.
+  // it still draws baseline + existence + Mode A content review. QR-010 mirrors
+  // the rule to the image half: deriving image gates from request text already
+  // means the card demands an image deliverable, so a missing image is a
+  // genuine FAIL — not "a gate the artifact cannot answer".
   const demandsDeck = criteria.some((c) => DECK_GATE_TYPES.has(c.type));
+  const demandsImage = criteria.some((c) => IMAGE_GATE_TYPES.has(c.type));
   return criteria.filter((c) => {
-    if (IMAGE_GATE_TYPES.has(c.type) && !hasImage) return false;
+    if (IMAGE_GATE_TYPES.has(c.type) && !hasImage && !demandsImage) return false;
     if (DECK_GATE_TYPES.has(c.type) && !hasDeck && !demandsDeck) return false;
     return true;
   });
