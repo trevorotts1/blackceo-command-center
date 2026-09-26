@@ -729,6 +729,19 @@ if [[ -n "$PUBLIC_URL" ]]; then
   elif [[ "$CF_HTTP" == "200" ]] && printf '%s' "$CF_BODY" | grep -qi 'cloudflare access\|cf-access-login\|cf_chl'; then
     CF_INDET=true; CF_DETAIL="CF Access policy misconfigured: public URL returns CF challenge (UNKNOWN)"
   elif [[ "$CF_HTTP" == "200" ]]; then CF_PASS="pass"; CF_DETAIL="CF public URL → HTTP 200: PASS"
+  # 2026-09-26: the app's OWN fail-closed tenant refusal. Since PR #420 the
+  # middleware answers an unauthenticated GET / with 403 {"error":
+  # "tenant_access_required"} (JSON for API/fetch/curl; friendly HTML only for a
+  # document navigation) instead of the old same-origin 302 → /interview. The
+  # tunnel resolved, Cloudflare routed, and the app answered and gated the
+  # request — the same "reachable + correctly protected" class as the U51
+  # CF-Access-login 302 above — so a 403 carrying the app's own refusal envelope
+  # is PASS, not the generic row-26-style FAIL. Deliberately narrow: only the
+  # app's `tenant_access_required` code qualifies; any OTHER 403 (edge WAF,
+  # foreign proxy) still falls through to FAIL, and `unregistered_hostname`
+  # (the row-33 TENANT WALL) is NOT excused here.
+  elif [[ "$CF_HTTP" == "403" ]] && printf '%s' "$CF_BODY" | grep -q 'tenant_access_required'; then
+    CF_PASS="pass"; CF_DETAIL="CF public URL → HTTP 403 with the app's own tenant-refusal envelope ({\"error\":\"tenant_access_required\"}) — reachable, correctly gated by the tenant middleware: PASS"
   else CF_PASS="fail"; CF_DETAIL="CF public URL → HTTP ${CF_HTTP}: FAIL"; fi
 fi
 [[ "$CF_INDET" == "true" ]] && log "UNKNOWN: ${CF_DETAIL}" || log "CF probe: ${CF_PASS} — ${CF_DETAIL}"
