@@ -92,11 +92,11 @@ function parsePm2Cloudflared(stdout: string): { found: boolean; online: boolean;
  * PM2 — `pm2 jlist` succeeding with zero cloudflared entries is the NORMAL
  * state of a healthy box, not evidence of a down tunnel. When the PM2 lookup
  * finds no cloudflared entry we check (a) a live `cloudflared` process via
- * `pgrep -f cloudflared`, then (b) a launchd agent with a cloudflare label.
- * Either hit is identity-grade: generic port squatters never spawn a process
- * literally named `cloudflared`, and launchd labels are box-local. The PM2
- * online-entry verdict still wins when present (it is the most specific).
- * Exported for tests.
+ * `pgrep -f cloudflared`, then (b) a launchd agent with a cloudflare label
+ * AND a real PID (HEA-002). Either hit is identity-grade: generic port
+ * squatters never spawn a process literally named `cloudflared`, and launchd
+ * labels are box-local. The PM2 online-entry verdict still wins when present
+ * (it is the most specific). Exported for tests.
  */
 export async function launchdTunnelEvidence(): Promise<{
   processRunning: boolean;
@@ -110,12 +110,16 @@ export async function launchdTunnelEvidence(): Promise<{
   const proc = await runFile('pgrep', ['-f', 'cloudflared'], EXEC_TIMEOUT_MS);
   const processRunning =
     proc.exitCode === 0 && (proc.stdout.trim().length > 0 || /cloudflared/.test(proc.stdout));
+  // HEA-002: a label alone is not liveness. `launchctl list` prints
+  // "PID  Status  Label" and a LOADED-BUT-NOT-RUNNING job has "-" in the PID
+  // column — matching the label anywhere in the line reported a dead tunnel as
+  // live. Column 1 must be a numeric PID for the job to count as running.
   let launchdLabel: string | null = null;
   const list = await runFile('launchctl', ['list'], EXEC_TIMEOUT_MS);
   if (list.exitCode === 0) {
     for (const line of list.stdout.split('\n')) {
       const match = line.match(/(com\.cloudflare[d]?[.\-][\w.\-]+|com\.cloudflar\w*)/i);
-      if (match) {
+      if (match && /^\s*\d+\s/.test(line)) {
         launchdLabel = match[1];
         break;
       }
