@@ -28,7 +28,7 @@ An alternative browser login is an operator-issued one-use invitation. With prot
 npx tsx scripts/mint-interview-enrollment.ts company.example.com owner-subject-id
 ```
 
-The command prints a 15-minute enrollment link and sends no messages. Deliver it through an explicitly authorized channel. Its fragment is removed by the interview page before redemption, and the server exchanges it for a host/tenant/installation-bound, httpOnly session valid for one hour. It cannot be reused after redemption. Provide a fresh invitation when expired. The ordinary page's CSRF cookie still protects browser mutations. Operator bypass requires an operator identity; it is not a general client authorization mechanism.
+The command prints an enrollment link that stays valid until the interview it opens is complete — it has no clock expiry — and sends no messages. Deliver it through an explicitly authorized channel. The canonical link form is `/interview?enroll=` with `#enroll=` kept as a fallback for older tickets. The server exchanges it for a host/tenant/installation-bound, httpOnly session valid for 30 days (`INTERVIEW_SESSION_TTL_SECONDS` in `src/lib/interview/session-policy.ts`). The link is re-openable on the same or a new device until the interview is complete: a lapsed session falls back to re-opening the link, and the first-use record is an audit trail rather than a gate that burns the link. Provide a fresh invitation only when the link itself is invalid. The ordinary page's CSRF cookie still protects browser mutations. Operator bypass requires an operator identity; it is not a general client authorization mechanism.
 
 ## Shared interview/board front end
 
