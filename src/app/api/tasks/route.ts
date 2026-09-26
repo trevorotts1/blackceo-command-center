@@ -305,7 +305,7 @@ export async function POST(request: NextRequest) {
     {
       const rawTitle = validatedData.title;
       const rawKeys = body !== null && typeof body === 'object' && !Array.isArray(body)
-        ? Object.keys(body as Record<string, unknown>)
+        ? Object.keys(body as unknown as Record<string, unknown>)
         : [];
       const hasDestination = !!(validatedData.workspace_id || validatedData.department);
       const hasOverhead = rawKeys.some(
