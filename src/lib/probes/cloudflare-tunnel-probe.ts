@@ -91,23 +91,43 @@ function parsePm2Cloudflared(stdout: string): { found: boolean; online: boolean;
  * managed by launchd (`com.cloudflared.*` / `com.cloudflare.*` agents), not
  * PM2 — `pm2 jlist` succeeding with zero cloudflared entries is the NORMAL
  * state of a healthy box, not evidence of a down tunnel. When the PM2 lookup
- * finds no cloudflared entry we check (a) a live `cloudflared` process via
- * `pgrep -f cloudflared`, then (b) a launchd agent with a cloudflare label
- * AND a real PID (HEA-002). Either hit is identity-grade: generic port
- * squatters never spawn a process literally named `cloudflared`, and launchd
- * labels are box-local. The PM2 online-entry verdict still wins when present
- * (it is the most specific). Exported for tests.
+ * finds no cloudflared entry we check (a) a live `cloudflared` TUNNEL process
+ * (HEA-003), then (b) a launchd agent with a cloudflare label AND a real PID
+ * (HEA-002). Either hit is identity-grade: generic port squatters never spawn
+ * a process literally named `cloudflared`, and launchd labels are box-local.
+ * The PM2 online-entry verdict still wins when present (it is the most
+ * specific). Exported for tests.
  */
 export async function launchdTunnelEvidence(): Promise<{
   processRunning: boolean;
   launchdLabel: string | null;
 }> {
-  // HEA-001 control note: `pgrep -f cloudflared` prints bare PIDs
-  // ("772\n780\n"), NOT the command line — so stdout never contains the
-  // word "cloudflared" and matching stdout is a broken instrument. Exit 0
-  // (at least one PID printed) IS the signal; stdout match kept only as a
-  // belt-and-braces second clause for pgrep variants that print names.
-  const proc = await runFile('pgrep', ['-f', 'cloudflared'], EXEC_TIMEOUT_MS);
+  // HEA-003: `pgrep -f cloudflared` matches the FULL argv of ANY process whose
+  // command line contains that string, so the long-lived `cloudflared access
+  // ssh --hostname rescue-*` client helpers this operator box spawns for
+  // ordinary `ssh rescue-*` use (PIDs 42132 / 94727 measured 2026-09-26)
+  // reported a box with no tunnel service as live. The pattern must identify
+  // the tunnel service itself. All three real tunnel argv shapes on this box
+  // match `cloudflared` + whitespace + `tunnel` + (whitespace or end):
+  //
+  //   cloudflared tunnel --config <path> run <name>
+  //   cloudflared tunnel run <name>
+  //   cloudflared --config <path> tunnel run <name>
+  //
+  // `cloudflared access ssh|tcp` does not, and neither does a helper whose
+  // `--config` path merely contains the substring "tunnel". ERE with an
+  // alternation is accepted by pgrep on both macOS and glibc (verified against
+  // the real pgrep before landing). This is one of the few places a shell
+  // pattern is load-bearing; the probe still spawns no shell (execFile).
+  //
+  // HEA-001 control note stands: pgrep prints bare PIDs ("772\n780\n"), never
+  // the command line, so the pattern narrows WHICH processes match in the
+  // kernel — matching stdout stays a belt-and-braces second clause only.
+  const proc = await runFile(
+    'pgrep',
+    ['-f', 'cloudflared.*[[:space:]]tunnel([[:space:]]|$)'],
+    EXEC_TIMEOUT_MS
+  );
   const processRunning =
     proc.exitCode === 0 && (proc.stdout.trim().length > 0 || /cloudflared/.test(proc.stdout));
   // HEA-002: a label alone is not liveness. `launchctl list` prints
