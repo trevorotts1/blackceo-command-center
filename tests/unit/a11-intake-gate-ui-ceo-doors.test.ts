@@ -65,20 +65,27 @@ function eventCount(): number {
   return queryOne<{ n: number }>('SELECT COUNT(*) AS n FROM events', [])!.n;
 }
 
-function callUiCreate(title: string): Promise<Response> {
+function callUiCreate(title: string, withDestination = false): Promise<Response> {
   const req = new NextRequest('http://localhost/api/tasks', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ title, workspace_id: SALES_WS_ID }),
+    // Raw-conversational shape: title only, no workspace_id/department —
+    // the shape a chat bubble forwarded verbatim carries. A workspace_id
+    // would make it a typed command (spec 4.2), never re-classified.
+    body: JSON.stringify(withDestination ? { title, workspace_id: SALES_WS_ID } : { title }),
   });
   return TASKS_POST(req) as unknown as Promise<Response>;
 }
 
-function callCeoDelegate(title: string): Promise<Response> {
+function callCeoDelegate(title: string, departmentSlug?: string): Promise<Response> {
   const req = new NextRequest('http://localhost/api/ceo-chat/task', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ sessionId: SESSION_ID, title, departmentSlug: 'sales' }),
+    body: JSON.stringify(
+      departmentSlug === undefined
+        ? { sessionId: SESSION_ID, title }
+        : { sessionId: SESSION_ID, title, departmentSlug },
+    ),
   });
   return CEO_POST(req) as unknown as Promise<Response>;
 }
@@ -154,7 +161,7 @@ test('UI create with a social message creates ZERO cards', async () => {
 // ── 3. UI door positive control: genuine task_request creates exactly one ────
 test('UI create with a genuine task_request creates EXACTLY ONE card (control)', async () => {
   const tasksBefore = taskCount();
-  const res = await callUiCreate(`Create the Q3 sales campaign ${RUN_ID}`);
+  const res = await callUiCreate(`Create the Q3 sales campaign ${RUN_ID}`, true);
   const bodyText = await res.clone().text();
   assert.equal(res.status, 201, `expected 201, got ${res.status}. Body: ${bodyText}`);
   const body = (await res.json()) as { id: string };
@@ -178,7 +185,7 @@ test('CEO-chat delegate with an answer_only message creates ZERO cards and never
 // ── 5. CEO door positive control ─────────────────────────────────────────────
 test('CEO-chat delegate with a genuine task_request creates EXACTLY ONE card (control)', async () => {
   const tasksBefore = taskCount();
-  const res = await callCeoDelegate(`Create the Q3 sales CEO campaign ${RUN_ID}`);
+  const res = await callCeoDelegate(`Create the Q3 sales CEO campaign ${RUN_ID}`, 'sales');
   const bodyText = await res.clone().text();
   assert.equal(res.status, 201, `expected 201, got ${res.status}. Body: ${bodyText}`);
   const body = (await res.json()) as { ok: boolean; taskId: string };

@@ -4,6 +4,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { queryAll, queryOne } from '@/lib/db';
 import { CreateTaskSchema } from '@/lib/validation';
 import { createTaskCore } from '@/lib/tasks';
+import { classify, assertTaskCreationAllowed } from '@/lib/intake';
 import { loadSubtaskPersonas, loadPersonaBundleScopes } from '@/lib/persona-selector';
 import { getOpenPersonaMismatch } from '@/lib/persona-mismatch';
 import { getOpenDispatchHold } from '@/lib/dispatch-hold';
@@ -286,6 +287,59 @@ export async function POST(request: NextRequest) {
     }
 
     const validatedData = validation.data;
+
+    // WIR-121 (spec 16.2 A11, 12.2 UI door): the RAW-conversational shape —
+    // a title-only call with NO workspace_id/department and NO overhead
+    // keys (no routing destination, nothing a typed command would carry) —
+    // goes through the EXISTING intake module: classify() then
+    // assertTaskCreationAllowed, before any card exists. Definite non-work
+    // verdicts (answer_only / social_conversation / existing_task_control /
+    // clarification_response) return 200 created:false with NO card, so
+    // createTaskCore (and everything downstream of its INSERT —
+    // routeTaskDecision / commitIntakeAssignment / autoDispatchTask) never
+    // runs. task_request / mixed_answer_and_task proceed through the
+    // creation gate (which proves classify() ran on THIS text via the
+    // message hash). unresolved falls through to card creation, and any
+    // structured call (a destination or an overhead key — any TypedIngest
+    // shape) carries a typed command, never re-classified (spec 4.2).
+    {
+      const rawTitle = validatedData.title;
+      const rawKeys = body !== null && typeof body === 'object' && !Array.isArray(body)
+        ? Object.keys(body as Record<string, unknown>)
+        : [];
+      const hasDestination = !!(validatedData.workspace_id || validatedData.department);
+      const hasOverhead = rawKeys.some(
+        (k) => !['title', 'description', 'workspace_id', 'department'].includes(k),
+      );
+      if (!hasDestination && !hasOverhead) {
+        const classification = await classify(rawTitle);
+        if (
+          classification.intent === 'answer_only' ||
+          classification.intent === 'social_conversation' ||
+          classification.intent === 'existing_task_control' ||
+          classification.intent === 'clarification_response'
+        ) {
+          return NextResponse.json(
+            { ok: true, created: false, intent: classification.intent, task_id: null },
+            { status: 200 },
+          );
+        }
+        if (
+          classification.intent === 'task_request' ||
+          classification.intent === 'mixed_answer_and_task'
+        ) {
+          if (!classification.bypassAllowed || classification.controlProbe) {
+            return NextResponse.json(
+              { error: 'control_probe_never_creates', intent: classification.intent },
+              { status: 403 },
+            );
+          }
+          assertTaskCreationAllowed({ kind: 'raw', message: rawTitle, classification });
+        }
+        // unresolved falls through to card creation: an explicit bare-title
+        // create is a typed command, not raw chat text (spec 4.2).
+      }
+    }
 
     const agentCompanyId = validatedData.assigned_agent_id || validatedData.created_by_agent_id
       ? await assignmentCompany(request) : undefined;

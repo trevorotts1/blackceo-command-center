@@ -39,6 +39,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { queryOne } from '@/lib/db';
 import { createTaskCore } from '@/lib/tasks';
+import { classify, assertTaskCreationAllowed } from '@/lib/intake';
 import { routeTask } from '@/lib/routing/department-router';
 import { isMyAiCeoBetaEnabled, CEO_CHAT_CHANNEL } from '@/lib/ceo-chat/config';
 import type { TaskPriority } from '@/lib/types';
@@ -107,6 +108,50 @@ export async function POST(request: NextRequest) {
     typeof body.detail === 'string' && body.detail.trim() ? body.detail.trim().slice(0, MAX_DETAIL_CHARS) : undefined;
 
   const rawDept = typeof body.departmentSlug === 'string' ? body.departmentSlug.trim() : '';
+
+  // WIR-121 (spec 16.2 A11, 12.2 CEO-chat door): the Delegate button always
+  // sends a TYPED command (sessionId + departmentSlug/detail), never raw
+  // chat text (spec 4.2) — so only that typed shape creates here. A RAW
+  // conversational message (no departmentSlug, no detail — e.g. a chat
+  // bubble forwarded verbatim) goes through the EXISTING intake module:
+  // classify() then assertTaskCreationAllowed, before any card exists.
+  // Definite non-work verdicts (answer_only / social_conversation /
+  // existing_task_control / clarification_response) return 200 created:false
+  // with NO card, so createTaskCore (and everything downstream of its
+  // INSERT — routeTaskDecision / commitIntakeAssignment / autoDispatchTask)
+  // never runs. task_request / mixed_answer_and_task proceed through the
+  // creation gate (which proves classify() ran on THIS text via the message
+  // hash). unresolved falls through to card creation: an explicit delegate
+  // call is a typed command, not raw chat text.
+  if (!detail && !rawDept) {
+    const classification = await classify(title);
+    if (
+      classification.intent === 'answer_only' ||
+      classification.intent === 'social_conversation' ||
+      classification.intent === 'existing_task_control' ||
+      classification.intent === 'clarification_response'
+    ) {
+      return NextResponse.json(
+        { ok: true, created: false, intent: classification.intent, task_id: null },
+        { status: 200 },
+      );
+    }
+    if (
+      classification.intent === 'task_request' ||
+      classification.intent === 'mixed_answer_and_task'
+    ) {
+      if (!classification.bypassAllowed || classification.controlProbe) {
+        return NextResponse.json(
+          { ok: false, error: 'control_probe_never_creates', intent: classification.intent },
+          { status: 403 },
+        );
+      }
+      assertTaskCreationAllowed({ kind: 'raw', message: title, classification });
+    }
+    // unresolved falls through to card creation: an explicit delegate call
+    // is a typed command, not raw chat text (spec 4.2).
+  }
+
   const isAuto = !rawDept || rawDept.toLowerCase() === 'auto';
 
   let workspaceId: string | null = null;
