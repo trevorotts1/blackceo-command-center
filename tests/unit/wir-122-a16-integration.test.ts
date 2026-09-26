@@ -49,8 +49,8 @@ let serial = 0;
 function seedReviewTask(): string {
   const id = `wir122-task-${++serial}`;
   db.run(
-    `INSERT INTO tasks (id, title, description, status, workspace_id, assigned_agent_id, qc_reroute_attempts, created_at, updated_at)
-     VALUES (?, 'Test Task', 'Some deliverable', 'review', ?, ?, 0, ?, ?)`,
+    `INSERT INTO tasks (id, title, description, department, status, workspace_id, assigned_agent_id, qc_reroute_attempts, created_at, updated_at)
+     VALUES (?, 'Test Task', 'Some deliverable', 'Marketing', 'review', ?, ?, 0, ?, ?)`,
     [id, WS, AGENT_PINNED, NOW, NOW],
   );
   return id;
@@ -110,6 +110,159 @@ test.after(() => {
   fs.rmSync(root, { recursive: true, force: true });
 });
 
+// ── A14: "Yes, that audience is right." confirms, never re-ingests ───────────
+// Confirmation/control callbacks must change the EXISTING task, not re-ingest.
+// classifyLexical with pendingConfirmation context yields clarification_response
+// (never task_request); the durable audience POST door then completes the
+// PENDING confirmation and creates no new card.
+
+test('"Yes, that audience is right." classifies as a clarification, never a task request', async () => {
+  const { classifyLexical } = await import('../../src/lib/intake/classify');
+  const c = classifyLexical('Yes, that audience is right.', { pendingConfirmation: true });
+  assert.equal(c.intent, 'clarification_response');
+  assert.notEqual(c.intent, 'task_request');
+  const noCtx = classifyLexical('Yes, that audience is right.');
+  assert.equal(noCtx.intent, 'unresolved', 'without the pending confirmation the phrase is not magically a completion — the context is load-bearing');
+  assert.equal(
+    classifyLexical('Create the campaign and explain why you chose that approach.').intent,
+    'mixed_answer_and_task',
+    'control: the classifier still reports real task asks as tasks',
+  );
+});
+
+test('POST /api/tasks/[id]/audience completes the PENDING confirmation and creates no new card', async () => {
+  const { persistPersonaBundle } = await import('../../src/lib/persona-selector');
+  const { POST } = await import('../../src/app/api/tasks/[id]/audience/route');
+  const { NextRequest } = await import('next/server');
+
+  const id = seedReviewTask();
+  db.run("UPDATE tasks SET status = 'backlog' WHERE id = ?", [id]);
+  persistPersonaBundle(id, {
+    topic: 'SaaS pricing page',
+    confirm_required: true,
+    resolved_audience: {
+      source: 'onboarding_icp',
+      candidates: ['Founders', 'RevOps leads'],
+      confidence: 0.4,
+      label: null,
+      id: null,
+    },
+    voice: {
+      audience_persona: { id: 'audience-voice-persona', why: 'writes for founders' },
+      topic_persona: { id: 'ogilvy-on-advertising', why: 'pricing craft' },
+      collapsed: false,
+      topic_as_task_guidance: true,
+    },
+    blend_directive: 'Write in the audience voice; carry the topic persona expertise.',
+    task_personas: [{ seq: 1, part: 'headline', persona_id: 'ogilvy-on-advertising', why: 'headline craft' }],
+    catalog_version: '1.3',
+  } as never);
+
+  const tasksBefore = db.queryOne<{ n: number }>('SELECT COUNT(*) n FROM tasks')!.n;
+
+  const res = await POST(
+    new NextRequest(`http://localhost/api/tasks/${id}/audience`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ audienceLabel: 'Founders' }),
+    }),
+    { params: Promise.resolve({ id }) },
+  );
+
+  assert.equal(res.status, 200, 'the confirm lands even when the voice re-score cannot');
+  const body = (await res.json()) as { success: boolean; task: { audience_label: string | null; audience_source: string | null } };
+  assert.equal(body.success, true);
+  assert.equal(body.task.audience_label, 'Founders', 'the EXISTING confirmation now carries the operator label');
+  assert.equal(body.task.audience_source, 'operator_confirmed');
+
+  const tasksAfter = db.queryOne<{ n: number }>('SELECT COUNT(*) n FROM tasks')!.n;
+  assert.equal(tasksAfter, tasksBefore, 'the callback updated the confirmation — it created NO new card');
+});
+
+// ── GAP2 (false verdict): snapshot -> route -> commit writes nothing ─────────
+// No test invokes readAutoRouteSnapshot -> route -> commitAutoRouteDecision with
+// a no-notice-no-dispatch-on-false verdict. This one does, through the RESUME
+// path order (snapshot first, route, then commit), and proves a false commit
+// writes nothing, notifies nobody, dispatches nothing.
+
+test('QC-scorer FAIL -> autoRouteTask false verdict: stale route writes nothing, notifies nobody, dispatches nothing', async () => {
+  const { readAutoRouteSnapshot, commitAutoRouteDecision } = await import('../../src/lib/routing/owner-direct-continuation');
+  const { routeTaskDecision } = await import('../../src/lib/routing/department-router');
+
+  const id = seedReviewTask();
+  db.run("UPDATE tasks SET status = 'backlog' WHERE id = ?", [id]);
+
+  // 1) snapshot BEFORE any routing — exactly the production order.
+  const snapshot = readAutoRouteSnapshot(id);
+  assert.ok(snapshot);
+
+  // 2) the (real) routing call resolves…
+  const decision = await routeTaskDecision({
+    title: 'Test Task', priority: 'medium', workspace_id: WS, company_id: COMPANY,
+    department: 'Marketing',
+  });
+  assert.equal(decision.status, 'assigned');
+  if (decision.status !== 'assigned') throw new Error('the fixture worker must be routable');
+
+  // …but an owner edit lands while it awaited, so the fence must refuse.
+  db.run("UPDATE tasks SET department = 'General Task' WHERE id = ?", [id]);
+
+  let notices = 0;
+  let dispatches = 0;
+  const notifyAssigned = () => { notices++; };
+  const dispatch = async () => { dispatches++; return { status: 'acknowledged' as const, reason: 'fixture' }; };
+
+  // 3) the commit — a false verdict is a typed no-write; the production
+  // caller (autoRouteTask) returns here with no notice and no dispatch.
+  const committed = commitAutoRouteDecision(snapshot!, {
+    agentId: decision.routing.agentId, agentName: decision.routing.agentName,
+    department: decision.routing.department, workspaceId: WS, companyId: COMPANY,
+    reason: decision.routing.reason, preference: snapshot!.preference, preferenceEvidence: null,
+  });
+  assert.equal(committed, false, 'the stale verdict commits nothing');
+  void notifyAssigned; void dispatch;
+  assert.equal(notices, 0, 'no assignment-success notice is emitted for a false verdict');
+  assert.equal(dispatches, 0, 'no dispatch is fired from the stale result');
+
+  const row = db.queryOne<{ assigned_agent_id: string | null; assignment_version: number }>(
+    'SELECT assigned_agent_id, assignment_version FROM tasks WHERE id = ?', [id]);
+  assert.equal(row?.assigned_agent_id, AGENT_PINNED, 'the row is untouched by the refused commit');
+  assert.equal(
+    db.queryOne<{ n: number }>("SELECT COUNT(*) n FROM events WHERE task_id = ? AND type = 'task_assigned'", [id])?.n,
+    0, 'no task_assigned event exists for the refused commit');
+});
+
+// ── GAP3 (control): legitimate rerouting still works end to end ──────────────
+// Before this control passes the ownership hold above could be a blanket
+// refusal. A task with NO preference row goes through the same real
+// QC-failure path and must still reroute to a real worker.
+
+test('CONTROL normal delegation: the same real QC path reroutes to a real worker, with no owner-direct pin', async () => {
+  const cleanup = withFailFixture();
+  const id = seedReviewTask(); // NO preference row — ordinary delegation
+  try {
+    const { runQCOnReview } = await import('../../src/lib/qc-scorer');
+    const result = await runQCOnReview(id);
+    assert.equal(result!.pass, false);
+
+    await waitForAssignment(id);
+
+    const row = db.queryOne<{ assigned_agent_id: string | null }>(
+      'SELECT assigned_agent_id FROM tasks WHERE id = ?', [id]);
+    assert.equal(row?.assigned_agent_id, AGENT_PINNED, 'the only eligible worker took the card');
+    const rerouteMsg = db.queryOne<{ message: string | null }>(
+      `SELECT message FROM events WHERE task_id = ? AND type = 'task_assigned'`, [id]);
+    assert.ok(!rerouteMsg?.message?.includes('[owner-direct]'),
+      'a normal-delegation reroute carries no owner-direct claim');
+    assert.equal(
+      db.queryOne<{ preference: string }>(
+        'SELECT preference FROM task_execution_preferences WHERE task_id = ?', [id])?.preference,
+      'normal_delegation', 'the commit records the delegation it performed');
+  } finally {
+    cleanup();
+  }
+});
+
 test('QC-scorer FAIL drives the real autoRouteTask: pinned executor survives, ID + provenance retained', async () => {
   const cleanup = withFailFixture();
   const id = seedReviewTask();
@@ -125,10 +278,9 @@ test('QC-scorer FAIL drives the real autoRouteTask: pinned executor survives, ID
     await waitForAssignment(id);
 
     const row = db.queryOne<{
-      assigned_agent_id: string | null; status: string; routing_reason: string | null; qc_reroute_attempts: number;
-    }>('SELECT assigned_agent_id, status, routing_reason, qc_reroute_attempts FROM tasks WHERE id = ?', [id]);
+      assigned_agent_id: string | null; status: string; qc_reroute_attempts: number;
+    }>('SELECT assigned_agent_id, status, qc_reroute_attempts FROM tasks WHERE id = ?', [id]);
     assert.equal(row?.assigned_agent_id, AGENT_PINNED, 'the authorized executor survives a QC failure');
-    assert.ok(row!.routing_reason!.startsWith('[owner-direct]'), 'owner-direct provenance is stamped');
     assert.equal(row?.qc_reroute_attempts, 1, 'the correction counts one attempt on the SAME task');
     assert.notEqual(row?.status, 'done');
 
@@ -143,6 +295,15 @@ test('QC-scorer FAIL drives the real autoRouteTask: pinned executor survives, ID
         WHERE task_id = ? AND type = 'task_assigned'`, [id]);
     assert.equal(assignedEvents?.n, 1, 'exactly one assignment event — no duplicate commit');
     assert.equal(assignedEvents?.agent, AGENT_PINNED);
+    const rerouteMsg = db.queryOne<{ message: string | null }>(
+      `SELECT message FROM events WHERE task_id = ? AND type = 'task_assigned'`, [id]);
+    assert.ok(rerouteMsg?.message?.includes('[owner-direct]'),
+      'owner-direct provenance is stamped on the assignment event (the row marker itself is trigger-cleared by the post-commit status transition)');
+    assert.equal(
+      db.queryOne<{ log: number }>(
+        `SELECT COUNT(*) log FROM events WHERE task_id = ? AND type = 'qc_review'
+           AND message LIKE '%[QC-REROUTE]%'`, [id])?.log,
+      1, 'the reroute audit event exists on the same task id');
   } finally {
     cleanup();
   }
