@@ -77,6 +77,7 @@ import {
   type InterviewQuestion,
 } from '@/lib/interview/base-questions';
 import {
+  mergeSkippedIds,
   nextStructuredIndex,
   personalizePrompt,
 } from '@/lib/interview/structured-progress';
@@ -140,6 +141,8 @@ interface InterviewStateResponse {
     remainingIds: string[];
     nextIndex: number | null;
     complete: boolean;
+    /** ILJ-004 (additive): server-side skip marks for this session. */
+    skippedIds?: string[];
   };
   knownContext?: Record<string, { value: string; source: string }>;
   progress: {
@@ -294,6 +297,10 @@ export default function InterviewClient() {
   const routedRef = useRef(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const recoveryRef = useRef<{ token: number }>({ token: 0 });
+  // ILJ-004: latest-value mirrors so skip callbacks (stable identities) never
+  // read a stale closure over answeredIds / interviewSessionId.
+  const answeredIdsRef = useRef<Set<string>>(new Set());
+  const interviewSessionIdRef = useRef<string | null>(null);
 
   const flags = state?.flags ?? ALL_GATES_FALSE;
   const transcriptReady = flags.genuineTranscriptReady;
@@ -309,6 +316,14 @@ export default function InterviewClient() {
     return ids;
   }, [locallyAnswered, state?.structured?.answeredIds]);
 
+  // ILJ-004: keep the callback-safe mirrors current (effects, not render writes).
+  useEffect(() => {
+    answeredIdsRef.current = answeredIds;
+  }, [answeredIds]);
+  useEffect(() => {
+    interviewSessionIdRef.current = interviewSessionId;
+  }, [interviewSessionId]);
+
   /** Structured questions skipped AND still unanswered (the circle-back queue). */
   const skippedQueue = useMemo(
     () => STRUCTURED_QUESTIONS.filter((q) => skippedIds.has(q.id) && !answeredIds.has(q.id)),
@@ -322,6 +337,53 @@ export default function InterviewClient() {
       /* private mode — chips simply don't survive this tab */
     }
   }, [interviewSessionId]);
+
+  /**
+   * ILJ-004: fold the server skip set into this device's local set (server
+   * wins the union; answers always clear). sessionStorage stays the same-tab
+   * cache it always was — cross-device survival comes from the server copy.
+   * Never throws; a malformed server set degrades to the local set.
+   */
+  const syncSkipsFromServer = useCallback((serverIds: readonly unknown[]) => {
+    setSkippedIds((prev) => {
+      let merged: string[];
+      try {
+        merged = mergeSkippedIds(STRUCTURED_QUESTIONS, serverIds, Array.from(prev), Array.from(answeredIdsRef.current));
+      } catch {
+        return prev;
+      }
+      try {
+        sessionStorage.setItem(
+          `${SKIPPED_KEY}:${interviewSessionIdRef.current || 'unresolved'}`,
+          JSON.stringify(merged),
+        );
+      } catch {
+        /* private mode — the merge still stands in memory */
+      }
+      return new Set(merged);
+    });
+  }, []);
+
+  /**
+   * ILJ-004: best-effort server write for one skip mark. The local chip is
+   * already set by the caller (optimistic) — a server failure degrades to the
+   * pre-ILJ-004 same-device behavior, never a blocked UI. `skipped: false`
+   * clears a mark the owner circled back to without answering yet.
+   */
+  const postSkipToServer = useCallback(async (questionId: string, skipped: boolean) => {
+    try {
+      const res = await fetch('/api/interview/state', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ questionId, skipped }),
+      });
+      if (!res.ok) return;
+      const data = (await res.json()) as { skippedIds?: unknown };
+      if (Array.isArray(data.skippedIds)) syncSkipsFromServer(data.skippedIds);
+    } catch {
+      /* offline — the local chip still stands */
+    }
+  }, [syncSkipsFromServer]);
 
   /* ---- gateway-session persistence (continuity across reloads) ---- */
 
@@ -349,6 +411,29 @@ export default function InterviewClient() {
       if (!verifiedProgress(data) && data.priorCompletionDeclared !== true) throw new Error(INTERVIEW_RETRY_HELP);
       setStateError(null);
       setState(data);
+      // ILJ-004: fold the server skip set into this device's local set so skips
+      // survive a device switch — the server copy is authoritative for the
+      // UNION (mergeSkippedIds drops answered/unknown ids on both sides).
+      if (Array.isArray(data.structured?.skippedIds)) {
+        const serverIds = data.structured.skippedIds;
+        setSkippedIds((prev) => {
+          let merged: string[];
+          try {
+            merged = mergeSkippedIds(STRUCTURED_QUESTIONS, serverIds, Array.from(prev), Array.from(answeredIdsRef.current));
+          } catch {
+            return prev;
+          }
+          try {
+            sessionStorage.setItem(
+              `${SKIPPED_KEY}:${data?.session?.interviewSessionId || interviewSessionIdRef.current || 'unresolved'}`,
+              JSON.stringify(merged),
+            );
+          } catch {
+            /* private mode — the merge still stands in memory */
+          }
+          return new Set(merged);
+        });
+      }
       return data;
     } catch (error) {
       setStateError(error instanceof Error ? error.message : 'Your progress is unavailable. Please retry.');
@@ -436,10 +521,19 @@ export default function InterviewClient() {
       if (routedRef.current) return;
       routedRef.current = true;
 
-      // Restore per-device skipped chips.
+      // Restore per-device skipped chips, then fold in the server copy (a skip
+      // marked on ANOTHER device arrives here on this fresh load — cross-device
+      // survival land here, not in sessionStorage alone).
       try {
         const raw = sessionStorage.getItem(`${SKIPPED_KEY}:${data?.session?.interviewSessionId || 'unresolved'}`);
-        if (raw) setSkippedIds(new Set(JSON.parse(raw) as string[]));
+        const local: string[] = raw ? (JSON.parse(raw) as string[]) : [];
+        const server: unknown[] = Array.isArray(data?.structured?.skippedIds)
+          ? data.structured.skippedIds
+          : [];
+        // ILJ-004: fold the server skip set into this device's local set so skips
+        // survive a device switch. sessionStorage stays the same-tab cache it
+        // always was; the server copy is authoritative for the UNION.
+        setSkippedIds(new Set(mergeSkippedIds(STRUCTURED_QUESTIONS, server, local)));
       } catch {
         /* ignore */
       }
@@ -617,12 +711,17 @@ export default function InterviewClient() {
 
       let nextAnswered = answeredIds;
       if (opts.skipped) {
+        // Optimistic local chip (same-tab instant) + best-effort server write
+        // (cross-device survival). The visual flow below uses the same merged
+        // set the render path derives, so the card advances identically even
+        // when the server write is still in flight or offline.
         setSkippedIds((prev) => {
           const next = new Set(prev);
           next.add(q.id);
           persistSkipped(next);
           return next;
         });
+        void postSkipToServer(q.id, true);
       } else {
         setLocallyAnswered((prev) => new Set(prev).add(q.id));
         nextAnswered = new Set(answeredIds).add(q.id);
@@ -658,6 +757,7 @@ export default function InterviewClient() {
       fireMilestone,
       loadState,
       persistSkipped,
+      postSkipToServer,
       skippedIds,
       startConversation,
     ],
@@ -734,10 +834,14 @@ export default function InterviewClient() {
       persistSkipped(next);
       return next;
     });
+    // ILJ-004: clear the server mark too (the owner is about to answer it, and
+    // answering clears it server-side anyway — this just un-skips the queue on
+    // the OTHER device immediately, without waiting for an answer).
+    void postSkipToServer(questionId, false);
     setQaMode('structured');
     setStructIndex(idx);
     setStage('qa');
-  }, [persistSkipped]);
+  }, [persistSkipped, postSkipToServer]);
 
   /** Circle back to a numbered CONVERSATIONAL question (agent-owned queue). */
   const circleBack = useCallback(
