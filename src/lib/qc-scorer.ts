@@ -3533,11 +3533,24 @@ export function cleanDetectionText(title: string, description?: string | null): 
   // terminated writer shape scored 6. The strip REQUIRES the declared trailer
   // terminator now, so it matches only the trailer the in-repo writer
   // (`reuseInstruction`, above) always emits in full. Unterminated owner prose
-  // survives. Dropping the `|$` alternative is the whole fix: no match at all
-  // is the fail-CLOSED direction here (nothing is stripped), so prose can only
-  // be over-retained, never deleted.
+  // survives. Dropping the `|$` alternative was NOT the whole fix: the
+  // `[\s\S]*?` span still ran from an opener to the NEXT terminator, so OWNER
+  // prose sitting between an opener and a later terminator was deleted anyway
+  // (REVL-026-R2-F2). Measured at the tip: an opener whose span reached a later
+  // terminator collapsed 223 chars to 18 with the demand gone, and a SINGLE
+  // opener sufficed — a second opener was never required.
+  //
+  // The span is now bounded twice, both times against the writer's own fixed
+  // shape (`reuseInstruction`, above), never against owner prose:
+  //   1. it may not cross a second opener, so a stray opener cannot reach
+  //      past the next trailer boundary;
+  //   2. it must contain "Re-register each one", the continuation the writer
+  //      always emits, so a truncated trailer's terminator cannot be used as
+  //      a free terminator to delete the prose in between.
+  // Owner prose under a stray opener therefore goes unmatched and is
+  // over-retained (nothing is stripped); the genuine trailer still strips whole.
   text = text.replace(
-    /\bAlready\s+(delivered|produced|shipped|completed|attached)\s+and\s+STILL\s+VALID\b[\s\S]*?Produce\s+ONLY\s+what\s+the\s+gaps\s+above\s+name\./gi,
+    /\bAlready\s+(delivered|produced|shipped|completed|attached)\s+and\s+STILL\s+VALID\b(?:(?!Already\s+(?:delivered|produced|shipped|completed|attached)\s+and\s+STILL\s+VALID)[\s\S])*?Re-register\s+each\s+one(?:(?!Already\s+(?:delivered|produced|shipped|completed|attached)\s+and\s+STILL\s+VALID)[\s\S])*?Produce\s+ONLY\s+what\s+the\s+gaps\s+above\s+name\./gi,
     ' ',
   );
   return text.replace(/\s+/g, ' ').trim();

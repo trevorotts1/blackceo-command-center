@@ -545,3 +545,105 @@ test('QR-016 (e-control) owner prose placed BEFORE the trailer survives alongsid
   assert.ok(!cleanDetectionText('Refresh', desc).includes('do NOT regenerate'), 'the trailer itself must still be stripped');
   console.log('  [QR-016 e-control] ids=[%s]', ids.sort().join(','));
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// REVL-026-R2-F2 — the QR-016 trailer strip was fail-OPEN on span extent.
+//
+// The R2-F1 fix (above) removed the `|$` alternative so a terminator was
+// required. That was necessary but NOT sufficient: the span between opener and
+// terminator was still `[\s\S]*?`, so any OWNER prose sitting between an opener
+// and a later terminator was deleted along with the trailer. Measured at the
+// tip d9f080b2: 223 chars collapsed to 18 and 156 collapsed to 18, demand gone
+// in both. A SINGLE opener suffices — a second opener is not required, which is
+// broader than the original finding stated.
+//
+// The strip is now bounded against the WRITER's own shape (never owner prose):
+// it cannot cross a second opener, and it must contain the writer's invariant
+// continuation "Re-register each one".
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Owner demand written in prose, as an owner brief actually reads. */
+const OWNER_DEMAND = 'Please add a 4k hero banner image at 1920x1080.';
+
+/** The truncated shape the QR-016 writer emits when no terminator is printed. */
+const STRAY_OPENER = 'Already delivered and STILL VALID — do NOT regenerate: /out/a.png.';
+const TRAILER_TERMINATOR = 'Produce ONLY what the gaps above name.';
+
+test('REVL-026-R2-F2 a SINGLE opener must not reach a later terminator and eat demand between', () => {
+  // S4 — the shape the R2-F1 fix still deleted. One opener, owner demand, then a
+  // terminator that belongs to no trailer. The strip must not use it as a free
+  // terminator and delete the demand.
+  const desc = `Build the launch page. ${STRAY_OPENER} ${OWNER_DEMAND} ${TRAILER_TERMINATOR}`;
+  const cleaned = cleanDetectionText('Refresh', desc);
+  assert.ok(
+    cleaned.includes('4k hero banner image'),
+    `the demand between a single opener and a later terminator must survive, got ${JSON.stringify(cleaned)}`,
+  );
+  const ids = typesOf('Refresh', desc);
+  assert.ok(ids.includes('valid_image'), `the image demand must keep valid_image, got [${ids.join(',')}]`);
+  assert.ok(ids.includes('min_resolution'), `the 4k demand must keep min_resolution, got [${ids.join(',')}]`);
+  console.log('  [REVL-026-R2-F2 S4] cleaned=%s', JSON.stringify(cleaned));
+});
+
+test('REVL-026-R2-F2 an opener must not cross a SECOND opener to reach a later terminator', () => {
+  // S3 — two openers, owner demand between them.
+  const desc = `Build the launch page. ${STRAY_OPENER} ${OWNER_DEMAND} `
+    + `${STRAY_OPENER.replace('/out/a.png', '/out/b.png')} ${TRAILER_TERMINATOR}`;
+  const cleaned = cleanDetectionText('Refresh', desc);
+  assert.ok(
+    cleaned.includes('4k hero banner image'),
+    `the demand between two openers must survive, got ${JSON.stringify(cleaned)}`,
+  );
+  const ids = typesOf('Refresh', desc);
+  assert.ok(ids.includes('valid_image'), `the image demand must keep valid_image, got [${ids.join(',')}]`);
+  console.log('  [REVL-026-R2-F2 S3] cleaned=%s', JSON.stringify(cleaned));
+});
+
+test('REVL-026-R2-F2 owner prose under a stray opener survives a LATER genuine trailer', () => {
+  // The realistic composite: owner prose uses the opener words, then the writer
+  // appends a real trailer. The genuine trailer must still strip whole, and the
+  // owner demand must survive alongside it.
+  const genuine = reuseInstruction('t1', () => [{ path: '/out/a.png' }, { path: '/out/b.png' }]);
+  assert.ok(genuine.includes('Re-register each one'), `writer shape changed: ${JSON.stringify(genuine)}`);
+  const desc = `Already delivered and STILL VALID last week as requested. ${OWNER_DEMAND}` + genuine;
+  const cleaned = cleanDetectionText('Refresh', desc);
+  assert.ok(
+    cleaned.includes('4k hero banner image'),
+    `the owner demand before a genuine trailer must survive, got ${JSON.stringify(cleaned)}`,
+  );
+  assert.ok(
+    !cleaned.includes('do NOT regenerate') && !cleaned.includes('Re-register each one'),
+    `the genuine trailer must still strip whole, got ${JSON.stringify(cleaned)}`,
+  );
+  console.log('  [REVL-026-R2-F2 composite] cleaned=%s', JSON.stringify(cleaned));
+});
+
+test('REVL-026-R2-F2 controls: genuine trailer alone still strips, owner demand still survives', () => {
+  // S1 control — the genuine writer trailer with nothing else must strip whole,
+  // so the strip did not degrade into a no-op.
+  const genuine = reuseInstruction('t1', () => [{ path: '/out/a.png' }]);
+  assert.equal(
+    cleanDetectionText('Refresh', genuine).includes('do NOT regenerate'),
+    false,
+    'a genuine trailer alone must still strip whole',
+  );
+  assert.equal(renderCount(typesOf('Refresh', genuine)), 0, 'a genuine trailer alone must render 0');
+
+  // S2 control — owner demand BEFORE a genuine trailer keeps its gates.
+  const desc = `Build the launch page. ${OWNER_DEMAND}` + genuine;
+  const ids = typesOf('Refresh', desc);
+  assert.ok(ids.includes('valid_image'), `the demand before a trailer must keep valid_image, got [${ids.join(',')}]`);
+  assert.equal(
+    cleanDetectionText('Refresh', desc).includes('do NOT regenerate'),
+    false,
+    'the genuine trailer must still strip when owner prose precedes it',
+  );
+
+  // S6 control — F1's unterminated shape must stay fixed.
+  const unterminated = `Build the hero. ${STRAY_OPENER} ${OWNER_DEMAND}`;
+  assert.ok(
+    cleanDetectionText('Refresh', unterminated).includes('4k hero banner image'),
+    'an unterminated trailer must still not eat demand after it (R2-F1 must not regress)',
+  );
+  console.log('  [REVL-026-R2-F2 controls] genuine render=%s', renderCount(typesOf('Refresh', genuine)));
+});
