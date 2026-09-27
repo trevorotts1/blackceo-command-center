@@ -1,3 +1,18 @@
+## [v7.6.68] — 2026-09-26 — interview transcript lock correctness (ILJ-003 + ILJ-011)
+
+- ILJ-003: seam atomic merge + `decrypt_failed` surfaced; answer route appends under the transcript lock
+- ILJ-011: lock creates its parent dir and treats `ENOENT` as missing-parent, never spinning the 10 s deadline
+
+## [v7.6.67] — 2026-09-26 — interview link reliability (ILJ wave 2)
+
+- ILJ-001: additive env-file reconcile in vps-docker-bootstrap step 8c
+- ILJ-002: tighten enrollment-window tenant scope
+- ILJ-004: persist structured skip marks server-side per session
+- ILJ-005: resume renews session cookie, SameSite Lax
+- ILJ-006: truthful interview rollout doc + 720h Access session
+- ILJ-007: sync live worktree to deployed revision at Phase 3 tail
+- ILJ-008: reland WIP (platform alias, nudge public link, dead-letter)
+
 ## [v7.6.66] — 2026-09-24 — ILG-003: openclaw 2026.9.6 contract anchor + mobile interview Playwright projects
 
 ### Fixed

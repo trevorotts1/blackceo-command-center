@@ -21,7 +21,11 @@ async function requestRemote(context:TenantContext, type:string, operationId:str
 }
 export async function deliverInterviewOperation(context:TenantContext, operation:RemoteOperation):Promise<{state:string;receipt?:any;reason?:string}> {
   if(operation.state==='acknowledged' || operation.state==='rejected')return {state:operation.state,receipt:operation.receipt?JSON.parse(operation.receipt):undefined};
-  if(operation.attempts>=5)return {state:'waiting',reason:'remote_retry_exhausted'};
+  // Dead-letter is terminal for automatic delivery: five failed attempts move
+  // the operation out of the retry loop into an operator-visible queue. The
+  // original operation identity is retained so repair + requeue never forks it.
+  if(operation.state==='dead_letter')return {state:operation.state,reason:operation.last_error||'remote_retry_exhausted'};
+  if(operation.attempts>=5){run(`UPDATE interview_remote_operations SET state='dead_letter',last_error='remote_retry_exhausted',updated_at=? WHERE operation_id=? AND state='pending'`,[timeNow(),operation.operation_id]);return {state:'dead_letter',reason:'remote_retry_exhausted'};}
   if(operation.next_eligible_at && Date.parse(operation.next_eligible_at)>Date.now())return {state:'pending',reason:operation.last_error||'retry_backoff'};
   // Preserve source order so completion cannot overtake an earlier answer/decision.
   const prior=queryAll<{operation_id:string}>(`SELECT operation_id FROM interview_remote_operations WHERE tenant_id=? AND state='pending' AND rowid < (SELECT rowid FROM interview_remote_operations WHERE operation_id=?) LIMIT 1`,[context.tenantId,operation.operation_id]);

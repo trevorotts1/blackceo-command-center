@@ -102,18 +102,29 @@ export function computeAnsweredIds(
 /**
  * Fold answered ids over the ordered question set → the exact resume position.
  * `nextIndex` is the first index whose id is NOT answered; null when complete.
+ *
+ * ILJ-004 (`skippedIds`): ids the owner passed on THIS pass. Skipped cards
+ * stay in the deck (they land in `remainingIds`, and the circle-back queue
+ * renders them) — but the forward `nextIndex` advances PAST them, so resume
+ * never plants the owner back on a card they already saw and passed. The shape
+ * is additive: callers that pass nothing get the exact pre-ILJ-004 behavior.
  */
 export function computeStructuredResume(
   questions: readonly StructuredQuestionLike[],
   answeredIds: readonly string[],
+  skippedIds: readonly string[] = [],
 ): StructuredResume {
   const answered = new Set(answeredIds);
+  const known = new Set(questions.map((q) => q.id));
+  const skipped = new Set(
+    skippedIds.filter((id) => known.has(id) && !answered.has(id)),
+  );
   const remainingIds: string[] = [];
   let nextIndex: number | null = null;
   questions.forEach((q, i) => {
     if (answered.has(q.id)) return;
     remainingIds.push(q.id);
-    if (nextIndex === null) nextIndex = i;
+    if (nextIndex === null && !skipped.has(q.id)) nextIndex = i;
   });
   return {
     total: questions.length,
@@ -146,6 +157,65 @@ export function nextStructuredIndex(
     return i;
   }
   return null;
+}
+
+/* ──────────────────── server-side skip persistence (ILJ-004) ─────────────── */
+
+/**
+ * ILJ-004: sanitize raw skip candidates into a stable skip set.
+ *
+ * Pure + client-safe (no fs, no DB): the state route runs this over its
+ * tenant_interview_skips rows; the client runs it over the merged
+ * server + sessionStorage sets so both sides can never drift.
+ *
+ * Drops non-strings, unknown ids (a client on a newer/older deck), already-
+ * answered ids (an answer clears its skip — answering wins), and dupes.
+ * Returns ids in canonical question order (stable UI + tests).
+ */
+export function sanitizeSkippedIds(
+  questions: readonly StructuredQuestionLike[],
+  candidates: readonly unknown[],
+  answeredIds: ReadonlySet<string> | readonly string[] = [],
+): string[] {
+  const known = new Set(questions.map((q) => q.id));
+  const answered = answeredIds instanceof Set ? answeredIds : new Set(answeredIds);
+  const seen = new Set<string>();
+  for (const c of candidates) {
+    if (typeof c !== 'string' || !c) continue;
+    if (!known.has(c) || answered.has(c) || seen.has(c)) continue;
+    seen.add(c);
+  }
+  return questions.filter((q) => seen.has(q.id)).map((q) => q.id);
+}
+
+/**
+ * ILJ-004: union the server skip set with this device's local skip set, minus
+ * answered ids. The client folds this over (serverSkips ∪ sessionStorage) on
+ * every state load, so a skip marked on one device survives on the second.
+ */
+export function mergeSkippedIds(
+  questions: readonly StructuredQuestionLike[],
+  serverIds: readonly unknown[],
+  localIds: readonly unknown[],
+  answeredIds: ReadonlySet<string> | readonly string[] = [],
+): string[] {
+  return sanitizeSkippedIds(questions, [...serverIds, ...localIds], answeredIds);
+}
+
+/**
+ * ILJ-004: 1-based structured card numbers for skip ids — the
+ * resume.skippedQuestions wire shape the WelcomeBack queue renders.
+ */
+export function skippedQuestionNumbers(
+  questions: readonly StructuredQuestionLike[],
+  skippedIds: readonly string[],
+): number[] {
+  const skipped = new Set(skippedIds);
+  const out: number[] = [];
+  questions.forEach((q, i) => {
+    if (skipped.has(q.id)) out.push(i + 1);
+  });
+  return out;
 }
 
 /* ────────────────────────── prompt personalization ─────────────────────────── */

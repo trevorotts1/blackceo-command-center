@@ -53,7 +53,7 @@ Multiple operator emails are supported by listing them after the subdomain.
    script prints a loud `WARNING` and falls back to PIN-only -- PIN keeps
    working either way.
 3. **Creates (or updates) a self-hosted Access Application** bound to the
-   subdomain with a 336-hour (14-day) session duration and `allowed_idps`
+   subdomain with a 720-hour (30-day) session duration and `allowed_idps`
    set to whichever of One-Time PIN / Google are available. If an app for
    that exact domain already exists and is missing either login method
    (for example a Google-only app), the script adds the missing one --
