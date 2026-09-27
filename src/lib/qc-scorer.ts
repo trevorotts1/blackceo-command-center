@@ -3560,7 +3560,7 @@ export function cleanDetectionText(title: string, description?: string | null): 
   // block still strips whole, and two concatenated genuine blocks strip
   // both.
   text = text.replace(
-    /\bAlready\s+(delivered|produced|shipped|completed|attached)(?:\s+and)?\s+STILL\s+VALID\b\s+[\u2014\u2013-]\s+do\s+NOT\s+regenerate:\s+Re-register\s+each\s+one\s+for(?:\s+this)?\s+attempt\s+\(POST\s+(?:\/api\/tasks\/[^)\s]+\/deliverables\s+)?with\s+the\s+same\s+path\)\s+so\s+it\s+counts(?:\s+as)?\s+(?:this\s+)?attempt['\u2019]s\s+output\.\s+Produce\s+ONLY(?:\s+what)?\s+the\s+gaps\s+above\s+name\./gi,
+    /\bAlready\s+(delivered|produced|shipped|completed|attached)(?:\s+and)?\s+STILL\s+VALID\b\s+[\u2014\u2013-]\s+do\s+NOT\s+regenerate:\s+(?:[^\s,()]+(?:,\s+[^\s,()]+)*\.\s+)?Re-register\s+each\s+one\s+for(?:\s+this)?\s+attempt\s+\(POST\s+(?:\/api\/tasks\/[^)\s]+\/deliverables\s+)?with\s+the\s+same\s+path\)\s+so\s+it\s+counts(?:\s+as)?\s+(?:this\s+)?attempt['\u2019]s\s+output\.\s+Produce\s+ONLY(?:\s+what)?\s+the\s+gaps\s+above\s+name\./gi,
     ' ',
   );
   return text.replace(/\s+/g, ' ').trim();
