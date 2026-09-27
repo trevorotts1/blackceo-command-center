@@ -10,7 +10,10 @@
  * can show the operator which binary went sideways.
  */
 
-import { spawn } from 'child_process';
+import { execFileSync, spawn } from 'child_process';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { getDb } from '@/lib/db';
 import {
   PROBE_TIMEOUT_MS,
@@ -36,22 +39,192 @@ interface PerCliResult {
 
 const PER_CLI_TIMEOUT_MS = 2000;
 
+/**
+ * QR-008: the login-shell PATH, harvested ONCE per process by asking the
+ * user's own interactive login shell to print $PATH. The static directory list
+ * alone was the reviewed defect: a CLI living anywhere else on the login PATH
+ * (~/bin, ~/.bun/bin, /opt/pmk/env/global/bin, …) was reported absent, because
+ * a probe inside a pm2/Next process never sees the operator's PATH — pm2
+ * pins a minimal one (see ecosystem.cc-prod.config.cjs).
+ *
+ * Cached because resolveCliBinary is called once per registered CLI; spawning
+ * a shell per call would put ~20 redundant forks inside a 3s probe budget.
+ * The cache is a Map so a failed harvest (shell missing, spawn error) memoizes
+ * the empty result rather than re-spawning for every remaining CLI.
+ *
+ * This is the ONLY place a shell is ever spawned here, it takes no arguments,
+ * and its output is treated purely as a list of directory strings — the
+ * caller's `spawn` of the resolved binary remains argument-static.
+ */
+let loginPathHarvestError: string | null = null;
+let cachedLoginPathDirs: string[] | null = null;
+
+/**
+ * CP-002(c): the login-shell harvest can FAIL (shell exits non-zero, hangs,
+ * is missing). It used to vanish into a bare `catch {}`, so the probe reported
+ * as if nothing were wrong. This is that failure, kept for the probe to show.
+ */
+export function loginPathHarvestFailure(): string | null {
+  return loginPathHarvestError;
+}
+
+/** Test-only: drop the memo so a test can drive a failing shell. */
+export function resetLoginPathHarvest(): void {
+  cachedLoginPathDirs = null;
+  loginPathHarvestError = null;
+}
+
+/**
+ * CP-002(a)(b): pick the PATH line out of raw login-shell stdout.
+ *
+ * QR-012's `.pop()` (take the literal last line) works only while every banner
+ * rides on the SAME line as PATH. On zsh the banner lands on its own line
+ * (`/etc/zshrc_Apple_Terminal` shape), so `.pop()` returned banner text, the
+ * delimiter filter emptied the list, and every login-PATH lookup went dark.
+ * A banner whose last line is an absolute path (`injection`) was worse: it was
+ * ADMISSIONED as a PATH entry.
+ *
+ * So: scan lines and keep the last one that both contains the path delimiter
+ * AND yields at least one absolute directory — that is the PATH line. Banners
+ * without `:` and banners with `:` but no absolute entries both lose.
+ * Exported for tests.
+ */
+export function pickLoginPathDirs(raw: string): string[] {
+  let chosen: string | null = null;
+  for (const line of raw.split(/\r?\n/)) {
+    if (!line.includes(path.delimiter)) continue;
+    const dirs = line
+      .split(path.delimiter)
+      .filter((dir) => dir.length > 0 && path.isAbsolute(dir));
+    if (dirs.length === 0) continue;
+    chosen = line;
+  }
+  return chosen === null
+    ? []
+    : chosen
+        .split(path.delimiter)
+        .filter((dir) => dir.length > 0 && path.isAbsolute(dir));
+}
+
+function loginPathDirs(): string[] {
+  if (cachedLoginPathDirs) return cachedLoginPathDirs;
+  cachedLoginPathDirs = [];
+  const shell = process.env.SHELL || '/bin/sh';
+  try {
+    // -lic: interactive+login, so the user's rc files (which is where the
+    // PATH exports live) are sourced exactly as they are at a real prompt.
+    // 1000ms: the measured interactive shell on this box answers in ~90ms,
+    // so this is a 10x ceiling. It has to stay well under PROBE_TIMEOUT_MS
+    // (3000): the harvest is blocking-synchronous and runs inside the probe,
+    // and a shell that hangs must not eat the budget the CLIs need.
+    const out = execFileSync(shell, ['-lic', 'printf %s "$PATH"'], {
+      encoding: 'utf8',
+      timeout: 1000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    loginPathHarvestError = null;
+    cachedLoginPathDirs = pickLoginPathDirs(out);
+  } catch (err) {
+    // CP-002(c): no usable shell / it hung / it exited non-zero. The fixed
+    // list still works, so this stays a degraded lookup rather than a probe
+    // failure — but it is RECORDED, not swallowed: the probe surfaces it.
+    loginPathHarvestError = err instanceof Error ? err.message : String(err);
+  }
+  return cachedLoginPathDirs;
+}
+
+/**
+ * HEA-001: PATH fallback for a registered binary. The registry stores the
+ * absolute path captured at install time (`/opt/homebrew/bin/claude`); when
+ * the entry's stored path is missing, stale, or not executable (reinstall to
+ * a new prefix, `~/.local/bin` vs brew drift), we retry by bare name before
+ * calling it a failure.
+ * QR-002: that lookup must cover the npm global prefix too — `pm2` (and other
+ * `npm install -g` tools) live in `~/.npm-global/bin` on this box, so a tool
+ * that was both installed and running was reported absent.
+ * QR-008: the lookup now walks the REAL PATH, not only a frozen list. Search
+ * order is: the four fixed directories FIRST (so every QR-002 verdict is
+ * byte-identical to before — `pm2` still resolves to `~/.npm-global/bin/pm2`
+ * even if some other directory on PATH also holds a `pm2`), then process.env.PATH,
+ * then the login shell's PATH. Adds directories only; removes none, and no
+ * candidate that resolved before resolves differently now.
+ *
+ * A registered path that still EXISTS is returned verbatim before any of this
+ * runs — a stale registration is never silently swapped for a same-named
+ * binary found elsewhere, because that substitution would need evidence this
+ * function does not have. Returns the resolved path, or null when the binary
+ * is genuinely absent. Every candidate is checked statically with
+ * `fs.accessSync(..., X_OK)`. Exported for tests.
+ */
+export function resolveCliBinary(
+  binaryPath: string | null,
+  cliName: string
+): string | null {
+  if (binaryPath) {
+    try {
+      fs.accessSync(binaryPath, fs.constants.X_OK);
+      return binaryPath;
+    } catch {
+      // Stored path stale — fall through to PATH lookup.
+    }
+  }
+  const home = os.homedir();
+  const bare = binaryPath ? path.basename(binaryPath) : cliName;
+
+  const dirs: string[] = [
+    path.join(home, '.local', 'bin'),
+    '/opt/homebrew/bin',
+    '/usr/local/bin',
+    // Last of the fixed four: strictly additive. A tool found in one of the
+    // three directories above resolves exactly as it did before, so this
+    // cannot change an existing verdict; it only rescues `npm install -g`
+    // tools (pm2 and friends) that live nowhere else.
+    path.join(home, '.npm-global', 'bin'),
+    // QR-008: then the PATHs the process actually has — the inherited env
+    // first (a caller may pass a richer one), then the login shell's.
+    ...(process.env.PATH ? process.env.PATH.split(path.delimiter) : []),
+    ...loginPathDirs(),
+  ];
+
+  const seen = new Set<string>();
+  for (const dir of dirs) {
+    if (!dir || seen.has(dir)) continue;
+    seen.add(dir);
+
+    // Skip directory entries that are not absolute — a relative PATH entry
+    // would resolve against the server's cwd and turn this into a different
+    // question ("what is in my cwd") than the one being asked.
+    const candidate = path.isAbsolute(dir) ? path.join(dir, bare) : null;
+    if (!candidate) continue;
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return candidate;
+    } catch {
+      // Not here — keep looking.
+    }
+  }
+  return null;
+}
+
 async function runVersion(name: string, binaryPath: string | null): Promise<PerCliResult> {
   const started = Date.now();
-  if (!binaryPath) {
+  const resolved = resolveCliBinary(binaryPath, name);
+  if (!resolved) {
     return {
       name,
-      binaryPath: null,
+      binaryPath,
       ok: false,
       exitCode: null,
-      error: 'no binary path registered',
+      error: binaryPath
+        ? `registered path missing and ${path.basename(binaryPath)} not found on PATH`
+        : 'no binary path registered',
       durationMs: 0,
     };
   }
 
   return new Promise<PerCliResult>((resolve) => {
     let settled = false;
-    const child = spawn(binaryPath, ['--version'], {
+    const child = spawn(resolved, ['--version'], {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
@@ -126,13 +299,23 @@ export async function probeCli(): Promise<ProbeResult> {
       }
 
       if (rows.length === 0) {
+        // HEA-001: empty registry is an INSTALLATION fault (nothing ever
+        // seeded this box — bootstrap/repair never wrote here), not a
+        // repository defect. Report `unknown` (never `offline`): the probe
+        // cannot distinguish "box has no CLIs" from "registry write never
+        // ran", so it must not certify either. `detail.next` names the heal.
         return {
           component: 'cli',
           label: 'Operator CLIs',
-          status: 'offline',
+          status: 'unknown',
           latencyMs: Date.now() - start,
-          error: 'no CLIs registered in cli_install_registry',
-          detail: { registered: 0, breakdown: [] },
+          error: 'no CLIs registered in cli_install_registry (registry never seeded on this box)',
+          detail: {
+            registered: 0,
+            breakdown: [],
+            cause: 'installation-fault',
+            next: 'cli_install_registry has no in-repo seeder — scripts/install/mac-mini-bootstrap.sh installs the CLIs but never writes this table, and repair-command-center.sh only seeds SOPs; seed the registry explicitly before this probe can report CLI health',
+          },
           probedAt: new Date().toISOString(),
         };
       }
@@ -156,6 +339,11 @@ export async function probeCli(): Promise<ProbeResult> {
       );
       const details = `${okCount}/${total} CLIs healthy. ${breakdownLines.join(', ')}`;
 
+      // CP-002(c): the login-shell harvest ran inside resolveCliBinary above.
+      // If it failed, the lookup silently fell back to the fixed list — say so
+      // in the detail instead of reporting a clean bill of health.
+      const harvestFailure = loginPathHarvestFailure();
+
       return {
         component: 'cli',
         label: 'Operator CLIs',
@@ -174,6 +362,11 @@ export async function probeCli(): Promise<ProbeResult> {
             durationMs: r.durationMs,
           })),
           summary: details,
+          ...(harvestFailure
+            ? {
+                loginPathHarvest: `degraded: login-shell PATH harvest failed (${harvestFailure}); lookup used the fixed list plus process PATH only`,
+              }
+            : {}),
         },
         probedAt: new Date().toISOString(),
       };

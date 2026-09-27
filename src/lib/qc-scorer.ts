@@ -3358,18 +3358,364 @@ export interface AcceptanceCriterion {
  * This function is deterministic (no LLM call) so it can be called at task
  * creation time without latency cost.
  */
+/**
+ * KAN-003: strip machine-written audit annotations, provenance trailers,
+ * prior-state history, URLs and filesystem paths from task text BEFORE
+ * image/deck detection.
+ *
+ * Every QC kickback, cap block and stale-sweep handback is PREPENDED to
+ * `tasks.description`, so after a few loops the description is mostly audit
+ * history. Raw text then matches the image/deck regexes on words the owner
+ * never wrote — `valid_image` / `language_match` inside a pasted QC gap list,
+ * `concept deck at <path>` inside a PRIOR-STATE already-produced note — and
+ * derive mints render gates (AF-LANG / AF-NUM / AF-SPELL / pipeline /
+ * coverage) for a markdown-only card. Those gates fail closed (2.8/10 →
+ * QC-UNROUTEABLE → blocked) on work that was never a render.
+ *
+ * Detection text only — the stored description is untouched.
+ *
+ * ponytail: marker list is EN-only and audit-format-specific; if briefs gain
+ * new machine prefixes, add them here — or split stored provenance/history
+ * into their own columns so detection never sees them.
+ */
+export function cleanDetectionText(title: string, description?: string | null): string {
+  const combined = [title, description].filter(Boolean).join('\n');
+  // QR-007: a handback field line (Problem/Tried/Needs/Suggested dept) is
+  // machine-written ONLY underneath its machine header, and every writer
+  // emits the two together, header first:
+  //   qc-scorer.ts `runQCOnReview`  `[QC-NO-ARTIFACT HANDBACK] <ts>` + fields
+  //   return-to-orchestrator/route.ts `POST`  `[HANDBACK #n/m] <ts>` + fields
+  //   stale-task-sweep.ts `returnToOrchestrator`  `[STALE-RETURN] <ts>` + fields
+  // Dropping those four words on sight also deleted OWNER prose ("Needs:
+  // update pricing $997/mo"), which then vanished from the AF-NUM/AF-SPELL
+  // spec copy and from gate detection. So the field run is only stripped
+  // while it is inside a machine block: header seen, and no blank / `---` /
+  // owner line since. A line with no header above it survives.
+  //
+  // QR-016 / REVR-030 F2: block membership is NOT "any number of field-shaped
+  // lines". Every real writer emits a CLOSED, ORDERED field set — Problem,
+  // Tried, Needs, Suggested dept — each at most once, in that order:
+  //   qc-scorer.ts `structuredHandbackNote`   Problem / Tried / Needs / Suggested dept
+  //   return-to-orchestrator/route.ts `POST`  Problem / Tried / Needs / Suggested dept
+  //   stale-task-sweep.ts `returnToOrchestrator`  Problem / Tried / Needs
+  // So membership requires the canonical order with no repeat. An owner line
+  // that merely LOOKS like a field after an unterminated run ("Needs: a real
+  // image please.") either repeats a field already seen or breaks the order,
+  // and it survives. Previously the reader judged only the NEXT line's shape,
+  // so such a line was deleted and its render demand was lost (tip render 0
+  // where the base rendered 5).
+  const MACHINE_BLOCK_HEADER = /^\[(STALE-RETURN|QC-[^\]]*|RETURN|HANDBACK)/;
+  const MACHINE_FIELD_ORDER = ['Problem:', 'Tried:', 'Needs:', 'Suggested dept:'];
+  const machineFieldIndex = (t: string): number => {
+    const low = t.toLowerCase();
+    return MACHINE_FIELD_ORDER.findIndex((f) => low.startsWith(f.toLowerCase()));
+  };
+  let inMachineBlock = false;
+  let lastFieldIndex = -1;
+  const lines = combined.split('\n').filter((line) => {
+    const t = line.trim();
+    if (!t) {
+      inMachineBlock = false;
+      return false;
+    }
+    if (MACHINE_BLOCK_HEADER.test(t)) {
+      inMachineBlock = true;
+      lastFieldIndex = -1;
+      return false;
+    }
+    if (inMachineBlock) {
+      const idx = machineFieldIndex(t);
+      if (idx > lastFieldIndex) {
+        lastFieldIndex = idx;
+        return false;
+      }
+      inMachineBlock = false;
+    }
+    if (/^---\s*$/.test(t)) return false;
+    return true;
+  });
+  let text = lines.join('\n');
+  // Inline audit verdicts appended mid-line by the kickback / cap-block paths
+  // (append, not newline-bracket, so the line filter above never sees them).
+  // Gap text pasted here carries standalone trigger words the owner never
+  // wrote ("File is a valid image ...", "Deck pipeline records ...").
+  text = text.replace(/\[(QC-FAIL|QC-BLOCKED|QC-CAP-ALERT)[^\n]*/gi, ' ');
+  text = text.replace(/QC-UNROUTEABLE:[^.]*\./gi, ' ');
+  text = text.replace(/Failed QC \d+x[^.]*\./gi, ' ');
+  text = text.replace(/\bscore \d+(\.\d+)?\/10[^.]*\./gi, ' ');
+  // URLs + path tokens FIRST: extensions inside paths (deck.pptx) must not
+  // count as types, and stripping them first lets the provenance sentence
+  // patterns below match cleanly ("PRIOR STATE: concept deck at <path>
+  // already produced" would otherwise leave "pptx already produced" behind
+  // after the sentence cut at the path's first period).
+  text = text.replace(/https?:\/\/\S+/gi, ' ');
+  // QZ-001: which slash tokens are owner PROSE? QR-013 (9b3cbcf01) split every
+  // single-slash token that was not obviously a path, so the halves of a mime
+  // type or of a relative path reached the detector regexes below:
+  // `image/png`, `outputs/deck`, `notes/slides` mint image/deck render gates
+  // for a card whose owner named a transfer format or a folder (REVL-016-D1) —
+  // measured 10.0 PASS -> 6.3/4.2 FAIL on legitimately delivered .md work.
+  //
+  // The measured class boundary is NOT the slash. Of every slash token the W36
+  // lenses recorded, the only prose class whose halves are gate-bearing is the
+  // resolution class (`1080/4k`, `hd/4k`, `hd/4k/render`); every other slash
+  // prose (`and/or`, `N/A`, `24/7`) has gate-free halves, so splitting it and
+  // dropping it derive byte-identical criteria (REVR-020 41-token matrix). So a
+  // slash token is kept as prose only when it reads as a resolution phrase, and
+  // dropped otherwise — which is gate-neutral for the prose it removes and is
+  // the fix for the mime / relative-path class:
+  //   · path shapes always drop: leading `/`, drive prefix, a `//` run, a `.`
+  //     or `..` segment, an extension-bearing segment (`deck.pptx`,
+  //     `shots/1080/hero.png`), a dotted path/host segment (`cdn.example.com`)
+  //   · single slash: admit on ONE resolution word (`1080/4k.v2`, `1.5x/1080`,
+  //     `v1.2/1080`, `x.com/4k`) — the dot no longer disqualifies prose
+  //     (REVR-020-R1: it made slash prose 10.0 PASS where its spaced-out
+  //     control scored 6.7 FAIL)
+  //   · multi-slash chain: admit on TWO (`hd/4k/render`) — a lone resolution
+  //     word inside a longer chain (`a/b/c/1080`) is path scaffolding
+  // Measured scope of the symmetry this buys, stated precisely because the
+  // broader claim is false: WITHIN the resolution-prose class the slash form and
+  // its spaced-out control derive IDENTICAL criteria (28 of 41 fuzz tokens,
+  // including `1080/4k`, `1080/4k.v2`, `1.5x/1080`, `v1.2/1080`, `x.com/4k`,
+  // `hd/4k/render`, `render/1080`) — so for prose, a slash neither creates nor
+  // deletes a render gate. For path and mime shapes the drop is DELIBERATE, and
+  // the two forms are not the same input written two ways: `a/deck` drops the
+  // deck gates that the spaced sentence "Deliver a deck asset." mints, and
+  // `deck.pptx/1080` drops the gates "Deliver deck.pptx 1080 asset." mints — the
+  // spaced forms name a deck in prose while the slash forms name a PATH. Those
+  // 13 divergences are the requirement, not a residue.
+  const RESOLUTION_WORD = /\b(high.?quality|large|high.?res|hd|4k|1080|resolution)\b/gi;
+  const PATH_SEGMENT = /^\.{1,2}$|\.{2,}|\.(png|jpe?g|gif|svg|webp|bmp|tiff?|pdf|pptx?|docx?|xlsx?|key|md|txt|csv|mp[34]|mov|wav|zip|json|ya?ml|html?)$/i;
+  text = text
+    .split(/\s+/)
+    .flatMap((tok) => {
+      if (!tok) return [];
+      if (!tok.includes('/')) return [tok];
+      const probe = tok.replace(/[.,;:!?)"']+$/, '');
+      if (!probe.includes('/')) return [tok];
+      const slashes = (probe.match(/\//g) ?? []).length;
+      const segments = probe.split('/').filter(Boolean);
+      const pathShaped =
+        probe.startsWith('/') ||
+        /^[A-Za-z]:\//.test(probe) ||
+        probe.includes('//') ||
+        segments.some((s) => PATH_SEGMENT.test(s));
+      const resolutionWords = (segments.join(' ').match(RESOLUTION_WORD) ?? []).length;
+      if (pathShaped || resolutionWords < (slashes > 1 ? 2 : 1)) return [];
+      const parts = segments.length > 0 ? segments : [probe];
+      const tail = tok.slice(probe.length); // trailing punctuation, reattached
+      parts[parts.length - 1] += tail;
+      return parts;
+    })
+    .join(' ');
+  // Prior-state history is provenance, never the current brief.
+  text = text.replace(/\bPRIOR STATE:[^.]*\./gi, ' ');
+  text = text.replace(/\bArtifacts?\s+already\s+(produced|delivered|shipped|completed|attached)[^.]*\./gi, ' ');
+  // Rework-reuse trailer appended by the kickback path (`reuseInstruction`,
+  // qc-scorer.ts:285) — names files the last attempt left, not new render
+  // intent:
+  //   "\n\nAlready delivered and STILL VALID[ —|-] do NOT regenerate: <paths>. ..."
+  //
+  // QR-016 / REVR-030 F1: the strip is anchored to the TRAILER SHAPE, never to
+  // the words alone. The previous pattern was /\bAlready\s+(delivered|produced|
+  // shipped|completed|attached)\b[^.]*\./i, which deleted OWNER sentences that
+  // open the same way ("Already delivered a banner last week. Please update
+  // it.") along with the render demand they carried — tip render 0 against the
+  // base's 5/6/deck-2 on identical inputs. The trailer's own continuation
+  // ("Re-register each one ...") goes with it; the strip stops at the sentence
+  // that ends the instruction, so owner prose that follows survives.
+  //
+  // REVL-026-R2-F1: FAIL-OPEN at end of input. The `|$` alternative in the
+  // original pattern let an UNTERMINATED occurrence swallow every character to
+  // the end of the description — including a real render demand written after
+  // it. Measured at the tip: "…STILL VALID - do NOT regenerate: /out/a.png.
+  // Please add a 4k banner image." scored render 0 (demand eaten); the
+  // terminated writer shape scored 6. The strip REQUIRES the declared trailer
+  // terminator now, so it matches only the trailer the in-repo writer
+  // (`reuseInstruction`, above) always emits in full. Unterminated owner prose
+  // survives. Dropping the `|$` alternative was NOT the whole fix: the
+  // `[\s\S]*?` span still ran from an opener to the NEXT terminator, so OWNER
+  // prose sitting between an opener and a later terminator was deleted anyway
+  // (REVL-026-R2-F2). Measured at the tip: an opener whose span reached a later
+  // terminator collapsed 223 chars to 18 with the demand gone, and a SINGLE
+  // opener sufficed — a second opener was never required.
+  //
+  // F-R4-1 / REVS-027 F-A: span is the writer's own block, byte-contiguous
+  // with what `reuseInstruction` (above) appends, as that text reaches
+  // this point in the pipeline: opener sentence (`Already delivered and
+  // STILL VALID — do NOT regenerate:`), then the writer's continuation —
+  // `Re-register each one for [this] attempt (POST [/api/tasks/<id>/
+  // deliverables] with the same path) so it counts [as] this attempt's
+  // output. Produce ONLY [what] the gaps above name.` — in writer order,
+  // with NO content wildcard between parts (whitespace runs only). The
+  // continuation's absolute paths have already been removed by the
+  // URL/path-token stage above, so the text
+  // here carries `(POST with the same path)`; the literal path form stays
+  // admitted in case that stage ever stops stripping it.
+  // Every part must appear in writer order, so nothing except a tail the
+  // writer itself emitted can be consumed (over-retain only): a bare
+  // "Re-register each one", a truncated continuation, a lone terminator,
+  // an unterminated opener, and a demand sitting between opener and
+  // terminator each leave every character in place. The genuine writer
+  // block still strips whole, and two concatenated genuine blocks strip
+  // both.
+  text = text.replace(
+    /\bAlready\s+(delivered|produced|shipped|completed|attached)(?:\s+and)?\s+STILL\s+VALID\b\s+[\u2014\u2013-]\s+do\s+NOT\s+regenerate:\s+Re-register\s+each\s+one\s+for(?:\s+this)?\s+attempt\s+\(POST\s+(?:\/api\/tasks\/[^)\s]+\/deliverables\s+)?with\s+the\s+same\s+path\)\s+so\s+it\s+counts(?:\s+as)?\s+(?:this\s+)?attempt['\u2019]s\s+output\.\s+Produce\s+ONLY(?:\s+what)?\s+the\s+gaps\s+above\s+name\./gi,
+    ' ',
+  );
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+// ---------------------------------------------------------------------------
+// ART-001: select render gates from the SHIPPED artifact type, not the brief.
+//
+// deriveAcceptanceCriteria mints gates from request TEXT. Text lies: audit
+// history, prior-state notes, paths and aspirational words ("deck", "slide",
+// "render") mint valid_image / vision_match / AF-LANG / AF-NUM / AF-SPELL /
+// pipeline_complete / coverage for a card whose only artifact is a .md
+// concepts doc. Those gates fail closed on markdown, so the card burns its
+// reroute budget on checks its artifact type can never answer (the
+// badge-journey-week1-concepts shape: 2.8/10 QC-UNROUTEABLE loop).
+//
+// criteriaForManifest narrows text-derived criteria to the gates the manifest
+// can answer: image-class gates stay only with a valid image item, deck-class
+// gates only with a valid deck file (.pptx/.pdf/.key). Baseline
+// (deliverable_registered) + existence always stay — a markdown artifact draws
+// markdown-appropriate checks and keeps SOP-rubric content review (Mode A),
+// never vision/slide-count gates. Genuine failures survive: no deck file on a
+// deck card still fails content review, evidence, and cert gates; stripping a
+// gate the artifact cannot answer is not passing it.
+//
+// ponytail: .pdf counts as deck-shaped (matches the AF-I14 convention); a pdf
+// REPORT on a slide-mentioning card keeps deck gates. Split report-pdf from
+// deck-pdf when a case proves it matters.
+const IMAGE_GATE_TYPES: ReadonlySet<string> = new Set([
+  'valid_image',
+  'min_resolution',
+  'vision_match',
+  'language_match',
+  'numeric_fidelity',
+  'spelling_fidelity',
+]);
+const DECK_GATE_TYPES: ReadonlySet<string> = new Set(['pipeline_complete', 'coverage']);
+
+/** True when the manifest holds a valid image artifact. File-local: the only
+ * callers are the fail-closed guards in criteriaForManifest below. */
+function manifestHasImageArtifact(manifest: DeliverableManifestItem[]): boolean {
+  return manifest.some((m) => m.valid && m.type === 'image');
+}
+
+/** True when the manifest holds a valid deck file. File-local, as above. */
+function manifestHasDeckArtifact(manifest: DeliverableManifestItem[]): boolean {
+  return manifest.some((m) => m.valid && !!m.path && /\.(pptx|pdf|key)$/i.test(m.path));
+}
+
+/**
+ * Narrow text-derived criteria to the gates the shipped artifacts can answer.
+ * Pure. Null/empty manifest returns criteria unchanged (no evidence to select
+ * from; invariant A owns that shape).
+ *
+ * QZ-001 MEASURED REACHABILITY. This function is IDENTITY on every derivable
+ * criteria set — it never strips anything. Measured at the tip: an exhaustive
+ * 12,282-combination sweep (all 2,047 non-empty subsets of the 11 criterion
+ * types x 6 manifest shapes) produced 0 strip events, output always equal to
+ * input. The reason is structural, not incidental: `demandsImage` and
+ * `demandsDeck` are computed over the same array being filtered, so a criterion
+ * can only reach a clause when its OWN type is in that set — which makes the
+ * clause's `!demandsX` conjunct false by construction. Both clauses are
+ * therefore unreachable-true, and the two `return false` lines below are
+ * retained ONLY as fail-closed guards for a future derivation that re-opens an
+ * existence-only residue; they are not live narrowing. Do not read them as
+ * evidence that stripping happens here. The genuine narrowing this function was
+ * built for now happens upstream, in deriveAcceptanceCriteria: detection runs on
+ * KAN-003's cleaned text and QZ-001's resolution-only slash admission, so a
+ * markdown card never derives render gates to strip in the first place. The
+ * QR-010 hole (3dec3ac31) is closed on that side — an image-demanding card still
+ * derives the full image set and still FAILs on `valid_image` when no image
+ * shipped (measured 6.3 FALSE); do not "fix" this function by removing the
+ * `!demandsImage` conjunct, which would re-open it.
+ */
+export function criteriaForManifest(
+  criteria: AcceptanceCriterion[],
+  manifest: DeliverableManifestItem[] | null,
+): AcceptanceCriterion[] {
+  if (!manifest || manifest.length === 0) return criteria;
+  const hasImage = manifestHasImageArtifact(manifest);
+  const hasDeck = manifestHasDeckArtifact(manifest);
+  if (hasImage && hasDeck) return criteria;
+  // QR-001: the DECK gates are never stripped. Deriving them from request text
+  // already means the card demands a deck deliverable, so a missing deck file is
+  // a genuine FAIL — not "a gate the artifact cannot answer". Stripping them
+  // left a deck-class card with no deck file holding exactly
+  // {deliverable_registered, existence}; `existence` is not
+  // `deliverable_registered`, so the caller's render-gate test read that residue
+  // as "real gates present" and the existence-only checklist passed a merely-
+  // reachable .md 10/10 — where base adc4398b4543568f63de5514f2f094b7a42df5cc
+  // FAILed the same case on the genuine deck gates (pipeline_complete /
+  // coverage, both fail-closed with no deck artifact path). The narrowing must
+  // not manufacture render-gate presence out of a set that stripping emptied.
+  //
+  // QZ-001: the clauses below are UNREACHABLE-TRUE, and the two comments that
+  // used to sit here claimed narrowing this function cannot perform. Measured
+  // at the tip: 12,282 combinations (all 2,047 non-empty subsets of the 11
+  // criterion types x 6 manifest shapes) -> 0 strip events, output always equal
+  // to input. `demandsDeck` / `demandsImage` are computed over the array being
+  // filtered, so a criterion of type X only reaches its clause when X is in the
+  // set, making `!demandsX` false by construction. The lines stay as
+  // fail-closed guards for a future derivation that re-opens an existence-only
+  // residue — they are NOT live narrowing and must not be cited as evidence that
+  // stripping happens here. The genuine selection happens upstream:
+  // deriveAcceptanceCriteria detects on KAN-003's cleaned text with QZ-001's
+  // resolution-only slash admission, so the ART-001 markdown shape (a concepts
+  // .md card, no image/deck word in the brief) derives the baseline criterion
+  // alone and takes Mode A content review with the manifest attached — measured
+  // score 10 pass=true on a reachable .md, where the tip scored 6.3 FALSE on the
+  // full image set. QR-010 mirrors the rule to the image half: deriving image
+  // gates from request text already means the card demands an image deliverable,
+  // so a missing image is a genuine FAIL — not "a gate the artifact cannot
+  // answer". Measured after this repair: an image-demanding card with no image
+  // still derives all 7 image criteria and still FAILs 6.3 on `valid_image`.
+  const demandsDeck = criteria.some((c) => DECK_GATE_TYPES.has(c.type));
+  const demandsImage = criteria.some((c) => IMAGE_GATE_TYPES.has(c.type));
+  return criteria.filter((c) => {
+    if (IMAGE_GATE_TYPES.has(c.type) && !hasImage && !demandsImage) return false;
+    if (DECK_GATE_TYPES.has(c.type) && !hasDeck && !demandsDeck) return false;
+    return true;
+  });
+}
+
 export function deriveAcceptanceCriteria(
   title: string,
   description?: string | null,
 ): AcceptanceCriterion[] {
-  const text = [title, description].filter(Boolean).join(' ').toLowerCase();
+  // KAN-003: detect on CLEANED text only. Raw descriptions accumulate audit
+  // history (QC kickbacks, cap blocks, stale handbacks), URLs and filesystem
+  // paths — all of which contain words the owner never wrote ("valid_image",
+  // "language_match", "concept deck at <path>") that mint render gates for a
+  // markdown-only card. The stored description is untouched; only detection
+  // sees the cleaned text.
+  const detectionSource = cleanDetectionText(title, description);
+  const text = detectionSource.toLowerCase();
 
   // Detect image / deck tasks. Decks/presentations are artifact tasks too — they
   // ship rendered slide images + a .pptx and must carry the AF-LANG/AF-NUM/
   // AF-SPELL render gates AND (deck-only) the AF-PIPELINE-COMPLETE gate.
+  //
+  // QZ-001 / REVP-018-F1: the bare verb `render` is deliberately NOT in this
+  // list. It names the ACTION, not the deliverable, and every real image brief
+  // names its artifact (image / logo / banner / png / graphic / illustration /
+  // thumbnail / duck / draw / "generate|create ... image"), all still here — so
+  // dropping it costs no genuine image detection. What it cost was the ART-001
+  // markdown shape: "Ops report render" / "Render the weekly ops report as a
+  // markdown file for the team." matched on the verb alone, minted the full
+  // image gate set, and — because hasRenderGates then reads true — skipped
+  // Mode A content review and failed the legitimately-delivered .md 6.3 on
+  // `valid_image`, burning qc_reroute_attempts to cap (measured tip c1633e799:
+  // 6.3 FALSE; with `render` removed the card derives baseline only and takes
+  // Mode A content review, which is ART-001's stated intent).
   const isImageTask =
-    /\b(image|picture|photo|png|jpg|jpeg|gif|illustration|render|graphic|logo|banner|thumbnail|duck|draw|generate.*image|create.*image)\b/.test(text);
-  const isDeckTask = describesDeckDeliverable(title, description ?? null);
+    /\b(image|picture|photo|png|jpg|jpeg|gif|illustration|graphic|logo|banner|thumbnail|duck|draw|generate.*image|create.*image)\b/.test(text);
+  const isDeckTask = describesDeckDeliverable(title, detectionSource);
 
   // ── BASELINE CRITERION — applies to EVERY task, no exceptions (T0-01) ──────
   // This function used to `return []` here for anything that was not an image
@@ -3439,7 +3785,7 @@ export function deriveAcceptanceCriteria(
   }
 
   // Vision match: does the image depict what was requested?
-  const subjectText = [title, description].filter(Boolean).join('. ');
+  const subjectText = detectionSource;
   criteria.push({
     id: 'vision_match',
     description: `Image depicts the requested subject: "${subjectText}"`,
@@ -3470,6 +3816,15 @@ export function deriveAcceptanceCriteria(
   // render money tokens are diffed against it. Any rendered money amount not in
   // the spec is a HARD FAIL. Carries the spec copy so the comparison is
   // self-contained (no extra plumbing through the manifest).
+  // QR-007: the spec copy is the OWNER'S brief, so it is built from the raw
+  // title+description — the same expression cleanDetectionText consumes — not
+  // from its cleaned output. Cleaning exists to stop audit words MINTING gates
+  // (KAN-003); it is not a licence to compare a render against a brief with the
+  // owner's own lines deleted. On cleaned text, an owner line shaped like a
+  // handback field ("Needs: update pricing to $997/mo") disappeared from the
+  // spec, so a render printing exactly the owner's $997/$11,964 was reported
+  // fabricated by AF-NUM (REVL-006 D2; measured base pass=true vs tip
+  // pass=false). Detection still reads the cleaned text.
   const specCopy = [title, description].filter(Boolean).join('\n');
   criteria.push({
     id: 'numeric_fidelity',
@@ -3502,7 +3857,13 @@ export function deriveAcceptanceCriteria(
   // upload. The required records are looked up on disk at evaluation time
   // (the run dir is resolved from the deck artifact path); if any is absent the
   // deck is NOT done. Fail-closed: an unreadable/missing run dir blocks too.
-  if (describesDeckDeliverable(title, description ?? null)) {
+  // KAN-003: deck-only gates key on the SAME cleaned-text verdict as the
+  // image/deck split above (isDeckTask), never on raw description. Raw text
+  // accumulates PRIOR-STATE already-produced notes ("concept deck at <path>")
+  // that would otherwise mint pipeline_complete/coverage for a card the
+  // cleaned split already ruled non-deck — including a genuine IMAGE task,
+  // which must carry render gates but no deck-pipeline gates.
+  if (isDeckTask) {
     criteria.push({
       id: 'pipeline_complete',
       description:
@@ -5678,7 +6039,13 @@ export async function runEngineOwnedDeckQC(
   }
 
   // ── 2. Deterministic artifact checklist ONLY ───────────────────────────────
-  const criteria = deriveAcceptanceCriteria(task.title, task.description);
+  // ART-001: narrow to the gates the SHIPPED artifacts can answer. Text minting
+  // render gates for a markdown-only card is the badge-journey misclassification;
+  // the deck-cert and pipeline content gates below stay untouched.
+  const criteria = criteriaForManifest(
+    deriveAcceptanceCriteria(task.title, task.description),
+    deliverableManifest,
+  );
   const criteriaResult = await evaluateCriteria(criteria, deliverableManifest);
   const failedCriteria = criteriaResult.results.filter((r) => !r.pass && !r.skipped);
   const failReasons = failedCriteria.map((r) => `${r.id}: ${r.reason}`);
@@ -6435,7 +6802,21 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
 
     if (deliverableManifest && deliverableManifest.length > 0) {
       // Artifact mode: use the pre-computed criteria (derived above for invariant A).
-      const criteria = artifactCriteriaForTitle;
+      //
+      // QZ-001: this used to read "narrowed (ART-001) to the gates the SHIPPED
+      // artifacts can answer ... a .md concepts doc draws baseline + existence".
+      // That claim is measurably false and is corrected here rather than left to
+      // mislead the next reader. Measured at the tip: criteriaForManifest is
+      // IDENTITY (12,282-combination sweep, 0 strip events), and a .md concepts
+      // card draws the baseline criterion ALONE — not "baseline + existence" —
+      // when its brief names no image/deck word (measured: full=[deliverable_
+      // registered], hasRenderGates=false, Mode A content review, 10 pass). A
+      // brief that does name an image or deck word keeps its full gate set and
+      // correctly fails closed on the missing artifact (measured: `valid_image`
+      // plus the AF gates, 6.3 FALSE). That selection is made upstream, in
+      // deriveAcceptanceCriteria, by KAN-003's cleaned-text detection with
+      // QZ-001's resolution-only slash admission — not by narrowing here.
+      const criteria = criteriaForManifest(artifactCriteriaForTitle, deliverableManifest);
 
       // ── Which checklist can actually JUDGE this deliverable? (T0-01) ────────
       // Branch on the RENDER gates, not on `criteria.length`. Every task now

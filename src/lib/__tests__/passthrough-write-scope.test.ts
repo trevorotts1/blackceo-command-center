@@ -27,6 +27,14 @@
  * client-facing social-theme routes are middleware-exempt + route-level
  * CSRF/same-origin):
  *
+ * re-derived 2026-09-27 for ILJ-004 tenant skip marks: POST
+ * /api/interview/state — the owner's browser marking one structured question
+ * skipped (InterviewClient.tsx:375 with the session cookie + tenant
+ * resolution, never a bearer): 130 mutating, 7 webhook-protected (5 static +
+ * 2 dynamic), 123 non-webhook — bearer coverage unchanged (47 patterns → 51
+ * templates, 50 bearer-ONLY; a session route is not a service-to-service route
+ * and must NOT join BEARER_REQUIRED_WRITE_ROUTES).
+ *
  * re-derived 2026-09-24 for durable prior-completion declaration (PR #423 /
  * JEV-010 era): POST /api/interview/prior-completion — the owner's browser
  * declaration that the interview was already done (InterviewClient.tsx:772
@@ -282,16 +290,16 @@ const nonWebhookCount = allMutatingRoutes.length - webhookProtectedCount;
 describe('passthrough-write-scope — anti-rot lock (U052)', () => {
   // ---- Counts ------------------------------------------------------------
 
-  it('API routes exporting a mutating method: 129 (literal assertion)', () => {
-    expect(allMutatingRoutes.length).toBe(129);
+  it('API routes exporting a mutating method: 130 (literal assertion)', () => {
+    expect(allMutatingRoutes.length).toBe(130);
   });
 
   it('protected by isWebhookSecretRoute: 7 (5 static + 2 dynamic — middleware src/middleware.ts:137-167)', () => {
     expect(webhookProtectedCount).toBe(7);
   });
 
-  it('non-webhook write routes: 122 (129 mutating − 7 webhook-protected; tenant authentication remains required)', () => {
-    expect(nonWebhookCount).toBe(122);
+  it('non-webhook write routes: 123 (130 mutating − 7 webhook-protected; tenant authentication remains required)', () => {
+    expect(nonWebhookCount).toBe(123);
   });
 
   it('interface call templates found by multi-line scanner', () => {

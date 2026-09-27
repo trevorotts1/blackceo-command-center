@@ -693,7 +693,7 @@ fi
 # with its rollback material retained, and watchdog-cc.sh (which never acts on
 # exit 3) could never repair anything. Unset → row 27 N/A (skip). A CONFIGURED
 # URL that is unreachable is still UNKNOWN below.
-CF_PASS="skip"; CF_INDET=false; CF_DETAIL="public URL not configured (row 27: N/A — set CC_PUBLIC_URL to probe the tunnel)"
+CF_PASS="skip"; CF_INDET=false; CF_DETAIL="CC_PUBLIC_URL not set in the checker's environment — this row is a skip (row 27: N/A); makes no claim about the box's own configuration (set CC_PUBLIC_URL in the checker's env to probe the tunnel)"
 if [[ -n "$PUBLIC_URL" ]]; then
   _CF=$(mktemp /tmp/cf_probe_XXXXXX.html)
   # Capture BOTH the status code and the redirect target (Location resolved to an

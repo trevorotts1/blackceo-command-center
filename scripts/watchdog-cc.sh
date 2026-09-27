@@ -401,7 +401,7 @@ except Exception:
     elif [[ "$SCHED_DUE" != "yes" ]]; then
       printf '[watchdog-cc] SCHEDULER: backoff window not yet elapsed; no restart this pass\n' >&2
     elif ! command -v pm2 >/dev/null 2>&1; then
-      printf '[watchdog-cc] SCHEDULER: pm2 not on PATH; cannot restart; human review required\n' >&2
+      printf '[watchdog-cc] SCHEDULER: pm2 not on PATH (searched PATH=%s); cannot restart; human review required\n' "${PATH}" >&2
     else
       # Resolve the target: the FIRST allowlisted name pm2 actually knows.
       # WATCHDOG_CC_APP_NAMES is intentionally unquoted here for word splitting
