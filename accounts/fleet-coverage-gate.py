@@ -176,7 +176,7 @@ def alias_set(box_id, meta):
     pm = meta.get("probe_match")
     if pm:
         aliases.add(pm)
-        # the bare slug too (e.g. oc-beverly-grandison from the probe_match)
+        # the bare slug too (e.g. oc-<client-slug> from the probe_match)
         aliases.add(pm.split(".")[0])
     return {a.lower() for a in aliases}
 
@@ -290,7 +290,7 @@ def cloudflare_reconcile(boxes, secrets, ignore):
     Fail-CLOSED: any ACTIVE tunnel matching the fleet-box convention
     (name startswith 'rescue-') that is NOT a roster Mac box and NOT on the
     ignore-list is a client with infra but no roster entry -> HARD problem
-    (this is the Cloudflare analogue of the Contabo/Beverly-Grandison detector).
+    (this is the Cloudflare analogue of the Contabo unrostered-client detector).
 
     WARN-only (non-fatal): a rostered Mac box whose tunnel is missing or down
     (a client may simply have unplugged their Mac — never false-fail on that),

@@ -84,12 +84,12 @@ PORT="${CC_PORT:-4000}"
 DB_PATH_OVERRIDE="${CC_DB_PATH:-}"
 DISK_PATH_OVERRIDE="${CC_DISK_PATH:-}"
 DISK_MIN_GB="${CC_DISK_MIN_GB:-5}"
-# HEALTH_RETRIES default: measured evidence, not a guess. teresa-pelham needed
+# HEALTH_RETRIES default: measured evidence, not a guess. One client box needed
 # ~530s of post-restart boot work (WAL replay / DB recovery) on a 319 MB
 # mission-control.db before the health check went green — the old default
 # (3 retries x (15s probe + 15s wait) = ~95s worst case) reported exit 3
-# (UNKNOWN) on a deploy that had actually succeeded. cassandra-henriquez is
-# untested at 1.69 GB, >5x teresa's size. 36 retries x (15s probe + 15s wait)
+# (UNKNOWN) on a deploy that had actually succeeded. A second client box is
+# untested at 1.69 GB, >5x that box's size. 36 retries x (15s probe + 15s wait)
 # = ~1080s (18 min), ~2x the one real measured data point, WITHOUT assuming
 # boot time scales linearly with DB size (unproven, and a full 5.3x linear
 # extrapolation would push this past 2800s). If a larger DB is measured and
