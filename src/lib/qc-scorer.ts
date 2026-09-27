@@ -3540,17 +3540,27 @@ export function cleanDetectionText(title: string, description?: string | null): 
   // terminator collapsed 223 chars to 18 with the demand gone, and a SINGLE
   // opener sufficed — a second opener was never required.
   //
-  // The span is now bounded twice, both times against the writer's own fixed
-  // shape (`reuseInstruction`, above), never against owner prose:
-  //   1. it may not cross a second opener, so a stray opener cannot reach
-  //      past the next trailer boundary;
-  //   2. it must contain "Re-register each one", the continuation the writer
-  //      always emits, so a truncated trailer's terminator cannot be used as
-  //      a free terminator to delete the prose in between.
-  // Owner prose under a stray opener therefore goes unmatched and is
-  // over-retained (nothing is stripped); the genuine trailer still strips whole.
+  // F-R4-1 / REVS-027 F-A: span is the writer's own block, byte-contiguous
+  // with what `reuseInstruction` (above) appends, as that text reaches
+  // this point in the pipeline: opener sentence (`Already delivered and
+  // STILL VALID — do NOT regenerate:`), then the writer's continuation —
+  // `Re-register each one for [this] attempt (POST [/api/tasks/<id>/
+  // deliverables] with the same path) so it counts [as] this attempt's
+  // output. Produce ONLY [what] the gaps above name.` — in writer order,
+  // with NO content wildcard between parts (whitespace runs only). The
+  // continuation's absolute paths have already been removed by the
+  // URL/path-token stage above, so the text
+  // here carries `(POST with the same path)`; the literal path form stays
+  // admitted in case that stage ever stops stripping it.
+  // Every part must appear in writer order, so nothing except a tail the
+  // writer itself emitted can be consumed (over-retain only): a bare
+  // "Re-register each one", a truncated continuation, a lone terminator,
+  // an unterminated opener, and a demand sitting between opener and
+  // terminator each leave every character in place. The genuine writer
+  // block still strips whole, and two concatenated genuine blocks strip
+  // both.
   text = text.replace(
-    /\bAlready\s+(delivered|produced|shipped|completed|attached)\s+and\s+STILL\s+VALID\b(?:(?!Already\s+(?:delivered|produced|shipped|completed|attached)\s+and\s+STILL\s+VALID)[\s\S])*?Re-register\s+each\s+one(?:(?!Already\s+(?:delivered|produced|shipped|completed|attached)\s+and\s+STILL\s+VALID)[\s\S])*?Produce\s+ONLY\s+what\s+the\s+gaps\s+above\s+name\./gi,
+    /\bAlready\s+(delivered|produced|shipped|completed|attached)(?:\s+and)?\s+STILL\s+VALID\b\s+[\u2014\u2013-]\s+do\s+NOT\s+regenerate:\s+Re-register\s+each\s+one\s+for(?:\s+this)?\s+attempt\s+\(POST\s+(?:\/api\/tasks\/[^)\s]+\/deliverables\s+)?with\s+the\s+same\s+path\)\s+so\s+it\s+counts(?:\s+as)?\s+(?:this\s+)?attempt['\u2019]s\s+output\.\s+Produce\s+ONLY(?:\s+what)?\s+the\s+gaps\s+above\s+name\./gi,
     ' ',
   );
   return text.replace(/\s+/g, ' ').trim();

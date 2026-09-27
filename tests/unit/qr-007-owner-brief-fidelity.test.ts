@@ -647,3 +647,137 @@ test('REVL-026-R2-F2 controls: genuine trailer alone still strips, owner demand 
   );
   console.log('  [REVL-026-R2-F2 controls] genuine render=%s', renderCount(typesOf('Refresh', genuine)));
 });
+
+// ---------------------------------------------------------------------------
+// FIX-027 (REVL-026 F-R4-1, REVS-027 F-A) regression battery. Every composite
+// input below is built from the REAL writer emission (`reuseInstruction`), so
+// each shape is byte-contiguous with what the writer actually appends; no bare
+// constants. The strip may only consume that writer block; every other
+// arrangement must over-retain. Shape names are round-4 QC grid tokens
+// (O opener, T terminator, D demand, C continuation; O2 = second opener
+// spelling — a different verb, path and task id).
+// ---------------------------------------------------------------------------
+function writerParts(paths: string[], taskId = 't1') {
+  const full = reuseInstruction(taskId, () => paths.map((p) => ({ path: p })));
+  const trimmed = full.trim();
+  const cut = trimmed.indexOf(' Re-register');
+  return {
+    full,
+    open: trimmed.slice(0, cut),
+    cont: trimmed.slice(cut + 1, trimmed.indexOf(' Produce ONLY')),
+    term: trimmed.slice(trimmed.indexOf('Produce ONLY')),
+  };
+}
+
+test('FIX-027 OTDCT: opener+TERM+demand+continuation+TERM must keep the demand', () => {
+  const { open, cont, term } = writerParts(['/out/a.png']);
+  const desc = `Build launch page. ${open} ${term} ${OWNER_DEMAND} ${cont} ${term}`;
+  const ids = typesOf('Refresh', desc);
+  assert.ok(ids.includes('valid_image'), `OTDCT: owner image demand must survive, got [${ids.join(',')}]`);
+  assert.ok(
+    cleanDetectionText('Refresh', desc).includes('4k hero banner image'),
+    'OTDCT: demand sentence must stay in cleaned text (was eaten at tip)',
+  );
+});
+
+test('FIX-027 OTCDT: opener+TERM+continuation+demand+TERM must keep the demand', () => {
+  const { open, cont, term } = writerParts(['/out/a.png']);
+  const desc = `Build launch page. ${open} ${term} ${cont} ${OWNER_DEMAND} ${term}`;
+  const ids = typesOf('Refresh', desc);
+  assert.ok(ids.includes('valid_image'), `OTCDT: owner image demand must survive, got [${ids.join(',')}]`);
+  assert.ok(
+    cleanDetectionText('Refresh', desc).includes('4k hero banner image'),
+    'OTCDT: demand sentence must stay in cleaned text (was eaten at tip)',
+  );
+});
+
+test('FIX-027 O2TDCT: second-opener spelling + TERM + demand + continuation + TERM keeps the demand', () => {
+  const { open, cont, term } = writerParts(['/out/b.png'], 't2');
+  const desc = `Build launch page. ${open} ${term} ${OWNER_DEMAND} ${cont} ${term}`;
+  const ids = typesOf('Refresh', desc);
+  assert.ok(ids.includes('valid_image'), `O2TDCT: owner image demand must survive, got [${ids.join(',')}]`);
+  assert.ok(
+    cleanDetectionText('Refresh', desc).includes('4k hero banner image'),
+    'O2TDCT: demand sentence must stay in cleaned text (was eaten at tip)',
+  );
+});
+
+test('FIX-027 O2TCDCT: second opener, TERM+continuation+demand+continuation+TERM keeps the demand', () => {
+  const { open, cont, term } = writerParts(['/out/b.png'], 't2');
+  const desc = `Build launch page. ${open} ${term} ${cont} ${OWNER_DEMAND} ${cont} ${term}`;
+  const ids = typesOf('Refresh', desc);
+  assert.ok(ids.includes('valid_image'), `O2TCDCT: owner image demand must survive, got [${ids.join(',')}]`);
+  assert.ok(
+    cleanDetectionText('Refresh', desc).includes('4k hero banner image'),
+    'O2TCDCT: demand sentence must stay in cleaned text (was eaten at tip)',
+  );
+});
+
+test('FIX-027 M1: opener+TERM+demand+"Re-register each one"+TERM keeps the demand', () => {
+  const { open, term } = writerParts(['/out/a.png']);
+  const desc = `Build launch page. ${open} ${term} ${OWNER_DEMAND} Re-register each one ${term}`;
+  const ids = typesOf('Refresh', desc);
+  assert.ok(ids.includes('valid_image'), `M1: demand must survive the conductor shape, got [${ids.join(',')}]`);
+  assert.ok(
+    cleanDetectionText('Refresh', desc).includes('4k hero banner image'),
+    'M1: demand sentence must stay in cleaned text (was eaten at tip)',
+  );
+});
+
+test('FIX-027 two concatenated re-dispatch notes must strip both and keep a demand after them', () => {
+  const one = writerParts(['/out/a.png']);
+  const two = writerParts(['/out/b.png'], 't2');
+  const desc = `Build the launch hero.${one.full}${two.full} ${OWNER_DEMAND}`;
+  const cleaned = cleanDetectionText('Refresh', desc);
+  assert.ok(!cleaned.includes('do NOT regenerate'), 'both genuine writer blocks must strip');
+  assert.ok(cleaned.includes('4k hero banner image'), 'demand after both blocks must survive');
+  assert.ok(typesOf('Refresh', desc).includes('valid_image'), 'valid_image must survive');
+});
+
+test('FIX-027 genuine block strips; double genuine strips both; demand between survives', () => {
+  const one = writerParts(['/out/a.png']);
+  const two = writerParts(['/out/b.png'], 't2');
+  const multi = writerParts(['/out/a.png', '/out/b.png']);
+  const single = typesOf('Refresh', `Update creative.${one.full}`);
+  assert.equal(renderCount(single), 0, 'genuine writer block alone must still strip whole');
+  assert.equal(single.includes('valid_image'), false, 'stripped block leaves no image gate');
+  const multiIds = typesOf('Refresh', `Update creative.${multi.full}`);
+  assert.equal(renderCount(multiIds), 0, 'genuine block with a two-path list must still strip');
+  const double = cleanDetectionText('Refresh', `Build the launch hero.${one.full}${two.full}`);
+  assert.ok(!double.includes('do NOT regenerate'), 'two concatenated genuine blocks strip both');
+  const betweenDesc = `Update creative.${one.full} ${OWNER_DEMAND}${two.full}`;
+  assert.ok(typesOf('Refresh', betweenDesc).includes('valid_image'), 'demand between two genuine blocks must survive');
+  assert.ok(
+    cleanDetectionText('Refresh', betweenDesc).includes('4k hero banner image'),
+    'demand sentence between two genuine blocks must stay',
+  );
+});
+
+test('FIX-027 prose carrying "Re-register each one" under a stray opener must not be eaten', () => {
+  const { open, term } = writerParts(['/out/a.png']);
+  const desc = `Build launch page. ${open} ${OWNER_DEMAND} Re-register each one of the tiles. ${term}`;
+  const ids = typesOf('Refresh', desc);
+  assert.ok(ids.includes('valid_image'), `prose phrase under stray opener: demand must survive, got [${ids.join(',')}]`);
+  assert.ok(
+    cleanDetectionText('Refresh', desc).includes('4k hero banner image'),
+    'prose phrase under stray opener: nothing may be deleted',
+  );
+});
+
+test('FIX-027 both historical trailer spellings stay admitted in the strip', () => {
+  // REVL-026 repair spec: the strip must keep stripping the writer trailer
+  // whichever of its historical surface spellings is present. No-`and`
+  // opener, hyphen in place of the em dash, no-`what` terminator.
+  const { full } = writerParts(['/out/a.png']);
+  const variant = full
+    .replace('—', '-')
+    .replace('Already delivered and STILL VALID', 'Already delivered STILL VALID')
+    .replace(' what the gaps', ' the gaps');
+  const desc = `Update creative.${variant}`;
+  const ids = typesOf('Refresh', desc);
+  assert.equal(renderCount(ids), 0, `variant spelling must still strip whole, got [${ids.join(',')}]`);
+  assert.ok(
+    !cleanDetectionText('Refresh', desc).includes('do NOT regenerate'),
+    'variant spelling must be stripped from detection text',
+  );
+});
