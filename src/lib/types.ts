@@ -339,6 +339,16 @@ export interface Task {
     declared_voice_persona_id: string | null;
     used_voice_persona_id: string | null;
     page: string | null;
+    // Which comparison diverged (`persona_voice_mismatch`, `persona_topic_mismatch`,
+    // `persona_task_roles_mismatch`, `persona_bundle_revision_mismatch`, …).
+    // `persona_bundle_revision_mismatch` = stored-vs-dispatched (A39): the STORED
+    // decision moved after dispatch; the producer did NOT diverge — the chip title
+    // must not claim it did.
+    reason?: string | null;
+    // Only for `persona_bundle_revision_mismatch`: 'stored' = stored decision
+    // rebuilt after dispatch; 'producer' = producer reported a revision other
+    // than the one it was handed.
+    revision_source?: 'stored' | 'producer' | null;
   } | null;
   // U37 (C-06) — S2 class-b visibility (src/lib/dispatch-hold.ts). Present
   // ONLY when this task's NEWEST task_activities row is a
