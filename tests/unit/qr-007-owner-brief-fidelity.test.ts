@@ -512,6 +512,31 @@ test('QR-016 (e) the REAL reuseInstruction trailer still renders 0', () => {
   console.log('  [QR-016 e] trailer render=0 | cleaned=%s', JSON.stringify(cleanDetectionText('Refresh', desc)));
 });
 
+test('REVL-026-R2-F1 an UNTERMINATED trailer occurrence must not eat a demand after it', () => {
+  // Truncated writer output — the "Already delivered and STILL VALID" opener is
+  // present but the declared terminator ("Produce ONLY what the gaps above
+  // name.") never printed. The old `|$` alternative ran the strip to end of
+  // input and deleted the real demand that followed: measured render 0.
+  const desc = 'Build the launch hero. Already delivered and STILL VALID - do NOT regenerate: /out/a.png. '
+    + 'Please add a 4k banner image.';
+  const ids = typesOf('Refresh', desc);
+  assert.equal(renderCount(ids), 6, `the owner demand after an unterminated trailer must survive, got ${renderCount(ids)} [${ids.join(',')}]`);
+  assert.ok(ids.includes('valid_image'), 'the image demand after an unterminated trailer must keep valid_image');
+  assert.ok(ids.includes('min_resolution'), 'the 4k demand after an unterminated trailer must keep min_resolution');
+  assert.ok(
+    cleanDetectionText('Refresh', desc).includes('Please add a 4k banner image'),
+    'the demand sentence itself must survive cleanDetectionText',
+  );
+
+  // Terminated writer output is still stripped whole, and a demand after it survives.
+  const terminated = 'Build the launch hero.' + reuseInstruction('t1', () => [{ path: '/out/a.png' }])
+    + ' Please add a 4k banner image.';
+  const tIds = typesOf('Refresh', terminated);
+  assert.ok(!cleanDetectionText('Refresh', terminated).includes('do NOT regenerate'), 'the terminated trailer must still be stripped');
+  assert.equal(renderCount(tIds), 6, `the demand after a terminated trailer must survive too, got ${renderCount(tIds)} [${tIds.join(',')}]`);
+  console.log('  [REVL-026-R2-F1] unterminated render=%s | terminated render=%s', renderCount(ids), renderCount(tIds));
+});
+
 test('QR-016 (e-control) owner prose placed BEFORE the trailer survives alongside it', () => {
   const trailer = reuseInstruction('t1', () => [{ path: '/out/a.png' }]);
   const desc = 'Build a hero banner image for the launch.' + trailer;

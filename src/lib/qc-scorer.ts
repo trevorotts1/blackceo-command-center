@@ -3524,8 +3524,20 @@ export function cleanDetectionText(title: string, description?: string | null): 
   // base's 5/6/deck-2 on identical inputs. The trailer's own continuation
   // ("Re-register each one ...") goes with it; the strip stops at the sentence
   // that ends the instruction, so owner prose that follows survives.
+  //
+  // REVL-026-R2-F1: FAIL-OPEN at end of input. The `|$` alternative in the
+  // original pattern let an UNTERMINATED occurrence swallow every character to
+  // the end of the description — including a real render demand written after
+  // it. Measured at the tip: "…STILL VALID - do NOT regenerate: /out/a.png.
+  // Please add a 4k banner image." scored render 0 (demand eaten); the
+  // terminated writer shape scored 6. The strip REQUIRES the declared trailer
+  // terminator now, so it matches only the trailer the in-repo writer
+  // (`reuseInstruction`, above) always emits in full. Unterminated owner prose
+  // survives. Dropping the `|$` alternative is the whole fix: no match at all
+  // is the fail-CLOSED direction here (nothing is stripped), so prose can only
+  // be over-retained, never deleted.
   text = text.replace(
-    /\bAlready\s+(delivered|produced|shipped|completed|attached)\s+and\s+STILL\s+VALID\b[\s\S]*?(?:Produce\s+ONLY\s+what\s+the\s+gaps\s+above\s+name\.|$)/gi,
+    /\bAlready\s+(delivered|produced|shipped|completed|attached)\s+and\s+STILL\s+VALID\b[\s\S]*?Produce\s+ONLY\s+what\s+the\s+gaps\s+above\s+name\./gi,
     ' ',
   );
   return text.replace(/\s+/g, ' ').trim();
