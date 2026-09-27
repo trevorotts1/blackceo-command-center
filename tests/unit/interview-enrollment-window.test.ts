@@ -9,7 +9,13 @@
  *
  * Pure interviewFinished() cases run in-process; enrollmentWindowClosed()
  * cases run against a throwaway OPENCLAW_WORKSPACE_ROOT. No DB, no network.
+ *
+ * C8: enrollment-window.ts imports @/lib/interview/seam for readBuildState,
+ * and seam statically reaches @/lib/db via foundation-verification. The pure
+ * behaviour is unchanged — this import only points DATABASE_PATH at a unique
+ * temp file so the transitive reach can never touch the live mission-control.db.
  */
+import './_isolated-db';
 import test, { beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
