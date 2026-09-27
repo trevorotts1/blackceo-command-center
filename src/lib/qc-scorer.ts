@@ -3576,13 +3576,14 @@ const IMAGE_GATE_TYPES: ReadonlySet<string> = new Set([
 ]);
 const DECK_GATE_TYPES: ReadonlySet<string> = new Set(['pipeline_complete', 'coverage']);
 
-/** True when the manifest holds a valid image artifact. */
-export function manifestHasImageArtifact(manifest: DeliverableManifestItem[]): boolean {
+/** True when the manifest holds a valid image artifact. File-local: the only
+ * callers are the fail-closed guards in criteriaForManifest below. */
+function manifestHasImageArtifact(manifest: DeliverableManifestItem[]): boolean {
   return manifest.some((m) => m.valid && m.type === 'image');
 }
 
-/** True when the manifest holds a valid deck file. */
-export function manifestHasDeckArtifact(manifest: DeliverableManifestItem[]): boolean {
+/** True when the manifest holds a valid deck file. File-local, as above. */
+function manifestHasDeckArtifact(manifest: DeliverableManifestItem[]): boolean {
   return manifest.some((m) => m.valid && !!m.path && /\.(pptx|pdf|key)$/i.test(m.path));
 }
 
