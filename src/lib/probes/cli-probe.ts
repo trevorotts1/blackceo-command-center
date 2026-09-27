@@ -56,38 +56,82 @@ const PER_CLI_TIMEOUT_MS = 2000;
  * and its output is treated purely as a list of directory strings — the
  * caller's `spawn` of the resolved binary remains argument-static.
  */
-const loginPathDirs = (() => {
-  let cached: string[] | null = null;
-  return (): string[] => {
-    if (cached) return cached;
-    cached = [];
-    const shell = process.env.SHELL || '/bin/sh';
-    try {
-      // -lic: interactive+login, so the user's rc files (which is where the
-      // PATH exports live) are sourced exactly as they are at a real prompt.
-      // 1000ms: the measured interactive shell on this box answers in ~90ms,
-      // so this is a 10x ceiling. It has to stay well under PROBE_TIMEOUT_MS
-      // (3000): the harvest is blocking-synchronous and runs inside the probe,
-      // and a shell that hangs must not eat the budget the CLIs need.
-      const out = execFileSync(shell, ['-lic', 'printf %s "$PATH"'], {
-        encoding: 'utf8',
-        timeout: 1000,
-        stdio: ['ignore', 'pipe', 'ignore'],
-      });
-      // QR-012: rc banners precede the PATH, so take the last line.
-      cached = out
-        .trim()
-        .split(/\r?\n/)
-        .pop()!
+let loginPathHarvestError: string | null = null;
+let cachedLoginPathDirs: string[] | null = null;
+
+/**
+ * CP-002(c): the login-shell harvest can FAIL (shell exits non-zero, hangs,
+ * is missing). It used to vanish into a bare `catch {}`, so the probe reported
+ * as if nothing were wrong. This is that failure, kept for the probe to show.
+ */
+export function loginPathHarvestFailure(): string | null {
+  return loginPathHarvestError;
+}
+
+/** Test-only: drop the memo so a test can drive a failing shell. */
+export function resetLoginPathHarvest(): void {
+  cachedLoginPathDirs = null;
+  loginPathHarvestError = null;
+}
+
+/**
+ * CP-002(a)(b): pick the PATH line out of raw login-shell stdout.
+ *
+ * QR-012's `.pop()` (take the literal last line) works only while every banner
+ * rides on the SAME line as PATH. On zsh the banner lands on its own line
+ * (`/etc/zshrc_Apple_Terminal` shape), so `.pop()` returned banner text, the
+ * delimiter filter emptied the list, and every login-PATH lookup went dark.
+ * A banner whose last line is an absolute path (`injection`) was worse: it was
+ * ADMISSIONED as a PATH entry.
+ *
+ * So: scan lines and keep the last one that both contains the path delimiter
+ * AND yields at least one absolute directory — that is the PATH line. Banners
+ * without `:` and banners with `:` but no absolute entries both lose.
+ * Exported for tests.
+ */
+export function pickLoginPathDirs(raw: string): string[] {
+  let chosen: string | null = null;
+  for (const line of raw.split(/\r?\n/)) {
+    if (!line.includes(path.delimiter)) continue;
+    const dirs = line
+      .split(path.delimiter)
+      .filter((dir) => dir.length > 0 && path.isAbsolute(dir));
+    if (dirs.length === 0) continue;
+    chosen = line;
+  }
+  return chosen === null
+    ? []
+    : chosen
         .split(path.delimiter)
         .filter((dir) => dir.length > 0 && path.isAbsolute(dir));
-    } catch {
-      // No usable shell / it hung: the fixed list still works, so this stays a
-      // silently degraded lookup rather than a probe failure.
-    }
-    return cached;
-  };
-})();
+}
+
+function loginPathDirs(): string[] {
+  if (cachedLoginPathDirs) return cachedLoginPathDirs;
+  cachedLoginPathDirs = [];
+  const shell = process.env.SHELL || '/bin/sh';
+  try {
+    // -lic: interactive+login, so the user's rc files (which is where the
+    // PATH exports live) are sourced exactly as they are at a real prompt.
+    // 1000ms: the measured interactive shell on this box answers in ~90ms,
+    // so this is a 10x ceiling. It has to stay well under PROBE_TIMEOUT_MS
+    // (3000): the harvest is blocking-synchronous and runs inside the probe,
+    // and a shell that hangs must not eat the budget the CLIs need.
+    const out = execFileSync(shell, ['-lic', 'printf %s "$PATH"'], {
+      encoding: 'utf8',
+      timeout: 1000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    loginPathHarvestError = null;
+    cachedLoginPathDirs = pickLoginPathDirs(out);
+  } catch (err) {
+    // CP-002(c): no usable shell / it hung / it exited non-zero. The fixed
+    // list still works, so this stays a degraded lookup rather than a probe
+    // failure — but it is RECORDED, not swallowed: the probe surfaces it.
+    loginPathHarvestError = err instanceof Error ? err.message : String(err);
+  }
+  return cachedLoginPathDirs;
+}
 
 /**
  * HEA-001: PATH fallback for a registered binary. The registry stores the
@@ -295,6 +339,11 @@ export async function probeCli(): Promise<ProbeResult> {
       );
       const details = `${okCount}/${total} CLIs healthy. ${breakdownLines.join(', ')}`;
 
+      // CP-002(c): the login-shell harvest ran inside resolveCliBinary above.
+      // If it failed, the lookup silently fell back to the fixed list — say so
+      // in the detail instead of reporting a clean bill of health.
+      const harvestFailure = loginPathHarvestFailure();
+
       return {
         component: 'cli',
         label: 'Operator CLIs',
@@ -313,6 +362,11 @@ export async function probeCli(): Promise<ProbeResult> {
             durationMs: r.durationMs,
           })),
           summary: details,
+          ...(harvestFailure
+            ? {
+                loginPathHarvest: `degraded: login-shell PATH harvest failed (${harvestFailure}); lookup used the fixed list plus process PATH only`,
+              }
+            : {}),
         },
         probedAt: new Date().toISOString(),
       };

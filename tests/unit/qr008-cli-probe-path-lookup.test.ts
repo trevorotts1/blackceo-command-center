@@ -27,7 +27,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { resolveCliBinary } from '../../src/lib/probes/cli-probe';
+import {
+  pickLoginPathDirs,
+  loginPathHarvestFailure,
+  resetLoginPathHarvest,
+  resolveCliBinary,
+} from '../../src/lib/probes/cli-probe';
 
 const HOME = os.homedir();
 
@@ -167,4 +172,82 @@ test('QR-008: a non-executable candidate is not resolved (X_OK check kept)', () 
 
   const resolved = withPathPrefix([dir], () => resolveCliBinary(null, name));
   assert.equal(resolved, null, `non-executable ${name} must not resolve`);
+});
+
+// ── 4. CP-002: login-shell stdout shapes ─────────────────────────────────────
+//
+// QR-012 read the LITERAL last stdout line. That holds only while every rc
+// banner rides on the SAME line as PATH. Two zsh shapes break it, and the
+// third defect is that a failed harvest was invisible. All three are pinned
+// below against `pickLoginPathDirs`, the exported line chooser.
+
+const PATH_LINE = '/usr/bin:/bin:/opt/homebrew/bin';
+
+test('CP-002(a): a banner on its OWN line after PATH cannot defeat the lookup', () => {
+  // /etc/zshrc_Apple_Terminal's shape: "Goodbye..." lands on its own line, so
+  // the PATH line is NOT the last one. `.pop()` returned the banner; the
+  // delimiter filter then emptied the list and every lookup went dark.
+  const raw = `\nGoodbye from .zlogout\n${PATH_LINE}\n`;
+  assert.deepEqual(
+    pickLoginPathDirs(raw),
+    PATH_LINE.split(':'),
+    'the PATH line must be chosen even when a banner follows it'
+  );
+});
+
+test('CP-002(a): a trailing banner line with no delimiter is skipped', () => {
+  const raw = `${PATH_LINE}\nGoodbye from .zlogout\n`;
+  assert.deepEqual(pickLoginPathDirs(raw), PATH_LINE.split(':'));
+});
+
+test('CP-002(b): a banner whose last line is an absolute path is NOT admitted', () => {
+  // REGRESSION introduced by the `.pop()` fix: a banner line that both starts
+  // with "/" and contains ":" passed isAbsolute and entered the PATH list.
+  const injected = '/tmp/cp002-banner-derived-dir';
+  const raw = `\n${injected}\n${PATH_LINE}\n`;
+  const dirs = pickLoginPathDirs(raw);
+  assert.deepEqual(dirs, PATH_LINE.split(':'));
+  assert.equal(
+    dirs.includes(injected),
+    false,
+    'a banner directory must never be admitted as a PATH entry'
+  );
+});
+
+test('CP-002(b): the LAST delimiter-bearing absolute line wins (banner before PATH)', () => {
+  // The legit rc shape: banner text first, real PATH last. Scan order must
+  // prefer the later line, or an rc banner containing a path would win.
+  const injected = '/tmp/cp002-earlier-banner-dir';
+  const raw = `${injected}:/usr/bin\n${PATH_LINE}\n`;
+  assert.deepEqual(pickLoginPathDirs(raw), PATH_LINE.split(':'));
+});
+
+test('CP-002: non-PATH text with no delimiter yields no directories', () => {
+  assert.deepEqual(pickLoginPathDirs('\nnot a path at all\n\nand more text\n'), []);
+  assert.deepEqual(pickLoginPathDirs('stdout banner: a:b:c not a path\n'), []);
+});
+
+// ── 5. CP-002(c): a failing harvest is REPORTED, not swallowed ───────────────
+
+test('CP-002(c): a login shell that exits non-zero records a harvest failure', () => {
+  resetLoginPathHarvest();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cp002-fail-'));
+  const shell = path.join(dir, 'failing-shell');
+  fs.writeFileSync(shell, '#!/bin/sh\nexit 3\n', { mode: 0o755 });
+
+  const originalShell = process.env.SHELL;
+  process.env.SHELL = shell;
+  try {
+    assert.equal(loginPathHarvestFailure(), null, 'clean before the failing run');
+    const resolved = resolveCliBinary(null, `cp002-absent-${process.pid}`);
+    assert.equal(resolved, null, 'lookup still degrades to the fixed list');
+    const failure = loginPathHarvestFailure();
+    assert.ok(
+      failure !== null && failure.length > 0,
+      'a failed harvest must be recorded so the probe can surface it'
+    );
+  } finally {
+    process.env.SHELL = originalShell;
+    resetLoginPathHarvest();
+  }
 });
