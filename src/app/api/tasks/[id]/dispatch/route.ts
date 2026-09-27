@@ -12,7 +12,7 @@ import { broadcast } from '@/lib/events';
 import { getProjectsPath, getMissionControlUrl } from '@/lib/config';
 import { detectPlatform } from '@/lib/platform';
 import { resolveAndLog, resolveSpecialistType } from '@/lib/intelligence-resolver';
-import { buildPersonaBlock, buildPersonaPlanBlock } from '@/lib/persona-dispatch';
+import { renderDispatchPersonaSection } from '@/lib/persona-dispatch';
 import { renderOwnerMessagesSection } from '@/lib/owner-messages';
 import { loadSubtaskPersonas } from '@/lib/persona-selector';
 import { checkModelSovereignty, detectModality } from '@/lib/model-selector';
@@ -611,11 +611,7 @@ ${stepLines.join('\n')}
     // block for a decomposed multi-persona task. buildPersonaPlanBlock returns ''
     // for a single-persona task, so this path is a no-op regression there. Keeps
     // the two dispatch messages byte-identical for the persona section (FDN-3).
-    const subtaskPlan = loadSubtaskPersonas(task.id);
-    const personaPlanBlock = buildPersonaPlanBlock(subtaskPlan, settings);
-    const personaSection = personaPlanBlock
-      ? `${buildPersonaBlock(task, settings)}\n${personaPlanBlock}`
-      : buildPersonaBlock(task, settings);
+    const personaSection = renderDispatchPersonaSection(task, settings, loadSubtaskPersonas(task.id));
 
     // Layer A (departments-that-use-skills): match installed SKILL.md files to
     // the task and deliver the top-3 to the doer — parity with the auto path.
