@@ -781,3 +781,27 @@ test('FIX-027 both historical trailer spellings stay admitted in the strip', () 
     'variant spelling must be stripped from detection text',
   );
 });
+
+test('F-R6-1 a demand between opener and genuine continuation survives whole and keeps min_resolution', async () => {
+  // RVL-033 (Trevor 2026-09-27, binding): the optional name slot in the strip
+  // is REMOVED entirely, so any demand sitting between the opener and the
+  // writer's invariant `Re-register each one` continuation must survive byte
+  // for byte and keep its gates — over-retain, never fail-open.
+  const { open, cont, term } = writerParts(['/out/a.png']);
+  const desc = `Build the launch page. ${open} Please add a 4k hero banner image. ${cont} ${term}`;
+  const cleaned = cleanDetectionText('Refresh', desc);
+  assert.ok(
+    cleaned.includes('4k hero banner image'),
+    `the demand between opener and continuation must survive, got ${JSON.stringify(cleaned)}`,
+  );
+  const ids = typesOf('Refresh', desc);
+  assert.ok(ids.includes('valid_image'), `the demand must keep valid_image, got [${ids.join(',')}]`);
+  assert.ok(ids.includes('min_resolution'), `the 4k demand must mint min_resolution, got [${ids.join(',')}]`);
+  const check = await evaluateCriteria(
+    deriveAcceptanceCriteria('Refresh', desc),
+    [mk({ type: 'image', sizeBytes: 512, valid: true })],
+  );
+  const minres = check.results.find((r) => r.type === 'min_resolution' || (r.id ?? '').includes('min_resolution'));
+  assert.ok(minres, 'min_resolution check must be present');
+  assert.equal(minres.pass, false, 'a 512-byte image must evaluate pass=false (below the 1KB floor)');
+});
