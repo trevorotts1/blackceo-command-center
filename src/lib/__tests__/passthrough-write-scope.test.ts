@@ -35,6 +35,17 @@
  * unchanged (47 patterns → 51 templates, 50 bearer-ONLY; a session route is
  * not a service-to-service route and must NOT join BEARER_REQUIRED_WRITE_ROUTES).
  *
+ * re-derived 2026-09-27 for ILJ-004 server-side skip marks (commit 572d5dde4,
+ * merged after the prior-completion re-derivation above landed on the same
+ * branch): POST /api/interview/state — the tenant interview client POSTs a
+ * structured skip mark and clears it on answer (InterviewClient; session
+ * cookie + CSRF, never a bearer). It is a browser-called session route, so it
+ * must NOT join BEARER_REQUIRED_WRITE_ROUTES, exactly like prior-completion:
+ * 130 mutating, 7 webhook-protected (5 static + 2 dynamic), 123 non-webhook —
+ * bearer coverage unchanged (47 patterns → 51 templates, 50 bearer-ONLY). Both
+ * B.1 checks were red on the merged head 96a197efc against the 129/122
+ * literal above; the delta is this one intended route, not a leak.
+ *
  * re-derived 2026-09-21 for ask-at-capacity: the owner's answer to a provider
  * question (POST /api/tasks/{id}/provider-choice) and the intake's lane
  * corrections (POST /api/routing-corrections). Both are service-to-service —
@@ -282,16 +293,16 @@ const nonWebhookCount = allMutatingRoutes.length - webhookProtectedCount;
 describe('passthrough-write-scope — anti-rot lock (U052)', () => {
   // ---- Counts ------------------------------------------------------------
 
-  it('API routes exporting a mutating method: 129 (literal assertion)', () => {
-    expect(allMutatingRoutes.length).toBe(129);
+  it('API routes exporting a mutating method: 130 (literal assertion)', () => {
+    expect(allMutatingRoutes.length).toBe(130);
   });
 
   it('protected by isWebhookSecretRoute: 7 (5 static + 2 dynamic — middleware src/middleware.ts:137-167)', () => {
     expect(webhookProtectedCount).toBe(7);
   });
 
-  it('non-webhook write routes: 122 (129 mutating − 7 webhook-protected; tenant authentication remains required)', () => {
-    expect(nonWebhookCount).toBe(122);
+  it('non-webhook write routes: 123 (130 mutating − 7 webhook-protected; tenant authentication remains required)', () => {
+    expect(nonWebhookCount).toBe(123);
   });
 
   it('interface call templates found by multi-line scanner', () => {
