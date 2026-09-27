@@ -109,6 +109,27 @@ if [[ "$MODE" != "uninstall" && ! -f "$WATCHDOG_SCRIPT" ]]; then
   exit 1
 fi
 
+# RUNTIME_PATH: launchd and cron both start jobs with a minimal PATH
+# (/usr/bin:/bin:/usr/sbin:/sbin). On a box whose pm2 lives under ~/.npm-global
+# that PATH misses pm2 entirely, so watchdog-cc.sh's scheduler self-heal takes
+# its "pm2 not on PATH" branch on boxes where pm2 IS installed — the restart
+# path is dead. Derive the real PATH here, at install time, from THIS box's own
+# layout; never hardcode one machine's directories.
+_pm2_dir=""
+if _pm2_bin="$(command -v pm2 2>/dev/null)"; then
+  _pm2_dir="$(cd "$(dirname "$_pm2_bin")" 2>/dev/null && pwd)" || _pm2_dir=""
+fi
+_npm_prefix_bin=""
+_npm_prefix="$(npm prefix -g 2>/dev/null || true)"
+[[ -n "$_npm_prefix" ]] && _npm_prefix_bin="${_npm_prefix}/bin"
+RUNTIME_PATH=""
+for _p in "$_pm2_dir" "$_npm_prefix_bin" /opt/homebrew/bin /usr/local/bin /usr/bin /bin /usr/sbin /sbin; do
+  [[ -n "$_p" ]] || continue
+  case ":${RUNTIME_PATH}:" in *":${_p}:"*) continue ;; esac
+  RUNTIME_PATH="${RUNTIME_PATH:+${RUNTIME_PATH}:}${_p}"
+done
+unset _pm2_dir _pm2_bin _npm_prefix _npm_prefix_bin _p
+
 ###############################################################################
 # macOS — launchd user agent
 ###############################################################################
@@ -144,6 +165,8 @@ _mac_write_plist() {
     </array>
     <key>EnvironmentVariables</key>
     <dict>
+        <key>PATH</key>
+        <string>${RUNTIME_PATH}</string>
         <key>WATCHDOG_SELF_HEAL</key>
         <string>1</string>
         <key>WATCHDOG_PORT</key>
@@ -228,7 +251,7 @@ _mac_uninstall() {
 # Linux — crontab block
 ###############################################################################
 _cron_line() {
-  local envs="WATCHDOG_SELF_HEAL=1 WATCHDOG_PORT=${PORT}"
+  local envs="PATH='${RUNTIME_PATH}' WATCHDOG_SELF_HEAL=1 WATCHDOG_PORT=${PORT}"
   [[ -n "$PM2_APP" ]] && envs="${envs} WATCHDOG_CC_APP_NAMES=${PM2_APP}"
   [[ -n "$PUBLIC_URL" ]] && envs="${envs} CC_PUBLIC_URL='${PUBLIC_URL//\'/}'"
   printf '*/5 * * * * %s bash %s >> %s 2>&1' "$envs" "$WATCHDOG_SCRIPT" "$LINUX_LOG"
