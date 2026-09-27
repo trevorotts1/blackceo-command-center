@@ -253,6 +253,12 @@ export default defineConfig({
     // bogus-type 400 negative control. Vitest globals, so vitest-only, never
     // the tsx --test glob (see package.json).
     'tests/unit/fix37-activity-enum.test.ts',
+      // CSF-001 / CSF-004 — expired-CSRF-token suites (authentic-expired predicate +
+      // middleware mid-sitting rejection/recovery with negative controls). Vitest
+      // globals + vi.resetModules re-import of the middleware, same pattern as
+      // middleware-same-origin-board.test.ts — vitest-only, never the tsx glob.
+      'tests/unit/csf-001-expired-token.test.ts',
+      'tests/unit/csf-expired-mid-sitting.test.ts',
     ],
     env: {
       NODE_ENV: 'test',

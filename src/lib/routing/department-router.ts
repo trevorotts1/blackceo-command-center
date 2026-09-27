@@ -558,34 +558,81 @@ function pickBestAgent(
  * UUID): exact agent id → exact agent name → exact persona → unique substring
  * of the agent name. Offline agents are excluded (a pin can't wake a dead box).
  *
- * Returns null when no agent matches, so the caller can fall back to normal
+ * AMBIGUITY IS A HOLD, NEVER A PICK (spec 1.1 ss 4.4 "Have Jordan do it." —
+ * "ambiguity must not select a random Jordan"; ss 5.5.1 "An unavailable pinned
+ * executor creates a specific hold, not silent delegation"). Two same-company
+ * workers the owner's name matches equally (two "Jordan", or "Jordan Blake" +
+ * "Jordan Reyes") used to fall through the `find()` chain and the substring
+ * guard to the first row in the list — a silent random pick the owner never
+ * authorized. They now return `ambiguous` with the candidate list, and the
+ * caller holds the card for an explicit owner decision.
+ *
+ * Returns null when NO agent matches, so the caller can fall back to normal
  * department routing rather than dropping the task.
  */
+type SpecialistPinResolution =
+  | { kind: 'pinned'; result: RoutingResult }
+  | { kind: 'ambiguous'; reason: string };
+
+/** Owner-facing candidate list: `Name @ Workspace (id)` — enough to disambiguate. */
+function describePinCandidates(candidates: AgentWithLoad[], departments: DepartmentConfig[]): string {
+  return candidates
+    .map((a) => {
+      const canon = canonicalDeptSlug(a.workspace_id);
+      const dept = departments.find((d) => d.id === a.workspace_id || canonicalDeptSlug(d.id) === canon);
+      return `${a.name} @ ${dept?.name ?? a.workspace_id} (${a.id})`;
+    })
+    .join('; ');
+}
+
 function resolveSpecialistPin(
   agents: AgentWithLoad[],
   targetAgent: string,
   departments: DepartmentConfig[],
-): RoutingResult | null {
+): SpecialistPinResolution | null {
   const needle = targetAgent.trim().toLowerCase();
   if (!needle) return null;
 
   const available = agents.filter((a) => a.status !== 'offline' && !a.is_master);
 
-  // Resolution precedence: id → exact name → exact persona → unique substring.
-  let pinned =
-    available.find((a) => a.id.toLowerCase() === needle) ??
-    available.find((a) => a.name.toLowerCase() === needle) ??
-    available.find((a) => (a.persona ?? '').toLowerCase() === needle);
+  const ambiguity = (candidates: AgentWithLoad[]): SpecialistPinResolution => ({
+    kind: 'ambiguous',
+    reason:
+      `Owner-named worker "${targetAgent}" is ambiguous — ${candidates.length} same-company matches ` +
+      `(${describePinCandidates(candidates, departments)}). Held for an explicit owner assignment; never a random pick.`,
+  });
 
-  if (!pinned && needle.length >= 3) {
-    const partial = available.filter((a) => a.name.toLowerCase().includes(needle));
-    // Only accept a substring match when it is unambiguous (exactly one agent),
-    // otherwise we'd silently pin the wrong specialist.
-    if (partial.length === 1) pinned = partial[0];
+  // Exact agent id is unique by primary key — always an unambiguous pin.
+  const byId = available.find((a) => a.id.toLowerCase() === needle);
+  if (byId) return pinResultFor(byId, targetAgent, departments);
+
+  // Resolution precedence for a typed NAME: exact name → exact persona → unique substring.
+  for (const match of [
+    (a: AgentWithLoad) => a.name.toLowerCase() === needle,
+    (a: AgentWithLoad) => (a.persona ?? '').toLowerCase() === needle,
+  ]) {
+    const exact = available.filter(match);
+    if (exact.length > 1) return ambiguity(exact);
+    if (exact.length === 1) return pinResultFor(exact[0], targetAgent, departments);
   }
 
-  if (!pinned) return null;
+  if (needle.length >= 3) {
+    const partial = available.filter((a) => a.name.toLowerCase().includes(needle));
+    // Only accept a substring match when it is unambiguous; several agents
+    // share the fragment → the owner must say which one.
+    if (partial.length > 1) return ambiguity(partial);
+    if (partial.length === 1) return pinResultFor(partial[0], targetAgent, departments);
+  }
 
+  return null;
+}
+
+/** Build the owner_direct RoutingResult for a resolved agent. */
+function pinResultFor(
+  pinned: AgentWithLoad,
+  targetAgent: string,
+  departments: DepartmentConfig[],
+): SpecialistPinResolution {
   // Resolve the agent's department label for the owner-facing report.
   const pinnedWsCanon = canonicalDeptSlug(pinned.workspace_id);
   const dept = departments.find(
@@ -594,13 +641,16 @@ function resolveSpecialistPin(
   const departmentName = dept?.name ?? pinned.role ?? 'Owner-Direct';
 
   return {
-    agentId: pinned.id,
-    agentName: pinned.name,
-    department: departmentName,
-    score: 1, method: 'owner_pin', confidence: 1, workspaceId: pinned.workspace_id,
-    reason:
-      `Owner-direct specialist pin: owner named "${targetAgent}" → routed straight to ` +
-      `${pinned.name} (${departmentName}), bypassing department classification and pickBestAgent.`,
+    kind: 'pinned',
+    result: {
+      agentId: pinned.id,
+      agentName: pinned.name,
+      department: departmentName,
+      score: 1, method: 'owner_pin', confidence: 1, workspaceId: pinned.workspace_id,
+      reason:
+        `Owner-direct specialist pin: owner named "${targetAgent}" → routed straight to ` +
+        `${pinned.name} (${departmentName}), bypassing department classification and pickBestAgent.`,
+    },
   };
 }
 
@@ -651,10 +701,18 @@ export async function comDispatch(
   // and bypasses pickBestAgent entirely. If the named specialist can't be
   // resolved we fall through to normal routing rather than dropping the task.
   if (task.target_agent) {
-    const pinned = resolveSpecialistPin(agents, String(task.target_agent), departments);
-    if (pinned) {
-      console.log(`[DepartmentRouter] ${pinned.reason}`);
-      return pinned;
+    const pin = resolveSpecialistPin(agents, String(task.target_agent), departments);
+    if (pin?.kind === 'pinned') {
+      console.log(`[DepartmentRouter] ${pin.result.reason}`);
+      return pin.result;
+    }
+    if (pin?.kind === 'ambiguous') {
+      // An owner name matching more than one same-company worker is a HOLD,
+      // never a silent random pick (spec 4.4 "Have Jordan do it."). It
+      // surfaces as `ambiguous` so routeTaskDecision records the specific
+      // hold reason and the card waits for an explicit owner assignment.
+      console.warn(`[DepartmentRouter] ${pin.reason}`);
+      return null;
     }
     return null; // An unresolved owner pin requires an explicit correction.
   }
@@ -846,7 +904,17 @@ export async function routeTaskDecision(task: RoutingTask): Promise<RoutingDecis
   const routing = task.catch_all && !task.target_agent
     ? catchAllAssignment(agents, departments, 'Reassessing queued catch-all executor')
     : await comDispatch(task, agents, departments);
-  if (!routing) return wait('No eligible worker for the requested department or specialist', 'no_capable_worker');
+  if (!routing) {
+    // An owner pin that matches more than one same-company worker is a
+    // HOLD (spec 4.4 "Have Jordan do it.": ambiguity must not select a random
+    // Jordan), not an ordinary "no worker" outcome — the reason must reach the
+    // owner, so it is reported as `ambiguous` rather than `no_capable_worker`.
+    if (task.target_agent) {
+      const pin = resolveSpecialistPin(agents, String(task.target_agent), departments);
+      if (pin?.kind === 'ambiguous') return wait(pin.reason, 'ambiguous');
+    }
+    return wait('No eligible worker for the requested department or specialist', 'no_capable_worker');
+  }
   const agent = agents.find(a => a.id === routing.agentId);
   const workspaceConfig = departments.find(d => d.id === agent?.workspace_id);
   if (!agent || (agent.is_master && (routing.method !== 'escalation' || !workspaceConfig ||

@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
 import { queryOne, run, transaction } from '@/lib/db';
-import { resolveTenantContext, type TenantContext } from '@/lib/auth/tenant-context';
+import { resolveTenantContext, configuredPublicOrigin, type TenantContext } from '@/lib/auth/tenant-context';
 import { createInterviewInvitation } from '@/lib/interview/invitation';
 import { resolveWorkspaceDir } from '@/lib/interview/paths';
 import { readBuildState, readHandoff, readInterviewProgress } from '@/lib/interview/seam';
@@ -40,9 +40,19 @@ function shellDeliveryFence(context: TenantContext, recipientHash: string, force
     return (error as NodeJS.ErrnoException).code === 'ENOENT' ? null : 'delivery_receipt_unverified';
   }
   if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)) return 'delivery_receipt_unverified';
+  // Item (4): the fence resolves the box's own origin through the shared
+  // CC_PUBLIC_URL-first resolver, so it can never disagree with issuance
+  // (invitation.ts) or implicit-self (tenant-context) about which host is
+  // "self". Half of item (3): an UNKNOWN legacy `expiresAt` in a prior
+  // receipt must not block a fresh send — the link's lifetime is completion,
+  // not the wire stamp, so a null/non-finite stamp is tolerated (treated as
+  // unknown, cooldown lifted) while a present finite stamp is still verified.
   let origin: string;
-  try { origin = new URL(process.env.MC_TENANT_PUBLIC_URL || '').origin; }
-  catch { return 'delivery_receipt_unverified'; }
+  try {
+    const configured = configuredPublicOrigin();
+    if (!configured) return 'delivery_receipt_unverified';
+    origin = configured.origin;
+  } catch { return 'delivery_receipt_unverified'; }
   if (receipt.companyId !== context.companyId || receipt.tenantId !== context.tenantId ||
       receipt.installationId !== context.installationId || receipt.origin !== origin ||
       new URL(origin).hostname !== context.host || receipt.recipientHash !== recipientHash) {
@@ -51,13 +61,23 @@ function shellDeliveryFence(context: TenantContext, recipientHash: string, force
   if (receipt.status === 'sending' || receipt.status === 'uncertain') return 'delivery_uncertain';
   if (!['accepted', 'rejected'].includes(String(receipt.status))) return 'delivery_receipt_unverified';
   if (receipt.status === 'accepted') {
+    // Item (3): `invitationExpiresAt` null (or any non-finite stamp) is
+    // "unknown", not forgery — tolerated here, and the cooldown below treats
+    // it as no-cooldown (link valid until complete). Message identity and
+    // epoch shape are still verified.
     if (typeof receipt.messageId !== 'string' || !receipt.messageId.trim() ||
         typeof receipt.epoch !== 'number' || !Number.isFinite(receipt.epoch) ||
-        typeof receipt.invitationExpiresAt !== 'number' || !Number.isFinite(receipt.invitationExpiresAt)) {
+        (receipt.invitationExpiresAt !== null && receipt.invitationExpiresAt !== undefined &&
+         (typeof receipt.invitationExpiresAt !== 'number' || !Number.isFinite(receipt.invitationExpiresAt)))) {
       return 'delivery_receipt_unverified';
     }
-    const expired = receipt.invitationExpiresAt <= Date.now() / 1000;
-    if (!force && !expired && Date.now() / 1000 - receipt.epoch < 1800) return 'cooldown';
+    // Item (3): `invitationExpiresAt` null (or any non-finite stamp) means
+    // "unknown", not "expired" — it lifts the cooldown but never blocks: the
+    // link is valid until the interview is complete, so only a fresh, finite,
+    // unexpired stamp within the cooldown window still cools down.
+    const stamp = receipt.invitationExpiresAt;
+    const fresh = typeof stamp === 'number' && Number.isFinite(stamp) && stamp > Date.now() / 1000;
+    if (!force && fresh && Date.now() / 1000 - receipt.epoch < 1800) return 'cooldown';
   }
   return null;
 }

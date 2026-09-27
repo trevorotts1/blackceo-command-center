@@ -12,7 +12,7 @@
 #      created by this script -- only PIN's presence is guaranteed; Google is
 #      attached when it already exists.
 #   2. Create (or update) a self-hosted Access Application for the subdomain
-#      (336h / 14-day session) whose allowed_idps lists One-Time PIN plus
+#      (720h / 30-day session) whose allowed_idps lists One-Time PIN plus
 #      Google when available -- and adding whichever of One-Time PIN / Google
 #      an already-existing app is missing (GET-merge PUT, Step 2b), so every
 #      client can sign in with an emailed code even if Google refuses them.
@@ -226,7 +226,7 @@ if [ -z "$APP_ID" ]; then
   "name": "${SUBDOMAIN} Command Center",
   "domain": "${SUBDOMAIN}",
   "type": "self_hosted",
-  "session_duration": "336h",
+  "session_duration": "720h",
   "allowed_idps": ${ALLOWED_IDPS_JSON}
 }
 EOF
@@ -409,7 +409,7 @@ Cloudflare Access provisioned for ${SUBDOMAIN}
 
   Application UUID : ${APP_ID}
   Application AUD  : ${APP_AUD}
-  Session length   : 336h (14 days)
+  Session length   : 720h (30 days)
   Login methods    : ${LOGIN_METHODS_SUMMARY}
   Allowed emails   : ${EMAILS[*]}
 

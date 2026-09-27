@@ -55,8 +55,8 @@ import {
 } from '@/lib/interview/seam';
 import { refreshInterviewMirror } from '@/lib/interview/mirror';
 import { answersFilePath, answersEncFilePath } from '@/lib/interview/paths';
-import { readTranscriptText } from '@/lib/interview/seam';
-import { writeEncryptedFile } from '@/lib/interview/crypto';
+import { isEncryptedEnvelope, readEncryptedFile } from '@/lib/interview/crypto';
+import { appendTranscriptTextAtomic, readTranscriptText } from '@/lib/interview/seam';
 import { mirrorCompanyAnswer } from '@/lib/interview/company-mirror';
 import {
   answerRequestSchema,
@@ -123,14 +123,52 @@ function isHttpUrl(value: string): boolean {
  * ENCRYPTED at rest in the `.enc` file. The plaintext `.md` is never the
  * primary write target — it is only a derived export artifact.
  *
- * Read-modify-write cycle:
- *   1. Read existing transcript (readTranscriptText handles .enc/plaintext/merge)
- *   2. Append the new Q/A block
- *   3. Write the full transcript encrypted to the .enc file
- *   4. Remove any plaintext .md (it is now stale)
+ * ILJ-003: the read (with tail-merge), append, and re-encrypt happen inside
+ * one transcript lock hold (appendTranscriptTextAtomic), so parallel writers
+ * serialize and no answer is lost to a read-modify-write race. A
+ * present-but-undecryptable `.enc` store returns decrypt_failed and writes
+ * nothing; the quarantine refusal below keeps the answers_unreadable (500)
+ * response contract unchanged.
  *
  * Returns the resolved encrypted transcript path (for the response / logging).
+ *
+ * Item (1), in-lane half: quarantine a transcript whose encrypted store exists
+ * but no longer decrypts, BEFORE appendAnswerBlock would append to a blank
+ * slate and re-encrypt over it. A decrypt failure with an `.enc` file present
+ * means either the key rotated under the data or the file is corrupt — in both
+ * cases appending a fresh transcript and renaming over the old `.enc` would
+ * destroy answers that are still recoverable (old key, backup, operator
+ * repair). So the route refuses with `answers_unreadable` (500) and renames
+ * the suspect file to `<enc>.quarantine-<epoch>` for forensics, leaving the
+ * plaintext fallback path (no `.enc` at all) untouched. The seam.ts proper
+ * fix (decrypt_failed distinct state) is ILF-005-owned, CROSS-LANE.
  */
+function quarantineUnreadableTranscript(): string | null {
+  try {
+    const encPath = answersEncFilePath();
+    const plainPath = answersFilePath();
+    if (encPath === plainPath) return null;
+    if (!fs.existsSync(encPath)) return null;
+    let envelope: string;
+    try {
+      envelope = fs.readFileSync(encPath, 'utf-8');
+    } catch {
+      return null;
+    }
+    if (!isEncryptedEnvelope(envelope)) return null;
+    if (readEncryptedFile(encPath) !== null) return null;
+    const quarantined = `${encPath}.quarantine-${Date.now()}`;
+    try {
+      fs.renameSync(encPath, quarantined);
+    } catch {
+      return encPath;
+    }
+    return quarantined;
+  } catch {
+    return null;
+  }
+}
+
 function appendAnswerBlock(args: {
   question: string;
   answer: string;
@@ -140,41 +178,46 @@ function appendAnswerBlock(args: {
   const plainPath = answersFilePath();
   fs.mkdirSync(path.dirname(encPath), { recursive: true });
 
-  // 1. Read existing transcript (handles .enc, plaintext, and merge cases).
-  const { text: existing, exists } = readTranscriptText();
-
-  // 2. Build the new content.
-  let content: string;
-  if (!exists) {
-    // Fresh transcript → GENUINE header only. Guard against ever writing the
-    // synthetic header (it would poison the genuineness gate).
-    const header = `${GENUINE_HEADER}\n\nStarted: ${humanNow()}\n\n---\n\n`;
-    if (header.includes(SYNTHETIC_HEADER)) {
-      throw new Error('refusing to write synthetic non-interactive header');
-    }
-    content = header;
-  } else {
-    content = existing;
+  // Item (1): quarantine before read. File exists but decrypt fails = refuse
+  // with 500 in the caller, never append-over-corrupt.
+  const quarantined = quarantineUnreadableTranscript();
+  if (quarantined) {
+    throw new Error(`refusing to append: encrypted transcript unreadable, quarantined to ${quarantined}`);
   }
 
+  // Build the Q/A block byte-shape (mirrors build-workforce.log_answer).
   let block = `**Q:** ${args.question}\n**A:** ${args.answer}\n`;
   if (args.confirmedFromContext && args.confirmedFromContext.trim()) {
     block += `**Provenance:** confirmed-from-context: ${args.confirmedFromContext.trim()}\n`;
   }
   block += `**Logged:** ${humanNow()}\n\n---\n\n`;
-  content += block;
 
-  // 3. Write encrypted.
-  writeEncryptedFile(encPath, content);
-
-  // 4. Remove stale plaintext (it is now superseded by the encrypted store).
-  try {
-    if (fs.existsSync(plainPath)) fs.unlinkSync(plainPath);
-  } catch {
-    // Non-fatal: the plaintext will be cleaned up on the next read.
+  // Fresh transcript → GENUINE header only. Guard against ever writing the
+  // synthetic header (it would poison the genuineness gate). The header vs
+  // append decision happens INSIDE appendTranscriptTextAtomic's lock hold
+  // (freshPrefix callback), so two concurrent first-writers cannot both see
+  // "empty" and double-stamp or interleave the header.
+  const header = `${GENUINE_HEADER}\n\nStarted: ${humanNow()}\n\n---\n\n`;
+  if (header.includes(SYNTHETIC_HEADER)) {
+    throw new Error('refusing to write synthetic non-interactive header');
   }
 
-  return encPath;
+  // Atomic locked write: locked read (with tail-merge) + fresh-prefix-or-append
+  // + re-encrypt inside one transcript lock hold, so parallel writers serialize
+  // and no answer is lost. A present-but-undecryptable store returns
+  // decrypt_failed and writes nothing — surfaced below as the unchanged
+  // answers_unreadable refusal, never an append over a blank slate.
+  const appended = appendTranscriptTextAtomic(block, undefined, { freshPrefix: header });
+  if (appended.decrypt === 'decrypt_failed') {
+    throw new Error(
+      `refusing to append: encrypted transcript unreadable, quarantined to ${appended.path}`,
+    );
+  }
+  if (!appended.exists) {
+    throw new Error('refusing to append: transcript write did not persist');
+  }
+
+  return appended.path;
 }
 
 export async function POST(req: NextRequest) {
@@ -343,12 +386,21 @@ export async function POST(req: NextRequest) {
       confirmedFromContext: body.confirmedFromContext,
     });
   } catch (err) {
+    // Item (1): quarantine refusal surfaces as a distinct code so the client
+    // knows answers are preserved, not lost — retry after the operator repairs
+    // the key/file, do not start over.
+    const quarantined = err instanceof Error && err.message.startsWith('refusing to append: encrypted transcript unreadable');
     return NextResponse.json(
-      {
-        error: 'answers_write_failed',
-        message: 'Your answer could not be saved to the interview transcript. Please try again.',
-        detail: err instanceof Error ? err.message : 'unknown error',
-      },
+      quarantined
+        ? {
+          error: 'answers_unreadable',
+          message: 'Your saved answers are temporarily unreadable, so this answer was not saved on top of them. They are preserved for repair — please retry later, do not start over.',
+        }
+        : {
+          error: 'answers_write_failed',
+          message: 'Your answer could not be saved to the interview transcript. Please try again.',
+          detail: err instanceof Error ? err.message : 'unknown error',
+        },
       { status: 500 },
     );
   }

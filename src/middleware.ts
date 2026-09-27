@@ -20,6 +20,7 @@ import {
   CSRF_COOKIE_ATTRIBUTES,
   signCsrfToken,
   verifyCsrfToken,
+  isExpiredAuthenticCsrfToken,
   isReadOnlyMethod,
 } from '@/lib/csrf-protection';
 
@@ -191,6 +192,40 @@ function isWebhookSecretRoute(pathname: string): boolean {
     WEBHOOK_SECRET_ROUTES.some((r) => matchesRoute(pathname, r)) ||
     WEBHOOK_SECRET_DYNAMIC_ROUTES.some((r) => r.test(pathname))
   );
+}
+
+/**
+ * Item (7): 403 answer-safety. A tenant refusal on a page NAVIGATION (a real
+ * browser loading a document — its Accept always includes text/html) renders
+ * a friendly sign-in page the client can act on — re-open the link, no fresh
+ * link needed — instead of a bare JSON blob. Everything else (anything under
+ * /api/, fetches, tests, curl, requests with no Accept header) keeps the
+ * machine-readable `{"error": ...}` JSON so clients and the InterviewClient
+ * exchange logic never have to parse HTML. Same status, same error code,
+ * different envelope; the refusal itself is never weakened (still 403, still
+ * fail-closed). Backward compatible by construction: only a client that
+ * explicitly asks for HTML gets HTML.
+ */
+function tenantRefusalResponse(request: NextRequest, body: { error: string; message: string }): NextResponse {
+  const headers = { 'cache-control': 'private, no-store' };
+  if (!isDocumentNavigation(request)) return NextResponse.json(body, { status: 403, headers });
+  const safe = body.message.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  return new NextResponse(
+    `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">` +
+    `<title>Sign in required</title></head><body style="font-family:system-ui,sans-serif;max-width:40rem;margin:4rem auto;padding:0 1rem">` +
+    `<h1>Sign in required</h1><p>${safe}</p>` +
+    `<p>Re-open your private interview link to sign in again and continue where you left off — ` +
+    `the same link works until your interview is complete, on any device. ` +
+    `If that link no longer opens, ask your operator for a fresh one.</p></body></html>`,
+    { status: 403, headers: { ...headers, 'content-type': 'text/html; charset=utf-8' } },
+  );
+}
+
+/** True only for a real document navigation: non-API path + client asks for HTML. */
+function isDocumentNavigation(request: NextRequest): boolean {
+  if (request.nextUrl.pathname.startsWith('/api/')) return false;
+  const accept = request.headers.get('accept') || '';
+  return accept.includes('text/html');
 }
 
 /**
@@ -368,6 +403,34 @@ function unauthorized(
 }
 
 /**
+ * CSF-002: re-mint CSRF ONLY for authentic-but-expired tokens.
+ *
+ * WHY: re-minting requires presenting a genuinely signed token that lapsed, so
+ * an attacker gains nothing they did not already get from an unauthenticated
+ * page-load mint. Re-minting for forged/absent tokens would hand a free token
+ * to any direct-to-origin caller. FORGED, ABSENT, or WRONG-ROLE tokens return
+ * the plain 401 with NO cookie — narrow mint surface.
+ */
+async function unauthorizedWithCsrfSelfHeal(
+  request: NextRequest,
+  csrfToken: string | undefined,
+): Promise<NextResponse> {
+  const rejection = unauthorized(request, 'Unauthorized', 'missing-csrf-token');
+  if (await isExpiredAuthenticCsrfToken(csrfToken)) {
+    try {
+      const { value, maxAge } = await signCsrfToken();
+      rejection.cookies.set(CSRF_COOKIE_NAME, value, {
+        ...CSRF_COOKIE_ATTRIBUTES,
+        maxAge,
+      });
+    } catch {
+      // Dev-secret hard-lock: keep the plain 401 (fail-safe).
+    }
+  }
+  return rejection;
+}
+
+/**
  * Constant-time string comparison (DATA-11).
  *
  * `===` on a secret short-circuits on the first differing byte, leaking
@@ -454,7 +517,7 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
   // This permits first-party enrollment even when Access enforcement is enabled.
   if (pathname === '/interview' && (request.method === 'GET' || request.method === 'HEAD')) {
     try { tenantRegistration(requestHost(request)); }
-    catch { return NextResponse.json({error:'unregistered_hostname'},{status:403}); }
+    catch { return tenantRefusalResponse(request, { error: 'unregistered_hostname', message: 'This interview link does not match a registered host. Re-open your private interview link to sign in.' }); }
     const response=NextResponse.next();
     await setCsrfCookieIfMissing(response,request);
     return response;
@@ -511,7 +574,7 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
     try { apiTenant = await resolveTenantContext(request); } catch { /* legacy signed producer gates below still apply */ }
     if (apiTenant?.kind === 'client' && !pathname.startsWith('/api/interview/') && !pathname.startsWith('/api/auth/') && !pathname.startsWith('/api/tenant-board/')) {
       if (!isReadOnlyMethod(request.method) && apiTenant.subject !== 'operator:api' && !await verifyCsrfToken(request.cookies.get(CSRF_COOKIE_NAME)?.value)) {
-        return unauthorized(request, 'Unauthorized', 'missing-csrf-token');
+        return unauthorizedWithCsrfSelfHeal(request, request.cookies.get(CSRF_COOKIE_NAME)?.value);
       }
       const remote = request.nextUrl.clone();
       remote.pathname = '/api/tenant-board/' + pathname.slice('/api/'.length);
@@ -590,11 +653,7 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
         const csrfToken = request.cookies.get(CSRF_COOKIE_NAME)?.value;
         const csrfValid = await verifyCsrfToken(csrfToken);
         if (!csrfValid) {
-          return unauthorized(
-            request,
-            'Unauthorized',
-            'missing-csrf-token',
-          );
+          return unauthorizedWithCsrfSelfHeal(request, csrfToken);
         }
       }
       const passthrough = authenticatedNext();
@@ -603,6 +662,12 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
       // Cf-Access-Authenticated-User-Email header, which is attacker-controlled
       // when the edge assertion is absent or unverified.
       if (apiTenant?.email) passthrough.headers.set('x-operator-email', apiTenant.email);
+      // CSF-002 EDIT A: mint CSRF on same-origin API passthrough. Token minted
+      // only on page responses, so sitting longer than CSRF_COOKIE_TTL_SECONDS
+      // (3600s) keeps sending stale token 401s on next answer.
+      // setCsrfCookieIfMissing no-ops when presented token verifies, so this
+      // costs one HMAC verify per call.
+      await setCsrfCookieIfMissing(passthrough, request);
       return passthrough;
     }
 
@@ -697,7 +762,7 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
     let scope='unverified';
     let gateEmail: string | null = null;
     try { const tenant=await resolveTenantContext(request); scope=`${tenant.tenantId}:${tenant.installationId}:${tenant.host}`; gateEmail=tenant.email ?? null; }
-    catch { return NextResponse.json({ error: 'tenant_access_required', message: 'Sign in with an authorized account. If access still fails, contact your operator. This is an access issue, not an incomplete interview.' }, { status: 403, headers: { 'cache-control': 'private, no-store' } }); }
+    catch { return tenantRefusalResponse(request, { error: 'tenant_access_required', message: 'Sign in with an authorized account. If access still fails, contact your operator. This is an access issue, not an incomplete interview.' }); }
     const verdict = await verifyInterviewToken(token,scope);
     if (verdict.complete === true && verdict.valid && await checkInterviewCompleteViaFallback(request.headers.get('host'))) {
       // Primary cookie is valid-complete — admit immediately.

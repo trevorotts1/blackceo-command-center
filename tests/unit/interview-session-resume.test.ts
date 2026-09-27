@@ -52,7 +52,10 @@ test('legacy 24h receipt field and 30-day cookie/JWT expiry remain separate and 
   const start = now(); const { response, cookie } = await enroll();
   assert.match(response.headers.get('set-cookie')!, /Max-Age=2592000/i);
   assert.match(response.headers.get('set-cookie')!, /HttpOnly/i);
-  assert.match(response.headers.get('set-cookie')!, /SameSite=strict/i);
+  // SameSite=Lax, pinned: the link arrives as a cross-site top-level
+  // navigation (tapped in an external app), which Strict would strip the
+  // cookie from. HttpOnly + Secure stay on always.
+  assert.match(response.headers.get('set-cookie')!, /SameSite=lax/i);
   const grant = await verifyTenantGrant(cookie.split('=')[1], host, 'session');
   assert.ok(grant); assert.equal(grant.companyId, registration.companyId);
   assert.ok(grant.exp >= start + INTERVIEW_SESSION_TTL_SECONDS && grant.exp <= now() + INTERVIEW_SESSION_TTL_SECONDS);
@@ -61,10 +64,26 @@ test('legacy 24h receipt field and 30-day cookie/JWT expiry remain separate and 
 
 test('a redeemed link resumes on its own browser and re-opens on a fresh one', async () => {
   const { token, cookie } = await enroll();
-  // Same browser: the live cookie resumes, and resuming never extends it.
+  // Same browser: the live cookie resumes, and resuming slides the window
+  // forward with a fresh cookie instead of silently keeping the old expiry.
+  const before = now();
   const resumed = await POST(request(token, cookie));
-  assert.equal(resumed.status, 200); assert.equal((await resumed.json()).resumed, true);
-  assert.equal(resumed.headers.get('set-cookie'), null, 'resume must not silently extend lifetime');
+  assert.equal(resumed.status, 200);
+  const resumedBody = await resumed.json();
+  assert.equal(resumedBody.resumed, true);
+  const renewed = resumed.headers.get('set-cookie');
+  assert.ok(renewed, 'resume must renew the session cookie with a fresh expiry');
+  assert.match(renewed, /Max-Age=2592000/i);
+  assert.match(renewed, /HttpOnly/i);
+  assert.match(renewed, /SameSite=lax/i);
+  const renewedGrant = await verifyTenantGrant(renewed.split(';')[0].split('=')[1], host, 'session');
+  assert.ok(renewedGrant);
+  assert.equal(renewedGrant.subject, 'owner:fixture', 'renewal must keep the live-session owner, never the ticket');
+  assert.equal(renewedGrant.companyId, registration.companyId);
+  assert.ok(renewedGrant.exp >= before + INTERVIEW_SESSION_TTL_SECONDS && renewedGrant.exp <= now() + INTERVIEW_SESSION_TTL_SECONDS);
+  const oldPayload = JSON.parse(Buffer.from(cookie.split('=')[1].split('.')[0], 'base64url').toString());
+  assert.notEqual(renewedGrant.nonce, oldPayload.nonce, 'each renewal gets its own nonce');
+  assert.equal(resumedBody.expiresAt, renewedGrant.exp, 'body expiry matches the renewed grant');
   assert.equal(resumed.headers.get('cache-control'), 'private, no-store');
   // A second browser with no cookie is the case that used to be locked out.
   const second = await POST(request(token));

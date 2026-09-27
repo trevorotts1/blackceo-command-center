@@ -22,11 +22,19 @@ export function enrollmentWindowClosed(companyId?: string): boolean {
   return interviewFinished(readBuildState(), companyId);
 }
 
+/** A recorded owner is any present, non-blank companyId. Absent/blank means
+ *  "no company recorded" and is still honoured; anything recorded that is not
+ *  this grant's company is foreign and says nothing about it. Non-string
+ *  values count as recorded (fail-open: a value we cannot match is foreign). */
+function isRecorded(owner: unknown): boolean {
+  return typeof owner === 'string' ? owner.trim() !== '' : owner !== undefined && owner !== null;
+}
+
 /** Pure half of enrollmentWindowClosed, for callers that already hold state. */
 export function interviewFinished(state: BuildState | null, companyId?: string): boolean {
   if (!state) return false;
   const owner = state.companyId;
-  if (companyId && typeof owner === 'string' && owner && owner !== companyId) return false;
+  if (companyId && isRecorded(owner) && owner !== companyId) return false;
   if (state.interviewComplete === true) return true;
   return typeof state.buildCompletedAt === 'string' && state.buildCompletedAt.trim() !== '';
 }

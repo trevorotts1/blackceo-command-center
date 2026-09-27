@@ -65,6 +65,20 @@ Therefore the direct-to-origin residual is closed **only by Part B** (`REQUIRE_C
 
 **Secret hygiene (fix2).** The CSRF cookie is HMAC-signed with a key that resolves from a DEDICATED var first — `MC_CSRF_COOKIE_SECRET` — then falls back to `MC_INTERVIEW_COOKIE_SECRET` → `MC_API_TOKEN` → `WEBHOOK_SECRET` → a public dev fallback (which hard-locks sign/verify in production). The dedicated var decouples CSRF signing from the API token lifecycle: `MC_API_TOKEN` is the credential an external caller presents, so sharing it as an HMAC key would widen the blast radius of a token leak into cookie forgery. Operators should set `MC_CSRF_COOKIE_SECRET` explicitly (see `.env.example`). This does not close the harvest-and-replay residual above — only `REQUIRE_CF_ACCESS=true` does — but it keeps the CSRF signature from being keyed on a credential that crosses the trust boundary.
 
+### CSF-006 status (long-sitting self-healing re-mint)
+
+Problem fixed by this wave: the Cross-Site Request Forgery cookie lives 1 hour (`src/lib/csrf-protection.ts:53`, `CSRF_COOKIE_TTL_SECONDS = 60 * 60`) and this tree re-mints it only on non-application-programming-interface page responses (`src/middleware.ts:866-887` `setCsrfCookieIfMissing`, called at `src/middleware.ts:493`, `src/middleware.ts:820`, and `src/middleware.ts:832`). A client answering questions on one interview page for longer than an hour therefore presents an expired token on the next save: the mutating same-origin check rejects it (`src/middleware.ts:623-632`, `missing-csrf-token`), and `submitInterviewAnswer` in `src/components/interview/QuestionCard.tsx:86-129` does not retry — `:109` maps any 401/403 to the sign-in help string, so a valid long sitting reads as a sign-in failure and the typed answer is never retried.
+
+Narrowed mint surface after this wave (specified end state; the re-mint behavior and its tests are owned by CSF-004, cited here rather than re-proved):
+
+1. Non-application-programming-interface page responses — pre-existing. `setCsrfCookieIfMissing` mints when no valid token is present, unchanged.
+2. Same-origin application-programming-interface responses — tenant-verified, new. A same-origin interview application-programming-interface response whose tenant verifies may carry a fresh `Set-Cookie: mc_csrf_token`, so an active sitting refreshes its token without a page load.
+3. Authentic-but-expired — new, narrow. Only a presented token that is validly signed with role `csrf` but past `exp` qualifies for a one-time re-mint with a single retry of the save; the typed answer is preserved across the retry.
+
+Why (3) is not harvest-and-replay: re-mint applies to validly signed tokens only. A forged, absent, or wrong-role token gets no re-mint and the request still fails closed; that invariant is pinned by `tests/unit/csf-expired-mid-sitting.test.ts` scenarios 2 and 3 (forged/absent/wrong-role gets no re-mint). The signature still proves only that the server minted the token, so the direct-to-origin residual named in the MR-23 section above is unchanged by this work and remains closed only by Part B (`REQUIRE_CF_ACCESS=true`).
+
+Tree note (this lane, main `5809dd115`): in this checkout `src/app/api/interview/answer/route.ts` sets no cookie and imports neither `signCsrfToken` nor `verifyCsrfToken` (the middleware owns the check), `src/components/interview/QuestionCard.tsx` still has no retry, and `tests/unit/csf-expired-mid-sitting.test.ts` is absent — the (2)/(3) behavior above is the wave-specified end state per the cited test path, not a re-verified landing in this tree.
+
 ### Interface call census
 
 The interface-kept routes (61 at authoring, 63 as of 2026-07-29) were determined by intersecting (a) all 106 `POST`/`PATCH`/`PUT`/`DELETE`-exporting routes (104 at authoring; 106 as of 2026-07-29) under `src/app/api/` with (b) every mutating `fetch()` call in `src/` outside `src/app/api/`. The anti-rot test at `src/lib/__tests__/passthrough-write-scope.test.ts` asserts this intersection — a new route added without classification, or a new interface call site to a listed route, fails the test.

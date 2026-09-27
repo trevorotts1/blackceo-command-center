@@ -9,7 +9,7 @@ The recommended path is the automated script. The manual dashboard path is docum
   - Edge-enforced login on every request. Cloudflare validates the user's email through a one-time PIN flow before forwarding the request to the origin.
   - A signed `Cf-Access-Jwt-Assertion` header injected on every authorized request, which the app verifies in middleware.
   - No password to manage. The client receives a 6-digit code by email at sign-in.
-  - Session length is configurable per Access app. Our default is 336 hours (14 days).
+  - Session length is configurable per Access app. Our default is 720 hours (30 days).
 
 The Cloudflare Access JWT is independent of any in-app session. `REQUIRE_CF_ACCESS` is OPT-IN and defaults OFF on every box (v4.72.0). Set `REQUIRE_CF_ACCESS=true` ONLY on a box that is genuinely fronted by Cloudflare Access — it adds a page-level edge gate (defense-in-depth) on top of the always-on MC_API_TOKEN bearer / WEBHOOK_SECRET HMAC gates. Do NOT set it true on a plain Cloudflare Tunnel box with no Access app: with no edge injecting `Cf-Access-Jwt-Assertion`, enforcement 401s every route and blanks the board. The board's own data always renders via the same-origin passthrough regardless of this flag.
 
@@ -53,7 +53,7 @@ The setup script is at [`../scripts/cloudflare/setup-access-app.sh`](../scripts/
      - Detects whether a **Google** identity provider is already configured at the account level (see "Google login" below). It never creates one.
      - An Access Application that protects `acme.zerohumanworkforce.com/*`, with `allowed_idps` set to One-Time PIN plus Google when Google is available.
      - A policy named `Allowed users` that includes only the supplied email(s). It does not restrict which of the app's allowed identity providers the user authenticates through -- that is governed by `allowed_idps` above, not by the policy.
-     - Session duration is set to `336h` (14 days). This means the client logs in once every two weeks at most.
+     - Session duration is set to `720h` (30 days). This means the client logs in once a month at most.
   5. The script prints the new App UUID, AUD, and which login methods were attached. Save the UUID into the client's row in the operator's client registry. You will need it to add more emails or revoke access later.
 
 If any step returns non-200 from the Cloudflare API, the script aborts before creating downstream resources. Re-run after fixing the failing call. The script is idempotent on the IdP, the App, its `allowed_idps`, and the Policy -- re-running it against the same subdomain never creates a duplicate resource, and re-running it against an already-existing app adds whichever of One-Time PIN / Google that app is missing. That add is a GET-merge: the script reads the app, extends only `allowed_idps`, and PUTs the same record back, so hand-set dashboard options are kept. It also turns `auto_redirect_to_identity` off when the app ends up with more than one login method (Cloudflare rejects auto-redirect with more than one, error 12130). An app with an empty `allowed_idps` already allows every login method and is left untouched.
@@ -83,7 +83,7 @@ If you cannot run the script (for example you are on a workstation without bash,
   2. Go to Zero Trust > Access > Applications. Click Add an application. Choose Self-hosted.
   3. Fill in:
      - Application name: `BlackCEO - <client-slug>` (for example `BlackCEO - Acme`)
-     - Session duration: 14 hours by default in the UI. Click the field and switch to a custom value of `336h`. The free Zero Trust plan caps at 720h.
+     - Session duration: 14 hours by default in the UI. Click the field and switch to a custom value of `720h`. The free Zero Trust plan caps at 720h.
      - Application domain: subdomain `acme`, domain `zerohumanworkforce.com`, path empty so it covers `/*`.
   4. Click Next. On the Identity providers step, leave only One-time PIN checked.
   5. Click Next. On the Policies step, click Add a policy.
@@ -151,7 +151,7 @@ The Cloudflare Tunnel does NOT need to be touched to revoke. The Tunnel is the d
 
 ### Session expires immediately after sign-in
 
-  - The Access app's session duration is set to `0h` (sometimes happens after a manual edit). Set it to `336h`.
+  - The Access app's session duration is set to `0h` (sometimes happens after a manual edit). Set it to `720h`.
   - The user is using a browser that blocks third-party cookies and the Cloudflare login redirect cannot complete. Tell them to allow `*.cloudflareaccess.com` cookies or to use a different browser.
 
 ### PIN email never arrives

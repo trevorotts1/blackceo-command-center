@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { resolveTenantContext } from '@/lib/auth/tenant-context';
+import { resolveTenantContext, tenantSecretIsFallback } from '@/lib/auth/tenant-context';
 import { queryOne } from '@/lib/db';
 import { personaCompanyContext } from '@/lib/persona-company';
 import { readBuildState } from '@/lib/interview/seam';
@@ -77,10 +77,39 @@ export async function GET(req:NextRequest) {
     } catch {prerequisites.push('interviewer_runtime_configuration');}
     try {const gateway=new URL(process.env.OPENCLAW_GATEWAY_URL||'ws://127.0.0.1:18789');if(!['ws:','wss:'].includes(gateway.protocol))throw new Error();} catch {prerequisites.push('gateway_configuration');}
     missing.push(...prerequisites);
+    // Item (2): the MC_API_TOKEN fallback keeps working boxes working, but a
+    // box that NEEDS it must say so (see flag below). The key name (not the
+    // value) lands in `missing` only when NO secret of any kind is configured.
     const enrollment=!!(process.env.MC_TENANT_SESSION_SECRET||process.env.MC_INTERVIEW_COOKIE_SECRET||process.env.MC_API_TOKEN);
     if(!enrollment) missing.push('enrollment_secret');
+    // Item (2): secret-fallback readiness. The fallback still SIGNS (working
+    // boxes keep working), so this is additive signal, never a new refusal:
+    // when enrollment passes on the MC_API_TOKEN fallback, `missing` carries
+    // the key name `enrollment_secret_fallback` (no value, never a secret) so
+    // the gap is visible until the operator provisions a dedicated secret.
+    // Item (2) + item (9): readiness SIGNAL, never a new wall. The fallback
+    // still SIGNS, issuance still gates, and `missing`/`ready`/status keep
+    // their exact prior contract (working boxes keep working, existing tests
+    // keep passing), so these keys go in an additive `warnings` array the
+    // operator can see before a link fails at redemption:
+    //   `enrollment_secret_fallback` — signing runs on the MC_API_TOKEN
+    //     fallback (no dedicated MC_TENANT_SESSION_SECRET /
+    //     MC_INTERVIEW_COOKIE_SECRET). Key name only, never a secret value.
+    //   `missing_registry_identity` — the host's registry entry lacks the
+    //     Access triple (issuer + audience + subjects), so the box cannot
+    //     verify the owner who opens a link. Same refusal `invitation.ts`
+    //     already returns as `access_identity_unregistered`; this surfaces it
+    //     at readiness instead of after the owner waits for a link.
+    const warnings:string[]=[];
+    if(enrollment && tenantSecretIsFallback()) warnings.push('enrollment_secret_fallback');
+    if(context.kind==='self') {
+      try {
+        const reg=(await import('@/lib/auth/tenant-context')).tenantRegistration(context.host);
+        if(!reg.issuer || !reg.audience || !reg.subjects?.length) warnings.push('missing_registry_identity');
+      } catch { warnings.push('missing_registry_identity'); }
+    }
     const foundation=verifyStandardFoundation(state);
     if(state?.buildType==='standard-first' && !foundation.ready) missing.push('standard_foundation_unverified');
-    return NextResponse.json({protocol,stage:'interview',ready:missing.length===0,tenantId:context.tenantId,companyId:context.companyId,installationId:context.installationId,host:context.host,interviewComplete:flagged&&identity!=='mismatched'?state!.interviewComplete:null,capabilities:{state:stateReady,localInterviewPrerequisites:prerequisites.length===0,enrollment,providerLiveness:'unverified'},foundation,missing},{status:missing.length?503:200,headers});
+    return NextResponse.json({protocol,stage:'interview',ready:missing.length===0,tenantId:context.tenantId,companyId:context.companyId,installationId:context.installationId,host:context.host,interviewComplete:flagged&&identity!=='mismatched'?state!.interviewComplete:null,capabilities:{state:stateReady,localInterviewPrerequisites:prerequisites.length===0,enrollment,providerLiveness:'unverified'},foundation,missing,warnings},{status:missing.length?503:200,headers});
   } catch {return NextResponse.json({ready:false,protocol,error:'tenant_registration_or_identity_unverified'},{status:403,headers});}
 }

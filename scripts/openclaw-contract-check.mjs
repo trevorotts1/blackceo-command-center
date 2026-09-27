@@ -392,13 +392,23 @@ async function main() {
         proved = file;
         break;
       }
-      // The entries roster must still be read as a keyed record. Both the
-      // readable and the minified copy spell this the same way.
-      const consumer = grepDist(dist, 'Object\\.entries\\(\\s*roster\\.value\\s*\\)');
+      // The entries roster must still be read as a keyed record. 2026.9.4
+      // spells it `Object.entries(roster.value)`; 2026.9.6 refactored the
+      // reader into collectAgentEntries() with `for (const id in roster.value)`
+      // plus an `Object.hasOwn(roster.value, id)` guard. Either spelling proves
+      // the keyed read — a symbol renamed to a third spelling fails loudly here,
+      // never silently.
+      const consumerDot = grepDist(dist, 'Object\\.entries\\(\\s*roster\\.value\\s*\\)');
+      const consumerForIn = grepDist(dist, 'for\\s*\\(\\s*(const|let|var)\\s+\\w+\\s+in\\s+roster\\.value\\s*\\)');
+      const consumerSearchOk = consumerDot.ok && consumerForIn.ok;
+      const consumerFiles = [...(consumerDot.files || []), ...(consumerForIn.files || [])];
+      const consumerSpelling = (consumerDot.files || []).length
+        ? '`Object.entries(roster.value)`'
+        : '`for (const id in roster.value)` + `Object.hasOwn(roster.value, id)`';
       if (!proved) fail(name, `no copy of readAgentRosterProperty checks "entries" before "list" (${seen.join('; ') || 'no readable body'})`);
-      else if (!consumer.ok) undetermined(name, `precedence proved in ${path.basename(proved)}, but the Object.entries consumer search failed: ${consumer.error}`);
-      else if (!consumer.files.length) fail(name, 'no `Object.entries(roster.value)` consumer found — the entries roster may no longer be read as a keyed record');
-      else pass(name, `\`entries\` is checked before \`list\` (proved in ${path.basename(proved)} of ${found.bodies.length} copies); read with Object.entries(roster.value)`);
+      else if (!consumerSearchOk) undetermined(name, `precedence proved in ${path.basename(proved)}, but the keyed-read consumer search failed: ${[consumerDot.error, consumerForIn.error].filter(Boolean).join('; ')}`);
+      else if (!consumerFiles.length) fail(name, 'no keyed-record read of the entries roster found — searched `Object.entries(roster.value)` (2026.9.4 spelling) and `for (const id in roster.value)` (2026.9.6 collectAgentEntries spelling); the entries roster may no longer be read as a keyed record');
+      else pass(name, `\`entries\` is checked before \`list\` (proved in ${path.basename(proved)} of ${found.bodies.length} copies); read as a keyed record via ${consumerSpelling}`);
     }
   }
 

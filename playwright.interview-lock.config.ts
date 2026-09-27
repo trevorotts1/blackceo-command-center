@@ -1,4 +1,4 @@
-import { defineConfig } from 'playwright/test';
+import { defineConfig, devices } from 'playwright/test';
 import { BASE_URL, PRODUCTION_MODE, serverEnv } from './tests/integration/interview-lock.fixture';
 
 /**
@@ -47,6 +47,29 @@ export default defineConfig({
   fullyParallel: false,
   reporter: [['list']],
   globalSetup: './tests/integration/interview-lock.global-setup.ts',
+  // Mobile coverage (ILG-003): the interview shell is the surface every client
+  // AI Workforce invitation opens on — phones first. The interview-lock-e2e CI
+  // job selects ONE named project per matrix leg (desktop chromium, mobile
+  // WebKit, Android chromium), so all three run the SAME spec files and a
+  // WebKit-only or small-viewport-only lock regression (302 target, cookie
+  // mint, /interview render) fails here instead of on a client's phone.
+  // Default (no --project flag) runs chromium-desktop only, so local runs
+  // without `npx playwright install webkit` keep working.
+  projects: [
+    { name: 'chromium-desktop', use: { browserName: 'chromium' } },
+    {
+      name: 'webkit-iphone',
+      // iPhone 15: real Mobile Safari agent, touch, 390x844 viewport.
+      // Needs `npx playwright install webkit`.
+      use: { ...devices['iPhone 15'] },
+    },
+    {
+      name: 'chromium-pixel7',
+      // Pixel 7: real Android Chrome agent, touch, 412x915 viewport.
+      // Chromium engine — no extra browser install beyond chromium.
+      use: { ...devices['Pixel 7'] },
+    },
+  ],
   use: {
     baseURL: BASE_URL,
     headless: true,

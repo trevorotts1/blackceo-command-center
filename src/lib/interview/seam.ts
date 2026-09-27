@@ -29,6 +29,7 @@ import { verifyStandardFoundation } from '@/lib/interview/foundation-verificatio
 
 import { execFile } from 'child_process';
 import fs from 'fs';
+import path from 'path';
 import { randomUUID } from 'crypto';
 import { promisify } from 'util';
 import {
@@ -43,7 +44,7 @@ import {
   updateInterviewStateScript,
   verticalDerivationGuardScript,
 } from './paths';
-import { readEncryptedFile, writeEncryptedFile, migratePlaintextFile } from './crypto';
+import { decryptAtRest, isEncryptedEnvelope, writeEncryptedFile, migratePlaintextFile } from './crypto';
 
 const execFileAsync = promisify(execFile);
 
@@ -421,6 +422,187 @@ export function readHandoff(): HandoffInfo {
 }
 
 /**
+ * ILJ-003: explicit decrypt outcome for the encrypted transcript store.
+ * `readEncryptedFile` collapses "missing" and "undecryptable" into one null;
+ * that silence let a key rotation / corrupt file read as an empty slate.
+ * `ok` = content returned (encrypted or plaintext path); `absent` = no store
+ * at all; `decrypt_failed` = an `.enc` store exists but does not decrypt.
+ */
+export type TranscriptDecryptState = 'ok' | 'absent' | 'decrypt_failed';
+
+export interface TranscriptReadResult {
+  text: string;
+  path: string;
+  exists: boolean;
+  decrypt: TranscriptDecryptState;
+}
+
+/** Sibling lock dir for one transcript (`<enc>.lockdir`). */
+export function transcriptLockPath(encPath: string): string {
+  return `${encPath}.lockdir`;
+}
+
+const TRANSCRIPT_LOCK_STALE_MS = 30_000;
+const TRANSCRIPT_LOCK_WAIT_MS = 10_000;
+
+/**
+ * ILJ-003: run `fn` while holding an exclusive lock for the transcript at
+ * `encPath`. Lock = atomic mkdir on a sibling `<enc>.lockdir`; a lock older
+ * than 30s is treated as a crashed holder and removed. Contended but live
+ * holders wait up to 10s, then `fn` throws (fail-closed, never two writers).
+ * Lock release never throws. ponytail: single-box POSIX locks; upgrade to a
+ * DB-serialized write if transcripts ever move off local disk.
+ */
+export function withTranscriptLock<T>(encPath: string, fn: () => T): T {
+  const lock = transcriptLockPath(encPath);
+  // ILJ-011: the lockdir's parent may not exist pre-first-answer (no
+  // company-discovery/ dir). Without this, mkdir fails ENOENT — not EEXIST —
+  // and the catch below mistakes it for contention, wedging the event loop on
+  // Atomics.wait for the full 10s deadline on every read-only path.
+  try {
+    fs.mkdirSync(path.dirname(encPath), { recursive: true });
+  } catch {
+    // Best-effort: if the parent truly cannot be created, the lock mkdir
+    // below fails and the ENOENT guard breaks out immediately.
+  }
+  const deadline = Date.now() + TRANSCRIPT_LOCK_WAIT_MS;
+  let held = false;
+  for (;;) {
+    try {
+      fs.mkdirSync(lock);
+      held = true;
+      break;
+    } catch (err) {
+      // ILJ-011: ENOENT = missing parent, never contention. Break out
+      // immediately instead of spinning to the deadline.
+      if ((err as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') {
+        throw new Error(`transcript lock parent missing, refusing to spin: ${encPath}`);
+      }
+      let stale = false;
+      try {
+        const age = Date.now() - fs.statSync(lock).mtimeMs;
+        stale = age > TRANSCRIPT_LOCK_STALE_MS;
+        if (stale) fs.rmSync(lock, { recursive: true, force: true });
+      } catch {
+        // Lock vanished mid-check; retry immediately.
+      }
+      if (!stale && Date.now() > deadline) {
+        throw new Error(`transcript lock contended, refusing concurrent write: ${encPath}`);
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    if (held) {
+      try {
+        fs.rmdirSync(lock);
+      } catch {
+        // Never throw from lock release.
+      }
+    }
+  }
+}
+
+/**
+ * ILJ-003: lock-held transcript read. Same four-way resolution as
+ * readTranscriptText, but returns the explicit decrypt state and performs the
+ * tail-merge/migrate writes while the lock is held, so two concurrent readers
+ * cannot both decrypt-merge-write and lose one tail.
+ */
+function readTranscriptLocked(encPath: string, plainPath: string): TranscriptReadResult {
+  let envelope: string | null = null;
+  try {
+    envelope = fs.readFileSync(encPath, 'utf-8');
+  } catch {
+    envelope = null;
+  }
+
+  if (envelope != null && isEncryptedEnvelope(envelope)) {
+    const decrypted = decryptAtRest(envelope);
+    // ILJ-003: explicit decrypt_failed instead of silent null.
+    if (decrypted == null) {
+      return { text: '', path: encPath, exists: false, decrypt: 'decrypt_failed' };
+    }
+    try {
+      if (fs.existsSync(plainPath)) {
+        const tail = fs.readFileSync(plainPath, 'utf-8');
+        if (tail.trim()) {
+          const merged = decrypted + '\n' + tail;
+          try {
+            writeEncryptedFile(encPath, merged);
+            fs.unlinkSync(plainPath);
+          } catch {
+            // Non-fatal: the merge is best-effort. The plaintext stays for
+            // the next read to retry.
+          }
+          return { text: merged, path: encPath, exists: true, decrypt: 'ok' };
+        }
+      }
+    } catch {
+      // fall through to returning just the decrypted content
+    }
+    return { text: decrypted, path: encPath, exists: true, decrypt: 'ok' };
+  }
+
+  // Plaintext exists → migrate to encrypted, return the text.
+  try {
+    if (fs.existsSync(plainPath)) {
+      const text = fs.readFileSync(plainPath, 'utf-8');
+      migratePlaintextFile(plainPath, encPath); // best-effort encrypt-in-place
+      return { text, path: plainPath, exists: true, decrypt: 'ok' };
+    }
+  } catch {
+    // fall through to "nothing"
+  }
+
+  return { text: '', path: plainPath, exists: false, decrypt: 'absent' };
+}
+
+/**
+ * ILJ-003: read-only fallback when the lock is contended. Same outcomes as
+ * readTranscriptLocked but performs NO writes (no merge, no migrate), so a
+ * contended read still reports decrypt_failed/ok/absent without blocking.
+ * Never throws.
+ */
+function readTranscriptBestEffort(encPath: string, plainPath: string): TranscriptReadResult {
+  try {
+    let envelope: string | null = null;
+    try {
+      envelope = fs.readFileSync(encPath, 'utf-8');
+    } catch {
+      envelope = null;
+    }
+    if (envelope != null && isEncryptedEnvelope(envelope)) {
+      const decrypted = decryptAtRest(envelope);
+      if (decrypted == null) {
+        return { text: '', path: encPath, exists: false, decrypt: 'decrypt_failed' };
+      }
+      try {
+        if (fs.existsSync(plainPath)) {
+          const tail = fs.readFileSync(plainPath, 'utf-8');
+          if (tail.trim()) return { text: decrypted + '\n' + tail, path: encPath, exists: true, decrypt: 'ok' };
+        }
+      } catch {
+        // fall through to returning just the decrypted content
+      }
+      return { text: decrypted, path: encPath, exists: true, decrypt: 'ok' };
+    }
+    try {
+      if (fs.existsSync(plainPath)) {
+        return { text: fs.readFileSync(plainPath, 'utf-8'), path: plainPath, exists: true, decrypt: 'ok' };
+      }
+    } catch {
+      // fall through to "nothing"
+    }
+  } catch {
+    // fall through to "nothing"
+  }
+  return { text: '', path: plainPath, exists: false, decrypt: 'absent' };
+}
+
+/**
  * U048: read the interview transcript text, preferring the encrypted store.
  * Resolution order:
  *   1. `.enc` file exists AND plaintext `.md` also exists → the shell script
@@ -436,52 +618,57 @@ export function readHandoff(): HandoffInfo {
  */
 export function readTranscriptText(
   state?: BuildState | null,
-): { text: string; path: string; exists: boolean } {
+): TranscriptReadResult {
   const recorded = readInterviewProgress(state).answersFilePath;
   const encPath = answersEncFilePath(recorded);
   const plainPath = answersFilePath(recorded);
 
-  const decrypted = readEncryptedFile(encPath);
-
-  // 1+2. Encrypted store exists.
-  if (decrypted != null) {
-    // Check for a plaintext tail the shell script appended after encryption.
-    try {
-      if (fs.existsSync(plainPath)) {
-        const tail = fs.readFileSync(plainPath, 'utf-8');
-        if (tail.trim()) {
-          // Merge: the plaintext tail is new content appended by the script.
-          const merged = decrypted + '\n' + tail;
-          // Re-encrypt the merged transcript and remove the plaintext.
-          try {
-            writeEncryptedFile(encPath, merged);
-            fs.unlinkSync(plainPath);
-          } catch {
-            // Non-fatal: the merge is best-effort. The plaintext stays for
-            // the next read to retry.
-          }
-          return { text: merged, path: encPath, exists: true };
-        }
-      }
-    } catch {
-      // fall through to returning just the decrypted content
-    }
-    return { text: decrypted, path: encPath, exists: true };
-  }
-
-  // 3. Plaintext exists → migrate to encrypted, return the text.
+  // ILJ-003: the merge/migrate writes happen while the lock is held, so two
+  // concurrent readers cannot both decrypt-merge-write and lose one tail.
+  // A contended lock falls back to a read-only pass (same outcomes, no
+  // writes) instead of failing the read.
   try {
-    if (fs.existsSync(plainPath)) {
-      const text = fs.readFileSync(plainPath, 'utf-8');
-      migratePlaintextFile(plainPath, encPath); // best-effort encrypt-in-place
-      return { text, path: plainPath, exists: true };
-    }
+    return withTranscriptLock(encPath, () => readTranscriptLocked(encPath, plainPath));
   } catch {
-    // fall through to "nothing"
+    return readTranscriptBestEffort(encPath, plainPath);
   }
+}
 
-  // 4. Nothing.
-  return { text: '', path: plainPath, exists: false };
+/**
+ * ILJ-003: append `block` to the transcript atomically. The read (with
+ * tail-merge), the append, and the re-encrypt happen inside one transcript
+ * lock hold, so parallel writers serialize: every block survives, none is
+ * lost to a read-modify-write race. A present-but-undecryptable `.enc` store
+ * returns `decrypt: 'decrypt_failed'` and writes nothing (the caller refuses
+ * instead of appending over a blank slate). Never throws on fs errors —
+ * returns `decrypt: 'absent'` with `exists: false` when there is no store.
+ */
+export function appendTranscriptTextAtomic(
+  block: string,
+  state?: BuildState | null,
+  opts?: { freshPrefix?: string },
+): TranscriptReadResult {
+  try {
+    const recorded = readInterviewProgress(state).answersFilePath;
+    const encPath = answersEncFilePath(recorded);
+    const plainPath = answersFilePath(recorded);
+    return withTranscriptLock(encPath, () => {
+      const current = readTranscriptLocked(encPath, plainPath);
+      if (current.decrypt === 'decrypt_failed') return current;
+      const freshPrefix = opts?.freshPrefix ?? '';
+      const content = current.exists ? current.text + block : freshPrefix + block;
+      writeEncryptedFile(encPath, content);
+      try {
+        if (fs.existsSync(plainPath)) fs.unlinkSync(plainPath);
+      } catch {
+        // Non-fatal: the plaintext will be cleaned up on the next read.
+      }
+      return { text: content, path: encPath, exists: true, decrypt: 'ok' as const };
+    });
+  } catch {
+    const recorded = readInterviewProgress(state).answersFilePath;
+    return { text: '', path: answersFilePath(recorded), exists: false, decrypt: 'absent' as const };
+  }
 }
 
 /**
