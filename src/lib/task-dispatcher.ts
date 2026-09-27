@@ -62,7 +62,7 @@ import { scoreRoute, recordRoutingReason, isBlocked, type RouteDecision } from '
 import { providerLabel, providerOf } from '@/lib/capacity/provider-pools';
 import { evaluateAskGate, holdForProviderChoice } from '@/lib/capacity/ask-at-capacity';
 import { sendProviderChoiceAsk } from '@/lib/jobs/trust-engine';
-import { buildPersonaBlock, buildPersonaPlanBlock } from '@/lib/persona-dispatch';
+import { renderDispatchPersonaSection } from '@/lib/persona-dispatch';
 import { renderOwnerMessagesSection } from '@/lib/owner-messages';
 import { loadSubtaskPersonas } from '@/lib/persona-selector';
 import { checkModelSovereignty, detectModality, type ModelSovereigntyViolation } from '@/lib/model-selector';
@@ -1898,11 +1898,7 @@ ${stepLines.join('\n')}
     // sub-task, buildPersonaBlock ×N) IN ADDITION to the primary persona block.
     // Single-persona tasks (0/1 plan rows) render only the primary block —
     // buildPersonaPlanBlock returns '' so there is no regression.
-    const subtaskPlan = loadSubtaskPersonas(task.id);
-    const personaPlanBlock = buildPersonaPlanBlock(subtaskPlan, settings);
-    const personaSection = personaPlanBlock
-      ? `${buildPersonaBlock(task, settings)}\n${personaPlanBlock}`
-      : buildPersonaBlock(task, settings);
+    const personaSection = renderDispatchPersonaSection(task, settings, loadSubtaskPersonas(task.id));
 
     const taskMessage = `${priorityEmoji} **NEW TASK ASSIGNED**
 
