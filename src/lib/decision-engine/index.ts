@@ -36,6 +36,23 @@ export {
 } from './capability';
 
 export {
+  checkPairedCohortActivation,
+  fenceStaleRecommendations,
+  isRecommendationFenced,
+  parseConfiguredMode,
+  resolveEffectivePath,
+  type CohortActivation,
+  type CohortPair,
+  type DecisionEngineMode,
+  type EffectivePath,
+  type FencedSplit,
+  type ModeResolution,
+  type ModeResolutionInput,
+  type ModeSkipReason,
+  type PolicyGate,
+} from './modes';
+
+export {
   stampRootDeadline,
   systemClock,
   type BridgeDeadline,
