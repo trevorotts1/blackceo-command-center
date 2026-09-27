@@ -39,6 +39,7 @@ import {
   compareNumericFidelity,
   compareSpellingFidelity,
   describesDeckDeliverable,
+  reuseInstruction,
   type DeliverableManifestItem,
 } from '../../src/lib/qc-scorer';
 
@@ -414,4 +415,108 @@ test('QZ-001 (viii) bare verb render alone no longer classifies a card as an ima
     assert.ok(types.includes('valid_image'), `genuine image detection must survive, got [${types.join(',')}] for "${title}"`);
   }
   console.log('  [QZ-001 viii] render-verb brief [%s] == no-verb brief [%s]', withVerb.join(','), withoutVerb.join(','));
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// QR-016 — REVR-030 F1 + F2. Two undeclared regressions that ate OWNER prose.
+//
+//  F1 (qc-scorer.ts, the "Already <verb>" strip): the pattern matched the
+//     PHRASE, so an owner sentence opening the same way as the rework-reuse
+//     trailer was deleted and its render demand went with it. The strip is now
+//     anchored to the trailer SHAPE the writer emits (`reuseInstruction`).
+//  F2 (qc-scorer.ts, machine-block membership): membership was decided by the
+//     NEXT line's shape alone, so an owner line that merely LOOKS like a
+//     handback field, abutting an unterminated field run, was deleted. The
+//     reader now requires the writers\' canonical, ordered, non-repeating
+//     field set (Problem → Tried → Needs → Suggested dept).
+//
+// Both are asserted against the REAL exported functions and the REAL writer
+// (`reuseInstruction`), never a reimplementation.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const RENDER_TYPES = [
+  'valid_image',
+  'vision_match',
+  'language_match',
+  'numeric_fidelity',
+  'spelling_fidelity',
+  'min_resolution',
+] as const;
+const DECK_TYPES = ['coverage', 'pipeline_complete'] as const;
+const renderCount = (ids: string[]) => ids.filter((i) => (RENDER_TYPES as readonly string[]).includes(i)).length;
+const deckCount = (ids: string[]) => ids.filter((i) => (DECK_TYPES as readonly string[]).includes(i)).length;
+const typesOf = (title: string, desc: string) => deriveAcceptanceCriteria(title, desc).map((c) => c.type);
+
+test('QR-016 F1 (a) "Already delivered a banner last week." is OWNER prose — 5 render gates retained', () => {
+  const ids = typesOf('Refresh', 'Already delivered a banner last week. Please update it.');
+  assert.equal(renderCount(ids), 5, `REVR-030 F1: the owner sentence must keep 5 render gates, got ${renderCount(ids)} [${ids.join(',')}]`);
+  assert.ok(
+    cleanDetectionText('Refresh', 'Already delivered a banner last week. Please update it.').includes('Already delivered a banner'),
+    'the owner sentence itself must survive cleanDetectionText',
+  );
+  console.log('  [QR-016 F1 a] render=%s ids=[%s]', renderCount(ids), ids.sort().join(','));
+});
+
+test('QR-016 F1 (b) "Already produced a logo. Redo it at 4k." keeps min_resolution — 6 render gates', () => {
+  const ids = typesOf('Refresh', 'Already produced a logo. Redo it at 4k.');
+  assert.equal(renderCount(ids), 6, `REVR-030 F1: the owner resolution demand must survive, got ${renderCount(ids)} [${ids.join(',')}]`);
+  assert.ok(ids.includes('min_resolution'), 'REVR-030 F1: min_resolution must be retained from the owner "4k" demand');
+  console.log('  [QR-016 F1 b] render=%s ids=[%s]', renderCount(ids), ids.sort().join(','));
+});
+
+test('QR-016 F1 (c) "Already delivered the pitch deck. Add the appendix." keeps BOTH deck gates', () => {
+  const ids = typesOf('Refresh', 'Already delivered the pitch deck. Add the appendix.');
+  assert.equal(deckCount(ids), 2, `REVR-030 F1: deck gates must be retained, got ${deckCount(ids)} [${ids.join(',')}]`);
+  assert.equal(renderCount(ids), 5, 'REVR-030 F1: the deck-card render set must be retained too');
+  console.log('  [QR-016 F1 c] render=%s deck=%s ids=[%s]', renderCount(ids), deckCount(ids), ids.sort().join(','));
+});
+
+test('QR-016 F2 (d) an owner field-shaped line abutting an unterminated field run SURVIVES', () => {
+  const unterminated = '[STALE-RETURN] 2026-09-26T12:00:00.000Z\nProblem: none\nSuggested dept: Sales\nNeeds: a real image please.';
+  const ids = typesOf('Pricing', unterminated);
+  assert.equal(renderCount(ids), 5, `REVR-030 F2: the owner line must survive and mint 5 render gates, got ${renderCount(ids)} [${ids.join(',')}]`);
+  assert.ok(
+    cleanDetectionText('Pricing', unterminated).includes('Needs: a real image please'),
+    'REVR-030 F2: the owner "Needs:" line must survive cleanDetectionText',
+  );
+
+  // Same input with the blank separator the real writers always emit: same answer.
+  const blanked = '[STALE-RETURN] 2026-09-26T12:00:00.000Z\nProblem: none\nSuggested dept: Sales\n\nNeeds: a real image please.';
+  assert.equal(renderCount(typesOf('Pricing', blanked)), 5, 'REVR-030 F2: the blank-line variant must also render 5');
+  console.log('  [QR-016 F2 d] unterminated render=%s | blank render=%s', renderCount(ids), renderCount(typesOf('Pricing', blanked)));
+});
+
+test('QR-016 F2 (d-control) a GENUINE machine block per the writers\' format is STILL stripped', () => {
+  // Field set and order verbatim from the three real writers.
+  const genuine = [
+    '[QC-NO-ARTIFACT HANDBACK] 2026-09-26T12:00:00.000Z',
+    'Problem: none',
+    'Tried: QC auto-scorer attempted to evaluate',
+    'Needs: register the output',
+    'Suggested dept: Sales',
+  ].join('\n');
+  assert.equal(cleanDetectionText('Pricing', genuine), 'Pricing', 'a genuine ordered machine block must still be stripped whole');
+  assert.deepEqual(typesOf('Pricing', genuine), ['deliverable_registered'], 'a genuine machine block must mint no render gates');
+  console.log('  [QR-016 F2 d-control] cleaned=%s', JSON.stringify(cleanDetectionText('Pricing', genuine)));
+});
+
+test('QR-016 (e) the REAL reuseInstruction trailer still renders 0', () => {
+  const trailer = reuseInstruction('t1', () => [{ path: '/out/a.pptx' }, { path: '/out/b.png' }]);
+  assert.ok(trailer.includes('Already delivered and STILL VALID'), `writer shape changed: ${JSON.stringify(trailer)}`);
+  const desc = 'Update the creative.' + trailer;
+  assert.equal(renderCount(typesOf('Refresh', desc)), 0, 'REVR-030 graded-intended: the trailer alone must render 0');
+  assert.ok(
+    !cleanDetectionText('Refresh', desc).includes('do NOT regenerate'),
+    'the trailer instruction must be stripped from detection text',
+  );
+  console.log('  [QR-016 e] trailer render=0 | cleaned=%s', JSON.stringify(cleanDetectionText('Refresh', desc)));
+});
+
+test('QR-016 (e-control) owner prose placed BEFORE the trailer survives alongside it', () => {
+  const trailer = reuseInstruction('t1', () => [{ path: '/out/a.png' }]);
+  const desc = 'Build a hero banner image for the launch.' + trailer;
+  const ids = typesOf('Refresh', desc);
+  assert.ok(ids.includes('valid_image'), `the owner image demand before the trailer must survive, got [${ids.join(',')}]`);
+  assert.ok(!cleanDetectionText('Refresh', desc).includes('do NOT regenerate'), 'the trailer itself must still be stripped');
+  console.log('  [QR-016 e-control] ids=[%s]', ids.sort().join(','));
 });

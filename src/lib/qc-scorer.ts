@@ -3391,9 +3391,27 @@ export function cleanDetectionText(title: string, description?: string | null): 
   // spec copy and from gate detection. So the field run is only stripped
   // while it is inside a machine block: header seen, and no blank / `---` /
   // owner line since. A line with no header above it survives.
+  //
+  // QR-016 / REVR-030 F2: block membership is NOT "any number of field-shaped
+  // lines". Every real writer emits a CLOSED, ORDERED field set — Problem,
+  // Tried, Needs, Suggested dept — each at most once, in that order:
+  //   qc-scorer.ts `structuredHandbackNote`   Problem / Tried / Needs / Suggested dept
+  //   return-to-orchestrator/route.ts `POST`  Problem / Tried / Needs / Suggested dept
+  //   stale-task-sweep.ts `returnToOrchestrator`  Problem / Tried / Needs
+  // So membership requires the canonical order with no repeat. An owner line
+  // that merely LOOKS like a field after an unterminated run ("Needs: a real
+  // image please.") either repeats a field already seen or breaks the order,
+  // and it survives. Previously the reader judged only the NEXT line's shape,
+  // so such a line was deleted and its render demand was lost (tip render 0
+  // where the base rendered 5).
   const MACHINE_BLOCK_HEADER = /^\[(STALE-RETURN|QC-[^\]]*|RETURN|HANDBACK)/;
-  const MACHINE_BLOCK_FIELD = /^(Problem|Tried|Needs|Suggested dept):/i;
+  const MACHINE_FIELD_ORDER = ['Problem:', 'Tried:', 'Needs:', 'Suggested dept:'];
+  const machineFieldIndex = (t: string): number => {
+    const low = t.toLowerCase();
+    return MACHINE_FIELD_ORDER.findIndex((f) => low.startsWith(f.toLowerCase()));
+  };
   let inMachineBlock = false;
+  let lastFieldIndex = -1;
   const lines = combined.split('\n').filter((line) => {
     const t = line.trim();
     if (!t) {
@@ -3402,10 +3420,15 @@ export function cleanDetectionText(title: string, description?: string | null): 
     }
     if (MACHINE_BLOCK_HEADER.test(t)) {
       inMachineBlock = true;
+      lastFieldIndex = -1;
       return false;
     }
     if (inMachineBlock) {
-      if (MACHINE_BLOCK_FIELD.test(t)) return false;
+      const idx = machineFieldIndex(t);
+      if (idx > lastFieldIndex) {
+        lastFieldIndex = idx;
+        return false;
+      }
       inMachineBlock = false;
     }
     if (/^---\s*$/.test(t)) return false;
@@ -3488,10 +3511,23 @@ export function cleanDetectionText(title: string, description?: string | null): 
   // Prior-state history is provenance, never the current brief.
   text = text.replace(/\bPRIOR STATE:[^.]*\./gi, ' ');
   text = text.replace(/\bArtifacts?\s+already\s+(produced|delivered|shipped|completed|attached)[^.]*\./gi, ' ');
-  // Rework-reuse trailer appended by the kickback path ("Already delivered
-  // and STILL VALID — do NOT regenerate: <paths>...") — names files the last
-  // attempt left, not new render intent.
-  text = text.replace(/\bAlready\s+(delivered|produced|shipped|completed|attached)\b[^.]*\./gi, ' ');
+  // Rework-reuse trailer appended by the kickback path (`reuseInstruction`,
+  // qc-scorer.ts:285) — names files the last attempt left, not new render
+  // intent:
+  //   "\n\nAlready delivered and STILL VALID[ —|-] do NOT regenerate: <paths>. ..."
+  //
+  // QR-016 / REVR-030 F1: the strip is anchored to the TRAILER SHAPE, never to
+  // the words alone. The previous pattern was /\bAlready\s+(delivered|produced|
+  // shipped|completed|attached)\b[^.]*\./i, which deleted OWNER sentences that
+  // open the same way ("Already delivered a banner last week. Please update
+  // it.") along with the render demand they carried — tip render 0 against the
+  // base's 5/6/deck-2 on identical inputs. The trailer's own continuation
+  // ("Re-register each one ...") goes with it; the strip stops at the sentence
+  // that ends the instruction, so owner prose that follows survives.
+  text = text.replace(
+    /\bAlready\s+(delivered|produced|shipped|completed|attached)\s+and\s+STILL\s+VALID\b[\s\S]*?(?:Produce\s+ONLY\s+what\s+the\s+gaps\s+above\s+name\.|$)/gi,
+    ' ',
+  );
   return text.replace(/\s+/g, ' ').trim();
 }
 
