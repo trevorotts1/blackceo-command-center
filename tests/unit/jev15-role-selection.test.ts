@@ -176,6 +176,78 @@ test('ties broken stable by worker id', () => {
   assert.equal(r2.worker!.id, 'w-aaa', 'input order must not decide ties');
 });
 
+// --- A19: similarly labeled workers, different methods, equal load ------------
+//
+// The gap the D15 suite left: every earlier test paired workers with DIFFERENT
+// labels, so a same-label pair whose methods differ was never exercised and the
+// id collation in the old Stage 2 went unnoticed. Both workers here carry the
+// same role label, the same load (0/1) and the same capacity (1) — only their
+// METHODS differ — so the pick must follow method fit, never the id.
+
+/** Same label, different method text; load/capacity equal. */
+function sameLabelPair(firstId: string, secondId: string, secondMethod: 'video' | 'copy') {
+  const copy = () => worker({
+    id: 'unused', role: 'Content Producer',
+    description: 'long-form copywriting and article drafting',
+    responsibilities: 'draft articles, edit newsletter copy',
+    capabilities: ['copywriting'],
+  });
+  const video = () => worker({
+    id: 'unused', role: 'Content Producer',
+    description: 'video editing and promo cut assembly',
+    responsibilities: 'cut promo video, color grade footage',
+    capabilities: ['video editing'],
+  });
+  const a = { ...copy(), id: firstId };
+  const b = { ...(secondMethod === 'video' ? video() : copy()), id: secondId };
+  return [a, b];
+}
+
+test('A19: same-label workers with different methods — task fit decides, not id order', () => {
+  // Video task; the video-method worker carries the LATER id in arm 1 and the
+  // EARLIER id in arm 2. Under id collation the pick follows the id and flips.
+  const arm1 = sameLabelPair('w-aaa', 'w-zzz', 'video');
+  const arm2 = sameLabelPair('w-zzz', 'w-aaa', 'video');
+
+  const r1 = selectRoleWorker(arm1, VIDEO_TASK);
+  const r2 = selectRoleWorker(arm2, VIDEO_TASK);
+
+  assert.equal(r1.worker!.id, 'w-zzz', `video method must win regardless of id: ${r1.reason}`);
+  assert.equal(r2.worker!.id, 'w-aaa', `video method must win regardless of id: ${r2.reason}`);
+  assert.notEqual(r1.worker!.id, r2.worker!.id, 'the pick must follow the method, not the id');
+  // The two arms swap ids only; the winner is the video-method worker both times.
+  assert.equal(r1.worker!.description, 'video editing and promo cut assembly');
+  assert.equal(r2.worker!.description, 'video editing and promo cut assembly');
+});
+
+test('A19: same-label sibling — method fit decided at equal load, not reversed by input order', () => {
+  const pool = sameLabelPair('w-copy', 'w-video', 'video');
+  const forward = selectRoleWorker(pool, VIDEO_TASK);
+  const reversed = selectRoleWorker([...pool].reverse(), VIDEO_TASK);
+  assert.equal(forward.worker!.id, 'w-video', forward.reason);
+  assert.equal(reversed.worker!.id, 'w-video', `input order must not decide: ${reversed.reason}`);
+});
+
+test('A19 control: idle unqualified same-label worker still loses to the qualified one', () => {
+  // Guards the fix against "always take the higher score": the loser here is
+  // eligible but genuinely unqualified, and the winner is loaded yet qualified.
+  const pool = [
+    worker({
+      id: 'w-idle-unqualified', role: 'Content Producer',
+      description: 'bookkeeping and invoices', responsibilities: 'monthly bookkeeping',
+      activeTasks: 0, maxConcurrentExecutions: 1,
+    }),
+    worker({
+      id: 'w-busy-qualified', role: 'Content Producer',
+      description: 'video editing and promo cut assembly',
+      responsibilities: 'cut promo video, color grade footage',
+      capabilities: ['video editing'], activeTasks: 2, maxConcurrentExecutions: 4,
+    }),
+  ];
+  const r = selectRoleWorker(pool, VIDEO_TASK);
+  assert.equal(r.worker!.id, 'w-busy-qualified', `7.3: ${r.reason}`);
+});
+
 // --- worker profile mapping (7.2 fields, existing-row source) ------------------
 
 test('workerProfileFromAgent maps existing agent row columns to 7.2 profile', () => {
