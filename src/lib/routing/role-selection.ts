@@ -9,10 +9,15 @@
  *      embeddings stays in the pool (section 7.4): scoring is pure lexical over
  *      real role text, so missing vectors change nothing.
  *   2. CAPACITY POLICY — among sufficiently suitable workers, pick
- *      deterministically: fewest active tasks first, ties broken stable by
- *      worker id. When every suitable worker is busy, return a QUEUED
- *      assignment naming the least-loaded suitable worker with reason
- *      capacity — never "ineligible".
+ *      deterministically: fewest active tasks first, then the higher task-fit
+ *      score, then stable by worker id. Load and capability stay separate
+ *      factors: load may only choose *among* the sufficient (an idle
+ *      unqualified worker never reaches this stage — the gate above excludes
+ *      it), and it never settles same-label peers at equal load. When load and
+ *      capacity are equal, actual task fit decides (A19); the worker id is the
+ *      last-resort determinism tie-break only for a true fit tie. When every
+ *      suitable worker is busy, return a QUEUED assignment naming the
+ *      least-loaded suitable worker with reason capacity — never "ineligible".
  *
  * Owner-direct is its own path: a named worker resolves straight through,
  * bypassing suitability exclusions (offline still excluded — a pin cannot wake
@@ -292,6 +297,24 @@ function byLoadThenId(a: SelectableWorker, b: SelectableWorker): number {
   return a.id.localeCompare(b.id);
 }
 
+/**
+ * Capacity policy comparator over scored candidates (spec 7.3): measured load
+ * first, then task fit, then the stable id last. Load never settles two workers
+ * that fit the task differently — at equal load the fit score decides (A19), and
+ * the id is reached only on a true fit tie. Load and capability stay separate
+ * factors; this only orders workers the suitability gate already admitted.
+ */
+function byLoadThenFitThenId(
+  a: { worker: SelectableWorker; score: number },
+  b: { worker: SelectableWorker; score: number },
+): number {
+  if (a.worker.activeTasks !== b.worker.activeTasks) {
+    return a.worker.activeTasks - b.worker.activeTasks;
+  }
+  if (b.score !== a.score) return b.score - a.score;
+  return a.worker.id.localeCompare(b.worker.id);
+}
+
 /** True when the task carries anything worth judging (else legacy path). */
 export function hasTaskContent(t: RoleSelectionTask): boolean {
   return [t.title, t.description, t.outcome, t.artifactType, t.constraints, t.sopContext]
@@ -373,7 +396,7 @@ export function selectRoleWorker(
   // Stage 2 — deterministic capacity/load among the sufficiently suitable.
   const available = suitable.filter(({ worker }) => worker.activeTasks < capacityOf(worker));
   if (available.length > 0) {
-    const pick = availableLoadedFirst(available);
+    const pick = leastLoadedThenBestFit(available);
     return {
       status: 'assigned',
       worker: pick.worker,
@@ -386,7 +409,9 @@ export function selectRoleWorker(
   }
 
   // All suitable workers busy: honest queued assignment, never "ineligible".
-  const queued = [...suitable].sort((a, b) => byLoadThenId(a.worker, b.worker))[0];
+  // Same policy as Stage 2 — least loaded, then best fit, then the id — so an
+  // equal-load queue is still settled by task fit, not by collation (A19).
+  const queued = [...suitable].sort(byLoadThenFitThenId)[0];
   return {
     status: 'queued',
     worker: queued.worker,
@@ -398,8 +423,8 @@ export function selectRoleWorker(
   };
 }
 
-function availableLoadedFirst(
+function leastLoadedThenBestFit(
   available: { worker: SelectableWorker; score: number }[],
 ): { worker: SelectableWorker; score: number } {
-  return [...available].sort((a, b) => byLoadThenId(a.worker, b.worker))[0];
+  return [...available].sort(byLoadThenFitThenId)[0];
 }
