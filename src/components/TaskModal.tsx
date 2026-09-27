@@ -550,7 +550,10 @@ export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskMod
               NOTHING when the bundle is null (mirrors AudienceConfirmPanel's
               early-return pattern). Mounted beside AudienceConfirmPanel so both
               axes are visible on the same form. */}
-          {task && <PersonaPickerPanel taskId={task.id} onConfirmed={() => window.location.reload()} />}
+          {/* CRT-001: hand the board-known assignment into the picker so a failed
+              bundle read (or a non-blend task with a real persona pin) can never
+              render as "no assignment" while the card visibly carries one. */}
+          {task && <PersonaPickerPanel taskId={task.id} assignedPersonaId={task.persona_id} assignedPersonaName={task.persona_name} onConfirmed={() => window.location.reload()} />}
           {/* P2-02 — task-detail panels for an existing task (skipped on the
               anthology Assembly card, whose overview is the cockpit only). They
               sit OUTSIDE the form so their buttons/links never submit the edit

@@ -86,6 +86,68 @@ function parsePm2Cloudflared(stdout: string): { found: boolean; online: boolean;
   }
 }
 
+/**
+ * HEA-001: launchd fallback for macOS. `cloudflared` on a Mac Mini is
+ * managed by launchd (`com.cloudflared.*` / `com.cloudflare.*` agents), not
+ * PM2 — `pm2 jlist` succeeding with zero cloudflared entries is the NORMAL
+ * state of a healthy box, not evidence of a down tunnel. When the PM2 lookup
+ * finds no cloudflared entry we check (a) a live `cloudflared` TUNNEL process
+ * (HEA-003), then (b) a launchd agent with a cloudflare label AND a real PID
+ * (HEA-002). Either hit is identity-grade: generic port squatters never spawn
+ * a process literally named `cloudflared`, and launchd labels are box-local.
+ * The PM2 online-entry verdict still wins when present (it is the most
+ * specific). Exported for tests.
+ */
+export async function launchdTunnelEvidence(): Promise<{
+  processRunning: boolean;
+  launchdLabel: string | null;
+}> {
+  // HEA-003: `pgrep -f cloudflared` matches the FULL argv of ANY process whose
+  // command line contains that string, so the long-lived `cloudflared access
+  // ssh --hostname rescue-*` client helpers this operator box spawns for
+  // ordinary `ssh rescue-*` use (PIDs 42132 / 94727 measured 2026-09-26)
+  // reported a box with no tunnel service as live. The pattern must identify
+  // the tunnel service itself. All three real tunnel argv shapes on this box
+  // match `cloudflared` + whitespace + `tunnel` + (whitespace or end):
+  //
+  //   cloudflared tunnel --config <path> run <name>
+  //   cloudflared tunnel run <name>
+  //   cloudflared --config <path> tunnel run <name>
+  //
+  // `cloudflared access ssh|tcp` does not, and neither does a helper whose
+  // `--config` path merely contains the substring "tunnel". ERE with an
+  // alternation is accepted by pgrep on both macOS and glibc (verified against
+  // the real pgrep before landing). This is one of the few places a shell
+  // pattern is load-bearing; the probe still spawns no shell (execFile).
+  //
+  // HEA-001 control note stands: pgrep prints bare PIDs ("772\n780\n"), never
+  // the command line, so the pattern narrows WHICH processes match in the
+  // kernel — matching stdout stays a belt-and-braces second clause only.
+  const proc = await runFile(
+    'pgrep',
+    ['-f', 'cloudflared.*[[:space:]]tunnel([[:space:]]|$)'],
+    EXEC_TIMEOUT_MS
+  );
+  const processRunning =
+    proc.exitCode === 0 && (proc.stdout.trim().length > 0 || /cloudflared/.test(proc.stdout));
+  // HEA-002: a label alone is not liveness. `launchctl list` prints
+  // "PID  Status  Label" and a LOADED-BUT-NOT-RUNNING job has "-" in the PID
+  // column — matching the label anywhere in the line reported a dead tunnel as
+  // live. Column 1 must be a numeric PID for the job to count as running.
+  let launchdLabel: string | null = null;
+  const list = await runFile('launchctl', ['list'], EXEC_TIMEOUT_MS);
+  if (list.exitCode === 0) {
+    for (const line of list.stdout.split('\n')) {
+      const match = line.match(/(com\.cloudflare[d]?[.\-][\w.\-]+|com\.cloudflar\w*)/i);
+      if (match && /^\s*\d+\s/.test(line)) {
+        launchdLabel = match[1];
+        break;
+      }
+    }
+  }
+  return { processRunning, launchdLabel };
+}
+
 async function probeMacMini(): Promise<{ status: 'live' | 'degraded' | 'offline'; details: string; detail: Record<string, unknown> }> {
   const outcome = await runFile('pm2', ['jlist'], EXEC_TIMEOUT_MS);
   if (outcome.exitCode !== 0) {
@@ -96,24 +158,40 @@ async function probeMacMini(): Promise<{ status: 'live' | 'degraded' | 'offline'
     };
   }
   const parsed = parsePm2Cloudflared(outcome.stdout);
-  if (!parsed.found) {
+  if (parsed.found && parsed.online) {
     return {
-      status: 'offline',
-      details: 'cloudflared not registered with PM2',
-      detail: { found: false },
+      status: 'live',
+      details: 'cloudflared online under PM2',
+      detail: { found: true, online: true, pm2Status: 'online' },
     };
   }
-  if (!parsed.online) {
+  if (parsed.found && !parsed.online) {
     return {
       status: 'degraded',
       details: `cloudflared PM2 status is ${parsed.raw?.pm2_env?.status || 'unknown'}, expected online`,
       detail: { found: true, online: false, pm2Status: parsed.raw?.pm2_env?.status },
     };
   }
+  // No PM2 entry: normal on launchd-managed Macs. Confirm via process+launchd
+  // before calling it down — absence from PM2 is not absence from the box.
+  const evidence = await launchdTunnelEvidence();
+  if (evidence.processRunning || evidence.launchdLabel) {
+    return {
+      status: 'live',
+      details: `cloudflared running outside PM2 (launchd${evidence.launchdLabel ? `: ${evidence.launchdLabel}` : ''})`,
+      detail: {
+        found: true,
+        online: true,
+        source: 'launchd',
+        processRunning: evidence.processRunning,
+        launchdLabel: evidence.launchdLabel,
+      },
+    };
+  }
   return {
-    status: 'live',
-    details: 'cloudflared online under PM2',
-    detail: { found: true, online: true, pm2Status: 'online' },
+    status: 'offline',
+    details: 'cloudflared not registered with PM2 and no cloudflared process or launchd agent found',
+    detail: { found: false, processRunning: false, launchdLabel: null },
   };
 }
 

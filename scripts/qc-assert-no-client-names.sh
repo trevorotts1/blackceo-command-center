@@ -237,11 +237,67 @@ if [ "${#CLIENT_NAMES[@]}" -gt 0 ]; then
   NAME_PATTERN=$(printf '\\b%s\\b\n' "${CLIENT_NAMES[@]}" | paste -sd'|' -)
 fi
 PATH_PATTERN=$(printf '%s\n' "${OPERATOR_PATHS[@]}" | paste -sd'|' -)
-if [ -n "$NAME_PATTERN" ]; then
-  PATTERN="${NAME_PATTERN}|${PATH_PATTERN}"
-else
-  PATTERN="$PATH_PATTERN"
+
+# ─── HOSTNAME / SLUG tier (REVS-017-S3) ──────────────────────────────────────
+# The display-name tier above builds \b<Name>\b alternatives from the roster's
+# SPACE-SEPARATED entries, so it cannot match the form that actually gets
+# published: the HYPHENATED slug (<first>-<last>) used in hostnames
+# (<slug>.zerohumanworkforce.com) and in paths. Measured at the tip: a tracked
+# file holding a real "<first>-<last>.zerohumanworkforce.com" hostname PASSED
+# (rc=0) while the same file's two-word display name FAILED (rc=1) — the gate
+# enforced only the space-separated class, which manufactured assurance on a
+# tree that provably leaks. The pattern below is DERIVED from the same roster,
+# exactly as the name tier is: nothing here enumerates a client name, so this
+# gate does not violate the rule it enforces.
+#
+# Only MULTI-word roster entries yield a hyphenated slug; a single-token entry
+# is already covered by the \b-name\b tier above, so no new false-positive
+# surface is opened for single names. The apostrophe/dot stripping and the
+# whitespace-to-hyphen join mirror the name shape the derivation admits
+# (NAME_TOKEN_RE = ^[A-Z][a-zA-Z.'-]{1,20}$), so "O'Brien" -> "o-brien".
+_slugify() {
+  printf '%s\n' "$1" \
+    | tr '[:upper:]' '[:lower:]' \
+    | tr -d "'." \
+    | tr -s '[:space:]' '-' \
+    | sed -e 's/^-\{1,\}//' -e 's/-\{1,\}$//'
+}
+
+SLUG_PATTERN=""
+if [ "${#CLIENT_NAMES[@]}" -gt 0 ]; then
+  SLUG_PATTERN=$(
+    for _roster_name in "${CLIENT_NAMES[@]}"; do
+      _roster_slug="$(_slugify "$_roster_name")"
+      # Strict shape guard: a curated roster entry may legitimately be an ERE
+      # fragment (client-roster-lib.sh documents "\bJane\b" as an entry form).
+      # Only a plain lowercase hyphenated word-run is a slug; anything else is
+      # already covered by the name tier and must not be re-emitted as a broken
+      # alternation here.
+      case "$_roster_slug" in
+        *-*) case "$_roster_slug" in
+               *[!a-z0-9-]*) ;;
+               [a-z0-9]*-*) printf '%s\n' "$_roster_slug" ;;
+             esac ;;
+      esac
+    done | sort -u | paste -sd'|' -
+  )
 fi
+
+if [ -n "$SLUG_PATTERN" ]; then
+  # QR-015: anchoring was "\b${SLUG_PATTERN}\b" — ONE \b pair around the WHOLE
+  # alternation. In ERE the \b binds only the FIRST and LAST alternative, so
+  # with 3+ slugs every MIDDLE alternative lost BOTH boundaries and became a
+  # bare substring: the gate flagged glued strings that merely CONTAIN a slug
+  # ("X<slug>", "<slug>Y") and matched slug fragments inside longer tokens.
+  # Anchor EACH alternative, exactly as the name tier above does
+  # (`printf '\\b%s\\b\n'`). Verified runtime capture at the parent revision:
+  #   bash -x ... | grep SLUG_PATTERN
+  #   + SLUG_PATTERN='\btest-alpha|test-beta|test-gamma\b'
+  SLUG_PATTERN="($(printf '%s\n' "$SLUG_PATTERN" | tr '|' '\n' \
+    | sed 's/^/\\b/; s/$/\\b/' | paste -sd'|' -))"
+fi
+
+PATTERN="${NAME_PATTERN:+${NAME_PATTERN}|}${SLUG_PATTERN:+${SLUG_PATTERN}|}${PATH_PATTERN}"
 
 # Whole-number, \b-anchored alternation for the chat-ID denylist (box mode only).
 CHATID_PATTERN=""

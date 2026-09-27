@@ -623,3 +623,28 @@ export function checkTriad(task: TriadCheckInput): { missing: string[] } {
 
   return { missing };
 }
+
+/**
+ * KAN-003: liveness probe for an attached SOP id.
+ *
+ * checkTriad() above already treats a truthy-but-dead sop_id (row missing or
+ * soft-deleted, e.g. legacy truncated ids removed by a re-ingest) as missing —
+ * this is the same predicate as a boolean so the dispatch-time self-heal
+ * (`resolveSopForTask` in task-dispatcher.ts) can tell "attached and live, do
+ * nothing" apart from "attached but dead, re-pull the department fit".
+ *
+ * Fail-OPEN on read error (returns true): a transient DB failure must preserve
+ * the old short-circuit, never trigger a re-pull storm.
+ */
+export function isLiveSopId(sopId: string | null | undefined): boolean {
+  if (!sopId) return false;
+  try {
+    const row = queryOne<{ deleted_at: string | null }>(
+      'SELECT deleted_at FROM sops WHERE id = ?',
+      [sopId]
+    );
+    return !!row && !row.deleted_at;
+  } catch {
+    return true;
+  }
+}
