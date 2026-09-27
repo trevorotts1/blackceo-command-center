@@ -61,8 +61,24 @@ function preQr008Resolve(bare: string): string | null {
 // ── fixtures ────────────────────────────────────────────────────────────────
 
 /** Create an executable stub binary in a fresh temp dir; returns [dir, bin]. */
+/** Temp dirs minted by this file's fixtures; removed when its tests finish.
+ * REVP-028-R2-F2: mkdtempSync had no matching rm, so every run leaked +4
+ * `ltrn-qr8-*` and +1 `cp002-fail-*` dirs into os.tmpdir() (measured). */
+const TEMP_DIRS: string[] = [];
+
+test.after(() => {
+  for (const dir of TEMP_DIRS) {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // best effort — a stuck temp dir must not fail the suite
+    }
+  }
+});
+
 function makeFixtureBin(name: string, mode = 0o755): { dir: string; bin: string } {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ltrn-qr8-'));
+  TEMP_DIRS.push(dir);
   const bin = path.join(dir, name);
   fs.writeFileSync(bin, '#!/bin/sh\nexit 0\n', { mode });
   return { dir, bin };
@@ -232,6 +248,7 @@ test('CP-002: non-PATH text with no delimiter yields no directories', () => {
 test('CP-002(c): a login shell that exits non-zero records a harvest failure', () => {
   resetLoginPathHarvest();
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cp002-fail-'));
+  TEMP_DIRS.push(dir);
   const shell = path.join(dir, 'failing-shell');
   fs.writeFileSync(shell, '#!/bin/sh\nexit 3\n', { mode: 0o755 });
 
