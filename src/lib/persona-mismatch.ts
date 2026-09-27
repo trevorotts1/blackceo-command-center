@@ -30,6 +30,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { queryOne, queryAll, run } from '@/lib/db';
 import { latestExecution } from '@/lib/execution-attempts';
 import { comparePersonaManifest, dispatchedPersonaShas, personaId, type PersonaManifest } from '@/lib/persona-conformance';
+import { personaBundleHash } from '@/lib/persona-state';
 
 export const PERSONA_MISMATCH_EVENT_TYPE = 'persona_mismatch';
 
@@ -51,6 +52,15 @@ export interface PersonaMismatchInfo {
   declared_voice_persona_id: string | null;
   used_voice_persona_id: string | null;
   page: string | null;
+  /** Which comparison diverged (comparePersonaManifest reason, or the
+   * stored-vs-dispatched `persona_bundle_revision_mismatch`). The chip title
+   * must not claim producer divergence when the producer was honest and the
+   * STORED decision moved — reason is what tells the two apart. */
+  reason?: string | null;
+  /** Only for `persona_bundle_revision_mismatch`: 'stored' = the stored bundle
+   * was rebuilt after dispatch; 'producer' = the producer reported a revision
+   * other than the one it was handed. Never invented for other reasons. */
+  revision_source?: 'stored' | 'producer' | null;
 }
 
 /** ONE normalisation rule, shared with the conformance comparator: blank, and
@@ -85,6 +95,12 @@ export function recordPersonaUsedAndCompare(
     const declared=clean(task?.voice_persona_id),used=clean(report.voice_persona_id);
     const page=clean(report.scope) ?? clean(report.page);
     let mismatch=declared && used && declared!==used ? 'persona_voice_mismatch' : null;
+    // Hoisted: the event message and the chip payload below are built OUTSIDE
+    // the persona-contract branch and need these.
+    let rebuilt=false;
+    let producerRevisionDrift=false;
+    let dispatchedRoot:string|null=null;
+    let revisionSource:'stored'|'producer'|null=null;
     if(task?.persona_contract_version){
       const execution=latestExecution(taskId);
       if(!execution || report.execution_id!==execution.id)return null;
@@ -93,7 +109,21 @@ export function recordPersonaUsedAndCompare(
       // comparePersonaManifest, measured against the bundle sha THIS execution
       // was handed at dispatch. Never a second, differently-spelled comparison.
       const dispatched=dispatchedPersonaShas(report.execution_id);
-      mismatch=row?comparePersonaManifest(JSON.parse(row.bundle_json),report,page?dispatched?.scopes[page]:dispatched?.root):'persona_scope_unregistered';
+      // A39 stored-vs-dispatched: the STORED bundle must still be the one this
+      // execution was handed at dispatch. A rebuild in between (a QC re-route
+      // that re-persisted a different decision) is a mismatch, never silence —
+      // the producer's `used` leg alone cannot see it. Fail-soft: no recorded
+      // snapshot (a pre-upgrade execution) skips, exactly like the revision
+      // check in comparePersonaManifest.
+      // ponytail: root reports only; the scope leg keeps its own checks.
+      const storedSha=!page&&row?personaBundleHash(JSON.parse(row.bundle_json)):null;
+      dispatchedRoot=dispatched?.root ?? null;
+      rebuilt=!!(storedSha&&dispatchedRoot&&storedSha!==dispatchedRoot);
+      mismatch=rebuilt?'persona_bundle_revision_mismatch':(row?comparePersonaManifest(JSON.parse(row.bundle_json),report,page?dispatched?.scopes[page]:dispatchedRoot):'persona_scope_unregistered');
+      // Stored == dispatched, yet the revision check moved: the producer
+      // reported a revision other than the one it was handed (leg (b)).
+      producerRevisionDrift = !rebuilt && mismatch === 'persona_bundle_revision_mismatch';
+      revisionSource = rebuilt ? 'stored' : producerRevisionDrift ? 'producer' : null;
     } else if(!declared||!used)return null;
     const mismatchKey=JSON.stringify([report.execution_id??'legacy',page??'root']);
     if(!mismatch){
@@ -115,16 +145,33 @@ export function recordPersonaUsedAndCompare(
     );
 
     if (!existing) {
+      // The chip title/feeds read this text, so it must name the comparison
+      // that actually diverged. Three distinct situations hid behind one
+      // wording: (a) the STORED decision moved after dispatch; (b) the producer
+      // ran a different revision than it was handed; (c) genuine voice/topic/
+      // roles divergence. (a) and (b) must never be worded as producer
+      // divergence from the declared voice — that was the live false-failure
+      // class this furnace closed.
+      const message = rebuilt
+        ? `[PERSONA-MISMATCH] stored decision revision changed after dispatch for execution ` +
+          `"${report.execution_id}" — the bundle the producer was handed is no longer the stored one. ` +
+          `Re-dispatch or restore the decision; never silent.`
+        : producerRevisionDrift
+          ? `[PERSONA-MISMATCH] producer reported bundle revision "${clean(report.bundle_sha)}" but execution ` +
+            `"${report.execution_id}" was dispatched "${dispatchedRoot}" — assigned-vs-used revision ` +
+            `divergence, never silent.`
+          : `[PERSONA-MISMATCH] declared voice "${declared}" but the producer reported writing ` +
+            `with "${used}"${page ? ` on page "${page}"` : ''} — declared-vs-used divergence, never silent.`;
       run(
         `INSERT INTO events (id, type, task_id, message, metadata, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
         [
           uuidv4(),
           PERSONA_MISMATCH_EVENT_TYPE,
           taskId,
-          `[PERSONA-MISMATCH] declared voice "${declared}" but the producer reported writing ` +
-            `with "${used}"${page ? ` on page "${page}"` : ''} — declared-vs-used divergence, never silent.`,
+          message,
           JSON.stringify({
             page, mismatch_key:mismatchKey, reason:mismatch, execution_id:report.execution_id,
+            revision_source: revisionSource,
             declared_voice_persona_id: declared,
             used_voice_persona_id: used,
             topic_persona_id: clean(report.topic_persona_id),
@@ -137,7 +184,12 @@ export function recordPersonaUsedAndCompare(
       );
     }
 
-    return { declared_voice_persona_id: declared, used_voice_persona_id: used, page };
+    // Historical payload for the classic declared-vs-used divergences (the
+    // board chip shape other units pin); the revision discriminator rides ONLY
+    // on revision mismatches — the A39 stored-vs-dispatched case must be
+    // distinguishable from producer divergence, everything else keeps its shape.
+    const baseInfo = { declared_voice_persona_id: declared, used_voice_persona_id: used, page };
+    return revisionSource ? { ...baseInfo, reason: mismatch, revision_source: revisionSource } : baseInfo;
   } catch (err) {
     console.warn(`[persona-mismatch] comparator skipped for task ${taskId} (non-fatal):`, (err as Error).message);
     return null;
@@ -161,7 +213,9 @@ export function getOpenPersonaMismatch(taskId: string): PersonaMismatchInfo | nu
       if(execution && parsed.execution_id!==execution.id)continue;
       const key=parsed.mismatch_key??'legacy';if(seen.has(key))continue;seen.add(key);
       if(row.type==='persona_mismatch_resolved')continue;
-      return {declared_voice_persona_id:clean(parsed.declared_voice_persona_id),used_voice_persona_id:clean(parsed.used_voice_persona_id),page:clean(parsed.page)};
+      const revisionSource = clean(parsed.revision_source);
+      const baseInfo = {declared_voice_persona_id:clean(parsed.declared_voice_persona_id),used_voice_persona_id:clean(parsed.used_voice_persona_id),page:clean(parsed.page)};
+      return revisionSource ? {...baseInfo, reason:clean(parsed.reason), revision_source:revisionSource as 'stored'|'producer'} : baseInfo;
     }
     return null;
   } catch {

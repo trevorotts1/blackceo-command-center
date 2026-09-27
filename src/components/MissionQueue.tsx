@@ -1722,10 +1722,18 @@ export function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted, 
           <span
             className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800 border border-red-300"
             title={
-              `Declared voice "${humanize(task.persona_mismatch.declared_voice_persona_id || '')}" but the ` +
-              `producer wrote with "${humanize(task.persona_mismatch.used_voice_persona_id || '')}"` +
-              (task.persona_mismatch.page ? ` on page "${task.persona_mismatch.page}"` : '') +
-              ' — open the task to resolve.'
+              task.persona_mismatch.reason === 'persona_bundle_revision_mismatch'
+                ? task.persona_mismatch.revision_source === 'stored'
+                  ? 'The stored persona decision was rebuilt after this execution was dispatched — ' +
+                    'the working decision is no longer the one the producer was handed, so ' +
+                    'selected/stored/dispatched hashes disagree. Open the task to resolve.'
+                  : 'The producer reported running a persona bundle revision other than the one ' +
+                    'this execution was dispatched with — assigned-vs-used hashes disagree. ' +
+                    'Open the task to resolve.'
+                : `Declared voice "${humanize(task.persona_mismatch.declared_voice_persona_id || '')}" but the ` +
+                  `producer wrote with "${humanize(task.persona_mismatch.used_voice_persona_id || '')}"` +
+                  (task.persona_mismatch.page ? ` on page "${task.persona_mismatch.page}"` : '') +
+                  ' — open the task to resolve.'
             }
           >
             🚨 Persona mismatch
