@@ -27,6 +27,12 @@
  * the JEV/generative path (spec 4.5), rather than claimed as classified.
  *
  * Offline only: no DB, no network, no JEV core.
+ *
+ * REP-012 (16.2 A12 repair) widened the question-form rule in
+ * src/lib/intake/classify.ts from a hardcoded verb list to a request-verb set
+ * with an informational guard, and flipped the DEFECT rows this file had
+ * locked — C3 homophone, C3 filler, C4 "set up", C4 "put together", C4 row-9.
+ * The C1 control-probe DEFECT rows are untouched and still record the defect.
  */
 
 import test from 'node:test';
@@ -186,21 +192,21 @@ test('[C3] STT casing loss (ALL CAPS) keeps 4.4 row-3 task_request', () => {
   assert.equal(gateEffect(msg, c), 'allows');
 });
 
-test('[C3] DEFECT: STT homophone "right" for "write" is classified answer_only', () => {
+test('[C3] STT homophone "right" for "write" is a task request (was the DEFECT; fixed)', () => {
   // Spec 4.4 row 3: a question-form task request must not be read as
   // answer-only. "can you right the draft for me" asks for a draft.
   const msg = 'can you right the draft for me';
   const c = classifyLexical(msg);
-  assert.equal(c.intent, 'answer_only', 'DEFECT: homophone collapses a task request into answer_only');
-  assert.equal(c.executionPreference, 'unspecified');
-  assert.equal(gateEffect(msg, c), 'allows', 'answer_only is not refused by the gate, so the request silently produces no card');
+  assert.equal(c.intent, 'task_request');
+  assert.equal(c.executionPreference, 'normal_delegation');
+  assert.equal(gateEffect(msg, c), 'allows');
 });
 
-test('[C3] DISCLOSED-CONSERVATIVE: STT filler/disfluency is unresolved, gate refuses', () => {
+test('[C3] STT filler/disfluency keeps the task request it carries', () => {
   const msg = 'so um can you, uh, build the page for me?';
   const c = classifyLexical(msg);
-  assert.equal(c.intent, 'unresolved');
-  assert.equal(gateEffect(msg, c), UNRESOLVED_GATE);
+  assert.equal(c.intent, 'task_request');
+  assert.equal(gateEffect(msg, c), 'allows');
 });
 
 // ── [C4] PARAPHRASES (the category A12 names as untested) ───────────────────
@@ -211,24 +217,24 @@ test('[C4] paraphrase of row 14 ("Cancel that task.") keeps existing_task_contro
   assert.equal(c.intent, 'existing_task_control');
 });
 
-test('[C4] DEFECT (16.2 A12 criterion): "Can you set up the campaign for me?" is a row-3 task request but returns answer_only', async () => {
+test('[C4] (16.2 A12 criterion): "Can you set up the campaign for me?" is a row-3 task request and returns task_request', async () => {
   // 16.2 A12: "Genuine question-form task requests are not mistaken for
-  // answer-only." This paraphrase of 4.4 row 3 is mistaken for answer-only.
+  // answer-only." This paraphrase of 4.4 row 3 is a task request.
   const msg = 'Can you set up the campaign for me?';
   const c = classifyLexical(msg);
-  assert.equal(c.intent, 'answer_only', 'DEFECT: paraphrase of row 3 classified answer_only');
-  assert.equal(c.executionPreference, 'unspecified');
+  assert.equal(c.intent, 'task_request');
+  assert.equal(c.executionPreference, 'normal_delegation');
   const viaDefault = await classify(msg);
   assert.deepEqual(viaDefault, c, 'no-JEV default equals lexical for this paraphrase');
   assert.equal(gateEffect(msg, c), 'allows');
 });
 
-test('[C4] DISCLOSED-CONSERVATIVE: row-3 paraphrase "Could you put together the campaign for me?" is unresolved, gate refuses', () => {
+test('[C4] row-3 paraphrase "Could you put together the campaign for me?" is a task request', () => {
   const msg = 'Could you put together the campaign for me?';
   const c = classifyLexical(msg);
-  assert.equal(c.intent, 'unresolved');
-  assert.equal(c.executionPreference, 'unspecified');
-  assert.equal(gateEffect(msg, c), UNRESOLVED_GATE);
+  assert.equal(c.intent, 'task_request');
+  assert.equal(c.executionPreference, 'normal_delegation');
+  assert.equal(gateEffect(msg, c), 'allows');
 });
 
 test('[C4] DISCLOSED-CONSERVATIVE: row-6 paraphrase "I want you to write it yourself, no delegating." is unresolved', () => {
@@ -246,12 +252,12 @@ test('[C4] DISCLOSED-CONSERVATIVE: row-5 paraphrase "Just explain the options, n
   assert.equal(gateEffect(msg, c), UNRESOLVED_GATE);
 });
 
-test('[C4] DISCLOSED-CONSERVATIVE: row-9 paraphrase "Please ask Marketing to take care of it." is unresolved, no department invented', () => {
+test('[C4] row-9 paraphrase "Please ask Marketing to take care of it." is a task request and invents no department', () => {
   const msg = 'Please ask Marketing to take care of it.';
   const c = classifyLexical(msg);
-  assert.equal(c.intent, 'unresolved');
+  assert.equal(c.intent, 'task_request');
   assert.equal(c.executorName, undefined, 'no executor name is fabricated for an unrecognised department phrase');
-  assert.equal(gateEffect(msg, c), UNRESOLVED_GATE);
+  assert.equal(gateEffect(msg, c), 'allows');
 });
 
 test('[C4] DISCLOSED-CONSERVATIVE: row-10 paraphrase "Assign it to Jordan." is unresolved, no random worker picked', () => {

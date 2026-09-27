@@ -82,8 +82,104 @@ const CONTROL_PATTERNS: readonly RegExp[] = [
   /override\s+(all\s+)?(safety|policy|routing|guardrails?)/i,
 ];
 
+/**
+ * Work verbs that make a question-form message a task request (spec 4.4 row 3
+ * shape; spec 4.1 line 437: "'Can you build the page?' is normally a task
+ * request"). The first group is the verb set the bare-imperative rule below
+ * already treats as task work, `handle|do|help` are carried from the original
+ * question-form rule, and `review|update|fix|publish|set|put|take` are the
+ * verbs the ACC-012 acceptance pass measured as falling through to
+ * answer_only. A verb outside this set is never guessed at: the message falls
+ * to the informational rule or to unresolved, neither of which creates a card.
+ */
+const REQUEST_VERBS: ReadonlySet<string> = new Set([
+  'create', 'build', 'make', 'write', 'draft', 'send', 'prepare', 'generate',
+  'design', 'schedule', 'plan', 'handle', 'do', 'help',
+  'review', 'update', 'fix', 'publish', 'set', 'put', 'take',
+]);
+
 export function normalizeIntakeMessage(message: string): string {
   return message.trim().replace(/\s+/g, ' ');
+}
+
+/**
+ * Informational guard for the question-form task rule. A message whose work
+ * verb is governable by these verbs asks ABOUT the work, not FOR it: "Can you
+ * tell me how to create a campaign?" must stay answer_only (spec 4.4 rows 1,
+ * 2, 8; spec 4.1 line 437 "How would you build the page?").
+ *
+ * Two positions count as "governing":
+ *  - before the first request verb — "Can you tell me how to create ...";
+ *  - after a WEAK first verb ("help", "do"), whose object is the informational
+ *    act itself — "Can you help me understand how the campaign works?".
+ * A request verb that precedes the informational one keeps the message a task:
+ * "Please review the deck and tell me what to change." asks FOR a review and
+ * merely asks to be told the result.
+ */
+const METHOD_LEAD = /^\s*(how|what|which|why|when|where)\b/i;
+const INFORMATIONAL_VERBS: readonly RegExp[] = [
+  /\bexplain\b/,
+  /\btell\b/,
+  /\bshow\b/,
+  /\bdescribe\b/,
+  /\bwalk (me )?through\b/,
+  /\bunderstand\b/,
+  /\bknow\b/,
+  /\blearn\b/,
+];
+/**
+ * Weak first verbs: their object is whatever follows, so they alone do not
+ * prove a work request — "Can you help me?" is not a task. They keep the
+ * object shape the original question-form rule required, which is exactly the
+ * behaviour this rule had before the work-verb list was widened.
+ */
+const WEAK_VERBS: ReadonlySet<string> = new Set(['help', 'do']);
+const WEAK_VERB_OBJECT = /\b(for me|this|the|a|an|it)\b/;
+
+/** The work verb governing this message, or null when there is none. */
+function requestVerb(stripped: string): string | null {
+  const words = stripped.toLowerCase().match(/[a-z']+/g) ?? [];
+  for (const w of words) if (REQUEST_VERBS.has(w)) return w;
+  return null;
+}
+
+/**
+ * Spec 4.4 row 3 (question form) extended to spec 4.1 line 437.
+ *
+ * Two shapes reach it:
+ *  - modal request  — `can you <verb>`, `could you <verb>`, `would you
+ *    <verb>`, `will you <verb>`, `are you able to <verb>`, `any chance you
+ *    could <verb>`, or a `please <verb>` serving as the command.
+ *  - plain question — `can you <verb>` with no tail ("Can you build the
+ *    landing page from the brief?"), same door.
+ *
+ * The modal grammar is matched, never a bare punctuation mark: spec 4.5
+ * forbids substituting a punctuation/`contains('you')` classifier, and every
+ * assertion here holds with or without the trailing "?".
+ */
+function isQuestionFormTaskRequest(stripped: string): boolean {
+  const s = stripped.toLowerCase();
+  const modal =
+    /(?:^|[^a-z])(?:can|could|would|will) you\b/.test(s) ||
+    /\bare you able to\b/.test(s) ||
+    /\bany chance you(?:'d| would| could)?\b/.test(s) ||
+    /^please\b/.test(s);
+  if (!modal) return false;
+  const verb = requestVerb(s);
+  if (verb === null) return false;
+  if (METHOD_LEAD.test(s)) return false;
+  const head = s.slice(0, s.indexOf(verb));
+  if (INFORMATIONAL_VERBS.some((re) => re.test(head))) return false;
+  // A weak first verb hands its object to an informational verb after it
+  // ("Can you help me understand how the campaign works?"), and on its own it
+  // is not proof of work ("Can you help me?") — it keeps the object shape the
+  // original rule required.
+  if (WEAK_VERBS.has(verb)) {
+    const tail = s.slice(s.indexOf(verb) + verb.length);
+    if (INFORMATIONAL_VERBS.some((re) => re.test(tail))) return false;
+    if (!WEAK_VERB_OBJECT.test(tail)) return false;
+  }
+  return true;
 }
 
 export function hashIntakeMessage(message: string): string {
@@ -205,7 +301,14 @@ export function classifyLexical(message: string, ctx: IntakeContext = {}): Class
     return finish('mixed_answer_and_task', 'normal_delegation', message, controlProbe, 'lexical');
   }
   // Question-form task request ("Can you create the campaign for me?").
-  if (/\bcan you (create|build|make|write|draft|send|handle|do|help).{0,40}(for me|this|the|a|an|it)\b/i.test(stripped)) {
+  // The discriminator is the REQUEST VERB, not the leading interrogative
+  // (spec 4.1 line 437: "'Can you build the page?' is normally a task
+  // request. 'How would you build the page?' is normally an informational
+  // question."). The informational-METHOD verb guard runs first so that
+  // "Can you tell me how to create a campaign?" cannot be read as a request
+  // to create one; a bare "Can you explain how it works?" has no request verb
+  // and falls to the informational rule below.
+  if (isQuestionFormTaskRequest(stripped)) {
     return finish('task_request', 'normal_delegation', message, controlProbe, 'lexical');
   }
   // Informational questions ("What does Marketing do?", "How would you
