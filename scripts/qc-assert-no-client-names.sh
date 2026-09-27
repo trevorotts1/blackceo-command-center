@@ -284,7 +284,17 @@ if [ "${#CLIENT_NAMES[@]}" -gt 0 ]; then
 fi
 
 if [ -n "$SLUG_PATTERN" ]; then
-  SLUG_PATTERN="\b${SLUG_PATTERN}\b"
+  # QR-015: anchoring was "\b${SLUG_PATTERN}\b" — ONE \b pair around the WHOLE
+  # alternation. In ERE the \b binds only the FIRST and LAST alternative, so
+  # with 3+ slugs every MIDDLE alternative lost BOTH boundaries and became a
+  # bare substring: the gate flagged glued strings that merely CONTAIN a slug
+  # ("X<slug>", "<slug>Y") and matched slug fragments inside longer tokens.
+  # Anchor EACH alternative, exactly as the name tier above does
+  # (`printf '\\b%s\\b\n'`). Verified runtime capture at the parent revision:
+  #   bash -x ... | grep SLUG_PATTERN
+  #   + SLUG_PATTERN='\btest-alpha|test-beta|test-gamma\b'
+  SLUG_PATTERN="($(printf '%s\n' "$SLUG_PATTERN" | tr '|' '\n' \
+    | sed 's/^/\\b/; s/$/\\b/' | paste -sd'|' -))"
 fi
 
 PATTERN="${NAME_PATTERN:+${NAME_PATTERN}|}${SLUG_PATTERN:+${SLUG_PATTERN}|}${PATH_PATTERN}"
