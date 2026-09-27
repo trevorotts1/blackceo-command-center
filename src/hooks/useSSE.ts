@@ -8,6 +8,7 @@
 import { useEffect, useRef } from 'react';
 import { useMissionControl } from '@/lib/store';
 import { debug } from '@/lib/debug';
+import { boardStateDisagrees } from '@/lib/board/a41-row-fields';
 import type { SSEEvent, Task } from '@/lib/types';
 
 interface UseSSEOptions {
@@ -71,15 +72,14 @@ export function useSSE(options?: UseSSEOptions) {
         if (!res.ok) return;
         const fresh: Task[] = await res.json();
         const current = useMissionControl.getState().tasks;
-        const changed =
-          fresh.length !== current.length ||
-          fresh.some((t) => {
-            const c = current.find((ct) => ct.id === t.id);
-            // Compare updated_at too: a delta that leaves status unchanged
-            // (title/priority/assignee edits, activity) still bumps updated_at,
-            // and status-only comparison would silently skip the reconcile.
-            return !c || c.status !== t.status || c.updated_at !== t.updated_at;
-          });
+        // A41 — the changed-check lives in src/lib/board/a41-row-fields.ts and
+        // is shared with the department-scoped catch-up in
+        // src/app/workspace/[slug]/page.tsx. It reconciles on ANY A41 field
+        // difference (provider provenance, mismatch, hold, plan, scope,
+        // preparation/execution state), not only on status/updated_at: a
+        // mismatch or hold that lands without a tasks write previously sat on
+        // screen as stale truth until the 60s fallback poll.
+        const changed = boardStateDisagrees(fresh, current);
         if (changed) {
           debug.sse('Reconnect catch-up: board changed, reconciling store');
           useMissionControl.getState().setTasks(fresh);

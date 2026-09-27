@@ -1,55 +1,19 @@
 import { TaskContextError } from '@/lib/task-request-identity';
 import { assignmentCompany, TaskAgentAccessError } from '@/lib/task-agent-assignment';
 import { NextRequest, NextResponse } from 'next/server';
-import { queryAll, queryOne } from '@/lib/db';
+import { queryOne, queryAll } from '@/lib/db';
 import { CreateTaskSchema } from '@/lib/validation';
 import { createTaskCore } from '@/lib/tasks';
 import { classify, assertTaskCreationAllowed } from '@/lib/intake';
-import { loadSubtaskPersonas, loadPersonaBundleScopes } from '@/lib/persona-selector';
-import { getOpenPersonaMismatch } from '@/lib/persona-mismatch';
-import { getOpenDispatchHold } from '@/lib/dispatch-hold';
-import { getQcHeuristicPark } from '@/lib/qc-promote';
-import { getLatestBlockEvent } from '@/lib/block-events';
-import type { Task, CreateTaskRequest } from '@/lib/types';
+import {
+  buildTaskRowSelect,
+  projectTaskRows,
+  type TaskRowRaw,
+} from '@/lib/board/task-row-projection';
+import type { CreateTaskRequest } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
-
-// P4-02 step 5 — does this box carry the persona-blend bundle table (migration
-// 090)? Cached: schema presence is stable per process, and a pre-090 box must
-// not have its board fetch break on a JOIN to a missing table.
-let _bundleTablePresent: boolean | null = null;
-function bundleTableExists(): boolean {
-  if (_bundleTablePresent !== null) return _bundleTablePresent;
-  try {
-    const row = queryOne<{ name: string }>(
-      "SELECT name FROM sqlite_master WHERE type='table' AND name='task_persona_bundle'",
-      [],
-    );
-    _bundleTablePresent = !!row;
-  } catch {
-    _bundleTablePresent = false;
-  }
-  return _bundleTablePresent;
-}
-
-// A-U5 — does this box carry the scoped-bundle table (migration 104)? Same
-// cached table-existence guard pattern as bundleTableExists() above, so a
-// pre-104 box's board fetch never breaks attaching persona_bundle_scopes.
-let _scopeTablePresent: boolean | null = null;
-function scopeTableExists(): boolean {
-  if (_scopeTablePresent !== null) return _scopeTablePresent;
-  try {
-    const row = queryOne<{ name: string }>(
-      "SELECT name FROM sqlite_master WHERE type='table' AND name='task_persona_bundle_scope'",
-      [],
-    );
-    _scopeTablePresent = !!row;
-  } catch {
-    _scopeTablePresent = false;
-  }
-  return _scopeTablePresent;
-}
 
 // GET /api/tasks - List all tasks with optional filters
 export async function GET(request: NextRequest) {
@@ -71,35 +35,12 @@ export async function GET(request: NextRequest) {
     // tasks stay fully retrievable (audit, restore) — they are hidden, not gone.
     const includeArchived = searchParams.get('includeArchived') === 'true';
 
-    // P4-02 step 5 — surface the persona-blend audience-confirm state onto each
-    // board row so the card can flag 'pending' (awaiting audience confirm). Only
-    // joined when the table exists (pre-090 boxes get a NULL literal instead).
-    const hasBundle = bundleTableExists();
-    const blendConfirmSelect = hasBundle
-      ? 'tpb.confirm_state as blend_confirm_state'
-      : 'NULL as blend_confirm_state';
-    const blendConfirmJoin = hasBundle
-      ? 'LEFT JOIN task_persona_bundle tpb ON tpb.task_id = t.id'
-      : '';
-
-    let sql = `
-      SELECT
-        t.*,
-        t.workspace_id as department_id,
-        aa.name as assigned_agent_name,
-        aa.avatar_emoji as assigned_agent_emoji,
-        aa.status as assigned_agent_status,
-        ca.name as created_by_agent_name,
-        mr.label as model_label,
-        mr.provider as model_provider,
-        mr.input_cost_per_million as model_input_cost_per_million,
-        mr.output_cost_per_million as model_output_cost_per_million,
-        ${blendConfirmSelect}
-      FROM tasks t
-      LEFT JOIN agents aa ON t.assigned_agent_id = aa.id
-      LEFT JOIN agents ca ON t.created_by_agent_id = ca.id
-      LEFT JOIN model_registry mr ON t.model_id = mr.model_id
-      ${blendConfirmJoin}
+    // P4-02 step 5 / A41 — the persona-blend confirm column and its guarded
+    // JOIN are owned by the ONE shared projection: buildTaskRowSelect() below
+    // includes blendConfirmSelectExpr() + blendConfirmJoin() and their pre-090
+    // table-existence guard. This route owns no field list at all — only the
+    // WHERE / ORDER / LIMIT clauses it appends.
+    let sql = `${buildTaskRowSelect()}
       WHERE 1=1
     `;
     const params: unknown[] = [];
@@ -193,70 +134,14 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    const tasks = queryAll<Task & { assigned_agent_name?: string; assigned_agent_emoji?: string; assigned_agent_status?: string; created_by_agent_name?: string }>(sql, params);
+    const tasks = queryAll<TaskRowRaw>(sql, params);
 
-    // Transform to include nested agent info.
-    // ROBUST null-name guard (AF-TASKBOARD-NULLNAME): only emit the nested
-    // assigned_agent object when BOTH the id AND a non-empty name are present.
-    // A LEFT JOIN can return an agent_id whose joined agent row was deleted /
-    // has a NULL name, which previously produced a truthy { name: null } object.
-    // Every board consumer (MissionQueue avatar `.name.charAt`, the agent pill,
-    // DepartmentBrowser, the dept focus view, TaskModal) gates on
-    // `task.assigned_agent ?` being truthy, so a null-name object slipped past
-    // the gate and crashed the client with "Cannot read properties of null
-    // (reading 'charAt')". Returning `undefined` here eliminates the crash at
-    // the source for ALL consumers. Component-level guards remain as
-    // belt-and-suspenders.
-    const transformedTasks = tasks.map((task) => ({
-      ...task,
-      assigned_agent:
-        task.assigned_agent_id && task.assigned_agent_name
-          ? {
-              id: task.assigned_agent_id,
-              name: task.assigned_agent_name,
-              avatar_emoji: task.assigned_agent_emoji,
-              status: task.assigned_agent_status || 'standby',
-            }
-          : undefined,
-      // DEP-5 / F3.7 — attach the multi-persona plan rows so the kanban card can
-      // render slot chips on reload (SSE carries them live at selection time).
-      // loadSubtaskPersonas is tolerant: [] on a single-persona task or a
-      // pre-migration-088 box, so this never breaks the board.
-      subtask_personas: loadSubtaskPersonas(task.id),
-      // A-U5 — attach the per-page/scoped persona-blend rows (migration 104)
-      // behind the same table-existence guard as bundleTableExists() above;
-      // loadPersonaBundleScopes is itself tolerant, so this is belt-and-
-      // suspenders — [] on a pre-104 box or a task with no scoped bundles.
-      persona_bundle_scopes: scopeTableExists() ? loadPersonaBundleScopes(task.id) : [],
-      // B-U6 / U20 — declared-vs-used comparator. Only a task with a resolved
-      // voice_persona_id can ever mismatch (a bundle-less task never blended),
-      // so short-circuit the per-row events lookup for every other card.
-      // getOpenPersonaMismatch is fail-soft: never breaks the board.
-      persona_mismatch: task.voice_persona_id ? getOpenPersonaMismatch(task.id) : null,
-      // U37 (C-06) — S2 class-b visibility: the "routed but not runnable" hold
-      // (task-dispatcher.ts RESOLVER-DISPATCH gate) surfaced onto the card.
-      // No status/type guard needed (unlike persona_mismatch, which only ever
-      // applies to a blended task) — any card can be routed to an agent with
-      // no wired runtime. getOpenDispatchHold is fail-soft: never breaks the
-      // board, and derives from the LATEST activity so a later successful
-      // dispatch clears the chip automatically.
-      dispatch_hold: getOpenDispatchHold(task.id),
-      // U38 (C-07) — human-promote control gate. Short-circuited to every
-      // non-review card (mirrors the persona_mismatch short-circuit above):
-      // only a `review` task can ever carry a heuristic-parked qc_review
-      // event, so this skips the per-row events lookup for the rest of the
-      // board. getQcHeuristicPark is fail-soft: never breaks the board.
-      qc_heuristic_park: task.status === 'review' ? getQcHeuristicPark(task.id) : null,
-      // MR-30 — block history. The board (this route) is the data source the
-      // task-detail modal renders from (TaskModal takes the store's task prop
-      // and never refetches by id), so last_block_event MUST be attached here
-      // for BlockedReasonPanel's grey "Previously blocked" panel to render on
-      // an unblocked card. Short-circuited to non-blocked cards: a currently-
-      // blocked card renders the red/amber live panel from the block_* columns
-      // and needs no history lookup. getLatestBlockEvent is fail-soft (null on
-      // a pre-migration-117 box or a never-blocked task): never breaks the board.
-      last_block_event: task.status === 'blocked' ? null : getLatestBlockEvent(task.id),
-    }));
+    // A41 — ONE transform, shared with detail GET, every task_updated emit site
+    // and the broadcast() choke point (src/lib/board/task-row-projection.ts).
+    // This route previously hand-rolled its own copy of the row shape, which is
+    // exactly how the live-update and task-detail surfaces drifted out of
+    // agreement with it.
+    const transformedTasks = projectTaskRows(tasks);
 
     // MR-26 — paginated response. When ?limit was supplied the body wraps
     // `{ tasks, total }` so consumers can render a page-control UI. Without
