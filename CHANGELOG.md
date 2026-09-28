@@ -1,3 +1,12 @@
+## [v7.6.73] — 2026-09-28 — Stale doc numbers fixed; doc-number-drift CI guard added
+
+- fix(docs): QC.md's migration-range rubric item was frozen at "001-021" while `src/lib/db/migrations.ts` had grown to 164 (162 entries; 022/023 intentionally reserved) — corrected to the real range.
+- fix(docs): `src/lib/routing/canonical-slug.ts`'s docstring, `src/lib/sop-authoring.ts` (3 locations, including a runtime-visible `reason` string) and `docs/SOP-LAYERS.md` all said "24-slug ZHC canonical set" after `CANONICAL_SLUGS` grew to 26 (`engineering`, `funnels` added later with no comment update) — corrected to 26, and a phantom `security` entry that was never actually in the Set was dropped from the docstring's example list.
+- fix(docs): `scripts/cloudflare/README.md` and `setup-access-app.sh` referenced a stale "BlackCEO v4.0" product-version label unrelated to the app's real version — dropped.
+- fix(docs): `DEPLOYMENT.md`'s "Standard Deploy" / Rollback / Troubleshooting sections still taught the deprecated `scripts/deploy.sh` (the file's own top-of-file warning already declares it deprecated) — retargeted at `update.sh` throughout; bumped the stale "Last Updated" stamp.
+- feat(ci): added `scripts/check-doc-number-drift.sh` (+ `tests/unit/check-doc-number-drift.test.sh`), wired into `version-consistency.yml`, which fails the build if the department-count or migration-count/range claims above drift from their real source again.
+- CHANGELOG audit: the last 60 annotated tags are fully covered in both directions. Widening the audit surfaced 8 additional tags from abandoned/renumbered branches with no entry (3 whose real content already ships under a different, correctly-changelogged version; 5 whose code never merged to main at all) — documented as an investigation record in `.github/changelog-orphaned-tags.txt` rather than fabricating entries for them.
+
 ## [v7.6.72] — 2026-09-28 — README current-release drift guard
 
 - fix(docs): README.md's "Current release" heading and "current release is" prose were frozen at v7.3.3 for weeks while /version moved on; added `scripts/check-readme-current-release.sh`, wired into `version-consistency.yml`, and `scripts/bump-version.sh` now rolls both README version numbers on every future bump

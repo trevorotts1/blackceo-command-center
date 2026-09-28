@@ -2,7 +2,7 @@
 #
 # setup-access-app.sh
 #
-# One-shot Cloudflare Access App provisioner for a BlackCEO v4.0 client
+# One-shot Cloudflare Access App provisioner for a BlackCEO client
 # subdomain. Implements PRD Section 7.2 (P1-10).
 #
 # Given a subdomain and one or more operator emails, this script will:

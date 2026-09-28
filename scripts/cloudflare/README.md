@@ -1,7 +1,7 @@
 # Cloudflare Access setup
 
 One-shot provisioner for the Cloudflare Access app that gates every BlackCEO
-v4.0 client subdomain. Implements PRD Section 7.2 (P1-10).
+client subdomain. Implements PRD Section 7.2 (P1-10).
 
 ## Prerequisites
 

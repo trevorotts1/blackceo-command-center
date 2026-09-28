@@ -129,7 +129,7 @@ SOP.
 - **Where:** `src/lib/sop-authoring.ts`, invoked from `src/lib/task-dispatcher.ts`
 - **Trigger:** a task dispatches to a **custom** (non-ZHC-canonical) department with
   NO SOP match above the 0.5 threshold.
-- **Canonical departments (24 ZHC slugs) → REFUSED.** The guard is absolute. The
+- **Canonical departments (26 ZHC slugs) → REFUSED.** The guard is absolute. The
   build gate (`scripts/qc-cc.sh §9`) asserts this in source. Canonical depts use
   `copyCanonicalSOPForTask` to pull from the `role-library` instead (near-zero tokens).
 - **Custom departments → authored.** Flow:
