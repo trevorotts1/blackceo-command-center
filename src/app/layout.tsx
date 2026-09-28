@@ -13,11 +13,12 @@ import { loadCompanyConfig } from '@/lib/company-config';
 // import AppShell from '@/components/AppShell';
 
 // Fonts are vendored in ./fonts (latin subset, variable wght, SIL OFL 1.1 —
-// see the *-OFL.txt files) instead of next/font/google. next/font/google
-// downloads Google Fonts CSS at BUILD time; when that fetch hiccups the
-// unattended daily rebuild crashes ("Cannot read properties of null (reading
-// '1')") and rolls back. Local files make the build network-independent.
-// Family names, CSS variables, weight ranges and display are unchanged.
+// see the *-OFL.txt files) instead of being fetched from Google Fonts via
+// Next's font loader at BUILD time. That loader downloads Google Fonts CSS
+// during the build; when that fetch hiccups the unattended daily rebuild
+// crashes ("Cannot read properties of null (reading '1')") and rolls back.
+// Local files make the build network-independent. Family names, CSS
+// variables, weight ranges and display are unchanged.
 // ponytail: latin subset only (same as the preloaded subset before); add
 // other subsets as extra files if non-latin glyphs ever matter.
 const inter = localFont({
