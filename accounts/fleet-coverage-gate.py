@@ -23,7 +23,7 @@ any unmatched client. Two other clients (one missing from both switches and
 one present in the other switch) were both reported DOWN
 while perfectly healthy. This gate's reconcile mode now ALSO enforces (always,
 by default — see cf_token_map_reconcile()) that every roster mac-kind box has
-an entry in the single-source accounts/cf-token-map.json that replaced those
+an entry in the single-source CF-token map (private: ~/.openclaw/fleet/cf-token-map.json) that replaced those
 switches.
 
 This gate replaces the paragraph with a runnable check. It owns the canonical
@@ -104,7 +104,11 @@ PROBE_FLEET = os.path.join(HOME, "clawd", "fleet-heartbeat", "scripts", "probe-f
 # hostname / probe_match). probe-fleet.sh's probe_mac_tunnel() AND its
 # auto-update block both read ONLY this file (see _cf_token_for_tunnel()
 # there) — no more hand-maintained case statement to forget or let drift.
-DEFAULT_CF_TOKEN_MAP = os.path.join(HERE, "cf-token-map.json")
+# It names every client, so it lives OUTSIDE this public repo (private operator
+# config); accounts/cf-token-map.example.json shows the shape. Override with
+# $CF_TOKEN_MAP (the same variable probe-fleet.sh honors) or --cf-token-map.
+DEFAULT_CF_TOKEN_MAP = os.environ.get("CF_TOKEN_MAP") or os.path.join(
+    HOME, ".openclaw", "fleet", "cf-token-map.json")
 
 # Where the operator's fleet credentials live (env-var NAMES only are referenced;
 # VALUES are never logged — see mask()).
@@ -523,7 +527,7 @@ def cf_token_map_reconcile(boxes, cf_token_map_path):
     credential -> reported DOWN while healthy).
 
     Every roster box with kind == "mac" MUST have an entry in the single-source
-    CF-token map (accounts/cf-token-map.json), keyed by that box's exact
+    CF-token map (DEFAULT_CF_TOKEN_MAP, private), keyed by that box's exact
     probe_match (tunnel hostname) -- the one identifier proven identical across
     fleet-roster.json and probe-fleet.sh's ROSTER array. A roster mac box with
     no entry there is EXACTLY that incident waiting to happen again;
@@ -633,7 +637,7 @@ def reconcile(boxes, check_contabo, check_cloudflare=False, check_ghl=False,
             problems.append(("MISSING_FROM_HEARTBEAT", box_id,
                              f"{client} ({provider}) — '{pm}' not in probe-fleet.sh ROSTER"))
 
-    # 2b) CF Access token mapping (accounts/cf-token-map.json) — every roster
+    # 2b) CF Access token mapping (private CF-token map) — every roster
     #     mac-tunnel box must resolve to a token or probe-fleet.sh fail-closes
     #     it as DOWN. This is the structural fix for the token-borrowing
     #     incidents: a client present in the roster+heartbeat ROSTER
@@ -804,7 +808,7 @@ def main(argv):
     ap.add_argument("--roster", default=DEFAULT_ROSTER,
                     help="canonical roster JSON (default: accounts/fleet-roster.json)")
     ap.add_argument("--cf-token-map", default=DEFAULT_CF_TOKEN_MAP,
-                    help="single-source CF Access token map (default: accounts/cf-token-map.json); "
+                    help="single-source CF Access token map (default: $CF_TOKEN_MAP or ~/.openclaw/fleet/cf-token-map.json); "
                          "every roster mac-kind box must have an entry here or reconcile FAILS")
     ap.add_argument("--reconcile", action="store_true",
                     help="reconcile the roster against its machine copies (default mode)")

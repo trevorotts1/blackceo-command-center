@@ -70,6 +70,24 @@ CHANGE_LOG="${ROOT}/change-log.md"
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/id_ed25519}"
 SSH_OPTS="-i ${SSH_KEY} -o BatchMode=yes -o ConnectTimeout=8 -o ServerAliveInterval=5 -o ServerAliveCountMax=2 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$HOME/.ssh/known_hosts"
 
+# Per-box login shell for Mac remediation. Which boxes need a non-zsh shell is
+# client-identifying, so it lives in private operator config, not this repo:
+# one "<container glob> <shell>" per line, first match wins, unlisted -> zsh.
+MAC_SHELLS_CONF="${MAC_SHELLS_CONF:-$HOME/.openclaw/fleet/mac-shells.conf}"
+mac_shell_for() {
+  local pat sh
+  if [ ! -r "$MAC_SHELLS_CONF" ]; then
+    echo "remediate: WARN: per-box shell config missing ($MAC_SHELLS_CONF); skipping overrides, using zsh for $1" >&2
+    echo zsh; return 0
+  fi
+  while read -r pat sh _; do
+    case "$pat" in ''|'#'*) continue ;; esac
+    # shellcheck disable=SC2254  # $pat is a glob on purpose
+    case "$1" in $pat) echo "${sh:-zsh}"; return 0 ;; esac
+  done < "$MAC_SHELLS_CONF"
+  echo zsh
+}
+
 # ---- Platform classification: VPS-Docker vs Mac-tunnel ----------------------
 #
 # The probe passes us the SAME 8 fields it emits per client. For VPS clients
@@ -103,8 +121,8 @@ esac
 # structured fix plan to a fix-it-ourselves ticket without ever touching the box.
 if [ "$DRY_RUN" = "1" ] && [ -n "$FORCE_CLASS" ]; then
   _ps=$(echo "$CONTAINER" | sed 's/-openclaw-1$//'); _pd="/docker/${_ps}"
-  # Per-box shell for Mac plans: Barret's Mac uses bash; all others use zsh.
-  _mshell="zsh"; case "$CONTAINER" in rescue-barret-matthews*) _mshell="bash" ;; esac
+  # Per-box shell for Mac plans (private config; default zsh).
+  _mshell=$(mac_shell_for "$CONTAINER")
   case "$FORCE_CLASS" in
     config-invalid)       _plan="docker exec -u node ${CONTAINER} openclaw doctor --fix; docker restart ${CONTAINER}" ;;
     container-exited)     _plan="docker compose -f ${_pd}/docker-compose.yml up -d --force-recreate" ;;
@@ -147,32 +165,6 @@ _read_env_var() {
   line="${line%\"}"; line="${line#\"}"
   line="${line%\'}"; line="${line#\'}"
   printf '%s' "$line"
-}
-
-# Map a client name to its CF Access service-token env-var stem (mirror of the
-# case block in probe-fleet.sh::probe_mac_tunnel — keep the two in sync).
-_token_stem_for_client() {
-  case "$1" in
-    *Cassandra*) echo CASSANDRA ;;
-    *Kofi*)      echo KOFI ;;
-    *Teresa*)    echo TERESA ;;
-    *Karen*)     echo KAREN ;;
-    *Jill*)      echo JILL ;;
-    *Sheila*)    echo SHEILA ;;
-    *Aurelia*)   echo AURELIA ;;
-    *LeAnne*)    echo LEANNE_DOLCE ;;
-    *Sonatta*)   echo SONATTA_CAMARA ;;
-    *Talaya*)    echo TALAYA ;;
-    *Stephanie*) echo STEPHANIE ;;
-    *Jocelyn*)   echo JOCELYN ;;
-    *Barret*)    echo BARRET ;;
-    *Maria*)     echo MARIA ;;
-    *Christy*)   echo CHRISTY ;;
-    *Erin*)      echo ERIN ;;
-    *Lyric*)     echo LYRIC_HAWKINS ;;
-    *Star*)      echo STAR ;;
-    *)           echo TERESA ;;
-  esac
 }
 
 # Legacy naming used _SVC_ID/_SVC_SECRET for some newer clients; prefer the
@@ -427,16 +419,13 @@ EOF
     fi
 
     # Reachable but gateway endpoint not answering. Determine per-box shell
-    # first (Barret uses bash; all other Mac boxes use zsh), then probe for
+    # first (mac_shell_for: private config, default zsh), then probe for
     # config-invalid symptoms before deciding which repair to run.
     # We do NOT run `openclaw gateway restart` (it can evict a detached job
     # and take the gateway fully down). NOTE: on several Mac boxes the gateway
     # runs as a DETACHED `openclaw gateway run`; for those a kickstart
     # no-ops harmlessly and the box self-heals via its own gw-watchdog cron.
-    case "$CONTAINER" in
-      rescue-barret-matthews*) MAC_SHELL="bash" ;;
-      *) MAC_SHELL="zsh" ;;
-    esac
+    MAC_SHELL=$(mac_shell_for "$CONTAINER")
 
     # Probe config validity and gateway status (read-only; safe in both
     # dry-run and live modes). Capture output for detection + DIAG_BLOB.
