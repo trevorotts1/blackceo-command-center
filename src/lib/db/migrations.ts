@@ -7885,6 +7885,59 @@ export const migrations: Migration[] = [
       )`);
     },
   },
+  {
+    id: '163',
+    name: 'blueprint_load_capture',
+    // D26/A40: `execution_load_evidence` was created at the capture call site
+    // (ensureLoadEvidenceTable) because the capture had no production caller.
+    // The capture is now invoked at dispatch, so the table is a real schema
+    // dependency of a real write path: the dispatch must not depend on a DDL
+    // statement running inside it. CREATE TABLE IF NOT EXISTS is a no-op on a
+    // box that already created the table at a call site, so this heals forward
+    // with no backfill and no data movement.
+    up: (db) => {
+      db.exec(`CREATE TABLE IF NOT EXISTS execution_load_evidence (
+        execution_id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL,
+        revision_sha TEXT NOT NULL,
+        catalog_version TEXT,
+        expected_json TEXT NOT NULL,
+        required_json TEXT NOT NULL,
+        captured_at TEXT NOT NULL
+      )`);
+      db.exec('CREATE INDEX IF NOT EXISTS idx_execution_load_evidence_task ON execution_load_evidence(task_id)');
+      console.log('[Migration 163] execution_load_evidence table ready');
+    },
+  },
+  {
+    id: '164',
+    name: 'qc_content_adherence_verdict',
+    // A40 second clause: "independent artifact adherence ... checked, not only
+    // identity equality". The QC judge (the one independent, client-owned LLM
+    // authority already on the completion path) now renders an ADHERENCE
+    // verdict next to its score inside the SAME reply. This column is where
+    // that verdict is recorded, so the completion door can require it instead
+    // of trusting the score alone. NULL = not judged (pre-upgrade rows,
+    // non-content tasks, heuristic paths) and never blocks a done move;
+    // 0 = the judge read the artifact against the brief and said it does not
+    // follow it, which refuses done. Guarded exactly like migration 160 so a
+    // fresh install (schema.ts already declares the column) is a clean no-op.
+    up: (db) => {
+      const exists = db
+        .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_qc_results'")
+        .get();
+      if (!exists) {
+        console.log('[Migration 164] task_qc_results absent — nothing to record');
+        return;
+      }
+      const cols = new Set(
+        (db.prepare('PRAGMA table_info(task_qc_results)').all() as { name: string }[]).map((c) => c.name),
+      );
+      if (!cols.has('content_adherence'))
+        db.exec('ALTER TABLE task_qc_results ADD COLUMN content_adherence INTEGER');
+      console.log('[Migration 164] task_qc_results.content_adherence ready');
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner

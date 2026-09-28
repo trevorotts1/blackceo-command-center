@@ -84,7 +84,9 @@ import { throwIfJobLeaseLost } from '@/lib/jobs/job-lease';
  */
 
 import { requirePersonaConformanceForCompletion } from '@/lib/persona-conformance';
-import { validateExecutionCompletion, linkDeliverableToExecution } from '@/lib/execution-attempts';
+import { validateExecutionCompletion, linkDeliverableToExecution, latestExecution } from '@/lib/execution-attempts';
+import { verifyExecutionLoadEvidence } from '@/lib/execution-load-evidence';
+import type { BlueprintLoadReport } from '@/lib/execution-load-evidence';
 import { v4 as uuidv4 } from 'uuid';
 import path from 'path';
 import fs from 'fs';
@@ -452,6 +454,113 @@ function presentationReviewEvidenceGate(): boolean {
 }
 
 /**
+ * A40 done-door clause — "adherence ... checked, not only identity equality".
+ *
+ * The persona-conformance gate proves the artifact is the RIGHT artifact
+ * (identity, hashes, registered deliverable); it never reads content. The one
+ * independent content authority on the completion path is the QC judge, which
+ * now renders a content-adherence verdict next to its score in the SAME reply
+ * (task_qc_results.content_adherence, migration 164). When the judge
+ * explicitly judged the artifact NON-adherent (0), the done move is refused
+ * here even though every identity check passed.
+ *
+ * NULL = not judged (pre-164 rows, non-content tasks, heuristic/no-key paths)
+ * and NEVER blocks — the same SKIP-never-blocks doctrine the U117 comms gate
+ * uses. Only an explicit judge-false refuses. An unreadable/missing column
+ * (pre-164 database) also resolves to null: this clause can never brick a box
+ * that has not run the migration yet.
+ */
+function contentAdherenceRefusal(taskId: string): string | null {
+  try {
+    const row = queryOne<{ content_adherence: number | null }>(
+      'SELECT content_adherence FROM task_qc_results WHERE task_id=? ORDER BY scored_at DESC, rowid DESC LIMIT 1',
+      [taskId],
+    );
+    if (row && row.content_adherence === 0)
+      return (
+        'content_adherence_failed: the independent QC judge read the registered artifact and found its ' +
+        'content does not follow the task brief/persona. Identity equality alone is not adherence (A40) — ' +
+        'rework the content and resubmit for QC.'
+      );
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A40 done-door clause — the FIRST half: the blueprint load contract is
+ * CHECKED, not merely captured.
+ *
+ * The dispatch path captures what this execution was handed
+ * (captureExecutionLoadEvidence, migrations 163/164). Nothing read it back, so
+ * "load evidence exists" was true while "load evidence is checked" was not.
+ * This reads the producer's own `loaded_sections` back out of its `persona_used`
+ * report and verifies it against that capture with the existing
+ * verifyExecutionLoadEvidence — same reader, same contract, no second opinion.
+ *
+ * FAIL-OPEN by construction, and for one specific reason: no producer field
+ * carries loaded sections yet. The report is a free-text JSON blob the producer
+ * is instructed to send; the instruction (renderPersonaConformanceInstructions)
+ * asks for conformance_passed, not for loaded_sections. So "no loaded_sections"
+ * means the producer was never ASKED, which is not evidence of a bad load.
+ * Refusing there would fail every card on every box the moment the capture
+ * gained a real caller — the same class of defect as the `null !== undefined`
+ * comparison that failed every content card on 2026-09-21.
+ *
+ * So: a report that NAMES sections is checked hard (a named-but-missing section
+ * refuses done), and a report that names none is skipped with a warning. The
+ * clause becomes enforcing the day the dispatch instruction asks for it, and
+ * that one-line instruction change is the documented upgrade path.
+ * ponytail: add `loaded_sections` to the persona_used instruction in
+ * renderPersonaConformanceInstructions to arm this — no code change needed here.
+ */
+function blueprintLoadRefusal(taskId: string): string | null {
+  try {
+    const exec = latestExecution(taskId);
+    if (!exec) return null;
+    const reports = queryAll<{ metadata: string }>(
+      "SELECT metadata FROM task_activities WHERE task_id=? AND json_valid(metadata) AND json_extract(metadata,'$.kind')='persona_used' ORDER BY created_at DESC,rowid DESC",
+      [taskId],
+    );
+    for (const r of reports) {
+      let meta: {
+        execution_id?: string | null;
+        page?: string | null;
+        scope?: string | null;
+      } & BlueprintLoadReport;
+      try {
+        meta = JSON.parse(r.metadata);
+      } catch {
+        continue;
+      }
+      if (meta.execution_id !== exec.id) continue;
+      if (meta.page || meta.scope) continue;
+      const named = Array.isArray(meta.loaded_sections) && meta.loaded_sections.length > 0;
+      const namedScopes =
+        !!meta.scopes &&
+        typeof meta.scopes === 'object' &&
+        Object.values(meta.scopes as Record<string, unknown>).some(
+          (v) => Array.isArray(v) && v.length > 0,
+        );
+      // Nothing named = never asked. Skip, never block (see the doc comment).
+      if (!named && !namedScopes) return null;
+      const v = verifyExecutionLoadEvidence(taskId, exec.id, meta);
+      if (!v.pass)
+        return (
+          `blueprint_load_failed: ${v.reason}${v.missing?.length ? ` (missing ${v.missing.join(', ')})` : ''}. ` +
+          'The blueprint sections this execution was handed were not all loaded. ' +
+          'Loading every required section is part of adherence (A40), not identity equality.'
+        );
+      return null;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * FIX 25 — the review-flavored refusal. Same shape and remedies as
  * noEvidenceMessage (which is done-framed), so every door refuses with the
  * identical actionable text: register a deliverable at this exact endpoint.
@@ -788,6 +897,10 @@ export function transitionWithDeclaredException(args: {
     if(args.to==='done') {
       const conformance=requirePersonaConformanceForCompletion(args.taskId);
       if(!conformance.pass) throw new TransitionError('PRECONDITION_EVIDENCE',conformance.reason);
+      const adherenceRefusal=contentAdherenceRefusal(args.taskId);
+      if(adherenceRefusal) throw new TransitionError('PRECONDITION_EVIDENCE',adherenceRefusal);
+      const loadRefusal=blueprintLoadRefusal(args.taskId);
+      if(loadRefusal) throw new TransitionError('PRECONDITION_EVIDENCE',loadRefusal);
     }
     if (evidence.expectedExecutionId) {
       const executionError=validateExecutionCompletion(args.taskId,{executionId:evidence.expectedExecutionId});
@@ -988,6 +1101,10 @@ export async function transition(
     if(to==='done') {
       const conformance=requirePersonaConformanceForCompletion(taskId);
       if(!conformance.pass) throw new TransitionError('PRECONDITION_EVIDENCE',conformance.reason);
+      const adherenceRefusal=contentAdherenceRefusal(taskId);
+      if(adherenceRefusal) throw new TransitionError('PRECONDITION_EVIDENCE',adherenceRefusal);
+      const loadRefusal=blueprintLoadRefusal(taskId);
+      if(loadRefusal) throw new TransitionError('PRECONDITION_EVIDENCE',loadRefusal);
     }
     if (evidence.expectedExecutionId) {
       const executionError=validateExecutionCompletion(taskId,{executionId:evidence.expectedExecutionId});

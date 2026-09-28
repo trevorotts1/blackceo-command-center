@@ -62,6 +62,7 @@ import { throwIfJobLeaseLost } from '@/lib/jobs/job-lease';
  */
 
 import { requirePersonaConformanceForCompletion, currentExecutionDeliverables } from '@/lib/persona-conformance';
+import { requiredSectionsOf } from '@/lib/execution-load-evidence';
 import { latestExecution, supersedeStaleDeliverables } from '@/lib/execution-attempts';
 import { readFileSync, writeFileSync, renameSync, unlinkSync, existsSync, statSync, openSync, readSync, closeSync, readdirSync } from 'fs';
 import * as path from 'path';
@@ -2235,6 +2236,14 @@ export interface QCScorerInput {
    * "brief completeness" to "deliverable fulfillment" mode.
    */
   deliverableManifest?: DeliverableManifestItem[] | null;
+  /**
+   * A40: the blueprint sections this task's persona bundle declares
+   * (`blueprintSections.required`), rendered into the artifact-fulfillment
+   * prompt so the judge's adherence verdict compares the artifact against the
+   * SAME contract the dispatch and load evidence name. Empty/absent renders
+   * "none declared" and never fails the prompt.
+   */
+  blueprintSections?: string[] | null;
 }
 
 export interface QCResult {
@@ -2290,6 +2299,16 @@ export interface QCResult {
   judgeEndpoint?: string;
   /** Verbatim, human-readable statement of what actually went wrong. */
   judgeFailureDetail?: string;
+  /**
+   * A40: the judge's CONTENT-ADHERENCE verdict from the SAME reply as the
+   * score — does the artifact follow the declared brief/persona instead of
+   * merely existing with the right identity? true/false when the judge
+   * answered the adherence question; null/absent when it did not (heuristic
+   * paths, no manifest, non-conforming judge reply) — and null NEVER blocks,
+   * mirroring the U117 comms gate's SKIP-never-blocks doctrine. false refuses
+   * the done move at the lifecycle door and is recorded on task_qc_results.
+   */
+  contentAdherence?: boolean | null;
 }
 
 /**
@@ -2489,6 +2508,13 @@ export function buildQCPrompt(input: QCScorerInput): string {
       ? `**SOP Steps:**\n${input.sopSteps}`
       : '**No SOP — score against the request only.**';
 
+    // A40: the same declared contract the dispatch hands the producer and the
+    // load evidence measures. Rendered verbatim so the adherence verdict below
+    // is against THIS task's declared blueprint, not a guess about "the brief".
+    const blueprintSection = input.blueprintSections?.length
+      ? `**Declared Blueprint Sections (this task's persona bundle requires these):**\n${input.blueprintSections.map((s) => `  - ${s}`).join('\n')}`
+      : '**Declared Blueprint Sections:** none declared for this task — judge adherence against the request above.**';
+
     return `${agentIdentity}
 
 **ARTIFACT-FULFILLMENT QC MODE**
@@ -2499,6 +2525,8 @@ Score whether the delivered artifact(s) satisfy the request. Do NOT penalise a t
 
 **Deliverables Manifest:**
 ${manifestLines}
+
+${blueprintSection}
 
 ${sopSection}
 
@@ -2526,6 +2554,13 @@ ${sopSection}
    content could not be verified rather than asserting it is empty.
 6. A deliverable is never missing or empty merely because it is a link rather
    than a file path. [url] items are delivered artifacts.
+7. CONTENT ADHERENCE — answer this honestly and independently of the score:
+   does the artifact's actual content follow the request and the declared
+   blueprint sections above (right audience/voice/method, required sections
+   present), rather than merely existing under the right filename? Report it
+   as "content_adherence". An artifact whose content ignores or contradicts
+   the brief is NOT adherent even if well-formed; use null ONLY when you
+   genuinely cannot see the content (every excerpt UNKNOWN/binary).
 
 **Gate:** ≥8.5 = PASS (auto-approve), <8.5 = RETURN (kick back for rework).
 
@@ -2533,6 +2568,7 @@ Reply in this EXACT JSON format (no other text):
 {
   "score": <number 1.0–10.0>,
   "pass": <boolean>,
+  "content_adherence": <true | false | null>,
   "reason": "<1–2 sentence summary>",
   "gaps": ["<specific gap 1>", "<specific gap 2>"]
 }
@@ -2886,7 +2922,7 @@ async function llmScoreViaJudge(
   const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
 
   // ── MALFORMED RESPONSE — never silently swallowed ─────────────────────────
-  let parsed: { score: number; pass: boolean; reason: string; gaps: string[] };
+  let parsed: { score: number; pass: boolean; reason: string; gaps: string[]; content_adherence?: boolean | null };
   try {
     parsed = JSON.parse(cleaned) as typeof parsed;
   } catch (err) {
@@ -2918,6 +2954,11 @@ async function llmScoreViaJudge(
       reason: typeof parsed.reason === 'string' ? `[model-stated] ${parsed.reason}` : `Score: ${score.toFixed(1)}/10`,
       gaps: Array.isArray(parsed.gaps) ? parsed.gaps.filter((g) => typeof g === 'string') : [],
       scoringPath: 'llm',
+      // A40: carry the judge's adherence verdict off the SAME reply. Only an
+      // explicit boolean counts — a missing/`null`/malformed field reads as
+      // "not judged" (null) and never blocks a done move by itself.
+      contentAdherence:
+        parsed.content_adherence === true ? true : parsed.content_adherence === false ? false : null,
       // FIX 14: record WHICH judge actually ran — the widened selection means
       // the provider is no longer a constant, so every llm-path verdict carries
       // its judge identity for the board event and the escalation surfaces.
@@ -6188,6 +6229,26 @@ export async function runEngineOwnedDeckQC(
   return result;
 }
 
+/**
+ * A40: the declared blueprint sections for a task's root persona bundle, read
+ * through the SAME reader the load-evidence capture uses (requiredSectionsOf)
+ * so the judge prompt and the load check can never name different contracts.
+ * Returns [] when the task has no bundle, the table is absent (pre-migration
+ * box), or the bundle declares nothing — the caller renders "none declared".
+ */
+function blueprintSectionsForJudge(taskId: string): string[] {
+  try {
+    const row = queryOne<{ bundle_json: string }>(
+      'SELECT bundle_json FROM task_persona_bundle WHERE task_id=?',
+      [taskId],
+    );
+    if (!row) return [];
+    return requiredSectionsOf(JSON.parse(row.bundle_json));
+  } catch {
+    return [];
+  }
+}
+
 export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
   if (DISABLE_QC_SCORER) {
     console.log('[QCScorer] DISABLE_QC_AUTO_SCORER is set, skipping auto-QC');
@@ -6878,6 +6939,7 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
           qcAgentModel: qcAgent?.model ?? null,
           writerModel,
           deliverableManifest: deliverableManifest,
+          blueprintSections: blueprintSectionsForJudge(task.id),
         };
         result = await scoreTaskForQC(input);
       }
@@ -7095,6 +7157,13 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
     const personaConformance=requirePersonaConformanceForCompletion(taskId);
     if(result.pass && !personaConformance.pass) result={...result,pass:false,
       reason:`${result.reason} — ${personaConformance.reason}`,gaps:[...result.gaps,personaConformance.reason]};
+    // A40: the judge's OWN adherence verdict (same reply as the score) is
+    // authoritative when it is false. A well-formed artifact that does not
+    // follow the brief must not pass on file-existence alone — this is the
+    // in-scorer half of the door clause in task-lifecycle; null never blocks.
+    if(result.pass && result.contentAdherence === false) result={...result,pass:false,
+      reason:`${result.reason} — content_adherence:false (the artifact does not follow the task brief/persona; identity alone is not adherence)`,
+      gaps:[...result.gaps,'content_adherence_failed']};
 
     // CC-FIXTURE-003: the personable/QC fixture write guard — refuse a durable
     // task_qc_results row when the verdict came from a fixture (merged from
@@ -7127,8 +7196,8 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
       // QC-VERDICT-RECORD-20260922: the WHY rides with the score (migration 160).
       run(
         `INSERT INTO task_qc_results
-           (id, task_id, workspace_id, department_slug, score, passed, scoring_path, qc_agent_id, attempt, scored_at, reason, gaps)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           (id, task_id, workspace_id, department_slug, score, passed, scoring_path, qc_agent_id, attempt, scored_at, reason, gaps, content_adherence)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           uuidv4(),
           taskId,
@@ -7142,6 +7211,9 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
           now,
           result.reason ?? null,
           JSON.stringify(result.gaps ?? []),
+          // A40 (migration 164): the judge's adherence verdict, from the SAME
+          // reply as the score. NULL = not judged (never blocks the door).
+          result.contentAdherence === true ? 1 : result.contentAdherence === false ? 0 : null,
         ],
       );
     } catch (qcPersistErr) {
