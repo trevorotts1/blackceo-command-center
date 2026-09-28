@@ -1,3 +1,10 @@
+## [v7.6.74] — 2026-09-28 — Zero-downtime update: nothing live changes until the new release is promoted
+
+- fix(update): `update.sh` merged origin/main into the LIVE checkout and ran `npm ci` in the LIVE directory before building. From that moment the source no longer matched the running build, so every restart during the build (a crash, pm2, the watchdog) was refused by `cc-start.sh`'s content guard (exit 78), and a client's Command Center stayed dark for about 35 minutes (2026-09-28). New zero-downtime path, used when the update is a fast-forward of a clean tracked tree (the fleet's normal case): fetch only, stage the TARGET release's `scripts/` outside the live tree, run the target's gateway contract check, then `scripts/atomic-deploy.sh --revision <origin/main>` builds a candidate from that commit in its own directory (its own npm ci and native gate), promotes it, moves the live tree onto it and restarts. The live source, node_modules and .next are untouched until promotion. Checkouts with local commits, local edits or a divergent local main still take the merge path, unchanged. `CC_UPDATE_ZERO_DOWNTIME=0` forces the merge path.
+- fix(atomic-deploy): the worktree sync fast-forwards the current branch when it can, so the checkout stays on main instead of being left detached. The Phase 5 watchdog schedule now points at the live checkout's `install-watchdog-cc.sh` (a staged copy is deleted after the update).
+- refactor(update): the departments sync, gateway contract check and pm2-name resolution are shared functions used by both paths.
+- test: `scripts/update-preserve-per-box-config.test.sh` scenarios 9 and 10 fail if the live source, node_modules, .next or tracked tree changes before promotion, or if npm runs in the live tree. Against the previous `update.sh` they fail 5 checks; all 45 pass now.
+
 ## [v7.6.73] — 2026-09-28 — Stale doc numbers fixed; doc-number-drift CI guard added
 
 - fix(docs): QC.md's migration-range rubric item was frozen at "001-021" while `src/lib/db/migrations.ts` had grown to 164 (162 entries; 022/023 intentionally reserved) — corrected to the real range.
