@@ -1,7 +1,7 @@
 /** Server-only launcher for a validated operator intake contract. */
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { mkdir, mkdtemp, writeFile } from 'fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import { bridgeReceipt, loadOperatorPresentationContract } from '@/lib/presentation-operator-contract';
@@ -53,5 +53,7 @@ export async function launchOperatorPresentationContract(taskId: string): Promis
     if (rc === 7) return { kind: 'deferred', detail };
     if (rc === 8) return { kind: 'blocked', detail };
     return { kind: 'retryable', detail };
+  } finally {
+    await rm(temp, { recursive: true, force: true }).catch(() => {});
   }
 }
