@@ -61,6 +61,10 @@ jobs:
           fi
           echo "✅ All 5 version locations agree at $V_ROOT"
 
+      - name: "README current-release freshness (scripts/check-readme-current-release.sh)"
+        shell: bash
+        run: bash scripts/check-readme-current-release.sh
+
       # The guard proves itself before it judges anything. The bounded wait
       # below is unobservable in a normal run -- it only engages when this job
       # races auto-tag-on-merge.yml on a release push, which is precisely when
