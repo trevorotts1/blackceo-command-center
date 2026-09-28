@@ -380,6 +380,49 @@ export function connectionMayReceive(
 }
 
 /**
+ * A41 — ONE projection at the choke point.
+ *
+ * Every task-family emitter (30 sites across routes, sweeps, libs) calls
+ * broadcast() with a payload it assembled itself: a bare `SELECT t.*`, a
+ * partial join, or — in stale-task-sweep — a synthetic `{ id, status }`. The
+ * board GET meanwhile returns the fully projected row, and the Zustand store
+ * replaces a card WHOLESALE on task_updated, so a live payload with fewer keys
+ * silently DELETED the fields the board had rendered (model_label,
+ * model_provider, persona_mismatch, dispatch_hold, subtask_personas,
+ * persona_bundle_scopes, blend_confirm_state).
+ *
+ * Rather than edit 30 call sites — and re-break the agreement the next time
+ * someone adds a field — the projection happens ONCE, here, on the way out:
+ * when a task_updated/task_created payload names a task that exists, the
+ * event carries that task's projected row. Callers keep passing whatever row
+ * they already had; the wire payload is the same shape as refresh and detail.
+ *
+ * Fail-soft and non-recursive: this module never broadcasts from inside the
+ * projection helpers, and any failure (missing table, deleted row, projection
+ * throw) leaves the caller's own payload in place rather than dropping the
+ * event. The extra read is one indexed single-row SELECT per task broadcast.
+ */
+function projectTaskEventPayload(event: SSEEvent): SSEEvent {
+  if (event.type !== 'task_updated' && event.type !== 'task_created') return event;
+  const payload = event.payload as { id?: unknown } | null | undefined;
+  if (!payload || typeof payload !== 'object') return event;
+  const id = payload.id;
+  if (typeof id !== 'string' || !id) return event;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { loadTaskRow } = require('@/lib/board/task-row-projection') as typeof import('@/lib/board/task-row-projection');
+    const projected = loadTaskRow(id);
+    // A caller-supplied field this projection does not model (persona-selector
+    // attaches an in-memory subtask_personas plan that the table read can race)
+    // is preserved: the projected row wins on every field it owns, and the
+    // caller's extras survive on top.
+    return projected ? { ...event, payload: { ...payload, ...projected } } : event;
+  } catch {
+    return event; // never let projection break a mutation's broadcast
+  }
+}
+
+/**
  * Broadcast an event to connected SSE clients, AND journal it to the
  * shared SQLite fan-out bus so cross-process clients see it on their next
  * poll tick.
@@ -394,14 +437,19 @@ export function connectionMayReceive(
  */
 export function broadcast(event: SSEEvent, options?: BroadcastOptions): void {
   const encoder = new TextEncoder();
+  // A41 — project the task-family payload BEFORE scope resolution and before
+  // both delivery paths, so the in-memory push, the cross-process journal, and
+  // (through the journal) a reconnecting browser all carry the same row shape
+  // the refresh and detail surfaces serve.
+  const projectedEvent = projectTaskEventPayload(event);
   // Explicit scope wins (null forces operator-level); otherwise derive from
   // the event itself so every existing call site is filtered without being
   // touched. Unresolvable events stay unscoped (legacy fan-out, unchanged).
   const eventCompanyId: string | null = options?.companyId !== undefined
     ? (options.companyId ?? null)
-    : scopeForEvent(event);
+    : scopeForEvent(projectedEvent);
   const wireEvent =
-    eventCompanyId === null ? event : { ...event, companyId: eventCompanyId };
+    eventCompanyId === null ? projectedEvent : { ...projectedEvent, companyId: eventCompanyId };
   const data = `data: ${JSON.stringify(wireEvent)}\n\n`;
   const encoded = encoder.encode(data);
 
@@ -419,7 +467,11 @@ export function broadcast(event: SSEEvent, options?: BroadcastOptions): void {
   // MR-10: dual-write to the shared SQLite journal so clients pinned to
   // OTHER processes discover this event during their poll loop. The scope
   // travels in the journaled payload so the cross-process path filters too.
-  journalEvent(eventCompanyId === null ? event : { ...event, companyId: eventCompanyId });
+  // A41 — the journal carries the SAME projected wireEvent the in-memory path
+  // delivers, so a client that reads this event off the cross-process poll
+  // sees the identical row shape (previously it journaled the unprojected
+  // caller payload while push delivered the projected one).
+  journalEvent(wireEvent);
 
   console.log(`[SSE] Broadcast ${event.type} to ${clients.size} client(s)`);
 }

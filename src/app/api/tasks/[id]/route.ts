@@ -16,17 +16,15 @@ import type { Task, UpdateTaskRequest, Agent, TaskDeliverable } from '@/lib/type
 import { checkTriad, getBestSOPForTask } from '@/lib/sops';
 import { proposeDraftFromTask } from '@/lib/sop-learning';
 import { runQCOnReview } from '@/lib/qc-scorer';
-import { selectPersonaForTask, buildPersonaReason, loadPersonaBundleScopes } from '@/lib/persona-selector';
+import { selectPersonaForTask, buildPersonaReason } from '@/lib/persona-selector';
 import { recordPersonaCompletions } from '@/lib/tasks';
-import { getOpenPersonaMismatch } from '@/lib/persona-mismatch';
-import { getOpenDispatchHold } from '@/lib/dispatch-hold';
-import { recordBlockEvent, getLatestBlockEvent } from '@/lib/block-events';
-import { getQcHeuristicPark } from '@/lib/qc-promote';
+import { recordBlockEvent } from '@/lib/block-events';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { collectCompletionEvidence, noEvidenceMessage } from '@/lib/completion-evidence';
 import { notifyOwner } from '@/lib/notify';
 import { notifyOwnerAssigned, notifyOwnerDone } from '@/lib/owner-reports';
 import { evaluatePresentationsCompletionGate, PROCESS_CERTIFICATE_SHA_RE } from '@/lib/presentations-cert-gate';
+import { loadTaskRow } from '@/lib/board/task-row-projection';
 import { transition, TransitionError, type LifecycleState, LEGAL_TRANSITIONS, getArtifactDirLastActivity } from '@/lib/task-lifecycle';
 
 export const dynamic = 'force-dynamic';
@@ -39,37 +37,20 @@ export async function GET(
 ) {
   try {
     const { id } = await params;
-    const task = queryOne<Task>(
-      `SELECT t.*,
-        aa.name as assigned_agent_name,
-        aa.avatar_emoji as assigned_agent_emoji,
-        mr.label as model_label,
-        mr.provider as model_provider,
-        mr.input_cost_per_million as model_input_cost_per_million,
-        mr.output_cost_per_million as model_output_cost_per_million
-       FROM tasks t
-       LEFT JOIN agents aa ON t.assigned_agent_id = aa.id
-       LEFT JOIN model_registry mr ON t.model_id = mr.model_id
-       WHERE t.id = ?`,
-      [id]
-    );
+    // A41 — the ONE shared projection (src/lib/board/task-row-projection.ts).
+    // This GET previously hand-rolled a SMALLER row shape than the board list:
+    // it joined the same model_registry columns but never attached
+    // subtask_personas or blend_confirm_state, so the task-detail modal and the
+    // board card disagreed about the same task. It now serves byte-identical
+    // row keys — including provider_truth (preparation/execution state) and the
+    // guarded blend-confirm column — differing only by the two fields that are
+    // meaningful for a single open task and not for a board of them.
+    const projected = loadTaskRow(id);
 
-    if (!task) {
+    if (!projected) {
       return NextResponse.json({ error: 'Task not found' }, { status: 404 });
     }
 
-    // B-U6 / U20 — declared-vs-used comparator, same field the tasks-list GET
-    // attaches (src/app/api/tasks/route.ts). Fail-soft, short-circuited when
-    // this task never resolved a voice persona.
-    // A-U5 — per-page/scoped persona-blend rows (migration 104). Fail-soft:
-    // loadPersonaBundleScopes tolerates a pre-104 box or a table-read error
-    // by returning [], never breaking this single-task fetch.
-    // U37 (C-06) — same class-b hold field the tasks-list GET attaches
-    // (src/app/api/tasks/route.ts); powers the task-detail modal's
-    // DispatchHoldPanel. Fail-soft, derived from the latest activity.
-    // U38 (C-07) — same human-promote control gate the tasks-list GET
-    // attaches; powers the task-detail modal's QcPromotePanel. Short-circuited
-    // to review-status tasks only (see route.ts's short-circuit comment).
     // TICKET 5a (L-09): read-side heartbeat proxy — most recent mtime under
     // this task's artifact directory, independent of tasks.status. Lets a
     // status check show "actively rendering" even when the board's own status
@@ -77,13 +58,8 @@ export async function GET(
     // minutes of false reassurance). null means no signal available, not
     // "confirmed inactive" — callers must not treat it as a negative proof.
     const withMismatch: Task = {
-      ...task,
-      persona_mismatch: task.voice_persona_id ? getOpenPersonaMismatch(task.id) : null,
-      persona_bundle_scopes: loadPersonaBundleScopes(task.id),
-      dispatch_hold: getOpenDispatchHold(task.id),
-      qc_heuristic_park: task.status === 'review' ? getQcHeuristicPark(task.id) : null,
-      last_block_event: getLatestBlockEvent(task.id),
-      last_activity_at: getArtifactDirLastActivity(task.id),
+      ...projected,
+      last_activity_at: getArtifactDirLastActivity(id),
     };
 
     return NextResponse.json(withMismatch);
@@ -963,19 +939,14 @@ export async function PATCH(
       }
     }
 
-    // Fetch updated task with all joined fields
-    const task = queryOne<Task>(
-      `SELECT t.*,
-        aa.name as assigned_agent_name,
-        aa.avatar_emoji as assigned_agent_emoji,
-        ca.name as created_by_agent_name,
-        ca.avatar_emoji as created_by_agent_emoji
-       FROM tasks t
-       LEFT JOIN agents aa ON t.assigned_agent_id = aa.id
-       LEFT JOIN agents ca ON t.created_by_agent_id = ca.id
-       WHERE t.id = ?`,
-      [id]
-    );
+    // A41 — the ONE shared projection (src/lib/board/task-row-projection.ts),
+    // not a second smaller SELECT. This site previously assembled its own join
+    // list (no model_registry at all, so its payload had NO model_label /
+    // model_provider / provider_truth), which meant the live-update surface
+    // and the refresh surface disagreed about the same task the moment a PATCH
+    // fanned out. broadcast() now also re-projects at the choke point, but
+    // fetching the shared shape here keeps the payload it hands over complete.
+    const task = loadTaskRow(id);
 
     // Broadcast task update via SSE
     if (task) {
