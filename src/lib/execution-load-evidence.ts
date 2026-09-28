@@ -85,8 +85,11 @@ export interface LoadEvidenceVerdict {
 }
 
 /** The blueprint contract a bundle declares. Additive/optional: bundles
- * persisted before D26 carry nothing here and verify soft (see below). */
-function requiredSectionsOf(bundle: unknown): string[] {
+ * persisted before D26 carry nothing here and verify soft (see below).
+ * Exported (A40 fix) so the QC judge prompt can render the same contract the
+ * load check measures against — one reader for "what does this bundle require",
+ * never two answers to the same question. */
+export function requiredSectionsOf(bundle: unknown): string[] {
   if (!bundle || typeof bundle !== 'object') return [];
   const required = (bundle as { blueprintSections?: { required?: unknown } })
     .blueprintSections?.required;

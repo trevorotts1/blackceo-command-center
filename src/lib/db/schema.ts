@@ -678,7 +678,11 @@ CREATE TABLE IF NOT EXISTS task_qc_results (
   scoring_path TEXT NOT NULL,
   qc_agent_id TEXT,
   attempt INTEGER DEFAULT 1,
-  scored_at TEXT NOT NULL DEFAULT (datetime('now'))
+  scored_at TEXT NOT NULL DEFAULT (datetime('now')),
+  -- A40 (migration 164 adds this to existing DBs): the judge's content-adherence
+  -- verdict from the SAME reply as the score. NULL = not judged, never blocks;
+  -- 0 = judged non-adherent, refuses done at the lifecycle door.
+  content_adherence INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_qc_results_task ON task_qc_results(task_id, scored_at DESC);
 CREATE INDEX IF NOT EXISTS idx_qc_results_dept ON task_qc_results(department_slug, scored_at DESC);

@@ -2,6 +2,7 @@ import { resolveSpecialistSessionKey } from '@/lib/routing/executor-runtime';
 import { isCatchAllRoutingReason, isCatchAllWorkspace } from '@/lib/routing/catch-all-policy';
 import { capturePersonaSnapshot } from '@/lib/persona-state';
 import { renderPersonaConformanceInstructions } from '@/lib/persona-conformance';
+import { captureExecutionLoadEvidence } from '@/lib/execution-load-evidence';
 /**
  * task-dispatcher.ts — Server-only.
  *
@@ -2204,6 +2205,18 @@ If you need help or clarification, ask the orchestrator.`;
     const execution = claim.execution;
     if (!beginExecutionSend(execution)) return { status: 'held', reason: 'claim_superseded', executionId };
     try {
+      // A40: record the load contract (revision + required blueprint sections)
+      // at the moment the work is handed over — the one moment it is known what
+      // THIS execution was given. Before this call the capture had no
+      // production caller, so load evidence could never exist on a real card.
+      // Never fatal: a task without a persona bundle or a pre-migration box
+      // returns a soft status, and a capture failure must not block a dispatch
+      // (matching renderPersonaConformanceInstructions' own no-op posture).
+      try {
+        captureExecutionLoadEvidence(task.id, execution.id);
+      } catch (loadCapErr) {
+        console.warn(`[task-dispatcher] load-evidence capture skipped for ${task.id}/${execution.id}:`, (loadCapErr as Error).message);
+      }
       const response = await client.call('chat.send', {
         sessionKey,
         message: `${taskMessage}\n\n${renderPersonaConformanceInstructions(task.id, executionId, agent.id, missionControlUrl)}\n\n**Execution ID:** ${execution.id}\nFor task completion, include execution_id: "${execution.id}" in the completion webhook JSON.`,

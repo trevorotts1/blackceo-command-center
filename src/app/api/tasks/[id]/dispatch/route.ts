@@ -1,5 +1,6 @@
 import { capturePersonaSnapshot } from '@/lib/persona-state';
 import { renderPersonaConformanceInstructions } from '@/lib/persona-conformance';
+import { captureExecutionLoadEvidence } from '@/lib/execution-load-evidence';
 import { NextRequest, NextResponse } from 'next/server';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -869,6 +870,16 @@ If you need help or clarification, ask the orchestrator.`;
     if (!beginExecutionSend(execution)) return NextResponse.json({success:false,held:true,reason:'claim_superseded'},{status:409});
     let acknowledged = false;
     try {
+      // A40: record the load contract (revision + required blueprint sections)
+      // at the moment the work is handed over. Before this call the capture had
+      // no production caller, so load evidence could never exist on a real
+      // card. Never fatal — a bundle-less task or pre-migration box returns a
+      // soft status, and a capture failure must not block a dispatch.
+      try {
+        captureExecutionLoadEvidence(task.id, execution.id);
+      } catch (loadCapErr) {
+        console.warn(`[dispatch route] load-evidence capture skipped for ${task.id}/${execution.id}:`, (loadCapErr as Error).message);
+      }
       // Send message to agent's session using chat.send.
       //
       // GATEWAY CONTRACT (verified against installed OpenClaw 2026.5.28 source,
