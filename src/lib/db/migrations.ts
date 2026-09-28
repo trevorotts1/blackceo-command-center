@@ -5563,7 +5563,7 @@ export const migrations: Migration[] = [
   {
     // ── Migration 122 — Podcast Editor seed + skills/agent_skills tables + QC judge model ──
     // PHASE 3 (master plan 2026-08-04, units 3.1-3.3) — Command Center wiring for the
-    // podcast department. Fixes Leanne's report that the CC has no Podcast Editor agent
+    // podcast department. Fixes an operator report that the CC has no Podcast Editor agent
     // row, no skills table, no skill bindings, and no QC judge.
     //
     //   3.1  Seed the `podcast-editor` specialist row (idempotent on the ROLE SLOT —
@@ -9810,7 +9810,7 @@ export function reseedWorkspacesFromConfig(
       }
     }
 
-    // DEFECT 2 fix (2026-08-04, "WANTED Woman" incident — 72 workspace rows
+    // DEFECT 2 fix (2026-08-04, "Client A" incident — 72 workspace rows
     // for 35 departments, 288 agents for a 36-agent workforce).
     //
     // The FM-6 / MR-21 guards above (canonOwner lookup, dept- prefix

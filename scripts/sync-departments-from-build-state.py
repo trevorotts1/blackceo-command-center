@@ -499,7 +499,7 @@ def _canonical_dept_slug(slug):
     "billing" -> "billing-finance") -- that full alias table is the CC app's
     single source of truth and this script must never fork a second, drifting
     copy of it. The dept- prefix collision is exactly the literal shape of
-    the 2026-08-04 "WANTED Woman" incident (36 `dept-<slug>` rows + 36
+    the 2026-08-04 "Client A" incident (36 `dept-<slug>` rows + 36
     `<slug>` rows for the same 36 departments); any alias-level duplicate
     this simpler pass misses is still healed by the TS-side
     dedupeCanonicalWorkspaces(), which runs on every subsequent boot and
@@ -540,7 +540,7 @@ def dedupe_canonical_workspaces(cur):
     TS reseed has ever run) still self-heals instead of accumulating a
     `dept-<slug>` / `<slug>` pair forever.
 
-    Company-scope guard (2026-08-04 "WANTED Woman" incident): grouping by
+    Company-scope guard (2026-08-04 "Client A" incident): grouping by
     canonical slug ALONE, with no company boundary, would merge TWO DIFFERENT
     companies' "marketing" workspace on a shared multi-client box into one
     row -- splicing one client's task/agent history onto another client's
@@ -807,7 +807,7 @@ def reseed_workspaces(db_path, departments, company_info, prune=False):
             inserted += 1
             print(f"  [sync] inserted workspace: {dept_id} ({name})")
 
-    # DEFECT 2 fix (2026-08-04, "WANTED Woman" incident). Heal any PRE-EXISTING
+    # DEFECT 2 fix (2026-08-04, "Client A" incident). Heal any PRE-EXISTING
     # `dept-<slug>` / `<slug>` duplicate pair for this box's own company(ies)
     # before pruning -- so the stale-department check below operates on the
     # already-deduped set. Runs on every call (not opt-in): a true no-op on a
