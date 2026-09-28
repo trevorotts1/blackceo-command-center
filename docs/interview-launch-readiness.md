@@ -1,6 +1,6 @@
 # Client interview launch and recovery
 
-Paired releases: Command Center v7.6.72 and onboarding v25.1.57 or later (this line was frozen at v7.1.2 / v25.0.5 for many releases; CHANGELOG.md's own most recent onboarding-version reference — `openclaw-onboarding v25.1.57`, at CC v7.6.29 — is the newest confirmed pairing point).
+Paired releases: Command Center v7.6.72 and onboarding v25.1.100 (per openclaw-onboarding's own `cc-compat.json`, which pins `commandCenter.pinnedTag: "v7.6.72"` at `onboardingVersion: "v25.1.100"` on its main branch; this line was frozen at v7.1.2 / v25.0.5 for many releases before this fix — re-verify against `cc-compat.json` on future edits rather than hand-tracking it here).
 
 1. Installation initializes a pending build with stable client/company/installation identity before exposing the shell. Fresh installations use standard-first onboarding. Existing recorded lanes and operator choices are preserved.
 2. Onboarding provisions client-specific service configuration, binds its database company, and creates the standard department foundation before the interview. A receipt hashes the company artifacts and records the expected department workspaces.
