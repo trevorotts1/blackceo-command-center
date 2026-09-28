@@ -1,3 +1,10 @@
+## [v7.6.70] — 2026-09-28 — private fleet config, remediate tunnel token fix, dedupe test repair
+
+- fix(privacy): client-identifying fleet config moved out of the public repo — `accounts/cf-token-map.json` removed and replaced by a private operator path (`~/.openclaw/fleet/cf-token-map.json`, override `$CF_TOKEN_MAP`/`--cf-token-map`), with a placeholder example file kept in the repo; `remediate.sh` reads the per-box Mac login shell from a private config instead of a hardcoded name (#444)
+- fix(remediate,privacy): `remediate.sh` `mac_ssh_run` never set the CF Access token stem, so the tunnel `ProxyCommand` carried no service token and every Mac reachability/SSH check failed; the stem is now looked up per tunnel host in the private CF token map; remaining client names in comments, docs and test fixtures replaced with neutral wording (#445)
+- fix(privacy): neutralized a remaining client business name and a client first name across dedupe tests, the department sync script, and a migrations.ts comment (#446)
+- test(sync-departments): brought the dedupe test fixture up to date with the archive-not-delete script — fixture now carries `archived_at`/`archived_reason` columns and asserts the merged loser is archived, not deleted (#447)
+
 ## [v7.6.69] — 2026-09-28 — interview CSRF self-heal, intake/routing wiring, persona adherence, task-row projection
 
 Re-cut release. The earlier v7.6.69 tag pointed at 2d5d93a57, whose own version files read 7.6.68; it was deleted and re-cut on the commit that actually carries v7.6.69. Everything merged to main since v7.6.68:
