@@ -1,3 +1,7 @@
+## [v7.6.71] — 2026-09-28 — vendor fonts locally, remove Google Fonts build dependency
+
+- fix(build): Inter and JetBrains Mono (OFL) are now vendored locally via `next/font/local` instead of fetched from Google Fonts at build time; fixes intermittent unattended-build failures (`Cannot read properties of null (reading 1)` in the Google font loader) that caused false failed status on daily updates (#449)
+
 ## [v7.6.70] — 2026-09-28 — private fleet config, remediate tunnel token fix, dedupe test repair
 
 - fix(privacy): client-identifying fleet config moved out of the public repo — `accounts/cf-token-map.json` removed and replaced by a private operator path (`~/.openclaw/fleet/cf-token-map.json`, override `$CF_TOKEN_MAP`/`--cf-token-map`), with a placeholder example file kept in the repo; `remediate.sh` reads the per-box Mac login shell from a private config instead of a hardcoded name (#444)
