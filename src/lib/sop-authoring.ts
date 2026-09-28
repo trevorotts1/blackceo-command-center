@@ -2,7 +2,7 @@
  * PRD 2.12-cc — Dispatch-time SOP authoring fast loop (custom departments only).
  *
  * When a task dispatches with NO SOP match and its department is NOT in the
- * 24-slug canonical ZHC set (i.e. it is a CUSTOM department), this module:
+ * 26-slug canonical ZHC set (i.e. it is a CUSTOM department), this module:
  *   1. Guards against canonical departments (HARD REFUSAL — copy from library instead).
  *   2. Creates a linked "Author SOP" sub-task routed to the dept's research specialist.
  *   3. Researches via the shared research layer (src/lib/research/sop-research.ts —
@@ -110,7 +110,7 @@ export interface AuthorResult {
 
 /**
  * Returns { canonical: true } when:
- *   (a) the department slug is in CANONICAL_SLUGS (24 ZHC depts), OR
+ *   (a) the department slug is in CANONICAL_SLUGS (26 ZHC depts), OR
  *   (b) a `source='role-library'` row already exists for this dept (+optional role).
  *
  * Both conditions mean: copy from library, never author. The guard is the
@@ -126,7 +126,7 @@ export function isCanonicalContext(
   if (CANONICAL_SLUGS.has(canonical)) {
     return {
       canonical: true,
-      reason: `department "${canonical}" is in the 24-slug ZHC canonical set`,
+      reason: `department "${canonical}" is in the 26-slug ZHC canonical set`,
     };
   }
 

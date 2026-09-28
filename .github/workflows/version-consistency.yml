@@ -73,6 +73,18 @@ jobs:
         shell: bash
         run: bash scripts/check-changelog-tag-coverage.sh
 
+      # The department-count and migration-count/range claims in QC.md,
+      # canonical-slug.ts, sop-authoring.ts and docs/SOP-LAYERS.md must track
+      # their real source of truth (CANONICAL_SLUGS / migrations.ts), so a
+      # new department or migration can never leave a stale count behind.
+      - name: "Doc/comment counts match their source of truth (scripts/check-doc-number-drift.sh)"
+        shell: bash
+        run: bash scripts/check-doc-number-drift.sh
+
+      - name: Self-test the doc-number-drift guard (+ mutation proof)
+        shell: bash
+        run: bash tests/unit/check-doc-number-drift.test.sh
+
       # The guard proves itself before it judges anything. The bounded wait
       # below is unobservable in a normal run -- it only engages when this job
       # races auto-tag-on-merge.yml on a release push, which is precisely when

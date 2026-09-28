@@ -1,0 +1,62 @@
+# INVESTIGATION RECORD (not consumed by any CI check): published,
+# truthfully-stamped tags whose branch was abandoned or superseded BEFORE the
+# work reached main, so no CHANGELOG.md entry exists for them and none should
+# ever be fabricated for them.
+#
+# scripts/check-changelog-tag-coverage.sh checks only the most recent N
+# (default 60) annotated tags by creation date, so it never revisits these —
+# they are all older than 60 releases back and permanently age further out of
+# that window as the repo releases more. This file exists purely so the next
+# person auditing old tags doesn't re-spend the time re-deriving the same
+# answer; it is documentation, not a ledger any script reads.
+#
+# This is a DIFFERENT defect class from never-version-stamped-releases.txt
+# (a tag pointing at a commit whose /version does NOT match the tag name).
+# Every tag below DOES have a commit whose own /version matches the tag —
+# the defect here is that the commit is not an ancestor of main: the branch
+# it lived on was abandoned, rebased away, or renumbered before merging, and
+# either (a) the same real work later shipped on main under a different,
+# correctly-changelogged version number, or (b) the tagged code never landed
+# on main at all.
+#
+# DO NOT write a CHANGELOG entry for a version listed here — that would
+# either duplicate an entry that already exists under the real shipped
+# version, or claim code that was never merged.
+#
+# Verified 2026-09-28 during the doc/changelog/number sweep (PR: see git log).
+#
+# Format: vX.Y.Z  # why
+
+# (a) real content already changelogged under a different version number —
+# each tag below is a dangling pre-merge tag from the July 21-24 2026
+# version-collision window; its tag/commit message matches an EXISTING
+# CHANGELOG.md entry title verbatim under the number the work actually shipped as.
+v6.0.14  # tag -> A-U5 scoped persona blends; explicitly documented as a stale
+         # premature tag on an unmerged branch in CHANGELOG.md's own v6.0.15
+         # "Version note"; the real U5 work shipped as v6.0.16.
+v6.0.64  # tag -> "CC-fixture-003: close the last two fixture residuals
+         # (persona pins, QC results)"; identical content shipped and is
+         # changelogged as v6.0.68.
+v6.0.69  # tag -> "July-23-Fixes Batch 1 (CC) (U013): Interview state
+         # canonical source documentation"; U013 is changelogged under
+         # v6.0.66, and the tagged commit's own diff (U019) is changelogged
+         # under v6.0.70.
+
+# (b) truthfully-stamped tags on a branch that was never merged to main at
+# all — grepped for each fix's distinguishing symbol/string across the
+# current tree and CHANGELOG.md and found neither, confirming the code was
+# never merged under any version number.
+v6.1.1  # tag -> ecosystem.config.cjs OPENCLAW_CLI_BIN pass-through. Not in
+        # the current tree; not in CHANGELOG.md under any version.
+v6.1.2  # tag -> embedding failure-cache circuit breaker
+        # (EMBEDDING_BREAKER_COOLDOWN_MS). Not in the current tree; not in
+        # CHANGELOG.md under any version.
+v6.1.4  # tag -> four fix-PR batch (#282/#287/#288/#290). None of the four
+        # fixes are present in the current tree; not in CHANGELOG.md under
+        # any version.
+v6.1.5  # tag -> src/lib/gemini.ts default model gemini-flash-latest. The
+        # current tree still has no such default; not in CHANGELOG.md under
+        # any version.
+v6.1.6  # tag -> Gemini error-label classification + SOP-authoring
+        # zombie-subtask terminal fail. Neither is present in the current
+        # tree; not in CHANGELOG.md under any version.

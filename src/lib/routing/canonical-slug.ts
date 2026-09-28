@@ -11,12 +11,14 @@
  * where a slug from user input, a DB column, or the workspace auto-seed meets
  * routing or SOP-match logic.
  *
- * Canonical set (ZHC 24-department model, +1 mandatory catch-all):
+ * Canonical set (ZHC 26-department model — 23 standard + engineering +
+ * funnels, +1 mandatory catch-all). Keep this comment's count in sync with
+ * CANONICAL_SLUGS.size below; scripts/check-doc-number-drift.sh enforces it.
  *   master-orchestrator, marketing, sales, billing-finance, customer-support,
  *   web-development, app-development, graphics, video, audio, research,
  *   communications, crm, openclaw-maintenance, legal, social-media,
  *   paid-advertisement, presentations, client-coaches, course-creator,
- *   podcast, community-management, personal-assistant, security,
+ *   podcast, community-management, personal-assistant, engineering, funnels,
  *   general-task (catch-all, mandatory on every client)
  */
 
