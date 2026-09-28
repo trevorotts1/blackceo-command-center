@@ -265,6 +265,10 @@ export default defineConfig({
     },
     // Increase timeout for tests that write temp files
     testTimeout: 15000,
+    // Point TMPDIR at one throwaway dir for the whole run (workers inherit it);
+    // removed when the run exits. Worker processes are killed, not exited, so
+    // per-file process.on('exit') cleanup never fires under vitest.
+    globalSetup: ['./tests/setup/tmp-sandbox.ts'],
   },
   resolve: {
     alias: {
