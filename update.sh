@@ -544,6 +544,15 @@ if [ -d ".git" ] && [ "${CC_UPDATE_ZERO_DOWNTIME:-1}" = "1" ]; then
   # the update would target a years-old origin/main.
   git fetch origin +refs/heads/main:refs/remotes/origin/main 2>&1 || fatal "git fetch failed"
   ZD_TARGET=$(git rev-parse origin/main)
+  # CC_UPDATE_TARGET: a fleet roll pins one main commit for every box, so a merge
+  # landing mid-roll never reaches the boxes that update after it.
+  # ponytail: only the zero-downtime path honours the pin; the merge fallback
+  # below still converges to origin/main.
+  if [ -n "${CC_UPDATE_TARGET:-}" ]; then
+    git merge-base --is-ancestor "$CC_UPDATE_TARGET" "$ZD_TARGET" 2>/dev/null \
+      || fatal "CC_UPDATE_TARGET $CC_UPDATE_TARGET is not a commit on origin/main"
+    ZD_TARGET=$(git rev-parse "$CC_UPDATE_TARGET^{commit}")
+  fi
   ZD_WHY=""
   git merge-base --is-ancestor HEAD "$ZD_TARGET" || ZD_WHY="the checkout has commits that are not on origin/main"
   [ -z "$ZD_WHY" ] && [ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ] \

@@ -505,6 +505,24 @@ fi
 [ "$(git -C "$INST" rev-parse HEAD)" = "$(git -C "$ORIGIN" rev-parse HEAD)" ] && [ -f "$INST/zd-tagonly.txt" ] \
   && ok "a tag-only clone lands on the latest main" || bad "a tag-only clone did not reach the latest main"
 
+# ── Scenario 12: a roll's pinned commit wins over a later main ──────────────
+# A PR merged mid-roll must not reach the boxes that update after it.
+echo "Scenario 12: CC_UPDATE_TARGET pins the deploy to one main commit"
+INST="$WORK/install-s12"
+new_install "$INST"
+printf 'pinned\n' > "$ORIGIN/zd-pinned.txt"
+git -C "$ORIGIN" add -A && git -C "$ORIGIN" commit -qm "fixture: the roll's commit"
+PIN="$(git -C "$ORIGIN" rev-parse HEAD)"
+printf 'later\n' > "$ORIGIN/zd-later.txt"
+git -C "$ORIGIN" add -A && git -C "$ORIGIN" commit -qm "fixture: merged mid-roll"
+if HOME="$WORK/home" PATH="$FIXTURE_PATH" CC_APP_DIR="$INST" CC_UPDATE_TARGET="$PIN" bash "$UPDATE_SH" > "$WORK/out-s12.txt" 2>&1; then
+  ok "updater exits 0 with a pinned target"
+else
+  bad "updater exits non-zero with a pinned target (see $WORK/out-s12.txt)"
+fi
+[ "$(git -C "$INST" rev-parse HEAD)" = "$PIN" ] && [ ! -f "$INST/zd-later.txt" ] \
+  && ok "the box lands on the pinned commit, not the later main" || bad "the pinned target was not honoured"
+
 # ── summary ─────────────────────────────────────────────────────────────────
 echo ""
 echo "update-preserve-per-box-config: $PASS passed, $FAIL failed"
