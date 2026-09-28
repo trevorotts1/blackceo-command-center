@@ -1,6 +1,6 @@
 /**
- * cc-agent-count-dedupe-scope.test.ts — 2026-08-04 "WANTED Woman" incident
- * (company_id='wanted-woman'): the Command Center dashboard reported 288
+ * cc-agent-count-dedupe-scope.test.ts — 2026-08-04 "Client A" incident
+ * (company_id='client-a'): the Command Center dashboard reported 288
  * agents for a 36-agent, 35-department workforce. Two verified root causes:
  *
  *   DEFECT 1 — /api/performance's `agent_utilization.total` (rendered as
@@ -53,7 +53,7 @@ import { reseedWorkspacesFromConfig } from '../../src/lib/db/migrations';
 import { dedupeCanonicalWorkspaces } from '../../src/lib/db/task-dedup';
 import { GET as performanceGET } from '../../src/app/api/performance/route';
 
-const ACTIVE = 'wanted-woman-co';
+const ACTIVE = 'client-a-co';
 const OTHER = 'other-client-co';
 let zhcDir: string;
 const savedEnv: Record<string, string | undefined> = {};
@@ -78,13 +78,13 @@ beforeAll(() => {
   process.env.COMPANY_SLUG = ACTIVE;
   delete process.env.COMPANY_NAME;
 
-  zhcDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wanted-woman-zhc-'));
+  zhcDir = fs.mkdtempSync(path.join(os.tmpdir(), 'client-a-zhc-'));
   fs.writeFileSync(path.join(zhcDir, 'departments.json'), JSON.stringify(manifest), 'utf8');
   process.env.ZERO_HUMAN_COMPANY_DIR = zhcDir;
 
   const db = getDb();
   db.prepare(
-    "INSERT OR IGNORE INTO companies (id, name, slug, industry, config) VALUES (?, 'WANTED Woman', ?, 'Retail', '{}')",
+    "INSERT OR IGNORE INTO companies (id, name, slug, industry, config) VALUES (?, 'Client A', ?, 'Retail', '{}')",
   ).run(ACTIVE, ACTIVE);
   db.prepare(
     "INSERT OR IGNORE INTO companies (id, name, slug, industry, config) VALUES (?, 'Other Client Co', ?, 'Retail', '{}')",

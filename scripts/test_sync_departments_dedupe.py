@@ -1,5 +1,5 @@
 """Regression test for sync-departments-from-build-state.py's duplicate-
-workspace healing (2026-08-04 "WANTED Woman" incident).
+workspace healing (2026-08-04 "Client A" incident).
 
 Ground truth on the client's box: 35 real departments, 36 OpenClaw agents
 (1 main + 35 department heads) -- correct. But her `workspaces` table held 72
@@ -61,14 +61,14 @@ def _fresh_db(tmp_path, name="mission-control.db"):
 
 def test_merges_dept_prefixed_and_bare_pair_for_the_same_company(tmp_path):
     _, conn, cur = _fresh_db(tmp_path)
-    cur.execute("INSERT INTO companies (id, name, slug) VALUES ('wanted-woman', 'WANTED Woman', 'wanted-woman')")
+    cur.execute("INSERT INTO companies (id, name, slug) VALUES ('client-a', 'Client A', 'client-a')")
     cur.execute(
         "INSERT INTO workspaces (id, name, slug, company_id) VALUES "
-        "('dept-marketing', 'Marketing', 'dept-marketing', 'wanted-woman')"
+        "('dept-marketing', 'Marketing', 'dept-marketing', 'client-a')"
     )
     cur.execute(
         "INSERT INTO workspaces (id, name, slug, company_id) VALUES "
-        "('marketing', 'Marketing', 'marketing', 'wanted-woman')"
+        "('marketing', 'Marketing', 'marketing', 'client-a')"
     )
     cur.execute("INSERT INTO agents (id, name, role, workspace_id) VALUES ('a1', 'Legacy', 'specialist', 'dept-marketing')")
     cur.execute("INSERT INTO agents (id, name, role, workspace_id) VALUES ('a2', 'Current', 'specialist', 'marketing')")
@@ -115,9 +115,9 @@ def test_never_merges_two_different_companies_identically_named_department(tmp_p
     # (schema-valid), same CANONICAL slug once dept- is stripped -- exactly
     # what dedupe_canonical_workspaces groups on.
     _, conn, cur = _fresh_db(tmp_path)
-    cur.execute("INSERT INTO companies (id, name, slug) VALUES ('wanted-woman', 'WANTED Woman', 'wanted-woman')")
+    cur.execute("INSERT INTO companies (id, name, slug) VALUES ('client-a', 'Client A', 'client-a')")
     cur.execute("INSERT INTO companies (id, name, slug) VALUES ('other-co', 'Other Co', 'other-co')")
-    cur.execute("INSERT INTO workspaces (id, name, slug, company_id) VALUES ('marketing', 'Marketing', 'marketing', 'wanted-woman')")
+    cur.execute("INSERT INTO workspaces (id, name, slug, company_id) VALUES ('marketing', 'Marketing', 'marketing', 'client-a')")
     cur.execute("INSERT INTO workspaces (id, name, slug, company_id) VALUES ('dept-marketing', 'Marketing', 'dept-marketing', 'other-co')")
     cur.execute("INSERT INTO agents (id, name, role, workspace_id) VALUES ('a1', 'WW Marketer', 'specialist', 'marketing')")
     cur.execute("INSERT INTO agents (id, name, role, workspace_id) VALUES ('a2', 'Other Co Marketer', 'specialist', 'dept-marketing')")
@@ -165,14 +165,14 @@ def test_reseed_workspaces_heals_pre_existing_duplicate_and_stays_idempotent(tmp
     db_path, conn, cur = _fresh_db(tmp_path)
     # Simulate the corrupted pre-existing state: a department present under
     # BOTH dept-marketing and marketing for the same company.
-    cur.execute("INSERT INTO companies (id, name, slug) VALUES ('wanted-woman', 'WANTED Woman', 'wanted-woman')")
-    cur.execute("INSERT INTO workspaces (id, name, slug, company_id) VALUES ('dept-marketing', 'Marketing', 'dept-marketing', 'wanted-woman')")
-    cur.execute("INSERT INTO workspaces (id, name, slug, company_id) VALUES ('marketing', 'Marketing', 'marketing', 'wanted-woman')")
+    cur.execute("INSERT INTO companies (id, name, slug) VALUES ('client-a', 'Client A', 'client-a')")
+    cur.execute("INSERT INTO workspaces (id, name, slug, company_id) VALUES ('dept-marketing', 'Marketing', 'dept-marketing', 'client-a')")
+    cur.execute("INSERT INTO workspaces (id, name, slug, company_id) VALUES ('marketing', 'Marketing', 'marketing', 'client-a')")
     conn.commit()
     conn.close()
 
     company_info = {
-        "name": "WANTED Woman", "slug": "wanted-woman", "industry": "Retail",
+        "name": "Client A", "slug": "client-a", "industry": "Retail",
         "brand_primary": "#1f2937", "brand_accent": "#3b82f6", "brand_text": "#f8fafc",
     }
     departments = [{"id": "marketing", "name": "Marketing", "emoji": "📣"}]

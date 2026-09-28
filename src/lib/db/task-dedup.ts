@@ -102,7 +102,7 @@ export function dedupeCanonicalWorkspaces(db: Database): WorkspaceDedupResult {
   }
 
   // DEFECT 2 / cross-company guard (verified live incident, 2026-08-04
-  // "WANTED Woman"). Grouping by canonical slug ALONE, with no company
+  // "Client A"). Grouping by canonical slug ALONE, with no company
   // boundary, would merge TWO DIFFERENT companies' "marketing" workspace on a
   // shared multi-client box into ONE row — splicing one client's task/agent
   // history onto another client's department. `company_id` NULL / '' /

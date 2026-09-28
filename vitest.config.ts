@@ -33,7 +33,7 @@ export default defineConfig({
       // instead of minting a duplicate canonical row and orphaning the original.
       // DB-backed vitest suite, same reason as floor-department-invariant above.
       'tests/unit/mr21-reseed-dept-prefix-migration.test.ts',
-      // 2026-08-04 "WANTED Woman" incident (company_id='wanted-woman'): the
+      // 2026-08-04 "Client A" incident (company_id='client-a'): the
       // dashboard reported 288 agents for a 36-agent, 35-department
       // workforce. Proves BOTH root causes fixed together — /api/performance
       // no longer returns a bare unscoped COUNT(*), and reseedWorkspacesFromConfig
