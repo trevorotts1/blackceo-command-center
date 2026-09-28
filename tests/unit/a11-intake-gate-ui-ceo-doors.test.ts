@@ -252,6 +252,25 @@ test('CEO-chat status question with a live session task is existing_task_control
   assert.equal(taskCount(), tasksBefore, 'ZERO new card rows');
 });
 
+// ── 8b. CEO door: an unanswered ask IS the pending confirmation ─────────────
+// The other half of the 4.2 context. `tasks.ask` non-empty is exactly what the
+// audience-confirm hold populates, so a confirmation answer completes the
+// waiting card instead of arriving as unresolved text — and creates no card.
+test('CEO-chat confirmation answer with a waiting ask is clarification_response, no new card', async () => {
+  const created = await callCeoDelegate(`Create the audience task ${RUN_ID}`, 'sales');
+  assert.equal(created.status, 201, 'setup control card must be created');
+  const createdBody = (await created.json()) as { taskId: string };
+  run("UPDATE tasks SET ask = 'Who is this for?' WHERE id = ?", [createdBody.taskId]);
+  const tasksBefore = taskCount();
+
+  const res = await callCeoDelegate('Yes, that audience is right.');
+  const body = (await res.json()) as { ok: boolean; created: boolean; intent: string };
+  assert.equal(res.status, 200, `suppressed intake must return 200, got ${res.status}: ${JSON.stringify(body)}`);
+  assert.equal(body.created, false, 'a confirmation answer never creates a card');
+  assert.equal(body.intent, 'clarification_response', 'spec 4.4 row 15 with the 4.2 context supplied');
+  assert.equal(taskCount(), tasksBefore, 'ZERO new card rows');
+});
+
 // ── 9. CEO door: no live task means no invented context ─────────────────────
 // The context is a fact about THIS session's cards, never a guess: a fresh
 // session with no cards must not read a status question as existing-task
