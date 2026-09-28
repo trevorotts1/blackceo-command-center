@@ -347,10 +347,16 @@ export function classifyLexical(message: string, ctx: IntakeContext = {}): Class
   // request-verb message already returned above, so nothing that reached here
   // can be turned into work by this allowance.
   const withoutLeadIn = stripped.replace(/^(?:so|well|and|but|ok|okay|now|hey)\b[\s,]*/i, '');
+  // The prohibition only reads as answer-only when the message asks for no
+  // work at all: a work verb anywhere ("Build the deck with no building
+  // delay") is still a request for it, and every such message returned above.
+  const prohibitedWork =
+    requestVerb(withoutLeadIn) === null &&
+    /\bno (building|creating|making|writing|drafting|sending|executing|doing)\b/i.test(stripped);
   if (
     /^(what|how|why|which|when|where|who|is|are|do|does|can)\b/i.test(withoutLeadIn) ||
     /^explain\b/i.test(withoutLeadIn) ||
-    /\bno (building|creating|making|writing|drafting|sending|executing|doing)\b/i.test(stripped)
+    prohibitedWork
   ) {
     return finish('answer_only', 'unspecified', message, controlProbe, 'lexical');
   }

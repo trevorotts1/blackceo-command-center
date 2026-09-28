@@ -254,6 +254,16 @@ test('[C4] row-5 paraphrase "Just explain the options, no building for now." is 
   assert.equal(gateEffect(msg, c), 'allows');
 });
 
+test('[C4] a prohibition does NOT swallow a message that also asks for work', () => {
+  // The prohibition reads as answer-only only when the message asks for no
+  // work at all. A work verb anywhere keeps it a request — otherwise
+  // "Build the deck with no building delay" would silently create no card.
+  const msg = 'Build the deck with no building delay';
+  const c = classifyLexical(msg);
+  assert.equal(c.intent, 'task_request');
+  assert.equal(gateEffect(msg, c), 'allows');
+});
+
 test('[C4] row-9 paraphrase "Please ask Marketing to take care of it." is a task request and invents no department', () => {
   const msg = 'Please ask Marketing to take care of it.';
   const c = classifyLexical(msg);
