@@ -478,8 +478,11 @@ _ccbi_set_transaction_phase() {
 #   * DIRTY tracked worktree (staged or unstaged changes) → ABORT the SYNC
 #     ONLY (rc 1): the promoted artifact + dependencies stay in place; the
 #     caller exits 2 with a loud receipt. Discarding dirty work is forbidden.
-#   * Detached HEAD or any branch → both fine; the sync lands on the deployed
-#     commit, which is exactly the state the guard attests.
+#   * On a branch whose tip is an ancestor of DEPLOY_REVISION (update.sh's
+#     zero-downtime path: the live tree stays on main until promotion) → the
+#     branch is fast-forwarded, so the checkout stays attached to it.
+#   * Detached HEAD or any other branch → the sync lands on the deployed
+#     commit (detached), which is exactly the state the guard attests.
 # Untracked files are NOT dirt for this check (--untracked-files=no): the
 # private candidate dir (.release-candidate.<pid> inside APP_DIR) is itself
 # untracked, and untracked files neither affect the explicit-revision verify
@@ -500,6 +503,12 @@ _ccbi_sync_worktree_to_deploy_revision() {
     _preflight_abort_receipt "Live worktree is DIRTY (uncommitted changes) so it cannot be synced to deployed revision ${DEPLOY_REVISION}. The candidate artifact and dependencies are PROMOTED; the startup content guard will refuse (exit 78) until the tree is synced by hand: commit or shelve the live-tree changes, then run: git -C ${APP_DIR} checkout ${DEPLOY_REVISION}. Dirty state that blocked the sync:"
     printf '%s\n' "$pre_dirty" | head -20 >&2
     return 1
+  fi
+  if git -C "$APP_DIR" symbolic-ref --quiet HEAD >/dev/null 2>&1 \
+     && git -C "$APP_DIR" merge-base --is-ancestor HEAD "$DEPLOY_REVISION" 2>/dev/null \
+     && git -C "$APP_DIR" merge --ff-only --quiet "$DEPLOY_REVISION" 2>&1; then
+    _ok "  Live worktree fast-forwarded to deployed revision ${DEPLOY_REVISION} (was ${live_head:-unknown})."
+    return 0
   fi
   if git -C "$APP_DIR" checkout "$DEPLOY_REVISION" 2>&1; then
     _ok "  Live worktree synced to deployed revision ${DEPLOY_REVISION} (was ${live_head:-unknown})."
@@ -1804,10 +1813,15 @@ if [[ $HEALTH_EXIT -eq 0 ]]; then
   _log "[5] Installing the box watchdog schedule (scripts/install-watchdog-cc.sh) ..."
   _wd_args=(--port "$PORT" --pm2-app "$PM2_APP_NAME" --app-dir "$APP_DIR")
   [[ -n "$PUBLIC_URL_PROBE" ]] && _wd_args+=(--public-url "$PUBLIC_URL_PROBE")
-  if bash "${SCRIPT_DIR}/install-watchdog-cc.sh" "${_wd_args[@]}"; then
+  # The schedule pins the watchdog script's own path. update.sh's zero-downtime
+  # path runs this script from a staged copy that is deleted afterwards, so
+  # schedule the LIVE checkout's watchdog (now on the deployed revision).
+  _wd_installer="${APP_DIR}/scripts/install-watchdog-cc.sh"
+  [[ -f "$_wd_installer" ]] || _wd_installer="${SCRIPT_DIR}/install-watchdog-cc.sh"
+  if bash "$_wd_installer" "${_wd_args[@]}"; then
     _ok "  Box watchdog scheduled — it checks this CC every 5 minutes and repairs the failures it is allowed to repair."
   else
-    _warn "  Box watchdog schedule NOT installed. Nothing out-of-process will restart this CC if it stops answering. Install it with: bash ${SCRIPT_DIR}/install-watchdog-cc.sh --port ${PORT} --pm2-app ${PM2_APP_NAME}"
+    _warn "  Box watchdog schedule NOT installed. Nothing out-of-process will restart this CC if it stops answering. Install it with: bash ${_wd_installer} --port ${PORT} --pm2-app ${PM2_APP_NAME}"
   fi
 
   # ── Cleanup rollback + parked build artefacts ──────────────────────────

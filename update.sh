@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # ============================================================
 #  BlackCEO Command Center — Updater
-#  Pulls latest from GitHub, installs deps, runs migrations.
-#  DESTRUCTIVE: replaces app code in-place. Backs up first.
+#  Fetches the latest release and deploys it through scripts/atomic-deploy.sh.
+#  Zero-downtime path (clean fast-forward): the live code, node_modules and
+#  build are untouched until the new release is built beside them and promoted.
+#  Otherwise the merge path updates the live checkout in place. Backs up first.
 #
 #  ENV OVERRIDES — an explicit pin ALWAYS wins over autodetection. Each of
 #  these is used verbatim when set, and the corresponding autodetection is
@@ -412,6 +414,192 @@ OLD_VERSION=""
 success "Current version: ${OLD_VERSION:-unknown}"
 
 # ----------------------------------------------------------
+# Steps shared by the zero-downtime path and the merge path
+# ----------------------------------------------------------
+# U133 -- merge-additive departments sync, update-flow. The onboarding flow
+# populates departments.json once during initial setup, but a CC update that
+# ships new department definitions (or upstream changes to existing departments)
+# leaves the old per-box file untouched until the next full onboarding reconcile
+# -- which may never happen on an already-provisioned box. Run
+# sync-departments-from-build-state.py with --merge so new departments are added
+# and existing ones updated in place, while any custom departments the box owner
+# has added manually are preserved. Best-effort: the script exits 0 when no ZHC
+# build-state is available (a fresh box that hasn't run Skill 23 yet), so the
+# update never fails because departments aren't found.
+cc_sync_departments() {
+  step "Step 3: Sync departments from build-state (merge-additive)"
+  local sync="$INSTALL_DIR/scripts/sync-departments-from-build-state.py"
+  if [ -f "$sync" ] && command -v python3 >/dev/null 2>&1; then
+    if python3 "$sync" --merge; then
+      success "Departments synced from build-state (merge-additive)"
+    else
+      warn "Departments sync exited non-zero -- dashboard will use the pre-update departments file."
+    fi
+  elif [ ! -f "$sync" ]; then
+    warn "sync-departments-from-build-state.py not found in the updated checkout -- departments file was NOT synced."
+  else
+    warn "python3 not found -- cannot run departments sync; departments file was NOT synced."
+  fi
+}
+
+# OpenClaw wire-contract guard (runs BEFORE anything is installed or built).
+# Every gateway call in src/lib/openclaw/client.ts is written against an
+# unversioned, undocumented contract that lives only inside the installed
+# `openclaw` package. When upstream renames a field, drops a handler or
+# re-shapes a result, NOTHING in this repo fails: the call still compiles, still
+# type-checks, still ships, and then returns the wrong thing forever at runtime.
+# Three live defects were found that way on one box -- sessions.list returning an
+# envelope the client read as an array, sessions.send being sent the wrong field
+# names, and sessions.history having no handler at all.
+#
+# So the contract is checked against the openclaw ACTUALLY INSTALLED ON THIS BOX,
+# before npm ci / migrations / build / restart -- where a failure costs a
+# refusal instead of a silently wrong dashboard. It names the contract that broke.
+# $1 is the checker of the release being deployed.
+#
+# Set OPENCLAW_CONTRACT_CHECK=0 to bypass (an emergency deploy against a gateway
+# you have already reasoned about). Skipped, loudly, when no openclaw is
+# installed: a box with no gateway has no contract to break.
+cc_contract_check() {
+  local check="$1"
+  if [ "${OPENCLAW_CONTRACT_CHECK:-1}" = "0" ]; then
+    warn "OPENCLAW_CONTRACT_CHECK=0 -- gateway wire contract NOT verified for this update."
+  elif [ ! -f "$check" ]; then
+    warn "scripts/openclaw-contract-check.mjs not found in the updated checkout -- gateway wire contract was NOT verified."
+  elif ! command -v openclaw >/dev/null 2>&1 && [ -z "${OPENCLAW_DIST:-}" ]; then
+    warn "No openclaw on PATH and OPENCLAW_DIST is unset -- no gateway to check against; skipping the contract guard."
+  elif node "$check"; then
+    success "OpenClaw gateway wire contract verified"
+  else
+    fatal "OpenClaw gateway wire contract FAILED (see the named contract above). The dashboard's gateway client would silently misbehave against this openclaw version. Fix src/lib/openclaw/client.ts, or re-run with OPENCLAW_CONTRACT_CHECK=0 to deploy anyway. Dependencies, migrations, build and restart were NOT run."
+  fi
+}
+
+# LIVE-DERIVED pm2 app name (was hardcoded to "blackceo-command-center").
+# On a box whose live CC runs under a different pm2 name (e.g. an operator box
+# running "cc-prod" on :4000), the hardcoded name matched NOTHING: the atomic
+# deploy then restarted/started a SECOND app under the assumed name, which
+# fought the live one for the port. Resolution order — LIVE state wins over
+# any assumed name:
+#   1. CC_PM2_APP_NAME env — the same override scripts/deploy.sh and
+#      scripts/atomic-deploy.sh already honor.
+#   2. The pm2 app actually declaring this box's CC port (pm2 jlist, parsed by
+#      scripts/lib/pm2-port-zombies.py --resolve-name; online apps win).
+#   3. Fleet-canonical "blackceo-command-center" (ecosystem.config.cjs) — only
+#      for boxes with no CC under pm2 at all (fresh install).
+# $1 is pm2-port-zombies.py of the release being deployed. Prints the name.
+cc_resolve_pm2_name() {
+  local lib="$1" name=""
+  if [ -n "${CC_PM2_APP_NAME:-}" ]; then
+    name="$CC_PM2_APP_NAME"
+    success "pm2 app name (CC_PM2_APP_NAME override): $name" >&2
+  elif command -v pm2 >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1 && [ -f "$lib" ]; then
+    name=$(pm2 jlist 2>/dev/null \
+      | python3 -s "$lib" --resolve-name "${CC_PORT:-4000}" "" 2>/dev/null \
+      | head -1 || true)
+    [ -n "$name" ] && success "pm2 app name (live, declares port ${CC_PORT:-4000}): $name" >&2
+  fi
+  if [ -z "$name" ]; then
+    name="blackceo-command-center"
+    warn "No live pm2 app declares port ${CC_PORT:-4000} — using fleet-canonical name: $name" >&2
+  fi
+  printf '%s\n' "$name"
+}
+
+# ----------------------------------------------------------
+# Zero-downtime path
+# ----------------------------------------------------------
+# The live checkout, its node_modules and the served .next are NOT touched
+# until the new release is built and promoted. The merge path below merges
+# origin/main into the LIVE tree and runs `npm ci` there BEFORE building: from
+# that moment the source no longer matches the running build, so any restart
+# during the build (a crash, pm2, the watchdog) is refused by cc-start.sh's
+# content guard (exit 78) and the Command Center stays dark until the build
+# finishes -- 35 minutes on a client's Hostinger box (2026-09-28).
+#
+# Here: fetch only; stage the target commit's scripts/ OUTSIDE the live tree;
+# check the gateway contract with the target's checker; then the target's
+# scripts/atomic-deploy.sh --revision builds a candidate from that commit (its
+# own npm ci and native gate, in its own directory), promotes it, fast-forwards
+# the live tree onto it and restarts. Eligible when the update is a
+# fast-forward of a clean tracked tree -- the fleet's normal case. Anything
+# else (local commits, local edits, a divergent local main, the one-time
+# runtime-config migration) takes the merge path below, unchanged.
+# CC_UPDATE_ZERO_DOWNTIME=0 forces the merge path.
+ZD_DONE=0
+_zd_bash4() {
+  local _c
+  for _c in /opt/homebrew/bin/bash /usr/local/bin/bash bash; do
+    if command -v "$_c" >/dev/null 2>&1 && \
+       [ "$("$_c" -c 'echo "${BASH_VERSINFO[0]:-0}"' 2>/dev/null || echo 0)" -ge 4 ]; then
+      printf '%s' "$_c"; return 0
+    fi
+  done
+  return 1
+}
+if [ -d ".git" ] && [ "${CC_UPDATE_ZERO_DOWNTIME:-1}" = "1" ]; then
+  step "Step 2: Fetch latest from GitHub (zero-downtime path check)"
+  git fetch origin main 2>&1 || fatal "git fetch failed"
+  ZD_TARGET=$(git rev-parse origin/main)
+  ZD_WHY=""
+  git merge-base --is-ancestor HEAD "$ZD_TARGET" || ZD_WHY="the checkout has commits that are not on origin/main"
+  [ -z "$ZD_WHY" ] && [ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ] \
+    && ZD_WHY="the checkout has uncommitted changes to tracked files"
+  if [ -z "$ZD_WHY" ] && git show-ref --verify --quiet refs/heads/main \
+     && ! git merge-base --is-ancestor refs/heads/main "$ZD_TARGET"; then
+    ZD_WHY="local main has commits that are not on origin/main"
+  fi
+  ZD_BASH4=""
+  [ -z "$ZD_WHY" ] && { ZD_BASH4="$(_zd_bash4)" || ZD_WHY="no bash 4+ for atomic-deploy.sh"; }
+  [ -z "$ZD_WHY" ] && ! git cat-file -e "$ZD_TARGET:scripts/atomic-deploy.sh" 2>/dev/null \
+    && ZD_WHY="the target release has no scripts/atomic-deploy.sh"
+  if [ -n "$ZD_WHY" ]; then
+    warn "Zero-downtime path not possible ($ZD_WHY) -- using the merge path (the live tree changes before the build)."
+  else
+    success "Zero-downtime path: target $ZD_TARGET is a fast-forward of the clean live checkout"
+    ZD_STAGE="$(mktemp -d "${TMPDIR:-/tmp}/cc-update-stage.XXXXXX")"
+    # Staged scripts leave with the process; the live tree is never the stage.
+    trap 'rm -rf "$ZD_STAGE"' EXIT
+    git archive "$ZD_TARGET" scripts | tar -x -C "$ZD_STAGE" \
+      || fatal "Could not stage the target release's scripts. Nothing was changed."
+
+    step "Step 3b: Verify the OpenClaw gateway wire contract (target release)"
+    cc_contract_check "$ZD_STAGE/scripts/openclaw-contract-check.mjs"
+
+    step "Step 6: Build + promote + restart (atomic deploy, zero-downtime)"
+    CC_PM2_NAME="$(cc_resolve_pm2_name "$ZD_STAGE/scripts/lib/pm2-port-zombies.py")"
+    ZD_ARGS=(--app-dir "$INSTALL_DIR" --pm2-app "$CC_PM2_NAME" --revision "$ZD_TARGET")
+    [ -n "${CC_PORT:-}" ] && ZD_ARGS+=(--port "$CC_PORT")
+    success "Atomic deploy source revision: $ZD_TARGET (the live tree stays on $(git rev-parse --short HEAD) until promotion)"
+    set +e
+    "$ZD_BASH4" "$ZD_STAGE/scripts/atomic-deploy.sh" "${ZD_ARGS[@]}"
+    ADEPLOY_RC=$?
+    set -e
+    case "$ADEPLOY_RC" in
+      0) success "Atomic deploy GREEN — built beside the live release, promoted, and serving" ;;
+      3) warn "Atomic deploy UNKNOWN (health indeterminate) — fresh build swapped but health not confirmed. NOT rolled back; investigate. See receipt above." ;;
+      1) fatal "Atomic deploy FAILED and auto-rolled-back to the prior build — the update did NOT take effect on the running server. See the atomic-deploy receipt above." ;;
+      2) fatal "Atomic deploy pre-flight failed (disk / build / deps) — old build untouched and still serving. Fix the reported issue and re-run this updater." ;;
+      *) fatal "Atomic deploy exited with unexpected code $ADEPLOY_RC — refusing to declare the update successful." ;;
+    esac
+    # atomic-deploy fast-forwarded (or, from a detached HEAD, checked out) the
+    # live tree onto the target. Attach it to main at the same commit: no file
+    # changes, so the served build still matches the source.
+    if [ "$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)" != "main" ]; then
+      git branch -f main "$ZD_TARGET" 2>&1 && git checkout -q main 2>&1 \
+        || fatal "Deployed $ZD_TARGET, but could not attach the checkout to main"
+    fi
+    [ "$(git rev-parse HEAD)" = "$ZD_TARGET" ] \
+      || fatal "Post-deploy assertion failed: the live checkout is not on the deployed revision $ZD_TARGET"
+    success "Checkout on main at the deployed revision"
+    cc_sync_departments
+    ZD_DONE=1
+  fi
+fi
+
+if [ "$ZD_DONE" != "1" ]; then
+# ---- merge path (steps 2-6): used only when the zero-downtime path is not possible ----
+# ----------------------------------------------------------
 # Pull latest
 # ----------------------------------------------------------
 step "Step 2: Pull latest from GitHub"
@@ -627,65 +815,12 @@ NEW_VERSION=""
 success "New version: ${NEW_VERSION:-unknown}"
 
 # ----------------------------------------------------------
-# Sync departments file (U133 -- merge-additive, update-flow)
+# Departments sync + gateway wire-contract guard (see the shared-steps
+# functions above; the guard runs BEFORE anything is installed or built).
 # ----------------------------------------------------------
-# The onboarding flow populates departments.json once during initial setup, but
-# a CC update that ships new department definitions (or upstream changes to
-# existing departments) leaves the old per-box file untouched until the next
-# full onboarding reconcile -- which may never happen on an already-provisioned
-# box. Run sync-departments-from-build-state.py with --merge so new departments
-# are added and existing ones updated in place, while any custom departments the
-# box owner has added manually are preserved. This is a best-effort sync: the
-# script exits 0 when no ZHC build-state is available (a fresh box that hasn't
-# run Skill 23 yet), so the update never fails because departments aren't found.
-step "Step 3: Sync departments from build-state (merge-additive)"
-_SYNC_DEPTS_SCRIPT="$INSTALL_DIR/scripts/sync-departments-from-build-state.py"
-if [ -f "$_SYNC_DEPTS_SCRIPT" ] && command -v python3 >/dev/null 2>&1; then
-  if python3 "$_SYNC_DEPTS_SCRIPT" --merge; then
-    success "Departments synced from build-state (merge-additive)"
-  else
-    warn "Departments sync exited non-zero -- dashboard will use the pre-update departments file."
-  fi
-elif [ ! -f "$_SYNC_DEPTS_SCRIPT" ]; then
-  warn "sync-departments-from-build-state.py not found in the updated checkout -- departments file was NOT synced."
-else
-  warn "python3 not found -- cannot run departments sync; departments file was NOT synced."
-fi
-
-# ----------------------------------------------------------
-# OpenClaw wire-contract guard (runs BEFORE anything is installed or built)
-# ----------------------------------------------------------
-# Every gateway call in src/lib/openclaw/client.ts is written against an
-# unversioned, undocumented contract that lives only inside the installed
-# `openclaw` package. When upstream renames a field, drops a handler or
-# re-shapes a result, NOTHING in this repo fails: the call still compiles, still
-# type-checks, still ships, and then returns the wrong thing forever at runtime.
-# Three live defects were found that way on one box -- sessions.list returning an
-# envelope the client read as an array, sessions.send being sent the wrong field
-# names, and sessions.history having no handler at all.
-#
-# So the contract is checked against the openclaw ACTUALLY INSTALLED ON THIS BOX,
-# here, before npm ci / migrations / build / restart -- where a failure costs a
-# refusal instead of a silently wrong dashboard. It names the contract that broke.
-#
-# Set OPENCLAW_CONTRACT_CHECK=0 to bypass (an emergency deploy against a gateway
-# you have already reasoned about). Skipped, loudly, when no openclaw is
-# installed: a box with no gateway has no contract to break.
+cc_sync_departments
 step "Step 3b: Verify the OpenClaw gateway wire contract"
-_CONTRACT_CHECK="$INSTALL_DIR/scripts/openclaw-contract-check.mjs"
-if [ "${OPENCLAW_CONTRACT_CHECK:-1}" = "0" ]; then
-  warn "OPENCLAW_CONTRACT_CHECK=0 -- gateway wire contract NOT verified for this update."
-elif [ ! -f "$_CONTRACT_CHECK" ]; then
-  warn "scripts/openclaw-contract-check.mjs not found in the updated checkout -- gateway wire contract was NOT verified."
-elif ! command -v openclaw >/dev/null 2>&1 && [ -z "${OPENCLAW_DIST:-}" ]; then
-  warn "No openclaw on PATH and OPENCLAW_DIST is unset -- no gateway to check against; skipping the contract guard."
-else
-  if node "$_CONTRACT_CHECK"; then
-    success "OpenClaw gateway wire contract verified"
-  else
-    fatal "OpenClaw gateway wire contract FAILED (see the named contract above). The dashboard's gateway client would silently misbehave against this openclaw version. Fix src/lib/openclaw/client.ts, or re-run with OPENCLAW_CONTRACT_CHECK=0 to deploy anyway. Dependencies, migrations, build and restart were NOT run."
-  fi
-fi
+cc_contract_check "$INSTALL_DIR/scripts/openclaw-contract-check.mjs"
 
 # ----------------------------------------------------------
 # Install dependencies
@@ -846,7 +981,6 @@ step "Step 6: Build + restart (atomic deploy)"
 #      scripts/lib/pm2-port-zombies.py --resolve-name; online apps win).
 #   3. Fleet-canonical "blackceo-command-center" (ecosystem.config.cjs) — only
 #      for boxes with no CC under pm2 at all (fresh install).
-CC_PM2_FALLBACK_NAME="blackceo-command-center"
 # CC_PORT is an override on the same footing as CC_APP_DIR / CC_PM2_APP_NAME:
 # when set it is used verbatim (for the pm2-port lookup below and passed
 # through to atomic-deploy) instead of the built-in 4000 default. Echo it so
@@ -854,21 +988,7 @@ CC_PM2_FALLBACK_NAME="blackceo-command-center"
 if [ -n "${CC_PORT:-}" ]; then
   success "CC port (CC_PORT override): $CC_PORT"
 fi
-PM2_NAME_LIB="$INSTALL_DIR/scripts/lib/pm2-port-zombies.py"
-CC_PM2_NAME=""
-if [ -n "${CC_PM2_APP_NAME:-}" ]; then
-  CC_PM2_NAME="$CC_PM2_APP_NAME"
-  success "pm2 app name (CC_PM2_APP_NAME override): $CC_PM2_NAME"
-elif command -v pm2 >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1 && [ -f "$PM2_NAME_LIB" ]; then
-  CC_PM2_NAME=$(pm2 jlist 2>/dev/null \
-    | python3 -s "$PM2_NAME_LIB" --resolve-name "${CC_PORT:-4000}" "" 2>/dev/null \
-    | head -1 || true)
-  [ -n "$CC_PM2_NAME" ] && success "pm2 app name (live, declares port ${CC_PORT:-4000}): $CC_PM2_NAME"
-fi
-if [ -z "$CC_PM2_NAME" ]; then
-  CC_PM2_NAME="$CC_PM2_FALLBACK_NAME"
-  warn "No live pm2 app declares port ${CC_PORT:-4000} — using fleet-canonical name: $CC_PM2_NAME"
-fi
+CC_PM2_NAME="$(cc_resolve_pm2_name "$INSTALL_DIR/scripts/lib/pm2-port-zombies.py")"
 ATOMIC_DEPLOY="$INSTALL_DIR/scripts/atomic-deploy.sh"
 
 # atomic-deploy.sh requires bash 4+ (macOS system bash is 3.2). Resolve one.
@@ -964,6 +1084,12 @@ if [ "$DEPLOY_OK" -ne 1 ]; then
     warn "PM2 not installed — restart the Next.js prod server manually."
   fi
 fi
+
+fi
+# ---- end merge path ----
+
+NEW_VERSION=""
+[ -f version ] && NEW_VERSION=$(tr -d '[:space:]' < version)
 
 # ----------------------------------------------------------
 # Operator kill-flag receipt (F6)

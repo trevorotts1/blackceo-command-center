@@ -41,6 +41,7 @@ mkdir -p "$WORK/bin" "$WORK/home"
 # degraded (no-bash4 / no-atomic-deploy) path also completes if ever taken.
 cat > "$WORK/bin/npm" <<'FAKENPM'
 #!/bin/sh
+[ -n "${FAKE_NPM_LOG:-}" ] && printf '%s npm %s\n' "$(pwd -P)" "$*" >> "$FAKE_NPM_LOG"
 if [ "$1" = "run" ] && [ "$2" = "build" ]; then
   mkdir -p .next && printf 'fixture-build\n' > .next/BUILD_ID
 fi
@@ -98,8 +99,25 @@ printf '{"logoUrl":"https://example.invalid/default-logo.png"}\n' > "$ORIGIN/pub
 # same file the real company_branding gate reads at deploy time.
 cat > "$ORIGIN/scripts/atomic-deploy.sh" <<'FAKEDEPLOY'
 #!/usr/bin/env bash
-name=$(python3 -c "import json;print(json.load(open('config/company-config.json'))['companyName'])" 2>/dev/null || echo "UNREADABLE")
+# Records what it can see, then promotes like the real one: the live tree is
+# moved onto --revision (fast-forward on a branch, else a detached checkout).
+app="$PWD"; rev=""
+while [ $# -gt 0 ]; do
+  case "$1" in --app-dir) app="$2"; shift 2 ;; --revision) rev="$2"; shift 2 ;; *) shift ;; esac
+done
+name=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]+'/config/company-config.json'))['companyName'])" "$app" 2>/dev/null || echo "UNREADABLE")
 [ -n "${FAKE_DEPLOY_RECEIPT:-}" ] && printf '%s\n' "$name" > "$FAKE_DEPLOY_RECEIPT"
+if [ -n "${FAKE_DEPLOY_STATE:-}" ]; then
+  { printf 'head=%s\n' "$(git -C "$app" rev-parse HEAD)"
+    printf 'revision=%s\n' "$rev"
+    printf 'node_modules=%s\n' "$(cat "$app/node_modules/.marker" 2>/dev/null)"
+    printf 'build=%s\n' "$(cat "$app/.next/BUILD_ID" 2>/dev/null)"
+    printf 'dirty=%s\n' "$(git -C "$app" status --porcelain --untracked-files=no | wc -l | tr -d ' ')"
+  } > "$FAKE_DEPLOY_STATE"
+fi
+if [ -n "$rev" ] && [ "$(git -C "$app" rev-parse HEAD)" != "$rev" ]; then
+  git -C "$app" merge --ff-only -q "$rev" 2>/dev/null || git -C "$app" checkout -q "$rev" || exit 2
+fi
 echo "fake-atomic-deploy: GREEN (companyName seen: $name)"
 exit 0
 FAKEDEPLOY
@@ -398,6 +416,75 @@ git -C "$INST" show-ref --verify --quiet refs/heads/box-feature \
   && ok "original feature branch reference is retained" \
   || bad "original feature branch reference was deleted"
 [ -f "$INST/latest-main.txt" ] && ok "latest upstream file landed" || bad "latest upstream file missing"
+
+# ── Scenario 9: zero-downtime — nothing live changes before promotion ───────
+# A client's Command Center went dark for 35 minutes (2026-09-28): the updater
+# merged origin/main into the LIVE tree and ran npm ci there before building,
+# so every restart during the build was refused by the startup content guard.
+# On a clean fast-forward the live source, node_modules and .next must be
+# exactly as they were when atomic-deploy.sh is handed the new revision.
+echo "Scenario 9: zero-downtime path leaves the live release alone until promotion"
+INST="$WORK/install-s9"
+new_install "$INST"
+OLD_HEAD="$(git -C "$INST" rev-parse HEAD)"
+mkdir -p "$INST/node_modules" "$INST/.next"
+printf 'live-deps\n' > "$INST/node_modules/.marker"
+printf 'live-build\n' > "$INST/.next/BUILD_ID"
+
+printf 'zero-downtime upstream code\n' > "$ORIGIN/zd-feature.txt"
+git -C "$ORIGIN" add -A && git -C "$ORIGIN" commit -qm "fixture: zero-downtime scenario code"
+NEW_HEAD="$(git -C "$ORIGIN" rev-parse HEAD)"
+
+: > "$WORK/npm-s9.log"
+if HOME="$WORK/home" PATH="$FIXTURE_PATH" CC_APP_DIR="$INST" FAKE_NPM_LOG="$WORK/npm-s9.log" \
+     FAKE_DEPLOY_STATE="$WORK/state-s9.txt" bash "$UPDATE_SH" > "$WORK/out-s9.txt" 2>&1; then
+  ok "updater exits 0 on the zero-downtime path"
+else
+  bad "updater exits non-zero on the zero-downtime path (see $WORK/out-s9.txt)"
+fi
+grep -q "Zero-downtime path: target" "$WORK/out-s9.txt" \
+  && ok "the zero-downtime path was taken" || bad "the zero-downtime path was NOT taken"
+grep -qx "head=$OLD_HEAD" "$WORK/state-s9.txt" \
+  && ok "live source still on the running revision when the build is handed off" \
+  || bad "live source moved before promotion: $(grep head= "$WORK/state-s9.txt" 2>/dev/null)"
+grep -qx "revision=$NEW_HEAD" "$WORK/state-s9.txt" \
+  && ok "atomic-deploy.sh builds the new revision explicitly" || bad "wrong or missing --revision"
+grep -qx "node_modules=live-deps" "$WORK/state-s9.txt" \
+  && ok "live node_modules untouched before promotion" || bad "live node_modules changed before promotion"
+grep -qx "build=live-build" "$WORK/state-s9.txt" \
+  && ok "live .next untouched before promotion" || bad "live .next changed before promotion"
+grep -qx "dirty=0" "$WORK/state-s9.txt" \
+  && ok "live tracked tree unchanged before promotion" || bad "live tracked tree changed before promotion"
+LIVE_REAL="$(cd "$INST" && pwd -P)"
+if grep -q "^$LIVE_REAL npm " "$WORK/npm-s9.log"; then
+  bad "npm ran in the live tree: $(grep "^$LIVE_REAL npm " "$WORK/npm-s9.log" | head -1)"
+else
+  ok "npm never ran in the live tree"
+fi
+[ "$(git -C "$INST" rev-parse HEAD)" = "$NEW_HEAD" ] && [ -f "$INST/zd-feature.txt" ] \
+  && ok "after promotion the live tree is on the new revision" || bad "live tree not on the new revision after promotion"
+[ "$(git -C "$INST" symbolic-ref --quiet --short HEAD 2>/dev/null || true)" = "main" ] \
+  && ok "checkout stays attached to main" || bad "checkout left detached after the zero-downtime deploy"
+
+# ── Scenario 10: a detached checkout (an old tag) also takes the zero-downtime path ─
+echo "Scenario 10: detached checkout converges to main without a live change before promotion"
+INST="$WORK/install-s10"
+new_install "$INST"
+git -C "$INST" checkout -q --detach HEAD~1
+DET_HEAD="$(git -C "$INST" rev-parse HEAD)"
+printf 'detached scenario upstream code\n' > "$ORIGIN/zd-detached.txt"
+git -C "$ORIGIN" add -A && git -C "$ORIGIN" commit -qm "fixture: detached scenario code"
+if HOME="$WORK/home" PATH="$FIXTURE_PATH" CC_APP_DIR="$INST" FAKE_DEPLOY_STATE="$WORK/state-s10.txt" \
+     bash "$UPDATE_SH" > "$WORK/out-s10.txt" 2>&1; then
+  ok "updater exits 0 from a detached checkout"
+else
+  bad "updater exits non-zero from a detached checkout (see $WORK/out-s10.txt)"
+fi
+grep -qx "head=$DET_HEAD" "$WORK/state-s10.txt" \
+  && ok "detached live source untouched before promotion" || bad "detached live source moved before promotion"
+[ "$(git -C "$INST" symbolic-ref --quiet --short HEAD 2>/dev/null || true)" = "main" ] \
+  && [ "$(git -C "$INST" rev-parse HEAD)" = "$(git -C "$ORIGIN" rev-parse HEAD)" ] \
+  && ok "detached checkout ends on main at the new revision" || bad "detached checkout did not converge to main"
 
 # ── summary ─────────────────────────────────────────────────────────────────
 echo ""
