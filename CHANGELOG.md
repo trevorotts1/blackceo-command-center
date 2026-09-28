@@ -1,3 +1,7 @@
+## [v7.6.72] — 2026-09-28 — README current-release drift guard
+
+- fix(docs): README.md's "Current release" heading and "current release is" prose were frozen at v7.3.3 for weeks while /version moved on; added `scripts/check-readme-current-release.sh`, wired into `version-consistency.yml`, and `scripts/bump-version.sh` now rolls both README version numbers on every future bump
+
 ## [v7.6.71] — 2026-09-28 — vendor fonts locally, remove Google Fonts build dependency
 
 - fix(build): Inter and JetBrains Mono (OFL) are now vendored locally via `next/font/local` instead of fetched from Google Fonts at build time; fixes intermittent unattended-build failures (`Cannot read properties of null (reading 1)` in the Google font loader) that caused false failed status on daily updates (#449)

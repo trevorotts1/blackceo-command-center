@@ -145,6 +145,30 @@ with open("$F_LOCK","w") as f:
     f.write("\n")
 PYEOF
 
+# README.md prose version tokens (added alongside
+# scripts/check-readme-current-release.sh). Two README version numbers went
+# stale for weeks because nothing rolled them: the "**Current release:
+# vX.Y.Z**" heading and the "current release is vX.Y.Z" line under
+# "## Historical release highlights" (both sat at v7.3.3 while /version
+# reached v7.6.70). Roll only the NUMBER in each — the surrounding
+# description still needs a per-release rewrite, same as CHANGELOG.md.
+# Not part of check_drift's strict 5-location set; checked separately by
+# scripts/check-readme-current-release.sh (called from version-consistency.yml).
+F_README="$REPO_ROOT/README.md"
+if [ -f "$F_README" ]; then
+  python3 - <<PYEOF
+import re
+p = "$F_README"
+target = "$TARGET"
+content = open(p).read()
+new = re.sub(r'(\*\*Current release: )v[0-9]+\.[0-9]+\.[0-9]+',
+             r'\1' + target, content, count=1)
+new = re.sub(r'(current release is )v[0-9]+\.[0-9]+\.[0-9]+',
+             r'\1' + target, new, count=1)
+open(p, "w").write(new)
+PYEOF
+fi
+
 echo ""
 print_state
 
