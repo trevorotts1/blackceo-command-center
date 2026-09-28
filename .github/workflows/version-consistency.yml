@@ -65,6 +65,14 @@ jobs:
         shell: bash
         run: bash scripts/check-readme-current-release.sh
 
+      - name: Self-test the CHANGELOG tag-coverage check (+ mutation proof)
+        shell: bash
+        run: bash tests/unit/changelog-tag-coverage.test.sh
+
+      - name: "CHANGELOG.md coverage for the last 60 annotated tags (scripts/check-changelog-tag-coverage.sh)"
+        shell: bash
+        run: bash scripts/check-changelog-tag-coverage.sh
+
       # The guard proves itself before it judges anything. The bounded wait
       # below is unobservable in a normal run -- it only engages when this job
       # races auto-tag-on-merge.yml on a release push, which is precisely when
