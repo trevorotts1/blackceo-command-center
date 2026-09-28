@@ -32,7 +32,7 @@
  *     (FIX 39 untouched)
  *
  * Runs via the Node built-in test runner under tsx, DB-backed on a throwaway
- * DATABASE_PATH (same pattern as maria-pattern-harness.test.ts):
+ * DATABASE_PATH (same pattern as stuck-card-pattern-harness.test.ts):
  *
  *   node --import tsx --import ./tests/setup/no-owner-telegram.ts \
  *        --test tests/unit/fix7-engine-deck-done-path.test.ts

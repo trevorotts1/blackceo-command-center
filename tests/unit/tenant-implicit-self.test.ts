@@ -29,11 +29,11 @@ test('no registry, production: loopback resolves to the implicit self identity',
 
 test('no registry, production: the hostname of CC_PUBLIC_URL resolves; any other host is refused', async () => {
   const { tenantRegistration, TenantAccessError } = await load();
-  withEnv({ NODE_ENV: 'production', MC_TENANT_REGISTRY_JSON: undefined, CC_PUBLIC_URL: 'https://Angela.example.com', MC_COMPANY_ID: 'acme' }, () => {
-    const reg = tenantRegistration('angela.example.com');
+  withEnv({ NODE_ENV: 'production', MC_TENANT_REGISTRY_JSON: undefined, CC_PUBLIC_URL: 'https://Client-A.example.com', MC_COMPANY_ID: 'acme' }, () => {
+    const reg = tenantRegistration('client-a.example.com');
     assert.equal(reg.companyId, 'acme');
     assert.throws(() => tenantRegistration('evil.example.com'), TenantAccessError);
-    assert.throws(() => tenantRegistration('angela.example.com.evil.net'), TenantAccessError);
+    assert.throws(() => tenantRegistration('client-a.example.com.evil.net'), TenantAccessError);
   });
   withEnv({ NODE_ENV: 'production', MC_TENANT_REGISTRY_JSON: undefined, CC_PUBLIC_URL: undefined, MC_TENANT_PUBLIC_URL: 'https://box.example.org/' }, () => {
     assert.equal(tenantRegistration('box.example.org').kind, 'self');

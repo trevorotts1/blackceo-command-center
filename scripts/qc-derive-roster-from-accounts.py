@@ -39,7 +39,7 @@ DERIVATION (structural, not hand-keyed):
      structural/category headings (an explicit denylist of section titles
      that are never a client identity — Credentials, Procedure, Client setup
      standards, How to use this file, Local — Mac mini, Client VPSes,
-     Client VPS (Lyric's...), Contabo VPS clients, Management Plan
+     Client VPS (...), Contabo VPS clients, Management Plan
      Designations, Quick reference table, Client emails, Common commands,
      Related). A handful of clients get promoted to this level instead of a
      numbered ### subsection.
@@ -82,7 +82,7 @@ DENYLIST_H2_PREFIXES = (
     "How to use this file",
     "Local — Mac mini",
     "Client VPSes",
-    "Client VPS (Lyric's",
+    "Client VPS (",
     "Contabo VPS clients",
     "Management Plan Designations",
     "Quick reference table",

@@ -41,7 +41,7 @@
  * no network. Only the durable side effect is withheld, and the response says
  * so explicitly via `fixture: true` / `persisted: false`. A test that genuinely
  * needs a persisted row calls `createResearchSearch()` directly against a
- * throwaway DATABASE_PATH — the seam tests/unit/maria-pattern-harness.test.ts
+ * throwaway DATABASE_PATH — the seam tests/unit/stuck-card-pattern-harness.test.ts
  * already enforces.
  */
 

@@ -1134,7 +1134,7 @@ export async function autoDispatchTask(
       // event, no backoff, no block, no operator alert — the card kept its
       // phantom assigned_agent_id forever and intake-advance re-selected it
       // every ~2 minutes, re-skipping it silently on every tick (the
-      // Maria-pattern S2 fake-agent root cause, class (a): a phantom id sits
+      // Stuck-card-pattern S2 fake-agent root cause, class (a): a phantom id sits
       // in the assignment column and nothing owns un-sticking it).
       //
       // FIX: heal it instead of skipping it. Clear the phantom

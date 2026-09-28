@@ -5878,7 +5878,7 @@ export const migrations: Migration[] = [
     },
   },
   {
-    // JANET-INTERVIEW-FIX (2026-08-13): tenant-scope the shared Command
+    // TENANT-INTERVIEW-FIX (2026-08-13): tenant-scope the shared Command
     // Center's interview surface. The client row for a remote box whose
     // hostname routes here carries its own gateway_url / gateway_token
     // (conversation relay) and its own interview_complete flag (state reads).
@@ -5950,7 +5950,7 @@ export const migrations: Migration[] = [
     },
   },
   {
-    // JANET-INTERVIEW-FIX phase 2 (2026-08-17): per-client interview state.
+    // TENANT-INTERVIEW-FIX phase 2 (2026-08-17): per-client interview state.
     //
     // The interview's canonical state lives in the OPERATOR's files, of which
     // there is exactly one set on the box. A remote client routed here by

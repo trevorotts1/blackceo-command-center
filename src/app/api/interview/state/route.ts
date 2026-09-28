@@ -325,7 +325,7 @@ export async function GET(request: NextRequest) {
   const customDeptIds = parseIdList(url.searchParams.get('customDeptIds'));
   const implicitYesCustomIds = parseIdList(url.searchParams.get('implicitYesCustomIds'));
 
-  // JANET-INTERVIEW-FIX: a remote client's hostname must be served from ITS
+  // TENANT-INTERVIEW-FIX: a remote client's hostname must be served from ITS
   // clients-row flag — never the operator's canonical files. Self reads the
   // canonical snapshot exactly as before (regression requirement).
   const tenant = await resolveInterviewTenant(request);

@@ -1,7 +1,7 @@
 /**
  * heal-phantom-assignments.ts — C-03 + C-04 (skill6-v2 U34/U35).
  *
- * THE PROBLEM (Maria-pattern S2, class (a) — "fake agent"):
+ * THE PROBLEM (Stuck-card-pattern S2, class (a) — "fake agent"):
  *   `autoDispatchTask` used to load the task's `assigned_agent_id`, find no
  *   matching `agents` row, and silently `console.warn` + return — no event,
  *   no `recordDispatchFailure`, no backoff, no block, no operator alert. The

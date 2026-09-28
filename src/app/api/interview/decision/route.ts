@@ -117,7 +117,7 @@ export async function POST(req: NextRequest) {
       }
     }
   }
-  // FAIL CLOSED for client tenants (JANET-INTERVIEW-FIX phase 2). This route
+  // FAIL CLOSED for client tenants (TENANT-INTERVIEW-FIX phase 2). This route
   // presses record-dept-decision.sh against the OPERATOR's canonical build
   // state, so a remote client's department decision would be written as the
   // operator's. Client tenants queue through the remote receiver instead.
