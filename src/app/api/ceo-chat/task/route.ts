@@ -39,7 +39,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { queryOne } from '@/lib/db';
 import { createTaskCore } from '@/lib/tasks';
-import { classify, assertTaskCreationAllowed } from '@/lib/intake';
+import { classify, assertTaskCreationAllowed, deriveIntakeContext } from '@/lib/intake';
+import type { IntakeContext } from '@/lib/intake';
 import { routeTask } from '@/lib/routing/department-router';
 import { isMyAiCeoBetaEnabled, CEO_CHAT_CHANNEL } from '@/lib/ceo-chat/config';
 import type { TaskPriority } from '@/lib/types';
@@ -65,6 +66,35 @@ function resolveExplicitWorkspace(departmentSlug: string): WorkspaceRow | null {
       [slug, slug],
     ) ?? null
   );
+}
+
+/**
+ * Spec 4.2 context for this door: the classifier must know whether this
+ * requester already has a live task (so "Is that finished?" reads as a status
+ * question, not a new request) and whether one is still waiting on their
+ * answer (so "Yes, that audience is right." completes it instead of arriving
+ * as unresolved text). Both are counts this session's own cards already
+ * carry; a query failure degrades to an empty context — the solver path
+ * behaves exactly as it did before, never as if a task existed.
+ */
+function requesterIntakeContext(sessionId: string): IntakeContext {
+  try {
+    const row = queryOne<{ live: number; awaiting: number }>(
+      `SELECT
+         SUM(CASE WHEN status NOT IN ('done','archived') THEN 1 ELSE 0 END) AS live,
+         SUM(CASE WHEN status NOT IN ('done','archived') AND ask IS NOT NULL AND ask <> ''
+                  THEN 1 ELSE 0 END) AS awaiting
+       FROM tasks
+       WHERE requester_channel = ? AND requester_chat_id = ?`,
+      [CEO_CHAT_CHANNEL, sessionId],
+    );
+    return deriveIntakeContext({
+      liveTaskCount: row?.live ?? 0,
+      awaitingAnswerCount: row?.awaiting ?? 0,
+    });
+  } catch {
+    return {};
+  }
 }
 
 function resolveGeneralTaskWorkspace(): WorkspaceRow | null {
@@ -121,10 +151,10 @@ export async function POST(request: NextRequest) {
   // INSERT — routeTaskDecision / commitIntakeAssignment / autoDispatchTask)
   // never runs. task_request / mixed_answer_and_task proceed through the
   // creation gate (which proves classify() ran on THIS text via the message
-  // hash). unresolved falls through to card creation: an explicit delegate
-  // call is a typed command, not raw chat text.
+  // hash). unresolved creates no card either — the module gate refuses it
+  // (see the explicit guard below).
   if (!detail && !rawDept) {
-    const classification = await classify(title);
+    const classification = await classify(title, requesterIntakeContext(sessionId));
     if (
       classification.intent === 'answer_only' ||
       classification.intent === 'social_conversation' ||
@@ -148,8 +178,17 @@ export async function POST(request: NextRequest) {
       }
       assertTaskCreationAllowed({ kind: 'raw', message: title, classification });
     }
-    // unresolved falls through to card creation: an explicit delegate call
-    // is a typed command, not raw chat text (spec 4.2).
+    // Spec 4.4 row 20: untrusted task material is never permission to bypass
+    // policy. A control probe whose intent did not resolve to work-bearing
+    // text would otherwise fall straight through to card creation, so the
+    // probe is refused on its own verdict rather than on its intent. An
+    // unclassifiable-but-clean title still routes as before.
+    if (classification.controlProbe || !classification.bypassAllowed) {
+      return NextResponse.json(
+        { ok: false, error: 'control_probe_never_creates', intent: classification.intent },
+        { status: 403 },
+      );
+    }
   }
 
   const isAuto = !rawDept || rawDept.toLowerCase() === 'auto';

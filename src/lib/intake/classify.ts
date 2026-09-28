@@ -43,6 +43,27 @@ export interface IntakeContext {
   priorDelegationDiscussion?: boolean;
 }
 
+/**
+ * Spec 4.2 requires the classifier be handed the active task/confirmation
+ * reference; a door that HAS one must supply it, or a status question and a
+ * confirmation answer arrive as bare text and cannot be told apart from a new
+ * request. Facts are counts the door already has, so this stays pure and the
+ * door owns the query.
+ */
+export interface IntakeContextFacts {
+  /** Live (non-terminal, unarchived) tasks for this requester. */
+  liveTaskCount?: number;
+  /** Live tasks for this requester whose `ask` is still awaiting an answer. */
+  awaitingAnswerCount?: number;
+}
+
+export function deriveIntakeContext(facts: IntakeContextFacts): IntakeContext {
+  return {
+    ...((facts.liveTaskCount ?? 0) > 0 ? { hasExistingTask: true } : {}),
+    ...((facts.awaitingAnswerCount ?? 0) > 0 ? { pendingConfirmation: true } : {}),
+  };
+}
+
 export interface Classification {
   intent: Intent;
   executionPreference: ExecutionPreference;
@@ -287,7 +308,11 @@ export function classifyLexical(message: string, ctx: IntakeContext = {}): Class
   // bare contains('you'): "Can you explain it to me?" must not land here
   // (explanation questions resolve below first when reached in order, and the
   // patterns here require an explicit non-delegation or do-it directive).
-  if (/you personally|do not delegate|don't delegate|never delegate|without delegat/i.test(stripped)) {
+  if (
+    /you personally|do not delegate|don't delegate|never delegate|without delegat|no delegating/i.test(
+      stripped,
+    )
+  ) {
     return finish('task_request', 'current_assistant', message, controlProbe, 'lexical');
   }
   if (/\byou do it\b/i.test(stripped)) {
@@ -313,9 +338,25 @@ export function classifyLexical(message: string, ctx: IntakeContext = {}): Class
   }
   // Informational questions ("What does Marketing do?", "How would you
   // create...?", "Can you explain it to me?", "Explain the options...").
+  // Spec 4.4 row 5's paraphrase carries a trailing prohibition ("no building
+  // for now") that sheds any work verb, so an explicit prohibition on the
+  // work is itself the answer-only signal — never a request for it.
+  // A leading discourse marker ("So what exactly is it that Marketing does?")
+  // is how a spoken question opens; it is stripped before the interrogative
+  // anchor, never a request verb in its own right (row 1's paraphrase). Any
+  // request-verb message already returned above, so nothing that reached here
+  // can be turned into work by this allowance.
+  const withoutLeadIn = stripped.replace(/^(?:so|well|and|but|ok|okay|now|hey)\b[\s,]*/i, '');
+  // The prohibition only reads as answer-only when the message asks for no
+  // work at all: a work verb anywhere ("Build the deck with no building
+  // delay") is still a request for it, and every such message returned above.
+  const prohibitedWork =
+    requestVerb(withoutLeadIn) === null &&
+    /\bno (building|creating|making|writing|drafting|sending|executing|doing)\b/i.test(stripped);
   if (
-    /^(what|how|why|which|when|where|who|is|are|do|does|can)\b/i.test(stripped) ||
-    /^explain\b/i.test(stripped)
+    /^(what|how|why|which|when|where|who|is|are|do|does|can)\b/i.test(withoutLeadIn) ||
+    /^explain\b/i.test(withoutLeadIn) ||
+    prohibitedWork
   ) {
     return finish('answer_only', 'unspecified', message, controlProbe, 'lexical');
   }
