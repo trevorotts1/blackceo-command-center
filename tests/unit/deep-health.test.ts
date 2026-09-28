@@ -2476,3 +2476,46 @@ describe('scheduler_liveness (ISSUE-04, GATING)', () => {
     expect(schedulerLivenessWarmupMinutes(watched)).toBe(widest + 1);
   });
 });
+
+// ────────────────────────────────────────────────────────────────────────────
+// build_content runs OFF the request thread and is cached per build + commit.
+// A synchronous verify blocked the whole server for the length of the hash, so
+// under load the Command Center stopped answering even /api/health.
+// ────────────────────────────────────────────────────────────────────────────
+describe('build_content — never blocks the server; cached per BUILD_ID + HEAD', () => {
+  function slowOracle(dir: string, counter: string): void {
+    fs.mkdirSync(path.join(dir, 'scripts', 'lib'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'scripts', 'lib', 'build-inventory.sh'),
+      `echo x >> "${counter}"; sleep 1; echo '{"verdict":"VERIFIED","build_id":"b1"}'\n`);
+    fs.mkdirSync(path.join(dir, '.next'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.next', 'BUILD_ID'), 'b1');
+    fs.mkdirSync(path.join(dir, '.git', 'refs', 'heads'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+    fs.writeFileSync(path.join(dir, '.git', 'refs', 'heads', 'main'), 'aaaa\n');
+  }
+
+  it('the event loop keeps serving while the verify runs', async () => {
+    const counter = path.join(tmpDir, 'calls');
+    slowOracle(tmpDir, counter);
+    const { checkBuildContentInventory } = await loadChecks();
+    const t0 = Date.now();
+    const check = checkBuildContentInventory();
+    expect(Date.now() - t0).toBeLessThan(500); // a synchronous spawn held the thread for the whole 1 s verify
+    let ticked = false;
+    await new Promise<void>((r) => setTimeout(() => { ticked = true; r(); }, 50));
+    expect(ticked).toBe(true);
+    expect((await check).pass).toBe(true);
+  });
+
+  it('a repeat poll of the same build + commit does not re-hash; a new commit does', async () => {
+    const counter = path.join(tmpDir, 'calls');
+    slowOracle(tmpDir, counter);
+    const { checkBuildContentInventory } = await loadChecks();
+    await Promise.all([checkBuildContentInventory(), checkBuildContentInventory()]);
+    await checkBuildContentInventory();
+    expect(fs.readFileSync(counter, 'utf8').trim().split('\n')).toHaveLength(1);
+    fs.writeFileSync(path.join(tmpDir, '.git', 'refs', 'heads', 'main'), 'bbbb\n');
+    await checkBuildContentInventory();
+    expect(fs.readFileSync(counter, 'utf8').trim().split('\n')).toHaveLength(2);
+  });
+});

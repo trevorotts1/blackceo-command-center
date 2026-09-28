@@ -311,6 +311,10 @@ _health_check_args() {
   if grep -q -- '--app-name' "$HEALTH_CHECK" 2>/dev/null; then
     args+=(--app-name "$PM2_APP_NAME")
   fi
+  # Same version-skew guard: the green gate judges build/serve rows only.
+  if grep -q -- '--deploy-gate' "$HEALTH_CHECK" 2>/dev/null; then
+    args+=(--deploy-gate)
+  fi
   args+=(--disk-min-gb 0.5)   # runtime threshold; B.4 build gate uses 5 GB (handled by us)
   args+=(--json-only)
   [[ -n "$DB_PATH_OVERRIDE" ]]    && args+=(--db-path "$DB_PATH_OVERRIDE")
@@ -1977,9 +1981,17 @@ else
     fi
     sleep 5
     _log "Re-running cc-health-check.sh on restored build ..."
-    ROLLBACK_HEALTH_EXIT=0
-    _run_health_check ROLLBACK_HEALTH_JSON || ROLLBACK_HEALTH_EXIT=$?
-    _log "  Rollback health check exit: ${ROLLBACK_HEALTH_EXIT}"
+    # Poll through the startup grace like the deploy's own health loop: a
+    # restored app still booting answers exit 3, which is not a failed rollback.
+    _rb_attempt=0
+    while true; do
+      _rb_attempt=$(( _rb_attempt + 1 ))
+      ROLLBACK_HEALTH_EXIT=0
+      _run_health_check ROLLBACK_HEALTH_JSON || ROLLBACK_HEALTH_EXIT=$?
+      _log "  Rollback health check attempt ${_rb_attempt}: exit ${ROLLBACK_HEALTH_EXIT}"
+      [[ $ROLLBACK_HEALTH_EXIT -eq 3 && $_rb_attempt -lt $HEALTH_RETRIES ]] || break
+      sleep "$HEALTH_RETRY_WAIT"
+    done
   else
     ROLLBACK_HEALTH_JSON="{\"green\":false,\"error\":\"rollback pm2 switch failed\"}"
     _err "CRITICAL: rollback restored the prior release but PM2 could not switch onto it."

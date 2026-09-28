@@ -681,6 +681,27 @@ test('Spec Verify (c): build ok + health exits 1 → rollback fires, .next.rollb
   }
 });
 
+// A restored app still inside its startup grace answers exit 3. Judging it once,
+// 5 s after the switch, left a healthy rollback stuck in ROLLBACK_VERIFY_FAILED
+// and every later deploy refused.
+test('Rollback verify polls through the startup grace: exit 3 then green → ROLLED_BACK_VERIFIED', async () => {
+  const fixture = buildFixture({ buildExitCode: 0, healthExitCode: 1, rollbackHealthExitCode: 0, liveNextExists: true });
+  writeFileSync(fixture.healthCheckStubPath, `#!/usr/bin/env bash
+C="${fixture.baseDir}/.health-call-count"; N=$(( $(cat "$C" 2>/dev/null || echo 0) + 1 )); echo "$N" > "$C"
+case "$N" in 1) echo '{"pass":false}'; exit 1;; 2) echo '{"pass":false,"indeterminate":true}'; exit 3;; *) echo '{"pass":true}'; exit 0;; esac
+`, { mode: 0o755 });
+  try {
+    const { exitCode, stderr } = runDeploy(fixture);
+    assert.strictEqual(exitCode, 1, stderr);
+    assert.ok(stderr.includes('Rollback verified'), `rollback must verify once the grace passes.\nstderr:\n${stderr}`);
+    assert.ok(!stderr.includes('ROLLBACK DID NOT COMPLETE'), stderr);
+    assert.ok(!existsSync(path.join(fixture.appDir, '.atomic-deploy-transaction.json')),
+      'a verified rollback archives its receipt; nothing may block the next deploy');
+  } finally {
+    fixture.cleanup();
+  }
+});
+
 // ─── Spec Verify (d): health exits 3 → retry, no rollback, exit 3 ───────────
 
 /**

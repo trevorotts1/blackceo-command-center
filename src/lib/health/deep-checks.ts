@@ -29,7 +29,7 @@ import os from 'os';
 // 'node:' URI scheme (UnhandledSchemeError) but tolerates the bare
 // specifier — the same pattern src/lib/notify.ts (already reachable from
 // this exact import chain) already relies on.
-import { execFile, spawnSync } from 'child_process';
+import { execFile } from 'child_process';
 import { promisify } from 'util';
 import BetterSqlite3 from 'better-sqlite3';
 import { getDb, getMigrationStatus, getDbPath } from '@/lib/db';
@@ -250,8 +250,45 @@ export interface BuildContentResult extends CheckResult {
   build_id?: string;
 }
 
-export function checkBuildContentInventory(): BuildContentResult {
+// The verify hashes the whole build tree. It runs off the request thread (a
+// synchronous spawn here blocked the whole server for the length of the hash,
+// so under load the Command Center stopped answering even /api/health), and
+// its verdict is cached per served build + checked-out commit, so repeated
+// health polls of an unchanged build never re-hash it.
+// ponytail: 5-minute TTL covers working-tree edits that do not move HEAD.
+const BUILD_CONTENT_TTL_MS = 5 * 60_000;
+let buildContentCache: { key: string; at: number; result: Promise<BuildContentResult> } | null = null;
+
+function buildContentCacheKey(cwd: string): string | null {
+  try {
+    const buildId = fs.readFileSync(path.join(cwd, '.next', 'BUILD_ID'), 'utf8').trim();
+    const head = fs.readFileSync(path.join(cwd, '.git', 'HEAD'), 'utf8').trim();
+    let ref = '';
+    if (head.startsWith('ref: ')) {
+      const refFile = path.join(cwd, '.git', head.slice(5));
+      const packed = path.join(cwd, '.git', 'packed-refs');
+      ref = fs.existsSync(refFile) ? fs.readFileSync(refFile, 'utf8').trim()
+        : fs.existsSync(packed) ? String(fs.statSync(packed).mtimeMs) : '';
+    }
+    return `${cwd}\n${buildId}\n${head}\n${ref}`;
+  } catch {
+    return null; // no git checkout (fixtures, copies): never cache
+  }
+}
+
+export function checkBuildContentInventory(): Promise<BuildContentResult> {
   const cwd = process.cwd();
+  const key = buildContentCacheKey(cwd);
+  const now = Date.now();
+  if (key && buildContentCache && buildContentCache.key === key && now - buildContentCache.at < BUILD_CONTENT_TTL_MS) {
+    return buildContentCache.result;
+  }
+  const result = computeBuildContentInventory(cwd);
+  if (key) buildContentCache = { key, at: now, result };
+  return result;
+}
+
+async function computeBuildContentInventory(cwd: string): Promise<BuildContentResult> {
   const invLib = path.join(cwd, 'scripts', 'lib', 'build-inventory.sh');
 
   if (!fs.existsSync(invLib)) {
@@ -268,7 +305,7 @@ export function checkBuildContentInventory(): BuildContentResult {
   }
 
   try {
-    const verify = spawnHelper(invLib, ['--verify', cwd], 30_000);
+    const verify = await spawnHelper(invLib, ['--verify', cwd], 30_000);
     let parsed: { verdict?: string; build_id?: string } = {};
     try { parsed = JSON.parse(verify.stdout) as { verdict?: string; build_id?: string }; } catch { /* fallthrough */ }
     const verdict = parsed.verdict ?? 'UNKNOWN';
@@ -285,8 +322,8 @@ export function checkBuildContentInventory(): BuildContentResult {
 
     if (verify.rc === 1 && verdict === 'MISMATCH') {
       // Deliberate-rollback path: the receipt must bind exactly this pair.
-      const sourceInv = spawnHelper(invLib, ['--digest', cwd], 30_000).stdout.trim();
-      const rb = spawnHelper(invLib, ['--verify-rollback', cwd, path.join(cwd, '.next'), sourceInv], 30_000);
+      const sourceInv = (await spawnHelper(invLib, ['--digest', cwd], 30_000)).stdout.trim();
+      const rb = await spawnHelper(invLib, ['--verify-rollback', cwd, path.join(cwd, '.next'), sourceInv], 30_000);
       let rbParsed: { receipt_verdict?: string } = {};
       try { rbParsed = JSON.parse(rb.stdout) as { receipt_verdict?: string }; } catch { /* fallthrough */ }
       const rbVerdict = rbParsed.receipt_verdict ?? 'RECEIPT_INVALID';
@@ -314,8 +351,8 @@ export function checkBuildContentInventory(): BuildContentResult {
       // legitimate inside the transaction-bound legacy-prior carve-out: the
       // rollback receipt names it "(unattested)" and binds the failed target
       // to this exact source tree. Anything else refuses.
-      const sourceInvMissing = spawnHelper(invLib, ['--digest', cwd], 30_000).stdout.trim();
-      const rbMissing = spawnHelper(invLib, ['--verify-rollback', cwd, path.join(cwd, '.next'), sourceInvMissing], 30_000);
+      const sourceInvMissing = (await spawnHelper(invLib, ['--digest', cwd], 30_000)).stdout.trim();
+      const rbMissing = await spawnHelper(invLib, ['--verify-rollback', cwd, path.join(cwd, '.next'), sourceInvMissing], 30_000);
       let rbMissingParsed: { receipt_verdict?: string } = {};
       try { rbMissingParsed = JSON.parse(rbMissing.stdout) as { receipt_verdict?: string }; } catch { /* fallthrough */ }
       const rbMissingVerdict = rbMissingParsed.receipt_verdict ?? 'RECEIPT_INVALID';
@@ -363,14 +400,18 @@ export function checkBuildContentInventory(): BuildContentResult {
 }
 
 /**
- * Synchronous helper: run a shell command via spawnSync with an ARGUMENT ARRAY
- * (no shell interpolation — arguments pass verbatim to bash), capture stdout +
- * exit code, with a hard timeout so a wedged filesystem cannot hang the health
- * endpoint.
+ * Run a shell command with an ARGUMENT ARRAY (no shell interpolation —
+ * arguments pass verbatim to bash) off the event loop, capture stdout + exit
+ * code, with a hard timeout so a wedged filesystem cannot hang the endpoint.
  */
-function spawnHelper(cmd: string, args: string[], timeoutMs: number): { stdout: string; rc: number } {
-  const res = spawnSync('bash', [cmd, ...args], { timeout: timeoutMs, encoding: 'utf8' });
-  return { stdout: res.stdout ?? '', rc: res.status ?? (res.error ? 1 : 1) };
+function spawnHelper(cmd: string, args: string[], timeoutMs: number): Promise<{ stdout: string; rc: number }> {
+  return new Promise((resolve) => {
+    execFile('bash', [cmd, ...args], { timeout: timeoutMs, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 },
+      (err, stdout) => {
+        const code = (err as { code?: unknown } | null)?.code;
+        resolve({ stdout: stdout ?? '', rc: err ? (typeof code === 'number' ? code : 1) : 0 });
+      });
+  });
 }
 
 // ── check: company branding ──────────────────────────────────────────────────

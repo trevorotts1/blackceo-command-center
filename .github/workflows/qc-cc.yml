@@ -506,6 +506,9 @@ jobs:
       # remediate.sh resolves the tunnel CF Access token from the private map.
       - name: remediate.sh CF token stem test
         run: bash tests/unit/remediate-cf-token.test.sh
+      # The deploy's green gate judges build/serve rows only; content rows warn.
+      - name: cc-health-check.sh --deploy-gate test
+        run: bash scripts/cc-health-check-deploy-gate.test.sh
 
 
   # ── Build smoke test — BLOCKING ───────────────────────────────────────────

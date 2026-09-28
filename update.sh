@@ -539,8 +539,20 @@ _zd_bash4() {
 }
 if [ -d ".git" ] && [ "${CC_UPDATE_ZERO_DOWNTIME:-1}" = "1" ]; then
   step "Step 2: Fetch latest from GitHub (zero-downtime path check)"
-  git fetch origin main 2>&1 || fatal "git fetch failed"
+  # Explicit refspec: a clone whose configured refspec names only a tag (seen on
+  # client boxes) never moves origin/main on a bare `git fetch origin main`, so
+  # the update would target a years-old origin/main.
+  git fetch origin +refs/heads/main:refs/remotes/origin/main 2>&1 || fatal "git fetch failed"
   ZD_TARGET=$(git rev-parse origin/main)
+  # CC_UPDATE_TARGET: a fleet roll pins one main commit for every box, so a merge
+  # landing mid-roll never reaches the boxes that update after it.
+  # ponytail: only the zero-downtime path honours the pin; the merge fallback
+  # below still converges to origin/main.
+  if [ -n "${CC_UPDATE_TARGET:-}" ]; then
+    git merge-base --is-ancestor "$CC_UPDATE_TARGET" "$ZD_TARGET" 2>/dev/null \
+      || fatal "CC_UPDATE_TARGET $CC_UPDATE_TARGET is not a commit on origin/main"
+    ZD_TARGET=$(git rev-parse "$CC_UPDATE_TARGET^{commit}")
+  fi
   ZD_WHY=""
   git merge-base --is-ancestor HEAD "$ZD_TARGET" || ZD_WHY="the checkout has commits that are not on origin/main"
   [ -z "$ZD_WHY" ] && [ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ] \
@@ -636,7 +648,10 @@ PER_BOX_TEMPLATE_FILES=(
 PRESERVE_DIR="$BACKUP_DIR/per-box-config-preserve"
 PRESERVED=()
 if [ -d ".git" ]; then
-  git fetch origin main 2>&1 || fatal "git fetch failed"
+  # Explicit refspec: a clone whose configured refspec names only a tag (seen on
+  # client boxes) never moves origin/main on a bare `git fetch origin main`, so
+  # the update would target a years-old origin/main.
+  git fetch origin +refs/heads/main:refs/remotes/origin/main 2>&1 || fatal "git fetch failed"
   OLD_HEAD_SHA=$(git rev-parse HEAD 2>/dev/null || true)
   MERGE_BASE_SHA=$(git merge-base HEAD origin/main 2>/dev/null || true)
 
