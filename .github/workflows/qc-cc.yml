@@ -500,6 +500,9 @@ jobs:
       # its store from the actual service identity, not inherited HOME.
       - name: Rescue credential loader parser and service-store tests
         run: bash tests/unit/rescue-credential-loader.test.sh
+      # remediate.sh per-box Mac shell is read from private config, not the repo.
+      - name: remediate.sh per-box Mac shell config test
+        run: bash tests/unit/remediate-mac-shell.test.sh
 
 
   # ── Build smoke test — BLOCKING ───────────────────────────────────────────

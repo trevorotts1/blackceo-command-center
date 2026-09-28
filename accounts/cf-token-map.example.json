@@ -1,0 +1,8 @@
+{
+  "_doc": "SHAPE ONLY. The real map names every mac-tunnel client, so it lives outside this public repo at ~/.openclaw/fleet/cf-token-map.json (override: $CF_TOKEN_MAP). Keys are tunnel hostnames (the exact probe_match from fleet-roster.json); values are the env-var NAME stem <NAME> of CF_ACCESS_<NAME>_SVC_CLIENT_ID / _SVC_CLIENT_SECRET in ~/.openclaw/secrets/.env. Never token values. Two boxes of the same client may share one stem. fleet-coverage-gate.py --reconcile fails with MISSING_CF_TOKEN_MAPPING when a mac-kind roster box has no entry.",
+  "tokens": {
+    "rescue-client-one.zerohumanworkforce.com": "CLIENT_ONE",
+    "rescue-client-two-macbookpro.zerohumanworkforce.com": "CLIENT_TWO",
+    "rescue-client-two.zerohumanworkforce.com": "CLIENT_TWO"
+  }
+}

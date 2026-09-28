@@ -172,3 +172,6 @@ client-roster.txt
 /AGENTS.md
 /memory/
 /.eslintrc.json
+
+# Private fleet config: names every client. Lives at ~/.openclaw/fleet/ (see accounts/cf-token-map.example.json).
+accounts/cf-token-map.json
