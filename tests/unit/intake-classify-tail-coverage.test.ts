@@ -237,19 +237,21 @@ test('[C4] row-3 paraphrase "Could you put together the campaign for me?" is a t
   assert.equal(gateEffect(msg, c), 'allows');
 });
 
-test('[C4] DISCLOSED-CONSERVATIVE: row-6 paraphrase "I want you to write it yourself, no delegating." is unresolved', () => {
+test('[C4] row-6 paraphrase "I want you to write it yourself, no delegating." is a current_assistant task request (was DEFECT; fixed)', () => {
   const msg = 'I want you to write it yourself, no delegating.';
   const c = classifyLexical(msg);
-  assert.equal(c.intent, 'unresolved');
-  assert.equal(c.executionPreference, 'unspecified', 'owner-direct preference is not guessed at either');
-  assert.equal(gateEffect(msg, c), UNRESOLVED_GATE);
+  assert.equal(c.intent, 'task_request');
+  assert.equal(c.executionPreference, 'current_assistant');
+  assert.equal(gateEffect(msg, c), 'allows');
 });
 
-test('[C4] DISCLOSED-CONSERVATIVE: row-5 paraphrase "Just explain the options, no building for now." is unresolved', () => {
+test('[C4] row-5 paraphrase "Just explain the options, no building for now." is answer_only (was DEFECT; fixed)', () => {
   const msg = 'Just explain the options, no building for now.';
   const c = classifyLexical(msg);
-  assert.equal(c.intent, 'unresolved');
-  assert.equal(gateEffect(msg, c), UNRESOLVED_GATE);
+  assert.equal(c.intent, 'answer_only');
+  // The module gate refuses only `unresolved` (bypass.ts:153); answer_only is
+  // suppressed at the doors, which return 200 created:false before any card.
+  assert.equal(gateEffect(msg, c), 'allows');
 });
 
 test('[C4] row-9 paraphrase "Please ask Marketing to take care of it." is a task request and invents no department', () => {

@@ -1,9 +1,18 @@
-export { classify, classifyLexical, classifyViaJev, hashIntakeMessage, isControlProbe, normalizeIntakeMessage } from './classify';
+export {
+  classify,
+  classifyLexical,
+  classifyViaJev,
+  deriveIntakeContext,
+  hashIntakeMessage,
+  isControlProbe,
+  normalizeIntakeMessage,
+} from './classify';
 export type {
   Classification,
   ClassificationProvenance,
   ExecutionPreference,
   IntakeContext,
+  IntakeContextFacts,
   Intent,
   JevIntentAnswer,
   JevResponder,

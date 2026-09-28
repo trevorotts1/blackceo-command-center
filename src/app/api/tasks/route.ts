@@ -184,7 +184,8 @@ export async function POST(request: NextRequest) {
     // routeTaskDecision / commitIntakeAssignment / autoDispatchTask) never
     // runs. task_request / mixed_answer_and_task proceed through the
     // creation gate (which proves classify() ran on THIS text via the
-    // message hash). unresolved falls through to card creation, and any
+    // message hash). unresolved creates no card either — the module gate
+    // refuses it, and any
     // structured call (a destination or an overhead key — any TypedIngest
     // shape) carries a typed command, never re-classified (spec 4.2).
     {
@@ -221,8 +222,17 @@ export async function POST(request: NextRequest) {
           }
           assertTaskCreationAllowed({ kind: 'raw', message: rawTitle, classification });
         }
-        // unresolved falls through to card creation: an explicit bare-title
-        // create is a typed command, not raw chat text (spec 4.2).
+        // Spec 4.4 row 20: untrusted task material is never permission to
+        // bypass policy. A control probe whose intent did not resolve to
+        // work-bearing text would otherwise fall straight through to card
+        // creation, so the probe is refused on its own verdict rather than on
+        // its intent. An unclassifiable-but-clean title still routes as before.
+        if (classification.controlProbe || !classification.bypassAllowed) {
+          return NextResponse.json(
+            { ok: false, error: 'control_probe_never_creates', intent: classification.intent },
+            { status: 403 },
+          );
+        }
       }
     }
 
