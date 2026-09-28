@@ -539,7 +539,10 @@ _zd_bash4() {
 }
 if [ -d ".git" ] && [ "${CC_UPDATE_ZERO_DOWNTIME:-1}" = "1" ]; then
   step "Step 2: Fetch latest from GitHub (zero-downtime path check)"
-  git fetch origin main 2>&1 || fatal "git fetch failed"
+  # Explicit refspec: a clone whose configured refspec names only a tag (seen on
+  # client boxes) never moves origin/main on a bare `git fetch origin main`, so
+  # the update would target a years-old origin/main.
+  git fetch origin +refs/heads/main:refs/remotes/origin/main 2>&1 || fatal "git fetch failed"
   ZD_TARGET=$(git rev-parse origin/main)
   ZD_WHY=""
   git merge-base --is-ancestor HEAD "$ZD_TARGET" || ZD_WHY="the checkout has commits that are not on origin/main"
@@ -636,7 +639,10 @@ PER_BOX_TEMPLATE_FILES=(
 PRESERVE_DIR="$BACKUP_DIR/per-box-config-preserve"
 PRESERVED=()
 if [ -d ".git" ]; then
-  git fetch origin main 2>&1 || fatal "git fetch failed"
+  # Explicit refspec: a clone whose configured refspec names only a tag (seen on
+  # client boxes) never moves origin/main on a bare `git fetch origin main`, so
+  # the update would target a years-old origin/main.
+  git fetch origin +refs/heads/main:refs/remotes/origin/main 2>&1 || fatal "git fetch failed"
   OLD_HEAD_SHA=$(git rev-parse HEAD 2>/dev/null || true)
   MERGE_BASE_SHA=$(git merge-base HEAD origin/main 2>/dev/null || true)
 

@@ -486,6 +486,25 @@ grep -qx "head=$DET_HEAD" "$WORK/state-s10.txt" \
   && [ "$(git -C "$INST" rev-parse HEAD)" = "$(git -C "$ORIGIN" rev-parse HEAD)" ] \
   && ok "detached checkout ends on main at the new revision" || bad "detached checkout did not converge to main"
 
+# ── Scenario 11: a tag-only clone still updates to the latest main ──────────
+# A client checkout cloned with a single-tag refspec: `git fetch origin main`
+# never moved origin/main, so the update targeted an ancient revision.
+echo "Scenario 11: tag-only clone refspec"
+INST="$WORK/install-s11"
+new_install "$INST"
+git -C "$ORIGIN" tag fixture-old-tag
+git -C "$INST" fetch -q origin tag fixture-old-tag
+git -C "$INST" config remote.origin.fetch "+refs/tags/fixture-old-tag:refs/tags/fixture-old-tag"
+printf 'tag-only scenario upstream code\n' > "$ORIGIN/zd-tagonly.txt"
+git -C "$ORIGIN" add -A && git -C "$ORIGIN" commit -qm "fixture: tag-only scenario code"
+if HOME="$WORK/home" PATH="$FIXTURE_PATH" CC_APP_DIR="$INST" bash "$UPDATE_SH" > "$WORK/out-s11.txt" 2>&1; then
+  ok "updater exits 0 on a tag-only clone"
+else
+  bad "updater exits non-zero on a tag-only clone (see $WORK/out-s11.txt)"
+fi
+[ "$(git -C "$INST" rev-parse HEAD)" = "$(git -C "$ORIGIN" rev-parse HEAD)" ] && [ -f "$INST/zd-tagonly.txt" ] \
+  && ok "a tag-only clone lands on the latest main" || bad "a tag-only clone did not reach the latest main"
+
 # ── summary ─────────────────────────────────────────────────────────────────
 echo ""
 echo "update-preserve-per-box-config: $PASS passed, $FAIL failed"
