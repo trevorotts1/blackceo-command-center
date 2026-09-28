@@ -157,7 +157,7 @@ export async function GET() {
     const [assetManifest, buildContent, companyBranding, htmlTitle, databasePath, migrations, diskHeadroom, appUrl] =
       await Promise.all([
         Promise.resolve(checkAssetManifest()),
-        Promise.resolve(checkBuildContentInventory()),
+        checkBuildContentInventory(),
         Promise.resolve(checkCompanyBranding()),
         Promise.resolve(checkHtmlTitle()),
         Promise.resolve(checkDatabasePath()),

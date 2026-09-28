@@ -71,6 +71,7 @@ while [[ $# -gt 0 ]]; do
     --unknown-deadline) UNKNOWN_DEADLINE="$2"; shift 2 ;;
     --unknown-since)    UNKNOWN_SINCE="$2";    shift 2 ;;
     --skip-pm2)         SKIP_PM2=1;            shift   ;;
+    --deploy-gate)      DEPLOY_GATE=1;         shift   ;;
     --json-only)        JSON_ONLY=1;           shift   ;;
     --dry-run)          DRY_RUN=1;             shift   ;;
     --remote)           REMOTE_MODE=1;         shift   ;;
@@ -80,6 +81,13 @@ while [[ $# -gt 0 ]]; do
 done
 
 BASE_URL="http://127.0.0.1:${PORT}"
+# --deploy-gate (atomic-deploy's green gate): only build/serve rows can fail a
+# deploy. Content/config rows (company_branding, html_title, disk_headroom,
+# next_public_app_url, the CF probe) are reported as deploy_warnings: a box whose
+# interview never ran must still receive code updates, and a deploy must never be
+# rolled back over data the deploy did not touch.
+DEPLOY_GATE="${DEPLOY_GATE:-0}"
+DEPLOY_GATE_ROWS="asset_manifest build_content database_path migrations scheduler_liveness"
 py() { python3 -s -c "import sys,json; d=json.load(sys.stdin); print($1)" 2>/dev/null || echo "$2"; }
 if [[ "$DRY_RUN" -eq 1 ]]; then
   log() { printf '[cc-health] DRY-RUN: %s\n' "$*" >&2; }
@@ -516,6 +524,21 @@ if ! python3 -s -c "import sys,json; json.loads(sys.stdin.read())" <<< "$DEEP_BO
   exit 3
 fi
 
+if [[ "$DEPLOY_GATE" -eq 1 ]]; then
+  DEEP_BODY=$(printf '%s' "$DEEP_BODY" | python3 -s -c "
+import sys, json
+d = json.load(sys.stdin); keep = sys.argv[1].split()
+checks = d.get('checks', {})
+d['deploy_warnings'] = {k: v for k, v in checks.items() if k not in keep and v.get('pass') is not True}
+d['checks'] = {k: v for k, v in checks.items() if k in keep}
+d['pass'] = all(v.get('pass') is True for v in d['checks'].values())
+d['indeterminate'] = any(v.get('indeterminate') is True for v in d['checks'].values())
+print(json.dumps(d))
+" "$DEPLOY_GATE_ROWS" 2>/dev/null || printf '%s' "$DEEP_BODY")
+  for w in $(printf '%s' "$DEEP_BODY" | py "' '.join(d.get('deploy_warnings', {}))" ""); do
+    log "WARN (deploy gate, non-gating): ${w} is not passing"
+  done
+fi
 DEEP_PASS=$(printf '%s' "$DEEP_BODY" | py "'true' if d.get('pass') else 'false'" "false")
 DEEP_INDET=$(printf '%s' "$DEEP_BODY" | py "'true' if d.get('indeterminate') else 'false'" "false")
 
@@ -783,8 +806,12 @@ fi
 FINAL_PASS=true; EXIT_CODE=0; FINAL_INDET=false
 [[ "$PM2_PASS"   == "fail" ]]  && FINAL_PASS=false && EXIT_CODE=1
 [[ "$ASSET_PASS" == "fail" ]]  && FINAL_PASS=false && EXIT_CODE=1
-[[ "$CF_PASS"    == "fail" ]]  && FINAL_PASS=false && EXIT_CODE=1
-[[ "$CF_INDET"   == "true" ]]  && FINAL_INDET=true
+if [[ "$DEPLOY_GATE" -eq 1 ]]; then
+  [[ "$CF_PASS" == "fail" || "$CF_INDET" == "true" ]] && log "WARN (deploy gate, non-gating): CF public-URL probe — ${CF_DETAIL}"
+else
+  [[ "$CF_PASS"    == "fail" ]]  && FINAL_PASS=false && EXIT_CODE=1
+  [[ "$CF_INDET"   == "true" ]]  && FINAL_INDET=true
+fi
 [[ "$ASSET_INDET" == "true" ]] && FINAL_INDET=true  # P2 FIX: no-ref path → exit 3
 # U51 fix: DEEP_INDET (deferred above, not exited on) now feeds the SAME
 # verdict aggregation as CF_INDET/ASSET_INDET instead of forcing an early
