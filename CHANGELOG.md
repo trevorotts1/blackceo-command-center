@@ -1909,7 +1909,7 @@ v6.0.63 — Security/integrity fix. Findings T0-01 and T0-42, ranked first and s
   the root cause, pinned as correct; it now asserts the baseline criterion is present AND
   that image-only render gates are still absent. `[U26-a]` asserted that a producer's own
   passing verdict promotes a deliverable-free task to `done` — it now asserts the refusal.
-  The other seven (`u38-c-07`, `u39-c-08`, `maria-pattern-harness`, `point6`,
+  The other seven (`u38-c-07`, `u39-c-08`, `stuck-card-pattern-harness`, `point6`,
   `qc-judge-failure-diagnosis`, `p1-05-clear`, `prd-2.10`, `ad-campaigns`) seeded fixture
   cards with no deliverable and drove them to `done`; each was given the real deliverable
   its fixture always implied. No assertion was deleted, skipped or inverted to make CI
@@ -3083,7 +3083,7 @@ v6.0.26 — Merges `skill6-v2/U34-U35` into `blackceo-command-center` main. Skil
 - **U34 (C-03):** a task dispatched to a phantom `assigned_agent_id` (an agent id with no matching `agents` row) previously failed silently. `src/lib/task-dispatcher.ts` now heals the phantom assignment loudly: NULLs the dead id, writes exactly one `events` row (`type: phantom_agent_healed`, `metadata.reason: assigned_agent_missing`), CAS-guarded so a second heal attempt on the same phantom id is a no-op. `src/lib/jobs/intake-advance-sweep.ts` then routes the healed task to a real agent on its next tick.
 - **U35 (C-04):** `scripts/heal-phantom-assignments.ts` — a one-time, idempotent, migration-safe batch cleanup for phantoms that already exist on a box, delegating to the same `healPhantomAssignmentsBatch()` primitive (`src/lib/jobs/heal-phantom-assignments.ts`) so a batch-healed task produces the identical event vocabulary as one healed live. Scope excludes `done`/archived tasks; history is never rewritten.
 - **Merge:** clean, zero conflicts vs `origin/main` (`cdfc9090`, v6.0.25) — file-disjoint from the concurrent C8 database-isolation fix already on main.
-- Test proof re-run independently on the merged tree, pre-ripple: `tests/unit/heal-phantom-assignments.test.ts` → 3/3 PASS; `tests/unit/phantom-agent-dispatch-heal.test.ts` → 17/17 PASS; `tests/unit/maria-pattern-harness.test.ts` → 9/9 PASS; `npx tsc --noEmit` clean; `npm run test:unit` → 1351 tests, 1346 pass, 5 fail — the 5 failures (`tests/unit/interview-detection.test.ts` `getInterviewState` filesystem-signal cases) independently reproduced byte-identical (5/8 fail, same test names) on a FRESH SEPARATE unmerged `origin/main` baseline clone (HEAD `cdfc9090`, v6.0.25), confirmed pre-existing, zero regressions introduced by this merge.
+- Test proof re-run independently on the merged tree, pre-ripple: `tests/unit/heal-phantom-assignments.test.ts` → 3/3 PASS; `tests/unit/phantom-agent-dispatch-heal.test.ts` → 17/17 PASS; `tests/unit/stuck-card-pattern-harness.test.ts` → 9/9 PASS; `npx tsc --noEmit` clean; `npm run test:unit` → 1351 tests, 1346 pass, 5 fail — the 5 failures (`tests/unit/interview-detection.test.ts` `getInterviewState` filesystem-signal cases) independently reproduced byte-identical (5/8 fail, same test names) on a FRESH SEPARATE unmerged `origin/main` baseline clone (HEAD `cdfc9090`, v6.0.25), confirmed pre-existing, zero regressions introduced by this merge.
 - No secret values, no client names, no box identifiers. No Anthropic model added/removed/substituted anywhere in the shipped code.
 
 ## [v6.0.25] — 2026-07-15 — fix(C8): hard-fail db resolution for non-server processes, database-isolation live guard (QC 8.7)
@@ -3291,14 +3291,14 @@ tag, to avoid any tag/version collision.
 - **Tests.** `tests/unit/sweep-liveness.test.ts` (10 cases: staleness math, the `INTAKE_ADVANCE_SWEEP_ENABLED=0` scenario, exactly-one cooldown-guarded alert, re-tick clears red within one cadence, kill switch, tick upsert) + `tests/unit/jobs-probe-phantom-working.test.ts` (3 cases, including a fail-first proof that the working-status CHECK constraint itself rejects `'working'` as a value) — 13/13 PASS. Scoped regression across board-hygiene, notify, port-integrity, persona-blend, and b1-prerequisite-fixes suites: 90/90 green. `tests/unit/deep-health.test.ts` (vitest, A7 regression guard included): 79/79 green. `tsc --noEmit` clean. eslint on touched files clean.
 - No client names, no secret values, no box identifiers, no model added/removed/substituted. Client skills/engines still run only on the client's own providers.
 
-## [v6.0.5] — 2026-07-14 — test(kanban): Maria-pattern proof harness (U32/C-01)
+## [v6.0.5] — 2026-07-14 — test(kanban): Stuck-card-pattern proof harness (U32/C-01)
 
-**Proves the shipped stuck-card safety net actually fires instead of trusting that it does.** New `tests/unit/maria-pattern-harness.test.ts` seeds one throwaway-DB fixture per documented stuck-card state and drives the real production jobs against them — not mocks, not a redescription of the code, the actual functions the sweep cron calls.
+**Proves the shipped stuck-card safety net actually fires instead of trusting that it does.** New `tests/unit/stuck-card-pattern-harness.test.ts` seeds one throwaway-DB fixture per documented stuck-card state and drives the real production jobs against them — not mocks, not a redescription of the code, the actual functions the sweep cron calls.
 
 - **Fixtures, one per stuck state.** S1 stuck-in-Backlog (22-day-old ungroomed card → stale-backlog nudge), S2a stuck-not-assigned/phantom-id (the silent skip produces zero events — intentionally encodes today's pre-C-03 behavior at `task-dispatcher.ts:431-436`, designed to flip the moment U34/C-03 ships), S2b stuck-not-assigned/no-runtime (`resolveSpecialistSessionKey` refuses the silent `agent:main` fallback — tested directly rather than against a live OpenClaw gateway, which a unit-test harness cannot depend on), S3 stuck-not-QC'd (25h-unscored review card gets force-scored, surfaces `qc_starved`), S4a/S4b stuck-not-Done (`POST /api/tasks/[id]/status status=done` → 403 no mutation; the only legal promote path is QC PASS, audited).
 - **Real jobs, not test doubles.** Drives `runIntakeAdvanceSweep`, `runStaleTaskSweep`, `runBoardHygiene`, `runQCOnReview`, `runStuckInProgressSweep` — the exact functions the production sweep cron calls — against the fixtures, asserting the documented remedy fires for each.
 - **Fixture-guard.** A dedicated final assertion confirms the entire suite ran end-to-end against ONLY the throwaway `DATABASE_PATH`, never touching a real board.
-- **Verification:** 9/9 passing standalone, `node --import tsx --test tests/unit/maria-pattern-harness.test.ts` — re-verified GREEN on the merged tree before this commit.
+- **Verification:** 9/9 passing standalone, `node --import tsx --test tests/unit/stuck-card-pattern-harness.test.ts` — re-verified GREEN on the merged tree before this commit.
 - No client names, no secret values, no box identifiers, no model added/removed/substituted. Client skills/engines still run only on the client's own providers.
 
 ## [v6.0.4] — 2026-07-14 — feat: declared-vs-used persona comparator + `persona_mismatch` chip (U20/B-U6, both-train)

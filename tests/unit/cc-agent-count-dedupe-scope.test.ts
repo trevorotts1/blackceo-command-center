@@ -58,7 +58,7 @@ const OTHER = 'other-client-co';
 let zhcDir: string;
 const savedEnv: Record<string, string | undefined> = {};
 
-// The CC manifest format Cassandra's rebuild actually produces: bare ids, no
+// The CC manifest format a client box's rebuild actually produces: bare ids, no
 // `dept-` prefix (see sync-departments-from-build-state.py's own stripping
 // and MR-21's normalizeDeptPrefixedId — both treat this as the canonical
 // on-disk shape).

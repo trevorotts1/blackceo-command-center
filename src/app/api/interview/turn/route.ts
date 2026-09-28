@@ -187,7 +187,7 @@ function sleep(ms: number): Promise<void> {
 async function connectOr503(req?: NextRequest): Promise<
   { ok: true; client: OpenClawClient } | { ok: false; response: NextResponse }
 > {
-  // JANET-INTERVIEW-FIX: a remote client's hostname relays the conversation to
+  // TENANT-INTERVIEW-FIX: a remote client's hostname relays the conversation to
   // THAT client's own gateway (its row's gateway_url + token), so the
   // interview runs on her box. Self keeps the historical local singleton.
   if (req) {
@@ -254,7 +254,7 @@ async function resolveSessionId(
   req: NextRequest,
   provided?: string,
 ): Promise<string> {
-  // JANET-INTERVIEW-FIX phase 2: for a client tenant, prefer the session we
+  // TENANT-INTERVIEW-FIX phase 2: for a client tenant, prefer the session we
   // already persisted for that client. Without this the browser had nowhere to
   // read a prior session id from (/api/interview/state returned null for
   // clients), so every visit minted a NEW gateway session and the client met a

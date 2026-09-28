@@ -36,7 +36,7 @@ export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
-  // JANET-INTERVIEW-FIX: a remote client's hostname must answer from ITS
+  // TENANT-INTERVIEW-FIX: a remote client's hostname must answer from ITS
   // clients-row flag, never this box's canonical files. Self (operator) reads
   // the canonical files exactly as before.
   // The middleware's dashboard-admission fallback calls this endpoint over an

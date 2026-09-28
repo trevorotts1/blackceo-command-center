@@ -675,8 +675,8 @@ def reconcile(boxes, check_contabo, check_cloudflare=False, check_ghl=False,
 
     # 4) LIVE client-universe reconcile — the roster vs the ACTUAL infrastructure
     #    that exists (Cloudflare tunnels + GHL locations). Catches a client with
-    #    real infra but NO roster entry (the founding "overlook" — e.g. Beverly
-    #    Grandison). These legs are robust: if creds are absent or the API is
+    #    real infra but NO roster entry (the founding "overlook" — a client that
+    #    was never added to the roster). These legs are robust: if creds are absent or the API is
     #    unreachable they WARN-and-skip (never crash, never false-fail); the local
     #    reconcile above always runs regardless.
     if check_cloudflare or check_ghl:

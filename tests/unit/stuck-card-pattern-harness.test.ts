@@ -1,7 +1,7 @@
 /**
- * maria-pattern-harness.test.ts — U32 / C-01 (MASTER SPEC v2, C+I.2).
+ * stuck-card-pattern-harness.test.ts — U32 / C-01 (MASTER SPEC v2, C+I.2).
  *
- * "Maria-pattern proof harness: reproduce all four stuck states on the
+ * "Stuck-card-pattern proof harness: reproduce all four stuck states on the
  * operator box and prove each net fires." Seeds one fixture card per
  * stuck state (S1 backlog, S2 not-assigned in BOTH flavors, S3 not-QC'd,
  * S4 not-Done), runs the REAL production jobs against them on a throwaway
@@ -43,7 +43,7 @@
  * repo is reserved for files needing vi.mock/module-isolation
  * (vitest.config.ts's own header comment), which nothing here needs.
  *
- *   node --import tsx --test tests/unit/maria-pattern-harness.test.ts
+ *   node --import tsx --test tests/unit/stuck-card-pattern-harness.test.ts
  *   (or: npm run test:unit, which globs this file in automatically)
  */
 
@@ -83,7 +83,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 process.env.OPENCLAW_WORKSPACE_PATH = fs.mkdtempSync(
-  path.join(os.tmpdir(), 'cc-maria-harness-workspace-'),
+  path.join(os.tmpdir(), 'cc-stuck-card-harness-workspace-'),
 );
 
 import './_isolated-db'; // MUST be first DB-touching import: throwaway DATABASE_PATH.
@@ -148,8 +148,8 @@ function seedSopWithCriteria(): string {
      VALUES (?, ?, ?, ?, ?, ?)`,
     [
       id,
-      'Vendor Ledger Reconciliation (Maria harness)',
-      `maria-harness-sop-${id.slice(0, 8)}`,
+      'Vendor Ledger Reconciliation (stuck-card harness)',
+      `stuck-card-harness-sop-${id.slice(0, 8)}`,
       'Step 1: pull the vendor statement. Step 2: match line items.',
       'Every line item is matched or flagged with a discrepancy note.',
       'finance-accounting',
@@ -291,7 +291,7 @@ test('S2a stuck-not-assigned (phantom id): C-03 heals it LOUDLY — the silent s
 // already exercises this exact function the same way (HOME override).
 // ============================================================================
 test('S2b stuck-not-assigned (no runtime): resolveSpecialistSessionKey refuses the silent agent:main fallback', () => {
-  const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-maria-harness-home-'));
+  const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-stuck-card-harness-home-'));
   // Deliberately create NO ~/.openclaw/agents/* directory — an entirely
   // unwired department, isolated from whatever runtime dirs happen to exist
   // on the box actually running this test.
@@ -307,7 +307,7 @@ test('S2b stuck-not-assigned (no runtime): resolveSpecialistSessionKey refuses t
     const agent = queryOne<Agent>('SELECT * FROM agents WHERE id = ?', [agentId]);
     assert.ok(agent, 'S2b: fixture agent row must exist');
 
-    const key = resolveSpecialistSessionKey(agent as Agent, 'sess-maria-harness', wsId, 'maria-harness-test');
+    const key = resolveSpecialistSessionKey(agent as Agent, 'sess-stuck-card-harness', wsId, 'stuck-card-harness-test');
     assert.equal(
       key,
       null,
@@ -371,7 +371,7 @@ test('S4a stuck-not-Done (a): POST /api/tasks/[id]/status status=done -> 403, no
   // through a genuine QC PASS -> done promote, so it needs a real file on
   // disk registered here — otherwise it proves the self-certification clamp
   // (or the evidence gate), not the S4b promote path it is meant to prove.
-  const s4DeliverablePath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cc-maria-s4-deliverable-')), 'signed-agreement.txt');
+  const s4DeliverablePath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cc-stuck-card-s4-deliverable-')), 'signed-agreement.txt');
   fs.writeFileSync(s4DeliverablePath, 'delivered\n');
   run(
     `INSERT INTO task_deliverables (id, task_id, deliverable_type, title, path, created_at)
@@ -406,11 +406,11 @@ test('S4a stuck-not-Done (a): POST /api/tasks/[id]/status status=done -> 403, no
 test('S4b stuck-not-Done (b): the ONLY legal promote path (QC PASS) advances review -> done, audited', async () => {
   assert.ok(s4TaskId, 'S4b depends on S4a having seeded + verified the fixture card first');
 
-  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-maria-qc-fixture-'));
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-stuck-card-qc-fixture-'));
   const fixturePath = path.join(fixtureDir, 'pass.json');
   fs.writeFileSync(
     fixturePath,
-    JSON.stringify({ score: 9.0, pass: true, reason: 'Maria-harness fixture PASS', gaps: [] }),
+    JSON.stringify({ score: 9.0, pass: true, reason: 'Stuck-card-harness fixture PASS', gaps: [] }),
   );
   // QC_FIXTURE_JSON_PATH (src/lib/fixture-guard.ts's own documented test seam)
   // forces a deterministic verdict with zero live-model cost — the SAME seam

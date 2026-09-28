@@ -198,7 +198,7 @@ function extractQcReasons(state: BuildState | null): string[] {
 /* -------------------------------------------------------------------------- */
 
 export async function POST(req: NextRequest) {
-  // FAIL CLOSED for client tenants (JANET-INTERVIEW-FIX phase 2). This route
+  // FAIL CLOSED for client tenants (TENANT-INTERVIEW-FIX phase 2). This route
   // presses update-interview-state.sh --complete and kicks the workforce build
   // — on THIS box, the operator's. Run by a remote client it would mark the
   // OPERATOR's interview complete and start the OPERATOR's build from the

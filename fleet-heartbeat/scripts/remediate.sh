@@ -148,8 +148,8 @@ EOF
 fi
 
 # Mac-tunnel access: SSH over a Cloudflare tunnel + Access service token, NOT
-# root@IP. Resolve the per-client service token by client name (same mapping as
-# probe-fleet.sh) and the absolute cloudflared path (the OpenClaw cron/exec env
+# root@IP. Resolve the per-client service token by tunnel host (private CF token
+# map, see cf_token_stem_for) and the absolute cloudflared path (the OpenClaw cron/exec env
 # does not always have Homebrew on PATH).
 SECRETS_ENV="${SECRETS_ENV:-$HOME/.openclaw/secrets/.env}"
 CF_TUNNEL_TIMEOUT="${CF_TUNNEL_TIMEOUT:-45}"
@@ -178,6 +178,15 @@ read_cf_access_token() {
   printf '%s\n%s\n' "$cid" "$csec"
 }
 
+# Tunnel host -> CF Access env-var stem. The map names every Mac client, so it
+# lives in private operator config (same file and override as
+# fleet-coverage-gate.py); accounts/cf-token-map.example.json shows the shape.
+CF_TOKEN_MAP="${CF_TOKEN_MAP:-$HOME/.openclaw/fleet/cf-token-map.json}"
+cf_token_stem_for() {
+  python3 -c 'import json,sys; print(json.load(open(sys.argv[2]))["tokens"].get(sys.argv[1], ""))' \
+    "$1" "$CF_TOKEN_MAP" 2>/dev/null
+}
+
 _TIMEOUT_WRAPPER="${ROOT}/scripts/_timeout.pl"
 if command -v timeout >/dev/null 2>&1; then
   _TIMEOUT() { timeout "$@"; }
@@ -202,16 +211,13 @@ mac_ssh_run() {
   local t="$1"; shift
   local remote="$1"
   local stem cid csec cfd proxy ct
-  local token_pair; token_pair=$(read_cf_access_token "$stem" "$SECRETS_ENV")
-  cid=$(echo "$token_pair" | sed -n '1p')
-  csec=$(echo "$token_pair" | sed -n '2p')
-  local token_pair; token_pair=$(read_cf_access_token "$stem" "$SECRETS_ENV")
-  cid=$(echo "$token_pair" | sed -n '1p')
-  csec=$(echo "$token_pair" | sed -n '2p')
-  local token_pair; token_pair=$(read_cf_access_token "$stem" "$SECRETS_ENV")
-  cid=$(echo "$token_pair" | sed -n '1p')
-  csec=$(echo "$token_pair" | sed -n '2p')
-  local token_pair; token_pair=$(read_cf_access_token "$stem" "$SECRETS_ENV")
+  local token_pair
+  # Resolve the CF Access service-token stem for THIS tunnel host. Without it
+  # read_cf_access_token returns an empty id/secret, the ProxyCommand carries no
+  # Access token, and every Mac reachability/SSH check fails.
+  stem=$(cf_token_stem_for "$CONTAINER")
+  [ -z "$stem" ] && echo "remediate: WARN: no CF token stem for $CONTAINER in $CF_TOKEN_MAP" >&2
+  token_pair=$(read_cf_access_token "$stem" "$SECRETS_ENV")
   cid=$(echo "$token_pair" | sed -n '1p')
   csec=$(echo "$token_pair" | sed -n '2p')
   cfd="/opt/homebrew/bin/cloudflared"

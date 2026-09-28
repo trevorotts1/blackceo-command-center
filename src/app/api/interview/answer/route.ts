@@ -303,7 +303,7 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // 3b) TENANT SPLIT (JANET-INTERVIEW-FIX phase 2). Everything below this point
+  // 3b) TENANT SPLIT (TENANT-INTERVIEW-FIX phase 2). Everything below this point
   //     — the transcript append, the update-interview-state.sh stamp, the
   //     company-config mirror — writes the OPERATOR's canonical state, of which
   //     there is exactly one set on this box. A remote client routed here by
