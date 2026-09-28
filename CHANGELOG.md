@@ -1,3 +1,25 @@
+## [v7.6.69] — 2026-09-28 — interview CSRF self-heal, intake/routing wiring, persona adherence, task-row projection
+
+Re-cut release. The earlier v7.6.69 tag pointed at 2d5d93a57, whose own version files read 7.6.68; it was deleted and re-cut on the commit that actually carries v7.6.69. Everything merged to main since v7.6.68:
+
+- CSF: interview CSRF self-heal — expired-token re-mint plus one-retry QuestionCard; 3 suites wired to both runners
+- JEV-009: decision-engine bridge (request/response + stdin/stdout JSON, single root deadline, revision echo, capability probe, read-only guard)
+- JEV-010 / A10: intake classify + typed bypass (lexical/JEV paths, control provenance, creation gate); section 4.4 tail coverage (misspellings, fragments, speech-to-text, paraphrases, non-English); classifier passes section-4 guidance and 4.4 paraphrases; prohibition reads answer-only only when no work verb is present (#433, #441, #442)
+- JEV-012 / A12 / A17: auto-route fenced per spec 1.1 section 5.5 (preference passthrough, CAS commit, QC provenance); real roster resolution with ambiguity hold; question-form task requests recognised outside the hardcoded verb list (#437)
+- JEV-014 / JEV-015 / A19: route tie-break through the shared authorized adapter; task-aware role selection module and pickBestAgent seam; task fit decides among similarly labeled workers at equal load (#436)
+- WIR-113 / A13: single-ingest exact-once cards through the raw conversational door
+- WIR-114 / WIR-121 / WIR-122 / A11 / A14 / A16: classify() and assertTaskCreationAllowed wired into the UI and CEO-chat doors; A16 real-path integration tests
+- JEV-224 / A37: one shared renderer for auto and manual persona dispatch sections
+- JEV-234 / D34: mode/compatibility adapters
+- JEV-025 / JEV-026 / JEV-031: board and task-detail truth projectors with privacy-safe diagnostics; D26 execution snapshot/load evidence with independent adherence review; D31 runtime trace capture/assertion harness
+- A39: stored-vs-dispatched persona bundle hash mismatch detected and visible (#438)
+- A40: independent persona-adherence artifact scoring wired into the completion gate
+- A41: one task-row projection for live update, refresh, reconnect and task detail (#440)
+- B.1: write-route census re-derived to 130; the app's own tenant-refusal 403 scored as PASS; ILJ-004 enrollment-window DB reach isolated
+- REL-001: corrected deploy-receipt evidence row; cc-health-check no longer calls an unset checker environment "not configured"
+- Watchdog schedule installs PATH into the launchd plist and cron line so the pm2 self-heal branch can resolve pm2
+- Wave-5 QC repairs batch (#434); main red-check repair: client-name leak cleared and package.json/lockfile version drift corrected (#439)
+
 ## [v7.6.68] — 2026-09-26 — interview transcript lock correctness (ILJ-003 + ILJ-011)
 
 - ILJ-003: seam atomic merge + `decrypt_failed` surfaced; answer route appends under the transcript lock
