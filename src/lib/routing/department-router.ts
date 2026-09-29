@@ -28,6 +28,10 @@ import type { Agent, Task, TaskPriority } from '@/lib/types';
 import { loadDepartments, type DepartmentConfig } from './departments.config';
 import { canonicalDeptSlug } from './canonical-slug';
 import { isCatchAllWorkspace } from './catch-all-policy';
+// JGT105 — direct sibling-file import (not the decision-engine barrel) to
+// keep this module's import graph a straight line, never a cycle.
+import { jevDecide } from '@/lib/decision-engine/live';
+import type { DecisionDepartment } from '@/lib/decision-engine/contract';
 import { resolveSpecialistSessionKey } from './executor-runtime';
 import {
   selectRoleWorker,
@@ -900,6 +904,39 @@ export type RoutingTask = Pick<Task, 'title' | 'priority'> & {
   catch_all?: boolean;
 };
 
+/**
+ * JGT105: when the task carries no department/agent/catch-all hint, let JEV
+ * rank it against the company's real department catalog first. A confident,
+ * non-fallback catalog match dispatches explicitly (so the reason records
+ * WHY); anything else — no live core, low confidence, fallback=true, or a
+ * department JEV named that isn't in the catalog — falls through to today's
+ * unchanged semantic/keyword/catch-all path.
+ */
+async function routeViaJevOrDispatch(
+  task: RoutingTask,
+  agents: AgentWithLoad[],
+  departments: DepartmentConfig[],
+): Promise<RoutingResult | null> {
+  const catalog: DecisionDepartment[] = departments
+    .filter((d) => canonicalDeptSlug(d.slug || d.id) !== 'default')
+    .map((d) => ({ slug: d.slug || d.id, name: d.name, description: d.purpose, keywords: d.keywords }));
+  const text = [task.title, task.description].filter(Boolean).join('\n');
+  const jev = await jevDecide(text, catalog);
+  if (jev && jev.route.action === 'route' && !jev.route.fallback && jev.route.department) {
+    const targetSlug = canonicalDeptSlug(jev.route.department);
+    const matched = catalog.find((c) => canonicalDeptSlug(c.slug) === targetSlug);
+    if (matched) {
+      const routing = await comDispatch({ ...task, department: matched.slug }, agents, departments);
+      if (routing) {
+        // NEVER prefix: isCatchAllRoutingReason is a startsWith('[catch-all]') check.
+        return { ...routing, reason: `${routing.reason} (department chosen by decision engine)` };
+      }
+      return routing;
+    }
+  }
+  return comDispatch(task, agents, departments);
+}
+
 /** Resolve company before any model call; an empty or ambiguous scope never expands globally. */
 export async function routeTaskDecision(task: RoutingTask): Promise<RoutingDecision> {
   const wait = (reason: string, status: 'waiting' | 'ambiguous' | 'no_capable_worker' = 'waiting'): RoutingDecision =>
@@ -923,9 +960,14 @@ export async function routeTaskDecision(task: RoutingTask): Promise<RoutingDecis
     const matches = departments.filter(d => d.name.toLowerCase() === task.department!.toLowerCase() || canonicalDeptSlug(d.slug || d.id) === canon);
     if (matches.length > 1) return wait('Explicit department is missing or ambiguous within the task company', 'ambiguous');
   }
-  const routing = task.catch_all && !task.target_agent
-    ? catchAllAssignment(agents, departments, 'Reassessing queued catch-all executor')
-    : await comDispatch(task, agents, departments);
+  let routing: RoutingResult | null;
+  if (task.catch_all && !task.target_agent) {
+    routing = catchAllAssignment(agents, departments, 'Reassessing queued catch-all executor');
+  } else if (!task.department && !task.target_agent && !task.catch_all) {
+    routing = await routeViaJevOrDispatch(task, agents, departments);
+  } else {
+    routing = await comDispatch(task, agents, departments);
+  }
   if (!routing) {
     // An owner pin that matches more than one same-company worker is a
     // HOLD (spec 4.4 "Have Jordan do it.": ambiguity must not select a random

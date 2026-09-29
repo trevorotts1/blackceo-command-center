@@ -12,9 +12,11 @@ export {
   assertRevisionEcho,
   buildRequest,
   schemaMajor,
+  type DecisionDepartment,
   type DecisionRequest,
   type DecisionRecommendation,
   type DecisionResponse,
+  type DecisionRoute,
 } from './contract';
 
 export {

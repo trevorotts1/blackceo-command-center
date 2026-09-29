@@ -51,6 +51,14 @@ const TMP_DB = path.join(
   'mission-control.test.db',
 );
 process.env.DATABASE_PATH = TMP_DB;
+// JGT105 — this file drives the REAL POST route, which now passes a live
+// JevResponder into classify() on the raw door. tests/setup/tmp-sandbox.ts
+// sandboxes TMPDIR only, never HOME, so an operator box with a real
+// ~/.openclaw/skills/shared-utils/decision-engine.py installed would
+// otherwise have this suite spawn IT instead of exercising the deterministic
+// lexical fixtures these tests assert on. Force the kill switch off so every
+// assertion here stays exactly what it was pre-JGT105.
+process.env.DECISION_ENGINE_MODE = 'off';
 
 const WEBHOOK_SECRET = 'test-webhook-secret-a13-single-ingest';
 process.env.WEBHOOK_SECRET = WEBHOOK_SECRET;
