@@ -18,6 +18,8 @@
  *                                                  GOOGLE_AI_STUDIO_API_KEY /
  *                                                  GEMINI_API_KEY
  *   SOP_EMBEDDING_PROVIDER=openai|google        — force a specific provider
+ *   SOP_EMBEDDING_PROVIDER=ollama               — local Ollama (nomic-embed-text @768), free,
+ *                                                  no key; explicit per-box opt-in only
  *
  * Google-only clients need NO OPENAI_API_KEY.
  * Set any Google key and the script uses gemini-embedding-2 automatically.
@@ -51,6 +53,16 @@
  *                      the actual API is still 1 call per text.
  *   --force            Re-embed SOPs that already have an embedding (full refresh).
  *   --check-stale      Print count of stale gemini-embedding-001 rows + exit. No embeds.
+ *   --batch-delay-ms=N Pause between batches (default: 2000 Google, 1000 otherwise).
+ *
+ * LOCAL OLLAMA MODE (SOP_EMBEDDING_PROVIDER=ollama)
+ *   A normal run re-embeds every SOP not already on the local model (the shipped
+ *   Gemini rows included — they are a different vector space), at zero key cost,
+ *   so the shipped-asset --force refusal does not apply. Before any row is written
+ *   the run stamps the `sop_embeddings_local_provider` marker table; the onboarding
+ *   repo's provision_sop_embeddings.py reads it and never re-imports the Gemini
+ *   asset over a box in local mode. To leave local mode: drop that table, set
+ *   SOP_EMBEDDING_PROVIDER=google, and re-run provisioning.
  *
  * RESUMABILITY
  *   The script skips SOPs that already have a row in sop_embeddings with the SAME
@@ -97,6 +109,7 @@ const forceReEmbed = args.includes('--force');
 const forceFullRebuildShipped = args.includes('--force-full-rebuild-shipped');
 const checkStale = args.includes('--check-stale');
 const batchSizeArg = args.find((a) => a.startsWith('--batch-size='));
+const batchDelayArg = args.find((a) => a.startsWith('--batch-delay-ms='));
 
 /**
  * P4-03 step 3 — mirrors embedding_engine.py::_refuse_full_rebuild_if_prebuilt
@@ -141,11 +154,14 @@ async function main(): Promise<void> {
   const db = await import('../src/lib/db');
   const { queryAll, queryOne, run } = db;
 
-  if (forceReEmbed) {
+  const emb = await import('../src/lib/sop-embeddings');
+
+  // Local Ollama re-embeds cost nothing, so the shipped-asset refusal (which
+  // protects the client's key spend) does not apply to it.
+  if (forceReEmbed && emb.resolveEmbeddingProvider().name !== 'ollama') {
     refuseFullRebuildIfShipped(queryOne as (sql: string, params: unknown[]) => unknown);
   }
 
-  const emb = await import('../src/lib/sop-embeddings');
   const {
     resolveEmbeddingProvider,
     buildSOPEmbedText,
@@ -176,14 +192,14 @@ async function main(): Promise<void> {
   // ----- resolve provider -----
   const provider = resolveEmbeddingProvider();
 
-  if (provider.name === 'none' || !provider.apiKey) {
+  if (provider.name === 'none' || (!provider.apiKey && provider.name !== 'ollama')) {
     console.error('[backfill-sop-embeddings] ERROR: No embedding provider is configured.');
     console.error('  Set one of the following in your shell or .env.local:');
     console.error('    OPENAI_API_KEY             → uses OpenAI text-embedding-3-small (1536-dim)');
     console.error(`    GOOGLE_API_KEY             → uses Google ${PINNED_GOOGLE_MODEL} (3072-dim)`);
     console.error('    GOOGLE_AI_STUDIO_API_KEY   → same, alternate key name');
     console.error('    GEMINI_API_KEY             → same, alternate key name');
-    console.error('  Or force a specific provider: SOP_EMBEDDING_PROVIDER=openai|google');
+    console.error('  Or force a specific provider: SOP_EMBEDDING_PROVIDER=openai|google|ollama');
     process.exit(1);
   }
 
@@ -201,7 +217,9 @@ async function main(): Promise<void> {
   const isGoogle = provider.name === 'google';
   const DEFAULT_BATCH_SIZE = isGoogle ? 5 : 10;
   const BATCH_SIZE = batchSizeArg ? parseInt(batchSizeArg.split('=')[1], 10) : DEFAULT_BATCH_SIZE;
-  const BATCH_DELAY_MS = isGoogle ? 2000 : 1000; // longer pause between batches for Google
+  const BATCH_DELAY_MS = batchDelayArg
+    ? parseInt(batchDelayArg.split('=')[1], 10)
+    : isGoogle ? 2000 : 1000; // longer pause between batches for Google
 
   console.log(`[backfill-sop-embeddings] Provider: ${provider.name} (${provider.model}, ${provider.dims}-dim)`);
   if (isGoogle) {
@@ -209,6 +227,29 @@ async function main(): Promise<void> {
       `[backfill-sop-embeddings] NOTE: using pinned model ${PINNED_GOOGLE_MODEL} (output_dimensionality=3072). ` +
       'Google free-tier pacing active — sequential calls with delays. ' +
       'A full 2,578-SOP run may take 30–45 min. The script is resumable; ^C and re-run anytime.'
+    );
+  }
+
+  // ----- local mode marker (read by provision_sop_embeddings.py) -----
+  if (provider.name === 'ollama' && !dryRun) {
+    run(
+      `CREATE TABLE IF NOT EXISTS sop_embeddings_local_provider (
+         id INTEGER PRIMARY KEY CHECK (id = 1),
+         provider TEXT NOT NULL,
+         model TEXT NOT NULL,
+         dims INTEGER NOT NULL,
+         updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+       )`,
+      []
+    );
+    run(
+      `INSERT OR REPLACE INTO sop_embeddings_local_provider (id, provider, model, dims, updated_at)
+       VALUES (1, ?, ?, ?, datetime('now'))`,
+      [provider.name, provider.model, provider.dims]
+    );
+    console.log(
+      `[backfill-sop-embeddings] Local mode: stamped sop_embeddings_local_provider ` +
+      `(${provider.model} @${provider.dims}) — shipped-asset re-provisioning will skip this box.`
     );
   }
 

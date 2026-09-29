@@ -118,8 +118,12 @@ async function probeEmbeddingHealthPy(): Promise<Record<string, unknown> | null>
   // Python path entirely — the caller only falls back to the TS snapshot when
   // python3/the script is unavailable, not on a provider-resolution hiccup.
   let activeProvider = 'none';
+  const localModelArgs: string[] = [];
   try {
-    activeProvider = resolveEmbeddingProvider().name;
+    const p = resolveEmbeddingProvider();
+    activeProvider = p.name;
+    // Local Ollama mode: tell the probe which local model/dims are canonical.
+    if (p.name === 'ollama') localModelArgs.push('--sop-active-model', p.model, '--sop-active-dims', String(p.dims));
   } catch {
     activeProvider = 'none';
   }
@@ -133,6 +137,7 @@ async function probeEmbeddingHealthPy(): Promise<Record<string, unknown> | null>
     getDbPath(),
     '--sop-active-provider',
     activeProvider,
+    ...localModelArgs,
   ];
 
   for (let attempt = 0; attempt < 2; attempt++) {

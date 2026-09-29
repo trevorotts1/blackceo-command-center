@@ -654,6 +654,17 @@ blue "── 12. Cross-store embedding contract validate (SOP_EMBEDDING_PROVIDER
 # Any drift between these three stores means the routing layer is silently using
 # a different embedding space than the stored index, corrupting cosine similarity.
 # This gate must pass before every deploy.
+#
+# LOCAL OLLAMA OPT-IN: a box whose .env.local sets SOP_EMBEDDING_PROVIDER=ollama
+# (free local embeddings, e.g. a box whose Gemini key is out of credit) is held
+# to its OWN contract instead — every sop_embeddings row on the local model
+# (SOP_EMBEDDING_MODEL, default nomic-embed-text) at its dims (default 768).
+SOP_EXP_MODEL="gemini-embedding-2"; SOP_EXP_DIMS=3072
+if [ -f .env.local ] && grep -q "^SOP_EMBEDDING_PROVIDER=ollama" .env.local; then
+  SOP_EXP_MODEL="$(sed -n 's/^SOP_EMBEDDING_MODEL=//p' .env.local | head -1 | tr -d "\"'")"
+  SOP_EXP_DIMS="$(sed -n 's/^SOP_EMBEDDING_DIMS=//p' .env.local | head -1 | tr -d "\"'")"
+  SOP_EXP_MODEL="${SOP_EXP_MODEL:-nomic-embed-text}"; SOP_EXP_DIMS="${SOP_EXP_DIMS:-768}"
+fi
 
 # 12.1: CODE contract — auto-detect in resolveEmbeddingProvider() puts Google FIRST
 #   (OpenAI is demoted to explicit optional fallback, never auto-selected over Google)
@@ -668,8 +679,8 @@ check "12.2" "sop-embeddings.ts: OpenAI demoted to OPTIONAL FALLBACK (not defaul
 # Skip gracefully when .env.local is absent (CI / fresh clone) — it is a
 # gitignored runtime file that only exists on a provisioned box.
 if [ -f .env.local ]; then
-  check "12.3" ".env.local pins SOP_EMBEDDING_PROVIDER=google (single contract env)" \
-    'grep -q "^SOP_EMBEDDING_PROVIDER=google" .env.local'
+  check "12.3" ".env.local pins SOP_EMBEDDING_PROVIDER=google (single contract env, or the explicit local ollama opt-in)" \
+    'grep -qE "^SOP_EMBEDDING_PROVIDER=(google|ollama)" .env.local'
 else
   yellow "  ! 12.3  .env.local pins SOP_EMBEDDING_PROVIDER=google (skip — .env.local absent in CI/fresh clone)"
   WARN=$((WARN+1))
@@ -685,10 +696,10 @@ DB_PATH="$(dirname "$ROOT")/data/mission-control.db"
 if command -v sqlite3 >/dev/null 2>&1 && [ -f "$DB_PATH" ]; then
   check "12.5" "DB sop_embeddings: zero OpenAI (text-embedding-3-small) rows (cross-store provider agreement)" \
     "[ \"\$(sqlite3 \"$DB_PATH\" \"SELECT COUNT(*) FROM sop_embeddings WHERE embedding_model='text-embedding-3-small';\" 2>/dev/null)\" = \"0\" ]"
-  check "12.6" "DB sop_embeddings: all rows use gemini-embedding-2 model (persona-index == CC active provider)" \
-    "[ \"\$(sqlite3 \"$DB_PATH\" \"SELECT COUNT(*) FROM sop_embeddings WHERE embedding_model != 'gemini-embedding-2';\" 2>/dev/null)\" = \"0\" ]"
-  check "12.7" "DB sop_embeddings: all rows have dims=3072 (gemini-embedding-2 output dimensionality)" \
-    "[ \"\$(sqlite3 \"$DB_PATH\" \"SELECT COUNT(*) FROM sop_embeddings WHERE embedding_dims != 3072;\" 2>/dev/null)\" = \"0\" ]"
+  check "12.6" "DB sop_embeddings: all rows use $SOP_EXP_MODEL model (persona-index == CC active provider)" \
+    "[ \"\$(sqlite3 \"$DB_PATH\" \"SELECT COUNT(*) FROM sop_embeddings WHERE embedding_model != '$SOP_EXP_MODEL';\" 2>/dev/null)\" = \"0\" ]"
+  check "12.7" "DB sop_embeddings: all rows have dims=$SOP_EXP_DIMS ($SOP_EXP_MODEL output dimensionality)" \
+    "[ \"\$(sqlite3 \"$DB_PATH\" \"SELECT COUNT(*) FROM sop_embeddings WHERE embedding_dims != $SOP_EXP_DIMS;\" 2>/dev/null)\" = \"0\" ]"
 else
   yellow "  ! 12.5  DB sop_embeddings OpenAI-row count (skip — sqlite3 not found or DB absent)"
   yellow "  ! 12.6  DB sop_embeddings gemini-embedding-2 model agreement (skip — sqlite3 not found or DB absent)"

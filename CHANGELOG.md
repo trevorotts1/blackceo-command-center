@@ -1,3 +1,13 @@
+## [v7.6.86] — 2026-09-29 — Free local Ollama SOP embeddings (explicit per-box opt-in)
+
+A box whose Gemini key is out of credit (HTTP 402) could only search SOPs by keyword: `SOP_EMBEDDING_PROVIDER` accepted `google` or `openai`, both paid. Local Ollama was already running on those boxes for memory search, but nothing could use it for SOPs.
+
+- feat(sop-embeddings): `SOP_EMBEDDING_PROVIDER=ollama` embeds with a local Ollama server (`SOP_EMBEDDING_OLLAMA_URL`, default `http://127.0.0.1:11434`; `SOP_EMBEDDING_MODEL`, default `nomic-embed-text`; `SOP_EMBEDDING_DIMS`, default 768). No key. Never auto-detected: every box without the setting keeps Google exactly as before. A vector of the wrong length is refused. Query time still compares only rows on the active model and dims. Department routing and skill matching stay keyword-only in this mode.
+- feat(backfill): in ollama mode a normal `backfill-sop-embeddings.ts` run re-embeds every SOP locally, and `--force` is not refused by the shipped-asset guard (local re-embeds cost no key spend). Before it writes any row, the run stamps a `sop_embeddings_local_provider` marker that the onboarding repo's Sunday `provision_sop_embeddings.py` reads, so the Gemini asset is never re-imported over the box. New flag: `--batch-delay-ms=N` for throttling.
+- feat(health): `/api/health` passes the local model and dims to `embedding_health.py`, which now accepts `--sop-active-provider ollama` and expects both stores on that model. Local rows at 768 report `ok`. Rows on the right model but the wrong dims are counted and reported as degraded.
+- chore(qc-cc): section 12 holds an ollama-mode box to its own model and dims.
+- test: `sop-embeddings-ollama-local.test.ts` (7 tests, all 7 fail on the old code).
+
 ## [v7.6.85] — 2026-09-29 — atomic-deploy always tells the health check which app it is checking
 
 Live incident: update.sh runs atomic-deploy.sh from a temp copy of the target release's `scripts/`, with only `--app-dir`. atomic-deploy passed `--canonical-dir` to cc-health-check.sh only when set explicitly, so v7.6.81's probe host lookup read `.env.local` beside the temp copy, found none, and probed `127.0.0.1`. A box with a tenant registry answers that with 403 `unregistered_hostname`: `outside_in_asset` failed, the deploy rolled back, the rollback's verification failed the same way, and the box was left in `ROLLBACK_VERIFY_FAILED`. Proven read-only on a client Mac: the health check exits 1 without `--canonical-dir` and 0 with the app dir.
