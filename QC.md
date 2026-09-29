@@ -19,7 +19,7 @@ yourself honestly.
 | **4**   | 1.0    | All 26 canonical departments present in `src/lib/routing/departments.config.ts` (the source of truth — no Operations/Creative/HR/IT drift); `config/departments.json` is a valid array (ships empty `[]` per v4.0.3 and is regenerated per-client) with schema-valid entries |
 | **5**   | 1.5    | All 23 agents have the 7 ZHC files (4 unique + 3 symlinks). `find agents -type l | wc -l` reports 69 |
 | **6**   | 1.0    | `agents/_shared/{AGENTS,TOOLS,USER}.md` exist and are real files (symlink targets) |
-| **7**   | 1.5    | All migrations present in `src/lib/db/migrations.ts` through the current highest id (162 entries spanning 001-164; 022/023 are intentionally reserved/unused — see the comment at migration 025) |
+| **7**   | 1.5    | All migrations present in `src/lib/db/migrations.ts` through the current highest id (163 entries spanning 001-165; 022/023 are intentionally reserved/unused — see the comment at migration 025) |
 | **8**   | 0.5    | No hardcoded Anthropic model id as an inference target in non-orchestrator business logic. Exempt: the orchestrator layer, `model-providers/anthropic.ts` (emits Claude family *labels* for the UI), and `web-agent/runner.ts` (built on the Anthropic Messages-API tool-use protocol; model id is env-overridable via `WEB_AGENT_MODEL`) |
 | **9**   | 0.5    | `npm run build` exits zero |
 | **10**  | 0.5    | `qc-cc.sh` exits zero |
