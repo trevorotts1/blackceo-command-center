@@ -116,6 +116,9 @@ REBUILD_STATE="$WATCHDOG_STATE_DIR/rebuild-state.json"
 SCHED_STATE="$WATCHDOG_STATE_DIR/scheduler-restart-state.json"
 
 TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+# Heartbeat: install-watchdog-cc.sh reads it to see that a scheduler it cannot
+# inspect (the host's crontab, for a container) is running this script.
+printf '%s %s\n' "$TS" "${WATCHDOG_SCHEDULED_BY:-local}" > "$WATCHDOG_STATE_DIR/watchdog-last-run" 2>/dev/null || true
 
 # ── state helpers (durable, crash-tolerant; single-line JSON) ────────────────
 state_get() {  # state_get FILE KEY DEFAULT
