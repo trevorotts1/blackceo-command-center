@@ -19,6 +19,11 @@ INDEPENDENTLY, and until now nothing reported them side-by-side:
                explicit optional fallback; auto-selects per key availability.
        Consumer: department-router.ts semantic routing + SOP search.
 
+  LOCAL OLLAMA MODE (--sop-active-provider ollama, the CC's explicit per-box
+  SOP_EMBEDDING_PROVIDER=ollama opt-in): BOTH stores are expected on the local
+  model (nomic-embed-text @768 unless --sop-active-model/--sop-active-dims say
+  otherwise). Gemini rows are then foreign and reported as degraded.
+
 THE ASYMMETRY THIS SURFACES
   A box with only an OpenAI key gets SEMANTIC routing (SOP store embeds at
   1536) but the persona index is Gemini-only, so its rows can no longer be
@@ -66,6 +71,8 @@ GEMINI_MODEL = "gemini-embedding-2"          # GA persona/SOP-google model
 GEMINI_DIMS = 3072
 OPENAI_MODEL = "text-embedding-3-small"      # SOP optional fallback
 OPENAI_DIMS = 1536
+OLLAMA_MODEL = "nomic-embed-text"            # local opt-in (SOP_EMBEDDING_PROVIDER=ollama)
+OLLAMA_DIMS = 768
 
 # Model slugs whose vectors are INCOMPATIBLE with the pinned GA model and must
 # be re-embedded. gemini-embedding-001 hard-retires 2026-07-14.
@@ -85,6 +92,7 @@ PROVIDER_BY_MODEL = {
     OPENAI_MODEL: "openai",
     "text-embedding-3-large": "openai",
     "text-embedding-ada-002": "openai",
+    OLLAMA_MODEL: "ollama",
 }
 
 
@@ -247,11 +255,26 @@ def inspect_store(
         result["foreign_provider_rows"] = foreign
 
         canonical_rows = hist.get(canonical_model, 0)
+        # Rows on the canonical model but a different dim are unusable (the
+        # query path matches model AND dims) — count them out.
+        wrong_dims = 0
+        if canonical_rows and dims_col in cols:
+            wrong_dims = int(cur.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE {model_col} = ? AND {dims_col} != ?",
+                (canonical_model, canonical_dims),
+            ).fetchone()[0] or 0)
+            canonical_rows -= wrong_dims
+        result["wrong_dims_rows"] = wrong_dims
+        if wrong_dims:
+            result["notes"].append(
+                f"{store}: {wrong_dims} {canonical_model} row(s) are not {canonical_dims}-dim — "
+                f"never cosine-compared; re-embed them."
+            )
         result["semantic_ready"] = canonical_rows > 0
 
         # degraded when there are no usable canonical-model rows, OR any stale
         # rows exist (they poison the space and can't be cross-compared).
-        result["degraded"] = (canonical_rows == 0) or (stale > 0) or (foreign > 0)
+        result["degraded"] = (canonical_rows == 0) or (stale > 0) or (foreign > 0) or (wrong_dims > 0)
 
         if result["total_rows"] == 0:
             result["notes"].append(
@@ -301,6 +324,8 @@ def build_report(
     sop_db: str,
     persona_db: str,
     sop_active_provider: str | None,
+    sop_active_model: str | None = None,
+    sop_active_dims: int | None = None,
 ) -> dict:
     # SOP canonical model follows the box's active provider when known
     # (passed in by the CC, which resolves it from key availability WITHOUT
@@ -310,6 +335,11 @@ def build_report(
         sop_canon_model, sop_canon_provider, sop_canon_dims = (
             OPENAI_MODEL, "openai", OPENAI_DIMS
         )
+    elif ap == "ollama":
+        sop_canon_model, sop_canon_provider, sop_canon_dims = (
+            sop_active_model or OLLAMA_MODEL, "ollama", sop_active_dims or OLLAMA_DIMS
+        )
+        PROVIDER_BY_MODEL.setdefault(sop_canon_model, "ollama")
     elif ap == "none":
         # No provider configured — nothing is semantic-ready by definition.
         sop_canon_model, sop_canon_provider, sop_canon_dims = ("", "none", 0)
@@ -318,15 +348,20 @@ def build_report(
             GEMINI_MODEL, "google", GEMINI_DIMS
         )
 
+    # The persona index follows the box: local Ollama mode expects it local too.
+    if ap == "ollama":
+        persona_canon = (sop_canon_model, "ollama", sop_canon_dims)
+    else:
+        persona_canon = (GEMINI_MODEL, "google", GEMINI_DIMS)
     persona = inspect_store(
         store="persona_index",
         db_path=persona_db,
         table="embeddings",
         model_col="model",
         dims_col="dim",
-        canonical_model=GEMINI_MODEL,
-        canonical_provider="google",
-        canonical_dims=GEMINI_DIMS,
+        canonical_model=persona_canon[0],
+        canonical_provider=persona_canon[1],
+        canonical_dims=persona_canon[2],
     )
     sop = inspect_store(
         store="sop_index",
@@ -412,9 +447,13 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--sop-active-provider",
         default=None,
-        choices=["google", "openai", "none"],
+        choices=["google", "openai", "ollama", "none"],
         help="Active SOP provider resolved by the CC (no secret is passed).",
     )
+    parser.add_argument("--sop-active-model", default=None,
+                        help="ollama only: the local model the CC is configured with.")
+    parser.add_argument("--sop-active-dims", type=int, default=None,
+                        help="ollama only: that model's vector dims.")
     parser.add_argument("--format", default="json", choices=["json", "line"])
     parser.add_argument(
         "--strict",
@@ -428,6 +467,8 @@ def main(argv=None) -> int:
             sop_db=resolve_sop_db(args.sop_db),
             persona_db=resolve_persona_db(args.persona_db),
             sop_active_provider=args.sop_active_provider,
+            sop_active_model=args.sop_active_model,
+            sop_active_dims=args.sop_active_dims,
         )
     except Exception as exc:  # noqa: BLE001 — last-resort guard, never crash
         report = {

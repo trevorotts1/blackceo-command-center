@@ -33,6 +33,10 @@
  * PROVIDER RESOLUTION ORDER (configurable via SOP_EMBEDDING_PROVIDER env):
  *   1. SOP_EMBEDDING_PROVIDER=google  → force Google (gemini-embedding-2 @3072-dim) [CONTRACT]
  *   2. SOP_EMBEDDING_PROVIDER=openai  → force OpenAI (text-embedding-3-small, 1536-dim) [EXPLICIT OPTIONAL FALLBACK]
+ *   2b. SOP_EMBEDDING_PROVIDER=ollama → local Ollama (nomic-embed-text @768 by default) [EXPLICIT OPT-IN,
+ *       free, no key]. Never auto-detected. SOP_EMBEDDING_OLLAMA_URL (default http://127.0.0.1:11434),
+ *       SOP_EMBEDDING_MODEL, SOP_EMBEDDING_DIMS override. Semantic routing (department-router /
+ *       context-pack skill match) stays keyword-only in this mode: getEmbeddingApiKey() is null.
  *   3. SOP_EMBEDDING_PROVIDER absent → auto-detect:
  *        Google key present       → google (gemini-embedding-2) [PRIMARY]
  *        ELSE OPENAI_API_KEY present → openai [OPTIONAL FALLBACK]
@@ -74,13 +78,15 @@ import type { SOP } from '@/lib/sops';
 // Provider types + constants
 // ---------------------------------------------------------------------------
 
-export type EmbeddingProviderName = 'openai' | 'google' | 'none';
+export type EmbeddingProviderName = 'openai' | 'google' | 'ollama' | 'none';
 
 export interface EmbeddingProvider {
   name: EmbeddingProviderName;
   apiKey: string | null;
   model: string;
   dims: number;
+  /** ollama only — the local Ollama server. */
+  baseUrl?: string;
 }
 
 /** OpenAI provider constants */
@@ -109,6 +115,11 @@ const GOOGLE_OUTPUT_DIMENSIONALITY = 3072; // passed to API explicitly
 const GOOGLE_RETIRED_MODEL = 'gemini-embedding-001';
 
 const GOOGLE_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
+
+/** Local Ollama defaults (SOP_EMBEDDING_PROVIDER=ollama opt-in). */
+export const OLLAMA_DEFAULT_URL = 'http://127.0.0.1:11434';
+export const OLLAMA_DEFAULT_MODEL = 'nomic-embed-text';
+export const OLLAMA_DEFAULT_DIMS = 768;
 
 /** Maximum batch size for OpenAI /v1/embeddings. */
 const BATCH_LIMIT = 100;
@@ -166,6 +177,16 @@ export function resolveEmbeddingProvider(): EmbeddingProvider {
     const key = process.env.OPENAI_API_KEY?.trim() || null;
     return { name: 'openai', apiKey: key, model: OPENAI_MODEL, dims: OPENAI_DIMS };
   }
+  // EXPLICIT OPT-IN: local Ollama. No key; never auto-selected.
+  if (override === 'ollama') {
+    return {
+      name: 'ollama',
+      apiKey: null,
+      model: process.env.SOP_EMBEDDING_MODEL?.trim() || OLLAMA_DEFAULT_MODEL,
+      dims: Number(process.env.SOP_EMBEDDING_DIMS) || OLLAMA_DEFAULT_DIMS,
+      baseUrl: (process.env.SOP_EMBEDDING_OLLAMA_URL?.trim() || OLLAMA_DEFAULT_URL).replace(/\/+$/, ''),
+    };
+  }
 
   // ── Auto-detect (no SOP_EMBEDDING_PROVIDER set) ────────────────────────────
   // PRIMARY: Google (gemini-embedding-2 @3072-dim) — the pinned single contract.
@@ -220,13 +241,17 @@ export function getEmbeddingApiKey(): string | null {
   return provider.name !== 'none' ? provider.apiKey : null;
 }
 
+/** A provider can embed: a keyed provider with its key, or local Ollama (no key). */
+function providerReady(p: EmbeddingProvider): boolean {
+  return p.name === 'ollama' || (p.name !== 'none' && Boolean(p.apiKey));
+}
+
 /**
- * True when any embedding provider key is set and non-trivially long.
+ * True when an embedding provider is usable (a key is set, or local Ollama is opted in).
  * Used by sops.ts / SOP routes to decide whether semantic search is active.
  */
 export function isEmbeddingAvailable(): boolean {
-  const provider = resolveEmbeddingProvider();
-  return provider.name !== 'none' && Boolean(provider.apiKey);
+  return providerReady(resolveEmbeddingProvider());
 }
 
 // ---------------------------------------------------------------------------
@@ -495,6 +520,37 @@ async function fetchEmbeddingsGoogle(texts: string[], apiKey: string): Promise<E
 }
 
 // ---------------------------------------------------------------------------
+// Local Ollama /api/embed
+// ---------------------------------------------------------------------------
+
+/**
+ * Fetch a SINGLE text embedding from a local Ollama server.
+ * POST {baseUrl}/api/embed { model, input } → { embeddings: [[...]] }.
+ * Refuses a vector whose length is not provider.dims (never store a wrong-dim row).
+ */
+async function fetchEmbeddingOllama(text: string, provider: EmbeddingProvider): Promise<Float32Array> {
+  const resp = await fetch(`${provider.baseUrl}/api/embed`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: provider.model, input: text.length > 8_000 ? text.slice(0, 8_000) : text }),
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!resp.ok) {
+    const errBody = await resp.text().catch(() => '');
+    throw new Error(`Ollama embeddings API error ${resp.status}: ${errBody.slice(0, 200)}`);
+  }
+  const json = (await resp.json()) as { embeddings?: number[][] };
+  const values = json?.embeddings?.[0];
+  if (!Array.isArray(values) || values.length !== provider.dims) {
+    throw new Error(
+      `Ollama ${provider.model} returned a ${Array.isArray(values) ? values.length : 0}-dim vector, ` +
+      `expected ${provider.dims} — refusing it`
+    );
+  }
+  return new Float32Array(values);
+}
+
+// ---------------------------------------------------------------------------
 // Public API: fetchEmbedding / fetchEmbeddings (provider-agnostic)
 // ---------------------------------------------------------------------------
 
@@ -507,6 +563,9 @@ async function fetchEmbeddingsGoogle(texts: string[], apiKey: string): Promise<E
  */
 export async function fetchEmbedding(text: string): Promise<Float32Array> {
   const provider = resolveEmbeddingProvider();
+  if (provider.name === 'ollama') {
+    return fetchEmbeddingOllama(text, provider);
+  }
   if (provider.name === 'none' || !provider.apiKey) {
     throw new Error('No embedding provider configured (no OPENAI_API_KEY or Google key found)');
   }
@@ -775,7 +834,7 @@ export async function storeEmbeddingForSOP(sop: SOP): Promise<void> {
   if (!isEmbeddingAvailable()) return;
   try {
     const provider = resolveEmbeddingProvider();
-    if (provider.name === 'none' || !provider.apiKey) return;
+    if (!providerReady(provider)) return;
 
     const text = buildSOPEmbedText(sop);
     const embedding = await fetchEmbedding(text);
