@@ -727,6 +727,27 @@ echo '{"pass":true}'; exit 0
   }
 });
 
+// update.sh runs atomic-deploy.sh from a temp copy of the target's scripts/. The
+// health check then only knows the app through --canonical-dir: without it, it
+// reads .env.local beside the copy, probes 127.0.0.1 and a tenant-walled app
+// answers 403 unregistered_hostname -- the deploy AND its rollback fail.
+test('The health check is always told the app dir (a tenant-walled app run from a copied scripts dir)', async () => {
+  const fixture = buildFixture({ buildExitCode: 0, healthExitCode: 0, rollbackHealthExitCode: 0, liveNextExists: true });
+  writeFileSync(fixture.healthCheckStubPath, `#!/usr/bin/env bash
+want="${fixture.appDir}"; got=""
+while [ $# -gt 0 ]; do [ "$1" = --canonical-dir ] && got="$2"; shift; done
+[ "$got" = "$want" ] && { echo '{"pass":true}'; exit 0; }
+echo '{"pass":false,"outside_in_asset":{"pass":false,"asset_ref":"none"},"detail":"403 unregistered_hostname"}'; exit 1
+`, { mode: 0o755 });
+  try {
+    const { exitCode, stderr } = runDeploy(fixture);
+    assert.strictEqual(exitCode, 0, `a healthy tenant-walled app must deploy green.\nstderr:\n${stderr}`);
+    assert.ok(!stderr.includes('ROLLBACK'), stderr);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
 // ─── Spec Verify (d): health exits 3 → retry, no rollback, exit 3 ───────────
 
 /**

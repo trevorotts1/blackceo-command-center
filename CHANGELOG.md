@@ -1,3 +1,10 @@
+## [v7.6.85] — 2026-09-29 — atomic-deploy always tells the health check which app it is checking
+
+Live incident: update.sh runs atomic-deploy.sh from a temp copy of the target release's `scripts/`, with only `--app-dir`. atomic-deploy passed `--canonical-dir` to cc-health-check.sh only when set explicitly, so v7.6.81's probe host lookup read `.env.local` beside the temp copy, found none, and probed `127.0.0.1`. A box with a tenant registry answers that with 403 `unregistered_hostname`: `outside_in_asset` failed, the deploy rolled back, the rollback's verification failed the same way, and the box was left in `ROLLBACK_VERIFY_FAILED`. Proven read-only on a client Mac: the health check exits 1 without `--canonical-dir` and 0 with the app dir.
+
+- fix(atomic-deploy): every health check it runs gets `--canonical-dir` (the explicit override, else `--app-dir`).
+- test: `b2-atomic-deploy.test.ts` "The health check is always told the app dir": a tenant-walled stub passes only with `--canonical-dir <app dir>` (fails on the old code).
+
 ## [v7.6.84] — 2026-09-29 — Operator alerts from an operator-owned box go through the operator webhook
 
 On a box marked operator-owned (`~/.openclaw/.operator-is-owner` or `CC_OPERATOR_IS_OWNER=1`: another operator's own box), SYSTEM alerts skipped the operator alert webhook and went by Telegram through that box's bot to the first operator id it knew, which reaches the box's owner, not the fleet operator.

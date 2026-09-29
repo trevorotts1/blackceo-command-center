@@ -16,7 +16,7 @@
 #   --disk-min-gb N      Minimum free GB required before build (default: 5)
 #   --health-retries N   Number of times to retry after exit-3 UNKNOWN from health check (default: 36)
 #   --health-retry-wait  Seconds to wait between exit-3 retries (default: 15)
-#   --canonical-dir DIR  Pass-through to cc-health-check.sh --canonical-dir
+#   --canonical-dir DIR  Pass-through to cc-health-check.sh --canonical-dir (default: the app dir)
 #   --public-url URL     Pass-through to cc-health-check.sh --public-url
 #   --revision SHA       Verified commit used for candidate preparation (default: HEAD)
 #
@@ -318,7 +318,12 @@ _health_check_args() {
   args+=(--disk-min-gb 0.5)   # runtime threshold; B.4 build gate uses 5 GB (handled by us)
   args+=(--json-only)
   [[ -n "$DB_PATH_OVERRIDE" ]]    && args+=(--db-path "$DB_PATH_OVERRIDE")
-  [[ -n "$CANONICAL_DIR_OVERRIDE" ]] && args+=(--canonical-dir "$CANONICAL_DIR_OVERRIDE")
+  # Always name the app: update.sh runs this script from a temp copy of the
+  # target's scripts/, so without it cc-health-check.sh looks for the app's
+  # .env.local (tenant registry, public host) beside that copy, finds none,
+  # probes 127.0.0.1, meets the tenant wall (403 unregistered_hostname) and
+  # fails both the deploy and its rollback verification.
+  args+=(--canonical-dir "${CANONICAL_DIR_OVERRIDE:-$APP_DIR}")
   [[ -n "$PUBLIC_URL_PROBE" ]]    && args+=(--public-url "$PUBLIC_URL_PROBE")
   printf '%s\n' "${args[@]}"
 }
