@@ -1,3 +1,11 @@
+## [v7.6.87] — 2026-09-29 — A pm2 version banner no longer reads as "no apps"; a rollback's receipt binds the live tree
+
+Live incident: a 14-minute outage on a client box, from two faults in one deploy.
+
+- fix(pm2): a pm2 CLI that differs from the running daemon prints `>>>> In-memory PM2 is out-of-date` on STDOUT before the app list. Every reader parsed the whole output as JSON and saw "no apps": the health check reported "FAIL: no pm2 app for target", exited 1, and atomic-deploy rolled back a healthy Command Center. `scripts/lib/pm2_json.py` reads the first JSON array of apps past any banner or `[PM2]` line; `pm2-analyze-cc.py`, `cc-health-check.sh` (service state), `pm2-port-zombies.py` (atomic-deploy dedup, update.sh name resolution) and `node-runtime.sh` use it. The mismatch is reported as its own non-gating WARN ("pm2 CLI/daemon version mismatch") and as `pm2_version_mismatch` in the topology JSON.
+- fix(atomic-deploy): the rollback receipt's `failed_target` is the inventory digest of the LIVE tree the rollback leaves behind (promotion fast-forwarded it; the rollback restores only `.next` and `node_modules`), not the frozen candidate's. cc-start verifies against the live tree: with an inventory input the candidate copy lacked, the old receipt read RECEIPT_STALE and cc-start refused (exit 78) in a loop.
+- test: `tests/unit/pm2-version-banner-parse.test.sh` (4 checks fail on the old code; the plain-list control passes on both), now in CI; `b2-atomic-deploy.test.ts` "An explicit-revision rollback leaves a receipt cc-start accepts for the live tree" (RECEIPT_STALE on the old code).
+
 ## [v7.6.86] — 2026-09-29 — Free local Ollama SOP embeddings (explicit per-box opt-in)
 
 A box whose Gemini key is out of credit (HTTP 402) could only search SOPs by keyword: `SOP_EMBEDDING_PROVIDER` accepted `google` or `openai`, both paid. Local Ollama was already running on those boxes for memory search, but nothing could use it for SOPs.

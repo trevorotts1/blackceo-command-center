@@ -518,6 +518,9 @@ jobs:
       # A Command Center missing from pm2 is RED, and the watchdog starts it.
       - name: watchdog-cc.sh down-is-red test
         run: bash tests/unit/watchdog-cc-down-is-red.test.sh
+      # A pm2 version banner before the app list must not read as "no apps".
+      - name: pm2 version-banner parse test
+        run: bash tests/unit/pm2-version-banner-parse.test.sh
 
 
   # ── Build smoke test — BLOCKING ───────────────────────────────────────────

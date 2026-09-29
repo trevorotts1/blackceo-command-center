@@ -228,8 +228,11 @@ def main() -> None:
 
     try:
         raw = sys.stdin.read()
-        pm2_list = json.loads(raw) if raw.strip() else []
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'lib'))
+        import pm2_json  # the list, even behind a pm2 version banner
+        pm2_list = pm2_json.load(raw)
         result = analyse(pm2_list, args.port, args.canonical_dir, args.app_name)
+        result['pm2_version_mismatch'] = pm2_json.version_mismatch(raw)
         print(json.dumps(result))
     except Exception as e:
         print(json.dumps({
