@@ -45,10 +45,19 @@ function ledgerEntry(provider: string, over: Partial<ProviderLedgerEntry> = {}):
   };
 }
 
+// v7.6.78 gave scoreRoute a fourth input, `placeable`, which defaults to this
+// box's openclaw.json (modelPolicy.allow, configured providers). Left to that
+// default, every overflow case here passed or failed on the developer's own
+// config. Inject it like the ledger and latency: every model is placeable
+// unless a case says otherwise (route-scorer-placeable.test.ts covers the rule).
+function score(input: Parameters<typeof scoreRoute>[0]) {
+  return scoreRoute({ placeable: () => true, ...input });
+}
+
 // ── A. Sovereignty: the candidate set is the agent's own list ───────────────
 
 test('an agent that declares one model has one candidate — the answer is queue, never substitute', () => {
-  const decision = scoreRoute({
+  const decision = score({
     agent: AGENT,
     candidateModels: ['ollama/deepseek-v4.1-flash:cloud'],
     ledger: [ledgerEntry('ollama', { slotsFree: 0 })],
@@ -63,7 +72,7 @@ test('an agent that declares one model has one candidate — the answer is queue
 });
 
 test('the preferred candidate is the FIRST declared model, not the best-scoring one', () => {
-  const decision = scoreRoute({
+  const decision = score({
     agent: AGENT,
     candidateModels: ['ollama/flash', 'openrouter/minimax/minimax-m3'],
     ledger: [ledgerEntry('ollama', { slotsFree: 0 }), ledgerEntry('openrouter', { slotsFree: 12 })],
@@ -78,7 +87,7 @@ test('the preferred candidate is the FIRST declared model, not the best-scoring 
 // ── B. Every dimension can answer "undetermined", and never refuses on one ──
 
 test('a null balance is undetermined, not empty — it never blocks a candidate', () => {
-  const decision = scoreRoute({
+  const decision = score({
     agent: AGENT,
     candidateModels: ['ollama/flash'],
     // Ollama Cloud publishes no balance. Scoring it as empty would refuse the
@@ -92,7 +101,7 @@ test('a null balance is undetermined, not empty — it never blocks a candidate'
 });
 
 test('a KNOWN balance at or below the floor does block', () => {
-  const decision = scoreRoute({
+  const decision = score({
     agent: AGENT,
     candidateModels: ['deepseek/deepseek-flash'],
     ledger: [ledgerEntry('deepseek', { balance: BALANCE_FLOOR, slotsFree: 9 })],
@@ -104,7 +113,7 @@ test('a KNOWN balance at or below the floor does block', () => {
 });
 
 test('a balance just above the floor does not block', () => {
-  const decision = scoreRoute({
+  const decision = score({
     agent: AGENT,
     candidateModels: ['deepseek/deepseek-flash'],
     ledger: [ledgerEntry('deepseek', { balance: BALANCE_FLOOR + 0.01, slotsFree: 9 })],
@@ -115,7 +124,7 @@ test('a balance just above the floor does not block', () => {
 });
 
 test('no measured latency means the deadline question is undetermined, not failed', () => {
-  const decision = scoreRoute({
+  const decision = score({
     agent: AGENT,
     candidateModels: ['ollama/flash'],
     ledger: [ledgerEntry('ollama', { slotsFree: 2 })],
@@ -129,7 +138,7 @@ test('no measured latency means the deadline question is undetermined, not faile
 
 test('a MEASURED median that overruns the deadline does block, and says by how much', () => {
   const now = Date.parse('2026-09-21T12:00:00.000Z');
-  const decision = scoreRoute({
+  const decision = score({
     agent: AGENT,
     candidateModels: ['ollama/flash'],
     ledger: [ledgerEntry('ollama', { slotsFree: 2 })],
@@ -142,7 +151,7 @@ test('a MEASURED median that overruns the deadline does block, and says by how m
 });
 
 test('no deadline on the card means the deadline is not a factor at all', () => {
-  const decision = scoreRoute({
+  const decision = score({
     agent: AGENT,
     candidateModels: ['ollama/flash'],
     ledger: [ledgerEntry('ollama', { slotsFree: 2 })],
@@ -154,7 +163,7 @@ test('no deadline on the card means the deadline is not a factor at all', () => 
 });
 
 test('unknown pool state is undetermined too — a provider the pools do not track still runs', () => {
-  const decision = scoreRoute({
+  const decision = score({
     agent: AGENT,
     candidateModels: ['somevendor/model-x'],
     ledger: [],
@@ -168,7 +177,7 @@ test('unknown pool state is undetermined too — a provider the pools do not tra
 
 test('a cooling pool is a definite no and the reason names the reopen time', () => {
   const until = '2026-09-21T12:30:00.000Z';
-  const decision = scoreRoute({
+  const decision = score({
     agent: AGENT,
     candidateModels: ['ollama/flash'],
     ledger: [ledgerEntry('ollama', { slotsFree: 3, coolingUntil: until })],
@@ -179,7 +188,7 @@ test('a cooling pool is a definite no and the reason names the reopen time', () 
 });
 
 test('a full pool is a definite no', () => {
-  const decision = scoreRoute({
+  const decision = score({
     agent: AGENT,
     candidateModels: ['ollama/flash'],
     ledger: [ledgerEntry('ollama', { slotsFree: 0, slotsLimit: 3, effectiveLimit: 3 })],
@@ -203,13 +212,13 @@ test('the same inputs always produce the same pick, so the reason can be trusted
     latency: {},
     title: 'Write a blog post',
   };
-  const first = scoreRoute(input);
-  for (let i = 0; i < 5; i++) assert.equal(scoreRoute(input).recommended?.modelId, first.recommended?.modelId);
+  const first = score(input);
+  for (let i = 0; i < 5; i++) assert.equal(score(input).recommended?.modelId, first.recommended?.modelId);
 });
 
 test('an unblocked candidate always outranks a blocked one, whatever the quality order says', () => {
   // content order puts ollama first; ollama is full, so openrouter must win.
-  const decision = scoreRoute({
+  const decision = score({
     agent: AGENT,
     candidateModels: ['openrouter/m3', 'ollama/flash'],
     ledger: [ledgerEntry('openrouter', { slotsFree: 4 }), ledgerEntry('ollama', { slotsFree: 0 })],
@@ -221,7 +230,7 @@ test('an unblocked candidate always outranks a blocked one, whatever the quality
 
 test('between two open candidates the quality order for the task kind decides', () => {
   const ledger = [ledgerEntry('openrouter', { slotsFree: 4 }), ledgerEntry('ollama', { slotsFree: 4 })];
-  const code = scoreRoute({
+  const code = score({
     agent: AGENT,
     candidateModels: ['ollama/flash', 'openrouter/m3'],
     ledger,
@@ -229,7 +238,7 @@ test('between two open candidates the quality order for the task kind decides', 
     title: 'Fix the API deploy script bug',
   });
   assert.equal(code.recommended?.provider, 'openrouter', 'code work prefers openrouter');
-  const content = scoreRoute({
+  const content = score({
     agent: AGENT,
     candidateModels: ['openrouter/m3', 'ollama/flash'],
     ledger,
@@ -261,7 +270,7 @@ test('task kinds are classified from the title and department', () => {
 // ── E. askWorthy is only a REAL decision point ─────────────────────────────
 
 test('a running primary is never ask-worthy, however good an alternate looks', () => {
-  const decision = scoreRoute({
+  const decision = score({
     agent: AGENT,
     candidateModels: ['ollama/flash', 'openrouter/m3'],
     ledger: [ledgerEntry('ollama', { slotsFree: 3 }), ledgerEntry('openrouter', { slotsFree: 20 })],
@@ -272,7 +281,7 @@ test('a running primary is never ask-worthy, however good an alternate looks', (
 });
 
 test('every model blocked is reported as exactly that, with each reason', () => {
-  const decision = scoreRoute({
+  const decision = score({
     agent: AGENT,
     candidateModels: ['ollama/flash', 'openrouter/m3'],
     ledger: [ledgerEntry('ollama', { slotsFree: 0 }), ledgerEntry('openrouter', { slotsFree: 0 })],
@@ -285,7 +294,7 @@ test('every model blocked is reported as exactly that, with each reason', () => 
 });
 
 test('the queued reason names the model the run will actually overflow onto', () => {
-  const decision = scoreRoute({
+  const decision = score({
     agent: AGENT,
     candidateModels: ['ollama/flash', 'openrouter/minimax/minimax-m3'],
     ledger: [ledgerEntry('ollama', { slotsFree: 0 }), ledgerEntry('openrouter', { slotsFree: 12 })],
@@ -298,7 +307,7 @@ test('the queued reason names the model the run will actually overflow onto', ()
 test('the overflow target follows CONFIG order, not the quality order', () => {
   // content quality order prefers ollama; config order puts deepseek second.
   // The run will land on deepseek because that is what the runtime walks to.
-  const decision = scoreRoute({
+  const decision = score({
     agent: AGENT,
     candidateModels: ['openrouter/m3', 'deepseek/flash', 'ollama/flash'],
     ledger: [
@@ -315,7 +324,7 @@ test('the overflow target follows CONFIG order, not the quality order', () => {
 });
 
 test('the reason says whether the overflow costs more per million tokens', () => {
-  const dearer = scoreRoute({
+  const dearer = score({
     agent: AGENT,
     candidateModels: ['ollama/flash', 'openrouter/m3'],
     ledger: [
@@ -325,7 +334,7 @@ test('the reason says whether the overflow costs more per million tokens', () =>
     latency: {},
   });
   assert.match(dearer.reason, /dearer per million tokens/);
-  const notDearer = scoreRoute({
+  const notDearer = score({
     agent: AGENT,
     candidateModels: ['openrouter/m3', 'ollama/flash'],
     ledger: [
@@ -335,6 +344,18 @@ test('the reason says whether the overflow costs more per million tokens', () =>
     latency: {},
   });
   assert.match(notDearer.reason, /no dearer per million tokens/);
+});
+
+test('an open fallback the box cannot place is named as unplaceable, not as blocked on capacity', () => {
+  const decision = score({
+    agent: AGENT,
+    candidateModels: ['ollama/flash', 'openrouter/minimax/minimax-m3'],
+    ledger: [ledgerEntry('ollama', { slotsFree: 0 }), ledgerEntry('openrouter', { slotsFree: 12 })],
+    latency: {},
+    placeable: () => false,
+  });
+  assert.equal(decision.overflowTo, null);
+  assert.match(decision.reason, /OpenRouter openrouter\/minimax\/minimax-m3 not placeable on this box/);
 });
 
 // ── F. Measured latency comes from this box's own completed runs ───────────

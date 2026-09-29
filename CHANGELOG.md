@@ -1,3 +1,12 @@
+## [v7.6.89] — 2026-09-29 — Mis-filed agents leave General Task; route-scorer tests stop reading the box
+
+Integrates jgt/JGT-202-refile-misfiled-agents (0100cac8) and jgt/jgt204-route-scorer (85e078e4).
+
+- fix(db): migration 167 moves agents that were mis-filed into General Task before v7.6.88 (the v7.6.88 notes said "Existing mis-filed rows are not moved"). It uses the same id rule as agent-sync (`dept-<slug>` / `head-agent-<slug>`, through `canonicalDeptSlug()`) and moves an agent only to a LIVE workspace in the SAME company. It never uses a name guess, never moves the General Task head agent or the master row, and never crosses a company boundary. A second run changes nothing.
+- fix(scorer): `buildReason` no longer calls an open but unplaceable fallback model "blocked" (it read "blocked too (OpenRouter)" while OpenRouter had free slots). It now says "<Provider> <model> not placeable on this box".
+- test: `route-scorer-2026-09.test.ts` injects `placeable: () => true` like it already injects ledger and latency, so its 4 cases no longer fail on a box whose `~/.openclaw/openclaw.json` allow list excludes the fixture models. New case covers the unplaceable-fallback reason. New `migration-167-refile-misfiled-general-task-agents.test.ts`.
+- docs(qc): QC.md migration count is 165 entries through 167.
+
 ## [v7.6.88] — 2026-09-29 — JEV decides live
 
 The Command Center now asks the installed decision engine (JEV) whether an owner message is a question or a task, and which department a task belongs to. A task that fits no department lands on the General Task lane, never lane-less and never on the structural `default` workspace.
