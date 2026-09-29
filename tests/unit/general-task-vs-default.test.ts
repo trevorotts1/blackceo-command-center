@@ -12,7 +12,7 @@
  *      (the dispatch authorization choke point) — a no-match task could
  *      therefore land on an agent sitting in the schema's default bucket
  *      instead of the real general-task lane.
- *   c) ceo-chat/task/route.ts's resolveGeneralTaskWorkspace matched 'general'
+ *   c) ceo-chat/task/route.ts's resolveGeneralTaskWorkspace (now src/lib/routing/general-task-workspace.ts) matched 'general'
  *      by NAME with no company filter and ORDER BY rowid — the 'default' row
  *      (inserted first, name 'General') could win outright, and nothing
  *      stopped a different company's row from winning either.
@@ -43,7 +43,7 @@ globalThis.fetch = async () => { throw new Error('general-task-vs-default fixtur
 let db: typeof import('../../src/lib/db');
 let isCatchAllWorkspace: typeof import('../../src/lib/routing/catch-all-policy')['isCatchAllWorkspace'];
 let routeTaskDecision: typeof import('../../src/lib/routing/department-router')['routeTaskDecision'];
-let resolveGeneralTaskWorkspace: typeof import('../../src/app/api/ceo-chat/task/route')['resolveGeneralTaskWorkspace'];
+let resolveGeneralTaskWorkspace: typeof import('../../src/lib/routing/general-task-workspace')['resolveGeneralTaskWorkspace'];
 let resolveAgentDeptWorkspace: typeof import('../../src/lib/openclaw/agent-sync')['resolveAgentDeptWorkspace'];
 
 test.before(async () => {
@@ -52,7 +52,7 @@ test.before(async () => {
 
   ({ isCatchAllWorkspace } = await import('../../src/lib/routing/catch-all-policy'));
   ({ routeTaskDecision } = await import('../../src/lib/routing/department-router'));
-  ({ resolveGeneralTaskWorkspace } = await import('../../src/app/api/ceo-chat/task/route'));
+  ({ resolveGeneralTaskWorkspace } = await import('../../src/lib/routing/general-task-workspace'));
   ({ resolveAgentDeptWorkspace } = await import('../../src/lib/openclaw/agent-sync'));
 
   fs.mkdirSync(path.join(root, 'openclaw', 'agents', 'main'), { recursive: true });

@@ -1,3 +1,16 @@
+## [v7.6.88] — 2026-09-29 — JEV decides live
+
+The Command Center now asks the installed decision engine (JEV) whether an owner message is a question or a task, and which department a task belongs to. A task that fits no department lands on the General Task lane, never lane-less and never on the structural `default` workspace.
+
+- feat(decision-engine): `routeTaskDecision` (the single choke point for createTaskCore, ingest, CEO-chat, the auto-route webhook and the intake sweep) consults JEV when a task has no department, target agent or catch-all. It sends the company's departments (minus `default`). On `route.action=route`, `fallback=false` and a catalog slug, the task goes to that department, and the reason gets the suffix " (department chosen by decision engine)". On `fallback=true`, the existing semantic/keyword ranking decides. Any error, a 3 s timeout, a missing or old core, or a response without `intent`/`route` returns null, and the existing no-JEV path runs. Results are memoized per process (max 500). New `src/lib/decision-engine/live.ts`; additive `intent`/`intentSource`/`route` fields in `contract.ts` (schema stays 1.1.0).
+- feat(kill switch): `OPENCLAW_DECISION_ENGINE_MODE` (CC also accepts `DECISION_ENGINE_MODE`), then the first word of `$OC_CONFIG/decision-engine-mode.conf` (default `~/.openclaw`), then the release default `auto`. `shadow` calls and logs only; `legacy`/`off` spawns no Python at all (today's behaviour). An invalid value is OFF. Read on every call, so no restart: `echo off > ~/.openclaw/decision-engine-mode.conf`.
+- feat(ingest): the raw door (`{message}`) classifies with JEV's intent. Lexical `existing_task_control` and `clarification_response` still win. A question creates no card (`created:false`).
+- feat(migrations): migration 166 inserts the `general-task` workspace on any box without one (live or archived) that did not opt out. The company comes from the CEO/master row, else the majority company, never `default`.
+- fix(tasks): a card with no eligible worker stays unassigned but keeps `workspace_id` general-task; it is never lane-less.
+- fix(routing): the structural `default` workspace (seeded as "General") is no longer a catch-all. `isCatchAllWorkspace` excludes it, and the CEO-chat General Task lookup (now `src/lib/routing/general-task-workspace.ts`) is company-scoped, excludes `default` and prefers the literal `general-task` slug.
+- fix(agent-sync): an agent named "General Counsel" is no longer filed into General Task. Department comes from the agent id (`dept-<slug>` / `head-agent-<slug>`) first; the name fallback needs the full phrase "general task". Existing mis-filed rows are not moved (the agents UPSERT does not update `workspace_id`).
+- test: `decision-engine-live.test.ts`, `migration-166-general-task-seed.test.ts`, `general-task-laneless-fallback.test.ts`, `general-task-vs-default.test.ts` (43 cases with `a13-single-ingest-exact-once.test.ts`).
+
 ## [v7.6.87] — 2026-09-29 — A pm2 version banner no longer reads as "no apps"; a rollback's receipt binds the live tree
 
 Live incident: a 14-minute outage on a client box, from two faults in one deploy.
