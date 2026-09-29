@@ -118,7 +118,9 @@ def app_name(app):
 
 def load_apps():
     try:
-        apps = json.load(sys.stdin)
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import pm2_json  # the list, even behind a pm2 version banner
+        apps = pm2_json.load(sys.stdin.read())
     except Exception:
         return []
     return apps if isinstance(apps, list) else []

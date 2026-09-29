@@ -114,7 +114,7 @@ _ccnr_from_pm2() {
   command -v pm2 >/dev/null 2>&1 || return 1
   command -v python3 >/dev/null 2>&1 || return 1
   local found
-  found="$(pm2 jlist 2>/dev/null | python3 -s -c '
+  found="$(pm2 jlist 2>/dev/null | { if [ -f "$(dirname "${BASH_SOURCE[0]}")/pm2_json.py" ]; then python3 -s "$(dirname "${BASH_SOURCE[0]}")/pm2_json.py" 2>/dev/null; else cat; fi; } | python3 -s -c '
 import json, sys
 names = set(sys.argv[1].split())
 try:

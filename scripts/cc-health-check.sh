@@ -332,12 +332,20 @@ except Exception:
 PYEOF
 }
 
+# The pm2 app list as clean JSON: a pm2 CLI that differs from the running daemon
+# prints a version banner on STDOUT first, and a bare json.loads then saw "no
+# apps" (scripts/lib/pm2_json.py). Without the helper, the raw text passes on.
+_PM2_JSON_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/pm2_json.py"
+_pm2_list_json() {
+  if [[ -f "$_PM2_JSON_LIB" ]]; then python3 -s "$_PM2_JSON_LIB" 2>/dev/null; else cat; fi
+}
+
 service_state_for_target() {
   # Print "STATUS|pm_id|uptime_secs" for the target pm2 app, or "" when pm2
   # cannot tell us anything (binary missing, daemon down, parse failure).
   command -v pm2 >/dev/null 2>&1 || return 1
   local j
-  j=$(pm2 jlist 2>/dev/null) || return 1
+  j=$(pm2 jlist 2>/dev/null | _pm2_list_json) || return 1
   [[ -n "$j" ]] || return 1
   python3 -s - "$j" "$PM2_APP_NAME" "$PORT" <<'PYEOF'
 import json, sys, time
@@ -628,6 +636,9 @@ else
   rm -f "$_J"
 
   PM2_COUNT=$(printf '%s' "$PM2_JSON" | py "d.get('app_count',0)" 0)
+  if [[ "$(printf '%s' "$PM2_JSON" | py "'true' if d.get('pm2_version_mismatch') else 'false'" false)" == "true" ]]; then
+    log "WARN: pm2 CLI/daemon version mismatch (the CLI printed 'In-memory PM2 is out-of-date'); the app list was read past the banner. Run 'pm2 update' in a maintenance window (non-gating)"
+  fi
   PM2_CRASH=$(printf '%s' "$PM2_JSON" | py "cl=d.get('crash_loopers',[]); '[]' if not cl else json.dumps(cl)" "[]")
   NULL_CWD=$(printf '%s'  "$PM2_JSON" | py "d.get('null_cwd_count',0)" 0)
   # FIX (Issue 1): also extract cwd_ok — null-cwd is caught above, but a

@@ -1258,6 +1258,60 @@ ${verify.stdout}`);
   }
 });
 
+// The rollback leaves the live worktree on the fast-forwarded target, and cc-start
+// verifies the rollback receipt against THAT tree's inventory digest. The receipt
+// recorded the frozen candidate's digest instead; a live tree with an inventory
+// input the candidate copy lacks then read RECEIPT_STALE and cc-start refused
+// (exit 78) in a loop -- a 14-minute outage on a client box.
+test('An explicit-revision rollback leaves a receipt cc-start accepts for the live tree', async () => {
+  const fixture = buildFixture({ buildExitCode: 0, healthExitCode: 1, rollbackHealthExitCode: 0, liveNextExists: true });
+  const sourcePath = path.join(fixture.appDir, 'src', 'a.ts');
+  try {
+    writeFileSync(sourcePath, 'export const a = 2;\n');
+    let result = spawnSync('git', ['-C', fixture.appDir, 'add', 'src/a.ts'], { encoding: 'utf8' });
+    assert.strictEqual(result.status, 0, result.stderr);
+    result = spawnSync('git', ['-C', fixture.appDir, '-c', 'user.name=Command Center Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-m', 'explicit target'], { encoding: 'utf8' });
+    assert.strictEqual(result.status, 0, result.stderr);
+    const targetRevision = execSync(`git -C ${fixture.appDir} rev-parse HEAD`).toString().trim();
+    // An inventory input in the live tree that the candidate (built from the commit) does not carry.
+    writeFileSync(path.join(fixture.appDir, 'src', 'box-local.ts'), 'export const local = 1;\n');
+    writeFileSync(path.join(fixture.binDir, 'npm'), `#!/usr/bin/env bash
+if [[ "$1" == "ci" ]]; then
+  mkdir -p node_modules/better-sqlite3
+  printf '%s\\n' '{"name":"better-sqlite3","version":"0.0.0","main":"index.js"}' > node_modules/better-sqlite3/package.json
+  printf '%s\\n' 'module.exports = class FakeDatabase { prepare() { return { get: () => ({ answer: 42 }) }; } close() {} };' > node_modules/better-sqlite3/index.js
+  exit 0
+fi
+if [[ "$1" == "run" && "$2" == "build" ]]; then
+  mkdir -p "$NEXT_DIST_DIR"
+  echo "new-build-id" > "$NEXT_DIST_DIR/BUILD_ID"
+  echo 0 > "$BUILD_EXIT_FILE"
+  exit 0
+fi
+exit 0
+`, { mode: 0o755 });
+    writeFileSync(fixture.healthCheckStubPath, `#!/usr/bin/env bash
+C="${fixture.baseDir}/.health-call-count"; N=$(( $(cat "$C" 2>/dev/null || echo 0) + 1 )); echo "$N" > "$C"
+[ "$N" -eq 1 ] && { echo '{"pass":false}'; exit 1; }
+echo '{"pass":true}'; exit 0
+`, { mode: 0o755 });
+
+    const { exitCode, stderr } = runDeploy(fixture, {}, { revision: targetRevision });
+    assert.strictEqual(exitCode, 1, stderr);
+    assert.ok(stderr.includes('Rollback verified'), stderr);
+
+    // What cc-start does on a content mismatch: verify the receipt against the LIVE tree.
+    const lib = path.join(process.cwd(), 'scripts', 'lib', 'build-inventory.sh');
+    const live = spawnSync('bash', [lib, '--digest', fixture.appDir], { encoding: 'utf8' }).stdout.trim();
+    assert.ok(live, 'live tree digest');
+    const verify = spawnSync('bash', [lib, '--verify-rollback', fixture.appDir, path.join(fixture.appDir, '.next'), live], { encoding: 'utf8' });
+    assert.match(verify.stdout ?? '', /"receipt_verdict":"RECEIPT_OK"/,
+      `cc-start must accept the rollback for the live tree (exit ${verify.status}).\n${verify.stdout}\n${verify.stderr}`);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
 test('RR14: interrupting explicit rollback restores the complete candidate release', async () => {
   const fixture = buildFixture({
     buildExitCode: 0,

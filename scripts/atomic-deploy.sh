@@ -1976,10 +1976,17 @@ else
   # vouches for exactly that pair (PRES-046). Written after the switch, the
   # restored app was refused (exit 78), rollback health never went green, and
   # the box was left in ROLLBACK_VERIFY_FAILED, refusing every later deploy.
+  # failed_target = the source tree that is LIVE after the rollback (promotion
+  # fast-forwarded the worktree; the rollback restores only .next and
+  # node_modules). cc-start verifies against that tree's digest, which can
+  # differ from the frozen candidate's (inventory inputs the candidate copy does
+  # not carry): binding the candidate digest was RECEIPT_STALE, exit 78, a loop.
+  _RB_TARGET_INVENTORY="$(_ccbi_inventory_digest "$APP_DIR" 2>/dev/null)" || _RB_TARGET_INVENTORY=""
+  [[ -n "$_RB_TARGET_INVENTORY" ]] || _RB_TARGET_INVENTORY="$PRE_BUILD_INVENTORY"
   _ccbi_write_rollback_state \
     "$APP_DIR" \
     "$ROLLBACK_INVENTORY" \
-    "$PRE_BUILD_INVENTORY" \
+    "$_RB_TARGET_INVENTORY" \
     "${BUILD_ID:-unknown}" \
     "Health check exit ${HEALTH_EXIT} on target build ${BUILD_ID:-unknown}; rolled back to the prior complete release" \
     && _ok "  Rollback receipt written: ${APP_DIR}/.deploy-rollback-state.json (prior=${ROLLBACK_INVENTORY})" \
