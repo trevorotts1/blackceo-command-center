@@ -45,7 +45,9 @@
 import { queryAll, queryOne, run } from '@/lib/db';
 import { canonicalProvider, providerLabel, providerOf } from '@/lib/capacity/provider-pools';
 import { readResourceLedger, type ProviderLedgerEntry } from '@/lib/capacity/resource-ledger';
-import { resolveRuntimeModelChainFromConfig } from '@/lib/runtime-model';
+import { readOpenClawConfig, resolveRuntimeModelChainFromConfig } from '@/lib/runtime-model';
+import { getProvider } from '@/lib/model-providers';
+import { resolveProviderApiKey } from '@/lib/provider-key-detection';
 import type { Agent } from '@/lib/types';
 
 /** Balance at or below which a provider is treated as effectively out of money. */
@@ -337,6 +339,49 @@ export interface ScoreRouteInput {
   /** Injected for tests; defaults to the agent's own openclaw.json entry. */
   candidateModels?: string[];
   nowMs?: number;
+  /** Injected for tests; defaults to placementBlocker() on this box's config. */
+  placeable?: (modelId: string) => boolean;
+}
+
+// A placement the gateway refused (most often: the model is not in
+// agents.defaults.modelPolicy.allow) is not retried for this long. Without it
+// the intake sweep re-picked the same refused fallback every 2 minutes, forever.
+const PLACEMENT_REFUSED_COOLDOWN_MS = 30 * 60_000;
+const placementRefusedUntil = new Map<string, number>();
+
+export function coolRefusedPlacement(modelId: string, nowMs = Date.now()): void {
+  placementRefusedUntil.set(modelId, nowMs + PLACEMENT_REFUSED_COOLDOWN_MS);
+}
+
+export function __resetPlacementCooldownsForTests(): void {
+  placementRefusedUntil.clear();
+}
+
+/**
+ * Why this box cannot place a run on `modelId` as an overflow target, or null.
+ * An agent's declared fallbacks are not proof the box can run them: a fallback
+ * outside modelPolicy.allow is refused by the gateway, and one whose provider
+ * has no configuration or key has no capacity at all (its "default pool" is a
+ * guess). An unreadable config says nothing, so it blocks nothing.
+ */
+export function placementBlocker(
+  modelId: string,
+  cfg: unknown = readOpenClawConfig(),
+  nowMs = Date.now(),
+): string | null {
+  if ((placementRefusedUntil.get(modelId) ?? 0) > nowMs) return 'refused by the gateway recently';
+  if (!cfg || typeof cfg !== 'object') return null;
+  const c = cfg as { agents?: { defaults?: { modelPolicy?: { allow?: unknown } } }; models?: { providers?: Record<string, unknown> } };
+  const allow = c.agents?.defaults?.modelPolicy?.allow;
+  if (Array.isArray(allow) && allow.length > 0 && !allow.includes(modelId)) return 'not in modelPolicy.allow';
+  const provider = providerOf(modelId);
+  if (c.models?.providers && Object.prototype.hasOwnProperty.call(c.models.providers, provider)) return null;
+  const known = getProvider(provider);
+  if (known) {
+    const key = resolveProviderApiKey(known);
+    if (!('localEndpoint' in key) && !key.found) return 'provider not configured on this box';
+  }
+  return null;
 }
 
 /**
@@ -377,7 +422,12 @@ export function scoreRoute(input: ScoreRouteInput): RouteDecision {
   // `recommended` is a separate question — the best FIT — and the two differ
   // whenever config order and quality order disagree. Reporting the second as
   // the first would put a model on the card that nothing is going to run.
-  const overflowTo = candidates.slice(1).find((c) => !isBlocked(c)) ?? null;
+  let placeable = input.placeable;
+  if (!placeable) {
+    const cfg = readOpenClawConfig();
+    placeable = (m) => placementBlocker(m, cfg, nowMs) === null;
+  }
+  const overflowTo = candidates.slice(1).find((c) => !isBlocked(c) && placeable!(c.modelId)) ?? null;
   const allBlocked = candidates.length > 0 && candidates.every(isBlocked);
   const askWorthy = !!(preferred && isBlocked(preferred));
 

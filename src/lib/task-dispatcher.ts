@@ -59,7 +59,7 @@ import { broadcast } from '@/lib/events';
 import { notifySystem } from '@/lib/notify';
 import { getMissionControlUrl } from '@/lib/config';
 import { resolveAndLog, resolveSpecialistType } from '@/lib/intelligence-resolver';
-import { scoreRoute, recordRoutingReason, isBlocked, type RouteDecision } from '@/lib/capacity/route-scorer';
+import { scoreRoute, recordRoutingReason, isBlocked, coolRefusedPlacement, type RouteDecision } from '@/lib/capacity/route-scorer';
 import { providerLabel, providerOf } from '@/lib/capacity/provider-pools';
 import { evaluateAskGate, holdForProviderChoice } from '@/lib/capacity/ask-at-capacity';
 import { sendProviderChoiceAsk } from '@/lib/jobs/trust-engine';
@@ -2179,6 +2179,7 @@ If you need help or clarification, ask the orchestrator.`;
           `[${context}] placement refused for task ${task.id} on ${wantPlacement}: ${(placeErr as Error).message}`,
         );
         recordPlacementRefused(task.id, agent.id, wantPlacement, (placeErr as Error).message, context);
+        coolRefusedPlacement(wantPlacement);
       }
     }
 
