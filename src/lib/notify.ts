@@ -1210,11 +1210,13 @@ export function notifySystem(
   // SAFETY-03: this rung now passes through DEDUP + a TOKEN BUCKET. It previously
   // had neither, so a retry loop or a sweep job could fire an unbounded number of
   // real DMs at the operator's phone.
-  // On a CLIENT box the operator never opened a chat with the client's bot, so
-  // a Telegram send to him fails ("chat not found": 364 dropped alerts on one
-  // box). There, the operator lane is the operator alert webhook the fleet roll
-  // uses; Telegram to the operator is only for his own box.
-  const alert = operatorIsOwnerBox() ? null : operatorAlertTarget();
+  // The operator never opened a chat with a client's bot, so a Telegram send to
+  // him fails ("chat not found": 364 dropped alerts on one box). Wherever the
+  // operator alert webhook the fleet roll uses is configured, it is the operator
+  // lane -- including a box whose owner is another operator: that box's
+  // Telegram would reach its owner, not the fleet operator. Telegram to the
+  // operator is only for a box with no webhook at all.
+  const alert = operatorAlertTarget();
   if (alert) {
     const kind = meta?.action ?? 'system_alert';
     const verdict = admitOperatorSend(kind, message);

@@ -178,3 +178,24 @@ test('no tracked pm2 config marks a box operator-owned (it ships to client boxes
     assert.doesNotMatch(src, /^\s*CC_OPERATOR_IS_OWNER\s*:/m, `${f} sets CC_OPERATOR_IS_OWNER`);
   }
 });
+
+test('operator-owned box with the operator alert webhook: SYSTEM alerts go to the webhook, not the box owner', async () => {
+  cleanEnv();
+  const ws = makeBox({
+    channels: { telegram: { allowFrom: ['6663821679', OPERATOR_ID] } },
+    env: { vars: { OPENCLAW_OWNER_CHAT_ID: '6663821679',
+      FLEET_STANDING_GATE_URL: 'https://n8n.example.test/webhook/fleet-standing-check',
+      FLEET_STANDING_GATE_SECRET: 'test-secret' } },
+  });
+  fs.writeFileSync(path.join(path.dirname(ws), '.operator-is-owner'), 'operator-owned\n');
+  const notify = await freshNotify();
+  const cap = capture(notify);
+  try {
+    assert.equal(notify.notifySystem('[DISPATCH] placement refused'), true);
+    assert.deepEqual(cap.sends, [], "no Telegram through the box's own bot (it would reach the box owner)");
+    assert.equal(cap.posts.length, 1);
+    assert.equal(cap.posts[0].url, 'https://n8n.example.test/webhook/fleet-standing-alert');
+  } finally {
+    cap.restore();
+  }
+});
