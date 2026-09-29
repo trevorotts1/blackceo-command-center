@@ -281,11 +281,16 @@ function normalizeChatId(v: unknown): string {
   return s;
 }
 
-/** Normalise + validate a candidate chat id; '' when invalid or an operator id. */
-function validOwnerChatId(v: unknown): string {
+/**
+ * Normalise + validate a candidate chat id; '' when invalid or an operator id.
+ * `operatorOwnedBox`: on a box whose owner IS an operator (operatorIsOwnerBox()),
+ * that operator's own recorded id is the owner; everywhere else an operator id
+ * is never an owner.
+ */
+function validOwnerChatId(v: unknown, operatorOwnedBox = false): string {
   const s = normalizeChatId(v);
   if (!s) return '';
-  if (OPERATOR_CHAT_IDS.has(s)) return ''; // client-protection guardrail — UNCHANGED
+  if (OPERATOR_CHAT_IDS.has(s) && !operatorOwnedBox) return ''; // client-protection guardrail
   return s;
 }
 
@@ -380,8 +385,9 @@ export function resolveOwnerChatId(): string | null {
     () => readDotenvVar(path.join(root, 'secrets', '.env'), key),
     () => readBuildState().ownerChat,
   ];
+  const operatorOwnedBox = operatorIsOwnerBox();
   for (const source of sources) {
-    const id = validOwnerChatId(source() ?? '');
+    const id = validOwnerChatId(source() ?? '', operatorOwnedBox);
     if (id) return id;
   }
   return null;

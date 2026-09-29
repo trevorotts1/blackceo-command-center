@@ -1,3 +1,9 @@
+## [v7.6.80] — 2026-09-29 — An operator's own box notifies its owner; the tracked pm2 template no longer marks client boxes operator-owned
+
+- fix(notify): on a box whose owner IS an operator (marked by `~/.openclaw/.operator-is-owner` or `CC_OPERATOR_IS_OWNER=1`), `resolveOwnerChatId()` accepts that owner's own explicit record (`OPENCLAW_OWNER_CHAT_ID` or the build state's `ownerChat`) even though it is an operator id. v7.6.77 rejected operator ids at every source, so such a box messaged nobody and sent the fleet operator "undeliverable" digests. On every other box an operator id still never resolves as the owner.
+- fix(pm2): `ecosystem.cc-prod.config.cjs` no longer hardcodes `CC_OPERATOR_IS_OWNER: '1'`. The file is tracked, so every client checkout carried it; the operator's own box is marked by the `~/.openclaw/.operator-is-owner` file instead.
+- test: `notify-owner-guards.test.ts` adds the marker case, the env-flag case, the client-box control, and a check that no tracked `ecosystem*.cjs` sets the flag (3 fail on the old code).
+
 ## [v7.6.79] — 2026-09-29 — A container's watchdog is scheduled from the host and seen from inside
 
 A container has no crontab and no cron daemon, so the deploy's watchdog install always failed there ("Box watchdog schedule NOT installed"), and the working fix on three client containers was a hand-written block in the host's crontab.
