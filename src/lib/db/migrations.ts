@@ -8058,6 +8058,98 @@ export const migrations: Migration[] = [
       // its head agent — not duplicated here.
     },
   },
+  // ── Migration 167 — JGT-202: retro-file agents mis-filed into General Task
+  // before agent-sync's id-based resolver existed. ───────────────────────────
+  {
+    id: '167',
+    name: 'refile_misfiled_general_task_agents',
+    // v7.6.88 shipped agent-sync.ts's resolveAgentDeptWorkspace (JGT-107):
+    // an agent whose OWN id encodes a real department — /^dept-(.+)$/ or
+    // /^head-agent-(.+)$/, normalized through canonicalDeptSlug() — is filed
+    // there instead of falling for a bare name-keyword guess (the MR-14
+    // regression that put 'General Counsel' in General Task). That release's
+    // own notes admit the gap this migration closes: "Existing mis-filed rows
+    // are not moved (the agents UPSERT does not update workspace_id)."
+    //
+    // This applies the SAME id-prefix + canonicalDeptSlug() rule agent-sync.ts
+    // now uses, once, to rows already sitting in a general-task workspace —
+    // but deliberately NARROWER than the live resolver in two ways a one-time
+    // data move demands that a fresh-insert guess doesn't:
+    //   1. No name-keyword fallback. A name guess is grounds to PLACE a brand
+    //      new row, never to MOVE one that's already live somewhere.
+    //   2. The target workspace must be LIVE (archived_at IS NULL) and in the
+    //      SAME company_id as the agent's current general-task workspace.
+    //      Crossing a company boundary, or landing on an archived/declined
+    //      department, would be a worse landmine than the one being fixed.
+    up: (db) => {
+      const agentCols = new Set(
+        (db.prepare('PRAGMA table_info(agents)').all() as { name: string }[]).map((c) => c.name),
+      );
+      if (!agentCols.has('workspace_id')) {
+        console.log('[Migration 167] agents.workspace_id absent — nothing to refile');
+        return;
+      }
+
+      // Every LIVE general-task workspace — one per company on a multi-tenant
+      // box (mirrors migration 166's own identity match: id or the
+      // general-task / dept-general-task slug aliases).
+      const generalTaskWorkspaces = db
+        .prepare(
+          `SELECT id, company_id FROM workspaces
+            WHERE archived_at IS NULL
+              AND (lower(id) = 'general-task' OR lower(slug) IN ('general-task', 'dept-general-task'))`,
+        )
+        .all() as { id: string; company_id: string }[];
+      if (generalTaskWorkspaces.length === 0) {
+        console.log('[Migration 167] no live general-task workspace — nothing to refile');
+        return;
+      }
+
+      const findLiveTarget = db.prepare(
+        `SELECT id FROM workspaces
+          WHERE archived_at IS NULL AND company_id = ?
+            AND id <> 'default' AND lower(slug) <> 'default'
+            AND (lower(slug) = ? OR lower(id) = ?)
+          LIMIT 1`,
+      );
+      const moveAgent = db.prepare(
+        `UPDATE agents SET workspace_id = ?, updated_at = ? WHERE id = ? AND workspace_id = ?`,
+      );
+
+      let moved = 0;
+      const now = new Date().toISOString();
+
+      for (const ws of generalTaskWorkspaces) {
+        // is_master guard mirrors agent-sync.ts's own invariant: never touch
+        // the master Orchestrator row. (A master sitting in general-task
+        // should never happen, but this is a data-moving migration — the
+        // guard costs nothing and forecloses the possibility outright.)
+        const agents = db
+          .prepare(`SELECT id, name FROM agents WHERE workspace_id = ? AND (is_master IS NULL OR is_master = 0)`)
+          .all(ws.id) as { id: string; name: string }[];
+
+        for (const agent of agents) {
+          const idMatch = agent.id.match(/^dept-(.+)$/) || agent.id.match(/^head-agent-(.+)$/);
+          if (!idMatch) continue; // no id-encoded department — a name alone never moves an existing row
+          const slug = canonicalDeptSlug(idMatch[1]).toLowerCase();
+          if (!slug || slug === 'general-task' || slug === 'dept-general-task') continue; // genuinely General Task (e.g. its own head agent)
+
+          const target = findLiveTarget.get(ws.company_id, slug, slug) as { id: string } | undefined;
+          if (!target || target.id === ws.id) continue; // no live same-company home to move to
+
+          const result = moveAgent.run(target.id, now, agent.id, ws.id);
+          if (result.changes > 0) {
+            moved++;
+            console.log(
+              `[Migration 167] Refiled agent "${agent.name}" (${agent.id}) out of General Task (${ws.id}) into "${slug}" (${target.id})`,
+            );
+          }
+        }
+      }
+
+      console.log(`[Migration 167] Refiled ${moved} mis-filed agent(s) out of General Task`);
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner
