@@ -21,6 +21,16 @@
 #       every foreign crontab line survives byte for byte.
 #   I7  Linux: --check reports it and exits 0; --uninstall removes ONLY the
 #       block and leaves the foreign lines exactly as they were.
+#   D1  Docker host (--container): the HOST crontab gets one block for that
+#       container that runs the container's own watchdog-cc.sh through
+#       `docker exec -u node` with PM2_HOME, self-heal and the port, logging to
+#       the host side of the container's openclaw volume.
+#   D2  A block written by hand for the same container is replaced, not
+#       duplicated; another container's block and foreign lines survive.
+#   D3  --check --container reports it; --uninstall --container removes only it.
+#   C1  Inside a container with no crontab: --check and install fail with the
+#       host command when the watchdog has not ticked in 15 minutes, and pass
+#       once watchdog-cc.sh has stamped its heartbeat (a stale one fails).
 #
 # Fixture-only: HOME points at a temp dir and `launchctl` and `crontab` are
 # fakes on PATH that record what they were asked to do. Nothing on this machine
@@ -244,6 +254,102 @@ else
 fi
 bash "$INSTALLER" --check >/dev/null 2>&1
 [[ $? -eq 1 ]] && ok "I7: --check confirms the block is gone" || bad "I7: --check still reports it installed"
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Docker host branch (--container), e.g. a Contabo host running client containers
+# ═══════════════════════════════════════════════════════════════════════════
+unset WATCHDOG_INSTALL_PLATFORM
+# fake docker: `exec ... test -f` succeeds for running containers; `inspect`
+# prints the host side of the openclaw volume.
+cat > "$WORK/bin/docker" <<'FAKEDOCKER'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${DOCKER_CALL_LOG:-/dev/null}"
+case "${1:-}" in
+  exec)    [[ " $* " == *" oc-stopped "* ]] && exit 1; exit 0 ;;
+  inspect) printf '%s\n' "${FAKE_VOLUME_SRC:-}"; exit 0 ;;
+esac
+exit 0
+FAKEDOCKER
+chmod +x "$WORK/bin/docker"
+export DOCKER_CALL_LOG="$WORK/docker-calls.log" FAKE_VOLUME_SRC="$WORK/opt/clients/alpha/data/config"
+
+cat > "$FAKE_CRONTAB_FILE" <<'HOSTTAB'
+*/30 * * * * docker exec -u node oc-alpha bash /home/node/.openclaw/ghl-keepalive.sh
+# BEGIN blackceo watchdog-cc oc-alpha (mirrors command-center scripts/install-watchdog-cc.sh; docker exec wrapper for Contabo)
+*/5 * * * * docker exec -u node -e WATCHDOG_PORT=4000 oc-alpha bash /home/node/.openclaw/command-center/scripts/watchdog-cc.sh >> /tmp/old.log 2>&1
+# END blackceo watchdog-cc oc-alpha
+# BEGIN blackceo watchdog-cc oc-alphabet (mirrors command-center scripts/install-watchdog-cc.sh; docker exec wrapper for Contabo)
+*/5 * * * * docker exec -u node oc-alphabet bash /home/node/.openclaw/command-center/scripts/watchdog-cc.sh >> /tmp/b.log 2>&1
+# END blackceo watchdog-cc oc-alphabet
+HOSTTAB
+
+echo "[D1] --container installs one host block that runs the container's watchdog"
+bash "$INSTALLER" --container oc-alpha >"$WORK/d1.out" 2>&1
+RC=$?
+[[ $RC -eq 0 ]] && ok "D1: installer exits 0" || bad "D1: installer exited $RC: $(cat "$WORK/d1.out")"
+LINE="$(grep '^\*/5 .* oc-alpha bash' "$FAKE_CRONTAB_FILE")"
+[[ "$LINE" == *"docker exec -u node "* ]] && ok "D1: runs through docker exec -u node" || bad "D1: no docker exec -u node: $LINE"
+[[ "$LINE" == *"-e PM2_HOME=/home/node/.openclaw/.pm2"* ]] && ok "D1: PM2_HOME is the persistent one" || bad "D1: PM2_HOME missing: $LINE"
+[[ "$LINE" == *"-e WATCHDOG_SELF_HEAL=1"* && "$LINE" == *"-e WATCHDOG_PORT=4000"* ]] \
+  && ok "D1: self-heal on, container port 4000" || bad "D1: self-heal/port missing: $LINE"
+[[ "$LINE" == *"-e WATCHDOG_SCHEDULED_BY=host-cron:oc-alpha"* ]] && ok "D1: the tick names its scheduler" || bad "D1: no WATCHDOG_SCHEDULED_BY: $LINE"
+[[ "$LINE" == *" oc-alpha bash /home/node/.openclaw/command-center/scripts/watchdog-cc.sh >> $FAKE_VOLUME_SRC/logs/watchdog-cc.log 2>&1" ]] \
+  && ok "D1: the container's own script, logged to the volume's host side" || bad "D1: wrong script or log: $LINE"
+grep -q "exec -u node oc-alpha test -f /home/node/.openclaw/command-center/scripts/watchdog-cc.sh" "$DOCKER_CALL_LOG" \
+  && ok "D1: it checked the script exists in the container first" || bad "D1: never checked the container's script"
+
+echo "[D2] the hand-written block for oc-alpha is replaced; oc-alphabet and foreign lines survive"
+[[ "$(grep -c '^# BEGIN blackceo watchdog-cc oc-alpha ' "$FAKE_CRONTAB_FILE")" == "1" ]] \
+  && ok "D2: one oc-alpha block" || bad "D2: oc-alpha blocks: $(grep -c '^# BEGIN blackceo watchdog-cc oc-alpha ' "$FAKE_CRONTAB_FILE")"
+grep -q '/tmp/old.log' "$FAKE_CRONTAB_FILE" && bad "D2: the hand-written oc-alpha line is still there" || ok "D2: the hand-written oc-alpha line is gone"
+grep -q 'oc-alphabet bash .*>> /tmp/b.log' "$FAKE_CRONTAB_FILE" && ok "D2: oc-alphabet's block is untouched" || bad "D2: lost oc-alphabet's block"
+grep -qF '*/30 * * * * docker exec -u node oc-alpha bash /home/node/.openclaw/ghl-keepalive.sh' "$FAKE_CRONTAB_FILE" \
+  && ok "D2: the foreign keepalive line survives" || bad "D2: lost the foreign line"
+bash "$INSTALLER" --container oc-alpha >/dev/null 2>&1
+[[ "$(grep -c 'oc-alpha bash /home/node/.openclaw/command-center' "$FAKE_CRONTAB_FILE")" == "1" ]] \
+  && ok "D2: a re-run still leaves one oc-alpha line" || bad "D2: re-run duplicated the line"
+bash "$INSTALLER" --container oc-stopped >"$WORK/d2.out" 2>&1
+[[ $? -eq 1 ]] && grep -q 'oc-stopped' "$WORK/d2.out" && ! grep -q 'watchdog-cc oc-stopped' "$FAKE_CRONTAB_FILE" \
+  && ok "D2: a container without the script gets no block and a non-zero exit" || bad "D2: scheduled a container it could not verify"
+
+echo "[D3] --check / --uninstall --container act on that container only"
+bash "$INSTALLER" --container oc-alpha --check >"$WORK/d3.out" 2>&1
+[[ $? -eq 0 ]] && grep -q 'container oc-alpha' "$WORK/d3.out" && ok "D3: --check finds it" || bad "D3: --check: $(cat "$WORK/d3.out")"
+bash "$INSTALLER" --container oc-alpha --uninstall >/dev/null 2>&1
+grep -q 'watchdog-cc oc-alpha ' "$FAKE_CRONTAB_FILE" && bad "D3: oc-alpha block still there" || ok "D3: oc-alpha block removed"
+grep -q 'watchdog-cc oc-alphabet' "$FAKE_CRONTAB_FILE" && ok "D3: oc-alphabet's block survives the uninstall" || bad "D3: uninstall took oc-alphabet too"
+bash "$INSTALLER" --container oc-alpha --check >/dev/null 2>&1
+[[ $? -eq 1 ]] && ok "D3: --check confirms it is gone" || bad "D3: --check still reports oc-alpha"
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Inside a container: no crontab at all
+# ═══════════════════════════════════════════════════════════════════════════
+echo "[C1] no crontab in the container: the watchdog's own heartbeat decides"
+mkdir -p "$WORK/ctbin"
+for t in awk find cut sed dirname grep tr uname mkdir cat rm date python3; do
+  src="$(command -v "$t" 2>/dev/null)" && ln -sf "$src" "$WORK/ctbin/$t"
+done
+export WATCHDOG_STATE_DIR="$WORK/cc-state"
+ct() { PATH="$WORK/ctbin" "$BASH" "$INSTALLER" "$@"; }
+WATCHDOG_INSTALL_PLATFORM=linux ct --check >"$WORK/c1a.out" 2>&1
+RC=$?
+[[ $RC -eq 1 ]] && grep -q 'NOT INSTALLED' "$WORK/c1a.out" && grep -q 'bash -s -- --container' "$WORK/c1a.out" \
+  && ok "C1: with no tick, --check fails and prints the host command" || bad "C1: control: rc=$RC $(cat "$WORK/c1a.out")"
+WATCHDOG_INSTALL_PLATFORM=linux ct --port 4000 >/dev/null 2>&1
+[[ $? -eq 1 ]] && ok "C1: with no tick, install fails too (atomic-deploy warns)" || bad "C1: install claimed success with no scheduler"
+# A real tick of the real watchdog stamps the heartbeat (a dead port: it only has to run).
+WATCHDOG_PORT=1 WATCHDOG_SELF_HEAL=0 WATCHDOG_ALERT_LOG="$WORK/alerts.log" WATCHDOG_SCHEDULED_BY=host-cron:oc-alpha \
+  bash "$REPO_ROOT/scripts/watchdog-cc.sh" >/dev/null 2>&1
+grep -q 'host-cron:oc-alpha' "$WATCHDOG_STATE_DIR/watchdog-last-run" 2>/dev/null \
+  && ok "C1: watchdog-cc.sh stamps its heartbeat with its scheduler" || bad "C1: no heartbeat after a watchdog tick"
+WATCHDOG_INSTALL_PLATFORM=linux ct --check >"$WORK/c1b.out" 2>&1
+[[ $? -eq 0 ]] && grep -q 'host-cron:oc-alpha' "$WORK/c1b.out" && ok "C1: a fresh tick makes --check pass" || bad "C1: --check: $(cat "$WORK/c1b.out")"
+WATCHDOG_INSTALL_PLATFORM=linux ct --port 4000 >/dev/null 2>&1
+[[ $? -eq 0 ]] && ok "C1: and install passes (atomic-deploy says scheduled)" || bad "C1: install failed with a fresh tick"
+touch -t 202001010000 "$WATCHDOG_STATE_DIR/watchdog-last-run"
+WATCHDOG_INSTALL_PLATFORM=linux ct --check >/dev/null 2>&1
+[[ $? -eq 1 ]] && ok "C1: a stale tick fails again" || bad "C1: a 2020 heartbeat counted as scheduled"
+unset WATCHDOG_STATE_DIR
 
 echo ""
 printf '[install-watchdog-cc] %s passed, %s failed\n' "$PASS" "$FAIL"

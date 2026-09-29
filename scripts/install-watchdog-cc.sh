@@ -21,6 +21,18 @@
 #           StartInterval 300, logs to ~/Library/Logs/openclaw/watchdog-cc.log
 #   Linux   a crontab block, */5, guarded by BEGIN/END marker comments, logging
 #           to ~/.openclaw/logs/watchdog-cc.log
+#   Docker  (--container NAME, run on the HOST as root) a crontab block in the
+#           host's crontab, one per container, that runs the container's own
+#           watchdog-cc.sh through `docker exec -u node`. A Contabo container
+#           has no crontab and no cron daemon, and running the plain Linux mode
+#           on the host would watch the host's port 4000, outside the container
+#           where pm2 lives. The host needs no checkout:
+#             docker exec NAME cat /home/node/.openclaw/command-center/scripts/install-watchdog-cc.sh \
+#               | bash -s -- --container NAME
+#
+# Inside a container with no crontab, install and --check succeed when
+# watchdog-cc.sh has ticked in the last 15 minutes (its heartbeat,
+# .cc-state/watchdog-last-run): the host schedules it, and nothing here can.
 #
 # Both carry WATCHDOG_SELF_HEAL=1 so the repairs watchdog-cc.sh already bounds
 # are switched on. This script NEVER changes watchdog-cc.sh's repair logic; it
@@ -30,6 +42,7 @@
 #   bash scripts/install-watchdog-cc.sh [--port 4000] [--pm2-app NAME]
 #   bash scripts/install-watchdog-cc.sh --check      # report, write nothing
 #   bash scripts/install-watchdog-cc.sh --uninstall  # remove ONLY what this wrote
+#   bash install-watchdog-cc.sh --container NAME [--container-home DIR] [--log FILE] [--check|--uninstall]
 #
 # EXIT CODES
 #   0  installed / already installed correctly / --check found it / uninstalled
@@ -57,7 +70,10 @@ INTERVAL_SECONDS=300
 
 # The crontab block is delimited so a re-run replaces exactly these lines and
 # nothing else. Anything outside the markers is copied through untouched.
-MARKER_BEGIN="# BEGIN blackceo watchdog-cc (managed by scripts/install-watchdog-cc.sh — do not edit)"
+# --container adds the container name, so each container on a host has its own
+# block; a block written by hand with the same "# BEGIN ... <name> (" prefix is
+# replaced, never duplicated.
+MARKER_KEY="# BEGIN blackceo watchdog-cc"
 MARKER_END="# END blackceo watchdog-cc"
 
 PORT="4000"
@@ -65,6 +81,9 @@ PM2_APP=""
 PUBLIC_URL=""
 APP_DIR=""
 MODE="install"
+CONTAINER=""
+CONTAINER_HOME="/home/node/.openclaw"
+HOST_LOG=""
 
 _log()  { printf '[install-watchdog-cc] %s\n' "$*" >&2; }
 _ok()   { printf '[install-watchdog-cc OK] %s\n' "$*" >&2; }
@@ -77,6 +96,9 @@ while [[ $# -gt 0 ]]; do
     --pm2-app)   PM2_APP="${2:?--pm2-app requires a value}"; shift 2 ;;
     --public-url) PUBLIC_URL="${2:?--public-url requires a value}"; shift 2 ;;
     --app-dir)   APP_DIR="${2:?--app-dir requires a value}"; shift 2 ;;
+    --container) CONTAINER="${2:?--container requires a value}"; shift 2 ;;
+    --container-home) CONTAINER_HOME="${2:?--container-home requires a value}"; shift 2 ;;
+    --log)       HOST_LOG="${2:?--log requires a value}"; shift 2 ;;
     --check)     MODE="check"; shift ;;
     --uninstall) MODE="uninstall"; shift ;;
     -h|--help)   sed -n '2,40p' "${BASH_SOURCE[0]}"; exit 0 ;;
@@ -87,7 +109,16 @@ done
 # CC_PUBLIC_URL: without it cc-health-check.sh reports row 27 UNKNOWN and the
 # watchdog never acts (measured on the operator Mac 2026-09-17). Take it from
 # --public-url, else from the app's own env file under --app-dir. Never printed.
-if [[ -z "$PUBLIC_URL" && -n "$APP_DIR" ]]; then
+if [[ -n "$CONTAINER" ]]; then
+  MARKER_KEY="${MARKER_KEY} ${CONTAINER}"
+  MARKER_END="${MARKER_END} ${CONTAINER}"
+fi
+MARKER_BEGIN="${MARKER_KEY} (managed by scripts/install-watchdog-cc.sh — do not edit)"
+
+# watchdog-cc.sh stamps this on every tick (WATCHDOG_STATE_DIR is its own knob).
+HEARTBEAT="${WATCHDOG_STATE_DIR:-${APP_DIR:-$(cd "${SCRIPT_DIR}/.." && pwd)}/.cc-state}/watchdog-last-run"
+
+if [[ -z "$PUBLIC_URL" && -n "$APP_DIR" && -z "$CONTAINER" ]]; then
   for _envf in "${APP_DIR}/.env.local" "${APP_DIR}/.env"; do
     if [[ -f "$_envf" ]]; then
       PUBLIC_URL="$(grep -E '^CC_PUBLIC_URL=' "$_envf" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"'"'"' ' || true)"
@@ -98,13 +129,15 @@ if [[ -z "$PUBLIC_URL" && -n "$APP_DIR" ]]; then
 fi
 
 PLATFORM="${WATCHDOG_INSTALL_PLATFORM:-$(uname -s)}"
+[[ -n "$CONTAINER" ]] && PLATFORM="docker"
 case "$PLATFORM" in
+  docker) ;;
   [Dd]arwin) PLATFORM="darwin" ;;
   [Ll]inux)  PLATFORM="linux" ;;
   *) _err "unsupported platform '${PLATFORM}' — install a */5 schedule for ${WATCHDOG_SCRIPT} by hand."; exit 2 ;;
 esac
 
-if [[ "$MODE" != "uninstall" && ! -f "$WATCHDOG_SCRIPT" ]]; then
+if [[ "$MODE" != "uninstall" && -z "$CONTAINER" && ! -f "$WATCHDOG_SCRIPT" ]]; then
   _err "watchdog-cc.sh not found at ${WATCHDOG_SCRIPT} — nothing to schedule."
   exit 1
 fi
@@ -261,11 +294,34 @@ _read_crontab() { crontab -l 2>/dev/null || true; }
 
 # Everything EXCEPT this script's block, byte for byte.
 _strip_block() {
-  awk -v b="$MARKER_BEGIN" -v e="$MARKER_END" '
-    $0 == b { skip = 1; next }
-    $0 == e { skip = 0; next }
+  awk -v k="$MARKER_KEY" -v e="$MARKER_END" '
+    $0 == k || index($0, k " (") == 1 { skip = 1; next }
+    skip == 1 && $0 == e { skip = 0; next }
     skip != 1 { print }
   '
+}
+
+# This script's block alone, without its markers.
+_block_lines() {
+  awk -v k="$MARKER_KEY" -v e="$MARKER_END" '
+    $0 == k || index($0, k " (") == 1 { inside = 1; next }
+    inside == 1 && $0 == e { inside = 0; next }
+    inside == 1 { print }
+  '
+}
+
+_has_block() { _read_crontab | awk -v k="$MARKER_KEY" '$0 == k || index($0, k " (") == 1 { f = 1 } END { exit !f }'; }
+
+# In a container with no crontab, the host schedules the watchdog: proof is a
+# tick in the last 15 minutes (three */5 slots).
+_host_scheduled() {
+  if [[ -f "$HEARTBEAT" ]] && [[ -n "$(find "$HEARTBEAT" -mmin -15 2>/dev/null)" ]]; then
+    _ok "INSTALLED: scheduled outside this container — watchdog-cc.sh last ran $(cut -c1-200 "$HEARTBEAT" 2>/dev/null)"
+    return 0
+  fi
+  _log "NOT INSTALLED: no crontab in this container and no watchdog tick in the last 15 minutes (${HEARTBEAT})."
+  _log "  Schedule it from the host, as root: docker exec <container> cat ${SCRIPT_DIR}/install-watchdog-cc.sh | bash -s -- --container <container>"
+  return 1
 }
 
 _write_crontab() {  # reads the full desired crontab on stdin
@@ -278,6 +334,7 @@ _write_crontab() {  # reads the full desired crontab on stdin
 }
 
 _linux_install() {
+  command -v crontab >/dev/null 2>&1 || { _host_scheduled; return; }
   mkdir -p "$LINUX_LOG_DIR" 2>/dev/null || true
   local kept; kept="$(_read_crontab | _strip_block)"
   local desired
@@ -294,24 +351,20 @@ _linux_install() {
 }
 
 _linux_check() {
-  local current; current="$(_read_crontab)"
-  if ! printf '%s\n' "$current" | grep -qF "$MARKER_BEGIN"; then
+  command -v crontab >/dev/null 2>&1 || { _host_scheduled; return; }
+  if ! _has_block; then
     _log "NOT INSTALLED: no watchdog-cc block in this user's crontab"
     return 1
   fi
-  _ok "INSTALLED: crontab block for ${LABEL}"
-  printf '%s\n' "$current" | awk -v b="$MARKER_BEGIN" -v e="$MARKER_END" '
-    $0 == b { inside = 1; next }
-    $0 == e { inside = 0; next }
-    inside == 1 { print "[install-watchdog-cc]   " $0 }
-  ' >&2
-  _log "  log: ${LINUX_LOG}"
+  _ok "INSTALLED: crontab block for ${LABEL}${CONTAINER:+ (container ${CONTAINER})}"
+  _read_crontab | _block_lines | sed 's/^/[install-watchdog-cc]   /' >&2
+  [[ -z "$CONTAINER" ]] && _log "  log: ${LINUX_LOG}"
   return 0
 }
 
 _linux_uninstall() {
   local current; current="$(_read_crontab)"
-  if ! printf '%s\n' "$current" | grep -qF "$MARKER_BEGIN"; then
+  if ! _has_block; then
     _log "nothing to remove: no watchdog-cc block in this user's crontab"
     return 0
   fi
@@ -324,9 +377,54 @@ _linux_uninstall() {
 }
 
 ###############################################################################
+# Docker host — one crontab block per container, run through docker exec
+###############################################################################
+_docker_cron_line() {
+  local envs="-e PATH=${CONTAINER_HOME}/npm-global/bin:${CONTAINER_HOME}/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+  envs="${envs} -e PM2_HOME=${CONTAINER_HOME}/.pm2 -e WATCHDOG_SELF_HEAL=1 -e WATCHDOG_PORT=${PORT}"
+  envs="${envs} -e WATCHDOG_SCHEDULED_BY=host-cron:${CONTAINER}"
+  [[ -n "$PM2_APP" ]] && envs="${envs} -e WATCHDOG_CC_APP_NAMES=${PM2_APP}"
+  printf '*/5 * * * * docker exec -u node %s %s bash %s >> %s 2>&1' \
+    "$envs" "$CONTAINER" "${APP_DIR:-${CONTAINER_HOME}/command-center}/scripts/watchdog-cc.sh" "$HOST_LOG"
+}
+
+_docker_install() {
+  command -v docker >/dev/null 2>&1 || { _err "--container needs docker on this host"; return 1; }
+  command -v crontab >/dev/null 2>&1 || { _err "--container needs crontab on this host"; return 1; }
+  local script="${APP_DIR:-${CONTAINER_HOME}/command-center}/scripts/watchdog-cc.sh"
+  if ! docker exec -u node "$CONTAINER" test -f "$script" >/dev/null 2>&1; then
+    _err "container ${CONTAINER}: no ${script} (is the container running, and is the Command Center installed there?)"
+    return 1
+  fi
+  if [[ -z "$HOST_LOG" ]]; then
+    # The host side of the container's openclaw volume, so the log is readable
+    # from inside the container too; /var/log when that volume is not a mount.
+    local src
+    src="$(docker inspect -f "{{range .Mounts}}{{if eq .Destination \"${CONTAINER_HOME}\"}}{{.Source}}{{end}}{{end}}" "$CONTAINER" 2>/dev/null)"
+    HOST_LOG="${src:+${src}/logs/watchdog-cc.log}"
+    HOST_LOG="${HOST_LOG:-/var/log/watchdog-cc.${CONTAINER}.log}"
+  fi
+  mkdir -p "$(dirname "$HOST_LOG")" 2>/dev/null || true
+  local kept; kept="$(_read_crontab | _strip_block)"
+  local desired
+  desired="$(printf '%s\n%s\n%s\n%s' "$kept" "$MARKER_BEGIN" "$(_docker_cron_line)" "$MARKER_END")"
+  desired="$(printf '%s\n' "$desired" | awk 'NR==1 && $0=="" {next} {print}')"
+  if printf '%s' "$desired" | _write_crontab; then
+    _ok "installed the host crontab block for container ${CONTAINER}: */5 docker exec ... ${script} (WATCHDOG_SELF_HEAL=1, WATCHDOG_PORT=${PORT})"
+    _log "log: ${HOST_LOG}"
+    return 0
+  fi
+  _err "crontab write failed — install the schedule by hand: $(_docker_cron_line)"
+  return 1
+}
+
+###############################################################################
 # Dispatch
 ###############################################################################
 case "${PLATFORM}:${MODE}" in
+  docker:install)   _docker_install ;;
+  docker:check)     _linux_check ;;
+  docker:uninstall) _linux_uninstall ;;
   darwin:install)   _mac_install ;;
   darwin:check)     _mac_check ;;
   darwin:uninstall) _mac_uninstall ;;
