@@ -39,6 +39,7 @@
  */
 
 import { getDb } from '@/lib/db';
+import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import {
   getOpenClawClient,
   type OpenClawAgentEntry,
@@ -93,13 +94,19 @@ function isCcManagedAgentId(id: string): boolean {
   return /^(qc|research|da)-agent-/.test(id) || /^head-agent-/.test(id);
 }
 
-/** Resolve a workspace id from a department slug, falling back to the slug itself. */
-function resolveWorkspaceId(db: ReturnType<typeof getDb>, slug: string): string {
-  if (!slug) return 'default';
+/**
+ * Resolve a workspace id from a department slug. `found=false` means no real
+ * workspace row matched — `id` still falls back to the slug itself (or
+ * 'default') so a caller that doesn't check `found` keeps today's behavior,
+ * but a caller that DOES check it (the id-prefix inference below) can refuse
+ * to trust a guess.
+ */
+function resolveWorkspaceId(db: ReturnType<typeof getDb>, slug: string): { id: string; found: boolean } {
+  if (!slug) return { id: 'default', found: false };
   const row = db
     .prepare('SELECT id FROM workspaces WHERE lower(slug) = ? OR lower(id) = ? LIMIT 1')
     .get(slug.toLowerCase(), slug.toLowerCase()) as { id: string } | undefined;
-  if (row) return row.id;
+  if (row) return { id: row.id, found: true };
   // Try stripping a 'dept-' prefix (some workspaces have slug='dept-marketing',
   // but the agent's department is just 'marketing').
   if (slug.startsWith('dept-')) {
@@ -107,11 +114,39 @@ function resolveWorkspaceId(db: ReturnType<typeof getDb>, slug: string): string 
     const row2 = db
       .prepare('SELECT id FROM workspaces WHERE lower(slug) = ? LIMIT 1')
       .get(bare.toLowerCase()) as { id: string } | undefined;
-    if (row2) return row2.id;
+    if (row2) return { id: row2.id, found: true };
   }
   // Fallback: use the slug as the workspace id directly (the workspace may have
-  // been created with the slug as its literal id).
-  return slug;
+  // been created with the slug as its literal id) — NOT a confirmed match.
+  return { id: slug, found: false };
+}
+
+/**
+ * Resolve an agent's department → workspace id from its gateway id and
+ * display name. The agent's OWN id wins when it encodes a real department
+ * (dept-<slug> / head-agent-<slug>) AND that slug is a CONFIRMED workspace —
+ * never a guess. A bare keyword substring match against the display name
+ * (inferDeptFromAgentName) is only the fallback: it used to file
+ * 'General Counsel' into General Task on the strength of "general" alone
+ * (MR-14 regression) — see tests/unit/general-task-vs-default.test.ts.
+ * Exported for direct unit testing (no gateway mock needed).
+ */
+export function resolveAgentDeptWorkspace(
+  db: ReturnType<typeof getDb>,
+  agentId: string,
+  name: string,
+): { workspaceId: string; dept: string | null } {
+  const idMatch = agentId.match(/^dept-(.+)$/) || agentId.match(/^head-agent-(.+)$/);
+  const idSlug = idMatch ? canonicalDeptSlug(idMatch[1]) : null;
+  const idResolved = idSlug ? resolveWorkspaceId(db, idSlug) : null;
+  const nameDept = inferDeptFromAgentName(name);
+  const dept = idResolved?.found ? idSlug : nameDept;
+  const workspaceId = idResolved?.found
+    ? idResolved.id
+    : nameDept
+    ? resolveWorkspaceId(db, nameDept).id
+    : 'default';
+  return { workspaceId, dept };
 }
 
 /* ────────────────────────────── Core sync ──────────────────────────────────── */
@@ -255,9 +290,8 @@ export async function syncSpecialistAgentsFromOpenClaw(): Promise<SyncResult> {
         str(entry.name, '') ||
         `Agent ${agentId.length > 8 ? agentId.slice(0, 8) : agentId}`;
 
-      // Resolve department → workspace id from the agent's name.
-      const dept = inferDeptFromAgentName(name);
-      const workspaceId = dept ? resolveWorkspaceId(db, dept) : 'default';
+      // Resolve department → workspace id (see resolveAgentDeptWorkspace).
+      const { workspaceId, dept } = resolveAgentDeptWorkspace(db, agentId, name);
 
       const role = name;
       const deptForDesc = dept || 'general';
@@ -326,7 +360,10 @@ function inferDeptFromAgentName(name: string): string | null {
     'legal', 'research', 'web', 'graphics', 'video', 'audio',
     'social', 'podcast', 'presentations', 'funnels', 'communications',
     'security', 'community', 'coach', 'course', 'app', 'quality',
-    'general', 'personal', 'paid', 'openclaw',
+    // The bare word 'general' used to substring-match names like "General
+    // Counsel" straight into the General Task lane (MR-14 regression). The
+    // two-word phrase is required so only an actual General Task name matches.
+    'general task', 'personal', 'paid', 'openclaw',
   ];
   const lowered = name.toLowerCase();
   for (const kw of deptKeywords) {
@@ -343,7 +380,7 @@ function inferDeptFromAgentName(name: string): string | null {
       if (kw === 'community') return 'community-management';
       if (kw === 'coach') return 'client-coaches';
       if (kw === 'course') return 'course-creator';
-      if (kw === 'general') return 'general-task';
+      if (kw === 'general task') return 'general-task';
       return kw;
     }
   }
