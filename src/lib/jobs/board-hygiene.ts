@@ -81,6 +81,7 @@ import { checkTriad } from '@/lib/sops';
 import { triadMissingPillText, type TriadMissingKey } from '@/lib/board-labels';
 import { boardSourceLabel, engineOwnedWaitingLabel } from '@/lib/board-sources';
 import { v4 as uuidv4 } from 'uuid';
+import { isSeededStarterTask } from '@/lib/starter-task';
 import { listPendingHarvestCards, resolveHarvestClientId, resolveWorkspaceBase } from '@/lib/winner-harvest';
 
 export const BOARD_HYGIENE_CRON = '0 * * * *'; // hourly, on the hour
@@ -317,6 +318,7 @@ function sendOwnerMessage(chatId: string | null, message: string): boolean {
 interface BlockedTaskRow {
   id: string;
   title: string;
+  description: string | null;
   block_reason: string | null;
   block_needs: string | null;
   block_audience: string | null;
@@ -330,7 +332,7 @@ async function processBlockedLane(result: BoardHygieneResult): Promise<void> {
   let rows: BlockedTaskRow[];
   try {
     rows = queryAll<BlockedTaskRow>(
-      `SELECT id, title, block_reason, block_needs, block_audience,
+      `SELECT id, title, description, block_reason, block_needs, block_audience,
               ask, last_progress_at, updated_at, department
          FROM tasks
         WHERE status = 'blocked' AND archived_at IS NULL`,
@@ -356,6 +358,7 @@ async function processBlockedLane(result: BoardHygieneResult): Promise<void> {
       // once/48h. NEVER touches status — re-ping only.
       if (
         task.block_audience === 'OWNER' &&
+        !isSeededStarterTask(task) &&
         ageHours >= ownerRepingHours &&
         !hasRecentEvent(task.id, EVT_OWNER_REPINGED, OWNER_REPING_COOLDOWN_HOURS)
       ) {

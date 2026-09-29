@@ -153,6 +153,21 @@ test('a permanent stop writes a plain-English reason, stamps the claim, and noti
   );
 });
 
+test('an installer-seeded "Welcome to <Dept>" card stops SILENTLY: never pages the owner', async () => {
+  // Live 2026-09-28: the intake sweep dispatched seven seeded starter cards right
+  // after install and every stop sent the owner's chat a "has stopped" card.
+  const id = mkTask({ title: 'Welcome to Bugs' });
+  run(`UPDATE tasks SET description = ? WHERE id = ?`,
+    ["This is your Bugs department's first task. Click to edit. Your AI workforce will populate real tasks as work comes in.", id]);
+  const r = await stopCardPermanently({
+    taskId: id, source: 'task-dispatcher', audience: 'OWNER',
+    reason: 'No model could take this card.', needs: 'Pick a model.',
+  });
+  assert.equal(r.blocked, true, 'the placeholder is still marked blocked on the board');
+  assert.equal(r.notified, false);
+  assert.equal(r.delivery, 'starter-silent', 'no owner lane at all for a seeded placeholder');
+});
+
 test('a second tick over the same stopped card does NOT re-notify', async () => {
   const id = mkTask();
 

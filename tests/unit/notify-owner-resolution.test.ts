@@ -5,10 +5,10 @@
  * Verifies:
  *   1. S0: OPENCLAW_OWNER_CHAT_ID env pin resolves — and an OPERATOR id pinned
  *      there is REJECTED (operator denylist applies to every source).
- *   2. S1: channels.telegram.allowFrom in the openclaw.json that sits beside
- *      the workspace resolves the first NON-OPERATOR entry.
- *   3. S1b: commands.ownerAllowFrom is honored when the channel list is
- *      operator-only.
+ *   2. allowFrom / ownerAllowFrom ORDER is never an owner record (a spouse
+ *      listed first received a client's stop-cards): it resolves nothing.
+ *   3. The explicit owner records resolve, in order: openclaw.json env.vars,
+ *      <root>/secrets/.env, the build state's ownerChat.
  *   4. S2 hardening: a sessions file whose ONLY direct session is an operator
  *      id resolves to null (the legacy "any session" fallback is gone).
  *   5. CLI-flag contract: the gateway send uses the REAL `openclaw message
@@ -84,27 +84,41 @@ test('S0: OPENCLAW_OWNER_CHAT_ID resolves, but an operator id is rejected', () =
 });
 
 // ── 2. allowFrom resolution (first non-operator entry) ───────────────────────
-test('S1: channels.telegram.allowFrom resolves first non-operator entry', () => {
-  clearSessions();
-  writeConfig({
-    channels: { telegram: { allowFrom: [OPERATOR_ID, CLIENT_ID, OPERATOR_ID_2] } },
-  });
-  assert.equal(resolveOwnerChatId(), CLIENT_ID);
+test('allowFrom order is NOT an owner record: nothing resolves from it', () => {
   clearConfig();
-});
-
-// ── 3. commands.ownerAllowFrom fallback ───────────────────────────────────────
-test('S1b: commands.ownerAllowFrom honored when channel list is operator-only', () => {
   clearSessions();
+  delete process.env.OPENCLAW_OWNER_CHAT_ID;
   writeConfig({
-    channels: { telegram: { allowFrom: [OPERATOR_ID] } },
+    channels: { telegram: { allowFrom: [CLIENT_ID, '1000000077'] } },
     commands: { ownerAllowFrom: [CLIENT_ID] },
   });
-  assert.equal(resolveOwnerChatId(), CLIENT_ID);
+  assert.equal(resolveOwnerChatId(), null);
   clearConfig();
 });
 
-// ── 4. operator-only sessions resolve to null (no legacy any-session fallback) ─
+test('the explicit owner records resolve: env.vars, then secrets/.env, then build-state ownerChat', () => {
+  clearConfig();
+  clearSessions();
+  delete process.env.OPENCLAW_OWNER_CHAT_ID;
+  const secrets = path.join(ROOT, 'secrets');
+  const state = path.join(WORKSPACE, '.workforce-build-state.json');
+  try {
+    fs.writeFileSync(state, JSON.stringify({ ownerChat: 1000000033 }));
+    assert.equal(resolveOwnerChatId(), '1000000033', 'build-state ownerChat');
+    fs.mkdirSync(secrets, { recursive: true });
+    fs.writeFileSync(path.join(secrets, '.env'), 'OTHER=x\nexport OPENCLAW_OWNER_CHAT_ID="1000000022"\n');
+    assert.equal(resolveOwnerChatId(), '1000000022', 'secrets/.env beats the build state');
+    writeConfig({ env: { vars: { OPENCLAW_OWNER_CHAT_ID: CLIENT_ID } }, channels: { telegram: { allowFrom: ['1000000077'] } } });
+    assert.equal(resolveOwnerChatId(), CLIENT_ID, 'openclaw.json env.vars beats secrets/.env');
+    writeConfig({ env: { vars: { OPENCLAW_OWNER_CHAT_ID: OPERATOR_ID } } });
+    assert.equal(resolveOwnerChatId(), '1000000022', 'an operator id in env.vars is refused; the next record wins');
+  } finally {
+    clearConfig();
+    fs.rmSync(secrets, { recursive: true, force: true });
+    fs.rmSync(state, { force: true });
+  }
+});
+
 test('S2: operator-only sessions file resolves to null', () => {
   clearConfig();
   writeSessions([OPERATOR_ID, OPERATOR_ID_2]);

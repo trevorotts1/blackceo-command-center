@@ -84,6 +84,7 @@ import { run, queryOne } from '@/lib/db';
 import { transition, TransitionError, type LifecycleState } from '@/lib/task-lifecycle';
 import { recordBlockEvent } from '@/lib/block-events';
 import { notifySystem } from '@/lib/notify';
+import { isSeededStarterTask } from '@/lib/starter-task';
 import { sendRequesterAudienceAsk, sendProviderChoiceAsk } from '@/lib/jobs/trust-engine';
 
 /** Who a permanent stop is addressed to. SYSTEM never reaches the client. */
@@ -134,7 +135,7 @@ export interface StopCardResult {
   /** This call won the notice claim and sent. False means someone already did. */
   notified: boolean;
   /** How the notice was delivered, or why it was not. */
-  delivery: 'telegram' | 'session' | 'system' | 'already-claimed' | 'undeliverable' | 'not-blocked';
+  delivery: 'telegram' | 'session' | 'system' | 'already-claimed' | 'undeliverable' | 'not-blocked' | 'starter-silent';
 }
 
 /** `ask` is capped to 500 to match UpdateTaskSchema.ask's validation limit. */
@@ -196,8 +197,8 @@ export async function stopCardPermanently(p: StopCardParams): Promise<StopCardRe
   const ask = p.needs.slice(0, ASK_MAX);
   const blockedOnHuman = p.audience === 'SYSTEM' ? 'operator' : 'owner';
 
-  const task = queryOne<{ title: string; status: string }>(
-    'SELECT title, status FROM tasks WHERE id = ?',
+  const task = queryOne<{ title: string; status: string; description: string | null }>(
+    'SELECT title, status, description FROM tasks WHERE id = ?',
     [p.taskId],
   );
   if (!task) return { blocked: false, notified: false, delivery: 'not-blocked' };
@@ -283,6 +284,12 @@ export async function stopCardPermanently(p: StopCardParams): Promise<StopCardRe
       console.error('[stop-card] SYSTEM notify failed (non-fatal):', (err as Error).message);
     }
     return { blocked: true, notified: true, delivery: 'system' };
+  }
+
+  // A seeded "Welcome to <Dept>" placeholder is not the owner's work: stopping
+  // it is never news to them.
+  if (isSeededStarterTask(task)) {
+    return { blocked: true, notified: false, delivery: 'starter-silent' };
   }
 
   // OWNER lane. Same sender the audience-confirm gate uses: the requester's own
