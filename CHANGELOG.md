@@ -1,3 +1,11 @@
+## [v7.6.81] — 2026-09-29 — The loopback health probe asks for the box's public host, so a box with a tunnel stops rolling back every deploy
+
+Once a box has its tunnel, the installer writes `MC_TENANT_REGISTRY_JSON` (its public host) and `MC_TENANT_PUBLIC_URL` into `.env.local`. A box with a registry does not treat a loopback Host as self, so `cc-health-check.sh`'s outside-in probe of `http://127.0.0.1:4000/interview` got 403 `unregistered_hostname` (RED): every deploy rolled back, and the rollback verify left `ROLLBACK_VERIFY_FAILED`.
+
+- fix(health): the outside-in page probes still connect to 127.0.0.1 but send `Host: <public host>`, taken from `--public-url` / `CC_PUBLIC_URL`, else `CC_PUBLIC_URL` or `MC_TENANT_PUBLIC_URL` in the app's `.env.local` (`--canonical-dir`, else the script's parent). The same-origin interview-lock redirect is judged against that origin. With no public URL, or a public host the registry does not list, the probe reads the tenant wall as before (RED), because a browser there is refused too.
+- The app's tenant check is unchanged. It cannot tell a loopback peer from a remote one: the tunnel's cloudflared connects from loopback too, so trusting a loopback peer would let every remote request through as self.
+- test: `tests/unit/cc-health-check-loopback-host.test.sh` (new, in CI) drives the real script against a fake middleware. A one-host registry box is GREEN (the v7.6.80 script is RED on it), no public URL or an unregistered public host stays RED, and the probe never leaves the box. `tenant-implicit-self.test.ts`: with a one-host registry, an unregistered host and a spoofed loopback Host header are refused.
+
 ## [v7.6.80] — 2026-09-29 — An operator's own box notifies its owner; the tracked pm2 template no longer marks client boxes operator-owned
 
 - fix(notify): on a box whose owner IS an operator (marked by `~/.openclaw/.operator-is-owner` or `CC_OPERATOR_IS_OWNER=1`), `resolveOwnerChatId()` accepts that owner's own explicit record (`OPENCLAW_OWNER_CHAT_ID` or the build state's `ownerChat`) even though it is an operator id. v7.6.77 rejected operator ids at every source, so such a box messaged nobody and sent the fleet operator "undeliverable" digests. On every other box an operator id still never resolves as the owner.

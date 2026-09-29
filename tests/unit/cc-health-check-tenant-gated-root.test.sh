@@ -11,7 +11,8 @@ bad() { FAIL=$((FAIL+1)); printf '  FAIL - %s\n' "$1"; }
 F=scripts/cc-health-check.sh
 grep -q 'ROOT_CODE" == "401" || "$ROOT_CODE" == "403"' "$F" && ok "401/403 on / is recognised as a tenant-gated root" || bad "no 401/403 branch"
 awk '/ROOT_CODE" == "401"/{f=1} f&&/PROBE_PATH="\/interview"/{print "OK"; exit}' "$F" | grep -q OK && ok "the probe moves to /interview" || bad "probe path not moved to /interview"
-grep -q 'is_interview_gate_redirect "$ROOT_LOC" "$BASE_URL"' "$F" && ok "the same-origin 302 path is unchanged" || bad "302 path changed"
+# v7.6.81: same-origin is judged against the origin the probe asked for (its Host).
+grep -q 'is_interview_gate_redirect "$ROOT_LOC" "$PROBE_ORIGIN"' "$F" && ok "the same-origin 302 path is judged against the probed origin" || bad "302 path changed"
 grep -q 'PROBE_CODE" == "403" ]] && printf' "$F" && ok "a 403 on the probed page itself is still the TENANT WALL (RED)" || bad "tenant wall branch missing"
 printf '[cc-health-check-tenant-gated-root] %s passed, %s failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]] || exit 1

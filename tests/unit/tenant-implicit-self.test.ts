@@ -56,3 +56,20 @@ test('an empty registry object counts as no registry', async () => {
     assert.equal(tenantRegistration('127.0.0.1').kind, 'self');
   });
 });
+
+// v7.6.81: the loopback health probe is fixed in cc-health-check.sh (it sends the
+// registered Host), NOT here. The app cannot tell a loopback peer from a remote
+// one (the tunnel's cloudflared also connects from loopback), so with a registry
+// only a registered Host header resolves, whoever sends it.
+test('one-host registry: an unregistered or spoofed loopback Host header is refused; the registered host resolves', async () => {
+  const { tenantRegistration, requestHost, TenantAccessError } = await load();
+  const registry = JSON.stringify({ 'box.example.com': { tenantId: 'self', companyId: 'c1', kind: 'self', installationId: 'i1' } });
+  withEnv({ NODE_ENV: 'production', MC_TENANT_REGISTRY_JSON: registry, MC_TENANT_PUBLIC_URL: 'https://box.example.com', CC_PUBLIC_URL: undefined }, () => {
+    const hostOf = (host: string) => requestHost({ headers: new Headers({ host }) });
+    assert.equal(tenantRegistration(hostOf('box.example.com:4000')).tenantId, 'self', 'the health probe\'s Host resolves');
+    assert.throws(() => tenantRegistration(hostOf('attacker.example.net')), TenantAccessError, 'unregistered remote host');
+    for (const spoofed of ['127.0.0.1', 'localhost:4000', '[::1]']) {
+      assert.throws(() => tenantRegistration(hostOf(spoofed)), TenantAccessError, `spoofed loopback Host ${spoofed}`);
+    }
+  });
+});
