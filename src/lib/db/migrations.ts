@@ -7938,6 +7938,32 @@ export const migrations: Migration[] = [
       console.log('[Migration 164] task_qc_results.content_adherence ready');
     },
   },
+  {
+    id: '165',
+    name: 'hold_seeded_starter_tasks',
+    // Installer-seeded "Welcome to <Dept>" placeholder cards (onboarding
+    // seed-dashboard-content.py / add-department.sh) were inserted WITHOUT the
+    // dispatch_hold /api/departments gives them, so the intake sweep dispatched
+    // them right after install and each stop paged the owner. Hold every one
+    // still sitting untouched in backlog; an edit or assignment clears the hold
+    // through the normal routing path, exactly as for API-created starters.
+    up: (db) => {
+      const cols = new Set(
+        (db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[]).map((c) => c.name),
+      );
+      if (!cols.has('dispatch_hold') || !cols.has('description')) {
+        console.log('[Migration 165] tasks.dispatch_hold absent — nothing to hold');
+        return;
+      }
+      const r = db.prepare(
+        `UPDATE tasks SET dispatch_hold = 1
+          WHERE status = 'backlog' AND COALESCE(dispatch_hold, 0) = 0
+            AND title LIKE 'Welcome to %'
+            AND description LIKE 'This is your % department''s first task.%'`,
+      ).run();
+      console.log(`[Migration 165] held ${r.changes} seeded starter task(s)`);
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner

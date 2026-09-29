@@ -1,3 +1,13 @@
+## [v7.6.77] — 2026-09-28 — The owner is an explicit record, never allowFrom order; owner-sends hold; seeded starters stay silent; operator alerts via the operator webhook
+
+Live incident: on a client box the Command Center sent 7 stop-cards and BOARD-HYGIENE alerts to the owner's spouse (the first id in `channels.telegram.allowFrom`), for seeded "Welcome to <Dept>" cards the intake sweep had dispatched right after install; the operator copies failed with "chat not found" (364 such failures on another box).
+
+- fix(notify): `resolveOwnerChatId()` reads only explicit owner records: `OPENCLAW_OWNER_CHAT_ID` from the process env, `<cwd>/.env.local`, openclaw.json `env.vars`, `<root>/secrets/.env`, then the build state's `ownerChat`. The allowFrom / ownerAllowFrom order and DM-session guesses are gone; with no record nothing is sent as "the owner" (it is recorded as undeliverable). Operator ids are still refused at every source.
+- fix(notify): onboarding's `ownerSendsHold: true` (build state) stops every send to a non-operator chat, at `notifyTelegram` and `notifySession`, and is recorded as `owner_send_held`.
+- fix(notify): on a client box with the fleet's operator alert webhook (`FLEET_OPERATOR_ALERT_URL`, or the fleet-standing gate URL with its header + secret, from env or openclaw.json env.vars), SYSTEM alerts go to that webhook instead of Telegram through the client's bot. Telegram to the operator stays for his own box and for boxes with no webhook.
+- fix(board): a seeded "Welcome to <Dept>" placeholder (`src/lib/starter-task.ts`) never pages the owner: stop-card skips the owner lane (`starter-silent`) and BOARD-HYGIENE never re-pings it. Migration 165 sets `dispatch_hold` on the ones still untouched in backlog (the installer inserted them without it), so the sweep leaves them alone.
+- test: `tests/unit/notify-owner-guards.test.ts` (3, all fail on the old code), a silent-starter case in `stop-card-permanently.test.ts` (fails on the old code), `migration-165-hold-seeded-starters.test.ts`; the owner-resolution tests now assert allowFrom order resolves nothing.
+
 ## [v7.6.76] — 2026-09-28 — Deploy gate on build/serve rows; health check never blocks the server; explicit fetch refspec
 
 - fix(update): a client Command Center cloned with a single-tag fetch refspec (`+refs/tags/v4.56.2:...`, seen on a client Mac during the 2026-09-28 fleet roll) never moved `origin/main` on `git fetch origin main`. The update then targeted a years-old `origin/main`, and the onboarding runner's version floor refused it (its package.json said 6.0.89). Both fetches in `update.sh` now name the ref explicitly (`+refs/heads/main:refs/remotes/origin/main`).
