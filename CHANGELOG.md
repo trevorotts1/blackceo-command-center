@@ -1,3 +1,11 @@
+## [v7.6.78] — 2026-09-28 — Overflow only onto a model this box can place; a refused placement cools that model down
+
+Live incident: the scorer overflowed a card to the agent's declared fallback `openrouter/moonshotai/kimi-k2.6` on a box where openrouter was neither configured nor in `agents.defaults.modelPolicy.allow`. The gateway refused the placement, and the intake-advance sweep picked the same fallback again every 2 minutes, forever.
+
+- fix(scorer): `scoreRoute()` offers an overflow target only when `placementBlocker()` passes: the model is in `modelPolicy.allow` (when the box has one), and its provider is in openclaw.json `models.providers` or has a key (or is a local endpoint). An unreadable config blocks nothing. With no placeable fallback, `overflowTo` is null and the card waits on its primary.
+- fix(dispatcher): a placement the gateway refuses cools that model down for 30 minutes (`coolRefusedPlacement`), so the sweep never retries it on every tick.
+- test: `tests/unit/route-scorer-placeable.test.ts` (4, all fail on the old code).
+
 ## [v7.6.77] — 2026-09-28 — The owner is an explicit record, never allowFrom order; owner-sends hold; seeded starters stay silent; operator alerts via the operator webhook
 
 Live incident: on a client box the Command Center sent 7 stop-cards and BOARD-HYGIENE alerts to the owner's spouse (the first id in `channels.telegram.allowFrom`), for seeded "Welcome to <Dept>" cards the intake sweep had dispatched right after install; the operator copies failed with "chat not found" (364 such failures on another box).
