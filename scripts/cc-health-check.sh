@@ -657,10 +657,35 @@ fi
 # redirect ONE hop so the asset check probes the served page instead of an empty
 # 302 body. --max-redirs 0 is retained so an off-origin CF login redirect is NOT
 # followed (it stays visible as a redirect and the probe verifies nothing → UNKNOWN).
+#
+# LOOPBACK PROBE HOST (v7.6.81): once a box has its tunnel, the installer writes
+# MC_TENANT_REGISTRY_JSON (its public host) + MC_TENANT_PUBLIC_URL, and a box
+# WITH a registry does not treat a loopback Host as self (tenant-context.ts).
+# The probe still connects to 127.0.0.1, but asks for the box's public host
+# (CC_PUBLIC_URL / --public-url, else CC_PUBLIC_URL or MC_TENANT_PUBLIC_URL from
+# the app's .env.local), the page a browser gets through the tunnel. Loopback
+# was 403 unregistered_hostname, so every deploy rolled back. The app is not
+# loosened: the tunnel's cloudflared also connects from loopback, so trusting
+# a loopback peer would trust every remote request.
+probe_host() {
+  local url="$PUBLIC_URL" envf k
+  envf="${CANONICAL_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/.env.local"
+  if [[ -z "$url" && -f "$envf" ]]; then
+    for k in CC_PUBLIC_URL MC_TENANT_PUBLIC_URL; do
+      url="$(grep -E "^[[:space:]]*(export[[:space:]]+)?${k}=" "$envf" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"'"'"' ' || true)"
+      [[ -n "$url" ]] && break
+    done
+  fi
+  url="$(url_host "$url")"
+  [[ "$url" =~ ^[a-z0-9.-]+$ ]] && printf '%s' "$url"
+}
+PROBE_HOST="$(probe_host)"
+PROBE_HDR=(); PROBE_ORIGIN="$BASE_URL"
+if [[ -n "$PROBE_HOST" ]]; then PROBE_HDR=(-H "Host: ${PROBE_HOST}"); PROBE_ORIGIN="http://${PROBE_HOST}"; fi
 PROBE_PATH="/"
-ROOT_WO=$(curl -s --max-time 10 --max-redirs 0 -o /dev/null -w '%{http_code} %{redirect_url}' "${BASE_URL}/" 2>/dev/null || echo "000 ")
+ROOT_WO=$(curl -s --max-time 10 --max-redirs 0 ${PROBE_HDR[@]+"${PROBE_HDR[@]}"} -o /dev/null -w '%{http_code} %{redirect_url}' "${BASE_URL}/" 2>/dev/null || echo "000 ")
 ROOT_CODE="${ROOT_WO%% *}"; ROOT_LOC="${ROOT_WO#* }"
-if [[ "$ROOT_CODE" =~ ^3 ]] && is_interview_gate_redirect "$ROOT_LOC" "$BASE_URL"; then
+if [[ "$ROOT_CODE" =~ ^3 ]] && is_interview_gate_redirect "$ROOT_LOC" "$PROBE_ORIGIN"; then
   PROBE_PATH="$(url_path "$ROOT_LOC")"
   log "outside-in: / 302→${PROBE_PATH} (interview lock); probing gated page for asset refs"
 elif [[ "$ROOT_CODE" == "401" || "$ROOT_CODE" == "403" ]]; then
@@ -673,8 +698,8 @@ elif [[ "$ROOT_CODE" == "401" || "$ROOT_CODE" == "403" ]]; then
   PROBE_PATH="/interview"
   log "outside-in: / answered ${ROOT_CODE} (tenant-gated root); probing ${PROBE_PATH} for asset refs"
 fi
-ROOT_HTML=$(curl -s --max-time 10 --max-redirs 0 "${BASE_URL}${PROBE_PATH}" 2>/dev/null || echo "")
-PROBE_CODE=$(curl -s --max-time 10 --max-redirs 0 -o /dev/null -w '%{http_code}' "${BASE_URL}${PROBE_PATH}" 2>/dev/null || echo "000")
+ROOT_HTML=$(curl -s --max-time 10 --max-redirs 0 ${PROBE_HDR[@]+"${PROBE_HDR[@]}"} "${BASE_URL}${PROBE_PATH}" 2>/dev/null || echo "")
+PROBE_CODE=$(curl -s --max-time 10 --max-redirs 0 ${PROBE_HDR[@]+"${PROBE_HDR[@]}"} -o /dev/null -w '%{http_code}' "${BASE_URL}${PROBE_PATH}" 2>/dev/null || echo "000")
 ASSET_REF=$(printf '%s' "$ROOT_HTML" | grep -oE '/_next/static/[^"'"'"' >]+\.(js|css)' | head -1 || echo "")
 ASSET_PASS="skip"; ASSET_INDET=false
 # TENANT WALL (2026-09-18): the app itself refusing its own loopback probe with
@@ -684,7 +709,7 @@ ASSET_PASS="skip"; ASSET_INDET=false
 # and left the wall live; RED makes the deploy roll back to the last build that
 # served the client, and the watchdog can act on it.
 if [[ "$PROBE_CODE" == "403" ]] && printf '%s' "$ROOT_HTML" | grep -q 'unregistered_hostname'; then
-  log "FAIL: ${PROBE_PATH} → HTTP 403 unregistered_hostname — the tenant middleware has no registration for this host (row 33: TENANT WALL). Remedy: set CC_PUBLIC_URL (implicit self registration) or MC_TENANT_REGISTRY_JSON in .env.local, then restart."
+  log "FAIL: ${PROBE_PATH} → HTTP 403 unregistered_hostname — the tenant middleware has no registration for host ${PROBE_HOST:-127.0.0.1} (row 33: TENANT WALL). Remedy: set CC_PUBLIC_URL (implicit self registration) or MC_TENANT_REGISTRY_JSON in .env.local, then restart."
   ASSET_PASS="fail"
 elif [[ -n "$ASSET_REF" ]]; then
   ASSET_CODE=$(curl -s --max-time 10 --max-redirs 0 -w '%{http_code}' -o /dev/null "${BASE_URL}${ASSET_REF}" 2>/dev/null || echo "000")

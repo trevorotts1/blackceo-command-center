@@ -509,6 +509,9 @@ jobs:
       # The deploy's green gate judges build/serve rows only; content rows warn.
       - name: cc-health-check.sh --deploy-gate test
         run: bash scripts/cc-health-check-deploy-gate.test.sh
+      # A box with a tenant registry: the loopback probe asks for its public host.
+      - name: cc-health-check.sh loopback probe host test
+        run: bash tests/unit/cc-health-check-loopback-host.test.sh
       # The watchdog schedule: launchd, crontab, and a container's host crontab.
       - name: install-watchdog-cc.sh schedule test
         run: bash tests/unit/install-watchdog-cc.test.sh
