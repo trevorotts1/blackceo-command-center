@@ -24,6 +24,7 @@ import {
   safeStatSync,
 } from '../fs/safe-fs';
 import { seedCompanyGuarded, resolveSeedingCompanyId } from './branding-seed';
+import { readDepartmentOptoutIds } from '../workspaces/department-optout';
 import { normalizeDepartmentsPayload } from '../departments-payload';
 import { ensureRuntimeConfigFile } from '../runtime-config';
 import { BLOCKED_ASK_TRIGGER_SQL } from '../blocked-ask';
@@ -7962,6 +7963,99 @@ export const migrations: Migration[] = [
             AND description LIKE 'This is your % department''s first task.%'`,
       ).run();
       console.log(`[Migration 165] held ${r.changes} seeded starter task(s)`);
+    },
+  },
+  // ── Migration 166 — JGT-106: no fit ever ends lane-less. ────────────────────
+  {
+    id: '166',
+    name: 'ensure_general_task_workspace',
+    // Mirrors migration 111's own backfill shape (additive-only, anchors
+    // company_id to an EXISTING workspace row, never touches a row that
+    // already exists). See src/lib/tasks.ts's createTaskCore fallback (JGT-106)
+    // for the other half: once this row exists, a card that resolves to "no
+    // department fits" is parked here instead of staying workspace_id NULL.
+    up: (db) => {
+      console.log('[Migration 166] Backfilling the "general-task" catch-all workspace...');
+
+      // Any row at all — archived included — already claiming this identity is
+      // "already exists": never resurrect an archived row, never insert a
+      // second one. dept-general-task is the legacy alias this same lane has
+      // shipped under; matching lower(slug) on it too means a pre-existing box
+      // that already seeded under that alias is left untouched.
+      const existing = db
+        .prepare(
+          `SELECT id FROM workspaces
+            WHERE lower(id) = 'general-task'
+               OR lower(slug) IN ('general-task', 'dept-general-task')
+            LIMIT 1`,
+        )
+        .get() as { id: string } | undefined;
+      if (existing) {
+        console.log(`[Migration 166] "general-task" workspace already present (id=${existing.id}) — no-op`);
+        return;
+      }
+
+      // Honour an explicit, provenanced decline (the ratified 2026-07-16
+      // ruling — general-task IS declinable). readDepartmentOptoutIds() is
+      // itself fail-quiet (missing/unreadable/malformed file -> []), but this
+      // is a migration, so a defensive try/catch stands guard too: any error
+      // reading the opt-out signal must never be read as an opt-out, and must
+      // never abort the migration chain.
+      let optedOut = false;
+      try {
+        optedOut = readDepartmentOptoutIds().some((depId) => String(depId).toLowerCase() === 'general-task');
+      } catch (err) {
+        console.log('[Migration 166] department-optout read failed (treated as NOT opted out):', (err as Error).message);
+      }
+      if (optedOut) {
+        console.log('[Migration 166] "general-task" is opted out — no-op (catch-all work routes to the CEO lane)');
+        return;
+      }
+
+      // company_id: prefer the CEO/master row, never rowid-first, never
+      // 'default'. Falling back to the most common company_id among live
+      // (non-default, non-archived-by-being-'default') rows covers a box that
+      // seeded departments before any CEO/master row existed.
+      let companyId: string | undefined = (
+        db
+          .prepare(
+            `SELECT company_id FROM workspaces
+              WHERE lower(slug) IN ('master-orchestrator', 'ceo', 'dept-ceo')
+                AND company_id <> 'default' AND archived_at IS NULL
+              ORDER BY sort_order ASC LIMIT 1`,
+          )
+          .get() as { company_id: string } | undefined
+      )?.company_id;
+      if (!companyId) {
+        const majority = db
+          .prepare(
+            `SELECT company_id, COUNT(*) AS n FROM workspaces
+              WHERE archived_at IS NULL AND id <> 'default' AND company_id <> 'default'
+              GROUP BY company_id ORDER BY n DESC LIMIT 1`,
+          )
+          .get() as { company_id: string; n: number } | undefined;
+        companyId = majority?.company_id;
+      }
+      if (!companyId) {
+        console.log('[Migration 166] No non-default company_id to anchor to — skipping (fresh install seeds "general-task" normally)');
+        return;
+      }
+
+      const now = new Date().toISOString();
+      db.prepare(
+        `INSERT INTO workspaces (id, name, slug, description, icon, company_id, sort_order, created_at, updated_at)
+         VALUES ('general-task', 'General Task', 'general-task', ?, ?, ?, 99999, ?, ?)`,
+      ).run(
+        'Catch-all lane: work that fits no other department',
+        '🗂️',
+        companyId,
+        now,
+        now,
+      );
+      console.log('[Migration 166] Inserted the "general-task" department workspace');
+      // ensureWorkspaceHeadAgents(db), already called unconditionally on every
+      // boot right after runMigrations() finishes (see below), gives this row
+      // its head agent — not duplicated here.
     },
   },
 ];
