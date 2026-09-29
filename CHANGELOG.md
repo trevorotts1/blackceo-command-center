@@ -1,3 +1,11 @@
+## [v7.6.80] — 2026-09-29 — An operator who owns a box is that box's owner; the cc-prod pm2 config no longer flags every clone as the operator box
+
+Since v7.6.77 the owner is an explicit record, but an operator id was still refused at every source. On an operator's own box the owner IS that operator (one such box pins an operator id in both `env.vars` and `ownerChat`), so those Command Centers resolved no owner, messaged nobody, and sent the operator "undeliverable" digests.
+
+- fix(notify): `resolveOwnerChatId()` accepts an operator id when a box's own record pins it (`OPENCLAW_OWNER_CHAT_ID` in the process env, `.env.local`, openclaw.json `env.vars` or `secrets/.env`, or the build state's `ownerChat`). The refusal only ever guarded the allowFrom and session guesses, which v7.6.77 removed. With nothing pinned (`ownerChat` 0) it still resolves nothing, and allowFrom order, operator-only or not, is still never an owner record.
+- fix(pm2): `ecosystem.cc-prod.config.cjs` hard-set `CC_OPERATOR_IS_OWNER: '1'`, and the file ships in every clone, client boxes included (found in a client's clone). It no longer sets it; the operator's own box is flagged by `~/.openclaw/.operator-is-owner`, which `operatorIsOwnerBox()` already reads.
+- test: `notify-owner-resolution.test.ts` (an operator id pinned via `OPENCLAW_OWNER_CHAT_ID` and via `ownerChat` resolves; `ownerChat` 0 and an operator-only allowFrom resolve nothing; a client box is unchanged), `ecosystem-db-path-env-local.test.ts` (neither pm2 config sets `CC_OPERATOR_IS_OWNER`). 6 fail on the old code; the tests that asserted the old refusal now assert the pin resolves.
+
 ## [v7.6.79] — 2026-09-29 — A container's watchdog is scheduled from the host and seen from inside
 
 A container has no crontab and no cron daemon, so the deploy's watchdog install always failed there ("Box watchdog schedule NOT installed"), and the working fix on three client containers was a hand-written block in the host's crontab.
