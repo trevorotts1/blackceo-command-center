@@ -246,3 +246,51 @@ test('migration 166 (g): after migrations plus ensureWorkspaceHeadAgents, genera
     fs.rmSync(path.dirname(dbPath), { recursive: true, force: true });
   }
 });
+
+test('migration 166 (h): CEO/master row itself sits under company "default" -> never anchor general-task to "default"', () => {
+  // QC break-it "ceodefault": an un-branded box where master-orchestrator,
+  // marketing and sales were all seeded under the sentinel company 'default'
+  // (reseedWorkspacesFromConfig's own fallback when no real company id was
+  // ever resolved). The CEO/master lookup must exclude company_id='default'
+  // just like the majority fallback already does, so there is nothing left
+  // to anchor to and the migration must no-op -- never insert with
+  // company_id='default'.
+  const dbPath = freshDbPath('ceo-under-default');
+  const db = seedDb(dbPath, [{ id: 'default', slug: 'default' }], [
+    { id: 'default', name: 'General', slug: 'default', companyId: 'default', sortOrder: 0 },
+    { id: 'master-orchestrator', name: 'CEO / COM', slug: 'master-orchestrator', companyId: 'default', sortOrder: 1 },
+    { id: 'marketing', name: 'Marketing', slug: 'marketing', companyId: 'default', sortOrder: 2 },
+    { id: 'sales', name: 'Sales', slug: 'sales', companyId: 'default', sortOrder: 3 },
+  ]);
+  try {
+    withIsolatedHome(() => runMigrations(db));
+
+    const rows = generalTaskRows(db);
+    assert.equal(rows.length, 0, 'with every workspace (including the CEO row) under "default", there is no real company to anchor to');
+    assert.ok(!rows.some((r) => r.company_id === 'default'), 'general-task must never be inserted with company_id="default"');
+  } finally {
+    db.close();
+    fs.rmSync(path.dirname(dbPath), { recursive: true, force: true });
+  }
+});
+
+test('migration 166 (i): CEO row under "default" but company acme holds the real departments -> anchors to acme, not default', () => {
+  const dbPath = freshDbPath('ceo-default-acme-majority');
+  const db = seedDb(dbPath, [{ id: 'default', slug: 'default' }, { id: 'acme', slug: 'acme' }], [
+    { id: 'default', name: 'General', slug: 'default', companyId: 'default', sortOrder: 0 },
+    { id: 'master-orchestrator', name: 'CEO / COM', slug: 'master-orchestrator', companyId: 'default', sortOrder: 1 },
+    { id: 'marketing', name: 'Marketing', slug: 'marketing', companyId: 'acme', sortOrder: 2 },
+    { id: 'sales', name: 'Sales', slug: 'sales', companyId: 'acme', sortOrder: 3 },
+  ]);
+  try {
+    withIsolatedHome(() => runMigrations(db));
+
+    const rows = generalTaskRows(db);
+    assert.equal(rows.length, 1, 'the majority fallback must still anchor the catch-all to the real company');
+    assert.equal(rows[0].company_id, 'acme');
+    assert.notEqual(rows[0].company_id, 'default', 'a company_id="default" CEO row must never win over a real company');
+  } finally {
+    db.close();
+    fs.rmSync(path.dirname(dbPath), { recursive: true, force: true });
+  }
+});

@@ -8021,6 +8021,7 @@ export const migrations: Migration[] = [
           .prepare(
             `SELECT company_id FROM workspaces
               WHERE lower(slug) IN ('master-orchestrator', 'ceo', 'dept-ceo')
+                AND company_id <> 'default' AND archived_at IS NULL
               ORDER BY sort_order ASC LIMIT 1`,
           )
           .get() as { company_id: string } | undefined
