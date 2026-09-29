@@ -1,3 +1,10 @@
+## [v7.6.84] — 2026-09-29 — Operator alerts from an operator-owned box go through the operator webhook
+
+On a box marked operator-owned (`~/.openclaw/.operator-is-owner` or `CC_OPERATOR_IS_OWNER=1`: another operator's own box), SYSTEM alerts skipped the operator alert webhook and went by Telegram through that box's bot to the first operator id it knew, which reaches the box's owner, not the fleet operator.
+
+- fix(notify): `notifySystem()` sends operator alerts through the operator alert webhook whenever it is configured, on every box; Telegram to the operator remains only for a box with no webhook.
+- test: `notify-owner-guards.test.ts` "operator-owned box with the operator alert webhook" (fails on the old code).
+
 ## [v7.6.83] — 2026-09-29 — A Command Center missing from pm2 is RED, and the watchdog starts it
 
 Live incident: a Hostinger container was recreated without `pm2 resurrect`, so pm2 came back with no Command Center. cc-health-check.sh saw HTTP unreachable and no pm2 app and called it a bounded UNKNOWN (exit 3); the watchdog does not act on UNKNOWN, and because nothing passed `--unknown-since` the UNKNOWN never escalated. The watchdog reported ok every 5 minutes while the Command Center was down.
