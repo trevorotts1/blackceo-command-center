@@ -1,3 +1,10 @@
+## [v7.6.82] — 2026-09-29 — A rollback writes its receipt before it starts the restored release
+
+Live incident: on a client Mac a deploy's health check failed and atomic-deploy rolled back. The live source tree stays on the failed target after a rollback, so cc-start serves the restored build only when `.deploy-rollback-state.json` vouches for exactly that pair (PRES-046). The receipt was written after the pm2 switch: cc-start refused the restored app (`content-mismatch-invalid-receipt`, exit 78), all 36 rollback health attempts read "server unreachable", the transaction ended `ROLLBACK_VERIFY_FAILED`, the Command Center was down, and every later deploy (including the fleet roll's own rollback rebuild) was refused.
+
+- fix(atomic-deploy): the rollback receipt is written after the prior artifact and dependencies are restored and before pm2 is switched onto them.
+- test: `b2-atomic-deploy.test.ts` "Rollback receipt is on disk before the restored release is started": the health stub refuses the restored release unless the receipt exists, like cc-start (fails on the old code).
+
 ## [v7.6.81] — 2026-09-29 — The loopback health probe asks for the box's public host, so a box with a tunnel stops rolling back every deploy
 
 Once a box has its tunnel, the installer writes `MC_TENANT_REGISTRY_JSON` (its public host) and `MC_TENANT_PUBLIC_URL` into `.env.local`. A box with a registry does not treat a loopback Host as self, so `cc-health-check.sh`'s outside-in probe of `http://127.0.0.1:4000/interview` got 403 `unregistered_hostname` (RED): every deploy rolled back, and the rollback verify left `ROLLBACK_VERIFY_FAILED`.

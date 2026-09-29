@@ -702,6 +702,31 @@ case "$N" in 1) echo '{"pass":false}'; exit 1;; 2) echo '{"pass":false,"indeterm
   }
 });
 
+// The live source stays on the failed target after a rollback, so cc-start serves
+// the restored build only when .deploy-rollback-state.json vouches for it (PRES-046).
+// Written after the pm2 switch, the restored app was refused (exit 78), rollback
+// health never went green, and the box stuck in ROLLBACK_VERIFY_FAILED.
+test('Rollback receipt is on disk before the restored release is started', async () => {
+  const fixture = buildFixture({ buildExitCode: 0, healthExitCode: 1, rollbackHealthExitCode: 0, liveNextExists: true });
+  const receipt = path.join(fixture.appDir, '.deploy-rollback-state.json');
+  writeFileSync(fixture.healthCheckStubPath, `#!/usr/bin/env bash
+C="${fixture.baseDir}/.health-call-count"; N=$(( $(cat "$C" 2>/dev/null || echo 0) + 1 )); echo "$N" > "$C"
+[ "$N" -eq 1 ] && { echo '{"pass":false}'; exit 1; }
+# cc-start: no receipt for the older build -> refused, server unreachable
+[ -f "${receipt}" ] || { echo '{"pass":false,"indeterminate":true,"detail":"server unreachable"}'; exit 3; }
+echo '{"pass":true}'; exit 0
+`, { mode: 0o755 });
+  try {
+    const { exitCode, stderr } = runDeploy(fixture);
+    assert.strictEqual(exitCode, 1, stderr);
+    assert.ok(stderr.includes('Rollback verified'), `the restored release must start and verify.\nstderr:\n${stderr}`);
+    assert.ok(!stderr.includes('ROLLBACK DID NOT COMPLETE'), stderr);
+    assert.ok(existsSync(receipt), 'the rollback receipt stays: the box is serving the prior release');
+  } finally {
+    fixture.cleanup();
+  }
+});
+
 // ─── Spec Verify (d): health exits 3 → retry, no rollback, exit 3 ───────────
 
 /**
