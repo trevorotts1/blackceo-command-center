@@ -515,6 +515,9 @@ jobs:
       # The watchdog schedule: launchd, crontab, and a container's host crontab.
       - name: install-watchdog-cc.sh schedule test
         run: bash tests/unit/install-watchdog-cc.test.sh
+      # A Command Center missing from pm2 is RED, and the watchdog starts it.
+      - name: watchdog-cc.sh down-is-red test
+        run: bash tests/unit/watchdog-cc-down-is-red.test.sh
 
 
   # ── Build smoke test — BLOCKING ───────────────────────────────────────────

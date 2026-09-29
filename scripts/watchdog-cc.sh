@@ -175,6 +175,8 @@ elif refusal.get('receipt_current') or (refusal.get('receipt_present') and refus
     print("refusal-receipt")
 elif d.get('service_status') in ('stopped', 'errored'):
     print("service-" + str(d.get('service_status')))
+elif d.get('service_status') == 'absent':
+    print("no-pm2-app")
 elif 'unreachable' in detail:
     print("unreachable")
 elif d.get('pm2_topology', {}).get('app_count', 0) == 0:
@@ -197,8 +199,18 @@ ARGS=(--port "$WATCHDOG_PORT" --json-only)
 [[ -n "${CC_PUBLIC_URL:-}" ]] && ARGS+=(--public-url "$CC_PUBLIC_URL")
 [[ -n "$WATCHDOG_CANONICAL_DIR" ]] && ARGS+=(--canonical-dir "$WATCHDOG_CANONICAL_DIR")
 
+# An UNKNOWN that never clears must become RED: cc-health-check.sh escalates
+# only when told when it started, so the first sighting is kept here.
+UNKNOWN_SINCE_FILE="$WATCHDOG_STATE_DIR/unknown-since"
+[[ -s "$UNKNOWN_SINCE_FILE" ]] && ARGS+=(--unknown-since "$(head -c 40 "$UNKNOWN_SINCE_FILE")")
+
 RESULT_JSON=""; RESULT_EXIT=0
 RESULT_JSON=$(bash "$HEALTH_CHECK" "${ARGS[@]}") || RESULT_EXIT=$?
+if [[ "$RESULT_EXIT" -eq 0 ]]; then
+  rm -f "$UNKNOWN_SINCE_FILE" 2>/dev/null || true
+elif [[ "$RESULT_EXIT" -eq 3 && ! -s "$UNKNOWN_SINCE_FILE" ]]; then
+  printf '%s\n' "$TS" > "$UNKNOWN_SINCE_FILE" 2>/dev/null || true
+fi
 
 # ── GREEN: silence, but archive any open incident exactly once ────────────────
 if [[ "$RESULT_EXIT" -eq 0 ]]; then
@@ -435,6 +447,42 @@ except Exception:
     fi
   fi
 
+  # ── NO COMMAND CENTER APP IN PM2 ─────────────────────────────────────────
+  # A recreated container whose startup never ran `pm2 resurrect` leaves pm2
+  # with nothing (or with everything but the Command Center). Bring back the
+  # saved list when pm2 is empty, then start the Command Center from its own
+  # ecosystem if it is still missing, and save. Never during a deploy: an open
+  # atomic-deploy transaction owns the service.
+  if [[ "$WATCHDOG_SELF_HEAL" == "1" && "$KEY" == "no-pm2-app" ]]; then
+    CC_DIR="${WATCHDOG_CANONICAL_DIR:-}"
+    if [[ -z "$CC_DIR" ]]; then
+      for d in "$CC_ROOT_DEFAULT" "$HOME/projects/command-center" "/data/projects/command-center"; do
+        [[ -f "$d/ecosystem.config.cjs" ]] && { CC_DIR="$d"; break; }
+      done
+    fi
+    if [[ -z "$CC_DIR" || ! -f "$CC_DIR/ecosystem.config.cjs" ]]; then
+      printf '[watchdog-cc] START skipped: cannot locate ecosystem.config.cjs\n' >&2
+    elif [[ -f "$CC_DIR/.atomic-deploy-transaction.json" ]]; then
+      printf '[watchdog-cc] START skipped: an atomic-deploy transaction is open in %s\n' "$CC_DIR" >&2
+    else
+      if [[ -z "$(pm2 ls -m 2>/dev/null | grep '^+--- ')" ]]; then
+        pm2 resurrect >/dev/null 2>&1 && printf '[watchdog-cc] START: pm2 was empty; resurrected the saved process list\n' >&2
+      fi
+      _cc_known=""
+      for name in $WATCHDOG_CC_APP_NAMES; do
+        pm2 describe "$name" >/dev/null 2>&1 && { _cc_known="$name"; break; }
+      done
+      if [[ -n "$_cc_known" ]]; then
+        printf '[watchdog-cc] START: pm2 app "%s" is back\n' "$_cc_known" >&2
+      elif (cd "$CC_DIR" && CC_PORT="$WATCHDOG_PORT" pm2 start "$CC_DIR/ecosystem.config.cjs" >/dev/null 2>&1); then
+        pm2 save >/dev/null 2>&1 || true
+        printf '[watchdog-cc] START: started the Command Center from %s/ecosystem.config.cjs and saved the pm2 list\n' "$CC_DIR" >&2
+      else
+        printf '[watchdog-cc] START: pm2 start failed — manual intervention required\n' >&2
+      fi
+    fi
+  fi
+
   # ── Legacy zombie self-heal (RETAINED, hardened) ────────────────────────────
   # Only runs when WATCHDOG_SELF_HEAL=1 AND the failure pattern indicates a
   # zombie/orphan/crash-loop that cc-start.sh can resolve.
@@ -443,7 +491,7 @@ except Exception:
   # are ever deleted, only before their own recreation; refusal-receipt REDs
   # are handled by the REBUILD path above, not by a bare `pm2 start` of the
   # same stale tree.
-  if [[ "$WATCHDOG_SELF_HEAL" == "1" && "$KEY" != "refusal-receipt" && "$KEY" != "scheduler-stalled" ]]; then
+  if [[ "$WATCHDOG_SELF_HEAL" == "1" && "$KEY" != "refusal-receipt" && "$KEY" != "scheduler-stalled" && "$KEY" != "no-pm2-app" ]]; then
     HEAL_TRIGGER=0
     if printf '%s' "$RESULT_JSON" | grep -q '"app_count":[2-9]'; then
       HEAL_TRIGGER=1

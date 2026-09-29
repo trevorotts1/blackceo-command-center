@@ -1,3 +1,12 @@
+## [v7.6.83] — 2026-09-29 — A Command Center missing from pm2 is RED, and the watchdog starts it
+
+Live incident: a Hostinger container was recreated without `pm2 resurrect`, so pm2 came back with no Command Center. cc-health-check.sh saw HTTP unreachable and no pm2 app and called it a bounded UNKNOWN (exit 3); the watchdog does not act on UNKNOWN, and because nothing passed `--unknown-since` the UNKNOWN never escalated. The watchdog reported ok every 5 minutes while the Command Center was down.
+
+- fix(health): HTTP unreachable while pm2 answers with no Command Center app is a definitive RED (`service_status: "absent"`, "no Command Center app in pm2").
+- fix(watchdog): that RED is the `no-pm2-app` incident. With `WATCHDOG_SELF_HEAL=1` the watchdog resurrects pm2's saved list when pm2 is empty, starts the Command Center from its `ecosystem.config.cjs` if it is still missing, and saves the list. Never while an atomic-deploy transaction is open.
+- fix(watchdog): the first UNKNOWN is recorded in the state dir and passed back as `--unknown-since`, so an UNKNOWN that never clears becomes the `persistent-unknown` RED after the deadline (300 s); GREEN clears it.
+- test: `tests/unit/watchdog-cc-down-is-red.test.sh` (12 checks, 8 fail on the old scripts; controls pass on both), now in CI.
+
 ## [v7.6.82] — 2026-09-29 — A rollback writes its receipt before it starts the restored release
 
 Live incident: on a client Mac a deploy's health check failed and atomic-deploy rolled back. The live source tree stays on the failed target after a rollback, so cc-start serves the restored build only when `.deploy-rollback-state.json` vouches for exactly that pair (PRES-046). The receipt was written after the pm2 switch: cc-start refused the restored app (`content-mismatch-invalid-receipt`, exit 78), all 36 rollback health attempts read "server unreachable", the transaction ended `ROLLBACK_VERIFY_FAILED`, the Command Center was down, and every later deploy (including the fleet roll's own rollback rebuild) was refused.

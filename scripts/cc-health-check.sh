@@ -370,6 +370,8 @@ for a in apps:
         uptime = max(0, int(time.time() * 1000) - int(rt)) if rt else 0
         print(f"{st}|{pm_id if pm_id is not None else ''}|{uptime // 1000}")
         sys.exit(0)
+# pm2 answered and none of its apps is the Command Center: nothing is serving it.
+print("absent||")
 sys.exit(0)
 PYEOF
 }
@@ -437,9 +439,12 @@ if [[ "$HTTP_CODE" == "0" || "$HTTP_CODE" == "000" ]]; then
     fi
   fi
 
-  # 1) DEFINITIVE RED: stopped/errored service, or a current refusal receipt.
-  if [[ "$_SVC_STATUS" == "stopped" || "$_SVC_STATUS" == "errored" ]] || [[ "$_RECEIPT_CURRENT" == "true" ]]; then
+  # 1) DEFINITIVE RED: stopped/errored service, no Command Center app in pm2
+  #    at all (a recreated container that never resurrected), or a current
+  #    refusal receipt.
+  if [[ "$_SVC_STATUS" == "stopped" || "$_SVC_STATUS" == "errored" || "$_SVC_STATUS" == "absent" ]] || [[ "$_RECEIPT_CURRENT" == "true" ]]; then
     _RED_REASON="service ${_SVC_STATUS:-unknown}"
+    [[ "$_SVC_STATUS" == "absent" ]] && _RED_REASON="no Command Center app in pm2"
     [[ "$_RECEIPT_CURRENT" == "true" ]] && _RED_REASON="current refusal receipt (reason=${_RECEIPT_REASON:-unknown}, exit=${_RECEIPT_EXIT:-78}, age=${_RECEIPT_AGE:-unknown}s) plus service ${_SVC_STATUS:-unknown}"
     log "RED: HTTP unreachable but classification is definitive — ${_RED_REASON}"
     printf '{"pass":false,"indeterminate":false,"timestamp":"%s","checks":{},"detail":"server unreachable: %s","refusal":{"receipt_present":%s,"receipt_current":%s,"reason":"%s","exit":"%s","age_seconds":"%s"},"service_status":"%s","cc_port":%s,"override_ack_set":%s}\n' \
