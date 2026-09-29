@@ -62,9 +62,10 @@ test('resolveOwnerChatId: returns client ID and skips operator ID', () => {
   // A DM session is not an owner record: whoever messaged the bot first is
   // not necessarily the owner.
   assert.equal(resolveOwnerChatId(), null, 'sessions never resolve the owner');
-  // The build state's ownerChat is an owner record; an operator id is still refused.
+  // The build state's ownerChat is an owner record — even an operator's own id
+  // (an operator's own box), v7.6.80.
   fs.writeFileSync(path.join(TMP_WS, '.workforce-build-state.json'), JSON.stringify({ ownerChat: Number(TREVOR_ID) }));
-  assert.equal(resolveOwnerChatId(), null, 'an operator id never resolves as the owner');
+  assert.equal(resolveOwnerChatId(), TREVOR_ID, 'a pinned operator id resolves as the owner');
   fs.writeFileSync(path.join(TMP_WS, '.workforce-build-state.json'), JSON.stringify({ ownerChat: Number(CLIENT_ID) }));
   const result = resolveOwnerChatId();
   assert.equal(result, CLIENT_ID, 'should return the non-operator chat ID');

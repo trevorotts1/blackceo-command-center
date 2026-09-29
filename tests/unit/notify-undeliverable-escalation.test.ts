@@ -225,10 +225,10 @@ test('MSG-07: a client id forced into CC_OPERATOR_CHAT_ID is REJECTED', async ()
   }
 });
 
-// ─── 4. The client-protection guardrail is UNCHANGED ─────────────────────────
-test('MSG-07: an OPERATOR id still never resolves as the client owner (guardrail intact)', async () => {
+// ─── 4. Owner records resolve in source order; allowFrom order never does ────
+test('MSG-07: the process-env owner pin beats an operator id in env.vars', async () => {
   cleanEnv();
-  // The operator pinned as the owner record: rejected; the client wins.
+  // The operator in env.vars and allowFrom; the client pinned in the process env, which wins.
   makeBox([OPERATOR_ID, CLIENT_ID], OPERATOR_ID);
   process.env.OPENCLAW_OWNER_CHAT_ID = CLIENT_ID;
   const notify = await freshNotify();
@@ -237,22 +237,18 @@ test('MSG-07: an OPERATOR id still never resolves as the client owner (guardrail
   assert.equal(
     notify.resolveOwnerChatId(),
     CLIENT_ID,
-    'the owner resolver must skip the operator id and pick the client',
+    'the process-env pin is read first',
   );
   // And the operator resolver picks the OPERATOR — never the client.
   assert.equal(notify.resolveOperatorChatId(), OPERATOR_ID);
 });
 
-test('MSG-07: an operator id pinned as the OWNER is still rejected', async () => {
+test('v7.6.80: an operator id pinned as the OWNER resolves (an operator owns their own box)', async () => {
   cleanEnv();
   makeBox([]);
   process.env.OPENCLAW_OWNER_CHAT_ID = OPERATOR_ID;
   const notify = await freshNotify();
-  assert.equal(
-    notify.resolveOwnerChatId(),
-    null,
-    'operator id pinned as owner must STILL be rejected — the guardrail is untouched',
-  );
+  assert.equal(notify.resolveOwnerChatId(), OPERATOR_ID);
 });
 
 // ─── 5. Nothing reachable → still a DURABLE record. Never silent. ────────────

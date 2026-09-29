@@ -3,12 +3,14 @@
  * src/lib/notify.ts. Runs under `npm run test:unit` (node --import tsx --test).
  *
  * Verifies:
- *   1. S0: OPENCLAW_OWNER_CHAT_ID env pin resolves — and an OPERATOR id pinned
- *      there is REJECTED (operator denylist applies to every source).
+ *   1. S0: OPENCLAW_OWNER_CHAT_ID env pin resolves — an OPERATOR id pinned
+ *      there too (an operator's own box, v7.6.80).
  *   2. allowFrom / ownerAllowFrom ORDER is never an owner record (a spouse
- *      listed first received a client's stop-cards): it resolves nothing.
+ *      listed first received a client's stop-cards): it resolves nothing, and
+ *      neither does an operator-only allowFrom with nothing pinned.
  *   3. The explicit owner records resolve, in order: openclaw.json env.vars,
- *      <root>/secrets/.env, the build state's ownerChat.
+ *      <root>/secrets/.env, the build state's ownerChat — an operator's pinned
+ *      ownerChat included; a client box is unchanged.
  *   4. S2 hardening: a sessions file whose ONLY direct session is an operator
  *      id resolves to null (the legacy "any session" fallback is gone).
  *   5. CLI-flag contract: the gateway send uses the REAL `openclaw message
@@ -69,16 +71,17 @@ function clearSessions(): void {
   fs.rmSync(path.join(WORKSPACE, 'agents'), { recursive: true, force: true });
 }
 
-// ── 1. env pin resolves; operator ids pinned there are rejected ──────────────
-test('S0: OPENCLAW_OWNER_CHAT_ID resolves, but an operator id is rejected', () => {
+// ── 1. env pin resolves, an operator's own pinned id included ────────────────
+test('S0: OPENCLAW_OWNER_CHAT_ID resolves, an operator id pinned there too', () => {
   clearConfig();
   clearSessions();
 
   process.env.OPENCLAW_OWNER_CHAT_ID = CLIENT_ID;
   assert.equal(resolveOwnerChatId(), CLIENT_ID);
 
-  process.env.OPENCLAW_OWNER_CHAT_ID = OPERATOR_ID;
-  assert.equal(resolveOwnerChatId(), null, 'operator id must never resolve as owner');
+  // An operator's own box: the pin is the owner.
+  process.env.OPENCLAW_OWNER_CHAT_ID = OPERATOR_ID_2;
+  assert.equal(resolveOwnerChatId(), OPERATOR_ID_2, 'a pinned operator id is the owner of its own box');
 
   delete process.env.OPENCLAW_OWNER_CHAT_ID;
 });
@@ -92,6 +95,10 @@ test('allowFrom order is NOT an owner record: nothing resolves from it', () => {
     channels: { telegram: { allowFrom: [CLIENT_ID, '1000000077'] } },
     commands: { ownerAllowFrom: [CLIENT_ID] },
   });
+  assert.equal(resolveOwnerChatId(), null);
+  // An operator's box with nothing pinned stays fail-closed: allowFrom holding
+  // only operator ids is still a guess, never an owner record.
+  writeConfig({ channels: { telegram: { allowFrom: [OPERATOR_ID, OPERATOR_ID_2] } } });
   assert.equal(resolveOwnerChatId(), null);
   clearConfig();
 });
@@ -111,10 +118,45 @@ test('the explicit owner records resolve: env.vars, then secrets/.env, then buil
     writeConfig({ env: { vars: { OPENCLAW_OWNER_CHAT_ID: CLIENT_ID } }, channels: { telegram: { allowFrom: ['1000000077'] } } });
     assert.equal(resolveOwnerChatId(), CLIENT_ID, 'openclaw.json env.vars beats secrets/.env');
     writeConfig({ env: { vars: { OPENCLAW_OWNER_CHAT_ID: OPERATOR_ID } } });
-    assert.equal(resolveOwnerChatId(), '1000000022', 'an operator id in env.vars is refused; the next record wins');
+    assert.equal(resolveOwnerChatId(), OPERATOR_ID, 'an operator id pinned in env.vars is the owner');
   } finally {
     clearConfig();
     fs.rmSync(secrets, { recursive: true, force: true });
+    fs.rmSync(state, { force: true });
+  }
+});
+
+test('v7.6.80: an operator id pinned only as the build-state ownerChat resolves; ownerChat 0 resolves nothing', () => {
+  clearConfig();
+  clearSessions();
+  delete process.env.OPENCLAW_OWNER_CHAT_ID;
+  const state = path.join(WORKSPACE, '.workforce-build-state.json');
+  try {
+    writeConfig({ channels: { telegram: { allowFrom: [OPERATOR_ID, OPERATOR_ID_2] } } });
+    fs.writeFileSync(state, JSON.stringify({ ownerChat: Number(OPERATOR_ID_2) }));
+    assert.equal(resolveOwnerChatId(), OPERATOR_ID_2, 'the operator who owns this box');
+    fs.writeFileSync(state, JSON.stringify({ ownerChat: 0 }));
+    assert.equal(resolveOwnerChatId(), null, 'ownerChat 0 is not a record: fail closed');
+  } finally {
+    clearConfig();
+    fs.rmSync(state, { force: true });
+  }
+});
+
+test('v7.6.80: a client box is unchanged — the client pin wins, the operator listed first in allowFrom does not', () => {
+  clearConfig();
+  clearSessions();
+  delete process.env.OPENCLAW_OWNER_CHAT_ID;
+  const state = path.join(WORKSPACE, '.workforce-build-state.json');
+  try {
+    writeConfig({
+      env: { vars: { OPENCLAW_OWNER_CHAT_ID: CLIENT_ID } },
+      channels: { telegram: { allowFrom: [OPERATOR_ID, CLIENT_ID] } },
+    });
+    fs.writeFileSync(state, JSON.stringify({ ownerChat: Number(CLIENT_ID) }));
+    assert.equal(resolveOwnerChatId(), CLIENT_ID);
+  } finally {
+    clearConfig();
     fs.rmSync(state, { force: true });
   }
 });

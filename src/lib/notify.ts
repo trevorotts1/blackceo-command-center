@@ -27,14 +27,16 @@
  *       S3  ownerChat in <workspace>/.workforce-build-state.json
  *     No source → nothing is sent to anyone as "the owner". allowFrom ORDER is
  *     NOT an owner record: a household member listed first received a client's
- *     stop-cards (2026-09-28). Every source rejects the known OPERATOR ids.
+ *     stop-cards (2026-09-28). A pinned OPERATOR id is accepted: on an
+ *     operator's own box the owner IS that
+ *     operator. The operator-id rejection only ever guarded the guesses.
  *   - OWNER-SENDS HOLD: ownerSendsHold=true in the build state (the onboarding
  *     switch) stops every send to a non-operator chat, at notifyTelegram.
  *   - OPERATOR alerts on a client box go through the operator alert webhook
  *     (FLEET_OPERATOR_ALERT_URL / the fleet-standing gate), never the client's
  *     bot: the operator never opened a chat with it ("chat not found").
  *   - MSG-08 / CC_OPERATOR_IS_OWNER=1 (opt-in, operator's own box ONLY): when
- *     no owner chat resolves (guaranteed on the operator's own board — see
+ *     no owner chat resolves (an operator's own board with no pinned owner — see
  *     operatorIsOwnerBox() below), notifyOwner() delivers the owner message
  *     directly to the resolved OPERATOR chat id instead of routing it through
  *     the UNDELIVERABLE escalation. Never set on a client box; the guardrail
@@ -146,8 +148,8 @@ export function ownerSendsSuppressed(): boolean {
  * MSG-08 — OPERATOR-OWNER FALLBACK: explicit, config-gated, opt-in ONLY.
  *
  * ── WHY THIS EXISTS ────────────────────────────────────────────────────────
- * `resolveOwnerChatId()` correctly rejects every operator id — a client box
- * must never resolve the operator as its owner. But that means on the
+ * Before v7.6.80 `resolveOwnerChatId()` rejected every operator id, even a
+ * pinned one. That meant on the
  * OPERATOR's OWN board (his `allowFrom` lists only operator ids — there is no
  * client on that box) `resolveOwnerChatId()` is STRUCTURALLY always null, so
  * `notifyOwner()` falls into `escalateUndeliverableOwner()` for EVERY owner
@@ -157,18 +159,18 @@ export function ownerSendsSuppressed(): boolean {
  * is noise a normal owner report should not have to look like.
  *
  * ── THE FIX IS AN EXPLICIT PER-BOX SIGNAL, NOT A GLOBAL LOOSENING ──────────
- * `validOwnerChatId()` / `resolveOwnerChatId()` are UNCHANGED — the
- * client-spam guardrail (an operator id can never resolve as a client's
- * owner) holds exactly as before, on every box that does not set this flag.
- * This is an opt-in fallback that only ever runs INSIDE `notifyOwner()`,
+ * `resolveOwnerChatId()` is not loosened by this flag: it still reads only
+ * explicit owner records, on every box. This is an opt-in fallback that only ever runs INSIDE `notifyOwner()`,
  * only AFTER `resolveOwnerChatId()` has already returned null, and only ever
  * targets an id that passes the pre-existing `validOperatorChatId()` inverse
  * guard (via `resolveOperatorChatId()`) — so it can never resolve a client id
  * either. A client box is never provisioned with this env var, so its
  * behaviour is identical to before this change.
  *
- * CC_OPERATOR_IS_OWNER=1 — set ONLY on the operator's own board's environment
- * (installer/deploy config), never on a client box. When set, and only when
+ * CC_OPERATOR_IS_OWNER=1 — set ONLY on the operator's own board's environment,
+ * never on a client box. No checked-in pm2 config sets it (the cc-prod
+ * ecosystem file did, and every client clone carries that file, v7.6.80): the
+ * operator box is flagged by the marker file below. When set, and only when
  * no real owner chat id resolves, `notifyOwner()` delivers the owner-facing
  * message directly to the resolved operator chat id — cleanly, once, with no
  * "UNDELIVERABLE" wrapper — instead of routing it through
@@ -281,29 +283,13 @@ function normalizeChatId(v: unknown): string {
   return s;
 }
 
-/** Normalise + validate a candidate chat id; '' when invalid or an operator id. */
-function validOwnerChatId(v: unknown): string {
-  const s = normalizeChatId(v);
-  if (!s) return '';
-  if (OPERATOR_CHAT_IDS.has(s)) return ''; // client-protection guardrail — UNCHANGED
-  return s;
-}
-
 /**
  * The INVERSE guard (MSG-07) — the seam that makes the OPERATOR loud without
- * making CLIENTS loud.
- *
- * `validOwnerChatId` rejects OPERATOR ids so an agent can never DM an operator
- * as if they were the client owner. This is its mirror image: a SYSTEM/operator
- * alert target is valid ONLY IF the id IS a known operator id. A client id can
- * therefore NEVER be returned here, which makes it *structurally impossible* for
- * a SYSTEM alert (dispatch failure, block, undeliverable notification) to land in
- * a client's Telegram — MOVE-IN-SILENCE holds by construction, not by convention.
- *
- * Together the two guards partition the chat-id space:
- *   validOwnerChatId    → clients only   (operator ids rejected)
- *   validOperatorChatId → operators only (client ids rejected)
- * Neither can ever leak into the other's channel.
+ * making CLIENTS loud: a SYSTEM/operator alert target is valid ONLY IF the id IS
+ * a known operator id. A client id can therefore NEVER be returned here, which
+ * makes it *structurally impossible* for a SYSTEM alert (dispatch failure, block,
+ * undeliverable notification) to land in a client's Telegram — MOVE-IN-SILENCE
+ * holds by construction, not by convention.
  */
 function validOperatorChatId(v: unknown): string {
   const s = normalizeChatId(v);
@@ -369,6 +355,11 @@ export function ownerSendsHeld(): boolean {
  * Returns null when none exists: the caller then sends nothing to anyone as
  * "the owner" (it records an undeliverable instead). Never guesses from
  * allowFrom order or from whichever chat has a session.
+ *
+ * An operator id pinned in one of these records is accepted: an operator's own
+ * box is owned by that operator, and rejecting the pin left its board
+ * messaging nobody. The operator-id rejection was only
+ * ever needed for the allowFrom/session guesses, which are gone.
  */
 export function resolveOwnerChatId(): string | null {
   const key = 'OPENCLAW_OWNER_CHAT_ID';
@@ -381,7 +372,7 @@ export function resolveOwnerChatId(): string | null {
     () => readBuildState().ownerChat,
   ];
   for (const source of sources) {
-    const id = validOwnerChatId(source() ?? '');
+    const id = normalizeChatId(source() ?? '');
     if (id) return id;
   }
   return null;
@@ -391,8 +382,8 @@ export function resolveOwnerChatId(): string | null {
  * Resolve the OPERATOR Telegram chat ID for SYSTEM-audience alerts (MSG-07).
  *
  * ── WHY THIS EXISTS: the operator's own board was structurally MUTE ──────────
- * `resolveOwnerChatId()` rejects operator ids at EVERY source — correctly, so a
- * client box can never DM an operator as if they were the client. But on the
+ * `resolveOwnerChatId()` rejected operator ids at EVERY source (until v7.6.80,
+ * which accepts a pinned one). On the
  * OPERATOR's own box, `channels.telegram.allowFrom` contains ONLY operator ids
  * (there is no client on that box). So every source rejected every candidate and
  * `resolveOwnerChatId()` returned null — forever. `notifyOwner()` then hit its

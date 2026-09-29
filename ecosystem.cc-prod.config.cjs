@@ -150,18 +150,10 @@ module.exports = {
       // pinned PATH below, so `node` there is the same binary cc-start.sh execs.
       CC_NODE_BIN: CC_NODE_BIN,
 
-      // ── MSG-08 (2026-07-15): OPERATOR-OWNER CLEAN NOTIFY (this box ONLY) ──
-      // This IS the operator's own board: resolveOwnerChatId() is structurally
-      // always null here (validOwnerChatId() rejects every operator id — the
-      // guardrail that stops a CLIENT box DMing the operator as its owner), so
-      // every owner report his own tasks generate used to fall into
-      // escalateUndeliverableOwner() and self-spam an "UNDELIVERABLE owner"
-      // digest. With this flag set, and ONLY after resolveOwnerChatId() returns
-      // null, notifyOwner() delivers the owner-facing message directly to the
-      // resolved OPERATOR chat id — cleanly, ONCE, no UNDELIVERABLE wrapper
-      // (src/lib/notify.ts operatorIsOwnerBox() / MSG-08). NEVER set on a client
-      // box — it is provisioned here only, on the operator's own machine.
-      CC_OPERATOR_IS_OWNER: '1',
+      // CC_OPERATOR_IS_OWNER is deliberately NOT set here: this file ships in
+      // every clone, client boxes included (it sat in a client's clone,
+      // v7.6.80). The operator's own box is flagged by
+      // ~/.openclaw/.operator-is-owner, which operatorIsOwnerBox() reads.
 
       // ── NOTIFY-01 (2026-07-14): OWNER NOTIFICATIONS ARE 100% DEAD ─────────
       // src/lib/notify.ts fires execFile('openclaw', […], { timeout: 5_000 }).

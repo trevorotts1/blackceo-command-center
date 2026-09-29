@@ -47,4 +47,20 @@ for (const file of ['ecosystem.config.cjs', 'ecosystem.cc-prod.config.cjs']) {
       assert.equal(got, path.join(realpathSync(dir), 'data', 'mc.db'));
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
+  // v7.6.80: both files ship in every clone, client boxes included (the cc-prod
+  // one hard-set CC_OPERATOR_IS_OWNER='1' and sat in a client's clone).
+  // The operator box is flagged by ~/.openclaw/.operator-is-owner instead.
+  test(`${file}: never sets CC_OPERATOR_IS_OWNER`, () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'eco-'));
+    const prev = process.env.CC_OPERATOR_IS_OWNER; delete process.env.CC_OPERATOR_IS_OWNER;
+    try {
+      mkdirSync(path.join(dir, 'scripts'), { recursive: true });
+      const app = loadConfigFrom(dir, file, null).apps[0];
+      assert.equal(app.env?.CC_OPERATOR_IS_OWNER, undefined);
+      assert.equal(app.env_production?.CC_OPERATOR_IS_OWNER, undefined);
+    } finally {
+      if (prev !== undefined) process.env.CC_OPERATOR_IS_OWNER = prev;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 }
