@@ -1,3 +1,11 @@
+## [v7.6.79] — 2026-09-29 — A container's watchdog is scheduled from the host and seen from inside
+
+A container has no crontab and no cron daemon, so the deploy's watchdog install always failed there ("Box watchdog schedule NOT installed"), and the working fix on three client containers was a hand-written block in the host's crontab.
+
+- feat(watchdog): `install-watchdog-cc.sh --container NAME`, run on the host as root, writes one host-crontab block per container that runs the container's own `watchdog-cc.sh` through `docker exec -u node` (persistent PATH, `PM2_HOME=<openclaw>/.pm2`, `WATCHDOG_SELF_HEAL=1`, `WATCHDOG_PORT=4000`), logging to the host side of the container's openclaw volume. It checks the script exists in the container first, replaces a hand-written block for the same container instead of adding a second, and never touches another container's block or any other line. `--check` / `--uninstall` take `--container` too. The host needs no checkout: `docker exec NAME cat /home/node/.openclaw/command-center/scripts/install-watchdog-cc.sh | bash -s -- --container NAME`.
+- feat(watchdog): `watchdog-cc.sh` stamps `.cc-state/watchdog-last-run` (time and scheduler) on every tick. Inside a container with no crontab, install and `--check` pass when it ticked in the last 15 minutes, so the deploy no longer warns about a watchdog the host runs; with no recent tick they fail and print the host command.
+- test: `tests/unit/install-watchdog-cc.test.sh` D1-D3 and C1 (15 checks fail on the old scripts); the file now runs in CI.
+
 ## [v7.6.78] — 2026-09-28 — Overflow only onto a model this box can place; a refused placement cools that model down
 
 Live incident: the scorer overflowed a card to the agent's declared fallback `openrouter/moonshotai/kimi-k2.6` on a box where openrouter was neither configured nor in `agents.defaults.modelPolicy.allow`. The gateway refused the placement, and the intake-advance sweep picked the same fallback again every 2 minutes, forever.
