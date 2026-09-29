@@ -31,6 +31,10 @@ import { verifyWebhookSignature } from '@/lib/webhook-signature';
 // EXISTING JEV-010 intake module (classify + the creation gate); this route
 // wires that module, it never re-implements a classifier.
 import { classify, assertTaskCreationAllowed, normalizeIntakeMessage, type Classification } from '@/lib/intake';
+// JGT105 — the raw door's ONLY live-JEV wiring: liveJevResponder falls back to
+// the lexical path itself (classify.ts's classifyViaJev catches a throw), so
+// nothing else in this gate changes.
+import { liveJevResponder } from '@/lib/decision-engine/live';
 // queryOne is still used for workspace resolution below.
 
 export const dynamic = 'force-dynamic';
@@ -417,7 +421,7 @@ export async function POST(request: NextRequest) {
     let rawIntake: { classification: Classification; message: string } | null = null;
     if (!title && typeof body.message === 'string' && body.message.trim()) {
       const message = body.message.trim();
-      const classification = await classify(message);
+      const classification = await classify(message, {}, { jevResponder: liveJevResponder });
       if (classification.intent !== 'task_request' && classification.intent !== 'mixed_answer_and_task') {
         // answer_only / existing_task_control / clarification_response /
         // social_conversation / unresolved — no card (spec 16.2 A11/A13).
@@ -983,8 +987,13 @@ export async function POST(request: NextRequest) {
           // 'general-task' slug so the task is never left unrouted in backlog.
           const generalWs = queryOne<{ id: string }>(
             `SELECT id FROM workspaces
-              WHERE company_id = ? AND archived_at IS NULL AND (lower(slug) IN ('general-task', 'dept-general-task')
+              WHERE company_id = ? AND archived_at IS NULL
+                AND id <> 'default' AND lower(slug) <> 'default'
+                AND (lower(slug) IN ('general-task', 'dept-general-task')
                  OR lower(name) IN ('general task', 'general'))
+              ORDER BY CASE WHEN lower(slug) = 'general-task' THEN 0
+                             WHEN lower(slug) = 'dept-general-task' THEN 1
+                             ELSE 2 END
               LIMIT 1`,
             [ingestCompanyId],
           );

@@ -14,6 +14,23 @@ export function schemaMajor(version: string): string {
   return version.split('.')[0];
 }
 
+/** A routable department offered to the core for live JEV ranking (JGT105). */
+export interface DecisionDepartment {
+  slug: string;
+  name: string;
+  description?: string;
+  keywords?: string[];
+}
+
+/** Live routing verdict (JGT101/JGT105): additive, schema stays '1.1.0'. */
+export interface DecisionRoute {
+  action: 'answer' | 'route' | 'none';
+  department: string | null;
+  confidence: number;
+  fallback: boolean;
+  catalog: 'request' | 'standard-floor' | 'empty';
+}
+
 export interface DecisionRequest {
   schemaVersion: typeof DECISION_SCHEMA_VERSION;
   /** Caller-owned config revision. Core echoes it back verbatim. */
@@ -21,6 +38,8 @@ export interface DecisionRequest {
   taskId: string;
   taskDescription: string;
   department?: string;
+  /** Only ever included when non-empty (buildRequest omits an empty list). */
+  departments?: DecisionDepartment[];
 }
 
 export interface DecisionRecommendation {
@@ -34,6 +53,10 @@ export interface DecisionResponse {
   configRevision: string;
   recommendation: DecisionRecommendation;
   evaluatedAt: string;
+  /** JGT101 additive fields — absent on an old (pre-live) core. */
+  intent?: string;
+  intentSource?: 'fixture' | 'heuristic';
+  route?: DecisionRoute;
 }
 
 /** Keys that would mutate assignment/board state. Never legal in a response. */
@@ -103,6 +126,7 @@ export function buildRequest(input: {
   taskId: string;
   taskDescription: string;
   department?: string;
+  departments?: DecisionDepartment[];
 }): DecisionRequest {
   return {
     schemaVersion: DECISION_SCHEMA_VERSION,
@@ -110,5 +134,6 @@ export function buildRequest(input: {
     taskId: input.taskId,
     taskDescription: input.taskDescription,
     ...(input.department ? { department: input.department } : {}),
+    ...(input.departments && input.departments.length > 0 ? { departments: input.departments } : {}),
   };
 }
