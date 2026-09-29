@@ -131,3 +131,50 @@ test('client box with the operator alert webhook: SYSTEM alerts go to the webhoo
     cap.restore();
   }
 });
+
+// ── Operator-owned boxes: the owner IS an operator (their own box). ──────────
+const OWN_OPERATOR_ID = '6771245262'; // an operator whose own box this is
+
+test('operator-owned box (marker): the box owner\'s own recorded operator id is the owner, not the fleet operator', async () => {
+  cleanEnv();
+  const ws = makeBox({ channels: { telegram: { allowFrom: [OPERATOR_ID, OWN_OPERATOR_ID] } } },
+    { ownerChat: Number(OWN_OPERATOR_ID) });
+  fs.writeFileSync(path.join(path.dirname(ws), '.operator-is-owner'), 'operator-owned\n');
+  const notify = await freshNotify();
+  const cap = capture(notify);
+  try {
+    assert.equal(notify.resolveOwnerChatId(), OWN_OPERATOR_ID);
+    assert.equal(notify.notifyOwner('Your task is complete.'), true);
+    assert.deepEqual(cap.sends.map((s) => s.chatId), [OWN_OPERATOR_ID], 'delivered to the box owner only');
+    assert.ok(!fs.existsSync(path.join(ws, 'notification-failures.jsonl')), 'nothing undeliverable');
+  } finally {
+    cap.restore();
+  }
+});
+
+test('operator-owned box (CC_OPERATOR_IS_OWNER=1): a pinned OPENCLAW_OWNER_CHAT_ID operator id resolves', async () => {
+  cleanEnv();
+  makeBox({ env: { vars: { OPENCLAW_OWNER_CHAT_ID: OWN_OPERATOR_ID } } });
+  process.env.CC_OPERATOR_IS_OWNER = '1';
+  const notify = await freshNotify();
+  try {
+    assert.equal(notify.resolveOwnerChatId(), OWN_OPERATOR_ID);
+  } finally {
+    delete process.env.CC_OPERATOR_IS_OWNER;
+  }
+});
+
+test('client box (not operator-owned): the same operator pin still resolves nothing', async () => {
+  cleanEnv();
+  makeBox({ env: { vars: { OPENCLAW_OWNER_CHAT_ID: OWN_OPERATOR_ID } } }, { ownerChat: Number(OWN_OPERATOR_ID) });
+  const notify = await freshNotify();
+  assert.equal(notify.resolveOwnerChatId(), null);
+});
+
+test('no tracked pm2 config marks a box operator-owned (it ships to client boxes)', () => {
+  const repo = path.resolve(__dirname, '../..');
+  for (const f of fs.readdirSync(repo).filter((n) => /^ecosystem.*\.c?js$/.test(n))) {
+    const src = fs.readFileSync(path.join(repo, f), 'utf8');
+    assert.doesNotMatch(src, /^\s*CC_OPERATOR_IS_OWNER\s*:/m, `${f} sets CC_OPERATOR_IS_OWNER`);
+  }
+});
