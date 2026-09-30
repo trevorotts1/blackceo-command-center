@@ -35,6 +35,7 @@ import { classify, assertTaskCreationAllowed, normalizeIntakeMessage, type Class
 // the lexical path itself (classify.ts's classifyViaJev catches a throw), so
 // nothing else in this gate changes.
 import { liveJevResponder } from '@/lib/decision-engine/live';
+import { rawDoorMakesCard } from '@/lib/intake/bypass';
 // queryOne is still used for workspace resolution below.
 
 export const dynamic = 'force-dynamic';
@@ -128,6 +129,13 @@ interface IngestPayload {
    * door and is never re-classified (spec 4.2).
    */
   message?: unknown;
+  /**
+   * JEV-501 — raw door only: true when a question to the owner is actually
+   * waiting for this message to answer it. Only then can "change … to …" /
+   * "use … instead" / "yes" be read as that answer. Anything but literal
+   * `true` is false.
+   */
+  pending_question?: unknown;
   description?: unknown;
   priority?: unknown;
   /**
@@ -412,8 +420,10 @@ export async function POST(request: NextRequest) {
     // ── A13 (spec 12.2): the RAW conversational door ─────────────────────────
     // A payload with no `title` but a `message` is conversational intake, not a
     // typed command: it goes through the EXISTING intake module — classify()
-    // then the creation gate — before any card can exist. Only a work-bearing
-    // verdict (task_request / mixed_answer_and_task) creates a card, exactly
+    // then the creation gate — before any card can exist. A card is made
+    // unless rawDoorMakesCard (bypass.ts) says the message is existing-task
+    // control, a pending-question answer, exact small talk, or a live-engine
+    // question verdict (JEV-501: backup leans to card). Exactly
     // once: the operation id below is derived from the message hash, so the
     // same message re-ingested finds its prior card instead of minting a
     // second. A typed payload (title present) never enters this branch and is
@@ -421,10 +431,15 @@ export async function POST(request: NextRequest) {
     let rawIntake: { classification: Classification; message: string } | null = null;
     if (!title && typeof body.message === 'string' && body.message.trim()) {
       const message = body.message.trim();
-      const classification = await classify(message, {}, { jevResponder: liveJevResponder });
-      if (classification.intent !== 'task_request' && classification.intent !== 'mixed_answer_and_task') {
-        // answer_only / existing_task_control / clarification_response /
-        // social_conversation / unresolved — no card (spec 16.2 A11/A13).
+      const classification = await classify(
+        message,
+        body.pending_question === true ? { pendingConfirmation: true } : {},
+        { jevResponder: liveJevResponder },
+      );
+      if (!rawDoorMakesCard(classification, message)) {
+        // JEV-501: only existing-task control, an answer to a pending
+        // question, exact small talk, or the live engine's own question
+        // verdict skip the card. Unsure / engine unavailable → a card.
         return NextResponse.json(
           { ok: true, created: false, intent: classification.intent, task_id: null },
           { status: 200 },
@@ -435,7 +450,7 @@ export async function POST(request: NextRequest) {
         // creation authorization (spec 4.4 last row).
         return NextResponse.json({ error: 'control_probe_never_creates', intent: classification.intent }, { status: 403 });
       }
-      assertTaskCreationAllowed({ kind: 'raw', message, classification });
+      assertTaskCreationAllowed({ kind: 'raw', message, classification, unsureMakesCard: true });
       rawIntake = { classification, message };
       // The card title is the message itself; the 500-char boundary is the
       // route's existing title ceiling (MAX_TITLE_CHARS in the intake module).

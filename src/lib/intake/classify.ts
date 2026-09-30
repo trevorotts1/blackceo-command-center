@@ -39,6 +39,12 @@ export type ClassificationProvenance = 'lexical' | 'jev' | 'control';
 
 export interface IntakeContext {
   hasExistingTask?: boolean;
+  /**
+   * A question to the owner is actually waiting for an answer. Only then can
+   * a "yes", a "change … to …" or a "use … instead" be read as that answer;
+   * without it the same words are a new instruction (JEV-501). Doors that do
+   * not know leave it unset (false).
+   */
   pendingConfirmation?: boolean;
   priorDelegationDiscussion?: boolean;
 }
@@ -284,7 +290,12 @@ export function classifyLexical(message: string, ctx: IntakeContext = {}): Class
     return finish('clarification_response', 'unspecified', message, controlProbe, 'lexical');
   }
   // Amendment of a pending decision ("Actually, use the new-business-owner audience.").
-  if (/\bactually\b.{0,10}\buse\b|\bchange\b.*\bto\b|\buse\b.*\binstead\b/i.test(stripped)) {
+  // Only when a question is actually pending: "Change the price on the
+  // coaching page to $997" with nothing pending is a new task (JEV-501).
+  if (
+    ctx.pendingConfirmation &&
+    /\bactually\b.{0,10}\buse\b|\bchange\b.*\bto\b|\buse\b.*\binstead\b/i.test(stripped)
+  ) {
     return finish('clarification_response', 'unspecified', message, controlProbe, 'lexical');
   }
   // Named-department preference ("Please have Marketing handle it.",

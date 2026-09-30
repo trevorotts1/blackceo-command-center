@@ -9,6 +9,7 @@ import type { DbInitFailure } from '@/lib/db';
 import { getSOPEmbeddingHealth, resolveEmbeddingProvider } from '@/lib/sop-embeddings';
 import { poolUsage } from '@/lib/capacity/provider-pools';
 import { readResourceLedger } from '@/lib/capacity/resource-ledger';
+import { jevEngineState } from '@/lib/decision-engine/live';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -277,6 +278,11 @@ export async function GET() {
       // configured one saw an empty board. ADDITIVE — a split is an operational
       // fact, so it never moves the top-level `status`.
       company: companyScope(db, process.env.MC_COMPANY_ID),
+      // JEV-501: is the decision engine giving live verdicts, and if not, why
+      // (mode off/shadow/legacy, core missing, probe failed + next retry).
+      // ADDITIVE — the raw door leans to a card without it, so it never moves
+      // the top-level `status`.
+      decisionEngine: jevEngineState(),
     });
   } catch (error) {
     // DATA-02: if THIS getDb() call is what surfaced the DB-init / migration
