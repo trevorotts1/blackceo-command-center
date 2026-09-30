@@ -1,3 +1,17 @@
+## [v7.6.90] — 2026-09-29 — Unsure means a card; measured department picker
+
+Integrates jev501/door-leans-to-card (063830aa) and jev502/department-picker-measured (77b0ae18), in that order. No merge conflicts.
+
+**Behavior change (kill switch).** With the decision engine set to `off`, `shadow` or `legacy` (or slow, missing or erroring), a raw message at the ingest door now still makes ONE card. Before this release those modes fell back to the word rules, and most real tasks got no card. The kill switch still stops all decision-engine calls; it no longer stops cards. The only raw messages that skip a card are: control of an existing task, an answer to a question that is actually pending, the exact small-talk list, or a "question" verdict from the live engine itself.
+
+- fix(ingest): new `rawDoorMakesCard()` in `bypass.ts` decides the raw door (`{message}`). Unsure or word-rules-only means one card. The creation gate accepts unsure raw text when the door says so.
+- fix(classify): the "change … to", "use … instead" and "actually use" rules apply only when a question is actually pending. The ingest payload gains `pending_question` (only literal `true` counts). "Change the price on the coaching page to $997" with nothing pending is now a task.
+- fix(decision-engine): a failed engine check no longer sticks until restart. It is retried after 30 s, doubling to a 5 min cap, with one warning line per state change.
+- feat(health): `/api/health` gains a `decisionEngine` block (mode, live, core, reason, retryAt, lastCallError). It never changes the top-level status.
+- feat(routing): department picking uses the first available picker of meaning-based (semantic) → decision engine → keyword. A confident pick wins; an unsure one goes to General Task. The order was chosen by measurement on a 169-message labeled set (`scripts/eval-department-routing.ts`): semantic first scored 91.1% acceptable vs 57.4% for the v7.6.89 order. Decision-engine picks need confidence 0.9 or more; keyword picks need a weighted score of 2.
+- feat(routing): the semantic router now runs on keyless local Ollama embeddings (`SOP_EMBEDDING_PROVIDER=ollama`, floor 0.56 unless the env sets one). An embedding outage falls through to the next picker instead of breaking routing.
+- test: new `jev501-door-leans-to-card.test.ts` and `jev502-department-picker-accuracy.test.ts` (replays recorded vectors, fails below 90%). `a13-single-ingest-exact-once.test.ts` now expects engine off → one card; `intake-classify-bypass.test.ts`, `decision-engine-live.test.ts` and `route-task-bare-full-universe.test.ts` updated for the new rules.
+
 ## [v7.6.89] — 2026-09-29 — Mis-filed agents leave General Task; route-scorer tests stop reading the box
 
 Integrates jgt/JGT-202-refile-misfiled-agents (0100cac8) and jgt/jgt204-route-scorer (85e078e4).
