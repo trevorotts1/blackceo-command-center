@@ -195,8 +195,10 @@ test('bare "Draft a cold sales outreach email sequence" routes to Sales, not Gen
 });
 
 // ── Test 4: reconcile invoices → Billing / Finance ────────────────────────────
-test('bare "Reconcile last month\'s invoices" routes to Billing / Finance, not General Task', async () => {
-  const r = await routeBare("Reconcile last month's invoices");
+// JEV-502: a keyword pick needs two signals (one stray substring hit measured
+// as noise), so the example carries two billing keywords (invoice + payment).
+test('bare "Reconcile last month\'s invoices and payments" routes to Billing / Finance, not General Task', async () => {
+  const r = await routeBare("Reconcile last month's invoices and payments");
   assert.ok(r !== null, 'routeTask must not return null for a bare finance task');
   assert.equal(
     r!.department,
