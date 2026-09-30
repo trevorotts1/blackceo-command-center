@@ -81,14 +81,77 @@ export function jevMode(): DecisionEngineMode {
   return parseConfiguredMode(normalized, 'auto');
 }
 
-// probeInstalledCore is JEV traffic too: spawn it at most once per process,
-// regardless of how many distinct task texts jevDecide is asked to evaluate.
-let capabilityPromise: Promise<CapabilityState> | null = null;
-function getCapabilityOnce(corePath: string, deadline: BridgeDeadline): Promise<CapabilityState> {
-  if (!capabilityPromise) {
-    capabilityPromise = probeInstalledCore(deadline, { corePath });
+// probeInstalledCore is JEV traffic too: a success is cached for the life of
+// the process (per core path). A FAILURE is not (JEV-501): it is retried after
+// a bounded backoff — 30 s, doubling, capped at 5 min — so one bad start on a
+// busy box no longer keeps the engine off until restart. Calls inside the
+// backoff window spawn nothing and get null (the lean-to-card backup path).
+const PROBE_RETRY_MIN_MS = 30_000;
+const PROBE_RETRY_MAX_MS = 5 * 60_000;
+
+export type JevCoreState = 'missing' | 'unprobed' | 'ready' | 'failed';
+
+let probe: { corePath: string; promise: Promise<CapabilityState> } | null = null;
+let probeFailures = 0;
+let probeRetryAtMs = 0;
+let coreState: JevCoreState = 'unprobed';
+let coreReason: string | undefined;
+let lastCallError: string | undefined;
+
+/** One warning line per state CHANGE — repeated failures stay quiet. */
+function noteCoreState(next: JevCoreState, reason?: string): void {
+  if (next !== coreState) {
+    console.warn(`[JEV live] decision engine ${coreState} -> ${next}${reason ? ` (${reason})` : ''}`);
   }
-  return capabilityPromise;
+  coreState = next;
+  coreReason = reason;
+}
+
+function getCapability(corePath: string, deadline: BridgeDeadline): Promise<CapabilityState> {
+  if (probe && probe.corePath === corePath) return probe.promise;
+  if (probeFailures > 0 && Date.now() < probeRetryAtMs) {
+    return Promise.resolve({ compatible: false, reason: 'handshake_failed', detail: 'probe retry backoff' });
+  }
+  const promise: Promise<CapabilityState> = probeInstalledCore(deadline, { corePath })
+    .catch((err): CapabilityState => ({ compatible: false, reason: 'handshake_failed', detail: String(err) }))
+    .then((cap) => {
+      if (cap.compatible) {
+        probeFailures = 0;
+        noteCoreState('ready');
+      } else {
+        probeFailures += 1;
+        probeRetryAtMs = Date.now() + Math.min(PROBE_RETRY_MIN_MS * 2 ** (probeFailures - 1), PROBE_RETRY_MAX_MS);
+        if (probe?.promise === promise) probe = null;
+        noteCoreState('failed', cap.reason);
+      }
+      return cap;
+    });
+  probe = { corePath, promise };
+  return promise;
+}
+
+export interface JevEngineState {
+  mode: DecisionEngineMode;
+  /** True only when a raw message can get a live engine verdict right now. */
+  live: boolean;
+  core: JevCoreState;
+  reason?: string;
+  retryAt?: string;
+  lastCallError?: string;
+}
+
+/** Read-only snapshot for /api/health. Never spawns anything. */
+export function jevEngineState(): JevEngineState {
+  const mode = jevMode();
+  const core: JevCoreState = resolveCorePath({ resolve: defaultCorePath }) ? coreState : 'missing';
+  return {
+    mode,
+    live: mode === 'auto' && core === 'ready',
+    core,
+    ...(core === 'failed' && coreReason ? { reason: coreReason } : {}),
+    ...(core === 'failed' ? { retryAt: new Date(probeRetryAtMs).toISOString() } : {}),
+    ...(lastCallError ? { lastCallError } : {}),
+  };
 }
 
 export interface JevDecision {
@@ -158,10 +221,14 @@ export async function jevDecide(
 
   try {
     const corePath = resolveCorePath({ resolve: defaultCorePath });
-    if (!corePath) return null;
+    if (!corePath) {
+      noteCoreState('missing');
+      return null;
+    }
+    if (coreState === 'missing') noteCoreState(probe?.corePath === corePath ? 'ready' : 'unprobed');
 
     const deadline = stampRootDeadline(3000);
-    const capability = await getCapabilityOnce(corePath, deadline);
+    const capability = await getCapability(corePath, deadline);
     if (!capability.compatible) return null;
 
     const request = buildRequest({
@@ -180,8 +247,10 @@ export async function jevDecide(
     }
 
     memoSet(key, decision);
+    lastCallError = undefined;
     return decision;
   } catch (err) {
+    lastCallError = (err as Error).name || 'Error';
     warnRateLimited(`jevDecide failed: ${(err as Error).message}`);
     return null;
   }

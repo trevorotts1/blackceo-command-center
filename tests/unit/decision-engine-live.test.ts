@@ -298,6 +298,8 @@ test('routeTaskDecision: JEV names a catalog department with fallback=false → 
   process.env.FAKE_ACTION = 'route';
   process.env.FAKE_FALLBACK = 'false';
   process.env.FAKE_DEPT_HINT = 'legal';
+  // JEV-502: only a full-confidence engine route is taken (the real engine's domain matches score 1.0).
+  process.env.FAKE_CONFIDENCE = '1.0';
 
   const f = deptFixture();
   const legal = f.worker('Legal / Compliance');

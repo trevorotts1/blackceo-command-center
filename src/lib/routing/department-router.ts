@@ -5,9 +5,11 @@
  *   1. Explicit department tag on the task
  *   2. SEMANTIC similarity (embedding cosine) — primary classification path
  *      - Embeds task text against each dept's (name + purpose + keywords)
- *      - Uses the CLIENT'S OWN OPENAI_API_KEY (never a shared key)
+ *      - Uses the CLIENT'S OWN embedding provider (Gemini/OpenAI key, or
+ *        keyless local Ollama)
  *      - LLM tiebreak when top-2 scores are within TIEBREAK_MARGIN
- *   3. Keyword scoring — fallback when no embedding key is configured
+ *   3. Without embeddings: the decision engine, then keyword scoring
+ *      (pickDepartment / DEPARTMENT_PICKER_ORDER, measured — JEV-502)
  *   4. Agent role matching within the winning department
  *   5. Load balancing — prefer agents with fewer active tasks
  *
@@ -41,7 +43,8 @@ import {
 import {
   fetchEmbeddings,
   cosineSimilarity,
-  getEmbeddingApiKey,
+  isEmbeddingAvailable,
+  resolveEmbeddingProvider,
   type EmbeddingVector,
 } from '@/lib/sop-embeddings';
 import {
@@ -77,18 +80,39 @@ const TIEBREAK_MARGIN = 0.04;
  * Default: 0.55. Rationale: cosine similarity below 0.55 on
  * text-embedding-ada-002 / gemini-embedding-001 is typically noise-level
  * for domain-specific department text.
+ *
+ * JEV-502: local Ollama (nomic-embed-text) runs on a different similarity
+ * scale; its default is 0.56, the lowest floor that keeps the labeled
+ * fixture (scripts/eval-department-routing.ts) at >=90% acceptable-or-General
+ * (0.55 → 88.8%, 0.56 → 91.1%). The env value, when valid, wins for every provider.
  */
-const MIN_ROUTING_CONFIDENCE: number = (() => {
+const MIN_ROUTING_CONFIDENCE_ENV: number | null = (() => {
   const env = process.env.MIN_ROUTING_CONFIDENCE;
   if (env) {
     const parsed = parseFloat(env);
     if (!isNaN(parsed) && parsed >= 0 && parsed <= 1) return parsed;
     console.warn(
-      `[DepartmentRouter] Invalid MIN_ROUTING_CONFIDENCE="${env}" — must be 0–1. Using default 0.55.`,
+      `[DepartmentRouter] Invalid MIN_ROUTING_CONFIDENCE="${env}" — must be 0–1. Using the provider default.`,
     );
   }
-  return 0.55;
+  return null;
 })();
+
+function minRoutingConfidence(): number {
+  return MIN_ROUTING_CONFIDENCE_ENV ?? (resolveEmbeddingProvider().name === 'ollama' ? 0.56 : 0.55);
+}
+
+/**
+ * JEV-502 measured gates for the fallback pickers (same fixture):
+ *  - a decision-engine route below 0.9 is a weak lexical guess (all of its
+ *    >=0.9 picks score 1.0 — a full domain match); gated it measures 87.6%
+ *    acceptable-or-General vs 65.1% ungated.
+ *  - a keyword pick needs a weighted score of 2 (two keyword hits or one
+ *    department-name token); one stray substring hit is not evidence.
+ *    Gated 92.9% vs 55.0% ungated.
+ */
+const JEV_MIN_CONFIDENCE = 0.9;
+const KEYWORD_MIN_SCORE = 2;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -428,15 +452,25 @@ async function semanticRankDepartments(
   taskText: string,
   departments: DepartmentConfig[],
 ): Promise<SemanticScore[] | null> {
-  if (!getEmbeddingApiKey()) return null;
+  // JEV-502: isEmbeddingAvailable() also covers keyless local Ollama
+  // (SOP_EMBEDDING_PROVIDER=ollama); getEmbeddingApiKey() skipped it.
+  if (!isEmbeddingAvailable()) return null;
   if (departments.length === 0) return null;
 
-  const deptVectors = await getCachedDepartmentVectors(departments);
-  if (!deptVectors) return null;
-
-  const taskResults = await fetchEmbeddings([taskText]);
-  if (!taskResults || taskResults.length < 1) return null;
-  const taskVec: EmbeddingVector = taskResults[0].embedding;
+  let taskVec: EmbeddingVector;
+  let deptVectors: Map<string, EmbeddingVector> | null;
+  try {
+    deptVectors = await getCachedDepartmentVectors(departments);
+    if (!deptVectors) return null;
+    const taskResults = await fetchEmbeddings([taskText]);
+    if (!taskResults || taskResults.length < 1) return null;
+    taskVec = taskResults[0].embedding;
+  } catch (err) {
+    // A down/slow provider (Ollama not running, 429, network) is "no semantic
+    // answer" — the next picker decides; it must never throw out of routing.
+    console.warn(`[DepartmentRouter] Semantic ranking unavailable: ${(err as Error).message}`);
+    return null;
+  }
 
   return departments
     .map((dept) => {
@@ -515,6 +549,121 @@ async function llmTiebreak(
     return top;
   }
   return candidates.find((c) => c.department.id === result.departmentId)?.department ?? top;
+}
+
+// ---------------------------------------------------------------------------
+// JEV-502 — department picking, in the MEASURED order
+// ---------------------------------------------------------------------------
+
+export type DepartmentPickerName = 'semantic' | 'jev' | 'keyword';
+
+/**
+ * The FIRST AVAILABLE picker decides: its confident pick wins, and when it is
+ * unsure the task goes to General Task (never on to a weaker picker — every
+ * "ask the next picker when unsure" chain measured worse). A picker that is
+ * unavailable (no embedding provider or a provider outage; decision engine
+ * off/absent/old, or it reports fallback=true) passes to the next one.
+ *
+ * Measured by scripts/eval-department-routing.ts on its 169-case labeled
+ * fixture, standard floor seeded as on a box (acceptable dept or General Task
+ * / strict acceptable dept / wrong department):
+ *   v7.6.89 order (decision engine first, then semantic) 61.5% / 52.7% / 65
+ *   decision engine alone (lexical)                      65.1% / 51.5% / 59
+ *   semantic alone, local nomic-embed-text, floor 0.56   91.1% / 34.9% / 15   ← first
+ *   no embeddings: decision engine, then keyword (gated) 87.0% / 32.5% / 22
+ *   no embeddings, decision engine off: keyword (gated)  92.9% / 33.7% / 12
+ * Gemini/OpenAI boxes were not measured (no key used); they keep floor 0.55.
+ */
+export const DEPARTMENT_PICKER_ORDER: readonly DepartmentPickerName[] = ['semantic', 'jev', 'keyword'];
+
+export interface DepartmentPick {
+  /** null → General Task catch-all. */
+  department: DepartmentConfig | null;
+  method: DepartmentPickerName | 'general';
+  confidence: number;
+  note: string;
+  /** When the deciding picker was unsure: the department it leaned to (evaluation only). */
+  candidate?: DepartmentConfig;
+}
+
+/** A confident pick, an unsure lean (→ General Task), or null = unavailable (next picker). */
+type Verdict = { pick: DepartmentPick; confident: boolean } | null;
+
+/** Catalog JEV ranks against: the company's departments minus the structural default. */
+function jevCatalog(departments: DepartmentConfig[]): DecisionDepartment[] {
+  return departments
+    .filter((d) => canonicalDeptSlug(d.slug || d.id) !== 'default')
+    .map((d) => ({ slug: d.slug || d.id, name: d.name, description: d.purpose, keywords: d.keywords }));
+}
+
+async function pickSemantic(
+  taskText: string,
+  departments: DepartmentConfig[],
+  tiebreakSeam: TiebreakSeamConfig,
+): Promise<Verdict> {
+  const ranked = await semanticRankDepartments(taskText, departments);
+  if (!ranked || ranked.length === 0) return null;
+  const top = ranked[0].similarity;
+  const floor = minRoutingConfidence();
+  if (top < floor) {
+    const note = `Low routing confidence (sim ${top.toFixed(3)} < floor ${floor}) for "${ranked[0].department.name}"`;
+    return { confident: false, pick: { department: ranked[0].department, method: 'semantic', confidence: top, note } };
+  }
+  let best = ranked[0].department;
+  if (ranked.length >= 2 && top - ranked[1].similarity < TIEBREAK_MARGIN) {
+    best = await llmTiebreak(taskText, ranked, tiebreakSeam);
+  }
+  const similarity = ranked.find((s) => s.department === best)?.similarity ?? 0;
+  return { confident: true, pick: { department: best, method: 'semantic', confidence: similarity, note: `Semantic routing matched "${best.name}" (similarity: ${similarity.toFixed(3)})` } };
+}
+
+async function pickJev(taskText: string, departments: DepartmentConfig[]): Promise<Verdict> {
+  const jev = await jevDecide(taskText, jevCatalog(departments));
+  // fallback=true is the engine saying it cannot place the task: CC's own ranking decides (JGT105).
+  if (!jev || jev.route.action !== 'route' || jev.route.fallback || !jev.route.department) return null;
+  const target = canonicalDeptSlug(jev.route.department);
+  const dept = departments.find((d) => canonicalDeptSlug(d.slug || d.id) === target);
+  if (!dept) return null;
+  const confidence = jev.route.confidence;
+  return { confident: confidence >= JEV_MIN_CONFIDENCE, pick: { department: dept, method: 'jev', confidence, note: `Decision engine matched "${dept.name}" (confidence: ${confidence.toFixed(2)})` } };
+}
+
+function pickKeyword(title: string, description: string, priority: TaskPriority, departments: DepartmentConfig[]): Verdict {
+  const top = rankDepartments(title, description, priority, departments)[0];
+  if (!top) return { confident: false, pick: { department: null, method: 'keyword', confidence: 0, note: 'Zero keyword hits' } };
+  const raw = keywordScore(`${title} ${description}`, top.department.keywords, top.department.name);
+  return {
+    confident: raw >= KEYWORD_MIN_SCORE,
+    pick: { department: top.department, method: 'keyword', confidence: Math.min(1, raw / 3), note: `Keyword scoring matched department "${top.department.name}" (score: ${top.score.toFixed(2)})` },
+  };
+}
+
+/**
+ * Pick the department for a task with no department/agent hint. Never throws
+ * for a picker outage and never drops a task: nothing confident ends on
+ * General Task (department null).
+ */
+export async function pickDepartment(
+  task: { title?: string | null; description?: string | null; priority?: TaskPriority | null },
+  departments: DepartmentConfig[],
+  opts: { order?: readonly DepartmentPickerName[]; tiebreakSeam?: TiebreakSeamConfig } = {},
+): Promise<DepartmentPick> {
+  const title = task.title || '';
+  const description = task.description || '';
+  const priority = (task.priority as TaskPriority) || 'medium';
+  for (const picker of opts.order ?? DEPARTMENT_PICKER_ORDER) {
+    const verdict =
+      picker === 'semantic' ? await pickSemantic([title, description].filter(Boolean).join(' — '), departments, opts.tiebreakSeam ?? {})
+      : picker === 'jev' ? await pickJev([title, description].filter(Boolean).join('\n'), departments)
+      : pickKeyword(title, description, priority, departments);
+    if (!verdict) continue;
+    if (verdict.confident) return verdict.pick;
+    return {
+      department: null, method: 'general', confidence: verdict.pick.confidence,
+      note: `${verdict.pick.note} — ${picker} picker unsure`, candidate: verdict.pick.department ?? undefined,
+    };
+  }
+  return { department: null, method: 'general', confidence: 0, note: 'No department picker available' };
 }
 
 // ---------------------------------------------------------------------------
@@ -688,11 +837,9 @@ function pinResultFor(
  *
  * Routing pipeline:
  *   1. Explicit department tag on the task (exact name or slug match)
- *   2. SEMANTIC similarity — embeds task text against each dept's
- *      (name + purpose + keywords) using the CLIENT'S OWN OPENAI_API_KEY.
- *      LLM tiebreak when top-2 scores are within TIEBREAK_MARGIN.
- *   3. Keyword scoring — fallback when no embedding key is configured.
- *   4. Same-company General worker, then CEO / COM executable fallback.
+ *   2. pickDepartment(): the first available of semantic → decision engine →
+ *      keyword decides; an unsure picker means General Task (JEV-502).
+ *   3. Same-company General worker, then CEO / COM executable fallback.
  *
  * An owned, recognized CEO workspace can execute the existing task when no
  * department worker is available. The fallback marker accompanies assignment
@@ -719,7 +866,6 @@ export async function comDispatch(
   const title = task.title || '';
   const description = task.description || '';
   const priority = (task.priority as TaskPriority) || 'medium';
-  const taskText = [title, description].filter(Boolean).join(' — ');
 
   // ── Step 0: Owner-direct specialist pin (W3.2 / spec §3) ──────────────────
   // The ONE exception to CEO → department → specialist: when the owner names a
@@ -774,88 +920,34 @@ export async function comDispatch(
     return catchAllAssignment(agents, departments, `Department "${task.department}" is unavailable or has no eligible worker`);
   }
 
-  // ── Step 2: Semantic (embedding) classification ───────────────────────────
-  // Primary path when OPENAI_API_KEY / GOOGLE_API_KEY is configured. Works for
-  // ANY dept name because it classifies by MEANING against the dept's purpose.
-  const semanticRanked = await semanticRankDepartments(taskText, departments);
-
-  if (semanticRanked && semanticRanked.length > 0) {
-    // Raw top result before tiebreak — we need its similarity for the floor check.
-    const rawTopSimilarity = semanticRanked[0].similarity;
-
-    // ── Confidence floor check ──────────────────────────────────────────────
-    // If the best semantic match is below MIN_ROUTING_CONFIDENCE, the task
-    // doesn't clearly belong to any specific department. Route to General Task
-    // (Step 3.5) instead of force-fitting. Log with the similarity + floor
-    // values so the operator can tune MIN_ROUTING_CONFIDENCE from real data.
-    if (rawTopSimilarity < MIN_ROUTING_CONFIDENCE) {
-      console.log(
-        `[DepartmentRouter] Low routing confidence (sim ${rawTopSimilarity.toFixed(3)} < floor ${MIN_ROUTING_CONFIDENCE}) — routing to General Task instead of force-fitting to "${semanticRanked[0].department.name}"`,
-      );
-      // Fall through to Step 3.5 below (after keyword block) by NOT returning here.
-      // We skip the semantic result entirely.
-    } else {
-      let bestDept: DepartmentConfig;
-
-      // LLM tiebreak when top-2 are ambiguously close (only when above floor)
-      if (
-        semanticRanked.length >= 2 &&
-        rawTopSimilarity - semanticRanked[1].similarity < TIEBREAK_MARGIN
-      ) {
-        bestDept = await llmTiebreak(taskText, semanticRanked, tiebreakSeam);
-        console.log(
-          `[DepartmentRouter] Semantic scores within tiebreak margin (${rawTopSimilarity.toFixed(3)} vs ${semanticRanked[1].similarity.toFixed(3)}) — LLM tiebreak selected "${bestDept.name}"`,
-        );
-      } else {
-        bestDept = semanticRanked[0].department;
-      }
-
-      const agent = pickBestAgent(agents, bestDept, task);
-      if (agent) {
-        const similarity = semanticRanked.find((s) => s.department === bestDept)?.similarity ?? 0;
-        return {
-          agentId: agent.id,
-          agentName: agent.name,
-          department: bestDept.name,
-          method: 'semantic', confidence: similarity, workspaceId: agent.workspace_id,
-          score: similarity * urgencyMultiplier(priority) * (bestDept.priority / 10),
-          reason: `Semantic routing matched "${bestDept.name}" (similarity: ${similarity.toFixed(3)}) → least-loaded role-fit agent selected (load: ${agent.active_tasks} tasks)`,
-        };
-      }
-      return catchAllAssignment(agents, departments, `Matched department "${bestDept.name}" has no eligible worker`);
-    }
+  // ── Step 2: department pick (JEV-502 measured order) ─────────────────────
+  // DEPARTMENT_PICKER_ORDER: the first AVAILABLE picker decides; if it is
+  // unsure (or none is available) → General Task catch-all.
+  const pick = await pickDepartment(task, departments, { tiebreakSeam });
+  if (!pick.department) {
+    console.log(`[DepartmentRouter] ${pick.note} — routing to General Task catch-all`);
+    return catchAllAssignment(agents, departments, 'No eligible department match');
   }
-
-  // ── Step 3: Keyword scoring fallback ─────────────────────────────────────
-  // Used when no embedding key is configured (zero configuration required).
-  // General Task has empty keywords + priority=1 → always scores 0 → filtered
-  // out here by the `score > 0` guard. It is NEVER reached by keyword scoring.
-  const ranked = semanticRanked && semanticRanked[0]?.similarity < MIN_ROUTING_CONFIDENCE ? [] : rankDepartments(title, description, priority, departments);
-
-  if (ranked.length > 0) {
-    for (const { department, score } of ranked.slice(0, 1)) {
-      const agent = pickBestAgent(agents, department, { title, description });
-      if (agent) {
-        return {
-          agentId: agent.id,
-          agentName: agent.name,
-          department: department.name,
-          score, method: 'keyword', confidence: Math.min(1, keywordScore(taskText, department.keywords, department.name) / 3), workspaceId: agent.workspace_id,
-          reason: `Keyword scoring matched department "${department.name}" (score: ${score.toFixed(2)}) → least-loaded role-fit agent selected (load: ${agent.active_tasks} tasks)`,
-        };
-      }
-    }
-  } else if (!semanticRanked) {
-    // Keyword-only mode (no embedding key) AND zero keyword hits → General Task.
-    // This is the keyword-mode equivalent of the confidence floor: when no dept
-    // matches at all, don't fall through to the CEO master; catch it here.
-    console.log(
-      `[DepartmentRouter] Keyword-only mode: zero keyword hits — routing to General Task catch-all`,
-    );
-    // Falls through to Step 3.5 below.
+  if (pick.method === 'jev') {
+    // The decision engine's pick dispatches as an explicit tag; NEVER prefix
+    // the reason: isCatchAllRoutingReason is a startsWith('[catch-all]') check.
+    const routing = await comDispatch({ ...task, department: pick.department.slug || pick.department.id }, agents, departments);
+    return routing ? { ...routing, reason: `${routing.reason} (department chosen by decision engine)` } : routing;
   }
-
-  return catchAllAssignment(agents, departments, 'No eligible department match');
+  const bestDept = pick.department;
+  const agent = pickBestAgent(agents, bestDept, task);
+  if (agent) {
+    const base = pick.method === 'semantic' ? pick.confidence : keywordScore(`${title} ${description}`, bestDept.keywords, bestDept.name);
+    return {
+      agentId: agent.id,
+      agentName: agent.name,
+      department: bestDept.name,
+      method: pick.method, confidence: pick.confidence, workspaceId: agent.workspace_id,
+      score: base * urgencyMultiplier(priority) * (bestDept.priority / 10),
+      reason: `${pick.note} → least-loaded role-fit agent selected (load: ${agent.active_tasks} tasks)`,
+    };
+  }
+  return catchAllAssignment(agents, departments, `Matched department "${bestDept.name}" has no eligible worker`);
 }
 
 // ---------------------------------------------------------------------------
@@ -904,39 +996,6 @@ export type RoutingTask = Pick<Task, 'title' | 'priority'> & {
   catch_all?: boolean;
 };
 
-/**
- * JGT105: when the task carries no department/agent/catch-all hint, let JEV
- * rank it against the company's real department catalog first. A confident,
- * non-fallback catalog match dispatches explicitly (so the reason records
- * WHY); anything else — no live core, low confidence, fallback=true, or a
- * department JEV named that isn't in the catalog — falls through to today's
- * unchanged semantic/keyword/catch-all path.
- */
-async function routeViaJevOrDispatch(
-  task: RoutingTask,
-  agents: AgentWithLoad[],
-  departments: DepartmentConfig[],
-): Promise<RoutingResult | null> {
-  const catalog: DecisionDepartment[] = departments
-    .filter((d) => canonicalDeptSlug(d.slug || d.id) !== 'default')
-    .map((d) => ({ slug: d.slug || d.id, name: d.name, description: d.purpose, keywords: d.keywords }));
-  const text = [task.title, task.description].filter(Boolean).join('\n');
-  const jev = await jevDecide(text, catalog);
-  if (jev && jev.route.action === 'route' && !jev.route.fallback && jev.route.department) {
-    const targetSlug = canonicalDeptSlug(jev.route.department);
-    const matched = catalog.find((c) => canonicalDeptSlug(c.slug) === targetSlug);
-    if (matched) {
-      const routing = await comDispatch({ ...task, department: matched.slug }, agents, departments);
-      if (routing) {
-        // NEVER prefix: isCatchAllRoutingReason is a startsWith('[catch-all]') check.
-        return { ...routing, reason: `${routing.reason} (department chosen by decision engine)` };
-      }
-      return routing;
-    }
-  }
-  return comDispatch(task, agents, departments);
-}
-
 /** Resolve company before any model call; an empty or ambiguous scope never expands globally. */
 export async function routeTaskDecision(task: RoutingTask): Promise<RoutingDecision> {
   const wait = (reason: string, status: 'waiting' | 'ambiguous' | 'no_capable_worker' = 'waiting'): RoutingDecision =>
@@ -963,9 +1022,8 @@ export async function routeTaskDecision(task: RoutingTask): Promise<RoutingDecis
   let routing: RoutingResult | null;
   if (task.catch_all && !task.target_agent) {
     routing = catchAllAssignment(agents, departments, 'Reassessing queued catch-all executor');
-  } else if (!task.department && !task.target_agent && !task.catch_all) {
-    routing = await routeViaJevOrDispatch(task, agents, departments);
   } else {
+    // No hint → comDispatch Step 2 runs DEPARTMENT_PICKER_ORDER (incl. JEV).
     routing = await comDispatch(task, agents, departments);
   }
   if (!routing) {
