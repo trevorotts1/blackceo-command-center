@@ -1,3 +1,5 @@
+## [v7.6.91] — 2026-10-01 — V23-CC1 intake chain + Agnes 3.0 + security deps
+
 ## [v7.6.90] — 2026-09-29 — Unsure means a card; measured department picker
 
 Integrates jev501/door-leans-to-card (063830aa) and jev502/department-picker-measured (77b0ae18), in that order. No merge conflicts.
