@@ -7,9 +7,9 @@
  *   3. Agnes 3.0 Flash — only when the box HAS Agnes
  *      (id `agnes-3.0-flash`; matches onboarding
  *      `shared-utils/llm_score.py` AGNES_MODEL — do not invent).
- *   4. Else the box keeps deciding with its OWN main model
- *      (openclaw.json `agents.list[i].model.primary` / defaults chain —
- *      read in `runtime-model.ts`, never re-implemented here).
+ *   4. Else the box keeps deciding with its OWN machinery — the installed
+ *      decision-engine core (the box's main-owned model), delegated to
+ *      `liveJevResponder` in `decision-engine/live.ts`.
  *
  * The call carries ONLY the classification policy plus the message (~2,000
  * tokens in) and does NOT pick a department.
@@ -37,7 +37,6 @@ import { getProvider, type ModelProvider } from '@/lib/model-providers';
 import { agnesProvider } from '@/lib/model-providers/agnes';
 import { minimaxProvider } from '@/lib/model-providers/minimax';
 import { openrouterProvider } from '@/lib/model-providers/openrouter';
-import { resolveRuntimeModelChainFromConfig } from '@/lib/runtime-model';
 import type { Agent } from '@/lib/types';
 import type { IntakeContext, JevIntentAnswer, JevResponder } from './classify';
 
@@ -192,23 +191,23 @@ async function attemptChat({
 
 /**
  * The chain as a JevResponder. Steps advance on missing key, timeout, or
- * error; total failure throws so classifyViaJev keeps the lexical floor.
+ * error; step 4 delegates to the box's own decision engine, and total
+ * failure throws so classifyViaJev keeps the lexical floor.
  */
 export const intakeChainResponder: JevResponder = async ({
   message,
-  context: _context,
+  context,
 }: {
   message: string;
   context: IntakeContext;
 }): Promise<JevIntentAnswer> => {
-  void _context;
   // SWITCH PARITY: the same ~/.openclaw/decision-engine-mode.conf semantics
   // govern here as in live.ts jevMode() (env OPENCLAW_DECISION_ENGINE_MODE
   // first, then the conf file, default auto; off/legacy/shadow = no JEV
   // traffic). Dynamic import: live.ts imports @/lib/intake, so a static
   // import here would cycle. Anything but auto throws — classifyViaJev then
   // keeps the lexical path (the floor).
-  const { jevMode } = await import('@/lib/decision-engine/live');
+  const { jevMode, liveJevResponder } = await import('@/lib/decision-engine/live');
   if (jevMode() !== 'auto') {
     throw new Error('intake chain disabled by decision-engine mode (lexical floor governs)');
   }
@@ -261,10 +260,10 @@ export const intakeChainResponder: JevResponder = async ({
       // Advance to the box-main fallthrough below.
     }
   }
-  // Step 4 — the box keeps deciding with its OWN main model (openclaw.json
-  // agents.list / defaults, read by runtime-model.ts — never re-implemented
-  // here, never an AI call from this responder). There is no further remote
-  // step to attempt, so throw: classifyViaJev falls back to the lexical path
-  // (the floor) and ingest never fails for an unavailable AI step.
-  throw new Error('intake chain unavailable: provider steps failed, box main model decides');
+  // Step 4 — the box keeps deciding with its OWN machinery: the installed
+  // decision-engine core (the box's main-owned model), delegated through
+  // liveJevResponder. That responder throws when the core is unavailable
+  // (no core / mode off / failure), so classifyViaJev still falls back to
+  // the lexical floor and ingest never fails for an unavailable AI step.
+  return await liveJevResponder({ message, context });
 };
