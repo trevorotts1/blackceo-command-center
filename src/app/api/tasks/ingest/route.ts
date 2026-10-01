@@ -31,10 +31,13 @@ import { verifyWebhookSignature } from '@/lib/webhook-signature';
 // EXISTING JEV-010 intake module (classify + the creation gate); this route
 // wires that module, it never re-implements a classifier.
 import { classify, assertTaskCreationAllowed, normalizeIntakeMessage, type Classification } from '@/lib/intake';
-// JGT105 — the raw door's ONLY live-JEV wiring: liveJevResponder falls back to
-// the lexical path itself (classify.ts's classifyViaJev catches a throw), so
-// nothing else in this gate changes.
-import { liveJevResponder } from '@/lib/decision-engine/live';
+// V23-CC1 — the raw door's classifier chain: intakeChainResponder walks
+// OpenRouter GPT-6 Luna -> Minimax 3 on Ollama Cloud (box has Ollama only) ->
+// Agnes 3.0 Flash (box has Agnes only) -> box main model. Every step advances
+// on missing key, timeout, or error, and total failure throws — so
+// classify.ts's classifyViaJev falls back to the lexical path itself and
+// nothing else in this gate changes. No second classifier lives here.
+import { intakeChainResponder } from '@/lib/intake/chain';
 import { rawDoorMakesCard } from '@/lib/intake/bypass';
 // queryOne is still used for workspace resolution below.
 
@@ -434,7 +437,7 @@ export async function POST(request: NextRequest) {
       const classification = await classify(
         message,
         body.pending_question === true ? { pendingConfirmation: true } : {},
-        { jevResponder: liveJevResponder },
+        { jevResponder: intakeChainResponder },
       );
       if (!rawDoorMakesCard(classification, message)) {
         // JEV-501: only existing-task control, an answer to a pending
