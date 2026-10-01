@@ -266,11 +266,21 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   exit 0
 fi
 
-DEEP_RAW=$(curl -s --max-time 15 --max-redirs 0 \
-  --write-out '\n{"_http_code":%{http_code}}' "${BASE_URL}/api/health/deep" 2>/dev/null \
-  || echo '{"_error":"curl_failed"}')
+# WDG-028: ONE bounded retry on a curl-000 deep probe. A single request can
+# lose the race against a saturated event loop and come back 000 while the app
+# is alive and serving; that miss was then escalated (via --unknown-since) to
+# an actionable exit 1 "persistent-unknown" RED after 300s on a box that never
+# stopped. A genuinely dead box fails both tries and classifies unchanged.
+DEEP_RAW=""; HTTP_CODE=""
+for _attempt in 1 2; do
+  DEEP_RAW=$(curl -s --max-time 15 --max-redirs 0 \
+    --write-out '\n{"_http_code":%{http_code}}' "${BASE_URL}/api/health/deep" 2>/dev/null \
+    || echo '{"_error":"curl_failed"}')
+  HTTP_CODE=$(printf '%s\n' "$DEEP_RAW" | awk 'END{print}' | py "d.get('_http_code',0)" 0)
+  [[ "$HTTP_CODE" != "0" && "$HTTP_CODE" != "000" ]] && break
+  [[ "$_attempt" -lt 2 ]] && sleep 3
+done
 DEEP_BODY=$(printf '%s\n' "$DEEP_RAW" | awk 'NR>1{print prev} {prev=$0}')
-HTTP_CODE=$(printf '%s\n' "$DEEP_RAW" | awk 'END{print}' | py "d.get('_http_code',0)" 0)
 
 # ── (a0) PRES-045 refusal/service inspection when HTTP is unreachable ────────
 # On curl code 000 (nothing answered at all — not a 5xx, not a bad body) the old
@@ -469,6 +479,36 @@ if [[ "$HTTP_CODE" == "0" || "$HTTP_CODE" == "000" ]]; then
     printf '{"pass":false,"indeterminate":true,"timestamp":"%s","checks":{},"detail":"startup grace: app up %ss of %ss grace, HTTP not yet answering","startup_grace":true,"service_status":"%s","cc_port":%s,"override_ack_set":%s}\n' \
       "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_UPTIME" "$STARTUP_GRACE" "${_SVC_STATUS:-unknown}" "${PORT:-null}" "$PORT_OVERRIDE_ACK_SET"
     exit 3
+  fi
+
+  # 2b) WDG-028 LIVENESS FALLBACK (before escalating UNKNOWN to RED): the
+  #     deep probe came back 000, but a 200 on the liveness endpoint
+  #     /api/health — with {"status":"ok"} parsed from the body — proves the
+  #     server is up and answering HTTP. Exit 3 (bounded UNKNOWN), NEVER 0:
+  #     a transient miss must not pin the watchdog GREEN, and it must not
+  #     escalate to an actionable RED either. Genuinely-dead boxes fail this
+  #     probe too and keep their classification below, unchanged.
+  if [[ "${HTTP_CODE:-0}" == "0" || "${HTTP_CODE:-0}" == "000" ]]; then
+    _LIVE_CODE=$(curl -s --max-time 10 --max-redirs 0 --write-out '%{http_code}' \
+      -o "${TMPDIR:-/tmp}/cc-health-liveness-$$.json" "${BASE_URL}/api/health" 2>/dev/null || echo 000)
+    _LIVE_OK=false
+    if [[ "$_LIVE_CODE" == "200" ]]; then
+      _LIVE_OK=$(python3 -s -c "
+import json, sys
+try:
+    with open(sys.argv[1]) as fh:
+        d = json.load(fh)
+    print('true' if d.get('status') == 'ok' else 'false')
+except Exception:
+    print('false')" "${TMPDIR:-/tmp}/cc-health-liveness-$$.json" 2>/dev/null || echo false)
+    fi
+    rm -f "${TMPDIR:-/tmp}/cc-health-liveness-$$.json" 2>/dev/null || true
+    if [[ "$_LIVE_OK" == "true" ]]; then
+      log "UNKNOWN: /api/health/deep unreachable (000) but /api/health is live (HTTP 200, status ok) — server up, deep probe missed; NOT escalating to RED"
+      printf '{"pass":false,"indeterminate":true,"timestamp":"%s","checks":{},"detail":"deep probe unreachable (000) but liveness endpoint /api/health is live (HTTP 200, status ok) — server up, deep probe missed; non-gating","liveness_fallback":true,"service_status":"%s","cc_port":%s,"override_ack_set":%s}\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${_SVC_STATUS:-unknown}" "${PORT:-null}" "$PORT_OVERRIDE_ACK_SET"
+      exit 3
+    fi
   fi
 
   # 3) PERSISTENT UNKNOWN: no definitive signal for >= deadline (measured by the
