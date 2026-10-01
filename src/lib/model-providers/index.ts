@@ -28,6 +28,7 @@ import { fishAudioProvider } from './fish-audio';
 import { xiaomiProvider } from './xiaomi';
 import ollamaCloudProvider from './ollama-cloud';
 import ollamaLocalProvider from './ollama-local';
+import { agnesProvider } from './agnes';
 
 /**
  * Model-sovereignty gate (P2-2). The Anthropic connector is registered ONLY on
