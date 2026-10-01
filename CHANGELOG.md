@@ -1,3 +1,11 @@
+## [v7.6.93] — 2026-10-01 — cc-health-check: no false RED on a transient deep-probe miss
+
+A live Command Center was reported RED for 30+ minutes by the watchdog while `/api/health` answered 200 `{"status":"ok"}` on every probe. Root cause, measured from the incident log: `scripts/cc-health-check.sh` issued a single un-retried `curl` to `/api/health/deep`; one request lost the race against a saturated event loop and returned curl code 000 ("nothing answered"), and the 000 ladder only had two outs — a definitive RED, or UNKNOWN that `--unknown-since` escalates to an actionable exit 1 `persistent-unknown` after 300 s. A transient miss therefore pinned a live app RED forever.
+
+- fix(health-check): ONE bounded retry on a 000 deep probe (max 15 s + 3 s sleep extra, only when the first try answers nothing). A genuinely dead box fails both tries and classifies unchanged.
+- fix(health-check): new liveness fallback before UNKNOWN→RED escalation. When the deep probe is 000 but `/api/health` answers 200 with `{"status":"ok"}`, the script exits 3 (bounded UNKNOWN, JSON gains `"liveness_fallback":true`) — never 0, so a transient miss cannot pin the watchdog GREEN, and never the false RED. Boxes that are actually down fail this probe too and keep their classification.
+- test evidence: all 9 repo suites for this script pass post-fix (exit3 7/0, deploy-gate 17/0, cfaccess 6/0, tenant-gated-root 4/0, loopback-host 7/0, no-public-url 4/0, tenant-refusal-403 8/0, tenant-wall 6/0, cf-530 5/0); a fixture (deep→000, `/api/health`→200 ok, fake pm2 online) with `--unknown-since` aged past the deadline returns rc=3 `liveness_fallback:true` post-fix and rc=1 `persistent_unknown` on the byte-identical pre-fix script; dead-port control still rc=1.
+
 ## [v7.6.92] — 2026-10-01 — in-flight security
 
 ## [v7.6.91] — 2026-10-01 — V23-CC1 intake chain + Agnes 3.0 + security deps
