@@ -1,3 +1,5 @@
+## [v7.6.92] — 2026-10-01 — in-flight security
+
 ## [v7.6.91] — 2026-10-01 — V23-CC1 intake chain + Agnes 3.0 + security deps
 
 ## [v7.6.90] — 2026-09-29 — Unsure means a card; measured department picker
