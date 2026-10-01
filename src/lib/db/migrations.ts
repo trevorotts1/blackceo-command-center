@@ -8150,6 +8150,30 @@ export const migrations: Migration[] = [
       console.log(`[Migration 167] Refiled ${moved} mis-filed agent(s) out of General Task`);
     },
   },
+  {
+    id: '168',
+    name: 'add_task_kill_acks',
+    up: (db) => {
+      // CANC-101 (finding 10): kill-fence acknowledgement. Cancelling twice
+      // (or cancelling a task whose run already ended) must not error and
+      // must not double-write — COALESCE on tasks.killed_at keeps the
+      // ORIGINAL timestamp and INSERT OR IGNORE on this table's UNIQUE
+      // (task_id) keeps ONE ack row per task. Audit-only: no fence reads it.
+      console.log('[Migration 168] Adding task_kill_acks...');
+      db.exec(
+        `CREATE TABLE IF NOT EXISTS task_kill_acks (
+          id TEXT PRIMARY KEY,
+          task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id) ON DELETE CASCADE,
+          killed_at TEXT NOT NULL,
+          execution_found INTEGER NOT NULL DEFAULT 0,
+          notice_delivered INTEGER NOT NULL DEFAULT 0,
+          notice_error TEXT,
+          created_at TEXT NOT NULL
+        )`,
+      );
+      console.log('[Migration 168] task_kill_acks ready');
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner

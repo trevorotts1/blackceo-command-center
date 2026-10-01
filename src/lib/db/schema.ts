@@ -511,6 +511,20 @@ CREATE TABLE IF NOT EXISTS task_events (
 );
 CREATE INDEX IF NOT EXISTS idx_task_events_task_id ON task_events(task_id, created_at);
 
+-- CANC-101 (finding 10 — migration 168 owns existing DBs; base CREATE covers
+-- fresh installs). Kill-fence acknowledgement: ONE row per task (UNIQUE on
+-- task_id, INSERT OR IGNORE), so cancelling twice never double-writes.
+-- Audit-only: no fence reads this table.
+CREATE TABLE IF NOT EXISTS task_kill_acks (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id) ON DELETE CASCADE,
+  killed_at TEXT NOT NULL,
+  execution_found INTEGER NOT NULL DEFAULT 0,
+  notice_delivered INTEGER NOT NULL DEFAULT 0,
+  notice_error TEXT,
+  created_at TEXT NOT NULL
+);
+
 -- Agent daily memory logs
 CREATE TABLE IF NOT EXISTS agent_memory_logs (
   id TEXT PRIMARY KEY,
