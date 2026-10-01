@@ -67,6 +67,7 @@ export const ALL_PROVIDERS: ModelProvider[] = [
   elevenlabsProvider,
   fishAudioProvider,
   xiaomiProvider,
+  agnesProvider,
 ];
 
 /**
