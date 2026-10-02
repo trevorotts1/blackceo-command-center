@@ -444,7 +444,27 @@ export async function POST(request: NextRequest) {
         body.pending_question === true ? { pendingConfirmation: true } : {},
         { jevResponder: intakeChainResponder },
       );
-      if (!rawDoorMakesCard(classification, message)) {
+      if (!classification.bypassAllowed || classification.controlProbe) {
+        // The module's own control-probe verdict: untrusted material, never a
+        // creation authorization (spec 4.4 last row). Ordered FIRST (FIX
+        // 009-001): a probe is refused before the ACC-001-09 change exemption
+        // below could let it reach the update path and write a note.
+        return NextResponse.json({ error: 'control_probe_never_creates', intent: classification.intent }, { status: 403 });
+      }
+      // ── FIX 009-001 (ACC-001-09) — a recognized change is NEVER dropped ────
+      // A change request ("change X to Y") is resolved by the ACC-001-09
+      // block below REGARDLESS of the classifier verdict: JEV-702 ruling A —
+      // a change tries `existing update` FIRST; only NOT_FOUND means new
+      // work; the change is never dropped. Before this fix the card-less
+      // verdict return sat IN FRONT of that block, so WHICH classifier step
+      // answered flipped the SAME bytes between "card updated" and "silently
+      // dropped" (a chain verdict of existing_task_control skipped the update
+      // path entirely). The one exemption: when a question is actually
+      // PENDING (JEV-501), "change … to …" is that ANSWER, not a board
+      // change — it stays on the card-less gate exactly as before.
+      const changeRef =
+        body.pending_question === true ? null : changeRequestRef(message);
+      if (!changeRef && !rawDoorMakesCard(classification, message)) {
         // JEV-501: only existing-task control, an answer to a pending
         // question, exact small talk, or the live engine's own question
         // verdict skip the card. Unsure / engine unavailable → a card.
@@ -452,11 +472,6 @@ export async function POST(request: NextRequest) {
           { ok: true, created: false, intent: classification.intent, task_id: null },
           { status: 200 },
         );
-      }
-      if (!classification.bypassAllowed || classification.controlProbe) {
-        // The module's own control-probe verdict: untrusted material, never a
-        // creation authorization (spec 4.4 last row).
-        return NextResponse.json({ error: 'control_probe_never_creates', intent: classification.intent }, { status: 403 });
       }
       assertTaskCreationAllowed({ kind: 'raw', message, classification, unsureMakesCard: true });
       rawIntake = { classification, message };
