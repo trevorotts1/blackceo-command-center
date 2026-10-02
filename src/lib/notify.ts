@@ -1216,7 +1216,19 @@ export function notifySystem(
   // lane -- including a box whose owner is another operator: that box's
   // Telegram would reach its owner, not the fleet operator. Telegram to the
   // operator is only for a box with no webhook at all.
-  const alert = operatorAlertTarget();
+  // ── 2026-10-02 OPERATOR-RELAY MUTE (SPAM-FIX): a CLIENT box with the
+  // fleet gate configured NEVER posts notifySystem() chatter to the
+  // fleet-standing-operator-alert webhook. Until today rung 2 forwarded
+  // EVERY SYSTEM alert — board-hygiene holds, QC starvation, persona
+  // sweeps, stop-cards, dispatch failures — one Telegram DM per box per
+  // minute at fleet scale (the "boards boards boards" flood, 2026-10-02).
+  // The relay is the fleet ROLL stream only (fleet_notify.py posts there
+  // itself). Board chatter stays on the box: rung 3's durable record.
+  // A box WITHOUT the fleet gate keeps the legacy Telegram fallback so a
+  // genuinely stranded box still pages the operator. The operator's own
+  // box keeps its v7.6.84 webhook lane. Rescue (rung 1) untouched.
+  const hasFleetGate = Boolean(process.env.FLEET_OPERATOR_ALERT_URL) || Boolean(process.env.FLEET_STANDING_GATE_URL) || Boolean(configEnvVar('FLEET_OPERATOR_ALERT_URL')) || Boolean(configEnvVar('FLEET_STANDING_GATE_URL'));
+  const alert = operatorIsOwnerBox() ? operatorAlertTarget() : null;
   if (alert) {
     const kind = meta?.action ?? 'system_alert';
     const verdict = admitOperatorSend(kind, message);
@@ -1238,8 +1250,11 @@ export function notifySystem(
       dispatched = true;
     }
   }
-  // Telegram to the operator: his own box, or a box with no alert webhook at all.
-  const operatorChatId = alert ? null : resolveOperatorChatId();
+  // Telegram to the operator: his OWN box only (2026-10-02 spam-fix — a
+  // client box whose allowFrom lists an operator id used to DM the
+  // operator every board alert straight through its bot; now client
+  // boxes never resolve a Telegram operator target at all).
+  const operatorChatId = operatorIsOwnerBox() || !hasFleetGate ? (alert ? null : resolveOperatorChatId()) : null;
   if (operatorChatId) {
     const kind = meta?.action ?? 'system_alert';
     const verdict = admitOperatorSend(kind, message);

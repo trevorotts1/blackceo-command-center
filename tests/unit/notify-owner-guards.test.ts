@@ -110,7 +110,7 @@ test('ownerSendsHold=true: nothing reaches the owner; the hold is recorded', asy
   }
 });
 
-test('client box with the operator alert webhook: SYSTEM alerts go to the webhook, not the client bot', async () => {
+test('client box with the operator alert webhook: SYSTEM alerts are muted — no webhook relay (2026-10-02 spam-fix)', async () => {
   cleanEnv();
   makeBox({
     channels: { telegram: { allowFrom: [OWNER_ID, OPERATOR_ID] } },
@@ -121,12 +121,10 @@ test('client box with the operator alert webhook: SYSTEM alerts go to the webhoo
   const notify = await freshNotify();
   const cap = capture(notify);
   try {
-    assert.equal(notify.notifySystem('[PERSONA-GROUNDING] persona_grounding_degraded'), true);
+    assert.equal(notify.notifySystem('[PERSONA-GROUNDING] persona_grounding_degraded'), false);
     assert.deepEqual(cap.sends, [], 'no Telegram through the client bot (the operator never opened that chat)');
-    assert.equal(cap.posts.length, 1);
-    assert.equal(cap.posts[0].url, 'https://n8n.example.test/webhook/fleet-standing-alert');
-    assert.equal(cap.posts[0].headers['X-Fleet-Standing-Secret'], 'test-secret');
-    assert.match(JSON.parse(cap.posts[0].body).text, /persona\\_grounding\\_degraded/);
+    assert.deepEqual(cap.posts, [], 'no webhook relay — board chatter stays on the box, fleet operator gets nothing');
+    assert.match(fs.readFileSync(path.join(String(process.env.OPENCLAW_WORKSPACE_PATH), 'notification-failures.jsonl'), 'utf8'), /system_alert/);
   } finally {
     cap.restore();
   }
@@ -179,7 +177,7 @@ test('no tracked pm2 config marks a box operator-owned (it ships to client boxes
   }
 });
 
-test('operator-owned box with the operator alert webhook: SYSTEM alerts go to the webhook, not the box owner', async () => {
+test('operator-owned box with the operator alert webhook: SYSTEM alerts still relay, operator box only (2026-10-02)', async () => {
   cleanEnv();
   const ws = makeBox({
     channels: { telegram: { allowFrom: ['6663821679', OPERATOR_ID] } },
