@@ -77,7 +77,7 @@ const TEMPLATE_CLIENT_NAMES = new Set([
 export interface BoxIdentity {
   /** The client this box belongs to, or UNKNOWN_CLIENT. The per-client cap key. */
   clientName: string;
-  /** This box's own name (hostname unless pinned), or UNKNOWN_BOX. */
+  /** This box's own name (fleet slug, else hostname), or UNKNOWN_BOX. */
   boxName: string;
   /** 'VPS' (Docker/Hostinger) | 'Mac' (bare install) | 'unknown'. */
   boxType: 'VPS' | 'Mac' | 'unknown';
@@ -132,10 +132,34 @@ export function resolveClientName(): string {
   return UNKNOWN_CLIENT;
 }
 
-/** This box's name: an explicit pin, else the hostname, else UNKNOWN_BOX. */
-export function resolveBoxName(): string {
-  const pinned = envValue('CC_BOX_NAME', 'OPENCLAW_BOX_NAME');
+/**
+ * Reads one `openclaw.json` -> `env.vars[key]` value ('' when absent). notify.ts
+ * passes its own reader so the config path and the test sandbox rules stay in
+ * ONE place (this module must not import notify.ts: notify.ts imports this one).
+ */
+export type ConfigEnvReader = (key: string) => string;
+
+/**
+ * This box's name. F18 (2026-10): Rescue Rangers matches a box by its FLEET SLUG
+ * (`fleet_standing.box_slug`), never by hostname ('Mac.fios-router.home' matches
+ * no client and pages the operator), so the slug now beats the hostname.
+ *
+ * Precedence: CC_BOX_NAME, OPENCLAW_BOX_NAME, FLEET_STANDING_BOX_SLUG env, then
+ * openclaw.json env.vars.FLEET_STANDING_BOX_SLUG (the same two sources the
+ * onboarding update-skills.sh fleet_standing_resolve_slug() reads), then the
+ * hostname, then UNKNOWN_BOX. A box that pins CC_BOX_NAME keeps it.
+ */
+export function resolveBoxName(configEnvVar?: ConfigEnvReader): string {
+  const pinned = envValue('CC_BOX_NAME', 'OPENCLAW_BOX_NAME', 'FLEET_STANDING_BOX_SLUG');
   if (pinned) return pinned;
+  if (configEnvVar) {
+    try {
+      const slug = (configEnvVar('FLEET_STANDING_BOX_SLUG') ?? '').trim();
+      if (slug) return slug;
+    } catch {
+      /* config unreadable — fall through to the hostname (fail-open) */
+    }
+  }
   try {
     const host = os.hostname().trim();
     if (host) return host;
@@ -169,13 +193,13 @@ export function resolveBoxType(): BoxIdentity['boxType'] {
  * Not cached: env/config can change under a long-lived Next.js server, and this
  * runs at most once per escalation — a file stat is not the hot path.
  */
-export function resolveBoxIdentity(): BoxIdentity {
+export function resolveBoxIdentity(configEnvVar?: ConfigEnvReader): BoxIdentity {
   let clientName = UNKNOWN_CLIENT;
   let boxName = UNKNOWN_BOX;
   let boxType: BoxIdentity['boxType'] = 'unknown';
   try {
     clientName = resolveClientName();
-    boxName = resolveBoxName();
+    boxName = resolveBoxName(configEnvVar);
     boxType = resolveBoxType();
   } catch {
     /* fail-OPEN: identity is metadata on an alarm and must never suppress it */
