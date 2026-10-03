@@ -7,6 +7,7 @@ Integrates the operator-relay mute (0c66db809, direct-to-main — this release c
 - fix(notify): lanes preserved exactly where they belong — the operator's OWN box keeps its v7.6.84 webhook lane; a client box with NO fleet gate keeps the legacy Telegram fallback so a genuinely stranded box still pages the operator; rung 1 (the Rescue Rangers webhook) is untouched, so a client's AGENT in trouble still escalates. A client box whose `allowFrom` lists an operator id no longer DMs the operator through its own bot either.
 - The n8n relay got a belt-and-braces filter node the same day (drops `\[<Company> (<host>)\]`-prefixed posts at the relay); this commit removes the traffic at source so the relay carries only the fleet-roll stream by construction.
 - test evidence: `tests/unit/notify-owner-guards.test.ts` re-proven — a client box with the webhook configured sends ZERO webhook posts and ZERO Telegram sends, durable record only (fails pre-fix: got 1 post); the operator-owned-box relay lane still asserts exactly 1 post. Full unit suite 3,785 tests: failures identical to the pre-change baseline (120 pre-existing, zero new). `tsc --noEmit` clean.
+- ci(audit): the `dependency-audit` check now gates on production dependencies only (`npm audit --omit=dev --audit-level=low`); the dev-only `braces` advisory (GHSA-vfj7-8cjw-p6xm) has no patched version, and production still reports 0 vulnerabilities
 
 ## [v7.6.95] — 2026-10-02 — intake ACC-001-09: a change request is never dropped, whatever verdict the classifier chain returns
 
