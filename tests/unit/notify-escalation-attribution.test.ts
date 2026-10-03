@@ -35,6 +35,10 @@
  *   5. The durable last-rung record (notification-failures.jsonl) is attributable
  *      too — a human reading it cold can tell which box wrote it.
  *
+ * F18 (Rescue Rangers 2026-10): the box is named by its FLEET SLUG
+ * (FLEET_STANDING_BOX_SLUG env, else openclaw.json env.vars), never by hostname,
+ * unless CC_BOX_NAME / OPENCLAW_BOX_NAME pins it. Cases 6-9 below.
+ *
  * Run: node --import tsx --test tests/unit/notify-escalation-attribution.test.ts
  */
 
@@ -108,6 +112,7 @@ function cleanEnv(): void {
   delete process.env.CC_CLIENT_NAME;
   delete process.env.CC_BOX_NAME;
   delete process.env.OPENCLAW_BOX_NAME;
+  delete process.env.FLEET_STANDING_BOX_SLUG;
   delete process.env.CC_BOX_TYPE;
   delete process.env.CC_OPERATOR_CHAT_ID;
   delete process.env.OPENCLAW_OPERATOR_CHAT_ID;
@@ -169,12 +174,12 @@ test('FIX-5: two different boxes produce different cap keys (no shared fleet cou
     process.env.CC_CLIENT_NAME = 'Placeholder Client A';
     process.env.CC_BOX_NAME = 'box-alpha-01';
     const notifyA = await freshNotify();
-    notifyA.notifySystem('same message text from both boxes', { agent: 'refresh-models' });
+    notifyA.notifySystem('same message text from both boxes', { agent: 'refresh-models', action: 'escalate' });
 
     process.env.CC_CLIENT_NAME = 'Placeholder Client B';
     process.env.CC_BOX_NAME = 'box-bravo-01';
     const notifyB = await freshNotify();
-    notifyB.notifySystem('same message text from both boxes', { agent: 'refresh-models' });
+    notifyB.notifySystem('same message text from both boxes', { agent: 'refresh-models', action: 'escalate' });
 
     assert.equal(cap.posts.length, 2);
     const [a, b] = cap.posts;
@@ -200,7 +205,7 @@ test('FIX-5: an unbranded box still escalates — anonymously, never silently', 
   const cap = captureWebhook();
   try {
     const notify = await freshNotify();
-    const dispatched = notify.notifySystem('gateway down', { agent: 'board-jobs-watchdog' });
+    const dispatched = notify.notifySystem('gateway down', { agent: 'refresh-models', action: 'escalate' });
 
     assert.equal(dispatched, true, 'FAIL-OPEN: identity must NEVER be a reason not to escalate');
     assert.equal(cap.posts.length, 1, 'the escalation still goes out');
@@ -250,4 +255,95 @@ test('FIX-5: the durable undeliverable record names the client and box', async (
   } finally {
     cap.restore();
   }
+});
+
+// ─── 6. F18: the fleet slug env names the box when nothing is pinned ─────────
+test('F18: FLEET_STANDING_BOX_SLUG with no pins names the box (not the hostname)', async () => {
+  cleanEnv();
+  makeWorkspace();
+  process.env.RESCUE_RANGERS_WEBHOOK_URL = WEBHOOK;
+  process.env.CC_CLIENT_NAME = 'Placeholder Client A';
+  process.env.FLEET_STANDING_BOX_SLUG = 'box-x';
+
+  const cap = captureWebhook();
+  try {
+    const notify = await freshNotify();
+    notify.notifySystem('real outage', { agent: 'refresh-models', action: 'escalate' });
+    assert.equal(cap.posts.length, 1);
+    assert.equal(cap.posts[0].boxName, 'box-x', 'boxName is the fleet slug');
+    assert.equal(cap.posts[0].boxId, 'placeholder-client-a:box-x');
+    assert.notEqual(cap.posts[0].boxName, os.hostname().trim(), 'never the hostname');
+  } finally {
+    delete process.env.FLEET_STANDING_BOX_SLUG;
+    cap.restore();
+  }
+});
+
+// ─── 7. F18: openclaw.json env.vars carries the slug (client boxes) ──────────
+test('F18: openclaw.json env.vars.FLEET_STANDING_BOX_SLUG names the box when env is unset', async () => {
+  cleanEnv();
+  const workspace = makeWorkspace();
+  fs.writeFileSync(
+    path.join(path.dirname(workspace), 'openclaw.json'),
+    JSON.stringify({
+      channels: { telegram: { allowFrom: [] } },
+      env: { vars: { FLEET_STANDING_BOX_SLUG: 'box-from-config' } },
+    }),
+    'utf8',
+  );
+  process.env.RESCUE_RANGERS_WEBHOOK_URL = WEBHOOK;
+
+  const cap = captureWebhook();
+  try {
+    const notify = await freshNotify();
+    notify.notifySystem('real outage', { agent: 'refresh-models', action: 'escalate' });
+    assert.equal(cap.posts.length, 1);
+    assert.equal(cap.posts[0].boxName, 'box-from-config');
+  } finally {
+    cap.restore();
+  }
+});
+
+// ─── 8. F18: explicit pins keep winning over the slug ────────────────────────
+test('F18: CC_BOX_NAME / OPENCLAW_BOX_NAME pins beat the fleet slug (env and config)', async () => {
+  cleanEnv();
+  const workspace = makeWorkspace();
+  fs.writeFileSync(
+    path.join(path.dirname(workspace), 'openclaw.json'),
+    JSON.stringify({ env: { vars: { FLEET_STANDING_BOX_SLUG: 'slug-from-config' } } }),
+    'utf8',
+  );
+  process.env.FLEET_STANDING_BOX_SLUG = 'slug-from-env';
+  const { resolveBoxName } = await import('../../src/lib/box-identity');
+
+  try {
+    process.env.CC_BOX_NAME = 'pinned-cc';
+    process.env.OPENCLAW_BOX_NAME = 'pinned-oc';
+    assert.equal(resolveBoxName(() => 'slug-from-config'), 'pinned-cc', 'CC_BOX_NAME first');
+    delete process.env.CC_BOX_NAME;
+    assert.equal(resolveBoxName(() => 'slug-from-config'), 'pinned-oc', 'OPENCLAW_BOX_NAME second');
+    delete process.env.OPENCLAW_BOX_NAME;
+    assert.equal(resolveBoxName(() => 'slug-from-config'), 'slug-from-env', 'slug env before config');
+    delete process.env.FLEET_STANDING_BOX_SLUG;
+    assert.equal(resolveBoxName(() => 'slug-from-config'), 'slug-from-config', 'config before hostname');
+  } finally {
+    delete process.env.FLEET_STANDING_BOX_SLUG;
+  }
+});
+
+// ─── 9. F18: fail-open — no slug anywhere (or a throwing reader) -> hostname ──
+test('F18: with no slug anywhere, or a reader that throws, the box still names itself', async () => {
+  cleanEnv();
+  makeWorkspace();
+  const { resolveBoxName, UNKNOWN_BOX } = await import('../../src/lib/box-identity');
+  const host = os.hostname().trim() || UNKNOWN_BOX;
+  assert.equal(resolveBoxName(), host, 'no reader, no env: hostname (pre-F18 behaviour)');
+  assert.equal(resolveBoxName(() => ''), host, 'empty config value: hostname');
+  assert.equal(
+    resolveBoxName(() => {
+      throw new Error('config unreadable');
+    }),
+    host,
+    'a throwing reader never suppresses the alarm',
+  );
 });
