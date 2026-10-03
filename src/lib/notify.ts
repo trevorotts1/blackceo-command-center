@@ -1120,6 +1120,28 @@ export type NotifyAudience = 'OWNER' | 'SYSTEM';
  * @returns true when dispatched to the rescue webhook; false when no webhook
  *   is configured (the alert is logged and dropped — never sent to the client).
  */
+/**
+ * 2026-10-02 RR-INTAKE MUTE: Rescue Rangers is ONLY for a client's AGENT that has
+ * a real problem it cannot solve. A box's own board housekeeping (stale/blocked
+ * cards, missing SOP/persona/triad grooming, board hygiene, QC holds/starvation,
+ * stop-card notices, persona-grounding sweeps) is NOT an agent problem: RR-02
+ * cannot match it to an agent (unmatched_identity) and pages the operator.
+ * Those alerts stay on the box (rung 3 durable record + its own board).
+ */
+const RR_HOUSEKEEPING_AGENTS = new Set([
+  'stale-task-sweep', 'board-hygiene', 'stuck-in-progress-sweep', 'intake-advance-sweep',
+  'operator-column-age-digest', 'qc-scorer', 'audience-confirm', 'manual-dispatch', 'createTaskCore',
+]);
+const RR_HOUSEKEEPING_MESSAGE =
+  /^\s*\[(stale-|stopped|stuck-in-progress|silent-failure|qc|audience-confirm|persona|triad|groom|board-hygiene|dispatch-cap)/i;
+
+export function isBoardHousekeepingAlert(
+  message: string,
+  meta?: { agent?: string; action?: string },
+): boolean {
+  return RR_HOUSEKEEPING_AGENTS.has(meta?.agent ?? '') || RR_HOUSEKEEPING_MESSAGE.test(message);
+}
+
 export function notifySystem(
   message: string,
   meta?: { agent?: string; action?: string },
@@ -1143,7 +1165,7 @@ export function notifySystem(
   // OWNER_NOTIFY_ALLOW_SEND_IN_TEST=1. Default-off still protects the ~14 files
   // that only `delete` the env var; only an explicit opt-in (which by convention
   // is coupled to installing the fetch double) can fire the POST in a test run.
-  const webhookUrl = process.env.RESCUE_RANGERS_WEBHOOK_URL;
+  const webhookUrl = isBoardHousekeepingAlert(message, meta) ? undefined : process.env.RESCUE_RANGERS_WEBHOOK_URL;
   if (webhookUrl && (!isTestEnvironment() || process.env.OWNER_NOTIFY_ALLOW_SEND_IN_TEST === '1')) {
     // ATTRIBUTION (FIX-5): the body used to carry ONLY {action, agent, message}.
     // No client. No box. So every escalation from every box in the fleet arrived

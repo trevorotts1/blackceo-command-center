@@ -1,3 +1,10 @@
+## [v7.6.97] — 2026-10-02 — notify(RR-MUTE): board housekeeping never files a Rescue Rangers ticket
+
+Client Command Center boxes were filing their own board reminders (e.g. `[STALE-BLOCKED] Task "..." ... Missing: SOP`, agent `stale-task-sweep`) as Rescue Rangers tickets. RR-02 cannot match them to an agent (unmatched_identity), marks NEEDS_HUMAN and pages the operator. Rescue Rangers is only for a client's AGENT with a real problem it cannot solve.
+
+- fix(notify): `notifySystem()` rung 1 (the Rescue Rangers RR-01 webhook) now skips board-housekeeping alerts, classified by `isBoardHousekeepingAlert()` — agent in {stale-task-sweep, board-hygiene, stuck-in-progress-sweep, intake-advance-sweep, operator-column-age-digest, qc-scorer, audience-confirm, manual-dispatch, createTaskCore} or message prefix `[stale-`, `[stopped`, `[stuck-in-progress`, `[silent-failure`, `[qc`, `[AUDIENCE-CONFIRM`, `[persona`, `[triad`, `[groom`, `[board-hygiene`, `[dispatch-cap`. Those alerts stay on the box (rung 3 durable record + its own board). Every other `notifySystem()` escalation posts to Rescue Rangers exactly as before.
+- test: new `tests/unit/notify-rr-housekeeping-mute.test.ts` proves a stale-task-sweep / board-hygiene / stop-card / QC alert produces zero RR posts and a genuine escalation still posts. Existing tests that used housekeeping agents as their sample RR escalation were repointed (`notify-escalation-attribution`, `notify-rescue-webhook-auth-header`, `qc-judge-failed-paging`, `operator-column-age-digest-lane`, `stale-blocked-reping-dedup`).
+
 ## [v7.6.96] — 2026-10-02 — notify(SPAM-FIX): a client box never pages the fleet operator relay
 
 Integrates the operator-relay mute (0c66db809, direct-to-main — this release cuts it into the version stream). Fixes the "boards boards boards" flood on the operator's Telegram, 2026-10-02.

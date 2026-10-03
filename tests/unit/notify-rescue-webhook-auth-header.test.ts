@@ -90,7 +90,7 @@ test('AUTH: when the secret is configured the escalation POST carries X-Rescue-S
   try {
     const notify = await freshNotify();
     const dispatched = notify.notifySystem('71 tasks blocked on human input', {
-      agent: 'stale-task-sweep',
+      agent: 'refresh-models',
       action: 'triad_stall',
     });
 
@@ -117,7 +117,7 @@ test('AUTH: without the secret the module sends no auth header and still best-ef
   try {
     const notify = await freshNotify();
     const dispatched = notify.notifySystem('sweep blocked', {
-      agent: 'board-hygiene',
+      agent: 'refresh-models',
       action: 'triad_stall',
     });
 

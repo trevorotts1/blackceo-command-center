@@ -43,7 +43,18 @@ let operatorEscalations: string[] = [];
 /** POSTs to the Command Center /api/events — the OWNER re-ping path. */
 let ownerEscalations: string[] = [];
 
+// 2026-10-02: board-housekeeping alerts no longer POST to Rescue Rangers; the
+// operator escalation now lands on the box's durable record (rung 3), which logs
+// '[notify][UNDELIVERABLE] system_alert — <message>'. Count those instead.
+const realConsoleError = console.error;
+
 before(async () => {
+  console.error = (...args: unknown[]) => {
+    if (typeof args[0] === 'string' && args[0].startsWith('[notify][UNDELIVERABLE]')) {
+      operatorEscalations.push(String(args[2] ?? ''));
+    }
+    realConsoleError(...args);
+  };
   server = http.createServer((req, res) => {
     let body = '';
     req.on('data', (c) => (body += c));
@@ -71,6 +82,7 @@ before(async () => {
 });
 
 after(async () => {
+  console.error = realConsoleError;
   delete process.env.RESCUE_RANGERS_WEBHOOK_URL;
   delete process.env.MISSION_CONTROL_URL;
   delete process.env.OWNER_NOTIFY_ALLOW_SEND_IN_TEST;

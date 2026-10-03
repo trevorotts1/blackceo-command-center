@@ -146,12 +146,8 @@ test('runOperatorColumnAgeDigest: dispatches on the OPERATOR lane only — zero 
     const result = await runOperatorColumnAgeDigest();
     assert.equal(result.digestSent, true, 'precondition: the digest actually sent');
 
-    // Exactly ONE dispatch — batched, never a per-task drip.
-    assert.equal(cap.posts.length, 1, 'exactly one operator-lane dispatch for the whole board');
-
-    // ...and it is THIS job's operator-lane escalation.
-    assert.equal(cap.posts[0].agent, 'operator-column-age-digest');
-    assert.equal(cap.posts[0].action, 'daily_digest');
+    // 2026-10-02: a board digest is housekeeping — it must NOT file a Rescue Rangers ticket.
+    assert.equal(cap.posts.length, 0, 'the board digest must never post to Rescue Rangers');
 
     // ZERO CLIENT SENDS: the reachable client chat id appears in no payload.
     for (const post of cap.posts) {

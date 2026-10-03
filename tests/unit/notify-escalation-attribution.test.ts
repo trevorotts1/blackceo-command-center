@@ -130,7 +130,7 @@ test('FIX-5: an escalation payload carries the box/client identity fields', asyn
   try {
     const notify = await freshNotify();
     const dispatched = notify.notifySystem('71 tasks blocked on human input', {
-      agent: 'stale-task-sweep',
+      agent: 'refresh-models',
       action: 'escalate',
     });
 
@@ -147,11 +147,11 @@ test('FIX-5: an escalation payload carries the box/client identity fields', asyn
       'placeholder-client-a:box-alpha-01',
       'a stable <client>:<box> key the receiver can bucket the 25/day cap on',
     );
-    assert.equal(body.agentName, 'stale-task-sweep', 'canonical agentName field is present');
+    assert.equal(body.agentName, 'refresh-models', 'canonical agentName field is present');
 
     // …and the pre-existing contract is untouched (backward compatible).
     assert.equal(body.action, 'escalate');
-    assert.equal(body.agent, 'stale-task-sweep');
+    assert.equal(body.agent, 'refresh-models');
     assert.equal(body.message, '71 tasks blocked on human input');
   } finally {
     cap.restore();
@@ -169,12 +169,12 @@ test('FIX-5: two different boxes produce different cap keys (no shared fleet cou
     process.env.CC_CLIENT_NAME = 'Placeholder Client A';
     process.env.CC_BOX_NAME = 'box-alpha-01';
     const notifyA = await freshNotify();
-    notifyA.notifySystem('same message text from both boxes', { agent: 'board-hygiene' });
+    notifyA.notifySystem('same message text from both boxes', { agent: 'refresh-models' });
 
     process.env.CC_CLIENT_NAME = 'Placeholder Client B';
     process.env.CC_BOX_NAME = 'box-bravo-01';
     const notifyB = await freshNotify();
-    notifyB.notifySystem('same message text from both boxes', { agent: 'board-hygiene' });
+    notifyB.notifySystem('same message text from both boxes', { agent: 'refresh-models' });
 
     assert.equal(cap.posts.length, 2);
     const [a, b] = cap.posts;
