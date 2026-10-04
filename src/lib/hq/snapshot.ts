@@ -142,9 +142,10 @@ export function parseHqSnapshotCursor(raw: string | null | undefined): number | 
  *     or a previous cursor newer than the server high-water mark (a database
  *     restore / reset), → `resetRequired: true`, fresh state, and the cursor is
  *     re-anchored to `highSeq` rather than handing back a misleading delta;
- *   - anything else → the client's own cursor is preserved and the read is the
- *     window `(cursor, highSeq]`, so a reconnect never jumps the feed forward
- *     merely because the current-state snapshot is newer;
+ *   - anything else → the client's own cursor is preserved (and reported back),
+ *     so a reconnect never jumps the feed forward merely because the
+ *     current-state snapshot is newer; the rows themselves are always the latest
+ *     window, which the client merges by ID/seq;
  *   - sequence gaps are never by themselves a reset trigger (S8 step 5: "Never
  *     infer cursor expiry from sequence gaps alone").
  */
