@@ -114,6 +114,8 @@ export default function HeadChat({
 
   const trimmed = draft.trim();
   const oversize = trimmed.length > MESSAGE_MAX;
+  // S9 requires an open owned session; the per-turn controls share the composer's gate.
+  const closed = !!sessionClosedReason;
   const canSend = trimmed.length > 0 && !oversize && !busy && !sessionClosedReason;
 
   const submit = () => {
@@ -172,7 +174,7 @@ export default function HeadChat({
           <li className="text-body text-bcc-text-secondary">No messages yet in this private conversation.</li>
         )}
         {turns.map((turn) => {
-          const canRetry = turn.state === 'failed_unsent' && turn.attempts < RETRY_MAX_ATTEMPTS;
+          const canRetry = turn.state === 'failed_unsent' && turn.attempts < RETRY_MAX_ATTEMPTS && !closed;
           const uncertain = turn.state === 'reconciling' || turn.state === 'unresolved';
           return (
             <li key={turn.id} data-testid={`hq-chat-turn-${turn.id}`} data-state={turn.state} className="space-y-1">
@@ -232,12 +234,13 @@ export default function HeadChat({
                     Retry send
                   </button>
                 )}
-                {turn.state === 'unresolved' && onSendAsNewMessage && (
+                {turn.state === 'unresolved' && onSendAsNewMessage && !closed && (
                   <button
                     type="button"
                     data-testid={`hq-chat-new-${turn.id}`}
                     onClick={() => onSendAsNewMessage(turn.id)}
-                    className="inline-flex items-center gap-1.5 min-h-[44px] px-3 rounded-xl border border-amber-300 bg-semantic-warningLight text-label text-amber-800"
+                    disabled={busy}
+                    className="inline-flex items-center gap-1.5 min-h-[44px] px-3 rounded-xl border border-amber-300 bg-semantic-warningLight text-label text-amber-800 disabled:opacity-40"
                   >
                     <Send className="w-4 h-4" aria-hidden="true" />
                     Send as new message (may duplicate)

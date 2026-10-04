@@ -225,6 +225,44 @@ describe('HeadChat — S9 conversation surface (B28)', () => {
     expect(onSend).not.toHaveBeenCalled();
   });
 
+  it('offers no Retry for a failed_unsent turn while the session is closed (S9 open-session precondition)', () => {
+    // S9 retry needs an open owned session; the component's own closed banner forbids new work.
+    const { unmount } = render(
+      <HeadChat
+        {...base}
+        turns={[turn({ id: 'f1', state: 'failed_unsent', attempts: 0 })]}
+        sessionClosedReason="head_binding_changed"
+        onSend={() => {}}
+        onRetry={() => {}}
+      />,
+    );
+    expect(screen.queryByTestId('hq-chat-retry-f1')).toBeNull();
+    unmount();
+
+    // Control: the same control is still offered once the session is open.
+    render(<HeadChat {...base} turns={[turn({ id: 'f1', state: 'failed_unsent', attempts: 0 })]} onSend={() => {}} onRetry={() => {}} />);
+    expect(screen.getByTestId('hq-chat-retry-f1')).toBeTruthy();
+  });
+
+  it('offers no Send-as-new for an unresolved turn while the session is closed (S9 open-session precondition)', () => {
+    const onSendAsNewMessage = vi.fn();
+    const { unmount } = render(
+      <HeadChat
+        {...base}
+        turns={[turn({ id: 'u1', state: 'unresolved', attempts: 1 })]}
+        sessionClosedReason="head_binding_changed"
+        onSend={() => {}}
+        onSendAsNewMessage={onSendAsNewMessage}
+      />,
+    );
+    expect(screen.queryByTestId('hq-chat-new-u1')).toBeNull();
+    unmount();
+
+    // Control: the recovery path is still offered once the session is open.
+    render(<HeadChat {...base} turns={[turn({ id: 'u1', state: 'unresolved', attempts: 1 })]} onSend={() => {}} onSendAsNewMessage={onSendAsNewMessage} />);
+    expect(screen.getByTestId('hq-chat-new-u1')).toBeTruthy();
+  });
+
   it('says so when the bounded context envelope dropped older messages', () => {
     render(<HeadChat {...base} turns={[]} historyTruncated onSend={() => {}} />);
     expect(screen.getByTestId('hq-head-chat-truncated').textContent).toContain('Older messages');
