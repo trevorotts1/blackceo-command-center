@@ -624,7 +624,12 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
     // never waives auth. `matchesRoute` subtree, not exact: /api/hq alone and
     // every descendant.
     if (matchesRoute(pathname, '/api/hq') || pathname === '/api/auth/owner-session') {
-      const reg = tenantRegistration(apiTenant?.host ?? requestHost(request));
+      let reg: ReturnType<typeof tenantRegistration>;
+      try {
+        reg = tenantRegistration(apiTenant?.host ?? requestHost(request));
+      } catch {
+        return tenantRefusalResponse(request, { error: 'unregistered_hostname', message: 'This Headquarters request does not match a registered host. Ask your operator for a fresh private link.' });
+      }
       if (reg.kind === 'client') {
         return NextResponse.json({ error: 'hq_direct_origin_required' }, { status: 403, headers: { 'cache-control': 'private, no-store' } });
       }
