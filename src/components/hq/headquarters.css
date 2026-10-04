@@ -1,0 +1,539 @@
+/**
+ * headquarters.css — B29 (Headquarters shell: header, list alternative, panel).
+ *
+ * Scope: ONLY `.hq-*` classes. Nothing here targets a global element selector,
+ * so importing this file from the shell cannot restyle the rest of the app.
+ *
+ * Theme inheritance: every colour is a `var(--token, #fallback)` read of the
+ * tokens BrandTheme/globals.css already publish on :root — `--bcc-*` for
+ * surfaces and text, `--brand-*` for the client's runtime-re-themed accent.
+ * No component-local palette is invented, so a client re-theme cascades here
+ * for free (SPEC S4 "Existing company branding controls theme").
+ *
+ * Contrast (SPEC S11: text 4.5:1, control/focus non-text 3:1) — the fallback
+ * hexes are the measured pairs; tests/unit/hq/B29/HeadquartersShell.test.ts
+ * re-computes each ratio from this file so drift fails loudly:
+ *   --bcc-text          #1A1D26 on #FFFFFF 15.4:1  on #F8F9FB 14.7:1
+ *   --bcc-text-secondary#6B7280 on #FFFFFF  4.8:1  on #F8F9FB  4.6:1
+ *   --brand-600         #43A047 vs #FFFFFF  3.2:1 (focus ring, non-text 3:1)
+ *   --hq-status-strong  #2E7D32 on #FFFFFF  5.1:1  on #F8F9FB  4.9:1
+ *                       (working/busy status ink — the Tailwind text-brand-700
+ *                       utility it replaced measured 4.12:1 on white, 3.66:1 on
+ *                       the brand tint, both under S11's 4.5:1 text floor)
+ *   --hq-control-border #6B7280 vs #FFFFFF  4.8:1 (control boundary 3:1)
+ *   --hq-focus-ring     #1A1D26 vs every surface used here >= 14:1, so the
+ *                       focus indicator keeps 3:1 even where a raw brand tint
+ *                       (runtime-re-themed) would drop below it.
+ */
+
+.hq-shell {
+  --hq-gutter: 16px;
+  --hq-text: var(--bcc-text, #1A1D26);
+  --hq-text-secondary: var(--bcc-text-secondary, #6B7280);
+  --hq-surface: var(--bcc-white, #FFFFFF);
+  --hq-surface-muted: var(--bcc-border-light, #F3F4F6);
+  --hq-border: var(--bcc-border, #E5E7EB);
+  --hq-accent: var(--brand-600, #43A047);
+  --hq-accent-tint: var(--brand-50, #E8F5E9);
+  /* Selected-control boundary. brand-600 measures 2.94:1 on its own tint and
+     3.30:1 on white — both below S11's 3:1 non-text floor — so the selected
+     state draws its border in the darkest brand step instead (4.56:1 on the
+     tint, 5.13:1 on white at the fallback values). The tint fill is unchanged. */
+  --hq-accent-strong: var(--brand-800, #2E7D32);
+  --hq-control-border: #6B7280;
+  --hq-focus-ring: var(--bcc-text, #1A1D26);
+
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 100%;
+  background: var(--bcc-bg, #F8F9FB);
+  color: var(--hq-text);
+  /* No page horizontal overflow (S11); the floor canvas pans on its own. */
+  overflow-x: clip;
+}
+
+/* One focus treatment for every control the shell owns: a ring that stays
+   >= 3:1 on white, on --bcc-bg, on the muted row and on the brand tint. */
+.hq-shell :focus-visible {
+  outline: 2px solid var(--hq-focus-ring);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* ---------------------------------------------------------------- header */
+
+.hq-header {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px var(--hq-gutter);
+  background: var(--hq-surface);
+  border-bottom: 1px solid var(--hq-border);
+}
+
+.hq-header-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.hq-title {
+  font-size: 20px;
+  line-height: 1.4;
+  font-weight: 700;
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.hq-scope {
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--hq-text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.hq-spacer {
+  flex: 1 1 auto;
+}
+
+/* Headquarters | Board. Board is a real link to the caller's canonical board
+   route (route-state carrying belongs to the page owner, never here). */
+.hq-nav {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px;
+  border: 1px solid var(--hq-control-border);
+  border-radius: 12px;
+  background: var(--hq-surface);
+}
+
+.hq-nav-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 44px;
+  padding: 0 12px;
+  border-radius: 10px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--hq-text-secondary);
+  text-decoration: none;
+  background: transparent;
+  border: 1px solid transparent;
+  cursor: pointer;
+}
+
+.hq-nav-item[aria-current='page'],
+.hq-nav-item[aria-selected='true'] {
+  background: var(--hq-accent-tint);
+  border-color: var(--hq-accent-strong);
+  color: var(--hq-text);
+}
+
+/* Connection status: icon + label, never colour alone (S11). */
+.hq-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 44px;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--hq-text);
+}
+
+.hq-status-icon {
+  flex-shrink: 0;
+}
+
+/* --------------------------------------------------------------- controls */
+
+.hq-controls {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.hq-picker {
+  position: relative;
+  min-width: 0;
+  flex: 0 1 280px;
+}
+
+.hq-picker-label {
+  display: block;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--hq-text);
+  margin-bottom: 2px;
+}
+
+.hq-picker-input {
+  width: 100%;
+  min-height: 44px;
+  padding: 0 12px;
+  font: inherit;
+  font-size: 14px;
+  color: var(--hq-text);
+  background: var(--hq-surface);
+  border: 1px solid var(--hq-control-border);
+  border-radius: 12px;
+}
+
+.hq-picker-list {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 4px);
+  left: 0;
+  width: min(100%, 320px);
+  max-height: 60vh;
+  overflow-y: auto;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  background: var(--hq-surface);
+  border: 1px solid var(--hq-control-border);
+  border-radius: 12px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+}
+
+.hq-picker-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  min-height: 44px;
+  padding: 4px 8px;
+  font: inherit;
+  font-size: 14px;
+  text-align: left;
+  color: var(--hq-text);
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.hq-picker-option:hover,
+.hq-picker-option[aria-selected='true'] {
+  background: var(--hq-accent-tint);
+}
+
+.hq-picker-empty {
+  margin: 0;
+  padding: 8px;
+  font-size: 14px;
+  color: var(--hq-text-secondary);
+}
+
+/* Floor | List — a tablist; each tab is a >=44px target. */
+.hq-tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px;
+  border: 1px solid var(--hq-control-border);
+  border-radius: 12px;
+  background: var(--hq-surface);
+}
+
+.hq-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 44px;
+  padding: 0 12px;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--hq-text-secondary);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.hq-tab[aria-selected='true'] {
+  background: var(--hq-accent-tint);
+  border-color: var(--hq-accent-strong);
+  color: var(--hq-text);
+}
+
+/* ---------------------------------------------------------------- layout */
+
+.hq-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 360px);
+  gap: var(--hq-gutter);
+  padding: var(--hq-gutter);
+  min-width: 0;
+  align-items: start;
+}
+
+.hq-body[data-panel='closed'] {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.hq-main {
+  min-width: 0;
+}
+
+.hq-card {
+  background: var(--hq-surface);
+  border: 1px solid var(--hq-border);
+  border-radius: 12px;
+  padding: var(--hq-gutter);
+  min-width: 0;
+}
+
+/* ------------------------------------------------------- list alternative */
+
+.hq-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.hq-list-item + .hq-list-item {
+  margin-top: 8px;
+}
+
+.hq-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 44px;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 14px;
+  text-align: left;
+  color: var(--hq-text);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.hq-row:hover {
+  background: var(--hq-surface-muted);
+  border-color: var(--hq-border);
+}
+
+.hq-row[aria-current='true'] {
+  background: var(--hq-accent-tint);
+  border-color: var(--hq-accent-strong);
+}
+
+/* Tinted row surfaces drop secondary ink below 4.5:1 (#6B7280 measures 4.39:1
+   on #F3F4F6 and 4.30:1 on #E8F5E9), so any tinted row re-inks its
+   secondary-ink text — meta spans, row-state spans, and the standby status
+   tone nested inside them — to the body token (15.3:1 on the muted surface,
+   15.0:1 on the brand tint). */
+.hq-row:hover .hq-row-meta,
+.hq-row[aria-current='true'] .hq-row-meta,
+.hq-picker-option:hover .hq-row-meta,
+.hq-picker-option[aria-selected='true'] .hq-row-meta,
+.hq-row:hover .hq-row-state,
+.hq-row[aria-current='true'] .hq-row-state,
+.hq-picker-option:hover .hq-row-state,
+.hq-picker-option[aria-selected='true'] .hq-row-state,
+.hq-row:hover .hq-status-secondary,
+.hq-row[aria-current='true'] .hq-status-secondary,
+.hq-picker-option:hover .hq-status-secondary,
+.hq-picker-option[aria-selected='true'] .hq-status-secondary {
+  color: var(--hq-text);
+}
+
+.hq-row-main {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.hq-row-name {
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.hq-row-meta {
+  font-size: 14px;
+  color: var(--hq-text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.hq-row-state {
+  font-size: 14px;
+  color: var(--hq-text);
+  flex-shrink: 0;
+}
+
+/* Status ink (S11 text 4.5:1): working/busy uses the darkest brand step —
+   #2E7D32 clears 5.13 white / 4.87 bg / 4.66 muted / 4.56 tint — never a
+   Tailwind utility the contrast test cannot name. Standby uses secondary ink
+   on plain surfaces; tinted rows re-ink it below. */
+.hq-status-strong {
+  color: var(--hq-accent-strong, #2E7D32);
+}
+
+.hq-status-secondary {
+  color: var(--hq-text-secondary, #6B7280);
+}
+
+.hq-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--hq-text);
+  background: var(--hq-surface-muted);
+  border: 1px solid var(--hq-control-border);
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.hq-nested {
+  margin: 4px 0 0 8px;
+  padding-left: 8px;
+  border-left: 2px solid var(--hq-border);
+}
+
+.hq-empty {
+  margin: 0;
+  padding: var(--hq-gutter);
+  font-size: 14px;
+  color: var(--hq-text-secondary);
+}
+
+.hq-live {
+  margin: 0;
+  padding: 0 var(--hq-gutter) 8px;
+  font-size: 14px;
+  color: var(--hq-text-secondary);
+}
+
+/* ------------------------------------------------------------------ panel */
+
+.hq-panel {
+  background: var(--hq-surface);
+  border: 1px solid var(--hq-border);
+  border-radius: 12px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100dvh - 120px);
+}
+
+.hq-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px var(--hq-gutter);
+  border-bottom: 1px solid var(--hq-border);
+}
+
+.hq-panel-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.hq-panel-close {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  color: var(--hq-text);
+  background: transparent;
+  border: 1px solid var(--hq-control-border);
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.hq-panel-body {
+  padding: var(--hq-gutter);
+  overflow-y: auto;
+  min-height: 0;
+}
+
+/* ------------------------------------------------------------ responsive */
+
+/* Tablet and below: one column; the panel stacks under the main area. */
+@media (max-width: 1023px) {
+  .hq-body,
+  .hq-body[data-panel='closed'] {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .hq-panel {
+    max-height: none;
+  }
+}
+
+/* Phone (<768px): List is the default view (S11) — set by the shell's mount
+   effect, not by hiding a rendered floor, so only one view is ever in the
+   DOM and focus order stays honest. The detail panel becomes a bottom sheet. */
+@media (max-width: 767px) {
+  .hq-header {
+    position: static;
+  }
+
+  .hq-nav,
+  .hq-tabs {
+    flex: 1 1 auto;
+  }
+
+  .hq-picker {
+    flex: 1 1 100%;
+  }
+
+  .hq-picker-list {
+    position: static;
+    width: 100%;
+    max-height: 50vh;
+    margin-top: 4px;
+  }
+
+  .hq-panel {
+    position: fixed;
+    inset-inline: 0;
+    bottom: 0;
+    z-index: 40;
+    border-radius: 16px 16px 0 0;
+    max-height: 85dvh;
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  .hq-panel-body {
+    max-height: calc(85dvh - 64px);
+  }
+}
+
+/* Never animate away from the user's own preference (S4/S11). */
+@media (prefers-reduced-motion: reduce) {
+  .hq-shell *,
+  .hq-shell *::before,
+  .hq-shell *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
