@@ -92,7 +92,7 @@ import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
 import { safeReadFileBuffer } from '@/lib/fs/safe-fs';
-import { queryOne, queryAll, run, transaction } from '@/lib/db';
+import { queryOne, queryAll, run, transaction, getDb } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { getProjectsPath } from '@/lib/config';
 import type { Task } from '@/lib/types';
@@ -722,14 +722,19 @@ function writeTaskEvent(
   toState: string,
   evidence: TransitionEvidence,
   now: string,
-): void {
+): string | null {
+  // B15: return the AUTHORITATIVE source audit id (`task_events.id`) so the HQ
+  // capture boundary can record `transition:<auditId>` against the row that was
+  // really written — never a re-minted id. null when only the legacy fallback
+  // row exists (no task_events id to cite).
+  const auditId = uuidv4();
   try {
     run(
       `INSERT INTO task_events
          (id, task_id, from_status, to_status, actor, reason, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [
-        uuidv4(),
+        auditId,
         taskId,
         fromState,
         toState,
@@ -738,6 +743,7 @@ function writeTaskEvent(
         now,
       ],
     );
+    return auditId;
   } catch (err) {
     // task_events table not yet created (migration 070 may not have run) — fall
     // back to the legacy events table so we never lose the transition record.
@@ -757,6 +763,7 @@ function writeTaskEvent(
       console.error(`[task-lifecycle] writeTaskEvent: both task_events and events INSERT failed for ${taskId}`);
     }
   }
+  return null;
 }
 
 /**
@@ -776,10 +783,182 @@ export function recordStatusEvent(
   toStatus: string,
   evidence: { actor?: string | null; reason?: string } = {},
 ): void {
+  const now = new Date().toISOString();
+  let auditId: string | null = null;
   try {
-    writeTaskEvent(taskId, fromStatus, toStatus, evidence, new Date().toISOString());
+    auditId = writeTaskEvent(taskId, fromStatus, toStatus, evidence, now);
   } catch {
     /* audit is best-effort — writeTaskEvent already has its own fallback */
+  }
+  // B15 S5 capture boundary. `auditId === null` means no task_events row exists
+  // (the legacy `events` fallback ran instead), so there is no authoritative
+  // source audit id to cite; capture is skipped rather than citing a fabricated
+  // one. Failure is returned as a degraded reason, never thrown — the raw writer
+  // that already committed its own status UPDATE is unaffected.
+  if (auditId) {
+    captureHqTaskEvent({
+      sourceKey: `transition:${auditId}`,
+      auditId,
+      taskId,
+      companyId: hqTaskCompanyId(taskId),
+      fromStatus,
+      toStatus,
+      // The real audit value: writeTaskEvent writes evidence.actor ?? 'system'.
+      actor: evidence.actor ?? 'system',
+      assignedAgentId: hqTaskAssignee(taskId),
+      occurredAt: now,
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// B15 — Headquarters task telemetry (SPEC S5 capture boundary)
+// ---------------------------------------------------------------------------
+
+/**
+ * SPEC S5 capture boundaries. The task rows in the table below are captured at
+ * the "existing canonical task creation/lifecycle/dispatch acceptance writes"
+ * this module already funnels, with these frozen source keys:
+ *
+ *   task creation   activity:<taskId>       (the canonical INSERT / create id)
+ *   task transition transition:<auditId>    (the task_events.id actually written)
+ *
+ * "authoritative source audit IDs" means exactly that: the id handed to the
+ * observer is the id of the row the business write really inserted. It is never
+ * re-minted, guessed, or synthesized for the occasion.
+ *
+ * The observer is deliberately NOT a static import of the activity module.
+ * B05 owns `src/lib/hq/activity.ts` (SPEC S5: appendHqActivity is the ONLY
+ * writer of Headquarters activity) and is not merged yet, so a static import
+ * would make every module that already imports this one unbuildable in the
+ * meantime. The single soft-require below resolves once per process; an absent
+ * or throwing observer leaves the business write completely untouched.
+ */
+export interface HqTaskCapture {
+  /** S5 source key verbatim: `activity:<taskId>` or `transition:<auditId>`. */
+  sourceKey: string;
+  /** The authoritative audit id the source write produced. */
+  auditId: string;
+  taskId: string;
+  companyId: string | null;
+  fromStatus: string | null;
+  toStatus: string | null;
+  /**
+   * The real actor recorded on the source audit row, or null when the source
+   * named none. Never substituted: an unnamed actor stays unnamed — SPEC S1
+   * "do not invent". This is a REQUESTER/DRIVER field, not a handoff actor.
+   */
+  actor: string | null;
+  /**
+   * SPEC S5 "Task ownership/status ... Required semantics: ... accepted/unknown/
+   * completed remain distinct" — the REAL assignee, read back from the row the
+   * business write just committed. Null means the task is genuinely unassigned.
+   * This is deliberately never a value the caller supplies: a model-authored or
+   * browser-supplied id cannot claim an assignment, which is what keeps a real
+   * assignment distinct from an invented one.
+   */
+  assignedAgentId: string | null;
+  occurredAt: string;
+}
+
+/** A Headquarters observer returns true when it accepted the capture synchronously. */
+type HqTaskObserver = (input: HqTaskCapture) => unknown;
+
+let cachedHqObserver: HqTaskObserver | null | undefined;
+
+function hqObserver(): HqTaskObserver | null {
+  if (cachedHqObserver !== undefined) return cachedHqObserver;
+  cachedHqObserver = null;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const mod = require('@/lib/hq/activity') as Record<string, unknown>;
+    const capture = mod.captureHqTaskEvent ?? mod.appendHqActivity;
+    if (typeof capture === 'function') cachedHqObserver = capture as HqTaskObserver;
+  } catch {
+    /* Observer module absent (B05 not integrated in this build) — capture unavailable. */
+  }
+  return cachedHqObserver;
+}
+
+/**
+ * SPEC S5: "Producers call it after the underlying source action is recorded;
+ * where source write is in the same database, insert within the source
+ * transaction using a savepoint. Telemetry failure rolls back its own savepoint
+ * and records a bounded capture-health failure; it does not roll back
+ * already-authorized business work."
+ *
+ * The savepoint bounds the observer's OWN writes only. A throwing observer is
+ * rolled back to the savepoint, recorded as degraded, and swallowed here, so the
+ * status UPDATE and both audit rows around this call still commit. A thenable is
+ * refused for the same reason: it would outlive the savepoint and reject
+ * unobserved. Every path through this function returns a degraded REASON when
+ * capture did not happen, and never throws.
+ *
+ * There is exactly ONE writer. This is the only call site, and it is on the
+ * business-write path (`transition`/`createTaskCore`), never on the SSE path:
+ * the `broadcast({type:'task_updated'|'task_created'})` that follows is
+ * transport for browsers and can never become a second capture writer.
+ *
+ * @returns the degraded reason when capture did not happen, else null.
+ */
+export function captureHqTaskEvent(input: HqTaskCapture): string | null {
+  const capture = hqObserver();
+  if (!capture) return 'observer_absent';
+  const db = getDb();
+  const savepoint = 'hq_task_capture';
+  const rollback = () => {
+    try {
+      db.exec(`ROLLBACK TO ${savepoint}`);
+      db.exec(`RELEASE ${savepoint}`);
+    } catch {
+      /* Savepoint teardown is best-effort; the surrounding business write outranks it. */
+    }
+  };
+  try {
+    db.exec(`SAVEPOINT ${savepoint}`);
+    const result = capture(input) as unknown;
+    if (result !== null && typeof result === 'object' && typeof (result as PromiseLike<unknown>).then === 'function') {
+      rollback();
+      console.warn(`[task-lifecycle] HQ capture degraded for ${input.sourceKey}: observer returned a promise (a synchronous observer is required to stay inside its savepoint)`);
+      return 'observer_async';
+    }
+    db.exec(`RELEASE ${savepoint}`);
+    return null;
+  } catch (err) {
+    rollback();
+    const detail = err instanceof Error ? err.message : String(err);
+    console.warn(`[task-lifecycle] HQ capture degraded for ${input.sourceKey}: ${detail}`);
+    return 'observer_failed';
+  }
+}
+
+/**
+ * Read the assignment actually stored on the task row — the authoritative
+ * assignee, or null when the task is genuinely unassigned. Never throws: an
+ * unreadable row yields null (unassigned) rather than a guessed actor.
+ */
+export function hqTaskAssignee(taskId: string): string | null {
+  try {
+    const row = queryOne<{ assigned_agent_id: string | null }>(
+      'SELECT assigned_agent_id FROM tasks WHERE id = ?',
+      [taskId],
+    );
+    return row?.assigned_agent_id ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Resolve the owning company for a task the business write just recorded. */
+export function hqTaskCompanyId(taskId: string): string | null {
+  try {
+    const row = queryOne<{ company_id: string | null }>(
+      'SELECT company_id FROM workspaces WHERE id = (SELECT workspace_id FROM tasks WHERE id = ?)',
+      [taskId],
+    );
+    return row?.company_id ?? null;
+  } catch {
+    return null; // Telemetry-only enrichment; never a reason to fail the business write.
   }
 }
 
@@ -1078,6 +1257,9 @@ export async function transition(
     evidence.eventMessage ??
     `[lifecycle] Task "${task.title}" moved ${from} → ${to}${evidence.reason ? ': ' + evidence.reason : ''}`;
 
+  // B15: the authoritative source audit id of the row this call writes.
+  let auditId: string | null = null;
+
   // ── Atomic, compare-and-swap DB write ──────────────────────────────────────
   // DISP-09: the status UPDATE, extraColumns, task_events insert, and legacy
   // events insert commit as ONE db.transaction() — all land or none do. A crash
@@ -1149,7 +1331,34 @@ export async function transition(
     }
 
     // Structured task_events row (primary audit trail).
-    writeTaskEvent(taskId, from, to, evidence, now);
+    auditId = writeTaskEvent(taskId, from, to, evidence, now);
+
+    // ── B15 S5 capture boundary — inside the source transaction ─────────────
+    // SPEC S5: "where source write is in the same database, insert within the
+    // source transaction using a savepoint. Telemetry failure rolls back its own
+    // savepoint ... it does not roll back already-authorized business work."
+    // captureHqTaskEvent opens that savepoint, rolls back to it on failure and
+    // never throws, so the status UPDATE + both audit rows above still commit.
+    // The capture cites the EXACT `task_events.id` written on the line above —
+    // S5's frozen `transition:<auditId>` source key — never a re-minted id, so
+    // the captured record traces to the row that was really inserted. `actor` is
+    // the caller's own value or 'system'; where the source names no actor that is
+    // what is recorded, and no handoff actor is invented.
+    if (auditId) {
+      captureHqTaskEvent({
+        sourceKey: `transition:${auditId}`,
+        auditId,
+        taskId,
+        companyId: hqTaskCompanyId(taskId),
+        fromStatus: from,
+        toStatus: to,
+        actor: evidence.actor ?? 'system',
+        // Read AFTER the UPDATE above, so extraColumns that assign an agent are
+        // reflected: the capture states the assignment that actually committed.
+        assignedAgentId: hqTaskAssignee(taskId),
+        occurredAt: now,
+      });
+    }
 
     // Legacy events row for backwards-compat (live feed, existing queries).
     // agent_id is bound (NULL unless the caller supplied evidence.eventAgentId)

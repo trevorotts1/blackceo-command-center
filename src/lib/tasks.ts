@@ -75,7 +75,7 @@ import {
   type RequesterAudienceAskDelivery,
 } from '@/lib/jobs/trust-engine';
 import { normalizeRequesterSessionKey } from '@/lib/requester-session';
-import { transition, recordStatusEvent, type LifecycleState } from '@/lib/task-lifecycle';
+import { transition, recordStatusEvent, captureHqTaskEvent, hqTaskAssignee, type LifecycleState } from '@/lib/task-lifecycle';
 import { assertNoFixtureDerivedServerWrite } from '@/lib/fixture-guard';
 import type { Task, TaskPriority, Agent, PersonaBundle, TaskPersonaBundleRow } from '@/lib/types';
 
@@ -2800,10 +2800,32 @@ export async function createTaskCore(
     ]
   );
 
+    // B15 S5 capture boundary — the canonical task-creation write. The audit id
+    // is the id of the `events` row this INSERT actually wrote (S5 source key
+    // `activity:<id>`), never a re-minted one. captureHqTaskEvent is
+    // savepoint-bounded and never throws, so a failed observer cannot roll back
+    // this creation. `assigned_agent_id` is recorded exactly as stored: a card
+    // created without an assignee stays unassigned, and no handoff actor is
+    // invented where the source names none.
+    const createAuditId = uuidv4();
     run(`INSERT INTO events (id, type, agent_id, task_id, message, created_at)
       VALUES (?, ?, ?, ?, ?, ?)`,
-      [uuidv4(), 'task_created', input.created_by_agent_id || null, id, creationMessage, now]);
+      [createAuditId, 'task_created', input.created_by_agent_id || null, id, creationMessage, now]);
     run('UPDATE tasks SET persona_contract_version = 1 WHERE id = ?', [id]);
+    captureHqTaskEvent({
+      sourceKey: `activity:${id}`,
+      auditId: createAuditId,
+      taskId: id,
+      companyId: creationCompanyId,
+      fromStatus: null,
+      toStatus: status,
+      actor: input.created_by_agent_id || null,
+      // Read back from the row just inserted: a real assignment is recorded
+      // distinctly, and an unassigned card is captured as unassigned rather
+      // than credited to a guessed handoff actor.
+      assignedAgentId: hqTaskAssignee(id),
+      occurredAt: now,
+    });
     if (input.presentation_operator_intake) {
       saveOperatorPresentationContract(id, bindOperatorPresentationContract(id, input.presentation_operator_intake));
     }
