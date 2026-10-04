@@ -71,7 +71,9 @@ async function main() {
     throw new Error(`Refusing ${origin.origin}: the origin must be scheme+host+port only, with no path, query or fragment.`);
   }
 
-  const host = origin.host;
+  // Hostname-only: requestHost() strips port, verifyGrant compares exact.
+  // origin.host includes port; signing it mints unverifiable grant.
+  const host = origin.hostname.toLowerCase();
   const registration = tenantRegistration(host);
   if (!registrationAllowsOwnerLogin(host)) {
     throw new Error(

@@ -50,6 +50,7 @@ fs.mkdirSync(workspace, { recursive: true });
 
 Object.assign(process.env, {
   OPENCLAW_WORKSPACE_ROOT: workspace,
+  OPENCLAW_OWNER_CHAT_ID: OWNER_CHAT,
   CC_PUBLIC_URL: ORIGIN,
   MC_TENANT_SESSION_SECRET: 'owner-login-fixture-signing',
   MC_COMPANY_ID: REGISTRATION.companyId,
@@ -58,6 +59,13 @@ Object.assign(process.env, {
   DISABLE_CRON: '1',
   DISABLE_BRIDGE_BOOTSTRAP: '1',
 });
+// F2 PATCH re-derivation reads owner record through resolveOwnerChatId(),
+// which also consults workspace build state. Pin fixture owner there so
+// env-clearing tests still resolve same owner.
+fs.writeFileSync(
+  path.join(workspace, '.workforce-build-state.json'),
+  JSON.stringify({ ownerChat: OWNER_CHAT }),
+);
 
 // `hq_owner_login_uses` is B01's migration 169 DDL and is NOT on this branch.
 // The consuming unit creates the exact frozen shape here so its own nonce
@@ -506,4 +514,113 @@ test('the landing page is data-free: no database, no server data fetch, no calle
   }
   assert.match(code, /history\.replaceState/, 'the fragment is stripped from history');
   assert.match(code, /window\.location\.hash/, 'the ticket is read from the fragment, never a query');
+});
+
+/* ── F1: port-bearing origin mints a verifiable session ─────────────────── */
+
+test('F1: a port-bearing configured origin mints a grant the runtime host form verifies', async () => {
+  // requestHost() strips the port by design; the mint must sign the same
+  // hostname-only form, or redeem 200s a cookie /hq can never verify.
+  const PORT_HOST = 'owner-login-port.example';
+  const PORT_ORIGIN = `http://${PORT_HOST}:4000`;
+  const savedRegistry = process.env.MC_TENANT_REGISTRY_JSON;
+  const savedUrl = process.env.CC_PUBLIC_URL;
+  process.env.MC_TENANT_REGISTRY_JSON = JSON.stringify({
+    [PORT_HOST]: { ...REGISTRATION, tenantId: 'ol-port', companyId: REGISTRATION.companyId, installationId: REGISTRATION.installationId },
+  });
+  process.env.CC_PUBLIC_URL = PORT_ORIGIN;
+  try {
+    const portTicket = await signTenantGrant({
+      purpose: OWNER_LOGIN_PURPOSE,
+      tenantId: 'ol-port',
+      companyId: REGISTRATION.companyId,
+      installationId: REGISTRATION.installationId,
+      host: PORT_HOST, // mint signs origin.hostname, never origin.host
+      subject: OWNER_SUBJECT,
+      exp: now() + OWNER_LOGIN_TTL_SECONDS,
+      nonce: randomUUID(),
+    });
+    const redeemHeaders: Record<string, string> = {
+      host: `${PORT_HOST}:4000`, // Host header the runtime actually sends
+      origin: PORT_ORIGIN,
+      'content-type': 'application/json',
+      cookie: await antiForgeryCookie(),
+    };
+    const response = await POST(
+      new NextRequest(`${PORT_ORIGIN}/api/auth/owner-session`, {
+        method: 'POST',
+        headers: redeemHeaders,
+        body: JSON.stringify({ ticket: portTicket }),
+      }),
+    );
+    assert.equal(response.status, 200, 'port-bearing origin must redeem, not refuse');
+    const rawCookie = response.headers.get('set-cookie')!;
+    const sessionToken = rawCookie.split(';')[0].split('=').slice(1).join('=');
+    // Verify through the runtime host form (requestHost strips the port).
+    const grant = await verifyTenantGrant(sessionToken, PORT_HOST, 'session');
+    assert.ok(grant, 'issued session must verify under the hostname-only host');
+    assert.equal(grant.subject, OWNER_SUBJECT);
+    const decoded = JSON.parse(Buffer.from(portTicket.split('.')[0], 'base64url').toString());
+    assert.equal(decoded.host, PORT_HOST, 'mint binds hostname-only host, never host:port');
+  } finally {
+    process.env.MC_TENANT_REGISTRY_JSON = savedRegistry;
+    process.env.CC_PUBLIC_URL = savedUrl;
+  }
+});
+
+/* ── F2: PATCH refuses a removed owner mapping ─────────────────────────── */
+
+test('F2: PATCH renews while the owner mapping matches, then 403s it after removal', async () => {
+  const cookie = await antiForgeryCookie();
+  const session = await sessionCookie(OWNER_SUBJECT);
+  const patch = (headers: Record<string, string>) =>
+    PATCH(new NextRequest(`${ORIGIN}/api/auth/owner-session`, { method: 'PATCH', headers: { host: HOST, ...headers } }));
+
+  // Control: mapping matches, renewal passes.
+  const control = await patch({ origin: ORIGIN, cookie: `${cookie}; ${session}` });
+  assert.equal(control.status, 200, 'live session with matching owner record renews');
+  assert.ok((control.headers.get('set-cookie') || '').includes('mc_tenant_session='), 'control issues a fresh cookie');
+
+  // Flip the owner record only: same registry, same session, new chat id.
+  const savedOwner = process.env.OPENCLAW_OWNER_CHAT_ID;
+  fs.writeFileSync(
+    path.join(workspace, '.workforce-build-state.json'),
+    JSON.stringify({ ownerChat: '15550009999' }),
+  );
+  process.env.OPENCLAW_OWNER_CHAT_ID = '15550009999';
+  try {
+    const flipped = await patch({ origin: ORIGIN, cookie: `${cookie}; ${session}` });
+    assert.equal(flipped.status, 403, 'a re-pointed owner mapping must not renew');
+    assert.equal((await flipped.json()).error, 'owner_session_renewal_refused');
+    assert.equal(flipped.headers.get('set-cookie'), null, 'a refusal issues no session');
+  } finally {
+    process.env.OPENCLAW_OWNER_CHAT_ID = savedOwner;
+    fs.writeFileSync(
+      path.join(workspace, '.workforce-build-state.json'),
+      JSON.stringify({ ownerChat: OWNER_CHAT }),
+    );
+  }
+});
+
+test('F2: PATCH refuses when no owner record resolves at all', async () => {
+  const cookie = await antiForgeryCookie();
+  const session = await sessionCookie(OWNER_SUBJECT);
+  const patch = (headers: Record<string, string>) =>
+    PATCH(new NextRequest(`${ORIGIN}/api/auth/owner-session`, { method: 'PATCH', headers: { host: HOST, ...headers } }));
+
+  const savedOwner = process.env.OPENCLAW_OWNER_CHAT_ID;
+  fs.writeFileSync(path.join(workspace, '.workforce-build-state.json'), JSON.stringify({}));
+  delete process.env.OPENCLAW_OWNER_CHAT_ID;
+  try {
+    const removed = await patch({ origin: ORIGIN, cookie: `${cookie}; ${session}` });
+    assert.equal(removed.status, 403, 'a removed owner mapping must not renew');
+    assert.equal((await removed.json()).error, 'owner_session_renewal_refused');
+    assert.equal(removed.headers.get('set-cookie'), null, 'a refusal issues no session');
+  } finally {
+    process.env.OPENCLAW_OWNER_CHAT_ID = savedOwner;
+    fs.writeFileSync(
+      path.join(workspace, '.workforce-build-state.json'),
+      JSON.stringify({ ownerChat: OWNER_CHAT }),
+    );
+  }
 });

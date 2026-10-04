@@ -27,6 +27,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { randomUUID } from 'node:crypto';
 import {
+  requestHost,
   signTenantGrant,
   tenantSessionToken,
   TENANT_SESSION_COOKIE,
@@ -40,6 +41,7 @@ import {
   OWNER_SESSION_TTL_SECONDS,
   consumeOwnerLoginNonce,
   ownerSessionCookieAttributes,
+  ownerSubjectForChatId,
   pruneOwnerLoginUses,
   registrationAllowsOwnerLogin,
   resolveOwnerBrowserIdentity,
@@ -48,6 +50,7 @@ import {
   verifyExactOrigin,
   verifyFetchMetadata,
 } from '@/lib/auth/owner-login';
+import { resolveOwnerChatId } from '@/lib/notify';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -97,7 +100,15 @@ export async function POST(req: NextRequest) {
     // 5. Signature, purpose, expiry, host, company and installation. The
     //    `owner-login` purpose expires on the clock because grantExpired()
     //    bounds every purpose except the deliberately timeless enrollment.
-    const host = req.headers.get('host') || '';
+    //    Hostname-only via requestHost(): a Host header carrying a port
+    //    (e.g. localhost:4000) must resolve to the same host the mint
+    //    signed (origin.hostname), never the raw port-bearing string.
+    let host: string;
+    try {
+      host = requestHost(req);
+    } catch {
+      return deny('owner_ticket_invalid', 403);
+    }
     const grant = await verifyTenantGrant(ticket, host, OWNER_LOGIN_PURPOSE);
     if (!grant) return deny('owner_ticket_invalid', 403);
 
@@ -181,7 +192,15 @@ export async function PATCH(req: NextRequest) {
     const refused = await mutationRefused(req);
     if (refused) return refused;
 
-    const host = req.headers.get('host') || '';
+    // Same hostname-only host derivation as POST: requestHost() strips any
+    // port so a Host header like localhost:4000 resolves to the host the
+    // mint signed (origin.hostname), never the raw port-bearing string.
+    let host: string;
+    try {
+      host = requestHost(req);
+    } catch {
+      return deny('owner_session_missing', 403);
+    }
     // Renewal is limited to the cookie this route owns. An Access-only visitor
     // has no local session to renew, and renewing one would be an implicit
     // principal merge S7 forbids.
@@ -192,6 +211,14 @@ export async function PATCH(req: NextRequest) {
     // not be able to renew. A verified identity that no longer matches the
     // presented session is a collision, not a renewal.
     if (!registrationAllowsOwnerLogin(host)) return deny('owner_session_renewal_refused', 403);
+    // SPEC S7 line 283: re-derive the CURRENT owner from the server-side
+    // owner record (the same source the mint script consults). The browser
+    // identity helper resolves FROM the request's own cookie, so it can only
+    // echo the session's subject — it can never detect a removed mapping.
+    const currentOwner = resolveOwnerChatId();
+    if (!currentOwner || ownerSubjectForChatId(currentOwner) !== active.subject) {
+      return deny('owner_session_renewal_refused', 403);
+    }
     const current = await resolveOwnerBrowserIdentity(req);
     if (!current || current.subject !== active.subject) {
       return deny('identity_switch_requires_signout', 409);
