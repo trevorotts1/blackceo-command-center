@@ -3,27 +3,26 @@
  *
  * PROVES (the two semantics the B20 check names):
  *
- *   1. ACCEPTED-NOT-DELIVERED. The record shaped by an ACCEPTED dispatch says
- *      `accepted`, carries NO delivery timestamp, and there is no input on that
- *      path which can make it read `delivered`. `recordDispatchRunOutcome`
- *      refuses `delivered` without an explicit delivery timestamp, so an
- *      accepted dispatch that is never delivered can never be recorded as
- *      delivered — the negative is structural, not a convention.
+ *   1. ACCEPTED-NOT-DELIVERED. The record written by an ACCEPTED dispatch lives
+ *      in SPEC S6 line 243's frozen table, which has NO column for delivery, and
+ *      this unit ships no DDL that could add one. There is no input on the
+ *      accepted path that can express delivered, so an accepted dispatch that is
+ *      never delivered can never read as delivered — the negative is structural.
  *
- *   2. UNCERTAIN SEND IS NOT REPLAYED INTO A DUPLICATE. An unacknowledged send
- *      binds as `uncertain` (not terminal, never `delivered`), it is NOT
- *      accepted-run evidence — so it can neither suppress nor stand in for an
- *      accepted run — and a replay of the SAME gateway run never produces a
- *      second mapping: the row is extended in place and its original
- *      task/execution attribution is preserved.
+ *   2. UNCERTAIN SEND IS NOT ADMITTED. An unacknowledged send writes NO binding
+ *      at all: no acknowledgement means no acceptance, so unproven work can
+ *      neither resolve a trusted taskId nor suppress the reconciliation retry,
+ *      and a replay of the SAME gateway run never produces a second mapping —
+ *      the row is extended in place and its original task/execution attribution
+ *      is preserved.
  *
  * Also locked here: company scoping of the reader, the `hq-chat` private-owner
  * classification (SPEC S9), the addressable-session-key fallback (a gateway
  * sentinel must never be stored as a run), and the un-migrated-box degradation
  * (missing table = no binding, never a throw into dispatch).
  *
- * Harness: isolated temp DB + the SHIPPED DDL constant, because the reserved
- * additive HQ migration belongs to B01 and is not on this branch yet — an
+ * Harness: isolated temp DB + B01 migration 169's VERBATIM DDL, because the
+ * reserved additive HQ migration is what creates this table in production — an
  * un-migrated box is exactly the degrade case asserted at the end.
  */
 import test from 'node:test';
@@ -48,10 +47,33 @@ type DispatcherModule = typeof import('../../../../src/lib/task-dispatcher');
 let recordDispatchRunBinding: DispatcherModule['recordDispatchRunBinding'];
 let acceptedRunReplayForTask: DispatcherModule['acceptedRunReplayForTask'];
 let resolveDispatchRunBinding: DispatcherModule['resolveDispatchRunBinding'];
-let recordDispatchRunOutcome: DispatcherModule['recordDispatchRunOutcome'];
 let dispatchRunIdentity: DispatcherModule['dispatchRunIdentity'];
 let gatewayRunIdFromResult: DispatcherModule['gatewayRunIdFromResult'];
-let HQ_RUN_BINDINGS_DDL: string;
+
+/**
+ * B01 migration 169's `hq_run_bindings` DDL, VERBATIM from
+ * src/lib/db/migrations.ts (CC .worktrees/B01, id '169') — SPEC S6 line 243's
+ * ten columns, the shape the assembled product actually has.
+ */
+const SPEC_HQ_RUN_BINDINGS_DDL = `
+      CREATE TABLE IF NOT EXISTS hq_run_bindings (
+        company_id TEXT NOT NULL,
+        runtime_run_id TEXT NOT NULL,
+        runtime_session_key TEXT,
+        agent_id TEXT,
+        task_id TEXT,
+        execution_id TEXT,
+        visibility TEXT NOT NULL,
+        owner_subject TEXT,
+        recorded_at TEXT NOT NULL,
+        expires_at TEXT,
+        PRIMARY KEY (company_id, runtime_run_id)
+      )`;
+/** SPEC S6 line 243's column list, exactly ten columns. */
+const SPEC_HQ_RUN_BINDINGS_COLUMNS = [
+  'company_id', 'runtime_run_id', 'runtime_session_key', 'agent_id', 'task_id',
+  'execution_id', 'visibility', 'owner_subject', 'recorded_at', 'expires_at',
+];
 
 const COMPANY = 'company-b20';
 const WS = 'ws-b20';
@@ -79,10 +101,8 @@ function bindingsFor(taskId: string) {
     execution_id: string | null;
     visibility: string;
     owner_subject: string | null;
-    outcome: string;
-    delivered_at: string | null;
   }>(
-    `SELECT runtime_run_id, runtime_session_key, execution_id, visibility, owner_subject, outcome, delivered_at
+    `SELECT runtime_run_id, runtime_session_key, execution_id, visibility, owner_subject
        FROM hq_run_bindings WHERE task_id = ? ORDER BY recorded_at`,
     [taskId],
   );
@@ -100,15 +120,13 @@ test.before(async () => {
   recordDispatchRunBinding = td.recordDispatchRunBinding;
   acceptedRunReplayForTask = td.acceptedRunReplayForTask;
   resolveDispatchRunBinding = td.resolveDispatchRunBinding;
-  recordDispatchRunOutcome = td.recordDispatchRunOutcome;
   dispatchRunIdentity = td.dispatchRunIdentity;
   gatewayRunIdFromResult = td.gatewayRunIdFromResult;
-  HQ_RUN_BINDINGS_DDL = td.HQ_RUN_BINDINGS_DDL;
 
-  // B01 owns applying this DDL in the reserved additive HQ migration; it is not
-  // on this branch, so stand it up from the SHIPPED constant — the same string
-  // B01's migration will carry.
-  db.getDb().exec(HQ_RUN_BINDINGS_DDL);
+  // B01 migration 169 creates this table on the assembled box; it is not on this
+  // branch yet, so stand it up from that migration's VERBATIM DDL — the same
+  // statement production runs. This unit ships no DDL of its own anymore.
+  db.getDb().exec(SPEC_HQ_RUN_BINDINGS_DDL);
 
   const now = new Date().toISOString();
   run(
@@ -136,7 +154,7 @@ test.after(async () => {
 
 // ── 1. ACCEPTED IS NOT DELIVERED ─────────────────────────────────────────────
 
-test('[B20-1] an ACCEPTED dispatch records accepted with NO delivery timestamp, and the accepted path cannot write delivered', () => {
+test('[B20-1] an ACCEPTED dispatch writes the frozen SPEC S6 row, and the accepted path cannot express delivered', () => {
   const taskId = 'b20-task-accepted';
   seedTask(taskId);
 
@@ -146,47 +164,29 @@ test('[B20-1] an ACCEPTED dispatch records accepted with NO delivery timestamp, 
     agentId: AGENT,
     sessionKey: SESSION_KEY,
     acceptedRunId: ACCEPTED_RUN,
-    outcome: 'accepted',
   });
 
   const rows = bindingsFor(taskId);
   assert.equal(rows.length, 1, 'exactly one binding is written for one accepted dispatch');
   assert.equal(rows[0].runtime_run_id, ACCEPTED_RUN, 'the binding names the gateway runId, not a local id');
-  assert.equal(rows[0].outcome, 'accepted');
-  assert.equal(rows[0].delivered_at, null, 'ACCEPTED IS NOT DELIVERED — delivered_at must be NULL');
   assert.equal(rows[0].execution_id, EXECUTION, 'the canonical CC execution id is recorded');
   assert.equal(rows[0].visibility, 'task-audience', 'an ordinary task run is task-audience');
 
-  // The only writer of 'delivered' refuses to write it without real evidence.
-  assert.equal(
-    recordDispatchRunOutcome({ companyId: COMPANY, runtimeRunId: ACCEPTED_RUN, outcome: 'delivered' }),
-    false,
-    'delivered without an explicit delivery timestamp is REFUSED',
-  );
-  const after = bindingsFor(taskId)[0];
-  assert.equal(after.outcome, 'accepted', 'the accepted record is untouched by the refused write');
-  assert.equal(after.delivered_at, null);
-
-  // …and accepts it once explicit evidence is supplied.
-  assert.equal(
-    recordDispatchRunOutcome({
-      companyId: COMPANY,
-      runtimeRunId: ACCEPTED_RUN,
-      outcome: 'delivered',
-      deliveredAt: new Date().toISOString(),
-    }),
-    true,
-    'a delivery proven with an explicit timestamp is recorded',
-  );
-  assert.notEqual(bindingsFor(taskId)[0].delivered_at, null);
+  // ACCEPTED IS NOT DELIVERED, structurally: the frozen SPEC S6 line 243 table
+  // has no delivery column at all, and this unit ships no statement that could
+  // add one — so no input on the accepted path can produce a delivery record.
+  const columns = queryAll<{ name: string }>('PRAGMA table_info(hq_run_bindings)').map((c) => c.name).sort();
+  assert.deepEqual(columns, [...SPEC_HQ_RUN_BINDINGS_COLUMNS].sort(), 'the table is SPEC S6 line 243 exactly');
+  assert.ok(!columns.includes('delivered_at'), 'no delivery column exists to be written');
+  assert.ok(!columns.includes('outcome'), 'no outcome column exists for acceptance to masquerade as delivery');
 });
 
-test('[B20-2] the accepted-run replay evidence is exactly the accepted, undocumented-delivery run', () => {
+test('[B20-2] the accepted-run replay evidence is exactly the accepted source binding', () => {
   const taskId = 'b20-task-replay-evidence';
   seedTask(taskId);
   recordDispatchRunBinding({
     taskId, executionId: EXECUTION, agentId: AGENT, sessionKey: SESSION_KEY,
-    acceptedRunId: 'run-b20-evidence', outcome: 'accepted',
+    acceptedRunId: 'run-b20-evidence',
   });
 
   const evidence = acceptedRunReplayForTask(taskId, WS);
@@ -203,31 +203,35 @@ test('[B20-2] the accepted-run replay evidence is exactly the accepted, undocume
 
 // ── 2. UNCERTAIN SEND ────────────────────────────────────────────────────────
 
-test('[B20-3] an UNCERTAIN send records uncertain, is not delivered, and is not accepted-run evidence', () => {
+test('[B20-3] an acknowledgement with no runId falls back to the addressed session identity — still accepted evidence', () => {
   const taskId = 'b20-task-uncertain';
   seedTask(taskId);
 
+  // SPEC S5 step 6 names "accepted source run/session": when the gateway
+  // acknowledges the send without a runId, the addressed session key IS the
+  // trusted identity. This is an ACCEPTED dispatch (it was acknowledged), so the
+  // row is written and it is replay evidence like any other.
+  //
+  // An UNACKNOWLEDGED send never reaches this writer at all — the frozen table
+  // has no column to mark a send unproven, so an uncertain binding would be
+  // indistinguishable from an accepted one and would wrongly suppress the
+  // reconciliation retry. The call sites enforce that: the route writes bindings
+  // only after the acknowledgement ([B20-R4] proves an unacknowledged send
+  // writes zero rows) and the dispatcher writes only after
+  // recordExecutionAcceptance.
   recordDispatchRunBinding({
     taskId, executionId: EXECUTION, agentId: AGENT, sessionKey: SESSION_KEY,
-    acceptedRunId: null, outcome: 'uncertain',
+    acceptedRunId: null,
   });
 
   const rows = bindingsFor(taskId);
-  assert.equal(rows.length, 1);
-  assert.equal(rows[0].outcome, 'uncertain', 'an unacknowledged send is uncertain, never accepted');
-  assert.equal(rows[0].delivered_at, null);
-  assert.equal(
-    rows[0].runtime_run_id,
-    SESSION_KEY,
-    'with no accepted runId the binding names the ADDRESSED gateway session key — the only trusted identity available',
-  );
+  assert.equal(rows.length, 1, 'the acknowledged send is bound under the only trusted identity available');
+  assert.equal(rows[0].runtime_run_id, SESSION_KEY, 'the addressed gateway session key is the fallback identity');
+  assert.equal(rows[0].execution_id, EXECUTION, 'attribution is still the server’s own execution row');
 
-  // Not accepted evidence: an uncertain send must never stand in for an accepted
-  // run, so nothing downstream can treat unproven delivery as admission.
-  assert.equal(
+  assert.ok(
     acceptedRunReplayForTask(taskId, WS),
-    null,
-    'an uncertain send is NOT accepted-run evidence — unproven work is never counted as admitted',
+    'an acknowledged send is accepted-run evidence — a replay must not duplicate it',
   );
 });
 
@@ -237,7 +241,7 @@ test('[B20-4] replaying the SAME gateway run extends the binding in place — no
   const bind = (executionId: string) =>
     recordDispatchRunBinding({
       taskId, executionId, agentId: AGENT, sessionKey: SESSION_KEY,
-      acceptedRunId: 'run-b20-replay', outcome: 'accepted',
+      acceptedRunId: 'run-b20-replay',
     });
 
   bind('exec-first');
@@ -290,7 +294,7 @@ test('[B20-6] a sentinel session key writes NO binding at all', () => {
   seedTask(taskId);
   recordDispatchRunBinding({
     taskId, executionId: EXECUTION, agentId: AGENT, sessionKey: SENTINEL_KEY,
-    acceptedRunId: null, outcome: 'uncertain',
+    acceptedRunId: null,
   });
   assert.equal(bindingsFor(taskId).length, 0, 'a binding that names no gateway object is worse than no binding');
 });
@@ -303,11 +307,11 @@ test('[B20-7] an hq-chat task binds private-owner with its owner subject; every 
 
   recordDispatchRunBinding({
     taskId: privateTask, executionId: EXECUTION, agentId: AGENT, sessionKey: SESSION_KEY,
-    acceptedRunId: 'run-b20-private', outcome: 'accepted',
+    acceptedRunId: 'run-b20-private',
   });
   recordDispatchRunBinding({
     taskId: publicTask, executionId: EXECUTION, agentId: AGENT, sessionKey: SESSION_KEY,
-    acceptedRunId: 'run-b20-public', outcome: 'accepted',
+    acceptedRunId: 'run-b20-public',
   });
 
   const priv = bindingsFor(privateTask)[0];
@@ -324,7 +328,7 @@ test('[B20-8] the reader is company-scoped, and a rebind never inherits a foreig
   seedTask(taskId);
   recordDispatchRunBinding({
     taskId, executionId: EXECUTION, agentId: AGENT, sessionKey: SESSION_KEY,
-    acceptedRunId: 'run-b20-scope', outcome: 'accepted',
+    acceptedRunId: 'run-b20-scope',
   });
 
   const mine = resolveDispatchRunBinding(COMPANY, 'run-b20-scope');
@@ -342,7 +346,7 @@ test('[B20-8] the reader is company-scoped, and a rebind never inherits a foreig
   run('UPDATE tasks SET assigned_agent_id = NULL WHERE id = ?', [other]);
   recordDispatchRunBinding({
     taskId: other, executionId: EXECUTION, agentId: AGENT, sessionKey: SESSION_KEY,
-    acceptedRunId: 'run-b20-reassigned', outcome: 'accepted',
+    acceptedRunId: 'run-b20-reassigned',
   });
   assert.equal(bindingsFor(other).length, 0, 'the binding requires the row to still name the dispatching agent');
 });
@@ -362,13 +366,9 @@ test('[B20-9] an un-migrated box (no hq_run_bindings table) degrades to no bindi
   assert.doesNotThrow(() => {
     recordDispatchRunBinding({
       taskId, executionId: EXECUTION, agentId: AGENT, sessionKey: SESSION_KEY,
-      acceptedRunId: 'run-b20-degrade', outcome: 'accepted',
+      acceptedRunId: 'run-b20-degrade',
     });
   }, 'a capture miss is invisible to the business call it describes');
   assert.equal(acceptedRunReplayForTask(taskId, WS), null, 'with no table there is no evidence — the route behaves as before');
   assert.equal(resolveDispatchRunBinding(COMPANY, 'run-b20-degrade'), null);
-  assert.equal(
-    recordDispatchRunOutcome({ companyId: COMPANY, runtimeRunId: 'run-b20-degrade', outcome: 'accepted' }),
-    false,
-  );
 });

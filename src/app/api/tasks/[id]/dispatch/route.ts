@@ -401,12 +401,12 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
     // twice. An accepted dispatch that was never delivered is never replayed
     // into a duplicate.
     //
-    // The evidence is the mapping B20 itself wrote (hq_run_bindings, outcome
-    // 'accepted'), scoped to the task's own company, and only a run the
-    // real-time dispatcher records as ACCEPTED — never 'uncertain' (unproven,
-    // still reconcilable) and never one already proven 'delivered'. It sits
-    // BEFORE any reservation, so a suppressed replay claims no execution, no
-    // provider pool slot and mints no idempotency key.
+    // The evidence is the accepted source mapping B20 itself wrote
+    // (hq_run_bindings, SPEC S6 line 243 — one row per ACCEPTED run), scoped to
+    // the task's own company. An UNCERTAIN send writes NO row, so unproven work
+    // is never admitted here and never suppresses the reconciliation retry. It
+    // sits BEFORE any reservation, so a suppressed replay claims no execution,
+    // no provider pool slot and mints no idempotency key.
     //
     // `{ force: true }` still overrides: deliberate operator re-dispatch after a
     // frozen or undelivered run keeps working, exactly as the duplicate-window
@@ -417,8 +417,9 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
         const replayMsg =
           `[dispatch_replay_suppressed] Task "${task.title}" already has an ACCEPTED gateway run ` +
           `(execution ${priorRun.executionId ?? 'unknown'}, accepted ${priorRun.acceptedAt}). The replay was ` +
-          `SUPPRESSED so the agent does not receive the task twice. Acceptance is not delivery — inspect the ` +
-          `run's actual outcome. To re-dispatch deliberately, repeat the request with { "force": true }.`;
+          `SUPPRESSED so the agent does not receive the task twice. Acceptance is not delivery — check the ` +
+          `run's actual progress before trusting it. To re-dispatch deliberately, repeat the request with ` +
+          `{ "force": true }.`;
         console.warn(`[Dispatch] ${replayMsg}`);
         const nowReplay = new Date().toISOString();
         run(
@@ -985,15 +986,14 @@ If you need help or clarification, ask the orchestrator.`;
       // step 6, S6 `hq_run_bindings`). Trusted server state only: the task/
       // agent/execution triple comes from the rows this handler already read,
       // never from the request body, the task message or any tool params.
-      // `outcome:'accepted'` — acceptance is NOT delivery and this path has no
-      // branch that can write delivered.
+      // Reachable ONLY after the gateway acknowledged the send — acceptance is
+      // not delivery, and this frozen table cannot say otherwise.
       recordDispatchRunBinding({
         taskId: task.id,
         executionId: execution.id,
         agentId: agent.id,
         sessionKey,
         acceptedRunId: gatewayRunIdFromResult(acknowledgement),
-        outcome: 'accepted',
       });
 
       // FIX-15 (Error 7 / R7 — model skew): pin the ACTUAL runtime model on the
@@ -1136,18 +1136,10 @@ If you need help or clarification, ask the orchestrator.`;
       if (acknowledged) return NextResponse.json({success:true,task_id:task.id,execution_id:executionId,warning:'accepted_bookkeeping_failed'});
       // The error travels so a 429 shuts the provider pool (see recordExecutionUnknown).
       recordExecutionUnknown(execution, undefined, err);
-      // B20 — an uncertain send may still have reached the gateway, so its
-      // binding is recorded as 'uncertain': NOT terminal, and NOT eligible for
-      // the accepted-run replay suppression above. No second send is authorized
-      // by this record; it exists so the run is not invisible.
-      recordDispatchRunBinding({
-        taskId: task.id,
-        executionId: execution.id,
-        agentId: agent.id,
-        sessionKey,
-        acceptedRunId: null,
-        outcome: 'uncertain',
-      });
+      // B20 — NO binding for an uncertain send: no acknowledgement means no
+      // acceptance, and the frozen SPEC S6 table records accepted source runs
+      // only. A row here would resolve a trusted taskId for unproven work and
+      // would suppress the reconciliation retry this path deliberately allows.
       return NextResponse.json({success:false,task_id:task.id,execution_id:executionId,
         reason:'send_acceptance_unknown',message:'Reconcile this execution before retrying.'},{status:202});
     }

@@ -8,18 +8,24 @@
  *
  * PROVES (B20 deliverable + the two named semantics):
  *   1. An ACCEPTED dispatch writes the trusted run binding — the ACTUAL gateway
- *      runId mapped to the CC task/execution/agent — with outcome 'accepted' and
- *      delivered_at NULL. Acceptance never writes delivered.
+ *      runId mapped to the CC task/execution/agent — in the frozen SPEC S6
+ *      line 243 shape. Acceptance never records delivery: that table has no
+ *      column for it.
  *   2. A replay of a task that HAS an accepted run is SUPPRESSED: 409,
  *      `accepted_run_replay`, ZERO second chat.send. An accepted dispatch that
  *      was never delivered is never replayed into a duplicate.
  *   3. `{ force: true }` still re-dispatches deliberately — the operator
  *      override is preserved, never shadowed.
- *   4. An UNCERTAIN send binds 'uncertain', is NOT accepted-run evidence (so it
- *      suppresses nothing) and is NOT delivered.
+ *   4. An UNCERTAIN send writes NO binding: no acknowledgement means no
+ *      acceptance, so it is not accepted-run evidence, suppresses nothing, and
+ *      cannot stand in for admitted work.
  *   5. The pre-existing dispatch-idempotency window still governs when it
  *      applies — asserted here by running the SAME replay shape with B20's guard
  *      made inert (no accepted binding) and the window ON.
+ *
+ * The harness stands the table up from B01 migration 169's VERBATIM DDL — the
+ * exact statement production runs — never from a shape this unit ships itself,
+ * so a column the migration does not create cannot creep back in unnoticed.
  *
  * The duplicate-EXECUTION guard (one live attempt per card) is pre-existing CC
  * behavior and would mask these cases, so each case that re-POSTs first retires
@@ -75,7 +81,33 @@ let POST: RouteModule['POST'];
 
 type DispatcherModule = typeof import('../../../../src/lib/task-dispatcher');
 let recordDispatchRunBinding: DispatcherModule['recordDispatchRunBinding'];
-let HQ_RUN_BINDINGS_DDL: string;
+
+/**
+ * B01 migration 169's `hq_run_bindings` DDL, VERBATIM from
+ * src/lib/db/migrations.ts (CC .worktrees/B01, id '169'). It is the shape the
+ * assembled product actually has — SPEC S6 line 243's ten columns. The harness
+ * applies THIS, never a statement this unit ships, so a column production does
+ * not have cannot appear in a test-only definition.
+ */
+const SPEC_HQ_RUN_BINDINGS_DDL = `
+      CREATE TABLE IF NOT EXISTS hq_run_bindings (
+        company_id TEXT NOT NULL,
+        runtime_run_id TEXT NOT NULL,
+        runtime_session_key TEXT,
+        agent_id TEXT,
+        task_id TEXT,
+        execution_id TEXT,
+        visibility TEXT NOT NULL,
+        owner_subject TEXT,
+        recorded_at TEXT NOT NULL,
+        expires_at TEXT,
+        PRIMARY KEY (company_id, runtime_run_id)
+      )`;
+/** SPEC S6 line 243's column list, exactly ten columns. */
+const SPEC_HQ_RUN_BINDINGS_COLUMNS = [
+  'company_id', 'runtime_run_id', 'runtime_session_key', 'agent_id', 'task_id',
+  'execution_id', 'visibility', 'owner_subject', 'recorded_at', 'expires_at',
+];
 
 const AGENT = 'agent-b20-route';
 const WS_ID = 'ws-b20-route';
@@ -108,13 +140,11 @@ function insertTask(id: string, status = 'in_progress'): void {
 function bindings(taskId: string) {
   return queryAll<{
     runtime_run_id: string;
-    outcome: string;
-    delivered_at: string | null;
     execution_id: string | null;
-    agent_id: string;
+    agent_id: string | null;
     visibility: string;
   }>(
-    `SELECT runtime_run_id, outcome, delivered_at, execution_id, agent_id, visibility
+    `SELECT runtime_run_id, execution_id, agent_id, visibility
        FROM hq_run_bindings WHERE task_id = ? ORDER BY recorded_at`,
     [taskId],
   );
@@ -158,11 +188,18 @@ test.before(async () => {
 
   const td = (await import('../../../../src/lib/task-dispatcher')) as DispatcherModule;
   recordDispatchRunBinding = td.recordDispatchRunBinding;
-  HQ_RUN_BINDINGS_DDL = td.HQ_RUN_BINDINGS_DDL;
-  // B01 owns applying this DDL in the reserved additive HQ migration; it is not
-  // on this branch, so stand it up from the SHIPPED constant — the same string
-  // B01's migration will carry.
-  db.getDb().exec(HQ_RUN_BINDINGS_DDL);
+  // B01 migration 169 creates this table on the assembled box; it is not on
+  // this branch yet, so stand it up from that migration's VERBATIM DDL — the
+  // same statement production runs. The unit ships no DDL of its own anymore.
+  db.getDb().exec(SPEC_HQ_RUN_BINDINGS_DDL);
+  const bindingColumns = (
+    db.getDb().prepare('PRAGMA table_info(hq_run_bindings)').all() as { name: string }[]
+  ).map((c) => c.name).sort();
+  assert.deepEqual(
+    bindingColumns,
+    [...SPEC_HQ_RUN_BINDINGS_COLUMNS].sort(),
+    'precondition: the harness table is SPEC S6 line 243 exactly — ten columns',
+  );
 
   const now = new Date().toISOString();
   run(
@@ -212,7 +249,7 @@ test.after(async () => {
 
 // ── 1. The real dispatch writes the binding ──────────────────────────────────
 
-test('[B20-R1] an ACCEPTED dispatch binds the ACTUAL gateway runId as accepted, with delivered_at NULL', async () => {
+test('[B20-R1] an ACCEPTED dispatch binds the ACTUAL gateway runId in the frozen SPEC S6 shape', async () => {
   retireExecutions();
   const gateway = await stubGateway({ runId: 'run-b20-r1' });
   const taskId = 'b20r-accepted';
@@ -225,11 +262,16 @@ test('[B20-R1] an ACCEPTED dispatch binds the ACTUAL gateway runId as accepted, 
   const rows = bindings(taskId);
   assert.equal(rows.length, 1, 'exactly one run binding for one accepted dispatch');
   assert.equal(rows[0].runtime_run_id, 'run-b20-r1', 'the binding names the ACTUAL gateway runId');
-  assert.equal(rows[0].outcome, 'accepted', 'an accepted dispatch is recorded accepted');
-  assert.equal(rows[0].delivered_at, null, 'ACCEPTED IS NOT DELIVERED — delivered_at must be NULL');
   assert.equal(rows[0].agent_id, AGENT, 'the binding carries the actual actor runtime binding owner');
   assert.equal(rows[0].visibility, 'task-audience');
   assert.ok(rows[0].execution_id, 'the canonical CC execution id is recorded');
+  // ACCEPTED IS NOT DELIVERED — structurally: the table this row lives in has
+  // no delivery column, and this unit ships no other statement that could add one.
+  const bindingColumns = (
+    queryAll<{ name: string }>('PRAGMA table_info(hq_run_bindings)').map((c) => c.name)
+  );
+  assert.equal(bindingColumns.length, 10, 'the binding table is SPEC S6 line 243 exactly');
+  assert.ok(!bindingColumns.includes('delivered_at'), 'no delivery column exists to be written');
 });
 
 // ── 2. Replay suppression ────────────────────────────────────────────────────
@@ -264,7 +306,6 @@ test('[B20-R2] a replay of a task with an accepted run is SUPPRESSED — 409, no
   const after = bindings(taskId);
   assert.equal(after.length, 1, 'a replay never produces a second mapping');
   assert.equal(after[0].execution_id, original.execution_id, 'original execution attribution preserved');
-  assert.equal(after[0].delivered_at, null, 'still not delivered');
 });
 
 test('[B20-R3] { force: true } still re-dispatches deliberately — the operator override is preserved', async () => {
@@ -288,7 +329,7 @@ test('[B20-R3] { force: true } still re-dispatches deliberately — the operator
 
 // ── 3. Uncertain send ────────────────────────────────────────────────────────
 
-test('[B20-R4] an UNCERTAIN send binds uncertain, is NOT delivered, and suppresses nothing', async () => {
+test('[B20-R4] an UNCERTAIN send writes NO binding, and suppresses nothing', async () => {
   retireExecutions();
   const gateway = await stubGateway({ fail: true });
   const taskId = 'b20r-uncertain';
@@ -298,14 +339,12 @@ test('[B20-R4] an UNCERTAIN send binds uncertain, is NOT delivered, and suppress
   assert.equal(res.status, 202, 'an unacknowledged send is reported as unknown, not success');
   assert.equal(gateway.sends, 1);
 
+  // No acknowledgement means no acceptance. The frozen SPEC S6 table records
+  // accepted source runs only, so an unproven send writes NO row: a row would
+  // resolve a trusted taskId for work that may never have run, and would
+  // suppress the reconciliation retry this path deliberately allows.
   const rows = bindings(taskId);
-  assert.equal(rows.length, 1, 'the unproven send is still bound — it is not invisible');
-  assert.equal(rows[0].outcome, 'uncertain', 'an unacknowledged send records uncertain, never accepted');
-  assert.equal(rows[0].delivered_at, null, 'uncertain is not delivered');
-  assert.ok(
-    String(rows[0].runtime_run_id).startsWith('agent:b20dept:'),
-    'with no accepted runId the binding names the ADDRESSED gateway session key, not a sentinel',
-  );
+  assert.equal(rows.length, 0, 'an unacknowledged send writes NO accepted binding — it is not admitted');
 
   retireExecutions();
   const second = await stubGateway({ runId: 'run-b20-route-second' });
@@ -336,9 +375,9 @@ test('[B20-R5] a binding under another company cannot suppress this company\'s d
   run(
     `INSERT INTO hq_run_bindings
        (company_id, runtime_run_id, runtime_session_key, agent_id, task_id, execution_id,
-        visibility, owner_subject, outcome, delivered_at, recorded_at, expires_at)
+        visibility, owner_subject, recorded_at, expires_at)
      VALUES ('company-foreign-b20', 'run-foreign', 'agent:x:y', ?, ?, 'exec-foreign',
-             'task-audience', NULL, 'accepted', NULL, ?, ?)`,
+             'task-audience', NULL, ?, ?)`,
     [AGENT, taskId, now, new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString()],
   );
 

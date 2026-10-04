@@ -2236,16 +2236,13 @@ If you need help or clarification, ask the orchestrator.`;
       acknowledgedExecution = execution;
       // B20 — bind the ACCEPTED dispatch to its ACTUAL gateway run. Written
       // after the acceptance is durably recorded, from trusted server state
-      // only (never from the agent's message or tool params). `outcome` here is
-      // 'accepted' and nothing in this path can write 'delivered': acceptance is
-      // not delivery.
+      // only (never from the agent's message or tool params).
       recordDispatchRunBinding({
         taskId: task.id,
         executionId: execution.id,
         agentId: agent.id,
         sessionKey,
         acceptedRunId: gatewayRunIdFromResult(response),
-        outcome: 'accepted',
       });
     } catch (sendErr) {
       // A transport failure may follow remote acceptance. Never roll back the
@@ -2253,17 +2250,10 @@ If you need help or clarification, ask the orchestrator.`;
       // The error travels so a 429 can shut the pool instead of the next card
       // walking into the same refusal.
       recordExecutionUnknown(execution, undefined, sendErr);
-      // B20 — an uncertain send may still have reached the gateway, so its
-      // binding is recorded as 'uncertain': deliberately NOT terminal, and NOT
-      // eligible for the accepted-run replay suppression the route consults.
-      recordDispatchRunBinding({
-        taskId: task.id,
-        executionId: execution.id,
-        agentId: agent.id,
-        sessionKey,
-        acceptedRunId: null,
-        outcome: 'uncertain',
-      });
+      // B20 — NO binding for an uncertain send: no acknowledgement means no
+      // acceptance, and the frozen SPEC S6 table records accepted source runs
+      // only. A row here would resolve a trusted taskId for unproven work and
+      // would suppress the reconciliation retry this path deliberately allows.
       console.error(`[${context}] chat.send acknowledgement unknown for ${task.id}:`, sendErr);
       return { status: 'unknown', reason: 'send_acceptance_unknown', executionId };
     }
@@ -2522,44 +2512,28 @@ If you need help or clarification, ask the orchestrator.`;
 // from a mapping the server itself wrote, never from a model-authored body or
 // tool params (SPEC S5 step 1 / §7 rule 4). This is that mapping's writer.
 //
-// ACCEPTED IS NOT DELIVERED. Two different facts, two different columns:
-//   • `outcome='accepted'`  — the gateway acknowledged the send. The run exists.
-//                             `delivered_at` stays NULL.
-//   • `outcome='uncertain'` — the send raised after it may have reached the
-//                             gateway (recordExecutionUnknown). Not terminal.
-//   • `outcome='delivered'` — written ONLY by a caller holding real delivery
-//                             evidence. Nothing on this accepted path has a
-//                             branch that writes it, so an accepted dispatch
-//                             that is never delivered can never read as
-//                             delivered (B20 check: accepted-not-delivered).
+// THE TABLE SHAPE IS SPEC S6 LINE 243'S, EXACTLY — ten columns, frozen. The
+// reserved additive HQ migration (B01, migration 169) creates it; this module
+// creates nothing. An earlier revision of this writer carried its own 12-column
+// CREATE (`outcome`, `delivered_at`) and that statement never ran in production:
+// `CREATE TABLE IF NOT EXISTS` means whichever statement runs FIRST defines the
+// shape forever, and the migration does. Against the real table the INSERT was
+// refused, the failure was swallowed as non-fatal, and the replay guard reading
+// `outcome` was silently inert. The writer/reader here are reduced to the
+// frozen ten columns so both revisions agree by construction.
+//
+// ACCEPTED IS NOT DELIVERED. This table records ONE fact: this gateway run was
+// ACCEPTED for this task (SPEC: "maps accepted source run/session to authorized
+// task/execution ID"; "Gateway acceptance is not delivery or completion"). A row
+// is written only after the gateway acknowledges the send, and the frozen table
+// has no column that can express delivery — nothing on this path can record an
+// unproven send as admitted, and nothing can record anything as delivered. An
+// UNCERTAIN send (a transport failure after the send may have begun) is NOT an
+// accepted source binding and writes NO row: a row would let unproven work
+// resolve a trusted taskId and would suppress the very re-dispatch
+// reconciliation needs. The pre-existing execution guard governs the uncertain
+// case, unchanged.
 export const HQ_RUN_BINDINGS_TABLE = 'hq_run_bindings';
-
-/**
- * The exact DDL shape of SPEC S6's `hq_run_bindings`. The reserved additive HQ
- * migration (B01) owns applying it; the statement is kept here so this writer
- * can verify the table exists (an un-migrated box degrades to no binding rather
- * than throwing "no such table" into a send) and so a test can stand the table
- * up without duplicating the column list.
- */
-export const HQ_RUN_BINDINGS_DDL = `
-CREATE TABLE IF NOT EXISTS hq_run_bindings (
-  company_id TEXT NOT NULL,
-  runtime_run_id TEXT NOT NULL,
-  runtime_session_key TEXT,
-  agent_id TEXT NOT NULL,
-  task_id TEXT,
-  execution_id TEXT,
-  visibility TEXT NOT NULL CHECK (visibility IN ('task-audience','private-owner')),
-  owner_subject TEXT,
-  outcome TEXT NOT NULL CHECK (outcome IN ('accepted','uncertain','delivered')),
-  delivered_at TEXT,
-  recorded_at TEXT NOT NULL,
-  expires_at TEXT NOT NULL,
-  PRIMARY KEY (company_id, runtime_run_id)
-);
-CREATE INDEX IF NOT EXISTS idx_hq_run_bindings_task ON hq_run_bindings(company_id, task_id);
-CREATE INDEX IF NOT EXISTS idx_hq_run_bindings_expiry ON hq_run_bindings(expires_at);
-`;
 
 /** SPEC S6 line 243: expiry 48 hours after the last relevant observation; hard 100,000 rows/company. */
 export const HQ_RUN_BINDING_TTL_MS = 48 * 60 * 60 * 1000;
@@ -2579,8 +2553,6 @@ export interface DispatchRunBindingInput {
   sessionKey: string;
   /** `runId` from the ACCEPTED chat.send result; null when never acknowledged. */
   acceptedRunId?: string | null;
-  /** 'accepted' only after acknowledgement; 'uncertain' when the send is unproven. */
-  outcome: 'accepted' | 'uncertain';
 }
 
 /** Gateway-issued `runId` from a chat.send result — the only trusted run source. */
@@ -2700,8 +2672,8 @@ export function recordDispatchRunBinding(input: DispatchRunBindingInput): void {
     run(
       `INSERT INTO hq_run_bindings
          (company_id, runtime_run_id, runtime_session_key, agent_id, task_id, execution_id,
-          visibility, owner_subject, outcome, delivered_at, recorded_at, expires_at)
-       VALUES (?,?,?,?,?,?,?,?,?,NULL,?,?)`,
+          visibility, owner_subject, recorded_at, expires_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?)`,
       [
         companyId,
         runId,
@@ -2711,7 +2683,6 @@ export function recordDispatchRunBinding(input: DispatchRunBindingInput): void {
         input.executionId,
         visibility,
         ownerSubject,
-        input.outcome,
         now.toISOString(),
         expiresAt,
       ],
@@ -2729,54 +2700,24 @@ export function recordDispatchRunBinding(input: DispatchRunBindingInput): void {
 export function resolveDispatchRunBinding(
   companyId: string,
   runtimeRunId: string,
-): { task_id: string | null; execution_id: string | null; agent_id: string; visibility: string; outcome: string; owner_subject: string | null } | null {
+): { task_id: string | null; execution_id: string | null; agent_id: string | null; visibility: string; owner_subject: string | null } | null {
   try {
     if (!hqRunBindingsReady()) return null;
     return (
       queryOne<{
         task_id: string | null;
         execution_id: string | null;
-        agent_id: string;
+        agent_id: string | null;
         visibility: string;
-        outcome: string;
         owner_subject: string | null;
       }>(
-        `SELECT task_id, execution_id, agent_id, visibility, outcome, owner_subject
+        `SELECT task_id, execution_id, agent_id, visibility, owner_subject
            FROM hq_run_bindings WHERE company_id = ? AND runtime_run_id = ?`,
         [companyId, runtimeRunId],
       ) ?? null
     );
   } catch {
     return null;
-  }
-}
-
-/**
- * Record a PAST-ACCEPTANCE outcome for an already bound run. The ONLY writer of
- * `outcome='delivered'`, and it demands an explicit delivery timestamp — there
- * is no default, so no accepted-only path can reach it by accident.
- */
-export function recordDispatchRunOutcome(args: {
-  companyId: string;
-  runtimeRunId: string;
-  outcome: 'accepted' | 'delivered';
-  deliveredAt?: string;
-}): boolean {
-  try {
-    if (!hqRunBindingsReady()) return false;
-    const deliveredAt = args.outcome === 'delivered' ? (args.deliveredAt ?? null) : null;
-    if (args.outcome === 'delivered' && !deliveredAt) return false;
-    return (
-      run('UPDATE hq_run_bindings SET outcome = ?, delivered_at = ? WHERE company_id = ? AND runtime_run_id = ?', [
-        args.outcome,
-        deliveredAt,
-        args.companyId,
-        args.runtimeRunId,
-      ]).changes === 1
-    );
-  } catch (err) {
-    console.warn('[hq-run-bindings] recordDispatchRunOutcome failed (non-fatal):', (err as Error).message);
-    return false;
   }
 }
 
@@ -2789,9 +2730,10 @@ export function recordDispatchRunOutcome(args: {
  * un-migrated box) or absent mapping means "no suppression" — the route then
  * behaves exactly as it did before, never worse.
  *
- * A run whose outcome later became `delivered` is deliberately NOT returned:
- * once delivery is proven the card is finished work and the ordinary
- * duplicate-window / force path governs re-dispatch, unchanged.
+ * Every row in the frozen SPEC S6 table IS an accepted source binding, so the
+ * gate is simply "has this task an accepted run". Delivery is not expressible
+ * in that table, so there is no delivered state to exclude: the ordinary
+ * duplicate-window / force path governs a deliberate re-dispatch.
  */
 export function acceptedRunReplayForTask(
   taskId: string,
@@ -2803,7 +2745,7 @@ export function acceptedRunReplayForTask(
     if (!companyId) return null;
     const row = queryOne<{ execution_id: string | null; recorded_at: string }>(
       `SELECT execution_id, recorded_at FROM hq_run_bindings
-        WHERE company_id = ? AND task_id = ? AND outcome = 'accepted'
+        WHERE company_id = ? AND task_id = ?
         ORDER BY recorded_at DESC LIMIT 1`,
       [companyId, taskId],
     );
