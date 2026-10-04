@@ -71,6 +71,15 @@ import {
   OPERATOR_COLUMN_AGE_DIGEST_CRON_EXPR,
   OPERATOR_COLUMN_AGE_DIGEST_CRON_TIMEZONE,
 } from './operator-column-age-digest';
+import {
+  runHqRetention,
+  formatHqRetentionSummary,
+  HQ_RETENTION_CRON_EXPR,
+} from './hq-retention';
+import {
+  runHqChatReconcile,
+  HQ_CHAT_RECONCILE_CRON,
+} from './hq-chat-reconcile';
 import { runEnvAudit } from '@/lib/env-auditor';
 import {
   resolveStaleTaskSweepKillFlag,
@@ -1004,6 +1013,54 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<unknown> | unk
         console.log(
           `[cron] social-expiry-recovery: scanned ${result.scanned}, retried ${result.retried}, ` +
             `recovered ${result.recovered}, awaiting_reconnect ${result.awaiting_reconnect}`,
+        );
+      }
+      return result;
+    },
+  },
+  // hq-retention: once per minute — B06 age-only bounded retention sweep for
+  // the Company Headquarters tables (migration 169, B01). Caps at 500 rows
+  // per family per run; receipts first per S6 ("cleanup first removes expired
+  // receipts"). Kill flag lives inside runHqRetention (DISABLE_HQ_RETENTION):
+  // on skip it returns skippedReason and wrap() records the tick 'disabled',
+  // never a false-green 'ok' — same contract as db-retention (MR-31).
+  {
+    name: 'hq-retention',
+    expr: HQ_RETENTION_CRON_EXPR,
+    fn: async () => {
+      const result = await runHqRetention();
+      console.log(
+        result.skippedReason
+          ? `[cron] hq-retention: skipped — ${result.skippedReason}`
+          : `[cron] hq-retention: ${formatHqRetentionSummary(result)}`,
+      );
+      return result;
+    },
+  },
+  // hq-chat-reconcile: once per minute — B13 bounded stale-turn
+  // reconciliation for SPEC S9 durable turns. One pass, at most 500 rows;
+  // a missing HQ schema is zero work ('schema_absent'), never an exception.
+  // No correlation probe is passed here: V07 has not verified the exact
+  // gateway method/correlation fields in the installed version, so per B13's
+  // own contract the job runs probeless and bounded-window expiry ends turns
+  // `unresolved` rather than guessing a gateway API. wrap() sees skippedReason
+  // and records 'disabled', never a false-green 'ok'.
+  {
+    name: 'hq-chat-reconcile',
+    expr: HQ_CHAT_RECONCILE_CRON,
+    fn: async () => {
+      const result = await runHqChatReconcile({ now: () => Date.now() });
+      if (result.skippedReason) {
+        console.log(`[cron] hq-chat-reconcile: skipped — ${result.skippedReason}`);
+      } else if (
+        result.expiredToReconciling.length > 0 ||
+        result.provenReplied.length > 0 ||
+        result.unresolved.length > 0
+      ) {
+        console.log(
+          `[cron] hq-chat-reconcile: scanned ${result.scanned}, ` +
+            `to-reconciling ${result.expiredToReconciling.length}, ` +
+            `replied ${result.provenReplied.length}, unresolved ${result.unresolved.length}`,
         );
       }
       return result;
