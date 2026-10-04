@@ -263,6 +263,10 @@ export interface BroadcastOptions {
  *     operator-level visibility preserved).
  *   - execution_queue_updated → payload.task_id → tasks when present, else
  *     unscoped.
+ *   - hq_changed (B22) → payload.companyId, but ONLY when the payload is the
+ *     frozen {companyId, highSeq} shape — see resolveHqChangedScope(). The
+ *     null return here is never delivered as legacy fan-out: broadcast()
+ *     DROPS an hq_changed whose scope is null (SPEC S7).
  *   - anything else / unresolvable → null (legacy fan-out, unchanged).
  *
  * A forged payload workspace pointing at a foreign workspace only NARROWS
@@ -271,6 +275,35 @@ export interface BroadcastOptions {
  * Unknown task ids resolve to 'default' (F01-D2 legacy posture) rather than
  * unscoped, so a deleted-then-referenced row can never widen to everyone.
  */
+
+/**
+ * B22 — fail-closed scope resolver for the content-free Headquarters
+ * invalidation (SPEC S7: "`hq_changed` is a content-free company-scoped
+ * invalidation with company and high-water cursor only … if scope cannot be
+ * proved, DROP it").
+ *
+ * Returns the proven { companyId, highSeq } pair, or `null` meaning UNPROVABLE
+ * = must be dropped. Every field is required: a missing/malformed company, or
+ * a cursor that is not a non-negative safe integer, makes this
+ * not-the-specified-event and therefore un-deliverable. Nothing here trusts a
+ * caller — the payload is read defensively and no value is defaulted.
+ *
+ * Content-free by construction: this resolver reads exactly two fields and
+ * broadcast() REBUILDS the wire payload from exactly those. Private chat text,
+ * turn/session IDs and activity payloads have no path onto this wire.
+ */
+export function resolveHqChangedScope(
+  event: SSEEvent,
+): { companyId: string; highSeq: number } | null {
+  const payload = event.payload as { companyId?: unknown; highSeq?: unknown } | null | undefined;
+  if (!payload || typeof payload !== 'object') return null;
+  const companyId = typeof payload.companyId === 'string' ? payload.companyId.trim() : '';
+  if (!companyId) return null;
+  const highSeq = payload.highSeq;
+  if (typeof highSeq !== 'number' || !Number.isSafeInteger(highSeq) || highSeq < 0) return null;
+  return { companyId, highSeq };
+}
+
 export function scopeForEvent(event: SSEEvent): string | null {
   try {
     const type = event.type;
@@ -279,6 +312,9 @@ export function scopeForEvent(event: SSEEvent): string | null {
       const suffix = type.slice(type.indexOf(':') + 1).trim();
       return suffix || null;
     }
+    // B22 — the content-free Headquarters invalidation carries its own scope,
+    // so it resolves WITHOUT a database read (early return, fail-closed).
+    if (type === 'hq_changed') return resolveHqChangedScope(event)?.companyId ?? null;
     // Same dynamic-require pattern journalEvent() uses (keeps better-sqlite3
     // out of the edge-runtime bundle).
     // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -445,11 +481,37 @@ export function broadcast(event: SSEEvent, options?: BroadcastOptions): void {
   // Explicit scope wins (null forces operator-level); otherwise derive from
   // the event itself so every existing call site is filtered without being
   // touched. Unresolvable events stay unscoped (legacy fan-out, unchanged).
-  const eventCompanyId: string | null = options?.companyId !== undefined
-    ? (options.companyId ?? null)
-    : scopeForEvent(projectedEvent);
-  const wireEvent =
-    eventCompanyId === null ? projectedEvent : { ...projectedEvent, companyId: eventCompanyId };
+  //
+  // B22 — the Headquarters invalidation is NOT eligible for either posture.
+  // Its scope comes from the payload alone: `options` is ignored so no caller
+  // can widen it to operator-level or re-attribute it, and an unprovable
+  // payload is DROPPED before both delivery paths (SPEC S7). Every other type
+  // keeps the legacy behaviour untouched.
+  let eventCompanyId: string | null;
+  let wireEvent: SSEEvent & { companyId?: string | null };
+  if (event.type === 'hq_changed') {
+    const proven = resolveHqChangedScope(projectedEvent);
+    if (!proven) {
+      console.warn('[SSE] Dropped hq_changed with unprovable company scope');
+      return;
+    }
+    // Content-free enforcement (SPEC S7): the wire payload is REBUILT from the
+    // two proven fields. The caller's payload object rides no further, so an
+    // extra key (chat text, session or turn ID) can never reach the in-memory
+    // push or the cross-process journal. Both copies also carry the trimmed id.
+    eventCompanyId = proven.companyId;
+    wireEvent = {
+      ...projectedEvent,
+      companyId: proven.companyId,
+      payload: { companyId: proven.companyId, highSeq: proven.highSeq },
+    };
+  } else {
+    eventCompanyId = options?.companyId !== undefined
+      ? (options.companyId ?? null)
+      : scopeForEvent(projectedEvent);
+    wireEvent =
+      eventCompanyId === null ? projectedEvent : { ...projectedEvent, companyId: eventCompanyId };
+  }
   const data = `data: ${JSON.stringify(wireEvent)}\n\n`;
   const encoded = encoder.encode(data);
 
