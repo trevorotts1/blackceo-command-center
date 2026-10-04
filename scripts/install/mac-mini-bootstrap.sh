@@ -239,5 +239,142 @@ else
   echo "repair-command-center.sh not found at $CC_DIR/scripts/ — run it manually after cloning the repo"
 fi
 
+#
+# Step 10: Headquarters capability + persistence preflight
+#
+# SPEC S10 ("Install, upgrade and failure"): availability flag
+# HEADQUARTERS_ENABLED — default enabled when the schema is available, disabled
+# with a descriptive setup status when it is not. It is an operational
+# fallback, never a customer activation approval; the flag is not an
+# authorization surface and nothing here mints, sends or logs an owner link.
+#
+# The LIVE schema is the authority, never the _migrations ledger — same rule as
+# scripts/cc-schema-health.ts (a box can claim a migration applied while the
+# columns/tables are absent). S6 owns the table set below.
+#
+# Runs AFTER the repair gate on purpose: on a fresh box the migrations only run
+# inside repair-command-center.sh, so a check placed before it would disable
+# Headquarters on every new install and nothing later would re-enable it.
+#
+# Soft gate by design: a schema-less box still installs, with Headquarters
+# DISABLED — fail-closed availability, never a broken install and never a
+# deceptive empty office (SPEC S10: startup schema failure blocks Headquarters
+# writes; it does not fake a populated company).
+#
+# Persistence uses the EXISTING Mac locations from src/lib/platform.ts
+# (~/clawd/, ~/clawd/scratch/, ~/.mission-control/identity). The exact outbox
+# file is owned by the telemetry unit and is deliberately NOT guessed here.
+# No new service, no new container, no key or provider config is touched.
+#
+# Test seam: every helper takes its paths as positional args (defaults are the
+# canonical ones) and HQ_SQLITE_BIN names the probe binary, so
+# tests/unit/hq/B31/mac-bootstrap-hq.test.sh drives the REAL functions against
+# temp fixtures (extracted by sed range, never copied).
+#
+HQ_SQLITE_BIN="${HQ_SQLITE_BIN:-sqlite3}"
+
+hq_required_tables() {
+  printf '%s\n' hq_activity hq_activity_state hq_activity_receipts \
+    hq_run_bindings hq_chat_sessions hq_chat_turns hq_owner_login_uses
+}
+
+# Mirrors the DATABASE_PATH order ecosystem.config.cjs documents. Tier 1 (an
+# exported DATABASE_PATH) then the path the canonical ecosystem at step 8b pins
+# for THIS install dir, which is what any pm2-started CC on a box this script
+# installed actually opens. A hand-tuned ecosystem that repointed the path
+# elsewhere is the one case this does not see — the resolved path is printed so
+# a mismatch is visible, never silent.
+hq_resolve_db_path() {
+  local install_dir="${1:-$ECOSYSTEM_DIR}"
+  if [ -n "${DATABASE_PATH:-}" ]; then
+    printf '%s' "$DATABASE_PATH"
+    return 0
+  fi
+  printf '%s' "$install_dir/mission-control.db"
+}
+
+# stdout: "<1|0>|<reason>" — reason is a token or "tables-missing:a,b".
+# Never a guess: an unreadable file is reported as unreadable, not as an empty
+# table set, and a missing probe binary is its own reason (UNDETERMINED is said
+# out loud rather than collapsed into "disabled because broken").
+hq_capability_check() {
+  local db="${1:-}" missing="" t probe rc
+  if ! command -v "$HQ_SQLITE_BIN" >/dev/null 2>&1; then
+    printf '0|sqlite3-cli-absent'
+    return 0
+  fi
+  if [ ! -f "$db" ]; then
+    printf '0|database-absent'
+    return 0
+  fi
+  probe="$("$HQ_SQLITE_BIN" -readonly "$db" "SELECT count(*) FROM sqlite_master" 2>/dev/null)"
+  rc=$?
+  if [ "$rc" -ne 0 ] || [ -z "$probe" ]; then
+    printf '0|database-unreadable'
+    return 0
+  fi
+  for t in $(hq_required_tables); do
+    if ! "$HQ_SQLITE_BIN" -readonly "$db" \
+      "SELECT 1 FROM sqlite_master WHERE type='table' AND name='$t' LIMIT 1" 2>/dev/null | grep -q 1; then
+      missing="${missing}${missing:+,}$t"
+    fi
+  done
+  if [ -n "$missing" ]; then
+    printf '0|tables-missing:%s' "$missing"
+    return 0
+  fi
+  printf '1|schema-present'
+}
+
+# Additive only, same contract as the VPS installer's env reconcile: an
+# operator/cohort value already present is preserved, an absent key is
+# appended, nothing is reordered or rewritten. Append-only needs no .bak — no
+# existing byte is touched, so there is nothing to restore.
+# stdout: "written" | "operator value preserved" | "write-failed".
+hq_apply_flag() {
+  local env_file="${1:-}" value="${2:-}"
+  [ -n "$env_file" ] || { printf 'write-failed'; return 0; }
+  if [ -f "$env_file" ] && grep -qE '^[[:space:]]*(export[[:space:]]+)?HEADQUARTERS_ENABLED[[:space:]]*=' "$env_file"; then
+    printf 'operator value preserved'
+    return 0
+  fi
+  if printf '%s\n' "HEADQUARTERS_ENABLED=$value" >> "$env_file" 2>/dev/null; then
+    chmod 600 "$env_file" 2>/dev/null || true
+    printf 'written'
+  else
+    printf 'write-failed'
+  fi
+}
+
+hq_persistence_preflight() {
+  local root="${1:-$HOME}"
+  mkdir -p "$root/clawd/scratch" "$root/.mission-control/identity" 2>/dev/null || return 1
+  return 0
+}
+
+echo "[step 10] Headquarters capability + persistence preflight (Mac)..."
+HQ_ENV_FILE="$ECOSYSTEM_DIR/.env.local"
+if hq_persistence_preflight "$HOME"; then
+  echo "  persistence:    ~/clawd/scratch/ and ~/.mission-control/identity present (bridge identity + workspace roots; no new service)"
+else
+  echo "  persistence:    WARN — could not create the Mac persistence roots; check $HOME permissions"
+fi
+HQ_DB="$(hq_resolve_db_path "$ECOSYSTEM_DIR")"
+HQ_RESULT="$(hq_capability_check "$HQ_DB")"
+HQ_ENABLED="${HQ_RESULT%%|*}"
+HQ_REASON="${HQ_RESULT#*|}"
+HQ_FLAG_ACTION="$(hq_apply_flag "$HQ_ENV_FILE" "$HQ_ENABLED")"
+
+echo "  database:       $HQ_DB"
+if [ "$HQ_ENABLED" = "1" ]; then
+  echo "  capability:     schema present — HEADQUARTERS_ENABLED=1"
+else
+  echo "  capability:     HEADQUARTERS_ENABLED=0 — $HQ_REASON"
+  echo "                  Headquarters writes stay blocked until the reserved HQ migration"
+  echo "                  lands and this step re-runs. Health reports this as a setup state,"
+  echo "                  not a dead box."
+fi
+echo "  flag:           $HQ_FLAG_ACTION in $HQ_ENV_FILE"
+
 echo
 echo "Mac Mini bootstrap: OK"
