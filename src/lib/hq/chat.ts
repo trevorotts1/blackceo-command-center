@@ -26,6 +26,10 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import { queryAll, queryOne, run, sqlTime, timeNow, transaction } from '@/lib/db';
+// The ONE runtime-binding resolver (dispatch path's own prober). Imported, never
+// re-implemented: a second copy of the probe order would be a second thing to drift (S3).
+import { resolveSpecialistSessionKey } from '@/lib/routing/executor-runtime';
+import type { Agent } from '@/lib/types';
 import { hqSemanticSerialize } from './types';
 import {
   hqChatTurnCreateSchema,
@@ -751,3 +755,265 @@ export function sweepStaleTurns(at: number = Date.now()): { reconciling: number;
 
 /** Exported for the fixture check that the one-active-turn index matches the state set. */
 export const HQ_CHAT_NONTERMINAL_STATES: readonly HqChatTurnState[] = NONTERMINAL_STATES;
+
+/* ================================================================== *
+ * Route-family service seam (S8 POST/GET route rows)
+ * ================================================================== */
+
+/**
+ * The HTTP-mappable surface `src/app/api/hq/chat/**` imports (B10's five routes).
+ *
+ * WHY THIS LIVES HERE. Every route decision above is a plain function returning a
+ * row or null, because the state machine has no HTTP opinion. The route family needs
+ * the same facts in its own vocabulary — an outcome carrying the status/code/message
+ * the S8 error envelope must publish — plus two things that are NOT state-machine
+ * work and so cannot be decided inside them:
+ *
+ *   • the runtime head binding (S8 POST /sessions: "resolve authorized head and
+ *     runtime binding ... 201 or 409 runtime unavailable"). Binding resolution needs
+ *     the installed registry and runtime directory, so it is resolved here through
+ *     the ONE existing resolver (`resolveSpecialistSessionKey`, the same prober the
+ *     dispatch path uses) and never guessed from a name (S3).
+ *   • the S6 session-expiry outcome (S6: "return 410 for expired owned session, 404
+ *     for unknown/foreign"). B09's `getSession` returns the row or null, and a closed
+ *     session is only distinguishable from a missing one by the row's own `closed_at`.
+ *
+ * NO BEHAVIOR IS ADDED: each wrapper reads exactly the primitives above and maps their
+ * answers 1:1 onto the frozen envelope. Dedupe, lease/CAS, expiry and conflict
+ * decisions remain the state machine's, as S9 requires ("The service (not the route)
+ * is where dedupe, lease/CAS and expiration are decided").
+ *
+ * `nowMs` is injected for the same reason the primitives take it: a test can freeze
+ * the clock. Production omits it and both writers stamp the wall clock.
+ */
+
+/** The envelope's failure half; `status`/`code`/`message` are already publishable. */
+export type HqChatServiceFailure = {
+  ok: false;
+  status: number;
+  code: string;
+  message: string;
+  retryable?: boolean;
+};
+
+export type HqChatServiceResult<T = Record<string, unknown>> = ({ ok: true } & T) | HqChatServiceFailure;
+
+/** S8 GET /sessions/{id}: the turn page plus the cursor the route republishes. */
+export type HqTurnListPage = {
+  turns: HqChatTurn[];
+  hasMore: boolean;
+  nextBefore: string | null;
+};
+
+const serviceFail = (status: number, code: string, message: string, retryable = false): HqChatServiceFailure => ({
+  ok: false,
+  status,
+  code,
+  message,
+  retryable,
+});
+
+/** The route family already authenticated; `HqContext` carries the scope under the names this module uses. */
+export type HqChatServiceCtx = {
+  companyId: string;
+  ownerSubject: string;
+  installationId: string;
+};
+
+const scopeOf = (ctx: HqChatServiceCtx): HqChatScope => ({
+  companyId: ctx.companyId,
+  ownerSubject: ctx.ownerSubject,
+  installationId: ctx.installationId,
+});
+
+/**
+ * Resolve the authorized head's runtime binding for a new session (S8).
+ *
+ * Uses the ONE existing resolver (`resolveSpecialistSessionKey`) rather than a second
+ * copy of the probe order, and asks it for a session key only to learn whether the
+ * binding resolves: the per-turn key is minted from the turn id later (S9), never here.
+ * `allowCeoExecution=true`: this is a head-conversation binding, not a specialist
+ * dispatch — the resolver's `main` refusal exists so a BUILD task can never land on the
+ * orchestrator, and a head the roster itself marks as `main` is exactly who the owner is
+ * talking to here.
+ * `null` is the resolver's own "no runtime for this head" answer — the route publishes
+ * 409 `runtime_unavailable` (S8 status-only; code per gap G-14).
+ */
+function resolveHeadRuntime(companyId: string, headAgentId: string): string | null {
+  const row = queryOne<Agent & { workspaces_company_id: string | null }>(
+    `SELECT a.*, w.company_id AS workspaces_company_id
+       FROM agents a JOIN workspaces w ON w.id = a.workspace_id
+      WHERE a.id = ?`,
+    [headAgentId],
+  );
+  // Company-scoped: a head from another company is not a head (S7 foreign/unknown 404).
+  if (!row) return null;
+  if (row.workspaces_company_id !== companyId) return null;
+  const key = resolveSpecialistSessionKey(row, 'hq-binding-probe', row.workspace_id, 'hq/chat', true);
+  // `agent:<runtimeId>:hq-binding-probe` — the middle segment IS the verified runtime id.
+  if (key === null) return null;
+  const runtimeId = key.slice('agent:'.length, key.indexOf(':hq-binding-probe'));
+  return runtimeId || null;
+}
+
+/** S8 POST /sessions — resolve authorized head + runtime binding, then mint the session. */
+export function createHqSession(
+  ctx: HqChatServiceCtx,
+  headAgentId: string,
+  opts: { nowMs?: number } = {},
+): Promise<HqChatServiceResult<{ session: HqChatSession }>> {
+  const runtimeAgentId = resolveHeadRuntime(ctx.companyId, headAgentId);
+  if (runtimeAgentId === null) {
+    return Promise.resolve(
+      serviceFail(409, 'runtime_unavailable', 'That head has no runtime binding on this installation.'),
+    );
+  }
+  const session = createSession(scopeOf(ctx), { headAgentId, runtimeAgentId, nowMs: opts.nowMs });
+  return Promise.resolve({ ok: true, session });
+}
+
+/**
+ * Ownership gate every session-scoped route runs FIRST (S6: "ownership validated on
+ * every access"; 404 unknown/foreign, 410 expired owned session — same shape as a
+ * missing record, so a foreign caller learns nothing).
+ */
+export function getHqSession(
+  ctx: HqChatServiceCtx,
+  sessionId: string,
+): Promise<HqChatServiceResult<{ session: HqChatSession }>> {
+  const session = getSession(scopeOf(ctx), sessionId);
+  if (!session) return Promise.resolve(serviceFail(404, 'not_found', 'Session not found.'));
+  if (session.closedAt !== null) {
+    return Promise.resolve(serviceFail(410, 'session_expired', 'This conversation has expired.'));
+  }
+  return Promise.resolve({ ok: true, session });
+}
+
+/** S8 GET /sessions/{id} — paginated private turns, newest-first by the `before` cursor. */
+export function listHqTurns(
+  ctx: HqChatServiceCtx,
+  sessionId: string,
+  page: { limit: number; before?: string },
+): Promise<HqChatServiceResult<HqTurnListPage>> {
+  const gate = getSession(scopeOf(ctx), sessionId);
+  if (!gate) return Promise.resolve(serviceFail(404, 'not_found', 'Session not found.'));
+  if (gate.closedAt !== null) {
+    return Promise.resolve(serviceFail(410, 'session_expired', 'This conversation has expired.'));
+  }
+
+  // `before` is an exclusive cursor on the same (created_at, id) order the page is read
+  // in; one extra row is read to answer `hasMore` without a second query. The cursor
+  // lookup is scoped to this company/owner/session, so a foreign id can only ever move
+  // the page inside the caller's own session (a miss leaves the cursor unconstrained —
+  // the gate above already proved the session is the caller's).
+  const limit = Math.min(Math.max(page.limit, 1), 200);
+  const before = page.before ?? null;
+  const cursor =
+    before === null
+      ? null
+      : (queryOne<{ created_at: string; id: string }>(
+          `SELECT created_at, id FROM hq_chat_turns
+            WHERE id = ? AND company_id = ? AND owner_subject = ? AND session_id = ?`,
+          [before, ctx.companyId, ctx.ownerSubject, sessionId],
+        ) ?? null);
+  const rows = queryAll<TurnRow>(
+    `SELECT * FROM hq_chat_turns
+      WHERE company_id = ? AND owner_subject = ? AND session_id = ?
+        AND (? IS NULL OR created_at < ? OR (created_at = ? AND id < ?))
+      ORDER BY created_at DESC, id DESC
+      LIMIT ?`,
+    [
+      ctx.companyId,
+      ctx.ownerSubject,
+      sessionId,
+      cursor?.created_at ?? null,
+      cursor?.created_at ?? null,
+      cursor?.created_at ?? null,
+      cursor?.id ?? null,
+      limit + 1,
+    ],
+  );
+  const hasMore = rows.length > limit;
+  const turns = rows.slice(0, limit).map(toTurnView);
+  return Promise.resolve({
+    ok: true,
+    turns,
+    hasMore,
+    nextBefore: hasMore ? turns[turns.length - 1].id : null,
+  });
+}
+
+/** S9 durable turn creation — foreign-before-dedupe, duplicate, conflict and one-active-turn. */
+export function createHqTurn(
+  ctx: HqChatServiceCtx,
+  sessionId: string,
+  body: { clientRequestId: string; message: string },
+  opts: { nowMs?: number } = {},
+): Promise<HqChatServiceResult<{ turn: HqChatTurn; duplicate: boolean }>> {
+  const session = getSession(scopeOf(ctx), sessionId);
+  if (!session) return Promise.resolve(serviceFail(404, 'not_found', 'Session not found.'));
+  if (session.closedAt !== null) {
+    return Promise.resolve(serviceFail(410, 'session_expired', 'This conversation has expired.'));
+  }
+  // S9: the binding is resolved from the head's CURRENT roster mapping, then compared
+  // against the one fixed at creation inside `createTurn` — so a changed mapping closes
+  // the logical session with `head_binding_changed` instead of silently sending through
+  // a stale runtime. The caller never supplies a runtime id (S9 "Client never supplies
+  // gateway key/runtime ID").
+  const runtimeAgentId = resolveHeadRuntime(ctx.companyId, session.headAgentId);
+  if (runtimeAgentId === null) {
+    return Promise.resolve(
+      serviceFail(409, 'head_binding_changed', 'roster mapping changed; close this session and open a new one before sending'),
+    );
+  }
+
+  const result = createTurn(scopeOf(ctx), sessionId, {
+    clientRequestId: body.clientRequestId,
+    message: body.message,
+    runtimeAgentId,
+    nowMs: opts.nowMs,
+  });
+  if (!result.ok) return Promise.resolve(serviceFail(result.status, result.code, result.message));
+  return Promise.resolve({ ok: true, turn: result.turn, duplicate: result.duplicate });
+}
+
+/** S8 GET /turns/{turnId} — state plus the persisted reply or labelled partial reply. */
+export function getHqTurn(
+  ctx: HqChatServiceCtx,
+  sessionId: string,
+  turnId: string,
+): Promise<HqChatServiceResult<{ turn: HqChatTurn }>> {
+  const session = getSession(scopeOf(ctx), sessionId);
+  if (!session) return Promise.resolve(serviceFail(404, 'not_found', 'Turn not found.'));
+  if (session.closedAt !== null) {
+    return Promise.resolve(serviceFail(410, 'session_expired', 'This conversation has expired.'));
+  }
+  // Looked up INSIDE the session that owns it, never by turn id alone, so a leaked
+  // turn id cannot be read.
+  const turn = getTurn(scopeOf(ctx), turnId);
+  if (!turn || turn.sessionId !== sessionId) {
+    return Promise.resolve(serviceFail(404, 'not_found', 'Turn not found.'));
+  }
+  return Promise.resolve({ ok: true, turn });
+}
+
+/** S9 retry of an EXISTING turn — eligibility is `retryTurn`'s, mapped 1:1. */
+export function retryHqTurn(
+  ctx: HqChatServiceCtx,
+  sessionId: string,
+  turnId: string,
+  opts: { nowMs?: number } = {},
+): Promise<HqChatServiceResult<{ turn: HqChatTurn }>> {
+  const session = getSession(scopeOf(ctx), sessionId);
+  if (!session) return Promise.resolve(serviceFail(404, 'not_found', 'Turn not found.'));
+  if (session.closedAt !== null) {
+    return Promise.resolve(serviceFail(410, 'session_expired', 'This conversation has expired.'));
+  }
+  const owned = getTurn(scopeOf(ctx), turnId);
+  if (!owned || owned.sessionId !== sessionId) {
+    return Promise.resolve(serviceFail(404, 'not_found', 'Turn not found.'));
+  }
+  const result = retryTurn(scopeOf(ctx), turnId, { nowMs: opts.nowMs });
+  if (!result.ok) return Promise.resolve(serviceFail(result.status, result.code, result.message));
+  return Promise.resolve({ ok: true, turn: result.turn });
+}
