@@ -57,6 +57,7 @@
  */
 
 import type Database from 'better-sqlite3';
+import { TEST_RESIDUE_WORKSPACE_SLUGS } from '@/lib/test-residue';
 import type { HqActivityEvent, HqDepartment, HqLayout } from './types';
 
 /* ================================================================== *
@@ -276,14 +277,11 @@ function readRecentRows(db: Database.Database, companyId: string, limit: number)
  * S5 "labels from current scope": the display label is resolved NOW, from the
  * same company scope the board uses, so a removed target yields a null label
  * (tombstone) and no stale name survives. Company scoping reuses the board's own
- * clause rather than a second filter that could drift from it; archived rows are
- * included because an archived department is still this company's record, while
- * unattributed/legacy rows follow the board's existing treatment.
+ * clause and its unconditional fixture-residue exclusion rather than a second
+ * filter that could drift from it; archived rows are included because an
+ * archived department is still this company's record, while unattributed/legacy
+ * rows follow the board's existing treatment.
  */
-function hqLabelScope(): string {
-  return `(w.company_id = ? OR w.company_id = 'default' OR w.company_id IS NULL OR w.company_id = '')`;
-}
-
 function resolveLabels(
   db: Database.Database,
   companyId: string,
@@ -293,14 +291,17 @@ function resolveLabels(
   const unique = Array.from(new Set(agentIds.filter((id) => typeof id === 'string' && id)));
   if (unique.length === 0) return labels;
   const placeholders = unique.map(() => '?').join(',');
+  const residue = TEST_RESIDUE_WORKSPACE_SLUGS.map(() => '?').join(',');
   const rows = db
     .prepare(
       `SELECT a.id AS id, a.name AS name
          FROM agents a
          JOIN workspaces w ON w.id = a.workspace_id
-        WHERE a.id IN (${placeholders}) AND ${hqLabelScope()}`,
+        WHERE a.id IN (${placeholders})
+          AND (w.company_id = ? OR w.company_id = 'default' OR w.company_id IS NULL OR w.company_id = '')
+          AND w.slug NOT IN (${residue})`,
     )
-    .all(...unique, companyId) as { id: string; name: string | null }[];
+    .all(...unique, companyId, ...TEST_RESIDUE_WORKSPACE_SLUGS) as { id: string; name: string | null }[];
   for (const row of rows) labels.set(row.id, row.name ?? null);
   for (const id of unique) if (!labels.has(id)) labels.set(id, null);
   return labels;
