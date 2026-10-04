@@ -93,6 +93,33 @@ export interface OpenClawAgentsList {
   agents: OpenClawAgentEntry[];
 }
 
+/**
+ * Opt-in native event frame (SPEC S9 "Native wire adapter", unit B11).
+ *
+ * The gateway's own `EventFrameSchema` is a closed object
+ * `{type:'event', event:<non-empty string>, payload?, seq?, stateVersion?,
+ * recipientProfileId?}`. A native frame carries NO `method`, so the legacy
+ * notification path below (`if (data.method)`) drops it on the floor — that is
+ * the gap S9 names. This interface is what `'native-event'` carries when a
+ * caller has opted in; it is a projection, not a re-encoding: only the three
+ * fields the adapter consumes are surfaced.
+ *
+ * Emission is OFF by default. `enableNativeEvents(true)` opts in; every
+ * existing caller keeps byte-for-byte the same `'notification'` / method event
+ * surface it had before, because nothing is emitted under a new name until a
+ * caller asks for it. A `res` frame — or a response carrying an unknown id —
+ * is dispatched and returned BEFORE this point and can never be reported as an
+ * event (S9: "never treat `res` or unknown response IDs as events").
+ */
+export interface OpenClawNativeEvent {
+  /** The frame's `event` discriminator (e.g. `'chat'`). Never empty. */
+  event: string;
+  /** The frame's raw `payload`, unvalidated — consumers normalize their own schema. */
+  payload: unknown;
+  /** The frame's channel `seq`, when it is a non-negative integer. */
+  seq: number | null;
+}
+
 // ── U020 ANTI-FURNACE: bounded reconnect backoff ─────────────────────────────
 // A flapping gateway used to trigger an infinite fixed-10s reconnect loop.
 // Mirrors the task-dispatcher's anti-furnace pattern (MAX_DISPATCH_ATTEMPTS,
@@ -111,6 +138,27 @@ const RECONNECT_BACKOFF_MAX_MS = Math.max(
   RECONNECT_BACKOFF_BASE_MS,
   parseInt(process.env.RECONNECT_BACKOFF_MAX_MS || '32000', 10),
 );
+
+/**
+ * B11/S9 validation gate: project a raw frame into an `OpenClawNativeEvent`,
+ * or `null` when it is not a valid native event frame. Validation is exactly
+ * what S9 names — `type === 'event'` with a non-empty string `event`. A frame
+ * with a non-string/missing `event` (or anything that reached here that is not
+ * an object) is NOT an event and is dropped, never guessed at or relabeled.
+ * `seq` is passed through only when it is a non-negative integer, matching the
+ * installed `EventFrameSchema`; a malformed seq is null rather than a lie.
+ */
+function toNativeEvent(data: Record<string, unknown>): OpenClawNativeEvent | null {
+  if (data.type !== 'event') return null;
+  const event = data.event;
+  if (typeof event !== 'string' || event.length === 0) return null;
+  const seq = data.seq;
+  return {
+    event,
+    payload: data.payload,
+    seq: typeof seq === 'number' && Number.isInteger(seq) && seq >= 0 ? seq : null,
+  };
+}
 
 export class OpenClawClient extends EventEmitter {
   private ws: SocketLike | null = null;
@@ -139,6 +187,9 @@ export class OpenClawClient extends EventEmitter {
    *  self-heal. Cleared on the next successful connect. */
   private pairingAutoApprovedNote: string | null = null;
   private messageHandlers = new Set<(event: { data: unknown }) => void>(); // Track all message handlers for cleanup
+  /** B11/S9: opt-in `'native-event'` emission. OFF by default so every existing
+   *  caller's observable surface is unchanged. See enableNativeEvents(). */
+  private nativeEventsEnabled = false;
   private readonly MAX_PROCESSED_EVENTS = 1000; // Limit the size of the processed events cache
   private readonly CLEANUP_THRESHOLD = 100; // Number of entries to remove when limit exceeded
   private readonly CACHE_ENTRY_TTL_MS = 60 * 60 * 1000; // 1 hour TTL for cache entries
@@ -739,11 +790,41 @@ export class OpenClawClient extends EventEmitter {
       return;
     }
 
+    // Native EventFrame (SPEC S9, B11): `{type:'event', event, payload}` with a
+    // string `event` and no `method`. Opt-in only — see enableNativeEvents().
+    // Ordering is load-bearing: this branch sits AFTER both response branches
+    // above, so a `res` frame or any frame carrying an id this client already
+    // consumed can never reach it (S9: "never treat res or unknown response IDs
+    // as events").
+    if (data.type === 'event') {
+      const nativeEvent = this.nativeEventsEnabled
+        ? toNativeEvent(data as unknown as Record<string, unknown>)
+        : null;
+      if (nativeEvent) this.emit('native-event', nativeEvent);
+    }
+
     // Handle events/notifications
     if (data.method) {
       this.emit('notification', data);
       this.emit(data.method, data.params);
     }
+  }
+
+  /**
+   * Opt in (or back out of) `'native-event'` emission on THIS client instance.
+   * Default is OFF, so a client handed to an unchanged legacy caller behaves
+   * exactly as it did before this method existed. Instance-scoped, not global:
+   * `getOpenClawClient()` caches one instance per target, so opting the HQ
+   * transport in must never silently re-wire every other caller of the same
+   * shared singleton.
+   */
+  enableNativeEvents(enabled = true): void {
+    this.nativeEventsEnabled = enabled;
+  }
+
+  /** Whether this instance currently emits `'native-event'`. */
+  isNativeEventsEnabled(): boolean {
+    return this.nativeEventsEnabled;
   }
 
   private scheduleReconnect(): void {

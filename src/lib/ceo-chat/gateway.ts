@@ -64,7 +64,8 @@
  * shape ({key: 'agent:main:<peer>'} / {key, message}), so this is a pure
  * extension of the seam, never a replacement.
  */
-import type { OpenClawClientTarget } from '@/lib/openclaw/client';
+import type { OpenClawClientTarget, OpenClawNativeEvent } from '@/lib/openclaw/client';
+import type { HqChatTransportCallback } from '@/lib/hq/types';
 import type { GatewayThinkingLevel } from './thinking-level';
 
 /** One streamed piece of an agent reply. U62 extends the vocabulary with
@@ -395,6 +396,492 @@ export async function* forwardToAgent(
   transport: ChatTransport = gatewayTransport,
 ): AsyncGenerator<ChatChunk> {
   yield* transport.forward(req);
+}
+
+/* ==================================================================== *
+ * SPEC S9 "Native wire adapter" — Headquarters native EventFrame path (B11)
+ * ==================================================================== *
+ *
+ * Everything below is a SECOND, opt-in path. `gatewayTransport` above is the
+ * legacy path and is untouched byte-for-byte by this section: legacy callers
+ * keep their exact method/notification/`ChatChunk` behavior. HQ chat does NOT
+ * use `POST /api/ceo-chat/message`; it uses this adapter, which consumes the
+ * native wire shape the legacy path drops — `{type:'event', event:'chat',
+ * payload:{...}}` in place of the `{method, params}` notification.
+ *
+ * Shape authority (verified by reading the installed gateway, not inferred):
+ *   • Frame:    `dist/sessions-Bw59kgfQ.mjs:1944-1951` (`EventFrameSchema`:
+ *               closed `{type:'event', event:<nonempty string>, payload?,
+ *               seq?, stateVersion?, recipientProfileId?}`). SPEC S9 cites the
+ *               same lines.
+ *   • Chat payload: same file `:2357-2469` — `ChatEventBaseSchema`
+ *               `{runId, sessionKey, agentId?, spawnedBy?, seq}` plus the
+ *               `state` variants `status|delta|final|aborted|error`.
+ *   • Producer: `dist/server-chat-Du3bvN_g.mjs:577-775` — `broadcastChatDelta`
+ *               (:592-609) emits `deltaText`/`replace`/`message`,
+ *               `emitChatTerminal` (:716-775) emits `final`/`aborted`/`error`
+ *               and `yielded:true` only on `jobState==='done' && opts.yielded`.
+ *   • Subscription: `dist/sessions-subscriptions-CcyLoxx0.mjs:69-199` —
+ *               `sessions.messages.subscribe`/`.unsubscribe`, params
+ *               `{key, agentId?, subscriptionId?(≤128)}`, closed object.
+ */
+
+/**
+ * Per-turn accumulator ceiling (S9). The accumulator stops growing at this
+ * many characters of VISIBLE assistant text and is marked truncated honestly;
+ * it is never allowed to grow unbounded off a token/event queue.
+ */
+export const HQ_NATIVE_ACCUMULATOR_MAX_CHARS = 64_000;
+
+/** Bounded wait for `sessions.messages.subscribe` before the attempt aborts. */
+const HQ_SUBSCRIBE_TIMEOUT_MS = Number(process.env.HQ_CHAT_SUBSCRIBE_TIMEOUT_MS || 8_000);
+
+/** HqChatTransportCallback kinds (P01's frozen S9 set) — re-stated as a local
+ *  literal union so this module needs no runtime import from the contract. */
+export type HqNativeCallbackKind = HqChatTransportCallback['kind'];
+
+/**
+ * Typed lifecycle callback (S9 + P01 gap G-16, which this unit closes for the
+ * transport seam). Every callback is correlated to the session and turn it
+ * belongs to; a callback whose gateway key is not this adapter's own unique
+ * per-turn key is never emitted on it (the guard lives in ONE place — see
+ * `emit`).
+ */
+export interface HqNativeLifecycleEvent {
+  kind: HqNativeCallbackKind;
+  sessionId: string;
+  turnId: string;
+  /** The unique per-turn gateway key `agent:<verifiedRuntimeId>:hq-<turnId>`. */
+  gatewaySessionKey: string;
+  /** Native `runId` — present only where a run is actually known. */
+  runId: string | null;
+  /** Machine-readable detail for non-success kinds (`no_visible_reply`, etc.). */
+  reason?: string;
+}
+
+/**
+ * Terminal outcome of one HQ turn. `replied` is the ONLY success state, and it
+ * is reached only by a matching `final` with `yielded !== true` AND actual
+ * nonempty visible assistant text. Everything else is honest about what was
+ * (not) observed: a `final` with no visible text is `no_visible_reply`, a
+ * partial reply that timed out is `timeout`, and an `error`/`aborted` frame is
+ * never success even when partial text exists.
+ */
+export interface HqNativeTurnResult {
+  /**
+   * `replied` — the ONLY success: matching `final`, `yielded !== true`, real
+   * visible text. All others are honest non-successes:
+   *  • `no_visible_reply` — final with no visible assistant text (incl. yielded)
+   *  • `aborted` / `error` — terminal non-success even with partial text
+   *  • `timeout` — explicit deadline; never a completion
+   *  • `subscribe_failed` — positively unsent (subscription refused)
+   *  • `failed_before_send` — positively unsent (connect/probe failure)
+   *  • `send_uncertain` — post-send exception; delivery UNKNOWN, never success
+   */
+  outcome: string;
+  /** Accumulated visible assistant text (cumulative authority when it existed). */
+  text: string;
+  /** True while the text is a non-authoritative partial and on any truncation. */
+  partial: boolean;
+  /** The run this turn actually belonged to, once observed. */
+  runId: string | null;
+  /** True when the accumulator hit `HQ_NATIVE_ACCUMULATOR_MAX_CHARS`. */
+  truncated: boolean;
+  /** True when a frame on this turn's key carried a DIFFERENT run id after the
+   *  first was recorded — the "ignored/flagged" half of S9's run-matching rule. */
+  foreignRunIgnored: boolean;
+}
+
+/** One HQ turn: the request plus its own unique identity. */
+export interface HqNativeTurnRequest {
+  /** Authorized HQ chat session id (server-owned; never the gateway key). */
+  sessionId: string;
+  /** Opaque per-turn id. Caller-supplied and server-minted; see the note on
+   *  `agentId`/`runtimeId` for what the server must NOT accept from a client. */
+  turnId: string;
+  /** Verified runtime id of the bound head (server-resolved roster binding). */
+  runtimeId: string;
+  /** Trimmed message text. Caller (route) enforces the 32,000-char cap and
+   *  rejects oversize with 413; this adapter adds no second policy. */
+  message: string;
+  /** Optional thinking level, passed through to `sessions.send` untouched. */
+  thinkingLevel?: GatewayThinkingLevel;
+}
+
+/** Injectable seam so the adapter is provable without a live gateway. */
+export interface HqNativeTransportClient {
+  isConnected(): boolean;
+  connectWithAutoPair(): Promise<unknown>;
+  call<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T>;
+  on(event: 'native-event', listener: (ev: OpenClawNativeEvent) => void): unknown;
+  off(event: 'native-event', listener: (ev: OpenClawNativeEvent) => void): unknown;
+  /** B11: opt this instance into `'native-event'` emission. */
+  enableNativeEvents?(enabled?: boolean): void;
+}
+
+export interface HqNativeTurnOptions {
+  client: HqNativeTransportClient;
+  /** Lifecycle callbacks, typed and correlated. */
+  onLifecycle?: (event: HqNativeLifecycleEvent) => void;
+  /** Called at most once per second while nonterminal with the partial text. */
+  onPartial?: (text: string, meta: { runId: string | null; partial: true }) => void;
+  /** Overall reply deadline (defaults to the legacy REPLY_TIMEOUT_MS). */
+  timeoutMs?: number;
+  /** Injectable clock for tests; defaults to `Date.now`. */
+  now?: () => number;
+}
+
+/** The unique per-turn gateway key. S9: `agent:<verifiedRuntimeId>:hq-<opaqueTurnId>`. */
+export function buildHqTurnGatewayKey(runtimeId: string, turnId: string): string {
+  return `agent:${runtimeId}:hq-${turnId}`;
+}
+
+/** The `subscriptionId` S9 fixes: `'hq-' + turnId` (installed cap 128 chars). */
+export function buildHqSubscriptionId(turnId: string): string {
+  return `hq-${turnId}`;
+}
+
+/**
+ * Visible assistant text from a native chat `message`, or null.
+ *
+ * S9: only `type:'text'` blocks are visible; a thinking/tool/attachment body is
+ * never rendered. An assistant message whose only blocks are non-text yields
+ * null — i.e. "no visible text", NOT empty-but-successful.
+ */
+export function hqVisibleTextFromNativeMessage(message: unknown): string | null {
+  if (message == null || typeof message !== 'object') return null;
+  const m = message as Record<string, unknown>;
+  if (m.role !== 'assistant') return null;
+  const content = m.content;
+  if (!Array.isArray(content)) return null;
+  let text = '';
+  for (const block of content) {
+    if (block == null || typeof block !== 'object') continue;
+    const b = block as Record<string, unknown>;
+    if (b.type !== 'text') continue;
+    if (typeof b.text === 'string') text += b.text;
+  }
+  return text.length > 0 ? text : null;
+}
+
+/** Validated native chat payload, or null when the frame is not a usable chat event. */
+interface HqNativeChatPayload {
+  runId: string;
+  sessionKey: string;
+  agentId: string | null;
+  seq: number;
+  state: string;
+  deltaText: string | null;
+  replace: boolean;
+  message: unknown;
+  yielded: boolean;
+}
+
+function readHqNativeChatPayload(payload: unknown): HqNativeChatPayload | null {
+  if (payload == null || typeof payload !== 'object') return null;
+  const p = payload as Record<string, unknown>;
+  const runId = p.runId;
+  const sessionKey = p.sessionKey;
+  const state = p.state;
+  const seq = p.seq;
+  if (typeof runId !== 'string' || runId.length === 0) return null;
+  if (typeof sessionKey !== 'string' || sessionKey.length === 0) return null;
+  if (typeof state !== 'string' || state.length === 0) return null;
+  if (typeof seq !== 'number' || !Number.isInteger(seq) || seq < 0) return null;
+  return {
+    runId,
+    sessionKey,
+    agentId: typeof p.agentId === 'string' && p.agentId.length > 0 ? p.agentId : null,
+    seq,
+    state,
+    deltaText: typeof p.deltaText === 'string' ? p.deltaText : null,
+    replace: p.replace === true,
+    message: p.message,
+    yielded: p.yielded === true,
+  };
+}
+
+/**
+ * Run one HQ turn over the native EventFrame path. S9-native semantics, in
+ * order, all of which are mutation-visible in this module:
+ *
+ *  1. Create the per-turn session (`sessions.create` on the unique key),
+ *     THEN subscribe (`sessions.messages.subscribe`, with this turn's unique
+ *     key + `subscriptionId`) and only THEN send. A refused create or a
+ *     refused subscription is POSITIVELY UNSENT: the attempt aborts with
+ *     `failed_before_send` / `subscribe_failed` — no message is ever sent.
+ *  2. `send_accepted` fires only after the send response acknowledges, never on
+ *     session creation or subscription.
+ *  3. Frames are matched on the exact per-turn `sessionKey` and (when the frame
+ *     carries one) the bound `agentId`. The first observed `runId` is recorded
+ *     as this turn's run; a different run id on the same key is ignored once
+ *     and flagged — never relabeled onto this turn. That is what makes a
+ *     late-arriving turn-A frame unable to touch turn-B's state even though
+ *     both may share a run id.
+ *  4. `(runId,seq)` dedup drops replayed and stale sequence numbers — a
+ *     per-run high-water mark, not just an exact-repeat set.
+ *  5. `delta`: a validated assistant cumulative `message` REPLACES the
+ *     accumulator (authoritative); else `replace:true` replaces with
+ *     `deltaText`; else `deltaText` is appended ONCE. A cumulative message and
+ *     a `deltaText` are never concatenated together.
+ *  6. `final` marks `replied` only with matching run/session,
+ *     `yielded !== true`, and actual nonempty visible text. Otherwise:
+ *     `no_visible_reply` (final, no text), `aborted`, or `error`.
+ *
+ * The returned promise resolves exactly once. Every listener this call
+ * registered is detached in `finally`, and the gateway subscription is released
+ * with a matching `sessions.messages.unsubscribe` — which releases only THIS
+ * turn's subscription and never aborts unrelated agent work.
+ */
+export async function runHqNativeTurn(
+  req: HqNativeTurnRequest,
+  options: HqNativeTurnOptions,
+): Promise<HqNativeTurnResult> {
+  const { client } = options;
+  const now = options.now ?? (() => Date.now());
+  const timeoutMs = options.timeoutMs ?? REPLY_TIMEOUT_MS;
+  const gatewaySessionKey = buildHqTurnGatewayKey(req.runtimeId, req.turnId);
+  const subscriptionId = buildHqSubscriptionId(req.turnId);
+
+  let accumulator = '';
+  let truncated = false;
+  let partial = false;
+  let observedRunId: string | null = null;
+  let foreignRunIgnored = false;
+  /** S9 dedup is a HIGH-WATER MARK, not an exact-repeat set: the gateway's
+   *  `seq` is monotonic within a run, so any number at or below the last one
+   *  accepted is stale and must be dropped (dropping only exact repeats would
+   *  append a late seq=4 onto a seq=6 accumulator). One mark per turn suffices
+   *  — frames carrying a different run id are already dropped above. */
+  let lastSeq = -1;
+  let lastPersistAt = 0;
+  let settled = false;
+
+  const emit = (kind: HqNativeCallbackKind, reason?: string) => {
+    // The correlation guard, in ONE place: a callback can only ever carry THIS
+    // turn's key. There is no path by which a foreign key reaches the caller.
+    options.onLifecycle?.({
+      kind,
+      sessionId: req.sessionId,
+      turnId: req.turnId,
+      gatewaySessionKey,
+      runId: observedRunId,
+      ...(reason ? { reason } : {}),
+    });
+  };
+
+  const persist = (authoritative: boolean) => {
+    if (!options.onPartial) return;
+    const at = now();
+    if (!authoritative && at - lastPersistAt < 1_000) return; // ≤ once per second
+    lastPersistAt = at;
+    options.onPartial(accumulator, { runId: observedRunId, partial: true });
+  };
+
+  const append = (chunk: string) => {
+    if (chunk.length === 0) return;
+    if (accumulator.length >= HQ_NATIVE_ACCUMULATOR_MAX_CHARS) {
+      truncated = true;
+      return;
+    }
+    const room = HQ_NATIVE_ACCUMULATOR_MAX_CHARS - accumulator.length;
+    if (chunk.length > room) truncated = true;
+    accumulator += chunk.slice(0, room);
+    partial = true;
+  };
+
+  const replaceAll = (text: string) => {
+    accumulator = text.slice(0, HQ_NATIVE_ACCUMULATOR_MAX_CHARS);
+    truncated = text.length > HQ_NATIVE_ACCUMULATOR_MAX_CHARS;
+    partial = true;
+  };
+
+  return await new Promise<HqNativeTurnResult>((resolve) => {
+    const finish = (result: Omit<HqNativeTurnResult, 'text' | 'partial' | 'runId' | 'truncated' | 'foreignRunIgnored'>) => {
+      if (settled) return;
+      settled = true;
+      resolve({
+        ...result,
+        text: accumulator,
+        partial,
+        runId: observedRunId,
+        truncated,
+        foreignRunIgnored,
+      });
+      // Cleanup runs on EVERY settle, terminal or not — the listener detaches
+      // and this turn's gateway subscription is released exactly once.
+      void cleanup();
+    };
+
+    const onEvent = (ev: OpenClawNativeEvent) => {
+      if (settled) return;
+      if (ev.event !== 'chat') return; // S9: HQ consumes event='chat' only.
+      const p = readHqNativeChatPayload(ev.payload);
+      if (!p) return;
+      // Exact per-turn session key match — the whole reason the key is unique.
+      if (p.sessionKey !== gatewaySessionKey) return;
+      // Optional agentId, when present, must match the bound target.
+      if (p.agentId !== null && p.agentId !== req.runtimeId) return;
+      // First observed runId is recorded; a DIFFERENT one on this key is
+      // ignored/flagged, never relabeled onto this turn.
+      if (observedRunId === null) {
+        observedRunId = p.runId;
+      } else if (observedRunId !== p.runId) {
+        // A foreign run is not a completion of anything this turn can observe:
+        // flag it and drop the frame. No `completion_observed` is emitted —
+        // that kind is reserved for this turn's own terminal evidence.
+        foreignRunIgnored = true;
+        return;
+      }
+      // Dedup by (runId,seq) as a high-water mark: repeats AND any sequence
+      // at or below the last accepted one are stale and dropped.
+      if (p.seq <= lastSeq) return;
+      lastSeq = p.seq;
+
+      if (p.state === 'status') return; // progress only, never completion
+
+      if (p.state === 'delta') {
+        const cumulative = hqVisibleTextFromNativeMessage(p.message);
+        if (cumulative !== null) {
+          // Authoritative cumulative visible text — REPLACE, and never
+          // concatenate it with deltaText.
+          replaceAll(cumulative);
+        } else if (p.replace) {
+          replaceAll(p.deltaText ?? '');
+        } else if (p.deltaText) {
+          append(p.deltaText);
+        }
+        persist(false);
+        return;
+      }
+
+      if (p.state === 'final') {
+        const finalText = hqVisibleTextFromNativeMessage(p.message);
+        if (p.yielded) {
+          // `yielded!==true` is required for completion, so a yielded final is
+          // NOT completion evidence — no `completion_observed` is emitted for
+          // it. The turn settles as `no_visible_reply` and its buffered text
+          // stays labeled partial.
+          finish({ outcome: 'no_visible_reply' });
+          return;
+        }
+        if (finalText === null || finalText.length === 0) {
+          // Final with no visible text: never fabricated success, and not a
+          // completion observation.
+          finish({ outcome: 'no_visible_reply' });
+          return;
+        }
+        replaceAll(finalText);
+        partial = false;
+        // The ONLY path that reports completion.
+        finish({ outcome: 'replied' });
+        emit('completion_observed');
+        return;
+      }
+
+      if (p.state === 'aborted') {
+        // Non-success even when a partial message exists. `aborted` is not a
+        // completion observation, and the turn deadline is still armed.
+        persist(true);
+        finish({ outcome: 'aborted' });
+        return;
+      }
+
+      if (p.state === 'error') {
+        persist(true);
+        finish({ outcome: 'error' });
+      }
+    };
+
+    const timer = setTimeout(() => {
+      // Explicit timeout — never a completion. Partial text stays partial.
+      finish({ outcome: 'timeout' });
+      emit('timeout', 'no_terminal_frame');
+    }, timeoutMs);
+
+    /** Idempotent: `finish()` is the single caller, and exactly one unsubscribe
+     *  is issued per attempt (S9: cleanup after terminal/timeout, once). It is
+     *  unconditional on purpose — when the subscribe call timed out or errored
+     *  we cannot know whether the gateway registered the subscription, and the
+     *  gateway's own unsubscribe handler is idempotent, so releasing a
+     *  subscription that was never created is free while leaking one is not. */
+    let cleanedUp = false;
+    const cleanup = async () => {
+      if (cleanedUp) return;
+      cleanedUp = true;
+      clearTimeout(timer);
+      client.off('native-event', onEvent);
+      try {
+        await client.call('sessions.messages.unsubscribe', {
+          key: gatewaySessionKey,
+          agentId: req.runtimeId,
+          subscriptionId,
+        });
+      } catch {
+        // Unsubscribe is best-effort cleanup: it releases only this turn's
+        // subscription and must never turn a good turn into a failure, nor
+        // abort unrelated agent work.
+      }
+    };
+
+    void (async () => {
+      try {
+        if (!client.isConnected()) {
+          await withTimeout(client.connectWithAutoPair(), CONNECT_TIMEOUT_MS);
+        }
+        // Opt the shared instance into native emission WITHOUT changing any
+        // legacy caller's surface (the flag is per-instance and off by default).
+        client.enableNativeEvents?.(true);
+
+        // 1. CREATE this turn's session on its unique key, then SUBSCRIBE,
+        // then SEND (S9: "after sessions.create returns the new per-turn key,
+        // subscribe ... before send"). A create refusal/error is positively
+        // unsent: it rejects into the outer catch, which emits
+        // `failed_before_send` — no subscription and no send are ever issued.
+        await client.call('sessions.create', { key: gatewaySessionKey });
+
+        // 2. SUBSCRIBE BEFORE SEND. A refusal here is positively unsent.
+        const sub = await withTimeout(
+          client.call<{ subscribed?: boolean }>('sessions.messages.subscribe', {
+            key: gatewaySessionKey,
+            agentId: req.runtimeId,
+            subscriptionId,
+          }),
+          HQ_SUBSCRIBE_TIMEOUT_MS,
+        ).catch(() => null);
+        if (!sub || sub.subscribed === false) {
+          // Positively unsent — no send is ever issued.
+          emit('failed_before_send', 'subscribe_failed');
+          finish({ outcome: 'subscribe_failed' });
+          return;
+        }
+
+        client.on('native-event', onEvent);
+
+        // 3. Send. `send_accepted` only after the response acknowledges.
+        try {
+          await client.call('sessions.send', {
+            key: gatewaySessionKey,
+            message: req.message,
+            ...(req.thinkingLevel ? { thinking: req.thinkingLevel } : {}),
+          });
+        } catch (error) {
+          // The send CALL was issued; a network exception after that point is
+          // UNCERTAIN, not a proven non-send. `send_uncertain` — never
+          // `failed_before_send`, never `replied`.
+          finish({ outcome: 'send_uncertain' });
+          emit('timeout', error instanceof Error ? error.message : 'send_threw');
+          return;
+        }
+        // `send_accepted` fires only now: the send response acknowledged.
+        emit('send_accepted');
+      } catch (error) {
+        // Connect/session-setup failure — nothing was sent yet.
+        finish({ outcome: 'failed_before_send' });
+        emit('failed_before_send', error instanceof Error ? error.message : 'connect_failed');
+      }
+    })();
+  });
 }
 
 /** Is the on-box gateway currently reachable? (Drives the UI degrade banner.) */
