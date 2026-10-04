@@ -277,8 +277,49 @@ test('snapshot: populated rows with no state row are NOT an empty company (no fa
   assert.equal(snapshot.highSeq, newest, 'highSeq must reflect the retained rows, never a fabricated 0');
   assert.ok(snapshot.highSeq > 0);
   assert.equal(snapshot.stateSeq, snapshot.highSeq);
+  // The no-state-row fallback must agree with the cursor facts served beside it:
+  // the plan is computed against the CLAMPED high-water mark, so a first visit
+  // anchors the feed at the newest retained seq instead of a clamped-for-0 cursor.
+  assert.equal(snapshot.feedCursor, snapshot.highSeq, 'first visit anchors the feed at the reported high-water mark');
+  assert.equal(snapshot.feedStart, 'recent');
+  assert.equal(snapshot.resetRequired, false, 'a missing state row is not a retention reset for a first visit');
+  const newestCursor = await loadHqSnapshot(
+    db,
+    { companyId: 'co-a', departments: emptyRoster, previousCursor: newest },
+    makeDeps({ layoutInputs: [] }),
+  );
+  assert.equal(newestCursor.feedStart, 'resumed', 'a cursor at the newest retained seq is a resume, not a reset');
+  assert.equal(newestCursor.feedCursor, newest);
+  assert.equal(newestCursor.resetRequired, false);
   assert.equal(snapshot.captureHealth.reported, false);
   assert.notEqual(snapshot.captureHealth.state, 'ok');
+  clearCompany(db, 'co-a');
+});
+
+test('snapshot: a stale state row (high_seq behind the rows) never invalidates an in-window cursor', async () => {
+  const db = getDb();
+  createHqTables(db);
+  seedCompanies(db, 'co-a');
+  clearCompany(db, 'co-a');
+  appendRow(db, { company_id: 'co-a' });
+  const middle = appendRow(db, { company_id: 'co-a' });
+  const newest = appendRow(db, { company_id: 'co-a' });
+  // Stale state row: high_seq=2 while retained rows reach seq 3.
+  db.prepare(
+    `INSERT INTO hq_activity_state (company_id, high_seq, pruned_through_seq, capture_state, retained_bytes, updated_at)
+     VALUES ('co-a', ?, 0, 'ok', 0, '2026-10-04T00:00:00Z')`,
+  ).run(middle);
+
+  const snapshot = await loadHqSnapshot(
+    db,
+    { companyId: 'co-a', departments: emptyRoster, previousCursor: middle },
+    makeDeps({ layoutInputs: [] }),
+  );
+  // The stale row must not shrink the served watermark nor fire a false reset.
+  assert.equal(snapshot.highSeq, newest, 'the retained rows raise the reported high-water mark above the stale row');
+  assert.equal(snapshot.resetRequired, false, 'a stale state row is not a cursor expiry');
+  assert.equal(snapshot.feedStart, 'resumed');
+  assert.equal(snapshot.feedCursor, middle, 'the client cursor is preserved against the clamped watermark');
   clearCompany(db, 'co-a');
 });
 

@@ -396,17 +396,25 @@ export async function loadHqSnapshot(
     const reportedHigh = stateRow && isHqCursor(stateRow.high_seq) ? stateRow.high_seq : 0;
     const reportedPruned = stateRow && isHqCursor(stateRow.pruned_through_seq) ? stateRow.pruned_through_seq : 0;
 
-    const plan = resolveHqSnapshotFeedPlan({
-      previousCursor: input.previousCursor,
-      highSeq: reportedHigh,
-      prunedThroughSeq: reportedPruned,
-    });
-
     // S8 fixes the payload: the snapshot always carries the latest activities.
-    // The plan above only decides the CURSOR fields, so a client that has more
+    // The plan below only decides the CURSOR fields, so a client that has more
     // retained history than this window keeps its own cursor and drains the rest
     // through the activity route (S8 catch-up is the correctness path).
     const rows = readRecentRows(db, input.companyId, limit);
+
+    // The plan is computed against the SAME cursor facts the response reports:
+    // the clamp below runs BEFORE it, never after, so a missing or stale state
+    // row can never make the plan disagree with the `highSeq`/`prunedThroughSeq`
+    // served beside it.
+    const maxRowSeq = rows.reduce((max, row) => (isHqCursor(row.seq) && row.seq > max ? row.seq : max), 0);
+    const highSeq = Math.max(reportedHigh, maxRowSeq);
+    const prunedThroughSeq = Math.min(reportedPruned, highSeq);
+
+    const plan = resolveHqSnapshotFeedPlan({
+      previousCursor: input.previousCursor,
+      highSeq,
+      prunedThroughSeq,
+    });
 
     const labels = resolveLabels(
       db,
@@ -414,13 +422,10 @@ export async function loadHqSnapshot(
       rows.flatMap((row) => [row.actor_agent_id, row.recipient_agent_id]).filter((id): id is string => !!id),
     );
 
-    return { stateRow, reportedHigh, reportedPruned, plan, rows, labels };
+    return { stateRow, plan, rows, labels, highSeq, prunedThroughSeq };
   })();
 
-  const maxRowSeq = read.rows.reduce((max, row) => (isHqCursor(row.seq) && row.seq > max ? row.seq : max), 0);
-  const highSeq = Math.max(read.reportedHigh, maxRowSeq);
-  const prunedThroughSeq = Math.min(read.reportedPruned, highSeq);
-
+  const { highSeq, prunedThroughSeq } = read;
   const resolveLabel = (agentId: string): string | null => read.labels.get(agentId) ?? null;
   const activities = read.rows.map((row) => deps.projectEvent(row, resolveLabel));
 
