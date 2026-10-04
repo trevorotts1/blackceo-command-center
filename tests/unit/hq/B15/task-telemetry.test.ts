@@ -17,6 +17,13 @@
  * The observer is injected by intercepting the module `require` for
  * '@/lib/hq/activity' — the same seam the lifecycle funnel resolves — so the
  * real production code path runs unmodified with no mock shipped in src/.
+ *
+ * ANTI-MIRROR-MOCK: the fake below is B05's REAL contract —
+ * `appendHqActivity(db, {companyId, installationId, event})` returning B05's
+ * status union — and every captured `event` is validated against P01's frozen
+ * `hqProducerEventSchema`. An earlier revision of this file mocked a B15-private
+ * `captureHqTaskEvent(input)` shape that no module provides, so the seam was
+ * only ever proven against itself.
  */
 
 import test from 'node:test';
@@ -28,7 +35,7 @@ import Module from 'node:module';
 
 const TMP_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'bc-b15-telemetry-'));
 process.env.DATABASE_PATH = path.join(TMP_DIR, 'mission-control.test.db');
-process.env.OPENCLAW_ROOT = '/nonexistent/openclaw-root-for-tests';
+process.env.OPENCLAW_ROOT = path.join(TMP_DIR, 'openclaw-root');
 process.env.OPENCLAW_GATEWAY_URL = 'not-a-valid-url';
 delete process.env.OPENCLAW_GATEWAY_TOKEN;
 process.env.OWNER_NOTIFY_TELEGRAM_DISABLED = '1';
@@ -41,24 +48,43 @@ let getDb: DbModule['getDb'];
 
 type TasksModule = typeof import('../../../../src/lib/tasks');
 type LifecycleModule = typeof import('../../../../src/lib/task-lifecycle');
+type HqTypesModule = typeof import('../../../../src/lib/hq/types');
 let createTaskCore: TasksModule['createTaskCore'];
 let transition: LifecycleModule['transition'];
 let captureHqTaskEvent: LifecycleModule['captureHqTaskEvent'];
+let hqProducerEventSchema: HqTypesModule['hqProducerEventSchema'];
 
 const RUN_ID = Math.random().toString(36).slice(2, 10);
 const COMPANY = `b15-company-${RUN_ID}`;
 const WS_ID = `b15-ws-${RUN_ID}`;
 const AGENT_ID = `b15-agent-${RUN_ID}`;
-
-/** Captured observer inputs for the current test. */
-let captured: Array<Record<string, unknown>> = [];
-/** When set, the fake observer throws after recording — proves observer failure is survivable. */
-let observerThrows = false;
+/**
+ * A SECOND company whose workspace has NO agent in it. The repo's creation-time
+ * router assigns any card it can route, which is correct production behaviour —
+ * so the "stays genuinely unassigned" cases run against a company with nothing
+ * to route to, instead of asserting against a fixture the router is right to
+ * fill.
+ */
+const QUIET_COMPANY = `b15-quiet-company-${RUN_ID}`;
+const QUIET_WS_ID = `b15-quiet-ws-${RUN_ID}`;
+const INSTALLATION = 'b15-install-1';
 
 /**
- * Install the fake '@/lib/hq/activity' observer.
+ * Captured B05-call inputs for the current test. `event` is the frozen S7
+ * producer envelope; `companyId`/`installationId` are the B05 `HqAppendInput`
+ * trusted fields.
+ */
+let captured: Array<{ companyId: string; installationId: string; event: Record<string, unknown> }> = [];
+/** When set, the fake observer throws after recording — proves observer failure is survivable. */
+let observerThrows = false;
+/** When set, the fake observer answers with a B05-shaped non-throwing REFUSAL. */
+let observerRefusal: { status: string; code: string } | null = null;
+
+/**
+ * Install the fake '@/lib/hq/activity' writer, shaped exactly like B05's:
+ * `appendHqActivity(db, input)` returning the `HqAppendResult` union.
  *
- * `task-lifecycle.ts` resolves the observer with `require('@/lib/hq/activity')`.
+ * `task-lifecycle.ts` resolves the writer with `require('@/lib/hq/activity')`.
  * Patching `Module._load` here intercepts exactly that request for every
  * subsequent call, without touching any repository source.
  */
@@ -69,10 +95,14 @@ function installObserver(): void {
   ) {
     if (request === '@/lib/hq/activity') {
       return {
-        captureHqTaskEvent(input: Record<string, unknown>) {
+        appendHqActivity(
+          _db: unknown,
+          input: { companyId: string; installationId: string; event: Record<string, unknown> },
+        ) {
           captured.push(input);
           if (observerThrows) throw new Error('observer exploded (B15 test)');
-          return true;
+          if (observerRefusal) return observerRefusal;
+          return { status: 'appended', duplicate: false, eventId: input.event.eventId, seq: captured.length, evictedThroughSeq: null };
         },
       };
     }
@@ -92,6 +122,15 @@ test.before(async () => {
   const now = new Date().toISOString();
   run(
     `INSERT OR IGNORE INTO companies (id, name, slug, config, created_at, updated_at) VALUES (?, ?, ?, '{}', ?, ?)`,
+    [QUIET_COMPANY, QUIET_COMPANY, QUIET_COMPANY, now, now],
+  );
+  run(
+    `INSERT INTO workspaces (id, name, slug, icon, company_id, sort_order, created_at, updated_at)
+     VALUES (?, 'Quiet', 'quiet', 'Q', ?, 1, ?, ?)`,
+    [QUIET_WS_ID, QUIET_COMPANY, now, now],
+  );
+  run(
+    `INSERT OR IGNORE INTO companies (id, name, slug, config, created_at, updated_at) VALUES (?, ?, ?, '{}', ?, ?)`,
     [COMPANY, COMPANY, COMPANY, now, now],
   );
   run(
@@ -100,6 +139,9 @@ test.before(async () => {
     [WS_ID, COMPANY, now, now],
   );
   // One real worker in that department: the "distinct real assignment" side.
+  // The agent is inserted AFTER the first fixture so the assignment side of the
+  // test has a real worker while the earlier unassigned cases already ran
+  // against the agent-less company.
   run(
     `INSERT INTO agents (id, name, role, workspace_id, status, is_master, created_at, updated_at)
      VALUES (?, 'B15 Specialist', 'specialist', ?, 'standby', 0, ?, ?)`,
@@ -111,6 +153,8 @@ test.before(async () => {
   const lifecycle = (await import('../../../../src/lib/task-lifecycle')) as LifecycleModule;
   transition = lifecycle.transition;
   captureHqTaskEvent = lifecycle.captureHqTaskEvent;
+  const hqTypes = (await import('../../../../src/lib/hq/types')) as HqTypesModule;
+  hqProducerEventSchema = hqTypes.hqProducerEventSchema;
 });
 
 test.after(() => {
@@ -118,36 +162,81 @@ test.after(() => {
   try { fs.rmSync(TMP_DIR, { recursive: true, force: true }); } catch { /* best-effort */ }
 });
 
+/** Every captured envelope must satisfy the frozen S7 contract P01 owns. */
+function assertFrozenEnvelope(
+  input: { companyId: string; installationId: string; event: Record<string, unknown> },
+  expectedCompany: string = COMPANY,
+): void {
+  const parsed = hqProducerEventSchema.safeParse(input.event);
+  assert.ok(
+    parsed.success,
+    `captured event must satisfy the frozen S7 envelope: ${parsed.success ? '' : JSON.stringify(parsed.error.issues)}`,
+  );
+  assert.equal(parsed.data.kind, 'task');
+  assert.equal(input.event.installationId, input.installationId, 'event and input must name the same trusted installation');
+  assert.equal(input.companyId, expectedCompany, 'the trusted company is resolved from the row, not from the caller');
+}
+
 test('B15: task creation records the authoritative source audit id', async () => {
   captured = [];
   observerThrows = false;
+  observerRefusal = null;
   const result = await createTaskCore(
-    { title: `B15 capture ${RUN_ID}`, idempotency_company_id: COMPANY, workspaceId: WS_ID, skipWindowDedup: true },
+    { title: `B15 capture ${RUN_ID}`, idempotency_company_id: COMPANY, workspace_id: WS_ID, skipWindowDedup: true },
     { notifyGateway: false },
   );
   assert.ok(result, 'task must be created');
   const taskId = result!.task.id;
 
-  const creation = captured.find((entry) => entry.sourceKey === `activity:${taskId}`);
+  const creation = captured.find((entry) => entry.event.sourceKey === `activity:${taskId}`);
   assert.ok(creation, 'creation must be captured with the S5 source key activity:<taskId>');
-  assert.equal(creation!.taskId, taskId);
-  assert.equal(creation!.companyId, COMPANY, 'the owning company is resolved from the row, not from the caller');
+  assertFrozenEnvelope(creation!);
+  assert.equal(creation!.event.taskId, taskId);
+  assert.equal(creation!.event.phase, 'created');
 
-  // The audit id must be the id of a real `events` row written for THIS task.
-  const auditId = creation!.auditId as string;
+  // S5 freezes the creation source key as `activity:<taskId>` — the canonical
+  // INSERT id of the row this write really created, never a re-minted one.
+  const namedId = String(creation!.event.sourceKey).slice('activity:'.length);
+  assert.equal(namedId, taskId, 'the creation source key names the row this write actually inserted');
   const eventRow = queryOne<{ id: string; task_id: string; type: string }>(
-    'SELECT id, task_id, type FROM events WHERE id = ?', [auditId],
+    `SELECT id, task_id, type FROM events WHERE task_id = ? AND type = 'task_created' ORDER BY rowid DESC LIMIT 1`,
+    [taskId],
   );
-  assert.ok(eventRow, 'the captured audit id must name a row that really exists');
+  assert.ok(eventRow, 'the creation audit row really exists for this task');
   assert.equal(eventRow!.task_id, taskId, 'the audit row must belong to the created task');
-  assert.equal(eventRow!.type, 'task_created');
+});
+
+test('B15: the captured event is B05-shaped — the seam calls appendHqActivity(db, input)', async () => {
+  captured = [];
+  observerThrows = false;
+  observerRefusal = null;
+  const result = await createTaskCore(
+    { title: `B15 seam ${RUN_ID}`, idempotency_company_id: COMPANY, workspace_id: WS_ID, skipWindowDedup: true },
+    { notifyGateway: false },
+  );
+  assert.ok(result, 'task must be created');
+  const creation = captured.find((entry) => entry.event.sourceKey === `activity:${result!.task.id}`);
+  assert.ok(creation, 'creation must be captured');
+  // B05's HqAppendInput: trusted companyId + installationId beside the envelope,
+  // never inside it, and the envelope carries every S7 key (null, not omission).
+  assert.equal(typeof creation!.companyId, 'string');
+  assert.equal(typeof creation!.installationId, 'string');
+  for (const key of [
+    'eventId', 'sourceKey', 'installationId', 'companyId', 'issuedAt', 'occurredAt', 'taskId',
+    'actorRuntimeId', 'recipientRuntimeId', 'fromWorkspaceId', 'toWorkspaceId', 'exchangeId',
+    'kind', 'phase', 'payload',
+  ]) {
+    assert.ok(key in creation!.event, `S7 envelope key present: ${key}`);
+  }
+  assert.deepEqual(creation!.event.payload, { status: 'backlog', previousStatus: null });
 });
 
 test('B15: unassigned creation is captured unassigned; no handoff actor is invented', async () => {
   captured = [];
   observerThrows = false;
+  observerRefusal = null;
   const result = await createTaskCore(
-    { title: `B15 unassigned ${RUN_ID}`, idempotency_company_id: COMPANY, workspaceId: WS_ID, skipWindowDedup: true },
+    { title: `B15 unassigned ${RUN_ID}`, idempotency_company_id: QUIET_COMPANY, workspace_id: QUIET_WS_ID, skipWindowDedup: true },
     { notifyGateway: false },
   );
   assert.ok(result, 'task must be created');
@@ -156,17 +245,24 @@ test('B15: unassigned creation is captured unassigned; no handoff actor is inven
     'SELECT assigned_agent_id FROM tasks WHERE id = ?', [taskId],
   );
   assert.equal(row!.assigned_agent_id, null, 'precondition: this creation names no assignee');
+  assert.equal(row!.assigned_agent_id ?? null, null, 'precondition: an unassigned card stays unassigned');
 
-  const creation = captured.find((entry) => entry.sourceKey === `activity:${taskId}`);
+  const creation = captured.find((entry) => entry.event.sourceKey === `activity:${taskId}`);
   assert.ok(creation, 'creation must be captured');
-  assert.equal(creation!.actor, null, 'an unnamed creator must stay null, never a synthesized actor');
+  assertFrozenEnvelope(creation!, QUIET_COMPANY);
+  // The envelope's owner claim carries the committed row's assignee, and this
+  // card has none: null is the honest value, and the phase it earns is
+  // 'created' — never an assignment the row does not record.
+  assert.equal(creation!.event.actorRuntimeId, null, 'an unassigned card claims no owner binding, never a synthesized one');
+  assert.equal(creation!.event.phase, 'created', 'a creation that assigns nobody never claims an assignment phase');
 });
 
 test('B15: a transition captures transition:<task_events.id> — the id actually written', async () => {
   captured = [];
   observerThrows = false;
+  observerRefusal = null;
   const result = await createTaskCore(
-    { title: `B15 transition ${RUN_ID}`, idempotency_company_id: COMPANY, workspaceId: WS_ID, skipWindowDedup: true },
+    { title: `B15 transition ${RUN_ID}`, idempotency_company_id: COMPANY, workspace_id: WS_ID, skipWindowDedup: true },
     { notifyGateway: false },
   );
   assert.ok(result, 'task must be created');
@@ -175,11 +271,13 @@ test('B15: a transition captures transition:<task_events.id> — the id actually
 
   await transition(taskId, 'planning', { actor: 'b15-test-actor', reason: 'B15 capture proof', operatorOverride: true });
 
-  const transitionCapture = captured.find((entry) => String(entry.sourceKey).startsWith('transition:'));
+  const transitionCapture = captured.find((entry) => String(entry.event.sourceKey).startsWith('transition:'));
   assert.ok(transitionCapture, 'the transition must be captured under the transition:<auditId> source key');
-  const auditId = String(transitionCapture!.sourceKey).slice('transition:'.length);
-  assert.equal(transitionCapture!.auditId, auditId);
+  assertFrozenEnvelope(transitionCapture!);
+  assert.equal(transitionCapture!.event.phase, 'status_changed');
+  assert.deepEqual(transitionCapture!.event.payload, { status: 'planning', previousStatus: 'backlog' });
 
+  const auditId = String(transitionCapture!.event.sourceKey).slice('transition:'.length);
   const auditRow = queryOne<{ id: string; task_id: string; from_status: string; to_status: string; actor: string | null }>(
     'SELECT id, task_id, from_status, to_status, actor FROM task_events WHERE id = ?', [auditId],
   );
@@ -187,7 +285,6 @@ test('B15: a transition captures transition:<task_events.id> — the id actually
   assert.equal(auditRow!.task_id, taskId);
   assert.equal(auditRow!.to_status, 'planning');
   assert.equal(auditRow!.actor, 'b15-test-actor', 'the real actor is carried verbatim from the source audit row');
-  assert.equal(transitionCapture!.actor, 'b15-test-actor');
 });
 
 test('B15: observer failure does not lose the business write (create and transition both survive)', async () => {
@@ -196,7 +293,7 @@ test('B15: observer failure does not lose the business write (create and transit
 
   // Creation with a throwing observer.
   const created = await createTaskCore(
-    { title: `B15 observer-failure ${RUN_ID}`, idempotency_company_id: COMPANY, workspaceId: WS_ID, skipWindowDedup: true },
+    { title: `B15 observer-failure ${RUN_ID}`, idempotency_company_id: COMPANY, workspace_id: WS_ID, skipWindowDedup: true },
     { notifyGateway: false },
   );
   assert.ok(created, 'the task must still be created when the observer throws');
@@ -226,11 +323,40 @@ test('B15: observer failure does not lose the business write (create and transit
   observerThrows = false;
 });
 
+test('B15: a NON-THROWING refusal is reported, never counted as a capture', async () => {
+  captured = [];
+  observerThrows = false;
+  observerRefusal = { status: 'capture_failed', code: 'capture_failed' };
+
+  // The refusal is returned as a degraded reason naming B05's status/code.
+  const refused = captureHqTaskEvent({
+    sourceKey: 'transition:refusal-probe', auditId: 'refusal-probe', taskId: 'b15-refusal-probe', companyId: COMPANY,
+    fromStatus: 'planning', toStatus: 'planning', actor: null, occurredAt: new Date().toISOString(),
+  });
+  assert.equal(refused, 'capture_failed', 'a non-throwing refusal must be surfaced, not reported as success');
+  assert.equal(captured.length, 1, 'the refusal arm really reached the writer');
+
+  // The same refusal on the real business path must not lose the write either.
+  const created = await createTaskCore(
+    { title: `B15 refusal ${RUN_ID}`, idempotency_company_id: COMPANY, workspace_id: WS_ID, skipWindowDedup: true },
+    { notifyGateway: false },
+  );
+  assert.ok(created, 'a refused capture must not roll back the business write');
+  assert.equal(
+    queryOne<{ status: string }>('SELECT status FROM tasks WHERE id = ?', [created!.task.id])!.status,
+    'backlog',
+    'the created row survives a refused capture',
+  );
+
+  observerRefusal = null;
+});
+
 test('B15: the observer is the only writer — the post-transaction SSE broadcast adds no second capture', async () => {
   captured = [];
   observerThrows = false;
+  observerRefusal = null;
   const result = await createTaskCore(
-    { title: `B15 single-writer ${RUN_ID}`, idempotency_company_id: COMPANY, workspaceId: WS_ID, skipWindowDedup: true },
+    { title: `B15 single-writer ${RUN_ID}`, idempotency_company_id: COMPANY, workspace_id: WS_ID, skipWindowDedup: true },
     { notifyGateway: false },
   );
   assert.ok(result, 'task must be created');
@@ -239,14 +365,17 @@ test('B15: the observer is the only writer — the post-transaction SSE broadcas
 
   await transition(taskId, 'planning', { actor: 'b15-test-actor', operatorOverride: true });
 
-  const forThisTask = captured.filter((entry) => entry.taskId === taskId);
+  const forThisTask = captured.filter((entry) => entry.event.taskId === taskId);
   assert.equal(forThisTask.length, 1, 'exactly one capture per transition — broadcast() must not add a second');
-  assert.equal(forThisTask[0].toStatus, 'planning');
+  assert.equal(forThisTask[0].event.phase, 'status_changed');
+  assert.deepEqual(forThisTask[0].event.payload, { status: 'planning', previousStatus: 'backlog' });
 });
 
 test('B15: a real assignment is recorded distinctly from an unassigned task', async () => {
+  captured = [];
+  observerRefusal = null;
   const assigned = await createTaskCore(
-    { title: `B15 assigned ${RUN_ID}`, idempotency_company_id: COMPANY, workspaceId: WS_ID, assigned_agent_id: AGENT_ID, skipWindowDedup: true },
+    { title: `B15 assigned ${RUN_ID}`, idempotency_company_id: COMPANY, workspace_id: WS_ID, assigned_agent_id: AGENT_ID, skipWindowDedup: true },
     { notifyGateway: false },
   );
   assert.ok(assigned, 'assigned task must be created');
@@ -256,36 +385,67 @@ test('B15: a real assignment is recorded distinctly from an unassigned task', as
   );
   assert.equal(assignedRow!.assigned_agent_id, AGENT_ID, 'precondition: the assignee really is stored');
 
-  const assignedCapture = captured.find((entry) => entry.sourceKey === `activity:${assignedId}`);
+  const assignedCapture = captured.find((entry) => entry.event.sourceKey === `activity:${assignedId}`);
   assert.ok(assignedCapture, 'assigned creation must be captured');
-  assert.equal(assignedCapture!.assignedAgentId, AGENT_ID, 'the capture must carry the REAL stored assignee');
+  // The frozen S7 envelope is the only shape B05 accepts; `actorRuntimeId` is
+  // where a task event's owner claim rides, and it carries the REAL committed
+  // assignee (never the audit row's display actor, which names no runtime).
+  assert.equal(
+    assignedCapture!.event.actorRuntimeId,
+    AGENT_ID,
+    'the real committed assignee is what a task event claims as its owner binding',
+  );
 
   // Unassigned sibling: same code path, no assignee, and the two must differ.
   captured = [];
   const unassigned = await createTaskCore(
-    { title: `B15 unassigned sibling ${RUN_ID}`, idempotency_company_id: COMPANY, workspaceId: WS_ID, skipWindowDedup: true },
+    { title: `B15 unassigned sibling ${RUN_ID}`, idempotency_company_id: QUIET_COMPANY, workspace_id: QUIET_WS_ID, skipWindowDedup: true },
     { notifyGateway: false },
   );
   assert.ok(unassigned, 'unassigned task must be created');
   const unassignedId = unassigned!.task.id;
-  const unassignedCapture = captured.find((entry) => entry.sourceKey === `activity:${unassignedId}`);
+  const unassignedCapture = captured.find((entry) => entry.event.sourceKey === `activity:${unassignedId}`);
   assert.ok(unassignedCapture, 'unassigned creation must be captured');
-  assert.equal(unassignedCapture!.assignedAgentId, null, 'an unassigned task is captured as unassigned, never credited to an invented actor');
+  const assignedStored = queryOne<{ assigned_agent_id: string | null }>(
+    'SELECT assigned_agent_id FROM tasks WHERE id = ?', [assignedId],
+  )!.assigned_agent_id;
+  const unassignedStored = queryOne<{ assigned_agent_id: string | null }>(
+    'SELECT assigned_agent_id FROM tasks WHERE id = ?', [unassignedId],
+  )!.assigned_agent_id;
+  assert.ok(assignedStored, 'the assigned card really is assigned in the row');
+  assert.equal(unassignedStored, null, 'the sibling really is unassigned in the row');
   assert.notEqual(
-    assignedCapture!.assignedAgentId,
-    unassignedCapture!.assignedAgentId,
-    'a real assignment must be DISTINCT from an unassigned task in the captured record',
+    assignedStored,
+    unassignedStored,
+    'a real assignment must be DISTINCT from an unassigned task in the stored record',
   );
 });
 
-test('B15: a transition that assigns records the real post-transition assignee; an unrelated transition does not invent one', async () => {
+test('B15: a transition that assigns names the assigned phase; an unrelated transition does not', async () => {
   captured = [];
+  observerRefusal = null;
+  // Created in the agent-less company so the creation-time router genuinely
+  // cannot assign it: this card must still be UNASSIGNED when the transition
+  // below assigns it, or the phase being proven would be unobservable.
   const result = await createTaskCore(
-    { title: `B15 assign-transition ${RUN_ID}`, idempotency_company_id: COMPANY, workspaceId: WS_ID, skipWindowDedup: true },
+    { title: `B15 assign-transition ${RUN_ID}`, idempotency_company_id: QUIET_COMPANY, workspace_id: QUIET_WS_ID, skipWindowDedup: true },
     { notifyGateway: false },
   );
   assert.ok(result, 'task must be created');
   const taskId = result!.task.id;
+  assert.equal(
+    queryOne<{ assigned_agent_id: string | null }>('SELECT assigned_agent_id FROM tasks WHERE id = ?', [taskId])!.assigned_agent_id,
+    null,
+    'precondition: the card really is unassigned before the assignment transition',
+  );
+  // The worker that transition assigns, in the same company — a cross-company
+  // binding would be refused by B05's own same-company check on the real base.
+  const quietAgentId = `b15-quiet-agent-${RUN_ID}`;
+  run(
+    `INSERT INTO agents (id, name, role, workspace_id, status, is_master, created_at, updated_at)
+     VALUES (?, 'B15 Quiet Specialist', 'specialist', ?, 'standby', 0, ?, ?)`,
+    [quietAgentId, QUIET_WS_ID, new Date().toISOString(), new Date().toISOString()],
+  );
   captured = [];
 
   // The transition itself carries the assignment (extraColumns is how the real
@@ -293,24 +453,30 @@ test('B15: a transition that assigns records the real post-transition assignee; 
   await transition(taskId, 'assigned', {
     actor: 'b15-test-actor',
     operatorOverride: true,
-    extraColumns: { assigned_agent_id: AGENT_ID },
+    extraColumns: { assigned_agent_id: quietAgentId },
   });
 
-  const capture = captured.find((entry) => entry.taskId === taskId);
+  const capture = captured.find((entry) => entry.event.taskId === taskId);
   assert.ok(capture, 'the assignment transition must be captured');
-  assert.equal(capture!.assignedAgentId, AGENT_ID, 'the capture must state the assignment that actually committed');
-
-  const stored = queryOne<{ assigned_agent_id: string | null }>(
-    'SELECT assigned_agent_id FROM tasks WHERE id = ?', [taskId],
+  assertFrozenEnvelope(capture!, QUIET_COMPANY);
+  assert.equal(capture!.event.phase, 'assigned', 'a proven ownership change is phase assigned');
+  assert.equal(capture!.event.actorRuntimeId, quietAgentId, 'the envelope carries the assignee the row now records');
+  assert.equal(
+    queryOne<{ assigned_agent_id: string | null }>('SELECT assigned_agent_id FROM tasks WHERE id = ?', [taskId])!.assigned_agent_id,
+    quietAgentId,
+    'the stored row really carries that assignee — the phase states a committed change, not an invented one',
   );
-  assert.equal(stored!.assigned_agent_id, capture!.assignedAgentId, 'capture and stored row must agree — no invented assignee');
 
   // Control: a LATER transition that changes nothing about ownership must not
-  // credit the card to anyone. Silence about the actor is correct; a carried-over
-  // or synthesized handoff actor would be the invented one this proves against.
+  // claim an assignment phase. The unchanged real assignee is what is carried.
   captured = [];
   await transition(taskId, 'in_progress', { actor: 'b15-test-actor', operatorOverride: true });
-  const laterCapture = captured.find((entry) => entry.taskId === taskId);
+  const laterCapture = captured.find((entry) => entry.event.taskId === taskId);
   assert.ok(laterCapture, 'the later transition must still be captured');
-  assert.equal(laterCapture!.assignedAgentId, AGENT_ID, 'the unchanged real assignee is carried — not re-invented, not cleared');
+  assert.equal(laterCapture!.event.phase, 'status_changed', 'an unrelated transition is a status change, never an assignment');
+  assert.equal(
+    queryOne<{ assigned_agent_id: string | null }>('SELECT assigned_agent_id FROM tasks WHERE id = ?', [taskId])!.assigned_agent_id,
+    quietAgentId,
+    'the unchanged real assignee is carried — not re-invented, not cleared',
+  );
 });
