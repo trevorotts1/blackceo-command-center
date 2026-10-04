@@ -118,6 +118,29 @@ test('known statuses map to themselves; unrecognized collapses to unknown with t
   assert.equal(out.diagnostics.filter((d) => d.code === 'status_not_observed').length, 1);
 });
 
+test('an unrecognized status keeps its raw value in diagnostics even when the row is also unobserved', () => {
+  const out = buildRoster(base({
+    agents: [agent({ id: 'a1', workspaceId: 'ws-one', status: 'vibing', observedAt: null })],
+  }));
+  assert.equal(out.departments[0].agents[0].status, 'unknown');
+  assert.deepEqual(
+    out.diagnostics.filter((d) => d.code === 'unrecognized_status' || d.code === 'status_not_observed'),
+    [
+      { code: 'unrecognized_status', agentId: 'a1', rawValue: 'vibing' },
+      { code: 'status_not_observed', agentId: 'a1' },
+    ],
+  );
+  // A known status with no source observation stays observed-only: no raw value to report.
+  const known = buildRoster(base({
+    agents: [agent({ id: 'a1', workspaceId: 'ws-one', status: 'busy', observedAt: null })],
+  }));
+  assert.equal(known.departments[0].agents[0].status, 'unknown');
+  assert.deepEqual(known.diagnostics.filter((d) => d.code === 'unrecognized_status'), []);
+  assert.deepEqual(known.diagnostics.filter((d) => d.code === 'status_not_observed'), [
+    { code: 'status_not_observed', agentId: 'a1' },
+  ]);
+});
+
 test('an open task is not live execution and a working flag is only what was reported', () => {
   const out = buildRoster(base({
     agents: [agent({ id: 'a1', workspaceId: 'ws-one', status: 'standby', activeTaskIds: ['t1', 't2'] })],
@@ -224,6 +247,39 @@ test('legacy/unattributed rows sit in the operator-only section and never reach 
   assert.deepEqual(operator.departments.map((d) => d.id), ['ws-one']);
   const client = buildRoster({ ...input, viewer: 'client' });
   assert.deepEqual(client.unassigned, []);
+});
+
+test('a planned role for a foreign-company workspace is refused, never projected to a client', () => {
+  assert.throws(
+    () => buildRoster(base({
+      workspaces: [ws({ id: 'ws-one' }), ws({ id: 'ws-foreign', companyId: 'co-2' })],
+      agents: [],
+      plannedRoles: [{ workspaceId: 'ws-foreign', key: 'role:spy', name: 'Foreign Spy Role' }],
+    })),
+    (err: unknown) => err instanceof HqRosterScopeError && err.code === 'foreign_workspace',
+  );
+});
+
+test('planned roles on legacy/default or unread workspaces stay operator-only, like the unassigned section', () => {
+  const input = base({
+    workspaces: [ws({ id: 'ws-one' }), ws({ id: 'ws-default', companyId: 'default' }), ws({ id: 'ws-null', companyId: null })],
+    agents: [agent({ id: 'legacy-1', workspaceId: 'ws-default' })],
+    plannedRoles: [
+      { workspaceId: 'ws-one', key: 'role:ok', name: 'Ok' },
+      { workspaceId: 'ws-default', key: 'role:legacy', name: 'Legacy Planned Role' },
+      { workspaceId: 'ws-null', key: 'role:null', name: 'Null Planned Role' },
+      { workspaceId: 'ws-not-read', key: 'role:orphan', name: 'Orphan Planned Role' },
+    ],
+  });
+  const client = buildRoster(input);
+  assert.deepEqual(client.plannedRoles, [{ workspaceId: 'ws-one', key: 'role:ok', name: 'Ok' }]);
+  assert.deepEqual(client.unassigned, []);
+  const operator = buildRoster({ ...input, viewer: 'operator' });
+  assert.deepEqual(
+    operator.plannedRoles.map((p) => p.key),
+    ['role:legacy', 'role:orphan', 'role:null', 'role:ok'],
+  );
+  assert.deepEqual(operator.unassigned.map((a) => a.id), ['legacy-1']);
 });
 
 test('a foreign-company row is refused loudly rather than merged or hidden', () => {

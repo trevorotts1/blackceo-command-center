@@ -22,6 +22,7 @@
  *   - enrolled-but-unmaterialized roles -> `plannedRoles`, never agent rows
  *   - untranslated department rows -> `archivedDepartments`
  *   - unattributed ("default"/NULL) rows -> `unassigned`, operator-view only
+ *   - planned roles on non-scoped workspaces -> `plannedRoles`, operator-view only
  *   - foreign-company rows -> refused loudly (the caller's query is broken)
  */
 
@@ -196,15 +197,18 @@ function bindingOf(row: HqRosterAgentRow, installed: ReadonlySet<string>, diagno
 }
 
 function statusOf(row: HqRosterAgentRow, diagnostics: HqRosterDiagnostic[]): HqAgentStatus {
+  // Unrecognized and unobserved are independent facts about one row: both are
+  // reported when both hold, so the raw value is never silently erased.
+  if (row.status !== null && !knownStatus(row.status)) {
+    // S3: unrecognized -> unknown, raw value restricted to diagnostics.
+    diagnostics.push({ code: 'unrecognized_status', agentId: row.id, rawValue: row.status });
+  }
   if (row.status === null || row.observedAt === null) {
     // "Status not observed": no source observation at all, or no status value.
     diagnostics.push({ code: 'status_not_observed', agentId: row.id });
     return 'unknown';
   }
-  if (knownStatus(row.status)) return row.status;
-  // S3: unrecognized -> unknown, raw value restricted to diagnostics.
-  diagnostics.push({ code: 'unrecognized_status', agentId: row.id, rawValue: row.status });
-  return 'unknown';
+  return knownStatus(row.status) ? row.status : 'unknown';
 }
 
 function staffingOf(row: HqRosterAgentRow, diagnostics: HqRosterDiagnostic[]): HqStaffing {
@@ -316,11 +320,13 @@ export function buildRoster(input: HqRosterInput): HqRosterProjection {
   }
 
   const workspaceIds = new Set<string>();
+  const scopedWorkspaceIds = new Set<string>();
   for (const ws of input.workspaces) {
     if (workspaceIds.has(ws.id)) {
       throw new HqRosterScopeError('duplicate_workspace', `duplicate workspace row id '${ws.id}' — refusing to merge distinct department rows`);
     }
     workspaceIds.add(ws.id);
+    if (!isUnattributed(ws.companyId) && ws.companyId === input.companyId) scopedWorkspaceIds.add(ws.id);
   }
 
   const departments: HqDepartment[] = [];
@@ -358,7 +364,11 @@ export function buildRoster(input: HqRosterInput): HqRosterProjection {
     if (!workspaceIds.has(workspaceId)) orphaned.push(...rows);
   }
 
+  // Planned roles obey the same scope as the rows they describe: a role on an
+  // unattributed/default or unread workspace is legacy truth — operator-view
+  // only, exactly like the `unassigned` agent section above.
   const visiblePlanned: HqPlannedRole[] = planned
+    .filter((p) => input.viewer === 'operator' || scopedWorkspaceIds.has(p.workspaceId))
     .map((p) => ({ workspaceId: p.workspaceId, key: p.key, name: p.name }))
     .sort(
       (a, b) =>
