@@ -32,6 +32,19 @@ import { worldToScreen, type HqCamera } from './useHqViewport';
 export const HQ_OVERLAY_VISIT_SECONDS = 0.9;
 export const HQ_MAX_ACTIVE_OVERLAYS = 4;
 export const HQ_OVERLAY_MS = Math.round(HQ_OVERLAY_VISIT_SECONDS * 1000);
+/** Gap between a label's anchor point and its text. */
+export const HQ_OVERLAY_LABEL_GAP_PX = 8;
+/**
+ * Per-character width ceiling for the 11px label, in layer pixels at zoom 1.
+ * Measured in chromium over ASCII 32-126 plus wide/emoji samples: the widest
+ * advance at 11px is 11.2px (U+0416), so this is a real ceiling with headroom,
+ * not a fitted value. Records are short ("Sent request", "Handoff accepted"),
+ * so the box stays a few dozen pixels wide; measure with getBBox instead if
+ * labels ever become user-supplied prose.
+ */
+export const HQ_OVERLAY_LABEL_CHAR_CEILING_PX = 16;
+/** Measured height of the 11px label text box. */
+export const HQ_OVERLAY_LABEL_HEIGHT_PX = 13;
 
 /**
  * One validated handoff/collaboration fact. The consumer (roster/activity read
@@ -138,19 +151,39 @@ export interface HandoffOverlayProps {
   className?: string;
 }
 
-function overlayBox(
+/**
+ * Box for one overlay in layer pixels. Besides the endpoint span plus `pad`, the
+ * box reserves the rectangle the receipt label needs. The outermost SVG clips
+ * to its viewBox by default (computed `overflow: hidden`; nothing in the repo
+ * overrides it) and the label is drawn to the right of and above its endpoint,
+ * so an unreserved label is cut off on whichever sides it overruns — measured
+ * for a forward handoff at fit zoom as 13% visible before this reservation, and
+ * the text still clipped off the top edge in every direction.
+ *
+ * The reservation is estimated from `label` alone rather than measured, so the
+ * box stays pure math (no DOM, no refs). Exported because the guarantee is
+ * geometric and can be asserted without a browser.
+ */
+export function overlayBox(
   start: { x: number; y: number },
   end: { x: number; y: number },
   pad: number,
+  label = '',
 ): { left: number; top: number; width: number; height: number } {
-  const left = Math.min(start.x, end.x) - pad;
-  const top = Math.min(start.y, end.y) - pad;
-  return {
-    left,
-    top,
-    width: Math.abs(end.x - start.x) + pad * 2,
-    height: Math.abs(end.y - start.y) + pad * 2,
-  };
+  const minX = Math.min(start.x, end.x) - pad;
+  const maxX = Math.max(start.x, end.x) + pad;
+  const minY = Math.min(start.y, end.y) - pad;
+  const maxY = Math.max(start.y, end.y) + pad;
+  // The label hangs off whichever endpoint the arrow points at, always to the
+  // right and above it (static text at +8/-8, moving text carried by the group).
+  const anchorX = Math.max(start.x, end.x);
+  const anchorY = Math.min(start.y, end.y);
+  const right = Math.max(
+    maxX,
+    anchorX + HQ_OVERLAY_LABEL_GAP_PX + label.length * HQ_OVERLAY_LABEL_CHAR_CEILING_PX,
+  );
+  const top = Math.min(maxY, anchorY - HQ_OVERLAY_LABEL_GAP_PX - HQ_OVERLAY_LABEL_HEIGHT_PX);
+  return { left: minX, top, width: right - minX, height: maxY - top };
 }
 
 /**
@@ -224,7 +257,7 @@ export default function HandoffOverlay({
       {overlays.map((overlay) => {
         const start = worldToScreen(camera, overlay.from);
         const end = worldToScreen(camera, overlay.to);
-        const box = overlayBox(start, end, pad);
+        const box = overlayBox(start, end, pad, overlay.label);
         const localStart = { x: start.x - box.left, y: start.y - box.top };
         const localEnd = { x: end.x - box.left, y: end.y - box.top };
         return (
@@ -253,7 +286,11 @@ export default function HandoffOverlay({
                   strokeDasharray="6 4"
                 />
                 <circle cx={localEnd.x} cy={localEnd.y} r={5} fill="currentColor" />
-                <text x={localEnd.x + 8} y={localEnd.y - 8} className="fill-current text-[11px]">
+                <text
+                  x={localEnd.x + HQ_OVERLAY_LABEL_GAP_PX}
+                  y={localEnd.y - HQ_OVERLAY_LABEL_GAP_PX}
+                  className="fill-current text-[11px]"
+                >
                   {overlay.label}
                 </text>
               </g>
@@ -265,7 +302,7 @@ export default function HandoffOverlay({
                 transition={{ duration: HQ_OVERLAY_VISIT_SECONDS, times: [0, 0.5, 1], ease: 'easeInOut' }}
               >
                 <circle r={6} fill="currentColor" />
-                <text x={8} y={-8} className="fill-current text-[11px]">
+                <text x={HQ_OVERLAY_LABEL_GAP_PX} y={-HQ_OVERLAY_LABEL_GAP_PX} className="fill-current text-[11px]">
                   {overlay.label}
                 </text>
               </motion.g>

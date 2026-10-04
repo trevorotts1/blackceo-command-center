@@ -29,8 +29,12 @@ import {
 } from '@/components/hq/useHqViewport';
 import HandoffOverlay, {
   HQ_MAX_ACTIVE_OVERLAYS,
+  HQ_OVERLAY_LABEL_CHAR_CEILING_PX,
+  HQ_OVERLAY_LABEL_GAP_PX,
+  HQ_OVERLAY_LABEL_HEIGHT_PX,
   deriveHandoffLedger,
   isEvidenceLinkedHandoff,
+  overlayBox,
   type HqHandoffEvidence,
 } from '@/components/hq/HandoffOverlay';
 
@@ -232,6 +236,52 @@ test('B25: reduced motion renders the final static arrow/label for the same reco
   assert.match(html, /data-actor-id="rt-1"/);
   assert.match(html, /data-from-workspace="w1"/);
   assert.match(html, /data-to-workspace="w2"/);
+});
+
+test('B25: the overlay box reserves its receipt label on every side', () => {
+  /*
+   * The outermost SVG clips to its viewBox (computed overflow: hidden; no repo
+   * rule overrides it), so anything drawn outside `overlayBox` is cut. The
+   * label is the only element that overruns the endpoint pad: it is drawn
+   * `HQ_OVERLAY_LABEL_GAP_PX` right of and above its anchor.
+   *
+   * `pad` is swept over the real caller's range, `24 * camera.zoom` for zoom
+   * 0.25-2.5, because the clip has two regimes: at normal zoom the label runs
+   * off the right edge (measured 13% visible at fit zoom, 0% at minimum), and
+   * when the pad shrinks below the label's own extent the top edge cuts too.
+   * Before the reservation every direction failed one or both.
+   * Labels are bounded here, so the assertion is arithmetic over exported
+   * constants — the geometry is what the browser clipped, not bespoke markup.
+   */
+  const pads = [24 * 0.25, 24 * 0.687, 24 * 1, 24 * 2.5];
+  for (const label of ['Sent request', 'Handoff accepted', 'Reply received']) {
+    const labelWidth = label.length * HQ_OVERLAY_LABEL_CHAR_CEILING_PX;
+    for (const pad of pads) {
+      // Every direction the projection produces: right, left, down and up.
+      const ends = [
+        { x: 320, y: 160 },
+        { x: 0, y: 160 },
+        { x: 160, y: 480 },
+        { x: 160, y: 0 },
+      ];
+      for (const end of ends) {
+        const start = { x: 160, y: 160 };
+        const box = overlayBox(start, end, pad, label);
+        // The label hangs off the endpoint the arrow points at, right and above.
+        const anchorX = Math.max(start.x, end.x);
+        const anchorY = Math.min(start.y, end.y);
+        const labelLeft = anchorX + HQ_OVERLAY_LABEL_GAP_PX - box.left;
+        const labelRight = labelLeft + labelWidth;
+        const labelBottom = anchorY - HQ_OVERLAY_LABEL_GAP_PX - box.top;
+        const labelTop = labelBottom - HQ_OVERLAY_LABEL_HEIGHT_PX;
+        const where = `${label} at (${end.x},${end.y}) pad ${pad}`;
+        assert.ok(labelRight <= box.width, `${where} overruns the box right edge`);
+        assert.ok(labelLeft >= 0, `${where} starts left of the box`);
+        assert.ok(labelTop >= 0, `${where} is clipped off the top edge`);
+        assert.ok(labelBottom <= box.height, `${where} overruns the box bottom edge`);
+      }
+    }
+  }
 });
 
 test('B25: no validated handoff renders no overlay layer at all', () => {
