@@ -938,14 +938,24 @@ function hqTaskPhase(input: HqTaskCapture): 'created' | 'assigned' | 'status_cha
  * and records a bounded capture-health failure; it does not roll back
  * already-authorized business work."
  *
- * The savepoint bounds the writer's OWN writes only. A throwing writer is
+ * The savepoint bounds the writer's OWN writes only. A THROWING writer is
  * rolled back to the savepoint, recorded as degraded, and swallowed here, so the
- * status UPDATE and both audit rows around this call still commit.
+ * status UPDATE and both audit rows around this call still commit — that is the
+ * one case where discarding the savepoint's writes is right, because a writer
+ * that threw may have left partial state behind.
  *
  * A non-throwing refusal is NOT success: B05 answers with a status union, and
  * anything other than `appended`/`duplicate` is returned as a degraded reason
  * naming the status/code. Swallowing those would report a refused capture as a
  * captured one.
+ *
+ * A refusal is also NOT discarded: B05 records the bounded capture-health
+ * failure SPEC S5 requires (`hq_activity_state.capture_state = 'degraded'`)
+ * BEFORE it returns any refusal, and B05 isolates its own transaction — its
+ * internals roll back only on a throw. So the refusal arm RELEASES the savepoint
+ * instead of rolling it back; rolling back here would erase the only durable
+ * record that the capture was refused, leaving a refused capture looking
+ * clean.
  *
  * There is exactly ONE writer. This is the only call site, and it is on the
  * business-write path (`transition`/`createTaskCore`), never on the SSE path:
@@ -997,6 +1007,13 @@ export function captureHqTaskEvent(input: HqTaskCapture): string | null {
       /* Savepoint teardown is best-effort; the surrounding business write outranks it. */
     }
   };
+  const release = () => {
+    try {
+      db.exec(`RELEASE ${savepoint}`);
+    } catch {
+      /* Savepoint teardown is best-effort; the surrounding business write outranks it. */
+    }
+  };
   try {
     db.exec(`SAVEPOINT ${savepoint}`);
     const result = write(db, { companyId, installationId: hqInstallationId(), event }) as
@@ -1009,9 +1026,12 @@ export function captureHqTaskEvent(input: HqTaskCapture): string | null {
     }
     const status = (result as { status?: unknown } | null)?.status;
     if (status !== 'appended' && status !== 'duplicate') {
-      // B05's refusal union: rolled back (it recorded its own capture-health
-      // failure) and surfaced — never reported as a capture that happened.
-      rollback();
+      // B05's refusal union: surfaced — never reported as a capture that
+      // happened. RELEASED, not rolled back: B05 already isolated its own
+      // transaction and wrote its bounded capture-health failure before
+      // returning, so a rollback here would erase the durable degraded marker
+      // and leave the refusal recorded nowhere.
+      release();
       const code = (result as { code?: unknown } | null)?.code;
       const reason = code === undefined ? String(status) : String(code);
       console.warn(`[task-lifecycle] HQ capture refused for ${input.sourceKey}: ${reason}`);

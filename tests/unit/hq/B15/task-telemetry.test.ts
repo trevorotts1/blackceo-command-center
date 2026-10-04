@@ -79,6 +79,8 @@ let captured: Array<{ companyId: string; installationId: string; event: Record<s
 let observerThrows = false;
 /** When set, the fake observer answers with a B05-shaped non-throwing REFUSAL. */
 let observerRefusal: { status: string; code: string } | null = null;
+/** Minimal shape of the handle B05 receives as its first argument. */
+type WriterHandle = { prepare: (sql: string) => { run: (...params: unknown[]) => unknown } };
 
 /**
  * Install the fake '@/lib/hq/activity' writer, shaped exactly like B05's:
@@ -101,7 +103,22 @@ function installObserver(): void {
         ) {
           captured.push(input);
           if (observerThrows) throw new Error('observer exploded (B15 test)');
-          if (observerRefusal) return observerRefusal;
+          if (observerRefusal) {
+            // B05 records the bounded capture-health failure BEFORE returning a
+            // refusal (SPEC S5), inside the caller's savepoint. Reproduced here,
+            // against the real production DB, so the test can assert what
+            // survives the caller's savepoint teardown. Best-effort by design,
+            // exactly like B05's own markCaptureDegraded: a failure to record a
+            // failure must not become a new failure.
+            try {
+              (_db as WriterHandle).prepare(
+                `INSERT INTO hq_activity_state (company_id, high_seq, pruned_through_seq, capture_state, updated_at)
+                 VALUES (?, 0, 0, 'degraded', ?)
+                 ON CONFLICT(company_id) DO UPDATE SET capture_state = 'degraded', updated_at = excluded.updated_at`,
+              ).run(input.companyId, new Date().toISOString());
+            } catch { /* swallow — see comment above */ }
+            return observerRefusal;
+          }
           return { status: 'appended', duplicate: false, eventId: input.event.eventId, seq: captured.length, evictedThroughSeq: null };
         },
       };
@@ -118,6 +135,21 @@ test.before(async () => {
   closeDb = db.closeDb;
   getDb = db.getDb;
   getDb(); // full migration chain on the throwaway DB
+
+  // B01 migration 169 DDL verbatim: the table B05 writes its bounded
+  // capture-health failure into (SPEC S5). Created here because B01 is not on
+  // this base yet; without it B05's marker write has nowhere to land and the
+  // refusal-persistence question is unobservable.
+  getDb().exec(
+    `CREATE TABLE IF NOT EXISTS hq_activity_state (
+       company_id TEXT PRIMARY KEY,
+       high_seq INTEGER NOT NULL,
+       pruned_through_seq INTEGER NOT NULL,
+       capture_state TEXT NOT NULL,
+       retained_bytes INTEGER NOT NULL DEFAULT 0,
+       updated_at TEXT NOT NULL
+     )`,
+  );
 
   const now = new Date().toISOString();
   run(
@@ -349,6 +381,50 @@ test('B15: a NON-THROWING refusal is reported, never counted as a capture', asyn
   );
 
   observerRefusal = null;
+});
+
+test('B15: a refusal leaves B05\'s durable capture-health record intact (the caller must not erase it)', async () => {
+  captured = [];
+  observerThrows = false;
+  // Clear any marker a previous case left, so the assertion below is unambiguous.
+  run('DELETE FROM hq_activity_state WHERE company_id = ?', [COMPANY]);
+  assert.equal(
+    queryOne<{ capture_state: string }>('SELECT capture_state FROM hq_activity_state WHERE company_id = ?', [COMPANY]),
+    undefined,
+    'precondition: no capture-health row before the refusal',
+  );
+
+  observerRefusal = { status: 'receipt_capacity', code: 'receipt_capacity' };
+  const refused = captureHqTaskEvent({
+    sourceKey: 'transition:refusal-durability', auditId: 'refusal-durability', taskId: 'b15-refusal-durability',
+    companyId: COMPANY, fromStatus: 'planning', toStatus: 'planning', actor: null, occurredAt: new Date().toISOString(),
+  });
+  assert.equal(refused, 'receipt_capacity', 'the refusal code is surfaced as the degraded reason');
+
+  // SPEC S5: B05's refusal is not silent — it recorded the bounded
+  // capture-health failure before returning. That record is the ONLY durable
+  // evidence the capture was refused; a caller that rolls its savepoint back
+  // erases it and leaves a refused capture looking clean.
+  const state = queryOne<{ capture_state: string }>(
+    'SELECT capture_state FROM hq_activity_state WHERE company_id = ?', [COMPANY],
+  );
+  assert.ok(state, 'the capture-health row B05 wrote for the refusal must still exist after the caller returns');
+  assert.equal(state!.capture_state, 'degraded', 'the refusal must leave a durable degraded capture-health marker');
+
+  // Control: an accepted capture leaves no degraded marker (the instrument
+  // discriminates between the two arms rather than always reporting degraded).
+  run('DELETE FROM hq_activity_state WHERE company_id = ?', [COMPANY]);
+  observerRefusal = null;
+  const ok = captureHqTaskEvent({
+    sourceKey: 'transition:accepted-control', auditId: 'accepted-control', taskId: 'b15-accepted-control',
+    companyId: COMPANY, fromStatus: 'planning', toStatus: 'planning', actor: null, occurredAt: new Date().toISOString(),
+  });
+  assert.equal(ok, null, 'control: the accepted arm still reports success');
+  assert.equal(
+    queryOne<{ capture_state: string }>('SELECT capture_state FROM hq_activity_state WHERE company_id = ?', [COMPANY]),
+    undefined,
+    'control: an accepted capture writes no degraded marker of its own',
+  );
 });
 
 test('B15: the observer is the only writer — the post-transaction SSE broadcast adds no second capture', async () => {
