@@ -232,18 +232,31 @@ test('the local development identity is refused, never accepted as a fallback', 
 
 test('a sentinel identity resolves the installation company through the server resolver, never row order of a foreign row', async () => {
   const cookie = await sessionCookie('a.example', 'owner:a', { companyId: 'default' });
-  await withEnv(
-    {
-      MC_TENANT_REGISTRY_JSON: JSON.stringify({
-        'a.example': { tenantId: 'tenant-a', companyId: 'default', kind: 'self', installationId: 'install-a' },
-      }),
-      MC_COMPANY_ID: 'company-a',
-    },
-    async () => {
-      const ctx = await requireHqContext(req('a.example', { cookie }));
-      assert.equal(ctx.companyId, 'company-a', 'the installation identity decides, not a placeholder row');
-    },
-  );
+  // Row order is part of the fixture, not incidental: the foreign company row is
+  // inserted FIRST, so a resolver that falls through to its positional last resort
+  // returns company-b and this test fails. The assertion is only meaningful against
+  // this order — with the installation company first, both paths agree by accident.
+  run("DELETE FROM companies WHERE id IN ('company-a','company-b')", []);
+  run("INSERT INTO companies(id,name,slug) VALUES('company-b','Company B','company-b')", []);
+  run("INSERT INTO companies(id,name,slug) VALUES('company-a','Company A','company-a')", []);
+  try {
+    await withEnv(
+      {
+        MC_TENANT_REGISTRY_JSON: JSON.stringify({
+          'a.example': { tenantId: 'tenant-a', companyId: 'default', kind: 'self', installationId: 'install-a' },
+        }),
+        MC_COMPANY_ID: 'company-a',
+      },
+      async () => {
+        const ctx = await requireHqContext(req('a.example', { cookie }));
+        assert.equal(ctx.companyId, 'company-a', 'the installation identity decides, not a placeholder row');
+      },
+    );
+  } finally {
+    run("DELETE FROM companies WHERE id IN ('company-a','company-b')", []);
+    run("INSERT INTO companies(id,name,slug) VALUES('company-a','Company A','company-a')", []);
+    run("INSERT INTO companies(id,name,slug) VALUES('company-b','Company B','company-b')", []);
+  }
 });
 
 test('an un-branded box with no resolvable company is refused 409 company_not_bound with a setup link, never global rows', async () => {

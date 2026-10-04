@@ -150,9 +150,15 @@ async function resolveBrowserIdentity(request: { headers: Headers }): Promise<Te
  * ("default", "command-center", empty — the box has no provisioned identity),
  * this consults the repo's one canonical active-company resolver
  * (`resolveActiveCompanyId` → `resolveSeedingCompanyId`, sentinel-aware, identity
- * terminal, row order last resort) for the installation's own company. A sentinel
- * answer is the absence of a company, so that is `company_not_bound` — never
- * global rows, never a silently widened scope.
+ * terminal, row order last resort) for the installation's own company. The
+ * resolver is called with NO explicit identity, so it defaults to the
+ * installation's own provisioned identity (`MC_COMPANY_ID` via
+ * `installedCompanyIdentity`) — which is authoritative and terminal. Handing it
+ * the sentinel instead would null that branch (branding-seed.ts:277) and drop the
+ * resolver to its row-order last resort, letting an unrelated company row decide
+ * whose data the board is scoped to. A sentinel answer is the absence of a
+ * company, so that is `company_not_bound` — never global rows, never a silently
+ * widened scope.
  */
 function resolveAuthorizedCompany(ctx: TenantContext): string {
   const registered = (ctx.companyId ?? '').trim();
@@ -169,7 +175,7 @@ function resolveAuthorizedCompany(ctx: TenantContext): string {
 
   let active: string | null;
   try {
-    active = resolveActiveCompanyId(undefined, registered || null);
+    active = resolveActiveCompanyId(undefined);
   } catch {
     // Startup schema failure / C8 guard: an unavailable store is NOT an unbound
     // company, so it must not be reported as 409 (SPEC S10 "blocks Headquarters
