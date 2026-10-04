@@ -103,6 +103,29 @@ out="$(hq_apply_flag "$ENVF2" 1)"
 [[ "$out" == "operator value preserved" ]] && ok "existing HEADQUARTERS_ENABLED reported preserved" || bad "preserve path not taken: $out"
 [[ "$(cat "$ENVF2")" == "$(printf '%s\n' 'MC_API_TOKEN=operator-secret-aaa' 'HEADQUARTERS_ENABLED=0')" ]] \
   && ok "env file byte-identical after preserve path" || bad "preserve path modified the file"
+# 8b. Operator file whose last byte is not a newline: the flag must land on
+#     its own line, the operator line must survive byte-identical, and a
+#     second run must append nothing (missing-newline fusion guard).
+ENVF3="$TMP/nonl/.env.local"; mkdir -p "$(dirname "$ENVF3")"
+printf '%s' 'OTHER_FLAG=1' > "$ENVF3"
+[[ "$(hq_apply_flag "$ENVF3" 1)" == "written" ]] && ok "no-trailing-newline file: flag written" || bad "no-trailing-newline write failed"
+[[ "$(grep -c '^OTHER_FLAG=1$' "$ENVF3")" == "1" ]] && ok "operator OTHER_FLAG line byte-identical" || bad "operator line fused: $(cat "$ENVF3")"
+[[ "$(grep -c '^HEADQUARTERS_ENABLED=1$' "$ENVF3")" == "1" ]] && ok "flag landed as its own standalone line" || bad "flag line missing or fused: $(cat "$ENVF3")"
+nl_before="$(wc -l < "$ENVF3")"
+hq_apply_flag "$ENVF3" 1 >/dev/null
+[[ "$(grep -c 'HEADQUARTERS_ENABLED' "$ENVF3")" == "1" ]] && ok "second run appends nothing (idempotent after newline repair)" || bad "flag duplicated on re-run"
+[[ "$(wc -l < "$ENVF3")" == "$nl_before" ]] || bad "line count changed on re-run"
+
+# 8c. Same no-trailing-newline fixture under macOS stock bash 3.2, the shell
+#     the installer supports (tail -c 1 and $'\n' portability check).
+ENVF4="$TMP/nonl32/.env.local"; mkdir -p "$(dirname "$ENVF4")"
+printf '%s' 'OTHER_FLAG=1' > "$ENVF4"
+/bin/bash -c "source '$TMP/fn.sh'; hq_apply_flag '$ENVF4' 1" > "$TMP/out32.txt" 2>&1
+[[ "$(cat "$TMP/out32.txt")" == "written" ]] && ok "bash 3.2: flag written" || bad "bash 3.2 write failed: $(cat "$TMP/out32.txt")"
+[[ "$(grep -c '^OTHER_FLAG=1$' "$ENVF4")" == "1" ]] && ok "bash 3.2: operator line byte-identical" || bad "bash 3.2 operator line fused: $(cat "$ENVF4")"
+[[ "$(grep -c '^HEADQUARTERS_ENABLED=1$' "$ENVF4")" == "1" ]] && ok "bash 3.2: flag on its own line" || bad "bash 3.2 flag fused: $(cat "$ENVF4")"
+/bin/bash -c "source '$TMP/fn.sh'; hq_apply_flag '$ENVF4' 1" >/dev/null 2>&1
+[[ "$(grep -c 'HEADQUARTERS_ENABLED' "$ENVF4")" == "1" ]] && ok "bash 3.2: second run appends nothing" || bad "bash 3.2 flag duplicated"
 
 # 9. Persistence preflight creates the two Mac roots under an isolated HOME.
 FAKE_HOME="$TMP/home"

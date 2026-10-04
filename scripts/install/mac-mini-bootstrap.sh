@@ -338,6 +338,14 @@ hq_apply_flag() {
     printf 'operator value preserved'
     return 0
   fi
+  # A file whose last byte is not a newline would fuse with the appended
+  # line (OTHER_FLAG=1 + HEADQUARTERS_ENABLED=1 on one row), breaking the
+  # additive-only contract and the idempotence anchor. Terminate it first.
+  # tail -c 1 and $'\n' both work on macOS stock bash 3.2 and 5.x; the
+  # [ -s ] guard leaves empty/fresh files untouched.
+  if [ -s "$env_file" ] && [ "$(tail -c 1 "$env_file")" != $'\n' ]; then
+    printf '\n' >> "$env_file" 2>/dev/null || true
+  fi
   if printf '%s\n' "HEADQUARTERS_ENABLED=$value" >> "$env_file" 2>/dev/null; then
     chmod 600 "$env_file" 2>/dev/null || true
     printf 'written'
