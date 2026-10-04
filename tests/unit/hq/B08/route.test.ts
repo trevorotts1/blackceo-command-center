@@ -23,7 +23,7 @@ import {
   hqSnapshotRouteDeps,
   HQ_SNAPSHOT_ASSEMBLY_PATHS,
   type HqRouteDeps,
-} from '../../../../src/app/api/hq/snapshot/route';
+} from '../../../../src/lib/hq/snapshot-route';
 import type { HqSnapshotActivityRow } from '../../../../src/lib/hq/snapshot';
 
 /* ------------------------------------------------------------------ *
