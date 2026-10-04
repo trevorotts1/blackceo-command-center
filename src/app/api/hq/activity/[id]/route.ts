@@ -88,6 +88,23 @@ async function resolveCompanyId(request: NextRequest): Promise<string | NextResp
     }
     return ctx.companyId;
   } catch (err) {
+    // The guard's refusal carries the SPEC-named code and retryable flag
+    // (B02 `HqContextError`: status/code/message/retryable/link). It is read
+    // structurally rather than by class identity: SPEC S7 line 263 names only
+    // `requireHqContext` as the shared helper, so this route must not require
+    // the guard's class export as well. SPEC S7 line 265 names 409
+    // `company_not_bound`, line 269 names 403 `hq_direct_origin_required`, and
+    // S6's storage refusal is retryable — collapsing those to a generic 401
+    // discards exactly the codes the frozen HQ_SPEC_ERROR_CODES set exists for.
+    const refusal = err as { status?: unknown; code?: unknown; message?: unknown; retryable?: unknown };
+    if (typeof refusal.status === 'number' && typeof refusal.code === 'string' && refusal.code) {
+      return fail(
+        refusal.status,
+        refusal.code,
+        typeof refusal.message === 'string' && refusal.message ? refusal.message : 'Headquarters request refused',
+        refusal.retryable === true,
+      );
+    }
     const status = (err as { status?: number }).status;
     return fail(typeof status === 'number' ? status : 401, 'unauthorized', 'A verified Headquarters identity is required');
   }
@@ -115,7 +132,10 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
 
     // S6 line 235: "Physical source deletion does not cascade-delete the
     // activity. Query joins recheck current permissions; removed targets yield
-    // tombstones with no retained secret names."
+    // tombstones with no retained secret names." The id space rechecked is the
+    // WRITER's acceptance set (B05 stores the envelope runtime binding verbatim
+    // and accepts `a.id OR a.openclaw_agent_id`): resolving only `a.id` would
+    // tombstone a LIVE runtime-bound target.
     const targetExists = (targetId: string | null, table: 'tasks' | 'agents'): boolean => {
       if (!targetId) return true;
       if (table === 'tasks') {
@@ -124,8 +144,11 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
           .get(targetId, companyId);
       }
       return !!db
-        .prepare(`SELECT 1 FROM agents WHERE id = ? AND workspace_id IN (SELECT id FROM workspaces WHERE company_id = ?)`)
-        .get(targetId, companyId);
+        .prepare(
+          `SELECT 1 FROM agents WHERE (id = ? OR openclaw_agent_id = ?)
+             AND workspace_id IN (SELECT id FROM workspaces WHERE company_id = ?)`,
+        )
+        .get(targetId, targetId, companyId);
     };
 
     const missingTargets: Array<'task' | 'actor' | 'recipient'> = [];
@@ -153,9 +176,9 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
         .prepare(
           `SELECT a.name AS name FROM agents a
              JOIN workspaces w ON w.id = a.workspace_id
-            WHERE a.id = ? AND w.company_id = ?`,
+            WHERE (a.id = ? OR a.openclaw_agent_id = ?) AND w.company_id = ?`,
         )
-        .get(agentId, companyId) as { name: string | null } | undefined;
+        .get(agentId, agentId, companyId) as { name: string | null } | undefined;
       return found?.name ?? null;
     };
 

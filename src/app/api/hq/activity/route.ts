@@ -109,6 +109,11 @@ function isMissingHqTable(err: unknown): boolean {
 /**
  * S5: actor and recipient labels are resolved from CURRENT scope, so a target
  * removed since the event yields null instead of a retained name (S6 line 235).
+ *
+ * The id space is the WRITER's acceptance set, never a narrower one: B05 stores
+ * the envelope's runtime binding verbatim and accepts it against
+ * `a.id OR a.openclaw_agent_id`, so a reader resolving only `a.id` would report
+ * a LIVE runtime-bound target as removed. Both bindings, same company.
  */
 function labelResolver(companyId: string): (agentId: string) => string | null {
   return (agentId) => {
@@ -116,9 +121,9 @@ function labelResolver(companyId: string): (agentId: string) => string | null {
       .prepare(
         `SELECT a.name AS name FROM agents a
            JOIN workspaces w ON w.id = a.workspace_id
-          WHERE a.id = ? AND w.company_id = ?`,
+          WHERE (a.id = ? OR a.openclaw_agent_id = ?) AND w.company_id = ?`,
       )
-      .get(agentId, companyId) as { name: string | null } | undefined;
+      .get(agentId, agentId, companyId) as { name: string | null } | undefined;
     return row?.name ?? null;
   };
 }
@@ -306,6 +311,23 @@ async function resolveCompanyId(request: NextRequest): Promise<string | NextResp
     }
     return ctx.companyId;
   } catch (err) {
+    // The guard's refusal carries the SPEC-named code and retryable flag
+    // (B02 `HqContextError`: status/code/message/retryable/link). It is read
+    // structurally rather than by class identity: SPEC S7 line 263 names only
+    // `requireHqContext` as the shared helper, so this route must not require
+    // the guard's class export as well. SPEC S7 line 265 names 409
+    // `company_not_bound`, line 269 names 403 `hq_direct_origin_required`, and
+    // S6's storage refusal is retryable — collapsing those to a generic 401
+    // discards exactly the codes the frozen HQ_SPEC_ERROR_CODES set exists for.
+    const refusal = err as { status?: unknown; code?: unknown; message?: unknown; retryable?: unknown };
+    if (typeof refusal.status === 'number' && typeof refusal.code === 'string' && refusal.code) {
+      return fail(
+        refusal.status,
+        refusal.code,
+        typeof refusal.message === 'string' && refusal.message ? refusal.message : 'Headquarters request refused',
+        refusal.retryable === true,
+      );
+    }
     const status = (err as { status?: number }).status;
     return fail(typeof status === 'number' ? status : 401, 'unauthorized', 'A verified Headquarters identity is required');
   }

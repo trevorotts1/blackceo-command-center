@@ -577,3 +577,86 @@ test('Q08: an authenticated denial is mapped, not swallowed', async () => {
     stubs.requireHqContext = () => COMPANY_A_CONTEXT;
   }
 });
+
+test('Q08: the guard refusal keeps its SPEC-named code and retryable flag', async () => {
+  // SPEC S7 line 265 (409 `company_not_bound`), line 269 (403
+  // `hq_direct_origin_required`), S6 storage refusal (retryable). A route that
+  // reads only `status` answers 401 'unauthorized' for all three.
+  const denial = (status: number, code: string, message: string, retryable = false) => () => {
+    const err = new Error(message);
+    Object.assign(err, { status, code, retryable });
+    throw err;
+  };
+  const cases: Array<[number, string, boolean]> = [
+    [409, 'company_not_bound', false],
+    [503, 'hq_storage_unavailable', true],
+    [403, 'hq_direct_origin_required', false],
+  ];
+  for (const [status, code, retryable] of cases) {
+    stubs.requireHqContext = denial(status, code, `${code} message`, retryable);
+    try {
+      for (const response of [
+        await getActivity('?after=0&through=1&limit=10'),
+        await getDetail('anything'),
+      ]) {
+        assert.equal(response.status, status);
+        const body = (await response.json()) as { error: { code: string; retryable: boolean } };
+        assert.equal(body.error.code, code, 'the SPEC-named code must survive the route mapping');
+        assert.equal(body.error.retryable, retryable, 'the guard retryable flag must not be downgraded');
+      }
+    } finally {
+      stubs.requireHqContext = () => COMPANY_A_CONTEXT;
+    }
+  }
+});
+
+test('Q08: a runtime-bound target resolves instead of tombstoning a live row', async () => {
+  // The writer stores the envelope runtime binding verbatim and accepts it
+  // against `agents.id OR agents.openclaw_agent_id`; a reader that resolves only
+  // `agents.id` reports a LIVE runtime-bound actor as removed (event:null plus a
+  // tombstone) and labels it null on the feed.
+  const db = getDb();
+  db.prepare(
+    `INSERT OR REPLACE INTO agents (id, name, role, workspace_id, openclaw_agent_id)
+     VALUES ('agent-runtime', 'Runtime Ava', 'specialist', 'ws-b07', 'runtime-xyz')`,
+  ).run();
+  seedActivity(COMPANY_A, 14, {
+    id: 'runtime-detail',
+    kind: 'owner_note',
+    phase: 'recorded',
+    actorAgentId: 'runtime-xyz',
+    recipientAgentId: 'runtime-xyz',
+    payloadJson: JSON.stringify({ text: 'runtime-bound' }),
+  });
+
+  const detail = await getDetail('runtime-detail');
+  const detailBody = (await detail.json()) as {
+    event: { actorLabel: string | null; recipientLabel: string | null } | null;
+    tombstone: unknown;
+  };
+  assert.equal(detailBody.tombstone, null, 'a LIVE runtime-bound target must not be tombstoned');
+  assert.equal(detailBody.event?.actorLabel, 'Runtime Ava');
+  assert.equal(detailBody.event?.recipientLabel, 'Runtime Ava');
+
+  const feed = (await (await getActivity('?after=0&through=100&limit=100')).json()) as {
+    events: Array<{ reference: string; actorLabel: string | null }>;
+  };
+  const row = feed.events.find((event) => event.reference === 'transition:audit-co-a-14');
+  assert.equal(row?.actorLabel, 'Runtime Ava', 'the feed must label the accepted runtime-bound actor');
+
+  // The control: a genuinely absent target still tombstones, so the widened read
+  // scope did not make the S6 rule unreachable.
+  seedActivity(COMPANY_A, 15, {
+    id: 'absent-detail',
+    kind: 'owner_note',
+    phase: 'recorded',
+    actorAgentId: 'runtime-not-there',
+    payloadJson: JSON.stringify({ text: 'absent' }),
+  });
+  const absent = (await (await getDetail('absent-detail')).json()) as {
+    event: unknown;
+    tombstone: { removed: boolean } | null;
+  };
+  assert.equal(absent.event, null);
+  assert.equal(absent.tombstone?.removed, true);
+});
