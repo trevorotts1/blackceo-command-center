@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Company Headquarters — office fixtures (unit B24, milestone V09/V11).
+
+  ART PROVENANCE: original vector artwork authored for this repository in unit B24
+  from primitives only (rectangles, rhombi, ellipses, bezier paths). No third-party
+  asset, no traced artwork, no "Remo" logo or copied scene, no generated raster. The
+  in-file wordmark-free geometry is the whole provenance: every shape below resolves
+  to canvas primitives declared in this file.
+
+  SPEC S4 requires "original assets or permissively licensed art only". This file is
+  the original-assets side of that rule; reuse is by fragment reference
+  (`<use href="/hq/office.svg#hq-desk">`) so one artwork sheet serves every room
+  without a fetch per employee.
+
+  Colours resolve through the app's own theme custom properties (the brand and bcc
+  token families defined in globals.css / BrandTheme.tsx) with static fallbacks, so
+  a customer's BrandTheme re-tints the room furniture (S4: "existing company
+  branding controls theme"). The root svg below draws a small room scene from the
+  same symbols, so opening this file shows what it publishes.
+
+  Symbols are <g> defs, not <symbol>+viewBox: external fragment <use> then places
+  them 1:1 in the caller's user units with no scaling ambiguity.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 520 400" width="520" height="400"
+     role="img" aria-label="Headquarters office fixtures: rug, desks, head station, plant">
+  <title>Headquarters office fixtures</title>
+  <defs>
+    <!-- Room carpet: flat isometric rhombus, centred on its use point. -->
+    <g id="hq-rug">
+      <path d="M 0 -96 L 168 0 L 0 96 L -168 0 Z"
+            fill="var(--hq-rug, #E8F5E9)" stroke="var(--bcc-border, #E5E7EB)" stroke-width="2" />
+      <path d="M 0 -76 L 133 0 L 0 76 L -133 0 Z"
+            fill="none" stroke="var(--bcc-border, #E5E7EB)" stroke-width="1" stroke-dasharray="6 6" />
+    </g>
+
+    <!-- Specialist desk: iso slab, drawn behind a seated figure. -->
+    <g id="hq-desk">
+      <path d="M 0 -14 L 34 -31 L 0 -48 L -34 -31 Z" fill="var(--hq-desk-top, #C8E6C9)" />
+      <path d="M -34 -31 L 0 -14 L 0 -6 L -34 -23 Z" fill="var(--hq-desk-side, #81C784)" />
+      <path d="M 34 -31 L 0 -14 L 0 -6 L 34 -23 Z" fill="var(--hq-desk-side, #81C784)" opacity="0.75" />
+      <path d="M 0 -14 L 0 -6" fill="none" stroke="var(--brand-800, #2E7D32)" stroke-width="1" />
+    </g>
+
+    <!-- Head station: wider desk plus a raised plate the "Head" marker sits on. -->
+    <g id="hq-head-desk">
+      <path d="M 0 -18 L 52 -41 L 0 -64 L -52 -41 Z" fill="var(--hq-head-top, #A5D6A7)" />
+      <path d="M -52 -41 L 0 -18 L 0 -6 L -52 -29 Z" fill="var(--hq-desk-side, #81C784)" />
+      <path d="M 52 -41 L 0 -18 L 0 -6 L 52 -29 Z" fill="var(--hq-desk-side, #81C784)" opacity="0.75" />
+      <rect x="-14" y="-30" width="28" height="24" rx="3"
+            fill="var(--bcc-white, #FFFFFF)" stroke="var(--brand-800, #2E7D32)" stroke-width="1.5" />
+    </g>
+
+    <!-- Plant: pot plus three leaves; pure paths, no emoji glyph. -->
+    <g id="hq-plant">
+      <path d="M -12 0 L 12 0 L 8 20 L -8 20 Z" fill="var(--hq-pot, #C8B08A)" />
+      <path d="M 0 0 C -14 -12 -22 -26 -18 -38 C -6 -34 2 -18 0 0 Z" fill="var(--brand-500, #4CAF50)" />
+      <path d="M 0 0 C 6 -16 16 -28 28 -32 C 26 -18 14 -6 0 0 Z" fill="var(--brand-400, #66BB6A)" />
+      <path d="M 0 0 C -4 -10 -2 -22 6 -30 C 10 -18 8 -8 0 0 Z" fill="var(--brand-600, #43A047)" />
+    </g>
+  </defs>
+
+  <!-- Self-preview: the same fixtures composed into one room, so this file is
+       legible on its own and its provenance is inspectable without the app. -->
+  <g transform="translate(260 120)">
+    <use href="#hq-rug" />
+  </g>
+  <g transform="translate(150 262)">
+    <use href="#hq-head-desk" />
+  </g>
+  <g transform="translate(200 190)">
+    <use href="#hq-desk" />
+  </g>
+  <g transform="translate(330 190)">
+    <use href="#hq-desk" />
+  </g>
+  <g transform="translate(470 96)">
+    <use href="#hq-plant" />
+  </g>
+</svg>
