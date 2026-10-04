@@ -16,6 +16,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { NextRequest } from 'next/server';
 import { getDb, getDbPath, run, queryOne } from '../../../../src/lib/db';
@@ -562,6 +564,61 @@ test('F1: a port-bearing configured origin mints a grant the runtime host form v
     assert.equal(grant.subject, OWNER_SUBJECT);
     const decoded = JSON.parse(Buffer.from(portTicket.split('.')[0], 'base64url').toString());
     assert.equal(decoded.host, PORT_HOST, 'mint binds hostname-only host, never host:port');
+  } finally {
+    process.env.MC_TENANT_REGISTRY_JSON = savedRegistry;
+    process.env.CC_PUBLIC_URL = savedUrl;
+  }
+});
+
+test('F1: the REAL mint script signs hostname-only, and its link redeems verifiably', async () => {
+  // The test above proves the ROUTE half. This one proves the MINT half: the
+  // real script, run as the operator runs it, for a port-bearing configured
+  // origin. Reverting `origin.hostname` to `origin.host` in the script must
+  // turn exactly this test red; without it the script's port bug is invisible.
+  const scriptPath = fileURLToPath(new URL('../../../../scripts/mint-owner-login.ts', import.meta.url));
+  const repoRoot = path.resolve(path.dirname(scriptPath), '..');
+  assert.ok(fs.existsSync(scriptPath), `mint script path resolves: ${scriptPath}`);
+
+  const PORT_HOST = 'owner-login-script.example';
+  const PORT_ORIGIN = `http://${PORT_HOST}:4000`;
+  const savedRegistry = process.env.MC_TENANT_REGISTRY_JSON;
+  const savedUrl = process.env.CC_PUBLIC_URL;
+  process.env.MC_TENANT_REGISTRY_JSON = JSON.stringify({
+    [PORT_HOST]: { ...REGISTRATION, tenantId: 'ol-script', companyId: REGISTRATION.companyId, installationId: REGISTRATION.installationId },
+  });
+  process.env.CC_PUBLIC_URL = PORT_ORIGIN;
+  try {
+    const run = spawnSync(
+      process.execPath,
+      ['--import', 'tsx', scriptPath, '--origin', PORT_ORIGIN],
+      { cwd: repoRoot, env: process.env, encoding: 'utf8', timeout: 60_000 },
+    );
+    assert.equal(run.status, 0, `mint script exits 0: ${run.stderr?.slice(0, 300)}`);
+    const link = (run.stdout || '').split('\n')[0] || '';
+    assert.match(link, /^http:\/\/owner-login-script\.example:4000\/owner-login#ticket=/, 'real script link format');
+    const minted = link.split('#ticket=')[1];
+    const decoded = JSON.parse(Buffer.from(minted.split('.')[0], 'base64url').toString());
+    assert.equal(decoded.host, PORT_HOST, 'the script signs hostname-only, never host:port');
+    assert.equal(decoded.purpose, OWNER_LOGIN_PURPOSE);
+
+    const response = await POST(
+      new NextRequest(`${PORT_ORIGIN}/api/auth/owner-session`, {
+        method: 'POST',
+        headers: {
+          host: `${PORT_HOST}:4000`,
+          origin: PORT_ORIGIN,
+          'content-type': 'application/json',
+          cookie: await antiForgeryCookie(),
+        },
+        body: JSON.stringify({ ticket: minted }),
+      }),
+    );
+    assert.equal(response.status, 200, 'the real script output must redeem, not be refused');
+    const rawCookie = response.headers.get('set-cookie')!;
+    const sessionToken = rawCookie.split(';')[0].split('=').slice(1).join('=');
+    const grant = await verifyTenantGrant(sessionToken, PORT_HOST, 'session');
+    assert.ok(grant, 'the session from the real script link verifies under the runtime host form');
+    assert.equal(grant.subject, OWNER_SUBJECT);
   } finally {
     process.env.MC_TENANT_REGISTRY_JSON = savedRegistry;
     process.env.CC_PUBLIC_URL = savedUrl;
