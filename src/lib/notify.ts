@@ -521,7 +521,7 @@ export function recordUndeliverable(kind: string, message: string): void {
   // ATTRIBUTION: an undeliverable alert is the LAST rung — the one a human reads
   // cold, days later, with no other context. It must say which box wrote it.
   // Identity is metadata only and never gates the write (fail-OPEN).
-  const identity = resolveBoxIdentity();
+  const identity = resolveBoxIdentity(configEnvVar);
   const line = {
     ts: new Date().toISOString(),
     kind,
@@ -1131,15 +1131,33 @@ export type NotifyAudience = 'OWNER' | 'SYSTEM';
 const RR_HOUSEKEEPING_AGENTS = new Set([
   'stale-task-sweep', 'board-hygiene', 'stuck-in-progress-sweep', 'intake-advance-sweep',
   'operator-column-age-digest', 'qc-scorer', 'audience-confirm', 'manual-dispatch', 'createTaskCore',
+  // F51 (2026-10): board/engine chatter that still sends action 'escalate'. (Event-typed
+  // callers such as social-publish-dispatcher need no entry: the allow-list drops them.)
+  'board-jobs-watchdog', 'stage-timings-ingest', 'trust-engine',
 ]);
 const RR_HOUSEKEEPING_MESSAGE =
-  /^\s*\[(stale-|stopped|stuck-in-progress|silent-failure|qc|audience-confirm|persona|triad|groom|board-hygiene|dispatch-cap)/i;
+  /^\s*\[(stale-|stopped|stuck-in-progress|silent-failure|qc|audience-confirm|persona|triad|groom|board-hygiene|dispatch-cap|routed_but_not_dispatched|podcast_)/i;
 
 export function isBoardHousekeepingAlert(
   message: string,
   meta?: { agent?: string; action?: string },
 ): boolean {
   return RR_HOUSEKEEPING_AGENTS.has(meta?.agent ?? '') || RR_HOUSEKEEPING_MESSAGE.test(message);
+}
+
+/**
+ * F51 (2026-10) — ALLOW-LIST for rung 1. Rescue Rangers gets an alert only when
+ * the caller says so explicitly (`meta.action === 'escalate'`) AND it is not board
+ * housekeeping. `meta.action` is otherwise an event type ('qc_starved',
+ * 'daily_digest', 'publish_failed', 'grounding_degraded'...), never a request to
+ * page: those, and calls with no meta at all, stay on the box (rung 3 record).
+ * Replaces the old deny-list-only rule, which let every new event type through.
+ */
+export function shouldPostToRescueRangers(
+  message: string,
+  meta?: { agent?: string; action?: string },
+): boolean {
+  return meta?.action === 'escalate' && !isBoardHousekeepingAlert(message, meta);
 }
 
 export function notifySystem(
@@ -1165,7 +1183,7 @@ export function notifySystem(
   // OWNER_NOTIFY_ALLOW_SEND_IN_TEST=1. Default-off still protects the ~14 files
   // that only `delete` the env var; only an explicit opt-in (which by convention
   // is coupled to installing the fetch double) can fire the POST in a test run.
-  const webhookUrl = isBoardHousekeepingAlert(message, meta) ? undefined : process.env.RESCUE_RANGERS_WEBHOOK_URL;
+  const webhookUrl = shouldPostToRescueRangers(message, meta) ? process.env.RESCUE_RANGERS_WEBHOOK_URL : undefined;
   if (webhookUrl && (!isTestEnvironment() || process.env.OWNER_NOTIFY_ALLOW_SEND_IN_TEST === '1')) {
     // ATTRIBUTION (FIX-5): the body used to carry ONLY {action, agent, message}.
     // No client. No box. So every escalation from every box in the fleet arrived
@@ -1186,7 +1204,7 @@ export function notifySystem(
     // FAIL-OPEN: resolveBoxIdentity() never throws and degrades to
     // `unknown-client` / `unknown-box`. Identity is metadata on an ALARM and can
     // never be a reason NOT to escalate.
-    const identity = resolveBoxIdentity();
+    const identity = resolveBoxIdentity(configEnvVar);
     // Fire-and-forget: do not await; swallow any error (best-effort, never throws).
     // AUTH HEADER (2026-09-16): RR-01-intake's webhook auth rejects requests without
     // X-Rescue-Secret (observed live: the CC was the top unauthenticated caller at a 5-min
@@ -1257,7 +1275,7 @@ export function notifySystem(
     if (verdict.admit) {
       const text = verdict.suffix ? `${message}${verdict.suffix}` : message;
       if (!isTestEnvironment() || process.env.OWNER_NOTIFY_ALLOW_SEND_IN_TEST === '1') {
-        const identity = resolveBoxIdentity();
+        const identity = resolveBoxIdentity(configEnvVar);
         void fetch(alert.url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', [alert.header]: alert.secret },
