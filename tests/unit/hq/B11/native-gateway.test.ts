@@ -88,6 +88,11 @@ class FixtureSocket {
 }
 
 async function flush() {
+  // Drain the RPC round trips (connect -> sessions.create -> subscribe) and
+  // the listener attach that follows them: a fixed microtask count depends on
+  // how many awaits the adapter happens to have on its startup path, so this
+  // yields to the macrotask queue instead, which drains them all.
+  for (let i = 0; i < 3; i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
   for (let i = 0; i < 6; i += 1) await Promise.resolve();
 }
 
@@ -105,8 +110,11 @@ async function connectedClient() {
 const TURN = { sessionId: 'hq-session-1', turnId: 'turn-1', runtimeId: 'head-a', message: 'hello' };
 const KEY = 'agent:head-a:hq-turn-1';
 
-/** Script: subscribe ok, send ok. Returns nothing — frames are injected by the caller. */
+/** Script: create ok, subscribe ok, send ok. Frames are injected by the caller. */
 function scriptHappyPath(socket: FixtureSocket) {
+  socket.responders.set('sessions.create', (frame, s) =>
+    s.receive({ type: 'res', id: frame.id, ok: true, payload: { key: KEY, sessionId: 'sess-turn-1' } }),
+  );
   socket.responders.set('sessions.messages.subscribe', (frame, s) =>
     s.receive({ type: 'res', id: frame.id, ok: true, payload: { subscribed: true, key: KEY, agentId: 'head-a' } }),
   );
@@ -137,12 +145,22 @@ test('B11/S9 native EventFrame: subscribe precedes send, success requires final 
     });
     await flush();
 
-    // 1. ORDER: subscribe was issued, and send came AFTER it.
+    // 1. ORDER: the per-turn session was created, subscribe was issued, and
+    // send came LAST (S9: after sessions.create returns the key, subscribe,
+    // only THEN send).
+    const createIdx = socket.requests.findIndex((r) => r.method === 'sessions.create');
     const subscribeIdx = socket.requests.findIndex((r) => r.method === 'sessions.messages.subscribe');
     const sendIdx = socket.requests.findIndex((r) => r.method === 'sessions.send');
+    assert.notEqual(createIdx, -1, 'sessions.create must be issued');
     assert.notEqual(subscribeIdx, -1, 'subscribe must be issued');
     assert.notEqual(sendIdx, -1, 'send must be issued');
+    assert.ok(createIdx < subscribeIdx, 'the per-turn session is created BEFORE subscribe');
     assert.ok(subscribeIdx < sendIdx, 'subscription must be established BEFORE send is issued');
+    assert.deepEqual(
+      socket.framesFor('sessions.create')[0].params,
+      { key: KEY },
+      'create addresses this turn\'s unique key',
+    );
 
     // Unique per-turn key and the S9 subscriptionId.
     const subParams = socket.framesFor('sessions.messages.subscribe')[0].params as Record<string, unknown>;
@@ -183,7 +201,17 @@ test('B11/S9 delta: cumulative assistant message REPLACES and never concatenates
   try {
     const { runHqNativeTurn } = await import(GATEWAY);
     scriptHappyPath(socket);
-    const promise = runHqNativeTurn(TURN, { client });
+    // MID-STREAM assertions only: this turn has NO final frame, so the
+    // accumulator state is whatever the delta rules produced (a final would
+    // replace the accumulator and mask every rule under test).
+    const partials: string[] = [];
+    let clock = 0;
+    const promise = runHqNativeTurn(TURN, {
+      client,
+      timeoutMs: 200,
+      now: () => (clock += 2000),
+      onPartial: (text) => partials.push(text),
+    });
     await flush();
     socket.receive(chatFrame({ runId: 'run-A', sessionKey: KEY, seq: 1, state: 'delta', deltaText: 'abc' }));
     // Cumulative authoritative message + deltaText in the SAME frame: the
@@ -194,10 +222,16 @@ test('B11/S9 delta: cumulative assistant message REPLACES and never concatenates
     }));
     // replace:true with no cumulative message replaces with deltaText.
     socket.receive(chatFrame({ runId: 'run-A', sessionKey: KEY, seq: 3, state: 'delta', deltaText: 'fresh', replace: true }));
-    socket.receive(chatFrame({ runId: 'run-A', sessionKey: KEY, seq: 4, state: 'final', message: { role: 'assistant', content: [{ type: 'text', text: 'fresh' }] } }));
     const result = await promise;
-    assert.equal(result.outcome, 'replied');
-    assert.equal(result.text, 'fresh', 'cumulative replaces; replace:true replaces; never concatenated');
+    assert.equal(result.outcome, 'timeout');
+    assert.equal(result.text, 'fresh', 'replace:true replaces the accumulator');
+    assert.ok(partials.includes('abc'), 'plain delta appended mid-stream');
+    assert.ok(partials.includes('abcd'), 'cumulative message REPLACED mid-stream, not appended');
+    assert.ok(partials.includes('fresh'), 'replace:true replaced mid-stream');
+    assert.ok(
+      !partials.some((text) => text.includes('XYZ') || text.includes('abcabcd')),
+      'cumulative message and deltaText are never concatenated',
+    );
   } finally {
     client.disconnect();
     restore();
@@ -208,8 +242,17 @@ test('B11/S9 seq dedup + only text blocks visible: duplicate/old seq dropped, th
   const { client, socket, restore } = await connectedClient();
   try {
     const { runHqNativeTurn } = await import(GATEWAY);
+    // Turn 1 — MID-STREAM dedup: no final frame, so the accumulator is exactly
+    // what the dedup rules let through (a final would mask both mutations).
     scriptHappyPath(socket);
-    const promise = runHqNativeTurn(TURN, { client });
+    const partials: string[] = [];
+    let clock = 0;
+    const promise = runHqNativeTurn(TURN, {
+      client,
+      timeoutMs: 200,
+      now: () => (clock += 2000),
+      onPartial: (text) => partials.push(text),
+    });
     await flush();
     // Same (runId,seq) with DIFFERENT text: the client's content-hash cache
     // cannot catch these, so this is the adapter's OWN seq dedup under test.
@@ -217,14 +260,24 @@ test('B11/S9 seq dedup + only text blocks visible: duplicate/old seq dropped, th
     socket.receive(chatFrame({ runId: 'run-A', sessionKey: KEY, seq: 5, state: 'delta', deltaText: 'REPLAY' })); // same seq, new content
     socket.receive(chatFrame({ runId: 'run-A', sessionKey: KEY, seq: 4, state: 'delta', deltaText: 'stale' })); // older seq
     socket.receive(chatFrame({ runId: 'run-A', sessionKey: KEY, seq: 6, state: 'delta', deltaText: 'two' }));
-    // Thinking/tool/attachment blocks are not visible text.
+    const midStream = await promise;
+    assert.equal(midStream.outcome, 'timeout');
+    assert.equal(midStream.text, 'onetwo', 'exact repeat (seq 5) and stale seq (4) both dropped mid-stream');
+    assert.deepEqual(partials, ['one', 'onetwo'], 'only the two fresh sequences ever mutated the accumulator');
+
+    // Turn 2 — terminal: thinking/tool/attachment blocks are not visible text.
+    scriptHappyPath(socket);
+    const promise2 = runHqNativeTurn(TURN, { client, timeoutMs: 400 });
+    await flush();
+    socket.receive(chatFrame({ runId: 'run-A', sessionKey: KEY, seq: 7, state: 'delta', deltaText: 'onetwo' }));
     socket.receive(chatFrame({
-      runId: 'run-A', sessionKey: KEY, seq: 7, state: 'final',
+      runId: 'run-A', sessionKey: KEY, seq: 8, state: 'final',
       message: { role: 'assistant', content: [{ type: 'thinking', thinking: 'secret' }, { type: 'text', text: 'onetwo' }] },
     }));
-    const result = await promise;
+    const result = await promise2;
     assert.equal(result.outcome, 'replied');
-    assert.equal(result.text, 'onetwo', 'duplicates and stale seq dropped; non-text blocks excluded');
+    assert.equal(result.text, 'onetwo', 'non-text blocks excluded from visible text');
+    assert.ok(!result.text.includes('secret'));
   } finally {
     client.disconnect();
     restore();
@@ -293,6 +346,9 @@ test('B11/S9 subscribe refusal is positively unsent: no send is ever issued', as
   const { client, socket, restore } = await connectedClient();
   try {
     const { runHqNativeTurn } = await import(GATEWAY);
+    socket.responders.set('sessions.create', (frame, s) =>
+      s.receive({ type: 'res', id: frame.id, ok: true, payload: { key: KEY } }),
+    );
     socket.responders.set('sessions.messages.subscribe', (frame, s) =>
       s.receive({ type: 'res', id: frame.id, ok: true, payload: { subscribed: false, key: KEY } }),
     );
@@ -308,6 +364,26 @@ test('B11/S9 subscribe refusal is positively unsent: no send is ever issued', as
     assert.ok(!kinds.includes('completion_observed'), 'a failed attempt never observes completion');
     await flush();
     assert.equal(socket.framesFor('sessions.messages.unsubscribe').length, 1, 'cleanup runs exactly once, even on the refusal path');
+
+    // A refused SESSION CREATION is equally positively unsent: no subscribe,
+    // no send — the attempt never reaches the wire.
+    const createKinds: string[] = [];
+    socket.responders.set('sessions.create', (frame, s) =>
+      s.receive({ type: 'res', id: frame.id, ok: false, error: { message: 'create refused' } }),
+    );
+    const createResult = await runHqNativeTurn(
+      { ...TURN, turnId: 'turn-refused' },
+      { client, onLifecycle: (e) => createKinds.push(e.kind) },
+    );
+    assert.equal(createResult.outcome, 'failed_before_send');
+    assert.equal(socket.framesFor('sessions.send').length, 0, 'a refused create means NO send either');
+    assert.equal(
+      socket.framesFor('sessions.messages.subscribe').length,
+      1,
+      'only the first turn subscribed; the refused create never subscribed',
+    );
+    assert.ok(createKinds.includes('failed_before_send'));
+    assert.ok(!createKinds.includes('send_accepted'));
   } finally {
     client.disconnect();
     restore();

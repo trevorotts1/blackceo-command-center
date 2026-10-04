@@ -605,10 +605,11 @@ function readHqNativeChatPayload(payload: unknown): HqNativeChatPayload | null {
  * Run one HQ turn over the native EventFrame path. S9-native semantics, in
  * order, all of which are mutation-visible in this module:
  *
- *  1. Subscribe FIRST (`sessions.messages.subscribe`, with this turn's unique
- *     key + `subscriptionId`) and only THEN send. A refused subscription is
- *     POSITIVELY UNSENT: the attempt aborts with `subscribe_failed` and
- *     `failed_before_send` — no message is ever sent.
+ *  1. Create the per-turn session (`sessions.create` on the unique key),
+ *     THEN subscribe (`sessions.messages.subscribe`, with this turn's unique
+ *     key + `subscriptionId`) and only THEN send. A refused create or a
+ *     refused subscription is POSITIVELY UNSENT: the attempt aborts with
+ *     `failed_before_send` / `subscribe_failed` — no message is ever sent.
  *  2. `send_accepted` fires only after the send response acknowledges, never on
  *     session creation or subscription.
  *  3. Frames are matched on the exact per-turn `sessionKey` and (when the frame
@@ -617,7 +618,8 @@ function readHqNativeChatPayload(payload: unknown): HqNativeChatPayload | null {
  *     and flagged — never relabeled onto this turn. That is what makes a
  *     late-arriving turn-A frame unable to touch turn-B's state even though
  *     both may share a run id.
- *  4. `(runId,seq)` dedup drops replayed and stale sequence numbers.
+ *  4. `(runId,seq)` dedup drops replayed and stale sequence numbers — a
+ *     per-run high-water mark, not just an exact-repeat set.
  *  5. `delta`: a validated assistant cumulative `message` REPLACES the
  *     accumulator (authoritative); else `replace:true` replaces with
  *     `deltaText`; else `deltaText` is appended ONCE. A cumulative message and
@@ -646,7 +648,12 @@ export async function runHqNativeTurn(
   let partial = false;
   let observedRunId: string | null = null;
   let foreignRunIgnored = false;
-  const seenSeq = new Set<string>();
+  /** S9 dedup is a HIGH-WATER MARK, not an exact-repeat set: the gateway's
+   *  `seq` is monotonic within a run, so any number at or below the last one
+   *  accepted is stale and must be dropped (dropping only exact repeats would
+   *  append a late seq=4 onto a seq=6 accumulator). One mark per turn suffices
+   *  — frames carrying a different run id are already dropped above. */
+  let lastSeq = -1;
   let lastPersistAt = 0;
   let settled = false;
 
@@ -726,10 +733,10 @@ export async function runHqNativeTurn(
         foreignRunIgnored = true;
         return;
       }
-      // Dedup by (runId,seq); stale sequences are dropped.
-      const seqKey = `${p.runId}:${p.seq}`;
-      if (seenSeq.has(seqKey)) return;
-      seenSeq.add(seqKey);
+      // Dedup by (runId,seq) as a high-water mark: repeats AND any sequence
+      // at or below the last accepted one are stale and dropped.
+      if (p.seq <= lastSeq) return;
+      lastSeq = p.seq;
 
       if (p.state === 'status') return; // progress only, never completion
 
@@ -826,7 +833,14 @@ export async function runHqNativeTurn(
         // legacy caller's surface (the flag is per-instance and off by default).
         client.enableNativeEvents?.(true);
 
-        // 1. SUBSCRIBE BEFORE SEND. A refusal here is positively unsent.
+        // 1. CREATE this turn's session on its unique key, then SUBSCRIBE,
+        // then SEND (S9: "after sessions.create returns the new per-turn key,
+        // subscribe ... before send"). A create refusal/error is positively
+        // unsent: it rejects into the outer catch, which emits
+        // `failed_before_send` — no subscription and no send are ever issued.
+        await client.call('sessions.create', { key: gatewaySessionKey });
+
+        // 2. SUBSCRIBE BEFORE SEND. A refusal here is positively unsent.
         const sub = await withTimeout(
           client.call<{ subscribed?: boolean }>('sessions.messages.subscribe', {
             key: gatewaySessionKey,
@@ -844,7 +858,7 @@ export async function runHqNativeTurn(
 
         client.on('native-event', onEvent);
 
-        // 2. Send. `send_accepted` only after the response acknowledges.
+        // 3. Send. `send_accepted` only after the response acknowledges.
         try {
           await client.call('sessions.send', {
             key: gatewaySessionKey,
