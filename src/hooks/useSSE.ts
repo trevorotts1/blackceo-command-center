@@ -30,9 +30,13 @@ export type SseListener = (event: SSEEvent) => void;
 
 export interface SseStreamHandlers {
   /**
-   * Fired on every successful open. `reopened` is false only for the first open
-   * of this stream, so a consumer can tell a genuine re-open (deltas may have
-   * been missed) from the first connect (its caller already loaded a snapshot).
+   * Fired on every successful open, and once (deferred) when a consumer attaches
+   * to a stream that is ALREADY open. `reopened` is false for every signal that
+   * is this consumer's first open — including attach-after-open, where the
+   * consumer has missed nothing since attaching (SPEC S8.1 attaches the stream
+   * BEFORE the snapshot, so its own load already covers current state) — so a
+   * consumer can tell a genuine re-open (deltas may have been missed) from the
+   * first connect (its caller already loaded a snapshot).
    */
   onOpen?: (info: { reopened: boolean }) => void;
   /** Fired when the socket errors. The registry owns the retry, not the caller. */
@@ -147,11 +151,36 @@ export function acquireEventStream(
   stream.listeners.add(listener);
   stream.handlers.set(listener, handlers);
 
+  // Attach-after-open: this consumer joined a stream somebody else already holds
+  // open, so the socket's own `onopen` fired before it existed and it would
+  // otherwise NEVER learn the stream is live — the HQ surface sat on
+  // `connection: 'connecting'` and a remounted board left `isFeedConnected`
+  // false while sharing the open socket. Its attach is its FIRST open, so it
+  // gets `reopened: false` (it has missed nothing since attaching; its own load
+  // covers current state). Deferred one microtask so no consumer runs setState
+  // inside an effect body, and re-checked so a socket that dropped, or a
+  // consumer that released, in between is not told anything.
+  const attachAfterOpen = stream.hasOpened && stream.source !== null;
+  const attachedStream = stream;
+
   if (stream.reconnectTimer) {
     clearTimeout(stream.reconnectTimer);
     stream.reconnectTimer = null;
   }
   if (!stream.source) openStream(stream);
+
+  if (attachAfterOpen) {
+    queueMicrotask(() => {
+      if (sharedStreams.get(url) !== attachedStream) return;
+      if (attachedStream.source === null) return;
+      if (attachedStream.handlers.get(listener) !== handlers) return;
+      try {
+        handlers.onOpen?.({ reopened: false });
+      } catch (error) {
+        debug.sse('onOpen handler threw', error);
+      }
+    });
+  }
 
   let released = false;
   return () => {

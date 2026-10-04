@@ -92,6 +92,44 @@ test('Q08: 20 mount/unmount cycles of the real useSSE hook return to baseline', 
   assert.equal(sources.length, 20, 'one socket per cycle — never one per consumer, never a growing pile');
 });
 
+test('S8.1: a consumer attaching to an already-OPEN shared stream still learns it is live', async () => {
+  const { sources } = await installBrowserShim();
+  const { acquireEventStream, activeSseStreamCount } = await import('@/hooks/useSSE');
+
+  const firstOpens: Array<{ reopened: boolean }> = [];
+  const releaseA = acquireEventStream('/api/events/stream', () => {}, {
+    onOpen: (info) => firstOpens.push(info),
+  });
+  const lateOpens: Array<{ reopened: boolean }> = [];
+  let releaseB: (() => void) | null = null;
+  try {
+    const socket = live(sources)[0];
+    assert.ok(socket, 'A opened the socket');
+    socket.open();
+    assert.deepEqual(firstOpens, [{ reopened: false }], 'A observes the first open');
+
+    // B attaches while the shared socket is already open (the composed-page
+    // ordering: the board's effect runs before the HQ surface's).
+    releaseB = acquireEventStream('/api/events/stream', () => {}, {
+      onOpen: (info) => lateOpens.push(info),
+    });
+    assert.equal(live(sources).length, 1, 'B reuses the open socket — one stream owner');
+
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.deepEqual(lateOpens, [{ reopened: false }], 'B learns the shared stream is live');
+    assert.equal(firstOpens.length, 1, 'the replay reaches B only, never re-firing on A');
+
+    // B owns no socket of its own: its release must not disturb A's stream.
+    releaseB();
+    releaseB = null;
+    assert.equal(live(sources).length, 1, 'A keeps the socket after B releases');
+  } finally {
+    releaseB?.();
+    releaseA();
+    assert.equal(activeSseStreamCount(), 0, 'registry returned to baseline');
+  }
+});
+
 test('Q08: a drop probes health, and the registry reconnect runs catch-up exactly once', async () => {
   const { sources } = await installBrowserShim();
   const { renderHook, act } = await import('@testing-library/react');
