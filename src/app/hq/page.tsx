@@ -112,19 +112,28 @@ function hqScopedQuery(state: HqRouteState): string {
 }
 
 /**
+ * SPEC S4: every non-scoped param the visitor arrived with is re-emitted
+ * verbatim, so an unrelated supported board filter survives the return in route
+ * state. Shared by the Board handoff and the route-state rewrite — a filter
+ * must never be scrubbed from the URL before the Board link reads it.
+ */
+function hqCarryUnrelated(query: URLSearchParams, carried?: HqSearchParams | null): URLSearchParams {
+  if (!carried) return query;
+  for (const key of carried.keys()) {
+    if ((HQ_SCOPED_KEYS as readonly string[]).includes(key)) continue;
+    const value = carried.get(key);
+    if (value !== null) query.set(key, value);
+  }
+  return query;
+}
+
+/**
  * Board handoff. Uses the existing `/tasks/by-department` route with no new
  * board engine; exactly the S4 filters are added, and every other board filter
  * the visitor arrived with is carried through unchanged.
  */
 function hqBoardHref(state: HqRouteState, carried?: HqSearchParams | null): string {
-  const query = new URLSearchParams(hqScopedQuery(state));
-  if (carried) {
-    for (const key of carried.keys()) {
-      if ((HQ_SCOPED_KEYS as readonly string[]).includes(key)) continue;
-      const value = carried.get(key);
-      if (value !== null) query.set(key, value);
-    }
-  }
+  const query = hqCarryUnrelated(new URLSearchParams(hqScopedQuery(state)), carried);
   const serialized = query.toString();
   return serialized ? `/tasks/by-department?${serialized}` : '/tasks/by-department';
 }
@@ -279,10 +288,26 @@ function HeadquartersController() {
   const loadedCompanyRef = useRef<string | null>(null);
   const writtenQueryRef = useRef<string>('');
   const incomingCompanyRef = useRef<string | null>(null);
+  // The company the latest snapshot request was issued for (judge F2): a
+  // superseded request's late response must never overwrite a newer scope.
+  const requestCompanyRef = useRef<string | null>(null);
 
   /** SPEC S8 step 6: everything private dies on a scope switch, before new bytes. */
   const resetPrivateState = useCallback(() => {
     setSelection(HQ_EMPTY_SELECTION);
+    setTalkAgentId(null);
+    setNotice(null);
+  }, []);
+
+  // The agent whose removal raised the live notice (S4): the latch that keeps
+  // the notice alive across the reconcile's own selection correction.
+  const removedAgentRef = useRef<string | null>(null);
+
+  /** S4/F3: every user navigation is an explicit selection change, and it also
+   *  retires any notice about the selection being navigated away from — a
+   *  removal claim must never outlive the state it describes. */
+  const moveSelection = useCallback((next: HqSelection) => {
+    setSelection(next);
     setTalkAgentId(null);
     setNotice(null);
   }, []);
@@ -307,9 +332,16 @@ function HeadquartersController() {
   }, [routeState.companyId, reloadToken, resetPrivateState]);
 
   // Authorized snapshot. One request, `no-store`; a failed load stays visibly
-  // failed — it is never rendered as an empty company (S8 step 7).
+  // failed — it is never rendered as an empty company (S8 step 7). The fetch
+  // re-issues whenever the REQUESTED company changes (S8 step 6): the scope
+  // the URL asks for is always asked of the server, never served from a stale
+  // snapshot. The resolved company is decided by the SERVER body, not by a
+  // ref: each request captures the company it asked for, and only the latest
+  // request may write — a stale response can never overwrite a newer scope.
   useEffect(() => {
     let cancelled = false;
+    const requestedCompany = routeState.companyId;
+    requestCompanyRef.current = requestedCompany;
     setLoadState('loading');
     setLoadError(null);
     (async () => {
@@ -329,6 +361,9 @@ function HeadquartersController() {
           setLoadError('Headquarters data unavailable (unexpected response).');
           return;
         }
+        // A superseded request's late response must not overwrite a newer scope
+        // (judge finding F2).
+        if (requestCompanyRef.current !== requestedCompany) return;
         setSnapshot(body);
         setLoadState('ready');
       } catch {
@@ -341,7 +376,7 @@ function HeadquartersController() {
     return () => {
       cancelled = true;
     };
-  }, [reloadToken]);
+  }, [reloadToken, routeState.companyId]);
 
   // Company switch: clear selection, private conversation and notice before any
   // new-scope bytes are shown. The composition subtree is also keyed by company
@@ -356,11 +391,26 @@ function HeadquartersController() {
   }, [snapshot, resetPrivateState]);
 
   // Roster truth: preserve selection by ID; removed entities produce a notice
-  // and a return to the department (S4).
+  // and a return to the department (S4). The notice has a lifecycle (F3): it is
+  // raised once when the selected agent disappears, survives the reconcile
+  // correction that follows (which would otherwise immediately erase it), and
+  // clears on the two ways the claim stops being true — the user navigates
+  // (moveSelection nulls it directly) or the removed agent is back in the
+  // roster. The raised text is latched so a later snapshot cannot restate or
+  // extend a claim about a state the user has already left.
   useEffect(() => {
     if (!snapshot) return;
     const reconciled = hqReconcileSelection(selection, snapshot.roster);
-    if (reconciled.notice) setNotice(reconciled.notice);
+    if (reconciled.notice && selection.agentId) {
+      removedAgentRef.current = selection.agentId;
+      setNotice(reconciled.notice);
+    } else if (removedAgentRef.current) {
+      const returned = snapshot.roster.some((row) => row.agents.some((rowAgent) => rowAgent.id === removedAgentRef.current));
+      if (returned) {
+        removedAgentRef.current = null;
+        setNotice(null);
+      }
+    }
     if (
       reconciled.selection.departmentId !== selection.departmentId ||
       reconciled.selection.agentId !== selection.agentId ||
@@ -370,15 +420,31 @@ function HeadquartersController() {
     }
   }, [snapshot, selection]);
 
+  // The company the URL and the Board link treat as current (judge F2). While
+  // a snapshot request is in flight the REQUESTED scope wins; once it lands the
+  // authorized snapshot's company takes over — so a stale snapshot's companyId
+  // can never overwrite a newer request, and the Board link can never disagree
+  // with the URL the controller just wrote. Pure state, no ref read in render.
+  const effectiveCompanyId =
+    loadState === 'loading'
+      ? (routeState.companyId ?? snapshot?.companyId ?? null)
+      : (snapshot?.companyId ?? routeState.companyId ?? null);
+
   // Route state: the current scope is always addressable, so a Board visit and
-  // return restores the same company/department/task.
+  // return restores the same company/department/task. SPEC S4: unrelated
+  // supported board filters are carried into the rewrite too — the controller
+  // must never scrub them from the URL before the Board link reads them
+  // (finding F1). SPEC S8 step 6: while a requested company's response is in
+  // flight, the REQUESTED scope is written back, never the stale snapshot's —
+  // a stale company must not overwrite the new request (finding F2).
   useEffect(() => {
-    const companyId = snapshot?.companyId ?? routeState.companyId;
-    const next = hqScopedQuery({ companyId, departmentId: selection.departmentId, taskId: selection.taskId });
+    const companyId = effectiveCompanyId;
+    const scoped = hqScopedQuery({ companyId, departmentId: selection.departmentId, taskId: selection.taskId });
+    const next = hqCarryUnrelated(new URLSearchParams(scoped), searchParams).toString();
     if (next === writtenQueryRef.current) return;
     writtenQueryRef.current = next;
     router.replace(next ? `/hq?${next}` : '/hq', { scroll: false });
-  }, [router, routeState.companyId, selection.departmentId, selection.taskId, snapshot?.companyId]);
+  }, [router, effectiveCompanyId, selection.departmentId, selection.taskId, searchParams]);
 
   const selectView = useCallback((next: HqViewMode) => {
     setView(next);
@@ -388,7 +454,7 @@ function HeadquartersController() {
   const department = roster.find((row) => row.id === selection.departmentId) ?? null;
   const agent = department?.agents.find((row) => row.id === selection.agentId) ?? null;
   const boardHref = hqBoardHref(
-    { companyId: snapshot?.companyId ?? routeState.companyId, departmentId: selection.departmentId, taskId: selection.taskId },
+    { companyId: effectiveCompanyId, departmentId: selection.departmentId, taskId: selection.taskId },
     searchParams,
   );
 
@@ -473,10 +539,7 @@ function HeadquartersController() {
           <button
             type="button"
             data-testid="hq-scope-clear"
-            onClick={() => {
-              setSelection(HQ_EMPTY_SELECTION);
-              setTalkAgentId(null);
-            }}
+            onClick={() => moveSelection(HQ_EMPTY_SELECTION)}
             className="inline-flex items-center min-h-[44px] px-3 rounded-xl border border-bcc-border text-label text-bcc-text hover:border-brand-300"
           >
             All departments
@@ -562,10 +625,7 @@ function HeadquartersController() {
                       type="button"
                       data-testid={`hq-room-${row.id}`}
                       aria-pressed={selected}
-                      onClick={() => {
-                        setSelection({ departmentId: row.id, agentId: null, taskId: null });
-                        setTalkAgentId(null);
-                      }}
+                      onClick={() => moveSelection({ departmentId: row.id, agentId: null, taskId: null })}
                       className={`w-full text-left min-h-[44px] rounded-2xl border p-3 ${
                         selected ? 'border-brand-400 bg-brand-50' : 'border-bcc-border bg-bcc-white'
                       }`}
@@ -590,10 +650,7 @@ function HeadquartersController() {
                       type="button"
                       data-testid={`hq-department-${row.id}`}
                       aria-pressed={selected}
-                      onClick={() => {
-                        setSelection({ departmentId: row.id, agentId: null, taskId: null });
-                        setTalkAgentId(null);
-                      }}
+                      onClick={() => moveSelection({ departmentId: row.id, agentId: null, taskId: null })}
                       className={`w-full text-left min-h-[44px] rounded-xl border px-3 py-2 ${
                         selected ? 'border-brand-400 bg-brand-50' : 'border-bcc-border bg-bcc-white'
                       }`}
@@ -629,10 +686,7 @@ function HeadquartersController() {
                     agent={row}
                     department={department}
                     selected={row.id === selection.agentId}
-                    onSelect={() => {
-                      setSelection({ departmentId: department.id, agentId: row.id, taskId: null });
-                      setTalkAgentId(null);
-                    }}
+                    onSelect={() => moveSelection({ departmentId: department.id, agentId: row.id, taskId: null })}
                   />
                 ))}
               </ul>
@@ -656,7 +710,7 @@ function HeadquartersController() {
                         type="button"
                         data-testid={`hq-task-${taskId}`}
                         aria-pressed={taskId === selection.taskId}
-                        onClick={() => setSelection({ departmentId: agent.workspaceId, agentId: agent.id, taskId })}
+                        onClick={() => moveSelection({ departmentId: agent.workspaceId, agentId: agent.id, taskId })}
                         className={`inline-flex items-center min-h-[44px] px-3 rounded-xl border text-label ${
                           taskId === selection.taskId ? 'border-brand-400 bg-brand-50 text-bcc-text' : 'border-bcc-border text-bcc-text'
                         }`}

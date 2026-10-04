@@ -5,7 +5,9 @@ import path from 'path';
 // B30 — /hq route composition/controller REAL render proof (jsdom + React).
 // Kept separate from vitest.component.config.ts so the shared component include
 // list stays untouched, and separate from vitest.config.ts (environment:
-// 'node', DB-backed suites). Mirrors vitest.b28-render.config.ts.
+// 'node', DB-backed suites). Sibling convention: each unit ships its own
+// vitest.b<NN>-render.config.ts; the include entry below is this unit's only
+// test file, so no other suite inherits this config.
 export default defineConfig({
   plugins: [react()],
   test: {
