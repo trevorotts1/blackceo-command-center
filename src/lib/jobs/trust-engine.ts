@@ -57,7 +57,7 @@
  * that carried it (`trust_ack(chat)` / `trust_ack(session)`).
  */
 
-import { queryAll, queryOne, run, transaction } from '@/lib/db';
+import { queryAll, queryOne, run, transaction, timeNow } from '@/lib/db';
 import {
   notifyTelegram,
   notifySession,
@@ -260,6 +260,194 @@ export function sendProviderChoiceAsk(
 }
 
 /**
+ * SPEC S9 — the explicit private Headquarters requester channel. Deliberately
+ * NOT the legacy `ceo-chat` channel: an HQ private message must never ride the
+ * channel whose report-back text is broadcast company-wide.
+ */
+export const HQ_CHAT_CHANNEL = 'hq-chat';
+
+/**
+ * SPEC S9 — the server-owned per-turn HQ gateway key
+ * `agent:<verifiedRuntimeId>:hq-<opaqueTurnId>`.
+ *
+ * Only this form names a Headquarters private session (the server mints it; the
+ * client never supplies a gateway key). Any other gateway key — a webchat key,
+ * a legacy key, a bare producer run id — is a FOREIGN session and is refused,
+ * never accepted as an hq-chat binding.
+ */
+const HQ_CHAT_SESSION_KEY = /^agent:[^\s:]+:hq-[^\s:]+$/;
+
+/**
+ * Why an hq-chat report-back was refused. Every member is a reason
+ * `validateHqChatReport` can actually return — recorded durably, never
+ * downgraded to a public path.
+ *
+ * NOTE ON COMPANY: the bound session is the task's OWN `requester_session_key`
+ * column, so the session's company and the task's company are the same row's
+ * company by construction — there is no second source to disagree with, and no
+ * `company_mismatch` reason exists to fabricate. The task's company IS resolved
+ * (SPEC S9 "resolve bound HQ session and task company") and carried on the
+ * binding / recorded in the report's metadata.
+ */
+export type HqChatRefusalReason =
+  | 'no_task'
+  | 'unknown_task'
+  | 'foreign_channel'
+  | 'no_bound_session'
+  | 'foreign_session'
+  | 'session_not_bound';
+
+export interface HqChatBinding {
+  taskId: string;
+  /** The bound server-owned HQ gateway session key (the per-turn key). */
+  sessionId: string;
+  /**
+   * The company the bound task's workspace resolves to. Null when the box's
+   * fixture has no resolvable company — recorded as null, never invented.
+   */
+  companyId: string | null;
+}
+
+export type HqChatBindingResult =
+  | { ok: true; binding: HqChatBinding }
+  | { ok: false; reason: HqChatRefusalReason };
+
+/** The opaque server-minted per-turn id inside an hq-chat gateway key. */
+function hqTurnId(sessionKey: string): string | null {
+  const m = sessionKey.match(/^agent:[^\s:]+:(hq-[^\s:]+)$/);
+  return m ? m[1] : null;
+}
+
+/**
+ * The company this task belongs to, read from its own workspace. Null when the
+ * task has no workspace or the box's fixture has no workspaces table — an
+ * unresolvable company is recorded as null, never guessed.
+ */
+function taskCompanyId(workspaceId: string | null): string | null {
+  if (!workspaceId) return null;
+  try {
+    const row = queryOne<{ company_id: string | null }>(
+      'SELECT company_id FROM workspaces WHERE id = ?',
+      [workspaceId],
+    );
+    return row?.company_id ?? null;
+  } catch {
+    return null; // minimal fixture without the workspaces table
+  }
+}
+
+/**
+ * SPEC S9 — validate an hq-chat report-back against its BOUND task and session
+ * BEFORE anything is written.
+ *
+ * The bound task is the row the plan's own stamp names; the bound session is the
+ * `requester_session_key` that row already carries. Every failure mode is a
+ * REFUSAL (`ok:false`) — never a downgrade: a foreign channel, an absent binding,
+ * a bound key that is not a server-minted `hq-` per-turn key, or a planned
+ * address that is some other session. There is no "close enough" branch, because
+ * the one thing this lane must never do is deliver a private report somewhere
+ * else.
+ */
+export function validateHqChatReport(input: {
+  taskId: string | null | undefined;
+  sessionId: string | null | undefined;
+}): HqChatBindingResult {
+  const taskId = (input.taskId ?? '').trim();
+  if (!taskId) return { ok: false, reason: 'no_task' };
+
+  let row: {
+    id: string;
+    requester_channel: string | null;
+    requester_session_key: string | null;
+    workspace_id: string | null;
+  } | undefined;
+  try {
+    row = queryOne(
+      'SELECT id, requester_channel, requester_session_key, workspace_id FROM tasks WHERE id = ?',
+      [taskId],
+    );
+  } catch {
+    return { ok: false, reason: 'unknown_task' };
+  }
+  if (!row) return { ok: false, reason: 'unknown_task' };
+
+  // The task itself must be bound to THIS branch. A task on telegram/ceo-chat/
+  // session can never be reported through the private HQ lane.
+  if (row.requester_channel !== HQ_CHAT_CHANNEL) return { ok: false, reason: 'foreign_channel' };
+
+  const bound = (row.requester_session_key ?? '').trim();
+  if (!bound) return { ok: false, reason: 'no_bound_session' };
+  // Only the server-minted per-turn form names an HQ private session. A webchat
+  // key or a bare producer run id stored here is foreign, not a fallback target.
+  if (!HQ_CHAT_SESSION_KEY.test(bound)) return { ok: false, reason: 'foreign_session' };
+
+  const sessionId = (input.sessionId ?? '').trim();
+  if (sessionId !== bound) return { ok: false, reason: 'session_not_bound' };
+
+  return {
+    ok: true,
+    binding: { taskId, sessionId: bound, companyId: taskCompanyId(row.workspace_id) },
+  };
+}
+
+/**
+ * Persist the validated private report as a task-scoped status reference and
+ * return the durable-send outcome. This is the ONLY write the hq-chat lane makes
+ * — no chat transcript row, no SSE broadcast, no Telegram. Never throws: a
+ * failure returns false so the caller's claim is released rather than reported
+ * as delivered.
+ */
+export function recordHqChatReport(
+  binding: HqChatBinding,
+  kind: 'trust_ack' | 'trust_progress' | 'trust_done',
+  message: string,
+): boolean {
+  try {
+    run(
+      `INSERT INTO task_activities (id, task_id, activity_type, message, metadata, created_at)
+       VALUES (?, ?, 'hq_chat_report', ?, ?, ?)`,
+      [
+        uuidv4(),
+        binding.taskId,
+        message,
+        JSON.stringify({
+          route: HQ_CHAT_CHANNEL,
+          kind,
+          // The opaque server-minted per-turn reference — NEVER the gateway key
+          // (which would put the private address into the task's activity feed).
+          turnRef: hqTurnId(binding.sessionId),
+          companyId: binding.companyId,
+        }),
+        timeNow(),
+      ],
+    );
+    return true;
+  } catch (err) {
+    console.warn('[trust-engine] hq-chat report write failed:', (err as Error).message);
+    return false;
+  }
+}
+
+/**
+ * Record a REFUSED hq-chat report honestly (SPEC S9 `report_back_uncorrelated`).
+ * The refusal is durable and diagnosable; the report is not delivered anywhere.
+ * Best-effort — a missing `events` table must not turn a refusal into a crash.
+ */
+function recordHqChatRefusal(taskId: string | null, reason: HqChatRefusalReason): void {
+  try {
+    run(`INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`, [
+      uuidv4(),
+      'report_back_uncorrelated',
+      taskId,
+      `report_back_uncorrelated: hq-chat report refused (${reason}) — no Telegram fallback, no broadcast`,
+      new Date().toISOString(),
+    ]);
+  } catch {
+    /* best-effort telemetry */
+  }
+}
+
+/**
  * The resolved address for one task's requester, and the lane that reaches it.
  *
  * ONE precedence rule, applied in ONE place, so the planner, the audience ask
@@ -274,7 +462,7 @@ export interface RequesterRoute {
   /** How to reach it: the stored channel, or REQUESTER_SESSION_CHANNEL. */
   channel: string;
   /** Short lane name recorded in the telemetry event so the route is durable. */
-  route: 'chat' | 'session';
+  route: 'chat' | 'session' | 'hq-chat';
 }
 
 export function resolveRequesterRoute(task: {
@@ -282,6 +470,20 @@ export function resolveRequesterRoute(task: {
   requester_chat_id: string | null;
   requester_session_key?: string | null;
 }): RequesterRoute | null {
+  // SPEC S9 — the private Headquarters lane is resolved BEFORE the chat-id
+  // branch, and that ordering is the whole point: a task carrying BOTH an
+  // `hq-chat` channel and a stale/other chat id would otherwise be reported to
+  // Telegram. An hq-chat task always takes this lane. When the bound session key
+  // is missing the route is still an hq-chat route with an empty address, so
+  // delivery REFUSES at the bound-session check below instead of quietly
+  // downgrading to a public transport.
+  if (task.requester_channel === HQ_CHAT_CHANNEL) {
+    return {
+      address: (task.requester_session_key ?? '').trim(),
+      channel: HQ_CHAT_CHANNEL,
+      route: 'hq-chat',
+    };
+  }
   if (task.requester_chat_id) {
     return {
       address: task.requester_chat_id,
@@ -784,6 +986,47 @@ function trustKindFor(plan: PlannedSend): 'trust_ack' | 'trust_progress' | 'trus
  * and never affects the send's success/failure outcome.
  */
 function defaultTrustSend(plan: PlannedSend): boolean {
+  // ── SPEC S9 — THE PRIVATE HQ-CHAT BRANCH, FIRST AND FAIL-CLOSED ─────────────
+  // This branch is deliberately ahead of the ceo-chat and Telegram branches and
+  // has exactly ONE exit per path: validate the bound session/task, then write
+  // the private task-scoped report. A plan whose binding does not validate is
+  // REFUSED (`false` → claim released → recorded `report_back_uncorrelated`).
+  // It never reaches `appendTrustMessage`, `broadcast` or `notifyTelegram`: the
+  // 2026-10-04 defect this closes was the inspected engine broadcasting
+  // ceo-chat report-back text company-wide and falling back to Telegram for
+  // unknown channels.
+  if (plan.channel === HQ_CHAT_CHANNEL) {
+    // EVERY task this plan carries is validated against the plan's session — a
+    // coalesced digest names more than one task, and one unbound member is enough
+    // to make the whole send refuse rather than deliver a private report to a
+    // recipient the plan cannot justify.
+    const taskIds = plan.stamps.map((stamp) => stamp.taskId);
+    let refusingTaskId: string | null = taskIds[0] ?? null;
+    const bindings: HqChatBinding[] = [];
+    let failure: HqChatRefusalReason | null = taskIds.length === 0 ? 'no_task' : null;
+    for (const candidateId of taskIds) {
+      const validation = validateHqChatReport({ taskId: candidateId, sessionId: plan.chatId });
+      if (!validation.ok) {
+        failure = validation.reason;
+        refusingTaskId = candidateId;
+        break;
+      }
+      bindings.push(validation.binding);
+    }
+    if (failure) {
+      recordHqChatRefusal(refusingTaskId, failure);
+      recordUndeliverable(
+        'hq_chat_report_refused',
+        `hq-chat report for task ${refusingTaskId ?? '(none)'} refused (${failure}); ` +
+          `claim released — no Telegram fallback, no company-wide broadcast.`,
+      );
+      return false;
+    }
+    const kind = trustKindFor(plan);
+    // A request is only DURABLY delivered when every task it carries got its
+    // task-scoped reference; a partial write must not read as success.
+    return bindings.every((b) => recordHqChatReport(b, kind, plan.message));
+  }
   if (plan.channel === CEO_CHAT_CHANNEL) {
     const taskId = plan.stamps[0]?.taskId ?? null;
     const kind = trustKindFor(plan);
@@ -1036,7 +1279,13 @@ function candidateSql(): string {
          t.process_certificate_sha, t.source
     FROM tasks t
     LEFT JOIN agents a ON t.assigned_agent_id = a.id
-   WHERE (t.requester_chat_id IS NOT NULL OR ${sessionExpr} IS NOT NULL)
+   WHERE (t.requester_chat_id IS NOT NULL
+          OR ${sessionExpr} IS NOT NULL
+          -- SPEC S9: an hq-chat task is a candidate even when its bound session
+          -- is missing, so the private lane REFUSES it on the record instead of
+          -- making it invisible. The value is new to this release, so no
+          -- pre-existing row changes lane.
+          OR t.requester_channel = '${HQ_CHAT_CHANNEL}')
      AND t.archived_at IS NULL
      AND (
        t.ack_sent_at IS NULL
