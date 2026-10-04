@@ -242,6 +242,59 @@ test('B22 regression: existing task events still scope through the workspace', a
   }
 });
 
+test('B22 hq_changed: extra payload keys never reach the wire, and the id is canonical', async () => {
+  const events = await import('../../../../src/lib/events');
+  const receivedA: string[] = [];
+  const ctrlA = fakeController(receivedA);
+  events.registerClient(ctrlA, COMPANY_A);
+
+  try {
+    // A spread-built producer payload (the realistic shape: `{ ...row }`) is
+    // not caught by TypeScript's excess-property check, so the runtime boundary
+    // must rebuild the wire payload from the two proven fields. Journal probe:
+    // the same rebuilt shape reaches the durable cross-process row.
+    const row = {
+      companyId: COMPANY_A,
+      highSeq: 5,
+      chatText: 'PRIVATE TURN DATA',
+      sessionId: 'sess-1',
+    };
+    const journalBefore = journalCount();
+    events.broadcast({ type: 'hq_changed', payload: { ...row } } as never);
+    assert.equal(receivedA.length, 1, 'proved scope still delivers');
+    const wire = receivedA[0].replace(/^data: /, '').trim();
+    assert.ok(!wire.includes('PRIVATE TURN DATA'), 'no chat text on the company bus');
+    assert.ok(!wire.includes('sess-1'), 'no session id on the company bus');
+    const parsed = JSON.parse(wire) as { companyId: string; payload: Record<string, unknown> };
+    assert.deepEqual(Object.keys(parsed.payload).sort(), ['companyId', 'highSeq']);
+    assert.equal(parsed.payload.chatText, undefined);
+    assert.equal(parsed.payload.sessionId, undefined);
+    const journaledRow = queryOne<{ payload: string }>(
+      `SELECT payload FROM sse_event_log WHERE event_type = 'hq_changed' ORDER BY id DESC LIMIT 1`,
+    );
+    assert.ok(journaledRow, 'proved hq_changed is journaled');
+    assert.ok(!journaledRow.payload.includes('PRIVATE TURN DATA'), 'journal row is content-free too');
+    assert.ok(!journaledRow.payload.includes('sess-1'));
+    assert.equal(journalCount(), journalBefore + 1);
+
+    // Canonical id: a padded payload id converges on the trimmed value, so the
+    // envelope and the payload — and the journal row — all agree.
+    events.broadcast({
+      type: 'hq_changed',
+      payload: { companyId: `  ${COMPANY_A}  `, highSeq: 6 },
+    } as never);
+    assert.equal(receivedA.length, 2, 'padded id still resolves to the same company');
+    const trimWire = JSON.parse(receivedA[1].replace(/^data: /, '').trim()) as {
+      companyId: string;
+      payload: { companyId: string };
+    };
+    assert.equal(trimWire.companyId, COMPANY_A);
+    assert.equal(trimWire.payload.companyId, COMPANY_A);
+  } finally {
+    events.unregisterClient(ctrlA);
+  }
+});
+
 test.after(() => {
   try {
     closeDb();

@@ -282,24 +282,26 @@ export interface BroadcastOptions {
  * invalidation with company and high-water cursor only … if scope cannot be
  * proved, DROP it").
  *
- * Returns the proven company id, or `null` meaning UNPROVABLE = must be
- * dropped. Every field is required: a missing/malformed company, or a cursor
- * that is not a non-negative safe integer, makes this not-the-specified-event
- * and therefore un-deliverable. Nothing here trusts a caller — the payload is
- * read defensively and no value is defaulted.
+ * Returns the proven { companyId, highSeq } pair, or `null` meaning UNPROVABLE
+ * = must be dropped. Every field is required: a missing/malformed company, or
+ * a cursor that is not a non-negative safe integer, makes this
+ * not-the-specified-event and therefore un-deliverable. Nothing here trusts a
+ * caller — the payload is read defensively and no value is defaulted.
  *
  * Content-free by construction: this resolver reads exactly two fields and
- * broadcast() forwards exactly those. Private chat text, turn/session IDs and
- * activity payloads have no path onto this wire.
+ * broadcast() REBUILDS the wire payload from exactly those. Private chat text,
+ * turn/session IDs and activity payloads have no path onto this wire.
  */
-export function resolveHqChangedScope(event: SSEEvent): string | null {
+export function resolveHqChangedScope(
+  event: SSEEvent,
+): { companyId: string; highSeq: number } | null {
   const payload = event.payload as { companyId?: unknown; highSeq?: unknown } | null | undefined;
   if (!payload || typeof payload !== 'object') return null;
   const companyId = typeof payload.companyId === 'string' ? payload.companyId.trim() : '';
   if (!companyId) return null;
   const highSeq = payload.highSeq;
   if (typeof highSeq !== 'number' || !Number.isSafeInteger(highSeq) || highSeq < 0) return null;
-  return companyId;
+  return { companyId, highSeq };
 }
 
 export function scopeForEvent(event: SSEEvent): string | null {
@@ -312,7 +314,7 @@ export function scopeForEvent(event: SSEEvent): string | null {
     }
     // B22 — the content-free Headquarters invalidation carries its own scope,
     // so it resolves WITHOUT a database read (early return, fail-closed).
-    if (type === 'hq_changed') return resolveHqChangedScope(event);
+    if (type === 'hq_changed') return resolveHqChangedScope(event)?.companyId ?? null;
     // Same dynamic-require pattern journalEvent() uses (keeps better-sqlite3
     // out of the edge-runtime bundle).
     // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -486,20 +488,30 @@ export function broadcast(event: SSEEvent, options?: BroadcastOptions): void {
   // payload is DROPPED before both delivery paths (SPEC S7). Every other type
   // keeps the legacy behaviour untouched.
   let eventCompanyId: string | null;
+  let wireEvent: SSEEvent & { companyId?: string | null };
   if (event.type === 'hq_changed') {
-    const hqCompanyId = resolveHqChangedScope(projectedEvent);
-    if (!hqCompanyId) {
+    const proven = resolveHqChangedScope(projectedEvent);
+    if (!proven) {
       console.warn('[SSE] Dropped hq_changed with unprovable company scope');
       return;
     }
-    eventCompanyId = hqCompanyId;
+    // Content-free enforcement (SPEC S7): the wire payload is REBUILT from the
+    // two proven fields. The caller's payload object rides no further, so an
+    // extra key (chat text, session or turn ID) can never reach the in-memory
+    // push or the cross-process journal. Both copies also carry the trimmed id.
+    eventCompanyId = proven.companyId;
+    wireEvent = {
+      ...projectedEvent,
+      companyId: proven.companyId,
+      payload: { companyId: proven.companyId, highSeq: proven.highSeq },
+    };
   } else {
     eventCompanyId = options?.companyId !== undefined
       ? (options.companyId ?? null)
       : scopeForEvent(projectedEvent);
+    wireEvent =
+      eventCompanyId === null ? projectedEvent : { ...projectedEvent, companyId: eventCompanyId };
   }
-  const wireEvent =
-    eventCompanyId === null ? projectedEvent : { ...projectedEvent, companyId: eventCompanyId };
   const data = `data: ${JSON.stringify(wireEvent)}\n\n`;
   const encoded = encoder.encode(data);
 
