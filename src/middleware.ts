@@ -526,6 +526,47 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
   // These routes verify narrow signed, expiry-bound capabilities themselves.
   if (pathname === '/api/auth/interview-session' || pathname === '/api/interview/remote') return NextResponse.next();
 
+  // A04 (SPEC S7 line 277): the completed-company owner entry. The data-free
+  // /owner-login landing (GET/HEAD only — no company data before auth, so no
+  // read or write method may ride this exemption) and the self-authenticating
+  // redemption POST /api/auth/owner-session reach their own handlers BEFORE
+  // generic Access/session/bearer enforcement and the tenant-board rewrite
+  // below. Both still require a registered direct self-kind installation —
+  // the route refuses foreign/expired/replayed tickets itself — and no other
+  // owner-session verb is exempt: GET/PATCH/DELETE still require a verified
+  // existing browser identity at the handler (checked here by the apiTenant
+  // passthrough logic rather than by exemption), no wildcard auth bypass, no
+  // anonymous HQ data, no change to the configured edge Access policy. The
+  // landing mints the signed anti-forgery (mc_csrf_token) cookie the POST
+  // presents; the POST itself is read by the route, not this cookie mint.
+  // Matches the narrowly self-authenticating interview-session pattern above,
+  // never the tenant passthrough at :575. Node-only owner-login module is
+  // never imported here — the exemption is a path decision, not a grant check.
+  if (pathname === '/owner-login' || pathname === '/api/auth/owner-session') {
+    // Method scope is the exemption: ONLY the data-free landing read and the
+    // self-authenticating redemption ride it. Any other verb on either path
+    // fails closed to its own refusal below — it must never NextResponse.next()
+    // into the shell lock's page fallthrough (POST /owner-login) or the Layer 2
+    // bearer gate's fallthrough.
+    const ownerLoginExempt =
+      (pathname === '/owner-login' && (request.method === 'GET' || request.method === 'HEAD')) ||
+      (pathname === '/api/auth/owner-session' && request.method === 'POST');
+    if (!ownerLoginExempt) {
+      return NextResponse.json({ error: 'owner_login_method_refused' }, { status: 403, headers: { 'cache-control': 'private, no-store' } });
+    }
+    try {
+      const registration = tenantRegistration(requestHost(request));
+      if (registration.kind !== 'self') {
+        return NextResponse.json({ error: 'hq_direct_origin_required' }, { status: 403, headers: { 'cache-control': 'private, no-store' } });
+      }
+    } catch {
+      return tenantRefusalResponse(request, { error: 'unregistered_hostname', message: 'This sign-in link does not match a registered Headquarters host. Ask your operator for a fresh private link.' });
+    }
+    const response = NextResponse.next();
+    if (pathname === '/owner-login') await setCsrfCookieIfMissing(response, request);
+    return response;
+  }
+
   // F27 social-theme mini app: every route under /api/social-theme/* verifies
   // its own narrow, expiry-bound capability itself — the social-theme session
   // cookie (HMAC grant bound to session+company+cycle, purpose
@@ -572,6 +613,22 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
     // All browser identities are tenant-bound, even when Origin/Referer is absent.
     let apiTenant: Awaited<ReturnType<typeof resolveTenantContext>> | null = null;
     try { apiTenant = await resolveTenantContext(request); } catch { /* legacy signed producer gates below still apply */ }
+    // A04 (SPEC S7 line 269): direct-host HQ refusal BEFORE generic resolution.
+    // A shared client-kind host must never fall through to the tenant-board
+    // rewrite below: /api/hq/* and the owner entry require a direct `kind:'self'`
+    // registration with a matching installation — a shared client-host request
+    // gets 403 hq_direct_origin_required here, before any rewrite, before the
+    // producer dual-auth gate below, with no private data attached. The
+    // producer POST /api/hq/activity keeps its own dual-auth (bearer + HMAC)
+    // at the route + gate B below; this block only refuses client-kind hosts,
+    // never waives auth. `matchesRoute` subtree, not exact: /api/hq alone and
+    // every descendant.
+    if (matchesRoute(pathname, '/api/hq') || pathname === '/api/auth/owner-session') {
+      const reg = tenantRegistration(apiTenant?.host ?? requestHost(request));
+      if (reg.kind === 'client') {
+        return NextResponse.json({ error: 'hq_direct_origin_required' }, { status: 403, headers: { 'cache-control': 'private, no-store' } });
+      }
+    }
     if (apiTenant?.kind === 'client' && !pathname.startsWith('/api/interview/') && !pathname.startsWith('/api/auth/') && !pathname.startsWith('/api/tenant-board/')) {
       if (!isReadOnlyMethod(request.method) && apiTenant.subject !== 'operator:api' && !await verifyCsrfToken(request.cookies.get(CSRF_COOKIE_NAME)?.value)) {
         return unauthorizedWithCsrfSelfHeal(request, request.cookies.get(CSRF_COOKIE_NAME)?.value);

@@ -2,6 +2,20 @@ import { resolveTenantContext, tenantRegistration, TenantAccessError } from '@/l
 
 /** Shared dashboards may only access the registered client's own installation. */
 export async function proxyTenantBoard(request: Request, segments: string[]): Promise<Response> {
+  // SPEC S7 line 269 / P02 storage-auth §(d.1): independently refuse `hq` and
+  // new owner-session paths BEFORE resolveTenantContext does any identity work
+  // and before any fetch — a client-host request must never reach a remote
+  // board under the shared service bearer, and owner sign-in is served
+  // directly by this installation. `segments` is the [...path] remainder AFTER
+  // /api/tenant-board/: empty or containing auth/owner-session/hq is not a
+  // board route, denied before auth parsing, logging, or fetch.
+  // B33 is named camelCase (`ownerSession`) because hyphens cannot appear
+  // after that prefix in the real dashboard path. Never fall through to the
+  // shared remote bearer — the refusal is the whole surface here.
+  const [first] = segments;
+  if (segments.length === 0 || first === 'hq' || first === 'auth' || first === 'ownerSession') {
+    return Response.json({ error: 'client_board_path_refused' }, { status: 403 });
+  }
   try {
     const context = await resolveTenantContext(request);
     if (context.kind !== 'client') return Response.json({ error: 'client_target_required' }, { status: 403 });
