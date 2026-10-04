@@ -44,8 +44,16 @@ export const HQ_STATUS_LABEL: Record<HqAgentStatus, string> = {
   unknown: 'Status not observed',
 };
 
-/** Text colour per status. All -700 shades: ≥4.5:1 on white (S11 text contrast). */
-const HQ_STATUS_TEXT: Record<HqAgentStatus, string> = {
+/**
+ * Mark colour per status. These classes set the group's CSS `color`, which the
+ * shape inside StatusMark consumes via `fill-current` / `stroke-current` — they
+ * tint the MARK only, never the status word. The word is painted `fill-bcc-text`
+ * (≥14.9:1 on every surface a room can paint): colouring the word per status is
+ * exactly what S11 forbids here, because amber-700 measures 4.464:1 and
+ * bcc-text-secondary 4.298:1 on the selected room's brand-50 floor, which a
+ * figure standing in that room sits on.
+ */
+const HQ_STATUS_MARK: Record<HqAgentStatus, string> = {
   standby: 'text-bcc-text-secondary',
   working: 'text-emerald-700',
   busy: 'text-blue-700',
@@ -103,8 +111,12 @@ export default function AgentFigure({ agent, seat, selected = false, onSelect }:
 
   const staffingLabel = agent.staffing === 'on-call' ? 'On-call' : 'Permanent';
   const statusLabel = HQ_STATUS_LABEL[agent.status];
+  // One fallback for both the visible label and the accessible name: a nameless
+  // roster row must not expose "undefined"/a leading comma to assistive tech
+  // (WCAG 2.5.3 label-in-name, S11 accessible names).
+  const displayName = agent.displayName || agent.id;
   const ariaLabel =
-    `${agent.displayName}, ${agent.role}. ` +
+    `${displayName}, ${agent.role}. ` +
     `${agent.isHead ? 'Head. ' : 'Specialist. '}${staffingLabel}. ${statusLabel}.` +
     (notices.length ? ` ${notices.join('. ')}.` : '');
 
@@ -165,20 +177,24 @@ export default function AgentFigure({ agent, seat, selected = false, onSelect }:
         </g>
       )}
 
-      {/* Name and role, always legible text (S3 display name, S11 contrast). */}
+      {/* Name and role, always legible text (S3 display name, S11 contrast). Role
+          uses the name's fill, not bcc-text-secondary: the figure can stand on the
+          selected room's brand-50 floor, where #6B7280 measures 4.298:1 — below the
+          S11 floor — while #1A1D26 measures 14.96:1 there. */}
       <text x={0} y={-68} textAnchor="middle" className="fill-bcc-text text-[12px] font-semibold">
-        {agent.displayName || agent.id}
+        {displayName}
       </text>
-      <text x={0} y={-56} textAnchor="middle" className="fill-bcc-text-secondary text-[10px]">
+      <text x={0} y={-56} textAnchor="middle" className="fill-bcc-text text-[10px]">
         {agent.role}
       </text>
 
-      {/* Status: shape + word. Unknown never renders as a cheerful quiet default. */}
-      <g transform="translate(0 14)" className={HQ_STATUS_TEXT[agent.status]}>
+      {/* Status: shape + word. Unknown never renders as a cheerful quiet default.
+          The word keeps the token text fill; only the mark is per-status (map above). */}
+      <g transform="translate(0 14)" className={HQ_STATUS_MARK[agent.status]}>
         <g transform="translate(-14 0)">
           <StatusMark status={agent.status} />
         </g>
-        <text x={-4} y={3} className="text-[10px] font-medium">
+        <text x={-4} y={3} className="fill-bcc-text text-[10px] font-medium">
           {statusLabel}
         </text>
       </g>
@@ -187,20 +203,24 @@ export default function AgentFigure({ agent, seat, selected = false, onSelect }:
       {agent.staffing === 'on-call' && (
         <g transform="translate(0 30)">
           <rect x={-22} y={-8} width={44} height={15} rx={7} className="fill-bcc-border-light stroke-bcc-border" />
-          <text x={0} y={3} textAnchor="middle" className="fill-bcc-text-secondary text-[10px]">
+          {/* Token text fill, not bcc-text-secondary: the badge's own #F3F4F6 fill
+              drops #6B7280 to 4.393:1 there (the token fill is 15.29:1). */}
+          <text x={0} y={3} textAnchor="middle" className="fill-bcc-text text-[10px]">
             On-call
           </text>
         </g>
       )}
 
-      {/* S3 conflict strings, in the warning tone, as words. */}
+      {/* S3 conflict strings, in the warning tone, as words. amber-800, not amber-700:
+          a figure can stand over the selected room's brand-50 floor or the rug, where
+          amber-700 measures 4.464:1 — below the S11 floor (amber-800 is 6.30:1 there). */}
       {notices.map((notice, index) => (
         <text
           key={notice}
           x={0}
           y={(agent.staffing === 'on-call' ? 44 : 30) + index * 11}
           textAnchor="middle"
-          className="fill-amber-700 text-[9px] font-medium"
+          className="fill-amber-800 text-[9px] font-medium"
         >
           {notice}
         </text>

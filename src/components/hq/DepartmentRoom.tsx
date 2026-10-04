@@ -105,29 +105,35 @@ export default function DepartmentRoom({
           <use key={`desk-${seat.agentId}`} href="/hq/office.svg#hq-desk" x={seat.screenX} y={seat.screenY} />
         ))}
 
-      {/* Department label above the room, with the seated count it actually has. */}
+      {/* Department label above the room, with the seated count it actually has.
+          Sits above the floor fill, so white behind: token text fill keeps every
+          label pair at the same ≥14.9:1 on any surface the room can paint. */}
       <text x={originScreen.x} y={originScreen.y - 26} textAnchor="middle" className="fill-bcc-text text-[13px] font-semibold">
         {department.name}
       </text>
-      <text x={originScreen.x} y={originScreen.y - 14} textAnchor="middle" className="fill-bcc-text-secondary text-[10px]">
+      <text x={originScreen.x} y={originScreen.y - 14} textAnchor="middle" className="fill-bcc-text text-[10px]">
         {department.slug} · {room.seats.length} seated
       </text>
 
-      {/* S3 explicit conflicts: provisioning and the shared-executor binding. */}
+      {/* S3 explicit conflicts: provisioning and the shared-executor binding. amber-800,
+          not amber-700: the label sits at the room edge and can overlap the selected
+          room's brand-50 floor, where amber-700 measures 4.464:1 (amber-800 is 6.30:1). */}
       {department.provisioning !== 'ready' && (
-        <text x={originScreen.x} y={originScreen.y - 2} textAnchor="middle" className="fill-amber-700 text-[10px] font-medium">
+        <text x={originScreen.x} y={originScreen.y - 2} textAnchor="middle" className="fill-amber-800 text-[10px] font-medium">
           {department.provisioning === 'incomplete' ? 'Setup incomplete' : 'Provisioning unknown'}
         </text>
       )}
       {/* S3 shared binding: the roles are labeled on their own figures; the room
-          states the runtime count it observes — one, not one per role row. */}
+          states the runtime count it observes — one, not one per role row. Token text
+          fill: these lines sit inside the room, so on the selected brand-50 floor
+          #6B7280 would measure 4.298:1 — below the S11 floor (#1A1D26 is 14.96:1). */}
       {department.agents.some((agent) => agent.bindingKind === 'department-shared') && (
-        <text x={originScreen.x} y={originScreen.y + 10} textAnchor="middle" className="fill-bcc-text-secondary text-[10px]">
+        <text x={originScreen.x} y={originScreen.y + 10} textAnchor="middle" className="fill-bcc-text text-[10px]">
           1 observed runtime
         </text>
       )}
       {plannedCount > 0 && (
-        <text x={originScreen.x} y={originScreen.y + 22} textAnchor="middle" className="fill-bcc-text-secondary text-[10px]">
+        <text x={originScreen.x} y={originScreen.y + 22} textAnchor="middle" className="fill-bcc-text text-[10px]">
           Planned roles: {plannedCount}
         </text>
       )}
@@ -146,10 +152,13 @@ export default function DepartmentRoom({
         );
       })}
 
-      {/* S3 "On-call team" list: enrolled, not seated, not counted as employees at work. */}
+      {/* S3 "On-call team" list: enrolled, not seated, not counted as employees at work.
+          List text keeps the token text fill, not bcc-text-secondary: the list always
+          overlaps the rug (#E8F5E9), where #6B7280 measures 4.298:1 — below the S11
+          floor — while #1A1D26 measures 14.96:1 there. */}
       {onCallTeam.length > 0 && (
         <g transform={`translate(${originScreen.x} ${originScreen.y + room.height / 2 - 8})`}>
-          <text x={0} y={0} textAnchor="middle" className="fill-bcc-text-secondary text-[10px] font-medium">
+          <text x={0} y={0} textAnchor="middle" className="fill-bcc-text text-[10px] font-medium">
             On-call team
           </text>
           {onCallTeam.map((agent, index) => (
@@ -158,7 +167,7 @@ export default function DepartmentRoom({
               x={0}
               y={12 + index * 11}
               textAnchor="middle"
-              className="fill-bcc-text-secondary text-[10px]"
+              className="fill-bcc-text text-[10px]"
             >
               {agent.displayName || agent.id}
             </text>
