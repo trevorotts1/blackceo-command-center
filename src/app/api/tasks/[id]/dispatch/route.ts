@@ -19,7 +19,7 @@ import { loadSubtaskPersonas } from '@/lib/persona-selector';
 import { checkModelSovereignty, detectModality } from '@/lib/model-selector';
 import { listModels } from '@/lib/model-registry';
 import { canonicalDeptSlug, expandDeptSlugAliases } from '@/lib/routing/canonical-slug';
-import { recordDispatchFailure } from '@/lib/task-dispatcher';
+import { recordDispatchFailure, recordDispatchRunBinding, gatewayRunIdFromResult, acceptedRunReplayForTask } from '@/lib/task-dispatcher';
 import { blockDispatchIfOwnerKilled } from '@/lib/owner-killed';
 import {
   checkDuplicateDispatch,
@@ -389,6 +389,70 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
 
     if (!agent) {
       return NextResponse.json({ error: 'Assigned agent not found' }, { status: 404 });
+    }
+
+    // ── B20 — ACCEPTED-NOT-DELIVERED REPLAY SUPPRESSION ────────────────────────
+    // EXISTING EXECUTION IDEMPOTENCY IS PRESERVED: the duplicate-window gate
+    // above still fires exactly as it did (it runs first, unchanged), and the
+    // DISP-01 gateway idempotencyKey still collapses concurrent sends. This
+    // guard closes the one gap that window cannot see — a replayed POST for a
+    // task whose gateway run was ALREADY ACCEPTED, arriving after the window
+    // elapsed — by REFUSING a second dispatch instead of sending the same work
+    // twice. An accepted dispatch that was never delivered is never replayed
+    // into a duplicate.
+    //
+    // The evidence is the mapping B20 itself wrote (hq_run_bindings, outcome
+    // 'accepted'), scoped to the task's own company, and only a run the
+    // real-time dispatcher records as ACCEPTED — never 'uncertain' (unproven,
+    // still reconcilable) and never one already proven 'delivered'. It sits
+    // BEFORE any reservation, so a suppressed replay claims no execution, no
+    // provider pool slot and mints no idempotency key.
+    //
+    // `{ force: true }` still overrides: deliberate operator re-dispatch after a
+    // frozen or undelivered run keeps working, exactly as the duplicate-window
+    // contract states.
+    if (!forceDispatch) {
+      const priorRun = acceptedRunReplayForTask(task.id, task.workspace_id);
+      if (priorRun) {
+        const replayMsg =
+          `[dispatch_replay_suppressed] Task "${task.title}" already has an ACCEPTED gateway run ` +
+          `(execution ${priorRun.executionId ?? 'unknown'}, accepted ${priorRun.acceptedAt}). The replay was ` +
+          `SUPPRESSED so the agent does not receive the task twice. Acceptance is not delivery — inspect the ` +
+          `run's actual outcome. To re-dispatch deliberately, repeat the request with { "force": true }.`;
+        console.warn(`[Dispatch] ${replayMsg}`);
+        const nowReplay = new Date().toISOString();
+        run(
+          `INSERT INTO task_activities (id, task_id, agent_id, activity_type, message, metadata, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [
+            uuidv4(), task.id, agent.id, 'dispatch_replay_suppressed', replayMsg,
+            JSON.stringify({
+              reason: 'accepted_run_replay',
+              accepted_execution_id: priorRun.executionId,
+              accepted_at: priorRun.acceptedAt,
+              forced: false,
+            }),
+            nowReplay,
+          ],
+        );
+        run(
+          `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [uuidv4(), 'dispatch_replay_suppressed', agent.id, task.id, replayMsg, nowReplay],
+        );
+        broadcast({ type: 'task_updated', payload: task });
+        return NextResponse.json(
+          {
+            success: false,
+            held: true,
+            suppressed: true,
+            reason: 'accepted_run_replay',
+            message: replayMsg,
+            accepted_execution_id: priorRun.executionId,
+          },
+          { status: 409 },
+        );
+      }
     }
 
     // Check if dispatching to the master agent while there are other orchestrators available
@@ -917,6 +981,20 @@ If you need help or clarification, ask the orchestrator.`;
 
       recordExecutionAcceptance(execution,acknowledgement);
       acknowledged = true;
+      // B20 — bind the ACCEPTED dispatch to its ACTUAL gateway run (SPEC S5
+      // step 6, S6 `hq_run_bindings`). Trusted server state only: the task/
+      // agent/execution triple comes from the rows this handler already read,
+      // never from the request body, the task message or any tool params.
+      // `outcome:'accepted'` — acceptance is NOT delivery and this path has no
+      // branch that can write delivered.
+      recordDispatchRunBinding({
+        taskId: task.id,
+        executionId: execution.id,
+        agentId: agent.id,
+        sessionKey,
+        acceptedRunId: gatewayRunIdFromResult(acknowledgement),
+        outcome: 'accepted',
+      });
 
       // FIX-15 (Error 7 / R7 — model skew): pin the ACTUAL runtime model on the
       // task, not the CC's "intended" resolution. The gateway has no supported
@@ -1058,6 +1136,18 @@ If you need help or clarification, ask the orchestrator.`;
       if (acknowledged) return NextResponse.json({success:true,task_id:task.id,execution_id:executionId,warning:'accepted_bookkeeping_failed'});
       // The error travels so a 429 shuts the provider pool (see recordExecutionUnknown).
       recordExecutionUnknown(execution, undefined, err);
+      // B20 — an uncertain send may still have reached the gateway, so its
+      // binding is recorded as 'uncertain': NOT terminal, and NOT eligible for
+      // the accepted-run replay suppression above. No second send is authorized
+      // by this record; it exists so the run is not invisible.
+      recordDispatchRunBinding({
+        taskId: task.id,
+        executionId: execution.id,
+        agentId: agent.id,
+        sessionKey,
+        acceptedRunId: null,
+        outcome: 'uncertain',
+      });
       return NextResponse.json({success:false,task_id:task.id,execution_id:executionId,
         reason:'send_acceptance_unknown',message:'Reconcile this execution before retrying.'},{status:202});
     }

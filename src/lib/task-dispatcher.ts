@@ -2234,12 +2234,36 @@ If you need help or clarification, ask the orchestrator.`;
       });
       recordExecutionAcceptance(execution, response);
       acknowledgedExecution = execution;
+      // B20 — bind the ACCEPTED dispatch to its ACTUAL gateway run. Written
+      // after the acceptance is durably recorded, from trusted server state
+      // only (never from the agent's message or tool params). `outcome` here is
+      // 'accepted' and nothing in this path can write 'delivered': acceptance is
+      // not delivery.
+      recordDispatchRunBinding({
+        taskId: task.id,
+        executionId: execution.id,
+        agentId: agent.id,
+        sessionKey,
+        acceptedRunId: gatewayRunIdFromResult(response),
+        outcome: 'accepted',
+      });
     } catch (sendErr) {
       // A transport failure may follow remote acceptance. Never roll back the
       // task or mint a fresh key based solely on a missing acknowledgement.
       // The error travels so a 429 can shut the pool instead of the next card
       // walking into the same refusal.
       recordExecutionUnknown(execution, undefined, sendErr);
+      // B20 — an uncertain send may still have reached the gateway, so its
+      // binding is recorded as 'uncertain': deliberately NOT terminal, and NOT
+      // eligible for the accepted-run replay suppression the route consults.
+      recordDispatchRunBinding({
+        taskId: task.id,
+        executionId: execution.id,
+        agentId: agent.id,
+        sessionKey,
+        acceptedRunId: null,
+        outcome: 'uncertain',
+      });
       console.error(`[${context}] chat.send acknowledgement unknown for ${task.id}:`, sendErr);
       return { status: 'unknown', reason: 'send_acceptance_unknown', executionId };
     }
@@ -2488,4 +2512,304 @@ If you need help or clarification, ask the orchestrator.`;
     return acknowledgedExecution
       ? { status: 'acknowledged', reason: 'accepted_bookkeeping_failed', executionId: acknowledgedExecution.id }
       : { status: 'failed', reason: 'dispatch_pipeline_error' };
+}
+
+// ── B20 — trusted CC dispatch → ACTUAL gateway run binding (SPEC S5 step 6, S6) ─
+//
+// The native exchange observer (B19) sees hook context and lifecycle events:
+// `sessionKey`, `runId`, `agentId` — and nothing that names a Command Center
+// task. Headquarters' rule is the other direction: the SERVER resolves taskId
+// from a mapping the server itself wrote, never from a model-authored body or
+// tool params (SPEC S5 step 1 / §7 rule 4). This is that mapping's writer.
+//
+// ACCEPTED IS NOT DELIVERED. Two different facts, two different columns:
+//   • `outcome='accepted'`  — the gateway acknowledged the send. The run exists.
+//                             `delivered_at` stays NULL.
+//   • `outcome='uncertain'` — the send raised after it may have reached the
+//                             gateway (recordExecutionUnknown). Not terminal.
+//   • `outcome='delivered'` — written ONLY by a caller holding real delivery
+//                             evidence. Nothing on this accepted path has a
+//                             branch that writes it, so an accepted dispatch
+//                             that is never delivered can never read as
+//                             delivered (B20 check: accepted-not-delivered).
+export const HQ_RUN_BINDINGS_TABLE = 'hq_run_bindings';
+
+/**
+ * The exact DDL shape of SPEC S6's `hq_run_bindings`. The reserved additive HQ
+ * migration (B01) owns applying it; the statement is kept here so this writer
+ * can verify the table exists (an un-migrated box degrades to no binding rather
+ * than throwing "no such table" into a send) and so a test can stand the table
+ * up without duplicating the column list.
+ */
+export const HQ_RUN_BINDINGS_DDL = `
+CREATE TABLE IF NOT EXISTS hq_run_bindings (
+  company_id TEXT NOT NULL,
+  runtime_run_id TEXT NOT NULL,
+  runtime_session_key TEXT,
+  agent_id TEXT NOT NULL,
+  task_id TEXT,
+  execution_id TEXT,
+  visibility TEXT NOT NULL CHECK (visibility IN ('task-audience','private-owner')),
+  owner_subject TEXT,
+  outcome TEXT NOT NULL CHECK (outcome IN ('accepted','uncertain','delivered')),
+  delivered_at TEXT,
+  recorded_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  PRIMARY KEY (company_id, runtime_run_id)
+);
+CREATE INDEX IF NOT EXISTS idx_hq_run_bindings_task ON hq_run_bindings(company_id, task_id);
+CREATE INDEX IF NOT EXISTS idx_hq_run_bindings_expiry ON hq_run_bindings(expires_at);
+`;
+
+/** SPEC S6 line 243: expiry 48 hours after the last relevant observation; hard 100,000 rows/company. */
+export const HQ_RUN_BINDING_TTL_MS = 48 * 60 * 60 * 1000;
+export const HQ_RUN_BINDING_MAX_PER_COMPANY = 100_000;
+
+/** SPEC S9: the private HQ conversation channel. Any other requester channel is not private-owner. */
+export const HQ_CHAT_REQUESTER_CHANNEL = 'hq-chat';
+
+/** `agent:<runtimeId>:<peer>` — the only key shape the gateway can be asked to address. */
+const ADDRESSABLE_SESSION_KEY = /^agent:[^\s:]+:[^\s]+$/;
+
+export interface DispatchRunBindingInput {
+  taskId: string;
+  executionId: string;
+  agentId: string;
+  /** Gateway session key the dispatch addressed. */
+  sessionKey: string;
+  /** `runId` from the ACCEPTED chat.send result; null when never acknowledged. */
+  acceptedRunId?: string | null;
+  /** 'accepted' only after acknowledgement; 'uncertain' when the send is unproven. */
+  outcome: 'accepted' | 'uncertain';
+}
+
+/** Gateway-issued `runId` from a chat.send result — the only trusted run source. */
+export function gatewayRunIdFromResult(result: unknown): string | null {
+  const r = result as { runId?: unknown; run_id?: unknown } | null | undefined;
+  const value = r?.runId ?? r?.run_id;
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+/**
+ * The gateway run identity the native observer will see for this dispatch.
+ * Prefers the ACCEPTED result's own runId; otherwise the addressed session key,
+ * and only when it is a real addressable key (the deterministic
+ * `mission-control-<agentId>-<execId>` sentinel does NOT match — a binding that
+ * names no gateway object is worse than no binding). Null = record unresolved
+ * capture health, never invent an identity.
+ */
+export function dispatchRunIdentity(input: { sessionKey: string; acceptedRunId?: string | null }): string | null {
+  const accepted = typeof input.acceptedRunId === 'string' ? input.acceptedRunId.trim() : '';
+  if (accepted) return accepted;
+  return ADDRESSABLE_SESSION_KEY.test(input.sessionKey?.trim() ?? '') ? input.sessionKey.trim() : null;
+}
+
+function hqRunBindingsReady(): boolean {
+  try {
+    return !!queryOne<{ name: string }>(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+      [HQ_RUN_BINDINGS_TABLE],
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Company scope comes from the task's own workspace row — the same column the
+ * board scopes by — and only when the companies row really exists. An
+ * unresolvable scope is `unresolved`, never guessed into a foreign company.
+ */
+function hqCompanyForWorkspace(workspaceId: string | null): string | null {
+  if (!workspaceId) return null;
+  const ws = queryOne<{ company_id: string | null }>(
+    'SELECT company_id FROM workspaces WHERE id = ?',
+    [workspaceId],
+  );
+  const companyId = ws?.company_id ?? null;
+  if (!companyId) return null;
+  return queryOne<{ id: string }>('SELECT id FROM companies WHERE id = ?', [companyId]) ? companyId : null;
+}
+
+/**
+ * Record (or extend) the binding of an ACTUAL dispatch to its gateway run.
+ *
+ * Idempotent per (company_id, runtime_run_id): a replayed POST for a task that
+ * already has this run EXTENDS the 48-hour expiry and returns the EXISTING row —
+ * a replay produces no second mapping and never rewrites the original
+ * task/execution/visibility attribution. Past the per-company budget a new
+ * mapping is refused (reported), never by evicting an active one.
+ *
+ * Never throws and never blocks the dispatch: a capture miss is invisible to
+ * the business call it describes.
+ */
+export function recordDispatchRunBinding(input: DispatchRunBindingInput): void {
+  try {
+    if (!hqRunBindingsReady()) return;
+    const runId = dispatchRunIdentity({ sessionKey: input.sessionKey, acceptedRunId: input.acceptedRunId });
+    if (!runId) return;
+
+    const task = queryOne<{
+      id: string;
+      assigned_agent_id: string | null;
+      workspace_id: string | null;
+      requester_channel: string | null;
+      requester_chat_id: string | null;
+    }>(
+      'SELECT id, assigned_agent_id, workspace_id, requester_channel, requester_chat_id FROM tasks WHERE id = ?',
+      [input.taskId],
+    );
+    if (!task) return;
+    // The bound row must still be the row the dispatch was read for: a rebound
+    // or reassigned card never inherits this mapping.
+    if (task.assigned_agent_id !== input.agentId) return;
+
+    const companyId = hqCompanyForWorkspace(task.workspace_id);
+    if (!companyId) return;
+
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + HQ_RUN_BINDING_TTL_MS).toISOString();
+    const existing = queryOne<{ runtime_run_id: string }>(
+      'SELECT runtime_run_id FROM hq_run_bindings WHERE company_id = ? AND runtime_run_id = ?',
+      [companyId, runId],
+    );
+    if (existing) {
+      run('UPDATE hq_run_bindings SET expires_at = ? WHERE company_id = ? AND runtime_run_id = ?', [
+        expiresAt,
+        companyId,
+        runId,
+      ]);
+      return;
+    }
+
+    const held = (queryOne<{ n: number }>('SELECT COUNT(*) AS n FROM hq_run_bindings WHERE company_id = ?', [
+      companyId,
+    ]) ?? { n: 0 }).n;
+    if (held >= HQ_RUN_BINDING_MAX_PER_COMPANY) {
+      console.warn(
+        `[hq-run-bindings] company ${companyId} is at its ${HQ_RUN_BINDING_MAX_PER_COMPANY}-row budget — ` +
+          `new mapping refused (capture degraded; active mappings preserved; dispatch unaffected).`,
+      );
+      return;
+    }
+
+    const isPrivate = (task.requester_channel ?? '').trim().toLowerCase() === HQ_CHAT_REQUESTER_CHANNEL;
+    const visibility = isPrivate ? 'private-owner' : 'task-audience';
+    const ownerSubject = isPrivate ? (task.requester_chat_id ?? null) : null;
+
+    run(
+      `INSERT INTO hq_run_bindings
+         (company_id, runtime_run_id, runtime_session_key, agent_id, task_id, execution_id,
+          visibility, owner_subject, outcome, delivered_at, recorded_at, expires_at)
+       VALUES (?,?,?,?,?,?,?,?,?,NULL,?,?)`,
+      [
+        companyId,
+        runId,
+        input.sessionKey ?? null,
+        input.agentId,
+        task.id,
+        input.executionId,
+        visibility,
+        ownerSubject,
+        input.outcome,
+        now.toISOString(),
+        expiresAt,
+      ],
+    );
+  } catch (err) {
+    console.warn('[hq-run-bindings] recordDispatchRunBinding failed (non-fatal):', (err as Error).message);
+  }
+}
+
+/**
+ * What Headquarters (and the observer's server side) resolves `taskId` from.
+ * Scoped to the caller's verified company: a run bound under another company is
+ * not found, never returned.
+ */
+export function resolveDispatchRunBinding(
+  companyId: string,
+  runtimeRunId: string,
+): { task_id: string | null; execution_id: string | null; agent_id: string; visibility: string; outcome: string; owner_subject: string | null } | null {
+  try {
+    if (!hqRunBindingsReady()) return null;
+    return (
+      queryOne<{
+        task_id: string | null;
+        execution_id: string | null;
+        agent_id: string;
+        visibility: string;
+        outcome: string;
+        owner_subject: string | null;
+      }>(
+        `SELECT task_id, execution_id, agent_id, visibility, outcome, owner_subject
+           FROM hq_run_bindings WHERE company_id = ? AND runtime_run_id = ?`,
+        [companyId, runtimeRunId],
+      ) ?? null
+    );
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Record a PAST-ACCEPTANCE outcome for an already bound run. The ONLY writer of
+ * `outcome='delivered'`, and it demands an explicit delivery timestamp — there
+ * is no default, so no accepted-only path can reach it by accident.
+ */
+export function recordDispatchRunOutcome(args: {
+  companyId: string;
+  runtimeRunId: string;
+  outcome: 'accepted' | 'delivered';
+  deliveredAt?: string;
+}): boolean {
+  try {
+    if (!hqRunBindingsReady()) return false;
+    const deliveredAt = args.outcome === 'delivered' ? (args.deliveredAt ?? null) : null;
+    if (args.outcome === 'delivered' && !deliveredAt) return false;
+    return (
+      run('UPDATE hq_run_bindings SET outcome = ?, delivered_at = ? WHERE company_id = ? AND runtime_run_id = ?', [
+        args.outcome,
+        deliveredAt,
+        args.companyId,
+        args.runtimeRunId,
+      ]).changes === 1
+    );
+  } catch (err) {
+    console.warn('[hq-run-bindings] recordDispatchRunOutcome failed (non-fatal):', (err as Error).message);
+    return false;
+  }
+}
+
+/**
+ * B20 replay gate — the task's already-ACCEPTED gateway run, if any.
+ *
+ * This is the ONLY thing the dispatch route consults to suppress a replay, and
+ * it exists so an accepted-but-undelivered dispatch is never replayed into a
+ * duplicate send. Scoped to the task's own company; absent table (an
+ * un-migrated box) or absent mapping means "no suppression" — the route then
+ * behaves exactly as it did before, never worse.
+ *
+ * A run whose outcome later became `delivered` is deliberately NOT returned:
+ * once delivery is proven the card is finished work and the ordinary
+ * duplicate-window / force path governs re-dispatch, unchanged.
+ */
+export function acceptedRunReplayForTask(
+  taskId: string,
+  workspaceId: string | null | undefined,
+): { companyId: string; executionId: string | null; acceptedAt: string } | null {
+  try {
+    if (!hqRunBindingsReady()) return null;
+    const companyId = hqCompanyForWorkspace(workspaceId ?? null);
+    if (!companyId) return null;
+    const row = queryOne<{ execution_id: string | null; recorded_at: string }>(
+      `SELECT execution_id, recorded_at FROM hq_run_bindings
+        WHERE company_id = ? AND task_id = ? AND outcome = 'accepted'
+        ORDER BY recorded_at DESC LIMIT 1`,
+      [companyId, taskId],
+    );
+    if (!row) return null;
+    return { companyId, executionId: row.execution_id, acceptedAt: row.recorded_at };
+  } catch {
+    return null;
+  }
 }
