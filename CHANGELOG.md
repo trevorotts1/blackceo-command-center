@@ -570,6 +570,8 @@ Count: **8 terminal-stop writers, 0 of which stamped the notice claim, 3 of whic
 - unit/B32-builder: hq(B32): Docker target capability check + contract fixtures (merge b6322ff47256)
 - unit/B33-builder: hq(B33): repair port-origin grant host + PATCH owner re-derivation (merge 76b1f475256a)
 - unit/B30-builder: hq(B30): /hq route composition/controller — scope, selection, Board return (merge 75d4842edc1d)
+- unit/B33-builder: hq(B33): prove the real mint script signs hostname-only (merge d7c111fcf84e)
+- unit/B30-builder: fix(B30): live-router repair — F1 filter carry, F2 company switch, F3 notice lifecycle (merge 362d6103ebbd)
 
 ## [v7.6.50] — 2026-09-21 — An explicit null is a state, not a missing argument (fixes the long-red u107 case)
 
