@@ -16,6 +16,10 @@
  *   --bcc-text          #1A1D26 on #FFFFFF 15.4:1  on #F8F9FB 14.7:1
  *   --bcc-text-secondary#6B7280 on #FFFFFF  4.8:1  on #F8F9FB  4.6:1
  *   --brand-600         #43A047 vs #FFFFFF  3.2:1 (focus ring, non-text 3:1)
+ *   --hq-status-strong  #2E7D32 on #FFFFFF  5.1:1  on #F8F9FB  4.9:1
+ *                       (working/busy status ink — the Tailwind text-brand-700
+ *                       utility it replaced measured 4.12:1 on white, 3.66:1 on
+ *                       the brand tint, both under S11's 4.5:1 text floor)
  *   --hq-control-border #6B7280 vs #FFFFFF  4.8:1 (control boundary 3:1)
  *   --hq-focus-ring     #1A1D26 vs every surface used here >= 14:1, so the
  *                       focus indicator keeps 3:1 even where a raw brand tint
@@ -332,12 +336,22 @@
 }
 
 /* Tinted row surfaces drop secondary ink below 4.5:1 (#6B7280 measures 4.39:1
-   on #F3F4F6 and 4.30:1 on #E8F5E9), so any tinted row re-inks its meta text to
-   the body token — 15.3:1 on the muted surface, 15.0:1 on the brand tint. */
+   on #F3F4F6 and 4.30:1 on #E8F5E9), so any tinted row re-inks its
+   secondary-ink text — meta spans, row-state spans, and the standby status
+   tone nested inside them — to the body token (15.3:1 on the muted surface,
+   15.0:1 on the brand tint). */
 .hq-row:hover .hq-row-meta,
 .hq-row[aria-current='true'] .hq-row-meta,
 .hq-picker-option:hover .hq-row-meta,
-.hq-picker-option[aria-selected='true'] .hq-row-meta {
+.hq-picker-option[aria-selected='true'] .hq-row-meta,
+.hq-row:hover .hq-row-state,
+.hq-row[aria-current='true'] .hq-row-state,
+.hq-picker-option:hover .hq-row-state,
+.hq-picker-option[aria-selected='true'] .hq-row-state,
+.hq-row:hover .hq-status-secondary,
+.hq-row[aria-current='true'] .hq-status-secondary,
+.hq-picker-option:hover .hq-status-secondary,
+.hq-picker-option[aria-selected='true'] .hq-status-secondary {
   color: var(--hq-text);
 }
 
@@ -364,6 +378,18 @@
   font-size: 14px;
   color: var(--hq-text);
   flex-shrink: 0;
+}
+
+/* Status ink (S11 text 4.5:1): working/busy uses the darkest brand step —
+   #2E7D32 clears 5.13 white / 4.87 bg / 4.66 muted / 4.56 tint — never a
+   Tailwind utility the contrast test cannot name. Standby uses secondary ink
+   on plain surfaces; tinted rows re-ink it below. */
+.hq-status-strong {
+  color: var(--hq-accent-strong, #2E7D32);
+}
+
+.hq-status-secondary {
+  color: var(--hq-text-secondary, #6B7280);
 }
 
 .hq-badge {

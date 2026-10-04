@@ -386,6 +386,42 @@ test('Q11-picker: search filters by name and slug; choice calls back once and re
   }
 });
 
+test('Q11-picker: every option is a direct child of the listbox (valid ARIA parent)', async () => {
+  const m = await mount({ departments: DEPARTMENTS as never });
+  try {
+    await React.act(async () => click(m.container.querySelector('[data-testid="hq-picker-trigger"]')!));
+    const listbox = m.container.querySelector('[role="listbox"]');
+    assert.ok(listbox, 'picker list carries the listbox role while it holds options');
+    const options = [...m.container.querySelectorAll('[role="option"]')];
+    assert.ok(options.length > 0, 'options exist, so this check is not vacuous');
+    for (const option of options) {
+      assert.equal(option.parentElement, listbox, 'each option must be owned directly by the listbox');
+    }
+  } finally {
+    m.unmount();
+  }
+});
+
+test('Q11-picker: working/busy status ink is the shell-owned strong tone, never a Tailwind utility', async () => {
+  const m = await mount({
+    departments: DEPARTMENTS as never,
+    view: 'list',
+    selectedDepartmentId: 'w1',
+  });
+  try {
+    const strong = m.container.querySelector('.hq-status-strong');
+    assert.ok(strong, 'working status renders the shell-owned strong tone');
+    assert.match(strong!.textContent ?? '', /Working/);
+    assert.equal(
+      m.container.querySelectorAll('[class*="text-brand-"]').length,
+      0,
+      'no Tailwind brand utility may set status ink (the stylesheet contrast test cannot reach it)',
+    );
+  } finally {
+    m.unmount();
+  }
+});
+
 test('Q11-picker: a query with no match states that plainly', async () => {
   const m = await mount({ departments: DEPARTMENTS as never });
   try {
@@ -572,18 +608,37 @@ test('S11-contrast: every text pair >= 4.5:1 and every control/focus pair >= 3:1
     ['secondary text on page background', contrast(secondary![1], BG), '4.5'],
   ];
   // Tinted row surfaces: the base muted ink measures below 4.5:1 there, so the
-  // stylesheet re-inks meta text to the body token on every tinted row. Assert
-  // BOTH halves: the re-ink rule exists, and the ink it names clears the floor.
+  // stylesheet re-inks meta text AND row-state text to the body token on every
+  // tinted row. Assert BOTH halves: the re-ink rule exists (for meta and for
+  // row-state, since the row-state span sits beside meta in the same row), and
+  // the ink it names clears the floor.
   assert.match(
     CSS,
-    /\.hq-row:hover \.hq-row-meta,[\s\S]*?\{[^}]*color:\s*var\(--hq-text\)/,
+    /\.hq-row:hover \.hq-row-meta,[\s\S]*?\.hq-row\[aria-current='true'\] \.hq-row-meta,[\s\S]*?\{[^}]*color:\s*var\(--hq-text\)/,
     'tinted rows must re-ink their meta text or lose contrast on the tint',
+  );
+  assert.match(
+    CSS,
+    /\.hq-row\[aria-current='true'\] \.hq-row-state,[\s\S]*?\.hq-picker-option\[aria-selected='true'\] \.hq-row-state,[\s\S]*?\{[^}]*color:\s*var\(--hq-text\)/,
+    'tinted rows must re-ink their row-state text too (the declared invariant covers the whole row)',
   );
   for (const [name, surface] of [
     ['muted row (re-inked)', MUTED],
     ['brand tint (re-inked)', '#E8F5E9'],
   ] as Array<[string, string]>) {
     pairs.push([`secondary text on ${name}`, contrast(text![1], surface), '4.5']);
+  }
+  // Working/busy status ink: the shell-owned strong tone must clear 4.5:1 on
+  // every surface it paints (white card, page background, muted hover, tint).
+  const statusStrong = CSS.match(/\.hq-status-strong\s*\{[^}]*color:\s*var\(--hq-accent-strong,\s*(#[0-9A-Fa-f]{6})\)/);
+  assert.ok(statusStrong, '.hq-status-strong declares a hardcoded 4.5:1-clearing fallback, never a Tailwind utility');
+  for (const [name, surface] of [
+    ['card', WHITE],
+    ['page background', BG],
+    ['muted row', MUTED],
+    ['brand tint', '#E8F5E9'],
+  ] as Array<[string, string]>) {
+    pairs.push([`working/busy status text on ${name}`, contrast(statusStrong![1], surface), '4.5']);
   }
   for (const [name, ratio, floor] of pairs) {
     assert.ok(

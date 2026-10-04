@@ -103,14 +103,17 @@ const CONNECTION_LABELS: Record<HqConnection, string> = {
 
 /** Icon + label, never colour alone (S11). */
 function StatusMark({ status }: { status: HqAgentStatus }) {
+  // Shell-owned tones from headquarters.css, never a Tailwind colour utility:
+  // the mark's ink has to be reachable by the stylesheet's contrast rules and
+  // by the stylesheet-side contrast test (a utility it does not name is not).
   const tone =
     status === 'working' || status === 'busy'
-      ? 'text-brand-700'
+      ? 'hq-status-strong'
       : status === 'standby'
-        ? 'text-bcc-text-secondary'
-        : 'text-bcc-text';
+        ? 'hq-status-secondary'
+        : null;
   return (
-    <span className={`inline-flex items-center gap-1 ${tone}`}>
+    <span className={['inline-flex items-center gap-1', tone].filter(Boolean).join(' ')}>
       <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-current" />
       <span>{STATUS_LABELS[status] ?? STATUS_LABELS.unknown}</span>
     </span>
@@ -334,25 +337,34 @@ export default function HeadquartersShell({
                   aria-controls={`${pickerId}-list`}
                   onChange={(e) => setQuery(e.target.value)}
                 />
-                <ul className="hq-picker-list" id={`${pickerId}-list`} role="listbox" aria-label="Departments">
+                {/* A listbox must own its options: each option renders as a
+                    direct child of the ul (an <li> between them strips the
+                    option's valid listbox parent), and the no-match note stays
+                    a plain list item — so the ul only carries the listbox role
+                    while it actually holds options. */}
+                <ul
+                  className="hq-picker-list"
+                  id={`${pickerId}-list`}
+                  role={matches.length === 0 ? undefined : 'listbox'}
+                  aria-label="Departments"
+                >
                   {matches.length === 0 && <li className="hq-picker-empty">No department matches “{query.trim()}”.</li>}
                   {matches.map((d) => (
-                    <li key={d.id}>
-                      <button
-                        type="button"
-                        role="option"
-                        aria-selected={d.id === selectedDepartmentId}
-                        className="hq-picker-option"
-                        onClick={() => chooseDepartment(d.id)}
-                        data-testid={`hq-picker-option-${d.id}`}
-                      >
-                        <span className="hq-row-name">{d.name}</span>
-                        <span className="hq-row-meta">
-                          {d.agents.length} {d.agents.length === 1 ? 'agent' : 'agents'}
-                          {d.provisioning !== 'ready' ? ` · Setup ${d.provisioning}` : ''}
-                        </span>
-                      </button>
-                    </li>
+                    <button
+                      key={d.id}
+                      type="button"
+                      role="option"
+                      aria-selected={d.id === selectedDepartmentId}
+                      className="hq-picker-option"
+                      onClick={() => chooseDepartment(d.id)}
+                      data-testid={`hq-picker-option-${d.id}`}
+                    >
+                      <span className="hq-row-name">{d.name}</span>
+                      <span className="hq-row-meta">
+                        {d.agents.length} {d.agents.length === 1 ? 'agent' : 'agents'}
+                        {d.provisioning !== 'ready' ? ` · Setup ${d.provisioning}` : ''}
+                      </span>
+                    </button>
                   ))}
                 </ul>
               </div>
