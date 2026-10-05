@@ -2920,6 +2920,32 @@ export async function createTaskCore(
             run(`UPDATE tasks SET routing_reason=?, routing_wait_owner=?, routing_next_action=?
               WHERE id=? AND assignment_version=? AND assigned_agent_id IS NULL AND archived_at IS NULL AND killed_at IS NULL`,
               [decision.reason, decision.owner, 'Repair the department configuration or retry assignment.', id, snapshot.assignment_version]);
+            // JGT-106 — no fit ever leaves a card lane-less. A non-'assigned'
+            // decision above only stamps the routing reason; if the task still
+            // has no workspace at all, park it in the company's General Task
+            // catch-all (migration 166) rather than leaving workspace_id NULL.
+            // Same optimistic guard as the stamp above so a concurrent
+            // assignment/edit can never be clobbered. If the company has no
+            // general-task workspace (declined, or not yet provisioned), this
+            // is a no-op and workspace_id stays NULL — unchanged behavior.
+            if (!snapshot.workspace_id) {
+              run(
+                `UPDATE tasks SET workspace_id = (
+                   SELECT id FROM workspaces
+                    WHERE company_id = ? AND archived_at IS NULL AND id <> 'default'
+                      AND lower(slug) IN ('general-task', 'dept-general-task')
+                    ORDER BY CASE WHEN lower(slug) = 'general-task' THEN 0 ELSE 1 END
+                    LIMIT 1
+                 )
+                 WHERE id = ? AND workspace_id IS NULL AND assignment_version=? AND assigned_agent_id IS NULL AND archived_at IS NULL AND killed_at IS NULL`,
+                [creationCompanyId, id, snapshot.assignment_version],
+              );
+              const parked = queryOne<{ id: string; slug: string | null }>(
+                'SELECT w.id, w.slug FROM tasks t JOIN workspaces w ON w.id = t.workspace_id WHERE t.id = ?',
+                [id],
+              );
+              if (parked) { workspaceId = parked.id; workspaceSlug = parked.slug; }
+            }
           }
         }
       } catch (routeErr) {

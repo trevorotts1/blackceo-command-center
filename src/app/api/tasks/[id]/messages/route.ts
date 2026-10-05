@@ -4,6 +4,11 @@ import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import { queryOne, queryAll, run } from '@/lib/db';
 import { broadcast } from '@/lib/events';
+import { getOpenClawClient } from '@/lib/openclaw/client';
+import {
+  findActiveExecutionForTask,
+  buildOwnerUpdateMessage,
+} from '@/lib/task-kill';
 import type { Task, ActivityType, TaskActivity } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
@@ -194,7 +199,53 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
 
     broadcast({ type: 'task_message', payload: { task_id: id, activity } });
 
-    return NextResponse.json({ activity, system_context: body.system_context || null });
+    // CANC-101 (finding 10): the recorded note never reached the agent. After
+    // the insert above (unchanged), attempt LIVE delivery of the owner's EXACT
+    // note text to the task's running agent session: same active-execution
+    // lookup + chat.send primitive as the dispatch route and the archive
+    // (cancel) route. Best-effort — insert already committed, delivery failure
+    // never fails the POST. NEVER sets killed_at: this route is note-delivery
+    // ONLY; only POST /api/tasks/[id]/archive cancels.
+    // Owner notes only: an agent_message is the agent's own report — sending
+    // it back into its session would be an echo. Owner (default) notes go live.
+    const isOwnerNote = activityType === 'owner_message';
+    let deliveredLive = false;
+    let deliveryTarget: 'session' | 'none' = 'none';
+    let deliveryError: string | null = null;
+    try {
+      const live = isOwnerNote ? findActiveExecutionForTask(id) : null;
+      if (live) {
+        deliveryTarget = 'session';
+        try {
+          const client = getOpenClawClient();
+          if (!client.isConnected()) await client.connect();
+          await client.call('chat.send', {
+            sessionKey: live.session_key,
+            message: buildOwnerUpdateMessage(id, body.content.trim()),
+          });
+          deliveredLive = true;
+        } catch (err) {
+          deliveryError = (err as Error).message ?? 'unknown delivery error';
+        }
+      }
+    } catch (err) {
+      deliveryError = (err as Error).message ?? 'unknown lookup error';
+    }
+
+    const deliveryNote = deliveredLive
+      ? 'delivered live to running agent'
+      : deliveryError
+        ? `note recorded; live delivery FAILED (${deliveryError}) — owner can retry`
+        : 'note recorded; no running agent session right now — it will be seen on next turn/dispatch';
+
+    return NextResponse.json({
+      activity,
+      system_context: body.system_context || null,
+      delivered_live: deliveredLive,
+      delivery_target: deliveryTarget,
+      delivery_error: deliveryError,
+      note: deliveryNote,
+    });
   } catch (error) {
     console.error('[messages:POST]', error);
     return NextResponse.json({ error: 'Failed to send message' }, { status: 500 });

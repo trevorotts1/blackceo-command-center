@@ -124,20 +124,9 @@ test('[PAGE-1] a [QC-JUDGE-FAILED-FINAL] task PAGES a human, carrying the scorer
     'board-hygiene must surface the escalated task — a terminal state it does not scan is silent',
   );
 
-  // The alarm must have LEFT the process, not merely been written to a table.
-  assert.equal(pages.length, 1, `exactly one page must be dispatched (got ${pages.length})`);
-  const body = pages[0].body as { message?: string; action?: string };
-  assert.equal(body.action, 'qc_judge_failed', 'the page must be attributed to the judge-failed action');
-  const msg = String(body.message);
-
-  assert.ok(msg.includes(id), 'the page must name the stuck task');
-  assert.ok(/judge FAILING/i.test(msg), 'the page must say the judge is FAILING');
-  assert.ok(/needs a human/i.test(msg), 'the page must say a human is required');
-  // The verbatim scorer diagnosis must ride along — a page that re-derives its
-  // own guess is how a healthy provider got blamed for six days.
-  assert.ok(msg.includes('content was EMPTY (provider is UP)'), 'the page must carry the OBSERVED failure');
-  assert.ok(msg.includes('QC_JUDGE_MAX_TOKENS'), 'the page must carry the fix that matches the failure');
-  assert.ok(!/provider is down/i.test(msg), 'the page must never claim the provider is down — it was UP');
+  // 2026-10-02: a QC hold is board housekeeping — it stays on the box (durable
+  // record + audit event) and must NEVER file a Rescue Rangers ticket.
+  assert.equal(pages.length, 0, `no Rescue Rangers post for a QC hold (got ${pages.length})`);
 
   // And an audit row is written so the cooldown has something to key on.
   assert.ok(eventTypes(id).includes('qc_judge_failed'), 'an audit event must record that we paged');

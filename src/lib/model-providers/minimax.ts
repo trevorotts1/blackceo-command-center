@@ -188,6 +188,8 @@ export async function chatCompletion(
 export const minimaxProvider: ModelProvider = {
   slug: PROVIDER_SLUG,
   displayName: PROVIDER_DISPLAY_NAME,
+  // V23-CC1 intake chain: MiniMax key resolved by alias; no new env name.
+  envCandidates: ['MINIMAX_API_KEY'],
   fetchModels,
   chatCompletion,
 };

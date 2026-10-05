@@ -131,6 +131,8 @@ const FIXTURES: Fixture[] = [
   },
   {
     message: 'Actually, use the new-business-owner audience.',
+    // JEV-501: an amendment is only an answer when a question is pending.
+    ctx: { pendingConfirmation: true },
     intent: 'clarification_response',
     jevAnswer: { intent: 'clarification_response', executionPreference: 'unspecified' },
   },

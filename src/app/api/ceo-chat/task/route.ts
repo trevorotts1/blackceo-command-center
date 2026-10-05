@@ -38,6 +38,7 @@
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { queryOne } from '@/lib/db';
+import { resolveGeneralTaskWorkspace, type WorkspaceRow } from '@/lib/routing/general-task-workspace';
 import { createTaskCore } from '@/lib/tasks';
 import { classify, assertTaskCreationAllowed, deriveIntakeContext } from '@/lib/intake';
 import type { IntakeContext } from '@/lib/intake';
@@ -50,12 +51,6 @@ export const revalidate = 0;
 
 const MAX_TITLE_CHARS = 500;
 const MAX_DETAIL_CHARS = 8_000;
-
-interface WorkspaceRow {
-  id: string;
-  slug: string | null;
-  name: string;
-}
 
 /** Explicit-pick resolution: the SAME tier-1 lookup as ingest's resolveWorkspaceId. */
 function resolveExplicitWorkspace(departmentSlug: string): WorkspaceRow | null {
@@ -95,18 +90,6 @@ function requesterIntakeContext(sessionId: string): IntakeContext {
   } catch {
     return {};
   }
-}
-
-function resolveGeneralTaskWorkspace(): WorkspaceRow | null {
-  return (
-    queryOne<WorkspaceRow>(
-      `SELECT id, slug, name FROM workspaces
-        WHERE lower(slug) IN ('general-task', 'dept-general-task', 'general')
-           OR lower(name) IN ('general task', 'general')
-        ORDER BY rowid ASC LIMIT 1`,
-      [],
-    ) ?? null
-  );
 }
 
 export async function POST(request: NextRequest) {
