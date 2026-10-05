@@ -119,6 +119,39 @@ def port_match(app: dict, port_str: str) -> bool:
     return declared_port(app) == port_str
 
 
+def is_pm2_module(app: dict) -> bool:
+    """Return True if this pm2 entry is a pm2 MODULE, not a managed app.
+
+    pm2 modules (pm2-logrotate, pm2-prometheus-exporter, ...) are installed
+    with `pm2 install` and are NOT part of the application topology.  They must
+    never be counted as a CC app: a module that happens to inherit PORT=4000
+    from the pm2 daemon's environment (pm2-logrotate does exactly this) would
+    otherwise read as a SECOND app claiming the target port, and the health
+    check would report a phantom duplicate/zombie on a perfectly healthy box.
+
+    Discriminators, in order (any one is sufficient):
+      1. pmx_module — set by pm2 on every installed module.
+      2. PM2_PROGRAMMATIC — set by pm2's programmatic/module API.
+      3. pm_exec_path under the pm2 modules tree (<PM2_HOME>/modules/...).
+
+    Deliberately NOT keyed on the module's name: a module is a module whatever
+    it is called, and the name is the one field a user can change.
+    """
+    env = app.get('pm2_env') or {}
+    if env.get('pmx_module'):
+        return True
+    if str(ev(env, 'PM2_PROGRAMMATIC')).lower() in ('true', '1', 'yes'):
+        return True
+    exec_path = str(env.get('pm_exec_path') or '')
+    if exec_path:
+        pm2_home = os.environ.get('PM2_HOME') or os.path.join(
+            os.path.expanduser('~'), '.pm2')
+        modules_root = os.path.join(pm2_home, 'modules') + os.sep
+        if os.path.normpath(exec_path).startswith(os.path.normpath(modules_root)):
+            return True
+    return False
+
+
 def is_cc_ish(app: dict, target_name: str) -> bool:
     """Return True if this app is a Command-Center-family app at all.
 
@@ -126,7 +159,13 @@ def is_cc_ish(app: dict, target_name: str) -> bool:
     Matches the historic keyword list plus the caller's own --app-name, so a
     box that names its production app something outside the keyword list (e.g.
     a site-specific name) is still discoverable by name.
+
+    pm2 MODULES are excluded outright: they are not application topology, and
+    a module that inherits the target port from the daemon env (pm2-logrotate)
+    would otherwise be counted as a duplicate of the app being gated.
     """
+    if is_pm2_module(app):
+        return False
     name = app_name_of(app).lower()
     if not name:
         return False
@@ -165,7 +204,12 @@ def analyse(pm2_json: list, port_str: str, canon_dir: str,
     running from another directory would fail an unrelated production deploy.
     """
     apps = pm2_json or []
-    candidates = [a for a in apps if is_cc_ish(a, target_name) or port_match(a, port_str)]
+    # pm2 modules are never candidates, even when they declare the target port:
+    # `pm2 install pm2-logrotate` inherits PORT from the daemon env, and that
+    # inherited value is not a claim on the Command Center's port.
+    candidates = [a for a in apps
+                  if not is_pm2_module(a)
+                  and (is_cc_ish(a, target_name) or port_match(a, port_str))]
 
     cc, others = [], []
     for a in candidates:

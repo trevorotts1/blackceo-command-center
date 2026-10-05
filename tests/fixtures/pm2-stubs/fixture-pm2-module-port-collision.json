@@ -1,0 +1,32 @@
+[
+ {
+  "name": "blackceo-command-center",
+  "pm2_env": {
+   "name": "blackceo-command-center",
+   "status": "online",
+   "pm_cwd": "/data/projects/command-center",
+   "pm_exec_path": "/usr/local/bin/npm",
+   "args": [
+    "start"
+   ],
+   "env": {
+    "CC_PORT": "4000",
+    "DATABASE_PATH": "/data/projects/command-center/mission-control.db"
+   }
+  }
+ },
+ {
+  "name": "pm2-logrotate",
+  "pm2_env": {
+   "name": "pm2-logrotate",
+   "status": "online",
+   "pm_cwd": "/data/.pm2/modules/pm2-logrotate/node_modules/pm2-logrotate",
+   "pm_exec_path": "/data/.pm2/modules/pm2-logrotate/node_modules/pm2-logrotate/app.js",
+   "pmx_module": true,
+   "PM2_PROGRAMMATIC": "true",
+   "env": {
+    "PORT": "4000"
+   }
+  }
+ }
+]

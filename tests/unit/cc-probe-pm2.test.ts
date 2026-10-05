@@ -364,4 +364,38 @@ describe('pm2-analyze-cc: CC_PORT is a port declaration (target identification)'
       expect(result.other_cc_count, `other_cc_count for --app-name ${appName}`).toBe(2);
     }
   });
+
+  it('FALSE RED — a pm2 MODULE that inherits the target port is NOT a duplicate', () => {
+    // Live regression (2026-09-29): `pm2 install pm2-logrotate` inherits PORT
+    // from the pm2 daemon's environment. On this box that was PORT=4000, the
+    // Command Center's own port, so the module read as a SECOND app claiming
+    // the target port → app_count=2 → "duplicate/zombie" FAIL on a box whose
+    // Command Center was online and answering HTTP 200. The watchdog then
+    // exited 1 every 5 minutes and auto-disabled itself after 10 failures.
+    //
+    // A module is not application topology: it must never be counted, even
+    // when it declares the target port.
+    const result = analyseFixture('fixture-pm2-module-port-collision.json', {
+      port: '4000',
+      appName: 'blackceo-command-center',
+      canonicalDir: '/data/projects/command-center',
+    });
+    expect(result.app_count).toBe(1); // → cc-health-check.sh maps >1 to FAIL
+    expect(result.crash_loopers).toHaveLength(0);
+    expect(result.cwd_ok).toBe(true);
+    expect(result.other_cc_count).toBe(0);
+  });
+
+  it('a pm2 module is excluded even when it carries the target NAME', () => {
+    // Belt-and-braces: the exclusion is keyed on the module markers, not on
+    // the module's name, so a module named like the deploy target is still
+    // excluded. Guards against re-introducing a name-based exemption.
+    const result = analyseFixture('fixture-pm2-module-port-collision.json', {
+      port: '4000',
+      appName: 'pm2-logrotate',
+      canonicalDir: '/data/projects/command-center',
+    });
+    expect(result.app_count).toBe(1);
+    expect(result.other_cc_count).toBe(0);
+  });
 });
