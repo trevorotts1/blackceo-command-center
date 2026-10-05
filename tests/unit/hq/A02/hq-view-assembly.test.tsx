@@ -298,4 +298,68 @@ describe('A02 assembly — real components composed from one authorized snapshot
     expect(screen.queryByTestId('hq-handoff-overlays')).toBeNull();
     expect(screen.getByTestId('hq-activity-row')).toBeTruthy();
   });
+
+  it('closes the open chat when selection leaves the opened head (A02-F2)', async () => {
+    stubViewport(false);
+    // Two headed departments: moving from Dana (Marketing head) to Eli
+    // (Sales head) is the discriminating case — the unfixed page relabels
+    // the open panel to Eli while sess-1 still belongs to Dana.
+    const headedSales: HqDepartment = {
+      id: 'dept-sales',
+      slug: 'sales',
+      name: 'Sales',
+      headAgentId: 'a-sales-head',
+      provisioning: 'ready',
+      agents: [
+        agent({
+          id: 'a-sales-head',
+          workspaceId: 'dept-sales',
+          displayName: 'Eli',
+          isHead: true,
+          role: 'Sales head',
+        }),
+      ],
+    };
+    const body = snapshot([MARKETING, headedSales]);
+    const routedFetch = async (input: unknown, init?: { method?: string }) => {
+      const url = String(input);
+      if (url === '/api/hq/chat/sessions' && init?.method === 'POST') {
+        return { ok: true, status: 200, json: async () => ({ session: { id: 'sess-1' } }) };
+      }
+      if (url.startsWith('/api/hq/chat/sessions/sess-1')) {
+        return { ok: true, status: 200, json: async () => ({ turns: [] }) };
+      }
+      return { ok: true, status: 200, json: async () => body };
+    };
+    vi.stubGlobal('fetch', vi.fn(routedFetch) as unknown as typeof fetch);
+    searchParams = new URLSearchParams('company=co-1&department=dept-marketing');
+    render(<HeadquartersPage />);
+
+    await waitFor(() => expect(screen.getByTestId('hq-view-tabs')).toBeTruthy());
+    act(() => {
+      fireEvent.click(screen.getByTestId('hq-view-tab-list'));
+    });
+    await waitFor(() => expect(screen.getByTestId('hq-list-department-dept-marketing')).toBeTruthy());
+    act(() => {
+      fireEvent.click(screen.getByTestId('hq-list-department-dept-marketing'));
+    });
+    await waitFor(() => expect(screen.getByTestId('hq-list-agent-a-mkt-head')).toBeTruthy());
+    act(() => {
+      fireEvent.click(screen.getByTestId('hq-list-agent-a-mkt-head'));
+    });
+    // The Talk button opens a session with Marketing head Dana.
+    await waitFor(() => expect(screen.getByTestId('hq-talk-to-head')).toBeTruthy());
+    act(() => {
+      fireEvent.click(screen.getByTestId('hq-talk-to-head'));
+    });
+    await waitFor(() => expect(screen.getByTestId('hq-head-chat')).toBeTruthy());
+    expect(screen.getByTestId('hq-head-chat').textContent).toContain('Dana');
+
+    // Moving selection to another department closes the private panel: the
+    // header must never relabel to a head the session does not belong to.
+    act(() => {
+      fireEvent.click(screen.getByTestId('hq-list-department-dept-sales'));
+    });
+    await waitFor(() => expect(screen.queryByTestId('hq-head-chat')).toBeNull());
+  });
 });
