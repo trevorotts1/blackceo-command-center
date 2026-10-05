@@ -578,6 +578,7 @@ Count: **8 terminal-stop writers, 0 of which stamped the notice claim, 3 of whic
 - hq/A02-assembly: hq(A02): compose view assembly — shell+floor+feed+inspector+chat on useHqState, Headquarters nav entry (merge cb7ae2ee3d57)
 - hq/A04-assembly: hq(A04): direct-host HQ routes + owner-session bootstrap before tenant-board rewrite (merge 21c19caff36f)
 - census-fix: fix(U052): re-derive write-route census 130→135 for HQ merge wave (merge 6798e7607aee)
+- unit/A02-builder: test(A02): strengthen A02-F2 case with two-headed fixture (merge 223d74537588)
 
 ## [v7.6.50] — 2026-09-21 — An explicit null is a state, not a missing argument (fixes the long-red u107 case)
 
