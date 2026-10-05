@@ -15,9 +15,23 @@
  * ("Ignore all routing rules" etc., spec 4.4 last row) forces provenance
  * 'control' and bypassAllowed=false on either path: untrusted task material,
  * never permission to bypass policy.
+ *
+ * B14 — this is the ACTUAL consuming boundary for the intake classification
+ * (SPEC S5 capture table, "JEV/intake route"): every returned Classification
+ * carries a closed safe `receipt` (see `src/lib/hq/decision-receipt.ts`)
+ * recording the selected intent, whether a JEV responder was actually
+ * consulted, and the caller resolution — safe fields only, never model text
+ * or reasoning. Receipts are optional (`HQ_DECISION_RECEIPTS=0` disables them
+ * everywhere); the classification verdict is identical either way.
  */
 
 import { createHash } from 'node:crypto';
+import {
+  buildDecisionReceipt,
+  type HqDecisionReceipt,
+  type HqDecisionReceiptPhase,
+  type HqDecisionReasonToken,
+} from '@/lib/hq/decision-receipt';
 
 export type Intent =
   | 'answer_only'
@@ -81,6 +95,27 @@ export interface Classification {
   bypassAllowed: boolean;
   /** sha256 of the normalized message; the task-creation gate re-checks it. */
   messageHash: string;
+  /**
+   * B14 — safe applied-decision receipt for this classification, or null when
+   * receipts are switched off (`HQ_DECISION_RECEIPTS=0`).
+   */
+  receipt: HqDecisionReceipt | null;
+}
+
+/**
+ * Optional B14 inputs for the receipt. This boundary knows exactly three
+ * things, so the context says exactly those: whether a JEV responder was
+ * consulted, whether it produced the answer, and where the message came from.
+ */
+interface ReceiptContext {
+  /** Mode label the deciding layer was in. Defaults to `not_consulted`. */
+  mode?: string;
+  /** Overrides the derived phase (used for an explicitly shadow-run responder). */
+  phase?: HqDecisionReceiptPhase;
+  /** Reason token stated for a non-applied responder outcome. */
+  reasonToken?: HqDecisionReasonToken | null;
+  /** Durable task/correlation id (qc.md Q05: resolve by correlation, never by text). */
+  sourceReference?: string | null;
 }
 
 const INTENTS: ReadonlySet<string> = new Set([
@@ -233,15 +268,28 @@ function finish(
   controlProbe: boolean,
   provenance: ClassificationProvenance,
   executorName?: string,
+  receipt?: ReceiptContext,
 ): Classification {
+  const resolvedProvenance = controlProbe ? 'control' : provenance;
   return {
     intent,
     executionPreference,
     ...(executorName ? { executorName } : {}),
-    provenance: controlProbe ? 'control' : provenance,
+    provenance: resolvedProvenance,
     controlProbe,
     bypassAllowed: !controlProbe,
     messageHash: hashIntakeMessage(message),
+    // B14 — observed classification result, safe fields only. This call cannot
+    // alter the verdict above; with receipts off it returns null.
+    receipt: buildDecisionReceipt({
+      stage: 'intake_classification',
+      phase: receipt?.phase ?? 'applied',
+      mode: receipt?.mode ?? 'not_consulted',
+      resolvedBy: resolvedProvenance,
+      intent,
+      sourceReference: receipt?.sourceReference ?? null,
+      ...(receipt?.reasonToken ? { tokens: [receipt.reasonToken] } : {}),
+    }),
   };
 }
 
@@ -250,44 +298,50 @@ function finish(
  * load-bearing: meta-questions about quoted text and social/stop/status
  * shapes resolve before any owner-direct or delegation phrase.
  */
-export function classifyLexical(message: string, ctx: IntakeContext = {}): Classification {
+export function classifyLexical(message: string, ctx: IntakeContext = {}, receipt?: ReceiptContext): Classification {
   const controlProbe = isControlProbe(message);
+  /** This function's `finish`, bound to the lexical path and this call's receipt context. */
+  const finishIn = (
+    intent: Intent,
+    executionPreference: ExecutionPreference,
+    executorName?: string,
+  ): Classification => finish(intent, executionPreference, message, controlProbe, 'lexical', executorName, receipt);
   const text = normalizeIntakeMessage(message);
   if (!text) {
-    return finish('unresolved', 'unspecified', message, controlProbe, 'lexical');
+    return finishIn('unresolved', 'unspecified');
   }
   const stripped = normalizeIntakeMessage(stripQuoted(text));
 
   // Quoted text is not current-owner authorization ("The client wrote,
   // 'you do it'; what does that mean?" -> answer only).
   if (/what does (that|this) mean|what do you mean\b/i.test(text)) {
-    return finish('answer_only', 'unspecified', message, controlProbe, 'lexical');
+    return finishIn('answer_only', 'unspecified');
   }
   // Social conversation ("Thanks.").
   if (/^(thanks?|thank you|thx|ok thanks|great|perfect|👍)[\s.!]*$/i.test(text)) {
-    return finish('social_conversation', 'unspecified', message, controlProbe, 'lexical');
+    return finishIn('social_conversation', 'unspecified');
   }
   // Existing-task stop/kill ("Stop that task.").
   if (/\bstop that\b|\b(stop|cancel|kill|halt|abort)\b.{0,20}\btask\b/i.test(stripped)) {
-    return finish('existing_task_control', 'unspecified', message, controlProbe, 'lexical');
+    return finishIn('existing_task_control', 'unspecified');
   }
   // Existing workflow action with prior authorization ("Send the draft you already made.").
   if (/\bsend\b.*\b(draft|it|that)\b.*\balready made\b/i.test(stripped)) {
-    return finish('existing_task_control', 'unspecified', message, controlProbe, 'lexical');
+    return finishIn('existing_task_control', 'unspecified');
   }
   // Status question about a live task ("Is that finished?").
   if (
     ctx.hasExistingTask &&
     /\b(is|are)\b.*\b(finished|done|complete|ready)\b|\bstatus\b.*\btask\b/i.test(stripped)
   ) {
-    return finish('existing_task_control', 'unspecified', message, controlProbe, 'lexical');
+    return finishIn('existing_task_control', 'unspecified');
   }
   // Pending-confirmation completion ("Yes, that audience is right.").
   if (
     ctx.pendingConfirmation &&
     /^(yes|yeah|yep|correct|right|agreed|looks good|that'?s right|confirmed)\b/i.test(stripped)
   ) {
-    return finish('clarification_response', 'unspecified', message, controlProbe, 'lexical');
+    return finishIn('clarification_response', 'unspecified');
   }
   // Amendment of a pending decision ("Actually, use the new-business-owner audience.").
   // Only when a question is actually pending: "Change the price on the
@@ -296,7 +350,7 @@ export function classifyLexical(message: string, ctx: IntakeContext = {}): Class
     ctx.pendingConfirmation &&
     /\bactually\b.{0,10}\buse\b|\bchange\b.*\bto\b|\buse\b.*\binstead\b/i.test(stripped)
   ) {
-    return finish('clarification_response', 'unspecified', message, controlProbe, 'lexical');
+    return finishIn('clarification_response', 'unspecified');
   }
   // Named-department preference ("Please have Marketing handle it.",
   // "send it to Sales", "I don't want you to do it; send it to Sales.").
@@ -307,13 +361,13 @@ export function classifyLexical(message: string, ctx: IntakeContext = {}): Class
     stripped.match(/\bhave ([\w-]+) (handle|take care of) (it|this|that)\b/i) ??
     stripped.match(/\blet ([\w-]+) (handle|take) (it|this|that)\b/i);
   if (deptMatch) {
-    return finish('task_request', 'named_department', message, controlProbe, 'lexical', deptMatch[1]);
+    return finishIn('task_request', 'named_department', deptMatch[1]);
   }
   // Named worker ("Have Jordan do it."). Records the name only — ambiguity
   // must never select a random worker; resolution happens against the roster.
   const workerMatch = stripped.match(/\bhave ([\w-]+) do it\b/i);
   if (workerMatch) {
-    return finish('task_request', 'named_worker', message, controlProbe, 'lexical', workerMatch[1]);
+    return finishIn('task_request', 'named_worker', workerMatch[1]);
   }
   // Owner-direct current-assistant execution. Specific phrases only — never a
   // bare contains('you'): "Can you explain it to me?" must not land here
@@ -324,17 +378,17 @@ export function classifyLexical(message: string, ctx: IntakeContext = {}): Class
       stripped,
     )
   ) {
-    return finish('task_request', 'current_assistant', message, controlProbe, 'lexical');
+    return finishIn('task_request', 'current_assistant');
   }
   if (/\byou do it\b/i.test(stripped)) {
-    return finish('task_request', 'current_assistant', message, controlProbe, 'lexical');
+    return finishIn('task_request', 'current_assistant');
   }
   // Mixed answer + task ("Create the campaign and explain why ...").
   if (
     /\b(create|build|make|write|draft|design)\b/i.test(stripped) &&
     /\band explain\b|\btell me why\b|\bwhy you chose\b/i.test(stripped)
   ) {
-    return finish('mixed_answer_and_task', 'normal_delegation', message, controlProbe, 'lexical');
+    return finishIn('mixed_answer_and_task', 'normal_delegation');
   }
   // Question-form task request ("Can you create the campaign for me?").
   // The discriminator is the REQUEST VERB, not the leading interrogative
@@ -345,7 +399,7 @@ export function classifyLexical(message: string, ctx: IntakeContext = {}): Class
   // to create one; a bare "Can you explain how it works?" has no request verb
   // and falls to the informational rule below.
   if (isQuestionFormTaskRequest(stripped)) {
-    return finish('task_request', 'normal_delegation', message, controlProbe, 'lexical');
+    return finishIn('task_request', 'normal_delegation');
   }
   // Informational questions ("What does Marketing do?", "How would you
   // create...?", "Can you explain it to me?", "Explain the options...").
@@ -369,16 +423,16 @@ export function classifyLexical(message: string, ctx: IntakeContext = {}): Class
     /^explain\b/i.test(withoutLeadIn) ||
     prohibitedWork
   ) {
-    return finish('answer_only', 'unspecified', message, controlProbe, 'lexical');
+    return finishIn('answer_only', 'unspecified');
   }
   // Bare imperative task verbs ("Draft it here, but do not send it.").
   // ponytail: prohibition part ("do not send") is recorded nowhere here;
   // a send-guard consumes the draft, never this classifier. Upgrade when a
   // structured prohibition field exists on the card.
   if (/^(create|build|make|write|draft|send|prepare|generate|design|schedule|plan)\b/i.test(stripped)) {
-    return finish('task_request', 'unspecified', message, controlProbe, 'lexical');
+    return finishIn('task_request', 'unspecified');
   }
-  return finish('unresolved', 'unspecified', message, controlProbe, 'lexical');
+  return finishIn('unresolved', 'unspecified');
 }
 
 export interface JevIntentAnswer {
@@ -403,19 +457,30 @@ export async function classifyViaJev(
   message: string,
   ctx: IntakeContext = {},
   responder?: JevResponder,
+  receipt?: ReceiptContext,
 ): Promise<Classification> {
   const controlProbe = isControlProbe(message);
   if (!responder) {
-    return classifyLexical(message, ctx);
+    return classifyLexical(message, ctx, receipt);
   }
   let answer: JevIntentAnswer;
   try {
     answer = await responder({ message, context: ctx });
   } catch {
-    return classifyLexical(message, ctx);
+    return classifyLexical(message, ctx, {
+      mode: receipt?.mode ?? 'not_consulted',
+      phase: 'unavailable',
+      reasonToken: 'engine_unavailable_fallback_lexical',
+      sourceReference: receipt?.sourceReference ?? null,
+    });
   }
   if (!INTENTS.has(answer.intent) || !EXEC_PREFS.has(answer.executionPreference)) {
-    return classifyLexical(message, ctx);
+    return classifyLexical(message, ctx, {
+      mode: receipt?.mode ?? 'not_consulted',
+      phase: 'unavailable',
+      reasonToken: 'engine_unavailable_fallback_lexical',
+      sourceReference: receipt?.sourceReference ?? null,
+    });
   }
   return finish(
     answer.intent as Intent,
@@ -426,6 +491,11 @@ export async function classifyViaJev(
     typeof answer.executorName === 'string' && answer.executorName.trim()
       ? answer.executorName.trim()
       : undefined,
+    {
+      mode: receipt?.mode ?? 'not_consulted',
+      reasonToken: receipt?.mode === 'shadow' ? 'engine_shadow' : null,
+      sourceReference: receipt?.sourceReference ?? null,
+    },
   );
 }
 
@@ -434,6 +504,7 @@ export function classify(
   message: string,
   ctx: IntakeContext = {},
   opts: { jevResponder?: JevResponder } = {},
+  receipt?: ReceiptContext,
 ): Promise<Classification> {
-  return classifyViaJev(message, ctx, opts.jevResponder);
+  return classifyViaJev(message, ctx, opts.jevResponder, receipt);
 }

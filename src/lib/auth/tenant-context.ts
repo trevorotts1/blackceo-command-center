@@ -128,7 +128,7 @@ async function signature(payload: string): Promise<Uint8Array> {
   return new Uint8Array(await crypto.subtle.sign('HMAC', key, enc.encode(payload)));
 }
 function equal(a: Uint8Array, b: Uint8Array): boolean { let diff = a.length ^ b.length; for (let i = 0; i < a.length; i++) diff |= a[i] ^ (b[i] ?? 0); return diff === 0; }
-export interface TenantGrant { purpose: 'session' | 'enrollment'; tenantId: string; companyId?: string; subject: string; host: string; installationId: string; exp: number; nonce: string; }
+export interface TenantGrant { purpose: 'session' | 'enrollment' | 'owner-login'; tenantId: string; companyId?: string; subject: string; host: string; installationId: string; exp: number; nonce: string; }
 export async function signTenantGrant(grant: TenantGrant): Promise<string> {
   // All newly signed grants carry company ownership. Serialized legacy grants
   // without this claim must sign in again; registry changes cannot rebind them.
@@ -141,10 +141,19 @@ export async function signTenantGrant(grant: TenantGrant): Promise<string> {
  * days or weeks later is never locked out of an unfinished interview. The
  * completion check lives at the redemption route (interview-session), which is
  * the only place that knows the build state. `exp` is still required to be a
- * finite number, so a truncated or tampered payload fails here, and it is still
- * enforced exactly as before for browser SESSION grants. */
+ * finite number, so a truncated or tampered payload fails here.
+ *
+ * `enrollment` is the ONLY deliberately timeless purpose. Every other purpose —
+ * `session` and `owner-login` — expires on the clock. The predicate used to
+ * read `purpose === 'session'`, which made every OTHER purpose unexpiring: a
+ * `purpose:'owner-login'` grant added without this fix would have been a
+ * PERMANENT capability, not a ten-minute one (SPEC S7). Written as an
+ * exclusion so a future purpose is bounded by default instead of unbounded by
+ * omission. */
+const TIMELESS_GRANT_PURPOSES: ReadonlySet<TenantGrant['purpose']> = new Set(['enrollment']);
 function grantExpired(grant: TenantGrant): boolean {
-  return grant.purpose === 'session' && grant.exp <= Date.now() / 1000;
+  if (TIMELESS_GRANT_PURPOSES.has(grant.purpose)) return false;
+  return grant.exp <= Date.now() / 1000;
 }
 async function verifyGrant(token: string | null, host: string, purpose: TenantGrant['purpose']): Promise<TenantGrant | null> {
   try {

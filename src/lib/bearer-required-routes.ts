@@ -44,6 +44,10 @@
  * interface calls them with no credential, and no route list can close them.
  * See docs/SECURITY-RESIDUALS.md and U052 Parts B and C.
  *
+ * 2026-10-05 (HQ merge wave): +1 pattern for POST /api/hq/activity — the HQ
+ * producer ingest (see the comment at its pattern). Now 48 patterns covering
+ * 52 route templates; see the U052 lock test for the live census.
+ *
  * MAINTENANCE: a new interface call site to a listed route will 401. Re-derive with the
  * test in src/lib/__tests__/passthrough-write-scope.test.ts, which fails when this
  * list and the codebase disagree -- so the list cannot rot silently.
@@ -80,6 +84,16 @@ export const BEARER_REQUIRED_WRITE_ROUTES: RegExp[] = [
   /^\/api\/execution-queue(\/[^/]+)?$/,
   /^\/api\/files\/upload$/,
   /^\/api\/harvest-cards\/[^/]+\/approve$/,
+  // 2026-10-05 (HQ activity producer ingest): POST /api/hq/activity — signed
+  // producer ingest (SPEC S5 line 182, S7 lines 287/291/295) enforcing its own
+  // dual-auth (MC_API_TOKEN bearer + webhook HMAC over exact raw bytes) in the
+  // handler. Service-to-service; the browser interface only ever GETs the
+  // activity feed (/api/hq/activity?before=…, src/app/hq/page.tsx:576), so the
+  // POST has no legitimate tokenless caller. Middleware's /api/hq direct-host
+  // refusal (src/middleware.ts) still runs FIRST for client-kind hosts; this
+  // pattern adds the bearer layer on the passthrough path without touching
+  // GET (READ_ONLY_METHODS short-circuits in requiresBearerForWrite).
+  /^\/api\/hq\/activity$/,
   /^\/api\/interview\/send-link$/,
   /^\/api\/logo$/,
   /^\/api\/openclaw\/sessions$/,

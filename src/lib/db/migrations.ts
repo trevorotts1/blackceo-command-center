@@ -8174,6 +8174,200 @@ export const migrations: Migration[] = [
       console.log('[Migration 168] task_kill_acks ready');
     },
   },
+  {
+    // HQ-001 / B01 — the ONE reserved additive migration for Company
+    // Headquarters (SPEC rev 4 S6, line 223: "Migrations own indexes; use the
+    // next conflict-free migration identifier reserved in V02"). Reserved as
+    // 169 by the frozen storage contract (evidence/contracts/storage-auth.md
+    // §a) — single writer B01, no per-table separate migration workers.
+    //
+    // Four bounded data families, all company-bound, all additive:
+    //   activity + replay receipts + run bindings, private sessions/turns,
+    //   owner-login nonce uses, and activity cursor state.
+    //
+    // Every statement is `CREATE TABLE/INDEX IF NOT EXISTS` and there is no
+    // ALTER of an existing table, so the interrupted-migration and
+    // rerun-idempotence proofs in S6 (line 259) hold: a partial apply leaves
+    // only harmless new tables, and a second run records the same id once.
+    //
+    // Older code must tolerate the retained additive tables after rollback
+    // (S6 line 259) — nothing here is read by non-HQ code paths.
+    id: '169',
+    name: 'add_hq_activity_chat_and_owner_login_tables',
+    up: (db) => {
+      console.log('[Migration 169] Adding Company Headquarters tables...');
+
+      // ---- Family 1: activity feed, cursor state and replay receipts (S6) ----
+      // seq is the global cursor; gaps are legal. UNIQUE(company_id,source_key)
+      // is the live dedup key; index (company_id,exchange_id,seq) serves the
+      // exchange drill-down; index (company_id,seq) serves forward/older pages.
+      db.exec(
+        `CREATE TABLE IF NOT EXISTS hq_activity (
+          seq INTEGER PRIMARY KEY AUTOINCREMENT,
+          id TEXT NOT NULL UNIQUE,
+          company_id TEXT NOT NULL,
+          source_key TEXT NOT NULL,
+          content_hash TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          task_id TEXT,
+          actor_agent_id TEXT,
+          recipient_agent_id TEXT,
+          from_workspace_id TEXT,
+          to_workspace_id TEXT,
+          exchange_id TEXT,
+          phase TEXT,
+          payload_json TEXT NOT NULL,
+          occurred_at TEXT,
+          received_at TEXT NOT NULL,
+          payload_bytes INTEGER NOT NULL DEFAULT 0,
+          UNIQUE(company_id, source_key)
+        )`,
+      );
+      db.exec(
+        `CREATE INDEX IF NOT EXISTS idx_hq_activity_company_seq
+          ON hq_activity(company_id, seq)`,
+      );
+      db.exec(
+        `CREATE INDEX IF NOT EXISTS idx_hq_activity_company_exchange_seq
+          ON hq_activity(company_id, exchange_id, seq)`,
+      );
+
+      // Cursor/watermark survives even when all history is pruned (S6 line 235).
+      // retained_bytes backs insertion-time byte bound; capture_state carries
+      // the truthful degradation label.
+      db.exec(
+        `CREATE TABLE IF NOT EXISTS hq_activity_state (
+          company_id TEXT PRIMARY KEY,
+          high_seq INTEGER NOT NULL,
+          pruned_through_seq INTEGER NOT NULL,
+          capture_state TEXT NOT NULL,
+          retained_bytes INTEGER NOT NULL DEFAULT 0,
+          updated_at TEXT NOT NULL
+        )`,
+      );
+
+      // Durable dedup keys outlive feed pruning (S6 line 239). issued_at is
+      // never refreshed on retry; accepted_at is the 48h retention anchor.
+      db.exec(
+        `CREATE TABLE IF NOT EXISTS hq_activity_receipts (
+          company_id TEXT NOT NULL,
+          source_key TEXT NOT NULL,
+          content_hash TEXT NOT NULL,
+          issued_at TEXT,
+          accepted_at TEXT NOT NULL,
+          original_seq INTEGER,
+          PRIMARY KEY (company_id, source_key)
+        )`,
+      );
+      db.exec(
+        `CREATE INDEX IF NOT EXISTS idx_hq_activity_receipts_company_accepted
+          ON hq_activity_receipts(company_id, accepted_at)`,
+      );
+
+      // ---- Family 2: trusted dispatch/run bindings (S6 line 243) ----
+      // Visibility is set from the authenticated source, never widened from a
+      // request body; expiry 48h after last terminal observation.
+      db.exec(
+        `CREATE TABLE IF NOT EXISTS hq_run_bindings (
+          company_id TEXT NOT NULL,
+          runtime_run_id TEXT NOT NULL,
+          runtime_session_key TEXT,
+          agent_id TEXT,
+          task_id TEXT,
+          execution_id TEXT,
+          visibility TEXT NOT NULL,
+          owner_subject TEXT,
+          recorded_at TEXT NOT NULL,
+          expires_at TEXT,
+          PRIMARY KEY (company_id, runtime_run_id)
+        )`,
+      );
+      db.exec(
+        `CREATE INDEX IF NOT EXISTS idx_hq_run_bindings_company_task
+          ON hq_run_bindings(company_id, task_id)`,
+      );
+      db.exec(
+        `CREATE INDEX IF NOT EXISTS idx_hq_run_bindings_company_expires
+          ON hq_run_bindings(company_id, expires_at)`,
+      );
+
+      // ---- Family 3: private head conversations (S6 lines 249-255) ----
+      // Composite uniqueness (company_id,id) enables scoped joins without
+      // trusting a caller-supplied id; ids are always server-minted.
+      db.exec(
+        `CREATE TABLE IF NOT EXISTS hq_chat_sessions (
+          id TEXT PRIMARY KEY,
+          company_id TEXT NOT NULL,
+          owner_subject TEXT NOT NULL,
+          installation_id TEXT NOT NULL,
+          head_agent_id TEXT,
+          runtime_agent_id TEXT,
+          created_at TEXT NOT NULL,
+          last_activity_at TEXT NOT NULL,
+          closed_at TEXT,
+          UNIQUE(company_id, id)
+        )`,
+      );
+      db.exec(
+        `CREATE INDEX IF NOT EXISTS idx_hq_chat_sessions_company_owner
+          ON hq_chat_sessions(company_id, owner_subject, last_activity_at)`,
+      );
+
+      // gateway_session_key is UNIQUE: each turn owns a different gateway
+      // session key (S9), and that uniqueness is what makes a late reply from
+      // turn A unable to land on turn B.
+      db.exec(
+        `CREATE TABLE IF NOT EXISTS hq_chat_turns (
+          id TEXT PRIMARY KEY,
+          company_id TEXT NOT NULL,
+          session_id TEXT NOT NULL,
+          owner_subject TEXT NOT NULL,
+          client_request_id TEXT NOT NULL,
+          payload_hash TEXT,
+          message_text TEXT NOT NULL,
+          reply_text TEXT,
+          state TEXT NOT NULL,
+          attempts INTEGER NOT NULL DEFAULT 0,
+          lease_token TEXT,
+          lease_expires_at TEXT,
+          gateway_session_key TEXT UNIQUE,
+          source_run_id TEXT,
+          task_id TEXT,
+          error_code TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          terminal_at TEXT,
+          content_expired_at TEXT,
+          UNIQUE(company_id, session_id, client_request_id),
+          FOREIGN KEY (company_id, session_id)
+            REFERENCES hq_chat_sessions(company_id, id)
+        )`,
+      );
+      db.exec(
+        `CREATE INDEX IF NOT EXISTS idx_hq_chat_turns_company_session_created
+          ON hq_chat_turns(company_id, session_id, created_at, id)`,
+      );
+      // S6 line 253: only ONE nonterminal turn per session. The partial index
+      // is the enforcement point — a second concurrent turn is refused by the
+      // database itself, not by an application check that can race.
+      db.exec(
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_hq_chat_turns_one_active_per_session
+          ON hq_chat_turns(company_id, session_id)
+          WHERE state IN ('queued','sending','awaiting_reply','reconciling')`,
+      );
+
+      // ---- Family 4: one-use owner-login nonce uses (S6 line 245, S7 line 281) ----
+      db.exec(
+        `CREATE TABLE IF NOT EXISTS hq_owner_login_uses (
+          nonce TEXT PRIMARY KEY,
+          expires_at INTEGER NOT NULL,
+          used_at INTEGER NOT NULL
+        )`,
+      );
+
+      console.log('[Migration 169] Company Headquarters tables ready');
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner

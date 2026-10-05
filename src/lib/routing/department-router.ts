@@ -32,8 +32,17 @@ import { canonicalDeptSlug } from './canonical-slug';
 import { isCatchAllWorkspace } from './catch-all-policy';
 // JGT105 — direct sibling-file import (not the decision-engine barrel) to
 // keep this module's import graph a straight line, never a cycle.
-import { jevDecide } from '@/lib/decision-engine/live';
+import { jevDecide, jevMode, jevEngineState, type JevDecision } from '@/lib/decision-engine/live';
 import type { DecisionDepartment } from '@/lib/decision-engine/contract';
+// B14 — applied-route receipts (SPEC S5 safe content). Import-only, side-effect
+// free, and never consulted by any routing branch: the receipt can only be
+// attached to a result the router already chose.
+import {
+  buildDecisionReceipt,
+  type HqDecisionReceipt,
+  type HqDecisionReceiptPhase,
+  type HqDecisionReasonToken,
+} from '@/lib/hq/decision-receipt';
 import { resolveSpecialistSessionKey } from './executor-runtime';
 import {
   selectRoleWorker,
@@ -129,11 +138,23 @@ export interface RoutingResult {
   confidence?: number;
   workspaceId?: string;
   companyId?: string;
+  /**
+   * B14 — safe applied-decision receipt for THIS route (SPEC S5 safe content),
+   * or null when receipts are switched off (`HQ_DECISION_RECEIPTS=0`). Purely
+   * additive: no routing branch reads it, and every routing field above is
+   * produced exactly as before.
+   */
+  receipt?: HqDecisionReceipt | null;
 }
 
 export type RoutingDecision =
   | { status: 'assigned'; routing: RoutingResult & { workspaceId: string; companyId: string } }
-  | { status: 'waiting' | 'ambiguous' | 'no_capable_worker'; reason: string; owner: 'SYSTEM'; retryable: boolean };
+  | {
+      status: 'waiting' | 'ambiguous' | 'no_capable_worker';
+      reason: string; owner: 'SYSTEM'; retryable: boolean;
+      /** B14 — safe applied-decision receipt for the WITHOUT-ASSIGNMENT outcome that was observed. */
+      receipt?: HqDecisionReceipt | null;
+    };
 
 export interface AgentWithLoad extends Agent {
   role_type?: string | null;
@@ -589,6 +610,103 @@ export interface DepartmentPick {
 /** A confident pick, an unsure lean (→ General Task), or null = unavailable (next picker). */
 type Verdict = { pick: DepartmentPick; confident: boolean } | null;
 
+// ---------------------------------------------------------------------------
+// B14 — decision-engine observation (input to the safe receipt)
+//
+// `pickDepartment` records what the decision-engine picker ACTUALLY did while
+// it runs, by reading the SAME `jevDecide`/`jevMode` values `pickJev` already
+// consumes. This is observation only: `pickJev`'s return value is unchanged,
+// so the department and owner decision are identical with or without receipts.
+// ---------------------------------------------------------------------------
+
+interface EngineObservation {
+  mode: string;
+  phase: HqDecisionReceiptPhase;
+  /** Engine route fields, recorded only when the engine's route was the applied one. */
+  routeAction: string | null;
+  departmentSlug: string | null;
+  confidence: number | null;
+  fallback: boolean | null;
+  /** Why the engine did not decide this boundary; null when it did. */
+  reasonToken: HqDecisionReasonToken | null;
+}
+
+/** Engine state → the reason token that states it explicitly. */
+function engineStateToken(mode: string): HqDecisionReasonToken {
+  if (mode === 'shadow') return 'engine_shadow';
+  if (mode === 'off') return 'engine_off';
+  if (mode === 'legacy') return 'engine_legacy';
+  const state = jevEngineState().core;
+  if (state === 'missing') return 'engine_core_missing';
+  if (state === 'failed') return 'engine_core_failed';
+  if (state === 'unprobed') return 'engine_core_unprobed';
+  return 'engine_no_decision';
+}
+
+/**
+ * What one `jevDecide` outcome means for the applied route.
+ *
+ * `applied` is the router's own verdict on whether it will USE this engine
+ * route (computed by `pickJev` from the same conditions it always used). An
+ * engine recommendation the router did not apply must never be recorded as
+ * the applied route — that is exactly the "core recommendation misrepresented
+ * as assignment" failure SPEC S5 forbids.
+ */
+function observeJevDecision(jev: JevDecision | null, mode: string, applied: boolean): EngineObservation {
+  if (mode === 'shadow') {
+    // SPEC S5: "Shadow is explicitly non-applied". The observed engine route is
+    // still RECORDED (that is the point of a shadow receipt) and the phase says
+    // plainly that it was not applied.
+    return {
+      mode,
+      phase: 'shadow',
+      routeAction: jev?.route.action ?? null,
+      departmentSlug: jev?.route.department ?? null,
+      confidence: jev?.route.confidence ?? null,
+      fallback: jev?.route.fallback ?? null,
+      reasonToken: 'engine_shadow',
+    };
+  }
+  if (!jev) {
+    return {
+      mode,
+      phase: 'unavailable',
+      routeAction: null,
+      departmentSlug: null,
+      confidence: null,
+      fallback: null,
+      reasonToken: engineStateToken(mode),
+    };
+  }
+  if (!applied) {
+    // The engine answered; this boundary did NOT apply its route (it declined
+    // to route, named a department outside the routed catalog, or landed under
+    // the router's confidence gate). The engine's fields are therefore not this
+    // receipt's route fields — they are stated as not supplied, and the reason
+    // channel says the engine did not decide here.
+    const declined = jev.route.action !== 'route' || jev.route.fallback || !jev.route.department;
+    return {
+      mode,
+      phase: 'applied',
+      routeAction: null,
+      departmentSlug: null,
+      confidence: null,
+      fallback: null,
+      reasonToken: declined ? 'engine_no_decision' : 'engine_unsure',
+    };
+  }
+  // The engine's route IS the applied route.
+  return {
+    mode,
+    phase: 'applied',
+    routeAction: jev.route.action,
+    departmentSlug: jev.route.department,
+    confidence: jev.route.confidence,
+    fallback: jev.route.fallback,
+    reasonToken: null,
+  };
+}
+
 /** Catalog JEV ranks against: the company's departments minus the structural default. */
 function jevCatalog(departments: DepartmentConfig[]): DecisionDepartment[] {
   return departments
@@ -617,14 +735,35 @@ async function pickSemantic(
   return { confident: true, pick: { department: best, method: 'semantic', confidence: similarity, note: `Semantic routing matched "${best.name}" (similarity: ${similarity.toFixed(3)})` } };
 }
 
-async function pickJev(taskText: string, departments: DepartmentConfig[]): Promise<Verdict> {
+async function pickJev(
+  taskText: string,
+  departments: DepartmentConfig[],
+  /** Per-call B14 out-channel: what the engine actually did. */
+  reportObservation: (observation: EngineObservation) => void,
+): Promise<Verdict> {
   const jev = await jevDecide(taskText, jevCatalog(departments));
+  const mode = jevMode();
+  // B14 — report what the engine actually did, for the receipt only. The
+  // decision statements below are unchanged, and `observeJevDecision` is a
+  // pure read of the same value `pickJev` already consumed. The report goes
+  // through a per-call callback (never module state) so two concurrent
+  // dispatches in one process can never read each other's observation.
   // fallback=true is the engine saying it cannot place the task: CC's own ranking decides (JGT105).
-  if (!jev || jev.route.action !== 'route' || jev.route.fallback || !jev.route.department) return null;
+  if (!jev || jev.route.action !== 'route' || jev.route.fallback || !jev.route.department) {
+    reportObservation(observeJevDecision(jev, mode, false));
+    return null;
+  }
   const target = canonicalDeptSlug(jev.route.department);
   const dept = departments.find((d) => canonicalDeptSlug(d.slug || d.id) === target);
-  if (!dept) return null;
+  if (!dept) {
+    reportObservation(observeJevDecision(jev, mode, false));
+    return null;
+  }
   const confidence = jev.route.confidence;
+  // "Applied" is exactly what this boundary will apply: a usable engine route
+  // that also clears the router's own confidence gate. Below the gate the task
+  // goes to General Task, so the engine route is NOT the applied route.
+  reportObservation(observeJevDecision(jev, mode, confidence >= JEV_MIN_CONFIDENCE));
   return { confident: confidence >= JEV_MIN_CONFIDENCE, pick: { department: dept, method: 'jev', confidence, note: `Decision engine matched "${dept.name}" (confidence: ${confidence.toFixed(2)})` } };
 }
 
@@ -648,22 +787,39 @@ export async function pickDepartment(
   departments: DepartmentConfig[],
   opts: { order?: readonly DepartmentPickerName[]; tiebreakSeam?: TiebreakSeamConfig } = {},
 ): Promise<DepartmentPick> {
+  return (await pickDepartmentInternal(task, departments, opts)).pick;
+}
+
+/**
+ * B14 — `pickDepartment` plus what its decision-engine picker observed. The
+ * observation travels as a per-call value (no module state), so concurrent
+ * dispatches cannot read each other's.
+ */
+async function pickDepartmentInternal(
+  task: { title?: string | null; description?: string | null; priority?: TaskPriority | null },
+  departments: DepartmentConfig[],
+  opts: { order?: readonly DepartmentPickerName[]; tiebreakSeam?: TiebreakSeamConfig } = {},
+): Promise<{ pick: DepartmentPick; observation: EngineObservation | null }> {
   const title = task.title || '';
   const description = task.description || '';
   const priority = (task.priority as TaskPriority) || 'medium';
+  let observation: EngineObservation | null = null;
   for (const picker of opts.order ?? DEPARTMENT_PICKER_ORDER) {
     const verdict =
       picker === 'semantic' ? await pickSemantic([title, description].filter(Boolean).join(' — '), departments, opts.tiebreakSeam ?? {})
-      : picker === 'jev' ? await pickJev([title, description].filter(Boolean).join('\n'), departments)
+      : picker === 'jev' ? await pickJev([title, description].filter(Boolean).join('\n'), departments, (o) => { observation = o; })
       : pickKeyword(title, description, priority, departments);
     if (!verdict) continue;
-    if (verdict.confident) return verdict.pick;
+    if (verdict.confident) return { pick: verdict.pick, observation };
     return {
-      department: null, method: 'general', confidence: verdict.pick.confidence,
-      note: `${verdict.pick.note} — ${picker} picker unsure`, candidate: verdict.pick.department ?? undefined,
+      pick: {
+        department: null, method: 'general', confidence: verdict.pick.confidence,
+        note: `${verdict.pick.note} — ${picker} picker unsure`, candidate: verdict.pick.department ?? undefined,
+      },
+      observation,
     };
   }
-  return { department: null, method: 'general', confidence: 0, note: 'No department picker available' };
+  return { pick: { department: null, method: 'general', confidence: 0, note: 'No department picker available' }, observation };
 }
 
 // ---------------------------------------------------------------------------
@@ -763,6 +919,7 @@ function resolveSpecialistPin(
   agents: AgentWithLoad[],
   targetAgent: string,
   departments: DepartmentConfig[],
+  sourceReference: string | null = null,
 ): SpecialistPinResolution | null {
   const needle = targetAgent.trim().toLowerCase();
   if (!needle) return null;
@@ -778,7 +935,7 @@ function resolveSpecialistPin(
 
   // Exact agent id is unique by primary key — always an unambiguous pin.
   const byId = available.find((a) => a.id.toLowerCase() === needle);
-  if (byId) return pinResultFor(byId, targetAgent, departments);
+  if (byId) return pinResultFor(byId, targetAgent, departments, sourceReference);
 
   // Resolution precedence for a typed NAME: exact name → exact persona → unique substring.
   for (const match of [
@@ -787,7 +944,7 @@ function resolveSpecialistPin(
   ]) {
     const exact = available.filter(match);
     if (exact.length > 1) return ambiguity(exact);
-    if (exact.length === 1) return pinResultFor(exact[0], targetAgent, departments);
+    if (exact.length === 1) return pinResultFor(exact[0], targetAgent, departments, sourceReference);
   }
 
   if (needle.length >= 3) {
@@ -795,7 +952,7 @@ function resolveSpecialistPin(
     // Only accept a substring match when it is unambiguous; several agents
     // share the fragment → the owner must say which one.
     if (partial.length > 1) return ambiguity(partial);
-    if (partial.length === 1) return pinResultFor(partial[0], targetAgent, departments);
+    if (partial.length === 1) return pinResultFor(partial[0], targetAgent, departments, sourceReference);
   }
 
   return null;
@@ -806,6 +963,7 @@ function pinResultFor(
   pinned: AgentWithLoad,
   targetAgent: string,
   departments: DepartmentConfig[],
+  sourceReference: string | null = null,
 ): SpecialistPinResolution {
   // Resolve the agent's department label for the owner-facing report.
   const pinnedWsCanon = canonicalDeptSlug(pinned.workspace_id);
@@ -814,18 +972,18 @@ function pinResultFor(
   );
   const departmentName = dept?.name ?? pinned.role ?? 'Owner-Direct';
 
-  return {
-    kind: 'pinned',
-    result: {
-      agentId: pinned.id,
-      agentName: pinned.name,
-      department: departmentName,
-      score: 1, method: 'owner_pin', confidence: 1, workspaceId: pinned.workspace_id,
-      reason:
-        `Owner-direct specialist pin: owner named "${targetAgent}" → routed straight to ` +
-        `${pinned.name} (${departmentName}), bypassing department classification and pickBestAgent.`,
-    },
+  const routing: RoutingResult = {
+    agentId: pinned.id,
+    agentName: pinned.name,
+    department: departmentName,
+    score: 1, method: 'owner_pin', confidence: 1, workspaceId: pinned.workspace_id,
+    reason:
+      `Owner-direct specialist pin: owner named "${targetAgent}" → routed straight to ` +
+      `${pinned.name} (${departmentName}), bypassing department classification and pickBestAgent.`,
   };
+  // B14 — owner pin is an explicit caller resolution; the department comes from
+  // the pinned worker, never from a classifier. No engine was consulted.
+  return { kind: 'pinned', result: withEngineReceipt('owner_pin', null, routing, { sourceReference }) };
 }
 
 // ---------------------------------------------------------------------------
@@ -858,10 +1016,23 @@ export async function comDispatch(
      * straight to it, bypassing department classification + pickBestAgent.
      */
     target_agent?: string | null;
+    /**
+     * B14 — durable task/correlation id, used only as the receipt's source
+     * reference (qc.md Q05: a receipt resolves by task/correlation, never by
+     * text similarity). Omitted → the receipt says so explicitly.
+     */
+    source_reference?: string | null;
   },
   agents: AgentWithLoad[],
   departments: DepartmentConfig[],
   tiebreakSeam: TiebreakSeamConfig = {},
+  /**
+   * B14 — optional out-holder for what the decision-engine picker observed.
+   * Callers that can receive a `null` route (the catch-all having no eligible
+   * worker) need this to state the observation honestly instead of claiming
+   * the engine was never consulted.
+   */
+  observationOut?: { observation: EngineObservation | null },
 ): Promise<RoutingResult | null> {
   const title = task.title || '';
   const description = task.description || '';
@@ -873,7 +1044,7 @@ export async function comDispatch(
   // and bypasses pickBestAgent entirely. If the named specialist can't be
   // resolved we fall through to normal routing rather than dropping the task.
   if (task.target_agent) {
-    const pin = resolveSpecialistPin(agents, String(task.target_agent), departments);
+    const pin = resolveSpecialistPin(agents, String(task.target_agent), departments, task.source_reference ?? null);
     if (pin?.kind === 'pinned') {
       console.log(`[DepartmentRouter] ${pin.result.reason}`);
       return pin.result;
@@ -903,51 +1074,130 @@ export async function comDispatch(
     if (dept) {
       const slug = canonicalDeptSlug(dept.slug || dept.id);
       if (['general', 'general-task'].includes(slug) || ['general', 'general task'].includes(dept.name.trim().toLowerCase())) {
-        return catchAllAssignment(agents, departments, 'Explicit General Task request');
+        return catchAllAssignment(agents, departments, 'Explicit General Task request', task.source_reference ?? null);
       }
       const agent = pickBestAgent(agents, dept, task);
       if (agent) {
-        return {
+        return withEngineReceipt('explicit', null, {
           agentId: agent.id,
           agentName: agent.name,
           department: dept.name,
           method: 'explicit', confidence: 1, workspaceId: agent.workspace_id,
           score: dept.priority * urgencyMultiplier(priority) - loadPenalty(agent.active_tasks),
           reason: `Explicit department tag "${dept.name}" matched → role-fit agent selected (load: ${agent.active_tasks} tasks)`,
-        };
+        }, { sourceReference: task.source_reference ?? null });
       }
     }
-    return catchAllAssignment(agents, departments, `Department "${task.department}" is unavailable or has no eligible worker`);
+    return catchAllAssignment(agents, departments, `Department "${task.department}" is unavailable or has no eligible worker`, task.source_reference ?? null);
   }
 
   // ── Step 2: department pick (JEV-502 measured order) ─────────────────────
   // DEPARTMENT_PICKER_ORDER: the first AVAILABLE picker decides; if it is
   // unsure (or none is available) → General Task catch-all.
-  const pick = await pickDepartment(task, departments, { tiebreakSeam });
+  const { pick, observation: enginePick } = await pickDepartmentInternal(task, departments, { tiebreakSeam });
+  if (observationOut) observationOut.observation = enginePick;
   if (!pick.department) {
     console.log(`[DepartmentRouter] ${pick.note} — routing to General Task catch-all`);
-    return catchAllAssignment(agents, departments, 'No eligible department match');
+    return catchAllAssignment(agents, departments, 'No eligible department match', task.source_reference ?? null, enginePick);
   }
   if (pick.method === 'jev') {
     // The decision engine's pick dispatches as an explicit tag; NEVER prefix
     // the reason: isCatchAllRoutingReason is a startsWith('[catch-all]') check.
     const routing = await comDispatch({ ...task, department: pick.department.slug || pick.department.id }, agents, departments);
-    return routing ? { ...routing, reason: `${routing.reason} (department chosen by decision engine)` } : routing;
+    if (!routing) return routing;
+    // B14 — the applied route was the ENGINE's; the nested explicit dispatch is
+    // only how it is carried out. Re-record that honestly (resolvedBy 'jev')
+    // instead of presenting the engine route as a bare explicit tag.
+    const withReceiptResult = withEngineReceipt('jev', enginePick, routing, { sourceReference: task.source_reference ?? null });
+    return { ...withReceiptResult, reason: `${routing.reason} (department chosen by decision engine)` };
   }
   const bestDept = pick.department;
   const agent = pickBestAgent(agents, bestDept, task);
   if (agent) {
     const base = pick.method === 'semantic' ? pick.confidence : keywordScore(`${title} ${description}`, bestDept.keywords, bestDept.name);
-    return {
+    return withEngineReceipt(pick.method, enginePick, {
       agentId: agent.id,
       agentName: agent.name,
       department: bestDept.name,
       method: pick.method, confidence: pick.confidence, workspaceId: agent.workspace_id,
       score: base * urgencyMultiplier(priority) * (bestDept.priority / 10),
       reason: `${pick.note} → least-loaded role-fit agent selected (load: ${agent.active_tasks} tasks)`,
-    };
+    }, { sourceReference: task.source_reference ?? null });
   }
-  return catchAllAssignment(agents, departments, `Matched department "${bestDept.name}" has no eligible worker`);
+  return catchAllAssignment(agents, departments, `Matched department "${bestDept.name}" has no eligible worker`, task.source_reference ?? null, enginePick);
+}
+
+/** Per-call receipt inputs. `confidence === null` states that none was supplied. */
+interface ReceiptOptions {
+  token?: HqDecisionReasonToken;
+  sourceReference?: string | null;
+  /**
+   * Confidence actually supplied by the deciding path. Omit to use the
+   * routing result's own confidence; pass null when this outcome carries no
+   * confidence at all (the catch-all's `confidence: 0` is a routing sentinel,
+   * NOT a supplied confidence, and must never be recorded as one).
+   */
+  confidence?: number | null;
+}
+
+/**
+ * Attach the B14 safe receipt to an already-decided RoutingResult. This is the
+ * only thing receipts may do here: every routing field is produced by the
+ * branch that chose it, and the receipt can never change one. Returns the
+ * result untouched when receipts are switched off.
+ *
+ * `observed` is the engine observation for this dispatch, or null when the
+ * engine picker was not reached (stated explicitly as `engine_not_consulted`).
+ */
+function withEngineReceipt(
+  resolvedBy: string,
+  observed: EngineObservation | null,
+  routing: RoutingResult,
+  options: ReceiptOptions = {},
+): RoutingResult {
+  const observation: EngineObservation = observed ?? {
+    mode: 'not_consulted',
+    phase: 'applied',
+    routeAction: null,
+    departmentSlug: null,
+    confidence: null,
+    fallback: null,
+    reasonToken: 'engine_not_consulted',
+  };
+  const engineDecided = observation.phase === 'applied' && observation.reasonToken === null;
+  // The engine answers in the CATALOG spelling it was given (often the raw
+  // workspace slug); the receipt records the canonical slug, matching what the
+  // non-engine paths record, so the two are comparable.
+  const departmentSlug = engineDecided
+    ? canonicalDeptSlug(observation.departmentSlug) || null
+    : canonicalDeptSlug(routing.department) || null;
+  const receipt = buildDecisionReceipt({
+    stage: 'department_routing',
+    phase: observation.phase,
+    mode: observation.mode,
+    resolvedBy,
+    routeAction: engineDecided ? observation.routeAction : null,
+    departmentSlug,
+    confidence: engineDecided
+      ? observation.confidence
+      : options.confidence !== undefined
+        ? options.confidence
+        : routing.confidence ?? null,
+    fallback: engineDecided ? observation.fallback : null,
+    // Q05: a receipt resolves by task/correlation, never by text similarity —
+    // this is the caller-supplied durable task/correlation id when there is one.
+    sourceReference: options.sourceReference ?? null,
+    tokens: [
+      ...(observation.reasonToken ? [observation.reasonToken] : []),
+      ...(options.token ? [options.token] : []),
+      ...(departmentSlug === null ? (['department_slug_unmapped'] as const) : []),
+      // SPEC S7 route actions are the core's own vocabulary; this boundary
+      // applies a department route, so an absent engine route action is stated
+      // rather than invented.
+      ...(engineDecided ? [] : (['route_action_not_supplied'] as const)),
+    ],
+  });
+  return receipt === null ? routing : { ...routing, receipt };
 }
 
 // ---------------------------------------------------------------------------
@@ -955,7 +1205,14 @@ export async function comDispatch(
 // ---------------------------------------------------------------------------
 
 /** Candidates are already company-scoped; recognized workspaces constrain fallback roles. */
-function catchAllAssignment(agents: AgentWithLoad[], departments: DepartmentConfig[], reason: string): RoutingResult | null {
+function catchAllAssignment(
+  agents: AgentWithLoad[],
+  departments: DepartmentConfig[],
+  reason: string,
+  sourceReference: string | null = null,
+  /** B14 — the engine observation from the pick that led here, when there was one. */
+  observed: EngineObservation | null = null,
+): RoutingResult | null {
   const eligible = agents.filter(agent => {
     const workspace = departments.find(d => d.id === agent.workspace_id);
     // Independent QC workers must never produce the work they will review.
@@ -973,9 +1230,13 @@ function catchAllAssignment(agents: AgentWithLoad[], departments: DepartmentConf
   const agent = generals.find(a => a.active_tasks === 0) || masters.find(a => a.active_tasks === 0) || generals[0] || masters[0];
   if (!agent) return null;
   const workspace = departments.find(d => d.id === agent.workspace_id)!;
-  return {agentId:agent.id,agentName:agent.name,department:workspace.name,workspaceId:agent.workspace_id,
+  // B14 — record the catch-all lane EXPLICITLY in the safe receipt (token
+  // `catch_all`), including the engine observation when this path was reached
+  // after a picker ran. The routing fields above are untouched.
+  return withEngineReceipt(agent.is_master ? 'escalation' : 'general', observed, {
+    agentId:agent.id,agentName:agent.name,department:workspace.name,workspaceId:agent.workspace_id,
     score:0,confidence:0,method:agent.is_master ? 'escalation' : 'general',
-    reason:`[catch-all] ${reason}. Assigned to ${agent.is_master ? 'CEO / orchestrator' : 'General worker'} for execution${agent.active_tasks ? ' when worker capacity is available' : ''}.`};
+    reason:`[catch-all] ${reason}. Assigned to ${agent.is_master ? 'CEO / orchestrator' : 'General worker'} for execution${agent.active_tasks ? ' when worker capacity is available' : ''}.`}, { token: 'catch_all', sourceReference, confidence: null });
 }
 
 /**
@@ -992,14 +1253,46 @@ export type RoutingTask = Pick<Task, 'title' | 'priority'> & {
   company_id?: string | null;
   department?: string;
   target_agent?: string | null;
+  /** B14 — durable task/correlation id for the receipt's source reference. */
+  source_reference?: string | null;
   /** Internal only: an already verified catch-all assignment needs a fresh worker choice. */
   catch_all?: boolean;
 };
 
 /** Resolve company before any model call; an empty or ambiguous scope never expands globally. */
 export async function routeTaskDecision(task: RoutingTask): Promise<RoutingDecision> {
-  const wait = (reason: string, status: 'waiting' | 'ambiguous' | 'no_capable_worker' = 'waiting'): RoutingDecision =>
-    ({ status, reason, owner: 'SYSTEM', retryable: false });
+  // B14 — every decision outcome (assigned AND each without-assignment HOLD)
+  // carries a safe receipt when receipts are enabled. `resolvedBy`/reason
+  // tokens describe the outcome that was observed; no routing branch reads
+  // them back.
+  const wait = (
+    reason: string,
+    status: 'waiting' | 'ambiguous' | 'no_capable_worker' = 'waiting',
+    resolvedBy: string = status,
+    tokens: HqDecisionReasonToken[] = [],
+    sourceReference: string | null = null,
+  ): RoutingDecision => {
+    // B14 — the engine may have been consulted before this hold (via the
+    // dispatcher). Its outcome is stated when it ran; only a genuinely
+    // unconsulted engine says `engine_not_consulted`.
+    const observed = dispatchObservation.observation;
+    const receipt = buildDecisionReceipt({
+      stage: 'department_routing',
+      phase: observed?.phase ?? 'applied',
+      mode: observed?.mode ?? 'not_consulted',
+      resolvedBy,
+      departmentSlug: null,
+      sourceReference,
+      tokens: [
+        ...(observed?.reasonToken ? [observed.reasonToken] : []),
+        ...(observed ? [] : (['engine_not_consulted'] as const)),
+        ...tokens,
+      ],
+    });
+    return { status, reason, owner: 'SYSTEM', retryable: false, ...(receipt ? { receipt } : {}) };
+  };
+  /** B14 — what the dispatcher's engine picker observed for THIS decision. */
+  const dispatchObservation: { observation: EngineObservation | null } = { observation: null };
   const workspace = task.workspace_id
     ? queryOne<{ company_id: string; archived_at: string | null }>('SELECT company_id, archived_at FROM workspaces WHERE id = ?', [task.workspace_id])
     : undefined;
@@ -1021,10 +1314,10 @@ export async function routeTaskDecision(task: RoutingTask): Promise<RoutingDecis
   }
   let routing: RoutingResult | null;
   if (task.catch_all && !task.target_agent) {
-    routing = catchAllAssignment(agents, departments, 'Reassessing queued catch-all executor');
+    routing = catchAllAssignment(agents, departments, 'Reassessing queued catch-all executor', task.source_reference ?? null);
   } else {
     // No hint → comDispatch Step 2 runs DEPARTMENT_PICKER_ORDER (incl. JEV).
-    routing = await comDispatch(task, agents, departments);
+    routing = await comDispatch(task, agents, departments, {}, dispatchObservation);
   }
   if (!routing) {
     // An owner pin that matches more than one same-company worker is a
@@ -1033,15 +1326,31 @@ export async function routeTaskDecision(task: RoutingTask): Promise<RoutingDecis
     // owner, so it is reported as `ambiguous` rather than `no_capable_worker`.
     if (task.target_agent) {
       const pin = resolveSpecialistPin(agents, String(task.target_agent), departments);
-      if (pin?.kind === 'ambiguous') return wait(pin.reason, 'ambiguous');
+      if (pin?.kind === 'ambiguous') {
+        return wait(pin.reason, 'ambiguous', 'owner_pin', [], task.source_reference ?? null);
+      }
+      // B14 — the explicit owner pin could not be resolved: stated, not implied.
+      return wait(
+        'No eligible worker for the requested department or specialist',
+        'no_capable_worker',
+        'owner_pin',
+        ['owner_pin_unresolved'],
+        task.source_reference ?? null,
+      );
     }
-    return wait('No eligible worker for the requested department or specialist', 'no_capable_worker');
+    return wait(
+      'No eligible worker for the requested department or specialist',
+      'no_capable_worker',
+      'no_capable_worker',
+      [],
+      task.source_reference ?? null,
+    );
   }
   const agent = agents.find(a => a.id === routing.agentId);
   const workspaceConfig = departments.find(d => d.id === agent?.workspace_id);
   if (!agent || (agent.is_master && (routing.method !== 'escalation' || !workspaceConfig ||
       !isCatchAllWorkspace({slug:workspaceConfig.slug || workspaceConfig.id, name:workspaceConfig.name})))) {
-    return wait('Task requires an operator routing decision');
+    return wait('Task requires an operator routing decision', 'waiting', 'waiting', [], task.source_reference ?? null);
   }
   return { status: 'assigned', routing: { ...routing, workspaceId: agent.workspace_id, companyId } };
 }
