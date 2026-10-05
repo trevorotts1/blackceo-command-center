@@ -576,6 +576,7 @@ Count: **8 terminal-stop writers, 0 of which stamped the notice claim, 3 of whic
 - unit/A01-builder: hq(A01): mount hq-retention + hq-chat-reconcile on shared scheduler (merge e79aa3f35c21)
 - unit/A04-builder: A04 repair cycle 1: fail-closed refusal for unregistered host on /api/hq block (merge a12ed4feb23a)
 - hq/A02-assembly: hq(A02): compose view assembly — shell+floor+feed+inspector+chat on useHqState, Headquarters nav entry (merge cb7ae2ee3d57)
+- hq/A04-assembly: hq(A04): direct-host HQ routes + owner-session bootstrap before tenant-board rewrite (merge 21c19caff36f)
 
 ## [v7.6.50] — 2026-09-21 — An explicit null is a state, not a missing argument (fixes the long-red u107 case)
 
