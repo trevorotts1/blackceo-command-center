@@ -342,6 +342,7 @@ function HeadquartersController() {
   const [chatError, setChatError] = useState<string | null>(null);
   const [chatClosed, setChatClosed] = useState<string | null>(null);
   const [talkOpen, setTalkOpen] = useState(false);
+  const [talkHeadId, setTalkHeadId] = useState<string | null>(null);
   const [olderRows, setOlderRows] = useState<HqActivityEvent[]>([]);
   useEffect(() => {
     if (hq.companyId === null) return;
@@ -355,6 +356,7 @@ function HeadquartersController() {
     setChatError(null);
     setChatClosed(null);
     setTalkOpen(false);
+    setTalkHeadId(null);
     setOlderRows([]);
     setOlderDone(false);
     setOlderError(null);
@@ -405,6 +407,22 @@ function HeadquartersController() {
     setNotice(null);
   }, []);
 
+  // Leaving the opened head closes its private panel: the header and the
+  // session must never refer to different agents (A02-F2). Runs as an effect
+  // (never setState inside another state's updater) on the selection the two
+  // callbacks above just wrote.
+  const navigatingAwayFromTalkHead =
+    talkHeadId !== null && (selection.agentId !== talkHeadId || !talkOpen);
+  useEffect(() => {
+    if (!navigatingAwayFromTalkHead) return;
+    setTalkOpen(false);
+    setTalkHeadId(null);
+    setChatSession(null);
+    setChatTurns([]);
+    setChatError(null);
+    setChatClosed(null);
+  }, [navigatingAwayFromTalkHead]);
+
   // Inspector selection: agent > department. Task chips resolve through the
   // agent that carries them (B30 selection truth; the task route itself
   // re-checks authorization).
@@ -419,8 +437,11 @@ function HeadquartersController() {
   /* ---- chat (B28 HeadChat against the real /api/hq/chat/* routes) ---- */
 
   const [chatBusy, setChatBusy] = useState(false);
-  const headAgent = department?.agents.find((row) => row.id === department.headAgentId) ?? null;
-  const talkHead = talkOpen ? (headAgent && agent?.id === headAgent.id ? headAgent : headAgent) : null;
+  // The open conversation stays bound to the head it was opened with: talkHead
+  // resolves the OPENED head id from the current roster (labels stay fresh),
+  // never the newly selected agent. A selection that leaves the opened head
+  // closes the panel (the navigating-away effect above selectAgent).
+  const talkHead = talkOpen && talkHeadId ? (roster.flatMap((row) => row.agents).find((row) => row.id === talkHeadId) ?? null) : null;
 
   const openHeadChat = useCallback(
     async (headId: string) => {
@@ -556,6 +577,7 @@ function HeadquartersController() {
 
   const closeChat = useCallback(() => {
     setTalkOpen(false);
+    setTalkHeadId(null);
     setChatSession(null);
     setChatTurns([]);
     setChatError(null);
@@ -718,6 +740,7 @@ function HeadquartersController() {
                 type="button"
                 data-testid="hq-talk-to-head"
                 onClick={() => {
+                  setTalkHeadId(agent.id);
                   setTalkOpen(true);
                   void openHeadChat(agent.id);
                 }}
