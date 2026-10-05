@@ -624,9 +624,13 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
     // never waives auth. `matchesRoute` subtree, not exact: /api/hq alone and
     // every descendant.
     if (matchesRoute(pathname, '/api/hq') || pathname === '/api/auth/owner-session') {
-      const reg = tenantRegistration(apiTenant?.host ?? requestHost(request));
-      if (reg.kind === 'client') {
-        return NextResponse.json({ error: 'hq_direct_origin_required' }, { status: 403, headers: { 'cache-control': 'private, no-store' } });
+      try {
+        const reg = tenantRegistration(apiTenant?.host ?? requestHost(request));
+        if (reg.kind === 'client') {
+          return NextResponse.json({ error: 'hq_direct_origin_required' }, { status: 403, headers: { 'cache-control': 'private, no-store' } });
+        }
+      } catch {
+        return tenantRefusalResponse(request, { error: 'unregistered_hostname', message: 'This sign-in link does not match a registered Headquarters host. Ask your operator for a fresh private link.' });
       }
     }
     if (apiTenant?.kind === 'client' && !pathname.startsWith('/api/interview/') && !pathname.startsWith('/api/auth/') && !pathname.startsWith('/api/tenant-board/')) {
