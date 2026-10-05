@@ -575,6 +575,7 @@ Count: **8 terminal-stop writers, 0 of which stamped the notice claim, 3 of whic
 - fix/chat-lane-integration: fix(hq-snapshot): move non-route exports out of the route file — next build TS2344 (merge 4f28c5f2615b)
 - unit/A01-builder: hq(A01): mount hq-retention + hq-chat-reconcile on shared scheduler (merge e79aa3f35c21)
 - unit/A04-builder: A04 repair cycle 1: fail-closed refusal for unregistered host on /api/hq block (merge a12ed4feb23a)
+- hq/A02-assembly: hq(A02): compose view assembly — shell+floor+feed+inspector+chat on useHqState, Headquarters nav entry (merge cb7ae2ee3d57)
 
 ## [v7.6.50] — 2026-09-21 — An explicit null is a state, not a missing argument (fixes the long-red u107 case)
 
