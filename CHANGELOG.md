@@ -573,6 +573,8 @@ Count: **8 terminal-stop writers, 0 of which stamped the notice claim, 3 of whic
 - unit/B33-builder: hq(B33): prove the real mint script signs hostname-only (merge d7c111fcf84e)
 - unit/B30-builder: fix(B30): live-router repair — F1 filter carry, F2 company switch, F3 notice lifecycle (merge 362d6103ebbd)
 - fix/chat-lane-integration: fix(hq-snapshot): move non-route exports out of the route file — next build TS2344 (merge 4f28c5f2615b)
+- unit/A01-builder: hq(A01): mount hq-retention + hq-chat-reconcile on shared scheduler (merge e79aa3f35c21)
+- unit/A04-builder: A04 repair cycle 1: fail-closed refusal for unregistered host on /api/hq block (merge a12ed4feb23a)
 
 ## [v7.6.50] — 2026-09-21 — An explicit null is a state, not a missing argument (fixes the long-red u107 case)
 
