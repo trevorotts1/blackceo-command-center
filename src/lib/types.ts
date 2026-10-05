@@ -812,7 +812,12 @@ export type SSEEventType =
   // (ack/progress/done) landed in a ceo-chat session's transcript. Additive
   // event so the rail's own EventSource listener can react within ~2s
   // without touching the board's useSSE hook / Zustand store at all.
-  | 'ceo_chat_task_status';
+  | 'ceo_chat_task_status'
+  // B22 — Company Headquarters (SPEC S7): a content-free, company-scoped
+  // invalidation carrying ONLY the company and its high-water cursor. Scope is
+  // resolved fail-closed in src/lib/events.ts — an `hq_changed` whose company
+  // cannot be proved is DROPPED, never fanned out on the legacy `null` path.
+  | 'hq_changed';
 
 export interface SSEEvent {
   type: SSEEventType;
@@ -846,6 +851,13 @@ export interface SSEEvent {
     status: 'queued' | 'running' | 'published' | 'failed';
     task_id?: string | null;
     execution_id?: string | null;
+  }
+  // B22 — `hq_changed` payload (SPEC S7). Deliberately this small: mirrors the
+  // frozen `HqChangedEvent` in src/lib/hq/types.ts. Never activity text, chat
+  // message/reply, session or turn IDs — those never ride the company bus.
+  | {
+    companyId: string;
+    highSeq: number;
   };
 }
 

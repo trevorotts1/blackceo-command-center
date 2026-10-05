@@ -1,0 +1,27 @@
+{
+  "//": "B10 test-only path map (swarm-plan base_policy: private test stubs only for absent implementations). Applied by pointing TSX_TSCONFIG_PATH at this file when running tests/unit/hq/B10/routes.test.ts, so the shipped routes resolve their declared B02/B09 imports to _stubs/ while every other '@/...' import still resolves to the real source tree. Nothing here is used by `next build`; the repo tsconfig is untouched.",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "target": "ES2022",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "paths": {
+      "@/lib/hq/context": ["./_stubs/context.ts"],
+      "@/lib/hq/chat": ["./_stubs/chat.ts"],
+      "@/*": ["../../../../src/*"]
+    },
+    "noEmit": true,
+    "incremental": false
+  },
+  "include": [
+    "./routes.test.ts",
+    "./_stubs/**/*.ts",
+    "../../../../src/app/api/hq/chat/**/*.ts",
+    "../../../../src/lib/hq/types.ts"
+  ]
+}

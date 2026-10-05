@@ -291,6 +291,120 @@ echo "[8c/9] Reconciling in-container env file (additive, operator keys preserve
 reconcile_env_file_additive || echo "[8c/9] WARNING: env reconcile failed — continuing (PM2 reconcile already applied)"
 
 #
+# Step 8d: Headquarters capability check + availability flag
+#
+# SPEC S10 (install/upgrade/failure): "Feature availability flag proposed
+# HEADQUARTERS_ENABLED=1 after capability checks; default enabled in tested
+# updated cohort, disabled if schema unavailable with descriptive setup status.
+# Flag is operational fallback, not customer activation approval." and
+# SPEC S10 (two targets): "Keep existing persistent /data mount ... New
+# database rows use existing resolved database. Outbox and bridge identity use
+# existing persistent workspace locations."
+#
+# Two capabilities are proved, both READ-ONLY:
+#   (1) SCHEMA — the additive HQ tables exist in the database the app actually
+#       serves ($ECOSYSTEM_DIR/mission-control.db, the DATABASE_PATH pinned in
+#       step 8b). Missing tables mean the Headquarters feature cannot write;
+#       the flag is written 0 with the missing names, never silently 1
+#       ("blocks Headquarters writes, not a deceptive empty office").
+#   (2) PERSISTENCE — the resolved database file, the platform workspace root
+#       and the bridge device-identity dir all live under the persistent mount
+#       (default /data). These are the exact VPS paths in CC
+#       src/lib/platform.ts: /data/.openclaw/workspace/,
+#       /data/.openclaw/mission-control/identity, /data/.openclaw/openclaw.json.
+#       A value outside the mount would not survive `--force-recreate`, so the
+#       flag is written 0 and the offending path is named.
+#
+# ADDITIVE ONLY: an already-set HEADQUARTERS_ENABLED (operator or prior run) is
+# PRESERVED, never rotated. Backup to .env.bak before writing (step 8c's .bak
+# convention, which step 8b shares). Non-fatal by design — a missing python3 or
+# database warns and returns 0 so bootstrap still reaches step 9.
+#
+# Test seam: HQ_CAPABILITY_DB / HQ_PERSIST_ROOT / HQ_ENV_TARGET are positional
+# overrides defaulting to the canonical container paths, so
+# tests/unit/hq/B32/headquarters-docker-capability.test.sh drives the REAL
+# functions against temp dirs (same seam pattern as step 8c's ILJ_ENV_*).
+#
+hq_missing_tables() {
+  local db="$1"
+  if [ ! -f "$db" ]; then
+    printf 'NO-DATABASE'
+    return 0
+  fi
+  python3 - "$db" <<'PYHQ'
+import sqlite3, sys
+# The additive HQ table set of SPEC S6. Read-only: PRAGMA + sqlite_master only,
+# no write, no migration, no fixture seeding.
+REQUIRED = ("hq_activity", "hq_activity_state", "hq_activity_receipts",
+            "hq_run_bindings", "hq_chat_sessions", "hq_chat_turns",
+            "hq_owner_login_uses")
+try:
+    con = sqlite3.connect("file:%s?mode=ro" % sys.argv[1], uri=True)
+    have = {row[0] for row in con.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    con.close()
+except sqlite3.Error as exc:
+    print("UNREADABLE:%s" % exc)
+    raise SystemExit(0)
+missing = [t for t in REQUIRED if t not in have]
+print("OK" if not missing else "MISSING:" + ",".join(missing))
+PYHQ
+}
+
+hq_persistence_offenders() {
+  local root="$1" db="$2"
+  # A path is persistent when it is the mount itself or sits under it.
+  local offenders="" p
+  # The three non-database paths are the vps-docker values of CC
+  # src/lib/platform.ts (workspace root, bridge device identity, path-loaded
+  # extension dir) expressed relative to the mount, so the production value is
+  # byte-identical while a test seam can point the root at a temp dir.
+  for p in "$db" "$root/.openclaw/workspace" "$root/.openclaw/mission-control/identity" "$root/.openclaw/extensions"; do
+    case "$p" in
+      "$root"|"$root"/*) : ;;
+      *) offenders="${offenders}${offenders:+, }${p}" ;;
+    esac
+  done
+  printf '%s' "$offenders"
+}
+
+hq_write_enabled_flag() {
+  local value="$1" status="$2" target="${3:-${HQ_ENV_TARGET:-/data/.openclaw/.env}}"
+  mkdir -p "$(dirname "$target")" 2>/dev/null || true
+  if [ -f "$target" ] && grep -q -E "^[[:space:]]*(export[[:space:]]+)?HEADQUARTERS_ENABLED[[:space:]]*=" "$target"; then
+    echo "[8d/9] HEADQUARTERS_ENABLED already set in $target — preserved (not overwritten). $status"
+    return 0
+  fi
+  [ -f "$target" ] && { cp -p "$target" "${target}.bak" && chmod 600 "${target}.bak" 2>/dev/null; }
+  printf 'HEADQUARTERS_ENABLED=%s\n' "$value" >> "$target"
+  chmod 600 "$target" 2>/dev/null || true
+  echo "[8d/9] HEADQUARTERS_ENABLED=$value written to $target. $status"
+  return 0
+}
+
+echo "[8d/9] Checking Headquarters capability (schema + persistent paths, read-only)..."
+_HQ_ROOT="${HQ_PERSIST_ROOT:-/data}"
+_HQ_DB="${HQ_CAPABILITY_DB:-$ECOSYSTEM_DIR/mission-control.db}"
+_HQ_PATH_OFFENDERS="$(hq_persistence_offenders "$_HQ_ROOT" "$_HQ_DB")"
+if [ -n "$_HQ_PATH_OFFENDERS" ]; then
+  hq_write_enabled_flag 0 "capability=0 reason=persistent-path-contract offenders=$_HQ_PATH_OFFENDERS (must sit under $_HQ_ROOT to survive container replacement)"
+else
+  _HQ_SCHEMA="$(hq_missing_tables "$_HQ_DB" || printf 'UNREADABLE:probe-failed')"
+  case "$_HQ_SCHEMA" in
+    OK)
+      mkdir -p "$_HQ_ROOT/.openclaw/workspace" "$_HQ_ROOT/.openclaw/mission-control/identity" 2>/dev/null || true
+      hq_write_enabled_flag 1 "capability=1 db=$_HQ_DB schema=present paths=persistent root=$_HQ_ROOT"
+      ;;
+    MISSING:*)
+      hq_write_enabled_flag 0 "capability=0 reason=schema-unavailable missing=${_HQ_SCHEMA#MISSING:} db=$_HQ_DB — run the Command Center migration (scripts/repair-command-center.sh) then re-run this bootstrap"
+      ;;
+    *)
+      hq_write_enabled_flag 0 "capability=0 reason=${_HQ_SCHEMA} db=$_HQ_DB status=descriptive-setup-required"
+      ;;
+  esac
+fi
+
+#
 # Step 9: PM2 systemd startup so PM2-managed processes survive restart
 #
 echo "[9/9] Configuring PM2 systemd startup..."

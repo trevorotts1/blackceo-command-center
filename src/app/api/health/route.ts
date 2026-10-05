@@ -5,6 +5,7 @@ import { promisify } from 'node:util';
 import path from 'node:path';
 import fs from 'node:fs';
 import { getDb, getMigrationStatus, getDbInitFailure, getDbPath } from '@/lib/db';
+import { HQ_TABLES, checkHqSchemaReady } from '@/lib/hq/storage';
 import type { DbInitFailure } from '@/lib/db';
 import { getSOPEmbeddingHealth, resolveEmbeddingProvider } from '@/lib/sop-embeddings';
 import { poolUsage } from '@/lib/capacity/provider-pools';
@@ -253,6 +254,36 @@ export async function GET() {
 
     const embeddings = await getEmbeddingsBlock();
 
+    // A04 (SPEC S10 line 393): readiness for Headquarters migration/capture/auth,
+    // not just port open. Uses B01's storage readiness on the SAME open handle
+    // this GET already holds — no new database is opened, no extra handle.
+    // Read-only LIVE-schema probe, additive: a schema-less box still polls
+    // health; it learns the office is unavailable with the missing tables named.
+    // It never moves top-level status: startup schema failure already surfaces
+    // through migrations/pending and failed health, and a transient error below
+    // falls into the existing degraded caretaker further down.
+    let headquarters: Record<string, unknown> | undefined;
+    try {
+      const readiness = checkHqSchemaReady(db);
+      headquarters = {
+        check: 'hq_schema_readiness',
+        status: readiness.ok ? 'ready' : 'setup',
+        ready: readiness.ok,
+        // S6 bound: migration 169 is where these tables land; the LEDGER claim
+        // is never the authority, only the tables below are.
+        tables: [...HQ_TABLES],
+        missingTables: [...readiness.missingTables],
+        missingIndexes: [...readiness.missingIndexes],
+      };
+    } catch {
+      headquarters = {
+        check: 'hq_schema_readiness',
+        status: 'unknown',
+        ready: false,
+        tables: [...HQ_TABLES],
+      };
+    }
+
     return NextResponse.json({
       status: pending.length === 0 ? 'ok' : 'degraded',
       timestamp: new Date().toISOString(),
@@ -263,6 +294,7 @@ export async function GET() {
         gap: pending.length,
       },
       embeddings,
+      headquarters,
       // PROVIDER CAPACITY: how much of each provider plan this box is using right
       // now, what the plan allows (`configured_limit`) versus what is in force
       // after self-calibration (`limit`), and whether a pool is shut after a 429.
@@ -314,6 +346,10 @@ export async function GET() {
           sop_index: null,
         },
         capacity: { pools: {}, providers: [] },
+        // A04: same additive readiness key as the success path, so a transient
+        // error above never looks like a headquarters verdict — status stays
+        // 'unknown' and this box-level answer stays 'degraded'.
+        headquarters: { check: 'hq_schema_readiness', status: 'unknown', ready: false, tables: [...HQ_TABLES] },
         error: error instanceof Error ? error.message : 'unknown',
       },
       { status: 200 }
