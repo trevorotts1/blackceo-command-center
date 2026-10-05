@@ -103,7 +103,7 @@ function resolveDeclaredPort(): number | null {
  */
 async function probeListening(
   port: number,
-  timeoutMs = 3000,
+  timeoutMs = 15000,
   fetchImpl: typeof fetch = fetch,
 ): Promise<{ ok: boolean; error: string | null }> {
   const controller = new AbortController();
@@ -201,7 +201,7 @@ export async function runPortIntegrityCheck(deps: PortIntegrityDeps = {}): Promi
   if (listenPort === null) {
     listenProbeError = 'CC_PORT/PORT env var not set — cannot determine declared listen port';
   } else {
-    const probe = await probeListening(listenPort, 3000, fetchImpl);
+    const probe = await probeListening(listenPort, 15000, fetchImpl);
     listenProbeError = probe.error;
     listenPortOk = listenPort === CANONICAL_CC_PORT && probe.ok;
   }
@@ -216,7 +216,7 @@ export async function runPortIntegrityCheck(deps: PortIntegrityDeps = {}): Promi
   const canonicalProbe =
     listenPort === CANONICAL_CC_PORT
       ? null                                    // already probed above; do not double-probe
-      : await probeListening(CANONICAL_CC_PORT, 3000, fetchImpl);
+      : await probeListening(CANONICAL_CC_PORT, 15000, fetchImpl);
   const canonicalPortAnswered: boolean | null =
     canonicalProbe === null ? listenPortOk || null : canonicalProbe.ok;
 
