@@ -301,6 +301,26 @@ describe('A02 assembly — real components composed from one authorized snapshot
 
   it('closes the open chat when selection leaves the opened head (A02-F2)', async () => {
     stubViewport(false);
+    // Two headed departments: moving from Dana (Marketing head) to Eli
+    // (Sales head) is the discriminating case — the unfixed page relabels
+    // the open panel to Eli while sess-1 still belongs to Dana.
+    const headedSales: HqDepartment = {
+      id: 'dept-sales',
+      slug: 'sales',
+      name: 'Sales',
+      headAgentId: 'a-sales-head',
+      provisioning: 'ready',
+      agents: [
+        agent({
+          id: 'a-sales-head',
+          workspaceId: 'dept-sales',
+          displayName: 'Eli',
+          isHead: true,
+          role: 'Sales head',
+        }),
+      ],
+    };
+    const body = snapshot([MARKETING, headedSales]);
     const routedFetch = async (input: unknown, init?: { method?: string }) => {
       const url = String(input);
       if (url === '/api/hq/chat/sessions' && init?.method === 'POST') {
@@ -309,7 +329,7 @@ describe('A02 assembly — real components composed from one authorized snapshot
       if (url.startsWith('/api/hq/chat/sessions/sess-1')) {
         return { ok: true, status: 200, json: async () => ({ turns: [] }) };
       }
-      return { ok: true, status: 200, json: async () => snapshot() };
+      return { ok: true, status: 200, json: async () => body };
     };
     vi.stubGlobal('fetch', vi.fn(routedFetch) as unknown as typeof fetch);
     searchParams = new URLSearchParams('company=co-1&department=dept-marketing');
