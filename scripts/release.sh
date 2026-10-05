@@ -83,7 +83,7 @@ echo "Verifying version consistency..."
 # ── Step 4: stage + commit ────────────────────────────────────────────────────
 echo ""
 echo "Staging version files + CHANGELOG..."
-git add version package.json package-lock.json CHANGELOG.md
+git add version package.json package-lock.json CHANGELOG.md README.md
 
 echo "Creating release commit..."
 git commit -m "chore(release): $TARGET — $TITLE"
@@ -105,7 +105,7 @@ echo "Creating GitHub release $TARGET ..."
 
 # Extract CHANGELOG body for this version (lines between this heading and next ## heading)
 CL_BODY=$(awk "/^## \[$TARGET\]/,/^## \[v[0-9]/" "$F_CL" \
-  | head -n -1 \
+  | sed '$d' \
   | tail -n +2 \
   | sed '/^[[:space:]]*$/d' \
   | head -40)

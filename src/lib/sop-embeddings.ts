@@ -35,8 +35,9 @@
  *   2. SOP_EMBEDDING_PROVIDER=openai  → force OpenAI (text-embedding-3-small, 1536-dim) [EXPLICIT OPTIONAL FALLBACK]
  *   2b. SOP_EMBEDDING_PROVIDER=ollama → local Ollama (nomic-embed-text @768 by default) [EXPLICIT OPT-IN,
  *       free, no key]. Never auto-detected. SOP_EMBEDDING_OLLAMA_URL (default http://127.0.0.1:11434),
- *       SOP_EMBEDDING_MODEL, SOP_EMBEDDING_DIMS override. Semantic routing (department-router /
- *       context-pack skill match) stays keyword-only in this mode: getEmbeddingApiKey() is null.
+ *       SOP_EMBEDDING_MODEL, SOP_EMBEDDING_DIMS override. department-router ranks semantically in
+ *       this mode too (isEmbeddingAvailable + fetchEmbeddings, JEV-502); the context-pack skill
+ *       match still keys on getEmbeddingApiKey(), which is null here.
  *   3. SOP_EMBEDDING_PROVIDER absent → auto-detect:
  *        Google key present       → google (gemini-embedding-2) [PRIMARY]
  *        ELSE OPENAI_API_KEY present → openai [OPTIONAL FALLBACK]
@@ -588,6 +589,15 @@ export async function fetchEmbedding(text: string): Promise<Float32Array> {
  */
 export async function fetchEmbeddings(texts: string[]): Promise<EmbeddingResult[]> {
   const provider = resolveEmbeddingProvider();
+  if (provider.name === 'ollama') {
+    // JEV-502: keyless local Ollama — sequential, one text per call (same
+    // wire + dim guard as fetchEmbedding), so department routing works too.
+    const results: EmbeddingResult[] = [];
+    for (let i = 0; i < texts.length; i++) {
+      results.push({ index: i, embedding: Array.from(await fetchEmbeddingOllama(texts[i], provider)) });
+    }
+    return results;
+  }
   if (provider.name === 'none' || !provider.apiKey) {
     throw new Error('No embedding API key configured');
   }

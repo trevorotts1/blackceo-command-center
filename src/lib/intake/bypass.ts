@@ -50,6 +50,8 @@ export interface TypedIngestPayload {
   effort_steps?: number | string;
   depts_touched?: number | string;
   persona_bundle?: unknown;
+  /** Raw door only: a question to the owner is waiting for this answer. Default false. */
+  pending_question?: boolean;
 }
 
 /** Every field the ingest front door accepts. Anything else is unknown. */
@@ -84,6 +86,7 @@ const KNOWN_TYPED_FIELDS: ReadonlySet<string> = new Set([
   'effort_steps',
   'depts_touched',
   'persona_bundle',
+  'pending_question',
 ]);
 
 const VALID_PRIORITIES: ReadonlySet<string> = new Set(['low', 'medium', 'high', 'critical']);
@@ -126,7 +129,16 @@ export function validateTypedIngest(
 }
 
 export type TaskCreationInput =
-  | { kind: 'raw'; message: string; classification?: Classification }
+  | {
+      kind: 'raw';
+      message: string;
+      classification?: Classification;
+      /**
+       * The door applied rawDoorMakesCard (JEV-501, Trevor-approved change to
+       * this gate): an unresolved message becomes a card rather than nothing.
+       */
+      unsureMakesCard?: boolean;
+    }
   | { kind: 'typed'; validated: Extract<ValidateTypedResult, { ok: true }> };
 
 /**
@@ -150,7 +162,43 @@ export function assertTaskCreationAllowed(input: TaskCreationInput): void {
   if (classification.messageHash !== hashIntakeMessage(message)) {
     throw new Error('classification does not match this message');
   }
-  if (classification.intent === 'unresolved') {
+  if (classification.intent === 'unresolved' && !input.unsureMakesCard) {
     throw new Error('unresolved raw text must not create a task');
   }
+}
+
+/**
+ * Exact small-talk list: the only messages the raw door may leave card-less
+ * without a decision engine verdict. Compared whole, lowercased, trailing
+ * punctuation dropped — never a prefix or pattern match.
+ */
+const SMALL_TALK: ReadonlySet<string> = new Set([
+  'hi', 'hello', 'hey', 'hi there', 'hello there', 'hey there',
+  'good morning', 'good afternoon', 'good evening',
+  'thanks', 'thank you', 'thank you so much', 'thanks so much', 'thx', 'ty',
+  'ok thanks', 'okay thanks', 'great', 'perfect', '👍',
+]);
+
+export function isPureSmallTalk(message: string): boolean {
+  return SMALL_TALK.has(message.trim().toLowerCase().replace(/[\s.!]+$/u, '').replace(/\s+/g, ' '));
+}
+
+/**
+ * JEV-501 raw-door rule — BACKUP LEANS TO CARD. A card is made unless:
+ *  - the verdict is a confident control of existing work (existing_task_control,
+ *    or clarification_response, which needs a pending question); or
+ *  - the message is on the exact small-talk list; or
+ *  - the live decision engine itself (provenance 'jev') called it a question
+ *    or small talk.
+ * Everything else — unresolved, or any lexical-only verdict because the
+ * engine is off/shadow/legacy/slow/missing/erroring — makes one card. The
+ * door never answers directly for something it could not classify.
+ */
+export function rawDoorMakesCard(classification: Classification, message: string): boolean {
+  const { intent, provenance } = classification;
+  if (intent === 'existing_task_control' || intent === 'clarification_response') return false;
+  if (intent === 'task_request' || intent === 'mixed_answer_and_task') return true;
+  if (isPureSmallTalk(message)) return false;
+  if (provenance === 'jev' && (intent === 'answer_only' || intent === 'social_conversation')) return false;
+  return true;
 }

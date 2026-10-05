@@ -167,6 +167,9 @@ export async function chatCompletion(
 export const openrouterProvider: ModelProvider = {
   slug: PROVIDER_SLUG,
   displayName: PROVIDER_DISPLAY_NAME,
+  // V23-CC1 intake chain: OpenRouter GPT-6 Luna step. Canonical key; extra
+  // aliases mirror the ledger's balance-probe family (no new secret name).
+  envCandidates: ['OPENROUTER_API_KEY', 'OPENROUTER_KEY', 'OR_API_KEY'],
   fetchModels,
   chatCompletion,
 };

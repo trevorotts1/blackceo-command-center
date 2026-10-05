@@ -319,7 +319,11 @@ export function buildReason(decision: Omit<RouteDecision, 'reason'>): string {
   return (
     `Queued: ${blocked}.` +
     (others.length
-      ? ` Every other model this agent declares is blocked too (${others.map((c) => blockReason(c) ?? providerLabel(c.provider)).join('; ')}).`
+      ? ` Every other model this agent declares is blocked too (${others
+          // No capacity/money/deadline reason means scoreRoute skipped it as
+          // unplaceable (v7.6.78); calling it "blocked" alone reads as a full pool.
+          .map((c) => blockReason(c) ?? `${providerLabel(c.provider)} ${c.modelId} not placeable on this box`)
+          .join('; ')}).`
       : ' This agent declares no other model, so it waits for a slot.')
   );
 }
