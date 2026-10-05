@@ -27,6 +27,23 @@
  * client-facing social-theme routes are middleware-exempt + route-level
  * CSRF/same-origin):
  *
+ * re-derived 2026-10-05 for the HQ merge wave (five mutating route files landed
+ * with the merged PASS units): POST /api/hq/activity (signed producer ingest,
+ * dual-auth bearer + HMAC in-handler — service-to-service, the browser only
+ * GETs the feed), POST /api/hq/chat/sessions, POST
+ * /api/hq/chat/sessions/{id}/turns, POST /api/hq/chat/sessions/{id}/turns/
+ * {id}/retry (all three owner-browser private-chat routes behind
+ * requireHqContext + direct-host refusal, session cookie + CSRF — classified
+ * by the interface scanner like every session route), POST/PATCH/DELETE
+ * /api/auth/owner-session (owner ticket redemption + sliding renewal + sign-out
+ * from /owner-login/page.tsx, session-cookie surface, never bearer): 135
+ * mutating, 7 webhook-protected (5 static + 2 dynamic), 128 non-webhook —
+ * 48 bearer patterns match 52 route templates (44 single-route + 4
+ * collection-or-item x2; 44 + 4x2 = 52), of which the pre-engine recovery
+ * template is webhook-gated as well, leaving 51 bearer-ONLY covered. Exactly
+ * one route needed a new pattern (/api/hq/activity — the other four are
+ * interface-called session surfaces and must NOT join the list).
+ *
  * re-derived 2026-09-27 for ILJ-004 tenant skip marks: POST
  * /api/interview/state — the owner's browser marking one structured question
  * skipped (InterviewClient.tsx:375 with the session cookie + tenant
@@ -290,16 +307,16 @@ const nonWebhookCount = allMutatingRoutes.length - webhookProtectedCount;
 describe('passthrough-write-scope — anti-rot lock (U052)', () => {
   // ---- Counts ------------------------------------------------------------
 
-  it('API routes exporting a mutating method: 130 (literal assertion)', () => {
-    expect(allMutatingRoutes.length).toBe(130);
+  it('API routes exporting a mutating method: 135 (literal assertion)', () => {
+    expect(allMutatingRoutes.length).toBe(135);
   });
 
   it('protected by isWebhookSecretRoute: 7 (5 static + 2 dynamic — middleware src/middleware.ts:137-167)', () => {
     expect(webhookProtectedCount).toBe(7);
   });
 
-  it('non-webhook write routes: 123 (130 mutating − 7 webhook-protected; tenant authentication remains required)', () => {
-    expect(nonWebhookCount).toBe(123);
+  it('non-webhook write routes: 128 (135 mutating − 7 webhook-protected; tenant authentication remains required)', () => {
+    expect(nonWebhookCount).toBe(128);
   });
 
   it('interface call templates found by multi-line scanner', () => {
@@ -316,12 +333,12 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
     expect(count).toBeGreaterThanOrEqual(40);
   });
 
-  it('bearer-ONLY-covered routes: 50 (47 patterns match 51 templates; 1 of them — UPDATE-014 /api/tasks/{id}/operator-preengine-recovery — is webhook-gated, so 51 − 1 = 50)', () => {
-    expect(bearerCoveredRoutes.size).toBe(50);
+  it('bearer-ONLY-covered routes: 51 (48 patterns match 52 templates; 1 of them — UPDATE-014 /api/tasks/{id}/operator-preengine-recovery — is webhook-gated, so 52 − 1 = 51)', () => {
+    expect(bearerCoveredRoutes.size).toBe(51);
   });
 
-  it('BEARER_REQUIRED_WRITE_ROUTES.length is 47, matching 51 route templates (checksum: 43 + 4×2 = 51; ask-at-capacity added /api/routing-corrections and /api/tasks/{id}/provider-choice, both single-route service-to-service surfaces)', () => {
-    expect(BEARER_REQUIRED_WRITE_ROUTES.length).toBe(47);
+  it('BEARER_REQUIRED_WRITE_ROUTES.length is 48, matching 52 route templates (checksum: 44 + 4×2 = 52; the HQ merge wave added POST /api/hq/activity, the signed producer ingest whose only browser touch is a GET of the same path)', () => {
+    expect(BEARER_REQUIRED_WRITE_ROUTES.length).toBe(48);
   });
 
   it('route-list membership: BEARER_REQUIRED_WRITE_ROUTES includes /api/weight-profiles', () => {
