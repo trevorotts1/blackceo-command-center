@@ -97,6 +97,7 @@ import {
 } from '@/lib/model-providers/ollama-cloud';
 import { resolveProviderApiKey } from '@/lib/provider-key-detection';
 import { resolveBoxDefaultModelChain } from '@/lib/runtime-model';
+import { successorModelId } from '@/lib/retired-models';
 import type { ChatCompletionResponse } from '@/lib/model-providers/types';
 import type { Task } from '@/lib/types';
 
@@ -2320,7 +2321,7 @@ export interface QCResult {
  * The QC judge's completion budget.
  *
  * THIS NUMBER CAUSED A SIX-DAY OUTAGE. It was 300. The configured judge
- * (`deepseek-v4-flash:0731-cloud`) is a REASONING model: its reply carries a hidden
+ * (`deepseek-v4.1-flash:cloud`) is a REASONING model: its reply carries a hidden
  * `reasoning` field alongside `content`, and reasoning is billed against the
  * SAME completion budget. At 300 tokens the reasoning ate the entire budget and
  * `content` came back EMPTY — which the code then reported as "provider-down".
@@ -2634,7 +2635,7 @@ If score <8.5, "gaps" must list specific, actionable rework items.`;
  * sanctioned QC-judge provider. Matches the registry shape `ollama-cloud/<m>`,
  * the legacy `ollama/<m>:cloud` shape, a bare `<m>:cloud` tag, AND the LIVE
  * fleet tag `<m>:0731-cloud` (the 2026-08-06 fleet build whose id ends in the
- * `-cloud` suffix, e.g. `deepseek-v4-flash:0731-cloud`). The legacy check was
+ * `-cloud` suffix, e.g. `deepseek-v4.1-flash:cloud`). The legacy check was
  * `id.includes(':cloud')`, which silently rejected the 0731 build — the very
  * Error-13 catalog-truth class: the operator names a model the gate does not
  * recognize. Mirrors model-selector.tierOf()'s tier-1 detection.
@@ -2648,7 +2649,7 @@ export function isOllamaCloudModel(modelId: string | null | undefined): boolean 
   const id = modelId.trim().toLowerCase();
   if (id.startsWith('ollama-cloud/')) return true;
   // Legacy `:cloud` tag (deepseek-v4-flash:cloud) OR the live `-cloud` suffix
-  // (deepseek-v4-flash:0731-cloud). The suffix match is the Error-13 fix: the
+  // (deepseek-v4.1-flash:cloud). The suffix match is the Error-13 fix: the
   // fleet now runs `:0731-cloud`, which carries `-cloud` but not `:cloud`.
   return id.includes(':cloud') || id.endsWith('-cloud');
 }
@@ -2662,7 +2663,7 @@ export function isOllamaCloudModel(modelId: string | null | undefined): boolean 
  */
 function resolveClientJudgeModel(input: QCScorerInput): string | null {
   for (const c of [input.qcAgentModel, process.env.QC_JUDGE_MODEL]) {
-    if (c && isOllamaCloudModel(c)) return c.trim();
+    if (c && isOllamaCloudModel(successorModelId(c))) return successorModelId(c.trim());
   }
   return null;
 }

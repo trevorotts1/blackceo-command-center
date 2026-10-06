@@ -1,11 +1,11 @@
 # FIX-24 QC EVIDENCE — model-catalog truth (Error 13 / T-24)
 
 **FIX:** CC `model_registry` row + operator catalog name the live fleet id
-`deepseek-v4-flash:0731-cloud`; the string `0713` appears nowhere in the catalog.
+`deepseek-v4.1-flash:cloud`; the string `0713` appears nowhere in the catalog.
 
 **QC gate (Gauntlet doc FIX-24 row):** Read the CC `model_registry` row +
 operator catalog for the presentation dept (python sqlite/targeted read) |
-Row == `deepseek-v4-flash:0731-cloud`; the string `0713` appears nowhere in the
+Row == `deepseek-v4.1-flash:cloud`; the string `0713` appears nowhere in the
 catalog | Evidence: the registry row + a python search of the catalog showing 0
 hits for `0713` | Pre-push: re-read the registry row after merge.
 
@@ -16,11 +16,11 @@ hits for `0713` | Pre-push: re-read the registry row after merge.
 Command: python sqlite read of `<operator-box>/command-center/data/mission-control.db`
 
 ```
-(698, 'ollama-cloud/deepseek-v4-flash:0731-cloud', 'deepseek-v4-flash:0731-cloud', 'ollama-cloud', 'deepseek', 'active', '["text","streaming","reasoning","tool_use","long_context"]', 1048576)
+(698, 'ollama-cloud/deepseek-v4.1-flash:cloud', 'deepseek-v4.1-flash:cloud', 'ollama-cloud', 'deepseek', 'active', '["text","streaming","reasoning","tool_use","long_context"]', 1048576)
 ```
 
-- model_id: `ollama-cloud/deepseek-v4-flash:0731-cloud`
-- normalized (provider-prefix-stripped): `deepseek-v4-flash:0731-cloud`  ==  live fleet id
+- model_id: `ollama-cloud/deepseek-v4.1-flash:cloud`
+- normalized (provider-prefix-stripped): `deepseek-v4.1-flash:cloud`  ==  live fleet id
 - status: active; context window: 1048576 (1M)
 - The row was registered by `scripts/remediate/ensure-fleet-primary-model.ts --apply`
   (idempotent boot-seed upsert; see the boot-seed wiring in `src/lib/studio/generators.ts`
@@ -50,12 +50,12 @@ row, no standing-instruction text names `0713`.
 ## 3. The retired build is no longer the presentations model
 
 - CC `isOllamaCloudModel()` previously checked `id.includes(':cloud')`, which
-  silently REJECTED `deepseek-v4-flash:0731-cloud` (the live build). Now accepts
+  silently REJECTED `deepseek-v4.1-flash:cloud` (the live build). Now accepts
   the `-cloud` suffix + legacy `:cloud` tag (src/lib/qc-scorer.ts).
 - CC rescue tier router model pins (`fleet-heartbeat/scripts/lib/rescue-tier-router.mjs`)
-  now route light/structured/medium tiers to `ollama/deepseek-v4-flash:0731-cloud`.
+  now route light/structured/medium tiers to `ollama/deepseek-v4.1-flash:cloud`.
 - Onboarding catalog: 26 standing-instruction files now name
-  `deepseek-v4-flash:0731-cloud` instead of the retired `:cloud` build
+  `deepseek-v4.1-flash:cloud` instead of the retired `:cloud` build
   (model_selector.py lineups, role-library docs, skill-38 templates/scripts,
   deprecated-models.json, generate-role-library.py, HEARTBEAT.md).
 

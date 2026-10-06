@@ -168,7 +168,7 @@ describe('FIX 14 — judge selection across client-owned providers', () => {
       ...BASE_INPUT,
       // Department QC agent configured with a NON-Ollama judge model.
       qcAgentModel: 'openrouter/deepseek-v4-pro',
-      writerModel: 'ollama-cloud/deepseek-v4-flash:0731-cloud',
+      writerModel: 'ollama-cloud/deepseek-v4.1-flash:cloud',
     });
 
     // THE FIX: the judge RAN on the client's OpenRouter route → real LLM
@@ -195,7 +195,7 @@ describe('FIX 14 — judge selection across client-owned providers', () => {
     const sel = resolve({
       ...BASE_INPUT,
       qcAgentModel: 'openrouter/deepseek-v4-pro',
-      writerModel: 'ollama-cloud/deepseek-v4-flash:0731-cloud',
+      writerModel: 'ollama-cloud/deepseek-v4.1-flash:cloud',
     });
     expect(sel, 'judge selection must succeed for an OpenRouter-only client').not.toBeNull();
     expect(sel!.modelId).toBe('openrouter/deepseek-v4-pro');
@@ -213,7 +213,7 @@ describe('FIX 14 — judge selection across client-owned providers', () => {
     const result = await scoreTaskForQC({
       ...BASE_INPUT,
       qcAgentModel: 'openrouter/deepseek-v4-pro',
-      writerModel: 'ollama-cloud/deepseek-v4-flash:0731-cloud',
+      writerModel: 'ollama-cloud/deepseek-v4.1-flash:cloud',
     });
     expect(result.scoringPath).toBe('heuristic');
     expect(result.heuristicReason).toBe('no-key');
@@ -251,7 +251,7 @@ describe('FIX 14 — judge selection across client-owned providers', () => {
     const sel = resolve({
       ...BASE_INPUT,
       qcAgentModel: 'openrouter/deepseek-v4-pro',
-      writerModel: 'ollama-cloud/deepseek-v4-flash:0731-cloud',
+      writerModel: 'ollama-cloud/deepseek-v4.1-flash:cloud',
     });
     // Rollback path: a non-Ollama judge id is NOT selectable.
     expect(sel).toBeNull();
