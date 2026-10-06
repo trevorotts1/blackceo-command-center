@@ -1,3 +1,10 @@
+## [v7.6.100] — 2026-10-06 — Env-reference apiKey hardening; main CI green again
+
+- fix(provider-discovery): `openclaw.json` `models.providers.<slug>.apiKey` that is an env reference (`$NAME`, `${NAME}`, bare `NAME`) is resolved from process.env / openclaw.json env / OpenClaw env files, or skipped. A placeholder is never hydrated as a key (Sheila Reynolds: literal `GEMINI_API_KEY` became `GOOGLE_API_KEY` -> Google 400, semantic dept picker + SOP ranking silently dead). Applies to every provider.
+- fix(sop-embeddings): `resolveGoogleKey()` and the OpenAI fallback skip placeholder-shaped values and fall through to the next candidate.
+- ci: QC.md migration census re-derived (167 entries, 001-169); HQ B10 routes test isolates DATABASE_PATH (C8 guard); `npm audit fix` clears sharp + source-map-js advisories.
+- Includes unreleased #482 / #483 persona fixes (triad-parked persona-less card heal; house voice when company context unresolved).
+
 ## [v7.6.99] — 2026-10-05 — Headquarters merge wave: B01–B33 builders plus A01/A02/A04 assemblies, census re-derivation
 
 

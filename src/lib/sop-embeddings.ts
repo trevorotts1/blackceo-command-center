@@ -74,6 +74,7 @@
 
 import { queryAll, queryOne, run, getDb } from '@/lib/db';
 import type { SOP } from '@/lib/sops';
+import { envReferenceName } from '@/lib/studio/provider-discovery';
 
 // ---------------------------------------------------------------------------
 // Provider types + constants
@@ -201,7 +202,7 @@ export function resolveEmbeddingProvider(): EmbeddingProvider {
   // OPTIONAL FALLBACK: OpenAI — only reached when no Google key is present.
   // This is an explicit optional fallback, not the default path.
   const openaiKey = process.env.OPENAI_API_KEY?.trim();
-  if (openaiKey && openaiKey.length > 10) {
+  if (openaiKey && openaiKey.length > 10 && !envReferenceName(openaiKey)) {
     return { name: 'openai', apiKey: openaiKey, model: OPENAI_MODEL, dims: OPENAI_DIMS };
   }
 
@@ -221,7 +222,7 @@ export function resolveGoogleKey(): string | null {
     process.env.GEMINI_API_KEY,
   ];
   for (const k of candidates) {
-    if (k && k.trim().length > 10) return k.trim();
+    if (k && k.trim().length > 10 && !envReferenceName(k)) return k.trim();
   }
   return null;
 }
