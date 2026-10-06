@@ -21,14 +21,15 @@
  *   an empty persona universe (A1).
  *
  * ANTI-FURNACE / ANTI-LOOP guards (durable, no self-resurrect):
- *   1. ONE attempt per task, ever: each processed task gets a queryable
+ *   1. ONE attempt per task per RETRY WINDOW: each processed task gets a queryable
  *      `persona_backfill_attempt` audit event, and the selection query EXCLUDES any
- *      task that already has one. So a genuinely mechanical task (which correctly
- *      stays NULL) is attempted exactly once and then drops out — it never loops.
- *      (The PHASE-2 blend backfill below is windowed instead of once-ever: its
- *      marker only suppresses a re-attempt for PERSONA_BACKFILL_RETRY_HOURS,
- *      because a blend attempt that FAILED leaves the task undispatchable
- *      forever — see runPersonaBlendBackfill.)
+ *      task whose newest one is younger than PERSONA_BACKFILL_RETRY_HOURS (default
+ *      6). It used to be once-ever, but an attempt that FAILED (selector throw,
+ *      e.g. `persona_company_context_missing` before the company map was wired)
+ *      then left the card persona-less for the life of the box — the triad gate
+ *      parks it and nothing ever re-tries. A mechanical task that correctly stays
+ *      NULL now costs one cheap attempt per window, not a loop (same posture as
+ *      the PHASE-2 blend backfill below).
  *   2. Grace window: only tasks older than PERSONA_BACKFILL_GRACE_SECONDS (default
  *      120s) are eligible, so a just-created task whose create-time selection is
  *      still in flight is not double-fired.
@@ -36,7 +37,12 @@
  *      oldest-first, processed sequentially (concurrency 1) so a slow selector
  *      cannot fan out python spawns.
  *   4. Terminal statuses (done / archived / review / blocked) are excluded — a
- *      persona for already-finished or blocked work buys nothing.
+ *      persona for already-finished or blocked work buys nothing. EXCEPT a card
+ *      blocked with block_reason='triad_incomplete': the triad gate parked it
+ *      precisely BECAUSE it has no persona, and this sweep is the only thing that
+ *      supplies one. Excluding it was a deadlock (gate waits for a persona, sweep
+ *      skips blocked cards). A pin on such a card releases it to backlog with its
+ *      dispatch budget reset — those attempts were triad holds, not dispatches.
  *
  * Trivially disabled: set PERSONA_BACKFILL_SWEEP_ENABLED=0, or remove the one JOBS
  * entry in scheduler.ts.
@@ -46,6 +52,7 @@ import { queryAll, queryOne, run } from '@/lib/db';
 import { v4 as uuidv4 } from 'uuid';
 import { resolvePersonaAndPin, shouldUsePersonaBlend } from '@/lib/tasks';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
+import { transition } from '@/lib/task-lifecycle';
 
 export interface PersonaBackfillResult {
   scanned: number;
@@ -108,9 +115,10 @@ export async function runPersonaBackfillSweep(): Promise<PersonaBackfillResult> 
   const graceCutoff = new Date(Date.now() - graceSeconds * 1000).toISOString();
 
   const placeholders = TERMINAL_STATUSES.map(() => '?').join(', ');
+  const retryCutoff = new Date(Date.now() - blendRetryHours() * 3_600_000).toISOString();
 
-  // Persona-less, non-terminal, aged past the grace window, and NOT already
-  // attempted by a prior sweep tick (the once-per-task loop guard). Oldest first.
+  // Persona-less, non-terminal (or triad-parked for the missing persona), aged
+  // past the grace window, and NOT attempted within the retry window. Oldest first.
   let rows: NakedTaskRow[];
   try {
     rows = queryAll<NakedTaskRow>(
@@ -122,16 +130,18 @@ export async function runPersonaBackfillSweep(): Promise<PersonaBackfillResult> 
               t.status AS status
          FROM tasks t
         WHERE (t.persona_id IS NULL OR t.persona_id = '')
-          AND t.status NOT IN (${placeholders})
+          AND (t.status NOT IN (${placeholders})
+               OR (t.status = 'blocked' AND t.block_reason = 'triad_incomplete'))
           AND t.archived_at IS NULL
           AND t.created_at <= ?
           AND NOT EXISTS (
             SELECT 1 FROM events e
              WHERE e.task_id = t.id AND e.type = 'persona_backfill_attempt'
+               AND e.created_at > ?
           )
         ORDER BY t.created_at ASC
         LIMIT ?`,
-      [...TERMINAL_STATUSES, graceCutoff, batch],
+      [...TERMINAL_STATUSES, graceCutoff, retryCutoff, batch],
     );
   } catch (err) {
     // Pre-migration DB (no persona_id / archived_at column) — nothing to heal.
@@ -174,6 +184,7 @@ export async function runPersonaBackfillSweep(): Promise<PersonaBackfillResult> 
       const pinnedId = await resolvePersonaAndPin(row.id, description, dept);
       if (pinnedId) {
         pinned++;
+        if (row.status === 'blocked') await releaseTriadParkedCard(row.id);
       } else {
         // no_persona_required (mechanical) — correctly personaless, governance-pointed.
         leftPersonaless++;
@@ -203,6 +214,32 @@ export async function runPersonaBackfillSweep(): Promise<PersonaBackfillResult> 
     blendBackfilled: blend.blendBackfilled,
     blendScanned: blend.blendScanned,
   };
+}
+
+/**
+ * A triad-parked card just acquired its missing persona: put it back in the
+ * advance lane. dispatch_attempts is reset because every attempt it burned was a
+ * triad hold (the card was never dispatchable), not a dispatch failure — left at
+ * the cap, the advancer re-blocks it instantly ("dispatch-attempt cap reached").
+ * CAS on expectedFrom:'blocked' so a concurrent Resume/heal wins cleanly.
+ */
+async function releaseTriadParkedCard(taskId: string): Promise<void> {
+  try {
+    await transition(taskId, 'backlog', {
+      actor: 'persona-backfill',
+      reason: '[PERSONA-BACKFILL] missing persona supplied — triad complete, re-entering dispatch queue',
+      expectedFrom: 'blocked',
+      extraColumns: {
+        dispatch_attempts: 0,
+        next_dispatch_eligible_at: null,
+        block_reason: null,
+        block_needs: null,
+        block_audience: null,
+      },
+    });
+  } catch (err) {
+    console.warn(`[persona-backfill] release failed for task ${taskId}:`, (err as Error).message);
+  }
 }
 
 interface BlendCandidateRow {
