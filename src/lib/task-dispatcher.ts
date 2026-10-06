@@ -1349,6 +1349,36 @@ export async function autoDispatchTask(
         // ORIGINAL in-line call site instead of this one.
       }
 
+      // PERSONA-RACE: a brand-new card is created first and its persona is pinned
+      // moments later by resolvePersonaAndPin (selector call). The gate used to
+      // fire 9 ms after creation and park the card "Missing: persona" for ~1 min
+      // (Sheila Reynolds, rescue-rangers card 6a8aca3b, 2026-10-04). While the
+      // card is younger than the grace window, re-read the pin and, if it is
+      // still absent, DEFER quietly (no hold event, no attempt counted) so the
+      // next sweep re-checks. Past the window the normal hold + accounting apply.
+      if (triad.missing.includes('persona_id')) {
+        const graceMs = Number(process.env.PERSONA_PIN_GRACE_SECONDS ?? 120) * 1000;
+        const fresh = queryOne<{ persona_id: string | null; created_at: string | null }>(
+          `SELECT persona_id, created_at FROM tasks WHERE id = ?`,
+          [task.id],
+        );
+        if (fresh?.persona_id) {
+          triad = checkTriad({
+            description: task.description,
+            sop_id: task.sop_id,
+            persona_id: fresh.persona_id,
+          });
+        } else if (
+          fresh?.created_at &&
+          Date.now() - new Date(fresh.created_at).getTime() < graceMs
+        ) {
+          console.log(
+            `[${context}] autoDispatchTask: task ${taskId} persona still being selected — deferring (not a hold)`,
+          );
+          return { status: 'held', reason: 'dispatch_precondition' };
+        }
+      }
+
       if (triad.missing.length > 0) {
         const missingLabel = triadMissingPillText(triad.missing as TriadMissingKey[]);
         const holdMsg =
