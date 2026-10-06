@@ -121,8 +121,11 @@ function seedTask(opts: {
    *  the "no requester-facing side effect" assertions non-vacuous. */
   requesterChannel?: string | null;
   requesterChatId?: string | null;
+  /** Defaults to 1h old so the PERSONA-RACE grace window never masks a genuine hold. */
+  ageMs?: number;
 }): void {
   const now = new Date().toISOString();
+  const created = new Date(Date.now() - (opts.ageMs ?? 3_600_000)).toISOString();
   run(
     `INSERT INTO tasks
        (id, title, description, status, priority, assigned_agent_id, workspace_id, business_id,
@@ -130,7 +133,7 @@ function seedTask(opts: {
      VALUES (?, ?, ?, 'backlog', 'medium', ?, NULL, NULL, ?, ?, ?, ?, ?, ?)`,
     [
       opts.id, `Task ${opts.id}`, opts.description, AGENT_ID, opts.sopId, opts.personaId,
-      opts.requesterChannel ?? null, opts.requesterChatId ?? null, now, now,
+      opts.requesterChannel ?? null, opts.requesterChatId ?? null, created, now,
     ],
   );
 }
@@ -438,4 +441,17 @@ test('[TRIAD-PARK] the hold log line is deduped — one per card per window, not
     2,
     'the attempt is still counted — dedupe silences the log, it does not skip the accounting',
   );
+});
+
+// PERSONA-RACE: a brand-new card whose persona is still being selected is deferred
+// quietly (no hold event, no attempt counted); once the pin lands it clears the gate.
+test('fresh card with persona still being selected is deferred, not held; pin landing clears it', async () => {
+  const sopId = (globalThis as Record<string, unknown>).__triadGateTestSopId as string;
+  seedTask({ id: 'race-1', description: 'Do the thing', sopId, personaId: null, ageMs: 50 });
+  await autoDispatchTask('race-1', 'test').catch(() => undefined);
+  assert.equal(eventsFor('race-1', 'triad_gate_hold').length, 0, 'no hold event for a fresh card');
+  const t = queryOne<{ dispatch_attempts: number | null; status: string }>(
+    'SELECT dispatch_attempts, status FROM tasks WHERE id = ?', ['race-1']);
+  assert.equal(t?.status, 'backlog');
+  assert.ok(!t?.dispatch_attempts, 'no failed attempt counted');
 });
