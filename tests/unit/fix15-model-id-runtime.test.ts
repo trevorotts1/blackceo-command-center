@@ -13,7 +13,7 @@
  *   2. `resolveRuntimeModelFromConfig` — reads `openclaw.json` `agents.list`
  *      `model.primary` for the matched agent (the runtime model).
  *   3. `normalizeModelId` / `modelsMatch` — provider-prefix-insensitive compare
- *      (`ollama/deepseek-v4-flash:0731-cloud` ≡ `deepseek-v4-flash:0731-cloud`).
+ *      (`ollama/deepseek-v4.1-flash:cloud` ≡ `deepseek-v4.1-flash:cloud`).
  *   4. `recordModelSkewEvent` — writes a `model_skew_detected` event row when
  *      intended ≠ runtime, and a `model_runtime_confirmed` row when they match.
  *
@@ -44,7 +44,7 @@ import {
 import type { Agent, Task } from '../../src/lib/types';
 
 // ── Fixture openclaw.json (mimics the live box: dept-presentations →
-//    model.primary = ollama/deepseek-v4-flash:0731-cloud) ────────────────────
+//    model.primary = ollama/deepseek-v4.1-flash:cloud) ────────────────────
 function writeFixtureConfig(dir: string): string {
   const cfg = {
     agents: {
@@ -54,19 +54,19 @@ function writeFixtureConfig(dir: string): string {
           id: 'dept-presentations',
           name: 'Presentations Department',
           model: {
-            primary: 'ollama/deepseek-v4-flash:0731-cloud',
+            primary: 'ollama/deepseek-v4.1-flash:cloud',
             fallbacks: ['agnes/agnes-2.5-flash'],
           },
         },
         {
           id: 'dept-funnels',
           name: 'Funnels',
-          model: { primary: 'ollama/deepseek-v4-flash:0731-cloud', fallbacks: [] },
+          model: { primary: 'ollama/deepseek-v4.1-flash:cloud', fallbacks: [] },
         },
         {
           id: 'main',
           name: 'Main',
-          model: { primary: 'ollama/deepseek-v4-flash:0731-cloud', fallbacks: [] },
+          model: { primary: 'ollama/deepseek-v4.1-flash:cloud', fallbacks: [] },
         },
       ],
     },
@@ -169,7 +169,7 @@ test('resolveRuntimeModelFromConfig reads model.primary for dept-presentations',
   assert.equal(res!.configAgentId, 'dept-presentations');
   assert.equal(
     res!.model_id,
-    'ollama/deepseek-v4-flash:0731-cloud',
+    'ollama/deepseek-v4.1-flash:cloud',
     'the runtime model must be the agent config primary, not the CC registry default',
   );
 });
@@ -188,26 +188,26 @@ test('resolveRuntimeModelFromConfig tolerates a missing config file', () => {
 
 // ── Test 3: normalizeModelId / modelsMatch — provider-prefix-insensitive ──
 test('normalizeModelId strips the provider prefix', () => {
-  assert.equal(normalizeModelId('ollama/deepseek-v4-flash:0731-cloud'), 'deepseek-v4-flash:0731-cloud');
-  assert.equal(normalizeModelId('deepseek-v4-flash:0731-cloud'), 'deepseek-v4-flash:0731-cloud');
+  assert.equal(normalizeModelId('ollama/deepseek-v4.1-flash:cloud'), 'deepseek-v4.1-flash:cloud');
+  assert.equal(normalizeModelId('deepseek-v4.1-flash:cloud'), 'deepseek-v4.1-flash:cloud');
   assert.equal(normalizeModelId('ollama-cloud/mistral-large-3:675b'), 'mistral-large-3:675b');
 });
 
 test('modelsMatch treats prefixed and bare ids as the same runtime model', () => {
   assert.equal(
-    modelsMatch('ollama/deepseek-v4-flash:0731-cloud', 'deepseek-v4-flash:0731-cloud'),
+    modelsMatch('ollama/deepseek-v4.1-flash:cloud', 'deepseek-v4.1-flash:cloud'),
     true,
   );
-  assert.equal(modelsMatch('ollama/deepseek-v4-flash:0731-cloud', 'ollama/deepseek-v4-flash:0731-cloud'), true);
-  assert.equal(modelsMatch('ollama-cloud/mistral-large-3:675b', 'deepseek-v4-flash:0731-cloud'), false);
-  assert.equal(modelsMatch(null, 'deepseek-v4-flash:0731-cloud'), false);
-  assert.equal(modelsMatch('', 'deepseek-v4-flash:0731-cloud'), false);
+  assert.equal(modelsMatch('ollama/deepseek-v4.1-flash:cloud', 'ollama/deepseek-v4.1-flash:cloud'), true);
+  assert.equal(modelsMatch('ollama-cloud/mistral-large-3:675b', 'deepseek-v4.1-flash:cloud'), false);
+  assert.equal(modelsMatch(null, 'deepseek-v4.1-flash:cloud'), false);
+  assert.equal(modelsMatch('', 'deepseek-v4.1-flash:cloud'), false);
 });
 
 // ── Test 3b: canonicalSkewModelId — the DEDUPE key (provider-aware, wrapper-tolerant)
 test('canonicalSkewModelId keeps the provider on a plain provider/model id', () => {
-  assert.equal(canonicalSkewModelId('ollama/deepseek-v4-flash:0731-cloud'), 'ollama/deepseek-v4-flash:0731-cloud');
-  assert.equal(canonicalSkewModelId('openrouter/deepseek-v4-flash:0731-cloud'), 'openrouter/deepseek-v4-flash:0731-cloud');
+  assert.equal(canonicalSkewModelId('ollama/deepseek-v4.1-flash:cloud'), 'ollama/deepseek-v4.1-flash:cloud');
+  assert.equal(canonicalSkewModelId('openrouter/deepseek-v4.1-flash:cloud'), 'openrouter/deepseek-v4.1-flash:cloud');
   assert.equal(canonicalSkewModelId('DEEPSEEK/deepseek-v4-flash-vision-exp'), 'deepseek/deepseek-v4-flash-vision-exp');
   assert.equal(canonicalSkewModelId('mistral-large-3:675b'), 'mistral-large-3:675b');
   assert.equal(canonicalSkewModelId(null), '');
@@ -234,7 +234,7 @@ test('recordModelSkewEvent writes a model_skew_detected row when intended ≠ ru
     taskId,
     agentId,
     intended: 'ollama-cloud/mistral-large-3:675b',
-    runtime: 'ollama/deepseek-v4-flash:0731-cloud',
+    runtime: 'ollama/deepseek-v4.1-flash:cloud',
     skew: true,
     detail: { source: 'openclaw_config', model_source: 'task_selector' },
   });
@@ -246,7 +246,7 @@ test('recordModelSkewEvent writes a model_skew_detected row when intended ≠ ru
   assert.ok(rows[0]!.message.includes('MODEL-SKEW'));
   const meta = JSON.parse(rows[0]!.metadata);
   assert.equal(meta.skew, true);
-  assert.equal(meta.runtime_model, 'ollama/deepseek-v4-flash:0731-cloud');
+  assert.equal(meta.runtime_model, 'ollama/deepseek-v4.1-flash:cloud');
   assert.equal(meta.intended_model, 'ollama-cloud/mistral-large-3:675b');
 });
 
@@ -255,8 +255,8 @@ test('recordModelSkewEvent writes a model_runtime_confirmed row when intended ==
   recordModelSkewEvent({
     taskId,
     agentId,
-    intended: 'ollama/deepseek-v4-flash:0731-cloud',
-    runtime: 'deepseek-v4-flash:0731-cloud',
+    intended: 'ollama/deepseek-v4.1-flash:cloud',
+    runtime: 'deepseek-v4.1-flash:cloud',
     skew: false,
     detail: { source: 'openclaw_config', model_source: 'sovereign_default' },
   });
@@ -270,7 +270,7 @@ test('recordModelSkewEvent writes a model_runtime_confirmed row when intended ==
 // ── Test 5: modelsMatch used by the skew predicate (integration of the gate) ──
 test('the skew predicate the dispatch uses would flag a real skew', () => {
   const intended = 'ollama-cloud/mistral-large-3:675b'; // CC registry default (Error 7)
-  const runtime = 'ollama/deepseek-v4-flash:0731-cloud'; // agent config primary
+  const runtime = 'ollama/deepseek-v4.1-flash:cloud'; // agent config primary
   const skew = !!(intended && runtime && !modelsMatch(intended, runtime));
   assert.equal(skew, true, 'a real Error-7 skew must be detected');
 
@@ -364,7 +364,7 @@ test('a PROVIDER flip on the same model emits a new skew event (2 rows)', () => 
   recordModelSkewEvent({
     taskId, agentId,
     intended: 'ollama/minimax-m3:cloud',
-    runtime: 'ollama/deepseek-v4-flash:0731-cloud',
+    runtime: 'ollama/deepseek-v4.1-flash:cloud',
     skew: true, detail: {},
   });
   // Same two models, resolved through a DIFFERENT provider this time — a new
@@ -372,7 +372,7 @@ test('a PROVIDER flip on the same model emits a new skew event (2 rows)', () => 
   recordModelSkewEvent({
     taskId, agentId,
     intended: 'openrouter/minimax-m3:cloud',
-    runtime: 'openrouter/deepseek-v4-flash:0731-cloud',
+    runtime: 'openrouter/deepseek-v4.1-flash:cloud',
     skew: true, detail: {},
   });
   const rows = queryAll<{ id: string; metadata: string }>(
@@ -411,7 +411,7 @@ test('a provider flip on ONE side of the pair still emits a new skew event', () 
   recordModelSkewEvent({
     taskId, agentId,
     intended: 'ollama/minimax-m3:cloud',
-    runtime: 'ollama/deepseek-v4-flash:0731-cloud',
+    runtime: 'ollama/deepseek-v4.1-flash:cloud',
     skew: true, detail: {},
   });
   const after = queryAll<{ id: string }>(
@@ -520,14 +520,14 @@ test('reconcileTaskModelRecord emits a new reconciliation row on a provider flip
   reconcileTaskModelRecord({
     taskId, agentId,
     intended: 'ollama/minimax-m3:cloud',
-    runtime: 'ollama/deepseek-v4-flash:0731-cloud',
+    runtime: 'ollama/deepseek-v4.1-flash:cloud',
     detail: {},
   });
   // Runtime re-resolved through a different provider — new divergence, new row.
   reconcileTaskModelRecord({
     taskId, agentId,
     intended: 'openrouter/minimax-m3:cloud',
-    runtime: 'openrouter/deepseek-v4-flash:0731-cloud',
+    runtime: 'openrouter/deepseek-v4.1-flash:cloud',
     detail: {},
   });
   const rows = queryAll<{ id: string }>(

@@ -1,4 +1,5 @@
 import { runtimeRegistryEntries } from '@/lib/openclaw/runtime-registry';
+import { successorModelId } from '@/lib/retired-models';
 import path from 'path';
 import { resolveOpenClawRuntimeRoot } from '@/lib/openclaw/runtime-root';
 /**
@@ -9,7 +10,7 @@ import { resolveOpenClawRuntimeRoot } from '@/lib/openclaw/runtime-root';
  * selector's "intended" model, e.g. `ollama-cloud/mistral-large-3:675b`),
  * which is NOT the model the OpenClaw runtime actually loads. The runtime
  * selects the model from the agent's OWN `openclaw.json` config entry
- * (`agents.list[i].model.primary`), e.g. `ollama/deepseek-v4-flash:0731-cloud`.
+ * (`agents.list[i].model.primary`), e.g. `ollama/deepseek-v4.1-flash:cloud`.
  * The owner was told a deck was built by a model it wasn't (Error 7).
  *
  * This module resolves the runtime model from the agent config BEFORE the
@@ -51,7 +52,7 @@ export type RuntimeModelSource =
   | 'none';
 
 export interface RuntimeModelResolution {
-  /** The model id the runtime will load (provider-prefixed, e.g. `ollama/deepseek-v4-flash:0731-cloud`). */
+  /** The model id the runtime will load (provider-prefixed, e.g. `ollama/deepseek-v4.1-flash:cloud`). */
   model_id: string | null;
   /** Provider portion of the runtime model id, when split (e.g. `ollama`). */
   provider: string | null;
@@ -86,9 +87,10 @@ interface OpenClawConfigShape {
 
 /** The primary model id out of either accepted shape. */
 function primaryOf(model: OpenClawModelConfig | undefined): string | null {
-  if (typeof model === 'string') return model.trim() || null;
+  // Retired Ollama deepseek-v4-flash ids heal to their live successor at read time.
+  if (typeof model === 'string') return model.trim() ? successorModelId(model.trim()) : null;
   const primary = model?.primary;
-  return typeof primary === 'string' && primary.trim() ? primary.trim() : null;
+  return typeof primary === 'string' && primary.trim() ? successorModelId(primary.trim()) : null;
 }
 
 /**
@@ -102,7 +104,7 @@ function primaryOf(model: OpenClawModelConfig | undefined): string | null {
 function fallbacksOf(model: OpenClawModelConfig | undefined): string[] {
   if (typeof model === 'string' || !model) return [];
   const list = model.fallbacks;
-  return Array.isArray(list) ? list.filter((m): m is string => typeof m === 'string' && !!m.trim()).map((m) => m.trim()) : [];
+  return Array.isArray(list) ? list.filter((m): m is string => typeof m === 'string' && !!m.trim()).map((m) => successorModelId(m.trim())) : [];
 }
 
 /**
@@ -350,7 +352,7 @@ export async function resolveAgentRuntimeModel(
   }
 
   // 3. CC `agents.model` column — legacy UI-pinned model (lowest authority).
-  const dbModel = agent.model ?? null;
+  const dbModel = successorModelId(agent.model ?? null) || null;
   if (dbModel) {
     const provider = dbModel.includes('/') ? dbModel.split('/')[0] : null;
     return {
@@ -366,7 +368,7 @@ export async function resolveAgentRuntimeModel(
 
 /**
  * Normalize two model ids for comparison. Strips provider prefixes and lowercases
- * so `ollama/deepseek-v4-flash:0731-cloud` and `deepseek-v4-flash:0731-cloud`
+ * so `ollama/deepseek-v4.1-flash:cloud` and `deepseek-v4.1-flash:cloud`
  * compare equal regardless of how the provider was written.
  */
 export function normalizeModelId(model: string | null | undefined): string {

@@ -217,7 +217,7 @@ export function seedRegistryIfEmpty(): number {
       ensureRegistrySeeded();
     }
     // FIX-24 (Error 13 / T-24): whatever the refresh cadence, the LIVE fleet
-    // primary id `deepseek-v4-flash:0731-cloud` must be present in the catalog
+    // primary id `deepseek-v4.1-flash:cloud` must be present in the catalog
     // from boot forward — the QC gate reads this row. Idempotent; a no-op once
     // the weekly refresh has populated it.
     ensureFleetPrimaryModel();

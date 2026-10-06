@@ -1,20 +1,20 @@
 /**
  * FIX-24 (Error 13 / T-24) — model-catalog truth: the CC model registry and
- * operator catalog must name the LIVE fleet id `deepseek-v4-flash:0731-cloud`,
+ * operator catalog must name the LIVE fleet id `deepseek-v4.1-flash:cloud`,
  * and the string `0713` must appear NOWHERE in the catalog or standing
  * instructions (the wrong tag Trevor once typed; it is not installed anywhere).
  *
  * QC gate (Gauntlet loop FIX-24 row): read the CC `model_registry` row for the
- * presentation dept + operator catalog; Row == `deepseek-v4-flash:0731-cloud`;
+ * presentation dept + operator catalog; Row == `deepseek-v4.1-flash:cloud`;
  * the string `0713` appears nowhere in the catalog.
  *
  * This suite proves:
  *   1. The presentations department's model resolves to
- *      `deepseek-v4-flash:0731-cloud` (provider-prefix-insensitive), NOT the
+ *      `deepseek-v4.1-flash:cloud` (provider-prefix-insensitive), NOT the
  *      retired `deepseek-v4-flash:cloud` build that was removed fleet-wide on
  *      2026-08-06, and NOT a phantom `0713` tag.
  *   2. When the registry is seeded exactly as the live Ollama Cloud catalog
- *      returns it (`ollama-cloud/deepseek-v4-flash:0731-cloud`), the task-time
+ *      returns it (`ollama-cloud/deepseek-v4.1-flash:cloud`), the task-time
  *      selector (via `intelligence-resolver.resolveSettings`) picks it for a
  *      presentation text task — the row the QC gate reads.
  *   3. A catalog-wide python-style scan of the registry rows for the string
@@ -45,9 +45,9 @@ import type { ModelRegistryEntry } from '../../src/lib/model-registry-types';
 import { FLEET_PRIMARY_MODEL_ID } from '../../src/lib/model-registry';
 
 /** The live fleet model id (per the 2026-08-06 fleet rollout). */
-const LIVE_FLEET_ID = 'deepseek-v4-flash:0731-cloud';
+const LIVE_FLEET_ID = 'deepseek-v4.1-flash:cloud';
 /** The registry-scoped id the ollama-cloud connector emits for it. */
-const LIVE_FLEET_REGISTRY_ID = 'ollama-cloud/deepseek-v4-flash:0731-cloud';
+const LIVE_FLEET_REGISTRY_ID = 'ollama-cloud/deepseek-v4.1-flash:cloud';
 /** The RETIRED pre-0731 build (removed fleet-wide 2026-08-06). */
 const RETIRED_BUILD_ID = 'deepseek-v4-flash:cloud';
 /** The phantom tag from Error 13 — must never exist anywhere. */
@@ -104,7 +104,7 @@ function connectorRow(modelId: string): ModelRegistryEntry {
 }
 
 // ─── 1. THE QC ROW: presentations model resolves to the live 0731-cloud id ───
-test('FIX-24: the presentations model resolves to deepseek-v4-flash:0731-cloud (NOT the retired :cloud build)', () => {
+test('FIX-24: the presentations model resolves to deepseek-v4.1-flash:cloud (NOT the retired :cloud build)', () => {
   // Registry carries BOTH the retired build (stale leftover) and the live id.
   // The live id is what the QC gate must find for the presentation dept.
   clearRegistry();
@@ -112,7 +112,7 @@ test('FIX-24: the presentations model resolves to deepseek-v4-flash:0731-cloud (
   seedRow(LIVE_FLEET_REGISTRY_ID);    // the live fleet id the refresh emits
 
   const rows = queryAll<{ model_id: string; status: string }>(
-    `SELECT model_id, status FROM model_registry WHERE model_id LIKE '%deepseek-v4-flash%' ORDER BY model_id`,
+    `SELECT model_id, status FROM model_registry WHERE model_id LIKE '%deepseek-v4%flash%' ORDER BY model_id`,
   );
 
   // The row the presentations dept resolves to must normalize to 0731-cloud.
@@ -208,7 +208,7 @@ test('FIX-24: the ollama-cloud connector normalizes a live row to the 0731-cloud
 // ─── 4b. The QC-judge gate recognizes the LIVE 0731-cloud build ─────────────
 test('FIX-24: isOllamaCloudModel accepts the live 0731-cloud build (Error-13 gate truth)', async () => {
   // Regression: the QC-judge classifier used to check `id.includes(':cloud')`,
-  // which silently REJECTED `deepseek-v4-flash:0731-cloud` (the fleet has run
+  // which silently REJECTED `deepseek-v4.1-flash:cloud` (the fleet has run
   // this build since 2026-08-06). A gate that does not recognize the model the
   // catalog names is exactly the Error-13 truth failure — pinned here.
   const { isOllamaCloudModel } = await import('../../src/lib/qc-scorer');
