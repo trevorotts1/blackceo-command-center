@@ -235,6 +235,25 @@ export function resolveRuntimeModelChainFromConfig(
 }
 
 /**
+ * The BOX's own default model chain, in the order the operator's runtime would
+ * reach for it: `agents.defaults.model.primary`, then the `main` agent's own
+ * primary, then the defaults' fallbacks. De-duped, order preserved; [] when
+ * nothing resolves. Read-only, never throws. Used by the QC judge to fall back
+ * to a model the box already runs when the configured judge model is gone.
+ */
+export function resolveBoxDefaultModelChain(configPathOverride?: string): string[] {
+  const config = readOpenClawConfig(configPathOverride);
+  if (!config) return [];
+  const defaults = config.agents?.defaults?.model;
+  const mainEntry = (config.agents?.list ?? []).find((a) => a?.id === 'main') ?? config.agents?.entries?.main;
+  const chain: string[] = [];
+  for (const m of [primaryOf(defaults), primaryOf(mainEntry?.model), ...fallbacksOf(defaults)]) {
+    if (m && !chain.includes(m)) chain.push(m);
+  }
+  return chain;
+}
+
+/**
  * Try to read the live runtime model from the gateway `sessions.list`.
  *
  * The gateway reports, per session, the model it ACTUALLY ran with

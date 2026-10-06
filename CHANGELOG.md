@@ -1,3 +1,11 @@
+## [v7.6.101] — 2026-10-06 — QC judge falls back to the box default model when its configured model is retired
+
+- fix(qc-scorer): when the configured QC judge (`QC_JUDGE_MODEL` / dept QC agent model) fails at the MODEL level (HTTP 404/410, "retired", "model not found", unknown model), the scorer now walks the box's own default chain (`openclaw.json` `agents.defaults.model.primary`, then the `main` agent, then the defaults' fallbacks; read through the existing `readOpenClawConfig` helper) instead of deferring 12 times and parking the card at `[QC-JUDGE-FAILED-FINAL]`. Incident: Ollama Cloud retired `deepseek-v4-flash:0731` on 2026-09-25 (HTTP 410), so every card on boxes still pointing at `deepseek-v4-flash:cloud` piled up in Review.
+- Safety rules unchanged: client-owned provider keys only (never an operator/shared key), the failed model is never retried, the WRITER model is skipped (next fallback is tried), and when nothing usable remains the card still fails closed to human review. A router-prefixed default (`9router/<route>/<model>:cloud`) resolves to its Ollama Cloud leaf.
+- One deduped `qc_judge_fallback` event (per from-to pair per day) plus a log line when the fallback judge is used. No owner message.
+- fix(qc-review-sweep): cards parked at `[QC-JUDGE-FAILED-FINAL]` for a model-level error (new `[JUDGE-MODEL-GONE]` token, or a legacy 404/410 in the detail) are re-scored once a working judge exists. One canary card per tick; only a real LLM verdict opens the gate for the rest.
+- test: `tests/unit/qc-judge-default-model-fallback.test.ts` (retired judge -> default used; default == writer -> next fallback; nothing usable -> fail-closed; healthy judge unchanged; router-prefixed default; sweep heal).
+
 ## [v7.6.100] — 2026-10-06 — Env-reference apiKey hardening; main CI green again
 
 - fix(provider-discovery): `openclaw.json` `models.providers.<slug>.apiKey` that is an env reference (`$NAME`, `${NAME}`, bare `NAME`) is resolved from process.env / openclaw.json env / OpenClaw env files, or skipped. A placeholder is never hydrated as a key (Sheila Reynolds: literal `GEMINI_API_KEY` became `GOOGLE_API_KEY` -> Google 400, semantic dept picker + SOP ranking silently dead). Applies to every provider.
