@@ -96,6 +96,7 @@ import {
   getOllamaCloudChatEndpoint,
 } from '@/lib/model-providers/ollama-cloud';
 import { resolveProviderApiKey } from '@/lib/provider-key-detection';
+import { resolveBoxDefaultModelChain } from '@/lib/runtime-model';
 import type { ChatCompletionResponse } from '@/lib/model-providers/types';
 import type { Task } from '@/lib/types';
 
@@ -2299,6 +2300,10 @@ export interface QCResult {
   judgeEndpoint?: string;
   /** Verbatim, human-readable statement of what actually went wrong. */
   judgeFailureDetail?: string;
+  /** True when EVERY judge tried failed at the MODEL level (404/410/retired/unknown) — the card heals once a working judge exists. */
+  judgeModelGone?: boolean;
+  /** Set when the configured judge's model was gone and the box's default model judged instead. */
+  judgeFallback?: { from: string; to: string };
   /**
    * A40: the judge's CONTENT-ADHERENCE verdict from the SAME reply as the
    * score — does the artifact follow the declared brief/persona instead of
@@ -2365,7 +2370,7 @@ export type JudgeFailureKind = 'unreachable' | 'empty-response' | 'malformed-res
 
 type JudgeOutcome =
   | { ok: true; result: QCResult }
-  | { ok: false; kind: JudgeFailureKind; detail: string };
+  | { ok: false; kind: JudgeFailureKind; detail: string; modelGone?: boolean };
 
 /** Map the true failure kind onto the heuristic reason carried in QCResult. */
 function judgeKindToHeuristicReason(kind: JudgeFailureKind): NonNullable<QCResult['heuristicReason']> {
@@ -2832,6 +2837,71 @@ function firstActiveTextModel(providerSlug: string): { model_id: string } | null
 }
 
 /**
+ * Did the judge fail because the MODEL is gone (HTTP 404/410, "retired",
+ * "model not found", "unknown model") rather than the provider being down?
+ * Ollama Cloud answers 410 for a retired build. Retrying that model can never
+ * succeed, so the scorer falls back to the box's default model instead.
+ */
+export function isModelLevelJudgeError(err: unknown): boolean {
+  const e = err as { status?: number; message?: string } | null;
+  if (e?.status === 404 || e?.status === 410) return true;
+  return /failed: (404|410)\b|retired|model[^.]{0,40}not found|unknown model|no such model/i.test(String(e?.message ?? ''));
+}
+
+/**
+ * Judges to try, in order, after the configured one died at the model level:
+ * the box's own default model chain (openclaw.json defaults primary, main
+ * agent, defaults fallbacks). Same sovereignty rules as the primary pick: a
+ * client-owned provider whose key resolves here (never an operator/shared
+ * key), never the failed model again, never the WRITER model.
+ */
+export function judgeFallbackCandidates(failed: JudgeSelection, input: QCScorerInput): JudgeSelection[] {
+  const writer = input.writerModel ? nativeModelId(input.writerModel.trim()).toLowerCase() : null;
+  const failedNative = nativeModelId(failed.modelId).toLowerCase();
+  const out: JudgeSelection[] = [];
+  for (const raw of resolveBoxDefaultModelChain()) {
+    const i = raw.indexOf('/');
+    let slug = i > 0 ? raw.slice(0, i) : 'ollama-cloud';
+    let rest = i > 0 ? raw.slice(i + 1) : raw;
+    if (slug === 'ollama') slug = isOllamaCloudModel(rest) ? 'ollama-cloud' : 'ollama-local';
+    else if (!JUDGE_PROVIDER_PRIORITY.includes(slug)) {
+      // Router-prefixed default (e.g. `9router/oc-glm5.3-flash-max/glm-5.3-flash:cloud`):
+      // not a CC connector, but a `:cloud` leaf is an Ollama Cloud model the
+      // client's OWN Ollama key can call directly.
+      const leaf = raw.slice(raw.lastIndexOf('/') + 1);
+      if (isOllamaCloudModel(leaf)) { slug = 'ollama-cloud'; rest = leaf; }
+    }
+    if (!JUDGE_PROVIDER_PRIORITY.includes(slug)) continue;
+    const full = `${slug}/${rest}`;
+    if (rest.toLowerCase() === failedNative) continue;
+    if (writer && writer === rest.toLowerCase()) continue;
+    if (out.some((c) => c.modelId === full)) continue;
+    const provider = getProvider(slug);
+    if (!provider || typeof provider.chatCompletion !== 'function') continue;
+    const keyRes = resolveProviderApiKey(provider);
+    if (!('found' in keyRes) || !keyRes.found || !keyRes.value) continue;
+    out.push({ modelId: full, provider: provider.slug, apiKey: keyRes.value });
+  }
+  return out;
+}
+
+/** One deduped (per from->to per 24h) event + log line when the fallback judge is used. Never throws, never messages the owner. */
+function recordJudgeFallback(taskId: string, from: string, to: string, why: string): void {
+  console.warn(`[QCScorer] QC judge "${from}" is gone (${why}) — judging on the box default model "${to}" instead`);
+  try {
+    const marker = `[QC-JUDGE-FALLBACK] ${from} -> ${to}`;
+    const seen = queryOne<{ one: number }>(
+      `SELECT 1 AS one FROM events WHERE type = 'qc_judge_fallback' AND message LIKE ? AND created_at >= datetime('now', '-1 day') LIMIT 1`,
+      [`${marker}%`],
+    );
+    if (seen) return;
+    run(`INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, 'qc_judge_fallback', ?, ?, ?)`, [
+      uuidv4(), taskId, `${marker} — configured QC judge model failed at the model level (${why.slice(0, 200)}); QC now runs on the box's own default model. Update QC_JUDGE_MODEL to silence this.`, new Date().toISOString(),
+    ]);
+  } catch { /* observability only */ }
+}
+
+/**
  * Score the task with the selected judge. FIX 14: the judge may run on ANY
  * client-owned provider connector (OpenRouter, OpenAI, Z.AI, Moonshot,
  * MiniMax, Google, xAI, Xiaomi, Ollama Local — or Ollama Cloud, which remains
@@ -2885,7 +2955,7 @@ async function llmScoreViaJudge(
       `the judge at ${endpoint} never answered: ${(err as Error).message} ` +
       `(model "${modelId}"). The provider is genuinely UNREACHABLE.`;
     console.warn(`[QCScorer] QC judge UNREACHABLE: ${detail}`);
-    return { ok: false, kind: 'unreachable', detail };
+    return { ok: false, kind: 'unreachable', detail, modelGone: isModelLevelJudgeError(err) };
   }
 
   // Past this line the provider ANSWERED. Whatever else goes wrong, it is NOT
@@ -3089,15 +3159,34 @@ export async function scoreTaskForQC(input: QCScorerInput): Promise<QCResult> {
   }
 
   let failure: { kind: JudgeFailureKind; detail: string };
+  let failedJudge: JudgeSelection = judge;
+  let judgeModelGone = false;
   if (simulateProviderDown) {
     failure = {
       kind: 'unreachable',
       detail: `QC_SIMULATE_PROVIDER_DOWN is set — a genuine provider outage is being simulated for judge "${judgeModel}".`,
     };
   } else {
-    const outcome = await llmScoreViaJudge(prompt, judge);
+    let outcome = await llmScoreViaJudge(prompt, judge);
     if (outcome.ok) return outcome.result;
+    // Configured judge's MODEL is gone (retired / unknown): walk the box's own
+    // default model chain. Any other failure keeps today's defer path.
+    if (outcome.modelGone) {
+      const firstDetail = outcome.detail;
+      for (const cand of judgeFallbackCandidates(judge, input)) {
+        const o = await llmScoreViaJudge(prompt, cand);
+        if (o.ok) {
+          o.result.judgeFallback = { from: judge.modelId, to: cand.modelId };
+          recordJudgeFallback(input.taskId, judge.modelId, cand.modelId, firstDetail);
+          return o.result;
+        }
+        outcome = o;
+        failedJudge = cand;
+        if (!o.modelGone) break;
+      }
+    }
     failure = { kind: outcome.kind, detail: outcome.detail };
+    judgeModelGone = !!outcome.modelGone;
   }
 
   // Judge IS configured and a key is present, but the call produced no verdict:
@@ -3106,10 +3195,11 @@ export async function scoreTaskForQC(input: QCScorerInput): Promise<QCResult> {
   // report what actually happened rather than a guessed category.
   const heuristic = heuristicScore(input);
   heuristic.heuristicReason = judgeKindToHeuristicReason(failure.kind);
-  heuristic.judgeModel = judgeModel;
-  heuristic.judgeEndpoint = judge.provider === 'ollama-cloud'
+  heuristic.judgeModel = failedJudge.modelId;
+  heuristic.judgeModelGone = judgeModelGone;
+  heuristic.judgeEndpoint = failedJudge.provider === 'ollama-cloud'
     ? getOllamaCloudChatEndpoint()
-    : `${judge.provider} connector (${judgeModel})`;
+    : `${failedJudge.provider} connector (${failedJudge.modelId})`;
   heuristic.judgeFailureDetail = failure.detail;
   // heuristicScore() hard-codes "no LLM API key configured" in its reason — TRUE
   // on the no-key path, FALSE here: a client judge IS configured, it just failed.
@@ -7336,7 +7426,7 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
               `no typo, and that OLLAMA_CLOUD_API_KEY is valid for that address.`;
 
           const finalMsg =
-            `[QC-JUDGE-FAILED-FINAL] Score: ${result.score.toFixed(1)}/10 | QC judge FAILED ${thisDeferral} ` +
+            `[QC-JUDGE-FAILED-FINAL]${result.judgeModelGone ? ' [JUDGE-MODEL-GONE]' : ''} Score: ${result.score.toFixed(1)}/10 | QC judge FAILED ${thisDeferral} ` +
             `consecutive times — this is NOT a transient blip. OBSERVED FAILURE: ${failureLabel}. ` +
             `Judge model "${judgeModelName}" called at ${judgeEndpoint}. DETAIL: ${failureDetail} ${nextStep} ` +
             `MANUAL REVIEW REQUIRED: this task can no longer auto-advance review→done — promote it manually, or ` +
