@@ -41,8 +41,8 @@
  *      blocked with block_reason='triad_incomplete': the triad gate parked it
  *      precisely BECAUSE it has no persona, and this sweep is the only thing that
  *      supplies one. Excluding it was a deadlock (gate waits for a persona, sweep
- *      skips blocked cards). A pin on such a card releases it to backlog with its
- *      dispatch budget reset — those attempts were triad holds, not dispatches.
+ *      skips blocked cards). A pin on such a card releases it to backlog. Its
+ *      dispatch budget is PRESERVED (a sweep never mints budget — PD-TEST-063).
  *
  * Trivially disabled: set PERSONA_BACKFILL_SWEEP_ENABLED=0, or remove the one JOBS
  * entry in scheduler.ts.
@@ -218,9 +218,10 @@ export async function runPersonaBackfillSweep(): Promise<PersonaBackfillResult> 
 
 /**
  * A triad-parked card just acquired its missing persona: put it back in the
- * advance lane. dispatch_attempts is reset because every attempt it burned was a
- * triad hold (the card was never dispatchable), not a dispatch failure — left at
- * the cap, the advancer re-blocks it instantly ("dispatch-attempt cap reached").
+ * advance lane. dispatch_attempts is deliberately NOT touched: a background sweep
+ * must never mint retry budget (PD-TEST-063 source scan). A card parked at the
+ * triad cap still has budget left and dispatches; one already at the dispatch
+ * cap re-blocks loudly for operator triage, where a human may grant budget.
  * CAS on expectedFrom:'blocked' so a concurrent Resume/heal wins cleanly.
  */
 async function releaseTriadParkedCard(taskId: string): Promise<void> {
@@ -230,7 +231,6 @@ async function releaseTriadParkedCard(taskId: string): Promise<void> {
       reason: '[PERSONA-BACKFILL] missing persona supplied — triad complete, re-entering dispatch queue',
       expectedFrom: 'blocked',
       extraColumns: {
-        dispatch_attempts: 0,
         next_dispatch_eligible_at: null,
         block_reason: null,
         block_needs: null,

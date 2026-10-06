@@ -9,7 +9,8 @@
  *
  * Proves: the sweep re-tries a triad-parked persona-less card once the retry
  * window has elapsed, pins a persona, and releases it to backlog with its
- * dispatch budget reset — and leaves every other blocked card alone.
+ * dispatch budget preserved (a sweep never mints budget — PD-TEST-063) — and
+ * leaves every other blocked card alone.
  */
 import './_isolated-db'; // MUST be the first DB-reaching import (C8 guard).
 import test from 'node:test';
@@ -38,7 +39,7 @@ function seedBlocked(blockReason: string, markerHoursAgo: number): string {
                         block_reason, block_needs, block_audience, dispatch_attempts,
                         created_at, updated_at, archived_at)
      VALUES (?, 'Plan the quarterly budget review', NULL, 'blocked', 'finance-ops', NULL, NULL,
-             ?, 'Missing: persona.', 'SYSTEM', 5, ?, ?, NULL)`,
+             ?, 'Missing: persona.', 'SYSTEM', 3, ?, ?, NULL)`,
     [id, blockReason, created, created],
   );
   run(`INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, 'persona_backfill_attempt', ?, 'prior failed attempt', ?)`, [
@@ -74,7 +75,7 @@ test('backfill heals a triad-parked persona-less card and releases it to backlog
   const healed = card(parked);
   assert.equal(healed.persona_id, 'covey-7-habits');
   assert.equal(healed.status, 'backlog', 'released out of blocked');
-  assert.equal(healed.dispatch_attempts, 0, 'triad-hold attempts do not count against the dispatch cap');
+  assert.equal(healed.dispatch_attempts, 3, 'the consumed budget is preserved — the sweep never mints budget');
   assert.equal(healed.block_reason, null);
 
   assert.equal(card(recent).status, 'blocked');
