@@ -119,6 +119,34 @@ def port_match(app: dict, port_str: str) -> bool:
     return declared_port(app) == port_str
 
 
+def is_pm2_module(app: dict) -> bool:
+    """Return True if this pm2 entry is a pm2 MODULE, not a managed app.
+
+    pm2 modules (pm2-logrotate, pm2-metrics, ...) are daemons pm2 runs for
+    itself.  They are NOT deploy targets and must never be counted as CC apps.
+
+    Why this exists (2026-10-06 incident): pm2-logrotate inherits the pm2
+    daemon's environment, which on this box carries PORT=4000 and
+    DATABASE_PATH from the Command Center.  declared_port() therefore read
+    "4000" off the log-rotation daemon, is_target() classified it as a second
+    app claiming the target port, app_count became 2, and cc-health-check.sh
+    FAILed with "2 pm2 apps claim target mission-control:4000".  The watchdog
+    then exited 1 on every 5-minute pass, and the automation was auto-disabled
+    after 10 consecutive failures.  The Command Center itself was healthy the
+    whole time.
+
+    Detection is by pm2's own module markers, never by name: `pmx_module` is
+    set on module entries, and a module's exec path lives under the pm2 modules
+    directory.  A real app that happens to be named "pm2-logrotate" is still an
+    app; a module is a module whatever it is called.
+    """
+    env = app.get('pm2_env') or {}
+    if env.get('pmx_module') or app.get('pmx_module'):
+        return True
+    exec_path = str(env.get('pm_exec_path') or '')
+    return '/.pm2/modules/' in exec_path or '/modules/pm2-' in exec_path
+
+
 def is_cc_ish(app: dict, target_name: str) -> bool:
     """Return True if this app is a Command-Center-family app at all.
 
@@ -165,6 +193,9 @@ def analyse(pm2_json: list, port_str: str, canon_dir: str,
     running from another directory would fail an unrelated production deploy.
     """
     apps = pm2_json or []
+    # pm2 modules are never deploy targets: drop them before any port/name
+    # matching so an inherited PORT in the daemon env cannot fake a duplicate.
+    apps = [a for a in apps if not is_pm2_module(a)]
     candidates = [a for a in apps if is_cc_ish(a, target_name) or port_match(a, port_str)]
 
     cc, others = [], []

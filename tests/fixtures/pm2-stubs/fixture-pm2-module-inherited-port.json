@@ -1,0 +1,26 @@
+[
+ {
+  "name": "mission-control",
+  "pm2_env": {
+   "name": "mission-control",
+   "status": "online",
+   "pm_cwd": "/home/user/mission-control",
+   "PORT": "4000",
+   "DATABASE_PATH": "/home/user/mission-control/mission-control.db"
+  }
+ },
+ {
+  "name": "pm2-logrotate",
+  "pmx_module": true,
+  "pm2_env": {
+   "name": "pm2-logrotate",
+   "status": "online",
+   "pm_cwd": "/home/user/.pm2/modules/pm2-logrotate/node_modules/pm2-logrotate",
+   "pm_exec_path": "/home/user/.pm2/modules/pm2-logrotate/node_modules/pm2-logrotate/app.js",
+   "pmx_module": true,
+   "PORT": "4000",
+   "CC_PORT": "4000",
+   "DATABASE_PATH": "/home/user/mission-control/mission-control.db"
+  }
+ }
+]

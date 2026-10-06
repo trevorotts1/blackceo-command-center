@@ -365,3 +365,51 @@ describe('pm2-analyze-cc: CC_PORT is a port declaration (target identification)'
     }
   });
 });
+
+// ── pm2 MODULES are never deploy targets (2026-10-06 live incident) ──────────
+// pm2-logrotate inherits the pm2 daemon's environment, which on the VPS carries
+// PORT=4000 and DATABASE_PATH from the Command Center.  Before this fix the
+// analyser read "4000" off the log-rotation daemon, counted it as a second app
+// claiming the target port, and cc-health-check.sh FAILed with
+// "2 pm2 apps claim target mission-control:4000" on every pass.  The watchdog
+// exited 1 each time and the cc-watchdog automation was auto-disabled after 10
+// consecutive failures while the Command Center itself was healthy.
+
+describe('pm2 topology — pm2 modules are excluded from the target set', () => {
+  it('pm2-logrotate carrying an inherited PORT=4000 does NOT count as a duplicate', () => {
+    const result = analyseFixture('fixture-pm2-module-inherited-port.json', {
+      canonicalDir: '/home/user/mission-control',
+    });
+    expect(result.app_count).toBe(1);
+    expect(result.crash_loopers).toHaveLength(0);
+    expect(result.cwd_ok).toBe(true);
+    expect(result.other_cc_count).toBe(0);
+  });
+
+  it('a module is excluded even when it is the ONLY entry claiming the target port', () => {
+    // Guards the inverse mistake: dropping modules must not be implemented as
+    // "ignore anything that looks like a module name" — a real app named
+    // pm2-logrotate would still be an app.  Here the module is the sole port
+    // claimant, so app_count must be 0 (no target), not 1.
+    const moduleOnly = [
+      {
+        name: 'pm2-logrotate',
+        pmx_module: true,
+        pm2_env: {
+          name: 'pm2-logrotate',
+          status: 'online',
+          pm_cwd: '/home/user/.pm2/modules/pm2-logrotate',
+          pm_exec_path: '/home/user/.pm2/modules/pm2-logrotate/app.js',
+          pmx_module: true,
+          PORT: '4000',
+        },
+      },
+    ];
+    const out = execFileSync('python3', [SCRIPT, '--port', '4000'], {
+      encoding: 'utf8',
+      input: JSON.stringify(moduleOnly),
+    });
+    const result = JSON.parse(out.trim()) as Pm2Analysis;
+    expect(result.app_count).toBe(0);
+  });
+});
