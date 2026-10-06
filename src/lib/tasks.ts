@@ -627,6 +627,56 @@ export function emitPersonaBlendMissing(taskId: string, personaId: string | null
   }
 }
 
+/**
+ * The task's company has no usable persona context (e.g. its company id is
+ * missing from MC_PERSONA_COMPANY_CONTEXTS_JSON). Previously this threw out of
+ * resolvePersonaAndPin with NOTHING pinned — every task in that company was born
+ * persona-less and the triad gate parked it. Pin the company-NEUTRAL house-voice
+ * constant instead: it reads no box-wide sticky history and no other company's
+ * config, so the "never borrow another company's default" guarantee still holds.
+ * The setup gap stays loud via a `persona_company_context_missing` event.
+ */
+function pinCompanyUnresolvedFallback(
+  taskId: string,
+  snapshot: ReturnType<typeof capturePersonaSnapshot>,
+  err: Error,
+  opts?: { blend?: boolean },
+): string | null {
+  if (err.message === 'persona_task_missing') throw err;
+  console.error(`[resolvePersonaAndPin] company persona context unresolved for task ${taskId}: ${err.message}`);
+  try {
+    run(
+      `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
+      [
+        uuidv4(),
+        'persona_company_context_missing',
+        taskId,
+        `[PERSONA-COMPANY] ${err.message} — this task's company is not wired in MC_PERSONA_COMPANY_CONTEXTS_JSON. ` +
+          `Pinned the company-neutral house voice so the card is not stranded; add the company entry to restore company-scoped selection.`,
+        new Date().toISOString(),
+      ],
+    );
+  } catch {
+    /* audit best-effort */
+  }
+  if (opts?.blend) { emitPersonaBlendMissing(taskId, null); return null; }
+  const fb: DepartmentDefaultPersona = {
+    persona_id: DEFAULT_PERSONA_FALLBACK,
+    persona_name: humanizeSlug(DEFAULT_PERSONA_FALLBACK),
+    persona_mode: 'leadership',
+    source: 'house-voice-constant',
+  };
+  try {
+    return commitPersonaMutation(snapshot, () => {
+      pinDepartmentDefaultPersona(taskId, fb);
+      return fb.persona_id;
+    });
+  } catch (fbErr) {
+    console.error(`[resolvePersonaAndPin] house-voice fallback pin FAILED for task ${taskId} — left unpinned:`, fbErr);
+    return null;
+  }
+}
+
 export async function resolvePersonaAndPin(
   taskId: string,
   taskDescription: string,
@@ -660,8 +710,14 @@ export async function resolvePersonaAndPin(
 
   // Resolve company before entering retry/fallback so ambiguity cannot degrade
   // into a different company's process-global default.
-  if (!process.env.PERSONA_FIXTURE_JSON) taskPersonaCompanyContext(taskId);
   const snapshot = capturePersonaSnapshot(taskId);
+  if (!process.env.PERSONA_FIXTURE_JSON) {
+    try {
+      taskPersonaCompanyContext(taskId);
+    } catch (err) {
+      return pinCompanyUnresolvedFallback(taskId, snapshot, err as Error, opts);
+    }
+  }
   for (let attempt = 1; attempt <= PERSONA_PIN_MAX_ATTEMPTS; attempt++) {
     try {
       const persona = await selectPersonaForTask(taskId, taskDescription, departmentForSelector, sopContext, {
