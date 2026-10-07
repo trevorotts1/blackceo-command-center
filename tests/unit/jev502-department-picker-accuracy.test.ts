@@ -287,13 +287,13 @@ test('model pick: a timeout, an error or no permitted model falls through to Gen
 test('chain at the shipped (accuracy-first) defaults: 80%+ correct department', async () => {
   const picks = await run(undefined, undefined, true);
   assert.deepEqual(misses, [], 'replay miss — re-run: npx tsx scripts/eval-department-routing.ts --onboarding <clone> --sops <db> --model glm-5.3-flash:cloud --record');
-  assert.equal(router.MODEL_PICK.maxRank, 3);
+  assert.equal(router.MODEL_PICK.maxRank, 5);
   assert.equal(sopVote.SOP_VOTE.margin, 0.4);
   assert.equal(sopVote.SOP_VOTE.minSim, 0.72);
   const s3 = score3(cases, picks.map((p) => slug(p.department)));
-  assert.ok(s3.a >= 0.8, `(a) correct department on department-labeled cases ${(s3.a * 100).toFixed(1)}% (measured 84.4%; before this chain 32.5%)`);
-  assert.ok(s3.wrongDept <= 18, `wrong-department ${s3.wrongDept} (measured 18; JEV alone is 5)`);
-  assert.ok(s3.total <= 40, `total wrong ${s3.total} (measured 28; before this chain 111)`);
+  assert.ok(s3.a >= 0.88, `(a) correct department on department-labeled cases ${(s3.a * 100).toFixed(1)}% (measured 93.1%; #495 was 84.4%; before this chain 32.5%)`);
+  assert.ok(s3.wrongDept <= 15, `wrong-department ${s3.wrongDept} (measured 12; JEV alone is 5)`);
+  assert.ok(s3.total <= 22, `total wrong ${s3.total} (measured 14; before this chain 111)`);
   assert.ok(s3.b >= 0.6, `(b) General-labeled cases sent to General ${(s3.b * 100).toFixed(1)}% (measured 66.7%)`);
   assert.ok(picks.filter((p) => p.method === 'jev').length >= 50, 'JEV must still decide first');
 });
