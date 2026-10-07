@@ -18,7 +18,7 @@
  *                                                  GOOGLE_AI_STUDIO_API_KEY /
  *                                                  GEMINI_API_KEY
  *   SOP_EMBEDDING_PROVIDER=openai|google        — force a specific provider
- *   SOP_EMBEDDING_PROVIDER=ollama               — local Ollama (nomic-embed-text @768), free,
+ *   SOP_EMBEDDING_PROVIDER=ollama               — local Ollama (embeddinggemma-2:740m @768), free,
  *                                                  no key; explicit per-box opt-in only
  *
  * Google-only clients need NO OPENAI_API_KEY.

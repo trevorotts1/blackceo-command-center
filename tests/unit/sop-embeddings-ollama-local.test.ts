@@ -3,8 +3,8 @@
  *
  * Proves:
  *   1. ollama resolves ONLY when opted in (never auto-detected; Google stays the default).
- *   2. It needs no key: semantic SOP search is available, but getEmbeddingApiKey() stays
- *      null so department routing / skill matching keep their keyword path.
+ *   2. It needs no key: semantic SOP search is available and getEmbeddingApiKey() stays
+ *      null (department routing and skill matching gate on isEmbeddingAvailable() instead).
  *   3. fetchEmbedding posts to <url>/api/embed and refuses a wrong-dim vector.
  *   4. rankSOPsBySemantic ranks ONLY rows on the local model+dims (Gemini rows skipped).
  *   5. getSOPEmbeddingHealth: local rows at 768 are healthy; Gemini-only is not.
@@ -77,12 +77,12 @@ async function insertSop(id: string, model: string, dims: number, vec: number[])
   );
 }
 
-test('ollama resolves only when opted in; defaults nomic-embed-text @768 on 127.0.0.1:11434', async () => {
+test('ollama resolves only when opted in; defaults embeddinggemma-2:740m @768 on 127.0.0.1:11434', async () => {
   const { resolveEmbeddingProvider } = await import('../../src/lib/sop-embeddings');
   await withEnv(OLLAMA, () => {
     const p = resolveEmbeddingProvider();
     assert.equal(p.name, 'ollama');
-    assert.equal(p.model, 'nomic-embed-text');
+    assert.equal(p.model, 'embeddinggemma-2:740m');
     assert.equal(p.dims, 768);
     assert.equal(p.baseUrl, 'http://127.0.0.1:11434');
     assert.equal(p.apiKey, null);
@@ -123,7 +123,7 @@ test('fetchEmbedding posts to <url>/api/embed and refuses a wrong-dim vector', a
       const v = await fetchEmbedding('hello');
       assert.equal(v.length, 768);
       assert.equal(calls[0].url, 'http://127.0.0.1:11434/api/embed');
-      assert.deepEqual(calls[0].body, { model: 'nomic-embed-text', input: 'hello' });
+      assert.deepEqual(calls[0].body, { model: 'embeddinggemma-2:740m', input: 'hello' });
       dims = 3072;
       await assert.rejects(fetchEmbedding('hello'), /3072-dim vector, expected 768/);
     });
@@ -135,8 +135,8 @@ test('fetchEmbedding posts to <url>/api/embed and refuses a wrong-dim vector', a
 test('rankSOPsBySemantic in ollama mode ranks only local-model rows', async () => {
   const { rankSOPsBySemantic } = await import('../../src/lib/sop-embeddings');
   const t = Date.now();
-  await insertSop(`ol-near-${t}`, 'nomic-embed-text', 768, unit(768, 0));
-  await insertSop(`ol-far-${t}`, 'nomic-embed-text', 768, unit(768, 1));
+  await insertSop(`ol-near-${t}`, 'embeddinggemma-2:740m', 768, unit(768, 0));
+  await insertSop(`ol-far-${t}`, 'embeddinggemma-2:740m', 768, unit(768, 1));
   await insertSop(`ol-gem-${t}`, 'gemini-embedding-2', 3072, unit(3072, 0));
   const origFetch = global.fetch;
   global.fetch = (async () =>
@@ -170,17 +170,17 @@ test('embedding_health.py accepts --sop-active-provider ollama; both stores loca
   const sop = path.join(TMP_DIR, 'sop-probe.db');
   const p = new Database(persona);
   p.exec('CREATE TABLE embeddings (id TEXT PRIMARY KEY, vector BLOB, provider TEXT, model TEXT, dim INTEGER)');
-  p.prepare("INSERT INTO embeddings VALUES ('a', x'00', 'ollama', 'nomic-embed-text', 768)").run();
+  p.prepare("INSERT INTO embeddings VALUES ('a', x'00', 'ollama', 'embeddinggemma-2:740m', 768)").run();
   p.close();
   const s = new Database(sop);
   s.exec('CREATE TABLE sop_embeddings (sop_id TEXT PRIMARY KEY, embedding BLOB, embedding_model TEXT, embedding_dims INTEGER)');
-  s.prepare("INSERT INTO sop_embeddings VALUES ('s', x'00', 'nomic-embed-text', 768)").run();
+  s.prepare("INSERT INTO sop_embeddings VALUES ('s', x'00', 'embeddinggemma-2:740m', 768)").run();
   s.close();
   const run = (extra: string[]) => spawnSync('python3', [
     path.join(REPO_ROOT, 'shared-utils', 'embedding_health.py'), '--format', 'json',
     '--sop-db', sop, '--persona-db', persona, '--sop-active-provider', 'ollama', ...extra,
   ], { encoding: 'utf-8' });
-  const r = run(['--sop-active-model', 'nomic-embed-text', '--sop-active-dims', '768']);
+  const r = run(['--sop-active-model', 'embeddinggemma-2:740m', '--sop-active-dims', '768']);
   assert.equal(r.status, 0, r.stderr);
   const report = JSON.parse(r.stdout);
   assert.equal(report.status, 'ok', r.stdout);
@@ -251,9 +251,9 @@ test('backfill in ollama mode: not refused by the shipped marker; stamps the loc
 
     const check = new Database(dbPath, { readonly: true });
     const marker = check.prepare('SELECT provider, model, dims FROM sop_embeddings_local_provider WHERE id = 1').get();
-    assert.deepEqual(marker, { provider: 'ollama', model: 'nomic-embed-text', dims: 768 });
+    assert.deepEqual(marker, { provider: 'ollama', model: 'embeddinggemma-2:740m', dims: 768 });
     const rows = check.prepare(
-      "SELECT COUNT(*) AS n FROM sop_embeddings WHERE sop_id IN ('bf-a','bf-b') AND embedding_model = 'nomic-embed-text' AND embedding_dims = 768 AND length(embedding) = 3072"
+      "SELECT COUNT(*) AS n FROM sop_embeddings WHERE sop_id IN ('bf-a','bf-b') AND embedding_model = 'embeddinggemma-2:740m' AND embedding_dims = 768 AND length(embedding) = 3072"
     ).get() as { n: number };
     check.close();
     assert.equal(rows.n, 2);
