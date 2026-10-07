@@ -145,7 +145,7 @@ async function main(): Promise<void> {
   }
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'jev502-eval-'));
   Object.assign(process.env, {
-    DATABASE_PATH: path.join(tmp, 'eval.db'), CC_TEST_FIXTURE_ROOT: tmp, OPENCLAW_ROOT: path.join(tmp, 'oc'),
+    DATABASE_PATH: path.join(tmp, 'eval.db'), CC_TEST_FIXTURE_ROOT: tmp, OPENCLAW_ROOT: path.join(tmp, 'oc'), HOME: tmp,
     OC_CONFIG: path.join(tmp, 'oc'), DISABLE_CRON: '1', DISABLE_BRIDGE_BOOTSTRAP: '1',
     OWNER_NOTIFY_TELEGRAM_DISABLED: '1', DECISION_ENGINE_CORE_PATH: core, DECISION_ENGINE_MODE: process.env.DECISION_ENGINE_MODE || 'auto',
   });
@@ -255,16 +255,19 @@ async function main(): Promise<void> {
 
   // ── Routing-accuracy steps (needs the box's SOP index: --sops <mission-control.db>) ──────────────
   if (sopsDb) {
+    // The model pick runs through the PRODUCTION path (model-pick-llm.ts): the box's own openclaw.json model chain and
+    // provider connectors. --model <id> writes that chain into the isolated OPENCLAW_ROOT (a stand-in for the box's config),
+    // and HOME is a temp dir so no real key store is read: an `ollama/<x>:cloud` entry then uses the local Ollama daemon.
     const modelName = arg('--model');
-    const chatUrl = (process.env.EVAL_CHAT_URL || process.env.SOP_EMBEDDING_OLLAMA_URL || 'http://127.0.0.1:11434').replace(/\/+$/, '') + '/v1/chat/completions';
-    const { authorizedTiebreak } = await import('../src/lib/routing/tiebreak-adapter');
-    const seam = modelName
-      ? { model: modelName, permissionOverride: true, tiebreak: (req: Parameters<typeof authorizedTiebreak>[0]) => authorizedTiebreak({ ...req, apiKey: 'local', endpoint: chatUrl }) }
-      : { model: null as string | null, permissionOverride: false };
+    if (modelName) {
+      fs.mkdirSync(String(process.env.OPENCLAW_ROOT), { recursive: true });
+      fs.writeFileSync(path.join(String(process.env.OPENCLAW_ROOT), 'openclaw.json'), JSON.stringify({ agents: { defaults: { model: { primary: `ollama/${modelName}` } } } }));
+    }
+    const seam = { companyId: EVAL_COMPANY };
     const run = async (tail: ('sop' | 'model')[], useSeam: boolean, profiles = false) => {
       process.env.JEV_SOP_PROFILES = profiles ? '1' : '0';
       const picks: (string | null)[] = [];
-      for (const c of cases) picks.push(slugOf((await pickDepartment({ title: c.m }, departments, { tail, ...(useSeam ? { tiebreakSeam: seam } : {}) })).department));
+      for (const c of cases) { const r = await pickDepartment({ title: c.m }, departments, { tail, ...(useSeam ? { tiebreakSeam: seam } : {}) }); picks.push(slugOf(r.department)); if (process.env.EVAL_TRACE) console.log(`TRACE\t${c.d}\t${slugOf(r.department) ?? 'general-task'}\t${r.method}\t${r.modelRank ?? ''}\t${r.generalBy ?? ''}\t${c.m}`); }
       return picks;
     };
     const record3 = async (label: string, tail: ('sop' | 'model')[], useSeam: boolean, profiles = false) => {
@@ -276,7 +279,8 @@ async function main(): Promise<void> {
     if (sweep) {
       const { SOP_VOTE, SOP_VOTE_GEMINI } = await import('../src/lib/routing/sop-vote');
       for (const spec of sweep.split(';')) {
-        const [k, m, ms, tailS] = spec.split(',');
+        const [k, m, ms, tailS, mr] = spec.split(',');
+        (await import('../src/lib/routing/department-router')).MODEL_PICK.maxRank = Number(mr || 3);
         Object.assign(SOP_VOTE, { k: Number(k), margin: Number(m), minSim: Number(ms) });
         Object.assign(SOP_VOTE_GEMINI, { k: Number(k), margin: Number(m), minSim: Number(ms) });
         const tail = (tailS || 'sop+model').split('+').filter(Boolean) as ('sop' | 'model')[];

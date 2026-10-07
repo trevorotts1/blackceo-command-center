@@ -46,16 +46,16 @@ export const SOP_VOTE = {
   /** Nearest SOPs that vote. */
   k: Number(process.env.SOP_VOTE_K) || 10,
   /** Winner's share lead over the runner-up, as a fraction of all vote weight. */
-  margin: process.env.SOP_VOTE_MARGIN ? Number(process.env.SOP_VOTE_MARGIN) : 0.4,
+  margin: process.env.SOP_VOTE_MARGIN ? Number(process.env.SOP_VOTE_MARGIN) : 0.6,
   /** The single most similar SOP must be at least this similar for the vote to route. */
-  minSim: process.env.SOP_VOTE_MIN_SIM ? Number(process.env.SOP_VOTE_MIN_SIM) : 0.72,
+  minSim: process.env.SOP_VOTE_MIN_SIM ? Number(process.env.SOP_VOTE_MIN_SIM) : 0.75,
 };
 
 /**
  * Gemini's similarities sit on a different scale than local embeddinggemma's, so
  * a Gemini box (primary) and the Ollama-down fallback use their own gate.
  */
-export const SOP_VOTE_GEMINI = { k: 10, margin: 0.4, minSim: 0.7 };
+export const SOP_VOTE_GEMINI = { k: 10, margin: 0.6, minSim: 0.7 };
 const paramsFor = (p: EmbeddingProvider) => (p.name === 'ollama' ? SOP_VOTE : SOP_VOTE_GEMINI);
 
 /**

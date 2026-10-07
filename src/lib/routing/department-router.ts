@@ -67,6 +67,7 @@ import {
   type TiebreakFn,
   type TiebreakPermission,
 } from './tiebreak-adapter';
+import { completeViaBoxModels, resolvePickModel } from './model-pick-llm';
 import { decideSopVote, rankDepartmentsBySops, sopProfileKeywords, type SopVoteRanking } from './sop-vote';
 
 // ---------------------------------------------------------------------------
@@ -560,6 +561,16 @@ export const __tiebreakTestSeams = {
   },
 };
 
+/**
+ * Which model and call path a tie-break / model pick uses. A test or caller seam wins; otherwise the box's own
+ * LLM path (model-pick-llm.ts: its configured models, its client-owned key, its provider connectors).
+ */
+async function tiebreakRunner(seam: TiebreakSeamConfig): Promise<{ model: string | null; run: TiebreakFn; complete?: typeof completeViaBoxModels }> {
+  if (seam.tiebreak) return { model: seam.model !== undefined ? seam.model : resolveTiebreakModel(), run: seam.tiebreak };
+  const model = seam.model !== undefined ? seam.model : await resolvePickModel();
+  return { model, run: authorizedTiebreak, complete: completeViaBoxModels };
+}
+
 async function llmTiebreak(
   taskText: string,
   candidates: SemanticScore[],
@@ -567,15 +578,15 @@ async function llmTiebreak(
 ): Promise<DepartmentConfig> {
   const top = candidates[0].department;
 
-  const model = seam.model !== undefined ? seam.model : resolveTiebreakModel();
+  const { model, run: runTiebreak, complete } = await tiebreakRunner(seam);
   const permission = __tiebreakTestSeams.permissionFor({
     companyId: seam.companyId,
     model,
     override: seam.permissionOverride,
   });
-  const runTiebreak: TiebreakFn = seam.tiebreak ?? authorizedTiebreak;
 
   const result = await runTiebreak({
+    complete,
     taskText,
     candidates: candidates.slice(0, 5).map((c) => ({
       id: c.department.id,
@@ -651,6 +662,12 @@ export const GENERAL_TASK_DESCRIPTION =
 export const MODEL_PICK_CANDIDATES = 3;
 /** Budget for the model pick; the adapter caps it again and never exceeds its own ceiling. */
 export const MODEL_PICK_TIMEOUT_MS = 6_000;
+/**
+ * Acceptance of the model's choice: a department the model picks is used only when it ranks within the first
+ * `maxRank` candidates (1 = the best-evidenced candidate only); a pick below that is treated as no answer and the
+ * task goes to General Task, the safe last resort. Tuned on the fixture (see CHANGELOG).
+ */
+export const MODEL_PICK = { maxRank: Number(process.env.MODEL_PICK_MAX_RANK) || 1 };
 
 export interface DepartmentPick {
   /** null → General Task catch-all. */
@@ -660,6 +677,8 @@ export interface DepartmentPick {
   note: string;
   /** General Task only: 'decision' = positively chosen (model pick), 'last-resort' = nothing was sure. */
   generalBy?: 'decision' | 'last-resort';
+  /** Model pick only: 1-based rank of the chosen department among the evidence-ordered candidates. */
+  modelRank?: number;
   /** When the deciding picker was unsure: the department it leaned to (evaluation only). */
   candidate?: DepartmentConfig;
 }
@@ -885,10 +904,10 @@ async function pickByModel(
 ): Promise<DepartmentPick | null> {
   if (candidates.length === 0) return null;
   try {
-    const model = seam.model !== undefined ? seam.model : resolveTiebreakModel();
+    const { model, run: runTiebreak, complete } = await tiebreakRunner(seam);
     const permission = __tiebreakTestSeams.permissionFor({ companyId: seam.companyId, model, override: seam.permissionOverride });
-    const runTiebreak: TiebreakFn = seam.tiebreak ?? authorizedTiebreak;
     const result = await runTiebreak({
+      complete,
       taskText,
       candidates: [
         ...candidates.map((d) => ({ id: d.id, name: d.name, purpose: d.purpose })),
@@ -904,7 +923,9 @@ async function pickByModel(
       return { department: null, method: 'general', generalBy: 'decision', confidence: 1, note: `Model pick chose General Task: the task fits no listed department (${result.provenance})` };
     }
     const dept = candidates.find((d) => d.id === result.departmentId);
-    return dept ? { department: dept, method: 'model', confidence: 1, note: `Model pick chose "${dept.name}" (${result.provenance})` } : null;
+    const rank = dept ? candidates.indexOf(dept) + 1 : 0;
+    if (dept && rank > MODEL_PICK.maxRank) return null; // the model chose a weakly evidenced candidate: not accepted
+    return dept ? { department: dept, method: 'model', modelRank: rank, confidence: 1, note: `Model pick chose "${dept.name}" (${result.provenance})` } : null;
   } catch (err) {
     console.warn(`[DepartmentRouter] Model pick unavailable: ${(err as Error).message}`);
     return null;
