@@ -178,12 +178,14 @@ export async function fetchModels(_apiKey: string): Promise<ProviderModel[]> {
  */
 export async function chatCompletion(
   _apiKey: string,
-  request: ChatCompletionRequest
+  request: ChatCompletionRequest,
+  signal?: AbortSignal,
 ): Promise<ChatCompletionResponse> {
   return fetchJson<ChatCompletionResponse>(CHAT_ENDPOINT, {
     method: 'POST',
     headers: jsonHeaders(),
     body: JSON.stringify(request),
+    signal,
   });
 }
 

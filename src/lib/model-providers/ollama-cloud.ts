@@ -275,7 +275,8 @@ export async function fetchUsage(apiKey: string): Promise<UsageSnapshot> {
  */
 export async function chatCompletion(
   apiKey: string,
-  request: ChatCompletionRequest
+  request: ChatCompletionRequest,
+  signal?: AbortSignal,
 ): Promise<ChatCompletionResponse> {
   if (!apiKey) {
     throw new Error('Ollama Cloud chatCompletion called without an apiKey');
@@ -284,6 +285,7 @@ export async function chatCompletion(
     method: 'POST',
     headers: authHeaders(apiKey),
     body: JSON.stringify(request),
+    signal,
   });
 }
 
