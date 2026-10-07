@@ -65,7 +65,9 @@ import {
   isEmbeddingAvailable,
   localEmbedText,
   resolveEmbeddingProvider,
-  fetchEmbeddings,
+  fetchEmbeddingsFor,
+  withEmbeddingFallback,
+  type EmbeddingProvider,
   cosineSimilarity,
   type EmbeddingResult,
   type EmbeddingVector,
@@ -688,9 +690,8 @@ const SKILL_MATCH_FLOOR_ENV: number | null = (() => {
  * skills through; 0.74 separates them.
  * ponytail: 42 pairs, not a labeled calibration set; re-measure when one exists.
  */
-export function skillMatchFloor(): number {
+export function skillMatchFloor(p: EmbeddingProvider = resolveEmbeddingProvider()): number {
   if (SKILL_MATCH_FLOOR_ENV !== null) return SKILL_MATCH_FLOOR_ENV;
-  const p = resolveEmbeddingProvider();
   return p.name === 'ollama' && p.model.toLowerCase().includes('embeddinggemma') ? 0.74 : 0.55;
 }
 
@@ -715,8 +716,9 @@ export function skillMatchFloor(): number {
 const EMBEDDING_CACHE_MAX = 2_000;
 const embeddingCache = new Map<string, EmbeddingVector>();
 
-function embeddingCacheKey(text: string): string {
-  return createHash('sha256').update(text).digest('hex');
+/** Keyed on provider + model + text: a Gemini vector is never reused for a local one (or the reverse). */
+function embeddingCacheKey(text: string, p: EmbeddingProvider = resolveEmbeddingProvider()): string {
+  return createHash('sha256').update(`${p.name}\u0000${p.model}\u0000${text}`).digest('hex');
 }
 
 /**
@@ -729,9 +731,10 @@ function embeddingCacheKey(text: string): string {
  */
 export async function embedTextsCached(
   texts: string[],
-  fetcher: (t: string[]) => Promise<EmbeddingResult[]> = fetchEmbeddings,
+  fetcher: (t: string[]) => Promise<EmbeddingResult[]> = (t) => fetchEmbeddingsFor(provider, t),
+  provider: EmbeddingProvider = resolveEmbeddingProvider(),
 ): Promise<EmbeddingVector[] | null> {
-  const keys = texts.map(embeddingCacheKey);
+  const keys = texts.map((t) => embeddingCacheKey(t, provider));
   const missKeys: string[] = [];
   const missTexts: string[] = [];
   const seen = new Set<string>();
@@ -1177,16 +1180,23 @@ export async function matchSkillsForTask(
     // providers; it adds only SOP_EMBEDDING_PROVIDER=ollama (keyless, local).
     if (isEmbeddingAvailable()) {
       try {
-        const texts = [
-          localEmbedText(taskText, 'query'),
-          ...candidates.map((c) => localEmbedText(`${c.name}. ${c.description}`.trim(), 'document')),
-        ].map((t) => (t.length > 8_000 ? t.slice(0, 8_000) : t));
-        // Cached: the ~80 static skill texts are embedded once per process, so a
-        // dispatch pays for the task text only (see embedTextsCached).
-        const emb = await embedTextsCached(texts);
-        if (emb && emb.length === texts.length) {
+        // Local Ollama down -> the box's own Gemini key: both sides are re-embedded with it,
+        // under that provider's own cache keys and floor, then keyword if that fails too.
+        const done = await withEmbeddingFallback(async (p) => {
+          const texts = [
+            localEmbedText(taskText, 'query', p),
+            ...candidates.map((c) => localEmbedText(`${c.name}. ${c.description}`.trim(), 'document', p)),
+          ].map((t) => (t.length > 8_000 ? t.slice(0, 8_000) : t));
+          // Cached: the ~80 static skill texts are embedded once per process, so a
+          // dispatch pays for the task text only (see embedTextsCached).
+          const vecs = await embedTextsCached(texts, undefined, p);
+          if (!vecs || vecs.length !== texts.length) throw new Error('skill embeddings unavailable');
+          return vecs;
+        });
+        const emb = done?.value;
+        if (done && emb) {
           const taskVec = emb[0];
-          const floor = skillMatchFloor();
+          const floor = skillMatchFloor(done.provider);
           const scored = candidates
             .map((c, i) => ({ c, score: cosineSimilarity(taskVec, emb[i + 1]) }))
             .filter((s) => s.score >= floor)

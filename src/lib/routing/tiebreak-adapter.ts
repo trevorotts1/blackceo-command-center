@@ -188,7 +188,9 @@ export async function authorizedTiebreak(
               'Which single department should handle this task? Reply with only the department name.',
           },
         ],
-        max_tokens: 50,
+        // A reasoning model's hidden reasoning counts against this limit (50 left its content empty;
+        // the QC judge needed 1500). The reply is one department name; the timeout still bounds the call.
+        max_tokens: 1500,
         temperature: 0,
       }),
     });
