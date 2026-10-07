@@ -617,3 +617,22 @@ test('[chip] only task_named / owner_default show "Written for"', () => {
   assert.equal(writtenForLabel({ audience_source: 'task_named', audience_label: ' ' }), null);
   assert.equal(writtenForLabel({}), null);
 });
+
+test('[hold] an already-answered task never gets a fresh ask or ask event', () => {
+  const id = nextId('hold-answered');
+  insertTask(id);
+  persistPersonaBundle(id, bundle({ confirm_required: true }));
+  run("UPDATE tasks SET audience_source = 'task_named', audience_label = 'Trevor Otts' WHERE id = ?", [id]);
+  let asked = 0;
+  holdForAudienceConfirm(id, null, { ...evaluateAudienceConfirmGate(id), hold: true, firstHold: true }, () => { asked++; return 'telegram'; });
+  assert.equal(asked, 0);
+  const n = queryOne<{ n: number }>("SELECT COUNT(*) n FROM events WHERE task_id = ? AND type LIKE 'audience_confirm_%'", [id]);
+  assert.equal(n?.n, 0);
+  assert.ok(!queryOne<{ ask: string | null }>('SELECT ask FROM tasks WHERE id = ?', [id])?.ask);
+});
+
+test('[rescore] confirm-time re-score budget is realistic (>=60s) and above the dispatch-time 10s', async () => {
+  const t = await import('../../src/lib/tasks');
+  assert.ok(t.AUDIENCE_RESCORE_TIMEOUT_MS >= 60_000);
+  assert.ok(t.AUDIENCE_RESCORE_TIMEOUT_MS > t.PERSONA_RESCORE_TIMEOUT_MS);
+});

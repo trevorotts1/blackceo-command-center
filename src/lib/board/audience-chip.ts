@@ -13,3 +13,14 @@ export function writtenForLabel(t: { audience_source?: string | null; audience_l
   const label = t.audience_label?.trim();
   return label && (AUTO_AUDIENCE_SOURCES as readonly string[]).includes(t.audience_source ?? '') ? label : null;
 }
+
+/** Every audience_source that means someone already answered "who will read this?". */
+export const ANSWERED_AUDIENCE_SOURCES = ['task_named', 'owner_default', 'operator_confirmed'] as const;
+
+/**
+ * True only while the question is genuinely open. An answered task whose voice
+ * refresh is still landing keeps confirm_state 'pending' but must not ask again.
+ */
+export function needsAudienceAnswer(t: { blend_confirm_state?: string | null; audience_source?: string | null }): boolean {
+  return t.blend_confirm_state === 'pending' && !(ANSWERED_AUDIENCE_SOURCES as readonly string[]).includes(t.audience_source ?? '');
+}

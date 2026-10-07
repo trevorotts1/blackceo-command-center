@@ -80,7 +80,7 @@ import { transition, recordStatusEvent, captureHqTaskEvent, hqTaskAssignee, type
 import { assertNoFixtureDerivedServerWrite } from '@/lib/fixture-guard';
 import type { Task, TaskPriority, Agent, PersonaBundle, TaskPersonaBundleRow } from '@/lib/types';
 import { extractNamedRecipient } from '@/lib/audience/named-recipient';
-import { AUDIENCE_ASK_TEXT } from '@/lib/board/audience-chip';
+import { AUDIENCE_ASK_TEXT, ANSWERED_AUDIENCE_SOURCES } from '@/lib/board/audience-chip';
 
 // ─── SENTINEL GUARD HELPERS ──────────────────────────────────────────────────
 
@@ -167,6 +167,10 @@ export const PERSONA_PIN_DISPATCH_BUDGET_MS = 8000;
 // Dispatch-time SOP rescore (F3.4) is a single bounded, heuristic-mode spawn so
 // dispatch stays responsive — no retry loop, tighter than the creation timeout.
 export const PERSONA_RESCORE_TIMEOUT_MS = 10000;
+// Confirm/auto-answer voice re-score runs the full --blend selector, which needs far more
+// than 10s on a real box (it was SIGTERM-killed 3x on the canary, stalling dispatch 12 min).
+// Bounded under the 5-min dispatch sweep window. Env: AUDIENCE_RESCORE_TIMEOUT_MS.
+export const AUDIENCE_RESCORE_TIMEOUT_MS = parseInt(process.env.AUDIENCE_RESCORE_TIMEOUT_MS || '', 10) || 120_000;
 
 // ─── DEFAULT-PERSONA FALLBACK CHAIN (POINT 10 fix 1 / F3.1 FDN-2) ────────────
 // The founder's board invariant: EVERY task carries a persona. Historically,
@@ -1977,7 +1981,14 @@ export function holdForAudienceConfirm(
     run('UPDATE tasks SET next_dispatch_eligible_at = ? WHERE id = ?', [nextEligible, taskId]);
   } catch { /* pre-migration tolerant */ }
 
-  if (decision.firstHold) {
+  // Already answered (task_named / owner_default / operator_confirmed): never write a fresh ask.
+  let answered = false;
+  try {
+    const src = queryOne<{ audience_source: string | null }>('SELECT audience_source FROM tasks WHERE id = ?', [taskId])?.audience_source ?? '';
+    answered = (ANSWERED_AUDIENCE_SOURCES as readonly string[]).includes(src);
+  } catch { /* pre-migration tolerant */ }
+
+  if (decision.firstHold && !answered) {
     try {
       run(
         `INSERT INTO events (id, type, agent_id, task_id, message, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
@@ -2266,7 +2277,7 @@ export async function rescoreAudienceBlend(
     const persona = await selectPersonaForTask(taskId, taskDescription, departmentForSelector, null, {
       blend: true,
       audienceOverride: audienceLabel,
-      timeoutMs: PERSONA_RESCORE_TIMEOUT_MS,
+      timeoutMs: AUDIENCE_RESCORE_TIMEOUT_MS,
     });
     if (!persona?.bundle) {
       console.warn(`[rescoreAudienceBlend] task ${taskId}: re-run selector returned no bundle — confirm stands, voice unchanged.`);
