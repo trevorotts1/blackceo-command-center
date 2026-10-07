@@ -64,6 +64,7 @@ import { createHash } from 'crypto';
 import {
   isEmbeddingAvailable,
   localEmbedText,
+  resolveEmbeddingProvider,
   fetchEmbeddings,
   cosineSimilarity,
   type EmbeddingResult,
@@ -670,14 +671,28 @@ export function renderMatchedSkillsSection(skills: MatchedSkill[]): string {
 // dispatch hot path is never blocked.
 
 /** Confidence floor for a semantic skill match. Env: SKILL_MATCH_FLOOR (0–1). */
-const SKILL_MATCH_FLOOR: number = (() => {
+const SKILL_MATCH_FLOOR_ENV: number | null = (() => {
   const env = process.env.SKILL_MATCH_FLOOR;
   if (env) {
     const parsed = parseFloat(env);
     if (!isNaN(parsed) && parsed >= 0 && parsed <= 1) return parsed;
   }
-  return 0.55;
+  return null;
 })();
+
+/**
+ * Default skill floor: 0.55, except a local embeddinggemma model (prefixed),
+ * whose cosines sit higher. Measured 2026-10-07 on the
+ * departments-use-skills-layer-a fixture (7 skills x 6 tasks): relevant pairs
+ * 0.770-0.883, unrelated pairs 0.538-0.716, so 0.55 lets 30 of 34 unrelated
+ * skills through; 0.74 separates them.
+ * ponytail: 42 pairs, not a labeled calibration set; re-measure when one exists.
+ */
+export function skillMatchFloor(): number {
+  if (SKILL_MATCH_FLOOR_ENV !== null) return SKILL_MATCH_FLOOR_ENV;
+  const p = resolveEmbeddingProvider();
+  return p.name === 'ollama' && p.model.toLowerCase().includes('embeddinggemma') ? 0.74 : 0.55;
+}
 
 /**
  * Process-lifetime embedding cache for the skill matcher.
@@ -1109,7 +1124,7 @@ function applySkillBindings(
  * Scoring reuses the department-router's embedding + cosine machinery:
  *   • when an embedding key is configured (the CLIENT'S OWN key), each skill's
  *     `name. description` is embedded alongside the task text and ranked by
- *     cosine similarity, keeping only matches at/above SKILL_MATCH_FLOOR (~0.55);
+ *     cosine similarity, keeping only matches at/above skillMatchFloor() (0.55; 0.74 on local embeddinggemma);
  *   • otherwise (or if the API errors, or nothing clears the floor) it falls
  *     back to keyword-overlap scoring so the feature works with zero config.
  *
@@ -1171,9 +1186,10 @@ export async function matchSkillsForTask(
         const emb = await embedTextsCached(texts);
         if (emb && emb.length === texts.length) {
           const taskVec = emb[0];
+          const floor = skillMatchFloor();
           const scored = candidates
             .map((c, i) => ({ c, score: cosineSimilarity(taskVec, emb[i + 1]) }))
-            .filter((s) => s.score >= SKILL_MATCH_FLOOR)
+            .filter((s) => s.score >= floor)
             .sort((a, b) => b.score - a.score)
             .slice(0, limit);
           if (scored.length > 0) return scored.map((s) => toMatchedSkill(s.c, s.score, 'semantic'));

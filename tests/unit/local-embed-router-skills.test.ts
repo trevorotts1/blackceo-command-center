@@ -55,6 +55,19 @@ function topicVec(text: string, dims: number): number[] {
 type Call = { url: string; model?: string; input: string };
 let calls: Call[] = [];
 let ollamaDown = false;
+/** Optional per-test vector override for the fake Ollama. */
+let vecOverride: ((input: string) => number[]) | null = null;
+
+/** Task = e1; text naming `hit` sits at cosine `c` from it; anything else is orthogonal. */
+function cosineFixture(hit: string, c: number): (input: string) => number[] {
+  return (input: string) => {
+    const v = new Array(768).fill(0);
+    if (input.startsWith('task: search result | query: ')) v[0] = 1;
+    else if (input.includes(hit)) { v[0] = c; v[1] = Math.sqrt(1 - c * c); }
+    else v[2] = 1;
+    return v;
+  };
+}
 const ORIGINAL_FETCH = global.fetch;
 
 function installFetch(): void {
@@ -69,7 +82,8 @@ function installFetch(): void {
     if (String(url).endsWith('/api/embed')) {
       calls.push({ url: String(url), model: body.model, input: body.input });
       if (ollamaDown) throw new TypeError('fetch failed: connect ECONNREFUSED 127.0.0.1:11434');
-      return new Response(JSON.stringify({ embeddings: [topicVec(body.input, 768)] }), { status: 200 });
+      const vec = vecOverride ? vecOverride(body.input) : topicVec(body.input, 768);
+      return new Response(JSON.stringify({ embeddings: [vec] }), { status: 200 });
     }
     throw new Error(`unexpected fetch ${url}`);
   }) as typeof fetch;
@@ -88,6 +102,7 @@ async function withEnv(vars: Record<string, string>, fn: () => Promise<void>): P
     await fn();
   } finally {
     ollamaDown = false;
+    vecOverride = null;
     global.fetch = ORIGINAL_FETCH;
     for (const k of ENV_KEYS) {
       if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k];
@@ -181,5 +196,56 @@ test('Ollama down: router and skill matcher fall back to keyword, no Google call
     assert.equal(m[0]?.name, 'invoice-bot');
     assert.equal(m[0]?.matchKind, 'keyword');
     assert.ok(calls.every((c) => !c.url.includes('googleapis')), 'a local box never calls Google');
+  });
+});
+
+test('local embeddinggemma: router floor is 0.69 (0.65 → General Task, 0.72 → the department)', async () => {
+  await withEnv(LOCAL, async () => {
+    const router = await import('../../src/lib/routing/department-router');
+    assert.equal(router.ollamaRoutingFloor(GEMMA), 0.69);
+    assert.equal(router.ollamaRoutingFloor('other-embed-model'), 0.56);
+    vecOverride = cosineFixture('Finance', 0.65);
+    const unsure = await router.pickDepartment(TASK, DEPTS as never, { order: ['semantic'] });
+    assert.equal(unsure.department, null, `0.65 < 0.69 must be General Task: ${unsure.note}`);
+    router._resetDeptVectorCacheForTests();
+    vecOverride = cosineFixture('Finance', 0.72);
+    const sure = await router.pickDepartment(TASK, DEPTS as never, { order: ['semantic'] });
+    assert.equal(sure.method, 'semantic', sure.note);
+    assert.equal(sure.department?.id, 'finance');
+  });
+});
+
+test('local embeddinggemma: skill floor is 0.74 (0.70 → keyword, 0.78 → semantic); Google keeps 0.55', async () => {
+  await withEnv(LOCAL, async () => {
+    const cp = await import('../../src/lib/context-pack');
+    assert.equal(cp.skillMatchFloor(), 0.74);
+    vecOverride = cosineFixture('invoice-bot', 0.70);
+    const low = await cp.matchSkillsForTask({ title: TASK.title, description: TASK.description });
+    assert.equal(low[0]?.matchKind, 'keyword', '0.70 < 0.74 must not count as a semantic match');
+    cp.clearEmbeddingCache();
+    vecOverride = cosineFixture('invoice-bot', 0.78);
+    const high = await cp.matchSkillsForTask({ title: TASK.title, description: TASK.description });
+    assert.equal(high[0]?.name, 'invoice-bot');
+    assert.equal(high[0]?.matchKind, 'semantic');
+  });
+  await withEnv({ SOP_EMBEDDING_PROVIDER: 'google', GOOGLE_API_KEY: GOOGLE_KEY }, async () => {
+    const cp = await import('../../src/lib/context-pack');
+    assert.equal(cp.skillMatchFloor(), 0.55);
+  });
+});
+
+test('router department-vector cache is keyed on provider + model, not just the text', async () => {
+  await withEnv(LOCAL, async () => {
+    const { pickDepartment } = await import('../../src/lib/routing/department-router');
+    await pickDepartment(TASK, DEPTS as never, { order: ['semantic'] });
+    calls = [];
+    process.env.SOP_EMBEDDING_MODEL = 'other-embed-model';
+    await pickDepartment(TASK, DEPTS as never, { order: ['semantic'] });
+    assert.deepEqual(calls.map((c) => c.input), [
+      'Finance. Bookkeeping and invoice collection.. Keywords: invoice, payroll',
+      'Marketing. Brand campaign work.. Keywords: campaign, brand',
+      TASK_TEXT,
+    ], 'a model switch must re-embed the departments (raw text for a non-embeddinggemma model)');
+    assert.ok(calls.every((c) => c.model === 'other-embed-model'));
   });
 });

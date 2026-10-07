@@ -91,13 +91,15 @@ const TIEBREAK_MARGIN = 0.04;
  * text-embedding-ada-002 / gemini-embedding-001 is typically noise-level
  * for domain-specific department text.
  *
- * JEV-502: local Ollama (nomic-embed-text) runs on a different similarity
- * scale; its default is 0.56, the lowest floor that keeps the labeled
- * fixture (scripts/eval-department-routing.ts) at >=90% acceptable-or-General
- * (0.55 → 88.8%, 0.56 → 91.1%). The env value, when valid, wins for every provider.
- * That floor was measured on nomic-embed-text; the local default is now
- * embeddinggemma-2:740m, which on the same fixture scores 62.1% at 0.56 and
- * first reaches >=90% at 0.69 (91.7%, strict 28.4%). Not yet recalibrated.
+ * Local Ollama runs on a different similarity scale per model, so its floor is
+ * per model family (ollamaRoutingFloor): the lowest floor that keeps the
+ * labeled fixture (scripts/eval-department-routing.ts) at >=90%
+ * acceptable-or-General.
+ *   - embeddinggemma (the local default, embeddinggemma-2:740m, with its
+ *     query/document prefixes): 0.69 (0.68 → 89.3%, 0.69 → 91.7%; 0.56 → 62.1%).
+ *   - any other local model: 0.56, as measured on nomic-embed-text in JEV-502
+ *     (0.55 → 88.8%, 0.56 → 91.1%).
+ * The env value, when valid, wins for every provider.
  */
 const MIN_ROUTING_CONFIDENCE_ENV: number | null = (() => {
   const env = process.env.MIN_ROUTING_CONFIDENCE;
@@ -111,8 +113,14 @@ const MIN_ROUTING_CONFIDENCE_ENV: number | null = (() => {
   return null;
 })();
 
+/** Semantic routing floor for a local Ollama model (see the measurements above). */
+export function ollamaRoutingFloor(model: string): number {
+  return model.toLowerCase().includes('embeddinggemma') ? 0.69 : 0.56;
+}
+
 function minRoutingConfidence(): number {
-  return MIN_ROUTING_CONFIDENCE_ENV ?? (resolveEmbeddingProvider().name === 'ollama' ? 0.56 : 0.55);
+  const p = resolveEmbeddingProvider();
+  return MIN_ROUTING_CONFIDENCE_ENV ?? (p.name === 'ollama' ? ollamaRoutingFloor(p.model) : 0.55);
 }
 
 /**
@@ -439,9 +447,12 @@ async function getCachedDepartmentVectors(
   const resolved = new Map<string, EmbeddingVector>();
   const toEmbed: { dept: DepartmentConfig; text: string; hash: string }[] = [];
 
+  // Keyed on provider + model + text: a vector from one embedding space (or
+  // prefix scheme) is never reused under another.
+  const p = resolveEmbeddingProvider();
   for (const dept of departments) {
     const text = deptEmbedText(dept);
-    const hash = _deptTextHash(text);
+    const hash = _deptTextHash(`${p.name}\u0000${p.model}\u0000${text}`);
     const cached = _deptVectorCache.get(dept.id);
     if (cached && cached.hash === hash) {
       resolved.set(dept.id, cached.vector);
@@ -595,6 +606,11 @@ export type DepartmentPickerName = 'semantic' | 'jev' | 'keyword';
  *   v7.6.89 order (decision engine first, then semantic) 61.5% / 52.7% / 65
  *   decision engine alone (lexical)                      65.1% / 51.5% / 59
  *   semantic alone, local nomic-embed-text, floor 0.56   91.1% / 34.9% / 15   ← first
+ * Re-measured 2026-10-07 with the local default embeddinggemma-2:740m (prefixed;
+ * the decision engine's routes have moved since, so the jev rows differ too):
+ *   semantic alone, embeddinggemma, floor 0.69           91.7% / 28.4% / 14
+ *   decision engine alone, gated                         96.4% / 34.3% / 6
+ *   (the picker order was not re-decided on these numbers)
  *   no embeddings: decision engine, then keyword (gated) 87.0% / 32.5% / 22
  *   no embeddings, decision engine off: keyword (gated)  92.9% / 33.7% / 12
  * Gemini/OpenAI boxes were not measured (no key used); they keep floor 0.55.
