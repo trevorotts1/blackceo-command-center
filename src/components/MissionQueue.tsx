@@ -8,6 +8,7 @@ import { X } from 'lucide-react';
 import { triggerAutoDispatch, shouldTriggerAutoDispatch } from '@/lib/auto-dispatch';
 import type { Task, TaskStatus, BugTicket, BugStatus } from '@/lib/types';
 import { TaskModal } from './TaskModal';
+import { needsPlanningAnswer } from '@/lib/board/planning-chip';
 import { MarketingPublishButton } from './MarketingPublishButton';
 import PhaseStepper from './PhaseStepper';
 import { PersonaSlotChips, PersonaScopeChips, CommsAudienceChip, humanize } from './kanban/TaskCard';
@@ -1830,6 +1831,19 @@ export function TaskCard({ task, onDragStart, onClick, onAnswer, isDragging, isC
             title="This content task is waiting for you to say who it is for. Click to answer — unanswered, it releases under a neutral house voice after the deadline."
           >
             ❓ Needs your answer — who is this for?
+          </button>
+        )}
+        {/* Planning Mode hold chip — a task waiting on the planning Q&A sits in
+            Being Prepared; without this the owner who closed the modal has no
+            visible reason. Click reopens the modal (Planning tab). */}
+        {needsPlanningAnswer(task) && (
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); onClick(); }}
+            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-indigo-500 text-white border border-indigo-600 hover:bg-indigo-600"
+            title="This task is waiting for you to answer the Planning Mode questions before it can start. Click to open it."
+          >
+            📝 Planning — answer the questions
           </button>
         )}
         {task.blend_confirm_state === 'deadline_fallback' && (
