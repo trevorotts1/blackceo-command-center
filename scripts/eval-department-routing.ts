@@ -39,6 +39,14 @@ export function loadFixture(): { catalog: [string, string][]; cases: Case[] } {
   return JSON.parse(fs.readFileSync(FIXTURE_PATH, 'utf8'));
 }
 
+export const CHANGES_PATH = path.join(ROOT, 'scripts', 'eval-department-routing.fixture-changes.json');
+/** The corrected answer key: the original cases plus the additive alternates in the fixture-changes file. */
+export function correctedCases(cases: Case[]): Case[] {
+  const ch = JSON.parse(fs.readFileSync(CHANGES_PATH, 'utf8')).changes as { m: string; addAlt?: string[]; newD?: string }[];
+  const by = new Map(ch.map((c) => [c.m, c]));
+  return cases.map((c) => { const x = by.get(c.m); return x ? { ...c, d: x.newD ?? c.d, alt: [...new Set([...c.alt, ...(x.addAlt ?? [])])] } : c; });
+}
+
 /** Mirror of onboarding 32-command-center-setup/scripts/seed-workspaces.py's INSERT. */
 export function seedFloorWorkspaces(db: Database.Database, catalog: [string, string][]): void {
   db.prepare("INSERT OR IGNORE INTO companies (id, name, slug) VALUES (?, ?, ?)").run(EVAL_COMPANY, 'JEV-502 Eval', EVAL_COMPANY);
@@ -296,12 +304,15 @@ async function main(): Promise<void> {
     }
     }
     const pc = (x: number) => `${(x * 100).toFixed(1)}%`.padStart(6);
-    const ref = score3(cases, cases.map((c) => c.d));
-    console.log(`\ndept-labeled ${ref.deptN} · General-labeled ${ref.generalN}`);
-    console.log('step                                   (a) dept correct  (b) General ok  wrong: dept->otherdept  dept->General  General->dept  total   old wrong(dept)  General%');
-    for (const st of steps) {
-      const x = st.score;
-      console.log(`${st.label.padEnd(38)} ${pc(x.a).padStart(10)}      ${pc(x.b).padStart(8)}          ${String(x.deptToWrongDept).padStart(8)}      ${String(x.deptToGeneral).padStart(10)}    ${String(x.generalToDept).padStart(10)}  ${String(x.total).padStart(6)}  ${String(x.wrongDept).padStart(10)}      ${pc(x.generalPct)}`);
+    const keys: [string, Case[]][] = [['ORIGINAL key', cases], ['CORRECTED key', correctedCases(cases)]];
+    for (const [kname, kc] of keys) {
+      const ref = score3(kc, kc.map((c) => c.d));
+      console.log(`\n${kname}: dept-labeled ${ref.deptN} · General-labeled ${ref.generalN}`);
+      console.log('step                                   (a) dept correct  (b) General ok  wrong: dept->otherdept  dept->General  General->dept  total   old wrong(dept)  General%');
+      for (const st of steps) {
+        const x = score3(kc, st.picks);
+        console.log(`${st.label.padEnd(38)} ${pc(x.a).padStart(10)}      ${pc(x.b).padStart(8)}          ${String(x.deptToWrongDept).padStart(8)}      ${String(x.deptToGeneral).padStart(10)}    ${String(x.generalToDept).padStart(10)}  ${String(x.total).padStart(6)}  ${String(x.wrongDept).padStart(10)}      ${pc(x.generalPct)}`);
+      }
     }
     if (process.argv.includes('--verbose')) {
       const last = steps[steps.length - 1];
