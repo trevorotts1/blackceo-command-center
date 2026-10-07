@@ -55,7 +55,7 @@ export const SOP_VOTE = {
  * Gemini's similarities sit on a different scale than local embeddinggemma's, so
  * a Gemini box (primary) and the Ollama-down fallback use their own gate.
  */
-export const SOP_VOTE_GEMINI = { k: 10, margin: 0.2, minSim: 0.6 };
+export const SOP_VOTE_GEMINI = { k: 10, margin: 0.4, minSim: 0.7 };
 const paramsFor = (p: EmbeddingProvider) => (p.name === 'ollama' ? SOP_VOTE : SOP_VOTE_GEMINI);
 
 /**
