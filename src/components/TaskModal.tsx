@@ -10,7 +10,7 @@ import { DeliverablesList } from './DeliverablesList';
 // U063 — Presentation deliverables checklist (nine rows, always).
 import { PresentationDeliverablesPanel } from './PresentationDeliverablesPanel';
 import { SessionsList } from './SessionsList';
-import { PlanningTab } from './PlanningTab';
+import { PlanningTab, startFailureMessage } from './PlanningTab';
 import { AgentModal } from './AgentModal';
 import { MicDictateButton } from './MicDictateButton';
 import { BLOCKED_REASONS, BLOCKED_AUDIENCES } from './kanban/BlockTaskModal';
@@ -98,6 +98,7 @@ export function TaskModal({ task: taskProp, onClose, workspaceId, initialStatus,
   const titleInterimRef = useRef('');
   const descInterimRef = useRef('');
   // Auto-switch to planning tab if task has planning session
+  const [planningStartError, setPlanningStartError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<TabType>(taskProp?.planning_session_key ? 'planning' : 'overview');
 
   // Stable callback for when spec is locked - use window.location.reload() to refresh data
@@ -295,9 +296,11 @@ export function TaskModal({ task: taskProp, onClose, workspaceId, initialStatus,
               if (!planRes.ok) {
                 const data = await planRes.json().catch(() => ({}));
                 console.error('Failed to start planning:', data.error);
+                setPlanningStartError(startFailureMessage(planRes.status, data));
               }
             } catch (error) {
               console.error('Failed to start planning:', error);
+              setPlanningStartError(startFailureMessage());
             }
             setCreatedTask(savedTask);
             setActiveTab('planning');
@@ -981,6 +984,7 @@ export function TaskModal({ task: taskProp, onClose, workspaceId, initialStatus,
                 // Planning-off closes. Other recognized producer sources
                 // (funnel/survey/web-development) keep Planning available.
                 engineNotice={isAnthologyTask(task) ? engineLabel : null}
+                initialStartError={planningStartError}
               />
             </div>
           )}

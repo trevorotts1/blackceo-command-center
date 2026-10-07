@@ -157,7 +157,7 @@ Command Center is a sophisticated web application for managing and orchestrating
 - **Task Board:** Kanban-style task management with drag-and-drop; a content task is written for the person it names (or your main audience) without asking, and only asks "who will read this?" when it cannot tell
   - **Needs-your-answer banner:** a task created on the dashboard asks "who is this for?" on the board itself; an amber banner and a card chip carry an Answer button, and the task starts as soon as you answer.
   - **Column navigator and scroll arrows:** columns fit the screen where they can; otherwise a column navigator and top scroll track show which columns are in view, large pulsing arrows with an "N more" count point to the hidden ones, and the bottom scrollbar is bigger.
-  - **Planning Mode flow:** turn on Planning Mode when creating a task, answer the planning questions in the task window (it stays open), and approve the plan. The task is not dispatched until you approve; if you close the window, a "Planning - answer the questions" chip on the card brings you back.
+  - **Planning Mode flow:** turn on Planning Mode when creating a task, answer the planning questions in the task window (it stays open), and approve the plan. The task is not dispatched until you approve (finishing the plan creates no extra agents; the plan travels with the task to its department's specialist, and a failed start, lost connection or unreadable reply is shown with a Try again button); if you close the window, a "Planning - answer the questions" chip on the card brings you back.
 - **Live Feed:** Real-time activity monitoring
 - **Planning Phase:** Collaborative task specification with AI agents
 - **Workspace Support:** Multi-workspace organization by department
