@@ -1,0 +1,4014 @@
+{
+ "_doc": "Route500 written test set (500 NEW synthetic owner tasks, labelled before any picker run). Same format as JEV-502 (m=message, d=expected department, alt=acceptable alternates) plus id and why (one-line rationale). Alternates only for genuine two-department tasks; general-task is never an alternate on a department task. Catalog is the JEV-502 24-department standard floor; master-orchestrator is a dispatcher and has no cases.",
+ "catalog": [
+  [
+   "marketing",
+   "Marketing"
+  ],
+  [
+   "sales",
+   "Sales"
+  ],
+  [
+   "billing-finance",
+   "Billing & Finance"
+  ],
+  [
+   "customer-support",
+   "Customer Support"
+  ],
+  [
+   "web-development",
+   "Web Development"
+  ],
+  [
+   "funnels",
+   "Funnels"
+  ],
+  [
+   "app-development",
+   "App Development"
+  ],
+  [
+   "graphics",
+   "Graphics"
+  ],
+  [
+   "video",
+   "Video"
+  ],
+  [
+   "audio",
+   "Audio"
+  ],
+  [
+   "research",
+   "Research"
+  ],
+  [
+   "communications",
+   "Communications"
+  ],
+  [
+   "crm",
+   "CRM"
+  ],
+  [
+   "openclaw-maintenance",
+   "OpenClaw Maintenance"
+  ],
+  [
+   "legal",
+   "Legal"
+  ],
+  [
+   "social-media",
+   "Social Media"
+  ],
+  [
+   "paid-advertisement",
+   "Paid Advertisement"
+  ],
+  [
+   "personal-assistant",
+   "Personal Assistant"
+  ],
+  [
+   "general-task",
+   "General Task"
+  ],
+  [
+   "project-architecture-office",
+   "Project Architecture Office"
+  ],
+  [
+   "bugs",
+   "Bugs"
+  ],
+  [
+   "healer",
+   "Healer"
+  ],
+  [
+   "quality-control",
+   "Quality Control"
+  ],
+  [
+   "master-orchestrator",
+   "Master Orchestrator"
+  ]
+ ],
+ "cases": [
+  {
+   "m": "Draft a 4 email launch sequence announcing our spring workshop",
+   "d": "marketing",
+   "alt": [
+    "communications",
+    "crm"
+   ],
+   "why": "Campaign copy and messaging is Marketing",
+   "id": "r500-001"
+  },
+  {
+   "m": "we need a content calendar for next month blog topics + keywords for seo",
+   "d": "marketing",
+   "alt": [],
+   "why": "Content plan and SEO are Marketing",
+   "id": "r500-002"
+  },
+  {
+   "m": "write the about us page copy for the new site",
+   "d": "marketing",
+   "alt": [
+    "web-development"
+   ],
+   "why": "Brand messaging copy",
+   "id": "r500-003"
+  },
+  {
+   "m": "Come up with 10 taglines for the new coaching program",
+   "d": "marketing",
+   "alt": [],
+   "why": "Brand/promotional copy",
+   "id": "r500-004"
+  },
+  {
+   "m": "Can you put together a one page brochure for the wellness retreat?",
+   "d": "marketing",
+   "alt": [
+    "graphics"
+   ],
+   "why": "Promo collateral content",
+   "id": "r500-005"
+  },
+  {
+   "m": "Plan the promo for Black Friday, discounts, bundle, timeline and the messaging",
+   "d": "marketing",
+   "alt": [
+    "sales",
+    "project-architecture-office"
+   ],
+   "why": "Promotional campaign planning",
+   "id": "r500-006"
+  },
+  {
+   "m": "rewrite our homepage headline its kinda boring",
+   "d": "marketing",
+   "alt": [
+    "web-development"
+   ],
+   "why": "Messaging and positioning",
+   "id": "r500-007"
+  },
+  {
+   "m": "What should our monthly newsletter theme be for Q4?",
+   "d": "marketing",
+   "alt": [],
+   "why": "Newsletter strategy",
+   "id": "r500-008"
+  },
+  {
+   "m": "Write a blog post on 5 mistakes new homeowners make when hiring a contractor",
+   "d": "marketing",
+   "alt": [],
+   "why": "Blog content",
+   "id": "r500-009"
+  },
+  {
+   "m": "Write product descriptions for the 12 new candles in our shop",
+   "d": "marketing",
+   "alt": [],
+   "why": "Product copy and promo content",
+   "id": "r500-010"
+  },
+  {
+   "m": "I want a brand voice guide so every post sounds like us",
+   "d": "marketing",
+   "alt": [
+    "communications"
+   ],
+   "why": "Brand voice is Marketing",
+   "id": "r500-011"
+  },
+  {
+   "m": "Outline a referral campaign where customers get a free month for bringing a friend",
+   "d": "marketing",
+   "alt": [
+    "sales"
+   ],
+   "why": "Campaign design",
+   "id": "r500-012"
+  },
+  {
+   "m": "Optimize our google business profile description and categories for local seo",
+   "d": "marketing",
+   "alt": [],
+   "why": "Local SEO",
+   "id": "r500-013"
+  },
+  {
+   "m": "write a press-friendly blurb about our 10 year anniversary",
+   "d": "marketing",
+   "alt": [
+    "communications"
+   ],
+   "why": "Promotional messaging",
+   "id": "r500-014"
+  },
+  {
+   "m": "Give me a positioning statement vs the big franchise competitors",
+   "d": "marketing",
+   "alt": [
+    "research"
+   ],
+   "why": "Positioning is Marketing",
+   "id": "r500-015"
+  },
+  {
+   "m": "can u write the sms text for the flash sale this weekend",
+   "d": "marketing",
+   "alt": [
+    "crm",
+    "social-media"
+   ],
+   "why": "Promotional message copy",
+   "id": "r500-016"
+  },
+  {
+   "m": "Build a lead magnet idea list for our dental clients, checklists, guides, quizzes",
+   "d": "marketing",
+   "alt": [
+    "funnels"
+   ],
+   "why": "Lead generation content strategy",
+   "id": "r500-017"
+  },
+  {
+   "m": "we're doing a webinar next week, draft the promo emails and reminder emails",
+   "d": "marketing",
+   "alt": [
+    "crm"
+   ],
+   "why": "Event promotion copy",
+   "id": "r500-018"
+  },
+  {
+   "m": "Write a case study on how we helped a bakery double its online orders",
+   "d": "marketing",
+   "alt": [],
+   "why": "Case study marketing content",
+   "id": "r500-019"
+  },
+  {
+   "m": "Create a messaging framework for our three customer types",
+   "d": "marketing",
+   "alt": [],
+   "why": "Messaging strategy",
+   "id": "r500-020"
+  },
+  {
+   "m": "Pitch me 5 partnership co-marketing ideas with local gyms",
+   "d": "marketing",
+   "alt": [
+    "sales"
+   ],
+   "why": "Co-marketing campaigns",
+   "id": "r500-021"
+  },
+  {
+   "m": "need a testimonial request email template to send after a job is done",
+   "d": "marketing",
+   "alt": [
+    "customer-support",
+    "crm"
+   ],
+   "why": "Marketing social proof asset",
+   "id": "r500-022"
+  },
+  {
+   "m": "Write ad-free promo copy for our holiday gift guide",
+   "d": "marketing",
+   "alt": [],
+   "why": "Promotional content",
+   "id": "r500-023"
+  },
+  {
+   "m": "Give me keyword ideas for a blog about aquarium plants",
+   "d": "marketing",
+   "alt": [],
+   "why": "SEO content",
+   "id": "r500-024"
+  },
+  {
+   "m": "audit the seo on our blog posts and tell me which to refresh",
+   "d": "marketing",
+   "alt": [
+    "web-development",
+    "research"
+   ],
+   "why": "Content SEO audit",
+   "id": "r500-025"
+  },
+  {
+   "m": "Plan a giveaway to grow our email list",
+   "d": "marketing",
+   "alt": [],
+   "why": "Lead gen campaign",
+   "id": "r500-026"
+  },
+  {
+   "m": "Can you draft a LinkedIn article about our new sustainability policy",
+   "d": "marketing",
+   "alt": [
+    "communications",
+    "social-media"
+   ],
+   "why": "Thought leadership content",
+   "id": "r500-027"
+  },
+  {
+   "m": "write a cold outreach email to local realtors about our staging service",
+   "d": "marketing",
+   "alt": [
+    "sales"
+   ],
+   "why": "Outreach copy",
+   "id": "r500-028"
+  },
+  {
+   "m": "Whats a good name and angle for our fall promo?",
+   "d": "marketing",
+   "alt": [],
+   "why": "Promo concept",
+   "id": "r500-029"
+  },
+  {
+   "m": "Update our brand guidelines doc with the new color usage rules",
+   "d": "marketing",
+   "alt": [
+    "graphics"
+   ],
+   "why": "Brand standards",
+   "id": "r500-030"
+  },
+  {
+   "m": "Create a landing page headline test list, 8 versions",
+   "d": "marketing",
+   "alt": [
+    "funnels"
+   ],
+   "why": "Messaging variants",
+   "id": "r500-031"
+  },
+  {
+   "m": "write a short founder story for the website and media kit",
+   "d": "marketing",
+   "alt": [
+    "communications"
+   ],
+   "why": "Brand story",
+   "id": "r500-032"
+  },
+  {
+   "m": "Make a 30 day content plan for the new product launch",
+   "d": "marketing",
+   "alt": [
+    "social-media"
+   ],
+   "why": "Launch content plan",
+   "id": "r500-033"
+  },
+  {
+   "m": "Write a follow up email for the prospect who went quiet after the proposal",
+   "d": "sales",
+   "alt": [],
+   "why": "Sales follow-up",
+   "id": "r500-034"
+  },
+  {
+   "m": "need a proposal for a 6 month retainer, $4k a month, for a restaurant group",
+   "d": "sales",
+   "alt": [
+    "legal"
+   ],
+   "why": "Client proposal",
+   "id": "r500-035"
+  },
+  {
+   "m": "Prep me for tomorrow's discovery call with a landscaping company owner",
+   "d": "sales",
+   "alt": [
+    "research"
+   ],
+   "why": "Sales call prep",
+   "id": "r500-036"
+  },
+  {
+   "m": "Draft a sales script for handling the 'its too expensive' objection",
+   "d": "sales",
+   "alt": [],
+   "why": "Objection handling",
+   "id": "r500-037"
+  },
+  {
+   "m": "Which leads from last week are hot? Rank them and tell me who to call first",
+   "d": "sales",
+   "alt": [
+    "crm"
+   ],
+   "why": "Lead qualification",
+   "id": "r500-038"
+  },
+  {
+   "m": "create a one page pricing comparison to show prospects",
+   "d": "sales",
+   "alt": [
+    "marketing"
+   ],
+   "why": "Sales collateral",
+   "id": "r500-039"
+  },
+  {
+   "m": "Write a breakup email for leads who never responded after 4 touches",
+   "d": "sales",
+   "alt": [
+    "crm"
+   ],
+   "why": "Follow-up sequence copy",
+   "id": "r500-040"
+  },
+  {
+   "m": "build me a quote for 3 hrs of consulting plus a workbook",
+   "d": "sales",
+   "alt": [],
+   "why": "Quote creation",
+   "id": "r500-041"
+  },
+  {
+   "m": "Draft the call script for our new outbound campaign to dentists",
+   "d": "sales",
+   "alt": [
+    "marketing"
+   ],
+   "why": "Outbound sales script",
+   "id": "r500-042"
+  },
+  {
+   "m": "How should I structure commission for two new reps?",
+   "d": "sales",
+   "alt": [
+    "billing-finance"
+   ],
+   "why": "Sales compensation structure",
+   "id": "r500-043"
+  },
+  {
+   "m": "we got a hot lead from the expo, send a personalized thank you and propose a call time",
+   "d": "sales",
+   "alt": [
+    "crm"
+   ],
+   "why": "Lead follow-up",
+   "id": "r500-044"
+  },
+  {
+   "m": "Create a sales deck outline for pitching the annual membership",
+   "d": "sales",
+   "alt": [],
+   "why": "Pitch deck content",
+   "id": "r500-045"
+  },
+  {
+   "m": "Write a script for a closing call that offers payment plans",
+   "d": "sales",
+   "alt": [],
+   "why": "Closing",
+   "id": "r500-046"
+  },
+  {
+   "m": "Make a list of 25 ideal prospects in the HVAC industry in Ohio with contact details",
+   "d": "sales",
+   "alt": [
+    "research"
+   ],
+   "why": "Prospecting",
+   "id": "r500-047"
+  },
+  {
+   "m": "can you write counter-offer language when a client asks for 20% off",
+   "d": "sales",
+   "alt": [],
+   "why": "Negotiation",
+   "id": "r500-048"
+  },
+  {
+   "m": "Qualify these 40 inbound inquiries as hot, warm, or cold",
+   "d": "sales",
+   "alt": [],
+   "why": "Lead qualification",
+   "id": "r500-049"
+  },
+  {
+   "m": "Create an upsell offer for clients finishing the 90 day program",
+   "d": "sales",
+   "alt": [],
+   "why": "Upsell",
+   "id": "r500-050"
+  },
+  {
+   "m": "Put together a case-study one pager for sales to send prospects",
+   "d": "sales",
+   "alt": [
+    "marketing"
+   ],
+   "why": "Sales enablement",
+   "id": "r500-051"
+  },
+  {
+   "m": "What's our close rate this quarter by rep? Summarize the pipeline.",
+   "d": "sales",
+   "alt": [
+    "crm"
+   ],
+   "why": "Pipeline reporting",
+   "id": "r500-052"
+  },
+  {
+   "m": "Write a LinkedIn DM opener for connecting with founders in logistics",
+   "d": "sales",
+   "alt": [
+    "social-media"
+   ],
+   "why": "Outbound prospecting",
+   "id": "r500-053"
+  },
+  {
+   "m": "draft a sales playbook for new hires, stages and key questions",
+   "d": "sales",
+   "alt": [
+    "project-architecture-office"
+   ],
+   "why": "Sales process",
+   "id": "r500-054"
+  },
+  {
+   "m": "Respond to this prospect asking for references and a discount",
+   "d": "sales",
+   "alt": [],
+   "why": "Prospect reply",
+   "id": "r500-055"
+  },
+  {
+   "m": "Write an email that reactivates old customers who haven't bought in a year",
+   "d": "sales",
+   "alt": [
+    "marketing",
+    "crm"
+   ],
+   "why": "Win-back sales outreach",
+   "id": "r500-056"
+  },
+  {
+   "m": "Prepare an ROI justification for a client to show their boss",
+   "d": "sales",
+   "alt": [
+    "research"
+   ],
+   "why": "Deal support",
+   "id": "r500-057"
+  },
+  {
+   "m": "set up a weekly sales numbers summary for me",
+   "d": "sales",
+   "alt": [],
+   "why": "Sales reporting",
+   "id": "r500-058"
+  },
+  {
+   "m": "Role-play a tough buyer and let me practice my pitch",
+   "d": "sales",
+   "alt": [],
+   "why": "Sales training",
+   "id": "r500-059"
+  },
+  {
+   "m": "write a short sms to a lead who booked a demo but didnt show",
+   "d": "sales",
+   "alt": [
+    "crm"
+   ],
+   "why": "No-show follow-up",
+   "id": "r500-060"
+  },
+  {
+   "m": "build a proposal template for photography packages",
+   "d": "sales",
+   "alt": [
+    "legal"
+   ],
+   "why": "Proposal template",
+   "id": "r500-061"
+  },
+  {
+   "m": "Who on the pipeline has had no activity in 2 weeks? nudge them",
+   "d": "sales",
+   "alt": [
+    "crm"
+   ],
+   "why": "Pipeline follow-up",
+   "id": "r500-062"
+  },
+  {
+   "m": "Send an invoice to the client for the March project, $2,850 net 30",
+   "d": "billing-finance",
+   "alt": [],
+   "why": "Invoicing",
+   "id": "r500-063"
+  },
+  {
+   "m": "reconcile last month's stripe payouts against the bank deposits",
+   "d": "billing-finance",
+   "alt": [],
+   "why": "Reconciliation",
+   "id": "r500-064"
+  },
+  {
+   "m": "Who still owes us money? Make an aged receivables list",
+   "d": "billing-finance",
+   "alt": [
+    "sales"
+   ],
+   "why": "Accounts receivable",
+   "id": "r500-065"
+  },
+  {
+   "m": "Issue a refund of $79 for the customer who double-charged",
+   "d": "billing-finance",
+   "alt": [
+    "customer-support"
+   ],
+   "why": "Refund",
+   "id": "r500-066"
+  },
+  {
+   "m": "Set up a recurring monthly invoice for the retainer clients",
+   "d": "billing-finance",
+   "alt": [],
+   "why": "Recurring billing",
+   "id": "r500-067"
+  },
+  {
+   "m": "the card on file for a subscriber failed, chase the payment",
+   "d": "billing-finance",
+   "alt": [
+    "customer-support",
+    "crm"
+   ],
+   "why": "Failed payment",
+   "id": "r500-068"
+  },
+  {
+   "m": "Categorize this month's expenses for the bookkeeper",
+   "d": "billing-finance",
+   "alt": [],
+   "why": "Bookkeeping",
+   "id": "r500-069"
+  },
+  {
+   "m": "Pull a quick income vs expenses breakdown for the third quarter",
+   "d": "billing-finance",
+   "alt": [],
+   "why": "Financial reporting",
+   "id": "r500-070"
+  },
+  {
+   "m": "Whats our monthly recurring revenue and the churn for the last 6 months?",
+   "d": "billing-finance",
+   "alt": [
+    "research"
+   ],
+   "why": "Subscription finance",
+   "id": "r500-071"
+  },
+  {
+   "m": "Draft a polite overdue invoice reminder, 15 days past due",
+   "d": "billing-finance",
+   "alt": [],
+   "why": "Collections",
+   "id": "r500-072"
+  },
+  {
+   "m": "Update our pricing sheet to add a 5% increase for new clients",
+   "d": "billing-finance",
+   "alt": [
+    "sales",
+    "marketing"
+   ],
+   "why": "Pricing/billing",
+   "id": "r500-073"
+  },
+  {
+   "m": "We need a payment plan option, 3 payments of $400, set it up in stripe",
+   "d": "billing-finance",
+   "alt": [
+    "funnels"
+   ],
+   "why": "Payment setup",
+   "id": "r500-074"
+  },
+  {
+   "m": "find out why paypal fees went up this month",
+   "d": "billing-finance",
+   "alt": [],
+   "why": "Fee analysis",
+   "id": "r500-075"
+  },
+  {
+   "m": "Prepare the 1099 info for our contractors",
+   "d": "billing-finance",
+   "alt": [
+    "legal"
+   ],
+   "why": "Tax reporting data",
+   "id": "r500-076"
+  },
+  {
+   "m": "calculate sales tax owed for the online store this quarter",
+   "d": "billing-finance",
+   "alt": [],
+   "why": "Tax calculation",
+   "id": "r500-077"
+  },
+  {
+   "m": "Log all my receipts from the trip into expenses",
+   "d": "billing-finance",
+   "alt": [
+    "personal-assistant"
+   ],
+   "why": "Expense logging",
+   "id": "r500-078"
+  },
+  {
+   "m": "send a receipt to a customer who says they never got one",
+   "d": "billing-finance",
+   "alt": [],
+   "why": "Receipts",
+   "id": "r500-079"
+  },
+  {
+   "m": "Set up a budget tracker for each department",
+   "d": "billing-finance",
+   "alt": [],
+   "why": "Budgeting",
+   "id": "r500-080"
+  },
+  {
+   "m": "We were charged twice by our software vendor, dispute it",
+   "d": "billing-finance",
+   "alt": [],
+   "why": "Payables dispute",
+   "id": "r500-081"
+  },
+  {
+   "m": "Pull a cash flow forecast for the next 90 days",
+   "d": "billing-finance",
+   "alt": [],
+   "why": "Cash flow",
+   "id": "r500-082"
+  },
+  {
+   "m": "create a credit memo for the cancelled order #4412",
+   "d": "billing-finance",
+   "alt": [],
+   "why": "Credit memo",
+   "id": "r500-083"
+  },
+  {
+   "m": "Process payroll summary for the 4 employees",
+   "d": "billing-finance",
+   "alt": [],
+   "why": "Payroll finance",
+   "id": "r500-084"
+  },
+  {
+   "m": "Offer annual subscription discounts, work out what price keeps margin above 60%",
+   "d": "billing-finance",
+   "alt": [
+    "sales"
+   ],
+   "why": "Pricing and margin math",
+   "id": "r500-085"
+  },
+  {
+   "m": "Chargeback came in from a customer, gather the evidence for the bank",
+   "d": "billing-finance",
+   "alt": [
+    "customer-support"
+   ],
+   "why": "Payments dispute",
+   "id": "r500-086"
+  },
+  {
+   "m": "Create an invoice template that has our logo and payment link",
+   "d": "billing-finance",
+   "alt": [
+    "graphics"
+   ],
+   "why": "Billing template",
+   "id": "r500-087"
+  },
+  {
+   "m": "How much did we spend on software subscriptions last year, list them",
+   "d": "billing-finance",
+   "alt": [],
+   "why": "Expense analysis",
+   "id": "r500-088"
+  },
+  {
+   "m": "Move the unpaid invoices into a collections follow-up list",
+   "d": "billing-finance",
+   "alt": [
+    "crm"
+   ],
+   "why": "AR follow-up",
+   "id": "r500-089"
+  },
+  {
+   "m": "Cancel the subscription for the member who asked and prorate the refund",
+   "d": "billing-finance",
+   "alt": [
+    "customer-support"
+   ],
+   "why": "Billing action",
+   "id": "r500-090"
+  },
+  {
+   "m": "A customer says her login isnt working, write her a reply and walk her through a reset",
+   "d": "customer-support",
+   "alt": [],
+   "why": "Support reply",
+   "id": "r500-091"
+  },
+  {
+   "m": "Draft responses to the 15 open support tickets",
+   "d": "customer-support",
+   "alt": [
+    "bugs"
+   ],
+   "why": "Ticket handling",
+   "id": "r500-092"
+  },
+  {
+   "m": "Customer wants to cancel and is pretty upset, write a save reply",
+   "d": "customer-support",
+   "alt": [],
+   "why": "Retention support",
+   "id": "r500-093"
+  },
+  {
+   "m": "Build an FAQ from the top 10 questions customers ask us",
+   "d": "customer-support",
+   "alt": [
+    "marketing"
+   ],
+   "why": "Support knowledge base",
+   "id": "r500-094"
+  },
+  {
+   "m": "write a macro reply for 'where's my order?'",
+   "d": "customer-support",
+   "alt": [],
+   "why": "Canned response",
+   "id": "r500-095"
+  },
+  {
+   "m": "Customer says he never received the course access email, please resolve",
+   "d": "customer-support",
+   "alt": [],
+   "why": "Customer issue",
+   "id": "r500-096"
+  },
+  {
+   "m": "Summarize this week's support complaints by theme",
+   "d": "customer-support",
+   "alt": [
+    "research"
+   ],
+   "why": "Support analysis",
+   "id": "r500-097"
+  },
+  {
+   "m": "create a help center article on how to update billing info",
+   "d": "customer-support",
+   "alt": [
+    "web-development"
+   ],
+   "why": "Help docs",
+   "id": "r500-098"
+  },
+  {
+   "m": "A client is asking for a refund after 45 days. Reply following our policy",
+   "d": "customer-support",
+   "alt": [
+    "billing-finance",
+    "legal"
+   ],
+   "why": "Complaint handling",
+   "id": "r500-099"
+  },
+  {
+   "m": "respond to the angry google review from this morning politely",
+   "d": "customer-support",
+   "alt": [
+    "communications",
+    "marketing"
+   ],
+   "why": "Customer complaint",
+   "id": "r500-100"
+  },
+  {
+   "m": "We need a customer onboarding checklist and welcome message for new members",
+   "d": "customer-support",
+   "alt": [],
+   "why": "Customer onboarding",
+   "id": "r500-101"
+  },
+  {
+   "m": "Reply to someone asking if our product works on android",
+   "d": "customer-support",
+   "alt": [],
+   "why": "Customer inquiry",
+   "id": "r500-102"
+  },
+  {
+   "m": "Set up an auto-responder for after hours support emails",
+   "d": "customer-support",
+   "alt": [
+    "crm"
+   ],
+   "why": "Support intake",
+   "id": "r500-103"
+  },
+  {
+   "m": "The member can't find the replay link for last week's call, help her",
+   "d": "customer-support",
+   "alt": [],
+   "why": "Member help",
+   "id": "r500-104"
+  },
+  {
+   "m": "Create a troubleshooting guide for the most common app problems",
+   "d": "customer-support",
+   "alt": [
+    "app-development"
+   ],
+   "why": "Support documentation",
+   "id": "r500-105"
+  },
+  {
+   "m": "how do we respond when a customer says the product broke after 2 days",
+   "d": "customer-support",
+   "alt": [],
+   "why": "Support policy reply",
+   "id": "r500-106"
+  },
+  {
+   "m": "Go through the inbox and answer anything from customers",
+   "d": "customer-support",
+   "alt": [],
+   "why": "Support inbox",
+   "id": "r500-107"
+  },
+  {
+   "m": "Triage the support queue: urgent, normal, can wait",
+   "d": "customer-support",
+   "alt": [],
+   "why": "Ticket triage",
+   "id": "r500-108"
+  },
+  {
+   "m": "Write a script for phone support when someone calls in confused about their bill",
+   "d": "customer-support",
+   "alt": [
+    "billing-finance"
+   ],
+   "why": "Support script",
+   "id": "r500-109"
+  },
+  {
+   "m": "Customer asks to change shipping address on an order that already shipped",
+   "d": "customer-support",
+   "alt": [],
+   "why": "Customer request",
+   "id": "r500-110"
+  },
+  {
+   "m": "Send a check-in message to customers who opened a ticket last week and see if solved",
+   "d": "customer-support",
+   "alt": [],
+   "why": "Follow-up care",
+   "id": "r500-111"
+  },
+  {
+   "m": "Help a user who says the video won't play on their phone",
+   "d": "customer-support",
+   "alt": [],
+   "why": "User troubleshooting",
+   "id": "r500-112"
+  },
+  {
+   "m": "Make a satisfaction survey to send after a support ticket closes",
+   "d": "customer-support",
+   "alt": [
+    "quality-control",
+    "research"
+   ],
+   "why": "Support feedback",
+   "id": "r500-113"
+  },
+  {
+   "m": "Reply to this member who thinks they were charged wrong, be kind",
+   "d": "customer-support",
+   "alt": [
+    "billing-finance"
+   ],
+   "why": "Complaint handling",
+   "id": "r500-114"
+  },
+  {
+   "m": "We keep getting the same question about parking at the event, draft the answer and a template",
+   "d": "customer-support",
+   "alt": [],
+   "why": "Inquiry response",
+   "id": "r500-115"
+  },
+  {
+   "m": "Tell this customer when her appointment slot opens up",
+   "d": "customer-support",
+   "alt": [],
+   "why": "Customer inquiry",
+   "id": "r500-116"
+  },
+  {
+   "m": "write a thank you and apology to the client whose delivery was late",
+   "d": "customer-support",
+   "alt": [],
+   "why": "Service recovery",
+   "id": "r500-117"
+  },
+  {
+   "m": "Make the escalation rules for tickets that sit longer than 24 hrs",
+   "d": "customer-support",
+   "alt": [
+    "project-architecture-office"
+   ],
+   "why": "Support process",
+   "id": "r500-118"
+  },
+  {
+   "m": "Add a new page for our services with a pricing table and contact form",
+   "d": "web-development",
+   "alt": [],
+   "why": "New page",
+   "id": "r500-119"
+  },
+  {
+   "m": "The site loads super slow on mobile, speed it up",
+   "d": "web-development",
+   "alt": [],
+   "why": "Performance",
+   "id": "r500-120"
+  },
+  {
+   "m": "Change the phone number in the footer on every page",
+   "d": "web-development",
+   "alt": [],
+   "why": "Site edit",
+   "id": "r500-121"
+  },
+  {
+   "m": "Install ssl and fix the mixed content warnings",
+   "d": "web-development",
+   "alt": [],
+   "why": "Site config",
+   "id": "r500-122"
+  },
+  {
+   "m": "Move our wordpress site to a faster host",
+   "d": "web-development",
+   "alt": [
+    "openclaw-maintenance"
+   ],
+   "why": "Migration",
+   "id": "r500-123"
+  },
+  {
+   "m": "Add a booking calendar embed to the contact page",
+   "d": "web-development",
+   "alt": [],
+   "why": "Embed feature",
+   "id": "r500-124"
+  },
+  {
+   "m": "Set up a blog section with categories and tags",
+   "d": "web-development",
+   "alt": [],
+   "why": "Site structure",
+   "id": "r500-125"
+  },
+  {
+   "m": "Update the plugin versions on the site and check nothing breaks",
+   "d": "web-development",
+   "alt": [
+    "openclaw-maintenance"
+   ],
+   "why": "Site upkeep",
+   "id": "r500-126"
+  },
+  {
+   "m": "Make the nav menu sticky and add a dropdown for Services",
+   "d": "web-development",
+   "alt": [],
+   "why": "UI change",
+   "id": "r500-127"
+  },
+  {
+   "m": "Create a 404 page that matches our branding",
+   "d": "web-development",
+   "alt": [
+    "graphics"
+   ],
+   "why": "Page build",
+   "id": "r500-128"
+  },
+  {
+   "m": "Connect the domain and set up www redirects",
+   "d": "web-development",
+   "alt": [],
+   "why": "DNS and redirects",
+   "id": "r500-129"
+  },
+  {
+   "m": "Build a members only area with login for our course",
+   "d": "web-development",
+   "alt": [
+    "app-development"
+   ],
+   "why": "Site feature",
+   "id": "r500-130"
+  },
+  {
+   "m": "make our website mobile friendly its a mess on iphone",
+   "d": "web-development",
+   "alt": [],
+   "why": "Responsive",
+   "id": "r500-131"
+  },
+  {
+   "m": "Add schema markup and meta descriptions to all pages",
+   "d": "web-development",
+   "alt": [
+    "marketing"
+   ],
+   "why": "Technical SEO",
+   "id": "r500-132"
+  },
+  {
+   "m": "Hook google analytics 4 and the meta pixel to the site",
+   "d": "web-development",
+   "alt": [],
+   "why": "Tracking install",
+   "id": "r500-133"
+  },
+  {
+   "m": "Redesign the homepage with a hero video and 3 feature sections",
+   "d": "web-development",
+   "alt": [
+    "graphics"
+   ],
+   "why": "Redesign",
+   "id": "r500-134"
+  },
+  {
+   "m": "Add a cookie consent banner",
+   "d": "web-development",
+   "alt": [
+    "legal"
+   ],
+   "why": "Site compliance",
+   "id": "r500-135"
+  },
+  {
+   "m": "Set up an e-commerce store with 20 products on shopify",
+   "d": "web-development",
+   "alt": [],
+   "why": "Store build",
+   "id": "r500-136"
+  },
+  {
+   "m": "swap the old team photos for the new ones on the about page",
+   "d": "web-development",
+   "alt": [],
+   "why": "Content update",
+   "id": "r500-137"
+  },
+  {
+   "m": "Make a one page website for the charity 5k run",
+   "d": "web-development",
+   "alt": [],
+   "why": "New site",
+   "id": "r500-138"
+  },
+  {
+   "m": "Embed the podcast player on the episodes page",
+   "d": "web-development",
+   "alt": [],
+   "why": "Embed",
+   "id": "r500-139"
+  },
+  {
+   "m": "Compress and lazy load the images across the site",
+   "d": "web-development",
+   "alt": [],
+   "why": "Performance",
+   "id": "r500-140"
+  },
+  {
+   "m": "Create a custom contact form that emails two people",
+   "d": "web-development",
+   "alt": [],
+   "why": "Form build",
+   "id": "r500-141"
+  },
+  {
+   "m": "The theme broke after the update, the header is overlapping",
+   "d": "web-development",
+   "alt": [
+    "bugs"
+   ],
+   "why": "Site layout fix",
+   "id": "r500-142"
+  },
+  {
+   "m": "Set up staging site so we can test changes before going live",
+   "d": "web-development",
+   "alt": [],
+   "why": "Dev environment",
+   "id": "r500-143"
+  },
+  {
+   "m": "Add an accessibility pass: alt text, contrast, keyboard nav",
+   "d": "web-development",
+   "alt": [
+    "quality-control"
+   ],
+   "why": "Site accessibility",
+   "id": "r500-144"
+  },
+  {
+   "m": "Build an opt-in page and thank you page for the free guide",
+   "d": "funnels",
+   "alt": [],
+   "why": "Funnel pages",
+   "id": "r500-145"
+  },
+  {
+   "m": "Map the funnel from ad click to webinar registration to sales page",
+   "d": "funnels",
+   "alt": [
+    "project-architecture-office",
+    "marketing"
+   ],
+   "why": "Funnel design",
+   "id": "r500-146"
+  },
+  {
+   "m": "Create a 3 step order form with an order bump and one upsell",
+   "d": "funnels",
+   "alt": [],
+   "why": "Checkout funnel",
+   "id": "r500-147"
+  },
+  {
+   "m": "Set up a tripwire offer for $27 after opt in",
+   "d": "funnels",
+   "alt": [],
+   "why": "Funnel offer",
+   "id": "r500-148"
+  },
+  {
+   "m": "Write the copy for a webinar registration page",
+   "d": "funnels",
+   "alt": [
+    "marketing"
+   ],
+   "why": "Funnel page copy",
+   "id": "r500-149"
+  },
+  {
+   "m": "a/b test two versions of the squeeze page headline",
+   "d": "funnels",
+   "alt": [],
+   "why": "Funnel testing",
+   "id": "r500-150"
+  },
+  {
+   "m": "Build the thank-you page with a video and next-step button",
+   "d": "funnels",
+   "alt": [
+    "video"
+   ],
+   "why": "Funnel pages",
+   "id": "r500-151"
+  },
+  {
+   "m": "Design a quiz funnel that segments leads into 3 buckets",
+   "d": "funnels",
+   "alt": [
+    "crm"
+   ],
+   "why": "Funnel build",
+   "id": "r500-152"
+  },
+  {
+   "m": "Create the evergreen webinar funnel from registration to replay",
+   "d": "funnels",
+   "alt": [],
+   "why": "Funnel build",
+   "id": "r500-153"
+  },
+  {
+   "m": "Add a downsell page if people decline the upsell",
+   "d": "funnels",
+   "alt": [],
+   "why": "Funnel logic",
+   "id": "r500-154"
+  },
+  {
+   "m": "Connect the funnel checkout to stripe and test a purchase",
+   "d": "funnels",
+   "alt": [
+    "billing-finance"
+   ],
+   "why": "Funnel checkout",
+   "id": "r500-155"
+  },
+  {
+   "m": "Build a challenge funnel, 5 day, with daily emails and a final offer",
+   "d": "funnels",
+   "alt": [
+    "marketing",
+    "crm"
+   ],
+   "why": "Funnel build",
+   "id": "r500-156"
+  },
+  {
+   "m": "Review where people drop off in the sales funnel and suggest fixes",
+   "d": "funnels",
+   "alt": [
+    "research"
+   ],
+   "why": "Funnel analytics",
+   "id": "r500-157"
+  },
+  {
+   "m": "Clone our best funnel and adapt it for the new product",
+   "d": "funnels",
+   "alt": [],
+   "why": "Funnel clone",
+   "id": "r500-158"
+  },
+  {
+   "m": "Create a booking funnel for strategy calls with a qualification form",
+   "d": "funnels",
+   "alt": [
+    "sales"
+   ],
+   "why": "Funnel build",
+   "id": "r500-159"
+  },
+  {
+   "m": "Build a VSL page with the video and an order button",
+   "d": "funnels",
+   "alt": [
+    "video"
+   ],
+   "why": "Funnel page",
+   "id": "r500-160"
+  },
+  {
+   "m": "Create the cart abandonment page and redirect flow",
+   "d": "funnels",
+   "alt": [
+    "crm"
+   ],
+   "why": "Funnel flow",
+   "id": "r500-161"
+  },
+  {
+   "m": "Make a thank you page that offers a one time deal",
+   "d": "funnels",
+   "alt": [],
+   "why": "Funnel page",
+   "id": "r500-162"
+  },
+  {
+   "m": "set up a funnel for the lead magnet with a 3 email follow up",
+   "d": "funnels",
+   "alt": [
+    "crm",
+    "marketing"
+   ],
+   "why": "Funnel build",
+   "id": "r500-163"
+  },
+  {
+   "m": "Build a membership funnel with free trial then paid",
+   "d": "funnels",
+   "alt": [],
+   "why": "Funnel build",
+   "id": "r500-164"
+  },
+  {
+   "m": "Build a mobile app where clients can book and pay for classes",
+   "d": "app-development",
+   "alt": [],
+   "why": "App build",
+   "id": "r500-165"
+  },
+  {
+   "m": "We want alerts to pop up on iPhones when a class is about to start, build that into the iOS app",
+   "d": "app-development",
+   "alt": [],
+   "why": "App feature",
+   "id": "r500-166"
+  },
+  {
+   "m": "Scope the MVP for a habit tracking app, then build the first screen",
+   "d": "app-development",
+   "alt": [
+    "project-architecture-office"
+   ],
+   "why": "App development",
+   "id": "r500-167"
+  },
+  {
+   "m": "Create a React Native app to display our podcast episodes",
+   "d": "app-development",
+   "alt": [],
+   "why": "Mobile app",
+   "id": "r500-168"
+  },
+  {
+   "m": "We need user accounts and a profile screen in the app",
+   "d": "app-development",
+   "alt": [
+    "web-development"
+   ],
+   "why": "App feature",
+   "id": "r500-169"
+  },
+  {
+   "m": "Submit the app update to the app store and write the release notes",
+   "d": "app-development",
+   "alt": [],
+   "why": "App release",
+   "id": "r500-170"
+  },
+  {
+   "m": "Add dark mode to the mobile app",
+   "d": "app-development",
+   "alt": [],
+   "why": "App feature",
+   "id": "r500-171"
+  },
+  {
+   "m": "Write an API endpoint that returns a user's order history",
+   "d": "app-development",
+   "alt": [
+    "web-development"
+   ],
+   "why": "Backend dev",
+   "id": "r500-172"
+  },
+  {
+   "m": "Build an internal dashboard for tracking inventory",
+   "d": "app-development",
+   "alt": [],
+   "why": "Custom software",
+   "id": "r500-173"
+  },
+  {
+   "m": "Connect the app to the payment API and handle subscriptions",
+   "d": "app-development",
+   "alt": [],
+   "why": "App integration",
+   "id": "r500-174"
+  },
+  {
+   "m": "Convert our website into a progressive web app",
+   "d": "app-development",
+   "alt": [],
+   "why": "App build",
+   "id": "r500-175"
+  },
+  {
+   "m": "Create an offline mode so the app works with no signal",
+   "d": "app-development",
+   "alt": [],
+   "why": "App feature",
+   "id": "r500-176"
+  },
+  {
+   "m": "make a simple app that texts me when stock drops under 10",
+   "d": "app-development",
+   "alt": [],
+   "why": "Custom app",
+   "id": "r500-177"
+  },
+  {
+   "m": "build a chatbot widget for our app that answers FAQ",
+   "d": "app-development",
+   "alt": [
+    "customer-support"
+   ],
+   "why": "App feature",
+   "id": "r500-178"
+  },
+  {
+   "m": "Add a leaderboard to the loyalty app",
+   "d": "app-development",
+   "alt": [],
+   "why": "App feature",
+   "id": "r500-179"
+  },
+  {
+   "m": "Refactor the app's login code to use tokens",
+   "d": "app-development",
+   "alt": [],
+   "why": "App engineering",
+   "id": "r500-180"
+  },
+  {
+   "m": "Set up the database schema for a booking system",
+   "d": "app-development",
+   "alt": [],
+   "why": "Backend",
+   "id": "r500-181"
+  },
+  {
+   "m": "Build an admin panel to approve new members in the app",
+   "d": "app-development",
+   "alt": [],
+   "why": "App feature",
+   "id": "r500-182"
+  },
+  {
+   "m": "Design a logo for a new brand of dog treats",
+   "d": "graphics",
+   "alt": [],
+   "why": "Logo design",
+   "id": "r500-183"
+  },
+  {
+   "m": "Create 5 instagram post templates in our brand colors",
+   "d": "graphics",
+   "alt": [
+    "social-media"
+   ],
+   "why": "Graphic design",
+   "id": "r500-184"
+  },
+  {
+   "m": "make a banner for the facebook event cover",
+   "d": "graphics",
+   "alt": [],
+   "why": "Banner",
+   "id": "r500-185"
+  },
+  {
+   "m": "Design a one sheet handout for the showing on Sunday",
+   "d": "graphics",
+   "alt": [
+    "marketing"
+   ],
+   "why": "Print design",
+   "id": "r500-186"
+  },
+  {
+   "m": "Redo our business card, modern, black and gold",
+   "d": "graphics",
+   "alt": [],
+   "why": "Print",
+   "id": "r500-187"
+  },
+  {
+   "m": "Create a thumbnail for the YouTube video about budgeting",
+   "d": "graphics",
+   "alt": [
+    "video"
+   ],
+   "why": "Thumbnail",
+   "id": "r500-188"
+  },
+  {
+   "m": "Make an infographic about the 5 steps to start an LLC",
+   "d": "graphics",
+   "alt": [],
+   "why": "Infographic",
+   "id": "r500-189"
+  },
+  {
+   "m": "Design the book cover for our workbook",
+   "d": "graphics",
+   "alt": [],
+   "why": "Cover design",
+   "id": "r500-190"
+  },
+  {
+   "m": "design a slide template for our brand",
+   "d": "graphics",
+   "alt": [],
+   "why": "Templates",
+   "id": "r500-191"
+  },
+  {
+   "m": "Resize the logo into every size for social profiles",
+   "d": "graphics",
+   "alt": [],
+   "why": "Asset prep",
+   "id": "r500-192"
+  },
+  {
+   "m": "We need product mockups for the new tote bag line",
+   "d": "graphics",
+   "alt": [],
+   "why": "Mockups",
+   "id": "r500-193"
+  },
+  {
+   "m": "Create a set of icons for the services page",
+   "d": "graphics",
+   "alt": [
+    "web-development"
+   ],
+   "why": "Icon set",
+   "id": "r500-194"
+  },
+  {
+   "m": "remove the background from these 30 product photos",
+   "d": "graphics",
+   "alt": [],
+   "why": "Image editing",
+   "id": "r500-195"
+  },
+  {
+   "m": "Design the packaging label for the hot sauce",
+   "d": "graphics",
+   "alt": [],
+   "why": "Packaging",
+   "id": "r500-196"
+  },
+  {
+   "m": "Make a quote graphic from this line from the podcast",
+   "d": "graphics",
+   "alt": [
+    "social-media"
+   ],
+   "why": "Graphic",
+   "id": "r500-197"
+  },
+  {
+   "m": "Create a branded email header image",
+   "d": "graphics",
+   "alt": [
+    "crm"
+   ],
+   "why": "Email graphic",
+   "id": "r500-198"
+  },
+  {
+   "m": "Update the color palette and fonts guide for the brand",
+   "d": "graphics",
+   "alt": [
+    "marketing"
+   ],
+   "why": "Brand visuals",
+   "id": "r500-199"
+  },
+  {
+   "m": "Design a poster for the community fundraiser",
+   "d": "graphics",
+   "alt": [],
+   "why": "Poster",
+   "id": "r500-200"
+  },
+  {
+   "m": "Make a simple cover image for our lead magnet pdf",
+   "d": "graphics",
+   "alt": [
+    "funnels"
+   ],
+   "why": "Cover graphic",
+   "id": "r500-201"
+  },
+  {
+   "m": "Retouch the headshot, brighten and clean the background",
+   "d": "graphics",
+   "alt": [],
+   "why": "Photo editing",
+   "id": "r500-202"
+  },
+  {
+   "m": "Edit the raw footage from Saturday's workshop into a 5 minute recap",
+   "d": "video",
+   "alt": [],
+   "why": "Video editing",
+   "id": "r500-203"
+  },
+  {
+   "m": "Add subtitles to all 8 course lesson videos",
+   "d": "video",
+   "alt": [],
+   "why": "Captions",
+   "id": "r500-204"
+  },
+  {
+   "m": "Write a shot list for the testimonial shoot with the bakery owner",
+   "d": "video",
+   "alt": [],
+   "why": "Shoot planning",
+   "id": "r500-205"
+  },
+  {
+   "m": "Cut a 30 sec teaser from the full interview",
+   "d": "video",
+   "alt": [
+    "social-media"
+   ],
+   "why": "Video cut",
+   "id": "r500-206"
+  },
+  {
+   "m": "Create an AI avatar video that explains our refund policy",
+   "d": "video",
+   "alt": [],
+   "why": "AI video",
+   "id": "r500-207"
+  },
+  {
+   "m": "make an intro and outro animation for our youtube channel",
+   "d": "video",
+   "alt": [
+    "graphics"
+   ],
+   "why": "Video branding",
+   "id": "r500-208"
+  },
+  {
+   "m": "Script a 90 second explainer video for the app",
+   "d": "video",
+   "alt": [
+    "marketing"
+   ],
+   "why": "Video script",
+   "id": "r500-209"
+  },
+  {
+   "m": "Color correct and stabilize the drone footage",
+   "d": "video",
+   "alt": [],
+   "why": "Post production",
+   "id": "r500-210"
+  },
+  {
+   "m": "Turn the podcast episode into a video with waveform and captions",
+   "d": "video",
+   "alt": [
+    "audio"
+   ],
+   "why": "Video repurpose",
+   "id": "r500-211"
+  },
+  {
+   "m": "record voiceover and sync it to the product demo screen recording",
+   "d": "video",
+   "alt": [
+    "audio"
+   ],
+   "why": "Video production",
+   "id": "r500-212"
+  },
+  {
+   "m": "Make a lower third and logo bug for our livestream",
+   "d": "video",
+   "alt": [],
+   "why": "Video graphics",
+   "id": "r500-213"
+  },
+  {
+   "m": "Trim the dead air out of the webinar replay and export 1080p",
+   "d": "video",
+   "alt": [],
+   "why": "Editing",
+   "id": "r500-214"
+  },
+  {
+   "m": "Compile a sizzle reel of our best event moments",
+   "d": "video",
+   "alt": [],
+   "why": "Video edit",
+   "id": "r500-215"
+  },
+  {
+   "m": "Create a looping background video for the website hero",
+   "d": "video",
+   "alt": [
+    "web-development"
+   ],
+   "why": "Video asset",
+   "id": "r500-216"
+  },
+  {
+   "m": "Storyboard a 3 part video series for onboarding",
+   "d": "video",
+   "alt": [],
+   "why": "Video planning",
+   "id": "r500-217"
+  },
+  {
+   "m": "Convert the Zoom recording into a clean lesson with chapters",
+   "d": "video",
+   "alt": [],
+   "why": "Video edit",
+   "id": "r500-218"
+  },
+  {
+   "m": "Make a vertical version of the ad video for stories",
+   "d": "video",
+   "alt": [
+    "paid-advertisement"
+   ],
+   "why": "Video format",
+   "id": "r500-219"
+  },
+  {
+   "m": "Upload the finished video to YouTube with title, description and tags",
+   "d": "video",
+   "alt": [
+    "social-media"
+   ],
+   "why": "Video publishing",
+   "id": "r500-220"
+  },
+  {
+   "m": "Clean up the audio on episode 42, remove the hum and ums",
+   "d": "audio",
+   "alt": [],
+   "why": "Audio editing",
+   "id": "r500-221"
+  },
+  {
+   "m": "Master the intro music so its not louder than the voice",
+   "d": "audio",
+   "alt": [],
+   "why": "Mastering",
+   "id": "r500-222"
+  },
+  {
+   "m": "Make a 30 second audio ad for local radio",
+   "d": "audio",
+   "alt": [
+    "paid-advertisement"
+   ],
+   "why": "Audio spot",
+   "id": "r500-223"
+  },
+  {
+   "m": "Record a voice over for the course welcome lesson",
+   "d": "audio",
+   "alt": [
+    "video"
+   ],
+   "why": "Voice",
+   "id": "r500-224"
+  },
+  {
+   "m": "Create a meditation track with soft background music",
+   "d": "audio",
+   "alt": [],
+   "why": "Audio production",
+   "id": "r500-225"
+  },
+  {
+   "m": "Transcribe the interview audio and make a clean text version",
+   "d": "audio",
+   "alt": [
+    "research"
+   ],
+   "why": "Transcription",
+   "id": "r500-226"
+  },
+  {
+   "m": "Mix the guest and host tracks and balance levels",
+   "d": "audio",
+   "alt": [],
+   "why": "Mixing",
+   "id": "r500-227"
+  },
+  {
+   "m": "Generate an ai voice reading of our blog post",
+   "d": "audio",
+   "alt": [
+    "marketing"
+   ],
+   "why": "Text to speech",
+   "id": "r500-228"
+  },
+  {
+   "m": "pick royalty free background music for our video series",
+   "d": "audio",
+   "alt": [
+    "video"
+   ],
+   "why": "Music selection",
+   "id": "r500-229"
+  },
+  {
+   "m": "Normalize volume across all the course audio files",
+   "d": "audio",
+   "alt": [],
+   "why": "Audio cleanup",
+   "id": "r500-230"
+  },
+  {
+   "m": "Make a custom jingle for our brand",
+   "d": "audio",
+   "alt": [],
+   "why": "Audio brand",
+   "id": "r500-231"
+  },
+  {
+   "m": "Split the long recording into 4 separate episodes",
+   "d": "audio",
+   "alt": [],
+   "why": "Audio edit",
+   "id": "r500-232"
+  },
+  {
+   "m": "Add chapter markers and an intro to the audiobook files",
+   "d": "audio",
+   "alt": [],
+   "why": "Audio production",
+   "id": "r500-233"
+  },
+  {
+   "m": "Remove the background noise from the voicemail greeting recording",
+   "d": "audio",
+   "alt": [],
+   "why": "Audio cleanup",
+   "id": "r500-234"
+  },
+  {
+   "m": "Find out who our top 5 competitors are and compare their pricing",
+   "d": "research",
+   "alt": [],
+   "why": "Competitive research",
+   "id": "r500-235"
+  },
+  {
+   "m": "How big is the market for pet wellness subscriptions in the US?",
+   "d": "research",
+   "alt": [
+    "marketing"
+   ],
+   "why": "Market sizing",
+   "id": "r500-236"
+  },
+  {
+   "m": "Look up the current rules for hiring remote contractors in Texas",
+   "d": "research",
+   "alt": [
+    "legal"
+   ],
+   "why": "Regulatory research",
+   "id": "r500-237"
+  },
+  {
+   "m": "What are customers saying about our competitor on reddit and review sites?",
+   "d": "research",
+   "alt": [
+    "marketing"
+   ],
+   "why": "Voice of customer research",
+   "id": "r500-238"
+  },
+  {
+   "m": "Research 10 podcasts that would be good guest spots for our CEO",
+   "d": "research",
+   "alt": [
+    "marketing",
+    "communications"
+   ],
+   "why": "Prospect research",
+   "id": "r500-239"
+  },
+  {
+   "m": "Summarize the 3 best studies on intermittent fasting for our newsletter",
+   "d": "research",
+   "alt": [
+    "marketing"
+   ],
+   "why": "Literature research",
+   "id": "r500-240"
+  },
+  {
+   "m": "Compare 4 project management tools for a team of 8 and recommend one",
+   "d": "research",
+   "alt": [],
+   "why": "Tool comparison",
+   "id": "r500-241"
+  },
+  {
+   "m": "Pull together a profile on this company before our meeting",
+   "d": "research",
+   "alt": [
+    "sales"
+   ],
+   "why": "Company research",
+   "id": "r500-242"
+  },
+  {
+   "m": "Find grants available to women owned small businesses",
+   "d": "research",
+   "alt": [],
+   "why": "Opportunity research",
+   "id": "r500-243"
+  },
+  {
+   "m": "what are the top trends in online coaching for 2026?",
+   "d": "research",
+   "alt": [],
+   "why": "Trend research",
+   "id": "r500-244"
+  },
+  {
+   "m": "Research venues in Austin that hold 150 people with av included",
+   "d": "research",
+   "alt": [
+    "personal-assistant"
+   ],
+   "why": "Venue research",
+   "id": "r500-245"
+  },
+  {
+   "m": "Find five case studies of successful membership sites",
+   "d": "research",
+   "alt": [],
+   "why": "Case research",
+   "id": "r500-246"
+  },
+  {
+   "m": "What do we know about our audience age and income? Dig into our survey data",
+   "d": "research",
+   "alt": [],
+   "why": "Data analysis",
+   "id": "r500-247"
+  },
+  {
+   "m": "Research pricing models other course creators use",
+   "d": "research",
+   "alt": [],
+   "why": "Pricing research",
+   "id": "r500-248"
+  },
+  {
+   "m": "Compile a list of industry conferences for next year with costs and dates",
+   "d": "research",
+   "alt": [],
+   "why": "Event research",
+   "id": "r500-249"
+  },
+  {
+   "m": "Research the best email platforms for deliverability",
+   "d": "research",
+   "alt": [],
+   "why": "Platform research",
+   "id": "r500-250"
+  },
+  {
+   "m": "Dig into why our competitors rank higher on google for 'meal prep'",
+   "d": "research",
+   "alt": [
+    "marketing"
+   ],
+   "why": "SEO research",
+   "id": "r500-251"
+  },
+  {
+   "m": "Find statistics we can cite about remote work productivity",
+   "d": "research",
+   "alt": [],
+   "why": "Fact finding",
+   "id": "r500-252"
+  },
+  {
+   "m": "Research whether people actually want a mobile app for a plumbing service",
+   "d": "research",
+   "alt": [
+    "app-development"
+   ],
+   "why": "Demand research",
+   "id": "r500-253"
+  },
+  {
+   "m": "Look into insurance options for a small event company",
+   "d": "research",
+   "alt": [
+    "legal"
+   ],
+   "why": "Business research",
+   "id": "r500-254"
+  },
+  {
+   "m": "Write a briefing on what our top 3 competitors launched this year",
+   "d": "research",
+   "alt": [],
+   "why": "Competitive brief",
+   "id": "r500-255"
+  },
+  {
+   "m": "Find out what tools bakers use for wholesale ordering",
+   "d": "research",
+   "alt": [],
+   "why": "Industry research",
+   "id": "r500-256"
+  },
+  {
+   "m": "Write the announcement to all staff about the new office hours",
+   "d": "communications",
+   "alt": [],
+   "why": "Internal comms",
+   "id": "r500-257"
+  },
+  {
+   "m": "Draft a press release for our new location opening",
+   "d": "communications",
+   "alt": [
+    "marketing"
+   ],
+   "why": "Press release",
+   "id": "r500-258"
+  },
+  {
+   "m": "Write a message to our community about the delay in shipping",
+   "d": "communications",
+   "alt": [
+    "customer-support"
+   ],
+   "why": "Crisis comms",
+   "id": "r500-259"
+  },
+  {
+   "m": "Draft talking points for the CEO's interview with the local paper",
+   "d": "communications",
+   "alt": [],
+   "why": "Media prep",
+   "id": "r500-260"
+  },
+  {
+   "m": "Prepare a statement responding to the negative news article",
+   "d": "communications",
+   "alt": [],
+   "why": "Public statement",
+   "id": "r500-261"
+  },
+  {
+   "m": "Write the quarterly update letter to our investors",
+   "d": "communications",
+   "alt": [],
+   "why": "Stakeholder comms",
+   "id": "r500-262"
+  },
+  {
+   "m": "create an internal memo about the new expense policy",
+   "d": "communications",
+   "alt": [
+    "billing-finance"
+   ],
+   "why": "Internal memo",
+   "id": "r500-263"
+  },
+  {
+   "m": "Write a thank you note to our top 20 partners",
+   "d": "communications",
+   "alt": [],
+   "why": "Relationship comms",
+   "id": "r500-264"
+  },
+  {
+   "m": "Draft the all-hands meeting agenda and the follow up summary",
+   "d": "communications",
+   "alt": [],
+   "why": "Internal comms",
+   "id": "r500-265"
+  },
+  {
+   "m": "Announce the staff holiday schedule in an email",
+   "d": "communications",
+   "alt": [],
+   "why": "Announcement",
+   "id": "r500-266"
+  },
+  {
+   "m": "Write the welcome letter for new hires",
+   "d": "communications",
+   "alt": [],
+   "why": "HR communications",
+   "id": "r500-267"
+  },
+  {
+   "m": "Draft a spokesperson Q&A for the product recall",
+   "d": "communications",
+   "alt": [],
+   "why": "Media relations",
+   "id": "r500-268"
+  },
+  {
+   "m": "Create a media kit one pager with bio and boilerplate",
+   "d": "communications",
+   "alt": [
+    "marketing"
+   ],
+   "why": "Media kit",
+   "id": "r500-269"
+  },
+  {
+   "m": "Pitch a feature story on our founder to 3 local magazines",
+   "d": "communications",
+   "alt": [
+    "marketing"
+   ],
+   "why": "Media pitching",
+   "id": "r500-270"
+  },
+  {
+   "m": "Write a letter to neighbors about the construction noise",
+   "d": "communications",
+   "alt": [],
+   "why": "Community notice",
+   "id": "r500-271"
+  },
+  {
+   "m": "Draft our company's response to the data incident, short and clear",
+   "d": "communications",
+   "alt": [
+    "legal"
+   ],
+   "why": "Crisis comms",
+   "id": "r500-272"
+  },
+  {
+   "m": "Write a farewell announcement for the retiring manager",
+   "d": "communications",
+   "alt": [],
+   "why": "Announcement",
+   "id": "r500-273"
+  },
+  {
+   "m": "Summarize the board meeting notes into a short update for the team",
+   "d": "communications",
+   "alt": [],
+   "why": "Meeting comms",
+   "id": "r500-274"
+  },
+  {
+   "m": "write the apology to attendees about the cancelled workshop",
+   "d": "communications",
+   "alt": [
+    "customer-support"
+   ],
+   "why": "Communication",
+   "id": "r500-275"
+  },
+  {
+   "m": "Draft the monthly partner newsletter, plain updates not promo",
+   "d": "communications",
+   "alt": [
+    "marketing"
+   ],
+   "why": "Partner comms",
+   "id": "r500-276"
+  },
+  {
+   "m": "Tag everyone who attended the webinar as 'warm' in the CRM",
+   "d": "crm",
+   "alt": [],
+   "why": "Tagging",
+   "id": "r500-277"
+  },
+  {
+   "m": "Merge the duplicate contacts from last year's import",
+   "d": "crm",
+   "alt": [],
+   "why": "List hygiene",
+   "id": "r500-278"
+  },
+  {
+   "m": "Build an automation that moves a lead to 'booked' when they schedule a call",
+   "d": "crm",
+   "alt": [],
+   "why": "CRM automation",
+   "id": "r500-279"
+  },
+  {
+   "m": "Import this csv of 300 contacts into GoHighLevel and map the fields",
+   "d": "crm",
+   "alt": [],
+   "why": "Import",
+   "id": "r500-280"
+  },
+  {
+   "m": "Set up a 5 email nurture sequence for new subscribers",
+   "d": "crm",
+   "alt": [
+    "marketing"
+   ],
+   "why": "Nurture sequence",
+   "id": "r500-281"
+  },
+  {
+   "m": "Segment the list into customers, leads and past clients",
+   "d": "crm",
+   "alt": [],
+   "why": "Segmentation",
+   "id": "r500-282"
+  },
+  {
+   "m": "Clean the list, remove bounced and unsubscribed emails",
+   "d": "crm",
+   "alt": [],
+   "why": "List hygiene",
+   "id": "r500-283"
+  },
+  {
+   "m": "Why are our emails landing in promotions? fix the sending setup",
+   "d": "crm",
+   "alt": [],
+   "why": "Deliverability",
+   "id": "r500-284"
+  },
+  {
+   "m": "Create a pipeline for coaching clients with 5 stages",
+   "d": "crm",
+   "alt": [
+    "sales"
+   ],
+   "why": "Pipeline stages",
+   "id": "r500-285"
+  },
+  {
+   "m": "Add a custom field for 'birthday' and trigger a card in that month",
+   "d": "crm",
+   "alt": [],
+   "why": "CRM fields",
+   "id": "r500-286"
+  },
+  {
+   "m": "Send the video email to everyone tagged 'vip' through the CRM",
+   "d": "crm",
+   "alt": [
+    "video"
+   ],
+   "why": "CRM send",
+   "id": "r500-287"
+  },
+  {
+   "m": "Set up a text reminder 1 hour before every appointment",
+   "d": "crm",
+   "alt": [],
+   "why": "Automation",
+   "id": "r500-288"
+  },
+  {
+   "m": "Build a workflow to assign new leads to reps round robin",
+   "d": "crm",
+   "alt": [
+    "sales"
+   ],
+   "why": "Lead routing",
+   "id": "r500-289"
+  },
+  {
+   "m": "Enrich our contact list with company names and job titles",
+   "d": "crm",
+   "alt": [],
+   "why": "Enrichment",
+   "id": "r500-290"
+  },
+  {
+   "m": "Update the missed call text-back automation",
+   "d": "crm",
+   "alt": [],
+   "why": "GHL automation",
+   "id": "r500-291"
+  },
+  {
+   "m": "Remove anyone who hasn't opened an email in 6 months",
+   "d": "crm",
+   "alt": [
+    "marketing"
+   ],
+   "why": "List management",
+   "id": "r500-292"
+  },
+  {
+   "m": "Set up a birthday email in the crm for clients",
+   "d": "crm",
+   "alt": [],
+   "why": "Automation",
+   "id": "r500-293"
+  },
+  {
+   "m": "Create a form that adds people to the 'newsletter' list and tags them",
+   "d": "crm",
+   "alt": [],
+   "why": "CRM capture",
+   "id": "r500-294"
+  },
+  {
+   "m": "Sync the stripe customers into the CRM with the right tags",
+   "d": "crm",
+   "alt": [
+    "billing-finance"
+   ],
+   "why": "Integration",
+   "id": "r500-295"
+  },
+  {
+   "m": "Make a smart list of contacts who bought twice",
+   "d": "crm",
+   "alt": [],
+   "why": "Smart lists",
+   "id": "r500-296"
+  },
+  {
+   "m": "Fix the automation that sent two welcome emails to everyone",
+   "d": "crm",
+   "alt": [
+    "bugs",
+    "healer"
+   ],
+   "why": "Automation error",
+   "id": "r500-297"
+  },
+  {
+   "m": "Set up a re-engagement campaign for cold contacts",
+   "d": "crm",
+   "alt": [],
+   "why": "Reengagement",
+   "id": "r500-298"
+  },
+  {
+   "m": "how many contacts do we have by source? pull it from the crm",
+   "d": "crm",
+   "alt": [],
+   "why": "CRM reporting",
+   "id": "r500-299"
+  },
+  {
+   "m": "Update the opt-in compliance settings and add unsubscribe link to templates",
+   "d": "crm",
+   "alt": [
+    "legal"
+   ],
+   "why": "Email compliance",
+   "id": "r500-300"
+  },
+  {
+   "m": "Run the weekly skill update on the agents",
+   "d": "openclaw-maintenance",
+   "alt": [],
+   "why": "Skill update",
+   "id": "r500-301"
+  },
+  {
+   "m": "Make sure every department agent is alive and answering pings",
+   "d": "openclaw-maintenance",
+   "alt": [],
+   "why": "Agent health",
+   "id": "r500-302"
+  },
+  {
+   "m": "The cron job for daily briefings did not fire this morning, check it",
+   "d": "openclaw-maintenance",
+   "alt": [
+    "healer"
+   ],
+   "why": "Cron maintenance",
+   "id": "r500-303"
+  },
+  {
+   "m": "Bump the openclaw version and verify the stamp",
+   "d": "openclaw-maintenance",
+   "alt": [],
+   "why": "Version bump",
+   "id": "r500-304"
+  },
+  {
+   "m": "Reinstall the missing skill on the sales agent",
+   "d": "openclaw-maintenance",
+   "alt": [],
+   "why": "Skill install",
+   "id": "r500-305"
+  },
+  {
+   "m": "Roll back the last system patch, it broke memory",
+   "d": "openclaw-maintenance",
+   "alt": [],
+   "why": "Rollback",
+   "id": "r500-306"
+  },
+  {
+   "m": "Clean up old agent sessions and logs to free disk",
+   "d": "openclaw-maintenance",
+   "alt": [],
+   "why": "System upkeep",
+   "id": "r500-307"
+  },
+  {
+   "m": "Verify the heartbeat for every department agent",
+   "d": "openclaw-maintenance",
+   "alt": [],
+   "why": "Heartbeat check",
+   "id": "r500-308"
+  },
+  {
+   "m": "Apply the hotfix to the gateway config and restart it",
+   "d": "openclaw-maintenance",
+   "alt": [],
+   "why": "Hotfix",
+   "id": "r500-309"
+  },
+  {
+   "m": "Review the self improvement log and apply the approved changes",
+   "d": "openclaw-maintenance",
+   "alt": [],
+   "why": "Self improvement",
+   "id": "r500-310"
+  },
+  {
+   "m": "Check the memory index isn't bloated and reindex if needed",
+   "d": "openclaw-maintenance",
+   "alt": [],
+   "why": "Memory maintenance",
+   "id": "r500-311"
+  },
+  {
+   "m": "Add a new agent to the marketing department and wire its tools",
+   "d": "openclaw-maintenance",
+   "alt": [],
+   "why": "Agent setup",
+   "id": "r500-312"
+  },
+  {
+   "m": "Run a system integrity check across all departments",
+   "d": "openclaw-maintenance",
+   "alt": [],
+   "why": "Integrity check",
+   "id": "r500-313"
+  },
+  {
+   "m": "Update the Sunday maintenance schedule so it runs at 2am",
+   "d": "openclaw-maintenance",
+   "alt": [],
+   "why": "Maintenance schedule",
+   "id": "r500-314"
+  },
+  {
+   "m": "Check that our model keys are set properly for all agents",
+   "d": "openclaw-maintenance",
+   "alt": [],
+   "why": "Agent config",
+   "id": "r500-315"
+  },
+  {
+   "m": "Why did the agent stop picking up tasks? check its dispatcher",
+   "d": "openclaw-maintenance",
+   "alt": [
+    "bugs",
+    "healer"
+   ],
+   "why": "Agent mechanics",
+   "id": "r500-316"
+  },
+  {
+   "m": "Draft an NDA for a contractor who will see our client list",
+   "d": "legal",
+   "alt": [],
+   "why": "NDA",
+   "id": "r500-317"
+  },
+  {
+   "m": "Review this vendor contract and flag anything risky",
+   "d": "legal",
+   "alt": [],
+   "why": "Contract review",
+   "id": "r500-318"
+  },
+  {
+   "m": "Write the privacy policy for the new website",
+   "d": "legal",
+   "alt": [
+    "web-development"
+   ],
+   "why": "Policy",
+   "id": "r500-319"
+  },
+  {
+   "m": "Update our terms of service to cover refunds and cancellations",
+   "d": "legal",
+   "alt": [
+    "billing-finance"
+   ],
+   "why": "Terms",
+   "id": "r500-320"
+  },
+  {
+   "m": "Do we need a disclaimer on the weight loss program page?",
+   "d": "legal",
+   "alt": [],
+   "why": "Compliance",
+   "id": "r500-321"
+  },
+  {
+   "m": "Draft an independent contractor agreement",
+   "d": "legal",
+   "alt": [],
+   "why": "Contract",
+   "id": "r500-322"
+  },
+  {
+   "m": "Check if our email list practices follow CAN-SPAM",
+   "d": "legal",
+   "alt": [
+    "crm"
+   ],
+   "why": "Compliance",
+   "id": "r500-323"
+  },
+  {
+   "m": "Help me with a trademark search for the business name",
+   "d": "legal",
+   "alt": [],
+   "why": "IP",
+   "id": "r500-324"
+  },
+  {
+   "m": "Write a cease and desist for someone using our course materials",
+   "d": "legal",
+   "alt": [],
+   "why": "IP enforcement",
+   "id": "r500-325"
+  },
+  {
+   "m": "Create a client agreement for the coaching package",
+   "d": "legal",
+   "alt": [
+    "sales"
+   ],
+   "why": "Agreement",
+   "id": "r500-326"
+  },
+  {
+   "m": "Review the lease terms for the new studio",
+   "d": "legal",
+   "alt": [],
+   "why": "Contract review",
+   "id": "r500-327"
+  },
+  {
+   "m": "Write a media release form for people who appear in our videos",
+   "d": "legal",
+   "alt": [
+    "video"
+   ],
+   "why": "Release form",
+   "id": "r500-328"
+  },
+  {
+   "m": "What do we need to be GDPR compliant for european customers?",
+   "d": "legal",
+   "alt": [],
+   "why": "GDPR",
+   "id": "r500-329"
+  },
+  {
+   "m": "Draft a refund policy that matches our guarantee",
+   "d": "legal",
+   "alt": [
+    "billing-finance",
+    "customer-support"
+   ],
+   "why": "Policy",
+   "id": "r500-330"
+  },
+  {
+   "m": "Summarize the key risks in this partnership agreement",
+   "d": "legal",
+   "alt": [],
+   "why": "Risk review",
+   "id": "r500-331"
+  },
+  {
+   "m": "Draft an affiliate agreement with commission terms",
+   "d": "legal",
+   "alt": [
+    "sales"
+   ],
+   "why": "Contract",
+   "id": "r500-332"
+  },
+  {
+   "m": "Write the license terms for our template pack",
+   "d": "legal",
+   "alt": [],
+   "why": "Licensing",
+   "id": "r500-333"
+  },
+  {
+   "m": "Prepare a data processing agreement for our software vendor",
+   "d": "legal",
+   "alt": [],
+   "why": "DPA",
+   "id": "r500-334"
+  },
+  {
+   "m": "Review the copyright on the images we've used in the course",
+   "d": "legal",
+   "alt": [
+    "graphics"
+   ],
+   "why": "Copyright",
+   "id": "r500-335"
+  },
+  {
+   "m": "Create a waiver for participants in the weekend retreat",
+   "d": "legal",
+   "alt": [],
+   "why": "Waiver",
+   "id": "r500-336"
+  },
+  {
+   "m": "Write 7 instagram captions for next week with hashtags",
+   "d": "social-media",
+   "alt": [],
+   "why": "Captions",
+   "id": "r500-337"
+  },
+  {
+   "m": "Create a month of linkedin posts about our team culture",
+   "d": "social-media",
+   "alt": [
+    "marketing"
+   ],
+   "why": "Content calendar",
+   "id": "r500-338"
+  },
+  {
+   "m": "Schedule the facebook posts for the weekend sale",
+   "d": "social-media",
+   "alt": [],
+   "why": "Scheduling",
+   "id": "r500-339"
+  },
+  {
+   "m": "Answer the replies people left under our latest tiktok clip",
+   "d": "social-media",
+   "alt": [],
+   "why": "Engagement",
+   "id": "r500-340"
+  },
+  {
+   "m": "Come up with 10 reel ideas for a hair salon",
+   "d": "social-media",
+   "alt": [
+    "video"
+   ],
+   "why": "Reel ideas",
+   "id": "r500-341"
+  },
+  {
+   "m": "Write a twitter thread about our 3 lessons from year one",
+   "d": "social-media",
+   "alt": [],
+   "why": "Thread",
+   "id": "r500-342"
+  },
+  {
+   "m": "what hashtags should I use for a bakery in portland",
+   "d": "social-media",
+   "alt": [],
+   "why": "Hashtags",
+   "id": "r500-343"
+  },
+  {
+   "m": "Post the new blog to all our social channels with fresh captions",
+   "d": "social-media",
+   "alt": [],
+   "why": "Posting",
+   "id": "r500-344"
+  },
+  {
+   "m": "Respond to the DMs from this morning and sort the leads out",
+   "d": "social-media",
+   "alt": [
+    "sales"
+   ],
+   "why": "DMs",
+   "id": "r500-345"
+  },
+  {
+   "m": "Make a weekly posting schedule across instagram, linkedin and facebook",
+   "d": "social-media",
+   "alt": [],
+   "why": "Social calendar",
+   "id": "r500-346"
+  },
+  {
+   "m": "Write a youtube community post teasing Friday's video",
+   "d": "social-media",
+   "alt": [],
+   "why": "Community post",
+   "id": "r500-347"
+  },
+  {
+   "m": "Plan a story series for instagram showing behind the scenes",
+   "d": "social-media",
+   "alt": [],
+   "why": "Story content",
+   "id": "r500-348"
+  },
+  {
+   "m": "analyze which posts got the most engagement last month",
+   "d": "social-media",
+   "alt": [
+    "research"
+   ],
+   "why": "Social analytics",
+   "id": "r500-349"
+  },
+  {
+   "m": "Write 3 tiktok hooks for a dog groomer",
+   "d": "social-media",
+   "alt": [],
+   "why": "Short-form hooks",
+   "id": "r500-350"
+  },
+  {
+   "m": "Create a poll for our linkedin audience about their biggest challenge",
+   "d": "social-media",
+   "alt": [],
+   "why": "Engagement",
+   "id": "r500-351"
+  },
+  {
+   "m": "Turn the webinar into 10 social posts",
+   "d": "social-media",
+   "alt": [],
+   "why": "Repurposing",
+   "id": "r500-352"
+  },
+  {
+   "m": "Draft a post celebrating 1000 followers",
+   "d": "social-media",
+   "alt": [],
+   "why": "Post",
+   "id": "r500-353"
+  },
+  {
+   "m": "Clean up our pinterest boards and write pin descriptions",
+   "d": "social-media",
+   "alt": [],
+   "why": "Platform management",
+   "id": "r500-354"
+  },
+  {
+   "m": "Write a response to the troll comment on our post, calm and brief",
+   "d": "social-media",
+   "alt": [
+    "communications"
+   ],
+   "why": "Moderation",
+   "id": "r500-355"
+  },
+  {
+   "m": "Plan a hashtag challenge for our fitness community",
+   "d": "social-media",
+   "alt": [],
+   "why": "Social campaign",
+   "id": "r500-356"
+  },
+  {
+   "m": "Draft instagram caption for the carousel on 5 morning habits",
+   "d": "social-media",
+   "alt": [
+    "graphics"
+   ],
+   "why": "Caption",
+   "id": "r500-357"
+  },
+  {
+   "m": "Find the best times to post this week",
+   "d": "social-media",
+   "alt": [],
+   "why": "Social timing",
+   "id": "r500-358"
+  },
+  {
+   "m": "Spin up a meta campaign promoting the webinar, daily cap of fifty bucks",
+   "d": "paid-advertisement",
+   "alt": [],
+   "why": "Ad campaign",
+   "id": "r500-359"
+  },
+  {
+   "m": "Write 5 google ads headlines and descriptions for our plumbing service",
+   "d": "paid-advertisement",
+   "alt": [
+    "marketing"
+   ],
+   "why": "Ad copy",
+   "id": "r500-360"
+  },
+  {
+   "m": "Our cost per lead jumped from $8 to $19, what's wrong with the ads?",
+   "d": "paid-advertisement",
+   "alt": [
+    "research"
+   ],
+   "why": "Ad performance",
+   "id": "r500-361"
+  },
+  {
+   "m": "Create a retargeting audience for website visitors in the last 30 days",
+   "d": "paid-advertisement",
+   "alt": [],
+   "why": "Retargeting",
+   "id": "r500-362"
+  },
+  {
+   "m": "Pause the low performing ad sets and shift budget to the winners",
+   "d": "paid-advertisement",
+   "alt": [],
+   "why": "Budget optimization",
+   "id": "r500-363"
+  },
+  {
+   "m": "Plan the ad budget for the summer sale across meta and google",
+   "d": "paid-advertisement",
+   "alt": [
+    "marketing"
+   ],
+   "why": "Ad planning",
+   "id": "r500-364"
+  },
+  {
+   "m": "Write the copy for a youtube pre-roll ad",
+   "d": "paid-advertisement",
+   "alt": [
+    "video"
+   ],
+   "why": "Ad creative",
+   "id": "r500-365"
+  },
+  {
+   "m": "Set up lookalike audiences from our customer list",
+   "d": "paid-advertisement",
+   "alt": [],
+   "why": "Targeting",
+   "id": "r500-366"
+  },
+  {
+   "m": "Build a linkedin ads campaign for b2b leads",
+   "d": "paid-advertisement",
+   "alt": [],
+   "why": "Ad campaign",
+   "id": "r500-367"
+  },
+  {
+   "m": "Report ROAS for each campaign last month",
+   "d": "paid-advertisement",
+   "alt": [],
+   "why": "Ad reporting",
+   "id": "r500-368"
+  },
+  {
+   "m": "Split test three ad creatives and report the winner",
+   "d": "paid-advertisement",
+   "alt": [],
+   "why": "Ad testing",
+   "id": "r500-369"
+  },
+  {
+   "m": "Add negative keywords to the google search campaign",
+   "d": "paid-advertisement",
+   "alt": [],
+   "why": "Search ads",
+   "id": "r500-370"
+  },
+  {
+   "m": "Set up conversion tracking so ad spend ties to purchases",
+   "d": "paid-advertisement",
+   "alt": [
+    "web-development"
+   ],
+   "why": "Ad tracking",
+   "id": "r500-371"
+  },
+  {
+   "m": "Launch a $20/day tiktok ad for the new product",
+   "d": "paid-advertisement",
+   "alt": [],
+   "why": "Ad campaign",
+   "id": "r500-372"
+  },
+  {
+   "m": "Our meta ads got rejected, figure out why and fix the policy issue",
+   "d": "paid-advertisement",
+   "alt": [],
+   "why": "Ad policy",
+   "id": "r500-373"
+  },
+  {
+   "m": "Create an ad for the local radio and billboard slots",
+   "d": "paid-advertisement",
+   "alt": [
+    "audio"
+   ],
+   "why": "Media buy",
+   "id": "r500-374"
+  },
+  {
+   "m": "Increase the daily budget by 20% on the best campaign",
+   "d": "paid-advertisement",
+   "alt": [],
+   "why": "Budget",
+   "id": "r500-375"
+  },
+  {
+   "m": "Make a media plan for q1 ads with spend by platform",
+   "d": "paid-advertisement",
+   "alt": [],
+   "why": "Ad planning",
+   "id": "r500-376"
+  },
+  {
+   "m": "Move my dentist appointment from Tuesday to Thursday morning",
+   "d": "personal-assistant",
+   "alt": [],
+   "why": "Calendar",
+   "id": "r500-377"
+  },
+  {
+   "m": "book me a hotel near the conference in Chicago for 2 nights",
+   "d": "personal-assistant",
+   "alt": [],
+   "why": "Travel",
+   "id": "r500-378"
+  },
+  {
+   "m": "Remind me to renew my passport next month",
+   "d": "personal-assistant",
+   "alt": [],
+   "why": "Reminder",
+   "id": "r500-379"
+  },
+  {
+   "m": "Sort my inbox and tell me which 5 emails need me today",
+   "d": "personal-assistant",
+   "alt": [],
+   "why": "Inbox",
+   "id": "r500-380"
+  },
+  {
+   "m": "Find me a table for 6 at an italian place Friday at 7",
+   "d": "personal-assistant",
+   "alt": [],
+   "why": "Reservation",
+   "id": "r500-381"
+  },
+  {
+   "m": "Block off 2 hours every morning for deep work",
+   "d": "personal-assistant",
+   "alt": [],
+   "why": "Calendar",
+   "id": "r500-382"
+  },
+  {
+   "m": "Pick up my dry cleaning, schedule the pickup",
+   "d": "personal-assistant",
+   "alt": [],
+   "why": "Errand",
+   "id": "r500-383"
+  },
+  {
+   "m": "Send flowers to my sister for her birthday on the 14th",
+   "d": "personal-assistant",
+   "alt": [],
+   "why": "Personal errand",
+   "id": "r500-384"
+  },
+  {
+   "m": "Put the school pickup on my calendar every wednesday",
+   "d": "personal-assistant",
+   "alt": [],
+   "why": "Calendar",
+   "id": "r500-385"
+  },
+  {
+   "m": "Find a pet sitter for the week I'm traveling",
+   "d": "personal-assistant",
+   "alt": [],
+   "why": "Personal errand",
+   "id": "r500-386"
+  },
+  {
+   "m": "cancel my gym membership for me",
+   "d": "personal-assistant",
+   "alt": [],
+   "why": "Personal admin",
+   "id": "r500-387"
+  },
+  {
+   "m": "Make a packing list for my 4 day trip to Denver",
+   "d": "personal-assistant",
+   "alt": [],
+   "why": "Travel",
+   "id": "r500-388"
+  },
+  {
+   "m": "what's on my schedule tomorrow? give me a quick rundown",
+   "d": "personal-assistant",
+   "alt": [],
+   "why": "Schedule",
+   "id": "r500-389"
+  },
+  {
+   "m": "Book a car service to the airport on the 3rd at 5am",
+   "d": "personal-assistant",
+   "alt": [],
+   "why": "Travel",
+   "id": "r500-390"
+  },
+  {
+   "m": "Renew the registration on my car",
+   "d": "personal-assistant",
+   "alt": [],
+   "why": "Personal admin",
+   "id": "r500-391"
+  },
+  {
+   "m": "Reschedule my lunch with my business partner to next week",
+   "d": "personal-assistant",
+   "alt": [],
+   "why": "Calendar",
+   "id": "r500-392"
+  },
+  {
+   "m": "Order groceries for the weekend, the usual stuff",
+   "d": "personal-assistant",
+   "alt": [],
+   "why": "Personal errand",
+   "id": "r500-393"
+  },
+  {
+   "m": "Find a babysitter for saturday night",
+   "d": "personal-assistant",
+   "alt": [],
+   "why": "Personal errand",
+   "id": "r500-394"
+  },
+  {
+   "m": "Draft a polite no to the speaking invite and send it from my email",
+   "d": "personal-assistant",
+   "alt": [],
+   "why": "Inbox handling",
+   "id": "r500-395"
+  },
+  {
+   "m": "Set up a recurring reminder to take my vitamins at 8am",
+   "d": "personal-assistant",
+   "alt": [],
+   "why": "Reminder",
+   "id": "r500-396"
+  },
+  {
+   "m": "Make a doctor appointment for my annual physical",
+   "d": "personal-assistant",
+   "alt": [],
+   "why": "Appointment",
+   "id": "r500-397"
+  },
+  {
+   "m": "Compile my travel receipts and itinerary for the Atlanta trip into one folder",
+   "d": "personal-assistant",
+   "alt": [],
+   "why": "Personal admin",
+   "id": "r500-398"
+  },
+  {
+   "m": "find me a gift for my husband, he likes fishing, under $100",
+   "d": "personal-assistant",
+   "alt": [],
+   "why": "Gift",
+   "id": "r500-399"
+  },
+  {
+   "m": "Add all my kids' soccer games to my calendar",
+   "d": "personal-assistant",
+   "alt": [],
+   "why": "Calendar",
+   "id": "r500-400"
+  },
+  {
+   "m": "Write a project charter for the new customer portal, scope, risks, stakeholders",
+   "d": "project-architecture-office",
+   "alt": [],
+   "why": "Project planning",
+   "id": "r500-401"
+  },
+  {
+   "m": "Break the product launch into workstreams with owners and deadlines",
+   "d": "project-architecture-office",
+   "alt": [
+    "marketing"
+   ],
+   "why": "Project plan",
+   "id": "r500-402"
+  },
+  {
+   "m": "Design the architecture for how our agents, CRM and billing system will work together",
+   "d": "project-architecture-office",
+   "alt": [
+    "app-development"
+   ],
+   "why": "System architecture",
+   "id": "r500-403"
+  },
+  {
+   "m": "Create a roadmap for the next 3 quarters with dependencies",
+   "d": "project-architecture-office",
+   "alt": [],
+   "why": "Roadmap",
+   "id": "r500-404"
+  },
+  {
+   "m": "Plan the migration from our old email platform to the new one, step by step",
+   "d": "project-architecture-office",
+   "alt": [
+    "crm"
+   ],
+   "why": "Migration plan",
+   "id": "r500-405"
+  },
+  {
+   "m": "Draft a statement of work for the website rebuild",
+   "d": "project-architecture-office",
+   "alt": [
+    "web-development"
+   ],
+   "why": "SOW",
+   "id": "r500-406"
+  },
+  {
+   "m": "Put together a RACI for the onboarding process",
+   "d": "project-architecture-office",
+   "alt": [],
+   "why": "Process architecture",
+   "id": "r500-407"
+  },
+  {
+   "m": "Plan the whole event, venue to follow up, with a timeline and budget",
+   "d": "project-architecture-office",
+   "alt": [
+    "personal-assistant"
+   ],
+   "why": "Large project plan",
+   "id": "r500-408"
+  },
+  {
+   "m": "Write a requirements doc for the member app",
+   "d": "project-architecture-office",
+   "alt": [],
+   "why": "PRD",
+   "id": "r500-409"
+  },
+  {
+   "m": "Map the dependencies between the funnel build and the email setup",
+   "d": "project-architecture-office",
+   "alt": [
+    "funnels"
+   ],
+   "why": "Dependency map",
+   "id": "r500-410"
+  },
+  {
+   "m": "how should we structure our departments and who reports where ??",
+   "d": "project-architecture-office",
+   "alt": [],
+   "why": "Org architecture",
+   "id": "r500-411"
+  },
+  {
+   "m": "Create a phased implementation plan for rolling out the new SOPs",
+   "d": "project-architecture-office",
+   "alt": [],
+   "why": "Implementation plan",
+   "id": "r500-412"
+  },
+  {
+   "m": "Build a work breakdown structure for the book launch",
+   "d": "project-architecture-office",
+   "alt": [],
+   "why": "WBS",
+   "id": "r500-413"
+  },
+  {
+   "m": "Scope out the 'big' project of opening a second location, phases and risks",
+   "d": "project-architecture-office",
+   "alt": [],
+   "why": "Scoping",
+   "id": "r500-414"
+  },
+  {
+   "m": "Write a technical design doc for the notification system",
+   "d": "project-architecture-office",
+   "alt": [
+    "app-development"
+   ],
+   "why": "Design doc",
+   "id": "r500-415"
+  },
+  {
+   "m": "Draft the project plan for training the whole team on the new tools",
+   "d": "project-architecture-office",
+   "alt": [],
+   "why": "Project plan",
+   "id": "r500-416"
+  },
+  {
+   "m": "The checkout page shows a 500 error when people use a discount code, log it",
+   "d": "bugs",
+   "alt": [],
+   "why": "Bug report",
+   "id": "r500-417"
+  },
+  {
+   "m": "Log this issue: the mobile menu doesn't close after tapping a link",
+   "d": "bugs",
+   "alt": [
+    "web-development"
+   ],
+   "why": "Bug logging",
+   "id": "r500-418"
+  },
+  {
+   "m": "Track every user-reported defect that comes in this week and number them",
+   "d": "bugs",
+   "alt": [],
+   "why": "Bug tracking",
+   "id": "r500-419"
+  },
+  {
+   "m": "Reproduce the bug where the app crashes on login with a fresh install",
+   "d": "bugs",
+   "alt": [
+    "app-development"
+   ],
+   "why": "Reproduction",
+   "id": "r500-420"
+  },
+  {
+   "m": "file a bug the pdf download link gives a blank page",
+   "d": "bugs",
+   "alt": [],
+   "why": "Bug filing",
+   "id": "r500-421"
+  },
+  {
+   "m": "Users report the search box returns nothing for names with an apostrophe",
+   "d": "bugs",
+   "alt": [],
+   "why": "Bug report",
+   "id": "r500-422"
+  },
+  {
+   "m": "Prioritize the 12 open bugs by severity",
+   "d": "bugs",
+   "alt": [],
+   "why": "Triage",
+   "id": "r500-423"
+  },
+  {
+   "m": "There's a bug in the booking form, it accepts dates in the past",
+   "d": "bugs",
+   "alt": [],
+   "why": "Bug report",
+   "id": "r500-424"
+  },
+  {
+   "m": "The email preview text is showing the wrong thing, add it to the bug list",
+   "d": "bugs",
+   "alt": [
+    "crm"
+   ],
+   "why": "Bug logging",
+   "id": "r500-425"
+  },
+  {
+   "m": "Write steps to reproduce the issue with the video player stuttering",
+   "d": "bugs",
+   "alt": [
+    "video"
+   ],
+   "why": "Repro steps",
+   "id": "r500-426"
+  },
+  {
+   "m": "Close out the bugs that were fixed in the last release and verify",
+   "d": "bugs",
+   "alt": [],
+   "why": "Bug tracking",
+   "id": "r500-427"
+  },
+  {
+   "m": "Document the error: 'something went wrong' on the order status page",
+   "d": "bugs",
+   "alt": [],
+   "why": "Bug report",
+   "id": "r500-428"
+  },
+  {
+   "m": "Create a ticket for the broken image on the pricing page",
+   "d": "bugs",
+   "alt": [
+    "web-development"
+   ],
+   "why": "Bug ticket",
+   "id": "r500-429"
+  },
+  {
+   "m": "The coupon field wont accept lowercase codes. log + track",
+   "d": "bugs",
+   "alt": [],
+   "why": "Bug report",
+   "id": "r500-430"
+  },
+  {
+   "m": "Collect all the error messages from the logs from yesterday and group them",
+   "d": "bugs",
+   "alt": [],
+   "why": "Error triage",
+   "id": "r500-431"
+  },
+  {
+   "m": "Someone said the unsubscribe link is dead, log it",
+   "d": "bugs",
+   "alt": [
+    "crm"
+   ],
+   "why": "Bug report",
+   "id": "r500-432"
+  },
+  {
+   "m": "The weekly report has been wrong 3 weeks in a row, find the root cause and fix it for good",
+   "d": "healer",
+   "alt": [],
+   "why": "Recurring failure",
+   "id": "r500-433"
+  },
+  {
+   "m": "Figure out why our invoices keep going out with the wrong tax rate and repair the process",
+   "d": "healer",
+   "alt": [
+    "billing-finance",
+    "bugs"
+   ],
+   "why": "Root cause, process repair",
+   "id": "r500-434"
+  },
+  {
+   "m": "Why do onboarding emails keep skipping new clients? Fix the underlying cause",
+   "d": "healer",
+   "alt": [
+    "crm"
+   ],
+   "why": "Recurring process failure",
+   "id": "r500-435"
+  },
+  {
+   "m": "Do a post mortem on the missed deadline and update the SOP so it can't repeat",
+   "d": "healer",
+   "alt": [
+    "project-architecture-office"
+   ],
+   "why": "Post mortem",
+   "id": "r500-436"
+  },
+  {
+   "m": "Agents keep forgetting the brand voice in every draft, fix the root of it",
+   "d": "healer",
+   "alt": [
+    "marketing",
+    "quality-control"
+   ],
+   "why": "Agent behavior fix",
+   "id": "r500-437"
+  },
+  {
+   "m": "the same refund mistake happens every month, stop it at the source",
+   "d": "healer",
+   "alt": [
+    "billing-finance",
+    "customer-support"
+   ],
+   "why": "Recurring error",
+   "id": "r500-438"
+  },
+  {
+   "m": "Find why leads sit unassigned over weekends and change the process to stop it",
+   "d": "healer",
+   "alt": [
+    "crm",
+    "sales"
+   ],
+   "why": "Process healing",
+   "id": "r500-439"
+  },
+  {
+   "m": "The follow up task keeps failing silently, diagnose and permanently repair",
+   "d": "healer",
+   "alt": [
+    "bugs"
+   ],
+   "why": "Recurring failure",
+   "id": "r500-440"
+  },
+  {
+   "m": "Our weekly report cron fails every monday, find out why and solve it properly",
+   "d": "healer",
+   "alt": [
+    "openclaw-maintenance"
+   ],
+   "why": "Recurring cron failure",
+   "id": "r500-441"
+  },
+  {
+   "m": "Analyze why the support team breaks the same SLA each week and repair the workflow",
+   "d": "healer",
+   "alt": [
+    "customer-support"
+   ],
+   "why": "Root cause",
+   "id": "r500-442"
+  },
+  {
+   "m": "the agent keeps double posting to instagram. root cause it and fix the instructions",
+   "d": "healer",
+   "alt": [
+    "social-media"
+   ],
+   "why": "Agent fix",
+   "id": "r500-443"
+  },
+  {
+   "m": "Why do the client reminders go out late again? get to the bottom and fix it so it sticks",
+   "d": "healer",
+   "alt": [
+    "personal-assistant",
+    "crm"
+   ],
+   "why": "Root cause",
+   "id": "r500-444"
+  },
+  {
+   "m": "Look at the pattern of failed handoffs between sales and fulfilment and fix the process",
+   "d": "healer",
+   "alt": [
+    "sales"
+   ],
+   "why": "Process repair",
+   "id": "r500-445"
+  },
+  {
+   "m": "Repeated errors in the monthly close: trace them to the cause and patch the checklist",
+   "d": "healer",
+   "alt": [
+    "billing-finance"
+   ],
+   "why": "Root cause",
+   "id": "r500-446"
+  },
+  {
+   "m": "Review the new SOP for onboarding clients and check every step is specific enough",
+   "d": "quality-control",
+   "alt": [],
+   "why": "SOP review",
+   "id": "r500-447"
+  },
+  {
+   "m": "Proofread the blog post before it gets published",
+   "d": "quality-control",
+   "alt": [
+    "marketing"
+   ],
+   "why": "Proofreading",
+   "id": "r500-448"
+  },
+  {
+   "m": "Audit the support replies from last week against our tone standards",
+   "d": "quality-control",
+   "alt": [
+    "customer-support"
+   ],
+   "why": "QA audit",
+   "id": "r500-449"
+  },
+  {
+   "m": "Check the checkout page copy for typos and broken links before we launch",
+   "d": "quality-control",
+   "alt": [
+    "funnels"
+   ],
+   "why": "Pre-launch check",
+   "id": "r500-450"
+  },
+  {
+   "m": "Score the 5 draft emails against our brand checklist",
+   "d": "quality-control",
+   "alt": [
+    "marketing"
+   ],
+   "why": "Scoring",
+   "id": "r500-451"
+  },
+  {
+   "m": "Review the department roles and flag any that are vague or overlap",
+   "d": "quality-control",
+   "alt": [],
+   "why": "Role audit",
+   "id": "r500-452"
+  },
+  {
+   "m": "QC the new landing page, spelling, layout and links",
+   "d": "quality-control",
+   "alt": [
+    "web-development",
+    "funnels"
+   ],
+   "why": "Page QC",
+   "id": "r500-453"
+  },
+  {
+   "m": "Go through the proposal one more time and catch any errors before it goes to the client",
+   "d": "quality-control",
+   "alt": [
+    "sales"
+   ],
+   "why": "Proofreading",
+   "id": "r500-454"
+  },
+  {
+   "m": "Verify the invoices for this month match the work orders",
+   "d": "quality-control",
+   "alt": [
+    "billing-finance"
+   ],
+   "why": "Accuracy check",
+   "id": "r500-455"
+  },
+  {
+   "m": "Check the video for audio sync problems and caption mistakes before posting",
+   "d": "quality-control",
+   "alt": [
+    "video"
+   ],
+   "why": "Review",
+   "id": "r500-456"
+  },
+  {
+   "m": "Run a quality check on the contract template wording",
+   "d": "quality-control",
+   "alt": [
+    "legal"
+   ],
+   "why": "Review",
+   "id": "r500-457"
+  },
+  {
+   "m": "Evaluate the quality of the last 10 agent outputs and rate them",
+   "d": "quality-control",
+   "alt": [],
+   "why": "Output grading",
+   "id": "r500-458"
+  },
+  {
+   "m": "audit the crm tags for consistency and flag the weird ones",
+   "d": "quality-control",
+   "alt": [
+    "crm"
+   ],
+   "why": "Audit",
+   "id": "r500-459"
+  },
+  {
+   "m": "Review the course lesson scripts for clarity and consistency",
+   "d": "quality-control",
+   "alt": [],
+   "why": "Content QC",
+   "id": "r500-460"
+  },
+  {
+   "m": "Flibbertigibbet the wumpus sprocket",
+   "d": "general-task",
+   "alt": [],
+   "why": "Nonsense input",
+   "id": "r500-461"
+  },
+  {
+   "m": "What's 18% of 2,450?",
+   "d": "general-task",
+   "alt": [],
+   "why": "Arithmetic",
+   "id": "r500-462"
+  },
+  {
+   "m": "Tell me a joke about accountants",
+   "d": "general-task",
+   "alt": [],
+   "why": "Chit chat",
+   "id": "r500-463"
+  },
+  {
+   "m": "Convert 72 degrees fahrenheit to celsius",
+   "d": "general-task",
+   "alt": [],
+   "why": "Unit conversion",
+   "id": "r500-464"
+  },
+  {
+   "m": "how do you say thank you in japanese",
+   "d": "general-task",
+   "alt": [],
+   "why": "Trivia",
+   "id": "r500-465"
+  },
+  {
+   "m": "Name the capital of Australia",
+   "d": "general-task",
+   "alt": [],
+   "why": "Trivia",
+   "id": "r500-466"
+  },
+  {
+   "m": "asdf jkl; test test",
+   "d": "general-task",
+   "alt": [],
+   "why": "Gibberish",
+   "id": "r500-467"
+  },
+  {
+   "m": "Write a limerick about a cat that hates mondays",
+   "d": "general-task",
+   "alt": [],
+   "why": "Creative writing",
+   "id": "r500-468"
+  },
+  {
+   "m": "Explain how photosynthesis works in two sentences",
+   "d": "general-task",
+   "alt": [],
+   "why": "General knowledge",
+   "id": "r500-469"
+  },
+  {
+   "m": "Give me ideas for names for my new puppy",
+   "d": "general-task",
+   "alt": [],
+   "why": "Naming",
+   "id": "r500-470"
+  },
+  {
+   "m": "Summarize this paragraph in one line: The quick brown fox jumped over the lazy dog three times before lunch",
+   "d": "general-task",
+   "alt": [],
+   "why": "Summarize",
+   "id": "r500-471"
+  },
+  {
+   "m": "Which is heavier a pound of feathers or a pound of bricks?",
+   "d": "general-task",
+   "alt": [],
+   "why": "Riddle",
+   "id": "r500-472"
+  },
+  {
+   "m": "Write a haiku about autumn",
+   "d": "general-task",
+   "alt": [],
+   "why": "Creative writing",
+   "id": "r500-473"
+  },
+  {
+   "m": "What day of the week was July 4 1999?",
+   "d": "general-task",
+   "alt": [],
+   "why": "Calendar math",
+   "id": "r500-474"
+  },
+  {
+   "m": "Recommend a good book on stoicism",
+   "d": "general-task",
+   "alt": [],
+   "why": "Recommendation",
+   "id": "r500-475"
+  },
+  {
+   "m": "What's the difference between affect and effect?",
+   "d": "general-task",
+   "alt": [],
+   "why": "Grammar",
+   "id": "r500-476"
+  },
+  {
+   "m": "Brainstorm 10 fun team icebreaker questions",
+   "d": "general-task",
+   "alt": [],
+   "why": "Brainstorm",
+   "id": "r500-477"
+  },
+  {
+   "m": "Translate 'where is the library' into french and spanish",
+   "d": "general-task",
+   "alt": [],
+   "why": "Translation",
+   "id": "r500-478"
+  },
+  {
+   "m": "tell me something interesting about octopuses",
+   "d": "general-task",
+   "alt": [],
+   "why": "Trivia",
+   "id": "r500-479"
+  },
+  {
+   "m": "What are some good stretches for lower back pain?",
+   "d": "general-task",
+   "alt": [],
+   "why": "Health tips",
+   "id": "r500-480"
+  },
+  {
+   "m": "Write a toast for my friend's wedding, short and funny",
+   "d": "general-task",
+   "alt": [],
+   "why": "Personal writing",
+   "id": "r500-481"
+  },
+  {
+   "m": "How many ounces are in a gallon",
+   "d": "general-task",
+   "alt": [],
+   "why": "Conversion",
+   "id": "r500-482"
+  },
+  {
+   "m": "Can you explain what a mortgage amortization is in simple terms?",
+   "d": "general-task",
+   "alt": [],
+   "why": "Explain",
+   "id": "r500-483"
+  },
+  {
+   "m": "Give me a recipe for banana bread",
+   "d": "general-task",
+   "alt": [],
+   "why": "Recipe",
+   "id": "r500-484"
+  },
+  {
+   "m": "Make up a bedtime story about a dragon who is afraid of fire",
+   "d": "general-task",
+   "alt": [],
+   "why": "Story",
+   "id": "r500-485"
+  },
+  {
+   "m": "Whats a good name for a fantasy football team?",
+   "d": "general-task",
+   "alt": [],
+   "why": "Naming",
+   "id": "r500-486"
+  },
+  {
+   "m": "Help me pick between two paint colors, sage green or dusty blue",
+   "d": "general-task",
+   "alt": [],
+   "why": "Opinion",
+   "id": "r500-487"
+  },
+  {
+   "m": "Sort this list alphabetically: pear, apple, mango, banana, cherry",
+   "d": "general-task",
+   "alt": [],
+   "why": "List sorting",
+   "id": "r500-488"
+  },
+  {
+   "m": "Write a thank you card message for my neighbor who watered my plants",
+   "d": "general-task",
+   "alt": [],
+   "why": "Personal writing",
+   "id": "r500-489"
+  },
+  {
+   "m": "what is the meaning of the word ephemeral",
+   "d": "general-task",
+   "alt": [],
+   "why": "Definition",
+   "id": "r500-490"
+  },
+  {
+   "m": "Compare cats vs dogs as pets in 4 bullet points",
+   "d": "general-task",
+   "alt": [],
+   "why": "Comparison",
+   "id": "r500-491"
+  },
+  {
+   "m": "Suggest a workout playlist theme",
+   "d": "general-task",
+   "alt": [],
+   "why": "Brainstorm",
+   "id": "r500-492"
+  },
+  {
+   "m": "what's the tallest mountain in south america",
+   "d": "general-task",
+   "alt": [],
+   "why": "Trivia",
+   "id": "r500-493"
+  },
+  {
+   "m": "Come up with a fun trivia quiz question about space",
+   "d": "general-task",
+   "alt": [],
+   "why": "Trivia",
+   "id": "r500-494"
+  },
+  {
+   "m": "Explain the rules of chess briefly",
+   "d": "general-task",
+   "alt": [],
+   "why": "Explain",
+   "id": "r500-495"
+  },
+  {
+   "m": "Convert this to bullet points: eggs, milk, bread, cheese, apples",
+   "d": "general-task",
+   "alt": [],
+   "why": "Formatting",
+   "id": "r500-496"
+  },
+  {
+   "m": "Suggest hobbies for someone who likes being outdoors",
+   "d": "general-task",
+   "alt": [],
+   "why": "Recommendation",
+   "id": "r500-497"
+  },
+  {
+   "m": "How long does it take to boil an egg?",
+   "d": "general-task",
+   "alt": [],
+   "why": "Cooking",
+   "id": "r500-498"
+  },
+  {
+   "m": "Write a short poem for my daughter's graduation",
+   "d": "general-task",
+   "alt": [],
+   "why": "Personal writing",
+   "id": "r500-499"
+  },
+  {
+   "m": "Rephrase this sentence more politely: Send me the thing now",
+   "d": "general-task",
+   "alt": [],
+   "why": "Rewrite",
+   "id": "r500-500"
+  }
+ ]
+}

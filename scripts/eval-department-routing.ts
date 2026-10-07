@@ -35,8 +35,10 @@ export const FIXTURE_PATH = path.join(ROOT, 'scripts', 'eval-department-routing.
 export const RECORDING_PATH = path.join(ROOT, 'tests', 'unit', 'fixtures', 'jev502-department-routing-recording.json');
 export const EVAL_COMPANY = 'jev502-eval';
 
-export function loadFixture(): { catalog: [string, string][]; cases: Case[] } {
-  return JSON.parse(fs.readFileSync(FIXTURE_PATH, 'utf8'));
+export const ROUTE500_PATH = path.join(ROOT, 'scripts', 'eval-route500.fixture.json');
+/** The held-out second fixture (500 synthetic tasks, never tuned on): `--fixture route500`. */
+export function loadFixture(which?: string): { catalog: [string, string][]; cases: Case[] } {
+  return JSON.parse(fs.readFileSync(which === 'route500' ? ROUTE500_PATH : FIXTURE_PATH, 'utf8'));
 }
 
 export const CHANGES_PATH = path.join(ROOT, 'scripts', 'eval-department-routing.fixture-changes.json');
@@ -200,7 +202,7 @@ async function main(): Promise<void> {
   const { canonicalDeptSlug } = await import('../src/lib/routing/canonical-slug');
   const { resolveEmbeddingProvider, isEmbeddingAvailable, cosineSimilarity, localEmbedText } = await import('../src/lib/sop-embeddings');
 
-  const { catalog, cases } = loadFixture();
+  const { catalog, cases } = loadFixture(arg('--fixture'));
   seedFloorWorkspaces(getDb(), catalog);
   const departments = loadDepartments(EVAL_COMPANY);
   const provider = resolveEmbeddingProvider();
@@ -318,7 +320,7 @@ async function main(): Promise<void> {
       const last = steps[steps.length - 1];
       cases.forEach((c, i) => { const got = last.picks[i] ?? 'general-task'; if (!(got === c.d || c.alt.includes(got))) console.log(`  want ${c.d.padEnd(26)} got ${got.padEnd(26)} ${c.m}`); });
     }
-    if (record) {
+    if (record && !arg('--fixture')) {
       // Replay recording: only the SOPs that can matter (top-25 per case), so the offline test votes identically.
       const keep = new Set<string>();
       for (const c of cases) {
@@ -331,7 +333,7 @@ async function main(): Promise<void> {
     }
   }
 
-  if (record) {
+  if (record && !arg('--fixture')) {
     if (provider.name !== 'ollama' || !semanticAvailable) throw new Error('--record needs SOP_EMBEDDING_PROVIDER=ollama with a reachable endpoint');
     // Raw engine route per message: department null = the engine reported fallback=true.
     const jev: Record<string, { department: string | null; confidence: number }> = {};
