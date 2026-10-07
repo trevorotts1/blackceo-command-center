@@ -664,7 +664,7 @@ export const MODEL_PICK_TIMEOUT_MS = 24_000;
 /**
  * Acceptance of the model's choice: a department the model picks is used only when it ranks within the first
  * `maxRank` candidates (1 = the best-evidenced candidate only); a pick below that is treated as no answer and the
- * task goes to General Task, the safe last resort. Default 3 = accuracy first (Trevor 2026-10-07); `MODEL_PICK_MAX_RANK=1` is the strict setting. Tuned on the fixture (see CHANGELOG).
+ * task goes to General Task, the safe last resort. Default 5 = every shown candidate, accuracy first (v7.6.109 CHANGELOG: top-5 decide-all prompt; v7.6.108 shipped 3, the model now sees 5 candidates so all 5 are acceptable); `MODEL_PICK_MAX_RANK=1` is the strict setting. Tuned on the fixture (see CHANGELOG).
  */
 export const MODEL_PICK = { maxRank: Number(process.env.MODEL_PICK_MAX_RANK) || 5 };
 

@@ -23,13 +23,14 @@ fs.mkdirSync(process.env.OPENCLAW_ROOT!, { recursive: true });
 
 const calls: { hop: string; model: string; auth: string | null }[] = [];
 const hopOf = (url: string) => (/openrouter/.test(url) ? 'openrouter' : /agnes/.test(url) ? 'agnes' : 'ollama');
+const hangSignals: (AbortSignal | null | undefined)[] = [];
 let behave: Record<string, 'ok' | 'fail' | 'hang'> = {};
 globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
   const body = JSON.parse(String(init?.body ?? '{}'));
   const hop = hopOf(String(url));
   calls.push({ hop, model: body.model, auth: new Headers(init?.headers).get('authorization') });
   const mode = behave[hop] ?? 'ok';
-  if (mode === 'hang') return new Promise<Response>(() => {});
+  if (mode === 'hang') { hangSignals.push(init?.signal); return new Promise<Response>((_, rej) => init?.signal?.addEventListener('abort', () => rej(new Error('aborted')))); }
   if (mode === 'fail') return new Response('boom', { status: 500 });
   // The decide-every-case prompt: answer with the first listed department id.
   const id = /- id: (\S+)/.exec(body.messages?.[1]?.content ?? '')?.[1] ?? 'GENERAL';
@@ -107,4 +108,13 @@ test('openclaw.json models never reorder the chain (no name-based reordering); T
   await pick();
   assert.deepEqual([calls[0].hop, calls[0].model], ['openrouter', 'some/override-model']);
   delete process.env.TIEBREAK_MODEL;
+});
+
+test('a timed-out hop is ABORTED (its HTTP request cancelled), not just abandoned, and the next hop answers', async () => {
+  keys(); reset({ ollama: 'hang' }); hangSignals.length = 0;
+  const r = await pick();
+  assert.equal(r.method, 'model', r.note);
+  assert.deepEqual(calls.map((c) => c.hop), ['ollama', 'openrouter']);
+  assert.equal(hangSignals.length, 1);
+  assert.equal(hangSignals[0]?.aborted, true, 'the hung hop\'s request signal was aborted');
 });

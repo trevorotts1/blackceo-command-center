@@ -95,14 +95,14 @@ test('correction learning: a person reassigning a task is recorded, ignored when
   const before = await sopVote.rankDepartmentsBySops('retainer reminder', departments);
   assert.equal(before!.ranked[0].department.id, 'billing-finance', 'the SOPs alone say billing');
 
-  assert.equal(corr.noteReassignment(task, 'a-sales', true), false, 'an agent-made change is not a correction');
-  assert.equal(corr.noteReassignment({ ...task, department: 'sales' }, 'a-sales', false), false, 'same department is not a correction');
-  assert.equal(corr.noteReassignment(task, null, false), false);
-  assert.equal(corr.noteReassignment(task, 'a-sales', false), true);
+  assert.equal(corr.noteReassignment(task, 'a-sales', false), false, 'a change that is not by a verified person is not a correction');
+  assert.equal(corr.noteReassignment({ ...task, department: 'sales' }, 'a-sales', true), false, 'same department is not a correction');
+  assert.equal(corr.noteReassignment(task, null, true), false);
+  assert.equal(corr.noteReassignment(task, 'a-sales', true), true);
   assert.deepEqual(db.prepare('SELECT text, department FROM routing_department_corrections').all(), [{ text: 'retainer reminder', department: 'sales' }]);
 
   const after = await sopVote.rankDepartmentsBySops('retainer reminder', departments);
-  assert.equal(after!.ranked[0].department.id, 'sales', 'the correction now outvotes the SOPs');
+  assert.equal(after!.ranked[0].department.id, 'sales', 'the lone correction (weight 1) beats the single weak SOP neighbour (0.8)');
   assert.ok(after!.examples.get('sales')!.some((x) => /corrected by a person: retainer reminder/.test(x)));
 
   // The same text corrected again replaces its department; an unrelated task is not pulled to Sales.

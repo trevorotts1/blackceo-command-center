@@ -36,7 +36,7 @@ import {
   type EmbeddingProvider,
 } from '@/lib/sop-embeddings';
 import { canonicalDeptSlug } from './canonical-slug';
-import { CORRECTION_MIN_SIM, CORRECTION_WEIGHT, loadCorrections } from './corrections';
+import { CORRECTION_MIN_SIM, CORRECTION_QUORUM, CORRECTION_WEIGHT, loadCorrections } from './corrections';
 import type { DepartmentConfig } from './departments.config';
 
 /**
@@ -147,16 +147,23 @@ export async function rankDepartmentsBySops(
       const results = await fetchEmbeddingsFor(p, [localEmbedText(taskText, 'query', p)]);
       if (!results || results.length < 1) throw new Error('task embedding unavailable');
       const q = results[0].embedding;
-      const near: { slug: string; sim: number; name: string; boost: number }[] = [];
+      const near: { slug: string; sim: number; name: string; boost: number; person?: boolean }[] = [];
       for (let i = 0; i < index.vecs.length; i++) {
         if (byCanon.has(index.slugs[i])) near.push({ slug: index.slugs[i], sim: cosineSimilarity(q, index.vecs[i]), name: index.names[i], boost: 1 });
       }
       // People's corrections (task text -> final department) are extra, heavier neighbours. Only in the box's own
       // index space: the Gemini fallback must not re-embed them.
+      // A lone correction is one ordinary neighbour (weight 1); CORRECTION_QUORUM or more near corrections of the
+      // same department each count CORRECTION_WEIGHT, so one mistaken correction cannot poison near-duplicates.
       if (!fallback) {
+        const hits = new Map<string, { sim: number; text: string }[]>();
         for (const c of await loadCorrections(p)) {
           const sim = cosineSimilarity(q, c.vec);
-          if (byCanon.has(c.slug) && sim >= CORRECTION_MIN_SIM) near.push({ slug: c.slug, sim, name: `corrected by a person: ${c.text.slice(0, 120)}`, boost: CORRECTION_WEIGHT });
+          if (byCanon.has(c.slug) && sim >= CORRECTION_MIN_SIM) hits.set(c.slug, [...(hits.get(c.slug) ?? []), { sim, text: c.text }]);
+        }
+        for (const [slug, list] of hits) {
+          const boost = list.length >= CORRECTION_QUORUM ? CORRECTION_WEIGHT : 1;
+          for (const h of list) near.push({ slug, sim: h.sim, name: `corrected by a person: ${h.text.slice(0, 120)}`, boost, person: true });
         }
       }
       if (near.length === 0) return null;
@@ -170,7 +177,7 @@ export async function rankDepartmentsBySops(
       const examples = new Map<string, string[]>();
       for (const h of near) {
         const ex = examples.get(h.slug) ?? [];
-        if (ex.length < 5 && h.name && (h.boost > 1 || !BOILERPLATE_NAME.test(h.name)) && !ex.includes(h.name)) { ex.push(h.name); examples.set(h.slug, ex); }
+        if (ex.length < 5 && h.name && (h.person || !BOILERPLATE_NAME.test(h.name)) && !ex.includes(h.name)) { ex.push(h.name); examples.set(h.slug, ex); }
       }
       return { ranked, topSimilarity: Math.max(...near.map((h) => h.sim)), examples, provider: p };
     });

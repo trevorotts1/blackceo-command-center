@@ -79,10 +79,11 @@ export const completeViaBoxModels: NonNullable<TiebreakRequest['complete']> = as
     const k = resolveProviderApiKey(provider);
     const apiKey = 'found' in k && k.found ? (k.value ?? '') : '';
     let timer: ReturnType<typeof setTimeout> | undefined;
+    const ctl = new AbortController();
     try {
       const resp = await Promise.race([
-        provider.chatCompletion!(apiKey, { model: t.native, messages, max_tokens: maxTokens, temperature: 0 }),
-        new Promise<never>((_, rej) => { timer = setTimeout(() => rej(new Error(`model pick hop ${t.modelId} timed out after ${left}ms`)), left); }),
+        provider.chatCompletion!(apiKey, { model: t.native, messages, max_tokens: maxTokens, temperature: 0 }, ctl.signal),
+        new Promise<never>((_, rej) => { timer = setTimeout(() => { ctl.abort(); rej(new Error(`model pick hop ${t.modelId} timed out after ${left}ms`)); }, left); }),
       ]);
       const text = resp.choices?.[0]?.message?.content?.trim();
       if (text) { if (process.env.ROUTING_PICK_TRACE === '1') console.log(`[model-pick] answered by ${t.modelId}`); return text; }
