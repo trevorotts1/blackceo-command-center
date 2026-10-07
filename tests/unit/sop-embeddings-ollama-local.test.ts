@@ -262,3 +262,42 @@ test('backfill in ollama mode: not refused by the shipped marker; stamps the loc
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('backfill --dry-run deletes nothing: other-model rows survive, no marker, no embed call', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'backfill-dryrun-'));
+  const dbPath = path.join(dir, 'mission-control.db');
+  initSchema(dbPath);
+  const db = new Database(dbPath);
+  const now = new Date().toISOString();
+  for (const id of ['dr-a', 'dr-b']) {
+    db.prepare(`INSERT INTO sops (id, name, slug, version, department, task_keywords, steps, created_at, updated_at)
+                VALUES (?, ?, ?, 1, 'test-dept', 'test', '[]', ?, ?)`).run(id, `SOP ${id}`, `slug-${id}`, now, now);
+    db.prepare(`INSERT INTO sop_embeddings (sop_id, embedding, embedding_model, embedding_dims, embedded_at)
+                VALUES (?, ?, 'gemini-embedding-2', 3072, ?)`).run(id, Buffer.alloc(3072 * 4), now);
+  }
+  const count = (d: Database.Database) => (d.prepare('SELECT COUNT(*) AS n FROM sop_embeddings').get() as { n: number }).n;
+  const before = count(db);
+  db.close();
+
+  let embedCalls = 0;
+  const server = http.createServer((req, res) => { embedCalls++; req.resume(); res.statusCode = 500; res.end(); });
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    const env = { SOP_EMBEDDING_PROVIDER: 'ollama', SOP_EMBEDDING_OLLAMA_URL: url, GOOGLE_API_KEY: '', GEMINI_API_KEY: '' };
+    const r = await runBackfill(dbPath, env, ['--dry-run']);
+    assert.equal(r.status, 0, `stdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
+
+    const check = new Database(dbPath, { readonly: true });
+    assert.equal(before, 2);
+    assert.equal(count(check), before, 'dry run must leave the row count unchanged');
+    const marker = check.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='sop_embeddings_local_provider'").get();
+    check.close();
+    assert.equal(marker, undefined, 'dry run must not stamp the local marker');
+    assert.equal(embedCalls, 0, 'dry run must not call the embed endpoint');
+    assert.match(r.stdout, /DRY RUN — would delete 2 non-active-model rows/);
+  } finally {
+    server.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
