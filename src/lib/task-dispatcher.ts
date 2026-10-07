@@ -1555,7 +1555,20 @@ export async function autoDispatchTask(
         evaluateAudienceConfirmGate, holdForAudienceConfirm, markAudienceDeadlineFallback,
         isHardHoldConfirmDepartment, blockForOwnerConfirm,
       } = await importWithTimeout(() => import('@/lib/tasks'), 'audience-confirm-gate:@/lib/tasks');
-      const gate = evaluateAudienceConfirmGate(task.id);
+      let gate = evaluateAudienceConfirmGate(task.id);
+      if (gate.hold) {
+        // Answer "who will read this?" without asking when the task names its
+        // recipient or the owner has a main audience on file. Same confirm path
+        // as the board's Answer button; no client message.
+        const { autoAnswerAudienceIfPossible } = await import('@/lib/tasks');
+        const auto = await autoAnswerAudienceIfPossible(task.id, agent.id, gate);
+        if (auto.answered) {
+          console.log(`[${context}] autoDispatchTask: task ${taskId} audience auto-answered "${auto.label}" (${auto.source})`);
+          gate = evaluateAudienceConfirmGate(task.id);
+          // Answered but the voice refresh is still landing: retry next sweep, never ask the owner.
+          if (gate.hold) return { status: 'held', reason: 'dispatch_precondition' };
+        }
+      }
       if (gate.hold) {
         holdForAudienceConfirm(task.id, agent.id, gate);
         console.log(
