@@ -30,6 +30,7 @@ import {
   triadMissingFields,
   triadMissingPillText,
 } from '@/lib/board-labels';
+import { visibleRange, thumbMetrics, trackClickToScrollLeft, hasOverflow } from '@/lib/board/kanban-scroll';
 import { taskToColumnId, columnIdToStatus } from '@/lib/board-projection';
 import { canonicalDeptFromAnyLabel, canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 
@@ -77,12 +78,9 @@ interface MissionQueueProps {
 
 type ColumnDef = { id: string; label: string; gradient: string; tooltip?: string; maxWip?: number };
 
-// Pixel width of the `gap-6` (1.5rem @ a 16px root) Tailwind class on the
-// column-strip flex container below. Columns are now fixed-width at every
-// breakpoint (mobile swipes/snaps between them instead of stacking them
-// vertically — see the P5-01 QC finding on board mobile responsiveness), so
-// the scroll-position → "which column is this" math needs the real gap size.
-const COLUMN_STRIP_GAP_PX = 24;
+// sessionStorage flag: once the user has scrolled the board (or clicked a
+// chevron / navigator pill) the attention pulse on the chevrons stops for good.
+const SCROLL_HINT_KEY = 'bcc-kanban-scroll-hint-done';
 
 // ── Column tooltips (v4.44.0) ─────────────────────────────────────────────
 // Each column carries a tooltip string (rendered via the `title` attribute on
@@ -377,24 +375,55 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
   const scrollRef = useRef<HTMLDivElement>(null);
   const [canScrollLeft, setCanScrollLeft] = useState(false);
   const [canScrollRight, setCanScrollRight] = useState(false);
+  // Navigator state: which columns are in view, how many are cut off on each
+  // side, and the scroll-track thumb geometry (percent of the track).
+  const [overflowing, setOverflowing] = useState(false);
+  const [visibleCols, setVisibleCols] = useState<boolean[]>([]);
+  const [hiddenLeft, setHiddenLeft] = useState(0);
+  const [hiddenRight, setHiddenRight] = useState(0);
+  const [thumb, setThumb] = useState({ left: 0, width: 100 });
+  const trackRef = useRef<HTMLDivElement>(null);
+  const [hintDone, setHintDone] = useState(false);
+
+  const markHintDone = useCallback(() => {
+    setHintDone(true);
+    try { sessionStorage.setItem(SCROLL_HINT_KEY, '1'); } catch { /* storage blocked — pulse just stops for this view */ }
+  }, []);
+
+  useEffect(() => {
+    try { if (sessionStorage.getItem(SCROLL_HINT_KEY)) setHintDone(true); } catch { /* ignore */ }
+  }, []);
 
   const updateScrollState = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
     setCanScrollLeft(el.scrollLeft > 8);
     setCanScrollRight(el.scrollLeft + el.clientWidth < el.scrollWidth - 8);
+    setOverflowing(hasOverflow(el.clientWidth, el.scrollWidth));
+    setThumb((prev) => {
+      const t = thumbMetrics(el.scrollLeft, el.clientWidth, el.scrollWidth);
+      return prev.left === t.left && prev.width === t.width ? prev : t;
+    });
 
-    // Derive the mobile column-picker's "active" pill from scroll position.
-    // Columns are equal-width + a fixed gap, so integer division gives a
-    // stable index without a second (IntersectionObserver) listener.
-    const firstColumnEl = columnRefs.current[COLUMNS[0]?.id];
-    const colWidth = firstColumnEl?.offsetWidth ?? 0;
-    if (colWidth > 0) {
-      const idx = Math.round(el.scrollLeft / (colWidth + COLUMN_STRIP_GAP_PX));
-      const clamped = Math.min(Math.max(idx, 0), COLUMNS.length - 1);
-      setActiveColumnIndex((prev) => (prev === clamped ? prev : clamped));
-    }
-  }, [COLUMNS]);
+    // Column rects relative to the scroll content, so the visible range is
+    // right for fixed (mobile) and flexible (desktop) column widths alike.
+    const box = el.getBoundingClientRect();
+    const rects = COLUMNS.flatMap((c) => {
+      const node = columnRefs.current[c.id];
+      if (!node) return [];
+      const r = node.getBoundingClientRect();
+      return [{ left: r.left - box.left + el.scrollLeft, width: r.width }];
+    });
+    const range = visibleRange(rects, el.scrollLeft, el.clientWidth);
+    setVisibleCols((prev) =>
+      prev.length === range.visible.length && prev.every((v, i) => v === range.visible[i]) ? prev : range.visible,
+    );
+    setHiddenLeft(range.hiddenLeft);
+    setHiddenRight(range.hiddenRight);
+    const firstVisible = range.visible.indexOf(true);
+    if (firstVisible >= 0) setActiveColumnIndex((prev) => (prev === firstVisible ? prev : firstVisible));
+    if (el.scrollLeft > 8) markHintDone(); // the user (or a pill click) scrolled — stop pulsing
+  }, [COLUMNS, markHintDone]);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -409,8 +438,43 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
     };
   }, [updateScrollState]);
 
-  const scrollBy = (delta: number) => {
-    scrollRef.current?.scrollBy({ left: delta, behavior: 'smooth' });
+  // Re-measure when column contents change the strip's size (tasks load in).
+  useEffect(() => { updateScrollState(); }, [updateScrollState, isLoading, boardKind, tasks.length]);
+
+  // Chevron step = one column (its width + the real flex gap), not a magic 320.
+  const scrollByColumn = (dir: 1 | -1) => {
+    const el = scrollRef.current;
+    const a = columnRefs.current[COLUMNS[0]?.id];
+    const b = columnRefs.current[COLUMNS[1]?.id];
+    const step = a && b ? b.getBoundingClientRect().left - a.getBoundingClientRect().left : a?.offsetWidth ?? 320;
+    markHintDone();
+    el?.scrollBy({ left: dir * step, behavior: 'smooth' });
+  };
+
+  // Drag the scroll-track thumb: map pointer travel on the track to scroll travel.
+  const onThumbPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    const el = scrollRef.current;
+    const track = trackRef.current;
+    if (!el || !track) return;
+    e.stopPropagation();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    const startX = e.clientX;
+    const startScroll = el.scrollLeft;
+    const ratio = el.scrollWidth / track.clientWidth;
+    const move = (ev: PointerEvent) => { el.scrollLeft = startScroll + (ev.clientX - startX) * ratio; };
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  };
+
+  const onTrackClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const box = e.currentTarget.getBoundingClientRect();
+    el.scrollTo({ left: trackClickToScrollLeft((e.clientX - box.left) / box.width, el.clientWidth, el.scrollWidth), behavior: 'smooth' });
   };
 
   // Focus View (single department) scopes by the workspace_id FK — the ONLY
@@ -1144,46 +1208,65 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
         </div>
       )}
 
-      {/* Mobile column picker — board mobile-responsiveness finding. Below
-          `lg` the columns render as a horizontally-scrollable, snap-aligned
-          strip (see the column container className below) instead of the
-          old full-width vertical stack, so this row of label+count pills
-          lets a touch user jump straight to a column instead of swiping
-          through all of them. Hidden at `lg`+, where every column is already
-          visible side-by-side. */}
-      <div
-        data-testid="kanban-column-picker"
-        role="tablist"
-        aria-label="Jump to board column"
-        className="lg:hidden bg-white px-4 py-2 border-b border-gray-100 flex items-center gap-2 overflow-x-auto shrink-0"
-      >
-        {COLUMNS.map((column, index) => {
-          const count =
-            boardKind === 'bug' ? getBugsByStatus(column.id).length : getTasksByStatus(column.id).length;
-          const isActive = index === activeColumnIndex;
-          return (
-            <button
-              key={column.id}
-              type="button"
-              role="tab"
-              aria-selected={isActive}
-              data-testid={`column-picker-${column.id}`}
-              onClick={() => scrollToColumn(column.id, index)}
-              className={`shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap transition-colors ${
-                isActive ? 'bg-gray-900 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-              }`}
-            >
-              <span>{column.label}</span>
-              <span
-                className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold ${
-                  isActive ? 'bg-white/20' : 'bg-gray-200 text-gray-500'
+      {/* Column navigator — the board's "top scrollbar". Below `lg` the
+          columns are a snap-aligned strip (fixed width); at `lg`+ they flex to
+          fit, and only scroll when the screen is genuinely too narrow. Either
+          way this row of label+count pills works as a minimap: pills for the
+          columns currently in view are highlighted, a click scrolls that
+          column into view, and the slim track below mirrors the scroll window
+          (click or drag it). The track is hidden when nothing overflows. */}
+      <div className="bg-white px-4 lg:px-6 pt-2 pb-2 border-b border-gray-100 shrink-0">
+        <div
+          data-testid="kanban-column-picker"
+          role="tablist"
+          aria-label="Jump to board column"
+          className="flex items-center gap-2 overflow-x-auto"
+        >
+          {COLUMNS.map((column, index) => {
+            const count =
+              boardKind === 'bug' ? getBugsByStatus(column.id).length : getTasksByStatus(column.id).length;
+            const isActive = overflowing ? !!visibleCols[index] : index === activeColumnIndex && visibleCols.length === 0;
+            return (
+              <button
+                key={column.id}
+                type="button"
+                role="tab"
+                aria-selected={isActive}
+                data-testid={`column-picker-${column.id}`}
+                onClick={() => scrollToColumn(column.id, index)}
+                className={`shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap transition-colors ${
+                  isActive ? 'bg-gray-900 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
                 }`}
               >
-                {count}
-              </span>
-            </button>
-          );
-        })}
+                <span>{column.label}</span>
+                <span
+                  className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold ${
+                    isActive ? 'bg-white/20' : 'bg-gray-200 text-gray-500'
+                  }`}
+                >
+                  {count}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+        {overflowing && (
+          <div
+            ref={trackRef}
+            data-testid="kanban-scroll-track"
+            onClick={onTrackClick}
+            className="relative mt-2 h-2 rounded-full bg-gray-200 cursor-pointer hidden lg:block"
+            aria-hidden="true"
+          >
+            <div
+              data-testid="kanban-scroll-thumb"
+              onPointerDown={onThumbPointerDown}
+              onClick={(e) => e.stopPropagation()}
+              className="absolute top-0 h-full rounded-full bg-brand-600 hover:bg-brand-700 cursor-grab active:cursor-grabbing touch-none"
+              style={{ left: `${thumb.left}%`, width: `${thumb.width}%` }}
+            />
+          </div>
+        )}
       </div>
 
       {/* Error banner for both boards */}
@@ -1206,34 +1289,41 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
         Chevron buttons have pointer-events:all and sit centred within each fade zone.
       */}
       <div className="flex-1 min-h-0 relative overflow-hidden">
-        {/* Left scroll affordance — fade + chevron */}
+        {/* Left scroll affordance — decorative fade + large chevron (+ "N more").
+            Only the fade is aria-hidden; the button stays reachable. */}
         {canScrollLeft && (
-          <div className="kanban-fade-left hidden lg:block" aria-hidden="true">
-            <button
-              className="kanban-scroll-btn"
-              style={{ left: 16 }}
-              onClick={() => scrollBy(-320)}
-              tabIndex={0}
-              aria-label="Scroll board left"
-            >
-              <ChevronLeft className="w-4 h-4" />
-            </button>
-          </div>
+          <>
+            <div className="kanban-fade-left hidden lg:block" aria-hidden="true" />
+            <div className="kanban-scroll-nav kanban-scroll-nav-left hidden lg:flex">
+              <button
+                type="button"
+                className={`kanban-scroll-btn${hintDone ? '' : ' kanban-scroll-btn-pulse'}`}
+                onClick={() => scrollByColumn(-1)}
+                aria-label="Scroll board left"
+              >
+                <ChevronLeft className="w-6 h-6" />
+              </button>
+              {hiddenLeft > 0 && <span className="kanban-scroll-badge" aria-hidden="true">← {hiddenLeft} more</span>}
+            </div>
+          </>
         )}
 
-        {/* Right scroll affordance — fade + chevron */}
+        {/* Right scroll affordance */}
         {canScrollRight && (
-          <div className="kanban-fade-right hidden lg:block" aria-hidden="true">
-            <button
-              className="kanban-scroll-btn"
-              style={{ right: 16 }}
-              onClick={() => scrollBy(320)}
-              tabIndex={0}
-              aria-label="Scroll board right"
-            >
-              <ChevronRight className="w-4 h-4" />
-            </button>
-          </div>
+          <>
+            <div className="kanban-fade-right hidden lg:block" aria-hidden="true" />
+            <div className="kanban-scroll-nav kanban-scroll-nav-right hidden lg:flex">
+              {hiddenRight > 0 && <span className="kanban-scroll-badge" aria-hidden="true">{hiddenRight} more →</span>}
+              <button
+                type="button"
+                className={`kanban-scroll-btn${hintDone ? '' : ' kanban-scroll-btn-pulse'}`}
+                onClick={() => scrollByColumn(1)}
+                aria-label="Scroll board right"
+              >
+                <ChevronRight className="w-6 h-6" />
+              </button>
+            </div>
+          </>
         )}
 
         {/* Actual scrollable column strip */}
@@ -1244,7 +1334,7 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
           aria-label="Task board columns — scroll left or right to see more"
           tabIndex={0}
         >
-          <div className="flex flex-row gap-6 h-full pb-4">
+          <div className="flex flex-row gap-6 lg:gap-3 h-full pb-4">
             {boardKind === 'bug' ? (
               /* Bug Board -- 7 lifecycle lanes, read from /api/bugs */
               bugLoading ? (
@@ -1258,7 +1348,7 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
                       ref={(el) => { columnRefs.current[column.id] = el; }}
                       data-walkthrough={`bug-column-${column.id}`}
                       data-testid={`bug-column-${column.id}`}
-                      className="w-[85vw] sm:w-80 shrink-0 snap-start lg:snap-align-none flex flex-col gap-4 min-h-0"
+                      className="w-[85vw] sm:w-80 shrink-0 snap-start lg:snap-align-none lg:flex-1 lg:min-w-[220px] lg:max-w-[340px] lg:w-auto flex flex-col gap-4 min-h-0"
                     >
                       {/* Column Header */}
                       <div className="flex items-center justify-between shrink-0">
@@ -1288,7 +1378,7 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
                 <div
                   key={column.id}
                   data-testid={`column-skeleton-${column.id}`}
-                  className="w-[85vw] sm:w-80 shrink-0 snap-start lg:snap-align-none flex flex-col gap-4 min-h-0"
+                  className="w-[85vw] sm:w-80 shrink-0 snap-start lg:snap-align-none lg:flex-1 lg:min-w-[220px] lg:max-w-[340px] lg:w-auto flex flex-col gap-4 min-h-0"
                 >
                   <div className="shrink-0">
                     <div className="inline-flex items-center gap-2 px-3 lg:px-4 py-2 lg:py-2.5 rounded-full shadow-md bg-gray-300 animate-pulse">
@@ -1315,7 +1405,7 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
                     ref={(el) => { columnRefs.current[column.id] = el; }}
                     data-walkthrough={`column-${column.id}`}
                     data-testid={`column-${column.id}`}
-                    className={`w-[85vw] sm:w-80 shrink-0 snap-start lg:snap-align-none flex flex-col gap-4 min-h-0${atCapacity ? ' kanban-column-at-capacity' : ''}`}
+                    className={`w-[85vw] sm:w-80 shrink-0 snap-start lg:snap-align-none lg:flex-1 lg:min-w-[220px] lg:max-w-[340px] lg:w-auto flex flex-col gap-4 min-h-0${atCapacity ? ' kanban-column-at-capacity' : ''}`}
                     onDragOver={(e) => handleDragOver(e, column, columnTasks.length)}
                     onDrop={(e) => handleDrop(e, column.id as TaskStatus | 'todo')}
                   >
