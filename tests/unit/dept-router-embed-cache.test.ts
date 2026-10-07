@@ -86,6 +86,7 @@ function makeDept(id: string, name: string, purpose: string, keywords: string[] 
 }
 
 test('department-embedding cache: first dispatch embeds task + every dept, second dispatch embeds ONLY the task', async (t) => {
+  process.env.DECISION_ENGINE_MODE = 'off'; // JEV decides first; these tests exercise the semantic picker, which runs when JEV is unavailable
   process.env.SOP_EMBEDDING_PROVIDER = 'google';
   process.env.GOOGLE_API_KEY = 'test-fake-google-key-not-real-0123456789';
   delete process.env.OPENAI_API_KEY;
@@ -141,6 +142,7 @@ test('department-embedding cache: first dispatch embeds task + every dept, secon
 });
 
 test('department-embedding cache: editing a department invalidates ONLY that department', async (t) => {
+  process.env.DECISION_ENGINE_MODE = 'off'; // JEV decides first; these tests exercise the semantic picker, which runs when JEV is unavailable
   process.env.SOP_EMBEDDING_PROVIDER = 'google';
   process.env.GOOGLE_API_KEY = 'test-fake-google-key-not-real-0123456789';
   delete process.env.OPENAI_API_KEY;
@@ -182,6 +184,7 @@ test('department-embedding cache: editing a department invalidates ONLY that dep
 });
 
 test('department-embedding cache: distinct department ids never collide in the cache', async (t) => {
+  process.env.DECISION_ENGINE_MODE = 'off'; // JEV decides first; these tests exercise the semantic picker, which runs when JEV is unavailable
   process.env.SOP_EMBEDDING_PROVIDER = 'google';
   process.env.GOOGLE_API_KEY = 'test-fake-google-key-not-real-0123456789';
   delete process.env.OPENAI_API_KEY;

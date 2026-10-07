@@ -64,6 +64,12 @@ export interface TiebreakRequest {
   /** Inherited remaining preparation budget in ms. Never reset per call. */
   deadlineMs?: number;
   permission: TiebreakPermission;
+  /**
+   * The box's own LLM path (see model-pick-llm.ts: the same provider connectors and client-owned keys the
+   * QC judge uses). When given, it carries the call and `apiKey`/`endpoint` are not needed. It receives the
+   * messages and the time budget and returns the model's reply text (null = no reply). It may throw.
+   */
+  complete?: (args: { model: string; messages: { role: 'system' | 'user'; content: string }[]; maxTokens: number; budgetMs: number }) => Promise<string | null>;
 }
 
 export interface TiebreakResult {
@@ -150,7 +156,7 @@ export async function authorizedTiebreak(
   if (!req.model) {
     return { decided: false, provenance: 'evidence-only:no-permitted-model' };
   }
-  if (!req.apiKey || !req.endpoint) {
+  if (!req.complete && (!req.apiKey || !req.endpoint)) {
     return {
       decided: false,
       provenance: 'evidence-only:no-credential-or-endpoint:tie-break-configured-without-approved-credential',
@@ -164,8 +170,27 @@ export async function authorizedTiebreak(
 
   const deptList = candidates.map((c, i) => `${i + 1}. ${c.name} — ${c.purpose}`).join('\n');
 
+  const messages = [
+    {
+      role: 'system' as const,
+      content:
+        'You are a task routing assistant. Given a task and a list of departments, ' +
+        'reply with ONLY the exact department name (no other text) that best handles the task.',
+    },
+    {
+      role: 'user' as const,
+      content:
+        `Task: "${req.taskText}"\n\nDepartments:\n${deptList}\n\n` +
+        'Which single department should handle this task? Reply with only the department name.',
+    },
+  ];
+
   try {
-    const resp = await fetchImpl(req.endpoint, {
+    let picked: string;
+    if (req.complete) {
+      picked = ((await req.complete({ model: req.model, messages, maxTokens: 1500, budgetMs })) ?? '').trim();
+    } else {
+    const resp = await fetchImpl(req.endpoint as string, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -174,21 +199,10 @@ export async function authorizedTiebreak(
       signal: AbortSignal.timeout(budgetMs),
       body: JSON.stringify({
         model: req.model,
-        messages: [
-          {
-            role: 'system',
-            content:
-              'You are a task routing assistant. Given a task and a list of departments, ' +
-              'reply with ONLY the exact department name (no other text) that best handles the task.',
-          },
-          {
-            role: 'user',
-            content:
-              `Task: "${req.taskText}"\n\nDepartments:\n${deptList}\n\n` +
-              'Which single department should handle this task? Reply with only the department name.',
-          },
-        ],
-        max_tokens: 50,
+        messages,
+        // A reasoning model's hidden reasoning counts against this limit (50 left its content empty;
+        // the QC judge needed 1500). The reply is one department name; the timeout still bounds the call.
+        max_tokens: 1500,
         temperature: 0,
       }),
     });
@@ -200,7 +214,8 @@ export async function authorizedTiebreak(
     const data = (await resp.json()) as {
       choices?: { message?: { content?: string } }[];
     };
-    const picked = data.choices?.[0]?.message?.content?.trim() ?? '';
+    picked = data.choices?.[0]?.message?.content?.trim() ?? '';
+    }
     if (!picked) {
       return { decided: false, provenance: 'evidence-only:tie-break-empty-reply' };
     }

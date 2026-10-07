@@ -7,8 +7,8 @@
  *      with the embeddinggemma query prefix, department / skill text with the document
  *      prefix, and never calls Google even when a Google key is present.
  *   2. A Google box sends the exact same raw texts as before (no prefix).
- *   3. Ollama down: the router falls through to keyword, the skill matcher to keyword,
- *      with no Google call.
+ *   3. Ollama down + the box's own Google key: router and skill matcher re-embed with Gemini (0.55 floor);
+ *      Ollama down + no key: keyword, no Google call (v7.6.108: Ollama down used to mean keyword even with a key).
  *
  * Run: node --import tsx --test tests/unit/local-embed-router-skills.test.ts
  */
@@ -25,7 +25,7 @@ const GEMMA = 'embeddinggemma-2:740m';
 const ENV_KEYS = [
   'OPENAI_API_KEY', 'GOOGLE_API_KEY', 'GOOGLE_AI_STUDIO_API_KEY', 'GEMINI_API_KEY',
   'SOP_EMBEDDING_PROVIDER', 'SOP_EMBEDDING_OLLAMA_URL', 'SOP_EMBEDDING_MODEL', 'SOP_EMBEDDING_DIMS',
-  'CC_SKILL_ROOTS', 'CC_SKILL_DEPARTMENT_MAP', 'MIN_ROUTING_CONFIDENCE',
+  'CC_SKILL_ROOTS', 'CC_SKILL_DEPARTMENT_MAP', 'MIN_ROUTING_CONFIDENCE', 'SOP_EMBEDDING_GEMINI_FALLBACK', 'HOME',
 ];
 const GOOGLE_KEY = 'AIza-test-key-long-enough-1234567890';
 const LOCAL = {
@@ -92,8 +92,10 @@ function installFetch(): void {
 async function withEnv(vars: Record<string, string>, fn: () => Promise<void>): Promise<void> {
   const saved: Record<string, string | undefined> = {};
   for (const k of ENV_KEYS) { saved[k] = process.env[k]; delete process.env[k]; }
-  Object.assign(process.env, { CC_SKILL_ROOTS: TMP, CC_SKILL_DEPARTMENT_MAP: path.join(TMP, 'map.json') }, vars);
+  // HOME is the temp dir: a test must never read the real ~/.openclaw secret stores (the Gemini fallback looks there).
+  Object.assign(process.env, { CC_SKILL_ROOTS: TMP, CC_SKILL_DEPARTMENT_MAP: path.join(TMP, 'map.json'), HOME: TMP }, vars);
   installFetch();
+  (await import('../../src/lib/sop-embeddings')).__resetEmbedFallback();
   const router = await import('../../src/lib/routing/department-router');
   const cp = await import('../../src/lib/context-pack');
   router._resetDeptVectorCacheForTests();
@@ -176,8 +178,27 @@ test('Google box: router and skill matcher send the same raw texts as before', a
   });
 });
 
-test('Ollama down: router and skill matcher fall back to keyword, no Google call', async () => {
+test('Ollama down + the box\'s own Google key: router and skill matcher re-embed with Gemini', async () => {
   await withEnv(LOCAL, async () => {
+    ollamaDown = true;
+    const { pickDepartment } = await import('../../src/lib/routing/department-router');
+    const { matchSkillsForTask } = await import('../../src/lib/context-pack');
+    const pick = await pickDepartment(TASK, DEPTS as never, { order: ['semantic', 'keyword'], tail: [] });
+    assert.equal(pick.method, 'semantic', pick.note);
+    assert.equal(pick.department?.id, 'finance');
+    const googleCalls = calls.filter((c) => c.url.includes('googleapis'));
+    assert.ok(googleCalls.length >= 3, 'task + both departments embedded with Gemini');
+    assert.ok(googleCalls.every((c) => !c.input.startsWith('task: search result') && !c.input.startsWith('title: none')), 'raw text, no embeddinggemma prefixes');
+    const m = await matchSkillsForTask({ title: TASK.title, description: TASK.description });
+    assert.equal(m[0]?.name, 'invoice-bot');
+    assert.equal(m[0]?.matchKind, 'semantic');
+  });
+});
+
+test('Ollama down + no Google key: router and skill matcher fall back to keyword, no Google call', async () => {
+  const { GOOGLE_API_KEY: _drop, ...noKey } = LOCAL;
+  void _drop;
+  await withEnv(noKey, async () => {
     ollamaDown = true;
     const { pickDepartment } = await import('../../src/lib/routing/department-router');
     const { matchSkillsForTask } = await import('../../src/lib/context-pack');
@@ -185,7 +206,7 @@ test('Ollama down: router and skill matcher fall back to keyword, no Google call
     const origWarn = console.warn;
     console.warn = (...a: unknown[]) => { warns.push(a.join(' ')); };
     try {
-      const pick = await pickDepartment(TASK, DEPTS as never, { order: ['semantic', 'keyword'] });
+      const pick = await pickDepartment(TASK, DEPTS as never, { order: ['semantic', 'keyword'], tail: [] });
       assert.equal(pick.method, 'keyword', pick.note);
       assert.equal(pick.department?.id, 'finance');
     } finally {
@@ -195,7 +216,7 @@ test('Ollama down: router and skill matcher fall back to keyword, no Google call
     const m = await matchSkillsForTask({ title: TASK.title, description: TASK.description });
     assert.equal(m[0]?.name, 'invoice-bot');
     assert.equal(m[0]?.matchKind, 'keyword');
-    assert.ok(calls.every((c) => !c.url.includes('googleapis')), 'a local box never calls Google');
+    assert.ok(calls.every((c) => !c.url.includes('googleapis')), 'no key: Google is never called');
   });
 });
 
