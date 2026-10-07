@@ -525,3 +525,33 @@ test('[dispatch] the manual dispatch route takes the gate verdict, not the raw c
   assert.ok(readyCall > flipCall, 'and it must flip BEFORE the readiness check reads the column');
   assert.ok(source.includes('isHardHoldConfirmDepartment('), 'the hard-hold departments must stay excluded');
 });
+
+test('[board] pending gate surfaces on the board row with its ask; confirm releases the hold delay; unconfirmed still holds', async () => {
+  const { loadTaskRow } = await import('../../src/lib/board/task-row-projection');
+  const { releaseAudienceHoldDelay } = await import('../../src/lib/tasks');
+  const id = nextId('board');
+  insertTask(id);
+  persistPersonaBundle(id, bundle({ confirm_required: true }));
+
+  const first = evaluateAudienceConfirmGate(id);
+  holdForAudienceConfirm(id, null, first, () => 'none');
+
+  // Board payload carries the pending state + the question (no requester chat needed).
+  const row = loadTaskRow(id);
+  assert.equal(row?.blend_confirm_state, 'pending');
+  assert.match(row?.ask ?? '', /who is this for/i);
+
+  // Gate is NOT weakened: unconfirmed still holds and stays parked.
+  assert.equal(evaluateAudienceConfirmGate(id).hold, true);
+  assert.ok(queryOne<{ n: string | null }>('SELECT next_dispatch_eligible_at n FROM tasks WHERE id=?', [id])?.n);
+
+  // Confirmed: delay is dropped so the next tick dispatches immediately.
+  confirmTaskAudience(id, { audienceLabel: 'Founders' });
+  assert.equal(evaluateAudienceConfirmGate(id).hold, true, 'held until the voice refresh lands');
+  // What rescoreAudienceBlend does on success:
+  persistPersonaBundle(id, bundle({ confirm_required: false, rationale: { refresh_pending: false } } as never));
+  run("UPDATE task_persona_bundle SET confirm_state='confirmed' WHERE task_id=?", [id]);
+  releaseAudienceHoldDelay(id);
+  assert.equal(queryOne<{ n: string | null }>('SELECT next_dispatch_eligible_at n FROM tasks WHERE id=?', [id])?.n, null);
+  assert.equal(evaluateAudienceConfirmGate(id).hold, false);
+});
