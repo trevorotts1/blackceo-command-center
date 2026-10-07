@@ -60,7 +60,7 @@ import {
 import { ensureBlendGuardrail } from '@/lib/persona-dispatch';
 import { getBestSOPForTask, getPersonaSlots, type PersonaSlot, type SOP } from '@/lib/sops';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
-import { autoDispatchTask, recordDispatchFailure } from '@/lib/task-dispatcher';
+import { autoDispatchTask, recordDispatchFailure, PLANNING_PENDING_KEY } from '@/lib/task-dispatcher';
 import { bindOperatorPresentationContract, saveOperatorPresentationContract, type OperatorPresentationIntake } from '@/lib/presentation-operator-contract';
 import {
   isPodcastTask,
@@ -2460,6 +2460,8 @@ export interface CreateTaskCoreInput {
   idempotency_company_id?: string | null;
   idempotency_payload_hash?: string;
   routing_hold_reason?: string | null;
+  /** Planning Mode: stamp the planning hold at INSERT time so routing/dispatch skip the task. */
+  planning_mode?: boolean;
   persona_bundle?: PersonaBundle | null;
   title: string;
   description?: string | null;
@@ -2904,6 +2906,7 @@ export async function createTaskCore(
     if (input.presentation_operator_intake) {
       saveOperatorPresentationContract(id, bindOperatorPresentationContract(id, input.presentation_operator_intake));
     }
+    if (input.planning_mode) run('UPDATE tasks SET planning_session_key=? WHERE id=?', [PLANNING_PENDING_KEY, id]);
     if (input.routing_hold_reason) run('UPDATE tasks SET dispatch_hold=1, routing_reason=?, routing_wait_owner=? WHERE id=?', [input.routing_hold_reason, 'SYSTEM', id]);
     // INTAKE LANE (migration 153) — written after the insert, the same shape
     // routing_hold_reason uses, so the canonical INSERT column list stays as it

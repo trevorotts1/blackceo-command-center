@@ -130,7 +130,7 @@ export async function POST(
     await transition(taskId, 'backlog', {
       actor: 'planning-approve',
       reason: 'planning spec locked',
-      extraColumns: { description: specMarkdown },
+      extraColumns: { description: specMarkdown, planning_complete: 1 },
     });
 
     // Log activity

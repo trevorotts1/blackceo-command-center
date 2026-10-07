@@ -4,6 +4,7 @@ import { getOpenClawClient } from '@/lib/openclaw/client';
 import { broadcast } from '@/lib/events';
 import { extractJSON } from '@/lib/planning-utils';
 import { recordStatusEvent } from '@/lib/task-lifecycle';
+import { PLANNING_PENDING_KEY } from '@/lib/task-dispatcher';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -31,6 +32,7 @@ export async function GET(
       planning_complete?: number;
       planning_spec?: string;
       planning_agents?: string;
+      planning_dispatch_error?: string;
     } | undefined;
     
     if (!task) {
@@ -41,10 +43,12 @@ export async function GET(
     const messages = task.planning_messages ? JSON.parse(task.planning_messages) : [];
 
     // Find the latest question (last assistant message with question structure)
+    // Only an UNANSWERED question is current: if the last message is the
+    // user's answer, the next question has not arrived yet.
     const lastAssistantMessage = [...messages].reverse().find((m: { role: string }) => m.role === 'assistant');
     let currentQuestion = null;
 
-    if (lastAssistantMessage) {
+    if (lastAssistantMessage && messages[messages.length - 1]?.role === 'assistant') {
       // Use extractJSON to handle code blocks and surrounding text
       const parsed = extractJSON(lastAssistantMessage.content);
       if (parsed && 'question' in parsed) {
@@ -58,6 +62,7 @@ export async function GET(
       messages,
       currentQuestion,
       isComplete: !!task.planning_complete,
+      dispatchError: task.planning_dispatch_error || undefined,
       spec: task.planning_spec ? JSON.parse(task.planning_spec) : null,
       agents: task.planning_agents ? JSON.parse(task.planning_agents) : null,
       isStarted: messages.length > 0,
@@ -92,7 +97,7 @@ export async function POST(
     }
 
     // Check if planning already started
-    if (task.planning_session_key) {
+    if (task.planning_session_key && task.planning_session_key !== PLANNING_PENDING_KEY) {
       return NextResponse.json({ error: 'Planning already started', sessionKey: task.planning_session_key }, { status: 400 });
     }
 

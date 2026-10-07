@@ -112,6 +112,25 @@ import { checkTaskWriteAuth, renderWriteBackInstructions } from '@/lib/mc-auth';
 // in GUARD 3 below and the block WHERE-clause.
 const SKIP_STATUSES = new Set(['in_progress', 'review', 'done', 'blocked']);
 
+/**
+ * SQL predicate: the task has a Planning Mode session the owner has not
+ * finished (no planning_complete flag and no locked spec). Such a task must
+ * not be routed or dispatched until the plan is approved. `alias` is the
+ * tasks table alias in the caller's query. Shared by autoDispatchTask and the
+ * advancer sweeps so the rule has one definition.
+ */
+/**
+ * Placeholder planning_session_key stamped at create time when the owner ticks
+ * Planning Mode, so the task is held from the instant it exists (before the
+ * planning session starts). POST /planning replaces it with the real key.
+ */
+export const PLANNING_PENDING_KEY = 'pending';
+
+export function planningInProgressSql(alias: string): string {
+  return `(${alias}.planning_session_key IS NOT NULL AND COALESCE(${alias}.planning_complete,0)=0
+    AND NOT EXISTS(SELECT 1 FROM planning_specs ps WHERE ps.task_id=${alias}.id))`;
+}
+
 // TICKET 4a: dynamic `import('@/lib/tasks')` calls inside autoDispatchTask sit
 // inside try/catch blocks that only catch a THROW — a module that never
 // settles (a genuine hang, not an error) would leave the await paused forever
@@ -940,6 +959,13 @@ export async function autoDispatchTask(
     if (!task) {
       console.warn(`[${context}] autoDispatchTask: task ${taskId} not found — skipping`);
       return { status: 'held', reason: 'dispatch_precondition' };
+    }
+
+    // Planning Mode: never dispatch while the owner is still answering the
+    // planning questions. Approval / completion sets planning_complete=1.
+    if (queryOne(`SELECT 1 AS x FROM tasks t WHERE t.id = ? AND ${planningInProgressSql('t')}`, [taskId])) {
+      console.log(`[${context}] autoDispatchTask: task ${taskId} has an unfinished planning session — hold`);
+      return { status: 'held', reason: 'planning_in_progress' };
     }
 
     // F3.4 ANCHOR (U33 / C-02-b): the SOP the CREATION-TIME persona selection
@@ -2784,4 +2810,20 @@ export function acceptedRunReplayForTask(
   } catch {
     return null;
   }
+}
+
+
+/**
+ * Dispatch a task whose planning just finished, in-process (no HTTP hop, so
+ * no relative-URL or middleware-auth failure). `success` is true only when the
+ * gateway acknowledged the run.
+ */
+export async function dispatchPlannedTask(
+  taskId: string,
+  context = 'planning',
+): Promise<{ success: boolean; error?: string }> {
+  const outcome = await autoDispatchTask(taskId, context);
+  return outcome.status === 'acknowledged'
+    ? { success: true }
+    : { success: false, error: `Dispatch ${outcome.status}: ${outcome.reason}` };
 }
