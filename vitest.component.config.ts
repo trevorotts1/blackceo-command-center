@@ -106,6 +106,8 @@ export default defineConfig({
       'tests/unit/social-f30-summary-area-render.test.tsx',
       // Planning Mode — modal stays open on the Planning tab, polling resumes, Other text kept.
       'tests/unit/planning-mode-modal.test.tsx',
+      // Planning Mode — start failure, gateway error and unreadable reply are visible with Try again.
+      'tests/unit/planning-mode-start-error.test.tsx',
     ],
     env: { NODE_ENV: 'test' },
     testTimeout: 15000,
