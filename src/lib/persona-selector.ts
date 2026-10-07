@@ -504,7 +504,7 @@ function normalizeAudienceConfidence(raw: unknown): number {
 function normalizeResolvedAudience(raw: unknown): ResolvedAudience | null {
   if (!raw || typeof raw !== "object") return null;
   const a = raw as Record<string, unknown>;
-  const validSources: AudienceConfirmSource[] = ["onboarding_icp", "operator_confirmed", "asked"];
+  const validSources: AudienceConfirmSource[] = ["onboarding_icp", "operator_confirmed", "asked", "task_named", "owner_default"];
   const source = (validSources.includes(a.source as AudienceConfirmSource)
     ? a.source
     : "asked") as AudienceConfirmSource;
@@ -709,8 +709,9 @@ export function persistPersonaBundle(
        catalog_version=excluded.catalog_version,confirm_state=excluded.confirm_state,created_at=excluded.created_at`,
       [taskId,JSON.stringify(persistedBundle),catalogVersion,state,requestedAt]);
     run(`UPDATE tasks SET voice_persona_id=?,topic_persona_id=?,audience_id=?,audience_label=?,
-         audience_source=?,voice_collapsed=?,blend_directive=?,comms_audience_source=?,comms_type=? WHERE id=?`,
-      [voicePersonaId,topicPersonaId,audienceId,audienceLabel,state === 'confirmed' ? 'operator_confirmed' : audienceSource,
+         audience_source=CASE WHEN ?=1 THEN (CASE WHEN audience_source IN ('task_named','owner_default') THEN audience_source ELSE 'operator_confirmed' END) ELSE ? END,
+         voice_collapsed=?,blend_directive=?,comms_audience_source=?,comms_type=? WHERE id=?`,
+      [voicePersonaId,topicPersonaId,audienceId,audienceLabel,state === 'confirmed' ? 1 : 0,audienceSource,
        voice.collapsed ? 1 : 0,blendDirective,commsAudienceSource,commsType,taskId]);
     return true;
   })();
