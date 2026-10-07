@@ -37,9 +37,11 @@ const recording = JSON.parse(fs.readFileSync(RECORDING_PATH, 'utf8')) as {
 // Fake Ollama: serves recorded vectors; a miss is recorded, never guessed.
 const misses: string[] = [];
 let ollamaDown = false;
+let embedCalls = 0;
 globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
   if (!String(url).startsWith(REPLAY_URL)) throw new Error(`JEV-502 fixture forbids network: ${String(url)}`);
   if (ollamaDown) throw new Error('connect ECONNREFUSED (ollama down)');
+  embedCalls++;
   const input = JSON.parse(String(init?.body)).input as string;
   const hit = recording.vectors[sha1(input)];
   if (!hit) { misses.push(input); return new Response('not recorded', { status: 500 }); }
@@ -84,8 +86,8 @@ async function run(order?: readonly PickerName[]) {
   return out;
 }
 
-test('the chosen order puts the measured-better picker (semantic) first', () => {
-  assert.deepEqual([...router.DEPARTMENT_PICKER_ORDER], ['semantic', 'jev', 'keyword']);
+test('the chosen order puts the measured-better picker (JEV, Option A) first', () => {
+  assert.deepEqual([...router.DEPARTMENT_PICKER_ORDER], ['jev', 'semantic', 'keyword']);
 });
 
 test('chosen order: >=90% of fixture tasks land in an acceptable department or General Task', async () => {
@@ -96,10 +98,11 @@ test('chosen order: >=90% of fixture tasks land in an acceptable department or G
   assert.ok(s.lenient >= 0.9, `acceptable-or-General ${(s.lenient * 100).toFixed(1)}% < 90%; wrong: ${JSON.stringify(s.wrong)}`);
   // Guard the other direction: the bar must not be met by dumping everything on General Task.
   assert.ok(s.strict >= 0.3, `strict ${(s.strict * 100).toFixed(1)}% < 30% — the picker stopped placing work`);
-  assert.ok(picks.filter((p) => p.method === 'semantic').length >= 50, 'semantic (local Ollama) must be deciding');
+  assert.ok(picks.filter((p) => p.method === 'jev').length >= 50, 'JEV must be deciding');
+  assert.equal(picks.filter((p) => p.method === 'semantic').length, 0, 'semantic only runs when JEV is unavailable');
 });
 
-test('the chosen order beats the v7.6.89 order and the decision engine alone', async () => {
+test('the chosen order beats the v7.6.89 order and the ungated decision engine', async () => {
   const standalone: Record<PickerName, Standalone[]> = { semantic: [], jev: [], keyword: [] };
   for (const p of ['semantic', 'jev', 'keyword'] as PickerName[]) {
     for (const r of await run([p])) standalone[p].push({ gated: slug(r.department), lean: slug(r.department ?? r.candidate), confidence: r.confidence });
@@ -108,7 +111,7 @@ test('the chosen order beats the v7.6.89 order and the decision engine alone', a
   const before = score(cases, composeBefore(standalone, false)); // v7.6.89 skipped semantic on local Ollama
   const jevAlone = score(cases, standalone.jev.map((x) => x.lean));
   assert.ok(chosen.wrong.length < before.wrong.length / 2, `chosen wrong ${chosen.wrong.length} vs before ${before.wrong.length}`);
-  assert.ok(chosen.lenient > jevAlone.lenient + 0.15, `chosen ${chosen.lenient} vs decision engine alone ${jevAlone.lenient}`);
+  assert.ok(chosen.lenient > jevAlone.lenient + 0.05, `chosen ${chosen.lenient} vs decision engine alone ${jevAlone.lenient}`);
 });
 
 test('no embeddings: the decision engine is the fallback, then keyword; nothing throws', async () => {
@@ -129,23 +132,45 @@ test('no embeddings: the decision engine is the fallback, then keyword; nothing 
   }
 });
 
-test('landmine 8: local Ollama embeddings route semantically; an Ollama outage falls through, never throws', async () => {
-  const press = await router.pickDepartment({ title: 'Draft a press release about the launch' }, departments);
-  assert.equal(press.method, 'semantic');
+test('JEV first: it decides and semantic is never asked while JEV is available', async () => {
+  const before = embedCalls;
+  const press = await router.pickDepartment({ title: 'Send an update to our investors about Q3' }, departments);
+  assert.equal(press.method, 'jev');
   assert.equal(slug(press.department), 'communications');
-  ollamaDown = true;
+  assert.equal(embedCalls, before, 'no embedding call');
+});
+
+test('JEV unavailable -> semantic runs; semantic unavailable too -> keyword', async () => {
+  process.env.DECISION_ENGINE_MODE = 'off';
   try {
-    const down = await router.pickDepartment({ title: 'Draft a press release about the launch' }, departments);
-    assert.equal(down.method, 'jev', 'outage → the decision engine decides');
-    assert.equal(slug(down.department), 'communications');
+    const before = embedCalls;
+    const sem = (await run()).filter((p) => p.method === 'semantic');
+    assert.ok(sem.length >= 50, `semantic must decide when JEV is off (got ${sem.length})`);
+    assert.ok(embedCalls > before);
+    ollamaDown = true;
+    try {
+      const kw = await router.pickDepartment({ title: 'Send an update to our investors about Q3' }, departments);
+      assert.ok(kw.method === 'keyword' || /keyword picker unsure/.test(kw.note), `keyword decided: ${kw.method} ${kw.note}`);
+    } finally {
+      ollamaDown = false;
+    }
   } finally {
-    ollamaDown = false;
+    process.env.DECISION_ENGINE_MODE = 'auto';
   }
 });
 
-test('an unsure picker sends the task to General Task instead of a weaker picker', async () => {
+test('JEV unsure (below 0.9 or cannot place) -> General Task and semantic is NOT asked', async () => {
+  const before = embedCalls;
   const r = await router.pickDepartment({ title: 'Zorblax the quintessential frobnicator' }, departments);
   assert.equal(r.department, null);
   assert.equal(r.method, 'general');
-  assert.match(r.note, /semantic picker unsure/);
+  assert.match(r.note, /jev picker unsure/);
+  assert.equal(embedCalls, before, 'semantic must not run after an unsure JEV');
+  // A recorded low-confidence (non-fallback) JEV route is unsure too, not "unavailable".
+  const low = cases.find((c) => { const j = recording.jev[c.m]; return j?.department && j.confidence < 0.9; });
+  assert.ok(low, 'fixture has a below-gate JEV route');
+  const r2 = await router.pickDepartment({ title: low.m }, departments);
+  assert.equal(r2.method, 'general');
+  assert.match(r2.note, /jev picker unsure/);
+  assert.equal(embedCalls, before);
 });

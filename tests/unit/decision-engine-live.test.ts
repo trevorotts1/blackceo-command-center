@@ -316,7 +316,7 @@ test('routeTaskDecision: JEV names a catalog department with fallback=false → 
   assert.ok(!decision.routing.reason.startsWith('[catch-all]'), 'the suffix is never a prefix');
 });
 
-test('routeTaskDecision: JEV reports fallback=true → the existing keyword path decides (marketing)', async () => {
+test('routeTaskDecision: JEV reports fallback=true → unsure → General Task, the keyword path is NOT consulted', async () => {
   process.env.DECISION_ENGINE_MODE = 'auto';
   resetFakeEnv();
   process.env.FAKE_INTENT = 'task_request';
@@ -328,13 +328,11 @@ test('routeTaskDecision: JEV reports fallback=true → the existing keyword path
   const marketing = f.worker('Marketing');
 
   const decision = await routeTaskDecision(f.task);
-  assert.equal(decision.status, 'assigned', JSON.stringify(decision));
-  if (decision.status !== 'assigned') return;
-  assert.equal(decision.routing.agentId, marketing.agentId, 'fallback=true must preserve the existing keyword path');
-  assert.ok(
-    !decision.routing.reason.endsWith(' (department chosen by decision engine)'),
-    'fallback=true must never carry the decision-engine suffix',
-  );
+  // Option A (JEV first): the engine answered "cannot place" = unsure -> General Task, never keyword.
+  // This fixture has no General Task workspace, so nothing is assignable; it is never marketing.
+  assert.equal(decision.status, 'no_capable_worker', JSON.stringify(decision));
+  if (decision.status === 'no_capable_worker') assert.match(decision.receipt?.reason ?? '', /engine_no_decision/);
+  assert.notEqual((decision as { routing?: { agentId?: string } }).routing?.agentId, marketing.agentId);
 });
 
 // ── (g) ingest raw door: JEV's intent decides card creation ─────────────────

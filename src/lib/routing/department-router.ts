@@ -3,13 +3,14 @@
  *
  * Routes tasks to the most appropriate agent based on:
  *   1. Explicit department tag on the task
- *   2. SEMANTIC similarity (embedding cosine) — primary classification path
+ *   2. The decision engine (JEV) decides first; semantic similarity (embedding
+ *      cosine) steps in only when JEV is unavailable (Option A, JEV-502):
  *      - Embeds task text against each dept's (name + purpose + keywords)
  *      - Uses the CLIENT'S OWN embedding provider (Gemini/OpenAI key, or
  *        keyless local Ollama)
  *      - LLM tiebreak when top-2 scores are within TIEBREAK_MARGIN
- *   3. Without embeddings: the decision engine, then keyword scoring
- *      (pickDepartment / DEPARTMENT_PICKER_ORDER, measured — JEV-502)
+ *   3. Order jev, then semantic, then keyword (pickDepartment /
+ *      DEPARTMENT_PICKER_ORDER, measured — JEV-502). JEV unsure = General Task.
  *   4. Agent role matching within the winning department
  *   5. Load balancing — prefer agents with fewer active tasks
  *
@@ -594,11 +595,15 @@ async function llmTiebreak(
 export type DepartmentPickerName = 'semantic' | 'jev' | 'keyword';
 
 /**
- * The FIRST AVAILABLE picker decides: its confident pick wins, and when it is
+ * "Option A" (Trevor, 2026-10-07): JEV (the decision engine) goes FIRST. The
+ * FIRST AVAILABLE picker decides: its confident pick wins, and when it is
  * unsure the task goes to General Task (never on to a weaker picker — every
- * "ask the next picker when unsure" chain measured worse). A picker that is
- * unavailable (no embedding provider or a provider outage; decision engine
- * off/absent/old, or it reports fallback=true) passes to the next one.
+ * "ask the next picker when unsure" chain measured worse). So JEV below
+ * JEV_MIN_CONFIDENCE, or JEV saying it cannot place the task (fallback=true,
+ * no department, a department outside the catalog), is UNSURE: General Task,
+ * and semantic is NOT asked. Only a picker that is unavailable passes to the
+ * next one: JEV off/absent/old/shadow/timeout/error -> semantic -> keyword;
+ * semantic with no embedding provider or an outage -> keyword.
  *
  * Measured by scripts/eval-department-routing.ts on its 169-case labeled
  * fixture, standard floor seeded as on a box (acceptable dept or General Task
@@ -610,12 +615,14 @@ export type DepartmentPickerName = 'semantic' | 'jev' | 'keyword';
  * the decision engine's routes have moved since, so the jev rows differ too):
  *   semantic alone, embeddinggemma, floor 0.69           91.7% / 28.4% / 14
  *   decision engine alone, gated                         96.4% / 34.3% / 6
- *   (the picker order was not re-decided on these numbers)
+ *   JEV first is chosen on these numbers: +4.7 points acceptable-or-General
+ *   and 8 fewer wrong departments than semantic first (6 vs 14), strict
+ *   34.3% vs 28.4%.
  *   no embeddings: decision engine, then keyword (gated) 87.0% / 32.5% / 22
  *   no embeddings, decision engine off: keyword (gated)  92.9% / 33.7% / 12
  * Gemini/OpenAI boxes were not measured (no key used); they keep floor 0.55.
  */
-export const DEPARTMENT_PICKER_ORDER: readonly DepartmentPickerName[] = ['semantic', 'jev', 'keyword'];
+export const DEPARTMENT_PICKER_ORDER: readonly DepartmentPickerName[] = ['jev', 'semantic', 'keyword'];
 
 export interface DepartmentPick {
   /** null → General Task catch-all. */
@@ -768,16 +775,21 @@ async function pickJev(
   // pure read of the same value `pickJev` already consumed. The report goes
   // through a per-call callback (never module state) so two concurrent
   // dispatches in one process can never read each other's observation.
-  // fallback=true is the engine saying it cannot place the task: CC's own ranking decides (JGT105).
-  if (!jev || jev.route.action !== 'route' || jev.route.fallback || !jev.route.department) {
+  // null = JEV unavailable (off/absent/old/shadow/timeout/error): next picker.
+  if (!jev) {
     reportObservation(observeJevDecision(jev, mode, false));
     return null;
   }
-  const target = canonicalDeptSlug(jev.route.department);
-  const dept = departments.find((d) => canonicalDeptSlug(d.slug || d.id) === target);
+  // Option A: the engine ANSWERED but cannot place the task (declined,
+  // fallback=true, no department, or a department outside the catalog). That
+  // is "unsure", not "unavailable": General Task, semantic is not asked.
+  const target = jev.route.department ? canonicalDeptSlug(jev.route.department) : null;
+  const dept = jev.route.action === 'route' && !jev.route.fallback && target
+    ? departments.find((d) => canonicalDeptSlug(d.slug || d.id) === target)
+    : undefined;
   if (!dept) {
     reportObservation(observeJevDecision(jev, mode, false));
-    return null;
+    return { confident: false, pick: { department: null, method: 'jev', confidence: jev.route.confidence ?? 0, note: 'Decision engine could not place the task' } };
   }
   const confidence = jev.route.confidence;
   // "Applied" is exactly what this boundary will apply: a usable engine route

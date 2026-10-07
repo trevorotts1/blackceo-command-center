@@ -124,6 +124,7 @@ test.afterEach(() => {
 
 test('JEV-unavailable plus permitted tie-break: exactly one call, company-bound config, inherited deadline', async (t) => {
   t.after(() => {});
+  process.env.DECISION_ENGINE_MODE = 'off'; // JEV decides first; these tests exercise the semantic picker, which runs when JEV is unavailable
   process.env.SOP_EMBEDDING_PROVIDER = 'google';
   process.env.GOOGLE_API_KEY = 'test-fake-google-key-not-real-0123456789';
   delete process.env.OPENAI_API_KEY;
@@ -168,6 +169,7 @@ test('JEV-unavailable plus permitted tie-break: exactly one call, company-bound 
 });
 
 test('JEV-unavailable plus no permitted model: deterministic fallback, zero tie-break network shape', async () => {
+  process.env.DECISION_ENGINE_MODE = 'off'; // JEV decides first; these tests exercise the semantic picker, which runs when JEV is unavailable
   process.env.SOP_EMBEDDING_PROVIDER = 'google';
   process.env.GOOGLE_API_KEY = 'test-fake-google-key-not-real-0123456789';
   delete process.env.OPENAI_API_KEY;
