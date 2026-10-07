@@ -74,7 +74,7 @@
 
 import { queryAll, queryOne, run, getDb } from '@/lib/db';
 import type { SOP } from '@/lib/sops';
-import { envReferenceName } from '@/lib/studio/provider-discovery';
+import { envReferenceName, hydrateEnvVarsFromOpenClaw } from '@/lib/studio/provider-discovery';
 
 // ---------------------------------------------------------------------------
 // Provider types + constants
@@ -562,8 +562,8 @@ async function fetchEmbeddingOllama(text: string, provider: EmbeddingProvider): 
  * model gets `text` back unchanged, so Gemini/OpenAI boxes send identical bytes.
  * Not used for the stored SOP index (its rows were embedded raw).
  */
-export function localEmbedText(text: string, kind: 'query' | 'document'): string {
-  const p = resolveEmbeddingProvider();
+export function localEmbedText(text: string, kind: 'query' | 'document', provider?: EmbeddingProvider): string {
+  const p = provider ?? resolveEmbeddingProvider();
   if (p.name !== 'ollama' || !p.model.toLowerCase().includes('embeddinggemma')) return text;
   return kind === 'query' ? `task: search result | query: ${text}` : `title: none | text: ${text}`;
 }
@@ -605,7 +605,11 @@ export async function fetchEmbedding(text: string): Promise<Float32Array> {
  * Used by: department-router.ts (semantic routing).
  */
 export async function fetchEmbeddings(texts: string[]): Promise<EmbeddingResult[]> {
-  const provider = resolveEmbeddingProvider();
+  return fetchEmbeddingsFor(resolveEmbeddingProvider(), texts);
+}
+
+/** fetchEmbeddings against an explicit provider (the Gemini fallback needs one that is not the box's primary). */
+export async function fetchEmbeddingsFor(provider: EmbeddingProvider, texts: string[]): Promise<EmbeddingResult[]> {
   if (provider.name === 'ollama') {
     // JEV-502: keyless local Ollama — sequential, one text per call (same
     // wire + dim guard as fetchEmbedding), so department routing works too.
@@ -625,6 +629,69 @@ export async function fetchEmbeddings(texts: string[]): Promise<EmbeddingResult[
   }
   // Default: openai
   return fetchEmbeddingsOpenAI(texts, provider.apiKey);
+}
+
+// ---------------------------------------------------------------------------
+// Local Ollama down -> the box's OWN Gemini key (Trevor 2026-10-07)
+// ---------------------------------------------------------------------------
+
+/** After a local-Ollama failure, go straight to Gemini for this long instead of waiting on a dead server per task. */
+const OLLAMA_RETRY_AFTER_MS = 60_000;
+let _ollamaDownUntil = 0;
+/** The secret stores are re-read at most this often while no Google key is found. */
+const SECRETS_LOOKUP_EVERY_MS = 60_000;
+let _secretsLookupAt = 0;
+
+/** Test seam: forget that Ollama was down. */
+export function __resetEmbedFallback(): void { _ollamaDownUntil = 0; _secretsLookupAt = 0; }
+
+/**
+ * The paid-Gemini fallback provider: the box's own Google key (GOOGLE_API_KEY /
+ * GOOGLE_AI_STUDIO_API_KEY / GEMINI_API_KEY) with the pinned gemini-embedding-2
+ * model. null when there is no key or SOP_EMBEDDING_GEMINI_FALLBACK=0.
+ */
+export function resolveGeminiFallbackProvider(): EmbeddingProvider | null {
+  if (process.env.SOP_EMBEDDING_GEMINI_FALLBACK === '0') return null;
+  let key = resolveGoogleKey();
+  if (!key && Date.now() - _secretsLookupAt > SECRETS_LOOKUP_EVERY_MS) {
+    // A client box keeps its Google key in ~/.openclaw/secrets/.env (and the other OpenClaw stores), not in the
+    // CC's own env: same store precedence as every other key reader (process.env still wins, never overwritten).
+    _secretsLookupAt = Date.now();
+    try { hydrateEnvVarsFromOpenClaw(['GOOGLE_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_AI_STUDIO_API_KEY']); } catch { /* best effort */ }
+    key = resolveGoogleKey();
+  }
+  return key ? { name: 'google', apiKey: key, model: GOOGLE_MODEL, dims: GOOGLE_DIMS } : null;
+}
+
+/**
+ * Run an embedding job with the box's provider; when that provider is LOCAL
+ * Ollama and the job fails, run it again with Gemini (the box's own key).
+ * Gemini and keyed boxes never fall back to Ollama (a non-local box never
+ * calls it). The job receives the provider it must embed BOTH sides with, so
+ * vectors from the two providers are never compared. Returns null when no
+ * provider could complete the job (the caller's next picker takes over).
+ */
+export async function withEmbeddingFallback<T>(
+  job: (provider: EmbeddingProvider) => Promise<T>,
+): Promise<{ value: T; provider: EmbeddingProvider } | null> {
+  const primary = resolveEmbeddingProvider();
+  if (!providerReady(primary)) return null;
+  const gemini = primary.name === 'ollama' ? resolveGeminiFallbackProvider() : null;
+  if (!(primary.name === 'ollama' && gemini && Date.now() < _ollamaDownUntil)) {
+    try {
+      return { value: await job(primary), provider: primary };
+    } catch (err) {
+      if (!gemini) throw err;
+      _ollamaDownUntil = Date.now() + OLLAMA_RETRY_AFTER_MS;
+      console.warn(`[sop-embeddings] local Ollama failed (${(err as Error).message}) — using Gemini on the box's own key`);
+    }
+  }
+  try {
+    return { value: await job(gemini!), provider: gemini! };
+  } catch (err) {
+    console.warn(`[sop-embeddings] Gemini fallback failed: ${(err as Error).message}`);
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------
