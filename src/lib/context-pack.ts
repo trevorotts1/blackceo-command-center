@@ -62,7 +62,8 @@ import { detectPlatform, vaultRoot, zhcLibraryBaseDirs } from '@/lib/platform';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { createHash } from 'crypto';
 import {
-  getEmbeddingApiKey,
+  isEmbeddingAvailable,
+  localEmbedText,
   fetchEmbeddings,
   cosineSimilarity,
   type EmbeddingResult,
@@ -1156,12 +1157,15 @@ export async function matchSkillsForTask(
     const taskText = [task.title, task.description].filter(Boolean).join(' — ').trim();
     if (!taskText) return [];
 
-    // ── Semantic path (client's own embedding key) ──────────────────────────
-    if (getEmbeddingApiKey()) {
+    // ── Semantic path (client's own embedding key, or local Ollama opt-in) ──
+    // isEmbeddingAvailable() === getEmbeddingApiKey() truthiness for keyed
+    // providers; it adds only SOP_EMBEDDING_PROVIDER=ollama (keyless, local).
+    if (isEmbeddingAvailable()) {
       try {
-        const texts = [taskText, ...candidates.map((c) => `${c.name}. ${c.description}`.trim())].map(
-          (t) => (t.length > 8_000 ? t.slice(0, 8_000) : t),
-        );
+        const texts = [
+          localEmbedText(taskText, 'query'),
+          ...candidates.map((c) => localEmbedText(`${c.name}. ${c.description}`.trim(), 'document')),
+        ].map((t) => (t.length > 8_000 ? t.slice(0, 8_000) : t));
         // Cached: the ~80 static skill texts are embedded once per process, so a
         // dispatch pays for the task text only (see embedTextsCached).
         const emb = await embedTextsCached(texts);

@@ -35,9 +35,9 @@
  *   2. SOP_EMBEDDING_PROVIDER=openai  → force OpenAI (text-embedding-3-small, 1536-dim) [EXPLICIT OPTIONAL FALLBACK]
  *   2b. SOP_EMBEDDING_PROVIDER=ollama → local Ollama (nomic-embed-text @768 by default) [EXPLICIT OPT-IN,
  *       free, no key]. Never auto-detected. SOP_EMBEDDING_OLLAMA_URL (default http://127.0.0.1:11434),
- *       SOP_EMBEDDING_MODEL, SOP_EMBEDDING_DIMS override. department-router ranks semantically in
- *       this mode too (isEmbeddingAvailable + fetchEmbeddings, JEV-502); the context-pack skill
- *       match still keys on getEmbeddingApiKey(), which is null here.
+ *       SOP_EMBEDDING_MODEL, SOP_EMBEDDING_DIMS override. department-router and the context-pack
+ *       skill match rank semantically in this mode too (isEmbeddingAvailable + fetchEmbeddings,
+ *       with localEmbedText's embeddinggemma prefixes); Ollama down → their keyword path.
  *   3. SOP_EMBEDDING_PROVIDER absent → auto-detect:
  *        Google key present       → google (gemini-embedding-2) [PRIMARY]
  *        ELSE OPENAI_API_KEY present → openai [OPTIONAL FALLBACK]
@@ -550,6 +550,22 @@ async function fetchEmbeddingOllama(text: string, provider: EmbeddingProvider): 
     );
   }
   return new Float32Array(values);
+}
+
+/**
+ * Model-card task prefix for the IN-MEMORY matchers (department router, skill
+ * matcher) on a local-mode box: SOP_EMBEDDING_PROVIDER=ollama with an
+ * embeddinggemma model (e.g. embeddinggemma-2:740m) gets
+ * "task: search result | query: " for the task text and "title: none | text: "
+ * for the corpus text — the same prefixes onboarding's
+ * shared-utils/embedding_engine._ollama_embed applies. Every other provider or
+ * model gets `text` back unchanged, so Gemini/OpenAI boxes send identical bytes.
+ * Not used for the stored SOP index (its rows were embedded raw).
+ */
+export function localEmbedText(text: string, kind: 'query' | 'document'): string {
+  const p = resolveEmbeddingProvider();
+  if (p.name !== 'ollama' || !p.model.toLowerCase().includes('embeddinggemma')) return text;
+  return kind === 'query' ? `task: search result | query: ${text}` : `title: none | text: ${text}`;
 }
 
 // ---------------------------------------------------------------------------

@@ -53,6 +53,7 @@ import {
   fetchEmbeddings,
   cosineSimilarity,
   isEmbeddingAvailable,
+  localEmbedText,
   resolveEmbeddingProvider,
   type EmbeddingVector,
 } from '@/lib/sop-embeddings';
@@ -447,7 +448,7 @@ async function getCachedDepartmentVectors(
   }
 
   if (toEmbed.length > 0) {
-    const results = await fetchEmbeddings(toEmbed.map((t) => t.text));
+    const results = await fetchEmbeddings(toEmbed.map((t) => localEmbedText(t.text, 'document')));
     if (!results || results.length !== toEmbed.length) return null;
     toEmbed.forEach((t, i) => {
       const vector = results[i].embedding;
@@ -483,7 +484,7 @@ async function semanticRankDepartments(
   try {
     deptVectors = await getCachedDepartmentVectors(departments);
     if (!deptVectors) return null;
-    const taskResults = await fetchEmbeddings([taskText]);
+    const taskResults = await fetchEmbeddings([localEmbedText(taskText, 'query')]);
     if (!taskResults || taskResults.length < 1) return null;
     taskVec = taskResults[0].embedding;
   } catch (err) {

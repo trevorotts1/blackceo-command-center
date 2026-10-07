@@ -3,8 +3,8 @@
  *
  * Proves:
  *   1. ollama resolves ONLY when opted in (never auto-detected; Google stays the default).
- *   2. It needs no key: semantic SOP search is available, but getEmbeddingApiKey() stays
- *      null so department routing / skill matching keep their keyword path.
+ *   2. It needs no key: semantic SOP search is available and getEmbeddingApiKey() stays
+ *      null (department routing and skill matching gate on isEmbeddingAvailable() instead).
  *   3. fetchEmbedding posts to <url>/api/embed and refuses a wrong-dim vector.
  *   4. rankSOPsBySemantic ranks ONLY rows on the local model+dims (Gemini rows skipped).
  *   5. getSOPEmbeddingHealth: local rows at 768 are healthy; Gemini-only is not.
