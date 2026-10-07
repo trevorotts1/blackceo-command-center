@@ -16,6 +16,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 
 const REPO_ROOT = process.cwd();
 
@@ -31,12 +32,36 @@ export const COOKIE_SECRET = 'create-task-e2e-secret-not-for-production';
 export const PORT = Number(process.env.CREATE_TASK_PORT || 4124);
 export const BASE_URL = `http://127.0.0.1:${PORT}`;
 
+/** Bearer for mutating routes the browser UI never calls (BEARER_REQUIRED_WRITE_ROUTES, e.g. POST /api/agents). */
+export const MACHINE_TOKEN = 'create-task-e2e-machine-token';
+
 export function serverEnv(): Record<string, string> {
   return {
     OPENCLAW_WORKSPACE_ROOT: WORKSPACE_DIR,
     MC_INTERVIEW_COOKIE_SECRET: COOKIE_SECRET,
     DATABASE_PATH: DB_PATH,
     PORT: String(PORT),
+    // Tenant gate (src/middleware.ts resolveTenantContext): same self-tenant
+    // registry the interview-lock fixture boots with. Without it every request
+    // 403s tenant_access_required. The matching signed session cookie is
+    // minted by signFixtureTenantGrant() and installed via storageState.
+    MC_API_TOKEN: MACHINE_TOKEN,
+    MC_TENANT_PUBLIC_URL: BASE_URL,
+    MC_TENANT_SESSION_SECRET: COOKIE_SECRET,
+    MC_COMPANY_ID: 'default',
+    MC_INSTALLATION_ID: 'create-task-install',
+    MC_TENANT_REGISTRY_JSON: JSON.stringify({
+      '127.0.0.1': {
+        kind: 'self',
+        tenantId: 'create-task-tenant',
+        companyId: 'default',
+        installationId: 'create-task-install',
+        issuer: 'https://create-task-access.example',
+        audience: 'create-task-audience',
+        subjects: ['owner:create-task'],
+      },
+    }),
+    REQUIRE_CF_ACCESS: 'false',
     // Keep the dev server from trying to reach a real gateway or seed real
     // department content — this suite only needs the board + task-create API.
     OPENCLAW_ROOT: '/nonexistent/openclaw-root-for-tests',
@@ -61,4 +86,21 @@ export function resetFixture(): void {
   fs.rmSync(E2E_OUT_DIR, { recursive: true, force: true });
   ensureWorkspace();
   writeCompleteBuildState();
+}
+
+/** Signed tenant session cookie (same payload format interview-lock uses). */
+export function signFixtureTenantGrant(): string {
+  const payload = Buffer.from(
+    JSON.stringify({
+      purpose: 'session',
+      companyId: 'default',
+      tenantId: 'create-task-tenant',
+      installationId: 'create-task-install',
+      host: '127.0.0.1',
+      subject: 'owner:create-task',
+      nonce: crypto.randomUUID(),
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    }),
+  ).toString('base64url');
+  return `${payload}.${crypto.createHmac('sha256', COOKIE_SECRET).update(payload).digest('base64url')}`;
 }

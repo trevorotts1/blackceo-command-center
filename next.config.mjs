@@ -35,7 +35,7 @@ const nextConfig = {
   distDir: resolveDistDir(),
   // Instrumentation is stable; keep native SQLite outside the server bundle.
   serverExternalPackages: ['better-sqlite3'],
-  webpack: (config, { nextRuntime }) => {
+  webpack: (config, { nextRuntime, webpack }) => {
     config.externals.push({
       'better-sqlite3': 'commonjs better-sqlite3',
       // PORT-FIX-3: the nodejs runtime legitimately uses node:child_process
@@ -61,6 +61,14 @@ const nextConfig = {
       // graph. fallback doesn't apply to resolvable packages — alias:false does, which
       // stubs the whole module for edge so their internal node:* imports never compile.
       // Also stub node: URI-prefixed variants (used in sop-auto-replace / sop-authoring).
+      // webpack rejects the `node:` URI scheme before alias/fallback run
+      // (UnhandledSchemeError), so strip the prefix first and let the bare-name
+      // fallback/alias stubs below apply (dev server failed on node:crypto).
+      config.plugins.push(
+        new webpack.NormalModuleReplacementPlugin(/^node:/, (resource) => {
+          resource.request = resource.request.replace(/^node:/, '');
+        }),
+      );
       config.resolve.alias = {
         ...(config.resolve.alias || {}),
         'node-cron': false, 'better-sqlite3': false,

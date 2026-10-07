@@ -32,6 +32,10 @@ import path from 'node:path';
 
 // Runtime readiness probes must stay inside this test's isolated fixture.
 process.env.OPENCLAW_ROOT = path.join(process.env.CC_TEST_FIXTURE_ROOT!, 'openclaw');
+// These tests pin the keyword/semantic fallback. A box with the decision-engine
+// core installed would otherwise let the engine pick the only department
+// (comDispatch step 2, JEV), making the outcome depend on the host.
+process.env.DECISION_ENGINE_MODE = 'off';
 
 // ---------------------------------------------------------------------------
 // Helpers to build in-memory test fixtures
