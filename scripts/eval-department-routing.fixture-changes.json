@@ -1,16 +1,40 @@
 {
-  "_doc": "Answer-key corrections (STEP 1, 2026-10-07). Additive only: each entry adds acceptable alternates (addAlt) and may relabel (newD). Original scripts/eval-department-routing.fixture.json is untouched; the eval reports BOTH keys. No label was clearly wrong, so there are no relabels.",
+  "_doc": "Answer-key corrections (STEP 1, 2026-10-07). Additive only: only true multi-department alternates. General Task is a last resort or a direct user request, so it is never added as an alternate for a department-labeled task. Original fixture is untouched; the eval reports BOTH keys, the ORIGINAL as the headline. No relabels.",
   "changes": [
-    { "m": "Hey, we got a bunch of new signups from the podcast, can you make sure they all get the welcome sequence?", "addAlt": ["funnels"], "why": "Welcome sequences are built and run in funnels as often as in the CRM (multi-department)." },
-    { "m": "Send a thank you card to everyone who referred a client this year", "addAlt": ["general-task"], "why": "A one-off personal/office errand; General Task is defined to take one-off personal work." },
-    { "m": "Schedule a call with Dr. Lee next week", "addAlt": ["general-task"], "why": "Personal one-off scheduling is both Personal Assistant and General Task by their own definitions." },
-    { "m": "Remind me to call my mom on Sunday", "addAlt": ["general-task"], "why": "Purely personal reminder; General Task covers personal one-offs." },
-    { "m": "Order a birthday gift for my assistant", "addAlt": ["general-task"], "why": "Personal one-off errand; General Task covers it." },
-    { "m": "Coordinate the launch across marketing, sales and support", "addAlt": ["general-task"], "why": "Cross-department work with no single owner is exactly General Task's definition (multi-department)." },
-    { "m": "Plan out the whole rollout for our new membership program, start to finish", "addAlt": ["general-task"], "why": "Cross-department rollout; General Task's definition names cross-department work (multi-department)." },
-    { "m": "The same payment reminder keeps failing every week, find the root cause and fix it so it stops", "addAlt": ["openclaw-maintenance"], "why": "A recurring failing automated job is also an AI-system maintenance task." },
-    { "m": "Research our top five competitors and their pricing", "addAlt": ["marketing"], "why": "Competitive analysis is a research task and a marketing task." },
-    { "m": "Proofread the new sales page", "addAlt": ["funnels"], "why": "A sales page lives in funnels; proofreading is also QC (multi-department)." },
-    { "m": "Translate our brochure into Spanish", "addAlt": ["graphics"], "why": "A brochure is a design asset; existing alternates already allow marketing and communications." }
+    {
+      "m": "Hey, we got a bunch of new signups from the podcast, can you make sure they all get the welcome sequence?",
+      "addAlt": [
+        "funnels"
+      ],
+      "why": "Welcome sequences are built and run in funnels as often as in the CRM (multi-department)."
+    },
+    {
+      "m": "The same payment reminder keeps failing every week, find the root cause and fix it so it stops",
+      "addAlt": [
+        "openclaw-maintenance"
+      ],
+      "why": "A recurring failing automated job is also an AI-system maintenance task."
+    },
+    {
+      "m": "Research our top five competitors and their pricing",
+      "addAlt": [
+        "marketing"
+      ],
+      "why": "Competitive analysis is a research task and a marketing task."
+    },
+    {
+      "m": "Proofread the new sales page",
+      "addAlt": [
+        "funnels"
+      ],
+      "why": "A sales page lives in funnels; proofreading is also QC (multi-department)."
+    },
+    {
+      "m": "Translate our brochure into Spanish",
+      "addAlt": [
+        "graphics"
+      ],
+      "why": "A brochure is a design asset; existing alternates already allow marketing and communications."
+    }
   ]
 }
