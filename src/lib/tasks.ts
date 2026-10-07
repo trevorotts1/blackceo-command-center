@@ -1741,7 +1741,7 @@ export async function refreshPersonaDecisionIfNeeded(taskId:string):Promise<void
   if(!stale && !(bundle.rationale as {refresh_pending?:boolean}|undefined)?.refresh_pending) { applyPersonaOperatorLock(taskId); await refreshPersonaScopesIfNeeded(taskId); return; }
   const dept=canonicalDeptSlug(task.department ?? '') || 'general';
   const description=`${task.title} ${task.description ?? ''}`;
-  if((task.audience_source==='operator_confirmed' || task.audience_source==='task_named' || task.audience_source==='owner_default') && task.audience_label) {
+  if((task.audience_source==='operator_confirmed' || task.audience_source==='task_named' || task.audience_source==='owner_default' || task.audience_source==='best_guess') && task.audience_label) {
     const refreshed=await rescoreAudienceBlend(taskId,description,dept,task.audience_label);
     if(!refreshed.rescored) throw new Error('persona_refresh_pending');
   } else {
@@ -2190,7 +2190,7 @@ export function markAudienceDeadlineFallback(taskId: string): void {
  */
 export function confirmTaskAudience(
   taskId: string,
-  opts: { audienceId?: string | null; audienceLabel?: string | null; changed?: boolean; source?: 'operator_confirmed' | 'task_named' | 'owner_default' } = {},
+  opts: { audienceId?: string | null; audienceLabel?: string | null; changed?: boolean; source?: 'operator_confirmed' | 'task_named' | 'owner_default' | 'best_guess' } = {},
 ): void {
   const source = opts.source ?? 'operator_confirmed';
   const snapshot=capturePersonaSnapshot(taskId);

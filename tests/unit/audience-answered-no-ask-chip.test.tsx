@@ -11,6 +11,15 @@ const task = (o: any) => ({ id: "t1", title: "Email Trevor", status: "backlog", 
 beforeEach(() => m.mockReturnValue(st([])));
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
+describe("best guess chip", () => {
+  it("shows (best guess) and counts as answered", () => {
+    expect(needsAudienceAnswer({ blend_confirm_state: "pending", audience_source: "best_guess" })).toBe(false);
+    m.mockReturnValue(st([task({ blend_confirm_state: "pending", audience_source: "best_guess", audience_label: "Coaches" })]));
+    render(<MissionQueue departmentFilter={null} />);
+    expect(screen.getByTestId("written-for-chip").textContent).toMatch(/Coaches \(best guess\)/);
+  });
+});
+
 describe("answered audience never asks again", () => {
   it("needsAudienceAnswer: pending + answered source is false", () => {
     for (const s of ["task_named", "owner_default", "operator_confirmed"]) {

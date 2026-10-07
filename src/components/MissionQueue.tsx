@@ -9,7 +9,7 @@ import { triggerAutoDispatch, shouldTriggerAutoDispatch } from '@/lib/auto-dispa
 import type { Task, TaskStatus, BugTicket, BugStatus } from '@/lib/types';
 import { TaskModal } from './TaskModal';
 import { needsPlanningAnswer } from '@/lib/board/planning-chip';
-import { AUDIENCE_ASK_TEXT, needsAudienceAnswer, writtenForLabel } from '@/lib/board/audience-chip';
+import { AUDIENCE_ASK_TEXT, needsAudienceAnswer, writtenForLabel, writtenForChipLabel } from '@/lib/board/audience-chip';
 import { MarketingPublishButton } from './MarketingPublishButton';
 import PhaseStepper from './PhaseStepper';
 import { PersonaSlotChips, PersonaScopeChips, CommsAudienceChip, humanize } from './kanban/TaskCard';
@@ -1842,7 +1842,7 @@ export function TaskCard({ task, onDragStart, onClick, onAnswer, isDragging, isC
             className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-700 border border-gray-300 hover:bg-gray-200"
             title="We assumed who will read this and started right away. Click to change it."
           >
-            ✍️ Written for {writtenForLabel(task)} · Change
+            ✍️ Written for {writtenForChipLabel(task)} · Change
           </button>
         )}
         {/* Planning Mode hold chip — a task waiting on the planning Q&A sits in
