@@ -4,7 +4,7 @@
  * the SOP vote (sop-vote.ts: each correction is one more neighbour, weighted CORRECTION_WEIGHT) and in the model pick
  * (the corrected text is listed first among that department's examples).
  *
- * Storage: `routing_corrections`, created on first use (CREATE IF NOT EXISTS, so no migration number to collide
+ * Storage: `routing_department_corrections` (the older `routing_corrections` table records owner lane overrides by task id, a different thing), created on first use (CREATE IF NOT EXISTS, so no migration number to collide
  * with other branches). The embedding is stored per (model, dims) in the same space as the SOP index and is
  * filled lazily when the provider was down at record time. Texts are stored as given by the user's task; they
  * never leave the box (they are only embedded by the box's own provider).
@@ -23,7 +23,7 @@ const MAX_TEXT = 1000;
 let _ready = false;
 function ensureTable(): void {
   if (_ready) return;
-  run(`CREATE TABLE IF NOT EXISTS routing_corrections (
+  run(`CREATE TABLE IF NOT EXISTS routing_department_corrections (
     id TEXT PRIMARY KEY,
     text_hash TEXT NOT NULL UNIQUE,
     text TEXT NOT NULL,
@@ -52,7 +52,7 @@ export function recordCorrection(text: string, department: string | null | undef
     ensureTable();
     const hash = crypto.createHash('sha1').update(t.toLowerCase()).digest('hex');
     run(
-      `INSERT INTO routing_corrections (id, text_hash, text, department) VALUES (?, ?, ?, ?)
+      `INSERT INTO routing_department_corrections (id, text_hash, text, department) VALUES (?, ?, ?, ?)
        ON CONFLICT(text_hash) DO UPDATE SET department = excluded.department, embedding = NULL, embedding_model = NULL, embedding_dims = NULL, updated_at = datetime('now')`,
       [crypto.randomUUID(), hash, t, dept],
     );
@@ -70,17 +70,17 @@ export async function loadCorrections(provider: EmbeddingProvider): Promise<Corr
   try {
     ensureTable();
     const missing = queryAll<{ id: string; text: string }>(
-      `SELECT id, text FROM routing_corrections WHERE embedding IS NULL OR embedding_model IS NOT ? OR embedding_dims IS NOT ? LIMIT 50`,
+      `SELECT id, text FROM routing_department_corrections WHERE embedding IS NULL OR embedding_model IS NOT ? OR embedding_dims IS NOT ? LIMIT 50`,
       [provider.model, provider.dims],
     );
     if (missing.length > 0) {
       const res = await fetchEmbeddingsFor(provider, missing.map((m) => localEmbedText(m.text, 'query', provider)));
       missing.forEach((m, i) => {
-        if (res[i]?.embedding) run('UPDATE routing_corrections SET embedding = ?, embedding_model = ?, embedding_dims = ? WHERE id = ?', [float32ToBuffer(Float32Array.from(res[i].embedding)), provider.model, provider.dims, m.id]);
+        if (res[i]?.embedding) run('UPDATE routing_department_corrections SET embedding = ?, embedding_model = ?, embedding_dims = ? WHERE id = ?', [float32ToBuffer(Float32Array.from(res[i].embedding)), provider.model, provider.dims, m.id]);
       });
     }
     const rows = queryAll<{ department: string; text: string; embedding: Buffer }>(
-      'SELECT department, text, embedding FROM routing_corrections WHERE embedding IS NOT NULL AND embedding_model = ? AND embedding_dims = ?',
+      'SELECT department, text, embedding FROM routing_department_corrections WHERE embedding IS NOT NULL AND embedding_model = ? AND embedding_dims = ?',
       [provider.model, provider.dims],
     );
     const out: Correction[] = [];

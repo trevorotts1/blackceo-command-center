@@ -241,7 +241,7 @@ test('SOP vote with an empty or foreign-model index falls through without any em
 });
 
 // ── model pick ───────────────────────────────────────────────────────────────────────────────────
-test('model pick: shown the top 3 candidates and General Task; its choice routes the task', async () => {
+test('model pick: shown the top 5 candidates and General Task; its choice routes the task', async () => {
   let shown: { id: string; name: string; purpose: string }[] = [];
   // A task JEV and the SOP vote cannot place, so the tail reaches the model.
   const unsure = await router.pickDepartment({ title: 'Look into whether we should expand to Canada' }, departments, {
@@ -250,7 +250,7 @@ test('model pick: shown the top 3 candidates and General Task; its choice routes
   });
   assert.equal(unsure.method, 'model');
   assert.equal(unsure.department?.id, shown[0].id);
-  assert.ok(shown.length >= 2 && shown.length <= 4, `3 candidates + General Task, got ${shown.length}`);
+  assert.ok(shown.length >= 2 && shown.length <= 6, `up to 5 candidates + General Task, got ${shown.length}`);
   const general = shown[shown.length - 1];
   assert.equal(general.id, 'general-task');
   assert.equal(general.purpose, router.GENERAL_TASK_DESCRIPTION);

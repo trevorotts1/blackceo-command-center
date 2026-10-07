@@ -659,7 +659,7 @@ export const GENERAL_TASK_ID = 'general-task';
 export const GENERAL_TASK_DESCRIPTION = profileText({ id: GENERAL_TASK_ID, purpose: '' } as DepartmentConfig);
 /** Candidate departments shown to the model pick (General Task is offered in addition). */
 export const MODEL_PICK_CANDIDATES = Number(process.env.MODEL_PICK_CANDIDATES) || 5;
-/** Total budget for the model pick: 3 provider hops x 8 s (model-pick-llm.ts PICK_HOP_TIMEOUT_MS); the adapter caps it again. */
+/** Total budget for the model pick: 3 provider hops x 8 s (model-pick-llm.ts PICK_HOP.timeoutMs); the adapter caps it again. */
 export const MODEL_PICK_TIMEOUT_MS = 24_000;
 /**
  * Acceptance of the model's choice: a department the model picks is used only when it ranks within the first

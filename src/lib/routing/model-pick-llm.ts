@@ -11,7 +11,7 @@
  * Then the caller falls to General Task. No name-based reordering, no model list read from openclaw.json, no
  * operator key. `TIEBREAK_MODEL`, when set, is an override tried FIRST (provider/model, or an Ollama tag).
  *
- * Timing: GLM-5.3-Flash is slow (about 3.3 s to first token, 51 tok/s), so each hop gets PICK_HOP_TIMEOUT_MS
+ * Timing: GLM-5.3-Flash is slow (about 3.3 s to first token, 51 tok/s), so each hop gets PICK_HOP.timeoutMs
  * (8 s). A failed hop (error, HTTP failure, empty reply, timeout) moves to the next at once. The total is the
  * caller's budget (MODEL_PICK_TIMEOUT_MS = 3 hops x 8 s = 24 s; the model pick runs on the background dispatch
  * path, and a hop that fails fast, such as a missing key, costs nothing). Never throws past `complete`.
@@ -19,7 +19,8 @@
  */
 import type { TiebreakRequest } from './tiebreak-adapter';
 
-export const PICK_HOP_TIMEOUT_MS = 8_000;
+/** Per-hop bound (env override is for tests). */
+export const PICK_HOP = { timeoutMs: Number(process.env.PICK_HOP_TIMEOUT_MS) || 8_000 };
 
 export interface PickTarget { slug: string; native: string; modelId: string }
 
@@ -71,7 +72,7 @@ export const completeViaBoxModels: NonNullable<TiebreakRequest['complete']> = as
   const deadline = Date.now() + budgetMs;
   let lastErr: unknown = null;
   for (const t of targets) {
-    const left = Math.min(deadline - Date.now(), PICK_HOP_TIMEOUT_MS);
+    const left = Math.min(deadline - Date.now(), PICK_HOP.timeoutMs);
     if (left <= 250) break;
     const provider = getProvider(t.slug)!;
     if (process.env.ROUTING_PICK_TRACE === '1') console.log(`[model-pick] via ${t.modelId}`);
