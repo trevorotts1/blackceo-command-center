@@ -14,8 +14,16 @@ import { queryAll, queryOne, run } from '@/lib/db';
 import { bufferToFloat32, float32ToBuffer, fetchEmbeddingsFor, localEmbedText, type EmbeddingProvider } from '@/lib/sop-embeddings';
 import { canonicalDeptSlug } from './canonical-slug';
 
-/** A correction is a person's explicit decision, so it counts for more than one SOP neighbour. */
+/**
+ * A correction is a person's explicit decision, so it counts for more than one SOP neighbour, but only when at
+ * least CORRECTION_QUORUM corrections for the same department are near the task: ONE correction (which may be a
+ * mistake) counts as a single ordinary neighbour (weight 1) and cannot outvote two or more agreeing SOPs.
+ */
 export const CORRECTION_WEIGHT = 2;
+export const CORRECTION_QUORUM = 2;
+/** Retention: newest N corrections per department, and nothing older than this many days. Pruned on insert. */
+export const CORRECTIONS_KEEP_PER_DEPT = 200;
+export const CORRECTIONS_MAX_AGE_DAYS = 365;
 /** A correction only counts as a neighbour when it is this similar to the new task (an unrelated one must not outvote SOPs). */
 export const CORRECTION_MIN_SIM = 0.7;
 const MAX_TEXT = 1000;
@@ -43,6 +51,16 @@ export function __resetCorrections(): void { _ready = false; }
 export const correctionText = (title?: string | null, description?: string | null): string =>
   [title, description].filter(Boolean).join(' — ').trim().slice(0, MAX_TEXT);
 
+/** Bounded table: drop this department's corrections beyond the newest N, and any older than the age limit. */
+function pruneCorrections(dept: string): void {
+  run(
+    `DELETE FROM routing_department_corrections WHERE department = ? AND id NOT IN
+       (SELECT id FROM routing_department_corrections WHERE department = ? ORDER BY updated_at DESC, rowid DESC LIMIT ?)`,
+    [dept, dept, CORRECTIONS_KEEP_PER_DEPT],
+  );
+  run(`DELETE FROM routing_department_corrections WHERE updated_at < datetime('now', ?)`, [`-${CORRECTIONS_MAX_AGE_DAYS} days`]);
+}
+
 /** Keep (task text → final department). The same text corrected again replaces its earlier department. Never throws. */
 export function recordCorrection(text: string, department: string | null | undefined): boolean {
   try {
@@ -56,6 +74,7 @@ export function recordCorrection(text: string, department: string | null | undef
        ON CONFLICT(text_hash) DO UPDATE SET department = excluded.department, embedding = NULL, embedding_model = NULL, embedding_dims = NULL, updated_at = datetime('now')`,
       [crypto.randomUUID(), hash, t, dept],
     );
+    pruneCorrections(dept);
     return true;
   } catch (err) {
     console.warn(`[DepartmentRouter] correction not recorded: ${(err as Error).message}`);
@@ -92,17 +111,20 @@ export async function loadCorrections(provider: EmbeddingProvider): Promise<Corr
 }
 
 /**
- * The CC's reassignment path: PATCH /api/tasks/[id] with a new `assigned_agent_id` made by a person (no
- * updated_by_agent_id). When the new agent belongs to a different department than the task's current one, that
- * is a correction of the routing: (task text -> the new agent's department). Never throws.
+ * The CC's reassignment path: PATCH /api/tasks/[id] with a new `assigned_agent_id`. `human` must be true only
+ * for a genuine person: the route passes it when the request carries a verified tenant session (not the shared
+ * MC_API_TOKEN bearer that agents and scripts use, `subject === 'operator:api'`) and no `updated_by_agent_id`.
+ * When the new agent belongs to a different department than the task's current one, that is a correction of
+ * the routing: (task text -> the new agent's department). The route calls this only AFTER the UPDATE commits.
+ * Never throws.
  */
 export function noteReassignment(
   task: { title?: string | null; description?: string | null; department?: string | null; workspace_id?: string | null },
   newAgentId: string | null | undefined,
-  byAgent: boolean,
+  human: boolean,
 ): boolean {
   try {
-    if (!newAgentId || byAgent) return false;
+    if (!newAgentId || !human) return false;
     const to = queryOne<{ slug: string | null }>(
       'SELECT w.slug AS slug FROM agents a JOIN workspaces w ON w.id = a.workspace_id WHERE a.id = ?', [newAgentId],
     )?.slug;
