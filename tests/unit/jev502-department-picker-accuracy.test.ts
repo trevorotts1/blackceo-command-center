@@ -241,7 +241,7 @@ test('SOP vote with an empty or foreign-model index falls through without any em
 });
 
 // ── model pick ───────────────────────────────────────────────────────────────────────────────────
-test('model pick: shown the top 3 candidates and General Task; its choice routes the task', async () => {
+test('model pick: shown the top 5 candidates and General Task; its choice routes the task', async () => {
   let shown: { id: string; name: string; purpose: string }[] = [];
   // A task JEV and the SOP vote cannot place, so the tail reaches the model.
   const unsure = await router.pickDepartment({ title: 'Look into whether we should expand to Canada' }, departments, {
@@ -250,7 +250,7 @@ test('model pick: shown the top 3 candidates and General Task; its choice routes
   });
   assert.equal(unsure.method, 'model');
   assert.equal(unsure.department?.id, shown[0].id);
-  assert.ok(shown.length >= 2 && shown.length <= 4, `3 candidates + General Task, got ${shown.length}`);
+  assert.ok(shown.length >= 2 && shown.length <= 6, `up to 5 candidates + General Task, got ${shown.length}`);
   const general = shown[shown.length - 1];
   assert.equal(general.id, 'general-task');
   assert.equal(general.purpose, router.GENERAL_TASK_DESCRIPTION);
@@ -287,13 +287,13 @@ test('model pick: a timeout, an error or no permitted model falls through to Gen
 test('chain at the shipped (accuracy-first) defaults: 80%+ correct department', async () => {
   const picks = await run(undefined, undefined, true);
   assert.deepEqual(misses, [], 'replay miss — re-run: npx tsx scripts/eval-department-routing.ts --onboarding <clone> --sops <db> --model glm-5.3-flash:cloud --record');
-  assert.equal(router.MODEL_PICK.maxRank, 3);
+  assert.equal(router.MODEL_PICK.maxRank, 5);
   assert.equal(sopVote.SOP_VOTE.margin, 0.4);
   assert.equal(sopVote.SOP_VOTE.minSim, 0.72);
   const s3 = score3(cases, picks.map((p) => slug(p.department)));
-  assert.ok(s3.a >= 0.8, `(a) correct department on department-labeled cases ${(s3.a * 100).toFixed(1)}% (measured 84.4%; before this chain 32.5%)`);
-  assert.ok(s3.wrongDept <= 18, `wrong-department ${s3.wrongDept} (measured 18; JEV alone is 5)`);
-  assert.ok(s3.total <= 40, `total wrong ${s3.total} (measured 28; before this chain 111)`);
+  assert.ok(s3.a >= 0.88, `(a) correct department on department-labeled cases ${(s3.a * 100).toFixed(1)}% (measured 93.1%; #495 was 84.4%; before this chain 32.5%)`);
+  assert.ok(s3.wrongDept <= 15, `wrong-department ${s3.wrongDept} (measured 12; JEV alone is 5)`);
+  assert.ok(s3.total <= 22, `total wrong ${s3.total} (measured 14; before this chain 111)`);
   assert.ok(s3.b >= 0.6, `(b) General-labeled cases sent to General ${(s3.b * 100).toFixed(1)}% (measured 66.7%)`);
   assert.ok(picks.filter((p) => p.method === 'jev').length >= 50, 'JEV must still decide first');
 });

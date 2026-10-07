@@ -42,6 +42,8 @@ export interface TiebreakCandidate {
   id: string;
   name: string;
   purpose: string;
+  /** Model pick only: titles of this department's nearest live SOPs for the task. */
+  examples?: string[];
 }
 
 export interface TiebreakPermission {
@@ -52,7 +54,7 @@ export interface TiebreakPermission {
 
 export interface TiebreakRequest {
   taskText: string;
-  /** Already-ranked close candidates, closest first. Capped to 5 inside. */
+  /** Already-ranked close candidates, closest first. Capped to 6 inside. */
   candidates: TiebreakCandidate[];
   companyId?: string;
   /** Explicit model from TIEBREAK_MODEL or approved client config. Null means none. */
@@ -64,6 +66,11 @@ export interface TiebreakRequest {
   /** Inherited remaining preparation budget in ms. Never reset per call. */
   deadlineMs?: number;
   permission: TiebreakPermission;
+  /**
+   * Model pick only: what the earlier pickers guessed (e.g. "decision engine: Funnels"). Presence switches the
+   * prompt to the decide-every-case form: the model returns a department id or GENERAL.
+   */
+  guesses?: string[];
   /**
    * The box's own LLM path (see model-pick-llm.ts: the same provider connectors and client-owned keys the
    * QC judge uses). When given, it carries the call and `apiKey`/`endpoint` are not needed. It receives the
@@ -83,9 +90,11 @@ export type TiebreakFn = (req: TiebreakRequest) => Promise<TiebreakResult>;
 
 /** Legacy ceiling preserved as a cap, never as an owned budget. */
 export const TIEBREAK_TIMEOUT_CAP_MS = 10_000;
+/** Ceiling for a call carried by the box's own multi-hop model path (each hop has its own bound there). */
+export const TIEBREAK_COMPLETE_CAP_MS = 30_000;
 
-/** Legacy candidate window preserved: judge at most the top 5. */
-export const TIEBREAK_MAX_CANDIDATES = 5;
+/** Candidate window: up to 5 departments plus General Task. */
+export const TIEBREAK_MAX_CANDIDATES = 6;
 
 const TIEBREAK_MODEL_ENV = 'TIEBREAK_MODEL';
 
@@ -165,12 +174,31 @@ export async function authorizedTiebreak(
 
   const budgetMs =
     req.deadlineMs !== undefined && req.deadlineMs > 0
-      ? Math.min(req.deadlineMs, TIEBREAK_TIMEOUT_CAP_MS)
+      ? Math.min(req.deadlineMs, req.complete ? TIEBREAK_COMPLETE_CAP_MS : TIEBREAK_TIMEOUT_CAP_MS)
       : TIEBREAK_TIMEOUT_CAP_MS;
 
-  const deptList = candidates.map((c, i) => `${i + 1}. ${c.name} — ${c.purpose}`).join('\n');
+  const decide = req.guesses !== undefined;
+  const deptList = decide
+    ? candidates.map((c) => `- id: ${c.id === 'general-task' ? 'GENERAL' : c.id}\n  name: ${c.name}\n  profile: ${c.purpose}` + (c.examples?.length ? `\n  example SOPs: ${c.examples.join(' | ')}` : '')).join('\n')
+    : candidates.map((c, i) => `${i + 1}. ${c.name} — ${c.purpose}`).join('\n');
 
-  const messages = [
+  const messages = decide
+    ? [
+        {
+          role: 'system' as const,
+          content:
+            'You route business tasks to the one department that owns them. Use each department\'s profile, including what it does NOT handle. ' +
+            'Pick GENERAL only when no listed department plausibly owns the task. Reply with ONLY the department id, or GENERAL.',
+        },
+        {
+          role: 'user' as const,
+          content:
+            `Task: "${req.taskText}"\n\nDepartments:\n${deptList}\n\n` +
+            (req.guesses!.length ? `Earlier guesses (may be wrong): ${req.guesses!.join('; ')}.\n` : '') +
+            'Which single department id (or GENERAL) should handle this Task? Reply with only that id.',
+        },
+      ]
+    : [
     {
       role: 'system' as const,
       content:
@@ -220,10 +248,13 @@ export async function authorizedTiebreak(
       return { decided: false, provenance: 'evidence-only:tie-break-empty-reply' };
     }
 
-    const match = candidates.find(
+    const pl = picked.toLowerCase();
+    const idHit = decide ? candidates.find((c) => pl === c.id.toLowerCase() || pl.replace(/[`"'*.\s]/g, '') === c.id.toLowerCase()) : undefined;
+    const match = idHit ?? candidates.find(
       (c) =>
-        c.name.toLowerCase() === picked.toLowerCase() ||
-        picked.toLowerCase().includes(c.name.toLowerCase()),
+        c.name.toLowerCase() === pl ||
+        pl.includes(c.name.toLowerCase()) ||
+        (decide && pl.replace(/[`"'*.\s]/g, '') === 'general' && c.id === 'general-task'),
     );
     if (!match) {
       return {

@@ -1,7 +1,8 @@
 /**
- * The routing model pick runs on the box's OWN existing LLM path (model-pick-llm.ts), with no seam injected:
- * the models in openclaw.json, the registered provider connectors, the client-owned key resolved the way the QC
- * judge resolves it. All HTTP is mocked; HOME is a temp dir (the real ~/.openclaw is never read).
+ * The routing model pick runs on the box's OWN LLM path (model-pick-llm.ts) through a FIXED provider chain:
+ *   1. glm-5.3-flash:cloud via Ollama Cloud (local daemon when the box has no cloud key), 2. OpenRouter
+ *   z-ai/glm-5.3-flash, 3. Agnes agnes-3.0-flash, 4. General Task. Each hop only with the box's own key.
+ * All HTTP is mocked; HOME is a temp dir (the real ~/.openclaw is never read).
  */
 import './_isolated-db';
 import test from 'node:test';
@@ -17,21 +18,23 @@ Object.assign(process.env, {
   DISABLE_CRON: '1', DISABLE_BRIDGE_BOOTSTRAP: '1', OWNER_NOTIFY_TELEGRAM_DISABLED: '1', OPENCLAW_CLI_BIN: '/usr/bin/false',
   DECISION_ENGINE_MODE: 'off', SOP_EMBEDDING_PROVIDER: 'openai', OPENAI_API_KEY: '',
 });
-for (const k of ['TIEBREAK_MODEL', 'OLLAMA_API_KEY', 'OLLAMA_CLOUD_API_KEY']) delete process.env[k];
+for (const k of ['TIEBREAK_MODEL', 'OLLAMA_API_KEY', 'OLLAMA_CLOUD_API_KEY', 'OPENROUTER_API_KEY', 'AGNES_API_KEY']) delete process.env[k];
 fs.mkdirSync(process.env.OPENCLAW_ROOT!, { recursive: true });
-const writeChain = (primary: string, fallbacks: string[] = []) =>
-  fs.writeFileSync(path.join(process.env.OPENCLAW_ROOT!, 'openclaw.json'), JSON.stringify({ agents: { defaults: { model: { primary, fallbacks } } } }));
 
-const calls: { url: string; model: string; auth: string | null }[] = [];
-let reply: (model: string, body?: { messages: { content: string }[] }) => Response = () => new Response('{}', { status: 500 });
+const calls: { hop: string; model: string; auth: string | null }[] = [];
+const hopOf = (url: string) => (/openrouter/.test(url) ? 'openrouter' : /agnes/.test(url) ? 'agnes' : 'ollama');
+let behave: Record<string, 'ok' | 'fail' | 'hang'> = {};
 globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
   const body = JSON.parse(String(init?.body ?? '{}'));
-  calls.push({ url: String(url), model: body.model, auth: new Headers(init?.headers).get('authorization') });
-  return reply(body.model, body);
+  const hop = hopOf(String(url));
+  calls.push({ hop, model: body.model, auth: new Headers(init?.headers).get('authorization') });
+  const mode = behave[hop] ?? 'ok';
+  if (mode === 'hang') return new Promise<Response>(() => {});
+  if (mode === 'fail') return new Response('boom', { status: 500 });
+  // The decide-every-case prompt: answer with the first listed department id.
+  const id = /- id: (\S+)/.exec(body.messages?.[1]?.content ?? '')?.[1] ?? 'GENERAL';
+  return new Response(JSON.stringify({ choices: [{ message: { role: 'assistant', content: id } }] }), { status: 200 });
 }) as typeof fetch;
-/** Answer with the first department the pick lists (the best-evidenced candidate). */
-const first = (_m: string, b?: { messages: { content: string }[] }) => ok(/Departments:\n1\. (.+?) — /.exec(b?.messages[1].content ?? '')?.[1] ?? 'General Task')();
-const ok = (text: string) => () => new Response(JSON.stringify({ choices: [{ message: { role: 'assistant', content: text } }] }), { status: 200 });
 
 type Router = typeof import('../../src/lib/routing/department-router');
 let router: Router;
@@ -41,51 +44,67 @@ test.before(async () => {
   seedFloorWorkspaces(db.getDb(), loadFixture().catalog);
   departments = (await import('../../src/lib/routing/departments.config')).loadDepartments(EVAL_COMPANY);
   router = await import('../../src/lib/routing/department-router');
-  router.MODEL_PICK.maxRank = 5; // these tests are about the call path, not the acceptance rank (tested elsewhere)
+  (await import('../../src/lib/routing/model-pick-llm')).PICK_HOP.timeoutMs = 400;
 });
 const task = { title: 'Plan the team retreat in March' };
 const pick = () => router.pickDepartment(task, departments, { tail: ['model'], tiebreakSeam: { companyId: EVAL_COMPANY } });
+const reset = (b: typeof behave = {}) => { calls.length = 0; behave = b; };
+const keys = () => Object.assign(process.env, { OPENROUTER_API_KEY: 'or-test', AGNES_API_KEY: 'ag-test' });
 
-test('no seam: the box\'s configured model (small and fast first) makes the pick, over the box\'s local Ollama daemon when no cloud key exists', async () => {
-  writeChain('agnes/agnes-3.0-pro', ['ollama/deepseek-v4.1-flash:cloud', 'ollama/big-model:70b']);
-  calls.length = 0; reply = ok('General Task');
+test('hop 1 answers: glm-5.3-flash:cloud on Ollama, no auth header without a cloud key, later hops never called', async () => {
+  keys(); reset();
   const r = await pick();
-  assert.equal(r.generalBy, 'decision', r.note);
-  assert.equal(calls.length, 1);
-  assert.match(calls[0].url, /\/v1\/chat\/completions$/);
-  assert.equal(calls[0].model, 'deepseek-v4.1-flash:cloud', 'the unknown-provider primary is skipped, the flash model is chosen');
-});
-
-test('a department answer routes; the model never sees an operator key (no key on the box means the local daemon, no auth header)', async () => {
-  writeChain('ollama/some-flash:cloud');
-  calls.length = 0; reply = first;
-  const r = await pick();
-  assert.equal(r.method, 'model');
-  assert.ok(r.department);
+  assert.equal(r.method, 'model', r.note);
+  assert.deepEqual(calls.map((c) => [c.hop, c.model]), [['ollama', 'glm-5.3-flash:cloud']]);
   assert.equal(calls[0].auth, null);
 });
 
-test('error and timeout: the next configured model is tried inside the budget, then General Task; never a crash', async () => {
-  writeChain('ollama/first-flash:cloud', ['ollama/second-flash:cloud']);
-  calls.length = 0; reply = (m, b) => (m === 'first-flash:cloud' ? new Response('boom', { status: 500 }) : first(m, b));
+test('hop 1 fails: OpenRouter z-ai/glm-5.3-flash answers with the box\'s own key', async () => {
+  keys(); reset({ ollama: 'fail' });
   const r = await pick();
-  assert.ok(r.department);
-  assert.deepEqual(calls.map((c) => c.model), ['first-flash:cloud', 'second-flash:cloud']);
-  reply = () => new Response('boom', { status: 500 });
-  const down = await pick();
-  assert.equal(down.department, null); assert.equal(down.generalBy, 'last-resort');
-  // A hung endpoint is bounded by the pick's own budget.
-  reply = () => new Response('x');
-  globalThis.fetch = (() => new Promise(() => {})) as typeof fetch;
-  const t0 = Date.now();
-  const hung = await router.pickDepartment(task, departments, { tail: ['model'], tiebreakSeam: { companyId: EVAL_COMPANY, deadlineMs: 700 } });
-  assert.ok(Date.now() - t0 < 3000, 'bounded');
-  assert.equal(hung.generalBy, 'last-resort');
+  assert.equal(r.method, 'model', r.note);
+  assert.deepEqual(calls.map((c) => [c.hop, c.model]), [['ollama', 'glm-5.3-flash:cloud'], ['openrouter', 'z-ai/glm-5.3-flash']]);
+  assert.equal(calls[1].auth, 'Bearer or-test');
 });
 
-test('no model configured on the box: no call, last resort', async () => {
-  fs.rmSync(path.join(process.env.OPENCLAW_ROOT!, 'openclaw.json'), { force: true });
-  let n = 0; globalThis.fetch = (async () => { n++; return new Response('{}'); }) as typeof fetch;
+test('hops 1 and 2 fail: Agnes agnes-3.0-flash answers', async () => {
+  keys(); reset({ ollama: 'fail', openrouter: 'fail' });
   const r = await pick();
-  assert.equal(n, 0); assert.equal(r.generalBy, 'last-resort');
+  assert.equal(r.method, 'model', r.note);
+  assert.deepEqual(calls.map((c) => c.hop), ['ollama', 'openrouter', 'agnes']);
+  assert.equal(calls[2].model, 'agnes-3.0-flash');
+});
+
+test('every hop fails: General Task as the last resort, in the fixed order, no crash', async () => {
+  keys(); reset({ ollama: 'fail', openrouter: 'fail', agnes: 'fail' });
+  const r = await pick();
+  assert.equal(r.department, null); assert.equal(r.generalBy, 'last-resort');
+  assert.deepEqual(calls.map((c) => c.hop), ['ollama', 'openrouter', 'agnes']);
+});
+
+test('a hop the box has no key for is skipped, never called', async () => {
+  delete process.env.OPENROUTER_API_KEY; process.env.AGNES_API_KEY = 'ag-test'; reset({ ollama: 'fail' });
+  const r = await pick();
+  assert.equal(r.method, 'model', r.note);
+  assert.deepEqual(calls.map((c) => c.hop), ['ollama', 'agnes']);
+});
+
+test('a hung hop is bounded by the per-hop timeout and the next hop answers', async () => {
+  keys(); reset({ ollama: 'hang' });
+  const t0 = Date.now();
+  const r = await pick();
+  assert.equal(r.method, 'model', r.note);
+  assert.deepEqual(calls.map((c) => c.hop), ['ollama', 'openrouter']);
+  assert.ok(Date.now() - t0 < 3000);
+});
+
+test('openclaw.json models never reorder the chain (no name-based reordering); TIEBREAK_MODEL is tried first', async () => {
+  fs.writeFileSync(path.join(process.env.OPENCLAW_ROOT!, 'openclaw.json'), JSON.stringify({ agents: { defaults: { model: { primary: 'agnes/agnes-3.0-flash', fallbacks: ['ollama/deepseek-v4.1-flash:cloud'] } } } }));
+  keys(); reset();
+  await pick();
+  assert.equal(calls[0].model, 'glm-5.3-flash:cloud');
+  process.env.TIEBREAK_MODEL = 'openrouter/some/override-model'; reset();
+  await pick();
+  assert.deepEqual([calls[0].hop, calls[0].model], ['openrouter', 'some/override-model']);
+  delete process.env.TIEBREAK_MODEL;
 });

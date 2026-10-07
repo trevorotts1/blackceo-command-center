@@ -1,3 +1,4 @@
+import { noteReassignment } from '@/lib/routing/corrections';
 import { validateExecutionCompletion, completeExecution, linkDeliverableToExecution } from '@/lib/execution-attempts';
 import { assignmentCompany, assertAgentCompany, assertTaskCompany, TaskAgentAccessError } from '@/lib/task-agent-assignment';
 import { NextRequest, NextResponse } from 'next/server';
@@ -730,6 +731,8 @@ export async function PATCH(
     if (validatedData.assigned_agent_id !== undefined && validatedData.assigned_agent_id !== existing.assigned_agent_id) {
       updates.push('assigned_agent_id = ?');
       values.push(validatedData.assigned_agent_id);
+      // Routing correction learning: a person moving the task to another department's agent teaches the router.
+      noteReassignment(existing, validatedData.assigned_agent_id, !!validatedData.updated_by_agent_id);
 
       if (validatedData.assigned_agent_id) {
         const agent = queryOne<Agent>('SELECT name FROM agents WHERE id = ?', [validatedData.assigned_agent_id]);
