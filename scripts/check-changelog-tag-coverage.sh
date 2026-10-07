@@ -19,6 +19,12 @@
 # creation-date order is the only ordering that reliably means "most recent"
 # and costs nothing extra, so it's used everywhere in this script.
 #
+# ONLY TAGS REACHABLE FROM HEAD COUNT (--merged HEAD). A developer clone can
+# hold stray local tags from a different repo's history (the v25.x / v99.99.99
+# numbering epoch: none exist on origin, none are ancestors of main). Those can
+# never get a CHANGELOG entry in THIS repo, so they are not this repo's
+# releases and must not fail its coverage check.
+#
 # Usage: bash scripts/check-changelog-tag-coverage.sh [N]   (default N=60)
 set -euo pipefail
 
@@ -33,7 +39,7 @@ N="${1:-60}"
 
 TAGS_FILE="$(mktemp)"
 trap 'rm -f "$TAGS_FILE"' EXIT
-git for-each-ref --sort=-creatordate --format='%(refname:short)' refs/tags \
+git for-each-ref --merged HEAD --sort=-creatordate --format='%(refname:short)' refs/tags \
   | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n "$N" > "$TAGS_FILE"
 
 TAG_COUNT=$(wc -l < "$TAGS_FILE" | tr -d '[:space:]')

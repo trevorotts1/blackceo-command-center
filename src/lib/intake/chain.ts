@@ -60,7 +60,7 @@ function apiKeyOf(
   return null;
 }
 
-function keyResolves(provider: ModelProvider): string | null {
+export function keyResolves(provider: ModelProvider): string | null {
   return apiKeyOf(resolveProviderApiKey(provider));
 }
 
@@ -111,7 +111,7 @@ const CLASSIFIER_SYSTEM_PROMPT = [
   'Classify only. Never pick a department, worker, or model.',
 ].join(' ');
 
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+export function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(() => reject(new Error(`chain step timed out after ${ms}ms`)), ms);

@@ -9,7 +9,7 @@ import { triggerAutoDispatch, shouldTriggerAutoDispatch } from '@/lib/auto-dispa
 import type { Task, TaskStatus, BugTicket, BugStatus } from '@/lib/types';
 import { TaskModal } from './TaskModal';
 import { needsPlanningAnswer } from '@/lib/board/planning-chip';
-import { AUDIENCE_ASK_TEXT, writtenForLabel } from '@/lib/board/audience-chip';
+import { AUDIENCE_ASK_TEXT, needsAudienceAnswer, writtenForLabel, writtenForChipLabel } from '@/lib/board/audience-chip';
 import { MarketingPublishButton } from './MarketingPublishButton';
 import PhaseStepper from './PhaseStepper';
 import { PersonaSlotChips, PersonaScopeChips, CommsAudienceChip, humanize } from './kanban/TaskCard';
@@ -1216,7 +1216,7 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
       {/* Audience-confirm banner — a dashboard-created task has no chat to ask
           "who will read this?" in, so the board asks the person sitting at it. */}
       {(() => {
-        const pending = filteredTasks.filter((t) => t.blend_confirm_state === 'pending');
+        const pending = filteredTasks.filter((t) => needsAudienceAnswer(t));
         if (pending.length === 0) return null;
         return (
           <div role="alert" data-testid="audience-ask-banner" className="mx-4 mt-3 lg:mx-6 rounded-xl border border-amber-400 bg-amber-50 p-3 text-amber-900">
@@ -1824,7 +1824,7 @@ export function TaskCard({ task, onDragStart, onClick, onAnswer, isDragging, isC
             a neutral house voice after 30 min. This chip surfaces the pending
             confirm gate on the card face so the operator sees it without opening
             the modal. */}
-        {task.blend_confirm_state === 'pending' && (
+        {needsAudienceAnswer(task) && (
           <button
             type="button"
             onClick={(e) => { e.stopPropagation(); (onAnswer ?? onClick)(); }}
@@ -1842,7 +1842,7 @@ export function TaskCard({ task, onDragStart, onClick, onAnswer, isDragging, isC
             className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-700 border border-gray-300 hover:bg-gray-200"
             title="We assumed who will read this and started right away. Click to change it."
           >
-            ✍️ Written for {writtenForLabel(task)} · Change
+            ✍️ Written for {writtenForChipLabel(task)} · Change
           </button>
         )}
         {/* Planning Mode hold chip — a task waiting on the planning Q&A sits in
