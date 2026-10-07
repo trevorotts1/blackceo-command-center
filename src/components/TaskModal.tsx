@@ -73,6 +73,8 @@ interface TaskModalProps {
   task?: Task;
   onClose: () => void;
   workspaceId?: string;
+  /** Opened from the board's "Answer" button: focus the audience-confirm input. */
+  focusAudience?: boolean;
   /**
    * Seeds the create form's status when opened from a column's "+" button
    * (MissionQueue passes the column's underlying status). Ignored when
@@ -81,7 +83,11 @@ interface TaskModalProps {
   initialStatus?: TaskStatus;
 }
 
-export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskModalProps) {
+export function TaskModal({ task: taskProp, onClose, workspaceId, initialStatus, focusAudience }: TaskModalProps) {
+  // A task created in this modal with Planning Mode on: the modal stays open on
+  // it (Planning tab) instead of closing, so it behaves like an existing task.
+  const [createdTask, setCreatedTask] = useState<Task | undefined>();
+  const task = taskProp ?? createdTask;
   const { agents, addTask, updateTask, addEvent } = useMissionControl();
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showAgentModal, setShowAgentModal] = useState(false);
@@ -91,7 +97,7 @@ export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskMod
   const titleInterimRef = useRef('');
   const descInterimRef = useRef('');
   // Auto-switch to planning tab if task has planning session
-  const [activeTab, setActiveTab] = useState<TabType>(task?.planning_session_key ? 'planning' : 'overview');
+  const [activeTab, setActiveTab] = useState<TabType>(taskProp?.planning_session_key ? 'planning' : 'overview');
 
   // Stable callback for when spec is locked - use window.location.reload() to refresh data
   const handleSpecLocked = useCallback(() => {
@@ -189,6 +195,8 @@ export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskMod
         // manufacture an id it has no reason to believe exists in the first
         // place — omit the key entirely and let the server default it.
         workspace_id: workspaceId || task?.workspace_id || undefined,
+        // Hold a new task from routing/dispatch until its planning is approved.
+        ...(!task && usePlanningMode ? { planning_mode: true } : {}),
       };
       // The blocked_reason/blocked_on_human/ask fields only mean anything on a
       // ->'blocked' transition (the API ignores them otherwise) — drop them
@@ -277,25 +285,24 @@ export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskMod
             created_at: new Date().toISOString(),
           });
 
-          // If planning mode is enabled, auto-generate questions and keep modal open
+          // Planning Mode: start the session, then keep the modal open on the
+          // new task's Planning tab so the owner can answer the questions.
+          // A failed start still lands on the tab, which offers "Start Planning".
           if (usePlanningMode) {
-            // Trigger question generation in background
-            fetch(`/api/tasks/${savedTask.id}/planning`, { method: 'POST' })
-              .then((res) => {
-                if (res.ok) {
-                  // Update our local task reference and switch to planning tab
-                  setActiveTab('planning');
-                } else {
-                  return res.json().then((data) => {
-                    console.error('Failed to start planning:', data.error);
-                  });
-                }
-              })
-              .catch((error) => {
-                console.error('Failed to start planning:', error);
-              });
+            try {
+              const planRes = await fetch(`/api/tasks/${savedTask.id}/planning`, { method: 'POST' });
+              if (!planRes.ok) {
+                const data = await planRes.json().catch(() => ({}));
+                console.error('Failed to start planning:', data.error);
+              }
+            } catch (error) {
+              console.error('Failed to start planning:', error);
+            }
+            setCreatedTask(savedTask);
+            setActiveTab('planning');
+          } else {
+            onClose();
           }
-          onClose();
         }
       }
     } catch (error) {
@@ -543,7 +550,7 @@ export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskMod
               the form, same as GatePanel, so its Confirm button never submits
               the task-edit form. */}
           {task && task.blend_directive && (
-            <AudienceConfirmPanel taskId={task.id} onConfirmed={() => window.location.reload()} />
+            <AudienceConfirmPanel taskId={task.id} autoFocus={focusAudience} onConfirmed={() => window.location.reload()} />
           )}
           {/* U064 — Persona picker panel (voice/topic axis). Self-contained +
               fail-quiet: GETs /api/tasks/[id]/persona-bundle on mount and renders

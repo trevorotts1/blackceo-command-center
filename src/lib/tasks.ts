@@ -60,7 +60,7 @@ import {
 import { ensureBlendGuardrail } from '@/lib/persona-dispatch';
 import { getBestSOPForTask, getPersonaSlots, type PersonaSlot, type SOP } from '@/lib/sops';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
-import { autoDispatchTask, recordDispatchFailure } from '@/lib/task-dispatcher';
+import { autoDispatchTask, recordDispatchFailure, PLANNING_PENDING_KEY } from '@/lib/task-dispatcher';
 import { bindOperatorPresentationContract, saveOperatorPresentationContract, type OperatorPresentationIntake } from '@/lib/presentation-operator-contract';
 import {
   isPodcastTask,
@@ -74,6 +74,7 @@ import {
   sendRequesterAudienceAsk,
   type RequesterAudienceAskDelivery,
 } from '@/lib/jobs/trust-engine';
+import { loadTaskRow } from '@/lib/board/task-row-projection';
 import { normalizeRequesterSessionKey } from '@/lib/requester-session';
 import { transition, recordStatusEvent, captureHqTaskEvent, hqTaskAssignee, type LifecycleState } from '@/lib/task-lifecycle';
 import { assertNoFixtureDerivedServerWrite } from '@/lib/fixture-guard';
@@ -2011,8 +2012,25 @@ export function holdForAudienceConfirm(
         [uuidv4(), 'audience_confirm_ask_sent', agentId, taskId, askDelivery, now],
       );
     } catch { /* audit best-effort */ }
+    // The ask is now on the row; push it to the board so the "needs your answer"
+    // banner appears without a manual reload (first hold only).
+    try {
+      const row = loadTaskRow(taskId);
+      if (row) broadcast({ type: 'task_updated', payload: row });
+    } catch { /* broadcast best-effort */ }
   }
   console.log(`[audience-confirm] task ${taskId} HELD — awaiting operator audience confirmation`);
+}
+
+/**
+ * The hold parks the card for AUDIENCE_CONFIRM_POLL_MS. Once the operator's
+ * confirm has fully landed, drop that wait so the next intake-advance tick
+ * dispatches it instead of making the card sit up to 5 more minutes.
+ */
+export function releaseAudienceHoldDelay(taskId: string): void {
+  try {
+    run('UPDATE tasks SET next_dispatch_eligible_at = NULL WHERE id = ?', [taskId]);
+  } catch { /* pre-migration tolerant */ }
 }
 
 /**
@@ -2231,6 +2249,7 @@ export async function rescoreAudienceBlend(
     try {
       run(`UPDATE task_persona_bundle SET confirm_state = 'confirmed' WHERE task_id = ?`, [taskId]);
     } catch { /* pre-090 tolerant */ }
+    releaseAudienceHoldDelay(taskId);
     const updatedTask = queryOne<Task>(
       `SELECT t.*,
           aa.name as assigned_agent_name,
@@ -2441,6 +2460,8 @@ export interface CreateTaskCoreInput {
   idempotency_company_id?: string | null;
   idempotency_payload_hash?: string;
   routing_hold_reason?: string | null;
+  /** Planning Mode: stamp the planning hold at INSERT time so routing/dispatch skip the task. */
+  planning_mode?: boolean;
   persona_bundle?: PersonaBundle | null;
   title: string;
   description?: string | null;
@@ -2885,6 +2906,7 @@ export async function createTaskCore(
     if (input.presentation_operator_intake) {
       saveOperatorPresentationContract(id, bindOperatorPresentationContract(id, input.presentation_operator_intake));
     }
+    if (input.planning_mode) run('UPDATE tasks SET planning_session_key=? WHERE id=?', [PLANNING_PENDING_KEY, id]);
     if (input.routing_hold_reason) run('UPDATE tasks SET dispatch_hold=1, routing_reason=?, routing_wait_owner=? WHERE id=?', [input.routing_hold_reason, 'SYSTEM', id]);
     // INTAKE LANE (migration 153) — written after the insert, the same shape
     // routing_hold_reason uses, so the canonical INSERT column list stays as it

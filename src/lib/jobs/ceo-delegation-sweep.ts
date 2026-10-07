@@ -30,7 +30,7 @@ import { queryAll, run, queryOne } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { routeTask } from '@/lib/routing/department-router';
 import { resolveDeptSlugForWrite } from '@/lib/routing/resolve-dept-slug-for-write';
-import { autoDispatchTask } from '@/lib/task-dispatcher';
+import { autoDispatchTask, planningInProgressSql } from '@/lib/task-dispatcher';
 import { blockDispatchIfOwnerKilled, loadKilledAtDefensive } from '@/lib/owner-killed';
 import { ensureCampaignForTask } from '@/lib/campaigns';
 import { v4 as uuidv4 } from 'uuid';
@@ -136,6 +136,7 @@ export async function runCeoDelegationSweep(): Promise<void> {
          AND (t.dispatch_attempts IS NULL OR t.dispatch_attempts < ?)
          AND (t.next_dispatch_eligible_at IS NULL OR t.next_dispatch_eligible_at <= ?)
          AND (a.is_master IS NULL OR a.is_master = 0)
+         AND NOT ${planningInProgressSql('t')}
          AND t.updated_at <= ?`,
       [...ceoWorkspaceIds, cap, ...engineSourceExclusionParams(), dispatchCap, nowIso, graceCutoff],
     );
@@ -170,6 +171,7 @@ export async function runCeoDelegationSweep(): Promise<void> {
        AND (t.dispatch_attempts IS NULL OR t.dispatch_attempts < ?)
        AND (t.next_dispatch_eligible_at IS NULL OR t.next_dispatch_eligible_at <= ?)
        AND (a.is_master IS NULL OR a.is_master = 0)
+       AND NOT ${planningInProgressSql('t')}
        AND t.updated_at <= ?`,
     [cap, ...engineSourceExclusionParams(), dispatchCap, nowIso, graceCutoff],
   );

@@ -5,6 +5,7 @@ import { broadcast } from '@/lib/events';
 import { extractJSON, getMessagesFromOpenClaw } from '@/lib/planning-utils';
 import { Task } from '@/lib/types';
 import { recordStatusEvent } from '@/lib/task-lifecycle';
+import { dispatchPlannedTask } from '@/lib/task-dispatcher';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -34,19 +35,23 @@ async function handlePlanningCompletion(taskId: string, parsed: any, messages: a
   const priorStatus = queryOne<{ status: string }>('SELECT status FROM tasks WHERE id = ?', [taskId])?.status ?? 'planning';
 
   // Wrap all database operations in a transaction for atomicity
-  // Set status to 'pending_dispatch' first - don't mark as complete until dispatch succeeds
+  // Set status to 'pending_dispatch' and planning_complete = 1 BEFORE dispatching:
+  // autoDispatchTask holds any task whose planning session is unfinished, and
+  // retry-dispatch requires planning_complete. A failed dispatch is recorded in
+  // planning_dispatch_error and retried from the UI.
   // U99-RAW-STATUS-WRITER: compound single-row UPDATE (planning_messages /
   // planning_spec / planning_agents must land atomically with the status
   // flip); audited via recordStatusEvent (DISP-10) right after `transaction()`
   // returns below, once the commit is known to have succeeded.
   const transaction = db.transaction(() => {
-    // Update task with completion data but keep planning_complete = 0 until dispatch succeeds
+    // Update task with completion data and release the planning hold
     db.prepare(`
       UPDATE tasks
       SET planning_messages = ?,
           planning_spec = ?,
           planning_agents = ?,
           status = 'pending_dispatch',
+          planning_complete = 1,
           planning_dispatch_error = NULL
       WHERE id = ?
     `).run(
@@ -130,27 +135,12 @@ async function handlePlanningCompletion(taskId: string, parsed: any, messages: a
     }
   }
 
-  // Trigger dispatch - use localhost since we're in the same process
+  // Trigger dispatch in-process: an internal HTTP call carries no origin or
+  // bearer token, so middleware rejects it whenever MC_API_TOKEN is set.
   if (firstAgentId && !skipDispatch) {
-    const dispatchUrl = `http://localhost:${process.env.PORT || 4000}/api/tasks/${taskId}/dispatch`;
-    console.log(`[Planning Poll] Triggering dispatch: ${dispatchUrl}`);
-
-    try {
-      const dispatchRes = await fetch(dispatchUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-      });
-
-      if (dispatchRes.ok) {
-        const dispatchData = await dispatchRes.json();
-        console.log(`[Planning Poll] Dispatch successful:`, dispatchData);
-      } else {
-        const errorText = await dispatchRes.text();
-        dispatchError = `Dispatch failed (${dispatchRes.status}): ${errorText}`;
-        console.error(`[Planning Poll] ${dispatchError}`);
-      }
-    } catch (err) {
-      dispatchError = `Dispatch error: ${(err as Error).message}`;
+    const result = await dispatchPlannedTask(taskId, 'planning-poll');
+    if (!result.success) {
+      dispatchError = result.error ?? 'Dispatch failed';
       console.error(`[Planning Poll] ${dispatchError}`);
     }
   }
@@ -178,7 +168,7 @@ async function handlePlanningCompletion(taskId: string, parsed: any, messages: a
         UPDATE tasks
         SET planning_complete = 1,
             assigned_agent_id = ?,
-            status = 'backlog',
+            status = CASE WHEN status = 'pending_dispatch' THEN 'backlog' ELSE status END,
             planning_dispatch_error = NULL,
             updated_at = datetime('now')
         WHERE id = ?
@@ -199,7 +189,9 @@ async function handlePlanningCompletion(taskId: string, parsed: any, messages: a
       `).run(taskId);
     }
   })();
-  if (!dispatchError) {
+  // A successful dispatch already moved the task to in_progress; only audit the
+  // pending_dispatch -> backlog flip when it actually happened.
+  if (!dispatchError && queryOne<{ status: string }>('SELECT status FROM tasks WHERE id = ?', [taskId])?.status === 'backlog') {
     recordStatusEvent(taskId, 'pending_dispatch', 'backlog', {
       actor: 'planning-poll',
       reason: firstAgentId ? 'planning dispatched to agent' : 'planning complete, no agent to dispatch',
