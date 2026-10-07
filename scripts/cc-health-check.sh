@@ -859,8 +859,32 @@ fi
 _SDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EMB_SCRIPT="${EMBEDDING_HEALTH_SCRIPT:-$(cd "$_SDIR/.." && pwd)/shared-utils/embedding_health.py}"
 EMB_JSON='{"check":"dual_store_embedding_health","degraded":true,"asymmetric":false,"asymmetric_detail":"embedding_health.py not found","source":"missing"}'
+# Tell the probe the box's SOP provider, the same way /api/health does
+# (route.ts probeEmbeddingHealthPy). Without it the probe assumes google, so a
+# box on SOP_EMBEDDING_PROVIDER=ollama read every local row as foreign and the
+# deploy reported the SOP index degraded while the app itself was semantic.
+# Shell env wins over the app's .env.local, matching Next's precedence. Names
+# only: these values are a provider, a model slug and a number, never a key.
+emb_env() {
+  local k="$1" v="${!1:-}" envf
+  envf="${CANONICAL_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/.env.local"
+  if [[ -z "$v" && -f "$envf" ]]; then
+    v="$(grep -E "^[[:space:]]*(export[[:space:]]+)?${k}=" "$envf" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"'"'"' ' || true)"
+  fi
+  printf '%s' "$v"
+}
+EMB_ARGS=()
+EMB_PROVIDER="$(emb_env SOP_EMBEDDING_PROVIDER | tr '[:upper:]' '[:lower:]')"
+if [[ "$EMB_PROVIDER" =~ ^(google|openai|ollama|none)$ ]]; then
+  EMB_ARGS+=(--sop-active-provider "$EMB_PROVIDER")
+  if [[ "$EMB_PROVIDER" == "ollama" ]]; then
+    EMB_MODEL="$(emb_env SOP_EMBEDDING_MODEL)"; EMB_DIMS="$(emb_env SOP_EMBEDDING_DIMS)"
+    [[ -n "$EMB_MODEL" ]] && EMB_ARGS+=(--sop-active-model "$EMB_MODEL")
+    [[ "$EMB_DIMS" =~ ^[0-9]+$ ]] && EMB_ARGS+=(--sop-active-dims "$EMB_DIMS")
+  fi
+fi
 if [[ -f "$EMB_SCRIPT" ]]; then
-  EMB_JSON=$(python3 -s "$EMB_SCRIPT" --format json --sop-db "${DATABASE_PATH:-$(pwd)/mission-control.db}" 2>/dev/null \
+  EMB_JSON=$(python3 -s "$EMB_SCRIPT" --format json --sop-db "${DATABASE_PATH:-$(pwd)/mission-control.db}" ${EMB_ARGS[@]+"${EMB_ARGS[@]}"} 2>/dev/null \
     || echo '{"check":"dual_store_embedding_health","degraded":true,"asymmetric":false,"asymmetric_detail":"embedding_health.py probe failed","source":"error"}')
   EMB_LINE=$(printf '%s' "$EMB_JSON" | python3 -s -c "
 import sys,json
