@@ -36,6 +36,7 @@ import {
   type EmbeddingProvider,
 } from '@/lib/sop-embeddings';
 import { canonicalDeptSlug } from './canonical-slug';
+import { CORRECTION_MIN_SIM, CORRECTION_WEIGHT, loadCorrections } from './corrections';
 import type { DepartmentConfig } from './departments.config';
 
 /**
@@ -74,12 +75,16 @@ export interface SopVoteRanking {
   ranked: { department: DepartmentConfig; weight: number; share: number }[];
   /** Cosine of the single most similar SOP (of the voting departments). */
   topSimilarity: number;
+  /** Per department (canonical slug): titles of its nearest live SOPs, best first (up to 5, no boilerplate). */
+  examples: Map<string, string[]>;
   /** The embedding provider that produced these similarities (selects the gate). */
   provider: EmbeddingProvider;
 }
 
-interface IndexRow { department: string | null; embedding: Buffer | null }
-interface IndexCache { key: string; slugs: string[]; vecs: Float32Array[] }
+interface IndexRow { department: string | null; name: string | null; embedding: Buffer | null }
+interface IndexCache { key: string; slugs: string[]; names: string[]; vecs: Float32Array[] }
+/** Role boilerplate and stubs make poor examples of what a department does. */
+const BOILERPLATE_NAME = /stub|pending|how-to|roles library|directory|^sops?\b|\{\{/i;
 const _indexes = new Map<string, IndexCache>();
 
 /** Live SOP vectors of `table` in the (model, dims) space, decoded once per index version. null = absent or empty. */
@@ -95,17 +100,18 @@ function loadIndex(table: string, model: string, dims: number): IndexCache | nul
     const hit = _indexes.get(table);
     if (hit?.key === key) return hit;
     const rows = queryAll<IndexRow>(
-      `SELECT s.department AS department, e.embedding AS embedding FROM ${table} e JOIN sops s ON s.id = e.sop_id
+      `SELECT s.department AS department, s.name AS name, e.embedding AS embedding FROM ${table} e JOIN sops s ON s.id = e.sop_id
         WHERE s.deleted_at IS NULL AND e.embedding IS NOT NULL AND e.embedding_model = ? AND e.embedding_dims = ?`,
       [model, dims],
     );
     const slugs: string[] = [];
+    const names: string[] = [];
     const vecs: Float32Array[] = [];
     for (const r of rows) {
       const v = bufferToFloat32(r.embedding);
-      if (v) { slugs.push(canonicalDeptSlug(r.department)); vecs.push(v); }
+      if (v) { slugs.push(canonicalDeptSlug(r.department)); names.push(r.name ?? ''); vecs.push(v); }
     }
-    const built = { key, slugs, vecs };
+    const built = { key, slugs, names, vecs };
     _indexes.set(table, built);
     return built;
   } catch {
@@ -141,19 +147,32 @@ export async function rankDepartmentsBySops(
       const results = await fetchEmbeddingsFor(p, [localEmbedText(taskText, 'query', p)]);
       if (!results || results.length < 1) throw new Error('task embedding unavailable');
       const q = results[0].embedding;
-      const near: { slug: string; sim: number }[] = [];
+      const near: { slug: string; sim: number; name: string; boost: number }[] = [];
       for (let i = 0; i < index.vecs.length; i++) {
-        if (byCanon.has(index.slugs[i])) near.push({ slug: index.slugs[i], sim: cosineSimilarity(q, index.vecs[i]) });
+        if (byCanon.has(index.slugs[i])) near.push({ slug: index.slugs[i], sim: cosineSimilarity(q, index.vecs[i]), name: index.names[i], boost: 1 });
+      }
+      // People's corrections (task text -> final department) are extra, heavier neighbours. Only in the box's own
+      // index space: the Gemini fallback must not re-embed them.
+      if (!fallback) {
+        for (const c of await loadCorrections(p)) {
+          const sim = cosineSimilarity(q, c.vec);
+          if (byCanon.has(c.slug) && sim >= CORRECTION_MIN_SIM) near.push({ slug: c.slug, sim, name: `corrected by a person: ${c.text.slice(0, 120)}`, boost: CORRECTION_WEIGHT });
+        }
       }
       if (near.length === 0) return null;
-      near.sort((a, b) => b.sim - a.sim);
+      near.sort((a, b) => b.sim * b.boost - a.sim * a.boost);
       const weight = new Map<string, number>();
-      for (const h of near.slice(0, k ?? paramsFor(p).k)) weight.set(h.slug, (weight.get(h.slug) ?? 0) + h.sim);
+      for (const h of near.slice(0, k ?? paramsFor(p).k)) weight.set(h.slug, (weight.get(h.slug) ?? 0) + h.sim * h.boost);
       const total = [...weight.values()].reduce((x, y) => x + y, 0);
       const ranked = [...weight.entries()]
         .sort((x, y) => y[1] - x[1])
         .map(([slug, w]) => ({ department: byCanon.get(slug)!, weight: w, share: w / total }));
-      return { ranked, topSimilarity: near[0].sim, provider: p };
+      const examples = new Map<string, string[]>();
+      for (const h of near) {
+        const ex = examples.get(h.slug) ?? [];
+        if (ex.length < 5 && h.name && (h.boost > 1 || !BOILERPLATE_NAME.test(h.name)) && !ex.includes(h.name)) { ex.push(h.name); examples.set(h.slug, ex); }
+      }
+      return { ranked, topSimilarity: Math.max(...near.map((h) => h.sim)), examples, provider: p };
     });
     return done?.value ?? null;
   } catch (err) {

@@ -1,0 +1,40 @@
+{
+  "_doc": "Answer-key corrections (STEP 1, 2026-10-07). Additive only: only true multi-department alternates. General Task is a last resort or a direct user request, so it is never added as an alternate for a department-labeled task. Original fixture is untouched; the eval reports BOTH keys, the ORIGINAL as the headline. No relabels.",
+  "changes": [
+    {
+      "m": "Hey, we got a bunch of new signups from the podcast, can you make sure they all get the welcome sequence?",
+      "addAlt": [
+        "funnels"
+      ],
+      "why": "Welcome sequences are built and run in funnels as often as in the CRM (multi-department)."
+    },
+    {
+      "m": "The same payment reminder keeps failing every week, find the root cause and fix it so it stops",
+      "addAlt": [
+        "openclaw-maintenance"
+      ],
+      "why": "A recurring failing automated job is also an AI-system maintenance task."
+    },
+    {
+      "m": "Research our top five competitors and their pricing",
+      "addAlt": [
+        "marketing"
+      ],
+      "why": "Competitive analysis is a research task and a marketing task."
+    },
+    {
+      "m": "Proofread the new sales page",
+      "addAlt": [
+        "funnels"
+      ],
+      "why": "A sales page lives in funnels; proofreading is also QC (multi-department)."
+    },
+    {
+      "m": "Translate our brochure into Spanish",
+      "addAlt": [
+        "graphics"
+      ],
+      "why": "A brochure is a design asset; existing alternates already allow marketing and communications."
+    }
+  ]
+}

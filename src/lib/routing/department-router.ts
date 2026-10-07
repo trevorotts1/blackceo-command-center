@@ -67,6 +67,7 @@ import {
   type TiebreakFn,
   type TiebreakPermission,
 } from './tiebreak-adapter';
+import { profileFor, profileText } from './department-profiles';
 import { completeViaBoxModels, resolvePickModel } from './model-pick-llm';
 import { decideSopVote, rankDepartmentsBySops, sopProfileKeywords, type SopVoteRanking } from './sop-vote';
 
@@ -655,19 +656,17 @@ export const DEPARTMENT_FALLBACK_TAIL: readonly DepartmentTailName[] = ['sop', '
 
 /** What belongs in General Task, offered to the model pick as an explicit choice. */
 export const GENERAL_TASK_ID = 'general-task';
-export const GENERAL_TASK_DESCRIPTION =
-  'One-off, personal, office-admin, hiring or HR, or cross-department tasks that fit no single department, ' +
-  'and requests too vague or unrecognizable to place. Choose this when no listed department clearly owns the work.';
+export const GENERAL_TASK_DESCRIPTION = profileText({ id: GENERAL_TASK_ID, purpose: '' } as DepartmentConfig);
 /** Candidate departments shown to the model pick (General Task is offered in addition). */
-export const MODEL_PICK_CANDIDATES = 3;
-/** Budget for the model pick; the adapter caps it again and never exceeds its own ceiling. */
-export const MODEL_PICK_TIMEOUT_MS = 6_000;
+export const MODEL_PICK_CANDIDATES = Number(process.env.MODEL_PICK_CANDIDATES) || 5;
+/** Total budget for the model pick: 3 provider hops x 8 s (model-pick-llm.ts PICK_HOP.timeoutMs); the adapter caps it again. */
+export const MODEL_PICK_TIMEOUT_MS = 24_000;
 /**
  * Acceptance of the model's choice: a department the model picks is used only when it ranks within the first
  * `maxRank` candidates (1 = the best-evidenced candidate only); a pick below that is treated as no answer and the
  * task goes to General Task, the safe last resort. Default 3 = accuracy first (Trevor 2026-10-07); `MODEL_PICK_MAX_RANK=1` is the strict setting. Tuned on the fixture (see CHANGELOG).
  */
-export const MODEL_PICK = { maxRank: Number(process.env.MODEL_PICK_MAX_RANK) || 3 };
+export const MODEL_PICK = { maxRank: Number(process.env.MODEL_PICK_MAX_RANK) || 5 };
 
 export interface DepartmentPick {
   /** null → General Task catch-all. */
@@ -789,7 +788,11 @@ function jevCatalog(departments: DepartmentConfig[]): DecisionDepartment[] {
   const profiles = sopProfileKeywords();
   return departments
     .filter((d) => canonicalDeptSlug(d.slug || d.id) !== 'default')
-    .map((d) => ({ slug: d.slug || d.id, name: d.name, description: d.purpose, keywords: [...d.keywords, ...(profiles.get(canonicalDeptSlug(d.slug || d.id)) ?? [])] }));
+    .map((d) => {
+      const slug = canonicalDeptSlug(d.slug || d.id);
+      const prof = process.env.JEV_DEPT_PROFILES === '0' ? undefined : profileFor(d);
+      return { slug: d.slug || d.id, name: d.name, description: d.purpose, keywords: [...d.keywords, ...(profiles.get(slug) ?? []), ...(prof?.words ?? [])] };
+    });
 }
 
 async function pickSemantic(
@@ -901,6 +904,7 @@ async function pickByModel(
   taskText: string,
   candidates: DepartmentConfig[],
   seam: TiebreakSeamConfig,
+  evidence: { guesses: string[]; examples?: Map<string, string[]> } = { guesses: [] },
 ): Promise<DepartmentPick | null> {
   if (candidates.length === 0) return null;
   try {
@@ -910,9 +914,10 @@ async function pickByModel(
       complete,
       taskText,
       candidates: [
-        ...candidates.map((d) => ({ id: d.id, name: d.name, purpose: d.purpose })),
+        ...candidates.map((d) => ({ id: d.id, name: d.name, purpose: profileText(d), examples: (evidence.examples?.get(canonicalDeptSlug(d.slug || d.id)) ?? []).slice(0, 4) })),
         { id: GENERAL_TASK_ID, name: 'General Task', purpose: GENERAL_TASK_DESCRIPTION },
       ],
+      guesses: process.env.MODEL_PICK_STYLE === 'v1' ? undefined : evidence.guesses, // v1 = the #495 prompt (measurement only)
       companyId: seam.companyId,
       model,
       deadlineMs: Math.min(seam.deadlineMs ?? MODEL_PICK_TIMEOUT_MS, MODEL_PICK_TIMEOUT_MS),
@@ -996,7 +1001,10 @@ async function pickDepartmentInternal(
   }
   if (tail.includes('model')) {
     const cands = await modelCandidates(text, title, description, priority, departments, sop);
-    const picked = await pickByModel(text, cands, opts.tiebreakSeam ?? {});
+    const guesses: string[] = [];
+    if (lastResort.candidate) guesses.push(`the decision engine leaned to ${lastResort.candidate.name}`);
+    if (sop?.ranked[0]) guesses.push(`the nearest SOPs lean to ${sop.ranked[0].department.name}${sop.ranked[1] ? ` then ${sop.ranked[1].department.name}` : ''}`);
+    const picked = await pickByModel(text, cands, opts.tiebreakSeam ?? {}, { guesses, examples: sop?.examples });
     if (picked) return { pick: picked, observation };
   }
   return { pick: lastResort, observation };
