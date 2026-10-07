@@ -1,4 +1,4 @@
-import { computeOverallTiered, type SystemStatus, type TieredProbeResult } from './probes/types';
+import { computeOverallTiered, isNotApplicable, type SystemStatus, type TieredProbeResult } from './probes/types';
 
 export type HealthTier = 'healthy' | 'degraded' | 'unavailable' | 'checking' | 'unknown';
 export interface StatusPayload {
@@ -40,7 +40,7 @@ export function parseReadiness(status: unknown, health: unknown): { tier: Health
     status: health.embeddings.degraded || health.embeddings.status === 'degraded' ? 'degraded' : 'live',
     latencyMs: null, probedAt: status.probedAt,
   });
-  const computed = computeOverallTiered(components);
+  const computed = computeOverallTiered(components.filter((c) => !isNotApplicable(c)));
   const overall = status.overall === 'offline' || computed === 'offline' || health.status === 'error' ? 'offline'
     : status.overall === 'degraded' || computed === 'degraded' || health.status === 'degraded' ? 'degraded'
     : status.overall === 'live' ? 'live' : 'unknown';
