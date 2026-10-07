@@ -944,7 +944,7 @@ export interface UpdateExecutionQueueRequest {
 // bundle and the CC behaves EXACTLY as before (backward compatible, no regression).
 
 /** Where the resolved audience came from. `asked` = the operator was prompted. */
-export type AudienceConfirmSource = 'onboarding_icp' | 'operator_confirmed' | 'asked';
+export type AudienceConfirmSource = 'onboarding_icp' | 'operator_confirmed' | 'asked' | 'task_named' | 'owner_default';
 
 /**
  * The audience the content is FOR, resolved from the client ICP (company-config

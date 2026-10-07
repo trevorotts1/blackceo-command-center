@@ -25,6 +25,7 @@ import { resolveAnthologyAssembly } from './anthology/assembly-cockpit-logic';
 // a task that actually went through the blend (task.blend_directive present)
 // so a plain non-content task never fires the extra gate-status fetch.
 import { AudienceConfirmPanel } from './AudienceConfirmPanel';
+import { writtenForLabel } from '@/lib/board/audience-chip';
 // U064 — persona picker (voice/topic axis), mounted beside AudienceConfirmPanel.
 import { PersonaPickerPanel } from './PersonaPickerPanel';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
@@ -550,7 +551,7 @@ export function TaskModal({ task: taskProp, onClose, workspaceId, initialStatus,
               the form, same as GatePanel, so its Confirm button never submits
               the task-edit form. */}
           {task && task.blend_directive && (
-            <AudienceConfirmPanel taskId={task.id} autoFocus={focusAudience} onConfirmed={() => window.location.reload()} />
+            <AudienceConfirmPanel taskId={task.id} assumedLabel={writtenForLabel(task)} autoFocus={focusAudience} onConfirmed={() => window.location.reload()} />
           )}
           {/* U064 — Persona picker panel (voice/topic axis). Self-contained +
               fail-quiet: GETs /api/tasks/[id]/persona-bundle on mount and renders
