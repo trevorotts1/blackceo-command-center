@@ -120,6 +120,11 @@ function loginPathDirs(): string[] {
     const out = execFileSync(shell, ['-lic', 'printf %s "$PATH"'], {
       encoding: 'utf8',
       timeout: 1000,
+      // SIGKILL, not the default SIGTERM: an interactive shell without a
+      // foreground terminal is stopped by SIGTTOU, and a stopped process never
+      // acts on SIGTERM, so execFileSync would block forever (the unit suite
+      // hung here when run from a non-foreground process group).
+      killSignal: 'SIGKILL',
       stdio: ['ignore', 'pipe', 'ignore'],
     });
     loginPathHarvestError = null;

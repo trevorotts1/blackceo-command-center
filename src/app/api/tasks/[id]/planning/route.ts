@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getDb, queryAll, queryOne, run } from '@/lib/db';
 import { getOpenClawClient } from '@/lib/openclaw/client';
 import { broadcast } from '@/lib/events';
-import { extractJSON } from '@/lib/planning-utils';
+import { extractJSON, PLANNING_PROTOCOL } from '@/lib/planning-utils';
 import { recordStatusEvent } from '@/lib/task-lifecycle';
 import { PLANNING_PENDING_KEY } from '@/lib/task-dispatcher';
 
@@ -47,12 +47,16 @@ export async function GET(
     // user's answer, the next question has not arrived yet.
     const lastAssistantMessage = [...messages].reverse().find((m: { role: string }) => m.role === 'assistant');
     let currentQuestion = null;
+    let malformedReply: string | undefined;
 
     if (lastAssistantMessage && messages[messages.length - 1]?.role === 'assistant') {
       // Use extractJSON to handle code blocks and surrounding text
       const parsed = extractJSON(lastAssistantMessage.content);
       if (parsed && 'question' in parsed) {
         currentQuestion = parsed;
+      } else if (!task.planning_complete && !(parsed && 'status' in parsed)) {
+        // Stored but unusable reply: show it with a Try again, never hang.
+        malformedReply = lastAssistantMessage.content;
       }
     }
 
@@ -61,6 +65,7 @@ export async function GET(
       sessionKey: task.planning_session_key,
       messages,
       currentQuestion,
+      malformedReply,
       isComplete: !!task.planning_complete,
       dispatchError: task.planning_dispatch_error || undefined,
       spec: task.planning_spec ? JSON.parse(task.planning_spec) : null,
@@ -139,36 +144,31 @@ export async function POST(
 Task Title: ${task.title}
 Task Description: ${task.description || 'No description provided'}
 
-You are starting a planning session for this task. Read PLANNING.md for your protocol.
+You are starting a planning session for this task.
 
-Generate your FIRST question to understand what the user needs. Remember:
-- Questions must be multiple choice
-- Include an "Other" option
-- Be specific to THIS task, not generic
+${PLANNING_PROTOCOL}
 
-Respond with ONLY valid JSON in this format:
-{
-  "question": "Your question here?",
-  "options": [
-    {"id": "A", "label": "First option"},
-    {"id": "B", "label": "Second option"},
-    {"id": "C", "label": "Third option"},
-    {"id": "other", "label": "Other"}
-  ]
-}`;
+Now generate your FIRST question to understand what the user needs. Questions must be multiple choice, include an "Other" option, and be specific to THIS task, not generic. Respond with ONLY the question JSON.`;
 
-    // Connect to OpenClaw and send the planning request
-    const client = getOpenClawClient();
-    if (!client.isConnected()) {
-      await client.connect();
+    // Connect to OpenClaw and send the planning request. A gateway failure
+    // gets its own 502 so the Planning tab can say so in plain words.
+    try {
+      const client = getOpenClawClient();
+      if (!client.isConnected()) {
+        await client.connect();
+      }
+      await client.call('chat.send', {
+        sessionKey: sessionKey,
+        message: planningPrompt,
+        idempotencyKey: `planning-start-${taskId}-${Date.now()}`,
+      });
+    } catch (gatewayError) {
+      console.error('Failed to reach OpenClaw to start planning:', gatewayError);
+      return NextResponse.json({
+        error: 'Failed to start planning: could not reach your AI assistant',
+        reason: 'gateway_unreachable',
+      }, { status: 502 });
     }
-
-    // Send planning request to the planning session
-    await client.call('chat.send', {
-      sessionKey: sessionKey,
-      message: planningPrompt,
-      idempotencyKey: `planning-start-${taskId}-${Date.now()}`,
-    });
 
     // Store the session key and initial message
     const messages = [{ role: 'user', content: planningPrompt, timestamp: Date.now() }];

@@ -1,11 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { queryOne, run, getDb, queryAll } from '@/lib/db';
+import { queryOne, run, getDb } from '@/lib/db';
 import { getOpenClawClient } from '@/lib/openclaw/client';
 import { broadcast } from '@/lib/events';
-import { extractJSON, getMessagesFromOpenClaw } from '@/lib/planning-utils';
+import { extractJSON, fetchMessagesFromOpenClaw, buildPlanContext, PLAN_CONTEXT_MARKER, PLANNING_REPROMPT } from '@/lib/planning-utils';
 import { Task } from '@/lib/types';
 import { recordStatusEvent } from '@/lib/task-lifecycle';
-import { dispatchPlannedTask } from '@/lib/task-dispatcher';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -22,192 +21,83 @@ if (isNaN(PLANNING_POLL_INTERVAL_MS) || PLANNING_POLL_INTERVAL_MS < 100) {
   throw new Error('PLANNING_POLL_INTERVAL_MS must be a valid number >= 100ms');
 }
 
-// Helper to handle planning completion with proper error handling and rollback
+// Helper to handle planning completion. Planning creates NO agent rows: the
+// planned roles stay in planning_agents and are folded into the task
+// description, and the task is released (backlog, planning_complete=1) so
+// intake-advance routes it to the department's real specialist.
 async function handlePlanningCompletion(taskId: string, parsed: any, messages: any[]) {
   const db = getDb();
-  let dispatchError: string | null = null;
-  let firstAgentId: string | null = null;
-
-  // Captured BEFORE the transaction below so the U99-RAW-STATUS-WRITER audit
-  // calls record the true observed from-status (this route only reaches here
-  // from an active planning session, i.e. status='planning', but we read it
-  // rather than assume it).
   const priorStatus = queryOne<{ status: string }>('SELECT status FROM tasks WHERE id = ?', [taskId])?.status ?? 'planning';
+  const planContext = buildPlanContext(parsed);
 
-  // Wrap all database operations in a transaction for atomicity
-  // Set status to 'pending_dispatch' and planning_complete = 1 BEFORE dispatching:
-  // autoDispatchTask holds any task whose planning session is unfinished, and
-  // retry-dispatch requires planning_complete. A failed dispatch is recorded in
-  // planning_dispatch_error and retried from the UI.
-  // U99-RAW-STATUS-WRITER: compound single-row UPDATE (planning_messages /
-  // planning_spec / planning_agents must land atomically with the status
-  // flip); audited via recordStatusEvent (DISP-10) right after `transaction()`
-  // returns below, once the commit is known to have succeeded.
-  const transaction = db.transaction(() => {
-    // Update task with completion data and release the planning hold
-    db.prepare(`
-      UPDATE tasks
-      SET planning_messages = ?,
-          planning_spec = ?,
-          planning_agents = ?,
-          status = 'pending_dispatch',
-          planning_complete = 1,
-          planning_dispatch_error = NULL
-      WHERE id = ?
-    `).run(
-      JSON.stringify(messages),
-      JSON.stringify(parsed.spec),
-      JSON.stringify(parsed.agents),
-      taskId
-    );
-
-    // Create the agents in the workspace and track first agent for auto-assign
-    if (parsed.agents && parsed.agents.length > 0) {
-      const insertAgent = db.prepare(`
-        INSERT INTO agents (id, workspace_id, name, role, description, avatar_emoji, status, soul_md, specialist_type, created_at, updated_at)
-        VALUES (?, (SELECT workspace_id FROM tasks WHERE id = ?), ?, ?, ?, ?, 'standby', ?, 'on-call', datetime('now'), datetime('now'))
-      `);
-
-      for (const agent of parsed.agents) {
-        const agentId = crypto.randomUUID();
-        if (!firstAgentId) firstAgentId = agentId;
-
-        insertAgent.run(
-          agentId,
-          taskId,
-          agent.name,
-          agent.role,
-          agent.instructions || '',
-          agent.avatar_emoji || '🤖',
-          agent.soul_md || ''
-        );
-      }
-    }
-
-    return firstAgentId;
-  });
-
-  // Execute the transaction to create agents and set pending_dispatch status
-  firstAgentId = transaction();
-  recordStatusEvent(taskId, priorStatus, 'pending_dispatch', {
-    actor: 'planning-poll',
-    reason: 'planning session reported complete',
-  });
-
-  // Re-check for other orchestrators before dispatching (prevents race condition)
-  if (firstAgentId) {
-    const task = queryOne<{ workspace_id: string }>('SELECT workspace_id FROM tasks WHERE id = ?', [taskId]);
-    if (task) {
-      const defaultMaster = queryOne<{ id: string }>(
-        `SELECT id FROM agents WHERE is_master = 1 AND workspace_id = ? ORDER BY created_at ASC LIMIT 1`,
-        [task.workspace_id]
-      );
-      const otherOrchestrators = queryAll<{ id: string; name: string }>(
-        `SELECT id, name
-         FROM agents
-         WHERE is_master = 1
-         AND id != ?
-         AND workspace_id = ?
-         AND status != 'offline'`,
-        [defaultMaster?.id ?? '', task.workspace_id]
-      );
-
-      if (otherOrchestrators.length > 0) {
-        dispatchError = `Cannot auto-dispatch: ${otherOrchestrators.length} other orchestrator(s) available in workspace`;
-        console.warn(`[Planning Poll] ${dispatchError}:`, otherOrchestrators.map(o => o.name).join(', '));
-        firstAgentId = null; // Don't dispatch
-      }
-    }
-  }
-
-  // Check if task is already assigned (idempotency - prevents duplicate dispatches from multiple polls)
-  let skipDispatch = false;
-  if (firstAgentId) {
-    const currentTask = queryOne<{ assigned_agent_id?: string }>(
-      'SELECT assigned_agent_id FROM tasks WHERE id = ?',
-      [taskId]
-    );
-    if (currentTask?.assigned_agent_id) {
-      console.log('[Planning Poll] Task already assigned to', currentTask.assigned_agent_id, ', skipping dispatch');
-      firstAgentId = currentTask.assigned_agent_id;
-      dispatchError = null;
-      skipDispatch = true; // Skip the HTTP dispatch call, but still mark as complete
-    }
-  }
-
-  // Trigger dispatch in-process: an internal HTTP call carries no origin or
-  // bearer token, so middleware rejects it whenever MC_API_TOKEN is set.
-  if (firstAgentId && !skipDispatch) {
-    const result = await dispatchPlannedTask(taskId, 'planning-poll');
-    if (!result.success) {
-      dispatchError = result.error ?? 'Dispatch failed';
-      console.error(`[Planning Poll] ${dispatchError}`);
-    }
-  }
-
-  // Final transaction: mark as complete or store error for retry
-  // U99-RAW-STATUS-WRITER: both success branches compound status with
-  // planning_complete/assigned_agent_id in one atomic UPDATE; each is audited
-  // via recordStatusEvent (DISP-10) right after the transaction commits below
-  // (the dispatchError branch does not touch status — no audit needed there).
-  db.transaction(() => {
-    if (dispatchError) {
-      // Store the error but don't mark as complete - user can retry
-      db.prepare(`
-        UPDATE tasks
-        SET planning_dispatch_error = ?,
-            updated_at = datetime('now')
-        WHERE id = ?
-      `).run(dispatchError, taskId);
-    } else if (firstAgentId) {
-      // Success - mark complete and assign
-      // U99-RAW-STATUS-WRITER: see the block comment above `db.transaction(`
-      // — audited via recordStatusEvent (DISP-10) right after this
-      // transaction commits.
-      db.prepare(`
-        UPDATE tasks
-        SET planning_complete = 1,
-            assigned_agent_id = ?,
-            status = CASE WHEN status = 'pending_dispatch' THEN 'backlog' ELSE status END,
-            planning_dispatch_error = NULL,
-            updated_at = datetime('now')
-        WHERE id = ?
-      `).run(firstAgentId, taskId);
-      console.log(`[Planning Poll] Planning complete and dispatched to agent ${firstAgentId}`);
-    } else {
-      // No agent to dispatch to, but planning is complete
-      // U99-RAW-STATUS-WRITER: see the block comment above `db.transaction(`
-      // — audited via recordStatusEvent (DISP-10) right after this
-      // transaction commits.
-      db.prepare(`
-        UPDATE tasks
-        SET planning_complete = 1,
-            status = 'backlog',
-            planning_dispatch_error = NULL,
-            updated_at = datetime('now')
-        WHERE id = ?
-      `).run(taskId);
-    }
-  })();
-  // A successful dispatch already moved the task to in_progress; only audit the
-  // pending_dispatch -> backlog flip when it actually happened.
-  if (!dispatchError && queryOne<{ status: string }>('SELECT status FROM tasks WHERE id = ?', [taskId])?.status === 'backlog') {
-    recordStatusEvent(taskId, 'pending_dispatch', 'backlog', {
+  // U99-RAW-STATUS-WRITER: compound single-row UPDATE (plan fields must land
+  // atomically with the status flip); audited via recordStatusEvent below.
+  db.prepare(`
+    UPDATE tasks
+    SET planning_messages = ?,
+        planning_spec = ?,
+        planning_agents = ?,
+        description = CASE WHEN instr(COALESCE(description,''), ?) > 0 THEN description
+                           ELSE COALESCE(description,'') || char(10) || char(10) || ? END,
+        status = 'backlog',
+        planning_complete = 1,
+        planning_dispatch_error = NULL,
+        updated_at = datetime('now')
+    WHERE id = ?
+  `).run(
+    JSON.stringify(messages),
+    JSON.stringify(parsed.spec),
+    JSON.stringify(parsed.agents),
+    PLAN_CONTEXT_MARKER,
+    planContext,
+    taskId
+  );
+  if (priorStatus !== 'backlog') {
+    recordStatusEvent(taskId, priorStatus, 'backlog', {
       actor: 'planning-poll',
-      reason: firstAgentId ? 'planning dispatched to agent' : 'planning complete, no agent to dispatch',
+      reason: 'planning complete; routed by department',
     });
   }
 
-  // Broadcast task update
   const updatedTask = queryOne<Task>('SELECT * FROM tasks WHERE id = ?', [taskId]);
   if (updatedTask) {
-    broadcast({
-      type: 'task_updated',
-      payload: updatedTask,
-    });
+    broadcast({ type: 'task_updated', payload: updatedTask });
   }
 
-  return { firstAgentId, parsed, dispatchError };
+  return { parsed, dispatchError: null as string | null };
+}
+
+// Ask the agent once more, in the same session, for the required JSON.
+async function sendReprompt(taskId: string, sessionKey: string, messages: any[]) {
+  const client = getOpenClawClient();
+  if (!client.isConnected()) await client.connect();
+  await client.call('chat.send', {
+    sessionKey,
+    message: PLANNING_REPROMPT,
+    idempotencyKey: `planning-reprompt-${taskId}-${Date.now()}`,
+  });
+  messages.push({ role: 'user', content: PLANNING_REPROMPT, timestamp: Date.now(), reprompt: true });
+  run('UPDATE tasks SET planning_messages = ? WHERE id = ?', [JSON.stringify(messages), taskId]);
+}
+
+// POST /api/tasks/[id]/planning/poll - "Try again" after an unusable reply: re-prompt in the same session.
+export async function POST(
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const { id: taskId } = await params;
+  const task = queryOne<{ planning_session_key?: string; planning_messages?: string; planning_complete?: number }>(
+    'SELECT planning_session_key, planning_messages, planning_complete FROM tasks WHERE id = ?', [taskId]);
+  if (!task?.planning_session_key || task.planning_complete) {
+    return NextResponse.json({ error: 'Planning session not found' }, { status: 404 });
+  }
+  try {
+    await sendReprompt(taskId, task.planning_session_key, task.planning_messages ? JSON.parse(task.planning_messages) : []);
+    return NextResponse.json({ success: true });
+  } catch (error) {
+    console.error('Failed to re-prompt planning agent:', error);
+    return NextResponse.json({ error: 'Failed to reach your AI assistant', gatewayError: true }, { status: 502 });
+  }
 }
 
 // GET /api/tasks/[id]/planning/poll - Check for new messages from OpenClaw
@@ -249,7 +139,14 @@ export async function GET(
     console.log('[Planning Poll] Task', taskId, 'has', messages.length, 'total messages,', initialAssistantCount, 'assistant messages');
 
     // Check OpenClaw for new messages (lightweight check, not a loop)
-    const openclawMessages = await getMessagesFromOpenClaw(task.planning_session_key);
+    let openclawMessages: Array<{ role: string; content: string }>;
+    try {
+      openclawMessages = await fetchMessagesFromOpenClaw(task.planning_session_key);
+    } catch (err) {
+      // Distinct from "no reply yet": the gateway could not be reached.
+      console.error('[Planning Poll] Gateway unreachable:', err);
+      return NextResponse.json({ hasUpdates: false, gatewayError: true });
+    }
 
     console.log('[Planning Poll] Comparison: stored_assistant=', initialAssistantCount, 'openclaw_assistant=', openclawMessages.length);
 
@@ -294,7 +191,7 @@ export async function GET(
           if (parsed && parsed.status === 'complete') {
             // Handle completion
             console.log('[Planning Poll] Planning complete, handling...');
-            const { firstAgentId, parsed: fullParsed, dispatchError } = await handlePlanningCompletion(taskId, parsed, messages);
+            const { parsed: fullParsed, dispatchError } = await handlePlanningCompletion(taskId, parsed, messages);
 
             return NextResponse.json({
               hasUpdates: true,
@@ -303,7 +200,7 @@ export async function GET(
               agents: fullParsed.agents,
               executionPlan: fullParsed.execution_plan,
               messages,
-              autoDispatched: !!firstAgentId,
+              autoDispatched: false,
               dispatchError,
             });
           }
@@ -314,6 +211,27 @@ export async function GET(
             currentQuestion = parsed;
           }
         }
+      }
+
+      // The last new reply is neither a question nor completion: re-prompt
+      // ONCE (unless we already did for the reply before it), else surface it.
+      const lastReply = messages[messages.length - 1];
+      if (!currentQuestion && lastReply?.role === 'assistant') {
+        const prev = messages[messages.length - 2];
+        if (!prev?.reprompt) {
+          try {
+            run('UPDATE tasks SET planning_messages = ? WHERE id = ?', [JSON.stringify(messages), taskId]);
+            await sendReprompt(taskId, task.planning_session_key, messages);
+            return NextResponse.json({ hasUpdates: false, reprompted: true });
+          } catch (err) {
+            console.error('[Planning Poll] Re-prompt failed:', err);
+            return NextResponse.json({ hasUpdates: false, gatewayError: true });
+          }
+        }
+        run('UPDATE tasks SET planning_messages = ? WHERE id = ?', [JSON.stringify(messages), taskId]);
+        return NextResponse.json({
+          hasUpdates: true, complete: false, messages, currentQuestion: null, malformedReply: lastReply.content,
+        });
       }
 
       console.log('[Planning Poll] Returning updates: currentQuestion =', currentQuestion ? 'YES' : 'NO');

@@ -24,6 +24,8 @@ interface PlanningState {
   sessionKey?: string;
   messages: PlanningMessage[];
   currentQuestion?: PlanningQuestion;
+  /** Raw agent reply that was not usable JSON, even after one re-prompt. */
+  malformedReply?: string;
   isComplete: boolean;
   dispatchError?: string;
   spec?: {
@@ -57,19 +59,32 @@ interface PlanningTabProps {
    * byte-for-byte unchanged.
    */
   engineNotice?: string | null;
+  /** A start failure the parent already hit (TaskModal starts planning on create). */
+  initialStartError?: string | null;
+}
+
+const GATEWAY_DOWN = "Can't reach your AI assistant right now.";
+
+/** Plain-words reason a planning start failed, from the POST /planning response. */
+export function startFailureMessage(status?: number, data?: { message?: string; reason?: string }): string {
+  if (status === undefined) return "Couldn't start planning: we couldn't reach the server.";
+  if (status === 409) return `Couldn't start planning: ${data?.message || 'another orchestrator is available for this workspace.'}`;
+  if (status === 502 || data?.reason === 'gateway_unreachable') return "Couldn't start planning: your AI assistant didn't respond.";
+  return `Couldn't start planning: something went wrong on our side (error ${status}).`;
 }
 
 // The first question (or next one) from an LLM can take a while; 30 s gave up
 // too early. After this the user gets a "Try again" button, not a dead end.
 const PLANNING_WAIT_MS = 120000;
 
-export function PlanningTab({ taskId, onSpecLocked, engineNotice }: PlanningTabProps) {
+export function PlanningTab({ taskId, onSpecLocked, engineNotice, initialStartError }: PlanningTabProps) {
   const [state, setState] = useState<PlanningState | null>(null);
   const [loading, setLoading] = useState(true);
   const [starting, setStarting] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [canceling, setCanceling] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [startError, setStartError] = useState<string | null>(initialStartError ?? null);
   const [otherText, setOtherText] = useState('');
   const [selectedOption, setSelectedOption] = useState<string | null>(null);
   const [isWaitingForResponse, setIsWaitingForResponse] = useState(false);
@@ -120,7 +135,11 @@ export function PlanningTab({ taskId, onSpecLocked, engineNotice }: PlanningTabP
       if (res.ok) {
         const data = await res.json();
 
-        if (data.hasUpdates) {
+        if (data.gatewayError) {
+          // Distinct from "no reply yet": say so and offer Try again.
+          stopPolling();
+          setError(GATEWAY_DOWN);
+        } else if (data.hasUpdates) {
           setState(prev => ({
             ...prev!,
             messages: data.messages,
@@ -128,6 +147,7 @@ export function PlanningTab({ taskId, onSpecLocked, engineNotice }: PlanningTabP
             spec: data.spec,
             agents: data.agents,
             currentQuestion: data.currentQuestion,
+            malformedReply: data.malformedReply,
             dispatchError: data.dispatchError,
           }));
 
@@ -203,6 +223,7 @@ export function PlanningTab({ taskId, onSpecLocked, engineNotice }: PlanningTabP
   const startPlanning = async () => {
     setStarting(true);
     setError(null);
+    setStartError(null);
 
     try {
       const res = await fetch(`/api/tasks/${taskId}/planning`, { method: 'POST' });
@@ -217,10 +238,10 @@ export function PlanningTab({ taskId, onSpecLocked, engineNotice }: PlanningTabP
         }));
         startPolling();
       } else {
-        setError(data.error || 'Failed to start planning');
+        setStartError(startFailureMessage(res.status, data));
       }
     } catch (err) {
-      setError('Failed to start planning');
+      setStartError(startFailureMessage());
     } finally {
       setStarting(false);
     }
@@ -306,6 +327,22 @@ export function PlanningTab({ taskId, onSpecLocked, engineNotice }: PlanningTabP
       setOtherText('');
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  // Unusable reply: ask the agent once more in the same session, then keep waiting.
+  const retryReply = async () => {
+    setError(null);
+    try {
+      const res = await fetch(`/api/tasks/${taskId}/planning/poll`, { method: 'POST' });
+      if (!res.ok) {
+        setError(GATEWAY_DOWN);
+        return;
+      }
+      setState(prev => (prev ? { ...prev, malformedReply: undefined } : prev));
+      startPolling();
+    } catch {
+      setError(GATEWAY_DOWN);
     }
   };
 
@@ -504,10 +541,10 @@ export function PlanningTab({ taskId, onSpecLocked, engineNotice }: PlanningTabP
           </p>
         </div>
 
-        {error && (
-          <div className="flex items-center gap-2 text-red-600 text-sm">
+        {(startError || error) && (
+          <div className="flex items-center gap-2 text-red-600 text-sm" role="alert" data-testid="planning-start-error">
             <AlertCircle className="w-4 h-4" />
-            {error}
+            {startError || error}
           </div>
         )}
 
@@ -522,7 +559,7 @@ export function PlanningTab({ taskId, onSpecLocked, engineNotice }: PlanningTabP
               Starting...
             </>
           ) : (
-            <>Start Planning</>
+            <>{startError ? 'Try again' : 'Start Planning'}</>
           )}
         </button>
       </div>
@@ -654,6 +691,19 @@ export function PlanningTab({ taskId, onSpecLocked, engineNotice }: PlanningTabP
                 </div>
               )}
             </div>
+          </div>
+        ) : state?.malformedReply ? (
+          <div className="max-w-xl mx-auto" data-testid="planning-malformed-reply">
+            <p className="text-red-600 text-sm mb-2">
+              Your AI assistant replied in a way we couldn&apos;t read. Here is what it said:
+            </p>
+            <pre className="whitespace-pre-wrap text-sm text-gray-700 bg-gray-50 border border-gray-200 rounded-lg p-3 max-h-64 overflow-y-auto">{state.malformedReply}</pre>
+            <button
+              onClick={retryReply}
+              className="mt-3 px-3 py-1.5 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors"
+            >
+              Try again
+            </button>
           </div>
         ) : (
           <div className="flex items-center justify-center h-full">

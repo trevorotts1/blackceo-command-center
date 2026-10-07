@@ -1591,11 +1591,20 @@ export async function autoDispatchTask(
         // NEVER-NAKED: unconfirmed past the deadline → dispatch under house-voice
         // governance only (buildPersonaBlock's fallback governs; the blend
         // directive's guardrail still renders). Audience is NOT fabricated.
+        // Fail-safe: best-guess the audience from client knowledge first; only
+        // when both tiers fail do we release on the neutral house voice.
+        const { bestGuessAudienceForTask } = await import('@/lib/audience-best-guess');
+        const guess = await bestGuessAudienceForTask(task.id, agent.id).catch(() => null);
+        if (guess) {
+          console.log(`[${context}] autoDispatchTask: task ${taskId} audience best-guessed "${guess.label}" (${guess.tier})`);
+          if (evaluateAudienceConfirmGate(task.id).hold) return { status: 'held', reason: 'dispatch_precondition' };
+        } else {
         markAudienceDeadlineFallback(task.id);
         console.warn(
           `[${context}] autoDispatchTask: task ${taskId} audience unconfirmed past deadline — ` +
             `dispatching under house-voice governance only`,
         );
+        }
       }
     } catch (gateErr) {
       // Never block dispatch on the gate machinery itself (pre-090 DB, etc.).

@@ -667,19 +667,34 @@ else
   # (a heredoc on the same process would bind stdin first, causing
   # sys.stdin.read() to return '' — the root cause fixed in REDO #2).
   _J=$(mktemp /tmp/pm2_raw_XXXXXX.json)
-  pm2 jlist 2>/dev/null > "$_J" || echo "[]" > "$_J"
+  _E=$(mktemp /tmp/pm2_err_XXXXXX.txt)
+  PM2_READ_FAIL=""
+  # A pm2 that cannot answer (daemon mid-restart during the deploy's pm2
+  # switch) is a measurement that could not be taken, NOT "no app": record it
+  # as INDETERMINATE (exit 3, retried by atomic-deploy), never as app_count 0.
+  pm2 jlist 2>"$_E" > "$_J" || { PM2_READ_FAIL="pm2 jlist failed: $(head -c 300 "$_E" | tr '\n"\\' '   ')"; echo "[]" > "$_J"; }
   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  _PM2_RC=0
   PM2_JSON=$(python3 -s "$SCRIPT_DIR/pm2-analyze-cc.py" \
     --port "$PORT" --app-name "$PM2_APP_NAME" \
-    ${CANONICAL_DIR:+--canonical-dir "$CANONICAL_DIR"} < "$_J" 2>/dev/null \
-    || echo '{"error":"pm2-analyze-cc.py failed","app_count":0,"crash_loopers":[],"db_path_set":false,"cwd_ok":false,"null_cwd_count":0,"other_cc_apps":[],"other_cc_count":0}')
-  rm -f "$_J"
+    ${CANONICAL_DIR:+--canonical-dir "$CANONICAL_DIR"} < "$_J" 2>"$_E") || _PM2_RC=$?
+  # The analyzer prints {"error":...} (exit 0) when it cannot parse pm2's
+  # output; a crash or empty stdout is the same class. All are indeterminate.
+  if [[ -z "$PM2_READ_FAIL" && ( "$_PM2_RC" -ne 0 || -z "$PM2_JSON" ) ]]; then
+    PM2_READ_FAIL="pm2-analyze-cc.py failed (rc=${_PM2_RC}): $(head -c 300 "$_E" | tr '\n"\\' '   ')"
+  elif [[ -z "$PM2_READ_FAIL" && "$(printf '%s' "$PM2_JSON" | py "'y' if d.get('error') else 'n'" y)" == "y" ]]; then
+    PM2_READ_FAIL="pm2-analyze-cc.py could not parse pm2 output: $(printf '%s' "$PM2_JSON" | py "str(d.get('error','unparseable output'))[:300].replace(chr(34),chr(39))" "unparseable output")"
+  fi
+  if [[ -n "$PM2_READ_FAIL" ]]; then
+    PM2_JSON="{\"error\":\"${PM2_READ_FAIL//\"/\'}\",\"indeterminate\":true,\"app_count\":0,\"crash_loopers\":[],\"db_path_set\":false,\"cwd_ok\":false,\"null_cwd_count\":0,\"other_cc_apps\":[],\"other_cc_count\":0}"
+  fi
+  rm -f "$_J" "$_E"
 
   PM2_COUNT=$(printf '%s' "$PM2_JSON" | py "d.get('app_count',0)" 0)
   if [[ "$(printf '%s' "$PM2_JSON" | py "'true' if d.get('pm2_version_mismatch') else 'false'" false)" == "true" ]]; then
     log "WARN: pm2 CLI/daemon version mismatch (the CLI printed 'In-memory PM2 is out-of-date'); the app list was read past the banner. Run 'pm2 update' in a maintenance window (non-gating)"
   fi
-  PM2_CRASH=$(printf '%s' "$PM2_JSON" | py "cl=d.get('crash_loopers',[]); '[]' if not cl else json.dumps(cl)" "[]")
+  PM2_CRASH=$(printf '%s' "$PM2_JSON" | py "json.dumps(d['crash_loopers']) if d.get('crash_loopers') else '[]'" "[]")
   NULL_CWD=$(printf '%s'  "$PM2_JSON" | py "d.get('null_cwd_count',0)" 0)
   # FIX (Issue 1): also extract cwd_ok — null-cwd is caught above, but a
   # wrong-but-non-null cwd (app running from wrong dir with --canonical-dir
@@ -698,7 +713,8 @@ else
   # ZOMBIE means: two or more apps claim THE TARGET (same port, or the target
   # name with no port pm2 can see) — a real duplicate that must still FAIL.
   # It does NOT mean "more than one CC app exists on the machine".
-  if   [[ "$PM2_COUNT" -eq 0 ]];     then log "FAIL: no pm2 app for target ${PM2_APP_NAME}:${PORT} (other CC apps seen: ${OTHER_LINE})"; PM2_PASS="fail"
+  if   [[ -n "$PM2_READ_FAIL" ]];    then log "UNKNOWN: pm2 reading could not be taken (${PM2_READ_FAIL}) — indeterminate, not a failure"; PM2_PASS="indeterminate"
+  elif [[ "$PM2_COUNT" -eq 0 ]];     then log "FAIL: no pm2 app for target ${PM2_APP_NAME}:${PORT} (other CC apps seen: ${OTHER_LINE})"; PM2_PASS="fail"
   elif [[ "$PM2_COUNT" -gt 1 ]];     then log "FAIL: ${PM2_COUNT} pm2 apps claim target ${PM2_APP_NAME}:${PORT} (duplicate/zombie)"; PM2_PASS="fail"
   elif [[ "$PM2_CRASH" != "[]" ]];   then log "FAIL: crash-looping CC app"; PM2_PASS="fail"
   elif [[ "$NULL_CWD"  -gt 0 ]];     then log "FAIL: CC app null cwd (drift)"; PM2_PASS="fail"
@@ -917,6 +933,7 @@ else
   [[ "$CF_PASS"    == "fail" ]]  && FINAL_PASS=false && EXIT_CODE=1
   [[ "$CF_INDET"   == "true" ]]  && FINAL_INDET=true
 fi
+[[ "$PM2_PASS" == "indeterminate" ]] && FINAL_INDET=true  # pm2 reading not takeable mid-restart
 [[ "$ASSET_INDET" == "true" ]] && FINAL_INDET=true  # P2 FIX: no-ref path → exit 3
 # U51 fix: DEEP_INDET (deferred above, not exited on) now feeds the SAME
 # verdict aggregation as CF_INDET/ASSET_INDET instead of forcing an early

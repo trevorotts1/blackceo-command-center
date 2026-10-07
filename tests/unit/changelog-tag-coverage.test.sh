@@ -73,5 +73,25 @@ else
   fi
 fi
 
+# ---- STRAY TAG (not reachable from HEAD) ----------------------------------
+# Restore the v1.0.1 entry, then add an annotated tag on a commit outside HEAD's
+# history (a foreign repo's tag in a developer clone). It has no CHANGELOG entry
+# and never can; it must not fail the check.
+cat > CHANGELOG.md <<'EOF'
+## [v1.0.1] — 2026-01-02 — second release
+
+## [v1.0.0] — 2026-01-01 — first release
+EOF
+git add CHANGELOG.md
+git commit -q -m "restore v1.0.1 entry"
+STRAY=$(git commit-tree "$(git write-tree)" -m stray)
+git tag -a v9.9.9 "$STRAY" -m "stray foreign tag"
+if bash "$CHECK_SCRIPT" 60 >"$OUT" 2>&1; then
+  ok "stray tag outside HEAD history is ignored"
+else
+  bad "stray unreachable tag failed the check — output:"
+  sed 's/^/       /' "$OUT"
+fi
+
 printf '[changelog-tag-coverage] %s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
