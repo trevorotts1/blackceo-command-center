@@ -38,7 +38,7 @@ import { createHash } from 'crypto';
 import { queryAll, run, queryOne, sqlTime, timeNow, transaction } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { notifySystem } from '@/lib/notify';
-import { autoDispatchTask } from '@/lib/task-dispatcher';
+import { autoDispatchTask, planningInProgressSql } from '@/lib/task-dispatcher';
 import { blockDispatchIfOwnerKilled, loadKilledAtDefensive } from '@/lib/owner-killed';
 import { isCatchAllRoutingReason, isCatchAllWorkspace } from '@/lib/routing/catch-all-policy';
 import { routeTaskDecision, type RoutingDecision } from '@/lib/routing/department-router';
@@ -195,6 +195,7 @@ export function commitIntakeAssignment(task: IntakeTaskRow, decision: Extract<Ro
       AND archived_at IS NULL AND killed_at IS NULL AND updated_at = ?
       AND upper(COALESCE(description,'')) NOT LIKE '%OWNER KILLED%'
       AND (source IS NULL OR source NOT IN ('build_deck', 'build_deck_phase', 'podcast-engine'))
+      AND NOT ${planningInProgressSql('tasks')}
       AND NOT EXISTS(SELECT 1 FROM task_executions x WHERE x.task_id=tasks.id AND x.state IN ${ACTIVE_EXECUTIONS})
       AND ${taskCompanySql('tasks')}=?`,
       [routing.agentId, worker.slug, routing.workspaceId, targetStatus, now, routing.reason, now,
@@ -222,6 +223,7 @@ export function normalizeIntakeForDispatch(taskId: string): boolean {
       AND t.archived_at IS NULL AND t.killed_at IS NULL AND COALESCE(t.dispatch_hold,0)=0
       AND upper(COALESCE(t.description,'')) NOT LIKE '%OWNER KILLED%'
       AND (t.source IS NULL OR t.source NOT IN ('build_deck','build_deck_phase','podcast-engine'))
+      AND NOT ${planningInProgressSql('t')}
       AND NOT EXISTS(SELECT 1 FROM task_executions x WHERE x.task_id=t.id AND x.state IN ${ACTIVE_EXECUTIONS})`,[taskId]);
     if (!task || (task.is_master && !(isCatchAllRoutingReason(task.routing_reason) && isCatchAllWorkspace(task)))) return false;
     if (task.status === 'backlog' || task.status === 'assigned') return true;
@@ -322,6 +324,7 @@ export async function runIntakeAdvanceSweep(dependencies: {
             OR (COALESCE(t.dispatch_hold,0)=1 AND t.routing_reason GLOB 'Requested department * is unavailable in this company.'))
           AND NOT EXISTS(SELECT 1 FROM task_executions x WHERE x.task_id=t.id AND x.state IN ${ACTIVE_EXECUTIONS})
           AND (t.sop_authoring_for_task_id IS NULL)
+          AND NOT ${planningInProgressSql('t')}
           AND ${sqlTime('t.updated_at')} <= ${sqlTime('?')}
         ) ORDER BY company_rank ASC, updated_at ASC
         LIMIT ?`,

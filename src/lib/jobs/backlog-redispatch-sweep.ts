@@ -48,7 +48,7 @@
 import { queryAll, queryOne, run } from '@/lib/db';
 import { v4 as uuidv4 } from 'uuid';
 import { broadcast } from '@/lib/events';
-import { autoDispatchTask } from '@/lib/task-dispatcher';
+import { autoDispatchTask, planningInProgressSql } from '@/lib/task-dispatcher';
 import { blockDispatchIfOwnerKilled, loadKilledAtDefensive } from '@/lib/owner-killed';
 import { QC_MAX_REROUTES } from '@/lib/qc-scorer';
 import { transition } from '@/lib/task-lifecycle';
@@ -248,6 +248,7 @@ export async function runBacklogRedispatchSweep(): Promise<BacklogRedispatchResu
         AND (t.next_dispatch_eligible_at IS NULL OR t.next_dispatch_eligible_at <= ?)
         AND (a.is_master IS NULL OR a.is_master = 0)
         ${sourceExclusion}
+        AND NOT ${planningInProgressSql('t')}
         AND t.updated_at <= ?
       ORDER BY t.updated_at ASC
       LIMIT ?`,

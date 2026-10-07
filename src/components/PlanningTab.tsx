@@ -59,6 +59,10 @@ interface PlanningTabProps {
   engineNotice?: string | null;
 }
 
+// The first question (or next one) from an LLM can take a while; 30 s gave up
+// too early. After this the user gets a "Try again" button, not a dead end.
+const PLANNING_WAIT_MS = 120000;
+
 export function PlanningTab({ taskId, onSpecLocked, engineNotice }: PlanningTabProps) {
   const [state, setState] = useState<PlanningState | null>(null);
   const [loading, setLoading] = useState(true);
@@ -85,6 +89,7 @@ export function PlanningTab({ taskId, onSpecLocked, engineNotice }: PlanningTabP
         const data = await res.json();
         setState(data);
         currentQuestionRef.current = data.currentQuestion?.question;
+        return data as PlanningState;
       }
     } catch (err) {
       console.error('Failed to load planning state:', err);
@@ -148,6 +153,10 @@ export function PlanningTab({ taskId, onSpecLocked, engineNotice }: PlanningTabP
 
           setIsWaitingForResponse(false);
           stopPolling();
+        } else if (data.isComplete) {
+          // Planning finished elsewhere (approval / another tab): show the result.
+          stopPolling();
+          loadState();
         }
       }
     } catch (err) {
@@ -155,10 +164,11 @@ export function PlanningTab({ taskId, onSpecLocked, engineNotice }: PlanningTabP
     } finally {
       isPollingRef.current = false;
     }
-  }, [taskId, onSpecLocked, stopPolling, setState, setError, setIsSubmittingAnswer, setSelectedOption, setOtherText]);
+  }, [taskId, onSpecLocked, stopPolling, loadState, setState, setError, setIsSubmittingAnswer, setSelectedOption, setOtherText]);
 
   const startPolling = useCallback(() => {
     stopPolling();
+    setError(null);
     setIsWaitingForResponse(true);
 
     pollingIntervalRef.current = setInterval(() => {
@@ -167,8 +177,8 @@ export function PlanningTab({ taskId, onSpecLocked, engineNotice }: PlanningTabP
 
     pollingTimeoutRef.current = setTimeout(() => {
       stopPolling();
-      setError('The orchestrator is taking too long to respond. Please try submitting again or refresh the page.');
-    }, 30000);
+      setError('The orchestrator is taking longer than expected to respond.');
+    }, PLANNING_WAIT_MS);
   }, [pollForUpdates, stopPolling]);
 
   useEffect(() => {
@@ -178,9 +188,17 @@ export function PlanningTab({ taskId, onSpecLocked, engineNotice }: PlanningTabP
   }, [state]);
 
   useEffect(() => {
-    loadState();
-    return () => stopPolling();
-  }, [loadState, stopPolling]);
+    let active = true;
+    loadState().then((data) => {
+      // A session that is started but has no unanswered question (just created,
+      // or reopened mid-wait) must keep polling instead of waiting forever.
+      if (active && data?.isStarted && !data.isComplete && !data.currentQuestion) startPolling();
+    });
+    return () => {
+      active = false;
+      stopPolling();
+    };
+  }, [loadState, stopPolling, startPolling]);
 
   const startPlanning = async () => {
     setStarting(true);
@@ -208,6 +226,14 @@ export function PlanningTab({ taskId, onSpecLocked, engineNotice }: PlanningTabP
     }
   };
 
+  // selectedOption holds the option LABEL; the "Other" option is identified by
+  // id 'other' or label "Other" (same rule the option list uses to show the text box).
+  const selectedIsOther =
+    !!selectedOption &&
+    !!state?.currentQuestion?.options.some(
+      (o) => o.label === selectedOption && (o.id === 'other' || o.label.toLowerCase() === 'other'),
+    );
+
   const submitAnswer = async () => {
     if (!selectedOption) return;
 
@@ -216,8 +242,8 @@ export function PlanningTab({ taskId, onSpecLocked, engineNotice }: PlanningTabP
     setError(null);
 
     const submission = {
-      answer: selectedOption === 'other' ? 'Other' : selectedOption,
-      otherText: selectedOption === 'other' ? otherText : undefined,
+      answer: selectedIsOther ? 'Other' : selectedOption,
+      otherText: selectedIsOther ? otherText : undefined,
     };
     lastSubmissionRef.current = submission;
 
@@ -608,7 +634,7 @@ export function PlanningTab({ taskId, onSpecLocked, engineNotice }: PlanningTabP
             <div className="mt-6">
               <button
                 onClick={submitAnswer}
-                disabled={!selectedOption || submitting || (selectedOption === 'Other' && !otherText.trim())}
+                disabled={!selectedOption || submitting || (selectedIsOther && !otherText.trim())}
                 className="w-full px-6 py-3 bg-indigo-600 text-white rounded-lg font-medium hover:bg-indigo-700 disabled:opacity-50 flex items-center justify-center gap-2 transition-colors"
               >
                 {submitting ? (
@@ -636,6 +662,17 @@ export function PlanningTab({ taskId, onSpecLocked, engineNotice }: PlanningTabP
               <p className="text-gray-500">
                 {isWaitingForResponse ? 'Waiting for response...' : 'Waiting for next question...'}
               </p>
+              {error && (
+                <div className="mt-4" data-testid="planning-wait-error">
+                  <p className="text-red-600 text-sm">{error}</p>
+                  <button
+                    onClick={startPolling}
+                    className="mt-2 px-3 py-1.5 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors"
+                  >
+                    Try again
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         )}

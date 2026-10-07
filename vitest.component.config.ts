@@ -104,6 +104,8 @@ export default defineConfig({
       // awaiting theme owned by client, retry deadline + visible failure,
       // no fabricated completion, bare button unchanged without a summary.
       'tests/unit/social-f30-summary-area-render.test.tsx',
+      // Planning Mode — modal stays open on the Planning tab, polling resumes, Other text kept.
+      'tests/unit/planning-mode-modal.test.tsx',
     ],
     env: { NODE_ENV: 'test' },
     testTimeout: 15000,

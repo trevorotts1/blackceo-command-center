@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { queryOne, run, getDb } from '@/lib/db';
-import { triggerAutoDispatch } from '@/lib/auto-dispatch';
+import { dispatchPlannedTask } from '@/lib/task-dispatcher';
 import { recordStatusEvent } from '@/lib/task-lifecycle';
 
 export const dynamic = 'force-dynamic';
@@ -48,17 +48,8 @@ export async function POST(
       }, { status: 400 });
     }
 
-    // Get agent name for logging
-    const agent = queryOne<{ name: string }>('SELECT name FROM agents WHERE id = ?', [task.assigned_agent_id]);
-
-    // Trigger the dispatch
-    const result = await triggerAutoDispatch({
-      taskId: task.id,
-      taskTitle: task.title,
-      agentId: task.assigned_agent_id,
-      agentName: agent?.name || 'Unknown Agent',
-      workspaceId: task.workspace_id
-    });
+    // Trigger the dispatch in-process (a relative-URL fetch cannot work server-side)
+    const result = await dispatchPlannedTask(task.id, 'planning-retry-dispatch');
 
     // Use transaction to ensure atomic updates
     // U99-RAW-STATUS-WRITER: both branches compound status with
@@ -67,11 +58,10 @@ export async function POST(
     const db = getDb();
     const transaction = db.transaction(() => {
       if (result.success) {
-        // Update task status on success
+        // The dispatcher owns the status flip; only clear the stored error
         run(`
           UPDATE tasks
-          SET status = 'backlog',
-              planning_dispatch_error = NULL,
+          SET planning_dispatch_error = NULL,
               updated_at = datetime('now')
           WHERE id = ?
         `, [taskId]);
@@ -91,10 +81,12 @@ export async function POST(
     });
 
     transaction();
-    recordStatusEvent(taskId, task.status, result.success ? 'backlog' : 'pending_dispatch', {
-      actor: 'planning-retry-dispatch',
-      reason: result.success ? 'dispatch retry succeeded' : `dispatch retry failed: ${result.error ?? 'unknown'}`,
-    });
+    if (!result.success) {
+      recordStatusEvent(taskId, task.status, 'pending_dispatch', {
+        actor: 'planning-retry-dispatch',
+        reason: `dispatch retry failed: ${result.error ?? 'unknown'}`,
+      });
+    }
 
     if (result.success) {
       return NextResponse.json({ 
