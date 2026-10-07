@@ -73,6 +73,8 @@ interface TaskModalProps {
   task?: Task;
   onClose: () => void;
   workspaceId?: string;
+  /** Opened from the board's "Answer" button: focus the audience-confirm input. */
+  focusAudience?: boolean;
   /**
    * Seeds the create form's status when opened from a column's "+" button
    * (MissionQueue passes the column's underlying status). Ignored when
@@ -81,7 +83,7 @@ interface TaskModalProps {
   initialStatus?: TaskStatus;
 }
 
-export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskModalProps) {
+export function TaskModal({ task, onClose, workspaceId, initialStatus, focusAudience }: TaskModalProps) {
   const { agents, addTask, updateTask, addEvent } = useMissionControl();
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showAgentModal, setShowAgentModal] = useState(false);
@@ -543,7 +545,7 @@ export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskMod
               the form, same as GatePanel, so its Confirm button never submits
               the task-edit form. */}
           {task && task.blend_directive && (
-            <AudienceConfirmPanel taskId={task.id} onConfirmed={() => window.location.reload()} />
+            <AudienceConfirmPanel taskId={task.id} autoFocus={focusAudience} onConfirmed={() => window.location.reload()} />
           )}
           {/* U064 — Persona picker panel (voice/topic axis). Self-contained +
               fail-quiet: GETs /api/tasks/[id]/persona-bundle on mount and renders

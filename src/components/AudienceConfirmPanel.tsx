@@ -18,7 +18,7 @@
  * non-content task never even fires the fetch).
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Users, Loader2, CheckCircle2 } from 'lucide-react';
 
 interface AudienceGateStatus {
@@ -35,9 +35,13 @@ interface AudienceConfirmPanelProps {
   taskId: string;
   /** Called after a successful confirm so the modal/board can refresh. */
   onConfirmed?: () => void;
+  /** Scroll into view and focus the audience input once the gate loads (opened from "Answer"). */
+  autoFocus?: boolean;
 }
 
-export function AudienceConfirmPanel({ taskId, onConfirmed }: AudienceConfirmPanelProps) {
+export function AudienceConfirmPanel({ taskId, onConfirmed, autoFocus }: AudienceConfirmPanelProps) {
+  const rootRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
   const [status, setStatus] = useState<AudienceGateStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [customLabel, setCustomLabel] = useState('');
@@ -89,13 +93,20 @@ export function AudienceConfirmPanel({ taskId, onConfirmed }: AudienceConfirmPan
     [taskId, load, onConfirmed],
   );
 
+  const showing = !loading && !!status && !!status.hold;
+  useEffect(() => {
+    if (!autoFocus || !showing) return;
+    rootRef.current?.scrollIntoView?.({ block: 'center' });
+    inputRef.current?.focus();
+  }, [autoFocus, showing]);
+
   // Nothing to show: still loading, no gate data, or the task isn't currently
   // held for confirmation (not_required / already confirmed / no bundle /
   // released past the deadline all render nothing here).
   if (loading || !status || !status.hold) return null;
 
   return (
-    <div className="mb-4 rounded-xl border border-indigo-300 bg-indigo-50 p-4">
+    <div ref={rootRef} className="mb-4 rounded-xl border border-indigo-300 bg-indigo-50 p-4">
       <div className="flex items-start gap-3">
         <div className="mt-0.5 rounded-full bg-indigo-100 p-1.5">
           <Users className="h-4 w-4 text-indigo-700" />
@@ -125,6 +136,7 @@ export function AudienceConfirmPanel({ taskId, onConfirmed }: AudienceConfirmPan
 
           <div className="mt-3 flex items-center gap-2">
             <input
+              ref={inputRef}
               type="text"
               value={customLabel}
               onChange={(e) => setCustomLabel(e.target.value)}

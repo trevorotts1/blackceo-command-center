@@ -238,6 +238,9 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
   const effectiveDepartment = departmentFilter !== undefined ? departmentFilter : selectedDepartment;
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [editingTask, setEditingTask] = useState<Task | null>(null);
+  // Opened via an "Answer" button: the modal focuses the audience input.
+  const [focusAudience, setFocusAudience] = useState(false);
+  const openAnswer = (task: Task) => { setFocusAudience(true); setEditingTask(task); };
   const [draggedTask, setDraggedTask] = useState<Task | null>(null);
   const [activeFilter, setActiveFilter] = useState('total');
   // Live-overridable "Tasks Due" window (days). Starts at the prop default;
@@ -1144,6 +1147,37 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
         </div>
       )}
 
+      {/* Audience-confirm banner — a dashboard-created task has no chat to ask
+          "who is this for?" in, so the board asks the person sitting at it. */}
+      {(() => {
+        const pending = filteredTasks.filter((t) => t.blend_confirm_state === 'pending');
+        if (pending.length === 0) return null;
+        return (
+          <div role="alert" data-testid="audience-ask-banner" className="mx-4 mt-3 lg:mx-6 rounded-xl border border-amber-400 bg-amber-50 p-3 text-amber-900">
+            <p className="text-sm font-semibold">
+              {pending.length} task{pending.length === 1 ? ' needs' : 's need'} your answer before {pending.length === 1 ? 'it' : 'they'} can start
+            </p>
+            <ul className="mt-2 space-y-2">
+              {pending.map((t) => (
+                <li key={t.id} className="flex items-center justify-between gap-3">
+                  <span className="min-w-0 text-xs">
+                    <span className="font-medium">{t.title}</span>
+                    <span className="block opacity-80">{t.ask || 'Who is this for? Tell us the audience you want this written for.'}</span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => openAnswer(t)}
+                    className="shrink-0 rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-amber-700"
+                  >
+                    Answer
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        );
+      })()}
+
       {/* Mobile column picker — board mobile-responsiveness finding. Below
           `lg` the columns render as a horizontally-scrollable, snap-aligned
           strip (see the column container className below) instead of the
@@ -1462,6 +1496,7 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
                               task={task}
                               onDragStart={handleDragStart}
                               onClick={() => setEditingTask(task)}
+                              onAnswer={() => openAnswer(task)}
                               isDragging={draggedTask?.id === task.id}
                               isCompleted={column.id === 'done'}
                               columns={COLUMNS}
@@ -1495,7 +1530,7 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
         />
       )}
       {editingTask && (
-        <TaskModal task={editingTask} onClose={() => setEditingTask(null)} workspaceId={workspaceId} />
+        <TaskModal task={editingTask} onClose={() => { setEditingTask(null); setFocusAudience(false); }} workspaceId={workspaceId} focusAudience={focusAudience} />
       )}
       {/* Blocked-column confirmation (item 2) — collects the human-only
           fields PATCH /api/tasks/[id] requires before the move is persisted. */}
@@ -1517,6 +1552,8 @@ export interface TaskCardProps {
   task: Task;
   onDragStart: (e: React.DragEvent, task: Task) => void;
   onClick: () => void;
+  /** Opens the task modal focused on the audience question (pending-confirm chip). */
+  onAnswer?: () => void;
   isDragging: boolean;
   isCompleted?: boolean;
   /** Board columns, for the touch-friendly Move menu (item 9). */
@@ -1548,7 +1585,7 @@ export function getAgentStatusDot(status: string | undefined): string {
 // a direct render-level test target, matching the existing pattern of
 // exporting card-face pieces for testability (kanban/TaskCard.tsx's
 // PersonaSlotChips/PersonaScopeChips).
-export function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted, columns, currentColumnId, onMove, columnTaskCounts }: TaskCardProps) {
+export function TaskCard({ task, onDragStart, onClick, onAnswer, isDragging, isCompleted, columns, currentColumnId, onMove, columnTaskCounts }: TaskCardProps) {
   const isSelected = useMissionControl((s) => s.selectedTaskIds.has(task.id));
   const toggleSelection = useMissionControl((s) => s.toggleTaskSelection);
 
@@ -1696,12 +1733,14 @@ export function TaskCard({ task, onDragStart, onClick, isDragging, isCompleted, 
             confirm gate on the card face so the operator sees it without opening
             the modal. */}
         {task.blend_confirm_state === 'pending' && (
-          <span
-            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800 border border-amber-300"
-            title="This content task's audience voice is awaiting your confirmation. Open the task to confirm the audience — unconfirmed, it releases under a neutral house voice after the deadline."
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); (onAnswer ?? onClick)(); }}
+            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-amber-500 text-white border border-amber-600 hover:bg-amber-600"
+            title="This content task is waiting for you to say who it is for. Click to answer — unanswered, it releases under a neutral house voice after the deadline."
           >
-            ⏳ Awaiting audience confirm
-          </span>
+            ❓ Needs your answer — who is this for?
+          </button>
         )}
         {task.blend_confirm_state === 'deadline_fallback' && (
           <span
