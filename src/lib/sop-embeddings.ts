@@ -33,7 +33,7 @@
  * PROVIDER RESOLUTION ORDER (configurable via SOP_EMBEDDING_PROVIDER env):
  *   1. SOP_EMBEDDING_PROVIDER=google  → force Google (gemini-embedding-2 @3072-dim) [CONTRACT]
  *   2. SOP_EMBEDDING_PROVIDER=openai  → force OpenAI (text-embedding-3-small, 1536-dim) [EXPLICIT OPTIONAL FALLBACK]
- *   2b. SOP_EMBEDDING_PROVIDER=ollama → local Ollama (nomic-embed-text @768 by default) [EXPLICIT OPT-IN,
+ *   2b. SOP_EMBEDDING_PROVIDER=ollama → local Ollama (embeddinggemma-2:740m @768 by default) [EXPLICIT OPT-IN,
  *       free, no key]. Never auto-detected. SOP_EMBEDDING_OLLAMA_URL (default http://127.0.0.1:11434),
  *       SOP_EMBEDDING_MODEL, SOP_EMBEDDING_DIMS override. department-router and the context-pack
  *       skill match rank semantically in this mode too (isEmbeddingAvailable + fetchEmbeddings,
@@ -120,7 +120,7 @@ const GOOGLE_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models
 
 /** Local Ollama defaults (SOP_EMBEDDING_PROVIDER=ollama opt-in). */
 export const OLLAMA_DEFAULT_URL = 'http://127.0.0.1:11434';
-export const OLLAMA_DEFAULT_MODEL = 'nomic-embed-text';
+export const OLLAMA_DEFAULT_MODEL = 'embeddinggemma-2:740m';
 export const OLLAMA_DEFAULT_DIMS = 768;
 
 /** Maximum batch size for OpenAI /v1/embeddings. */

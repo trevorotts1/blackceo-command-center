@@ -148,8 +148,14 @@ test('Google box: router and skill matcher send the same raw texts as before', a
     assert.equal(calls[0].input, TASK_TEXT);
     assert.equal(localEmbedText('x', 'query'), 'x');
   });
-  // A local box on a non-embeddinggemma model gets raw text too.
+  // A local box with SOP_EMBEDDING_MODEL unset is on embeddinggemma (prefixed);
+  // an override to another model gets raw text.
   await withEnv({ SOP_EMBEDDING_PROVIDER: 'ollama' }, async () => {
+    const { localEmbedText, resolveEmbeddingProvider } = await import('../../src/lib/sop-embeddings');
+    assert.equal(resolveEmbeddingProvider().model, GEMMA);
+    assert.equal(localEmbedText('x', 'document'), 'title: none | text: x');
+  });
+  await withEnv({ SOP_EMBEDDING_PROVIDER: 'ollama', SOP_EMBEDDING_MODEL: 'other-embed-model' }, async () => {
     const { localEmbedText } = await import('../../src/lib/sop-embeddings');
     assert.equal(localEmbedText('x', 'document'), 'x');
   });

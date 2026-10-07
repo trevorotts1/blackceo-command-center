@@ -95,6 +95,9 @@ const TIEBREAK_MARGIN = 0.04;
  * scale; its default is 0.56, the lowest floor that keeps the labeled
  * fixture (scripts/eval-department-routing.ts) at >=90% acceptable-or-General
  * (0.55 → 88.8%, 0.56 → 91.1%). The env value, when valid, wins for every provider.
+ * That floor was measured on nomic-embed-text; the local default is now
+ * embeddinggemma-2:740m, which on the same fixture scores 62.1% at 0.56 and
+ * first reaches >=90% at 0.69 (91.7%, strict 28.4%). Not yet recalibrated.
  */
 const MIN_ROUTING_CONFIDENCE_ENV: number | null = (() => {
   const env = process.env.MIN_ROUTING_CONFIDENCE;
