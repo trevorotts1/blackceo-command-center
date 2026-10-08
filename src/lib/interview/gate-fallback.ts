@@ -22,6 +22,7 @@ interface GateStatusResponse {
   interviewComplete?: boolean;
   buildCompleted?: boolean;
   priorCompletionDeclared?: boolean;
+  standardPlaceholder?: boolean;
 }
 
 /**
@@ -72,7 +73,8 @@ export async function checkInterviewCompleteViaFallback(host?: string | null): P
     clearTimeout(timeout);
     if (!res.ok) return false;
     const body = (await res.json()) as GateStatusResponse;
-    return body.interviewComplete === true || body.buildCompleted === true || body.priorCompletionDeclared === true;
+    return body.interviewComplete === true || body.buildCompleted === true || body.priorCompletionDeclared === true
+      || body.standardPlaceholder === true;
   } catch {
     // Any failure (network, timeout, bad JSON) → fail closed
     return false;

@@ -4,19 +4,24 @@ import { X } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 
-async function isInterviewComplete(): Promise<boolean> {
+// STD001: banner stays visible on a standard placeholder (interview is NOT complete); only the copy changes.
+async function bannerState(): Promise<{ complete: boolean; placeholder: boolean }> {
   try {
     const r = await fetch('/api/interview/state', { cache: 'no-store' });
-    if (!r.ok) return false;
+    if (!r.ok) return { complete: false, placeholder: false };
     const d = await r.json().catch(() => ({}));
-    return d.interviewComplete === true || d.buildCompleted === true || d.priorCompletionDeclared === true;
-  } catch { return false; }
+    return {
+      complete: d.interviewComplete === true || d.buildCompleted === true || d.priorCompletionDeclared === true,
+      placeholder: d.standardPlaceholder === true,
+    };
+  } catch { return { complete: false, placeholder: false }; }
 }
 
 export default function InterviewBypassBanner() {
   const router = useRouter();
   const [visible, setVisible] = useState(false);
-  useEffect(() => { let c = false; void (async () => { const v = !(await isInterviewComplete()); if (!c) setVisible(v); })(); return () => { c = true; }; }, []);
+  const [placeholder, setPlaceholder] = useState(false);
+  useEffect(() => { let c = false; void (async () => { const s = await bannerState(); if (!c) { setVisible(!s.complete); setPlaceholder(s.placeholder); } })(); return () => { c = true; }; }, []);
   if (!visible) return null;
   return (
     <div role="alert" aria-live="polite" data-walkthrough="interview-bypass-banner"
@@ -24,7 +29,7 @@ export default function InterviewBypassBanner() {
         background:'var(--iv-accent-strong,#f2b134)',color:'var(--iv-accent-ink,#1c1c22)',
         padding:'0.55rem 1rem',display:'flex',alignItems:'center',justifyContent:'center',
         gap:'0.6rem',fontSize:'0.85rem',fontWeight:600,boxShadow:'0 1px 6px rgba(0,0,0,0.15)' }}>
-      <span>Your AI Workforce Interview is not yet complete.</span>
+      <span>{placeholder ? "You're running on a standard company setup. Finish your AI Workforce Interview to make it yours." : 'Your AI Workforce Interview is not yet complete.'}</span>
       <button type="button" onClick={() => router.push('/interview')}
         style={{ background:'rgba(0,0,0,0.12)',border:'none',borderRadius:'6px',
           padding:'0.25rem 0.6rem',cursor:'pointer',fontWeight:600,fontSize:'inherit',color:'inherit' }}>
