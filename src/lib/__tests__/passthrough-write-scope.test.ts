@@ -36,8 +36,8 @@
  * requireHqContext + direct-host refusal, session cookie + CSRF — classified
  * by the interface scanner like every session route), POST/PATCH/DELETE
  * /api/auth/owner-session (owner ticket redemption + sliding renewal + sign-out
- * from /owner-login/page.tsx, session-cookie surface, never bearer): 135
- * mutating, 7 webhook-protected (5 static + 2 dynamic), 128 non-webhook —
+ * from /owner-login/page.tsx, session-cookie surface, never bearer): 136
+ * mutating, 7 webhook-protected (5 static + 2 dynamic), 129 non-webhook —
  * 48 bearer patterns match 52 route templates (44 single-route + 4
  * collection-or-item x2; 44 + 4x2 = 52), of which the pre-engine recovery
  * template is webhook-gated as well, leaving 51 bearer-ONLY covered. Exactly
@@ -307,16 +307,16 @@ const nonWebhookCount = allMutatingRoutes.length - webhookProtectedCount;
 describe('passthrough-write-scope — anti-rot lock (U052)', () => {
   // ---- Counts ------------------------------------------------------------
 
-  it('API routes exporting a mutating method: 135 (literal assertion)', () => {
-    expect(allMutatingRoutes.length).toBe(135);
+  it('API routes exporting a mutating method: 136 (literal assertion)', () => {
+    expect(allMutatingRoutes.length).toBe(136);
   });
 
   it('protected by isWebhookSecretRoute: 7 (5 static + 2 dynamic — middleware src/middleware.ts:137-167)', () => {
     expect(webhookProtectedCount).toBe(7);
   });
 
-  it('non-webhook write routes: 128 (135 mutating − 7 webhook-protected; tenant authentication remains required)', () => {
-    expect(nonWebhookCount).toBe(128);
+  it('non-webhook write routes: 129 (136 mutating − 7 webhook-protected; tenant authentication remains required)', () => {
+    expect(nonWebhookCount).toBe(129);
   });
 
   it('interface call templates found by multi-line scanner', () => {
