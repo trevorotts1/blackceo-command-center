@@ -26,6 +26,7 @@ import { verifiedBuild } from '@/lib/interview/build-verification';
  * exposes three booleans, no secrets, no session, no write path.
  */
 
+import { standardPlaceholderActive } from '@/lib/interview/build-verification';
 import { NextRequest, NextResponse } from 'next/server';
 import { readBuildState, readStandardPrebuild } from '@/lib/interview/seam';
 import { resolveInterviewTenant, refuseUnverifiedTenant, tenantForHost } from '@/lib/interview/tenant';
@@ -78,6 +79,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       interviewComplete: tenant.client.interview_complete === true,
       buildCompleted: false,
       standardReady: false,
+      standardPlaceholder: false,
     });
   }
   const bs = readBuildState();
@@ -86,5 +88,6 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     interviewComplete: bs?.interviewComplete === true,
     buildCompleted: verifiedBuild(bs),
     standardReady: readStandardPrebuild(bs).standardReady,
+    standardPlaceholder: standardPlaceholderActive(bs),
   });
 }
