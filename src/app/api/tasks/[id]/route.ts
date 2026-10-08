@@ -1,6 +1,8 @@
+import { noteReassignment } from '@/lib/routing/corrections';
 import { validateExecutionCompletion, completeExecution, linkDeliverableToExecution } from '@/lib/execution-attempts';
 import { assignmentCompany, assertAgentCompany, assertTaskCompany, TaskAgentAccessError } from '@/lib/task-agent-assignment';
 import { NextRequest, NextResponse } from 'next/server';
+import { resolveTenantContext } from '@/lib/auth/tenant-context';
 import { v4 as uuidv4 } from 'uuid';
 import { queryOne, run, queryAll, getDb } from '@/lib/db';
 import {
@@ -67,6 +69,11 @@ export async function GET(
     console.error('Failed to fetch task:', error);
     return NextResponse.json({ error: 'Failed to fetch task' }, { status: 500 });
   }
+}
+
+/** A genuine person: a verified tenant session (cookie grant or Cloudflare Access JWT), not the shared MC_API_TOKEN bearer (`operator:api`) that agents and scripts use. */
+async function isHumanSession(request: NextRequest): Promise<boolean> {
+  try { return (await resolveTenantContext(request)).subject !== 'operator:api'; } catch { return false; }
 }
 
 // PATCH /api/tasks/[id] - Update a task
@@ -869,6 +876,8 @@ export async function PATCH(
       }).immediate();
       // Notify only after assignment and its audit event commit together.
       if (validatedData.assigned_agent_id && validatedData.assigned_agent_id !== existing.assigned_agent_id) {
+        // Routing correction learning, only after the UPDATE succeeded: a verified person (not an agent, not the bearer token) moving the task to another department's agent teaches the router.
+        noteReassignment(existing, validatedData.assigned_agent_id, !validatedData.updated_by_agent_id && await isHumanSession(request));
         try { notifyOwnerAssigned(id, { department: existing.department }); } catch { /* non-fatal */ }
       }
 

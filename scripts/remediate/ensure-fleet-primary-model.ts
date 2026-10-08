@@ -1,8 +1,8 @@
 /**
  * ensure-fleet-primary-model.ts — FIX-24 (Error 13 / T-24) per-box reconcile.
  *
- * Registers the LIVE fleet primary model id (`deepseek-v4-flash:0731-cloud`,
- * registry-scoped `ollama-cloud/deepseek-v4-flash:0731-cloud`) in `model_registry`
+ * Registers the LIVE fleet primary model id (`deepseek-v4.1-flash:cloud`,
+ * registry-scoped `ollama-cloud/deepseek-v4.1-flash:cloud`) in `model_registry`
  * so the operator catalog names the model the fleet actually runs — and never
  * the retired `:cloud` build or a phantom `0713`.
  *

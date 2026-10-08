@@ -31,6 +31,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { AUDIENCE_ASK_TEXT, writtenForLabel } from '../../src/lib/board/audience-chip';
 
 const TMP_DB = path.join(
   fs.mkdtempSync(path.join(os.tmpdir(), 'bc-blend-confirm-')),
@@ -56,6 +57,7 @@ let evaluateAudienceConfirmGate: TasksModule['evaluateAudienceConfirmGate'];
 let holdForAudienceConfirm: TasksModule['holdForAudienceConfirm'];
 let markAudienceDeadlineFallback: TasksModule['markAudienceDeadlineFallback'];
 let confirmTaskAudience: TasksModule['confirmTaskAudience'];
+let autoAnswerAudienceIfPossible: TasksModule['autoAnswerAudienceIfPossible'];
 let AUDIENCE_CONFIRM_DEADLINE_MS: TasksModule['AUDIENCE_CONFIRM_DEADLINE_MS'];
 
 let checkPersonaDispatchReady: TasksModule['checkPersonaDispatchReady'];
@@ -113,6 +115,7 @@ test.before(async () => {
   holdForAudienceConfirm = tasks.holdForAudienceConfirm;
   markAudienceDeadlineFallback = tasks.markAudienceDeadlineFallback;
   confirmTaskAudience = tasks.confirmTaskAudience;
+  autoAnswerAudienceIfPossible = tasks.autoAnswerAudienceIfPossible;
   AUDIENCE_CONFIRM_DEADLINE_MS = tasks.AUDIENCE_CONFIRM_DEADLINE_MS;
   checkPersonaDispatchReady = tasks.checkPersonaDispatchReady;
   isHardHoldConfirmDepartment = tasks.isHardHoldConfirmDepartment;
@@ -220,7 +223,7 @@ test('[gate] pending within deadline → HOLD with an operator prompt', () => {
   const g = evaluateAudienceConfirmGate(id); // nowMs = now, well within deadline
   assert.equal(g.hold, true, 'pending within deadline must HOLD the write');
   assert.equal(g.state, 'pending');
-  assert.ok(g.prompt && /What audience are we dealing with\?/.test(g.prompt), 'low-confidence multi → the exact ASK');
+  assert.ok(g.prompt && /Who will be reading this\?/.test(g.prompt), 'low-confidence multi → the plain ASK');
   assert.ok(g.prompt.includes('Founders') && g.prompt.includes('RevOps leads'), 'enumerates known ICP audiences');
   assert.equal(g.firstHold, true, 'first hold surfaces the operator');
 });
@@ -234,7 +237,7 @@ test('[gate] single high-confidence ICP → CONFIRM prompt (not the open ask)', 
   }));
   const g = evaluateAudienceConfirmGate(id);
   assert.equal(g.hold, true);
-  assert.ok(g.prompt && /Confirm the audience/.test(g.prompt), 'high-confidence single → confirm prompt');
+  assert.ok(g.prompt && /Likely answer/.test(g.prompt), 'high-confidence single → confirm prompt');
   assert.ok(g.prompt.includes('Founders'));
 });
 
@@ -280,7 +283,7 @@ test('[hold] first hold asks the requester, writes the board ask, and records Te
 
   assert.deepEqual(audienceAskCalls, [{
     taskId: id,
-    question: 'Quick question before we start building: who is this for? Tell me about the audience you want this written for.',
+    question: AUDIENCE_ASK_TEXT,
   }], 'the client-safe question is routed through the trust-engine requester seam');
   const ask = queryOne<{ ask: string | null }>('SELECT ask FROM tasks WHERE id = ?', [id]);
   assert.equal(ask?.ask, audienceAskCalls[0].question, 'the same question is visible on the board');
@@ -331,7 +334,7 @@ test('[hold] first hold without a requester chat records no requester delivery a
   const ask = queryOne<{ ask: string | null }>('SELECT ask FROM tasks WHERE id = ?', [id]);
   assert.equal(
     ask?.ask,
-    'Quick check before we start building: this will be written for Founders — is that right, or should it be for someone else?',
+    "This is going to Founders. Is that who it's written for? This task is waiting until you answer.",
   );
   const event = queryOne<{ message: string }>(
     "SELECT message FROM events WHERE task_id = ? AND type = 'audience_confirm_ask_sent'", [id],
@@ -524,4 +527,112 @@ test('[dispatch] the manual dispatch route takes the gate verdict, not the raw c
   assert.ok(gateCall > 0 && flipCall > gateCall, 'the route must consult the gate and flip on its verdict');
   assert.ok(readyCall > flipCall, 'and it must flip BEFORE the readiness check reads the column');
   assert.ok(source.includes('isHardHoldConfirmDepartment('), 'the hard-hold departments must stay excluded');
+});
+
+test('[board] pending gate surfaces on the board row with its ask; confirm releases the hold delay; unconfirmed still holds', async () => {
+  const { loadTaskRow } = await import('../../src/lib/board/task-row-projection');
+  const { releaseAudienceHoldDelay } = await import('../../src/lib/tasks');
+  const id = nextId('board');
+  insertTask(id);
+  persistPersonaBundle(id, bundle({ confirm_required: true }));
+
+  const first = evaluateAudienceConfirmGate(id);
+  holdForAudienceConfirm(id, null, first, () => 'none');
+
+  // Board payload carries the pending state + the question (no requester chat needed).
+  const row = loadTaskRow(id);
+  assert.equal(row?.blend_confirm_state, 'pending');
+  assert.match(row?.ask ?? '', /who will be reading this/i);
+
+  // Gate is NOT weakened: unconfirmed still holds and stays parked.
+  assert.equal(evaluateAudienceConfirmGate(id).hold, true);
+  assert.ok(queryOne<{ n: string | null }>('SELECT next_dispatch_eligible_at n FROM tasks WHERE id=?', [id])?.n);
+
+  // Confirmed: delay is dropped so the next tick dispatches immediately.
+  confirmTaskAudience(id, { audienceLabel: 'Founders' });
+  assert.equal(evaluateAudienceConfirmGate(id).hold, true, 'held until the voice refresh lands');
+  // What rescoreAudienceBlend does on success:
+  persistPersonaBundle(id, bundle({ confirm_required: false, rationale: { refresh_pending: false } } as never));
+  run("UPDATE task_persona_bundle SET confirm_state='confirmed' WHERE task_id=?", [id]);
+  releaseAudienceHoldDelay(id);
+  assert.equal(queryOne<{ n: string | null }>('SELECT next_dispatch_eligible_at n FROM tasks WHERE id=?', [id])?.n, null);
+  assert.equal(evaluateAudienceConfirmGate(id).hold, false);
+});
+
+// ── F. Auto-answer: the board answers "who will read this?" when it can ────
+
+function insertNamedTask(id: string, title: string, description: string | null): void {
+  insertTask(id);
+  run('UPDATE tasks SET title = ?, description = ? WHERE id = ?', [title, description, id]);
+}
+
+// Stand-in for rescoreAudienceBlend's success path (the real one spawns the selector).
+const fakeRescore = (async (id: string) => {
+  persistPersonaBundle(id, bundle({ confirm_required: false, rationale: { refresh_pending: false } } as never));
+  run("UPDATE task_persona_bundle SET confirm_state='confirmed' WHERE task_id=?", [id]);
+  return { rescored: true, bundle: null };
+}) as unknown as Parameters<TasksModule['autoAnswerAudienceIfPossible']>[3];
+
+test('[auto] task names its recipient -> confirmed as task_named, no hold, event written', async () => {
+  const id = nextId('auto-named');
+  insertNamedTask(id, 'Create an email and send to Trevor Otts', 'send to Trevor Otts at trevorotts@blackceo.com about my upcoming event');
+  persistPersonaBundle(id, bundle({ confirm_required: true, resolved_audience: { source: 'asked', candidates: [], confidence: 0, label: null, id: null } }));
+  const gate = evaluateAudienceConfirmGate(id);
+  assert.equal(gate.hold, true);
+  const r = await autoAnswerAudienceIfPossible(id, null, gate, fakeRescore);
+  assert.deepEqual([r.answered, r.label, r.source, r.released], [true, 'Trevor Otts', 'task_named', true]);
+  assert.equal(evaluateAudienceConfirmGate(id).hold, false);
+  const row = queryOne<{ audience_source: string; audience_label: string }>('SELECT audience_source, audience_label FROM tasks WHERE id = ?', [id]);
+  assert.equal(row?.audience_source, 'task_named');
+  assert.equal(writtenForLabel(row!), 'Trevor Otts');
+  const ev = queryAll<{ message: string }>("SELECT message FROM events WHERE task_id = ? AND type = 'audience_auto_answered'", [id]);
+  assert.equal(ev.length, 1);
+  assert.match(ev[0].message, /Trevor Otts.*task_named/);
+  assert.equal(queryAll("SELECT id FROM events WHERE task_id = ? AND type = 'audience_confirm_pending'", [id]).length, 0, 'no hold event');
+});
+
+test('[auto] no name but audience on file -> owner_default uses the main audience', async () => {
+  const id = nextId('auto-owner');
+  insertNamedTask(id, "Plan this week's social media postings", null);
+  persistPersonaBundle(id, bundle({ confirm_required: true })); // candidates Founders, RevOps leads
+  const r = await autoAnswerAudienceIfPossible(id, null, evaluateAudienceConfirmGate(id), fakeRescore);
+  assert.deepEqual([r.answered, r.label, r.source], [true, 'Founders', 'owner_default']);
+  assert.equal(queryOne<{ audience_source: string }>('SELECT audience_source FROM tasks WHERE id = ?', [id])?.audience_source, 'owner_default');
+});
+
+test('[auto] no name and no audience list -> still HOLDS (gate not weakened)', async () => {
+  const id = nextId('auto-none');
+  insertNamedTask(id, 'Write a blog post for my audience', null);
+  persistPersonaBundle(id, bundle({ confirm_required: true, resolved_audience: { source: 'asked', candidates: [], confidence: 0, label: null, id: null } }));
+  const r = await autoAnswerAudienceIfPossible(id, null, evaluateAudienceConfirmGate(id), fakeRescore);
+  assert.equal(r.answered, false);
+  assert.equal(evaluateAudienceConfirmGate(id).hold, true);
+  assert.equal(queryAll("SELECT id FROM events WHERE task_id = ? AND type = 'audience_auto_answered'", [id]).length, 0);
+});
+
+test('[chip] only task_named / owner_default show "Written for"', () => {
+  assert.equal(writtenForLabel({ audience_source: 'task_named', audience_label: 'Dana Cole' }), 'Dana Cole');
+  assert.equal(writtenForLabel({ audience_source: 'owner_default', audience_label: 'Founders' }), 'Founders');
+  assert.equal(writtenForLabel({ audience_source: 'operator_confirmed', audience_label: 'Founders' }), null);
+  assert.equal(writtenForLabel({ audience_source: 'task_named', audience_label: ' ' }), null);
+  assert.equal(writtenForLabel({}), null);
+});
+
+test('[hold] an already-answered task never gets a fresh ask or ask event', () => {
+  const id = nextId('hold-answered');
+  insertTask(id);
+  persistPersonaBundle(id, bundle({ confirm_required: true }));
+  run("UPDATE tasks SET audience_source = 'task_named', audience_label = 'Trevor Otts' WHERE id = ?", [id]);
+  let asked = 0;
+  holdForAudienceConfirm(id, null, { ...evaluateAudienceConfirmGate(id), hold: true, firstHold: true }, () => { asked++; return 'telegram'; });
+  assert.equal(asked, 0);
+  const n = queryOne<{ n: number }>("SELECT COUNT(*) n FROM events WHERE task_id = ? AND type LIKE 'audience_confirm_%'", [id]);
+  assert.equal(n?.n, 0);
+  assert.ok(!queryOne<{ ask: string | null }>('SELECT ask FROM tasks WHERE id = ?', [id])?.ask);
+});
+
+test('[rescore] confirm-time re-score budget is realistic (>=60s) and above the dispatch-time 10s', async () => {
+  const t = await import('../../src/lib/tasks');
+  assert.ok(t.AUDIENCE_RESCORE_TIMEOUT_MS >= 60_000);
+  assert.ok(t.AUDIENCE_RESCORE_TIMEOUT_MS > t.PERSONA_RESCORE_TIMEOUT_MS);
 });

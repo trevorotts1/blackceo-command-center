@@ -624,7 +624,7 @@ test('[D4] AUDIENCE_HIGH_CONFIDENCE branch is reachable end to end: a live "high
   }));
   const g = evaluateAudienceConfirmGate(id);
   assert.equal(g.hold, true);
-  assert.ok(g.prompt && /Confirm the audience/.test(g.prompt), 'D4: 0.9 (mapped from "high") clears AUDIENCE_HIGH_CONFIDENCE=0.75 → CONFIRM prompt, not the open ask');
+  assert.ok(g.prompt && /Likely answer/.test(g.prompt), 'D4: 0.9 (mapped from "high") clears AUDIENCE_HIGH_CONFIDENCE=0.75 → CONFIRM prompt, not the open ask');
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

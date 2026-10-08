@@ -299,18 +299,18 @@ export function selectionHolds(task: SelectionHoldTaskInput): SelectionHold[] {
   if (task.blend_confirm_state === 'pending') {
     holds.push({
       kind: 'audience-confirm',
-      title: 'Audience awaiting confirmation',
+      title: 'Waiting for your answer',
       message:
-        'This content task is held for audience confirmation. Unconfirmed, it ' +
-        'releases under a neutral house voice after the deadline.',
+        'This task is waiting for you to say who will read it. If it stays ' +
+        'unanswered, it starts after 30 minutes in a neutral house voice.',
     });
   } else if (task.blend_confirm_state === 'deadline_fallback') {
     holds.push({
       kind: 'house-voice-fallback',
       title: 'Released on house voice',
       message:
-        'The audience was never confirmed in time — this task released under ' +
-        'the neutral house voice. Confirm the audience to re-voice future work.',
+        'Nobody said who would read this in time, so it was written in a neutral ' +
+        'house voice. Tell us who will read your future tasks to get a closer match.',
     });
   }
   return holds;

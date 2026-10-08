@@ -23,7 +23,7 @@
  */
 
 import { test, expect, request, type Page } from 'playwright/test';
-import { BASE_URL } from './create-task.fixture';
+import { BASE_URL, MACHINE_TOKEN } from './create-task.fixture';
 
 test.beforeAll(async () => {
   const probe = await request.newContext({ baseURL: BASE_URL });
@@ -250,11 +250,13 @@ test.describe('Create New Task — workspace-scoped board + SSE/routing proof (C
     // just-created REAL workspace (never the literal 'default' — no box seeds
     // that row outside `npm run db:seed`, so it would 500 the agent create on
     // the same FK the P2-03 task fix already had to solve for tasks.workspace_id).
-    const agentRes = await pageFetchJson(page, '/api/agents', {
-      method: 'POST',
-      body: { name: `E2E QA Master ${Date.now()}`, role: 'CEO', is_master: true, workspace_id: workspace.id },
+    // POST /api/agents is a bearer-required write route (middleware refuses the
+    // browser same-origin passthrough for it), so seed it as the machine caller.
+    const agentRes = await page.request.post('/api/agents', {
+      headers: { Authorization: `Bearer ${MACHINE_TOKEN}` },
+      data: { name: `E2E QA Master ${Date.now()}`, role: 'CEO', is_master: true, workspace_id: workspace.id },
     });
-    expect(agentRes.ok, `POST /api/agents -> ${agentRes.status}`).toBeTruthy();
+    expect(agentRes.ok(), `POST /api/agents -> ${agentRes.status()}`).toBeTruthy();
 
     // ---- Open the department board, idle (no task of its own submitted) ----
     await page.goto(`/workspace/${workspace.slug}`, { waitUntil: 'domcontentloaded' });
@@ -328,9 +330,11 @@ test.describe('Create New Task — workspace-scoped board + SSE/routing proof (C
     // TaskModal's own optimistic addTask()).
     await expect(backlogColumn.getByText(titleC, { exact: true })).toBeVisible({ timeout: 5_000 });
 
-    // Instant routing kicked off and completed: the seeded master agent is
-    // the guaranteed CEO/COM last-resort pick, so a `task_dispatched`
-    // "Auto-routed:" event must exist for this exact task within a few
+    // Instant routing kicked off and completed: intake-advance routes the card
+    // to the department's role-fit agent and records a `task_assigned`
+    // "Intake-advance routed:" event (the old `task_dispatched` "Auto-routed:"
+    // row no longer exists; real dispatch now defers until the persona pin
+    // lands and needs a gateway this fixture deliberately lacks). It must exist for this exact task within a few
     // seconds of creation (bounded poll, no fixed sleep).
     await expect
       .poll(
@@ -341,14 +345,14 @@ test.describe('Create New Task — workspace-scoped board + SSE/routing proof (C
           );
           if (!res.ok) return false;
           return res.body.some(
-            (e) => e.type === 'task_dispatched' && e.task_id === createdC.id && e.message.startsWith('Auto-routed:'),
+            (e) => e.type === 'task_assigned' && e.task_id === createdC.id && e.message.startsWith('Intake-advance routed:'),
           );
         },
         {
           timeout: 10_000,
           intervals: [250, 500, 1_000],
           message:
-            'no task_dispatched "Auto-routed:" event landed for the SSE-broadcast task — instant routing did not kick off',
+            'no task_assigned "Intake-advance routed:" event landed for the SSE-broadcast task — instant routing did not kick off',
         },
       )
       .toBe(true);

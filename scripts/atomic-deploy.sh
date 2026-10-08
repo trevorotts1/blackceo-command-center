@@ -1732,8 +1732,22 @@ else
     exit 2
   fi
   _ok "  PM2 switch succeeded for '${PM2_APP_NAME}'."
-  _log "  Waiting 5 seconds for server to start ..."
-  sleep 5
+  # Bounded readiness poll instead of a flat sleep: wait until pm2 reports a
+  # live pid for the app AND the local /api/health answers 200. Never fatal:
+  # on timeout the health check below measures (and exit 3 is retried).
+  _wait_s="${CC_POST_SWITCH_WAIT:-60}"
+  _log "  Waiting up to ${_wait_s}s for '${PM2_APP_NAME}' to be online and answering on port ${PORT} ..."
+  _t0=$SECONDS; _ready=0
+  while (( SECONDS - _t0 < _wait_s )); do
+    _pid="$(pm2 pid "$PM2_APP_NAME" 2>/dev/null | tr -d '[:space:]')"
+    if [[ -n "$_pid" && "$_pid" != "0" ]] && \
+       [[ "$(curl -s -o /dev/null -m 3 -w '%{http_code}' "http://127.0.0.1:${PORT}/api/health" 2>/dev/null)" == "200" ]]; then
+      _ready=1; break
+    fi
+    sleep 2
+  done
+  if (( _ready )); then _log "  App online and answering after $(( SECONDS - _t0 ))s."
+  else _warn "  App not answering after ${_wait_s}s — continuing; the health check decides (exit 3 is retried)."; fi
 
   _log "[4b] Running cc-health-check.sh ..."
   HEALTH_JSON=""

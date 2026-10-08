@@ -295,6 +295,7 @@ export async function POST(request: NextRequest) {
         department: validatedData.department,
         due_date: validatedData.due_date,
         sop_id: validatedData.sop_id ?? null,
+        planning_mode: validatedData.planning_mode,
         requester_channel: requesterChannel,
         requester_chat_id: requesterChatId,
         // U94 — this is the Command-Center UI create door for the

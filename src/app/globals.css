@@ -278,12 +278,12 @@ body {
    reads as interactive and matches the column header pills.          ─────── */
 .kanban-scroll {
   /* Firefox: always-visible, medium-width bar */
-  scrollbar-width: thin;
-  scrollbar-color: var(--brand-400, #66BB6A) var(--brand-50, #E8F5E9);
+  scrollbar-width: auto;
+  scrollbar-color: var(--brand-600, #43A047) var(--brand-50, #E8F5E9);
 }
 
 .kanban-scroll::-webkit-scrollbar {
-  height: 10px;   /* horizontal bar height — large enough to grab comfortably */
+  height: 14px;   /* horizontal bar height — large enough to notice and grab */
   width: 10px;    /* vertical (column-inner) bar width */
 }
 
@@ -294,7 +294,7 @@ body {
 }
 
 .kanban-scroll::-webkit-scrollbar-thumb {
-  background: var(--brand-400, #66BB6A);
+  background: var(--brand-600, #43A047);
   border-radius: 10px;
   border: 2px solid var(--brand-50, #E8F5E9); /* inner padding effect */
   min-width: 40px; /* thumb never shrinks to ungrabbable width */
@@ -322,8 +322,8 @@ body {
 .kanban-fade-right {
   position: absolute;
   top: 0;
-  bottom: 18px;     /* stop above the scrollbar track */
-  width: 64px;
+  bottom: 14px;     /* stop above the scrollbar track */
+  width: 96px;
   pointer-events: none;
   z-index: 10;
   transition: opacity 0.25s ease;
@@ -331,42 +331,98 @@ body {
 
 .kanban-fade-left {
   left: 0;
-  background: linear-gradient(to right, rgba(248,249,251,0.92) 0%, transparent 100%);
+  background: linear-gradient(to right, rgba(248,249,251,0.95) 0%, transparent 100%);
 }
 
 .kanban-fade-right {
   right: 0;
-  background: linear-gradient(to left, rgba(248,249,251,0.92) 0%, transparent 100%);
+  background: linear-gradient(to left, rgba(248,249,251,0.95) 0%, transparent 100%);
 }
 
-/* Scroll hint buttons (chevrons) sit inside the fades */
-.kanban-scroll-btn {
+/* Chevron + "N more" badge, vertically centred in the visible board area.
+   The wrapper ignores pointer events so cards underneath stay droppable. */
+.kanban-scroll-nav {
   position: absolute;
   top: 50%;
   transform: translateY(-50%);
   z-index: 11;
-  width: 32px;
-  height: 32px;
+  align-items: center;
+  gap: 8px;
+  pointer-events: none;
+}
+.kanban-scroll-nav-left { left: 12px; }
+.kanban-scroll-nav-right { right: 12px; }
+
+.kanban-scroll-btn {
+  position: relative;
+  width: 48px;
+  height: 48px;
   display: flex;
   align-items: center;
   justify-content: center;
   border-radius: 50%;
-  background: white;
-  border: 1.5px solid var(--brand-200, #A5D6A7);
-  color: var(--brand-700, #388E3C);
-  box-shadow: 0 2px 8px rgba(0,0,0,0.10);
+  background: var(--brand-600, #43A047);
+  border: 2px solid white;
+  color: white;
+  box-shadow: 0 6px 18px rgba(0,0,0,0.28);
   cursor: pointer;
-  transition: background 0.15s ease, box-shadow 0.15s ease;
+  transition: background 0.15s ease, transform 0.15s ease;
   pointer-events: all;
 }
 
 .kanban-scroll-btn:hover {
-  background: var(--brand-50, #E8F5E9);
-  box-shadow: 0 4px 14px rgba(0,0,0,0.14);
+  background: var(--brand-700, #388E3C);
+  transform: scale(1.06);
 }
 
 .kanban-scroll-btn:active {
-  background: var(--brand-100, #C8E6C9);
+  background: var(--brand-800, #2E7D32);
+}
+
+.kanban-scroll-badge {
+  padding: 4px 10px;
+  border-radius: 9999px;
+  background: var(--brand-900, #1B5E20);
+  color: white;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+  box-shadow: 0 3px 10px rgba(0,0,0,0.25);
+}
+
+/* Attention pulse: a soft ring that expands from the chevron, three beats
+   then a rest, repeating until the user scrolls/clicks (JS drops the class
+   for the rest of the session). */
+.kanban-scroll-btn-pulse::after {
+  content: '';
+  position: absolute;
+  inset: -2px;
+  border-radius: 50%;
+  border: 3px solid var(--brand-500, #4CAF50);
+  opacity: 0;
+  pointer-events: none;
+  animation: kanban-scroll-pulse 8s ease-out infinite;
+}
+
+@keyframes kanban-scroll-pulse {
+  0%   { transform: scale(1);   opacity: 0.9; }
+  12%  { transform: scale(1.7); opacity: 0; }
+  15%  { transform: scale(1);   opacity: 0.9; }
+  27%  { transform: scale(1.7); opacity: 0; }
+  30%  { transform: scale(1);   opacity: 0.9; }
+  42%  { transform: scale(1.7); opacity: 0; }
+  100% { transform: scale(1.7); opacity: 0; }
+}
+
+/* Reduced motion: no animation, a static high-contrast ring instead. */
+@media (prefers-reduced-motion: reduce) {
+  .kanban-scroll-btn-pulse::after {
+    animation: none;
+    opacity: 1;
+    transform: none;
+    inset: -6px;
+    border-color: var(--brand-900, #1B5E20);
+  }
 }
 
 /* App walkthrough (E10/B3): highlight ring around the element a coach-mark

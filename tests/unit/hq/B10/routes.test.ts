@@ -21,6 +21,7 @@
  *   TSX_TSCONFIG_PATH=tests/unit/hq/B10/tsconfig.b10.json \
  *     ../../node_modules/.bin/tsx --test tests/unit/hq/B10/routes.test.ts
  */
+import '../../_isolated-db';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { NextRequest } from 'next/server';

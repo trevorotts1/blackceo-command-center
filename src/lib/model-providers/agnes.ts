@@ -106,6 +106,7 @@ export async function fetchModels(apiKey: string): Promise<ProviderModel[]> {
 export async function chatCompletion(
   apiKey: string,
   request: ChatCompletionRequest,
+  signal?: AbortSignal,
 ): Promise<ChatCompletionResponse> {
   if (!apiKey) {
     throw new Error('Agnes chatCompletion called without an apiKey');
@@ -119,6 +120,7 @@ export async function chatCompletion(
     method: 'POST',
     headers: authHeaders(apiKey),
     body: JSON.stringify(req),
+    signal,
   });
 }
 

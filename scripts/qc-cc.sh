@@ -658,12 +658,12 @@ blue "── 12. Cross-store embedding contract validate (SOP_EMBEDDING_PROVIDER
 # LOCAL OLLAMA OPT-IN: a box whose .env.local sets SOP_EMBEDDING_PROVIDER=ollama
 # (free local embeddings, e.g. a box whose Gemini key is out of credit) is held
 # to its OWN contract instead — every sop_embeddings row on the local model
-# (SOP_EMBEDDING_MODEL, default nomic-embed-text) at its dims (default 768).
+# (SOP_EMBEDDING_MODEL, default embeddinggemma-2:740m) at its dims (default 768).
 SOP_EXP_MODEL="gemini-embedding-2"; SOP_EXP_DIMS=3072
 if [ -f .env.local ] && grep -q "^SOP_EMBEDDING_PROVIDER=ollama" .env.local; then
   SOP_EXP_MODEL="$(sed -n 's/^SOP_EMBEDDING_MODEL=//p' .env.local | head -1 | tr -d "\"'")"
   SOP_EXP_DIMS="$(sed -n 's/^SOP_EMBEDDING_DIMS=//p' .env.local | head -1 | tr -d "\"'")"
-  SOP_EXP_MODEL="${SOP_EXP_MODEL:-nomic-embed-text}"; SOP_EXP_DIMS="${SOP_EXP_DIMS:-768}"
+  SOP_EXP_MODEL="${SOP_EXP_MODEL:-embeddinggemma-2:740m}"; SOP_EXP_DIMS="${SOP_EXP_DIMS:-768}"
 fi
 
 # 12.1: CODE contract — auto-detect in resolveEmbeddingProvider() puts Google FIRST

@@ -60,7 +60,7 @@ import {
 import { ensureBlendGuardrail } from '@/lib/persona-dispatch';
 import { getBestSOPForTask, getPersonaSlots, type PersonaSlot, type SOP } from '@/lib/sops';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
-import { autoDispatchTask, recordDispatchFailure } from '@/lib/task-dispatcher';
+import { autoDispatchTask, recordDispatchFailure, PLANNING_PENDING_KEY } from '@/lib/task-dispatcher';
 import { bindOperatorPresentationContract, saveOperatorPresentationContract, type OperatorPresentationIntake } from '@/lib/presentation-operator-contract';
 import {
   isPodcastTask,
@@ -74,10 +74,13 @@ import {
   sendRequesterAudienceAsk,
   type RequesterAudienceAskDelivery,
 } from '@/lib/jobs/trust-engine';
+import { loadTaskRow } from '@/lib/board/task-row-projection';
 import { normalizeRequesterSessionKey } from '@/lib/requester-session';
 import { transition, recordStatusEvent, captureHqTaskEvent, hqTaskAssignee, type LifecycleState } from '@/lib/task-lifecycle';
 import { assertNoFixtureDerivedServerWrite } from '@/lib/fixture-guard';
 import type { Task, TaskPriority, Agent, PersonaBundle, TaskPersonaBundleRow } from '@/lib/types';
+import { extractNamedRecipient } from '@/lib/audience/named-recipient';
+import { AUDIENCE_ASK_TEXT, ANSWERED_AUDIENCE_SOURCES } from '@/lib/board/audience-chip';
 
 // ─── SENTINEL GUARD HELPERS ──────────────────────────────────────────────────
 
@@ -164,6 +167,10 @@ export const PERSONA_PIN_DISPATCH_BUDGET_MS = 8000;
 // Dispatch-time SOP rescore (F3.4) is a single bounded, heuristic-mode spawn so
 // dispatch stays responsive — no retry loop, tighter than the creation timeout.
 export const PERSONA_RESCORE_TIMEOUT_MS = 10000;
+// Confirm/auto-answer voice re-score runs the full --blend selector, which needs far more
+// than 10s on a real box (it was SIGTERM-killed 3x on the canary, stalling dispatch 12 min).
+// Bounded under the 5-min dispatch sweep window. Env: AUDIENCE_RESCORE_TIMEOUT_MS.
+export const AUDIENCE_RESCORE_TIMEOUT_MS = parseInt(process.env.AUDIENCE_RESCORE_TIMEOUT_MS || '', 10) || 120_000;
 
 // ─── DEFAULT-PERSONA FALLBACK CHAIN (POINT 10 fix 1 / F3.1 FDN-2) ────────────
 // The founder's board invariant: EVERY task carries a persona. Historically,
@@ -1648,7 +1655,7 @@ type RequesterAudienceAskSender = (
 /**
  * Build the operator-facing audience prompt. A single high-confidence ICP audience
  * gets a CONFIRM prompt; multiple / low-confidence / none gets the exact
- * "What audience are we dealing with?" ask enumerating the known ICP audiences.
+ * plain "Who will be reading this?" ask listing the known readers.
  */
 function buildAudiencePrompt(
   label: string | null,
@@ -1656,12 +1663,12 @@ function buildAudiencePrompt(
   confidence: number,
 ): string {
   if (label && candidates.length <= 1 && confidence >= AUDIENCE_HIGH_CONFIDENCE) {
-    return `Confirm the audience for this content task: "${label}". This is the ICP we will write FOR — reply to change it if that's wrong before the task is dispatched.`;
+    return `Likely answer for "who will read this?": "${label}". Confirm it, or change it, before the task starts.`;
   }
   const list = candidates.length
     ? candidates.map((c) => `• ${c}`).join('\n')
-    : '(no ICP audiences on file — name the audience)';
-  return `What audience are we dealing with? This content task needs a confirmed audience before dispatch. Known ICP audiences:\n${list}`;
+    : '(nothing on file — the owner needs to say who will read it)';
+  return `Who will be reading this? This content task is waiting for an answer before it starts. Known readers:\n${list}`;
 }
 
 /**
@@ -1734,7 +1741,7 @@ export async function refreshPersonaDecisionIfNeeded(taskId:string):Promise<void
   if(!stale && !(bundle.rationale as {refresh_pending?:boolean}|undefined)?.refresh_pending) { applyPersonaOperatorLock(taskId); await refreshPersonaScopesIfNeeded(taskId); return; }
   const dept=canonicalDeptSlug(task.department ?? '') || 'general';
   const description=`${task.title} ${task.description ?? ''}`;
-  if(task.audience_source==='operator_confirmed' && task.audience_label) {
+  if((task.audience_source==='operator_confirmed' || task.audience_source==='task_named' || task.audience_source==='owner_default' || task.audience_source==='best_guess') && task.audience_label) {
     const refreshed=await rescoreAudienceBlend(taskId,description,dept,task.audience_label);
     if(!refreshed.rescored) throw new Error('persona_refresh_pending');
   } else {
@@ -1974,7 +1981,14 @@ export function holdForAudienceConfirm(
     run('UPDATE tasks SET next_dispatch_eligible_at = ? WHERE id = ?', [nextEligible, taskId]);
   } catch { /* pre-migration tolerant */ }
 
-  if (decision.firstHold) {
+  // Already answered (task_named / owner_default / operator_confirmed): never write a fresh ask.
+  let answered = false;
+  try {
+    const src = queryOne<{ audience_source: string | null }>('SELECT audience_source FROM tasks WHERE id = ?', [taskId])?.audience_source ?? '';
+    answered = (ANSWERED_AUDIENCE_SOURCES as readonly string[]).includes(src);
+  } catch { /* pre-migration tolerant */ }
+
+  if (decision.firstHold && !answered) {
     try {
       run(
         `INSERT INTO events (id, type, agent_id, task_id, message, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
@@ -1991,8 +2005,8 @@ export function holdForAudienceConfirm(
     } catch { /* notify best-effort */ }
 
     const audienceQuestion = decision.audienceLabel
-      ? `Quick check before we start building: this will be written for ${decision.audienceLabel} — is that right, or should it be for someone else?`
-      : 'Quick question before we start building: who is this for? Tell me about the audience you want this written for.';
+      ? `This is going to ${decision.audienceLabel}. Is that who it's written for? This task is waiting until you answer.`
+      : AUDIENCE_ASK_TEXT;
     let askDelivery: RequesterAudienceAskDelivery = 'send_failed';
     try {
       askDelivery = sendRequesterAudienceAskFn(taskId, audienceQuestion);
@@ -2011,8 +2025,25 @@ export function holdForAudienceConfirm(
         [uuidv4(), 'audience_confirm_ask_sent', agentId, taskId, askDelivery, now],
       );
     } catch { /* audit best-effort */ }
+    // The ask is now on the row; push it to the board so the "needs your answer"
+    // banner appears without a manual reload (first hold only).
+    try {
+      const row = loadTaskRow(taskId);
+      if (row) broadcast({ type: 'task_updated', payload: row });
+    } catch { /* broadcast best-effort */ }
   }
   console.log(`[audience-confirm] task ${taskId} HELD — awaiting operator audience confirmation`);
+}
+
+/**
+ * The hold parks the card for AUDIENCE_CONFIRM_POLL_MS. Once the operator's
+ * confirm has fully landed, drop that wait so the next intake-advance tick
+ * dispatches it instead of making the card sit up to 5 more minutes.
+ */
+export function releaseAudienceHoldDelay(taskId: string): void {
+  try {
+    run('UPDATE tasks SET next_dispatch_eligible_at = NULL WHERE id = ?', [taskId]);
+  } catch { /* pre-migration tolerant */ }
 }
 
 /**
@@ -2159,8 +2190,9 @@ export function markAudienceDeadlineFallback(taskId: string): void {
  */
 export function confirmTaskAudience(
   taskId: string,
-  opts: { audienceId?: string | null; audienceLabel?: string | null; changed?: boolean } = {},
+  opts: { audienceId?: string | null; audienceLabel?: string | null; changed?: boolean; source?: 'operator_confirmed' | 'task_named' | 'owner_default' | 'best_guess' } = {},
 ): void {
+  const source = opts.source ?? 'operator_confirmed';
   const snapshot=capturePersonaSnapshot(taskId);
   commitPersonaMutation(snapshot,()=>{
     const row=queryOne<{bundle_json:string}>('SELECT bundle_json FROM task_persona_bundle WHERE task_id=?',[taskId]);
@@ -2168,18 +2200,54 @@ export function confirmTaskAudience(
     const bundle=JSON.parse(row.bundle_json) as PersonaBundle;
     const label=opts.audienceLabel ?? bundle.resolved_audience?.label ?? null;
     bundle.resolved_audience={...(bundle.resolved_audience ?? {confidence:1,candidates:[]}),id:opts.audienceId ?? bundle.resolved_audience?.id ?? null,
-      label,source:'operator_confirmed',candidates:label?[label]:[]};
+      label,source,candidates:label?[label]:[]};
     // Confirmation is preserved, but writing waits until the new voice decision
     // is rebuilt. Never release an old audience's blend during the async await.
     const pending={...bundle,confirm_required:true,rationale:{...(bundle.rationale ?? {}),refresh_pending:true}};
     persistPersonaBundle(taskId,pending);
     run("UPDATE task_persona_bundle SET confirm_state='pending',created_at=? WHERE task_id=?",[new Date().toISOString(),taskId]);
-    run("UPDATE tasks SET audience_source='operator_confirmed' WHERE id=?",[taskId]);
+    run("UPDATE tasks SET audience_source=?,audience_label=COALESCE(?,audience_label) WHERE id=?",[source,label,taskId]);
     run('INSERT INTO events(id,type,task_id,message,created_at) VALUES(?,?,?,?,?)',
       [uuidv4(),'audience_confirmed',taskId,'Audience confirmed; refreshing the persona decision before dispatch.',new Date().toISOString()]);
   });
 }
 
+
+/**
+ * Single chokepoint for "who will read this?" answered without asking.
+ * Called by autoDispatchTask when the gate says pending. Order: (1) the task
+ * names its recipient, (2) the owner has a main audience on file. Confirms it
+ * through the same path as the board's Answer button, then reports whether
+ * the gate has released. No client message is ever sent from here.
+ */
+export async function autoAnswerAudienceIfPossible(
+  taskId: string,
+  agentId: string | null,
+  decision: AudienceConfirmDecision,
+  rescore: typeof rescoreAudienceBlend = rescoreAudienceBlend,
+): Promise<{ answered: boolean; label: string | null; source: 'task_named' | 'owner_default' | null; released: boolean }> {
+  const none = { answered: false, label: null, source: null, released: false } as const;
+  if (decision.reason === 'persona_governance_unavailable' || decision.reason === 'persona_refresh_pending') return none;
+  const task = queryOne<Task>('SELECT * FROM tasks WHERE id = ?', [taskId]);
+  if (!task) return none;
+  const named = extractNamedRecipient(task.title, task.description);
+  const fallback = decision.audienceLabel ?? decision.candidates[0] ?? null;
+  const label = named ?? fallback;
+  const source = named ? 'task_named' : 'owner_default';
+  if (!label) return none;
+  confirmTaskAudience(taskId, { audienceLabel: label, source });
+  const dept = canonicalDeptSlug(task.department || task.workspace_id || '') || 'general';
+  await rescore(taskId, `${task.title}${task.description ? `. ${task.description}` : ''}`.trim(), dept, label);
+  // The re-score re-persists the bundle; make sure the card keeps the auto source (drives the "Written for" chip).
+  try { run('UPDATE tasks SET audience_source = ?, audience_label = ? WHERE id = ?', [source, label, taskId]); } catch { /* pre-090 tolerant */ }
+  try {
+    run(
+      'INSERT INTO events (id, type, agent_id, task_id, message, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+      [uuidv4(), 'audience_auto_answered', agentId, taskId, `Answered "who will read this?" automatically: ${label} (${source}).`, new Date().toISOString()],
+    );
+  } catch { /* audit best-effort */ }
+  return { answered: true, label, source, released: !evaluateAudienceConfirmGate(taskId).hold };
+}
 
 /**
  * D3 — re-run the voice-first blend WITH the operator-confirmed audience so the
@@ -2209,7 +2277,7 @@ export async function rescoreAudienceBlend(
     const persona = await selectPersonaForTask(taskId, taskDescription, departmentForSelector, null, {
       blend: true,
       audienceOverride: audienceLabel,
-      timeoutMs: PERSONA_RESCORE_TIMEOUT_MS,
+      timeoutMs: AUDIENCE_RESCORE_TIMEOUT_MS,
     });
     if (!persona?.bundle) {
       console.warn(`[rescoreAudienceBlend] task ${taskId}: re-run selector returned no bundle — confirm stands, voice unchanged.`);
@@ -2231,6 +2299,7 @@ export async function rescoreAudienceBlend(
     try {
       run(`UPDATE task_persona_bundle SET confirm_state = 'confirmed' WHERE task_id = ?`, [taskId]);
     } catch { /* pre-090 tolerant */ }
+    releaseAudienceHoldDelay(taskId);
     const updatedTask = queryOne<Task>(
       `SELECT t.*,
           aa.name as assigned_agent_name,
@@ -2441,6 +2510,8 @@ export interface CreateTaskCoreInput {
   idempotency_company_id?: string | null;
   idempotency_payload_hash?: string;
   routing_hold_reason?: string | null;
+  /** Planning Mode: stamp the planning hold at INSERT time so routing/dispatch skip the task. */
+  planning_mode?: boolean;
   persona_bundle?: PersonaBundle | null;
   title: string;
   description?: string | null;
@@ -2885,6 +2956,7 @@ export async function createTaskCore(
     if (input.presentation_operator_intake) {
       saveOperatorPresentationContract(id, bindOperatorPresentationContract(id, input.presentation_operator_intake));
     }
+    if (input.planning_mode) run('UPDATE tasks SET planning_session_key=? WHERE id=?', [PLANNING_PENDING_KEY, id]);
     if (input.routing_hold_reason) run('UPDATE tasks SET dispatch_hold=1, routing_reason=?, routing_wait_owner=? WHERE id=?', [input.routing_hold_reason, 'SYSTEM', id]);
     // INTAKE LANE (migration 153) — written after the insert, the same shape
     // routing_hold_reason uses, so the canonical INSERT column list stays as it

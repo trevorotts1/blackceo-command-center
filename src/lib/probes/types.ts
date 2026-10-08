@@ -88,6 +88,25 @@ export interface TieredStatusInput {
  * (`readCachedStatus`) in system-status.ts call this SAME function so their
  * `overall` values are identical for identical inputs by construction.
  */
+/**
+ * An `unknown` row that only means "nothing to check here": a provider/channel
+ * with no key configured, or a memory ledger that has no entries yet. It is not
+ * a fault and must not turn the header pill Degraded. Every `overall`
+ * computation (server fresh, server cached, client readiness) filters with this.
+ */
+export function isNotApplicable(c: {
+  component: string;
+  status: SystemStatus;
+  detail?: Record<string, unknown>;
+}): boolean {
+  if (c.status !== 'unknown') return false;
+  return (
+    c.component.startsWith('provider_') ||
+    c.detail?.configured === false ||
+    (c.component === 'memory' && c.detail?.entries === 0)
+  );
+}
+
 export function computeOverallTiered(components: TieredStatusInput[]): SystemStatus {
   const critical = components.filter((c) => c.tier === 'critical').map((c) => c.status);
   const auxiliary = components.filter((c) => c.tier === 'auxiliary').map((c) => c.status);

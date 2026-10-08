@@ -168,6 +168,7 @@ function runDeploy(fixture: Fx, extraEnv: Record<string, string> = {}): { exitCo
         PATH: `${fixture.binDir}:${process.env.PATH ?? ''}`,
         HOME: fixture.baseDir,
         CC_HEALTH_CHECK_PATH: fixture.healthStub,
+        CC_POST_SWITCH_WAIT: '0',
         ...extraEnv,
       },
       cwd: fixture.appDir,

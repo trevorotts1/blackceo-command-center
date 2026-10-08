@@ -128,9 +128,26 @@ test('QR-008: the measured box case — ~/bin resolves under pm2-shaped minimal 
     // by the fixture test above regardless of what is installed here.
     return;
   }
-  const resolved = withPathExact('/usr/bin:/bin:/usr/sbin:/sbin', () =>
-    resolveCliBinary(null, 'adb')
-  );
+  // The login shell is a deterministic stub that prints the PATH a real
+  // interactive login shell would (with ~/bin). Spawning the operator's real
+  // `$SHELL -lic` made this test depend on rc-file speed: under a loaded full
+  // suite it exceeded the harvest's 1s ceiling and resolved null.
+  resetLoginPathHarvest();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qr8-shell-'));
+  TEMP_DIRS.push(dir);
+  const shell = path.join(dir, 'login-shell');
+  fs.writeFileSync(shell, `#!/bin/sh\nprintf %s "${path.join(HOME, 'bin')}:/usr/bin:/bin"\n`, { mode: 0o755 });
+  const originalShell = process.env.SHELL;
+  process.env.SHELL = shell;
+  let resolved: string | null;
+  try {
+    resolved = withPathExact('/usr/bin:/bin:/usr/sbin:/sbin', () =>
+      resolveCliBinary(null, 'adb')
+    );
+  } finally {
+    process.env.SHELL = originalShell;
+    resetLoginPathHarvest();
+  }
   assert.equal(resolved, adb, `adb must resolve to ${adb} even without ~/bin on PATH`);
 });
 

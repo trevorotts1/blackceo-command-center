@@ -377,6 +377,7 @@ function runDeploy(
         // Inject health check stub path — atomic-deploy.sh reads CC_HEALTH_CHECK_PATH
         // before falling back to SCRIPT_DIR, so this always wins.
         CC_HEALTH_CHECK_PATH: fixture.healthCheckStubPath,
+        CC_POST_SWITCH_WAIT: '0', // fixtures have no listener; skip the readiness poll
         ...extraEnv,
       },
       cwd: fixture.appDir,
@@ -1806,6 +1807,7 @@ esac
           PATH: `${binDir}:${process.env.PATH ?? ''}`,
           HOME: baseDir,
           CC_HEALTH_CHECK_PATH: healthStubPath,
+          CC_POST_SWITCH_WAIT: '0',
         },
         cwd: appDir,
         timeout: 60_000,
