@@ -18,7 +18,7 @@
  *                                                  GOOGLE_AI_STUDIO_API_KEY /
  *                                                  GEMINI_API_KEY
  *   SOP_EMBEDDING_PROVIDER=openai|google        — force a specific provider
- *   SOP_EMBEDDING_PROVIDER=ollama               — local Ollama (nomic-embed-text @768), free,
+ *   SOP_EMBEDDING_PROVIDER=ollama               — local Ollama (embeddinggemma-2:740m @768), free,
  *                                                  no key; explicit per-box opt-in only
  *
  * Google-only clients need NO OPENAI_API_KEY.
@@ -263,12 +263,18 @@ async function main(): Promise<void> {
   );
   if (staleRows.length > 0) {
     const totalStale = staleRows.reduce((s, r) => s + r.cnt, 0);
-    console.log(`[backfill-sop-embeddings] PURGE: deleting ${totalStale} non-active-model rows:`);
+    console.log(
+      `[backfill-sop-embeddings] PURGE: ${dryRun ? 'DRY RUN — would delete' : 'deleting'} ` +
+      `${totalStale} non-active-model rows:`
+    );
     for (const r of staleRows) {
       console.log(`  - ${r.embedding_model}: ${r.cnt} row(s)`);
     }
-    run('DELETE FROM sop_embeddings WHERE embedding_model != ?', [provider.model]);
-    console.log('[backfill-sop-embeddings] Purge complete. Only active-model rows remain.');
+    // --dry-run never writes: this DELETE once wiped every Gemini row on a dry run.
+    if (!dryRun) {
+      run('DELETE FROM sop_embeddings WHERE embedding_model != ?', [provider.model]);
+      console.log('[backfill-sop-embeddings] Purge complete. Only active-model rows remain.');
+    }
   } else {
     console.log('[backfill-sop-embeddings] Purge: no non-active-model rows found (already clean).');
   }

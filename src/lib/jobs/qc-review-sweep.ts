@@ -315,6 +315,43 @@ export async function runQCReviewSweep(): Promise<QCReviewSweepResult> {
     [`-${deferredRetryMin} minutes`],
   );
 
+  // HEAL: a card parked at [QC-JUDGE-FAILED-FINAL] because its judge MODEL was
+  // gone (new marker [JUDGE-MODEL-GONE], or a legacy 404/410 in the detail) is
+  // re-scored once a working judge exists (configured one fixed, or the box
+  // default model via the scorer's fallback). One canary card per tick: only a
+  // real `llm` verdict opens the gate for the rest, so a still-dead judge costs
+  // one failing call per tick, not one per card.
+  const healRows = queryAll<{ id: string; title: string }>(
+    `SELECT t.id, t.title
+     FROM tasks t
+     WHERE t.status = 'review'
+       AND t.archived_at IS NULL
+       AND (t.source IS NULL OR t.source <> 'build_deck_phase')
+       AND NOT EXISTS (
+         SELECT 1 FROM events e WHERE e.task_id = t.id AND e.type = 'qc_review'
+           AND e.message LIKE '%[QC-HEURISTIC-FINAL]%'
+       )
+       AND EXISTS (
+         SELECT 1 FROM events e WHERE e.task_id = t.id AND e.type = 'qc_review'
+           AND e.message LIKE '%[QC-JUDGE-FAILED-FINAL]%'
+           AND (e.message LIKE '%[JUDGE-MODEL-GONE]%' OR e.message LIKE '%failed: 410%' OR e.message LIKE '%failed: 404%')
+       )
+     ORDER BY t.updated_at ASC`,
+    [],
+  );
+  let healed = 0;
+  for (const row of healRows) {
+    try {
+      const r = await runQCOnReview(row.id);
+      if (!r || r.scoringPath !== 'llm') break; // judge still dead — stop after the canary
+      healed++;
+    } catch (err) {
+      console.error(`[qc-review-sweep] Error re-scoring judge-failed task ${row.id}:`, (err as Error).message);
+      break;
+    }
+  }
+  if (healed > 0) console.log(`[qc-review-sweep] Healed ${healed} judge-model-gone card(s) — judge works again`);
+
   if (stuckRows.length === 0) {
     return { scanned: 0, scored: 0, ranAt };
   }

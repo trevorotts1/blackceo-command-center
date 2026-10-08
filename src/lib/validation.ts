@@ -125,6 +125,8 @@ export const CreateTaskSchema = z.object({
   // back to the operator digest (never a client-facing send).
   requester_channel: z.string().min(1).max(64).optional().nullable(),
   requester_chat_id: z.string().min(1).max(128).optional().nullable(),
+  // Planning Mode ticked in the create form: hold the task from creation.
+  planning_mode: z.boolean().optional(),
 });
 
 export const UpdateTaskSchema = z.object({

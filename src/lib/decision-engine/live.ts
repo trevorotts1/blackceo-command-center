@@ -179,7 +179,8 @@ const MEMO_LIMIT = 500;
 const memo = new Map<string, JevDecision>();
 
 function memoKeyFor(text: string, departments?: DecisionDepartment[]): string {
-  const slugs = (departments ?? []).map((d) => d.slug).join(',');
+  // Keywords are part of the key: a department profile that changed (new SOPs) must not be answered from an older decision.
+  const slugs = (departments ?? []).map((d) => `${d.slug}:${(d.keywords ?? []).join(' ')}`).join(',');
   return createHash('sha1').update(`${text}|${slugs}`).digest('hex');
 }
 

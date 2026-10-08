@@ -112,6 +112,25 @@ import { checkTaskWriteAuth, renderWriteBackInstructions } from '@/lib/mc-auth';
 // in GUARD 3 below and the block WHERE-clause.
 const SKIP_STATUSES = new Set(['in_progress', 'review', 'done', 'blocked']);
 
+/**
+ * SQL predicate: the task has a Planning Mode session the owner has not
+ * finished (no planning_complete flag and no locked spec). Such a task must
+ * not be routed or dispatched until the plan is approved. `alias` is the
+ * tasks table alias in the caller's query. Shared by autoDispatchTask and the
+ * advancer sweeps so the rule has one definition.
+ */
+/**
+ * Placeholder planning_session_key stamped at create time when the owner ticks
+ * Planning Mode, so the task is held from the instant it exists (before the
+ * planning session starts). POST /planning replaces it with the real key.
+ */
+export const PLANNING_PENDING_KEY = 'pending';
+
+export function planningInProgressSql(alias: string): string {
+  return `(${alias}.planning_session_key IS NOT NULL AND COALESCE(${alias}.planning_complete,0)=0
+    AND NOT EXISTS(SELECT 1 FROM planning_specs ps WHERE ps.task_id=${alias}.id))`;
+}
+
 // TICKET 4a: dynamic `import('@/lib/tasks')` calls inside autoDispatchTask sit
 // inside try/catch blocks that only catch a THROW — a module that never
 // settles (a genuine hang, not an error) would leave the await paused forever
@@ -942,6 +961,13 @@ export async function autoDispatchTask(
       return { status: 'held', reason: 'dispatch_precondition' };
     }
 
+    // Planning Mode: never dispatch while the owner is still answering the
+    // planning questions. Approval / completion sets planning_complete=1.
+    if (queryOne(`SELECT 1 AS x FROM tasks t WHERE t.id = ? AND ${planningInProgressSql('t')}`, [taskId])) {
+      console.log(`[${context}] autoDispatchTask: task ${taskId} has an unfinished planning session — hold`);
+      return { status: 'held', reason: 'planning_in_progress' };
+    }
+
     // F3.4 ANCHOR (U33 / C-02-b): the SOP the CREATION-TIME persona selection
     // consumed, snapshotted at dispatch ENTRY. The SOP-aware persona rescore far
     // below compares the dispatch-resolved SOP against this value, and the case it
@@ -1349,6 +1375,36 @@ export async function autoDispatchTask(
         // ORIGINAL in-line call site instead of this one.
       }
 
+      // PERSONA-RACE: a brand-new card is created first and its persona is pinned
+      // moments later by resolvePersonaAndPin (selector call). The gate used to
+      // fire 9 ms after creation and park the card "Missing: persona" for ~1 min
+      // (Sheila Reynolds, rescue-rangers card 6a8aca3b, 2026-10-04). While the
+      // card is younger than the grace window, re-read the pin and, if it is
+      // still absent, DEFER quietly (no hold event, no attempt counted) so the
+      // next sweep re-checks. Past the window the normal hold + accounting apply.
+      if (triad.missing.includes('persona_id')) {
+        const graceMs = Number(process.env.PERSONA_PIN_GRACE_SECONDS ?? 120) * 1000;
+        const fresh = queryOne<{ persona_id: string | null; created_at: string | null }>(
+          `SELECT persona_id, created_at FROM tasks WHERE id = ?`,
+          [task.id],
+        );
+        if (fresh?.persona_id) {
+          triad = checkTriad({
+            description: task.description,
+            sop_id: task.sop_id,
+            persona_id: fresh.persona_id,
+          });
+        } else if (
+          fresh?.created_at &&
+          Date.now() - new Date(fresh.created_at).getTime() < graceMs
+        ) {
+          console.log(
+            `[${context}] autoDispatchTask: task ${taskId} persona still being selected — deferring (not a hold)`,
+          );
+          return { status: 'held', reason: 'dispatch_precondition' };
+        }
+      }
+
       if (triad.missing.length > 0) {
         const missingLabel = triadMissingPillText(triad.missing as TriadMissingKey[]);
         const holdMsg =
@@ -1499,7 +1555,20 @@ export async function autoDispatchTask(
         evaluateAudienceConfirmGate, holdForAudienceConfirm, markAudienceDeadlineFallback,
         isHardHoldConfirmDepartment, blockForOwnerConfirm,
       } = await importWithTimeout(() => import('@/lib/tasks'), 'audience-confirm-gate:@/lib/tasks');
-      const gate = evaluateAudienceConfirmGate(task.id);
+      let gate = evaluateAudienceConfirmGate(task.id);
+      if (gate.hold) {
+        // Answer "who will read this?" without asking when the task names its
+        // recipient or the owner has a main audience on file. Same confirm path
+        // as the board's Answer button; no client message.
+        const { autoAnswerAudienceIfPossible } = await import('@/lib/tasks');
+        const auto = await autoAnswerAudienceIfPossible(task.id, agent.id, gate);
+        if (auto.answered) {
+          console.log(`[${context}] autoDispatchTask: task ${taskId} audience auto-answered "${auto.label}" (${auto.source})`);
+          gate = evaluateAudienceConfirmGate(task.id);
+          // Answered but the voice refresh is still landing: retry next sweep, never ask the owner.
+          if (gate.hold) return { status: 'held', reason: 'dispatch_precondition' };
+        }
+      }
       if (gate.hold) {
         holdForAudienceConfirm(task.id, agent.id, gate);
         console.log(
@@ -1522,11 +1591,20 @@ export async function autoDispatchTask(
         // NEVER-NAKED: unconfirmed past the deadline → dispatch under house-voice
         // governance only (buildPersonaBlock's fallback governs; the blend
         // directive's guardrail still renders). Audience is NOT fabricated.
+        // Fail-safe: best-guess the audience from client knowledge first; only
+        // when both tiers fail do we release on the neutral house voice.
+        const { bestGuessAudienceForTask } = await import('@/lib/audience-best-guess');
+        const guess = await bestGuessAudienceForTask(task.id, agent.id).catch(() => null);
+        if (guess) {
+          console.log(`[${context}] autoDispatchTask: task ${taskId} audience best-guessed "${guess.label}" (${guess.tier})`);
+          if (evaluateAudienceConfirmGate(task.id).hold) return { status: 'held', reason: 'dispatch_precondition' };
+        } else {
         markAudienceDeadlineFallback(task.id);
         console.warn(
           `[${context}] autoDispatchTask: task ${taskId} audience unconfirmed past deadline — ` +
             `dispatching under house-voice governance only`,
         );
+        }
       }
     } catch (gateErr) {
       // Never block dispatch on the gate machinery itself (pre-090 DB, etc.).
@@ -2754,4 +2832,20 @@ export function acceptedRunReplayForTask(
   } catch {
     return null;
   }
+}
+
+
+/**
+ * Dispatch a task whose planning just finished, in-process (no HTTP hop, so
+ * no relative-URL or middleware-auth failure). `success` is true only when the
+ * gateway acknowledged the run.
+ */
+export async function dispatchPlannedTask(
+  taskId: string,
+  context = 'planning',
+): Promise<{ success: boolean; error?: string }> {
+  const outcome = await autoDispatchTask(taskId, context);
+  return outcome.status === 'acknowledged'
+    ? { success: true }
+    : { success: false, error: `Dispatch ${outcome.status}: ${outcome.reason}` };
 }

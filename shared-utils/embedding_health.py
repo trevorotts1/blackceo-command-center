@@ -21,7 +21,7 @@ INDEPENDENTLY, and until now nothing reported them side-by-side:
 
   LOCAL OLLAMA MODE (--sop-active-provider ollama, the CC's explicit per-box
   SOP_EMBEDDING_PROVIDER=ollama opt-in): BOTH stores are expected on the local
-  model (nomic-embed-text @768 unless --sop-active-model/--sop-active-dims say
+  model (embeddinggemma-2:740m @768 unless --sop-active-model/--sop-active-dims say
   otherwise). Gemini rows are then foreign and reported as degraded.
 
 THE ASYMMETRY THIS SURFACES
@@ -71,7 +71,7 @@ GEMINI_MODEL = "gemini-embedding-2"          # GA persona/SOP-google model
 GEMINI_DIMS = 3072
 OPENAI_MODEL = "text-embedding-3-small"      # SOP optional fallback
 OPENAI_DIMS = 1536
-OLLAMA_MODEL = "nomic-embed-text"            # local opt-in (SOP_EMBEDDING_PROVIDER=ollama)
+OLLAMA_MODEL = "embeddinggemma-2:740m"          # local opt-in (SOP_EMBEDDING_PROVIDER=ollama)
 OLLAMA_DIMS = 768
 
 # Model slugs whose vectors are INCOMPATIBLE with the pinned GA model and must

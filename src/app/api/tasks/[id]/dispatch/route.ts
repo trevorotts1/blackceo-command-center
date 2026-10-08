@@ -916,7 +916,11 @@ If you need help or clarification, ask the orchestrator.`;
     const audienceGate = evaluateAudienceConfirmGate(task.id);
     if (!audienceGate.hold && audienceGate.state === 'deadline_fallback'
         && !isHardHoldConfirmDepartment(canonicalDeptSlug(task.department || task.workspace_id || '') || 'general')) {
-      markAudienceDeadlineFallback(task.id);
+      // Fail-safe: best-guess the audience first (same path as auto-dispatch);
+      // house-voice release only when both tiers fail.
+      const { bestGuessAudienceForTask } = await import('@/lib/audience-best-guess');
+      const guess = await bestGuessAudienceForTask(task.id, agent.id).catch(() => null);
+      if (!guess) markAudienceDeadlineFallback(task.id);
     }
     const personaReady = checkPersonaDispatchReady(task.id);
     if (!personaReady.ready) return NextResponse.json({success:false,held:true,reason:personaReady.reason},{status:409});

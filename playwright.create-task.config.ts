@@ -1,5 +1,5 @@
 import { defineConfig } from 'playwright/test';
-import { BASE_URL, serverEnv } from './tests/integration/create-task.fixture';
+import { BASE_URL, serverEnv, signFixtureTenantGrant } from './tests/integration/create-task.fixture';
 
 /**
  * Dedicated, self-contained Playwright config for the P2-03 create-task
@@ -28,6 +28,22 @@ export default defineConfig({
   use: {
     baseURL: BASE_URL,
     headless: true,
+    // Pre-authenticated tenant session so src/middleware.ts admits the browser.
+    storageState: {
+      cookies: [
+        {
+          name: 'mc_tenant_session',
+          value: signFixtureTenantGrant(),
+          domain: '127.0.0.1',
+          path: '/',
+          expires: -1,
+          httpOnly: true,
+          secure: false,
+          sameSite: 'Strict',
+        },
+      ],
+      origins: [],
+    },
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',
     video: 'off',

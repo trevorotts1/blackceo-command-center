@@ -237,7 +237,8 @@ export interface ModelProvider {
   /** Returns usage / quota snapshot. Optional. */
   fetchUsage?(apiKey: string): Promise<UsageSnapshot>;
   /** Proxy a chat completion through the provider. Optional. */
-  chatCompletion?(apiKey: string, request: ChatCompletionRequest): Promise<ChatCompletionResponse>;
+  /** `signal`, when given, cancels the HTTP request (the routing model pick aborts a timed-out hop). */
+  chatCompletion?(apiKey: string, request: ChatCompletionRequest, signal?: AbortSignal): Promise<ChatCompletionResponse>;
   /**
    * Optional post-save smoke-test. After the operator saves a new key via
    * POST /api/clients/[id]/keys, the route calls this (if present) to

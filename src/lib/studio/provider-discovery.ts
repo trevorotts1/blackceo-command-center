@@ -267,6 +267,15 @@ export function extractOpenclawEnv(json: unknown): Record<string, string> {
 }
 
 /**
+ * If `v` is an env-variable reference (`$NAME`, `${NAME}`, or a bare
+ * UPPER_SNAKE name) return NAME, else null. Real keys are never all-caps-snake.
+ */
+export function envReferenceName(v: string): string | null {
+  const m = /^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$|^\$([A-Za-z_][A-Za-z0-9_]*)$|^([A-Z][A-Z0-9_]*)$/.exec(v.trim());
+  return m ? m[1] || m[2] || m[3] : null;
+}
+
+/**
  * Pull provider API keys out of an `openclaw.json` `models.providers` map.
  *
  * OpenClaw stores per-provider credentials at
@@ -275,7 +284,10 @@ export function extractOpenclawEnv(json: unknown): Record<string, string> {
  * key configured ONLY inside openclaw.json (never exported to a `.env`) still
  * lights up the provider. Never throws.
  */
-export function extractOpenclawProviderKeys(json: unknown): Record<string, string> {
+export function extractOpenclawProviderKeys(
+  json: unknown,
+  lookup?: (name: string) => string | undefined,
+): Record<string, string> {
   const out: Record<string, string> = {};
   if (!json || typeof json !== 'object') return out;
   const models = (json as Record<string, unknown>).models;
@@ -283,6 +295,7 @@ export function extractOpenclawProviderKeys(json: unknown): Record<string, strin
   const providers = (models as Record<string, unknown>).providers;
   if (!providers || typeof providers !== 'object') return out;
 
+  const envVarsInJson = extractOpenclawEnv(json);
   for (const [slug, raw] of Object.entries(providers as Record<string, unknown>)) {
     if (!raw || typeof raw !== 'object') continue;
     const entry = raw as Record<string, unknown>;
@@ -291,9 +304,20 @@ export function extractOpenclawProviderKeys(json: unknown): Record<string, strin
       (typeof entry.api_key === 'string' && entry.api_key) ||
       '';
     if (!key) continue;
+    // An env REFERENCE ($NAME, ${NAME}, bare NAME) is not a key: resolve it from
+    // process.env / openclaw.json env / the caller's lookup, else SKIP it. Never
+    // hydrate a placeholder as a credential (Sheila Reynolds, 2026-10: literal
+    // "GEMINI_API_KEY" became GOOGLE_API_KEY -> Google 400).
+    const refName = envReferenceName(key);
+    let value = key;
+    if (refName) {
+      const resolved = process.env[refName] || envVarsInJson[refName] || lookup?.(refName);
+      if (!resolved || envReferenceName(resolved)) continue;
+      value = resolved;
+    }
     // Convention mirrors apiKeyFor() in the refresh job: SLUG -> SLUG_API_KEY.
     const envName = slug.toUpperCase().replace(/-/g, '_') + '_API_KEY';
-    out[envName] = key;
+    out[envName] = value;
     // C1 — Ollama slug alias: the openclaw config stores the key under the
     // slug `ollama`; the connector and discovery table expect BOTH
     // `OLLAMA_API_KEY` (conventional slug derivation above) AND
@@ -301,7 +325,7 @@ export function extractOpenclawProviderKeys(json: unknown): Record<string, strin
     // both so the Ollama Cloud provider lights up regardless of which name
     // the detection layer checks first.
     if (slug === 'ollama') {
-      out['OLLAMA_CLOUD_API_KEY'] = key;
+      out['OLLAMA_CLOUD_API_KEY'] = value;
     }
   }
   return out;
@@ -396,7 +420,15 @@ export function hydrateEnvVarsFromOpenClaw(wanted: string[]): string[] {
         json = null;
       }
       // env / env.vars first, then per-provider apiKey entries.
-      const envVars = { ...extractOpenclawProviderKeys(json), ...extractOpenclawEnv(json) };
+      const fileLookup = (name: string) => {
+        for (const f of candidateEnvFiles()) {
+          const c = safeReadFile(f);
+          const v = c ? parseDotEnv(c)[name] : undefined;
+          if (v) return v;
+        }
+        return undefined;
+      };
+      const envVars = { ...extractOpenclawProviderKeys(json, fileLookup), ...extractOpenclawEnv(json) };
       for (const key of missing()) {
         if (envVars[key]) {
           process.env[key] = envVars[key];

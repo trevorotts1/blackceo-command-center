@@ -328,6 +328,8 @@ export interface Task {
   //   'not_required'      — non-content / no audience voice needed.
   //   'deadline_fallback' — released under the neutral house voice past deadline.
   blend_confirm_state?: string | null;
+  // Board banner copy for a pending audience gate (tasks.ask column; t.* carries it).
+  ask?: string | null;
   // B-U6 / U20 — declared-vs-used comparator (src/lib/persona-mismatch.ts).
   // Present ONLY when the producer's reported USED voice persona diverges from
   // this task's DECLARED voice_persona_id; null/absent on agreement or when the
@@ -942,7 +944,7 @@ export interface UpdateExecutionQueueRequest {
 // bundle and the CC behaves EXACTLY as before (backward compatible, no regression).
 
 /** Where the resolved audience came from. `asked` = the operator was prompted. */
-export type AudienceConfirmSource = 'onboarding_icp' | 'operator_confirmed' | 'asked';
+export type AudienceConfirmSource = 'onboarding_icp' | 'operator_confirmed' | 'asked' | 'task_named' | 'owner_default' | 'best_guess';
 
 /**
  * The audience the content is FOR, resolved from the client ICP (company-config
