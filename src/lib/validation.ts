@@ -397,6 +397,7 @@ export const CreateAdCampaignSchema = z.object({
   department: z.string().max(100).optional(),
   workspace: z.string().max(200).optional(),
   agent_id: z.string().max(200).optional(), // OpenClaw id; provenance ONLY — never assigned_agent_id
+  title_prefix: z.string().max(60).optional(), // epic card title/description prefix; default 'FB Ad Run'
   money_ceiling_usd: z.number().nonnegative().optional(),
   estimated_cost_usd: z.number().nonnegative().optional(),
   show_date: z.string().max(100).optional(),
