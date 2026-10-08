@@ -1,3 +1,8 @@
+## [v7.6.111] — 2026-10-08 — Batch #512: W2-B-U1 ad-campaign title_prefix + U052 census re-derive
+
+- feat(ad-campaigns): optional title_prefix on ad-campaign epic title/description (W2-B-U1, drama-song manual H3 step 1). `src/lib/ad-campaigns.ts`, `src/lib/validation.ts`, `tests/unit/ad-campaigns.test.ts`.
+- fix(passthrough-write-scope): U052 anti-rot census re-derived 135 → 136 mutating routes — v7.6.106's POST on `/api/tasks/[id]/planning/poll` (a407cab588) shipped without re-deriving the lock, leaving `B.1 deep-health truth table` red on main since 2026-10-07. Same class as ce4282c672's 130→135 re-derive. `src/lib/__tests__/passthrough-write-scope.test.ts`.
+
 ## [v7.6.110] — 2026-10-07 — Routing corrections hardening (QC follow-up to v7.6.109)
 
 - fix(routing/corrections/vote): ONE correction (weight 2, similarity >= 0.7) could outvote two or more agreeing SOP neighbours, so one mistaken correction poisoned routing for near-duplicate tasks. A department's corrections now count CORRECTION_WEIGHT (2) each only when at least CORRECTION_QUORUM (2) of them are near the task; a lone correction counts as one ordinary neighbour (weight 1) and cannot flip a placement that two or more SOPs agree on. Two agreeing corrections are still learned. `src/lib/routing/corrections.ts`, `sop-vote.ts`.
