@@ -54,6 +54,8 @@ export interface CreateAdCampaignInput {
   department?: string;
   workspace?: string;
   agent_id?: string;
+  /** Optional epic title prefix; default 'FB Ad Run' when absent. */
+  title_prefix?: string;
   money_ceiling_usd?: number;
   estimated_cost_usd?: number;
   show_date?: string;
@@ -82,6 +84,7 @@ export interface CreateAdCampaignResult {
   campaign_id: string;
   parent_id: string | null;
   stages: StageRef[];
+  title_prefix?: string;
 }
 
 /**
@@ -185,13 +188,20 @@ export function createAdCampaign(input: CreateAdCampaignInput): CreateAdCampaign
   const department = input.department || 'marketing';
   const now = new Date().toISOString();
 
+  // Epic title/description use the optional title_prefix; 'FB Ad Run' default
+  // keeps Skill 48 payloads (no title_prefix) byte-identical to before.
+  const epicTitle = `${input.title_prefix ?? 'FB Ad Run'} — ${input.show_name}`;
+  const epicDescription = input.owner
+    ? `Skill 48 Facebook ad run. owner=${input.owner}`
+    : 'Skill 48 Facebook ad run.';
+
   // Build the card list: epic parent first, then one card per stage.
   const stageList = input.stages && input.stages.length > 0 ? input.stages : DEFAULT_AD_STAGES;
   const cardsToInsert: Array<{ id: string; slug: string; title: string }> = [];
   cardsToInsert.push({
     id: uuidv4(),
     slug: EPIC_SLUG,
-    title: `FB Ad Run — ${input.show_name}`,
+    title: epicTitle,
   });
   for (const stage of stageList) {
     cardsToInsert.push({
@@ -210,8 +220,8 @@ export function createAdCampaign(input: CreateAdCampaignInput): CreateAdCampaign
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         jobId,
-        `FB Ad Run — ${input.show_name}`,
-        input.owner ? `Skill 48 Facebook ad run. owner=${input.owner}` : 'Skill 48 Facebook ad run.',
+        epicTitle,
+        epicDescription,
         'active',
         JSON.stringify([]),
         null,
@@ -260,7 +270,7 @@ export function createAdCampaign(input: CreateAdCampaignInput): CreateAdCampaign
   }
 
   const { parentId, stages } = readStageRefs(jobId);
-  return { ok: true, created: true, campaign_id: jobId, parent_id: parentId, stages };
+  return { ok: true, created: true, campaign_id: jobId, parent_id: parentId, stages, title_prefix: input.title_prefix };
 }
 
 // ---------------------------------------------------------------------------

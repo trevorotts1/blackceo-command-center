@@ -93,6 +93,41 @@ test('createAdCampaign creates 8 backlog cards and is idempotent on job_id', () 
   assert.equal(after.length, 8, 're-create did not duplicate cards');
 });
 
+test('title_prefix overrides epic title/description; absent prefix keeps FB Ad Run default (W2-B-U1)', () => {
+  const prefixedId = newJobId();
+  const prefixed = createAdCampaign({
+    job_id: prefixedId,
+    show_name: 'Book 2 of 5 — Midnight Confession (batch b77)',
+    title_prefix: 'Drama Song Ad',
+  });
+  assert.equal(prefixed.created, true);
+  const epicPrefixed = queryOne<{ title: string; description: string }>(
+    'SELECT title, description FROM tasks WHERE id = ?',
+    [prefixed.parent_id!],
+  );
+  assert.ok(epicPrefixed, 'prefixed epic card exists');
+  assert.equal(
+    epicPrefixed.title,
+    'Drama Song Ad — Book 2 of 5 — Midnight Confession (batch b77)',
+    'epic card title uses title_prefix',
+  );
+  assert.equal(prefixed.title_prefix, 'Drama Song Ad', 'prefix echoed in result');
+  const epicCampaignRow = queryOne<{ name: string; description: string }>(
+    'SELECT name, description FROM campaigns WHERE id = ?',
+    [prefixedId],
+  );
+  assert.equal(epicCampaignRow!.name, 'Drama Song Ad — Book 2 of 5 — Midnight Confession (batch b77)');
+
+  // Backward compatibility: no title_prefix → unchanged 'FB Ad Run — <name>'.
+  const defaultId = newJobId();
+  const def = createAdCampaign({ job_id: defaultId, show_name: 'Acme Default Show' });
+  assert.equal(def.title_prefix, undefined, 'no prefix echoed when absent');
+  const epicDefault = queryOne<{ title: string }>('SELECT title FROM tasks WHERE id = ?', [
+    def.parent_id!,
+  ]);
+  assert.equal(epicDefault!.title, 'FB Ad Run — Acme Default Show');
+});
+
 test('moveAdStage backlog -> in_progress -> review stays at review (no QC auto-done)', async () => {
   const jobId = newJobId();
   createAdCampaign({ job_id: jobId, show_name: 'Review Pause Show' });
