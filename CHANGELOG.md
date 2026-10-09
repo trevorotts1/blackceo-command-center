@@ -1,3 +1,12 @@
+## [v7.6.112] - 2026-10-08 - feat(interview): standard placeholder company admits the dashboard (STD001)
+When a client's AI Workforce interview has been incomplete for 14+ days, onboarding v26.4.7 builds a
+standard company named after the client and records companyMode="standard-placeholder" with
+standardPlaceholder.status="active" in .workforce-build-state.json. The shell lock now admits the
+dashboard for that state (gate-actions, gate-status, gate-fallback share one helper,
+standardPlaceholderActive). It is never interview completion: interviewComplete stays false, /interview
+stays open, and the banner now reads "You're running on a standard company setup. Finish your AI
+Workforce Interview to make it yours." A bare standardPrebuild (standardReady) still does not unlock.
+
 ## [v7.6.111] — 2026-10-08 — Batch #512: W2-B-U1 ad-campaign title_prefix + U052 census re-derive
 
 - feat(ad-campaigns): optional title_prefix on ad-campaign epic title/description (W2-B-U1, drama-song manual H3 step 1). `src/lib/ad-campaigns.ts`, `src/lib/validation.ts`, `tests/unit/ad-campaigns.test.ts`.

@@ -1,4 +1,5 @@
 import { priorCompletion } from '@/lib/interview/prior-completion';
+import { standardPlaceholderActive } from '@/lib/interview/build-verification';
 import { queryAll, queryOne, run } from '@/lib/db';
 import { ensureTenantInterview, tenantAnswers } from '@/lib/interview/remote-store';
 import { readRemoteInterviewState, drainInterviewOperations } from '@/lib/interview/remote-protocol';
@@ -383,6 +384,7 @@ export async function GET(request: NextRequest) {
       companyId: tenant.context!.companyId,
       installationId: tenant.context!.installationId,
       priorCompletionDeclared,
+      standardPlaceholder: false,
       interviewComplete: tenant.client.interview_complete === true || remote?.interviewComplete === true,
       remoteAvailable: remote !== null,
       remoteStatus: remote ? 'connected' : 'waiting_for_installation',
@@ -519,6 +521,7 @@ export async function GET(request: NextRequest) {
 
       // Top-level lifecycle signals (drive the locked-shell + redirect logic).
       priorCompletionDeclared,
+      standardPlaceholder: standardPlaceholderActive((snap.buildState as Record<string, unknown> | null) ?? null),
       interviewComplete: snap.interviewComplete,
       buildCompleted: snap.buildCompleted,
       qcStatus: snap.qcStatus,
@@ -583,6 +586,7 @@ export async function GET(request: NextRequest) {
       {
         ok: false,
         priorCompletionDeclared,
+        standardPlaceholder: false,
         session: { interviewSessionId: null },
         structured: {
           total: INTERVIEW_QUESTIONS.length,
