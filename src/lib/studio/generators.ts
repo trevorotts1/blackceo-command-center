@@ -35,6 +35,7 @@ import {
   discoverRegistryRows,
   hydrateProviderEnvFromOpenClaw,
 } from '@/lib/studio/provider-discovery';
+import { runKieJob, type KieJobResult } from '@/lib/model-providers/kie';
 
 export type StudioKind = 'image' | 'video' | 'audio';
 export type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed';
@@ -558,26 +559,61 @@ async function callFal(job: StudioJob, options: Record<string, unknown>): Promis
   return { url, metadata: { request_id: json.request_id ?? null } };
 }
 
-async function callKie(job: StudioJob, _options: Record<string, unknown>): Promise<{ url: string; metadata?: Record<string, unknown> }> {
+/**
+ * KIE generation follows the OFFICIAL agent API (docs.kie.ai/ai-agent) — see
+ * `src/lib/model-providers/kie.ts`:
+ *
+ *   POST /api/v1/jobs/createTask  {model, input}  -> data.taskId
+ *   GET  /api/v1/jobs/recordInfo?taskId=...       -> data.state (poll to
+ *                                                    success | fail)
+ *
+ * The pre-CC-KIE-U1 body posted to the undocumented `/api/v1/generations`
+ * with a flat `{model, prompt}`, checked ONLY the HTTP status, and never
+ * polled — every KIE job is asynchronous, so that path could never return a
+ * finished asset. Body `code` is now authoritative (Kie answers HTTP 200 on
+ * failure), and the job is polled to a terminal state before we hand back a
+ * URL.
+ */
+export async function callKie(
+  job: StudioJob,
+  options: Record<string, unknown>
+): Promise<{ url: string; metadata?: Record<string, unknown> }> {
   // kie.ts documents KIE_API_KEY (what the box has); accept legacy spellings.
   const key = process.env.KIE_API_KEY || process.env.KIEAI_API_KEY || process.env.KIE_AI_API_KEY;
   if (!key) throw new Error('KIE_API_KEY missing');
-  const res = await fetch('https://api.kie.ai/api/v1/generations', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${key}`,
-      'Content-Type': 'application/json',
+  // Registry ids are provider-prefixed (`kie/<catalog id>`); the API wants the
+  // bare catalog id exactly as `data.models[].model` returns it.
+  const model = (job.model_id || '').replace(/^kie\//i, '');
+  if (!model) throw new Error('KIE job has no model id');
+
+  const result = await runKieJob(key, model, { prompt: job.prompt, ...options });
+  const url = pickKieResultUrl(result);
+  if (!url) throw new Error(`Kie.ai job ${result.taskId} succeeded but returned no output URL`);
+  return {
+    url,
+    metadata: {
+      kie_task_id: result.taskId,
+      kie_state: result.state,
+      kie_model: model,
     },
-    body: JSON.stringify({ model: job.model_id, prompt: job.prompt }),
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Kie.ai failed: ${res.status} ${text.slice(0, 400)}`);
+  };
+}
+
+/**
+ * Most models return `response.resultUrls`. Suno's generate/extend/sounds
+ * tasks return their tracks at `response.data[].audio_url` instead (official
+ * doc: "Reading the output"), so fall back to that before giving up.
+ */
+function pickKieResultUrl(result: KieJobResult): string | null {
+  if (result.resultUrls.length > 0) return result.resultUrls[0];
+  const data = result.response?.data;
+  if (Array.isArray(data)) {
+    for (const entry of data) {
+      const url = (entry as { audio_url?: unknown } | null)?.audio_url;
+      if (typeof url === 'string' && url) return url;
+    }
   }
-  const json = (await res.json()) as Record<string, unknown>;
-  const url = pickFirstUrl(json);
-  if (!url) throw new Error('Kie.ai returned no output URL');
-  return { url, metadata: { upstream: json } };
+  return null;
 }
 
 async function callOpenAiImages(job: StudioJob, options: Record<string, unknown>): Promise<{ url: string; metadata?: Record<string, unknown> }> {
