@@ -12,7 +12,12 @@
 import StudioCanvas from '@/components/operator/StudioCanvas';
 import OperatorHelpButton from '@/components/operator/OperatorHelpButton';
 import ModuleHealthDot from '@/components/operator/ModuleHealthDot';
-import { availableModels, type StudioKind, type StudioModelOption } from '@/lib/studio/generators';
+import {
+  availableModels,
+  studioGenerationCapabilities,
+  type StudioKind,
+  type StudioModelOption,
+} from '@/lib/studio/generators';
 
 export const dynamic = 'force-dynamic';
 
@@ -22,6 +27,9 @@ export default async function OperatorStudioPage() {
     video: availableModels('video'),
     audio: availableModels('audio'),
   };
+  // CC-KIE-1 — the capability flag the UI reads. false = the paid entry is not
+  // available, so the Generate control must never present it as usable.
+  const capabilities = studioGenerationCapabilities();
 
   return (
     <div className="space-y-6">
@@ -38,7 +46,7 @@ export default async function OperatorStudioPage() {
           the vault under <code className="font-mono text-[12px] text-bcc-text">studio/&lt;type&gt;/YYYY/MM/</code>.
         </p>
       </header>
-      <StudioCanvas initialModels={initialModels} />
+      <StudioCanvas initialModels={initialModels} capabilities={capabilities} />
     </div>
   );
 }

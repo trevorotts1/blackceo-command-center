@@ -53,12 +53,18 @@ interface StudioToolbarProps {
   onPromptChange: (s: string) => void;
   onGenerate: () => void;
   busy: boolean;
+  /**
+   * CC-KIE-1 — server-advertised capability for this kind. `false` = the paid
+   * entry is unavailable; Generate must stay disabled and say so.
+   */
+  capabilityAvailable: boolean;
 }
 
 export default function StudioToolbar(props: StudioToolbarProps) {
   const meta = KIND_META[props.kind];
   const noModels = props.models.length === 0;
-  const disabled = props.busy || !props.prompt.trim() || noModels;
+  const unavailable = !props.capabilityAvailable;
+  const disabled = props.busy || !props.prompt.trim() || noModels || unavailable;
 
   return (
     <section className="space-y-3 rounded-xl border border-bcc-border bg-bcc-white p-4">
@@ -121,9 +127,11 @@ export default function StudioToolbar(props: StudioToolbarProps) {
 
       <div className="flex items-center justify-between">
         <p className="text-[11px] uppercase tracking-widest text-bcc-text-muted">
-          {noModels
-            ? `No ${meta.capability} provider key found. Add one of: ${meta.keyHint}.`
-            : 'Press Cmd or Ctrl + Enter to generate.'}
+          {unavailable
+            ? `${meta.label} generation is unavailable (capability false) — no provider key with a wired generate path. Nothing is submitted or spent.`
+            : noModels
+              ? `No ${meta.capability} provider key found. Add one of: ${meta.keyHint}.`
+              : 'Press Cmd or Ctrl + Enter to generate.'}
         </p>
         <button
           type="button"
