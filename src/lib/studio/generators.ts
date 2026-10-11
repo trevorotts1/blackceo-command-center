@@ -287,6 +287,63 @@ function hasApiKey(provider: string): boolean {
   return envs.some((e) => Boolean(process.env[e]));
 }
 
+/**
+ * CC-KIE-1 — is a real `call*` generator wired for this provider + kind?
+ *
+ * Mirrors the dispatch in `runJob()` exactly: Replicate / Fal / Kie handle any
+ * kind; OpenAI Images is image-only; ElevenLabs is audio-only. A provider whose
+ * key is present but whose generate path is NOT wired (Google, Fish Audio, Luma
+ * … — the `generates: false` registry rows) must NOT count as an available
+ * paid entry: advertising it to the UI and then submitting would be the exact
+ * fail-open this unit closes.
+ */
+function isGeneratorWired(kind: StudioKind, provider: string): boolean {
+  const p = (provider || '').toLowerCase();
+  if (!p) return false;
+  if (p.includes('replicate') || p.includes('fal') || p.includes('kie')) return true;
+  if (kind === 'image' && p.includes('openai')) return true;
+  if (kind === 'audio' && p.includes('elevenlabs')) return true;
+  return false;
+}
+
+/**
+ * CC-KIE-1 — THE CAPABILITY FLAG the Studio advertises to the UI.
+ *
+ * Per kind, `true` ONLY when at least one model is (a) present in the registry
+ * and (b) backed by a provider key in the environment AND (c) routed to a wired
+ * `call*` generator. Every other state — no key, registry-only provider, empty
+ * registry — resolves to `false`, so the UI cannot present a paid entry as
+ * available and `createJob()` refuses before submitting anything.
+ */
+export function studioGenerationCapabilities(): Record<StudioKind, boolean> {
+  return {
+    image: availableModels('image').some((m) => isGeneratorWired('image', m.provider)),
+    video: availableModels('video').some((m) => isGeneratorWired('video', m.provider)),
+    audio: availableModels('audio').some((m) => isGeneratorWired('audio', m.provider)),
+  };
+}
+
+/**
+ * CC-KIE-1 — thrown by `createJob()` when the paid entry is not available.
+ *
+ * Raised BEFORE any job is persisted and before `runJob()` is scheduled, so an
+ * unauthorized/unavailable request performs NO submit, NO poll and NO spend.
+ * Carries the capability map so a caller (the generate route) can return it to
+ * the UI as the honest `capabilities: false` signal.
+ */
+export class StudioGenerationRefusedError extends Error {
+  readonly kind: StudioKind;
+  readonly reason: string;
+  readonly capabilities: Record<StudioKind, boolean>;
+  constructor(kind: StudioKind, reason: string, capabilities: Record<StudioKind, boolean>) {
+    super(reason);
+    this.name = 'StudioGenerationRefusedError';
+    this.kind = kind;
+    this.reason = reason;
+    this.capabilities = capabilities;
+  }
+}
+
 export interface CreateJobInput {
   kind: StudioKind;
   prompt: string;
@@ -300,14 +357,32 @@ export interface CreateJobInput {
  * `GET /jobs/[id]` for completion.
  */
 export async function createJob(input: CreateJobInput): Promise<StudioJob> {
+  // CC-KIE-1 — FAIL CLOSED at the paid entry. When the capability flag for
+  // this kind is false (no keyed provider with a wired generate path) we refuse
+  // HERE, before a job row is persisted and before `runJob()` is scheduled:
+  // NO submit, NO poll, NO spend, NO job artifact.
+  const capabilities = studioGenerationCapabilities();
+  if (!capabilities[input.kind]) {
+    throw new StudioGenerationRefusedError(
+      input.kind,
+      `Studio ${input.kind} generation is unavailable: no provider has both a key ` +
+        `and a wired generate path for ${input.kind}. Nothing is submitted, polled ` +
+        `or spent. Add a keyed provider that is wired for ${input.kind}.`,
+      capabilities
+    );
+  }
+
   const now = new Date().toISOString();
   const id = randomUUID();
 
-  // Resolve model: explicit > first available for kind > null (will fail)
+  // Resolve model: explicit > first available for kind > null (will fail).
+  // Prefer a WIRED model so a default pick never lands on a registry-only
+  // ("coming soon") row while a real generator is present.
   const models = availableModels(input.kind);
+  const wired = models.filter((m) => isGeneratorWired(input.kind, m.provider));
   const resolved = input.model_id
-    ? models.find((m) => m.model_id === input.model_id) || null
-    : models[0] || null;
+    ? wired.find((m) => m.model_id === input.model_id) || models.find((m) => m.model_id === input.model_id) || null
+    : wired[0] || models[0] || null;
 
   const job: StudioJob = {
     id,
