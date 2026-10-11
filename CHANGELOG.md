@@ -1,3 +1,18 @@
+## [v7.6.113] - 2026-10-10 - fix(routing): daily-briefings canonical slug alias (repo-fix; guard 63/63 + dispatch bridge)
+Daily Briefings never canonicalized: the board workspace slug is `daily-briefings` (plural) while the live
+runtime folder and agents.entries key is `dept-daily-briefing-dept` (singular + folder "-dept"), and
+ALIAS_MAP carried no daily-briefing entry, so `canonicalDeptSlug()` returned each spelling unchanged and
+`expandDeptSlugAliases('daily-briefings')` bridged neither direction. `guard-department-runtime-parity.py`
+failed 1/63 (Daily Briefings, no_specialist_runtime) and dispatch `resolveSpecialistSessionKey` probed six
+slugs, missing the only dir on disk, so `openclaw_agent_id` stayed NULL.
+Two ALIAS_MAP entries now map `daily-briefings` -> `daily-briefing` and `daily-briefing-dept` ->
+`daily-briefing` (CANONICAL_SLUGS untouched, pinned count stays 26), mirrored into
+`scripts/sync-departments-from-build-state.py` `_DEPT_ALIASES`. New fail-first test
+`tests/unit/daily-briefings-slug-alias.test.ts`: 1 pass / 3 fail on the pre-fix source, 4 pass / 0 fail on
+the fix. Load-bearing with the upstream SHR002 `canonical_agent_ids` guard (already on main): SHR002 guard
++ patched `shared-utils/canonical_slug.py` = 63/63 exit 0 against the live operator `mission-control.db` +
+`openclaw.json` (measured twice); the same guard without the aliases = 1/63. Paired onboarding release: v27.1.3.
+
 ## [v7.6.112] - 2026-10-08 - feat(interview): standard placeholder company admits the dashboard (STD001)
 When a client's AI Workforce interview has been incomplete for 14+ days, onboarding v26.4.7 builds a
 standard company named after the client and records companyMode="standard-placeholder" with

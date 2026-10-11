@@ -411,6 +411,8 @@ _DEPT_ALIASES = {
     "software-development": "engineering",
     "software-dev": "engineering",
     "apps": "engineering",
+    "daily-briefings": "daily-briefing",
+    "daily-briefing-dept": "daily-briefing",
     "video-production": "video",
     "audio-production": "audio",
     "legal-compliance": "legal",
