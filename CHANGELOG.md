@@ -1,3 +1,14 @@
+## [v7.6.115] — 2026-10-11 — Intelligence Settings shows the KIE balance: "KIE credits: N" from the check the key already makes (CC-KIE-2)
+
+- feat(intelligence-settings/kie): the KIE tile now shows `KIE credits: N`. `verifyKey()` (`src/lib/model-providers/kie.ts`) already called `GET /chat/credit` to prove the key and discarded the balance it returned; it now keeps `data.credit` on `SmokeTestResult.credits`. No new live call and no extra spend.
+- fix(kie/fail-closed): a missing key, a rejected key, a non-200 code, a timeout or a malformed reply yields no balance (`undefined`), never a made-up number. A numeric string is parsed to the same number. `verifyKey()`'s existing failure branches are byte-identical.
+- feat(provider-auth-proof): `AuthProofResult` and `AuthProofCacheRow` carry `credits`; `proveProviderAuth` sets it only on a successful key check and `null` on every other path; the cache upsert stores it and `getCachedAuthProof` / `getOrProveProviderAuth` return it from the cache with no re-call.
+- feat(db): migration 170 adds the nullable `provider_auth_proof_cache.credits` column (additive, guarded by a column-existence check, no row rewrite; rows written before 170 stay `NULL`).
+- feat(api): `GET /api/models/provider-status` surfaces the cached balance on the existing cache-only read path (`src/app/api/models/provider-status/route.ts`).
+- feat(ui): `IntelligenceProviderList.tsx` renders the line only for the `kie` provider and only when the cached balance is a number.
+- test: `tests/unit/cc-kie-2-balance-tile.test.ts` (6 cases, every one stubs `fetch` with the `{code,msg,data}` reply shape — zero live calls).
+- Member: #522 `unit/CC-KIE-2` @ `029f25bff09f27b9b143a9737d477cb1257dbe51`. Joint plan line 1068, decision 19.
+
 ## [v7.6.114] — 2026-10-10 — Studio paid entry fails closed: capability false, no submit, no poll (CC-KIE-1)
 
 - fix(studio/paid-entry): the real Studio generation path no longer fail-OPENs. `createJob()` (`src/lib/studio/generators.ts`) now refuses BEFORE a job row is persisted and before `runJob()` is scheduled when the kind's capability is false, so an unauthorized/unavailable entry performs NO submit (`POST /jobs/createTask`), NO poll (`GET /jobs/recordInfo`) and NO spend; it throws the typed `StudioGenerationRefusedError`.
