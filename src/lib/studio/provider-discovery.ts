@@ -101,12 +101,32 @@ export const PROVIDER_DISCOVERY: ProviderDiscoveryEntry[] = [
     displayName: 'Kie.ai',
     // kie.ts documents KIE_API_KEY; the probe used KIEAI_API_KEY — accept both.
     envCandidates: ['KIE_API_KEY', 'KIEAI_API_KEY', 'KIE_AI_API_KEY'],
+    // CC-KIE-U1 — OFFLINE SEED IDS, NOT MEMORY.
+    //
+    // These used to be `kie/nano-banana`, `kie/gpt-image`, `kie/flux-1.1-pro`,
+    // `kie/veo-3`, `kie/runway-gen3` — names typed from memory, which the KIE
+    // official agent docs forbid outright ("Never write a model name from
+    // memory or training data... A name you 'know' may not exist"). Every id
+    // below is a `canonical_model_id` copied verbatim from the KIE skills in
+    // openclaw-onboarding:
+    //   - 66-kie-image/models.json   (image rows)
+    //   - 67-kie-video/models.json   (video rows)
+    // and every one of them declares
+    // `create_endpoint: "/api/v1/jobs/createTask"` — the single path
+    // `generators.ts callKie()` submits to. Skills 67/68 also carry models
+    // whose `create_endpoint` is a dedicated route (`/api/v1/veo/generate`,
+    // `/api/v1/runway/generate`, `/api/v1/generate`); those are deliberately
+    // NOT seeded here because callKie does not implement them.
+    //
+    // The live catalog (`kie.ts fetchModels()` reading `data.models`) is
+    // still what fills the registry on the weekly refresh — this list only
+    // gives a freshly-deployed box something honest to show before then.
     models: [
-      { model_id: 'kie/nano-banana', label: 'Nano Banana (Kie)', capability: 'image_generation', family: 'nano-banana', generates: true },
-      { model_id: 'kie/gpt-image', label: 'GPT Image (Kie)', capability: 'image_generation', family: 'gpt-image', generates: true },
-      { model_id: 'kie/flux-1.1-pro', label: 'FLUX 1.1 Pro (Kie)', capability: 'image_generation', family: 'flux', generates: true },
-      { model_id: 'kie/veo-3', label: 'Veo 3 (Kie)', capability: 'video_generation', family: 'veo', generates: true },
-      { model_id: 'kie/runway-gen3', label: 'Runway Gen-3 (Kie)', capability: 'video_generation', family: 'runway', generates: true },
+      { model_id: 'kie/gpt-image-2-5-sunburst-text-to-image', label: 'GPT Image 2.5 (Kie)', capability: 'image_generation', family: 'gpt-image-2-5-sunburst', generates: true },
+      { model_id: 'kie/gpt-image-2-text-to-image', label: 'GPT Image 2 (Kie)', capability: 'image_generation', family: 'gpt-image-2', generates: true },
+      { model_id: 'kie/nano-banana-2', label: 'Nano Banana 2 (Kie)', capability: 'image_generation', family: 'nano-banana-2', generates: true },
+      { model_id: 'kie/wan/3-0-video', label: 'Wan 3.0 Video (Kie)', capability: 'video_generation', family: 'wan-3-0', generates: true },
+      { model_id: 'kie/kling-3.0/video', label: 'Kling 3.0 (Kie)', capability: 'video_generation', family: 'kling-3-0', generates: true },
     ],
   },
   {
