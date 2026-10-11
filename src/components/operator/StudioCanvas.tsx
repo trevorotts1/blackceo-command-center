@@ -20,11 +20,17 @@ import StudioOutputPanel from './StudioOutputPanel';
 
 interface StudioCanvasProps {
   initialModels: Record<StudioKind, StudioModelOption[]>;
+  /**
+   * CC-KIE-1 — per-kind capability flag from the server. `false` means the paid
+   * entry is unavailable (no keyed provider with a wired generate path) and the
+   * Generate control must stay disabled so the UI cannot present it as usable.
+   */
+  capabilities: Record<StudioKind, boolean>;
 }
 
 const TERMINAL: StudioJob['status'][] = ['succeeded', 'failed'];
 
-export default function StudioCanvas({ initialModels }: StudioCanvasProps) {
+export default function StudioCanvas({ initialModels, capabilities }: StudioCanvasProps) {
   const [kind, setKind] = useState<StudioKind>('image');
   const [prompt, setPrompt] = useState('');
 
@@ -41,6 +47,7 @@ export default function StudioCanvas({ initialModels }: StudioCanvasProps) {
 
   const models = initialModels[kind];
   const busy = Boolean(activeJob && !TERMINAL.includes(activeJob.status));
+  const capabilityAvailable = Boolean(capabilities[kind]);
 
   // Initial history fetch + refetch on kind change.
   useEffect(() => {
@@ -95,6 +102,8 @@ export default function StudioCanvas({ initialModels }: StudioCanvasProps) {
   }, [activeJob]);
 
   const generate = useCallback(async () => {
+    // CC-KIE-1 — never even reach the network when the capability is false.
+    if (!capabilities[kind]) return;
     const p = prompt.trim();
     if (!p) return;
     const body = {
@@ -143,7 +152,7 @@ export default function StudioCanvas({ initialModels }: StudioCanvasProps) {
       metadata: {},
     });
     setPrompt('');
-  }, [kind, modelByKind, prompt]);
+  }, [kind, modelByKind, prompt, capabilities]);
 
   const onSelectModel = useCallback(
     (m: string | null) => {
@@ -198,6 +207,7 @@ export default function StudioCanvas({ initialModels }: StudioCanvasProps) {
         onPromptChange={setPrompt}
         onGenerate={generate}
         busy={busy}
+        capabilityAvailable={capabilityAvailable}
       />
 
       <StudioOutputPanel job={activeJob} />
