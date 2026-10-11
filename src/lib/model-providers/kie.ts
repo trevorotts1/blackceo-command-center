@@ -432,6 +432,12 @@ export async function runKieJob(
 interface KieCreditResponse {
   code?: number;
   msg?: string;
+  /**
+   * CC-KIE-2 — GET /chat/credit carries the caller's own credit balance at
+   * `data.credit`. Typed `unknown` on purpose: the value is read defensively
+   * and only a finite number is ever surfaced (never a fabricated one).
+   */
+  data?: { credit?: unknown };
   [key: string]: unknown;
 }
 
@@ -471,7 +477,18 @@ export async function verifyKey(apiKey: string): Promise<SmokeTestResult> {
       return { ok: false, status: res.status, message: payload?.msg || `${res.status} ${res.statusText}` };
     }
     if (payload && payload.code === 200) {
-      return { ok: true, status: res.status };
+      // CC-KIE-2 — keep the balance this endpoint already returns so the
+      // Intelligence Settings tile can show "KIE credits: N". Fail-closed: a
+      // missing or malformed value yields `undefined` (no balance shown),
+      // NEVER a fabricated number. A numeric string is parsed to its number
+      // (same value, not an invented one); anything else is dropped.
+      const rawCredit = payload.data?.credit;
+      const parsed =
+        typeof rawCredit === 'number' || (typeof rawCredit === 'string' && rawCredit.trim() !== '')
+          ? Number(rawCredit)
+          : Number.NaN;
+      const credits = Number.isFinite(parsed) ? parsed : undefined;
+      return { ok: true, status: res.status, credits };
     }
     return {
       ok: false,

@@ -58,6 +58,14 @@ export interface AuthProofSummary {
   failureKind: string | null;
   /** True ONLY when the key itself was actually rejected. */
   authDisproven: boolean;
+  /**
+   * CC-KIE-2 — provider account balance carried by the cached proof, when the
+   * proof call returned one (Kie /chat/credit `data.credit`). null whenever no
+   * balance was cached (missing key, rejected key, malformed reply, or a
+   * pre-migration-170 row) — never a fabricated number. Cache-only, like the
+   * rest of this summary: it never triggers a live call.
+   */
+  credits: number | null;
 }
 
 export interface ProviderStatusEntry {
@@ -210,6 +218,10 @@ export async function GET() {
         // catalog ('model_not_found') or a transport blip ('network') must never
         // paint this provider as an auth failure.
         authDisproven: failureKind === 'auth',
+        // CC-KIE-2 — pass the cached balance straight through. It is only ever
+        // written on a proven /chat/credit call, so a null here honestly means
+        // "no balance known", never a zero-invented one.
+        credits: cachedProof?.credits ?? null,
       };
 
       return {

@@ -8368,6 +8368,38 @@ export const migrations: Migration[] = [
       console.log('[Migration 169] Company Headquarters tables ready');
     },
   },
+  {
+    id: '170',
+    name: 'add_provider_auth_proof_credits',
+    up: (db) => {
+      // CC-KIE-2 — PURELY ADDITIVE, one nullable column on migration 100's
+      // provider_auth_proof_cache. The Kie proof endpoint (GET /chat/credit)
+      // already returns the caller's account balance at `data.credit`; this
+      // column keeps that number beside the cached proof so the Intelligence
+      // Settings tile can show "KIE credits: N" from the EXISTING
+      // provider-status read path, with no new live call and no extra spend.
+      // Never rewrites an existing row — rows written before this migration
+      // keep credits NULL, and the tile simply shows no balance (fail-closed,
+      // never a fabricated number). Column-existence-guarded ALTER, the same
+      // no-op-safe pattern as migration 106.
+      console.log('[Migration 170] Adding provider_auth_proof_cache.credits...');
+
+      const cols = db.prepare(`PRAGMA table_info(provider_auth_proof_cache)`).all() as { name: string }[];
+
+      if (cols.length === 0) {
+        // Table not present yet (fresh DB where 100 hasn't run): nothing to
+        // alter — migration 100 creates it and this is a no-op.
+        console.log('[Migration 170] provider_auth_proof_cache absent — skipping (no-op)');
+        return;
+      }
+
+      if (!cols.some((c) => c.name === 'credits')) {
+        db.exec(`ALTER TABLE provider_auth_proof_cache ADD COLUMN credits REAL`);
+      }
+
+      console.log('[Migration 170] provider_auth_proof_cache.credits ready');
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner
