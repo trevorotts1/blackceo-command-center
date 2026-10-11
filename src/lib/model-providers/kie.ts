@@ -1,21 +1,28 @@
 /**
- * Kie.ai provider connector per PRD Section 5.2.
+ * Kie.ai provider connector (official KIE agent API — docs.kie.ai/ai-agent).
  *
- * Kie.ai aggregates async image/video generation models (Midjourney proxy,
- * Veo, Suno, Runway, Flux, etc.) behind a unified jobs API:
- *   - GET  /v1/models                 list models (where available)
- *   - POST /v1/<task>/generate        create a generation job (model-specific path)
- *   - GET  /v1/jobs/{id}              poll job status
+ * Kie.ai aggregates async image/video/audio generation models behind a unified
+ * JOB API. The two documented endpoints are:
+ *   - POST /api/v1/jobs/createTask   submit {model, input} -> {data:{taskId}}
+ *   - GET  /api/v1/jobs/recordInfo?taskId=...  poll until `state` is terminal
+ * and the catalog is:
+ *   - GET  /api/v1/models            -> {code, data:{total, models:[...]}}
+ *
+ * Three rules from the official docs that this file follows literally:
+ *   - Check `code` in the RESPONSE BODY before reading `data`. Kie's gateway
+ *     answers HTTP 200 on failures too, so the HTTP status alone is never
+ *     proof a call succeeded.
+ *   - Every createTask job is ASYNCHRONOUS. HTTP 200 on the create call only
+ *     means "accepted"; the job must be polled to `state` success|fail.
+ *   - Model ids come from the catalog (`data.models[].model`), never from
+ *     memory or training data.
  *
  * Auth: Bearer token in the Authorization header.
  * Env:  KIE_API_KEY
  *
- * Kie is NOT a chat provider. We omit chatCompletion and expose `generate()`
- * and `getJob()` instead. The connector still conforms to ModelProvider
+ * Kie is NOT a chat provider. We omit chatCompletion and expose `runKieJob()`
+ * (create + poll) instead. The connector still conforms to ModelProvider
  * (slug, displayName, fetchModels) for the registry / refresh loop.
- *
- * Note on /models: Kie's catalog endpoint is sparse and shape-volatile. We
- * try it first; the live call's result is authoritative (see U50 note).
  *
  * U50/H+L.8 — CATALOG HONESTY (swallow-audit closure). This connector used
  * to wrap the `/models` call in a bare `try/catch` that fell through to
@@ -53,36 +60,74 @@ const MODELS_ENDPOINT = `${BASE_URL}/models`;
 // {"code":401,"msg":"Unauthorized – Authentication failed. ..."}. So auth
 // proof here reads `body.code`, never the HTTP status alone.
 const CREDIT_ENDPOINT = `${BASE_URL}/chat/credit`;
+// Official unified job API (docs.kie.ai/ai-agent).
+const CREATE_TASK_ENDPOINT = `${BASE_URL}/jobs/createTask`;
+const RECORD_INFO_ENDPOINT = `${BASE_URL}/jobs/recordInfo`;
+
+/** Default polling cadence. Docs: 3s is a good interval; recordInfo allows
+ * 10 requests/second per taskId, so 3s is well inside the limit. */
+const DEFAULT_POLL_INTERVAL_MS = 3_000;
+/** Default deadline. Docs suggest 300s for image jobs; video and music take
+ * longer, so callers may raise it via `runKieJob` options. */
+const DEFAULT_POLL_TIMEOUT_MS = 300_000;
 
 interface KieModelRow {
   id?: string;
+  /** Official catalog field — the identifier used everywhere else. */
   model?: string;
+  slug?: string;
   name?: string;
+  title?: string;
+  /** Official catalog field, e.g. `["Text to Video"]`. */
+  taskType?: unknown;
   category?: string;
   capabilities?: string[];
   [key: string]: unknown;
 }
 
+/** Official catalog envelope: `{code, msg, data: {total, models: [...]}}`. */
 interface KieModelsResponse {
-  data?: KieModelRow[];
-  models?: KieModelRow[];
+  code?: number;
+  msg?: string;
+  data?: {
+    total?: number;
+    models?: KieModelRow[];
+  } | KieModelRow[];
 }
 
-export interface KieGenerateRequest {
-  /** Kie model id, for example `veo-3`, `flux-1.1-pro`, `midjourney-v6`. */
-  model: string;
-  /** Path under the API, for example `veo/generate` or `flux/generate`. */
-  path?: string;
-  /** Free-form request body forwarded to Kie. */
-  input: Record<string, unknown>;
+/** Every Kie endpoint answers `{code, msg, data}`. */
+interface KieEnvelope<T> {
+  code?: number;
+  msg?: string;
+  data?: T;
 }
 
-export interface KieJobResponse {
-  id?: string;
-  job_id?: string;
-  status?: string;
-  data?: Record<string, unknown>;
+interface KieTaskRecord {
+  taskId?: string;
+  state?: string;
+  successFlag?: number;
+  failCode?: string | number | null;
+  failMsg?: string | null;
+  response?: Record<string, unknown> | null;
   [key: string]: unknown;
+}
+
+export interface KieJobResult {
+  taskId: string;
+  state: string;
+  /** Parsed `data.response` from the terminal recordInfo reply. */
+  response: Record<string, unknown> | null;
+  /** `data.response.resultUrls` when present (most models), else []. */
+  resultUrls: string[];
+}
+
+export interface KieRunJobOptions {
+  /** Poll cadence in ms. Defaults to 3000. */
+  pollIntervalMs?: number;
+  /** Overall deadline in ms. Defaults to 300000 (image-sized); raise for video/music. */
+  pollTimeoutMs?: number;
+  /** Injectable clock hook for tests — awaited between polls. */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 function authHeaders(apiKey: string): Record<string, string> {
@@ -142,18 +187,40 @@ function inferCapabilities(modelId: string): ModelCapability[] {
   return ['image_generation'];
 }
 
+/**
+ * Official catalog rows carry `taskType: string[]` (for example
+ * `["Text to Video"]`) instead of a `capabilities` array. Map it to Studio's
+ * three capability tags, video > audio > image so an "Image to Video" model
+ * lands on the Video tab rather than both. Returns null when the field is
+ * absent or unrecognised, in which case the caller falls back to
+ * `inferCapabilities(id)`.
+ */
+function capabilitiesFromTaskType(taskType: unknown): ModelCapability[] | null {
+  if (!Array.isArray(taskType)) return null;
+  const joined = taskType.filter((t): t is string => typeof t === 'string').join(' ');
+  if (!joined) return null;
+  if (/video/i.test(joined)) return ['video_generation'];
+  if (/audio|music|speech|singing|tts|voice|dialogue/i.test(joined)) return ['audio_generation'];
+  if (/image|photo/i.test(joined)) return ['image_generation'];
+  return null;
+}
+
 function normalizeRow(row: KieModelRow): ProviderModel | null {
-  const id = row.id || row.model || row.name;
+  // Official field order: `model` is the identifier, `slug`/`id`/`name` are
+  // legacy/fallback spellings kept so a non-standard reply still normalises.
+  const id = row.model || row.slug || row.id || row.name;
   if (!id) return null;
-  const caps = (row.capabilities || []).filter((c): c is ModelCapability => typeof c === 'string');
+  const declared = (row.capabilities || []).filter((c): c is ModelCapability => typeof c === 'string');
+  const caps =
+    declared.length > 0 ? declared : capabilitiesFromTaskType(row.taskType) ?? inferCapabilities(id);
   return {
     model_id: `${PROVIDER_SLUG}/${id}`,
-    label: row.name || id,
+    label: row.title || row.name || id,
     provider: PROVIDER_SLUG,
     family: inferFamily(id),
     pricing_model: 'per_token',
     pricing_source: 'auto',
-    capabilities: caps.length > 0 ? caps : inferCapabilities(id),
+    capabilities: caps,
     status: 'active',
     raw_metadata: row as unknown as Record<string, unknown>,
   };
@@ -189,69 +256,178 @@ async function fetchJson<T>(url: string, init: RequestInit): Promise<T> {
 }
 
 /**
+ * Fetch a JSON envelope and enforce the body's `code` before the caller reads
+ * `data`. Kie answers HTTP 200 even when the call failed (a rejected key is
+ * `HTTP 200` + `{"code":401,...}`), so the HTTP status alone is INSUFFICIENT
+ * proof of success — official doc rule 5. A missing/non-numeric `code` is
+ * treated as a failure too (fail closed), never as success.
+ */
+async function fetchKieEnvelope<T>(url: string, init: RequestInit): Promise<T> {
+  const payload = await fetchJson<KieEnvelope<T>>(url, init);
+  if (payload?.code !== 200) {
+    const msg = typeof payload?.msg === 'string' && payload.msg ? payload.msg : 'no code:200 in reply';
+    throw new Error(`Kie.ai request to ${url} rejected: code ${String(payload?.code)} ${msg}`);
+  }
+  return payload.data as T;
+}
+
+/**
  * Fetch the Kie.ai model catalog.
+ *
+ * OFFICIAL SHAPE: `{"code":200, "data": {"total": N, "models": [...]}}` —
+ * `data` is an OBJECT holding `models`, not a list. Reading `payload.data` as
+ * an array (the pre-fix behaviour) returned [] for every successful call, so
+ * the weekly refresh silently emptied the Kie catalog.
  *
  * U50/H+L.8 — CATALOG HONESTY. This used to swallow EVERY failure (a dead
  * key, a network error, a non-2xx response) into a bare `catch` that
  * returned `CURATED_MODELS` stamped `active` — so a garbage key made the
  * weekly refresh log `success: true` and re-stamped a hardcoded catalog
  * `active` forever. That swallow is gone:
- *   - a live-call failure now PROPAGATES (via `fetchJson`, no try/catch
- *     here) so `refreshOneProvider()` catches it and records
- *     `success: false` with the real error detail, exactly like every
- *     other connector;
- *   - an authenticated, successful call that legitimately lists zero
- *     models is treated as an EMPTY catalog, never substituted with
- *     `CURATED_MODELS` — presence of a key and a 200 is not a license to
- *     invent rows.
+ *   - a live-call failure now PROPAGATES (via `fetchJson`/`fetchKieEnvelope`,
+ *     no try/catch here) so `refreshOneProvider()` catches it and records
+ *     `success: false` with the real error detail, exactly like every other
+ *     connector;
+ *   - an authenticated, successful call that legitimately lists zero models
+ *     resolves to an EMPTY catalog, never substituted with `CURATED_MODELS`
+ *     — presence of a key and a 200 is not a license to invent rows.
+ *
+ * Model ids come from `data.models[].model` — the catalog, never memory.
  */
 export async function fetchModels(apiKey: string): Promise<ProviderModel[]> {
   if (!apiKey) {
     throw new Error('Kie.ai fetchModels called without an apiKey (set KIE_API_KEY)');
   }
-  const payload = await fetchJson<KieModelsResponse>(MODELS_ENDPOINT, {
+  const data = await fetchKieEnvelope<KieModelsResponse['data']>(MODELS_ENDPOINT, {
     method: 'GET',
     headers: authHeaders(apiKey),
   });
-  const rows = payload?.data || payload?.models || [];
+  const rows = Array.isArray(data) ? data : (data?.models ?? []);
   return rows.map(normalizeRow).filter((m): m is ProviderModel => m !== null);
 }
 
+const TERMINAL_STATES = new Set(['success', 'fail']);
+
 /**
- * Create a generation job on Kie. The caller picks the path (model-specific)
- * and the input shape. Returns the raw response so the caller can extract
- * the job id and poll with `getJob`.
+ * Numeric env override for the two polling knobs below. Docs note that 300s
+ * suits image jobs and that video/music need longer, so these are
+ * operator-tunable without a code change. A missing or non-numeric value
+ * falls back to the constant — never to 0/NaN.
  */
-export async function generate(
-  apiKey: string,
-  request: KieGenerateRequest
-): Promise<KieJobResponse> {
-  if (!apiKey) {
-    throw new Error('Kie.ai generate called without an apiKey');
-  }
-  const path = request.path || `${request.model}/generate`;
-  const url = `${BASE_URL}/${path.replace(/^\/+/, '')}`;
-  return fetchJson<KieJobResponse>(url, {
-    method: 'POST',
-    headers: authHeaders(apiKey),
-    body: JSON.stringify({ model: request.model, ...request.input }),
-  });
+function envInt(name: string, fallback: number, min: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n >= min ? n : fallback;
 }
 
 /**
- * Poll an async Kie job for completion. The shape is provider-stable enough
- * to expose as-is.
+ * Submit one official KIE job: `POST /api/v1/jobs/createTask` with
+ * `{model, input}`. Returns the `taskId`.
+ *
+ * A 200 here only means ACCEPTED — every KIE job is asynchronous and must be
+ * polled with `getJobStatus`/`runKieJob`.
  */
-export async function getJob(apiKey: string, jobId: string): Promise<KieJobResponse> {
+export async function createJob(
+  apiKey: string,
+  model: string,
+  input: Record<string, unknown>
+): Promise<string> {
   if (!apiKey) {
-    throw new Error('Kie.ai getJob called without an apiKey');
+    throw new Error('Kie.ai createJob called without an apiKey');
   }
-  const url = `${BASE_URL}/jobs/${encodeURIComponent(jobId)}`;
-  return fetchJson<KieJobResponse>(url, {
-    method: 'GET',
+  if (!model) {
+    throw new Error('Kie.ai createJob called without a model id');
+  }
+  const data = await fetchKieEnvelope<{ taskId?: string; recordId?: string }>(CREATE_TASK_ENDPOINT, {
+    method: 'POST',
     headers: authHeaders(apiKey),
+    body: JSON.stringify({ model, input }),
   });
+  const taskId = data?.taskId;
+  if (!taskId) {
+    throw new Error('Kie.ai createTask returned no data.taskId');
+  }
+  return taskId;
 }
+
+/**
+ * Poll `GET /api/v1/jobs/recordInfo?taskId=...` ONCE and return the record.
+ * `recordId` is not the polling key — only `taskId`.
+ */
+export async function getJobStatus(apiKey: string, taskId: string): Promise<KieTaskRecord> {
+  if (!apiKey) {
+    throw new Error('Kie.ai getJobStatus called without an apiKey');
+  }
+  const url = `${RECORD_INFO_ENDPOINT}?taskId=${encodeURIComponent(taskId)}`;
+  return fetchKieEnvelope<KieTaskRecord>(url, { method: 'GET', headers: authHeaders(apiKey) });
+}
+
+/**
+ * Official end-to-end run: createTask, then poll recordInfo until `state`
+ * reaches a TERMINAL value (`success` or `fail`), or the deadline expires.
+ *
+ * Non-terminal states per the docs: `waiting`, `queuing`, `generating`.
+ * Anything else that is not `success`/`fail` is still running. On `fail` the
+ * record's `failCode`/`failMsg` are surfaced in the thrown error.
+ *
+ * The HTTP status alone is never treated as success at any step: `createJob`
+ * and `getJobStatus` both read the body `code` first.
+ */
+export async function runKieJob(
+  apiKey: string,
+  model: string,
+  input: Record<string, unknown>,
+  opts: KieRunJobOptions = {}
+): Promise<KieJobResult> {
+  const pollIntervalMs = opts.pollIntervalMs ?? envInt('KIE_POLL_INTERVAL_MS', DEFAULT_POLL_INTERVAL_MS, 0);
+  const pollTimeoutMs = opts.pollTimeoutMs ?? envInt('KIE_POLL_TIMEOUT_MS', DEFAULT_POLL_TIMEOUT_MS, 1);
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+
+  const taskId = await createJob(apiKey, model, input);
+  const deadline = Date.now() + pollTimeoutMs;
+
+  for (;;) {
+    const record = await getJobStatus(apiKey, taskId);
+    const state = typeof record?.state === 'string' ? record.state : '';
+    if (TERMINAL_STATES.has(state)) {
+      if (state === 'fail') {
+        const failMsg = record.failMsg ?? 'no failMsg';
+        throw new Error(
+          `Kie.ai job ${taskId} failed (state=fail, failCode=${String(record.failCode ?? 'n/a')}): ${String(failMsg)}`
+        );
+      }
+      const response = (record.response ?? null) as Record<string, unknown> | null;
+      const rawUrls = Array.isArray(response?.resultUrls)
+        ? (response!.resultUrls as unknown[]).filter((u): u is string => typeof u === 'string')
+        : [];
+      return { taskId, state, response, resultUrls: rawUrls };
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `Kie.ai job ${taskId} did not reach a terminal state within ${pollTimeoutMs}ms (last state=${state || 'unknown'})`
+      );
+    }
+    await sleep(pollIntervalMs);
+  }
+}
+
+/*
+ * DELETED (CC-KIE-U1): `generate()` and `getJob()`.
+ *
+ * Both were dead. A repo-wide caller search (git grep over src/, tests/,
+ * scripts/ for imports of `model-providers/kie` and for `generate`/`getJob`
+ * references) found ZERO callers outside this file — the only importers of
+ * kie.ts are `model-providers/index.ts` (imports `kieProvider`) and three
+ * test files (which import `fetchModels`/`verifyKey`). The similarly-named
+ * `getJob` in `lib/podcast/queries.ts` is an unrelated function.
+ *
+ * Both were also wrong against the official API: `generate()` posted to the
+ * undocumented `/api/v1/<model>/generate`, and `getJob()` read the
+ * undocumented `/api/v1/jobs/<id>`. The documented pair is
+ * `/api/v1/jobs/createTask` + `/api/v1/jobs/recordInfo?taskId=` — see
+ * `createJob`/`getJobStatus`/`runKieJob` above.
+ */
 
 interface KieCreditResponse {
   code?: number;

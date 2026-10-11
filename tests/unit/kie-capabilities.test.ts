@@ -24,16 +24,30 @@ import assert from 'node:assert/strict';
 
 import { fetchModels } from '../../src/lib/model-providers/kie';
 
-/** Return a live-shaped /models response with no `capabilities` field on any
- * row, forcing normalizeRow() through inferCapabilities(id) — the same
- * inference path the retired curated fallback used to exercise. */
-async function withLiveModelsResponse<T>(rows: Array<{ id: string }>, fn: () => Promise<T>): Promise<T> {
+/**
+ * Return a live-shaped /models response in the OFFICIAL envelope
+ * `{code, msg, data: {total, models: [...]}}`, with no `taskType` and no
+ * `capabilities` field on any row, so normalizeRow() falls through to
+ * inferCapabilities(id) — the same inference path the retired curated
+ * fallback used to exercise. The envelope itself is part of what this locks
+ * down: `fetchModels()` reads `data.models` (a list), not `data`.
+ *
+ * CC-KIE-U1: the pre-fix helper returned `{ data: rows }` — a bare list —
+ * which the official catalog never does.
+ */
+async function withLiveModelsResponse<T>(
+  models: Array<Record<string, unknown>>,
+  fn: () => Promise<T>
+): Promise<T> {
   const original = globalThis.fetch;
   globalThis.fetch = (async () =>
-    new Response(JSON.stringify({ data: rows }), {
-      status: 200,
-      headers: { 'content-type': 'application/json' },
-    })) as typeof fetch;
+    new Response(
+      JSON.stringify({ code: 200, msg: 'success', data: { total: models.length, models } }),
+      {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }
+    )) as typeof fetch;
   try {
     return await fn();
   } finally {
@@ -43,7 +57,13 @@ async function withLiveModelsResponse<T>(rows: Array<{ id: string }>, fn: () => 
 
 test('KIE live catalog tags video families video_generation, audio families audio_generation', async () => {
   const models = await withLiveModelsResponse(
-    [{ id: 'veo-3' }, { id: 'veo-3-fast' }, { id: 'runway-gen3' }, { id: 'suno-v4' }, { id: 'flux-1.1-pro' }],
+    [
+      { model: 'veo-3' },
+      { model: 'veo-3-fast' },
+      { model: 'runway-gen3' },
+      { model: 'suno-v4' },
+      { model: 'flux-1.1-pro' },
+    ],
     () => fetchModels('kie-fake-key')
   );
   assert.ok(models.length > 0, 'the live response must resolve to a non-empty catalog');
