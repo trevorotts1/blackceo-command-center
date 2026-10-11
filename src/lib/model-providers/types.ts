@@ -201,6 +201,14 @@ export interface SmokeTestResult {
   status?: number;
   /** Human-readable description (never echoes the key). */
   message?: string;
+  /**
+   * CC-KIE-2 — the provider account balance, when the connector's own
+   * authenticated key-check endpoint returns one (Kie's GET /chat/credit
+   * carries it at `data.credit`). Display-only. Present ONLY on an ok:true
+   * call that carried a finite number — a missing key, a rejected key or a
+   * malformed reply leaves this undefined, never a fabricated value.
+   */
+  credits?: number;
 }
 
 /**
