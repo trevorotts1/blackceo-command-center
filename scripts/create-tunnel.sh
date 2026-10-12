@@ -49,9 +49,16 @@ echo "CLOUDFLARE_TUNNEL_TOKEN=$TUNNEL_TOKEN" >> "$TMP_ENV"
 mv "$TMP_ENV" ~/.openclaw/.env
 
 echo "[3/5] Starting tunnel via PM2"
+# The connector token is a bearer credential: never on argv. A token in the pm2
+# command line lands in ~/.pm2/dump.pm2, its backups and `ps`. cloudflared reads
+# it from a mode-600 file via --token-file instead.
+TOKEN_FILE="$HOME/.openclaw/secrets/tunnel-command-center.token"
+( umask 077; mkdir -p "$(dirname "$TOKEN_FILE")" )
+( umask 077; printf '%s' "$TUNNEL_TOKEN" > "$TOKEN_FILE" )
+chmod 600 "$TOKEN_FILE"
 pm2 delete cloudflare-tunnel >/dev/null 2>&1 || true
 # Tunnel targets localhost:4000 for Command Center
-pm2 start "cloudflared tunnel run --token $TUNNEL_TOKEN" --name cloudflare-tunnel >/dev/null
+pm2 start "cloudflared tunnel run --token-file $TOKEN_FILE" --name cloudflare-tunnel >/dev/null
 pm2 save >/dev/null
 
 echo "[4/5] Waiting for tunnel to come online..."
