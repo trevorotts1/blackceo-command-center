@@ -56,6 +56,13 @@ interface AuthProofSummary {
   stale: boolean;
   method: string | null;
   provenAt: string | null;
+  /**
+   * CC-KIE-2 — provider account balance carried by the cached proof, when the
+   * proof call returned one (Kie /chat/credit `data.credit`). null/undefined
+   * whenever no balance is known — the tile then shows nothing (fail-closed,
+   * never a fabricated number).
+   */
+  credits?: number | null;
 }
 
 interface ProviderStatusEntry {
@@ -673,6 +680,16 @@ export function IntelligenceProviderList({
                     {status && isLocalEndpoint && status.localEndpointUrl && (
                       <div className="text-xs text-gray-400 mt-0.5">
                         Endpoint: <code className="font-mono">{status.localEndpointUrl}</code>
+                      </div>
+                    )}
+                    {/* CC-KIE-2 — surface the Kie account balance the /chat/credit
+                        proof already fetched. KIE provider ONLY, and only when the
+                        cached proof carried a finite number — a missing key, a
+                        rejected key or a malformed reply shows no balance at all,
+                        never a fabricated number. */}
+                    {p === 'kie' && typeof status?.authProof?.credits === 'number' && (
+                      <div className="text-xs text-gray-500 mt-0.5">
+                        KIE credits: <span className="font-medium text-gray-700">{status.authProof.credits}</span>
                       </div>
                     )}
                   </div>

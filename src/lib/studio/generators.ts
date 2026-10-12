@@ -35,7 +35,13 @@ import {
   discoverRegistryRows,
   hydrateProviderEnvFromOpenClaw,
 } from '@/lib/studio/provider-discovery';
-import { runKieJob, type KieJobResult } from '@/lib/model-providers/kie';
+import {
+  findKieLiveAdapterPath,
+  kieApiKey,
+  kieStudioAvailable,
+  kieStudioRefusalReason,
+  runKieLiveAdapter,
+} from '@/lib/studio/kie-live-adapter';
 
 export type StudioKind = 'image' | 'video' | 'audio';
 export type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed';
@@ -72,6 +78,16 @@ const EXTENSION_FOR_KIND: Record<StudioKind, string> = {
   image: 'png',
   video: 'mp4',
   audio: 'mp3',
+};
+
+/**
+ * Skill 74 adapter poll timeout per kind, in seconds. Slow kinds (video,
+ * music) get the adapter's long budget; images keep the adapter default.
+ */
+const KIE_ADAPTER_TIMEOUT_SEC: Record<StudioKind, number> = {
+  image: 300,
+  video: 900,
+  audio: 900,
 };
 
 /**
@@ -145,6 +161,20 @@ function vaultOutputPath(kind: StudioKind, prompt: string, ext: string): string 
   const slug = slugify(prompt);
   const stamp = now.toISOString().replace(/[:.]/g, '-');
   return path.join(vaultRoot(), 'studio', kind, yyyy, mm, `${stamp}-${slug}.${ext}`);
+}
+
+/**
+ * The vault directory a produced asset of `kind` belongs in (the same
+ * `studio/<kind>/YYYY/MM` tree `vaultOutputPath` writes to). Used as the
+ * skill 74 adapter's `--save-dir`, so adapter-saved files land in the real
+ * output tree — unlike the CC-fixture-002 canned fixture, these ARE produced
+ * work and belong in the All Images / All Videos buckets.
+ */
+function vaultOutputDir(kind: StudioKind): string {
+  const now = new Date();
+  const yyyy = String(now.getFullYear());
+  const mm = String(now.getMonth() + 1).padStart(2, '0');
+  return path.join(vaultRoot(), 'studio', kind, yyyy, mm);
 }
 
 /**
@@ -287,6 +317,80 @@ function hasApiKey(provider: string): boolean {
   return envs.some((e) => Boolean(process.env[e]));
 }
 
+/**
+ * CC-KIE-1 — is a real `call*` generator wired for this provider + kind?
+ *
+ * Mirrors the dispatch in `runJob()`: Replicate / Fal handle any kind; OpenAI
+ * Images is image-only; ElevenLabs is audio-only. A provider whose key is
+ * present but whose generate path is NOT wired (Google, Fish Audio, Luma …
+ * — the `generates: false` registry rows) must NOT count as an available
+ * paid entry: advertising it to the UI and then submitting would be the exact
+ * fail-open this unit closes.
+ *
+ * CC-KIE-3 — KIE IS wired through skill 74. A KIE row makes a Studio kind
+ * available ONLY when the skill 74 adapter (`kie_live_adapter.py`) exists on
+ * disk AND the KIE key is present (`kieStudioAvailable()`); otherwise a KIE
+ * row never counts as available and `createJob()` refuses before any paid
+ * request. Studio never talks to KIE's API directly (CC-KIE-1 switched that
+ * path off); it spawns the adapter's `run`.
+ */
+function isGeneratorWired(kind: StudioKind, provider: string): boolean {
+  const p = (provider || '').toLowerCase();
+  if (!p) return false;
+  if (p.includes('kie')) return kieStudioAvailable();
+  if (p.includes('replicate') || p.includes('fal')) return true;
+  if (kind === 'image' && p.includes('openai')) return true;
+  if (kind === 'audio' && p.includes('elevenlabs')) return true;
+  return false;
+}
+
+/**
+ * CC-KIE-1 — THE CAPABILITY FLAG the Studio advertises to the UI.
+ *
+ * Per kind, `true` ONLY when at least one model is (a) present in the registry
+ * and (b) backed by a provider key in the environment AND (c) routed to a wired
+ * `call*` generator. Every other state — no key, registry-only provider, empty
+ * registry — resolves to `false`, so the UI cannot present a paid entry as
+ * available and `createJob()` refuses before submitting anything.
+ */
+export function studioGenerationCapabilities(): Record<StudioKind, boolean> {
+  return {
+    image: availableModels('image').some((m) => isGeneratorWired('image', m.provider)),
+    video: availableModels('video').some((m) => isGeneratorWired('video', m.provider)),
+    audio: availableModels('audio').some((m) => isGeneratorWired('audio', m.provider)),
+  };
+}
+
+/**
+ * CC-KIE-1 + CC-KIE-3 — the exact refusal a Studio KIE request returns when
+ * the skill 74 adapter is not installed or the KIE key is absent. The message
+ * is built by `kieStudioRefusalReason()` in `kie-live-adapter.ts` so the
+ * availability decision is made in ONE place. Kept as a constant for callers
+ * that only need to recognise the family of refusals.
+ */
+export const KIE_STUDIO_UNAVAILABLE_PREFIX = 'KIE Studio is unavailable:';
+
+/**
+ * CC-KIE-1 — thrown by `createJob()` when the paid entry is not available.
+ *
+ * Raised BEFORE any job is persisted and before `runJob()` is scheduled, so an
+ * unauthorized/unavailable request performs NO submit, NO poll and NO spend.
+ * Carries the capability map so a caller (the generate route) can return it to
+ * the UI as the honest `capabilities: false` signal.
+ */
+export class StudioGenerationRefusedError extends Error {
+  readonly kind: StudioKind;
+  readonly reason: string;
+  readonly capabilities: Record<StudioKind, boolean>;
+  constructor(kind: StudioKind, reason: string, capabilities: Record<StudioKind, boolean>) {
+    super(reason);
+    this.name = 'StudioGenerationRefusedError';
+    this.kind = kind;
+    this.reason = reason;
+    this.capabilities = capabilities;
+  }
+}
+
 export interface CreateJobInput {
   kind: StudioKind;
   prompt: string;
@@ -300,14 +404,50 @@ export interface CreateJobInput {
  * `GET /jobs/[id]` for completion.
  */
 export async function createJob(input: CreateJobInput): Promise<StudioJob> {
+  const capabilities = studioGenerationCapabilities();
+
+  // Resolve model: explicit > first available for kind > null (will fail).
+  // Prefer a WIRED model so a default pick never lands on a registry-only
+  // ("coming soon") row while a real generator is present.
+  const models = availableModels(input.kind);
+  const wired = models.filter((m) => isGeneratorWired(input.kind, m.provider));
+  const resolved = input.model_id
+    ? wired.find((m) => m.model_id === input.model_id) || models.find((m) => m.model_id === input.model_id) || null
+    : wired[0] || models[0] || null;
+
+  // CC-KIE-3 — Studio KIE runs through skill 74 (`kie_live_adapter.py run`).
+  // It is REFUSED unless the adapter is installed on this box AND the KIE key
+  // is present; otherwise NO submit, NO poll, NO spend. Checked on the RESOLVED
+  // provider so an explicit `kie/...` model_id is evaluated even when another
+  // keyed provider would otherwise make the kind "available". When both
+  // conditions hold the request proceeds and `runJob()` -> `callKie()` spawns
+  // the adapter.
+  const kieRequested =
+    (resolved?.provider ?? '').toLowerCase().includes('kie') ||
+    (input.model_id ?? '').toLowerCase().startsWith('kie/');
+  if (kieRequested) {
+    const reason = kieStudioRefusalReason();
+    if (reason) {
+      throw new StudioGenerationRefusedError(input.kind, reason, capabilities);
+    }
+  }
+
+  // CC-KIE-1 — FAIL CLOSED at the paid entry. When the capability flag for
+  // this kind is false (no keyed provider with a wired generate path) we refuse
+  // HERE, before a job row is persisted and before `runJob()` is scheduled:
+  // NO submit, NO poll, NO spend, NO job artifact.
+  if (!capabilities[input.kind]) {
+    throw new StudioGenerationRefusedError(
+      input.kind,
+      `Studio ${input.kind} generation is unavailable: no provider has both a key ` +
+        `and a wired generate path for ${input.kind}. Nothing is submitted, polled ` +
+        `or spent. Add a keyed provider that is wired for ${input.kind}.`,
+      capabilities
+    );
+  }
+
   const now = new Date().toISOString();
   const id = randomUUID();
-
-  // Resolve model: explicit > first available for kind > null (will fail)
-  const models = availableModels(input.kind);
-  const resolved = input.model_id
-    ? models.find((m) => m.model_id === input.model_id) || null
-    : models[0] || null;
 
   const job: StudioJob = {
     id,
@@ -560,60 +700,86 @@ async function callFal(job: StudioJob, options: Record<string, unknown>): Promis
 }
 
 /**
- * KIE generation follows the OFFICIAL agent API (docs.kie.ai/ai-agent) — see
- * `src/lib/model-providers/kie.ts`:
+ * CC-KIE-3 — Studio KIE runs THROUGH skill 74 (`kie_live_adapter.py run`).
  *
- *   POST /api/v1/jobs/createTask  {model, input}  -> data.taskId
- *   GET  /api/v1/jobs/recordInfo?taskId=...       -> data.state (poll to
- *                                                    success | fail)
+ * CC-KIE-1 switched Studio's direct KIE HTTP path OFF (decision 16). Studio
+ * must not carry a second KIE client: the adapter owns validate -> createTask
+ * -> poll -> save, the paid door, the credit check and the redaction. So this
+ * spawns `python3 <skill74>/scripts/kie_live_adapter.py run --request <file>
+ * --save-dir <dir> --mode active --json` with an ARGV ARRAY (no shell), the
+ * key BY ENVIRONMENT ONLY, and parses the one JSON object it prints.
  *
- * The pre-CC-KIE-U1 body posted to the undocumented `/api/v1/generations`
- * with a flat `{model, prompt}`, checked ONLY the HTTP status, and never
- * polled — every KIE job is asynchronous, so that path could never return a
- * finished asset. Body `code` is now authoritative (Kie answers HTTP 200 on
- * failure), and the job is polled to a terminal state before we hand back a
- * URL.
+ * FAIL-CLOSED: the adapter file still being present and the key still being
+ * set is re-verified here (the adapter could have been removed since
+ * `createJob()`); anything other than `state: "success"` with a produced file
+ * — a non-zero exit, `skipped` (shadow/off), `fail`, a parse error — becomes
+ * the SAME typed refusal. A refused or partial run is NEVER reported as a
+ * produced asset.
  */
 export async function callKie(
   job: StudioJob,
   options: Record<string, unknown>
 ): Promise<{ url: string; metadata?: Record<string, unknown> }> {
-  // kie.ts documents KIE_API_KEY (what the box has); accept legacy spellings.
-  const key = process.env.KIE_API_KEY || process.env.KIEAI_API_KEY || process.env.KIE_AI_API_KEY;
-  if (!key) throw new Error('KIE_API_KEY missing');
-  // Registry ids are provider-prefixed (`kie/<catalog id>`); the API wants the
-  // bare catalog id exactly as `data.models[].model` returns it.
+  const refusal = kieStudioRefusalReason();
+  const key = kieApiKey();
+  const adapterPath = findKieLiveAdapterPath();
+  if (refusal || !key || !adapterPath) {
+    throw new StudioGenerationRefusedError(
+      job.kind,
+      refusal ?? 'KIE Studio is unavailable: skill 74 adapter or KIE key missing',
+      studioGenerationCapabilities()
+    );
+  }
+
+  // Registry ids are provider-prefixed (`kie/<catalog id>`); the adapter wants
+  // the bare catalog id exactly as the request contract's `model` field.
   const model = (job.model_id || '').replace(/^kie\//i, '');
   if (!model) throw new Error('KIE job has no model id');
 
-  const result = await runKieJob(key, model, { prompt: job.prompt, ...options });
-  const url = pickKieResultUrl(result);
-  if (!url) throw new Error(`Kie.ai job ${result.taskId} succeeded but returned no output URL`);
-  return {
-    url,
-    metadata: {
-      kie_task_id: result.taskId,
-      kie_state: result.state,
-      kie_model: model,
-    },
-  };
-}
+  const saveDir = vaultOutputDir(job.kind);
+  await fs.mkdir(saveDir, { recursive: true });
 
-/**
- * Most models return `response.resultUrls`. Suno's generate/extend/sounds
- * tasks return their tracks at `response.data[].audio_url` instead (official
- * doc: "Reading the output"), so fall back to that before giving up.
- */
-function pickKieResultUrl(result: KieJobResult): string | null {
-  if (result.resultUrls.length > 0) return result.resultUrls[0];
-  const data = result.response?.data;
-  if (Array.isArray(data)) {
-    for (const entry of data) {
-      const url = (entry as { audio_url?: unknown } | null)?.audio_url;
-      if (typeof url === 'string' && url) return url;
-    }
+  const result = await runKieLiveAdapter({
+    adapterPath,
+    key,
+    request: { model, input: { prompt: job.prompt, ...options } },
+    saveDir,
+    runTimeoutSec: KIE_ADAPTER_TIMEOUT_SEC[job.kind],
+  });
+
+  const metadata: Record<string, unknown> = {
+    kie_adapter: true,
+    kie_task_id: result.taskId,
+    kie_state: result.state,
+    kie_model: model,
+    kie_credits_consumed: result.creditsConsumed,
+    kie_warnings: result.warnings,
+  };
+
+  if (result.state === 'success' && result.savedPaths.length > 0) {
+    // The adapter already wrote the bytes into the vault; skip the download.
+    return {
+      url: result.savedPaths[0],
+      metadata: { ...metadata, skip_download: true, saved_paths: result.savedPaths },
+    };
   }
-  return null;
+  if (result.state === 'success' && result.resultUrls.length > 0) {
+    // A synchronous result the adapter could not save: hand the URL back so
+    // runJob()'s existing download step stores it.
+    return { url: result.resultUrls[0], metadata };
+  }
+
+  // Refusal / non-zero exit / skipped / incomplete — NEVER fail open.
+  const detail =
+    result.error ||
+    (result.fallbackUsed
+      ? 'skill 74 adapter did not dispatch (skipped; not in active mode)'
+      : `skill 74 adapter returned state "${result.state}" with no produced file`);
+  throw new StudioGenerationRefusedError(
+    job.kind,
+    `KIE Studio generation failed: ${detail}`,
+    studioGenerationCapabilities()
+  );
 }
 
 async function callOpenAiImages(job: StudioJob, options: Record<string, unknown>): Promise<{ url: string; metadata?: Record<string, unknown> }> {

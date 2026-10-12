@@ -179,7 +179,18 @@ elif d.get('service_status') == 'absent':
     print("no-pm2-app")
 elif 'unreachable' in detail:
     print("unreachable")
-elif d.get('pm2_topology', {}).get('app_count', 0) == 0:
+elif any((d.get('checks') or {}).get(k, {}).get('pass') is False
+         and (d.get('checks') or {}).get(k, {}).get('indeterminate') is not True
+         and 'applied_count' not in (d.get('checks') or {}).get(k, {})
+         for k in ('migrations', 'database_path')):
+    # CCG-1: the app answers HTTP but its database does not work (a native
+    # better-sqlite3 built for another node, a bad DATABASE_PATH). The deep
+    # health JSON carries no pm2_topology in this state, which used to fall
+    # into the no-pm2-app label below and hide the cause. A check that FAILED
+    # on a pending-migration count carries applied_count and is not this class.
+    print("database-failed")
+elif 'pm2_topology' in d and (d.get('pm2_topology') or {}).get('app_count', 0) == 0:
+    # Only a report that actually counted pm2 apps may say there are none.
     print("no-pm2-app")
 elif (d.get('checks') or {}).get('scheduler_liveness', {}).get('pass') is False \
         and (d.get('checks') or {}).get('scheduler_liveness', {}).get('indeterminate') is not True:
@@ -193,6 +204,47 @@ elif (d.get('checks') or {}).get('scheduler_liveness', {}).get('pass') is False 
 else:
     print("red")
 PYEOF
+}
+
+# ── guarded pm2 save ─────────────────────────────────────────────────────────
+# `pm2 save` REWRITES dump.pm2 from whatever is running right now. When this
+# script starts the daemon and the Command Center at gateway-up, it can run
+# BEFORE the box's own startup has run `pm2 resurrect`; an unguarded save then
+# overwrites the dump with the Command Center alone and every other app (e.g.
+# ghl-community-mcp) is silently dropped at boot. So: never save a list that
+# has fewer apps than the existing dump. Apps in the dump that are not running
+# (other than the Command Center names this script manages itself) mean the
+# resurrect has not happened yet -> SKIP the save and say why; the dump stays
+# intact for the resurrect that is coming. Unreadable pm2 list -> skip too.
+pm2_save_guarded() {
+  local dump="${PM2_HOME:-$HOME/.pm2}/dump.pm2" missing
+  if [[ -s "$dump" ]]; then
+    missing="$(pm2 jlist 2>/dev/null | python3 -s -c '
+import json, sys
+raw = sys.stdin.read()
+run = None
+for i, ch in enumerate(raw):
+    if ch == "[":
+        try:
+            run = json.JSONDecoder().raw_decode(raw[i:])[0]; break
+        except ValueError:
+            pass
+if run is None:
+    sys.exit(3)
+cc = set(sys.argv[2].split())
+want = {a.get("name") for a in json.load(open(sys.argv[1])) if a.get("name")}
+have = {p.get("name") for p in run}
+print(" ".join(sorted(want - have - cc)))
+' "$dump" "$WATCHDOG_CC_APP_NAMES")" || {
+      printf '[watchdog-cc] pm2 save SKIPPED: cannot compare the running list with %s\n' "$dump" >&2
+      return 0
+    }
+    if [[ -n "$missing" ]]; then
+      printf '[watchdog-cc] pm2 save SKIPPED: %s lists app(s) not running yet (%s); saving now would drop them. Leaving the dump for pm2 resurrect.\n' "$dump" "$missing" >&2
+      return 0
+    fi
+  fi
+  pm2 save >/dev/null 2>&1 || true
 }
 
 ARGS=(--port "$WATCHDOG_PORT" --json-only)
@@ -475,7 +527,7 @@ except Exception:
       if [[ -n "$_cc_known" ]]; then
         printf '[watchdog-cc] START: pm2 app "%s" is back\n' "$_cc_known" >&2
       elif (cd "$CC_DIR" && CC_PORT="$WATCHDOG_PORT" pm2 start "$CC_DIR/ecosystem.config.cjs" >/dev/null 2>&1); then
-        pm2 save >/dev/null 2>&1 || true
+        pm2_save_guarded
         printf '[watchdog-cc] START: started the Command Center from %s/ecosystem.config.cjs and saved the pm2 list\n' "$CC_DIR" >&2
       else
         printf '[watchdog-cc] START: pm2 start failed — manual intervention required\n' >&2
@@ -537,7 +589,7 @@ except Exception:
           printf '[watchdog-cc] SELF-HEAL: pm2 start ecosystem.config.cjs OK\n' >&2 || \
           printf '[watchdog-cc] SELF-HEAL: pm2 start failed — manual intervention required\n' >&2
 
-        pm2 save >/dev/null 2>&1 || true
+        pm2_save_guarded
         printf '[watchdog-cc] SELF-HEAL: complete at %s\n' "$TS" >&2
       fi
     else
