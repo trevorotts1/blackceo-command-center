@@ -179,7 +179,18 @@ elif d.get('service_status') == 'absent':
     print("no-pm2-app")
 elif 'unreachable' in detail:
     print("unreachable")
-elif d.get('pm2_topology', {}).get('app_count', 0) == 0:
+elif any((d.get('checks') or {}).get(k, {}).get('pass') is False
+         and (d.get('checks') or {}).get(k, {}).get('indeterminate') is not True
+         and 'applied_count' not in (d.get('checks') or {}).get(k, {})
+         for k in ('migrations', 'database_path')):
+    # CCG-1: the app answers HTTP but its database does not work (a native
+    # better-sqlite3 built for another node, a bad DATABASE_PATH). The deep
+    # health JSON carries no pm2_topology in this state, which used to fall
+    # into the no-pm2-app label below and hide the cause. A check that FAILED
+    # on a pending-migration count carries applied_count and is not this class.
+    print("database-failed")
+elif 'pm2_topology' in d and (d.get('pm2_topology') or {}).get('app_count', 0) == 0:
+    # Only a report that actually counted pm2 apps may say there are none.
     print("no-pm2-app")
 elif (d.get('checks') or {}).get('scheduler_liveness', {}).get('pass') is False \
         and (d.get('checks') or {}).get('scheduler_liveness', {}).get('indeterminate') is not True:
