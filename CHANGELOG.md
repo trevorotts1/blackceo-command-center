@@ -1,3 +1,10 @@
+## [v7.6.119] — 2026-10-12 — create-tunnel.sh hands cloudflared its token by a mode-600 file, never on the command line (D16)
+
+- fix(create-tunnel): `scripts/create-tunnel.sh` started the tunnel with `pm2 start "cloudflared tunnel run --token $TUNNEL_TOKEN"`. pm2 stores the expanded command, so the Cloudflare tunnel token (a bearer credential) landed in `~/.pm2/dump.pm2`, every `dump.pm2.bak-*`, and the `ps` / `pm2 describe` output. Seen on four client boxes (2026-10-12).
+- fix: the script now writes the token to `~/.openclaw/secrets/tunnel-command-center.token` (mode 600, written under umask 077) and runs `cloudflared tunnel run --token-file <that path>`. The path, not the token, is what pm2 persists, so `pm2 resurrect` after a restart still finds the file. Same pattern as the onboarding repo's own `create-tunnel.sh`.
+- test: `tests/unit/create-tunnel-token-file.test.sh` (4 checks; runs the real script with fake `curl` / `pm2` / `cloudflared`). v7.6.118 script: 0 pass / 4 fail; fixed: 4 / 0. Wired into `qc-cc.yml`.
+- No deploy: the per-box roll ships it. Boxes already holding the token in a pm2 dump are not changed by this release.
+
 ## [v7.6.118] — 2026-10-12 — cc-start.sh loads the database module before it starts the app; the watchdog names a database failure (CCG-1)
 
 - fix(cc-start/db-module-guard): the launcher's ABI guard compared the web-app build's node ABI with the runtime but never loaded the compiled `better-sqlite3` module. On three boxes (2026-10-12) an `npm` run under a global node 26 (ABI 147) rebuilt the module while pm2 ran the app on node 24/25 (ABI 137/141): the guard printed "artifact and runtime agree", the app started, `FATAL: DB init failed ... NODE_MODULE_VERSION 147 ... requires 141` followed, and the box ran with no database (and no scheduler) for hours while `/` still answered 403.

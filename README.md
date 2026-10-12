@@ -1,6 +1,6 @@
 # Command Center
 
-**Current release: v7.6.118 (2026-10-12)** — The box watchdog (`scripts/watchdog-cc.sh`) no longer `pm2 save`s a process list smaller than the saved `dump.pm2`: at boot it could run before `pm2 resurrect`, overwrite the dump with the Command Center alone, and silently drop every other pm2 app (e.g. `ghl-community-mcp`). It now skips the save and logs why. See CHANGELOG.md.
+**Current release: v7.6.119 (2026-10-12)** — `scripts/create-tunnel.sh` no longer puts the Cloudflare tunnel token on the pm2 command line (where it was saved in `dump.pm2` and its backups and shown by `ps`): it writes the token to a mode-600 file and starts `cloudflared` with `--token-file`.
 
 **Recent releases** (since v7.3.3 - full per-release history in [CHANGELOG.md](CHANGELOG.md)):
 
@@ -19,7 +19,7 @@ Publishing this code does not deploy or verify it on client installations. Befor
 
 ## Historical release highlights
 
-The highlights below describe earlier releases. The current release is v7.6.118; the complete history is in [CHANGELOG.md](CHANGELOG.md).
+The highlights below describe earlier releases. The current release is v7.6.119; the complete history is in [CHANGELOG.md](CHANGELOG.md).
 
 > **v4.63.0 (2026-07-06)** is a full dashboard UX/design + functionality pass. **Kanban**: drag/move errors now surface in a toast and revert instead of silently snapping back; the **Blocked** column is finally reachable (a modal collects the required reason/audience/ask and persists them); a touch-friendly "Move task" menu makes the board usable on phones/tablets; real-time deletes, per-column create, a board search, empty-column hints, and a 60s stale-board refetch land too. The task **DELETE 500** (blocked by `persona_selection_log`/`persona_performance` FKs) is fixed, and UI-created tasks keep their department. **Settings** stop lying: Intelligence overrides can be cleared ("Reset to inherited"), lock (423) holders are named, provider badges read "Key present" (not "Configured"), the settings hub drops dead localStorage-only fields, and Company Settings reads brand state back + warns visibly when live branding isn't applied. **Models engine**: the Ollama-Cloud cascade actually selects (`tierOf` now recognizes `ollama-cloud/`), operator role/department model overrides now win over the auto-selector, and a hardcoded Anthropic id was removed from the Header (models load dynamically). **Health-rating**: no more fabricated `72`s or hardcoded `B` grades — the pulse strip, `resolve-department`, and CEO dashboard all use the real `grading.ts` engine and show "Insufficient data" honestly. **Responsive**: a real mobile bottom-nav, an app-wide Cmd+K navigate group, a responsive CEO-board header (with the Agents-tab 404 fixed), an AA-compliant muted-text token, and verified no-horizontal-overflow at mobile/tablet/desktop. A fresh-DB seed crash (`SQLITE_CONSTRAINT_FOREIGNKEY`) and an invalid-priority demo seed are also fixed. No new dependencies; no Anthropic ids in client-facing paths. See `CHANGELOG.md` for the full v4.63.0 entry.
 >
