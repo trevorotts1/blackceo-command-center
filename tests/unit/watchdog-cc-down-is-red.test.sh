@@ -54,6 +54,7 @@ FAKEPM2
 chmod +x "$WORK/bin/pm2"
 export PATH="$WORK/bin:$PATH"
 export PM2_CALL_LOG="$WORK/pm2.log"
+export PM2_HOME="$WORK/pm2home"   # the guarded pm2 save reads dump.pm2 from here, never the real ~/.pm2
 
 # ── H0/H1: the real cc-health-check.sh, against a port nothing listens on ────
 cp "$REPO_ROOT/scripts/cc-health-check.sh" "$WORK/real/scripts/"
