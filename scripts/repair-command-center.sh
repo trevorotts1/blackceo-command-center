@@ -74,7 +74,17 @@ cd "$REPO_ROOT"
 FAILURES=()
 
 # ── detect Node + npm ────────────────────────────────────────────────────────
-NODE_BIN="$(command -v node 2>/dev/null || true)"
+# CCG-1: rebuild against the node the server RUNS on (scripts/lib/node-runtime.sh),
+# not whichever node is first on PATH. A global node 26 on PATH while pm2 runs
+# node 24/25 produced a better-sqlite3 the server could not load (3 boxes,
+# 2026-10-12). Same rule as update.sh and atomic-deploy.sh.
+NODE_BIN=""
+if _cc_resolved="$(bash "$REPO_ROOT/scripts/lib/node-runtime.sh" 2>/dev/null)" && [[ -n "$_cc_resolved" ]]; then
+  NODE_BIN="$_cc_resolved"
+  export CC_NODE_BIN="$NODE_BIN"
+  [[ "$(command -v node 2>/dev/null || true)" == "$NODE_BIN" ]] || export PATH="$(dirname "$NODE_BIN"):$PATH"
+fi
+[[ -n "$NODE_BIN" ]] || NODE_BIN="$(command -v node 2>/dev/null || true)"
 NPM_BIN="$(command -v npm 2>/dev/null || true)"
 if [[ -z "$NODE_BIN" ]]; then
   # Try common non-login-shell locations

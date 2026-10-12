@@ -569,6 +569,70 @@ _assert_native_abi_matches() {
 
 _assert_native_abi_matches
 
+# ── 2c. DATABASE MODULE LOAD GUARD (CCG-1) ───────────────────────────────────
+#
+# THE GAP the ABI guard above leaves open: it compares the node ABI recorded for
+# the WEB-APP build with the runtime, and never looks at the compiled
+# better-sqlite3 module itself. An unrelated `npm ci` / `npm rebuild` run under
+# a DIFFERENT node (a global node 26, ABI 147, while pm2 runs node 24/25, ABI
+# 137/141) rewrites node_modules/better-sqlite3/build/Release/*.node and leaves
+# the build manifest untouched. Measured 2026-10-12 on three boxes: the guard
+# printed "artifact and runtime agree", the app started, its database failed
+# ("FATAL: DB init failed ... NODE_MODULE_VERSION 147 ... requires 141"), and
+# the box ran without a database for hours while `/` still answered 403.
+#
+# So, before exec, load better-sqlite3 with the EXACT node that will run the
+# app (one throwaway process, in-memory database; no real database is opened).
+#   * loads                      -> proceed.
+#   * NODE_MODULE_VERSION / dlopen / missing-bindings failure
+#                                -> `npm rebuild better-sqlite3` with that same
+#                                   node (its directory leads PATH, so npm and
+#                                   node-gyp compile for it), re-test once.
+#   * still failing, or any other failure
+#                                -> refuse: receipt `native-module-load-failed`,
+#                                   exit 78 (pm2 stop_exit_codes), same style as
+#                                   the guards above.
+# Like the guard above it never fires on missing evidence: no
+# node_modules/better-sqlite3 means there is nothing to load (atomic-deploy's
+# native gates own a missing install).
+_cc_sqlite_probe() {  # prints the load error (if any); rc 0 = module loads
+  (cd "$CC_DIR" && "$CC_NODE_BIN" -e 'const D=require(process.argv[1]);new D(":memory:").close()' \
+    "$CC_DIR/node_modules/better-sqlite3" 2>&1 >/dev/null)
+}
+
+_assert_sqlite_module_loads() {
+  local mod="$CC_DIR/node_modules/better-sqlite3" err node_dir=""
+  if [[ ! -d "$mod" ]]; then
+    printf '[cc-start] DB module guard: no node_modules/better-sqlite3 to load; skipping (atomic-deploy native gates cover this).\n' >&2
+    return 0
+  fi
+  if err="$(_cc_sqlite_probe)"; then
+    printf '[cc-start] DB module guard: better-sqlite3 loads under %s.\n' "$CC_NODE_BIN" >&2
+    return 0
+  fi
+  if printf '%s' "$err" | grep -Eq 'NODE_MODULE_VERSION|ERR_DLOPEN_FAILED|Could not locate the bindings'; then
+    printf '[cc-start] DB module guard: better-sqlite3 does not load under %s (%s).\n' \
+      "$CC_NODE_BIN" "$(printf '%s' "$err" | grep -Eo 'NODE_MODULE_VERSION [0-9]+' | tr '\n' ' ')" >&2
+    printf '[cc-start] DB module guard: rebuilding it with that same node.\n' >&2
+    [[ "$CC_NODE_BIN" == */* ]] && node_dir="$(dirname "$CC_NODE_BIN")"
+    # ponytail: no timeout around the rebuild; add one if a hung registry ever stalls a start.
+    (cd "$CC_DIR" && PATH="${node_dir:+$node_dir:}$PATH" npm rebuild better-sqlite3 --ignore-scripts=false) >&2 || true
+    if err="$(_cc_sqlite_probe)"; then
+      printf '[cc-start] DB module guard: rebuilt; better-sqlite3 now loads under %s.\n' "$CC_NODE_BIN" >&2
+      return 0
+    fi
+  fi
+  local detail
+  detail="better-sqlite3 cannot be loaded by the runtime ${CC_NODE_BIN} (module ABI $("$CC_NODE_BIN" -p process.versions.modules 2>/dev/null || echo unknown)); the server would start with no database. Load error: $(printf '%s' "$err" | head -c 400 | tr '\n' ' ')"
+  printf '[cc-start] FATAL: native-module-load-failed: %s\n' "$detail" >&2
+  printf '[cc-start] This is a DETERMINISTIC refusal (exit 78): restarting cannot fix it.\n' >&2
+  printf '[cc-start] Rebuild against this runtime: `npm rebuild better-sqlite3` with %s, or `bash scripts/atomic-deploy.sh`.\n' "$CC_NODE_BIN" >&2
+  _ccbi_content_refusal_receipt "native-module-load-failed" "$detail"
+  exit 78
+}
+
+_assert_sqlite_module_loads
+
 
 # ── 3. EXEC next start ────────────────────────────────────────────────────────
 # exec replaces this bash process so PM2's PID tracking points at the real node

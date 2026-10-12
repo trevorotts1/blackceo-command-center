@@ -524,6 +524,12 @@ jobs:
       # The watchdog must never pm2-save a list smaller than the saved dump.
       - name: watchdog-cc.sh pm2 save race test
         run: bash tests/unit/watchdog-cc-pm2-save-race.test.sh
+      # The launcher must load better-sqlite3 with the node that will run the app.
+      - name: cc-start.sh database module guard test
+        run: bash tests/unit/cc-start-sqlite-module-guard.test.sh
+      # A dead database must be labelled database-failed, never no-pm2-app.
+      - name: watchdog-cc.sh database-failed label test
+        run: bash tests/unit/watchdog-cc-database-failed-label.test.sh
       # A pm2 version banner before the app list must not read as "no apps".
       - name: pm2 version-banner parse test
         run: bash tests/unit/pm2-version-banner-parse.test.sh
