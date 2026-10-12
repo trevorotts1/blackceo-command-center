@@ -533,6 +533,9 @@ jobs:
       # A pm2 version banner before the app list must not read as "no apps".
       - name: pm2 version-banner parse test
         run: bash tests/unit/pm2-version-banner-parse.test.sh
+      # The tunnel token must reach pm2 as a mode-600 --token-file, never on argv.
+      - name: create-tunnel.sh token-file test
+        run: bash tests/unit/create-tunnel-token-file.test.sh
 
 
   # ── Build smoke test — BLOCKING ───────────────────────────────────────────
