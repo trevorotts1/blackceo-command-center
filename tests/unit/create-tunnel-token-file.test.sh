@@ -38,7 +38,7 @@ TF="$(printf '%s' "$START" | grep -oE -e '--token-file [^ "]+' | cut -d' ' -f2)"
 if [[ -n "$TF" ]] && ! grep -q -e '--token ' "$T/pm2.log"; then ok "T1 pm2 start uses --token-file"; else bad "T1 pm2 start uses --token-file ($START)"; fi
 if ! grep -q "$FAKE_TOKEN" "$T/pm2.log"; then ok "T1 token text absent from pm2 argv"; else bad "T1 token text absent from pm2 argv"; fi
 if [[ -n "$TF" && -f "$TF" && "$(cat "$TF")" == "$FAKE_TOKEN" ]]; then ok "T2 token file holds the token"; else bad "T2 token file holds the token"; fi
-MODE="$(stat -f %Lp "$TF" 2>/dev/null || stat -c %a "$TF" 2>/dev/null)"
+MODE="$(stat -c %a "$TF" 2>/dev/null || stat -f %Lp "$TF" 2>/dev/null)"
 if [[ "$MODE" == "600" ]]; then ok "T2 token file mode 600"; else bad "T2 token file mode 600 (got $MODE)"; fi
 
 echo "$PASS pass / $FAIL fail"
