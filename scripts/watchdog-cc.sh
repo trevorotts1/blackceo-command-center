@@ -206,6 +206,30 @@ else:
 PYEOF
 }
 
+# ── self-heal triggers, read from the parsed health JSON ─────────────────────
+# FXCC-1 / D21: the health JSON is pretty-printed (`"app_count": 2`), so the old
+# `grep '"app_count":[2-9]'` and `grep '"crash_looper":true'` could never match
+# and a real zombie or crash loop was never healed. Parse it. Prints `zombie`
+# when pm2_topology.app_count > 1 and `crash_looper` when the report carries a
+# crash_looper flag or a non-empty pm2_topology.crash_loopers list. The pm2
+# analyzer ignores pm2 modules (D14), so pm2-logrotate cannot read as a second
+# app here; keep D14 landed before or with this.
+heal_reasons() {
+  python3 -s - "$1" <<'PYEOF' 2>/dev/null || true
+import json, sys
+try:
+    d = json.loads(sys.argv[1])
+    t = d.get('pm2_topology') or {}
+    n = t.get('app_count')
+    if isinstance(n, int) and n > 1:
+        print("zombie")
+    if d.get('crash_looper') is True or t.get('crash_looper') is True or t.get('crash_loopers'):
+        print("crash_looper")
+except Exception:
+    pass
+PYEOF
+}
+
 # ── guarded pm2 save ─────────────────────────────────────────────────────────
 # `pm2 save` REWRITES dump.pm2 from whatever is running right now. When this
 # script starts the daemon and the Command Center at gateway-up, it can run
@@ -545,11 +569,12 @@ except Exception:
   # same stale tree.
   if [[ "$WATCHDOG_SELF_HEAL" == "1" && "$KEY" != "refusal-receipt" && "$KEY" != "scheduler-stalled" && "$KEY" != "no-pm2-app" ]]; then
     HEAL_TRIGGER=0
-    if printf '%s' "$RESULT_JSON" | grep -q '"app_count":[2-9]'; then
+    HEAL_WHY="$(heal_reasons "$RESULT_JSON")"
+    if [[ "$HEAL_WHY" == *zombie* ]]; then
       HEAL_TRIGGER=1
       printf '[watchdog-cc] SELF-HEAL trigger: zombie detected (app_count>1)\n' >&2
     fi
-    if printf '%s' "$RESULT_JSON" | grep -q '"crash_looper":true'; then
+    if [[ "$HEAL_WHY" == *crash_looper* ]]; then
       HEAL_TRIGGER=1
       printf '[watchdog-cc] SELF-HEAL trigger: crash_looper=true in health report\n' >&2
     fi
