@@ -195,6 +195,47 @@ else:
 PYEOF
 }
 
+# ── guarded pm2 save ─────────────────────────────────────────────────────────
+# `pm2 save` REWRITES dump.pm2 from whatever is running right now. When this
+# script starts the daemon and the Command Center at gateway-up, it can run
+# BEFORE the box's own startup has run `pm2 resurrect`; an unguarded save then
+# overwrites the dump with the Command Center alone and every other app (e.g.
+# ghl-community-mcp) is silently dropped at boot. So: never save a list that
+# has fewer apps than the existing dump. Apps in the dump that are not running
+# (other than the Command Center names this script manages itself) mean the
+# resurrect has not happened yet -> SKIP the save and say why; the dump stays
+# intact for the resurrect that is coming. Unreadable pm2 list -> skip too.
+pm2_save_guarded() {
+  local dump="${PM2_HOME:-$HOME/.pm2}/dump.pm2" missing
+  if [[ -s "$dump" ]]; then
+    missing="$(pm2 jlist 2>/dev/null | python3 -s -c '
+import json, sys
+raw = sys.stdin.read()
+run = None
+for i, ch in enumerate(raw):
+    if ch == "[":
+        try:
+            run = json.JSONDecoder().raw_decode(raw[i:])[0]; break
+        except ValueError:
+            pass
+if run is None:
+    sys.exit(3)
+cc = set(sys.argv[2].split())
+want = {a.get("name") for a in json.load(open(sys.argv[1])) if a.get("name")}
+have = {p.get("name") for p in run}
+print(" ".join(sorted(want - have - cc)))
+' "$dump" "$WATCHDOG_CC_APP_NAMES")" || {
+      printf '[watchdog-cc] pm2 save SKIPPED: cannot compare the running list with %s\n' "$dump" >&2
+      return 0
+    }
+    if [[ -n "$missing" ]]; then
+      printf '[watchdog-cc] pm2 save SKIPPED: %s lists app(s) not running yet (%s); saving now would drop them. Leaving the dump for pm2 resurrect.\n' "$dump" "$missing" >&2
+      return 0
+    fi
+  fi
+  pm2 save >/dev/null 2>&1 || true
+}
+
 ARGS=(--port "$WATCHDOG_PORT" --json-only)
 [[ -n "${CC_PUBLIC_URL:-}" ]] && ARGS+=(--public-url "$CC_PUBLIC_URL")
 [[ -n "$WATCHDOG_CANONICAL_DIR" ]] && ARGS+=(--canonical-dir "$WATCHDOG_CANONICAL_DIR")
@@ -475,7 +516,7 @@ except Exception:
       if [[ -n "$_cc_known" ]]; then
         printf '[watchdog-cc] START: pm2 app "%s" is back\n' "$_cc_known" >&2
       elif (cd "$CC_DIR" && CC_PORT="$WATCHDOG_PORT" pm2 start "$CC_DIR/ecosystem.config.cjs" >/dev/null 2>&1); then
-        pm2 save >/dev/null 2>&1 || true
+        pm2_save_guarded
         printf '[watchdog-cc] START: started the Command Center from %s/ecosystem.config.cjs and saved the pm2 list\n' "$CC_DIR" >&2
       else
         printf '[watchdog-cc] START: pm2 start failed — manual intervention required\n' >&2
@@ -537,7 +578,7 @@ except Exception:
           printf '[watchdog-cc] SELF-HEAL: pm2 start ecosystem.config.cjs OK\n' >&2 || \
           printf '[watchdog-cc] SELF-HEAL: pm2 start failed — manual intervention required\n' >&2
 
-        pm2 save >/dev/null 2>&1 || true
+        pm2_save_guarded
         printf '[watchdog-cc] SELF-HEAL: complete at %s\n' "$TS" >&2
       fi
     else
