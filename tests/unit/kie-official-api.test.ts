@@ -4,13 +4,17 @@
  *
  * Four defects, four proofs:
  *
- *  1. `callKie` posted to the UNDOCUMENTED `/api/v1/generations` with a flat
- *     `{model, prompt}`, checked only the HTTP status, and never polled —
+ *  1. The KIE client posted to the UNDOCUMENTED `/api/v1/generations` with a
+ *     flat `{model, prompt}`, checked only the HTTP status, and never polled —
  *     though every KIE job is asynchronous. Now it submits
  *     `POST /api/v1/jobs/createTask {model, input}` and polls
  *     `GET /api/v1/jobs/recordInfo?taskId=` to a TERMINAL `state`.
- *     Proven by "callKie submits to the official path and polls to terminal"
+ *     Proven by "runKieJob submits to the official path and polls to terminal"
  *     and "runKieJob ... polls recordInfo to a terminal state".
+ *     (CC-KIE-3 moved Studio's own entry — `callKie` — onto skill 74's
+ *     `kie_live_adapter.py run`, so this proof drives the direct client those
+ *     Studio calls used to make; the Studio entry is proven in
+ *     tests/unit/cc-kie-3-studio-kie-skill74.test.ts.)
  *
  *  2. `provider-discovery.ts` seeded KIE model ids typed from MEMORY with
  *     `generates: true`. The official docs' rule 1 forbids it outright.
@@ -244,13 +248,17 @@ test('runKieJob gives up at the deadline instead of polling forever', async () =
   }
 });
 
-// ── defect 1, via the Studio entry point ─────────────────────────────────────
+// ── defect 1, the direct KIE client ──────────────────────────────────────────
+//
+// CC-KIE-3 moved STUDIO's KIE entry (`callKie`) onto skill 74
+// (`kie_live_adapter.py run`); the direct HTTP client that Studio used to call
+// directly — `runKieJob` — still backs every other KIE consumer, so the
+// official-path proof now drives it. The Studio entry itself is proven in
+// tests/unit/cc-kie-3-studio-kie-skill74.test.ts.
 
-test('callKie submits to the official path and polls to a terminal state', async () => {
-  const savedKey = process.env.KIE_API_KEY;
+test('runKieJob submits to the official path and polls to a terminal state', async () => {
   const savedInterval = process.env.KIE_POLL_INTERVAL_MS;
   const savedTimeout = process.env.KIE_POLL_TIMEOUT_MS;
-  process.env.KIE_API_KEY = 'kie-fake-key';
   process.env.KIE_POLL_INTERVAL_MS = '1';
   process.env.KIE_POLL_TIMEOUT_MS = '10000';
 
@@ -276,31 +284,16 @@ test('callKie submits to the official path and polls to a terminal state', async
   });
 
   try {
-    // Dynamic so the C8 DB isolation import above is evaluated first.
-    const { callKie } = await import('../../src/lib/studio/generators');
-    const result = await callKie(
-      {
-        id: 'job-1',
-        kind: 'image',
-        status: 'running',
-        prompt: 'a single red maple leaf on wet slate',
-        model_id: 'kie/gpt-image-2-text-to-image',
-        provider: 'kie',
-        result_path: null,
-        result_url: null,
-        error: null,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-        duration_ms: null,
-        metadata: {},
-      },
-      { aspect_ratio: '1:1' }
+    const result = await runKieJob(
+      'kie-fake-key',
+      'gpt-image-2-text-to-image',
+      { prompt: 'a single red maple leaf on wet slate', aspect_ratio: '1:1' }
     );
 
-    assert.equal(result.url, 'https://cdn.kie.example/studio.png');
-    assert.equal(result.metadata?.kie_task_id, 'task-9');
+    assert.equal(result.resultUrls[0], 'https://cdn.kie.example/studio.png');
+    assert.equal(result.taskId, 'task-9');
 
-    assert.match(calls[0].url, /\/api\/v1\/jobs\/createTask$/, 'callKie must use the documented createTask path');
+    assert.match(calls[0].url, /\/api\/v1\/jobs\/createTask$/, 'the client must use the documented createTask path');
     assert.deepEqual(
       calls[0].body,
       { model: 'gpt-image-2-text-to-image', input: { prompt: 'a single red maple leaf on wet slate', aspect_ratio: '1:1' } },
@@ -308,7 +301,7 @@ test('callKie submits to the official path and polls to a terminal state', async
     );
     assert.ok(
       calls.slice(1).every((c) => /\/api\/v1\/jobs\/recordInfo\?taskId=task-9$/.test(c.url)),
-      'callKie must poll recordInfo — the pre-fix code never polled at all'
+      'the client must poll recordInfo — the pre-fix code never polled at all'
     );
     assert.ok(calls.length >= 3, 'at least one non-terminal poll before success');
     assert.ok(
@@ -320,35 +313,15 @@ test('callKie submits to the official path and polls to a terminal state', async
     const codeFail = stubFetch(() => ({ status: 200, json: { code: 401, msg: 'Unauthorized' } }));
     try {
       await assert.rejects(
-        () =>
-          callKie(
-            {
-              id: 'job-2',
-              kind: 'image',
-              status: 'running',
-              prompt: 'x',
-              model_id: 'kie/gpt-image-2-text-to-image',
-              provider: 'kie',
-              result_path: null,
-              result_url: null,
-              error: null,
-              created_at: new Date().toISOString(),
-              updated_at: new Date().toISOString(),
-              duration_ms: null,
-              metadata: {},
-            },
-            {}
-          ),
+        () => runKieJob('kie-fake-key', 'gpt-image-2-text-to-image', { prompt: 'x' }),
         /code 401/,
-        'callKie must read body.code, never the HTTP status alone'
+        'the client must read body.code, never the HTTP status alone'
       );
     } finally {
       codeFail.restore();
     }
   } finally {
     restore();
-    if (savedKey === undefined) delete process.env.KIE_API_KEY;
-    else process.env.KIE_API_KEY = savedKey;
     if (savedInterval === undefined) delete process.env.KIE_POLL_INTERVAL_MS;
     else process.env.KIE_POLL_INTERVAL_MS = savedInterval;
     if (savedTimeout === undefined) delete process.env.KIE_POLL_TIMEOUT_MS;
@@ -378,7 +351,7 @@ test('provider-discovery seeds no KIE model ids from memory — only skill 66/67
 
   // Every seeded id must be a canonical_model_id published by the KIE skills
   // in openclaw-onboarding, and each must declare the createTask endpoint
-  // that callKie actually submits to.
+  // that skill 74's `kie_live_adapter.py run` submits to (CC-KIE-3).
   const SKILL_66_IMAGE = new Set([
     'gpt-image-2-text-to-image',
     'gpt-image-2-image-to-image',
