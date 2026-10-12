@@ -25,14 +25,15 @@
  *       typed `StudioGenerationRefusedError` and the ROUTE answers HTTP 409
  *       { error: 'generation_unavailable', capabilities } (never a 202).
  *
- * CC-KIE-1 (decision 16) — the direct KIE generation path is SWITCHED OFF.
- * `isGeneratorWired()` excludes KIE, so a keyed KIE row never makes a Studio
- * kind available, and `createJob()` refuses with the exact message
- * "KIE generation runs through skill 74; not wired in Studio" (CC-KIE-3 wires
- * Studio to skill 74 later). The regression below proves the REAL route makes
- * zero `createTask` submits and zero `recordInfo` polls and returns exactly
- * that string, reusing the offline KIE catalog seed. A control proves the
- * switch-off does not over-block a genuinely wired provider (OpenAI Images).
+ * CC-KIE-3 — Studio KIE is wired to skill 74 (`kie_live_adapter.py run`), but
+ * ONLY when the adapter is installed on this box AND the KIE key is present.
+ * This file keeps the CC-KIE-1 fail-closed guarantee: with NO skill 74 adapter
+ * on disk a keyed KIE row never makes a Studio kind available, and the REAL
+ * route refuses 409 with the fail-closed message. The regression below proves
+ * the REAL route makes zero `createTask` submits and zero `recordInfo` polls.
+ * A control proves the gate does not over-block a genuinely wired provider
+ * (OpenAI Images). The adapter-PRESENT wiring is proven in
+ * `tests/unit/cc-kie-3-studio-kie-skill74.test.ts`.
  *
  * Runs via the Node built-in test runner under tsx (`npm run test:unit`).
  * No network: every HTTP call is a stubbed `globalThis.fetch`. HOME is pointed
@@ -239,25 +240,31 @@ test('CC-KIE-1: POST /api/operator/studio/generate on the unauthorized path refu
   });
 });
 
-// ── THE REGRESSION: KIE Studio generation is switched OFF (decision 16) ──────
+// ── THE REGRESSION: Studio KIE fails CLOSED when skill 74 is absent ─────────
+//
+// CC-KIE-3 wires Studio KIE to skill 74's `kie_live_adapter.py run`, but ONLY
+// when the adapter is installed on this box AND the KIE key is present. This
+// sandbox HOME has no skill 74 tree, so a keyed KIE request must STILL refuse:
+// the CC-KIE-1 fail-closed guarantee holds for the adapter-absent case.
 
-test('CC-KIE-1 regression: KIE Studio generation submits nothing, polls nothing and returns exactly the skill-74 message', async () => {
+test('CC-KIE-3 regression: a keyed KIE request with NO skill 74 adapter submits nothing, polls nothing and refuses 409', async () => {
   await withEnv({ KIE_API_KEY: 'kie-fake-key' }, async () => {
     // Offline KIE catalog seed — the same offline discovery rows a fresh box
     // gets, no network and no live catalog read (reuses the catalog fixture).
     registry.bulkUpsertModels(discovery.discoverRegistryRows({ hydrate: false }));
 
-    // (a) KIE is marked UNAVAILABLE — a keyed KIE provider never makes a
-    // Studio kind available, so the UI can never present the paid entry as usable.
+    // (a) KIE is marked UNAVAILABLE — a keyed KIE provider without the skill 74
+    // adapter never makes a Studio kind available, so the UI can never present
+    // the paid entry as usable.
     assert.deepEqual(
       generators.studioGenerationCapabilities(),
       { image: false, video: false, audio: false },
-      'a keyed KIE provider must NOT report any Studio capability as available'
+      'a keyed KIE provider without the skill 74 adapter must NOT report any Studio capability as available'
     );
 
     const rec = stubFetch(() => ({ json: { code: 200, msg: 'success', data: { taskId: 'never' } } }));
     try {
-      // (d) the REAL server entrypoint refuses with the exact skill-74 message.
+      // (d) the REAL server entrypoint refuses with the fail-closed message.
       const res = await route.POST(
         new NextRequest('http://localhost/api/operator/studio/generate', {
           method: 'POST',
@@ -278,13 +285,13 @@ test('CC-KIE-1 regression: KIE Studio generation submits nothing, polls nothing 
       assert.equal(body.error, 'generation_unavailable');
       assert.equal(
         body.detail,
-        'KIE generation runs through skill 74; not wired in Studio',
-        'the route must return EXACTLY the skill-74 message'
+        'KIE Studio is unavailable: skill 74 (74-kie-live-adapter/scripts/kie_live_adapter.py) is not installed on this box. Nothing is submitted, polled or spent.',
+        'the route must return the exact fail-closed message when the skill 74 adapter is absent'
       );
       assert.deepEqual(body.capabilities, { image: false, video: false, audio: false });
 
-      // createJob — the single production entry into runJob -> callKie ->
-      // runKieJob — throws the same exact message, before any job row.
+      // createJob — the single production entry into runJob -> callKie —
+      // throws the same exact message, before any job row.
       await assert.rejects(
         () =>
           generators.createJob({
@@ -299,8 +306,8 @@ test('CC-KIE-1 regression: KIE Studio generation submits nothing, polls nothing 
           );
           assert.equal(
             (err as Error).message,
-            'KIE generation runs through skill 74; not wired in Studio',
-            'createJob must carry EXACTLY the skill-74 message'
+            'KIE Studio is unavailable: skill 74 (74-kie-live-adapter/scripts/kie_live_adapter.py) is not installed on this box. Nothing is submitted, polled or spent.',
+            'createJob must carry the exact fail-closed message'
           );
           return true;
         }
