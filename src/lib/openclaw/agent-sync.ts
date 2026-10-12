@@ -122,6 +122,32 @@ function resolveWorkspaceId(db: ReturnType<typeof getDb>, slug: string): { id: s
 }
 
 /**
+ * The live general-task catch-all lane — the correct parking place for an
+ * agent with NO confirmed department evidence (id-prefix, bare-id, or name).
+ * Mirrors migration 167's live-target rule (archived_at IS NULL) and
+ * resolveGeneralTaskWorkspace's precedence: the canonical id/slug
+ * 'general-task' outranks the legacy 'dept-general-task' slug. Returns null
+ * when no live catch-all row exists (caller keeps its legacy fallback).
+ */
+function catchAllGeneralTaskWorkspaceId(
+  db: ReturnType<typeof getDb>,
+): string | null {
+  const row = db
+    .prepare(
+      `SELECT id FROM workspaces
+        WHERE archived_at IS NULL
+          AND (lower(id) = 'general-task'
+               OR lower(slug) IN ('general-task', 'dept-general-task'))
+        ORDER BY CASE WHEN lower(id) = 'general-task' THEN 0
+                      WHEN lower(slug) = 'general-task'  THEN 1
+                      ELSE 2 END
+        LIMIT 1`,
+    )
+    .get() as { id: string } | undefined;
+  return row?.id ?? null;
+}
+
+/**
  * Resolve an agent's department → workspace id from its gateway id and
  * display name. The agent's OWN id wins when it encodes a real department
  * (dept-<slug> / head-agent-<slug>) AND that slug is a CONFIRMED workspace —
@@ -130,6 +156,17 @@ function resolveWorkspaceId(db: ReturnType<typeof getDb>, slug: string): { id: s
  * 'General Counsel' into General Task on the strength of "general" alone
  * (MR-14 regression) — see tests/unit/general-task-vs-default.test.ts.
  * Exported for direct unit testing (no gateway mock needed).
+ *
+ * Unmatched agents park in the LIVE general-task catch-all (JGT catch-all
+ * lane, migration 166: "work that fits no other department"), never the
+ * structural 'default' row: 'default' is only minted by db:seed (seed.ts),
+ * so a box that never ran seed has no 'default' row and the old literal
+ * 'default' fallback violated agents.workspace_id → workspaces(id) on every
+ * boot (2026-10-12 box log: "Ingested 0 new + updated 56 … 24 agent(s)
+ * skipped", all FOREIGN KEY constraint failed). isCatchAllWorkspace()
+ * rejects 'default' anyway (MR-14), so general-task is the only doctrinal
+ * no-guess lane. 'default' is kept solely as a last resort for legacy boxes
+ * with no live general-task workspace, preserving pre-fix behavior there.
  */
 export function resolveAgentDeptWorkspace(
   db: ReturnType<typeof getDb>,
@@ -139,13 +176,35 @@ export function resolveAgentDeptWorkspace(
   const idMatch = agentId.match(/^dept-(.+)$/) || agentId.match(/^head-agent-(.+)$/);
   const idSlug = idMatch ? canonicalDeptSlug(idMatch[1]) : null;
   const idResolved = idSlug ? resolveWorkspaceId(db, idSlug) : null;
+  // Bare-id confirmation: an agent id that IS a real workspace (e.g. agent
+  // id 'product-development' ↔ workspace slug 'product-development') carries
+  // the same id evidence the dept-/head-agent- prefix rule trusts — but it
+  // resolves as found only when the workspace row actually exists. Never a
+  // name guess: this is the gateway's own identifier. Skipped for prefixed
+  // ids, whose department form was already tried through idSlug above.
+  const bareResolved = idMatch ? null : resolveWorkspaceId(db, agentId);
   const nameDept = inferDeptFromAgentName(name);
-  const dept = idResolved?.found ? idSlug : nameDept;
+  const noEvidence = !(idResolved?.found || bareResolved?.found || nameDept);
+  const dept = idResolved?.found
+    ? idSlug
+    : bareResolved?.found
+    ? agentId
+    : nameDept;
   const workspaceId = idResolved?.found
     ? idResolved.id
+    : bareResolved?.found
+    ? bareResolved.id
     : nameDept
     ? resolveWorkspaceId(db, nameDept).id
-    : 'default';
+    // No evidence at all → the live catch-all lane; the literal 'default'
+    // remains only for legacy boxes with no live general-task workspace.
+    : (catchAllGeneralTaskWorkspaceId(db) ?? 'default');
+  if (noEvidence) {
+    // Observable parity with the evidence tiers above (no silent parking).
+    console.log(
+      `[Agent-Sync] "${agentId}" has no department evidence — parking in live catch-all if present (workspace: ${workspaceId}).`,
+    );
+  }
   return { workspaceId, dept };
 }
 
