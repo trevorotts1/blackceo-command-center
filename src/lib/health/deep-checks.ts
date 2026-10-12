@@ -284,7 +284,13 @@ export function checkBuildContentInventory(): Promise<BuildContentResult> {
     return buildContentCache.result;
   }
   const result = computeBuildContentInventory(cwd);
-  if (key) buildContentCache = { key, at: now, result };
+  if (key) {
+    buildContentCache = { key, at: now, result };
+    // An UNKNOWN is transient: do not pin it for the 5 minute TTL (D15).
+    void result.then((r) => {
+      if (r.indeterminate && buildContentCache?.result === result) buildContentCache = null;
+    }, () => undefined);
+  }
   return result;
 }
 
@@ -384,6 +390,19 @@ async function computeBuildContentInventory(cwd: string): Promise<BuildContentRe
         pass: false,
         verdict,
         detail: 'build_content: OBSOLETE INVENTORY — manifest was computed over a different compile-affecting input set than this tree has now; the recorded inventory no longer covers what compiles (PRES-046). Rebuild: bash scripts/atomic-deploy.sh',
+      };
+    }
+    if (verdict === 'UNKNOWN') {
+      // FXCC-1 / D15: the helper gave no verdict at all. spawnHelper turns a
+      // 30 s timeout (e.g. the 03:00 maintenance storm) into rc 1 with empty
+      // stdout, which landed here as a definitive RED and a nightly false alarm.
+      // No verdict is UNKNOWN, not a failure: the watchdog's transient-UNKNOWN
+      // path retries it, and a MISMATCH / INVALID verdict above still fails hard.
+      return {
+        pass: false,
+        indeterminate: true,
+        verdict,
+        detail: `build_content: verification gave no verdict (rc=${verify.rc}; helper timed out or was killed) — UNKNOWN, not a mismatch`,
       };
     }
     return {
