@@ -536,6 +536,9 @@ jobs:
       # The tunnel token must reach pm2 as a mode-600 --token-file, never on argv.
       - name: create-tunnel.sh token-file test
         run: bash tests/unit/create-tunnel-token-file.test.sh
+      # pm2 modules are not apps (D14), self-heal reads parsed JSON (D21), backups on the persistent root (D22).
+      - name: fleet defects D14/D21/D22 test
+        run: bash tests/unit/fxcc-fleet-defects.test.sh
 
 
   # ── Build smoke test — BLOCKING ───────────────────────────────────────────

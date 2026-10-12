@@ -177,7 +177,17 @@ export async function register(): Promise<void> {
     // Fire-and-forget: a failure here just means the gateway is down or the
     // device is pending approval. Either way the pending request is now on the
     // gateway and the status route will report the precise remediation.
-    client.connect().then(
+    // FXCC-1 / D09: pm2 starts this process before the gateway is ready, so the
+    // first connect can close with 1013 "gateway starting" — and the client only
+    // auto-reconnects a socket that was connected before. Retry on a bounded
+    // backoff (~5 min) so the bridge comes up and the agent sync below runs.
+    const { connectWithBootRetry } = await import('@/lib/openclaw/boot-connect');
+    connectWithBootRetry(client, {
+      onRetry: (attempt, delayMs, err) =>
+        console.log(
+          `[instrumentation] Bridge boot connect ${attempt} failed (${err instanceof Error ? err.message : String(err)}); retrying in ${Math.round(delayMs / 1000)}s`,
+        ),
+    }).then(
       async () => {
         console.log('[instrumentation] Bridge connected to OpenClaw gateway on boot');
 

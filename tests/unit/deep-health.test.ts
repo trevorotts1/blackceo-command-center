@@ -2519,3 +2519,47 @@ describe('build_content — never blocks the server; cached per BUILD_ID + HEAD'
     expect(fs.readFileSync(counter, 'utf8').trim().split('\n')).toHaveLength(2);
   });
 });
+
+// ────────────────────────────────────────────────────────────────────────────
+// FXCC-1 / D15: a build-inventory helper that gives NO verdict (its 30 s timeout
+// under the 03:00 maintenance storm becomes rc 1 + empty stdout) is UNKNOWN, not
+// a definitive build_content RED. A real MISMATCH still fails hard.
+// ────────────────────────────────────────────────────────────────────────────
+describe('build_content — a helper with no verdict is UNKNOWN, a MISMATCH still fails (FXCC-1 / D15)', () => {
+  function fakeOracle(dir: string, body: string): void {
+    fs.mkdirSync(path.join(dir, 'scripts', 'lib'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'scripts', 'lib', 'build-inventory.sh'), body);
+    fs.mkdirSync(path.join(dir, '.next'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.next', 'BUILD_ID'), 'b1');
+    fs.mkdirSync(path.join(dir, '.git', 'refs', 'heads'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+    fs.writeFileSync(path.join(dir, '.git', 'refs', 'heads', 'main'), 'aaaa\n');
+  }
+
+  it('rc 1 with empty stdout (what a killed helper looks like) is indeterminate, not a hard fail', async () => {
+    fakeOracle(tmpDir, 'exit 1\n');
+    const { checkBuildContentInventory } = await loadChecks();
+    const r = await checkBuildContentInventory();
+    expect(r.pass).toBe(false);
+    expect(r.indeterminate).toBe(true);
+    expect(r.detail).toMatch(/UNKNOWN/);
+  });
+
+  it('the UNKNOWN is not cached: the next poll re-runs the helper and can go green', async () => {
+    const counter = path.join(tmpDir, 'calls');
+    fakeOracle(tmpDir, `echo x >> "${counter}"\nif [ "$(wc -l < "${counter}")" -lt 2 ]; then exit 1; fi\necho '{"verdict":"VERIFIED","build_id":"b1"}'\n`);
+    const { checkBuildContentInventory } = await loadChecks();
+    expect((await checkBuildContentInventory()).indeterminate).toBe(true);
+    await new Promise((r) => setTimeout(r, 20));
+    expect((await checkBuildContentInventory()).pass).toBe(true);
+  });
+
+  it('control: a real MISMATCH verdict is still a definitive fail (not indeterminate)', async () => {
+    fakeOracle(tmpDir, 'echo \'{"verdict":"MISMATCH","build_id":"b1"}\'\nexit 1\n');
+    const { checkBuildContentInventory } = await loadChecks();
+    const r = await checkBuildContentInventory();
+    expect(r.pass).toBe(false);
+    expect(r.indeterminate).not.toBe(true);
+    expect(r.verdict).toBe('MISMATCH');
+  });
+});

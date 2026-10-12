@@ -10,7 +10,28 @@ set -euo pipefail
 # Configuration
 MEMORY_BASE="${HOME}/.openclaw/memory"
 WORKFLOW_DIRS=("bug-fix" "feature-dev" "security-audit")
-CLEANUP_LOG="${HOME}/Downloads/openclaw-backups/cleanup-log.txt"
+# >>> cc_persist_root (FXCC-1 / D22; same text in scripts/weekly-cleanup.sh)
+# Contabo: only the OpenClaw root is a mounted volume; $HOME (/home/node) is the
+# container layer and is wiped on every recreate. Prints the OpenClaw root when
+# it is a mount point and $HOME is not; fails everywhere else (Mac has no
+# `mountpoint`; Hostinger's root is a plain folder inside the /data volume), so
+# those platforms keep their existing paths.
+cc_persist_root() {
+  local r
+  for r in "${OPENCLAW_ROOT:-}" /data/.openclaw "$HOME/.openclaw"; do
+    [ -n "$r" ] && [ -d "$r" ] || continue
+    command -v mountpoint >/dev/null 2>&1 || return 1
+    if mountpoint -q "$r" && ! mountpoint -q "$HOME"; then printf '%s' "$r"; return 0; fi
+    return 1
+  done
+  return 1
+}
+# <<< cc_persist_root
+if _CC_PERSIST="$(cc_persist_root)"; then
+    CLEANUP_LOG="${_CC_PERSIST}/backups/cleanup-log.txt"
+else
+    CLEANUP_LOG="${HOME}/Downloads/openclaw-backups/cleanup-log.txt"
+fi
 RETENTION_DAYS=7
 DRY_RUN=false
 
