@@ -118,6 +118,10 @@ export async function GET(req:NextRequest) {
     // false, because only they make a promised link undeliverable.
     const runtimeReady=missing.length===0;
     for(const reason of invitationGate.reasons) if(!missing.includes(reason)) missing.push(reason);
-    return NextResponse.json({protocol,stage:'interview',ready:missing.length===0,tenantId:context.tenantId,companyId:context.companyId,installationId:context.installationId,host:context.host,interviewComplete:flagged&&identity!=='mismatched'?state!.interviewComplete:null,capabilities:{state:stateReady,localInterviewPrerequisites:prerequisites.length===0,enrollment,providerLiveness:'unverified',runtimeReady,invitationIssuable:invitationGate.issuable},foundation,missing,warnings},{status:missing.length?503:200,headers});
+    // `enrollment` is ISSUANCE capability, not secret presence (item 13): a
+    // configured signing secret is not the ability to mint a link the box can
+    // verify, so the two are reported separately — `signingSecretConfigured`
+    // keeps the diagnostic, `enrollment` tells the truth about issuance.
+    return NextResponse.json({protocol,stage:'interview',ready:missing.length===0,tenantId:context.tenantId,companyId:context.companyId,installationId:context.installationId,host:context.host,interviewComplete:flagged&&identity!=='mismatched'?state!.interviewComplete:null,capabilities:{state:stateReady,localInterviewPrerequisites:prerequisites.length===0,enrollment:enrollment&&invitationGate.issuable,signingSecretConfigured:enrollment,providerLiveness:'unverified',runtimeReady,invitationIssuable:invitationGate.issuable},foundation,missing,warnings},{status:missing.length?503:200,headers});
   } catch {return NextResponse.json({ready:false,protocol,error:'tenant_registration_or_identity_unverified'},{status:403,headers});}
 }

@@ -132,6 +132,10 @@ test('readiness: identity-only registry reports not-issuable AND not-ready (item
     assert.equal(response.status, 503, JSON.stringify(body));
     assert.equal(body.ready, false);
     assert.equal(body.capabilities.invitationIssuable, false);
+    // Item 13: enrollment is issuance capability, so it is false here too, and
+    // the signing-secret diagnostic stays separate and truthful.
+    assert.equal(body.capabilities.enrollment, false);
+    assert.equal(body.capabilities.signingSecretConfigured, true);
     assert.ok(body.missing.includes('access_identity_unregistered'), JSON.stringify(body.missing));
     assert.ok(body.warnings.includes('missing_registry_identity'), JSON.stringify(body.warnings));
     // Runtime health stays a separate, still-truthful answer.
@@ -144,6 +148,7 @@ test('readiness: identity-only registry reports not-issuable AND not-ready (item
     assert.equal(response.status, 200, JSON.stringify(body));
     assert.equal(body.ready, true);
     assert.equal(body.capabilities.invitationIssuable, true);
+    assert.equal(body.capabilities.enrollment, true);
     assert.equal(body.capabilities.runtimeReady, true);
     assert.ok(!body.missing.includes('access_identity_unregistered'), JSON.stringify(body.missing));
   });
