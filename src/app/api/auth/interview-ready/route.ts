@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { resolveTenantContext, tenantSecretIsFallback } from '@/lib/auth/tenant-context';
+import { resolveTenantContext, tenantSecretIsFallback, invitationPrerequisites } from '@/lib/auth/tenant-context';
 import { queryOne } from '@/lib/db';
 import { personaCompanyContext } from '@/lib/persona-company';
 import { readBuildState } from '@/lib/interview/seam';
@@ -102,14 +102,22 @@ export async function GET(req:NextRequest) {
     //     at readiness instead of after the owner waits for a link.
     const warnings:string[]=[];
     if(enrollment && tenantSecretIsFallback()) warnings.push('enrollment_secret_fallback');
-    if(context.kind==='self') {
-      try {
-        const reg=(await import('@/lib/auth/tenant-context')).tenantRegistration(context.host);
-        if(!reg.issuer || !reg.audience || !reg.subjects?.length) warnings.push('missing_registry_identity');
-      } catch { warnings.push('missing_registry_identity'); }
-    }
+    // Items (9) + 13: this warning stays for the operators and older consumers
+    // that read it, but it is no longer the ONLY place the gap appears — the
+    // same condition now also fails `ready` below through the shared issuance
+    // predicate, so a readiness answer can never authorize an invitation the
+    // registry will refuse.
+    const invitationGate=invitationPrerequisites(context);
+    if(context.kind==='self' && !invitationGate.issuable && invitationGate.reasons.includes('access_identity_unregistered')) warnings.push('missing_registry_identity');
     const foundation=verifyStandardFoundation(state);
     if(state?.buildType==='standard-first' && !foundation.ready) missing.push('standard_foundation_unverified');
-    return NextResponse.json({protocol,stage:'interview',ready:missing.length===0,tenantId:context.tenantId,companyId:context.companyId,installationId:context.installationId,host:context.host,interviewComplete:flagged&&identity!=='mismatched'?state!.interviewComplete:null,capabilities:{state:stateReady,localInterviewPrerequisites:prerequisites.length===0,enrollment,providerLiveness:'unverified'},foundation,missing,warnings},{status:missing.length?503:200,headers});
+    // `runtimeReady` is the whole answer EXCEPT issuance eligibility: legacy
+    // consumers keep reading `ready`, `missing` and the existing capability
+    // keys unchanged, and can move to `runtimeReady`/`invitationIssuable` on
+    // their own schedule. Only the invitation prerequisites flip `ready` to
+    // false, because only they make a promised link undeliverable.
+    const runtimeReady=missing.length===0;
+    for(const reason of invitationGate.reasons) if(!missing.includes(reason)) missing.push(reason);
+    return NextResponse.json({protocol,stage:'interview',ready:missing.length===0,tenantId:context.tenantId,companyId:context.companyId,installationId:context.installationId,host:context.host,interviewComplete:flagged&&identity!=='mismatched'?state!.interviewComplete:null,capabilities:{state:stateReady,localInterviewPrerequisites:prerequisites.length===0,enrollment,providerLiveness:'unverified',runtimeReady,invitationIssuable:invitationGate.issuable},foundation,missing,warnings},{status:missing.length?503:200,headers});
   } catch {return NextResponse.json({ready:false,protocol,error:'tenant_registration_or_identity_unverified'},{status:403,headers});}
 }
