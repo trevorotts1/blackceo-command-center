@@ -1,0 +1,821 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Council of Wise Elders: locked screen reference (CWE-031)</title>
+<link rel="stylesheet" href="../council-theme.css">
+<style>
+  /* Reference scaffolding only. Product styling comes from council-theme.css. */
+  body { margin: 0; background: #EDEAE2; font-family: Inter, system-ui, sans-serif; }
+  .ref-wrap { max-width: 1080px; margin: 0 auto; padding: 2rem 1rem 4rem; }
+  .ref-screen { margin-bottom: 3rem; border-radius: 24px; overflow: hidden; box-shadow: 0 18px 48px rgba(20,22,26,.14); }
+  .ref-screen-head { background: #23262B; color: #F5F1E8; padding: .75rem 1.25rem; font-size: 14px; display: flex; gap: 1rem; align-items: center; }
+  .ref-badge { background: #F59E0B; color: #1A1D26; font-weight: 700; font-size: 12px; padding: .15rem .5rem; border-radius: 999px; letter-spacing: .04em; }
+  .ref-body { padding: 2rem; }
+  .ref-cols { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; }
+  .ref-phone { width: 390px; max-width: 100%; margin: 0 auto; border: 10px solid #23262B; border-radius: 36px; overflow: hidden; }
+  .ref-phone .ref-body { padding: 1.25rem; }
+  table.ref-score { border-collapse: collapse; width: 100%; font-size: 16px; }
+  table.ref-score th, table.ref-score td { border: 1px solid var(--council-line); padding: .5rem .75rem; text-align: left; }
+  .ref-center { position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%); width: 300px; text-align: center; color: var(--council-stage-ink); }
+  .ref-center .council-meta { color: var(--council-stage-muted); }
+  @media (max-width: 700px) { .ref-cols { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="ref-wrap">
+  <header style="padding:1rem 0 2rem">
+    <h1 style="font-family:Fraunces,Georgia,serif;font-weight:500">Council of Wise Elders: locked screen reference</h1>
+    <p>Locked by CWE-031 (Skill 77). This reference is the visual benchmark CWE-042 scores rendered
+    screens against, with the rubric in <strong>../visual-benchmark.md</strong>. It is built from the locked
+    sources themselves: the scoped tokens in <strong>../council-theme.css</strong>, the seat geometry in
+    <strong>../council-theme.ts</strong>, and the nine canonical medallion assets from the onboarding
+    skill's <strong>assets/portraits/</strong>. Every decision shown is a fictional sample and is labeled
+    as one. Screens: home, brief review, live room, verdict, phone reading view (Sections 21 and 22).
+    Reference viewports: 1366x768 and 1920x1080 desktop, 390x844 phone frame below; the full matrix
+    (320x780, 768x1024, 200% zoom, reduced motion) is judged by CWE-042/CWE-044 on the real build.</p>
+  </header>
+
+  <!-- ═══ SCREEN 1: HOME ═══ -->
+  <section class="ref-screen council-theme" aria-label="Screen reference: council home">
+    <div class="ref-screen-head"><strong>Screen 1 of 5: Council home</strong> <span class="ref-badge">FICTIONAL SAMPLE</span> <span>Route: /council (built by CWE-033)</span></div>
+    <div class="ref-body">
+      <p class="council-eyebrow">Council of Wise Elders</p>
+      <h2 class="council-display" style="margin:.5rem 0">Big decisions deserve more than one perspective.</h2>
+      <p class="council-lede" style="max-width:44rem">Bring your question. Your council will examine the options,
+      challenge the assumptions, and help you choose your next move.</p>
+      <p style="margin:1.25rem 0">
+        <button class="council-btn council-btn-primary" type="button">Ask the council</button>
+        <button class="council-btn council-btn-quiet" type="button">Review past decisions</button>
+      </p>
+      <div class="council-card" style="margin-bottom:1.5rem">
+        <p class="council-meta" style="margin:0">Your model: <strong>Client-selected route</strong> (sample state).
+        The council uses the model you choose; it never substitutes another one silently.
+        Nine perspectives, one recommendation, sources you can inspect.</p>
+      </div>
+      <h3 class="council-heading" style="margin-bottom:1rem">Your council</h3>
+      <div class="council-seat-grid">
+        
+        <button class="council-seat" type="button" aria-label="Simon Sinek, purpose and strategic alignment">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="72" height="72" role="img" aria-labelledby="t d">
+  <title id="t">Simon Sinek medallion</title>
+  <desc id="d">Illustrative identity medallion for the Simon Sinek council seat (purpose and strategic alignment): the initials SS and three concentric circles inside a colored ring on a tinted disc. A designed symbol, not a photograph or likeness.</desc>
+  <circle cx="120" cy="120" r="114" fill="#FBF1DA"/>
+  <circle cx="120" cy="120" r="114" fill="none" stroke="#B57E0E" stroke-width="6"/>
+  <circle cx="120" cy="120" r="102" fill="none" stroke="#B57E0E" stroke-width="1.5" opacity="0.45"/>
+  
+  <g fill="none" stroke="#7A5200" stroke-width="5">
+    <circle cx="120" cy="72" r="24"/>
+    <circle cx="120" cy="72" r="15"/>
+    <circle cx="120" cy="72" r="6" fill="#7A5200" stroke="none"/>
+  </g>
+  <text x="120" y="172" text-anchor="middle" font-family="Fraunces, Georgia, 'Times New Roman', serif" font-size="56" font-weight="600" letter-spacing="1" fill="#7A5200">SS</text>
+  <g fill="#B57E0E">
+    <circle cx="104" cy="196" r="3.5"/>
+    <circle cx="120" cy="196" r="3.5"/>
+    <circle cx="136" cy="196" r="3.5"/>
+  </g>
+</svg>
+          <span class="council-seat-name">Simon Sinek</span>
+          <span class="council-seat-role">purpose and strategic alignment</span>
+        </button>
+        <button class="council-seat" type="button" aria-label="T. D. Jakes, instinct, reinvention, and communication">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="72" height="72" role="img" aria-labelledby="t d">
+  <title id="t">T. D. Jakes medallion</title>
+  <desc id="d">Illustrative identity medallion for the T. D. Jakes council seat (instinct, reinvention, and communication): the initials TJ and a microphone inside a colored ring on a tinted disc. A designed symbol, not a photograph or likeness.</desc>
+  <circle cx="120" cy="120" r="114" fill="#F0EAF9"/>
+  <circle cx="120" cy="120" r="114" fill="none" stroke="#6C4AB0" stroke-width="6"/>
+  <circle cx="120" cy="120" r="102" fill="none" stroke="#6C4AB0" stroke-width="1.5" opacity="0.45"/>
+  
+  <g fill="none" stroke="#472C7E" stroke-width="5" stroke-linecap="round">
+    <rect x="111" y="38" width="18" height="32" rx="9" fill="#472C7E" stroke="none"/>
+    <path d="M102 58a18 18 0 0 0 36 0"/>
+    <path d="M120 78v14M106 94h28"/>
+  </g>
+  <text x="120" y="172" text-anchor="middle" font-family="Fraunces, Georgia, 'Times New Roman', serif" font-size="56" font-weight="600" letter-spacing="1" fill="#472C7E">TJ</text>
+  <g fill="#6C4AB0">
+    <circle cx="104" cy="196" r="3.5"/>
+    <circle cx="120" cy="196" r="3.5"/>
+    <circle cx="136" cy="196" r="3.5"/>
+  </g>
+</svg>
+          <span class="council-seat-name">T. D. Jakes</span>
+          <span class="council-seat-role">instinct, reinvention, and communication</span>
+        </button>
+        <button class="council-seat" type="button" aria-label="Oprah Winfrey, intention, significance, and human connection">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="72" height="72" role="img" aria-labelledby="t d">
+  <title id="t">Oprah Winfrey medallion</title>
+  <desc id="d">Illustrative identity medallion for the Oprah Winfrey council seat (intention, significance, and human connection): the initials OW and an open book beneath a small sun inside a colored ring on a tinted disc. A designed symbol, not a photograph or likeness.</desc>
+  <circle cx="120" cy="120" r="114" fill="#FAEAF0"/>
+  <circle cx="120" cy="120" r="114" fill="none" stroke="#B23A5E" stroke-width="6"/>
+  <circle cx="120" cy="120" r="102" fill="none" stroke="#B23A5E" stroke-width="1.5" opacity="0.45"/>
+  
+  <g fill="none" stroke="#7C2440" stroke-width="5" stroke-linejoin="round" stroke-linecap="round">
+    <circle cx="120" cy="42" r="5" fill="#7C2440" stroke="none"/>
+    <path d="M84 92V60c12-6 24-6 36 2 12-8 24-8 36-2v32c-12-6-24-6-36 2-12-8-24-8-36-2Z"/>
+    <path d="M120 62v32"/>
+  </g>
+  <text x="120" y="172" text-anchor="middle" font-family="Fraunces, Georgia, 'Times New Roman', serif" font-size="56" font-weight="600" letter-spacing="1" fill="#7C2440">OW</text>
+  <g fill="#B23A5E">
+    <circle cx="104" cy="196" r="3.5"/>
+    <circle cx="120" cy="196" r="3.5"/>
+    <circle cx="136" cy="196" r="3.5"/>
+  </g>
+</svg>
+          <span class="council-seat-name">Oprah Winfrey</span>
+          <span class="council-seat-role">intention, significance, and human connection</span>
+        </button>
+        <button class="council-seat" type="button" aria-label="Tiffany Aliche, financial stability and sustainable commitments">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="72" height="72" role="img" aria-labelledby="t d">
+  <title id="t">Tiffany Aliche medallion</title>
+  <desc id="d">Illustrative identity medallion for the Tiffany Aliche council seat (financial stability and sustainable commitments): the initials TA and a pediment over three columns, a foundation inside a colored ring on a tinted disc. A designed symbol, not a photograph or likeness.</desc>
+  <circle cx="120" cy="120" r="114" fill="#E5F3F0"/>
+  <circle cx="120" cy="120" r="114" fill="none" stroke="#177E6E" stroke-width="6"/>
+  <circle cx="120" cy="120" r="102" fill="none" stroke="#177E6E" stroke-width="1.5" opacity="0.45"/>
+  
+  <g fill="none" stroke="#0C5546" stroke-width="5" stroke-linecap="round">
+    <path d="M82 56 120 40l38 16"/>
+    <path d="M92 64v24M120 64v24M148 64v24"/>
+    <path d="M82 96h76"/>
+  </g>
+  <text x="120" y="172" text-anchor="middle" font-family="Fraunces, Georgia, 'Times New Roman', serif" font-size="56" font-weight="600" letter-spacing="1" fill="#0C5546">TA</text>
+  <g fill="#177E6E">
+    <circle cx="104" cy="196" r="3.5"/>
+    <circle cx="120" cy="196" r="3.5"/>
+    <circle cx="136" cy="196" r="3.5"/>
+  </g>
+</svg>
+          <span class="council-seat-name">Tiffany Aliche</span>
+          <span class="council-seat-role">financial stability and sustainable commitments</span>
+        </button>
+        <button class="council-seat" type="button" aria-label="Russell Brunson, offers, acquisition, and conversion">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="72" height="72" role="img" aria-labelledby="t d">
+  <title id="t">Russell Brunson medallion</title>
+  <desc id="d">Illustrative identity medallion for the Russell Brunson council seat (offers, acquisition, and conversion): the initials RB and a funnel inside a colored ring on a tinted disc. A designed symbol, not a photograph or likeness.</desc>
+  <circle cx="120" cy="120" r="114" fill="#E8EEFB"/>
+  <circle cx="120" cy="120" r="114" fill="none" stroke="#2F5FC4" stroke-width="6"/>
+  <circle cx="120" cy="120" r="102" fill="none" stroke="#2F5FC4" stroke-width="1.5" opacity="0.45"/>
+  
+  <g fill="none" stroke="#1E4189" stroke-width="5" stroke-linejoin="round">
+    <path d="M86 44h68l-24 28v22l-20 8V72L86 44Z"/>
+  </g>
+  <text x="120" y="172" text-anchor="middle" font-family="Fraunces, Georgia, 'Times New Roman', serif" font-size="56" font-weight="600" letter-spacing="1" fill="#1E4189">RB</text>
+  <g fill="#2F5FC4">
+    <circle cx="104" cy="196" r="3.5"/>
+    <circle cx="120" cy="196" r="3.5"/>
+    <circle cx="136" cy="196" r="3.5"/>
+  </g>
+</svg>
+          <span class="council-seat-name">Russell Brunson</span>
+          <span class="council-seat-role">offers, acquisition, and conversion</span>
+        </button>
+        <button class="council-seat" type="button" aria-label="Michelle Obama, grounded leadership, identity, and community">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="72" height="72" role="img" aria-labelledby="t d">
+  <title id="t">Michelle Obama medallion</title>
+  <desc id="d">Illustrative identity medallion for the Michelle Obama council seat (grounded leadership, identity, and community): the initials MO and a sunrise over two horizon lines inside a colored ring on a tinted disc. A designed symbol, not a photograph or likeness.</desc>
+  <circle cx="120" cy="120" r="114" fill="#F6E9F0"/>
+  <circle cx="120" cy="120" r="114" fill="none" stroke="#8E3B63" stroke-width="6"/>
+  <circle cx="120" cy="120" r="102" fill="none" stroke="#8E3B63" stroke-width="1.5" opacity="0.45"/>
+  
+  <g fill="none" stroke="#5E2542" stroke-width="5" stroke-linecap="round">
+    <path d="M90 84a30 30 0 0 1 60 0"/>
+    <path d="M120 40v10M96 50l6 8M144 50l-6 8"/>
+    <path d="M78 94h84M90 106h60"/>
+  </g>
+  <text x="120" y="172" text-anchor="middle" font-family="Fraunces, Georgia, 'Times New Roman', serif" font-size="56" font-weight="600" letter-spacing="1" fill="#5E2542">MO</text>
+  <g fill="#8E3B63">
+    <circle cx="104" cy="196" r="3.5"/>
+    <circle cx="120" cy="196" r="3.5"/>
+    <circle cx="136" cy="196" r="3.5"/>
+  </g>
+</svg>
+          <span class="council-seat-name">Michelle Obama</span>
+          <span class="council-seat-role">grounded leadership, identity, and community</span>
+        </button>
+        <button class="council-seat" type="button" aria-label="Brené Brown, courage, trust, and accountable behavior">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="72" height="72" role="img" aria-labelledby="t d">
+  <title id="t">Brené Brown medallion</title>
+  <desc id="d">Illustrative identity medallion for the Brené Brown council seat (courage, trust, and accountable behavior): the initials BB and a heart outline inside a colored ring on a tinted disc. A designed symbol, not a photograph or likeness.</desc>
+  <circle cx="120" cy="120" r="114" fill="#FAECE5"/>
+  <circle cx="120" cy="120" r="114" fill="none" stroke="#BC5837" stroke-width="6"/>
+  <circle cx="120" cy="120" r="102" fill="none" stroke="#BC5837" stroke-width="1.5" opacity="0.45"/>
+  
+  <g fill="none" stroke="#7E3719" stroke-width="5" stroke-linejoin="round">
+    <path d="M120 94C108 80 90 68 90 52c0-9 7-15 15-15 6 0 12 4 15 10 3-6 9-10 15-10 8 0 15 6 15 15 0 16-18 28-30 42Z"/>
+  </g>
+  <text x="120" y="172" text-anchor="middle" font-family="Fraunces, Georgia, 'Times New Roman', serif" font-size="56" font-weight="600" letter-spacing="1" fill="#7E3719">BB</text>
+  <g fill="#BC5837">
+    <circle cx="104" cy="196" r="3.5"/>
+    <circle cx="120" cy="196" r="3.5"/>
+    <circle cx="136" cy="196" r="3.5"/>
+  </g>
+</svg>
+          <span class="council-seat-name">Brené Brown</span>
+          <span class="council-seat-role">courage, trust, and accountable behavior</span>
+        </button>
+        <button class="council-seat" type="button" aria-label="Dr. Dennis Kimbro, ownership, wealth creation, and achievement">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="72" height="72" role="img" aria-labelledby="t d">
+  <title id="t">Dr. Dennis Kimbro medallion</title>
+  <desc id="d">Illustrative identity medallion for the Dr. Dennis Kimbro council seat (ownership, wealth creation, and achievement): the initials DK and a key inside a colored ring on a tinted disc. A designed symbol, not a photograph or likeness.</desc>
+  <circle cx="120" cy="120" r="114" fill="#E7F2EA"/>
+  <circle cx="120" cy="120" r="114" fill="none" stroke="#2E7D4F" stroke-width="6"/>
+  <circle cx="120" cy="120" r="102" fill="none" stroke="#2E7D4F" stroke-width="1.5" opacity="0.45"/>
+  
+  <g fill="none" stroke="#1C5133" stroke-width="5" stroke-linecap="round">
+    <circle cx="98" cy="66" r="14"/>
+    <path d="M109 74 148 98M136 86v10M146 93v10"/>
+  </g>
+  <text x="120" y="172" text-anchor="middle" font-family="Fraunces, Georgia, 'Times New Roman', serif" font-size="56" font-weight="600" letter-spacing="1" fill="#1C5133">DK</text>
+  <g fill="#2E7D4F">
+    <circle cx="104" cy="196" r="3.5"/>
+    <circle cx="120" cy="196" r="3.5"/>
+    <circle cx="136" cy="196" r="3.5"/>
+  </g>
+</svg>
+          <span class="council-seat-name">Dr. Dennis Kimbro</span>
+          <span class="council-seat-role">ownership, wealth creation, and achievement</span>
+        </button>
+        <button class="council-seat" type="button" aria-label="Les Brown, self-belief, resilience, and committed action">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="72" height="72" role="img" aria-labelledby="t d">
+  <title id="t">Les Brown medallion</title>
+  <desc id="d">Illustrative identity medallion for the Les Brown council seat (self-belief, resilience, and committed action): the initials LB and a rising arrow over a ground line inside a colored ring on a tinted disc. A designed symbol, not a photograph or likeness.</desc>
+  <circle cx="120" cy="120" r="114" fill="#FBEEE0"/>
+  <circle cx="120" cy="120" r="114" fill="none" stroke="#C05E0A" stroke-width="6"/>
+  <circle cx="120" cy="120" r="102" fill="none" stroke="#C05E0A" stroke-width="1.5" opacity="0.45"/>
+  
+  <g fill="none" stroke="#7E3C04" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M84 90 114 62l14 13 24-30"/>
+    <path d="M138 43h15v15"/>
+    <path d="M80 102h80"/>
+  </g>
+  <text x="120" y="172" text-anchor="middle" font-family="Fraunces, Georgia, 'Times New Roman', serif" font-size="56" font-weight="600" letter-spacing="1" fill="#7E3C04">LB</text>
+  <g fill="#C05E0A">
+    <circle cx="104" cy="196" r="3.5"/>
+    <circle cx="120" cy="196" r="3.5"/>
+    <circle cx="136" cy="196" r="3.5"/>
+  </g>
+</svg>
+          <span class="council-seat-name">Les Brown</span>
+          <span class="council-seat-role">self-belief, resilience, and committed action</span>
+        </button>
+      </div>
+      <p class="council-meta" style="margin-top:1.25rem">Each member is an AI perspective inspired by the published
+      work of the named author. Not the individual and not an endorsement. Medallions are designed symbols, not photographs.</p>
+    </div>
+  </section>
+
+  <!-- ═══ SCREEN 2: BRIEF REVIEW ═══ -->
+  <section class="ref-screen council-theme" aria-label="Screen reference: brief review">
+    <div class="ref-screen-head"><strong>Screen 2 of 5: Brief review</strong> <span class="ref-badge">FICTIONAL SAMPLE</span> <span>Route: /council/new (built by CWE-033)</span></div>
+    <div class="ref-body">
+      <p class="council-eyebrow">Review my question</p>
+      <h2 class="council-heading" style="margin:.5rem 0 1rem">Should we pilot the revised coaching offer with new clients next month?</h2>
+      <div class="ref-cols">
+        <div class="council-card"><h3 style="margin-top:0">Options</h3>
+          <p>A. Keep the current offer<br>B. Pilot the revised offer with new clients<br>C. Launch the revised offer broadly</p></div>
+        <div class="council-card"><h3 style="margin-top:0">Facts and assumptions</h3>
+          <p>Fact: current offer sells steadily (client-reported).<br>Assumption: new clients respond to the revised price.<br>Unknown: delivery capacity at twice the volume.</p></div>
+        <div class="council-card"><h3 style="margin-top:0">Run settings</h3>
+          <p>Mode: Full council, all nine seats<br>Model: client-selected route<br>Allowance: shown before start, never exceeded silently</p></div>
+      </div>
+      <p style="margin-top:1.5rem">
+        <button class="council-btn council-btn-primary" type="button">Start council</button>
+        <button class="council-btn council-btn-secondary" type="button">Back to my question</button>
+      </p>
+      <p class="council-meta">Starting asks for run authorization for this session only. Approving the advice later is a separate step, and executing anything is a separate authorization again.</p>
+    </div>
+  </section>
+
+  <!-- ═══ SCREEN 3: LIVE ROOM ═══ -->
+  <section class="ref-screen council-theme" aria-label="Screen reference: live room">
+    <div class="ref-screen-head"><strong>Screen 3 of 5: Live room</strong> <span class="ref-badge">FICTIONAL SAMPLE</span> <span>LIVE badge in product is driven only by real committed events (Section 18)</span></div>
+    <div class="ref-body">
+      <div class="council-stage" style="padding:1.5rem">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap">
+          <p style="margin:0"><strong>Round 2 of 3: Challenge</strong> &nbsp;<span style="color:var(--council-stage-muted)">Six of nine perspectives are in. Nothing here is final until the verdict is validated.</span></p>
+          <p style="margin:0">
+            <button class="council-btn council-btn-secondary" type="button">Pause after this step</button>
+            <button class="council-btn council-btn-quiet" type="button" style="color:var(--council-stage-ink)">Stop council</button>
+          </p>
+        </div>
+        <div class="council-room" style="margin-top:1rem">
+          <div class="council-room-frame">
+            <div class="ref-center">
+              <p class="council-meta" style="margin:0 0 .5rem">THE DECISION</p>
+              <p style="margin:0;font-size:18px;line-height:1.45">Pilot the revised coaching offer with new clients next month?</p>
+              <p class="council-meta" style="margin:.75rem 0 0">Current crux: demand evidence versus delivery capacity</p>
+            </div>
+            
+          <button class="council-seat council-room-seat" type="button" style="left:50.0%;top:16.4%"
+            aria-label="Simon Sinek, purpose and strategic alignment, current state: Supports">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="44" height="44" role="img" aria-labelledby="t d">
+  <title id="t">Simon Sinek medallion</title>
+  <desc id="d">Illustrative identity medallion for the Simon Sinek council seat (purpose and strategic alignment): the initials SS and three concentric circles inside a colored ring on a tinted disc. A designed symbol, not a photograph or likeness.</desc>
+  <circle cx="120" cy="120" r="114" fill="#FBF1DA"/>
+  <circle cx="120" cy="120" r="114" fill="none" stroke="#B57E0E" stroke-width="6"/>
+  <circle cx="120" cy="120" r="102" fill="none" stroke="#B57E0E" stroke-width="1.5" opacity="0.45"/>
+  
+  <g fill="none" stroke="#7A5200" stroke-width="5">
+    <circle cx="120" cy="72" r="24"/>
+    <circle cx="120" cy="72" r="15"/>
+    <circle cx="120" cy="72" r="6" fill="#7A5200" stroke="none"/>
+  </g>
+  <text x="120" y="172" text-anchor="middle" font-family="Fraunces, Georgia, 'Times New Roman', serif" font-size="56" font-weight="600" letter-spacing="1" fill="#7A5200">SS</text>
+  <g fill="#B57E0E">
+    <circle cx="104" cy="196" r="3.5"/>
+    <circle cx="120" cy="196" r="3.5"/>
+    <circle cx="136" cy="196" r="3.5"/>
+  </g>
+</svg>
+            <span class="council-seat-name">Simon Sinek</span>
+            <span class="council-state council-state-support">Supports</span>
+          </button>
+          <button class="council-seat council-room-seat" type="button" style="left:73.8%;top:24.3%"
+            aria-label="T. D. Jakes, instinct, reinvention, and communication, current state: Conditional">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="44" height="44" role="img" aria-labelledby="t d">
+  <title id="t">T. D. Jakes medallion</title>
+  <desc id="d">Illustrative identity medallion for the T. D. Jakes council seat (instinct, reinvention, and communication): the initials TJ and a microphone inside a colored ring on a tinted disc. A designed symbol, not a photograph or likeness.</desc>
+  <circle cx="120" cy="120" r="114" fill="#F0EAF9"/>
+  <circle cx="120" cy="120" r="114" fill="none" stroke="#6C4AB0" stroke-width="6"/>
+  <circle cx="120" cy="120" r="102" fill="none" stroke="#6C4AB0" stroke-width="1.5" opacity="0.45"/>
+  
+  <g fill="none" stroke="#472C7E" stroke-width="5" stroke-linecap="round">
+    <rect x="111" y="38" width="18" height="32" rx="9" fill="#472C7E" stroke="none"/>
+    <path d="M102 58a18 18 0 0 0 36 0"/>
+    <path d="M120 78v14M106 94h28"/>
+  </g>
+  <text x="120" y="172" text-anchor="middle" font-family="Fraunces, Georgia, 'Times New Roman', serif" font-size="56" font-weight="600" letter-spacing="1" fill="#472C7E">TJ</text>
+  <g fill="#6C4AB0">
+    <circle cx="104" cy="196" r="3.5"/>
+    <circle cx="120" cy="196" r="3.5"/>
+    <circle cx="136" cy="196" r="3.5"/>
+  </g>
+</svg>
+            <span class="council-seat-name">T. D. Jakes</span>
+            <span class="council-state council-state-conditional">Conditional</span>
+          </button>
+          <button class="council-seat council-room-seat" type="button" style="left:86.4%;top:44.2%"
+            aria-label="Oprah Winfrey, intention, significance, and human connection, current state: Supports">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="44" height="44" role="img" aria-labelledby="t d">
+  <title id="t">Oprah Winfrey medallion</title>
+  <desc id="d">Illustrative identity medallion for the Oprah Winfrey council seat (intention, significance, and human connection): the initials OW and an open book beneath a small sun inside a colored ring on a tinted disc. A designed symbol, not a photograph or likeness.</desc>
+  <circle cx="120" cy="120" r="114" fill="#FAEAF0"/>
+  <circle cx="120" cy="120" r="114" fill="none" stroke="#B23A5E" stroke-width="6"/>
+  <circle cx="120" cy="120" r="102" fill="none" stroke="#B23A5E" stroke-width="1.5" opacity="0.45"/>
+  
+  <g fill="none" stroke="#7C2440" stroke-width="5" stroke-linejoin="round" stroke-linecap="round">
+    <circle cx="120" cy="42" r="5" fill="#7C2440" stroke="none"/>
+    <path d="M84 92V60c12-6 24-6 36 2 12-8 24-8 36-2v32c-12-6-24-6-36 2-12-8-24-8-36-2Z"/>
+    <path d="M120 62v32"/>
+  </g>
+  <text x="120" y="172" text-anchor="middle" font-family="Fraunces, Georgia, 'Times New Roman', serif" font-size="56" font-weight="600" letter-spacing="1" fill="#7C2440">OW</text>
+  <g fill="#B23A5E">
+    <circle cx="104" cy="196" r="3.5"/>
+    <circle cx="120" cy="196" r="3.5"/>
+    <circle cx="136" cy="196" r="3.5"/>
+  </g>
+</svg>
+            <span class="council-seat-name">Oprah Winfrey</span>
+            <span class="council-state council-state-support">Supports</span>
+          </button>
+          <button class="council-seat council-room-seat" type="button" style="left:82.0%;top:66.8%"
+            aria-label="Tiffany Aliche, financial stability and sustainable commitments, current state: Opposes">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="44" height="44" role="img" aria-labelledby="t d">
+  <title id="t">Tiffany Aliche medallion</title>
+  <desc id="d">Illustrative identity medallion for the Tiffany Aliche council seat (financial stability and sustainable commitments): the initials TA and a pediment over three columns, a foundation inside a colored ring on a tinted disc. A designed symbol, not a photograph or likeness.</desc>
+  <circle cx="120" cy="120" r="114" fill="#E5F3F0"/>
+  <circle cx="120" cy="120" r="114" fill="none" stroke="#177E6E" stroke-width="6"/>
+  <circle cx="120" cy="120" r="102" fill="none" stroke="#177E6E" stroke-width="1.5" opacity="0.45"/>
+  
+  <g fill="none" stroke="#0C5546" stroke-width="5" stroke-linecap="round">
+    <path d="M82 56 120 40l38 16"/>
+    <path d="M92 64v24M120 64v24M148 64v24"/>
+    <path d="M82 96h76"/>
+  </g>
+  <text x="120" y="172" text-anchor="middle" font-family="Fraunces, Georgia, 'Times New Roman', serif" font-size="56" font-weight="600" letter-spacing="1" fill="#0C5546">TA</text>
+  <g fill="#177E6E">
+    <circle cx="104" cy="196" r="3.5"/>
+    <circle cx="120" cy="196" r="3.5"/>
+    <circle cx="136" cy="196" r="3.5"/>
+  </g>
+</svg>
+            <span class="council-seat-name">Tiffany Aliche</span>
+            <span class="council-state council-state-oppose">Opposes</span>
+          </button>
+          <button class="council-seat council-room-seat" type="button" style="left:62.6%;top:81.6%"
+            aria-label="Russell Brunson, offers, acquisition, and conversion, current state: Supports">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="44" height="44" role="img" aria-labelledby="t d">
+  <title id="t">Russell Brunson medallion</title>
+  <desc id="d">Illustrative identity medallion for the Russell Brunson council seat (offers, acquisition, and conversion): the initials RB and a funnel inside a colored ring on a tinted disc. A designed symbol, not a photograph or likeness.</desc>
+  <circle cx="120" cy="120" r="114" fill="#E8EEFB"/>
+  <circle cx="120" cy="120" r="114" fill="none" stroke="#2F5FC4" stroke-width="6"/>
+  <circle cx="120" cy="120" r="102" fill="none" stroke="#2F5FC4" stroke-width="1.5" opacity="0.45"/>
+  
+  <g fill="none" stroke="#1E4189" stroke-width="5" stroke-linejoin="round">
+    <path d="M86 44h68l-24 28v22l-20 8V72L86 44Z"/>
+  </g>
+  <text x="120" y="172" text-anchor="middle" font-family="Fraunces, Georgia, 'Times New Roman', serif" font-size="56" font-weight="600" letter-spacing="1" fill="#1E4189">RB</text>
+  <g fill="#2F5FC4">
+    <circle cx="104" cy="196" r="3.5"/>
+    <circle cx="120" cy="196" r="3.5"/>
+    <circle cx="136" cy="196" r="3.5"/>
+  </g>
+</svg>
+            <span class="council-seat-name">Russell Brunson</span>
+            <span class="council-state council-state-support">Supports</span>
+          </button>
+          <button class="council-seat council-room-seat" type="button" style="left:37.4%;top:81.6%"
+            aria-label="Michelle Obama, grounded leadership, identity, and community, current state: Conditional">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="44" height="44" role="img" aria-labelledby="t d">
+  <title id="t">Michelle Obama medallion</title>
+  <desc id="d">Illustrative identity medallion for the Michelle Obama council seat (grounded leadership, identity, and community): the initials MO and a sunrise over two horizon lines inside a colored ring on a tinted disc. A designed symbol, not a photograph or likeness.</desc>
+  <circle cx="120" cy="120" r="114" fill="#F6E9F0"/>
+  <circle cx="120" cy="120" r="114" fill="none" stroke="#8E3B63" stroke-width="6"/>
+  <circle cx="120" cy="120" r="102" fill="none" stroke="#8E3B63" stroke-width="1.5" opacity="0.45"/>
+  
+  <g fill="none" stroke="#5E2542" stroke-width="5" stroke-linecap="round">
+    <path d="M90 84a30 30 0 0 1 60 0"/>
+    <path d="M120 40v10M96 50l6 8M144 50l-6 8"/>
+    <path d="M78 94h84M90 106h60"/>
+  </g>
+  <text x="120" y="172" text-anchor="middle" font-family="Fraunces, Georgia, 'Times New Roman', serif" font-size="56" font-weight="600" letter-spacing="1" fill="#5E2542">MO</text>
+  <g fill="#8E3B63">
+    <circle cx="104" cy="196" r="3.5"/>
+    <circle cx="120" cy="196" r="3.5"/>
+    <circle cx="136" cy="196" r="3.5"/>
+  </g>
+</svg>
+            <span class="council-seat-name">Michelle Obama</span>
+            <span class="council-state council-state-conditional">Conditional</span>
+          </button>
+          <button class="council-seat council-room-seat" type="button" style="left:18.0%;top:66.8%"
+            aria-label="Brené Brown, courage, trust, and accountable behavior, current state: Conditional">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="44" height="44" role="img" aria-labelledby="t d">
+  <title id="t">Brené Brown medallion</title>
+  <desc id="d">Illustrative identity medallion for the Brené Brown council seat (courage, trust, and accountable behavior): the initials BB and a heart outline inside a colored ring on a tinted disc. A designed symbol, not a photograph or likeness.</desc>
+  <circle cx="120" cy="120" r="114" fill="#FAECE5"/>
+  <circle cx="120" cy="120" r="114" fill="none" stroke="#BC5837" stroke-width="6"/>
+  <circle cx="120" cy="120" r="102" fill="none" stroke="#BC5837" stroke-width="1.5" opacity="0.45"/>
+  
+  <g fill="none" stroke="#7E3719" stroke-width="5" stroke-linejoin="round">
+    <path d="M120 94C108 80 90 68 90 52c0-9 7-15 15-15 6 0 12 4 15 10 3-6 9-10 15-10 8 0 15 6 15 15 0 16-18 28-30 42Z"/>
+  </g>
+  <text x="120" y="172" text-anchor="middle" font-family="Fraunces, Georgia, 'Times New Roman', serif" font-size="56" font-weight="600" letter-spacing="1" fill="#7E3719">BB</text>
+  <g fill="#BC5837">
+    <circle cx="104" cy="196" r="3.5"/>
+    <circle cx="120" cy="196" r="3.5"/>
+    <circle cx="136" cy="196" r="3.5"/>
+  </g>
+</svg>
+            <span class="council-seat-name">Brené Brown</span>
+            <span class="council-state council-state-conditional">Conditional</span>
+          </button>
+          <button class="council-seat council-room-seat" type="button" style="left:13.6%;top:44.2%"
+            aria-label="Dr. Dennis Kimbro, ownership, wealth creation, and achievement, current state: Abstains">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="44" height="44" role="img" aria-labelledby="t d">
+  <title id="t">Dr. Dennis Kimbro medallion</title>
+  <desc id="d">Illustrative identity medallion for the Dr. Dennis Kimbro council seat (ownership, wealth creation, and achievement): the initials DK and a key inside a colored ring on a tinted disc. A designed symbol, not a photograph or likeness.</desc>
+  <circle cx="120" cy="120" r="114" fill="#E7F2EA"/>
+  <circle cx="120" cy="120" r="114" fill="none" stroke="#2E7D4F" stroke-width="6"/>
+  <circle cx="120" cy="120" r="102" fill="none" stroke="#2E7D4F" stroke-width="1.5" opacity="0.45"/>
+  
+  <g fill="none" stroke="#1C5133" stroke-width="5" stroke-linecap="round">
+    <circle cx="98" cy="66" r="14"/>
+    <path d="M109 74 148 98M136 86v10M146 93v10"/>
+  </g>
+  <text x="120" y="172" text-anchor="middle" font-family="Fraunces, Georgia, 'Times New Roman', serif" font-size="56" font-weight="600" letter-spacing="1" fill="#1C5133">DK</text>
+  <g fill="#2E7D4F">
+    <circle cx="104" cy="196" r="3.5"/>
+    <circle cx="120" cy="196" r="3.5"/>
+    <circle cx="136" cy="196" r="3.5"/>
+  </g>
+</svg>
+            <span class="council-seat-name">Dr. Dennis Kimbro</span>
+            <span class="council-state council-state-abstain">Abstains</span>
+          </button>
+          <button class="council-seat council-room-seat" type="button" style="left:26.2%;top:24.3%"
+            aria-label="Les Brown, self-belief, resilience, and committed action, current state: Supports">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="44" height="44" role="img" aria-labelledby="t d">
+  <title id="t">Les Brown medallion</title>
+  <desc id="d">Illustrative identity medallion for the Les Brown council seat (self-belief, resilience, and committed action): the initials LB and a rising arrow over a ground line inside a colored ring on a tinted disc. A designed symbol, not a photograph or likeness.</desc>
+  <circle cx="120" cy="120" r="114" fill="#FBEEE0"/>
+  <circle cx="120" cy="120" r="114" fill="none" stroke="#C05E0A" stroke-width="6"/>
+  <circle cx="120" cy="120" r="102" fill="none" stroke="#C05E0A" stroke-width="1.5" opacity="0.45"/>
+  
+  <g fill="none" stroke="#7E3C04" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M84 90 114 62l14 13 24-30"/>
+    <path d="M138 43h15v15"/>
+    <path d="M80 102h80"/>
+  </g>
+  <text x="120" y="172" text-anchor="middle" font-family="Fraunces, Georgia, 'Times New Roman', serif" font-size="56" font-weight="600" letter-spacing="1" fill="#7E3C04">LB</text>
+  <g fill="#C05E0A">
+    <circle cx="104" cy="196" r="3.5"/>
+    <circle cx="120" cy="196" r="3.5"/>
+    <circle cx="136" cy="196" r="3.5"/>
+  </g>
+</svg>
+            <span class="council-seat-name">Les Brown</span>
+            <span class="council-state council-state-support">Supports</span>
+          </button>
+          </div>
+        </div>
+      </div>
+      <div class="council-card" style="margin-top:1.5rem">
+        <h3 style="margin-top:0">Latest finding</h3>
+        <p style="margin-bottom:0">Tiffany Aliche opposes a broad launch until delivery capacity is proven, and supports the
+        bounded pilot because its cost is known in advance. <span class="council-meta">Sample finding text for layout reference.</span></p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ SCREEN 4: VERDICT ═══ -->
+  <section class="ref-screen council-theme" aria-label="Screen reference: verdict">
+    <div class="ref-screen-head"><strong>Screen 4 of 5: Verdict</strong> <span class="ref-badge">FICTIONAL SAMPLE</span> <span>Order fixed by Section 21.4: recommendation, conditions, reasons, strongest concern, next actions, scorecard</span></div>
+    <div class="ref-body">
+      <p class="council-eyebrow">The council recommends</p>
+      <h2 class="council-display" style="margin:.5rem 0">Pilot the revised offer with new clients</h2>
+      <p class="council-lede">GO WITH CONDITIONS, weighted score 7.6 of 10, all nine seats scored.</p>
+      <div class="ref-cols" style="margin-top:1.5rem">
+        <div class="council-card"><h3 style="margin-top:0">Conditions first</h3>
+          <p>Cap the pilot at the seats the team can actually deliver. Confirm the cash reserve covers the pilot cost before launch.</p></div>
+        <div class="council-card"><h3 style="margin-top:0">Three main reasons</h3>
+          <p>Demand can be tested at known cost. The current offer keeps selling during the test. A failed pilot is reversible; a failed broad launch is not.</p></div>
+        <div class="council-card"><h3 style="margin-top:0">Strongest concern</h3>
+          <p>Delivery capacity is unproven at twice the volume (Tiffany Aliche, opposing broad launch). The pilot exists to answer exactly this.</p></div>
+      </div>
+      <h3 class="council-heading" style="margin:1.5rem 0 .75rem">Immediate next actions</h3>
+      <p>1. Set the pilot cap and price. &nbsp; 2. Confirm the reserve. &nbsp; 3. Announce the pilot to new clients only.</p>
+      <p><button class="council-btn council-btn-primary" type="button">Create this action plan</button>
+      <button class="council-btn council-btn-quiet" type="button">Read the full rounds and sources</button></p>
+      <h3 class="council-heading" style="margin:1.5rem 0 .75rem">Scorecard</h3>
+      <table class="ref-score" aria-label="Sample scorecard">
+        <tr><th>Option</th><th>Weighted score</th><th>Coverage</th></tr>
+        <tr><td>A. Keep the current offer</td><td>6.0</td><td>9 of 9 seats</td></tr>
+        <tr><td>B. Pilot the revised offer</td><td>7.6</td><td>9 of 9 seats</td></tr>
+        <tr><td>C. Launch broadly</td><td>6.6</td><td>9 of 9 seats</td></tr>
+      </table>
+      <p class="council-meta" style="margin-top:1rem">Sample scores are the directive's golden-fixture values, used here as layout data.
+      A real verdict shows its dissent, sources, and what would change the answer; a sample never creates tasks.</p>
+    </div>
+  </section>
+
+  <!-- ═══ SCREEN 5: PHONE READING VIEW ═══ -->
+  <section class="ref-screen council-theme" aria-label="Screen reference: phone reading view">
+    <div class="ref-screen-head"><strong>Screen 5 of 5: Phone reading view</strong> <span class="ref-badge">FICTIONAL SAMPLE</span> <span>390px frame; must also hold at 320px and 200% zoom</span></div>
+    <div class="ref-phone">
+      <div class="ref-body">
+        <p class="council-eyebrow">Round 2 of 3: Challenge</p>
+        <h2 class="council-heading" style="margin:.5rem 0">Pilot the revised coaching offer with new clients next month?</h2>
+        <p class="council-meta">Six of nine perspectives are in. Tap any seat to read its full card.</p>
+        <div class="council-reading-list" style="margin-top:1rem">
+          
+          <div class="council-reading-row">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="48" height="48" role="img" aria-labelledby="t d">
+  <title id="t">Simon Sinek medallion</title>
+  <desc id="d">Illustrative identity medallion for the Simon Sinek council seat (purpose and strategic alignment): the initials SS and three concentric circles inside a colored ring on a tinted disc. A designed symbol, not a photograph or likeness.</desc>
+  <circle cx="120" cy="120" r="114" fill="#FBF1DA"/>
+  <circle cx="120" cy="120" r="114" fill="none" stroke="#B57E0E" stroke-width="6"/>
+  <circle cx="120" cy="120" r="102" fill="none" stroke="#B57E0E" stroke-width="1.5" opacity="0.45"/>
+  
+  <g fill="none" stroke="#7A5200" stroke-width="5">
+    <circle cx="120" cy="72" r="24"/>
+    <circle cx="120" cy="72" r="15"/>
+    <circle cx="120" cy="72" r="6" fill="#7A5200" stroke="none"/>
+  </g>
+  <text x="120" y="172" text-anchor="middle" font-family="Fraunces, Georgia, 'Times New Roman', serif" font-size="56" font-weight="600" letter-spacing="1" fill="#7A5200">SS</text>
+  <g fill="#B57E0E">
+    <circle cx="104" cy="196" r="3.5"/>
+    <circle cx="120" cy="196" r="3.5"/>
+    <circle cx="136" cy="196" r="3.5"/>
+  </g>
+</svg>
+            <div>
+              <div class="council-seat-name">Simon Sinek</div>
+              <div class="council-seat-role">purpose and strategic alignment</div>
+            </div>
+            <span class="council-state council-state-support" style="margin-left:auto">Supports</span>
+          </div>
+          <div class="council-reading-row">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="48" height="48" role="img" aria-labelledby="t d">
+  <title id="t">T. D. Jakes medallion</title>
+  <desc id="d">Illustrative identity medallion for the T. D. Jakes council seat (instinct, reinvention, and communication): the initials TJ and a microphone inside a colored ring on a tinted disc. A designed symbol, not a photograph or likeness.</desc>
+  <circle cx="120" cy="120" r="114" fill="#F0EAF9"/>
+  <circle cx="120" cy="120" r="114" fill="none" stroke="#6C4AB0" stroke-width="6"/>
+  <circle cx="120" cy="120" r="102" fill="none" stroke="#6C4AB0" stroke-width="1.5" opacity="0.45"/>
+  
+  <g fill="none" stroke="#472C7E" stroke-width="5" stroke-linecap="round">
+    <rect x="111" y="38" width="18" height="32" rx="9" fill="#472C7E" stroke="none"/>
+    <path d="M102 58a18 18 0 0 0 36 0"/>
+    <path d="M120 78v14M106 94h28"/>
+  </g>
+  <text x="120" y="172" text-anchor="middle" font-family="Fraunces, Georgia, 'Times New Roman', serif" font-size="56" font-weight="600" letter-spacing="1" fill="#472C7E">TJ</text>
+  <g fill="#6C4AB0">
+    <circle cx="104" cy="196" r="3.5"/>
+    <circle cx="120" cy="196" r="3.5"/>
+    <circle cx="136" cy="196" r="3.5"/>
+  </g>
+</svg>
+            <div>
+              <div class="council-seat-name">T. D. Jakes</div>
+              <div class="council-seat-role">instinct, reinvention, and communication</div>
+            </div>
+            <span class="council-state council-state-conditional" style="margin-left:auto">Conditional</span>
+          </div>
+          <div class="council-reading-row">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="48" height="48" role="img" aria-labelledby="t d">
+  <title id="t">Oprah Winfrey medallion</title>
+  <desc id="d">Illustrative identity medallion for the Oprah Winfrey council seat (intention, significance, and human connection): the initials OW and an open book beneath a small sun inside a colored ring on a tinted disc. A designed symbol, not a photograph or likeness.</desc>
+  <circle cx="120" cy="120" r="114" fill="#FAEAF0"/>
+  <circle cx="120" cy="120" r="114" fill="none" stroke="#B23A5E" stroke-width="6"/>
+  <circle cx="120" cy="120" r="102" fill="none" stroke="#B23A5E" stroke-width="1.5" opacity="0.45"/>
+  
+  <g fill="none" stroke="#7C2440" stroke-width="5" stroke-linejoin="round" stroke-linecap="round">
+    <circle cx="120" cy="42" r="5" fill="#7C2440" stroke="none"/>
+    <path d="M84 92V60c12-6 24-6 36 2 12-8 24-8 36-2v32c-12-6-24-6-36 2-12-8-24-8-36-2Z"/>
+    <path d="M120 62v32"/>
+  </g>
+  <text x="120" y="172" text-anchor="middle" font-family="Fraunces, Georgia, 'Times New Roman', serif" font-size="56" font-weight="600" letter-spacing="1" fill="#7C2440">OW</text>
+  <g fill="#B23A5E">
+    <circle cx="104" cy="196" r="3.5"/>
+    <circle cx="120" cy="196" r="3.5"/>
+    <circle cx="136" cy="196" r="3.5"/>
+  </g>
+</svg>
+            <div>
+              <div class="council-seat-name">Oprah Winfrey</div>
+              <div class="council-seat-role">intention, significance, and human connection</div>
+            </div>
+            <span class="council-state council-state-support" style="margin-left:auto">Supports</span>
+          </div>
+          <div class="council-reading-row">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="48" height="48" role="img" aria-labelledby="t d">
+  <title id="t">Tiffany Aliche medallion</title>
+  <desc id="d">Illustrative identity medallion for the Tiffany Aliche council seat (financial stability and sustainable commitments): the initials TA and a pediment over three columns, a foundation inside a colored ring on a tinted disc. A designed symbol, not a photograph or likeness.</desc>
+  <circle cx="120" cy="120" r="114" fill="#E5F3F0"/>
+  <circle cx="120" cy="120" r="114" fill="none" stroke="#177E6E" stroke-width="6"/>
+  <circle cx="120" cy="120" r="102" fill="none" stroke="#177E6E" stroke-width="1.5" opacity="0.45"/>
+  
+  <g fill="none" stroke="#0C5546" stroke-width="5" stroke-linecap="round">
+    <path d="M82 56 120 40l38 16"/>
+    <path d="M92 64v24M120 64v24M148 64v24"/>
+    <path d="M82 96h76"/>
+  </g>
+  <text x="120" y="172" text-anchor="middle" font-family="Fraunces, Georgia, 'Times New Roman', serif" font-size="56" font-weight="600" letter-spacing="1" fill="#0C5546">TA</text>
+  <g fill="#177E6E">
+    <circle cx="104" cy="196" r="3.5"/>
+    <circle cx="120" cy="196" r="3.5"/>
+    <circle cx="136" cy="196" r="3.5"/>
+  </g>
+</svg>
+            <div>
+              <div class="council-seat-name">Tiffany Aliche</div>
+              <div class="council-seat-role">financial stability and sustainable commitments</div>
+            </div>
+            <span class="council-state council-state-oppose" style="margin-left:auto">Opposes</span>
+          </div>
+          <div class="council-reading-row">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="48" height="48" role="img" aria-labelledby="t d">
+  <title id="t">Russell Brunson medallion</title>
+  <desc id="d">Illustrative identity medallion for the Russell Brunson council seat (offers, acquisition, and conversion): the initials RB and a funnel inside a colored ring on a tinted disc. A designed symbol, not a photograph or likeness.</desc>
+  <circle cx="120" cy="120" r="114" fill="#E8EEFB"/>
+  <circle cx="120" cy="120" r="114" fill="none" stroke="#2F5FC4" stroke-width="6"/>
+  <circle cx="120" cy="120" r="102" fill="none" stroke="#2F5FC4" stroke-width="1.5" opacity="0.45"/>
+  
+  <g fill="none" stroke="#1E4189" stroke-width="5" stroke-linejoin="round">
+    <path d="M86 44h68l-24 28v22l-20 8V72L86 44Z"/>
+  </g>
+  <text x="120" y="172" text-anchor="middle" font-family="Fraunces, Georgia, 'Times New Roman', serif" font-size="56" font-weight="600" letter-spacing="1" fill="#1E4189">RB</text>
+  <g fill="#2F5FC4">
+    <circle cx="104" cy="196" r="3.5"/>
+    <circle cx="120" cy="196" r="3.5"/>
+    <circle cx="136" cy="196" r="3.5"/>
+  </g>
+</svg>
+            <div>
+              <div class="council-seat-name">Russell Brunson</div>
+              <div class="council-seat-role">offers, acquisition, and conversion</div>
+            </div>
+            <span class="council-state council-state-support" style="margin-left:auto">Supports</span>
+          </div>
+          <div class="council-reading-row">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="48" height="48" role="img" aria-labelledby="t d">
+  <title id="t">Michelle Obama medallion</title>
+  <desc id="d">Illustrative identity medallion for the Michelle Obama council seat (grounded leadership, identity, and community): the initials MO and a sunrise over two horizon lines inside a colored ring on a tinted disc. A designed symbol, not a photograph or likeness.</desc>
+  <circle cx="120" cy="120" r="114" fill="#F6E9F0"/>
+  <circle cx="120" cy="120" r="114" fill="none" stroke="#8E3B63" stroke-width="6"/>
+  <circle cx="120" cy="120" r="102" fill="none" stroke="#8E3B63" stroke-width="1.5" opacity="0.45"/>
+  
+  <g fill="none" stroke="#5E2542" stroke-width="5" stroke-linecap="round">
+    <path d="M90 84a30 30 0 0 1 60 0"/>
+    <path d="M120 40v10M96 50l6 8M144 50l-6 8"/>
+    <path d="M78 94h84M90 106h60"/>
+  </g>
+  <text x="120" y="172" text-anchor="middle" font-family="Fraunces, Georgia, 'Times New Roman', serif" font-size="56" font-weight="600" letter-spacing="1" fill="#5E2542">MO</text>
+  <g fill="#8E3B63">
+    <circle cx="104" cy="196" r="3.5"/>
+    <circle cx="120" cy="196" r="3.5"/>
+    <circle cx="136" cy="196" r="3.5"/>
+  </g>
+</svg>
+            <div>
+              <div class="council-seat-name">Michelle Obama</div>
+              <div class="council-seat-role">grounded leadership, identity, and community</div>
+            </div>
+            <span class="council-state council-state-conditional" style="margin-left:auto">Conditional</span>
+          </div>
+          <div class="council-reading-row">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="48" height="48" role="img" aria-labelledby="t d">
+  <title id="t">Brené Brown medallion</title>
+  <desc id="d">Illustrative identity medallion for the Brené Brown council seat (courage, trust, and accountable behavior): the initials BB and a heart outline inside a colored ring on a tinted disc. A designed symbol, not a photograph or likeness.</desc>
+  <circle cx="120" cy="120" r="114" fill="#FAECE5"/>
+  <circle cx="120" cy="120" r="114" fill="none" stroke="#BC5837" stroke-width="6"/>
+  <circle cx="120" cy="120" r="102" fill="none" stroke="#BC5837" stroke-width="1.5" opacity="0.45"/>
+  
+  <g fill="none" stroke="#7E3719" stroke-width="5" stroke-linejoin="round">
+    <path d="M120 94C108 80 90 68 90 52c0-9 7-15 15-15 6 0 12 4 15 10 3-6 9-10 15-10 8 0 15 6 15 15 0 16-18 28-30 42Z"/>
+  </g>
+  <text x="120" y="172" text-anchor="middle" font-family="Fraunces, Georgia, 'Times New Roman', serif" font-size="56" font-weight="600" letter-spacing="1" fill="#7E3719">BB</text>
+  <g fill="#BC5837">
+    <circle cx="104" cy="196" r="3.5"/>
+    <circle cx="120" cy="196" r="3.5"/>
+    <circle cx="136" cy="196" r="3.5"/>
+  </g>
+</svg>
+            <div>
+              <div class="council-seat-name">Brené Brown</div>
+              <div class="council-seat-role">courage, trust, and accountable behavior</div>
+            </div>
+            <span class="council-state council-state-conditional" style="margin-left:auto">Conditional</span>
+          </div>
+          <div class="council-reading-row">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="48" height="48" role="img" aria-labelledby="t d">
+  <title id="t">Dr. Dennis Kimbro medallion</title>
+  <desc id="d">Illustrative identity medallion for the Dr. Dennis Kimbro council seat (ownership, wealth creation, and achievement): the initials DK and a key inside a colored ring on a tinted disc. A designed symbol, not a photograph or likeness.</desc>
+  <circle cx="120" cy="120" r="114" fill="#E7F2EA"/>
+  <circle cx="120" cy="120" r="114" fill="none" stroke="#2E7D4F" stroke-width="6"/>
+  <circle cx="120" cy="120" r="102" fill="none" stroke="#2E7D4F" stroke-width="1.5" opacity="0.45"/>
+  
+  <g fill="none" stroke="#1C5133" stroke-width="5" stroke-linecap="round">
+    <circle cx="98" cy="66" r="14"/>
+    <path d="M109 74 148 98M136 86v10M146 93v10"/>
+  </g>
+  <text x="120" y="172" text-anchor="middle" font-family="Fraunces, Georgia, 'Times New Roman', serif" font-size="56" font-weight="600" letter-spacing="1" fill="#1C5133">DK</text>
+  <g fill="#2E7D4F">
+    <circle cx="104" cy="196" r="3.5"/>
+    <circle cx="120" cy="196" r="3.5"/>
+    <circle cx="136" cy="196" r="3.5"/>
+  </g>
+</svg>
+            <div>
+              <div class="council-seat-name">Dr. Dennis Kimbro</div>
+              <div class="council-seat-role">ownership, wealth creation, and achievement</div>
+            </div>
+            <span class="council-state council-state-abstain" style="margin-left:auto">Abstains</span>
+          </div>
+          <div class="council-reading-row">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="48" height="48" role="img" aria-labelledby="t d">
+  <title id="t">Les Brown medallion</title>
+  <desc id="d">Illustrative identity medallion for the Les Brown council seat (self-belief, resilience, and committed action): the initials LB and a rising arrow over a ground line inside a colored ring on a tinted disc. A designed symbol, not a photograph or likeness.</desc>
+  <circle cx="120" cy="120" r="114" fill="#FBEEE0"/>
+  <circle cx="120" cy="120" r="114" fill="none" stroke="#C05E0A" stroke-width="6"/>
+  <circle cx="120" cy="120" r="102" fill="none" stroke="#C05E0A" stroke-width="1.5" opacity="0.45"/>
+  
+  <g fill="none" stroke="#7E3C04" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M84 90 114 62l14 13 24-30"/>
+    <path d="M138 43h15v15"/>
+    <path d="M80 102h80"/>
+  </g>
+  <text x="120" y="172" text-anchor="middle" font-family="Fraunces, Georgia, 'Times New Roman', serif" font-size="56" font-weight="600" letter-spacing="1" fill="#7E3C04">LB</text>
+  <g fill="#C05E0A">
+    <circle cx="104" cy="196" r="3.5"/>
+    <circle cx="120" cy="196" r="3.5"/>
+    <circle cx="136" cy="196" r="3.5"/>
+  </g>
+</svg>
+            <div>
+              <div class="council-seat-name">Les Brown</div>
+              <div class="council-seat-role">self-belief, resilience, and committed action</div>
+            </div>
+            <span class="council-state council-state-support" style="margin-left:auto">Supports</span>
+          </div>
+        </div>
+        <div class="council-card" style="margin-top:1rem">
+          <h3 style="margin-top:0">Latest finding</h3>
+          <p style="margin-bottom:0">Delivery capacity is the open question. The pilot is sized to answer it at known cost.</p>
+        </div>
+        <p class="council-meta" style="margin-top:1rem">Reading view carries everything the room shows, without the spatial
+        layout or animation (Section 23.2). All nine seats are reachable by scrolling; no pinch-zoom is ever required.</p>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <p style="font-size:14px;color:#3c4043">Identity assets: the nine medallions above are the canonical files from the
+    onboarding skill (assets/portraits/, registered in assets/portrait-manifest.json with provenance, rights status,
+    hashes, dimensions, and alt text). They are designed symbols, not photographs. Per-seat attribution in product:
+    "AI perspective inspired by the published work of Simon Sinek. Not the individual and not an endorsement." and the matching label for every seat, rendered wherever a seat appears.</p>
+  </footer>
+</div>
+</body>
+</html>
