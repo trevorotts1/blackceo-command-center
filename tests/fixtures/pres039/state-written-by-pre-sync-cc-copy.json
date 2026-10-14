@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "job_id": "pj_d32b20050a1178b630676d4742",
+  "run_dir": "/home/hatch/workspace/presentation-diagnostic/build/b25-cc-sync/scratch/statecap/job1",
+  "created_at": "2026-10-14T03:59:14+00:00",
+  "manifest_path": "/home/hatch/workspace/presentation-diagnostic/build/b25-cc-sync/scratch/statecap/manifest.json",
+  "manifest_version": 70,
+  "manifest_sha256": "8a50d6d30284c0433247af6bbce6c3293c5795c9e76037e397cad33668743a3a",
+  "engine_origin": {
+    "distributor": "ONB",
+    "source_path": "23-ai-workforce-blueprint/templates/role-library/presentations/scripts/presentation_job",
+    "copy_role": "vendored-duplicate-non-authoritative",
+    "cutover_owner": "PRES",
+    "cutover_task": "PRES-049",
+    "dedup_task": "PRES-039",
+    "contract_version": 1,
+    "package_dir": "/home/hatch/workspace/presentation-diagnostic/work/cc-c/presentation_job",
+    "package_digest": "5219720ead908f731af460703ca55993ef3fc2332fe3fdf0461468b6c401c0b9",
+    "package_files": 42,
+    "distributor_commit": {
+      "repo": "/home/hatch/workspace/presentation-diagnostic/work/cc-c",
+      "commit": "4b98187decef9c473d14960fc75031cf69cef560"
+    }
+  },
+  "presentation_type": "from_scratch",
+  "requester": {
+    "chat_id": "qc-probe-039"
+  },
+  "intake": {
+    "presentation_type": "from_scratch",
+    "requester": {
+      "chat_id": "qc-probe-039"
+    }
+  },
+  "current_phase": null,
+  "phases": [],
+  "gates": {},
+  "waivers": [],
+  "events": [],
+  "sent": {},
+  "undeliverable": [],
+  "heartbeat": {},
+  "terminal": null,
+  "updated_at": "2026-10-14T03:59:14+00:00"
+}

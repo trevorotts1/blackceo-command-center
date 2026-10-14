@@ -9,18 +9,6 @@ def describe_park(state: dict, run_dir=None) -> list[str]:
     Never mutates state. Returns [] when the job is not parked."""
     lines: list[str] = []
 
-    # PRES-039 engine origin is reported for EVERY state, including live
-    # (terminal None) runs: provenance must not depend on the job parking.
-    _eo0 = state.get("engine_origin") or {}
-    if _eo0:
-        _commit0 = (_eo0.get("distributor_commit") or {}).get("commit", "?")
-        lines.append(f"engine   : distributor={_eo0.get('distributor')} "
-                     f"role={_eo0.get('copy_role')} "
-                     f"digest={str(_eo0.get('package_digest'))[:12]} "
-                     f"commit={str(_commit0)[:12]} "
-                     f"contract v{_eo0.get('contract_version')}")
-    else:
-        lines.append("engine   : origin NOT RECORDED (pre-PRES-039 run)")
     terminal = state.get("terminal")
     if terminal is None:
         lines.append("terminal : in progress")
@@ -72,6 +60,12 @@ def describe_park(state: dict, run_dir=None) -> list[str]:
     n_banked = len(banked)
     lines.append("")
     lines.append(f"phases  : {n_done} of {total_phases} done, {n_banked} artifact(s) banked")
+    # FIX 20: a repinned job carries obsolete rows (phases the manifest no
+    # longer contains). They are not unfinished work — surface them so the
+    # operator can see why the denominator moved.
+    obsolete = [p["id"] for p in phases if p.get("status") == "obsolete"]
+    if obsolete:
+        lines.append(f"obsolete: {len(obsolete)} phase(s) removed at repin: {', '.join(obsolete)}")
 
     # -- Resume re-validation count -------------------------------------------
     # state["resume_revalidation"] is a dict as of U017: {"checked": N, "failed": M}.
