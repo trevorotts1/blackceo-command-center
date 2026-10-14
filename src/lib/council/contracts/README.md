@@ -1,19 +1,29 @@
-# @blackceo/wise-elders-core: canonical contracts (CWE-003)
+# @blackceo/wise-elders-core: canonical contracts (CWE-003) - GENERATED consumer artifact
 
 Proposed internal package identity (directive Section 6.2). This is not an
 assertion that the package exists on npm; do not publish it publicly without
 authorization.
 
-This folder is the Command Center copy of the versioned canonical contracts
-for Skill 77, Council of Wise Elders. It publishes the contract artifact for
-consumers without editing consumer code.
+**This folder is a generated consumer artifact. Do not hand-edit it.**
+The single definition source is the canonical contracts home in
+trevorotts1/openclaw-onboarding (CWE-003, coordinator decision D-006):
+
+- `77-council-of-wise-elders/runtime/src/contracts/**`
+- `77-council-of-wise-elders/schemas/**`
+
+Regenerate this tree with `tools/generate-cc-consumer.mjs` from the
+canonical folder and prove parity with `tools/verify-cc-parity.mjs` from
+the same folder. See GENERATED.md in this folder for the provenance record
+of the current generation. Fix contract defects in the canonical source,
+regenerate, and re-verify; never patch this copy.
 
 ## Contents
 
-- `schemas.ts`: the single schema source (zod). Sessions, brief revisions,
-  sources/evidence, cards, conditions, verdicts, jobs, events, approvals,
-  action proposals, settings, and receipts, with all enums, scope fields,
-  revision rules, unknown/null handling, supported modes, and typed errors.
+- `schemas.ts`: the single schema source (zod), generated from the
+  canonical definitions. Sessions, brief revisions, sources/evidence,
+  cards, conditions, verdicts, jobs, events, approvals, action proposals,
+  settings, and receipts, with all enums, scope fields, revision rules,
+  unknown/null handling, supported modes, and typed errors.
 - `types.ts`: TypeScript consumer types generated from the same definitions
   (z.infer), never hand-maintained copies.
 - `generated/json-schemas.json`: JSON Schema artifact generated from the
