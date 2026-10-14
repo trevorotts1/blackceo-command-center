@@ -703,10 +703,25 @@ test('FEATURE_NOT_READY shape on every unwired endpoint; committed state unchang
       body: {},
     }),
   ), 'CWE-050');
-  await checkNotReady('events get', await eventsRoute.GET(
+  // CWE-030 graduated the events endpoint from FEATURE_NOT_READY to
+  // the real scoped journal surface, so it no longer belongs in this
+  // not-ready sweep: the owner reads the committed session_created
+  // event back through it, scoped to this session.
+  const eventsResponse = await eventsRoute.GET(
     await makeRequest('council-a.test', 'owner:alice', `/api/council/sessions/${id}/events`),
     { params: Promise.resolve({ id }) },
-  ), 'CWE-030');
+  );
+  const eventsBody = await eventsResponse.json();
+  assert.equal(eventsResponse.status, 200, `events get: ${JSON.stringify(eventsBody)}`);
+  assert.equal(eventsBody.ok, true, 'events get');
+  assert.equal(eventsBody.data.kind, 'page', 'events get');
+  assert.equal(eventsBody.data.page.kind, 'events', 'events get');
+  assert.deepEqual(
+    eventsBody.data.page.events.map((event: any) => event.type),
+    ['session_created'],
+    'events get',
+  );
+  assert.equal(eventsBody.data.page.events[0].scope.session_id, id, 'events get');
   await checkNotReady('evidence get', await evidenceRoute.GET(
     await makeRequest('council-a.test', 'owner:alice', `/api/council/sessions/${id}/evidence/ev-1`),
     { params: Promise.resolve({ id, evidenceId: 'ev-1' }) },
