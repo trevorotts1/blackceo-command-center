@@ -123,6 +123,13 @@ export default defineConfig({
       // no-quotation honesty, rerun comparison, company-switch cache
       // partition, follow-up parent immutability, outcome field split.
       'tests/unit/council-session-ui-render.test.tsx',
+      // CWE-033 (Skill 77) — council journey UI real render proof: B10 nav
+      // entry present/absent by capability, intake resume without reissued
+      // questions (T016), prefilled facts with source marks, panel step
+      // not_assessed consequence before start, brief review five content
+      // kinds (T017), verdict section order (21.4), typed FEATURE_NOT_READY
+      // states naming their owners, preference step separation.
+      'tests/unit/council-journey-render.test.tsx',
     ],
     env: { NODE_ENV: 'test' },
     testTimeout: 15000,

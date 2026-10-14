@@ -2,8 +2,14 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Home, Kanban, BarChart3, Terminal, Settings } from 'lucide-react';
+import { Home, Kanban, BarChart3, Terminal, Settings, Landmark } from 'lucide-react';
 import type { ComponentType } from 'react';
+import {
+  COUNCIL_NAV_HREF,
+  COUNCIL_NAV_SHORT_LABEL,
+  insertEngineNavItem,
+} from '@/lib/nav-gating';
+import { useCouncilEntry } from '@/components/council/useCouncilEntry';
 
 interface MobileNavItem {
   href: string;
@@ -20,6 +26,19 @@ const NAV_ITEMS: MobileNavItem[] = [
 ];
 
 /**
+ * The Council of Wise Elders entry (Skill 77, CWE-033, B10): registered
+ * once in src/lib/nav-gating.ts and inserted after the Board item only
+ * when the council capabilities probe succeeds for this principal
+ * (fail-closed, exactly like the engine-gated items). Menu presence is
+ * never the authorization control; the council routes enforce CWE-007.
+ */
+const COUNCIL_NAV_ITEM: MobileNavItem = {
+  href: COUNCIL_NAV_HREF,
+  label: COUNCIL_NAV_SHORT_LABEL,
+  icon: Landmark,
+};
+
+/**
  * Fixed bottom navigation for phones (md:hidden). The old AppShell sidebar
  * was retired by design (Track A1: "Top header + breadcrumbs handle
  * navigation"), but that left small screens with zero navigation affordance
@@ -30,6 +49,7 @@ const NAV_ITEMS: MobileNavItem[] = [
  */
 export default function MobileNav() {
   const pathname = usePathname();
+  const councilEntry = useCouncilEntry();
 
   // The interview/onboarding flows are a gated, self-contained shell with
   // their own chrome — they are not part of the day-to-day dashboard nav.
@@ -37,13 +57,20 @@ export default function MobileNav() {
     return null;
   }
 
+  const items = insertEngineNavItem(
+    NAV_ITEMS,
+    '/ceo-board',
+    COUNCIL_NAV_ITEM,
+    councilEntry.show,
+  );
+
   return (
     <nav
       aria-label="Primary"
       className="fixed inset-x-0 bottom-0 z-40 md:hidden flex items-stretch bg-white border-t border-gray-200"
       style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
     >
-      {NAV_ITEMS.map((item) => {
+      {items.map((item) => {
         const active = item.href === '/' ? pathname === '/' : pathname.startsWith(item.href);
         const Icon = item.icon;
         return (
