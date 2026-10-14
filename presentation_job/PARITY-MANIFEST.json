@@ -1,25 +1,33 @@
 {
   "canonical_repo": "trevorotts1/openclaw-onboarding",
-  "canonical_commit": "ea22ed88c368236b3680f03b2c6912c0b8730b3f",
+  "canonical_commit": "74219e44210494d3feb6d8235919219c1f6386e5",
   "canonical_package_path": "23-ai-workforce-blueprint/templates/role-library/presentations/scripts/presentation_job",
-  "generated_at": "2026-10-14T04:01:38Z",
+  "generated_at": "2026-10-14T22:02:26Z",
   "generator_version": 1,
-  "package_digest": "e5574952d03f5cb1e49abec93ea5ece4824ff91634a76656f3adb2facd337571",
-  "package_files": 75,
-  "file_count": 200,
-  "origin": null,
+  "package_digest": "6393e4753d41e1cfce17517b918884ec79f4442b42e5b60cb546ec8e63be86b2",
+  "package_files": 76,
+  "file_count": 201,
+  "origin": {
+    "distributor": "ONB",
+    "source_path": "23-ai-workforce-blueprint/templates/role-library/presentations/scripts/presentation_job",
+    "copy_role": "canonical-source-authoritative",
+    "cutover_owner": "PRES",
+    "cutover_task": "PRES-049",
+    "dedup_task": "PRES-039",
+    "contract_version": 1
+  },
   "files": [
     {
       "path": "__init__.py",
-      "git_blob_sha": "832bd2dc7a19f3db4e3343885839b555ae54797f",
-      "sha256": "d819d3922612b91210f3c63a3293ad093f902a461fe891983fa51813de5a95de",
-      "bytes": 75
+      "git_blob_sha": "34bcd039d572812e14c7e28edf2ba0a98f201a9f",
+      "sha256": "edba9055e9f17ebb901570ce7b5401045bc1bb4d4b7c8155526fd64f10d7af57",
+      "bytes": 1427
     },
     {
       "path": "__main__.py",
-      "git_blob_sha": "f95dfcc2b0a387198253b6106b95e208da6346a8",
-      "sha256": "bacd562e604e9f7176c676a32498de57c00045c2b6c05e254aeb90c5e021c0da",
-      "bytes": 71468
+      "git_blob_sha": "48ced78c807dac6c884674674982fe581dc8f79a",
+      "sha256": "fa62922f2adb5be811cf3d6ddf21c8f6c556ad0e1a61ff775bfe294790275a9d",
+      "bytes": 74223
     },
     {
       "path": "admission.py",
@@ -47,9 +55,9 @@
     },
     {
       "path": "auto_resume.py",
-      "git_blob_sha": "2833b24b13f274f012b613a185b6528ef519b8b4",
-      "sha256": "5abfe3b911a6a6d022c7c17bc580d3c30c9df365ed76ce6b96fc8739ba46676a",
-      "bytes": 75306
+      "git_blob_sha": "0f3074e5abea1d0a8c3950e0e4e4cd8df9d71197",
+      "sha256": "ca8f2876b45fad4a6ea10ddbb1683763baa105912494f4300fafa148e18e1e3d",
+      "bytes": 108061
     },
     {
       "path": "autospawn.py",
@@ -59,9 +67,9 @@
     },
     {
       "path": "board.py",
-      "git_blob_sha": "09e8d1a8e3b9950a79d063ca3aded6ede395b5e8",
-      "sha256": "3fb3edee6f5036b64d74f02326d947c8b6722fe26a6be797cc605f1e2ea7eb64",
-      "bytes": 34897
+      "git_blob_sha": "2ffb74b0faa6529a5a99853ea157820a6b365a2a",
+      "sha256": "098eea388d7ea0aa50bfafe5e168f5732cbbcfbf6dba4ebf9ac25f221921e886",
+      "bytes": 34955
     },
     {
       "path": "capacity.py",
@@ -95,9 +103,9 @@
     },
     {
       "path": "credit_preflight.py",
-      "git_blob_sha": "c1bea97d8e2d9c9ecae1b6e1d459f5930fd26850",
-      "sha256": "6fafca1a1ed80d2624591f9147f0e055704c9fac21e7433a9188af7ef8576a53",
-      "bytes": 44315
+      "git_blob_sha": "ed94524327946c8e1a982074bc34267f5c05e06f",
+      "sha256": "f726f010a7c7d9244f53210e5319fd9250cedb560a6d98ebc6aef8f0f90d0185",
+      "bytes": 44850
     },
     {
       "path": "curate.py",
@@ -131,15 +139,21 @@
     },
     {
       "path": "diagnose.py",
-      "git_blob_sha": "ab325a4d88a80da1e111763d92c868ba247752fe",
-      "sha256": "4fadf43953a57ae0dc086c3f6fe99b47c77dd94fe5694490215c0e26971e5c47",
-      "bytes": 4805
+      "git_blob_sha": "b18db03ffd742ee6129c82ce3bcbd3d46e92810a",
+      "sha256": "a0426db6fc7797a5f5f6a95c8534a0b68beeaf47479da7bca9b342d7da314b2d",
+      "bytes": 5489
     },
     {
       "path": "dispatcher.py",
       "git_blob_sha": "d8925417bc8471ab0801b91151dc06ec7890a81a",
       "sha256": "1c7a37b06c304ed46a97f503177127f24ab55d0c6e932930d076b35efc351a32",
       "bytes": 616643
+    },
+    {
+      "path": "engine_origin.py",
+      "git_blob_sha": "48af0094e8426e1955f1939087e3b7ecb1673121",
+      "sha256": "f0ca499985cb89441952a18ce7575db475e76710f892d198369503c6b8e3d8a0",
+      "bytes": 18380
     },
     {
       "path": "env_store.py",
@@ -197,9 +211,9 @@
     },
     {
       "path": "heal.py",
-      "git_blob_sha": "70af89e9de29338b92fd998f7fc5f546d1e107fb",
-      "sha256": "03d2f52d74abe4f84c14ac849a4438f2f36846fa59fe6fe9514ac94614b1a5c3",
-      "bytes": 30440
+      "git_blob_sha": "217fc71009504822aa97edf606dc25c08b2115ec",
+      "sha256": "26843a6414602a06e97b2a07cce83d78d280775449efb5ecf299cf490b2cc04d",
+      "bytes": 37891
     },
     {
       "path": "launch_plan.py",
@@ -209,9 +223,9 @@
     },
     {
       "path": "launcher.py",
-      "git_blob_sha": "0233d2b2afbffb2544c7d6543af75b914e066ede",
-      "sha256": "7c3f64f3bf099cfcd868678537d344ed889f6ef406ebbba07f493ef298cd0b2c",
-      "bytes": 103722
+      "git_blob_sha": "3052c57afafca8ecb2ebc4042f736028a64ac398",
+      "sha256": "c2a4ed1db3498743c73cfc7815b783bb33a39c42de9991618b7d1c606748177c",
+      "bytes": 106108
     },
     {
       "path": "lease.py",
@@ -239,9 +253,9 @@
     },
     {
       "path": "model_router.py",
-      "git_blob_sha": "442c16fcf805a67567ae146a332fdef9cbeefaa0",
-      "sha256": "7382873973f09b9b1ae09963fce7cae5f610ca72aabc86941c2306743aec9324",
-      "bytes": 106981
+      "git_blob_sha": "7ee6a159a689bc98d54e6f665f037da1366dac19",
+      "sha256": "bf8602157b6d5d2a09b1e81b2518cc89755e7e41be57026363a6ff517e39a601",
+      "bytes": 105387
     },
     {
       "path": "notify_preflight.py",
@@ -365,9 +379,9 @@
     },
     {
       "path": "persona_service/resources/helpers/llm_score.py",
-      "git_blob_sha": "03e3992d25235a57c84a0a45c49c0e77b789be96",
-      "sha256": "1ecbc39d4164f2112fb4de80b349650766e8b9048fd47c37ecc40d28ef7ac6b2",
-      "bytes": 56478
+      "git_blob_sha": "6801456e23cdbd7ddeff7ea91b4d08e1152555a3",
+      "sha256": "7d94cb4bfaafab9e1de313a1436216364a2fec7b3a8e79c1ce4a062023ded73e",
+      "bytes": 60866
     },
     {
       "path": "persona_service/resources/helpers/mechanical-gate.py",
@@ -1037,9 +1051,9 @@
     },
     {
       "path": "phases.py",
-      "git_blob_sha": "ee15625202c6e50c5d96b6cfc752c0aa55ed953d",
-      "sha256": "84aa51fb846c9e6f98bc86450523522edfd8f3a1e09f48fa02c85d5d4049e146",
-      "bytes": 308850
+      "git_blob_sha": "d9413ad57cacd8f063e23169adff708876898f7b",
+      "sha256": "395ba3a8cd230bde6bebfc39f2ba2c0bf0843db55f782ec6e6f67ffb6323fcfd",
+      "bytes": 312479
     },
     {
       "path": "pipeline_interp.py",
@@ -1157,9 +1171,9 @@
     },
     {
       "path": "supervisor.py",
-      "git_blob_sha": "3af2b88e0ee4b3a280fe22913fbfefa0cff073be",
-      "sha256": "17db70229480949eb24c5f3173d4ac9a4d1ffa07aac0d384daf5b7d48b96ce1c",
-      "bytes": 50805
+      "git_blob_sha": "c0b9a811a5bf06a67881a67ca366d134132964ab",
+      "sha256": "c18ac454de4e05dcb477460a3339a162b46d5b8b004ddf32f426c55d97bb6763",
+      "bytes": 58893
     },
     {
       "path": "support_gate.py",
@@ -1193,9 +1207,9 @@
     },
     {
       "path": "watchdog.py",
-      "git_blob_sha": "f8a3be1ceeee4e7ac40f563d81f8a04303ae9ef6",
-      "sha256": "cadd2da3a0a9ffb4570ff2dc30225fedacf7e2cbfd45222f02257e22c8850f0f",
-      "bytes": 17785
+      "git_blob_sha": "9a35e71bd09524b20579f4b12702d015402a7073",
+      "sha256": "b697a1f0d098acf613e5c933adbe54fdcf8e744a14626aae0e76012a80eb37c1",
+      "bytes": 31388
     },
     {
       "path": "wave_contract.py",
