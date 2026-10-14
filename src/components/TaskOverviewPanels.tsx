@@ -27,6 +27,9 @@ import { RECOGNIZED_BOARD_SOURCES, normalizeBoardSource, BOARD_SOURCE_LABELS } f
 // only surface the SAME rows in the task-detail window (C+I.0 point 10 /
 // spec L1176-1179).
 import { PersonaSlotChips, PersonaScopeChips } from './kanban/TaskCard';
+// Item 19 — the engine park panel (plain-words park record + the engine's
+// own resume path), shared with the presentation parent card face.
+import { PresentationEnginePanel } from './kanban/PresentationEnginePanel';
 
 // A slug like "russell-brunson" → "Russell Brunson" for display. Presentation
 // only — the authoritative name is persona_name when the selector resolved one.
@@ -737,6 +740,22 @@ export function BlockedReasonPanel({ task }: { task: Task }) {
         </div>
       ) : null}
 
+      {/* Item 19 — a task whose ENGINE run is parked resumes through the
+          engine's own launcher path, never the board dispatch below: the
+          board does not dispatch engine-owned cards, so a board resume
+          would move the card while the engine stayed parked (a fabricated
+          state change). The engine panel shows the plain-words park
+          record and that resume. Board-dispatched tasks keep U061. */}
+      {task.park_status ? (
+        <div className="mt-3 pt-3 border-t border-red-200/50" data-testid="blocked-panel-engine-resume-area">
+          <PresentationEnginePanel
+            taskId={task.id}
+            park={task.park_status}
+            terminal={task.engine_terminal ?? null}
+          />
+        </div>
+      ) : (
+      <>
       {/* U061 — Resume action: re-enter the dispatch loop through the state machine */}
       <div className="mt-3 pt-3 border-t border-red-200/50" data-testid="blocked-panel-resume-area">
         {resumed ? (
@@ -766,6 +785,8 @@ export function BlockedReasonPanel({ task }: { task: Task }) {
           </>
         )}
       </div>
+      </>
+      )}
     </div>
   );
 }

@@ -17,7 +17,9 @@ import {
   childPhaseLabel,
   computePhaseProgress,
   PHASE_LABELS,
+  type PhaseStepLabel,
 } from '@/lib/presentation-phases';
+import { getTaskEngineView } from '@/lib/presentation-engine-state';
 import { resolveActiveCompanyId } from '@/lib/company';
 import { tenantTaskWhere } from '@/lib/presentation-tenant-scope';
 
@@ -221,7 +223,9 @@ export async function GET(request: NextRequest) {
         stage_slug: (child.stage_slug as string | null | undefined) ?? null,
         title: (child.title as string | null | undefined) ?? null,
       });
-    let currentPhase: typeof PHASE_LABELS[number] | null = null;
+    // Item 19 — a P-U child's label is a branch step label, so the
+    // aggregate's current-phase vocabulary widens with childPhaseLabel's.
+    let currentPhase: PhaseStepLabel | null = null;
     for (const child of children) {
       if (child.status === 'in_progress') {
         const label = labelOfChild(child);
@@ -277,6 +281,19 @@ export async function GET(request: NextRequest) {
     // invented here.
     const recoveryOwner = (parent.assigned_agent_id as string | null | undefined) ?? null;
 
+    // ── Item 19 — the engine's own run record for this parent ──────────
+    // The terminal vocabulary (ABANDONED included) and the plain-words
+    // park view live in the bound run's state.json, not in the board's
+    // tables. Fail-soft: an unreadable run record yields nulls (the card
+    // then shows only the board's own posted state), never a 500.
+    const engineView = (() => {
+      try {
+        return getTaskEngineView(parentId);
+      } catch {
+        return null;
+      }
+    })();
+
     return NextResponse.json({
       parent: {
         id: parent.id,
@@ -296,6 +313,10 @@ export async function GET(request: NextRequest) {
         next_retry_at: (parent.next_dispatch_eligible_at as string | null | undefined) ?? null,
         recovery_owner: recoveryOwner,
         updated_at: (parent.updated_at as string | null | undefined) ?? null,
+        // Item 19 — engine terminal vocabulary + plain-words park view
+        // (nulls when the run record is UNDETERMINED on this box).
+        engine_terminal: engineView?.terminal ?? null,
+        park_status: engineView?.park ?? null,
       },
       children: childrenWithPhases,
       aggregate: {

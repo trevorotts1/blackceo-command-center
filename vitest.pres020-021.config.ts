@@ -12,6 +12,10 @@ export default defineConfig({
     include: [
       'tests/unit/pres020-phase-completeness.test.ts',
       'tests/unit/pres021-parent-refresh.test.ts',
+      // Item 19 — board visibility: P-U stepper branches, ABANDONED +
+      // park surfacing from the bound run's state.json, engine resume
+      // round-trip. Same DB-backed pattern as the PRES suites above.
+      'tests/unit/item19-board-visibility.test.ts',
     ],
     env: { NODE_ENV: 'test' },
     testTimeout: 30000,

@@ -386,6 +386,32 @@ export interface Task {
     message: string;
     created_at: string;
   } | null;
+  // Item 19 — the presentation engine's own terminal vocabulary for this
+  // task's run (DONE | BLOCKED | ABANDONED), read per-row by the task-row
+  // projection from the bound run's state.json (the engine's record, NOT
+  // the board's posted status: the producer posts every terminal run as
+  // `review`, so an ABANDONED run is invisible without this field). Null
+  // when no engine state is readable — UNDETERMINED, never a guess.
+  // NOT a tasks column and NOT a TaskStatus: the 10-status manifest above
+  // is untouched; this is a derived board-truth field like qc_heuristic_park.
+  engine_terminal?: 'DONE' | 'BLOCKED' | 'ABANDONED' | null;
+  // Item 19 — the plain-words park view for a parked engine run (Item 10's
+  // state["park_status"] record: waiting on whom, what is needed, since
+  // when — never the raw blocked reason). Computed per-row by the same
+  // projection from the bound run's state.json; null when the run is not
+  // parked or no engine state is readable.
+  park_status?: {
+    label: string;
+    waiting_on: 'client' | 'operator' | 'system' | null;
+    needed: string | null;
+    phase: string | null;
+    since: string | null;
+    park_class: string | null;
+    auto_resume: boolean | null;
+    attempts_used: number | null;
+    attempts_cap: number | null;
+    source: 'park_status' | 'configuration_pending' | 'blocked';
+  } | null;
   // MR-30 — the most recent block-event row for this task (computed per-row in
   // the tasks GET routes from task_block_events, exactly like dispatch_hold from
   // task_activities). Present even when the task is no longer in the blocked
