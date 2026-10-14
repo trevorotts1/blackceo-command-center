@@ -524,6 +524,12 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
   }
 
   // These routes verify narrow signed, expiry-bound capabilities themselves.
+  // Item 11 precision: this exemption means NO Cloudflare Access identity is
+  // re-proven in-route for enrollment redemption — the route authenticates the
+  // signed enrollment grant (bearer capability) produced at issuance. The host's
+  // registered Access triple is the PROVISIONING PREREQUISITE that anchors that
+  // grant, and the full-host edge application supplies the owner login where one
+  // is enforced; neither is an in-route check here.
   if (pathname === '/api/auth/interview-session' || pathname === '/api/interview/remote') return NextResponse.next();
 
   // A04 (SPEC S7 line 277): the completed-company owner entry. The data-free
