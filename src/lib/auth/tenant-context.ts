@@ -120,6 +120,43 @@ function secret(): string {
 }
 
 /** Item (2): true when signing runs on the MC_API_TOKEN fallback (no dedicated secret). */
+/** Issuance prerequisites, shared by readiness and issuance (items 07 + 13).
+ *
+ *  WHY THIS EXISTS. `createInterviewInvitation()` has always refused a host
+ *  whose registry entry carries no Access issuer/audience/subjects
+ *  (409 `access_identity_unregistered`), while `/api/auth/interview-ready`
+ *  reported `ready:true` for the same host with only a `warnings` entry. Every
+ *  caller — the sender, the nudges, an agent polling readiness — was told the
+ *  interview could be issued at the exact moment issuance was impossible, and
+ *  waited for a link that could never be minted. One predicate, one answer.
+ *
+ *  SEPARATION OF CONCERNS. This gate says only "can this box verify the owner
+ *  who opens a link". It never claims the runtime is healthy, and it never
+ *  claims a provider is alive; those stay `runtimeReady` and
+ *  `providerLiveness`. Reasons are machine-readable keys, never values, and
+ *  nothing here invents an issuer, an audience or a subject.
+ *
+ *  A `client`-kind registration is intentionally NOT issuable here: issuance is
+ *  a self-registration (dedicated) operation, exactly as the operator:api gate
+ *  above it already requires. */
+export interface InvitationPrerequisites {
+  issuable: boolean;
+  reasons: string[];
+}
+export function invitationPrerequisites(context: { kind: TenantContext['kind']; installationId: string; host: string }): InvitationPrerequisites {
+  const reasons: string[] = [];
+  if (context.kind !== 'self') reasons.push('dedicated_self_registration');
+  if (context.installationId !== process.env.MC_INSTALLATION_ID) reasons.push('installation_id');
+  let registration: TenantRegistration | null = null;
+  try {
+    registration = tenantRegistration(context.host);
+  } catch {
+    registration = null;
+  }
+  if (!registration?.issuer || !registration?.audience || !registration.subjects?.length) reasons.push('access_identity_unregistered');
+  return { issuable: reasons.length === 0, reasons };
+}
+
 export function tenantSecretIsFallback(): boolean {
   return !(process.env.MC_TENANT_SESSION_SECRET || process.env.MC_INTERVIEW_COOKIE_SECRET || '').trim();
 }
