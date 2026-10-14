@@ -178,11 +178,8 @@ jobs:
       - name: Checkout the paired onboarding repository
         uses: actions/checkout@v4
         with:
-          # The item-08 acceptance lives on the onboarding acceptance branch
-          # until PR trevorotts1/openclaw-onboarding#1982 merges; after that
-          # merge this pin returns to `main` (the file exists there too).
           repository: trevorotts1/openclaw-onboarding
-          ref: interview-08-paired-acceptance
+          ref: main
           path: paired-onboarding
           persist-credentials: false
 
