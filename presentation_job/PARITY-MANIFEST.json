@@ -1,0 +1,1213 @@
+{
+  "canonical_repo": "trevorotts1/openclaw-onboarding",
+  "canonical_commit": "ea22ed88c368236b3680f03b2c6912c0b8730b3f",
+  "canonical_package_path": "23-ai-workforce-blueprint/templates/role-library/presentations/scripts/presentation_job",
+  "generated_at": "2026-10-14T04:01:38Z",
+  "generator_version": 1,
+  "package_digest": "e5574952d03f5cb1e49abec93ea5ece4824ff91634a76656f3adb2facd337571",
+  "package_files": 75,
+  "file_count": 200,
+  "origin": null,
+  "files": [
+    {
+      "path": "__init__.py",
+      "git_blob_sha": "832bd2dc7a19f3db4e3343885839b555ae54797f",
+      "sha256": "d819d3922612b91210f3c63a3293ad093f902a461fe891983fa51813de5a95de",
+      "bytes": 75
+    },
+    {
+      "path": "__main__.py",
+      "git_blob_sha": "f95dfcc2b0a387198253b6106b95e208da6346a8",
+      "sha256": "bacd562e604e9f7176c676a32498de57c00045c2b6c05e254aeb90c5e021c0da",
+      "bytes": 71468
+    },
+    {
+      "path": "admission.py",
+      "git_blob_sha": "35122eff1e0d7a05a545a95575c1b7d01b93f78d",
+      "sha256": "58f7750050e9007a74bcfadabc58a878eda2ac22ffd0fc1a0941c9021ca8b789",
+      "bytes": 17760
+    },
+    {
+      "path": "approvals.py",
+      "git_blob_sha": "6b963e254dd7b2fedde15c457ca7387ece27aa9a",
+      "sha256": "b368bff36954ec669721dc6163696f3b555a96536d48943660fcc5e8a6582fca",
+      "bytes": 17422
+    },
+    {
+      "path": "arc_slides.py",
+      "git_blob_sha": "94dc98eff016c93fcfb0edbcbcb2e5a1897376d4",
+      "sha256": "65ca98070fc62a8bf7a072c406f6711814b697eaa504a48dc767414c13e65b4a",
+      "bytes": 13368
+    },
+    {
+      "path": "artifacts.py",
+      "git_blob_sha": "4b66a9b0604664dc0f3537e4b54a164fc075943a",
+      "sha256": "c09526425829272598ddbe1a206d61e1f19787b32a70780425400e95429c3de6",
+      "bytes": 24460
+    },
+    {
+      "path": "auto_resume.py",
+      "git_blob_sha": "2833b24b13f274f012b613a185b6528ef519b8b4",
+      "sha256": "5abfe3b911a6a6d022c7c17bc580d3c30c9df365ed76ce6b96fc8739ba46676a",
+      "bytes": 75306
+    },
+    {
+      "path": "autospawn.py",
+      "git_blob_sha": "3f3438a2a5a99918ba47c00d303979d23f7da8a5",
+      "sha256": "9681687e95ff3b75a930a41609c9d08b91988fe4390f1cd1a8a1246d3d581d42",
+      "bytes": 26424
+    },
+    {
+      "path": "board.py",
+      "git_blob_sha": "09e8d1a8e3b9950a79d063ca3aded6ede395b5e8",
+      "sha256": "3fb3edee6f5036b64d74f02326d947c8b6722fe26a6be797cc605f1e2ea7eb64",
+      "bytes": 34897
+    },
+    {
+      "path": "capacity.py",
+      "git_blob_sha": "c4f2b9f9076b975ae4940de349ff7b2f9843dc63",
+      "sha256": "42b91d208f2f02c4356a344986a1cb0d0053031aefcc3590b1e19ebb63e421e5",
+      "bytes": 152671
+    },
+    {
+      "path": "checkpoint.py",
+      "git_blob_sha": "eb5a1beee1053466a2f3a5cabe04e694c7b11fda",
+      "sha256": "c44105a55c26e2970087411c223625938fc5a946868faa63f4f310712f33003b",
+      "bytes": 5022
+    },
+    {
+      "path": "citation_validator.py",
+      "git_blob_sha": "bb77ed39de5b45a90ad057147776e89a775e5696",
+      "sha256": "65dee41bdfc5a5605be0a25c06db9855827a1f42f8ef5eade36634550de1d70d",
+      "bytes": 28117
+    },
+    {
+      "path": "context_pack.py",
+      "git_blob_sha": "c1cba83ea0095561c5bb31f2537e49865fcfc309",
+      "sha256": "40f6a74aed8c3aab9cc18df001b72c34d2edecdc9dd78036fe9b9a297d479bf1",
+      "bytes": 17628
+    },
+    {
+      "path": "contract_introspect.py",
+      "git_blob_sha": "320b599696774beae77402b6fc18f855d1865197",
+      "sha256": "4262a43fb39ca2cd34b5cf94b52dc4c99232096ce7e6ed9033f23e2e52b0f298",
+      "bytes": 37987
+    },
+    {
+      "path": "credit_preflight.py",
+      "git_blob_sha": "c1bea97d8e2d9c9ecae1b6e1d459f5930fd26850",
+      "sha256": "6fafca1a1ed80d2624591f9147f0e055704c9fac21e7433a9188af7ef8576a53",
+      "bytes": 44315
+    },
+    {
+      "path": "curate.py",
+      "git_blob_sha": "68f6549e762b0b6c6ae043c5059d227dbb2595cf",
+      "sha256": "16d4ab8e2d42cce122eca95c45c3c99c1cf97ebe40ee83f5f54e47b943b0005b",
+      "bytes": 29301
+    },
+    {
+      "path": "defers.py",
+      "git_blob_sha": "94f67c6f4f283de0d3f05b756fe26ca389fc19b3",
+      "sha256": "5bf97d7a91b9f10899d0f8ea79ca73cf01ceee32cc512f0f8539f41162c62aba",
+      "bytes": 11546
+    },
+    {
+      "path": "deliverable_floors.py",
+      "git_blob_sha": "18781a80b28e41d5ffcc8778aac6d95f5644401c",
+      "sha256": "d944e3eb21d17991a8bbed0a5d62bcde5c55cd9b983b1da72cde00146d5d7fe6",
+      "bytes": 10916
+    },
+    {
+      "path": "deliverable_paths.py",
+      "git_blob_sha": "00abf2bdc068de174c894b3b835e71226db11124",
+      "sha256": "5ee5e11dfef69c41b6e6a5478afd7e7b5e949a200ec3c4873cd5752091bb9c80",
+      "bytes": 21045
+    },
+    {
+      "path": "deliverables.py",
+      "git_blob_sha": "d6fe87c06a681dbe731de8b5aac7d7e8ff605403",
+      "sha256": "34f964eefdb4e8b1c8a0f9a3fa7bcae2fc5c244d36cb366afd261ca0afbd82d3",
+      "bytes": 28680
+    },
+    {
+      "path": "diagnose.py",
+      "git_blob_sha": "ab325a4d88a80da1e111763d92c868ba247752fe",
+      "sha256": "4fadf43953a57ae0dc086c3f6fe99b47c77dd94fe5694490215c0e26971e5c47",
+      "bytes": 4805
+    },
+    {
+      "path": "dispatcher.py",
+      "git_blob_sha": "d8925417bc8471ab0801b91151dc06ec7890a81a",
+      "sha256": "1c7a37b06c304ed46a97f503177127f24ab55d0c6e932930d076b35efc351a32",
+      "bytes": 616643
+    },
+    {
+      "path": "env_store.py",
+      "git_blob_sha": "b67f6d5f7147a2145b3e865ce5f8f780760cff84",
+      "sha256": "69f84fccd84220a011328ba6845529f20921d3ea0342d795e7f13457d8de6960",
+      "bytes": 18669
+    },
+    {
+      "path": "execution_plan.py",
+      "git_blob_sha": "48e62bc2893b4591b0d24ccdd22505fc35c7e0ed",
+      "sha256": "6364c55feb5565982531168a32e74c73c2f5c29dc437cbc5acf10e365afe46dd",
+      "bytes": 32496
+    },
+    {
+      "path": "execution_stamp.py",
+      "git_blob_sha": "e60ff386f2cce736fd0663f1d5b0fa087d9cfd77",
+      "sha256": "ceb79d945b111c46f7b59c0cbe3da67fe872eee04ae1363e7b9f4f3b0d7eeff3",
+      "bytes": 17040
+    },
+    {
+      "path": "fanout.py",
+      "git_blob_sha": "4010cdfd48116cd067e5f6e3a425a0bcf035e056",
+      "sha256": "fea4fe8d0be0bd205d407ecce78a870292114a240fa878465c05478dda4611fc",
+      "bytes": 57231
+    },
+    {
+      "path": "gate_read_audit.py",
+      "git_blob_sha": "f7c7ddd974c84eae9444147f740806636de3cd9f",
+      "sha256": "b712cf5c3d348adc516fca78c07fd37ebe973512b7d067149863ffde6fa6b54e",
+      "bytes": 15548
+    },
+    {
+      "path": "gates.py",
+      "git_blob_sha": "4bd372f6b61af246732318316154ee0f77009c55",
+      "sha256": "36437c41531fbe5a2d6d63f66813582d43132b8b616cebd74bfcbd404f254682",
+      "bytes": 21259
+    },
+    {
+      "path": "governor.py",
+      "git_blob_sha": "b7d479e7e9e6d7c0b3f5306f8afa42673de4b307",
+      "sha256": "8c4147334afba1f241a7f1356b1f0d14f4895d5411127643ee34948757af577f",
+      "bytes": 83157
+    },
+    {
+      "path": "governor_store.py",
+      "git_blob_sha": "a2fcf6685afee1dc3a48a7848e882b759a1455c0",
+      "sha256": "6d358c142399b6a07db38d04524de0115a9d1406ffb6e6007aae3684a3ab7b67",
+      "bytes": 23923
+    },
+    {
+      "path": "hardware_budget.py",
+      "git_blob_sha": "fb40e859cc5bc49e4f445529e0a27e5c28e74826",
+      "sha256": "e528b9cd2b483e26f498650829142c6e3fce9ba4749ba8f7ace8fb250bf3a333",
+      "bytes": 29851
+    },
+    {
+      "path": "heal.py",
+      "git_blob_sha": "70af89e9de29338b92fd998f7fc5f546d1e107fb",
+      "sha256": "03d2f52d74abe4f84c14ac849a4438f2f36846fa59fe6fe9514ac94614b1a5c3",
+      "bytes": 30440
+    },
+    {
+      "path": "launch_plan.py",
+      "git_blob_sha": "8a1a9f2c925c59ba09541f9a06404c3a3d9519c9",
+      "sha256": "f39f9b7b3c5b97718673bff94a211816f806ad58f38fc24b3b13e5b26e17e2f5",
+      "bytes": 11596
+    },
+    {
+      "path": "launcher.py",
+      "git_blob_sha": "0233d2b2afbffb2544c7d6543af75b914e066ede",
+      "sha256": "7c3f64f3bf099cfcd868678537d344ed889f6ef406ebbba07f493ef298cd0b2c",
+      "bytes": 103722
+    },
+    {
+      "path": "lease.py",
+      "git_blob_sha": "cd1fef2dc0c8299f93888b64b9e48dce6d9b1b2f",
+      "sha256": "d504b0c2e74644f945379f711053b85694207d3d3a099b18879f245b263f1df7",
+      "bytes": 19188
+    },
+    {
+      "path": "manifest.py",
+      "git_blob_sha": "f0c5b2a006c9142b095a8126f069d6b672bda6b5",
+      "sha256": "ad1cf86cf1b2eb8448d522355be6899145a67e7e53765b561dd719ad56a527b0",
+      "bytes": 57385
+    },
+    {
+      "path": "model_catalog.json",
+      "git_blob_sha": "303ce4ee2c5ab69a055abd0c6a7aabfc2b6b5b8c",
+      "sha256": "d48f9f38d1d30269a44c4d9ddc24d6f8efc9edf700a3f2fa1faef6f38d15c1c7",
+      "bytes": 6697
+    },
+    {
+      "path": "model_catalog.py",
+      "git_blob_sha": "6e5c541f3d8c52e88eca3b3f2ebab6e97fb83557",
+      "sha256": "031388ae059dd097c84328561e6f4c4e2e117685f48fa9b18813cbb7cacab3d0",
+      "bytes": 15354
+    },
+    {
+      "path": "model_router.py",
+      "git_blob_sha": "442c16fcf805a67567ae146a332fdef9cbeefaa0",
+      "sha256": "7382873973f09b9b1ae09963fce7cae5f610ca72aabc86941c2306743aec9324",
+      "bytes": 106981
+    },
+    {
+      "path": "notify_preflight.py",
+      "git_blob_sha": "b54f6db519df9941fa5e3d25497c446f75a67de6",
+      "sha256": "393a1ff4a3cefbc35a9b30c49a04c695cfdb7cd41e0e713c2018444f8894b6ba",
+      "bytes": 8277
+    },
+    {
+      "path": "oc_paths.py",
+      "git_blob_sha": "cfe5c8947a87e5903933f00859c835afb163857c",
+      "sha256": "350e01eaf19d3a0810750ffa564f87ec367c7ae3eef3928e9867441b24d5b08a",
+      "bytes": 5295
+    },
+    {
+      "path": "ocr-deps.json",
+      "git_blob_sha": "16987aca04b8f3ee01a2a7420ac5f06350716e7a",
+      "sha256": "fe75eca1cf270330caba486caf43ea5d2e672acd6b77686eac0275f25b7dbe3d",
+      "bytes": 1260
+    },
+    {
+      "path": "ocr_verify.py",
+      "git_blob_sha": "ca75d3c9e454ca6ad9f0aec681e07209b6491e53",
+      "sha256": "b3b3a61bc3d70be7659b4d777dad2f9f470472516ff7a8f554846f75891d2801",
+      "bytes": 15459
+    },
+    {
+      "path": "parallel_prompt_worker.py",
+      "git_blob_sha": "306b5e3d9a3b6b1fa4289d74a2b91b05687ab382",
+      "sha256": "1c7ec7a4cbb4cf7fb50f81d671f81dd2454faeb609b8485e48d0a8413ec140b5",
+      "bytes": 72701
+    },
+    {
+      "path": "persona.py",
+      "git_blob_sha": "860bc10f5cd47996138d33ae4887bb0ab9cb7b31",
+      "sha256": "c551e1eb8440768f5d861a52ed07985a78128b1f06e25ed31c5ccefaada4c867",
+      "bytes": 19168
+    },
+    {
+      "path": "persona_context.py",
+      "git_blob_sha": "8b207e1f1e4e23c7f3bd77e3f3e427bfdadeba06",
+      "sha256": "dbcedcd5a36a5eb70c727d3a63452e2d24a912ca6d90ab73fb0d9452132a7d73",
+      "bytes": 21525
+    },
+    {
+      "path": "persona_deadline.py",
+      "git_blob_sha": "80424c8a75bdc75bf59c0b5e7b006de1e06b6151",
+      "sha256": "857f878f1bd315955144f1c49e6833581a5bd6829311182cb49fb1113049d4e4",
+      "bytes": 32012
+    },
+    {
+      "path": "persona_service/.gitignore",
+      "git_blob_sha": "2c0d583985a3a33cb9f226e3abd7bc2c2e62ac2d",
+      "sha256": "8732373dbb958a03ca367a4db9cc1dc2291c7da70516240ca86691ea02ec5a3f",
+      "bytes": 281
+    },
+    {
+      "path": "persona_service/__init__.py",
+      "git_blob_sha": "d6a93d1e1fa4e1f10849d4b140b2a944686f1ecb",
+      "sha256": "694b572f9179bd4e480be8be93e54a8cffbd436660a23b623f8ec16079e9ef86",
+      "bytes": 1265
+    },
+    {
+      "path": "persona_service/adapters.py",
+      "git_blob_sha": "f7b00ef496676adab16c4482b753030061c3fd70",
+      "sha256": "f1c681f0bce76494406518bdfc155b0b3554bccca9a4c37d92b524940505f09f",
+      "bytes": 9007
+    },
+    {
+      "path": "persona_service/bundle.py",
+      "git_blob_sha": "98ebfd944f6966ecedd59275f36325001599e787",
+      "sha256": "3b5bd556a76315b5bea05408e8119b6b9dbc86ca4f91ae5252ade3b7e62441d8",
+      "bytes": 8099
+    },
+    {
+      "path": "persona_service/catalog.py",
+      "git_blob_sha": "1af65ddf11df414e9938f46c5c3a0b85d24c3a60",
+      "sha256": "0efe074fb4d2967c0f6381fc3ab44ed665b9d96a7c98e9c72ecb64bbe7796c82",
+      "bytes": 6214
+    },
+    {
+      "path": "persona_service/context.py",
+      "git_blob_sha": "de6446f589a06ac881fa3762f41343cdf6ed277c",
+      "sha256": "74d801c21bd6cdc3c29fbc20fb986c7c3ec82c06cdd43c53cdd0379df81894bd",
+      "bytes": 3368
+    },
+    {
+      "path": "persona_service/policy.py",
+      "git_blob_sha": "41af671dbae631a994e54729d39b61004580896c",
+      "sha256": "d38ae77c910312c09d12cebdb71c4c480708de946af24c6e2358cb12a7a66a49",
+      "bytes": 8558
+    },
+    {
+      "path": "persona_service/provenance.py",
+      "git_blob_sha": "6cf2766ef9ab542560409c303c1b30a3822230e0",
+      "sha256": "79eeef1a553b1e8a7f3f3eea24044e62ca06f7522dddf9ac5a1cb0c9c17bf6b6",
+      "bytes": 1861
+    },
+    {
+      "path": "persona_service/resources/helpers/adaptive_weights.py",
+      "git_blob_sha": "671261b2eefb2f61568529147dde654dea839516",
+      "sha256": "e07c8979788e61c1a751f55b5045f4dd267dfba75b5904568141d9076764cf91",
+      "bytes": 12184
+    },
+    {
+      "path": "persona_service/resources/helpers/canonical_slug.py",
+      "git_blob_sha": "d878fcd61d52ded655143654707b83f0a8e65878",
+      "sha256": "a5d2a763646488571ddb56fb393a1a0cc75c1c1f5d05c6e2052c6d77dd98bcef",
+      "bytes": 7965
+    },
+    {
+      "path": "persona_service/resources/helpers/detect_platform.py",
+      "git_blob_sha": "0341ade9ceff711857bd28926c55a15196fa2ba1",
+      "sha256": "b063b77b86a51706ad5d6f54b4afff14d8a95eefbcbd6b98919a6fc5cf8becff",
+      "bytes": 18688
+    },
+    {
+      "path": "persona_service/resources/helpers/embedding_engine.py",
+      "git_blob_sha": "e9906da4523dac84f9355cd4961db7672943791e",
+      "sha256": "e3f40f60dbb2123537b4afabb70c1bd1d7e4e47d7ae08254598512b4fdd57c3c",
+      "bytes": 1851
+    },
+    {
+      "path": "persona_service/resources/helpers/llm_score.py",
+      "git_blob_sha": "03e3992d25235a57c84a0a45c49c0e77b789be96",
+      "sha256": "1ecbc39d4164f2112fb4de80b349650766e8b9048fd47c37ecc40d28ef7ac6b2",
+      "bytes": 56478
+    },
+    {
+      "path": "persona_service/resources/helpers/mechanical-gate.py",
+      "git_blob_sha": "18354a3733a47c72a35e00ea924f0707cfdc8285",
+      "sha256": "2e0fe8b327f32d3a599e55a01ae58bcda4de2f7b5dd5fbb0db9dfc4ca4e81ea0",
+      "bytes": 6403
+    },
+    {
+      "path": "persona_service/resources/helpers/resolve_db.py",
+      "git_blob_sha": "059388a89908c9c49ef8c74f9bea1ba64a528fd9",
+      "sha256": "33a2a28701611e86363b49f47a1e936dd9f6520c299cc4228bfcd677bc67f61c",
+      "bytes": 12137
+    },
+    {
+      "path": "persona_service/resources/helpers/secret_helper.py",
+      "git_blob_sha": "8285c2e82cab6f955e947405f239edccea30fe0c",
+      "sha256": "5ac3ab36e5af49a78ea8d3c787f3aee7c0bfc5d857247b6144f874ddc408bb3f",
+      "bytes": 17539
+    },
+    {
+      "path": "persona_service/resources/helpers/secret_names.json",
+      "git_blob_sha": "5becbafda667415f69b4cf90446d75af94b869dc",
+      "sha256": "5c88a695eefcd99ca4779a506dd3c3e0e574305e1fcad77330836aa6e8720492",
+      "bytes": 4572
+    },
+    {
+      "path": "persona_service/resources/helpers/semantic_task_fit.py",
+      "git_blob_sha": "a918ead722f3ea99f77eb39f0a46d738f9c299ae",
+      "sha256": "a8d279dd25995bcbe604775c350bf97ffa443453ebac403c785161b09e1162d5",
+      "bytes": 37168
+    },
+    {
+      "path": "persona_service/resources/personas/persona-categories.json",
+      "git_blob_sha": "0f233457d15958d019202decba1235fdb72c8d6f",
+      "sha256": "95eb026033716c71e730c81abd0501bb717ba70a8dcac42b5dcc1d01494cd07a",
+      "bytes": 317757
+    },
+    {
+      "path": "persona_service/resources/personas/personas/_section-map.json",
+      "git_blob_sha": "5054c50e461ac61d558956b8d3366ec59065aca4",
+      "sha256": "f58c181bb30d419a0eef79846e75268ad83eec060c42a0209ffba5b96f48b531",
+      "bytes": 86149
+    },
+    {
+      "path": "persona_service/resources/personas/personas/acuff-miner-new-model-of-selling/persona-blueprint.md",
+      "git_blob_sha": "b48e16127f59a3c7ae9fecf3e41dcf3b04d1cb15",
+      "sha256": "da326fae46d2684df1b5446aaf3482b245069d6eaa761c0d9c9820727ba3d2d3",
+      "bytes": 40725
+    },
+    {
+      "path": "persona_service/resources/personas/personas/aliche-get-good-with-money/persona-blueprint.md",
+      "git_blob_sha": "2b2a579e94a02addcaed4d51ab4696f89f370a44",
+      "sha256": "4b0ca33a2953330e590e90eacc9f608e41145d7920637ee3f7bafc60a743cd4c",
+      "bytes": 58478
+    },
+    {
+      "path": "persona_service/resources/personas/personas/allan-dib-the-1-page-marketing-plan/persona-blueprint.md",
+      "git_blob_sha": "86296ba65f5aa3fb45e948033ee97a0e99c19586",
+      "sha256": "63a27b30106e0b2fac43610c812258ea65be2aa965649b2b4846e6e04fd3daf0",
+      "bytes": 49742
+    },
+    {
+      "path": "persona_service/resources/personas/personas/attwood-passion-test/persona-blueprint.md",
+      "git_blob_sha": "5e434ba669a662f73717f8203875ebd786fb1486",
+      "sha256": "b5f06d214d2600cd6387d0eef15900e5b333a2b60de5c948d2052f491dd7ac67",
+      "bytes": 29154
+    },
+    {
+      "path": "persona_service/resources/personas/personas/berger-contagious/persona-blueprint.md",
+      "git_blob_sha": "e4a9e0c07cdd359bbb322516eb5a3390c9c377e3",
+      "sha256": "174adb431eeea931a9e6800c88b42a8eef5b77b2721b5248d2bdb5742e6f8fa7",
+      "bytes": 44946
+    },
+    {
+      "path": "persona_service/resources/personas/personas/blackceo-house-voice/persona-blueprint.md",
+      "git_blob_sha": "b9a8a7859d4e5a4bcd4639c58075377cfae9b554",
+      "sha256": "550e2a57ae53d7098a498b00fb434a7bbd98cf4a2d5b1a9b6c3084db28324bf6",
+      "bytes": 9348
+    },
+    {
+      "path": "persona_service/resources/personas/personas/bly-copywriters-handbook/persona-blueprint.md",
+      "git_blob_sha": "ca36eb553d1a84c142045b9ad3b9235f2b01a694",
+      "sha256": "b25e3f390b6ebe787671a0b19a943369b25d0e452d5e5835f0a1b0c68e1063a5",
+      "bytes": 42103
+    },
+    {
+      "path": "persona_service/resources/personas/personas/brian-mark-10-million-instagram-funnel/persona-blueprint.md",
+      "git_blob_sha": "d22bf64d7204ea90844ad6ac06b18de3ca09989e",
+      "sha256": "cd652a5cf0d102d3507ab9431f67154e3f33b2ac57e26e4e37180bfe439994cb",
+      "bytes": 44081
+    },
+    {
+      "path": "persona_service/resources/personas/personas/brown-atlas-of-heart/persona-blueprint.md",
+      "git_blob_sha": "e35419a62ad63c134b735bfef61bdf8d7c3070be",
+      "sha256": "54a94bcf8c888cac3ecb5fb83aab3bd2120bb2db77e1feedec4a2e84006c7a37",
+      "bytes": 39665
+    },
+    {
+      "path": "persona_service/resources/personas/personas/brunson-marketing-secrets-blackbook/persona-blueprint.md",
+      "git_blob_sha": "f65ee93a3864cedff9956e054df6b133a247f99a",
+      "sha256": "c14ed4ace440bb52477466f6ecdc3a9e793b578288659bb354ea6e828d4d7071",
+      "bytes": 32825
+    },
+    {
+      "path": "persona_service/resources/personas/personas/brunson-network-marketing-secrets/persona-blueprint.md",
+      "git_blob_sha": "1588dedd5c8925095a6457f004adad6031e24428",
+      "sha256": "d9f5b0d9e151f58d7f8ec9ef7728d43b5b51afde84760c42e3f487b29f3e3466",
+      "bytes": 47762
+    },
+    {
+      "path": "persona_service/resources/personas/personas/budelmann-brand-identity-essentials/persona-blueprint.md",
+      "git_blob_sha": "cba5e1f1ead7742d307f755bec3da1f46376dc59",
+      "sha256": "bfa90c41d2e42569781566d77c773d9914da7b11284d5b2feeba3b091c420f2e",
+      "bytes": 56194
+    },
+    {
+      "path": "persona_service/resources/personas/personas/butow-instagram-facebook-all-in-one/persona-blueprint.md",
+      "git_blob_sha": "7d4203572ebcab482b6ceefbd9fb3862557efced",
+      "sha256": "172c95acbe4aa1661c9b0fdc3f47080893f49ecfef33fdc3b7364b9d7aad8854",
+      "bytes": 29757
+    },
+    {
+      "path": "persona_service/resources/personas/personas/butow-ultimate-guide-social-media-marketing/persona-blueprint.md",
+      "git_blob_sha": "96c88bb843213aea07e4d90d0b2b9a366f26cf55",
+      "sha256": "4fb82570daa6afb4c2e3c6ffad616c3feca9a1a5197e1249054b1e74bb065bfe",
+      "bytes": 15183
+    },
+    {
+      "path": "persona_service/resources/personas/personas/cancel-conversational-marketing/persona-blueprint.md",
+      "git_blob_sha": "a630aa81a5a32cb8d442755aec03a767fe628c2a",
+      "sha256": "f73c46430f401bc8c17db6533321337f6b00b31f53b7d856edbf8924afd930a5",
+      "bytes": 58152
+    },
+    {
+      "path": "persona_service/resources/personas/personas/carnegie-how-to-win-friends-digital-age/persona-blueprint.md",
+      "git_blob_sha": "525aeaebb5ba853272dcaf9947ad528de2d72bc5",
+      "sha256": "6e15450862850ff9425f3063eff4def7f574a3239f3cc405a952345f0c34805c",
+      "bytes": 58986
+    },
+    {
+      "path": "persona_service/resources/personas/personas/charvet-words-change-minds/persona-blueprint.md",
+      "git_blob_sha": "ab4eab0feecec4dc7fa67651527fbbb443119773",
+      "sha256": "866874dc5228bf661901854ea73c9f51d5a37dbc0d9912e2cf6bb892da714908",
+      "bytes": 34001
+    },
+    {
+      "path": "persona_service/resources/personas/personas/charvet-words-that-change-minds/persona-blueprint.md",
+      "git_blob_sha": "40e2f9c32e40a3c229600c4c9f8b1c28e35245d0",
+      "sha256": "110eb7137e43a0d4d6c2f4e97cf3eaa59c95006a92c07eb937385d021274ff5a",
+      "bytes": 46935
+    },
+    {
+      "path": "persona_service/resources/personas/personas/cialdini-influence/persona-blueprint.md",
+      "git_blob_sha": "0f289d77e9a4fb24b14d14e40a47413117c9e102",
+      "sha256": "bfad6d41a4c008e35da5933a935da94532516beeebfe8ab948dce46434294836",
+      "bytes": 35971
+    },
+    {
+      "path": "persona_service/resources/personas/personas/cialdini-pre-suasion/persona-blueprint.md",
+      "git_blob_sha": "58bc5d5b31c26dee22d73994d756a3ab583ff6aa",
+      "sha256": "2e11a3737ddf369bc337e362bc4ddcbd74c336709ac4a9adb8d146579ec702b4",
+      "bytes": 41775
+    },
+    {
+      "path": "persona_service/resources/personas/personas/clear-atomic-habits/persona-blueprint.md",
+      "git_blob_sha": "96527921da690b210bfcd3ed21588099649a38f6",
+      "sha256": "73ce1ed806fed67643bace5860c50bdb49e4b5f72f8fb5455aad7c0d0ae6220d",
+      "bytes": 32816
+    },
+    {
+      "path": "persona_service/resources/personas/personas/collins-good-to-great-summary/persona-blueprint.md",
+      "git_blob_sha": "9cabb9da9ef1fee2bcbcdc4aef6002a81db8107f",
+      "sha256": "3471b00271670d50b42b96e4519f7212ec09da1bd034cac815900f374c93d261",
+      "bytes": 37421
+    },
+    {
+      "path": "persona_service/resources/personas/personas/collins-good-to-great/persona-blueprint.md",
+      "git_blob_sha": "bc89dd219ad56cf52f037714c78a96b1ae5598bf",
+      "sha256": "0eb644533c497ef01d00b926edfdfcec9e1818c952dbccc1a98fb1b7841fe462",
+      "bytes": 35725
+    },
+    {
+      "path": "persona_service/resources/personas/personas/collins-turning-the-flywheel/persona-blueprint.md",
+      "git_blob_sha": "ab19ab966191af3a4bf7e6d4e32b0b08c207b828",
+      "sha256": "c25aec39c5e4ede00a2d618be20bfc77468b4352348d542f8080701cadd515b2",
+      "bytes": 49973
+    },
+    {
+      "path": "persona_service/resources/personas/personas/covey-7-habits/persona-blueprint.md",
+      "git_blob_sha": "05a5a1b996956fa7f3527c97f28389ca28e6d8d2",
+      "sha256": "cab4bd84ada04c9be46c9c58eee789d8a1db6c5b7b9c7a46af7c8a2ef8d6447a",
+      "bytes": 47190
+    },
+    {
+      "path": "persona_service/resources/personas/personas/deziel-content-fuel-framework/persona-blueprint.md",
+      "git_blob_sha": "e82214502ac25bc80b4df7b78dc1b12f2d6fe150",
+      "sha256": "34ef1f9abf4ca993072f3efef30a781abc1b16bbd70f4ec4d208e851b50c19aa",
+      "bytes": 45167
+    },
+    {
+      "path": "persona_service/resources/personas/personas/duckworth-grit/persona-blueprint.md",
+      "git_blob_sha": "bc584cc00346ce900888a8a682a15d47fb57726a",
+      "sha256": "39dc5bbdeeb474a7e6324a2f9e283327c547d306b5cf559bc104dbe907e23117",
+      "bytes": 78037
+    },
+    {
+      "path": "persona_service/resources/personas/personas/duhigg-power-of-habit/persona-blueprint.md",
+      "git_blob_sha": "8291cb084f06f4b6c6e11d212f1b43334a48cee7",
+      "sha256": "e9bbf916459f2db294f1ef1ad3acd7e659493f02ae6e74fdeb263f8a55a0258a",
+      "bytes": 34502
+    },
+    {
+      "path": "persona_service/resources/personas/personas/duhigg-smarter-faster-better/persona-blueprint.md",
+      "git_blob_sha": "f45d1a92032e15db06069b75583d21575a0794c5",
+      "sha256": "69bc4e19d0c710c91a47cdd1f1f5c5106609ecc9c72fd4bf934ffa50446b22aa",
+      "bytes": 44987
+    },
+    {
+      "path": "persona_service/resources/personas/personas/duhigg-supercommunicators/persona-blueprint.md",
+      "git_blob_sha": "d6dfad978d6e64684a1d6d35493d52fe52bfc593",
+      "sha256": "6f12412adc5f43b4fe71d73373905879f38ba657de3a5ea69e253d8dcfd8d5bc",
+      "bytes": 33240
+    },
+    {
+      "path": "persona_service/resources/personas/personas/edwards-copywriting-secrets/persona-blueprint.md",
+      "git_blob_sha": "130e30de3837b9096165e22fde0ca6b3d96d6719",
+      "sha256": "b6b7d411bfd9943491c93c57ea85e1f41dabc589585cbe7ade602da9fda636a2",
+      "bytes": 49196
+    },
+    {
+      "path": "persona_service/resources/personas/personas/erikson-surrounded-by-idiots/persona-blueprint.md",
+      "git_blob_sha": "5a83516ae916f9506bec5293bdaba0599efc9cda",
+      "sha256": "db0dda9234093adf697764bbe955a035e9fc8e0c3f5256b9cfb43410e84c5ab6",
+      "bytes": 50024
+    },
+    {
+      "path": "persona_service/resources/personas/personas/ferri-growth-marketing/persona-blueprint.md",
+      "git_blob_sha": "6ec06d1f2abbb323a11af862bf7c3f10a6297247",
+      "sha256": "96cc6c58f5d8bcdb92c332cca1c576a44572b21a07e7769dcb765c4d8af1db0d",
+      "bytes": 46380
+    },
+    {
+      "path": "persona_service/resources/personas/personas/flynn-superfans/persona-blueprint.md",
+      "git_blob_sha": "b7d3638ed62fa2f2d14bf09d29133632583b71cc",
+      "sha256": "79ecb303559c754bda320b30bff05a8c109072eca5bbd12fa0ff5fbe7371f152",
+      "bytes": 47358
+    },
+    {
+      "path": "persona_service/resources/personas/personas/forte-building-second-brain/persona-blueprint.md",
+      "git_blob_sha": "829390aadce2df6a8b334288069078072b5e931c",
+      "sha256": "affca91b429681058510a5938e8008bbe8f541e3fa03d3f02b28838a28557b37",
+      "bytes": 35345
+    },
+    {
+      "path": "persona_service/resources/personas/personas/forte-para-method/persona-blueprint.md",
+      "git_blob_sha": "3024ae179be5d1de89f0c88e7cbcddae387dfb54",
+      "sha256": "342939ee83c49ba8f2c4a004bb2c34990a25f19d86c7e865bae4ce0a7b89e939",
+      "bytes": 39865
+    },
+    {
+      "path": "persona_service/resources/personas/personas/gallo-talk-like-ted/persona-blueprint.md",
+      "git_blob_sha": "4d741eb1a1e0baec87b2d20cb522dc4505243428",
+      "sha256": "9cff1598f041c7ac7f8043474ad52396bc1673958de10faf185d7e1780ca5532",
+      "bytes": 38513
+    },
+    {
+      "path": "persona_service/resources/personas/personas/gitomer-sales-bible/persona-blueprint.md",
+      "git_blob_sha": "db398deeaa1a0276c5be540834c83af918d9d9e7",
+      "sha256": "b608584c06ff3675e38d429b2f505af3d56990a9bca684b187af464335d792a3",
+      "bytes": 43041
+    },
+    {
+      "path": "persona_service/resources/personas/personas/godin-this-is-marketing/persona-blueprint.md",
+      "git_blob_sha": "2713ac1bc1aff6dd30f73b4f9d642971bee51b1d",
+      "sha256": "d76be84f0d22cb1c5522f953d9213892e6a91dcff9eba9a9da9f9785f001500b",
+      "bytes": 37108
+    },
+    {
+      "path": "persona_service/resources/personas/personas/goggins-cant-hurt-me/persona-blueprint.md",
+      "git_blob_sha": "4f859fa123ea9834ef3f1c637e4d834563752a43",
+      "sha256": "41b23b3c6cd89ea6a817c0922e380bc5dbc713b3cfb8d3ee85316ca933277169",
+      "bytes": 33036
+    },
+    {
+      "path": "persona_service/resources/personas/personas/grenny-crucial-conversations/persona-blueprint.md",
+      "git_blob_sha": "a6928d1574228ee04c51125d74a8793a45284a2e",
+      "sha256": "bbd247b0fab5101953b53a9a5980834143fe411361422e2d77c5c59d3b610057",
+      "bytes": 40952
+    },
+    {
+      "path": "persona_service/resources/personas/personas/grover-relentless/persona-blueprint.md",
+      "git_blob_sha": "52288bb5fcf17088290f20bf7e216644b8414b21",
+      "sha256": "adaa0449c4a5bf8b6e8fb1b2e67b1c9f68b69547a8c7efbb97aac43b16d12fa3",
+      "bytes": 37390
+    },
+    {
+      "path": "persona_service/resources/personas/personas/hormozi-100m-leads/persona-blueprint.md",
+      "git_blob_sha": "99939cb71c08e2136f4b1e887dd0a93fed8f706b",
+      "sha256": "4b35191edcb39f64aefdd7b61205255111cb032df7af11be2d0022a66c807af9",
+      "bytes": 41961
+    },
+    {
+      "path": "persona_service/resources/personas/personas/hormozi-100m-offers/persona-blueprint.md",
+      "git_blob_sha": "132b7c121298777e4a39e1639448a9db966081a6",
+      "sha256": "67f68c449748338165f23507639281112ca33510d6df8e1c94e97ab20c75d443",
+      "bytes": 34216
+    },
+    {
+      "path": "persona_service/resources/personas/personas/hunt-thomas-pragmatic-programmer/persona-blueprint.md",
+      "git_blob_sha": "3e090e17f980b25aed9a008e6383f3f4964b2859",
+      "sha256": "9ca9116db79c99a4ea3d3b295356bb6581b4161d0074f11fb5dfd99948bb2b00",
+      "bytes": 61836
+    },
+    {
+      "path": "persona_service/resources/personas/personas/jakes-instinct/persona-blueprint.md",
+      "git_blob_sha": "1317ed1b48a5025d79ed60ba1848eec8aac95a17",
+      "sha256": "f2b310ce366a49e06644c073edc3e8daf6fc2adc266277bd496d5c14284fa89c",
+      "bytes": 33177
+    },
+    {
+      "path": "persona_service/resources/personas/personas/jeremy-miner-the-nepq-black-book-of-questions/persona-blueprint.md",
+      "git_blob_sha": "31eb59397d353787a95614e273b3aacb3ed70a51",
+      "sha256": "8f58c92dfc1842728968f90a2067e69904c68b040b4118aeb6bea13bb7f67da8",
+      "bytes": 49652
+    },
+    {
+      "path": "persona_service/resources/personas/personas/jones-exactly-what-to-say/persona-blueprint.md",
+      "git_blob_sha": "82928b76dcf961c20c9b270e0de00d07b88a37bd",
+      "sha256": "e160f859c2b42892e1671f6367533dd272514178a04b2db45d3a8b001c0f88ee",
+      "bytes": 40184
+    },
+    {
+      "path": "persona_service/resources/personas/personas/kahneman-thinking-fast-and-slow/persona-blueprint.md",
+      "git_blob_sha": "ba02cd05e5a013d286ef9f818e88a264b8cfd811",
+      "sha256": "1797b33bba327e643c8aa206dd4fd572a0368beb503e49d96ffa5497f4909d39",
+      "bytes": 22688
+    },
+    {
+      "path": "persona_service/resources/personas/personas/kane-hook-point/persona-blueprint.md",
+      "git_blob_sha": "4814dc8a47620a29fab1c9c93f639e16ad49aa8a",
+      "sha256": "62b31a2a166db5295d6a89ac000a34e22d1339d81ee537d2bc16e308ef95d2bf",
+      "bytes": 35764
+    },
+    {
+      "path": "persona_service/resources/personas/personas/kane-one-million-followers/persona-blueprint.md",
+      "git_blob_sha": "6794e6e6e527cccc0c8f2c30a5d8cbc8f7deba1a",
+      "sha256": "8c6d0c1c79df9546ccb20376d1ab0f3f6fed46a1a9b403f02ae211db9e452c23",
+      "bytes": 43653
+    },
+    {
+      "path": "persona_service/resources/personas/personas/kaufman-personal-mba/persona-blueprint.md",
+      "git_blob_sha": "daa4a7dc8cfdcd2b1fda7ebe7e21514cafedfdfb",
+      "sha256": "7a5deddaf3176dc1f4d7490c3f0c8bda41b08ff02fc6a2cfcf7e2eb1bc2db7e0",
+      "bytes": 56622
+    },
+    {
+      "path": "persona_service/resources/personas/personas/kimbro-the-wealth-choice/persona-blueprint.md",
+      "git_blob_sha": "04ca6da7dbfa373aedc42f6f06bad837f8c853a0",
+      "sha256": "cbe58f89a7774cae406e5ca0a2481c4330357e976d86a886807b1e99b00f08c3",
+      "bytes": 40096
+    },
+    {
+      "path": "persona_service/resources/personas/personas/kimbro-what-makes-great-great/persona-blueprint.md",
+      "git_blob_sha": "c24c824cb99b9682b8859b06a81c222a7d1b2179",
+      "sha256": "f6dfd179345461c31f6f1c03a8d7b5ac3c1b844b0f715850cf17023e43d356e0",
+      "bytes": 40082
+    },
+    {
+      "path": "persona_service/resources/personas/personas/king-read-people-like-a-book/persona-blueprint.md",
+      "git_blob_sha": "3b21bea8cd23e73a372d451ebdf19d79b49db33e",
+      "sha256": "89bd1b58c624ed013272ce31ce8713d5a344d21e685a619facdf33737e1a03ed",
+      "bytes": 92576
+    },
+    {
+      "path": "persona_service/resources/personas/personas/king-the-art-of-witty-banter/persona-blueprint.md",
+      "git_blob_sha": "9e80d9b83b73012b2f627495758586c5233e357f",
+      "sha256": "f7d6ee2ba0299ff431633fd2ee20d55f81dcf52fa4b6f32f9f78de03e50c5dc9",
+      "bytes": 38156
+    },
+    {
+      "path": "persona_service/resources/personas/personas/kleon-show-your-work/persona-blueprint.md",
+      "git_blob_sha": "3fcf78fdbfd2182d422c124e747895982e12a3ad",
+      "sha256": "752d7df0116daadf746698eb2bffca48077d6487292ba3298d09e98115f40a21",
+      "bytes": 44831
+    },
+    {
+      "path": "persona_service/resources/personas/personas/lakhiani-extraordinary-mind/persona-blueprint.md",
+      "git_blob_sha": "19d205000ceaaa7cdb1972121fce06c61ed64fc1",
+      "sha256": "5f3ae5ef519f233b13f0a0fe518731d48890300e8d2455452b4bcdb451e49bbf",
+      "bytes": 38092
+    },
+    {
+      "path": "persona_service/resources/personas/personas/landing-page-conversion-essentials/persona-blueprint.md",
+      "git_blob_sha": "e88cda4f92409baa9109476f5584a445474f5b26",
+      "sha256": "98225c843510cdb7da8f14c4fb60f32acd2473441c5527972acd1efe75e06f2a",
+      "bytes": 48015
+    },
+    {
+      "path": "persona_service/resources/personas/personas/leland-brand-mapping-strategy/persona-blueprint.md",
+      "git_blob_sha": "ac232b3f11f101e725aa1fb537ebd9b04304dae8",
+      "sha256": "9724570c6917b563f1a2992b7d165664df982e02228dc9c40dab65d41cfd819a",
+      "bytes": 53861
+    },
+    {
+      "path": "persona_service/resources/personas/personas/michalowicz-clockwork/persona-blueprint.md",
+      "git_blob_sha": "c98c350ac3aab2f98d24c35487ff6e972a28268e",
+      "sha256": "410df3506f6e3cb593b46bec1dfbccdeda8dbee63577888e8200352f67532c14",
+      "bytes": 48218
+    },
+    {
+      "path": "persona_service/resources/personas/personas/michalowicz-profit-first/persona-blueprint.md",
+      "git_blob_sha": "80d5228f1aee98e95391fd03fb9ae1f93ec799d9",
+      "sha256": "7d3e6cce9dff7c93dd53bf93d473047cc1e3c0102d7528ea10bc132f40882003",
+      "bytes": 35657
+    },
+    {
+      "path": "persona_service/resources/personas/personas/miller-building-storybrand/persona-blueprint.md",
+      "git_blob_sha": "8ab06d8d5512dbc6d448f8f7d7373312ea0ad51e",
+      "sha256": "5b73373e28a622961054052c7464f9b9f3abd7321706717efb642866ea6d4c34",
+      "bytes": 54279
+    },
+    {
+      "path": "persona_service/resources/personas/personas/miller-coach-builder/persona-blueprint.md",
+      "git_blob_sha": "14501cf276eb82c72ec3627d6d724b3f6eb41bf0",
+      "sha256": "670c5942fc57d4263fbfdef6c1e154edfa614b9c8accc342408f2799e0d3510f",
+      "bytes": 47265
+    },
+    {
+      "path": "persona_service/resources/personas/personas/miller-marketing-made-simple/persona-blueprint.md",
+      "git_blob_sha": "addfbbb04ac993ad8af32de7856980d3ba1d047f",
+      "sha256": "8e5fd292d8641c2e0166b5195957725cc93fef5660c194a583eebcaca6cd8c58",
+      "bytes": 62806
+    },
+    {
+      "path": "persona_service/resources/personas/personas/moran-12-week-year/persona-blueprint.md",
+      "git_blob_sha": "a3ea8669fb0a7eacddc72c704ff37591edef9d27",
+      "sha256": "c0719f29c7abe9dce3cf1f12375750e2b6b685a79f850c52dcc7ab531f2793a2",
+      "bytes": 33725
+    },
+    {
+      "path": "persona_service/resources/personas/personas/obama-becoming/persona-blueprint.md",
+      "git_blob_sha": "dd07bf88dfb2a11a5623429f3606518c6749c90a",
+      "sha256": "056487c606ea42ac954f315a4661aaf125387efd9ce7200f5f1017167ded7254",
+      "bytes": 37149
+    },
+    {
+      "path": "persona_service/resources/personas/personas/obama-light-we-carry/persona-blueprint.md",
+      "git_blob_sha": "f28232cf9df96f9ffcfe26c4eafdcddc87c8fc30",
+      "sha256": "6e7f4c91390936a7f88c61b53613e20cbd4d07aed304fef18cdd69ef21c596e9",
+      "bytes": 41466
+    },
+    {
+      "path": "persona_service/resources/personas/personas/opara-color-works/persona-blueprint.md",
+      "git_blob_sha": "b7c53a2122c1ea8fe56b9874269a675d2e8d4ac2",
+      "sha256": "7a802506da850b0242387241713c17042cfe6a8890d9ab74ffdb065cb8b2c1e5",
+      "bytes": 48692
+    },
+    {
+      "path": "persona_service/resources/personas/personas/pedro-adao-challenge-secrets-masterclass/persona-blueprint.md",
+      "git_blob_sha": "e99aed5e61ae917dd988b4c015636a3fc5e04b51",
+      "sha256": "df3411133b0f46b141249898e760f7650cc02d8b3a934d6b43b115b9042440ea",
+      "bytes": 61690
+    },
+    {
+      "path": "persona_service/resources/personas/personas/pink-drive/persona-blueprint.md",
+      "git_blob_sha": "3d97eed8f1e939b420c333f89bd327632c4725b4",
+      "sha256": "ddadf01abec1c7d5962336fb1248962e2d2bbacac4c7510bb46947150e57f38f",
+      "bytes": 43468
+    },
+    {
+      "path": "persona_service/resources/personas/personas/pink-to-sell-is-human/persona-blueprint.md",
+      "git_blob_sha": "c0ef25567fe8b013118e3dbea6a77f6a31b4c831",
+      "sha256": "93e4e524c782095729775dc68b2f0d64b58fe850bd03c56ea68301276df62f44",
+      "bytes": 36362
+    },
+    {
+      "path": "persona_service/resources/personas/personas/pink-when/persona-blueprint.md",
+      "git_blob_sha": "925e6384b960b0542b07d704c18a590214c4d2dd",
+      "sha256": "f579eb2879bfeb36af719290a03dba8ee5ee75d9d84cd8f76f468133534b8c02",
+      "bytes": 36090
+    },
+    {
+      "path": "persona_service/resources/personas/personas/priestley-oversubscribed/persona-blueprint.md",
+      "git_blob_sha": "4b1f4d435233f387261273bc619b352fb074b234",
+      "sha256": "9d0d24f338e2ceae9ce67538a073c5dee951ef86f77bd794f7c7675ed5ed384b",
+      "bytes": 39296
+    },
+    {
+      "path": "persona_service/resources/personas/personas/rackham-spin-selling/persona-blueprint.md",
+      "git_blob_sha": "204c3726e72bb8a6e13f04e369269dd6b259d64b",
+      "sha256": "4b1213a395695ef18bb073f431d68ab0ac0e702e85a617867f142087e98c7e3d",
+      "bytes": 42066
+    },
+    {
+      "path": "persona_service/resources/personas/personas/ries-lean-startup/persona-blueprint.md",
+      "git_blob_sha": "70ff9267d1c8c35ae3c6d689653ce7901f468283",
+      "sha256": "c1419b6d67c542afcc186ee1c26099b811335ec3a406ef356fe812b16e27a57d",
+      "bytes": 44934
+    },
+    {
+      "path": "persona_service/resources/personas/personas/robbins-five-second-rule/persona-blueprint.md",
+      "git_blob_sha": "c546d6fddde19a251528cd46cd5bbc06a9ff6905",
+      "sha256": "9de905f0c297e90f5bada9d994196a40bbaf6e49c3d116587960df49e8b181e4",
+      "bytes": 38199
+    },
+    {
+      "path": "persona_service/resources/personas/personas/robbins-let-them-theory/persona-blueprint.md",
+      "git_blob_sha": "a85cdb435b46fc6beb69196524f05f1ff18bd1a1",
+      "sha256": "403a9caa8519672e3592063700c4b0d5229f7e9d4dfa9577da9fe41070ce1ad8",
+      "bytes": 33928
+    },
+    {
+      "path": "persona_service/resources/personas/personas/rohde-the-sketchnote-workbook/persona-blueprint.md",
+      "git_blob_sha": "1f8d198cea6a202314ea8e3bc419151cbf7040ff",
+      "sha256": "e4005705f7bc1dc50104fcf72ea0717d02b7452094002d31d3dbe926675b86bc",
+      "bytes": 39073
+    },
+    {
+      "path": "persona_service/resources/personas/personas/russell-brunson-lead-funnels/persona-blueprint.md",
+      "git_blob_sha": "75c0dd9d2a80d8294fbde87deaad7c06f1fd3783",
+      "sha256": "c871bb3df7f7d465e075e2f00838f2dd89a63cf3f8cf2fbe8a73bf01874e178c",
+      "bytes": 40702
+    },
+    {
+      "path": "persona_service/resources/personas/personas/russell-brunson-the-funnel-hackers-cookbook/persona-blueprint.md",
+      "git_blob_sha": "9b809578a31aa82e88dec580b37673f9351cbbe6",
+      "sha256": "5367f11c51a5257ca1c8987bfe4a63a63eaac32c3319a2ddfd2b7bd0b8dbb9d6",
+      "bytes": 47278
+    },
+    {
+      "path": "persona_service/resources/personas/personas/russell-brunson-traffic-secrets/persona-blueprint.md",
+      "git_blob_sha": "047b48e55d5e12e11437c8c1973c50e4d66ee8d7",
+      "sha256": "02afc468a66bbbc7af6da54afd6fd7ff3aa788214c38d2b854b6740e3523c278",
+      "bytes": 46969
+    },
+    {
+      "path": "persona_service/resources/personas/personas/samit-disrupt-yourself/persona-blueprint.md",
+      "git_blob_sha": "a84364d68e688e22ce69d145a7bdf3a76e35e987",
+      "sha256": "01152593ab8109c5d0abc1a6ec61ff58c0c07df8e256f59334d07e0829aaeff5",
+      "bytes": 36515
+    },
+    {
+      "path": "persona_service/resources/personas/personas/sharma-5am-club/persona-blueprint.md",
+      "git_blob_sha": "eb7b083454eb1d29c2dfc0a6cea8da7854d8ed16",
+      "sha256": "2aa49b27e13852717e6c4cc5bb9a577ca25856ae5a16ce49cae2bab180e29b79",
+      "bytes": 34872
+    },
+    {
+      "path": "persona_service/resources/personas/personas/sinek-find-your-why/persona-blueprint.md",
+      "git_blob_sha": "86a3745df308a567bbd0c78ac4277a09d725268f",
+      "sha256": "3425c5514fd01de64a58ebc15169849bd8bb2540f48755b0cbdd6db8408d19af",
+      "bytes": 40680
+    },
+    {
+      "path": "persona_service/resources/personas/personas/sinek-start-with-why/persona-blueprint.md",
+      "git_blob_sha": "381e5b20e690a51b844a84412590bed144e937a8",
+      "sha256": "94348b6785055f86c107f0c025f1eff3d7533800f5a31ec2aba05dcd88cc4622",
+      "bytes": 40210
+    },
+    {
+      "path": "persona_service/resources/personas/personas/suby-sell-like-crazy/persona-blueprint.md",
+      "git_blob_sha": "03e9f87611d154ebdc6697d0bda4c78487a4162c",
+      "sha256": "4cbe527c93039cb81e4fde0394c9116220c79f8fac35fd14f120d7f3ecc8bd94",
+      "bytes": 55129
+    },
+    {
+      "path": "persona_service/resources/personas/personas/tawwab-set-boundaries-find-peace/persona-blueprint.md",
+      "git_blob_sha": "13cf874b132300dffec80ee108d44fec6d1a7cbf",
+      "sha256": "0242a403c5336fb386a4642a81a610548db245c70022adbedb992d18d46e6b31",
+      "bytes": 29024
+    },
+    {
+      "path": "persona_service/resources/personas/personas/thiel-zero-to-one/persona-blueprint.md",
+      "git_blob_sha": "7eb2829f83986bad28241effed663190aa082c87",
+      "sha256": "96a8ccf3a6f030ced15baa5e837b48dc73cfc5e71141f97370c978b3aa4d9996",
+      "bytes": 35585
+    },
+    {
+      "path": "persona_service/resources/personas/personas/thomas-instagram-performance-marketing/persona-blueprint.md",
+      "git_blob_sha": "3ab1f6469f9a935159f88f8e7e8cc989052279bc",
+      "sha256": "96ffd366aec90415a93292d381914558b10cb1c0994fb8ec3e6659055e58b0f7",
+      "bytes": 46099
+    },
+    {
+      "path": "persona_service/resources/personas/personas/thorne-youtube-unlocked/persona-blueprint.md",
+      "git_blob_sha": "eaf252a31ddeefacdcc1508468ab647d28b8a6a9",
+      "sha256": "3fed9188b0e1bb664c345b9f433730715f9e57fd04ca4f87f5e5344060ca2c62",
+      "bytes": 47274
+    },
+    {
+      "path": "persona_service/resources/personas/personas/tolle-the-power-of-now/persona-blueprint.md",
+      "git_blob_sha": "290be1bb51ad5daafbb27db5a3393192ade54d97",
+      "sha256": "c2faa8d3f5bc2b32135a4c4ab48150c5e835d70c73ba611df39ed28748638a74",
+      "bytes": 48078
+    },
+    {
+      "path": "persona_service/resources/personas/personas/video-funnels/persona-blueprint.md",
+      "git_blob_sha": "2a3234c25d4bc5c5e832598f12b4f2dba2cd63bf",
+      "sha256": "244e51286cbbd32fcb6512ab2257a591ec9ce52ec3e5427fbecc7c866512b1ea",
+      "bytes": 31375
+    },
+    {
+      "path": "persona_service/resources/personas/personas/voss-never-split-difference/persona-blueprint.md",
+      "git_blob_sha": "a97f214b11a3011dfa03dc0498421b7b480497c6",
+      "sha256": "ed34a932883e8869253e213a2bddc140a7f7ae78ba3b2a304e414fb37a76f204",
+      "bytes": 36845
+    },
+    {
+      "path": "persona_service/resources/personas/personas/vsevolod-pudovkin-film-technique/persona-blueprint.md",
+      "git_blob_sha": "11aaf654d7e84123a218b05418fb1f8bef9959fd",
+      "sha256": "949ba989beede44625518796a44c0c737d04f493a7c40e8a8390bc2bbe0bff5b",
+      "bytes": 25372
+    },
+    {
+      "path": "persona_service/resources/personas/personas/walker-launch/persona-blueprint.md",
+      "git_blob_sha": "8676a053bcc87dac1799fac3df81ee385028880d",
+      "sha256": "91422138686f3faf8104a9cc31426e66c9cdffdfb5f99c394c748fb97ebf9409",
+      "bytes": 48806
+    },
+    {
+      "path": "persona_service/resources/personas/personas/wickman-rocket-fuel/persona-blueprint.md",
+      "git_blob_sha": "b94fa29394f7c900cece1816c86c8bd7adc510e1",
+      "sha256": "1f437992e17d72a18344006603f4ae52f1fd24d880247f86ec88b321c5ff4023",
+      "bytes": 48314
+    },
+    {
+      "path": "persona_service/resources/personas/personas/wickman-traction/persona-blueprint.md",
+      "git_blob_sha": "f62288ec77af2f89db801456ba09b8a1234933a5",
+      "sha256": "248a14bd5aee1db83226054d33efafd182389a458e2e63c9e57f3e483efbed6a",
+      "bytes": 35149
+    },
+    {
+      "path": "persona_service/resources/personas/personas/wiebe-copy-hackers/persona-blueprint.md",
+      "git_blob_sha": "07b78e38ad737e245c11ca337f805a07def84ec6",
+      "sha256": "6b703b1b0413eeb696750d5ead3bfd38dc30ecfaf46c243332607df4e0ab0d79",
+      "bytes": 41508
+    },
+    {
+      "path": "persona_service/resources/scripts/decompose-task.py",
+      "git_blob_sha": "11bd4d3f16ca205896042a8b7b7865516c3eb59d",
+      "sha256": "d15929f281852e9687d9cf6be1798b4e9b46a3c7499b723ba83b10de0c84e07a",
+      "bytes": 55505
+    },
+    {
+      "path": "persona_service/resources/scripts/infer-task-category.py",
+      "git_blob_sha": "52fa36f961f96f6c706fb7d03a4cd686d977b200",
+      "sha256": "6f127660dc19342718853b089713e06db7d7889e173befda7a95872ddc77308f",
+      "bytes": 3881
+    },
+    {
+      "path": "persona_service/resources/scripts/persona-selector-v2.py",
+      "git_blob_sha": "4054354cf91f7b983c340d2296c5beccd6d3c403",
+      "sha256": "79f9a560b3a0ff364e554a3e4d2ae3684d9c59be362def9181d1daac5cd068d9",
+      "bytes": 163882
+    },
+    {
+      "path": "persona_service/resources/scripts/persona_blend.py",
+      "git_blob_sha": "142ed78b81d4f1aacbf9f6a58f6db7409c67d8e3",
+      "sha256": "c63c381efecba449101d2bd8d3165ed4c240f698bf5cbcb8c068ca74a5e21ee0",
+      "bytes": 95414
+    },
+    {
+      "path": "persona_service/service.py",
+      "git_blob_sha": "a69fd3bb675d21bacf881e36e8f226634887b08d",
+      "sha256": "b9d2cf4d4453d93426f67cbeeb90aca192efc973200a5c49d4c70296a4850a69",
+      "bytes": 31018
+    },
+    {
+      "path": "phases.py",
+      "git_blob_sha": "ee15625202c6e50c5d96b6cfc752c0aa55ed953d",
+      "sha256": "84aa51fb846c9e6f98bc86450523522edfd8f3a1e09f48fa02c85d5d4049e146",
+      "bytes": 308850
+    },
+    {
+      "path": "pipeline_interp.py",
+      "git_blob_sha": "2bf7f31634160412e589db2b44a1047d3e72c50a",
+      "sha256": "0f412fbfb77e5df26206aac095ab6c94b4c625c66ba48f5522e5ded8dd9edc96",
+      "bytes": 21167
+    },
+    {
+      "path": "preflight_deps.py",
+      "git_blob_sha": "fb3def62698af1c224620195ac8be936293c5032",
+      "sha256": "b8e5ded993cef48f398629c4e6a9025d8468ba224d6eccb2005e228148b99c16",
+      "bytes": 8801
+    },
+    {
+      "path": "preflight_shadow.py",
+      "git_blob_sha": "d33da4eca6c3e299a544142199f40d8a9ccc14a5",
+      "sha256": "9d67cbbf95d4d86c325027e312686dc1c53edb7bcf086af1726c7ac96dbdc2dc",
+      "bytes": 28633
+    },
+    {
+      "path": "providers.yaml",
+      "git_blob_sha": "fdb66e78637b269b57cde898a91a446ec8ab30a6",
+      "sha256": "e321dca674196541c7a391ab461bf4d64d48a773dd62004304d0c8a87225d93b",
+      "bytes": 7664
+    },
+    {
+      "path": "recovery_gate.py",
+      "git_blob_sha": "c0d5024549d9788e721e3d686bd18dbbf1c8a321",
+      "sha256": "1acdf7c3710d98a4d28fc20f603afa9bd1b75a3285606b13c8766c56ad73c3b4",
+      "bytes": 12259
+    },
+    {
+      "path": "relay.py",
+      "git_blob_sha": "f86b7238a38515e9499da17289f092df2aa87876",
+      "sha256": "9703f5fcadb0142ce75dd86a6b4cb5023a579b2c6b18e9f186221459ae234f70",
+      "bytes": 30589
+    },
+    {
+      "path": "report.py",
+      "git_blob_sha": "88a0316c66c4b8bebccbc7e355298c786ccc14f4",
+      "sha256": "d6f50c8a184bf8bbc4248f5ddd40875c9a1bcc1f83949b1c0e481b2808d8a919",
+      "bytes": 18264
+    },
+    {
+      "path": "required_resources.py",
+      "git_blob_sha": "bfb4e638d122d93c3c70c2f63ce8bc7d7686c5b2",
+      "sha256": "233cdfcb2e4ad37b42ee97ca794d14c05450dee561398eb4cfd38d5a9fc20738",
+      "bytes": 15284
+    },
+    {
+      "path": "research_select.py",
+      "git_blob_sha": "ee35f563e82e161b999c26d079aab85c2056ac46",
+      "sha256": "3842de9d3159df5fd482ddc1db4d0cc9ae660246f1a1f24830f90586050fcc85",
+      "bytes": 8055
+    },
+    {
+      "path": "research_web.py",
+      "git_blob_sha": "0204814f268b571a8a22e397fe408d656390d060",
+      "sha256": "fb23acb1048601d91a036295094f0c1d68f42fe79fa62314b47df965b181217c",
+      "bytes": 44154
+    },
+    {
+      "path": "resolve_intake.py",
+      "git_blob_sha": "888a0c9d9fcef9a2a591e82724cbc4c463955913",
+      "sha256": "bce337d500324442cf867a869b5c5bd357f1a8a34101e3476bfc54102e5c1d2b",
+      "bytes": 38188
+    },
+    {
+      "path": "resource_profile.py",
+      "git_blob_sha": "bea7ce884eb28dae7636da6b1c4d47ff8f510b74",
+      "sha256": "1a2a9d9605ccd17e989fc825ba74c51d3a653be414b1d307169c3b26a2e1b1db",
+      "bytes": 98910
+    },
+    {
+      "path": "result.py",
+      "git_blob_sha": "da8b3b915acc4793580c33ffc599aadd44c3f308",
+      "sha256": "a6277e27b95bf698b6b92b375ee9a0ebbbce36d0e8a6daab3f37331d2976113f",
+      "bytes": 5626
+    },
+    {
+      "path": "retrieval_store.py",
+      "git_blob_sha": "9a1b83cd2c567aa11ab84be3759033e1a5601958",
+      "sha256": "5dc5f9926bdbfba9d47686b9dc300dffed18c388ea8b0ab1071a7f911d8000f3",
+      "bytes": 17617
+    },
+    {
+      "path": "runfacts.py",
+      "git_blob_sha": "31f23642f35e7dd44c73fd33fd6192a9bb95fb6d",
+      "sha256": "231cd2c7507904e7074b8cf22257a7ecfbfb8550b1fe4efbff3a1c8abffb0872",
+      "bytes": 97782
+    },
+    {
+      "path": "scan_roots.py",
+      "git_blob_sha": "e489a34bccffe8cabbe270efa3561fe4b806e940",
+      "sha256": "d2ee271975e80d28a2bbc18f0f8f6cf50ca2e9b6391c73102c755bcd568d533c",
+      "bytes": 10852
+    },
+    {
+      "path": "scanners.py",
+      "git_blob_sha": "b8642a435a9b55b2df8f6d59506dedc4df0a2b2f",
+      "sha256": "1834888537946713a1b562a1ca30d4d67f0650304da109f491a16a8b294f4c1b",
+      "bytes": 17865
+    },
+    {
+      "path": "slides_assembly.py",
+      "git_blob_sha": "9c69e15d4c76cf37d29257ab75266c330a7b60cb",
+      "sha256": "3c80e10f7b8213dced0d8b32063083077f3a1eec317560db0db1a4afb8332a06",
+      "bytes": 32047
+    },
+    {
+      "path": "state.py",
+      "git_blob_sha": "6fb61c44cb524528fe484c40666f20cded812d5d",
+      "sha256": "2a9c86bf5f03e82953eac0e284c4065bc32ee5677de532ff4f8ce44761c09ea1",
+      "bytes": 9318
+    },
+    {
+      "path": "supervisor.py",
+      "git_blob_sha": "3af2b88e0ee4b3a280fe22913fbfefa0cff073be",
+      "sha256": "17db70229480949eb24c5f3173d4ac9a4d1ffa07aac0d384daf5b7d48b96ce1c",
+      "bytes": 50805
+    },
+    {
+      "path": "support_gate.py",
+      "git_blob_sha": "8ced14e2f85e1358db8565f556468a4286e52136",
+      "sha256": "ce300e8390b2e2d3b00e88920d1db3f74ed937397a66e7ca6439944ad35f9f12",
+      "bytes": 24525
+    },
+    {
+      "path": "sweep.py",
+      "git_blob_sha": "4bda4b18d5b62c2b19e64127088d26cba1001fe8",
+      "sha256": "e2925182b16ca9a28f552cc8970eb4362dc7ff35e51075885594c166222c0793",
+      "bytes": 35367
+    },
+    {
+      "path": "unit_store.py",
+      "git_blob_sha": "2a149fa90bdee4d86a37bba1314c1fdb79b1ecaa",
+      "sha256": "0ff75858feaba51019fd5ca21ba45447f09acbebfe2d52779658a9103b912df3",
+      "bytes": 17111
+    },
+    {
+      "path": "vocab.py",
+      "git_blob_sha": "02ed0af0094025d31f63725024b4e6fc25b2114a",
+      "sha256": "12df0ab7aa386a9f47d67e21c5ec074e603c6762dde21927b5a295690fcb6c70",
+      "bytes": 5559
+    },
+    {
+      "path": "waivers.py",
+      "git_blob_sha": "fd7693db320b18cb6a10102e52ba1b08e3e459c2",
+      "sha256": "3d5627d3d23bab475b5d76ca4698ea1e1dc1c0e0e526d609da6c76b3e8b294f7",
+      "bytes": 8684
+    },
+    {
+      "path": "watchdog.py",
+      "git_blob_sha": "f8a3be1ceeee4e7ac40f563d81f8a04303ae9ef6",
+      "sha256": "cadd2da3a0a9ffb4570ff2dc30225fedacf7e2cbfd45222f02257e22c8850f0f",
+      "bytes": 17785
+    },
+    {
+      "path": "wave_contract.py",
+      "git_blob_sha": "c443b49a410c82bada98b029de1f1fc7d1926a99",
+      "sha256": "6ae623aace3fd720616d7cfd8e018aba4578dfd2610701501aaf5e1b4f69a9e0",
+      "bytes": 14956
+    },
+    {
+      "path": "workingset.py",
+      "git_blob_sha": "88f26cfa7153b6f2aa78f06007100bc1bed410fd",
+      "sha256": "ea9007b86b0b3db6f623e41026739808e58338ae1b021558c9dfe9e9506cc53b",
+      "bytes": 22169
+    }
+  ]
+}
