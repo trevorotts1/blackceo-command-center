@@ -156,6 +156,80 @@ jobs:
       - name: Run qc-cc.sh
         run: bash scripts/qc-cc.sh
 
+  # ── Hardening plan ITEM 08 — real paired onboarding invitation acceptance ──
+  # The onboarding contract workflow's paired check scans source strings and
+  # mocks a receipt, so nothing exercised the PRES-046 manifest refusal or
+  # registration-dependent issuance from THIS side either. This job checks out
+  # the paired onboarding repository and runs its real acceptance against THIS
+  # checkout: a real production build sealed through build-inventory.sh, the
+  # real cc-start exit-78 refusal when the manifest is absent, a fixture
+  # install whose missing Access triple refuses issuance, and a fixture install
+  # whose full triple reaches a real mint through the real onboarding
+  # validator behind a fixture edge. Fixture identities only — no client key,
+  # no fleet write, no client send. The proof records paired revisions and
+  # never the ticket; a missing, failed or skipped proof fails this job.
+  paired-invitation-acceptance:
+    name: Real paired onboarding invitation acceptance (no skips, no ticket)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the Command Center under test
+        uses: actions/checkout@v4
+
+      - name: Checkout the paired onboarding repository
+        uses: actions/checkout@v4
+        with:
+          repository: trevorotts1/openclaw-onboarding
+          ref: main
+          path: paired-onboarding
+          persist-credentials: false
+
+      - name: Set up Node for the real paired build
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Set up Python for the real onboarding validator
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install the Command Center's reviewed dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Run the real paired acceptance against THIS checkout
+        working-directory: paired-onboarding
+        env:
+          CC_REPO: ${{ github.workspace }}
+          PAIRED_CC_REF: ${{ github.sha }}
+          INTERVIEW_ACCEPTANCE_PROOF: ${{ runner.temp }}/paired-invitation-proof.json
+        run: |
+          python3 - <<'PY'
+          import importlib.util, json, os, pathlib, unittest
+          spec = importlib.util.spec_from_file_location('paired_acceptance', 'tests/unit/interview-paired-acceptance.test.py')
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          suite = unittest.defaultTestLoader.loadTestsFromModule(module)
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          if result.skipped:
+              raise SystemExit('skips are forbidden: an unexercised paired proof is a failed proof')
+          if result.errors or result.failures or result.testsRun == 0:
+              raise SystemExit(1)
+          proof_path = os.environ.get('INTERVIEW_ACCEPTANCE_PROOF', '')
+          if not proof_path or not pathlib.Path(proof_path).is_file():
+              raise SystemExit('paired acceptance proof was not written')
+          raw = pathlib.Path(proof_path).read_text()
+          if 'enroll=' in raw:
+              raise SystemExit('paired acceptance proof leaked a ticket')
+          proof = json.loads(raw)
+          checks = proof.get('checks') or {}
+          if not checks or any(not v.get('ok') for v in checks.values()):
+              bad = [k for k, v in checks.items() if not v.get('ok')]
+              raise SystemExit(f'paired acceptance proof carries failed/absent checks: {bad}')
+          print('paired revisions:', json.dumps(proof.get('pairedRevisions', {})))
+          print('paired acceptance checks:', json.dumps({k: v['ok'] for k, v in checks.items()}))
+          PY
+
   qc-independence:
     name: QC scorer independence
     runs-on: ubuntu-latest

@@ -25,6 +25,33 @@ function response(body: Record<string, unknown>, status = 200) {
   return NextResponse.json(body, { status, headers: HEADERS });
 }
 
+/** Decision 2 (hardening plan item 12): the wire contract keeps
+ * `error: "interview_not_ready"` byte-identical for every existing caller;
+ * the sanitized CAUSE rides this new first-class `reason` field and the same
+ * string in the dispatch log's metadata. ONLY these allowlisted application
+ * codes ever surface — the same vocabulary INVITATION_APPLICATION_ERRORS
+ * defines in the onboarding sender (item 10) and readiness now uses (item 13),
+ * so one vocabulary everywhere. Never a raw body, URL, ticket or secret:
+ * anything unrecognised yields no `reason` at all rather than a guess. */
+const INVITE_REASON_ALLOWLIST = new Set([
+  'access_identity_unregistered', 'interview_not_ready', 'recipient_binding_required',
+  'public_origin_unconfigured', 'public_origin_mismatch', 'operator_required',
+  'invitation_unavailable',
+]);
+
+/** Read the issuer's own `error` code off a non-200 invitation response and
+ * allowlist it. Malformed / non-JSON / foreign codes return null — the failure
+ * keeps its generic `interview_not_ready` name and no reason, never a body. */
+async function invitationFailureReason(res: Response): Promise<string | null> {
+  try {
+    const body: unknown = await res.json();
+    const code = (body as { error?: unknown } | null)?.error;
+    return typeof code === 'string' && INVITE_REASON_ALLOWLIST.has(code) ? code : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Same receipt path as the canonical onboarding send-interview-link.sh.
  * A retry through another entry point must not bypass unknown delivery or
  * adopt a receipt belonging to another client, installation, host or owner.
@@ -145,7 +172,12 @@ function reserve(context: TenantContext, recipientHash: string, mode: string, fo
   });
 }
 
-function finish(id: string, status: DeliveryStatus) {
+function finish(id: string, status: DeliveryStatus, reason?: string | null) {
+  if (reason && INVITE_REASON_ALLOWLIST.has(reason)) {
+    run("UPDATE events SET metadata=json_set(metadata,'$.status',?,'$.reason',?) WHERE id=? AND type=?",
+      [status, reason, id, EVENT_TYPE]);
+    return;
+  }
   run("UPDATE events SET metadata=json_set(metadata,'$.status',?) WHERE id=? AND type=?",
     [status, id, EVENT_TYPE]);
 }
@@ -195,8 +227,11 @@ export async function POST(req: NextRequest) {
   try {
     const issued = await createInterviewInvitation(req, recipientHash);
     if (issued.status !== 200) {
-      finish(id, 'not-dispatched');
-      return response({ error: 'interview_not_ready', mode }, 409);
+      // Decision 2: `error` is byte-identical for existing callers; the precise
+      // allowlisted cause rides `reason` and the dispatch log metadata.
+      const reason = await invitationFailureReason(issued);
+      finish(id, 'not-dispatched', reason);
+      return response({ error: 'interview_not_ready', ...(reason ? { reason } : {}), mode }, 409);
     }
     const invitation = await issued.json();
     const privateUrl = new URL(invitation.url);

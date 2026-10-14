@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { randomUUID } from 'crypto';
-import { resolveTenantContext, signTenantGrant, tenantRegistration, configuredPublicOrigin } from '@/lib/auth/tenant-context';
+import { resolveTenantContext, signTenantGrant, invitationPrerequisites, configuredPublicOrigin } from '@/lib/auth/tenant-context';
 import { GET as readiness } from '@/app/api/auth/interview-ready/route';
 import { INTERVIEW_INVITATION_TTL_SECONDS, INTERVIEW_INVITATION_VALID_UNTIL, INTERVIEW_INVITATION_REDEEMABLE } from './session-policy';
 
@@ -40,23 +40,47 @@ export async function createInterviewInvitation(req: NextRequest, recipientHash:
       return NextResponse.json({ error: 'public_origin_mismatch' }, { status: 409, headers });
     }
 
+    // Registration gate (ISR-001), now the SAME predicate readiness reports as
+    // `capabilities.invitationIssuable` (items 07 + 13). It runs BEFORE the
+    // readiness call so the specific refusal keeps its name — readiness now
+    // also fails for the same condition, and both answers agree.
+    //
+    // This gate is a PROVISIONING PREREQUISITE, not a verification of whoever
+    // opens the link (item 11 — the earlier wording here overclaimed). The
+    // invitation URL is a short same-origin path that works WITHOUT a prior
+    // tenant cookie (the exchange route sets the HttpOnly session cookie).
+    // Redemption in `interview-session` authenticates a SIGNED ENROLLMENT GRANT
+    // produced by signTenantGrant below — a bearer capability, verified
+    // in-process — and `middleware` exempts that route before the generic
+    // outer-edge Access check, so no Access identity is re-proven inside the
+    // redemption route itself. The registered triple (issuer + audience +
+    // exact subjects, the same triple verifyAccessJwt enforces) exists so that
+    // grant is ANCHORED to this host's real Access login and so an owner login
+    // can be verified where one is offered. The full-host Cloudflare Access
+    // application (with this client's own service-token policy) supplies the
+    // additional owner login at the EDGE; the private signed ticket grants the
+    // app SESSION.
+    //
+    // `recipientHash` binds the ticket to the intended DELIVERY DESTINATION (a
+    // hash of the resolved owner chat). It is NOT independent proof that the
+    // human opening the link is that Telegram user — anyone holding the ticket
+    // text can redeem it until the interview completes, which is the forwarding
+    // exposure, and why delivery is an acknowledged gateway send to the resolved
+    // owner rather than a claim about the opener.
+    //
+    // Boxes without a registered identity get this safe-compatibility refusal,
+    // never a link that cannot be anchored. The parent provisions the real
+    // per-host issuer/audience/subjects; this gate only stages the contract
+    // (no secret changes).
+    const gate = invitationPrerequisites(context);
+    if (!gate.issuable) {
+      const error = gate.reasons.includes('access_identity_unregistered') ? 'access_identity_unregistered' : 'interview_not_ready';
+      return NextResponse.json({ error }, { status: 409, headers });
+    }
     const ready = await readiness(req);
     const receipt = await ready.json();
     if (ready.status !== 200 || receipt.ready !== true || receipt.interviewComplete !== false) {
       return NextResponse.json({ error: 'interview_not_ready' }, { status: 409, headers });
-    }
-    // Registration gate (ISR-001): the invitation URL is a short same-origin
-    // path that works WITHOUT a prior tenant cookie (the exchange route sets
-    // the HttpOnly session cookie), so it must be issuable ONLY when the box
-    // can actually verify the owner who opens it. That means a registered
-    // Access identity: the host's registry entry carries issuer + audience +
-    // exact subjects — the same triple verifyAccessJwt enforces. Boxes without
-    // it get a safe-compatibility refusal here, never a link that cannot
-    // verify. The parent provisions the real per-host issuer/audience/identity;
-    // this gate only stages the contract (no secret changes).
-    const registration = tenantRegistration(context.host);
-    if (!registration.issuer || !registration.audience || !registration.subjects?.length) {
-      return NextResponse.json({ error: 'access_identity_unregistered' }, { status: 409, headers });
     }
     const expiresAt = Math.floor(Date.now() / 1000) + INTERVIEW_INVITATION_TTL_SECONDS;
     const ticket = await signTenantGrant({

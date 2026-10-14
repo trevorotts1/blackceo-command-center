@@ -20,6 +20,14 @@
 #      hardcodes a login-method requirement -- which of the app's allowed_idps
 #      a user authenticates through is enforced at the app level (step 2), not
 #      re-restricted here to One-Time PIN only.
+#   4. (Optional, interview hardening 2026-10-13) When ACCESS_SERVICE_TOKEN_ID is
+#      set to an EXISTING client-specific Access service-token id, reconcile a
+#      narrowly scoped non_identity policy named "<subdomain> Command Center
+#      automation" on that app, so the box's own bearer-only automation
+#      (/api/auth/interview-ready, /api/auth/interview-invitation) reaches the
+#      Command Center instead of being redirected to the Access login page.
+#      This step never creates, rotates or prints a credential: it only attaches
+#      the caller-supplied token id. Unset means "skip", exactly as before.
 #
 # The script is idempotent: re-running it against the same subdomain will
 # detect the existing IdP / App / allowed_idps and report rather than create
@@ -391,6 +399,72 @@ else
 EOF
 )" >/dev/null
   echo "    Allow policy created (no login-method restriction; governed by the app's allowed_idps)." >&2
+fi
+
+# ---------------------------------------------------------------------------
+# Step 3b (optional): machine / service-token policy for same-client automation
+# ---------------------------------------------------------------------------
+#
+# WHY THIS EXISTS. Full-host Cloudflare Access turns every unauthenticated
+# request into an edge redirect BEFORE the Command Center runs. A bearer-only
+# caller (MC_API_TOKEN) never gets past that redirect, so readiness checks and
+# invitation issuance fail at the EDGE rather than in the app -- the box can no
+# longer prove its own interview path or mint its own invitation. The repair is
+# one non_identity policy bound to the client's OWN existing service token: it
+# admits that single token and nothing else, and it composes with the human
+# "Allowed users" policy above (Access evaluates any matching policy as allow).
+#
+# INVARIANTS. Existing policies are never removed. The service token itself is
+# never created, rotated or echoed -- only its id travels in this script's
+# environment. No operator-account administrator credential is required here.
+if [ -n "${ACCESS_SERVICE_TOKEN_ID:-}" ]; then
+  MACHINE_POLICY_NAME="${SUBDOMAIN} Command Center automation"
+
+  echo "==> Reconciling machine (service-token) policy '${MACHINE_POLICY_NAME}'..." >&2
+
+  MACHINE_POLICY_JSON=$(echo "$POLICIES" | MACHINE_POLICY_NAME="$MACHINE_POLICY_NAME" python3 -c "
+import json, os, sys
+name = os.environ['MACHINE_POLICY_NAME']
+data = json.load(sys.stdin)
+for p in data.get('result', []) or []:
+    if p.get('name') == name:
+        print(json.dumps(p))
+        break
+" || true)
+
+  MACHINE_POLICY_BODY=$(ACCESS_SERVICE_TOKEN_ID="$ACCESS_SERVICE_TOKEN_ID" python3 -c "
+import json, os
+print(json.dumps({
+    'name': os.environ['MACHINE_POLICY_NAME'],
+    'decision': 'non_identity',
+    'include': [{'service_token': {'token_id': os.environ['ACCESS_SERVICE_TOKEN_ID']}}],
+}))
+")
+
+  if [ -n "$MACHINE_POLICY_JSON" ]; then
+    MACHINE_POLICY_ID=$(echo "$MACHINE_POLICY_JSON" | json_extract id)
+    MACHINE_POLICY_TOKEN=$(echo "$MACHINE_POLICY_JSON" | python3 -c "
+import json, sys
+p = json.load(sys.stdin)
+for entry in p.get('include') or []:
+    token = (entry or {}).get('service_token') or {}
+    if token.get('token_id'):
+        print(token['token_id'])
+        break
+")
+    if [ "$MACHINE_POLICY_TOKEN" = "$ACCESS_SERVICE_TOKEN_ID" ]; then
+      echo "    Machine policy already correct on App ${APP_ID} (id=${MACHINE_POLICY_ID}). Skipping." >&2
+    else
+      echo "    Machine policy exists with a different service token — updating in place (id=${MACHINE_POLICY_ID})." >&2
+      cf_call PUT "/apps/${APP_ID}/policies/${MACHINE_POLICY_ID}" "$MACHINE_POLICY_BODY" >/dev/null
+    fi
+  else
+    echo "    Creating machine policy (non_identity, one existing service token; every other policy preserved)." >&2
+    cf_call POST "/apps/${APP_ID}/policies" "$MACHINE_POLICY_BODY" >/dev/null
+  fi
+  echo "    Machine policy reconciled on App ${APP_ID}." >&2
+else
+  echo "==> ACCESS_SERVICE_TOKEN_ID unset — no machine (service-token) policy reconciled." >&2
 fi
 
 # ---------------------------------------------------------------------------
