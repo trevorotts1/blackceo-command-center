@@ -109,6 +109,9 @@ export default defineConfig({
       'tests/unit/planning-mode-modal.test.tsx',
       // Planning Mode — start failure, gateway error and unreadable reply are visible with Try again.
       'tests/unit/planning-mode-start-error.test.tsx',
+      // Item 19 — ABANDONED pill/panel, plain-words park record, resume
+      // outcome rendering, and the board's Abandoned filter, real render proof.
+      'tests/unit/item19-engine-panel-render.test.tsx',
     ],
     env: { NODE_ENV: 'test' },
     testTimeout: 15000,

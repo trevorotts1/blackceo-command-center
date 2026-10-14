@@ -38,6 +38,10 @@ import { getOpenPersonaMismatch } from '@/lib/persona-mismatch';
 import { getOpenDispatchHold } from '@/lib/dispatch-hold';
 import { getQcHeuristicPark } from '@/lib/qc-promote';
 import { getLatestBlockEvent } from '@/lib/block-events';
+import {
+  getTaskEngineView,
+  taskRowMayHaveEngineState,
+} from '@/lib/presentation-engine-state';
 import { resolveProviderTruth, type ProviderTruth } from '@/lib/board/board-truth';
 import type { Agent, Task } from '@/lib/types';
 
@@ -182,6 +186,28 @@ export function resolveExecutionState(task: {
  * than the lookup and cannot change the answer — a task without a voice
  * persona never blended, and only a `review` task can carry a heuristic park.
  */
+/**
+ * Item 19 — the engine-truth fields for one row: the run's terminal
+ * vocabulary (ABANDONED included) and its plain-words park view, read from
+ * the bound run's state.json. Gated to presentation engine parents (the
+ * only rows that can carry engine state) and fail-soft by construction:
+ * any failure yields honest nulls, never a broken board payload and never
+ * an invented value.
+ */
+function engineFieldsForRow(row: TaskRowRaw): {
+  engine_terminal: TaskRowRaw['engine_terminal'];
+  park_status: TaskRowRaw['park_status'];
+} {
+  const empty = { engine_terminal: null, park_status: null };
+  try {
+    if (!taskRowMayHaveEngineState(row)) return empty;
+    const view = getTaskEngineView(row.id);
+    return { engine_terminal: view.terminal, park_status: view.park };
+  } catch {
+    return empty;
+  }
+}
+
 export function projectTaskRow(row: TaskRowRaw): TaskRowRaw {
   return {
     ...row,
@@ -226,6 +252,11 @@ export function projectTaskRow(row: TaskRowRaw): TaskRowRaw {
     // A41 — preparation / execution state: intended model+provider vs the
     // ACTUAL runtime provider/state. Same object on every surface.
     provider_truth: resolveExecutionState(row),
+    // Item 19 — engine terminal vocabulary + plain-words park view, from
+    // the bound run's state.json (see engineFieldsForRow above). This is
+    // what lets an ABANDONED run render as ABANDONED (and be filtered)
+    // instead of sitting in review-limbo, and a parked run say WHY.
+    ...engineFieldsForRow(row),
   };
 }
 
