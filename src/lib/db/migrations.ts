@@ -26,6 +26,7 @@ import {
 import { seedCompanyGuarded, resolveSeedingCompanyId } from './branding-seed';
 import { ensureRuntimeConfigFile } from '../runtime-config';
 import { BLOCKED_ASK_TRIGGER_SQL } from '../blocked-ask';
+import { councilMigration } from '../council/persistence/council-migration';
 import {
   dedupeCanonicalWorkspaces,
   reapDuplicateOpenAuthoringTasks,
@@ -7108,6 +7109,16 @@ export const migrations: Migration[] = [
       console.log('[Migration 144] WF12-B idempotency + receipt tables ready');
     },
   },
+
+  // CWE-005 council persistence (directive Section 16). The entry lives
+  // in src/lib/council/persistence/council-migration.ts. Its id is a
+  // clearly marked PENDING integration-time assignment: the single
+  // integrator allocates the next numeric id (highest existing id + 1)
+  // at integration and replaces the constant there. Do NOT allocate a
+  // number in a unit branch. The runner sorts numerically; the pending
+  // non-numeric id sorts after every numeric migration, which is safe
+  // because the council schema is additive and independent.
+  councilMigration,
 
 ];
 
