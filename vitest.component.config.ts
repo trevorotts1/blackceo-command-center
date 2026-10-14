@@ -116,6 +116,13 @@ export default defineConfig({
       // running, and created tasks show real IDs, hold state, and
       // dependency state.
       'tests/unit/council-action-plan-components.test.tsx',
+      // CWE-034 (Skill 77) — live session / verdict / history / source /
+      // outcome screens real render proof: reducer-driven seat updates,
+      // duplicate and gap handling, reconnect catch-up, verdict section
+      // order, invalid and not-ready verdict states, source drawer
+      // no-quotation honesty, rerun comparison, company-switch cache
+      // partition, follow-up parent immutability, outcome field split.
+      'tests/unit/council-session-ui-render.test.tsx',
     ],
     env: { NODE_ENV: 'test' },
     testTimeout: 15000,
