@@ -1,6 +1,6 @@
 # Command Center
 
-**Current release: v7.6.120 (2026-10-12)** — Five fleet defects fixed: the boot connect to the OpenClaw gateway now retries with a bounded backoff (it was lost when pm2 started the Command Center before the gateway), the pm2 analyzer ignores pm2 modules such as `pm2-logrotate` (no more false "two Command Centers"), the watchdog self-heal triggers now read the parsed health JSON, a build-inventory timeout is UNKNOWN rather than RED, and update backups go to the persistent OpenClaw root on Contabo. See CHANGELOG.md.
+**Current release: v7.6.121 (2026-10-13)** — Batch: AI Workforce Interview hardening — the shared invitation predicate gates readiness and issuance (a registry gap is 503/`access_identity_unregistered`, never a false ready), the Cloudflare Access service-token machine policy provisions through the app script, issuance comments match signed-capability semantics, and `send-link` surfaces the precise allowlisted cause without changing its `error` contract. See CHANGELOG.md.
 
 **Recent releases** (since v7.3.3 - full per-release history in [CHANGELOG.md](CHANGELOG.md)):
 
