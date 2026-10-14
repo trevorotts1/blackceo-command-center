@@ -1,3 +1,10 @@
+## [v7.6.122] - 2026-10-14 - batch: Command Center merge train (engine sync, Skill 71 run tracking, presentation board visibility) + version stamp reconciliation
+
+- feat(presentations): train PR #545 landed PR #542 (engine sync): the vendored presentation_job package re-synced to the canonical onboarding commit ea22ed88, with PARITY-MANIFEST.json pins exact across the 200-file package.
+- feat(skill71): train PR #545 landed PR #543 (Skill 71 run tracking): the skill71-runs ingestion core and /api/skill-runs routes, the SkillRunsPanel board mount, migration 171 (skill71_run_tracking_tables) and the skill71_ schema tables.
+- feat(presentations board): train PR #545 landed PR #544 (board visibility): presentation engine state and phases surfaced on the board, the POST /api/presentations/[taskId]/resume route, and the item19 board-visibility suite wired into the test runs.
+- chore(release): the annotated tag v7.6.122 was minted at the batch merge commit 230f6d18 before the version files were stamped, so the tag and the files ran one number apart. This entry and its companion commit stamp the five version locations to v7.6.122. The tag stands unmoved at 230f6d18 by operator ruling; the next release tag will be v7.6.123. Standing ceremony from this release on: bump-in-batch, meaning the version bump rides inside the batch and the tag is minted on the bumped tree.
+
 ## [v7.6.121] — 2026-10-13 — batch: AI Workforce Interview hardening (items 05, 07+13, 11, 12)
 
 - fix(cloudflare/access): `scripts/cloudflare/setup-access-app.sh` provisions the same-client service-token machine policy (`ACCESS_SERVICE_TOKEN_ID` → `non_identity`) on an explicitly named application, preserving the owner `allow` policy (item 05).
