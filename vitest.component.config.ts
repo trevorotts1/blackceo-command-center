@@ -110,6 +110,12 @@ export default defineConfig({
       // behavior, honest seat states (queued never "thinking"), sample badge,
       // reduced-motion flag with no information loss.
       'tests/unit/council-room-render.test.tsx',
+      // CWE-036 (Skill 77) — ActionPlanEditor / LinkedTasksPanel real
+      // render proof: the three authorizations read as distinct, the
+      // approved plan hash is visible, held tasks never render as
+      // running, and created tasks show real IDs, hold state, and
+      // dependency state.
+      'tests/unit/council-action-plan-components.test.tsx',
     ],
     env: { NODE_ENV: 'test' },
     testTimeout: 15000,

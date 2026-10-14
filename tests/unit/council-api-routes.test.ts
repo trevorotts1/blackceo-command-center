@@ -127,9 +127,9 @@ before(async () => {
     ['rerun', 'council.sessions.rerun', 'CWE-050'],
     ['outcomes', 'council.sessions.outcomes', 'CWE-050'],
     ['archive', 'council.sessions.archive', 'CWE-050'],
-    ['action-plan/preview', 'council.sessions.action_plan.preview', 'CWE-036'],
-    ['action-plan/approve', 'council.sessions.action_plan.approve', 'CWE-036'],
-    ['action-plan/create', 'council.sessions.action_plan.create', 'CWE-036'],
+    // CWE-036 graduated the three action-plan endpoints to the real
+    // service; they are covered by council-action-routes.test.ts and
+    // no longer answer FEATURE_NOT_READY.
     ['run-authorization/preview', 'council.sessions.run_authorization.preview', 'CWE-049'],
     ['run-authorization/approve', 'council.sessions.run_authorization.approve', 'CWE-049'],
     ['run-authorization/revoke', 'council.sessions.run_authorization.revoke', 'CWE-049'],
