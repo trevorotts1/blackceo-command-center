@@ -46,7 +46,10 @@ jobs:
           set -euo pipefail
           TMP="$RUNNER_TEMP/parity-selftest"
           mkdir -p "$TMP"
-          cp -a presentation_job "$TMP/presentation_job"
+          # cp -r, not cp -a: the gate hashes content bytes, so ownership
+          # preservation is irrelevant -- and cp -a exits non-zero when it
+          # cannot chown, which would abort this step before the tamper.
+          cp -r presentation_job "$TMP/presentation_job"
           # Flip one byte in a data file of the COPY (never the real tree).
           python3 - "$TMP/presentation_job/model_catalog.json" <<'EOF'
           import sys
