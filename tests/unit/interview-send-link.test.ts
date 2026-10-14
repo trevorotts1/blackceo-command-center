@@ -147,8 +147,50 @@ test('unregistered Access identity refuses issuance with a safe compatibility er
   try {
     const response = await POST(req());
     assert.equal(response.status, 409);
-    assert.equal((await response.json()).error, 'interview_not_ready');
+    const body = await response.json();
+    // Decision 2 (item 12), OLD SHAPE: byte-identical contract for every
+    // caller that parses only `error`.
+    assert.equal(body.error, 'interview_not_ready');
+    // NEW SHAPE: the precise, allowlisted cause as a first-class field.
+    assert.equal(body.reason, 'access_identity_unregistered');
+    // Nothing leaks: no ticket, no url, no raw issuer body, no secrets.
+    assert.ok(!('url' in body));
+    assert.ok(!JSON.stringify(body).includes('enroll='));
     assert.equal(fs.existsSync(capture), false);
+    // The dispatch log carries the same reason.
+    const rows = ledger();
+    assert.equal(rows.length, 1);
+    const meta = JSON.parse(rows[0].metadata);
+    assert.equal(meta.status, 'not-dispatched');
+    assert.equal(meta.reason, 'access_identity_unregistered');
+  } finally {
+    process.env.MC_TENANT_REGISTRY_JSON = saved;
+  }
+});
+test('a non-allowlisted or malformed issuer body adds no reason, never the body', async () => {
+  const saved = process.env.MC_TENANT_REGISTRY_JSON;
+  process.env.MC_TENANT_REGISTRY_JSON = JSON.stringify({ 'send.example': {
+    kind: 'self', tenantId: 'send-tenant', companyId: 'send-company', installationId: 'send-install',
+  } });
+  try {
+    // Wrong-registration (stale/foreign identity) -> readiness fails for a
+    // different allowlisted-adjacent reason; whatever the issuer answers, only
+    // allowlisted codes may surface and `error` must stay byte-identical.
+    const response = await POST(req());
+    assert.equal(response.status, 409);
+    const body = await response.json();
+    assert.equal(body.error, 'interview_not_ready');
+    if ('reason' in body) {
+      assert.ok(typeof body.reason === 'string' &&
+        ['access_identity_unregistered', 'interview_not_ready', 'operator_required',
+         'public_origin_unconfigured', 'public_origin_mismatch', 'recipient_binding_required',
+         'invitation_unavailable'].includes(body.reason), `unexpected reason: ${String(body.reason)}`);
+    }
+    assert.ok(!JSON.stringify(body).includes('enroll='));
+    const meta = JSON.parse(ledger()[0].metadata);
+    assert.equal(meta.status, 'not-dispatched');
+    if ('reason' in body) assert.equal(meta.reason, body.reason);
+    else assert.ok(!('reason' in meta), 'dispatch log must not carry a reason the response did not');
   } finally {
     process.env.MC_TENANT_REGISTRY_JSON = saved;
   }
