@@ -104,6 +104,12 @@ export default defineConfig({
       // awaiting theme owned by client, retry deadline + visible failure,
       // no fabricated completion, bare button unchanged without a summary.
       'tests/unit/social-f30-summary-area-render.test.tsx',
+      // CWE-032 (Skill 77) — CouncilShell / CouncilRoom / CouncilReadingView /
+      // AdvisorCardDrawer real render proof: stable roster slot order under
+      // scrambled arrival, full names unclipped, keyboard + drawer focus
+      // behavior, honest seat states (queued never "thinking"), sample badge,
+      // reduced-motion flag with no information loss.
+      'tests/unit/council-room-render.test.tsx',
     ],
     env: { NODE_ENV: 'test' },
     testTimeout: 15000,
