@@ -817,4 +817,64 @@ CREATE TABLE IF NOT EXISTS task_block_events (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_task_block_events_task ON task_block_events(task_id, created_at DESC);
+
+-- Skill 71 run tracking (fix plan Items 24-26). Populated ONLY by event
+-- ingestion (src/lib/skill71-runs.ts): the file importer
+-- (scripts/import-skill71-runs.ts) and POST /api/skill-runs/ingest.
+-- Stores IDs, verdicts, hashes, and score aggregates: never page copy,
+-- prompt text, review notes, or credential values.
+CREATE TABLE IF NOT EXISTS skill71_runs (
+  run_id TEXT PRIMARY KEY,
+  page_name TEXT,
+  brand_id TEXT,
+  client TEXT,
+  client_slug TEXT,
+  host_shape TEXT,
+  run_dir TEXT,
+  test_run INTEGER NOT NULL DEFAULT 0,
+  overall TEXT NOT NULL DEFAULT 'incomplete',
+  review_mode TEXT,
+  report_json_path TEXT,
+  report_md_path TEXT,
+  blocked_stage TEXT,
+  started_at TEXT,
+  last_event_at TEXT,
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS skill71_run_stages (
+  run_id TEXT NOT NULL REFERENCES skill71_runs(run_id) ON DELETE CASCADE,
+  stage TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open',
+  receipt_status TEXT,
+  closed_at TEXT,
+  duration_s REAL,
+  scores_summary_json TEXT,
+  cost_json TEXT,
+  artifact_hashes_json TEXT,
+  failures_json TEXT,
+  items_json TEXT NOT NULL DEFAULT '{}',
+  updated_at TEXT DEFAULT (datetime('now')),
+  PRIMARY KEY (run_id, stage)
+);
+
+CREATE TABLE IF NOT EXISTS skill71_run_events (
+  event_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  emitted_at TEXT NOT NULL,
+  source TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  received_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS skill71_ingest_tokens (
+  id TEXT PRIMARY KEY,
+  token_hash TEXT NOT NULL UNIQUE,
+  client_slug TEXT NOT NULL,
+  host_shape TEXT NOT NULL,
+  created_at TEXT DEFAULT (datetime('now')),
+  revoked_at TEXT
+);
 `;
