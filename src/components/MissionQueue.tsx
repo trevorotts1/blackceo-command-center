@@ -548,6 +548,13 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
           return !!task.assigned_agent_id;
         case 'completed':
           return task.status === 'done';
+        case 'abandoned':
+          // Item 19 — the engine's terminal vocabulary, projected onto the
+          // row from the bound run's state.json (task.engine_terminal).
+          // Distinct from 'completed' (engine DONE) and from blocked /
+          // parked (a park has no terminal ABANDONED and stays findable
+          // under its posted status).
+          return task.engine_terminal === 'ABANDONED';
         case 'total':
         default:
           return true;
@@ -1008,6 +1015,9 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
     { id: 'due', label: 'Tasks Due' },
     { id: 'agent', label: 'By Agent' },
     { id: 'completed', label: 'Completed' },
+    // Item 19 — engine-ABANDONED runs: the producer posts them as
+    // `review`, so no status filter could ever find them before this.
+    { id: 'abandoned', label: 'Abandoned' },
   ];
 
   return (

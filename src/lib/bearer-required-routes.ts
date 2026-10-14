@@ -48,6 +48,11 @@
  * producer ingest (see the comment at its pattern). Now 48 patterns covering
  * 52 route templates; see the U052 lock test for the live census.
  *
+ * 2026-10-14 (Skill 71 run-events ingest): +1 pattern for POST
+ * /api/skill-runs/ingest — the Skill 71 run-events producer ingest (see the
+ * comment at its pattern). Now 49 patterns covering 53 route templates; see
+ * the U052 lock test for the live census.
+ *
  * MAINTENANCE: a new interface call site to a listed route will 401. Re-derive with the
  * test in src/lib/__tests__/passthrough-write-scope.test.ts, which fails when this
  * list and the codebase disagree -- so the list cannot rot silently.
@@ -103,6 +108,14 @@ export const BEARER_REQUIRED_WRITE_ROUTES: RegExp[] = [
   /^\/api\/operator\/tts$/,
   /^\/api\/recommendations$/,
   /^\/api\/recommendations\/[^/]+\/outcome$/,
+  // 2026-10-14 (Skill 71 run-events ingest): POST /api/skill-runs/ingest —
+  // the Skill 71 run-events producer ingest (stream S6), enforcing its own
+  // per-client Bearer token in the handler (hash-only token records;
+  // verifySkill71IngestToken). Service-to-service; an external shipper CLI
+  // posts run events, and the browser interface only ever GETs
+  // /api/skill-runs (the SkillRunsPanel feed), so the POST has no legitimate
+  // tokenless caller.
+  /^\/api\/skill-runs\/ingest$/,
   /^\/api\/social\/media\/[^/]+$/,
   /^\/api\/social\/performance$/,
   /^\/api\/social-theme\/invitations$/,

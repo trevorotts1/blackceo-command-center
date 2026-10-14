@@ -315,12 +315,18 @@ def check_against_pins(receipt: Dict[str, Any]) -> list:
 
 def write_receipt(receipt: Dict[str, Any], dest: Path) -> Path:
     """Write the redacted JSON receipt. dest may be a file (receipt written
-    there) or a directory (RECEIPT_NAME written inside)."""
+    there) or a directory (RECEIPT_NAME written inside). A missing dest
+    directory is CREATED first — calling this for a not-yet-existing
+    working/checkpoints/ must never clobber the directory path with a file."""
     dest = Path(dest)
-    if dest.is_dir():
+    if dest.suffix == "" or dest.is_dir():
+        # A directory-shaped dest: always the receipt INSIDE it.
+        dest.mkdir(parents=True, exist_ok=True)
         dest = dest / RECEIPT_NAME
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(json.dumps(receipt, indent=2), encoding="utf-8")
+    tmp = dest.with_suffix(dest.suffix + ".tmp")
+    tmp.write_text(json.dumps(receipt, indent=2), encoding="utf-8")
+    os.replace(tmp, dest)  # atomic: no torn receipt under the canonical name
     return dest
 
 
