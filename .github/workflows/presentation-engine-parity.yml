@@ -1,0 +1,83 @@
+name: Presentation engine parity gate
+
+# Item 7 (B7 two-copies design, section 3.3): presentation_job/ in this
+# repo is GENERATED from the canonical package in
+# trevorotts1/openclaw-onboarding, pinned to the commit recorded in
+# presentation_job/PARITY-MANIFEST.json and produced by
+# scripts/sync-presentation-engine.sh. This job is the parity gate: it
+# proves the committed copy still equals the pinned canonical tree
+# byte-for-byte (per-file git blob SHA + sha256), that no unlisted file
+# was hand-added, that the recorded package digest recomputes, and that
+# the engine contract invariants hold (checked by reusing the pinned
+# tree's own engine_origin._check_contract whenever the pin carries it).
+#
+# The gate compares the copy against the PIN, never against canonical
+# HEAD: a canonical change cannot break this repo's CI by itself. It
+# creates drift, which the weekly presentation-engine-drift workflow
+# surfaces as a draft sync PR.
+#
+# WARN-FIRST STAGING (the repo's Rule 3.5 doctrine: report, drive to
+# zero, then flip): the real check runs with --warn, so drift annotates
+# loudly (::warning::) without failing the job. FLIP TO ENFORCE (design
+# Step 4) after the first full sync has merged and one weekly drift cycle
+# has run clean: drop --warn from the "Check parity against the pin"
+# step. Nothing else changes; the verifier's exit codes already carry
+# the verdict. A missing or unparseable PARITY-MANIFEST.json exits 2
+# even in warn mode -- a gate that cannot read its manifest has not
+# warned, it has not run.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  parity:
+    name: presentation_job parity vs pinned canonical commit (warn-first)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Self-test -- the verifier MUST fail a tampered copy
+        run: |
+          set -euo pipefail
+          TMP="$RUNNER_TEMP/parity-selftest"
+          mkdir -p "$TMP"
+          cp -a presentation_job "$TMP/presentation_job"
+          # Flip one byte in a data file of the COPY (never the real tree).
+          python3 - "$TMP/presentation_job/model_catalog.json" <<'EOF'
+          import sys
+          p = sys.argv[1]
+          data = bytearray(open(p, "rb").read())
+          data[10] ^= 0x01
+          open(p, "wb").write(bytes(data))
+          EOF
+          if python3 scripts/sync-presentation-engine.py verify --target "$TMP"; then
+            echo "ERROR: verifier PASSED a tampered copy -- the gate is broken"
+            exit 1
+          fi
+          echo "OK: verifier failed the tampered copy (exit 1), naming the drift"
+          # Warn mode against the same tampered copy must exit 0 but speak.
+          OUT="$(python3 scripts/sync-presentation-engine.py verify --warn --target "$TMP")"
+          echo "$OUT" | grep -q "::warning::" || {
+            echo "ERROR: warn mode produced no ::warning:: annotation on drift"
+            exit 1
+          }
+          echo "OK: warn mode annotated the drift and exited 0"
+
+      - name: Check parity against the pin (warn-first)
+        run: |
+          python3 scripts/sync-presentation-engine.py verify --warn
+          echo "NOTE: warn-first staging (design Step 4 flips this to enforce)."
+
+      - name: Run pres039 (parity + origin protections, loud skips in CI)
+        run: |
+          # pres039's live-origin sections (T5) need an onboarding checkout
+          # for the canonical pipeline manifest; CI has none, so they SKIP
+          # loudly here by design (a skip is printed and counted, never a
+          # silent pass). The parity, state-compatibility and census
+          # sections run in full.
+          bash tests/unit/pres039-engine-origin.test.sh
