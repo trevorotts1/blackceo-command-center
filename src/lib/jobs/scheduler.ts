@@ -441,7 +441,7 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<unknown> | unk
       return getCouncilEngine().pumpOutboxOnce();
     },
   },
-  // council-completion-scan: every 5 minutes — CWE-045 production
+  // council-completion-scan: every 5 minutes (CWE-045 production)
   // invocation of CWE-037's completion scan. Completed sessions with
   // no scan at their current state version are scanned (trigger
   // 'completion'); completed sessions whose last scan predates the
