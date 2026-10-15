@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
-import { LayoutGrid, BarChart3, Kanban, ArrowRight, Activity, Brain, Settings, Terminal, MessagesSquare, BookOpen, Mic, Sparkles, LifeBuoy } from 'lucide-react';
+import { LayoutGrid, BarChart3, Kanban, ArrowRight, Activity, Brain, Settings, Terminal, MessagesSquare, BookOpen, Mic, Sparkles, LifeBuoy, Scale } from 'lucide-react';
 import { useLogoUrl } from '@/hooks/useLogoUrl';
 import { useCompanyBrand } from '@/hooks/useCompanyBrand';
 import { format } from 'date-fns';
@@ -17,6 +17,7 @@ import {
   type EngineDbPresence,
 } from '@/lib/dashboard-workspaces';
 import { shouldShowRescueEntry, type RescueProbeStatus } from '@/lib/rescue/severity';
+import { useCouncilEntry } from '@/components/council/useCouncilEntry';
 
 const cardVariants = {
   hidden: { opacity: 0, y: 30, scale: 0.95 },
@@ -76,6 +77,11 @@ export default function HomePage() {
   // rather than a card that leads to a permanently empty page.
   const [rescueProbe, setRescueProbe] = useState<RescueProbeStatus>('loading');
   const [rescueAvailable, setRescueAvailable] = useState(false);
+  // CWE-050 (CWE-033's named remainder): the Council of Wise Elders
+  // home dashboard card, gated by the same fail-closed capabilities
+  // probe as the nav entry (useCouncilEntry): the card renders only
+  // when the council API answers the current principal successfully.
+  const councilEntry = useCouncilEntry();
 
   const hasBrand = brand.primaryColor && brand.secondaryColor;
   const cardBackground = hasBrand
@@ -415,7 +421,25 @@ export default function HomePage() {
     route: '/my-ai-ceo',
     cta: 'Open My AI CEO',
   };
-  const visibleCards: EntryCard[] = ceoBetaEnabled ? [ceoCard, ...coreCards] : coreCards;
+  // CWE-050: the council card, present only when the fail-closed
+  // capabilities probe shows the entry. It leads the core grid
+  // behind the optional CEO beta card; when the probe fails, loads,
+  // or is denied, no council card appears at all (B10).
+  const councilCard: EntryCard = {
+    title: 'Council of Wise Elders',
+    description: 'Nine-seat advisory council',
+    detail:
+      'Bring a decision to the council: nine advisor perspectives review it over three rounds and return a scored, evidence-bound verdict with conditions and dissent recorded. Advisory only: nothing executes without separate approvals.',
+    icon: <Scale className="w-7 h-7 text-white" />,
+    gradient: 'from-amber-500 via-yellow-600 to-amber-700',
+    route: '/council',
+    cta: 'Open the Council',
+  };
+  const visibleCards: EntryCard[] = [
+    ...(ceoBetaEnabled ? [ceoCard] : []),
+    ...(councilEntry.show ? [councilCard] : []),
+    ...coreCards,
+  ];
 
   return (
     <div className="min-h-screen bg-bcc-bg flex flex-col">

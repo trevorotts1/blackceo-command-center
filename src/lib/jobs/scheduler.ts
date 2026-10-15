@@ -417,6 +417,30 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<unknown> | unk
   // execution-reconcile: every 2 minutes, catch in_progress tasks whose
   // TASK_COMPLETE report never reached the webhook.
   { name: 'interview-outbox', expr: '*/2 * * * *', fn: runInterviewOutboxSweep },
+  // council-outbox-pump: every minute — CWE-050 composition of
+  // CWE-030's remainder. Drains the council projection outbox
+  // (durable intents over the CWE-006 journal) into the council's
+  // own scoped subscription registry from the composition root
+  // (src/lib/council/engine.ts). Council events never route through
+  // the host's company-keyed SSE fan-out (binding B07). The engine
+  // is imported dynamically so the scheduler never statically pulls
+  // the council composition into every host boot path. Kill switch:
+  // DISABLE_COUNCIL_OUTBOX_PUMP=1.
+  {
+    name: 'council-outbox-pump',
+    expr: '* * * * *',
+    fn: async () => {
+      if (
+        process.env.DISABLE_COUNCIL_OUTBOX_PUMP === '1' ||
+        process.env.DISABLE_COUNCIL_OUTBOX_PUMP === 'true'
+      ) {
+        console.log('[cron] council-outbox-pump: DISABLE_COUNCIL_OUTBOX_PUMP set, skipping');
+        return { skipped: true, skippedReason: 'DISABLE_COUNCIL_OUTBOX_PUMP set' };
+      }
+      const { getCouncilEngine } = await import('@/lib/council/engine');
+      return getCouncilEngine().pumpOutboxOnce();
+    },
+  },
   { name: 'dispatch-intents', expr: '*/2 * * * *', fn: runDispatchIntentSweep },
   { name: 'execution-reconcile', expr: '*/2 * * * *', fn: runExecutionCompletionReconcile },
   // social-publish-dispatcher: every 2 minutes — F03 (social/wf05-durable-exec).

@@ -384,7 +384,7 @@ test('a mutation without CSRF proof is refused, and a cross-company caller gets 
   assert.equal(crossCompany.body.ok, false);
 });
 
-test('seam pin: a drafts-created session is owner-scoped, so create assembles nothing (CWE-050 reconciles)', async () => {
+test('seam reconciled (CWE-050): a drafts-created company session now assembles its parent and plan', async () => {
   installFixtureEnv();
   const request = await makeRequest('council-a.test', ALICE, '/api/council/sessions', {
     method: 'POST',
@@ -440,7 +440,16 @@ test('seam pin: a drafts-created session is owner-scoped, so create assembles no
     plan_hash: planHash,
   });
   assert.equal(createResult.status, 200, JSON.stringify(createResult.body));
-  assert.equal(createResult.body.data.status, 'not_assembled_private_session');
-  assert.equal(createResult.body.data.tasks.length, 0);
-  assert.equal(countWhere('tasks', 'description LIKE ?', `%source-session:${sessionId}%`), 0);
+  // CWE-050 reconciliation: privacy keys on the session's visibility
+  // alone (the CWE-005/CWE-006/CWE-007 rule), so this company session
+  // assembles exactly like a store-seeded one — parent plus one held
+  // task per approved action — even though the drafts service stamps
+  // owner_subject as the creator of record. The pre-reconciliation
+  // pin (create answering not_assembled_private_session with zero
+  // tasks) is retired by this same change; the genuinely-private
+  // direction is pinned in council-coordination.test.ts.
+  assert.notEqual(createResult.body.data.status, 'not_assembled_private_session');
+  assert.ok(createResult.body.data.parent_task_id, 'the parent task exists');
+  assert.equal(createResult.body.data.tasks.length, 2);
+  assert.equal(countWhere('tasks', 'description LIKE ?', `%source-session:${sessionId}%`), 3);
 });

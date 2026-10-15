@@ -117,23 +117,19 @@ before(async () => {
   exportsRoute = await import('../../src/app/api/council/exports/route');
   exportRoute = await import('../../src/app/api/council/exports/[exportId]/route');
   runAuthRoute = await import('../../src/app/api/council/sessions/[id]/run-authorization/route');
-  const sessionScoped: Array<[string, string, string]> = [
-    ['start', 'council.sessions.start', 'CWE-027'],
-    ['pause', 'council.sessions.pause', 'CWE-027'],
-    ['cancel', 'council.sessions.cancel', 'CWE-027'],
-    ['resume', 'council.sessions.resume', 'CWE-027'],
-    ['decision', 'council.sessions.decision', 'CWE-050'],
-    ['follow-up', 'council.sessions.follow_up', 'CWE-050'],
-    ['rerun', 'council.sessions.rerun', 'CWE-050'],
-    ['outcomes', 'council.sessions.outcomes', 'CWE-050'],
-    ['archive', 'council.sessions.archive', 'CWE-050'],
-    // CWE-036 graduated the three action-plan endpoints to the real
-    // service; they are covered by council-action-routes.test.ts and
-    // no longer answer FEATURE_NOT_READY.
-    ['run-authorization/preview', 'council.sessions.run_authorization.preview', 'CWE-049'],
-    ['run-authorization/approve', 'council.sessions.run_authorization.approve', 'CWE-049'],
-    ['run-authorization/revoke', 'council.sessions.run_authorization.revoke', 'CWE-049'],
-  ];
+  // CWE-036 graduated the three action-plan endpoints to the real
+  // service; they are covered by council-action-routes.test.ts and
+  // no longer answer FEATURE_NOT_READY.
+  //
+  // CWE-050 graduated every remaining session-scoped endpoint in
+  // this table (start, pause, cancel, resume, decision, follow-up,
+  // rerun, outcomes, archive, run-authorization preview/approve/
+  // revoke) to the composed production services; they are covered
+  // by the CWE-050 suites (council-run-controls,
+  // council-run-authorization-routes, council-coordination) and no
+  // longer answer FEATURE_NOT_READY. The table stays as the
+  // mechanism for any future unwired segment.
+  const sessionScoped: Array<[string, string, string]> = [];
   for (const [segment, , owner] of sessionScoped) {
     const mod = await import(`../../src/app/api/council/sessions/[id]/${segment}/route`);
     notReadyRoutes[segment] = { handler: mod.POST as RouteHandler, owner, sessionScoped: true };
@@ -604,7 +600,11 @@ test('metadata reads: capabilities, advisors, models', async () => {
   assert.equal(capabilities.status, 200, JSON.stringify(capabilitiesBody));
   assert.equal(capabilitiesBody.data.foundation.unit, 'CWE-029');
   assert.equal(capabilitiesBody.data.endpoints.total, 32);
-  assert.equal(capabilitiesBody.data.endpoints.ready, 8);
+  // CWE-050: composition graduated every endpoint whose service
+  // exists in this tree; only council.models.probe stays not ready
+  // (no probe executor in this tree, naming CWE-009).
+  assert.equal(capabilitiesBody.data.endpoints.ready, 31);
+  assert.equal(capabilitiesBody.data.endpoints.not_ready, 1);
   assert.equal(capabilitiesBody.data.principal.subject, 'owner:alice');
 
   const advisors = await advisorsRoute.GET(
@@ -631,7 +631,7 @@ test('metadata reads: capabilities, advisors, models', async () => {
   }
 });
 
-test('FEATURE_NOT_READY shape on every unwired endpoint; committed state unchanged', async () => {
+test('FEATURE_NOT_READY shape on the remaining unwired endpoint; graduated endpoints serve real responses; committed state unchanged', async () => {
   const created = await createDraft('owner:alice', { visibility: 'company' });
   const id = created.body.data.spec.session_id;
 
@@ -665,14 +665,22 @@ test('FEATURE_NOT_READY shape on every unwired endpoint; committed state unchang
   }
 
   installFixtureEnv();
-  await checkNotReady('session delete', await sessionRoute.DELETE(
+  // CWE-050 graduated session delete: without the explicit
+  // confirmation the real endpoint refuses with SCHEMA_VALIDATION
+  // and deletes nothing (the full delete flow is covered by
+  // council-coordination.test.ts).
+  const deleteRefusal = await sessionRoute.DELETE(
     await makeRequest('council-a.test', 'owner:alice', `/api/council/sessions/${id}`, {
       method: 'DELETE',
       csrf: true,
       idempotencyKey: 'nr-delete',
+      body: {},
     }),
     { params: Promise.resolve({ id }) },
-  ), 'CWE-050');
+  );
+  const deleteRefusalBody = await deleteRefusal.json();
+  assert.equal(deleteRefusal.status, 400, `session delete guard: ${JSON.stringify(deleteRefusalBody)}`);
+  assert.equal(deleteRefusalBody.error.code, 'SCHEMA_VALIDATION', 'session delete guard');
   await checkNotReady('models probe', await probeRoute.POST(
     await makeRequest('council-a.test', 'owner:alice', '/api/council/models/probe', {
       method: 'POST',
@@ -681,28 +689,47 @@ test('FEATURE_NOT_READY shape on every unwired endpoint; committed state unchang
       body: {},
     }),
   ), 'CWE-009');
-  await checkNotReady('exports create', await exportsRoute.POST(
+  // CWE-050 graduated exports and settings: an export create with
+  // no session_id is a SCHEMA_VALIDATION refusal, an unknown export
+  // read is a typed 404, and the settings read returns the canonical
+  // defaults (full flows in council-exports-cc.test.ts and
+  // council-composition.test.ts).
+  const exportCreateRefusal = await exportsRoute.POST(
     await makeRequest('council-a.test', 'owner:alice', '/api/council/exports', {
       method: 'POST',
       csrf: true,
       idempotencyKey: 'nr-export',
       body: {},
     }),
-  ), 'CWE-038');
-  await checkNotReady('export get', await exportRoute.GET(
+  );
+  const exportCreateBody = await exportCreateRefusal.json();
+  assert.equal(exportCreateRefusal.status, 400, `exports create guard: ${JSON.stringify(exportCreateBody)}`);
+  assert.equal(exportCreateBody.error.code, 'SCHEMA_VALIDATION', 'exports create guard');
+  const exportGetMiss = await exportRoute.GET(
     await makeRequest('council-a.test', 'owner:alice', '/api/council/exports/some-export'),
-  ), 'CWE-038');
-  await checkNotReady('settings get', await settingsRoute.GET(
+    { params: Promise.resolve({ exportId: 'some-export' }) },
+  );
+  const exportGetMissBody = await exportGetMiss.json();
+  assert.equal(exportGetMiss.status, 404, `export get: ${JSON.stringify(exportGetMissBody)}`);
+  assert.equal(exportGetMissBody.error.code, 'EXPORT_DELIVERABLE_NOT_FOUND', 'export get');
+  const settingsGet = await settingsRoute.GET(
     await makeRequest('council-a.test', 'owner:alice', '/api/council/settings'),
-  ), 'CWE-050');
-  await checkNotReady('settings patch', await settingsRoute.PATCH(
+  );
+  const settingsGetBody = await settingsGet.json();
+  assert.equal(settingsGet.status, 200, `settings get: ${JSON.stringify(settingsGetBody)}`);
+  assert.equal(settingsGetBody.data.source, 'canonical_defaults', 'settings get');
+  assert.equal(settingsGetBody.data.revision, 0, 'settings get');
+  const settingsPatchRefusal = await settingsRoute.PATCH(
     await makeRequest('council-a.test', 'owner:alice', '/api/council/settings', {
       method: 'PATCH',
       csrf: true,
       idempotencyKey: 'nr-settings',
       body: {},
     }),
-  ), 'CWE-050');
+  );
+  const settingsPatchBody = await settingsPatchRefusal.json();
+  assert.equal(settingsPatchRefusal.status, 400, `settings patch guard: ${JSON.stringify(settingsPatchBody)}`);
+  assert.equal(settingsPatchBody.error.code, 'SCHEMA_VALIDATION', 'settings patch guard');
   // CWE-030 graduated the events endpoint from FEATURE_NOT_READY to
   // the real scoped journal surface, so it no longer belongs in this
   // not-ready sweep: the owner reads the committed session_created
@@ -722,14 +749,24 @@ test('FEATURE_NOT_READY shape on every unwired endpoint; committed state unchang
     'events get',
   );
   assert.equal(eventsBody.data.page.events[0].scope.session_id, id, 'events get');
-  await checkNotReady('evidence get', await evidenceRoute.GET(
+  // CWE-050 graduated the evidence read (committed manifest
+  // entries) and the run-authorization status view: an evidence ID
+  // outside the draft's manifest is a typed 404, and a session with
+  // no grants reads back an empty redacted grant list.
+  const evidenceMiss = await evidenceRoute.GET(
     await makeRequest('council-a.test', 'owner:alice', `/api/council/sessions/${id}/evidence/ev-1`),
     { params: Promise.resolve({ id, evidenceId: 'ev-1' }) },
-  ), 'CWE-025');
-  await checkNotReady('run-authorization get', await runAuthRoute.GET(
+  );
+  const evidenceMissBody = await evidenceMiss.json();
+  assert.equal(evidenceMiss.status, 404, `evidence get: ${JSON.stringify(evidenceMissBody)}`);
+  assert.equal(evidenceMissBody.error.code, 'COUNCIL_EVIDENCE_NOT_FOUND', 'evidence get');
+  const runAuthGet = await runAuthRoute.GET(
     await makeRequest('council-a.test', 'owner:alice', `/api/council/sessions/${id}/run-authorization`),
     { params: Promise.resolve({ id }) },
-  ), 'CWE-049');
+  );
+  const runAuthGetBody = await runAuthGet.json();
+  assert.equal(runAuthGet.status, 200, `run-authorization get: ${JSON.stringify(runAuthGetBody)}`);
+  assert.deepEqual(runAuthGetBody.data.grants, [], 'run-authorization get');
 
   const after = await getSession(id);
   assert.equal(after.status, 200);

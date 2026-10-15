@@ -38,6 +38,8 @@ import {
   CouncilActionPlanService,
   type CouncilActionPlanView,
 } from './kanban/plan-service';
+import { CouncilRunAuthorizationService } from './run-authorization';
+import { CouncilRunAuthorizationAdapter } from './run-authorization-adapter';
 
 const API_SOURCE = 'council-api';
 const APPROVE_OPERATION = 'council.sessions.action_plan.approve';
@@ -52,19 +54,35 @@ export interface ActionPlanServices {
 }
 
 /**
- * Compose the action-plan services over the request's store. The
- * execution guard runs with CWE-035's fail-closed run-authorization
- * port until CWE-050 composes the real CWE-049 implementation, so in
- * this composition tasks are created held and released only when a
- * real grant resolves.
+ * Compose the action-plan services over the request's store.
+ *
+ * CWE-050 composition: the execution guard and the plan service now
+ * run with the real CWE-049 CouncilRunAuthorizationService behind
+ * CWE-035's CouncilRunAuthorizationPort (CouncilRunAuthorizationAdapter),
+ * replacing the fail-closed default CWE-036 composed against. Tasks
+ * are still created held, and release still requires the full guard
+ * chain — exact plan approval, the typed handler, dependencies done,
+ * committed condition verification — plus an ACTIVE grant resolving
+ * through the real service that admits the task's exact operation
+ * identity. Without an active grant, every task stays held.
  */
 export function composeActionPlanServices(ctx: CouncilRouteContext): ActionPlanServices {
   const db = ctx.store.handle();
-  const planService = new CouncilActionPlanService({ repositories: ctx.repositories, db });
+  const runAuthorization = new CouncilRunAuthorizationAdapter({
+    principal: ctx.principal,
+    service: new CouncilRunAuthorizationService({ store: ctx.store }),
+    db,
+  });
+  const planService = new CouncilActionPlanService({
+    repositories: ctx.repositories,
+    db,
+    runAuthorization,
+  });
   const guard = new CouncilActionExecutionGuard({
     repositories: ctx.repositories,
     db,
     planService,
+    runAuthorization,
   });
   const assembly = new CouncilPlanAssembly({
     repositories: ctx.repositories,

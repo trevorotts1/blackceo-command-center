@@ -102,9 +102,25 @@ export function rowScopeFields(row: CouncilSessionScopeRow): ScopeFields {
   };
 }
 
-/** A session is private when its visibility says so or it is owner-scoped. */
+/**
+ * A session is private when its visibility says so (Section 11.1).
+ *
+ * CWE-050 reconciliation of the drafts-privacy seam: this predicate
+ * previously also treated any non-null owner_subject as private. That
+ * contradicted every other layer's visibility derivation — the
+ * CWE-005 store adapter (sessionVisibleTo), the CWE-006 repositories
+ * (sessionVisibleToEnvelope), and the CWE-007 session assertions all
+ * key privacy on `visibility` alone, with owner_subject acting as the
+ * identity a private session is checked against, never as a privacy
+ * marker by itself. Because CWE-029's createDraftSession stamps
+ * owner_subject (the creator) on every draft, the old predicate made
+ * every API-created company session "private" here: such sessions
+ * could be previewed and approved but never assembled or projected
+ * to the board. owner_subject remains the creator/owner of record;
+ * privacy is visibility alone.
+ */
 export function isPrivateSessionRow(row: CouncilSessionScopeRow): boolean {
-  return row.visibility === 'private' || row.owner_subject !== null;
+  return row.visibility === 'private';
 }
 
 /**

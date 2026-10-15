@@ -691,6 +691,31 @@ export async function autoDispatchTask(
       return { status: 'held', reason: 'dispatch_precondition' };
     }
 
+    // GUARD 3b (CWE-050, closing the CWE-035/CWE-036 manually-assigned
+    // dispatch edge): a task under an explicit dispatch hold NEVER
+    // executes through this path, however it acquired its assignee.
+    // Council action-plan tasks are created held (tasks.dispatch_hold
+    // = 1, routing_reason 'council_plan_assembling') and only
+    // CWE-036's execution guard may clear that hold, after its full
+    // release chain passes (exact plan approval, active run grant,
+    // dependencies, committed condition verification). The board
+    // sweeps exclude held tasks from their candidate queries, but a
+    // held task handed an agent by hand reaches THIS function
+    // directly — and before this guard, nothing here checked the
+    // hold. The column is read with its own query because the Task
+    // type's `dispatch_hold` member is a computed UI field of the
+    // same name, not this column.
+    const holdRow = queryOne<{ dispatch_hold: number | null }>(
+      'SELECT dispatch_hold FROM tasks WHERE id = ?',
+      [taskId],
+    );
+    if (holdRow && Number(holdRow.dispatch_hold ?? 0) !== 0) {
+      console.log(
+        `[${context}] autoDispatchTask: task ${taskId} is under an explicit dispatch hold — skipping (the hold clears only through its owning release path)`,
+      );
+      return { status: 'held', reason: 'dispatch_precondition' };
+    }
+
     // GUARD 4: QC loop cap.
     // FIX 42 (R5B §C.4): `>` → `>=`. The scorer's own cap path (qc-scorer.ts)
     // blocks at qc_reroute_attempts > QC_MAX_REROUTES only AFTER bumping, so a

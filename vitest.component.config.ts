@@ -130,6 +130,10 @@ export default defineConfig({
       // kinds (T017), verdict section order (21.4), typed FEATURE_NOT_READY
       // states naming their owners, preference step separation.
       'tests/unit/council-journey-render.test.tsx',
+      // CWE-050 (Skill 77) — Section 7 attribution label on the composed
+      // verdict surface: every seat-attributed row (scored detail rounds
+      // and the consult result) renders its seat's exact profile label.
+      'tests/unit/council-verdict-label-render.test.tsx',
     ],
     env: { NODE_ENV: 'test' },
     testTimeout: 15000,

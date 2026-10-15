@@ -76,6 +76,47 @@ export interface CouncilRouteContext {
  * Any error thrown by the handler is translated by errors.ts; codes
  * pass through from the canonical layer that raised them.
  */
+/**
+ * Section 17.1 foundation limit: JSON request bodies are capped.
+ * Larger bodies are refused before parsing; attachments are not
+ * carried on this JSON surface at all.
+ */
+export const COUNCIL_MAX_BODY_BYTES = 1_048_576;
+
+const RATE_LIMIT_WINDOW_MS = 60_000;
+/**
+ * Section 17.1 foundation limit (CWE-050): a generous fixed-window
+ * ceiling per (tenant, company, principal). It exists to bound
+ * abuse, not to shape normal traffic; legitimate council use is
+ * orders of magnitude below it.
+ */
+let rateLimitCeilingPerWindow = 1200;
+const rateLimitBuckets = new Map<string, { windowStart: number; count: number }>();
+
+/** Test seam: lower (or restore) the foundation rate ceiling. */
+export function setCouncilRateLimitForTests(ceiling: number | null): void {
+  rateLimitCeilingPerWindow = ceiling ?? 1200;
+  rateLimitBuckets.clear();
+}
+
+function enforceRateLimit(principal: CouncilPrincipal): void {
+  const now = Date.now();
+  const key = `${principal.scope.tenant_id}:${principal.scope.company_id}:${principal.subject}`;
+  const bucket = rateLimitBuckets.get(key);
+  if (!bucket || now - bucket.windowStart >= RATE_LIMIT_WINDOW_MS) {
+    rateLimitBuckets.set(key, { windowStart: now, count: 1 });
+    return;
+  }
+  bucket.count += 1;
+  if (bucket.count > rateLimitCeilingPerWindow) {
+    throw new CouncilApiError(
+      'RATE_LIMITED',
+      `Council API rate limit exceeded for this principal and company (ceiling ${rateLimitCeilingPerWindow} requests per minute, Section 17.1). Retry after the window resets.`,
+      { status: 429, retryable: true, action: 'retry_later' },
+    );
+  }
+}
+
 export async function handleCouncil(
   request: NextRequest,
   fn: (ctx: CouncilRouteContext) => Promise<NextResponse>,
@@ -84,6 +125,7 @@ export async function handleCouncil(
   try {
     assertNoQueryCredential(new URL(request.url));
     const principal = await resolveCouncilPrincipal(request);
+    enforceRateLimit(principal);
     const ctx: CouncilRouteContext = {
       principal,
       requestId,
@@ -118,6 +160,13 @@ export async function requireMutationProof(request: NextRequest): Promise<void> 
  */
 export async function parseJsonBody(request: NextRequest): Promise<Record<string, unknown>> {
   const raw = await request.text();
+  if (raw.length > COUNCIL_MAX_BODY_BYTES) {
+    throw new CouncilApiError(
+      'PAYLOAD_TOO_LARGE',
+      `The request body exceeds the council API limit of ${COUNCIL_MAX_BODY_BYTES} bytes (Section 17.1).`,
+      { status: 413, action: 'fix_request' },
+    );
+  }
   if (raw.trim().length === 0) return {};
   let parsed: unknown;
   try {

@@ -1,11 +1,15 @@
 import type { NextRequest } from 'next/server';
 import {
+  authorizeSessionMutate,
   authorizeSessionRead,
   checkBodyScope,
   handleCouncil,
-  handleNotReady,
+  parseJsonBody,
+  requireIdempotencyKey,
+  requireMutationProof,
   respondOk,
 } from '@/lib/council/api/foundation';
+import { deleteSessionRoute } from '@/lib/council/composed-services';
 import { CouncilPersistenceError } from '@/lib/council/store';
 
 export const dynamic = 'force-dynamic';
@@ -44,17 +48,26 @@ export async function GET(
 }
 
 /**
- * DELETE /api/council/sessions/:id (registered, not wired).
- * Deletion coordination belongs to CWE-050; the foundation performs
- * no deletion and answers FEATURE_NOT_READY (Section 17.6).
+ * DELETE /api/council/sessions/:id (CWE-050).
+ * Deletion runs the CWE-006 store's tombstone flow: the body must
+ * carry the explicit confirmation (SessionDeleteRequest), the
+ * session record is removed, a tombstone blocks late writes, audit
+ * reads of the session answer deleted from then on, and protected
+ * diagnostic payload files are purged. It is never an unguarded
+ * delete and never a state change.
  */
 export async function DELETE(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
-  return handleNotReady(request, 'council.sessions.delete', {
-    sessionId: id,
-    sessionAccess: 'mutate',
+  return handleCouncil(request, async (ctx) => {
+    await requireMutationProof(request);
+    const body = await parseJsonBody(request);
+    checkBodyScope(ctx.principal, body);
+    const idempotencyKey = requireIdempotencyKey(request, body, 'session delete');
+    const authorized = authorizeSessionMutate(ctx, id);
+    const result = deleteSessionRoute(ctx, authorized, id, body, idempotencyKey);
+    return respondOk(ctx, result, { meta: { access_via: authorized.accessVia } });
   });
 }

@@ -80,6 +80,33 @@ const EXPECTED_READY: ReadonlySet<string> = new Set([
   'council.sessions.get',
   'council.sessions.brief.patch',
   'council.sessions.verdict.get',
+  // CWE-050 graduation: every endpoint whose owning service exists
+  // in this tree is now ready and bound at the composition root.
+  // council.models.probe stays not_ready naming CWE-009: no probe
+  // executor exists in this tree.
+  'council.sessions.events.get',
+  'council.sessions.evidence.get',
+  'council.sessions.start',
+  'council.sessions.pause',
+  'council.sessions.cancel',
+  'council.sessions.resume',
+  'council.sessions.run_authorization.preview',
+  'council.sessions.run_authorization.approve',
+  'council.sessions.run_authorization.get',
+  'council.sessions.run_authorization.revoke',
+  'council.sessions.decision',
+  'council.sessions.follow_up',
+  'council.sessions.rerun',
+  'council.sessions.outcomes',
+  'council.sessions.action_plan.preview',
+  'council.sessions.action_plan.approve',
+  'council.sessions.action_plan.create',
+  'council.exports.create',
+  'council.exports.get',
+  'council.sessions.archive',
+  'council.sessions.delete',
+  'council.settings.get',
+  'council.settings.patch',
 ]);
 
 test('registry covers the entire Section 17 surface exactly once', () => {

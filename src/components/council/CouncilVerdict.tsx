@@ -142,6 +142,9 @@ export function CouncilVerdict({
           <h2 className={council.heading}>
             {seatIdentity(card.seat_id).displayName}
           </h2>
+          <p className={council.meta} data-testid="verdict-seat-label">
+            {seatIdentity(card.seat_id).profileLabel}
+          </p>
           <p>{card.answer}</p>
           <p>
             <strong>Next step:</strong> {verdict.next_step}
@@ -366,6 +369,9 @@ export function CouncilVerdict({
                           ? `, prefers ${optionLabel(optionLabels, card.preferred_option_id)}`
                           : ''}
                         . Source qualification: {qualificationLabel(qualification)}{' '}
+                        <span className={council.meta} data-testid="verdict-seat-label">
+                          {identity.profileLabel}
+                        </span>{' '}
                         {onOpenSources ? (
                           <button
                             type="button"
