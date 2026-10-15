@@ -17,6 +17,7 @@
     "test:persona-grounding-health": "vitest run tests/unit/u12-a-persona-grounding-health.test.ts",
     "test:vitest": "vitest run",
     "test:component": "vitest run --config vitest.component.config.ts",
+    "test:council:visual": "node tests/council-gauntlet/run.mjs",
     "test:prove-zhe-web": "node --import tsx --test tests/e2e/prove-zhe-web.e2e.mjs",
     "test:401-e2e": "node tests/e2e/prove-401-telemetry.e2e.mjs",
     "test:e2e:interview-lock": "playwright test --config=playwright.interview-lock.config.ts",

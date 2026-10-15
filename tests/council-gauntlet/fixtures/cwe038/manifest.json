@@ -1,0 +1,39 @@
+{
+  "fixture_identity": "cwe-038-synthetic-fixtures/v1",
+  "generated_by": "CWE-044 gauntlet fixture builder (make-cwe038-fixtures.mjs)",
+  "generated_at": "2026-10-15T00:55:58.523Z",
+  "onb_runtime_commit": "038bc67c83bf91e76194dbb1a06ee99cd5fad2c5",
+  "report_revision_id": "report-b165ecc9acf87c6e590f0a72470737c1",
+  "verdict_content_sha256": "85ac7c3b9daaebed9ec0fc6e63f815fbf5e818214774bc4abba7ec1284be660a",
+  "export_states": [
+    "authorized",
+    "validated",
+    "rendered",
+    "journaled",
+    "registered"
+  ],
+  "pdf_refusal": {
+    "name": "ReportExportError",
+    "code": "EXPORT_FORMAT_NOT_READY",
+    "message": "The pdf deliverable is registered but not ready: the approved Playwright/Chromium PDF renderer (directive Section 24.3) is not present in the runtime dependency bill (package dependencies: zod only); rendered PDF production and visual QA are owned by CWE-044.",
+    "missing_piece": "the approved Playwright/Chromium PDF renderer (directive Section 24.3) is not present in the runtime dependency bill (package dependencies: zod only); rendered PDF production and visual QA are owned by CWE-044"
+  },
+  "artifacts": {
+    "golden-print.html": {
+      "sha256": "5ef9a03e45aaa78ddeaf08566d603832e25736ae27a8f7cfa6d424ea44a4bf10",
+      "bytes": 9641
+    },
+    "golden.md": {
+      "sha256": "1d0469ffbf668086583566b0a397822ecdf55d7594a988dba4298ad20ceeb8ac",
+      "bytes": 7487
+    },
+    "golden-record.json": {
+      "sha256": "27e019d1d9287a37950f7b91e43468e79d2c5b78117499e7a4d7de3e2e34277b",
+      "bytes": 11093
+    },
+    "long-print.html": {
+      "sha256": "c988b2b774aa5c9baf27428f62fe91f33e1c04788d09aa95c01707f3a6582ebd",
+      "bytes": 18148
+    }
+  }
+}
