@@ -266,6 +266,55 @@ export interface RouteCatalogEntry {
   qualityQualified: boolean;
 }
 
+/**
+ * Recorded probe evidence for the catalog (CWE-045). The composed
+ * probe (model-probe.ts) journals a route_probe_recorded event on the
+ * grant's session for every dispatched probe, carrying the
+ * RouteEvidence it derived. This reader folds those events for one
+ * tenant/company scope into the evidence map buildRouteCatalog
+ * consumes: the latest probe per route wins for transport and
+ * reported identity. Probes never record evaluations, so this map can
+ * raise a route to PROBED (and its identity to what the provider
+ * reported) but never to QUALIFIED.
+ */
+export function recordedRouteEvidence(
+  db: import('better-sqlite3').Database,
+  scope: { tenant_id: string; company_id: string },
+): Map<string, RouteEvidence> {
+  const rows = db
+    .prepare(
+      `SELECT payload_json, created_at FROM council_events
+        WHERE tenant_id = ? AND company_id = ? AND type = 'operation_completed'
+          AND payload_json LIKE '%"action":"route_probe_recorded"%'
+        ORDER BY created_at ASC`,
+    )
+    .all(scope.tenant_id, scope.company_id) as Array<{
+    payload_json: string;
+    created_at: string;
+  }>;
+  const evidence = new Map<string, RouteEvidence>();
+  for (const row of rows) {
+    let payload: Record<string, unknown>;
+    try {
+      payload = JSON.parse(row.payload_json) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    if (payload.action !== 'route_probe_recorded') continue;
+    const routeId = payload.route_id;
+    const recorded = payload.evidence as RouteEvidence | undefined;
+    if (typeof routeId !== 'string' || !recorded) continue;
+    evidence.set(routeId, {
+      transportProbed: recorded.transportProbed === true,
+      reportedModelId:
+        typeof recorded.reportedModelId === 'string' ? recorded.reportedModelId : null,
+      identityVerification: null,
+      evaluation: null,
+    });
+  }
+  return evidence;
+}
+
 export function buildRouteCatalog(
   routes: ProviderRouteDescriptor[],
   evidenceByRouteId: ReadonlyMap<string, RouteEvidence> = new Map(),

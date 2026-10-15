@@ -3,9 +3,10 @@ import {
   authorizeSessionMutate,
   checkBodyScope,
   handleCouncil,
+  machineAuthFor,
   parseJsonBody,
   requireIdempotencyKey,
-  requireMutationProof,
+  requireMutationProofFor,
   respondOk,
 } from '@/lib/council/api/foundation';
 import { createActionPlan } from '@/lib/council/approvals';
@@ -22,6 +23,12 @@ export const revalidate = 0;
  * execution grant and its own dependencies and prerequisites permit
  * (Sections 17.6, 19.6, 19.7; T092-T095, T159). Creation requires the
  * committed approval for the same plan hash named in the request.
+ *
+ * CWE-045 machine binding: a machine-channel caller is authenticated
+ * through the CWE-007 machine binding (host-configured, operation
+ * 'execute') instead of the browser CSRF proof, and the binding is
+ * threaded into the plan service, the assembly, and the execution
+ * guard; browser callers keep the CSRF proof.
  */
 export async function POST(
   request: NextRequest,
@@ -29,12 +36,13 @@ export async function POST(
 ) {
   const { id } = await params;
   return handleCouncil(request, async (ctx) => {
-    await requireMutationProof(request);
+    await requireMutationProofFor(request, ctx.principal);
+    const auth = machineAuthFor(request, ctx.principal, 'execute', id);
     const body = await parseJsonBody(request);
     checkBodyScope(ctx.principal, body);
     const idempotencyKey = requireIdempotencyKey(request, body, 'action plan creation');
     const authorized = authorizeSessionMutate(ctx, id);
-    const result = await createActionPlan(ctx, authorized, id, body, idempotencyKey);
+    const result = await createActionPlan(ctx, authorized, id, body, idempotencyKey, undefined, auth);
     return respondOk(ctx, result, {
       meta: { access_via: authorized.accessVia, replayed: result.replayed },
     });

@@ -152,6 +152,35 @@ export async function POST(request: NextRequest) {
 
       let assistantText = '';
       let gatewayDown = false;
+
+      // CWE-045 council intent surface binding: a message that
+      // classifies as one of the seven registered Council of Wise
+      // Elders intents is dispatched through the council's intent
+      // adapter and answered from recorded council state, instead of
+      // being forwarded to the agent as ordinary chat. The binding is
+      // fail-open: when no verified council principal resolves for
+      // this request (council auth unconfigured or unauthenticated),
+      // or the binding itself fails, the message follows the normal
+      // forward path below, unchanged.
+      let councilHandled = false;
+      try {
+        const { resolveCouncilPrincipal } = await import('@/lib/council/auth');
+        const { handleCouncilSurfaceMessage } = await import('@/lib/council/intent-surface');
+        const principal = await resolveCouncilPrincipal(request);
+        const council = await handleCouncilSurfaceMessage({
+          principal,
+          text: message,
+          origin: { kind: 'ceo', source_session_id: null },
+        });
+        if (council.intercepted && council.summary) {
+          councilHandled = true;
+          assistantText = council.summary;
+          safeEnqueue(sse('token', { text: council.summary }));
+          safeEnqueue(sse('routed', { agentId: 'council-of-wise-elders' }));
+        }
+      } catch {
+        councilHandled = false;
+      }
       // U62 (JM/U65) — the last real usage frame captured this turn (S3),
       // persisted onto the assistant row below so history can echo it after
       // a reload (migration 110). Stays null when no usage frame arrives —
@@ -159,7 +188,9 @@ export async function POST(request: NextRequest) {
       let capturedUsage: { input: number; output: number; total: number } | null = null;
 
       try {
-        for await (const chunk of forwardToAgent({
+        for await (const chunk of councilHandled
+          ? []
+          : forwardToAgent({
           sessionId,
           content: message,
           metadata: { requester_channel: CEO_CHAT_CHANNEL, requester_chat_id: sessionId },

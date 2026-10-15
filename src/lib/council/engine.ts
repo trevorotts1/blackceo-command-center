@@ -30,10 +30,28 @@
  * (DISABLE_COUNCIL_OUTBOX_PUMP=1), mirroring the host's job pattern.
  *
  * Nothing in this module invents a service: every member maps to an
- * accepted unit's implementation in this tree. The one endpoint
- * whose service does not exist anywhere in the tree (the model
- * probe) stays typed FEATURE_NOT_READY in the registry, naming
- * CWE-009.
+ * accepted unit's implementation in this tree.
+ *
+ * CWE-045 final integration additions:
+ * - CWE-037's intent dispatcher and completion scanner are bound
+ *   here, over this store and these repositories, so the surface
+ *   binding (intents/intent-surface.ts, consumed by the CEO chat
+ *   route) and the scheduler's completion-scan sweep share the one
+ *   composition.
+ * - runCompletionScansOnce is the production invocation of CWE-037's
+ *   completion scan: every COMPLETED session that has no scan record
+ *   at its current state version is scanned with trigger
+ *   'completion', and a completed session whose last scan predates
+ *   the current calendar month is scanned again with trigger
+ *   'scheduled_review' (the Section 20.4 outcome-review cadence; the
+ *   scanner's own dedupe keys make the review candidate monthly).
+ *   The sweep acts under each session's recorded owner subject, so
+ *   the CWE-007 private-owner rule is honored exactly; a private
+ *   session with no recorded owner is skipped and reported, never
+ *   scanned under a borrowed identity.
+ * - The model probe (model-probe.ts) graduated council.models.probe
+ *   to a real composed service; the registry now reports every
+ *   endpoint ready.
  */
 
 import {
@@ -53,6 +71,12 @@ import { CouncilRunAuthorizationAdapter } from './run-authorization-adapter';
 import { CouncilSettingsService } from './settings';
 import type { ReportDownloadsDeps } from './report-downloads';
 import type { CouncilPrincipal } from './auth';
+import {
+  CouncilCompletionScanner,
+  CouncilIntentDispatcher,
+  type CompletionScanTrigger,
+} from './intents';
+import { listKanbanJournalEntries } from './kanban/journal';
 
 export interface CouncilEngine {
   store: CouncilStore;
@@ -68,8 +92,29 @@ export interface CouncilEngine {
   runAuthorizationFor(principal: CouncilPrincipal): CouncilRunAuthorizationAdapter;
   /** The run controls bound to one principal. */
   runControlsFor(principal: CouncilPrincipal): CouncilRunControls;
+  /** CWE-037's intent dispatch adapter, bound to this store (CWE-045). */
+  intents: CouncilIntentDispatcher;
+  /** CWE-037's completion scanner, bound to this store (CWE-045). */
+  completionScanner: CouncilCompletionScanner;
   /** Drain due outbox intents in every scope that has them. */
   pumpOutboxOnce(limitPerScope?: number): CouncilOutboxPumpSummary;
+  /**
+   * Invoke CWE-037's completion scan where it is due (CWE-045):
+   * trigger 'completion' for completed sessions with no scan at
+   * their current state version, trigger 'scheduled_review' for
+   * completed sessions whose last scan predates this month.
+   */
+  runCompletionScansOnce(): Promise<CouncilCompletionScanSummary>;
+}
+
+export interface CouncilCompletionScanSummary {
+  scanned: Array<{
+    session_id: string;
+    trigger: CompletionScanTrigger;
+    enqueued: number;
+    skipped_candidates: number;
+  }>;
+  skipped: Array<{ session_id: string; reason: string }>;
 }
 
 export interface CouncilOutboxPumpSummary {
@@ -105,6 +150,10 @@ export function composeCouncilEngine(overrides: CouncilEngineOverrides = {}): Co
       db: store.handle(),
     });
 
+  const engineDb = store.handle();
+  const intents = new CouncilIntentDispatcher({ repositories, db: engineDb });
+  const completionScanner = new CouncilCompletionScanner({ repositories, db: engineDb });
+
   const engine: CouncilEngine = {
     store,
     repositories,
@@ -112,6 +161,8 @@ export function composeCouncilEngine(overrides: CouncilEngineOverrides = {}): Co
     jobs,
     settings,
     reportDownloads: { repositories, store },
+    intents,
+    completionScanner,
     runAuthorizationService,
     runAuthorizationFor,
     runControlsFor(principal: CouncilPrincipal) {
@@ -172,6 +223,99 @@ export function composeCouncilEngine(overrides: CouncilEngineOverrides = {}): Co
         summary.marked_failed += result.marked_failed;
         summary.skipped_unlinked += result.skipped_unlinked;
         summary.skipped_gone += result.skipped_gone;
+      }
+      return summary;
+    },
+    async runCompletionScansOnce(): Promise<CouncilCompletionScanSummary> {
+      const rows = engineDb
+        .prepare(
+          `SELECT id, tenant_id, company_id, installation_id, owner_subject, visibility, state_version
+             FROM council_sessions
+            WHERE state = 'COMPLETED' AND archived = 0
+            ORDER BY tenant_id, company_id, id`,
+        )
+        .all() as Array<{
+        id: string;
+        tenant_id: string;
+        company_id: string;
+        installation_id: string;
+        owner_subject: string | null;
+        visibility: string;
+        state_version: number;
+      }>;
+      const summary: CouncilCompletionScanSummary = { scanned: [], skipped: [] };
+      const currentMonth = new Date().toISOString().slice(0, 7);
+      for (const row of rows) {
+        const scope = { tenant_id: row.tenant_id, company_id: row.company_id };
+        const scans = listKanbanJournalEntries(engineDb, scope, row.id).filter(
+          (entry) => entry.action === 'completion_scan_recorded',
+        );
+        const completionAtVersion = scans.some(
+          (entry) =>
+            entry.payload.trigger === 'completion' &&
+            entry.payload.session_state_version === row.state_version,
+        );
+        let trigger: CompletionScanTrigger | null = null;
+        if (!completionAtVersion) {
+          trigger = 'completion';
+        } else {
+          const lastScanMonth = scans
+            .map((entry) => entry.created_at.slice(0, 7))
+            .sort()
+            .at(-1);
+          if (lastScanMonth !== undefined && lastScanMonth < currentMonth) {
+            trigger = 'scheduled_review';
+          }
+        }
+        if (!trigger) {
+          summary.skipped.push({ session_id: row.id, reason: 'already_scanned' });
+          continue;
+        }
+        if (row.owner_subject === null && row.visibility === 'private') {
+          summary.skipped.push({
+            session_id: row.id,
+            reason: 'private_session_without_recorded_owner',
+          });
+          continue;
+        }
+        const subject = row.owner_subject ?? 'system:council-completion-scan';
+        const principal: CouncilPrincipal = {
+          subject,
+          tenantKind: 'self',
+          channel: 'browser',
+          supportAccess: false,
+          scope: {
+            tenant_id: row.tenant_id,
+            company_id: row.company_id,
+            installation_id: row.installation_id,
+            owner_subject: null,
+          },
+          tenant: {
+            tenantId: row.tenant_id,
+            companyId: row.company_id,
+            clientId: null,
+            kind: 'self',
+            subject,
+            host: '',
+            installationId: row.installation_id,
+          },
+        };
+        try {
+          const result = await completionScanner.runCompletionScan(principal, row.id, {
+            trigger,
+          });
+          summary.scanned.push({
+            session_id: row.id,
+            trigger,
+            enqueued: result.enqueued.length,
+            skipped_candidates: result.skipped.length,
+          });
+        } catch (error) {
+          summary.skipped.push({
+            session_id: row.id,
+            reason: `scan_failed: ${error instanceof Error ? error.message : String(error)}`,
+          });
+        }
       }
       return summary;
     },

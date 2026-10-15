@@ -11,11 +11,10 @@
  *      (T123: the API foundation cannot resolve fixture services in
  *      production).
  *   2. Readiness is derived from actually bound services (T129):
- *      the registry holds all 32 Section 17 endpoints, 31 ready,
- *      and every ready endpoint's route file exists and contains
- *      no FEATURE_NOT_READY path. The single not_ready endpoint is
- *      council.models.probe, naming CWE-009, whose service
- *      genuinely does not exist in this tree.
+ *      the registry holds all 32 Section 17 endpoints, all ready
+ *      since CWE-045 graduated council.models.probe to its real
+ *      composed service, and every ready endpoint's route file
+ *      exists and contains no FEATURE_NOT_READY path.
  *   3. T122 producer/consumer scan: no ready endpoint is owned by a
  *      unit downstream of this composition (a hidden downstream
  *      prerequisite would make the readiness claim false).
@@ -377,14 +376,15 @@ test('composition root binds the real services; no fixture service is reachable 
   assert.equal(typeof engine.pumpOutboxOnce, 'function');
 });
 
-test('readiness derives from bound services: 31 of 32 ready, probe honestly not_ready (T129, T123)', async () => {
+test('readiness derives from bound services: 32 of 32 ready after CWE-045 (T129, T123)', async () => {
   const { COUNCIL_ENDPOINT_REGISTRY } = await import('../../src/lib/council/api/registry');
   assert.equal(COUNCIL_ENDPOINT_REGISTRY.length, 32, 'all 32 Section 17 endpoints are registered');
   const ready = COUNCIL_ENDPOINT_REGISTRY.filter((e) => e.readiness === 'ready');
   const notReady = COUNCIL_ENDPOINT_REGISTRY.filter((e) => e.readiness === 'not_ready');
-  assert.equal(ready.length, 31);
-  assert.deepEqual(notReady.map((e) => e.contract.contract_id), ['council.models.probe']);
-  assert.match(notReady[0].owning_unit, /CWE-009/, 'the not-ready endpoint names its missing owner');
+  // CWE-045: council.models.probe graduated to its real composed
+  // service (model-probe.ts); no endpoint remains not_ready.
+  assert.equal(ready.length, 32);
+  assert.deepEqual(notReady.map((e) => e.contract.contract_id), []);
 
   // Every ready endpoint's route file exists and carries no
   // FEATURE_NOT_READY path: the final assembly has no unbound

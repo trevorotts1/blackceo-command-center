@@ -601,10 +601,12 @@ test('metadata reads: capabilities, advisors, models', async () => {
   assert.equal(capabilitiesBody.data.foundation.unit, 'CWE-029');
   assert.equal(capabilitiesBody.data.endpoints.total, 32);
   // CWE-050: composition graduated every endpoint whose service
-  // exists in this tree; only council.models.probe stays not ready
-  // (no probe executor in this tree, naming CWE-009).
-  assert.equal(capabilitiesBody.data.endpoints.ready, 31);
-  assert.equal(capabilitiesBody.data.endpoints.not_ready, 1);
+  // exists in this tree. CWE-045: council.models.probe graduated
+  // too (model-probe.ts composes the CWE-008 catalog, the CWE-049
+  // capability_probe grant fences, and the host chat transport), so
+  // every registered endpoint is ready.
+  assert.equal(capabilitiesBody.data.endpoints.ready, 32);
+  assert.equal(capabilitiesBody.data.endpoints.not_ready, 0);
   assert.equal(capabilitiesBody.data.principal.subject, 'owner:alice');
 
   const advisors = await advisorsRoute.GET(
@@ -681,14 +683,21 @@ test('FEATURE_NOT_READY shape on the remaining unwired endpoint; graduated endpo
   const deleteRefusalBody = await deleteRefusal.json();
   assert.equal(deleteRefusal.status, 400, `session delete guard: ${JSON.stringify(deleteRefusalBody)}`);
   assert.equal(deleteRefusalBody.error.code, 'SCHEMA_VALIDATION', 'session delete guard');
-  await checkNotReady('models probe', await probeRoute.POST(
+  // CWE-045: the models probe graduated to its real composed
+  // service, so it no longer answers FEATURE_NOT_READY; an empty
+  // body is a typed SCHEMA_VALIDATION refusal (the full probe flow
+  // is covered by council-cwe045-probe.test.ts).
+  const probeRefusal = await probeRoute.POST(
     await makeRequest('council-a.test', 'owner:alice', '/api/council/models/probe', {
       method: 'POST',
       csrf: true,
       idempotencyKey: 'nr-probe',
       body: {},
     }),
-  ), 'CWE-009');
+  );
+  const probeRefusalBody = await probeRefusal.json();
+  assert.equal(probeRefusal.status, 400, `models probe guard: ${JSON.stringify(probeRefusalBody)}`);
+  assert.equal(probeRefusalBody.error.code, 'SCHEMA_VALIDATION', 'models probe guard');
   // CWE-050 graduated exports and settings: an export create with
   // no session_id is a SCHEMA_VALIDATION refusal, an unknown export
   // read is a typed 404, and the settings read returns the canonical

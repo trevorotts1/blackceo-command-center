@@ -413,6 +413,54 @@ export function assertMachineBinding(
   }
 }
 
+/**
+ * Host-configured machine bindings (CWE-045 production binding for the
+ * CWE-036 action-plan routes). The operator configures bindings in
+ * MC_COUNCIL_MACHINE_BINDINGS_JSON: a JSON array of
+ * CouncilMachineBinding objects (or a single object). A binding is
+ * configuration, never request input: a machine caller can only ever
+ * act inside the binding the host configured for its installation and
+ * company, and only for the operations that binding names. Malformed
+ * configuration fails closed (no binding resolves).
+ */
+export function resolveConfiguredMachineBinding(
+  principal: CouncilPrincipal,
+): CouncilMachineBinding | null {
+  const raw = process.env.MC_COUNCIL_MACHINE_BINDINGS_JSON;
+  if (!raw || raw.trim().length === 0) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  const entries = Array.isArray(parsed) ? parsed : [parsed];
+  for (const entry of entries) {
+    if (typeof entry !== 'object' || entry === null) continue;
+    const record = entry as Record<string, unknown>;
+    if (
+      record.installation_id !== principal.scope.installation_id ||
+      record.company_id !== principal.scope.company_id
+    ) {
+      continue;
+    }
+    if (
+      !Array.isArray(record.operations) ||
+      record.operations.some((op) => typeof op !== 'string')
+    ) {
+      continue;
+    }
+    return {
+      installation_id: record.installation_id as string,
+      company_id: record.company_id as string,
+      operations: record.operations as CouncilPermission[],
+      session_id:
+        typeof record.session_id === 'string' ? record.session_id : null,
+    };
+  }
+  return null;
+}
+
 function configuredSecretValues(): string[] {
   return [
     process.env.MC_API_TOKEN,

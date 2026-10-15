@@ -441,6 +441,29 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<unknown> | unk
       return getCouncilEngine().pumpOutboxOnce();
     },
   },
+  // council-completion-scan: every 5 minutes — CWE-045 production
+  // invocation of CWE-037's completion scan. Completed sessions with
+  // no scan at their current state version are scanned (trigger
+  // 'completion'); completed sessions whose last scan predates the
+  // current month get the Section 20.4 outcome-review pass (trigger
+  // 'scheduled_review'). The scan enqueues follow-up candidates as
+  // PROPOSALS only; it creates no tasks. Kill switch:
+  // DISABLE_COUNCIL_COMPLETION_SCAN=1.
+  {
+    name: 'council-completion-scan',
+    expr: '*/5 * * * *',
+    fn: async () => {
+      if (
+        process.env.DISABLE_COUNCIL_COMPLETION_SCAN === '1' ||
+        process.env.DISABLE_COUNCIL_COMPLETION_SCAN === 'true'
+      ) {
+        console.log('[cron] council-completion-scan: DISABLE_COUNCIL_COMPLETION_SCAN set, skipping');
+        return { skipped: true, skippedReason: 'DISABLE_COUNCIL_COMPLETION_SCAN set' };
+      }
+      const { getCouncilEngine } = await import('@/lib/council/engine');
+      return getCouncilEngine().runCompletionScansOnce();
+    },
+  },
   { name: 'dispatch-intents', expr: '*/2 * * * *', fn: runDispatchIntentSweep },
   { name: 'execution-reconcile', expr: '*/2 * * * *', fn: runExecutionCompletionReconcile },
   // social-publish-dispatcher: every 2 minutes — F03 (social/wf05-durable-exec).

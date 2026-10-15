@@ -11,6 +11,7 @@ import {
 } from '@/lib/council/api/foundation';
 import { deleteSessionRoute } from '@/lib/council/composed-services';
 import { CouncilPersistenceError } from '@/lib/council/store';
+import { CouncilScanQueue } from '@/lib/council/kanban/scan-queue';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -43,7 +44,23 @@ export async function GET(
         `No council session ${id} exists in this tenant and company scope.`,
       );
     }
-    return respondOk(ctx, session, { meta: { access_via: accessVia } });
+    // CWE-045 proposal surfacing (CWE-037 remainder): the session's
+    // follow-up scan state rides this read: pending scan items the
+    // completion scan enqueued and the proposal records processing
+    // created. Proposals are records for review only; surfacing them
+    // creates nothing and neither list can contain a task.
+    const scanQueue = new CouncilScanQueue({
+      repositories: ctx.repositories,
+      db: ctx.store.handle(),
+    });
+    const followUps = {
+      pending_scan_items: await scanQueue.listPendingScanItems(ctx.principal, id),
+      proposals: await scanQueue.listScanProposals(ctx.principal, id),
+    };
+    // CWE-045: the follow-ups ride response metadata so the session
+    // resource itself stays byte-equal to the committed record (the
+    // route's round-trip law).
+    return respondOk(ctx, session, { meta: { access_via: accessVia, follow_ups: followUps } });
   });
 }
 

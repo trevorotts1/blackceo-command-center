@@ -80,10 +80,13 @@ const EXPECTED_READY: ReadonlySet<string> = new Set([
   'council.sessions.get',
   'council.sessions.brief.patch',
   'council.sessions.verdict.get',
+  'council.models.probe',
   // CWE-050 graduation: every endpoint whose owning service exists
   // in this tree is now ready and bound at the composition root.
-  // council.models.probe stays not_ready naming CWE-009: no probe
-  // executor exists in this tree.
+  // CWE-045 graduation: council.models.probe is ready too; its probe
+  // executor (model-probe.ts) composes the CWE-008 catalog, the
+  // CWE-049 capability_probe grant fences, and the host connectors'
+  // optional chat transport.
   'council.sessions.events.get',
   'council.sessions.evidence.get',
   'council.sessions.start',

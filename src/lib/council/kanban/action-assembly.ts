@@ -211,6 +211,13 @@ export class CouncilPlanAssembly {
       grant_ref?: string | null;
       auth?: KanbanAuthOptions;
       onStep?: (event: AssemblyStepEvent) => Promise<void> | void;
+      /**
+       * CWE-045 composition hook: invoked with every release outcome
+       * the guard chain produces in step 8, in evaluation order. The
+       * composed route layer binds CWE-037's recordReleaseOutcomes
+       * here so refused releases become recorded session state.
+       */
+      onReleaseOutcome?: (outcome: TaskReleaseOutcome) => Promise<void> | void;
     } = {},
   ): Promise<CouncilPlanAssemblyResult> {
     const { scope } = authorizeKanbanOperation(
@@ -384,6 +391,7 @@ export class CouncilPlanAssembly {
           auth: opts.auth,
           onTask: async (outcome) => {
             await onStep({ step: 'task_release_evaluated', action_id: outcome.action_id });
+            if (opts.onReleaseOutcome) await opts.onReleaseOutcome(outcome);
           },
         },
       );

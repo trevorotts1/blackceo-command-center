@@ -29,10 +29,18 @@
  * outcomes, archive, delete, settings, evidence read), and report
  * exports/downloads (CWE-038's CC remainder). Readiness here is
  * derived from the services actually bound at the composition root
- * (T129). One endpoint stays `not_ready` naming its owner:
- * council.models.probe — no probe/transport executor exists in this
- * tree (CWE-009's service was not built in the Command Center), and
- * the registry does not simulate it.
+ * (T129).
+ *
+ * CWE-045 graduation (final integration): council.models.probe is
+ * now `ready` too. The probe executor exists in this tree
+ * (src/lib/council/model-probe.ts): it resolves the route against
+ * the CWE-008 catalog, requires a purpose-bound capability_probe
+ * grant from CWE-049's service pinning the exact route, admits and
+ * settles the probe operation through that service, dispatches one
+ * minimal request through the host provider connector, and records
+ * the typed RouteEvidence the models catalog merges. With this
+ * graduation every registered endpoint is bound to a real composed
+ * service; no endpoint in this registry is `not_ready`.
  */
 
 import {
@@ -166,7 +174,7 @@ export const COUNCIL_ENDPOINT_REGISTRY: readonly CouncilEndpointEntry[] = [
     idempotency: 'required_key',
     version_rule: 'Probe results are recorded as route evidence with a probe timestamp.',
     service_owner: 'CWE-009 (transport probes)',
-    readiness: 'not_ready',
+    readiness: 'ready',
     owning_unit: 'CWE-009',
     surface: 'Model route probe',
   }),

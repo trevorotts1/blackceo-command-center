@@ -40,6 +40,9 @@ import {
 } from './kanban/plan-service';
 import { CouncilRunAuthorizationService } from './run-authorization';
 import { CouncilRunAuthorizationAdapter } from './run-authorization-adapter';
+import type { KanbanAuthOptions } from './kanban/context';
+import type { TaskReleaseOutcome } from './kanban/action-execution';
+import { CouncilCompletionScanner } from './intents/completion-scan';
 
 const API_SOURCE = 'council-api';
 const APPROVE_OPERATION = 'council.sessions.action_plan.approve';
@@ -372,6 +375,7 @@ export async function approveActionPlan(
   body: Record<string, unknown>,
   idempotencyKey: string,
   services: ActionPlanServices = composeActionPlanServices(ctx),
+  auth?: KanbanAuthOptions,
 ): Promise<ActionPlanApprovalResult> {
   rejectUnknownKeys(
     body,
@@ -414,12 +418,12 @@ export async function approveActionPlan(
   if (claim.outcome === 'conflict') throw idempotencyConflict(APPROVE_OPERATION);
   if (claim.outcome === 'replay') {
     const plans = await guard(async () =>
-      services.planService.listPlans(ctx.principal, sessionId),
+      services.planService.listPlans(ctx.principal, sessionId, auth),
     );
     const existing = plans.find((plan) => plan.plan_hash === planHash);
     if (!existing) throw idempotencyConflict(APPROVE_OPERATION);
     const view = await guard(async () =>
-      services.planService.getPlan(ctx.principal, sessionId, existing.plan_id),
+      services.planService.getPlan(ctx.principal, sessionId, existing.plan_id, auth),
     );
     return approvalResult(view, ctx.principal, true);
   }
@@ -427,6 +431,7 @@ export async function approveActionPlan(
   const plan = await guard(async () =>
     services.planService.proposePlan(ctx.principal, sessionId, verdict, {
       selected_action_ids: selectedActionIds,
+      auth,
     }),
   );
   if (plan.plan_hash !== planHash) {
@@ -446,11 +451,12 @@ export async function approveActionPlan(
         plan.plan_id,
         item.action_id,
         decision,
+        { auth },
       ),
     );
   }
   const view = await guard(async () =>
-    services.planService.getPlan(ctx.principal, sessionId, plan.plan_id),
+    services.planService.getPlan(ctx.principal, sessionId, plan.plan_id, auth),
   );
   return approvalResult(view, ctx.principal, false);
 }
@@ -482,6 +488,13 @@ export interface ActionPlanCreateResult {
   }>;
   replayed: boolean;
   note: string;
+  /**
+   * CWE-045 recorder wiring receipt: how many refused release outcomes
+   * this create recorded into the session journal through CWE-037's
+   * recordReleaseOutcomes, and how many recordings failed. Present on
+   * a fresh assembly; a replayed create records nothing new.
+   */
+  release_recording?: { recorded: number; failed: number };
 }
 
 const CREATE_NOTE =
@@ -522,6 +535,7 @@ export async function createActionPlan(
   body: Record<string, unknown>,
   idempotencyKey: string,
   services: ActionPlanServices = composeActionPlanServices(ctx),
+  auth?: KanbanAuthOptions,
 ): Promise<ActionPlanCreateResult> {
   rejectUnknownKeys(
     body,
@@ -538,7 +552,7 @@ export async function createActionPlan(
     throw schemaValidation('grant_ref must be a string when supplied.');
   }
 
-  const plans = await guard(async () => services.planService.listPlans(ctx.principal, sessionId));
+  const plans = await guard(async () => services.planService.listPlans(ctx.principal, sessionId, auth));
   const plan =
     typeof planIdClaim === 'string'
       ? plans.find((entry) => entry.plan_id === planIdClaim)
@@ -587,7 +601,7 @@ export async function createActionPlan(
     throw idempotencyConflict(CREATE_OPERATION);
   }
   if (priorClaim !== null && completedBefore) {
-    return replayCreateResult(ctx, sessionId, plan.plan_id, plan.plan_hash, services);
+    return replayCreateResult(ctx, sessionId, plan.plan_id, plan.plan_hash, services, auth);
   }
   if (plan.status === 'superseded') {
     boundaryError(new CouncilActionError(
@@ -607,16 +621,48 @@ export async function createActionPlan(
     });
     if (claim.outcome === 'conflict') throw idempotencyConflict(CREATE_OPERATION);
     if (claim.outcome === 'replay' && completedBefore) {
-      return replayCreateResult(ctx, sessionId, plan.plan_id, plan.plan_hash, services);
+      return replayCreateResult(ctx, sessionId, plan.plan_id, plan.plan_hash, services, auth);
     }
   }
 
+  // CWE-045 recorder wiring (CWE-037 remainder): every release
+  // outcome the assembly's guard chain produces is recorded into the
+  // session journal through CWE-037's recordReleaseOutcomes, so a
+  // refused release becomes recorded state the completion scan can
+  // narrate. Recording failures never mask or undo a release outcome;
+  // they are counted and reported on the receipt.
+  const scanner = new CouncilCompletionScanner({
+    repositories: ctx.repositories,
+    db: ctx.store.handle(),
+  });
+  let outcomesRecorded = 0;
+  let outcomesRecordingFailed = 0;
+  const onReleaseOutcome = async (outcome: TaskReleaseOutcome): Promise<void> => {
+    try {
+      const recorded = await scanner.recordReleaseOutcomes(
+        ctx.principal,
+        sessionId,
+        [outcome],
+        auth,
+      );
+      outcomesRecorded += recorded.recorded;
+    } catch {
+      outcomesRecordingFailed += 1;
+    }
+  };
   const result = await guard(async () =>
     services.assembly.assemblePlan(ctx.principal, sessionId, plan.plan_id, {
       grant_ref: typeof grantRef === 'string' ? grantRef : null,
+      auth,
+      onReleaseOutcome,
     }),
   );
-  return assemblyResult(sessionId, plan.plan_id, result, false);
+  const receipt = assemblyResult(sessionId, plan.plan_id, result, false);
+  receipt.release_recording = {
+    recorded: outcomesRecorded,
+    failed: outcomesRecordingFailed,
+  };
+  return receipt;
 }
 
 function assemblyResult(
@@ -674,6 +720,7 @@ async function replayCreateResult(
   planId: string,
   planHash: string,
   services: ActionPlanServices,
+  replayAuth?: KanbanAuthOptions,
 ): Promise<ActionPlanCreateResult> {
   const scope = {
     tenant_id: ctx.principal.scope.tenant_id,
@@ -685,7 +732,9 @@ async function replayCreateResult(
   const tasks = [];
   for (const link of links) {
     const decision = await guard(async () =>
-      services.guard.evaluateTaskRelease(ctx.principal, sessionId, planId, link.action_id),
+      services.guard.evaluateTaskRelease(ctx.principal, sessionId, planId, link.action_id, {
+        auth: replayAuth,
+      }),
     );
     tasks.push({
       action_id: link.action_id,

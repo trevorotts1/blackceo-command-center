@@ -29,13 +29,18 @@ import {
   assertCouncilCsrf,
   assertCouncilSessionMutate,
   assertCouncilSessionRead,
+  assertMachineBinding,
   assertNoConfiguredSecretsInPayload,
   assertNoQueryCredential,
   clientSafePrincipalView,
+  CouncilAuthError,
+  resolveConfiguredMachineBinding,
   resolveCouncilPrincipal,
   type CouncilAccessVia,
+  type CouncilPermission,
   type CouncilPrincipal,
 } from '../auth';
+import type { KanbanAuthOptions } from '../kanban/context';
 import {
   envelopeFromScope,
   CouncilPersistenceError,
@@ -60,6 +65,7 @@ import { advisorProfileLabel, SEAT_ROSTER } from '../contracts';
 import {
   buildRouteCatalog,
   credentialPresenceForSlug,
+  recordedRouteEvidence,
   routeDescriptorFromRegistryEntry,
 } from '../providers';
 import { listModels } from '@/lib/model-registry';
@@ -151,6 +157,56 @@ export function respondOk<T>(
 /** CSRF proof for mutating council requests (Section 17.1, CWE-007). */
 export async function requireMutationProof(request: NextRequest): Promise<void> {
   await assertCouncilCsrf(request);
+}
+
+/**
+ * Channel-aware mutation proof (CWE-045). Browser principals prove
+ * mutations with the CSRF cookie, exactly as CWE-007 established.
+ * Machine principals authenticate with the approved bearer mechanism
+ * instead: a server-side credential has no browser cookie to bind a
+ * CSRF token to, and CWE-007 binds machine callers through
+ * assertMachineBinding (see machineAuthFor), which every machine call
+ * through a bound route must pass. No channel skips proof; each
+ * channel presents the proof its mechanism defines.
+ */
+export async function requireMutationProofFor(
+  request: NextRequest,
+  principal: CouncilPrincipal,
+): Promise<void> {
+  if (principal.channel === 'machine') return;
+  await assertCouncilCsrf(request);
+}
+
+/**
+ * The machine-binding proof for a bound route (CWE-045, CWE-007
+ * T077). Browser principals return undefined: the kanban layer's
+ * session assertions are their authorization. Machine principals must
+ * resolve the host-configured binding for their installation and
+ * company (MC_COUNCIL_MACHINE_BINDINGS_JSON) and pass
+ * assertMachineBinding for the route's operation and session; the
+ * returned options are threaded into the kanban services so every
+ * service-level authorization re-checks the same binding against the
+ * exact permission that method declares. A machine caller with no
+ * configured binding is refused COUNCIL_MACHINE_BINDING: machine
+ * access is configured by the host, never claimed by the request.
+ */
+export function machineAuthFor(
+  request: NextRequest,
+  principal: CouncilPrincipal,
+  operation: CouncilPermission,
+  sessionId?: string | null,
+): KanbanAuthOptions | undefined {
+  if (principal.channel !== 'machine') return undefined;
+  const binding = resolveConfiguredMachineBinding(principal);
+  if (!binding) {
+    throw new CouncilAuthError(
+      'COUNCIL_MACHINE_BINDING',
+      'No machine binding is configured for this installation and company. ' +
+        'Machine access to council routes is host-configured (MC_COUNCIL_MACHINE_BINDINGS_JSON), never request-claimed.',
+    );
+  }
+  assertMachineBinding(principal, request.headers, binding, operation, sessionId ?? null);
+  return { machineBinding: binding, headers: request.headers };
 }
 
 /**
@@ -370,7 +426,7 @@ export async function handleNotReady(
 
 /** GET /api/council/capabilities data: registry and catalog metadata only. */
 export function capabilitiesData(ctx: CouncilRouteContext): Record<string, unknown> {
-  const catalog = modelsCatalogData();
+  const catalog = modelsCatalogData(ctx);
   return {
     foundation: {
       unit: 'CWE-029',
@@ -401,9 +457,12 @@ export function advisorsData(): Record<string, unknown> {
  * GET /api/council/models data: the CWE-008 explicit route catalog
  * built from the host model registry. Credential values never enter
  * the catalog (presence only, per CWE-008); routes with no recorded
- * evidence report UNTESTED with runtime_verified false.
+ * evidence report UNTESTED with runtime_verified false. CWE-045: when
+ * a request context is supplied, recorded probe evidence in the
+ * caller's scope (route_probe_recorded journal events written by the
+ * composed probe) is merged, so a probed route reads PROBED.
  */
-export function modelsCatalogData(): {
+export function modelsCatalogData(ctx?: CouncilRouteContext): {
   routes: ReturnType<typeof buildRouteCatalog>;
   summary: { total: number; by_readiness: Record<string, number>; runtime_verified: boolean };
 } {
@@ -418,7 +477,13 @@ export function modelsCatalogData(): {
       },
     ),
   );
-  const routes = buildRouteCatalog(descriptors);
+  const evidence = ctx
+    ? recordedRouteEvidence(ctx.store.handle(), {
+        tenant_id: ctx.principal.scope.tenant_id,
+        company_id: ctx.principal.scope.company_id,
+      })
+    : undefined;
+  const routes = buildRouteCatalog(descriptors, evidence);
   const byReadiness: Record<string, number> = {};
   for (const route of routes) {
     byReadiness[route.readiness] = (byReadiness[route.readiness] ?? 0) + 1;

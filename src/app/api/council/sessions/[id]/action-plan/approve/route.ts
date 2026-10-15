@@ -3,9 +3,10 @@ import {
   authorizeSessionMutate,
   checkBodyScope,
   handleCouncil,
+  machineAuthFor,
   parseJsonBody,
   requireIdempotencyKey,
-  requireMutationProof,
+  requireMutationProofFor,
   respondOk,
 } from '@/lib/council/api/foundation';
 import { approveActionPlan } from '@/lib/council/approvals';
@@ -20,6 +21,12 @@ export const revalidate = 0;
  * scope, the budgets inside the item hashes, and the approving
  * principal (Section 19.5, T091). Approval creates no tasks and is
  * not an execution credential.
+ *
+ * CWE-045 machine binding: a machine-channel caller is authenticated
+ * through the CWE-007 machine binding (host-configured, operation
+ * 'approve_plan') instead of the browser CSRF proof, and the binding
+ * is threaded into the plan service so each service-level
+ * authorization re-checks it; browser callers keep the CSRF proof.
  */
 export async function POST(
   request: NextRequest,
@@ -27,12 +34,13 @@ export async function POST(
 ) {
   const { id } = await params;
   return handleCouncil(request, async (ctx) => {
-    await requireMutationProof(request);
+    await requireMutationProofFor(request, ctx.principal);
+    const auth = machineAuthFor(request, ctx.principal, 'approve_plan', id);
     const body = await parseJsonBody(request);
     checkBodyScope(ctx.principal, body);
     const idempotencyKey = requireIdempotencyKey(request, body, 'action plan approval');
     const authorized = authorizeSessionMutate(ctx, id);
-    const result = await approveActionPlan(ctx, authorized, id, body, idempotencyKey);
+    const result = await approveActionPlan(ctx, authorized, id, body, idempotencyKey, undefined, auth);
     return respondOk(ctx, result, {
       meta: { access_via: authorized.accessVia, replayed: result.replayed },
     });
