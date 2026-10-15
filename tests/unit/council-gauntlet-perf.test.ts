@@ -24,13 +24,43 @@
  *     services (CWE-050), not by these reads. Recorded as such in
  *     perf-results.json.
  *   - Start admission (p95 <= 750 ms) and stop acknowledgement
- *     (p95 <= 1 s) target contracts that are not_ready on this tree:
- *     the measurement branch below is written and ready; while the
- *     registry reports not_ready it records PENDING_CWE050_RERUN
- *     instead of measuring a stub.
+ *     (p95 <= 1 s): while the registry reports a contract not_ready
+ *     the branch below records PENDING_CWE050_RERUN instead of
+ *     measuring a stub. On a ready tree (post-CWE-050) it measures
+ *     the granted path through the REAL routes. Amendment (CWE-044
+ *     harness amendment, 2026-10-15): the fixture now performs the
+ *     CWE-049 grant step the product law requires (a start posted
+ *     with no grant lawfully answers 403
+ *     RUN_AUTHORIZATION_REQUIRED): run-authorization preview and
+ *     approve with an explicit route snapshot, then the start body
+ *     carries the issued grant_id. Every sample is a FIRST start
+ *     (or, for stop ack, a FIRST cancel) on a freshly seeded
+ *     session with its own grant, and every sample asserts
+ *     idempotent_replay === false, so the p95 is first-admission
+ *     latency, never the recorded-receipt replay a repeat start
+ *     returns under T055/T078. Preview and approve are the explicit
+ *     user-consent interaction Section 32.6 excludes from the
+ *     start-admission window, so they run untimed as setup; the
+ *     timed window is the start (or cancel) POST through its full
+ *     response: for start, the durable enqueue/202 receipt; for
+ *     cancel, a response written only after the cancellation
+ *     commit. Budgets and sample counts are unchanged.
+ *   - Rate-limit honesty: the composed product enforces its
+ *     Section 17.1 ceiling of 1,200 council API requests per
+ *     minute per principal and company, and this suite's combined
+ *     surfaces exceed that inside a single minute window. A 429
+ *     RATE_LIMITED refusal is a capacity answer, not an admission
+ *     measurement: when any step of a start/stop sample meets one,
+ *     the sample is discarded, the fixture waits out the window
+ *     (61 s), and the sample is re-measured from scratch with a
+ *     fresh session and a fresh grant, so every recorded number
+ *     is still a clean first operation admitted inside a live
+ *     window. The number of such waits is recorded in
+ *     perf-results.json as rate_limit_waits. No timed sample
+ *     includes a refusal.
  *
  * Results are machine-relative: written on a loaded 2-CPU VM on
- * 2026-10-14 and labeled as such in perf-results.json. A budget
+ * 2026-10-15 and labeled as such in perf-results.json. A budget
  * miss here is evidence about this machine under load; the harness
  * repeats identically on a quiet machine for the decisive run.
  */
@@ -68,6 +98,14 @@ let sessionRoute: {
 let eventsRoute: {
   GET: (request: NextRequest, ctx?: unknown) => Promise<Response>;
 };
+type PostRouteModule = {
+  POST: (request: NextRequest, ctx?: unknown) => Promise<Response>;
+};
+let startRoute: PostRouteModule;
+let cancelRoute: PostRouteModule;
+let raPreviewRoute: PostRouteModule;
+let raApproveRoute: PostRouteModule;
+let writeEnvelope: ReturnType<typeof envelopeFromScopeFn>;
 
 const now = '2026-10-14T12:00:00.000Z';
 let idCounter = 0;
@@ -146,6 +184,261 @@ async function routeRequest(path: string, method = 'GET', csrf = false): Promise
   return new NextRequest(`https://council-a.test${path}`, { method, headers });
 }
 
+/**
+ * POST request carrying a JSON body, built the way the CWE-050
+ * composition and run-controls suites build theirs: the same
+ * idempotency key travels in the header and in the body, alongside
+ * the signed tenant grant and CSRF cookies.
+ */
+async function postJsonRequest(
+  path: string,
+  bodyFields: Record<string, unknown>,
+): Promise<NextRequest> {
+  const key = `cc044-${Math.random()}`;
+  const headers: Record<string, string> = {
+    host: 'council-a.test',
+    'idempotency-key': key,
+  };
+  const token = await signTenantGrant({
+    purpose: 'session',
+    tenantId: 'tenant-a',
+    companyId: 'company-a',
+    subject: 'owner:alice',
+    host: 'council-a.test',
+    installationId: 'install-a',
+    exp: Math.floor(Date.now() / 1000) + 3600,
+    nonce: `cc044-${Math.random()}`,
+  });
+  const { value } = await signCsrfToken();
+  headers.cookie = [`mc_tenant_session=${token}`, `mc_csrf_token=${value}`].join('; ');
+  return new NextRequest(`https://council-a.test${path}`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ ...bodyFields, idempotency_key: key }),
+  });
+}
+
+/** Explicit route snapshot, the CWE-050 composition test's shape. */
+function routeSnapshot(): Record<string, unknown> {
+  return {
+    schema: 'wise-elders.route-selection/v1',
+    selectionSource: 'explicit',
+    routeId: 'route-a',
+    routeRevision: 1,
+    routeKind: 'fixed_model',
+    providerSlug: 'provider-a',
+    requestedRoute: 'route-a',
+    requestedModelOrAlias: 'model-a',
+    combinationMembers: null,
+    reasoning: { requested: null, applied: null, supported: null, limitation: null },
+    fallbackPolicy: 'none',
+    providerAccountRef: null,
+    capabilitySnapshot: {
+      contextWindowTokens: 200000,
+      maxOutputTokens: 8000,
+      capabilities: ['text'],
+      supportedReasoningLevels: null,
+    },
+    credential: {
+      state: 'present',
+      envVar: 'PROVIDER_A_API_KEY',
+      source: 'process.env',
+      checked: ['process.env'],
+    },
+    identityLevel: 'configured',
+    scope: {
+      tenantId: 'tenant-a',
+      companyId: 'company-a',
+      installationId: 'install-a',
+      ownerSubject: null,
+    },
+    createdAt: new Date().toISOString(),
+  };
+}
+
+/** Tagged refusal from the product's Section 17.1 rate limiter. */
+class RateLimitedError extends Error {
+  constructor(where: string) {
+    super(`rate limited (429 RATE_LIMITED) at ${where}`);
+    this.name = 'RateLimitedError';
+  }
+}
+
+let rateLimitWaits = 0;
+const MAX_RATE_LIMIT_WAITS_PER_SAMPLE = 4;
+
+/**
+ * A discarded sample waits out the limiter's one-minute window
+ * (61 s covers both wall-clock-aligned and first-request-anchored
+ * fixed windows) and is then re-measured from scratch.
+ */
+async function waitOutRateLimitWindow(): Promise<void> {
+  rateLimitWaits += 1;
+  await new Promise((resolve) => setTimeout(resolve, 61_000));
+}
+
+async function postRouteJson(
+  route: PostRouteModule,
+  path: string,
+  sessionId: string,
+  bodyFields: Record<string, unknown>,
+): Promise<{ status: number; body: any }> {
+  const res = await route.POST(await postJsonRequest(path, bodyFields), {
+    params: Promise.resolve({ id: sessionId }),
+  });
+  const body = JSON.parse(await res.text());
+  if (res.status === 429) throw new RateLimitedError(path);
+  return { status: res.status, body };
+}
+
+async function timedRoutePost(
+  route: PostRouteModule,
+  path: string,
+  sessionId: string,
+  bodyFields: Record<string, unknown>,
+): Promise<{ ms: number; status: number; body: any }> {
+  const started = performance.now();
+  const res = await route.POST(await postJsonRequest(path, bodyFields), {
+    params: Promise.resolve({ id: sessionId }),
+  });
+  // Drain the body inside the window: the measurement covers the
+  // full response, the same convention as timed() for the reads.
+  const text = await res.text();
+  const ms = performance.now() - started;
+  const body = JSON.parse(text);
+  if (res.status === 429) throw new RateLimitedError(path);
+  return { ms, status: res.status, body };
+}
+
+/**
+ * The CWE-049 grant step, through the real run-authorization
+ * routes: preview (explicit route snapshot) then approve. Returns
+ * the issued grant_id. Untimed setup for the start/stop samples:
+ * this is the explicit user-consent interaction Section 32.6
+ * excludes from the admission window.
+ */
+async function approveRunGrant(sessionId: string): Promise<string> {
+  const preview = await postRouteJson(
+    raPreviewRoute,
+    `/api/council/sessions/${sessionId}/run-authorization/preview`,
+    sessionId,
+    { route_snapshot: routeSnapshot() },
+  );
+  assert.equal(
+    preview.status,
+    201,
+    `grant preview for ${sessionId}: ${JSON.stringify(preview.body)}`,
+  );
+  const approved = await postRouteJson(
+    raApproveRoute,
+    `/api/council/sessions/${sessionId}/run-authorization/approve`,
+    sessionId,
+    { preview_id: preview.body.data.preview_id },
+  );
+  assert.equal(
+    approved.status,
+    201,
+    `grant approve for ${sessionId}: ${JSON.stringify(approved.body)}`,
+  );
+  assert.equal(approved.body.data.status, 'active');
+  return approved.body.data.grant_id as string;
+}
+
+let startSampleSeq = 0;
+let stopSampleSeq = 0;
+
+/**
+ * One start-admission sample: a freshly seeded session with its
+ * own freshly approved grant, timed on its FIRST start only. The
+ * replay assertion makes a recorded-receipt repeat fail loudly
+ * instead of silently entering the p95.
+ */
+async function sampleFirstStartAdmission(): Promise<number> {
+  startSampleSeq += 1;
+  const baseId = `sess-perf-start-${String(startSampleSeq).padStart(4, '0')}`;
+  for (let attempt = 1; ; attempt++) {
+    const sessionId = attempt === 1 ? baseId : `${baseId}-r${attempt}`;
+    repositories.createSession(writeEnvelope, makeStored(sessionId));
+    try {
+      const grantId = await approveRunGrant(sessionId);
+      const result = await timedRoutePost(
+        startRoute,
+        `/api/council/sessions/${sessionId}/start`,
+        sessionId,
+        { grant_id: grantId },
+      );
+      assert.equal(
+        result.status,
+        202,
+        `first start for ${sessionId}: ${JSON.stringify(result.body)}`,
+      );
+      assert.equal(
+        result.body.data.idempotent_replay,
+        false,
+        `start sample for ${sessionId} must be a first admission, not a replay`,
+      );
+      return result.ms;
+    } catch (err) {
+      if (err instanceof RateLimitedError && attempt <= MAX_RATE_LIMIT_WAITS_PER_SAMPLE) {
+        await waitOutRateLimitWindow();
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
+/**
+ * One stop-ack sample: a freshly seeded, granted, and started
+ * session (setup untimed), timed on its FIRST cancel only.
+ */
+async function sampleFirstStopAck(): Promise<number> {
+  stopSampleSeq += 1;
+  const baseId = `sess-perf-stop-${String(stopSampleSeq).padStart(4, '0')}`;
+  for (let attempt = 1; ; attempt++) {
+    const sessionId = attempt === 1 ? baseId : `${baseId}-r${attempt}`;
+    repositories.createSession(writeEnvelope, makeStored(sessionId));
+    try {
+      const grantId = await approveRunGrant(sessionId);
+      const started = await postRouteJson(
+        startRoute,
+        `/api/council/sessions/${sessionId}/start`,
+        sessionId,
+        { grant_id: grantId },
+      );
+      assert.equal(
+        started.status,
+        202,
+        `setup start for ${sessionId}: ${JSON.stringify(started.body)}`,
+      );
+      const result = await timedRoutePost(
+        cancelRoute,
+        `/api/council/sessions/${sessionId}/cancel`,
+        sessionId,
+        {},
+      );
+      assert.equal(
+        result.status,
+        200,
+        `first cancel for ${sessionId}: ${JSON.stringify(result.body)}`,
+      );
+      assert.equal(result.body.data.state, 'CANCELLED');
+      assert.equal(
+        result.body.data.idempotent_replay,
+        false,
+        `stop sample for ${sessionId} must be a first cancel, not a replay`,
+      );
+      return result.ms;
+    } catch (err) {
+      if (err instanceof RateLimitedError && attempt <= MAX_RATE_LIMIT_WAITS_PER_SAMPLE) {
+        await waitOutRateLimitWindow();
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
 function p95(samples: number[]): number {
   const sorted = [...samples].sort((a, b) => a - b);
   return sorted[Math.min(sorted.length - 1, Math.ceil(0.95 * sorted.length) - 1)];
@@ -218,10 +511,19 @@ before(async () => {
   sessionsRoute = await import('../../src/app/api/council/sessions/route');
   sessionRoute = await import('../../src/app/api/council/sessions/[id]/route');
   eventsRoute = await import('../../src/app/api/council/sessions/[id]/events/route');
+  startRoute = await import('../../src/app/api/council/sessions/[id]/start/route');
+  cancelRoute = await import('../../src/app/api/council/sessions/[id]/cancel/route');
+  raPreviewRoute = await import(
+    '../../src/app/api/council/sessions/[id]/run-authorization/preview/route'
+  );
+  raApproveRoute = await import(
+    '../../src/app/api/council/sessions/[id]/run-authorization/approve/route'
+  );
   installRouteEnv();
 
   // Reference load: 1,000 historical sessions in the scope.
   const write = envelopeFromScopeFn(SCOPE, 'owner:alice', 'owner', 'write');
+  writeEnvelope = write;
   for (let i = 1; i <= 1000; i++) {
     const id = `sess-perf-${String(i).padStart(4, '0')}`;
     repositories.createSession(write, makeStored(id));
@@ -278,11 +580,14 @@ after(() => {
         contract: 'T154',
         generated_at: new Date().toISOString(),
         machine:
-          'machine-relative: loaded 2-CPU Linux VM, 2026-10-14; repeat on a quiet machine for decisive budget evidence',
+          'machine-relative: loaded 2-CPU Linux VM, 2026-10-15; repeat on a quiet machine for decisive budget evidence',
         method:
           'real route handlers in-process with signed tenant grants; 200 measured requests after 20 warmup per surface; reference load 1,000 sessions + one 200-event journal seeded via the real repositories',
         provider_note:
           'the measured read surfaces call no model provider; fast/slow synthetic provider cases do not affect them. Model latency is reported separately by the run services (CWE-050) and is not conflated with interface budgets.',
+        start_stop_method:
+          'start admission and stop acknowledgement are measured on granted FIRST operations only (CWE-044 harness amendment, 2026-10-15). Each sample seeds a fresh session through the real repositories, obtains a real CWE-049 run grant through the run-authorization preview and approve routes with an explicit route snapshot, and passes grant_id in the start request body. The start sample asserts 202 with idempotent_replay === false, so no recorded-receipt replay (T055/T078) enters the p95; the timed window is the start POST through its full response, i.e. the durable enqueue/202 receipt. Preview and approve run untimed as setup: they are the explicit user-consent interaction Section 32.6 excludes from the admission window. The stop sample starts its fresh granted session untimed, then times the FIRST cancel POST through its full 200 response, asserting state CANCELLED and idempotent_replay === false; the response is written only after the cancellation commit. Visible-UI propagation of the cancellation is the separate event-to-UI metric, not this number. 200 measured samples after 20 warmup per surface, same as the reads. Rate limiting: the composed product enforces 1,200 council API requests per minute per principal and company (Section 17.1); when any step of a sample is refused with 429 RATE_LIMITED the sample is discarded, the fixture waits out the window (61 s), and the sample is re-measured from scratch with a fresh session and grant. rate_limit_waits counts those discards; no recorded sample includes a refusal.',
+        rate_limit_waits: rateLimitWaits,
         metrics,
         pending: pendings,
       },
@@ -341,6 +646,10 @@ test('start admission and stop ack: measurement branch ready, pending while the 
     );
     return registrySrc.match(re)?.[1] ?? 'not_found';
   };
+  const samplers = {
+    'sessions.start': sampleFirstStartAdmission,
+    'sessions.cancel': sampleFirstStopAck,
+  } as const;
   for (const [contract, surface, budget] of [
     ['sessions.start', 'POST /api/council/sessions/:id/start (start admission)', 750],
     ['sessions.cancel', 'POST /api/council/sessions/:id/cancel (stop acknowledgement)', 1000],
@@ -355,26 +664,19 @@ test('start admission and stop ack: measurement branch ready, pending while the 
       continue;
     }
     // Ready branch (post-CWE-050 re-run): measure admission/ack p95
-    // against the live route. A non-2xx response fails the sample
-    // loudly rather than timing an error path as success.
-    const action = contract === 'sessions.start' ? 'start' : 'cancel';
-    await measure(surface, budget, async () =>
-      timed(async () => {
-        const res = await (
-          await import(`../../src/app/api/council/sessions/[id]/${action}/route`)
-        ).POST(
-          await routeRequest(`/api/council/sessions/${DETAIL_SESSION}/${action}`, 'POST', true),
-          { params: Promise.resolve({ id: DETAIL_SESSION }) },
-        );
-        assert.ok(res.status < 300, `${surface} answered ${res.status}`);
-        return res;
-      })(),
-    );
+    // against the live routes, through the granted path. Every
+    // sample is a first start (or first cancel) on a fresh session
+    // with its own approved grant, and a replayed receipt or a
+    // non-success response fails the sample loudly rather than
+    // timing an error path or a replay as a first admission.
+    await measure(surface, budget, samplers[contract]);
     const m = metrics[metrics.length - 1];
     assert.ok(m.within_budget, `${m.surface}: p95 ${m.p95_ms}ms exceeds ${m.budget_ms}ms`);
   }
   assert.ok(
-    pendings.length > 0 || metrics.some((m) => m.surface.includes('start admission')),
-    'the start/stop branch recorded either pendings or measurements',
+    pendings.length > 0 ||
+      (metrics.some((m) => m.surface.includes('start admission')) &&
+        metrics.some((m) => m.surface.includes('stop acknowledgement'))),
+    'the start/stop branch recorded either pendings or both measurements',
   );
 });
