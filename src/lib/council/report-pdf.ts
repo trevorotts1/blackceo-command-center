@@ -36,6 +36,20 @@
  * function that composition calls for the pdf format (report
  * filename council-report-<session_id>-r<revision>.pdf, media type
  * application/pdf, per CWE-038's registry).
+ *
+ * Byte stability (CWE-044 final stream): the composed export
+ * service binds every artifact by SHA-256 (journal record,
+ * deliverable row, download bytes must all agree, and downloads
+ * re-render and verify). Chromium's print-to-PDF output is byte
+ * deterministic for identical input EXCEPT the info-dictionary
+ * /CreationDate and /ModDate, which carry the render wall-clock
+ * (verified empirically: two renders of the same HTML seconds
+ * apart differ only in those digits). The renderer therefore pins
+ * those two values' digits to zero in place before returning:
+ * the replacement is digit-for-digit, so every byte length and
+ * xref offset is preserved and the pinned bytes are the validated,
+ * served bytes. Identical print HTML now renders to identical
+ * bytes, which is what makes the hash binding honest.
  */
 
 import {
@@ -196,6 +210,23 @@ const PDF_HEADER_TEMPLATE = '<span></span>';
  * explicitly so Chromium paginates to the template's design. */
 const PDF_MARGIN = { top: '20mm', bottom: '20mm', left: '18mm', right: '18mm' };
 
+/**
+ * Pin the only volatile bytes in Chromium's PDF output (the
+ * info-dictionary /CreationDate and /ModDate wall-clock values) to
+ * a fixed all-zero form, digit for digit, preserving every byte
+ * length and xref offset. See the module header for why the
+ * composed export service needs byte-stable renders.
+ */
+function pinVolatilePdfMetadata(bytes: Buffer): Buffer {
+  const text = bytes.toString('latin1');
+  const pinned = text.replace(
+    /\/(CreationDate|ModDate)(\s*)\(([^)]*)\)/g,
+    (_match, name: string, separator: string, inner: string) =>
+      `/${name}${separator}(${inner.replace(/[0-9]/g, '0')})`,
+  );
+  return Buffer.from(pinned, 'latin1');
+}
+
 function countPdfPages(bytes: Buffer): number {
   const text = bytes.toString('latin1');
   const pagesNode = text.match(/\/Type\s*\/Pages[\s\S]{0,300}?\/Count\s+(\d+)/);
@@ -273,7 +304,7 @@ export async function renderCouncilReportPdf(
       footerTemplate: PDF_FOOTER_TEMPLATE,
       margin: PDF_MARGIN,
     });
-    const buffer = Buffer.from(bytes);
+    const buffer = pinVolatilePdfMetadata(Buffer.from(bytes));
     const pageCount = validatePdfBytes(buffer);
     return { bytes: buffer, byteLength: buffer.length, pageCount };
   } catch (err) {

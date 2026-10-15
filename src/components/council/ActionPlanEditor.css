@@ -111,10 +111,13 @@
   opacity: 0.55;
 }
 
+/* Same pairing as .council-btn-primary (CWE-044 fix, D-044-2): the
+   fill is the accent-ink step, never the 42%-lightness 600 step, so
+   the white on-accent ink keeps 4.5:1 under every client theme. */
 .council-action-btn-primary {
-  background: var(--council-accent, #43a047);
-  border-color: var(--council-accent, #43a047);
-  color: var(--council-on-accent, #0b0c0f);
+  background: var(--council-accent-ink, #256528);
+  border-color: var(--council-accent-ink, #256528);
+  color: var(--council-on-accent, #ffffff);
   font-weight: 600;
 }
 

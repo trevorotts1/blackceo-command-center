@@ -30,7 +30,12 @@ export async function GET(
   return handleCouncil(request, async (ctx) => {
     const sessionId = locateExportSession(ctx, exportId);
     const authorized = authorizeSessionRead(ctx, sessionId);
-    const download = readExportDownload(ctx, authorized, sessionId, exportId);
-    return new NextResponse(download.bytes, { status: 200, headers: download.headers });
+    const download = await readExportDownload(ctx, authorized, sessionId, exportId);
+    // PDF artifacts are Buffers; NextResponse takes a Uint8Array view.
+    const body =
+      typeof download.bytes === 'string'
+        ? download.bytes
+        : new Uint8Array(download.bytes);
+    return new NextResponse(body, { status: 200, headers: download.headers });
   });
 }

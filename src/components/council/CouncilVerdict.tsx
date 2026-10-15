@@ -291,7 +291,7 @@ export function CouncilVerdict({
       {/* 6. Full scorecard */}
       <section data-testid="verdict-scorecard" aria-label="Full scorecard">
         <h3 className={council.heading}>Full scorecard</h3>
-        <table>
+        <table className="council-scorecard-table">
           <thead>
             <tr>
               <th scope="col">Option</th>

@@ -9,13 +9,21 @@
  *      print HTML are rendered from ONE model and agree on scores,
  *      the decision, conditions, citation locators, and the report
  *      revision; the record binds the sibling artifact hashes and
- *      names the PDF deliverable not_ready with its missing piece.
- *      The score fixture is the directive's golden case (A weighted
- *      sum 132 over denominator 22 = 6.0; B 168/22, display 7.6,
- *      spread 3).
- *   2. PDF (and 'all', which includes it) refuses
- *      EXPORT_FORMAT_NOT_READY naming the missing renderer; no
- *      bytes are produced and nothing is journaled.
+ *      names the PDF sibling as a ready format (its hash is bound
+ *      when the PDF was rendered in the same create call; see the
+ *      T106 composed test). The score fixture is the directive's
+ *      golden case (A weighted sum 132 over denominator 22 = 6.0;
+ *      B 168/22, display 7.6, spread 3).
+ *   2. T106 (composed closure, CWE-044 final stream): a PDF export
+ *      through the composed service renders a real validated PDF
+ *      from the same print HTML through CWE-044's Chromium
+ *      renderer; the B15 hash chain (journal record, deliverable
+ *      row, download bytes) binds the PDF exactly like the text
+ *      formats; a replayed create returns the recorded artifact
+ *      with no second journal record and the re-rendered download
+ *      still hash-matches (the renderer pins its volatile bytes);
+ *      'all' yields four artifacts and its record JSON binds the
+ *      pdf sibling hash of the same create call.
  *   3. B15 closure: create -> journal record -> deliverable row on
  *      the session's parent task through registerDeliverable ->
  *      download bytes whose SHA-256 equals both the journaled
@@ -338,6 +346,29 @@ function sha256(text: string): string {
   return createHash('sha256').update(text, 'utf8').digest('hex');
 }
 
+/** Binary-safe download for PDF artifacts (response.text() would
+ * corrupt non-UTF8 bytes before hashing). */
+async function downloadBytes(exportId: string, subject = ALICE): Promise<{ status: number; bytes: Buffer; headers: Headers }> {
+  installFixtureEnv();
+  const request = await makeRequest('council-a.test', subject, `/api/council/exports/${exportId}`);
+  const response = await exportRoute.GET(request, { params: Promise.resolve({ exportId }) });
+  return { status: response.status, bytes: Buffer.from(await response.arrayBuffer()), headers: response.headers };
+}
+
+function sha256Bytes(bytes: Buffer): string {
+  return createHash('sha256').update(bytes).digest('hex');
+}
+
+/** Page count read back from the PDF bytes (the same /Pages /Count
+ * read-back the renderer module validates with). */
+function pdfPageCount(bytes: Buffer): number {
+  const text = bytes.toString('latin1');
+  const pagesNode = text.match(/\/Type\s*\/Pages[\s\S]{0,300}?\/Count\s+(\d+)/);
+  if (pagesNode) return Number.parseInt(pagesNode[1], 10);
+  const singles = text.match(/\/Type\s*\/Page(?![s\w])/g);
+  return singles ? singles.length : 0;
+}
+
 function exportJournalCount(sessionId: string): number {
   const row = db
     .prepare(
@@ -420,8 +451,11 @@ test('T105 + B15: formats agree from one model; the deliverable row and the down
   assert.equal(rowB.spread, 3);
   const siblings = Object.fromEntries(record.sibling_artifacts.map((s: any) => [s.format, s]));
   assert.equal(siblings.markdown.sha256, artifact.sha256, 'the record binds the exact Markdown bytes');
-  assert.equal(siblings.pdf.status, 'not_ready');
-  assert.match(siblings.pdf.missing_piece, /CWE-044/);
+  // The PDF is a ready composed format (CWE-044 final stream); this
+  // create call rendered no PDF, so the sibling entry binds no hash.
+  assert.equal(siblings.pdf.status, 'ready');
+  assert.equal(siblings.pdf.missing_piece, null);
+  assert.equal(siblings.pdf.sha256, null);
 
   // Print HTML: same revision, print stylesheet present.
   const printCreated = await createExport(sessionId, { format: 'print_html' }, 'export-key-3');
@@ -433,19 +467,84 @@ test('T105 + B15: formats agree from one model; the deliverable row and the down
   assert.match(printDl.text, /GO_WITH_CONDITIONS/);
 });
 
-test('PDF refuses EXPORT_FORMAT_NOT_READY naming the missing renderer; nothing is journaled', async () => {
+test('T106 (composed): a PDF export through the composed service renders a real validated PDF with the B15 hash chain bound', async () => {
   const sessionId = 'sess-export-2';
   seedSession(sessionId, 'company', null);
   commitCardsAndVerdict(sessionId, SCOPE);
-  const before = exportJournalCount(sessionId);
-  const pdf = await createExport(sessionId, { format: 'pdf' });
-  assert.equal(pdf.status, 501, JSON.stringify(pdf.body));
-  assert.equal(pdf.body.error.code, 'EXPORT_FORMAT_NOT_READY');
-  assert.match(pdf.body.error.message, /Playwright\/Chromium/);
-  const all = await createExport(sessionId, { format: 'all' });
-  assert.equal(all.status, 501, JSON.stringify(all.body));
-  assert.equal(all.body.error.code, 'EXPORT_FORMAT_NOT_READY');
-  assert.equal(exportJournalCount(sessionId), before, 'no export was journaled for a refused format');
+
+  // Assemble so the session has a parent task for B15 registration.
+  const preview = await post(previewRoute, `/api/council/sessions/${sessionId}/action-plan/preview`, { verdict_revision: 1 }, { params: { id: sessionId } });
+  assert.equal(preview.status, 200, JSON.stringify(preview.body));
+  const planHash = preview.body.data.plan_hash as string;
+  const approved = await post(approveRoute, `/api/council/sessions/${sessionId}/action-plan/approve`, {
+    verdict_revision: 1,
+    plan_hash: planHash,
+  }, { params: { id: sessionId } });
+  assert.equal(approved.status, 200, JSON.stringify(approved.body));
+  const assembled = await post(createRoute, `/api/council/sessions/${sessionId}/action-plan/create`, {
+    plan_id: approved.body.data.plan_id,
+    plan_hash: planHash,
+  }, { params: { id: sessionId } });
+  assert.equal(assembled.status, 200, JSON.stringify(assembled.body));
+  const parentTaskId = assembled.body.data.parent_task_id as string;
+  assert.ok(parentTaskId);
+
+  const created = await createExport(sessionId, { format: 'pdf' }, 'export-key-pdf-1');
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  const artifact = created.body.data.artifacts[0];
+  assert.equal(artifact.format, 'pdf');
+  assert.equal(artifact.media_type, 'application/pdf');
+  assert.equal(artifact.filename, `council-report-${sessionId}-r1.pdf`);
+  assert.ok(artifact.byte_size > 1000, 'a real report PDF is not a stub');
+  assert.ok(artifact.deliverable_id, 'B15: the PDF artifact registered a deliverable row');
+  const deliverable = db
+    .prepare(`SELECT task_id, path, sha256 FROM task_deliverables WHERE id = ?`)
+    .get(artifact.deliverable_id) as { task_id: string; path: string; sha256: string };
+  assert.equal(deliverable.task_id, parentTaskId);
+  assert.equal(deliverable.path, artifact.filename);
+  assert.equal(deliverable.sha256, artifact.sha256, 'B15: the deliverable row binds the journaled PDF hash');
+
+  // Download: validated PDF bytes whose hash equals the journaled
+  // and registered hash, with the verdict binding in the headers.
+  const dl = await downloadBytes(artifact.export_id);
+  assert.equal(dl.status, 200);
+  assert.equal(dl.headers.get('content-type'), 'application/pdf');
+  assert.equal(sha256Bytes(dl.bytes), artifact.sha256, 'PDF download bytes hash-match the journaled artifact hash');
+  assert.equal(dl.bytes.subarray(0, 5).toString('latin1'), '%PDF-');
+  assert.ok(
+    dl.bytes.subarray(Math.max(0, dl.bytes.length - 2048)).toString('latin1').includes('%%EOF'),
+    'the PDF carries its %%EOF trailer',
+  );
+  assert.ok(pdfPageCount(dl.bytes) >= 1, 'the PDF declares at least one page');
+
+  // Replay (T078 for the rendered format): the same key returns the
+  // recorded artifact with no second journal record, and the
+  // re-rendered download still hash-matches, because the renderer
+  // pins its volatile info-dictionary dates (CWE-044 final stream).
+  const countAfterFirst = exportJournalCount(sessionId);
+  const replay = await createExport(sessionId, { format: 'pdf' }, 'export-key-pdf-1');
+  assert.equal(replay.status, 201, JSON.stringify(replay.body));
+  assert.equal(replay.body.data.artifacts[0].export_id, artifact.export_id);
+  assert.equal(exportJournalCount(sessionId), countAfterFirst, 'the replay wrote no second journal record');
+  const dl2 = await downloadBytes(artifact.export_id);
+  assert.equal(dl2.status, 200);
+  assert.equal(sha256Bytes(dl2.bytes), artifact.sha256, 're-rendered PDF bytes still hash-match after replay');
+
+  // 'all' yields the four artifacts, and the record JSON created in
+  // the same call binds the pdf sibling hash to that call's PDF.
+  const all = await createExport(sessionId, { format: 'all' }, 'export-key-all-1');
+  assert.equal(all.status, 201, JSON.stringify(all.body));
+  const formats = (all.body.data.artifacts as any[]).map((a) => a.format).sort();
+  assert.deepEqual(formats, ['markdown', 'pdf', 'print_html', 'record_json']);
+  const pdfArtifact = all.body.data.artifacts.find((a: any) => a.format === 'pdf');
+  const recordArtifact = all.body.data.artifacts.find((a: any) => a.format === 'record_json');
+  const recordDl = await download(recordArtifact.export_id);
+  assert.equal(recordDl.status, 200);
+  const record = JSON.parse(recordDl.text);
+  const pdfSibling = record.sibling_artifacts.find((s: any) => s.format === 'pdf');
+  assert.equal(pdfSibling.status, 'ready');
+  assert.equal(pdfSibling.sha256, pdfArtifact.sha256, 'the record JSON binds the exact PDF bytes of the same create call');
+  assert.equal(pdfSibling.filename, pdfArtifact.filename);
 });
 
 test('replay returns the recorded export with no second journal record; a changed payload under the same key conflicts (T078)', async () => {
@@ -511,8 +610,8 @@ test('T059: deleting the session between create and download refuses the downloa
   ).run(raceId, raceId, new Date().toISOString());
   const { readCouncilExport } = await import('../../src/lib/council/report-downloads');
   const raceEnvelope = envelopeFromScopeFn(SCOPE as never, ALICE, 'owner', 'read');
-  assert.throws(
-    () => readCouncilExport({ repositories, store: { handle: () => db } as never }, raceEnvelope, raceId, raceExportId),
+  await assert.rejects(
+    readCouncilExport({ repositories, store: { handle: () => db } as never }, raceEnvelope, raceId, raceExportId),
     (error: any) => error?.code === 'EXPORT_SESSION_DELETED' && error?.status === 410,
   );
 

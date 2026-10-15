@@ -8,11 +8,20 @@
  * revision, the frozen brief, and the final cards; deterministic
  * Markdown, canonical record JSON, and print HTML rendered from
  * that model only; a registered deliverable per artifact bound to
- * the exact verdict revision and content hash; PDF registered NOT
- * READY naming the missing Playwright/Chromium renderer (rendered
- * PDF production and visual QA are CWE-044). This module is the
- * same contract bound to the Command Center store and evidence
- * path:
+ * the exact verdict revision and content hash. PDF was registered
+ * NOT READY there because that runtime's dependency bill has no
+ * renderer. In this Command Center composition the pdf format is
+ * rendered through CWE-044's Playwright/Chromium renderer
+ * (src/lib/council/report-pdf.ts, directive Section 24.3), whose
+ * output is byte-pinned (volatile info-dictionary dates zeroed),
+ * so a PDF artifact binds by SHA-256 exactly like the text formats:
+ * journal record, deliverable row, and download bytes agree, and
+ * the read path re-renders and verifies before serving. When the
+ * Chromium capability is absent, a pdf request refuses
+ * EXPORT_FORMAT_NOT_READY naming the missing piece; a render or
+ * validation failure refuses EXPORT_RENDER_FAILED. No path
+ * produces placeholder bytes. This module is the same contract
+ * bound to the Command Center store and evidence path:
  *
  * - The model is built from the session's committed verdict (which
  *   the CWE-006 store admitted only after canonical validation),
@@ -68,6 +77,7 @@ import type { CouncilEnvelope, CouncilRepositories, CouncilStoredSession } from 
 import type { CouncilStore } from './persistence/council-store';
 import { registerDeliverable } from '../task-lifecycle';
 import { CouncilApiError } from './api/errors';
+import { renderCouncilReportPdf, ReportPdfError } from './report-pdf';
 import {
   formatCoverage,
   formatDisplayScore,
@@ -87,9 +97,6 @@ export interface ReportFormatDescriptor {
   file_extension: string;
   missing_piece: string | null;
 }
-
-export const PDF_MISSING_PIECE =
-  'the approved Playwright/Chromium PDF renderer (directive Section 24.3) is not present in the Command Center dependency bill; rendered PDF production and visual QA are owned by CWE-044 (T106)';
 
 export const REPORT_FORMAT_REGISTRY: Readonly<Record<ReportFormat, ReportFormatDescriptor>> = {
   record_json: {
@@ -115,10 +122,10 @@ export const REPORT_FORMAT_REGISTRY: Readonly<Record<ReportFormat, ReportFormatD
   },
   pdf: {
     format: 'pdf',
-    status: 'not_ready',
+    status: 'ready',
     media_type: 'application/pdf',
     file_extension: 'pdf',
-    missing_piece: PDF_MISSING_PIECE,
+    missing_piece: null,
   },
 };
 
@@ -159,6 +166,16 @@ export function reportFilename(args: {
 
 export function sha256OfText(text: string): string {
   return sha256Hex(new TextEncoder().encode(text));
+}
+
+/** Artifact bytes are text for the deterministic formats and a
+ * Buffer for the rendered PDF; hashing and sizing handle both. */
+export function sha256OfArtifact(bytes: string | Buffer): string {
+  return typeof bytes === 'string' ? sha256OfText(bytes) : sha256Hex(bytes);
+}
+
+export function byteSizeOfArtifact(bytes: string | Buffer): number {
+  return typeof bytes === 'string' ? Buffer.byteLength(bytes, 'utf8') : bytes.length;
 }
 
 // -------------------------------------------------------------- model
@@ -820,17 +837,21 @@ function pushProvenanceMd(lines: string[], model: Record<string, unknown>): void
 
 export interface SiblingArtifact {
   format: string;
-  filename: string;
-  sha256: string;
+  filename: string | null;
+  sha256: string | null;
   status: 'ready' | 'not_ready';
   missing_piece: string | null;
 }
 
 /**
  * The canonical record JSON: the full report model in canonical
- * serialized form, plus the sibling artifact index binding the exact
- * bytes of the Markdown and print HTML, and naming the PDF
- * deliverable as not ready with its missing piece.
+ * serialized form, plus the sibling artifact index binding the
+ * exact bytes of the Markdown and print HTML. The caller supplies
+ * the complete sibling list, including the pdf entry: its hash and
+ * filename are bound when the PDF was rendered in the same create
+ * call (or resolved from the journal on the read path); otherwise
+ * the entry names the ready pdf format with no hash bound in this
+ * record.
  */
 export function renderRecordJson(
   model: Record<string, unknown>,
@@ -838,16 +859,7 @@ export function renderRecordJson(
 ): string {
   const record = {
     ...model,
-    sibling_artifacts: [
-      ...siblings,
-      {
-        format: 'pdf',
-        filename: null,
-        sha256: null,
-        status: 'not_ready',
-        missing_piece: PDF_MISSING_PIECE,
-      },
-    ],
+    sibling_artifacts: [...siblings],
   };
   return `${canonicalStringify(record)}\n`;
 }
@@ -1077,13 +1089,71 @@ function parentTaskIdFor(deps: ReportDownloadsDeps, envelope: CouncilEnvelope, s
 }
 
 /**
+ * Render the pdf artifact from the model's print HTML through the
+ * composed Chromium renderer, mapping the renderer's typed
+ * refusals onto the export error shape: capability absent is
+ * EXPORT_FORMAT_NOT_READY naming the missing piece; a render or
+ * validation failure is EXPORT_RENDER_FAILED. Either way no bytes
+ * are produced and nothing is journaled.
+ */
+async function renderPdfArtifact(printHtml: string): Promise<Buffer> {
+  try {
+    const rendered = await renderCouncilReportPdf(printHtml);
+    return rendered.bytes;
+  } catch (error) {
+    if (error instanceof ReportPdfError && error.code === 'EXPORT_FORMAT_NOT_READY') {
+      throw new CouncilApiError(
+        'EXPORT_FORMAT_NOT_READY',
+        `The pdf deliverable cannot be rendered in this environment: ${error.missingPiece ?? error.message}. No bytes were produced and nothing was journaled.`,
+        { status: 501, action: 'choose_another_format' },
+      );
+    }
+    if (error instanceof ReportPdfError) {
+      throw new CouncilApiError(
+        'EXPORT_RENDER_FAILED',
+        `The pdf deliverable failed to render: ${error.message}. No bytes were produced and nothing was journaled.`,
+        { status: 502, action: 'retry_export' },
+      );
+    }
+    throw error;
+  }
+}
+
+/** The pdf sibling entry for a record JSON: hash-bound when the
+ * PDF bytes exist in this flow, an unbound ready entry otherwise. */
+function pdfSibling(args: {
+  session_id: string;
+  verdict_revision: number;
+  redacted: boolean;
+  filename: string | null;
+  sha256: string | null;
+}): SiblingArtifact {
+  return {
+    format: 'pdf',
+    filename:
+      args.sha256 !== null
+        ? (args.filename ??
+          reportFilename({
+            session_id: args.session_id,
+            verdict_revision: args.verdict_revision,
+            format: 'pdf',
+            redacted: args.redacted,
+          }))
+        : null,
+    sha256: args.sha256,
+    status: 'ready',
+    missing_piece: null,
+  };
+}
+
+/**
  * Create an export: validate, render every ready format from the one
  * model, journal one record per requested ready artifact, register
  * each through the CC evidence path when a parent task exists, and
  * return the artifact descriptors. A request naming a not-ready
  * format refuses EXPORT_FORMAT_NOT_READY before any rendering.
  */
-export function createCouncilExport(
+export async function createCouncilExport(
   deps: ReportDownloadsDeps,
   envelope: CouncilEnvelope,
   input: {
@@ -1095,7 +1165,7 @@ export function createCouncilExport(
     via: string;
     exported_at?: string;
   },
-): CouncilExportResult {
+): Promise<CouncilExportResult> {
   for (const format of input.formats) {
     const descriptor = REPORT_FORMAT_REGISTRY[format];
     if (descriptor.status === 'not_ready') {
@@ -1122,6 +1192,13 @@ export function createCouncilExport(
 
   const markdown = renderMarkdown(model);
   const printHtml = renderPrintHtml(model);
+  // The pdf artifact renders from the same print HTML through the
+  // composed Chromium renderer, but only when the pdf format was
+  // requested: a record JSON created without pdf binds an unbound
+  // pdf sibling entry rather than paying a render it does not need.
+  const pdfBytes = input.formats.includes('pdf')
+    ? await renderPdfArtifact(printHtml)
+    : null;
   const siblings: SiblingArtifact[] = [
     {
       format: 'markdown',
@@ -1147,11 +1224,19 @@ export function createCouncilExport(
       status: 'ready',
       missing_piece: null,
     },
+    pdfSibling({
+      session_id: input.session_id,
+      verdict_revision: verdict.verdict_revision,
+      redacted,
+      filename: null,
+      sha256: pdfBytes !== null ? sha256Hex(pdfBytes) : null,
+    }),
   ];
-  const bytesByFormat = new Map<ReportFormat, string>([
+  const bytesByFormat = new Map<ReportFormat, string | Buffer>([
     ['markdown', markdown],
     ['print_html', printHtml],
   ]);
+  if (pdfBytes !== null) bytesByFormat.set('pdf', pdfBytes);
   if (input.formats.includes('record_json')) {
     bytesByFormat.set('record_json', renderRecordJson(model, siblings));
   }
@@ -1174,12 +1259,18 @@ export function createCouncilExport(
         format,
         redacted,
       }),
-      sha256: sha256OfText(bytes),
+      sha256: sha256OfArtifact(bytes),
+      byte_size: byteSizeOfArtifact(bytes),
     };
   });
   if (redaction !== null) {
+    // The text artifacts carry the redaction assertion directly.
+    // The pdf artifact inherits the redacted model: it renders from
+    // the redacted print HTML, whose bytes are asserted here.
     assertRedactionComplete(
-      rendered.map((a) => ({ filename: a.filename, bytes: a.bytes })),
+      rendered
+        .filter((a) => typeof a.bytes === 'string')
+        .map((a) => ({ filename: a.filename, bytes: a.bytes as string })),
       redaction,
     );
   }
@@ -1211,7 +1302,7 @@ export function createCouncilExport(
         filename: prior.filename,
         media_type: REPORT_FORMAT_REGISTRY[artifact.format].media_type,
         sha256: artifact.sha256,
-        byte_size: Buffer.byteLength(artifact.bytes, 'utf8'),
+        byte_size: artifact.byte_size,
         redacted,
         replayed: true,
         deliverable_id: prior.deliverable_id,
@@ -1224,7 +1315,7 @@ export function createCouncilExport(
       deliverableId = registerDeliverable(parentTaskId, {
         path: artifact.filename,
         mime: REPORT_FORMAT_REGISTRY[artifact.format].media_type,
-        bytes: Buffer.byteLength(artifact.bytes, 'utf8'),
+        bytes: artifact.byte_size,
         sha256: artifact.sha256,
         title: `Council decision report: session ${input.session_id}, verdict revision ${verdict.verdict_revision} (${artifact.format})`,
       });
@@ -1240,7 +1331,7 @@ export function createCouncilExport(
       verdict_content_sha256: verdict.content_sha256,
       report_revision_id: reportRevision,
       artifact_sha256: artifact.sha256,
-      byte_size: Buffer.byteLength(artifact.bytes, 'utf8'),
+      byte_size: artifact.byte_size,
       redacted,
       redaction_profile_id: redaction?.profile_id ?? null,
       exporter_subject: input.exporter_subject,
@@ -1313,7 +1404,7 @@ export function findExportSession(
 
 export interface CouncilExportDownload {
   record: CouncilExportRecord;
-  bytes: string;
+  bytes: string | Buffer;
   headers: Record<string, string>;
 }
 
@@ -1321,14 +1412,17 @@ export interface CouncilExportDownload {
  * Read one registered export: re-render from committed state,
  * verify the bytes hash to the journaled artifact hash, and build
  * the Section 24.4 download headers. Refuses deleted sessions
- * (T059) and hash drift; never returns unrecorded bytes.
+ * (T059) and hash drift; never returns unrecorded bytes. The pdf
+ * format re-renders through the composed Chromium renderer; its
+ * byte-pinned output verifies against the journaled hash exactly
+ * like the deterministic text formats.
  */
-export function readCouncilExport(
+export async function readCouncilExport(
   deps: ReportDownloadsDeps,
   envelope: CouncilEnvelope,
   sessionId: string,
   exportId: string,
-): CouncilExportDownload {
+): Promise<CouncilExportDownload> {
   assertSessionAlive(deps, sessionId, envelope.tenant_id);
   const record = findExportRecord(deps, envelope, sessionId, exportId);
   if (!record) {
@@ -1373,6 +1467,13 @@ export function readCouncilExport(
   });
   const markdown = renderMarkdown(model);
   const printHtml = renderPrintHtml(model);
+  // A record JSON binds its pdf sibling from the journal: the pdf
+  // artifact created under the same request carries the hash this
+  // record was created with. Without one, the entry stays unbound.
+  const pdfRecord =
+    listExportRecords(deps, envelope, sessionId).find(
+      (r) => r.format === 'pdf' && r.request_id === record.request_id,
+    ) ?? null;
   const siblings: SiblingArtifact[] = [
     {
       format: 'markdown',
@@ -1398,14 +1499,23 @@ export function readCouncilExport(
       status: 'ready',
       missing_piece: null,
     },
+    pdfSibling({
+      session_id: sessionId,
+      verdict_revision: verdict.verdict_revision,
+      redacted: false,
+      filename: pdfRecord?.filename ?? null,
+      sha256: pdfRecord?.artifact_sha256 ?? null,
+    }),
   ];
-  const bytes =
+  const bytes: string | Buffer =
     record.format === 'markdown'
       ? markdown
       : record.format === 'print_html'
         ? printHtml
-        : renderRecordJson(model, siblings);
-  const digest = sha256OfText(bytes);
+        : record.format === 'pdf'
+          ? await renderPdfArtifact(printHtml)
+          : renderRecordJson(model, siblings);
+  const digest = sha256OfArtifact(bytes);
   if (digest !== record.artifact_sha256) {
     throw new CouncilApiError(
       'EXPORT_JOURNAL_MISMATCH',
@@ -1416,7 +1526,7 @@ export function readCouncilExport(
   const cacheControl =
     record.visibility === 'private' ? 'private, no-store' : 'no-cache';
   return {
-    record: { ...record, byte_size: Buffer.byteLength(bytes, 'utf8') },
+    record: { ...record, byte_size: byteSizeOfArtifact(bytes) },
     bytes,
     headers: {
       'Content-Type': record.media_type,

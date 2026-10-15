@@ -817,7 +817,7 @@ export function patchSettingsRoute(ctx: CouncilRouteContext, body: Record<string
 
 // --------------------------------------------------------------- exports
 
-export function createExportRoute(
+export async function createExportRoute(
   ctx: CouncilRouteContext,
   authorized: AuthorizedSession,
   body: Record<string, unknown>,
@@ -863,7 +863,7 @@ export function createExportRoute(
     formats,
     redaction_profile_id: null,
   }, sessionId);
-  const result = createCouncilExport(
+  const result = await createCouncilExport(
     { repositories: ctx.repositories, store: ctx.store },
     authorized.envelope,
     {
@@ -915,12 +915,12 @@ export function locateExportSession(ctx: CouncilRouteContext, exportId: string):
   return sessionId;
 }
 
-export function readExportDownload(
+export async function readExportDownload(
   ctx: CouncilRouteContext,
   authorized: AuthorizedSession,
   sessionId: string,
   exportId: string,
-): CouncilExportDownload {
+): Promise<CouncilExportDownload> {
   return readCouncilExport(
     { repositories: ctx.repositories, store: ctx.store },
     authorized.envelope,
