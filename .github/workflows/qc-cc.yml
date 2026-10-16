@@ -274,10 +274,30 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Install Playwright Chromium (council PDF tests render real PDFs)
+        # Same provisioning pattern as the interview-lock e2e job below
+        # (`npx playwright install --with-deps ...`). The Skill 77 council
+        # PDF tests in this job's test:unit step: the capability probe,
+        # golden report and long report in
+        # tests/unit/council-gauntlet-pdf.test.ts, and the T106 composed
+        # export in tests/unit/council-exports-cc.test.ts, render REAL
+        # PDFs through Playwright Chromium, and the product refuses
+        # honestly (EXPORT_FORMAT_NOT_READY) when no browser executable
+        # exists, so without this step those tests can only ever fail in
+        # CI. Chromium only: the PDF renderer launches no other browser.
+        run: npx playwright install --with-deps chromium
+
+      - name: Prepare council gauntlet evidence directory
+        # The council gauntlet tests write rendered-PDF evidence to
+        # $GAUNTLET_OUT (default ~/workspace/skill77/cwe-044/evidence,
+        # a developer-machine path that does not exist on a CI runner).
+        run: mkdir -p "${{ runner.temp }}/council-gauntlet-evidence"
+
       - name: Run tests/unit/*.test.ts (Node built-in runner)
         run: npm run test:unit
         env:
           NODE_ENV: test
+          GAUNTLET_OUT: ${{ runner.temp }}/council-gauntlet-evidence
 
       - name: Run real render-level proof (jsdom + @testing-library/react)
         run: npm run test:component
