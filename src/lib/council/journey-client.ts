@@ -327,8 +327,11 @@ export async function patchBrief(
   input: BriefRevisionInput,
   idempotencyKey: string,
 ): Promise<CouncilStoredSession> {
+  // Literal /api path here (not the API_BASE composition) so the repo's
+  // U052 passthrough scanner sees this interface call, as it does for
+  // every other client in the codebase. The composed URL is identical.
   const { data } = await councilFetch<CouncilStoredSession>(
-    `${API_BASE}/sessions/${encodeURIComponent(sessionId)}/brief`,
+    `/api/council/sessions/${encodeURIComponent(sessionId)}/brief`,
     { method: 'PATCH', body: input, idempotencyKey },
   );
   return data;
@@ -348,8 +351,11 @@ export async function getVerdict(sessionId: string): Promise<CouncilVerdictData>
  * reports progress of any kind.
  */
 export async function startSession(sessionId: string, idempotencyKey: string): Promise<never> {
+  // Literal /api path here (not the API_BASE composition) so the repo's
+  // U052 passthrough scanner sees this interface call, as it does for
+  // every other client in the codebase. The composed URL is identical.
   const { data } = await councilFetch<unknown>(
-    `${API_BASE}/sessions/${encodeURIComponent(sessionId)}/start`,
+    `/api/council/sessions/${encodeURIComponent(sessionId)}/start`,
     { method: 'POST', body: {}, idempotencyKey },
   );
   // The foundation never returns success here today; if a future wired

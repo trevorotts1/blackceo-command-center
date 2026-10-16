@@ -72,6 +72,40 @@
  * bearer-ONLY covered) because the Item 19 resume route is a session route
  * and adds no bearer pattern.
  *
+ * re-derived 2026-10-16 for the Skill 77 Council of Wise Elders composition
+ * (train PR #550): +21 council mutating routes, so the census is 159
+ * mutating, 7 webhook-protected (unchanged), 152 non-webhook. Bearer totals
+ * unchanged (49 patterns match 53 templates, 52 bearer-ONLY covered): no
+ * council route joins BEARER_REQUIRED_WRITE_ROUTES. The council write
+ * surface authenticates through the verified tenant identity plus the
+ * signed CSRF cookie at this middleware's passthrough and, in-handler,
+ * the CWE-007 principal with CSRF proof (assertCouncilCsrf) and the
+ * session read/mutate scope rule; no council caller presents the
+ * MC_API_TOKEN bearer except the machine channel (tenant subject
+ * operator:api) that CWE-045 binds on the three action-plan routes.
+ * Classification of the 21: the six param-less or session-client routes
+ * (POST /api/council/sessions, PATCH /api/council/settings, POST
+ * /api/council/exports, POST /api/council/models/probe, POST
+ * /api/council/sessions/{id}/follow-up, POST
+ * /api/council/sessions/{id}/outcomes) were already scanner-visible;
+ * POST /api/council/sessions/{id}/start (wired in SessionDetail.tsx via
+ * the journey client) and PATCH /api/council/sessions/{id}/brief (the
+ * journey client's shipped binding) are interface-classified, their two
+ * call sites spelled as literal /api paths so this scanner sees them
+ * (the composed URLs are byte-identical). The remaining 13 session
+ * routes (DELETE /api/council/sessions/{id}; POST archive, cancel,
+ * decision, pause, rerun, resume; POST run-authorization/preview,
+ * /approve, /revoke; POST action-plan/preview, /approve, /create) are
+ * STOPPED, left unclassified for a coordinator decision: no browser
+ * call site or client binding for them exists in this tree, so the
+ * interface category cannot be evidenced, and the bearer category does
+ * not fit their real auth (browser-channel handlers demand the CSRF
+ * cookie proof from every principal; the action-plan trio additionally
+ * admits the CWE-045 machine binding by design). The classification
+ * assertion below therefore still fails, listing exactly those 13,
+ * until the coordinator classifies them; the two count pins in this
+ * paragraph are the composed truth regardless.
+ *
  * re-derived 2026-09-27 for ILJ-004 tenant skip marks: POST
  * /api/interview/state — the owner's browser marking one structured question
  * skipped (InterviewClient.tsx:375 with the session cookie + tenant
@@ -335,16 +369,16 @@ const nonWebhookCount = allMutatingRoutes.length - webhookProtectedCount;
 describe('passthrough-write-scope — anti-rot lock (U052)', () => {
   // ---- Counts ------------------------------------------------------------
 
-  it('API routes exporting a mutating method: 138 (literal assertion)', () => {
-    expect(allMutatingRoutes.length).toBe(138);
+  it('API routes exporting a mutating method: 159 (literal assertion)', () => {
+    expect(allMutatingRoutes.length).toBe(159);
   });
 
   it('protected by isWebhookSecretRoute: 7 (5 static + 2 dynamic — middleware src/middleware.ts:137-167)', () => {
     expect(webhookProtectedCount).toBe(7);
   });
 
-  it('non-webhook write routes: 131 (138 mutating − 7 webhook-protected; tenant authentication remains required)', () => {
-    expect(nonWebhookCount).toBe(131);
+  it('non-webhook write routes: 152 (159 mutating − 7 webhook-protected; tenant authentication remains required)', () => {
+    expect(nonWebhookCount).toBe(152);
   });
 
   it('interface call templates found by multi-line scanner', () => {
