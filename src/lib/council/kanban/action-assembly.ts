@@ -310,6 +310,14 @@ export class CouncilPlanAssembly {
           created_count: links.filter((link) => link.created).length,
           linked_count: links.filter((link) => !link.created).length,
           task_ids: links.map((link) => link.task_id),
+          // CWE-048 O-1: the per-link created flags, itemized so a
+          // replayed create receipt can be rebuilt from committed
+          // records exactly (additive; the counts above are unchanged).
+          links: links.map((link) => ({
+            action_id: link.action_id,
+            task_id: link.task_id,
+            created: link.created,
+          })),
           authorization: { permission: 'execute' },
         },
       });

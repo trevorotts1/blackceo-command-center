@@ -33,6 +33,7 @@ import { computePlanPreview, type CouncilPlanPreview } from './kanban/action-pre
 import { CouncilPlanAssembly, type CouncilPlanAssemblyResult } from './kanban/action-assembly';
 import { CouncilActionExecutionGuard } from './kanban/action-execution';
 import { listPlanTaskLinks } from './kanban/action-dependencies';
+import { listKanbanJournalEntries } from './kanban/journal';
 import { CouncilKanbanError } from './kanban/errors';
 import {
   CouncilActionPlanService,
@@ -729,6 +730,40 @@ async function replayCreateResult(
   const db = ctx.store.handle();
   const links = listPlanTaskLinks(db, scope, sessionId, planId);
   const record = services.assembly.assemblyRecord(scope, sessionId, planId);
+  // CWE-048 O-1: rebuild the receipt's assembly facts from the
+  // committed assembly journal, exactly as the fresh path reported
+  // them: the parent task and the per-link created flags from the
+  // latest plan_tasks_materialized entry for this assembly, and the
+  // edges from the latest assembly_edges_resolved entry. Assemblies
+  // recorded before the per-link itemization existed keep
+  // created: null per task (their journal recorded the counts, never
+  // the per-link split); the parent and the edges are still rebuilt.
+  let parentTaskId: string | null = null;
+  const createdByAction = new Map<string, boolean>();
+  let edges: ActionPlanCreateResult['edges'] = [];
+  for (const entry of listKanbanJournalEntries(db, scope, sessionId)) {
+    if (entry.payload.plan_id !== planId) continue;
+    if (record !== null && entry.payload.assembly_id !== record.assembly_id) continue;
+    if (entry.action === 'plan_tasks_materialized') {
+      if (typeof entry.payload.parent_task_id === 'string') {
+        parentTaskId = entry.payload.parent_task_id;
+      }
+      createdByAction.clear();
+      const itemized = entry.payload.links;
+      if (Array.isArray(itemized)) {
+        for (const item of itemized) {
+          if (item === null || typeof item !== 'object') continue;
+          const candidate = item as { action_id?: unknown; created?: unknown };
+          if (typeof candidate.action_id === 'string' && typeof candidate.created === 'boolean') {
+            createdByAction.set(candidate.action_id, candidate.created);
+          }
+        }
+      }
+    }
+    if (entry.action === 'assembly_edges_resolved' && Array.isArray(entry.payload.edges)) {
+      edges = entry.payload.edges as ActionPlanCreateResult['edges'];
+    }
+  }
   const tasks = [];
   for (const link of links) {
     const decision = await guard(async () =>
@@ -740,7 +775,7 @@ async function replayCreateResult(
       action_id: link.action_id,
       task_id: link.task_id,
       operation_id: link.operation_id,
-      created: null,
+      created: createdByAction.get(link.action_id) ?? null,
       released: decision.already_released,
       releasable: decision.releasable,
       reasons: decision.reasons,
@@ -753,9 +788,9 @@ async function replayCreateResult(
     plan_hash: planHash,
     status: record?.completed ? 'assembled' : 'assembly_recorded',
     assembly_id: record?.assembly_id ?? null,
-    parent_task_id: null,
+    parent_task_id: parentTaskId,
     tasks,
-    edges: [],
+    edges,
     replayed: true,
     note: CREATE_NOTE,
   };
