@@ -106,6 +106,18 @@
  * until the coordinator classifies them; the two count pins in this
  * paragraph are the composed truth regardless.
  *
+ * Coordinator decision on those 13 (2026-10-16, train PR #550): they are
+ * classified as a documented residual, DOCUMENTED_UNWIRED_CONSOLE_ROUTES
+ * at the derivation test below, with each route's verified posture
+ * recorded there. The assertion enforces the residual exactly in both
+ * directions (an unlisted unclassified route fails by name; a residual
+ * entry that gains a classification fails by name as stale), so the
+ * lock's anti-rot property is unchanged. Wiring their console UI in a
+ * later unit moves them to interface-called on evidence and shrinks the
+ * list; bearer-listing them remains rejected (it misstates the browser
+ * channel's CSRF-proof auth and is mechanically blocked by the
+ * no-overlap assertion via the registry's canonical :id paths).
+ *
  * re-derived 2026-09-27 for ILJ-004 tenant skip marks: POST
  * /api/interview/state — the owner's browser marking one structured question
  * skipped (InterviewClient.tsx:375 with the session cookie + tenant
@@ -416,7 +428,40 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
 
   // ---- Derivation test: every reachable route is classified ---------------
 
-  it('every reachable mutating route is either in BEARER_REQUIRED_WRITE_ROUTES or called by the interface', () => {
+  // DOCUMENTED RESIDUAL (coordinator decision, 2026-10-16, train PR #550).
+  // The 13 council session routes below are in neither classification:
+  // no browser call site or client binding for them exists in this tree,
+  // so the interface category cannot be evidenced, and the bearer
+  // category would misstate their real auth. Their designed caller is
+  // the operator's browser console, whose UI is not yet wired to them.
+  // Their posture, verified per handler: verified tenant identity plus
+  // the signed mc_csrf_token cookie at middleware passthrough, and
+  // in-handler the CWE-007 principal with a CSRF mutation proof and
+  // authorizeSessionMutate (the action-plan trio is dual-channel under
+  // CWE-045, additionally admitting the host-configured machine binding).
+  // This list is the COMPLETE residual set, and the assertion below
+  // enforces it exactly in both directions: a route classified nowhere
+  // and absent here fails by name, and an entry here that has gained a
+  // classification (or no longer exists) fails by name as stale, so the
+  // list cannot rot into a blanket exemption. Adding a route to this
+  // list is a reviewable security decision, never a convenience.
+  const DOCUMENTED_UNWIRED_CONSOLE_ROUTES: string[] = [
+    '/api/council/sessions/{id}', // DELETE (tombstone delete, CWE-050)
+    '/api/council/sessions/{id}/archive',
+    '/api/council/sessions/{id}/cancel',
+    '/api/council/sessions/{id}/decision',
+    '/api/council/sessions/{id}/pause',
+    '/api/council/sessions/{id}/rerun',
+    '/api/council/sessions/{id}/resume',
+    '/api/council/sessions/{id}/run-authorization/preview',
+    '/api/council/sessions/{id}/run-authorization/approve',
+    '/api/council/sessions/{id}/run-authorization/revoke',
+    '/api/council/sessions/{id}/action-plan/preview', // dual-channel trio (CWE-045)
+    '/api/council/sessions/{id}/action-plan/approve',
+    '/api/council/sessions/{id}/action-plan/create',
+  ];
+
+  it('every reachable mutating route is either in BEARER_REQUIRED_WRITE_ROUTES, called by the interface, or a documented unwired console route (exact residual enforced)', () => {
     const unclassified: string[] = [];
     const routeByPattern = new Set<string>(); // routes covered by bearer patterns
 
@@ -434,9 +479,16 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
       unclassified.push(p);
     }
 
-    // The anti-rot assertion: if a NEW route is added without classification,
-    // it appears here and the test fails.
-    expect(unclassified).toEqual([]);
+    // The anti-rot assertion, exact in both directions: a NEW route added
+    // without classification appears in `unexpected` and fails by name;
+    // a residual entry that has since been classified (or removed)
+    // appears in `stale` and fails by name, forcing this list to shrink.
+    const residual = new Set(DOCUMENTED_UNWIRED_CONSOLE_ROUTES);
+    const unexpected = unclassified.filter((p) => !residual.has(p));
+    const stale = DOCUMENTED_UNWIRED_CONSOLE_ROUTES.filter(
+      (p) => !unclassified.includes(p),
+    );
+    expect({ unexpected, stale }).toEqual({ unexpected: [], stale: [] });
   });
 
   // ---- No-overlap test (full check against all patterns across all files) ---
