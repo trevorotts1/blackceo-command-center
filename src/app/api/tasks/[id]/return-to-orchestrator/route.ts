@@ -11,7 +11,7 @@
  *   2. Writes a task_returned event to the events table (audit trail).
  *   3. Sets task status = 'backlog' so the ceo-delegation-sweep picks it up.
  *   4. Increments qc_reroute_attempts.
- *   5. If qc_reroute_attempts >= cap (default 3), flags the task for operator
+ *   5. If qc_reroute_attempts >= cap (default 5), flags the task for operator
  *      escalation instead of re-routing (broadcasts task_escalated event).
  *   6. Bumps last_progress_at (stale sweep reads this).
  *   7. Broadcasts task_updated so the board card moves visibly.
@@ -28,11 +28,12 @@ import { broadcast } from '@/lib/events';
 import { v4 as uuidv4 } from 'uuid';
 import type { Task } from '@/lib/types';
 import { transition, recordStatusEvent } from '@/lib/task-lifecycle';
+import { QC_MAX_REROUTES } from '@/lib/qc-cap';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
-const MAX_REROUTES = parseInt(process.env.QC_MAX_REROUTES || '3', 10);
+const MAX_REROUTES = QC_MAX_REROUTES;
 
 const HandbackSchema = z.object({
   /** One concise line describing exactly what failed. */

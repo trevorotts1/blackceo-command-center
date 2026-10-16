@@ -8,7 +8,7 @@ import {NextRequest} from 'next/server';
 const root=process.env.CC_TEST_FIXTURE_ROOT!;
 const companyRoot=path.join(root,'company'),workspace=path.join(root,'workspace'),runtimeRoot=path.join(root,'runtime'),scripts=path.join(root,'scripts');
 Object.assign(process.env,{OPENCLAW_GATEWAY_URL:'ws://127.0.0.1:1',OPENCLAW_ROOT:runtimeRoot,OPENCLAW_WORKSPACE_ROOT:workspace,OPENCLAW_SKILL23_SCRIPTS:scripts,MC_API_TOKEN:'launch-fixture-token',MC_INSTALLATION_ID:'launch-install',MC_COMPANY_ID:'launch-company',DISABLE_CRON:'1',DISABLE_BRIDGE_BOOTSTRAP:'1'});
-process.env.MC_TENANT_REGISTRY_JSON=JSON.stringify({'launch.example':{kind:'self',tenantId:'launch-tenant',companyId:'launch-company',installationId:'launch-install'}});
+process.env.MC_TENANT_REGISTRY_JSON=JSON.stringify({'launch.example':{kind:'self',tenantId:'launch-tenant',companyId:'launch-company',installationId:'launch-install',issuer:'https://launch-access.example',audience:'launch-audience',subjects:['owner:launch']}});
 process.env.MC_PERSONA_COMPANY_CONTEXTS_JSON=JSON.stringify({'launch-company':{companyRoot,companyConfig:path.join(companyRoot,'company-config.json'),companySlug:'launch-company',personaCatalog:path.join(companyRoot,'catalog.json')}});
 let db:typeof import('../../src/lib/db');let GET:typeof import('../../src/app/api/auth/interview-ready/route')['GET'];
 let seam:typeof import('../../src/lib/interview/seam');
@@ -38,7 +38,7 @@ test('fresh scoped shell proves prerequisites before answers without claiming pr
 });
 test('unknown host, missing enrollment authorization and conflicting installation fail closed',async()=>{
  assert.equal((await GET(req('foreign.example'))).status,403);assert.equal((await GET(req('launch.example','wrong'))).status,403);
- for(const field of ['companyId','installationId','tenantId']){writeState({...fresh(),[field]:'foreign'});const response=await GET(req());assert.equal(response.status,503);assert.ok((await response.json()).missing.includes('scoped_interview_state'));}
+ for(const field of ['companyId','installationId','tenantId']){writeState({...fresh(),[field]:'foreign'});const response=await GET(req());assert.equal(response.status,503);assert.ok((await response.json()).missing.includes('interview_state_identity_mismatch'));}
  writeState(fresh());
 });
 test('empty catalogs, absent state, missing scripts and invalid runtime cannot pass',async()=>{
@@ -94,7 +94,7 @@ test('ambient systemAgent selection wins; ownerless multi-agent fleet cannot gue
  } finally {fs.writeFileSync(configPath,original);}
 });
 
-test('sender-issued one-use invitation redeems to authenticated state and preserves answers',async()=>{
+test('sender-issued invitation redeems to authenticated state, re-opens, and preserves answers',async()=>{
  const {POST:issue}=await import('../../src/app/api/auth/interview-invitation/route');
  const {POST:redeem}=await import('../../src/app/api/auth/interview-session/route');
  const {GET:stateGET}=await import('../../src/app/api/interview/state/route');
@@ -103,14 +103,28 @@ test('sender-issued one-use invitation redeems to authenticated state and preser
  const denied=await stateGET(new NextRequest('https://launch.example/api/interview/state',{headers:{host:'launch.example'}}));assert.equal(denied.status,403);
  const response=await call(),invitation=await response.json();assert.equal(response.status,200,JSON.stringify(invitation));
  assert.equal(invitation.companyId,'launch-company');assert.equal(invitation.protocol,'interview-invitation.v1');
- const ticket=new URLSearchParams(new URL(invitation.url).hash.slice(1)).get('enroll')!;assert.ok(ticket);assert.ok(invitation.expiresAt<=Date.now()/1000+86400);
+ // Query (?enroll=) and legacy fragment (#enroll=) ticket extraction stay
+ // compatible: the sender emits the short query link, older tooling may still
+ // hand back the fragment form, and both must redeem.
+ const ticket=new URL(invitation.url).searchParams.get('enroll')!;assert.ok(ticket);
+ // The receipt's validity is completion. `expiresAt` survives only so an
+ // onboarding validator already deployed on a fleet box, which bound-checks it
+ // against 24h plus 10s of skew, still accepts a link minted here.
+ assert.equal(invitation.validUntil,'interview-complete');
+ assert.equal(invitation.redeemable,'until-interview-complete');
+ assert.equal(invitation.oneUse,true,'legacy wire constant kept so already-deployed onboarding validators still accept the receipt');
+ assert.ok(invitation.expiresAt>Date.now()/1000&&invitation.expiresAt<=Date.now()/1000+86410,'legacy expiresAt must stay inside the deployed validator bound');
  const redemption=(host='launch.example')=>redeem(new NextRequest(`https://${host}/api/auth/interview-session`,{method:'POST',headers:{host,'content-type':'application/json'},body:JSON.stringify({ticket})}));
  assert.equal((await redemption('foreign.example')).status,403);
- const enrolled=await redemption();assert.equal(enrolled.status,200);assert.equal((await redemption()).status,409);
+ const enrolled=await redemption();assert.equal(enrolled.status,200);assert.equal((await redemption()).status,200,'the delivered link re-opens on a second device');
  const cookie=enrolled.headers.get('set-cookie')!.split(';')[0];
  const state=await stateGET(new NextRequest('https://launch.example/api/interview/state',{headers:{host:'launch.example',cookie}}));assert.equal(state.status,200,await state.text());
  assert.equal(JSON.parse(fs.readFileSync(statePath,'utf8')).interviewProgress.savedAnswer,'Keep this answer');
- const freshInvitation=await call();assert.equal(freshInvitation.status,200);assert.notEqual((await freshInvitation.json()).url,invitation.url,'fresh invitation preserves tenant answers with a new one-use token');
+ const freshInvitation=await call();assert.equal(freshInvitation.status,200);assert.notEqual((await freshInvitation.json()).url,invitation.url,'fresh invitation preserves tenant answers with a new token');
+ // Completion is the one state that closes issuance, exactly as it closes
+ // redemption. Nothing about elapsed time does.
+ writeState({...fresh(),interviewComplete:true});
+ const afterCompletion=await call();assert.equal(afterCompletion.status,409);assert.equal((await afterCompletion.json()).error,'interview_not_ready');
  writeState(fresh());
 });
 
@@ -120,11 +134,60 @@ test('invitation uses configured public origin behind an internal proxy and reje
  const call=()=>issue(new NextRequest('http://127.0.0.1:4000/api/auth/interview-invitation',{method:'POST',headers:{host:'launch.example',authorization:'Bearer launch-fixture-token','content-type':'application/json','x-forwarded-host':'foreign.example','x-forwarded-proto':'http'},body:JSON.stringify({recipientHash:'a'.repeat(64)})}));
  try {
   Object.assign(process.env,{NODE_ENV:'production',MC_TENANT_PUBLIC_URL:'https://launch.example'});
-  const response=await call();assert.equal(response.status,200);assert.ok((await response.json()).url.startsWith('https://launch.example/interview#enroll='));
+  const response=await call();assert.equal(response.status,200);assert.ok((await response.json()).url.startsWith('https://launch.example/interview?enroll='));
   process.env.MC_TENANT_PUBLIC_URL='https://foreign.example';assert.equal((await call()).status,409);
   delete process.env.MC_TENANT_PUBLIC_URL;assert.equal((await call()).status,409);
  } finally {
   if(previousOrigin===undefined)delete process.env.MC_TENANT_PUBLIC_URL;else process.env.MC_TENANT_PUBLIC_URL=previousOrigin;
   if(previousMode===undefined)delete process.env.NODE_ENV;else Object.assign(process.env,{NODE_ENV:previousMode});
  }
+});
+
+// An interview finished before the identity stamps existed must not be reported
+// as never having happened. Measured on a client box whose build state carried
+// interviewComplete:true from June and none of the three stamps.
+test('interview completed before the identity stamps existed reads complete and self-stamps',async()=>{
+ writeState({interviewComplete:true,buildType:'legacy',buildId:'build-one'});
+ const before=JSON.parse(fs.readFileSync(statePath,'utf8'));
+ assert.deepEqual(['companyId','installationId','tenantId'].filter(key=>key in before),[],'fixture must genuinely start unstamped or this test proves nothing');
+ const response=await GET(req());const body=await response.json();
+ assert.equal(response.status,200,JSON.stringify(body));
+ assert.equal(body.interviewComplete,true,'a finished interview is never reported as unknown');
+ assert.equal(body.capabilities.state,true);assert.deepEqual(body.missing,[]);
+ const after=JSON.parse(fs.readFileSync(statePath,'utf8'));
+ assert.deepEqual([after.companyId,after.installationId,after.tenantId],['launch-company','launch-install','launch-tenant'],'the stamps are written back so the next read is already scoped');
+ assert.equal(after.interviewComplete,true);assert.equal(after.buildId,'build-one','backfill preserves every other key');
+ writeState(fresh());
+});
+
+test('a stamp that names another tenant still fails closed and is never backfilled over',async()=>{
+ writeState({interviewComplete:true,buildType:'legacy',companyId:'foreign-company'});
+ const response=await GET(req());const body=await response.json();
+ assert.equal(response.status,503);
+ assert.ok(body.missing.includes('interview_state_identity_mismatch'),JSON.stringify(body.missing));
+ assert.ok(!body.missing.includes('interview_state_unstamped'),'a real mismatch is not reported as merely unstamped');
+ assert.equal(body.interviewComplete,null,'a flag stamped for another tenant is not this tenant answer');
+ assert.equal(JSON.parse(fs.readFileSync(statePath,'utf8')).companyId,'foreign-company','a present foreign stamp is never overwritten');
+ writeState(fresh());
+});
+
+test('an unstamped state with no completion flag still reads incomplete',async()=>{
+ writeState({buildType:'legacy'});
+ const response=await GET(req());const body=await response.json();
+ assert.equal(response.status,503);
+ assert.ok(body.missing.includes('interview_state_unstamped'),JSON.stringify(body.missing));
+ assert.equal(body.interviewComplete,null);assert.equal(body.capabilities.state,false);
+ assert.equal(JSON.parse(fs.readFileSync(statePath,'utf8')).companyId,undefined,'nothing is stamped without a completion flag to trust');
+ writeState(fresh());
+});
+
+test('the login gate admits an unstamped but completed interview',async()=>{
+ const {GET:gateStatus}=await import('../../src/app/api/interview/gate-status/route');
+ writeState({interviewComplete:true,buildType:'legacy'});
+ const admitted=await gateStatus(req() as never);
+ assert.equal((await admitted.json()).interviewComplete,true,'the shell lock reads the flag itself, so a missing stamp never locks a client out');
+ writeState({interviewComplete:false,buildType:'legacy'});
+ const refused=await gateStatus(req() as never);
+ assert.equal((await refused.json()).interviewComplete,false,'and an unfinished interview is still locked');
+ writeState(fresh());
 });

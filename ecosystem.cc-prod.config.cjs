@@ -41,9 +41,100 @@ const path = require('path');
 const INSTALL_DIR = process.env.CC_INSTALL_DIR || process.cwd();
 // Canonical absolute DB path — identical to .env.local and the previously
 // working cc-prod pm2 env, so a restart always opens the same database.
-const DB_PATH = process.env.DATABASE_PATH || path.join(process.env.HOME, 'command-center/data/mission-control.db');
+// B.4 HARDENING (decoy-DB fix, 2026-09-06): four-tier DATABASE_PATH resolution
+// anchored on __dirname -- this config file's OWN directory -- never on
+// process.cwd(), which becomes the CALLER's cwd when watchdog-cc.sh or
+// atomic-deploy run `pm2 start <abs>/ecosystem.cc-prod.config.cjs` without
+// cd-ing into the install dir. That cwd bug is what resolved DB_PATH to a decoy
+// path and made the Command Center silently serve an empty database.
+//   1) shell env DATABASE_PATH
+//   2) DATABASE_PATH parsed out of <__dirname>/.env.local (quotes stripped; a
+//      relative value is resolved to an ABSOLUTE path against __dirname)
+//   3) <__dirname>/mission-control.db when that file exists
+//   4) the ORIGINAL fallback, kept LAST so nothing regresses
+function __ccDbResolveFromEnvLocal(dir) {
+  const ccfs = require('fs');
+  try {
+    const f = path.join(dir, '.env.local');
+    if (!ccfs.existsSync(f)) return null;
+    const m = ccfs.readFileSync(f, 'utf8')
+      .match(/^[ \t]*(?:export[ \t]+)?DATABASE_PATH[ \t]*=[ \t]*(.*)$/m);
+    if (!m) return null;
+    let v = m[1].trim().replace(/\s+#.*$/, '').trim();
+    if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
+      v = v.slice(1, -1);
+    }
+    v = v.trim();
+    if (!v) return null;
+    return path.isAbsolute(v) ? v : path.resolve(dir, v);
+  } catch (e) { return null; }
+}
+function __ccDbLocalFile(dir) {
+  const ccfs = require('fs');
+  try {
+    const p = path.join(dir, 'mission-control.db');
+    return ccfs.existsSync(p) ? p : null;
+  } catch (e) { return null; }
+}
+const DB_PATH = process.env.DATABASE_PATH
+  || __ccDbResolveFromEnvLocal(__dirname)
+  || __ccDbLocalFile(__dirname)
+  || path.join(process.env.HOME, 'command-center/data/mission-control.db');
 // CC_PORT ONLY — cc-start.sh reads this, strips ambient PORT, then re-exports it.
 const CC_PORT = process.env.CC_PORT || '4000';
+
+// ── ISSUE-09: NODE RUNTIME IDENTITY (resolved at config load) ────────────────
+// This config used to run `script: 'bash'` with no interpreter and no PATH,
+// and scripts/cc-start.sh then exec'd a BARE `node` off whatever PATH pm2
+// happened to inherit. On a Mac that is launchd's minimal PATH at boot and the
+// operator's interactive PATH after `pm2 restart --update-env`, which are not
+// the same node. Meanwhile `postinstall` compiles better-sqlite3 against
+// whichever node ran npm. The node that rebuilt the native module and the node
+// that ran the server were routinely different, so better-sqlite3 threw
+// NODE_MODULE_VERSION on every boot and it recurred after every update.
+//
+// scripts/lib/node-runtime.sh is now the single place that decides, and it is
+// asked HERE so the resolved binary reaches the pm2 child env. CC_NODE_BIN is
+// what cc-start.sh execs; its directory is prepended to PATH so any tool the
+// app shells out to resolves the same node.
+//
+// FAIL LOUD, never fall back. A config that silently defaults to bare `node`
+// is exactly the defect: pm2 would start, the app would load a native module
+// built for a different ABI, and the box would crash-loop with a message that
+// names neither the config nor the runtime. Throwing here surfaces the real
+// problem, with the install command, before anything starts.
+// spawnSync rather than execFileSync: stderr has to be CAPTURED so the
+// resolver's remedy can be folded into the thrown Error (pm2 surfaces a
+// config-load throw, but does not reliably surface a child's inherited
+// stderr), AND re-emitted on the success path so a warning about an override
+// pinning the wrong major is never silent. Only spawnSync gives both.
+const { spawnSync } = require('child_process');
+
+function resolveCcNodeBin() {
+  const resolver = path.join(__dirname, 'scripts', 'lib', 'node-runtime.sh');
+  const proc = spawnSync('bash', [resolver], { encoding: 'utf8' });
+  const stderr = String((proc && proc.stderr) || '').trim();
+  if (proc.error || proc.status !== 0) {
+    const detail = stderr || String((proc.error && proc.error.message) || 'resolver exited ' + proc.status);
+    throw new Error(
+      'BlackCEO Command Center: cannot resolve the Node runtime, refusing to start.\n' +
+      detail + '\n' +
+      'Resolver: ' + resolver + '\n' +
+      'Set CC_NODE_BIN to an explicit node path to override.'
+    );
+  }
+  if (stderr) process.stderr.write(stderr + '\n');
+  const resolved = String(proc.stdout || '').trim();
+  if (!resolved) {
+    throw new Error(
+      'BlackCEO Command Center: ' + resolver + ' exited 0 but named no node binary. Refusing to start.'
+    );
+  }
+  return resolved;
+}
+
+const CC_NODE_BIN = resolveCcNodeBin();
+const CC_NODE_DIR = path.dirname(CC_NODE_BIN);
 
 module.exports = {
   apps: [{
@@ -55,19 +146,14 @@ module.exports = {
       NODE_ENV: 'production',
       CC_PORT: CC_PORT,
       DATABASE_PATH: DB_PATH,
+      // ISSUE-09: the ONE resolved node this box uses. Its directory leads the
+      // pinned PATH below, so `node` there is the same binary cc-start.sh execs.
+      CC_NODE_BIN: CC_NODE_BIN,
 
-      // ── MSG-08 (2026-07-15): OPERATOR-OWNER CLEAN NOTIFY (this box ONLY) ──
-      // This IS the operator's own board: resolveOwnerChatId() is structurally
-      // always null here (validOwnerChatId() rejects every operator id — the
-      // guardrail that stops a CLIENT box DMing the operator as its owner), so
-      // every owner report his own tasks generate used to fall into
-      // escalateUndeliverableOwner() and self-spam an "UNDELIVERABLE owner"
-      // digest. With this flag set, and ONLY after resolveOwnerChatId() returns
-      // null, notifyOwner() delivers the owner-facing message directly to the
-      // resolved OPERATOR chat id — cleanly, ONCE, no UNDELIVERABLE wrapper
-      // (src/lib/notify.ts operatorIsOwnerBox() / MSG-08). NEVER set on a client
-      // box — it is provisioned here only, on the operator's own machine.
-      CC_OPERATOR_IS_OWNER: '1',
+      // MSG-08: CC_OPERATOR_IS_OWNER is NOT set here. This file ships in every
+      // checkout, client boxes included, so a hardcoded '1' marked a client's
+      // Command Center as operator-owned. The operator's own box is marked by
+      // ~/.openclaw/.operator-is-owner (src/lib/notify.ts operatorIsOwnerBox()).
 
       // ── NOTIFY-01 (2026-07-14): OWNER NOTIFICATIONS ARE 100% DEAD ─────────
       // src/lib/notify.ts fires execFile('openclaw', […], { timeout: 5_000 }).
@@ -113,10 +199,17 @@ module.exports = {
       // --update-env restart from a shell whose PATH is prefixed with
       // ~/.openclaw-testshim can NEVER make production resolve `openclaw` to the
       // test shim that swallows sends. The test shim is deliberately ABSENT here.
+      //
+      // ISSUE-09: CC_NODE_DIR goes FIRST. The entries below list /usr/local/bin
+      // and /opt/homebrew/bin, either of which can hold a node of the wrong
+      // major, and whichever came first used to win. The resolved node now
+      // precedes both, so every tool this process shells out to sees the same
+      // node the app itself runs on.
       PATH: [
+        CC_NODE_DIR,                                    // ISSUE-09: the resolved node
         path.join(process.env.HOME, '.npm-global/bin'), // openclaw, npx
         path.join(process.env.HOME, '.local/bin'),      // openclaw (symlink)
-        '/usr/local/bin',                         // node
+        '/usr/local/bin',
         '/opt/homebrew/bin',
         '/opt/homebrew/sbin',
         '/usr/bin', '/bin', '/usr/sbin', '/sbin',

@@ -87,6 +87,14 @@ export interface AuthProofResult {
   provenAt: string;
   /** Why the proof failed, when it did. 'none' when ok. */
   failureKind: AuthProofFailureKind;
+  /**
+   * CC-KIE-2 — provider account balance returned by the proof call, when the
+   * connector's key-check endpoint carries one (Kie /chat/credit `data.credit`).
+   * Display-only; null whenever the proof carried no finite balance (missing
+   * key, rejected key, malformed reply, or a non-balance proof method) — never
+   * a fabricated number.
+   */
+  credits: number | null;
 }
 
 export interface AuthProofCacheRow {
@@ -98,6 +106,8 @@ export interface AuthProofCacheRow {
   detail: string | null;
   /** Nullable: rows written before migration 106 have no failure_kind. */
   failure_kind: string | null;
+  /** Nullable: rows written before migration 170 have no credits. */
+  credits: number | null;
 }
 
 /**
@@ -147,16 +157,17 @@ export function isProofFresh(row: AuthProofCacheRow | null, nowMs: number = Date
 
 function upsertAuthProofCache(slug: string, result: AuthProofResult): void {
   run(
-    `INSERT INTO provider_auth_proof_cache (provider_slug, proven_at, ok, method, model_id, detail, failure_kind)
-     VALUES (?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO provider_auth_proof_cache (provider_slug, proven_at, ok, method, model_id, detail, failure_kind, credits)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(provider_slug) DO UPDATE SET
        proven_at = excluded.proven_at,
        ok = excluded.ok,
        method = excluded.method,
        model_id = excluded.model_id,
        detail = excluded.detail,
-       failure_kind = excluded.failure_kind`,
-    [slug, result.provenAt, result.ok ? 1 : 0, result.method, result.modelId, result.detail, result.failureKind],
+       failure_kind = excluded.failure_kind,
+       credits = excluded.credits`,
+    [slug, result.provenAt, result.ok ? 1 : 0, result.method, result.modelId, result.detail, result.failureKind, result.credits ?? null],
   );
 }
 
@@ -204,6 +215,7 @@ export async function proveProviderAuth(provider: ModelProvider, apiKey: string)
           detail: hasChoice ? null : 'provider responded but returned no completion choices',
           provenAt,
           failureKind: hasChoice ? 'none' : 'unknown',
+          credits: null,
         };
       } catch (err) {
         const kind = classifyProofFailure(err);
@@ -221,6 +233,7 @@ export async function proveProviderAuth(provider: ModelProvider, apiKey: string)
           detail: err instanceof Error ? err.message : String(err),
           provenAt,
           failureKind: kind,
+          credits: null,
         };
       }
     }
@@ -241,6 +254,7 @@ export async function proveProviderAuth(provider: ModelProvider, apiKey: string)
         detail: err instanceof Error ? err.message : String(err),
         provenAt,
         failureKind: classifyProofFailure(err),
+        credits: null,
       };
     }
     return {
@@ -250,6 +264,9 @@ export async function proveProviderAuth(provider: ModelProvider, apiKey: string)
       detail: smoke.message ?? null,
       provenAt,
       failureKind: smoke.ok ? 'none' : 'auth',
+      // CC-KIE-2 — surface the balance only on a proven call; a failed
+      // verifyKey carries none. Fail-closed: never a fabricated number.
+      credits: smoke.ok ? (smoke.credits ?? null) : null,
     };
   }
 
@@ -266,6 +283,7 @@ export async function proveProviderAuth(provider: ModelProvider, apiKey: string)
         `The local model catalog is stale — refresh it, then prove again.`,
       provenAt,
       failureKind: 'model_not_found',
+      credits: null,
     };
   }
 
@@ -276,6 +294,7 @@ export async function proveProviderAuth(provider: ModelProvider, apiKey: string)
     detail: 'no authenticated-call method available',
     provenAt,
     failureKind: 'unknown',
+    credits: null,
   };
 }
 
@@ -306,6 +325,9 @@ export async function getOrProveProviderAuth(
         // Rows written before migration 106 have no failure_kind: report the
         // honest 'unknown' rather than inventing a cause.
         failureKind: (cached!.failure_kind as AuthProofFailureKind | null) ?? (cached!.ok === 1 ? 'none' : 'unknown'),
+        // Rows written before migration 170 have no credits: report null
+        // (no balance shown) rather than inventing a number.
+        credits: cached!.credits ?? null,
       };
     }
   }
@@ -319,6 +341,7 @@ export async function getOrProveProviderAuth(
       detail: `unknown provider slug: ${slug}`,
       provenAt: new Date().toISOString(),
       failureKind: 'unknown',
+      credits: null,
     };
   }
 

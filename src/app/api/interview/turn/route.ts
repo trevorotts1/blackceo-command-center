@@ -21,10 +21,12 @@ import { randomUUID } from 'crypto';
  *
  * Recipe copied from src/app/api/openclaw/sessions/route.ts
  * (dynamic='force-dynamic', getOpenClawClient() + connect()-or-503,
- * sendMessage). The reply is read back with the documented
- * getSessionHistory (sessions.history) RPC — the same one the
+ * sendMessage). The reply is read back with getSessionHistory, which calls the
+ * gateway's `chat.history` RPC — the same one the
  * /api/openclaw/sessions/[id]/history route uses — so we never guess an
- * undocumented gateway event name.
+ * undocumented gateway event name. (It used to call `sessions.history`, a
+ * method no gateway version has ever registered; every readback failed and the
+ * route reported it as "the agent did not reply". See client.ts.)
  *
  * Gateway coupling is tolerated by design: on an unreachable gateway this
  * returns 503 and the UI falls back to structured cards (branding +
@@ -185,7 +187,7 @@ function sleep(ms: number): Promise<void> {
 async function connectOr503(req?: NextRequest): Promise<
   { ok: true; client: OpenClawClient } | { ok: false; response: NextResponse }
 > {
-  // JANET-INTERVIEW-FIX: a remote client's hostname relays the conversation to
+  // TENANT-INTERVIEW-FIX: a remote client's hostname relays the conversation to
   // THAT client's own gateway (its row's gateway_url + token), so the
   // interview runs on her box. Self keeps the historical local singleton.
   if (req) {
@@ -252,7 +254,7 @@ async function resolveSessionId(
   req: NextRequest,
   provided?: string,
 ): Promise<string> {
-  // JANET-INTERVIEW-FIX phase 2: for a client tenant, prefer the session we
+  // TENANT-INTERVIEW-FIX phase 2: for a client tenant, prefer the session we
   // already persisted for that client. Without this the browser had nowhere to
   // read a prior session id from (/api/interview/state returned null for
   // clients), so every visit minted a NEW gateway session and the client met a

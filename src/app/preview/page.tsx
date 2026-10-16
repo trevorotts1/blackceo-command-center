@@ -43,6 +43,7 @@ import { loadCompanyConfig } from '@/lib/company-config';
 import { readBuildState, readStandardPrebuild } from '@/lib/interview/seam';
 import type { BuildState } from '@/lib/interview/seam';
 import { resolveDepartmentsConfigPath } from '@/lib/db/migrations';
+import { departmentsOrEmpty } from '@/lib/departments-payload';
 import fs from 'fs';
 
 export const runtime = 'nodejs';
@@ -74,24 +75,22 @@ function displayNameFromSlug(slug: string): string {
 
 /**
  * Normalize a parsed departments.json payload into PreviewDepartment[].
- * Mirrors seed-workspaces.py `_normalize_departments`: the artifact comes in
- * three shapes in the wild (canonical array-of-objects, bare-string list,
- * dict-of-dicts keyed by slug); all three must render. Anything that cannot
- * name a department is dropped — the preview never invents one.
+ *
+ * The ENVELOPE layer is `departmentsOrEmpty()` — the one normalizer shared with
+ * `reseedWorkspacesFromConfig()` and, rule for rule, with the Python installer
+ * scripts. This function used to fold ANY object's keys in as department ids,
+ * so the build's `{company, total_departments, total_roles, departments}`
+ * envelope rendered four phantom departments named Company, Total Departments,
+ * Total Roles and Departments — the same defect that seeded four bogus
+ * workspaces onto a client board. A dict's metadata keys are never departments.
+ *
+ * What stays here is the PER-ENTRY coercion: the artifact's entries come as
+ * objects, as bare slug strings, or keyed by slug, and all three must render.
+ * Anything that cannot name a department is dropped — the preview never invents
+ * one.
  */
 function normalizeDepartments(data: unknown): PreviewDepartment[] {
-  let items: unknown[] = [];
-
-  if (Array.isArray(data)) {
-    items = data;
-  } else if (data && typeof data === 'object') {
-    // Dict-of-dicts keyed by slug: fold the key in as the id.
-    items = Object.entries(data as Record<string, unknown>).map(([slug, value]) =>
-      value && typeof value === 'object' ? { ...(value as object), id: slug } : { id: slug },
-    );
-  } else {
-    return [];
-  }
+  const items = departmentsOrEmpty(data);
 
   const out: PreviewDepartment[] = [];
   for (const raw of items) {

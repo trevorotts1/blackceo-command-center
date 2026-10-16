@@ -24,6 +24,8 @@ import {
   safeStatSync,
 } from '../fs/safe-fs';
 import { seedCompanyGuarded, resolveSeedingCompanyId } from './branding-seed';
+import { readDepartmentOptoutIds } from '../workspaces/department-optout';
+import { normalizeDepartmentsPayload } from '../departments-payload';
 import { ensureRuntimeConfigFile } from '../runtime-config';
 import { BLOCKED_ASK_TRIGGER_SQL } from '../blocked-ask';
 import { councilMigration } from '../council/persistence/council-migration';
@@ -2458,7 +2460,7 @@ export const migrations: Migration[] = [
     name: 'add_tasks_qc_reroute_attempts',
     // Adds tasks.qc_reroute_attempts INTEGER column used by the QC scorer
     // (v4.12.0) to track how many times a task has been returned to backlog
-    // after failing QC. When the count reaches QC_MAX_REROUTES (default 3),
+    // after failing QC. When the count reaches QC_MAX_REROUTES (default 5),
     // the scorer stops re-dispatching, sets the task to `blocked`, and writes
     // a CEO-addressed event to surface the loop for human review.
     // Additive + idempotent: safe against any existing DB.
@@ -2548,15 +2550,24 @@ export const migrations: Migration[] = [
         VALUES (?, ?, 'QC Specialist', ?, '🔍', 'standby', 0, ?, 'permanent', 'qc', datetime('now'), datetime('now'))
       `);
 
+      // An archived workspace never receives agents. (On a fresh climb this set
+      // is empty — migration 095 adds archived_at AFTER this one — so ordering
+      // costs nothing; on a re-run against a modern schema it is load-bearing.)
+      const archived = archivedWorkspaces(db);
+
       let seeded = 0;
       for (const ws of workspaces) {
+        if (archived.has(ws.id)) continue;
         const agentId = `qc-agent-${ws.id}`;
         const agentName = `${ws.name} QC Specialist`;
         const description = `Quality control specialist for the ${ws.name} department. Reviews completed tasks against SOP success criteria and decides whether work moves to Done or back to In Progress.`;
         insertQC.run(agentId, agentName, description, ws.id);
         seeded++;
       }
-      console.log(`[Migration 060] Seeded/verified ${seeded} QC Specialist agent(s) across ${workspaces.length} workspace(s)`);
+      console.log(
+        `[Migration 060] Seeded/verified ${seeded} QC Specialist agent(s) across ${workspaces.length} workspace(s)` +
+          `${archived.size ? ` (${archived.size} archived workspace(s) skipped)` : ''}`,
+      );
     },
   },
 
@@ -5554,7 +5565,7 @@ export const migrations: Migration[] = [
   {
     // ── Migration 122 — Podcast Editor seed + skills/agent_skills tables + QC judge model ──
     // PHASE 3 (master plan 2026-08-04, units 3.1-3.3) — Command Center wiring for the
-    // podcast department. Fixes Leanne's report that the CC has no Podcast Editor agent
+    // podcast department. Fixes an operator report that the CC has no Podcast Editor agent
     // row, no skills table, no skill bindings, and no QC judge.
     //
     //   3.1  Seed the `podcast-editor` specialist row (idempotent on the ROLE SLOT —
@@ -5650,6 +5661,17 @@ export const migrations: Migration[] = [
         return;
       }
       const wsId = podcastWs.id;
+
+      // An ARCHIVED podcast workspace never receives agents. A box that declined
+      // or retired the podcast engine keeps the row for its history; seeding an
+      // editor/producer/QC into it would resurrect a workforce for a department
+      // the board does not show.
+      if (archivedWorkspaces(db).has(wsId)) {
+        console.log(
+          `[Migration 122] podcast workspace "${wsId}" is archived — skipping specialist/QC seed`,
+        );
+        return;
+      }
 
       const writerModel =
         process.env.PODCAST_WRITER_MODEL ||
@@ -5858,7 +5880,7 @@ export const migrations: Migration[] = [
     },
   },
   {
-    // JANET-INTERVIEW-FIX (2026-08-13): tenant-scope the shared Command
+    // TENANT-INTERVIEW-FIX (2026-08-13): tenant-scope the shared Command
     // Center's interview surface. The client row for a remote box whose
     // hostname routes here carries its own gateway_url / gateway_token
     // (conversation relay) and its own interview_complete flag (state reads).
@@ -5930,7 +5952,7 @@ export const migrations: Migration[] = [
     },
   },
   {
-    // JANET-INTERVIEW-FIX phase 2 (2026-08-17): per-client interview state.
+    // TENANT-INTERVIEW-FIX phase 2 (2026-08-17): per-client interview state.
     //
     // The interview's canonical state lives in the OPERATOR's files, of which
     // there is exactly one set on the box. A remote client routed here by
@@ -7110,6 +7132,1338 @@ export const migrations: Migration[] = [
     },
   },
 
+
+  {
+    // Mainline owns 142–144. This additive operator-contract table must receive
+    // its own applied-state key or existing boxes silently skip it.
+    id: '145',
+    name: 'presentation_operator_contracts',
+    up: (db) => {
+      db.exec(`CREATE TABLE IF NOT EXISTS presentation_operator_contracts (
+        task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+        execution_id TEXT NOT NULL UNIQUE,
+        contract_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      )`);
+    },
+  },
+  {
+    id: '146',
+    name: 'presentation_operator_preengine_recoveries',
+    up: (db) => {
+      db.exec(`CREATE TABLE IF NOT EXISTS presentation_operator_preengine_recoveries (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id) ON DELETE CASCADE,
+        execution_id TEXT NOT NULL,
+        contract_sha256 TEXT NOT NULL,
+        prior_dispatch_attempts INTEGER NOT NULL,
+        repair_key TEXT NOT NULL,
+        prior_failure_code TEXT NOT NULL,
+        bridge_state TEXT NOT NULL,
+        bridge_retry_attempt INTEGER NOT NULL,
+        dispatch_started_at TEXT,
+        created_at TEXT NOT NULL
+      )`);
+    },
+  },
+  {
+    // PD-TEST-050: the recovery receipt must be unique per (task_id, repair_key),
+    // NOT per task_id.
+    //
+    // Migration 146 declared `task_id TEXT NOT NULL UNIQUE`, which made the FIRST
+    // pre-engine recovery the LAST one for that task. On 2026-09-14T23:38Z the one
+    // permitted receipt (repair_key `pd038-notify-env-and-pd039-recovery-counter`)
+    // was legitimately consumed and the engine then died on a DIFFERENT
+    // deterministic pre-engine defect (PD-TEST-049). With the row present a
+    // different repair_key drew 409 `pre_engine_recovery_already_issued`, the same
+    // repair_key replayed idempotently without re-dispatching, and both ordinary
+    // sweeps gate on `dispatch_attempts < MAX_DISPATCH_ATTEMPTS` while the counter
+    // had moved 5 -> 6: no supported re-drive path existed.
+    //
+    // SQLite cannot drop an inline UNIQUE constraint, so this is a 12-step table
+    // rebuild: same columns, same types, same FK, UNIQUE moved to
+    // (task_id, repair_key). Every existing receipt row is COPIED ACROSS
+    // UNCHANGED — no recovery, submission or attempt history is deleted, and no
+    // task's `dispatch_attempts` is touched. The COPY runs before the DROP, both
+    // inside one transaction, so a failure mid-rebuild leaves the old table
+    // intact. `useOuterTransaction: false` because PRAGMA foreign_keys cannot be
+    // toggled inside an open transaction (see the Migration interface note).
+    //
+    // The rebuild is GUARDED on the old table actually existing (see the
+    // existence guard in `up`): on a half-migrated box whose `_migrations`
+    // records 146 while the table is gone, this migration CREATES the table in
+    // the new shape instead of throwing `no such table` — which, on a fail-closed
+    // boot (src/lib/db/index.ts:197-211), would stop the Command Center serving
+    // on every boot. It is also safe to re-run: a death between the rebuild
+    // commit and the runner recording the id simply rebuilds again, and the
+    // copy-and-restore below conserves every row (proven by the migration suite).
+    //
+    // DELIBERATELY NO `ALTER TABLE … RENAME TO`. SQLite's rename path re-parses
+    // and re-resolves EVERY trigger and view in the schema, so one PRE-EXISTING
+    // broken object elsewhere in the database turns this migration into a
+    // hard boot failure — a constraint rebuild must not depend on unrelated
+    // schema objects being valid. That is not theoretical: migration 132 creates
+    // `tasks_persona_decision_revision`, whose body references `NEW.persona_id`
+    // (added by migrations 016/021), so on any box where those were skipped —
+    // every minimal/partial fixture that pre-marks 001–113, and the U55 CI sweep
+    // — the trigger is latently invalid. Renaming `…_147` over the real name
+    // therefore died with `error in trigger tasks_persona_decision_revision:
+    // no such column: NEW.persona_id` and failed `boot path warns and does not
+    // crash on empty manifest` plus three migration-114 tests. The rebuild is
+    // instead: copy out to the scratch table, DROP the original, recreate it
+    // under its own name, copy back, drop the scratch. CREATE/DROP never
+    // re-resolve other objects (verified against that same fixture).
+    id: '147',
+    name: 'presentation_operator_preengine_recoveries_per_repair_key',
+    useOuterTransaction: false,
+    up: (db) => {
+      const RECEIPTS = 'presentation_operator_preengine_recoveries';
+      const SCRATCH = 'presentation_operator_preengine_recoveries_147';
+      const COLUMNS = 'id, task_id, execution_id, contract_sha256, prior_dispatch_attempts, repair_key, prior_failure_code, bridge_state, bridge_retry_attempt, dispatch_started_at, created_at';
+      const ddl = (name: string) => `CREATE TABLE ${name} (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        execution_id TEXT NOT NULL,
+        contract_sha256 TEXT NOT NULL,
+        prior_dispatch_attempts INTEGER NOT NULL,
+        repair_key TEXT NOT NULL,
+        prior_failure_code TEXT NOT NULL,
+        bridge_state TEXT NOT NULL,
+        bridge_retry_attempt INTEGER NOT NULL,
+        dispatch_started_at TEXT,
+        created_at TEXT NOT NULL,
+        UNIQUE(task_id, repair_key)
+      )`;
+      const fkRow = db.prepare('PRAGMA foreign_keys').get() as { foreign_keys: number } | undefined;
+      const fkWasOn = fkRow?.foreign_keys === 1;
+      db.exec('PRAGMA foreign_keys = OFF');
+      try {
+        const rebuild = db.transaction(() => {
+          // EXISTENCE GUARD (migration-131 convention — "every ALTER is
+          // PRAGMA/if-exists-guarded so minimal fixtures and half-migrated boxes
+          // heal instead of crashing"; migration 144's header states it, and 146
+          // itself is CREATE TABLE IF NOT EXISTS). This database class is real,
+          // not theoretical: `_migrations` has been observed on THIS box
+          // recording a later id while earlier table-creating ids were absent
+          // (145 recorded with 142-144 missing). Absent table ⇒ create it
+          // directly in the new shape; there is nothing to rebuild or preserve.
+          const tableExists = (db.prepare(
+            `SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name=?`,
+          ).get(RECEIPTS) as { n: number }).n > 0;
+          if (!tableExists) {
+            db.exec(ddl(RECEIPTS));
+            return;
+          }
+          db.exec(`DROP TABLE IF EXISTS ${SCRATCH}`);
+          db.exec(ddl(SCRATCH));
+          // Copies are PLAIN `INSERT ... SELECT`, never `INSERT OR IGNORE`: a
+          // duplicate must ABORT the rebuild loudly rather than be silently
+          // dropped. Under 146 a duplicate (task_id, repair_key) pair is
+          // impossible (task_id UNIQUE is strictly stronger); the row-count
+          // assertions re-prove it after each copy.
+          const before = (db.prepare(`SELECT COUNT(*) AS n FROM ${RECEIPTS}`).get() as { n: number }).n;
+          db.exec(`INSERT INTO ${SCRATCH} (${COLUMNS}) SELECT ${COLUMNS} FROM ${RECEIPTS}`);
+          const copied = (db.prepare(`SELECT COUNT(*) AS n FROM ${SCRATCH}`).get() as { n: number }).n;
+          if (copied !== before) throw new Error(`[Migration 147] recovery receipt copy lost rows (${before} -> ${copied}); refusing to drop the original table`);
+          db.exec(`DROP TABLE ${RECEIPTS}`);
+          db.exec(ddl(RECEIPTS));
+          db.exec(`INSERT INTO ${RECEIPTS} (${COLUMNS}) SELECT ${COLUMNS} FROM ${SCRATCH}`);
+          const restored = (db.prepare(`SELECT COUNT(*) AS n FROM ${RECEIPTS}`).get() as { n: number }).n;
+          if (restored !== before) throw new Error(`[Migration 147] recovery receipt restore lost rows (${before} -> ${restored})`);
+          db.exec(`DROP TABLE ${SCRATCH}`);
+        });
+        rebuild();
+      } finally {
+        if (fkWasOn) db.exec('PRAGMA foreign_keys = ON');
+      }
+      console.log('[Migration 147] presentation_operator_preengine_recoveries is now UNIQUE(task_id, repair_key) — receipts preserved');
+    },
+  },
+  {
+    // FLOOD-01 — indexes the stage-timings flood breaker counts on.
+    //
+    // 2026-09-16 incident: presentation_stage_timings grew from ~3,400 rows to
+    // 1,481,914 (539 MB table, ~100 MB indexes, 875 MB database) because a
+    // crash-looping presentation runner POSTed a phase_exit event ~50 times a
+    // second for two days. src/lib/presentations/stage-timings-guard.ts now
+    // refuses a run that exceeds a rate window or a lifetime ceiling, and it
+    // must answer "how many rows does run X already have?" on EVERY ingest
+    // POST. Migration 127's index is (run_id, event) and 131's is
+    // (task_id, event) — neither serves a `run_id = ? AND created_at >= ?`
+    // count, so without this the breaker would scan every row the flooding run
+    // already wrote, on every request, precisely when the table is at its
+    // worst.
+    //
+    // idx_..._run_created covers the per-run window count and the lifetime
+    // count (run_id is the leading column). idx_..._created is for time-ranged
+    // maintenance over the whole table — retention pruning and "what landed in
+    // the last hour" triage — which has no run id to seek on.
+    //
+    // Additive and idempotent: CREATE INDEX IF NOT EXISTS, guarded on the table
+    // existing (migration-131 convention) so a minimal fixture or a
+    // half-migrated box heals instead of crashing a fail-closed boot.
+    id: '148',
+    name: 'presentation_stage_timings_flood_breaker_indexes',
+    up: (db) => {
+      const tableExists = (db.prepare(
+        `SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name=?`,
+      ).get('presentation_stage_timings') as { n: number }).n > 0;
+      if (!tableExists) {
+        console.log(
+          '[Migration 148] presentation_stage_timings absent (minimal fixture); flood-breaker indexes skipped',
+        );
+        return;
+      }
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_presentation_stage_timings_run_created
+          ON presentation_stage_timings (run_id, created_at)
+      `);
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_presentation_stage_timings_created
+          ON presentation_stage_timings (created_at)
+      `);
+      console.log('[Migration 148] stage-timings flood-breaker indexes ready');
+    },
+  },
+  {
+    // PER-WORKER CONCURRENCY — a worker may run more than one execution at once.
+    //
+    // reserveExecution refused a dispatch if the agent had ANY active execution,
+    // and `task_execution_worker_capacity` (a UNIQUE partial index on agent_id)
+    // enforced that same one-at-a-time rule in the database. The gateway itself
+    // runs `agents.defaults.maxConcurrent` (12 on a stock box) runs per agent, so
+    // a department with one worker was serialized by the Command Center alone —
+    // and a single quarantined `unknown` row starved that department outright
+    // (observed live: one row held a worker for four days).
+    //
+    // The limit becomes a per-agent number instead of a constraint:
+    //   • agents.max_concurrent_executions INTEGER NOT NULL DEFAULT 1 — DEFAULT 1
+    //     so every existing box keeps today's behaviour until an operator raises it.
+    //   • the UNIQUE worker index is dropped; a limit above 1 cannot be expressed
+    //     as uniqueness. reserveExecution now COUNTS the worker's live executions
+    //     inside its BEGIN IMMEDIATE transaction, which serializes the read and the
+    //     insert against every other reserver, in this process or another.
+    //   • idx_task_executions_agent_state serves that count.
+    //
+    // The PER-TASK rule is untouched: `task_execution_active_task` still makes a
+    // second live execution for one card impossible at the database level.
+    //
+    // Additive and idempotent, guarded on the table existing (migration-131
+    // convention) so a minimal fixture heals instead of crashing a fail-closed boot.
+    id: '149',
+    name: 'per_worker_execution_concurrency',
+    up: (db) => {
+      const agentColumns = new Set((db.prepare('PRAGMA table_info(agents)').all() as { name: string }[]).map((c) => c.name));
+      if (agentColumns.size && !agentColumns.has('max_concurrent_executions')) {
+        db.exec('ALTER TABLE agents ADD COLUMN max_concurrent_executions INTEGER NOT NULL DEFAULT 1');
+      }
+      const executionsExist = (db.prepare(
+        `SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name=?`,
+      ).get('task_executions') as { n: number }).n > 0;
+      if (!executionsExist) {
+        console.log('[Migration 149] task_executions absent (minimal fixture); worker-capacity index untouched');
+        return;
+      }
+      db.exec('DROP INDEX IF EXISTS task_execution_worker_capacity');
+      db.exec('CREATE INDEX IF NOT EXISTS idx_task_executions_agent_state ON task_executions(agent_id, state)');
+      console.log('[Migration 149] per-worker concurrency ready — worker capacity is counted against agents.max_concurrent_executions (default 1)');
+    },
+  },
+  {
+    // PROVIDER CAPACITY POOLS — concurrency belongs to the client's provider
+    // PLAN, not to the agent.
+    //
+    // Migration 149 made the limit a per-agent number defaulting to 1. That is
+    // the wrong unit. What runs out on a box is the subscription: Ollama Cloud
+    // Pro allows 3 concurrent requests and Max allows 10, DeepSeek Direct
+    // documents 2,500, OpenRouter is effectively unbounded. Two consequences
+    // followed from encoding it per agent. Upgrading a plan raised nothing until
+    // every agent row had been edited by hand, and four agents each holding a
+    // ceiling of 1 could together exceed a 3-concurrent plan without any single
+    // agent exceeding its own limit.
+    //
+    // This migration moves the accounting to the pool:
+    //   • task_executions.provider — the provider prefix of the runtime model the
+    //     execution was dispatched on, denormalised onto the row so
+    //     reserveExecution counts a pool inside BEGIN IMMEDIATE without joining
+    //     back through agents and re-reading openclaw.json on every reserve.
+    //     NULL on rows written before this column; they count toward no pool and
+    //     drain within a lease. idx_task_executions_provider_state serves the count.
+    //   • provider_cooldowns — one row per pool. A provider that answers 429 shuts
+    //     its whole pool for PROVIDER_COOLDOWN_MS instead of letting the next card
+    //     walk into the same refusal.
+    //   • agents.max_concurrent_executions becomes OPTIONAL: NULL/absent means
+    //     "no agent ceiling, the pool is the limit". Every row still carrying the
+    //     migration-149 default of exactly 1 is nulled, because that 1 was never a
+    //     decision anybody made — it was the old unit of capacity. An explicitly
+    //     set OTHER value is a decision and is preserved verbatim.
+    //
+    // SQLite cannot alter a column's NOT NULL/DEFAULT in place, so the column is
+    // dropped and re-added as nullable (DROP COLUMN, SQLite 3.35+; migration 149
+    // put no index, trigger or view on it, so nothing depends on it) and the
+    // preserved values are written back. If DROP COLUMN is refused on some box,
+    // the fallback writes 0 instead — which workerConcurrencyLimit has always
+    // read as "unset" — so the semantics land either way.
+    //
+    // Additive and idempotent throughout, guarded on each table existing
+    // (migration-131 convention) so a minimal fixture heals instead of crashing.
+    id: '150',
+    name: 'provider_capacity_pools',
+    up: (db) => {
+      const tableExists = (name: string) => (db.prepare(
+        `SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name=?`,
+      ).get(name) as { n: number }).n > 0;
+
+      if (tableExists('task_executions')) {
+        const executionColumns = new Set((db.prepare('PRAGMA table_info(task_executions)').all() as { name: string }[]).map((c) => c.name));
+        if (!executionColumns.has('provider')) db.exec('ALTER TABLE task_executions ADD COLUMN provider TEXT');
+        db.exec('CREATE INDEX IF NOT EXISTS idx_task_executions_provider_state ON task_executions(provider, state)');
+      } else {
+        console.log('[Migration 150] task_executions absent (minimal fixture); provider column skipped');
+      }
+
+      db.exec(`CREATE TABLE IF NOT EXISTS provider_cooldowns (
+        provider TEXT PRIMARY KEY,
+        until TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )`);
+
+      const agentColumns = new Set((db.prepare('PRAGMA table_info(agents)').all() as { name: string }[]).map((c) => c.name));
+      if (!agentColumns.size || !agentColumns.has('max_concurrent_executions')) {
+        console.log('[Migration 150] provider capacity pools ready — agents carry no concurrency column on this box');
+        return;
+      }
+      const ceilingColumn = (db.prepare('PRAGMA table_info(agents)').all() as { name: string; notnull: number; dflt_value: unknown }[])
+        .find((c) => c.name === 'max_concurrent_executions');
+      // Already nullable with no default — this migration has run, or the column
+      // was created in its post-150 shape. Only the row heal below is needed.
+      const needsRebuild = !!ceilingColumn && (ceilingColumn.notnull === 1 || ceilingColumn.dflt_value !== null);
+      // Anything that is not the migration-149 default of 1 is somebody's decision.
+      const preserved = db.prepare(
+        'SELECT id, max_concurrent_executions AS n FROM agents WHERE max_concurrent_executions IS NOT NULL AND max_concurrent_executions <> 1',
+      ).all() as { id: string; n: number }[];
+      if (needsRebuild) {
+        try {
+          db.exec('ALTER TABLE agents DROP COLUMN max_concurrent_executions');
+          db.exec('ALTER TABLE agents ADD COLUMN max_concurrent_executions INTEGER');
+          const restore = db.prepare('UPDATE agents SET max_concurrent_executions=? WHERE id=?');
+          for (const row of preserved) restore.run(row.n, row.id);
+          console.log(`[Migration 150] agents.max_concurrent_executions is now OPTIONAL (NULL = no agent ceiling); ${preserved.length} explicit ceiling(s) preserved`);
+        } catch (err) {
+          // DROP COLUMN refused (an index, trigger or view we do not know about).
+          // 0 is read as "unset" by workerConcurrencyLimit, so the semantics are
+          // the same; only the stored spelling differs.
+          db.prepare('UPDATE agents SET max_concurrent_executions=0 WHERE max_concurrent_executions=1').run();
+          console.log(`[Migration 150] agents.max_concurrent_executions kept NOT NULL (${(err as Error).message}); the v7.6.27 default of 1 was zeroed instead — 0 means no agent ceiling`);
+        }
+      } else {
+        db.prepare('UPDATE agents SET max_concurrent_executions=NULL WHERE max_concurrent_executions=1').run();
+        console.log('[Migration 150] agents.max_concurrent_executions already optional; v7.6.27 default rows nulled');
+      }
+      console.log('[Migration 150] provider capacity pools ready — concurrency is counted per provider plan, per box');
+    },
+  },
+  {
+    // PROVIDER RESOURCE LEDGER — the money half of a routing decision.
+    //
+    // Capacity pools answer "is a slot free". They cannot answer "can this
+    // provider afford the job", and nothing on the box stored the answer: every
+    // balance lived in a vendor dashboard a human had to open. So a routing
+    // choice between two providers was made on slots alone, and a provider
+    // three dollars from empty looked identical to one with three hundred.
+    //
+    // One row per provider, written ONLY by a probe against that vendor's own
+    // documented balance endpoint (see src/lib/capacity/resource-ledger.ts for
+    // each URL). `balance` stays NULL whenever the provider publishes no such
+    // endpoint, no key resolves, or the call failed — a null here means
+    // UNDETERMINED and is never to be read as zero. `last_probe_error` carries
+    // why, so "no number" and "the probe broke" stay distinguishable.
+    //
+    // No key or secret is ever stored here: a probe sends the key in an
+    // Authorization header and writes back only the number it got.
+    //
+    // Additive and idempotent.
+    id: '151',
+    name: 'provider_resource_ledger',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS provider_ledger (
+          provider TEXT PRIMARY KEY,
+          balance REAL,
+          balance_currency TEXT,
+          balance_as_of TEXT,
+          last_probe_error TEXT,
+          updated_at TEXT NOT NULL
+        )
+      `);
+      console.log('[Migration 151] provider_ledger ready — per-provider balance, currency, freshness and last probe error');
+    },
+  },
+  {
+    // SELF-CALIBRATING POOLS — what the provider has TAUGHT us, per pool.
+    //
+    // Migration 150 gave each provider a fixed limit out of a table in this
+    // repo plus whatever the box configured, and a `provider_cooldowns` row
+    // that shut a pool for a few seconds after a 429. A published ceiling is
+    // not always the ceiling an account actually gets, and a table here cannot
+    // know what a given subscription is being allowed today — so a cooldown
+    // alone just walks back into the same wall a minute later.
+    //
+    // `provider_pool_state` supersedes `provider_cooldowns` and carries three
+    // facts per pool instead of one: the cooldown (`cooling_until`, the same
+    // column under a clearer name), the LEARNED limit (`effective_limit`,
+    // lowered by one on every rate-limit refusal and floored at 1), and when
+    // the provider last refused (`last_429_at`), which is what the recovery
+    // pass waits on before growing the limit back one step at a time. A pool
+    // with nothing to say holds no row, so a healthy box carries an empty table.
+    //
+    // Any live cooldown is carried across rather than dropped: a pool that is
+    // shut right now must stay shut across the upgrade.
+    //
+    // Additive and idempotent, and safe on a box that never had migration 150's
+    // table at all.
+    id: '152',
+    name: 'provider_pool_self_calibration',
+    up: (db) => {
+      db.exec(`CREATE TABLE IF NOT EXISTS provider_pool_state (
+        provider TEXT PRIMARY KEY,
+        effective_limit INTEGER,
+        last_429_at TEXT,
+        cooling_until TEXT,
+        updated_at TEXT NOT NULL
+      )`);
+      const legacyExists = (db.prepare(
+        `SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name=?`,
+      ).get('provider_cooldowns') as { n: number }).n > 0;
+      if (legacyExists) {
+        // A pool that is shut right now stays shut. `effective_limit` is left
+        // NULL — the old table recorded no learned limit, and NULL means
+        // "nothing learned yet, use the configured limit".
+        // OR IGNORE, not ON CONFLICT: SQLite cannot parse an ON CONFLICT clause
+        // after a SELECT source (it reads the `ON` as a join), and this needs no
+        // upsert anyway — a pool that already has state knows more than the old
+        // table did.
+        const carried = db.prepare(
+          `INSERT OR IGNORE INTO provider_pool_state(provider,effective_limit,last_429_at,cooling_until,updated_at)
+             SELECT provider,NULL,NULL,until,updated_at FROM provider_cooldowns`,
+        ).run().changes;
+        db.exec('DROP TABLE provider_cooldowns');
+        console.log(`[Migration 152] provider_cooldowns folded into provider_pool_state (${carried} cooldown row(s) carried)`);
+      }
+      console.log('[Migration 152] provider pools self-calibrate — a 429 lowers the limit, quiet time grows it back');
+    },
+  },
+  {
+    // THE INTAKE LANE AND THE SHAPE OF THE WORK.
+    //
+    // Every card reaching the board looked the same size to the router. A
+    // question the CEO could have answered in chat, a one-line ordinary task
+    // and a twelve-step cross-department build were all just "a task", so the
+    // only decision the box could make about capacity was "dispatch or refuse".
+    //
+    // The intake now says which lane a message was classified into and roughly
+    // how big the work is, and the card keeps it:
+    //   route_lane      'answer' | 'route' | 'heavy' — the ANSWER lane never
+    //                   reaches here (the agent replies in chat instead), so a
+    //                   stored 'answer' is a correction, not a normal card.
+    //   effort_steps    the intake's own step estimate, when it made one.
+    //   depts_touched   how many departments the work spans.
+    // All three are NULLABLE and purely descriptive: a caller that sends none —
+    // every producer shipped before this — creates exactly the card it always
+    // did. Nothing refuses a card for lacking them.
+    //
+    // The DEADLINE deliberately does NOT get a column: `tasks.due_date` has
+    // existed since the initial schema and already carries exactly this meaning.
+    // A second `need_by` column would be two fields that must agree forever.
+    //
+    // Additive and idempotent.
+    id: '153',
+    name: 'task_intake_lane_and_effort',
+    up: (db) => {
+      const columns = new Set((db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[]).map((c) => c.name));
+      if (!columns.size) {
+        console.log('[Migration 153] tasks absent (minimal fixture); intake-lane columns untouched');
+        return;
+      }
+      for (const [column, type] of Object.entries({
+        route_lane: 'TEXT',
+        effort_steps: 'INTEGER',
+        depts_touched: 'INTEGER',
+      })) {
+        if (!columns.has(column)) db.exec(`ALTER TABLE tasks ADD COLUMN ${column} ${type}`);
+      }
+      console.log('[Migration 153] intake lane + effort recorded on the card (deadline stays on the existing due_date)');
+    },
+  },
+  {
+    id: '154',
+    name: 'persona_bundle_sha_snapshot_per_execution',
+    up: (db) => {
+      const columns = new Set((db.prepare('PRAGMA table_info(task_executions)').all() as {name:string}[]).map((c) => c.name));
+      if (!columns.size) {
+        console.log('[Migration 154] task_executions absent — nothing to snapshot');
+        return;
+      }
+      if (!columns.has('persona_bundle_shas')) db.exec('ALTER TABLE task_executions ADD COLUMN persona_bundle_shas TEXT');
+      // Deliberately NOT backfilled. What an already-dispatched execution was
+      // handed is not recoverable — the bundle may have been rebuilt since, and
+      // guessing it from the current row is exactly the defect this closes. A
+      // NULL means "no snapshot", which SKIPS the revision check rather than
+      // failing a producer for a revision nobody recorded.
+      console.log('[Migration 154] executions now carry the persona bundle sha they were dispatched with');
+    },
+  },
+  {
+    id: '155',
+    name: 'delete_stray_agents_in_archived_workspaces',
+    // DESTRUCTIVE data cleanup (deletes agent rows). Deferred during the
+    // request-time additive self-heal for the same reason as 091/092/093 — it
+    // runs on the next controlled boot instead of racing live ingest.
+    deferInAdditiveSelfHeal: true,
+    up: (db) => {
+      // The one-time sweep for the create-side leak this release closes: every
+      // boot re-ran the trio and head seeders across ALL workspaces, archived
+      // ones included, so an archived department accumulated a head + QC +
+      // research + devil's-advocate it can never use. Only rows nothing
+      // references are removed; anything with a surviving reference is kept and
+      // named in the log for an operator to judge.
+      console.log('[Migration 155] Sweeping stray agents out of archived workspaces...');
+      const r = cleanupAgentsInArchivedWorkspaces(db);
+      console.log(
+        `[Migration 155] archived workspaces=${r.archivedWorkspaces}; ` +
+          `cleared ${r.headPointersCleared} archived head pointer(s); ` +
+          `deleted ${r.agentsDeleted} unreferenced stray agent(s); ` +
+          `kept ${r.agentsKept} referenced agent(s)` +
+          (r.kept.length
+            ? ` (${r.kept.map((k) => `${k.id}@${k.workspaceId}:${k.refs}ref`).join(', ')})`
+            : ''),
+      );
+    },
+  },
+  {
+    // ASK-AT-CAPACITY — the ledger behind an owner decision.
+    //
+    // A saturated pool overflows onto the agent's next declared model silently,
+    // which is right almost always. It is wrong when the alternative costs the
+    // owner real money, misses their deadline, or spends the last of a balance:
+    // in those cases the box has been quietly making a spending decision on
+    // their behalf. So it asks — rarely, with numbers, and with a default that
+    // runs the work if nobody answers.
+    //
+    //   provider_choice_asks  one row per card that was asked about. `batch_id`
+    //                         groups the cards that arrived after the hourly
+    //                         message budget was spent; answering the one
+    //                         question that was SENT answers all of them.
+    //                         `delivered` records the route ('telegram',
+    //                         'session', 'batched', 'send_failed'), so a
+    //                         question nobody could receive is visible rather
+    //                         than looking answered.
+    //   routing_corrections   'just answer that' / 'route that' from the owner.
+    //                         Evidence for the intake's thresholds; task_id is
+    //                         NULLABLE because a correction on a message that
+    //                         never became a card has no task to point at.
+    //   tasks.provider_choice the answer, remembered, so the same question is
+    //                         never asked twice about one card.
+    //
+    // Additive and idempotent.
+    id: '156',
+    name: 'ask_at_capacity',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS provider_choice_asks (
+          id TEXT PRIMARY KEY,
+          task_id TEXT NOT NULL,
+          batch_id TEXT NOT NULL,
+          question TEXT NOT NULL,
+          recommendation TEXT,
+          triggers TEXT,
+          asked_at TEXT NOT NULL,
+          delivered TEXT,
+          answered_at TEXT,
+          answer TEXT
+        )
+      `);
+      db.exec('CREATE INDEX IF NOT EXISTS idx_provider_choice_asks_task ON provider_choice_asks(task_id, asked_at DESC)');
+      db.exec('CREATE INDEX IF NOT EXISTS idx_provider_choice_asks_open ON provider_choice_asks(answered_at, asked_at DESC)');
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS routing_corrections (
+          id TEXT PRIMARY KEY,
+          task_id TEXT,
+          from_lane TEXT,
+          to_lane TEXT NOT NULL,
+          note TEXT,
+          created_at TEXT NOT NULL
+        )
+      `);
+      db.exec('CREATE INDEX IF NOT EXISTS idx_routing_corrections_created ON routing_corrections(created_at DESC)');
+      const columns = new Set((db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[]).map((c) => c.name));
+      if (columns.size && !columns.has('provider_choice')) {
+        db.exec('ALTER TABLE tasks ADD COLUMN provider_choice TEXT');
+      }
+      console.log('[Migration 156] ask-at-capacity ready — asks, batches, owner answers and lane corrections');
+    },
+  },
+  {
+    // THE MODEL A RUN WAS ACTUALLY PLACED ON.
+    //
+    // Until now the Command Center could only ever attempt an agent's own
+    // `model.primary`: `chat.send` has no `model` field, so a full primary pool
+    // was a refusal and the card queued. `sessions.create` DOES take a model
+    // (verified live against OpenClaw 2026.9.4 — the entry comes back with
+    // providerOverride/modelOverride and `modelOverrideSource: "user"`, and the
+    // run serves on it), so a run can now be PLACED on one of the agent's own
+    // declared fallbacks instead of waiting.
+    //
+    // `placed_model` records which model the session was pinned to, NULL when
+    // the run took the ordinary primary path. It is what makes the pool debit
+    // auditable: a row debited to Agnes must carry the Agnes model it was
+    // pinned to, or the accounting is a claim with nothing behind it.
+    //
+    // `placement_confirmed` is the READBACK, written after the send from the
+    // model the gateway itself reports for the session (the existing FIX-15
+    // resolver, no new call): 1 when the gateway agreed, 0 when it reported
+    // something else, NULL when it could not be asked. A placement nobody
+    // confirmed is not evidence.
+    //
+    // Additive and idempotent.
+    id: '157',
+    name: 'execution_placed_model',
+    up: (db) => {
+      const columns = new Set((db.prepare('PRAGMA table_info(task_executions)').all() as { name: string }[]).map((c) => c.name));
+      if (!columns.size) {
+        console.log('[Migration 157] task_executions absent (minimal fixture); placement columns untouched');
+        return;
+      }
+      if (!columns.has('placed_model')) db.exec('ALTER TABLE task_executions ADD COLUMN placed_model TEXT');
+      if (!columns.has('placement_confirmed')) db.exec('ALTER TABLE task_executions ADD COLUMN placement_confirmed INTEGER');
+      console.log('[Migration 157] executions record the model they were placed on, and whether the gateway confirmed it');
+    },
+  },
+  {
+    // 157 is taken by the placement migration; this is the next free id.
+    id: '158',
+    name: 'deliverable_execution_attribution',
+    up: (db) => {
+      const columns = new Set((db.prepare('PRAGMA table_info(task_deliverables)').all() as {name:string}[]).map((c) => c.name));
+      if (!columns.size) {
+        console.log('[Migration 158] task_deliverables absent — nothing to attribute');
+        return;
+      }
+      if (!columns.has('execution_id')) db.exec('ALTER TABLE task_deliverables ADD COLUMN execution_id TEXT');
+      // Deliberately NOT backfilled. Which attempt registered an existing row is
+      // not recoverable — `created_at` is written in two different formats on a
+      // live box (SQLite `datetime('now')` on some paths, ISO-8601 on others),
+      // so any timestamp guess would be wrong on exactly the cards this closes.
+      // NULL means "registered before this linkage existed"; the artifact
+      // snapshot gate reads that as "not attributable to the current attempt",
+      // and falls back to the pre-158 whole-card rule only when the current
+      // attempt registered nothing of its own (see persona-conformance.ts).
+      console.log('[Migration 158] deliverables now name the execution that registered them');
+    },
+  },
+  {
+    id: '159',
+    name: 'qc_cap_alert_marker',
+    // QC-CAP-ALERT-20260922: the attempt count at which this card's LAST
+    // "stopped retrying" alert was sent to the owner. The alert fires only when
+    // the current attempt count exceeds this, so a repeated sweep tick, a lost
+    // CAS race, or a process restart cannot re-send it, while a card that is
+    // resumed and fails again (attempts keep climbing — unblocking clears the
+    // block_* columns but never resets qc_reroute_attempts) earns exactly one
+    // more. NULL = never alerted.
+    up: (db) => {
+      const tasksExists = db
+        .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks'")
+        .get();
+      if (!tasksExists) {
+        console.log('[Migration 159] tasks table absent — nothing to add');
+        return;
+      }
+      const cols = new Set((db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[]).map((c) => c.name));
+      if (!cols.has('qc_cap_alert_attempts')) {
+        db.exec('ALTER TABLE tasks ADD COLUMN qc_cap_alert_attempts INTEGER');
+        console.log('[Migration 159] tasks.qc_cap_alert_attempts added');
+        return;
+      }
+      console.log('[Migration 159] tasks.qc_cap_alert_attempts already present');
+    },
+  },
+  {
+    id: '160',
+    name: 'qc_results_carry_the_reason',
+    // QC-VERDICT-RECORD-20260922: `task_qc_results` stored id, task_id,
+    // workspace_id, department_slug, score, passed, scoring_path, qc_agent_id,
+    // attempt, scored_at — and nothing about WHY. Measured on a client box: a
+    // card failed twice at 9.5 and 9.0 against an 8.5 threshold and the reason
+    // was not recoverable from the database OR from both pm2 logs, because the
+    // scorer only ever logged the score. These two nullable columns make a
+    // verdict answerable after the fact. Existing rows stay NULL, which reads
+    // as "scored before the reason was kept".
+    up: (db) => {
+      const exists = db
+        .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_qc_results'")
+        .get();
+      if (!exists) {
+        console.log('[Migration 160] task_qc_results absent — nothing to record');
+        return;
+      }
+      const cols = new Set((db.prepare('PRAGMA table_info(task_qc_results)').all() as { name: string }[]).map((c) => c.name));
+      const added: string[] = [];
+      if (!cols.has('reason')) { db.exec('ALTER TABLE task_qc_results ADD COLUMN reason TEXT'); added.push('reason'); }
+      if (!cols.has('gaps')) { db.exec('ALTER TABLE task_qc_results ADD COLUMN gaps TEXT'); added.push('gaps'); }
+      console.log(`[Migration 160] task_qc_results verdict columns: ${added.length > 0 ? added.join(', ') : 'none (already present)'}`);
+    },
+  },
+  {
+    id: '161',
+    name: 'supersede_stale_task_deliverables',
+    // QC-DELIVERABLE-HOUSEKEEPING-20260922: `task_deliverables` rows accumulate
+    // across QC re-routes and nothing ever retires them — one live card held 27
+    // rows for 5 real files. This is NOT a correctness fault: migration 158 plus
+    // `currentExecutionDeliverables` already scope the conformance gate to the
+    // current execution, and a card with 15 unlinked rows passed at 9.0/10 on a
+    // build carrying that scoping. It is unbounded growth, so the fix retires
+    // rows rather than deleting them: a client's file record is never destroyed.
+    //
+    // The one-time backfill applies the same rule the re-route now applies —
+    // everything attributed to an execution that is no longer the task's current
+    // one is superseded — so a box carrying an existing pile-up self-heals on
+    // upgrade. Rows with a NULL execution_id (registered before migration 158)
+    // are LEFT ALONE: they cannot be attributed to an attempt, and retiring them
+    // on a guess would discard the only record of a file.
+    up: (db) => {
+      const exists = db
+        .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_deliverables'")
+        .get();
+      if (!exists) {
+        console.log('[Migration 161] task_deliverables absent — nothing to supersede');
+        return;
+      }
+      const cols = new Set((db.prepare('PRAGMA table_info(task_deliverables)').all() as { name: string }[]).map((c) => c.name));
+      if (!cols.has('superseded_at')) db.exec('ALTER TABLE task_deliverables ADD COLUMN superseded_at TEXT');
+      if (!cols.has('superseded_by_execution_id')) db.exec('ALTER TABLE task_deliverables ADD COLUMN superseded_by_execution_id TEXT');
+
+      // The backfill needs the execution linkage (158) to know what is stale.
+      const hasExecColumn = new Set(
+        (db.prepare('PRAGMA table_info(task_deliverables)').all() as { name: string }[]).map((c) => c.name),
+      ).has('execution_id');
+      const hasExecTable = db
+        .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_executions'")
+        .get();
+      if (!hasExecColumn || !hasExecTable) {
+        console.log('[Migration 161] columns ready; no execution linkage to backfill against');
+        return;
+      }
+
+      const now = new Date().toISOString();
+      const result = db.prepare(`
+        UPDATE task_deliverables
+           SET superseded_at = ?,
+               superseded_by_execution_id = (
+                 SELECT e.id FROM task_executions e
+                  WHERE e.task_id = task_deliverables.task_id
+                  ORDER BY e.generation DESC LIMIT 1
+               )
+         WHERE superseded_at IS NULL
+           AND execution_id IS NOT NULL
+           AND execution_id <> (
+                 SELECT e.id FROM task_executions e
+                  WHERE e.task_id = task_deliverables.task_id
+                  ORDER BY e.generation DESC LIMIT 1
+               )
+      `).run(now);
+      console.log(`[Migration 161] superseded ${result.changes} stale deliverable row(s) — none deleted`);
+    },
+  },
+  {
+    id: '162',
+    name: 'interview_prior_completion_declarations',
+    up: (db) => {
+      db.exec(`CREATE TABLE IF NOT EXISTS interview_prior_completion_declarations (
+        tenant_id TEXT NOT NULL, company_id TEXT NOT NULL, installation_id TEXT NOT NULL,
+        declared_by TEXT NOT NULL, declared_at TEXT NOT NULL,
+        source TEXT NOT NULL CHECK (source = 'owner-self-attestation'),
+        PRIMARY KEY (tenant_id, company_id, installation_id)
+      )`);
+    },
+  },
+  {
+    id: '163',
+    name: 'blueprint_load_capture',
+    // D26/A40: `execution_load_evidence` was created at the capture call site
+    // (ensureLoadEvidenceTable) because the capture had no production caller.
+    // The capture is now invoked at dispatch, so the table is a real schema
+    // dependency of a real write path: the dispatch must not depend on a DDL
+    // statement running inside it. CREATE TABLE IF NOT EXISTS is a no-op on a
+    // box that already created the table at a call site, so this heals forward
+    // with no backfill and no data movement.
+    up: (db) => {
+      db.exec(`CREATE TABLE IF NOT EXISTS execution_load_evidence (
+        execution_id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL,
+        revision_sha TEXT NOT NULL,
+        catalog_version TEXT,
+        expected_json TEXT NOT NULL,
+        required_json TEXT NOT NULL,
+        captured_at TEXT NOT NULL
+      )`);
+      db.exec('CREATE INDEX IF NOT EXISTS idx_execution_load_evidence_task ON execution_load_evidence(task_id)');
+      console.log('[Migration 163] execution_load_evidence table ready');
+    },
+  },
+  {
+    id: '164',
+    name: 'qc_content_adherence_verdict',
+    // A40 second clause: "independent artifact adherence ... checked, not only
+    // identity equality". The QC judge (the one independent, client-owned LLM
+    // authority already on the completion path) now renders an ADHERENCE
+    // verdict next to its score inside the SAME reply. This column is where
+    // that verdict is recorded, so the completion door can require it instead
+    // of trusting the score alone. NULL = not judged (pre-upgrade rows,
+    // non-content tasks, heuristic paths) and never blocks a done move;
+    // 0 = the judge read the artifact against the brief and said it does not
+    // follow it, which refuses done. Guarded exactly like migration 160 so a
+    // fresh install (schema.ts already declares the column) is a clean no-op.
+    up: (db) => {
+      const exists = db
+        .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_qc_results'")
+        .get();
+      if (!exists) {
+        console.log('[Migration 164] task_qc_results absent — nothing to record');
+        return;
+      }
+      const cols = new Set(
+        (db.prepare('PRAGMA table_info(task_qc_results)').all() as { name: string }[]).map((c) => c.name),
+      );
+      if (!cols.has('content_adherence'))
+        db.exec('ALTER TABLE task_qc_results ADD COLUMN content_adherence INTEGER');
+      console.log('[Migration 164] task_qc_results.content_adherence ready');
+    },
+  },
+  {
+    id: '165',
+    name: 'hold_seeded_starter_tasks',
+    // Installer-seeded "Welcome to <Dept>" placeholder cards (onboarding
+    // seed-dashboard-content.py / add-department.sh) were inserted WITHOUT the
+    // dispatch_hold /api/departments gives them, so the intake sweep dispatched
+    // them right after install and each stop paged the owner. Hold every one
+    // still sitting untouched in backlog; an edit or assignment clears the hold
+    // through the normal routing path, exactly as for API-created starters.
+    up: (db) => {
+      const cols = new Set(
+        (db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[]).map((c) => c.name),
+      );
+      if (!cols.has('dispatch_hold') || !cols.has('description')) {
+        console.log('[Migration 165] tasks.dispatch_hold absent — nothing to hold');
+        return;
+      }
+      const r = db.prepare(
+        `UPDATE tasks SET dispatch_hold = 1
+          WHERE status = 'backlog' AND COALESCE(dispatch_hold, 0) = 0
+            AND title LIKE 'Welcome to %'
+            AND description LIKE 'This is your % department''s first task.%'`,
+      ).run();
+      console.log(`[Migration 165] held ${r.changes} seeded starter task(s)`);
+    },
+  },
+  // ── Migration 166 — JGT-106: no fit ever ends lane-less. ────────────────────
+  {
+    id: '166',
+    name: 'ensure_general_task_workspace',
+    // Mirrors migration 111's own backfill shape (additive-only, anchors
+    // company_id to an EXISTING workspace row, never touches a row that
+    // already exists). See src/lib/tasks.ts's createTaskCore fallback (JGT-106)
+    // for the other half: once this row exists, a card that resolves to "no
+    // department fits" is parked here instead of staying workspace_id NULL.
+    up: (db) => {
+      console.log('[Migration 166] Backfilling the "general-task" catch-all workspace...');
+
+      // Any row at all — archived included — already claiming this identity is
+      // "already exists": never resurrect an archived row, never insert a
+      // second one. dept-general-task is the legacy alias this same lane has
+      // shipped under; matching lower(slug) on it too means a pre-existing box
+      // that already seeded under that alias is left untouched.
+      const existing = db
+        .prepare(
+          `SELECT id FROM workspaces
+            WHERE lower(id) = 'general-task'
+               OR lower(slug) IN ('general-task', 'dept-general-task')
+            LIMIT 1`,
+        )
+        .get() as { id: string } | undefined;
+      if (existing) {
+        console.log(`[Migration 166] "general-task" workspace already present (id=${existing.id}) — no-op`);
+        return;
+      }
+
+      // Honour an explicit, provenanced decline (the ratified 2026-07-16
+      // ruling — general-task IS declinable). readDepartmentOptoutIds() is
+      // itself fail-quiet (missing/unreadable/malformed file -> []), but this
+      // is a migration, so a defensive try/catch stands guard too: any error
+      // reading the opt-out signal must never be read as an opt-out, and must
+      // never abort the migration chain.
+      let optedOut = false;
+      try {
+        optedOut = readDepartmentOptoutIds().some((depId) => String(depId).toLowerCase() === 'general-task');
+      } catch (err) {
+        console.log('[Migration 166] department-optout read failed (treated as NOT opted out):', (err as Error).message);
+      }
+      if (optedOut) {
+        console.log('[Migration 166] "general-task" is opted out — no-op (catch-all work routes to the CEO lane)');
+        return;
+      }
+
+      // company_id: prefer the CEO/master row, never rowid-first, never
+      // 'default'. Falling back to the most common company_id among live
+      // (non-default, non-archived-by-being-'default') rows covers a box that
+      // seeded departments before any CEO/master row existed.
+      let companyId: string | undefined = (
+        db
+          .prepare(
+            `SELECT company_id FROM workspaces
+              WHERE lower(slug) IN ('master-orchestrator', 'ceo', 'dept-ceo')
+                AND company_id <> 'default' AND archived_at IS NULL
+              ORDER BY sort_order ASC LIMIT 1`,
+          )
+          .get() as { company_id: string } | undefined
+      )?.company_id;
+      if (!companyId) {
+        const majority = db
+          .prepare(
+            `SELECT company_id, COUNT(*) AS n FROM workspaces
+              WHERE archived_at IS NULL AND id <> 'default' AND company_id <> 'default'
+              GROUP BY company_id ORDER BY n DESC LIMIT 1`,
+          )
+          .get() as { company_id: string; n: number } | undefined;
+        companyId = majority?.company_id;
+      }
+      if (!companyId) {
+        console.log('[Migration 166] No non-default company_id to anchor to — skipping (fresh install seeds "general-task" normally)');
+        return;
+      }
+
+      const now = new Date().toISOString();
+      db.prepare(
+        `INSERT INTO workspaces (id, name, slug, description, icon, company_id, sort_order, created_at, updated_at)
+         VALUES ('general-task', 'General Task', 'general-task', ?, ?, ?, 99999, ?, ?)`,
+      ).run(
+        'Catch-all lane: work that fits no other department',
+        '🗂️',
+        companyId,
+        now,
+        now,
+      );
+      console.log('[Migration 166] Inserted the "general-task" department workspace');
+      // ensureWorkspaceHeadAgents(db), already called unconditionally on every
+      // boot right after runMigrations() finishes (see below), gives this row
+      // its head agent — not duplicated here.
+    },
+  },
+  // ── Migration 167 — JGT-202: retro-file agents mis-filed into General Task
+  // before agent-sync's id-based resolver existed. ───────────────────────────
+  {
+    id: '167',
+    name: 'refile_misfiled_general_task_agents',
+    // v7.6.88 shipped agent-sync.ts's resolveAgentDeptWorkspace (JGT-107):
+    // an agent whose OWN id encodes a real department — /^dept-(.+)$/ or
+    // /^head-agent-(.+)$/, normalized through canonicalDeptSlug() — is filed
+    // there instead of falling for a bare name-keyword guess (the MR-14
+    // regression that put 'General Counsel' in General Task). That release's
+    // own notes admit the gap this migration closes: "Existing mis-filed rows
+    // are not moved (the agents UPSERT does not update workspace_id)."
+    //
+    // This applies the SAME id-prefix + canonicalDeptSlug() rule agent-sync.ts
+    // now uses, once, to rows already sitting in a general-task workspace —
+    // but deliberately NARROWER than the live resolver in two ways a one-time
+    // data move demands that a fresh-insert guess doesn't:
+    //   1. No name-keyword fallback. A name guess is grounds to PLACE a brand
+    //      new row, never to MOVE one that's already live somewhere.
+    //   2. The target workspace must be LIVE (archived_at IS NULL) and in the
+    //      SAME company_id as the agent's current general-task workspace.
+    //      Crossing a company boundary, or landing on an archived/declined
+    //      department, would be a worse landmine than the one being fixed.
+    up: (db) => {
+      const agentCols = new Set(
+        (db.prepare('PRAGMA table_info(agents)').all() as { name: string }[]).map((c) => c.name),
+      );
+      if (!agentCols.has('workspace_id')) {
+        console.log('[Migration 167] agents.workspace_id absent — nothing to refile');
+        return;
+      }
+
+      // Every LIVE general-task workspace — one per company on a multi-tenant
+      // box (mirrors migration 166's own identity match: id or the
+      // general-task / dept-general-task slug aliases).
+      const generalTaskWorkspaces = db
+        .prepare(
+          `SELECT id, company_id FROM workspaces
+            WHERE archived_at IS NULL
+              AND (lower(id) = 'general-task' OR lower(slug) IN ('general-task', 'dept-general-task'))`,
+        )
+        .all() as { id: string; company_id: string }[];
+      if (generalTaskWorkspaces.length === 0) {
+        console.log('[Migration 167] no live general-task workspace — nothing to refile');
+        return;
+      }
+
+      const findLiveTarget = db.prepare(
+        `SELECT id FROM workspaces
+          WHERE archived_at IS NULL AND company_id = ?
+            AND id <> 'default' AND lower(slug) <> 'default'
+            AND (lower(slug) = ? OR lower(id) = ?)
+          LIMIT 1`,
+      );
+      const moveAgent = db.prepare(
+        `UPDATE agents SET workspace_id = ?, updated_at = ? WHERE id = ? AND workspace_id = ?`,
+      );
+
+      let moved = 0;
+      const now = new Date().toISOString();
+
+      for (const ws of generalTaskWorkspaces) {
+        // is_master guard mirrors agent-sync.ts's own invariant: never touch
+        // the master Orchestrator row. (A master sitting in general-task
+        // should never happen, but this is a data-moving migration — the
+        // guard costs nothing and forecloses the possibility outright.)
+        const agents = db
+          .prepare(`SELECT id, name FROM agents WHERE workspace_id = ? AND (is_master IS NULL OR is_master = 0)`)
+          .all(ws.id) as { id: string; name: string }[];
+
+        for (const agent of agents) {
+          const idMatch = agent.id.match(/^dept-(.+)$/) || agent.id.match(/^head-agent-(.+)$/);
+          if (!idMatch) continue; // no id-encoded department — a name alone never moves an existing row
+          const slug = canonicalDeptSlug(idMatch[1]).toLowerCase();
+          if (!slug || slug === 'general-task' || slug === 'dept-general-task') continue; // genuinely General Task (e.g. its own head agent)
+
+          const target = findLiveTarget.get(ws.company_id, slug, slug) as { id: string } | undefined;
+          if (!target || target.id === ws.id) continue; // no live same-company home to move to
+
+          const result = moveAgent.run(target.id, now, agent.id, ws.id);
+          if (result.changes > 0) {
+            moved++;
+            console.log(
+              `[Migration 167] Refiled agent "${agent.name}" (${agent.id}) out of General Task (${ws.id}) into "${slug}" (${target.id})`,
+            );
+          }
+        }
+      }
+
+      console.log(`[Migration 167] Refiled ${moved} mis-filed agent(s) out of General Task`);
+    },
+  },
+  {
+    id: '168',
+    name: 'add_task_kill_acks',
+    up: (db) => {
+      // CANC-101 (finding 10): kill-fence acknowledgement. Cancelling twice
+      // (or cancelling a task whose run already ended) must not error and
+      // must not double-write — COALESCE on tasks.killed_at keeps the
+      // ORIGINAL timestamp and INSERT OR IGNORE on this table's UNIQUE
+      // (task_id) keeps ONE ack row per task. Audit-only: no fence reads it.
+      console.log('[Migration 168] Adding task_kill_acks...');
+      db.exec(
+        `CREATE TABLE IF NOT EXISTS task_kill_acks (
+          id TEXT PRIMARY KEY,
+          task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id) ON DELETE CASCADE,
+          killed_at TEXT NOT NULL,
+          execution_found INTEGER NOT NULL DEFAULT 0,
+          notice_delivered INTEGER NOT NULL DEFAULT 0,
+          notice_error TEXT,
+          created_at TEXT NOT NULL
+        )`,
+      );
+      console.log('[Migration 168] task_kill_acks ready');
+    },
+  },
+  {
+    // HQ-001 / B01 — the ONE reserved additive migration for Company
+    // Headquarters (SPEC rev 4 S6, line 223: "Migrations own indexes; use the
+    // next conflict-free migration identifier reserved in V02"). Reserved as
+    // 169 by the frozen storage contract (evidence/contracts/storage-auth.md
+    // §a) — single writer B01, no per-table separate migration workers.
+    //
+    // Four bounded data families, all company-bound, all additive:
+    //   activity + replay receipts + run bindings, private sessions/turns,
+    //   owner-login nonce uses, and activity cursor state.
+    //
+    // Every statement is `CREATE TABLE/INDEX IF NOT EXISTS` and there is no
+    // ALTER of an existing table, so the interrupted-migration and
+    // rerun-idempotence proofs in S6 (line 259) hold: a partial apply leaves
+    // only harmless new tables, and a second run records the same id once.
+    //
+    // Older code must tolerate the retained additive tables after rollback
+    // (S6 line 259) — nothing here is read by non-HQ code paths.
+    id: '169',
+    name: 'add_hq_activity_chat_and_owner_login_tables',
+    up: (db) => {
+      console.log('[Migration 169] Adding Company Headquarters tables...');
+
+      // ---- Family 1: activity feed, cursor state and replay receipts (S6) ----
+      // seq is the global cursor; gaps are legal. UNIQUE(company_id,source_key)
+      // is the live dedup key; index (company_id,exchange_id,seq) serves the
+      // exchange drill-down; index (company_id,seq) serves forward/older pages.
+      db.exec(
+        `CREATE TABLE IF NOT EXISTS hq_activity (
+          seq INTEGER PRIMARY KEY AUTOINCREMENT,
+          id TEXT NOT NULL UNIQUE,
+          company_id TEXT NOT NULL,
+          source_key TEXT NOT NULL,
+          content_hash TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          task_id TEXT,
+          actor_agent_id TEXT,
+          recipient_agent_id TEXT,
+          from_workspace_id TEXT,
+          to_workspace_id TEXT,
+          exchange_id TEXT,
+          phase TEXT,
+          payload_json TEXT NOT NULL,
+          occurred_at TEXT,
+          received_at TEXT NOT NULL,
+          payload_bytes INTEGER NOT NULL DEFAULT 0,
+          UNIQUE(company_id, source_key)
+        )`,
+      );
+      db.exec(
+        `CREATE INDEX IF NOT EXISTS idx_hq_activity_company_seq
+          ON hq_activity(company_id, seq)`,
+      );
+      db.exec(
+        `CREATE INDEX IF NOT EXISTS idx_hq_activity_company_exchange_seq
+          ON hq_activity(company_id, exchange_id, seq)`,
+      );
+
+      // Cursor/watermark survives even when all history is pruned (S6 line 235).
+      // retained_bytes backs insertion-time byte bound; capture_state carries
+      // the truthful degradation label.
+      db.exec(
+        `CREATE TABLE IF NOT EXISTS hq_activity_state (
+          company_id TEXT PRIMARY KEY,
+          high_seq INTEGER NOT NULL,
+          pruned_through_seq INTEGER NOT NULL,
+          capture_state TEXT NOT NULL,
+          retained_bytes INTEGER NOT NULL DEFAULT 0,
+          updated_at TEXT NOT NULL
+        )`,
+      );
+
+      // Durable dedup keys outlive feed pruning (S6 line 239). issued_at is
+      // never refreshed on retry; accepted_at is the 48h retention anchor.
+      db.exec(
+        `CREATE TABLE IF NOT EXISTS hq_activity_receipts (
+          company_id TEXT NOT NULL,
+          source_key TEXT NOT NULL,
+          content_hash TEXT NOT NULL,
+          issued_at TEXT,
+          accepted_at TEXT NOT NULL,
+          original_seq INTEGER,
+          PRIMARY KEY (company_id, source_key)
+        )`,
+      );
+      db.exec(
+        `CREATE INDEX IF NOT EXISTS idx_hq_activity_receipts_company_accepted
+          ON hq_activity_receipts(company_id, accepted_at)`,
+      );
+
+      // ---- Family 2: trusted dispatch/run bindings (S6 line 243) ----
+      // Visibility is set from the authenticated source, never widened from a
+      // request body; expiry 48h after last terminal observation.
+      db.exec(
+        `CREATE TABLE IF NOT EXISTS hq_run_bindings (
+          company_id TEXT NOT NULL,
+          runtime_run_id TEXT NOT NULL,
+          runtime_session_key TEXT,
+          agent_id TEXT,
+          task_id TEXT,
+          execution_id TEXT,
+          visibility TEXT NOT NULL,
+          owner_subject TEXT,
+          recorded_at TEXT NOT NULL,
+          expires_at TEXT,
+          PRIMARY KEY (company_id, runtime_run_id)
+        )`,
+      );
+      db.exec(
+        `CREATE INDEX IF NOT EXISTS idx_hq_run_bindings_company_task
+          ON hq_run_bindings(company_id, task_id)`,
+      );
+      db.exec(
+        `CREATE INDEX IF NOT EXISTS idx_hq_run_bindings_company_expires
+          ON hq_run_bindings(company_id, expires_at)`,
+      );
+
+      // ---- Family 3: private head conversations (S6 lines 249-255) ----
+      // Composite uniqueness (company_id,id) enables scoped joins without
+      // trusting a caller-supplied id; ids are always server-minted.
+      db.exec(
+        `CREATE TABLE IF NOT EXISTS hq_chat_sessions (
+          id TEXT PRIMARY KEY,
+          company_id TEXT NOT NULL,
+          owner_subject TEXT NOT NULL,
+          installation_id TEXT NOT NULL,
+          head_agent_id TEXT,
+          runtime_agent_id TEXT,
+          created_at TEXT NOT NULL,
+          last_activity_at TEXT NOT NULL,
+          closed_at TEXT,
+          UNIQUE(company_id, id)
+        )`,
+      );
+      db.exec(
+        `CREATE INDEX IF NOT EXISTS idx_hq_chat_sessions_company_owner
+          ON hq_chat_sessions(company_id, owner_subject, last_activity_at)`,
+      );
+
+      // gateway_session_key is UNIQUE: each turn owns a different gateway
+      // session key (S9), and that uniqueness is what makes a late reply from
+      // turn A unable to land on turn B.
+      db.exec(
+        `CREATE TABLE IF NOT EXISTS hq_chat_turns (
+          id TEXT PRIMARY KEY,
+          company_id TEXT NOT NULL,
+          session_id TEXT NOT NULL,
+          owner_subject TEXT NOT NULL,
+          client_request_id TEXT NOT NULL,
+          payload_hash TEXT,
+          message_text TEXT NOT NULL,
+          reply_text TEXT,
+          state TEXT NOT NULL,
+          attempts INTEGER NOT NULL DEFAULT 0,
+          lease_token TEXT,
+          lease_expires_at TEXT,
+          gateway_session_key TEXT UNIQUE,
+          source_run_id TEXT,
+          task_id TEXT,
+          error_code TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          terminal_at TEXT,
+          content_expired_at TEXT,
+          UNIQUE(company_id, session_id, client_request_id),
+          FOREIGN KEY (company_id, session_id)
+            REFERENCES hq_chat_sessions(company_id, id)
+        )`,
+      );
+      db.exec(
+        `CREATE INDEX IF NOT EXISTS idx_hq_chat_turns_company_session_created
+          ON hq_chat_turns(company_id, session_id, created_at, id)`,
+      );
+      // S6 line 253: only ONE nonterminal turn per session. The partial index
+      // is the enforcement point — a second concurrent turn is refused by the
+      // database itself, not by an application check that can race.
+      db.exec(
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_hq_chat_turns_one_active_per_session
+          ON hq_chat_turns(company_id, session_id)
+          WHERE state IN ('queued','sending','awaiting_reply','reconciling')`,
+      );
+
+      // ---- Family 4: one-use owner-login nonce uses (S6 line 245, S7 line 281) ----
+      db.exec(
+        `CREATE TABLE IF NOT EXISTS hq_owner_login_uses (
+          nonce TEXT PRIMARY KEY,
+          expires_at INTEGER NOT NULL,
+          used_at INTEGER NOT NULL
+        )`,
+      );
+
+      console.log('[Migration 169] Company Headquarters tables ready');
+    },
+  },
+  {
+    id: '170',
+    name: 'add_provider_auth_proof_credits',
+    up: (db) => {
+      // CC-KIE-2 — PURELY ADDITIVE, one nullable column on migration 100's
+      // provider_auth_proof_cache. The Kie proof endpoint (GET /chat/credit)
+      // already returns the caller's account balance at `data.credit`; this
+      // column keeps that number beside the cached proof so the Intelligence
+      // Settings tile can show "KIE credits: N" from the EXISTING
+      // provider-status read path, with no new live call and no extra spend.
+      // Never rewrites an existing row — rows written before this migration
+      // keep credits NULL, and the tile simply shows no balance (fail-closed,
+      // never a fabricated number). Column-existence-guarded ALTER, the same
+      // no-op-safe pattern as migration 106.
+      console.log('[Migration 170] Adding provider_auth_proof_cache.credits...');
+
+      const cols = db.prepare(`PRAGMA table_info(provider_auth_proof_cache)`).all() as { name: string }[];
+
+      if (cols.length === 0) {
+        // Table not present yet (fresh DB where 100 hasn't run): nothing to
+        // alter — migration 100 creates it and this is a no-op.
+        console.log('[Migration 170] provider_auth_proof_cache absent — skipping (no-op)');
+        return;
+      }
+
+      if (!cols.some((c) => c.name === 'credits')) {
+        db.exec(`ALTER TABLE provider_auth_proof_cache ADD COLUMN credits REAL`);
+      }
+
+      console.log('[Migration 170] provider_auth_proof_cache.credits ready');
+    },
+  },
+  {
+    id: '171',
+    name: 'skill71_run_tracking_tables',
+    up: (db) => {
+      console.log('[Migration 171] Adding Skill 71 run tracking tables...');
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS skill71_runs (
+          run_id TEXT PRIMARY KEY,
+          page_name TEXT,
+          brand_id TEXT,
+          client TEXT,
+          client_slug TEXT,
+          host_shape TEXT,
+          run_dir TEXT,
+          test_run INTEGER NOT NULL DEFAULT 0,
+          overall TEXT NOT NULL DEFAULT 'incomplete',
+          review_mode TEXT,
+          report_json_path TEXT,
+          report_md_path TEXT,
+          blocked_stage TEXT,
+          started_at TEXT,
+          last_event_at TEXT,
+          created_at TEXT DEFAULT (datetime('now')),
+          updated_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS skill71_run_stages (
+          run_id TEXT NOT NULL REFERENCES skill71_runs(run_id) ON DELETE CASCADE,
+          stage TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'open',
+          receipt_status TEXT,
+          closed_at TEXT,
+          duration_s REAL,
+          scores_summary_json TEXT,
+          cost_json TEXT,
+          artifact_hashes_json TEXT,
+          failures_json TEXT,
+          items_json TEXT NOT NULL DEFAULT '{}',
+          updated_at TEXT DEFAULT (datetime('now')),
+          PRIMARY KEY (run_id, stage)
+        );
+        CREATE TABLE IF NOT EXISTS skill71_run_events (
+          event_id TEXT PRIMARY KEY,
+          run_id TEXT NOT NULL,
+          event_type TEXT NOT NULL,
+          emitted_at TEXT NOT NULL,
+          source TEXT NOT NULL,
+          payload_json TEXT NOT NULL,
+          received_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS skill71_ingest_tokens (
+          id TEXT PRIMARY KEY,
+          token_hash TEXT NOT NULL UNIQUE,
+          client_slug TEXT NOT NULL,
+          host_shape TEXT NOT NULL,
+          created_at TEXT DEFAULT (datetime('now')),
+          revoked_at TEXT
+        );
+      `);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_skill71_events_run ON skill71_run_events(run_id);`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_skill71_runs_last_event ON skill71_runs(last_event_at);`);
+    }
+  },
+
   // CWE-005 council persistence (directive Section 16). The entry lives
   // in src/lib/council/persistence/council-migration.ts. Its id is a
   // clearly marked PENDING integration-time assignment: the single
@@ -7119,7 +8473,6 @@ export const migrations: Migration[] = [
   // non-numeric id sorts after every numeric migration, which is safe
   // because the council schema is additive and independent.
   councilMigration,
-
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner
@@ -7342,11 +8695,12 @@ export function autoSeedTrioAgents(db: Database.Database): void {
 
     const seeded = seedTrioForWorkspaces(db, workspaces);
     const total = seeded.qc + seeded.research + seeded.devilsAdvocate;
-    if (total > 0) {
+    if (total > 0 || seeded.skippedArchived > 0) {
       console.log(
         `[Auto-seed Trio] Seeded ${seeded.qc} QC + ${seeded.research} Research + ` +
           `${seeded.devilsAdvocate} Devil's Advocate agent(s) across ${workspaces.length} workspace(s); ` +
-          `${seeded.skipped} role slot(s) already filled (role_type-aware skip)`,
+          `${seeded.skipped} role slot(s) already filled (role_type-aware skip); ` +
+          `${seeded.skippedArchived} archived workspace(s) skipped (never seeded)`,
       );
     }
   } catch (err) {
@@ -7425,16 +8779,66 @@ function isCcGeneratedTrioId(id: string): boolean {
 }
 
 /**
+ * Every SOFT-ARCHIVED workspace, mapped id → `archived_reason`.
+ *
+ * THE ARCHIVED-WORKSPACE SEED LEAK. An archived department is a decision that
+ * has already been made — by the owner's provenanced decline ('declined'), by
+ * U108's opt-out record ('department-optout'), by the retire path ('retired'),
+ * by an operator ('operator'), or by the build-state sync
+ * (`pruned: absent from build-state` / `deduped: loser of <id>`, both written by
+ * scripts/sync-departments-from-build-state.py since v7.6.38, which archives
+ * rather than deletes). The row survives for its history; the board hides it.
+ *
+ * Nothing that CREATES agents may act on one. Every seeder here used to read
+ * `SELECT ... FROM workspaces` with no archive filter, so on a client box
+ * carrying 12 archived duplicate/pruned workspaces a Command Center restart
+ * minted a head + QC + research + devil's-advocate into each of them — 48 agent
+ * rows attached to departments no one can see, counted by every workforce total
+ * and dispatchable by nothing.
+ *
+ * Returns an EMPTY map on a pre-migration-095 database (no `archived_at`
+ * column): that schema has no archive concept, so every workspace is live and
+ * behaviour is unchanged. Never throws — a seeder must not be the thing that
+ * crashes boot.
+ */
+export function archivedWorkspaces(db: Database.Database): Map<string, string | null> {
+  const out = new Map<string, string | null>();
+  try {
+    const cols = (db.prepare('PRAGMA table_info(workspaces)').all() as { name: string }[]).map(
+      (c) => c.name,
+    );
+    if (!cols.includes('archived_at')) return out;
+    const hasReason = cols.includes('archived_reason');
+    const rows = db
+      .prepare(
+        `SELECT id, ${hasReason ? 'archived_reason' : 'NULL AS archived_reason'} FROM workspaces
+          WHERE archived_at IS NOT NULL AND archived_at <> ''`,
+      )
+      .all() as { id: string; archived_reason: string | null }[];
+    for (const r of rows) out.set(r.id, r.archived_reason ?? null);
+  } catch {
+    /* pre-095 / table absent — no archive concept, every workspace is live */
+  }
+  return out;
+}
+
+/**
  * Seed the trio (QC + Research + Devil's Advocate) for the given workspaces,
  * skipping any ROLE SLOT that is already filled by ANY agent — whatever its id or
  * alias spelling. This is the C3 create-side guard: it makes re-provisioning
  * converge instead of multiply.
+ *
+ * An ARCHIVED workspace is skipped outright (see `archivedWorkspaces`): it never
+ * receives a trio, however it got into the caller's list. The guard lives HERE,
+ * in the one primitive both trio-seeding callers route through (migration 065
+ * and `autoSeedTrioAgents`), so neither can reintroduce the leak.
  */
 export function seedTrioForWorkspaces(
   db: Database.Database,
   workspaces: { id: string; name: string }[],
-): { qc: number; research: number; devilsAdvocate: number; skipped: number } {
-  const result = { qc: 0, research: 0, devilsAdvocate: 0, skipped: 0 };
+): { qc: number; research: number; devilsAdvocate: number; skipped: number; skippedArchived: number } {
+  const result = { qc: 0, research: 0, devilsAdvocate: 0, skipped: 0, skippedArchived: 0 };
+  const archived = archivedWorkspaces(db);
 
   const insert = db.prepare(`
     INSERT OR IGNORE INTO agents
@@ -7471,6 +8875,10 @@ export function seedTrioForWorkspaces(
   });
 
   for (const ws of workspaces) {
+    if (archived.has(ws.id)) {
+      result.skippedArchived++;
+      continue;
+    }
     const specs = spec(ws);
     for (const role of TRIO_ROLE_TYPES) {
       const aliases = aliasesFor(role);
@@ -7538,11 +8946,21 @@ export function findDuplicateTrioAgents(db: Database.Database): DuplicateTrioGro
   return Array.from(groups.values()).filter((g) => g.agentIds.length > 1);
 }
 
-/** Workspaces with no head agent — the thing that must always be zero. */
+/**
+ * LIVE workspaces with no head agent — the thing that must always be zero.
+ *
+ * An ARCHIVED workspace is excluded, not reported: it is hidden from the board
+ * by design, so "it has no head" is not a defect and materialising one for it is
+ * exactly the leak this exclusion closes. `ensureWorkspaceHeadAgents()` — the
+ * only repair path — reads this list, so the filter here is what stops a boot
+ * from minting a Department Head into an archived department AND from stamping
+ * `head_agent_id` on an archived row.
+ */
 export function findHeadlessWorkspaces(db: Database.Database): { id: string; slug: string }[] {
   const cols = (db.prepare('PRAGMA table_info(workspaces)').all() as { name: string }[]).map((c) => c.name);
   if (!cols.includes('head_agent_id')) return [];
-  return db
+  const archived = archivedWorkspaces(db);
+  const rows = db
     .prepare(
       `SELECT w.id, w.slug FROM workspaces w
         WHERE w.head_agent_id IS NULL OR w.head_agent_id = ''
@@ -7550,6 +8968,7 @@ export function findHeadlessWorkspaces(db: Database.Database): { id: string; slu
         ORDER BY w.slug ASC`,
     )
     .all() as { id: string; slug: string }[];
+  return rows.filter((r) => !archived.has(r.id));
 }
 
 /** Every column in the schema that is a FOREIGN KEY onto agents(id). */
@@ -7784,6 +9203,171 @@ export function ensureWorkspaceHeadAgents(db: Database.Database): HeadAgentResul
     }
     setHead.run(headId, ws.id);
     result.created++;
+  }
+
+  return result;
+}
+
+/** Every column in the schema that can hold an `agents.id` value. */
+function agentReferenceColumns(db: Database.Database): { table: string; column: string }[] {
+  const seen = new Set<string>();
+  const out: { table: string; column: string }[] = [];
+  const push = (table: string, column: string) => {
+    if (table === 'agents') return; // the agents table's own columns are not references to it
+    const key = `${table}.${column}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push({ table, column });
+  };
+
+  for (const fk of agentFkColumns(db)) push(fk.table, fk.column);
+
+  // Declared foreign keys are not the whole story: several tables carry an agent
+  // id by CONVENTION with no REFERENCES clause (task_qc_results.qc_agent_id,
+  // sop_feedback.agent_id, and the operator_* Bridge tables). Enumerate them
+  // from the LIVE schema rather than hardcoding a list that rots as tables are
+  // added. Over-inclusion is safe by construction: a column this scan sweeps in
+  // that does not really hold a workforce agent id (operator_workspaces.agent_id
+  // holds a CLI slug) can only make the cleanup MORE conservative — it keeps an
+  // agent it might have deleted, never the reverse.
+  let tables: { name: string }[] = [];
+  try {
+    tables = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+      .all() as { name: string }[];
+  } catch {
+    return out;
+  }
+  for (const t of tables) {
+    try {
+      const cols = db.prepare(`PRAGMA table_info("${t.name}")`).all() as { name: string }[];
+      for (const c of cols) {
+        if (c.name === 'agent_id' || c.name.endsWith('_agent_id')) push(t.name, c.name);
+      }
+    } catch {
+      /* table vanished mid-iteration — skip */
+    }
+  }
+  return out;
+}
+
+export interface ArchivedWorkspaceAgentCleanup {
+  /** How many workspaces are archived on this box. */
+  archivedWorkspaces: number;
+  /** Archived workspaces whose own head pointer was cleared before the sweep. */
+  headPointersCleared: number;
+  /** Stray agent rows deleted (archived workspace + zero references anywhere). */
+  agentsDeleted: number;
+  /** Agents left in place because something still references them. */
+  agentsKept: number;
+  /** The kept ones, named, so the operator can audit rather than guess. */
+  kept: { id: string; workspaceId: string; refs: number }[];
+}
+
+/**
+ * Delete the agent rows the seeders leaked into ARCHIVED workspaces — and ONLY
+ * the ones nothing anywhere references.
+ *
+ * The create-side leak is fixed above (`seedTrioForWorkspaces`,
+ * `findHeadlessWorkspaces`, the reseed's archive skip), but a box that has
+ * already booted carries the rows: one client board held 48 of them across 12
+ * archived departments. They are invisible on the board, they inflate every
+ * workforce count, and nothing can ever dispatch to them.
+ *
+ * WHAT IS SAFE TO DELETE, exactly:
+ *   • the agent's workspace is archived, AND
+ *   • the agent is not the master orchestrator (`is_master`), AND
+ *   • NO column in the live schema that can hold an agents.id still holds this
+ *     one (`agentReferenceColumns` — declared FKs plus every conventional
+ *     `*agent_id` column, read from the schema, never a hardcoded list).
+ *
+ * The archived workspace's OWN `head_agent_id` is cleared first, but only when
+ * it points at a candidate: that pointer is the seeder's own leftover, not
+ * history. A LIVE workspace's head pointer is never touched, so an agent that
+ * heads a live department is counted as referenced and kept.
+ *
+ * Anything with a single surviving reference is KEPT and REPORTED. A duplicate
+ * row is recoverable; a destroyed foreign key is not — the same posture
+ * `dedupeTrioAgents` takes.
+ *
+ * Idempotent: a second run finds no candidates. A box with no archived
+ * workspaces is a total no-op.
+ */
+export function cleanupAgentsInArchivedWorkspaces(
+  db: Database.Database,
+): ArchivedWorkspaceAgentCleanup {
+  const result: ArchivedWorkspaceAgentCleanup = {
+    archivedWorkspaces: 0,
+    headPointersCleared: 0,
+    agentsDeleted: 0,
+    agentsKept: 0,
+    kept: [],
+  };
+
+  const archived = archivedWorkspaces(db);
+  result.archivedWorkspaces = archived.size;
+  if (archived.size === 0) return result;
+
+  const ids = Array.from(archived.keys());
+  const placeholders = ids.map(() => '?').join(',');
+
+  const agentCols = (db.prepare('PRAGMA table_info(agents)').all() as { name: string }[]).map(
+    (c) => c.name,
+  );
+  if (!agentCols.includes('workspace_id')) return result;
+  // Never delete the master orchestrator, whatever workspace it is parked in.
+  const masterGuard = agentCols.includes('is_master') ? 'AND (is_master IS NULL OR is_master = 0)' : '';
+
+  const candidates = db
+    .prepare(
+      `SELECT id, workspace_id FROM agents WHERE workspace_id IN (${placeholders}) ${masterGuard}`,
+    )
+    .all(...ids) as { id: string; workspace_id: string }[];
+  if (candidates.length === 0) return result;
+  const candidateIds = new Set(candidates.map((c) => c.id));
+
+  const wsCols = (db.prepare('PRAGMA table_info(workspaces)').all() as { name: string }[]).map(
+    (c) => c.name,
+  );
+  if (wsCols.includes('head_agent_id')) {
+    const heads = db
+      .prepare(
+        `SELECT id, head_agent_id FROM workspaces
+          WHERE id IN (${placeholders}) AND head_agent_id IS NOT NULL AND head_agent_id <> ''`,
+      )
+      .all(...ids) as { id: string; head_agent_id: string }[];
+    const clearHead = db.prepare('UPDATE workspaces SET head_agent_id = NULL WHERE id = ?');
+    for (const h of heads) {
+      if (!candidateIds.has(h.head_agent_id)) continue;
+      clearHead.run(h.id);
+      result.headPointersCleared++;
+    }
+  }
+
+  const refCols = agentReferenceColumns(db);
+  const del = db.prepare('DELETE FROM agents WHERE id = ?');
+
+  for (const a of candidates) {
+    let refs = 0;
+    for (const rc of refCols) {
+      try {
+        const row = db
+          .prepare(`SELECT count(*) AS c FROM "${rc.table}" WHERE "${rc.column}" = ?`)
+          .get(a.id) as { c: number } | undefined;
+        refs += row?.c ?? 0;
+      } catch {
+        // A column we cannot READ is a column we cannot clear: count it as a
+        // reference so the agent is kept. Never delete on an unanswered question.
+        refs++;
+      }
+    }
+    if (refs > 0) {
+      result.agentsKept++;
+      result.kept.push({ id: a.id, workspaceId: a.workspace_id, refs });
+      continue;
+    }
+    del.run(a.id);
+    result.agentsDeleted++;
   }
 
   return result;
@@ -8470,6 +10054,23 @@ export function reseedWorkspacesFromConfig(
     }
     depts = JSON.parse(raw);
 
+    // SHAPE: departments.json is EITHER a bare array OR an object wrapping that
+    // array under a "departments" key (the retirement script's
+    // {removedWithProvenance, departments} audit trail, and the build's
+    // {company, total_departments, total_roles, departments} envelope). The
+    // Array.isArray gate below used to report a perfectly valid wrapped artifact
+    // as 'malformed', so a healthy box rendered NO department columns. Unwrap it
+    // here, through the one normalizer the preview page and the Python installer
+    // scripts also use. A refusal still falls through to the 'malformed' branch,
+    // which stays fail-closed: an object whose keys are metadata is NEVER folded
+    // in as departments.
+    const shape = normalizeDepartmentsPayload(depts, configPath);
+    if (shape.ok) {
+      depts = shape.departments;
+    } else {
+      console.error(`[reseed] ${shape.reason}`);
+    }
+
     // U041 (audit E11). This branch used to be the ONLY exit in this function
     // that returned without logging anything, and it is the exit that means "we
     // found this client's manifest and it declares no departments." The result
@@ -8553,6 +10154,27 @@ export function reseedWorkspacesFromConfig(
 
     const existsCheck = db.prepare('SELECT id FROM workspaces WHERE id = ?');
 
+    // An ARCHIVED workspace is not re-seeded from the manifest. The UPSERT below
+    // deliberately never touched `archived_at`, so it could not un-archive a row
+    // — but it DID keep re-syncing an archived row's display fields on every
+    // boot and every converge, reporting it as `updated`, and it handed the
+    // freshly-touched row straight to the trio/head seeders that follow. The
+    // manifest still listing a department the sync archived
+    // (`pruned: absent from build-state`, `deduped: loser of <id>`) or the owner
+    // declined is the NORMAL state, not a fault: the archive is the newer
+    // decision and it wins.
+    //
+    // Deliberately NOT done here: creating a FRESH live row for an archived
+    // slug. That would mint a second row for one department — the exact
+    // duplicate-column disease the FM-6 guard, migration 081 and
+    // dedupeCanonicalWorkspaces exist to heal. Restoring an archived department
+    // is an explicit act with its own owners: DELETE /api/workspaces/<id>/archive
+    // for an operator archive, or the reason-scoped reversal in
+    // syncDeclinedWorkspaceArchive / syncDepartmentOptoutArchive when the owner
+    // flips NO → YES. Once un-archived, the very next boot seeds its trio and
+    // head normally.
+    const archivedRows = archivedWorkspaces(db);
+
     for (const dept of depts) {
       // Robustness guard (mirrors autoSeedFromDepartmentsJson): a bare-string or
       // slug/id-less entry would throw and abort the whole reseed, dropping every
@@ -8605,6 +10227,22 @@ export function reseedWorkspacesFromConfig(
       const rawSlug = String(dept.slug || rawId);
       const canonicalId = normalizeDeptPrefixedId(rawId);
       const canonicalSlug = normalizeDeptPrefixedId(rawSlug);
+
+      // ARCHIVE WINS. Check BOTH spellings: a pre-MR-21 box carries the row
+      // under the raw `dept-<slug>` id while the manifest entry canonicalizes to
+      // the bare id, and the sync script archives whichever one it pruned.
+      const archivedId = archivedRows.has(canonicalId)
+        ? canonicalId
+        : archivedRows.has(rawId)
+          ? rawId
+          : null;
+      if (archivedId) {
+        console.log(
+          `[reseed] Skipping "${rawId || rawSlug}" — workspace "${archivedId}" is archived ` +
+            `(reason=${archivedRows.get(archivedId) ?? 'unspecified'}); left archived, no agents seeded`,
+        );
+        continue;
+      }
 
       const slugLower = rawSlug.toLowerCase();
       const isCeo = canonicalSlug === 'master-orchestrator' || slugLower === 'ceo' || slugLower === 'dept-ceo' || rawId === 'ceo';
@@ -8707,7 +10345,7 @@ export function reseedWorkspacesFromConfig(
       }
     }
 
-    // DEFECT 2 fix (2026-08-04, "WANTED Woman" incident — 72 workspace rows
+    // DEFECT 2 fix (2026-08-04, "Client A" incident — 72 workspace rows
     // for 35 departments, 288 agents for a 36-agent workforce).
     //
     // The FM-6 / MR-21 guards above (canonOwner lookup, dept- prefix

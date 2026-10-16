@@ -14,7 +14,7 @@ new client is added the SAME way every time and never half-added again.
 | **Roster (source of truth)** | `~/clawd/accounts/accounts.md` | one numbered section + table row per client: machine, owner, access method, tunnel/CF-app ids, **env-var NAMES** for tokens/passwords, SSH alias/key/known_hosts |
 | **Heartbeat copy (drives monitoring)** | `~/clawd/fleet-heartbeat/scripts/probe-fleet.sh` → `ROSTER=()` | machine-readable copy of the roster the ONE heartbeat loops over |
 | **Canonical machine roster (drives the gate)** | `~/clawd/accounts/fleet-roster.json` | JSON copy of `accounts.md` keyed by box-id (provider/account/kind/registry_id/probe_match). The coverage gate's authority. |
-| **CF Access token map (Mac-tunnel only, drives the gate)** | `~/clawd/accounts/cf-token-map.json` | single-source map of tunnel hostname (`probe_match`) → CF Access token NAME suffix (e.g. `EDDIE_OTTS`). `probe-fleet.sh` reads ONLY this file for both the probe and the auto-update step — no more duplicated `case` switch. The gate FAILS (`MISSING_CF_TOKEN_MAPPING`) if a mac-kind roster box has no entry. |
+| **CF Access token map (Mac-tunnel only, drives the gate)** | `~/.openclaw/fleet/cf-token-map.json` (private, outside the repo; shape: `accounts/cf-token-map.example.json`; override `$CF_TOKEN_MAP`) | single-source map of tunnel hostname (`probe_match`) → CF Access token NAME suffix (e.g. `CLIENT_ONE`). `probe-fleet.sh` reads ONLY this file for both the probe and the auto-update step — no more duplicated `case` switch. The gate FAILS (`MISSING_CF_TOKEN_MAPPING`) if a mac-kind roster box has no entry. |
 | **Prover/rolls copy** | `~/clawd/fleet-prover/box-registry.json` | box connection registry `prove-floor.py`/`prove-fleet.sh` iterate |
 | **🚦 Coverage gate (ENFORCES no-silent-drop)** | `~/clawd/accounts/fleet-coverage-gate.py` | `--reconcile --check-contabo` proves all copies agree; `--touched -` proves an op covered everyone. Exit 1 = STOP. |
 | **Access RULES (patterns only)** | `~/clawd/AGENTS.md` | VPS pattern (`ssh root@IP` → `docker exec`; §"Contabo VPS" + §"Other clients, hosts & gotchas"); Mac-tunnel ssh-config pattern + service-token gotchas (§"Rescue Rangers — client onboarding for remote SSH"). **RULES/patterns only — per-client blocks are NOT here anymore (retired).** |
@@ -46,7 +46,7 @@ the env var (e.g. `CF_ACCESS_KAREN_SVC_CLIENT_SECRET`); the value lives only in 
 - A3. CF Access **self_hosted** app on that hostname (Google SSO + allowed emails) **+ service token** (non-identity policy).
 
 ### B. (Mac-tunnel only) Make the connector PERMANENT — ON THE CLIENT'S MAC (can't be done remotely)
-The tunnel survives **reboot + crash + idle** only if you do BOTH B1 and B2. This is the exact setup proven on Cassandra's box (up for days). Copy it.
+The tunnel survives **reboot + crash + idle** only if you do BOTH B1 and B2. This is the exact setup proven on a client box (up for days). Copy it.
 
 **B1 — connector as a permanent launchd LaunchDaemon.**
 - *Simple (no other cloudflared on the box):* `sudo cloudflared service install <CONNECTOR-TOKEN>` → creates `/Library/LaunchDaemons/com.cloudflare.cloudflared.plist` with `RunAtLoad`. Then verify `KeepAlive` is set (B1b).
@@ -73,7 +73,7 @@ The tunnel survives **reboot + crash + idle** only if you do BOTH B1 and B2. Thi
   sudo launchctl bootout  system /Library/LaunchDaemons/com.blackceo.rescue-<client>.plist 2>/dev/null
   sudo launchctl bootstrap system /Library/LaunchDaemons/com.blackceo.rescue-<client>.plist
   ```
-- **B1b — both `RunAtLoad=true` AND `KeepAlive=true` must be set** in whichever plist you used. Missing either = the connector dies and never returns (this is what dropped Kofi/Karen). Use `--no-autoupdate`.
+- **B1b — both `RunAtLoad=true` AND `KeepAlive=true` must be set** in whichever plist you used. Missing either = the connector dies and never returns (this is what dropped two client boxes). Use `--no-autoupdate`.
 
 **B2 — never sleep:** `sudo pmset -a sleep 0 displaysleep 0` → confirm `pmset -g | grep ' sleep'` shows `0 (sleep prevented by powerd)`.
 
@@ -110,7 +110,7 @@ A **client-attended reboot is the OPTIONAL gold test only** — run it solely wh
   - Mac-tunnel: `"Client|Persona|<ssh-user>|<tunnelhost>|mac-tunnel"` (or `mac-tunnel-rescue`) — **quote any pattern containing a space or `(`** (an unquoted space/paren is a `bash` parse error that makes the WHOLE script emit nothing → the heartbeat silently covers NOBODY; this happened Jun 18–29).
 - D2b. `~/clawd/accounts/fleet-roster.json` — add the box under `boxes` with `client/provider/account/kind/registry_id/probe_match` (env-var NAMES only). This is the gate's authority.
 - D2c. `~/clawd/fleet-prover/box-registry.json` — add the box so `prove-floor`/rolls reach it.
-- D2d. **(Mac-tunnel ONLY)** `~/clawd/accounts/cf-token-map.json` — add one entry under `"tokens"`: `"<tunnelhost>": "<NAME>"`, keyed by the EXACT `probe_match` value you just used in D2b (not the client's display name — those two are allowed to differ, e.g. one client's Mac mini box). This is the SINGLE source `probe-fleet.sh` reads for CF Access token names — it replaced a hand-maintained `case` statement that was duplicated in two places in that file and let one client (missing from both) and another (missing from one) silently inherit a DIFFERENT client's Cloudflare credential and get reported DOWN while healthy. **You cannot forget this step and ship anyway: `fleet-coverage-gate.py --reconcile` (step below) FAILS with `MISSING_CF_TOKEN_MAPPING` if a mac-kind roster box has no entry here — the gate is the enforcement, this bullet is just the how-to.**
+- D2d. **(Mac-tunnel ONLY)** `~/.openclaw/fleet/cf-token-map.json` (private; never commit it) — add one entry under `"tokens"`: `"<tunnelhost>": "<NAME>"`, keyed by the EXACT `probe_match` value you just used in D2b (not the client's display name — those two are allowed to differ, e.g. one client's Mac mini box). This is the SINGLE source `probe-fleet.sh` reads for CF Access token names — it replaced a hand-maintained `case` statement that was duplicated in two places in that file and let one client (missing from both) and another (missing from one) silently inherit a DIFFERENT client's Cloudflare credential and get reported DOWN while healthy. **You cannot forget this step and ship anyway: `fleet-coverage-gate.py --reconcile` (step below) FAILS with `MISSING_CF_TOKEN_MAPPING` if a mac-kind roster box has no entry here — the gate is the enforcement, this bullet is just the how-to.**
 - D3. **Active rollout/wave roster (if one exists):** `~/clawd/accounts/accounts.md` is the SINGLE SOURCE OF TRUTH for the fleet. Any wave/execution roster (e.g. `~/clawd/WAVE5-ROSTER.md`) is a DERIVED view — if such a file currently exists, add the new client's row there too (same columns: #, Client, Agent, Box Type, Tunnel/Host + tunnel id, SSH User, CF token env-var NAMES, SSH command pattern, Special Cases) and bump its box count, OR regenerate it from accounts.md. Don't let it drift from accounts.md. (A new fleet member was missed here once because they were added to accounts.md but not the active wave roster.)
 - ✅ After D, the ONE `fleet-heartbeat` cron checks this client every hour. No per-client heartbeat ever.
 
@@ -127,8 +127,8 @@ A **client-attended reboot is the OPTIONAL gold test only** — run it solely wh
 The client opens their dashboard at `<client>.zerohumanworkforce.com`, gated by its OWN Cloudflare Access app
 `<client>-command-center` (a SEPARATE app from the A3 SSH app). Its `allow` policy MUST include the **client's
 own Google login email**, not just the operator emails — otherwise the client hits **"That account does not have
-access"** the first time they log in, even though the dashboard is healthy locally. (Real incident: Monique
-Tucker lockout 2026-06-21; an audit then found 4 more clients — Corey, Sonatta, Aurelia, Karen — with the
+access"** the first time they log in, even though the dashboard is healthy locally. (Real incident: a client
+lockout 2026-06-21; an audit then found 4 more clients with the
 identical gap. See changelog 2026-06-21.)
 - G1. Find the app + its allow policy (token `CLOUDFLARE_ZHW_APPS_API_TOKEN`; account = ZHC `$CLOUDFLARE_ACCOUNT_ID` = `13f808b7…`; Access login domain `sweet-wave-ca28.cloudflareaccess.com`):
   `GET /accounts/$CLOUDFLARE_ACCOUNT_ID/access/apps` → find `<client>-command-center` → `GET …/access/apps/{app}/policies` → the `decision:allow` ("Operator access") policy.

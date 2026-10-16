@@ -32,6 +32,7 @@
  */
 
 import { v4 as uuidv4 } from 'uuid';
+import { stopCardPermanently } from '@/lib/stop-card';
 import { createTaskOnce, taskRequestCompany, TaskContextError, taskRequestFingerprint } from '@/lib/task-request-identity';
 import { assertAgentCompany } from '@/lib/task-agent-assignment';
 import { taskPersonaCompanyContext, personaCompanyContext } from '@/lib/persona-company';
@@ -59,7 +60,8 @@ import {
 import { ensureBlendGuardrail } from '@/lib/persona-dispatch';
 import { getBestSOPForTask, getPersonaSlots, type PersonaSlot, type SOP } from '@/lib/sops';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
-import { autoDispatchTask, recordDispatchFailure } from '@/lib/task-dispatcher';
+import { autoDispatchTask, recordDispatchFailure, PLANNING_PENDING_KEY } from '@/lib/task-dispatcher';
+import { bindOperatorPresentationContract, saveOperatorPresentationContract, type OperatorPresentationIntake } from '@/lib/presentation-operator-contract';
 import {
   isPodcastTask,
   podcastProcessorActivationStatus,
@@ -72,11 +74,13 @@ import {
   sendRequesterAudienceAsk,
   type RequesterAudienceAskDelivery,
 } from '@/lib/jobs/trust-engine';
+import { loadTaskRow } from '@/lib/board/task-row-projection';
 import { normalizeRequesterSessionKey } from '@/lib/requester-session';
-import { transition, recordStatusEvent, type LifecycleState } from '@/lib/task-lifecycle';
-import { recordBlockEvent } from '@/lib/block-events';
+import { transition, recordStatusEvent, captureHqTaskEvent, hqTaskAssignee, type LifecycleState } from '@/lib/task-lifecycle';
 import { assertNoFixtureDerivedServerWrite } from '@/lib/fixture-guard';
 import type { Task, TaskPriority, Agent, PersonaBundle, TaskPersonaBundleRow } from '@/lib/types';
+import { extractNamedRecipient } from '@/lib/audience/named-recipient';
+import { AUDIENCE_ASK_TEXT, ANSWERED_AUDIENCE_SOURCES } from '@/lib/board/audience-chip';
 
 // ─── SENTINEL GUARD HELPERS ──────────────────────────────────────────────────
 
@@ -146,11 +150,12 @@ export const SENTINEL_IDS = new Set([
 // kicks this off concurrently, then gates autoDispatchTask on it for a bounded
 // budget so board persona == runtime persona without blocking the API response.
 //
-// F3.1 / FDN-2: the per-spawn timeout is 60s (PERSONA_SELECT_TIMEOUT_MS) and the
-// policy is "1 retry after 5s" — one real attempt, a 5s cool-off, then one retry
-// (2 spawns total) before the deterministic TS fallback chain engages. A
-// slow-but-valid selection now has 60s to land; a genuinely broken selector fails
-// over in bounded time instead of hammering the box. The retry is off the hot
+// F3.1 / FDN-2: the per-spawn timeout is PERSONA_SELECT_TIMEOUT_MS (300s default,
+// raised from 60s in the 2026-09 dispatch-stall fix — the --blend path was measured
+// at 206s and 258s on a loaded box) and the policy is "1 retry after 5s" — one real
+// attempt, a 5s cool-off, then one retry (2 spawns total) before the deterministic
+// TS fallback chain engages. A slow-but-valid selection gets to land; a genuinely
+// broken selector fails over in bounded time instead of hammering the box. The retry is off the hot
 // path — autoDispatchTask only waits PERSONA_PIN_DISPATCH_BUDGET_MS and the
 // dispatch gate heals anything still naked, so the 5s cool-off never stalls a board.
 export const PERSONA_PIN_MAX_ATTEMPTS = 2;
@@ -162,6 +167,10 @@ export const PERSONA_PIN_DISPATCH_BUDGET_MS = 8000;
 // Dispatch-time SOP rescore (F3.4) is a single bounded, heuristic-mode spawn so
 // dispatch stays responsive — no retry loop, tighter than the creation timeout.
 export const PERSONA_RESCORE_TIMEOUT_MS = 10000;
+// Confirm/auto-answer voice re-score runs the full --blend selector, which needs far more
+// than 10s on a real box (it was SIGTERM-killed 3x on the canary, stalling dispatch 12 min).
+// Bounded under the 5-min dispatch sweep window. Env: AUDIENCE_RESCORE_TIMEOUT_MS.
+export const AUDIENCE_RESCORE_TIMEOUT_MS = parseInt(process.env.AUDIENCE_RESCORE_TIMEOUT_MS || '', 10) || 120_000;
 
 // ─── DEFAULT-PERSONA FALLBACK CHAIN (POINT 10 fix 1 / F3.1 FDN-2) ────────────
 // The founder's board invariant: EVERY task carries a persona. Historically,
@@ -625,6 +634,56 @@ export function emitPersonaBlendMissing(taskId: string, personaId: string | null
   }
 }
 
+/**
+ * The task's company has no usable persona context (e.g. its company id is
+ * missing from MC_PERSONA_COMPANY_CONTEXTS_JSON). Previously this threw out of
+ * resolvePersonaAndPin with NOTHING pinned — every task in that company was born
+ * persona-less and the triad gate parked it. Pin the company-NEUTRAL house-voice
+ * constant instead: it reads no box-wide sticky history and no other company's
+ * config, so the "never borrow another company's default" guarantee still holds.
+ * The setup gap stays loud via a `persona_company_context_missing` event.
+ */
+function pinCompanyUnresolvedFallback(
+  taskId: string,
+  snapshot: ReturnType<typeof capturePersonaSnapshot>,
+  err: Error,
+  opts?: { blend?: boolean },
+): string | null {
+  if (err.message === 'persona_task_missing') throw err;
+  console.error(`[resolvePersonaAndPin] company persona context unresolved for task ${taskId}: ${err.message}`);
+  try {
+    run(
+      `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
+      [
+        uuidv4(),
+        'persona_company_context_missing',
+        taskId,
+        `[PERSONA-COMPANY] ${err.message} — this task's company is not wired in MC_PERSONA_COMPANY_CONTEXTS_JSON. ` +
+          `Pinned the company-neutral house voice so the card is not stranded; add the company entry to restore company-scoped selection.`,
+        new Date().toISOString(),
+      ],
+    );
+  } catch {
+    /* audit best-effort */
+  }
+  if (opts?.blend) { emitPersonaBlendMissing(taskId, null); return null; }
+  const fb: DepartmentDefaultPersona = {
+    persona_id: DEFAULT_PERSONA_FALLBACK,
+    persona_name: humanizeSlug(DEFAULT_PERSONA_FALLBACK),
+    persona_mode: 'leadership',
+    source: 'house-voice-constant',
+  };
+  try {
+    return commitPersonaMutation(snapshot, () => {
+      pinDepartmentDefaultPersona(taskId, fb);
+      return fb.persona_id;
+    });
+  } catch (fbErr) {
+    console.error(`[resolvePersonaAndPin] house-voice fallback pin FAILED for task ${taskId} — left unpinned:`, fbErr);
+    return null;
+  }
+}
+
 export async function resolvePersonaAndPin(
   taskId: string,
   taskDescription: string,
@@ -658,8 +717,14 @@ export async function resolvePersonaAndPin(
 
   // Resolve company before entering retry/fallback so ambiguity cannot degrade
   // into a different company's process-global default.
-  if (!process.env.PERSONA_FIXTURE_JSON) taskPersonaCompanyContext(taskId);
   const snapshot = capturePersonaSnapshot(taskId);
+  if (!process.env.PERSONA_FIXTURE_JSON) {
+    try {
+      taskPersonaCompanyContext(taskId);
+    } catch (err) {
+      return pinCompanyUnresolvedFallback(taskId, snapshot, err as Error, opts);
+    }
+  }
   for (let attempt = 1; attempt <= PERSONA_PIN_MAX_ATTEMPTS; attempt++) {
     try {
       const persona = await selectPersonaForTask(taskId, taskDescription, departmentForSelector, sopContext, {
@@ -1590,7 +1655,7 @@ type RequesterAudienceAskSender = (
 /**
  * Build the operator-facing audience prompt. A single high-confidence ICP audience
  * gets a CONFIRM prompt; multiple / low-confidence / none gets the exact
- * "What audience are we dealing with?" ask enumerating the known ICP audiences.
+ * plain "Who will be reading this?" ask listing the known readers.
  */
 function buildAudiencePrompt(
   label: string | null,
@@ -1598,12 +1663,12 @@ function buildAudiencePrompt(
   confidence: number,
 ): string {
   if (label && candidates.length <= 1 && confidence >= AUDIENCE_HIGH_CONFIDENCE) {
-    return `Confirm the audience for this content task: "${label}". This is the ICP we will write FOR — reply to change it if that's wrong before the task is dispatched.`;
+    return `Likely answer for "who will read this?": "${label}". Confirm it, or change it, before the task starts.`;
   }
   const list = candidates.length
     ? candidates.map((c) => `• ${c}`).join('\n')
-    : '(no ICP audiences on file — name the audience)';
-  return `What audience are we dealing with? This content task needs a confirmed audience before dispatch. Known ICP audiences:\n${list}`;
+    : '(nothing on file — the owner needs to say who will read it)';
+  return `Who will be reading this? This content task is waiting for an answer before it starts. Known readers:\n${list}`;
 }
 
 /**
@@ -1676,7 +1741,7 @@ export async function refreshPersonaDecisionIfNeeded(taskId:string):Promise<void
   if(!stale && !(bundle.rationale as {refresh_pending?:boolean}|undefined)?.refresh_pending) { applyPersonaOperatorLock(taskId); await refreshPersonaScopesIfNeeded(taskId); return; }
   const dept=canonicalDeptSlug(task.department ?? '') || 'general';
   const description=`${task.title} ${task.description ?? ''}`;
-  if(task.audience_source==='operator_confirmed' && task.audience_label) {
+  if((task.audience_source==='operator_confirmed' || task.audience_source==='task_named' || task.audience_source==='owner_default' || task.audience_source==='best_guess') && task.audience_label) {
     const refreshed=await rescoreAudienceBlend(taskId,description,dept,task.audience_label);
     if(!refreshed.rescored) throw new Error('persona_refresh_pending');
   } else {
@@ -1857,39 +1922,27 @@ export async function blockForOwnerConfirm(
   // CAS_CONFLICT rather than a silent overwrite.
   const current = queryOne<{ status: string }>('SELECT status FROM tasks WHERE id = ?', [taskId]);
   if (!current || current.status === 'blocked') return; // already blocked — idempotent no-op
-  let blocked = false;
-  try {
-    await transition(taskId, 'blocked', {
-      actor: 'audience-confirm',
-      reason: `hard-hold department "${department}" unconfirmed past deadline`,
-      operatorOverride: true,
-      expectedFrom: current.status as LifecycleState,
-      extraColumns: {
-        block_reason: `[AUDIENCE-CONFIRM] Unconfirmed past the deadline in build department "${department}" — HARD-HOLD, never house-voice.`,
-        block_needs: `Owner action required: ${prompt}`,
-        block_audience: 'OWNER',
-      },
-    });
-    blocked = true;
-  } catch (err) {
-    // CAS_CONFLICT (concurrent writer won the read→write race) — non-fatal, and
-    // we must NOT emit a duplicate event/notify. Anything else is worth a warn.
-    if (err instanceof Error && !err.message.includes('CAS_CONFLICT')) {
-      console.warn(`[audience-confirm] blockForOwnerConfirm transition failed for task ${taskId}:`, err);
-    }
-  }
-  if (!blocked) return; // transition aborted (CAS lost / illegal / error) — no duplicate event/notify
-  // MR-30: snapshot block metadata for the block-history audit trail.
-  // (transition() already writes the task_events audit; this is the companion
-  // block-snapshot the task-detail modal reads for the 'Previously blocked'
-  // panel.)
-  recordBlockEvent({
+  // NO-SILENT-STOP: the transition, the block_* metadata, the block-history
+  // snapshot AND the owner notice all run through the one chokepoint. Before
+  // this, the owner notice here was a notifySystem() to the OPERATOR lane plus
+  // a hope that the trust engine's periodic sweep would eventually reach the
+  // owner — which it only did if the card still carried block_audience='OWNER'
+  // and the sweep ran. The chokepoint sends it now, once, and stamps the claim.
+  const blockedResult = await stopCardPermanently({
     taskId,
-    blockReason: `[AUDIENCE-CONFIRM] Unconfirmed past the deadline in build department "${department}" — HARD-HOLD, never house-voice.`,
-    blockNeeds: `Owner action required: ${prompt}`,
-    blockAudience: 'OWNER',
-    actor: 'audience-confirm',
+    source: 'audience-confirm',
+    reason:
+      `We need you to confirm who this is for before we write it, and the confirmation window has passed. ` +
+      `Work in "${department}" is never written on a guess about the audience, so it is waiting on you.`,
+    needs: prompt,
+    audience: 'OWNER',
+    expectedFrom: current.status as LifecycleState,
+    operatorOverride: true,
+    machineDetail:
+      `[AUDIENCE-CONFIRM] Unconfirmed past the deadline in build department "${department}" — HARD-HOLD, never house-voice.`,
   });
+  const blocked = blockedResult.blocked;
+  if (!blocked) return; // transition aborted (CAS lost / illegal / error) — no duplicate event/notify
   try {
     run(
       `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
@@ -1899,6 +1952,9 @@ export async function blockForOwnerConfirm(
     );
   } catch { /* audit best-effort */ }
   try {
+    // The OPERATOR-lane copy is retained deliberately: the owner is told by the
+    // chokepoint above, and the operator still needs to see a hard-hold land on
+    // their own board. This one is an echo, not the notice, so it is unstamped.
     notifySystem(
       `[AUDIENCE-CONFIRM] Task ${taskId} (department: ${department}) BLOCKED for owner sign-off — confirm-window expired and this department never silently releases under house voice. ${prompt}`,
       { agent: 'audience-confirm', action: 'blocked_owner' },
@@ -1925,7 +1981,14 @@ export function holdForAudienceConfirm(
     run('UPDATE tasks SET next_dispatch_eligible_at = ? WHERE id = ?', [nextEligible, taskId]);
   } catch { /* pre-migration tolerant */ }
 
-  if (decision.firstHold) {
+  // Already answered (task_named / owner_default / operator_confirmed): never write a fresh ask.
+  let answered = false;
+  try {
+    const src = queryOne<{ audience_source: string | null }>('SELECT audience_source FROM tasks WHERE id = ?', [taskId])?.audience_source ?? '';
+    answered = (ANSWERED_AUDIENCE_SOURCES as readonly string[]).includes(src);
+  } catch { /* pre-migration tolerant */ }
+
+  if (decision.firstHold && !answered) {
     try {
       run(
         `INSERT INTO events (id, type, agent_id, task_id, message, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
@@ -1942,8 +2005,8 @@ export function holdForAudienceConfirm(
     } catch { /* notify best-effort */ }
 
     const audienceQuestion = decision.audienceLabel
-      ? `Quick check before we start building: this will be written for ${decision.audienceLabel} — is that right, or should it be for someone else?`
-      : 'Quick question before we start building: who is this for? Tell me about the audience you want this written for.';
+      ? `This is going to ${decision.audienceLabel}. Is that who it's written for? This task is waiting until you answer.`
+      : AUDIENCE_ASK_TEXT;
     let askDelivery: RequesterAudienceAskDelivery = 'send_failed';
     try {
       askDelivery = sendRequesterAudienceAskFn(taskId, audienceQuestion);
@@ -1962,8 +2025,25 @@ export function holdForAudienceConfirm(
         [uuidv4(), 'audience_confirm_ask_sent', agentId, taskId, askDelivery, now],
       );
     } catch { /* audit best-effort */ }
+    // The ask is now on the row; push it to the board so the "needs your answer"
+    // banner appears without a manual reload (first hold only).
+    try {
+      const row = loadTaskRow(taskId);
+      if (row) broadcast({ type: 'task_updated', payload: row });
+    } catch { /* broadcast best-effort */ }
   }
   console.log(`[audience-confirm] task ${taskId} HELD — awaiting operator audience confirmation`);
+}
+
+/**
+ * The hold parks the card for AUDIENCE_CONFIRM_POLL_MS. Once the operator's
+ * confirm has fully landed, drop that wait so the next intake-advance tick
+ * dispatches it instead of making the card sit up to 5 more minutes.
+ */
+export function releaseAudienceHoldDelay(taskId: string): void {
+  try {
+    run('UPDATE tasks SET next_dispatch_eligible_at = NULL WHERE id = ?', [taskId]);
+  } catch { /* pre-migration tolerant */ }
 }
 
 /**
@@ -2110,8 +2190,9 @@ export function markAudienceDeadlineFallback(taskId: string): void {
  */
 export function confirmTaskAudience(
   taskId: string,
-  opts: { audienceId?: string | null; audienceLabel?: string | null; changed?: boolean } = {},
+  opts: { audienceId?: string | null; audienceLabel?: string | null; changed?: boolean; source?: 'operator_confirmed' | 'task_named' | 'owner_default' | 'best_guess' } = {},
 ): void {
+  const source = opts.source ?? 'operator_confirmed';
   const snapshot=capturePersonaSnapshot(taskId);
   commitPersonaMutation(snapshot,()=>{
     const row=queryOne<{bundle_json:string}>('SELECT bundle_json FROM task_persona_bundle WHERE task_id=?',[taskId]);
@@ -2119,18 +2200,54 @@ export function confirmTaskAudience(
     const bundle=JSON.parse(row.bundle_json) as PersonaBundle;
     const label=opts.audienceLabel ?? bundle.resolved_audience?.label ?? null;
     bundle.resolved_audience={...(bundle.resolved_audience ?? {confidence:1,candidates:[]}),id:opts.audienceId ?? bundle.resolved_audience?.id ?? null,
-      label,source:'operator_confirmed',candidates:label?[label]:[]};
+      label,source,candidates:label?[label]:[]};
     // Confirmation is preserved, but writing waits until the new voice decision
     // is rebuilt. Never release an old audience's blend during the async await.
     const pending={...bundle,confirm_required:true,rationale:{...(bundle.rationale ?? {}),refresh_pending:true}};
     persistPersonaBundle(taskId,pending);
     run("UPDATE task_persona_bundle SET confirm_state='pending',created_at=? WHERE task_id=?",[new Date().toISOString(),taskId]);
-    run("UPDATE tasks SET audience_source='operator_confirmed' WHERE id=?",[taskId]);
+    run("UPDATE tasks SET audience_source=?,audience_label=COALESCE(?,audience_label) WHERE id=?",[source,label,taskId]);
     run('INSERT INTO events(id,type,task_id,message,created_at) VALUES(?,?,?,?,?)',
       [uuidv4(),'audience_confirmed',taskId,'Audience confirmed; refreshing the persona decision before dispatch.',new Date().toISOString()]);
   });
 }
 
+
+/**
+ * Single chokepoint for "who will read this?" answered without asking.
+ * Called by autoDispatchTask when the gate says pending. Order: (1) the task
+ * names its recipient, (2) the owner has a main audience on file. Confirms it
+ * through the same path as the board's Answer button, then reports whether
+ * the gate has released. No client message is ever sent from here.
+ */
+export async function autoAnswerAudienceIfPossible(
+  taskId: string,
+  agentId: string | null,
+  decision: AudienceConfirmDecision,
+  rescore: typeof rescoreAudienceBlend = rescoreAudienceBlend,
+): Promise<{ answered: boolean; label: string | null; source: 'task_named' | 'owner_default' | null; released: boolean }> {
+  const none = { answered: false, label: null, source: null, released: false } as const;
+  if (decision.reason === 'persona_governance_unavailable' || decision.reason === 'persona_refresh_pending') return none;
+  const task = queryOne<Task>('SELECT * FROM tasks WHERE id = ?', [taskId]);
+  if (!task) return none;
+  const named = extractNamedRecipient(task.title, task.description);
+  const fallback = decision.audienceLabel ?? decision.candidates[0] ?? null;
+  const label = named ?? fallback;
+  const source = named ? 'task_named' : 'owner_default';
+  if (!label) return none;
+  confirmTaskAudience(taskId, { audienceLabel: label, source });
+  const dept = canonicalDeptSlug(task.department || task.workspace_id || '') || 'general';
+  await rescore(taskId, `${task.title}${task.description ? `. ${task.description}` : ''}`.trim(), dept, label);
+  // The re-score re-persists the bundle; make sure the card keeps the auto source (drives the "Written for" chip).
+  try { run('UPDATE tasks SET audience_source = ?, audience_label = ? WHERE id = ?', [source, label, taskId]); } catch { /* pre-090 tolerant */ }
+  try {
+    run(
+      'INSERT INTO events (id, type, agent_id, task_id, message, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+      [uuidv4(), 'audience_auto_answered', agentId, taskId, `Answered "who will read this?" automatically: ${label} (${source}).`, new Date().toISOString()],
+    );
+  } catch { /* audit best-effort */ }
+  return { answered: true, label, source, released: !evaluateAudienceConfirmGate(taskId).hold };
+}
 
 /**
  * D3 — re-run the voice-first blend WITH the operator-confirmed audience so the
@@ -2160,7 +2277,7 @@ export async function rescoreAudienceBlend(
     const persona = await selectPersonaForTask(taskId, taskDescription, departmentForSelector, null, {
       blend: true,
       audienceOverride: audienceLabel,
-      timeoutMs: PERSONA_RESCORE_TIMEOUT_MS,
+      timeoutMs: AUDIENCE_RESCORE_TIMEOUT_MS,
     });
     if (!persona?.bundle) {
       console.warn(`[rescoreAudienceBlend] task ${taskId}: re-run selector returned no bundle — confirm stands, voice unchanged.`);
@@ -2182,6 +2299,7 @@ export async function rescoreAudienceBlend(
     try {
       run(`UPDATE task_persona_bundle SET confirm_state = 'confirmed' WHERE task_id = ?`, [taskId]);
     } catch { /* pre-090 tolerant */ }
+    releaseAudienceHoldDelay(taskId);
     const updatedTask = queryOne<Task>(
       `SELECT t.*,
           aa.name as assigned_agent_name,
@@ -2386,10 +2504,14 @@ export function findDuplicateByTitleWindow(
 }
 
 export interface CreateTaskCoreInput {
+  /** Validated at the authenticated ingest door; bound and persisted with the task before dispatch. */
+  presentation_operator_intake?: OperatorPresentationIntake | null;
   /** Validated internal identity, never unchecked external tenant input. */
   idempotency_company_id?: string | null;
   idempotency_payload_hash?: string;
   routing_hold_reason?: string | null;
+  /** Planning Mode: stamp the planning hold at INSERT time so routing/dispatch skip the task. */
+  planning_mode?: boolean;
   persona_bundle?: PersonaBundle | null;
   title: string;
   description?: string | null;
@@ -2401,6 +2523,18 @@ export interface CreateTaskCoreInput {
   workspace_id?: string | null;
   department?: string | null;
   due_date?: string | null;
+  /**
+   * INTAKE LANE (migration 153). What the intake classified this message as —
+   * 'route' for ordinary work, 'heavy' for work that spans departments, carries
+   * a deadline or is large. 'answer' should never arrive here: that lane is
+   * answered in chat and never routed, so an 'answer' card is a correction.
+   * Descriptive only; nothing refuses a card for omitting it.
+   */
+  route_lane?: string | null;
+  /** The intake's own step estimate for the work, when it made one. */
+  effort_steps?: number | null;
+  /** How many departments the work spans, per the intake. */
+  depts_touched?: number | null;
   sop_id?: string | null;
   /**
    * WI-15b (D1 Option B — NESTED subtasks, migration 124). The parent row id
@@ -2511,13 +2645,13 @@ export interface CreateTaskCoreResult {
 
 export interface CreateTaskCoreOptions {
   /**
-   * Fire the outbound `/api/webhooks/task-created` notify to the OpenClaw
-   * gateway. Defaults to true so ingested tasks announce themselves exactly
-   * like UI-created ones. The base URL is derived from `origin` (falling back
-   * to NEXT_PUBLIC_APP_URL / localhost:4000).
+   * @deprecated ACCEPTED AND IGNORED. This used to fire an outbound
+   * `/api/webhooks/task-created` notify; that self-call is gone (see the note
+   * where it used to run, after the task_created broadcast). Both fields stay
+   * on the interface so the ~30 existing call sites keep compiling unchanged.
    */
   notifyGateway?: boolean;
-  /** Request origin used to build the absolute webhook URL. */
+  /** @deprecated ACCEPTED AND IGNORED — see `notifyGateway`. */
   origin?: string | null;
 }
 
@@ -2571,6 +2705,9 @@ export async function createTaskCore(
   input: CreateTaskCoreInput,
   options: CreateTaskCoreOptions = {}
 ): Promise<CreateTaskCoreResult | undefined> {
+  // Both fields of `options` are accepted and ignored since the gateway
+  // self-POST was deleted; the parameter stays so call sites compile unchanged.
+  void options;
   // Structured identity is reserved with the task/event transaction below.
   // ── DEDUP LAYER 2: title + workspace window ────────────────────────────────
   // Applies to the UI / Telegram create paths that carry NO idempotency key.
@@ -2790,11 +2927,52 @@ export async function createTaskCore(
     ]
   );
 
+    // B15 S5 capture boundary — the canonical task-creation write. The audit id
+    // is the id of the `events` row this INSERT actually wrote (S5 source key
+    // `activity:<id>`), never a re-minted one. captureHqTaskEvent is
+    // savepoint-bounded and never throws, so a failed observer cannot roll back
+    // this creation. `assigned_agent_id` is recorded exactly as stored: a card
+    // created without an assignee stays unassigned, and no handoff actor is
+    // invented where the source names none.
+    const createAuditId = uuidv4();
     run(`INSERT INTO events (id, type, agent_id, task_id, message, created_at)
       VALUES (?, ?, ?, ?, ?, ?)`,
-      [uuidv4(), 'task_created', input.created_by_agent_id || null, id, creationMessage, now]);
+      [createAuditId, 'task_created', input.created_by_agent_id || null, id, creationMessage, now]);
     run('UPDATE tasks SET persona_contract_version = 1 WHERE id = ?', [id]);
+    captureHqTaskEvent({
+      sourceKey: `activity:${id}`,
+      auditId: createAuditId,
+      taskId: id,
+      companyId: creationCompanyId,
+      fromStatus: null,
+      toStatus: status,
+      actor: input.created_by_agent_id || null,
+      // Read back from the row just inserted: a real assignment is recorded
+      // distinctly, and an unassigned card is captured as unassigned rather
+      // than credited to a guessed handoff actor.
+      assignedAgentId: hqTaskAssignee(id),
+      occurredAt: now,
+    });
+    if (input.presentation_operator_intake) {
+      saveOperatorPresentationContract(id, bindOperatorPresentationContract(id, input.presentation_operator_intake));
+    }
+    if (input.planning_mode) run('UPDATE tasks SET planning_session_key=? WHERE id=?', [PLANNING_PENDING_KEY, id]);
     if (input.routing_hold_reason) run('UPDATE tasks SET dispatch_hold=1, routing_reason=?, routing_wait_owner=? WHERE id=?', [input.routing_hold_reason, 'SYSTEM', id]);
+    // INTAKE LANE (migration 153) — written after the insert, the same shape
+    // routing_hold_reason uses, so the canonical INSERT column list stays as it
+    // was and a pre-153 box simply ignores the write. Only touched when the
+    // caller actually supplied something: a producer that sends none leaves
+    // three NULLs, exactly the row it created before these columns existed.
+    if (input.route_lane != null || input.effort_steps != null || input.depts_touched != null) {
+      try {
+        run('UPDATE tasks SET route_lane=?, effort_steps=?, depts_touched=? WHERE id=?', [
+          input.route_lane ?? null,
+          input.effort_steps ?? null,
+          input.depts_touched ?? null,
+          id,
+        ]);
+      } catch { /* pre-153 box: the lane is descriptive, never worth failing a create */ }
+    }
   }, true);
   if (priorTaskId) {
     const prior = queryOne<Task>('SELECT * FROM tasks WHERE id = ?', [priorTaskId]);
@@ -2892,6 +3070,32 @@ export async function createTaskCore(
             run(`UPDATE tasks SET routing_reason=?, routing_wait_owner=?, routing_next_action=?
               WHERE id=? AND assignment_version=? AND assigned_agent_id IS NULL AND archived_at IS NULL AND killed_at IS NULL`,
               [decision.reason, decision.owner, 'Repair the department configuration or retry assignment.', id, snapshot.assignment_version]);
+            // JGT-106 — no fit ever leaves a card lane-less. A non-'assigned'
+            // decision above only stamps the routing reason; if the task still
+            // has no workspace at all, park it in the company's General Task
+            // catch-all (migration 166) rather than leaving workspace_id NULL.
+            // Same optimistic guard as the stamp above so a concurrent
+            // assignment/edit can never be clobbered. If the company has no
+            // general-task workspace (declined, or not yet provisioned), this
+            // is a no-op and workspace_id stays NULL — unchanged behavior.
+            if (!snapshot.workspace_id) {
+              run(
+                `UPDATE tasks SET workspace_id = (
+                   SELECT id FROM workspaces
+                    WHERE company_id = ? AND archived_at IS NULL AND id <> 'default'
+                      AND lower(slug) IN ('general-task', 'dept-general-task')
+                    ORDER BY CASE WHEN lower(slug) = 'general-task' THEN 0 ELSE 1 END
+                    LIMIT 1
+                 )
+                 WHERE id = ? AND workspace_id IS NULL AND assignment_version=? AND assigned_agent_id IS NULL AND archived_at IS NULL AND killed_at IS NULL`,
+                [creationCompanyId, id, snapshot.assignment_version],
+              );
+              const parked = queryOne<{ id: string; slug: string | null }>(
+                'SELECT w.id, w.slug FROM tasks t JOIN workspaces w ON w.id = t.workspace_id WHERE t.id = ?',
+                [id],
+              );
+              if (parked) { workspaceId = parked.id; workspaceSlug = parked.slug; }
+            }
           }
         }
       } catch (routeErr) {
@@ -3086,39 +3290,22 @@ export async function createTaskCore(
     payload: task,
   });
 
-  // Notify the OpenClaw gateway asynchronously — don't block.
-  // NOTE (B4): routing now happens IN-PROCESS above via routeTask(), so this
-  // outbound notify is no longer the routing mechanism (the old
-  // /api/webhooks/task-created HTTP-to-WS-gateway call was a silent no-op). It
-  // is retained only as a best-effort "a task exists" announcement and is fully
-  // non-fatal; routing does not depend on it.
-  if (options.notifyGateway !== false) {
-    const origin =
-      options.origin || process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:4000';
-    const webhookUrl = `${origin}/api/webhooks/task-created`;
-    (async () => {
-      try {
-        const webhookResponse = await fetch(webhookUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            taskId: task.id,
-            title: task.title,
-            description: task.description,
-            department: task.department,
-            priority: task.priority,
-            workspaceId: task.workspace_id,
-          }),
-        });
-        if (!webhookResponse.ok) {
-          console.error('[createTaskCore] Webhook notification failed:', await webhookResponse.text());
-        }
-      } catch (webhookError) {
-        // Log but never fail the task creation.
-        console.error('[createTaskCore] Failed to trigger webhook:', webhookError);
-      }
-    })();
-  }
+  // NO GATEWAY SELF-POST HERE — deleted deliberately, do not restore.
+  //
+  // Every task creation used to fire an unauthenticated POST from this process
+  // back into this same process at `/api/webhooks/task-created`. It did nothing:
+  // routing moved IN-PROCESS to routeTask() above (B4), and the comment this
+  // replaces already recorded that the HTTP-to-WS-gateway call "was a silent
+  // no-op … retained only as a best-effort announcement". What it did produce
+  // was one `middleware_401` per created task — the request carries no webhook
+  // signature, so the middleware rejects it before the route runs. A no-op that
+  // only emits auth failures is noise with a security smell, not an
+  // announcement.
+  //
+  // The board already learns about the card from the `task_created` SSE
+  // broadcast directly above, which is the real notification path.
+  // `/api/webhooks/task-created` itself is untouched — it stays for genuine
+  // EXTERNAL callers that sign their requests.
 
   // ── ASYNC PERSONA SELECTION (PRD 1.6 / G10-TRIAD-PERSONA-RESOLVE) ─────────────
   // Persona selection + pin + task_updated SSE re-broadcast are owned by

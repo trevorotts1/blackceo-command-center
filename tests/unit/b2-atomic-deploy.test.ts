@@ -39,7 +39,14 @@ import { execSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { createRequire } from 'node:module';
 import Database from 'better-sqlite3';
+
+const testRequire = createRequire(import.meta.url);
+const REAL_BETTER_SQLITE3_DIR = path.dirname(testRequire.resolve('better-sqlite3/package.json'));
+const REAL_BINDINGS_DIR = path.dirname(testRequire.resolve('bindings/package.json'));
+const REAL_FILE_URI_TO_PATH_DIR = path.dirname(testRequire.resolve('file-uri-to-path/package.json'));
+const REAL_MV = execSync('command -v mv').toString().trim();
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -73,6 +80,20 @@ function writeFixtureDb(dbPath: string): void {
 
 function rmTmpDir(dir: string): void {
   try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+}
+
+function initializeFixtureGit(appDir: string, message = 'fixture baseline'): string {
+  const git = (args: string[]) => {
+    const result = spawnSync('git', ['-C', appDir, ...args], { encoding: 'utf8' });
+    assert.strictEqual(result.status, 0,
+      `git ${args.join(' ')} failed in fixture ${appDir}: ${result.stderr}`);
+    return (result.stdout ?? '').trim();
+  };
+  git(['init']);
+  git(['add', 'package.json', 'package-lock.json']);
+  if (existsSync(path.join(appDir, 'src'))) git(['add', 'src']);
+  git(['-c', 'user.name=Command Center Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-m', message]);
+  return git(['rev-parse', 'HEAD']);
 }
 
 /**
@@ -160,6 +181,17 @@ function buildFixture(cfg: FixtureConfig = {}): Fixture {
 
   // Fake DB
   writeFixtureDb(path.join(appDir, 'mission-control.db'));
+  mkdirSync(path.join(appDir, 'src'), { recursive: true });
+  writeFileSync(path.join(appDir, 'src', 'a.ts'), 'export const a = 1;\n');
+  writeFileSync(path.join(appDir, 'package.json'), '{"name":"fixture","version":"1.0.0","build":"next build"}\n');
+  writeFileSync(path.join(appDir, 'package-lock.json'), '{"name":"fixture","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{}}\n');
+  initializeFixtureGit(appDir);
+  const createSqliteStub = (dir: string) => {
+    mkdirSync(path.join(dir, 'node_modules', 'better-sqlite3'), { recursive: true });
+    writeFileSync(path.join(dir, 'node_modules', 'better-sqlite3', 'package.json'), '{"name":"better-sqlite3","version":"0.0.0","main":"index.js"}\n');
+    writeFileSync(path.join(dir, 'node_modules', 'better-sqlite3', 'index.js'), 'module.exports = class FakeDatabase { prepare() { return { get: () => ({ answer: 42 }) }; } close() {} };\n');
+  };
+  createSqliteStub(appDir);
 
   // Existing live .next
   if (liveNextExists) {
@@ -183,6 +215,12 @@ function buildFixture(cfg: FixtureConfig = {}): Fixture {
   // - always write the exit code to BUILD_EXIT_FILE (the temp file the script reads)
   const npmStub = `#!/usr/bin/env bash
 # Stub npm for B.2 fixture tests
+if [[ "$1" == "ci" ]]; then
+  mkdir -p node_modules/better-sqlite3
+  printf '%s\n' '{"name":"better-sqlite3","version":"0.0.0","main":"index.js"}' > node_modules/better-sqlite3/package.json
+  printf '%s\n' 'module.exports = class FakeDatabase { prepare() { return { get: () => ({ answer: 42 }) }; } close() {} };' > node_modules/better-sqlite3/index.js
+  exit 0
+fi
 if [[ "$1" == "run" && "$2" == "build" ]]; then
   if [[ "${buildExitCode}" -eq 0 && -n "\${NEXT_DIST_DIR:-}" ]]; then
     mkdir -p "$NEXT_DIST_DIR"
@@ -314,17 +352,18 @@ fi
 function runDeploy(
   fixture: Fixture,
   extraEnv: Record<string, string> = {},
-  opts: { pm2App?: string } = {},
+  opts: { pm2App?: string; revision?: string } = {},
 ): {
   exitCode: number; stdout: string; stderr: string;
 } {
   const result = spawnSync(
     (() => {
-      try { return execSync('which bash').toString().trim(); } catch { return '/opt/homebrew/bin/bash'; }
+      try { return execSync('/opt/homebrew/bin/bash --version >/dev/null 2>&1 && printf %s /opt/homebrew/bin/bash || command -v bash').toString().trim(); } catch { return '/opt/homebrew/bin/bash'; }
     })(),
     [fixture.deployScript,
       '--app-dir', fixture.appDir,
       '--pm2-app', opts.pm2App ?? 'mission-control',
+      ...(opts.revision ? ['--revision', opts.revision] : []),
       '--port', '4000',
       '--disk-min-gb', '5',
       '--health-retries', '2',
@@ -338,6 +377,7 @@ function runDeploy(
         // Inject health check stub path — atomic-deploy.sh reads CC_HEALTH_CHECK_PATH
         // before falling back to SCRIPT_DIR, so this always wins.
         CC_HEALTH_CHECK_PATH: fixture.healthCheckStubPath,
+        CC_POST_SWITCH_WAIT: '0', // fixtures have no listener; skip the readiness poll
         ...extraEnv,
       },
       cwd: fixture.appDir,
@@ -351,6 +391,98 @@ function runDeploy(
     stdout: result.stdout ?? '',
     stderr: result.stderr ?? '',
   };
+}
+
+
+// ─── RR14 transaction regressions ─────────────────────────────────────────────
+
+/**
+ * Replace the fixture npm stub with one that gives the candidate its own
+ * dependency identity. The stub can optionally snapshot the LIVE app's marker
+ * while `npm run build` is executing, which is what exposes the old deploy's
+ * mutation of APP_DIR/node_modules before the build completed.
+ */
+function useCandidateDependencyMarkerNpmStub(
+  fixture: Fixture,
+  opts: {
+    buildExitCode?: number;
+    ciExitCode?: number;
+    observeLiveDependenciesTo?: string;
+    npmCallsLog?: string;
+  } = {},
+): void {
+  const buildExitCode = opts.buildExitCode ?? 0;
+  const ciExitCode = opts.ciExitCode ?? 0;
+  const observeLiveDependenciesTo = opts.observeLiveDependenciesTo ?? '';
+  const npmCallsLog = opts.npmCallsLog ?? '';
+  const npmStub = `#!/usr/bin/env bash
+if [[ -n "${npmCallsLog}" ]]; then
+  printf '%s\n' "$*" >> "${npmCallsLog}"
+fi
+if [[ "$1" == "ci" ]]; then
+  if [[ -n "${observeLiveDependenciesTo}" ]]; then
+    cat "${fixture.appDir}/node_modules/dependency-marker" > "${observeLiveDependenciesTo}"
+  fi
+  mkdir -p node_modules/better-sqlite3
+  printf '%s\n' '{"name":"better-sqlite3","version":"0.0.0","main":"index.js"}' > node_modules/better-sqlite3/package.json
+  printf '%s\n' 'module.exports = class FakeDatabase { prepare() { return { get: () => ({ answer: 42 }) }; } close() {} };' > node_modules/better-sqlite3/index.js
+  printf '%s\n' 'candidate' > node_modules/dependency-marker
+  if [[ "${ciExitCode}" -ne 0 ]]; then
+    exit ${ciExitCode}
+  fi
+  exit 0
+fi
+if [[ "$1" == "run" && "$2" == "build" ]]; then
+  if [[ -n "${observeLiveDependenciesTo}" ]]; then
+    cat "${fixture.appDir}/node_modules/dependency-marker" > "${observeLiveDependenciesTo}"
+  fi
+  if [[ "${buildExitCode}" -eq 0 && -n "\${NEXT_DIST_DIR:-}" ]]; then
+    mkdir -p "$NEXT_DIST_DIR"
+    echo "new-build-id" > "$NEXT_DIST_DIR/BUILD_ID"
+  fi
+  if [[ -n "\${BUILD_EXIT_FILE:-}" ]]; then
+    echo "${buildExitCode}" > "$BUILD_EXIT_FILE"
+  fi
+  exit ${buildExitCode}
+fi
+exit 0
+`;
+  writeFileSync(path.join(fixture.binDir, 'npm'), npmStub, { mode: 0o755 });
+}
+
+function dependencyMarkerPath(appDir: string): string {
+  return path.join(appDir, 'node_modules', 'dependency-marker');
+}
+
+/**
+ * Model PM2's actual behavior: `--update-env` merges the caller environment
+ * into an already-persisted process environment, while an ordinary restart
+ * uses that persisted environment. This is deliberately not an "assume unset"
+ * stub: it proves whether the deploy reconciled a seeded stale NEXT_DIST_DIR.
+ */
+function usePersistedNextDistDirPm2Stub(fixture: Fixture, appName: string): {
+  persistedValuePath: string;
+  observedValuesPath: string;
+} {
+  const persistedValuePath = path.join(fixture.baseDir, 'pm2-next-dist-dir.txt');
+  const observedValuesPath = path.join(fixture.baseDir, 'pm2-restart-next-dist-dir.log');
+  writeFileSync(persistedValuePath, '/stale/.next.tmp.20260917\n');
+  const pm2Stub = `#!/usr/bin/env bash
+case "$1" in
+  jlist) echo '[]' ;;
+  list) echo '${appName}' ;;
+  restart)
+    if [[ "$3" == "--update-env" && -n "\${NEXT_DIST_DIR:-}" ]]; then
+      printf '%s\\n' "$NEXT_DIST_DIR" > "${persistedValuePath}"
+    fi
+    cat "${persistedValuePath}" >> "${observedValuesPath}"
+    exit 0
+    ;;
+  *) exit 0 ;;
+esac
+`;
+  writeFileSync(path.join(fixture.binDir, 'pm2'), pm2Stub, { mode: 0o755 });
+  return { persistedValuePath, observedValuesPath };
 }
 
 // ─── Spec Verify (a+fg): FALSE-GREEN guard ───────────────────────────────────
@@ -550,6 +682,73 @@ test('Spec Verify (c): build ok + health exits 1 → rollback fires, .next.rollb
   }
 });
 
+// A restored app still inside its startup grace answers exit 3. Judging it once,
+// 5 s after the switch, left a healthy rollback stuck in ROLLBACK_VERIFY_FAILED
+// and every later deploy refused.
+test('Rollback verify polls through the startup grace: exit 3 then green → ROLLED_BACK_VERIFIED', async () => {
+  const fixture = buildFixture({ buildExitCode: 0, healthExitCode: 1, rollbackHealthExitCode: 0, liveNextExists: true });
+  writeFileSync(fixture.healthCheckStubPath, `#!/usr/bin/env bash
+C="${fixture.baseDir}/.health-call-count"; N=$(( $(cat "$C" 2>/dev/null || echo 0) + 1 )); echo "$N" > "$C"
+case "$N" in 1) echo '{"pass":false}'; exit 1;; 2) echo '{"pass":false,"indeterminate":true}'; exit 3;; *) echo '{"pass":true}'; exit 0;; esac
+`, { mode: 0o755 });
+  try {
+    const { exitCode, stderr } = runDeploy(fixture);
+    assert.strictEqual(exitCode, 1, stderr);
+    assert.ok(stderr.includes('Rollback verified'), `rollback must verify once the grace passes.\nstderr:\n${stderr}`);
+    assert.ok(!stderr.includes('ROLLBACK DID NOT COMPLETE'), stderr);
+    assert.ok(!existsSync(path.join(fixture.appDir, '.atomic-deploy-transaction.json')),
+      'a verified rollback archives its receipt; nothing may block the next deploy');
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+// The live source stays on the failed target after a rollback, so cc-start serves
+// the restored build only when .deploy-rollback-state.json vouches for it (PRES-046).
+// Written after the pm2 switch, the restored app was refused (exit 78), rollback
+// health never went green, and the box stuck in ROLLBACK_VERIFY_FAILED.
+test('Rollback receipt is on disk before the restored release is started', async () => {
+  const fixture = buildFixture({ buildExitCode: 0, healthExitCode: 1, rollbackHealthExitCode: 0, liveNextExists: true });
+  const receipt = path.join(fixture.appDir, '.deploy-rollback-state.json');
+  writeFileSync(fixture.healthCheckStubPath, `#!/usr/bin/env bash
+C="${fixture.baseDir}/.health-call-count"; N=$(( $(cat "$C" 2>/dev/null || echo 0) + 1 )); echo "$N" > "$C"
+[ "$N" -eq 1 ] && { echo '{"pass":false}'; exit 1; }
+# cc-start: no receipt for the older build -> refused, server unreachable
+[ -f "${receipt}" ] || { echo '{"pass":false,"indeterminate":true,"detail":"server unreachable"}'; exit 3; }
+echo '{"pass":true}'; exit 0
+`, { mode: 0o755 });
+  try {
+    const { exitCode, stderr } = runDeploy(fixture);
+    assert.strictEqual(exitCode, 1, stderr);
+    assert.ok(stderr.includes('Rollback verified'), `the restored release must start and verify.\nstderr:\n${stderr}`);
+    assert.ok(!stderr.includes('ROLLBACK DID NOT COMPLETE'), stderr);
+    assert.ok(existsSync(receipt), 'the rollback receipt stays: the box is serving the prior release');
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+// update.sh runs atomic-deploy.sh from a temp copy of the target's scripts/. The
+// health check then only knows the app through --canonical-dir: without it, it
+// reads .env.local beside the copy, probes 127.0.0.1 and a tenant-walled app
+// answers 403 unregistered_hostname -- the deploy AND its rollback fail.
+test('The health check is always told the app dir (a tenant-walled app run from a copied scripts dir)', async () => {
+  const fixture = buildFixture({ buildExitCode: 0, healthExitCode: 0, rollbackHealthExitCode: 0, liveNextExists: true });
+  writeFileSync(fixture.healthCheckStubPath, `#!/usr/bin/env bash
+want="${fixture.appDir}"; got=""
+while [ $# -gt 0 ]; do [ "$1" = --canonical-dir ] && got="$2"; shift; done
+[ "$got" = "$want" ] && { echo '{"pass":true}'; exit 0; }
+echo '{"pass":false,"outside_in_asset":{"pass":false,"asset_ref":"none"},"detail":"403 unregistered_hostname"}'; exit 1
+`, { mode: 0o755 });
+  try {
+    const { exitCode, stderr } = runDeploy(fixture);
+    assert.strictEqual(exitCode, 0, `a healthy tenant-walled app must deploy green.\nstderr:\n${stderr}`);
+    assert.ok(!stderr.includes('ROLLBACK'), stderr);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
 // ─── Spec Verify (d): health exits 3 → retry, no rollback, exit 3 ───────────
 
 /**
@@ -562,7 +761,7 @@ test('Spec Verify (d): health exits 3 (all retries) → exit 3, no rollback, new
     buildExitCode: 0,
     healthExitCode: 3,
     healthJson: unknownHealthJson,
-    rollbackHealthExitCode: 3,  // Rollback never fires, so this is not called
+    rollbackHealthExitCode: 3, // Every UNKNOWN retry must stay UNKNOWN
     liveNextExists: true,
   });
   try {
@@ -589,6 +788,826 @@ test('Spec Verify (d): health exits 3 (all retries) → exit 3, no rollback, new
     assert.ok(
       stderr.includes('UNKNOWN') || stderr.includes('exit 3'),
       `UNKNOWN receipt must appear in output for exit-3 state.\nstderr:\n${stderr}`,
+    );
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+
+// ─── RR14: candidate preparation must not mutate the live release ────────────
+
+test('RR14: failing candidate preparation/build never mutates the live release or service', async () => {
+  const fixture = buildFixture({ buildExitCode: 1, liveNextExists: true });
+  const observedLiveDependencies = path.join(fixture.baseDir, 'build-time-live-node_modules.txt');
+  const pm2CallsLog = path.join(fixture.baseDir, 'pm2-failed-build-calls.log');
+  try {
+    writeFileSync(dependencyMarkerPath(fixture.appDir), 'live\n');
+    mkdirSync(path.join(fixture.appDir, 'src'), { recursive: true });
+    const liveSourceMarker = path.join(fixture.appDir, 'src', 'rr14-live-marker.ts');
+    writeFileSync(liveSourceMarker, 'export const liveSource = true;\n');
+    useCandidateDependencyMarkerNpmStub(fixture, {
+      buildExitCode: 1,
+      observeLiveDependenciesTo: observedLiveDependencies,
+    });
+    writeFileSync(path.join(fixture.binDir, 'pm2'), `#!/usr/bin/env bash
+echo "$@" >> "${pm2CallsLog}"
+case "$1" in
+  jlist) echo '[]' ;;
+  list) echo 'mission-control' ;;
+  *) exit 0 ;;
+esac
+`, { mode: 0o755 });
+
+    const { exitCode, stderr } = runDeploy(fixture, {
+      CC_TEST_APP_DIR: fixture.appDir,
+      CC_TEST_OBSERVE_LIVE_DEPS: observedLiveDependencies,
+    });
+
+    assert.strictEqual(exitCode, 2,
+      `Expected a failed candidate build to abort with exit 2, got ${exitCode}.\nstderr:\n${stderr}`);
+    assert.strictEqual(
+      readFileSync(observedLiveDependencies, 'utf8').trim(),
+      'live',
+      'The live APP_DIR/node_modules was replaced with candidate dependencies while the build ran. ' +
+      'The observed value proves candidate preparation mutated the running release.',
+    );
+    assert.strictEqual(
+      readFileSync(dependencyMarkerPath(fixture.appDir), 'utf8').trim(),
+      'live',
+      'The final restored marker may look correct, but the build-time marker above must prove the live tree was never swapped.',
+    );
+    assert.strictEqual(
+      readFileSync(liveSourceMarker, 'utf8'),
+      'export const liveSource = true;\n',
+      'A failed candidate build must leave live source content unchanged.',
+    );
+    const pm2Calls = existsSync(pm2CallsLog)
+      ? readFileSync(pm2CallsLog, 'utf8').split('\n').map((line) => line.trim()).filter(Boolean)
+      : [];
+    const serviceMutations = pm2Calls.filter((call) => /^(restart|reload|start|delete|stop)\b/.test(call));
+    assert.deepStrictEqual(serviceMutations, [],
+      `A failed candidate build must not mutate the running PM2 service. Calls: ${JSON.stringify(pm2Calls)}`);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test('RR14: UNKNOWN keeps the complete candidate artifact and dependency tree together', async () => {
+  const fixture = buildFixture({
+    buildExitCode: 0,
+    healthExitCode: 3,
+    healthJson: '{"green":null,"timestamp":"2026-09-17T00:00:00Z","checks":{}}',
+    rollbackHealthExitCode: 3,
+    liveNextExists: true,
+  });
+  try {
+    writeFileSync(dependencyMarkerPath(fixture.appDir), 'live\n');
+    useCandidateDependencyMarkerNpmStub(fixture);
+
+    const { exitCode, stderr } = runDeploy(fixture);
+    assert.strictEqual(exitCode, 3,
+      `Expected UNKNOWN exit 3, got ${exitCode}.\nstderr:\n${stderr}`);
+
+    const liveBuildId = readFileSync(path.join(fixture.appDir, '.next', 'BUILD_ID'), 'utf8').trim();
+    assert.strictEqual(liveBuildId, 'new-build-id',
+      `UNKNOWN kept the candidate artifact (${liveBuildId}) but must also keep candidate dependencies.`);
+    assert.strictEqual(
+      readFileSync(dependencyMarkerPath(fixture.appDir), 'utf8').trim(),
+      'candidate',
+      `UNKNOWN left a mixed state: candidate BUILD_ID=${liveBuildId} with the previous dependency tree.`,
+    );
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+
+
+test('RR14-CRITICAL: failed PM2 switch with an old healthy process never reports green', async () => {
+  const fixture = buildFixture({ buildExitCode: 0, healthExitCode: 0, liveNextExists: true });
+  const healthCallsLog = path.join(fixture.baseDir, 'pm2-switch-failure-health-calls.log');
+  try {
+    writeFileSync(dependencyMarkerPath(fixture.appDir), 'live\n');
+    useCandidateDependencyMarkerNpmStub(fixture);
+    writeFileSync(path.join(fixture.binDir, 'pm2'), `#!/usr/bin/env bash
+case "$1" in
+  jlist) echo '[]' ;;
+  list) echo 'mission-control' ;;
+  restart|reload|start) exit 1 ;;
+  *) exit 0 ;;
+esac
+`, { mode: 0o755 });
+    writeFileSync(fixture.healthCheckStubPath, `#!/usr/bin/env bash
+echo call >> "${healthCallsLog}"
+echo '{"green":true,"timestamp":"2026-09-17T00:00:00Z","checks":{}}'
+exit 0
+`, { mode: 0o755 });
+
+    const { exitCode, stderr } = runDeploy(fixture);
+    assert.strictEqual(exitCode, 1,
+      `A failed PM2 switch must fail the deploy, got ${exitCode}.\nstderr:\n${stderr}`);
+    assert.ok(!stderr.includes('ATOMIC DEPLOY SUCCESS'),
+      `A failed PM2 switch must never emit success.\nstderr:\n${stderr}`);
+    assert.ok(stderr.includes('PM2 switch FAILED'),
+      `The deploy must name the failed PM2 switch.\nstderr:\n${stderr}`);
+    assert.ok(stderr.includes('ROLLBACK DID NOT COMPLETE'),
+      `Rollback service verification must be truthful after a failed PM2 switch.\nstderr:\n${stderr}`);
+    assert.ok(!existsSync(healthCallsLog),
+      'The health check must not run after PM2 switch failure; an old healthy process could produce a false green.');
+
+    assert.strictEqual(
+      readFileSync(path.join(fixture.appDir, '.next', 'BUILD_ID'), 'utf8').trim(),
+      'old-build-id',
+      'The complete prior artifact must be restored after a failed PM2 switch.');
+    assert.strictEqual(
+      readFileSync(dependencyMarkerPath(fixture.appDir), 'utf8').trim(),
+      'live',
+      'The complete prior dependency tree must be restored after a failed PM2 switch.');
+    assert.ok(existsSync(path.join(fixture.appDir, '.next.rollback')),
+      'Rollback material must remain available when service verification fails.');
+    const transaction = JSON.parse(
+      readFileSync(path.join(fixture.appDir, '.atomic-deploy-transaction.json'), 'utf8'),
+    ) as Record<string, string>;
+    assert.strictEqual(transaction.phase, 'ROLLBACK_VERIFY_FAILED',
+      `A failed rollback service switch must persist its unverified phase, got ${transaction.phase}.`);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test('RR14-CRITICAL: restore-move failure is reported and never claimed recovered', async () => {
+  const fixture = buildFixture({
+    buildExitCode: 0,
+    healthExitCode: 1,
+    healthJson: '{"green":false,"timestamp":"2026-09-17T00:00:00Z","checks":{}}',
+    rollbackHealthExitCode: 0,
+    liveNextExists: true,
+  });
+  try {
+    writeFileSync(dependencyMarkerPath(fixture.appDir), 'live\n');
+    useCandidateDependencyMarkerNpmStub(fixture);
+    writeFileSync(path.join(fixture.binDir, 'mv'), `#!/usr/bin/env bash
+if [[ "$1" == "${fixture.appDir}/.node_modules.rollback."* && "$2" == "${fixture.appDir}/node_modules" ]]; then
+  exit 1
+fi
+exec "${REAL_MV}" "$@"
+`, { mode: 0o755 });
+
+    const { exitCode, stderr } = runDeploy(fixture);
+    assert.strictEqual(exitCode, 1,
+      `A restore-move failure must fail the deploy, got ${exitCode}.\nstderr:\n${stderr}`);
+    assert.ok(stderr.includes('dependency rollback FAILED'),
+      `The receipt must name the actual dependency restoration failure.\nstderr:\n${stderr}`);
+    assert.ok(!stderr.includes('Rollback verified'),
+      `A failed restore move must never claim verified rollback.\nstderr:\n${stderr}`);
+
+    assert.strictEqual(
+      readFileSync(path.join(fixture.appDir, '.next', 'BUILD_ID'), 'utf8').trim(),
+      'new-build-id',
+      'After a failed dependency restore, the candidate artifact must be recovered.');
+    assert.strictEqual(
+      readFileSync(dependencyMarkerPath(fixture.appDir), 'utf8').trim(),
+      'candidate',
+      'After a failed dependency restore, the candidate dependency tree must be recovered.');
+    assert.ok(existsSync(path.join(fixture.appDir, '.next.rollback')),
+      'Rollback material must remain available after a failed restore move.');
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+
+test('RR14-CRITICAL: transaction receipt is persisted before the first live dependency move', async () => {
+  const fixture = buildFixture({ buildExitCode: 0, healthExitCode: 0, liveNextExists: true });
+  const receiptAtMove = path.join(fixture.baseDir, 'receipt-at-first-live-move.json');
+  try {
+    useCandidateDependencyMarkerNpmStub(fixture);
+    writeFileSync(path.join(fixture.binDir, 'mv'), `#!/usr/bin/env bash
+if [[ "$1" == "${fixture.appDir}/node_modules" && "$2" == "${fixture.appDir}/.node_modules.rollback."* ]]; then
+  cp "${fixture.appDir}/.atomic-deploy-transaction.json" "${receiptAtMove}"
+fi
+exec "${REAL_MV}" "$@"
+`, { mode: 0o755 });
+
+    const { exitCode, stderr } = runDeploy(fixture);
+    assert.strictEqual(exitCode, 0,
+      `Receipt-capture deploy should succeed, got ${exitCode}.\nstderr:\n${stderr}`);
+    assert.ok(existsSync(receiptAtMove),
+      'The mv stub must capture the transaction receipt at the first live dependency move.');
+    const receipt = JSON.parse(readFileSync(receiptAtMove, 'utf8')) as Record<string, string>;
+    assert.strictEqual(receipt.phase, 'PROMOTING',
+      `Receipt must be persisted as PROMOTING before live moves, got ${receipt.phase}.`);
+    assert.match(receipt.previous_deps_backup ?? '', /(^|\/)\.node_modules\.rollback\./,
+      'Receipt must record the previous dependency backup before moving live dependencies.');
+    assert.ok(receipt.release_dir,
+      'Receipt must record the candidate release directory before live moves.');
+    assert.ok(receipt.previous_next_park,
+      'Receipt must record the previous artifact park before live moves.');
+    assert.ok(receipt.revision,
+      'Receipt must record the explicit revision before live moves.');
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test('RR14-HIGH: invalid requested revision fails before candidate preparation or live mutation', async () => {
+  const fixture = buildFixture({ buildExitCode: 0, healthExitCode: 0, liveNextExists: true });
+  try {
+    const { exitCode, stderr } = runDeploy(fixture, {}, { revision: '0123456789abcdef0123456789abcdef01234567' });
+    assert.strictEqual(exitCode, 2,
+      `An invalid revision must fail pre-flight, got ${exitCode}.\nstderr:\n${stderr}`);
+    assert.ok(stderr.includes('not a valid commit'),
+      `The receipt must name the invalid requested revision.\nstderr:\n${stderr}`);
+    assert.strictEqual(
+      readFileSync(path.join(fixture.appDir, '.next', 'BUILD_ID'), 'utf8').trim(),
+      'old-build-id',
+      'An invalid revision must not mutate the live artifact.');
+    assert.ok(!existsSync(path.join(fixture.appDir, '.atomic-deploy-transaction.json')),
+      'No transaction receipt should be created for an invalid revision.');
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test('RR14-CRITICAL: hard-crash receipt reconciles an abandoned promotion from disk', async () => {
+  const fixture = buildFixture({ buildExitCode: 0, healthExitCode: 0, liveNextExists: true });
+  const releaseDir = path.join(fixture.appDir, '.release-candidate.crash');
+  const previousNext = path.join(fixture.appDir, '.next.old.crash');
+  const previousDeps = path.join(fixture.appDir, '.node_modules.rollback.crash');
+  try {
+    spawnSync('mv', [path.join(fixture.appDir, '.next'), previousNext], { stdio: 'ignore' });
+    mkdirSync(path.join(fixture.appDir, '.next'), { recursive: true });
+    writeFileSync(path.join(fixture.appDir, '.next', 'BUILD_ID'), 'candidate-build-id');
+    mkdirSync(releaseDir, { recursive: true });
+    writeFileSync(dependencyMarkerPath(fixture.appDir), 'candidate\n');
+    mkdirSync(previousDeps, { recursive: true });
+    writeFileSync(path.join(previousDeps, 'dependency-marker'), 'live\n');
+    const revision = execSync(`git -C ${fixture.appDir} rev-parse HEAD`).toString().trim();
+    writeFileSync(path.join(fixture.appDir, '.atomic-deploy-transaction.json'), JSON.stringify({
+      schema: 'atomic-deploy-transaction/1',
+      phase: 'PROMOTING',
+      revision,
+      release_dir: releaseDir,
+      previous_deps_backup: previousDeps,
+      previous_next_park: previousNext,
+      candidate_next_park: '',
+      candidate_deps_park: '',
+      build_id: 'candidate-build-id',
+      pid: 999999,
+      updated_at: '2026-09-17T00:00:00.000Z',
+    }, null, 2));
+
+    const { exitCode, stderr } = runDeploy(fixture);
+    assert.strictEqual(exitCode, 0,
+      `Recovery should allow the new deploy to proceed green, got ${exitCode}.\nstderr:\n${stderr}`);
+    assert.ok(stderr.includes('Previous complete release recovered from abandoned promotion.'),
+      `The next run must reconcile the recorded PROMOTING phase.\nstderr:\n${stderr}`);
+    assert.ok(!existsSync(path.join(fixture.appDir, '.atomic-deploy-transaction.json')),
+      'The active transaction receipt must be reconciled and archived.');
+    assert.strictEqual(
+      readFileSync(path.join(fixture.appDir, '.next', 'BUILD_ID'), 'utf8').trim(),
+      'new-build-id',
+      'The reconciling deploy must finish with its verified candidate artifact.');
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+
+
+
+test('RR14-CRITICAL: first-deploy hard crash after candidate promotion preserves the complete candidate', async () => {
+  const fixture = buildFixture({ buildExitCode: 0, healthExitCode: 0, liveNextExists: false });
+  const previousDeps = path.join(fixture.appDir, '.node_modules.rollback.first-crash');
+  try {
+    mkdirSync(path.join(fixture.appDir, '.next'), { recursive: true });
+    writeFileSync(path.join(fixture.appDir, '.next', 'BUILD_ID'), 'candidate-hard-crash');
+    writeFileSync(dependencyMarkerPath(fixture.appDir), 'candidate\n');
+    mkdirSync(previousDeps, { recursive: true });
+    writeFileSync(path.join(previousDeps, 'dependency-marker'), 'previous\n');
+    const revision = execSync(`git -C ${fixture.appDir} rev-parse HEAD`).toString().trim();
+    writeFileSync(path.join(fixture.appDir, '.atomic-deploy-transaction.json'), JSON.stringify({
+      schema: 'atomic-deploy-transaction/1',
+      phase: 'PROMOTING',
+      revision,
+      release_dir: path.join(fixture.appDir, '.release-candidate.first-crash'),
+      previous_deps_backup: previousDeps,
+      previous_next_park: '',
+      candidate_next_park: '',
+      candidate_deps_park: '',
+      build_id: 'candidate-hard-crash',
+      pid: 999999,
+      updated_at: '2026-09-17T00:00:00.000Z',
+    }, null, 2));
+
+    const { exitCode, stderr } = runDeploy(fixture);
+    assert.strictEqual(exitCode, 0,
+      `First-deploy crash recovery should allow a green redeploy, got ${exitCode}.\nstderr:\n${stderr}`);
+    assert.ok(stderr.includes('Complete candidate release was already promoted; preserving it'),
+      `Recovery must preserve the complete first-deploy candidate, not pair it with previous dependencies.\nstderr:\n${stderr}`);
+    assert.ok(existsSync(previousDeps),
+      'The pre-promotion dependency backup must remain retained as rollback material.');
+    assert.ok(!existsSync(path.join(fixture.appDir, '.atomic-deploy-transaction.json')),
+      'The reconciled transaction receipt must be archived.');
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test('RR14-CRITICAL: hard-crash SERVICE_SWITCH receipt refuses an unknown service outcome', async () => {
+  const fixture = buildFixture({ buildExitCode: 0, healthExitCode: 0, liveNextExists: true });
+  const receiptPath = path.join(fixture.appDir, '.atomic-deploy-transaction.json');
+  try {
+    const revision = execSync(`git -C ${fixture.appDir} rev-parse HEAD`).toString().trim();
+    writeFileSync(receiptPath, JSON.stringify({
+      schema: 'atomic-deploy-transaction/1',
+      phase: 'SERVICE_SWITCH',
+      revision,
+      release_dir: path.join(fixture.appDir, '.release-candidate.crash'),
+      previous_deps_backup: path.join(fixture.appDir, '.node_modules.rollback.crash'),
+      previous_next_park: '',
+      candidate_next_park: '',
+      candidate_deps_park: '',
+      build_id: 'new-build-id',
+      pid: 999999,
+      updated_at: '2026-09-17T00:00:00.000Z',
+    }, null, 2));
+
+    const { exitCode, stderr } = runDeploy(fixture);
+    assert.strictEqual(exitCode, 2,
+      `An unknown PM2 switch outcome must refuse a new deploy, got ${exitCode}.\nstderr:\n${stderr}`);
+    assert.ok(stderr.includes('PM2 switch outcome is unknown'),
+      `Reconciliation must name the unknown service-switch phase.\nstderr:\n${stderr}`);
+    assert.ok(existsSync(receiptPath),
+      'The SERVICE_SWITCH receipt must be retained for manual verification.');
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test('RR14-CRITICAL: hard-crash ROLLING_BACK_DEPS receipt restores both candidate halves', async () => {
+  const fixture = buildFixture({ buildExitCode: 0, healthExitCode: 0, liveNextExists: true });
+  const candidateNext = path.join(fixture.appDir, '.next.candidate.crash');
+  const candidateDeps = path.join(fixture.appDir, '.node_modules.candidate.crash');
+  const previousDeps = path.join(fixture.appDir, '.node_modules.rollback.crash');
+  try {
+    useCandidateDependencyMarkerNpmStub(fixture);
+    // Simulate the durable state after the prior artifact was installed and
+    // candidate dependencies were parked, but before the transaction reached
+    // ROLLED_BACK. The live tree is previous; both candidate halves are parked.
+    mkdirSync(candidateNext, { recursive: true });
+    writeFileSync(path.join(candidateNext, 'BUILD_ID'), 'new-build-id');
+    mkdirSync(candidateDeps, { recursive: true });
+    writeFileSync(path.join(candidateDeps, 'dependency-marker'), 'candidate\n');
+    writeFileSync(dependencyMarkerPath(fixture.appDir), 'live\n');
+    const revision = execSync(`git -C ${fixture.appDir} rev-parse HEAD`).toString().trim();
+    writeFileSync(path.join(fixture.appDir, '.atomic-deploy-transaction.json'), JSON.stringify({
+      schema: 'atomic-deploy-transaction/1',
+      phase: 'ROLLING_BACK_DEPS',
+      revision,
+      release_dir: path.join(fixture.appDir, '.release-candidate.crash'),
+      previous_deps_backup: previousDeps,
+      previous_next_park: '',
+      candidate_next_park: candidateNext,
+      candidate_deps_park: candidateDeps,
+      build_id: 'new-build-id',
+      pid: 999999,
+      updated_at: '2026-09-17T00:00:00.000Z',
+    }, null, 2));
+
+    const { exitCode, stderr } = runDeploy(fixture);
+    assert.strictEqual(exitCode, 0,
+      `Dependency-phase crash recovery should allow a green redeploy, got ${exitCode}.\nstderr:\n${stderr}`);
+    assert.ok(stderr.includes('Recovered candidate artifact'),
+      `Recovery must restore the recorded candidate artifact park.\nstderr:\n${stderr}`);
+    assert.ok(stderr.includes('Recovered candidate dependencies'),
+      `Recovery must restore the recorded candidate dependency park.\nstderr:\n${stderr}`);
+    assert.strictEqual(
+      readFileSync(path.join(fixture.appDir, '.next', 'BUILD_ID'), 'utf8').trim(),
+      'new-build-id',
+      'The reconciled candidate artifact must be live.');
+    assert.strictEqual(
+      readFileSync(dependencyMarkerPath(fixture.appDir), 'utf8').trim(),
+      'candidate',
+      'The reconciled candidate dependency tree must be live.');
+    assert.ok(!existsSync(path.join(fixture.appDir, '.atomic-deploy-transaction.json')),
+      'The active receipt must be archived after successful reconciliation.');
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test('RR14-HIGH: candidate preparation uses the explicit SHA, not the dirty live tree', async () => {
+  const fixture = buildFixture({ buildExitCode: 0, healthExitCode: 0, liveNextExists: true });
+  const sourcePath = path.join(fixture.appDir, 'src', 'a.ts');
+  try {
+    writeFileSync(sourcePath, 'export const a = 2;\n');
+    let result = spawnSync('git', ['-C', fixture.appDir, 'add', 'src/a.ts'], { encoding: 'utf8' });
+    assert.strictEqual(result.status, 0, result.stderr);
+    result = spawnSync('git', ['-C', fixture.appDir, '-c', 'user.name=Command Center Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-m', 'explicit target'], { encoding: 'utf8' });
+    assert.strictEqual(result.status, 0, result.stderr);
+    const targetRevision = execSync(`git -C ${fixture.appDir} rev-parse HEAD`).toString().trim();
+    writeFileSync(sourcePath, 'export const a = 3; // dirty live tree\n');
+
+    writeFileSync(path.join(fixture.binDir, 'npm'), `#!/usr/bin/env bash
+if [[ "$1" == "ci" ]]; then
+  mkdir -p node_modules/better-sqlite3
+  printf '%s\\n' '{"name":"better-sqlite3","version":"0.0.0","main":"index.js"}' > node_modules/better-sqlite3/package.json
+  printf '%s\\n' 'module.exports = class FakeDatabase { prepare() { return { get: () => ({ answer: 42 }) }; } close() {} };' > node_modules/better-sqlite3/index.js
+  exit 0
+fi
+if [[ "$1" == "run" && "$2" == "build" ]]; then
+  mkdir -p "$NEXT_DIST_DIR"
+  echo "new-build-id" > "$NEXT_DIST_DIR/BUILD_ID"
+  cp "$PWD/src/a.ts" "$NEXT_DIST_DIR/source.ts"
+  echo 0 > "$BUILD_EXIT_FILE"
+  exit 0
+fi
+exit 0
+`, { mode: 0o755 });
+
+    const { exitCode, stderr } = runDeploy(fixture, {}, { revision: targetRevision });
+    assert.strictEqual(exitCode, 0,
+      `Explicit-SHA deploy should succeed, got ${exitCode}.\nstderr:\n${stderr}`);
+    assert.ok(stderr.includes(`Verified deploy revision: ${targetRevision}`),
+      `The deploy must verify the requested revision.\nstderr:\n${stderr}`);
+
+    assert.strictEqual(
+      readFileSync(path.join(fixture.appDir, '.next', 'source.ts'), 'utf8'),
+      'export const a = 2;\n',
+      'The candidate must be built from the explicit commit, not the dirty live tree.');
+    assert.strictEqual(
+      readFileSync(sourcePath, 'utf8'),
+      'export const a = 3; // dirty live tree\n',
+      'Explicit-SHA candidate preparation must leave the dirty live tree unchanged.');
+    const manifest = JSON.parse(readFileSync(path.join(fixture.appDir, '.next', 'build-inventory.json'), 'utf8')) as Record<string, string>;
+    assert.strictEqual(manifest.source_sha, targetRevision,
+      'The sealed manifest must record the exact requested commit SHA.');
+    const verify = spawnSync('bash', [
+      path.join(process.cwd(), 'scripts', 'lib', 'build-inventory.sh'),
+      '--verify', fixture.appDir,
+    ], { encoding: 'utf8' });
+    assert.strictEqual(verify.status, 0,
+      `The runtime freshness guard must verify the explicit revision despite a dirty live tree.
+${verify.stderr}`);
+    assert.match(verify.stdout ?? '', /"verdict":"VERIFIED"/,
+      `The explicit-revision manifest must verify against its commit, not the dirty working tree.
+${verify.stdout}`);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+// The rollback leaves the live worktree on the fast-forwarded target, and cc-start
+// verifies the rollback receipt against THAT tree's inventory digest. The receipt
+// recorded the frozen candidate's digest instead; a live tree with an inventory
+// input the candidate copy lacks then read RECEIPT_STALE and cc-start refused
+// (exit 78) in a loop -- a 14-minute outage on a client box.
+test('An explicit-revision rollback leaves a receipt cc-start accepts for the live tree', async () => {
+  const fixture = buildFixture({ buildExitCode: 0, healthExitCode: 1, rollbackHealthExitCode: 0, liveNextExists: true });
+  const sourcePath = path.join(fixture.appDir, 'src', 'a.ts');
+  try {
+    writeFileSync(sourcePath, 'export const a = 2;\n');
+    let result = spawnSync('git', ['-C', fixture.appDir, 'add', 'src/a.ts'], { encoding: 'utf8' });
+    assert.strictEqual(result.status, 0, result.stderr);
+    result = spawnSync('git', ['-C', fixture.appDir, '-c', 'user.name=Command Center Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-m', 'explicit target'], { encoding: 'utf8' });
+    assert.strictEqual(result.status, 0, result.stderr);
+    const targetRevision = execSync(`git -C ${fixture.appDir} rev-parse HEAD`).toString().trim();
+    // An inventory input in the live tree that the candidate (built from the commit) does not carry.
+    writeFileSync(path.join(fixture.appDir, 'src', 'box-local.ts'), 'export const local = 1;\n');
+    writeFileSync(path.join(fixture.binDir, 'npm'), `#!/usr/bin/env bash
+if [[ "$1" == "ci" ]]; then
+  mkdir -p node_modules/better-sqlite3
+  printf '%s\\n' '{"name":"better-sqlite3","version":"0.0.0","main":"index.js"}' > node_modules/better-sqlite3/package.json
+  printf '%s\\n' 'module.exports = class FakeDatabase { prepare() { return { get: () => ({ answer: 42 }) }; } close() {} };' > node_modules/better-sqlite3/index.js
+  exit 0
+fi
+if [[ "$1" == "run" && "$2" == "build" ]]; then
+  mkdir -p "$NEXT_DIST_DIR"
+  echo "new-build-id" > "$NEXT_DIST_DIR/BUILD_ID"
+  echo 0 > "$BUILD_EXIT_FILE"
+  exit 0
+fi
+exit 0
+`, { mode: 0o755 });
+    writeFileSync(fixture.healthCheckStubPath, `#!/usr/bin/env bash
+C="${fixture.baseDir}/.health-call-count"; N=$(( $(cat "$C" 2>/dev/null || echo 0) + 1 )); echo "$N" > "$C"
+[ "$N" -eq 1 ] && { echo '{"pass":false}'; exit 1; }
+echo '{"pass":true}'; exit 0
+`, { mode: 0o755 });
+
+    const { exitCode, stderr } = runDeploy(fixture, {}, { revision: targetRevision });
+    assert.strictEqual(exitCode, 1, stderr);
+    assert.ok(stderr.includes('Rollback verified'), stderr);
+
+    // What cc-start does on a content mismatch: verify the receipt against the LIVE tree.
+    const lib = path.join(process.cwd(), 'scripts', 'lib', 'build-inventory.sh');
+    const live = spawnSync('bash', [lib, '--digest', fixture.appDir], { encoding: 'utf8' }).stdout.trim();
+    assert.ok(live, 'live tree digest');
+    const verify = spawnSync('bash', [lib, '--verify-rollback', fixture.appDir, path.join(fixture.appDir, '.next'), live], { encoding: 'utf8' });
+    assert.match(verify.stdout ?? '', /"receipt_verdict":"RECEIPT_OK"/,
+      `cc-start must accept the rollback for the live tree (exit ${verify.status}).\n${verify.stdout}\n${verify.stderr}`);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test('RR14: interrupting explicit rollback restores the complete candidate release', async () => {
+  const fixture = buildFixture({
+    buildExitCode: 0,
+    healthExitCode: 1,
+    healthJson: '{"green":false,"timestamp":"2026-09-17T00:00:00Z","checks":{}}',
+    rollbackHealthExitCode: 0,
+    liveNextExists: true,
+  });
+  try {
+    writeFileSync(dependencyMarkerPath(fixture.appDir), 'live\n');
+    useCandidateDependencyMarkerNpmStub(fixture);
+
+    // Trigger after atomic-deploy parks the candidate artifact during explicit
+    // rollback. The real move completes, then the stub signals the deploy shell.
+    const mvStub = `#!/usr/bin/env bash
+if [[ "$1" == "${fixture.appDir}/.next" && "$2" == "${fixture.appDir}/.next.candidate."* ]]; then
+  "${REAL_MV}" "$@"
+  kill -TERM "$PPID"
+  exit 0
+fi
+exec "${REAL_MV}" "$@"
+`;
+    writeFileSync(path.join(fixture.binDir, 'mv'), mvStub, { mode: 0o755 });
+
+    const { exitCode, stderr } = runDeploy(fixture);
+    assert.ok(
+      exitCode === 130 || exitCode === 143,
+      `Interrupted rollback should exit by signal handling (130 or 143), got ${exitCode}.\nstderr:\n${stderr}`,
+    );
+    assert.ok(
+      stderr.includes('Interrupted rollback recovered the candidate artifact'),
+      `Signal cleanup must recover the parked candidate artifact.\nstderr:\n${stderr}`,
+    );
+
+    const liveBuildId = readFileSync(path.join(fixture.appDir, '.next', 'BUILD_ID'), 'utf8').trim();
+    assert.strictEqual(liveBuildId, 'new-build-id',
+      `Interrupted rollback must restore the candidate artifact, got ${liveBuildId}.`);
+    assert.strictEqual(
+      readFileSync(dependencyMarkerPath(fixture.appDir), 'utf8').trim(),
+      'candidate',
+      'Interrupted rollback must retain candidate dependencies with the restored candidate artifact.',
+    );
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+
+test('RR14: interrupting dependency rollback restores candidate artifact and dependencies together', async () => {
+  const fixture = buildFixture({
+    buildExitCode: 0,
+    healthExitCode: 1,
+    healthJson: '{"green":false,"timestamp":"2026-09-17T00:00:00Z","checks":{}}',
+    rollbackHealthExitCode: 0,
+    liveNextExists: true,
+  });
+  try {
+    writeFileSync(dependencyMarkerPath(fixture.appDir), 'live\n');
+    useCandidateDependencyMarkerNpmStub(fixture);
+
+    // Trigger after candidate dependencies are parked during explicit
+    // rollback. At this point the prior artifact is installed and the live
+    // dependency path is empty; signal cleanup must recover BOTH candidate
+    // halves, never leave that mixed state behind.
+    const mvStub = `#!/usr/bin/env bash
+if [[ "$1" == "${fixture.appDir}/node_modules" && "$2" == "${fixture.appDir}/.node_modules.candidate."* ]]; then
+  "${REAL_MV}" "$@"
+  kill -TERM "$PPID"
+  exit 0
+fi
+exec "${REAL_MV}" "$@"
+`;
+    writeFileSync(path.join(fixture.binDir, 'mv'), mvStub, { mode: 0o755 });
+
+    const { exitCode, stderr } = runDeploy(fixture);
+    assert.ok(
+      exitCode === 130 || exitCode === 143,
+      `Interrupted dependency rollback should exit by signal handling (130 or 143), got ${exitCode}.\nstderr:\n${stderr}`,
+    );
+    assert.ok(
+      stderr.includes('Interrupted rollback recovered the candidate artifact'),
+      `Signal cleanup must restore the candidate artifact.\nstderr:\n${stderr}`,
+    );
+    assert.ok(
+      stderr.includes('Interrupted rollback recovered the candidate dependencies'),
+      `Signal cleanup must restore the candidate dependencies.\nstderr:\n${stderr}`,
+    );
+
+    const liveBuildId = readFileSync(path.join(fixture.appDir, '.next', 'BUILD_ID'), 'utf8').trim();
+    assert.strictEqual(liveBuildId, 'new-build-id',
+      `Interrupted dependency rollback must restore the candidate artifact, got ${liveBuildId}.`);
+    assert.strictEqual(
+      readFileSync(dependencyMarkerPath(fixture.appDir), 'utf8').trim(),
+      'candidate',
+      'Interrupted dependency rollback must restore candidate dependencies with the candidate artifact.',
+    );
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test('RR14: deploy explicitly reconciles PM2 NEXT_DIST_DIR and an ordinary restart stays correct', async () => {
+  const fixture = buildFixture({ buildExitCode: 0, healthExitCode: 0, liveNextExists: true });
+  const appName = 'mission-control';
+  const { observedValuesPath } = usePersistedNextDistDirPm2Stub(fixture, appName);
+  // RELATIVE by contract: next.config.mjs path.join()s distDir onto the project
+  // dir, so an absolute value is concatenated and `next start` cannot find the build.
+  const expectedNextDir = '.next';
+  try {
+    const { exitCode, stderr } = runDeploy(fixture, {
+      NEXT_DIST_DIR: '/stale/.next.tmp.20260917',
+    }, { pm2App: appName });
+    assert.strictEqual(exitCode, 0,
+      `Expected a green deploy, got ${exitCode}.\nstderr:\n${stderr}`);
+
+    // PM2's real --update-env merge preserves omitted keys. An ordinary restart
+    // therefore proves the corrected value was persisted, not merely inherited
+    // for this one deploy process.
+    spawnSync(path.join(fixture.binDir, 'pm2'), ['restart', appName], {
+      env: { ...process.env, PATH: `${fixture.binDir}:${process.env.PATH ?? ''}` },
+      encoding: 'utf8',
+    });
+
+    const observed = readFileSync(observedValuesPath, 'utf8')
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean);
+    assert.deepStrictEqual(observed, [expectedNextDir, expectedNextDir],
+      `Deploy restart and ordinary restart must both use ${expectedNextDir}. Got ${JSON.stringify(observed)}.`);
+
+    const launcher = readFileSync(path.join(process.cwd(), 'scripts', 'cc-start.sh'), 'utf8');
+    assert.ok(
+      launcher.includes('export NEXT_DIST_DIR=".next"'),
+      'cc-start.sh must explicitly sanitize NEXT_DIST_DIR before starting Next, so ordinary restarts cannot inherit a stale PM2 value.',
+    );
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test('RR14: fallback PM2 npm start puts --update-env before the npm argument separator', async () => {
+  const fixture = buildFixture({ buildExitCode: 0, healthExitCode: 0, liveNextExists: true });
+  const callsLog = path.join(fixture.baseDir, 'pm2-fallback-calls.log');
+  const pm2Stub = `#!/usr/bin/env bash
+echo "$@" >> "${callsLog}"
+case "$1" in
+  jlist) echo '[]' ;;
+  list) echo '' ;;
+  *) exit 0 ;;
+esac
+`;
+  writeFileSync(path.join(fixture.binDir, 'pm2'), pm2Stub, { mode: 0o755 });
+  try {
+    const { exitCode, stderr } = runDeploy(fixture, {}, { pm2App: 'fallback-app' });
+    assert.strictEqual(exitCode, 0,
+      `Expected a green fallback deploy, got ${exitCode}.\nstderr:\n${stderr}`);
+    const calls = readFileSync(callsLog, 'utf8')
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean);
+    assert.ok(
+      calls.includes('start npm --name fallback-app --update-env -- start'),
+      `--update-env belongs to PM2, before the -- separator. Calls: ${JSON.stringify(calls)}`,
+    );
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test('RR14: broken live native module plus failed candidate preparation leaves the live release untouched', async () => {
+  const fixture = buildFixture({ buildExitCode: 0, healthExitCode: 0, liveNextExists: true });
+  const brokenIndex = path.join(fixture.appDir, 'node_modules', 'better-sqlite3', 'index.js');
+  const brokenModuleContents =
+    'module.exports = class BrokenNative { constructor() { throw new Error("fixture native failure"); } };\n';
+  const liveSource = path.join(fixture.appDir, 'src', 'live-marker.ts');
+  const liveBuildId = path.join(fixture.appDir, '.next', 'BUILD_ID');
+  const liveDependencyMarker = dependencyMarkerPath(fixture.appDir);
+  const observedLiveDependencies = path.join(fixture.baseDir, 'ci-time-live-node_modules.txt');
+  const npmCallsLog = path.join(fixture.baseDir, 'failed-candidate-npm-calls.log');
+  try {
+    writeFileSync(brokenIndex, brokenModuleContents);
+    writeFileSync(liveSource, 'export const liveSource = "before";\n');
+    writeFileSync(liveBuildId, 'old-build-id');
+    writeFileSync(liveDependencyMarker, 'live\n');
+    useCandidateDependencyMarkerNpmStub(fixture, {
+      ciExitCode: 1,
+      observeLiveDependenciesTo: observedLiveDependencies,
+      npmCallsLog,
+    });
+    const { exitCode, stderr } = runDeploy(fixture, {
+      CC_TEST_APP_DIR: fixture.appDir,
+      CC_TEST_OBSERVE_LIVE_DEPS: observedLiveDependencies,
+    });
+    assert.strictEqual(exitCode, 2,
+      `A failed candidate with a broken live native module must abort before promotion. Exit was ${exitCode}.\nstderr:\n${stderr}`);
+    assert.ok(
+      stderr.includes('the currently installed runtime is degraded'),
+      `The degraded-live-runtime diagnostic must appear in stderr.\nstderr:\n${stderr}`,
+    );
+    assert.ok(
+      stderr.includes('The live runtime will NOT be modified in place'),
+      `The no-in-place-repair diagnostic must appear in stderr.\nstderr:\n${stderr}`,
+    );
+    assert.ok(
+      stderr.includes('Dependency staging failed (npm ci). Live source, dependencies and artifact untouched.'),
+      `A failed candidate preparation must emit the exact live-release-untouched receipt.\nstderr:\n${stderr}`,
+    );
+    assert.strictEqual(
+      readFileSync(observedLiveDependencies, 'utf8').trim(),
+      'live',
+      'The live dependency marker must still be the live value while candidate preparation fails.',
+    );
+    assert.strictEqual(readFileSync(brokenIndex, 'utf8'), brokenModuleContents,
+      'The live broken native module must remain byte-for-byte unchanged after failed candidate preparation.');
+    assert.strictEqual(readFileSync(liveSource, 'utf8'), 'export const liveSource = "before";\n',
+      'The live source marker must remain unchanged after failed candidate preparation.');
+    assert.strictEqual(readFileSync(liveBuildId, 'utf8'), 'old-build-id',
+      'The live BUILD_ID must remain unchanged after failed candidate preparation.');
+    assert.strictEqual(readFileSync(liveDependencyMarker, 'utf8').trim(), 'live',
+      'The live dependency marker must remain unchanged after failed candidate preparation.');
+    const npmCalls = existsSync(npmCallsLog) ? readFileSync(npmCallsLog, 'utf8') : '';
+    assert.ok(
+      npmCalls.includes('ci --no-audit --no-fund --prefer-offline --ignore-scripts=false'),
+      `The candidate npm ci call must be observed so the no-rebuild assertion is meaningful. npm calls:\n${npmCalls}`,
+    );
+    assert.ok(!npmCalls.includes('rebuild'), `No live-tree npm rebuild may occur. npm calls:\n${npmCalls}`);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test('RR14: a broken live native module is repaired only by the isolated candidate', async () => {
+  const fixture = buildFixture({ buildExitCode: 0, healthExitCode: 0, liveNextExists: true });
+  const brokenModuleDir = path.join(fixture.appDir, 'node_modules', 'better-sqlite3');
+  const brokenIndex = path.join(brokenModuleDir, 'index.js');
+  const brokenModuleContents =
+    'module.exports = class BrokenNative { constructor() { throw new Error("fixture native failure"); } };\n';
+  const npmCallsLog = path.join(fixture.baseDir, 'npm-calls.log');
+  const liveIndexAtCandidateBuild = path.join(fixture.baseDir, 'live-index-at-candidate-build.txt');
+  try {
+    writeFileSync(brokenIndex, brokenModuleContents);
+
+    const npmStub = `#!/usr/bin/env bash
+copy_real_sqlite() {
+  rm -rf node_modules/better-sqlite3 node_modules/bindings node_modules/file-uri-to-path
+  mkdir -p node_modules/better-sqlite3 node_modules/bindings node_modules/file-uri-to-path
+  cp -R "${REAL_BETTER_SQLITE3_DIR}/." node_modules/better-sqlite3/
+  cp -R "${REAL_BINDINGS_DIR}/." node_modules/bindings/
+  cp -R "${REAL_FILE_URI_TO_PATH_DIR}/." node_modules/file-uri-to-path/
+}
+printf '%s\n' "$*" >> "${npmCallsLog}"
+if [[ "$1" == "ci" ]]; then
+  copy_real_sqlite
+  exit 0
+fi
+if [[ "$1" == "run" && "$2" == "build" ]]; then
+  cp "${fixture.appDir}/node_modules/better-sqlite3/index.js" "${liveIndexAtCandidateBuild}"
+  if [[ -n "\${NEXT_DIST_DIR:-}" ]]; then
+    mkdir -p "$NEXT_DIST_DIR"
+    echo "new-build-id" > "$NEXT_DIST_DIR/BUILD_ID"
+  fi
+  if [[ -n "\${BUILD_EXIT_FILE:-}" ]]; then echo 0 > "$BUILD_EXIT_FILE"; fi
+  exit 0
+fi
+exit 0
+`;
+    writeFileSync(path.join(fixture.binDir, 'npm'), npmStub, { mode: 0o755 });
+
+    const { exitCode, stderr } = runDeploy(fixture);
+    assert.strictEqual(exitCode, 0,
+      `A candidate with a real better_sqlite3 package must deploy successfully even when the live module is broken. Exit was ${exitCode}.\nstderr:\n${stderr}`);
+    assert.ok(
+      stderr.includes('the currently installed runtime is degraded'),
+      `The degraded-live-runtime diagnostic must appear in stderr.\nstderr:\n${stderr}`,
+    );
+    assert.ok(
+      stderr.includes('The live runtime will NOT be modified in place'),
+      `The no-in-place-repair diagnostic must appear in stderr.\nstderr:\n${stderr}`,
+    );
+    assert.ok(
+      stderr.includes('Do NOT run npm rebuild against the live tree'),
+      `The gate must never advise an in-place live-tree repair.\nstderr:\n${stderr}`,
+    );
+    assert.ok(
+      !stderr.includes('Phase 1 pre-flight passed'),
+      `A failed live native gate must not be reported as pre-flight passed.\nstderr:\n${stderr}`,
+    );
+    assert.ok(
+      !readFileSync(npmCallsLog, 'utf8').includes('rebuild'),
+      `npm rebuild must not be invoked. npm calls:\n${readFileSync(npmCallsLog, 'utf8')}`,
+    );
+    assert.strictEqual(
+      readFileSync(liveIndexAtCandidateBuild, 'utf8'),
+      brokenModuleContents,
+      'The live broken native module must remain untouched while the candidate is prepared and built.',
     );
   } finally {
     fixture.cleanup();
@@ -700,6 +1719,17 @@ test('Spec Verify (g): NEXT_DIST_DIR bypass + npm exits non-zero → exit 2, APP
 
   // Fake DB
   writeFixtureDb(path.join(appDir, 'mission-control.db'));
+  mkdirSync(path.join(appDir, 'src'), { recursive: true });
+  writeFileSync(path.join(appDir, 'src', 'a.ts'), 'export const a = 1;\n');
+  writeFileSync(path.join(appDir, 'package.json'), '{"name":"fixture","version":"1.0.0","build":"next build"}\n');
+  writeFileSync(path.join(appDir, 'package-lock.json'), '{"name":"fixture","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{}}\n');
+  initializeFixtureGit(appDir);
+  const createSqliteStub = (dir: string) => {
+    mkdirSync(path.join(dir, 'node_modules', 'better-sqlite3'), { recursive: true });
+    writeFileSync(path.join(dir, 'node_modules', 'better-sqlite3', 'package.json'), '{"name":"better-sqlite3","version":"0.0.0","main":"index.js"}\n');
+    writeFileSync(path.join(dir, 'node_modules', 'better-sqlite3', 'index.js'), 'module.exports = class FakeDatabase { prepare() { return { get: () => ({ answer: 42 }) }; } close() {} };\n');
+  };
+  createSqliteStub(appDir);
 
   // Existing live .next with a BUILD_ID that will be "fresh" (mtime guard passes
   // because we touch it just before the script runs — the fixture harness runs
@@ -711,6 +1741,12 @@ test('Spec Verify (g): NEXT_DIST_DIR bypass + npm exits non-zero → exit 2, APP
   // It also writes BUILD_ID to APP_DIR/.next to simulate the NEXT_DIST_DIR-ignored path,
   // and writes exit code 1 to BUILD_EXIT_FILE.
   const npmStub = `#!/usr/bin/env bash
+if [[ "$1" == "ci" ]]; then
+  mkdir -p node_modules/better-sqlite3
+  printf '%s\n' '{"name":"better-sqlite3","version":"0.0.0","main":"index.js"}' > node_modules/better-sqlite3/package.json
+  printf '%s\n' 'module.exports = class FakeDatabase { prepare() { return { get: () => ({ answer: 42 }) }; } close() {} };' > node_modules/better-sqlite3/index.js
+  exit 0
+fi
 if [[ "$1" == "run" && "$2" == "build" ]]; then
   # Simulate Next.js ignoring NEXT_DIST_DIR — write fresh BUILD_ID to APP_DIR/.next
   # (it was already there; just touch it so mtime == now, making the guard pass)
@@ -755,7 +1791,7 @@ esac
   try {
     const result = spawnSync(
       (() => {
-        try { return execSync('which bash').toString().trim(); } catch { return '/opt/homebrew/bin/bash'; }
+        try { return execSync('/opt/homebrew/bin/bash --version >/dev/null 2>&1 && printf %s /opt/homebrew/bin/bash || command -v bash').toString().trim(); } catch { return '/opt/homebrew/bin/bash'; }
       })(),
       [deployScript,
         '--app-dir', appDir,
@@ -771,6 +1807,7 @@ esac
           PATH: `${binDir}:${process.env.PATH ?? ''}`,
           HOME: baseDir,
           CC_HEALTH_CHECK_PATH: healthStubPath,
+          CC_POST_SWITCH_WAIT: '0',
         },
         cwd: appDir,
         timeout: 60_000,
@@ -1093,6 +2130,12 @@ function buildDataPathFixture(cfg: FixtureConfig = {}): Fixture {
   // Patch the npm stub in binDir to write to NEXT_DIST_DIR under the new path
   const buildExitCode = cfg.buildExitCode ?? 0;
   const npmStub = `#!/usr/bin/env bash
+if [[ "$1" == "ci" ]]; then
+  mkdir -p node_modules/better-sqlite3
+  printf '%s\n' '{"name":"better-sqlite3","version":"0.0.0","main":"index.js"}' > node_modules/better-sqlite3/package.json
+  printf '%s\n' 'module.exports = class FakeDatabase { prepare() { return { get: () => ({ answer: 42 }) }; } close() {} };' > node_modules/better-sqlite3/index.js
+  exit 0
+fi
 if [[ "$1" == "run" && "$2" == "build" ]]; then
   if [[ "${buildExitCode}" -eq 0 && -n "\${NEXT_DIST_DIR:-}" ]]; then
     mkdir -p "$NEXT_DIST_DIR"
@@ -1336,7 +2379,7 @@ test('1d e2e REGRESSION GUARD: deploy on the live-box roster (canonical cc-prod)
       'The port-blind bug deleted blackceo-cc-demo-interview and blackceo-cc-demo-dashboard here. ' +
       `No delete/stop may be issued when nothing fights for the canonical port. Got: ${JSON.stringify(kills)}`);
 
-    assert.ok(calls.some((c) => c === 'restart cc-prod'),
+    assert.ok(calls.some((c) => c === 'restart cc-prod --update-env'),
       `Phase 4 must restart the canonical app. pm2 calls: ${JSON.stringify(calls)}`);
   } finally {
     fixture.cleanup();

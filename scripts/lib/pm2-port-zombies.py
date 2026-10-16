@@ -118,10 +118,16 @@ def app_name(app):
 
 def load_apps():
     try:
-        apps = json.load(sys.stdin)
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import pm2_json  # the list, even behind a pm2 version banner
+        apps = pm2_json.load(sys.stdin.read())
     except Exception:
         return []
-    return apps if isinstance(apps, list) else []
+    if not isinstance(apps, list):
+        return []
+    # FXCC-1 / D14: a pm2 module (pm2-logrotate) is not an app; its daemon
+    # inherited PORT, so it must never be named a zombie or the CC app.
+    return [a for a in apps if not (a.get("pm2_env") or {}).get("pmx_module")]
 
 
 def select_zombies(canonical, port, listener_pids):

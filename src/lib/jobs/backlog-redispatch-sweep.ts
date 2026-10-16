@@ -48,11 +48,11 @@
 import { queryAll, queryOne, run } from '@/lib/db';
 import { v4 as uuidv4 } from 'uuid';
 import { broadcast } from '@/lib/events';
-import { autoDispatchTask } from '@/lib/task-dispatcher';
+import { autoDispatchTask, planningInProgressSql } from '@/lib/task-dispatcher';
 import { blockDispatchIfOwnerKilled, loadKilledAtDefensive } from '@/lib/owner-killed';
 import { QC_MAX_REROUTES } from '@/lib/qc-scorer';
 import { transition } from '@/lib/task-lifecycle';
-import { recordBlockEvent } from '@/lib/block-events';
+import { stopCardPermanently } from '@/lib/stop-card';
 import type { Task } from '@/lib/types';
 
 export interface BacklogRedispatchResult {
@@ -101,7 +101,7 @@ export const REDISPATCH_ESCALATE_HOURS = 6;
 // eligible exactly as before) instead of throwing "no such column". The helpers
 // are file-local (not a shared module) because the sweep files are each other's
 // only consumers and must stay within their own review scope.
-const ENGINE_OWNED_SOURCES = ['build_deck', 'build_deck_phase'] as const;
+const ENGINE_OWNED_SOURCES = ['build_deck', 'build_deck_phase', 'podcast-engine'] as const;
 
 function tasksHaveSourceColumn(): boolean {
   try {
@@ -139,51 +139,36 @@ async function escalateStuckBacklogTask(
     `cannot clear by retrying.`;
   const now = new Date().toISOString();
 
-  // MR-04: route through transition() with extraColumns so the block_*
-  // metadata lands atomically AND the legal-transition guard + preconditions
-  // + CAS run (backlog→blocked is a legal edge — see LEGAL_TRANSITIONS).
-  // fix2(MR-04): AWAIT the transition and gate every follow-up write on it
-  // landing. The fire-and-forget form wrote the operator-feed events + block
-  // snapshot below regardless of outcome, so a lost CAS race (another advancer
-  // already moved the task) left orphan events recording a block that never
-  // landed. A CAS_CONFLICT is a normal race (return silently); any other
-  // failure rethrows so the caller's try/catch logs it and does not count the
-  // task as escalated.
-  let landed = false;
-  try {
-    await transition(row.id, 'blocked', {
-      actor: 'backlog-redispatch-sweep',
-      reason: `re-dispatch cap: ${priorCount} attempts over ≥${hours}h`,
-      extraColumns: {
-        block_reason: `Re-dispatch cap: ${priorCount} cheap retries over ≥${hours}h, still stuck in backlog`,
-        block_needs: `Operator action required: diagnose why "${row.title}" cannot advance (gateway / runtime / config / SOP hold) ` +
-          `and re-route or fix. It will not auto-retry further.`,
-        block_audience: 'SYSTEM',
-        next_dispatch_eligible_at: null,
-      },
-    });
-    landed = true;
-  } catch (err) {
-    // CAS_CONFLICT: another advancer already moved the task — non-fatal.
-    if (err instanceof Error && !err.message.includes('CAS_CONFLICT')) {
-      throw err;
-    }
-  }
-  if (!landed) return;
-
-  // MR-30 — snapshot the block metadata so the history survives the unblock
-  // (the block_* columns are cleared when the card leaves blocked). Only
-  // fires when the transition actually landed, so a lost CAS race never
-  // writes a false event.
-  recordBlockEvent({
+  // MR-04: the transition carries extraColumns so the block_* metadata lands
+  // atomically WITH the status flip, under the legal-transition guard +
+  // preconditions + CAS (backlog→blocked is a legal edge — see
+  // LEGAL_TRANSITIONS). fix2(MR-04): every follow-up write is gated on the
+  // transition actually landing, so a lost CAS race (another advancer already
+  // moved the task) never leaves orphan events recording a block that did not
+  // happen. Both guarantees are preserved inside stopCardPermanently(), which
+  // returns blocked:false on a lost race and writes nothing.
+  //
+  // NO-SILENT-STOP: this path used to write two `events` rows and nothing else.
+  // A Live Feed row is not a message — it is precisely the "internal row only"
+  // shape the live incident took, where a card had been dead for eleven hours
+  // and no human had been told. The chokepoint performs the transition, the
+  // block_* metadata, the block-history snapshot AND the one operator alert.
+  const needs =
+    `Operator action required: diagnose why "${row.title}" cannot advance (gateway / runtime / config / SOP hold) ` +
+    `and re-route or fix. It will not auto-retry further.`;
+  const stopped = await stopCardPermanently({
     taskId: row.id,
-    blockReason: `Re-dispatch cap: ${priorCount} cheap retries over ≥${hours}h, still stuck in backlog`,
-    blockNeeds:
-      `Operator action required: diagnose why "${row.title}" cannot advance (gateway / runtime / config / SOP hold) ` +
-      `and re-route or fix. It will not auto-retry further.`,
-    blockAudience: 'SYSTEM',
-    actor: 'backlog-redispatch-sweep',
+    source: 'backlog-redispatch-sweep',
+    reason:
+      `We tried to start this ${priorCount} time(s) over more than ${hours} hours and it never got going, ` +
+      `so it has stopped retrying.`,
+    needs,
+    audience: 'SYSTEM',
+    retriesExhausted: true,
+    machineDetail: `Re-dispatch cap: ${priorCount} cheap retries over ≥${hours}h, still stuck in backlog`,
+    extraColumns: { next_dispatch_eligible_at: null },
   });
+  if (!stopped.blocked) return;
 
   // Operator-feed events (SYSTEM audience → no client Telegram, per silent-updates doctrine).
   run(
@@ -263,6 +248,7 @@ export async function runBacklogRedispatchSweep(): Promise<BacklogRedispatchResu
         AND (t.next_dispatch_eligible_at IS NULL OR t.next_dispatch_eligible_at <= ?)
         AND (a.is_master IS NULL OR a.is_master = 0)
         ${sourceExclusion}
+        AND NOT ${planningInProgressSql('t')}
         AND t.updated_at <= ?
       ORDER BY t.updated_at ASC
       LIMIT ?`,

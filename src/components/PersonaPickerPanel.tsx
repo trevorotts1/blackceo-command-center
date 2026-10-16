@@ -49,6 +49,13 @@ interface PersonaBundleApiResponse {
 
 interface PersonaPickerPanelProps {
   taskId: string;
+  /** Board-known assignment from the tasks GET row. Lets this panel tell a
+      FAILED bundle read apart from a genuinely unassigned task: the board can
+      carry persona_id/persona_name while this panel's own fetch fails (auth,
+      network, 500) or while no blend-bundle row exists at all (non-content
+      task). Never written, only displayed. */
+  assignedPersonaId?: string | null;
+  assignedPersonaName?: string | null;
   /** Called after a successful action so the modal/board can refresh. */
   onConfirmed?: () => void;
 }
@@ -64,7 +71,7 @@ function whyLine(bundle: PersonaBundleDisplay): string {
   return 'A blended persona governs this deck, derived from audience, topic, and conversion goal.';
 }
 
-export function PersonaPickerPanel({ taskId, onConfirmed }: PersonaPickerPanelProps) {
+export function PersonaPickerPanel({ taskId, assignedPersonaId, assignedPersonaName, onConfirmed }: PersonaPickerPanelProps) {
   const [bundle, setBundle] = useState<PersonaBundleDisplay | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -102,6 +109,11 @@ export function PersonaPickerPanel({ taskId, onConfirmed }: PersonaPickerPanelPr
 
   const postChoice = useCallback(
     async (body: Record<string, unknown>) => {
+      // CRT-001: single dispatch per click — a double-click while the first
+      // POST is in flight must not fire a second persona-choice write. The
+      // buttons already disable on `submitting`; this closes the race between
+      // the clicks. Retry after a failure re-arms naturally (submitting false).
+      if (submitting) return;
       setSubmitting(true);
       setError(null);
       try {
@@ -125,20 +137,58 @@ export function PersonaPickerPanel({ taskId, onConfirmed }: PersonaPickerPanelPr
         setSubmitting(false);
       }
     },
-    [taskId, load, onConfirmed],
+    [taskId, load, onConfirmed, submitting],
   );
 
   if (loading) return <p role="status" className="mb-4 text-sm text-bcc-text-secondary">Loading persona assignment…</p>;
-  if (loadError) return (
-    <div role="alert" className="mb-4 rounded-xl border border-bcc-border p-4">
-      <p className="text-sm text-bcc-text">{loadError}</p>
-      <button type="button" onClick={() => void load()}
-        className="mt-2 rounded-lg border border-bcc-border px-3 py-1.5 text-sm text-bcc-text focus-visible:outline focus-visible:outline-2">
-        Retry persona assignment
-      </button>
-    </div>
-  );
-  if (!bundle) return <p className="mb-4 text-sm text-bcc-text-secondary">No persona assigned yet.</p>;
+  if (loadError) {
+    // CRT-001: a FAILED read must never read as "no assignment". The board row
+    // can carry a persisted persona_id/persona_name while this panel's own
+    // bundle fetch fails (401/403/500, network). Render the failure LOUD with
+    // the board-known evidence beside it, so a visible assignment plus this
+    // error is never mistaken for "nothing assigned".
+    const knownLabel = (assignedPersonaName && assignedPersonaName !== 'N/A'
+      ? assignedPersonaName
+      : assignedPersonaId) ?? null;
+    return (
+      <div role="alert" className="mb-4 rounded-xl border border-bcc-border p-4">
+        <p className="text-sm text-bcc-text">{loadError}</p>
+        {knownLabel ? (
+          <p className="mt-1 text-sm text-bcc-text-secondary">
+            The board still shows this task assigned to {knownLabel} — the read failed, not the assignment.
+          </p>
+        ) : null}
+        <button type="button" onClick={async () => { await load(); }}
+          className="mt-2 rounded-lg border border-bcc-border px-3 py-1.5 text-sm text-bcc-text focus-visible:outline focus-visible:outline-2">
+          Retry persona assignment
+        </button>
+      </div>
+    );
+  }
+  // CRT-001: a null bundle is "no BLEND bundle on this task" (the route 200s
+  // null for any task that never ran through the blend — non-content tasks,
+  // single-persona pins). When the board row carries a persisted persona it is
+  // a real assignment with real evidence (name, reason, triad pass); render it
+  // instead of the bare "No persona assigned yet." so the modal never reports
+  // "Missing: persona" for a task that visibly carries one.
+  if (!bundle) {
+    const knownLabel = (assignedPersonaName && assignedPersonaName !== 'N/A'
+      ? assignedPersonaName
+      : assignedPersonaId) ?? null;
+    if (knownLabel) {
+      return (
+        <div className="mb-4 rounded-xl border border-violet-300 bg-violet-50 p-4" data-testid="persona-picker-panel">
+          <p className="text-sm text-bcc-text" data-testid="persona-picker-voice">
+            {knownLabel}
+          </p>
+          <p className="mt-1 text-xs text-bcc-text-secondary">
+            Assigned on the task. No blend bundle was recorded for this task, so there is no blend detail to show.
+          </p>
+        </div>
+      );
+    }
+    return <p className="mb-4 text-sm text-bcc-text-secondary">No persona assigned yet.</p>;
+  }
 
   const voicePersona = bundle.voice;
   const topicPersona = bundle.topic_persona;

@@ -18,6 +18,117 @@
 
 export const PHASE_LABELS = ['Intake','Script','Prompts','Images','Teleprompter','QC','Delivered'] as const;
 
+// ── Item 19 (FIX-PLAN) — the P-U upsell branch ─────────────────────────────
+// The canonical PIPELINE-MANIFEST (v70) carries 22 P-U-* phase ids. None of
+// them is in PHASE_TO_LABEL: the U060 table maps the 26 main-line ids, and
+// its totality test pins exactly those 26. Before Item 19 every P-U activity
+// therefore landed in the reducer's `unmapped` bucket, which no surface
+// renders — a run that elected the sales/checkout or VSL branch built those
+// pages invisibly (the diagnostic's forever-amber finding: the branch could
+// neither complete nor be seen running).
+//
+// The branch maps to its OWN stepper steps, inserted after Images, and a
+// step exists ONLY for a branch the run actually elected (or, when the
+// election record cannot be read, a branch with real engine activity — the
+// engine emits P-U signals only for elected branches, because the manifest's
+// defers_unless gates defer the rest). A declined branch produces NO step:
+// no phantom steps, and no main label waits forever on a phase that will
+// never run.
+//
+// Grouping follows the manifest's own structure (defers_unless in
+// parentheses; orders are the manifest's):
+//   Sales Page — want_sales_checkout: P-U-SALES-COPY (3.6), P-U-DESIGN-SALES
+//     (4.2), P-U-DESIGN-RENDER-SALES (4.21), P-U-HTML-SALES (5.2),
+//     P-U-GHL-SALES (6.2, the GHL install), P-U-SALES-BUILD (8.75, ungated
+//     build step of the same branch).
+//   Checkout — want_sales_checkout: P-U-CHECKOUT-COPY (3.7),
+//     P-U-DESIGN-CHECKOUT (4.3), P-U-DESIGN-RENDER-CHECKOUT (4.31),
+//     P-U-HTML-CHECKOUT (5.3), P-U-CHECKOUT-BUILD (8.76, ungated),
+//     P-U-FORM-CHECKOUT (8.77, ungated payment/lead form wiring).
+//   VSL Page — want_vsl_page: P-U-VSL-RESEARCH (3.8), P-U-VSL-COPY (3.9),
+//     P-U-DESIGN-VSL (4.4), P-U-DESIGN-RENDER-VSL (4.41), P-U-HTML-VSL (5.4),
+//     P-U-FORM-GATE (5.6), P-U-GHL-VSL (6.4, the GHL install),
+//     P-U-VSL-BUILD (8.93, ungated).
+export const UPSELL_LABELS = ['Sales Page', 'Checkout', 'VSL Page'] as const;
+
+export type PhaseStepLabel =
+  | (typeof PHASE_LABELS)[number]
+  | (typeof UPSELL_LABELS)[number];
+
+export const UPSELL_PHASE_TO_LABEL: Record<string, (typeof UPSELL_LABELS)[number]> = {
+  'P-U-SALES-COPY':           'Sales Page',
+  'P-U-DESIGN-SALES':         'Sales Page',
+  'P-U-DESIGN-RENDER-SALES':  'Sales Page',
+  'P-U-HTML-SALES':           'Sales Page',
+  'P-U-GHL-SALES':            'Sales Page',
+  'P-U-SALES-BUILD':          'Sales Page',
+  'P-U-CHECKOUT-COPY':        'Checkout',
+  'P-U-DESIGN-CHECKOUT':      'Checkout',
+  'P-U-DESIGN-RENDER-CHECKOUT': 'Checkout',
+  'P-U-HTML-CHECKOUT':        'Checkout',
+  'P-U-CHECKOUT-BUILD':       'Checkout',
+  'P-U-FORM-CHECKOUT':        'Checkout',
+  'P-U-VSL-RESEARCH':         'VSL Page',
+  'P-U-VSL-COPY':             'VSL Page',
+  'P-U-DESIGN-VSL':           'VSL Page',
+  'P-U-DESIGN-RENDER-VSL':    'VSL Page',
+  'P-U-HTML-VSL':             'VSL Page',
+  'P-U-FORM-GATE':            'VSL Page',
+  'P-U-GHL-VSL':              'VSL Page',
+  'P-U-VSL-BUILD':            'VSL Page',
+};
+
+// The two shared wrap-up phases gate on EITHER election
+// (defers_unless: want_sales_checkout == "yes" or want_vsl_page == "yes").
+// They are not steps of their own: P-U-QC is the upsell QC gate and joins
+// the QC label's required set, and P-U-COLLATERAL (the delivery backup of
+// the upsell pages) joins Delivered's — ONLY for a run with an active
+// upsell branch, so a deck-only run's QC stays 2 units and Delivered 3.
+export const UPSELL_SHARED_PHASE_TO_LABEL: Record<string, (typeof PHASE_LABELS)[number]> = {
+  'P-U-QC':         'QC',
+  'P-U-COLLATERAL': 'Delivered',
+};
+
+/** The branch a P-U phase id belongs to ('either' = the shared wrap-up). */
+export function upsellBranchOfPhase(
+  phaseId: string,
+): 'sales_checkout' | 'vsl' | 'either' | null {
+  const label = UPSELL_PHASE_TO_LABEL[phaseId];
+  if (label === 'Sales Page' || label === 'Checkout') return 'sales_checkout';
+  if (label === 'VSL Page') return 'vsl';
+  if (phaseId in UPSELL_SHARED_PHASE_TO_LABEL) return 'either';
+  return null;
+}
+
+/** True when the id is any of the 22 manifest P-U ids. */
+export function isUpsellPhaseId(phaseId: string): boolean {
+  return upsellBranchOfPhase(phaseId) != null;
+}
+
+/**
+ * A run's upsell elections, resolved from the engine's own records (the
+ * sealed intake record's pre_presentation_capture answers, or the operator
+ * contract's yes/no fields). `null` means UNDETERMINED — no readable
+ * election record — never a guess in either direction.
+ */
+export interface UpsellElections {
+  salesCheckout: boolean;
+  vsl: boolean;
+}
+
+/**
+ * The label ANY known phase id (main line, upsell branch, or shared
+ * wrap-up) belongs to, or null for an id no table knows.
+ */
+export function labelForPhaseId(phaseId: string): PhaseStepLabel | null {
+  return (
+    PHASE_TO_LABEL[phaseId] ??
+    UPSELL_PHASE_TO_LABEL[phaseId] ??
+    UPSELL_SHARED_PHASE_TO_LABEL[phaseId] ??
+    null
+  );
+}
+
 export const PHASE_TO_LABEL: Record<string, typeof PHASE_LABELS[number]> = {
   'P-CONVERTER':        'Intake',
   'P-0.5-RESEARCH':     'Intake',
@@ -169,10 +280,10 @@ export function childPhaseLabel(input: {
   stage_slug?: string | null;
   activities?: Array<{ activity_type: string; metadata?: string | Record<string, unknown> | null }>;
   title?: string | null;
-}): typeof PHASE_LABELS[number] | null {
+}): PhaseStepLabel | null {
   // 1. Explicit stage_slug on the row — the FIX 52 write path.
   if (typeof input.stage_slug === 'string' && input.stage_slug.length > 0) {
-    const mapped = PHASE_TO_LABEL[input.stage_slug];
+    const mapped = labelForPhaseId(input.stage_slug);
     if (mapped) return mapped;
   }
   // 2. Phase id carried in the child's activity metadata.
@@ -180,14 +291,14 @@ export function childPhaseLabel(input: {
     for (const a of input.activities) {
       const id = phaseIdOf(a);
       if (id == null) continue;
-      const mapped = PHASE_TO_LABEL[id];
+      const mapped = labelForPhaseId(id);
       if (mapped) return mapped;
     }
   }
   // 3. Legacy fallback: title contains a label verbatim (case-insensitive).
   if (typeof input.title === 'string' && input.title.length > 0) {
     const lower = input.title.toLowerCase();
-    for (const label of PHASE_LABELS) {
+    for (const label of [...PHASE_LABELS, ...UPSELL_LABELS]) {
       if (lower.includes(label.toLowerCase())) return label;
     }
   }
@@ -223,12 +334,18 @@ function isPhaseCompletedActivity(activityType: string): boolean {
 }
 
 export interface PhaseProgressStep {
-  label: typeof PHASE_LABELS[number];
+  label: PhaseStepLabel;
   status: PhaseStepStatus;
   /** PRES-020 — how many required phase ids of this label are done. */
   doneIds: number;
   /** PRES-020 — how many required phase ids of this label apply here. */
   totalIds: number;
+  /**
+   * Item 19 — the exact required phase ids behind this step, so consumers
+   * (the phases route's receipt projection) never re-derive a set that can
+   * drift from the one the reducer scored.
+   */
+  requiredIds: string[];
 }
 
 /**
@@ -243,21 +360,46 @@ export interface PhaseProgressStep {
  * part: no manifest phase id maps to it, so it stays deliverable-derived.
  */
 export function requiredPhaseIdsForLabel(
-  label: typeof PHASE_LABELS[number],
+  label: PhaseStepLabel,
   excludedPhaseIds?: ReadonlySet<string> | ReadonlyArray<string> | null,
+  elections?: UpsellElections | null,
 ): string[] {
   const excluded =
     excludedPhaseIds instanceof Set
       ? excludedPhaseIds
       : new Set(excludedPhaseIds ?? []);
-  return Object.entries(PHASE_TO_LABEL)
+  // Item 19 — an upsell branch label's required set is its manifest ids.
+  // With elections KNOWN and the branch declined, the set is empty (the
+  // phases are deferred for this run; nothing may wait on them).
+  if ((UPSELL_LABELS as readonly string[]).includes(label)) {
+    if (elections != null) {
+      const active =
+        label === 'VSL Page' ? elections.vsl : elections.salesCheckout;
+      if (!active) return [];
+    }
+    return Object.entries(UPSELL_PHASE_TO_LABEL)
+      .filter(([id, l]) => l === label && !excluded.has(id))
+      .map(([id]) => id);
+  }
+  const main = Object.entries(PHASE_TO_LABEL)
     .filter(([id, l]) => l === label && !excluded.has(id))
     .map(([id]) => id);
+  // Item 19 — the shared wrap-up ids join their main label ONLY when the
+  // caller knows an upsell branch is active for this run.
+  if (elections != null && (elections.salesCheckout || elections.vsl)) {
+    for (const [id, l] of Object.entries(UPSELL_SHARED_PHASE_TO_LABEL)) {
+      if (l === label && !excluded.has(id)) main.push(id);
+    }
+  }
+  return main;
 }
 
 export interface PhaseProgress {
-  phases: PhaseProgressStep[];   // always 7, in PHASE_LABELS order
-  unmapped: string[];            // phase ids seen that PHASE_TO_LABEL does not know
+  // The 7 main steps in PHASE_LABELS order, plus — Item 19 — one step per
+  // ACTIVE upsell branch (Sales Page / Checkout / VSL Page) inserted after
+  // Images. Inactive or unevidenced branches emit no step at all.
+  phases: PhaseProgressStep[];
+  unmapped: string[];            // phase ids seen that no mapping table knows
 }
 
 export interface PhaseActivityLite {
@@ -298,6 +440,16 @@ export interface ComputePhaseProgressOptions {
    * outside it are obsolete and ignored; unscoped rows still count.
    */
   activeScope?: { run_id?: string | null; attempt_id?: string | number | null } | null;
+  /**
+   * Item 19 — the run's upsell elections, when a caller could read them
+   * from the engine's own records. Known elections decide branch-step
+   * emission exactly (elected → step with real states; declined → NO step).
+   * When omitted/null (UNDETERMINED), a branch step is emitted only on real
+   * engine evidence for that branch — the engine emits P-U signals only for
+   * elected branches, so evidence is proof of election, and its absence
+   * keeps the stepper at the 7 main steps rather than inventing branches.
+   */
+  electedBranches?: UpsellElections | null;
 }
 
 function scopeOf(a: PhaseActivityLite): string | null {
@@ -351,7 +503,10 @@ export function computePhaseProgress(
   for (const a of activities) {
     const id = phaseIdOf(a);
     if (id == null) continue;
-    const label = PHASE_TO_LABEL[id];
+    // Item 19 — P-U ids are KNOWN ids (branch/shared tables), never
+    // `unmapped`: unmapped means "no table knows this id", and a mapped
+    // branch the run did not elect is not-applicable, not unknown.
+    const label = labelForPhaseId(id);
     if (label == null) { if (!unmapped.includes(id)) unmapped.push(id); continue; }
     // PRES-020 — stale-scope rows are obsolete: a late completion from an
     // old run/attempt must not flip the label, and stale starts must not
@@ -371,6 +526,55 @@ export function computePhaseProgress(
   // 'teleprompter' type. Callers must SELECT path; a row without one only
   // matches via the legacy type.
   const hasTeleprompterDeliverable = deliverables.some(isTeleprompterDeliverable);
+
+  // ── Item 19 — which upsell branches are ACTIVE for this run ────────────
+  // Known elections decide exactly. UNDETERMINED elections fall back to
+  // evidence: the engine's defers_unless gates mean P-U signals exist only
+  // for elected branches, so scoped, current evidence is proof of election.
+  const elections = options?.electedBranches ?? null;
+  const evidenced = (branch: 'sales_checkout' | 'vsl' | 'either') =>
+    [...seenIds, ...completedIds].some((id) => upsellBranchOfPhase(id) === branch);
+  const salesActive = elections ? elections.salesCheckout : evidenced('sales_checkout');
+  const vslActive = elections ? elections.vsl : evidenced('vsl');
+  const sharedActive =
+    salesActive || vslActive || (elections == null && evidenced('either'));
+  // The elections view the required-set helper scores against: known
+  // elections verbatim; in evidence mode, a synthesized view that is true
+  // exactly when some upsell work is active (drives the shared wrap-up ids
+  // joining QC / Delivered, and nothing else).
+  const scoringElections: UpsellElections | null = elections ?? {
+    salesCheckout: sharedActive,
+    vsl: sharedActive,
+  };
+
+  const scoreStep = (
+    label: PhaseStepLabel,
+    required: string[],
+  ): PhaseProgressStep => {
+    const doneIds = required.filter((id) => completedIds.has(id)).length;
+    const seenCount = required.filter((id) => seenIds.has(id)).length;
+    // PRES-020 — done requires EVERY applicable required id done. An empty
+    // required set (whole label waived by the approved manifest) is done only
+    // when a completion actually touched the label — never vacuous.
+    if (required.length === 0) {
+      const touchedDone = [...completedIds].some((id) => labelForPhaseId(id) === label);
+      return {
+        label,
+        status: touchedDone ? 'done' : 'not_started',
+        doneIds: touchedDone ? 1 : 0,
+        totalIds: 0,
+        requiredIds: required,
+      };
+    }
+    if (doneIds === required.length) {
+      return { label, status: 'done', doneIds, totalIds: required.length, requiredIds: required };
+    }
+    if (seenCount > 0 || doneIds > 0) {
+      return { label, status: 'in_progress', doneIds, totalIds: required.length, requiredIds: required };
+    }
+    return { label, status: 'not_started', doneIds: 0, totalIds: required.length, requiredIds: required };
+  };
+
   const phases: PhaseProgressStep[] = PHASE_LABELS.map((label) => {
     if (label === 'Teleprompter') {
       return {
@@ -378,32 +582,33 @@ export function computePhaseProgress(
         status: hasTeleprompterDeliverable ? 'done' : 'not_started',
         doneIds: hasTeleprompterDeliverable ? 1 : 0,
         totalIds: 1,
+        requiredIds: [],
       };
     }
-    const required = requiredPhaseIdsForLabel(label, options?.excludedPhaseIds);
-    const doneIds = required.filter((id) => completedIds.has(id)).length;
-    const seenCount = required.filter((id) => seenIds.has(id)).length;
-    // PRES-020 — done requires EVERY applicable required id done. An empty
-    // required set (whole label waived by the approved manifest) is done only
-    // when a completion actually touched the label — never vacuous.
-    if (required.length === 0) {
-      const touchedDone = [...completedIds].some((id) => PHASE_TO_LABEL[id] === label);
-      return {
-        label,
-        status: touchedDone ? 'done' : 'not_started',
-        doneIds: touchedDone ? 1 : 0,
-        totalIds: 0,
-      };
-    }
-    if (doneIds === required.length) {
-      return { label, status: 'done', doneIds, totalIds: required.length };
-    }
-    if (seenCount > 0 || doneIds > 0) {
-      return { label, status: 'in_progress', doneIds, totalIds: required.length };
-    }
-    void touchedLabels;
-    return { label, status: 'not_started', doneIds: 0, totalIds: required.length };
+    return scoreStep(
+      label,
+      requiredPhaseIdsForLabel(label, options?.excludedPhaseIds, scoringElections),
+    );
   });
+  void touchedLabels;
+
+  // Item 19 — branch steps, inserted after Images (the branch's design /
+  // render / HTML mass sits mid-pipeline), one per ACTIVE branch, in
+  // manifest order. A step's state is scored from the same seen/completed
+  // evidence as every main step: a phase the engine has not reached shows
+  // not_started — its true state, never a default success or a stuck amber.
+  const branchSteps: PhaseProgressStep[] = [];
+  if (salesActive) {
+    branchSteps.push(scoreStep('Sales Page', requiredPhaseIdsForLabel('Sales Page', options?.excludedPhaseIds, scoringElections)));
+    branchSteps.push(scoreStep('Checkout', requiredPhaseIdsForLabel('Checkout', options?.excludedPhaseIds, scoringElections)));
+  }
+  if (vslActive) {
+    branchSteps.push(scoreStep('VSL Page', requiredPhaseIdsForLabel('VSL Page', options?.excludedPhaseIds, scoringElections)));
+  }
+  if (branchSteps.length > 0) {
+    const imagesIdx = phases.findIndex((p) => p.label === 'Images');
+    phases.splice(imagesIdx + 1, 0, ...branchSteps);
+  }
   return { phases, unmapped };
 }
 
@@ -433,9 +638,7 @@ export interface StageTimingRowLite {
   duration_s: number | null;
 }
 
-export type PhaseElapsedSeconds = Partial<
-  Record<(typeof PHASE_LABELS)[number], number>
->;
+export type PhaseElapsedSeconds = Partial<Record<PhaseStepLabel, number>>;
 
 /**
  * PRES-020 — canonical run selection for wall-clock attribution. The defect:
@@ -462,6 +665,7 @@ export function selectCanonicalRunId(
 export function phaseElapsedSeconds(
   rows: StageTimingRowLite[],
   authoritativeRunId?: string | null,
+  electedBranches?: UpsellElections | null,
 ): PhaseElapsedSeconds {
   const elapsed: PhaseElapsedSeconds = {};
   if (rows.length === 0) return elapsed;
@@ -472,11 +676,31 @@ export function phaseElapsedSeconds(
   const latestRun = selectCanonicalRunId(rows, authoritativeRunId);
   if (latestRun == null) return elapsed;
 
-  for (const r of rows) {
-    if (r.run_id !== latestRun) continue;
+  // Item 19 — P-U timing rows attribute to their branch step (or, for the
+  // shared wrap-up ids, to QC / Delivered) under the same activation rules
+  // as computePhaseProgress: known elections decide; otherwise the timing
+  // rows themselves are the evidence (a phase_exit row exists only for a
+  // phase the engine actually ran).
+  const canonicalRows = rows.filter((r) => r.run_id === latestRun);
+  const rowBranch = (branch: 'sales_checkout' | 'vsl' | 'either') =>
+    canonicalRows.some(
+      (r) => typeof r.phase_id === 'string' && upsellBranchOfPhase(r.phase_id) === branch,
+    );
+  const salesActive = electedBranches ? electedBranches.salesCheckout : rowBranch('sales_checkout');
+  const vslActive = electedBranches ? electedBranches.vsl : rowBranch('vsl');
+  const sharedActive =
+    salesActive || vslActive || (electedBranches == null && rowBranch('either'));
+
+  for (const r of canonicalRows) {
     if (typeof r.phase_id !== 'string' || r.phase_id.length === 0) continue;
     if (typeof r.duration_s !== 'number' || !Number.isFinite(r.duration_s)) continue;
-    const label = PHASE_TO_LABEL[r.phase_id];
+    let label: PhaseStepLabel | null = PHASE_TO_LABEL[r.phase_id] ?? null;
+    if (label == null) {
+      const branch = upsellBranchOfPhase(r.phase_id);
+      if (branch === 'sales_checkout' && salesActive) label = UPSELL_PHASE_TO_LABEL[r.phase_id];
+      else if (branch === 'vsl' && vslActive) label = UPSELL_PHASE_TO_LABEL[r.phase_id];
+      else if (branch === 'either' && sharedActive) label = UPSELL_SHARED_PHASE_TO_LABEL[r.phase_id];
+    }
     if (label == null) continue; // unmapped ids never advance a bar (same rule as computePhaseProgress)
     elapsed[label] = (elapsed[label] ?? 0) + r.duration_s;
   }

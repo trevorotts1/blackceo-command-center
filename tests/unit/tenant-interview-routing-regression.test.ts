@@ -10,7 +10,7 @@ import { resolveTenantContext, signTenantGrant, verifyTenantGrant } from '../../
 import { queueInterviewOperation, tenantAnswers, ensureTenantInterview } from '../../src/lib/interview/remote-store';
 import { verifyRemoteBody, signRemoteBody, deliverInterviewOperation } from '../../src/lib/interview/remote-protocol';
 import { routeTaskDecision, comDispatch, type AgentWithLoad } from '../../src/lib/routing/department-router';
-import { checkSweepLiveness, WATCHED_JOB_CADENCE_MINUTES } from '../../src/lib/jobs/sweep-liveness';
+import { checkBoardJobsWatchdog, WATCHED_JOB_CADENCE_MINUTES } from '../../src/lib/jobs/board-jobs-watchdog';
 import { runIntakeAdvanceSweep } from '../../src/lib/jobs/intake-advance-sweep';
 
 process.env.MC_API_TOKEN='fixture-api-token';
@@ -57,6 +57,32 @@ for(const id of ['client-a','client-b'])run('INSERT OR IGNORE INTO clients(id,na
     assert.equal((await resolveTenantContext(req('a.example','/api/interview/state',{'cf-access-jwt-assertion':make('subject-a','aud-a')}))).subject,'subject-a');
     await assert.rejects(resolveTenantContext(req('a.example','/api/interview/state',{'cf-access-jwt-assertion':make('subject-b','aud-a')})));
     await assert.rejects(resolveTenantContext(req('a.example','/api/interview/state',{'cf-access-jwt-assertion':make('subject-a','aud-b')})));
+  }finally{globalThis.fetch=original;process.env.MC_TENANT_REGISTRY_JSON=JSON.stringify(registry);}
+ });
+ test('registered owner email matches only the signed email claim, whatever the sign-in method',async()=>{
+  const {privateKey,publicKey}=generateKeyPairSync('rsa',{modulusLength:2048});
+  const jwk={...publicKey.export({format:'jwk'}),kid:'fixture-key',alg:'RS256'};
+  const original=globalThis.fetch; // own issuer: the 5-minute JWKS cache is keyed by issuer and holds the previous test's key
+  process.env.MC_TENANT_REGISTRY_JSON=JSON.stringify({...registry,'a.example':{...registry['a.example'],issuer:'https://fixture-email.cloudflareaccess.com',audience:'aud-a',subjects:['Owner@Example.test'],allowedEmails:['owner@example.test']}});
+  globalThis.fetch=async()=>new Response(JSON.stringify({keys:[jwk]}),{status:200});
+  const make=(claims:Record<string,unknown>)=>{
+    const content=Buffer.from(JSON.stringify({alg:'RS256',kid:'fixture-key'})).toString('base64url')+'.'+Buffer.from(JSON.stringify({iss:'https://fixture-email.cloudflareaccess.com',aud:['aud-a'],exp:Date.now()/1000+60,...claims})).toString('base64url');
+    return content+'.'+sign('RSA-SHA256',Buffer.from(content),privateKey).toString('base64url');
+  };
+  const as=(token:string,extra:Record<string,string>={})=>resolveTenantContext(req('a.example','/api/interview/state',{'cf-access-jwt-assertion':token,...extra}));
+  try{
+    // Google and one-time-code logins carry different opaque `sub`s but the same signed email.
+    for(const sub of [randomUUID(),randomUUID()]){
+      const ctx=await as(make({sub,email:'owner@example.test'}));
+      assert.equal(ctx.subject,'Owner@Example.test');
+      assert.equal(ctx.email,'owner@example.test');
+    }
+    await assert.rejects(as(make({sub:randomUUID(),email:'intruder@example.test'})));
+    await assert.rejects(as(make({sub:randomUUID()}),{'cf-access-authenticated-user-email':'owner@example.test'}));
+    await assert.rejects(as(make({sub:'owner@example.test'.replace('@','-'),email:'Owner@Example.test.evil'})));
+    const forged=make({sub:randomUUID(),email:'intruder@example.test'}).split('.');
+    forged[1]=Buffer.from(JSON.stringify({iss:'https://fixture-email.cloudflareaccess.com',aud:['aud-a'],exp:Date.now()/1000+60,sub:randomUUID(),email:'owner@example.test'})).toString('base64url');
+    await assert.rejects(as(forged.join('.')));
   }finally{globalThis.fetch=original;process.env.MC_TENANT_REGISTRY_JSON=JSON.stringify(registry);}
  });
  test('client state supplies authenticated company and installation for isolated browser drafts',async()=>{
@@ -114,9 +140,9 @@ for(const id of ['client-a','client-b'])run('INSERT OR IGNORE INTO clients(id,na
  });
  test('fresh error ticks fail health and recovery restores it',()=>{
   for(const name of Object.keys(WATCHED_JOB_CADENCE_MINUTES))run(`INSERT INTO job_liveness(job_name,last_ran_at,last_status,consecutive_failures,last_success_at) VALUES(?,?,'error',2,?) ON CONFLICT(job_name) DO UPDATE SET last_ran_at=excluded.last_ran_at,last_status='error',consecutive_failures=2,last_success_at=excluded.last_success_at`,[name,new Date().toISOString(),new Date().toISOString()]);
-  assert.equal(checkSweepLiveness().pass,false);
+  assert.equal(checkBoardJobsWatchdog().pass,false);
   run("UPDATE job_liveness SET last_status='ok',consecutive_failures=0,last_finished_at=last_ran_at,last_success_at=last_ran_at");
-  assert.equal(checkSweepLiveness().pass,true);
+  assert.equal(checkBoardJobsWatchdog().pass,true);
  });
  test('25 unroutable oldest rows do not starve the 26th and dispatch counts are honest',async()=>{
   run("INSERT OR IGNORE INTO workspaces(id,name,slug,company_id) VALUES('fixture-intake-ws','Communications','fixture-intake-ws','company-a')");
@@ -172,12 +198,14 @@ for(const id of ['client-a','client-b'])run('INSERT OR IGNORE INTO clients(id,na
   const current=queryOne<any>("SELECT assigned_agent_id,killed_at FROM tasks WHERE id='cancel-during-route'");
   assert.ok(current.killed_at);assert.equal(current.assigned_agent_id,null);assert.equal(sends,0);
  });
- test('enrollment is one use and readiness validates the installed identity',async()=>{
+ test('enrollment re-opens while the interview is unfinished and readiness validates the installed identity',async()=>{
   const {POST:enroll}=await import('../../src/app/api/auth/interview-session/route');
   const ticket=await signTenantGrant({purpose:'enrollment',tenantId:'tenant-a',subject:'owner:a',host:'a.example',installationId:'install-a',exp:Date.now()/1000+60,nonce:randomUUID()});
   const request=()=>new NextRequest('https://a.example/api/auth/interview-session',{method:'POST',headers:{host:'a.example','content-type':'application/json'},body:JSON.stringify({ticket})});
   assert.equal((await enroll(request())).status,200);
-  assert.equal((await enroll(request())).status,409);
+  // The link is re-openable until the interview is complete, so a second open
+  // from a browser with no cookie signs the same owner in again.
+  assert.equal((await enroll(request())).status,200);
   const {GET:ready}=await import('../../src/app/api/auth/tenant-ready/route');
   process.env.MC_INSTALLATION_ID='wrong-install';
   assert.equal((await ready(req('self.example','/api/auth/tenant-ready',{authorization:'Bearer fixture-api-token'}))).status,503);

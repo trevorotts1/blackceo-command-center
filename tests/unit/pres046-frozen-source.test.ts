@@ -41,6 +41,19 @@ function rmTmpDir(dir: string): void {
   try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
 }
 
+function initializeFixtureGit(appDir: string): string {
+  const git = (args: string[]) => {
+    const result = spawnSync('git', ['-C', appDir, ...args], { encoding: 'utf8' });
+    assert.strictEqual(result.status, 0,
+      `git ${args.join(' ')} failed in fixture ${appDir}: ${result.stderr}`);
+    return (result.stdout ?? '').trim();
+  };
+  git(['init']);
+  git(['add', 'package.json', 'package-lock.json', 'src']);
+  git(['-c', 'user.name=Command Center Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-m', 'fixture baseline']);
+  return git(['rev-parse', 'HEAD']);
+}
+
 interface Fx { baseDir: string; appDir: string; binDir: string; healthStub: string; deploy: string; cleanup(): void; }
 
 function buildFixture(opts: {
@@ -64,12 +77,29 @@ function buildFixture(opts: {
   mkdirSync(path.join(appDir, 'src'), { recursive: true });
   writeFileSync(path.join(appDir, 'src', 'a.ts'), 'export const a = 1;\n');
   writeFileSync(path.join(appDir, 'package.json'), '{"name":"fixture","version":"1.0.0","build":"next build"}\n');
+  writeFileSync(path.join(appDir, 'package-lock.json'), '{"name":"fixture","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{}}\n');
+  initializeFixtureGit(appDir);
+  // Stub native module gate: the deploy gate requires a usable better-sqlite3
+  // from the app and from the staged dependency tree.
+  const createSqliteStub = (dir: string) => {
+    mkdirSync(path.join(dir, 'node_modules', 'better-sqlite3'), { recursive: true });
+    writeFileSync(path.join(dir, 'node_modules', 'better-sqlite3', 'package.json'), '{"name":"better-sqlite3","version":"0.0.0","main":"index.js"}\n');
+    writeFileSync(path.join(dir, 'node_modules', 'better-sqlite3', 'index.js'), 'module.exports = class FakeDatabase { prepare() { return { get: () => ({ answer: 42 }) }; } close() {} };\n');
+  };
+  createSqliteStub(appDir);
 
   // existing live .next
   mkdirSync(path.join(appDir, '.next'), { recursive: true });
   writeFileSync(path.join(appDir, '.next', 'BUILD_ID'), 'old-build-id');
 
   const npmStub = `#!/usr/bin/env bash
+if [[ "$1" == "ci" ]]; then
+  # Stage a minimal usable dependency tree in the npm cwd.
+  mkdir -p node_modules/better-sqlite3
+  printf '%s\n' '{"name":"better-sqlite3","version":"0.0.0","main":"index.js"}' > node_modules/better-sqlite3/package.json
+  printf '%s\n' 'module.exports = class FakeDatabase { prepare() { return { get: () => ({ answer: 42 }) }; } close() {} };' > node_modules/better-sqlite3/index.js
+  exit 0
+fi
 if [[ "$1" == "run" && "$2" == "build" ]]; then
   # cwd IS the app dir (atomic-deploy.sh cd's into APP_DIR before building).
   ${npmBody}
@@ -138,6 +168,7 @@ function runDeploy(fixture: Fx, extraEnv: Record<string, string> = {}): { exitCo
         PATH: `${fixture.binDir}:${process.env.PATH ?? ''}`,
         HOME: fixture.baseDir,
         CC_HEALTH_CHECK_PATH: fixture.healthStub,
+        CC_POST_SWITCH_WAIT: '0',
         ...extraEnv,
       },
       cwd: fixture.appDir,
@@ -147,6 +178,31 @@ function runDeploy(fixture: Fx, extraEnv: Record<string, string> = {}): { exitCo
   );
   return { exitCode: result.status ?? 1, stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
 }
+
+test('PRES-046 F0: per-box generated files (public/brand.css, public/logo-config.json) are NOT in the content inventory', () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'ccbi-brand-'));
+  try {
+    mkdirSync(path.join(dir, 'public'), { recursive: true });
+    mkdirSync(path.join(dir, 'src'), { recursive: true });
+    writeFileSync(path.join(dir, 'src', 'a.ts'), 'export const a = 1;\n');
+    writeFileSync(path.join(dir, 'public', 'brand.css'), ':root{--brand:#123456}\n');
+    writeFileSync(path.join(dir, 'public', 'logo.svg'), '<svg/>\n');
+    writeFileSync(path.join(dir, 'public', 'logo-config.json'), '{"logoUrl":"a"}\n');
+    const lib = path.join(process.cwd(), 'scripts', 'lib', 'build-inventory.sh');
+    const list = execFileSync('bash', ['-c', `source "${lib}"; _ccbi_inventory_relpaths "${dir}"`], { encoding: 'utf8' });
+    assert.ok(list.includes('public/logo.svg'), 'other public files are digested');
+    assert.ok(list.includes('src/a.ts'), 'src files are digested');
+    assert.ok(!list.includes('public/brand.css'), 'brand.css must not be digested');
+    assert.ok(!list.includes('public/logo-config.json'), 'logo-config.json (per-box runtime config, written at build) must not be digested');
+    const d1 = execFileSync('bash', ['-c', `source "${lib}"; _ccbi_inventory_digest "${dir}"`], { encoding: 'utf8' }).trim();
+    writeFileSync(path.join(dir, 'public', 'brand.css'), ':root{--brand:#abcdef}\n');
+    writeFileSync(path.join(dir, 'public', 'logo-config.json'), '{"logoUrl":"b"}\n');
+    const d2 = execFileSync('bash', ['-c', `source "${lib}"; _ccbi_inventory_digest "${dir}"`], { encoding: 'utf8' }).trim();
+    assert.equal(d1, d2, 'changing brand.css must not change the inventory digest');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test('PRES-046 F1: input mutated during build → FROZEN-SOURCE VIOLATION, exit 2, live .next untouched', () => {
   const fixture = buildFixture({
@@ -198,9 +254,14 @@ test('PRES-046 F3: health-fail rollback writes a binding receipt; matching redep
     const mf1 = JSON.parse(readFileSync(path.join(fixture.appDir, '.next', 'build-inventory.json'), 'utf8')) as Record<string, string>;
     const invX = mf1.inventory_digest;
 
-    // Step 2: change source to Y, deploy again with health failing → auto-rollback to X.
-    // The rollback receipt must bind: rolled_back_to=X (served prior), failed_target=Y.
+    // Step 2: commit content Y, then deploy that explicit revision with health
+    // failing → auto-rollback to X. The rollback receipt must bind:
+    // rolled_back_to=X (served prior), failed_target=Y.
     writeFileSync(path.join(fixture.appDir, 'src', 'a.ts'), 'export const a = 2;\n');
+    let gitResult = spawnSync('git', ['-C', fixture.appDir, 'add', 'src/a.ts'], { encoding: 'utf8' });
+    assert.strictEqual(gitResult.status, 0, gitResult.stderr);
+    gitResult = spawnSync('git', ['-C', fixture.appDir, '-c', 'user.name=Command Center Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-m', 'content Y'], { encoding: 'utf8' });
+    assert.strictEqual(gitResult.status, 0, gitResult.stderr);
     // capture content-Y inventory via the lib (same oracle the deploy uses)
     const invY = execFileSync('bash', [path.join(process.cwd(), 'scripts', 'lib', 'build-inventory.sh'), '--digest', fixture.appDir], { encoding: 'utf8' }).trim();
     const healthStubPath = fixture.healthStub;
@@ -259,6 +320,60 @@ exit 0
     assert.equal(fourthRun.exitCode, 0, 'green deploy still exits 0');
     assert.ok(existsSync(receiptPath), 'non-matching receipt is NOT cleared by an unrelated green deploy');
     assert.ok(fourthRun.stderr.includes('does not match this deploy'), 'supersede-loudly message present');
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+// ILJ-007 F4: explicit-revision deploy at an OLD commit syncs the live
+// worktree onto that commit, so the artifact and the tree agree for the
+// startup content guard. The F3 test above already proves the genuine
+// mismatch still refuses (MISMATCH) through the same verify path.
+test('PRES-046 F4 (ILJ-007): explicit-revision deploy syncs the live worktree to the deployed commit', () => {
+  const fixture = buildFixture({
+    npmBody: `if [[ -n "\${NEXT_DIST_DIR:-}" ]]; then mkdir -p "$NEXT_DIST_DIR"; echo "new-build-id" > "$NEXT_DIST_DIR/BUILD_ID"; fi
+`,
+  });
+  try {
+    // Commit content X, deploy it (HEAD deploy), then commit content Y on top
+    // so live HEAD is AHEAD of the deployed artifact.
+    const revX = execSync(`git -C ${fixture.appDir} rev-parse HEAD`).toString().trim();
+    const first = runDeploy(fixture);
+    assert.equal(first.exitCode, 0, `baseline HEAD deploy must exit 0\nstderr:\n${first.stderr}`);
+    writeFileSync(path.join(fixture.appDir, 'src', 'a.ts'), 'export const a = 2;\n');
+    let gitResult = spawnSync('git', ['-C', fixture.appDir, 'add', 'src/a.ts'], { encoding: 'utf8' });
+    assert.strictEqual(gitResult.status, 0, gitResult.stderr);
+    gitResult = spawnSync('git', ['-C', fixture.appDir, '-c', 'user.name=Command Center Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-m', 'content Y (ahead of artifact)'], { encoding: 'utf8' });
+    assert.strictEqual(gitResult.status, 0, gitResult.stderr);
+
+    // Re-deploy the OLD revision X explicitly: the artifact is built from X
+    // while live HEAD names Y. The Phase 3 tail must move the live worktree
+    // back onto X so the pair agrees.
+    const second = runDeploy(fixture, { CC_DEPLOY_REVISION: revX });
+    assert.equal(second.exitCode, 0, `explicit-revision deploy must exit 0\nstderr:\n${second.stderr}`);
+    const liveHead = execSync(`git -C ${fixture.appDir} rev-parse HEAD`).toString().trim();
+    assert.equal(liveHead, revX, 'live worktree must be synced onto the deployed revision');
+    const verify = spawnSync('bash', [
+      path.join(process.cwd(), 'scripts', 'lib', 'build-inventory.sh'),
+      '--verify', fixture.appDir,
+    ], { encoding: 'utf8' });
+    assert.strictEqual(verify.status, 0,
+      `explicit-revision artifact must VERIFY once the tree is synced\n${verify.stdout ?? ''}`);
+    assert.match(verify.stdout ?? '', /"verdict":"VERIFIED"/);
+
+    // Dirty guard: uncommitted tracked edits must abort the SYNC loudly
+    // (exit 2) without discarding the operator's work.
+    writeFileSync(path.join(fixture.appDir, 'src', 'a.ts'), 'export const a = 3; // operator edit\n');
+    gitResult = spawnSync('git', ['-C', fixture.appDir, 'add', 'src/a.ts'], { encoding: 'utf8' });
+    assert.strictEqual(gitResult.status, 0, gitResult.stderr);
+    gitResult = spawnSync('git', ['-C', fixture.appDir, '-c', 'user.name=Command Center Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-m', 'content Z'], { encoding: 'utf8' });
+    assert.strictEqual(gitResult.status, 0, gitResult.stderr);
+    writeFileSync(path.join(fixture.appDir, 'src', 'a.ts'), 'export const a = Z-dirty;\n');
+    const third = runDeploy(fixture, { CC_DEPLOY_REVISION: revX });
+    assert.equal(third.exitCode, 2, `deploy with a dirty tree must abort the sync (exit 2), got ${third.exitCode}\nstderr:\n${third.stderr}`);
+    assert.ok(third.stderr.includes('DIRTY'), 'abort receipt must name the dirty worktree');
+    assert.ok(readFileSync(path.join(fixture.appDir, 'src', 'a.ts'), 'utf8').includes('Z-dirty'),
+      'the sync must never discard dirty tracked work');
   } finally {
     fixture.cleanup();
   }

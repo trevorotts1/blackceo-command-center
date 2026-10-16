@@ -365,3 +365,22 @@ describe('pm2-analyze-cc: CC_PORT is a port declaration (target identification)'
     }
   });
 });
+
+// ── Unparseable pm2 output: analyzer reports an error, never a clean "no app" ──
+// cc-health-check.sh maps `error` to INDETERMINATE (exit 3), not exit 1.
+describe('pm2-analyze-cc: unparseable pm2 output is an error, distinct from an empty list', () => {
+  it('garbage stdin → error key set (health check treats as exit 3)', () => {
+    const out = execFileSync('python3', [SCRIPT, '--port', '4000'], { encoding: 'utf8', input: '<<not json>>' });
+    const r = JSON.parse(out.trim()) as Pm2Analysis;
+    expect(r.error).toBeTruthy();
+    expect(r.app_count).toBe(0);
+  });
+  it('a valid empty list has NO error key (definitive "no app", stays exit 1)', () => {
+    expect(analyseFixture('fixture-empty.json').error).toBeUndefined();
+  });
+  it('errored app has NO error key and a crash_looper (definitive, stays exit 1)', () => {
+    const r = analyseFixture('fixture-2f-errored.json');
+    expect(r.error).toBeUndefined();
+    expect(r.crash_loopers.length).toBeGreaterThan(0);
+  });
+});

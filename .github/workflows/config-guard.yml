@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 # Prevents the v4.0.3 regression where demo department data and a real company
 # name were shipped inside runtime config. Only the *.example.json templates may

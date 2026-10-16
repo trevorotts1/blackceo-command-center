@@ -47,13 +47,15 @@ const OPERATOR_ID = '5252140759';
 const CLIENT_ID = '8959124298';
 
 /** Build a throwaway workspace with an openclaw.json carrying `allowFrom`. */
-function makeBox(allowFrom: string[]): string {
+function makeBox(allowFrom: string[], owner = ''): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-notify-box-'));
   const workspace = path.join(root, 'workspace');
   fs.mkdirSync(workspace, { recursive: true });
   fs.writeFileSync(
     path.join(root, 'openclaw.json'),
-    JSON.stringify({ channels: { telegram: { allowFrom } } }),
+    // The owner is an explicit record (env.vars), never allowFrom order.
+    JSON.stringify({ channels: { telegram: { allowFrom } },
+      env: { vars: owner ? { OPENCLAW_OWNER_CHAT_ID: owner } : {} } }),
     'utf8',
   );
   process.env.OPENCLAW_WORKSPACE_PATH = workspace;
@@ -177,7 +179,7 @@ test('MSG-07: an undeliverable owner notification escalates and REACHES THE OPER
 test('MSG-07: a SYSTEM alert is NEVER sent to a client chat id', async () => {
   cleanEnv();
   // A CLIENT box: allowFrom holds the client. There is no operator listed.
-  makeBox([CLIENT_ID]);
+  makeBox([CLIENT_ID], CLIENT_ID);
   const notify = await freshNotify();
   const cap = captureSends(notify);
   try {
@@ -226,7 +228,9 @@ test('MSG-07: a client id forced into CC_OPERATOR_CHAT_ID is REJECTED', async ()
 // ─── 4. The client-protection guardrail is UNCHANGED ─────────────────────────
 test('MSG-07: an OPERATOR id still never resolves as the client owner (guardrail intact)', async () => {
   cleanEnv();
-  makeBox([OPERATOR_ID, CLIENT_ID]);
+  // The operator pinned as the owner record: rejected; the client wins.
+  makeBox([OPERATOR_ID, CLIENT_ID], OPERATOR_ID);
+  process.env.OPENCLAW_OWNER_CHAT_ID = CLIENT_ID;
   const notify = await freshNotify();
 
   // With BOTH present, the owner must be the CLIENT — never the operator.

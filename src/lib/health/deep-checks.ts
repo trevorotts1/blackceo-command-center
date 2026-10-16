@@ -29,7 +29,7 @@ import os from 'os';
 // 'node:' URI scheme (UnhandledSchemeError) but tolerates the bare
 // specifier — the same pattern src/lib/notify.ts (already reachable from
 // this exact import chain) already relies on.
-import { execFile, spawnSync } from 'child_process';
+import { execFile } from 'child_process';
 import { promisify } from 'util';
 import BetterSqlite3 from 'better-sqlite3';
 import { getDb, getMigrationStatus, getDbPath } from '@/lib/db';
@@ -250,8 +250,51 @@ export interface BuildContentResult extends CheckResult {
   build_id?: string;
 }
 
-export function checkBuildContentInventory(): BuildContentResult {
+// The verify hashes the whole build tree. It runs off the request thread (a
+// synchronous spawn here blocked the whole server for the length of the hash,
+// so under load the Command Center stopped answering even /api/health), and
+// its verdict is cached per served build + checked-out commit, so repeated
+// health polls of an unchanged build never re-hash it.
+// ponytail: 5-minute TTL covers working-tree edits that do not move HEAD.
+const BUILD_CONTENT_TTL_MS = 5 * 60_000;
+let buildContentCache: { key: string; at: number; result: Promise<BuildContentResult> } | null = null;
+
+function buildContentCacheKey(cwd: string): string | null {
+  try {
+    const buildId = fs.readFileSync(path.join(cwd, '.next', 'BUILD_ID'), 'utf8').trim();
+    const head = fs.readFileSync(path.join(cwd, '.git', 'HEAD'), 'utf8').trim();
+    let ref = '';
+    if (head.startsWith('ref: ')) {
+      const refFile = path.join(cwd, '.git', head.slice(5));
+      const packed = path.join(cwd, '.git', 'packed-refs');
+      ref = fs.existsSync(refFile) ? fs.readFileSync(refFile, 'utf8').trim()
+        : fs.existsSync(packed) ? String(fs.statSync(packed).mtimeMs) : '';
+    }
+    return `${cwd}\n${buildId}\n${head}\n${ref}`;
+  } catch {
+    return null; // no git checkout (fixtures, copies): never cache
+  }
+}
+
+export function checkBuildContentInventory(): Promise<BuildContentResult> {
   const cwd = process.cwd();
+  const key = buildContentCacheKey(cwd);
+  const now = Date.now();
+  if (key && buildContentCache && buildContentCache.key === key && now - buildContentCache.at < BUILD_CONTENT_TTL_MS) {
+    return buildContentCache.result;
+  }
+  const result = computeBuildContentInventory(cwd);
+  if (key) {
+    buildContentCache = { key, at: now, result };
+    // An UNKNOWN is transient: do not pin it for the 5 minute TTL (D15).
+    void result.then((r) => {
+      if (r.indeterminate && buildContentCache?.result === result) buildContentCache = null;
+    }, () => undefined);
+  }
+  return result;
+}
+
+async function computeBuildContentInventory(cwd: string): Promise<BuildContentResult> {
   const invLib = path.join(cwd, 'scripts', 'lib', 'build-inventory.sh');
 
   if (!fs.existsSync(invLib)) {
@@ -268,7 +311,7 @@ export function checkBuildContentInventory(): BuildContentResult {
   }
 
   try {
-    const verify = spawnHelper(invLib, ['--verify', cwd], 30_000);
+    const verify = await spawnHelper(invLib, ['--verify', cwd], 30_000);
     let parsed: { verdict?: string; build_id?: string } = {};
     try { parsed = JSON.parse(verify.stdout) as { verdict?: string; build_id?: string }; } catch { /* fallthrough */ }
     const verdict = parsed.verdict ?? 'UNKNOWN';
@@ -285,8 +328,8 @@ export function checkBuildContentInventory(): BuildContentResult {
 
     if (verify.rc === 1 && verdict === 'MISMATCH') {
       // Deliberate-rollback path: the receipt must bind exactly this pair.
-      const sourceInv = spawnHelper(invLib, ['--digest', cwd], 30_000).stdout.trim();
-      const rb = spawnHelper(invLib, ['--verify-rollback', cwd, path.join(cwd, '.next'), sourceInv], 30_000);
+      const sourceInv = (await spawnHelper(invLib, ['--digest', cwd], 30_000)).stdout.trim();
+      const rb = await spawnHelper(invLib, ['--verify-rollback', cwd, path.join(cwd, '.next'), sourceInv], 30_000);
       let rbParsed: { receipt_verdict?: string } = {};
       try { rbParsed = JSON.parse(rb.stdout) as { receipt_verdict?: string }; } catch { /* fallthrough */ }
       const rbVerdict = rbParsed.receipt_verdict ?? 'RECEIPT_INVALID';
@@ -314,8 +357,8 @@ export function checkBuildContentInventory(): BuildContentResult {
       // legitimate inside the transaction-bound legacy-prior carve-out: the
       // rollback receipt names it "(unattested)" and binds the failed target
       // to this exact source tree. Anything else refuses.
-      const sourceInvMissing = spawnHelper(invLib, ['--digest', cwd], 30_000).stdout.trim();
-      const rbMissing = spawnHelper(invLib, ['--verify-rollback', cwd, path.join(cwd, '.next'), sourceInvMissing], 30_000);
+      const sourceInvMissing = (await spawnHelper(invLib, ['--digest', cwd], 30_000)).stdout.trim();
+      const rbMissing = await spawnHelper(invLib, ['--verify-rollback', cwd, path.join(cwd, '.next'), sourceInvMissing], 30_000);
       let rbMissingParsed: { receipt_verdict?: string } = {};
       try { rbMissingParsed = JSON.parse(rbMissing.stdout) as { receipt_verdict?: string }; } catch { /* fallthrough */ }
       const rbMissingVerdict = rbMissingParsed.receipt_verdict ?? 'RECEIPT_INVALID';
@@ -349,6 +392,19 @@ export function checkBuildContentInventory(): BuildContentResult {
         detail: 'build_content: OBSOLETE INVENTORY — manifest was computed over a different compile-affecting input set than this tree has now; the recorded inventory no longer covers what compiles (PRES-046). Rebuild: bash scripts/atomic-deploy.sh',
       };
     }
+    if (verdict === 'UNKNOWN') {
+      // FXCC-1 / D15: the helper gave no verdict at all. spawnHelper turns a
+      // 30 s timeout (e.g. the 03:00 maintenance storm) into rc 1 with empty
+      // stdout, which landed here as a definitive RED and a nightly false alarm.
+      // No verdict is UNKNOWN, not a failure: the watchdog's transient-UNKNOWN
+      // path retries it, and a MISMATCH / INVALID verdict above still fails hard.
+      return {
+        pass: false,
+        indeterminate: true,
+        verdict,
+        detail: `build_content: verification gave no verdict (rc=${verify.rc}; helper timed out or was killed) — UNKNOWN, not a mismatch`,
+      };
+    }
     return {
       pass: false,
       verdict,
@@ -363,14 +419,18 @@ export function checkBuildContentInventory(): BuildContentResult {
 }
 
 /**
- * Synchronous helper: run a shell command via spawnSync with an ARGUMENT ARRAY
- * (no shell interpolation — arguments pass verbatim to bash), capture stdout +
- * exit code, with a hard timeout so a wedged filesystem cannot hang the health
- * endpoint.
+ * Run a shell command with an ARGUMENT ARRAY (no shell interpolation —
+ * arguments pass verbatim to bash) off the event loop, capture stdout + exit
+ * code, with a hard timeout so a wedged filesystem cannot hang the endpoint.
  */
-function spawnHelper(cmd: string, args: string[], timeoutMs: number): { stdout: string; rc: number } {
-  const res = spawnSync('bash', [cmd, ...args], { timeout: timeoutMs, encoding: 'utf8' });
-  return { stdout: res.stdout ?? '', rc: res.status ?? (res.error ? 1 : 1) };
+function spawnHelper(cmd: string, args: string[], timeoutMs: number): Promise<{ stdout: string; rc: number }> {
+  return new Promise((resolve) => {
+    execFile('bash', [cmd, ...args], { timeout: timeoutMs, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 },
+      (err, stdout) => {
+        const code = (err as { code?: unknown } | null)?.code;
+        resolve({ stdout: stdout ?? '', rc: err ? (typeof code === 'number' ? code : 1) : 0 });
+      });
+  });
 }
 
 // ── check: company branding ──────────────────────────────────────────────────
@@ -537,15 +597,22 @@ export function checkCompanyBranding(): CompanyBrandingResult {
     };
   }
 
-  // Consistency check: if both exist, they must match
+  // Consistency check: if both exist, they should match. A mismatch is a
+  // BRANDING inconsistency, not a broken install: the app serves, the board
+  // moves, the client sees one of two names. It is reported (degraded: true)
+  // but it must not gate. Measured 2026-09-18 on a client VPS: the deploy's
+  // health check returned exit 1 on this row alone, atomic-deploy rolled the
+  // artifact back to a pre-inventory build, and the new cc-start refused that
+  // build — the box was DOWN because two spellings of the practice name differed.
   if (configName && dbName && configName.toLowerCase() !== dbName.toLowerCase()) {
     return {
-      pass: false,
+      pass: true,
       indeterminate: false,
+      degraded: true,
       config_exists: true,
       config_name: configName,
       db_name: dbName,
-      detail: `company_branding: config name ("${configName}") does not match DB name ("${dbName}") — inconsistent branding`,
+      detail: `company_branding: DEGRADED — config name ("${configName}") does not match DB name ("${dbName}"); branding inconsistent, app serving (advisory, non-gating)`,
     };
   }
 
@@ -2009,7 +2076,7 @@ export function checkSkill35CycleProjection(): ProducerBoardProjectionResult {
 // reports every other posture check — no shell access required.
 //
 // DESIGN NOTE — same posture as every other advisory check in this file
-// (anthology/skill6 board projection, sweep_liveness): non-gating. A pile of
+// (anthology/skill6 board projection, board_jobs_watchdog): non-gating. A pile of
 // undeliverable records is an OPERATIONAL signal (something downstream —
 // Telegram config, an operator chat id — needs attention), never a Command
 // Center correctness fault, so it must never flip the top-level pass/
@@ -2261,7 +2328,7 @@ function isValidPersonaMatchShape(v: unknown): v is Partial<PersonaMatchDistribu
  * must place this under `advisory`, mirroring every other check in this
  * file's posture. `pass: false` here reflects a confirmed grounding
  * degrade for the field's OWN value only (same posture as
- * checkSweepLiveness's `pass: false` on a stale watcher) — it carries no
+ * checkBoardJobsWatchdog's `pass: false` on a silent job) — it carries no
  * gating weight because `advisory` is structurally excluded from
  * `gatingChecks` in the route.
  */

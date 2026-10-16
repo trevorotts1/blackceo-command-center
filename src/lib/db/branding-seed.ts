@@ -150,27 +150,61 @@ export function slugifyCompanyName(name: string): string {
 }
 
 /**
+ * The company ids that name the ABSENCE of a company rather than a company.
+ *
+ * `seedCompanyGuarded` writes `id === slug` for a real brand and the literal
+ * `default` for the un-branded sentinel; `command-center` is the legacy pre-B.3
+ * sentinel. So the ID is the STRUCTURAL marker, and it is the one field a later
+ * rename cannot launder.
+ */
+const SENTINEL_COMPANY_IDS = new Set(['default', 'command-center']);
+
+/**
+ * True when this id names the absence of a company (or nothing at all).
+ *
+ * Used in BOTH directions, which is the point:
+ *   • on a company ROW, a sentinel id means placeholder regardless of slug;
+ *   • on an IDENTITY (MC_COMPANY_ID, a registry `companyId`, a grant claim), a
+ *     sentinel value means "this box was never told who it is" — it is NEVER an
+ *     identity to scope a board by. A client box carried `companyId: default` on
+ *     all six of its registered hosts; treating that as authoritative scopes the
+ *     board to the sentinel and empties it.
+ */
+export function isSentinelCompanyId(id: string | null | undefined): boolean {
+  const value = String(id ?? '').trim().toLowerCase();
+  return value === '' || SENTINEL_COMPANY_IDS.has(value);
+}
+
+/**
  * Placeholder / not-a-real-client company predicate — the SINGLE source of truth
  * shared by BOTH the board filter (src/lib/company.ts resolveActiveCompanyId) and
  * the department seeder (reseedWorkspacesFromConfig → this module), so the two can
  * NEVER disagree about which company is "active" on a single-tenant box.
  *
- * A placeholder is a row that onboarding / the seed / a stale legacy install may
- * leave behind that does NOT represent the client's real brand:
- *   • slug `default` / name `Default`      — the un-branded seed sentinel
- *   • slug `command-center` / name `Command Center` — the legacy pre-B.3 default
- *     id. Boxes onboarded before the branding seed wrote a real slug carry a
- *     `command-center` company row even though the client is someone else. This is
- *     the exact row that used to hijack department attribution (Fable-5).
- *   • slug `acme-*`                        — demo / sample company
+ * THE ROW'S OWN ID IS CHECKED FIRST, and that is the fix for the defect this
+ * predicate used to have. It was a denylist of three slugs (`default`,
+ * `command-center`, `acme-*`), and a denylist cannot enumerate every wrong
+ * value. Measured on a client box: the sentinel row had been renamed in place to
+ * slug `wuhs` while keeping id `default`. `wuhs` is on nobody's denylist, so the
+ * sentinel won the resolver, the board scoped to `default`, and all 40 of that
+ * client's active workspaces and 40 departments were filtered out while the
+ * client sat logged in staring at an empty board. Asking what the row IS (its
+ * sentinel id) instead of listing what it must not be called is what closes
+ * that class, not just the `wuhs` instance.
  *
- * NOTE: this set is deliberately IDENTICAL to the predicate the board filter used
- * before it was consolidated here — do NOT widen it casually, the floor-invariant
- * test relies on an `acme-inc` row being selectable via an explicit COMPANY_SLUG env
- * override even though its slug matches the `acme-*` placeholder pattern (the env
- * override is checked against ALL rows first, see resolveSeedingCompanyId).
+ * The remaining slug/name terms are kept for rows whose id is legitimate but
+ * whose branding is not: the pre-B.3 `command-center` id that used to hijack
+ * department attribution (Fable-5), and `acme-*` demo rows. Do NOT widen them
+ * casually — the floor-invariant test relies on an `acme-inc` row being
+ * selectable via an explicit COMPANY_SLUG env override even though its slug
+ * matches the `acme-*` pattern (the env override is checked against ALL rows
+ * first, see resolveSeedingCompanyId).
  */
-export function isPlaceholderCompany(c: { name?: string | null; slug?: string | null }): boolean {
+export function isPlaceholderCompany(c: { id?: string | null; name?: string | null; slug?: string | null }): boolean {
+  // A sentinel id is a placeholder whatever the row was later renamed to.
+  // Callers that carry only name/slug pass no id, and this term does not fire.
+  if (c.id !== undefined && c.id !== null && isSentinelCompanyId(c.id)) return true;
+
   const slug = (c.slug || '').trim().toLowerCase();
   const name = (c.name || '').trim();
   return (
@@ -183,22 +217,47 @@ export function isPlaceholderCompany(c: { name?: string | null; slug?: string | 
 }
 
 /**
+ * The company identity this installation was PROVISIONED with.
+ *
+ * `MC_COMPANY_ID` is the same value `tenantRegistration()` hands every verified
+ * request as `TenantContext.companyId` (see src/lib/auth/tenant-context.ts —
+ * `implicitSelf()` reads this exact variable), so consulting it here IS the
+ * resolver consulting the box's tenant identity rather than guessing from row
+ * order. A sentinel value is not an identity (see isSentinelCompanyId).
+ */
+export function installedCompanyIdentity(): string | null {
+  const id = (process.env.MC_COMPANY_ID || '').trim();
+  return isSentinelCompanyId(id) ? null : id;
+}
+
+/**
  * Resolve the id of the ACTIVE client company for a single-tenant box — the ONE
  * resolver used both when SEEDING departments (attribution) and when FILTERING the
  * Kanban board, so the two always agree (the floor invariant depends on it).
  *
- * Resolution order (mirrors the pickCompany() heuristic behind /api/company):
+ * Resolution order:
  *   1. COMPANY_SLUG env — exact slug match against ANY company row. An explicit
  *      operator override wins even over a placeholder-slug row (deterministic,
  *      independent of row order).
  *   2. COMPANY_NAME env — name match against ANY row, then its slugified form.
- *   3. The first NON-placeholder company row by rowid (skip default /
- *      command-center / acme-* / "Command Center" / "Default").
+ *   3. THE TENANT IDENTITY (`identity`, defaulting to MC_COMPANY_ID). Authoritative
+ *      and terminal: once the box knows who it is, ROW ORDER NEVER DECIDES WHOSE
+ *      DATA A CLIENT SEES. Note it does not require a matching `companies` row —
+ *      the row is branding, the identity is ownership, and on the box that blanked
+ *      a board the workspaces were attributed to an id whose row had been renamed
+ *      out from under them.
+ *   4. Only with NO identity at all: the first NON-placeholder company row by
+ *      rowid. This is the positional heuristic that returned the wrong company,
+ *      and it is now both last and unreachable whenever identity is known.
  *
- * Returns null when ONLY placeholder/default companies exist (a box that has not
- * been branded yet). Callers treat null as fail-open: the board shows every
- * workspace rather than going blank, and the seeder falls back to the 'default'
- * sentinel rather than mis-attributing to a placeholder.
+ * Returns null when the box has no identity AND only placeholder/default companies
+ * exist (a box that has not been branded yet). Callers treat null as fail-open:
+ * the board shows every workspace rather than going blank, and the seeder falls
+ * back to the 'default' sentinel rather than mis-attributing to a placeholder.
+ *
+ * A WRONG non-null answer is the dangerous case, not null — it silently filters a
+ * populated board to zero. `assertBoardNotSilentlyEmpty`
+ * (src/lib/workspaces/board-query.ts) is the backstop that refuses to render that.
  *
  * WHY THIS EXISTS (Fable-5 root cause): historically the board filtered with
  * src/lib/company.ts resolveActiveCompanyId (placeholder-aware → skipped a stale
@@ -208,18 +267,24 @@ export function isPlaceholderCompany(c: { name?: string | null; slug?: string | 
  * reseed re-pinned all departments to `command-center` while the board filtered on
  * the real company — the board collapsed to just the handful of rows the reseed
  * never touches. Routing BOTH paths through this single resolver makes the
- * disagreement structurally impossible.
+ * disagreement structurally impossible — which is also why `identity` defaults to
+ * the installed one instead of being plumbed per-request into the board alone.
  */
-export function resolveSeedingCompanyId(db: Database.Database): string | null {
+export function resolveSeedingCompanyId(
+  db: Database.Database,
+  identity: string | null = installedCompanyIdentity(),
+): string | null {
+  const authoritative = isSentinelCompanyId(identity) ? null : String(identity).trim();
+
   let rows: { id: string; name: string; slug: string }[];
   try {
     rows = db
       .prepare('SELECT id, name, slug FROM companies ORDER BY rowid ASC')
       .all() as { id: string; name: string; slug: string }[];
   } catch {
-    return null; // companies table missing (pre-migration) — caller falls back
+    return authoritative; // companies table missing (pre-migration) — identity still answers
   }
-  if (rows.length === 0) return null;
+  if (rows.length === 0) return authoritative;
 
   // Explicit operator overrides win against ANY row (even a placeholder-slug row),
   // so a COMPANY_SLUG/COMPANY_NAME pin is deterministic regardless of row order.
@@ -240,7 +305,10 @@ export function resolveSeedingCompanyId(db: Database.Database): string | null {
     }
   }
 
-  // No explicit override — fall back to the first REAL (non-placeholder) company.
+  // IDENTITY IS AUTHORITATIVE AND TERMINAL. No fall-through to row order below.
+  if (authoritative) return authoritative;
+
+  // No identity and no override — the positional heuristic, last resort only.
   const real = rows.find((c) => !isPlaceholderCompany(c));
   return real ? real.id : null;
 }

@@ -61,7 +61,9 @@ import { throwIfJobLeaseLost } from '@/lib/jobs/job-lease';
  * (human decides) and log a warning. Never crashes the PATCH route.
  */
 
-import { requirePersonaConformanceForCompletion } from '@/lib/persona-conformance';
+import { requirePersonaConformanceForCompletion, currentExecutionDeliverables } from '@/lib/persona-conformance';
+import { requiredSectionsOf } from '@/lib/execution-load-evidence';
+import { latestExecution, supersedeStaleDeliverables } from '@/lib/execution-attempts';
 import { readFileSync, writeFileSync, renameSync, unlinkSync, existsSync, statSync, openSync, readSync, closeSync, readdirSync } from 'fs';
 import * as path from 'path';
 import { resolvePresentationRunRoots } from '@/lib/presentation-run-roots';
@@ -77,12 +79,15 @@ import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { TRIO_ROLE_ALIASES } from '@/lib/db/migrations';
 import { getMissionControlUrl } from '@/lib/config';
 import { missionControlAuthHeaders } from '@/lib/mc-auth';
+import { autoRouteTask } from '@/lib/routing/auto-route';
 import { notifyOwner, notifySystem, resolveWorkspaceBase } from '@/lib/notify';
+import { QC_MAX_REROUTES } from '@/lib/qc-cap';
 import { notifyOwnerDone } from '@/lib/owner-reports';
 import { transition, TransitionError, type LifecycleState } from '@/lib/task-lifecycle';
 import { requiresRegisteredCertificate, requiresRegisteredProof } from '@/lib/presentations-cert-gate';
 import { bootstrapProofForPass } from '@/lib/presentation-proof-registry';
 import { recordBlockEvent } from '@/lib/block-events';
+import { stopCardPermanently } from '@/lib/stop-card';
 import { assertNoFixtureEnvInProduction, assertNoFixtureDerivedServerWrite } from '@/lib/fixture-guard';
 import { EVIDENCE_DELIVERABLE_TYPES, isUsableUrl, collectCompletionEvidence, isBundleDeliverablePath, verifyPresentationBundleDeliverable, bundleReverifyEnabled } from '@/lib/completion-evidence';
 import { getProvider } from '@/lib/model-providers';
@@ -91,6 +96,8 @@ import {
   getOllamaCloudChatEndpoint,
 } from '@/lib/model-providers/ollama-cloud';
 import { resolveProviderApiKey } from '@/lib/provider-key-detection';
+import { resolveBoxDefaultModelChain } from '@/lib/runtime-model';
+import { successorModelId } from '@/lib/retired-models';
 import type { ChatCompletionResponse } from '@/lib/model-providers/types';
 import type { Task } from '@/lib/types';
 
@@ -204,6 +211,224 @@ export function classifyQCBlockAudience(gapsAndReason: string[], forceSystem = f
   return QC_BLOCK_SYSTEM_SIGNALS.some((p) => p.test(text)) ? 'SYSTEM' : 'OWNER';
 }
 
+// ---------------------------------------------------------------------------
+// QC-CAP-ALERT-20260922 — the retry cap STOPS, and it says so out loud.
+//
+// INCIDENT (live client box, 2026-09-22): a card sat `blocked` carrying
+// `block_reason = "Failed QC 3x, last score 9.0/10"`. 9.0 is ABOVE the 8.5
+// pass bar — the card failed on a mandatory gap, not on its score — and the
+// only way anyone learned about it was by reading the database. Two separate
+// defects:
+//
+//   1. The block_reason named the SCORE, which had passed, and never named the
+//      GAP, which had not. Read on the board it is nonsense.
+//   2. The owner notice that blockTaskForQC() does send is generic ("a task is
+//      BLOCKED and needs your attention") — no attempt count, no cap, no
+//      threshold, and no statement that retrying has STOPPED.
+//
+// So the cap now produces a purpose-built alert: what stopped, how many times
+// it tried, what the score was, what the bar is, and the actual gap. Sent ONCE
+// per landed at-cap block through the sender the OWNER branch already uses
+// (notifyOwner → resolveOwnerChatId → the gateway), marked durably on the card
+// so neither a restart nor a repeated sweep tick can re-send it.
+// ---------------------------------------------------------------------------
+
+export interface QCCapAlert {
+  /** This pass's attempt number (already incremented). */
+  attempts: number;
+  /** The cap it hit — QC_MAX_REROUTES unless a caller overrides it. */
+  cap: number;
+  score: number;
+  gaps: string[];
+  reason: string;
+  /** Injected so tests never reach a phone. Defaults to notifyOwner. */
+  send?: (message: string) => boolean;
+}
+
+/**
+ * How a FAILING verdict's score stands against the pass bar, said honestly.
+ *
+ * The board event for a re-routed card formatted this as
+ * `score X/10 < ${QC_PASS_THRESHOLD}` UNCONDITIONALLY, so a card that scored
+ * 9.0 and failed on a mandatory gap published "9.0/10 < 8.5" — a false
+ * comparison, and (with no stored verdict reason) the only line a human ever
+ * saw. A score can be at or above the bar and still fail: persona conformance,
+ * comms conformance and the artifact gates all turn a PASS into a FAIL without
+ * touching the number. Every site that states the score of a failing verdict
+ * uses this, so none of them can drift back into asserting `<` about a number
+ * that is not.
+ */
+export function qcScoreVerdictClause(score: number): string {
+  return score >= QC_PASS_THRESHOLD
+    ? `score ${score.toFixed(1)}/10 PASSED the ${QC_PASS_THRESHOLD} bar — a mandatory gap failed it`
+    : `score ${score.toFixed(1)}/10 < ${QC_PASS_THRESHOLD}`;
+}
+
+// ---------------------------------------------------------------------------
+// QC-REWORK-REUSE-20260922 — a re-route asks for the GAPS, not the whole job.
+//
+// The kickback appends the gap list to the description and re-dispatches, and
+// the agent reads that as "do it again". In the observed case a bookkeeping gap
+// sent an agent back to regenerate 21 days of content that was already on disk
+// and already acceptable. Nothing told it otherwise.
+//
+// So the note now NAMES the files the last attempt left that still exist, and
+// says to re-register them rather than produce them again. That needs no new
+// agent-facing API: registering a deliverable always INSERTs a fresh row and
+// `linkDeliverableToExecution` attributes it to the CURRENT execution, so
+// POSTing the same path again is exactly how an attempt takes ownership of a
+// file it did not regenerate.
+//
+// ponytail: this is instruction only — nothing enforces that the agent obeys
+// it. Enforcing partial rework means the gate knowing which gap maps to which
+// file, which is a redesign, not this fix.
+// ---------------------------------------------------------------------------
+
+/** Files the last attempt left that are still on disk, as a rework instruction. */
+export function reuseInstruction(taskId: string, deliverablesFn = liveDeliverablesForTask): string {
+  const live = deliverablesFn(taskId);
+  if (live.length === 0) return '';
+  const named = live.map((d) => d.path).join(', ');
+  return `\n\nAlready delivered and STILL VALID — do NOT regenerate: ${named}. `
+    + `Re-register each one for this attempt (POST /api/tasks/${taskId}/deliverables with the same path) `
+    + `so it counts as this attempt's output. Produce ONLY what the gaps above name.`;
+}
+
+/** The current attempt's registered deliverables whose files still exist. */
+function liveDeliverablesForTask(taskId: string): { path: string }[] {
+  try {
+    const execution = latestExecution(taskId);
+    if (!execution) return [];
+    return currentExecutionDeliverables(taskId, execution.id)
+      .filter((d) => typeof d.path === 'string' && d.path.trim() !== '')
+      // A url/link deliverable has no local file to check; a file/artifact does,
+      // and naming one that has since been deleted would send the agent looking
+      // for something that is not there.
+      .filter((d) => (d.deliverable_type === 'file' || d.deliverable_type === 'artifact')
+        ? existsSync(d.path)
+        : true)
+      .map((d) => ({ path: d.path }));
+  } catch {
+    // Never let a rework HINT fail a re-route. No list is simply the old note.
+    return [];
+  }
+}
+
+/** Every gap a verdict named, for a one-line summary. Falls back to the reason. */
+export function qcGapSummary(gaps: string[], reason: string): string {
+  const named = gaps.filter((g) => g && g.trim() !== '');
+  return named.length > 0 ? named.join('; ') : reason;
+}
+
+/** The one gap a one-line summary can carry. Falls back to the verdict reason. */
+function primaryGap(gaps: string[], reason: string): string {
+  return gaps.find((g) => g && g.trim() !== '')?.trim() ?? reason;
+}
+
+/**
+ * `block_reason` for a card that stopped at the cap.
+ *
+ * Names the gap, not just the score — and when the score is at or above the
+ * pass bar, says so explicitly, because "Failed QC 5x, last score 9.0/10" on a
+ * board with an 8.5 bar reads as a bug in the scorer rather than a real
+ * mandatory gap.
+ */
+export function qcCapBlockReason(p: { attempts: number; score: number; gaps: string[]; reason: string }): string {
+  return `Failed QC ${p.attempts}x — stopped retrying. ${qcScoreVerdictClause(p.score)}: ${primaryGap(p.gaps, p.reason)}`;
+}
+
+/**
+ * The owner-facing alert for a card that has stopped retrying.
+ *
+ * PURE — builds text, sends nothing — so the wording is testable without a
+ * sender. Every element the operator asked for is load-bearing: the title, the
+ * attempt count against the cap, the last score against the threshold, and the
+ * gap that actually failed it.
+ */
+export function qcCapAlertMessage(p: { taskTitle: string } & Omit<QCCapAlert, 'send'>): string {
+  const gapList = p.gaps.filter((g) => g && g.trim() !== '');
+  const scoreLine = p.score >= QC_PASS_THRESHOLD
+    ? `Its last QC score was ${p.score.toFixed(1)}/10, which PASSES the ${QC_PASS_THRESHOLD}/10 bar. The score is not what failed it — it was blocked on a requirement QC treats as mandatory:`
+    : `Its last QC score was ${p.score.toFixed(1)}/10, under the ${QC_PASS_THRESHOLD}/10 pass bar. What failed it:`;
+  return [
+    `\u26d4 "${p.taskTitle}" has STOPPED retrying after ${p.attempts} failed QC attempts (limit ${p.cap}).`,
+    '',
+    scoreLine,
+    ...(gapList.length > 0 ? gapList.map((g) => `\u2022 ${g}`) : [`\u2022 ${p.reason}`]),
+    '',
+    'Nothing further will run on this card until you act. Reply here to unblock it, reassign it, or tell me to drop the requirement.',
+  ].join('\n');
+}
+
+/** The gaps the DURABLE verdict recorded for this card (migration 160).
+ *
+ * The owner alert quotes what the database will still say tomorrow, not a
+ * value that lived only in the process that sent it — so an owner reading the
+ * alert and an operator reading `task_qc_results` see the same reason. Null
+ * when the row is missing or predates the column, in which case the caller
+ * falls back to the verdict in hand: the persist is best-effort and an alert
+ * must never lose its gaps to a failed INSERT. */
+export function storedVerdictGaps(taskId: string): string[] | null {
+  try {
+    const row = queryOne<{ gaps: string | null }>(
+      'SELECT gaps FROM task_qc_results WHERE task_id = ? ORDER BY scored_at DESC, rowid DESC LIMIT 1',
+      [taskId],
+    );
+    if (!row?.gaps) return null;
+    const parsed: unknown = JSON.parse(row.gaps);
+    if (!Array.isArray(parsed)) return null;
+    const named = parsed.map((g) => String(g)).filter((g) => g.trim() !== '');
+    return named.length > 0 ? named : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Has this card already been alerted for this attempt count?
+ *
+ * The marker is `tasks.qc_cap_alert_attempts` (migration 159) — the attempt
+ * number of the last cap alert SENT. A re-block at the same attempt count is
+ * silent; a card that is resumed and fails again arrives with a HIGHER attempt
+ * count (unblocking clears the block_* columns but never resets
+ * qc_reroute_attempts) and so earns exactly one more alert.
+ *
+ * Fail-OPEN on a read error: a pre-migration DB, or an unreadable column, must
+ * lose the marker rather than the alert. A duplicate notice is recoverable; a
+ * card that stops working and tells nobody is the defect this closes.
+ */
+function capAlertAlreadySent(taskId: string, attempts: number): boolean {
+  try {
+    const row = queryOne<{ qc_cap_alert_attempts: number | null }>(
+      'SELECT qc_cap_alert_attempts FROM tasks WHERE id = ?', [taskId],
+    );
+    return (row?.qc_cap_alert_attempts ?? 0) >= attempts;
+  } catch {
+    return false;
+  }
+}
+
+/** Stamp the marker and write the audit row. Best-effort — never fails a block. */
+function recordCapAlert(taskId: string, attempts: number, message: string, delivered: boolean): void {
+  try {
+    run('UPDATE tasks SET qc_cap_alert_attempts = ? WHERE id = ?', [attempts, taskId]);
+  } catch (err) {
+    // Marker lost: the alert may repeat on a later at-cap block. Still better
+    // than suppressing it, and the event below keeps the audit trail intact.
+    console.warn(`[blockTaskForQC] cap-alert marker write failed for ${taskId} (non-fatal):`, (err as Error).message);
+  }
+  try {
+    run(
+      `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
+      [uuidv4(), 'qc_cap_alert', taskId,
+        `[QC-CAP-ALERT] attempt ${attempts} — owner alert ${delivered ? 'sent' : 'NOT delivered'}: ${message}`,
+        new Date().toISOString()],
+    );
+  } catch (err) {
+    console.warn(`[blockTaskForQC] cap-alert audit event failed for ${taskId} (non-fatal):`, (err as Error).message);
+  }
+}
+
 export interface BlockTaskForQCParams {
   taskId: string;
   taskTitle: string;
@@ -232,6 +457,13 @@ export interface BlockTaskForQCParams {
   ownerNotifyMessage?: string;
   /** OWNER audience: optional CEO-attributed qc_review event retained by the QC cap path. */
   ownerReviewEventMessage?: string;
+  /**
+   * Set ONLY by the at-cap callers (this block is the END of retrying, not one
+   * more attempt). Replaces the generic owner notice with the cap alert, sent
+   * at most once per attempt count per card. Absent for every other block —
+   * an un-reroutable verdict or a loop-detector block is not a cap stop.
+   */
+  capAlert?: QCCapAlert;
 }
 
 /**
@@ -248,6 +480,14 @@ export interface BlockTaskForQCParams {
  */
 export async function blockTaskForQC(p: BlockTaskForQCParams): Promise<boolean> {
   const now = new Date().toISOString();
+  // NO-SILENT-STOP: the plain-English sentence a non-technical owner reads.
+  // `blockReason` stays the machine string the board and the audit trail use
+  // ("Failed QC 3x, last score 4.2/10"); this is the same fact said in words,
+  // and it is what stopCardPermanently() sends.
+  const plainReason =
+    `This work did not pass our quality check${p.attempts !== null ? ` after ${p.attempts} attempt(s)` : ''}` +
+    `, so it has stopped rather than go out wrong.` +
+    (p.gaps.length > 0 ? ` What was wrong: ${p.gaps.slice(0, 3).join('; ')}.` : '');
   const blockedOnHuman = p.audience === 'SYSTEM' ? 'operator' : 'owner';
   const ask = p.needs.slice(0, 500);
   const blockGapsJson = JSON.stringify(p.gaps);
@@ -270,12 +510,18 @@ export async function blockTaskForQC(p: BlockTaskForQCParams): Promise<boolean> 
   }
 
   try {
-    await transition(p.taskId, 'blocked', {
+    // Same self-inflicted bump the re-route paths already guard against: this
+    // write appends QC's own audit note to `description`, which fires the
+    // migration-132 `tasks_persona_input_revision` trigger. On the live box
+    // every blocked card sat exactly one revision ahead of its bundle, so the
+    // moment it was re-scored it failed `persona_input_changed` — a card
+    // blocked by QC could never be recovered by re-scoring it.
+    await withoutSelfInflictedPersonaBump(p.taskId, () => transition(p.taskId, 'blocked', {
       actor: p.actor,
       reason: auditNote,
       expectedFrom: p.fromStatus,
       extraColumns,
-    });
+    }));
   } catch (txErr) {
     if (!(txErr instanceof TransitionError && txErr.code === 'CAS_CONFLICT')) {
       console.warn(`[blockTaskForQC] transition failed for ${p.taskId}:`, (txErr as Error).message);
@@ -319,6 +565,15 @@ export async function blockTaskForQC(p: BlockTaskForQCParams): Promise<boolean> 
       `INSERT INTO events (id, type, agent_id, task_id, message, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
       [uuidv4(), 'qc_escalation', ceoAgentId, p.taskId, p.escalationMessage ?? p.timelineEventMessage, now],
     );
+    // NO-SILENT-STOP — DELIBERATELY NOT a second send here. The SYSTEM lane
+    // already has exactly one owner of its operator notification: FIX 21's
+    // rate-limited notifySystem() in the QC cap path (see
+    // admitSystemBlockNotify — it coalesces repeat blocks of the same card
+    // inside a cooldown window, which is what stopped the operator furnace).
+    // Routing this branch through the chokepoint as well produced TWO operator
+    // pages per SYSTEM block, which is a different defect, not a fix. The
+    // OWNER branch below is the one that had no reliable sender, and that is
+    // the one the chokepoint now owns.
   } else {
     // OWNER block: preserve the QC cap path's CEO-authored Live Feed event,
     // then fire Telegram immediately (trust-engine's blocked_notice_sent_at
@@ -341,10 +596,56 @@ export async function blockTaskForQC(p: BlockTaskForQCParams): Promise<boolean> 
       );
     }
 
-    try {
-      notifyOwner(p.ownerNotifyMessage ?? p.timelineEventMessage);
-    } catch (notifyErr) {
-      console.error('[blockTaskForQC] BLOCKED owner notify error (non-fatal):', (notifyErr as Error).message);
+    // NO-SILENT-STOP x QC-CAP-ALERT-20260922 — ONE sender per block, never two.
+    //
+    // v7.6.57 gave an AT-CAP block a purpose-built alert (attempts, cap, score,
+    // threshold, gap) with its own durable per-(task, attempt) dedupe in
+    // `recordCapAlert`. That path is already exactly-once and already says why
+    // the card stopped, so routing it through the chokepoint as well would send
+    // the owner two messages for one stop — the opposite of the point.
+    //
+    // So: an at-cap block keeps ITS sender, unchanged. Every OTHER owner-facing
+    // block — the ones that used to fire a bare notifyOwner() with no claim and
+    // no idempotency at all — goes through stopCardPermanently(), which stamps
+    // blocked_notice_sent_at so a re-scored card, a restart mid-send, or two
+    // concurrent scorers collapse to ONE message.
+    //
+    // applyBlock:false in both readings — the transition above already landed,
+    // with the description write and persona-revision restore this path owns.
+    const capAlert = p.capAlert;
+    if (capAlert) {
+      if (capAlertAlreadySent(p.taskId, capAlert.attempts)) {
+        console.log(`[blockTaskForQC] cap alert for ${p.taskId} already sent at attempt ${capAlert.attempts} — not re-sending`);
+      } else {
+        const message = qcCapAlertMessage({
+          taskTitle: p.taskTitle,
+          ...capAlert,
+          gaps: storedVerdictGaps(p.taskId) ?? capAlert.gaps,
+        });
+        let delivered = false;
+        try {
+          delivered = (capAlert.send ?? notifyOwner)(message);
+        } catch (notifyErr) {
+          console.error('[blockTaskForQC] BLOCKED owner notify error (non-fatal):', (notifyErr as Error).message);
+        }
+        // Stamped on an UNDELIVERED alert too: notifyOwner already escalates an
+        // undeliverable owner message to the operator lane (MSG-07), so retrying
+        // it on the next at-cap block would only repeat a failure that has
+        // already been reported.
+        recordCapAlert(p.taskId, capAlert.attempts, message, delivered);
+      }
+    } else {
+      await stopCardPermanently({
+        taskId: p.taskId,
+        source: p.actor,
+        reason: plainReason,
+        needs: p.needs,
+        audience: 'OWNER',
+        gaps: p.gaps,
+        retriesExhausted: p.attempts !== null,
+        machineDetail: p.ownerNotifyMessage ?? p.timelineEventMessage,
+        applyBlock: false,
+      });
     }
   }
 
@@ -381,8 +682,10 @@ export interface RerouteOrBlockParams {
   score: number;
   reason: string;
   gaps: string[];
-  /** Full description-persisted kickback note, e.g. `[QC-FAIL] Score 2.0/10 (attempt 2/3). …`. */
+  /** Full description-persisted kickback note, e.g. `[QC-FAIL] Score 2.0/10 (attempt 2/5). …`. */
   kickbackNote: string;
+  /** Cap-alert sender. Injected so tests never reach a phone; defaults to notifyOwner. */
+  send?: (message: string) => boolean;
 }
 
 /**
@@ -400,6 +703,53 @@ export interface RerouteOrBlockParams {
  * path keeps its own distinctive audit text); the caller composes it from the
  * returned outcome so it states the move the task actually took.
  */
+/** A QC kickback note appended to the description is QC's OWN annotation, not a
+ * change to the task's persona inputs — but the migration-132
+ * `tasks_persona_input_revision` trigger bumps the revision on ANY description
+ * write. That self-inflicted bump invalidates the persona bundle the NEXT
+ * execution is measured against: on a live box (2026-09-21) the re-route
+ * rebuilt the bundle and then failed the re-run for
+ * `persona_bundle_revision_mismatch` against a revision the re-route itself had
+ * just created. Restore the revision the card carried before the kickback. A
+ * REAL input change still bumps it — a new title, audience, persona, or the
+ * assignee auto-route picks next — because none of those happen in here.
+ * Writing `persona_input_revision` alone fires no trigger. Only a write that
+ * actually lands is undone; a lost CAS race restores nothing. */
+async function withoutSelfInflictedPersonaBump<T>(taskId: string, write: () => Promise<T>): Promise<T> {
+  let before: number | null = null;
+  try {
+    before = queryOne<{ persona_input_revision: number }>(
+      'SELECT persona_input_revision FROM tasks WHERE id = ?', [taskId],
+    )?.persona_input_revision ?? null;
+  } catch { /* pre-migration DB has no such column — nothing to preserve */ }
+  const out = await write();
+  if (before !== null) {
+    try {
+      run('UPDATE tasks SET persona_input_revision = ? WHERE id = ?', [before, taskId]);
+    } catch (err) {
+      console.warn(`[QCScorer] persona_input_revision restore failed for ${taskId} (non-fatal):`, (err as Error).message);
+    }
+  }
+  return out;
+}
+
+
+/** Retire the deliverable rows of every attempt but the one that just ran.
+ *
+ * Called on a landed re-route, from BOTH re-route implementations, so the row
+ * count of a looping card stays the size of one attempt instead of growing by
+ * one attempt per failure. Nothing is deleted (execution-attempts.ts). */
+function tidyDeliverablesAfterReroute(taskId: string): void {
+  try {
+    const execution = latestExecution(taskId);
+    if (!execution) return;
+    const retired = supersedeStaleDeliverables(taskId, execution.id);
+    if (retired > 0) {
+      console.log(`[QCScorer] ${taskId}: retired ${retired} deliverable row(s) from earlier attempts (none deleted)`);
+    }
+  } catch { /* housekeeping must never fail a re-route */ }
+}
+
 export async function rerouteOrBlock(p: RerouteOrBlockParams): Promise<QCRerouteOutcome> {
   throwIfJobLeaseLost();
   if (p.attempts >= p.cap) {
@@ -420,8 +770,9 @@ export async function rerouteOrBlock(p: RerouteOrBlockParams): Promise<QCReroute
       gaps: p.gaps,
       needs: blockNeeds,
       audience: blockAudience,
-      blockReason: `Failed QC ${p.attempts}x, last score ${p.score.toFixed(1)}/10`,
+      blockReason: qcCapBlockReason({ attempts: p.attempts, score: p.score, gaps: p.gaps, reason: p.reason }),
       auditNote: p.kickbackNote,
+      capAlert: { attempts: p.attempts, cap: p.cap, score: p.score, gaps: p.gaps, reason: p.reason, send: p.send },
       timelineEventMessage: `[QC-BLOCKED] Task "${p.taskTitle}" blocked after ${p.attempts} QC-fail re-routes (cap: ${p.cap}). Audience: ${blockAudience}. ${blockAudience === 'SYSTEM' ? 'SYSTEM fix needed — escalating to master orchestrator.' : 'Human review required.'}`,
       escalationMessage: `[QC-SYSTEM-BLOCK] "${p.taskTitle}" failed QC ${p.attempts} time(s) due to a SYSTEM issue the executor cannot fix. Score: ${p.score.toFixed(1)}/10. Root cause gaps: ${p.gaps.join('; ')}. Action needed: ${blockNeeds}`,
       ownerNotifyMessage: `⚠️ A task is BLOCKED and needs your attention: "${p.taskTitle}".\nReason: ${p.gaps.length > 0 ? p.gaps.join('; ') : p.reason}\n\nThis task failed QC ${p.attempts} time(s) (score ${p.score.toFixed(1)}/10). Reply here to unblock or reassign.`,
@@ -463,7 +814,7 @@ export async function rerouteOrBlock(p: RerouteOrBlockParams): Promise<QCReroute
     ? `${p.taskDescription}\n\n${p.kickbackNote}`
     : p.kickbackNote;
   try {
-    await transition(p.taskId, 'backlog', {
+    await withoutSelfInflictedPersonaBump(p.taskId, () => transition(p.taskId, 'backlog', {
       actor: 'qc-scorer',
       reason: p.kickbackNote,
       expectedFrom: 'review',
@@ -471,7 +822,8 @@ export async function rerouteOrBlock(p: RerouteOrBlockParams): Promise<QCReroute
         description: rerouteDesc,
         qc_reroute_attempts: p.attempts,
       },
-    });
+    }));
+    tidyDeliverablesAfterReroute(p.taskId);
     return 'rerouted';
   } catch (txErr) {
     if (!(txErr instanceof TransitionError && txErr.code === 'CAS_CONFLICT')) {
@@ -1060,11 +1412,13 @@ export function runAFI14Guardrail(
 export const QC_PASS_THRESHOLD = 8.5;
 
 /**
- * Maximum number of times a task can be re-routed after QC failure before the
- * loop is capped and the task is set to `blocked` for human review.
- * Override with QC_MAX_REROUTES env var. Default: 3.
+ * Maximum number of times a task can FAIL QC before the loop is capped, the
+ * task is set to `blocked`, and the owner is alerted once. Default 5, override
+ * with the QC_MAX_REROUTES env var. Defined in `@/lib/qc-cap` (a leaf module
+ * `grading.ts` can import without dragging the scorer into the client bundle)
+ * and re-exported here so every existing importer is unchanged.
  */
-export const QC_MAX_REROUTES = parseInt(process.env.QC_MAX_REROUTES || '3', 10);
+export { QC_MAX_REROUTES };
 
 /**
  * FIX 21 (presentation rev2): how long a SYSTEM-blocked card stays muted after
@@ -1487,7 +1841,12 @@ export interface DeliverableManifestItem {
   title: string;
   path: string;
   type: 'image' | 'file' | 'url';
-  /** null when file is missing or unreadable */
+  /**
+   * Measured size in bytes, or null when the size is UNKNOWN — the file is
+   * missing/unreadable, or the deliverable is a URL whose content could not be
+   * retrieved. null is NEVER a measurement of zero: renderers must print it as
+   * UNKNOWN and gates must not treat it as empty.
+   */
   sizeBytes: number | null;
   /** Set for images: WxH string or null if not determinable */
   dimensions: string | null;
@@ -1513,6 +1872,344 @@ export interface DeliverableManifestItem {
    * and the sweep retries.
    */
   ioDeferred?: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// URL deliverable probing (URL-SIZE fix)
+// ---------------------------------------------------------------------------
+
+/**
+ * A URL deliverable used to reach the judge as `sizeBytes: null`, and the
+ * prompt renderer interpolated that straight into `EXISTS — ${sizeBytes} bytes`
+ * — so EVERY url deliverable was described to the judge as the literal string
+ * "EXISTS — null bytes". Good work was scored as an empty deliverable and the
+ * card burned its whole reroute budget on a measurement that was never taken.
+ *
+ * This probe establishes REAL evidence where it can, and says UNDETERMINED
+ * where it genuinely cannot. It never reports zero for "not measured": a size
+ * the system does not know is `null`, and `null` now renders as UNKNOWN (see
+ * `buildQCPrompt`) and is never treated as empty (see `evaluateCriteria`).
+ *
+ * Retrieval rules:
+ *   • docs.google.com document/spreadsheet links are rewritten to their public
+ *     plain-text/CSV export endpoint. Fetching the `/edit` URL would measure the
+ *     editor's JavaScript shell — a number that is identical for an empty doc
+ *     and a finished one, which is a FALSE measurement, worse than none.
+ *   • a login redirect or 401/403 is an auth wall: UNDETERMINED, named as such.
+ *   • a text/markdown/csv/json body is real content: measured, excerpted and
+ *     structurally counted exactly like a local text deliverable.
+ *   • an text/html body proves reachability but may be an application shell,
+ *     so it is measured AND labelled as such so the judge scores honestly.
+ *   • any network/timeout/DNS failure is UNDETERMINED, never zero.
+ *
+ * Fail-safe by construction: every failure path returns "unknown", so a QC run
+ * can never be made worse by the network. `QC_URL_PROBE=off` disables retrieval
+ * entirely (syntax validation still runs).
+ */
+const URL_PROBE_MAX_BYTES = 262_144;
+const URL_PROBE_TIMEOUT_MS = Number(process.env.QC_URL_PROBE_TIMEOUT_MS ?? 8000);
+
+/** Hosts that mean "you were bounced to a login page", not "here is the doc". */
+const AUTH_WALL_HOSTS = new Set([
+  'accounts.google.com',
+  'login.microsoftonline.com',
+  'login.live.com',
+  'appleid.apple.com',
+]);
+
+/** Content types whose body IS the deliverable's content. */
+const URL_CONTENT_TYPES = ['text/plain', 'text/markdown', 'text/csv', 'application/json', 'text/x-markdown'];
+
+export interface UrlProbe {
+  /** Syntactically a usable http(s) URL. */
+  valid: boolean;
+  /**
+   * Measured body size in bytes, or null when the content could not be
+   * retrieved. null means UNKNOWN — never "empty".
+   */
+  sizeBytes: number | null;
+  excerpt: string | null;
+  structuralChecks: TextStructuralChecks | null;
+  /** Always set — how the size was established, or why it could not be. */
+  contentNote: string;
+  invalidReason?: string;
+}
+
+/** True for hosts we refuse to fetch from QC (SSRF guard on agent-supplied URLs). */
+export function isPrivateProbeHost(hostname: string): boolean {
+  const h = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local') || h.endsWith('.internal')) return true;
+  if (h === '::1' || h === '::' || h.startsWith('fc') || h.startsWith('fd') || h.startsWith('fe80:')) return true;
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+  if (!m) return false;
+  const [a, b] = [Number(m[1]), Number(m[2])];
+  if (a === 10 || a === 127 || a === 0) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 169 && b === 254) return true; // link-local / cloud metadata
+  return false;
+}
+
+/**
+ * Rewrite a Google Docs/Sheets editor link to its plain-content export URL.
+ * Returns the input unchanged for anything else.
+ */
+export function googleExportUrl(href: string): string {
+  try {
+    const u = new URL(href);
+    if (u.hostname !== 'docs.google.com') return href;
+    const doc = /^\/document\/d\/([^/]+)/.exec(u.pathname);
+    if (doc) return `https://docs.google.com/document/d/${doc[1]}/export?format=txt`;
+    const sheet = /^\/spreadsheets\/d\/([^/]+)/.exec(u.pathname);
+    if (sheet) return `https://docs.google.com/spreadsheets/d/${sheet[1]}/export?format=csv`;
+    return href;
+  } catch {
+    return href;
+  }
+}
+
+/** Read at most `cap` bytes of a response body; never buffers more. */
+async function readBoundedBody(resp: Response, cap: number): Promise<{ buf: Buffer; truncated: boolean }> {
+  if (!resp.body) return { buf: Buffer.from(await resp.arrayBuffer()).subarray(0, cap), truncated: false };
+  const reader = resp.body.getReader();
+  const chunks: Buffer[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(Buffer.from(value));
+      total += value.byteLength;
+      if (total > cap) {
+        await reader.cancel().catch(() => {});
+        return { buf: Buffer.concat(chunks).subarray(0, cap), truncated: true };
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return { buf: Buffer.concat(chunks), truncated: false };
+}
+
+function unknownUrlProbe(note: string): UrlProbe {
+  return { valid: true, sizeBytes: null, excerpt: null, structuralChecks: null, contentNote: note };
+}
+
+export async function probeUrlDeliverable(href: string): Promise<UrlProbe> {
+  const trimmed = href.trim();
+  if (!isUsableUrl(trimmed)) {
+    return {
+      valid: false,
+      sizeBytes: null,
+      excerpt: null,
+      structuralChecks: null,
+      contentNote: 'not a valid http(s) URL',
+      invalidReason: `Not a valid http(s) URL: ${trimmed}`,
+    };
+  }
+  if ((process.env.QC_URL_PROBE ?? '').toLowerCase() === 'off') {
+    return unknownUrlProbe('URL content UNDETERMINED — retrieval disabled (QC_URL_PROBE=off); link is well-formed');
+  }
+
+  let target: URL;
+  try {
+    target = new URL(googleExportUrl(trimmed));
+  } catch {
+    return unknownUrlProbe('URL content UNDETERMINED — link could not be parsed for retrieval');
+  }
+  if (isPrivateProbeHost(target.hostname)) {
+    return unknownUrlProbe(`URL content UNDETERMINED — refused to fetch a private/loopback host (${target.hostname})`);
+  }
+
+  try {
+    const resp = await fetch(target.toString(), {
+      redirect: 'follow',
+      signal: AbortSignal.timeout(URL_PROBE_TIMEOUT_MS),
+      headers: { accept: 'text/plain, text/markdown, text/csv, application/json, text/html;q=0.5, */*;q=0.1' },
+    });
+
+    const finalHost = (() => {
+      try { return new URL(resp.url || target.toString()).hostname.toLowerCase(); } catch { return target.hostname; }
+    })();
+    if (AUTH_WALL_HOSTS.has(finalHost) && finalHost !== target.hostname) {
+      return unknownUrlProbe(
+        `URL content UNDETERMINED — retrieval was redirected to a sign-in page (${finalHost}); the link is well-formed and may hold real content that QC cannot read without credentials`,
+      );
+    }
+    if (resp.status === 401 || resp.status === 403 || resp.status === 407) {
+      return unknownUrlProbe(
+        `URL content UNDETERMINED — retrieval returned HTTP ${resp.status} (authentication required); the link is well-formed and may hold real content that QC cannot read without credentials`,
+      );
+    }
+    if (!resp.ok) {
+      return unknownUrlProbe(`URL content UNDETERMINED — retrieval returned HTTP ${resp.status}`);
+    }
+
+    // Bounded read. The URL comes from an agent, so an unbounded arrayBuffer()
+    // would let one deliverable pull an arbitrarily large body into the QC loop.
+    // A body over the cap still yields a HONEST size when the server declared
+    // one, and is reported as capped otherwise — never as a smaller number
+    // dressed up as the real measurement.
+    const declared = Number(resp.headers.get('content-length') ?? '');
+    const { buf, truncated } = await readBoundedBody(resp, URL_PROBE_MAX_BYTES);
+    const bodyBytes = truncated
+      ? (Number.isFinite(declared) && declared > 0 ? declared : null)
+      : buf.length;
+    const contentType = (resp.headers.get('content-type') ?? '').toLowerCase();
+
+    if (truncated) {
+      return {
+        valid: true,
+        sizeBytes: bodyBytes,
+        excerpt: buf.subarray(0, CONTENT_EXCERPT_MAX_BYTES).toString('utf8').slice(0, CONTENT_EXCERPT_MAX_CHARS),
+        structuralChecks: null,
+        contentNote: bodyBytes === null
+          ? `URL is reachable and returned more than the ${URL_PROBE_MAX_BYTES}-byte probe cap; exact size UNDETERMINED but the deliverable is demonstrably non-empty`
+          : `URL is reachable and declares ${bodyBytes} bytes (${contentType || 'unknown type'}) — body read was capped at ${URL_PROBE_MAX_BYTES} bytes`,
+      };
+    }
+    const isTextContent = URL_CONTENT_TYPES.some((t) => contentType.startsWith(t));
+    const isHtml = contentType.startsWith('text/html');
+
+    // Past the truncated branch the whole body is in hand, so the size is exact.
+    const measured = buf.length;
+    if (measured === 0) {
+      return unknownUrlProbe('URL content UNDETERMINED — retrieval succeeded but returned an empty body (may be an access or export limitation, not an empty deliverable)');
+    }
+
+    if (isTextContent) {
+      const text = buf.subarray(0, Math.min(measured, CONTENT_EXCERPT_MAX_BYTES)).toString('utf8');
+      return {
+        valid: true,
+        sizeBytes: measured,
+        excerpt: text.slice(0, CONTENT_EXCERPT_MAX_CHARS),
+        structuralChecks: {
+          lines: text.split('\n').length,
+          words: text.split(/\s+/).filter(Boolean).length,
+          nonEmptyChars: text.replace(/\s/g, '').length,
+        },
+        contentNote: `URL content retrieved and measured (${contentType || 'text'}) — ${measured} bytes of actual content`,
+      };
+    }
+
+    return {
+      valid: true,
+      sizeBytes: measured,
+      excerpt: null,
+      structuralChecks: null,
+      contentNote: isHtml
+        ? `URL is reachable and returned ${measured} bytes of HTML — this is the HTTP response body and may be an application shell rather than the document text, so treat the byte count as reachability evidence, NOT as a content measurement`
+        : `URL is reachable and returned ${measured} bytes (${contentType || 'unknown type'}) — content not text-extractable, scored on retrieval only`,
+    };
+  } catch (err) {
+    return unknownUrlProbe(
+      `URL content UNDETERMINED — retrieval failed (${(err as Error).message}); the link is well-formed and this is NOT evidence the deliverable is empty`,
+    );
+  }
+}
+
+/**
+ * Build one manifest item from a registered deliverable row.
+ *
+ * Single source of truth for BOTH manifest builders (the engine-owned deck lane
+ * and the generic review lane) — they carried byte-identical copies of this
+ * logic, so the url bug had to be fixed twice or it would drift back.
+ */
+export async function buildDeliverableManifestItem(
+  d: { title: string; path: string | null; deliverable_type: string },
+): Promise<DeliverableManifestItem> {
+  // URL deliverables carry a link in `path`, not a filesystem path — they must
+  // be validated and RETRIEVED as URLs, never stat()ed (a stat would always
+  // fail and report a genuine deliverable as "file not found").
+  if (d.deliverable_type === 'url') {
+    const href = d.path!.trim();
+    const probe = await probeUrlDeliverable(href);
+    return {
+      title: d.title,
+      path: href,
+      type: 'url',
+      sizeBytes: probe.sizeBytes,
+      dimensions: null,
+      valid: probe.valid,
+      invalidReason: probe.invalidReason,
+      contentExcerpt: probe.excerpt,
+      structuralChecks: probe.structuralChecks,
+      contentNote: probe.contentNote,
+    };
+  }
+
+  const rawPath = d.path!.replace(/^~/, process.env.HOME || '');
+  const ext = rawPath.slice(rawPath.lastIndexOf('.')).toLowerCase();
+  const isImage = IMAGE_EXTENSIONS.has(ext);
+
+  // FIX 28: a bundle-shaped deliverable (deck/guide/speech/audio/infographic/
+  // teleprompter names mirrored from build_deck.py's DELIVERABLES_REQUIRED) is
+  // re-verified BYTE-LEVEL — presence, symlink rejection, size floor, leading
+  // magic — so a right-sized decoy can never reach the judge as a valid
+  // manifest item. The evidence gate (collectCompletionEvidence) enforces the
+  // same probe at done; this makes the QC verdict certify the same bytes.
+  if (bundleReverifyEnabled() && !isImage && isBundleDeliverablePath(rawPath)) {
+    const verdict = verifyPresentationBundleDeliverable(rawPath);
+    if (!verdict.ok) {
+      return {
+        title: d.title,
+        path: rawPath,
+        type: 'file',
+        sizeBytes: verdict.sizeBytes ?? null,
+        dimensions: null,
+        valid: false,
+        invalidReason: verdict.reason ?? `bundle re-verification failed: ${rawPath}`,
+        contentNote: 'bundle re-verification refused this artifact before content scoring (magic-byte/size/symlink check)',
+      };
+    }
+    // Bundle-verified: manifest item is valid on the verified bytes; size-only
+    // members (md) still carry structural content via the text probe below only
+    // when they are text formats.
+  }
+
+  if (isImage) {
+    const probe = probeImageFile(rawPath);
+    if (!probe.valid) {
+      return {
+        title: d.title,
+        path: rawPath,
+        type: 'image',
+        sizeBytes: null,
+        dimensions: null,
+        valid: false,
+        invalidReason: probe.reason,
+      };
+    }
+    return {
+      title: d.title,
+      path: rawPath,
+      type: 'image',
+      sizeBytes: probe.sizeBytes,
+      dimensions: null, // dimensions require image decode; skip for now
+      valid: true,
+    };
+  }
+
+  // Non-image file: extract bounded content + structural checks (U082). The old
+  // code validated by byte count alone — a placeholder scored identically to a
+  // finished deliverable. probeTextFile reads a bounded excerpt and computes
+  // line/word/non-empty-char counts so the judge scores CONTENT, not existence.
+  // FIX 45: probe.ioDeferred (exists-but-unreadable) rides through to the
+  // manifest so the all-invalid branch can tell a deferral from a genuine fail.
+  const probe = probeTextFile(rawPath);
+  return {
+    title: d.title,
+    path: rawPath,
+    type: 'file',
+    sizeBytes: probe.valid ? probe.sizeBytes : null,
+    dimensions: null,
+    valid: probe.valid,
+    invalidReason: probe.invalidReason,
+    contentExcerpt: probe.excerpt,
+    structuralChecks: probe.structuralChecks,
+    contentNote: probe.contentNote,
+    ioDeferred: probe.ioDeferred === true ? true : undefined,
+  };
 }
 
 export interface QCScorerInput {
@@ -1541,6 +2238,14 @@ export interface QCScorerInput {
    * "brief completeness" to "deliverable fulfillment" mode.
    */
   deliverableManifest?: DeliverableManifestItem[] | null;
+  /**
+   * A40: the blueprint sections this task's persona bundle declares
+   * (`blueprintSections.required`), rendered into the artifact-fulfillment
+   * prompt so the judge's adherence verdict compares the artifact against the
+   * SAME contract the dispatch and load evidence name. Empty/absent renders
+   * "none declared" and never fails the prompt.
+   */
+  blueprintSections?: string[] | null;
 }
 
 export interface QCResult {
@@ -1596,13 +2301,27 @@ export interface QCResult {
   judgeEndpoint?: string;
   /** Verbatim, human-readable statement of what actually went wrong. */
   judgeFailureDetail?: string;
+  /** True when EVERY judge tried failed at the MODEL level (404/410/retired/unknown) — the card heals once a working judge exists. */
+  judgeModelGone?: boolean;
+  /** Set when the configured judge's model was gone and the box's default model judged instead. */
+  judgeFallback?: { from: string; to: string };
+  /**
+   * A40: the judge's CONTENT-ADHERENCE verdict from the SAME reply as the
+   * score — does the artifact follow the declared brief/persona instead of
+   * merely existing with the right identity? true/false when the judge
+   * answered the adherence question; null/absent when it did not (heuristic
+   * paths, no manifest, non-conforming judge reply) — and null NEVER blocks,
+   * mirroring the U117 comms gate's SKIP-never-blocks doctrine. false refuses
+   * the done move at the lifecycle door and is recorded on task_qc_results.
+   */
+  contentAdherence?: boolean | null;
 }
 
 /**
  * The QC judge's completion budget.
  *
  * THIS NUMBER CAUSED A SIX-DAY OUTAGE. It was 300. The configured judge
- * (`deepseek-v4-flash:0731-cloud`) is a REASONING model: its reply carries a hidden
+ * (`deepseek-v4.1-flash:cloud`) is a REASONING model: its reply carries a hidden
  * `reasoning` field alongside `content`, and reasoning is billed against the
  * SAME completion budget. At 300 tokens the reasoning ate the entire budget and
  * `content` came back EMPTY — which the code then reported as "provider-down".
@@ -1652,7 +2371,7 @@ export type JudgeFailureKind = 'unreachable' | 'empty-response' | 'malformed-res
 
 type JudgeOutcome =
   | { ok: true; result: QCResult }
-  | { ok: false; kind: JudgeFailureKind; detail: string };
+  | { ok: false; kind: JudgeFailureKind; detail: string; modelGone?: boolean };
 
 /** Map the true failure kind onto the heuristic reason carried in QCResult. */
 function judgeKindToHeuristicReason(kind: JudgeFailureKind): NonNullable<QCResult['heuristicReason']> {
@@ -1753,7 +2472,7 @@ function heuristicScore(input: QCScorerInput): QCResult {
  * When a per-department QC agent is available, its identity is used as the
  * QC persona so the model scores from that specialist's perspective.
  */
-function buildQCPrompt(input: QCScorerInput): string {
+export function buildQCPrompt(input: QCScorerInput): string {
   const agentIdentity = input.qcAgentName
     ? `You are ${input.qcAgentName}, the QC Specialist for the ${input.departmentSlug ?? 'General'} department.`
     : `You are a QC agent scoring a completed task for the ${input.departmentSlug ?? 'General'} department.`;
@@ -1762,8 +2481,16 @@ function buildQCPrompt(input: QCScorerInput): string {
   const manifest = input.deliverableManifest;
   if (manifest && manifest.length > 0) {
     const manifestLines = manifest.map((d, i) => {
+      // A size the system does not know must read as UNKNOWN — never as a
+      // number, and never as the literal "null bytes". Interpolating a null
+      // sizeBytes described every url deliverable to the judge as "EXISTS —
+      // null bytes", which read as empty and failed finished work.
+      const sizeLabel =
+        d.sizeBytes === null
+          ? 'SIZE UNKNOWN (not measured — this is NOT a measurement of zero and is NOT evidence the deliverable is empty)'
+          : `${d.sizeBytes} bytes`;
       const status = d.valid
-        ? `EXISTS — ${d.sizeBytes} bytes${d.dimensions ? `, ${d.dimensions}` : ''}`
+        ? `EXISTS — ${sizeLabel}${d.dimensions ? `, ${d.dimensions}` : ''}`
         : `MISSING/INVALID — ${d.invalidReason ?? 'unknown reason'}`;
       let line = `  ${i + 1}. "${d.title}" [${d.type}] path=${d.path} → ${status}`;
       // U082: surface a bounded content excerpt + deterministic structural
@@ -1787,6 +2514,13 @@ function buildQCPrompt(input: QCScorerInput): string {
       ? `**SOP Steps:**\n${input.sopSteps}`
       : '**No SOP — score against the request only.**';
 
+    // A40: the same declared contract the dispatch hands the producer and the
+    // load evidence measures. Rendered verbatim so the adherence verdict below
+    // is against THIS task's declared blueprint, not a guess about "the brief".
+    const blueprintSection = input.blueprintSections?.length
+      ? `**Declared Blueprint Sections (this task's persona bundle requires these):**\n${input.blueprintSections.map((s) => `  - ${s}`).join('\n')}`
+      : '**Declared Blueprint Sections:** none declared for this task — judge adherence against the request above.**';
+
     return `${agentIdentity}
 
 **ARTIFACT-FULFILLMENT QC MODE**
@@ -1797,6 +2531,8 @@ Score whether the delivered artifact(s) satisfy the request. Do NOT penalise a t
 
 **Deliverables Manifest:**
 ${manifestLines}
+
+${blueprintSection}
 
 ${sopSection}
 
@@ -1814,6 +2550,23 @@ ${sopSection}
    chars, or whose excerpt is a placeholder / template / truncated stub that does
    not address the request, is NOT a finished deliverable — score it low (≤4.0)
    and name the gap, even though the file exists and is non-empty.
+5. "SIZE UNKNOWN" means the system could not measure this deliverable — most
+   often a URL whose content needs credentials QC does not hold. It is NOT a
+   size of zero and NOT evidence of an empty deliverable. NEVER score a
+   deliverable as missing, empty or unfinished because its size is UNKNOWN, and
+   never list "unknown size" or "empty file" as a gap for such an item. A
+   deliverable marked EXISTS with an UNKNOWN size is present; judge it on its
+   note, excerpt and title, and if there is genuinely nothing to judge, say the
+   content could not be verified rather than asserting it is empty.
+6. A deliverable is never missing or empty merely because it is a link rather
+   than a file path. [url] items are delivered artifacts.
+7. CONTENT ADHERENCE — answer this honestly and independently of the score:
+   does the artifact's actual content follow the request and the declared
+   blueprint sections above (right audience/voice/method, required sections
+   present), rather than merely existing under the right filename? Report it
+   as "content_adherence". An artifact whose content ignores or contradicts
+   the brief is NOT adherent even if well-formed; use null ONLY when you
+   genuinely cannot see the content (every excerpt UNKNOWN/binary).
 
 **Gate:** ≥8.5 = PASS (auto-approve), <8.5 = RETURN (kick back for rework).
 
@@ -1821,6 +2574,7 @@ Reply in this EXACT JSON format (no other text):
 {
   "score": <number 1.0–10.0>,
   "pass": <boolean>,
+  "content_adherence": <true | false | null>,
   "reason": "<1–2 sentence summary>",
   "gaps": ["<specific gap 1>", "<specific gap 2>"]
 }
@@ -1881,7 +2635,7 @@ If score <8.5, "gaps" must list specific, actionable rework items.`;
  * sanctioned QC-judge provider. Matches the registry shape `ollama-cloud/<m>`,
  * the legacy `ollama/<m>:cloud` shape, a bare `<m>:cloud` tag, AND the LIVE
  * fleet tag `<m>:0731-cloud` (the 2026-08-06 fleet build whose id ends in the
- * `-cloud` suffix, e.g. `deepseek-v4-flash:0731-cloud`). The legacy check was
+ * `-cloud` suffix, e.g. `deepseek-v4.1-flash:cloud`). The legacy check was
  * `id.includes(':cloud')`, which silently rejected the 0731 build — the very
  * Error-13 catalog-truth class: the operator names a model the gate does not
  * recognize. Mirrors model-selector.tierOf()'s tier-1 detection.
@@ -1895,7 +2649,7 @@ export function isOllamaCloudModel(modelId: string | null | undefined): boolean 
   const id = modelId.trim().toLowerCase();
   if (id.startsWith('ollama-cloud/')) return true;
   // Legacy `:cloud` tag (deepseek-v4-flash:cloud) OR the live `-cloud` suffix
-  // (deepseek-v4-flash:0731-cloud). The suffix match is the Error-13 fix: the
+  // (deepseek-v4.1-flash:cloud). The suffix match is the Error-13 fix: the
   // fleet now runs `:0731-cloud`, which carries `-cloud` but not `:cloud`.
   return id.includes(':cloud') || id.endsWith('-cloud');
 }
@@ -1909,7 +2663,7 @@ export function isOllamaCloudModel(modelId: string | null | undefined): boolean 
  */
 function resolveClientJudgeModel(input: QCScorerInput): string | null {
   for (const c of [input.qcAgentModel, process.env.QC_JUDGE_MODEL]) {
-    if (c && isOllamaCloudModel(c)) return c.trim();
+    if (c && isOllamaCloudModel(successorModelId(c))) return successorModelId(c.trim());
   }
   return null;
 }
@@ -2084,6 +2838,71 @@ function firstActiveTextModel(providerSlug: string): { model_id: string } | null
 }
 
 /**
+ * Did the judge fail because the MODEL is gone (HTTP 404/410, "retired",
+ * "model not found", "unknown model") rather than the provider being down?
+ * Ollama Cloud answers 410 for a retired build. Retrying that model can never
+ * succeed, so the scorer falls back to the box's default model instead.
+ */
+export function isModelLevelJudgeError(err: unknown): boolean {
+  const e = err as { status?: number; message?: string } | null;
+  if (e?.status === 404 || e?.status === 410) return true;
+  return /failed: (404|410)\b|retired|model[^.]{0,40}not found|unknown model|no such model/i.test(String(e?.message ?? ''));
+}
+
+/**
+ * Judges to try, in order, after the configured one died at the model level:
+ * the box's own default model chain (openclaw.json defaults primary, main
+ * agent, defaults fallbacks). Same sovereignty rules as the primary pick: a
+ * client-owned provider whose key resolves here (never an operator/shared
+ * key), never the failed model again, never the WRITER model.
+ */
+export function judgeFallbackCandidates(failed: JudgeSelection, input: QCScorerInput): JudgeSelection[] {
+  const writer = input.writerModel ? nativeModelId(input.writerModel.trim()).toLowerCase() : null;
+  const failedNative = nativeModelId(failed.modelId).toLowerCase();
+  const out: JudgeSelection[] = [];
+  for (const raw of resolveBoxDefaultModelChain()) {
+    const i = raw.indexOf('/');
+    let slug = i > 0 ? raw.slice(0, i) : 'ollama-cloud';
+    let rest = i > 0 ? raw.slice(i + 1) : raw;
+    if (slug === 'ollama') slug = isOllamaCloudModel(rest) ? 'ollama-cloud' : 'ollama-local';
+    else if (!JUDGE_PROVIDER_PRIORITY.includes(slug)) {
+      // Router-prefixed default (e.g. `9router/oc-glm5.3-flash-max/glm-5.3-flash:cloud`):
+      // not a CC connector, but a `:cloud` leaf is an Ollama Cloud model the
+      // client's OWN Ollama key can call directly.
+      const leaf = raw.slice(raw.lastIndexOf('/') + 1);
+      if (isOllamaCloudModel(leaf)) { slug = 'ollama-cloud'; rest = leaf; }
+    }
+    if (!JUDGE_PROVIDER_PRIORITY.includes(slug)) continue;
+    const full = `${slug}/${rest}`;
+    if (rest.toLowerCase() === failedNative) continue;
+    if (writer && writer === rest.toLowerCase()) continue;
+    if (out.some((c) => c.modelId === full)) continue;
+    const provider = getProvider(slug);
+    if (!provider || typeof provider.chatCompletion !== 'function') continue;
+    const keyRes = resolveProviderApiKey(provider);
+    if (!('found' in keyRes) || !keyRes.found || !keyRes.value) continue;
+    out.push({ modelId: full, provider: provider.slug, apiKey: keyRes.value });
+  }
+  return out;
+}
+
+/** One deduped (per from->to per 24h) event + log line when the fallback judge is used. Never throws, never messages the owner. */
+function recordJudgeFallback(taskId: string, from: string, to: string, why: string): void {
+  console.warn(`[QCScorer] QC judge "${from}" is gone (${why}) — judging on the box default model "${to}" instead`);
+  try {
+    const marker = `[QC-JUDGE-FALLBACK] ${from} -> ${to}`;
+    const seen = queryOne<{ one: number }>(
+      `SELECT 1 AS one FROM events WHERE type = 'qc_judge_fallback' AND message LIKE ? AND created_at >= datetime('now', '-1 day') LIMIT 1`,
+      [`${marker}%`],
+    );
+    if (seen) return;
+    run(`INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, 'qc_judge_fallback', ?, ?, ?)`, [
+      uuidv4(), taskId, `${marker} — configured QC judge model failed at the model level (${why.slice(0, 200)}); QC now runs on the box's own default model. Update QC_JUDGE_MODEL to silence this.`, new Date().toISOString(),
+    ]);
+  } catch { /* observability only */ }
+}
+
+/**
  * Score the task with the selected judge. FIX 14: the judge may run on ANY
  * client-owned provider connector (OpenRouter, OpenAI, Z.AI, Moonshot,
  * MiniMax, Google, xAI, Xiaomi, Ollama Local — or Ollama Cloud, which remains
@@ -2137,7 +2956,7 @@ async function llmScoreViaJudge(
       `the judge at ${endpoint} never answered: ${(err as Error).message} ` +
       `(model "${modelId}"). The provider is genuinely UNREACHABLE.`;
     console.warn(`[QCScorer] QC judge UNREACHABLE: ${detail}`);
-    return { ok: false, kind: 'unreachable', detail };
+    return { ok: false, kind: 'unreachable', detail, modelGone: isModelLevelJudgeError(err) };
   }
 
   // Past this line the provider ANSWERED. Whatever else goes wrong, it is NOT
@@ -2174,7 +2993,7 @@ async function llmScoreViaJudge(
   const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
 
   // ── MALFORMED RESPONSE — never silently swallowed ─────────────────────────
-  let parsed: { score: number; pass: boolean; reason: string; gaps: string[] };
+  let parsed: { score: number; pass: boolean; reason: string; gaps: string[]; content_adherence?: boolean | null };
   try {
     parsed = JSON.parse(cleaned) as typeof parsed;
   } catch (err) {
@@ -2206,6 +3025,11 @@ async function llmScoreViaJudge(
       reason: typeof parsed.reason === 'string' ? `[model-stated] ${parsed.reason}` : `Score: ${score.toFixed(1)}/10`,
       gaps: Array.isArray(parsed.gaps) ? parsed.gaps.filter((g) => typeof g === 'string') : [],
       scoringPath: 'llm',
+      // A40: carry the judge's adherence verdict off the SAME reply. Only an
+      // explicit boolean counts — a missing/`null`/malformed field reads as
+      // "not judged" (null) and never blocks a done move by itself.
+      contentAdherence:
+        parsed.content_adherence === true ? true : parsed.content_adherence === false ? false : null,
       // FIX 14: record WHICH judge actually ran — the widened selection means
       // the provider is no longer a constant, so every llm-path verdict carries
       // its judge identity for the board event and the escalation surfaces.
@@ -2336,15 +3160,34 @@ export async function scoreTaskForQC(input: QCScorerInput): Promise<QCResult> {
   }
 
   let failure: { kind: JudgeFailureKind; detail: string };
+  let failedJudge: JudgeSelection = judge;
+  let judgeModelGone = false;
   if (simulateProviderDown) {
     failure = {
       kind: 'unreachable',
       detail: `QC_SIMULATE_PROVIDER_DOWN is set — a genuine provider outage is being simulated for judge "${judgeModel}".`,
     };
   } else {
-    const outcome = await llmScoreViaJudge(prompt, judge);
+    let outcome = await llmScoreViaJudge(prompt, judge);
     if (outcome.ok) return outcome.result;
+    // Configured judge's MODEL is gone (retired / unknown): walk the box's own
+    // default model chain. Any other failure keeps today's defer path.
+    if (outcome.modelGone) {
+      const firstDetail = outcome.detail;
+      for (const cand of judgeFallbackCandidates(judge, input)) {
+        const o = await llmScoreViaJudge(prompt, cand);
+        if (o.ok) {
+          o.result.judgeFallback = { from: judge.modelId, to: cand.modelId };
+          recordJudgeFallback(input.taskId, judge.modelId, cand.modelId, firstDetail);
+          return o.result;
+        }
+        outcome = o;
+        failedJudge = cand;
+        if (!o.modelGone) break;
+      }
+    }
     failure = { kind: outcome.kind, detail: outcome.detail };
+    judgeModelGone = !!outcome.modelGone;
   }
 
   // Judge IS configured and a key is present, but the call produced no verdict:
@@ -2353,10 +3196,11 @@ export async function scoreTaskForQC(input: QCScorerInput): Promise<QCResult> {
   // report what actually happened rather than a guessed category.
   const heuristic = heuristicScore(input);
   heuristic.heuristicReason = judgeKindToHeuristicReason(failure.kind);
-  heuristic.judgeModel = judgeModel;
-  heuristic.judgeEndpoint = judge.provider === 'ollama-cloud'
+  heuristic.judgeModel = failedJudge.modelId;
+  heuristic.judgeModelGone = judgeModelGone;
+  heuristic.judgeEndpoint = failedJudge.provider === 'ollama-cloud'
     ? getOllamaCloudChatEndpoint()
-    : `${judge.provider} connector (${judgeModel})`;
+    : `${failedJudge.provider} connector (${failedJudge.modelId})`;
   heuristic.judgeFailureDetail = failure.detail;
   // heuristicScore() hard-codes "no LLM API key configured" in its reason — TRUE
   // on the no-key path, FALSE here: a client judge IS configured, it just failed.
@@ -2646,18 +3490,364 @@ export interface AcceptanceCriterion {
  * This function is deterministic (no LLM call) so it can be called at task
  * creation time without latency cost.
  */
+/**
+ * KAN-003: strip machine-written audit annotations, provenance trailers,
+ * prior-state history, URLs and filesystem paths from task text BEFORE
+ * image/deck detection.
+ *
+ * Every QC kickback, cap block and stale-sweep handback is PREPENDED to
+ * `tasks.description`, so after a few loops the description is mostly audit
+ * history. Raw text then matches the image/deck regexes on words the owner
+ * never wrote — `valid_image` / `language_match` inside a pasted QC gap list,
+ * `concept deck at <path>` inside a PRIOR-STATE already-produced note — and
+ * derive mints render gates (AF-LANG / AF-NUM / AF-SPELL / pipeline /
+ * coverage) for a markdown-only card. Those gates fail closed (2.8/10 →
+ * QC-UNROUTEABLE → blocked) on work that was never a render.
+ *
+ * Detection text only — the stored description is untouched.
+ *
+ * ponytail: marker list is EN-only and audit-format-specific; if briefs gain
+ * new machine prefixes, add them here — or split stored provenance/history
+ * into their own columns so detection never sees them.
+ */
+export function cleanDetectionText(title: string, description?: string | null): string {
+  const combined = [title, description].filter(Boolean).join('\n');
+  // QR-007: a handback field line (Problem/Tried/Needs/Suggested dept) is
+  // machine-written ONLY underneath its machine header, and every writer
+  // emits the two together, header first:
+  //   qc-scorer.ts `runQCOnReview`  `[QC-NO-ARTIFACT HANDBACK] <ts>` + fields
+  //   return-to-orchestrator/route.ts `POST`  `[HANDBACK #n/m] <ts>` + fields
+  //   stale-task-sweep.ts `returnToOrchestrator`  `[STALE-RETURN] <ts>` + fields
+  // Dropping those four words on sight also deleted OWNER prose ("Needs:
+  // update pricing $997/mo"), which then vanished from the AF-NUM/AF-SPELL
+  // spec copy and from gate detection. So the field run is only stripped
+  // while it is inside a machine block: header seen, and no blank / `---` /
+  // owner line since. A line with no header above it survives.
+  //
+  // QR-016 / REVR-030 F2: block membership is NOT "any number of field-shaped
+  // lines". Every real writer emits a CLOSED, ORDERED field set — Problem,
+  // Tried, Needs, Suggested dept — each at most once, in that order:
+  //   qc-scorer.ts `structuredHandbackNote`   Problem / Tried / Needs / Suggested dept
+  //   return-to-orchestrator/route.ts `POST`  Problem / Tried / Needs / Suggested dept
+  //   stale-task-sweep.ts `returnToOrchestrator`  Problem / Tried / Needs
+  // So membership requires the canonical order with no repeat. An owner line
+  // that merely LOOKS like a field after an unterminated run ("Needs: a real
+  // image please.") either repeats a field already seen or breaks the order,
+  // and it survives. Previously the reader judged only the NEXT line's shape,
+  // so such a line was deleted and its render demand was lost (tip render 0
+  // where the base rendered 5).
+  const MACHINE_BLOCK_HEADER = /^\[(STALE-RETURN|QC-[^\]]*|RETURN|HANDBACK)/;
+  const MACHINE_FIELD_ORDER = ['Problem:', 'Tried:', 'Needs:', 'Suggested dept:'];
+  const machineFieldIndex = (t: string): number => {
+    const low = t.toLowerCase();
+    return MACHINE_FIELD_ORDER.findIndex((f) => low.startsWith(f.toLowerCase()));
+  };
+  let inMachineBlock = false;
+  let lastFieldIndex = -1;
+  const lines = combined.split('\n').filter((line) => {
+    const t = line.trim();
+    if (!t) {
+      inMachineBlock = false;
+      return false;
+    }
+    if (MACHINE_BLOCK_HEADER.test(t)) {
+      inMachineBlock = true;
+      lastFieldIndex = -1;
+      return false;
+    }
+    if (inMachineBlock) {
+      const idx = machineFieldIndex(t);
+      if (idx > lastFieldIndex) {
+        lastFieldIndex = idx;
+        return false;
+      }
+      inMachineBlock = false;
+    }
+    if (/^---\s*$/.test(t)) return false;
+    return true;
+  });
+  let text = lines.join('\n');
+  // Inline audit verdicts appended mid-line by the kickback / cap-block paths
+  // (append, not newline-bracket, so the line filter above never sees them).
+  // Gap text pasted here carries standalone trigger words the owner never
+  // wrote ("File is a valid image ...", "Deck pipeline records ...").
+  text = text.replace(/\[(QC-FAIL|QC-BLOCKED|QC-CAP-ALERT)[^\n]*/gi, ' ');
+  text = text.replace(/QC-UNROUTEABLE:[^.]*\./gi, ' ');
+  text = text.replace(/Failed QC \d+x[^.]*\./gi, ' ');
+  text = text.replace(/\bscore \d+(\.\d+)?\/10[^.]*\./gi, ' ');
+  // URLs + path tokens FIRST: extensions inside paths (deck.pptx) must not
+  // count as types, and stripping them first lets the provenance sentence
+  // patterns below match cleanly ("PRIOR STATE: concept deck at <path>
+  // already produced" would otherwise leave "pptx already produced" behind
+  // after the sentence cut at the path's first period).
+  text = text.replace(/https?:\/\/\S+/gi, ' ');
+  // QZ-001: which slash tokens are owner PROSE? QR-013 (9b3cbcf01) split every
+  // single-slash token that was not obviously a path, so the halves of a mime
+  // type or of a relative path reached the detector regexes below:
+  // `image/png`, `outputs/deck`, `notes/slides` mint image/deck render gates
+  // for a card whose owner named a transfer format or a folder (REVL-016-D1) —
+  // measured 10.0 PASS -> 6.3/4.2 FAIL on legitimately delivered .md work.
+  //
+  // The measured class boundary is NOT the slash. Of every slash token the W36
+  // lenses recorded, the only prose class whose halves are gate-bearing is the
+  // resolution class (`1080/4k`, `hd/4k`, `hd/4k/render`); every other slash
+  // prose (`and/or`, `N/A`, `24/7`) has gate-free halves, so splitting it and
+  // dropping it derive byte-identical criteria (REVR-020 41-token matrix). So a
+  // slash token is kept as prose only when it reads as a resolution phrase, and
+  // dropped otherwise — which is gate-neutral for the prose it removes and is
+  // the fix for the mime / relative-path class:
+  //   · path shapes always drop: leading `/`, drive prefix, a `//` run, a `.`
+  //     or `..` segment, an extension-bearing segment (`deck.pptx`,
+  //     `shots/1080/hero.png`), a dotted path/host segment (`cdn.example.com`)
+  //   · single slash: admit on ONE resolution word (`1080/4k.v2`, `1.5x/1080`,
+  //     `v1.2/1080`, `x.com/4k`) — the dot no longer disqualifies prose
+  //     (REVR-020-R1: it made slash prose 10.0 PASS where its spaced-out
+  //     control scored 6.7 FAIL)
+  //   · multi-slash chain: admit on TWO (`hd/4k/render`) — a lone resolution
+  //     word inside a longer chain (`a/b/c/1080`) is path scaffolding
+  // Measured scope of the symmetry this buys, stated precisely because the
+  // broader claim is false: WITHIN the resolution-prose class the slash form and
+  // its spaced-out control derive IDENTICAL criteria (28 of 41 fuzz tokens,
+  // including `1080/4k`, `1080/4k.v2`, `1.5x/1080`, `v1.2/1080`, `x.com/4k`,
+  // `hd/4k/render`, `render/1080`) — so for prose, a slash neither creates nor
+  // deletes a render gate. For path and mime shapes the drop is DELIBERATE, and
+  // the two forms are not the same input written two ways: `a/deck` drops the
+  // deck gates that the spaced sentence "Deliver a deck asset." mints, and
+  // `deck.pptx/1080` drops the gates "Deliver deck.pptx 1080 asset." mints — the
+  // spaced forms name a deck in prose while the slash forms name a PATH. Those
+  // 13 divergences are the requirement, not a residue.
+  const RESOLUTION_WORD = /\b(high.?quality|large|high.?res|hd|4k|1080|resolution)\b/gi;
+  const PATH_SEGMENT = /^\.{1,2}$|\.{2,}|\.(png|jpe?g|gif|svg|webp|bmp|tiff?|pdf|pptx?|docx?|xlsx?|key|md|txt|csv|mp[34]|mov|wav|zip|json|ya?ml|html?)$/i;
+  text = text
+    .split(/\s+/)
+    .flatMap((tok) => {
+      if (!tok) return [];
+      if (!tok.includes('/')) return [tok];
+      const probe = tok.replace(/[.,;:!?)"']+$/, '');
+      if (!probe.includes('/')) return [tok];
+      const slashes = (probe.match(/\//g) ?? []).length;
+      const segments = probe.split('/').filter(Boolean);
+      const pathShaped =
+        probe.startsWith('/') ||
+        /^[A-Za-z]:\//.test(probe) ||
+        probe.includes('//') ||
+        segments.some((s) => PATH_SEGMENT.test(s));
+      const resolutionWords = (segments.join(' ').match(RESOLUTION_WORD) ?? []).length;
+      if (pathShaped || resolutionWords < (slashes > 1 ? 2 : 1)) return [];
+      const parts = segments.length > 0 ? segments : [probe];
+      const tail = tok.slice(probe.length); // trailing punctuation, reattached
+      parts[parts.length - 1] += tail;
+      return parts;
+    })
+    .join(' ');
+  // Prior-state history is provenance, never the current brief.
+  text = text.replace(/\bPRIOR STATE:[^.]*\./gi, ' ');
+  text = text.replace(/\bArtifacts?\s+already\s+(produced|delivered|shipped|completed|attached)[^.]*\./gi, ' ');
+  // Rework-reuse trailer appended by the kickback path (`reuseInstruction`,
+  // qc-scorer.ts:285) — names files the last attempt left, not new render
+  // intent:
+  //   "\n\nAlready delivered and STILL VALID[ —|-] do NOT regenerate: <paths>. ..."
+  //
+  // QR-016 / REVR-030 F1: the strip is anchored to the TRAILER SHAPE, never to
+  // the words alone. The previous pattern was /\bAlready\s+(delivered|produced|
+  // shipped|completed|attached)\b[^.]*\./i, which deleted OWNER sentences that
+  // open the same way ("Already delivered a banner last week. Please update
+  // it.") along with the render demand they carried — tip render 0 against the
+  // base's 5/6/deck-2 on identical inputs. The trailer's own continuation
+  // ("Re-register each one ...") goes with it; the strip stops at the sentence
+  // that ends the instruction, so owner prose that follows survives.
+  //
+  // REVL-026-R2-F1: FAIL-OPEN at end of input. The `|$` alternative in the
+  // original pattern let an UNTERMINATED occurrence swallow every character to
+  // the end of the description — including a real render demand written after
+  // it. Measured at the tip: "…STILL VALID - do NOT regenerate: /out/a.png.
+  // Please add a 4k banner image." scored render 0 (demand eaten); the
+  // terminated writer shape scored 6. The strip REQUIRES the declared trailer
+  // terminator now, so it matches only the trailer the in-repo writer
+  // (`reuseInstruction`, above) always emits in full. Unterminated owner prose
+  // survives. Dropping the `|$` alternative was NOT the whole fix: the
+  // `[\s\S]*?` span still ran from an opener to the NEXT terminator, so OWNER
+  // prose sitting between an opener and a later terminator was deleted anyway
+  // (REVL-026-R2-F2). Measured at the tip: an opener whose span reached a later
+  // terminator collapsed 223 chars to 18 with the demand gone, and a SINGLE
+  // opener sufficed — a second opener was never required.
+  //
+  // F-R4-1 / REVS-027 F-A: span is the writer's own block, byte-contiguous
+  // with what `reuseInstruction` (above) appends, as that text reaches
+  // this point in the pipeline: opener sentence (`Already delivered and
+  // STILL VALID — do NOT regenerate:`), then the writer's continuation —
+  // `Re-register each one for [this] attempt (POST [/api/tasks/<id>/
+  // deliverables] with the same path) so it counts [as] this attempt's
+  // output. Produce ONLY [what] the gaps above name.` — in writer order,
+  // with NO content wildcard between parts (whitespace runs only). The
+  // continuation's absolute paths have already been removed by the
+  // URL/path-token stage above, so the text
+  // here carries `(POST with the same path)`; the literal path form stays
+  // admitted in case that stage ever stops stripping it.
+  // Every part must appear in writer order, so nothing except a tail the
+  // writer itself emitted can be consumed (over-retain only): a bare
+  // "Re-register each one", a truncated continuation, a lone terminator,
+  // an unterminated opener, and a demand sitting between opener and
+  // terminator each leave every character in place. The genuine writer
+  // block still strips whole, and two concatenated genuine blocks strip
+  // both.
+  text = text.replace(
+    /\bAlready\s+(delivered|produced|shipped|completed|attached)(?:\s+and)?\s+STILL\s+VALID\b\s+[\u2014\u2013-]\s+do\s+NOT\s+regenerate:\s+Re-register\s+each\s+one\s+for(?:\s+this)?\s+attempt\s+\(POST\s+(?:\/api\/tasks\/[^)\s]+\/deliverables\s+)?with\s+the\s+same\s+path\)\s+so\s+it\s+counts(?:\s+as)?\s+(?:this\s+)?attempt['\u2019]s\s+output\.\s+Produce\s+ONLY(?:\s+what)?\s+the\s+gaps\s+above\s+name\./gi,
+    ' ',
+  );
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+// ---------------------------------------------------------------------------
+// ART-001: select render gates from the SHIPPED artifact type, not the brief.
+//
+// deriveAcceptanceCriteria mints gates from request TEXT. Text lies: audit
+// history, prior-state notes, paths and aspirational words ("deck", "slide",
+// "render") mint valid_image / vision_match / AF-LANG / AF-NUM / AF-SPELL /
+// pipeline_complete / coverage for a card whose only artifact is a .md
+// concepts doc. Those gates fail closed on markdown, so the card burns its
+// reroute budget on checks its artifact type can never answer (the
+// badge-journey-week1-concepts shape: 2.8/10 QC-UNROUTEABLE loop).
+//
+// criteriaForManifest narrows text-derived criteria to the gates the manifest
+// can answer: image-class gates stay only with a valid image item, deck-class
+// gates only with a valid deck file (.pptx/.pdf/.key). Baseline
+// (deliverable_registered) + existence always stay — a markdown artifact draws
+// markdown-appropriate checks and keeps SOP-rubric content review (Mode A),
+// never vision/slide-count gates. Genuine failures survive: no deck file on a
+// deck card still fails content review, evidence, and cert gates; stripping a
+// gate the artifact cannot answer is not passing it.
+//
+// ponytail: .pdf counts as deck-shaped (matches the AF-I14 convention); a pdf
+// REPORT on a slide-mentioning card keeps deck gates. Split report-pdf from
+// deck-pdf when a case proves it matters.
+const IMAGE_GATE_TYPES: ReadonlySet<string> = new Set([
+  'valid_image',
+  'min_resolution',
+  'vision_match',
+  'language_match',
+  'numeric_fidelity',
+  'spelling_fidelity',
+]);
+const DECK_GATE_TYPES: ReadonlySet<string> = new Set(['pipeline_complete', 'coverage']);
+
+/** True when the manifest holds a valid image artifact. File-local: the only
+ * callers are the fail-closed guards in criteriaForManifest below. */
+function manifestHasImageArtifact(manifest: DeliverableManifestItem[]): boolean {
+  return manifest.some((m) => m.valid && m.type === 'image');
+}
+
+/** True when the manifest holds a valid deck file. File-local, as above. */
+function manifestHasDeckArtifact(manifest: DeliverableManifestItem[]): boolean {
+  return manifest.some((m) => m.valid && !!m.path && /\.(pptx|pdf|key)$/i.test(m.path));
+}
+
+/**
+ * Narrow text-derived criteria to the gates the shipped artifacts can answer.
+ * Pure. Null/empty manifest returns criteria unchanged (no evidence to select
+ * from; invariant A owns that shape).
+ *
+ * QZ-001 MEASURED REACHABILITY. This function is IDENTITY on every derivable
+ * criteria set — it never strips anything. Measured at the tip: an exhaustive
+ * 12,282-combination sweep (all 2,047 non-empty subsets of the 11 criterion
+ * types x 6 manifest shapes) produced 0 strip events, output always equal to
+ * input. The reason is structural, not incidental: `demandsImage` and
+ * `demandsDeck` are computed over the same array being filtered, so a criterion
+ * can only reach a clause when its OWN type is in that set — which makes the
+ * clause's `!demandsX` conjunct false by construction. Both clauses are
+ * therefore unreachable-true, and the two `return false` lines below are
+ * retained ONLY as fail-closed guards for a future derivation that re-opens an
+ * existence-only residue; they are not live narrowing. Do not read them as
+ * evidence that stripping happens here. The genuine narrowing this function was
+ * built for now happens upstream, in deriveAcceptanceCriteria: detection runs on
+ * KAN-003's cleaned text and QZ-001's resolution-only slash admission, so a
+ * markdown card never derives render gates to strip in the first place. The
+ * QR-010 hole (3dec3ac31) is closed on that side — an image-demanding card still
+ * derives the full image set and still FAILs on `valid_image` when no image
+ * shipped (measured 6.3 FALSE); do not "fix" this function by removing the
+ * `!demandsImage` conjunct, which would re-open it.
+ */
+export function criteriaForManifest(
+  criteria: AcceptanceCriterion[],
+  manifest: DeliverableManifestItem[] | null,
+): AcceptanceCriterion[] {
+  if (!manifest || manifest.length === 0) return criteria;
+  const hasImage = manifestHasImageArtifact(manifest);
+  const hasDeck = manifestHasDeckArtifact(manifest);
+  if (hasImage && hasDeck) return criteria;
+  // QR-001: the DECK gates are never stripped. Deriving them from request text
+  // already means the card demands a deck deliverable, so a missing deck file is
+  // a genuine FAIL — not "a gate the artifact cannot answer". Stripping them
+  // left a deck-class card with no deck file holding exactly
+  // {deliverable_registered, existence}; `existence` is not
+  // `deliverable_registered`, so the caller's render-gate test read that residue
+  // as "real gates present" and the existence-only checklist passed a merely-
+  // reachable .md 10/10 — where base adc4398b4543568f63de5514f2f094b7a42df5cc
+  // FAILed the same case on the genuine deck gates (pipeline_complete /
+  // coverage, both fail-closed with no deck artifact path). The narrowing must
+  // not manufacture render-gate presence out of a set that stripping emptied.
+  //
+  // QZ-001: the clauses below are UNREACHABLE-TRUE, and the two comments that
+  // used to sit here claimed narrowing this function cannot perform. Measured
+  // at the tip: 12,282 combinations (all 2,047 non-empty subsets of the 11
+  // criterion types x 6 manifest shapes) -> 0 strip events, output always equal
+  // to input. `demandsDeck` / `demandsImage` are computed over the array being
+  // filtered, so a criterion of type X only reaches its clause when X is in the
+  // set, making `!demandsX` false by construction. The lines stay as
+  // fail-closed guards for a future derivation that re-opens an existence-only
+  // residue — they are NOT live narrowing and must not be cited as evidence that
+  // stripping happens here. The genuine selection happens upstream:
+  // deriveAcceptanceCriteria detects on KAN-003's cleaned text with QZ-001's
+  // resolution-only slash admission, so the ART-001 markdown shape (a concepts
+  // .md card, no image/deck word in the brief) derives the baseline criterion
+  // alone and takes Mode A content review with the manifest attached — measured
+  // score 10 pass=true on a reachable .md, where the tip scored 6.3 FALSE on the
+  // full image set. QR-010 mirrors the rule to the image half: deriving image
+  // gates from request text already means the card demands an image deliverable,
+  // so a missing image is a genuine FAIL — not "a gate the artifact cannot
+  // answer". Measured after this repair: an image-demanding card with no image
+  // still derives all 7 image criteria and still FAILs 6.3 on `valid_image`.
+  const demandsDeck = criteria.some((c) => DECK_GATE_TYPES.has(c.type));
+  const demandsImage = criteria.some((c) => IMAGE_GATE_TYPES.has(c.type));
+  return criteria.filter((c) => {
+    if (IMAGE_GATE_TYPES.has(c.type) && !hasImage && !demandsImage) return false;
+    if (DECK_GATE_TYPES.has(c.type) && !hasDeck && !demandsDeck) return false;
+    return true;
+  });
+}
+
 export function deriveAcceptanceCriteria(
   title: string,
   description?: string | null,
 ): AcceptanceCriterion[] {
-  const text = [title, description].filter(Boolean).join(' ').toLowerCase();
+  // KAN-003: detect on CLEANED text only. Raw descriptions accumulate audit
+  // history (QC kickbacks, cap blocks, stale handbacks), URLs and filesystem
+  // paths — all of which contain words the owner never wrote ("valid_image",
+  // "language_match", "concept deck at <path>") that mint render gates for a
+  // markdown-only card. The stored description is untouched; only detection
+  // sees the cleaned text.
+  const detectionSource = cleanDetectionText(title, description);
+  const text = detectionSource.toLowerCase();
 
   // Detect image / deck tasks. Decks/presentations are artifact tasks too — they
   // ship rendered slide images + a .pptx and must carry the AF-LANG/AF-NUM/
   // AF-SPELL render gates AND (deck-only) the AF-PIPELINE-COMPLETE gate.
+  //
+  // QZ-001 / REVP-018-F1: the bare verb `render` is deliberately NOT in this
+  // list. It names the ACTION, not the deliverable, and every real image brief
+  // names its artifact (image / logo / banner / png / graphic / illustration /
+  // thumbnail / duck / draw / "generate|create ... image"), all still here — so
+  // dropping it costs no genuine image detection. What it cost was the ART-001
+  // markdown shape: "Ops report render" / "Render the weekly ops report as a
+  // markdown file for the team." matched on the verb alone, minted the full
+  // image gate set, and — because hasRenderGates then reads true — skipped
+  // Mode A content review and failed the legitimately-delivered .md 6.3 on
+  // `valid_image`, burning qc_reroute_attempts to cap (measured tip c1633e799:
+  // 6.3 FALSE; with `render` removed the card derives baseline only and takes
+  // Mode A content review, which is ART-001's stated intent).
   const isImageTask =
-    /\b(image|picture|photo|png|jpg|jpeg|gif|illustration|render|graphic|logo|banner|thumbnail|duck|draw|generate.*image|create.*image)\b/.test(text);
-  const isDeckTask = describesDeckDeliverable(title, description ?? null);
+    /\b(image|picture|photo|png|jpg|jpeg|gif|illustration|graphic|logo|banner|thumbnail|duck|draw|generate.*image|create.*image)\b/.test(text);
+  const isDeckTask = describesDeckDeliverable(title, detectionSource);
 
   // ── BASELINE CRITERION — applies to EVERY task, no exceptions (T0-01) ──────
   // This function used to `return []` here for anything that was not an image
@@ -2727,7 +3917,7 @@ export function deriveAcceptanceCriteria(
   }
 
   // Vision match: does the image depict what was requested?
-  const subjectText = [title, description].filter(Boolean).join('. ');
+  const subjectText = detectionSource;
   criteria.push({
     id: 'vision_match',
     description: `Image depicts the requested subject: "${subjectText}"`,
@@ -2758,6 +3948,15 @@ export function deriveAcceptanceCriteria(
   // render money tokens are diffed against it. Any rendered money amount not in
   // the spec is a HARD FAIL. Carries the spec copy so the comparison is
   // self-contained (no extra plumbing through the manifest).
+  // QR-007: the spec copy is the OWNER'S brief, so it is built from the raw
+  // title+description — the same expression cleanDetectionText consumes — not
+  // from its cleaned output. Cleaning exists to stop audit words MINTING gates
+  // (KAN-003); it is not a licence to compare a render against a brief with the
+  // owner's own lines deleted. On cleaned text, an owner line shaped like a
+  // handback field ("Needs: update pricing to $997/mo") disappeared from the
+  // spec, so a render printing exactly the owner's $997/$11,964 was reported
+  // fabricated by AF-NUM (REVL-006 D2; measured base pass=true vs tip
+  // pass=false). Detection still reads the cleaned text.
   const specCopy = [title, description].filter(Boolean).join('\n');
   criteria.push({
     id: 'numeric_fidelity',
@@ -2790,7 +3989,13 @@ export function deriveAcceptanceCriteria(
   // upload. The required records are looked up on disk at evaluation time
   // (the run dir is resolved from the deck artifact path); if any is absent the
   // deck is NOT done. Fail-closed: an unreadable/missing run dir blocks too.
-  if (describesDeckDeliverable(title, description ?? null)) {
+  // KAN-003: deck-only gates key on the SAME cleaned-text verdict as the
+  // image/deck split above (isDeckTask), never on raw description. Raw text
+  // accumulates PRIOR-STATE already-produced notes ("concept deck at <path>")
+  // that would otherwise mint pipeline_complete/coverage for a card the
+  // cleaned split already ruled non-deck — including a genuine IMAGE task,
+  // which must carry render gates but no deck-pipeline gates.
+  if (isDeckTask) {
     criteria.push({
       id: 'pipeline_complete',
       description:
@@ -3694,12 +4899,23 @@ export async function evaluateCriteria(
       }
 
       case 'existence': {
-        const anyValid = manifest.some((m) => m.valid && (m.sizeBytes ?? 0) > 0);
+        // `sizeBytes === null` means the size is UNKNOWN, not zero. Coercing it
+        // to 0 here failed every url deliverable — whose content is never
+        // stat()able — as an empty artifact. A deliverable that resolved (valid)
+        // but whose size could not be measured is UNDETERMINED, and UNDETERMINED
+        // never fails this gate: the emptiness was never established.
+        const nonEmpty = manifest.filter((m) => m.valid && (m.sizeBytes ?? 1) > 0);
+        const anyValid = nonEmpty.length > 0;
+        const unmeasured = nonEmpty.filter((m) => m.sizeBytes === null);
         results.push({
           id: c.id,
           description: c.description,
           pass: anyValid,
-          reason: anyValid ? 'File exists and is non-empty' : 'No valid non-empty artifact found',
+          reason: anyValid
+            ? unmeasured.length === nonEmpty.length
+              ? `Deliverable resolved but its size could not be measured (${unmeasured.map((m) => m.path).join('; ')}) — UNDETERMINED, not empty`
+              : 'File exists and is non-empty'
+            : 'No valid non-empty artifact found',
         });
         break;
       }
@@ -3719,7 +4935,9 @@ export async function evaluateCriteria(
         // We don't decode image dimensions in the current manifest (no heavy decoder).
         // Pass through: if file is valid image and size is reasonable (>1KB), accept.
         const minSizeHeuristic = 1024; // 1KB — smallest valid non-trivial PNG
-        const meetsSize = manifest.some((m) => m.valid && (m.sizeBytes ?? 0) >= minSizeHeuristic);
+        // Same rule as `existence`: an unmeasured size is UNKNOWN, not zero, so
+        // it can never be the thing that proves an artifact "too small".
+        const meetsSize = manifest.some((m) => m.valid && (m.sizeBytes === null || m.sizeBytes >= minSizeHeuristic));
         results.push({
           id: c.id,
           description: c.description,
@@ -4875,75 +6093,7 @@ export async function runEngineOwnedDeckQC(
     if (fileRows.length === 0) {
       noEvidence = true;
     } else {
-      deliverableManifest = fileRows.map((d): DeliverableManifestItem => {
-        if (d.deliverable_type === 'url') {
-          const href = d.path!.trim();
-          const ok = isUsableUrl(href);
-          return {
-            title: d.title,
-            path: href,
-            type: 'url',
-            sizeBytes: null,
-            dimensions: null,
-            valid: ok,
-            invalidReason: ok ? undefined : `Not a valid http(s) URL: ${href}`,
-          };
-        }
-        const rawPath = d.path!.replace(/^~/, process.env.HOME || '');
-        const ext = rawPath.slice(rawPath.lastIndexOf('.')).toLowerCase();
-        const isImage = IMAGE_EXTENSIONS.has(ext);
-        if (bundleReverifyEnabled() && !isImage && isBundleDeliverablePath(rawPath)) {
-          const verdict = verifyPresentationBundleDeliverable(rawPath);
-          if (!verdict.ok) {
-            return {
-              title: d.title,
-              path: rawPath,
-              type: 'file',
-              sizeBytes: verdict.sizeBytes ?? null,
-              dimensions: null,
-              valid: false,
-              invalidReason: verdict.reason ?? `bundle re-verification failed: ${rawPath}`,
-              contentNote: 'bundle re-verification refused this artifact before content scoring (magic-byte/size/symlink check)',
-            };
-          }
-        }
-        if (isImage) {
-          const probe = probeImageFile(rawPath);
-          if (!probe.valid) {
-            return {
-              title: d.title,
-              path: rawPath,
-              type: 'image',
-              sizeBytes: null,
-              dimensions: null,
-              valid: false,
-              invalidReason: probe.reason,
-            };
-          }
-          return {
-            title: d.title,
-            path: rawPath,
-            type: 'image',
-            sizeBytes: probe.sizeBytes,
-            dimensions: null,
-            valid: true,
-          };
-        }
-        const probe = probeTextFile(rawPath);
-        return {
-          title: d.title,
-          path: rawPath,
-          type: 'file',
-          sizeBytes: probe.valid ? probe.sizeBytes : null,
-          dimensions: null,
-          valid: probe.valid,
-          invalidReason: probe.invalidReason,
-          contentExcerpt: probe.excerpt,
-          structuralChecks: probe.structuralChecks,
-          contentNote: probe.contentNote,
-          ioDeferred: probe.ioDeferred === true ? true : undefined,
-        };
-      });
+      deliverableManifest = await Promise.all(fileRows.map(buildDeliverableManifestItem));
 
       const allInvalid = deliverableManifest.every((d) => !d.valid);
       const allIoDeferred =
@@ -5021,7 +6171,13 @@ export async function runEngineOwnedDeckQC(
   }
 
   // ── 2. Deterministic artifact checklist ONLY ───────────────────────────────
-  const criteria = deriveAcceptanceCriteria(task.title, task.description);
+  // ART-001: narrow to the gates the SHIPPED artifacts can answer. Text minting
+  // render gates for a markdown-only card is the badge-journey misclassification;
+  // the deck-cert and pipeline content gates below stay untouched.
+  const criteria = criteriaForManifest(
+    deriveAcceptanceCriteria(task.title, task.description),
+    deliverableManifest,
+  );
   const criteriaResult = await evaluateCriteria(criteria, deliverableManifest);
   const failedCriteria = criteriaResult.results.filter((r) => !r.pass && !r.skipped);
   const failReasons = failedCriteria.map((r) => `${r.id}: ${r.reason}`);
@@ -5046,12 +6202,21 @@ export async function runEngineOwnedDeckQC(
     let deptSlug: string | null = task.department ?? null;
     if (deptSlug) deptSlug = canonicalDeptSlug(deptSlug) || deptSlug;
     const attemptNum = (task.qc_reroute_attempts ?? 0) + 1;
-    const passed = result.scoringPath === 'llm' && result.score >= QC_PASS_THRESHOLD ? 1 : 0;
+    // ONE verdict, not two. This used to re-derive the verdict from the score
+    // alone, so every gate that can turn a PASS into a FAIL (persona
+    // conformance, comms conformance, the producer/judge both-gates rule) was
+    // invisible here: the durable row said passed=1 while the qc_review event
+    // said FAIL and the card was re-routed. `result.pass` IS the verdict.
+    const passed = result.scoringPath === 'llm' && result.pass ? 1 : 0;
+    // QC-VERDICT-RECORD-20260922: the WHY rides with the score (migration 160).
+    // Without it a card that failed twice at 9.5 and 9.0 against an 8.5 bar was
+    // unanswerable from the database and from both pm2 logs.
     run(
       `INSERT INTO task_qc_results
-         (id, task_id, workspace_id, department_slug, score, passed, scoring_path, attempt, scored_at)
-       VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?)`,
-      [uuidv4(), taskId, deptSlug, result.score, passed, result.scoringPath, attemptNum, now],
+         (id, task_id, workspace_id, department_slug, score, passed, scoring_path, attempt, scored_at, reason, gaps)
+       VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [uuidv4(), taskId, deptSlug, result.score, passed, result.scoringPath, attemptNum, now,
+        result.reason ?? null, JSON.stringify(result.gaps ?? [])],
     );
   } catch (qcPersistErr) {
     console.warn('[QCScorer] FIX 7 task_qc_results INSERT failed (non-fatal):', (qcPersistErr as Error).message);
@@ -5060,7 +6225,9 @@ export async function runEngineOwnedDeckQC(
   // ── 4. FAIL → increment-then-decide reroute/block, same as generic path ────
   if (!result.pass) {
     const newAttempts = (task.qc_reroute_attempts ?? 0) + 1;
-    const kickbackNote = `[QC-FAIL] Score ${result.score.toFixed(1)}/10 (attempt ${newAttempts}/${QC_MAX_REROUTES}). ${result.reason}`;
+    const kickbackNote = `[QC-FAIL] ${qcScoreVerdictClause(result.score)} (attempt ${newAttempts}/${QC_MAX_REROUTES}). `
+      + `Rework needed: ${qcGapSummary(result.gaps, result.reason)}`
+      + reuseInstruction(taskId);
     await rerouteOrBlock({
       taskId,
       taskTitle: task.title,
@@ -5151,6 +6318,26 @@ export async function runEngineOwnedDeckQC(
     `[QCScorer] Task "${task.title}" (${taskId}): FIX 7 deck parent PASS ${result.score.toFixed(1)}/10 → done (actor qc-scorer)`,
   );
   return result;
+}
+
+/**
+ * A40: the declared blueprint sections for a task's root persona bundle, read
+ * through the SAME reader the load-evidence capture uses (requiredSectionsOf)
+ * so the judge prompt and the load check can never name different contracts.
+ * Returns [] when the task has no bundle, the table is absent (pre-migration
+ * box), or the bundle declares nothing — the caller renders "none declared".
+ */
+function blueprintSectionsForJudge(taskId: string): string[] {
+  try {
+    const row = queryOne<{ bundle_json: string }>(
+      'SELECT bundle_json FROM task_persona_bundle WHERE task_id=?',
+      [taskId],
+    );
+    if (!row) return [];
+    return requiredSectionsOf(JSON.parse(row.bundle_json));
+  } catch {
+    return [];
+  }
 }
 
 export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
@@ -5524,100 +6711,7 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
       // ── End invariant A ──────────────────────────────────────────────────────
 
       if (fileRows.length > 0) {
-        deliverableManifest = fileRows.map((d): DeliverableManifestItem => {
-          // URL deliverables carry a link in `path`, not a filesystem path — they
-          // must be validated as URLs, never stat()ed (a stat would always fail
-          // and report a genuine deliverable as "file not found").
-          if (d.deliverable_type === 'url') {
-            const href = d.path!.trim();
-            const ok = isUsableUrl(href);
-            return {
-              title: d.title,
-              path: href,
-              type: 'url',
-              sizeBytes: null,
-              dimensions: null,
-              valid: ok,
-              invalidReason: ok ? undefined : `Not a valid http(s) URL: ${href}`,
-            };
-          }
-
-          const rawPath = d.path!.replace(/^~/, process.env.HOME || '');
-          const ext = rawPath.slice(rawPath.lastIndexOf('.')).toLowerCase();
-          const isImage = IMAGE_EXTENSIONS.has(ext);
-
-          // FIX 28: a bundle-shaped deliverable (deck/guide/speech/audio/
-          // infographic/teleprompter names mirrored from build_deck.py's
-          // DELIVERABLES_REQUIRED) is re-verified BYTE-LEVEL — presence,
-          // symlink rejection, size floor, leading magic — so a right-sized
-          // decoy can never reach the judge as a valid manifest item. The
-          // evidence gate (collectCompletionEvidence) enforces the same probe
-          // at done; this makes the QC verdict certify the same bytes.
-          if (bundleReverifyEnabled() && !isImage && isBundleDeliverablePath(rawPath)) {
-            const verdict = verifyPresentationBundleDeliverable(rawPath);
-            if (!verdict.ok) {
-              return {
-                title: d.title,
-                path: rawPath,
-                type: 'file',
-                sizeBytes: verdict.sizeBytes ?? null,
-                dimensions: null,
-                valid: false,
-                invalidReason: verdict.reason ?? `bundle re-verification failed: ${rawPath}`,
-                contentNote: 'bundle re-verification refused this artifact before content scoring (magic-byte/size/symlink check)',
-              };
-            }
-            // Bundle-verified: manifest item is valid on the verified bytes;
-            // size-only members (md) still carry structural content via the
-            // text probe below only when they are text formats.
-          }
-
-          if (isImage) {
-            const probe = probeImageFile(rawPath);
-            if (!probe.valid) {
-              return {
-                title: d.title,
-                path: rawPath,
-                type: 'image',
-                sizeBytes: null,
-                dimensions: null,
-                valid: false,
-                invalidReason: probe.reason,
-              };
-            }
-            return {
-              title: d.title,
-              path: rawPath,
-              type: 'image',
-              sizeBytes: probe.sizeBytes,
-              dimensions: null, // dimensions require image decode; skip for now
-              valid: true,
-            };
-          }
-
-          // Non-image file: extract bounded content + structural checks (U082).
-          // The old code validated by byte count alone — a placeholder scored
-          // identically to a finished deliverable. probeTextFile reads a bounded
-          // excerpt and computes line/word/non-empty-char counts so the judge
-          // scores CONTENT, not just existence.
-          // FIX 45: probe.ioDeferred (exists-but-unreadable) rides through to
-          // the manifest so the all-invalid branch can tell a deferral from a
-          // genuine fail.
-          const probe = probeTextFile(rawPath);
-          return {
-            title: d.title,
-            path: rawPath,
-            type: 'file',
-            sizeBytes: probe.valid ? probe.sizeBytes : null,
-            dimensions: null,
-            valid: probe.valid,
-            invalidReason: probe.invalidReason,
-            contentExcerpt: probe.excerpt,
-            structuralChecks: probe.structuralChecks,
-            contentNote: probe.contentNote,
-            ioDeferred: probe.ioDeferred === true ? true : undefined,
-          };
-        });
+        deliverableManifest = await Promise.all(fileRows.map(buildDeliverableManifestItem));
 
         // Early-exit: if ALL deliverables are missing/invalid, fail immediately
         // without spending an LLM call — the reason is structural, not qualitative.
@@ -5860,7 +6954,21 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
 
     if (deliverableManifest && deliverableManifest.length > 0) {
       // Artifact mode: use the pre-computed criteria (derived above for invariant A).
-      const criteria = artifactCriteriaForTitle;
+      //
+      // QZ-001: this used to read "narrowed (ART-001) to the gates the SHIPPED
+      // artifacts can answer ... a .md concepts doc draws baseline + existence".
+      // That claim is measurably false and is corrected here rather than left to
+      // mislead the next reader. Measured at the tip: criteriaForManifest is
+      // IDENTITY (12,282-combination sweep, 0 strip events), and a .md concepts
+      // card draws the baseline criterion ALONE — not "baseline + existence" —
+      // when its brief names no image/deck word (measured: full=[deliverable_
+      // registered], hasRenderGates=false, Mode A content review, 10 pass). A
+      // brief that does name an image or deck word keeps its full gate set and
+      // correctly fails closed on the missing artifact (measured: `valid_image`
+      // plus the AF gates, 6.3 FALSE). That selection is made upstream, in
+      // deriveAcceptanceCriteria, by KAN-003's cleaned-text detection with
+      // QZ-001's resolution-only slash admission — not by narrowing here.
+      const criteria = criteriaForManifest(artifactCriteriaForTitle, deliverableManifest);
 
       // ── Which checklist can actually JUDGE this deliverable? (T0-01) ────────
       // Branch on the RENDER gates, not on `criteria.length`. Every task now
@@ -5922,6 +7030,7 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
           qcAgentModel: qcAgent?.model ?? null,
           writerModel,
           deliverableManifest: deliverableManifest,
+          blueprintSections: blueprintSectionsForJudge(task.id),
         };
         result = await scoreTaskForQC(input);
       }
@@ -6139,6 +7248,13 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
     const personaConformance=requirePersonaConformanceForCompletion(taskId);
     if(result.pass && !personaConformance.pass) result={...result,pass:false,
       reason:`${result.reason} — ${personaConformance.reason}`,gaps:[...result.gaps,personaConformance.reason]};
+    // A40: the judge's OWN adherence verdict (same reply as the score) is
+    // authoritative when it is false. A well-formed artifact that does not
+    // follow the brief must not pass on file-existence alone — this is the
+    // in-scorer half of the door clause in task-lifecycle; null never blocks.
+    if(result.pass && result.contentAdherence === false) result={...result,pass:false,
+      reason:`${result.reason} — content_adherence:false (the artifact does not follow the task brief/persona; identity alone is not adherence)`,
+      gaps:[...result.gaps,'content_adherence_failed']};
 
     // CC-FIXTURE-003: the personable/QC fixture write guard — refuse a durable
     // task_qc_results row when the verdict came from a fixture (merged from
@@ -6162,12 +7278,17 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
         deptSlug = canonicalDeptSlug(deptSlug) || deptSlug;
       }
       const attemptNum = (task.qc_reroute_attempts ?? 0) + 1;
-      const passed = result.scoringPath === 'llm' && result.score >= QC_PASS_THRESHOLD ? 1 : 0;
+      // ONE verdict, not two — see the FIX 7 lane above. Re-deriving from the
+      // score alone is what wrote passed=1 next to a FAIL verdict on a live box
+      // (2026-09-21): the score was 10.0, a fail-soft persona gap had flipped
+      // result.pass to false, and the two records disagreed.
+      const passed = result.scoringPath === 'llm' && result.pass ? 1 : 0;
 
+      // QC-VERDICT-RECORD-20260922: the WHY rides with the score (migration 160).
       run(
         `INSERT INTO task_qc_results
-           (id, task_id, workspace_id, department_slug, score, passed, scoring_path, qc_agent_id, attempt, scored_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           (id, task_id, workspace_id, department_slug, score, passed, scoring_path, qc_agent_id, attempt, scored_at, reason, gaps, content_adherence)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           uuidv4(),
           taskId,
@@ -6179,6 +7300,11 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
           qcAgent?.id ?? null,
           attemptNum,
           now,
+          result.reason ?? null,
+          JSON.stringify(result.gaps ?? []),
+          // A40 (migration 164): the judge's adherence verdict, from the SAME
+          // reply as the score. NULL = not judged (never blocks the door).
+          result.contentAdherence === true ? 1 : result.contentAdherence === false ? 0 : null,
         ],
       );
     } catch (qcPersistErr) {
@@ -6301,7 +7427,7 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
               `no typo, and that OLLAMA_CLOUD_API_KEY is valid for that address.`;
 
           const finalMsg =
-            `[QC-JUDGE-FAILED-FINAL] Score: ${result.score.toFixed(1)}/10 | QC judge FAILED ${thisDeferral} ` +
+            `[QC-JUDGE-FAILED-FINAL]${result.judgeModelGone ? ' [JUDGE-MODEL-GONE]' : ''} Score: ${result.score.toFixed(1)}/10 | QC judge FAILED ${thisDeferral} ` +
             `consecutive times — this is NOT a transient blip. OBSERVED FAILURE: ${failureLabel}. ` +
             `Judge model "${judgeModelName}" called at ${judgeEndpoint}. DETAIL: ${failureDetail} ${nextStep} ` +
             `MANUAL REVIEW REQUIRED: this task can no longer auto-advance review→done — promote it manually, or ` +
@@ -6714,11 +7840,18 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
           gaps: result.gaps,
           needs: blockNeeds,
           audience: blockAudience,
-          blockReason: `Failed QC ${newAttempts}x, last score ${result.score.toFixed(1)}/10`,
+          blockReason: qcCapBlockReason({ attempts: newAttempts, score: result.score, gaps: result.gaps, reason: result.reason }),
           // Keep main's complete cap/audience/reason audit text in both the
           // description and transition history; blockReason remains concise
           // machine-readable metadata.
           auditNote: blockedNote,
+          capAlert: {
+            attempts: newAttempts,
+            cap: QC_MAX_REROUTES,
+            score: result.score,
+            gaps: result.gaps,
+            reason: result.reason,
+          },
           timelineEventMessage: `[QC-BLOCKED] Task "${task.title}" blocked after ${newAttempts} QC-fail re-routes (cap: ${QC_MAX_REROUTES}). Audience: ${blockAudience}. ${isSystemBlock ? 'SYSTEM fix needed — escalating to master orchestrator.' : 'Human review required.'}`,
           escalationMessage: `[QC-SYSTEM-BLOCK] "${task.title}" failed QC ${newAttempts} time(s) due to a SYSTEM issue the executor cannot fix. Score: ${result.score.toFixed(1)}/10. Root cause gaps: ${result.gaps.join('; ')}. Action needed: ${blockNeeds}`,
           ownerNotifyMessage: `⚠️ A task is BLOCKED and needs your attention: "${task.title}".\nReason: ${result.gaps.length > 0 ? result.gaps.join('; ') : result.reason}\n\nThis task failed QC ${newAttempts} time(s) (score ${result.score.toFixed(1)}/10). Reply here to unblock or reassign.`,
@@ -6761,9 +7894,9 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
       }
       // ── End of loop guard ────────────────────────────────────────────────
 
-      const kickbackNote = result.gaps.length > 0
-        ? `[QC-FAIL] Score ${result.score.toFixed(1)}/10 (attempt ${newAttempts}/${QC_MAX_REROUTES}). Rework needed: ${result.gaps.join('; ')}`
-        : `[QC-FAIL] Score ${result.score.toFixed(1)}/10 (attempt ${newAttempts}/${QC_MAX_REROUTES}). ${result.reason}`;
+      const kickbackNote = `[QC-FAIL] ${qcScoreVerdictClause(result.score)} (attempt ${newAttempts}/${QC_MAX_REROUTES}). `
+        + `Rework needed: ${qcGapSummary(result.gaps, result.reason)}`
+        + reuseInstruction(taskId);
 
       // fix2(MR-04): route through transition() with extraColumns so the
       // description + qc_reroute_attempts land atomically with the status flip
@@ -6779,7 +7912,7 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
         : kickbackNote;
       let rerouteLanded = false;
       try {
-        await transition(taskId, 'backlog', {
+        await withoutSelfInflictedPersonaBump(taskId, () => transition(taskId, 'backlog', {
           actor: 'qc-scorer',
           reason: kickbackNote,
           expectedFrom: 'review',
@@ -6787,8 +7920,9 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
             description: rerouteDesc,
             qc_reroute_attempts: newAttempts,
           },
-        });
+        }));
         rerouteLanded = true;
+        tidyDeliverablesAfterReroute(taskId);
       } catch (txErr) {
         if (!(txErr instanceof TransitionError && txErr.code === 'CAS_CONFLICT')) {
           console.warn(`[QCScorer] reroute-to-backlog transition failed for ${taskId}:`, (txErr as Error).message);
@@ -6808,14 +7942,14 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
         `INSERT INTO events (id, type, task_id, message, created_at)
          VALUES (?, ?, ?, ?, ?)`,
         [uuidv4(), 'task_status_changed', taskId,
-          `[QC-AUTO] Task "${task.title}" returned to Backlog — score ${result.score.toFixed(1)}/10 < ${QC_PASS_THRESHOLD} (attempt ${newAttempts}/${QC_MAX_REROUTES}). ${result.reason}`,
+          `[QC-AUTO] Task "${task.title}" returned to Backlog — ${qcScoreVerdictClause(result.score)} (attempt ${newAttempts}/${QC_MAX_REROUTES}). ${qcGapSummary(result.gaps, result.reason)}`,
           now],
       );
 
       // Write CEO-addressed reroute event so the master-orchestrator knows to
       // re-assign / re-route the task back to the correct department.
       const ceoDept = task.department ?? task.workspace_id ?? 'unknown';
-      const gapsSummary = result.gaps.length > 0 ? result.gaps.join('; ') : result.reason;
+      const gapsSummary = qcGapSummary(result.gaps, result.reason);
 
       // Resolve master-orchestrator/CEO agent for the event author field.
       let ceoAgentId: string | null = null;
@@ -6844,16 +7978,21 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
         ],
       );
 
-      // ── Fix: use getMissionControlUrl() (port 4000) not NEXTAUTH_URL (port 3000) ──
-      // This was the root cause of "fetch failed" — NEXTAUTH_URL defaults to
-      // port 3000 but the app runs on port 4000.
-      const baseUrl = getMissionControlUrl();
-      fetch(`${baseUrl}/api/webhooks/auto-route`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ taskId, workspaceId: task.workspace_id }),
-      }).then(async (resp) => {
-        if (resp.ok) {
+      // ── The re-route runs IN PROCESS, not over HTTP ──────────────────────
+      // This used to `fetch` our own /api/webhooks/auto-route with no
+      // credentials. That route is in the middleware's WEBHOOK_SECRET_ROUTES
+      // family, which is deliberately excluded from the same-origin
+      // passthrough, so the call was rejected at the gate before the handler
+      // ran: every QC-failed card logged `Auto-route returned 401 ... stays in
+      // backlog` and waited out the 5-minute ceo-delegation sweep. Signing it
+      // would have meant reproducing BOTH layers the route demands of an
+      // EXTERNAL caller (Bearer MC_API_TOKEN + an HMAC of the raw body over
+      // WEBHOOK_SECRET) and guessing our own base URL — the port-3000/4000 bug
+      // this comment used to describe — all to reach the same process. The
+      // routing decision is a callable now; there is no request to
+      // authenticate.
+      autoRouteTask(taskId, task.workspace_id).then(async (routing) => {
+        if (routing.routed) {
           // Auto-route succeeded: move the task to in_progress so it leaves backlog.
           // fix2(MR-04): route through transition(). This .then() callback is
           // already async, so the async transition() can be awaited directly
@@ -6881,7 +8020,7 @@ export async function runQCOnReview(taskId: string): Promise<QCResult | null> {
             }
           }
         } else {
-          console.warn(`[QCScorer] Auto-route returned ${resp.status} for task ${taskId} — stays in backlog for ceo-delegation-sweep`);
+          console.warn(`[QCScorer] Auto-route did not route task ${taskId} (${routing.failure}: ${routing.reason}) — stays in backlog for ceo-delegation-sweep`);
         }
       }).catch(err => console.warn('[QCScorer] Auto-route trigger failed (non-fatal):', (err as Error).message));
 

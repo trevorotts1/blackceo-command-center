@@ -147,3 +147,21 @@ test('QC-only General without CEO remains unassigned',async()=>{
   db.run("UPDATE agents SET role_type='qc' WHERE id=?",[general.id]);
   assert.notEqual((await route(f.task)).status,'assigned');
 });
+
+test('an explicit user choice of General Task bypasses every picker (no embedding, no model call)',async()=>{
+  const f=fixture(),general=f.worker('general'); f.worker('ceo');
+  let calls=0; const prev=globalThis.fetch; const prevProvider=process.env.SOP_EMBEDDING_PROVIDER;
+  // Local embeddings ON, so any picker that ran WOULD call the (fake) embedding endpoint and be counted.
+  process.env.SOP_EMBEDDING_PROVIDER='ollama';
+  globalThis.fetch=async()=>{calls++;return new Response(JSON.stringify({embeddings:[[1,0,0,0]]}),{status:200});};
+  // The text is plainly a Web Development task; the user's own choice wins.
+  const text='Fix the broken link on the About page of the website';
+  let byTag:Awaited<ReturnType<typeof route>>,byLane:Awaited<ReturnType<typeof route>>;
+  try{
+  byTag=await route({title:text,priority:'medium',company_id:f.company,department:'General Task'});
+  byLane=await route({title:text,priority:'medium',company_id:f.company,workspace_id:general.workspace,department:'General Task'});
+  }finally{globalThis.fetch=prev;process.env.SOP_EMBEDDING_PROVIDER=prevProvider;}
+  for(const d of [byTag,byLane]) assigned(d,general.id,f.company,general.workspace,'general');
+  if(byTag.status==='assigned') assert.match(byTag.routing.reason,/Explicit General Task request/);
+  assert.equal(calls,0,'the router must not consult any picker for an explicit choice');
+});

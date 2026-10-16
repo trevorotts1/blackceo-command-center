@@ -15,12 +15,12 @@ Set `MC_INSTALLATION_ID` to the installation's stable ID and provide `MC_API_TOK
     "installationId": "installation-stable-id",
     "issuer": "https://your-team.cloudflareaccess.com",
     "audience": "access-application-audience",
-    "subjects": ["verified-access-subject-id"]
+    "subjects": ["owner@company.example.com"]
   }
 }
 ```
 
-Company IDs and installation IDs are identifiers verified against the installation, not guessed slugs or names. Cloudflare authentication validates RS256 signatures from the pinned issuer certificate endpoint, issuer, audience, expiry, and the registered subject list. Trusting `cf-ray`, an email, or an unsigned JWT is insufficient. Ensure the origin is reachable only through the intended ingress as an independent protection. Never commit live credentials or tokens in registry examples.
+Company IDs and installation IDs are identifiers verified against the installation, not guessed slugs or names. Cloudflare authentication validates RS256 signatures from the pinned issuer certificate endpoint, issuer, audience, expiry, and the registered subject list. A subject is either the Access `sub` or the owner email; an email subject matches only the signed JWT `email` claim (exact, case-insensitive), so Google and one-time-code sign-in resolve to the same owner on every device. Trusting `cf-ray`, an email, or an unsigned JWT is insufficient. Ensure the origin is reachable only through the intended ingress as an independent protection. Never commit live credentials or tokens in registry examples.
 
 An alternative browser login is an operator-issued one-use invitation. With protected signing configuration loaded on the operator machine, run:
 
@@ -28,7 +28,7 @@ An alternative browser login is an operator-issued one-use invitation. With prot
 npx tsx scripts/mint-interview-enrollment.ts company.example.com owner-subject-id
 ```
 
-The command prints a 15-minute enrollment link and sends no messages. Deliver it through an explicitly authorized channel. Its fragment is removed by the interview page before redemption, and the server exchanges it for a host/tenant/installation-bound, httpOnly session valid for one hour. It cannot be reused after redemption. Provide a fresh invitation when expired. The ordinary page's CSRF cookie still protects browser mutations. Operator bypass requires an operator identity; it is not a general client authorization mechanism.
+The command prints an enrollment link that stays valid until the interview it opens is complete — it has no clock expiry — and sends no messages. Deliver it through an explicitly authorized channel. The canonical link form is `/interview?enroll=` with `#enroll=` kept as a fallback for older tickets. The server exchanges it for a host/tenant/installation-bound, httpOnly session valid for 30 days (`INTERVIEW_SESSION_TTL_SECONDS` in `src/lib/interview/session-policy.ts`). The link is re-openable on the same or a new device until the interview is complete: a lapsed session falls back to re-opening the link, and the first-use record is an audit trail rather than a gate that burns the link. Provide a fresh invitation only when the link itself is invalid. The ordinary page's CSRF cookie still protects browser mutations. Operator bypass requires an operator identity; it is not a general client authorization mechanism.
 
 ## Shared interview/board front end
 

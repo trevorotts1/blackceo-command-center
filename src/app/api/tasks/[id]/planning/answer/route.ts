@@ -39,7 +39,7 @@ export async function POST(
     }
 
     // Build the answer message
-    const answerText = answer === 'other' && otherText 
+    const answerText = String(answer).toLowerCase() === 'other' && otherText 
       ? `Other: ${otherText}`
       : answer;
 

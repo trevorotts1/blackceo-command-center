@@ -68,6 +68,22 @@ export interface CompanyConfig {
   brandPrimaryColor: string;
   brandSecondaryColor: string;
   logoUrl: string;
+  /**
+   * Per-box concurrency overrides, keyed by provider (`{"ollama": 8}`) — see
+   * src/lib/capacity/provider-pools.ts. This is the ONE setting a plan upgrade
+   * changes: raising it lets every agent on the box take more work at once, with
+   * no agent row edited. `PROVIDER_CONCURRENCY_<PROVIDER>` in the environment
+   * outranks it. Absent on most boxes, which then run on the default table.
+   */
+  provider_concurrency?: Record<string, number>;
+  /**
+   * Per-box PLAN names, keyed by provider (`{"ollama": "max"}`) — the friendly
+   * spelling of `provider_concurrency`, so an upgrade is entered as the plan
+   * that was bought rather than as a number somebody has to look up. A raw
+   * `provider_concurrency` entry for the same provider outranks it, and both
+   * are outranked by the environment.
+   */
+  provider_plans?: Record<string, string>;
 }
 
 /** Cached config to avoid repeated file reads */
@@ -130,6 +146,12 @@ export function loadCompanyConfig(): CompanyConfig {
     departments: Array.isArray(raw.departments) && raw.departments.length > 0
       ? raw.departments
       : [],
+    provider_concurrency:
+      raw.provider_concurrency && typeof raw.provider_concurrency === 'object'
+        ? raw.provider_concurrency
+        : undefined,
+    provider_plans:
+      raw.provider_plans && typeof raw.provider_plans === 'object' ? raw.provider_plans : undefined,
     brandPrimaryColor: raw.brandPrimaryColor || raw.branding?.primaryColor || '',
     brandSecondaryColor: raw.brandSecondaryColor || raw.branding?.secondaryColor || '',
     logoUrl: raw.logoUrl || raw.branding?.logoUrl || '',

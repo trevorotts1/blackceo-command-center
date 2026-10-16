@@ -84,6 +84,19 @@ export async function PATCH(
       return NextResponse.json({error:'invalid_runtime_binding'}, {status:400});
     }
 
+    // Per-worker parallelism (migration 149). Bounded: 1 restores strict
+    // one-job-per-worker, and the ceiling keeps a typo from handing one agent
+    // more concurrent runs than the gateway will actually serve.
+    if (body.max_concurrent_executions !== undefined) {
+      const limit = Number(body.max_concurrent_executions);
+      if (!Number.isInteger(limit) || limit < 1 || limit > 64) {
+        return NextResponse.json(
+          { error: 'max_concurrent_executions must be a whole number between 1 and 64', code: 'INVALID_CONCURRENCY' },
+          { status: 400 },
+        );
+      }
+    }
+
     const updates: string[] = [];
     const values: unknown[] = [];
 
@@ -146,6 +159,10 @@ export async function PATCH(
     if (body.model !== undefined) {
       updates.push('model = ?');
       values.push(body.model);
+    }
+    if (body.max_concurrent_executions !== undefined) {
+      updates.push('max_concurrent_executions = ?');
+      values.push(Number(body.max_concurrent_executions));
     }
     if ((body as { specialist_type?: string }).specialist_type !== undefined) {
       updates.push('specialist_type = ?');

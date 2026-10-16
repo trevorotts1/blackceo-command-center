@@ -30,7 +30,21 @@
  *     "company_branding": { "pass": bool, "detail": string, "indeterminate"?: bool },
  *     "database_path":    { "pass": bool, "detail": string },
  *     "migrations":       { "pass": bool, "detail": string },
- *     "disk_headroom":    { "pass": bool, "detail": string }
+ *     "disk_headroom":    { "pass": bool, "detail": string },
+ *     "scheduler_liveness": { "pass": bool, "detail": string, "indeterminate"?: bool
+ *                           // ISSUE-04: the in-app node-cron scheduler is the
+ *                           // one subsystem that cannot report its own death.
+ *                           // GATING on `stale` only (no tick inside a watched
+ *                           // job's cadence x STALE_MULTIPLIER window), never on
+ *                           // a job that ticks but fails or is kill-flagged.
+ *                           // Inside the boot warm-up window silence PASSES (a
+ *                           // fresh process has not ticked yet and that is not
+ *                           // evidence of a stall); UNKNOWN is reserved for an
+ *                           // unreadable job_liveness table.
+ *                           // advisory.board_jobs_watchdog keeps reporting all
+ *                           // three states (silent / failing / switched off)
+ *                           // un-gated.
+ *                         }
  *   },
  *   "advisory": {             // NON-GATING — reported side-by-side, never gates
  *     "anthology_board_projection": { "pass": bool, "detail": string, ...,
@@ -52,7 +66,7 @@
  *     "mc_board_56_sales_page_assets_projection":    { "pass": bool, "detail": string, ... }, // U100
  *     "mc_board_57_social_media_in_a_box_projection":{ "pass": bool, "detail": string, ... }, // U100
  *     "skill35_cycle_projection":    { "pass": bool, "detail": string, ... }, // U100
- *     "sweep_liveness":             { "pass": bool, "detail": string, ... },
+ *     "board_jobs_watchdog":        { "pass": bool, "detail": string, ... },
  *     "notification_failures_log":  { "pass": bool, "detail": string, ... }, // U102 / C12.3 item 10b
  *     "trust_coverage":             { "pass": bool, "detail": string, ... }, // U94 / X.2.3
  *     "persona_match":              { "pass": bool, "detail": string, "persona_match"?: {...}, "grounding"?: {...} }, // A-U12
@@ -74,10 +88,19 @@
  *   a Command Center correctness fault, so it must NEVER trip auto-rollback or
  *   halt the heartbeat — the very thing A7 (and its Skill-6 clone, U27) exists
  *   to detect cannot be allowed to disable the box that detects it.
- *   `sweep_liveness` (C-09 / U40 — "watch the watchers") is the same posture:
- *   an advancer gone silent is an operational alert (routed separately,
- *   cooldown-guarded, via sweep-liveness.ts's own scheduler.ts cron entry),
+ *   `board_jobs_watchdog` (C-09 / U40 — "watch the watchers") is the same
+ *   posture: an advancer gone silent is an operational alert (routed separately,
+ *   cooldown-guarded, via board-jobs-watchdog.ts's own scheduler.ts cron entry),
  *   never a reason to auto-rollback a healthy deploy or halt the heartbeat.
+ *   ISSUE-04 splits ONE signal out of it into `checks.scheduler_liveness`:
+ *   not "a sweep is unhappy" but "no sweep has ticked at all", which means the
+ *   in-process node-cron loop is gone. That one cannot stay advisory, because
+ *   the cron job that reports it is itself registered on the loop that died,
+ *   and its only side effect is a Telegram notify that therefore never fires.
+ *   Gating it is what lets an OUT-OF-PROCESS consumer (cc-health-check.sh into
+ *   scripts/watchdog-cc.sh) see the stall and restart the app. Everything else
+ *   board_jobs_watchdog reports (a ticking job that fails, a kill-flagged job)
+ *   stays advisory exactly as before.
  *   `notification_failures_log` (U102 / C12.3 item 10b) is the same posture
  *   again: the size of the MSG-07 undeliverable ledger is an operational
  *   signal (something downstream of notify.ts needs attention), never a
@@ -124,7 +147,7 @@ import {
   checkPersonaGrounding,
   checkFixtureEnvVars,
 } from '@/lib/health/deep-checks';
-import { checkSweepLiveness } from '@/lib/jobs/sweep-liveness';
+import { checkBoardJobsWatchdog, checkSchedulerLiveness } from '@/lib/jobs/board-jobs-watchdog';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -134,7 +157,7 @@ export async function GET() {
     const [assetManifest, buildContent, companyBranding, htmlTitle, databasePath, migrations, diskHeadroom, appUrl] =
       await Promise.all([
         Promise.resolve(checkAssetManifest()),
-        Promise.resolve(checkBuildContentInventory()),
+        checkBuildContentInventory(),
         Promise.resolve(checkCompanyBranding()),
         Promise.resolve(checkHtmlTitle()),
         Promise.resolve(checkDatabasePath()),
@@ -142,6 +165,28 @@ export async function GET() {
         checkDiskHeadroom(),
         Promise.resolve(checkNextPublicAppUrl()),
       ]);
+
+    // ISSUE-04 - GATING scheduler liveness. Resolved outside the Promise.all
+    // above only so its own failure mode stays readable: this is the ONE
+    // gating check whose subject is the process serving this request, so a
+    // throw inside it is degraded to a self-describing UNKNOWN rather than
+    // reaching the outer catch (which returns 500 + pass:false and can trip
+    // auto-rollback). UNKNOWN on a gating check is the documented transient
+    // channel; a stalled scheduler reports pass:false with the silent jobs
+    // named, and cc-health-check.sh turns that into a definitive RED that
+    // scripts/watchdog-cc.sh classifies as `scheduler-stalled`.
+    let schedulerLiveness: { pass: boolean; detail: string; indeterminate?: boolean };
+    try {
+      schedulerLiveness = checkSchedulerLiveness();
+    } catch (schedErr) {
+      schedulerLiveness = {
+        pass: false,
+        indeterminate: true,
+        detail: `scheduler_liveness: probe unavailable (${
+          schedErr instanceof Error ? schedErr.message : String(schedErr)
+        }); UNKNOWN`,
+      };
+    }
 
     // GATING checks — these, and only these, feed the pass/indeterminate
     // verdict that the deploy + heartbeat automation acts on.
@@ -154,6 +199,7 @@ export async function GET() {
       migrations: migrations,
       disk_headroom: diskHeadroom,
       next_public_app_url: appUrl,
+      scheduler_liveness: schedulerLiveness,
     };
 
     const gatingChecks = Object.values(checks);
@@ -242,17 +288,17 @@ export async function GET() {
       };
     }
 
-    // C-09 / U40 — sweep-liveness advisory. Own try/catch for the same reason
+    // C-09 / U40 — board jobs watchdog advisory. Own try/catch for the same reason
     // as the block above: a throw here must NEVER reach the outer catch (which
     // would return 500 + pass:false and could trip auto-rollback/heartbeat-gate
     // consumers that only read d.pass / d.indeterminate).
     try {
-      advisory.sweep_liveness = checkSweepLiveness();
+      advisory.board_jobs_watchdog = checkBoardJobsWatchdog();
     } catch (advErr) {
-      advisory.sweep_liveness = {
+      advisory.board_jobs_watchdog = {
         pass: true,
         indeterminate: true,
-        detail: `sweep_liveness: advisory probe unavailable — ${
+        detail: `board_jobs_watchdog: advisory probe unavailable — ${
           advErr instanceof Error ? advErr.message : String(advErr)
         } (UNKNOWN; non-gating)`,
       };

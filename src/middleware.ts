@@ -20,6 +20,7 @@ import {
   CSRF_COOKIE_ATTRIBUTES,
   signCsrfToken,
   verifyCsrfToken,
+  isExpiredAuthenticCsrfToken,
   isReadOnlyMethod,
 } from '@/lib/csrf-protection';
 
@@ -30,11 +31,13 @@ import {
  *
  *   1. Cloudflare Access (page + API). Cloudflare sits in front of the
  *      subdomain and gates ALL traffic. Authenticated requests arrive with
- *      `Cf-Access-Jwt-Assertion` and `Cf-Access-Authenticated-User-Email`
- *      headers populated. The Next.js app never validates the JWT itself
- *      (Cloudflare already did that), it just checks that the headers are
- *      present and surfaces the email to downstream code via the request
- *      headers.
+ *      `Cf-Access-Jwt-Assertion` populated. The app cryptographically verifies
+ *      that JWT itself (RS256/JWKS, issuer, audience, expiry, exact subjects —
+ *      see lib/auth/tenant-context.ts); the unsigned email header is never
+ *      trusted and is never forwarded as identity. The verified subject (and,
+ *      when present, the signed email claim) is what downstream code reads via
+ *      the tenant context — the `x-operator-email` mirror below carries ONLY
+ *      that verified value, never the raw header.
  *
  *   2. MC_API_TOKEN (API only). A long-lived bearer token used by external
  *      integrations (CLIs, scripts, OpenClaw, SSE consumers) that cannot go
@@ -163,6 +166,7 @@ const WEBHOOK_SECRET_ROUTES = [
  */
 const WEBHOOK_SECRET_DYNAMIC_ROUTES: RegExp[] = [
   /^\/api\/tasks\/[^/]+\/status$/, // /api/tasks/{id}/status
+  /^\/api\/tasks\/[^/]+\/operator-preengine-recovery$/,
 ];
 
 /**
@@ -188,6 +192,40 @@ function isWebhookSecretRoute(pathname: string): boolean {
     WEBHOOK_SECRET_ROUTES.some((r) => matchesRoute(pathname, r)) ||
     WEBHOOK_SECRET_DYNAMIC_ROUTES.some((r) => r.test(pathname))
   );
+}
+
+/**
+ * Item (7): 403 answer-safety. A tenant refusal on a page NAVIGATION (a real
+ * browser loading a document — its Accept always includes text/html) renders
+ * a friendly sign-in page the client can act on — re-open the link, no fresh
+ * link needed — instead of a bare JSON blob. Everything else (anything under
+ * /api/, fetches, tests, curl, requests with no Accept header) keeps the
+ * machine-readable `{"error": ...}` JSON so clients and the InterviewClient
+ * exchange logic never have to parse HTML. Same status, same error code,
+ * different envelope; the refusal itself is never weakened (still 403, still
+ * fail-closed). Backward compatible by construction: only a client that
+ * explicitly asks for HTML gets HTML.
+ */
+function tenantRefusalResponse(request: NextRequest, body: { error: string; message: string }): NextResponse {
+  const headers = { 'cache-control': 'private, no-store' };
+  if (!isDocumentNavigation(request)) return NextResponse.json(body, { status: 403, headers });
+  const safe = body.message.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  return new NextResponse(
+    `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">` +
+    `<title>Sign in required</title></head><body style="font-family:system-ui,sans-serif;max-width:40rem;margin:4rem auto;padding:0 1rem">` +
+    `<h1>Sign in required</h1><p>${safe}</p>` +
+    `<p>Re-open your private interview link to sign in again and continue where you left off — ` +
+    `the same link works until your interview is complete, on any device. ` +
+    `If that link no longer opens, ask your operator for a fresh one.</p></body></html>`,
+    { status: 403, headers: { ...headers, 'content-type': 'text/html; charset=utf-8' } },
+  );
+}
+
+/** True only for a real document navigation: non-API path + client asks for HTML. */
+function isDocumentNavigation(request: NextRequest): boolean {
+  if (request.nextUrl.pathname.startsWith('/api/')) return false;
+  const accept = request.headers.get('accept') || '';
+  return accept.includes('text/html');
 }
 
 /**
@@ -365,6 +403,34 @@ function unauthorized(
 }
 
 /**
+ * CSF-002: re-mint CSRF ONLY for authentic-but-expired tokens.
+ *
+ * WHY: re-minting requires presenting a genuinely signed token that lapsed, so
+ * an attacker gains nothing they did not already get from an unauthenticated
+ * page-load mint. Re-minting for forged/absent tokens would hand a free token
+ * to any direct-to-origin caller. FORGED, ABSENT, or WRONG-ROLE tokens return
+ * the plain 401 with NO cookie — narrow mint surface.
+ */
+async function unauthorizedWithCsrfSelfHeal(
+  request: NextRequest,
+  csrfToken: string | undefined,
+): Promise<NextResponse> {
+  const rejection = unauthorized(request, 'Unauthorized', 'missing-csrf-token');
+  if (await isExpiredAuthenticCsrfToken(csrfToken)) {
+    try {
+      const { value, maxAge } = await signCsrfToken();
+      rejection.cookies.set(CSRF_COOKIE_NAME, value, {
+        ...CSRF_COOKIE_ATTRIBUTES,
+        maxAge,
+      });
+    } catch {
+      // Dev-secret hard-lock: keep the plain 401 (fail-safe).
+    }
+  }
+  return rejection;
+}
+
+/**
  * Constant-time string comparison (DATA-11).
  *
  * `===` on a secret short-circuits on the first differing byte, leaking
@@ -451,14 +517,61 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
   // This permits first-party enrollment even when Access enforcement is enabled.
   if (pathname === '/interview' && (request.method === 'GET' || request.method === 'HEAD')) {
     try { tenantRegistration(requestHost(request)); }
-    catch { return NextResponse.json({error:'unregistered_hostname'},{status:403}); }
+    catch { return tenantRefusalResponse(request, { error: 'unregistered_hostname', message: 'This interview link does not match a registered host. Re-open your private interview link to sign in.' }); }
     const response=NextResponse.next();
     await setCsrfCookieIfMissing(response,request);
     return response;
   }
 
   // These routes verify narrow signed, expiry-bound capabilities themselves.
+  // Item 11 precision: this exemption means NO Cloudflare Access identity is
+  // re-proven in-route for enrollment redemption — the route authenticates the
+  // signed enrollment grant (bearer capability) produced at issuance. The host's
+  // registered Access triple is the PROVISIONING PREREQUISITE that anchors that
+  // grant, and the full-host edge application supplies the owner login where one
+  // is enforced; neither is an in-route check here.
   if (pathname === '/api/auth/interview-session' || pathname === '/api/interview/remote') return NextResponse.next();
+
+  // A04 (SPEC S7 line 277): the completed-company owner entry. The data-free
+  // /owner-login landing (GET/HEAD only — no company data before auth, so no
+  // read or write method may ride this exemption) and the self-authenticating
+  // redemption POST /api/auth/owner-session reach their own handlers BEFORE
+  // generic Access/session/bearer enforcement and the tenant-board rewrite
+  // below. Both still require a registered direct self-kind installation —
+  // the route refuses foreign/expired/replayed tickets itself — and no other
+  // owner-session verb is exempt: GET/PATCH/DELETE still require a verified
+  // existing browser identity at the handler (checked here by the apiTenant
+  // passthrough logic rather than by exemption), no wildcard auth bypass, no
+  // anonymous HQ data, no change to the configured edge Access policy. The
+  // landing mints the signed anti-forgery (mc_csrf_token) cookie the POST
+  // presents; the POST itself is read by the route, not this cookie mint.
+  // Matches the narrowly self-authenticating interview-session pattern above,
+  // never the tenant passthrough at :575. Node-only owner-login module is
+  // never imported here — the exemption is a path decision, not a grant check.
+  if (pathname === '/owner-login' || pathname === '/api/auth/owner-session') {
+    // Method scope is the exemption: ONLY the data-free landing read and the
+    // self-authenticating redemption ride it. Any other verb on either path
+    // fails closed to its own refusal below — it must never NextResponse.next()
+    // into the shell lock's page fallthrough (POST /owner-login) or the Layer 2
+    // bearer gate's fallthrough.
+    const ownerLoginExempt =
+      (pathname === '/owner-login' && (request.method === 'GET' || request.method === 'HEAD')) ||
+      (pathname === '/api/auth/owner-session' && request.method === 'POST');
+    if (!ownerLoginExempt) {
+      return NextResponse.json({ error: 'owner_login_method_refused' }, { status: 403, headers: { 'cache-control': 'private, no-store' } });
+    }
+    try {
+      const registration = tenantRegistration(requestHost(request));
+      if (registration.kind !== 'self') {
+        return NextResponse.json({ error: 'hq_direct_origin_required' }, { status: 403, headers: { 'cache-control': 'private, no-store' } });
+      }
+    } catch {
+      return tenantRefusalResponse(request, { error: 'unregistered_hostname', message: 'This sign-in link does not match a registered Headquarters host. Ask your operator for a fresh private link.' });
+    }
+    const response = NextResponse.next();
+    if (pathname === '/owner-login') await setCsrfCookieIfMissing(response, request);
+    return response;
+  }
 
   // F27 social-theme mini app: every route under /api/social-theme/* verifies
   // its own narrow, expiry-bound capability itself — the social-theme session
@@ -506,9 +619,29 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
     // All browser identities are tenant-bound, even when Origin/Referer is absent.
     let apiTenant: Awaited<ReturnType<typeof resolveTenantContext>> | null = null;
     try { apiTenant = await resolveTenantContext(request); } catch { /* legacy signed producer gates below still apply */ }
+    // A04 (SPEC S7 line 269): direct-host HQ refusal BEFORE generic resolution.
+    // A shared client-kind host must never fall through to the tenant-board
+    // rewrite below: /api/hq/* and the owner entry require a direct `kind:'self'`
+    // registration with a matching installation — a shared client-host request
+    // gets 403 hq_direct_origin_required here, before any rewrite, before the
+    // producer dual-auth gate below, with no private data attached. The
+    // producer POST /api/hq/activity keeps its own dual-auth (bearer + HMAC)
+    // at the route + gate B below; this block only refuses client-kind hosts,
+    // never waives auth. `matchesRoute` subtree, not exact: /api/hq alone and
+    // every descendant.
+    if (matchesRoute(pathname, '/api/hq') || pathname === '/api/auth/owner-session') {
+      try {
+        const reg = tenantRegistration(apiTenant?.host ?? requestHost(request));
+        if (reg.kind === 'client') {
+          return NextResponse.json({ error: 'hq_direct_origin_required' }, { status: 403, headers: { 'cache-control': 'private, no-store' } });
+        }
+      } catch {
+        return tenantRefusalResponse(request, { error: 'unregistered_hostname', message: 'This sign-in link does not match a registered Headquarters host. Ask your operator for a fresh private link.' });
+      }
+    }
     if (apiTenant?.kind === 'client' && !pathname.startsWith('/api/interview/') && !pathname.startsWith('/api/auth/') && !pathname.startsWith('/api/tenant-board/')) {
       if (!isReadOnlyMethod(request.method) && apiTenant.subject !== 'operator:api' && !await verifyCsrfToken(request.cookies.get(CSRF_COOKIE_NAME)?.value)) {
-        return unauthorized(request, 'Unauthorized', 'missing-csrf-token');
+        return unauthorizedWithCsrfSelfHeal(request, request.cookies.get(CSRF_COOKIE_NAME)?.value);
       }
       const remote = request.nextUrl.clone();
       remote.pathname = '/api/tenant-board/' + pathname.slice('/api/'.length);
@@ -587,15 +720,21 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
         const csrfToken = request.cookies.get(CSRF_COOKIE_NAME)?.value;
         const csrfValid = await verifyCsrfToken(csrfToken);
         if (!csrfValid) {
-          return unauthorized(
-            request,
-            'Unauthorized',
-            'missing-csrf-token',
-          );
+          return unauthorizedWithCsrfSelfHeal(request, csrfToken);
         }
       }
       const passthrough = authenticatedNext();
-      if (cfEmail) passthrough.headers.set('x-operator-email', cfEmail);
+      // Identity mirror (ISR-001): carry ONLY the cryptographically verified
+      // tenant subject/email from resolveTenantContext — never the raw
+      // Cf-Access-Authenticated-User-Email header, which is attacker-controlled
+      // when the edge assertion is absent or unverified.
+      if (apiTenant?.email) passthrough.headers.set('x-operator-email', apiTenant.email);
+      // CSF-002 EDIT A: mint CSRF on same-origin API passthrough. Token minted
+      // only on page responses, so sitting longer than CSRF_COOKIE_TTL_SECONDS
+      // (3600s) keeps sending stale token 401s on next answer.
+      // setCsrfCookieIfMissing no-ops when presented token verifies, so this
+      // costs one HMAC verify per call.
+      await setCsrfCookieIfMissing(passthrough, request);
       return passthrough;
     }
 
@@ -606,7 +745,10 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
     if (!MC_API_TOKEN) {
       if (ALLOW_INSECURE_OPEN_API) {
         const passthrough = authenticatedNext();
-        if (cfEmail) passthrough.headers.set('x-operator-email', cfEmail);
+        // Verified-only mirror (ISR-001): the raw CF email header is never
+        // forwarded. apiTenant here resolved pre-bearer (same-origin/session
+        // or verified Access JWT), so its email is already verified-or-absent.
+        if (apiTenant?.email) passthrough.headers.set('x-operator-email', apiTenant.email);
         return passthrough;
       }
       return unauthorized(
@@ -660,7 +802,8 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
     if (!apiTenant) return NextResponse.json({error:'unverified_tenant_registration'}, {status:403});
 
     const passthrough = authenticatedNext();
-    if (cfEmail) passthrough.headers.set('x-operator-email', cfEmail);
+    // Verified-only mirror (ISR-001) — see the passthrough block above.
+    if (apiTenant.email) passthrough.headers.set('x-operator-email', apiTenant.email);
     return passthrough;
   }
 
@@ -684,8 +827,9 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
   ) {
     const token = request.cookies.get(INTERVIEW_COOKIE_NAME)?.value;
     let scope='unverified';
-    try { const tenant=await resolveTenantContext(request); scope=`${tenant.tenantId}:${tenant.installationId}:${tenant.host}`; }
-    catch { return NextResponse.redirect(new URL('/interview', request.url),302); }
+    let gateEmail: string | null = null;
+    try { const tenant=await resolveTenantContext(request); scope=`${tenant.tenantId}:${tenant.installationId}:${tenant.host}`; gateEmail=tenant.email ?? null; }
+    catch { return tenantRefusalResponse(request, { error: 'tenant_access_required', message: 'Sign in with an authorized account. If access still fails, contact your operator. This is an access issue, not an incomplete interview.' }); }
     const verdict = await verifyInterviewToken(token,scope);
     if (verdict.complete === true && verdict.valid && await checkInterviewCompleteViaFallback(request.headers.get('host'))) {
       // Primary cookie is valid-complete — admit immediately.
@@ -752,7 +896,8 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
       }
       if (!admitted) {
         const redirect = NextResponse.redirect(new URL('/interview', request.url), 302);
-        if (cfEmail) redirect.headers.set('x-operator-email', cfEmail);
+        // Verified-only mirror (ISR-001) — never the raw CF email header.
+        if (gateEmail) redirect.headers.set('x-operator-email', gateEmail);
         return redirect;
       }
       if (needCookie) {
@@ -771,7 +916,8 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
         // MR-23: set signed CSRF cookie on page responses so mutating API calls
         // from the browser carry the token.
         await setCsrfCookieIfMissing(response, request);
-        if (cfEmail) response.headers.set('x-operator-email', cfEmail);
+        // Verified-only mirror (ISR-001) — never the raw CF email header.
+        if (gateEmail) response.headers.set('x-operator-email', gateEmail);
         return response;
       }
     }
@@ -782,7 +928,15 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
   // MR-23: set signed CSRF cookie on page responses so mutating API calls
   // from the browser carry the token.
   await setCsrfCookieIfMissing(response, request);
-  if (cfEmail) response.headers.set('x-operator-email', cfEmail);
+  // Verified-only identity mirror (ISR-001): the shell-lock block resolved the
+  // tenant above only for gated paths; page paths resolve here so the mirror
+  // still carries ONLY a verified subject/email, never the raw header.
+  try {
+    const pageTenant = await resolveTenantContext(request);
+    if (pageTenant.email) response.headers.set('x-operator-email', pageTenant.email);
+  } catch {
+    // Unverified page visitor — no identity mirror (fail-closed downstream).
+  }
   return response;
 }
 

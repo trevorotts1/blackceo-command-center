@@ -32,6 +32,7 @@ import { queryOne, queryAll, run, transaction } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { transition, TransitionError } from '@/lib/task-lifecycle';
 import { recordBlockEvent } from '@/lib/block-events';
+import { stopCardPermanently } from '@/lib/stop-card';
 import { isBlankAsk } from '@/lib/blocked-ask';
 import type { Task } from '@/lib/types';
 
@@ -53,6 +54,8 @@ export interface CreateAdCampaignInput {
   department?: string;
   workspace?: string;
   agent_id?: string;
+  /** Optional epic title prefix; default 'FB Ad Run' when absent. */
+  title_prefix?: string;
   money_ceiling_usd?: number;
   estimated_cost_usd?: number;
   show_date?: string;
@@ -81,6 +84,7 @@ export interface CreateAdCampaignResult {
   campaign_id: string;
   parent_id: string | null;
   stages: StageRef[];
+  title_prefix?: string;
 }
 
 /**
@@ -184,13 +188,20 @@ export function createAdCampaign(input: CreateAdCampaignInput): CreateAdCampaign
   const department = input.department || 'marketing';
   const now = new Date().toISOString();
 
+  // Epic title/description use the optional title_prefix; 'FB Ad Run' default
+  // keeps Skill 48 payloads (no title_prefix) byte-identical to before.
+  const epicTitle = `${input.title_prefix ?? 'FB Ad Run'} — ${input.show_name}`;
+  const epicDescription = input.owner
+    ? `Skill 48 Facebook ad run. owner=${input.owner}`
+    : 'Skill 48 Facebook ad run.';
+
   // Build the card list: epic parent first, then one card per stage.
   const stageList = input.stages && input.stages.length > 0 ? input.stages : DEFAULT_AD_STAGES;
   const cardsToInsert: Array<{ id: string; slug: string; title: string }> = [];
   cardsToInsert.push({
     id: uuidv4(),
     slug: EPIC_SLUG,
-    title: `FB Ad Run — ${input.show_name}`,
+    title: epicTitle,
   });
   for (const stage of stageList) {
     cardsToInsert.push({
@@ -209,8 +220,8 @@ export function createAdCampaign(input: CreateAdCampaignInput): CreateAdCampaign
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         jobId,
-        `FB Ad Run — ${input.show_name}`,
-        input.owner ? `Skill 48 Facebook ad run. owner=${input.owner}` : 'Skill 48 Facebook ad run.',
+        epicTitle,
+        epicDescription,
         'active',
         JSON.stringify([]),
         null,
@@ -259,7 +270,7 @@ export function createAdCampaign(input: CreateAdCampaignInput): CreateAdCampaign
   }
 
   const { parentId, stages } = readStageRefs(jobId);
-  return { ok: true, created: true, campaign_id: jobId, parent_id: parentId, stages };
+  return { ok: true, created: true, campaign_id: jobId, parent_id: parentId, stages, title_prefix: input.title_prefix };
 }
 
 // ---------------------------------------------------------------------------
@@ -300,6 +311,24 @@ export async function moveAdStage(jobId: string, input: MoveAdStageInput): Promi
       [input.blocked_reason, input.blocked_on_human || 'operator', input.ask, now, card.id],
     );
     const updated = await transition(card.id, 'blocked', { actor, reason, operatorOverride: true });
+    // NO-SILENT-STOP: a stage card parked on a named human is a card that will not
+    // move again until that human acts — a permanent stop by any definition, and
+    // until now one that told nobody. The producer that called this API knows;
+    // the person named in `blocked_on_human` did not. The chokepoint stamps the
+    // claim and sends exactly one notice, on the lane that person belongs to.
+    // applyBlock:false — the transition and the block_* metadata landed above.
+    await stopCardPermanently({
+      taskId: card.id,
+      source: actor,
+      reason:
+        `This step is waiting on a person before it can go any further` +
+        `${input.blocked_reason ? ` (${input.blocked_reason})` : ''}. ` +
+        `Nothing else will happen on it until that is answered.`,
+      needs: input.ask ?? 'Answer the question on the card so the work can continue.',
+      audience: (input.blocked_on_human || 'operator') === 'owner' ? 'OWNER' : 'SYSTEM',
+      machineDetail: reason ?? `stage stage parked: ${input.blocked_reason}`,
+      applyBlock: false,
+    });
     // MR-30 — snapshot the block metadata so the history survives the unblock
     // (the blocked_* columns are cleared when the card leaves blocked). Gated
     // on a genuine entry into blocked: transition() is idempotent for same-
@@ -332,7 +361,8 @@ export async function moveAdStage(jobId: string, input: MoveAdStageInput): Promi
     run(
       `UPDATE tasks
           SET blocked_reason = NULL, blocked_on_human = NULL, ask = NULL,
-              block_reason = NULL, block_needs = NULL, block_audience = NULL
+              block_reason = NULL, block_needs = NULL, block_audience = NULL,
+              blocked_notice_sent_at = NULL
         WHERE id = ?`,
       [card.id],
     );

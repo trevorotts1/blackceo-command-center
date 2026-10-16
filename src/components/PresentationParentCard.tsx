@@ -49,6 +49,11 @@ import { useMissionControl } from '@/lib/store';
 // pill and block-transparency panel as every flat card on the board.
 import { StatusPill } from './kanban/StatusPill';
 import { BlockedPanel } from './kanban/BlockedPanel';
+import {
+  PresentationEnginePanel,
+  AbandonedPill,
+  type EngineParkView,
+} from './kanban/PresentationEnginePanel';
 import { MoveTaskMenu } from './kanban/MoveTaskMenu';
 import { taskToColumnId } from '@/lib/board-projection';
 import type { Task, TaskStatus } from '@/lib/types';
@@ -113,6 +118,12 @@ interface ParentData {
   block_needs?: string | null;
   block_audience?: 'OWNER' | 'SYSTEM' | null;
   dispatch_attempts?: number | null;
+  // Item 19 — the engine's own run record, served by
+  // /api/presentations/children from the bound run's state.json: the
+  // terminal vocabulary (ABANDONED included) and the plain-words park
+  // view. Null when the run record is UNDETERMINED on this box.
+  engine_terminal?: string | null;
+  park_status?: EngineParkView | null;
 }
 
 interface AggregateData {
@@ -457,6 +468,14 @@ export default function PresentationParentCard({
   );
   const faceStatus = faceTask.status;
 
+  // Item 19 — engine truth for this run: the children payload is the
+  // freshest read (refetched on SSE pulses); the board's projected Task
+  // row is the fallback so the standalone preview and first paint agree.
+  const engineTerminal =
+    parent.engine_terminal ?? parentTask?.engine_terminal ?? null;
+  const parkView: EngineParkView | null =
+    parent.park_status ?? parentTask?.park_status ?? null;
+
   // ── Parent card render ────────────────────────────────────────────────
   // FIX 51b — the root is draggable like a flat TaskCard (native HTML5 DnD,
   // MissionQueue's handleDragStart; the column's onDrop runs the shared
@@ -551,6 +570,10 @@ export default function PresentationParentCard({
         <div className="flex items-center gap-3 text-xs text-gray-500 mb-3">
           {/* FIX 51a/51b — shared status pill: identical to every flat card. */}
           <StatusPill status={faceStatus} />
+          {/* Item 19 — an engine-ABANDONED run carries its own pill beside
+              the posted status: the producer posts terminal runs as
+              `review`, so without this the run reads as awaiting QC. */}
+          {engineTerminal === 'ABANDONED' && <AbandonedPill />}
           <span className="flex items-center gap-1">
             <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
             <span>
@@ -572,6 +595,16 @@ export default function PresentationParentCard({
             blocked flat card renders (audience badge, reason, gaps, next
             step, heal attempts). Gated + styled inside BlockedPanel. */}
         <BlockedPanel task={faceTask} />
+
+        {/* Item 19 — the engine's own word on this run: ABANDONED panel,
+            or the plain-words park record with the engine resume action.
+            Renders nothing when the run record carries neither. */}
+        <PresentationEnginePanel
+          taskId={taskId}
+          park={parkView}
+          terminal={engineTerminal}
+          onAfterResume={() => { void fetchData(); }}
+        />
 
         {/* 7-label stepper — always visible, even when children are collapsed */}
         <PhaseStepper

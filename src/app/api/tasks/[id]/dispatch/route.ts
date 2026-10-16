@@ -1,5 +1,6 @@
 import { capturePersonaSnapshot } from '@/lib/persona-state';
 import { renderPersonaConformanceInstructions } from '@/lib/persona-conformance';
+import { captureExecutionLoadEvidence } from '@/lib/execution-load-evidence';
 import { NextRequest, NextResponse } from 'next/server';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -12,13 +13,13 @@ import { broadcast } from '@/lib/events';
 import { getProjectsPath, getMissionControlUrl } from '@/lib/config';
 import { detectPlatform } from '@/lib/platform';
 import { resolveAndLog, resolveSpecialistType } from '@/lib/intelligence-resolver';
-import { buildPersonaBlock, buildPersonaPlanBlock } from '@/lib/persona-dispatch';
+import { renderDispatchPersonaSection } from '@/lib/persona-dispatch';
 import { renderOwnerMessagesSection } from '@/lib/owner-messages';
 import { loadSubtaskPersonas } from '@/lib/persona-selector';
 import { checkModelSovereignty, detectModality } from '@/lib/model-selector';
 import { listModels } from '@/lib/model-registry';
 import { canonicalDeptSlug, expandDeptSlugAliases } from '@/lib/routing/canonical-slug';
-import { recordDispatchFailure } from '@/lib/task-dispatcher';
+import { recordDispatchFailure, recordDispatchRunBinding, gatewayRunIdFromResult, acceptedRunReplayForTask } from '@/lib/task-dispatcher';
 import { blockDispatchIfOwnerKilled } from '@/lib/owner-killed';
 import {
   checkDuplicateDispatch,
@@ -29,6 +30,7 @@ import { checkTaskWriteAuth, renderWriteBackInstructions } from '@/lib/mc-auth';
 import { transition, recordStatusEvent, checkWipLimit } from '@/lib/task-lifecycle';
 import {
   resolveAgentRuntimeModel,
+  resolveRuntimeModelChainFromConfig,
   modelsMatch,
   recordModelSkewEvent,
   reconcileTaskModelRecord,
@@ -389,6 +391,71 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
       return NextResponse.json({ error: 'Assigned agent not found' }, { status: 404 });
     }
 
+    // ── B20 — ACCEPTED-NOT-DELIVERED REPLAY SUPPRESSION ────────────────────────
+    // EXISTING EXECUTION IDEMPOTENCY IS PRESERVED: the duplicate-window gate
+    // above still fires exactly as it did (it runs first, unchanged), and the
+    // DISP-01 gateway idempotencyKey still collapses concurrent sends. This
+    // guard closes the one gap that window cannot see — a replayed POST for a
+    // task whose gateway run was ALREADY ACCEPTED, arriving after the window
+    // elapsed — by REFUSING a second dispatch instead of sending the same work
+    // twice. An accepted dispatch that was never delivered is never replayed
+    // into a duplicate.
+    //
+    // The evidence is the accepted source mapping B20 itself wrote
+    // (hq_run_bindings, SPEC S6 line 243 — one row per ACCEPTED run), scoped to
+    // the task's own company. An UNCERTAIN send writes NO row, so unproven work
+    // is never admitted here and never suppresses the reconciliation retry. It
+    // sits BEFORE any reservation, so a suppressed replay claims no execution,
+    // no provider pool slot and mints no idempotency key.
+    //
+    // `{ force: true }` still overrides: deliberate operator re-dispatch after a
+    // frozen or undelivered run keeps working, exactly as the duplicate-window
+    // contract states.
+    if (!forceDispatch) {
+      const priorRun = acceptedRunReplayForTask(task.id, task.workspace_id);
+      if (priorRun) {
+        const replayMsg =
+          `[dispatch_replay_suppressed] Task "${task.title}" already has an ACCEPTED gateway run ` +
+          `(execution ${priorRun.executionId ?? 'unknown'}, accepted ${priorRun.acceptedAt}). The replay was ` +
+          `SUPPRESSED so the agent does not receive the task twice. Acceptance is not delivery — check the ` +
+          `run's actual progress before trusting it. To re-dispatch deliberately, repeat the request with ` +
+          `{ "force": true }.`;
+        console.warn(`[Dispatch] ${replayMsg}`);
+        const nowReplay = new Date().toISOString();
+        run(
+          `INSERT INTO task_activities (id, task_id, agent_id, activity_type, message, metadata, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [
+            uuidv4(), task.id, agent.id, 'dispatch_replay_suppressed', replayMsg,
+            JSON.stringify({
+              reason: 'accepted_run_replay',
+              accepted_execution_id: priorRun.executionId,
+              accepted_at: priorRun.acceptedAt,
+              forced: false,
+            }),
+            nowReplay,
+          ],
+        );
+        run(
+          `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [uuidv4(), 'dispatch_replay_suppressed', agent.id, task.id, replayMsg, nowReplay],
+        );
+        broadcast({ type: 'task_updated', payload: task });
+        return NextResponse.json(
+          {
+            success: false,
+            held: true,
+            suppressed: true,
+            reason: 'accepted_run_replay',
+            message: replayMsg,
+            accepted_execution_id: priorRun.executionId,
+          },
+          { status: 409 },
+        );
+      }
+    }
+
     // Check if dispatching to the master agent while there are other orchestrators available
     if (agent.is_master) {
       // Check for other master agents in the same workspace (excluding this one)
@@ -610,11 +677,7 @@ ${stepLines.join('\n')}
     // block for a decomposed multi-persona task. buildPersonaPlanBlock returns ''
     // for a single-persona task, so this path is a no-op regression there. Keeps
     // the two dispatch messages byte-identical for the persona section (FDN-3).
-    const subtaskPlan = loadSubtaskPersonas(task.id);
-    const personaPlanBlock = buildPersonaPlanBlock(subtaskPlan, settings);
-    const personaSection = personaPlanBlock
-      ? `${buildPersonaBlock(task, settings)}\n${personaPlanBlock}`
-      : buildPersonaBlock(task, settings);
+    const personaSection = renderDispatchPersonaSection(task, settings, loadSubtaskPersonas(task.id));
 
     // Layer A (departments-that-use-skills): match installed SKILL.md files to
     // the task and deliver the top-3 to the doer — parity with the auto path.
@@ -839,15 +902,53 @@ If you need help or clarification, ask the orchestrator.`;
       );
     }
 
-    const { checkPersonaDispatchReady } = await import('@/lib/tasks');
+    // AUDIENCE CONFIRM — take the GATE's verdict, not the raw column.
+    //
+    // evaluateAudienceConfirmGate releases a card whose confirm deadline has
+    // passed (hold=false, state='deadline_fallback'), but the release is only
+    // durable once `task_persona_bundle.confirm_state` is flipped — which the
+    // auto-dispatcher does and this route never did. So checkPersonaDispatchReady
+    // read a column still saying 'pending' and refused with 409: on a live box
+    // an operator could not hand-dispatch a card the gate had already let go.
+    // Flip it here exactly as the sweep does. A hard-hold build department is
+    // NOT released this way (A-U4 / D23) — it stays refused for the owner.
+    const { checkPersonaDispatchReady, evaluateAudienceConfirmGate, markAudienceDeadlineFallback, isHardHoldConfirmDepartment } = await import('@/lib/tasks');
+    const audienceGate = evaluateAudienceConfirmGate(task.id);
+    if (!audienceGate.hold && audienceGate.state === 'deadline_fallback'
+        && !isHardHoldConfirmDepartment(canonicalDeptSlug(task.department || task.workspace_id || '') || 'general')) {
+      // Fail-safe: best-guess the audience first (same path as auto-dispatch);
+      // house-voice release only when both tiers fail.
+      const { bestGuessAudienceForTask } = await import('@/lib/audience-best-guess');
+      const guess = await bestGuessAudienceForTask(task.id, agent.id).catch(() => null);
+      if (!guess) markAudienceDeadlineFallback(task.id);
+    }
     const personaReady = checkPersonaDispatchReady(task.id);
     if (!personaReady.ready) return NextResponse.json({success:false,held:true,reason:personaReady.reason},{status:409});
-    const claim = reserveExecution({...task,persona_snapshot:personaSendSnapshot},sessionKey,executionId);
-    if (!claim.execution) return NextResponse.json({success:false,held:true,reason:claim.reason},{status:409});
+    // PROVIDER POOL: the reservation is counted against the PRIMARY subscription
+    // — the model the run will actually attempt. Resolved from openclaw.json the
+    // same way FIX-15 resolves the model after the send (the gateway half needs
+    // a session that does not exist yet). The agent's declared fallbacks ride
+    // along only so a refusal can report where there IS room.
+    const modelChain = resolveRuntimeModelChainFromConfig(agent, task.workspace_id ?? undefined);
+    const claim = reserveExecution(
+      {...task,persona_snapshot:personaSendSnapshot,model_chain:modelChain.length ? modelChain : (agent.model ? [agent.model] : [])},
+      sessionKey,executionId,
+    );
+    if (!claim.execution) return NextResponse.json({success:false,held:true,reason:claim.reason,provider:claim.provider,running:claim.running,limit:claim.limit,pools:claim.summary,fallbacksWithRoom:claim.fallbacksWithRoom},{status:409});
     const execution=claim.execution;
     if (!beginExecutionSend(execution)) return NextResponse.json({success:false,held:true,reason:'claim_superseded'},{status:409});
     let acknowledged = false;
     try {
+      // A40: record the load contract (revision + required blueprint sections)
+      // at the moment the work is handed over. Before this call the capture had
+      // no production caller, so load evidence could never exist on a real
+      // card. Never fatal — a bundle-less task or pre-migration box returns a
+      // soft status, and a capture failure must not block a dispatch.
+      try {
+        captureExecutionLoadEvidence(task.id, execution.id);
+      } catch (loadCapErr) {
+        console.warn(`[dispatch route] load-evidence capture skipped for ${task.id}/${execution.id}:`, (loadCapErr as Error).message);
+      }
       // Send message to agent's session using chat.send.
       //
       // GATEWAY CONTRACT (verified against installed OpenClaw 2026.5.28 source,
@@ -872,11 +973,32 @@ If you need help or clarification, ask the orchestrator.`;
         sessionKey,
         message: `${taskMessage}\n\n${renderPersonaConformanceInstructions(task.id, executionId, agent.id, missionControlUrl)}\n\n**Execution ID:** ${executionId}\nInclude execution_id: "${executionId}" in completion webhook JSON.`,
         idempotencyKey: execution.idempotency_key,
-        timeoutMs: 30000,
+        // [RUN-BUDGET-FIX 2026-09-15] Deliberately NO timeoutMs here.
+        // The gateway reads chat.send timeoutMs as the WHOLE AGENT RUN budget,
+        // not as an acknowledgement bound: chat-send-handler resolves
+        // resolveAgentTimeoutMs({ cfg, overrideMs: p.timeoutMs }) and feeds it into
+        // resolveChatRunExpiresAtMs, whose hard floor is 120 s. Passing 30000 gave
+        // 30s + 60s grace = 90 s, under that floor, so every dispatched run was
+        // killed at ~120-180 s. Omitting the field falls back to
+        // agents.defaults.timeoutSeconds (3600 = 1 h), the intended budget.
+        // The RPC envelope still uses the gateway default (30 s) -- unchanged.
       });
 
       recordExecutionAcceptance(execution,acknowledgement);
       acknowledged = true;
+      // B20 — bind the ACCEPTED dispatch to its ACTUAL gateway run (SPEC S5
+      // step 6, S6 `hq_run_bindings`). Trusted server state only: the task/
+      // agent/execution triple comes from the rows this handler already read,
+      // never from the request body, the task message or any tool params.
+      // Reachable ONLY after the gateway acknowledged the send — acceptance is
+      // not delivery, and this frozen table cannot say otherwise.
+      recordDispatchRunBinding({
+        taskId: task.id,
+        executionId: execution.id,
+        agentId: agent.id,
+        sessionKey,
+        acceptedRunId: gatewayRunIdFromResult(acknowledgement),
+      });
 
       // FIX-15 (Error 7 / R7 — model skew): pin the ACTUAL runtime model on the
       // task, not the CC's "intended" resolution. The gateway has no supported
@@ -1016,7 +1138,12 @@ If you need help or clarification, ask the orchestrator.`;
     } catch (err) {
       console.error('Dispatch acknowledgement/bookkeeping failed:', err);
       if (acknowledged) return NextResponse.json({success:true,task_id:task.id,execution_id:executionId,warning:'accepted_bookkeeping_failed'});
-      recordExecutionUnknown(execution);
+      // The error travels so a 429 shuts the provider pool (see recordExecutionUnknown).
+      recordExecutionUnknown(execution, undefined, err);
+      // B20 — NO binding for an uncertain send: no acknowledgement means no
+      // acceptance, and the frozen SPEC S6 table records accepted source runs
+      // only. A row here would resolve a trusted taskId for unproven work and
+      // would suppress the reconciliation retry this path deliberately allows.
       return NextResponse.json({success:false,task_id:task.id,execution_id:executionId,
         reason:'send_acceptance_unknown',message:'Reconcile this execution before retrying.'},{status:202});
     }

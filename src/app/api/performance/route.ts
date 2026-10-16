@@ -17,7 +17,7 @@ export const dynamic = 'force-dynamic';
  * (KPIStatCards.tsx and related redesign components — the `CEODashboard`
  * component this comment used to reference was dead code, deleted in U57).
  *
- * DEFECT 1 (2026-08-04, "WANTED Woman" / wanted-woman incident): every metric
+ * DEFECT 1 (2026-08-04, "Client A" / client-a incident): every metric
  * here used to be a BARE, UNSCOPED `COUNT(*)` / `GROUP BY` over `tasks` and
  * `agents` — no join to `workspaces`, no company filter, no dept- prefix
  * dedup. On a box carrying duplicate workspace rows for the same department

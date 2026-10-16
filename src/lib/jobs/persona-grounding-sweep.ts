@@ -1,7 +1,7 @@
 /**
  * A-U12 — persona_grounding_degraded board event (CC half of the both-repo
  * unit; ONB's shared-utils/persona_grounding_health_probe.py, merged
- * 2026-07-16 commit 4411c87b, is the other half). Mirrors sweep-liveness.ts's
+ * 2026-07-16 commit 4411c87b, is the other half). Mirrors board-jobs-watchdog.ts's
  * cooldown-guarded, NULL-task_id event pattern for a board-wide,
  * non-task-scoped condition — the same pattern board-hygiene.ts's
  * processBlendRegressionCheck established first (task_id is nullable on
@@ -14,7 +14,7 @@
  * already owns `persona_blend_regression` / `persona_mismatch`
  * (board-hygiene.ts)."
  *
- * Two readers, same split as sweep-liveness.ts:
+ * Two readers, same split as board-jobs-watchdog.ts:
  *   1. checkPersonaGrounding() (deep-checks.ts) — pure, side-effect-free
  *      read folded into /api/health/deep's `advisory.persona_match`. Never
  *      gates the box's pass/indeterminate verdict (A-U12 acceptance (a)).
@@ -25,12 +25,12 @@
  * DESIGN DECISION (A-U12 acceptance (c), "restoring it clears the chip"):
  * the board CHIP (PersonaGroundingBanner.tsx) does NOT read this event feed
  * — `events` is an append-only feed-of-record (persona_mismatch /
- * persona_blend_regression / sweep_liveness_alert rows never clear). The
+ * persona_blend_regression / board_jobs_watchdog_alert rows never clear). The
  * chip instead renders from the LIVE deep-health advisory (current probe
  * state) on every poll, so it clears the moment a probe cycle reports
  * grounding healthy again — no separate "resolved" bookkeeping needed. This
  * event is the durable, cooldown-guarded AUDIT record of the transition,
- * same posture as sweep_liveness_alert / persona_blend_regression.
+ * same posture as board_jobs_watchdog_alert / persona_blend_regression.
  */
 import { v4 as uuidv4 } from 'uuid';
 import { queryOne, run, timeNow, sqlTime } from '@/lib/db';
@@ -45,7 +45,7 @@ function numEnv(name: string, fallback: number): number {
 }
 
 /** Re-alert cadence while the condition persists (default 60 minutes),
- *  mirroring SWEEP_LIVENESS_ALERT_COOLDOWN_MINUTES's precedent. */
+ *  mirroring BOARD_JOBS_WATCHDOG_ALERT_COOLDOWN_MINUTES's precedent. */
 const ALERT_COOLDOWN_MINUTES = numEnv('PERSONA_GROUNDING_ALERT_COOLDOWN_MINUTES', 60);
 
 function isDisabled(): boolean {

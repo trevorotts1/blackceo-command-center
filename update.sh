@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # ============================================================
 #  BlackCEO Command Center — Updater
-#  Pulls latest from GitHub, installs deps, runs migrations.
-#  DESTRUCTIVE: replaces app code in-place. Backs up first.
+#  Fetches the latest release and deploys it through scripts/atomic-deploy.sh.
+#  Zero-downtime path (clean fast-forward): the live code, node_modules and
+#  build are untouched until the new release is built beside them and promoted.
+#  Otherwise the merge path updates the live checkout in place. Backs up first.
 #
 #  ENV OVERRIDES — an explicit pin ALWAYS wins over autodetection. Each of
 #  these is used verbatim when set, and the corresponding autodetection is
@@ -251,25 +253,88 @@ fi
 cd "$INSTALL_DIR"
 
 # Node runtime preflight — before backup pruning or checkout mutations.
-# Keep this bootstrap check aligned with package.json engines. It cannot depend
-# on node_modules: the updater also handles fresh/pruned checkouts. npm ci below
-# additionally enforces the engine declarations of the newly merged lockfile.
+#
+# ISSUE-09. This gate used to run a bare `node --version` against the declared
+# range, and that is how a box ended up running the app on one node while its
+# cron and update shells used another: `npm ci` and postinstall's
+# `npm rebuild better-sqlite3` compiled the native module for whichever node
+# the UPDATE SHELL happened to resolve, pm2 then loaded it under the node the
+# SERVER was on, and better-sqlite3 threw NODE_MODULE_VERSION on every boot.
+#
+# The defect is DRIFT between those two nodes, not the version of either. An
+# earlier revision of this file tried to fix it by requiring major 24, which
+# measured against the live fleet would have refused updates on most boxes:
+# two client machines and the operator Mac run v26.7.0 or v26.8.1 with no
+# node@24 installed at all. Locking the majority of the fleet out of updating
+# is not a fix.
+#
+# So this gate now does two separate things, in the right order:
+#
+#   IDENTITY  scripts/lib/node-runtime.sh resolves the ONE node this box uses,
+#             preferring the node recorded in the served artifact's manifest
+#             and then the node the live pm2 process runs on, so an update
+#             rebuilds with the same binary that produced what is on disk.
+#             That resolved binary is exported as CC_NODE_BIN and leads PATH,
+#             so `npm ci` and its lifecycle scripts compile against the node
+#             the server will actually exec.
+#
+#   SUPPORT   the RESOLVED node is then checked against package.json engines.
+#             Checking the resolved node rather than ambient `node` is the
+#             point: the thing that must be supported is the thing that will
+#             build and run the app.
 _cc_require_supported_node() {
-  local version major minor
-  command -v node >/dev/null 2>&1 \
-    || fatal "Node.js is missing. Install Node 24 LTS before updating; nothing was changed."
-  version=$(node --version 2>/dev/null) \
-    || fatal "Cannot read Node.js version. Install Node 24 LTS before updating; nothing was changed."
+  local version major minor resolver resolved
+  # ${INSTALL_DIR:-.} rather than $INSTALL_DIR: this whole section is extracted
+  # and executed on its own by tests/unit/update-locked-dependencies.test.ts,
+  # where INSTALL_DIR is unset and `set -u` would abort before a single
+  # assertion ran. In the real updater INSTALL_DIR is always resolved above.
+  resolver="${INSTALL_DIR:-.}/scripts/lib/node-runtime.sh"
+
+  # ── IDENTITY ──────────────────────────────────────────────────────────────
+  CC_NODE_BIN=""
+  if [ -f "$resolver" ]; then
+    if resolved=$(bash "$resolver"); then
+      CC_NODE_BIN="$resolved"
+    else
+      fatal "No usable node binary found (see the resolver output above). Install Node, or set CC_NODE_BIN to an absolute path; nothing was changed."
+    fi
+  else
+    # The checkout predates the resolver (first update onto this release).
+    # Ambient node is the only identity available, and it is still checked
+    # against the declared range below.
+    command -v node >/dev/null 2>&1 \
+      || fatal "Node.js is missing. Install a supported Node before updating; nothing was changed."
+    CC_NODE_BIN="$(command -v node)"
+  fi
+  export CC_NODE_BIN
+
+  # Lead PATH with the runtime directory ONLY when PATH would otherwise find a
+  # different node. That directory also holds an npm, so an unconditional
+  # prepend overrides whatever npm PATH deliberately pointed at, and when the
+  # resolved node is already the one PATH finds, rewriting PATH can only do
+  # harm. Same rule as scripts/atomic-deploy.sh.
+  if [ "$(command -v node 2>/dev/null || true)" != "$CC_NODE_BIN" ]; then
+    export PATH="$(dirname "$CC_NODE_BIN"):$PATH"
+  fi
+
+  # ── SUPPORT: the RESOLVED node against package.json engines ───────────────
+  # Keep this rule aligned with the engines field
+  # (^20.19.0 || ^22.13.0 || >=24). It cannot read package.json here: the
+  # updater also handles fresh/pruned checkouts, and npm ci below additionally
+  # enforces the engine declarations of the newly merged lockfile.
+  version=$("$CC_NODE_BIN" --version 2>/dev/null) \
+    || fatal "Cannot read the version of $CC_NODE_BIN. Install a supported Node before updating; nothing was changed."
   if [[ "$version" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
     major=$((10#${BASH_REMATCH[1]}))
     minor=$((10#${BASH_REMATCH[2]}))
     if [ "$major" -ge 24 ] \
       || { [ "$major" -eq 22 ] && [ "$minor" -ge 13 ]; } \
       || { [ "$major" -eq 20 ] && [ "$minor" -ge 19 ]; }; then
+      success "Node runtime: $CC_NODE_BIN ($version, module ABI $("$CC_NODE_BIN" -p process.versions.modules 2>/dev/null || echo unknown))"
       return 0
     fi
   fi
-  fatal "Unsupported Node.js $version. This release requires ^20.19.0 || ^22.13.0 || >=24. Install Node 24 LTS before updating; nothing was changed."
+  fatal "Unsupported Node.js $version at $CC_NODE_BIN. This release requires ^20.19.0 || ^22.13.0 || >=24. Install a supported Node before updating; nothing was changed."
 }
 _cc_require_supported_node
 # End Node runtime preflight
@@ -304,7 +369,26 @@ fi
 # Backup
 # ----------------------------------------------------------
 step "Step 1: Backup"
-if [ -d "/data/.openclaw" ]; then
+# >>> cc_persist_root (FXCC-1 / D22; same text in scripts/weekly-cleanup.sh)
+# Contabo: only the OpenClaw root is a mounted volume; $HOME (/home/node) is the
+# container layer and is wiped on every recreate. Prints the OpenClaw root when
+# it is a mount point and $HOME is not; fails everywhere else (Mac has no
+# `mountpoint`; Hostinger's root is a plain folder inside the /data volume), so
+# those platforms keep their existing paths.
+cc_persist_root() {
+  local r
+  for r in "${OPENCLAW_ROOT:-}" /data/.openclaw "$HOME/.openclaw"; do
+    [ -n "$r" ] && [ -d "$r" ] || continue
+    command -v mountpoint >/dev/null 2>&1 || return 1
+    if mountpoint -q "$r" && ! mountpoint -q "$HOME"; then printf '%s' "$r"; return 0; fi
+    return 1
+  done
+  return 1
+}
+# <<< cc_persist_root
+if _CC_PERSIST="$(cc_persist_root)"; then
+  BACKUP_BASE="$_CC_PERSIST/backups/blackceo-cc-backups"
+elif [ -d "/data/.openclaw" ]; then
   BACKUP_BASE="$HOME/blackceo-cc-backups"
 else
   BACKUP_BASE="$HOME/Downloads/blackceo-cc-backups"
@@ -349,6 +433,204 @@ OLD_VERSION=""
 success "Current version: ${OLD_VERSION:-unknown}"
 
 # ----------------------------------------------------------
+# Steps shared by the zero-downtime path and the merge path
+# ----------------------------------------------------------
+# U133 -- merge-additive departments sync, update-flow. The onboarding flow
+# populates departments.json once during initial setup, but a CC update that
+# ships new department definitions (or upstream changes to existing departments)
+# leaves the old per-box file untouched until the next full onboarding reconcile
+# -- which may never happen on an already-provisioned box. Run
+# sync-departments-from-build-state.py with --merge so new departments are added
+# and existing ones updated in place, while any custom departments the box owner
+# has added manually are preserved. Best-effort: the script exits 0 when no ZHC
+# build-state is available (a fresh box that hasn't run Skill 23 yet), so the
+# update never fails because departments aren't found.
+cc_sync_departments() {
+  step "Step 3: Sync departments from build-state (merge-additive)"
+  local sync="$INSTALL_DIR/scripts/sync-departments-from-build-state.py"
+  if [ -f "$sync" ] && command -v python3 >/dev/null 2>&1; then
+    if python3 "$sync" --merge; then
+      success "Departments synced from build-state (merge-additive)"
+    else
+      warn "Departments sync exited non-zero -- dashboard will use the pre-update departments file."
+    fi
+  elif [ ! -f "$sync" ]; then
+    warn "sync-departments-from-build-state.py not found in the updated checkout -- departments file was NOT synced."
+  else
+    warn "python3 not found -- cannot run departments sync; departments file was NOT synced."
+  fi
+}
+
+# OpenClaw wire-contract guard (runs BEFORE anything is installed or built).
+# Every gateway call in src/lib/openclaw/client.ts is written against an
+# unversioned, undocumented contract that lives only inside the installed
+# `openclaw` package. When upstream renames a field, drops a handler or
+# re-shapes a result, NOTHING in this repo fails: the call still compiles, still
+# type-checks, still ships, and then returns the wrong thing forever at runtime.
+# Three live defects were found that way on one box -- sessions.list returning an
+# envelope the client read as an array, sessions.send being sent the wrong field
+# names, and sessions.history having no handler at all.
+#
+# So the contract is checked against the openclaw ACTUALLY INSTALLED ON THIS BOX,
+# before npm ci / migrations / build / restart -- where a failure costs a
+# refusal instead of a silently wrong dashboard. It names the contract that broke.
+# $1 is the checker of the release being deployed.
+#
+# Set OPENCLAW_CONTRACT_CHECK=0 to bypass (an emergency deploy against a gateway
+# you have already reasoned about). Skipped, loudly, when no openclaw is
+# installed: a box with no gateway has no contract to break.
+cc_contract_check() {
+  local check="$1"
+  if [ "${OPENCLAW_CONTRACT_CHECK:-1}" = "0" ]; then
+    warn "OPENCLAW_CONTRACT_CHECK=0 -- gateway wire contract NOT verified for this update."
+  elif [ ! -f "$check" ]; then
+    warn "scripts/openclaw-contract-check.mjs not found in the updated checkout -- gateway wire contract was NOT verified."
+  elif ! command -v openclaw >/dev/null 2>&1 && [ -z "${OPENCLAW_DIST:-}" ]; then
+    warn "No openclaw on PATH and OPENCLAW_DIST is unset -- no gateway to check against; skipping the contract guard."
+  elif node "$check"; then
+    success "OpenClaw gateway wire contract verified"
+  else
+    fatal "OpenClaw gateway wire contract FAILED (see the named contract above). The dashboard's gateway client would silently misbehave against this openclaw version. Fix src/lib/openclaw/client.ts, or re-run with OPENCLAW_CONTRACT_CHECK=0 to deploy anyway. Dependencies, migrations, build and restart were NOT run."
+  fi
+}
+
+# LIVE-DERIVED pm2 app name (was hardcoded to "blackceo-command-center").
+# On a box whose live CC runs under a different pm2 name (e.g. an operator box
+# running "cc-prod" on :4000), the hardcoded name matched NOTHING: the atomic
+# deploy then restarted/started a SECOND app under the assumed name, which
+# fought the live one for the port. Resolution order — LIVE state wins over
+# any assumed name:
+#   1. CC_PM2_APP_NAME env — the same override scripts/deploy.sh and
+#      scripts/atomic-deploy.sh already honor.
+#   2. The pm2 app actually declaring this box's CC port (pm2 jlist, parsed by
+#      scripts/lib/pm2-port-zombies.py --resolve-name; online apps win).
+#   3. Fleet-canonical "blackceo-command-center" (ecosystem.config.cjs) — only
+#      for boxes with no CC under pm2 at all (fresh install).
+# $1 is pm2-port-zombies.py of the release being deployed. Prints the name.
+cc_resolve_pm2_name() {
+  local lib="$1" name=""
+  if [ -n "${CC_PM2_APP_NAME:-}" ]; then
+    name="$CC_PM2_APP_NAME"
+    success "pm2 app name (CC_PM2_APP_NAME override): $name" >&2
+  elif command -v pm2 >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1 && [ -f "$lib" ]; then
+    name=$(pm2 jlist 2>/dev/null \
+      | python3 -s "$lib" --resolve-name "${CC_PORT:-4000}" "" 2>/dev/null \
+      | head -1 || true)
+    [ -n "$name" ] && success "pm2 app name (live, declares port ${CC_PORT:-4000}): $name" >&2
+  fi
+  if [ -z "$name" ]; then
+    name="blackceo-command-center"
+    warn "No live pm2 app declares port ${CC_PORT:-4000} — using fleet-canonical name: $name" >&2
+  fi
+  printf '%s\n' "$name"
+}
+
+# ----------------------------------------------------------
+# Zero-downtime path
+# ----------------------------------------------------------
+# The live checkout, its node_modules and the served .next are NOT touched
+# until the new release is built and promoted. The merge path below merges
+# origin/main into the LIVE tree and runs `npm ci` there BEFORE building: from
+# that moment the source no longer matches the running build, so any restart
+# during the build (a crash, pm2, the watchdog) is refused by cc-start.sh's
+# content guard (exit 78) and the Command Center stays dark until the build
+# finishes -- 35 minutes on a client's Hostinger box (2026-09-28).
+#
+# Here: fetch only; stage the target commit's scripts/ OUTSIDE the live tree;
+# check the gateway contract with the target's checker; then the target's
+# scripts/atomic-deploy.sh --revision builds a candidate from that commit (its
+# own npm ci and native gate, in its own directory), promotes it, fast-forwards
+# the live tree onto it and restarts. Eligible when the update is a
+# fast-forward of a clean tracked tree -- the fleet's normal case. Anything
+# else (local commits, local edits, a divergent local main, the one-time
+# runtime-config migration) takes the merge path below, unchanged.
+# CC_UPDATE_ZERO_DOWNTIME=0 forces the merge path.
+ZD_DONE=0
+_zd_bash4() {
+  local _c
+  for _c in /opt/homebrew/bin/bash /usr/local/bin/bash bash; do
+    if command -v "$_c" >/dev/null 2>&1 && \
+       [ "$("$_c" -c 'echo "${BASH_VERSINFO[0]:-0}"' 2>/dev/null || echo 0)" -ge 4 ]; then
+      printf '%s' "$_c"; return 0
+    fi
+  done
+  return 1
+}
+if [ -d ".git" ] && [ "${CC_UPDATE_ZERO_DOWNTIME:-1}" = "1" ]; then
+  step "Step 2: Fetch latest from GitHub (zero-downtime path check)"
+  # Explicit refspec: a clone whose configured refspec names only a tag (seen on
+  # client boxes) never moves origin/main on a bare `git fetch origin main`, so
+  # the update would target a years-old origin/main.
+  git fetch origin +refs/heads/main:refs/remotes/origin/main 2>&1 || fatal "git fetch failed"
+  ZD_TARGET=$(git rev-parse origin/main)
+  # CC_UPDATE_TARGET: a fleet roll pins one main commit for every box, so a merge
+  # landing mid-roll never reaches the boxes that update after it.
+  # ponytail: only the zero-downtime path honours the pin; the merge fallback
+  # below still converges to origin/main.
+  if [ -n "${CC_UPDATE_TARGET:-}" ]; then
+    git merge-base --is-ancestor "$CC_UPDATE_TARGET" "$ZD_TARGET" 2>/dev/null \
+      || fatal "CC_UPDATE_TARGET $CC_UPDATE_TARGET is not a commit on origin/main"
+    ZD_TARGET=$(git rev-parse "$CC_UPDATE_TARGET^{commit}")
+  fi
+  ZD_WHY=""
+  git merge-base --is-ancestor HEAD "$ZD_TARGET" || ZD_WHY="the checkout has commits that are not on origin/main"
+  [ -z "$ZD_WHY" ] && [ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ] \
+    && ZD_WHY="the checkout has uncommitted changes to tracked files"
+  if [ -z "$ZD_WHY" ] && git show-ref --verify --quiet refs/heads/main \
+     && ! git merge-base --is-ancestor refs/heads/main "$ZD_TARGET"; then
+    ZD_WHY="local main has commits that are not on origin/main"
+  fi
+  ZD_BASH4=""
+  [ -z "$ZD_WHY" ] && { ZD_BASH4="$(_zd_bash4)" || ZD_WHY="no bash 4+ for atomic-deploy.sh"; }
+  [ -z "$ZD_WHY" ] && ! git cat-file -e "$ZD_TARGET:scripts/atomic-deploy.sh" 2>/dev/null \
+    && ZD_WHY="the target release has no scripts/atomic-deploy.sh"
+  if [ -n "$ZD_WHY" ]; then
+    warn "Zero-downtime path not possible ($ZD_WHY) -- using the merge path (the live tree changes before the build)."
+  else
+    success "Zero-downtime path: target $ZD_TARGET is a fast-forward of the clean live checkout"
+    ZD_STAGE="$(mktemp -d "${TMPDIR:-/tmp}/cc-update-stage.XXXXXX")"
+    # Staged scripts leave with the process; the live tree is never the stage.
+    trap 'rm -rf "$ZD_STAGE"' EXIT
+    git archive "$ZD_TARGET" scripts | tar -x -C "$ZD_STAGE" \
+      || fatal "Could not stage the target release's scripts. Nothing was changed."
+
+    step "Step 3b: Verify the OpenClaw gateway wire contract (target release)"
+    cc_contract_check "$ZD_STAGE/scripts/openclaw-contract-check.mjs"
+
+    step "Step 6: Build + promote + restart (atomic deploy, zero-downtime)"
+    CC_PM2_NAME="$(cc_resolve_pm2_name "$ZD_STAGE/scripts/lib/pm2-port-zombies.py")"
+    ZD_ARGS=(--app-dir "$INSTALL_DIR" --pm2-app "$CC_PM2_NAME" --revision "$ZD_TARGET")
+    [ -n "${CC_PORT:-}" ] && ZD_ARGS+=(--port "$CC_PORT")
+    success "Atomic deploy source revision: $ZD_TARGET (the live tree stays on $(git rev-parse --short HEAD) until promotion)"
+    set +e
+    "$ZD_BASH4" "$ZD_STAGE/scripts/atomic-deploy.sh" "${ZD_ARGS[@]}"
+    ADEPLOY_RC=$?
+    set -e
+    case "$ADEPLOY_RC" in
+      0) success "Atomic deploy GREEN — built beside the live release, promoted, and serving" ;;
+      3) warn "Atomic deploy UNKNOWN (health indeterminate) — fresh build swapped but health not confirmed. NOT rolled back; investigate. See receipt above." ;;
+      1) fatal "Atomic deploy FAILED and auto-rolled-back to the prior build — the update did NOT take effect on the running server. See the atomic-deploy receipt above." ;;
+      2) fatal "Atomic deploy pre-flight failed (disk / build / deps) — old build untouched and still serving. Fix the reported issue and re-run this updater." ;;
+      *) fatal "Atomic deploy exited with unexpected code $ADEPLOY_RC — refusing to declare the update successful." ;;
+    esac
+    # atomic-deploy fast-forwarded (or, from a detached HEAD, checked out) the
+    # live tree onto the target. Attach it to main at the same commit: no file
+    # changes, so the served build still matches the source.
+    if [ "$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)" != "main" ]; then
+      git branch -f main "$ZD_TARGET" 2>&1 && git checkout -q main 2>&1 \
+        || fatal "Deployed $ZD_TARGET, but could not attach the checkout to main"
+    fi
+    [ "$(git rev-parse HEAD)" = "$ZD_TARGET" ] \
+      || fatal "Post-deploy assertion failed: the live checkout is not on the deployed revision $ZD_TARGET"
+    success "Checkout on main at the deployed revision"
+    cc_sync_departments
+    ZD_DONE=1
+  fi
+fi
+
+if [ "$ZD_DONE" != "1" ]; then
+# ---- merge path (steps 2-6): used only when the zero-downtime path is not possible ----
+# ----------------------------------------------------------
 # Pull latest
 # ----------------------------------------------------------
 step "Step 2: Pull latest from GitHub"
@@ -385,7 +667,10 @@ PER_BOX_TEMPLATE_FILES=(
 PRESERVE_DIR="$BACKUP_DIR/per-box-config-preserve"
 PRESERVED=()
 if [ -d ".git" ]; then
-  git fetch origin main 2>&1 || fatal "git fetch failed"
+  # Explicit refspec: a clone whose configured refspec names only a tag (seen on
+  # client boxes) never moves origin/main on a bare `git fetch origin main`, so
+  # the update would target a years-old origin/main.
+  git fetch origin +refs/heads/main:refs/remotes/origin/main 2>&1 || fatal "git fetch failed"
   OLD_HEAD_SHA=$(git rev-parse HEAD 2>/dev/null || true)
   MERGE_BASE_SHA=$(git merge-base HEAD origin/main 2>/dev/null || true)
 
@@ -564,30 +849,12 @@ NEW_VERSION=""
 success "New version: ${NEW_VERSION:-unknown}"
 
 # ----------------------------------------------------------
-# Sync departments file (U133 -- merge-additive, update-flow)
+# Departments sync + gateway wire-contract guard (see the shared-steps
+# functions above; the guard runs BEFORE anything is installed or built).
 # ----------------------------------------------------------
-# The onboarding flow populates departments.json once during initial setup, but
-# a CC update that ships new department definitions (or upstream changes to
-# existing departments) leaves the old per-box file untouched until the next
-# full onboarding reconcile -- which may never happen on an already-provisioned
-# box. Run sync-departments-from-build-state.py with --merge so new departments
-# are added and existing ones updated in place, while any custom departments the
-# box owner has added manually are preserved. This is a best-effort sync: the
-# script exits 0 when no ZHC build-state is available (a fresh box that hasn't
-# run Skill 23 yet), so the update never fails because departments aren't found.
-step "Step 3: Sync departments from build-state (merge-additive)"
-_SYNC_DEPTS_SCRIPT="$INSTALL_DIR/scripts/sync-departments-from-build-state.py"
-if [ -f "$_SYNC_DEPTS_SCRIPT" ] && command -v python3 >/dev/null 2>&1; then
-  if python3 "$_SYNC_DEPTS_SCRIPT" --merge; then
-    success "Departments synced from build-state (merge-additive)"
-  else
-    warn "Departments sync exited non-zero -- dashboard will use the pre-update departments file."
-  fi
-elif [ ! -f "$_SYNC_DEPTS_SCRIPT" ]; then
-  warn "sync-departments-from-build-state.py not found in the updated checkout -- departments file was NOT synced."
-else
-  warn "python3 not found -- cannot run departments sync; departments file was NOT synced."
-fi
+cc_sync_departments
+step "Step 3b: Verify the OpenClaw gateway wire contract"
+cc_contract_check "$INSTALL_DIR/scripts/openclaw-contract-check.mjs"
 
 # ----------------------------------------------------------
 # Install dependencies
@@ -597,9 +864,113 @@ step "Step 4: Install npm dependencies"
   || fatal "Reviewed package-lock.json is missing. Restore it from the release and retry; migrations, build and restart were not run."
 # Never repair dependency resolution on a client box: npm install can silently
 # replace the reviewed graph after a missing/out-of-sync lock or failed npm ci.
-npm ci --engine-strict --no-audit --no-fund 2>&1 \
+# ISSUE-09: PATH was prepended with the resolved Node 24 directory by
+# _cc_require_supported_node above, so npm, npx and postinstall's
+# `npm rebuild better-sqlite3` all compile against the runtime pm2 will exec.
+# Previously this ran on whatever node the cron/update shell resolved, which is
+# how the rebuilt native module came out with the wrong ABI.
+#
+# --ignore-scripts=false: npm ci WIPES node_modules first, and a user or global
+# npmrc setting `ignore-scripts=true` (an operator hardening, measured on the
+# canary Mac) then suppresses postinstall — so better-sqlite3's native build
+# never runs and the box is left with no binding at all. The flag on the command
+# line beats any npmrc, which is the only place this can be enforced from; the
+# same flag is already on scripts/atomic-deploy.sh's npm ci for this reason.
+#
+# NODE_MODULES SURVIVAL: because npm ci wipes first, a failure here used to leave
+# the box with NO node_modules. The live app kept serving only because the
+# running process held the deleted files open; any restart would have
+# crash-looped. So the previous tree is moved aside first and swapped back if
+# anything between here and the native-module verdict fails.
+# Paths are relative to the install directory, which is the working directory
+# here and the one npm ci itself installs into.
+_cc_nm_prev=""
+_cc_restore_node_modules() {
+  [ -n "$_cc_nm_prev" ] || return 0
+  if [ -d "$_cc_nm_prev" ]; then
+    echo "  ⚠ Restoring the previous node_modules so the running app survives a restart."
+    rm -rf node_modules
+    mv "$_cc_nm_prev" node_modules
+  fi
+  _cc_nm_prev=""
+}
+trap _cc_restore_node_modules EXIT
+if [ -d node_modules ]; then
+  rm -rf node_modules.prev
+  if mv node_modules node_modules.prev; then
+    _cc_nm_prev="node_modules.prev"
+  else
+    fatal "Could not move node_modules aside; refusing to run npm ci, which would wipe it. Migrations, build and restart were not run."
+  fi
+fi
+npm ci --engine-strict --no-audit --no-fund --ignore-scripts=false 2>&1 \
   || fatal "npm ci failed. Fix the reported runtime, lockfile or registry error and retry. No npm install fallback is allowed; migrations, build and restart were not run."
 success "Dependencies installed"
+
+# ISSUE-09 follow-up: prove postinstall's rebuild actually produced a loadable
+# binary. package.json runs `npm rebuild better-sqlite3` on postinstall, and
+# that command REPORTS SUCCESS WITHOUT PRODUCING A BINARY. Measured on the
+# operator Mac: it printed "rebuilt dependencies successfully" and exited 0
+# while node_modules/better-sqlite3 held no .node file at all, so every later
+# `new Database()` threw "Could not locate the bindings file". npm ci's exit
+# code therefore says nothing about whether the app can open its database.
+#
+# Check the two things that matter, under the RESOLVED runtime rather than
+# ambient node: the compiled binary exists, and it loads. Fail loud here, where
+# the remedy is one command and nothing has been rebuilt or restarted yet,
+# rather than letting the box crash-loop after the deploy.
+_cc_assert_native_module_usable() {
+  local mod="$1"
+  local pkg="$INSTALL_DIR/node_modules/$mod"
+  # node-gyp names the compiled artifact after binding.gyp's `target_name`, NOT
+  # after the npm package name. better-sqlite3's target_name is
+  # `better_sqlite3`, so the real file is build/Release/better_sqlite3.node.
+  # The original "$mod.node" spelling therefore pointed at a path that has
+  # never existed on ANY correctly installed box, and this guard fataled on
+  # every single one of them — the updater aborted before migrations, build and
+  # restart, fleet-wide, from ed3bcf55a (2026-09-17) until this fix. Map the
+  # hyphens to underscores to name the real artifact.
+  local lib="$pkg/build/Release/${mod//-/_}.node"
+  # The defect class is narrow and worth stating: a package that IS installed
+  # whose native binary is silently absent. A package that is not installed at
+  # all is a different failure, and one npm ci already owns with a non-zero
+  # exit that this script fatals on above. Firing here on an absent package
+  # would also mean any environment with a stubbed npm could never run the
+  # updater, which is a worse trade than the coverage it buys.
+  if [ ! -d "$pkg" ]; then
+    warn "$mod is not present under $INSTALL_DIR/node_modules -- skipping the native-module check (npm ci reported success, so nothing claims it should be there)."
+    return 0
+  fi
+  # LOADING IT IS THE VERDICT. A derived path is a guess about someone else's
+  # build config — the guess above is now right for better-sqlite3, but getting
+  # it wrong is exactly what caused this outage, so it must not be able to
+  # cause another. Ask the resolved node whether the module actually loads and
+  # executes SQLite; a box that answers yes is a working box no matter where
+  # its binary sits (a prebuild can land outside build/Release). $lib is only
+  # consulted afterwards, to choose which remedy the operator is handed.
+  if "$CC_NODE_BIN" -e "
+    const { createRequire } = require('module');
+    const req = createRequire(process.argv[1] + '/node_modules/');
+    let M = req(process.argv[2]);
+    if (M && typeof M !== 'function') M = M.default || M;
+    const db = new M(':memory:');
+    try { if (db.prepare('SELECT 42 AS a').get().a !== 42) process.exit(3); } finally { db.close(); }
+  " "$INSTALL_DIR" "$mod" >/dev/null 2>&1; then
+    success "Native module $mod verified: loads and executes SQLite under $CC_NODE_BIN"
+    return 0
+  fi
+  if [ ! -f "$lib" ]; then
+    fatal "npm ci completed but $mod has no compiled binary at $lib and does not load. postinstall's 'npm rebuild $mod' exits 0 even when it compiles nothing, so its success is not evidence. Run 'cd $INSTALL_DIR/node_modules/$mod && npx node-gyp rebuild' and re-run the updater; migrations, build and restart were not run."
+  fi
+  fatal "$mod is present at $lib but cannot be loaded and used by $CC_NODE_BIN ($("$CC_NODE_BIN" --version 2>/dev/null || echo unknown), module ABI $("$CC_NODE_BIN" -p process.versions.modules 2>/dev/null || echo unknown)). This is the native ABI mismatch that crash-loops the Command Center. Run 'cd $INSTALL_DIR/node_modules/$mod && npx node-gyp rebuild' with that same node and re-run the updater; migrations, build and restart were not run."
+}
+_cc_assert_native_module_usable better-sqlite3
+
+# The new tree is proven loadable. Drop the safety copy and disarm the restore;
+# everything after this point fails forward onto a working node_modules.
+rm -rf "$_cc_nm_prev"
+_cc_nm_prev=""
+trap - EXIT
 
 # ----------------------------------------------------------
 # Run any database migrations (if seed files changed)
@@ -644,7 +1015,6 @@ step "Step 6: Build + restart (atomic deploy)"
 #      scripts/lib/pm2-port-zombies.py --resolve-name; online apps win).
 #   3. Fleet-canonical "blackceo-command-center" (ecosystem.config.cjs) — only
 #      for boxes with no CC under pm2 at all (fresh install).
-CC_PM2_FALLBACK_NAME="blackceo-command-center"
 # CC_PORT is an override on the same footing as CC_APP_DIR / CC_PM2_APP_NAME:
 # when set it is used verbatim (for the pm2-port lookup below and passed
 # through to atomic-deploy) instead of the built-in 4000 default. Echo it so
@@ -652,21 +1022,7 @@ CC_PM2_FALLBACK_NAME="blackceo-command-center"
 if [ -n "${CC_PORT:-}" ]; then
   success "CC port (CC_PORT override): $CC_PORT"
 fi
-PM2_NAME_LIB="$INSTALL_DIR/scripts/lib/pm2-port-zombies.py"
-CC_PM2_NAME=""
-if [ -n "${CC_PM2_APP_NAME:-}" ]; then
-  CC_PM2_NAME="$CC_PM2_APP_NAME"
-  success "pm2 app name (CC_PM2_APP_NAME override): $CC_PM2_NAME"
-elif command -v pm2 >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1 && [ -f "$PM2_NAME_LIB" ]; then
-  CC_PM2_NAME=$(pm2 jlist 2>/dev/null \
-    | python3 -s "$PM2_NAME_LIB" --resolve-name "${CC_PORT:-4000}" "" 2>/dev/null \
-    | head -1 || true)
-  [ -n "$CC_PM2_NAME" ] && success "pm2 app name (live, declares port ${CC_PORT:-4000}): $CC_PM2_NAME"
-fi
-if [ -z "$CC_PM2_NAME" ]; then
-  CC_PM2_NAME="$CC_PM2_FALLBACK_NAME"
-  warn "No live pm2 app declares port ${CC_PORT:-4000} — using fleet-canonical name: $CC_PM2_NAME"
-fi
+CC_PM2_NAME="$(cc_resolve_pm2_name "$INSTALL_DIR/scripts/lib/pm2-port-zombies.py")"
 ATOMIC_DEPLOY="$INSTALL_DIR/scripts/atomic-deploy.sh"
 
 # atomic-deploy.sh requires bash 4+ (macOS system bash is 3.2). Resolve one.
@@ -681,6 +1037,10 @@ done
 DEPLOY_OK=0
 if [ -f "$ATOMIC_DEPLOY" ] && [ -n "$BASH4" ]; then
   ADEPLOY_ARGS=(--app-dir "$INSTALL_DIR" --pm2-app "$CC_PM2_NAME")
+  DEPLOY_REVISION="$(git -C "$INSTALL_DIR" rev-parse HEAD 2>/dev/null)" \
+    || fatal "Could not resolve the merged commit SHA for atomic deployment."
+  ADEPLOY_ARGS+=(--revision "$DEPLOY_REVISION")
+  success "Atomic deploy source revision: $DEPLOY_REVISION"
   [ -n "${CC_PORT:-}" ] && ADEPLOY_ARGS+=(--port "$CC_PORT")
   # set -e is active for the updater; suspend it around the deploy so we can
   # inspect its exit-contract code (0 green / 1 rolled-back / 2 pre-flight / 3 unknown).
@@ -758,6 +1118,12 @@ if [ "$DEPLOY_OK" -ne 1 ]; then
     warn "PM2 not installed — restart the Next.js prod server manually."
   fi
 fi
+
+fi
+# ---- end merge path ----
+
+NEW_VERSION=""
+[ -f version ] && NEW_VERSION=$(tr -d '[:space:]' < version)
 
 # ----------------------------------------------------------
 # Operator kill-flag receipt (F6)

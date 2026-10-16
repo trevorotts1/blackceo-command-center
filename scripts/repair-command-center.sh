@@ -74,7 +74,17 @@ cd "$REPO_ROOT"
 FAILURES=()
 
 # ── detect Node + npm ────────────────────────────────────────────────────────
-NODE_BIN="$(command -v node 2>/dev/null || true)"
+# CCG-1: rebuild against the node the server RUNS on (scripts/lib/node-runtime.sh),
+# not whichever node is first on PATH. A global node 26 on PATH while pm2 runs
+# node 24/25 produced a better-sqlite3 the server could not load (3 boxes,
+# 2026-10-12). Same rule as update.sh and atomic-deploy.sh.
+NODE_BIN=""
+if _cc_resolved="$(bash "$REPO_ROOT/scripts/lib/node-runtime.sh" 2>/dev/null)" && [[ -n "$_cc_resolved" ]]; then
+  NODE_BIN="$_cc_resolved"
+  export CC_NODE_BIN="$NODE_BIN"
+  [[ "$(command -v node 2>/dev/null || true)" == "$NODE_BIN" ]] || export PATH="$(dirname "$NODE_BIN"):$PATH"
+fi
+[[ -n "$NODE_BIN" ]] || NODE_BIN="$(command -v node 2>/dev/null || true)"
 NPM_BIN="$(command -v npm 2>/dev/null || true)"
 if [[ -z "$NODE_BIN" ]]; then
   # Try common non-login-shell locations
@@ -91,7 +101,11 @@ log "Node $NODE_VERSION (major $NODE_MAJOR), ABI $("$NODE_BIN" -p 'process.versi
 
 # ── (a) Rebuild better-sqlite3 ──────────────────────────────────────────────
 log "(a) Rebuilding better-sqlite3 against Node ABI $("$NODE_BIN" -p 'process.versions.modules') ..."
-if "$NPM_BIN" rebuild better-sqlite3 2>&1; then
+# --ignore-scripts=false: a user or global npmrc with ignore-scripts=true (an
+# operator hardening, measured on the canary Mac) makes a bare `npm rebuild`
+# print "rebuilt dependencies successfully" and build NOTHING. The flag on the
+# command line beats the npmrc; without it this repair silently repairs nothing.
+if "$NPM_BIN" rebuild better-sqlite3 --ignore-scripts=false 2>&1; then
   # Verify the module actually loads after rebuild
   if "$NODE_BIN" -e "
     const db = require('./node_modules/better-sqlite3');

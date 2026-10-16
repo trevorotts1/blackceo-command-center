@@ -19,14 +19,20 @@
  *     A test can therefore never reach a real phone even if it forgets the gate
  *     above — see isTestEnvironment(). Opt back in only via the explicit
  *     OWNER_NOTIFY_ALLOW_SEND_IN_TEST=1.
- *   - Chat-ID resolution mirrors the fleet's authoritative resolver
- *     (openclaw-onboarding/shared-utils/resolve-owner-chat.sh):
- *       S0  OPENCLAW_OWNER_CHAT_ID env (operator-rejected)
- *       S1  openclaw.json → channels.telegram.allowFrom   (first non-operator)
- *       S1b openclaw.json → commands.ownerAllowFrom       (first non-operator)
- *       S2  <workspace>/agents/main/sessions/sessions.json direct-session keys
- *     Every source rejects the known OPERATOR chat ids so a client box can
- *     never notify an operator DM as if it were the owner.
+ *   - Chat-ID resolution uses ONLY an explicit owner record, never a guess:
+ *       S0  OPENCLAW_OWNER_CHAT_ID in the process env (incl. .env.local)
+ *       S0b OPENCLAW_OWNER_CHAT_ID in <cwd>/.env.local
+ *       S0c OPENCLAW_OWNER_CHAT_ID in openclaw.json → env.vars
+ *       S0d OPENCLAW_OWNER_CHAT_ID in <openclaw root>/secrets/.env
+ *       S3  ownerChat in <workspace>/.workforce-build-state.json
+ *     No source → nothing is sent to anyone as "the owner". allowFrom ORDER is
+ *     NOT an owner record: a household member listed first received a client's
+ *     stop-cards (2026-09-28). Every source rejects the known OPERATOR ids.
+ *   - OWNER-SENDS HOLD: ownerSendsHold=true in the build state (the onboarding
+ *     switch) stops every send to a non-operator chat, at notifyTelegram.
+ *   - OPERATOR alerts on a client box go through the operator alert webhook
+ *     (FLEET_OPERATOR_ALERT_URL / the fleet-standing gate), never the client's
+ *     bot: the operator never opened a chat with it ("chat not found").
  *   - MSG-08 / CC_OPERATOR_IS_OWNER=1 (opt-in, operator's own box ONLY): when
  *     no owner chat resolves (guaranteed on the operator's own board — see
  *     operatorIsOwnerBox() below), notifyOwner() delivers the owner message
@@ -275,11 +281,16 @@ function normalizeChatId(v: unknown): string {
   return s;
 }
 
-/** Normalise + validate a candidate chat id; '' when invalid or an operator id. */
-function validOwnerChatId(v: unknown): string {
+/**
+ * Normalise + validate a candidate chat id; '' when invalid or an operator id.
+ * `operatorOwnedBox`: on a box whose owner IS an operator (operatorIsOwnerBox()),
+ * that operator's own recorded id is the owner; everywhere else an operator id
+ * is never an owner.
+ */
+function validOwnerChatId(v: unknown, operatorOwnedBox = false): string {
   const s = normalizeChatId(v);
   if (!s) return '';
-  if (OPERATOR_CHAT_IDS.has(s)) return ''; // client-protection guardrail — UNCHANGED
+  if (OPERATOR_CHAT_IDS.has(s) && !operatorOwnedBox) return ''; // client-protection guardrail
   return s;
 }
 
@@ -316,74 +327,70 @@ function firstOperatorFromList(list: unknown): string {
   return '';
 }
 
-/** First non-operator id from an allowFrom-style list (string | array). */
-function firstOwnerFromList(list: unknown): string {
-  const entries = Array.isArray(list) ? list : list != null ? [list] : [];
-  for (const entry of entries) {
-    const id = validOwnerChatId(entry as string | number);
-    if (id) return id;
+/** One KEY's value from a dotenv-style file ('' when absent). Never logs the file. */
+function readDotenvVar(file: string, key: string): string {
+  try {
+    for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+      const m = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/);
+      if (m && m[1] === key) return m[2].replace(/^(['"])(.*)\1$/, '$2');
+    }
+  } catch {
+    /* absent or unreadable */
   }
   return '';
 }
 
-/** S1/S1b — read allowFrom lists from openclaw.json. Never logs file contents. */
-function resolveFromConfig(): string | null {
+/** openclaw.json → env.vars[key] ('' when absent). Reads that one field only. */
+function configEnvVar(key: string): string {
   try {
-    const raw = fs.readFileSync(resolveConfigPath(), 'utf8');
-    const cfg = JSON.parse(raw) as Record<string, any>;
-    const allowFrom = cfg?.channels?.telegram?.allowFrom;
-    const fromChannel = firstOwnerFromList(allowFrom);
-    if (fromChannel) return fromChannel;
-    const ownerAllowFrom = cfg?.commands?.ownerAllowFrom;
-    const fromCommands = firstOwnerFromList(ownerAllowFrom);
-    if (fromCommands) return fromCommands;
-    return null;
+    const cfg = JSON.parse(fs.readFileSync(resolveConfigPath(), 'utf8')) as Record<string, any>;
+    const v = cfg?.env?.vars?.[key];
+    return typeof v === 'string' || typeof v === 'number' ? String(v) : '';
   } catch {
-    return null;
+    return '';
   }
 }
 
-/** S2 — legacy fallback: paired direct sessions in the sessions file. */
-function resolveFromSessions(): string | null {
-  const sessionsPath = path.join(
-    resolveWorkspaceBase(),
-    'agents/main/sessions/sessions.json',
-  );
+/** The onboarding build state (<workspace>/.workforce-build-state.json), or {}. */
+function readBuildState(): Record<string, any> {
   try {
-    const raw = fs.readFileSync(sessionsPath, 'utf8');
-    const data = JSON.parse(raw) as Record<string, unknown>;
-    const keys = Object.keys(data).filter((k) =>
-      k.startsWith('agent:main:telegram:direct:'),
+    const d = JSON.parse(
+      fs.readFileSync(path.join(resolveWorkspaceBase(), '.workforce-build-state.json'), 'utf8'),
     );
-    // Only a non-operator (client) ID may resolve as the owner. The previous
-    // "fall back to any direct session" branch could return an OPERATOR id on
-    // a box where only the operator had DM'd the bot — doctrine forbids that.
-    for (const k of keys) {
-      const id = validOwnerChatId(k.split(':').pop());
-      if (id) return id;
-    }
-    return null;
+    return d && typeof d === 'object' ? d : {};
   } catch {
-    return null;
+    return {};
   }
+}
+
+/** Onboarding's owner-sends hold: only an explicit `ownerSendsHold: true` holds. */
+export function ownerSendsHeld(): boolean {
+  return readBuildState().ownerSendsHold === true;
 }
 
 /**
- * Resolve the owner (client) Telegram chat ID.
+ * Resolve the owner (client) Telegram chat ID from an explicit owner record.
  *
- * Returns null when no source yields a valid, non-operator chat id.
+ * Returns null when none exists: the caller then sends nothing to anyone as
+ * "the owner" (it records an undeliverable instead). Never guesses from
+ * allowFrom order or from whichever chat has a session.
  */
 export function resolveOwnerChatId(): string | null {
-  // S0 — explicit env pin (operator-rejected like every other source).
-  const pinned = validOwnerChatId(process.env.OPENCLAW_OWNER_CHAT_ID ?? '');
-  if (pinned) return pinned;
-
-  // S1/S1b — openclaw.json allowFrom lists (the fleet's authoritative source).
-  const fromConfig = resolveFromConfig();
-  if (fromConfig) return fromConfig;
-
-  // S2 — paired direct sessions (legacy fallback).
-  return resolveFromSessions();
+  const key = 'OPENCLAW_OWNER_CHAT_ID';
+  const root = path.dirname(resolveWorkspaceBase());
+  const sources: Array<() => unknown> = [
+    () => process.env[key],
+    () => readDotenvVar(path.join(process.cwd(), '.env.local'), key),
+    () => configEnvVar(key),
+    () => readDotenvVar(path.join(root, 'secrets', '.env'), key),
+    () => readBuildState().ownerChat,
+  ];
+  const operatorOwnedBox = operatorIsOwnerBox();
+  for (const source of sources) {
+    const id = validOwnerChatId(source() ?? '', operatorOwnedBox);
+    if (id) return id;
+  }
+  return null;
 }
 
 /**
@@ -429,6 +436,30 @@ export function resolveOperatorChatId(): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * The operator alert webhook (the one the fleet roll's alerts use): an n8n relay
+ * that posts to the operator's own chat through the operator's bot. From env or
+ * openclaw.json env.vars: FLEET_OPERATOR_ALERT_URL, else the fleet-standing gate
+ * URL with /fleet-standing-check → /fleet-standing-alert; auth is the gate's
+ * header + secret. Null when not configured.
+ */
+function operatorAlertTarget(): { url: string; header: string; secret: string } | null {
+  const get = (k: string) => process.env[k] || configEnvVar(k);
+  let url = get('FLEET_OPERATOR_ALERT_URL');
+  const gate = get('FLEET_STANDING_GATE_URL').replace(/\/+$/, '');
+  if (!url && gate.endsWith('/fleet-standing-check')) {
+    url = gate.slice(0, -'fleet-standing-check'.length) + 'fleet-standing-alert';
+  }
+  const secret = get('FLEET_STANDING_GATE_SECRET');
+  if (!url || !secret) return null;
+  return { url, header: get('FLEET_STANDING_GATE_HEADER') || 'X-Fleet-Standing-Secret', secret };
+}
+
+/** The relay's Telegram node sends legacy Markdown: escape its four markers. */
+function legacyMarkdownEscape(text: string): string {
+  return text.replace(/([_*`[])/g, '\\$1');
 }
 
 /**
@@ -490,7 +521,7 @@ export function recordUndeliverable(kind: string, message: string): void {
   // ATTRIBUTION: an undeliverable alert is the LAST rung — the one a human reads
   // cold, days later, with no other context. It must say which box wrote it.
   // Identity is metadata only and never gates the write (fail-OPEN).
-  const identity = resolveBoxIdentity();
+  const identity = resolveBoxIdentity(configEnvVar);
   const line = {
     ts: new Date().toISOString(),
     kind,
@@ -732,6 +763,10 @@ export function notifyTelegram(opts: {
   if (ownerSendsSuppressed()) {
     return false;
   }
+  if (!validOperatorChatId(opts.chatId) && ownerSendsHeld()) {
+    appendNotificationLog({ ts: new Date().toISOString(), kind: 'owner_send_held', message: opts.message });
+    return false;
+  }
   execFile(
     'openclaw',
     [
@@ -804,6 +839,10 @@ export function notifySession(opts: {
   message: string;
 }): boolean {
   if (ownerSendsSuppressed()) {
+    return false;
+  }
+  if (ownerSendsHeld()) {
+    appendNotificationLog({ ts: new Date().toISOString(), kind: 'owner_send_held', message: opts.message });
     return false;
   }
   const sessionKey = (opts.sessionKey ?? '').trim();
@@ -1081,6 +1120,46 @@ export type NotifyAudience = 'OWNER' | 'SYSTEM';
  * @returns true when dispatched to the rescue webhook; false when no webhook
  *   is configured (the alert is logged and dropped — never sent to the client).
  */
+/**
+ * 2026-10-02 RR-INTAKE MUTE: Rescue Rangers is ONLY for a client's AGENT that has
+ * a real problem it cannot solve. A box's own board housekeeping (stale/blocked
+ * cards, missing SOP/persona/triad grooming, board hygiene, QC holds/starvation,
+ * stop-card notices, persona-grounding sweeps) is NOT an agent problem: RR-02
+ * cannot match it to an agent (unmatched_identity) and pages the operator.
+ * Those alerts stay on the box (rung 3 durable record + its own board).
+ */
+const RR_HOUSEKEEPING_AGENTS = new Set([
+  'stale-task-sweep', 'board-hygiene', 'stuck-in-progress-sweep', 'intake-advance-sweep',
+  'operator-column-age-digest', 'qc-scorer', 'audience-confirm', 'manual-dispatch', 'createTaskCore',
+  // F51 (2026-10): board/engine chatter that still sends action 'escalate'. (Event-typed
+  // callers such as social-publish-dispatcher need no entry: the allow-list drops them.)
+  'board-jobs-watchdog', 'stage-timings-ingest', 'trust-engine',
+]);
+const RR_HOUSEKEEPING_MESSAGE =
+  /^\s*\[(stale-|stopped|stuck-in-progress|silent-failure|qc|audience-confirm|persona|triad|groom|board-hygiene|dispatch-cap|routed_but_not_dispatched|podcast_)/i;
+
+export function isBoardHousekeepingAlert(
+  message: string,
+  meta?: { agent?: string; action?: string },
+): boolean {
+  return RR_HOUSEKEEPING_AGENTS.has(meta?.agent ?? '') || RR_HOUSEKEEPING_MESSAGE.test(message);
+}
+
+/**
+ * F51 (2026-10) — ALLOW-LIST for rung 1. Rescue Rangers gets an alert only when
+ * the caller says so explicitly (`meta.action === 'escalate'`) AND it is not board
+ * housekeeping. `meta.action` is otherwise an event type ('qc_starved',
+ * 'daily_digest', 'publish_failed', 'grounding_degraded'...), never a request to
+ * page: those, and calls with no meta at all, stay on the box (rung 3 record).
+ * Replaces the old deny-list-only rule, which let every new event type through.
+ */
+export function shouldPostToRescueRangers(
+  message: string,
+  meta?: { agent?: string; action?: string },
+): boolean {
+  return meta?.action === 'escalate' && !isBoardHousekeepingAlert(message, meta);
+}
+
 export function notifySystem(
   message: string,
   meta?: { agent?: string; action?: string },
@@ -1104,7 +1183,7 @@ export function notifySystem(
   // OWNER_NOTIFY_ALLOW_SEND_IN_TEST=1. Default-off still protects the ~14 files
   // that only `delete` the env var; only an explicit opt-in (which by convention
   // is coupled to installing the fetch double) can fire the POST in a test run.
-  const webhookUrl = process.env.RESCUE_RANGERS_WEBHOOK_URL;
+  const webhookUrl = shouldPostToRescueRangers(message, meta) ? process.env.RESCUE_RANGERS_WEBHOOK_URL : undefined;
   if (webhookUrl && (!isTestEnvironment() || process.env.OWNER_NOTIFY_ALLOW_SEND_IN_TEST === '1')) {
     // ATTRIBUTION (FIX-5): the body used to carry ONLY {action, agent, message}.
     // No client. No box. So every escalation from every box in the fleet arrived
@@ -1125,11 +1204,21 @@ export function notifySystem(
     // FAIL-OPEN: resolveBoxIdentity() never throws and degrades to
     // `unknown-client` / `unknown-box`. Identity is metadata on an ALARM and can
     // never be a reason NOT to escalate.
-    const identity = resolveBoxIdentity();
+    const identity = resolveBoxIdentity(configEnvVar);
     // Fire-and-forget: do not await; swallow any error (best-effort, never throws).
+    // AUTH HEADER (2026-09-16): RR-01-intake's webhook auth rejects requests without
+    // X-Rescue-Secret (observed live: the CC was the top unauthenticated caller at a 5-min
+    // cadence, every POST ending at 'Respond - Unauthorized'). The secret is read from the
+    // env var the fleet propagator already provisions (fleet-heartbeat/scripts/
+    // propagate-rescue-webhook.sh) and is never logged or hardcoded. When it is unset the
+    // POST still fires (best-effort contract) and the receiver rejects it fail-closed.
+    const rescueSecret = process.env.RESCUE_RANGERS_WEBHOOK_SECRET || '';
     void fetch(webhookUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(rescueSecret ? { 'X-Rescue-Secret': rescueSecret } : {}),
+      },
       body: JSON.stringify({
         action: meta?.action ?? 'escalate',
         // `agent` is kept for backward compatibility with the existing receiver;
@@ -1161,7 +1250,51 @@ export function notifySystem(
   // SAFETY-03: this rung now passes through DEDUP + a TOKEN BUCKET. It previously
   // had neither, so a retry loop or a sweep job could fire an unbounded number of
   // real DMs at the operator's phone.
-  const operatorChatId = resolveOperatorChatId();
+  // The operator never opened a chat with a client's bot, so a Telegram send to
+  // him fails ("chat not found": 364 dropped alerts on one box). Wherever the
+  // operator alert webhook the fleet roll uses is configured, it is the operator
+  // lane -- including a box whose owner is another operator: that box's
+  // Telegram would reach its owner, not the fleet operator. Telegram to the
+  // operator is only for a box with no webhook at all.
+  // ── 2026-10-02 OPERATOR-RELAY MUTE (SPAM-FIX): a CLIENT box with the
+  // fleet gate configured NEVER posts notifySystem() chatter to the
+  // fleet-standing-operator-alert webhook. Until today rung 2 forwarded
+  // EVERY SYSTEM alert — board-hygiene holds, QC starvation, persona
+  // sweeps, stop-cards, dispatch failures — one Telegram DM per box per
+  // minute at fleet scale (the "boards boards boards" flood, 2026-10-02).
+  // The relay is the fleet ROLL stream only (fleet_notify.py posts there
+  // itself). Board chatter stays on the box: rung 3's durable record.
+  // A box WITHOUT the fleet gate keeps the legacy Telegram fallback so a
+  // genuinely stranded box still pages the operator. The operator's own
+  // box keeps its v7.6.84 webhook lane. Rescue (rung 1) untouched.
+  const hasFleetGate = Boolean(process.env.FLEET_OPERATOR_ALERT_URL) || Boolean(process.env.FLEET_STANDING_GATE_URL) || Boolean(configEnvVar('FLEET_OPERATOR_ALERT_URL')) || Boolean(configEnvVar('FLEET_STANDING_GATE_URL'));
+  const alert = operatorIsOwnerBox() ? operatorAlertTarget() : null;
+  if (alert) {
+    const kind = meta?.action ?? 'system_alert';
+    const verdict = admitOperatorSend(kind, message);
+    if (verdict.admit) {
+      const text = verdict.suffix ? `${message}${verdict.suffix}` : message;
+      if (!isTestEnvironment() || process.env.OWNER_NOTIFY_ALLOW_SEND_IN_TEST === '1') {
+        const identity = resolveBoxIdentity(configEnvVar);
+        void fetch(alert.url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', [alert.header]: alert.secret },
+          body: JSON.stringify({ text: legacyMarkdownEscape(`[${identity.clientName} (${identity.boxName})] ${text}`).slice(0, 4090) }),
+        }).catch((err) => {
+          console.warn('[notify] notifySystem: operator alert webhook POST failed: %s', (err as Error).message);
+        });
+        dispatched = true;
+      }
+    } else {
+      recordSuppressed('system_alert', verdict.reason ?? 'suppressed', message);
+      dispatched = true;
+    }
+  }
+  // Telegram to the operator: his OWN box only (2026-10-02 spam-fix — a
+  // client box whose allowFrom lists an operator id used to DM the
+  // operator every board alert straight through its bot; now client
+  // boxes never resolve a Telegram operator target at all).
+  const operatorChatId = operatorIsOwnerBox() || !hasFleetGate ? (alert ? null : resolveOperatorChatId()) : null;
   if (operatorChatId) {
     const kind = meta?.action ?? 'system_alert';
     const verdict = admitOperatorSend(kind, message);

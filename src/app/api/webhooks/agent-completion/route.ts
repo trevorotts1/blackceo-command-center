@@ -3,6 +3,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { createHmac } from 'crypto';
 import { latestExecution, validateExecutionCompletion, completeExecution, type Execution } from '@/lib/execution-attempts';
 import { queryOne, queryAll, run } from '@/lib/db';
+import { loadTaskRow } from '@/lib/board/task-row-projection';
 import { broadcast } from '@/lib/events';
 import { runQCOnReview } from '@/lib/qc-scorer';
 import { transition, TransitionError } from '@/lib/task-lifecycle';
@@ -40,15 +41,13 @@ function resolveAgentFromSessionId(sessionId: string): { id: string; name: strin
  * manual refresh.
  */
 function broadcastTaskUpdate(taskId: string): void {
-  const updated = queryOne<Task>(
-    `SELECT t.*,
-        aa.name as assigned_agent_name,
-        aa.avatar_emoji as assigned_agent_emoji
-     FROM tasks t
-     LEFT JOIN agents aa ON t.assigned_agent_id = aa.id
-     WHERE t.id = ?`,
-    [taskId]
-  );
+  // A41 — the ONE shared projection (src/lib/board/task-row-projection.ts).
+  // This local refetch previously built its own two-table row (no
+  // model_registry at all, no computed fields), so a webhook-driven completion
+  // pushed a card that disagreed with the board's own refresh about provider
+  // provenance and preparation/execution state. loadTaskRow() returns the same
+  // shape refresh and detail serve.
+  const updated = loadTaskRow(taskId);
   if (updated) {
     broadcast({ type: 'task_updated', payload: updated });
   }

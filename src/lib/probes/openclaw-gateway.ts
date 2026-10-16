@@ -8,13 +8,18 @@
  * port as "live".  A port-squatter (e.g. a stray Node process) that returns
  * HTTP 200 on any GET would produce a false-green.
  *
- * Fix: after confirming the port is reachable, we call the gateway's own
- * status endpoint (`/api/status` or `/health`) and check for an
- * OpenClaw-specific field in the JSON response:
- *   - `gateway: "openclaw"` or `product: "openclaw"` in the body, OR
- *   - HTTP 426 Upgrade Required (the standard WS-only response OpenClaw
- *     returns on its websocket port when probed over plain HTTP) — this is
- *     still OpenClaw-specific because generic HTTP servers do not emit 426.
+ * Fix: after confirming the port is reachable, we confirm gateway identity
+ * from the port root plus the gateway's own status endpoints (`/api/status`
+ * or `/health`), checking for an OpenClaw-specific signal:
+ *   - HTTP 426 / 400 / 101 on the websocket port (generic HTTP servers do
+ *     not emit these for a plain GET), OR
+ *   - a JSON body with an OpenClaw identity field, OR
+ *   - the Control UI HTML shell at `/` (HTTP 200 with data-openclaw-*
+ *     attributes and the "OpenClaw Control" title). The installed gateway
+ *     serves this shell first, so a real gateway can present NONE of the
+ *     JSON/WS signals over plain HTTP — without this signal it reads as a
+ *     port squatter (false negative). Generic squatters never emit these
+ *     strings.
  *
  * If neither signal is present, the probe returns 'offline' with detail
  * explaining the port-squatter suspicion, so the operator can investigate
@@ -39,7 +44,21 @@ const OPENCLAW_WS_PORT_STATUSES = new Set([
 /** Known field names that OpenClaw embeds in its /health or /api/status JSON. */
 const OPENCLAW_IDENTITY_FIELDS = ['gateway', 'product', 'service', 'name'] as const;
 
-function isOpenClawResponse(status: number, bodyText: string): boolean {
+/**
+ * HEA-001: the Control UI HTML shell is an identity signal. A live gateway
+ * serves it at `/` (HTTP 200) with data-openclaw-* attributes and the
+ * "OpenClaw Control" title; a plain-GET probe never sees a WS 426/101 from it
+ * and /health is a bare {"ok","status"} pair with no identity fields, so
+ * without this branch a live gateway reads as a port squatter (false
+ * negative). Generic squatters do not emit these strings. Exported for tests.
+ */
+export function isOpenClawResponse(status: number, bodyText: string): boolean {
+  if (
+    /data-openclaw-[a-z-]+/i.test(bodyText) ||
+    /<title>\s*OpenClaw/i.test(bodyText)
+  ) {
+    return true;
+  }
   // Signal 1: WS-port-specific HTTP status — generic servers do not emit 426
   if (OPENCLAW_WS_PORT_STATUSES.has(status)) return true;
 

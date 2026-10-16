@@ -40,7 +40,9 @@
     ".next-interview-lock/types/**/*.ts",
     ".next-duck-e2e/types/**/*.ts",
     ".next/dev/types/**/*.ts",
-    ".next-interview-lock/dev/types/**/*.ts"
+    ".next-interview-lock/dev/types/**/*.ts",
+    ".next-prior-completion-proof/types/**/*.ts",
+    ".next-prior-completion-proof/dev/types/**/*.ts"
   ],
   "exclude": [
     "node_modules"

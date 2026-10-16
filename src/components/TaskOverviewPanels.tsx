@@ -20,13 +20,16 @@ import type { Task } from '@/lib/types';
 // ONE canonical module (src/lib/board-sources.ts) shared with
 // /api/tasks/[id]/status, so the 403 gate and this panel's honest empty-copy
 // can never drift apart again. The panel adds only the human LABELS on top.
-import { RECOGNIZED_BOARD_SOURCES, normalizeBoardSource } from '@/lib/board-sources';
+import { RECOGNIZED_BOARD_SOURCES, normalizeBoardSource, BOARD_SOURCE_LABELS } from '@/lib/board-sources';
 // U42 (C-11) — reuse the EXACT card-face chip components for the modal's
 // multi-persona plan + per-page/per-part scoped-blend rows. Single source: the
 // modal must never re-derive or restate what the board card already renders,
 // only surface the SAME rows in the task-detail window (C+I.0 point 10 /
 // spec L1176-1179).
 import { PersonaSlotChips, PersonaScopeChips } from './kanban/TaskCard';
+// Item 19 — the engine park panel (plain-words park record + the engine's
+// own resume path), shared with the presentation parent card face.
+import { PresentationEnginePanel } from './kanban/PresentationEnginePanel';
 
 // A slug like "russell-brunson" → "Russell Brunson" for display. Presentation
 // only — the authoritative name is persona_name when the selector resolved one.
@@ -50,7 +53,7 @@ function formatScore(score?: number | null): string | null {
  * from src/lib/board-sources.ts per FIX 36): Skill 6 (funnel/survey/
  * web-development), the Anthology Engine (anthology), and the Presentations
  * engine (build_deck / presentations / build_deck_phase /
- * presentation-interview-app). Producer-ingested
+ * presentation-interview-app / podcast-engine). Producer-ingested
  * cards are NOT routed through the CC selector the way an organic task is
  * (C+I.0 point 13 / D-C3 grounding: producer cards move themselves, no CC
  * dispatch routing fires from this card family), so the generic "one is
@@ -60,19 +63,11 @@ function formatScore(score?: number | null): string | null {
  * (falls back to the legacy `Source: <value>` description marker for a
  * pre-migration row, same fallback order `resolveBoardSource` uses).
  */
-const RECOGNIZED_ENGINE_SOURCES: Record<string, string> = {
-  funnel: 'a Skill 6 funnel build',
-  survey: 'a Skill 6 survey build',
-  'web-development': 'a Skill 6 web-development build',
-  anthology: 'the Anthology Engine',
-  // U030 (audit E1) — the presentations deck-build producer.
-  build_deck: 'the presentations deck build',
-  // FIX 36 — the two engine sources the status route already recognizes but
-  // this panel's label map was missing: per-phase child cards and the
-  // interview app's own cards.
-  build_deck_phase: 'a presentations deck phase build',
-  'presentation-interview-app': 'the presentations interview app',
-};
+// STRANDED-02: the label map moved to src/lib/board-sources.ts, next to the
+// RECOGNIZED_BOARD_SOURCES set it labels, so the board-hygiene job can name the
+// owning engine without importing this 'use client' module. Re-exported here
+// under its original name so every existing consumer is unchanged.
+const RECOGNIZED_ENGINE_SOURCES: Record<string, string> = BOARD_SOURCE_LABELS;
 
 const LEGACY_ENGINE_SOURCE_MARKER = /^Source:\s*(funnel|survey|web-development|anthology)\s*$/m;
 
@@ -321,24 +316,62 @@ export function TaskSopPanel({
 }) {
   const [sopTitle, setSopTitle] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  // CRT-001: whether the attached sop_id resolves to a LIVE row. A 404 here
+  // means the pointer is dead (id missing or soft-deleted), not that the read
+  // machinery broke — and it must never render as a bare "Missing: SOP" with
+  // no way forward. A 500/network failure is the opposite: unknown state, so
+  // the panel says the title could not be verified and keeps the id visible.
+  //
+  // CRT-002: a 404 alone is NOT the whole dead-pointer set. GET /api/sops/[id]
+  // has no deleted_at filter and DELETE only stamps deleted_at, so a
+  // SOFT-DELETED SOP comes back 200 with its row — and this panel would render
+  // it as an ordinary live link while the Triad banner (checkTriad /
+  // isLiveSopId, src/lib/sops.ts) already called it missing. The liveness
+  // predicate is the row's own `deleted_at`, the same column and polarity
+  // isLiveSopId() reads (`!!row && !row.deleted_at`); it is checked on the row
+  // this same fetch already carries, so the panel and the Triad banner cannot
+  // drift apart again.
+  const [sopMissing, setSopMissing] = useState(false);
+  const [sopUnverified, setSopUnverified] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     if (!task.sop_id) {
       setSopTitle(null);
+      setSopMissing(false);
+      setSopUnverified(false);
       return;
     }
     setLoading(true);
+    setSopMissing(false);
+    setSopUnverified(false);
     fetch(`/api/sops/${encodeURIComponent(task.sop_id)}`)
-      .then((res) => (res.ok ? res.json() : null))
+      .then((res) => {
+        if (res.status === 404) {
+          if (!cancelled) setSopMissing(true);
+          return null;
+        }
+        if (!res.ok) {
+          if (!cancelled) setSopUnverified(true);
+          return null;
+        }
+        return res.json();
+      })
       .then((data) => {
-        if (cancelled) return;
+        if (cancelled || !data) return;
         // /api/sops/[id] returns the SOP row (or { sop }) — tolerate both shapes.
         const sop = data?.sop ?? data;
+        // CRT-002: the GET carries deleted_at (SELECT *), so a soft-deleted row
+        // arrives here as 200. Same predicate as isLiveSopId(): a row whose
+        // deleted_at is set is NOT live, whatever the status code said.
+        if (sop && typeof sop === 'object' && (sop as { deleted_at?: string | null }).deleted_at) {
+          setSopMissing(true);
+          return;
+        }
         setSopTitle(sop?.title || sop?.name || null);
       })
       .catch(() => {
-        if (!cancelled) setSopTitle(null);
+        if (!cancelled) setSopUnverified(true);
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -358,15 +391,25 @@ export function TaskSopPanel({
           <div className="min-w-0">
             <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">SOP</p>
             {task.sop_id ? (
-              <a
-                href={`/sops/${encodeURIComponent(task.sop_id)}`}
-                target="_blank"
-                rel="noreferrer"
-                className="block truncate text-sm font-medium text-indigo-600 hover:underline"
-                title={sopTitle || task.sop_id}
-              >
-                {loading ? 'Loading SOP…' : sopTitle || humanizeSlug(task.sop_id)}
-              </a>
+              sopMissing ? (
+                // CRT-001: dead pointer (id missing or soft-deleted) — say so
+                // explicitly and point at the one-click repair the Triad banner
+                // already offers, instead of a bare id or a "Missing: SOP" pill
+                // with no way forward.
+                <p className="text-sm font-medium text-red-700" data-testid="task-sop-dead">
+                  Attached playbook no longer exists — re-attach below.
+                </p>
+              ) : (
+                <a
+                  href={`/sops/${encodeURIComponent(task.sop_id)}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="block truncate text-sm font-medium text-indigo-600 hover:underline"
+                  title={sopTitle || task.sop_id}
+                >
+                  {loading ? 'Loading SOP…' : sopUnverified ? `Attached playbook (could not verify): ${task.sop_id}` : sopTitle || humanizeSlug(task.sop_id)}
+                </a>
+              )
             ) : (
               <p className="text-sm italic text-gray-400">No SOP attached</p>
             )}
@@ -516,17 +559,24 @@ export function BlockedReasonPanel({ task }: { task: Task }) {
   const [resuming, setResuming] = useState(false);
   const [resumeError, setResumeError] = useState<string | null>(null);
   const [resumed, setResumed] = useState(false);
+  const [resumedTaskId, setResumedTaskId] = useState<string | null>(null);
   const handleResume = async () => {
-    if (!task.id || resuming) return;
+    if (!task.id || resuming || resumed) return;
     setResuming(true);
     setResumeError(null);
     try {
       const res = await fetch(`/api/tasks/${task.id}/resume`, { method: 'POST' });
       const body = await res.json().catch(() => ({}));
       if (res.ok) {
+        // CRT-001: single dispatch per click — the resuming guard above plus
+        // this settled flag stop double-fire while the request is in flight
+        // and after it lands. The server's own idempotent resume absorbs a
+        // retried request; the confirmation below carries the CURRENT status
+        // the server actually returned, never a fabricated "done".
         setResumed(true);
+        setResumedTaskId(typeof body?.task?.id === 'string' ? body.task.id : task.id);
       } else {
-        setResumeError(body.error || `Resume failed (status ${res.status})`);
+        setResumeError(body.error || body.detail || `Resume failed (status ${res.status})`);
       }
     } catch (e: unknown) {
       setResumeError(e instanceof Error ? e.message : 'Resume request failed');
@@ -690,11 +740,30 @@ export function BlockedReasonPanel({ task }: { task: Task }) {
         </div>
       ) : null}
 
+      {/* Item 19 — a task whose ENGINE run is parked resumes through the
+          engine's own launcher path, never the board dispatch below: the
+          board does not dispatch engine-owned cards, so a board resume
+          would move the card while the engine stayed parked (a fabricated
+          state change). The engine panel shows the plain-words park
+          record and that resume. Board-dispatched tasks keep U061. */}
+      {task.park_status ? (
+        <div className="mt-3 pt-3 border-t border-red-200/50" data-testid="blocked-panel-engine-resume-area">
+          <PresentationEnginePanel
+            taskId={task.id}
+            park={task.park_status}
+            terminal={task.engine_terminal ?? null}
+          />
+        </div>
+      ) : (
+      <>
       {/* U061 — Resume action: re-enter the dispatch loop through the state machine */}
       <div className="mt-3 pt-3 border-t border-red-200/50" data-testid="blocked-panel-resume-area">
         {resumed ? (
+          // CRT-001: confirm the RESUME result — the task id the server
+          // actually re-entered — not a new status claim. The card's status
+          // still refreshes from the board fetch, never from this sentence.
           <p className="text-xs text-green-700 font-medium" data-testid="blocked-panel-resumed">
-            Task resumed — re-entering dispatch queue
+            Resume accepted for task {resumedTaskId ?? task.id} — re-entering dispatch queue
           </p>
         ) : (
           <>
@@ -716,6 +785,8 @@ export function BlockedReasonPanel({ task }: { task: Task }) {
           </>
         )}
       </div>
+      </>
+      )}
     </div>
   );
 }

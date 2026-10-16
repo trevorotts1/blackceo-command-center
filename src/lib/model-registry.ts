@@ -266,7 +266,7 @@ export function upsertModel(input: ModelRegistryUpsertInput): UpsertOutcome {
 /**
  * FIX-24 (Error 13 / T-24) — model-catalog truth: the operator-facing catalog
  * and the CC `model_registry` must name the LIVE fleet primary id
- * `deepseek-v4-flash:0731-cloud` (the 2026-08-06 fleet rollout id), never the
+ * `deepseek-v4.1-flash:cloud` (live since the 2026-09-25 retirement of every deepseek-v4-flash build), never the
  * retired `deepseek-v4-flash:cloud` build and NEVER a phantom `0713` tag.
  *
  * The registry is populated by the weekly Ollama Cloud refresh, which pulls the
@@ -281,7 +281,7 @@ export function upsertModel(input: ModelRegistryUpsertInput): UpsertOutcome {
  * sovereignty (this is the operator's own primary; a client box simply won't
  * have the `ollama-cloud` provider configured and the row stays inert).
  */
-export const FLEET_PRIMARY_MODEL_ID = 'ollama-cloud/deepseek-v4-flash:0731-cloud';
+export const FLEET_PRIMARY_MODEL_ID = 'ollama-cloud/deepseek-v4.1-flash:cloud';
 
 /**
  * Ensure the live fleet primary model is registered. Returns the upsert
@@ -297,7 +297,7 @@ export function ensureFleetPrimaryModel(): UpsertOutcome | 'present' {
     if (existing) return 'present';
     const outcome = upsertModel({
       model_id: FLEET_PRIMARY_MODEL_ID,
-      label: 'deepseek-v4-flash:0731-cloud',
+      label: 'deepseek-v4.1-flash:cloud',
       provider: 'ollama-cloud',
       family: 'deepseek',
       context_window: 1_048_576,

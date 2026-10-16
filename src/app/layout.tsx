@@ -1,6 +1,6 @@
 import type { Metadata, Viewport } from 'next';
 import './globals.css';
-import { Inter, JetBrains_Mono } from 'next/font/google';
+import localFont from 'next/font/local';
 import CommandPalette from '@/components/CommandPalette';
 import MobileNav from '@/components/MobileNav';
 import AppWalkthrough from '@/components/walkthrough/AppWalkthrough';
@@ -12,18 +12,31 @@ import { loadCompanyConfig } from '@/lib/company-config';
 // handle navigation; AppShell sidebar import also retired.
 // import AppShell from '@/components/AppShell';
 
-const inter = Inter({
-  subsets: ['latin'],
+// Fonts are vendored in ./fonts (latin subset, variable wght, SIL OFL 1.1 —
+// see the *-OFL.txt files) instead of being fetched from Google Fonts via
+// Next's font loader at BUILD time. That loader downloads Google Fonts CSS
+// during the build; when that fetch hiccups the unattended daily rebuild
+// crashes ("Cannot read properties of null (reading '1')") and rolls back.
+// Local files make the build network-independent. Family names, CSS
+// variables, weight ranges and display are unchanged.
+// ponytail: latin subset only (same as the preloaded subset before); add
+// other subsets as extra files if non-latin glyphs ever matter.
+const inter = localFont({
+  src: './fonts/Inter-latin-wght.woff2',
   variable: '--font-inter',
-  weight: ['400', '500', '600', '700', '800', '900'],
+  weight: '400 900',
+  style: 'normal',
   display: 'swap',
+  declarations: [{ prop: 'font-family', value: 'Inter' }],
 });
 
-const jetbrainsMono = JetBrains_Mono({
-  subsets: ['latin'],
+const jetbrainsMono = localFont({
+  src: './fonts/JetBrainsMono-latin-wght.woff2',
   variable: '--font-jetbrains-mono',
-  weight: ['400', '500', '600', '700'],
+  weight: '400 700',
+  style: 'normal',
   display: 'swap',
+  declarations: [{ prop: 'font-family', value: 'JetBrains Mono' }],
 });
 
 // Product name now reads from the configured company-config.json

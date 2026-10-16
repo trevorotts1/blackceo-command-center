@@ -93,6 +93,33 @@ export interface OpenClawAgentsList {
   agents: OpenClawAgentEntry[];
 }
 
+/**
+ * Opt-in native event frame (SPEC S9 "Native wire adapter", unit B11).
+ *
+ * The gateway's own `EventFrameSchema` is a closed object
+ * `{type:'event', event:<non-empty string>, payload?, seq?, stateVersion?,
+ * recipientProfileId?}`. A native frame carries NO `method`, so the legacy
+ * notification path below (`if (data.method)`) drops it on the floor — that is
+ * the gap S9 names. This interface is what `'native-event'` carries when a
+ * caller has opted in; it is a projection, not a re-encoding: only the three
+ * fields the adapter consumes are surfaced.
+ *
+ * Emission is OFF by default. `enableNativeEvents(true)` opts in; every
+ * existing caller keeps byte-for-byte the same `'notification'` / method event
+ * surface it had before, because nothing is emitted under a new name until a
+ * caller asks for it. A `res` frame — or a response carrying an unknown id —
+ * is dispatched and returned BEFORE this point and can never be reported as an
+ * event (S9: "never treat `res` or unknown response IDs as events").
+ */
+export interface OpenClawNativeEvent {
+  /** The frame's `event` discriminator (e.g. `'chat'`). Never empty. */
+  event: string;
+  /** The frame's raw `payload`, unvalidated — consumers normalize their own schema. */
+  payload: unknown;
+  /** The frame's channel `seq`, when it is a non-negative integer. */
+  seq: number | null;
+}
+
 // ── U020 ANTI-FURNACE: bounded reconnect backoff ─────────────────────────────
 // A flapping gateway used to trigger an infinite fixed-10s reconnect loop.
 // Mirrors the task-dispatcher's anti-furnace pattern (MAX_DISPATCH_ATTEMPTS,
@@ -111,6 +138,27 @@ const RECONNECT_BACKOFF_MAX_MS = Math.max(
   RECONNECT_BACKOFF_BASE_MS,
   parseInt(process.env.RECONNECT_BACKOFF_MAX_MS || '32000', 10),
 );
+
+/**
+ * B11/S9 validation gate: project a raw frame into an `OpenClawNativeEvent`,
+ * or `null` when it is not a valid native event frame. Validation is exactly
+ * what S9 names — `type === 'event'` with a non-empty string `event`. A frame
+ * with a non-string/missing `event` (or anything that reached here that is not
+ * an object) is NOT an event and is dropped, never guessed at or relabeled.
+ * `seq` is passed through only when it is a non-negative integer, matching the
+ * installed `EventFrameSchema`; a malformed seq is null rather than a lie.
+ */
+function toNativeEvent(data: Record<string, unknown>): OpenClawNativeEvent | null {
+  if (data.type !== 'event') return null;
+  const event = data.event;
+  if (typeof event !== 'string' || event.length === 0) return null;
+  const seq = data.seq;
+  return {
+    event,
+    payload: data.payload,
+    seq: typeof seq === 'number' && Number.isInteger(seq) && seq >= 0 ? seq : null,
+  };
+}
 
 export class OpenClawClient extends EventEmitter {
   private ws: SocketLike | null = null;
@@ -139,6 +187,9 @@ export class OpenClawClient extends EventEmitter {
    *  self-heal. Cleared on the next successful connect. */
   private pairingAutoApprovedNote: string | null = null;
   private messageHandlers = new Set<(event: { data: unknown }) => void>(); // Track all message handlers for cleanup
+  /** B11/S9: opt-in `'native-event'` emission. OFF by default so every existing
+   *  caller's observable surface is unchanged. See enableNativeEvents(). */
+  private nativeEventsEnabled = false;
   private readonly MAX_PROCESSED_EVENTS = 1000; // Limit the size of the processed events cache
   private readonly CLEANUP_THRESHOLD = 100; // Number of entries to remove when limit exceeded
   private readonly CACHE_ENTRY_TTL_MS = 60 * 60 * 1000; // 1 hour TTL for cache entries
@@ -739,11 +790,41 @@ export class OpenClawClient extends EventEmitter {
       return;
     }
 
+    // Native EventFrame (SPEC S9, B11): `{type:'event', event, payload}` with a
+    // string `event` and no `method`. Opt-in only — see enableNativeEvents().
+    // Ordering is load-bearing: this branch sits AFTER both response branches
+    // above, so a `res` frame or any frame carrying an id this client already
+    // consumed can never reach it (S9: "never treat res or unknown response IDs
+    // as events").
+    if (data.type === 'event') {
+      const nativeEvent = this.nativeEventsEnabled
+        ? toNativeEvent(data as unknown as Record<string, unknown>)
+        : null;
+      if (nativeEvent) this.emit('native-event', nativeEvent);
+    }
+
     // Handle events/notifications
     if (data.method) {
       this.emit('notification', data);
       this.emit(data.method, data.params);
     }
+  }
+
+  /**
+   * Opt in (or back out of) `'native-event'` emission on THIS client instance.
+   * Default is OFF, so a client handed to an unchanged legacy caller behaves
+   * exactly as it did before this method existed. Instance-scoped, not global:
+   * `getOpenClawClient()` caches one instance per target, so opting the HQ
+   * transport in must never silently re-wire every other caller of the same
+   * shared singleton.
+   */
+  enableNativeEvents(enabled = true): void {
+    this.nativeEventsEnabled = enabled;
+  }
+
+  /** Whether this instance currently emits `'native-event'`. */
+  isNativeEventsEnabled(): boolean {
+    return this.nativeEventsEnabled;
   }
 
   private scheduleReconnect(): void {
@@ -827,8 +908,31 @@ export class OpenClawClient extends EventEmitter {
   }
 
   // Session management methods
+
+  /**
+   * `sessions.list` returns an ENVELOPE, not an array:
+   * `{ts, path, count, totalCount, defaults, sessions: [...]}` — built by the
+   * gateway's own `buildSessionsListResult()`. This method used to return that
+   * object straight through while its return type claimed an array, so every
+   * caller was silently handed the wrong shape and TypeScript could not see it:
+   *   - runtime-model.ts's `Array.isArray(sessions)` guard was ALWAYS false, so
+   *     the live runtime model resolved to null on every dispatch;
+   *   - the status route reported `sessions.length` as undefined;
+   *   - the client feed's `.map()` and the by-id route's `.find()` would throw.
+   * Unwrapping here fixes all of them at once — no caller changes, because the
+   * array is what every caller already believed it was getting.
+   *
+   * The envelope is tolerated defensively rather than demanded: an older or
+   * patched gateway that returns a bare array still works, and anything else
+   * yields an empty list instead of throwing into a caller that has no way to
+   * tell a shape change from a dead gateway. `scripts/openclaw-contract-check.mjs`
+   * is what makes the envelope's disappearance LOUD; this method stays quiet.
+   */
   async listSessions(): Promise<OpenClawSessionInfo[]> {
-    return this.call<OpenClawSessionInfo[]>('sessions.list');
+    const result = await this.call<unknown>('sessions.list');
+    if (Array.isArray(result)) return result as OpenClawSessionInfo[];
+    const sessions = (result as { sessions?: unknown } | null)?.sessions;
+    return Array.isArray(sessions) ? (sessions as OpenClawSessionInfo[]) : [];
   }
 
   /**
@@ -842,12 +946,45 @@ export class OpenClawClient extends EventEmitter {
     return this.call<OpenClawAgentsList>('agents.list', {});
   }
 
-  async getSessionHistory(sessionId: string): Promise<unknown[]> {
-    return this.call<unknown[]>('sessions.history', { session_id: sessionId });
+  /**
+   * THERE IS NO `sessions.history` RPC. It was never a method on any gateway
+   * version this repo has run against: a search of the installed 2026.9.4 dist
+   * and of the published 2026.9.5 tarball finds ZERO references to the name,
+   * while `chat.history` is registered in both. Every call this method made was
+   * answered with an unknown-method error, which the interview turn route then
+   * reported as "the agent did not reply".
+   *
+   * The real method takes `{sessionKey}` (closed schema, `sessionKey` required)
+   * and answers with an envelope `{sessionKey, sessionId, messages, ...}`. The
+   * caller's argument is passed through unchanged as the session key, and the
+   * messages array is unwrapped so callers keep the array they already expect.
+   *
+   * NO `limit` IS SENT, deliberately. The gateway defaults to 200 entries
+   * (`Math.min(CHAT_HISTORY_MAX_ENTRIES, limit ?? 200)`), which is already
+   * bounded. /api/interview/turn counts the agent turns in this history to form
+   * a baseline and then waits for the count to GROW, so a tight window would
+   * silently break new-reply detection on a long interview: once the window is
+   * full, a new turn pushes an old one out and the count never moves. Other call
+   * sites that ask for `limit: 50` are doing one-shot reads where that does not
+   * apply. Do not add a limit here without fixing that route first.
+   */
+  async getSessionHistory(sessionKey: string): Promise<unknown[]> {
+    const result = await this.call<unknown>('chat.history', { sessionKey });
+    if (Array.isArray(result)) return result;
+    const messages = (result as { messages?: unknown } | null)?.messages;
+    return Array.isArray(messages) ? messages : [];
   }
 
-  async sendMessage(sessionId: string, content: string): Promise<void> {
-    await this.call('sessions.send', { session_id: sessionId, content });
+  /**
+   * `sessions.send` takes `{key, message}` — a CLOSED schema whose `required`
+   * is exactly those two fields. This method used to send `{session_id, content}`,
+   * so the gateway rejected every send outright for unexpected properties AND
+   * missing required ones: the interview turn, the operator bridge dispatch and
+   * the goals nudge all failed at the wire, not in any code path this repo could
+   * see. The argument values are unchanged; only the field names were wrong.
+   */
+  async sendMessage(sessionKey: string, content: string): Promise<void> {
+    await this.call('sessions.send', { key: sessionKey, message: content });
   }
 
   /**
@@ -866,9 +1003,35 @@ export class OpenClawClient extends EventEmitter {
    * session routing/addressing (routing continuity, where needed, already
    * happens by the caller reusing a previously-returned session id, not by
    * re-deriving it from `peer` on every call).
+   *
+   * `opts` carries the three fields a PINNED session needs. `model` is the
+   * whole point: `chat.send` has no `model` field (its params schema is a
+   * closed object without one), so the ONLY way the Command Center can decide
+   * which model serves a run is to set it when the session is created.
+   * Verified live against the installed gateway (OpenClaw 2026.9.4) on
+   * 2026-09-21: `sessions.create {key, agentId, model}` returns an entry
+   * carrying `providerOverride`, `modelOverride` and `modelOverrideSource:
+   * "user"`, a following `chat.send` runs on it, and `chat.history` reports
+   * `modelProvider`/`model` as the override while the same payload's
+   * `defaults` block still shows the agent's own primary. A fully-qualified
+   * `agent:<id>:<session>` key is accepted verbatim, so a caller that already
+   * holds one passes it straight through.
+   *
+   * A model outside `agents.defaults.modelPolicy.allow` is REFUSED — the call
+   * throws `model not allowed: <id>` — never silently replaced. Callers must
+   * treat that throw as "placement is unavailable", never as success.
    */
-  async createSession(channel: string, peer?: string): Promise<OpenClawSessionInfo> {
-    return this.call<OpenClawSessionInfo>('sessions.create', peer ? { label: peer } : {});
+  async createSession(
+    channel: string,
+    peer?: string,
+    opts?: { key?: string; agentId?: string; model?: string },
+  ): Promise<OpenClawSessionInfo> {
+    const params: Record<string, unknown> = {};
+    if (peer) params.label = peer;
+    if (opts?.key) params.key = opts.key;
+    if (opts?.agentId) params.agentId = opts.agentId;
+    if (opts?.model) params.model = opts.model;
+    return this.call<OpenClawSessionInfo>('sessions.create', params);
   }
 
   // Node methods (device capabilities)

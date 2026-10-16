@@ -5,6 +5,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { getDb } from '@/lib/db';
+import { linkDeliverableToExecution } from '@/lib/execution-attempts';
 import { broadcast } from '@/lib/events';
 import { CreateDeliverableSchema } from '@/lib/validation';
 import {
@@ -267,6 +268,11 @@ export async function POST(request: NextRequest, props: { params: Promise<{ id: 
       file_size_bytes,
       sha256,
     );
+
+    // Name the attempt that registered this row. The persona artifact-snapshot
+    // gate holds a producer to ITS OWN artifacts, not to the ones earlier QC
+    // re-routes left on the card (execution-attempts.ts).
+    linkDeliverableToExecution(taskId, id, db);
 
     // Get the created deliverable
     const deliverable = db.prepare(`

@@ -7,7 +7,7 @@
 // ~570s agent wall and the 600s queue cap and paged a human (live evidence: a
 // ticket abandoned at 602.2s).
 //
-// FIX: a real MEDIUM tier — coach/how-to -> deepseek-v4-flash:cloud@low with a
+// FIX: a real MEDIUM tier — coach/how-to -> deepseek-v4.1-flash:cloud@low with a
 // short (~210s) agent wall; per-tier agent walls (~180-240s) for the light-model
 // tiers; and a per-job queue cap derived to sit STRICTLY ABOVE the tier's agent
 // wall so the agent's OWN graceful timeout fires first instead of the brutal queue
@@ -19,7 +19,7 @@
 // imports { classifyTier, deriveQueueTimeout, ...TIMEOUTS } from here.
 //
 // MODEL POLICY (binding 2026-07-01): ALL rescue tiers run on Ollama Cloud only.
-// LIGHT + STRUCTURED + MEDIUM -> ollama/deepseek-v4-flash:0731-cloud (cheap/fast).
+// LIGHT + STRUCTURED + MEDIUM -> ollama/deepseek-v4.1-flash:cloud (cheap/fast).
 // HARD -> model:null => agent primary (ollama/kimi-k2.6:cloud) @ high thinking.
 // ---------------------------------------------------------------------------
 
@@ -49,9 +49,9 @@ export const QUEUE_MARGIN = envInt("RESCUE_QUEUE_MARGIN", 60);
 // Seconds added to the agent's own --timeout to form the SIGKILL wall in runAgent.
 export const AGENT_WALL_GRACE = 30;
 
-export const LIGHT_MODEL = "ollama/deepseek-v4-flash:0731-cloud";
-export const STRUCTURED_MODEL = "ollama/deepseek-v4-flash:0731-cloud";
-export const MEDIUM_MODEL = "ollama/deepseek-v4-flash:0731-cloud";
+export const LIGHT_MODEL = "ollama/deepseek-v4.1-flash:cloud";
+export const STRUCTURED_MODEL = "ollama/deepseek-v4.1-flash:cloud";
+export const MEDIUM_MODEL = "ollama/deepseek-v4.1-flash:cloud";
 export const HARD_THINKING = "high";
 export const LIGHT_THINKING = "low";
 export const MEDIUM_THINKING = "low";
@@ -73,10 +73,10 @@ const LIGHT_RE = /\[routing\s+test\]|\[synthetic\]|\btest\s+ticket\b|^ack$/i;
 // classifyTier — deterministic regex only, zero LLM tokens.
 // Returns { tier, model, thinking, agentTimeout, reason }.
 //   hard       -> destructive/credential guardrail. model:null (agent primary), high.
-//   structured -> remediate.sh class. deepseek-v4-flash:0731-cloud, low.
-//   light      -> routing test / synthetic / trivial. deepseek-v4-flash:0731-cloud, low.
+//   structured -> remediate.sh class. deepseek-v4.1-flash:cloud, low.
+//   light      -> routing test / synthetic / trivial. deepseek-v4.1-flash:cloud, low.
 //   medium     -> DEFAULT: coach-client-agent / how-to (the most common ticket).
-//                 deepseek-v4-flash:0731-cloud, low. (Was HARD — the FIX-RESCUE-05 bug.)
+//                 deepseek-v4.1-flash:cloud, low. (Was HARD — the FIX-RESCUE-05 bug.)
 // ---------------------------------------------------------------------------
 export function classifyTier(message) {
   const text = (message || "").toString();
@@ -92,7 +92,7 @@ export function classifyTier(message) {
   }
   // Default: MEDIUM — coach/how-to. FIX-RESCUE-05: was HARD (kimi@high) which blew
   // the agent + queue walls and paged a human on the common case.
-  return { tier: "medium", model: MEDIUM_MODEL, thinking: MEDIUM_THINKING, agentTimeout: AGENT_TIMEOUT_MEDIUM, reason: "coach/how-to default -> medium (deepseek-v4-flash:0731-cloud@low)" };
+  return { tier: "medium", model: MEDIUM_MODEL, thinking: MEDIUM_THINKING, agentTimeout: AGENT_TIMEOUT_MEDIUM, reason: "coach/how-to default -> medium (deepseek-v4.1-flash:cloud@low)" };
 }
 
 // The tier's SIGKILL agent wall = agentTimeout + AGENT_WALL_GRACE.

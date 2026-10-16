@@ -550,6 +550,35 @@ describe('company_branding — config file rules', () => {
   });
 });
 
+describe('company_branding — config/DB name mismatch is advisory (non-gating)', () => {
+  // Measured 2026-09-18 on a client VPS: this row alone returned exit 1 to the
+  // deploy's health check, atomic-deploy rolled back to a pre-inventory build,
+  // and the new cc-start refused it — the box was DOWN over two spellings of
+  // the practice name. A mismatch is reported as DEGRADED and never gates.
+  it('config name != DB name → pass=true, degraded=true, detail says DEGRADED', async () => {
+    writeCompanyConfig(tmpDir, { companyName: 'Example Wellness Practice' });
+    vi.doMock('@/lib/db', () => ({
+      getDb: () => ({
+        prepare: (sql: string) => ({
+          get: () => {
+            if (sql.includes('sqlite_master')) return { name: 'companies' };
+            if (sql.includes('SELECT name FROM companies')) return { name: "Dr. Example Client MD" };
+            return undefined;
+          },
+          all: () => [],
+        }),
+      }),
+      getMigrationStatus: () => ({ applied: ['001'], pending: [] }),
+      getDbPath: () => '/tmp/test.db',
+    }));
+    const { checkCompanyBranding } = await loadChecks();
+    const result = checkCompanyBranding() as { pass: boolean; degraded?: boolean; detail: string };
+    expect(result.pass).toBe(true);
+    expect(result.degraded).toBe(true);
+    expect(result.detail).toMatch(/DEGRADED/);
+  });
+});
+
 describe('company_branding — DB branding checks', () => {
   // Row 4 variant: DB company row = "Command Center" → FAIL
   // FALSE-GREEN CONFIRMED on feat/b1-cc-health-check (old branch, line 1125):
@@ -1603,6 +1632,12 @@ describe('GET /api/health/deep — response shape', () => {
   // confirmed drift exists, then asserts the drift is reported as a NON-GATING
   // advisory while the top-level verdict stays green.
   function greenGatingDbMock() {
+    // ISSUE-04: a GREEN box is one whose in-process scheduler is ticking, so
+    // this fixture now answers the job_liveness reads too. Before the gating
+    // scheduler_liveness check existed, `queryOne` was simply absent from this
+    // mock and the board jobs watchdog saw every watched job as never observed, which
+    // was invisible only because nothing gated on it.
+    const freshTick = new Date().toISOString();
     return {
       getDb: () => ({
         prepare: (sql: string) => ({
@@ -1616,6 +1651,27 @@ describe('GET /api/health/deep — response shape', () => {
           all: () => [],
         }),
       }),
+      queryOne: (sql: string) => {
+        if (sql.includes('job_liveness')) {
+          return {
+            ok: 1,
+            last_ran_at: freshTick,
+            last_status: 'ok',
+            last_started_at: freshTick,
+            last_finished_at: freshTick,
+            last_success_at: freshTick,
+            consecutive_failures: 0,
+            error_code: null,
+            result_counts: '{}',
+          };
+        }
+        return undefined;
+      },
+      queryAll: () => [],
+      run: () => undefined,
+      timeNow: () => freshTick,
+      sqlTime: (col: string) => col,
+      parseDbTime: (value: unknown) => (value ? new Date(String(value)).getTime() : NaN),
       getMigrationStatus: () => ({ applied: ['001'], pending: [] }),
       getDbPath: () => path.join(tmpDir, 'test.db'),
     };
@@ -2188,5 +2244,322 @@ describe('company_branding — leftover default seed row (C-03)', () => {
     const result = withoutCompanyEnv(() => checkCompanyBranding());
     expect(result.pass).toBe(false);
     db.close();
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// ISSUE-04: scheduler_liveness, the GATING half of the board jobs watchdog signal
+//
+// THE DEFECT: every sweep is a node-cron job registered in-process, and the
+// board jobs watchdog is itself one of them, so it dies with the loop it
+// watches. checkBoardJobsWatchdog() reached /api/health/deep only as
+// advisory.board_jobs_watchdog, which the gating aggregation excludes and
+// scripts/cc-health-check.sh never reads. A live box sat "healthy" for 41
+// hours with no card moving.
+//
+// These tests pin the contract the out-of-process repair path depends on:
+// pass when the jobs tick, pass inside the boot warm-up window (a process that
+// has just started has not ticked yet, and that is not evidence of a stall),
+// definitive FAIL after it, and a clean PASS when monitoring is opted out.
+// UNKNOWN is reserved for an unreadable job_liveness table: a broken
+// instrument rather than a broken scheduler.
+// The one thing it must never do is fail for a job that ticks but errors, or
+// for one an operator kill-flagged: those still prove the loop is alive and
+// stay on the un-gated advisory.
+// ────────────────────────────────────────────────────────────────────────────
+
+/** Load board-jobs-watchdog.ts fresh, against whatever '@/lib/db' mock is active. */
+async function loadSchedulerLiveness() {
+  vi.resetModules();
+  return await import('../../src/lib/jobs/board-jobs-watchdog.js') as typeof import('../../src/lib/jobs/board-jobs-watchdog');
+}
+
+/**
+ * Mock '@/lib/db' so `SELECT * FROM job_liveness WHERE job_name=?` answers
+ * from `rows` (keyed by job name). A job absent from the map returns
+ * undefined, which is the real "never observed" shape.
+ */
+function mockJobLivenessRows(rows: Record<string, Record<string, unknown>>) {
+  vi.doMock('@/lib/db', () => ({
+    queryOne: (_sql: string, params: unknown[] = []) => rows[String(params[0])],
+    queryAll: () => [],
+    run: () => undefined,
+    timeNow: () => new Date().toISOString(),
+    sqlTime: (col: string) => col,
+    parseDbTime: (value: unknown) =>
+      value ? new Date(String(value)).getTime() : NaN,
+    getDb: () => ({ prepare: () => ({ get: () => undefined, all: () => [] }) }),
+    getMigrationStatus: () => ({ applied: ['001'], pending: [] }),
+    getDbPath: () => path.join(tmpDir, 'test.db'),
+  }));
+}
+
+/** An ISO timestamp `minutes` in the past. */
+function minutesAgo(minutes: number): string {
+  return new Date(Date.now() - minutes * 60_000).toISOString();
+}
+
+/** A healthy job_liveness row: ticked `ageMinutes` ago, finished, status ok. */
+function healthyRow(ageMinutes: number): Record<string, unknown> {
+  const at = minutesAgo(ageMinutes);
+  return {
+    last_ran_at: at,
+    last_status: 'ok',
+    last_started_at: at,
+    last_finished_at: at,
+    last_success_at: at,
+    consecutive_failures: 0,
+    error_code: null,
+    result_counts: '{}',
+  };
+}
+
+const WATCHED_JOBS = ['intake-advance', 'qc-review-sweep', 'execution-reconcile', 'stuck-in-progress-sweep'];
+
+/** All four watched jobs healthy at the same age. */
+function allHealthy(ageMinutes: number): Record<string, Record<string, unknown>> {
+  const out: Record<string, Record<string, unknown>> = {};
+  for (const job of WATCHED_JOBS) out[job] = healthyRow(ageMinutes);
+  return out;
+}
+
+describe('scheduler_liveness (ISSUE-04, GATING)', () => {
+  const UPTIME_PAST_WARMUP = 60 * 60; // 60 minutes, well past the 16m window
+
+  afterEach(() => {
+    delete process.env.DISABLE_BOARD_JOBS_WATCHDOG;
+    delete process.env.DISABLE_SWEEP_LIVENESS; // pre-rename alias, still honoured
+  });
+
+  it('all watched jobs ticking → pass=true, never indeterminate', async () => {
+    mockJobLivenessRows(allHealthy(1));
+    const { checkSchedulerLiveness } = await loadSchedulerLiveness();
+    const result = checkSchedulerLiveness(UPTIME_PAST_WARMUP);
+    expect(result.pass).toBe(true);
+    expect(result.indeterminate).not.toBe(true);
+    expect(result.detail).toMatch(/OK/);
+  });
+
+  it('a healthy box is NOT downgraded to indeterminate inside the warm-up window', async () => {
+    // Otherwise every box would report UNKNOWN for 16 minutes after every
+    // restart, which is a worse signal than the one this check replaces.
+    mockJobLivenessRows(allHealthy(1));
+    const { checkSchedulerLiveness } = await loadSchedulerLiveness();
+    const result = checkSchedulerLiveness(30); // 30 seconds of uptime
+    expect(result.pass).toBe(true);
+    expect(result.indeterminate).not.toBe(true);
+  });
+
+  it('a job silent past its threshold, past the warm-up window → definitive FAIL naming the job', async () => {
+    const rows = allHealthy(1);
+    // intake-advance: cadence 2m, threshold 6m. 45m of silence is a stall.
+    rows['intake-advance'] = healthyRow(45);
+    mockJobLivenessRows(rows);
+    const { checkSchedulerLiveness } = await loadSchedulerLiveness();
+    const result = checkSchedulerLiveness(UPTIME_PAST_WARMUP);
+    expect(result.pass).toBe(false);
+    expect(result.indeterminate).not.toBe(true);
+    expect(result.detail).toMatch(/STALLED/);
+    expect(result.detail).toMatch(/intake-advance/);
+  });
+
+  it('every job silent (the real 41-hour stall) → definitive FAIL', async () => {
+    const rows: Record<string, Record<string, unknown>> = {};
+    for (const job of WATCHED_JOBS) rows[job] = healthyRow(41 * 60);
+    mockJobLivenessRows(rows);
+    const { checkSchedulerLiveness } = await loadSchedulerLiveness();
+    const result = checkSchedulerLiveness(41 * 60 * 60);
+    expect(result.pass).toBe(false);
+    expect(result.indeterminate).not.toBe(true);
+    for (const job of WATCHED_JOBS) expect(result.detail).toContain(job);
+  });
+
+  it('the same silence INSIDE the warm-up window PASSES, and is never UNKNOWN', async () => {
+    // Measured on a real CI probe of a freshly started server: at 0m uptime all
+    // four watched jobs read "never observed". Reporting UNKNOWN there flips the
+    // whole deep response to indeterminate, cc-health-check.sh exits 3, and a
+    // run of exit 3 past the deadline is escalated as a persistent-unknown RED.
+    // Inside the window silence is the EXPECTED state of a fresh process, not
+    // weak evidence of a stall, so there is no adverse signal to report.
+    const rows = allHealthy(1);
+    rows['intake-advance'] = healthyRow(45);
+    mockJobLivenessRows(rows);
+    const { checkSchedulerLiveness } = await loadSchedulerLiveness();
+    const result = checkSchedulerLiveness(5 * 60); // 5 minutes of uptime
+    expect(result.pass).toBe(true);
+    expect(result.indeterminate).not.toBe(true);
+    expect(result.detail).toMatch(/warm-up/);
+    expect(result.detail).toMatch(/intake-advance/);
+  });
+
+  it('a brand-new box with no job_liveness rows passes while warming, then FAILS definitively', async () => {
+    // The cost of the rule above, stated plainly: a box whose scheduler never
+    // starts reads green for the length of the window. No evidence of ticking
+    // can exist before the first cadence elapses, so nothing can close it.
+    mockJobLivenessRows({});
+    const { checkSchedulerLiveness } = await loadSchedulerLiveness();
+    const warming = checkSchedulerLiveness(60);
+    expect(warming.pass).toBe(true);
+    expect(warming.indeterminate).not.toBe(true);
+    const settled = checkSchedulerLiveness(UPTIME_PAST_WARMUP);
+    expect(settled.pass).toBe(false);
+    expect(settled.indeterminate).not.toBe(true);
+    expect(settled.detail).toMatch(/never observed/);
+  });
+
+  it('a freshly booted process never turns the deep response indeterminate', async () => {
+    // The exact CI regression this replaces: 0m uptime, nothing has ticked, and
+    // the box must still read green rather than UNKNOWN.
+    mockJobLivenessRows({});
+    const { checkSchedulerLiveness } = await loadSchedulerLiveness();
+    const atBoot = checkSchedulerLiveness(0);
+    expect(atBoot.pass).toBe(true);
+    expect(atBoot.indeterminate).not.toBe(true);
+  });
+
+  it('a job that TICKS but keeps failing does NOT gate (it proves the loop is alive)', async () => {
+    const rows = allHealthy(1);
+    rows['qc-review-sweep'] = { ...healthyRow(1), last_status: 'error', consecutive_failures: 9, error_code: 'job_failed' };
+    mockJobLivenessRows(rows);
+    const { checkSchedulerLiveness, checkBoardJobsWatchdog } = await loadSchedulerLiveness();
+    expect(checkSchedulerLiveness(UPTIME_PAST_WARMUP).pass).toBe(true);
+    // ...and the advisory still reports it, so the signal is not lost.
+    expect(checkBoardJobsWatchdog().pass).toBe(false);
+  });
+
+  it('a kill-flagged (disabled) job does NOT gate either, and the advisory treats it as an operator decision (pass, named in detail)', async () => {
+    const rows = allHealthy(1);
+    rows['stuck-in-progress-sweep'] = { ...healthyRow(1), last_status: 'disabled' };
+    mockJobLivenessRows(rows);
+    const { checkSchedulerLiveness, checkBoardJobsWatchdog } = await loadSchedulerLiveness();
+    expect(checkSchedulerLiveness(UPTIME_PAST_WARMUP).pass).toBe(true);
+    const advisory = checkBoardJobsWatchdog();
+    expect(advisory.pass).toBe(true);
+    expect(advisory.detail).toMatch(/stuck-in-progress-sweep is switched off on this box/);
+  });
+
+  it('DISABLE_BOARD_JOBS_WATCHDOG makes the gating check PASS, never a permanent UNKNOWN', async () => {
+    // A permanent indeterminate would be escalated by cc-health-check.sh as a
+    // persistent-unknown RED: a false red produced by an operator setting.
+    process.env.DISABLE_BOARD_JOBS_WATCHDOG = '1';
+    mockJobLivenessRows({});
+    const { checkSchedulerLiveness } = await loadSchedulerLiveness();
+    const result = checkSchedulerLiveness(UPTIME_PAST_WARMUP);
+    expect(result.pass).toBe(true);
+    expect(result.indeterminate).not.toBe(true);
+    expect(result.detail).toMatch(/disabled/);
+  });
+
+  it('an unreadable job_liveness table is UNKNOWN, never a definitive red', async () => {
+    vi.doMock('@/lib/db', () => ({
+      queryOne: () => { throw new Error('database is locked'); },
+      queryAll: () => [],
+      run: () => undefined,
+      timeNow: () => new Date().toISOString(),
+      sqlTime: (col: string) => col,
+      parseDbTime: () => NaN,
+      getDb: () => ({ prepare: () => ({ get: () => undefined, all: () => [] }) }),
+      getMigrationStatus: () => ({ applied: ['001'], pending: [] }),
+      getDbPath: () => path.join(tmpDir, 'test.db'),
+    }));
+    const { checkSchedulerLiveness } = await loadSchedulerLiveness();
+    const result = checkSchedulerLiveness(UPTIME_PAST_WARMUP);
+    expect(result.pass).toBe(false);
+    expect(result.indeterminate).toBe(true);
+  });
+
+  it('the warm-up window is derived from the widest watched threshold, not hardcoded', async () => {
+    mockJobLivenessRows(allHealthy(1));
+    const { getWatchedJobLiveness, schedulerLivenessWarmupMinutes } = await loadSchedulerLiveness();
+    const watched = getWatchedJobLiveness();
+    const widest = Math.max(...watched.map((w) => w.staleThresholdMinutes));
+    expect(schedulerLivenessWarmupMinutes(watched)).toBe(widest + 1);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// build_content runs OFF the request thread and is cached per build + commit.
+// A synchronous verify blocked the whole server for the length of the hash, so
+// under load the Command Center stopped answering even /api/health.
+// ────────────────────────────────────────────────────────────────────────────
+describe('build_content — never blocks the server; cached per BUILD_ID + HEAD', () => {
+  function slowOracle(dir: string, counter: string): void {
+    fs.mkdirSync(path.join(dir, 'scripts', 'lib'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'scripts', 'lib', 'build-inventory.sh'),
+      `echo x >> "${counter}"; sleep 1; echo '{"verdict":"VERIFIED","build_id":"b1"}'\n`);
+    fs.mkdirSync(path.join(dir, '.next'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.next', 'BUILD_ID'), 'b1');
+    fs.mkdirSync(path.join(dir, '.git', 'refs', 'heads'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+    fs.writeFileSync(path.join(dir, '.git', 'refs', 'heads', 'main'), 'aaaa\n');
+  }
+
+  it('the event loop keeps serving while the verify runs', async () => {
+    const counter = path.join(tmpDir, 'calls');
+    slowOracle(tmpDir, counter);
+    const { checkBuildContentInventory } = await loadChecks();
+    const t0 = Date.now();
+    const check = checkBuildContentInventory();
+    expect(Date.now() - t0).toBeLessThan(500); // a synchronous spawn held the thread for the whole 1 s verify
+    let ticked = false;
+    await new Promise<void>((r) => setTimeout(() => { ticked = true; r(); }, 50));
+    expect(ticked).toBe(true);
+    expect((await check).pass).toBe(true);
+  });
+
+  it('a repeat poll of the same build + commit does not re-hash; a new commit does', async () => {
+    const counter = path.join(tmpDir, 'calls');
+    slowOracle(tmpDir, counter);
+    const { checkBuildContentInventory } = await loadChecks();
+    await Promise.all([checkBuildContentInventory(), checkBuildContentInventory()]);
+    await checkBuildContentInventory();
+    expect(fs.readFileSync(counter, 'utf8').trim().split('\n')).toHaveLength(1);
+    fs.writeFileSync(path.join(tmpDir, '.git', 'refs', 'heads', 'main'), 'bbbb\n');
+    await checkBuildContentInventory();
+    expect(fs.readFileSync(counter, 'utf8').trim().split('\n')).toHaveLength(2);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// FXCC-1 / D15: a build-inventory helper that gives NO verdict (its 30 s timeout
+// under the 03:00 maintenance storm becomes rc 1 + empty stdout) is UNKNOWN, not
+// a definitive build_content RED. A real MISMATCH still fails hard.
+// ────────────────────────────────────────────────────────────────────────────
+describe('build_content — a helper with no verdict is UNKNOWN, a MISMATCH still fails (FXCC-1 / D15)', () => {
+  function fakeOracle(dir: string, body: string): void {
+    fs.mkdirSync(path.join(dir, 'scripts', 'lib'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'scripts', 'lib', 'build-inventory.sh'), body);
+    fs.mkdirSync(path.join(dir, '.next'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.next', 'BUILD_ID'), 'b1');
+    fs.mkdirSync(path.join(dir, '.git', 'refs', 'heads'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+    fs.writeFileSync(path.join(dir, '.git', 'refs', 'heads', 'main'), 'aaaa\n');
+  }
+
+  it('rc 1 with empty stdout (what a killed helper looks like) is indeterminate, not a hard fail', async () => {
+    fakeOracle(tmpDir, 'exit 1\n');
+    const { checkBuildContentInventory } = await loadChecks();
+    const r = await checkBuildContentInventory();
+    expect(r.pass).toBe(false);
+    expect(r.indeterminate).toBe(true);
+    expect(r.detail).toMatch(/UNKNOWN/);
+  });
+
+  it('the UNKNOWN is not cached: the next poll re-runs the helper and can go green', async () => {
+    const counter = path.join(tmpDir, 'calls');
+    fakeOracle(tmpDir, `echo x >> "${counter}"\nif [ "$(wc -l < "${counter}")" -lt 2 ]; then exit 1; fi\necho '{"verdict":"VERIFIED","build_id":"b1"}'\n`);
+    const { checkBuildContentInventory } = await loadChecks();
+    expect((await checkBuildContentInventory()).indeterminate).toBe(true);
+    await new Promise((r) => setTimeout(r, 20));
+    expect((await checkBuildContentInventory()).pass).toBe(true);
+  });
+
+  it('control: a real MISMATCH verdict is still a definitive fail (not indeterminate)', async () => {
+    fakeOracle(tmpDir, 'echo \'{"verdict":"MISMATCH","build_id":"b1"}\'\nexit 1\n');
+    const { checkBuildContentInventory } = await loadChecks();
+    const r = await checkBuildContentInventory();
+    expect(r.pass).toBe(false);
+    expect(r.indeterminate).not.toBe(true);
+    expect(r.verdict).toBe('MISMATCH');
   });
 });

@@ -32,7 +32,10 @@
 #     "build_id": "<.next/BUILD_ID contents>",
 #     "build_started_epoch": "<seconds>",
 #     "build_finished_epoch": "<seconds>",
-#     "node_runtime": "<node -v output or unknown>"
+#     "node_runtime": "<node -v output or unknown>",
+#     "node_version": "<node -v output or unknown>",
+#     "node_abi":     "<process.versions.modules or unknown>",
+#     "node_bin":     "<absolute path of the node that built this, or empty>"
 #   }
 #
 # inventory_inputs_digest is the OBSOLESCENCE GUARD: it pins WHICH input list
@@ -130,6 +133,17 @@ _ccbi_sha256_file() {
 # would die on its next restart with verdict=MISMATCH and no code change at all.
 # A client changing their logo must never brick their Command Center. Keep
 # runtime data OUT of this digest; it attests compiled bytes vs compiled source.
+# public/logo-config.json is EXCLUDED too (2026-09-18): it is per-box runtime config
+# (update.sh PER_BOX_CONFIG_FILES) that src/app/api/logo/route.ts creates at module
+# load via ensureRuntimeConfigFile — and `next build` evaluates that module, so the
+# build itself wrote the file into the release candidate and every deploy on a box
+# without it failed FROZEN-SOURCE (measured on the operator Mac, v7.6.5 deploy).
+# public/brand.css is EXCLUDED from the inventory (2026-09-18): it is a per-box
+# GENERATED asset (generate-brand-css.py writes the client's colours into it, and
+# cc-start.sh seeds the shipped default when it is absent). A generated file in the
+# digest made every branded box read as "content MISMATCH vs source" on its next
+# restart, and a restart loop that re-seeded it during a deploy produced a
+# FROZEN-SOURCE VIOLATION on the operator Mac. It never affects what compiles.
 _CCBI_TOPLEVEL_INPUTS="src public package.json package-lock.json next.config.mjs next.config.js next.config.ts tsconfig.json tailwind.config.ts postcss.config.mjs middleware.ts"
 
 # _ccbi_inventory_relpaths <dir> — print \n-separated, LC_ALL=C-sorted relative
@@ -157,7 +171,7 @@ _ccbi_inventory_relpaths() {
       # stream which still hashes deterministically.
       # config/ is intentionally NOT enumerated — see _CCBI_TOPLEVEL_INPUTS.
       { find src -type f -print0 2>/dev/null || true; } \
-        && { find public -type f -print0 2>/dev/null || true; } || true
+        && { find public -type f ! -name 'brand.css' ! -name 'logo-config.json' -print0 2>/dev/null || true; } || true
     } | LC_ALL=C sort -z -u | tr '\0' '\n'
   )
 }
@@ -261,16 +275,46 @@ _ccbi_write_manifest() {
   local app_dir="$1" out_dir="$2" build_id="$3" started="$4"
   local mf="$out_dir/build-inventory.json" tmpf="$out_dir/.build-inventory.json.tmp.$$"
   [[ -d "$out_dir" ]] || return 4
-  local finished built_at source_sha dirty inv inv_in cfg node_v
+  local finished built_at source_sha dirty inv inv_in cfg node_v node_bin node_abi
   finished="$(date +%s)"
   built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf 'unknown')"
-  source_sha="$(_ccbi_git_head "$app_dir")"
-  dirty="$(_ccbi_dirty_digest "$app_dir")"     || return 4
+  # atomic-deploy.sh builds from a verified explicit commit. When it provides
+  # that identity, seal the manifest against the extracted candidate rather
+  # than the mutable live checkout.
+  if [[ -n "${CCBI_SOURCE_SHA_OVERRIDE:-}" ]]; then
+    source_sha="$CCBI_SOURCE_SHA_OVERRIDE"
+    dirty="${CCBI_DIRTY_DIGEST_OVERRIDE:-explicit-revision}"
+  else
+    source_sha="$(_ccbi_git_head "$app_dir")"
+    dirty="$(_ccbi_dirty_digest "$app_dir")"   || return 4
+  fi
   inv="$(_ccbi_inventory_digest "$app_dir")"   || return 4
   inv_in="$(_ccbi_inventory_inputs_digest "$app_dir")" || return 4
   cfg="$(_ccbi_build_config_digest "$app_dir")" || return 4
-  node_v="unknown"
-  command -v node >/dev/null 2>&1 && node_v="$(node --version 2>/dev/null || printf 'unknown')"
+  # ISSUE-09: record the node that BUILT this artifact, by absolute PATH, by
+  # version, and by native module ABI.
+  #
+  # `node_bin` is the continuity field. scripts/lib/node-runtime.sh reads it as
+  # its second resolution step, so the next `npm ci`, `npm rebuild` and build
+  # reuse the very binary that produced what is on disk. That is what stops ABI
+  # drift: not a version rule, but the same node every time.
+  #
+  # `node_abi` is what cc-start.sh compares against its own runtime before it
+  # execs, because it is the ABI, not the version, that decides whether
+  # better-sqlite3 loads. `node_version` is for humans.
+  #
+  # Prefer the resolved runtime (CC_NODE_BIN, normally exported by
+  # atomic-deploy.sh) over ambient `node`, so the recorded identity is the one
+  # the build actually used rather than whatever this shell happens to find.
+  node_bin="${CC_NODE_BIN:-}"
+  if [[ -z "$node_bin" ]] || [[ ! -x "$node_bin" ]]; then
+    node_bin="$(command -v node 2>/dev/null || printf '')"
+  fi
+  node_v="unknown"; node_abi="unknown"
+  if [[ -n "$node_bin" ]]; then
+    node_v="$("$node_bin" --version 2>/dev/null || printf 'unknown')"
+    node_abi="$("$node_bin" -p process.versions.modules 2>/dev/null || printf 'unknown')"
+  fi
   cat > "$tmpf" <<EOF
 {
   "manifest_version": "1",
@@ -283,7 +327,10 @@ _ccbi_write_manifest() {
   "build_id": "$build_id",
   "build_started_epoch": "$started",
   "build_finished_epoch": "$finished",
-  "node_runtime": "$node_v"
+  "node_runtime": "$node_v",
+  "node_version": "$node_v",
+  "node_abi": "$node_abi",
+  "node_bin": "$node_bin"
 }
 EOF
   mv -f "$tmpf" "$mf" || { rm -f "$tmpf"; return 4; }
@@ -387,30 +434,88 @@ _ccbi_verify_rollback_receipt() {
   printf 'RECEIPT_OK\n'; return 0
 }
 
+# Extract a commit to a private tree and compute the canonical inventory over
+# exactly that revision. Used by atomic-deploy manifests sealed with
+# dirty_digest=explicit-revision; dirty working-tree files do not redefine the
+# source that was deployed.
+_ccbi_commit_inventory_digest() {
+  local app_dir="$1" commit="$2"
+  local tmp
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/ccbi-commit-inv-XXXXXX")" || return 4
+  if ! git -C "$app_dir" archive "$commit" | tar -x -C "$tmp" 2>/dev/null; then
+    rm -rf "$tmp"
+    return 4
+  fi
+  local inv
+  inv="$(_ccbi_inventory_digest "$tmp")" || { rm -rf "$tmp"; return 4; }
+  rm -rf "$tmp"
+  printf '%s' "$inv"
+}
+
+_ccbi_commit_inventory_inputs_digest() {
+  local app_dir="$1" commit="$2"
+  local tmp
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/ccbi-commit-inv-XXXXXX")" || return 4
+  if ! git -C "$app_dir" archive "$commit" | tar -x -C "$tmp" 2>/dev/null; then
+    rm -rf "$tmp"
+    return 4
+  fi
+  local inv
+  inv="$(_ccbi_inventory_inputs_digest "$tmp")" || { rm -rf "$tmp"; return 4; }
+  rm -rf "$tmp"
+  printf '%s' "$inv"
+}
+
 # ── verification ─────────────────────────────────────────────────────────────
 # _ccbi_verify_tree_against_manifest <app_dir> <manifest_path>
 # Prints one of: VERIFIED | MISMATCH | MANIFEST_MISSING | MANIFEST_INVALID |
 #                OBSOLETE_INVENTORY
 # and returns 0/1/2/3/5 respectively. Content-only: mtimes are irrelevant.
 _ccbi_verify_tree_against_manifest() {
-  local app_dir="$1" manifest="$2" current recorded recorded_inputs current_inputs
+  local app_dir="$1" manifest="$2"
+  local current recorded recorded_inputs current_inputs
   if [[ ! -f "$manifest" ]]; then
     printf 'MANIFEST_MISSING\n'; return 2
   fi
   # Truncated/invalid manifest: required fields absent → INVALID (exact
   # failure; a corrupt manifest must never silently downgrade to mtime trust).
   recorded="$(_ccbi_json_field "$manifest" inventory_digest)"
-  local bid
+  local bid source_sha dirty_digest current_head
   bid="$(_ccbi_json_field "$manifest" build_id)"
+  source_sha="$(_ccbi_json_field "$manifest" source_sha)"
+  dirty_digest="$(_ccbi_json_field "$manifest" dirty_digest)"
   recorded_inputs="$(_ccbi_json_field "$manifest" inventory_inputs_digest)"
   if [[ -z "$recorded" || -z "$bid" || -z "$recorded_inputs" \
         || "$recorded" == *' '* || "${#recorded}" -lt 8 ]]; then
     printf 'MANIFEST_INVALID\n'; return 3
   fi
-  # Obsolescence guard: the manifest pins the input LIST it was computed over.
-  # If the canonical compile-affecting input set has changed since (new config
-  # file, extended canonical list), the recorded inventory no longer covers
-  # what compiles today — exact failure, never a silent pass.
+
+  # New atomic-deploy artifacts are sealed against an explicit commit. Their
+  # source of truth is that commit, not a dirty checkout. Require the live HEAD
+  # to still equal the recorded SHA, then compare the manifest to the commit's
+  # own canonical inventory.
+  if [[ "$dirty_digest" == "explicit-revision" ]]; then
+    if [[ -z "$source_sha" || "$source_sha" == "non-git" ]]; then
+      printf 'MANIFEST_INVALID\n'; return 3
+    fi
+    current_head="$(_ccbi_git_head "$app_dir")"
+    if [[ -z "$current_head" || "$current_head" != "$source_sha" ]]; then
+      printf 'MISMATCH\n'; return 1
+    fi
+    current_inputs="$(_ccbi_commit_inventory_inputs_digest "$app_dir" "$source_sha")" \
+      || { printf 'MANIFEST_INVALID\n'; return 3; }
+    if [[ "$current_inputs" != "$recorded_inputs" ]]; then
+      printf 'OBSOLETE_INVENTORY\n'; return 5
+    fi
+    current="$(_ccbi_commit_inventory_digest "$app_dir" "$source_sha")" \
+      || { printf 'MANIFEST_INVALID\n'; return 3; }
+    if [[ "$current" == "$recorded" ]]; then
+      printf 'VERIFIED\n'; return 0
+    fi
+    printf 'MISMATCH\n'; return 1
+  fi
+
+  # Legacy manifests continue to verify against the live working tree.
   current_inputs="$(_ccbi_inventory_inputs_digest "$app_dir")" \
     || { printf 'MANIFEST_INVALID\n'; return 3; }
   if [[ "$current_inputs" != "$recorded_inputs" ]]; then

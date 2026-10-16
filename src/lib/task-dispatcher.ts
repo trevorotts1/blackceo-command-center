@@ -2,6 +2,7 @@ import { resolveSpecialistSessionKey } from '@/lib/routing/executor-runtime';
 import { isCatchAllRoutingReason, isCatchAllWorkspace } from '@/lib/routing/catch-all-policy';
 import { capturePersonaSnapshot } from '@/lib/persona-state';
 import { renderPersonaConformanceInstructions } from '@/lib/persona-conformance';
+import { captureExecutionLoadEvidence } from '@/lib/execution-load-evidence';
 /**
  * task-dispatcher.ts — Server-only.
  *
@@ -50,18 +51,24 @@ import { renderPersonaConformanceInstructions } from '@/lib/persona-conformance'
 import { v4 as uuidv4 } from 'uuid';
 import { beginExecutionSend, executionSessionId, reserveExecution, recordExecutionAcceptance, recordExecutionUnknown, type DispatchOutcome, type Execution } from '@/lib/execution-attempts';
 import { throwIfJobLeaseLost } from '@/lib/jobs/job-lease';
+import { boardSourceLabel } from '@/lib/board-sources';
 import { queryOne, run } from '@/lib/db';
+import { parseEventTimestamp } from '@/lib/dispatch-idempotency';
 import { getOpenClawClient } from '@/lib/openclaw/client';
 import { broadcast } from '@/lib/events';
-import { notifyOwner, notifySystem } from '@/lib/notify';
+import { notifySystem } from '@/lib/notify';
 import { getMissionControlUrl } from '@/lib/config';
 import { resolveAndLog, resolveSpecialistType } from '@/lib/intelligence-resolver';
-import { buildPersonaBlock, buildPersonaPlanBlock } from '@/lib/persona-dispatch';
+import { scoreRoute, recordRoutingReason, isBlocked, coolRefusedPlacement, type RouteDecision } from '@/lib/capacity/route-scorer';
+import { providerLabel, providerOf } from '@/lib/capacity/provider-pools';
+import { evaluateAskGate, holdForProviderChoice } from '@/lib/capacity/ask-at-capacity';
+import { sendProviderChoiceAsk } from '@/lib/jobs/trust-engine';
+import { renderDispatchPersonaSection } from '@/lib/persona-dispatch';
 import { renderOwnerMessagesSection } from '@/lib/owner-messages';
 import { loadSubtaskPersonas } from '@/lib/persona-selector';
 import { checkModelSovereignty, detectModality, type ModelSovereigntyViolation } from '@/lib/model-selector';
 import { listModels } from '@/lib/model-registry';
-import { getBestSOPForTask, checkTriad } from '@/lib/sops';
+import { getBestSOPForTask, checkTriad, isLiveSopId } from '@/lib/sops';
 import { triadMissingPillText, type TriadMissingKey } from '@/lib/board-labels';
 import { QC_MAX_REROUTES } from '@/lib/qc-scorer';
 import {
@@ -72,17 +79,20 @@ import {
 } from '@/lib/capability-manifest';
 import { isCanonicalContext, copyCanonicalSOPForTask, authorSOPForTask } from '@/lib/sop-authoring';
 import { recordBlockEvent } from '@/lib/block-events';
+import { stopCardPermanently } from '@/lib/stop-card';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { artifactDispatchPayload, recordStatusEvent } from '@/lib/task-lifecycle';
 import { healPhantomAgentAssignment } from '@/lib/jobs/heal-phantom-assignments';
 import {
   resolveAgentRuntimeModel,
+  resolveRuntimeModelChainFromConfig,
   modelsMatch,
   recordModelSkewEvent,
   reconcileTaskModelRecord,
   type RuntimeModelResolution,
 } from '@/lib/runtime-model';
 import { blockDispatchIfOwnerKilled } from '@/lib/owner-killed';
+import { launchOperatorPresentationContract } from '@/lib/presentation-operator-launcher';
 
 import type { SOP, SOPStep } from '@/lib/sops';
 import type { Task, Agent, OpenClawSession } from '@/lib/types';
@@ -101,6 +111,25 @@ import { checkTaskWriteAuth, renderWriteBackInstructions } from '@/lib/mc-auth';
 // dead in this set; the real archival exclusion is `archived_at IS NULL`, applied
 // in GUARD 3 below and the block WHERE-clause.
 const SKIP_STATUSES = new Set(['in_progress', 'review', 'done', 'blocked']);
+
+/**
+ * SQL predicate: the task has a Planning Mode session the owner has not
+ * finished (no planning_complete flag and no locked spec). Such a task must
+ * not be routed or dispatched until the plan is approved. `alias` is the
+ * tasks table alias in the caller's query. Shared by autoDispatchTask and the
+ * advancer sweeps so the rule has one definition.
+ */
+/**
+ * Placeholder planning_session_key stamped at create time when the owner ticks
+ * Planning Mode, so the task is held from the instant it exists (before the
+ * planning session starts). POST /planning replaces it with the real key.
+ */
+export const PLANNING_PENDING_KEY = 'pending';
+
+export function planningInProgressSql(alias: string): string {
+  return `(${alias}.planning_session_key IS NOT NULL AND COALESCE(${alias}.planning_complete,0)=0
+    AND NOT EXISTS(SELECT 1 FROM planning_specs ps WHERE ps.task_id=${alias}.id))`;
+}
 
 // TICKET 4a: dynamic `import('@/lib/tasks')` calls inside autoDispatchTask sit
 // inside try/catch blocks that only catch a THROW — a module that never
@@ -122,7 +151,15 @@ function importWithTimeout<T>(loader: () => Promise<T>, label: string, ms = 10_0
 // no per-dept runtime) got re-fired every 2-5 min forever. We now record EVERY
 // failed advance attempt, back off exponentially, and after MAX_DISPATCH_ATTEMPTS
 // hard-block the task (visible + reported) so it is NEVER silently re-looped.
-const MAX_DISPATCH_ATTEMPTS = Math.max(
+// PD-TEST-063: EXPORTED so the watchdog sweeps gate on the SAME number this
+// dispatcher blocks at, instead of re-deriving their own copy. The sweeps'
+// `dispatch_attempts < dispatchCap` filter and this block-at-cap threshold must
+// be one value: if a sweep's copy drifted lower, an exhausted card would pass
+// the dispatcher's filter; if higher, a card the dispatcher already end-stated
+// would keep being re-fired. A sweep must never instead ZERO the counter to
+// "unstick" a card — that launders an exhausted budget into a fresh one (see
+// src/lib/jobs/stale-task-sweep.ts PD-TEST-063).
+export const MAX_DISPATCH_ATTEMPTS = Math.max(
   1,
   parseInt(process.env.MAX_DISPATCH_ATTEMPTS || '5', 10),
 );
@@ -156,6 +193,41 @@ const TRIAD_HOLD_LOG_INTERVAL_SECONDS = Math.max(
 );
 
 type DispatchBlockAudience = 'OWNER' | 'SYSTEM';
+
+// ── STRANDED-01: a tick that loses its scheduler lease must not strand the card ─
+// `throwIfJobLeaseLost()` (src/lib/jobs/job-lease.ts) throws `scheduler_lease_lost`
+// when the sweep that is driving this dispatch outran its 90s lease (or was
+// aborted). That throw lands in autoDispatchTask's outer catch, which recorded it
+// ONLY as a `dispatch_pipeline_error` event: no attempt accounting, no backoff,
+// no block, no alert. The card kept whatever `dispatch_attempts` it already
+// carried and stayed in its intake lane — and intake-advance, the SINGLE live
+// advancer since SWEEP-01 paused backlog-redispatch, selects only cards with
+// `dispatch_attempts < MAX_DISPATCH_ATTEMPTS`. A card already at the cap was
+// therefore never looked at again by anything, with nobody told.
+//
+// A lost lease is a TRANSIENT INFRASTRUCTURE failure, not a defect in the card,
+// so it is recorded through the SAME recordDispatchFailure path every other
+// transient failure uses: a bounded exponential backoff while under the cap (the
+// live advancer re-claims the card once the window elapses) and, at the cap, a
+// block carrying an honest reason plus ONE operator alert via notifySystem — the
+// same sender the audience-confirm gate uses (src/lib/tasks.ts). No new
+// notification path, no hardcoded chat id.
+//
+// Lanes only. The lease we lost may have been taken over by a live owner that
+// already claimed and advanced this card; a backoff stamp or a block must never
+// land on work that is now running.
+const PRE_DISPATCH_STATUSES = new Set([
+  'inbox',
+  'backlog',
+  'planning',
+  'pending_dispatch',
+  'assigned',
+]);
+
+/** True when a dispatch aborted because its scheduler lease was lost/aborted. */
+function isLostLeaseAbort(errMsg: string): boolean {
+  return errMsg.includes('scheduler_lease_lost');
+}
 
 /**
  * Record a FAILED advance attempt for a task. Increments dispatch_attempts,
@@ -251,18 +323,41 @@ export function recordDispatchFailure(
         const updated = queryOne<Task>('SELECT * FROM tasks WHERE id = ?', [taskId]);
         if (updated) broadcast({ type: 'task_updated', payload: updated });
       } catch { /* broadcast best-effort */ }
-      try {
-        // MSG-06 / SWEEP-06: a SYSTEM-audience block is an OPERATOR concern —
-        // it must NEVER reach the client's Telegram (MOVE-IN-SILENCE). Route it
-        // through notifySystem() (Rescue Rangers / server log); only a genuine
-        // OWNER-audience block goes to the client's own chat.
-        const blockMsg = `Task blocked: "${row?.title ?? taskId}" — ${opts.needs}`;
-        if (opts.audience === 'SYSTEM') {
-          notifySystem(blockMsg, { agent: opts.context, action: 'escalate' });
-        } else {
-          notifyOwner(`🚫 ${blockMsg}`);
-        }
-      } catch { /* notify best-effort */ }
+      // NO-SILENT-STOP: the notice is no longer this path's own notifySystem/
+      // notifyOwner pair. It routes through stopCardPermanently(), which stamps
+      // blocked_notice_sent_at as an atomic claim — so a redispatch that blocks
+      // the same card twice, or a restart mid-send, produces ONE message, not
+      // two and not none. MSG-06 / SWEEP-06 routing is unchanged and enforced
+      // inside the chokepoint: a SYSTEM-audience block still never reaches the
+      // client's Telegram (MOVE-IN-SILENCE); only OWNER goes to their own chat.
+      //
+      // applyBlock:false — the compound UPDATE above already landed the status
+      // flip together with the dispatch accounting and block_* metadata, a CAS
+      // (`status NOT IN ('done') AND archived_at IS NULL`) that transition()'s
+      // single expectedFrom cannot express.
+      //
+      // Fire-and-forget with a catch, matching the best-effort notify it
+      // replaces: recordDispatchFailure is synchronous and void-returning, and
+      // a notification must never be able to fail a dispatch attempt.
+      void stopCardPermanently({
+        taskId,
+        source: opts.context,
+        // Plain English only. `opts.reason` is a machine string ('triad_incomplete',
+        // 'sop_authoring_failed') and belongs in the `task_blocked` events row
+        // above and in the block_reason column, not read out to an owner.
+        reason: opts.hardBlock
+          ? 'We could not start this work, and it is not something retrying will fix.'
+          : `We tried to start this work ${attempts} time(s) and it did not go through, so it has stopped.`,
+        needs: opts.needs,
+        audience: opts.audience,
+        retriesExhausted: !opts.hardBlock,
+        // No machineDetail: this path writes its OWN `task_blocked` events row
+        // carrying `blockNote` a few lines above, and a second copy from the
+        // chokepoint would double every block announcement on the card.
+        applyBlock: false,
+      }).catch((notifyErr: unknown) => {
+        console.error('[task-dispatcher] stop notice failed (non-fatal):', (notifyErr as Error).message);
+      });
       console.warn(`[${opts.context}] recordDispatchFailure: task ${taskId} BLOCKED (${opts.reason})`);
     } else {
       run(
@@ -288,13 +383,227 @@ export function recordDispatchFailure(
   }
 }
 
-/** Clear attempt-accounting after a task successfully advances to in_progress. */
-function recordDispatchSuccess(taskId: string): void {
+/** How long one (task, reason) persona hold suppresses a repeat activity row. */
+export const PERSONA_HOLD_ACTIVITY_DEDUPE_HOURS = 6;
+
+/** Activity type written when the persona governance gate holds a dispatch. */
+export const PERSONA_HOLD_ACTIVITY_TYPE = 'dispatch_held';
+
+/**
+ * Make a dispatch hold VISIBLE on the card's Activity tab.
+ *
+ * A hold is not an error state anywhere upstream — the sweeps count it as
+ * "waiting" — so a card that cannot clear a gate looked identical to one about
+ * to dispatch, and the board stayed green while nothing moved. ONE
+ * `task_activities` row per (task, dedupeLike) per
+ * PERSONA_HOLD_ACTIVITY_DEDUPE_HOURS: enough to name the stall, never enough to
+ * spam the tab every five minutes. `dedupeLike` is the LIKE pattern that decides
+ * what counts as "the same hold" — the callers below own their own wording.
+ *
+ * Best-effort: a pre-migration DB or any write failure degrades to the caller's
+ * log line. Never throws into the dispatch path.
+ */
+function recordDispatchHoldActivity(
+  taskId: string,
+  agentId: string | null,
+  dedupeLike: string,
+  message: string,
+  context: string,
+): void {
+  try {
+    const last = queryOne<{ created_at: string }>(
+      `SELECT created_at FROM task_activities
+        WHERE task_id = ? AND activity_type = ? AND message LIKE ?
+        ORDER BY created_at DESC LIMIT 1`,
+      [taskId, PERSONA_HOLD_ACTIVITY_TYPE, dedupeLike],
+    );
+    const lastMs = parseEventTimestamp(last?.created_at);
+    if (lastMs !== null && Date.now() - lastMs < PERSONA_HOLD_ACTIVITY_DEDUPE_HOURS * 3_600_000) {
+      return; // Already reported this exact hold inside the window.
+    }
+    run(
+      `INSERT INTO task_activities (id, task_id, agent_id, activity_type, message, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [uuidv4(), taskId, agentId, PERSONA_HOLD_ACTIVITY_TYPE, message, new Date().toISOString()],
+    );
+  } catch (err) {
+    console.warn(`[${context}] dispatch hold activity non-fatal:`, (err as Error).message);
+  }
+}
+
+/** The persona governance gate held this card (no persona bundle yet). */
+function recordPersonaHoldActivity(
+  taskId: string,
+  agentId: string | null,
+  reason: string,
+  context: string,
+): void {
+  console.warn(`[${context}] autoDispatchTask: HELD task ${taskId} — persona gate: ${reason}`);
+  recordDispatchHoldActivity(taskId, agentId, `%persona gate: ${reason}%`, `[${context}] persona gate: ${reason}`, context);
+}
+
+/**
+ * Make a WORKER-AT-CAPACITY hold visible (per-worker concurrency, migration 149).
+ *
+ * reserveExecution refuses while the worker already runs its limit. That is a
+ * QUEUE, not a fault: the sweep re-selects the card next tick and it dispatches
+ * the moment a slot frees. Without a row it is indistinguishable on the board
+ * from a card that is genuinely stuck, which is exactly the confusion the live
+ * stall caused. Same dedupe window and same best-effort contract as the persona
+ * hold; the message names the queue depth so the card reads "queued behind N".
+ */
+function recordWorkerCapacityHold(
+  taskId: string,
+  agentId: string | null,
+  running: number,
+  limit: number,
+  context: string,
+): void {
+  console.warn(`[${context}] autoDispatchTask: QUEUED task ${taskId} — worker at capacity (${running}/${limit} running)`);
+  recordDispatchHoldActivity(
+    taskId,
+    agentId,
+    '%worker at capacity%',
+    `[${context}] worker at capacity: queued behind ${running} running (limit ${limit})`,
+    context,
+  );
+}
+
+/**
+ * STRANDED-02 — the board REFUSES to dispatch an engine-owned card, and says so
+ * on the card.
+ *
+ * GUARD 4d below is correct and stays: a card whose ingest `source` belongs to
+ * an engine (build_deck / build_deck_phase / podcast-engine) is created,
+ * sequenced and completed by that engine, and a board dispatch would put a
+ * SECOND executor on the same work (FIX 38a, R5B §F1). What was wrong is that
+ * the refusal was INVISIBLE: it wrote one `engine_owned_card_not_dispatched`
+ * row into `events` and nothing else, so on the board the card was
+ * indistinguishable from ordinary queued work. Live evidence: card e9393e31
+ * (source=podcast-engine) sat in backlog looking normal while its owning
+ * engine's last run had failed hours earlier — a client saw a card that never
+ * moved and no explanation.
+ *
+ * This writes the reason where a human actually reads it: the card's Activity
+ * tab, through the SAME dedup-guarded helper the persona and capacity holds
+ * use, so it names the stall once instead of every tick. The board card face
+ * carries the matching label (src/components/MissionQueue.tsx), and the stale
+ * alert lives in board-hygiene.
+ *
+ * Exported because the hygiene job writes the same row for an engine card that
+ * never reached this guard at all — an engine card with no assigned agent is
+ * never handed to autoDispatchTask, and every advancer excludes it in its
+ * SELECT, so it is refused without ever being refused HERE.
+ */
+export function recordEngineOwnedHoldActivity(
+  taskId: string,
+  agentId: string | null,
+  source: string,
+  context: string,
+): void {
+  const owner = boardSourceLabel(source) ?? source;
+  recordDispatchHoldActivity(
+    taskId,
+    agentId,
+    '%waiting on%the board does not dispatch this card%',
+    `[${context}] waiting on ${owner} — the board does not dispatch this card. ` +
+      `The owning engine is its only executor; the board will not start, claim, or advance it.`,
+    context,
+  );
+}
+
+/**
+ * The agent's PRIMARY provider pool is full — the only pool a dispatch debits,
+ * because the run always attempts the primary model and the runtime falls back
+ * only after that attempt fails. Same queue-not-fault contract as the worker
+ * hold: no dispatch attempt is spent, and the sweep re-selects the card the
+ * moment the pool frees a slot.
+ *
+ * The summary carries the actionable half for the owner-ask layer: which of the
+ * agent's OWN declared fallbacks currently have room. That is a fact about the
+ * box, not a promise about this run — nothing here re-points the agent.
+ */
+function recordProviderCapacityHold(
+  taskId: string,
+  agentId: string | null,
+  summary: string,
+  context: string,
+): void {
+  console.warn(`[${context}] autoDispatchTask: QUEUED task ${taskId} — ${summary}`);
+  recordDispatchHoldActivity(
+    taskId,
+    agentId,
+    `%provider pool pressure: ${summary}%`,
+    `[${context}] provider pool pressure: ${summary}`,
+    context,
+  );
+}
+
+/**
+ * Make a STANDING OWNER CHOICE visible: this card waits for its own primary
+ * subscription because the owner said so, not because anything is broken. Same
+ * dedupe window and best-effort contract as the other capacity holds.
+ */
+function recordOwnerWaitsForPrimary(
+  taskId: string,
+  agentId: string | null,
+  decision: RouteDecision,
+  context: string,
+): void {
+  const primary = decision.preferred?.provider ?? 'its primary provider';
+  console.warn(`[${context}] autoDispatchTask: WAITING task ${taskId} — owner chose to wait for ${primary}`);
+  recordDispatchHoldActivity(
+    taskId,
+    agentId,
+    '%owner chose to wait%',
+    `[${context}] owner chose to wait for ${providerLabel(primary)} rather than overflow`,
+    context,
+  );
+  try {
+    recordRoutingReason(
+      taskId,
+      `Waiting for ${providerLabel(primary)} because you asked me to hold it there rather than run it elsewhere.`,
+    );
+  } catch { /* the explanation is never worth failing a hold */ }
+}
+
+/**
+ * A placement the gateway REFUSED. Recorded, never silent: the operator should
+ * see that the box tried to place a run on a declared fallback and was told no
+ * — most often because the model is absent from
+ * `agents.defaults.modelPolicy.allow`, which is a config fact somebody can fix.
+ * The card then queues on its primary exactly as it would without placement.
+ */
+function recordPlacementRefused(
+  taskId: string,
+  agentId: string | null,
+  model: string,
+  reason: string,
+  context: string,
+): void {
   try {
     run(
-      `UPDATE tasks SET dispatch_attempts = 0, next_dispatch_eligible_at = NULL, last_dispatch_attempt_at = ? WHERE id = ?`,
-      [new Date().toISOString(), taskId],
+      `INSERT INTO events (id, type, agent_id, task_id, message, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+      [uuidv4(), 'provider_placement_refused', agentId, taskId,
+        `Gateway refused to place this run on ${model}: ${reason.slice(0, 300)}`, new Date().toISOString()],
     );
+  } catch (err) {
+    console.warn(`[${context}] placement-refused event non-fatal:`, (err as Error).message);
+  }
+}
+
+/** Clear attempt-accounting after a task successfully advances to in_progress. */
+function recordDispatchSuccess(taskId: string, opts: { preserveAttempts?: boolean } = {}): void {
+  try {
+    const now = new Date().toISOString();
+    if (opts.preserveAttempts) {
+      // A pre-engine recovery is a one-shot, separately receipted bridge retry.
+      // Its exhausted historical dispatch budget stays on the task so a later
+      // ordinary backlog sweep cannot turn this exception into a fresh budget.
+      run(`UPDATE tasks SET next_dispatch_eligible_at = NULL, last_dispatch_attempt_at = ? WHERE id = ?`, [now, taskId]);
+    } else {
+      run(`UPDATE tasks SET dispatch_attempts = 0, next_dispatch_eligible_at = NULL, last_dispatch_attempt_at = ? WHERE id = ?`, [now, taskId]);
+    }
   } catch { /* pre-migration tolerant */ }
 }
 
@@ -323,14 +632,14 @@ function recordDispatchSuccess(taskId: string): void {
 const DECK_RUN_REASON = 'deck_run_identity_missing';
 
 // ── FIX 38a (R5B §F1): engine-owned source vocabulary ────────────────────────
-// Sources the Presentations engine writes and advances ITSELF. The board's
+// Sources an engine writes and advances ITSELF (Presentations or Skill 58 podcast). The board's
 // auto-advancers must never dispatch these cards — the engine is the single
 // executor. (FIX 36's planned board-sources.ts module is not in the tree yet;
 // this set is self-contained here so W17 does not depend on W16's landing.
 // When board-sources.ts exists, re-point this helper at its export.)
-const ENGINE_OWNED_SOURCES = new Set(['build_deck', 'build_deck_phase']);
+const ENGINE_OWNED_SOURCES = new Set(['build_deck', 'build_deck_phase', 'podcast-engine']);
 
-/** True when a task's ingest `source` is owned by the Presentations engine. */
+/** True when a task's ingest `source` is owned by an engine (never board-dispatched). */
 function isEngineOwnedSource(source: string | null | undefined): boolean {
   return typeof source === 'string' && ENGINE_OWNED_SOURCES.has(source.trim().toLowerCase());
 }
@@ -487,8 +796,15 @@ async function resolveSopForTask(
 ): Promise<SopResolution> {
   const taskId = task.id;
 
-  // Idempotence gate: an SOP is already attached — no pull, no copy, no authoring.
-  if (task.sop_id) return { outcome: 'already', sopId: task.sop_id };
+  // Idempotence gate: a LIVE SOP is already attached — no pull, no copy, no
+  // authoring. KAN-003: the old gate fired on any truthy sop_id, including a
+  // DEAD one (row missing or soft-deleted after a re-ingest). A dead id fell
+  // through as 'already', so GUARD 7's `checkTriad` (which correctly treats it
+  // as missing) held the card while the only engine that could cure it refused
+  // to run. A dead id now falls THROUGH to the pull below: a department fit
+  // re-pulls and (with persistFill) is written back; a genuine library gap
+  // still ends 'library_gap'/'unresolved' and the caller holds.
+  if (task.sop_id && isLiveSopId(task.sop_id)) return { outcome: 'already', sopId: task.sop_id };
 
   // ── SOP pull ────────────────────────────────────────────────────────────
   let resolvedSopId: string | null = null;
@@ -645,6 +961,13 @@ export async function autoDispatchTask(
       return { status: 'held', reason: 'dispatch_precondition' };
     }
 
+    // Planning Mode: never dispatch while the owner is still answering the
+    // planning questions. Approval / completion sets planning_complete=1.
+    if (queryOne(`SELECT 1 AS x FROM tasks t WHERE t.id = ? AND ${planningInProgressSql('t')}`, [taskId])) {
+      console.log(`[${context}] autoDispatchTask: task ${taskId} has an unfinished planning session — hold`);
+      return { status: 'held', reason: 'planning_in_progress' };
+    }
+
     // F3.4 ANCHOR (U33 / C-02-b): the SOP the CREATION-TIME persona selection
     // consumed, snapshotted at dispatch ENTRY. The SOP-aware persona rescore far
     // below compares the dispatch-resolved SOP against this value, and the case it
@@ -772,8 +1095,8 @@ export async function autoDispatchTask(
     }
 
     // ── GUARD 4d (FIX 38a / R5B §F1): engine-owned cards are never dispatched ──
-    // An engine-owned card (source ∈ {build_deck, build_deck_phase}) is written
-    // and advanced by the Presentations engine itself. Every auto-advancer that
+    // An engine-owned card (source ∈ {build_deck, build_deck_phase, podcast-engine}) is written
+    // and advanced by its owning engine itself. Every auto-advancer that
     // re-fired dispatch on one created the "146 claims, three sweeps, second
     // executor" defect — the engine and the board both driving the same phase.
     // The advancer must NEVER claim these; the engine is the single executor.
@@ -783,16 +1106,58 @@ export async function autoDispatchTask(
     // GUARD 5 and all session/gateway work) so EVERY caller — create-time
     // dispatch and every sweep — shares one fail-closed path. See the GUARD 4c
     // comment above for why 4c must run first.
+    // PD025: signed operator-delegated Presentations requests have a structured
+    // intake contract. Hand it to the local bridge before any generic agent chat;
+    // the bridge owns the lease and canonical engine launcher.
+    if ((task as Task & { source?: string | null }).source === 'operator-delegated' &&
+        (task.department === 'presentations' || task.workspace_id === 'presentations')) {
+      const handedOff = await launchOperatorPresentationContract(task.id);
+      if (handedOff?.kind === 'acknowledged') {
+        recordDeckGateEvent('presentation_operator_contract_handed_off', task.id, task.assigned_agent_id ?? null,
+          `[presentation_operator_contract_handed_off] ${task.id} launched canonical bridge run ${handedOff.runDir}`);
+        recordDispatchSuccess(task.id, { preserveAttempts: context === 'operator-preengine-recovery' });
+        return { status: 'acknowledged', reason: 'presentation_operator_handoff' };
+      }
+      if (handedOff?.kind === 'blocked') {
+        recordDispatchFailure(task.id, task.assigned_agent_id ?? null, {
+          reason: 'presentation_operator_bridge_blocked', audience: 'SYSTEM',
+          needs: handedOff.detail, context, hardBlock: true,
+        });
+        return { status: 'held', reason: 'dispatch_precondition' };
+      }
+      if (handedOff) {
+        recordDispatchFailure(task.id, task.assigned_agent_id ?? null, {
+          reason: handedOff.kind === 'deferred' ? 'presentation_operator_bridge_deferred' : 'presentation_operator_bridge_retryable',
+          audience: 'SYSTEM', needs: handedOff.detail, context,
+        });
+        return { status: 'failed', reason: 'dispatch_pipeline_error' };
+      }
+      recordDispatchFailure(task.id, task.assigned_agent_id ?? null, {
+        reason: 'presentation_operator_contract_missing', audience: 'SYSTEM',
+        needs: 'Restore the signed operator presentation contract before retrying this task.', context,
+        hardBlock: true,
+      });
+      return { status: 'held', reason: 'dispatch_precondition' };
+    }
+
     if (isEngineOwnedSource((task as Task & { source?: string | null }).source)) {
       const engineHoldMsg =
         `[engine_owned_card_not_dispatched] Task "${task.title}" (${task.id}) has engine-owned ` +
         `source "${(task as Task & { source?: string | null }).source}" — NOT dispatched by the board ` +
-        `advancer. The Presentations engine is the single executor for this card.`;
+        `advancer. The owning engine is the single executor for this card.`;
       recordDeckGateEvent(
         'engine_owned_card_not_dispatched',
         task.id,
         task.assigned_agent_id ?? null,
         engineHoldMsg,
+      );
+      // STRANDED-02: the refusal is correct — make it visible on the card, not
+      // just in the events table. See recordEngineOwnedHoldActivity above.
+      recordEngineOwnedHoldActivity(
+        task.id,
+        task.assigned_agent_id ?? null,
+        (task as Task & { source?: string | null }).source ?? '',
+        context,
       );
       console.log(`[${context}] autoDispatchTask: ${engineHoldMsg}`);
       return { status: 'held', reason: 'dispatch_precondition' };
@@ -820,7 +1185,7 @@ export async function autoDispatchTask(
       // event, no backoff, no block, no operator alert — the card kept its
       // phantom assigned_agent_id forever and intake-advance re-selected it
       // every ~2 minutes, re-skipping it silently on every tick (the
-      // Maria-pattern S2 fake-agent root cause, class (a): a phantom id sits
+      // Stuck-card-pattern S2 fake-agent root cause, class (a): a phantom id sits
       // in the assignment column and nothing owns un-sticking it).
       //
       // FIX: heal it instead of skipping it. Clear the phantom
@@ -1035,6 +1400,36 @@ export async function autoDispatchTask(
         // ORIGINAL in-line call site instead of this one.
       }
 
+      // PERSONA-RACE: a brand-new card is created first and its persona is pinned
+      // moments later by resolvePersonaAndPin (selector call). The gate used to
+      // fire 9 ms after creation and park the card "Missing: persona" for ~1 min
+      // (Sheila Reynolds, rescue-rangers card 6a8aca3b, 2026-10-04). While the
+      // card is younger than the grace window, re-read the pin and, if it is
+      // still absent, DEFER quietly (no hold event, no attempt counted) so the
+      // next sweep re-checks. Past the window the normal hold + accounting apply.
+      if (triad.missing.includes('persona_id')) {
+        const graceMs = Number(process.env.PERSONA_PIN_GRACE_SECONDS ?? 120) * 1000;
+        const fresh = queryOne<{ persona_id: string | null; created_at: string | null }>(
+          `SELECT persona_id, created_at FROM tasks WHERE id = ?`,
+          [task.id],
+        );
+        if (fresh?.persona_id) {
+          triad = checkTriad({
+            description: task.description,
+            sop_id: task.sop_id,
+            persona_id: fresh.persona_id,
+          });
+        } else if (
+          fresh?.created_at &&
+          Date.now() - new Date(fresh.created_at).getTime() < graceMs
+        ) {
+          console.log(
+            `[${context}] autoDispatchTask: task ${taskId} persona still being selected — deferring (not a hold)`,
+          );
+          return { status: 'held', reason: 'dispatch_precondition' };
+        }
+      }
+
       if (triad.missing.length > 0) {
         const missingLabel = triadMissingPillText(triad.missing as TriadMissingKey[]);
         const holdMsg =
@@ -1185,7 +1580,20 @@ export async function autoDispatchTask(
         evaluateAudienceConfirmGate, holdForAudienceConfirm, markAudienceDeadlineFallback,
         isHardHoldConfirmDepartment, blockForOwnerConfirm,
       } = await importWithTimeout(() => import('@/lib/tasks'), 'audience-confirm-gate:@/lib/tasks');
-      const gate = evaluateAudienceConfirmGate(task.id);
+      let gate = evaluateAudienceConfirmGate(task.id);
+      if (gate.hold) {
+        // Answer "who will read this?" without asking when the task names its
+        // recipient or the owner has a main audience on file. Same confirm path
+        // as the board's Answer button; no client message.
+        const { autoAnswerAudienceIfPossible } = await import('@/lib/tasks');
+        const auto = await autoAnswerAudienceIfPossible(task.id, agent.id, gate);
+        if (auto.answered) {
+          console.log(`[${context}] autoDispatchTask: task ${taskId} audience auto-answered "${auto.label}" (${auto.source})`);
+          gate = evaluateAudienceConfirmGate(task.id);
+          // Answered but the voice refresh is still landing: retry next sweep, never ask the owner.
+          if (gate.hold) return { status: 'held', reason: 'dispatch_precondition' };
+        }
+      }
       if (gate.hold) {
         holdForAudienceConfirm(task.id, agent.id, gate);
         console.log(
@@ -1208,11 +1616,20 @@ export async function autoDispatchTask(
         // NEVER-NAKED: unconfirmed past the deadline → dispatch under house-voice
         // governance only (buildPersonaBlock's fallback governs; the blend
         // directive's guardrail still renders). Audience is NOT fabricated.
+        // Fail-safe: best-guess the audience from client knowledge first; only
+        // when both tiers fail do we release on the neutral house voice.
+        const { bestGuessAudienceForTask } = await import('@/lib/audience-best-guess');
+        const guess = await bestGuessAudienceForTask(task.id, agent.id).catch(() => null);
+        if (guess) {
+          console.log(`[${context}] autoDispatchTask: task ${taskId} audience best-guessed "${guess.label}" (${guess.tier})`);
+          if (evaluateAudienceConfirmGate(task.id).hold) return { status: 'held', reason: 'dispatch_precondition' };
+        } else {
         markAudienceDeadlineFallback(task.id);
         console.warn(
           `[${context}] autoDispatchTask: task ${taskId} audience unconfirmed past deadline — ` +
             `dispatching under house-voice governance only`,
         );
+        }
       }
     } catch (gateErr) {
       // Never block dispatch on the gate machinery itself (pre-090 DB, etc.).
@@ -1592,11 +2009,7 @@ ${stepLines.join('\n')}
     // sub-task, buildPersonaBlock ×N) IN ADDITION to the primary persona block.
     // Single-persona tasks (0/1 plan rows) render only the primary block —
     // buildPersonaPlanBlock returns '' so there is no regression.
-    const subtaskPlan = loadSubtaskPersonas(task.id);
-    const personaPlanBlock = buildPersonaPlanBlock(subtaskPlan, settings);
-    const personaSection = personaPlanBlock
-      ? `${buildPersonaBlock(task, settings)}\n${personaPlanBlock}`
-      : buildPersonaBlock(task, settings);
+    const personaSection = renderDispatchPersonaSection(task, settings, loadSubtaskPersonas(task.id));
 
     const taskMessage = `${priorityEmoji} **NEW TASK ASSIGNED**
 
@@ -1740,25 +2153,210 @@ If you need help or clarification, ask the orchestrator.`;
     // note this same function used to carry).
     const { checkPersonaDispatchReady } = await import('@/lib/tasks');
     const personaReady = checkPersonaDispatchReady(task.id);
-    if (!personaReady.ready) return { status: 'held', reason: personaReady.reason };
+    if (!personaReady.ready) {
+      // NEVER SILENT (live stall 2026-09): this gate returned 'held' with no log
+      // and no row. The sweep counts 'held' as "waiting", so a task whose persona
+      // bundle never landed (persona_bundle_required) was re-held every tick
+      // forever while the board stayed green. Say it out loud, once per reason
+      // per PERSONA_HOLD_ACTIVITY_DEDUPE_HOURS, so the operator can see it.
+      recordPersonaHoldActivity(task.id, agent.id, personaReady.reason, context);
+      return { status: 'held', reason: personaReady.reason };
+    }
     throwIfJobLeaseLost();
-    const claim = reserveExecution({...task,persona_snapshot:personaSendSnapshot}, sessionKey, executionId);
-    if (!claim.execution) return { status: 'held', reason: claim.reason };
+    // PROVIDER POOL: resolve the agent's OWN ordered model list before reserving
+    // — primary first, then the fallbacks its runtime config declares. The
+    // reservation is counted against the PRIMARY, which is the model the run
+    // will actually attempt; the fallbacks are probed only so a refusal can say
+    // where there is room. The config read is the synchronous half of the
+    // FIX-15 resolver; the gateway half needs a live session, which does not
+    // exist until after this claim. `agents.model` is the fallback only because
+    // a box with no runtime entry still has to land in some pool.
+    const modelChain = resolveRuntimeModelChainFromConfig(agent, task.workspace_id ?? undefined);
+    const effectiveChain = modelChain.length ? modelChain : (agent.model ? [agent.model] : []);
+
+    // RESOURCE-AWARE ROUTING: score that SAME chain on the two dimensions the
+    // pool logic has no way to see — money and the card's deadline — plus this
+    // box's own measured latency per provider. It does NOT reorder the chain
+    // and it does not choose a provider: the reserve debits the PRIMARY, which
+    // is the model the run will actually attempt, and the runtime reaches a
+    // fallback only if that attempt fails. What the scorer produces is the
+    // sentence the CARD carries and the `askWorthy` fact the ask gate reads —
+    // so a queued card can say which subscription it is waiting on and what the
+    // alternatives would cost, without any of that moving the accounting.
+    // Best-effort throughout — scoring never blocks a dispatch.
+    let routeDecision: RouteDecision | null = null;
+    try {
+      routeDecision = scoreRoute({
+        agent,
+        workspaceId: task.workspace_id,
+        title: task.title,
+        department: task.department,
+        needBy: (task as { due_date?: string | null }).due_date ?? null,
+        candidateModels: effectiveChain,
+      });
+    } catch (scoreErr) {
+      console.warn(`[${context}] route scoring failed for task ${task.id}:`, (scoreErr as Error).message);
+    }
+
+    // ASK-AT-CAPACITY. Two separate owner-facing rules, in this order:
+    //
+    //   1. A standing `primary_only` answer. The owner has already said this
+    //      card waits for its own primary subscription rather than overflowing,
+    //      so while that primary is blocked the card defers instead of
+    //      dispatching. Checked FIRST so an answered card is never re-asked.
+    //   2. A NEW question, when the preferred model cannot serve the card AND
+    //      something material is at stake (cost, time, the last of a balance, a
+    //      deadline, or nothing available at all). The hold is a DEFERRAL: no
+    //      answer inside the window and the card dispatches on the
+    //      recommendation, so silence never strands work.
+    if (routeDecision?.preferred && isBlocked(routeDecision.preferred)) {
+      const existingChoice = (task as { provider_choice?: string | null }).provider_choice ?? null;
+      if (existingChoice === 'primary_only') {
+        recordOwnerWaitsForPrimary(task.id, agent.id, routeDecision, context);
+        return { status: 'held', reason: 'owner_waits_for_primary' };
+      }
+      try {
+        const gate = evaluateAskGate({
+          taskId: task.id,
+          taskTitle: task.title,
+          department: task.department,
+          routeLane: (task as { route_lane?: string | null }).route_lane ?? null,
+          existingChoice,
+          decision: routeDecision,
+        });
+        if (gate.hold) {
+          holdForProviderChoice(task.id, gate, sendProviderChoiceAsk);
+          recordRoutingReason(task.id, gate.question ?? routeDecision.reason);
+          return { status: 'held', reason: 'provider_choice_pending' };
+        }
+      } catch (askErr) {
+        // An ask that cannot be evaluated must never block the work. Fall
+        // through and dispatch exactly as a box without this gate would.
+        console.warn(`[${context}] ask-at-capacity gate failed for task ${task.id}:`, (askErr as Error).message);
+      }
+    }
+
+    // PLACEMENT. When the agent's own primary cannot take this run and the
+    // scorer names a declared fallback that can, pin THAT model on this
+    // execution's gateway session before reserving.
+    //
+    // `chat.send` has no `model` field, so this is the only hook that exists:
+    // `sessions.create {key, model}` sets the session's modelOverride and the
+    // run serves on it (verified live — see the contract note on
+    // OpenClawClient.createSession). Pinning BEFORE the reserve is deliberate:
+    // a refused override must never leave a debited slot behind, so nothing is
+    // claimed until the placement is known to have taken.
+    //
+    // SOVEREIGNTY: only a model already in this agent's own declared chain is
+    // ever pinned. A refusal is NEVER answered with a substitute — the run
+    // falls back to the ordinary primary path, which queues the card with its
+    // reason, exactly as a box without placement would.
+    let placedModel: string | null = null;
+    // `primary_only` is the owner saying this card waits for its own
+    // subscription. It is handled above (the card never reaches here while the
+    // primary is blocked), and re-read here so no later edit can turn an
+    // owner's "wait" into a placement by accident.
+    const ownerChoice = (task as { provider_choice?: string | null }).provider_choice ?? null;
+    const wantPlacement =
+      ownerChoice !== 'primary_only'
+      && routeDecision?.preferred
+      && isBlocked(routeDecision.preferred)
+      && routeDecision.overflowTo
+      && effectiveChain.includes(routeDecision.overflowTo.modelId)
+        ? routeDecision.overflowTo.modelId
+        : null;
+    if (wantPlacement) {
+      try {
+        await client.createSession('mission-control', undefined, {
+          key: sessionKey,
+          model: wantPlacement,
+        });
+        placedModel = wantPlacement;
+        console.log(`[${context}] PLACED task ${task.id} on ${wantPlacement} (${providerLabel(providerOf(wantPlacement))})`);
+      } catch (placeErr) {
+        // The commonest cause is the gateway's own allowlist
+        // (agents.defaults.modelPolicy.allow), which REFUSES an id it does not
+        // carry rather than silently swapping one in. Either way placement is
+        // unavailable and the card queues on its primary.
+        console.warn(
+          `[${context}] placement refused for task ${task.id} on ${wantPlacement}: ${(placeErr as Error).message}`,
+        );
+        recordPlacementRefused(task.id, agent.id, wantPlacement, (placeErr as Error).message, context);
+        coolRefusedPlacement(wantPlacement);
+      }
+    }
+
+    const claim = reserveExecution(
+      {...task,persona_snapshot:personaSendSnapshot,model_chain:effectiveChain,placed_model:placedModel},
+      sessionKey, executionId,
+    );
+    if (!claim.execution) {
+      // Every one of these is a QUEUE, not a fault: none spends a dispatch attempt.
+      if (claim.reason === 'worker_at_capacity') {
+        recordWorkerCapacityHold(task.id, agent.id, claim.running ?? 0, claim.limit ?? 1, context);
+      } else if (claim.reason === 'provider_at_capacity') {
+        recordProviderCapacityHold(task.id, agent.id, claim.summary ?? 'provider pool full', context);
+      }
+      // Say WHY on the card, in live numbers, so a queued card reads as a queue
+      // with a cause instead of a card that looks stuck. Only for the capacity
+      // refusals: the other reasons are state changes, not resource decisions,
+      // and the scorer has nothing to say about them.
+      if (routeDecision && (claim.reason === 'provider_at_capacity' || claim.reason === 'worker_at_capacity')) {
+        recordRoutingReason(task.id, routeDecision.reason);
+      }
+      return { status: 'held', reason: claim.reason };
+    }
     const execution = claim.execution;
     if (!beginExecutionSend(execution)) return { status: 'held', reason: 'claim_superseded', executionId };
     try {
+      // A40: record the load contract (revision + required blueprint sections)
+      // at the moment the work is handed over — the one moment it is known what
+      // THIS execution was given. Before this call the capture had no
+      // production caller, so load evidence could never exist on a real card.
+      // Never fatal: a task without a persona bundle or a pre-migration box
+      // returns a soft status, and a capture failure must not block a dispatch
+      // (matching renderPersonaConformanceInstructions' own no-op posture).
+      try {
+        captureExecutionLoadEvidence(task.id, execution.id);
+      } catch (loadCapErr) {
+        console.warn(`[task-dispatcher] load-evidence capture skipped for ${task.id}/${execution.id}:`, (loadCapErr as Error).message);
+      }
       const response = await client.call('chat.send', {
         sessionKey,
         message: `${taskMessage}\n\n${renderPersonaConformanceInstructions(task.id, executionId, agent.id, missionControlUrl)}\n\n**Execution ID:** ${execution.id}\nFor task completion, include execution_id: "${execution.id}" in the completion webhook JSON.`,
         idempotencyKey: execution.idempotency_key,
-        timeoutMs: 30000,
+        // [RUN-BUDGET-FIX 2026-09-15] Deliberately NO timeoutMs here.
+        // The gateway reads chat.send timeoutMs as the WHOLE AGENT RUN budget,
+        // not as an acknowledgement bound: chat-send-handler resolves
+        // resolveAgentTimeoutMs({ cfg, overrideMs: p.timeoutMs }) and feeds it into
+        // resolveChatRunExpiresAtMs, whose hard floor is 120 s. Passing 30000 gave
+        // 30s + 60s grace = 90 s, under that floor, so every dispatched run was
+        // killed at ~120-180 s. Omitting the field falls back to
+        // agents.defaults.timeoutSeconds (3600 = 1 h), the intended budget.
+        // The RPC envelope still uses the gateway default (30 s) -- unchanged.
       });
       recordExecutionAcceptance(execution, response);
       acknowledgedExecution = execution;
+      // B20 — bind the ACCEPTED dispatch to its ACTUAL gateway run. Written
+      // after the acceptance is durably recorded, from trusted server state
+      // only (never from the agent's message or tool params).
+      recordDispatchRunBinding({
+        taskId: task.id,
+        executionId: execution.id,
+        agentId: agent.id,
+        sessionKey,
+        acceptedRunId: gatewayRunIdFromResult(response),
+      });
     } catch (sendErr) {
       // A transport failure may follow remote acceptance. Never roll back the
       // task or mint a fresh key based solely on a missing acknowledgement.
-      recordExecutionUnknown(execution);
+      // The error travels so a 429 can shut the pool instead of the next card
+      // walking into the same refusal.
+      recordExecutionUnknown(execution, undefined, sendErr);
+      // B20 — NO binding for an uncertain send: no acknowledgement means no
+      // acceptance, and the frozen SPEC S6 table records accepted source runs
+      // only. A row here would resolve a trusted taskId for unproven work and
+      // would suppress the reconciliation retry this path deliberately allows.
       console.error(`[${context}] chat.send acknowledgement unknown for ${task.id}:`, sendErr);
       return { status: 'unknown', reason: 'send_acceptance_unknown', executionId };
     }
@@ -1791,6 +2389,24 @@ If you need help or clarification, ask the orchestrator.`;
     );
     const intendedModel = settings.model || null;
     const runtimeModel = runtimeResolved.model_id || intendedModel;
+
+    // PLACEMENT READBACK. The resolver above already asks the gateway what this
+    // session is actually running — no second call. If a model was pinned, that
+    // answer is the evidence: 1 when the gateway agrees, 0 when it reports
+    // something else, and left NULL when it could not be asked at all. A
+    // placement nobody confirmed is not evidence, and a 0 is the signal that a
+    // pool was debited for a run that went somewhere else.
+    if (placedModel) {
+      const confirmed = runtimeResolved.model_id ? (modelsMatch(placedModel, runtimeResolved.model_id) ? 1 : 0) : null;
+      try {
+        run('UPDATE task_executions SET placement_confirmed=? WHERE id=?', [confirmed, execution.id]);
+      } catch { /* pre-157 box */ }
+      if (confirmed === 0) {
+        console.warn(
+          `[${context}] PLACEMENT NOT CONFIRMED task ${task.id}: pinned="${placedModel}" gateway reports "${runtimeResolved.model_id}"`,
+        );
+      }
+    }
     const skew = !!(intendedModel && runtimeModel && !modelsMatch(intendedModel, runtimeModel));
     if (skew) {
       console.warn(
@@ -1841,6 +2457,23 @@ If you need help or clarification, ask the orchestrator.`;
     // W8.2: task advanced — clear attempt-accounting so a future re-queue starts
     // from a clean slate (only CONSECUTIVE failures accumulate toward the cap).
     recordDispatchSuccess(task.id);
+
+    // The routing explanation is written HERE, after every status write this
+    // path makes. `tasks_routing_reconsider` (migration 133) erases
+    // routing_reason on any update that also touches status, so a reason
+    // written before the claim would be wiped by the claim itself.
+    // The card names the model the run was PLACED on when one was pinned, so
+    // the sentence an owner reads matches where the work actually went.
+    if (routeDecision) {
+      recordRoutingReason(
+        task.id,
+        placedModel
+          ? `${routeDecision.preferred ? `${providerLabel(routeDecision.preferred.provider)} was full, so ` : ''}` +
+            `this run was placed on ${placedModel} (${providerLabel(providerOf(placedModel))}), ` +
+            `one of this agent's own declared models.`
+          : routeDecision.reason,
+      );
+    }
 
     // W5.3 — START owner notification (spec §5): persona + dept + specialist + SOP + role.
     // All five values are in local scope at this point. Best-effort; gateway-routed; never throws.
@@ -1938,8 +2571,306 @@ If you need help or clarification, ask the orchestrator.`;
       // DB) — still never throw out of a fire-and-forget dispatch.
       console.error(`[${context}] autoDispatchTask: dispatch_pipeline_error write failed:`, writeErr);
     }
+
+    // STRANDED-01: a lost lease is transient — account for it, back off, and
+    // block + alert at the cap, instead of leaving the card unaccounted for in
+    // its intake lane where no advancer will look at it again. See
+    // PRE_DISPATCH_STATUSES above for why this is scoped to pre-dispatch lanes.
+    try {
+      if (isLostLeaseAbort(errMsg)) {
+        const current = queryOne<{ status: string; assigned_agent_id: string | null }>(
+          'SELECT status, assigned_agent_id FROM tasks WHERE id = ?',
+          [taskId],
+        );
+        if (current && PRE_DISPATCH_STATUSES.has(current.status)) {
+          recordDispatchFailure(taskId, current.assigned_agent_id, {
+            reason: 'scheduler_lease_lost',
+            audience: 'SYSTEM',
+            needs:
+              'The scheduler tick lost its lease mid-dispatch (a transient infrastructure failure: the sweep ' +
+              'outran its lease, most often a slow or stalled gateway). The card was re-queued with a bounded ' +
+              'backoff on each attempt and has now used its whole dispatch budget. Check gateway/scheduler ' +
+              'health, then Resume the card.',
+            context,
+          });
+        }
+      }
+    } catch (recoverErr) {
+      console.warn(
+        `[${context}] autoDispatchTask: lost-lease recovery non-fatal:`,
+        (recoverErr as Error).message,
+      );
+    }
   }
     return acknowledgedExecution
       ? { status: 'acknowledged', reason: 'accepted_bookkeeping_failed', executionId: acknowledgedExecution.id }
       : { status: 'failed', reason: 'dispatch_pipeline_error' };
+}
+
+// ── B20 — trusted CC dispatch → ACTUAL gateway run binding (SPEC S5 step 6, S6) ─
+//
+// The native exchange observer (B19) sees hook context and lifecycle events:
+// `sessionKey`, `runId`, `agentId` — and nothing that names a Command Center
+// task. Headquarters' rule is the other direction: the SERVER resolves taskId
+// from a mapping the server itself wrote, never from a model-authored body or
+// tool params (SPEC S5 step 1 / §7 rule 4). This is that mapping's writer.
+//
+// THE TABLE SHAPE IS SPEC S6 LINE 243'S, EXACTLY — ten columns, frozen. The
+// reserved additive HQ migration (B01, migration 169) creates it; this module
+// creates nothing. An earlier revision of this writer carried its own 12-column
+// CREATE (`outcome`, `delivered_at`) and that statement never ran in production:
+// `CREATE TABLE IF NOT EXISTS` means whichever statement runs FIRST defines the
+// shape forever, and the migration does. Against the real table the INSERT was
+// refused, the failure was swallowed as non-fatal, and the replay guard reading
+// `outcome` was silently inert. The writer/reader here are reduced to the
+// frozen ten columns so both revisions agree by construction.
+//
+// ACCEPTED IS NOT DELIVERED. This table records ONE fact: this gateway run was
+// ACCEPTED for this task (SPEC: "maps accepted source run/session to authorized
+// task/execution ID"; "Gateway acceptance is not delivery or completion"). A row
+// is written only after the gateway acknowledges the send, and the frozen table
+// has no column that can express delivery — nothing on this path can record an
+// unproven send as admitted, and nothing can record anything as delivered. An
+// UNCERTAIN send (a transport failure after the send may have begun) is NOT an
+// accepted source binding and writes NO row: a row would let unproven work
+// resolve a trusted taskId and would suppress the very re-dispatch
+// reconciliation needs. The pre-existing execution guard governs the uncertain
+// case, unchanged.
+export const HQ_RUN_BINDINGS_TABLE = 'hq_run_bindings';
+
+/** SPEC S6 line 243: expiry 48 hours after the last relevant observation; hard 100,000 rows/company. */
+export const HQ_RUN_BINDING_TTL_MS = 48 * 60 * 60 * 1000;
+export const HQ_RUN_BINDING_MAX_PER_COMPANY = 100_000;
+
+/** SPEC S9: the private HQ conversation channel. Any other requester channel is not private-owner. */
+export const HQ_CHAT_REQUESTER_CHANNEL = 'hq-chat';
+
+/** `agent:<runtimeId>:<peer>` — the only key shape the gateway can be asked to address. */
+const ADDRESSABLE_SESSION_KEY = /^agent:[^\s:]+:[^\s]+$/;
+
+export interface DispatchRunBindingInput {
+  taskId: string;
+  executionId: string;
+  agentId: string;
+  /** Gateway session key the dispatch addressed. */
+  sessionKey: string;
+  /** `runId` from the ACCEPTED chat.send result; null when never acknowledged. */
+  acceptedRunId?: string | null;
+}
+
+/** Gateway-issued `runId` from a chat.send result — the only trusted run source. */
+export function gatewayRunIdFromResult(result: unknown): string | null {
+  const r = result as { runId?: unknown; run_id?: unknown } | null | undefined;
+  const value = r?.runId ?? r?.run_id;
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+/**
+ * The gateway run identity the native observer will see for this dispatch.
+ * Prefers the ACCEPTED result's own runId; otherwise the addressed session key,
+ * and only when it is a real addressable key (the deterministic
+ * `mission-control-<agentId>-<execId>` sentinel does NOT match — a binding that
+ * names no gateway object is worse than no binding). Null = record unresolved
+ * capture health, never invent an identity.
+ */
+export function dispatchRunIdentity(input: { sessionKey: string; acceptedRunId?: string | null }): string | null {
+  const accepted = typeof input.acceptedRunId === 'string' ? input.acceptedRunId.trim() : '';
+  if (accepted) return accepted;
+  return ADDRESSABLE_SESSION_KEY.test(input.sessionKey?.trim() ?? '') ? input.sessionKey.trim() : null;
+}
+
+function hqRunBindingsReady(): boolean {
+  try {
+    return !!queryOne<{ name: string }>(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+      [HQ_RUN_BINDINGS_TABLE],
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Company scope comes from the task's own workspace row — the same column the
+ * board scopes by — and only when the companies row really exists. An
+ * unresolvable scope is `unresolved`, never guessed into a foreign company.
+ */
+function hqCompanyForWorkspace(workspaceId: string | null): string | null {
+  if (!workspaceId) return null;
+  const ws = queryOne<{ company_id: string | null }>(
+    'SELECT company_id FROM workspaces WHERE id = ?',
+    [workspaceId],
+  );
+  const companyId = ws?.company_id ?? null;
+  if (!companyId) return null;
+  return queryOne<{ id: string }>('SELECT id FROM companies WHERE id = ?', [companyId]) ? companyId : null;
+}
+
+/**
+ * Record (or extend) the binding of an ACTUAL dispatch to its gateway run.
+ *
+ * Idempotent per (company_id, runtime_run_id): a replayed POST for a task that
+ * already has this run EXTENDS the 48-hour expiry and returns the EXISTING row —
+ * a replay produces no second mapping and never rewrites the original
+ * task/execution/visibility attribution. Past the per-company budget a new
+ * mapping is refused (reported), never by evicting an active one.
+ *
+ * Never throws and never blocks the dispatch: a capture miss is invisible to
+ * the business call it describes.
+ */
+export function recordDispatchRunBinding(input: DispatchRunBindingInput): void {
+  try {
+    if (!hqRunBindingsReady()) return;
+    const runId = dispatchRunIdentity({ sessionKey: input.sessionKey, acceptedRunId: input.acceptedRunId });
+    if (!runId) return;
+
+    const task = queryOne<{
+      id: string;
+      assigned_agent_id: string | null;
+      workspace_id: string | null;
+      requester_channel: string | null;
+      requester_chat_id: string | null;
+    }>(
+      'SELECT id, assigned_agent_id, workspace_id, requester_channel, requester_chat_id FROM tasks WHERE id = ?',
+      [input.taskId],
+    );
+    if (!task) return;
+    // The bound row must still be the row the dispatch was read for: a rebound
+    // or reassigned card never inherits this mapping.
+    if (task.assigned_agent_id !== input.agentId) return;
+
+    const companyId = hqCompanyForWorkspace(task.workspace_id);
+    if (!companyId) return;
+
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + HQ_RUN_BINDING_TTL_MS).toISOString();
+    const existing = queryOne<{ runtime_run_id: string }>(
+      'SELECT runtime_run_id FROM hq_run_bindings WHERE company_id = ? AND runtime_run_id = ?',
+      [companyId, runId],
+    );
+    if (existing) {
+      run('UPDATE hq_run_bindings SET expires_at = ? WHERE company_id = ? AND runtime_run_id = ?', [
+        expiresAt,
+        companyId,
+        runId,
+      ]);
+      return;
+    }
+
+    const held = (queryOne<{ n: number }>('SELECT COUNT(*) AS n FROM hq_run_bindings WHERE company_id = ?', [
+      companyId,
+    ]) ?? { n: 0 }).n;
+    if (held >= HQ_RUN_BINDING_MAX_PER_COMPANY) {
+      console.warn(
+        `[hq-run-bindings] company ${companyId} is at its ${HQ_RUN_BINDING_MAX_PER_COMPANY}-row budget — ` +
+          `new mapping refused (capture degraded; active mappings preserved; dispatch unaffected).`,
+      );
+      return;
+    }
+
+    const isPrivate = (task.requester_channel ?? '').trim().toLowerCase() === HQ_CHAT_REQUESTER_CHANNEL;
+    const visibility = isPrivate ? 'private-owner' : 'task-audience';
+    const ownerSubject = isPrivate ? (task.requester_chat_id ?? null) : null;
+
+    run(
+      `INSERT INTO hq_run_bindings
+         (company_id, runtime_run_id, runtime_session_key, agent_id, task_id, execution_id,
+          visibility, owner_subject, recorded_at, expires_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?)`,
+      [
+        companyId,
+        runId,
+        input.sessionKey ?? null,
+        input.agentId,
+        task.id,
+        input.executionId,
+        visibility,
+        ownerSubject,
+        now.toISOString(),
+        expiresAt,
+      ],
+    );
+  } catch (err) {
+    console.warn('[hq-run-bindings] recordDispatchRunBinding failed (non-fatal):', (err as Error).message);
+  }
+}
+
+/**
+ * What Headquarters (and the observer's server side) resolves `taskId` from.
+ * Scoped to the caller's verified company: a run bound under another company is
+ * not found, never returned.
+ */
+export function resolveDispatchRunBinding(
+  companyId: string,
+  runtimeRunId: string,
+): { task_id: string | null; execution_id: string | null; agent_id: string | null; visibility: string; owner_subject: string | null } | null {
+  try {
+    if (!hqRunBindingsReady()) return null;
+    return (
+      queryOne<{
+        task_id: string | null;
+        execution_id: string | null;
+        agent_id: string | null;
+        visibility: string;
+        owner_subject: string | null;
+      }>(
+        `SELECT task_id, execution_id, agent_id, visibility, owner_subject
+           FROM hq_run_bindings WHERE company_id = ? AND runtime_run_id = ?`,
+        [companyId, runtimeRunId],
+      ) ?? null
+    );
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * B20 replay gate — the task's already-ACCEPTED gateway run, if any.
+ *
+ * This is the ONLY thing the dispatch route consults to suppress a replay, and
+ * it exists so an accepted-but-undelivered dispatch is never replayed into a
+ * duplicate send. Scoped to the task's own company; absent table (an
+ * un-migrated box) or absent mapping means "no suppression" — the route then
+ * behaves exactly as it did before, never worse.
+ *
+ * Every row in the frozen SPEC S6 table IS an accepted source binding, so the
+ * gate is simply "has this task an accepted run". Delivery is not expressible
+ * in that table, so there is no delivered state to exclude: the ordinary
+ * duplicate-window / force path governs a deliberate re-dispatch.
+ */
+export function acceptedRunReplayForTask(
+  taskId: string,
+  workspaceId: string | null | undefined,
+): { companyId: string; executionId: string | null; acceptedAt: string } | null {
+  try {
+    if (!hqRunBindingsReady()) return null;
+    const companyId = hqCompanyForWorkspace(workspaceId ?? null);
+    if (!companyId) return null;
+    const row = queryOne<{ execution_id: string | null; recorded_at: string }>(
+      `SELECT execution_id, recorded_at FROM hq_run_bindings
+        WHERE company_id = ? AND task_id = ?
+        ORDER BY recorded_at DESC LIMIT 1`,
+      [companyId, taskId],
+    );
+    if (!row) return null;
+    return { companyId, executionId: row.execution_id, acceptedAt: row.recorded_at };
+  } catch {
+    return null;
+  }
+}
+
+
+/**
+ * Dispatch a task whose planning just finished, in-process (no HTTP hop, so
+ * no relative-URL or middleware-auth failure). `success` is true only when the
+ * gateway acknowledged the run.
+ */
+export async function dispatchPlannedTask(
+  taskId: string,
+  context = 'planning',
+): Promise<{ success: boolean; error?: string }> {
+  const outcome = await autoDispatchTask(taskId, context);
+  return outcome.status === 'acknowledged'
+    ? { success: true }
+    : { success: false, error: `Dispatch ${outcome.status}: ${outcome.reason}` };
 }

@@ -1,11 +1,16 @@
+import { companyScope } from '@/lib/company-scope';
 import { NextResponse } from 'next/server';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
 import fs from 'node:fs';
 import { getDb, getMigrationStatus, getDbInitFailure, getDbPath } from '@/lib/db';
+import { HQ_TABLES, checkHqSchemaReady } from '@/lib/hq/storage';
 import type { DbInitFailure } from '@/lib/db';
 import { getSOPEmbeddingHealth, resolveEmbeddingProvider } from '@/lib/sop-embeddings';
+import { poolUsage } from '@/lib/capacity/provider-pools';
+import { readResourceLedger } from '@/lib/capacity/resource-ledger';
+import { jevEngineState } from '@/lib/decision-engine/live';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -115,8 +120,12 @@ async function probeEmbeddingHealthPy(): Promise<Record<string, unknown> | null>
   // Python path entirely — the caller only falls back to the TS snapshot when
   // python3/the script is unavailable, not on a provider-resolution hiccup.
   let activeProvider = 'none';
+  const localModelArgs: string[] = [];
   try {
-    activeProvider = resolveEmbeddingProvider().name;
+    const p = resolveEmbeddingProvider();
+    activeProvider = p.name;
+    // Local Ollama mode: tell the probe which local model/dims are canonical.
+    if (p.name === 'ollama') localModelArgs.push('--sop-active-model', p.model, '--sop-active-dims', String(p.dims));
   } catch {
     activeProvider = 'none';
   }
@@ -130,6 +139,7 @@ async function probeEmbeddingHealthPy(): Promise<Record<string, unknown> | null>
     getDbPath(),
     '--sop-active-provider',
     activeProvider,
+    ...localModelArgs,
   ];
 
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -192,6 +202,33 @@ async function getEmbeddingsBlock(): Promise<Record<string, unknown>> {
   }
 }
 
+/**
+ * The resource ledger, compactly, so a single health poll shows whether this
+ * box can actually pay for the work it is being handed. READ-ONLY: it never
+ * probes a vendor (the `provider-ledger` cron owns that), so it cannot slow a
+ * health check down or turn a vendor outage into a red box. Degradation here
+ * never flips the top-level `status` — an unknown balance is an operational
+ * fact, not a downed box. Full detail, including why a number is missing, is
+ * at /api/capacity.
+ */
+function capacityBlock() {
+  try {
+    return readResourceLedger().map((entry) => ({
+      provider: entry.provider,
+      slotsFree: entry.slotsFree,
+      slotsLimit: entry.slotsLimit,
+      balance: entry.balance,
+      balanceCurrency: entry.balanceCurrency,
+      balanceAsOf: entry.balanceAsOf,
+      lastProbeError: entry.lastProbeError,
+    }));
+  } catch {
+    // A pre-migration box has no ledger table yet. Report nothing rather than
+    // failing a health check over a table that heals on the next boot.
+    return [];
+  }
+}
+
 export async function GET() {
   // DATA-02: fail CLOSED on a captured DB-init / migration failure BEFORE
   // touching getDb() again. Reading the durable snapshot (rather than
@@ -217,6 +254,36 @@ export async function GET() {
 
     const embeddings = await getEmbeddingsBlock();
 
+    // A04 (SPEC S10 line 393): readiness for Headquarters migration/capture/auth,
+    // not just port open. Uses B01's storage readiness on the SAME open handle
+    // this GET already holds — no new database is opened, no extra handle.
+    // Read-only LIVE-schema probe, additive: a schema-less box still polls
+    // health; it learns the office is unavailable with the missing tables named.
+    // It never moves top-level status: startup schema failure already surfaces
+    // through migrations/pending and failed health, and a transient error below
+    // falls into the existing degraded caretaker further down.
+    let headquarters: Record<string, unknown> | undefined;
+    try {
+      const readiness = checkHqSchemaReady(db);
+      headquarters = {
+        check: 'hq_schema_readiness',
+        status: readiness.ok ? 'ready' : 'setup',
+        ready: readiness.ok,
+        // S6 bound: migration 169 is where these tables land; the LEDGER claim
+        // is never the authority, only the tables below are.
+        tables: [...HQ_TABLES],
+        missingTables: [...readiness.missingTables],
+        missingIndexes: [...readiness.missingIndexes],
+      };
+    } catch {
+      headquarters = {
+        check: 'hq_schema_readiness',
+        status: 'unknown',
+        ready: false,
+        tables: [...HQ_TABLES],
+      };
+    }
+
     return NextResponse.json({
       status: pending.length === 0 ? 'ok' : 'degraded',
       timestamp: new Date().toISOString(),
@@ -227,6 +294,27 @@ export async function GET() {
         gap: pending.length,
       },
       embeddings,
+      headquarters,
+      // PROVIDER CAPACITY: how much of each provider plan this box is using right
+      // now, what the plan allows (`configured_limit`) versus what is in force
+      // after self-calibration (`limit`), and whether a pool is shut after a 429.
+      // One GROUP BY plus one small table read, so a watchdog can poll it.
+      // `providers` adds the money half — remaining balance and price per
+      // provider, read from the stored ledger and never probed here. ADDITIVE —
+      // a full pool is a queue and an unknown balance is an operational fact, so
+      // neither moves the top-level `status`.
+      capacity: { pools: poolUsage(db), providers: capacityBlock() },
+      // COMPANY SCOPE: which company id this box is configured for, which one
+      // actually owns the most active workspaces, and the full split. A client
+      // box carried three ids for one client and every reader scoped to the
+      // configured one saw an empty board. ADDITIVE — a split is an operational
+      // fact, so it never moves the top-level `status`.
+      company: companyScope(db, process.env.MC_COMPANY_ID),
+      // JEV-501: is the decision engine giving live verdicts, and if not, why
+      // (mode off/shadow/legacy, core missing, probe failed + next retry).
+      // ADDITIVE — the raw door leans to a card without it, so it never moves
+      // the top-level `status`.
+      decisionEngine: jevEngineState(),
     });
   } catch (error) {
     // DATA-02: if THIS getDb() call is what surfaced the DB-init / migration
@@ -257,6 +345,11 @@ export async function GET() {
           persona_index: null,
           sop_index: null,
         },
+        capacity: { pools: {}, providers: [] },
+        // A04: same additive readiness key as the success path, so a transient
+        // error above never looks like a headquarters verdict — status stays
+        // 'unknown' and this box-level answer stays 'degraded'.
+        headquarters: { check: 'hq_schema_readiness', status: 'unknown', ready: false, tables: [...HQ_TABLES] },
         error: error instanceof Error ? error.message : 'unknown',
       },
       { status: 200 }

@@ -33,7 +33,7 @@ export default defineConfig({
       // instead of minting a duplicate canonical row and orphaning the original.
       // DB-backed vitest suite, same reason as floor-department-invariant above.
       'tests/unit/mr21-reseed-dept-prefix-migration.test.ts',
-      // 2026-08-04 "WANTED Woman" incident (company_id='wanted-woman'): the
+      // 2026-08-04 "Client A" incident (company_id='client-a'): the
       // dashboard reported 288 agents for a 36-agent, 35-department
       // workforce. Proves BOTH root causes fixed together — /api/performance
       // no longer returns a bare unscoped COUNT(*), and reseedWorkspacesFromConfig
@@ -254,12 +254,22 @@ export default defineConfig({
     // bogus-type 400 negative control. Vitest globals, so vitest-only, never
     // the tsx --test glob (see package.json).
     'tests/unit/fix37-activity-enum.test.ts',
+      // CSF-001 / CSF-004 — expired-CSRF-token suites (authentic-expired predicate +
+      // middleware mid-sitting rejection/recovery with negative controls). Vitest
+      // globals + vi.resetModules re-import of the middleware, same pattern as
+      // middleware-same-origin-board.test.ts — vitest-only, never the tsx glob.
+      'tests/unit/csf-001-expired-token.test.ts',
+      'tests/unit/csf-expired-mid-sitting.test.ts',
     ],
     env: {
       NODE_ENV: 'test',
     },
     // Increase timeout for tests that write temp files
     testTimeout: 15000,
+    // Point TMPDIR at one throwaway dir for the whole run (workers inherit it);
+    // removed when the run exits. Worker processes are killed, not exited, so
+    // per-file process.on('exit') cleanup never fires under vitest.
+    globalSetup: ['./tests/setup/tmp-sandbox.ts'],
   },
   resolve: {
     alias: {

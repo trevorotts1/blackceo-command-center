@@ -43,7 +43,7 @@
  * cooldown-guarded `events` marker (OPERATOR_COLUMN_AGE_DIGEST_COOLDOWN_HOURS,
  * default 20h — deliberately just under 24h so a legitimate next-day run is
  * never suppressed) reuses the exact pattern board-hygiene's blend-regression
- * check and sweep-liveness.ts already established for a board-wide,
+ * check and board-jobs-watchdog.ts already established for a board-wide,
  * non-task-scoped condition: an `events` row with a NULL task_id.
  *
  * An empty board (zero eligible tasks) sends NOTHING — a "the board is

@@ -101,12 +101,32 @@ export const PROVIDER_DISCOVERY: ProviderDiscoveryEntry[] = [
     displayName: 'Kie.ai',
     // kie.ts documents KIE_API_KEY; the probe used KIEAI_API_KEY — accept both.
     envCandidates: ['KIE_API_KEY', 'KIEAI_API_KEY', 'KIE_AI_API_KEY'],
+    // CC-KIE-U1 — OFFLINE SEED IDS, NOT MEMORY.
+    //
+    // These used to be `kie/nano-banana`, `kie/gpt-image`, `kie/flux-1.1-pro`,
+    // `kie/veo-3`, `kie/runway-gen3` — names typed from memory, which the KIE
+    // official agent docs forbid outright ("Never write a model name from
+    // memory or training data... A name you 'know' may not exist"). Every id
+    // below is a `canonical_model_id` copied verbatim from the KIE skills in
+    // openclaw-onboarding:
+    //   - 66-kie-image/models.json   (image rows)
+    //   - 67-kie-video/models.json   (video rows)
+    // and every one of them declares
+    // `create_endpoint: "/api/v1/jobs/createTask"` — the single path
+    // `generators.ts callKie()` submits to. Skills 67/68 also carry models
+    // whose `create_endpoint` is a dedicated route (`/api/v1/veo/generate`,
+    // `/api/v1/runway/generate`, `/api/v1/generate`); those are deliberately
+    // NOT seeded here because callKie does not implement them.
+    //
+    // The live catalog (`kie.ts fetchModels()` reading `data.models`) is
+    // still what fills the registry on the weekly refresh — this list only
+    // gives a freshly-deployed box something honest to show before then.
     models: [
-      { model_id: 'kie/nano-banana', label: 'Nano Banana (Kie)', capability: 'image_generation', family: 'nano-banana', generates: true },
-      { model_id: 'kie/gpt-image', label: 'GPT Image (Kie)', capability: 'image_generation', family: 'gpt-image', generates: true },
-      { model_id: 'kie/flux-1.1-pro', label: 'FLUX 1.1 Pro (Kie)', capability: 'image_generation', family: 'flux', generates: true },
-      { model_id: 'kie/veo-3', label: 'Veo 3 (Kie)', capability: 'video_generation', family: 'veo', generates: true },
-      { model_id: 'kie/runway-gen3', label: 'Runway Gen-3 (Kie)', capability: 'video_generation', family: 'runway', generates: true },
+      { model_id: 'kie/gpt-image-2-5-sunburst-text-to-image', label: 'GPT Image 2.5 (Kie)', capability: 'image_generation', family: 'gpt-image-2-5-sunburst', generates: true },
+      { model_id: 'kie/gpt-image-2-text-to-image', label: 'GPT Image 2 (Kie)', capability: 'image_generation', family: 'gpt-image-2', generates: true },
+      { model_id: 'kie/nano-banana-2', label: 'Nano Banana 2 (Kie)', capability: 'image_generation', family: 'nano-banana-2', generates: true },
+      { model_id: 'kie/wan/3-0-video', label: 'Wan 3.0 Video (Kie)', capability: 'video_generation', family: 'wan-3-0', generates: true },
+      { model_id: 'kie/kling-3.0/video', label: 'Kling 3.0 (Kie)', capability: 'video_generation', family: 'kling-3-0', generates: true },
     ],
   },
   {
@@ -267,6 +287,15 @@ export function extractOpenclawEnv(json: unknown): Record<string, string> {
 }
 
 /**
+ * If `v` is an env-variable reference (`$NAME`, `${NAME}`, or a bare
+ * UPPER_SNAKE name) return NAME, else null. Real keys are never all-caps-snake.
+ */
+export function envReferenceName(v: string): string | null {
+  const m = /^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$|^\$([A-Za-z_][A-Za-z0-9_]*)$|^([A-Z][A-Z0-9_]*)$/.exec(v.trim());
+  return m ? m[1] || m[2] || m[3] : null;
+}
+
+/**
  * Pull provider API keys out of an `openclaw.json` `models.providers` map.
  *
  * OpenClaw stores per-provider credentials at
@@ -275,7 +304,10 @@ export function extractOpenclawEnv(json: unknown): Record<string, string> {
  * key configured ONLY inside openclaw.json (never exported to a `.env`) still
  * lights up the provider. Never throws.
  */
-export function extractOpenclawProviderKeys(json: unknown): Record<string, string> {
+export function extractOpenclawProviderKeys(
+  json: unknown,
+  lookup?: (name: string) => string | undefined,
+): Record<string, string> {
   const out: Record<string, string> = {};
   if (!json || typeof json !== 'object') return out;
   const models = (json as Record<string, unknown>).models;
@@ -283,6 +315,7 @@ export function extractOpenclawProviderKeys(json: unknown): Record<string, strin
   const providers = (models as Record<string, unknown>).providers;
   if (!providers || typeof providers !== 'object') return out;
 
+  const envVarsInJson = extractOpenclawEnv(json);
   for (const [slug, raw] of Object.entries(providers as Record<string, unknown>)) {
     if (!raw || typeof raw !== 'object') continue;
     const entry = raw as Record<string, unknown>;
@@ -291,9 +324,20 @@ export function extractOpenclawProviderKeys(json: unknown): Record<string, strin
       (typeof entry.api_key === 'string' && entry.api_key) ||
       '';
     if (!key) continue;
+    // An env REFERENCE ($NAME, ${NAME}, bare NAME) is not a key: resolve it from
+    // process.env / openclaw.json env / the caller's lookup, else SKIP it. Never
+    // hydrate a placeholder as a credential (Sheila Reynolds, 2026-10: literal
+    // "GEMINI_API_KEY" became GOOGLE_API_KEY -> Google 400).
+    const refName = envReferenceName(key);
+    let value = key;
+    if (refName) {
+      const resolved = process.env[refName] || envVarsInJson[refName] || lookup?.(refName);
+      if (!resolved || envReferenceName(resolved)) continue;
+      value = resolved;
+    }
     // Convention mirrors apiKeyFor() in the refresh job: SLUG -> SLUG_API_KEY.
     const envName = slug.toUpperCase().replace(/-/g, '_') + '_API_KEY';
-    out[envName] = key;
+    out[envName] = value;
     // C1 — Ollama slug alias: the openclaw config stores the key under the
     // slug `ollama`; the connector and discovery table expect BOTH
     // `OLLAMA_API_KEY` (conventional slug derivation above) AND
@@ -301,7 +345,7 @@ export function extractOpenclawProviderKeys(json: unknown): Record<string, strin
     // both so the Ollama Cloud provider lights up regardless of which name
     // the detection layer checks first.
     if (slug === 'ollama') {
-      out['OLLAMA_CLOUD_API_KEY'] = key;
+      out['OLLAMA_CLOUD_API_KEY'] = value;
     }
   }
   return out;
@@ -348,7 +392,24 @@ export function candidateEnvFiles(): string[] {
  * now present.
  */
 export function hydrateProviderEnvFromOpenClaw(): string[] {
-  const wanted = allKnownEnvVars();
+  return hydrateEnvVarsFromOpenClaw(allKnownEnvVars());
+}
+
+/**
+ * The same OpenClaw secret-store read, for an ARBITRARY set of env-var names.
+ *
+ * `hydrateProviderEnvFromOpenClaw()` above is this function applied to the
+ * model-provider key set. Anything else on a box that reads a key out of
+ * `process.env` — a research API key, a search API key — needs the identical
+ * store precedence (host `$OPENCLAW_PROJECT_DIR/.env`, the Docker
+ * `/data/.openclaw` files, `~/.openclaw/.env`, `~/.openclaw/secrets/.env`,
+ * `openclaw.json` `env`/`env.vars` and `models.providers[].apiKey`) and must
+ * NOT re-implement the parsing or the file discovery. Call this instead.
+ *
+ * Same contract as its caller: `process.env` wins and is never overwritten,
+ * never throws, idempotent, returns the names newly hydrated from a store.
+ */
+export function hydrateEnvVarsFromOpenClaw(wanted: string[]): string[] {
   const hydrated: string[] = [];
 
   const missing = () => wanted.filter((k) => !process.env[k]);
@@ -379,7 +440,15 @@ export function hydrateProviderEnvFromOpenClaw(): string[] {
         json = null;
       }
       // env / env.vars first, then per-provider apiKey entries.
-      const envVars = { ...extractOpenclawProviderKeys(json), ...extractOpenclawEnv(json) };
+      const fileLookup = (name: string) => {
+        for (const f of candidateEnvFiles()) {
+          const c = safeReadFile(f);
+          const v = c ? parseDotEnv(c)[name] : undefined;
+          if (v) return v;
+        }
+        return undefined;
+      };
+      const envVars = { ...extractOpenclawProviderKeys(json, fileLookup), ...extractOpenclawEnv(json) };
       for (const key of missing()) {
         if (envVars[key]) {
           process.env[key] = envVars[key];

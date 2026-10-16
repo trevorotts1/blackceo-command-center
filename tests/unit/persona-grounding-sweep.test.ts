@@ -9,7 +9,7 @@
  * This file covers the EVENT half (the chip half is
  * tests/unit/u12-a-persona-grounding-chip-render.test.tsx).
  *
- * Coverage (mirrors sweep-liveness.test.ts's structure for the same
+ * Coverage (mirrors board-jobs-watchdog.test.ts's structure for the same
  * board-wide, non-task-scoped, NULL-task_id event pattern):
  *   1. runPersonaGroundingHealthSweep() records exactly ONE cooldown-guarded
  *      `persona_grounding_degraded` event when the probe reports a confirmed
@@ -29,7 +29,7 @@
  *      1 is actually load-bearing, not decoration.
  *
  * notifySystem() itself is exercised for real (never mocked), same
- * network-free suppression sweep-liveness.test.ts already uses.
+ * network-free suppression board-jobs-watchdog.test.ts already uses.
  *
  * Run: node --import tsx --test tests/unit/persona-grounding-sweep.test.ts
  */

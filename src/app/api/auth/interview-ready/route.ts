@@ -2,12 +2,13 @@ import { NextRequest, NextResponse } from 'next/server';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { resolveTenantContext } from '@/lib/auth/tenant-context';
+import { resolveTenantContext, tenantSecretIsFallback, invitationPrerequisites } from '@/lib/auth/tenant-context';
 import { queryOne } from '@/lib/db';
 import { personaCompanyContext } from '@/lib/persona-company';
 import { readBuildState } from '@/lib/interview/seam';
 import { buildStatePath, resolveWorkspaceDir, updateInterviewStateScript, recordDeptDecisionScript, listCanonicalDepartmentsScript } from '@/lib/interview/paths';
 import { hasCanonicalPersonaCatalog, verifyStandardFoundation } from '@/lib/interview/foundation-verification';
+import { classifyStateIdentity, stampStateIdentity } from '@/lib/interview/state-identity';
 import { resolveOpenClawRuntimeRoot } from '@/lib/openclaw/runtime-root';
 import { runtimeRegistryEntries } from '@/lib/openclaw/runtime-registry';
 export const runtime='nodejs';
@@ -25,8 +26,15 @@ export async function GET(req:NextRequest) {
     if(!queryOne('SELECT id FROM companies WHERE id=?',[context.companyId])) missing.push('company_record');
     if(!queryOne('SELECT id FROM workspaces WHERE company_id=? AND archived_at IS NULL',[context.companyId])) missing.push('company_workspace');
     const state=readBuildState();
-    let stateReady=!!state && typeof state.interviewComplete==='boolean' && state.companyId===context.companyId && state.installationId===context.installationId && state.tenantId===context.tenantId;
-    if(!stateReady) missing.push('scoped_interview_state');
+    const flagged=!!state && typeof state.interviewComplete==='boolean';
+    // An interview completed BEFORE the identity stamps existed is COMPLETE, not
+    // incomplete. Self-stamp it from the verified context instead of reporting an
+    // unknown flag and telling the client her finished interview never happened.
+    // A PRESENT stamp that disagrees is still a scope violation and still fails.
+    let identity=classifyStateIdentity(state,context);
+    if(identity==='unstamped' && flagged && stampStateIdentity(context)) identity='scoped';
+    let stateReady=flagged && identity==='scoped';
+    if(!stateReady) missing.push(identity==='mismatched'?'interview_state_identity_mismatch':identity==='unstamped'?'interview_state_unstamped':'scoped_interview_state');
     try {fs.accessSync(buildStatePath(),fs.constants.R_OK|fs.constants.W_OK);fs.accessSync(path.dirname(buildStatePath()),fs.constants.W_OK);} catch {stateReady=false;missing.push('interview_state_access');}
     try {
       const persona=personaCompanyContext(context.companyId);
@@ -69,10 +77,51 @@ export async function GET(req:NextRequest) {
     } catch {prerequisites.push('interviewer_runtime_configuration');}
     try {const gateway=new URL(process.env.OPENCLAW_GATEWAY_URL||'ws://127.0.0.1:18789');if(!['ws:','wss:'].includes(gateway.protocol))throw new Error();} catch {prerequisites.push('gateway_configuration');}
     missing.push(...prerequisites);
+    // Item (2): the MC_API_TOKEN fallback keeps working boxes working, but a
+    // box that NEEDS it must say so (see flag below). The key name (not the
+    // value) lands in `missing` only when NO secret of any kind is configured.
     const enrollment=!!(process.env.MC_TENANT_SESSION_SECRET||process.env.MC_INTERVIEW_COOKIE_SECRET||process.env.MC_API_TOKEN);
     if(!enrollment) missing.push('enrollment_secret');
+    // Item (2): secret-fallback readiness. The fallback still SIGNS (working
+    // boxes keep working), so this is additive signal, never a new refusal:
+    // when enrollment passes on the MC_API_TOKEN fallback, `missing` carries
+    // the key name `enrollment_secret_fallback` (no value, never a secret) so
+    // the gap is visible until the operator provisions a dedicated secret.
+    // Item (2) + item (9): readiness SIGNAL, never a new wall. The fallback
+    // still SIGNS, issuance still gates, and `missing`/`ready`/status keep
+    // their exact prior contract (working boxes keep working, existing tests
+    // keep passing), so these keys go in an additive `warnings` array the
+    // operator can see before a link fails at redemption:
+    //   `enrollment_secret_fallback` — signing runs on the MC_API_TOKEN
+    //     fallback (no dedicated MC_TENANT_SESSION_SECRET /
+    //     MC_INTERVIEW_COOKIE_SECRET). Key name only, never a secret value.
+    //   `missing_registry_identity` — the host's registry entry lacks the
+    //     Access triple (issuer + audience + subjects), so the box cannot
+    //     verify the owner who opens a link. Same refusal `invitation.ts`
+    //     already returns as `access_identity_unregistered`; this surfaces it
+    //     at readiness instead of after the owner waits for a link.
+    const warnings:string[]=[];
+    if(enrollment && tenantSecretIsFallback()) warnings.push('enrollment_secret_fallback');
+    // Items (9) + 13: this warning stays for the operators and older consumers
+    // that read it, but it is no longer the ONLY place the gap appears — the
+    // same condition now also fails `ready` below through the shared issuance
+    // predicate, so a readiness answer can never authorize an invitation the
+    // registry will refuse.
+    const invitationGate=invitationPrerequisites(context);
+    if(context.kind==='self' && !invitationGate.issuable && invitationGate.reasons.includes('access_identity_unregistered')) warnings.push('missing_registry_identity');
     const foundation=verifyStandardFoundation(state);
     if(state?.buildType==='standard-first' && !foundation.ready) missing.push('standard_foundation_unverified');
-    return NextResponse.json({protocol,stage:'interview',ready:missing.length===0,tenantId:context.tenantId,companyId:context.companyId,installationId:context.installationId,host:context.host,interviewComplete:stateReady?state!.interviewComplete:null,capabilities:{state:stateReady,localInterviewPrerequisites:prerequisites.length===0,enrollment,providerLiveness:'unverified'},foundation,missing},{status:missing.length?503:200,headers});
+    // `runtimeReady` is the whole answer EXCEPT issuance eligibility: legacy
+    // consumers keep reading `ready`, `missing` and the existing capability
+    // keys unchanged, and can move to `runtimeReady`/`invitationIssuable` on
+    // their own schedule. Only the invitation prerequisites flip `ready` to
+    // false, because only they make a promised link undeliverable.
+    const runtimeReady=missing.length===0;
+    for(const reason of invitationGate.reasons) if(!missing.includes(reason)) missing.push(reason);
+    // `enrollment` is ISSUANCE capability, not secret presence (item 13): a
+    // configured signing secret is not the ability to mint a link the box can
+    // verify, so the two are reported separately — `signingSecretConfigured`
+    // keeps the diagnostic, `enrollment` tells the truth about issuance.
+    return NextResponse.json({protocol,stage:'interview',ready:missing.length===0,tenantId:context.tenantId,companyId:context.companyId,installationId:context.installationId,host:context.host,interviewComplete:flagged&&identity!=='mismatched'?state!.interviewComplete:null,capabilities:{state:stateReady,localInterviewPrerequisites:prerequisites.length===0,enrollment:enrollment&&invitationGate.issuable,signingSecretConfigured:enrollment,providerLiveness:'unverified',runtimeReady,invitationIssuable:invitationGate.issuable},foundation,missing,warnings},{status:missing.length?503:200,headers});
   } catch {return NextResponse.json({ready:false,protocol,error:'tenant_registration_or_identity_unverified'},{status:403,headers});}
 }

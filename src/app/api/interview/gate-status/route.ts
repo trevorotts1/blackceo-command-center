@@ -1,3 +1,5 @@
+import { priorCompletion } from '@/lib/interview/prior-completion';
+import { tenantRegistration } from '@/lib/auth/tenant-context';
 import { verifiedBuild } from '@/lib/interview/build-verification';
 /**
  * GET /api/interview/gate-status (U010)
@@ -24,6 +26,7 @@ import { verifiedBuild } from '@/lib/interview/build-verification';
  * exposes three booleans, no secrets, no session, no write path.
  */
 
+import { standardPlaceholderActive } from '@/lib/interview/build-verification';
 import { NextRequest, NextResponse } from 'next/server';
 import { readBuildState, readStandardPrebuild } from '@/lib/interview/seam';
 import { resolveInterviewTenant, refuseUnverifiedTenant, tenantForHost } from '@/lib/interview/tenant';
@@ -34,7 +37,7 @@ export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
-  // JANET-INTERVIEW-FIX: a remote client's hostname must answer from ITS
+  // TENANT-INTERVIEW-FIX: a remote client's hostname must answer from ITS
   // clients-row flag, never this box's canonical files. Self (operator) reads
   // the canonical files exactly as before.
   // The middleware's dashboard-admission fallback calls this endpoint over an
@@ -63,17 +66,28 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     : await resolveInterviewTenant(request);
   const refusedTenant = refuseUnverifiedTenant(tenant);
   if (refusedTenant) return refusedTenant;
+  let priorCompletionDeclared: boolean;
+  try {
+    const scope = internalOk ? tenantRegistration(new URL(`http://${claimedHost}`).hostname) : tenant.context!;
+    priorCompletionDeclared = priorCompletion(scope) !== null;
+  } catch {
+    return NextResponse.json({ error: 'completion_state_unavailable' }, { status: 503 });
+  }
   if (tenant.kind === 'client' && tenant.client) {
     return NextResponse.json({
+      priorCompletionDeclared,
       interviewComplete: tenant.client.interview_complete === true,
       buildCompleted: false,
       standardReady: false,
+      standardPlaceholder: false,
     });
   }
   const bs = readBuildState();
   return NextResponse.json({
+    priorCompletionDeclared,
     interviewComplete: bs?.interviewComplete === true,
     buildCompleted: verifiedBuild(bs),
     standardReady: readStandardPrebuild(bs).standardReady,
+    standardPlaceholder: standardPlaceholderActive(bs),
   });
 }

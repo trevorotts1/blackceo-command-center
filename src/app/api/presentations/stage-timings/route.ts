@@ -6,6 +6,16 @@ import { resolveActiveCompanyId } from '@/lib/company';
 import { boardWhereClause } from '@/lib/workspaces/board-query';
 import { StageTimingBatchSchema } from '@/lib/validation';
 import { verifyWebhookSignature } from '@/lib/webhook-signature';
+import {
+  checkRunFlood,
+  floodRefusalBody,
+  FLOOD_RETRY_AFTER_SECONDS,
+  isPlaceholderRunId,
+  maxRowsPer10Min,
+  maxRowsPerRun,
+  placeholderRunIdBody,
+  recordFloodRefusal,
+} from '@/lib/presentations/stage-timings-guard';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -91,6 +101,21 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // FLOOD-01 — a placeholder run id is refused at the door, before any DB
+    // work. 'run' is not a run id: 1,394,621 of the rows in the 2026-09-16
+    // flood carried exactly that literal, and every one was accepted because
+    // nothing here ever asked whether the runner had resolved its identity.
+    // The refusal names the offending value so the runner's log says WHAT to
+    // fix, and the whole batch is rejected (a batch is one run's events).
+    for (const row of validated.data.rows) {
+      if (isPlaceholderRunId(row.run_id)) {
+        console.warn(
+          `[STAGE-TIMINGS] refused placeholder run_id "${row.run_id}" — the runner did not send a real run id`,
+        );
+        return NextResponse.json(placeholderRunIdBody(row.run_id), { status: 400 });
+      }
+    }
+
     const db = getDb();
 
     // NOTE: the request body is already consumed above, so the self-heal path
@@ -124,6 +149,25 @@ export async function POST(request: NextRequest) {
     // totals: the timing read path keys current execution off the task's
     // registered run, not insertion order.
     const companyId = resolveActiveCompanyId(db) ?? '';
+
+    // FLOOD-01 — per-run flood breaker. Counted BEFORE the write, per distinct
+    // run id in the batch, so a looping runner is stopped at the door instead
+    // of growing the table by one row per POST (the incident: ~50 rows/second
+    // for two days, 1,481,914 rows, 875 MB). The first run that trips refuses
+    // the WHOLE batch: a batch carries one run's events, and a partial accept
+    // would leave the caller unable to tell what landed.
+    const batchRunIds = Array.from(new Set(validated.data.rows.map((r) => r.run_id)));
+    for (const runId of batchRunIds) {
+      const verdict = checkRunFlood(db, runId, companyId);
+      if (verdict.refused) {
+        // One alert per run per hour — see recordFloodRefusal().
+        recordFloodRefusal(db, verdict);
+        return NextResponse.json(floodRefusalBody(verdict), {
+          status: 429,
+          headers: { 'Retry-After': String(FLOOD_RETRY_AFTER_SECONDS) },
+        });
+      }
+    }
 
     const scopedTaskIds = ((): string[] => {
       try {
@@ -327,7 +371,18 @@ export async function GET() {
     method: 'POST',
     accepts: '{ rows: [{event:"phase_exit", run_id, phase_id, wave, model_used, started_at, ended_at, duration_s, status, return_code?} | {event:"run_summary", run_id, total_wall_s, phase_count, slowest_3[], generated_at}] }',
     auth: 'x-webhook-signature: HMAC-SHA256(WEBHOOK_SECRET, rawBody) — REQUIRED in production (503 when unset); skipped only in development',
-    limits: { maxBodyBytes: MAX_BODY_BYTES, maxRows: 1000 },
+    limits: {
+      maxBodyBytes: MAX_BODY_BYTES,
+      maxRows: 1000,
+      // FLOOD-01 ceilings (env-tunable: STAGE_TIMINGS_MAX_ROWS_PER_10MIN /
+      // STAGE_TIMINGS_MAX_ROWS_PER_RUN). Exceeding either is 429 + Retry-After.
+      maxRowsPer10MinPerRun: maxRowsPer10Min(),
+      maxRowsPerRun: maxRowsPerRun(),
+    },
+    refuses: {
+      placeholderRunIds:
+        'run_id must be a real run id — placeholders (run, test, undefined, null, none, default) and ids under 4 characters are 400',
+    },
     producer: 'openclaw-onboarding presentation_job engine (FIX 5)',
   });
 }

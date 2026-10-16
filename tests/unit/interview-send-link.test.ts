@@ -30,6 +30,7 @@ Object.assign(process.env, { OPENCLAW_ROOT: runtimeRoot, OPENCLAW_WORKSPACE_ROOT
   MC_TENANT_PUBLIC_URL: 'https://send.example', OPENCLAW_OWNER_CHAT_ID: owner });
 process.env.MC_TENANT_REGISTRY_JSON = JSON.stringify({ 'send.example': {
   kind: 'self', tenantId: 'send-tenant', companyId: 'send-company', installationId: 'send-install',
+  issuer: 'https://send-access.example', audience: 'send-audience', subjects: ['owner:send'],
 } });
 process.env.MC_PERSONA_COMPANY_CONTEXTS_JSON = JSON.stringify({ 'send-company': {
   companyRoot, companyConfig: path.join(companyRoot, 'company-config.json'),
@@ -94,18 +95,21 @@ test('operator auth remains mandatory with no token, wrong token, or unknown hos
   assert.equal((await POST(req())).status, 403);
   assert.equal(ledger().length, 0); assert.equal(fs.existsSync(capture), false);
 });
-test('fresh owner without Access gets a private 24-hour grant for configured public host; no ticket in response or ledger', async () => {
+test('fresh owner without Access gets a private re-openable grant for configured public host; no ticket in response or ledger', async () => {
   const response = await POST(req());
   const body = await response.json(); assert.equal(response.status, 200, JSON.stringify(body));
   assert.equal(body.mode, 'start'); assert.equal(body.bookmark, 'https://send.example/interview');
   const message = sentMessage();
-  const url = new URL(message.match(/https:\/\/send\.example\/interview#enroll=\S+/)![0]);
-  const ticket = decodeURIComponent(url.hash.slice('#enroll='.length));
+  const url = new URL(message.match(/https:\/\/send\.example\/interview\?enroll=\S+/)![0]);
+  const ticket = decodeURIComponent(url.searchParams.get('enroll')!);
   const { verifyTenantGrant } = await import('../../src/lib/auth/tenant-context');
   const grant = await verifyTenantGrant(ticket, 'send.example', 'enrollment');
   assert.equal(grant?.companyId, 'send-company');
   assert.ok(grant!.exp - Date.now() / 1000 > 86390);
   assert.match(message, /bookmark.*while you are signed in/);
+  // Truthful validity: re-openable until complete, never single-use/24h.
+  assert.match(message, /stays valid until your interview is complete/);
+  assert.ok(!/can be used once within 24 hours/.test(message));
   assert.ok(!JSON.stringify(body).includes(ticket));
   assert.ok(!JSON.stringify(ledger()).includes(ticket));
   assert.equal(JSON.parse(ledger()[0].metadata).status, 'accepted');
@@ -124,7 +128,7 @@ test('fresh owner without Access gets a private 24-hour grant for configured pub
   const entered = await redeem(enrollment());
   assert.equal(entered.status, 200, 'owner without Access can exchange delivered ticket');
   assert.match(entered.headers.get('set-cookie')!, /HttpOnly/i);
-  assert.equal((await redeem(enrollment())).status, 409, 'one-use protection remains intact');
+  assert.equal((await redeem(enrollment())).status, 200, 'the same link re-opens while the interview is unfinished');
 });
 test('saved interview receives fresh enrollment with resume copy without resetting answers', async () => {
   const saved = { ...fresh(), buildCompletedAt: '2026-01-01', interviewSessionId: 'saved-session', interviewProgress: { lastQuestionNumber: 4 }, answers: { q1: 'Saved answer' } };
@@ -132,8 +136,64 @@ test('saved interview receives fresh enrollment with resume copy without resetti
   const response = await POST(req()); assert.equal(response.status, 200);
   assert.equal((await response.json()).mode, 'resume');
   assert.match(sentMessage(), /saved answers.*Continue your interview/);
-  assert.match(sentMessage(), /#enroll=/); assert.ok(!sentMessage().includes('/onboarding/resume/'));
+  assert.match(sentMessage(), /[?&]enroll=/); assert.ok(!sentMessage().includes('/onboarding/resume/'));
   assert.equal(fs.readFileSync(statePath, 'utf8'), before);
+});
+test('unregistered Access identity refuses issuance with a safe compatibility error', async () => {
+  const saved = process.env.MC_TENANT_REGISTRY_JSON;
+  process.env.MC_TENANT_REGISTRY_JSON = JSON.stringify({ 'send.example': {
+    kind: 'self', tenantId: 'send-tenant', companyId: 'send-company', installationId: 'send-install',
+  } });
+  try {
+    const response = await POST(req());
+    assert.equal(response.status, 409);
+    const body = await response.json();
+    // Decision 2 (item 12), OLD SHAPE: byte-identical contract for every
+    // caller that parses only `error`.
+    assert.equal(body.error, 'interview_not_ready');
+    // NEW SHAPE: the precise, allowlisted cause as a first-class field.
+    assert.equal(body.reason, 'access_identity_unregistered');
+    // Nothing leaks: no ticket, no url, no raw issuer body, no secrets.
+    assert.ok(!('url' in body));
+    assert.ok(!JSON.stringify(body).includes('enroll='));
+    assert.equal(fs.existsSync(capture), false);
+    // The dispatch log carries the same reason.
+    const rows = ledger();
+    assert.equal(rows.length, 1);
+    const meta = JSON.parse(rows[0].metadata);
+    assert.equal(meta.status, 'not-dispatched');
+    assert.equal(meta.reason, 'access_identity_unregistered');
+  } finally {
+    process.env.MC_TENANT_REGISTRY_JSON = saved;
+  }
+});
+test('a non-allowlisted or malformed issuer body adds no reason, never the body', async () => {
+  const saved = process.env.MC_TENANT_REGISTRY_JSON;
+  process.env.MC_TENANT_REGISTRY_JSON = JSON.stringify({ 'send.example': {
+    kind: 'self', tenantId: 'send-tenant', companyId: 'send-company', installationId: 'send-install',
+  } });
+  try {
+    // Wrong-registration (stale/foreign identity) -> readiness fails for a
+    // different allowlisted-adjacent reason; whatever the issuer answers, only
+    // allowlisted codes may surface and `error` must stay byte-identical.
+    const response = await POST(req());
+    assert.equal(response.status, 409);
+    const body = await response.json();
+    assert.equal(body.error, 'interview_not_ready');
+    if ('reason' in body) {
+      assert.ok(typeof body.reason === 'string' &&
+        ['access_identity_unregistered', 'interview_not_ready', 'operator_required',
+         'public_origin_unconfigured', 'public_origin_mismatch', 'recipient_binding_required',
+         'invitation_unavailable'].includes(body.reason), `unexpected reason: ${String(body.reason)}`);
+    }
+    assert.ok(!JSON.stringify(body).includes('enroll='));
+    const meta = JSON.parse(ledger()[0].metadata);
+    assert.equal(meta.status, 'not-dispatched');
+    if ('reason' in body) assert.equal(meta.reason, body.reason);
+    else assert.ok(!('reason' in meta), 'dispatch log must not carry a reason the response did not');
+  } finally {
+    process.env.MC_TENANT_REGISTRY_JSON = saved;
+  }
 });
 test('completed, foreign state, and unverified public origins never send', async () => {
   fs.writeFileSync(statePath, JSON.stringify({ ...fresh(), interviewComplete: true }));
@@ -161,9 +221,9 @@ test('uncertain gateway error is redacted and never force-retried', async () => 
     assert.equal(mirrored.status, 'uncertain');
     assert.equal(mirrored.companyId, 'send-company');
     assert.equal(mirrored.recipientHash, createHash('sha256').update(owner).digest('hex'));
-    assert.ok(!JSON.stringify(mirrored).includes('#enroll='));
+    assert.ok(!JSON.stringify(mirrored).includes('enroll='));
     assert.equal(fs.statSync(shellReceipt).mode & 0o777, 0o600);
-    assert.ok(!JSON.stringify(ledger()).includes('#enroll='));
+    assert.ok(!JSON.stringify(ledger()).includes('enroll='));
   } finally { console.error = savedError; }
 });
 test('foreign acknowledgement stays uncertain and test suppression never dispatches', async () => {

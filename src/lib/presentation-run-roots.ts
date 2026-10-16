@@ -27,6 +27,26 @@ export const DEPARTMENT_PRESENTATIONS_RUNS = path.join(
   '.openclaw', 'workspace', 'departments', 'Presentations', 'runs',
 );
 
+/**
+ * PD-TEST-050: the ONE definition of the operator bridge's run directory.
+ *
+ * `launchOperatorPresentationContract()` creates this directory and hands it to
+ * the bridge, and the pre-engine recovery's engine-artifact probe READS it. If
+ * those two ever derived the path separately, the probe could "prove" a run had
+ * produced no engine work by looking in a directory the engine never used —
+ * a false negative that would hand back an unbounded retry budget. One
+ * definition, both callers.
+ */
+export const OPERATOR_PRESENTATION_RUN_PREFIX = 'pres-operator-';
+
+export function operatorPresentationRunDir(
+  taskId: string,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const root = env.PRESENTATION_OPERATOR_RUNS_DIR?.trim() || DEPARTMENT_PRESENTATIONS_RUNS;
+  return path.join(root, `${OPERATOR_PRESENTATION_RUN_PREFIX}${taskId}`);
+}
+
 /** Resolve the effective run-root list (order preserved, deduped). */
 export function resolvePresentationRunRoots(
   env: NodeJS.ProcessEnv = process.env,

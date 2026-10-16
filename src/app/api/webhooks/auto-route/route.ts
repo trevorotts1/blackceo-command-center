@@ -1,10 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createHmac, timingSafeEqual } from 'crypto';
-import { run, queryOne } from '@/lib/db';
+import { queryOne } from '@/lib/db';
 import { routeTask } from '@/lib/routing/department-router';
-import { autoDispatchTask } from '@/lib/task-dispatcher';
+import { autoRouteTask } from '@/lib/routing/auto-route';
 import type { Task } from '@/lib/types';
-import { notifyOwnerAssigned } from '@/lib/owner-reports';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -71,72 +70,21 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Fetch the task so we have full context for routing
-    const task = queryOne<Task>('SELECT * FROM tasks WHERE id = ?', [taskId]);
+    // The routing decision itself lives in @/lib/routing/auto-route so that
+    // in-process callers (the QC scorer's re-route after a FAIL) can run it
+    // directly instead of HTTP-ing this box and having to reproduce BOTH auth
+    // layers above. This handler is the HTTP door; the logic is shared.
+    const result = await autoRouteTask(taskId, workspaceId);
 
-    if (!task) {
-      return NextResponse.json({ error: `Task not found: ${taskId}` }, { status: 404 });
-    }
-
-    // Use workspaceId from body if provided, otherwise fall back to task's workspace
-    const effectiveWorkspaceId = workspaceId || task.workspace_id || 'default';
-
-    const routingInput = {
-      title: task.title,
-      description: task.description || '',
-      priority: task.priority,
-      workspace_id: effectiveWorkspaceId,
-      department: task.department,
-    };
-
-    const result = await routeTask(routingInput);
-
-    if (!result) {
+    if (!result.routed) {
+      if (result.failure === 'task-not-found') {
+        return NextResponse.json({ error: result.reason }, { status: 404 });
+      }
       return NextResponse.json(
-        {
-          success: false,
-          routed: false,
-          taskId,
-          reason: 'No suitable agent available for this task',
-        },
+        { success: false, routed: false, taskId, reason: result.reason },
         { status: 422 },
       );
     }
-
-    // Assign the agent ONLY — leave status at backlog. autoDispatchTask is the
-    // single authority that flips backlog → in_progress, and it only does so
-    // AFTER chat.send actually reaches the specialist (see task-dispatcher.ts).
-    //
-    // G8-KANBAN fix: the previous code pre-set status='in_progress' here, which
-    // tripped autoDispatchTask GUARD 3 (SKIP_STATUSES includes 'in_progress'),
-    // so the OpenClaw invocation returned before chat.send — the card showed
-    // "In Progress" but the agent was never actually invoked. Mirroring
-    // createTaskCore (assign → leave backlog → let autoDispatchTask flip) is the
-    // only correct pattern. If dispatch aborts (gateway down / sovereignty / SOP
-    // hold) the task stays assigned-in-backlog and the backlog-redispatch sweep
-    // rescues it.
-    const now = new Date().toISOString();
-    run(
-      `UPDATE tasks
-       SET assigned_agent_id = ?,
-           updated_at = ?
-       WHERE id = ?`,
-      [result.agentId, now, taskId],
-    );
-
-    console.log(
-      `[AutoRoute] Task "${task.title}" (${taskId}) assigned to ${result.agentName} via ${result.department} → backlog (awaiting auto-dispatch)`,
-    );
-
-    // W5.2 — ASSIGNMENT owner notification (spec §5): "I'm sending this task to the [Dept] department."
-    // Best-effort; gateway-routed; never blocks response or rolls back DB state.
-    try { notifyOwnerAssigned(taskId, { department: result.department }); } catch { /* non-fatal */ }
-
-    // AUTO-DISPATCH (v4.14.0): fire OpenClaw invocation immediately after routing.
-    // autoDispatchTask guards against master/CEO agents and terminal statuses and
-    // performs the backlog → in_progress flip itself once chat.send succeeds.
-    // Fire-and-forget so routing response is not blocked by OpenClaw latency.
-    void autoDispatchTask(taskId, 'auto-route');
 
     return NextResponse.json({
       success: true,

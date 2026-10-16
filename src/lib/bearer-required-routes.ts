@@ -31,10 +31,27 @@
  * calls it (the review job reads the DB directly), so no legitimate tokenless
  * POST caller exists. Now 42 patterns covering 45 routes.
  *
+ * 2026-09-14 (WS-C, Skill 69 archify): +1 collection-or-item pattern for
+ * POST /api/archify-runs + PATCH /api/archify-runs/{id} — the Skill 69 archify
+ * diagram producer's board door (structural mirror of /api/ad-campaigns). An
+ * external Node CLI drives it; the browser interface never calls it, so no
+ * legitimate tokenless caller exists. The list is now 45 patterns covering 49
+ * routes (41 single + 4 collection-or-item x2); the U052 lock test
+ * (src/lib/__tests__/passthrough-write-scope.test.ts) carries the live census.
+ *
  * This list is NOT the whole fix. 61 routes -- including /api/system/converge,
  * /api/system/bootstrap and /api/clients/{id}/keys -- must stay open because the
  * interface calls them with no credential, and no route list can close them.
  * See docs/SECURITY-RESIDUALS.md and U052 Parts B and C.
+ *
+ * 2026-10-05 (HQ merge wave): +1 pattern for POST /api/hq/activity — the HQ
+ * producer ingest (see the comment at its pattern). Now 48 patterns covering
+ * 52 route templates; see the U052 lock test for the live census.
+ *
+ * 2026-10-14 (Skill 71 run-events ingest): +1 pattern for POST
+ * /api/skill-runs/ingest — the Skill 71 run-events producer ingest (see the
+ * comment at its pattern). Now 49 patterns covering 53 route templates; see
+ * the U052 lock test for the live census.
  *
  * MAINTENANCE: a new interface call site to a listed route will 401. Re-derive with the
  * test in src/lib/__tests__/passthrough-write-scope.test.ts, which fails when this
@@ -46,6 +63,12 @@
 export const BEARER_REQUIRED_WRITE_ROUTES: RegExp[] = [
   /^\/api\/auth\/interview-invitation$/,
   /^\/api\/ad-campaigns(\/[^/]+)?$/,
+  // Skill 69 (archify) producer surfaces: POST /api/archify-runs and
+  // PATCH /api/archify-runs/{id}. Service-to-service (an external diagram
+  // assembly line driving the board); the browser interface never calls them,
+  // so there is no legitimate tokenless caller. Collection-or-item, like
+  // ad-campaigns above.
+  /^\/api\/archify-runs(\/[^/]+)?$/,
   /^\/api\/agents$/,
   /^\/api\/agents\/[^/]+\/memory-logs$/,
   /^\/api\/agents\/[^/]+\/openclaw$/,
@@ -56,10 +79,26 @@ export const BEARER_REQUIRED_WRITE_ROUTES: RegExp[] = [
   /^\/api\/companies$/,
   /^\/api\/cron\/sop-learning$/,
   /^\/api\/da-challenges$/,
+  // Ask-at-capacity: the owner's answer to a provider question, and the lane
+  // corrections the intake reports. Both are service-to-service — the answer
+  // arrives from the agent that delivered the question, the corrections from
+  // the intake itself — and the browser interface calls neither, so there is no
+  // legitimate tokenless caller.
+  /^\/api\/routing-corrections$/,
   /^\/api\/departments\/[^/]+\/config$/,
   /^\/api\/execution-queue(\/[^/]+)?$/,
   /^\/api\/files\/upload$/,
   /^\/api\/harvest-cards\/[^/]+\/approve$/,
+  // 2026-10-05 (HQ activity producer ingest): POST /api/hq/activity — signed
+  // producer ingest (SPEC S5 line 182, S7 lines 287/291/295) enforcing its own
+  // dual-auth (MC_API_TOKEN bearer + webhook HMAC over exact raw bytes) in the
+  // handler. Service-to-service; the browser interface only ever GETs the
+  // activity feed (/api/hq/activity?before=…, src/app/hq/page.tsx:576), so the
+  // POST has no legitimate tokenless caller. Middleware's /api/hq direct-host
+  // refusal (src/middleware.ts) still runs FIRST for client-kind hosts; this
+  // pattern adds the bearer layer on the passthrough path without touching
+  // GET (READ_ONLY_METHODS short-circuits in requiresBearerForWrite).
+  /^\/api\/hq\/activity$/,
   /^\/api\/interview\/send-link$/,
   /^\/api\/logo$/,
   /^\/api\/openclaw\/sessions$/,
@@ -69,6 +108,14 @@ export const BEARER_REQUIRED_WRITE_ROUTES: RegExp[] = [
   /^\/api\/operator\/tts$/,
   /^\/api\/recommendations$/,
   /^\/api\/recommendations\/[^/]+\/outcome$/,
+  // 2026-10-14 (Skill 71 run-events ingest): POST /api/skill-runs/ingest —
+  // the Skill 71 run-events producer ingest (stream S6), enforcing its own
+  // per-client Bearer token in the handler (hash-only token records;
+  // verifySkill71IngestToken). Service-to-service; an external shipper CLI
+  // posts run events, and the browser interface only ever GETs
+  // /api/skill-runs (the SkillRunsPanel feed), so the POST has no legitimate
+  // tokenless caller.
+  /^\/api\/skill-runs\/ingest$/,
   /^\/api\/social\/media\/[^/]+$/,
   /^\/api\/social\/performance$/,
   /^\/api\/social-theme\/invitations$/,
@@ -93,6 +140,8 @@ export const BEARER_REQUIRED_WRITE_ROUTES: RegExp[] = [
   // browser interface never calls it). Bearer-gated so the destructive-
   // confirmation backfill is reachable ONLY with MC_API_TOKEN + HMAC.
   /^\/api\/tasks\/[^/]+\/audit-backfill$/,
+  /^\/api\/tasks\/[^/]+\/provider-choice$/,
+  /^\/api\/tasks\/[^/]+\/operator-preengine-recovery$/,
   /^\/api\/weight-profiles$/,
   /^\/api\/workspaces\/[^/]+$/,
 ];

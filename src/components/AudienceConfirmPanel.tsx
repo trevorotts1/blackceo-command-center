@@ -18,7 +18,7 @@
  * non-content task never even fires the fetch).
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Users, Loader2, CheckCircle2 } from 'lucide-react';
 
 interface AudienceGateStatus {
@@ -35,9 +35,15 @@ interface AudienceConfirmPanelProps {
   taskId: string;
   /** Called after a successful confirm so the modal/board can refresh. */
   onConfirmed?: () => void;
+  /** Scroll into view and focus the audience input once the gate loads (opened from "Answer"). */
+  autoFocus?: boolean;
+  /** Who we assumed when the board answered by itself (task_named / owner_default); lets the owner change it. */
+  assumedLabel?: string | null;
 }
 
-export function AudienceConfirmPanel({ taskId, onConfirmed }: AudienceConfirmPanelProps) {
+export function AudienceConfirmPanel({ taskId, onConfirmed, autoFocus, assumedLabel }: AudienceConfirmPanelProps) {
+  const rootRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
   const [status, setStatus] = useState<AudienceGateStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [customLabel, setCustomLabel] = useState('');
@@ -74,14 +80,14 @@ export function AudienceConfirmPanel({ taskId, onConfirmed }: AudienceConfirmPan
         });
         if (!res.ok) {
           const body = await res.json().catch(() => ({}) as { error?: string });
-          setError(body.error || 'Failed to confirm audience');
+          setError(body.error || 'Could not save your answer');
           return;
         }
         setCustomLabel('');
         await load();
         onConfirmed?.();
       } catch {
-        setError('Failed to confirm audience');
+        setError('Could not save your answer');
       } finally {
         setSubmitting(false);
       }
@@ -89,24 +95,63 @@ export function AudienceConfirmPanel({ taskId, onConfirmed }: AudienceConfirmPan
     [taskId, load, onConfirmed],
   );
 
+  const [changing, setChanging] = useState(false);
+  const held = !!status && !!status.hold;
+  const showing = !loading && !!status && (held || !!assumedLabel);
+  useEffect(() => {
+    if (!autoFocus || !showing) return;
+    rootRef.current?.scrollIntoView?.({ block: 'center' });
+    inputRef.current?.focus();
+  }, [autoFocus, showing]);
+
   // Nothing to show: still loading, no gate data, or the task isn't currently
   // held for confirmation (not_required / already confirmed / no bundle /
   // released past the deadline all render nothing here).
-  if (loading || !status || !status.hold) return null;
+  if (loading || !status || (!status.hold && !assumedLabel)) return null;
+  const likely = status.hold ? status.audienceLabel ?? status.candidates[0] ?? null : assumedLabel ?? null;
+  const showCheck = !!likely && !changing && (status.hold || false);
 
   return (
-    <div className="mb-4 rounded-xl border border-indigo-300 bg-indigo-50 p-4">
+    <div ref={rootRef} className="mb-4 rounded-xl border border-indigo-300 bg-indigo-50 p-4">
       <div className="flex items-start gap-3">
         <div className="mt-0.5 rounded-full bg-indigo-100 p-1.5">
           <Users className="h-4 w-4 text-indigo-700" />
         </div>
         <div className="flex-1">
-          <h4 className="text-sm font-semibold text-indigo-900">Confirm audience before dispatch</h4>
-          {status.prompt && <p className="mt-1 text-xs text-indigo-800">{status.prompt}</p>}
+          <h4 className="text-sm font-semibold text-indigo-900">
+            {status.hold ? 'Who will be reading this?' : `Written for ${assumedLabel}`}
+          </h4>
+          <p className="mt-1 text-xs text-indigo-800">
+            {status.hold
+              ? 'For example: a client, a business partner, your email list, or your social media followers. We ask so we can write it in the right tone.'
+              : 'We assumed this and started right away. Type someone else below if that is wrong.'}
+          </p>
+          {showCheck && (
+            <div className="mt-3">
+              <p className="text-xs font-medium text-indigo-900">This is going to {likely}. Is that who it&apos;s written for?</p>
+              <div className="mt-2 flex gap-2">
+                <button
+                  type="button"
+                  disabled={submitting}
+                  onClick={() => confirm(likely!)}
+                  className="rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-700 disabled:opacity-60"
+                >
+                  Yes, start now
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setChanging(true)}
+                  className="rounded-lg border border-indigo-300 bg-white px-3 py-1.5 text-xs font-medium text-indigo-700 hover:bg-indigo-100"
+                >
+                  Change
+                </button>
+              </div>
+            </div>
+          )}
 
           {error && <p className="mt-2 text-xs font-medium text-red-700">{error}</p>}
 
-          {status.candidates.length > 0 && (
+          {!showCheck && status.hold && status.candidates.length > 0 && (
             <div className="mt-3 flex flex-wrap gap-2">
               {status.candidates.map((c) => (
                 <button
@@ -123,12 +168,13 @@ export function AudienceConfirmPanel({ taskId, onConfirmed }: AudienceConfirmPan
             </div>
           )}
 
-          <div className="mt-3 flex items-center gap-2">
+          {!showCheck && <div className="mt-3 flex items-center gap-2">
             <input
+              ref={inputRef}
               type="text"
               value={customLabel}
               onChange={(e) => setCustomLabel(e.target.value)}
-              placeholder="Name the audience..."
+              placeholder="e.g. my email list, a client, Trevor Otts"
               className="flex-1 rounded-lg border border-indigo-200 bg-white px-3 py-1.5 text-xs text-gray-900 focus:border-indigo-500 focus:outline-none"
             />
             <button
@@ -137,9 +183,9 @@ export function AudienceConfirmPanel({ taskId, onConfirmed }: AudienceConfirmPan
               onClick={() => confirm(customLabel)}
               className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-300 bg-white px-3 py-1.5 text-xs font-medium text-indigo-700 transition-colors hover:bg-indigo-100 disabled:opacity-60"
             >
-              {submitting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Confirm'}
+              {submitting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : status.hold ? 'Start' : 'Change'}
             </button>
-          </div>
+          </div>}
         </div>
       </div>
     </div>

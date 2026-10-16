@@ -1,0 +1,9 @@
+{
+  "query": { "original": "widget forging best practices 2026", "more_results_available": true },
+  "web": {
+    "results": [
+      { "title": "Forging Tolerance Standards 2026", "url": "https://example.com/brave-forging-standards", "description": "Tolerance checks at each heat, with a single-owner sign-off per batch." },
+      { "title": "Heat Treat QA Handbook", "url": "https://example.com/brave-heat-treat-qa", "description": "Post-quench hardness sampling and the documentation it requires." }
+    ]
+  }
+}

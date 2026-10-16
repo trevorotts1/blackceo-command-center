@@ -5,6 +5,11 @@ import { capturePersonaSnapshot, type PersonaSnapshot } from '@/lib/persona-stat
 import { randomUUID } from 'crypto';
 import { getDb } from '@/lib/db';
 import { isOwnerKilled } from '@/lib/owner-killed';
+import { ACTIVE_EXECUTION_STATES_SQL } from '@/lib/execution-schema';
+import {
+  isRateLimitError, noteProviderRateLimit, poolPressureSummary, probeChain, providerOf,
+  type PoolProbe,
+} from '@/lib/capacity/provider-pools';
 import type Database from 'better-sqlite3';
 
 export type DispatchOutcome = { status: 'acknowledged' | 'held' | 'failed' | 'unknown'; reason: string; executionId?: string };
@@ -12,20 +17,95 @@ export interface Execution {
  id: string; task_id: string; assignment_version: number; agent_id: string;
  workspace_id: string | null; generation: number; session_key: string; session_id: string;
  worker_context: string; remote_run_id: string | null; state: string; lease_owner: string; lease_expires_at: string;
- idempotency_key: string; created_at: string;
+ idempotency_key: string; provider: string | null; created_at: string;
 }
 export interface DispatchSnapshot {
  persona_snapshot?:PersonaSnapshot; id: string; assigned_agent_id?: string | null; assignment_version?: number;
  workspace_id?: string | null; department?: string | null; status: string;
  source?: string | null; dispatch_hold?: unknown; killed_at?: string | null;
  archived_at?: string | null; description?: string | null;
+ /** The agent's OWN ordered model list — primary first, then its configured
+  * fallbacks — resolved by the caller from the RUNTIME config (FIX-15:
+  * openclaw.json, not the CC's intended model). reserveExecution takes the
+  * first pool in this list with room. Absent — a caller that has not resolved
+  * one — falls back to the `agents.model` column inside reserveExecution. */
+ model_chain?: readonly string[] | null;
+ /** The model the caller has ALREADY pinned on this execution's gateway session
+  *  (sessions.create {model}). When set, it is the model the run will attempt,
+  *  so it — not the chain head — is the pool this reserve debits. Unset is the
+  *  ordinary path and behaves exactly as before. */
+ placed_model?: string | null;
 }
-const ACTIVE = "('reserved','sending','accepted','running','unknown')";
+// The capacity-owning states. Shared with capacity/provider-pools.ts via the
+// schema module so the two counters can never drift apart.
+const ACTIVE = ACTIVE_EXECUTION_STATES_SQL;
 export function executionSessionId(agentId: string, executionId: string): string {
  return `mission-control-${agentId}-${executionId}`;
 }
 export function latestExecution(taskId: string, db = getDb()): Execution | undefined {
  return db.prepare('SELECT * FROM task_executions WHERE task_id = ? ORDER BY generation DESC LIMIT 1').get(taskId) as Execution | undefined;
+}
+
+/** Retire the deliverable rows of every attempt but the current one.
+ *
+ * QC-DELIVERABLE-HOUSEKEEPING-20260922. `task_deliverables` grows without
+ * bound: each re-route registers its output beside everything earlier attempts
+ * left, and nothing ever retires a row — one live card held 27 rows for 5 real
+ * files. This does NOT block a card (migration 158 + `currentExecutionDeliverables`
+ * already scope the conformance gate to the current attempt), so it is
+ * housekeeping, and housekeeping never destroys a client's file record: rows
+ * are STAMPED, never deleted, and every existing reader still sees them.
+ *
+ * Rows with a NULL `execution_id` are left alone — they predate the linkage and
+ * cannot be attributed to an attempt, so retiring them would be a guess.
+ * Best-effort: a re-route must never fail because tidying failed.
+ *
+ * @returns how many rows were retired.
+ */
+export function supersedeStaleDeliverables(taskId: string, keepExecutionId: string, db = getDb()): number {
+  try {
+    const cols = new Set((db.prepare('PRAGMA table_info(task_deliverables)').all() as { name: string }[]).map((c) => c.name));
+    if (!cols.has('superseded_at') || !cols.has('execution_id')) return 0;
+    const res = db.prepare(
+      `UPDATE task_deliverables
+          SET superseded_at = ?, superseded_by_execution_id = ?
+        WHERE task_id = ?
+          AND superseded_at IS NULL
+          AND execution_id IS NOT NULL
+          AND execution_id <> ?`,
+    ).run(new Date().toISOString(), keepExecutionId, taskId, keepExecutionId);
+    return res.changes;
+  } catch {
+    return 0;
+  }
+}
+
+/** Name the attempt that registered a deliverable (migration 158).
+ *
+ * A card's `task_deliverables` rows ACCUMULATE across QC re-routes: every
+ * re-execution registers its own output beside everything earlier attempts
+ * left. The persona artifact-snapshot gate asks a producer to account for the
+ * card's deliverables, and a producer report can only ever cover the artifacts
+ * of its OWN attempt — so on a live box (2026-09-21) a card reached 13
+ * registered deliverables against 6 in the latest report and blocked with a
+ * perfect score, un-reroutable, because each further attempt only widened the
+ * gap. The linkage written here is what lets that gate scope the question.
+ *
+ * Called from every path that registers a row, INCLUDING the idempotent
+ * "already registered at this path" branches — a re-execution re-claiming the
+ * same path is registering it for THIS attempt, and the row must say so.
+ *
+ * Fail-soft: a pre-158 database has no such column, the UPDATE throws, and the
+ * row stays unattributed. That is the state the gate reads as "registered
+ * before this linkage existed", never as a failure. */
+export function linkDeliverableToExecution(taskId:string,deliverableId:string,db:Database.Database=getDb()):void {
+ try {
+  const execution=latestExecution(taskId,db);
+  if(!execution)return;
+  db.prepare('UPDATE task_deliverables SET execution_id=? WHERE id=?').run(execution.id,deliverableId);
+ } catch (err) {
+  console.warn(`[execution-attempts] deliverable ${deliverableId} not attributed to an execution (non-fatal):`,(err as Error).message);
+ }
 }
 
 function workerContext(agentId:string,db:Database.Database):string|null {
@@ -41,8 +121,75 @@ function auditExecutionStatus(taskId:string,from:string,to:string,reason:string,
  else db.prepare('INSERT INTO events(id,type,task_id,message,created_at) VALUES(?,?,?,?,?)').run(randomUUID(),'task_status_changed',taskId,`${from} → ${to}: ${reason}`,now);
 }
 
+/** An OPTIONAL per-agent ceiling, or null when this agent has none.
+ *
+ * v7.6.27 made this a required per-agent number defaulting to 1, which made the
+ * AGENT the unit of capacity. It is not: the client's provider PLAN is (see
+ * capacity/provider-pools.ts), and an agent ceiling of 1 silently capped every
+ * box at one job per worker no matter what the subscription allowed. Migration
+ * 150 therefore nulls every row still carrying that v7.6.27 default, and this
+ * reads NULL/0 as "no ceiling — the pool is the limit".
+ *
+ * An explicitly set value still wins, so an operator can pin one agent down
+ * without touching the pool. `WORKER_MAX_CONCURRENT_DEFAULT` remains as a
+ * box-wide fallback for that pin and is UNSET by default.
+ *
+ * A pre-migration database has no such column: the read throws, is caught, and
+ * the answer is "no ceiling" — so an un-migrated box is bounded by its pool
+ * rather than failing a dispatch. */
+export function workerConcurrencyLimit(agentId: string, db: Database.Database = getDb()): number | null {
+ let configured = 0;
+ try {
+  const row = db.prepare('SELECT max_concurrent_executions FROM agents WHERE id=?').get(agentId) as { max_concurrent_executions?: number | null } | undefined;
+  configured = Number(row?.max_concurrent_executions ?? 0);
+ } catch { /* pre-migration DB: the column is absent; there is no agent ceiling. */ }
+ if (Number.isFinite(configured) && configured > 0) return configured;
+ const envRaw = Number.parseInt(process.env.WORKER_MAX_CONCURRENT_DEFAULT ?? '', 10);
+ return Number.isFinite(envRaw) && envRaw > 0 ? envRaw : null;
+}
+
+/** True when this database carries the migration-150 `provider` column.
+ * Cheap (a PRAGMA off the schema cache) and read inside the reserve
+ * transaction, so a box whose migrations have not run yet keeps dispatching on
+ * the v7.6.27 rules instead of throwing on every reserve. */
+function hasProviderColumn(db: Database.Database): boolean {
+ try {
+  return (db.prepare('PRAGMA table_info(task_executions)').all() as { name: string }[]).some((c) => c.name === 'provider');
+ } catch { return false; }
+}
+
+/** Last-resort model chain when the caller did not supply one.
+ * `agents.model` is the CC's own pinned model, which FIX-15 established is NOT
+ * necessarily what the runtime loads — so a dispatcher that knows the runtime
+ * chain should always pass it. This keeps a caller that does not (a test, a
+ * background dispatcher) attributed to SOME pool rather than none. A single
+ * model is a chain of one: no fallback is ever invented here. */
+function agentModelChainFallback(agentId: string, db: Database.Database): string[] {
+ try {
+  const row = db.prepare('SELECT model FROM agents WHERE id=?').get(agentId) as { model?: string | null } | undefined;
+  return row?.model ? [row.model] : [];
+ } catch { return []; }
+}
+
+export interface ReserveResult {
+ execution?: Execution; reason: string; running?: number; limit?: number;
+ /** The PRIMARY pool — the only pool a reserve ever debits. */
+ provider?: string;
+ /** The agent's own fallback pools, probed for VISIBILITY on a refusal. Never
+  * debited: the runtime only reaches them if the primary attempt fails. */
+ fallbacks?: PoolProbe[];
+ /** Which of those fallback pools have room, for the owner-ask layer. */
+ fallbacksWithRoom?: string[];
+ /** "Ollama Cloud 3/3 full; Agnes AI 1/50 have room" — what the card shows. */
+ summary?: string;
+ /** The model this execution's session was pinned to, when the caller pinned
+  *  one and it is genuinely in the agent's own chain. Undefined on the ordinary
+  *  primary path. */
+ placedModel?: string;
+}
+
 export function reserveExecution(snapshot: DispatchSnapshot, sessionKey: string, executionId: string,
- db: Database.Database = getDb()): { execution?: Execution; reason: string } {
+ db: Database.Database = getDb()): ReserveResult {
  return db.transaction(() => {
   const task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(snapshot.id) as DispatchSnapshot | undefined;
   if (!task || !['backlog','assigned','blocked','in_progress'].includes(task.status) || task.status !== snapshot.status || task.assigned_agent_id !== snapshot.assigned_agent_id ||
@@ -51,11 +198,82 @@ export function reserveExecution(snapshot: DispatchSnapshot, sessionKey: string,
       task.source !== snapshot.source || task.archived_at || isOwnerKilled(task).killed || task.dispatch_hold ||
       !task.assigned_agent_id || ['build_deck','build_deck_phase'].includes(String(task.source ?? '').trim().toLowerCase())) return { reason: 'assignment_or_state_changed' };
   if(snapshot.persona_snapshot && capturePersonaSnapshot(task.id,db).fingerprint!==snapshot.persona_snapshot.fingerprint)return {reason:'dispatch_prompt_context_changed'};
-  const active = db.prepare(`SELECT id FROM task_executions WHERE (task_id = ? OR agent_id = ?) AND state IN ${ACTIVE} LIMIT 1`)
-    .get(task.id, task.assigned_agent_id);
-  if (active) return { reason: 'execution_or_worker_busy' };
-  // Legacy shared-session workers also consume capacity until their old task finishes.
-  if (db.prepare("SELECT id FROM tasks WHERE assigned_agent_id = ? AND id <> ? AND status = 'in_progress' AND archived_at IS NULL LIMIT 1")
+  // PER-TASK rule, unchanged: one live attempt per card, ever. Still backed by
+  // the `task_execution_active_task` unique partial index.
+  if (db.prepare(`SELECT id FROM task_executions WHERE task_id = ? AND state IN ${ACTIVE} LIMIT 1`).get(task.id))
+    return { reason: 'execution_or_worker_busy' };
+  // PER-WORKER capacity: COUNT the worker's other live executions against its
+  // configured limit instead of refusing on the first one. The old rule was a
+  // hard one-job-per-worker even though the gateway runs many per agent, so a
+  // department with one worker processed its queue strictly serially — and a
+  // single quarantined row starved it completely. The DB-level UNIQUE index that
+  // used to encode the limit is dropped by migration 149 (a limit above 1 cannot
+  // be a uniqueness constraint); the count below is the rule now, and it is read
+  // inside this BEGIN IMMEDIATE transaction, which serializes it against every
+  // other reserver, in this process or another.
+  // PROVIDER-POOL capacity, checked FIRST because it is the real constraint:
+  // concurrency is a property of the client's provider PLAN, not of the agent
+  // (capacity/provider-pools.ts). Every agent on this box that runs on Ollama
+  // draws on the ONE Ollama subscription the client pays for, so the count is
+  // per provider per box, not per agent — four agents at one job each could
+  // exceed a 3-concurrent plan without any of them exceeding an agent ceiling.
+  // Counted inside this same BEGIN IMMEDIATE, so it serializes against every
+  // other reserver exactly as the worker count does.
+  //
+  // THE PRIMARY IS THE ONLY POOL DEBITED. The run always ATTEMPTS the agent's
+  // primary model — the gateway takes no per-run model override, and the
+  // runtime advances its own fallback chain only after an attempt FAILS, never
+  // pre-emptively on capacity. So a full primary is a refusal, not a cue to
+  // debit someone else: crediting a fallback here while the run still hits the
+  // primary would under-count the one subscription the pool protects.
+  //
+  // The agent's own fallbacks are still probed, for VISIBILITY: the refusal
+  // names which of them have room so the owner can act on it.
+  const chain = (snapshot.model_chain?.length ? [...snapshot.model_chain] : agentModelChainFallback(task.assigned_agent_id, db));
+  // THE POOL DEBITED IS THE POOL THE RUN WILL ATTEMPT.
+  //
+  // Ordinarily that is the chain head, because the run attempts the agent's own
+  // primary and the runtime reaches a fallback only after an attempt FAILS.
+  // But when the caller has PINNED a model on this execution's session
+  // (sessions.create {model} — the gateway honours it, `chat.send` cannot), the
+  // run attempts THAT model, and debiting the primary would under-count the
+  // subscription actually being spent. A pin is only ever one of the agent's
+  // own declared models; the caller enforces that before it pins.
+  const attemptedModel = (snapshot.placed_model && chain.includes(snapshot.placed_model))
+    ? snapshot.placed_model
+    : chain[0];
+  const pool = providerOf(attemptedModel);
+  const poolTracked = hasProviderColumn(db);
+  if (poolTracked) {
+   // Probe with the ATTEMPTED model first, so `primary` is the pool that must
+   // have room for this particular run.
+   const orderedChain = attemptedModel === chain[0]
+     ? chain
+     : [attemptedModel, ...chain.filter((m) => m !== attemptedModel)];
+   const { primary, fallbacks } = probeChain(orderedChain, db, task.id);
+   if (!primary.room) {
+    // A QUEUE, not a fault: the caller holds and spends no dispatch attempt.
+    return {
+     reason: 'provider_at_capacity', provider: primary.provider,
+     running: primary.running, limit: primary.limit,
+     fallbacks, fallbacksWithRoom: fallbacks.filter((p) => p.room).map((p) => p.provider),
+     summary: poolPressureSummary(primary, fallbacks),
+    };
+   }
+  }
+  // PER-AGENT ceiling: OPTIONAL since the pool became the limit. null means the
+  // agent has no ceiling of its own and takes as much as its pool allows.
+  const limit = workerConcurrencyLimit(task.assigned_agent_id, db);
+  if (limit !== null) {
+   const running = (db.prepare(`SELECT COUNT(*) AS n FROM task_executions WHERE agent_id = ? AND task_id <> ? AND state IN ${ACTIVE}`)
+     .get(task.assigned_agent_id, task.id) as { n: number }).n;
+   if (running >= limit) return { reason: 'worker_at_capacity', running, limit };
+  }
+  // Legacy shared-session workers also consume capacity until their old task
+  // finishes. That check exists because those workers SHARED one session; every
+  // session is per-execution now, so above limit 1 it would silently cancel the
+  // parallelism the operator just asked for. Kept verbatim at limit 1.
+  if (limit === 1 && db.prepare("SELECT id FROM tasks WHERE assigned_agent_id = ? AND id <> ? AND status = 'in_progress' AND archived_at IS NULL LIMIT 1")
     .get(task.assigned_agent_id, task.id)) return { reason: 'worker_busy_legacy_task' };
   const context=workerContext(task.assigned_agent_id,db);
   if(!context)return {reason:'worker_missing'};
@@ -69,15 +287,28 @@ export function reserveExecution(snapshot: DispatchSnapshot, sessionKey: string,
   const sessionId = executionSessionId(task.assigned_agent_id, executionId);
   const owner = randomUUID();
   db.prepare(`INSERT INTO task_executions
-   (id,task_id,assignment_version,agent_id,workspace_id,generation,worker_context,session_key,session_id,state,lease_owner,lease_expires_at,idempotency_key,created_at,updated_at)
-   VALUES (?,?,?,?,?,?,?,?,?,'reserved',?,?,?,?,?)`).run(executionId, task.id, claimed.assignment_version,
+   (id,task_id,assignment_version,agent_id,workspace_id,generation,worker_context,session_key,session_id,state,lease_owner,lease_expires_at,idempotency_key,${poolTracked ? 'provider,' : ''}created_at,updated_at)
+   VALUES (?,?,?,?,?,?,?,?,?,'reserved',?,?,?,${poolTracked ? '?,' : ''}?,?)`).run(executionId, task.id, claimed.assignment_version,
     task.assigned_agent_id, task.workspace_id ?? null, generation, context, sessionKey, sessionId, owner,
-    new Date(Date.now()+120_000).toISOString(), `execution-${executionId}`, now, now);
+    new Date(Date.now()+120_000).toISOString(), `execution-${executionId}`, ...(poolTracked ? [pool] : []), now, now);
   // Never rebind an existing session. Each attempt has immutable attribution.
   db.prepare(`INSERT INTO openclaw_sessions
    (id,agent_id,openclaw_session_id,channel,status,task_id,created_at,updated_at)
    VALUES (?,?,?,'mission-control','active',?,?,?)`).run(randomUUID(), task.assigned_agent_id, sessionId, task.id, now, now);
-  return { execution: latestExecution(task.id, db), reason: 'reserved' };
+  // Record the pin on the row, so a debit to a non-primary pool always carries
+  // the model that justifies it. Separate from the templated INSERT above so a
+  // pre-158 box simply skips it instead of failing the whole reserve.
+  if (snapshot.placed_model && attemptedModel === snapshot.placed_model) {
+    try {
+      db.prepare('UPDATE task_executions SET placed_model=? WHERE id=?').run(snapshot.placed_model, executionId);
+    } catch { /* pre-158 box: the debit stands, the annotation is best-effort */ }
+  }
+  return {
+    execution: latestExecution(task.id, db),
+    reason: 'reserved',
+    provider: pool,
+    placedModel: snapshot.placed_model && attemptedModel === snapshot.placed_model ? snapshot.placed_model : undefined,
+  };
  }).immediate();
 }
 
@@ -103,12 +334,23 @@ export function recordExecutionAcceptance(execution: Execution, response: unknow
  if(changed && db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='task_dispatch_intents'").get())db.prepare("UPDATE task_dispatch_intents SET state='acknowledged',updated_at=? WHERE task_id=? AND state='pending'").run(new Date().toISOString(),execution.task_id);
  }).immediate();
 }
-export function recordExecutionUnknown(execution: Execution, db = getDb()): void {
+/** The send did not acknowledge. `error` is the failure the gateway raised, when
+ * the caller has it: a 429 in that text is the PROVIDER refusing more work, so
+ * the whole pool goes into cooldown rather than the next card walking straight
+ * into the same refusal. The execution row itself is unchanged by that — it
+ * still retains capacity until it is reconciled. */
+export function recordExecutionUnknown(execution: Execution, db = getDb(), error?: unknown): void {
  db.prepare("UPDATE task_executions SET state='unknown',error_code='send_acceptance_unknown',updated_at=? WHERE id=? AND lease_owner=? AND state='sending'")
    .run(new Date().toISOString(), execution.id, execution.lease_owner);
  db.prepare(`INSERT INTO events(id,type,task_id,agent_id,message,created_at) VALUES(?,?,?,?,?,?)`)
    .run(randomUUID(),'dispatch_acceptance_unknown',execution.task_id,execution.agent_id,
    'Gateway acknowledgement missing. This execution retains worker capacity; reconcile its session before retrying.',new Date().toISOString());
+ if (error !== undefined && execution.provider && isRateLimitError(error)) {
+  const noted = noteProviderRateLimit(execution.provider, db);
+  if (noted) db.prepare(`INSERT INTO events(id,type,task_id,agent_id,message,created_at) VALUES(?,?,?,?,?,?)`)
+    .run(randomUUID(),'provider_rate_limited',execution.task_id,execution.agent_id,
+    `Provider "${execution.provider}" reported a rate limit; its pool is shut until ${noted.until} and its limit is now ${noted.effective_limit}.`,new Date().toISOString());
+ }
 }
 
 /** New attempts require execution identity, or their unique session ID. Legacy
@@ -128,11 +370,71 @@ export function completeExecution(taskId: string, executionId?: string, db = get
  db.prepare(`UPDATE task_executions SET state='succeeded',progress_at=?,updated_at=? WHERE task_id=? AND id=? AND state IN ${ACTIVE}`)
   .run(new Date().toISOString(),new Date().toISOString(),taskId,executionId);
 }
+/** How long a quarantined `unknown` row keeps holding worker capacity (ms). */
+export const UNKNOWN_QUARANTINE_MS = 24 * 60 * 60 * 1000;
+
+/** POSITIVE EVIDENCE (2026-09): the gateway's own session history contains the
+ * dispatched message for this execution, so the send DID land and the missing
+ * acknowledgement was a transport artefact. Promote the quarantine to a live
+ * state rather than waiting out UNKNOWN_QUARANTINE_MS. Guarded on `unknown` so
+ * a late acknowledgement or completion that already moved the row wins. */
+export function recordExecutionEvidence(executionId: string, state: 'accepted' | 'running', fromState = 'unknown', db = getDb()): boolean {
+ return db.prepare("UPDATE task_executions SET state=?,error_code=NULL,updated_at=? WHERE id=? AND state=?")
+  .run(state, new Date().toISOString(), executionId, fromState).changes === 1;
+}
+
+/** NEGATIVE EVIDENCE: the gateway was reachable and it has no record of this
+ * run — for a quarantined `unknown` row, its history does not contain the
+ * dispatched message; for an `accepted`/`running` row, the session shows no
+ * agent activity at all and is not reported finished. Either way the row is
+ * past its resolve window and is holding a worker slot and a provider pool slot
+ * for work nobody is doing. Release the capacity and hand the card back to the
+ * same worker — the same guard the expired-reservation path uses
+ * (assignment_version + agent + still in_progress), so a reassigned, killed or
+ * archived task is never rewound. No new idempotency key is ever minted.
+ *
+ * `fromState` is the state the caller READ, so the CAS can only ever fail a row
+ * that has not moved since; `errorCode` names which of the two absences it was. */
+export function failExecutionWithoutEvidence(
+ executionId: string,
+ opts: { fromState?: string; errorCode?: string; reason?: string } = {},
+ db = getDb(),
+): { failed: boolean; taskReset: boolean } {
+ const fromState = opts.fromState ?? 'unknown';
+ const errorCode = opts.errorCode ?? 'execution_unknown_no_evidence';
+ const reason = opts.reason ?? 'Quarantined execution had no gateway evidence';
+ return db.transaction(() => {
+  const row = db.prepare("SELECT * FROM task_executions WHERE id=? AND state=?").get(executionId, fromState) as Execution | undefined;
+  if (!row) return { failed: false, taskReset: false };
+  const now = new Date().toISOString();
+  db.prepare("UPDATE task_executions SET state='failed',error_code=?,updated_at=? WHERE id=? AND state=?").run(errorCode, now, executionId, fromState);
+  // U99-RAW-STATUS-WRITER: the same CAS-guarded in_progress→assigned restore the
+  // expired-reservation path above performs, audited by auditExecutionStatus in
+  // this same transaction. transition()'s single expectedFrom cannot express the
+  // assignment_version + agent + kill/archive guard this CAS carries.
+  const changed = db.prepare("UPDATE tasks SET status='assigned',updated_at=? WHERE id=? AND assignment_version=? AND assigned_agent_id=? AND status='in_progress' AND killed_at IS NULL AND archived_at IS NULL")
+   .run(now, row.task_id, row.assignment_version, row.agent_id).changes;
+  if (changed) auditExecutionStatus(row.task_id, 'in_progress', 'assigned', reason, db);
+  return { failed: true, taskReset: changed === 1 };
+ }).immediate();
+}
+
 /** Process-restart reconciliation never creates a new key. Expired reservations
- * are safe to fail; sending/accepted work is quarantined until positive evidence. */
+ * are safe to fail; sending/accepted work is quarantined until positive evidence.
+ *
+ * QUARANTINE EXPIRY (live stall 2026-09): a row that was `sending` at lease
+ * expiry becomes state='unknown', error_code='execution_lease_expired' — and
+ * nothing ever reconciled it. reserveExecution counts `unknown` as ACTIVE per
+ * agent, so one such row blocked that worker permanently (a client box had one
+ * stuck for 4 days). The quarantine is meant to outlive a plausible late
+ * acknowledgement, not the agent: after UNKNOWN_QUARANTINE_MS with no
+ * acceptance, heartbeat or completion, the row is failed as
+ * `execution_unknown_stale` and the capacity is released. Semantics preserved:
+ * no new idempotency key is ever minted, and the task row is untouched (the
+ * remote run may have happened — only the CC-side reservation is released). */
 export function recoverExpiredExecutions(db = getDb(), now = new Date().toISOString()): number {
  return db.transaction(() => {
-  const rows = db.prepare(`SELECT * FROM task_executions WHERE lease_expires_at < ? AND state IN ('reserved','sending','accepted','running')`).all(now) as Execution[];
+  const rows = db.prepare(`SELECT * FROM task_executions WHERE lease_expires_at < ? AND state IN ('reserved','sending')`).all(now) as Execution[];
   for (const row of rows) {
    db.prepare('UPDATE task_executions SET state=?,error_code=?,updated_at=? WHERE id=? AND lease_owner=?')
     .run(row.state === 'reserved' ? 'failed' : 'unknown', 'execution_lease_expired', now, row.id,row.lease_owner);
@@ -142,6 +444,12 @@ export function recoverExpiredExecutions(db = getDb(), now = new Date().toISOStr
     if(changed)auditExecutionStatus(row.task_id,'in_progress','assigned','Unsent execution reservation expired',db);
    }
   }
-  return rows.length;
+  // Release quarantine held past UNKNOWN_QUARANTINE_MS. Rows failed above keep
+  // updated_at=now, so this pass can never re-flip what it just wrote.
+  const parsedNow = Date.parse(now);
+  const staleBefore = new Date((Number.isNaN(parsedNow) ? Date.now() : parsedNow) - UNKNOWN_QUARANTINE_MS).toISOString();
+  const stale = db.prepare(`UPDATE task_executions SET state='failed',error_code='execution_unknown_stale',updated_at=?
+    WHERE state='unknown' AND error_code='execution_lease_expired' AND updated_at < ?`).run(now,staleBefore).changes;
+  return rows.length + stale;
  }).immediate();
 }

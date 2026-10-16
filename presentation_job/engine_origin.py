@@ -1,4 +1,4 @@
-"""presentation_job/engine_origin.py — PRES-039 engine provenance + compatibility preflight.
+"""presentation_job/engine_origin.py -- PRES-039 engine provenance + compatibility preflight.
 
 Single home for three facts every run and diagnostic must agree on:
 
@@ -8,18 +8,24 @@ Single home for three facts every run and diagnostic must agree on:
   3. WHETHER this copy may dispatch (compatibility preflight against the
      CC API contract + stale-duplicate detection on the import path).
 
-Authoritative distributable engine: ONB
+Authoritative distributable engine: ONB (THIS tree)
   23-ai-workforce-blueprint/templates/role-library/presentations/scripts/presentation_job/
 Full cutover owner after extraction acceptance: the PRES package (PRES-049/WF16).
-Until that cutover this CC-root copy is a vendored non-authoritative
-duplicate: never edit it independently, never delete it until every caller
-and installer is migrated and rollback is tested.
+Until that cutover the CC-root copy is a vendored non-authoritative
+duplicate of this package: never edit it independently, never delete it
+until every caller and installer is migrated and rollback is tested.
+
+Upstreamed from the CC copy (PRES-039) under FIX-PLAN Item 7: the CC copy
+carried this preflight first; the canonical engine now carries it too, so
+provenance is recorded and enforced identically on both sides of the
+generated sync (the Item 7 design makes the CC copy generated output of
+this tree).
 
 Design notes:
 
 * The digest covers file BYTES (sorted names + lengths + sha256), not git
   SHAs: it works identically from a repo root, an installed Mac workspace,
-  a Docker workdir, or a bare copy on PYTHONPATH — none of which is
+  a Docker workdir, or a bare copy on PYTHONPATH -- none of which is
   guaranteed to be a git checkout.
 * The preflight FAILS (non-zero, machine-readable reason) on:
     - a stale duplicate shadowing this package earlier on sys.path
@@ -38,7 +44,6 @@ import hashlib
 import importlib.util
 import json
 import os
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -57,19 +62,23 @@ from . import (
 # modules (AST for .py members, JSON shape for data files):
 #   - state.STATE_SCHEMA_VERSION == 1 (state.json readers/writers agree)
 #   - phases Engine honors manifest pins (no silent fallback)
-#   - launcher dispatch refusal family intact (-4..-7 sentinels)
+#   - launcher dispatch refusal family intact (-4..-7 sentinels, plus the
+#     PRES-039 engine sentinel at its canonical value; see _check_contract)
 #   - board posts carry metadata.phase_id (CC phaseIdOf reads ONLY that key)
 #   - TS contract key PHASE_ACTIVITY_METADATA_KEY == 'phase_id'
 ENGINE_CONTRACT_VERSION = 1
 EXPECTED_STATE_SCHEMA_VERSION = 1
 EXPECTED_METADATA_KEY = "phase_id"
 
-# Structured-compat floor: the CC copy predates modules the canonical ONB
-# engine grew (governor/fanout/lease/env_store/supervisor/autospawn/...
-# — 17 files). Dispatch compatibility is judged against the CC API
-# contract above, NOT against ONB module-set parity: the missing 17 are a
-# recorded capability gap (pending WF16 vendoring), not a dispatch refusal.
-# Refusing every run until parity would be its own outage.
+# Structured-compat floor, recorded from the PRES-039 survey of the CC
+# vendored copy: at survey time the CC copy predated modules this canonical
+# engine had already grown (governor/fanout/lease/env_store/supervisor/
+# autospawn/... -- 17 files). Dispatch compatibility is judged against the
+# CC API contract above, NOT against module-set parity: the missing 17 are
+# a recorded capability gap on the CC side (closed by the Item 7 generated
+# sync, which replaces this list with PARITY-MANIFEST.json), not a dispatch
+# refusal. Refusing every run until parity would be its own outage. The
+# list is documentary only; the preflight never refuses on it.
 KNOWN_MISSING_VS_CANONICAL = [
     "approvals.py",
     "auto_resume.py",
@@ -131,26 +140,87 @@ def package_digest(package_dir: Optional[Path] = None) -> Dict[str, Any]:
     }
 
 
+def _read_git_head(git_dir: Path, common_dir: Path) -> Optional[str]:
+    """Resolve HEAD to a commit sha by reading git's on-disk ref store.
+
+    Handles a detached HEAD (the sha sits in HEAD itself), a loose ref,
+    and a packed ref. Returns None on any irregularity."""
+    try:
+        head = (git_dir / "HEAD").read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not head.startswith("ref:"):
+        return head if _looks_like_sha(head) else None
+    ref = head[4:].strip()
+    try:
+        loose = (common_dir / ref).read_text(encoding="utf-8").strip()
+        if _looks_like_sha(loose):
+            return loose
+    except OSError:
+        pass
+    try:
+        for line in (common_dir / "packed-refs").read_text(
+                encoding="utf-8").splitlines():
+            if line.startswith("#") or line.startswith("^"):
+                continue
+            sha, _, name = line.partition(" ")
+            if name.strip() == ref and _looks_like_sha(sha.strip()):
+                return sha.strip()
+    except OSError:
+        pass
+    return None
+
+
+def _looks_like_sha(text: str) -> bool:
+    return len(text) in (40, 64) and all(
+        c in "0123456789abcdef" for c in text.lower())
+
+
 def distributor_commit(package_dir: Optional[Path] = None) -> Optional[Dict[str, str]]:
     """Best-effort distributor commit identity (None when unavailable).
 
     Never fatal: installed workspaces / Docker workdirs / bare copies are
-    not git checkouts. Returns {repo, commit} only on a clean `git` answer.
+    not git checkouts. Returns {repo, commit} only on a clean answer.
+
+    CANONICAL ADAPTATION (Item 7 Step 1): the CC copy shells out to
+    `git rev-parse`. This port resolves HEAD from git's on-disk ref store
+    instead (loose refs, packed-refs, worktree gitdir/commondir files),
+    because the canonical launcher's dispatch path is contractually
+    spawn-free before its refusal gates (the capacity test suite's Popen
+    guard fires on ANY pre-refusal spawn, engine or not). Same inputs,
+    same outputs, no subprocess.
     """
     root = Path(package_dir) if package_dir else PACKAGE_DIR
     try:
-        r = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "HEAD"],
-            capture_output=True, text=True, timeout=10,
-        )
-        commit = r.stdout.strip()
-        if r.returncode != 0 or not commit:
+        here = root.resolve()
+        while True:
+            dot = here / ".git"
+            if dot.is_dir():
+                git_dir = dot
+                break
+            if dot.is_file():
+                # Worktree / submodule: ".git" is a file naming the real
+                # git dir ("gitdir: <path>", relative to here).
+                text = dot.read_text(encoding="utf-8").strip()
+                if not text.startswith("gitdir:"):
+                    return None
+                target = Path(text[len("gitdir:"):].strip())
+                git_dir = target if target.is_absolute() else (here / target)
+                git_dir = Path(os.path.normpath(str(git_dir)))
+                break
+            if here.parent == here:
+                return None
+            here = here.parent
+        common_dir = git_dir
+        commondir_file = git_dir / "commondir"
+        if commondir_file.is_file():
+            rel = commondir_file.read_text(encoding="utf-8").strip()
+            cand = Path(rel) if Path(rel).is_absolute() else (git_dir / rel)
+            common_dir = Path(os.path.normpath(str(cand)))
+        commit = _read_git_head(git_dir, common_dir)
+        if not commit:
             return None
-        top = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True, timeout=10,
-        )
-        return {"repo": top.stdout.strip() or str(root), "commit": commit}
+        return {"repo": str(here), "commit": commit}
     except Exception:
         return None
 
@@ -251,8 +321,16 @@ def _check_contract(package_dir: Optional[Path] = None) -> Tuple[bool, List[str]
     except Exception as exc:
         problems.append(f"board.py unreadable: {exc.__class__.__name__}: {exc}")
 
-    # 3. Launcher refusal family intact: -4..-8 sentinels + UNDETERMINED gate.
-    # Regex with line anchors: a bare substring test would accept -70 for -7.
+    # 3. Launcher refusal family intact: -4..-7 sentinels, the PRES-039
+    # engine sentinel, + UNDETERMINED gate. Regex with line anchors: a bare
+    # substring test would accept -70 for -7.
+    # CANONICAL NUMBERING: the CC vendored copy numbers the engine sentinel
+    # -8, but in THIS tree -8 is DISPATCH_OCR_REFUSED (FIX 33) and -9..-11
+    # are also taken, so canonical DISPATCH_ENGINE_REFUSED = -12. The token
+    # below asserts the canonical value; launcher.py carries the matching
+    # constant and a cross-reference comment, and after the Item 7
+    # generated sync both files travel together from this tree, so the
+    # check and the launcher cannot drift apart.
     import re as _re
     try:
         launcher_src = (root / "launcher.py").read_text(encoding="utf-8")
@@ -260,7 +338,7 @@ def _check_contract(package_dir: Optional[Path] = None) -> Tuple[bool, List[str]
                       r"^DISPATCH_UNKNOWN_DECK_TYPE = -5\s*$",
                       r"^DISPATCH_CREDIT_REFUSED = -6\s*$",
                       r"^DISPATCH_NOTIFY_REFUSED = -7\s*$",
-                      r"^DISPATCH_ENGINE_REFUSED = -8\s*$",
+                      r"^DISPATCH_ENGINE_REFUSED = -12\s*$",
                       r"^CAPACITY_STATUS_UNDETERMINED"):
             if not _re.search(token, launcher_src, _re.MULTILINE):
                 problems.append(f"launcher.py missing {token}")

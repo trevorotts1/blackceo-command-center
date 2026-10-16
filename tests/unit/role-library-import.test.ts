@@ -201,6 +201,43 @@ test('importRoleLibrary: INSERT then UPDATE is idempotent with zero duplicate sl
   assert.equal(rowAfterUpdate?.version, 2, 'update bumps version 1 -> 2');
 });
 
+// ---------- 2b. no per-box embedding (build once, push to all clients) ----------
+
+test('importRoleLibrary: makes ZERO embedding calls even when a client embedding key is set', async () => {
+  // The role library is "no embeddings by design" (onboarding docs/EMBEDDINGS.md);
+  // SOP vectors ship centrally as the sop-embeddings release asset. An import
+  // must never spend the client's own key -- it runs on every update, so a
+  // per-row embed here re-bills the whole role library on every roll.
+  const saved = { key: process.env.GOOGLE_API_KEY, provider: process.env.SOP_EMBEDDING_PROVIDER };
+  const realFetch = globalThis.fetch;
+  let embedCalls = 0;
+  process.env.GOOGLE_API_KEY = 'test-client-key-not-real-0000';
+  process.env.SOP_EMBEDDING_PROVIDER = 'google';
+  globalThis.fetch = (async () => {
+    embedCalls++;
+    return new Response(JSON.stringify({ embedding: { values: [0.1] } }), { status: 200 });
+  }) as typeof fetch;
+  try {
+    const root = makeDepartmentsTree({
+      'embedcheck-dept': { '01-analyst': '# Analyst\n\nAnalyse.\n\n## Collect\nData.' },
+    });
+    const first = importRoleLibrary({ departmentsPath: root });
+    const second = importRoleLibrary({ departmentsPath: root });
+    assert.equal(first.inserted + second.updated, 2, 'the import itself still wrote the row twice');
+    await new Promise((r) => setTimeout(r, 50)); // let any fire-and-forget embed run
+    assert.equal(embedCalls, 0, 'importRoleLibrary must not call an embedding provider');
+    const vecs = queryOne<{ c: number }>(
+      `SELECT COUNT(*) AS c FROM sop_embeddings e JOIN sops s ON s.id = e.sop_id WHERE s.slug = ?`,
+      [roleLibrarySlug('embedcheck', 'analyst')],
+    );
+    assert.equal(vecs?.c, 0, 'no per-box vector stored for an imported role row');
+  } finally {
+    globalThis.fetch = realFetch;
+    if (saved.key === undefined) delete process.env.GOOGLE_API_KEY; else process.env.GOOGLE_API_KEY = saved.key;
+    if (saved.provider === undefined) delete process.env.SOP_EMBEDDING_PROVIDER; else process.env.SOP_EMBEDDING_PROVIDER = saved.provider;
+  }
+});
+
 // ---------- 3. clobber-skip on source IS NULL ----------
 
 test('importRoleLibrary: never clobbers a user-authored (source IS NULL) row sharing the slug', () => {

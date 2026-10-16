@@ -1,3 +1,17 @@
+/**
+ * States in which an execution still OWNS capacity — the task's slot, its
+ * worker's slot and its provider pool's slot. `unknown` is in the set because an
+ * unacknowledged send may still be running remotely; absence of an
+ * acknowledgement is never evidence that remote work did not start.
+ *
+ * Kept here, in the dependency-free schema module, because both
+ * `execution-attempts.ts` and `capacity/provider-pools.ts` count against this
+ * same set and neither should have to import the other to agree on it. It is a
+ * SQL fragment so it can be interpolated straight into an `IN (...)` clause;
+ * it contains only literals this file writes.
+ */
+export const ACTIVE_EXECUTION_STATES_SQL = "('reserved','sending','accepted','running','unknown')";
+
 /** Additive schema used by migration 132 and isolated failure-injection tests. */
 export const EXECUTION_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS task_executions (
@@ -18,14 +32,45 @@ CREATE TABLE IF NOT EXISTS task_executions (
  progress_at TEXT,
  idempotency_key TEXT NOT NULL UNIQUE,
  error_code TEXT,
+ -- PROVIDER POOL (migration 150): the provider prefix of the runtime model this
+ -- execution was dispatched on, denormalised onto the row so reserveExecution can
+ -- count a pool inside BEGIN IMMEDIATE without joining back through agents and
+ -- re-reading openclaw.json on every reserve. NULL on rows written before the
+ -- column existed; those count toward no pool.
+ provider TEXT,
+ -- PERSONA DISPATCH SNAPSHOT (migration 154): the persona bundle sha this
+ -- execution was actually HANDED at dispatch, as
+ -- {"root":"<sha>","scopes":{"<scope>":"<sha>"}}. The completion conformance
+ -- check measures the producer's report against THIS, never against the live
+ -- bundle row, which a QC re-route rebuilds after the work is done. NULL on a
+ -- row written before the column existed; that execution skips the revision
+ -- check rather than failing it.
+ persona_bundle_shas TEXT,
  created_at TEXT NOT NULL,
  updated_at TEXT NOT NULL,
  UNIQUE(task_id, generation)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS task_execution_active_task ON task_executions(task_id)
  WHERE state IN ('reserved','sending','accepted','running','unknown');
-CREATE UNIQUE INDEX IF NOT EXISTS task_execution_worker_capacity ON task_executions(agent_id)
- WHERE state IN ('reserved','sending','accepted','running','unknown');
+-- Worker capacity is COUNTED, not uniquely indexed: agents.max_concurrent_executions
+-- (migration 149) may allow more than one live execution per worker, which a UNIQUE
+-- index cannot express. reserveExecution does the count inside BEGIN IMMEDIATE.
+-- Migration 149 drops the old unique index on databases that already have it.
+CREATE INDEX IF NOT EXISTS idx_task_executions_agent_state ON task_executions(agent_id, state);
+-- Provider capacity is counted the same way, against the same ACTIVE set.
+CREATE INDEX IF NOT EXISTS idx_task_executions_provider_state ON task_executions(provider, state);
+-- What each provider pool has TAUGHT us, one row per pool. A pool with nothing
+-- to say holds no row at all. effective_limit is the configured limit lowered
+-- by observed 429s; cooling_until shuts the pool outright for a few seconds
+-- after one; last_429_at is what the recovery sweep waits on before growing the
+-- limit back. A past cooling_until means the pool is open.
+CREATE TABLE IF NOT EXISTS provider_pool_state (
+ provider TEXT PRIMARY KEY,
+ effective_limit INTEGER,
+ last_429_at TEXT,
+ cooling_until TEXT,
+ updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS scheduler_leases (
  job_name TEXT PRIMARY KEY,
  owner TEXT NOT NULL,

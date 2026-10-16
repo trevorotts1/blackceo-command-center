@@ -121,6 +121,8 @@ export interface Agent {
   persona?: string;
   /** "permanent" = full-time team member, "on-call" = spawned when needed */
   specialist_type?: 'permanent' | 'on-call';
+  /** How many executions this worker runs at once (migration 149). Default 1. */
+  max_concurrent_executions?: number;
   created_at: string;
   updated_at: string;
 }
@@ -326,6 +328,8 @@ export interface Task {
   //   'not_required'      — non-content / no audience voice needed.
   //   'deadline_fallback' — released under the neutral house voice past deadline.
   blend_confirm_state?: string | null;
+  // Board banner copy for a pending audience gate (tasks.ask column; t.* carries it).
+  ask?: string | null;
   // B-U6 / U20 — declared-vs-used comparator (src/lib/persona-mismatch.ts).
   // Present ONLY when the producer's reported USED voice persona diverges from
   // this task's DECLARED voice_persona_id; null/absent on agreement or when the
@@ -337,6 +341,16 @@ export interface Task {
     declared_voice_persona_id: string | null;
     used_voice_persona_id: string | null;
     page: string | null;
+    // Which comparison diverged (`persona_voice_mismatch`, `persona_topic_mismatch`,
+    // `persona_task_roles_mismatch`, `persona_bundle_revision_mismatch`, …).
+    // `persona_bundle_revision_mismatch` = stored-vs-dispatched (A39): the STORED
+    // decision moved after dispatch; the producer did NOT diverge — the chip title
+    // must not claim it did.
+    reason?: string | null;
+    // Only for `persona_bundle_revision_mismatch`: 'stored' = stored decision
+    // rebuilt after dispatch; 'producer' = producer reported a revision other
+    // than the one it was handed.
+    revision_source?: 'stored' | 'producer' | null;
   } | null;
   // U37 (C-06) — S2 class-b visibility (src/lib/dispatch-hold.ts). Present
   // ONLY when this task's NEWEST task_activities row is a
@@ -372,6 +386,32 @@ export interface Task {
     message: string;
     created_at: string;
   } | null;
+  // Item 19 — the presentation engine's own terminal vocabulary for this
+  // task's run (DONE | BLOCKED | ABANDONED), read per-row by the task-row
+  // projection from the bound run's state.json (the engine's record, NOT
+  // the board's posted status: the producer posts every terminal run as
+  // `review`, so an ABANDONED run is invisible without this field). Null
+  // when no engine state is readable — UNDETERMINED, never a guess.
+  // NOT a tasks column and NOT a TaskStatus: the 10-status manifest above
+  // is untouched; this is a derived board-truth field like qc_heuristic_park.
+  engine_terminal?: 'DONE' | 'BLOCKED' | 'ABANDONED' | null;
+  // Item 19 — the plain-words park view for a parked engine run (Item 10's
+  // state["park_status"] record: waiting on whom, what is needed, since
+  // when — never the raw blocked reason). Computed per-row by the same
+  // projection from the bound run's state.json; null when the run is not
+  // parked or no engine state is readable.
+  park_status?: {
+    label: string;
+    waiting_on: 'client' | 'operator' | 'system' | null;
+    needed: string | null;
+    phase: string | null;
+    since: string | null;
+    park_class: string | null;
+    auto_resume: boolean | null;
+    attempts_used: number | null;
+    attempts_cap: number | null;
+    source: 'park_status' | 'configuration_pending' | 'blocked';
+  } | null;
   // MR-30 — the most recent block-event row for this task (computed per-row in
   // the tasks GET routes from task_block_events, exactly like dispatch_hold from
   // task_activities). Present even when the task is no longer in the blocked
@@ -395,9 +435,12 @@ export interface Task {
   // IS NOT NULL = task has been archived; NULL = live on the board.
   archived_at?: string | null;
   // QC loop guard (migration 061): number of times the QC scorer has returned
-  // this task to backlog after a FAIL. Capped at QC_MAX_REROUTES (default 3)
-  // before the task is set to `blocked` for human review.
+  // this task to backlog after a FAIL. Capped at QC_MAX_REROUTES (default 5)
+  // before the task is set to `blocked` and the owner is alerted once.
   qc_reroute_attempts?: number | null;
+  // QC cap-alert marker (migration 159): attempt count of the last "stopped
+  // retrying" alert sent to the owner. NULL = never alerted.
+  qc_cap_alert_attempts?: number | null;
   // Dispatch attempt-accounting (migration 077 / W8 anti-furnace). Incremented on
   // EVERY failed advance attempt (gateway down / sovereignty / no-runtime). Drives
   // exponential backoff (next_dispatch_eligible_at) and the block-on-N cap so an
@@ -690,6 +733,8 @@ export interface CreateAgentRequest {
   memory_md?: string;
   model?: string;
   specialist_type?: 'permanent' | 'on-call';
+  /** Per-worker parallelism, 1-64. Omitted leaves the stored value alone. */
+  max_concurrent_executions?: number;
 }
 
 export interface UpdateAgentRequest extends Partial<CreateAgentRequest> {
@@ -795,7 +840,12 @@ export type SSEEventType =
   // (ack/progress/done) landed in a ceo-chat session's transcript. Additive
   // event so the rail's own EventSource listener can react within ~2s
   // without touching the board's useSSE hook / Zustand store at all.
-  | 'ceo_chat_task_status';
+  | 'ceo_chat_task_status'
+  // B22 — Company Headquarters (SPEC S7): a content-free, company-scoped
+  // invalidation carrying ONLY the company and its high-water cursor. Scope is
+  // resolved fail-closed in src/lib/events.ts — an `hq_changed` whose company
+  // cannot be proved is DROPPED, never fanned out on the legacy `null` path.
+  | 'hq_changed';
 
 export interface SSEEvent {
   type: SSEEventType;
@@ -829,6 +879,13 @@ export interface SSEEvent {
     status: 'queued' | 'running' | 'published' | 'failed';
     task_id?: string | null;
     execution_id?: string | null;
+  }
+  // B22 — `hq_changed` payload (SPEC S7). Deliberately this small: mirrors the
+  // frozen `HqChangedEvent` in src/lib/hq/types.ts. Never activity text, chat
+  // message/reply, session or turn IDs — those never ride the company bus.
+  | {
+    companyId: string;
+    highSeq: number;
   };
 }
 
@@ -913,7 +970,7 @@ export interface UpdateExecutionQueueRequest {
 // bundle and the CC behaves EXACTLY as before (backward compatible, no regression).
 
 /** Where the resolved audience came from. `asked` = the operator was prompted. */
-export type AudienceConfirmSource = 'onboarding_icp' | 'operator_confirmed' | 'asked';
+export type AudienceConfirmSource = 'onboarding_icp' | 'operator_confirmed' | 'asked' | 'task_named' | 'owner_default' | 'best_guess';
 
 /**
  * The audience the content is FOR, resolved from the client ICP (company-config

@@ -5,10 +5,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
 import { queryOne, run, transaction } from '@/lib/db';
-import { resolveTenantContext, type TenantContext } from '@/lib/auth/tenant-context';
+import { resolveTenantContext, configuredPublicOrigin, type TenantContext } from '@/lib/auth/tenant-context';
 import { createInterviewInvitation } from '@/lib/interview/invitation';
 import { resolveWorkspaceDir } from '@/lib/interview/paths';
 import { readBuildState, readHandoff, readInterviewProgress } from '@/lib/interview/seam';
+import { classifyStateIdentity } from '@/lib/interview/state-identity';
 import { notifyOwnerPrivate, resolveOwnerChatId } from '@/lib/notify';
 
 export const runtime = 'nodejs';
@@ -22,6 +23,33 @@ type DeliveryStatus = 'pending' | 'accepted' | 'uncertain' | 'not-dispatched';
 
 function response(body: Record<string, unknown>, status = 200) {
   return NextResponse.json(body, { status, headers: HEADERS });
+}
+
+/** Decision 2 (hardening plan item 12): the wire contract keeps
+ * `error: "interview_not_ready"` byte-identical for every existing caller;
+ * the sanitized CAUSE rides this new first-class `reason` field and the same
+ * string in the dispatch log's metadata. ONLY these allowlisted application
+ * codes ever surface — the same vocabulary INVITATION_APPLICATION_ERRORS
+ * defines in the onboarding sender (item 10) and readiness now uses (item 13),
+ * so one vocabulary everywhere. Never a raw body, URL, ticket or secret:
+ * anything unrecognised yields no `reason` at all rather than a guess. */
+const INVITE_REASON_ALLOWLIST = new Set([
+  'access_identity_unregistered', 'interview_not_ready', 'recipient_binding_required',
+  'public_origin_unconfigured', 'public_origin_mismatch', 'operator_required',
+  'invitation_unavailable',
+]);
+
+/** Read the issuer's own `error` code off a non-200 invitation response and
+ * allowlist it. Malformed / non-JSON / foreign codes return null — the failure
+ * keeps its generic `interview_not_ready` name and no reason, never a body. */
+async function invitationFailureReason(res: Response): Promise<string | null> {
+  try {
+    const body: unknown = await res.json();
+    const code = (body as { error?: unknown } | null)?.error;
+    return typeof code === 'string' && INVITE_REASON_ALLOWLIST.has(code) ? code : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Same receipt path as the canonical onboarding send-interview-link.sh.
@@ -39,9 +67,19 @@ function shellDeliveryFence(context: TenantContext, recipientHash: string, force
     return (error as NodeJS.ErrnoException).code === 'ENOENT' ? null : 'delivery_receipt_unverified';
   }
   if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)) return 'delivery_receipt_unverified';
+  // Item (4): the fence resolves the box's own origin through the shared
+  // CC_PUBLIC_URL-first resolver, so it can never disagree with issuance
+  // (invitation.ts) or implicit-self (tenant-context) about which host is
+  // "self". Half of item (3): an UNKNOWN legacy `expiresAt` in a prior
+  // receipt must not block a fresh send — the link's lifetime is completion,
+  // not the wire stamp, so a null/non-finite stamp is tolerated (treated as
+  // unknown, cooldown lifted) while a present finite stamp is still verified.
   let origin: string;
-  try { origin = new URL(process.env.MC_TENANT_PUBLIC_URL || '').origin; }
-  catch { return 'delivery_receipt_unverified'; }
+  try {
+    const configured = configuredPublicOrigin();
+    if (!configured) return 'delivery_receipt_unverified';
+    origin = configured.origin;
+  } catch { return 'delivery_receipt_unverified'; }
   if (receipt.companyId !== context.companyId || receipt.tenantId !== context.tenantId ||
       receipt.installationId !== context.installationId || receipt.origin !== origin ||
       new URL(origin).hostname !== context.host || receipt.recipientHash !== recipientHash) {
@@ -50,13 +88,23 @@ function shellDeliveryFence(context: TenantContext, recipientHash: string, force
   if (receipt.status === 'sending' || receipt.status === 'uncertain') return 'delivery_uncertain';
   if (!['accepted', 'rejected'].includes(String(receipt.status))) return 'delivery_receipt_unverified';
   if (receipt.status === 'accepted') {
+    // Item (3): `invitationExpiresAt` null (or any non-finite stamp) is
+    // "unknown", not forgery — tolerated here, and the cooldown below treats
+    // it as no-cooldown (link valid until complete). Message identity and
+    // epoch shape are still verified.
     if (typeof receipt.messageId !== 'string' || !receipt.messageId.trim() ||
         typeof receipt.epoch !== 'number' || !Number.isFinite(receipt.epoch) ||
-        typeof receipt.invitationExpiresAt !== 'number' || !Number.isFinite(receipt.invitationExpiresAt)) {
+        (receipt.invitationExpiresAt !== null && receipt.invitationExpiresAt !== undefined &&
+         (typeof receipt.invitationExpiresAt !== 'number' || !Number.isFinite(receipt.invitationExpiresAt)))) {
       return 'delivery_receipt_unverified';
     }
-    const expired = receipt.invitationExpiresAt <= Date.now() / 1000;
-    if (!force && !expired && Date.now() / 1000 - receipt.epoch < 1800) return 'cooldown';
+    // Item (3): `invitationExpiresAt` null (or any non-finite stamp) means
+    // "unknown", not "expired" — it lifts the cooldown but never blocks: the
+    // link is valid until the interview is complete, so only a fresh, finite,
+    // unexpired stamp within the cooldown window still cools down.
+    const stamp = receipt.invitationExpiresAt;
+    const fresh = typeof stamp === 'number' && Number.isFinite(stamp) && stamp > Date.now() / 1000;
+    if (!force && fresh && Date.now() / 1000 - receipt.epoch < 1800) return 'cooldown';
   }
   return null;
 }
@@ -124,7 +172,12 @@ function reserve(context: TenantContext, recipientHash: string, mode: string, fo
   });
 }
 
-function finish(id: string, status: DeliveryStatus) {
+function finish(id: string, status: DeliveryStatus, reason?: string | null) {
+  if (reason && INVITE_REASON_ALLOWLIST.has(reason)) {
+    run("UPDATE events SET metadata=json_set(metadata,'$.status',?,'$.reason',?) WHERE id=? AND type=?",
+      [status, reason, id, EVENT_TYPE]);
+    return;
+  }
   run("UPDATE events SET metadata=json_set(metadata,'$.status',?) WHERE id=? AND type=?",
     [status, id, EVENT_TYPE]);
 }
@@ -147,8 +200,11 @@ export async function POST(req: NextRequest) {
   } catch { return response({ error: 'invalid_request' }, 400); }
 
   const state = readBuildState();
-  if (!state || state.companyId !== context.companyId || state.tenantId !== context.tenantId ||
-      state.installationId !== context.installationId) {
+  // A legacy state that predates the identity stamps is not a foreign tenant:
+  // refusing it here left a client unable to be sent her own interview link.
+  // A stamp that is PRESENT and disagrees still fails closed.
+  const identity = classifyStateIdentity(state, context);
+  if (!state || identity === 'mismatched') {
     return response({ error: 'interview_identity_unverified' }, 409);
   }
   if (state.interviewComplete === true) return response({ error: 'interview_complete' }, 409);
@@ -171,24 +227,34 @@ export async function POST(req: NextRequest) {
   try {
     const issued = await createInterviewInvitation(req, recipientHash);
     if (issued.status !== 200) {
-      finish(id, 'not-dispatched');
-      return response({ error: 'interview_not_ready', mode }, 409);
+      // Decision 2: `error` is byte-identical for existing callers; the precise
+      // allowlisted cause rides `reason` and the dispatch log metadata.
+      const reason = await invitationFailureReason(issued);
+      finish(id, 'not-dispatched', reason);
+      return response({ error: 'interview_not_ready', ...(reason ? { reason } : {}), mode }, 409);
     }
     const invitation = await issued.json();
     const privateUrl = new URL(invitation.url);
     if (invitation.companyId !== context.companyId || invitation.tenantId !== context.tenantId ||
         invitation.installationId !== context.installationId || privateUrl.hostname !== context.host ||
-        privateUrl.pathname !== '/interview' || !privateUrl.hash.startsWith('#enroll=')) {
+        privateUrl.pathname !== '/interview' || !privateUrl.searchParams.get('enroll') || privateUrl.hash) {
       finish(id, 'not-dispatched');
       return response({ error: 'invitation_identity_unverified' }, 409);
     }
     const bookmark = `${privateUrl.origin}/interview`;
+    // Truthful validity copy (ISR-001): the enrollment link is re-openable
+    // until the interview itself is complete — never single-use, never a 24h
+    // clock. The legacy `expiresAt` wire field stays in the receipt for
+    // fleet-validator compatibility but is NOT this link's lifetime and is
+    // never quoted to the owner.
     const message = (mode === 'resume'
       ? 'Welcome back — your saved answers are still there. Continue your interview here: '
       : 'Your AI Workforce Interview is ready. Start here: ') + invitation.url +
-      '\n\nThis private sign-in link can be used once within 24 hours. Keep it private. ' +
+      '\n\nThis private sign-in link stays valid until your interview is complete, ' +
+      'and you can open it again whenever you like, on any device. Keep it private. ' +
       'After signing in, bookmark ' + bookmark +
-      '. The bookmark works while you are signed in; if asked to sign in again, request a fresh private link. ' +
+      '. The bookmark works while you are signed in; if asked to sign in again, re-open this same link — ' +
+      'no fresh link needed unless your interview is already complete. ' +
       'Each answer is saved when you press Continue or Send.';
     // Issuance awaits signature/readiness work; recheck a shell attempt that
     // became visible during that interval before touching the gateway.

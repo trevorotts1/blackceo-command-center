@@ -18,7 +18,7 @@
  *   4. Above the advisory threshold (NOTIFICATION_FAILURES_LOG_WARN_LINES) →
  *      pass:false — but this is an ADVISORY signal, never gating (verified by
  *      route.ts's isolation posture, mirrored by every sibling advisory
- *      check in this file — anthology/skill6 board projection, sweep_liveness).
+ *      check in this file — anthology/skill6 board projection, board_jobs_watchdog).
  *   5. checkNotificationFailuresLog() never throws even on a read error
  *      (degrades to indeterminate, pass:true — never a false red).
  *

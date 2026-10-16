@@ -14,7 +14,7 @@
  * — this file does NOT duplicate that coverage, it cites it:
  *   (b)            tests/unit/task-status-transition.test.ts:239
  *                  "status=done (valid auth, Skill-6-marked card) → 403 and no mutation"
- *   (c) PASS half  tests/unit/maria-pattern-harness.test.ts:390-425
+ *   (c) PASS half  tests/unit/stuck-card-pattern-harness.test.ts:390-425
  *                  "S4b stuck-not-Done (b): the ONLY legal promote path (QC PASS)
  *                  advances review -> done, audited"
  *
@@ -31,7 +31,7 @@
  * the already-proven 403 and QC-PASS-promote steps as a THIN chain on the SAME
  * fixture card, alongside the newly-proven FAIL step, so one test demonstrates
  * the full "only path to done" contract the spec's C-08 "what" describes —
- * without rewriting task-status-transition.test.ts or maria-pattern-harness
+ * without rewriting task-status-transition.test.ts or stuck-card-pattern-harness
  * .test.ts's own dedicated matrices.
  *
  * Soft dep (spec line 1159 / Section B / U26 / B-U12): this file makes NO
@@ -154,7 +154,7 @@ function latestDoneAudit(id: string) {
 
 /** Force a deterministic runQCOnReview verdict via the sanctioned test seam
  * (src/lib/fixture-guard.ts hard-fails this in NODE_ENV=production; we are
- * not in production — asserted by the maria-pattern-harness suite this
+ * not in production — asserted by the stuck-card-pattern-harness suite this
  * pattern is copied from). Always cleans up the env var + temp file. */
 async function runQcWithFixture(
   taskId: string,
@@ -271,7 +271,7 @@ test('[U39-c-08 FAIL] a second consecutive FAIL on a fresh lineage increments ag
 // steps on the SAME fixture id, chained with the newly-proven FAIL step, so
 // one test demonstrates the full "only path to done" contract C-08's "what"
 // describes. Does not duplicate the dedicated matrices in
-// task-status-transition.test.ts or maria-pattern-harness.test.ts — see the
+// task-status-transition.test.ts or stuck-card-pattern-harness.test.ts — see the
 // file header for exact citations.
 // ─────────────────────────────────────────────────────────────────────────
 
@@ -313,7 +313,7 @@ test('[U39-c-08 CHAIN] one fixture card: consumer 403 on done (auth present) -> 
   ]);
   assert.equal(currentStatus(id), 'review');
 
-  // ── Step 4 (cites maria-pattern-harness.test.ts:390-425) — QC PASS is the
+  // ── Step 4 (cites stuck-card-pattern-harness.test.ts:390-425) — QC PASS is the
   // ONLY legal promote path: review -> done, audited.
   const passResult = await runQcWithFixture(id, {
     score: 9.0,

@@ -2,7 +2,7 @@
 #
 # setup-access-app.sh
 #
-# One-shot Cloudflare Access App provisioner for a BlackCEO v4.0 client
+# One-shot Cloudflare Access App provisioner for a BlackCEO client
 # subdomain. Implements PRD Section 7.2 (P1-10).
 #
 # Given a subdomain and one or more operator emails, this script will:
@@ -12,13 +12,22 @@
 #      created by this script -- only PIN's presence is guaranteed; Google is
 #      attached when it already exists.
 #   2. Create (or update) a self-hosted Access Application for the subdomain
-#      (336h / 14-day session) whose allowed_idps lists One-Time PIN plus
-#      Google when available -- attaching Google to an already-existing app
-#      the first time it becomes available at the account level.
+#      (720h / 30-day session) whose allowed_idps lists One-Time PIN plus
+#      Google when available -- and adding whichever of One-Time PIN / Google
+#      an already-existing app is missing (GET-merge PUT, Step 2b), so every
+#      client can sign in with an emailed code even if Google refuses them.
 #   3. Attach an "Allow" policy for the supplied emails. The policy no longer
 #      hardcodes a login-method requirement -- which of the app's allowed_idps
 #      a user authenticates through is enforced at the app level (step 2), not
 #      re-restricted here to One-Time PIN only.
+#   4. (Optional, interview hardening 2026-10-13) When ACCESS_SERVICE_TOKEN_ID is
+#      set to an EXISTING client-specific Access service-token id, reconcile a
+#      narrowly scoped non_identity policy named "<subdomain> Command Center
+#      automation" on that app, so the box's own bearer-only automation
+#      (/api/auth/interview-ready, /api/auth/interview-invitation) reaches the
+#      Command Center instead of being redirected to the Access login page.
+#      This step never creates, rotates or prints a credential: it only attaches
+#      the caller-supplied token id. Unset means "skip", exactly as before.
 #
 # The script is idempotent: re-running it against the same subdomain will
 # detect the existing IdP / App / allowed_idps and report rather than create
@@ -225,7 +234,7 @@ if [ -z "$APP_ID" ]; then
   "name": "${SUBDOMAIN} Command Center",
   "domain": "${SUBDOMAIN}",
   "type": "self_hosted",
-  "session_duration": "336h",
+  "session_duration": "720h",
   "allowed_idps": ${ALLOWED_IDPS_JSON}
 }
 EOF
@@ -245,54 +254,52 @@ APP_DETAIL=$(cf_call GET "/apps/${APP_ID}")
 APP_AUD=$(echo "$APP_DETAIL" | json_extract aud)
 
 # ---------------------------------------------------------------------------
-# Step 2b (P1-08): attach Google to an EXISTING app if it just became
-# available and isn't wired yet. GET-check-then-create-only-missing, applied
-# to the app's allowed_idps rather than to the app record itself: never
-# touches an app that already lists every currently-known IdP.
+# Step 2b: make sure an EXISTING app offers every available login method.
 #
-# KNOWN RESIDUE (documented per spec Section 2.7, not GET-merged here): a
-# Cloudflare PUT /apps/{id} REPLACES the app record with exactly the fields
-# in the body. This script sends only name/domain/type/session_duration/
-# allowed_idps, so if an app had any hand-set options in the Cloudflare
-# dashboard (app_launcher_visible, custom deny/block-page messages, CORS
-# headers, custom_non_identity_deny_url, etc.) BEFORE this PUT ran, those
-# options are reset to Cloudflare defaults by this call -- the script owns
-# and re-asserts only the 5 fields listed above on every app it touches.
-# Remediation if a box needs a hand-set option preserved: re-apply that
-# option in the dashboard AFTER this script runs (it is idempotent and will
-# not touch the app again once allowed_idps already matches), or extend this
-# PUT to GET-merge the full app record (`cf_call GET "/apps/${APP_ID}"`,
-# override only `allowed_idps` on the returned object, PUT the merged
-# object back) if per-app hand-set options become common enough to need
-# in-script preservation.
+# An app created by hand (or by an older script) can list only Google in
+# allowed_idps. Google sign-in fails for personal @gmail.com users while the
+# Google OAuth client is internal-only (Error 403: org_internal), so a client
+# with no email-code option is locked out. This step adds whatever of
+# One-Time PIN / Google the app is missing. It never removes an IdP the app
+# already lists, and never touches an app whose allowed_idps is empty (empty
+# means Cloudflare already offers every account IdP, including email code).
+#
+# Cloudflare's PUT /apps/{id} REPLACES the whole record, so the body is the
+# app's own GET result with only allowed_idps changed (GET-merge): hand-set
+# dashboard options (launcher visibility, deny pages, CORS, ...) survive.
+# Cloudflare also rejects auto_redirect_to_identity=true when more than one
+# IdP is allowed (API error 12130), so that flag is turned off in the same
+# PUT when the merged list has more than one entry.
 # ---------------------------------------------------------------------------
 
-if [ -n "$GOOGLE_IDP_ID" ]; then
-  APP_HAS_GOOGLE=$(echo "$APP_DETAIL" | GOOGLE_IDP_ID="$GOOGLE_IDP_ID" python3 -c "
+MERGE_RESULT=$(echo "$APP_DETAIL" | WANTED_IDPS="$ALLOWED_IDPS_JSON" OTP_IDP_ID="$OTP_IDP_ID" python3 -c "
 import json, os, sys
-target = os.environ.get('GOOGLE_IDP_ID', '')
+wanted = json.loads(os.environ['WANTED_IDPS'])
+otp = os.environ['OTP_IDP_ID']
 data = json.load(sys.stdin)
-result = data.get('result', data) if isinstance(data, dict) else data
-ids = (result.get('allowed_idps') or []) if isinstance(result, dict) else []
-print('yes' if target in ids else 'no')
-" || echo "no")
+app = data.get('result', data) if isinstance(data, dict) else {}
+current = app.get('allowed_idps') or []
+missing = [i for i in wanted if i not in current]
+if not current or not missing:
+    print(json.dumps({'missing': []}))
+    sys.exit(0)
+body = {k: v for k, v in app.items() if k not in ('id', 'aud', 'uid', 'created_at', 'updated_at', 'policies')}
+body['allowed_idps'] = current + missing
+if len(body['allowed_idps']) > 1 and body.get('auto_redirect_to_identity'):
+    body['auto_redirect_to_identity'] = False
+names = ['One-Time PIN' if i == otp else 'Google' for i in missing]
+print(json.dumps({'missing': names, 'body': body}))
+")
 
-  if [ "$APP_HAS_GOOGLE" = "no" ]; then
-    echo "==> Attaching Google IdP to Access App ${APP_ID} (already existed, Google newly available)..." >&2
-    cf_call PUT "/apps/${APP_ID}" "$(cat <<EOF
-{
-  "name": "${SUBDOMAIN} Command Center",
-  "domain": "${SUBDOMAIN}",
-  "type": "self_hosted",
-  "session_duration": "336h",
-  "allowed_idps": ${ALLOWED_IDPS_JSON}
-}
-EOF
-)" >/dev/null
-    echo "    Google IdP attached to ${APP_ID} alongside One-Time PIN." >&2
-  else
-    echo "    Access App ${APP_ID} already has Google attached. Skipping update." >&2
-  fi
+MISSING_IDP_NAMES=$(echo "$MERGE_RESULT" | python3 -c "import json,sys; print(', '.join(json.load(sys.stdin)['missing']))")
+
+if [ -n "$MISSING_IDP_NAMES" ]; then
+  echo "==> Adding ${MISSING_IDP_NAMES} to existing Access App ${APP_ID} (GET-merge PUT; nothing else changes)..." >&2
+  MERGED_APP_BODY=$(echo "$MERGE_RESULT" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['body']))")
+  cf_call PUT "/apps/${APP_ID}" "$MERGED_APP_BODY" >/dev/null
+  echo "    ${MISSING_IDP_NAMES} added to ${APP_ID}." >&2
+else
+  echo "    Access App ${APP_ID} already offers every available login method. Skipping update." >&2
 fi
 
 # ---------------------------------------------------------------------------
@@ -395,6 +402,72 @@ EOF
 fi
 
 # ---------------------------------------------------------------------------
+# Step 3b (optional): machine / service-token policy for same-client automation
+# ---------------------------------------------------------------------------
+#
+# WHY THIS EXISTS. Full-host Cloudflare Access turns every unauthenticated
+# request into an edge redirect BEFORE the Command Center runs. A bearer-only
+# caller (MC_API_TOKEN) never gets past that redirect, so readiness checks and
+# invitation issuance fail at the EDGE rather than in the app -- the box can no
+# longer prove its own interview path or mint its own invitation. The repair is
+# one non_identity policy bound to the client's OWN existing service token: it
+# admits that single token and nothing else, and it composes with the human
+# "Allowed users" policy above (Access evaluates any matching policy as allow).
+#
+# INVARIANTS. Existing policies are never removed. The service token itself is
+# never created, rotated or echoed -- only its id travels in this script's
+# environment. No operator-account administrator credential is required here.
+if [ -n "${ACCESS_SERVICE_TOKEN_ID:-}" ]; then
+  MACHINE_POLICY_NAME="${SUBDOMAIN} Command Center automation"
+
+  echo "==> Reconciling machine (service-token) policy '${MACHINE_POLICY_NAME}'..." >&2
+
+  MACHINE_POLICY_JSON=$(echo "$POLICIES" | MACHINE_POLICY_NAME="$MACHINE_POLICY_NAME" python3 -c "
+import json, os, sys
+name = os.environ['MACHINE_POLICY_NAME']
+data = json.load(sys.stdin)
+for p in data.get('result', []) or []:
+    if p.get('name') == name:
+        print(json.dumps(p))
+        break
+" || true)
+
+  MACHINE_POLICY_BODY=$(ACCESS_SERVICE_TOKEN_ID="$ACCESS_SERVICE_TOKEN_ID" python3 -c "
+import json, os
+print(json.dumps({
+    'name': os.environ['MACHINE_POLICY_NAME'],
+    'decision': 'non_identity',
+    'include': [{'service_token': {'token_id': os.environ['ACCESS_SERVICE_TOKEN_ID']}}],
+}))
+")
+
+  if [ -n "$MACHINE_POLICY_JSON" ]; then
+    MACHINE_POLICY_ID=$(echo "$MACHINE_POLICY_JSON" | json_extract id)
+    MACHINE_POLICY_TOKEN=$(echo "$MACHINE_POLICY_JSON" | python3 -c "
+import json, sys
+p = json.load(sys.stdin)
+for entry in p.get('include') or []:
+    token = (entry or {}).get('service_token') or {}
+    if token.get('token_id'):
+        print(token['token_id'])
+        break
+")
+    if [ "$MACHINE_POLICY_TOKEN" = "$ACCESS_SERVICE_TOKEN_ID" ]; then
+      echo "    Machine policy already correct on App ${APP_ID} (id=${MACHINE_POLICY_ID}). Skipping." >&2
+    else
+      echo "    Machine policy exists with a different service token — updating in place (id=${MACHINE_POLICY_ID})." >&2
+      cf_call PUT "/apps/${APP_ID}/policies/${MACHINE_POLICY_ID}" "$MACHINE_POLICY_BODY" >/dev/null
+    fi
+  else
+    echo "    Creating machine policy (non_identity, one existing service token; every other policy preserved)." >&2
+    cf_call POST "/apps/${APP_ID}/policies" "$MACHINE_POLICY_BODY" >/dev/null
+  fi
+  echo "    Machine policy reconciled on App ${APP_ID}." >&2
+else
+  echo "==> ACCESS_SERVICE_TOKEN_ID unset — no machine (service-token) policy reconciled." >&2
+fi
+
+# ---------------------------------------------------------------------------
 # Done. Print the operator-facing summary on stdout.
 # ---------------------------------------------------------------------------
 
@@ -410,7 +483,7 @@ Cloudflare Access provisioned for ${SUBDOMAIN}
 
   Application UUID : ${APP_ID}
   Application AUD  : ${APP_AUD}
-  Session length   : 336h (14 days)
+  Session length   : 720h (30 days)
   Login methods    : ${LOGIN_METHODS_SUMMARY}
   Allowed emails   : ${EMAILS[*]}
 

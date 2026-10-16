@@ -1,0 +1,7 @@
+{
+  "search_metadata": { "id": "serpapi-fixture-1", "status": "Success" },
+  "organic_results": [
+    { "position": 1, "title": "Forging Tolerance Standards 2026", "link": "https://example.com/serpapi-forging-standards", "displayed_link": "example.com", "snippet": "Tolerance checks at each heat." },
+    { "position": 2, "title": "Heat Treat QA Handbook", "link": "https://example.com/serpapi-heat-treat-qa", "displayed_link": "example.com", "snippet": "Hardness sampling after quench." }
+  ]
+}

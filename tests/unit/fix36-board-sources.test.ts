@@ -135,6 +135,7 @@ test('normalizeBoardSource recognizes both engine sources + legacy set, fail-clo
   const { RECOGNIZED_BOARD_SOURCES, normalizeBoardSource } = await import('../../src/lib/board-sources');
   assert.equal(normalizeBoardSource('build_deck_phase'), 'build_deck_phase');
   assert.equal(normalizeBoardSource('presentation-interview-app'), 'presentation-interview-app');
+  assert.equal(normalizeBoardSource('podcast-engine'), 'podcast-engine');
   assert.equal(normalizeBoardSource('  Build_Deck_Phase '), 'build_deck_phase', 'trim + lowercase');
   for (const legacy of ['funnel', 'survey', 'web-development', 'anthology', 'build_deck', 'presentations']) {
     assert.equal(normalizeBoardSource(legacy), legacy, `legacy source ${legacy} still recognized`);
@@ -143,7 +144,7 @@ test('normalizeBoardSource recognizes both engine sources + legacy set, fail-clo
   assert.equal(normalizeBoardSource(''), null);
   assert.equal(normalizeBoardSource(null), null);
   assert.equal(normalizeBoardSource(42), null);
-  assert.equal(RECOGNIZED_BOARD_SOURCES.size, 8);
+  assert.equal(RECOGNIZED_BOARD_SOURCES.size, 9);
 });
 
 // ── QC.md FIX 36 proof, over the REAL ingest → status round trip ──────────────

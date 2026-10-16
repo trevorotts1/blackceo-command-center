@@ -164,7 +164,10 @@ def analyse(pm2_json: list, port_str: str, canon_dir: str,
     target set ONLY — otherwise a stopped demo instance or a demo instance
     running from another directory would fail an unrelated production deploy.
     """
-    apps = pm2_json or []
+    # FXCC-1 / D14: a pm2 module (pm2-logrotate, pm2-server-monit) is not an app.
+    # It runs in a daemon that inherited PORT from the shell that spawned it, so
+    # without this it "declared" the target port and counted as a second CC.
+    apps = [a for a in (pm2_json or []) if not (a.get('pm2_env') or {}).get('pmx_module')]
     candidates = [a for a in apps if is_cc_ish(a, target_name) or port_match(a, port_str)]
 
     cc, others = [], []
@@ -228,8 +231,11 @@ def main() -> None:
 
     try:
         raw = sys.stdin.read()
-        pm2_list = json.loads(raw) if raw.strip() else []
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'lib'))
+        import pm2_json  # the list, even behind a pm2 version banner
+        pm2_list = pm2_json.load(raw)
         result = analyse(pm2_list, args.port, args.canonical_dir, args.app_name)
+        result['pm2_version_mismatch'] = pm2_json.version_mismatch(raw)
         print(json.dumps(result))
     except Exception as e:
         print(json.dumps({

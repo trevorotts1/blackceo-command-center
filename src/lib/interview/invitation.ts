@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { randomUUID } from 'crypto';
-import { resolveTenantContext, signTenantGrant } from '@/lib/auth/tenant-context';
+import { resolveTenantContext, signTenantGrant, invitationPrerequisites, configuredPublicOrigin } from '@/lib/auth/tenant-context';
 import { GET as readiness } from '@/app/api/auth/interview-ready/route';
-import { INTERVIEW_INVITATION_TTL_SECONDS } from './session-policy';
+import { INTERVIEW_INVITATION_TTL_SECONDS, INTERVIEW_INVITATION_VALID_UNTIL, INTERVIEW_INVITATION_REDEEMABLE } from './session-policy';
 
 
-/** Operator-authorized issuance; one-use redemption stays in interview-session. */
+/** Operator-authorized issuance. Redemption, and the completion check that is
+ *  the only thing which ends a link, stay in interview-session. */
 export async function createInterviewInvitation(req: NextRequest, recipientHash: string) {
   const headers = { 'cache-control': 'private, no-store' };
   try {
@@ -22,7 +23,10 @@ export async function createInterviewInvitation(req: NextRequest, recipientHash:
 
     // A reverse proxy may give Next an internal HTTP URL. Use this installation's
     // configured public origin, never an unverified forwarded-host/proto header.
-    const configuredOrigin = process.env.MC_TENANT_PUBLIC_URL;
+    // Item (4): resolved through the shared CC_PUBLIC_URL-first resolver, so
+    // issuance can never disagree with the delivery fence or the implicit-self
+    // check about which host is "self". No MC_TENANT_PUBLIC_URL special case.
+    const configuredOrigin = configuredPublicOrigin()?.origin ?? '';
     if (!configuredOrigin && process.env.NODE_ENV === 'production') {
       return NextResponse.json({ error: 'public_origin_unconfigured' }, { status: 409, headers });
     }
@@ -36,6 +40,43 @@ export async function createInterviewInvitation(req: NextRequest, recipientHash:
       return NextResponse.json({ error: 'public_origin_mismatch' }, { status: 409, headers });
     }
 
+    // Registration gate (ISR-001), now the SAME predicate readiness reports as
+    // `capabilities.invitationIssuable` (items 07 + 13). It runs BEFORE the
+    // readiness call so the specific refusal keeps its name — readiness now
+    // also fails for the same condition, and both answers agree.
+    //
+    // This gate is a PROVISIONING PREREQUISITE, not a verification of whoever
+    // opens the link (item 11 — the earlier wording here overclaimed). The
+    // invitation URL is a short same-origin path that works WITHOUT a prior
+    // tenant cookie (the exchange route sets the HttpOnly session cookie).
+    // Redemption in `interview-session` authenticates a SIGNED ENROLLMENT GRANT
+    // produced by signTenantGrant below — a bearer capability, verified
+    // in-process — and `middleware` exempts that route before the generic
+    // outer-edge Access check, so no Access identity is re-proven inside the
+    // redemption route itself. The registered triple (issuer + audience +
+    // exact subjects, the same triple verifyAccessJwt enforces) exists so that
+    // grant is ANCHORED to this host's real Access login and so an owner login
+    // can be verified where one is offered. The full-host Cloudflare Access
+    // application (with this client's own service-token policy) supplies the
+    // additional owner login at the EDGE; the private signed ticket grants the
+    // app SESSION.
+    //
+    // `recipientHash` binds the ticket to the intended DELIVERY DESTINATION (a
+    // hash of the resolved owner chat). It is NOT independent proof that the
+    // human opening the link is that Telegram user — anyone holding the ticket
+    // text can redeem it until the interview completes, which is the forwarding
+    // exposure, and why delivery is an acknowledged gateway send to the resolved
+    // owner rather than a claim about the opener.
+    //
+    // Boxes without a registered identity get this safe-compatibility refusal,
+    // never a link that cannot be anchored. The parent provisions the real
+    // per-host issuer/audience/subjects; this gate only stages the contract
+    // (no secret changes).
+    const gate = invitationPrerequisites(context);
+    if (!gate.issuable) {
+      const error = gate.reasons.includes('access_identity_unregistered') ? 'access_identity_unregistered' : 'interview_not_ready';
+      return NextResponse.json({ error }, { status: 409, headers });
+    }
     const ready = await readiness(req);
     const receipt = await ready.json();
     if (ready.status !== 200 || receipt.ready !== true || receipt.interviewComplete !== false) {
@@ -59,8 +100,17 @@ export async function createInterviewInvitation(req: NextRequest, recipientHash:
       installationId: context.installationId,
       host: context.host,
       expiresAt,
+      validUntil: INTERVIEW_INVITATION_VALID_UNTIL,
+      redeemable: INTERVIEW_INVITATION_REDEEMABLE,
+      // LEGACY WIRE CONSTANT, not a description of behaviour. Onboarding
+      // validators already deployed across the fleet refuse any receipt whose
+      // `oneUse` is not exactly true, so dropping it would stop those boxes
+      // delivering links at all. Redemption is no longer single-use: the link
+      // is re-openable until the interview is complete, and `redeemable` above
+      // is the field that says so truthfully. Remove this only once no fleet
+      // box runs a validator that requires it.
       oneUse: true,
-      url: `${publicUrl.origin}/interview#enroll=${encodeURIComponent(ticket)}`,
+      url: `${publicUrl.origin}/interview?enroll=${encodeURIComponent(ticket)}`,
     }, { headers });
   } catch {
     return NextResponse.json({ error: 'invitation_unavailable' }, { status: 403, headers });

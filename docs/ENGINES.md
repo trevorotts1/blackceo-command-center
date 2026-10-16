@@ -1,4 +1,6 @@
-# Engine ownership during onboarding (v7.1.3)
+# Engine ownership during onboarding
+
+*(Introduced in v7.1.3. This is normative guidance for every future engine, not a claim scoped to that release — see "Status: normative" below.)*
 
 Engine capability does not imply shared client data. Podcast, Anthology and
 Presentations department rows belong to the explicitly bound client. Convergence

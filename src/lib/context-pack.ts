@@ -60,10 +60,17 @@ import os from 'os';
 import { queryAll, queryOne } from '@/lib/db';
 import { detectPlatform, vaultRoot, zhcLibraryBaseDirs } from '@/lib/platform';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
+import { createHash } from 'crypto';
 import {
-  getEmbeddingApiKey,
-  fetchEmbeddings,
+  isEmbeddingAvailable,
+  localEmbedText,
+  resolveEmbeddingProvider,
+  fetchEmbeddingsFor,
+  withEmbeddingFallback,
+  type EmbeddingProvider,
   cosineSimilarity,
+  type EmbeddingResult,
+  type EmbeddingVector,
 } from '@/lib/sop-embeddings';
 import type { SOP } from '@/lib/sops';
 import type { Agent, Task } from '@/lib/types';
@@ -666,14 +673,104 @@ export function renderMatchedSkillsSection(skills: MatchedSkill[]): string {
 // dispatch hot path is never blocked.
 
 /** Confidence floor for a semantic skill match. Env: SKILL_MATCH_FLOOR (0–1). */
-const SKILL_MATCH_FLOOR: number = (() => {
+const SKILL_MATCH_FLOOR_ENV: number | null = (() => {
   const env = process.env.SKILL_MATCH_FLOOR;
   if (env) {
     const parsed = parseFloat(env);
     if (!isNaN(parsed) && parsed >= 0 && parsed <= 1) return parsed;
   }
-  return 0.55;
+  return null;
 })();
+
+/**
+ * Default skill floor: 0.55, except a local embeddinggemma model (prefixed),
+ * whose cosines sit higher. Measured 2026-10-07 on the
+ * departments-use-skills-layer-a fixture (7 skills x 6 tasks): relevant pairs
+ * 0.770-0.883, unrelated pairs 0.538-0.716, so 0.55 lets 30 of 34 unrelated
+ * skills through; 0.74 separates them.
+ * ponytail: 42 pairs, not a labeled calibration set; re-measure when one exists.
+ */
+export function skillMatchFloor(p: EmbeddingProvider = resolveEmbeddingProvider()): number {
+  if (SKILL_MATCH_FLOOR_ENV !== null) return SKILL_MATCH_FLOOR_ENV;
+  return p.name === 'ollama' && p.model.toLowerCase().includes('embeddinggemma') ? 0.74 : 0.55;
+}
+
+/**
+ * Process-lifetime embedding cache for the skill matcher.
+ *
+ * WHY (live dispatch stall 2026-09): every dispatch embedded the task text PLUS
+ * `name. description` for EVERY installed SKILL.md. fetchEmbeddings' Google path
+ * is a sequential loop with a 250 ms sleep per text and no cache, so ~80 skills
+ * cost ~40 s of pure API latency per dispatch — past the 90 s scheduler job lease,
+ * which surfaced as a `scheduler_lease_lost` storm. The skill corpus is static
+ * between installs, so the same ~80 strings were re-embedded on every single
+ * dispatch. Cache them by sha256(text): the first dispatch pays, the rest embed
+ * only the task text.
+ *
+ * Deliberately in-process and unbounded in time (no TTL): a SKILL.md edit is
+ * picked up on the next restart, and the CC restarts on every deploy. Capacity is
+ * capped at EMBEDDING_CACHE_MAX with oldest-first eviction.
+ * ponytail: insertion-order eviction, not LRU — swap in an LRU only if the
+ * corpus ever exceeds the cap in normal operation.
+ */
+const EMBEDDING_CACHE_MAX = 2_000;
+const embeddingCache = new Map<string, EmbeddingVector>();
+
+/** Keyed on provider + model + text: a Gemini vector is never reused for a local one (or the reverse). */
+function embeddingCacheKey(text: string, p: EmbeddingProvider = resolveEmbeddingProvider()): string {
+  return createHash('sha256').update(`${p.name}\u0000${p.model}\u0000${text}`).digest('hex');
+}
+
+/**
+ * Embed `texts`, reusing cached vectors and calling `fetcher` ONLY for the texts
+ * that are not cached yet (deduped within the call). Returns vectors in the same
+ * order as `texts`, or null when the fetcher returns a short/unusable batch —
+ * the caller then falls back to keyword scoring exactly as before.
+ *
+ * `fetcher` is injectable for tests; production always uses fetchEmbeddings.
+ */
+export async function embedTextsCached(
+  texts: string[],
+  fetcher: (t: string[]) => Promise<EmbeddingResult[]> = (t) => fetchEmbeddingsFor(provider, t),
+  provider: EmbeddingProvider = resolveEmbeddingProvider(),
+): Promise<EmbeddingVector[] | null> {
+  const keys = texts.map((t) => embeddingCacheKey(t, provider));
+  const missKeys: string[] = [];
+  const missTexts: string[] = [];
+  const seen = new Set<string>();
+  keys.forEach((key, i) => {
+    if (embeddingCache.has(key) || seen.has(key)) return;
+    seen.add(key);
+    missKeys.push(key);
+    missTexts.push(texts[i]);
+  });
+
+  if (missTexts.length > 0) {
+    const fetched = await fetcher(missTexts);
+    if (!fetched || fetched.length !== missTexts.length) return null;
+    for (let i = 0; i < missKeys.length; i++) {
+      embeddingCache.set(missKeys[i], fetched[i].embedding);
+    }
+    while (embeddingCache.size > EMBEDDING_CACHE_MAX) {
+      const oldest = embeddingCache.keys().next().value;
+      if (oldest === undefined) break;
+      embeddingCache.delete(oldest);
+    }
+  }
+
+  const out: EmbeddingVector[] = [];
+  for (const key of keys) {
+    const vec = embeddingCache.get(key);
+    if (!vec) return null; // Evicted mid-assembly (corpus > cap) — keyword fallback.
+    out.push(vec);
+  }
+  return out;
+}
+
+/** Test-only: drop every cached vector. */
+export function clearEmbeddingCache(): void {
+  embeddingCache.clear();
+}
 
 /** Global-scope tokens in the skill-department-map (skill available to all depts). */
 const SKILL_GLOBAL_TOKENS = new Set(['*', 'all', 'global', 'any', 'core', 'shared']);
@@ -1030,7 +1127,7 @@ function applySkillBindings(
  * Scoring reuses the department-router's embedding + cosine machinery:
  *   • when an embedding key is configured (the CLIENT'S OWN key), each skill's
  *     `name. description` is embedded alongside the task text and ranked by
- *     cosine similarity, keeping only matches at/above SKILL_MATCH_FLOOR (~0.55);
+ *     cosine similarity, keeping only matches at/above skillMatchFloor() (0.55; 0.74 on local embeddinggemma);
  *   • otherwise (or if the API errors, or nothing clears the floor) it falls
  *     back to keyword-overlap scoring so the feature works with zero config.
  *
@@ -1078,18 +1175,31 @@ export async function matchSkillsForTask(
     const taskText = [task.title, task.description].filter(Boolean).join(' — ').trim();
     if (!taskText) return [];
 
-    // ── Semantic path (client's own embedding key) ──────────────────────────
-    if (getEmbeddingApiKey()) {
+    // ── Semantic path (client's own embedding key, or local Ollama opt-in) ──
+    // isEmbeddingAvailable() === getEmbeddingApiKey() truthiness for keyed
+    // providers; it adds only SOP_EMBEDDING_PROVIDER=ollama (keyless, local).
+    if (isEmbeddingAvailable()) {
       try {
-        const texts = [taskText, ...candidates.map((c) => `${c.name}. ${c.description}`.trim())].map(
-          (t) => (t.length > 8_000 ? t.slice(0, 8_000) : t),
-        );
-        const emb = await fetchEmbeddings(texts);
-        if (emb && emb.length === texts.length) {
-          const taskVec = emb[0].embedding;
+        // Local Ollama down -> the box's own Gemini key: both sides are re-embedded with it,
+        // under that provider's own cache keys and floor, then keyword if that fails too.
+        const done = await withEmbeddingFallback(async (p) => {
+          const texts = [
+            localEmbedText(taskText, 'query', p),
+            ...candidates.map((c) => localEmbedText(`${c.name}. ${c.description}`.trim(), 'document', p)),
+          ].map((t) => (t.length > 8_000 ? t.slice(0, 8_000) : t));
+          // Cached: the ~80 static skill texts are embedded once per process, so a
+          // dispatch pays for the task text only (see embedTextsCached).
+          const vecs = await embedTextsCached(texts, undefined, p);
+          if (!vecs || vecs.length !== texts.length) throw new Error('skill embeddings unavailable');
+          return vecs;
+        });
+        const emb = done?.value;
+        if (done && emb) {
+          const taskVec = emb[0];
+          const floor = skillMatchFloor(done.provider);
           const scored = candidates
-            .map((c, i) => ({ c, score: cosineSimilarity(taskVec, emb[i + 1].embedding) }))
-            .filter((s) => s.score >= SKILL_MATCH_FLOOR)
+            .map((c, i) => ({ c, score: cosineSimilarity(taskVec, emb[i + 1]) }))
+            .filter((s) => s.score >= floor)
             .sort((a, b) => b.score - a.score)
             .slice(0, limit);
           if (scored.length > 0) return scored.map((s) => toMatchedSkill(s.c, s.score, 'semantic'));

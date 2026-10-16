@@ -1,5 +1,6 @@
 'use server';
-import { verifiedBuild } from '@/lib/interview/build-verification';
+import { priorCompletion } from '@/lib/interview/prior-completion';
+import { verifiedBuild, standardPlaceholderActive } from '@/lib/interview/build-verification';
 import { resolveTenantContext, TenantAccessError } from '@/lib/auth/tenant-context';
 import { getClient } from '@/lib/clients';
 
@@ -51,14 +52,20 @@ import { INTERVIEW_COOKIE_NAME, INTERVIEW_BYPASS_COOKIE_NAME, LATCH_COOKIE_NAME,
  * only early company view (middleware exemption), and the full dashboard stays
  * locked until interviewComplete. The read below makes this awareness explicit
  * and pinned by tests: `standardReady` is evaluated and deliberately never
- * admitted. A future "prebuild unlocks the dashboard" change must be a
- * deliberate doctrine edit here, not an accidental side effect.
+ * admitted.
+ *
+ * DELIBERATE DOCTRINE EDIT (STD001, Trevor 2026-10-08): the owner-ordered
+ * STANDARD PLACEHOLDER (companyMode "standard-placeholder" with
+ * standardPlaceholder.status "active", written by onboarding after 14+ days
+ * of an incomplete interview) DOES admit the dashboard. A bare standardReady
+ * still does not. The placeholder is never interview completion.
  */
 function deriveInterviewComplete(): boolean {
   const bs = readBuildState();
   if (!bs) return false;
   if (verifiedBuild(bs)) return true;
   if (bs.interviewComplete === true) return true;
+  if (standardPlaceholderActive(bs)) return true;
   // STANDARD_READY (standardPrebuild done, interview incomplete) — this third
   // state is aware-but-not-complete: the shell lock holds, only /preview is
   // reachable early. Read explicitly (and pinned by tests) so the prebuilt
@@ -87,7 +94,7 @@ export async function refreshInterviewGate(): Promise<void> {
     } catch { /* An absent cookie also preserves the middleware's locked state. */ }
     return;
   }
-  const complete=context.kind==='self' ? deriveInterviewComplete() : getClient(context.clientId!)?.interview_complete===true;
+  const complete=priorCompletion(context) !== null || (context.kind==='self' ? deriveInterviewComplete() : getClient(context.clientId!)?.interview_complete===true);
   const scope=`${context.tenantId}:${context.installationId}:${context.host}`;
   const { value, maxAge } = await signInterviewToken(complete,scope);
   try {

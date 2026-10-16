@@ -23,6 +23,7 @@ import { refreshModels } from './refresh-models';
 import { ALL_PROVIDERS } from '@/lib/model-providers';
 import { resolveProviderApiKey } from '@/lib/provider-key-detection'; // MODEL-08 (usage-refresh key resolution)
 import { runExecutionCompletionReconcile } from './execution-watcher';
+import { refreshProviderBalances } from '@/lib/capacity/resource-ledger';
 import { runCeoDelegationSweep } from './ceo-delegation-sweep';
 import { detectPatternsAndPropose } from '@/lib/sop-learning';
 import {
@@ -30,6 +31,12 @@ import {
   WEEKLY_DONE_CLEAR_CRON_EXPR,
   WEEKLY_DONE_CLEAR_CRON_TIMEZONE,
 } from './weekly-done-clear';
+import {
+  runDbRetention,
+  formatDbRetentionSummary,
+  DB_RETENTION_CRON_EXPR,
+  DB_RETENTION_CRON_TIMEZONE,
+} from './db-retention';
 import {
   runLssControlReview,
   LSS_CONTROL_REVIEW_CRON_EXPR,
@@ -46,7 +53,7 @@ import { runIntakeAdvanceSweep } from './intake-advance-sweep';
 import { runPortIntegrityCheck } from './port-integrity';
 import { runTrustEngineSweep } from './trust-engine';
 import { runBoardHygiene, BOARD_HYGIENE_CRON } from './board-hygiene';
-import { runSweepLivenessSweep } from './sweep-liveness';
+import { runBoardJobsWatchdog, type BoardJobsWatchdogRunResult } from './board-jobs-watchdog';
 import { runPersonaGroundingHealthSweep } from './persona-grounding-sweep';
 import { runSocialPublishDispatcherSweep } from './social-publish-dispatcher';
 import { runSocialVerificationSweep } from './social-publish-verification';
@@ -64,6 +71,15 @@ import {
   OPERATOR_COLUMN_AGE_DIGEST_CRON_EXPR,
   OPERATOR_COLUMN_AGE_DIGEST_CRON_TIMEZONE,
 } from './operator-column-age-digest';
+import {
+  runHqRetention,
+  formatHqRetentionSummary,
+  HQ_RETENTION_CRON_EXPR,
+} from './hq-retention';
+import {
+  runHqChatReconcile,
+  HQ_CHAT_RECONCILE_CRON,
+} from './hq-chat-reconcile';
 import { runEnvAudit } from '@/lib/env-auditor';
 import {
   resolveStaleTaskSweepKillFlag,
@@ -73,6 +89,11 @@ import {
 import { scoreTaskForQC } from '@/lib/qc-scorer';
 import { queryAll, run } from '@/lib/db';
 import type { QCScorerInput } from '@/lib/qc-scorer';
+
+/** Last observed set of deliberately switched-off board jobs, as a sorted
+ *  signature. `null` means "not yet observed in this process", so the first
+ *  tick always logs. See the board-jobs-watchdog registration below. */
+let lastBoardJobsDisabledSignature: string | null = null;
 
 export interface RegisteredJob {
   name: string;
@@ -110,7 +131,7 @@ function markRegistered(): void {
  * scheduler loop itself is alive, not proof the job's own logic succeeded;
  * failures are already logged separately below). Best-effort: a write failure
  * here must never affect the job's own outcome, so it is caught and logged,
- * never rethrown. src/lib/jobs/sweep-liveness.ts reads this table to detect an
+ * never rethrown. src/lib/jobs/board-jobs-watchdog.ts reads this table to detect an
  * advancer (intake-advance) or qc-review-sweep gone silent.
  */
 export function recordJobTick(name: string, ranAt: string, status: 'ok' | 'error' | 'disabled', errorMessage?: string, result?: unknown): void {
@@ -139,14 +160,24 @@ export function recordJobTick(name: string, ranAt: string, status: 'ok' | 'error
  *
  * MR-31: `wrap()` previously recorded `'ok'` for EVERY resolution that did
  * not throw — including a sweep that returned instantly because its kill flag
- * was set (skippedReason).  The sweep-liveness watchdog then saw a "healthy"
+ * was set (skippedReason).  The board jobs watchdog then saw a "healthy"
  * tick for a job doing zero work — a blind "watch the watchers" layer.  Now
  * `wrap()` inspects the return value for a `skippedReason` string and records
  * `'disabled'` instead, so the watchdog can distinguish "ticking and working"
  * from "ticking but disabled" at a glance without polling every kill flag
  * itself.
+ *
+ * `timeoutMs` (optional) is the job's LEASE budget. Omitted → runLeasedJob's
+ * 90s default, which is right for every sweep that only touches the DB. A job
+ * that drives a long external process (the persona selector's --blend path runs
+ * up to PERSONA_SELECT_TIMEOUT_MS per task) must declare its own, or the lease
+ * expires mid-run and every late write throws `scheduler_lease_lost`.
  */
-function wrap(name: string, fn: () => Promise<unknown> | unknown): () => Promise<void> {
+function wrap(
+  name: string,
+  fn: () => Promise<unknown> | unknown,
+  timeoutMs?: number,
+): () => Promise<void> {
   return async () => {
     const startedAt = new Date().toISOString();
     try {
@@ -155,7 +186,7 @@ function wrap(name: string, fn: () => Promise<unknown> | unknown): () => Promise
         run(`INSERT INTO job_liveness(job_name,last_ran_at,last_status,last_started_at) VALUES(?,?,'ok',?)
           ON CONFLICT(job_name) DO UPDATE SET last_started_at=excluded.last_started_at`,[name,startedAt,startedAt]);
         return fn();
-      });
+      }, timeoutMs);
       if (lease.skipped) return;
       const result = lease.result;
       console.log(`[cron] ${name} finished`);
@@ -389,7 +420,10 @@ async function runSopLearning(): Promise<void> {
 // hand its result — including a skippedReason — back up to wrap(), which reads
 // it to record 'disabled' vs 'ok' in job_liveness. wrap() already accepts
 // () => Promise<unknown> | unknown, so this just aligns the declared type.
-const JOBS: Array<{ name: string; expr: string; fn: () => Promise<unknown> | unknown; timezone?: string }> = [
+// `timeoutMs` (optional) overrides runLeasedJob's 90s default lease for a job
+// whose body can legitimately run longer (see wrap()). Leave it off everywhere
+// else — a long lease on a fast job only delays recovery after a crash.
+const JOBS: Array<{ name: string; expr: string; fn: () => Promise<unknown> | unknown; timezone?: string; timeoutMs?: number }> = [
   // model-refresh: Sundays 03:00 server local. DESTRUCTIVE — it can deprecate
   // catalog rows. Kill switch: DISABLE_MODEL_REFRESH_CRON=1 (see runModelRefresh).
   { name: 'model-refresh', expr: '0 3 * * 0', fn: runModelRefresh },
@@ -466,6 +500,29 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<unknown> | unk
   },
   { name: 'dispatch-intents', expr: '*/2 * * * *', fn: runDispatchIntentSweep },
   { name: 'execution-reconcile', expr: '*/2 * * * *', fn: runExecutionCompletionReconcile },
+  // provider-ledger: every 5 minutes — refresh each provider's remaining
+  // balance from that vendor's OWN documented endpoint (resource-ledger.ts
+  // carries a doc URL per provider). A provider that publishes no balance is
+  // never probed and stays null; a probe that fails records why. Only stale
+  // rows are re-probed, so a steady box makes at most one call per provider
+  // per window. Disable with DISABLE_PROVIDER_LEDGER_CRON=1.
+  {
+    name: 'provider-ledger',
+    expr: '*/5 * * * *',
+    fn: async () => {
+      if (process.env.DISABLE_PROVIDER_LEDGER_CRON === '1' || process.env.DISABLE_PROVIDER_LEDGER_CRON === 'true') {
+        return { skippedReason: 'DISABLE_PROVIDER_LEDGER_CRON set' };
+      }
+      const result = await refreshProviderBalances();
+      if (result.probed > 0) {
+        console.log(
+          `[cron] provider-ledger: probed ${result.probed}, ${result.withBalance} returned a balance, ` +
+            `${result.errors} error(s), ${result.skipped} still fresh`,
+        );
+      }
+      return result;
+    },
+  },
   // social-publish-dispatcher: every 2 minutes — F03 (social/wf05-durable-exec).
   // THE consumer for the Skill 35 publish queue: claims queued rows under
   // atomic leases, creates the canonical company-bound task, dispatches it
@@ -515,9 +572,15 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<unknown> | unk
   // not received a qc_review event in the last 10 minutes. Catches tasks that
   // arrived in review before the scorer was wired to the completion paths.
   // Disable with DISABLE_QC_REVIEW_SWEEP=1.
+  // LEASE: 10 min, not the 90s default. One tick judges SEVERAL review cards
+  // and each judgement is a model call, so under load the sweep ran past 90s
+  // and runLeasedJob killed it (`[cron] qc-review-sweep failed: Error:
+  // scheduler_job_timeout`); every write after the kill threw
+  // `scheduler_lease_lost` and the cards it was judging stayed in review.
   {
     name: 'qc-review-sweep',
     expr: '*/2 * * * *',
+    timeoutMs: 600_000,
     fn: async () => {
       const result = await runQCReviewSweep();
       if (result.skippedReason) {
@@ -564,30 +627,28 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<unknown> | unk
     },
   },
 
-  // sweep-liveness: every 2 minutes — C-09 / U40 "watch the watchers". Reads
-  // the job_liveness ticks wrap() persists for every job and, when the
-  // intake-advance or qc-review-sweep advancer has gone silent for 3x its own
+  // board-jobs-watchdog: every 2 minutes — C-09 / U40 "watch the watchers".
+  // Reads the job_liveness ticks wrap() persists for every job and, when one of
+  // the board-maintenance background jobs has gone silent for 3x its own
   // cadence, fires ONE cooldown-guarded notifySystem() alert (SYSTEM audience
   // only). The same underlying computation is exposed read-only, non-gating,
-  // via /api/health/deep's advisory.sweep_liveness (checkSweepLiveness in
-  // sweep-liveness.ts) so the board stays green overall while this chip goes
-  // red — same posture as the anthology board-projection drift banner (A7).
-  // Disable with DISABLE_SWEEP_LIVENESS=1.
+  // via /api/health/deep's advisory.board_jobs_watchdog (checkBoardJobsWatchdog
+  // in board-jobs-watchdog.ts) so the board stays green overall while this chip
+  // goes red — same posture as the anthology board-projection drift banner (A7).
+  // Disable with DISABLE_BOARD_JOBS_WATCHDOG=1.
   {
-    name: 'sweep-liveness',
+    name: 'board-jobs-watchdog',
     expr: '*/2 * * * *',
     fn: async () => {
-      const result = await runSweepLivenessSweep();
+      const result = await runBoardJobsWatchdog();
       if (result.skippedReason) {
-        console.log(`[cron] sweep-liveness: skipped — ${result.skippedReason}`);
-      } else if (result.staleJobs.length > 0 || result.disabledJobs.length > 0) {
-        const parts: string[] = [];
-        if (result.staleJobs.length > 0) parts.push(`STALE — ${result.staleJobs.join(', ')}`);
-        if (result.disabledJobs.length > 0) parts.push(`DISABLED — ${result.disabledJobs.join(', ')}`);
-        console.warn(
-          `[cron] sweep-liveness: ${parts.join(' | ')}${result.alerted ? ' (alerted)' : ' (cooldown, already alerted)'}`,
-        );
+        console.log(`[cron] board-jobs-watchdog: skipped — ${result.skippedReason}`);
+        return;
       }
+      const offSignature = result.disabledJobs.slice().sort().join(',');
+      const line = boardJobsWatchdogLogLine(result, offSignature !== lastBoardJobsDisabledSignature);
+      lastBoardJobsDisabledSignature = offSignature;
+      if (line) console.warn(line);
     },
   },
 
@@ -598,7 +659,7 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<unknown> | unk
   // underlying probe is exposed read-only, non-gating, via /api/health/deep's
   // advisory.persona_match (checkPersonaGrounding in deep-checks.ts) — the
   // box stays green overall while the board chip goes amber, same posture as
-  // the sweep-liveness entry above. Disable with
+  // the board-jobs-watchdog entry above. Disable with
   // DISABLE_PERSONA_GROUNDING_SWEEP=1.
   {
     name: 'persona-grounding-health',
@@ -669,9 +730,15 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<unknown> | unk
   // design. Furnace/loop-proof: one attempt per task ever (guarded by a
   // persona_backfill_attempt event), a 120s grace window, and a batch cap.
   // Disable with PERSONA_BACKFILL_SWEEP_ENABLED=0.
+  // LEASE: 30 min, not the 90s default. This job processes up to
+  // PERSONA_BACKFILL_BATCH (10) tasks SEQUENTIALLY and each one can drive the
+  // python selector for up to PERSONA_SELECT_TIMEOUT_MS (5 min default). At 90s
+  // the lease expired mid-batch and every subsequent write threw
+  // `scheduler_lease_lost` — the storm seen on a live box.
   {
     name: 'persona-backfill',
     expr: '*/5 * * * *',
+    timeoutMs: 1_800_000,
     fn: async () => {
       const result = await runPersonaBackfillSweep();
       if (result.skippedReason) {
@@ -707,9 +774,15 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<unknown> | unk
         console.log(`[cron] stale-task-sweep: skipped -- ${result.skippedReason}`);
       } else if (result.scanned > 0 || result.returned > 0 || result.repinged > 0 || (result.recovered ?? 0) > 0) {
         const rec = result.recovered ?? 0;
+        // PD-TEST-063: an END-STATED card (dispatch budget exhausted) is surfaced
+        // explicitly — it is re-escalated rather than returned to backlog, and it
+        // will never be auto-re-dispatched until a human grants fresh budget.
+        const endStated = result.budgetEndStated ?? 0;
         console.log(
           `[cron] stale-task-sweep: scanned ${result.scanned}, returned ${result.returned}, ` +
-          `repinged ${result.repinged}, recovered ${rec}${rec > 0 ? ` (${(result.recoveredIds ?? []).join(', ')})` : ''}`,
+          `repinged ${result.repinged}, recovered ${rec}${rec > 0 ? ` (${(result.recoveredIds ?? []).join(', ')})` : ''}, ` +
+          `budget-end-stated ${endStated}` +
+          `${endStated > 0 ? ` (${(result.budgetEndStatedIds ?? []).join(', ')})` : ''}`,
         );
       }
     },
@@ -777,6 +850,29 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<unknown> | unk
           ? `[cron] weekly-done-clear: skipped — ${result.skippedReason}`
           : `[cron] weekly-done-clear: archived ${result.archivedCount} done task(s)`,
       );
+    },
+  },
+
+  // db-retention: 03:40 daily America/New_York — age out append-only diagnostic
+  // rows (presentation_stage_timings, sse_event_log, events, task_activities) so
+  // the database stops growing without bound. Never touches tasks, task_events,
+  // task_deliverables, persona/SOP tables or job_liveness, and never deletes a
+  // row belonging to a live card. Bounded batches under a 60s budget; no VACUUM.
+  // Disable with DISABLE_DB_RETENTION=1.
+  {
+    name: 'db-retention',
+    expr: DB_RETENTION_CRON_EXPR,
+    timezone: DB_RETENTION_CRON_TIMEZONE,
+    fn: async () => {
+      const result = await runDbRetention();
+      console.log(
+        result.skippedReason
+          ? `[cron] db-retention: skipped — ${result.skippedReason}`
+          : `[cron] db-retention: ${formatDbRetentionSummary(result)}`,
+      );
+      // MR-31: return the result so wrap() sees skippedReason and records the
+      // job_liveness tick as 'disabled' rather than a false-green 'ok'.
+      return result;
     },
   },
 
@@ -969,11 +1065,106 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<unknown> | unk
       return result;
     },
   },
+  // hq-retention: once per minute — B06 age-only bounded retention sweep for
+  // the Company Headquarters tables (migration 169, B01). Caps at 500 rows
+  // per family per run; receipts first per S6 ("cleanup first removes expired
+  // receipts"). Kill flag lives inside runHqRetention (DISABLE_HQ_RETENTION):
+  // on skip it returns skippedReason and wrap() records the tick 'disabled',
+  // never a false-green 'ok' — same contract as db-retention (MR-31).
+  {
+    name: 'hq-retention',
+    expr: HQ_RETENTION_CRON_EXPR,
+    fn: async () => {
+      const result = await runHqRetention();
+      console.log(
+        result.skippedReason
+          ? `[cron] hq-retention: skipped — ${result.skippedReason}`
+          : `[cron] hq-retention: ${formatHqRetentionSummary(result)}`,
+      );
+      return result;
+    },
+  },
+  // hq-chat-reconcile: once per minute — B13 bounded stale-turn
+  // reconciliation for SPEC S9 durable turns. One pass, at most 500 rows;
+  // a missing HQ schema is zero work ('schema_absent'), never an exception.
+  // No correlation probe is passed here: V07 has not verified the exact
+  // gateway method/correlation fields in the installed version, so per B13's
+  // own contract the job runs probeless and bounded-window expiry ends turns
+  // `unresolved` rather than guessing a gateway API. wrap() sees skippedReason
+  // and records 'disabled', never a false-green 'ok'.
+  {
+    name: 'hq-chat-reconcile',
+    expr: HQ_CHAT_RECONCILE_CRON,
+    fn: async () => {
+      const result = await runHqChatReconcile({ now: () => Date.now() });
+      if (result.skippedReason) {
+        console.log(`[cron] hq-chat-reconcile: skipped — ${result.skippedReason}`);
+      } else if (
+        result.expiredToReconciling.length > 0 ||
+        result.provenReplied.length > 0 ||
+        result.unresolved.length > 0
+      ) {
+        console.log(
+          `[cron] hq-chat-reconcile: scanned ${result.scanned}, ` +
+            `to-reconciling ${result.expiredToReconciling.length}, ` +
+            `replied ${result.provenReplied.length}, unresolved ${result.unresolved.length}`,
+        );
+      }
+      return result;
+    },
+  },
 ];
 
 /**
  * Register every job. Safe to call multiple times.
  */
+/**
+ * The one operator-facing log line for a board-jobs-watchdog tick, or null when
+ * there is nothing true to say. Pure, exported, and tested — because every
+ * defect this function has had was a defect in a SENTENCE, and a sentence is
+ * only checkable if something can call it.
+ *
+ * A job an operator switched off is a STANDING STATE, not an event. Logging it
+ * on every 2-minute tick wrote the same line ~720 times a day and filled the pm2
+ * error log on boxes where the sweeps are disabled on purpose — the noise that
+ * hides the one line that matters. It is therefore logged on the FIRST
+ * observation and then only when the SET of switched-off jobs changes. Silence
+ * (NOT RUNNING) is a live fault and still warns on every tick.
+ *
+ * TWO FALSE STATEMENTS THIS FIXES, both in the old suffix:
+ *
+ *   WARM-UP. Right after a start every liveness row reads silent, so
+ *     `staleJobs` is non-empty and `alerted` is false, and the line came out as
+ *     "NOT RUNNING — intake-advance, qc-review-sweep (cooldown, already
+ *     alerted)". Both halves were untrue: nothing had alerted, and the jobs had
+ *     not stopped — they had not started yet. runBoardJobsWatchdog() has already
+ *     logged the honest boot line ("that is a boot and not a stall") by the time
+ *     it returns this status, so there is nothing left to say and this returns
+ *     null.
+ *   UNAVAILABLE. `alerted` is also false when the notification could not be
+ *     sent at all, and "already alerted" is the opposite of what happened: NOBODY
+ *     was told. That case now says so, which is the difference between an
+ *     operator ignoring a duplicate and an operator learning their alerting is
+ *     down.
+ */
+export function boardJobsWatchdogLogLine(
+  result: BoardJobsWatchdogRunResult,
+  offChanged: boolean,
+): string | null {
+  if (result.notificationStatus === 'warmup') return null;
+  const parts: string[] = [];
+  if (result.staleJobs.length > 0) parts.push(`NOT RUNNING — ${result.staleJobs.join(', ')}`);
+  if (result.disabledJobs.length > 0 && offChanged) parts.push(`SWITCHED OFF — ${result.disabledJobs.join(', ')}`);
+  if (result.selfRestart && result.selfRestart !== 'none') parts.push(`self-restart: ${result.selfRestart}`);
+  if (parts.length === 0) return null;
+  const suffix = result.alerted
+    ? ' (alerted)'
+    : result.notificationStatus === 'unavailable'
+      ? ' (NOT alerted — the notification channel is unavailable)'
+      : ' (cooldown, already alerted)';
+  return `[cron] board-jobs-watchdog: ${parts.join(' | ')}${suffix}`;
+}
+
 export function registerCronJobs(): RegisteredJob[] {
   if (alreadyRegistered()) {
     return listJobs();
@@ -986,7 +1177,7 @@ export function registerCronJobs(): RegisteredJob[] {
     }
     const scheduleOptions: { name: string; timezone?: string; noOverlap: boolean } = { name: job.name, noOverlap: true };
     if (job.timezone) scheduleOptions.timezone = job.timezone;
-    cron.schedule(job.expr, wrap(job.name, job.fn), scheduleOptions);
+    cron.schedule(job.expr, wrap(job.name, job.fn, job.timeoutMs), scheduleOptions);
   }
 
   markRegistered();

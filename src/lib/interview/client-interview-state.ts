@@ -1,5 +1,5 @@
 /**
- * Per-client interview state (JANET-INTERVIEW-FIX phase 2, 2026-08-17).
+ * Per-client interview state (TENANT-INTERVIEW-FIX phase 2, 2026-08-17).
  *
  * WHY THIS MODULE EXISTS
  * ----------------------

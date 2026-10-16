@@ -13,9 +13,11 @@ import {
   computePhaseProgress,
   phaseElapsedSeconds,
   PHASE_LABELS,
-  PHASE_TO_LABEL,
-  requiredPhaseIdsForLabel,
+  labelForPhaseId,
+  type PhaseElapsedSeconds,
+  type PhaseStepLabel,
 } from '@/lib/presentation-phases';
+import { getTaskEngineView } from '@/lib/presentation-engine-state';
 import { resolveActiveCompanyId } from '@/lib/company';
 import { tenantTaskWhere } from '@/lib/presentation-tenant-scope';
 
@@ -49,6 +51,21 @@ export async function GET(_request: NextRequest, props: { params: Promise<{ task
     if (!task) {
       return NextResponse.json({ error: 'Task not found' }, { status: 404 });
     }
+
+    // ── Item 19 — the engine's own run record for this task ─────────────
+    // Elections (for the P-U branch steps), the terminal vocabulary
+    // (ABANDONED included), and the plain-words park view all live in the
+    // bound run's state.json / intake record, not in the board's tables.
+    // Fail-soft: an unreadable run record degrades this read to the
+    // pre-Item-19 shape (no branch steps without evidence, no engine
+    // block), never to a 500.
+    const engineView = (() => {
+      try {
+        return getTaskEngineView(taskId);
+      } catch {
+        return null;
+      }
+    })();
 
     // PRES-020 — canonical execution record: the parent card's `Ref:` run
     // identity (FIX 57) is the authoritative run id. It scopes both the
@@ -107,7 +124,10 @@ export async function GET(_request: NextRequest, props: { params: Promise<{ task
         if (typeof parsed !== 'object' || parsed === null) continue;
         const rec = parsed as Record<string, unknown>;
         const gate = typeof rec.qc_gate === 'string' ? rec.qc_gate : null;
-        if (gate == null || !(gate in PHASE_TO_LABEL)) continue;
+        // Item 19 — a QC receipt for a P-U phase id validates exactly like
+        // a main-line receipt; the gate must be an id SOME mapping table
+        // knows (main, upsell branch, or shared wrap-up).
+        if (gate == null || labelForPhaseId(gate) == null) continue;
         if (rec.qc_passed === true) completionReceipts[gate] = true;
       }
     } catch {
@@ -118,6 +138,9 @@ export async function GET(_request: NextRequest, props: { params: Promise<{ task
     const progress = computePhaseProgress(activities, deliverables, {
       completionReceipts,
       activeScope: canonicalRunId ? { run_id: canonicalRunId } : null,
+      // Item 19 — the run's upsell elections from its sealed intake record
+      // (null = UNDETERMINED: branch steps then ride on engine evidence).
+      electedBranches: engineView?.elections ?? null,
     });
 
     // ── FIX 53 (R5A §E, §H6) — per-label elapsed from stage timings ──────
@@ -137,7 +160,7 @@ export async function GET(_request: NextRequest, props: { params: Promise<{ task
     // via task_id (FIX 53 linkage). run_summary rows never feed per-label
     // elapsed (same rule as before). Every SELECT is cooperative: a missing
     // table/column (pre-migration box) degrades to null elapsed, never 500.
-    let elapsed: Partial<Record<typeof PHASE_LABELS[number], number>> = {};
+    let elapsed: PhaseElapsedSeconds = {};
     let timingBreakdown: Record<string, { wall_s: number; provider_s: number; queue_s: number; qc_s: number }> = {};
     try {
       const timingCols = new Set(
@@ -190,12 +213,14 @@ export async function GET(_request: NextRequest, props: { params: Promise<{ task
             )
             .all(taskId) as TimingRow[];
         }
-        elapsed = phaseElapsedSeconds(rows, canonicalRunId);
+        elapsed = phaseElapsedSeconds(rows, canonicalRunId, engineView?.elections ?? null);
         if (hasSplit) {
           const acc = new Map<string, { wall_s: number; provider_s: number; queue_s: number; qc_s: number }>();
           for (const r of rows) {
             if (typeof r.phase_id !== 'string' || !r.phase_id) continue;
-            const label = PHASE_TO_LABEL[r.phase_id];
+            // Item 19 — P-U timing rows attribute to their branch step /
+            // shared label too, under the same combined mapping.
+            const label = labelForPhaseId(r.phase_id);
             if (!label) continue;
             const cur = acc.get(label) ?? { wall_s: 0, provider_s: 0, queue_s: 0, qc_s: 0 };
             if (typeof r.duration_s === 'number' && Number.isFinite(r.duration_s)) cur.wall_s += r.duration_s;
@@ -220,7 +245,8 @@ export async function GET(_request: NextRequest, props: { params: Promise<{ task
     // Determine current_phase: the last label that has been seen or the
     // Teleprompter if its deliverable exists, falling back to the first label
     // whose phase mapped. If nothing is active, current_phase is null.
-    let currentPhase: typeof PHASE_LABELS[number] | null = null;
+    // Item 19 — the label vocabulary now includes the upsell branch steps.
+    let currentPhase: PhaseStepLabel | null = null;
     for (const step of progress.phases) {
       if (step.status !== 'not_started') {
         currentPhase = step.label;
@@ -255,13 +281,22 @@ export async function GET(_request: NextRequest, props: { params: Promise<{ task
     return NextResponse.json({
       job_id: taskId,
       terminal,
-      current_phase: (currentPhase ?? PHASE_LABELS[0]) as typeof PHASE_LABELS[number],
+      current_phase: (currentPhase ?? PHASE_LABELS[0]) as PhaseStepLabel,
+      // Item 19 — the engine's terminal vocabulary and plain-words park
+      // view, from the bound run's state.json (nulls when UNDETERMINED).
+      engine: {
+        terminal: engineView?.terminal ?? null,
+        park_status: engineView?.park ?? null,
+      },
       phases: progress.phases.map((step) => {
         const total = step.totalIds;
         const done = Math.min(step.doneIds, total);
         const percent =
           step.status === 'done' ? 100 : total > 0 ? Math.round((done / total) * 100) : 0;
-        const requiredIds = requiredPhaseIdsForLabel(step.label);
+        // Item 19 — receipts project from the step's OWN required set (the
+        // one the reducer scored), so an upsell step shows its receipts and
+        // QC/Delivered include the shared wrap-up ids when they apply.
+        const requiredIds = step.requiredIds;
         return {
           id: step.label.toLowerCase(),
           label: step.label,

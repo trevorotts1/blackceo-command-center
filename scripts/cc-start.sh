@@ -39,6 +39,19 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CC_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# Shared non-evaluating dotenv loader and service-identity store resolver.
+source "$SCRIPT_DIR/lib/rescue-credentials.sh"
+
+# PM2 can retain a stale NEXT_DIST_DIR across restarts. Pin the real runtime
+# artifact before any Next code can observe the inherited environment.
+# RELATIVE, never absolute (2026-09-18): next.config.mjs feeds this straight
+# into `distDir`, and Next resolves distDir with path.join(<project dir>, distDir),
+# which CONCATENATES an absolute second argument instead of replacing. The
+# absolute form ("${CC_DIR}/.next") made `next start` look for
+# <CC_DIR>/<CC_DIR>/.next and refuse with "Could not find a production build" on
+# every restart — measured on the operator Mac: 71 pm2 restarts, app down.
+export NEXT_DIST_DIR=".next"
+
 # ── CLI flag parsing ───────────────────────────────────────────────────────────
 ARG_PORT=""
 while [[ $# -gt 0 ]]; do
@@ -69,6 +82,26 @@ export CC_PORT="$CC_PORT"
 export NODE_ENV="${NODE_ENV:-production}"
 
 printf '[cc-start] ENV-BLEED GUARD: pinned PORT=%s (NODE_ENV=%s)\n' "$CC_PORT" "$NODE_ENV" >&2
+
+# RESCUE-RANGERS-AUTH: notifySystem() posts to RESCUE_RANGERS_WEBHOOK_URL with an
+# X-Rescue-Secret header read from RESCUE_RANGERS_WEBHOOK_SECRET. The receiver
+# (RR-01-intake webhook) is fail-closed; a missing or empty secret means every
+# CC escalation is rejected. The shared loader parses the allowlisted key without
+# evaluation and resolves the store from the configured service identity rather
+# than inherited HOME. Never print or hardcode the value.
+if [[ -z "${RESCUE_RANGERS_WEBHOOK_SECRET:-}" ]]; then
+  _rr_load_status=0
+  rescue_load_webhook_secret || _rr_load_status=$?
+  if [[ "$_rr_load_status" -eq 0 ]]; then
+    printf '[cc-start] RESCUE-RANGERS-AUTH: X-Rescue-Secret provisioned from the service secret store.\n' >&2
+  elif [[ "$_rr_load_status" -eq 2 ]]; then
+    printf '[cc-start] RESCUE-RANGERS-AUTH: configured secret is empty; X-Rescue-Secret remains unset.\n' >&2
+  else
+    printf '[cc-start] RESCUE-RANGERS-AUTH: no usable configured secret store/key; X-Rescue-Secret remains unset.\n' >&2
+  fi
+  unset _rr_load_status
+fi
+unset RESCUE_DOTENV_VALUE RESCUE_SECRET_STORE_PATH RESCUE_SERVICE_HOME RESCUE_TRIMMED 2>/dev/null || true
 
 # ── 1b. NON-4000 DRIFT ACK GUARD (P1-02 Unit B, item 4) ───────────────────────
 # Port 4000 is the ONE canonical CC port fleet-wide — the Cloudflare tunnel
@@ -339,7 +372,7 @@ _assert_fresh_build() {
     local tmp
     tmp="$(mktemp "$state_dir/.cc-refusal.XXXXXX" 2>/dev/null)" || return 0
     CCBI_REFUSAL_TMP="$tmp" CCBI_CC_DIR="$CC_DIR" CCBI_REASON="$reason" \
-    CCBI_DETAIL="$detail" node -e '
+    CCBI_DETAIL="$detail" "${CC_NODE_BIN:-node}" -e '
       const fs = require("fs");
       const buildId = (() => { try { return fs.readFileSync(process.env.CCBI_CC_DIR + "/.next/BUILD_ID", "utf8").trim(); } catch { return null; } })();
       const doc = {
@@ -387,8 +420,8 @@ _assert_fresh_build() {
   source "$inv_lib"
 
   local verify_json verify_rc verdict served_bid
-  verify_json="$(bash "$inv_lib" --verify "$CC_DIR" 2>/dev/null)"
-  verify_rc=$?
+  verify_rc=0
+  verify_json="$(bash "$inv_lib" --verify "$CC_DIR" 2>/dev/null)" || verify_rc=$?
   verdict="$(printf '%s' "$verify_json" | sed -n 's/.*"verdict"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
   served_bid="$(printf '%s' "$verify_json" | sed -n 's/.*"build_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
 
@@ -404,9 +437,9 @@ _assert_fresh_build() {
       # written by the SAME deploy transaction that restored it binds it as
       # "(unattested)" and names THIS source tree as the failed target.
       local source_inv_missing rb_json_missing rb_rc_missing rb_verdict_missing
-      source_inv_missing="$(_ccbi_inventory_digest "$CC_DIR")"
-      rb_json_missing="$(bash "$inv_lib" --verify-rollback "$CC_DIR" "$next_dir" "$source_inv_missing" 2>/dev/null)"
-      rb_rc_missing=$?
+      source_inv_missing="$(_ccbi_inventory_digest "$CC_DIR")" || true
+      rb_rc_missing=0
+      rb_json_missing="$(bash "$inv_lib" --verify-rollback "$CC_DIR" "$next_dir" "$source_inv_missing" 2>/dev/null)" || rb_rc_missing=$?
       rb_verdict_missing="$(printf '%s' "$rb_json_missing" | sed -n 's/.*"receipt_verdict"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
       if [[ "$rb_rc_missing" -eq 0 && "$rb_verdict_missing" == "RECEIPT_OK" ]]; then
         printf '[cc-start] DEGRADED (legacy-prior): serving a pre-inventory artifact with NO manifest after a failed deploy.\n' >&2
@@ -430,9 +463,9 @@ _assert_fresh_build() {
       # MISMATCH — the only legitimate path is a transaction-bound rollback receipt
       # binding exactly this pair. Verify it.
       local source_inv rb_json rb_rc rb_verdict
-      source_inv="$(_ccbi_inventory_digest "$CC_DIR")"
-      rb_json="$(bash "$inv_lib" --verify-rollback "$CC_DIR" "$next_dir" "$source_inv" 2>/dev/null)"
-      rb_rc=$?
+      source_inv="$(_ccbi_inventory_digest "$CC_DIR")" || true
+      rb_rc=0
+      rb_json="$(bash "$inv_lib" --verify-rollback "$CC_DIR" "$next_dir" "$source_inv" 2>/dev/null)" || rb_rc=$?
       rb_verdict="$(printf '%s' "$rb_json" | sed -n 's/.*"receipt_verdict"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
       if [[ "$rb_rc" -eq 0 && "$rb_verdict" == "RECEIPT_OK" ]]; then
         printf '[cc-start] DEGRADED: serving the PRIOR artifact after a failed deploy (content mismatch vs source).\n' >&2
@@ -459,6 +492,148 @@ _assert_fresh_build() {
 _assert_fresh_build
 
 
+# ── 2b. NODE RUNTIME IDENTITY + NATIVE ABI GUARD (ISSUE-09) ───────────────────
+#
+# THE DEFECT: this launcher exec'd a BARE `node` off the ambient PATH, and
+# ecosystem.config.cjs supplied neither an interpreter nor a PATH, so the node
+# that ran the server was whatever pm2 happened to inherit. Meanwhile
+# `postinstall` compiles better-sqlite3 against whichever node ran npm. Client
+# the node that rebuilt the native module and the node that ran the server were
+# routinely different, so better-sqlite3 threw NODE_MODULE_VERSION on every boot
+# and no health check could name the cause.
+#
+# Two changes close it. The exec below uses "$CC_NODE_BIN", resolved by
+# scripts/lib/node-runtime.sh (and normally handed down by the ecosystem config
+# so the pm2 child and this launcher agree). And before exec, a DETERMINISTIC
+# comparison: the artifact's build-inventory.json records the module ABI of the
+# node that built it, and this process must match it.
+#
+# A mismatch is deterministic, exactly like a stale build: restarting cannot
+# fix it, only a rebuild can. So it takes the SAME path as every other content
+# refusal in this file: a durable receipt with reason `native-abi-mismatch`,
+# remedy `bash scripts/atomic-deploy.sh`, and exit 78. pm2's stop_exit_codes
+# stops the loop instead of hammering, and watchdog-cc.sh's existing
+# refusal-receipt class repairs it with one locked atomic deploy. The crash
+# loop becomes a named, self-repairing refusal.
+#
+# The guard NEVER fires on missing evidence. A legacy artifact whose manifest
+# predates the node_abi field, or an unreadable manifest, cannot be compared,
+# and an uncomparable pair is not a mismatch. atomic-deploy.sh's native-module
+# gates cover that case; refusing here on an absent field would brick every
+# box carrying a pre-ISSUE-09 artifact.
+if [[ -z "${CC_NODE_BIN:-}" ]]; then
+  # Not handed down (a manual start, or an ecosystem file predating ISSUE-09).
+  # Resolve it here so every start path agrees on one runtime.
+  if [[ -x "$SCRIPT_DIR/lib/node-runtime.sh" || -f "$SCRIPT_DIR/lib/node-runtime.sh" ]]; then
+    # stdout ONLY. The resolver writes warnings to stderr on the SUCCESS path
+    # (an override pinning a non-fleet major), and folding those into the
+    # capture would set CC_NODE_BIN to a warning banner.
+    _cc_resolved_node="$(bash "$SCRIPT_DIR/lib/node-runtime.sh")" && CC_NODE_BIN="$_cc_resolved_node" || {
+      printf '[cc-start] FATAL: no supported Node runtime; refusing to start on an unknown one.\n' >&2
+      exit 78
+    }
+    export CC_NODE_BIN
+  fi
+fi
+CC_NODE_BIN="${CC_NODE_BIN:-node}"
+printf '[cc-start] Node runtime: %s (%s)\n' "$CC_NODE_BIN" "$("$CC_NODE_BIN" --version 2>/dev/null || echo 'version unreadable')" >&2
+
+_assert_native_abi_matches() {
+  local manifest="$CC_DIR/.next/build-inventory.json"
+  local recorded runtime_abi
+  [[ -f "$manifest" ]] || {
+    printf '[cc-start] ABI guard: no build-inventory.json to compare against; skipping (atomic-deploy native gates cover this).\n' >&2
+    return 0
+  }
+  recorded="$(sed -n 's/.*"node_abi"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest" 2>/dev/null | head -1 || true)"
+  if [[ -z "$recorded" || "$recorded" == "unknown" ]]; then
+    printf '[cc-start] ABI guard: artifact records no node_abi (pre-ISSUE-09 manifest); nothing to compare, proceeding.\n' >&2
+    return 0
+  fi
+  runtime_abi="$("$CC_NODE_BIN" -p process.versions.modules 2>/dev/null || true)"
+  if [[ -z "$runtime_abi" ]]; then
+    printf '[cc-start] ABI guard: %s could not report process.versions.modules; nothing to compare, proceeding.\n' "$CC_NODE_BIN" >&2
+    return 0
+  fi
+  if [[ "$recorded" != "$runtime_abi" ]]; then
+    local detail
+    detail="native module ABI mismatch: this artifact was built by a node with module ABI ${recorded}, but the runtime ${CC_NODE_BIN} reports ABI ${runtime_abi}. better-sqlite3 cannot load across that boundary, so the server would crash-loop on its first DB call"
+    printf '[cc-start] FATAL: native-abi-mismatch: %s\n' "$detail" >&2
+    printf '[cc-start] This is a DETERMINISTIC refusal (exit 78): restarting cannot fix it.\n' >&2
+    printf '[cc-start] Rebuild against this runtime: `bash scripts/atomic-deploy.sh`.\n' >&2
+    _ccbi_content_refusal_receipt "native-abi-mismatch" "$detail"
+    exit 78
+  fi
+  printf '[cc-start] ABI guard: artifact and runtime agree on module ABI %s.\n' "$runtime_abi" >&2
+}
+
+_assert_native_abi_matches
+
+# ── 2c. DATABASE MODULE LOAD GUARD (CCG-1) ───────────────────────────────────
+#
+# THE GAP the ABI guard above leaves open: it compares the node ABI recorded for
+# the WEB-APP build with the runtime, and never looks at the compiled
+# better-sqlite3 module itself. An unrelated `npm ci` / `npm rebuild` run under
+# a DIFFERENT node (a global node 26, ABI 147, while pm2 runs node 24/25, ABI
+# 137/141) rewrites node_modules/better-sqlite3/build/Release/*.node and leaves
+# the build manifest untouched. Measured 2026-10-12 on three boxes: the guard
+# printed "artifact and runtime agree", the app started, its database failed
+# ("FATAL: DB init failed ... NODE_MODULE_VERSION 147 ... requires 141"), and
+# the box ran without a database for hours while `/` still answered 403.
+#
+# So, before exec, load better-sqlite3 with the EXACT node that will run the
+# app (one throwaway process, in-memory database; no real database is opened).
+#   * loads                      -> proceed.
+#   * NODE_MODULE_VERSION / dlopen / missing-bindings failure
+#                                -> `npm rebuild better-sqlite3` with that same
+#                                   node (its directory leads PATH, so npm and
+#                                   node-gyp compile for it), re-test once.
+#   * still failing, or any other failure
+#                                -> refuse: receipt `native-module-load-failed`,
+#                                   exit 78 (pm2 stop_exit_codes), same style as
+#                                   the guards above.
+# Like the guard above it never fires on missing evidence: no
+# node_modules/better-sqlite3 means there is nothing to load (atomic-deploy's
+# native gates own a missing install).
+_cc_sqlite_probe() {  # prints the load error (if any); rc 0 = module loads
+  (cd "$CC_DIR" && "$CC_NODE_BIN" -e 'const D=require(process.argv[1]);new D(":memory:").close()' \
+    "$CC_DIR/node_modules/better-sqlite3" 2>&1 >/dev/null)
+}
+
+_assert_sqlite_module_loads() {
+  local mod="$CC_DIR/node_modules/better-sqlite3" err node_dir=""
+  if [[ ! -d "$mod" ]]; then
+    printf '[cc-start] DB module guard: no node_modules/better-sqlite3 to load; skipping (atomic-deploy native gates cover this).\n' >&2
+    return 0
+  fi
+  if err="$(_cc_sqlite_probe)"; then
+    printf '[cc-start] DB module guard: better-sqlite3 loads under %s.\n' "$CC_NODE_BIN" >&2
+    return 0
+  fi
+  if printf '%s' "$err" | grep -Eq 'NODE_MODULE_VERSION|ERR_DLOPEN_FAILED|Could not locate the bindings'; then
+    printf '[cc-start] DB module guard: better-sqlite3 does not load under %s (%s).\n' \
+      "$CC_NODE_BIN" "$(printf '%s' "$err" | grep -Eo 'NODE_MODULE_VERSION [0-9]+' | tr '\n' ' ')" >&2
+    printf '[cc-start] DB module guard: rebuilding it with that same node.\n' >&2
+    [[ "$CC_NODE_BIN" == */* ]] && node_dir="$(dirname "$CC_NODE_BIN")"
+    # ponytail: no timeout around the rebuild; add one if a hung registry ever stalls a start.
+    (cd "$CC_DIR" && PATH="${node_dir:+$node_dir:}$PATH" npm rebuild better-sqlite3 --ignore-scripts=false) >&2 || true
+    if err="$(_cc_sqlite_probe)"; then
+      printf '[cc-start] DB module guard: rebuilt; better-sqlite3 now loads under %s.\n' "$CC_NODE_BIN" >&2
+      return 0
+    fi
+  fi
+  local detail
+  detail="better-sqlite3 cannot be loaded by the runtime ${CC_NODE_BIN} (module ABI $("$CC_NODE_BIN" -p process.versions.modules 2>/dev/null || echo unknown)); the server would start with no database. Load error: $(printf '%s' "$err" | head -c 400 | tr '\n' ' ')"
+  printf '[cc-start] FATAL: native-module-load-failed: %s\n' "$detail" >&2
+  printf '[cc-start] This is a DETERMINISTIC refusal (exit 78): restarting cannot fix it.\n' >&2
+  printf '[cc-start] Rebuild against this runtime: `npm rebuild better-sqlite3` with %s, or `bash scripts/atomic-deploy.sh`.\n' "$CC_NODE_BIN" >&2
+  _ccbi_content_refusal_receipt "native-module-load-failed" "$detail"
+  exit 78
+}
+
+_assert_sqlite_module_loads
+
+
 # ── 3. EXEC next start ────────────────────────────────────────────────────────
 # exec replaces this bash process so PM2's PID tracking points at the real node
 # child — cc-health-check.sh pm2-analyze-cc.py regex `(--port|-p)\s+PORT` still
@@ -466,4 +641,11 @@ _assert_fresh_build
 printf '[cc-start] Launching: next start -p %s -H 0.0.0.0 (cwd: %s)\n' "$CC_PORT" "$CC_DIR" >&2
 
 cd "$CC_DIR"
-exec node "$CC_DIR/scripts/next-service-env.cjs" start -p "$CC_PORT" -H 0.0.0.0
+# brand.css is a per-box generated file (generate-brand-css.py) and is no longer
+# tracked; lay down the shipped default only when the box has none, so a fresh
+# box has a stylesheet and a branded box keeps its own colours across updates.
+if [ ! -f "$CC_DIR/public/brand.css" ] && [ -f "$CC_DIR/public/brand.default.css" ]; then
+  cp "$CC_DIR/public/brand.default.css" "$CC_DIR/public/brand.css" 2>/dev/null \
+    && printf '[cc-start] public/brand.css absent — seeded from brand.default.css\n' >&2
+fi
+exec "$CC_NODE_BIN" "$CC_DIR/scripts/next-service-env.cjs" start -p "$CC_PORT" -H 0.0.0.0

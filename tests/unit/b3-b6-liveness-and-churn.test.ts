@@ -28,6 +28,7 @@ import { getDb, run, queryOne, queryAll } from '../../src/lib/db';
 import { probeSessionLiveness, type SessionHistoryReader, type RawHistoryMessage } from '../../src/lib/jobs/execution-watcher';
 import { runStaleTaskSweep } from '../../src/lib/jobs/stale-task-sweep';
 import { runIntakeAdvanceSweep } from '../../src/lib/jobs/intake-advance-sweep';
+import { QC_MAX_REROUTES } from '../../src/lib/qc-cap';
 
 const db = getDb();
 const WS_ID = `ws-${uuidv4()}`;
@@ -183,7 +184,9 @@ test('B6: stale sweep spares a review task parked by QC, still returns a plain s
 // ── B6: intake-advance cap-out surfaced once ─────────────────────────────────
 
 test('B6: a QC-reroute-capped task is surfaced to the operator exactly once', async () => {
-  const cap = parseInt(process.env.QC_MAX_REROUTES || '3', 10);
+  // The shared cap (src/lib/qc-cap.ts), not a literal — this case is about a
+  // card AT the cap, whatever the cap currently is.
+  const cap = QC_MAX_REROUTES;
   const id = uuidv4();
   // Capped task sits in backlog (filtered out of the advance selection) and would
   // otherwise rot invisibly. qc_reroute_attempts >= cap; recent updated_at so the

@@ -12,6 +12,7 @@ export default defineConfig({
     globals: true,
     setupFiles: ['./tests/setup/jsdom-storage.ts'],
     include: [
+      'tests/unit/audience-answered-no-ask-chip.test.tsx',
       'tests/unit/u55-company-health-render.test.tsx',
       // A-U5 acceptance (b) — PersonaScopeChips real render proof.
       'tests/unit/a-u5-persona-scope-chips-render.test.tsx',
@@ -134,6 +135,13 @@ export default defineConfig({
       // verdict surface: every seat-attributed row (scored detail rounds
       // and the consult result) renders its seat's exact profile label.
       'tests/unit/council-verdict-label-render.test.tsx',
+      // Planning Mode — modal stays open on the Planning tab, polling resumes, Other text kept.
+      'tests/unit/planning-mode-modal.test.tsx',
+      // Planning Mode — start failure, gateway error and unreadable reply are visible with Try again.
+      'tests/unit/planning-mode-start-error.test.tsx',
+      // Item 19 — ABANDONED pill/panel, plain-words park record, resume
+      // outcome rendering, and the board's Abandoned filter, real render proof.
+      'tests/unit/item19-engine-panel-render.test.tsx',
     ],
     env: { NODE_ENV: 'test' },
     testTimeout: 15000,

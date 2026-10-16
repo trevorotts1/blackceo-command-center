@@ -22,10 +22,27 @@ export function describeApp(rawApp) {
 
 export function loadRequirableConfig(absPath) {
   const source = sourceId(absPath);
+  // ISSUE-09: the ecosystem configs resolve the fleet Node runtime at load and
+  // THROW when none is found, so a box (or a CI runner) without Node 24 cannot
+  // require them. This guard is a STATIC ANALYZER, not a launcher: it must
+  // still read the canonical config and report its clustering shape. Silently
+  // catching the throw would drop the repo's most important PM2 config from
+  // the audit and turn a real clustering regression invisible.
+  //
+  // So pin CC_NODE_BIN to the node already running this analysis for the
+  // duration of the require, and restore it afterwards. This changes nothing
+  // about what the config declares; it only lets the file be read.
+  const hadOverride = Object.prototype.hasOwnProperty.call(process.env, 'CC_NODE_BIN');
+  const priorOverride = process.env.CC_NODE_BIN;
+  if (!hadOverride) process.env.CC_NODE_BIN = process.execPath;
   try {
     const mod = require_(absPath);
     return { source, apps: Array.isArray(mod.apps) ? mod.apps : [] };
   } catch (e) { return { source, apps: [], error: true, errorName: e.name }; }
+  finally {
+    if (hadOverride) process.env.CC_NODE_BIN = priorOverride;
+    else delete process.env.CC_NODE_BIN;
+  }
 }
 
 export function loadShellTemplateConfig(absPath) {

@@ -66,7 +66,7 @@ test('updater installs only the locked graph with strict engines, then permits l
   const result = runFixture();
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(result.log, [
-    'checkout-mutation', 'npm ci --engine-strict --no-audit --no-fund',
+    'checkout-mutation', 'npm ci --engine-strict --no-audit --no-fund --ignore-scripts=false',
     'migrations', 'build', 'restart',
   ]);
 });
@@ -83,23 +83,93 @@ test('updater npm ci failure never falls back to npm install or later actions', 
   assert.equal(result.status, 1);
   assert.match(result.stdout, /npm ci failed/);
   assert.match(result.stdout, /Fix the reported runtime, lockfile or registry error/);
-  assert.deepEqual(result.log, ['checkout-mutation', 'npm ci --engine-strict --no-audit --no-fund']);
+  assert.deepEqual(result.log, ['checkout-mutation', 'npm ci --engine-strict --no-audit --no-fund --ignore-scripts=false']);
 });
 
-test('updater rejects unsupported Node before checkout mutation or dependency installation', () => {
-  for (const nodeVersion of ['v20.18.3', 'v21.7.0', 'v22.12.0', 'v23.11.0', 'unexpected']) {
+// ISSUE-09. The preflight now does TWO things in order: resolve the ONE node
+// this box uses (identity), then check THAT node against the declared engines
+// range (support). The fixture has no scripts/lib/node-runtime.sh, so identity
+// falls through to ambient node, which is exactly the path these cases cover.
+//
+// The accepted set is deliberately the ORIGINAL range, not a Node 24 pin. An
+// earlier revision of this branch required major 24; measured against the live
+// fleet that would have refused Command Center updates on most boxes, since two
+// client machines and the operator Mac run v26.7.0 or v26.8.1 with no node@24
+// present. ABI drift is a consistency problem between the node that rebuilds
+// the native module and the node that runs the server, not a version problem,
+// and it is closed by reusing the SAME binary rather than by narrowing which
+// versions may update.
+test('updater rejects a Node below the supported range, before checkout mutation or dependency installation', () => {
+  for (const nodeVersion of ['v18.20.4', 'v20.18.3', 'v22.12.0', 'unexpected']) {
     const result = runFixture({ nodeVersion });
     assert.equal(result.status, 1, nodeVersion);
-    assert.match(result.stdout, /Install Node 24 LTS before updating/);
+    assert.match(result.stdout, /Unsupported Node\.js|Cannot read the version/);
     assert.deepEqual(result.log, [], nodeVersion);
   }
   assert.ok(updater.indexOf('# Node runtime preflight') < updater.indexOf('# Backup retention + disk pre-check'));
 });
 
 test('updater bootstrap Node floor matches package engines at supported boundaries', () => {
-  assert.equal(JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8')).engines.node, '^20.19.0 || ^22.13.0 || >=24');
-  for (const nodeVersion of ['v20.19.0', 'v22.13.0', 'v24.0.0', 'v25.0.0']) {
+  assert.equal(
+    JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8')).engines.node,
+    '^20.19.0 || ^22.13.0 || >=24',
+  );
+  // The boundaries of the declared range, plus the majors the fleet actually
+  // runs. v25 and v26 are the load-bearing cases: a Node 24 pin rejected them
+  // and would have locked most of the fleet out of updating.
+  for (const nodeVersion of ['v20.19.0', 'v22.13.0', 'v24.0.0', 'v25.6.1', 'v26.8.1']) {
     const result = runFixture({ nodeVersion });
     assert.equal(result.status, 0, `${nodeVersion}: ${result.stderr}`);
   }
+});
+
+
+test('updater passes the resolved merge commit as the explicit atomic-deploy revision', () => {
+  assert.match(
+    updater,
+    /DEPLOY_REVISION="\$\(git -C "\$INSTALL_DIR" rev-parse HEAD/,
+    'update.sh must resolve the exact merged commit before invoking atomic-deploy.sh',
+  );
+  assert.match(
+    updater,
+    /ADEPLOY_ARGS\+=\(--revision "\$DEPLOY_REVISION"\)/,
+    'update.sh must pass the resolved commit explicitly to atomic-deploy.sh',
+  );
+  assert.match(
+    updater,
+    /Atomic deploy source revision: \$DEPLOY_REVISION/,
+    'update.sh must report the exact revision used for the atomic deployment',
+  );
+});
+
+test('updater checks the RESOLVED node, and reports it by path', () => {
+  // The identity half: whatever node the preflight settled on is the one whose
+  // version is checked and the one exported as CC_NODE_BIN for npm ci.
+  const result = runFixture({ nodeVersion: 'v26.8.1' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Node runtime: \S+ \(v26\.8\.1/);
+});
+
+test('the native-module guard names node-gyp\'s artifact, not the npm package', () => {
+  // node-gyp names the compiled file after binding.gyp's `target_name`, so
+  // better-sqlite3 produces build/Release/better_sqlite3.node. update.sh used
+  // to derive "$mod.node" from the package name, a path that exists on no
+  // correctly installed box, and the guard fataled fleet-wide before
+  // migrations, build and restart (ed3bcf55a, 2026-09-17).
+  assert.match(
+    updater,
+    /build\/Release\/\$\{mod\/\/-\/_\}\.node/,
+    'update.sh must map hyphens to underscores when deriving the node-gyp artifact name',
+  );
+  assert.ok(
+    !updater.includes('build/Release/$mod.node'),
+    'update.sh must not derive the artifact name straight from the package name',
+  );
+  // Loading the module is the verdict; the derived path only picks the remedy.
+  // A guessed path must never again be able to fail a working install.
+  const guard = section('_cc_assert_native_module_usable() {', '_cc_assert_native_module_usable better-sqlite3');
+  assert.ok(
+    guard.indexOf('"$CC_NODE_BIN" -e') < guard.indexOf('if [ ! -f "$lib" ]'),
+    'the load test must run before the artifact-path check, so a working module is never fataled on a bad guess',
+  );
 });

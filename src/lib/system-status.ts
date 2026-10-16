@@ -22,6 +22,7 @@ import { probeCloudflareAccess } from './probes/cloudflare-access-probe';
 import { probeUnauthorized401 } from './probes/unauthorized-401-probe';
 import {
   computeOverallTiered,
+  isNotApplicable,
   ProbeResult,
   SystemStatus,
   TieredProbeResult,
@@ -124,7 +125,7 @@ export async function runAllProbes(): Promise<SystemStatusPayload> {
   // reduction: a critical outage means `offline`; an auxiliary problem never
   // does. Unknown providers (no key) do not degrade the overall.
   const considered = components.filter(
-    (c) => !(c.component.startsWith('provider_') && c.status === 'unknown')
+    (c) => !isNotApplicable(c)
   );
   const overall = computeOverallTiered(considered);
 
@@ -200,7 +201,7 @@ export function readCachedStatus(): SystemStatusPayload | null {
     }));
 
     const considered = components.filter(
-      (c) => !(c.component.startsWith('provider_') && c.status === 'unknown')
+      (c) => !isNotApplicable(c)
     );
     // Same shared function as the fresh path — identical inputs (same
     // component/tier/status triples) always produce an identical `overall`.

@@ -36,10 +36,15 @@ test('public pre-enrollment refresh stays locked; real signed enrollment session
   const {POST}=await import('../../src/app/api/auth/interview-session/route');
   const {NextRequest}=await import('next/server');
   const ticket=await signTenantGrant({purpose:'enrollment',tenantId:'gate-tenant',installationId:'gate-install',host:'gate.example',subject:'owner:fixture',nonce:crypto.randomUUID(),exp:Math.floor(Date.now()/1000)+900});
-  const enrolled=await POST(new NextRequest('https://gate.example/api/auth/interview-session',{method:'POST',headers:{host:'gate.example','content-type':'application/json'},body:JSON.stringify({ticket})}));
+  const redeem=()=>POST(new NextRequest('https://gate.example/api/auth/interview-session',{method:'POST',headers:{host:'gate.example','content-type':'application/json'},body:JSON.stringify({ticket})}));
+  // A completed interview is the one thing that closes an invitation.
+  const refused=await redeem();
+  assert.equal(refused.status,403);
+  assert.equal((await refused.json()).error,'interview_already_complete');
+  fs.writeFileSync(statePath,JSON.stringify({interviewComplete:false}));
+  const enrolled=await redeem();
   assert.equal(enrolled.status,200);
   const session=enrolled.headers.get('set-cookie')!.split(';')[0];
-  fs.writeFileSync(statePath,JSON.stringify({interviewComplete:false}));
   const after=await refresh(session);
   const payload=JSON.parse(Buffer.from(after.get('mc_interview_complete').value.split('.')[0],'base64url').toString());
   assert.equal(payload.complete,false);assert.equal(payload.scope,'gate-tenant:gate-install:gate.example');

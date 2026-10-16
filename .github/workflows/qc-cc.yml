@@ -15,6 +15,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
   # ── U60/JM-U63b — My AI CEO off-brand color gate ────────────────────────
@@ -154,6 +155,80 @@ jobs:
 
       - name: Run qc-cc.sh
         run: bash scripts/qc-cc.sh
+
+  # ── Hardening plan ITEM 08 — real paired onboarding invitation acceptance ──
+  # The onboarding contract workflow's paired check scans source strings and
+  # mocks a receipt, so nothing exercised the PRES-046 manifest refusal or
+  # registration-dependent issuance from THIS side either. This job checks out
+  # the paired onboarding repository and runs its real acceptance against THIS
+  # checkout: a real production build sealed through build-inventory.sh, the
+  # real cc-start exit-78 refusal when the manifest is absent, a fixture
+  # install whose missing Access triple refuses issuance, and a fixture install
+  # whose full triple reaches a real mint through the real onboarding
+  # validator behind a fixture edge. Fixture identities only — no client key,
+  # no fleet write, no client send. The proof records paired revisions and
+  # never the ticket; a missing, failed or skipped proof fails this job.
+  paired-invitation-acceptance:
+    name: Real paired onboarding invitation acceptance (no skips, no ticket)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the Command Center under test
+        uses: actions/checkout@v4
+
+      - name: Checkout the paired onboarding repository
+        uses: actions/checkout@v4
+        with:
+          repository: trevorotts1/openclaw-onboarding
+          ref: main
+          path: paired-onboarding
+          persist-credentials: false
+
+      - name: Set up Node for the real paired build
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Set up Python for the real onboarding validator
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install the Command Center's reviewed dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Run the real paired acceptance against THIS checkout
+        working-directory: paired-onboarding
+        env:
+          CC_REPO: ${{ github.workspace }}
+          PAIRED_CC_REF: ${{ github.sha }}
+          INTERVIEW_ACCEPTANCE_PROOF: ${{ runner.temp }}/paired-invitation-proof.json
+        run: |
+          python3 - <<'PY'
+          import importlib.util, json, os, pathlib, unittest
+          spec = importlib.util.spec_from_file_location('paired_acceptance', 'tests/unit/interview-paired-acceptance.test.py')
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          suite = unittest.defaultTestLoader.loadTestsFromModule(module)
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          if result.skipped:
+              raise SystemExit('skips are forbidden: an unexercised paired proof is a failed proof')
+          if result.errors or result.failures or result.testsRun == 0:
+              raise SystemExit(1)
+          proof_path = os.environ.get('INTERVIEW_ACCEPTANCE_PROOF', '')
+          if not proof_path or not pathlib.Path(proof_path).is_file():
+              raise SystemExit('paired acceptance proof was not written')
+          raw = pathlib.Path(proof_path).read_text()
+          if 'enroll=' in raw:
+              raise SystemExit('paired acceptance proof leaked a ticket')
+          proof = json.loads(raw)
+          checks = proof.get('checks') or {}
+          if not checks or any(not v.get('ok') for v in checks.values()):
+              bad = [k for k, v in checks.items() if not v.get('ok')]
+              raise SystemExit(f'paired acceptance proof carries failed/absent checks: {bad}')
+          print('paired revisions:', json.dumps(proof.get('pairedRevisions', {})))
+          print('paired acceptance checks:', json.dumps({k: v['ok'] for k, v in checks.items()}))
+          PY
 
   qc-independence:
     name: QC scorer independence
@@ -495,6 +570,50 @@ jobs:
       # Fail-first contract test — see the file header for the four assertions.
       - name: cc-start.sh non-4000 drift ACK guard test (P1-02 Unit B)
         run: bash tests/unit/cc-start-port-ack-guard.test.sh
+      # RR-03: parse the Rescue webhook secret without evaluation and resolve
+      # its store from the actual service identity, not inherited HOME.
+      - name: Rescue credential loader parser and service-store tests
+        run: bash tests/unit/rescue-credential-loader.test.sh
+      # remediate.sh per-box Mac shell is read from private config, not the repo.
+      - name: remediate.sh per-box Mac shell config test
+        run: bash tests/unit/remediate-mac-shell.test.sh
+      # remediate.sh resolves the tunnel CF Access token from the private map.
+      - name: remediate.sh CF token stem test
+        run: bash tests/unit/remediate-cf-token.test.sh
+      # The deploy's green gate judges build/serve rows only; content rows warn.
+      - name: cc-health-check.sh --deploy-gate test
+        run: bash scripts/cc-health-check-deploy-gate.test.sh
+      # A box with a tenant registry: the loopback probe asks for its public host.
+      - name: cc-health-check.sh loopback probe host test
+        run: bash tests/unit/cc-health-check-loopback-host.test.sh
+      # The embedding probe is told the box's SOP provider (ollama boxes are not "foreign").
+      - name: cc-health-check.sh embedding provider test
+        run: bash tests/unit/cc-health-check-embedding-provider.test.sh
+      # The watchdog schedule: launchd, crontab, and a container's host crontab.
+      - name: install-watchdog-cc.sh schedule test
+        run: bash tests/unit/install-watchdog-cc.test.sh
+      # A Command Center missing from pm2 is RED, and the watchdog starts it.
+      - name: watchdog-cc.sh down-is-red test
+        run: bash tests/unit/watchdog-cc-down-is-red.test.sh
+      # The watchdog must never pm2-save a list smaller than the saved dump.
+      - name: watchdog-cc.sh pm2 save race test
+        run: bash tests/unit/watchdog-cc-pm2-save-race.test.sh
+      # The launcher must load better-sqlite3 with the node that will run the app.
+      - name: cc-start.sh database module guard test
+        run: bash tests/unit/cc-start-sqlite-module-guard.test.sh
+      # A dead database must be labelled database-failed, never no-pm2-app.
+      - name: watchdog-cc.sh database-failed label test
+        run: bash tests/unit/watchdog-cc-database-failed-label.test.sh
+      # A pm2 version banner before the app list must not read as "no apps".
+      - name: pm2 version-banner parse test
+        run: bash tests/unit/pm2-version-banner-parse.test.sh
+      # The tunnel token must reach pm2 as a mode-600 --token-file, never on argv.
+      - name: create-tunnel.sh token-file test
+        run: bash tests/unit/create-tunnel-token-file.test.sh
+      # pm2 modules are not apps (D14), self-heal reads parsed JSON (D21), backups on the persistent root (D22).
+      - name: fleet defects D14/D21/D22 test
+        run: bash tests/unit/fxcc-fleet-defects.test.sh
+
 
   # ── Build smoke test — BLOCKING ───────────────────────────────────────────
   # This job used to carry `continue-on-error: true` ("Don't block the QC gate
@@ -728,6 +847,14 @@ jobs:
   interview-lock-e2e:
     name: Interview-unlock shell-lock e2e (Playwright)
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # ILG-003: the SAME interview-lock spec on desktop + phone surfaces.
+        # webkit-iphone runs the iPhone 15 project (real Mobile Safari agent,
+        # touch, 390x844); chromium-pixel7 runs Pixel 7 (Android Chrome agent,
+        # touch, 412x915); chromium-desktop is today’s gate, unchanged.
+        project: [chromium-desktop, webkit-iphone, chromium-pixel7]
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -741,10 +868,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Install Playwright browser (Chromium + OS deps)
-        # Only Chromium is needed (config runs headless Chromium); --with-deps
-        # pulls the apt libs the runner is missing so the browser launches.
-        run: npx playwright install --with-deps chromium
+      - name: Install Playwright browsers (Chromium + WebKit + OS deps)
+        # Chromium covers the desktop + Pixel 7 projects; WebKit covers the
+        # iPhone 15 project. --with-deps pulls the apt libs the runner is
+        # missing so the browsers launch.
+        run: npx playwright install --with-deps chromium webkit
 
       - name: Build production interview fixture
         env:
@@ -762,17 +890,17 @@ jobs:
           NODE
         timeout-minutes: 12
 
-      - name: Run production HTTPS interview and shell-lock e2e
+      - name: Run production HTTPS interview and shell-lock e2e (${{ matrix.project }})
         env:
           INTERVIEW_LOCK_PRODUCTION: "1"
-        run: npm run test:e2e:interview-lock
+        run: npm run test:e2e:interview-lock -- --project=${{ matrix.project }}
         timeout-minutes: 12
 
       - name: Upload Playwright trace + fixture artifacts on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: interview-lock-e2e-traces
+          name: interview-lock-e2e-traces-${{ matrix.project }}
           path: |
             test-results/
             playwright-report/

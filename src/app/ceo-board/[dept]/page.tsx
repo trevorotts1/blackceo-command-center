@@ -50,6 +50,7 @@ import { KPIStatCardsRow } from '@/components/ceo-board/KPIStatCardsRow';
 import { DeploymentHealthChart } from '@/components/ceo-board/DeploymentHealthChart';
 import { RepositoryStatusCard } from '@/components/ceo-board/RepositoryStatusCard';
 import { DepartmentBlockersPanel } from '@/components/ceo-board/DepartmentBlockersPanel';
+import { SkillRunsPanel } from '@/components/skill-runs/SkillRunsPanel';
 import {
   computeDepartmentOperationalStats,
   type OperationalTaskInput,
@@ -916,6 +917,7 @@ export default function DepartmentSubBoardPage() {
   const supportDept = deptId === 'support';
   const operationsDept = isOperationsDept(deptId, department?.name);
   const appdevDept = deptId === 'appdev';
+  const webDevDept = deptId === 'web-development';
 
   const hrGoals = [
     {
@@ -1066,6 +1068,12 @@ export default function DepartmentSubBoardPage() {
           <motion.section variants={sectionVariants} initial="hidden" animate="visible" transition={{ delay: 0.05 }}>
             <DepartmentBlockersPanel deptId={deptId} stats={operationalStats} />
           </motion.section>
+
+          {webDevDept && (
+            <motion.section variants={sectionVariants} initial="hidden" animate="visible" transition={{ delay: 0.06 }}>
+              <SkillRunsPanel />
+            </motion.section>
+          )}
 
           {creativeDept && (
             <motion.section variants={sectionVariants} initial="hidden" animate="visible" transition={{ delay: 0.08 }}>

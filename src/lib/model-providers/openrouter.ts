@@ -152,7 +152,8 @@ export async function fetchModels(apiKey: string): Promise<ProviderModel[]> {
 
 export async function chatCompletion(
   apiKey: string,
-  request: ChatCompletionRequest
+  request: ChatCompletionRequest,
+  signal?: AbortSignal,
 ): Promise<ChatCompletionResponse> {
   if (!apiKey) {
     throw new Error('OpenRouter chatCompletion called without an apiKey');
@@ -161,12 +162,16 @@ export async function chatCompletion(
     method: 'POST',
     headers: authHeaders(apiKey),
     body: JSON.stringify(request),
+    signal,
   });
 }
 
 export const openrouterProvider: ModelProvider = {
   slug: PROVIDER_SLUG,
   displayName: PROVIDER_DISPLAY_NAME,
+  // V23-CC1 intake chain: OpenRouter GPT-6 Luna step. Canonical key; extra
+  // aliases mirror the ledger's balance-probe family (no new secret name).
+  envCandidates: ['OPENROUTER_API_KEY', 'OPENROUTER_KEY', 'OR_API_KEY'],
   fetchModels,
   chatCompletion,
 };

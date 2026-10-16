@@ -1,0 +1,123 @@
+name: Presentation engine drift signal
+
+# Item 7 (B7 two-copies design, section 3.3): the weekly drift signal.
+# presentation_job/ is generated from the canonical package in
+# trevorotts1/openclaw-onboarding, pinned in
+# presentation_job/PARITY-MANIFEST.json. This workflow compares the pin
+# against onboarding main's package tree every Monday; when the pin is
+# behind, it regenerates the copy on the engine-sync/auto-drift branch
+# and opens (or updates) a DRAFT sync PR for a human to review.
+#
+# Sync PRs are never auto-merged and never marked ready here: they ride
+# the batch train on the owner's word, like every other PR in this
+# system. The human review surface is the PR body's drift summary (files
+# added / removed / changed between pins), not the raw 200-file diff.
+#
+# The branch is a PURE FUNCTION of (this repo's main, the canonical pin):
+# each run rebuilds it from main and force-pushes with lease. There is
+# never anything on it worth preserving by hand; hand edits to
+# presentation_job/ fail the parity gate anyway.
+#
+# REQUIREMENT: checking out the onboarding repo needs read access to it.
+# If trevorotts1/openclaw-onboarding is private in this context, create a
+# fine-grained PAT with read-only Contents access to that repo and store
+# it as the ENGINE_SYNC_TOKEN secret; without it the checkout step fails
+# loudly, which is the intended signal (this workflow was authored with
+# the Item 7 build and its first run should be supervised).
+
+on:
+  schedule:
+    # Mondays 07:15 UTC, just after the OpenClaw contract guard's run.
+    - cron: '15 7 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  drift:
+    name: Weekly canonical drift check + draft sync PR
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+
+      - name: Checkout the canonical onboarding repo
+        uses: actions/checkout@v4
+        with:
+          repository: trevorotts1/openclaw-onboarding
+          path: _onboarding
+          token: ${{ secrets.ENGINE_SYNC_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Compare the pin against canonical main
+        id: drift
+        run: |
+          set -uo pipefail
+          python3 scripts/sync-presentation-engine.py drift --source _onboarding \
+            | tee "$RUNNER_TEMP/drift.txt"
+          CODE=${PIPESTATUS[0]}
+          if [ "$CODE" -eq 0 ]; then
+            echo "Pin is current. Nothing to do."
+            echo "drift=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$CODE" -ne 3 ]; then
+            echo "ERROR: drift check itself failed (exit $CODE) -- see output above"
+            exit "$CODE"
+          fi
+          echo "drift=true" >> "$GITHUB_OUTPUT"
+          SHA="$(git -C _onboarding rev-parse HEAD)"
+          echo "canonical_sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Drift found against canonical $SHA; a draft sync PR follows."
+
+      - name: Regenerate the copy at the new pin and open a draft PR
+        if: steps.drift.outputs.drift == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CANONICAL_SHA: ${{ steps.drift.outputs.canonical_sha }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          BRANCH="engine-sync/auto-drift"
+          git checkout -B "$BRANCH"
+          bash scripts/sync-presentation-engine.sh sync \
+            --source _onboarding --commit "$CANONICAL_SHA" \
+            | tee "$RUNNER_TEMP/sync.txt"
+          # The generated tree must pass its own gate before it is proposed.
+          python3 scripts/sync-presentation-engine.py verify
+          if [ -z "$(git status --porcelain -- presentation_job)" ]; then
+            echo "Sync produced no changes (pin moved without package changes). Done."
+            exit 0
+          fi
+          git add presentation_job
+          git commit -m "chore(presentations): sync vendored engine to canonical ${CANONICAL_SHA:0:12} (generated)"
+          git push --force-with-lease origin "$BRANCH"
+          {
+            echo "Generated sync of the vendored presentation engine (Item 7)."
+            echo ""
+            echo "Canonical pin: trevorotts1/openclaw-onboarding@$CANONICAL_SHA"
+            echo ""
+            echo "Drift that prompted this PR:"
+            echo '```'
+            cat "$RUNNER_TEMP/drift.txt"
+            echo '```'
+            echo ""
+            echo "Sync summary:"
+            echo '```'
+            cat "$RUNNER_TEMP/sync.txt"
+            echo '```'
+            echo ""
+            echo "Review the summaries above, not the raw diff: presentation_job/"
+            echo "is generated output and PARITY-MANIFEST.json is its proof."
+            echo "This PR is a draft and merges only through the batch train."
+          } > "$RUNNER_TEMP/pr-body.md"
+          EXISTING="$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number')"
+          if [ -n "$EXISTING" ]; then
+            echo "Draft PR #$EXISTING already open for $BRANCH; the push updated it."
+          else
+            gh pr create --draft --base main --head "$BRANCH" \
+              --title "chore(presentations): sync vendored engine to canonical ${CANONICAL_SHA:0:12} (generated, draft)" \
+              --body-file "$RUNNER_TEMP/pr-body.md"
+          fi

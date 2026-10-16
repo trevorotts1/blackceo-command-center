@@ -54,13 +54,15 @@ const OPERATOR_ID = '5252140759';
 const CLIENT_ID = '8959124298';
 
 /** Build a throwaway workspace with an openclaw.json carrying `allowFrom`. */
-function makeBox(allowFrom: string[]): string {
+function makeBox(allowFrom: string[], owner = ''): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-notify-opbox-'));
   const workspace = path.join(root, 'workspace');
   fs.mkdirSync(workspace, { recursive: true });
   fs.writeFileSync(
     path.join(root, 'openclaw.json'),
-    JSON.stringify({ channels: { telegram: { allowFrom } } }),
+    // The owner is an explicit record (env.vars), never allowFrom order.
+    JSON.stringify({ channels: { telegram: { allowFrom } },
+      env: { vars: owner ? { OPENCLAW_OWNER_CHAT_ID: owner } : {} } }),
     'utf8',
   );
   process.env.OPENCLAW_WORKSPACE_PATH = workspace;
@@ -126,7 +128,7 @@ function cleanEnv(): void {
 test('MSG-08: on a CLIENT box the client still receives the notice; the operator id is never used as owner and never DM\'d, even with the flag set', async () => {
   cleanEnv();
   // A CLIENT box: allowFrom holds the client, not the operator.
-  makeBox([CLIENT_ID]);
+  makeBox([CLIENT_ID], CLIENT_ID);
   // Deliberately set the operator-owner opt-in too — it must NOT be able to
   // override a real, resolvable client owner. A client box should never carry
   // this flag in practice, but the fallback's own guard (only engages when

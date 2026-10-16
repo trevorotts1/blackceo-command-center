@@ -5,9 +5,11 @@
 
 ## What was closed
 
-**42 routes**, reachable with no credential via a forged same-origin header, are now gated by `BEARER_REQUIRED_WRITE_ROUTES` in `src/middleware.ts`. A caller without a valid `Authorization: Bearer` token receives a 401 on those routes. The exact 42 routes are listed in the `BEARER_REQUIRED_WRITE_ROUTES` array (39 regex patterns; three use the `(\/[^/]+)?` collection-or-item form and each covers two routes).
+**49 route templates**, reachable with no credential via a forged same-origin header, are now gated by `BEARER_REQUIRED_WRITE_ROUTES` in `src/middleware.ts`. A caller without a valid `Authorization: Bearer` token receives a 401 on those routes. The exact templates are listed in the `BEARER_REQUIRED_WRITE_ROUTES` array (45 regex patterns; four use the `(\/[^/]+)?` collection-or-item form and each covers two templates: 41 single + 4 × 2 = 49). One of the 49 — `/api/tasks/{id}/operator-preengine-recovery` — is webhook-gated as well, so 48 templates are bearer-ONLY covered.
 
 > **Updated 2026-09-08 (F38, W2 batch).** One pattern added for `POST /api/social/media/{id}` (company-bound asset-register ingest; the browser player only ever GETs, so no legitimate tokenless POST caller exists). Closed set grows 38 -> 42; the anti-rot test at `src/lib/__tests__/passthrough-write-scope.test.ts` asserts the live census (114 mutating routes, 6 webhook-protected, 108 non-webhook).
+>
+> **Updated 2026-09-14 (WS-C, Skill 69 archify).** One collection-or-item pattern added for `POST /api/archify-runs` + `PATCH /api/archify-runs/{id}` (the Skill 69 archify diagram producer's board door, a structural mirror of `/api/ad-campaigns`; an external Node CLI drives it, the browser interface never calls it). Adding this feature's two route files required re-deriving the U052 census. The lock test was GREEN on the pre-feature base (124 mutating, 7 webhook-protected, 117 non-webhook; 44 patterns → 47 templates, 46 bearer-ONLY) and is GREEN 20/20 again at the re-derived literals: **126 mutating `/api/*` routes, 7 webhook-protected (5 static + 2 dynamic), 119 non-webhook; 45 patterns → 49 templates (41 single + 4 collection-or-item × 2), one of them webhook-gated, leaving 48 bearer-ONLY covered.** The prose counts above this note had drifted stale independently of this change — they still read 42 routes via 39 patterns while the base array already held 44 patterns → 47 templates — and are corrected to the measured numbers.
 
 ## What remains open — 63 routes
 
@@ -62,6 +64,20 @@ MR-23 added a signed `mc_csrf_token` double-submit cookie (httpOnly + SameSite=S
 Therefore the direct-to-origin residual is closed **only by Part B** (`REQUIRE_CF_ACCESS=true`): Layer 1 rejects any request lacking the Cloudflare-Access edge assertion before the passthrough runs. The CSRF cookie is defense-in-depth for the cross-site and unsigned-forgery vectors; it is not a substitute for CF Access on the direct-forgery vector.
 
 **Secret hygiene (fix2).** The CSRF cookie is HMAC-signed with a key that resolves from a DEDICATED var first — `MC_CSRF_COOKIE_SECRET` — then falls back to `MC_INTERVIEW_COOKIE_SECRET` → `MC_API_TOKEN` → `WEBHOOK_SECRET` → a public dev fallback (which hard-locks sign/verify in production). The dedicated var decouples CSRF signing from the API token lifecycle: `MC_API_TOKEN` is the credential an external caller presents, so sharing it as an HMAC key would widen the blast radius of a token leak into cookie forgery. Operators should set `MC_CSRF_COOKIE_SECRET` explicitly (see `.env.example`). This does not close the harvest-and-replay residual above — only `REQUIRE_CF_ACCESS=true` does — but it keeps the CSRF signature from being keyed on a credential that crosses the trust boundary.
+
+### CSF-006 status (long-sitting self-healing re-mint)
+
+Problem fixed by this wave: the Cross-Site Request Forgery cookie lives 1 hour (`src/lib/csrf-protection.ts:53`, `CSRF_COOKIE_TTL_SECONDS = 60 * 60`) and this tree re-mints it only on non-application-programming-interface page responses (`src/middleware.ts:866-887` `setCsrfCookieIfMissing`, called at `src/middleware.ts:493`, `src/middleware.ts:820`, and `src/middleware.ts:832`). A client answering questions on one interview page for longer than an hour therefore presents an expired token on the next save: the mutating same-origin check rejects it (`src/middleware.ts:623-632`, `missing-csrf-token`), and `submitInterviewAnswer` in `src/components/interview/QuestionCard.tsx:86-129` does not retry — `:109` maps any 401/403 to the sign-in help string, so a valid long sitting reads as a sign-in failure and the typed answer is never retried.
+
+Narrowed mint surface after this wave (specified end state; the re-mint behavior and its tests are owned by CSF-004, cited here rather than re-proved):
+
+1. Non-application-programming-interface page responses — pre-existing. `setCsrfCookieIfMissing` mints when no valid token is present, unchanged.
+2. Same-origin application-programming-interface responses — tenant-verified, new. A same-origin interview application-programming-interface response whose tenant verifies may carry a fresh `Set-Cookie: mc_csrf_token`, so an active sitting refreshes its token without a page load.
+3. Authentic-but-expired — new, narrow. Only a presented token that is validly signed with role `csrf` but past `exp` qualifies for a one-time re-mint with a single retry of the save; the typed answer is preserved across the retry.
+
+Why (3) is not harvest-and-replay: re-mint applies to validly signed tokens only. A forged, absent, or wrong-role token gets no re-mint and the request still fails closed; that invariant is pinned by `tests/unit/csf-expired-mid-sitting.test.ts` scenarios 2 and 3 (forged/absent/wrong-role gets no re-mint). The signature still proves only that the server minted the token, so the direct-to-origin residual named in the MR-23 section above is unchanged by this work and remains closed only by Part B (`REQUIRE_CF_ACCESS=true`).
+
+Tree note (this lane, main `5809dd115`): in this checkout `src/app/api/interview/answer/route.ts` sets no cookie and imports neither `signCsrfToken` nor `verifyCsrfToken` (the middleware owns the check), `src/components/interview/QuestionCard.tsx` still has no retry, and `tests/unit/csf-expired-mid-sitting.test.ts` is absent — the (2)/(3) behavior above is the wave-specified end state per the cited test path, not a re-verified landing in this tree.
 
 ### Interface call census
 

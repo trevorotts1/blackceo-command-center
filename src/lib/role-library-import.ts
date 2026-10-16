@@ -47,8 +47,7 @@ import {
   safeStatSync,
 } from './fs/safe-fs';
 import { queryAll, queryOne, run, transaction } from '@/lib/db';
-import type { SOPStep, SOP } from '@/lib/sops';
-import { storeEmbeddingForSOP } from '@/lib/sop-embeddings';
+import type { SOPStep } from '@/lib/sops';
 
 export const ROLE_LIBRARY_SOURCE = 'role-library';
 
@@ -469,27 +468,24 @@ export interface ImportOptions {
  * Returns a per-row summary. Wrapped in a single transaction so a partial
  * failure rolls back cleanly.
  *
- * After the transaction, asynchronously queues embedding computation for all
- * inserted/updated rows (fire-and-forget; errors are swallowed per the
- * storeEmbeddingForSOP contract — a missing key never breaks imports).
+ * Makes NO embedding calls. The role library is "no embeddings by design"
+ * (onboarding docs/EMBEDDINGS.md); SOP vectors are built once centrally and
+ * shipped as the sop-embeddings release asset. This import runs on every
+ * update, so a per-row embed here re-billed the client's own key for the whole
+ * role library on every roll.
  */
 export function importRoleLibrary(opts: ImportOptions = {}): ImportResult {
   const departmentsPath = resolveDepartmentsPath(opts.departmentsPath);
   const howtos = discoverRoleHowTos(departmentsPath);
 
-  const result = transaction((): ImportResult & { _insertedOrUpdatedSlugs: string[] } => {
+  return transaction((): ImportResult => {
     const items: ImportedSOPSummary[] = [];
     const seenSlugs = new Set<string>();
-    const insertedOrUpdatedSlugs: string[] = [];
 
     for (const howto of howtos) {
       const parsed = parseRoleHowTo(howto);
       seenSlugs.add(parsed.slug);
-      const summary = upsertRoleSOP(parsed);
-      items.push(summary);
-      if (summary.action === 'inserted' || summary.action === 'updated') {
-        insertedOrUpdatedSlugs.push(parsed.slug);
-      }
+      items.push(upsertRoleSOP(parsed));
     }
 
     let pruned = 0;
@@ -515,22 +511,6 @@ export function importRoleLibrary(opts: ImportOptions = {}): ImportResult {
       skipped: items.filter((i) => i.action === 'skipped').length,
       pruned,
       items,
-      _insertedOrUpdatedSlugs: insertedOrUpdatedSlugs,
     };
   });
-
-  // Fire-and-forget embedding for all rows that were written this run.
-  // The transaction is done; reads here are safe. Errors are swallowed.
-  if (result._insertedOrUpdatedSlugs.length > 0) {
-    for (const slug of result._insertedOrUpdatedSlugs) {
-      const sop = queryOne<SOP>(`SELECT * FROM sops WHERE slug = ? AND deleted_at IS NULL`, [slug]);
-      if (sop) {
-        storeEmbeddingForSOP(sop).catch(() => {/* logged inside */});
-      }
-    }
-  }
-
-  // Strip internal field before returning
-  const { _insertedOrUpdatedSlugs: _dropped, ...publicResult } = result;
-  return publicResult;
 }

@@ -83,7 +83,18 @@ export const GOVERNANCE_PERSONA_FALLBACK = "covey-7-habits";
 // box, so a 30s cap turned a slow-but-valid selection into a null result (naked
 // task). 60s gives the real selection room to land before the retry/fallback
 // chain engages.
-export const PERSONA_SELECT_TIMEOUT_MS = 60_000;
+//
+// Raised 60s -> 300s (live stall 2026-09): the --blend path makes ~20+ SEQUENTIAL
+// LLM scoring calls and was measured at 47s, 206s and 258s on a loaded client box.
+// At 60s the CC killed a selection that WOULD have landed and pinned a fallback
+// persona with NO bundle (persona_blend_missing), leaving the content task stuck
+// behind the persona_bundle_required dispatch gate forever. A kill must mean
+// "genuinely hung", not "slower than a fast box".
+// Env: PERSONA_SELECT_TIMEOUT_MS (ms; non-numeric / 0 → the 300s default).
+// NOTE: any leased job that drives the selector must budget for this — the
+// persona-backfill job carries an explicit 30-minute lease (jobs/scheduler.ts).
+export const PERSONA_SELECT_TIMEOUT_MS =
+  parseInt(process.env.PERSONA_SELECT_TIMEOUT_MS || '', 10) || 300_000;
 
 /**
  * D8 — true only when `filePath` exists, is readable, AND parses as valid JSON.
@@ -493,7 +504,7 @@ function normalizeAudienceConfidence(raw: unknown): number {
 function normalizeResolvedAudience(raw: unknown): ResolvedAudience | null {
   if (!raw || typeof raw !== "object") return null;
   const a = raw as Record<string, unknown>;
-  const validSources: AudienceConfirmSource[] = ["onboarding_icp", "operator_confirmed", "asked"];
+  const validSources: AudienceConfirmSource[] = ["onboarding_icp", "operator_confirmed", "asked", "task_named", "owner_default", "best_guess"];
   const source = (validSources.includes(a.source as AudienceConfirmSource)
     ? a.source
     : "asked") as AudienceConfirmSource;
@@ -698,8 +709,9 @@ export function persistPersonaBundle(
        catalog_version=excluded.catalog_version,confirm_state=excluded.confirm_state,created_at=excluded.created_at`,
       [taskId,JSON.stringify(persistedBundle),catalogVersion,state,requestedAt]);
     run(`UPDATE tasks SET voice_persona_id=?,topic_persona_id=?,audience_id=?,audience_label=?,
-         audience_source=?,voice_collapsed=?,blend_directive=?,comms_audience_source=?,comms_type=? WHERE id=?`,
-      [voicePersonaId,topicPersonaId,audienceId,audienceLabel,state === 'confirmed' ? 'operator_confirmed' : audienceSource,
+         audience_source=CASE WHEN ?=1 THEN (CASE WHEN audience_source IN ('task_named','owner_default','best_guess') THEN audience_source ELSE 'operator_confirmed' END) ELSE ? END,
+         voice_collapsed=?,blend_directive=?,comms_audience_source=?,comms_type=? WHERE id=?`,
+      [voicePersonaId,topicPersonaId,audienceId,audienceLabel,state === 'confirmed' ? 1 : 0,audienceSource,
        voice.collapsed ? 1 : 0,blendDirective,commsAudienceSource,commsType,taskId]);
     return true;
   })();

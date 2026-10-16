@@ -1,0 +1,8 @@
+{
+  "license": "CC-BY-NC-SA 4.0",
+  "query": "widget forging best practices 2026",
+  "results": [
+    { "url": "https://example.com/marginalia-forging-standards", "title": "Forging Tolerance Standards 2026", "description": "Tolerance checks at each heat, single-owner sign-off per batch." },
+    { "url": "https://example.com/marginalia-heat-treat-qa", "title": "Heat Treat QA Handbook", "description": "Post-quench hardness sampling." }
+  ]
+}

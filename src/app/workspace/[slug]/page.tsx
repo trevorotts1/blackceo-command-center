@@ -20,6 +20,7 @@ import { AnthologyBoardDriftBanner } from '@/components/anthology/BoardDriftBann
 import { Skill6BoardDriftBanner } from '@/components/skill6/BoardDriftBanner';
 import { PersonaGroundingBanner } from '@/components/skill6/PersonaGroundingBanner';
 import { unwrapAgents } from '@/lib/api-envelope';
+import { boardStateDisagrees } from '@/lib/board/a41-row-fields';
 import type { Task, Workspace } from '@/lib/types';
 
 export default function WorkspacePage() {
@@ -81,12 +82,12 @@ export default function WorkspacePage() {
       if (!res.ok) return;
       const fresh: Task[] = await res.json();
       const current = useMissionControl.getState().tasks;
-      const changed =
-        fresh.length !== current.length ||
-        fresh.some((t) => {
-          const c = current.find((ct) => ct.id === t.id);
-          return !c || c.status !== t.status;
-        });
+      // A41 — same shared comparator the unscoped catch-up uses
+      // (src/lib/board/a41-row-fields.ts, via src/hooks/useSSE.ts). This site
+      // previously compared ONLY status, so a department board sat stale on
+      // every non-status change: provider provenance, a persona mismatch, a
+      // dispatch hold, a plan or scope edit - none of which move `status`.
+      const changed = boardStateDisagrees(fresh, current);
       if (changed) {
         debug.sse(
           `Reconnect catch-up (${routeDepartment ?? 'ceo'}): board changed, reconciling store`,

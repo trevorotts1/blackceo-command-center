@@ -10,6 +10,8 @@
 # Schedule (crontab): */5 * * * *  /path/to/scripts/watchdog-cc.sh
 # Env: WATCHDOG_PORT  WATCHDOG_CANONICAL_DIR  WATCHDOG_ALERT_LOG  WATCHDOG_ALERT_HOOK
 #      WATCHDOG_SELF_HEAL   (default: 0 — set to 1 to enable self-healing on RED)
+#      WATCHDOG_CC_APP_NAMES  WATCHDOG_SCHEDULER_MAX_ATTEMPTS
+#      WATCHDOG_SCHEDULER_BACKOFF_BASE   (ISSUE-04 scheduler-stall restart)
 #
 # PRES-045 / CC-H1 (refusal protection, this revision):
 #
@@ -35,6 +37,20 @@
 #   RETAINED but hardened: it still clears only the three CC app names and
 #   recreates the canonical one; `pm2 delete all` remains forbidden.
 #
+#   SCHEDULER-STALL RESTART (ISSUE-04, this revision): a RED classified
+#   `scheduler-stalled` (checks.scheduler_liveness.pass == false in the health
+#   JSON: the app answers HTTP, everything else is green, and its in-process
+#   node-cron loop has stopped ticking) is repaired by AT MOST ONE bounded
+#   `pm2 restart <name> --update-env` per incident per backoff window, on an
+#   allowlisted CC app name that pm2 already knows (WATCHDOG_CC_APP_NAMES).
+#   It is NEVER a rebuild, NEVER `pm2 restart all`, and NEVER a name taken
+#   from the health JSON. Its attempt budget lives in its own state file and
+#   resets on the GREEN recovery pass, so it is per-incident and not a
+#   lifetime cap. A restart is the only possible repair for this class: the
+#   cron loop is registered once at process start, so nothing inside the
+#   running process can revive it, and the sweep that would have alerted on
+#   the stall is itself on the loop that died.
+#
 #   NEVER acts on exit 3 (UNKNOWN) — preserves the exit-3=no-action contract;
 #   persistent-unknown escalation is produced by cc-health-check.sh itself
 #   (it exits 1 with "persistent_unknown":true once the deadline passes), and
@@ -54,6 +70,21 @@ WATCHDOG_ALERT_HOOK="${WATCHDOG_ALERT_HOOK:-}"
 WATCHDOG_SELF_HEAL="${WATCHDOG_SELF_HEAL:-0}"
 # PRES-045: durable state dir for incident dedupe + recovery + rebuild lock.
 CC_ROOT_DEFAULT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# Public-URL fallback (2026-09-17): cc-health-check.sh reports row 27 UNKNOWN
+# (exit 3) when CC_PUBLIC_URL is unset, and this watchdog NEVER acts on exit 3.
+# Measured on the operator Mac: every scheduled run was UNKNOWN, so a stalled
+# scheduler could never be repaired. The app already knows its public URL — it
+# is in its own env file — so read it from there when the caller did not set it.
+# The value is never printed.
+if [[ -z "${CC_PUBLIC_URL:-}" ]]; then
+  for _envf in "${CC_ROOT_DEFAULT}/.env.local" "${CC_ROOT_DEFAULT}/.env"; do
+    if [[ -f "$_envf" ]]; then
+      _pub="$(grep -E '^CC_PUBLIC_URL=' "$_envf" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"'"'"' ' || true)"
+      if [[ -n "$_pub" ]]; then CC_PUBLIC_URL="$_pub"; export CC_PUBLIC_URL; break; fi
+    fi
+  done
+  unset _envf _pub
+fi
 WATCHDOG_STATE_DIR="${WATCHDOG_STATE_DIR:-${CC_ROOT_DEFAULT}/.cc-state}"
 WATCHDOG_MIN_FREE_MB="${WATCHDOG_MIN_FREE_MB:-2048}"
 WATCHDOG_REBUILD_BACKOFF_BASE="${WATCHDOG_REBUILD_BACKOFF_BASE:-300}"
@@ -62,6 +93,15 @@ WATCHDOG_REBUILD_MAX_ATTEMPTS="${WATCHDOG_REBUILD_MAX_ATTEMPTS:-3}"
 # atomic deploy; it must be a REBUILD, never a bare `pm2 start` of the same
 # stale tree (CC-H1: "never repeatedly start the unchanged build").
 WATCHDOG_REBUILD_CMD="${WATCHDOG_REBUILD_CMD:-bash scripts/atomic-deploy.sh}"
+# ISSUE-04 scheduler-stall restart budget. Deliberately separate knobs from the
+# rebuild budget above: a restart is far cheaper than a rebuild, but it is also
+# the action most likely to be wrong, so it stays bounded and backed off.
+WATCHDOG_SCHEDULER_MAX_ATTEMPTS="${WATCHDOG_SCHEDULER_MAX_ATTEMPTS:-3}"
+WATCHDOG_SCHEDULER_BACKOFF_BASE="${WATCHDOG_SCHEDULER_BACKOFF_BASE:-900}"
+# The ONLY pm2 app names this script will ever restart. `pm2 restart all` and
+# any name discovered at runtime are forbidden: a wrong name here restarts the
+# OpenClaw gateway or a client worker on the same box.
+WATCHDOG_CC_APP_NAMES="${WATCHDOG_CC_APP_NAMES:-blackceo-command-center cc-prod command-center mission-control}"
 
 if [[ ! -x "$HEALTH_CHECK" ]]; then
   printf 'FATAL: cc-health-check.sh not found at %s\n' "$HEALTH_CHECK" >&2; exit 1
@@ -71,8 +111,14 @@ mkdir -p "$WATCHDOG_STATE_DIR" 2>/dev/null || true
 STATE_FILE="$WATCHDOG_STATE_DIR/incidents.json"
 REBUILD_LOCK="$WATCHDOG_STATE_DIR/rebuild.lock"
 REBUILD_STATE="$WATCHDOG_STATE_DIR/rebuild-state.json"
+# ISSUE-04: separate bookkeeping for the scheduler-stall restart, so it can
+# never consume or reset the stale-build rebuild budget above.
+SCHED_STATE="$WATCHDOG_STATE_DIR/scheduler-restart-state.json"
 
 TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+# Heartbeat: install-watchdog-cc.sh reads it to see that a scheduler it cannot
+# inspect (the host's crontab, for a container) is running this script.
+printf '%s %s\n' "$TS" "${WATCHDOG_SCHEDULED_BY:-local}" > "$WATCHDOG_STATE_DIR/watchdog-last-run" 2>/dev/null || true
 
 # ── state helpers (durable, crash-tolerant; single-line JSON) ────────────────
 state_get() {  # state_get FILE KEY DEFAULT
@@ -129,20 +175,118 @@ elif refusal.get('receipt_current') or (refusal.get('receipt_present') and refus
     print("refusal-receipt")
 elif d.get('service_status') in ('stopped', 'errored'):
     print("service-" + str(d.get('service_status')))
+elif d.get('service_status') == 'absent':
+    print("no-pm2-app")
 elif 'unreachable' in detail:
     print("unreachable")
-elif d.get('pm2_topology', {}).get('app_count', 0) == 0:
+elif any((d.get('checks') or {}).get(k, {}).get('pass') is False
+         and (d.get('checks') or {}).get(k, {}).get('indeterminate') is not True
+         and 'applied_count' not in (d.get('checks') or {}).get(k, {})
+         for k in ('migrations', 'database_path')):
+    # CCG-1: the app answers HTTP but its database does not work (a native
+    # better-sqlite3 built for another node, a bad DATABASE_PATH). The deep
+    # health JSON carries no pm2_topology in this state, which used to fall
+    # into the no-pm2-app label below and hide the cause. A check that FAILED
+    # on a pending-migration count carries applied_count and is not this class.
+    print("database-failed")
+elif 'pm2_topology' in d and (d.get('pm2_topology') or {}).get('app_count', 0) == 0:
+    # Only a report that actually counted pm2 apps may say there are none.
     print("no-pm2-app")
+elif (d.get('checks') or {}).get('scheduler_liveness', {}).get('pass') is False \
+        and (d.get('checks') or {}).get('scheduler_liveness', {}).get('indeterminate') is not True:
+    # ISSUE-04: the app answers HTTP and every other gating check is fine, but
+    # its in-process node-cron loop has stopped ticking. Ranked BELOW every
+    # class above on purpose: a stopped service, a refusal receipt or a missing
+    # pm2 app all explain a silent scheduler, and their own repair paths are
+    # the correct ones. This class is only for the case where the box looks
+    # alive and the scheduler alone is dead.
+    print("scheduler-stalled")
 else:
     print("red")
 PYEOF
 }
 
+# ── self-heal triggers, read from the parsed health JSON ─────────────────────
+# FXCC-1 / D21: the health JSON is pretty-printed (`"app_count": 2`), so the old
+# `grep '"app_count":[2-9]'` and `grep '"crash_looper":true'` could never match
+# and a real zombie or crash loop was never healed. Parse it. Prints `zombie`
+# when pm2_topology.app_count > 1 and `crash_looper` when the report carries a
+# crash_looper flag or a non-empty pm2_topology.crash_loopers list. The pm2
+# analyzer ignores pm2 modules (D14), so pm2-logrotate cannot read as a second
+# app here; keep D14 landed before or with this.
+heal_reasons() {
+  python3 -s - "$1" <<'PYEOF' 2>/dev/null || true
+import json, sys
+try:
+    d = json.loads(sys.argv[1])
+    t = d.get('pm2_topology') or {}
+    n = t.get('app_count')
+    if isinstance(n, int) and n > 1:
+        print("zombie")
+    if d.get('crash_looper') is True or t.get('crash_looper') is True or t.get('crash_loopers'):
+        print("crash_looper")
+except Exception:
+    pass
+PYEOF
+}
+
+# ── guarded pm2 save ─────────────────────────────────────────────────────────
+# `pm2 save` REWRITES dump.pm2 from whatever is running right now. When this
+# script starts the daemon and the Command Center at gateway-up, it can run
+# BEFORE the box's own startup has run `pm2 resurrect`; an unguarded save then
+# overwrites the dump with the Command Center alone and every other app (e.g.
+# ghl-community-mcp) is silently dropped at boot. So: never save a list that
+# has fewer apps than the existing dump. Apps in the dump that are not running
+# (other than the Command Center names this script manages itself) mean the
+# resurrect has not happened yet -> SKIP the save and say why; the dump stays
+# intact for the resurrect that is coming. Unreadable pm2 list -> skip too.
+pm2_save_guarded() {
+  local dump="${PM2_HOME:-$HOME/.pm2}/dump.pm2" missing
+  if [[ -s "$dump" ]]; then
+    missing="$(pm2 jlist 2>/dev/null | python3 -s -c '
+import json, sys
+raw = sys.stdin.read()
+run = None
+for i, ch in enumerate(raw):
+    if ch == "[":
+        try:
+            run = json.JSONDecoder().raw_decode(raw[i:])[0]; break
+        except ValueError:
+            pass
+if run is None:
+    sys.exit(3)
+cc = set(sys.argv[2].split())
+want = {a.get("name") for a in json.load(open(sys.argv[1])) if a.get("name")}
+have = {p.get("name") for p in run}
+print(" ".join(sorted(want - have - cc)))
+' "$dump" "$WATCHDOG_CC_APP_NAMES")" || {
+      printf '[watchdog-cc] pm2 save SKIPPED: cannot compare the running list with %s\n' "$dump" >&2
+      return 0
+    }
+    if [[ -n "$missing" ]]; then
+      printf '[watchdog-cc] pm2 save SKIPPED: %s lists app(s) not running yet (%s); saving now would drop them. Leaving the dump for pm2 resurrect.\n' "$dump" "$missing" >&2
+      return 0
+    fi
+  fi
+  pm2 save >/dev/null 2>&1 || true
+}
+
 ARGS=(--port "$WATCHDOG_PORT" --json-only)
+[[ -n "${CC_PUBLIC_URL:-}" ]] && ARGS+=(--public-url "$CC_PUBLIC_URL")
 [[ -n "$WATCHDOG_CANONICAL_DIR" ]] && ARGS+=(--canonical-dir "$WATCHDOG_CANONICAL_DIR")
+
+# An UNKNOWN that never clears must become RED: cc-health-check.sh escalates
+# only when told when it started, so the first sighting is kept here.
+UNKNOWN_SINCE_FILE="$WATCHDOG_STATE_DIR/unknown-since"
+[[ -s "$UNKNOWN_SINCE_FILE" ]] && ARGS+=(--unknown-since "$(head -c 40 "$UNKNOWN_SINCE_FILE")")
 
 RESULT_JSON=""; RESULT_EXIT=0
 RESULT_JSON=$(bash "$HEALTH_CHECK" "${ARGS[@]}") || RESULT_EXIT=$?
+if [[ "$RESULT_EXIT" -eq 0 ]]; then
+  rm -f "$UNKNOWN_SINCE_FILE" 2>/dev/null || true
+elif [[ "$RESULT_EXIT" -eq 3 && ! -s "$UNKNOWN_SINCE_FILE" ]]; then
+  printf '%s\n' "$TS" > "$UNKNOWN_SINCE_FILE" 2>/dev/null || true
+fi
 
 # ── GREEN: silence, but archive any open incident exactly once ────────────────
 if [[ "$RESULT_EXIT" -eq 0 ]]; then
@@ -151,6 +295,15 @@ if [[ "$RESULT_EXIT" -eq 0 ]]; then
     printf '[watchdog-cc] RECOVERY at %s — incident "%s" cleared (verified GREEN after RED)\n' "$TS" "$OPEN" >&2
     printf '{"watchdog_recovery":true,"timestamp":"%s","incident":"%s","port":%s}\n' "$TS" "$OPEN" "$WATCHDOG_PORT" >> "$WATCHDOG_ALERT_LOG"
     state_set "$STATE_FILE" open_incident ''
+    # ISSUE-04: a verified GREEN after a scheduler-stall incident means the
+    # restart worked, so that incident's restart budget is spent and closed.
+    # Without this reset the attempt counter would be a LIFETIME cap, and the
+    # fourth stall a year later would find the budget already exhausted.
+    if [[ "$OPEN" == "scheduler-stalled" ]]; then
+      state_set "$SCHED_STATE" scheduler_restart_attempts 0
+      state_set "$SCHED_STATE" scheduler_recovered_at "$TS"
+      printf '[watchdog-cc] SCHEDULER: sweeps are ticking again; restart budget reset for the next incident\n' >&2
+    fi
     # Refusal receipt resolution on verified recovery is the health check's
     # job (it verifies build digest + online state); the watchdog only
     # archives its own incident bookkeeping here.
@@ -286,6 +439,126 @@ except Exception: print('yes')" "$REBUILD_STATE" "$WATCHDOG_REBUILD_MAX_ATTEMPTS
     fi
   fi
 
+  # ── SCHEDULER-STALL RESTART (opt-in, ISSUE-04) ─────────────────────────────
+  # The app answers HTTP, every other gating check passes, and its in-process
+  # node-cron loop has stopped ticking. A restart is the ONLY repair: the loop
+  # is registered at process start (src/instrumentation.ts), so nothing inside
+  # the running process can bring it back, and the cron job that would have
+  # alerted on the stall is itself on the dead loop.
+  #
+  # BOUNDED, exactly like the rebuild path above and for the same reason:
+  #   * ONE restart per incident per backoff window, attempts counted durably
+  #   * exponential backoff from the last attempt (capped at 24h)
+  #   * a hard attempt cap, after which a human is required
+  #   * ONLY a pm2 app name from WATCHDOG_CC_APP_NAMES, and only one that pm2
+  #     already knows about. Never `pm2 restart all`, never a name read out of
+  #     the health JSON, never a rebuild.
+  # The counter resets on the GREEN recovery pass, so a stall months later
+  # still gets its own budget.
+  if [[ "$WATCHDOG_SELF_HEAL" == "1" && "$KEY" == "scheduler-stalled" ]]; then
+    SCHED_ATTEMPTS=$(python3 -s -c "import json,sys
+try: print(int(json.load(open(sys.argv[1])).get('scheduler_restart_attempts', 0)))
+except Exception: print(0)" "$SCHED_STATE" 2>/dev/null || echo 0)
+    SCHED_OK=$(python3 -s -c "
+import json, sys
+try: print('yes' if int(json.load(open(sys.argv[1])).get('scheduler_restart_attempts', 0)) < int(sys.argv[2]) else 'no')
+except Exception: print('yes')" "$SCHED_STATE" "$WATCHDOG_SCHEDULER_MAX_ATTEMPTS" 2>/dev/null || echo yes)
+    SCHED_DUE=$(python3 -s -c "
+import sys, datetime, json
+def _parse_ts(ts):
+    s = (ts or '').strip()
+    if not s:
+        raise ValueError('empty timestamp')
+    if s.endswith('Z'):
+        s = s[:-1] + '+00:00'
+    dt = datetime.datetime.fromisoformat(s)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt
+try:
+    with open(sys.argv[1]) as fh: d = json.load(fh)
+    n = int(d.get('scheduler_restart_attempts', 0))
+    if n == 0: print('yes'); sys.exit(0)
+    dt = _parse_ts(d.get('last_scheduler_restart_at', ''))
+    age = int((datetime.datetime.now(datetime.timezone.utc) - dt).total_seconds())
+    base = int(sys.argv[2])
+    backoff = min(base * (2 ** (n - 1)), 86400)
+    print('yes' if age >= backoff else 'no')
+except Exception:
+    print('yes')" "$SCHED_STATE" "$WATCHDOG_SCHEDULER_BACKOFF_BASE" 2>/dev/null || echo yes)
+
+    if [[ "$SCHED_OK" != "yes" ]]; then
+      printf '[watchdog-cc] SCHEDULER: restart cap %s reached; the scheduler keeps stalling after restarts; human review required\n' "$WATCHDOG_SCHEDULER_MAX_ATTEMPTS" >&2
+    elif [[ "$SCHED_DUE" != "yes" ]]; then
+      printf '[watchdog-cc] SCHEDULER: backoff window not yet elapsed; no restart this pass\n' >&2
+    elif ! command -v pm2 >/dev/null 2>&1; then
+      printf '[watchdog-cc] SCHEDULER: pm2 not on PATH (searched PATH=%s); cannot restart; human review required\n' "${PATH}" >&2
+    else
+      # Resolve the target: the FIRST allowlisted name pm2 actually knows.
+      # WATCHDOG_CC_APP_NAMES is intentionally unquoted here for word splitting
+      # (bash 3.2 safe: no arrays, no mapfile).
+      SCHED_TARGET=""
+      for _cc_name in $WATCHDOG_CC_APP_NAMES; do
+        if pm2 describe "$_cc_name" >/dev/null 2>&1; then
+          SCHED_TARGET="$_cc_name"
+          break
+        fi
+      done
+      if [[ -z "$SCHED_TARGET" ]]; then
+        printf '[watchdog-cc] SCHEDULER: no allowlisted CC app found in pm2 (looked for: %s); refusing to restart anything else\n' "$WATCHDOG_CC_APP_NAMES" >&2
+      else
+        SCHED_NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+        state_set "$SCHED_STATE" scheduler_restart_attempts "$((SCHED_ATTEMPTS + 1))"
+        state_set "$SCHED_STATE" last_scheduler_restart_at "$SCHED_NOW"
+        state_set "$SCHED_STATE" scheduler_restart_incident "$KEY"
+        state_set "$SCHED_STATE" scheduler_restart_target "$SCHED_TARGET"
+        printf '[watchdog-cc] SCHEDULER: in-app cron loop is stalled; restarting pm2 app "%s" (attempt %s/%s, bounded, no rebuild)\n' \
+          "$SCHED_TARGET" "$((SCHED_ATTEMPTS + 1))" "$WATCHDOG_SCHEDULER_MAX_ATTEMPTS" >&2
+        if pm2 restart "$SCHED_TARGET" --update-env >/dev/null 2>&1; then
+          printf '[watchdog-cc] SCHEDULER: pm2 restart "%s" OK; next pass verifies whether the sweeps resumed\n' "$SCHED_TARGET" >&2
+        else
+          printf '[watchdog-cc] SCHEDULER: pm2 restart "%s" FAILED; no further attempts until the backoff window elapses\n' "$SCHED_TARGET" >&2
+        fi
+      fi
+    fi
+  fi
+
+  # ── NO COMMAND CENTER APP IN PM2 ─────────────────────────────────────────
+  # A recreated container whose startup never ran `pm2 resurrect` leaves pm2
+  # with nothing (or with everything but the Command Center). Bring back the
+  # saved list when pm2 is empty, then start the Command Center from its own
+  # ecosystem if it is still missing, and save. Never during a deploy: an open
+  # atomic-deploy transaction owns the service.
+  if [[ "$WATCHDOG_SELF_HEAL" == "1" && "$KEY" == "no-pm2-app" ]]; then
+    CC_DIR="${WATCHDOG_CANONICAL_DIR:-}"
+    if [[ -z "$CC_DIR" ]]; then
+      for d in "$CC_ROOT_DEFAULT" "$HOME/projects/command-center" "/data/projects/command-center"; do
+        [[ -f "$d/ecosystem.config.cjs" ]] && { CC_DIR="$d"; break; }
+      done
+    fi
+    if [[ -z "$CC_DIR" || ! -f "$CC_DIR/ecosystem.config.cjs" ]]; then
+      printf '[watchdog-cc] START skipped: cannot locate ecosystem.config.cjs\n' >&2
+    elif [[ -f "$CC_DIR/.atomic-deploy-transaction.json" ]]; then
+      printf '[watchdog-cc] START skipped: an atomic-deploy transaction is open in %s\n' "$CC_DIR" >&2
+    else
+      if [[ -z "$(pm2 ls -m 2>/dev/null | grep '^+--- ')" ]]; then
+        pm2 resurrect >/dev/null 2>&1 && printf '[watchdog-cc] START: pm2 was empty; resurrected the saved process list\n' >&2
+      fi
+      _cc_known=""
+      for name in $WATCHDOG_CC_APP_NAMES; do
+        pm2 describe "$name" >/dev/null 2>&1 && { _cc_known="$name"; break; }
+      done
+      if [[ -n "$_cc_known" ]]; then
+        printf '[watchdog-cc] START: pm2 app "%s" is back\n' "$_cc_known" >&2
+      elif (cd "$CC_DIR" && CC_PORT="$WATCHDOG_PORT" pm2 start "$CC_DIR/ecosystem.config.cjs" >/dev/null 2>&1); then
+        pm2_save_guarded
+        printf '[watchdog-cc] START: started the Command Center from %s/ecosystem.config.cjs and saved the pm2 list\n' "$CC_DIR" >&2
+      else
+        printf '[watchdog-cc] START: pm2 start failed — manual intervention required\n' >&2
+      fi
+    fi
+  fi
+
   # ── Legacy zombie self-heal (RETAINED, hardened) ────────────────────────────
   # Only runs when WATCHDOG_SELF_HEAL=1 AND the failure pattern indicates a
   # zombie/orphan/crash-loop that cc-start.sh can resolve.
@@ -294,13 +567,14 @@ except Exception: print('yes')" "$REBUILD_STATE" "$WATCHDOG_REBUILD_MAX_ATTEMPTS
   # are ever deleted, only before their own recreation; refusal-receipt REDs
   # are handled by the REBUILD path above, not by a bare `pm2 start` of the
   # same stale tree.
-  if [[ "$WATCHDOG_SELF_HEAL" == "1" && "$KEY" != "refusal-receipt" ]]; then
+  if [[ "$WATCHDOG_SELF_HEAL" == "1" && "$KEY" != "refusal-receipt" && "$KEY" != "scheduler-stalled" && "$KEY" != "no-pm2-app" ]]; then
     HEAL_TRIGGER=0
-    if printf '%s' "$RESULT_JSON" | grep -q '"app_count":[2-9]'; then
+    HEAL_WHY="$(heal_reasons "$RESULT_JSON")"
+    if [[ "$HEAL_WHY" == *zombie* ]]; then
       HEAL_TRIGGER=1
       printf '[watchdog-cc] SELF-HEAL trigger: zombie detected (app_count>1)\n' >&2
     fi
-    if printf '%s' "$RESULT_JSON" | grep -q '"crash_looper":true'; then
+    if [[ "$HEAL_WHY" == *crash_looper* ]]; then
       HEAL_TRIGGER=1
       printf '[watchdog-cc] SELF-HEAL trigger: crash_looper=true in health report\n' >&2
     fi
@@ -340,7 +614,7 @@ except Exception: print('yes')" "$REBUILD_STATE" "$WATCHDOG_REBUILD_MAX_ATTEMPTS
           printf '[watchdog-cc] SELF-HEAL: pm2 start ecosystem.config.cjs OK\n' >&2 || \
           printf '[watchdog-cc] SELF-HEAL: pm2 start failed — manual intervention required\n' >&2
 
-        pm2 save >/dev/null 2>&1 || true
+        pm2_save_guarded
         printf '[watchdog-cc] SELF-HEAL: complete at %s\n' "$TS" >&2
       fi
     else

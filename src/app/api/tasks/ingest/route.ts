@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { TaskContextError, TaskRequestConflict, taskRequestFingerprint, taskRequestCompany } from '@/lib/task-request-identity';
-import { queryOne, getDb, run } from '@/lib/db';
+import { queryOne, queryAll, getDb, run } from '@/lib/db';
 import { v4 as uuidv4 } from 'uuid';
 import { runMigrations } from '@/lib/db/migrations';
 import { createTaskCore, validateProducerPersonaBundle } from '@/lib/tasks';
+import { parseOperatorPresentationContract, ensureOperatorPresentationContract } from '@/lib/presentation-operator-contract';
 import type { PersonaBundle } from '@/lib/types';
 import { routeTask } from '@/lib/routing/department-router';
 import type { TaskPriority } from '@/lib/types';
@@ -24,7 +25,25 @@ import { resolveIngestSourceRef } from '@/components/anthology/anthology-card';
 // /api/presentations/stage-timings and /api/tasks/[id]/status). Replaces this
 // route's local `===` digest compare, which leaked first-difference timing and
 // returned a 401 only after a length-mismatched compare could not happen.
+import { resolveWorkspaceId } from '@/lib/company-scope';
 import { verifyWebhookSignature } from '@/lib/webhook-signature';
+// A13 (spec 12.2) — raw conversational intake is classified through the
+// EXISTING JEV-010 intake module (classify + the creation gate); this route
+// wires that module, it never re-implements a classifier.
+import { classify, assertTaskCreationAllowed, normalizeIntakeMessage, hashIntakeMessage, type Classification } from '@/lib/intake';
+// V23-CC1 — the raw door's classifier chain: intakeChainResponder walks
+// OpenRouter GPT-6 Luna -> Minimax 3 on Ollama Cloud (box has Ollama only) ->
+// Agnes 3.0 Flash (box has Agnes only) -> box main model. Every step advances
+// on missing key, timeout, or error, and total failure throws — so
+// classify.ts's classifyViaJev falls back to the lexical path itself and
+// nothing else in this gate changes. No second classifier lives here.
+import { intakeChainResponder } from '@/lib/intake/chain';
+import { rawDoorMakesCard } from '@/lib/intake/bypass';
+// ACC-001-09 / ACC-001-11 — the two intake failure classes: a question-phrased
+// change request refers to an existing card (update it, never mint a second),
+// and one message holding two separate jobs makes ONE CARD PER JOB. Pure text
+// readers; the door below owns the board action.
+import { changeRequestRef, splitJobs } from '@/lib/intake/job-split';
 // queryOne is still used for workspace resolution below.
 
 export const dynamic = 'force-dynamic';
@@ -108,8 +127,42 @@ let selfHealState: 'idle' | 'running' | 'done' = 'idle';
 interface IngestPayload {
   persona_bundle?: unknown;
   title?: unknown;
+  /**
+   * A13 (spec 12.2) — RAW conversational intake. Read ONLY when `title` is
+   * absent: the text is classified by the EXISTING intake module (classify)
+   * and must pass the creation gate before a card exists. Only task_request /
+   * mixed_answer_and_task create a card; the card's operation id is derived
+   * deterministically from the message hash, so re-ingesting the same message
+   * creates no second card. A typed payload carrying `title` never enters this
+   * door and is never re-classified (spec 4.2).
+   */
+  message?: unknown;
+  /**
+   * JEV-501 — raw door only: true when a question to the owner is actually
+   * waiting for this message to answer it. Only then can "change … to …" /
+   * "use … instead" / "yes" be read as that answer. Anything but literal
+   * `true` is false.
+   */
+  pending_question?: unknown;
   description?: unknown;
   priority?: unknown;
+  /**
+   * RESOURCE-AWARE ROUTING. All four are OPTIONAL and descriptive; a producer
+   * that sends none creates exactly the card it always did.
+   *   need_by        ISO-8601 deadline. Stored on the EXISTING `due_date`
+   *                  column — the meaning is identical and a second column
+   *                  would be two fields that must agree forever.
+   *   lane           'route' | 'heavy' (an 'answer' is replied to in chat and
+   *                  never routed, so it should not arrive here).
+   *   effort_steps   the intake's own step estimate.
+   *   depts_touched  how many departments the work spans.
+   * A malformed value is DROPPED, never guessed at: a bad date must not become
+   * a deadline nobody set, and a bad number must not become an effort estimate.
+   */
+  need_by?: unknown;
+  lane?: unknown;
+  effort_steps?: unknown;
+  depts_touched?: unknown;
   source?: unknown;
   source_ref?: unknown;
   department_slug?: unknown;
@@ -203,6 +256,8 @@ interface IngestPayload {
    * must not block capture.
    */
   slide_count?: unknown;
+  /** Signed, operator-delegated structured Presentations execution request. */
+  presentation_intake?: unknown;
   /**
    * FIX 52 (MASTER Part 8 / [R5A §H5]) — the explicit manifest phase id a
    * presentation producer stamps on its per-phase CHILD card ("P4-COPY",
@@ -296,38 +351,6 @@ function isWorkforceProvisioned(companyId: string): { provisioned: boolean; reas
   return { provisioned, reason };
 }
 
-/**
- * Resolve the target workspace id. Tries department_slug, then persona/name,
- * then falls back to the CEO workspace — the CEO agent runs all other
- * departments, so it is the correct catch-all owner for unrouted work. Returns
- * { workspaceId, resolvedBy } so the caller can record how routing happened.
- *
- * BARE-TASK RESILIENCE (v4.44.0 — BARE-INGEST-001):
- * When no slug is supplied and the CEO/master-orchestrator workspace is not yet
- * seeded (fresh install), we used to return workspaceId='default' which is a
- * sentinel string that has NO row in the workspaces table. createTaskCore would
- * then fail the FK constraint and the whole ingest route would 500.
- *
- * The fix: resolve the first real workspace we can find from the DB so we always
- * hand off a real workspace_id (or null, which createTaskCore handles gracefully).
- * We NEVER return the bare 'default' literal unless it actually has a DB row.
- */
-function resolveWorkspaceId(departmentSlug: string | undefined, persona: string | undefined, companyId: string): {workspaceId:string|null;resolvedBy:string} {
-  const rows = getDb().prepare('SELECT id,slug,name FROM workspaces WHERE company_id=? AND archived_at IS NULL ORDER BY sort_order,id')
-    .all(companyId) as {id:string;slug:string;name:string}[];
-  const match = departmentSlug ? rows.filter(w => w.slug.toLowerCase()===departmentSlug.toLowerCase() || w.id.toLowerCase()===departmentSlug.toLowerCase()) : [];
-  if (match.length===1) return {workspaceId:match[0].id,resolvedBy:`department_slug:${departmentSlug}`};
-  if (!departmentSlug && persona) {
-    const named=rows.filter(w => w.name.toLowerCase()===persona.toLowerCase());
-    if(named.length===1) return {workspaceId:named[0].id,resolvedBy:`persona:${persona}`};
-  }
-  const namedGeneral=rows.filter(w => w.name.trim().toLowerCase()==='general task');
-  const general=rows.find(w => ['general-task','dept-general-task','general'].includes(w.slug.toLowerCase())) || (namedGeneral.length===1 ? namedGeneral[0] : undefined);
-  const ceo=rows.find(w => ['master-orchestrator','ceo','dept-ceo'].includes(w.slug.toLowerCase()));
-  if(departmentSlug) return {workspaceId:general?.id??ceo?.id??null,resolvedBy:general?'unrecognized-slug->general':ceo?'unrecognized-slug->ceo':'unrecognized-slug->unrouted'};
-  return {workspaceId:general?.id??ceo?.id??null,resolvedBy:general?'general-task-fallback':ceo?'ceo-fallback':'no-workspace-fallback'};
-}
-
 export async function POST(request: NextRequest) {
   try {
     const rawBody = await request.text();
@@ -395,7 +418,67 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
     }
 
-    const title = typeof body.title === 'string' ? body.title.trim() : '';
+    let title = typeof body.title === 'string' ? body.title.trim() : '';
+    let presentationIntake: ReturnType<typeof parseOperatorPresentationContract> | null = null;
+    if (body.presentation_intake !== undefined) {
+      try { presentationIntake = parseOperatorPresentationContract(body.presentation_intake); }
+      catch (err) { return NextResponse.json({ error: (err as Error).message }, { status: 400 }); }
+      if (presentationIntake.title !== title) return NextResponse.json({ error: 'presentation_intake title must match task title' }, { status: 400 });
+    }
+    // ── A13 (spec 12.2): the RAW conversational door ─────────────────────────
+    // A payload with no `title` but a `message` is conversational intake, not a
+    // typed command: it goes through the EXISTING intake module — classify()
+    // then the creation gate — before any card can exist. A card is made
+    // unless rawDoorMakesCard (bypass.ts) says the message is existing-task
+    // control, a pending-question answer, exact small talk, or a live-engine
+    // question verdict (JEV-501: backup leans to card). Exactly
+    // once: the operation id below is derived from the message hash, so the
+    // same message re-ingested finds its prior card instead of minting a
+    // second. A typed payload (title present) never enters this branch and is
+    // never re-classified (spec 4.2).
+    let rawIntake: { classification: Classification; message: string } | null = null;
+    if (!title && typeof body.message === 'string' && body.message.trim()) {
+      const message = body.message.trim();
+      const classification = await classify(
+        message,
+        body.pending_question === true ? { pendingConfirmation: true } : {},
+        { jevResponder: intakeChainResponder },
+      );
+      if (!classification.bypassAllowed || classification.controlProbe) {
+        // The module's own control-probe verdict: untrusted material, never a
+        // creation authorization (spec 4.4 last row). Ordered FIRST (FIX
+        // 009-001): a probe is refused before the ACC-001-09 change exemption
+        // below could let it reach the update path and write a note.
+        return NextResponse.json({ error: 'control_probe_never_creates', intent: classification.intent }, { status: 403 });
+      }
+      // ── FIX 009-001 (ACC-001-09) — a recognized change is NEVER dropped ────
+      // A change request ("change X to Y") is resolved by the ACC-001-09
+      // block below REGARDLESS of the classifier verdict: JEV-702 ruling A —
+      // a change tries `existing update` FIRST; only NOT_FOUND means new
+      // work; the change is never dropped. Before this fix the card-less
+      // verdict return sat IN FRONT of that block, so WHICH classifier step
+      // answered flipped the SAME bytes between "card updated" and "silently
+      // dropped" (a chain verdict of existing_task_control skipped the update
+      // path entirely). The one exemption: when a question is actually
+      // PENDING (JEV-501), "change … to …" is that ANSWER, not a board
+      // change — it stays on the card-less gate exactly as before.
+      const changeRef =
+        body.pending_question === true ? null : changeRequestRef(message);
+      if (!changeRef && !rawDoorMakesCard(classification, message)) {
+        // JEV-501: only existing-task control, an answer to a pending
+        // question, exact small talk, or the live engine's own question
+        // verdict skip the card. Unsure / engine unavailable → a card.
+        return NextResponse.json(
+          { ok: true, created: false, intent: classification.intent, task_id: null },
+          { status: 200 },
+        );
+      }
+      assertTaskCreationAllowed({ kind: 'raw', message, classification, unsureMakesCard: true });
+      rawIntake = { classification, message };
+      // The card title is the message itself; the 500-char boundary is the
+      // route's existing title ceiling (MAX_TITLE_CHARS in the intake module).
+      title = normalizeIntakeMessage(message).slice(0, 500);
+    }
     if (!title) {
       return NextResponse.json({ error: 'title is required' }, { status: 400 });
     }
@@ -404,6 +487,77 @@ export async function POST(request: NextRequest) {
     }
 
     const ingestCompanyId = taskRequestCompany(getDb(), null, process.env.MC_COMPANY_ID);
+
+    // ── ACC-001-09 — a question-phrased CHANGE REQUEST updates, never mints ────
+    // "Can you change the webinar date to the 15th? I think that works better."
+    // refers to a card already on the board. mc-route.sh's contract (JEV-702
+    // ruling A; acceptance README): a change request tries `existing update`
+    // FIRST; only a NOT_FOUND means new work. This door mirrors that: when the
+    // message names an existing card, record the owner's exact words as an
+    // owner_message on that card and return WITHOUT creating a second card.
+    // No card matches (or the message names none) → fall through unchanged, so
+    // "Can you change the banner to blue?" is still a normal task request.
+    if (rawIntake) {
+      const changeRef = changeRequestRef(rawIntake.message);
+      if (changeRef) {
+        const ref = changeRef.toLowerCase();
+        // Whole-word, all-words matching — the SAME rule as mc-route.sh's
+        // matcher (JEV-802): every word of the reference must appear in the
+        // title as a whole word, never a raw substring. The stop list is
+        // mc-route's own.
+        const STOP = new Set([
+          'the', 'and', 'for', 'that', 'this', 'task', 'card', 'job', 'with',
+          'from', 'our', 'your', 'about', 'please', 'one',
+        ]);
+        const wanted = new Set(
+          ref.split(/[^a-z0-9]+/).filter((w) => w.length > 2 && !STOP.has(w)),
+        );
+        const candidates = queryAll<{ id: string; title: string; updated_at: string | null }>(
+          `SELECT t.id, t.title, t.updated_at
+             FROM tasks t
+             WHERE t.archived_at IS NULL
+               AND (EXISTS (SELECT 1 FROM workspaces w WHERE w.id = t.workspace_id AND w.company_id = ?)
+                 OR EXISTS (SELECT 1 FROM task_request_keys k WHERE k.task_id = t.id AND k.company_id = ?))
+             ORDER BY t.updated_at DESC
+             LIMIT 500`,
+          [ingestCompanyId, ingestCompanyId],
+        );
+        const matches = candidates.filter((t) => {
+          const titleSet = new Set((t.title || '').toLowerCase().match(/[a-z0-9]+/g) ?? []);
+          if (titleSet.size === 0 || wanted.size === 0) return false;
+          for (const w of wanted) if (!titleSet.has(w)) return false;
+          return true;
+        });
+        if (matches.length > 0) {
+          // Newest first — same-title double cards are ONE job carded twice
+          // (JEV-702): the live card is the one acted on.
+          matches.sort((a, b) => String(b.updated_at ?? '').localeCompare(String(a.updated_at ?? '')));
+          const target = matches[0];
+          // The SAME record the canonical owner-note path writes
+          // (POST /api/tasks/[id]/messages): an owner_message activity with the
+          // owner's exact words. No state change beyond that note.
+          run(
+            `INSERT INTO task_activities (id, task_id, activity_type, message, metadata, created_at)
+             VALUES (?, ?, 'owner_message', ?, NULL, ?)`,
+            [uuidv4(), target.id, rawIntake.message, new Date().toISOString()],
+          );
+          return NextResponse.json(
+            {
+              ok: true,
+              created: false,
+              updated: true,
+              intent: 'existing_update',
+              task_id: target.id,
+              title: target.title,
+            },
+            { status: 200 },
+          );
+        }
+        // Ref named no card on this board: the change is NEW work — fall through
+        // to the normal card path (never drop it), exactly as mc-route.sh's
+        // NOT_FOUND text instructs the caller.
+      }
+    }
 
     // FIX 3 — re-ingest loop gate.
     // When a caller passes existing_task_id and that task already exists with a
@@ -489,6 +643,7 @@ export async function POST(request: NextRequest) {
     // check itself lives in normalizeBoardSource() and runs at the status
     // route (fail-closed there, 403 for unknown values like "garbage").
     const source = typeof body.source === 'string' ? body.source.trim().toLowerCase() : undefined;
+    if (presentationIntake && source !== 'operator-delegated') return NextResponse.json({ error: 'presentation_intake requires source=operator-delegated' }, { status: 400 });
     const sourceRef = typeof body.source_ref === 'string' ? body.source_ref.trim() : undefined;
     const departmentSlug =
       typeof body.department_slug === 'string' ? body.department_slug.trim() : undefined;
@@ -648,6 +803,10 @@ export async function POST(request: NextRequest) {
         ? 'web-development'
         : departmentSlug;
 
+    if (presentationIntake && resolvedDeptSlug?.toLowerCase() !== 'presentations') {
+      return NextResponse.json({ error: 'presentation_intake requires department_slug=presentations' }, { status: 400 });
+    }
+
     const persona = typeof body.persona === 'string' ? body.persona.trim() : undefined;
     // W3.2 — owner-direct specialist pin. `target_agent` wins; `specialist` is
     // an accepted alias. Empty strings collapse to undefined.
@@ -706,6 +865,18 @@ export async function POST(request: NextRequest) {
       normalizeRequesterSessionKey(body.requester_session_key) ??
       normalizeRequesterSessionKey(externalSessionId) ??
       undefined;
+
+    // RESOURCE-AWARE ROUTING intake fields. Each parses or is dropped.
+    const needByRaw = typeof body.need_by === 'string' ? body.need_by.trim() : '';
+    const needBy = needByRaw && Number.isFinite(Date.parse(needByRaw)) ? new Date(needByRaw).toISOString() : null;
+    const laneRaw = typeof body.lane === 'string' ? body.lane.trim().toLowerCase() : '';
+    const lane = ['answer', 'route', 'heavy'].includes(laneRaw) ? laneRaw : null;
+    const positiveIntOrNull = (v: unknown): number | null => {
+      const n = typeof v === 'number' ? v : Number.parseInt(String(v ?? ''), 10);
+      return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
+    };
+    const effortSteps = positiveIntOrNull(body.effort_steps);
+    const deptsTouched = positiveIntOrNull(body.depts_touched);
 
     const priorityRaw = typeof body.priority === 'string' ? body.priority.trim() : undefined;
     const priority: TaskPriority | undefined =
@@ -786,10 +957,20 @@ export async function POST(request: NextRequest) {
     if (headerKey && idempotencyKey && headerKey !== idempotencyKey) {
       return NextResponse.json({ error: 'conflicting_idempotency_keys' }, { status: 400 });
     }
-    const dedupeKey = headerKey || idempotencyKey || sourceRef || uuidv4();
+    const dedupeKey =
+      headerKey ||
+      idempotencyKey ||
+      sourceRef ||
+      // A13: a raw-conversational card's operation id IS the message hash, so
+      // re-ingesting the same message is the same operation (dedupe hit, no
+      // second card) while a different message is a different card.
+      (rawIntake ? `intake-msg:${rawIntake.classification.messageHash}` : uuidv4());
     if (dedupeKey.length > 512) return NextResponse.json({ error: 'idempotency_key_too_long' }, { status: 400 });
     const { idempotency_key: _operationKey, ...semanticPayload } = body;
-    const requestFingerprint = taskRequestFingerprint(semanticPayload);
+    // Hash the parsed canonical intake rather than caller spelling so a harmless
+    // JSON key-order/whitespace retry stays the same operation, while a changed
+    // selected deliverable is an idempotency conflict.
+    const requestFingerprint = taskRequestFingerprint({ ...semanticPayload, presentation_intake: presentationIntake ?? body.presentation_intake });
 
     let { workspaceId, resolvedBy }: { workspaceId: string | null; resolvedBy: string } = resolveWorkspaceId(resolvedDeptSlug, persona, ingestCompanyId);
     // A missing department is an executable catch-all request, never a correction hold.
@@ -915,8 +1096,13 @@ export async function POST(request: NextRequest) {
           // 'general-task' slug so the task is never left unrouted in backlog.
           const generalWs = queryOne<{ id: string }>(
             `SELECT id FROM workspaces
-              WHERE company_id = ? AND archived_at IS NULL AND (lower(slug) IN ('general-task', 'dept-general-task')
+              WHERE company_id = ? AND archived_at IS NULL
+                AND id <> 'default' AND lower(slug) <> 'default'
+                AND (lower(slug) IN ('general-task', 'dept-general-task')
                  OR lower(name) IN ('general task', 'general'))
+              ORDER BY CASE WHEN lower(slug) = 'general-task' THEN 0
+                             WHEN lower(slug) = 'dept-general-task' THEN 1
+                             ELSE 2 END
               LIMIT 1`,
             [ingestCompanyId],
           );
@@ -966,6 +1152,72 @@ export async function POST(request: NextRequest) {
     if (dedupeKey) eventMessageParts.push(`[ingest:${dedupeKey}]`);
     const eventMessage = eventMessageParts.join(' ');
 
+    // ── ACC-001-11 — two separate jobs in one message = ONE CARD PER JOB ──────
+    // "Reorder printer toner and schedule the carpet cleaning for Monday." is
+    // two jobs: two cards, each carrying ITS OWN clause as the title. A
+    // single-job message (items 02, 10, 15) is untouched — splitJobs returns it
+    // whole. Each job gets a distinct operation id, so Layer-1 idempotency
+    // cannot collapse the two cards onto each other, and a retry of the same
+    // multi-job message re-derives the same ids (no duplicate cards).
+    if (rawIntake) {
+      const rawJobs = splitJobs(rawIntake.message);
+      if (rawJobs.length > 1) {
+        const jobs = rawJobs.map((job) => normalizeIntakeMessage(job).slice(0, 500) || title);
+        const created: Array<{ id: string; title: string; deduped: boolean }> = [];
+        for (const job of jobs) {
+          const result = await createTaskCore(
+            {
+              title: job,
+              description: finalDescription,
+              status: 'backlog',
+              priority,
+              assigned_agent_id: pinnedAgentId,
+              created_by_agent_id: null,
+              workspace_id: workspaceId,
+              department: resolvedDepartment ?? null,
+              parent_task_id: parentTaskId,
+              eventMessage: `Task captured via ${source || 'ingest'}: ${job}`,
+              // Distinct operation per job: the parent key names the message,
+              // the job hash names WHICH job — so two jobs never share a key
+              // and a retry never adds a third card.
+              idempotency_key: `${dedupeKey}#job:${hashIntakeMessage(job)}`,
+              idempotency_payload_hash: requestFingerprint,
+              idempotency_company_id: ingestCompanyId,
+              source: source ?? null,
+              requester_channel: requesterChannel ?? null,
+              requester_chat_id: requesterChatId ?? null,
+              requester_session_key: requesterSessionKey ?? null,
+              humanDoorId: requesterChatId ? 'telegram-ingest' : null,
+              route_lane: lane,
+              effort_steps: effortSteps,
+              depts_touched: deptsTouched,
+              due_date: needBy ?? undefined,
+            },
+            { origin: request.headers.get('origin') },
+          );
+          if (result) created.push({ id: result.task.id, title: result.task.title, deduped: result.deduped });
+        }
+        if (created.length === 0) {
+          return NextResponse.json({ error: 'Failed to create task' }, { status: 500 });
+        }
+        return NextResponse.json(
+          {
+            ok: true,
+            deduped: created[0].deduped,
+            operation_id: dedupeKey,
+            task_id: created[0].id,
+            task_ids: created.map((c) => c.id),
+            jobs: created.map((c) => c.title),
+            workspace_id: workspaceId,
+            resolved_by: resolvedBy,
+            resolved_department: resolvedDepartment ?? undefined,
+            status: 'backlog',
+          },
+          { status: 201 },
+        );
+      }
+    }
+
     const result = await createTaskCore(
       {
         title,
@@ -999,6 +1251,7 @@ export async function POST(request: NextRequest) {
         // now reads first, before falling back to the legacy (forgeable)
         // description marker for pre-migration rows.
         source: source ?? null,
+        presentation_operator_intake: presentationIntake,
         // P1-04: the originating client channel so the trust engine reports back.
         requester_channel: requesterChannel ?? null,
         requester_chat_id: requesterChatId ?? null,
@@ -1024,6 +1277,15 @@ export async function POST(request: NextRequest) {
         // surface it on the card and the ContextPack assembler can carry the
         // pointers into the dispatch handoff (buildContextPack input.contextRefs).
         context_refs: contextRefs.length > 0 ? contextRefs : null,
+        // RESOURCE-AWARE ROUTING: the deadline rides the EXISTING due_date
+        // column. `undefined` (not null) when the caller sent none, because
+        // createTaskCore applies its department SLA default only when the key
+        // is absent entirely — passing null would suppress that default and
+        // silently strip every card's SLA.
+        due_date: needBy ?? undefined,
+        route_lane: lane,
+        effort_steps: effortSteps,
+        depts_touched: deptsTouched,
       },
       { origin: request.headers.get('origin') }
     );
@@ -1033,6 +1295,16 @@ export async function POST(request: NextRequest) {
     }
 
     const { task, deduped } = result;
+    if (presentationIntake && deduped) {
+      try { ensureOperatorPresentationContract(task.id, presentationIntake); }
+      catch (err) {
+        const message = (err as Error).message;
+        return NextResponse.json(
+          { error: `presentation_intake persistence failed: ${message}` },
+          { status: message.includes('immutable') ? 409 : 500 },
+        );
+      }
+    }
 
     // FIX 52 (migration 130) — stamp the presentation slide count onto the
     // freshly created card. Done as a follow-up UPDATE rather than inside

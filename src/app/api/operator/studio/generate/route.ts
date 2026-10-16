@@ -14,13 +14,18 @@
  *
  * Response: 202 with { job_id, status, model_id, provider }.
  *
+ * CC-KIE-1 — FAIL CLOSED. When the Studio capability for the requested kind is
+ * false (no keyed provider with a wired generate path) the entry refuses with
+ * 409 { error: 'generation_unavailable', kind, detail, capabilities } and NO
+ * submit, poll or spend is performed.
+ *
  * Track B4 (Operator Studio).
  */
 
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 
-import { createJob } from '@/lib/studio/generators';
+import { createJob, StudioGenerationRefusedError } from '@/lib/studio/generators';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -44,12 +49,31 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const job = await createJob({
-    kind: parsed.kind,
-    prompt: parsed.prompt,
-    model_id: parsed.model_id ?? null,
-    options: parsed.options ?? {},
-  });
+  // CC-KIE-1 — the paid entry fails CLOSED. When the Studio capability for this
+  // kind is false the createJob() gate throws BEFORE any job row, submit or
+  // poll; map that to an explicit 409 refusal and advertise `capabilities`.
+  let job;
+  try {
+    job = await createJob({
+      kind: parsed.kind,
+      prompt: parsed.prompt,
+      model_id: parsed.model_id ?? null,
+      options: parsed.options ?? {},
+    });
+  } catch (err) {
+    if (err instanceof StudioGenerationRefusedError) {
+      return NextResponse.json(
+        {
+          error: 'generation_unavailable',
+          kind: err.kind,
+          detail: err.reason,
+          capabilities: err.capabilities,
+        },
+        { status: 409 }
+      );
+    }
+    throw err;
+  }
 
   return NextResponse.json(
     {

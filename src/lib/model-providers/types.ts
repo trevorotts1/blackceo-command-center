@@ -201,6 +201,14 @@ export interface SmokeTestResult {
   status?: number;
   /** Human-readable description (never echoes the key). */
   message?: string;
+  /**
+   * CC-KIE-2 — the provider account balance, when the connector's own
+   * authenticated key-check endpoint returns one (Kie's GET /chat/credit
+   * carries it at `data.credit`). Display-only. Present ONLY on an ok:true
+   * call that carried a finite number — a missing key, a rejected key or a
+   * malformed reply leaves this undefined, never a fabricated value.
+   */
+  credits?: number;
 }
 
 /**
@@ -237,7 +245,8 @@ export interface ModelProvider {
   /** Returns usage / quota snapshot. Optional. */
   fetchUsage?(apiKey: string): Promise<UsageSnapshot>;
   /** Proxy a chat completion through the provider. Optional. */
-  chatCompletion?(apiKey: string, request: ChatCompletionRequest): Promise<ChatCompletionResponse>;
+  /** `signal`, when given, cancels the HTTP request (the routing model pick aborts a timed-out hop). */
+  chatCompletion?(apiKey: string, request: ChatCompletionRequest, signal?: AbortSignal): Promise<ChatCompletionResponse>;
   /**
    * Optional post-save smoke-test. After the operator saves a new key via
    * POST /api/clients/[id]/keys, the route calls this (if present) to

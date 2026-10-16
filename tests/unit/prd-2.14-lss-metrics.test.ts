@@ -30,6 +30,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { v4 as uuidv4 } from 'uuid';
+import { QC_MAX_REROUTES } from '../../src/lib/qc-cap';
 
 const TMP_DB = path.join(
   fs.mkdtempSync(path.join(os.tmpdir(), 'bc-lss-')),
@@ -191,7 +192,9 @@ test.before(async () => {
   // T4: Stale loops killed — 2 blocked tasks inside window, 1 outside
   // The 2 blocked tasks also have attempt>1 so they count in reworkRate too.
   // ─────────────────────────────────────────────────────────────────────────
-  const QC_MAX = parseInt(process.env.QC_MAX_REROUTES || '3', 10);
+  // The shared cap (src/lib/qc-cap.ts), not a literal: staleLoopsKilled counts
+  // cards at or over whatever the cap currently is.
+  const QC_MAX = QC_MAX_REROUTES;
   const outsideDate = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString();
 
   for (let i = 0; i < 2; i++) {

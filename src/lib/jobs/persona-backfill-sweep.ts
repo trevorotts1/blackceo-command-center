@@ -21,10 +21,15 @@
  *   an empty persona universe (A1).
  *
  * ANTI-FURNACE / ANTI-LOOP guards (durable, no self-resurrect):
- *   1. ONE attempt per task, ever: each processed task gets a queryable
+ *   1. ONE attempt per task per RETRY WINDOW: each processed task gets a queryable
  *      `persona_backfill_attempt` audit event, and the selection query EXCLUDES any
- *      task that already has one. So a genuinely mechanical task (which correctly
- *      stays NULL) is attempted exactly once and then drops out — it never loops.
+ *      task whose newest one is younger than PERSONA_BACKFILL_RETRY_HOURS (default
+ *      6). It used to be once-ever, but an attempt that FAILED (selector throw,
+ *      e.g. `persona_company_context_missing` before the company map was wired)
+ *      then left the card persona-less for the life of the box — the triad gate
+ *      parks it and nothing ever re-tries. A mechanical task that correctly stays
+ *      NULL now costs one cheap attempt per window, not a loop (same posture as
+ *      the PHASE-2 blend backfill below).
  *   2. Grace window: only tasks older than PERSONA_BACKFILL_GRACE_SECONDS (default
  *      120s) are eligible, so a just-created task whose create-time selection is
  *      still in flight is not double-fired.
@@ -32,7 +37,12 @@
  *      oldest-first, processed sequentially (concurrency 1) so a slow selector
  *      cannot fan out python spawns.
  *   4. Terminal statuses (done / archived / review / blocked) are excluded — a
- *      persona for already-finished or blocked work buys nothing.
+ *      persona for already-finished or blocked work buys nothing. EXCEPT a card
+ *      blocked with block_reason='triad_incomplete': the triad gate parked it
+ *      precisely BECAUSE it has no persona, and this sweep is the only thing that
+ *      supplies one. Excluding it was a deadlock (gate waits for a persona, sweep
+ *      skips blocked cards). A pin on such a card releases it to backlog. Its
+ *      dispatch budget is PRESERVED (a sweep never mints budget — PD-TEST-063).
  *
  * Trivially disabled: set PERSONA_BACKFILL_SWEEP_ENABLED=0, or remove the one JOBS
  * entry in scheduler.ts.
@@ -42,6 +52,7 @@ import { queryAll, queryOne, run } from '@/lib/db';
 import { v4 as uuidv4 } from 'uuid';
 import { resolvePersonaAndPin, shouldUsePersonaBlend } from '@/lib/tasks';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
+import { transition } from '@/lib/task-lifecycle';
 
 export interface PersonaBackfillResult {
   scanned: number;
@@ -72,6 +83,19 @@ interface NakedTaskRow {
 // Statuses for which a persona no longer matters (finished / parked work).
 const TERMINAL_STATUSES = ['done', 'archived', 'review', 'blocked'];
 
+/** Default retry window for a FAILED blend backfill attempt (hours). */
+export const PERSONA_BACKFILL_RETRY_HOURS_DEFAULT = 6;
+
+/**
+ * How long a `blend_backfilled` marker suppresses a re-attempt.
+ * Env: PERSONA_BACKFILL_RETRY_HOURS (non-numeric / negative → the default;
+ * a huge value restores the old never-retry behavior).
+ */
+function blendRetryHours(): number {
+  const raw = parseInt(process.env.PERSONA_BACKFILL_RETRY_HOURS ?? '', 10);
+  return Number.isNaN(raw) || raw < 0 ? PERSONA_BACKFILL_RETRY_HOURS_DEFAULT : raw;
+}
+
 export async function runPersonaBackfillSweep(): Promise<PersonaBackfillResult> {
   if (
     process.env.PERSONA_BACKFILL_SWEEP_ENABLED === '0' ||
@@ -91,9 +115,10 @@ export async function runPersonaBackfillSweep(): Promise<PersonaBackfillResult> 
   const graceCutoff = new Date(Date.now() - graceSeconds * 1000).toISOString();
 
   const placeholders = TERMINAL_STATUSES.map(() => '?').join(', ');
+  const retryCutoff = new Date(Date.now() - blendRetryHours() * 3_600_000).toISOString();
 
-  // Persona-less, non-terminal, aged past the grace window, and NOT already
-  // attempted by a prior sweep tick (the once-per-task loop guard). Oldest first.
+  // Persona-less, non-terminal (or triad-parked for the missing persona), aged
+  // past the grace window, and NOT attempted within the retry window. Oldest first.
   let rows: NakedTaskRow[];
   try {
     rows = queryAll<NakedTaskRow>(
@@ -105,16 +130,18 @@ export async function runPersonaBackfillSweep(): Promise<PersonaBackfillResult> 
               t.status AS status
          FROM tasks t
         WHERE (t.persona_id IS NULL OR t.persona_id = '')
-          AND t.status NOT IN (${placeholders})
+          AND (t.status NOT IN (${placeholders})
+               OR (t.status = 'blocked' AND t.block_reason = 'triad_incomplete'))
           AND t.archived_at IS NULL
           AND t.created_at <= ?
           AND NOT EXISTS (
             SELECT 1 FROM events e
              WHERE e.task_id = t.id AND e.type = 'persona_backfill_attempt'
+               AND e.created_at > ?
           )
         ORDER BY t.created_at ASC
         LIMIT ?`,
-      [...TERMINAL_STATUSES, graceCutoff, batch],
+      [...TERMINAL_STATUSES, graceCutoff, retryCutoff, batch],
     );
   } catch (err) {
     // Pre-migration DB (no persona_id / archived_at column) — nothing to heal.
@@ -157,6 +184,7 @@ export async function runPersonaBackfillSweep(): Promise<PersonaBackfillResult> 
       const pinnedId = await resolvePersonaAndPin(row.id, description, dept);
       if (pinnedId) {
         pinned++;
+        if (row.status === 'blocked') await releaseTriadParkedCard(row.id);
       } else {
         // no_persona_required (mechanical) — correctly personaless, governance-pointed.
         leftPersonaless++;
@@ -188,6 +216,32 @@ export async function runPersonaBackfillSweep(): Promise<PersonaBackfillResult> 
   };
 }
 
+/**
+ * A triad-parked card just acquired its missing persona: put it back in the
+ * advance lane. dispatch_attempts is deliberately NOT touched: a background sweep
+ * must never mint retry budget (PD-TEST-063 source scan). A card parked at the
+ * triad cap still has budget left and dispatches; one already at the dispatch
+ * cap re-blocks loudly for operator triage, where a human may grant budget.
+ * CAS on expectedFrom:'blocked' so a concurrent Resume/heal wins cleanly.
+ */
+async function releaseTriadParkedCard(taskId: string): Promise<void> {
+  try {
+    await transition(taskId, 'backlog', {
+      actor: 'persona-backfill',
+      reason: '[PERSONA-BACKFILL] missing persona supplied — triad complete, re-entering dispatch queue',
+      expectedFrom: 'blocked',
+      extraColumns: {
+        next_dispatch_eligible_at: null,
+        block_reason: null,
+        block_needs: null,
+        block_audience: null,
+      },
+    });
+  } catch (err) {
+    console.warn(`[persona-backfill] release failed for task ${taskId}:`, (err as Error).message);
+  }
+}
+
 interface BlendCandidateRow {
   id: string;
   title: string;
@@ -205,10 +259,15 @@ interface BlendCandidateRow {
  *   1. Never overwrite a non-null bundle: a task that ALREADY has a
  *      `task_persona_bundle` row is excluded at the SQL layer — the blend it
  *      already computed (possibly operator-confirmed) is never clobbered.
- *   2. ONE attempt per task, ever: each processed task gets a queryable
+ *   2. ONE attempt per RETRY WINDOW: each processed task gets a queryable
  *      `blend_backfilled` audit event, and the selection query EXCLUDES any task
- *      that already has one — so a task whose selector legitimately returns no
- *      bundle (non-content edge, stale install) is attempted once and drops out.
+ *      whose newest one is younger than PERSONA_BACKFILL_RETRY_HOURS (default 6).
+ *      An attempt that FAILED (selector timeout — the live stall: the content task
+ *      never got a `task_persona_bundle` row, so checkPersonaDispatchReady returned
+ *      `persona_bundle_required` on every dispatch tick FOREVER) is therefore
+ *      retried on the next window instead of being excluded for the life of the
+ *      box; a task whose selector legitimately returns no bundle (non-content edge,
+ *      stale install) costs one cheap attempt per window, not a loop.
  *   3. Content-only: `isContentTask()` is an LLM-free semantic classifier (never
  *      a grep-as-content-judge — 2.4); a non-content task is skipped (its
  *      `blend_directive` staying NULL is correct, not a defect).
@@ -220,6 +279,7 @@ export async function runPersonaBlendBackfill(
   graceCutoff: string,
 ): Promise<{ blendScanned: number; blendBackfilled: number }> {
   const placeholders = TERMINAL_STATUSES.map(() => '?').join(', ');
+  const retryCutoff = new Date(Date.now() - blendRetryHours() * 3_600_000).toISOString();
 
   let rows: BlendCandidateRow[];
   try {
@@ -242,10 +302,11 @@ export async function runPersonaBlendBackfill(
           AND NOT EXISTS (
             SELECT 1 FROM events e
              WHERE e.task_id = t.id AND e.type = 'blend_backfilled'
+               AND e.created_at > ?
           )
         ORDER BY t.created_at ASC
         LIMIT ?`,
-      [...TERMINAL_STATUSES, graceCutoff, batch],
+      [...TERMINAL_STATUSES, graceCutoff, retryCutoff, batch],
     );
   } catch (err) {
     // Pre-090 DB (no blend_directive / task_persona_bundle) — nothing to heal.

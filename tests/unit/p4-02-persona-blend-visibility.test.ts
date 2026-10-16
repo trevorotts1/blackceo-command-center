@@ -288,7 +288,10 @@ test('step3: blend backfill heals blend-less content tasks and respects every gu
     status: 'done',
     createdAt: daysAgo(1),
   });
-  // EXCLUDED — already attempted once (idempotency guard).
+  // EXCLUDED — attempted inside the retry window (idempotency guard). The marker
+  // is stamped NOW: the exclusion is windowed by PERSONA_BACKFILL_RETRY_HOURS
+  // (default 6h), not permanent — a failed attempt older than the window is
+  // deliberately retried (see tests/unit/dispatch-stall-2026-09.test.ts).
   const attempted = seedTask({
     title: 'write an email newsletter',
     personaId: 'covey-7-habits',
@@ -297,7 +300,7 @@ test('step3: blend backfill heals blend-less content tasks and respects every gu
   run(`INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, 'blend_backfilled', ?, 'prior', ?)`, [
     uuidv4(),
     attempted,
-    daysAgo(1),
+    new Date().toISOString(),
   ]);
 
   process.env.PERSONA_FIXTURE_JSON = BUNDLE_FIXTURE;

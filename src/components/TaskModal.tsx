@@ -10,7 +10,7 @@ import { DeliverablesList } from './DeliverablesList';
 // U063 — Presentation deliverables checklist (nine rows, always).
 import { PresentationDeliverablesPanel } from './PresentationDeliverablesPanel';
 import { SessionsList } from './SessionsList';
-import { PlanningTab } from './PlanningTab';
+import { PlanningTab, startFailureMessage } from './PlanningTab';
 import { AgentModal } from './AgentModal';
 import { MicDictateButton } from './MicDictateButton';
 import { BLOCKED_REASONS, BLOCKED_AUDIENCES } from './kanban/BlockTaskModal';
@@ -25,6 +25,7 @@ import { resolveAnthologyAssembly } from './anthology/assembly-cockpit-logic';
 // a task that actually went through the blend (task.blend_directive present)
 // so a plain non-content task never fires the extra gate-status fetch.
 import { AudienceConfirmPanel } from './AudienceConfirmPanel';
+import { writtenForLabel } from '@/lib/board/audience-chip';
 // U064 — persona picker (voice/topic axis), mounted beside AudienceConfirmPanel.
 import { PersonaPickerPanel } from './PersonaPickerPanel';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
@@ -73,6 +74,8 @@ interface TaskModalProps {
   task?: Task;
   onClose: () => void;
   workspaceId?: string;
+  /** Opened from the board's "Answer" button: focus the audience-confirm input. */
+  focusAudience?: boolean;
   /**
    * Seeds the create form's status when opened from a column's "+" button
    * (MissionQueue passes the column's underlying status). Ignored when
@@ -81,7 +84,11 @@ interface TaskModalProps {
   initialStatus?: TaskStatus;
 }
 
-export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskModalProps) {
+export function TaskModal({ task: taskProp, onClose, workspaceId, initialStatus, focusAudience }: TaskModalProps) {
+  // A task created in this modal with Planning Mode on: the modal stays open on
+  // it (Planning tab) instead of closing, so it behaves like an existing task.
+  const [createdTask, setCreatedTask] = useState<Task | undefined>();
+  const task = taskProp ?? createdTask;
   const { agents, addTask, updateTask, addEvent } = useMissionControl();
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showAgentModal, setShowAgentModal] = useState(false);
@@ -91,7 +98,8 @@ export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskMod
   const titleInterimRef = useRef('');
   const descInterimRef = useRef('');
   // Auto-switch to planning tab if task has planning session
-  const [activeTab, setActiveTab] = useState<TabType>(task?.planning_session_key ? 'planning' : 'overview');
+  const [planningStartError, setPlanningStartError] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<TabType>(taskProp?.planning_session_key ? 'planning' : 'overview');
 
   // Stable callback for when spec is locked - use window.location.reload() to refresh data
   const handleSpecLocked = useCallback(() => {
@@ -189,6 +197,8 @@ export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskMod
         // manufacture an id it has no reason to believe exists in the first
         // place — omit the key entirely and let the server default it.
         workspace_id: workspaceId || task?.workspace_id || undefined,
+        // Hold a new task from routing/dispatch until its planning is approved.
+        ...(!task && usePlanningMode ? { planning_mode: true } : {}),
       };
       // The blocked_reason/blocked_on_human/ask fields only mean anything on a
       // ->'blocked' transition (the API ignores them otherwise) — drop them
@@ -277,25 +287,26 @@ export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskMod
             created_at: new Date().toISOString(),
           });
 
-          // If planning mode is enabled, auto-generate questions and keep modal open
+          // Planning Mode: start the session, then keep the modal open on the
+          // new task's Planning tab so the owner can answer the questions.
+          // A failed start still lands on the tab, which offers "Start Planning".
           if (usePlanningMode) {
-            // Trigger question generation in background
-            fetch(`/api/tasks/${savedTask.id}/planning`, { method: 'POST' })
-              .then((res) => {
-                if (res.ok) {
-                  // Update our local task reference and switch to planning tab
-                  setActiveTab('planning');
-                } else {
-                  return res.json().then((data) => {
-                    console.error('Failed to start planning:', data.error);
-                  });
-                }
-              })
-              .catch((error) => {
-                console.error('Failed to start planning:', error);
-              });
+            try {
+              const planRes = await fetch(`/api/tasks/${savedTask.id}/planning`, { method: 'POST' });
+              if (!planRes.ok) {
+                const data = await planRes.json().catch(() => ({}));
+                console.error('Failed to start planning:', data.error);
+                setPlanningStartError(startFailureMessage(planRes.status, data));
+              }
+            } catch (error) {
+              console.error('Failed to start planning:', error);
+              setPlanningStartError(startFailureMessage());
+            }
+            setCreatedTask(savedTask);
+            setActiveTab('planning');
+          } else {
+            onClose();
           }
-          onClose();
         }
       }
     } catch (error) {
@@ -543,14 +554,17 @@ export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskMod
               the form, same as GatePanel, so its Confirm button never submits
               the task-edit form. */}
           {task && task.blend_directive && (
-            <AudienceConfirmPanel taskId={task.id} onConfirmed={() => window.location.reload()} />
+            <AudienceConfirmPanel taskId={task.id} assumedLabel={writtenForLabel(task)} autoFocus={focusAudience} onConfirmed={() => window.location.reload()} />
           )}
           {/* U064 — Persona picker panel (voice/topic axis). Self-contained +
               fail-quiet: GETs /api/tasks/[id]/persona-bundle on mount and renders
               NOTHING when the bundle is null (mirrors AudienceConfirmPanel's
               early-return pattern). Mounted beside AudienceConfirmPanel so both
               axes are visible on the same form. */}
-          {task && <PersonaPickerPanel taskId={task.id} onConfirmed={() => window.location.reload()} />}
+          {/* CRT-001: hand the board-known assignment into the picker so a failed
+              bundle read (or a non-blend task with a real persona pin) can never
+              render as "no assignment" while the card visibly carries one. */}
+          {task && <PersonaPickerPanel taskId={task.id} assignedPersonaId={task.persona_id} assignedPersonaName={task.persona_name} onConfirmed={() => window.location.reload()} />}
           {/* P2-02 — task-detail panels for an existing task (skipped on the
               anthology Assembly card, whose overview is the cockpit only). They
               sit OUTSIDE the form so their buttons/links never submit the edit
@@ -970,6 +984,7 @@ export function TaskModal({ task, onClose, workspaceId, initialStatus }: TaskMod
                 // Planning-off closes. Other recognized producer sources
                 // (funnel/survey/web-development) keep Planning available.
                 engineNotice={isAnthologyTask(task) ? engineLabel : null}
+                initialStartError={planningStartError}
               />
             </div>
           )}

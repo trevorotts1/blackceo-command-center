@@ -49,7 +49,16 @@ import { openclawConfigPath } from '@/lib/platform';
 import { parseDotEnv, extractOpenclawEnv } from '@/lib/studio/provider-discovery';
 
 /** The Research search providers, highest preference first. */
-export type ResearchProviderSlug = 'perplexity' | 'openai' | 'ollama' | 'xai';
+export type ResearchProviderSlug =
+  | 'perplexity'
+  | 'openai'
+  | 'ollama'
+  | 'xai'
+  | 'brave'
+  | 'exa'
+  | 'serper'
+  | 'serpapi'
+  | 'marginalia';
 
 /** One Research provider's discovery rule. */
 export interface ResearchProviderEntry {
@@ -65,6 +74,13 @@ export interface ResearchProviderEntry {
   defaultModel: string;
   /** One-line description of how this provider is called (for the report/UI). */
   callSummary: string;
+  /**
+   * TRUE when the provider needs no credential at all, so `envCandidates` is
+   * empty by design and "no key" must NOT read as "not available". Only
+   * Marginalia qualifies today. See the extension-point note in providers.ts
+   * before adding another.
+   */
+  keyless?: boolean;
 }
 
 /**
@@ -115,6 +131,52 @@ export const RESEARCH_PROVIDERS: ResearchProviderEntry[] = [
     defaultModel: 'grok-4-fast',
     callSummary:
       'POST https://api.x.ai/v1/chat/completions with `search_parameters.mode=on` (Live Search over X + the web). Sources returned in `citations`.',
+  },
+  // ── Pure SEARCH APIs. No chat model, no synthesized answer: they return
+  // ranked results with extracts, which ride on each citation's `snippet`.
+  // `defaultModel` is a label, not a model id — these endpoints take none.
+  {
+    slug: 'brave',
+    displayName: 'Brave Search',
+    envCandidates: ['BRAVE_API_KEY', 'BRAVE_SEARCH_API_KEY'],
+    defaultModel: 'web-search',
+    callSummary:
+      'GET https://api.search.brave.com/res/v1/web/search with `X-Subscription-Token`. Results in `web.results[]` (title/url/description).',
+  },
+  {
+    slug: 'exa',
+    displayName: 'Exa',
+    envCandidates: ['EXA_API_KEY'],
+    defaultModel: 'web-search',
+    callSummary:
+      'POST https://api.exa.ai/search with `x-api-key` and `{query, numResults, contents:{text:true}}`. Results in `results[]` (title/url/text).',
+  },
+  {
+    slug: 'serper',
+    displayName: 'Serper',
+    envCandidates: ['SERPER_API_KEY'],
+    defaultModel: 'web-search',
+    callSummary:
+      'POST https://google.serper.dev/search with `X-API-KEY` and `{q}`. Results in `organic[]` (title/link/snippet).',
+  },
+  {
+    slug: 'serpapi',
+    displayName: 'SerpAPI',
+    envCandidates: ['SERPAPI_API_KEY', 'SERPAPI_KEY'],
+    defaultModel: 'web-search',
+    callSummary:
+      'GET https://serpapi.com/search.json?engine=google&q=&api_key=. Results in `organic_results[]` (title/link/snippet).',
+  },
+  {
+    slug: 'marginalia',
+    displayName: 'Marginalia Search',
+    // KEYLESS. The public key is a literal, shared and rate-limited; a box may
+    // supply its own free non-commercial key instead.
+    envCandidates: ['MARGINALIA_API_KEY'],
+    keyless: true,
+    defaultModel: 'web-search',
+    callSummary:
+      'GET https://api2.marginalia-search.com/search with `API-Key: public` (no account needed). Results in `results[]` (url/title/description), licensed CC-BY-NC-SA 4.0 — attribution required.',
   },
 ];
 
@@ -221,6 +283,21 @@ export function resolveApiKeyEnv(entry: ResearchProviderEntry): string | null {
     if (process.env[candidate]) return candidate;
   }
   return null;
+}
+
+/**
+ * Can this provider actually answer on this box? A KEYLESS provider always
+ * can, whether or not it has an optional key.
+ *
+ * SCOPE: this is the SOP research CHAIN's predicate
+ * (src/lib/research/sop-research.ts), not the Operator Console's.
+ * `selectResearchProvider()` and `researchAvailability()` above deliberately
+ * stay key-only: the console's "no provider configured" empty state is a
+ * designed behaviour, and quietly auto-selecting a keyless fallback there
+ * would be a UI change nobody asked for.
+ */
+export function providerAvailable(entry: ResearchProviderEntry): boolean {
+  return Boolean(entry.keyless) || resolveApiKeyEnv(entry) !== null;
 }
 
 /** The selected provider plus the env var its key was resolved from. */

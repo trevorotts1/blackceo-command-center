@@ -130,9 +130,14 @@ CREATE TABLE IF NOT EXISTS tasks (
   completed_at TEXT,
   archived_at TEXT,
   -- QC loop guard (migration 061): counts how many times this task has been
-  -- returned to backlog by the QC scorer. Capped at QC_MAX_REROUTES (default 3)
+  -- returned to backlog by the QC scorer. Capped at QC_MAX_REROUTES (default 5)
   -- before the task is set to blocked status and the CEO is notified.
   qc_reroute_attempts INTEGER DEFAULT 0,
+  -- QC cap-alert marker (migration 159): the attempt count at which the owner
+  -- was last told this card had STOPPED retrying. NULL = never alerted. Guards
+  -- the alert against sweep ticks and restarts; a resumed card that fails again
+  -- arrives with a higher attempt count and earns one more alert.
+  qc_cap_alert_attempts INTEGER,
   -- PRD 2.12-cc dispatch-time SOP authoring link (migration 066 owns this for
   -- existing DBs; this base CREATE covers fresh installs). When set, this task
   -- is the "Author SOP" sub-task for the referenced original task. The fast-loop
@@ -329,7 +334,7 @@ CREATE INDEX IF NOT EXISTS idx_ceo_chat_session ON ceo_chat_messages(session_id,
 -- Cron job liveness ledger (C-09 / U40 -- "watch the watchers"). Migration 102
 -- also creates this for existing DBs; CREATE TABLE IF NOT EXISTS is idempotent.
 -- One row per registered scheduler.ts job name, upserted on every tick (success
--- or failure) by wrap(). src/lib/jobs/sweep-liveness.ts reads this to detect an
+-- or failure) by wrap(). src/lib/jobs/board-jobs-watchdog.ts reads this to detect an
 -- advancer (intake-advance) or qc-review-sweep gone silent for 3x its cadence.
 CREATE TABLE IF NOT EXISTS job_liveness (
   job_name TEXT PRIMARY KEY,
@@ -468,9 +473,14 @@ CREATE TABLE IF NOT EXISTS task_activities (
 
 -- Task deliverables table (files, URLs, artifacts)
 -- NOTE: mime_type, file_size_bytes, sha256 added by migration 070 on existing DBs.
+-- NOTE: execution_id added by migration 158 on existing DBs. It names the
+-- attempt that registered the row, so the persona artifact-snapshot gate can
+-- ask a producer to account for ITS OWN artifacts and not for the ones earlier
+-- QC re-routes left behind (see persona-conformance.ts).
 CREATE TABLE IF NOT EXISTS task_deliverables (
   id TEXT PRIMARY KEY,
   task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  execution_id TEXT,
   deliverable_type TEXT NOT NULL,
   title TEXT NOT NULL,
   path TEXT,
@@ -478,6 +488,10 @@ CREATE TABLE IF NOT EXISTS task_deliverables (
   mime_type TEXT,
   file_size_bytes INTEGER,
   sha256 TEXT,
+  -- Retired by a later attempt (migration 161). NEVER deleted: a client's file
+  -- record survives, it simply stops counting as the current attempt's output.
+  superseded_at TEXT,
+  superseded_by_execution_id TEXT,
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
 );
@@ -496,6 +510,20 @@ CREATE TABLE IF NOT EXISTS task_events (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_task_events_task_id ON task_events(task_id, created_at);
+
+-- CANC-101 (finding 10 — migration 168 owns existing DBs; base CREATE covers
+-- fresh installs). Kill-fence acknowledgement: ONE row per task (UNIQUE on
+-- task_id, INSERT OR IGNORE), so cancelling twice never double-writes.
+-- Audit-only: no fence reads this table.
+CREATE TABLE IF NOT EXISTS task_kill_acks (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id) ON DELETE CASCADE,
+  killed_at TEXT NOT NULL,
+  execution_found INTEGER NOT NULL DEFAULT 0,
+  notice_delivered INTEGER NOT NULL DEFAULT 0,
+  notice_error TEXT,
+  created_at TEXT NOT NULL
+);
 
 -- Agent daily memory logs
 CREATE TABLE IF NOT EXISTS agent_memory_logs (
@@ -664,7 +692,11 @@ CREATE TABLE IF NOT EXISTS task_qc_results (
   scoring_path TEXT NOT NULL,
   qc_agent_id TEXT,
   attempt INTEGER DEFAULT 1,
-  scored_at TEXT NOT NULL DEFAULT (datetime('now'))
+  scored_at TEXT NOT NULL DEFAULT (datetime('now')),
+  -- A40 (migration 164 adds this to existing DBs): the judge's content-adherence
+  -- verdict from the SAME reply as the score. NULL = not judged, never blocks;
+  -- 0 = judged non-adherent, refuses done at the lifecycle door.
+  content_adherence INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_qc_results_task ON task_qc_results(task_id, scored_at DESC);
 CREATE INDEX IF NOT EXISTS idx_qc_results_dept ON task_qc_results(department_slug, scored_at DESC);
@@ -785,4 +817,64 @@ CREATE TABLE IF NOT EXISTS task_block_events (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_task_block_events_task ON task_block_events(task_id, created_at DESC);
+
+-- Skill 71 run tracking (fix plan Items 24-26). Populated ONLY by event
+-- ingestion (src/lib/skill71-runs.ts): the file importer
+-- (scripts/import-skill71-runs.ts) and POST /api/skill-runs/ingest.
+-- Stores IDs, verdicts, hashes, and score aggregates: never page copy,
+-- prompt text, review notes, or credential values.
+CREATE TABLE IF NOT EXISTS skill71_runs (
+  run_id TEXT PRIMARY KEY,
+  page_name TEXT,
+  brand_id TEXT,
+  client TEXT,
+  client_slug TEXT,
+  host_shape TEXT,
+  run_dir TEXT,
+  test_run INTEGER NOT NULL DEFAULT 0,
+  overall TEXT NOT NULL DEFAULT 'incomplete',
+  review_mode TEXT,
+  report_json_path TEXT,
+  report_md_path TEXT,
+  blocked_stage TEXT,
+  started_at TEXT,
+  last_event_at TEXT,
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS skill71_run_stages (
+  run_id TEXT NOT NULL REFERENCES skill71_runs(run_id) ON DELETE CASCADE,
+  stage TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open',
+  receipt_status TEXT,
+  closed_at TEXT,
+  duration_s REAL,
+  scores_summary_json TEXT,
+  cost_json TEXT,
+  artifact_hashes_json TEXT,
+  failures_json TEXT,
+  items_json TEXT NOT NULL DEFAULT '{}',
+  updated_at TEXT DEFAULT (datetime('now')),
+  PRIMARY KEY (run_id, stage)
+);
+
+CREATE TABLE IF NOT EXISTS skill71_run_events (
+  event_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  emitted_at TEXT NOT NULL,
+  source TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  received_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS skill71_ingest_tokens (
+  id TEXT PRIMARY KEY,
+  token_hash TEXT NOT NULL UNIQUE,
+  client_slug TEXT NOT NULL,
+  host_shape TEXT NOT NULL,
+  created_at TEXT DEFAULT (datetime('now')),
+  revoked_at TEXT
+);
 `;

@@ -7,7 +7,7 @@
  * oldest in-flight task so the operator can spot stalls.
  *
  * For actual PER-JOB cron-scheduler liveness (does the loop still tick at
- * all), see src/lib/jobs/sweep-liveness.ts (C-09 / U40) — that is the real
+ * all), see src/lib/jobs/board-jobs-watchdog.ts (C-09 / U40) — that is the real
  * "watch the watchers" signal this file's own doc comment names as missing;
  * this probe only ever inspects task rows, never the scheduler's own ticks.
  */

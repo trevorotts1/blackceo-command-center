@@ -77,6 +77,7 @@ import {
   type InterviewQuestion,
 } from '@/lib/interview/base-questions';
 import {
+  mergeSkippedIds,
   nextStructuredIndex,
   personalizePrompt,
 } from '@/lib/interview/structured-progress';
@@ -130,6 +131,7 @@ interface InterviewStateResponse {
   installationId?: string;
   buildId?: string | null;
   interviewComplete: boolean;
+  priorCompletionDeclared?: boolean;
   buildCompleted: boolean;
   qcStatus: string;
   session?: { interviewSessionId: string | null; gatewaySessionId?: string | null };
@@ -139,6 +141,8 @@ interface InterviewStateResponse {
     remainingIds: string[];
     nextIndex: number | null;
     complete: boolean;
+    /** ILJ-004 (additive): server-side skip marks for this session. */
+    skippedIds?: string[];
   };
   knownContext?: Record<string, { value: string; source: string }>;
   progress: {
@@ -255,6 +259,8 @@ export default function InterviewClient() {
   const [state, setState] = useState<InterviewStateResponse | null>(null);
   const [booting, setBooting] = useState(true);
   const [stateError, setStateError] = useState<string | null>(null);
+  const [declaringCompletion, setDeclaringCompletion] = useState(false);
+  const [declarationError, setDeclarationError] = useState<string | null>(null);
 
   // Structured answers recorded THIS session (merged with the server's set so a
   // just-answered card is skipped even before the next /state read lands).
@@ -291,6 +297,10 @@ export default function InterviewClient() {
   const routedRef = useRef(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const recoveryRef = useRef<{ token: number }>({ token: 0 });
+  // ILJ-004: latest-value mirrors so skip callbacks (stable identities) never
+  // read a stale closure over answeredIds / interviewSessionId.
+  const answeredIdsRef = useRef<Set<string>>(new Set());
+  const interviewSessionIdRef = useRef<string | null>(null);
 
   const flags = state?.flags ?? ALL_GATES_FALSE;
   const transcriptReady = flags.genuineTranscriptReady;
@@ -306,6 +316,14 @@ export default function InterviewClient() {
     return ids;
   }, [locallyAnswered, state?.structured?.answeredIds]);
 
+  // ILJ-004: keep the callback-safe mirrors current (effects, not render writes).
+  useEffect(() => {
+    answeredIdsRef.current = answeredIds;
+  }, [answeredIds]);
+  useEffect(() => {
+    interviewSessionIdRef.current = interviewSessionId;
+  }, [interviewSessionId]);
+
   /** Structured questions skipped AND still unanswered (the circle-back queue). */
   const skippedQueue = useMemo(
     () => STRUCTURED_QUESTIONS.filter((q) => skippedIds.has(q.id) && !answeredIds.has(q.id)),
@@ -319,6 +337,53 @@ export default function InterviewClient() {
       /* private mode — chips simply don't survive this tab */
     }
   }, [interviewSessionId]);
+
+  /**
+   * ILJ-004: fold the server skip set into this device's local set (server
+   * wins the union; answers always clear). sessionStorage stays the same-tab
+   * cache it always was — cross-device survival comes from the server copy.
+   * Never throws; a malformed server set degrades to the local set.
+   */
+  const syncSkipsFromServer = useCallback((serverIds: readonly unknown[]) => {
+    setSkippedIds((prev) => {
+      let merged: string[];
+      try {
+        merged = mergeSkippedIds(STRUCTURED_QUESTIONS, serverIds, Array.from(prev), Array.from(answeredIdsRef.current));
+      } catch {
+        return prev;
+      }
+      try {
+        sessionStorage.setItem(
+          `${SKIPPED_KEY}:${interviewSessionIdRef.current || 'unresolved'}`,
+          JSON.stringify(merged),
+        );
+      } catch {
+        /* private mode — the merge still stands in memory */
+      }
+      return new Set(merged);
+    });
+  }, []);
+
+  /**
+   * ILJ-004: best-effort server write for one skip mark. The local chip is
+   * already set by the caller (optimistic) — a server failure degrades to the
+   * pre-ILJ-004 same-device behavior, never a blocked UI. `skipped: false`
+   * clears a mark the owner circled back to without answering yet.
+   */
+  const postSkipToServer = useCallback(async (questionId: string, skipped: boolean) => {
+    try {
+      const res = await fetch('/api/interview/state', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ questionId, skipped }),
+      });
+      if (!res.ok) return;
+      const data = (await res.json()) as { skippedIds?: unknown };
+      if (Array.isArray(data.skippedIds)) syncSkipsFromServer(data.skippedIds);
+    } catch {
+      /* offline — the local chip still stands */
+    }
+  }, [syncSkipsFromServer]);
 
   /* ---- gateway-session persistence (continuity across reloads) ---- */
 
@@ -343,9 +408,32 @@ export default function InterviewClient() {
       const res = await fetch('/api/interview/state', { cache: 'no-store' });
       if (!res.ok) throw new Error(res.status === 403 || res.status === 401 ? INTERVIEW_SIGN_IN_HELP : INTERVIEW_RETRY_HELP);
       const data = (await res.json()) as InterviewStateResponse;
-      if (!verifiedProgress(data)) throw new Error(INTERVIEW_RETRY_HELP);
+      if (!verifiedProgress(data) && data.priorCompletionDeclared !== true) throw new Error(INTERVIEW_RETRY_HELP);
       setStateError(null);
       setState(data);
+      // ILJ-004: fold the server skip set into this device's local set so skips
+      // survive a device switch — the server copy is authoritative for the
+      // UNION (mergeSkippedIds drops answered/unknown ids on both sides).
+      if (Array.isArray(data.structured?.skippedIds)) {
+        const serverIds = data.structured.skippedIds;
+        setSkippedIds((prev) => {
+          let merged: string[];
+          try {
+            merged = mergeSkippedIds(STRUCTURED_QUESTIONS, serverIds, Array.from(prev), Array.from(answeredIdsRef.current));
+          } catch {
+            return prev;
+          }
+          try {
+            sessionStorage.setItem(
+              `${SKIPPED_KEY}:${data?.session?.interviewSessionId || interviewSessionIdRef.current || 'unresolved'}`,
+              JSON.stringify(merged),
+            );
+          } catch {
+            /* private mode — the merge still stands in memory */
+          }
+          return new Set(merged);
+        });
+      }
       return data;
     } catch (error) {
       setStateError(error instanceof Error ? error.message : 'Your progress is unavailable. Please retry.');
@@ -355,15 +443,25 @@ export default function InterviewClient() {
     }
   }, []);
 
-  // Opening another invitation on this same page can be a fragment-only browser
-  // navigation. Reload into the normal bootstrap so it verifies the current
-  // sign-in and removes the bearer, just as a fresh navigation would.
+  // Opening another invitation on this same page can be a query or legacy
+  // fragment navigation. Query (?enroll=) is the canonical short link (it
+  // survives Cloudflare Access login); fragment (#enroll=) stays accepted so
+  // tickets issued before the query migration still bootstrap. Reload into
+  // the normal bootstrap so it verifies the current sign-in, just as a fresh
+  // navigation would.
   useEffect(() => {
-    const onHashChange = () => {
-      if (new URLSearchParams(window.location.hash.slice(1)).has('enroll')) window.location.reload();
+    const hasEnrollment = () =>
+      new URLSearchParams(window.location.search).has('enroll') ||
+      new URLSearchParams(window.location.hash.slice(1)).has('enroll');
+    const onSearchChange = () => {
+      if (hasEnrollment()) window.location.reload();
     };
-    window.addEventListener('hashchange', onHashChange);
-    return () => window.removeEventListener('hashchange', onHashChange);
+    window.addEventListener('popstate', onSearchChange);
+    window.addEventListener('hashchange', onSearchChange);
+    return () => {
+      window.removeEventListener('popstate', onSearchChange);
+      window.removeEventListener('hashchange', onSearchChange);
+    };
   }, []);
 
   // On mount: read state once and route to the right screen. ANY prior answer —
@@ -372,19 +470,28 @@ export default function InterviewClient() {
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const enrollment = new URLSearchParams(window.location.hash.slice(1)).get('enroll');
+      const params = new URLSearchParams(window.location.search);
+      // Canonical short links carry ?enroll= (survives Cloudflare Access
+      // login); legacy links carry #enroll= — accept either, query first.
+      const enrollment =
+        params.get('enroll') ??
+        new URLSearchParams(window.location.hash.slice(1)).get('enroll');
+      let bootstrapPath = window.location.pathname + window.location.search;
       if (enrollment && !enrollmentRef.current) {
         pendingEnrollmentRef.current = enrollment;
-        const cleanUrl = window.location.pathname + window.location.search;
-        // Remove the bearer immediately. After redemption, replace the document
-        // so its router starts authenticated with a clean canonical URL; a
-        // pending action from this bootstrap cannot restore the consumed ticket.
-        window.history.replaceState(null, '', cleanUrl);
-        // StrictMode effect replay must await the same one-use redemption, never
+        // Keep ?enroll= until the exchange below issues the session cookie:
+        // POST /api/auth/interview-session sets the HttpOnly cookie, so a
+        // short link works with NO prior tenant cookie. Only after a
+        // successful exchange is the query stripped (expired/invalid links
+        // stay visible so the owner can copy or re-request them).
+        // StrictMode effect replay must await the same exchange, never
         // load unauthenticated state or submit this ticket a second time.
         enrollmentRef.current = (async () => {
           const error = await recoverInterviewAccess(enrollment);
           if (error) return error;
+          const cleanUrl = window.location.pathname;
+          window.history.replaceState(null, '', cleanUrl);
+          bootstrapPath = cleanUrl;
           window.location.replace(cleanUrl);
           return null;
         })();
@@ -393,7 +500,7 @@ export default function InterviewClient() {
         const enrollmentError = await enrollmentRef.current;
         if (cancelled) return;
         if (enrollmentError) { setStateError(enrollmentError); setBooting(false); }
-        return; // Success hands off to the authenticated, fragment-free document.
+        return; // Success hands off to the authenticated, query-free document.
       }
       const data = await loadState();
       // AI Workforce standard-first (PHASE 6 item 6): read the prebuilt-
@@ -414,10 +521,19 @@ export default function InterviewClient() {
       if (routedRef.current) return;
       routedRef.current = true;
 
-      // Restore per-device skipped chips.
+      // Restore per-device skipped chips, then fold in the server copy (a skip
+      // marked on ANOTHER device arrives here on this fresh load — cross-device
+      // survival land here, not in sessionStorage alone).
       try {
         const raw = sessionStorage.getItem(`${SKIPPED_KEY}:${data?.session?.interviewSessionId || 'unresolved'}`);
-        if (raw) setSkippedIds(new Set(JSON.parse(raw) as string[]));
+        const local: string[] = raw ? (JSON.parse(raw) as string[]) : [];
+        const server: unknown[] = Array.isArray(data?.structured?.skippedIds)
+          ? data.structured.skippedIds
+          : [];
+        // ILJ-004: fold the server skip set into this device's local set so skips
+        // survive a device switch. sessionStorage stays the same-tab cache it
+        // always was; the server copy is authoritative for the UNION.
+        setSkippedIds(new Set(mergeSkippedIds(STRUCTURED_QUESTIONS, server, local)));
       } catch {
         /* ignore */
       }
@@ -428,7 +544,7 @@ export default function InterviewClient() {
       // counts — the owner is done; route straight to the dashboard (already
       // unlocked by the gate cookie once interviewComplete is true). Checked
       // FIRST, ahead of the answeredCount branch below.
-      if (data.interviewComplete === true) {
+      if (data.interviewComplete === true || data.buildCompleted === true || data.priorCompletionDeclared === true) {
         router.replace('/');
         return;
       }
@@ -595,12 +711,17 @@ export default function InterviewClient() {
 
       let nextAnswered = answeredIds;
       if (opts.skipped) {
+        // Optimistic local chip (same-tab instant) + best-effort server write
+        // (cross-device survival). The visual flow below uses the same merged
+        // set the render path derives, so the card advances identically even
+        // when the server write is still in flight or offline.
         setSkippedIds((prev) => {
           const next = new Set(prev);
           next.add(q.id);
           persistSkipped(next);
           return next;
         });
+        void postSkipToServer(q.id, true);
       } else {
         setLocallyAnswered((prev) => new Set(prev).add(q.id));
         nextAnswered = new Set(answeredIds).add(q.id);
@@ -636,6 +757,7 @@ export default function InterviewClient() {
       fireMilestone,
       loadState,
       persistSkipped,
+      postSkipToServer,
       skippedIds,
       startConversation,
     ],
@@ -712,10 +834,14 @@ export default function InterviewClient() {
       persistSkipped(next);
       return next;
     });
+    // ILJ-004: clear the server mark too (the owner is about to answer it, and
+    // answering clears it server-side anyway — this just un-skips the queue on
+    // the OTHER device immediately, without waiting for an answer).
+    void postSkipToServer(questionId, false);
     setQaMode('structured');
     setStructIndex(idx);
     setStage('qa');
-  }, [persistSkipped]);
+  }, [persistSkipped, postSkipToServer]);
 
   /** Circle back to a numbered CONVERSATIONAL question (agent-owned queue). */
   const circleBack = useCallback(
@@ -739,8 +865,29 @@ export default function InterviewClient() {
     const error = await recoverInterviewAccess(ticket);
     if (error) { setStateError(error); setBooting(false); return; }
     pendingEnrollmentRef.current = null;
-    window.location.replace(window.location.pathname + window.location.search);
+    window.location.replace(window.location.pathname);
   }, []);
+
+  const declareCompleted = useCallback(async () => {
+    if (declaringCompletion) return;
+    setDeclaringCompletion(true);
+    setDeclarationError(null);
+    try {
+      const response = await fetch('/api/interview/prior-completion', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ confirmed: true }),
+      });
+      const result = await response.json();
+      if (!response.ok || result.priorCompletionDeclared !== true) {
+        throw new Error(response.status === 401 || response.status === 403
+          ? INTERVIEW_SIGN_IN_HELP : 'Your declaration was not saved. Please retry.');
+      }
+      window.location.assign('/');
+    } catch (error) {
+      setDeclarationError(error instanceof Error ? error.message : 'Your declaration was not saved. Please retry.');
+      setDeclaringCompletion(false);
+    }
+  }, [declaringCompletion]);
 
   /* ---- renders ---- */
 
@@ -756,7 +903,7 @@ export default function InterviewClient() {
 
   if (stateError) {
     screen = <div className={iv.root}><div className={iv.stage} role="alert">
-      <h1 className={iv.question}>Continue your interview</h1>
+      <h1 className={iv.question}>Check your access</h1>
       <p className={iv.lede}>{stateError}</p>
       <button type="button" className={iv.btnPrimary} disabled={booting} onClick={() => void retryAccess()}>{booting ? 'Checking…' : 'Check sign-in and retry'}</button>
       <p className="mt-4 text-sm">Use this same interview page after signing in. Submitted answers stay saved; a fresh link does not start a new interview.</p>
@@ -869,7 +1016,18 @@ export default function InterviewClient() {
   }
 
   // Respect the OS reduced-motion preference across every interview animation.
-  return <MotionConfig reducedMotion="user">{screen}</MotionConfig>;
+  return <MotionConfig reducedMotion="user">{screen}
+    {!booting && !state?.interviewComplete && !state?.buildCompleted && !state?.priorCompletionDeclared && (
+      <section className="mx-auto w-full max-w-2xl px-5 pb-8" aria-label="Previously completed interview">
+        <button type="button" className={iv.btnSecondary} disabled={declaringCompletion}
+          aria-describedby="prior-completion-help" onClick={() => void declareCompleted()}>
+          {declaringCompletion ? 'Saving your declaration…' : 'I have already completed the interview'}
+        </button>
+        <p id="prior-completion-help" className="mt-3 text-sm">This saves your declaration that you previously completed the interview and stops repeat prompts across sign-ins. It does not create answers or mark your workforce build complete.</p>
+        {declarationError && <p role="alert" className="mt-3 text-sm">{declarationError}</p>}
+      </section>
+    )}
+  </MotionConfig>;
 }
 
 /* -------------------------------------------------------------------------- */

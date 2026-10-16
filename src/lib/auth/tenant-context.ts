@@ -2,11 +2,18 @@
 export interface TenantContext {
   tenantId: string; companyId: string; clientId: string | null;
   kind: 'self' | 'client'; subject: string; host: string; installationId: string;
+  /** Verified owner email from the cryptographically verified Access JWT claim.
+   *  Null unless the identity was proven via RS256/JWKS above. Never a raw header. */
+  email?: string | null;
 }
 export interface TenantRegistration {
   tenantId: string; companyId: string; clientId?: string;
   kind: 'self' | 'client'; installationId: string; subjects?: string[];
   issuer?: string; audience?: string;
+  /** Exact owner emails allowed via the verified Access JWT `email` claim.
+   *  Checked ONLY against the signed claim, never a header. When absent, any
+   *  email on a valid JWT is accepted and only `subjects` gates identity. */
+  allowedEmails?: string[];
   remoteUrl?: string; remoteSecret?: string; remoteApiToken?: string;
 }
 export class TenantAccessError extends Error { status = 403; }
@@ -19,27 +26,146 @@ export function requestHost(request: { headers: Headers }): string {
   const raw = request.headers.get('host') || '';
   try { return new URL(`http://${raw}`).hostname.toLowerCase(); } catch { throw new TenantAccessError('Invalid hostname'); }
 }
+/**
+ * Parse the tenant registry defensively. A malformed MC_TENANT_REGISTRY_JSON
+ * must never become a 403 wall: it logs loudly and is treated as unconfigured,
+ * so the implicit-self path below still serves the box's own host. Never throws.
+ */
+function readTenantRegistry(): Record<string, TenantRegistration> {
+  const raw = process.env.MC_TENANT_REGISTRY_JSON;
+  if (!raw || !raw.trim()) return {};
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('registry must be a JSON object keyed by hostname');
+    }
+    return parsed as Record<string, TenantRegistration>;
+  } catch (err) {
+    console.error(
+      '[tenant] MC_TENANT_REGISTRY_JSON is malformed; treating as unconfigured (implicit-self still applies):',
+      err instanceof Error ? err.message : String(err),
+    );
+    return {};
+  }
+}
+
+/**
+ * Shared public-origin resolver (CC_PUBLIC_URL-first).
+ *
+ * The box's own public URL is read from CC_PUBLIC_URL, falling back to the
+ * legacy MC_TENANT_PUBLIC_URL. invitation.ts, the send-link fence, and the
+ * implicit-self check below all resolve through here so the three can never
+ * disagree about which host is "self". Returns null when unconfigured or
+ * unparseable — callers decide whether that is fatal (issuance) or a fence
+ * failure (delivery receipts). Never throws, never prints the value.
+ */
+export function configuredPublicOrigin(): URL | null {
+  const raw = (process.env.CC_PUBLIC_URL || process.env.MC_TENANT_PUBLIC_URL || '').trim();
+  if (!raw) return null;
+  try {
+    return new URL(raw);
+  } catch {
+    console.error('[tenant] configured public origin is not a valid URL; treating as unconfigured');
+    return null;
+  }
+}
+
 export function tenantRegistration(host: string): TenantRegistration {
-  const registrations = JSON.parse(process.env.MC_TENANT_REGISTRY_JSON || '{}') as Record<string, TenantRegistration>;
+  const registrations = readTenantRegistry();
   const reg = registrations[host];
   if (reg && reg.tenantId && reg.companyId && reg.installationId && (reg.kind === 'self' || (reg.kind === 'client' && reg.clientId))) return reg;
+  const implicitSelf = (): TenantRegistration => ({ tenantId: 'self', companyId: process.env.MC_COMPANY_ID || 'default', kind: 'self', installationId: process.env.MC_INSTALLATION_ID || 'local' });
+  const loopback = ['localhost', '127.0.0.1', '[::1]', '::1'].includes(host);
   // Explicit local development mode only. Production requires a registered hostname.
-  if (process.env.NODE_ENV !== 'production' && ['localhost', '127.0.0.1', '[::1]'].includes(host)) {
-    return { tenantId: 'self', companyId: process.env.MC_COMPANY_ID || 'default', kind: 'self', installationId: process.env.MC_INSTALLATION_ID || 'local' };
+  if (process.env.NODE_ENV !== 'production' && loopback) return implicitSelf();
+  // Implicit self registration (2026-09-18): a production box with NO registry
+  // configured at all is an unprovisioned single-tenant installation, not a
+  // multi-tenant host. Before the registry existed such a box served exactly one
+  // tenant (itself) on its own public hostname and on loopback; refusing both
+  // turned every unprovisioned box into a 403 wall (measured on VPS + Mac boxes
+  // upgraded 2026-09-18) and blinded the loopback health probes. Only two hosts
+  // qualify: loopback (reachable from the box alone) and the hostname of the
+  // box's own configured public URL. Every other host still has no tenant, and a
+  // box WITH a registry keeps the strict behaviour above unchanged.
+  if (Object.keys(registrations).length === 0) {
+    if (loopback) return implicitSelf();
+    const own = configuredPublicOrigin()?.hostname.toLowerCase() ?? null;
+    if (own && own === host) return implicitSelf();
   }
   throw new TenantAccessError('Hostname has no configured tenant');
 }
+let _fallbackWarned = false;
 function secret(): string {
-  const value = process.env.MC_TENANT_SESSION_SECRET || process.env.MC_INTERVIEW_COOKIE_SECRET || process.env.MC_API_TOKEN;
-  if (!value) throw new TenantAccessError('Tenant authentication is not configured');
-  return value;
+  // Item (2): the MC_API_TOKEN fallback is load-bearing — boxes that never set
+  // a dedicated tenant secret still sign/verify through the one secret they
+  // have. Dropping it would 403-lock every working box on the next deploy, so
+  // it stays; but a box that NEEDS it now says so on every boot and the
+  // readiness endpoint reports `enrollment_secret_fallback` instead of a bare
+  // pass, so the gap is visible until the operator provisions a dedicated
+  // secret. Never prints the secret itself.
+  const dedicated = process.env.MC_TENANT_SESSION_SECRET || process.env.MC_INTERVIEW_COOKIE_SECRET || '';
+  if (dedicated.trim()) return dedicated;
+  const fallback = process.env.MC_API_TOKEN || '';
+  if (fallback.trim()) {
+    if (!_fallbackWarned) {
+      _fallbackWarned = true;
+      console.warn(
+        '[tenant] no dedicated tenant signing secret set (MC_TENANT_SESSION_SECRET / MC_INTERVIEW_COOKIE_SECRET); ' +
+        'using MC_API_TOKEN fallback. Provision a dedicated secret.',
+      );
+    }
+    return fallback;
+  }
+  throw new TenantAccessError('Tenant authentication is not configured');
+}
+
+/** Item (2): true when signing runs on the MC_API_TOKEN fallback (no dedicated secret). */
+/** Issuance prerequisites, shared by readiness and issuance (items 07 + 13).
+ *
+ *  WHY THIS EXISTS. `createInterviewInvitation()` has always refused a host
+ *  whose registry entry carries no Access issuer/audience/subjects
+ *  (409 `access_identity_unregistered`), while `/api/auth/interview-ready`
+ *  reported `ready:true` for the same host with only a `warnings` entry. Every
+ *  caller — the sender, the nudges, an agent polling readiness — was told the
+ *  interview could be issued at the exact moment issuance was impossible, and
+ *  waited for a link that could never be minted. One predicate, one answer.
+ *
+ *  SEPARATION OF CONCERNS. This gate says only "can this box verify the owner
+ *  who opens a link". It never claims the runtime is healthy, and it never
+ *  claims a provider is alive; those stay `runtimeReady` and
+ *  `providerLiveness`. Reasons are machine-readable keys, never values, and
+ *  nothing here invents an issuer, an audience or a subject.
+ *
+ *  A `client`-kind registration is intentionally NOT issuable here: issuance is
+ *  a self-registration (dedicated) operation, exactly as the operator:api gate
+ *  above it already requires. */
+export interface InvitationPrerequisites {
+  issuable: boolean;
+  reasons: string[];
+}
+export function invitationPrerequisites(context: { kind: TenantContext['kind']; installationId: string; host: string }): InvitationPrerequisites {
+  const reasons: string[] = [];
+  if (context.kind !== 'self') reasons.push('dedicated_self_registration');
+  if (context.installationId !== process.env.MC_INSTALLATION_ID) reasons.push('installation_id');
+  let registration: TenantRegistration | null = null;
+  try {
+    registration = tenantRegistration(context.host);
+  } catch {
+    registration = null;
+  }
+  if (!registration?.issuer || !registration?.audience || !registration.subjects?.length) reasons.push('access_identity_unregistered');
+  return { issuable: reasons.length === 0, reasons };
+}
+
+export function tenantSecretIsFallback(): boolean {
+  return !(process.env.MC_TENANT_SESSION_SECRET || process.env.MC_INTERVIEW_COOKIE_SECRET || '').trim();
 }
 async function signature(payload: string): Promise<Uint8Array> {
   const key = await crypto.subtle.importKey('raw', enc.encode(secret()), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
   return new Uint8Array(await crypto.subtle.sign('HMAC', key, enc.encode(payload)));
 }
 function equal(a: Uint8Array, b: Uint8Array): boolean { let diff = a.length ^ b.length; for (let i = 0; i < a.length; i++) diff |= a[i] ^ (b[i] ?? 0); return diff === 0; }
-export interface TenantGrant { purpose: 'session' | 'enrollment'; tenantId: string; companyId?: string; subject: string; host: string; installationId: string; exp: number; nonce: string; }
+export interface TenantGrant { purpose: 'session' | 'enrollment' | 'owner-login'; tenantId: string; companyId?: string; subject: string; host: string; installationId: string; exp: number; nonce: string; }
 export async function signTenantGrant(grant: TenantGrant): Promise<string> {
   // All newly signed grants carry company ownership. Serialized legacy grants
   // without this claim must sign in again; registry changes cannot rebind them.
@@ -47,14 +173,33 @@ export async function signTenantGrant(grant: TenantGrant): Promise<string> {
   const payload = b64(enc.encode(JSON.stringify(bound)));
   return `${payload}.${b64(await signature(payload))}`;
 }
-async function verifyGrant(token: string | null, host: string, purpose: TenantGrant['purpose'], acceptExpiredEnrollment = false): Promise<TenantGrant | null> {
+/** Enrollment tickets carry NO clock expiry: an interview invitation stays
+ * valid until the interview itself is complete, so a client who opens the link
+ * days or weeks later is never locked out of an unfinished interview. The
+ * completion check lives at the redemption route (interview-session), which is
+ * the only place that knows the build state. `exp` is still required to be a
+ * finite number, so a truncated or tampered payload fails here.
+ *
+ * `enrollment` is the ONLY deliberately timeless purpose. Every other purpose —
+ * `session` and `owner-login` — expires on the clock. The predicate used to
+ * read `purpose === 'session'`, which made every OTHER purpose unexpiring: a
+ * `purpose:'owner-login'` grant added without this fix would have been a
+ * PERMANENT capability, not a ten-minute one (SPEC S7). Written as an
+ * exclusion so a future purpose is bounded by default instead of unbounded by
+ * omission. */
+const TIMELESS_GRANT_PURPOSES: ReadonlySet<TenantGrant['purpose']> = new Set(['enrollment']);
+function grantExpired(grant: TenantGrant): boolean {
+  if (TIMELESS_GRANT_PURPOSES.has(grant.purpose)) return false;
+  return grant.exp <= Date.now() / 1000;
+}
+async function verifyGrant(token: string | null, host: string, purpose: TenantGrant['purpose']): Promise<TenantGrant | null> {
   try {
     if (!token) return null;
     const [payload, sig, extra] = token.split('.');
     if (!payload || !sig || extra || !equal(bytes(sig), await signature(payload))) return null;
     const grant = json(payload) as TenantGrant;
     const reg = tenantRegistration(host);
-    if (grant.purpose !== purpose || grant.host !== host || grant.tenantId !== reg.tenantId || grant.companyId !== reg.companyId || grant.installationId !== reg.installationId || !grant.subject || !grant.nonce || !Number.isFinite(grant.exp) || (!(acceptExpiredEnrollment && purpose === 'enrollment') && grant.exp <= Date.now() / 1000)) return null;
+    if (grant.purpose !== purpose || grant.host !== host || grant.tenantId !== reg.tenantId || grant.companyId !== reg.companyId || grant.installationId !== reg.installationId || !grant.subject || !grant.nonce || !Number.isFinite(grant.exp) || grantExpired(grant)) return null;
     return grant;
   } catch { return null; }
 }
@@ -64,14 +209,17 @@ export async function verifyTenantGrant(token: string | null, host: string, purp
 /** Identity comparison only, after an independently verified LIVE session.
  * This never authorizes enrollment or extends session lifetime. */
 export async function verifyEnrollmentIdentity(token: string | null, host: string): Promise<TenantGrant | null> {
-  return verifyGrant(token, host, 'enrollment', true);
+  return verifyGrant(token, host, 'enrollment');
 }
-export function tenantSessionToken(request: { headers: Headers }): string | null {
-  return request.headers.get('cookie')?.split(';').map(s => s.trim())
+export function tenantSessionToken(request: { headers: Headers }): string | null {  return request.headers.get('cookie')?.split(';').map(s => s.trim())
     .find(s => s.startsWith(TENANT_SESSION_COOKIE + '='))?.slice(TENANT_SESSION_COOKIE.length + 1) || null;
 }
 const jwks = new Map<string, { expires: number; keys: JsonWebKey[] }>();
-async function verifyAccessJwt(token: string, reg: TenantRegistration): Promise<string | null> {
+/** Verified Access identity: subject plus the signed email claim. The `email`
+ *  header is attacker-controlled and never read — only the JWT claim inside a
+ *  signature-verified, issuer/audience/expiry/claim-checked RS256 token. */
+export interface VerifiedAccessIdentity { sub: string; email: string | null; }
+async function verifyAccessJwt(token: string, reg: TenantRegistration): Promise<VerifiedAccessIdentity | null> {
   if (!reg.issuer || !reg.audience || !reg.subjects?.length) return null;
   try {
     const issuer = new URL(reg.issuer);
@@ -79,33 +227,75 @@ async function verifyAccessJwt(token: string, reg: TenantRegistration): Promise<
     const [headerRaw, payloadRaw, sig, extra] = token.split('.');
     if (extra || !sig) return null;
     const header = json(headerRaw), claims = json(payloadRaw);
-    if (header.alg !== 'RS256' || !header.kid || claims.iss !== reg.issuer || !Number.isFinite(claims.exp) || claims.exp <= Date.now()/1000 || (claims.nbf && claims.nbf > Date.now()/1000) || ![claims.aud].flat().includes(reg.audience) || !reg.subjects.includes(claims.sub)) return null;
+    if (header.alg !== 'RS256' || !header.kid || claims.iss !== reg.issuer || !Number.isFinite(claims.exp) || claims.exp <= Date.now()/1000 || (claims.nbf && claims.nbf > Date.now()/1000) || ![claims.aud].flat().includes(reg.audience) || typeof claims.sub !== 'string' || !claims.sub.trim()) return null;
+    const signedEmail = typeof claims.email === 'string' && claims.email.trim() ? claims.email.trim() : null;
+    // A registered subject is either the Access user id (`sub`) or the owner's
+    // email. Access `sub` is an opaque per-account id the installer cannot know
+    // before first login, so the email form is what registries actually hold;
+    // it matches ONLY the signed `email` claim, exactly (case-insensitive), and
+    // is identical whether the owner signed in with Google or a one-time code.
+    const matched = reg.subjects.includes(claims.sub) ? claims.sub as string
+      : signedEmail ? reg.subjects.find(s => s.includes('@') && s.toLowerCase() === signedEmail.toLowerCase()) : undefined;
+    if (!matched) return null;
+    // Exact allowed-email allowlist, enforced ONLY on the signed `email` claim.
+    // Unsigned headers never participate. When configured, a valid JWT whose
+    // signed email is not listed is rejected — identity without authorization.
+    if (reg.allowedEmails?.length && (!signedEmail || !reg.allowedEmails.map(e => e.toLowerCase()).includes(signedEmail.toLowerCase()))) return null;
     let cached = jwks.get(reg.issuer);
     if (!cached || cached.expires <= Date.now()) {
-      const response = await fetch(new URL('/cdn-cgi/access/certs', issuer), { signal: AbortSignal.timeout(5000), redirect: 'error' });
-      if (!response.ok) return null;
-      const body = await response.json();
-      if (!Array.isArray(body.keys)) return null;
-      cached = { expires: Date.now() + 300_000, keys: body.keys };
-      jwks.set(reg.issuer, cached);
+      // Item (6): the cached key set survives a failed refresh. A JWKS fetch
+      // that errors (edge blip, rotation race) previously nulled the whole
+      // verification even though a key we already trusted minutes ago was good
+      // enough to check this signature. The stale set is now kept as fallback
+      // and only replaced on success; when neither fresh nor stale keys verify,
+      // the caller still fails closed below. Never throws.
+      try {
+        const response = await fetch(new URL('/cdn-cgi/access/certs', issuer), { signal: AbortSignal.timeout(5000), redirect: 'error' });
+        if (!response.ok) throw new Error(`jwks refresh status ${response.status}`);
+        const body = await response.json();
+        if (!Array.isArray(body.keys)) throw new Error('jwks refresh returned no key set');
+        cached = { expires: Date.now() + 300_000, keys: body.keys };
+        jwks.set(reg.issuer, cached);
+      } catch (err) {
+        console.error(
+          '[tenant] JWKS refresh failed; falling back to cached keys:',
+          err instanceof Error ? err.message : String(err),
+        );
+        const stale = jwks.get(reg.issuer);
+        if (!stale) return null;
+        cached = stale;
+      }
     }
-    const keyData = cached.keys.find(k => (k as JsonWebKey & {kid?: string}).kid === header.kid);
+    const keyData = cached?.keys.find(k => (k as JsonWebKey & {kid?: string}).kid === header.kid);
     if (!keyData || keyData.kty !== 'RSA') return null;
     const key = await crypto.subtle.importKey('jwk', keyData, {name: 'RSASSA-PKCS1-v1_5', hash:'SHA-256'}, false, ['verify']);
-    return await crypto.subtle.verify('RSASSA-PKCS1-v1_5', key, bytes(sig), enc.encode(`${headerRaw}.${payloadRaw}`)) ? claims.sub : null;
+    if (!await crypto.subtle.verify('RSASSA-PKCS1-v1_5', key, bytes(sig), enc.encode(`${headerRaw}.${payloadRaw}`))) return null;
+    return { sub: matched, email: signedEmail };
   } catch { return null; }
 }
 export async function resolveTenantContext(request: { headers: Headers }): Promise<TenantContext> {
   const host = requestHost(request), reg = tenantRegistration(host);
   let subject: string | null = null;
+  let email: string | null = null;
   const bearer = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '');
   if (bearer && process.env.MC_API_TOKEN && equal(enc.encode(bearer), enc.encode(process.env.MC_API_TOKEN))) subject = 'operator:api';
   if (!subject) {
     const cookie = tenantSessionToken(request);
     subject = (await verifyTenantGrant(cookie, host, 'session'))?.subject || null;
   }
-  if (!subject) subject = await verifyAccessJwt(request.headers.get('cf-access-jwt-assertion') || '', reg);
+  // Cloudflare Access owner login, cryptographically verified in-process:
+  // RS256/JWKS signature, issuer, audience, expiry/nbf, exact subject and —
+  // when configured — exact signed-email allowlist. The unsigned email/header
+  // values are never trusted; only the claims inside a verified token identify
+  // the owner. No public slug fallback, no fake bearer: boxes without
+  // issuer/audience/subjects configured cannot verify (verifyAccessJwt nulls)
+  // and fall through to the refusal below. Only exact-registered subjects
+  // verify: the Access `sub`, or the owner email matched against the signed claim.
+  if (!subject) {
+    const verified = await verifyAccessJwt(request.headers.get('cf-access-jwt-assertion') || '', reg);
+    if (verified) { subject = verified.sub; email = verified.email; }
+  }
   if (!subject && process.env.NODE_ENV !== 'production' && process.env.INTERVIEW_TENANT_TRUST_LOCAL === 'true' && ['localhost','127.0.0.1'].includes(host)) subject = 'development:local';
   if (!subject) throw new TenantAccessError('A verified tenant identity is required');
-  return { tenantId: reg.tenantId, companyId: reg.companyId, clientId: reg.clientId || null, kind: reg.kind, subject, host, installationId: reg.installationId };
+  return { tenantId: reg.tenantId, companyId: reg.companyId, clientId: reg.clientId || null, kind: reg.kind, subject, host, installationId: reg.installationId, email };
 }

@@ -17,6 +17,7 @@
  * Forbidden: Anthropic models. Always.
  */
 
+import { successorModelId } from '@/lib/retired-models';
 import type { ModelCapability, ModelRegistryEntry } from './model-registry-types';
 
 // ─── Constants ──────────────────────────────────────────────────────────────
@@ -721,7 +722,7 @@ export function resolveSovereignDefault(
   inventory: ModelRegistryEntry[],
   required_modality: TaskModality = 'text',
 ): string | null {
-  const envDefault = (process.env.SOVEREIGN_DEFAULT_MODEL || '').trim();
+  const envDefault = successorModelId((process.env.SOVEREIGN_DEFAULT_MODEL || '').trim());
   if (envDefault && !checkModelSovereignty(envDefault, inventory, required_modality)) {
     // FM-6c (env-default path): for text tasks, also guard against a pure TTS/media
     // SOVEREIGN_DEFAULT_MODEL. checkModelSovereignty skips the modality check when

@@ -271,6 +271,35 @@ test('VERTICAL_DERIVATION_GUARD_ENABLED=false restores the pre-U107 unfiltered f
 test('declaredVerticalPacks() reads verticalPacks.detectedPacks from build-state; absence fails closed to []', () => {
   assert.deepEqual(declaredVerticalPacks(null), []);
   assert.deepEqual(declaredVerticalPacks({}), []);
+
+  // REGRESSION GUARD. The two assertions above are vacuous on a machine with no
+  // build-state file — which is every CI runner, and is why this case stayed
+  // green in CI while failing on any developer box whose own build-state
+  // declares a pack. Point the workspace at a scratch dir holding a REAL
+  // build-state, so an explicit null is proven not to read it.
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'u107-buildstate-'));
+  const priorRoot = process.env.OPENCLAW_WORKSPACE_ROOT;
+  process.env.OPENCLAW_WORKSPACE_ROOT = scratch;
+  try {
+    fs.writeFileSync(
+      path.join(scratch, '.workforce-build-state.json'),
+      JSON.stringify({ verticalPacks: { detectedPacks: [{ pack: 'real-estate' }] } }),
+    );
+    assert.deepEqual(
+      declaredVerticalPacks(),
+      ['real-estate'],
+      'omitting the argument still reads the live build-state',
+    );
+    assert.deepEqual(
+      declaredVerticalPacks(null),
+      [],
+      'an explicit null is a state, and it is empty — it must NOT fall through to the live file',
+    );
+  } finally {
+    if (priorRoot === undefined) delete process.env.OPENCLAW_WORKSPACE_ROOT;
+    else process.env.OPENCLAW_WORKSPACE_ROOT = priorRoot;
+    fs.rmSync(scratch, { recursive: true, force: true });
+  }
   assert.deepEqual(
     declaredVerticalPacks({
       verticalPacks: { detectedPacks: [{ pack: 'personal-pro-dev', matchedKeywords: ['coach'] }] },

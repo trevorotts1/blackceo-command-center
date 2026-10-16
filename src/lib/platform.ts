@@ -11,9 +11,11 @@
  *
  * Detection order (highest precedence first):
  *   1. `OPENCLAW_PLATFORM` environment variable, when set to `mac-mini` or
- *      `vps-docker`. Lets the operator force a platform for tests, CI, or
- *      atypical hosts (for example, running the VPS container locally on a
- *      Mac for debugging).
+ *      `vps-docker` (short aliases `mac` and `vps` are accepted too, so the
+ *      one-word values already used across scripts and tests resolve through
+ *      this helper instead of bypassing it). Lets the operator force a platform
+ *      for tests, CI, or atypical hosts (for example, running the VPS container
+ *      locally on a Mac for debugging).
  *   2. Presence of the `/data/.openclaw` directory. Hostinger's Docker
  *      template mounts `/data` as the persistent volume, so this directory
  *      reliably exists on every VPS install.
@@ -40,8 +42,11 @@ const VPS_MARKER = '/data/.openclaw';
  */
 export function detectPlatform(): Platform {
   const envOverride = process.env.OPENCLAW_PLATFORM;
-  if (envOverride === 'mac-mini' || envOverride === 'vps-docker') {
-    return envOverride;
+  if (envOverride === 'mac-mini' || envOverride === 'mac') {
+    return 'mac-mini';
+  }
+  if (envOverride === 'vps-docker' || envOverride === 'vps') {
+    return 'vps-docker';
   }
 
   if (existsSync(VPS_MARKER)) {

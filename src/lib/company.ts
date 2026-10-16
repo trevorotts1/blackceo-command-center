@@ -30,21 +30,36 @@ export function getCompanySlug(): string {
  *
  * This is the shared source of truth used both when SEEDING departments
  * (attribution) and when FILTERING the Kanban board (/api/workspaces), so the two
- * always agree — the floor invariant depends on it. It mirrors the pickCompany()
- * heuristic behind /api/company:
+ * always agree — the floor invariant depends on it:
  *   1. COMPANY_SLUG env — exact slug match.
  *   2. COMPANY_NAME env — name match, then its slugified form.
- *   3. The first NON-placeholder company row (skip default / command-center /
- *      acme-* / "Command Center" / "Default").
- * Returns null when ONLY placeholder/default companies exist (a box that has not
- * been branded yet). Callers treat null as "do not filter" — a deliberate
- * fail-open so an un-branded box shows every workspace rather than a blank board.
+ *   3. The TENANT IDENTITY (`identity`, defaulting to MC_COMPANY_ID) —
+ *      authoritative and terminal; row order never decides.
+ *   4. Only with no identity: the first NON-placeholder company row.
+ *
+ * Returns null when the box has no identity and only placeholder companies exist
+ * (un-branded). Callers treat null as "do not filter" — a deliberate fail-open so
+ * an un-branded box shows every workspace rather than a blank board. The board's
+ * backstop against a WRONG non-null answer is `assertBoardNotSilentlyEmpty`
+ * (src/lib/workspaces/board-query.ts), which refuses to render a board scoped to
+ * zero rows while the database holds rows the board would otherwise show.
+ *
+ * `identity` is exposed for callers that hold a separately verified tenant
+ * identity. Leave it unset unless you can also make the SEEDER use the same
+ * value: a board that resolves differently from the seeder is the Fable-5
+ * attribution-drift root cause, which is why the default is the installed
+ * identity both paths share.
  */
-export function resolveActiveCompanyId(database?: Database.Database): string | null {
+export function resolveActiveCompanyId(
+  database?: Database.Database,
+  identity?: string | null,
+): string | null {
   // Delegate to the ONE canonical resolver in branding-seed.ts so the board filter
   // and the department seeder (reseedWorkspacesFromConfig) can never disagree about
   // the active company — the Fable-5 attribution-drift root cause. branding-seed is
   // a leaf module (imports only better-sqlite3 + runtime-config), so this adds no
   // import cycle.
-  return resolveSeedingCompanyId(database ?? getDb());
+  return identity === undefined
+    ? resolveSeedingCompanyId(database ?? getDb())
+    : resolveSeedingCompanyId(database ?? getDb(), identity);
 }

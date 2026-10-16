@@ -52,35 +52,34 @@ bash ~/projects/command-center/scripts/atomic-deploy.sh \
    cd ~/projects/mission-control
    ```
 
-2. **Run the deploy script:**
+2. **Run the update script (NOT `scripts/deploy.sh` — see the deprecation warning above):**
    ```bash
-   ./scripts/deploy.sh
+   ./update.sh
    ```
 
-3. **Watch the output.** The script will show:
-   - Build backup status
-   - Database backup status
-   - Build progress (last 5 lines)
+3. **Watch the output.** `update.sh` routes through `scripts/atomic-deploy.sh`, which shows:
+   - Build backup / snapshot status
+   - Atomic build-into-temp-dir + swap progress
    - PM2 restart confirmation
-   - Health check result (HTTP 200 = success)
+   - Health check result (green = success)
 
-4. **Done.** If you see `=== Deploy Complete ===`, the deployment succeeded.
+4. **Done.** A green health check means the deployment succeeded; a failed one auto-rolls back before the script returns.
 
 ### What the Script Does
 
-1. **Backs up current build** — Copies `.next/` to `.next-backup/`
-2. **Backs up database** — Copies `mission-control.db` to `mission-control.db.backup`
-3. **Cleans old build** — Removes `.next/` to prevent cache corruption
-4. **Builds the app** — Runs `npm run build`
-5. **Restarts PM2** — Restarts the `blackceo-command-center` process
-6. **Health checks** — Verifies the site returns HTTP 200
-7. **Auto-rollback** — If health check fails, restores backups and restarts
+1. **Backs up critical files** and verifies the checkout
+2. **Installs dependencies** — `npm ci`
+3. **Builds into a temp directory** — never touches the live `.next/` until the build is verified good
+4. **Atomically swaps** the new build in with a single `mv` — no missing-build window
+5. **Restarts PM2** — restarts the `blackceo-command-center` process
+6. **Health checks** — verifies the site is actually serving 200 OK
+7. **Auto-rollback** — if the health check fails, restores the prior build and restarts
 
 ---
 
 ## Rollback Instructions
 
-### If deploy.sh fails and you need manual rollback:
+### If atomic-deploy.sh's auto-rollback did not run and you need manual rollback:
 
 ```bash
 # 1. Stop the current process
@@ -262,7 +261,7 @@ Before every deployment, confirm:
 ```bash
 # Increase Node memory limit
 export NODE_OPTIONS="--max-old-space-size=4096"
-./scripts/deploy.sh
+./update.sh
 ```
 
 ### PM2 process not found
@@ -295,7 +294,7 @@ pm2 start npm --name "blackceo-command-center" -- start
 | `pm2 logs blackceo-command-center` | View app logs |
 | `pm2 logs blackceo-command-center --lines 100` | View last 100 lines |
 | `pm2 stop blackceo-command-center` | Stop the process |
-| `pm2 restart blackceo-command-center` | Restart (use deploy.sh instead) |
+| `pm2 restart blackceo-command-center` | Restart (use `update.sh` instead) |
 | `pm2 delete blackceo-command-center` | Remove from PM2 |
 
 ---
@@ -331,4 +330,4 @@ never public.
 
 ---
 
-**Last Updated:** March 21, 2026
+**Last Updated:** September 28, 2026

@@ -71,6 +71,7 @@ while [[ $# -gt 0 ]]; do
     --unknown-deadline) UNKNOWN_DEADLINE="$2"; shift 2 ;;
     --unknown-since)    UNKNOWN_SINCE="$2";    shift 2 ;;
     --skip-pm2)         SKIP_PM2=1;            shift   ;;
+    --deploy-gate)      DEPLOY_GATE=1;         shift   ;;
     --json-only)        JSON_ONLY=1;           shift   ;;
     --dry-run)          DRY_RUN=1;             shift   ;;
     --remote)           REMOTE_MODE=1;         shift   ;;
@@ -80,6 +81,13 @@ while [[ $# -gt 0 ]]; do
 done
 
 BASE_URL="http://127.0.0.1:${PORT}"
+# --deploy-gate (atomic-deploy's green gate): only build/serve rows can fail a
+# deploy. Content/config rows (company_branding, html_title, disk_headroom,
+# next_public_app_url, the CF probe) are reported as deploy_warnings: a box whose
+# interview never ran must still receive code updates, and a deploy must never be
+# rolled back over data the deploy did not touch.
+DEPLOY_GATE="${DEPLOY_GATE:-0}"
+DEPLOY_GATE_ROWS="asset_manifest build_content database_path migrations scheduler_liveness"
 py() { python3 -s -c "import sys,json; d=json.load(sys.stdin); print($1)" 2>/dev/null || echo "$2"; }
 if [[ "$DRY_RUN" -eq 1 ]]; then
   log() { printf '[cc-health] DRY-RUN: %s\n' "$*" >&2; }
@@ -258,11 +266,21 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   exit 0
 fi
 
-DEEP_RAW=$(curl -s --max-time 15 --max-redirs 0 \
-  --write-out '\n{"_http_code":%{http_code}}' "${BASE_URL}/api/health/deep" 2>/dev/null \
-  || echo '{"_error":"curl_failed"}')
+# WDG-028: ONE bounded retry on a curl-000 deep probe. A single request can
+# lose the race against a saturated event loop and come back 000 while the app
+# is alive and serving; that miss was then escalated (via --unknown-since) to
+# an actionable exit 1 "persistent-unknown" RED after 300s on a box that never
+# stopped. A genuinely dead box fails both tries and classifies unchanged.
+DEEP_RAW=""; HTTP_CODE=""
+for _attempt in 1 2; do
+  DEEP_RAW=$(curl -s --max-time 15 --max-redirs 0 \
+    --write-out '\n{"_http_code":%{http_code}}' "${BASE_URL}/api/health/deep" 2>/dev/null \
+    || echo '{"_error":"curl_failed"}')
+  HTTP_CODE=$(printf '%s\n' "$DEEP_RAW" | awk 'END{print}' | py "d.get('_http_code',0)" 0)
+  [[ "$HTTP_CODE" != "0" && "$HTTP_CODE" != "000" ]] && break
+  [[ "$_attempt" -lt 2 ]] && sleep 3
+done
 DEEP_BODY=$(printf '%s\n' "$DEEP_RAW" | awk 'NR>1{print prev} {prev=$0}')
-HTTP_CODE=$(printf '%s\n' "$DEEP_RAW" | awk 'END{print}' | py "d.get('_http_code',0)" 0)
 
 # ── (a0) PRES-045 refusal/service inspection when HTTP is unreachable ────────
 # On curl code 000 (nothing answered at all — not a 5xx, not a bad body) the old
@@ -324,12 +342,20 @@ except Exception:
 PYEOF
 }
 
+# The pm2 app list as clean JSON: a pm2 CLI that differs from the running daemon
+# prints a version banner on STDOUT first, and a bare json.loads then saw "no
+# apps" (scripts/lib/pm2_json.py). Without the helper, the raw text passes on.
+_PM2_JSON_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/pm2_json.py"
+_pm2_list_json() {
+  if [[ -f "$_PM2_JSON_LIB" ]]; then python3 -s "$_PM2_JSON_LIB" 2>/dev/null; else cat; fi
+}
+
 service_state_for_target() {
   # Print "STATUS|pm_id|uptime_secs" for the target pm2 app, or "" when pm2
   # cannot tell us anything (binary missing, daemon down, parse failure).
   command -v pm2 >/dev/null 2>&1 || return 1
   local j
-  j=$(pm2 jlist 2>/dev/null) || return 1
+  j=$(pm2 jlist 2>/dev/null | _pm2_list_json) || return 1
   [[ -n "$j" ]] || return 1
   python3 -s - "$j" "$PM2_APP_NAME" "$PORT" <<'PYEOF'
 import json, sys, time
@@ -362,6 +388,8 @@ for a in apps:
         uptime = max(0, int(time.time() * 1000) - int(rt)) if rt else 0
         print(f"{st}|{pm_id if pm_id is not None else ''}|{uptime // 1000}")
         sys.exit(0)
+# pm2 answered and none of its apps is the Command Center: nothing is serving it.
+print("absent||")
 sys.exit(0)
 PYEOF
 }
@@ -429,9 +457,12 @@ if [[ "$HTTP_CODE" == "0" || "$HTTP_CODE" == "000" ]]; then
     fi
   fi
 
-  # 1) DEFINITIVE RED: stopped/errored service, or a current refusal receipt.
-  if [[ "$_SVC_STATUS" == "stopped" || "$_SVC_STATUS" == "errored" ]] || [[ "$_RECEIPT_CURRENT" == "true" ]]; then
+  # 1) DEFINITIVE RED: stopped/errored service, no Command Center app in pm2
+  #    at all (a recreated container that never resurrected), or a current
+  #    refusal receipt.
+  if [[ "$_SVC_STATUS" == "stopped" || "$_SVC_STATUS" == "errored" || "$_SVC_STATUS" == "absent" ]] || [[ "$_RECEIPT_CURRENT" == "true" ]]; then
     _RED_REASON="service ${_SVC_STATUS:-unknown}"
+    [[ "$_SVC_STATUS" == "absent" ]] && _RED_REASON="no Command Center app in pm2"
     [[ "$_RECEIPT_CURRENT" == "true" ]] && _RED_REASON="current refusal receipt (reason=${_RECEIPT_REASON:-unknown}, exit=${_RECEIPT_EXIT:-78}, age=${_RECEIPT_AGE:-unknown}s) plus service ${_SVC_STATUS:-unknown}"
     log "RED: HTTP unreachable but classification is definitive — ${_RED_REASON}"
     printf '{"pass":false,"indeterminate":false,"timestamp":"%s","checks":{},"detail":"server unreachable: %s","refusal":{"receipt_present":%s,"receipt_current":%s,"reason":"%s","exit":"%s","age_seconds":"%s"},"service_status":"%s","cc_port":%s,"override_ack_set":%s}\n' \
@@ -448,6 +479,36 @@ if [[ "$HTTP_CODE" == "0" || "$HTTP_CODE" == "000" ]]; then
     printf '{"pass":false,"indeterminate":true,"timestamp":"%s","checks":{},"detail":"startup grace: app up %ss of %ss grace, HTTP not yet answering","startup_grace":true,"service_status":"%s","cc_port":%s,"override_ack_set":%s}\n' \
       "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_UPTIME" "$STARTUP_GRACE" "${_SVC_STATUS:-unknown}" "${PORT:-null}" "$PORT_OVERRIDE_ACK_SET"
     exit 3
+  fi
+
+  # 2b) WDG-028 LIVENESS FALLBACK (before escalating UNKNOWN to RED): the
+  #     deep probe came back 000, but a 200 on the liveness endpoint
+  #     /api/health — with {"status":"ok"} parsed from the body — proves the
+  #     server is up and answering HTTP. Exit 3 (bounded UNKNOWN), NEVER 0:
+  #     a transient miss must not pin the watchdog GREEN, and it must not
+  #     escalate to an actionable RED either. Genuinely-dead boxes fail this
+  #     probe too and keep their classification below, unchanged.
+  if [[ "${HTTP_CODE:-0}" == "0" || "${HTTP_CODE:-0}" == "000" ]]; then
+    _LIVE_CODE=$(curl -s --max-time 10 --max-redirs 0 --write-out '%{http_code}' \
+      -o "${TMPDIR:-/tmp}/cc-health-liveness-$$.json" "${BASE_URL}/api/health" 2>/dev/null || echo 000)
+    _LIVE_OK=false
+    if [[ "$_LIVE_CODE" == "200" ]]; then
+      _LIVE_OK=$(python3 -s -c "
+import json, sys
+try:
+    with open(sys.argv[1]) as fh:
+        d = json.load(fh)
+    print('true' if d.get('status') == 'ok' else 'false')
+except Exception:
+    print('false')" "${TMPDIR:-/tmp}/cc-health-liveness-$$.json" 2>/dev/null || echo false)
+    fi
+    rm -f "${TMPDIR:-/tmp}/cc-health-liveness-$$.json" 2>/dev/null || true
+    if [[ "$_LIVE_OK" == "true" ]]; then
+      log "UNKNOWN: /api/health/deep unreachable (000) but /api/health is live (HTTP 200, status ok) — server up, deep probe missed; NOT escalating to RED"
+      printf '{"pass":false,"indeterminate":true,"timestamp":"%s","checks":{},"detail":"deep probe unreachable (000) but liveness endpoint /api/health is live (HTTP 200, status ok) — server up, deep probe missed; non-gating","liveness_fallback":true,"service_status":"%s","cc_port":%s,"override_ack_set":%s}\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${_SVC_STATUS:-unknown}" "${PORT:-null}" "$PORT_OVERRIDE_ACK_SET"
+      exit 3
+    fi
   fi
 
   # 3) PERSISTENT UNKNOWN: no definitive signal for >= deadline (measured by the
@@ -516,6 +577,21 @@ if ! python3 -s -c "import sys,json; json.loads(sys.stdin.read())" <<< "$DEEP_BO
   exit 3
 fi
 
+if [[ "$DEPLOY_GATE" -eq 1 ]]; then
+  DEEP_BODY=$(printf '%s' "$DEEP_BODY" | python3 -s -c "
+import sys, json
+d = json.load(sys.stdin); keep = sys.argv[1].split()
+checks = d.get('checks', {})
+d['deploy_warnings'] = {k: v for k, v in checks.items() if k not in keep and v.get('pass') is not True}
+d['checks'] = {k: v for k, v in checks.items() if k in keep}
+d['pass'] = all(v.get('pass') is True for v in d['checks'].values())
+d['indeterminate'] = any(v.get('indeterminate') is True for v in d['checks'].values())
+print(json.dumps(d))
+" "$DEPLOY_GATE_ROWS" 2>/dev/null || printf '%s' "$DEEP_BODY")
+  for w in $(printf '%s' "$DEEP_BODY" | py "' '.join(d.get('deploy_warnings', {}))" ""); do
+    log "WARN (deploy gate, non-gating): ${w} is not passing"
+  done
+fi
 DEEP_PASS=$(printf '%s' "$DEEP_BODY" | py "'true' if d.get('pass') else 'false'" "false")
 DEEP_INDET=$(printf '%s' "$DEEP_BODY" | py "'true' if d.get('indeterminate') else 'false'" "false")
 
@@ -591,16 +667,34 @@ else
   # (a heredoc on the same process would bind stdin first, causing
   # sys.stdin.read() to return '' — the root cause fixed in REDO #2).
   _J=$(mktemp /tmp/pm2_raw_XXXXXX.json)
-  pm2 jlist 2>/dev/null > "$_J" || echo "[]" > "$_J"
+  _E=$(mktemp /tmp/pm2_err_XXXXXX.txt)
+  PM2_READ_FAIL=""
+  # A pm2 that cannot answer (daemon mid-restart during the deploy's pm2
+  # switch) is a measurement that could not be taken, NOT "no app": record it
+  # as INDETERMINATE (exit 3, retried by atomic-deploy), never as app_count 0.
+  pm2 jlist 2>"$_E" > "$_J" || { PM2_READ_FAIL="pm2 jlist failed: $(head -c 300 "$_E" | tr '\n"\\' '   ')"; echo "[]" > "$_J"; }
   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  _PM2_RC=0
   PM2_JSON=$(python3 -s "$SCRIPT_DIR/pm2-analyze-cc.py" \
     --port "$PORT" --app-name "$PM2_APP_NAME" \
-    ${CANONICAL_DIR:+--canonical-dir "$CANONICAL_DIR"} < "$_J" 2>/dev/null \
-    || echo '{"error":"pm2-analyze-cc.py failed","app_count":0,"crash_loopers":[],"db_path_set":false,"cwd_ok":false,"null_cwd_count":0,"other_cc_apps":[],"other_cc_count":0}')
-  rm -f "$_J"
+    ${CANONICAL_DIR:+--canonical-dir "$CANONICAL_DIR"} < "$_J" 2>"$_E") || _PM2_RC=$?
+  # The analyzer prints {"error":...} (exit 0) when it cannot parse pm2's
+  # output; a crash or empty stdout is the same class. All are indeterminate.
+  if [[ -z "$PM2_READ_FAIL" && ( "$_PM2_RC" -ne 0 || -z "$PM2_JSON" ) ]]; then
+    PM2_READ_FAIL="pm2-analyze-cc.py failed (rc=${_PM2_RC}): $(head -c 300 "$_E" | tr '\n"\\' '   ')"
+  elif [[ -z "$PM2_READ_FAIL" && "$(printf '%s' "$PM2_JSON" | py "'y' if d.get('error') else 'n'" y)" == "y" ]]; then
+    PM2_READ_FAIL="pm2-analyze-cc.py could not parse pm2 output: $(printf '%s' "$PM2_JSON" | py "str(d.get('error','unparseable output'))[:300].replace(chr(34),chr(39))" "unparseable output")"
+  fi
+  if [[ -n "$PM2_READ_FAIL" ]]; then
+    PM2_JSON="{\"error\":\"${PM2_READ_FAIL//\"/\'}\",\"indeterminate\":true,\"app_count\":0,\"crash_loopers\":[],\"db_path_set\":false,\"cwd_ok\":false,\"null_cwd_count\":0,\"other_cc_apps\":[],\"other_cc_count\":0}"
+  fi
+  rm -f "$_J" "$_E"
 
   PM2_COUNT=$(printf '%s' "$PM2_JSON" | py "d.get('app_count',0)" 0)
-  PM2_CRASH=$(printf '%s' "$PM2_JSON" | py "cl=d.get('crash_loopers',[]); '[]' if not cl else json.dumps(cl)" "[]")
+  if [[ "$(printf '%s' "$PM2_JSON" | py "'true' if d.get('pm2_version_mismatch') else 'false'" false)" == "true" ]]; then
+    log "WARN: pm2 CLI/daemon version mismatch (the CLI printed 'In-memory PM2 is out-of-date'); the app list was read past the banner. Run 'pm2 update' in a maintenance window (non-gating)"
+  fi
+  PM2_CRASH=$(printf '%s' "$PM2_JSON" | py "json.dumps(d['crash_loopers']) if d.get('crash_loopers') else '[]'" "[]")
   NULL_CWD=$(printf '%s'  "$PM2_JSON" | py "d.get('null_cwd_count',0)" 0)
   # FIX (Issue 1): also extract cwd_ok — null-cwd is caught above, but a
   # wrong-but-non-null cwd (app running from wrong dir with --canonical-dir
@@ -619,7 +713,8 @@ else
   # ZOMBIE means: two or more apps claim THE TARGET (same port, or the target
   # name with no port pm2 can see) — a real duplicate that must still FAIL.
   # It does NOT mean "more than one CC app exists on the machine".
-  if   [[ "$PM2_COUNT" -eq 0 ]];     then log "FAIL: no pm2 app for target ${PM2_APP_NAME}:${PORT} (other CC apps seen: ${OTHER_LINE})"; PM2_PASS="fail"
+  if   [[ -n "$PM2_READ_FAIL" ]];    then log "UNKNOWN: pm2 reading could not be taken (${PM2_READ_FAIL}) — indeterminate, not a failure"; PM2_PASS="indeterminate"
+  elif [[ "$PM2_COUNT" -eq 0 ]];     then log "FAIL: no pm2 app for target ${PM2_APP_NAME}:${PORT} (other CC apps seen: ${OTHER_LINE})"; PM2_PASS="fail"
   elif [[ "$PM2_COUNT" -gt 1 ]];     then log "FAIL: ${PM2_COUNT} pm2 apps claim target ${PM2_APP_NAME}:${PORT} (duplicate/zombie)"; PM2_PASS="fail"
   elif [[ "$PM2_CRASH" != "[]" ]];   then log "FAIL: crash-looping CC app"; PM2_PASS="fail"
   elif [[ "$NULL_CWD"  -gt 0 ]];     then log "FAIL: CC app null cwd (drift)"; PM2_PASS="fail"
@@ -634,17 +729,61 @@ fi
 # redirect ONE hop so the asset check probes the served page instead of an empty
 # 302 body. --max-redirs 0 is retained so an off-origin CF login redirect is NOT
 # followed (it stays visible as a redirect and the probe verifies nothing → UNKNOWN).
+#
+# LOOPBACK PROBE HOST (v7.6.81): once a box has its tunnel, the installer writes
+# MC_TENANT_REGISTRY_JSON (its public host) + MC_TENANT_PUBLIC_URL, and a box
+# WITH a registry does not treat a loopback Host as self (tenant-context.ts).
+# The probe still connects to 127.0.0.1, but asks for the box's public host
+# (CC_PUBLIC_URL / --public-url, else CC_PUBLIC_URL or MC_TENANT_PUBLIC_URL from
+# the app's .env.local), the page a browser gets through the tunnel. Loopback
+# was 403 unregistered_hostname, so every deploy rolled back. The app is not
+# loosened: the tunnel's cloudflared also connects from loopback, so trusting
+# a loopback peer would trust every remote request.
+probe_host() {
+  local url="$PUBLIC_URL" envf k
+  envf="${CANONICAL_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/.env.local"
+  if [[ -z "$url" && -f "$envf" ]]; then
+    for k in CC_PUBLIC_URL MC_TENANT_PUBLIC_URL; do
+      url="$(grep -E "^[[:space:]]*(export[[:space:]]+)?${k}=" "$envf" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"'"'"' ' || true)"
+      [[ -n "$url" ]] && break
+    done
+  fi
+  url="$(url_host "$url")"
+  [[ "$url" =~ ^[a-z0-9.-]+$ ]] && printf '%s' "$url"
+}
+PROBE_HOST="$(probe_host)"
+PROBE_HDR=(); PROBE_ORIGIN="$BASE_URL"
+if [[ -n "$PROBE_HOST" ]]; then PROBE_HDR=(-H "Host: ${PROBE_HOST}"); PROBE_ORIGIN="http://${PROBE_HOST}"; fi
 PROBE_PATH="/"
-ROOT_WO=$(curl -s --max-time 10 --max-redirs 0 -o /dev/null -w '%{http_code} %{redirect_url}' "${BASE_URL}/" 2>/dev/null || echo "000 ")
+ROOT_WO=$(curl -s --max-time 10 --max-redirs 0 ${PROBE_HDR[@]+"${PROBE_HDR[@]}"} -o /dev/null -w '%{http_code} %{redirect_url}' "${BASE_URL}/" 2>/dev/null || echo "000 ")
 ROOT_CODE="${ROOT_WO%% *}"; ROOT_LOC="${ROOT_WO#* }"
-if [[ "$ROOT_CODE" =~ ^3 ]] && is_interview_gate_redirect "$ROOT_LOC" "$BASE_URL"; then
+if [[ "$ROOT_CODE" =~ ^3 ]] && is_interview_gate_redirect "$ROOT_LOC" "$PROBE_ORIGIN"; then
   PROBE_PATH="$(url_path "$ROOT_LOC")"
   log "outside-in: / 302→${PROBE_PATH} (interview lock); probing gated page for asset refs"
+elif [[ "$ROOT_CODE" == "401" || "$ROOT_CODE" == "403" ]]; then
+  # TENANT-GATED ROOT (2026-09-18): on a box whose tenant registry carries
+  # Cloudflare Access settings, an unauthenticated loopback GET / answers
+  # 401/403 {"error":"A verified tenant identity is required"} instead of a
+  # same-origin 302. The app is up and gating correctly; the page that carries
+  # the /_next/static refs is the lock-exempt /interview shell, so probe that
+  # (a VPS box sat UNKNOWN through 36 attempts with a healthy 7.6.17 build).
+  PROBE_PATH="/interview"
+  log "outside-in: / answered ${ROOT_CODE} (tenant-gated root); probing ${PROBE_PATH} for asset refs"
 fi
-ROOT_HTML=$(curl -s --max-time 10 --max-redirs 0 "${BASE_URL}${PROBE_PATH}" 2>/dev/null || echo "")
+ROOT_HTML=$(curl -s --max-time 10 --max-redirs 0 ${PROBE_HDR[@]+"${PROBE_HDR[@]}"} "${BASE_URL}${PROBE_PATH}" 2>/dev/null || echo "")
+PROBE_CODE=$(curl -s --max-time 10 --max-redirs 0 ${PROBE_HDR[@]+"${PROBE_HDR[@]}"} -o /dev/null -w '%{http_code}' "${BASE_URL}${PROBE_PATH}" 2>/dev/null || echo "000")
 ASSET_REF=$(printf '%s' "$ROOT_HTML" | grep -oE '/_next/static/[^"'"'"' >]+\.(js|css)' | head -1 || echo "")
 ASSET_PASS="skip"; ASSET_INDET=false
-if [[ -n "$ASSET_REF" ]]; then
+# TENANT WALL (2026-09-18): the app itself refusing its own loopback probe with
+# 403 {"error":"unregistered_hostname"} is not "verified nothing" — it is a
+# definite, deterministic fault (no tenant registry / public URL configured for
+# this installation) that every browser hits too. UNKNOWN here retried 36 times
+# and left the wall live; RED makes the deploy roll back to the last build that
+# served the client, and the watchdog can act on it.
+if [[ "$PROBE_CODE" == "403" ]] && printf '%s' "$ROOT_HTML" | grep -q 'unregistered_hostname'; then
+  log "FAIL: ${PROBE_PATH} → HTTP 403 unregistered_hostname — the tenant middleware has no registration for host ${PROBE_HOST:-127.0.0.1} (row 33: TENANT WALL). Remedy: set CC_PUBLIC_URL (implicit self registration) or MC_TENANT_REGISTRY_JSON in .env.local, then restart."
+  ASSET_PASS="fail"
+elif [[ -n "$ASSET_REF" ]]; then
   ASSET_CODE=$(curl -s --max-time 10 --max-redirs 0 -w '%{http_code}' -o /dev/null "${BASE_URL}${ASSET_REF}" 2>/dev/null || echo "000")
   ASSET_CT=$(curl -s --max-time 10 --max-redirs 0 -I "${BASE_URL}${ASSET_REF}" 2>/dev/null | grep -i 'content-type:' | head -1 || echo "")
   if [[ "$ASSET_CODE" == "200" ]] && printf '%s' "$ASSET_CT" | grep -qiE 'javascript|css|text'; then
@@ -667,7 +806,14 @@ fi
 # this script's own interview-lock check could ever see it — the old code
 # scored that as row-26 FAIL (indistinguishable from a dead origin). Reachable
 # + correctly gated by Access is a real security improvement, not an outage.
-CF_PASS="skip"; CF_INDET=false; CF_DETAIL="public URL not configured (row 27: UNKNOWN)"
+# NOT CONFIGURED is a known state, not an indeterminate one (2026-09-18): with
+# CC_PUBLIC_URL unset this probe used to force the whole verdict to UNKNOWN
+# (exit 3), so on every box without a public URL — all nine Hostinger VPS
+# containers — every atomic-deploy burned 36 health retries and ended UNKNOWN
+# with its rollback material retained, and watchdog-cc.sh (which never acts on
+# exit 3) could never repair anything. Unset → row 27 N/A (skip). A CONFIGURED
+# URL that is unreachable is still UNKNOWN below.
+CF_PASS="skip"; CF_INDET=false; CF_DETAIL="CC_PUBLIC_URL not set in the checker's environment — this row is a skip (row 27: N/A); makes no claim about the box's own configuration (set CC_PUBLIC_URL in the checker's env to probe the tunnel)"
 if [[ -n "$PUBLIC_URL" ]]; then
   _CF=$(mktemp /tmp/cf_probe_XXXXXX.html)
   # Capture BOTH the status code and the redirect target (Location resolved to an
@@ -678,6 +824,13 @@ if [[ -n "$PUBLIC_URL" ]]; then
   CF_HTTP="${CF_WO%% *}"; CF_LOC="${CF_WO#* }"
   CF_BODY=$(cat "$_CF" 2>/dev/null || echo ""); rm -f "$_CF"
   if   [[ "$CF_HTTP" == "000" ]]; then CF_INDET=true; CF_DETAIL="CF tunnel unreachable (row 27: UNKNOWN)"
+  # 2026-09-18: HTTP 530 is Cloudflare's own edge answer (error 1033) when NO
+  # cloudflared connector is registered for the hostname — the tunnel process
+  # on the box is down or its credentials are gone. That is a tunnel fault the
+  # deploy cannot cause or cure; scoring it FAIL rolled a healthy build back on
+  # a Mac and the rollback then refused its pre-inventory artifact (CC down).
+  # Same class as 000: reachable-by-nobody → UNKNOWN, reported, never RED.
+  elif [[ "$CF_HTTP" == "530" ]]; then CF_INDET=true; CF_DETAIL="CF public URL → HTTP 530: Cloudflare has no connector for this hostname — the box's cloudflared tunnel is down (row 27: UNKNOWN; fix the tunnel, not the build)"
   elif [[ "$CF_HTTP" =~ ^3 ]]; then
     # Wave-5 interview-lock reconciliation: a SAME-ORIGIN 302 to a middleware-exempt
     # in-app path (/interview, /onboarding) means the app is UP and correctly gating
@@ -696,8 +849,21 @@ if [[ -n "$PUBLIC_URL" ]]; then
   elif [[ "$CF_HTTP" == "200" ]] && printf '%s' "$CF_BODY" | grep -qi 'cloudflare access\|cf-access-login\|cf_chl'; then
     CF_INDET=true; CF_DETAIL="CF Access policy misconfigured: public URL returns CF challenge (UNKNOWN)"
   elif [[ "$CF_HTTP" == "200" ]]; then CF_PASS="pass"; CF_DETAIL="CF public URL → HTTP 200: PASS"
+  # 2026-09-26: the app's OWN fail-closed tenant refusal. Since PR #420 the
+  # middleware answers an unauthenticated GET / with 403 {"error":
+  # "tenant_access_required"} (JSON for API/fetch/curl; friendly HTML only for a
+  # document navigation) instead of the old same-origin 302 → /interview. The
+  # tunnel resolved, Cloudflare routed, and the app answered and gated the
+  # request — the same "reachable + correctly protected" class as the U51
+  # CF-Access-login 302 above — so a 403 carrying the app's own refusal envelope
+  # is PASS, not the generic row-26-style FAIL. Deliberately narrow: only the
+  # app's `tenant_access_required` code qualifies; any OTHER 403 (edge WAF,
+  # foreign proxy) still falls through to FAIL, and `unregistered_hostname`
+  # (the row-33 TENANT WALL) is NOT excused here.
+  elif [[ "$CF_HTTP" == "403" ]] && printf '%s' "$CF_BODY" | grep -q 'tenant_access_required'; then
+    CF_PASS="pass"; CF_DETAIL="CF public URL → HTTP 403 with the app's own tenant-refusal envelope ({\"error\":\"tenant_access_required\"}) — reachable, correctly gated by the tenant middleware: PASS"
   else CF_PASS="fail"; CF_DETAIL="CF public URL → HTTP ${CF_HTTP}: FAIL"; fi
-else CF_INDET=true; fi
+fi
 [[ "$CF_INDET" == "true" ]] && log "UNKNOWN: ${CF_DETAIL}" || log "CF probe: ${CF_PASS} — ${CF_DETAIL}"
 
 # ── (d) dual-store embedding health (F2.3 / DEP-11) — NON-GATING WARN ─────────
@@ -709,8 +875,32 @@ else CF_INDET=true; fi
 _SDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EMB_SCRIPT="${EMBEDDING_HEALTH_SCRIPT:-$(cd "$_SDIR/.." && pwd)/shared-utils/embedding_health.py}"
 EMB_JSON='{"check":"dual_store_embedding_health","degraded":true,"asymmetric":false,"asymmetric_detail":"embedding_health.py not found","source":"missing"}'
+# Tell the probe the box's SOP provider, the same way /api/health does
+# (route.ts probeEmbeddingHealthPy). Without it the probe assumes google, so a
+# box on SOP_EMBEDDING_PROVIDER=ollama read every local row as foreign and the
+# deploy reported the SOP index degraded while the app itself was semantic.
+# Shell env wins over the app's .env.local, matching Next's precedence. Names
+# only: these values are a provider, a model slug and a number, never a key.
+emb_env() {
+  local k="$1" v="${!1:-}" envf
+  envf="${CANONICAL_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/.env.local"
+  if [[ -z "$v" && -f "$envf" ]]; then
+    v="$(grep -E "^[[:space:]]*(export[[:space:]]+)?${k}=" "$envf" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"'"'"' ' || true)"
+  fi
+  printf '%s' "$v"
+}
+EMB_ARGS=()
+EMB_PROVIDER="$(emb_env SOP_EMBEDDING_PROVIDER | tr '[:upper:]' '[:lower:]')"
+if [[ "$EMB_PROVIDER" =~ ^(google|openai|ollama|none)$ ]]; then
+  EMB_ARGS+=(--sop-active-provider "$EMB_PROVIDER")
+  if [[ "$EMB_PROVIDER" == "ollama" ]]; then
+    EMB_MODEL="$(emb_env SOP_EMBEDDING_MODEL)"; EMB_DIMS="$(emb_env SOP_EMBEDDING_DIMS)"
+    [[ -n "$EMB_MODEL" ]] && EMB_ARGS+=(--sop-active-model "$EMB_MODEL")
+    [[ "$EMB_DIMS" =~ ^[0-9]+$ ]] && EMB_ARGS+=(--sop-active-dims "$EMB_DIMS")
+  fi
+fi
 if [[ -f "$EMB_SCRIPT" ]]; then
-  EMB_JSON=$(python3 -s "$EMB_SCRIPT" --format json --sop-db "${DATABASE_PATH:-$(pwd)/mission-control.db}" 2>/dev/null \
+  EMB_JSON=$(python3 -s "$EMB_SCRIPT" --format json --sop-db "${DATABASE_PATH:-$(pwd)/mission-control.db}" ${EMB_ARGS[@]+"${EMB_ARGS[@]}"} 2>/dev/null \
     || echo '{"check":"dual_store_embedding_health","degraded":true,"asymmetric":false,"asymmetric_detail":"embedding_health.py probe failed","source":"error"}')
   EMB_LINE=$(printf '%s' "$EMB_JSON" | python3 -s -c "
 import sys,json
@@ -737,8 +927,13 @@ fi
 FINAL_PASS=true; EXIT_CODE=0; FINAL_INDET=false
 [[ "$PM2_PASS"   == "fail" ]]  && FINAL_PASS=false && EXIT_CODE=1
 [[ "$ASSET_PASS" == "fail" ]]  && FINAL_PASS=false && EXIT_CODE=1
-[[ "$CF_PASS"    == "fail" ]]  && FINAL_PASS=false && EXIT_CODE=1
-[[ "$CF_INDET"   == "true" ]]  && FINAL_INDET=true
+if [[ "$DEPLOY_GATE" -eq 1 ]]; then
+  [[ "$CF_PASS" == "fail" || "$CF_INDET" == "true" ]] && log "WARN (deploy gate, non-gating): CF public-URL probe — ${CF_DETAIL}"
+else
+  [[ "$CF_PASS"    == "fail" ]]  && FINAL_PASS=false && EXIT_CODE=1
+  [[ "$CF_INDET"   == "true" ]]  && FINAL_INDET=true
+fi
+[[ "$PM2_PASS" == "indeterminate" ]] && FINAL_INDET=true  # pm2 reading not takeable mid-restart
 [[ "$ASSET_INDET" == "true" ]] && FINAL_INDET=true  # P2 FIX: no-ref path → exit 3
 # U51 fix: DEEP_INDET (deferred above, not exited on) now feeds the SAME
 # verdict aggregation as CF_INDET/ASSET_INDET instead of forcing an early
