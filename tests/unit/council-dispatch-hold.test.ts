@@ -137,6 +137,19 @@ test('control: clearing the hold the way the guard does lets the same task past 
         AND routing_reason = 'council_plan_assembling'`,
     ['task-council-held'],
   );
+  // Train integration calibration (mainline PERSONA-RACE stage): the
+  // dispatcher on current main defers a triad-incomplete card younger
+  // than PERSONA_PIN_GRACE_SECONDS (default 120) with no attempt
+  // counted, while its persona pin may still be in flight. That stage
+  // did not exist when this control was calibrated, and the fixture
+  // card is seconds old, so age the card past the grace window; the
+  // control then measures the same thing it always did: the released
+  // card travels past the hold guard into the pipeline and stops at
+  // the triad completeness gate, which records attempt 1.
+  run(
+    `UPDATE tasks SET created_at = ? WHERE id = ?`,
+    [new Date(Date.now() - 10 * 60 * 1000).toISOString(), 'task-council-held'],
+  );
   await autoDispatchTask('task-council-held', 'test-after-release');
   // Calibration (observed on this fixture, 2026-10-14): the
   // dispatcher's later guards share the held/dispatch_precondition
