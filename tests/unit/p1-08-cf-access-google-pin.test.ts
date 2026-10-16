@@ -233,7 +233,7 @@ test('P1-08 step 2/3 (a): Google IdP configured at account level, new app → al
       urlContains: '/apps/app-333',
       body: {
         success: true,
-        result: { id: 'app-333', aud: 'aud-444', domain: 'acme.zerohumanworkforce.com', allowed_idps: ['otp-111', 'goog-222'] },
+        result: { id: 'app-333', aud: 'aud-444', domain: 'acme.zerohumanworkforce.com', session_duration: '720h', allowed_idps: ['otp-111', 'goog-222'] },
       },
     },
     { method: 'GET', urlContains: '/apps/app-333/policies', body: { success: true, result: [] } },
@@ -307,7 +307,7 @@ test('P1-08 step 2 (b): NO Google IdP at account level → loud WARNING + D-3 re
       urlContains: '/apps/app-666',
       body: {
         success: true,
-        result: { id: 'app-666', aud: 'aud-777', domain: 'noidp.zerohumanworkforce.com', allowed_idps: ['otp-111'] },
+        result: { id: 'app-666', aud: 'aud-777', domain: 'noidp.zerohumanworkforce.com', session_duration: '720h', allowed_idps: ['otp-111'] },
       },
     },
     { method: 'GET', urlContains: '/apps/app-666/policies', body: { success: true, result: [] } },
@@ -375,6 +375,7 @@ test('P1-08 step 2b (c): existing app without Google + Google now available at a
           id: 'app-existing',
           aud: 'aud-999',
           domain: 'existing.zerohumanworkforce.com',
+          session_duration: '720h',
           allowed_idps: ['otp-111'],
         },
       },
@@ -457,6 +458,7 @@ test('P1-08 step 2b (d): existing app already has Google attached → no redunda
           id: 'app-full',
           aud: 'aud-000',
           domain: 'full.zerohumanworkforce.com',
+          session_duration: '720h',
           allowed_idps: ['otp-111', 'goog-222'],
         },
       },
@@ -527,6 +529,7 @@ test('P1-08 policy reconciliation: existing app + stale login_method:onetimepin 
           // Already carries both IdPs (e.g. reconciled by a prior run of
           // Step 2b) so this scenario isolates the POLICY reconciliation
           // path specifically -- no Step 2b app PUT should fire here.
+          session_duration: '720h',
           allowed_idps: ['otp-111', 'goog-222'],
         },
       },
@@ -671,7 +674,7 @@ test('email code (f): existing Google-only app → PUT adds One-Time PIN, preser
     assert.deepStrictEqual(body.allowed_idps, ['goog-222', 'otp-111'], 'keeps Google, adds One-Time PIN');
     assert.strictEqual(body.auto_redirect_to_identity, false, 'auto-redirect must be off once two IdPs are allowed');
     assert.strictEqual(body.name, 'Hand-named app', 'hand-set name must survive (GET-merge)');
-    assert.strictEqual(body.session_duration, '24h', 'hand-set session length must survive (GET-merge)');
+    assert.strictEqual(body.session_duration, '720h', 'legacy session duration must become 30 days');
     assert.strictEqual(body.app_launcher_visible, false, 'hand-set launcher visibility must survive');
     assert.strictEqual(body.custom_deny_message, 'hand-set deny page', 'hand-set deny page must survive');
     for (const k of ['id', 'aud', 'uid', 'created_at', 'updated_at', 'policies']) {
@@ -702,7 +705,7 @@ test('email code (g): existing app with empty allowed_idps (all methods) → no 
     {
       method: 'GET',
       urlContains: '/apps/app-all',
-      body: { success: true, result: { id: 'app-all', aud: 'aud-all', domain: 'all.zerohumanworkforce.com', allowed_idps: [] } },
+      body: { success: true, result: { id: 'app-all', aud: 'aud-all', domain: 'all.zerohumanworkforce.com', session_duration: '720h', allowed_idps: [] } },
     },
     {
       method: 'GET',
@@ -732,4 +735,89 @@ test('P1-08 structural: setup-access-app.sh exists and is executable', () => {
   assert.ok(existsSync(scriptPath), 'setup-access-app.sh must exist');
   const stat = require('node:fs').statSync(scriptPath);
   assert.ok((stat.mode & 0o111) !== 0, 'setup-access-app.sh must be executable');
+});
+
+// Legacy applications must receive the same session policy as new applications,
+// regardless of whether their login-method list needs any change.
+function existingAppFixture(app: Record<string, unknown>, policy: Record<string, unknown>) {
+  return buildFixture([
+    { method: 'GET', urlContains: '/identity_providers', body: { success: true, result: [
+      { id: 'otp-111', type: 'onetimepin' }, { id: 'goog-222', type: 'google' },
+    ] } },
+    { method: 'GET', urlContains: '/apps?per_page=1000', body: { success: true, result: [app] } },
+    { method: 'GET', urlContains: '/apps/app-repair', body: { success: true, result: app } },
+    { method: 'PUT', urlContains: '/apps/app-repair', body: { success: true, result: app } },
+    { method: 'GET', urlContains: '/apps/app-repair/policies', body: { success: true, result: [policy] } },
+    { method: 'PUT', urlContains: '/apps/app-repair/policies/pol-repair', body: { success: true, result: policy } },
+  ]);
+}
+const repairApp = {
+  id: 'app-repair', aud: 'aud-repair', name: 'Private client dashboard',
+  domain: 'repair.zerohumanworkforce.com', type: 'self_hosted',
+  session_duration: '720h', allowed_idps: ['otp-111', 'goog-222'],
+  app_launcher_visible: false, custom_deny_message: 'Contact the owner',
+};
+const repairPolicy = {
+  id: 'pol-repair', name: 'Allowed users', decision: 'allow',
+  include: [{ email: { email: 'owner@repair.example' } }],
+};
+
+for (const methods of [['otp-111', 'goog-222'], []]) {
+  test(`existing 24h app gets 720h without changing its ${methods.length ? 'complete' : 'all-methods'} IdP list, then converges`, () => {
+    const fixture = existingAppFixture({ ...repairApp, session_duration: '24h', allowed_idps: methods }, repairPolicy);
+    let repaired: Record<string, unknown>;
+    try {
+      const result = runSetupScript(fixture, ['repair.zerohumanworkforce.com', 'owner@repair.example']);
+      assert.equal(result.exitCode, 0, result.stderr);
+      const writes = fixture.readCallLog().filter(c => c.method === 'PUT');
+      assert.equal(writes.length, 1, 'session-only repair changes exactly the application');
+      repaired = parseData(writes[0]);
+      assert.deepEqual(repaired, {
+        name: repairApp.name, domain: repairApp.domain, type: repairApp.type,
+        session_duration: '720h', allowed_idps: methods,
+        app_launcher_visible: false, custom_deny_message: repairApp.custom_deny_message,
+      });
+    } finally { fixture.cleanup(); }
+    const converged = existingAppFixture({ ...repaired!, id: 'app-repair', aud: 'aud-repair' }, repairPolicy);
+    try {
+      const result = runSetupScript(converged, ['repair.zerohumanworkforce.com', 'owner@repair.example']);
+      assert.equal(result.exitCode, 0, result.stderr);
+      assert.equal(converged.readCallLog().some(c => c.method !== 'GET'), false, 'second run is read-only');
+    } finally { converged.cleanup(); }
+  });
+}
+
+test('removing historical PIN requirement preserves exclusions, other requirements, session override and policy options', () => {
+  const unchanged = {
+    ...repairPolicy,
+    exclude: [{ email: { email: 'revoked@repair.example' } }],
+    require: [{ group: { id: 'staff-group' } }, { login_method: { id: 'goog-222' } }],
+    precedence: 4, session_duration: '12h', purpose_justification_required: true,
+    purpose_justification_prompt: 'Explain your access',
+  };
+  const fixture = existingAppFixture(repairApp, {
+    ...unchanged, created_at: '2026-01-01T00:00:00Z',
+    require: [{ login_method: { id: 'onetimepin' } }, ...unchanged.require],
+  });
+  try {
+    const result = runSetupScript(fixture, ['repair.zerohumanworkforce.com', 'owner@repair.example']);
+    assert.equal(result.exitCode, 0, result.stderr);
+    const writes = fixture.readCallLog().filter(c => c.method === 'PUT');
+    assert.equal(writes.length, 1);
+    assert.ok(writes[0].url.endsWith('/policies/pol-repair'));
+    const { id: _id, ...expected } = unchanged;
+    assert.deepEqual(parseData(writes[0]), expected);
+  } finally { fixture.cleanup(); }
+});
+
+test('an intentional nonlegacy login-method requirement is never removed', () => {
+  const fixture = existingAppFixture(repairApp, {
+    ...repairPolicy, require: [{ login_method: { id: 'goog-222' } }],
+    exclude: [{ email: { email: 'revoked@repair.example' } }],
+  });
+  try {
+    const result = runSetupScript(fixture, ['repair.zerohumanworkforce.com', 'owner@repair.example']);
+    assert.equal(result.exitCode, 0, result.stderr);
+    assert.equal(fixture.readCallLog().some(c => c.method !== 'GET'), false);
+  } finally { fixture.cleanup(); }
 });
