@@ -462,6 +462,14 @@ export class CouncilPlanAssembly {
         outcomes.push({ action_id: link.action_id, task_id: link.task_id, outcome: 'already_blocked' });
         continue;
       }
+      // SILENT-STOP-EXEMPT: operator-initiated assembly cancellation.
+      // The cancelling principal receives every task outcome
+      // synchronously from this call, and the cancellation is written
+      // to the session journal (assembly_cancelled) with the same
+      // outcomes. These tasks were created by this assembly, were born
+      // held, and were never released: no work stopped mid-flight and
+      // nobody is waiting on them, so the chokepoint's failure notice
+      // has no one to tell who does not already know.
       try {
         await transition(link.task_id, 'blocked', {
           actor: 'council-plan-assembly',
