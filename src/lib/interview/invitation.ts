@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { randomUUID } from 'crypto';
 import { resolveTenantContext, signTenantGrant, invitationPrerequisites, configuredPublicOrigin } from '@/lib/auth/tenant-context';
 import { GET as readiness } from '@/app/api/auth/interview-ready/route';
-import { INTERVIEW_INVITATION_TTL_SECONDS, INTERVIEW_INVITATION_VALID_UNTIL, INTERVIEW_INVITATION_REDEEMABLE } from './session-policy';
+import { INTERVIEW_INVITATION_TTL_SECONDS, INTERVIEW_INVITATION_VALID_UNTIL, INTERVIEW_INVITATION_REDEEMABLE, INTERVIEW_COMPLETION_GRACE_SECONDS } from './session-policy';
 
 
 /** Operator-authorized issuance. Redemption, and the completion check that is
@@ -64,8 +64,8 @@ export async function createInterviewInvitation(req: NextRequest, recipientHash:
     // `recipientHash` binds the ticket to the intended DELIVERY DESTINATION (a
     // hash of the resolved owner chat). It is NOT independent proof that the
     // human opening the link is that Telegram user — anyone holding the ticket
-    // text can redeem it until the interview completes, which is the forwarding
-    // exposure, and why delivery is an acknowledged gateway send to the resolved
+    // text can redeem it through the interview completion grace. This forwarding
+    // exposure explains why delivery is an acknowledged gateway send to the resolved
     // owner rather than a claim about the opener.
     //
     // Boxes without a registered identity get this safe-compatibility refusal,
@@ -102,12 +102,13 @@ export async function createInterviewInvitation(req: NextRequest, recipientHash:
       expiresAt,
       validUntil: INTERVIEW_INVITATION_VALID_UNTIL,
       redeemable: INTERVIEW_INVITATION_REDEEMABLE,
+      completionGraceSeconds: INTERVIEW_COMPLETION_GRACE_SECONDS,
       // LEGACY WIRE CONSTANT, not a description of behaviour. Onboarding
       // validators already deployed across the fleet refuse any receipt whose
       // `oneUse` is not exactly true, so dropping it would stop those boxes
       // delivering links at all. Redemption is no longer single-use: the link
-      // is re-openable until the interview is complete, and `redeemable` above
-      // is the field that says so truthfully. Remove this only once no fleet
+      // is re-openable through completion plus completionGraceSeconds, which
+      // extends the legacy `redeemable` marker. Remove this only once no fleet
       // box runs a validator that requires it.
       oneUse: true,
       url: `${publicUrl.origin}/interview?enroll=${encodeURIComponent(ticket)}`,

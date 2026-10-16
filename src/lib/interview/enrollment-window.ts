@@ -1,25 +1,25 @@
 import { readBuildState, type BuildState } from '@/lib/interview/seam';
+import { INTERVIEW_COMPLETION_GRACE_SECONDS } from './session-policy';
 
-/**
- * The one condition that ends an interview invitation's validity.
- *
- * An enrollment link has no clock expiry (see lib/interview/session-policy.ts):
- * it stays usable until the interview it opens is finished. "Finished" is what
- * the canonical build state says — interviewComplete, or a recorded
- * buildCompletedAt — never elapsed time.
- *
- * Two deliberate asymmetries:
- *   • UNREADABLE OR ABSENT state is UNDETERMINED, not complete. An unreadable
- *     file must never lock an owner out of an interview nobody has proven is
- *     over; the mint side already refuses to issue a link once the interview
- *     is complete, and the middleware gate keeps a finished client out of the
- *     interview shell on its own.
- *   • State that names a DIFFERENT company is not this grant's state and says
- *     nothing about it. State with no company recorded is still honoured, so a
- *     completed interview cannot be re-opened just because the field is absent.
+/** Invitation access is unbounded before completion, then lasts exactly 24h.
+ * Reading never changes completion state or starts a new grace period. A legacy
+ * completed record without a trustworthy interview timestamp fails closed;
+ * build completion and a later browser visit must never move the deadline.
+ * Missing/unreadable or foreign-company state retains its existing undetermined
+ * behavior, and does not claim that this tenant finished an interview.
  */
 export function enrollmentWindowClosed(companyId?: string): boolean {
-  return interviewFinished(readBuildState(), companyId);
+  return enrollmentExpired(readBuildState(), companyId);
+}
+
+/** Pure admission rule; completion itself remains a separate, unchanged fact. */
+export function enrollmentExpired(state: BuildState | null, companyId?: string, now = Date.now()): boolean {
+  if (!interviewFinished(state, companyId)) return false;
+  const timestamp = state?.interviewCompletedAt;
+  if (typeof timestamp !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(timestamp)) return true;
+  const completedAt = Date.parse(timestamp);
+  if (!Number.isFinite(completedAt) || completedAt > now) return true;
+  return now >= completedAt + INTERVIEW_COMPLETION_GRACE_SECONDS * 1000;
 }
 
 /** A recorded owner is any present, non-blank companyId. Absent/blank means
@@ -30,7 +30,7 @@ function isRecorded(owner: unknown): boolean {
   return typeof owner === 'string' ? owner.trim() !== '' : owner !== undefined && owner !== null;
 }
 
-/** Pure half of enrollmentWindowClosed, for callers that already hold state. */
+/** Completion fact only: enrollment grace never reopens a completed interview. */
 export function interviewFinished(state: BuildState | null, companyId?: string): boolean {
   if (!state) return false;
   const owner = state.companyId;

@@ -108,7 +108,7 @@ test('fresh owner without Access gets a private re-openable grant for configured
   assert.ok(grant!.exp - Date.now() / 1000 > 86390);
   assert.match(message, /bookmark.*while you are signed in/);
   // Truthful validity: re-openable until complete, never single-use/24h.
-  assert.match(message, /stays valid until your interview is complete/);
+  assert.match(message, /stays valid until 24 hours after your interview is complete/);
   assert.ok(!/can be used once within 24 hours/.test(message));
   assert.ok(!JSON.stringify(body).includes(ticket));
   assert.ok(!JSON.stringify(ledger()).includes(ticket));
