@@ -1,3 +1,10 @@
+## [v7.6.123] — 2026-10-16 — Interview access and completion grace
+
+- Keep personalized invitation links reusable while incomplete, then expire redemption and renewal 24 hours after the original interview completion. Browser sessions remain 30 days; saved answers and completion state are preserved.
+- Publish the additive completion-grace capability and accurate invitation copy. Requires onboarding timestamp preservation before rollout.
+- Reconcile existing Cloudflare Access applications to 720-hour sessions and preserve unrelated policy conditions during historical PIN-only reconciliation.
+- Validate completion boundaries, cross-device redemption, owner isolation and desktop/phone browser flows.
+
 ## [v7.6.122] - 2026-10-14 - batch: Command Center merge train (engine sync, Skill 71 run tracking, presentation board visibility) + version stamp reconciliation
 
 - feat(presentations): train PR #545 landed PR #542 (engine sync): the vendored presentation_job package re-synced to the canonical onboarding commit ea22ed88, with PARITY-MANIFEST.json pins exact across the 200-file package.
