@@ -23,6 +23,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   enrollmentWindowClosed,
+  enrollmentExpired,
   interviewFinished,
 } from '../../src/lib/interview/enrollment-window';
 
@@ -126,4 +127,40 @@ test('enrollmentWindowClosed: own complete file closes, foreign never does', () 
   assert.equal(enrollmentWindowClosed(OWN), false);
   writeState({ companyId: FOREIGN, buildCompletedAt: STAMP });
   assert.equal(enrollmentWindowClosed(OWN), false);
+});
+
+const completedMs = Date.parse(STAMP);
+const graceMs = 24 * 60 * 60 * 1000;
+test('completion grace is open through 23:59:59.999 and closes exactly at 24 hours', () => {
+  const state = { companyId: OWN, interviewComplete: true, interviewCompletedAt: STAMP };
+  assert.equal(interviewFinished(state, OWN), true, 'grace does not undo completion');
+  for (const elapsed of [0, 1, graceMs - 1]) {
+    assert.equal(enrollmentExpired(state, OWN, completedMs + elapsed), false);
+  }
+  for (const elapsed of [graceMs, graceMs + 1, 365 * graceMs]) {
+    assert.equal(enrollmentExpired(state, OWN, completedMs + elapsed), true);
+  }
+});
+
+test('missing or invalid legacy completion timestamp cannot start a sliding grace', () => {
+  for (const stamp of [undefined, '', 'not-a-date', '2026-09-18', '2026-99-18T00:00:00Z']) {
+    const state = { companyId: OWN, interviewComplete: true, interviewCompletedAt: stamp };
+    assert.equal(enrollmentExpired(state, OWN, completedMs), true);
+    assert.equal(enrollmentExpired(state, OWN, completedMs + graceMs), true);
+  }
+  assert.equal(enrollmentExpired({ companyId: OWN, interviewComplete: true, interviewCompletedAt: STAMP }, OWN, completedMs - 1), true, 'future completion timestamp is not a trustworthy deadline');
+});
+
+test('later build completion does not move the interview deadline or fill a legacy missing timestamp', () => {
+  const state = { companyId: OWN, interviewComplete: true, interviewCompletedAt: STAMP, buildCompletedAt: new Date(completedMs + graceMs).toISOString() };
+  const before = JSON.stringify(state);
+  assert.equal(enrollmentExpired(state, OWN, completedMs + graceMs), true);
+  assert.equal(JSON.stringify(state), before, 'admission never rewrites canonical completion');
+  assert.equal(enrollmentExpired({ companyId: OWN, buildCompletedAt: STAMP }, OWN, completedMs), true);
+});
+
+test('foreign completion never starts or ends this tenant grace and unfinished state ignores stale timestamps', () => {
+  assert.equal(enrollmentExpired({ companyId: FOREIGN, interviewComplete: true, interviewCompletedAt: STAMP }, OWN, completedMs + 2 * graceMs), false);
+  assert.equal(enrollmentExpired({ companyId: OWN, interviewComplete: false, interviewCompletedAt: STAMP }, OWN, completedMs + 2 * graceMs), false);
+  assert.equal(enrollmentExpired({ interviewComplete: true, interviewCompletedAt: STAMP }, OWN, completedMs + graceMs - 1), false);
 });
