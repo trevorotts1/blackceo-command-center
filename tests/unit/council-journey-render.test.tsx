@@ -329,7 +329,7 @@ describe('council nav entry (B10)', () => {
     expect(link.getAttribute('href')).toBe('/council');
     // It sits in the strategy neighborhood, right after the Board item.
     const links = screen.getAllByRole('link').map((l) => l.getAttribute('href'));
-    expect(links).toEqual(['/', '/tasks/all', '/ceo-board', '/council', '/operator', '/settings']);
+    expect(links).toEqual(['/', '/hq', '/tasks/all', '/ceo-board', '/council', '/operator', '/settings']);
   });
 
   it('is absent for an unauthorized principal, base nav intact', async () => {
@@ -340,7 +340,7 @@ describe('council nav entry (B10)', () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(screen.queryByRole('link', { name: /council/i })).toBeNull();
     const links = screen.getAllByRole('link').map((l) => l.getAttribute('href'));
-    expect(links).toEqual(['/', '/tasks/all', '/ceo-board', '/operator', '/settings']);
+    expect(links).toEqual(['/', '/hq', '/tasks/all', '/ceo-board', '/operator', '/settings']);
   });
 });
 
