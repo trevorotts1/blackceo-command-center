@@ -58,9 +58,8 @@ import {
   HASH_FIXTURE_A,
   HASH_FIXTURE_B,
   HASH_FIXTURE_CANONICAL_TEXT,
-  generateJsonSchemaArtifact,
-  JSON_SCHEMA_ARTIFACT_PATH,
 } from './index';
+import { generateJsonSchemaArtifact, JSON_SCHEMA_ARTIFACT_PATH } from './generate';
 import {
   invalidFixtures,
   validAdvisorCardAuthor,

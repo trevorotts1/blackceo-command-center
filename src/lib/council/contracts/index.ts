@@ -20,5 +20,7 @@ export * from './state-machine';
 export * from './scoring';
 export * from './diagnostic-retention';
 export * from './golden-vectors';
-export { generateJsonSchemaArtifact, JSON_SCHEMA_ARTIFACT_PATH } from './generate';
+// ./generate is intentionally not re-exported from this barrel: it is the
+// server-side codegen script (its entry point loads node: builtins), and
+// this surface is imported by client bundles. Consumers import it directly.
 export type * from './types';
