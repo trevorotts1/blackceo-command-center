@@ -336,6 +336,7 @@ export const QUERY_CREDENTIAL_PARAMETERS: ReadonlySet<string> = new Set([
   'api_key',
   'apikey',
   'api-key',
+  'api_token',
   'access_token',
   'token',
   'key',
