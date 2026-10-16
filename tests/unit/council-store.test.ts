@@ -91,7 +91,7 @@ test('getDb() applied the council schema through the real migration runner', () 
     .all() as { id: string }[];
   assert.deepEqual(
     ledger.map((r) => r.id),
-    ['PENDING_INTEGRATION_ALLOCATION_CWE005'],
+    ['172'],
   );
   const tables = store
     .handle()

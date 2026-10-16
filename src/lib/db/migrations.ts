@@ -8465,12 +8465,12 @@ export const migrations: Migration[] = [
   },
 
   // CWE-005 council persistence (directive Section 16). The entry lives
-  // in src/lib/council/persistence/council-migration.ts. Its id is a
-  // clearly marked PENDING integration-time assignment: the single
-  // integrator allocates the next numeric id (highest existing id + 1)
-  // at integration and replaces the constant there. Do NOT allocate a
-  // number in a unit branch. The runner sorts numerically; the pending
-  // non-numeric id sorts after every numeric migration, which is safe
+  // in src/lib/council/persistence/council-migration.ts. Its id was a
+  // clearly marked PENDING integration-time assignment in the unit
+  // branch; the single integrator allocated the next numeric id at
+  // integration (highest existing id 171 + 1 = '172') and set the
+  // constant there. The runner sorts numerically, so the council
+  // migration applies in numeric position after 171, which is safe
   // because the council schema is additive and independent.
   councilMigration,
 ];

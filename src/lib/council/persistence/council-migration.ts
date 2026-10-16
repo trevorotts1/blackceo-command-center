@@ -1,29 +1,24 @@
 /**
  * CWE-005 council persistence migration (directive Sections 16 and 34).
  *
- * MIGRATION NUMBER LAW: this branch does NOT allocate a Command Center
- * registry number. The registry in src/lib/db/migrations.ts currently
- * holds 142 unique numeric ids (highest 144, gaps at 22 and 23). The
- * single integrator allocates the next id at integration time and
- * replaces COUNCIL_MIGRATION_ID_PENDING below with that numeric string.
- * Until then the entry registers under a self-describing non-numeric id
- * that the runner's numeric sort places after every numeric migration
- * (its parseInt is NaN, so ordering falls back to string comparison,
- * which sorts this id last). The statements are additive and independent
- * of every existing table, so applying last is always safe.
+ * MIGRATION NUMBER LAW: the unit branch did NOT allocate a Command Center
+ * registry number; the entry registered under a self-describing
+ * non-numeric id that the runner's numeric sort places after every
+ * numeric migration (its parseInt is NaN, so ordering falls back to
+ * string comparison, which sorts this id last). The statements are
+ * additive and independent of every existing table, so applying last is
+ * always safe.
  *
- * Integrator, at integration time (exact steps, also in the CWE-005
- * build report):
- *   1. On the integrated tree, read the then-highest numeric id in
- *      src/lib/db/migrations.ts (do not reuse the gaps at 22 and 23;
- *      historical ids are never recycled).
- *   2. Set COUNCIL_MIGRATION_ID_PENDING to that id + 1, as a string
- *      (for example '145' if 144 is still the highest).
- *   3. Nothing else changes: the registry entry in migrations.ts reads
- *      this constant, and the runner sorts numerically.
- *   4. If any box ever ran this branch unallocated (its _migrations
- *      ledger would show the pending id), the additive body makes the
- *      renumbered run a harmless no-op re-apply.
+ * ALLOCATED AT INTEGRATION (Skill 77 batch train, 2026-10-16): the
+ * single integrator read the then-highest numeric id in
+ * src/lib/db/migrations.ts on the composed tree (171; the historical
+ * gaps at 22 and 23 were not recycled) and set
+ * COUNCIL_MIGRATION_ID_PENDING below to '172', per the steps this header
+ * prescribed. The registry entry in migrations.ts reads this constant,
+ * and the runner sorts numerically, so the council migration now applies
+ * in numeric position after 171. If any box ever ran this branch
+ * unallocated (its _migrations ledger would show the pending id), the
+ * additive body makes the renumbered run a harmless no-op re-apply.
  *
  * Rollback: the migration is additive only. Rolling back means running
  * the previous build against the same database; the council_* tables
@@ -42,11 +37,13 @@ import type Database from 'better-sqlite3';
 import { COUNCIL_SCHEMA_MIGRATION_NAME, COUNCIL_SCHEMA_SQL } from './council-schema';
 
 /**
- * INTEGRATION-TIME ASSIGNMENT: replace with the numeric id the single
- * integrator allocates at integration (highest existing id + 1). Never
- * allocate a number inside a unit branch.
+ * The council migration's registry id. Authored as the non-numeric
+ * placeholder 'PENDING_INTEGRATION_ALLOCATION_CWE005' (never allocate a
+ * number inside a unit branch); the single integrator allocated '172'
+ * at integration (highest existing id 171 + 1). The constant keeps its
+ * name: tests and the registry entry import it by name.
  */
-export const COUNCIL_MIGRATION_ID_PENDING = 'PENDING_INTEGRATION_ALLOCATION_CWE005';
+export const COUNCIL_MIGRATION_ID_PENDING = '172';
 
 export const COUNCIL_MIGRATION_NAME = COUNCIL_SCHEMA_MIGRATION_NAME;
 

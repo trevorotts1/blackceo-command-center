@@ -10,7 +10,7 @@
  * that the array is exported so one migration can be unit-tested in
  * isolation). One test additionally runs the REAL registry through
  * getDb() on an isolated DATABASE_PATH to prove the registration,
- * the pending id, and the fail-closed lifecycle end to end.
+ * the allocated id, and the fail-closed lifecycle end to end.
  *
  * Covers:
  *   1. Fresh apply: all 19 council_* tables (the 18 of Section 16.2 plus
@@ -576,10 +576,14 @@ test('concurrent installers racing one database both succeed, schema lands once'
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test('registry: the council entry is registered once, under the pending id', () => {
-  assert.equal(COUNCIL_MIGRATION_ID_PENDING, 'PENDING_INTEGRATION_ALLOCATION_CWE005');
+test('registry: the council entry is registered once, under its allocated id', () => {
+  // Integration calibration (Skill 77 batch train): the id was the
+  // non-numeric placeholder 'PENDING_INTEGRATION_ALLOCATION_CWE005' in
+  // the unit branch; the integrator allocated '172' (highest existing
+  // id 171 + 1) at integration, per the CWE-005 migration number law.
+  assert.equal(COUNCIL_MIGRATION_ID_PENDING, '172');
   assert.equal(councilMigration.id, COUNCIL_MIGRATION_ID_PENDING);
-  assert.ok(Number.isNaN(parseInt(councilMigration.id, 10)), 'pending id must stay non-numeric');
+  assert.equal(parseInt(councilMigration.id, 10), 172, 'allocated id is numeric and sorts after 171');
 
   // Child process: DATABASE_PATH discipline (the C8 hard-isolation guard
   // requires an explicit throwaway path outside the server process), then
@@ -623,7 +627,7 @@ test('registry: the council entry is registered once, under the pending id', () 
   assert.equal(report.entries, 1, 'exactly one council registry entry');
   assert.equal(report.entryId, COUNCIL_MIGRATION_ID_PENDING);
   assert.equal(report.total, 170, '169 registry migrations on the composed main + the council entry');
-  assert.equal(report.maxNumeric, 171, 'highest numeric id is mainline 171; the council entry holds no numeric id');
+  assert.equal(report.maxNumeric, 172, 'highest numeric id is the council entry at its allocated id 172 (mainline reaches 171)');
   assert.equal(report.ledger, 1, 'the runner recorded the council migration exactly once');
   assert.equal(report.tables, ALL_COUNCIL_TABLES.length, 'getDb() applied the council schema');
   fs.rmSync(dir, { recursive: true, force: true });

@@ -31,6 +31,20 @@ function deriveHeadMigration(): string {
   const ids: number[] = [];
   let m: RegExpExecArray | null;
   while ((m = re.exec(src)) !== null) ids.push(parseInt(m[1], 10));
+  // The registry's council entry (CWE-005) is not a literal in
+  // migrations.ts: the array holds the imported `councilMigration`
+  // object, whose id is the COUNCIL_MIGRATION_ID_PENDING constant in
+  // src/lib/council/persistence/council-migration.ts. Read that constant
+  // from its own source so the derived head covers the FULL registry
+  // array, exactly as before: derived, never hard-coded. (Pre-allocation
+  // the constant was non-numeric and contributed nothing.)
+  const councilMigrationTs = path.resolve(
+    __dirname,
+    '../../src/lib/council/persistence/council-migration.ts',
+  );
+  const councilSrc = fs.readFileSync(councilMigrationTs, 'utf8');
+  const councilId = councilSrc.match(/COUNCIL_MIGRATION_ID_PENDING\s*=\s*'(\d+)'/);
+  if (councilId) ids.push(parseInt(councilId[1], 10));
   if (ids.length === 0) {
     throw new Error('_head-migration: no `id: \'NNN\', name:` migration entries found in migrations.ts');
   }
