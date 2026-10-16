@@ -622,8 +622,8 @@ test('registry: the council entry is registered once, under the pending id', () 
   };
   assert.equal(report.entries, 1, 'exactly one council registry entry');
   assert.equal(report.entryId, COUNCIL_MIGRATION_ID_PENDING);
-  assert.equal(report.total, 143, '142 baseline migrations + the council entry');
-  assert.equal(report.maxNumeric, 144, 'no numeric id was allocated by this branch');
+  assert.equal(report.total, 170, '169 registry migrations on the composed main + the council entry');
+  assert.equal(report.maxNumeric, 171, 'highest numeric id is mainline 171; the council entry holds no numeric id');
   assert.equal(report.ledger, 1, 'the runner recorded the council migration exactly once');
   assert.equal(report.tables, ALL_COUNCIL_TABLES.length, 'getDb() applied the council schema');
   fs.rmSync(dir, { recursive: true, force: true });
