@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   validateApprovedCouncilPortraitManifest,
+  readApprovedCouncilPortraitRelease,
   CouncilPortraitManifestError,
 } from '../../src/components/council/council-portrait-manifest';
 import {
@@ -140,4 +141,40 @@ test('no raw draft, empty or malformed artifact is treated as a complete illustr
   ]) {
     assertReject(value);
   }
+});
+
+test('same-origin signed manifest lookup supplies approved room and drawer portraits only', async () => {
+  let called = 0;
+  const fetcher = (async (url: RequestInfo | URL, init?: RequestInit) => {
+    called += 1;
+    assert.equal(String(url), '/council/portraits/manifest.json');
+    assert.equal(init?.method, 'GET');
+    assert.equal(init?.credentials, 'same-origin');
+    assert.equal(init?.cache, 'no-store');
+    return Response.json(fixture());
+  }) as typeof fetch;
+  const result = await readApprovedCouncilPortraitRelease(fetcher);
+  assert.equal(called, 1);
+  assert.equal(result.status, 'approved');
+  if (result.status === 'approved') {
+    assert.equal(result.images.roomSrcBySeat['simon-sinek'], '/council/portraits/simon-sinek-room.webp');
+  }
+});
+
+test('missing or malformed manifest remains visibly unavailable rather than forging images', async () => {
+  const missing = await readApprovedCouncilPortraitRelease(
+    (async () => new Response('not found', { status: 404 })) as typeof fetch,
+  );
+  assert.equal(missing.status, 'unavailable');
+
+  const bad = await readApprovedCouncilPortraitRelease(
+    (async () => Response.json(altered((m) => {
+      ((m.entries as Obj[])[0]).approved_subject = 'Steve Harvey';
+    }))) as typeof fetch,
+  );
+  assert.equal(bad.status, 'unavailable');
+  const interrupted = await readApprovedCouncilPortraitRelease(
+    (async () => { throw new Error('network offline'); }) as typeof fetch,
+  );
+  assert.equal(interrupted.status, 'unavailable');
 });
