@@ -287,6 +287,15 @@ jobs:
         # CI. Chromium only: the PDF renderer launches no other browser.
         run: npx playwright install --with-deps chromium
 
+      - name: Install poppler-utils (council PDF tests inspect rendered PDFs)
+        # The same council PDF tests also shell out to poppler's pdfinfo
+        # and pdftotext (tests/unit/council-gauntlet-pdf.test.ts: pdfPages
+        # and pdfText) to verify the rendered PDFs page by page. The runner
+        # image does not ship poppler-utils, so without this step those
+        # tests can only ever fail in CI with spawnSync pdfinfo ENOENT,
+        # even though the PDFs themselves render correctly.
+        run: sudo apt-get update && sudo apt-get install -y poppler-utils
+
       - name: Prepare council gauntlet evidence directory
         # The council gauntlet tests write rendered-PDF evidence to
         # $GAUNTLET_OUT (default ~/workspace/skill77/cwe-044/evidence,
