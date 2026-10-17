@@ -1,0 +1,25 @@
+name: Council original portrait asset contract
+
+on:
+  pull_request:
+    paths:
+      - "scripts/council/build_portrait_assets.py"
+      - "tests/council-assets/**"
+      - ".github/workflows/council-portrait-asset-contract.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  variant-generation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install pinned build-only image converter
+        run: python -m pip install "Pillow==12.0.0"
+      - name: Verify real variant encoder, budgets, provenance and atomic failure behavior
+        run: python -m unittest discover -s tests/council-assets -p "test_*.py" -v
