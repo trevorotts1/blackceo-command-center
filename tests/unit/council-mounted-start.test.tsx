@@ -52,6 +52,9 @@ describe('active mounted Council run start panel', () => {
     expect(page).toContain('readStoredCouncilSession(sessionId)');
     expect(page).toContain('accessVia={detail.accessVia}');
     expect(page).toContain('state_version: receipt.state_version');
+    expect(page).toContain('COUNCIL_MEDALLION_SMALL_SRC');
+    expect(page).toContain('COUNCIL_MEDALLION_LARGE_SRC');
+    expect(page).not.toContain('fixtureMedallionSrcs');
   });
 
   it('queues one authorized job and shows only the server receipt, not fake progress', async () => {
