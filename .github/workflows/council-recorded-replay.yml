@@ -1,0 +1,31 @@
+name: Council genuine recorded replay
+
+on:
+  pull_request:
+    paths:
+      - "src/components/council/council-replay-timeline.ts"
+      - "src/components/council/CouncilRecordedReplay.tsx"
+      - "src/components/council/CouncilLiveSession.tsx"
+      - "tests/unit/council-recorded-replay-timeline.test.ts"
+      - "tests/unit/council-session-ui-render.test.tsx"
+      - ".github/workflows/council-recorded-replay.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  saved-event-replay:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Verify read-only event timeline, timestamps, scope and exact seeking
+        run: node --import tsx --test tests/unit/council-recorded-replay-timeline.test.ts
+      - name: Verify mounted React Replay controls never open stream
+        run: npx vitest run --config vitest.component.config.ts tests/unit/council-session-ui-render.test.tsx
