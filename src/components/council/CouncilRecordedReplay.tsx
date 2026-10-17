@@ -124,14 +124,20 @@ export function CouncilRecordedReplay({
       const now = Date.now();
       const delta = Math.max(0, now - last);
       last = now;
-      setElapsedMs((previous) => {
-        const next = advanceReplayClock(timeline, previous, delta, speed);
-        if (next.finished) setPlaying(false);
-        return next.elapsedMs;
-      });
+      setElapsedMs((previous) =>
+        advanceReplayClock(timeline, previous, delta, speed).elapsedMs,
+      );
     }, TICK_MS);
     return () => clearInterval(timer);
   }, [playing, speed, timeline]);
+
+  // Stop playback outside a React state updater, avoiding cross-state
+  // updates during render and retaining a deterministic final frame.
+  useEffect(() => {
+    if (playing && timeline && elapsedMs >= timeline.durationMs) {
+      setPlaying(false);
+    }
+  }, [elapsedMs, playing, timeline]);
 
   const position = useMemo(
     () => timeline ? replayAtElapsedMs(timeline, elapsedMs) : null,
