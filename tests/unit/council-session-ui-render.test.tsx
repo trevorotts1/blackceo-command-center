@@ -232,6 +232,17 @@ describe('CWE-030 reducer contract as the client binding', () => {
 /* ── Live session screen ────────────────────────────────────────────── */
 
 describe('live session screen', () => {
+  it('rejects malformed event envelopes without inventing a room or throwing a raw TypeError', async () => {
+    const transport = new FakeTransport({
+      kind: 'page',
+      page: undefined,
+    } as unknown as CouncilCatchUp);
+    renderLive(transport);
+    const error = await screen.findByTestId('council-live-error');
+    expect(error.textContent).toContain('invalid event page');
+    expect(screen.queryByTestId('council-room')).toBeNull();
+  });
+
   it('renders seats only from committed events: queued is waiting, never thinking', async () => {
     const transport = new FakeTransport({
       kind: 'snapshot',

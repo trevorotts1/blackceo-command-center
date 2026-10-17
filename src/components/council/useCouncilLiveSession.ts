@@ -84,11 +84,35 @@ export function useCouncilLiveSession(
     (result: CouncilCatchUp): 'ok' | 'private' | 'gap' => {
       const reducer = reducerRef.current;
       if (!reducer) return 'ok';
+      // HTTP 200 with an unexpected payload is NOT evidence of a saved
+      // Council snapshot. Refuse it explicitly, before reading .events
+      // or announcing a live ready state.
+      if (!result || typeof result !== 'object' || !('kind' in result)) {
+        throw new Error('The Council events endpoint returned an invalid event response.');
+      }
       if (result.kind === 'invalidation') return 'private';
       if (result.kind === 'snapshot') {
-        reducer.applySnapshot(result.snapshot);
+        const snapshot = result.snapshot;
+        if (
+          !snapshot || snapshot.kind !== 'snapshot' ||
+          snapshot.session_id !== sessionId ||
+          !snapshot.projection ||
+          snapshot.projection.session_id !== sessionId ||
+          !Array.isArray(snapshot.projection.seats)
+        ) {
+          throw new Error('The Council events endpoint returned an invalid session snapshot.');
+        }
+        reducer.applySnapshot(snapshot);
         syncProjection();
         return 'ok';
+      }
+      if (
+        result.kind !== 'page' || !result.page ||
+        result.page.kind !== 'events' ||
+        result.page.session_id !== sessionId ||
+        !Array.isArray(result.page.events)
+      ) {
+        throw new Error('The Council events endpoint returned an invalid event page.');
       }
       const outcomes = reducer.applyPage(result.page.events);
       syncProjection();
