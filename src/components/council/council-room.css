@@ -107,21 +107,37 @@
 @container (max-width: 919px) {
   .council-room-frame {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 1rem;
     max-width: none;
+    min-width: 0;
+    height: auto;
+  }
+  .council-room-frame .council-room-seat {
+    position: static;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    transform: none;
+    box-sizing: border-box;
+    /* Inline ellipse coordinates remain data but never move grid seats. */
+    /* Static grid positioning makes inline ellipse offsets inert. */
   }
   .council-room-center {
     position: static;
     transform: none;
     width: auto;
+    min-width: 0;
     grid-column: 1 / -1;
     order: -1;
     padding: 0.5rem 0;
   }
 }
 @container (max-width: 640px) {
-  .council-room-frame { grid-template-columns: repeat(2, 1fr); }
+  .council-room-frame {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.625rem;
+  }
 }
 
 /* ── Compact room density for ellipse seats (see AdvisorSeat variant) ── */
@@ -197,3 +213,55 @@
    transitions and animations under prefers-reduced-motion; the shell also
    sets data-reduced-motion so behavior can be tested, and the reading
    view never carries motion in the first place (Section 22.7, 23.2). */
+
+/* WER-019: long decisions, localized names and narrow browser zoom remain
+   readable. No horizontal scroll or type-size reduction is used to fit. */
+.council-theme .council-room,
+.council-theme .council-room-frame,
+.council-theme .council-seat-room {
+  box-sizing: border-box;
+  min-width: 0;
+  max-width: 100%;
+}
+.council-theme .council-seat-room .council-seat-name,
+.council-theme .council-room-center-decision {
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+.council-theme .council-room-center-decision {
+  max-width: 100%;
+}
+.council-theme .council-drawer {
+  box-sizing: border-box;
+  overflow-x: hidden;
+  overflow-wrap: anywhere;
+  overscroll-behavior-y: contain;
+  padding-bottom: max(1.25rem, env(safe-area-inset-bottom));
+}
+.council-theme .council-drawer-head {
+  flex-wrap: wrap;
+}
+.council-theme .council-drawer-head > div {
+  flex: 1 1 13rem;
+  min-width: 0;
+}
+.council-theme .council-view-toggle {
+  max-width: 100%;
+}
+@media (max-width: 420px) {
+  .council-theme .council-view-toggle {
+    display: flex;
+    width: 100%;
+    box-sizing: border-box;
+  }
+  .council-theme .council-view-toggle .council-btn {
+    flex: 1 1 0;
+    min-width: 0;
+    padding-inline: 0.375rem;
+    white-space: normal;
+  }
+  .council-theme .council-drawer {
+    width: 100vw;
+    padding-inline: max(0.875rem, env(safe-area-inset-left)) max(0.875rem, env(safe-area-inset-right));
+  }
+}
