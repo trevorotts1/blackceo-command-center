@@ -74,6 +74,32 @@ class CouncilPortraitBuildTests(unittest.TestCase):
             builder.build_portraits(self.masters, self.provenance, self.output)
         self.assertFalse(self.output.exists())
 
+    def test_a_tenth_or_wrong_person_picture_is_a_hard_roster_failure(self):
+        # The nine approved Council members must remain the exact images
+        # shipped. Unknown files are not silently discarded.
+        outside = Image.new("RGBA", (1024, 1280), (0, 0, 0, 0))
+        outside.save(self.masters / "steve-harvey.png")
+        with self.assertRaisesRegex(builder.PortraitError, "unexpected"):
+            builder.build_portraits(self.masters, self.provenance, self.output)
+        self.assertFalse(self.output.exists())
+        (self.masters / "steve-harvey.png").unlink()
+
+        # A wrong label for a required seat also fails; nine images are
+        # expected, not just any nine celebrities.
+        (self.masters / "oprah-winfrey.png").rename(self.masters / "person-unknown.png")
+        with self.assertRaisesRegex(builder.PortraitError, "roster mismatch"):
+            builder.build_portraits(self.masters, self.provenance, self.output)
+        self.assertFalse(self.output.exists())
+
+    def test_roster_is_locked_to_owner_approved_nine_no_others(self):
+        expected = {
+            "simon-sinek", "td-jakes", "oprah-winfrey", "tiffany-aliche",
+            "russell-brunson", "michelle-obama", "brene-brown",
+            "dennis-kimbro", "les-brown",
+        }
+        self.assertEqual(set(builder.SEATS), expected)
+        self.assertEqual(len(builder.SEATS), 9)
+
     def test_opaque_or_too_small_master_refused(self):
         image = Image.new("RGBA", (900, 1100), (10, 10, 10, 255))
         image.save(self.masters / "simon-sinek.png")
