@@ -5,6 +5,10 @@ on:
     paths:
       - "scripts/council/build_portrait_assets.py"
       - "tests/council-assets/**"
+      - "tests/unit/council-approved-roster-parity.test.ts"
+      - "src/components/council/council-room-types.ts"
+      - "src/components/council/medallions.ts"
+      - "src/components/council/portraits/**"
       - ".github/workflows/council-portrait-asset-contract.yml"
   workflow_dispatch:
 
@@ -23,3 +27,16 @@ jobs:
         run: python -m pip install "Pillow==12.0.0"
       - name: Verify real variant encoder, budgets, provenance and atomic failure behavior
         run: python -m unittest discover -s tests/council-assets -p "test_*.py" -v
+
+  exact-owner-roster:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+      - name: Install locked frontend testing dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Require precisely the nine selected people in every shipped visual manifest
+        run: node --import tsx --test tests/unit/council-approved-roster-parity.test.ts
