@@ -104,6 +104,28 @@ def _encode_variant(master, size, limit, seat, variant):
 
 def build_portraits(masters: Path, provenance_path: Path, output: Path):
     provenance = _provenance(provenance_path)
+
+    # The owner's nine Council seats are an allowlist. Never silently
+    # ignore a Steve Harvey / tenth-person image dropped into the
+    # source folder: reject the entire build before any publication.
+    expected = {f"{seat}.png" for seat in SEATS}
+    if not masters.is_dir():
+        raise PortraitError(f"Council master-image directory is missing: {masters}")
+    supplied = {
+        candidate.name
+        for candidate in masters.iterdir()
+        if candidate.is_file() and candidate.suffix.lower() in {
+            ".png", ".jpg", ".jpeg", ".webp", ".avif", ".svg"
+        }
+    }
+    unexpected = sorted(supplied - expected)
+    missing = sorted(expected - supplied)
+    if unexpected or missing:
+        raise PortraitError(
+            "Council portrait roster mismatch: expected exactly the nine approved "
+            f"person filenames; unexpected={unexpected}; missing={missing}"
+        )
+
     entries = []
     staging_parent = output.parent
     staging_parent.mkdir(parents=True, exist_ok=True)
