@@ -34,7 +34,7 @@ import { CouncilVerdict } from '../../../components/council/CouncilVerdict';
 import { CouncilFollowUp } from '../../../components/council/CouncilFollowUp';
 import { CouncilOutcomeForm } from '../../../components/council/CouncilOutcomeForm';
 import { CouncilSourceDrawer } from '../../../components/council/CouncilSourceDrawer';
-import { fixtureMedallionSrcs } from '../../../components/council/council-room-fixtures';
+import { COUNCIL_MEDALLION_LARGE_SRC, COUNCIL_MEDALLION_SMALL_SRC } from '../../../components/council/medallions';
 import {
   CouncilApiClient,
   FetchCouncilSessionTransport,
@@ -45,9 +45,6 @@ import {
   type SeatSources,
 } from '../../../components/council/council-session-types';
 import type { CouncilCard, DecisionBrief } from '@/lib/council/contracts';
-
-/** Vendored medallion assets (CWE-031/CWE-032) served at this base. */
-const MEDALLION_BASE = '/portraits';
 
 interface SessionDetailState {
   brief: DecisionBrief;
@@ -70,7 +67,6 @@ export default function CouncilSessionPage({
     () => new FetchCouncilSessionTransport(client),
     [client],
   );
-  const medallions = useMemo(() => fixtureMedallionSrcs(MEDALLION_BASE), []);
 
   const [detail, setDetail] = useState<SessionDetailState | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
@@ -172,8 +168,8 @@ export default function CouncilSessionPage({
         transport={transport}
         decisionTitle={detail?.title ?? 'Council session'}
         replay={replay}
-        medallionSrcBySeat={medallions.small}
-        medallionLargeSrcBySeat={medallions.large}
+        medallionSrcBySeat={COUNCIL_MEDALLION_SMALL_SRC}
+        medallionLargeSrcBySeat={COUNCIL_MEDALLION_LARGE_SRC}
       />
 
       {detailError ? (
