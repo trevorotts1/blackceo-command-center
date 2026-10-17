@@ -1,0 +1,26 @@
+name: Council projection and card coherence
+
+on:
+  pull_request:
+    paths:
+      - "src/components/council/council-session-types.ts"
+      - "tests/unit/council-projection-card-hydration.test.ts"
+      - ".github/workflows/council-projection-card-coherence.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  projection:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Exercise projection and authorized-card matching
+        run: node --import tsx --test tests/unit/council-projection-card-hydration.test.ts
