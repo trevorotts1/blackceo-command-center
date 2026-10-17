@@ -428,7 +428,8 @@ describe('intake journey', () => {
     const user = userEvent.setup();
     render(<DecisionComposer />);
     expect(await screen.findByTestId('intake-step-route')).toBeTruthy();
-    const readiness = screen.getByTestId('route-readiness-route-fixture-untested');
+    // The route step mounts before the async model catalog resolves; wait for the real fixture response.
+    const readiness = await screen.findByTestId('route-readiness-route-fixture-untested');
     expect(readiness.dataset.readiness).toBe('UNTESTED');
     expect(readiness.textContent).toContain('UNTESTED');
     await user.click(screen.getByRole('radio', { name: /fixture route/i }));
