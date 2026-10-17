@@ -16,7 +16,7 @@ import { NextRequest } from 'next/server';
 import { getDb, queryOne } from '../../src/lib/db';
 import { POST, GET } from '../../src/app/api/auth/interview-session/route';
 import { signTenantGrant, verifyTenantGrant } from '../../src/lib/auth/tenant-context';
-import { INTERVIEW_INVITATION_VALID_UNTIL, INTERVIEW_INVITATION_REDEEMABLE, INTERVIEW_SESSION_TTL_SECONDS } from '../../src/lib/interview/session-policy';
+import { INTERVIEW_INVITATION_VALID_UNTIL, INTERVIEW_INVITATION_REDEEMABLE, INTERVIEW_SESSION_TTL_SECONDS, INTERVIEW_COMPLETION_GRACE_SECONDS } from '../../src/lib/interview/session-policy';
 import { interviewFinished } from '../../src/lib/interview/enrollment-window';
 
 const root = process.env.CC_TEST_FIXTURE_ROOT!;
@@ -155,7 +155,7 @@ test('the first open is recorded once, as an audit trail and never as a gate', a
   assert.equal(queryOne<{ n: number }>('SELECT COUNT(*) AS n FROM interview_enrollment_uses WHERE nonce=?', [nonce])!.n, 1);
 });
 
-test('a link already opened is still refused the moment the interview completes', async () => {
+test('a legacy completed record without a timestamp refuses the previously opened link', async () => {
   const token = await ticket();
   assert.equal((await redeem(token)).status, 200);
   writeState({ ...registration, interviewComplete: true });
@@ -165,7 +165,49 @@ test('a link already opened is still refused the moment the interview completes'
   assert.equal(refused.headers.get('set-cookie'), null);
 });
 
-test('the published contract is completion for validity and for redemption, never a duration', () => {
+test('legacy completion receipt markers remain compatible and additive grace is exactly 24 hours', () => {
+  assert.equal(INTERVIEW_COMPLETION_GRACE_SECONDS, 86400);
   assert.equal(INTERVIEW_INVITATION_VALID_UNTIL, 'interview-complete');
   assert.equal(INTERVIEW_INVITATION_REDEEMABLE, 'until-interview-complete');
+});
+
+
+test('same signed invitation works across devices through the completion grace, without reopening answers', async () => {
+  const token = await ticket(100);
+  const completedAt = Date.now();
+  const state = { ...registration, interviewComplete: true, interviewCompletedAt: new Date(completedAt).toISOString(), interviewProgress: { savedAnswer: 'Keep this answer' } };
+  writeState(state);
+  const before = fs.readFileSync(statePath, 'utf8');
+  const realNow = Date.now;
+  try {
+    Date.now = () => completedAt;
+    const first = await redeem(token);
+    assert.equal(first.status, 200);
+    const cookie = first.headers.get('set-cookie')!.split(';')[0];
+    Date.now = () => completedAt + INTERVIEW_COMPLETION_GRACE_SECONDS * 1000 - 1;
+    assert.equal((await redeem(token)).status, 200, 'another device works until the final millisecond');
+    assert.equal((await redeem(token, cookie)).status, 200, 'same browser works during grace');
+    Date.now = () => completedAt + INTERVIEW_COMPLETION_GRACE_SECONDS * 1000;
+    for (const browser of ['', cookie]) {
+      const expired = await redeem(token, browser);
+      assert.equal(expired.status, 403, 'active cookie cannot extend the invitation deadline');
+      assert.equal((await expired.json()).error, 'interview_already_complete');
+      assert.equal(expired.headers.get('set-cookie'), null);
+    }
+    const sessionStatus = await GET(new NextRequest(`https://${host}/api/auth/interview-session`, { headers: { host, cookie } }));
+    assert.equal(sessionStatus.status, 200, 'independent 30-day session remains valid');
+    assert.equal(fs.readFileSync(statePath, 'utf8'), before, 'completion timestamp, flag and answers are unchanged');
+  } finally { Date.now = realNow; }
+});
+
+test('grace never relaxes signed tenant/host/subject binding', async () => {
+  writeState({ ...registration, interviewComplete: true, interviewCompletedAt: new Date().toISOString() });
+  const token = await ticket(40);
+  for (const extra of [{ companyId: 'foreign' }, { installationId: 'foreign' }, { tenantId: 'foreign' }, { host: 'foreign.example' }]) {
+    assert.equal((await redeem(await ticket(40, extra))).status, 403);
+  }
+  const own = await redeem(token);
+  assert.equal(own.status, 200);
+  const cookie = own.headers.get('set-cookie')!.split(';')[0];
+  assert.equal((await redeem(await ticket(40, { subject: 'foreign-owner' }), cookie)).status, 403);
 });

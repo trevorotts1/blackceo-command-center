@@ -254,18 +254,18 @@ APP_DETAIL=$(cf_call GET "/apps/${APP_ID}")
 APP_AUD=$(echo "$APP_DETAIL" | json_extract aud)
 
 # ---------------------------------------------------------------------------
-# Step 2b: make sure an EXISTING app offers every available login method.
+# Step 2b: reconcile login methods and the 30-day session on EXISTING apps.
 #
 # An app created by hand (or by an older script) can list only Google in
 # allowed_idps. Google sign-in fails for personal @gmail.com users while the
 # Google OAuth client is internal-only (Error 403: org_internal), so a client
 # with no email-code option is locked out. This step adds whatever of
 # One-Time PIN / Google the app is missing. It never removes an IdP the app
-# already lists, and never touches an app whose allowed_idps is empty (empty
-# means Cloudflare already offers every account IdP, including email code).
+# already lists. An empty allowed_idps stays empty (Cloudflare already offers
+# every account IdP, including email code); its session can still need repair.
 #
 # Cloudflare's PUT /apps/{id} REPLACES the whole record, so the body is the
-# app's own GET result with only allowed_idps changed (GET-merge): hand-set
+# app's own GET result with only login/session settings changed (GET-merge): hand-set
 # dashboard options (launcher visibility, deny pages, CORS, ...) survive.
 # Cloudflare also rejects auto_redirect_to_identity=true when more than one
 # IdP is allowed (API error 12130), so that flag is turned off in the same
@@ -279,27 +279,35 @@ otp = os.environ['OTP_IDP_ID']
 data = json.load(sys.stdin)
 app = data.get('result', data) if isinstance(data, dict) else {}
 current = app.get('allowed_idps') or []
-missing = [i for i in wanted if i not in current]
-if not current or not missing:
-    print(json.dumps({'missing': []}))
+missing = [i for i in wanted if i not in current] if current else []
+session_changed = app.get('session_duration') != '720h'
+if not missing and not session_changed:
+    print(json.dumps({'missing': [], 'update': False}))
     sys.exit(0)
 body = {k: v for k, v in app.items() if k not in ('id', 'aud', 'uid', 'created_at', 'updated_at', 'policies')}
-body['allowed_idps'] = current + missing
-if len(body['allowed_idps']) > 1 and body.get('auto_redirect_to_identity'):
-    body['auto_redirect_to_identity'] = False
+if missing:
+    body['allowed_idps'] = current + missing
+    if len(body['allowed_idps']) > 1 and body.get('auto_redirect_to_identity'):
+        body['auto_redirect_to_identity'] = False
+body['session_duration'] = '720h'
 names = ['One-Time PIN' if i == otp else 'Google' for i in missing]
-print(json.dumps({'missing': names, 'body': body}))
+print(json.dumps({'missing': names, 'update': True, 'body': body}))
 ")
 
 MISSING_IDP_NAMES=$(echo "$MERGE_RESULT" | python3 -c "import json,sys; print(', '.join(json.load(sys.stdin)['missing']))")
+APP_UPDATE_NEEDED=$(echo "$MERGE_RESULT" | python3 -c "import json,sys; print('yes' if json.load(sys.stdin)['update'] else 'no')")
 
-if [ -n "$MISSING_IDP_NAMES" ]; then
-  echo "==> Adding ${MISSING_IDP_NAMES} to existing Access App ${APP_ID} (GET-merge PUT; nothing else changes)..." >&2
+if [ "$APP_UPDATE_NEEDED" = "yes" ]; then
+  if [ -n "$MISSING_IDP_NAMES" ]; then
+    echo "==> Adding ${MISSING_IDP_NAMES} to existing Access App ${APP_ID} and ensuring a 30-day session..." >&2
+  else
+    echo "==> Updating Access App ${APP_ID} to a 30-day session (login methods unchanged)..." >&2
+  fi
   MERGED_APP_BODY=$(echo "$MERGE_RESULT" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['body']))")
   cf_call PUT "/apps/${APP_ID}" "$MERGED_APP_BODY" >/dev/null
-  echo "    ${MISSING_IDP_NAMES} added to ${APP_ID}." >&2
+  echo "    Access App ${APP_ID} reconciled with a 720h session." >&2
 else
-  echo "    Access App ${APP_ID} already offers every available login method. Skipping update." >&2
+  echo "    Access App ${APP_ID} already offers every available login method and a 720h session. Skipping update." >&2
 fi
 
 # ---------------------------------------------------------------------------
@@ -340,31 +348,35 @@ if [ -n "$EXISTING_POLICY_JSON" ]; then
 import json, sys
 p = json.load(sys.stdin)
 require = p.get('require') or []
-found = any(isinstance(r, dict) and 'login_method' in r for r in require)
+found = any(isinstance(r, dict) and r.get('login_method') == {'id': 'onetimepin'} for r in require)
 print('yes' if found else 'no')
 ")
 
   if [ -n "$GOOGLE_IDP_ID" ] && [ "$HAS_LOGIN_METHOD" = "yes" ]; then
     echo "==> Policy 'Allowed users' on App ${APP_ID} carries a stale login_method:onetimepin require clause from the pre-P1-08 script -- Google is available but would be rejected at policy eval. Removing the clause..." >&2
 
-    # Preserve the policy's own name/decision/include; drop only the
-    # restrictive require clause. Built from the policy record already
+    # Preserve every writable policy field and unrelated condition; drop only
+    # the historical onetimepin require selector. Built from the policy already
     # fetched above (no extra GET needed) rather than hand-assembled from
     # shell variables, so unexpected characters in email addresses/names
     # can never corrupt the JSON we send back.
     RECONCILED_POLICY_BODY=$(echo "$EXISTING_POLICY_JSON" | python3 -c "
 import json, sys
 p = json.load(sys.stdin)
-body = {
-    'name': p.get('name'),
-    'decision': p.get('decision'),
-    'include': p.get('include') or [],
-}
+body = {k: v for k, v in p.items() if k not in ('id', 'uid', 'created_at', 'updated_at')}
+remaining = []
+for clause in p.get('require') or []:
+    if isinstance(clause, dict) and clause.get('login_method') == {'id': 'onetimepin'}:
+        clause = {k: v for k, v in clause.items() if k != 'login_method'}
+        if not clause:
+            continue
+    remaining.append(clause)
+body['require'] = remaining
 print(json.dumps(body))
 ")
 
     cf_call PUT "/apps/${APP_ID}/policies/${POLICY_ID}" "$RECONCILED_POLICY_BODY" >/dev/null
-    echo "    Policy 'Allowed users' updated -- login_method restriction removed. Login method is now enforced once, at the app level, via allowed_idps (Step 2/2b); this policy only restricts WHO (by email) is allowed in." >&2
+    echo "    Policy 'Allowed users' updated -- historical onetimepin restriction removed; unrelated policy conditions preserved." >&2
   else
     echo "    Policy 'Allowed users' has no login_method restriction to remove (or Google is not yet available). Skipping update." >&2
     echo "    To change the allow-list, edit the policy via dashboard or PUT it directly." >&2

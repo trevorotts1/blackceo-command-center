@@ -127,13 +127,24 @@ test('registered invitation authenticates browser interview access and re-opens 
   const freshBrowser = await request.newContext({ baseURL: BASE_URL, ignoreHTTPSErrors: PRODUCTION_MODE });
   try {
     expect((await freshBrowser.post('/api/auth/interview-session', { data: { ticket } })).status()).toBe(200);
-    // Completion is the one thing that ends it, on that fresh browser too.
+    // Completion starts a fixed 24-hour grace, including on a fresh device.
     writeBuildState(true);
     const afterCompletion = await request.newContext({ baseURL: BASE_URL, ignoreHTTPSErrors: PRODUCTION_MODE });
     try {
+      expect((await afterCompletion.post('/api/auth/interview-session', { data: { ticket } })).status()).toBe(200);
+      const completed = JSON.parse(fs.readFileSync(BUILD_STATE_PATH, 'utf8'));
+      completed.interviewCompletedAt = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
+      fs.writeFileSync(BUILD_STATE_PATH, JSON.stringify(completed));
+      // A live cookie cannot renew access through the expired invitation.
       const refused = await afterCompletion.post('/api/auth/interview-session', { data: { ticket } });
       expect(refused.status()).toBe(403);
       expect((await refused.json()).error).toBe('interview_already_complete');
+      const afterDeadline = await request.newContext({ baseURL: BASE_URL, ignoreHTTPSErrors: PRODUCTION_MODE });
+      try {
+        const expired = await afterDeadline.post('/api/auth/interview-session', { data: { ticket } });
+        expect(expired.status()).toBe(403);
+        expect((await expired.json()).error).toBe('interview_already_complete');
+      } finally { await afterDeadline.dispose(); }
     } finally { await afterCompletion.dispose(); }
     writeBuildState(false);
   } finally { await freshBrowser.dispose(); }

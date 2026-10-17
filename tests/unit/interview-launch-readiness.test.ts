@@ -110,6 +110,7 @@ test('sender-issued invitation redeems to authenticated state, re-opens, and pre
  // The receipt's validity is completion. `expiresAt` survives only so an
  // onboarding validator already deployed on a fleet box, which bound-checks it
  // against 24h plus 10s of skew, still accepts a link minted here.
+ assert.equal(invitation.completionGraceSeconds,86400);
  assert.equal(invitation.validUntil,'interview-complete');
  assert.equal(invitation.redeemable,'until-interview-complete');
  assert.equal(invitation.oneUse,true,'legacy wire constant kept so already-deployed onboarding validators still accept the receipt');

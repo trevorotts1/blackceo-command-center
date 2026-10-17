@@ -1,7 +1,14 @@
-## [v7.6.123] - 2026-10-16 - batch: Council of Wise Elders (Skill 77) lands in the Command Center
+## [v7.6.124] - 2026-10-16 - batch: Council of Wise Elders (Skill 77) lands in the Command Center
 
 - feat(council): train PR #550 lands PR #549 (Council of Wise Elders): the nine-seat council deliberation surfaces in the Command Center. Council migration id 172 allocated at integration; the council write routes are classified in the passthrough census (pins 159/152) with brief+start as interface calls; the 13 unwired council console routes are recorded as a documented residual in the U052 lock; cancelAssembly carries its reviewed silent-stop annotation; the CEO-chat council binding suite runs vitest-only; Playwright Chromium is provisioned for the U55 render tests; the contracts codegen module stays out of the client barrel.
-- chore(release): version stamped to v7.6.123 in all five locations inside the batch (bump-in-batch ceremony); the annotated tag v7.6.123 is minted on the merge commit. The mis-cut v7.6.122 tag stands unmoved at 230f6d18 by operator ruling; its repair remains an operator decision.
+- chore(release): version stamped to v7.6.124 in all five locations inside the batch (bump-in-batch ceremony); the annotated tag v7.6.124 is minted on the merge commit. The mis-cut v7.6.122 tag stands unmoved at 230f6d18 by operator ruling; its repair remains an operator decision.
+
+## [v7.6.123] — 2026-10-16 — Interview access and completion grace
+
+- Keep personalized invitation links reusable while incomplete, then expire redemption and renewal 24 hours after the original interview completion. Browser sessions remain 30 days; saved answers and completion state are preserved.
+- Publish the additive completion-grace capability and accurate invitation copy. Requires onboarding timestamp preservation before rollout.
+- Reconcile existing Cloudflare Access applications to 720-hour sessions and preserve unrelated policy conditions during historical PIN-only reconciliation.
+- Validate completion boundaries, cross-device redemption, owner isolation and desktop/phone browser flows.
 
 ## [v7.6.122] - 2026-10-14 - batch: Command Center merge train (engine sync, Skill 71 run tracking, presentation board visibility) + version stamp reconciliation
 

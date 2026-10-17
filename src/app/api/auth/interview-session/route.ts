@@ -61,6 +61,11 @@ export async function POST(req: NextRequest) {
       if (!identity || identity.subject !== active.subject) {
         return NextResponse.json({ error: 'enrollment_session_mismatch' }, { status: 403, headers });
       }
+      // A live browser cookie does not extend the invitation's completion grace.
+      // Its independent session remains usable through GET until its own expiry.
+      if (enrollmentWindowClosed(active.companyId)) {
+        return NextResponse.json({ error: 'interview_already_complete' }, { status: 403, headers });
+      }
       // Sliding renewal: an actively used session gets a fresh 30-day window
       // on each resume so it never dies mid-interview. Ownership and scope
       // are copied from the LIVE session grant (active), never the ticket —
@@ -77,7 +82,7 @@ export async function POST(req: NextRequest) {
     }
     const grant = await verifyTenantGrant(ticket, host, 'enrollment');
     if (!grant) return NextResponse.json({ error: 'invalid_enrollment' }, { status: 403, headers });
-    // The invitation never times out. Completing the interview is what ends it,
+    // The invitation has no pre-completion timeout. Its 24-hour grace ends it,
     // so this is the only reason a well-formed, correctly signed ticket is
     // turned away here.
     if (enrollmentWindowClosed(grant.companyId)) {
@@ -85,7 +90,7 @@ export async function POST(req: NextRequest) {
     }
     const expiresAt = Math.floor(Date.now() / 1000) + INTERVIEW_SESSION_TTL_SECONDS;
     const token = await signTenantGrant({ ...grant, purpose: 'session', exp: expiresAt, nonce: randomUUID() });
-    // The link is RE-OPENABLE until the interview is complete. Burning the nonce
+    // The link is RE-OPENABLE through the fixed completion grace. Burning the nonce
     // on first redemption locked a client out of an unfinished interview the
     // moment they switched device, cleared cookies, or came back after the
     // browser session lapsed — a second way for the link to die early, which the
@@ -94,7 +99,7 @@ export async function POST(req: NextRequest) {
     //
     // Identity does not widen. Every redemption issues a session for the subject
     // the ticket was signed for, so re-opening cannot switch owners, and the
-    // completion check above is the one thing that ends the link.
+    // completion deadline above is the one thing that ends the link.
     run('INSERT OR IGNORE INTO interview_enrollment_uses (nonce,used_at) VALUES (?,?)', [grant.nonce, new Date().toISOString()]);
     const response = NextResponse.json({ ok: true, resumed: false, expiresAt }, { headers });
     setInterviewSessionCookie(response, token);
