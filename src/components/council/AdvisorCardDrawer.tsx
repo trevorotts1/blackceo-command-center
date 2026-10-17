@@ -41,9 +41,10 @@ const FOCUSABLE_SELECTOR =
 export function AdvisorCardDrawer({ seat, medallionSrc = '', onClose }: AdvisorCardDrawerProps) {
   const drawerRef = useRef<HTMLDivElement | null>(null);
   const restoreRef = useRef<Element | null>(null);
+  const activeSeatId = seat?.seatId ?? null;
 
   useEffect(() => {
-    if (!seat) return;
+    if (!activeSeatId) return;
     restoreRef.current = document.activeElement;
     const drawer = drawerRef.current;
     const closeButton = drawer?.querySelector<HTMLButtonElement>('[data-drawer-close]');
@@ -77,7 +78,7 @@ export function AdvisorCardDrawer({ seat, medallionSrc = '', onClose }: AdvisorC
       const restore = restoreRef.current;
       if (restore instanceof HTMLElement) restore.focus();
     };
-  }, [seat, onClose]);
+  }, [activeSeatId, onClose]);
 
   if (!seat) return null;
 

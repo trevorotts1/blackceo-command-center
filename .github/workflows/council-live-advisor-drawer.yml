@@ -1,0 +1,27 @@
+name: Council live advisor drawer
+
+on:
+  pull_request:
+    paths:
+      - "src/components/council/CouncilShell.tsx"
+      - "src/components/council/AdvisorCardDrawer.tsx"
+      - "tests/unit/council-room-render.test.tsx"
+      - ".github/workflows/council-live-advisor-drawer.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  advisor-drawer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Exercise real React Council room and live drawer rendering
+        run: npx vitest run --config vitest.component.config.ts tests/unit/council-room-render.test.tsx
