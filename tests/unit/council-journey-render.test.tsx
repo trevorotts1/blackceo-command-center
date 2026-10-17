@@ -38,7 +38,7 @@ import MobileNav from '../../src/components/MobileNav';
 import { DecisionComposer } from '../../src/components/council/DecisionComposer';
 import { BriefReview } from '../../src/components/council/BriefReview';
 import { VerdictView } from '../../src/components/council/VerdictView';
-import { SessionDetail } from '../../src/components/council/SessionDetail';
+import { SessionDetail, roomViewFromSession } from '../../src/components/council/SessionDetail';
 import { ConsultPanel } from '../../src/components/council/ConsultPanel';
 import {
   FIXTURE_HASH_A,
@@ -650,5 +650,98 @@ describe('WER-016 typed Start receipt and non-mutation controls', () => {
     render(<SessionDetail sessionId="sess-fixture-1" />);
     await screen.findByTestId('session-start-unavailable');
     expect(screen.queryByTestId('session-start')).toBeNull();
+  });
+});
+
+/* WER-015: actual mounted page must never synthesize nine completions. */
+describe('WER-015 committed event room on the mounted session journey', () => {
+  const completedSession = {
+    ...STORED_SESSION,
+    state: { ...STORED_SESSION.state, state: 'COMPLETED' },
+  };
+  const oneCommittedSeat = {
+    kind: 'snapshot',
+    snapshot: {
+      kind: 'snapshot',
+      session_id: 'sess-fixture-1',
+      last_sequence: 2,
+      projection: {
+        session_id: 'sess-fixture-1',
+        scope: {
+          tenant_id: 'tenant-fixture',
+          company_id: 'company-fixture',
+          installation_id: 'install-fixture',
+          session_id: 'sess-fixture-1',
+          owner_subject: 'fixture-principal',
+          visibility: 'private',
+        },
+        mode: 'full',
+        sample: false,
+        state: 'COMPLETED',
+        state_version: 3,
+        brief_revision: 1,
+        seats: ALL_SEATS.map((id) => ({
+          seat_id: id,
+          status: id === 'simon-sinek' ? 'completed' : 'queued',
+          last_card: id === 'simon-sinek'
+            ? { round: 1, card_hash: FIXTURE_HASH_A, sequence: 2 }
+            : null,
+        })),
+        activity: {
+          completed_cards: 1,
+          total_seats: 9,
+          last_event_sequence: 2,
+          last_event_type: 'card_accepted',
+          last_event_at: '2026-10-14T12:02:00Z',
+        },
+        verdict: null,
+        updated_at: '2026-10-14T12:02:00Z',
+      },
+    },
+  };
+
+  it('refuses to project advisor completion from a coarse final session state', () => {
+    expect(() => roomViewFromSession(completedSession)).toThrow(/committed event projection/);
+  });
+
+  it('mounts real snapshot-driven advisor states: one committed, eight waiting', async () => {
+    const fetchSpy = stubFetch([
+      { match: '/verdict', body: okEnvelope({ session_id: 'sess-fixture-1', verdict_state: 'not_ready', verdict: null }) },
+      { match: '/api/council/sessions/sess-fixture-1', method: 'GET', body: okEnvelope(completedSession) },
+      { match: '/api/council/models', body: MODELS_OK },
+      { match: '/api/council/sessions/sess-fixture-1/events?snapshot=1', body: okEnvelope(oneCommittedSeat) },
+    ]);
+    render(<SessionDetail sessionId="sess-fixture-1" />);
+    await screen.findByTestId('council-room');
+    expect(screen.queryByTestId('session-room-prerun-note')).toBeNull();
+    expect(screen.getByTestId('council-seat-simon-sinek').textContent).toContain('Completed');
+    for (const id of ALL_SEATS.filter((name) => name !== 'simon-sinek')) {
+      expect(screen.getByTestId(`council-seat-${id}`).textContent).toContain('Waiting in queue');
+    }
+    const calls = fetchSpy.mock.calls.map(([url]) => String(url));
+    expect(calls.some((url) => url.includes('/events?snapshot=1'))).toBe(true);
+  });
+
+  it('shows an explicit event-read failure, not an invented completed Council', async () => {
+    stubFetch([
+      { match: '/verdict', body: okEnvelope({ session_id: 'sess-fixture-1', verdict_state: 'not_ready', verdict: null }) },
+      { match: '/api/council/sessions/sess-fixture-1', method: 'GET', body: okEnvelope(completedSession) },
+      { match: '/api/council/models', body: MODELS_OK },
+      { match: '/api/council/sessions/sess-fixture-1/events?snapshot=1', status: 503, body: {
+        ok: false,
+        error: {
+          code: 'COUNCIL_READ_UNAVAILABLE',
+          message: 'Committed event store temporarily unavailable.',
+          retryable: true,
+          action: 'retry',
+          request_id: 'req-snapshot-unavailable',
+        },
+      } },
+    ]);
+    render(<SessionDetail sessionId="sess-fixture-1" />);
+    const error = await screen.findByTestId('council-live-error');
+    expect(error.textContent).toContain('Committed event store temporarily unavailable');
+    expect(screen.queryByTestId('council-room')).toBeNull();
+    expect(screen.queryByTestId('council-seat-simon-sinek')).toBeNull();
   });
 });
