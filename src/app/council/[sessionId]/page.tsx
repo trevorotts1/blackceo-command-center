@@ -27,6 +27,9 @@ import { council } from '../../../components/council/council-theme';
 import '../../../components/council/council-theme.css';
 import '../../../components/council/council-room.css';
 import { CouncilLiveSession } from '../../../components/council/CouncilLiveSession';
+import { CouncilRunStartPanel } from '../../../components/council/CouncilRunStartPanel';
+import { getSession as readStoredCouncilSession } from '@/lib/council/journey-client';
+import type { CouncilStoredSession } from '@/lib/council/store';
 import { CouncilVerdict } from '../../../components/council/CouncilVerdict';
 import { CouncilFollowUp } from '../../../components/council/CouncilFollowUp';
 import { CouncilOutcomeForm } from '../../../components/council/CouncilOutcomeForm';
@@ -49,6 +52,8 @@ const MEDALLION_BASE = '/portraits';
 interface SessionDetailState {
   brief: DecisionBrief;
   title: string;
+  session: CouncilStoredSession;
+  accessVia: string | null;
 }
 
 export default function CouncilSessionPage({
@@ -77,13 +82,12 @@ export default function CouncilSessionPage({
 
   useEffect(() => {
     let cancelled = false;
-    client
-      .getSession(sessionId)
-      .then((data) => {
+    readStoredCouncilSession(sessionId)
+      .then(({ session, accessVia }) => {
         if (cancelled) return;
-        const brief = (data as { brief?: DecisionBrief }).brief ?? null;
+        const brief = session.brief ?? null;
         if (brief) {
-          setDetail({ brief, title: brief.question });
+          setDetail({ brief, title: brief.question, session, accessVia });
         } else {
           setDetailError('The session record carried no frozen brief.');
         }
@@ -142,6 +146,27 @@ export default function CouncilSessionPage({
 
   return (
     <main className={council.theme}>
+      {!replay && detail ? (
+        <CouncilRunStartPanel
+          key={sessionId}
+          sessionId={sessionId}
+          session={detail.session}
+          accessVia={detail.accessVia}
+          onQueued={(receipt) => {
+            setDetail((previous) => previous ? {
+              ...previous,
+              session: {
+                ...previous.session,
+                state: {
+                  ...previous.session.state,
+                  state: receipt.state,
+                  state_version: receipt.state_version,
+                },
+              },
+            } : null);
+          }}
+        />
+      ) : null}
       <CouncilLiveSession
         sessionId={sessionId}
         transport={transport}
