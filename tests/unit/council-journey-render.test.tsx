@@ -706,10 +706,13 @@ describe('WER-015 committed event room on the mounted session journey', () => {
 
   it('mounts real snapshot-driven advisor states: one committed, eight waiting', async () => {
     const fetchSpy = stubFetch([
+      // Match the specific event resource BEFORE the prefix-matched
+      // /sessions/:id route. Otherwise the fixture supplies a session
+      // record to the event reducer and masks the behavior under test.
+      { match: '/api/council/sessions/sess-fixture-1/events?snapshot=1', body: okEnvelope(oneCommittedSeat) },
       { match: '/verdict', body: okEnvelope({ session_id: 'sess-fixture-1', verdict_state: 'not_ready', verdict: null }) },
       { match: '/api/council/sessions/sess-fixture-1', method: 'GET', body: okEnvelope(completedSession) },
       { match: '/api/council/models', body: MODELS_OK },
-      { match: '/api/council/sessions/sess-fixture-1/events?snapshot=1', body: okEnvelope(oneCommittedSeat) },
     ]);
     render(<SessionDetail sessionId="sess-fixture-1" />);
     await screen.findByTestId('council-room');
@@ -724,9 +727,6 @@ describe('WER-015 committed event room on the mounted session journey', () => {
 
   it('shows an explicit event-read failure, not an invented completed Council', async () => {
     stubFetch([
-      { match: '/verdict', body: okEnvelope({ session_id: 'sess-fixture-1', verdict_state: 'not_ready', verdict: null }) },
-      { match: '/api/council/sessions/sess-fixture-1', method: 'GET', body: okEnvelope(completedSession) },
-      { match: '/api/council/models', body: MODELS_OK },
       { match: '/api/council/sessions/sess-fixture-1/events?snapshot=1', status: 503, body: {
         ok: false,
         error: {
@@ -737,6 +737,9 @@ describe('WER-015 committed event room on the mounted session journey', () => {
           request_id: 'req-snapshot-unavailable',
         },
       } },
+      { match: '/verdict', body: okEnvelope({ session_id: 'sess-fixture-1', verdict_state: 'not_ready', verdict: null }) },
+      { match: '/api/council/sessions/sess-fixture-1', method: 'GET', body: okEnvelope(completedSession) },
+      { match: '/api/council/models', body: MODELS_OK },
     ]);
     render(<SessionDetail sessionId="sess-fixture-1" />);
     const error = await screen.findByTestId('council-live-error');
