@@ -121,8 +121,7 @@
     transform: none;
     box-sizing: border-box;
     /* Inline ellipse coordinates remain data but never move grid seats. */
-    left: auto !important;
-    top: auto !important;
+    /* Static grid positioning makes inline ellipse offsets inert. */
   }
   .council-room-center {
     position: static;
