@@ -6,7 +6,9 @@ on:
       - "src/components/council/SessionDetail.tsx"
       - "src/components/council/CouncilLiveSession.tsx"
       - "src/components/council/council-session-client.ts"
+      - "src/components/council/useCouncilLiveSession.ts"
       - "tests/unit/council-journey-render.test.tsx"
+      - "tests/unit/council-session-ui-render.test.tsx"
       - ".github/workflows/council-mounted-event-room.yml"
   workflow_dispatch:
 
