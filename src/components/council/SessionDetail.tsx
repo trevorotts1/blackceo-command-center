@@ -15,7 +15,7 @@
  * registered but not wired.
  */
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   endpointReadiness,
   featureNotReadyState,
@@ -25,6 +25,7 @@ import {
   isCouncilClientError,
   newIdempotencyKey,
   startSession,
+  type CouncilStartReceipt,
   type CouncilStoredSession,
   type CouncilVerdictData,
   type FeatureNotReadyState,
@@ -74,6 +75,9 @@ export function SessionDetail({ sessionId }: { sessionId: string }) {
   const [starting, setStarting] = useState(false);
   const [startNotReady, setStartNotReady] = useState<FeatureNotReadyState | null>(null);
   const [startError, setStartError] = useState<string | null>(null);
+  const [startReceipt, setStartReceipt] = useState<CouncilStartReceipt | null>(null);
+  const startIdempotencyKeyRef = useRef<string | null>(null);
+  const startInFlightRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -106,12 +110,34 @@ export function SessionDetail({ sessionId }: { sessionId: string }) {
   const room = useMemo(() => (session ? roomViewFromSession(session) : null), [session]);
   const eventsReadiness = endpointReadiness('council.sessions.events.get');
 
+  const startEligible = session !== null
+    && accessVia !== 'support'
+    && (session.state.state === 'DRAFT' || session.state.state === 'READY');
+
   const handleStart = async () => {
+    if (startInFlightRef.current || !startEligible || !session) return;
+    startInFlightRef.current = true;
     setStarting(true);
     setStartNotReady(null);
     setStartError(null);
     try {
-      await startSession(sessionId, newIdempotencyKey());
+      // Retain the same key across uncertain network outcomes; a second
+      // click must not invent a second durable council_run operation.
+      if (!startIdempotencyKeyRef.current) {
+        startIdempotencyKeyRef.current = newIdempotencyKey();
+      }
+      const receipt = await startSession(sessionId, startIdempotencyKeyRef.current, {
+        expectedVersion: session.state.state_version,
+      });
+      setStartReceipt(receipt);
+      setSession((previous) => previous ? {
+        ...previous,
+        state: {
+          ...previous.state,
+          state: receipt.state,
+          state_version: receipt.state_version,
+        },
+      } : previous);
     } catch (caught) {
       const state = featureNotReadyState(caught, 'council.sessions.start');
       if (state) {
@@ -124,6 +150,7 @@ export function SessionDetail({ sessionId }: { sessionId: string }) {
         );
       }
     } finally {
+      startInFlightRef.current = false;
       setStarting(false);
     }
   };
@@ -183,15 +210,32 @@ export function SessionDetail({ sessionId }: { sessionId: string }) {
           Starting the run is its own authorization, separate from creating the session. A
           council vote is never an execution credential.
         </p>
-        <button
-          type="button"
-          className={council.btnPrimary}
-          onClick={handleStart}
-          disabled={starting}
-          data-testid="session-start"
-        >
-          {starting ? 'Contacting the run service…' : 'Start council run'}
-        </button>
+        {startEligible ? (
+          <button
+            type="button"
+            className={council.btnPrimary}
+            onClick={handleStart}
+            disabled={starting}
+            data-testid="session-start"
+          >
+            {starting ? 'Contacting the run service…' : 'Start council run'}
+          </button>
+        ) : (
+          <p className={council.meta} data-testid="session-start-unavailable">
+            {accessVia === 'support'
+              ? 'Support access is read-only; this account cannot start the Council.'
+              : session.state.state === 'QUEUED'
+                ? 'This session is already queued for Council execution.'
+                : 'This session is not in a startable draft state. Review its current state before taking another action.'}
+          </p>
+        )}
+        {startReceipt ? (
+          <div className="council-journey-notice" data-testid="session-start-queued" role="status">
+            Council execution was queued. Job {startReceipt.job_id}; attempt {startReceipt.attempt}.
+            {startReceipt.idempotent_replay ? ' Existing queued operation reused.' : ''}
+            This receipt confirms admission, not a completed Council verdict.
+          </div>
+        ) : null}
         {startNotReady ? (
           <div
             className="council-journey-notice"
