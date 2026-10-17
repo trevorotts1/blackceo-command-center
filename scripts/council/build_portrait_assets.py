@@ -52,7 +52,7 @@ def _text(value, field):
     return value.strip()
 
 
-def _provenance(path):
+def _provenance(path, *, allow_test_fixtures=False):
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
@@ -63,9 +63,43 @@ def _provenance(path):
     for seat, raw in payload.items():
         if not isinstance(raw, dict):
             raise PortraitError(f"Provenance for {seat} must be an object")
+
+        # A correctly named file is not proof it depicts the right person.
+        # A human art/identity reviewer must sign off on the exact master
+        # bytes BEFORE the nine images can be published.
+        approved_subject = _text(raw.get("approved_subject"), f"{seat}.approved_subject")
+        if approved_subject != SEATS[seat]:
+            raise PortraitError(
+                f"Portrait subject mismatch for {seat}: "
+                f"approved_subject must be exactly {SEATS[seat]}"
+            )
+        review_status = _text(raw.get("identity_review_status"), f"{seat}.identity_review_status")
+        if review_status != "approved":
+            raise PortraitError(f"Portrait {seat} has no completed identity review")
+        approved_by = _text(raw.get("approved_by"), f"{seat}.approved_by")
+        reviewed_at = _text(raw.get("reviewed_at"), f"{seat}.reviewed_at")
+        if "T" not in reviewed_at or not reviewed_at.endswith("Z"):
+            raise PortraitError(f"Portrait {seat} has no UTC identity review timestamp")
+        master_sha = _text(raw.get("reviewed_master_sha256"), f"{seat}.reviewed_master_sha256")
+        if len(master_sha) != 64 or any(ch not in "0123456789abcdef" for ch in master_sha):
+            raise PortraitError(f"Portrait {seat} review must bind a lowercase SHA-256 digest")
+        rights = _text(raw.get("rights_status"), f"{seat}.rights_status")
+        allowed_rights = {"owned_original", "licensed_original", "owned_generated"}
+        if rights == "test_only" and allow_test_fixtures:
+            pass
+        elif rights not in allowed_rights:
+            raise PortraitError(
+                f"Portrait {seat} rights are not approved for release: {rights}"
+            )
         result[seat] = {
+            "approved_subject": approved_subject,
+            "identity_review_status": review_status,
+            "approved_by": approved_by,
+            "reviewed_at": reviewed_at,
+            "reviewed_master_sha256": master_sha,
+            "identity_review_note": _text(raw.get("identity_review_note"), f"{seat}.identity_review_note"),
             "creation_method": _text(raw.get("creation_method"), f"{seat}.creation_method"),
-            "rights_status": _text(raw.get("rights_status"), f"{seat}.rights_status"),
+            "rights_status": rights,
             "source_note": _text(raw.get("source_note"), f"{seat}.source_note"),
             "alt_text": _text(raw.get("alt_text"), f"{seat}.alt_text"),
         }
@@ -102,8 +136,8 @@ def _encode_variant(master, size, limit, seat, variant):
     raise PortraitError(f"{seat} {variant} cannot fit under {limit} bytes without unacceptable quality")
 
 
-def build_portraits(masters: Path, provenance_path: Path, output: Path):
-    provenance = _provenance(provenance_path)
+def build_portraits(masters: Path, provenance_path: Path, output: Path, *, allow_test_fixtures=False):
+    provenance = _provenance(provenance_path, allow_test_fixtures=allow_test_fixtures)
 
     # The owner's nine Council seats are an allowlist. Never silently
     # ignore a Steve Harvey / tenth-person image dropped into the
@@ -136,6 +170,11 @@ def build_portraits(masters: Path, provenance_path: Path, output: Path):
             master_path = masters / f"{seat}.png"
             master = _read_master(master_path, seat)
             master_sha = hashlib.sha256(master_path.read_bytes()).hexdigest()
+            if provenance[seat]["reviewed_master_sha256"] != master_sha:
+                raise PortraitError(
+                    f"Portrait {seat} changed after identity review. "
+                    "Review the exact new master before generating or publishing."
+                )
             variants = {}
             for variant, (width, height, limit) in VARIANTS.items():
                 name = f"{seat}-{variant}.webp"
@@ -163,7 +202,10 @@ def build_portraits(masters: Path, provenance_path: Path, output: Path):
             raise PortraitError(f"Nine room variants exceed the total {TOTAL_ROOM_BUDGET} byte budget")
         manifest = {
             "schema": "blackceo.council-portraits/v1",
-            "source_kind": "original_editorial_illustrations",
+            "source_kind": (
+                "synthetic_test_fixture_not_for_release"
+                if allow_test_fixtures else "reviewed_original_editorial_illustrations"
+            ),
             "seat_count": 9,
             "room_bytes_total": total_room_bytes,
             "entries": entries,
