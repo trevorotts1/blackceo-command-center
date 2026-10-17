@@ -6,6 +6,7 @@ on:
       - "src/components/council/CouncilRoom.tsx"
       - "src/components/council/council-room.css"
       - "tests/unit/council-mobile-layout-contract.test.ts"
+      - "tests/unit/council-room-logic.test.ts"
       - ".github/workflows/council-mobile-responsive-contract.yml"
   workflow_dispatch:
 
@@ -25,5 +26,5 @@ jobs:
         run: npm ci --no-audit --no-fund
       - name: Verify mobile layout contract and Council room unit tests
         run: |
-          node --import tsx --test tests/unit/council-mobile-layout-contract.test.ts
+          node --import tsx --test tests/unit/council-mobile-layout-contract.test.ts tests/unit/council-room-logic.test.ts
           npx vitest run --config vitest.component.config.ts tests/unit/council-room-render.test.tsx
