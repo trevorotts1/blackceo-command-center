@@ -152,3 +152,41 @@ export function validateApprovedCouncilPortraitManifest(raw: unknown): ApprovedC
     thumbSrcBySeat: thumb,
   };
 }
+
+/**
+ * This is intentionally a SAME-ORIGIN, READ-ONLY asset lookup. The host
+ * serves a vetted manifest only after the complete nine-image cohort has
+ * shipped. Missing/invalid art is a named unavailable state, never a
+ * silently fabricated portrait. The mounted page may preserve accessible
+ * medallions until it can safely adopt these URLs.
+ */
+export type CouncilPortraitRelease =
+  | { status: 'approved'; images: ApprovedCouncilPortraitMaps }
+  | { status: 'unavailable'; reason: string };
+
+export async function readApprovedCouncilPortraitRelease(
+  fetcher: typeof fetch,
+  signal?: AbortSignal,
+): Promise<CouncilPortraitRelease> {
+  try {
+    const response = await fetcher('/council/portraits/manifest.json', {
+      method: 'GET',
+      credentials: 'same-origin',
+      cache: 'no-store',
+      ...(signal ? { signal } : {}),
+    });
+    if (!response.ok) {
+      return { status: 'unavailable', reason: 'No completed Council portrait asset cohort is published.' };
+    }
+    const body: unknown = await response.json();
+    return {
+      status: 'approved',
+      images: validateApprovedCouncilPortraitManifest(body),
+    };
+  } catch {
+    return {
+      status: 'unavailable',
+      reason: 'The Council portrait manifest is absent, unapproved or malformed.',
+    };
+  }
+}
