@@ -145,6 +145,10 @@ export default defineConfig({
       // {channel,peer}/{session_id,content} shapes outright) to a call()
       // dispatcher — vitest-only, same vi.doMock pattern as its sibling.
       'tests/unit/ceo-chat-message-route-passthrough.test.ts',
+      // CWE-045: CEO-chat council-intent binding (Section 17.5). The
+      // council sibling of the passthrough suite above, same vi.doMock
+      // pattern, vitest-only, never the tsx --test glob (see package.json).
+      'tests/unit/ceo-chat-council-binding.test.ts',
       // U62 — migration 110 (usage columns on ceo_chat_messages; originally
       // authored as 109, renumbered on rebase — main independently landed
       // its own migration 109), proved against a REAL pre-existing DB shape

@@ -105,6 +105,36 @@ export default defineConfig({
       // awaiting theme owned by client, retry deadline + visible failure,
       // no fabricated completion, bare button unchanged without a summary.
       'tests/unit/social-f30-summary-area-render.test.tsx',
+      // CWE-032 (Skill 77) — CouncilShell / CouncilRoom / CouncilReadingView /
+      // AdvisorCardDrawer real render proof: stable roster slot order under
+      // scrambled arrival, full names unclipped, keyboard + drawer focus
+      // behavior, honest seat states (queued never "thinking"), sample badge,
+      // reduced-motion flag with no information loss.
+      'tests/unit/council-room-render.test.tsx',
+      // CWE-036 (Skill 77) — ActionPlanEditor / LinkedTasksPanel real
+      // render proof: the three authorizations read as distinct, the
+      // approved plan hash is visible, held tasks never render as
+      // running, and created tasks show real IDs, hold state, and
+      // dependency state.
+      'tests/unit/council-action-plan-components.test.tsx',
+      // CWE-034 (Skill 77) — live session / verdict / history / source /
+      // outcome screens real render proof: reducer-driven seat updates,
+      // duplicate and gap handling, reconnect catch-up, verdict section
+      // order, invalid and not-ready verdict states, source drawer
+      // no-quotation honesty, rerun comparison, company-switch cache
+      // partition, follow-up parent immutability, outcome field split.
+      'tests/unit/council-session-ui-render.test.tsx',
+      // CWE-033 (Skill 77) — council journey UI real render proof: B10 nav
+      // entry present/absent by capability, intake resume without reissued
+      // questions (T016), prefilled facts with source marks, panel step
+      // not_assessed consequence before start, brief review five content
+      // kinds (T017), verdict section order (21.4), typed FEATURE_NOT_READY
+      // states naming their owners, preference step separation.
+      'tests/unit/council-journey-render.test.tsx',
+      // CWE-050 (Skill 77) — Section 7 attribution label on the composed
+      // verdict surface: every seat-attributed row (scored detail rounds
+      // and the consult result) renders its seat's exact profile label.
+      'tests/unit/council-verdict-label-render.test.tsx',
       // Planning Mode — modal stays open on the Planning tab, polling resumes, Other text kept.
       'tests/unit/planning-mode-modal.test.tsx',
       // Planning Mode — start failure, gateway error and unreadable reply are visible with Try again.

@@ -28,6 +28,7 @@ import { readDepartmentOptoutIds } from '../workspaces/department-optout';
 import { normalizeDepartmentsPayload } from '../departments-payload';
 import { ensureRuntimeConfigFile } from '../runtime-config';
 import { BLOCKED_ASK_TRIGGER_SQL } from '../blocked-ask';
+import { councilMigration } from '../council/persistence/council-migration';
 import {
   dedupeCanonicalWorkspaces,
   reapDuplicateOpenAuthoringTasks,
@@ -8462,6 +8463,16 @@ export const migrations: Migration[] = [
       db.exec(`CREATE INDEX IF NOT EXISTS idx_skill71_runs_last_event ON skill71_runs(last_event_at);`);
     }
   },
+
+  // CWE-005 council persistence (directive Section 16). The entry lives
+  // in src/lib/council/persistence/council-migration.ts. Its id was a
+  // clearly marked PENDING integration-time assignment in the unit
+  // branch; the single integrator allocated the next numeric id at
+  // integration (highest existing id 171 + 1 = '172') and set the
+  // constant there. The runner sorts numerically, so the council
+  // migration applies in numeric position after 171, which is safe
+  // because the council schema is additive and independent.
+  councilMigration,
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner

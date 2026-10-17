@@ -61,3 +61,39 @@ export function insertEngineNavItem<T extends NavItemLike>(
   const insertAt = idx >= 0 ? idx + 1 : baseItems.length;
   return [...baseItems.slice(0, insertAt), engineItem, ...baseItems.slice(insertAt)];
 }
+
+/* ------------------------------------------------------------------ *\
+ * Council of Wise Elders entry (Skill 77, CWE-033; closes B10).
+ *
+ * ONE registration for the council entry, consumed by every live
+ * navigation surface (the root-layout MobileNav and the per-page
+ * Header) so the entry can never drift between menus. The council is
+ * not an engine workspace, so it has no workspace slug; its presence
+ * and permission signal is the council's own capability check,
+ * GET /api/council/capabilities, answered through CWE-007
+ * authorization. The gate follows the exact fail-closed contract of
+ * shouldShowEngineNavItem above: hidden while the check is loading,
+ * hidden when it errors or is denied, shown only when the capabilities
+ * call succeeds for the current principal.
+ *
+ * Menu presence is never the authorization control (Directive
+ * Section 28): the /council routes and the council API enforce
+ * CWE-007 on every request regardless of what any menu shows.
+\* ------------------------------------------------------------------ */
+
+export const COUNCIL_NAV_HREF = '/council';
+export const COUNCIL_NAV_LABEL = 'Council of Wise Elders';
+export const COUNCIL_NAV_SHORT_LABEL = 'Council';
+
+/** Status of the council capabilities probe behind the entry gate. */
+export type CouncilCapabilityStatus = 'loading' | 'ok' | 'error';
+
+/**
+ * Whether the Council of Wise Elders nav entry should render. FAILS
+ * CLOSED, exactly like shouldShowEngineNavItem: only a completed,
+ * successful capabilities response for the current principal shows
+ * the entry.
+ */
+export function shouldShowCouncilNavItem(status: CouncilCapabilityStatus): boolean {
+  return status === 'ok';
+}

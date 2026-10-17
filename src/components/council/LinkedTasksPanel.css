@@ -1,0 +1,73 @@
+/* LinkedTasksPanel (CWE-036). Scoped to the council theme tokens
+   (Section 22): consumes --council-* variables only, never writes
+   global :root colors. */
+
+.council-linked-panel {
+  color: var(--council-ink, #1a1d26);
+  font-family: var(--council-font-sans, 'Inter', system-ui, sans-serif);
+  line-height: var(--council-leading, 1.55);
+  max-width: 56rem;
+}
+
+.council-linked-heading {
+  font-family: var(--council-font-display, Georgia, serif);
+  font-size: var(--council-text-heading, 1.625rem);
+  margin: 0 0 0.5rem;
+}
+
+.council-linked-meta {
+  color: var(--council-ink-soft, #54575f);
+  font-size: var(--council-text-meta, 0.875rem);
+}
+
+.council-linked-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.council-linked-task {
+  background: var(--council-surface, #ffffff);
+  border: 1px solid var(--council-line, #e7e1d3);
+  border-radius: 0.75rem;
+  margin-bottom: 0.75rem;
+  padding: 0.75rem 1rem;
+}
+
+.council-linked-task-head {
+  align-items: baseline;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  justify-content: space-between;
+}
+
+.council-linked-task-title {
+  font-size: var(--council-text-body-sm, 1rem);
+  font-weight: 600;
+}
+
+.council-linked-state {
+  border: 1px solid var(--council-line-strong, #cfc7b4);
+  border-radius: 999px;
+  font-size: var(--council-text-meta, 0.875rem);
+  padding: 0.125rem 0.625rem;
+}
+
+.council-linked-hold {
+  color: var(--council-state-oppose, #b42318);
+  font-size: var(--council-text-meta, 0.875rem);
+  margin: 0.25rem 0 0;
+}
+
+.council-linked-deps {
+  color: var(--council-ink-soft, #54575f);
+  font-size: var(--council-text-meta, 0.875rem);
+  list-style: none;
+  margin: 0.25rem 0 0;
+  padding: 0;
+}
+
+.council-linked-empty {
+  color: var(--council-ink-soft, #54575f);
+}

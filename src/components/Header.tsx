@@ -10,6 +10,9 @@ import { useLogoUrl } from '@/hooks/useLogoUrl';
 import { format } from 'date-fns';
 import type { Workspace } from '@/lib/types';
 import { HealthIndicator } from './HealthIndicator';
+import { COUNCIL_NAV_HREF, COUNCIL_NAV_LABEL } from '@/lib/nav-gating';
+import { useCouncilEntry } from '@/components/council/useCouncilEntry';
+import { Landmark } from 'lucide-react';
 
 // --- AI Settings model & persona options ---
 // openrouter/free intentionally removed — AF-MODEL-SOVEREIGNTY forbids it as a default.
@@ -32,6 +35,10 @@ interface HeaderProps {
 export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
   const router = useRouter();
   const { agents, tasks } = useMissionControl();
+  // Council of Wise Elders entry (Skill 77, CWE-033, B10): the ONE
+  // registration in src/lib/nav-gating.ts, shown only when the council
+  // capabilities probe succeeds for this principal (fail-closed).
+  const councilEntry = useCouncilEntry();
   // Bug 4 (v4.0.2): mount-gate the live clock. Initial render must be the
   // same on server and client (null), then useEffect populates it after
   // hydration so a fresh Date() does not cause React #418/#423 mismatch.
@@ -361,6 +368,17 @@ export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
 
       {/* Right: Time & Status */}
       <div className="flex items-center gap-2 sm:gap-4 shrink-0">
+        {councilEntry.show && (
+          <Link
+            href={COUNCIL_NAV_HREF}
+            aria-label={COUNCIL_NAV_LABEL}
+            title={COUNCIL_NAV_LABEL}
+            className="flex items-center gap-2 px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-gray-700 hover:bg-gray-50 hover:border-gray-300 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-300"
+          >
+            <Landmark className="w-4 h-4" />
+            <span className="hidden sm:inline">{COUNCIL_NAV_LABEL}</span>
+          </Link>
+        )}
         <Link
           href="/operator"
           aria-label="Operator Console"
