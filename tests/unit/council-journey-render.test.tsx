@@ -573,3 +573,82 @@ describe('typed readiness states', () => {
     expect(screen.getByTestId('consult-panel').textContent).toContain('Strongest concern');
   });
 });
+
+/* ── WER-016: the real wired Start route must be reflected honestly ── */
+describe('WER-016 typed Start receipt and non-mutation controls', () => {
+  const startReceipt = {
+    session_id: 'sess-fixture-1',
+    state: 'QUEUED',
+    state_version: 2,
+    idempotent_replay: false,
+    job_id: 'job-council-1',
+    grant_id: 'grant-active-1',
+    attempt: 1,
+  };
+
+  it('shows an actual 202 durable admission and does not offer a second Start', async () => {
+    const fetchSpy = stubFetch([
+      { match: '/verdict', body: okEnvelope({ session_id: 'sess-fixture-1', verdict_state: 'not_ready', verdict: null }) },
+      { match: '/api/council/sessions/sess-fixture-1', method: 'GET', body: okEnvelope(STORED_SESSION) },
+      { match: '/api/council/models', body: MODELS_OK },
+      { match: '/api/council/sessions/sess-fixture-1/start', method: 'POST', status: 202, body: okEnvelope(startReceipt) },
+    ]);
+    const user = userEvent.setup();
+    render(<SessionDetail sessionId="sess-fixture-1" />);
+    await user.click(await screen.findByTestId('session-start'));
+    const receipt = await screen.findByTestId('session-start-queued');
+    expect(receipt.textContent).toContain('job-council-1');
+    expect(receipt.textContent).toContain('not a completed Council verdict');
+    expect(screen.queryByTestId('session-start')).toBeNull();
+    expect(screen.queryByTestId('session-start-not-ready')).toBeNull();
+    const writes = fetchSpy.mock.calls.filter(([url, init]) =>
+      String(url).endsWith('/start') && init?.method === 'POST',
+    );
+    expect(writes).toHaveLength(1);
+    const headers = writes[0]?.[1]?.headers as Record<string, string>;
+    expect(headers?.['Idempotency-Key']).toBeTruthy();
+    const body = JSON.parse(String(writes[0]?.[1]?.body));
+    expect(body).toEqual({ expected_version: 0 });
+  });
+
+  it('refuses a malformed success response rather than fabricating a queued job', async () => {
+    stubFetch([
+      { match: '/verdict', body: okEnvelope({ session_id: 'sess-fixture-1', verdict_state: 'not_ready', verdict: null }) },
+      { match: '/api/council/sessions/sess-fixture-1', method: 'GET', body: okEnvelope(STORED_SESSION) },
+      { match: '/api/council/models', body: MODELS_OK },
+      { match: '/api/council/sessions/sess-fixture-1/start', method: 'POST', status: 202, body: okEnvelope({ status: 'ok' }) },
+    ]);
+    render(<SessionDetail sessionId="sess-fixture-1" />);
+    fireEvent.click(await screen.findByTestId('session-start'));
+    const error = await screen.findByRole('alert');
+    expect(error.textContent).toContain('UNEXPECTED_RESPONSE');
+    expect(screen.queryByTestId('session-start-queued')).toBeNull();
+  });
+
+  it('never renders a mutation button for a support-only read or completed session', async () => {
+    stubFetch([
+      { match: '/verdict', body: okEnvelope({ session_id: 'sess-fixture-1', verdict_state: 'not_ready', verdict: null }) },
+      { match: '/api/council/sessions/sess-fixture-1', method: 'GET', body: {
+        ...okEnvelope(STORED_SESSION), meta: { access_via: 'support' },
+      } },
+      { match: '/api/council/models', body: MODELS_OK },
+    ]);
+    const first = render(<SessionDetail sessionId="sess-fixture-1" />);
+    await screen.findByTestId('session-start-unavailable');
+    expect(screen.queryByTestId('session-start')).toBeNull();
+    expect(screen.getByTestId('session-start-unavailable').textContent).toContain('read-only');
+    first.unmount();
+
+    stubFetch([
+      { match: '/verdict', body: okEnvelope({ session_id: 'sess-fixture-1', verdict_state: 'not_ready', verdict: null }) },
+      { match: '/api/council/sessions/sess-fixture-1', method: 'GET', body: okEnvelope({
+        ...STORED_SESSION,
+        state: { ...STORED_SESSION.state, state: 'COMPLETED' },
+      }) },
+      { match: '/api/council/models', body: MODELS_OK },
+    ]);
+    render(<SessionDetail sessionId="sess-fixture-1" />);
+    await screen.findByTestId('session-start-unavailable');
+    expect(screen.queryByTestId('session-start')).toBeNull();
+  });
+});
