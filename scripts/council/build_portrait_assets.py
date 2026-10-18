@@ -8,9 +8,11 @@ No completed asset set is published unless all nine inputs validate.
 This is not a portrait generator; generating/approving genuine art precedes it.
 """
 import argparse
+from datetime import datetime
 import hashlib
 import io
 import json
+import re
 import shutil
 import sys
 import tempfile
@@ -78,8 +80,12 @@ def _provenance(path, *, allow_test_fixtures=False):
             raise PortraitError(f"Portrait {seat} has no completed identity review")
         approved_by = _text(raw.get("approved_by"), f"{seat}.approved_by")
         reviewed_at = _text(raw.get("reviewed_at"), f"{seat}.reviewed_at")
-        if "T" not in reviewed_at or not reviewed_at.endswith("Z"):
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z", reviewed_at):
             raise PortraitError(f"Portrait {seat} has no UTC identity review timestamp")
+        try:
+            datetime.fromisoformat(reviewed_at)
+        except ValueError as exc:
+            raise PortraitError(f"Portrait {seat} has no valid UTC identity review timestamp") from exc
         master_sha = _text(raw.get("reviewed_master_sha256"), f"{seat}.reviewed_master_sha256")
         if len(master_sha) != 64 or any(ch not in "0123456789abcdef" for ch in master_sha):
             raise PortraitError(f"Portrait {seat} review must bind a lowercase SHA-256 digest")
@@ -91,6 +97,8 @@ def _provenance(path, *, allow_test_fixtures=False):
             raise PortraitError(
                 f"Portrait {seat} rights are not approved for release: {rights}"
             )
+        if approved_by == "synthetic-unit-test-harness" and not allow_test_fixtures:
+            raise PortraitError(f"Portrait {seat} requires a real identity reviewer for release")
         result[seat] = {
             "approved_subject": approved_subject,
             "identity_review_status": review_status,
@@ -109,7 +117,11 @@ def _provenance(path, *, allow_test_fixtures=False):
 def _read_master(path, seat):
     if not path.is_file() or path.is_symlink():
         raise PortraitError(f"Missing or linked original master for {seat}: {path}")
-    with Image.open(path) as opened:
+    # Decode and bind the same immutable bytes, even if the file is replaced
+    # while this build is running.
+    master_bytes = path.read_bytes()
+    master_sha = hashlib.sha256(master_bytes).hexdigest()
+    with Image.open(io.BytesIO(master_bytes)) as opened:
         opened.load()
         if opened.format != "PNG" or opened.mode != "RGBA":
             raise PortraitError(f"Master {seat} must be a transparent RGBA PNG")
@@ -122,7 +134,7 @@ def _read_master(path, seat):
     source.thumbnail(MASTER_SIZE, Image.Resampling.LANCZOS)
     canvas = Image.new("RGBA", MASTER_SIZE, (0, 0, 0, 0))
     canvas.alpha_composite(source, ((MASTER_SIZE[0]-source.width)//2, (MASTER_SIZE[1]-source.height)//2))
-    return canvas
+    return canvas, master_sha
 
 
 def _encode_variant(master, size, limit, seat, variant):
@@ -168,8 +180,7 @@ def build_portraits(masters: Path, provenance_path: Path, output: Path, *, allow
         total_room_bytes = 0
         for seat, display_name in SEATS.items():
             master_path = masters / f"{seat}.png"
-            master = _read_master(master_path, seat)
-            master_sha = hashlib.sha256(master_path.read_bytes()).hexdigest()
+            master, master_sha = _read_master(master_path, seat)
             if provenance[seat]["reviewed_master_sha256"] != master_sha:
                 raise PortraitError(
                     f"Portrait {seat} changed after identity review. "

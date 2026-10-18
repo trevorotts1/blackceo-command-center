@@ -2,6 +2,7 @@ import importlib.util
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from hashlib import sha256
 from pathlib import Path
 
@@ -96,6 +97,49 @@ class CouncilPortraitBuildTests(unittest.TestCase):
         self.provenance.write_text(json.dumps(notes), encoding="utf-8")
         with self.assertRaisesRegex(builder.PortraitError, "approved_by"):
             builder.build_portraits(self.masters, self.provenance, self.output, allow_test_fixtures=True)
+        self.assertFalse(self.output.exists())
+
+    def test_review_timestamp_must_be_a_real_utc_date(self):
+        notes = json.loads(self.provenance.read_text(encoding="utf-8"))
+        for index, invalid in enumerate(("TZ", "2026-02-30T12:00:00Z", "20261017T120000Z", "2026-10-17T12:00:00", "2026-10-17T12:00:00+01:00")):
+            with self.subTest(reviewed_at=invalid):
+                output = self.output.with_name(f"invalid-date-{index}")
+                notes["oprah-winfrey"]["reviewed_at"] = invalid
+                self.provenance.write_text(json.dumps(notes), encoding="utf-8")
+                with self.assertRaisesRegex(builder.PortraitError, "UTC identity review timestamp"):
+                    builder.build_portraits(self.masters, self.provenance, output, allow_test_fixtures=True)
+                self.assertFalse(output.exists())
+        notes["oprah-winfrey"]["reviewed_at"] = "2026-10-17T12:00:00.123Z"
+        self.provenance.write_text(json.dumps(notes), encoding="utf-8")
+        self.assertEqual(builder._provenance(self.provenance, allow_test_fixtures=True)["oprah-winfrey"]["reviewed_at"], "2026-10-17T12:00:00.123Z")
+
+    def test_test_reviewer_cannot_be_promoted_by_changing_rights(self):
+        notes = json.loads(self.provenance.read_text(encoding="utf-8"))
+        for entry in notes.values():
+            entry["rights_status"] = "owned_generated"
+        self.provenance.write_text(json.dumps(notes), encoding="utf-8")
+        with self.assertRaisesRegex(builder.PortraitError, "real identity reviewer"):
+            builder.build_portraits(self.masters, self.provenance, self.output)
+        self.assertFalse(self.output.exists())
+
+    def test_decoded_pixels_cannot_use_a_replacement_files_review_hash(self):
+        path = self.masters / "simon-sinek.png"
+        reviewed_bytes = path.read_bytes()
+        with Image.open(path) as image:
+            unreviewed = image.copy()
+        ImageDraw.Draw(unreviewed).rectangle((430, 380, 610, 470), fill=(255, 255, 255, 255))
+        unreviewed.save(path)
+        read_master = builder._read_master
+
+        def replace_after_decode(master_path, seat):
+            result = read_master(master_path, seat)
+            if seat == "simon-sinek":
+                master_path.write_bytes(reviewed_bytes)
+            return result
+
+        with patch.object(builder, "_read_master", side_effect=replace_after_decode):
+            with self.assertRaisesRegex(builder.PortraitError, "changed after identity review"):
+                builder.build_portraits(self.masters, self.provenance, self.output, allow_test_fixtures=True)
         self.assertFalse(self.output.exists())
 
     def test_missing_master_fails_without_publishing_partial_assets(self):
