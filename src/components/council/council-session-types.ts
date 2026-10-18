@@ -29,6 +29,7 @@ import {
   seatIdentity,
   type CouncilRoomMode,
   type CouncilRoomView,
+  type CouncilSeatCardView,
   type CouncilSeatId,
   type CouncilSeatView,
 } from './council-room-types';
@@ -185,30 +186,59 @@ export function phaseLabelForState(state: string): string {
 }
 
 /**
- * Adapt the CWE-030 projection to the CWE-032 room view. Seat status
- * comes only from the projection (a seat is 'queued' until a
- * committed card proves 'completed'); card CONTENT is not carried by
- * the journal projection, so seats carry `card: null` here and the
- * drawer says plainly that no card content is in this read. The room
- * never sees a 'started' or 'thinking' state from this adapter,
- * because no committed journal event proves one (Section 18.4).
+ * A hydrated card read is accepted by this view adapter only when it matches
+ * the SAME scoped committed projection's latest card receipt. Actual API
+ * scope authorization and body validation belong to the owning read route.
+ * A stale, wrong-round, wrong-session or uncommitted card never renders.
+ */
+export interface HydratedCouncilRoomCard {
+  sessionId: string;
+  seatId: CouncilSeatId;
+  round: number;
+  cardHash: string;
+  card: CouncilSeatCardView;
+}
+
+/**
+ * Adapt an event projection plus optional already-authorized committed-card
+ * detail reads. The journal itself carries only hashes, not body content.
+ * Without valid matching hydrated data the seat remains honestly card:null.
+ * An active state phase takes precedence over the last completed card round.
  */
 export function projectionToRoomView(
   projection: CouncilSessionProjection,
-  options: { decisionTitle: string; mode?: CouncilRoomMode },
+  options: {
+    decisionTitle: string;
+    mode?: CouncilRoomMode;
+    hydratedCards?: Readonly<Partial<Record<CouncilSeatId, HydratedCouncilRoomCard>>>;
+    committedCrux?: string | null;
+  },
 ): CouncilRoomView {
-  const seats: CouncilSeatView[] = projection.seats.map((seat) => ({
-    seatId: seat.seat_id as CouncilSeatId,
-    status: seat.status,
-    card: null,
-  }));
+  const seats: CouncilSeatView[] = projection.seats.map((seat) => {
+    const seatId = seat.seat_id as CouncilSeatId;
+    const hydrated = options.hydratedCards?.[seatId] ?? null;
+    const latest = seat.last_card;
+    const matchesCommitted =
+      seat.status === 'completed' &&
+      latest !== null &&
+      hydrated !== null &&
+      hydrated.seatId === seatId &&
+      hydrated.sessionId === projection.session_id &&
+      hydrated.round === latest.round &&
+      hydrated.cardHash === latest.card_hash;
+    return {
+      seatId,
+      status: seat.status,
+      card: matchesCommitted ? hydrated.card : null,
+    };
+  });
   const highestCardRound = projection.seats.reduce<number | null>(
     (acc, seat) =>
       seat.last_card ? Math.max(acc ?? 0, seat.last_card.round) : acc,
     null,
   );
   const stateRound = STATE_ROUNDS[projection.state] ?? null;
-  const currentRound = (highestCardRound ?? stateRound) as 1 | 2 | 3 | null;
+  const currentRound = (stateRound ?? highestCardRound) as 1 | 2 | 3 | null;
   return {
     decisionTitle: options.decisionTitle,
     phaseLabel: phaseLabelForState(projection.state),
@@ -216,7 +246,7 @@ export function projectionToRoomView(
       currentRound !== null && currentRound >= 1 && currentRound <= 3
         ? (currentRound as 1 | 2 | 3)
         : null,
-    cruxLabel: null,
+    cruxLabel: options.committedCrux ?? null,
     mode: options.mode ?? (projection.sample ? 'sample' : 'live'),
     seats,
   };
