@@ -256,3 +256,21 @@ test('malformed review metadata remains unavailable through the release loader',
     assert.equal(result.status, 'unavailable');
   }
 });
+
+test('shipped nine-photo cohort passes the mounted reader and binds every asset byte', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { createHash } = await import('node:crypto');
+  const manifest = JSON.parse(readFileSync(new URL('../../public/council/portraits/manifest.json', import.meta.url), 'utf8'));
+  const release = await readApprovedCouncilPortraitRelease(async () => new Response(JSON.stringify(manifest)));
+  assert.equal(release.status, 'approved');
+  for (const entry of manifest.entries) {
+    assert.equal(entry.selected_subject, entry.display_name);
+    assert.equal(entry.rights_status, 'unverified');
+    assert.ok(!('approved_by' in entry));
+    for (const variant of Object.values(entry.variants) as Array<{src: string; bytes: number; sha256: string}>) {
+      const bytes = readFileSync(new URL('../../public' + variant.src, import.meta.url));
+      assert.equal(bytes.length, variant.bytes);
+      assert.equal(createHash('sha256').update(bytes).digest('hex'), variant.sha256);
+    }
+  }
+});

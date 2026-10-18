@@ -1,0 +1,236 @@
+[
+  {
+    "seat_id": "simon-sinek",
+    "display_name": "Simon Sinek",
+    "image_url": "https://upload.wikimedia.org/wikipedia/commons/4/40/Simon_Sinek_speaks_at_Camp_H.M._Smith_in_Hawaii_%28cropped%29.jpg",
+    "source_url": "https://commons.wikimedia.org/wiki/File:Simon_Sinek_speaks_at_Camp_H.M._Smith_in_Hawaii_(cropped).jpg",
+    "credit": "Shannon Smith / U.S. Navy",
+    "license_note": "Public domain (U.S. federal work)",
+    "license_url": "https://creativecommons.org/publicdomain/mark/1.0/",
+    "bytes": 1096893,
+    "sha256": "ad6e2ad94b727ee39615c9ffe75935999071644285dd12866153fa4579abbff0",
+    "source_dimensions": [
+      2583,
+      3448
+    ],
+    "crop_xyxy": [
+      0,
+      0,
+      2580,
+      3225
+    ],
+    "master_sha256": "5b850a7fffa059d9233e2cec39c4cc2f769e4b32053f7dbb03ec048fd89e3142",
+    "master_dimensions": [
+      2580,
+      3225
+    ]
+  },
+  {
+    "seat_id": "td-jakes",
+    "display_name": "T. D. Jakes",
+    "image_url": "https://upload.wikimedia.org/wikipedia/commons/8/80/TD_Jakes%2C_2020.jpg",
+    "source_url": "https://commons.wikimedia.org/wiki/File:TD_Jakes,_2020.jpg",
+    "credit": "Loren Kerns",
+    "license_note": "CC BY 2.0",
+    "license_url": "https://creativecommons.org/licenses/by/2.0/",
+    "bytes": 33860,
+    "sha256": "bf9767879db03307a70c95e1cf8ba3976156e431810a806f9f3d1787a2b79918",
+    "source_dimensions": [
+      506,
+      587
+    ],
+    "crop_xyxy": [
+      19,
+      0,
+      487,
+      585
+    ],
+    "master_sha256": "fece99bb1f1664e454faa4e116b12b69ffe3ef2f5f7a3c810024956b9c47a1bc",
+    "master_dimensions": [
+      468,
+      585
+    ]
+  },
+  {
+    "seat_id": "oprah-winfrey",
+    "display_name": "Oprah Winfrey",
+    "image_url": "https://upload.wikimedia.org/wikipedia/commons/e/e0/Oprah_Winfrey_2016.jpg",
+    "source_url": "https://commons.wikimedia.org/wiki/File:Oprah_Winfrey_2016.jpg",
+    "credit": "U.S. Embassy South Africa",
+    "license_note": "Public domain (U.S. federal work)",
+    "license_url": "https://creativecommons.org/publicdomain/mark/1.0/",
+    "bytes": 659858,
+    "sha256": "e3ee88f6e2b70e8f71a40afe351b250d58adfe73e0090ec455a7ac0bfd4fec93",
+    "source_dimensions": [
+      1108,
+      1604
+    ],
+    "crop_xyxy": [
+      0,
+      60,
+      1104,
+      1440
+    ],
+    "master_sha256": "79fada3118274154748377c0dd7794719ef65269d0ad8b24d62b052608dec2b4",
+    "master_dimensions": [
+      1104,
+      1380
+    ]
+  },
+  {
+    "seat_id": "tiffany-aliche",
+    "display_name": "Tiffany Aliche",
+    "image_url": "https://thebudgetnista.com/wp-content/uploads/2026/06/tiffany-aliche.jpg",
+    "source_url": "https://thebudgetnista.com/press/",
+    "credit": "The Budgetnista press page",
+    "license_note": "No reuse license stated",
+    "license_url": null,
+    "bytes": 51419,
+    "sha256": "f4de9ae6edb7a7fbb24508a98c8666489641eb23921c93cbd7f32777761ec068",
+    "source_dimensions": [
+      500,
+      375
+    ],
+    "crop_xyxy": [
+      90,
+      0,
+      390,
+      375
+    ],
+    "master_sha256": "f48185020b9adf4607ca3933908d228b961efce47fffb9c6685dd9a23058593d",
+    "master_dimensions": [
+      300,
+      375
+    ]
+  },
+  {
+    "seat_id": "russell-brunson",
+    "display_name": "Russell Brunson",
+    "image_url": "https://statics.myclickfunnels.com/image/737/file/939814f7700fbd528e65356ff126116e.jpg",
+    "source_url": "https://www.russellbrunson.com/press-and-media",
+    "credit": "Russell Brunson press and media / Approved Photos",
+    "license_note": "No general reuse license stated",
+    "license_url": null,
+    "bytes": 479233,
+    "sha256": "014ff40fdb50741d34d13f7b98d15f6f82d32966195c9fa58dd7c1d80eb102a4",
+    "source_dimensions": [
+      1500,
+      2249
+    ],
+    "crop_xyxy": [
+      0,
+      0,
+      1500,
+      1875
+    ],
+    "master_sha256": "f8651adc4b459af1700b8554da17ae642d22ca820d1e0943ff1aed81254b6a6a",
+    "master_dimensions": [
+      1500,
+      1875
+    ]
+  },
+  {
+    "seat_id": "michelle-obama",
+    "display_name": "Michelle Obama",
+    "image_url": "https://upload.wikimedia.org/wikipedia/commons/5/53/Michelle_Obama_official_portrait_headshot.jpg",
+    "source_url": "https://commons.wikimedia.org/wiki/File:Michelle_Obama_official_portrait_headshot.jpg",
+    "credit": "Joyce Boghosian / White House",
+    "license_note": "Public domain (U.S. federal work)",
+    "license_url": "https://creativecommons.org/publicdomain/mark/1.0/",
+    "bytes": 840039,
+    "sha256": "2d5d0909f8dafc9738498d18f935177546c99b0b394e524760553a5cad63d660",
+    "source_dimensions": [
+      894,
+      1195
+    ],
+    "crop_xyxy": [
+      0,
+      0,
+      892,
+      1115
+    ],
+    "master_sha256": "2d943c7171e7c74ba11a858b773df608dd4597f716d6632d9ee280d69730a4f8",
+    "master_dimensions": [
+      892,
+      1115
+    ]
+  },
+  {
+    "seat_id": "brene-brown",
+    "display_name": "Brené Brown",
+    "image_url": "https://upload.wikimedia.org/wikipedia/commons/9/9f/Bren%C3%A9_Brown_Wikipedia.jpg",
+    "source_url": "https://commons.wikimedia.org/wiki/File:Bren%C3%A9_Brown_Wikipedia.jpg",
+    "credit": "BBeargTeam; photographer Felix Sanchez (EXIF)",
+    "license_note": "CC BY-SA 4.0",
+    "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+    "bytes": 1971100,
+    "sha256": "169a20137dd8dcce4ded22d3359834f63f03927b4ffbe9056be5d11be986c333",
+    "source_dimensions": [
+      3413,
+      5120
+    ],
+    "crop_xyxy": [
+      0,
+      995,
+      3300,
+      5120
+    ],
+    "master_sha256": "bf5a5462b3ad0dffa03864526a63476ed3299c3102069cf028c0968764f8718c",
+    "master_dimensions": [
+      3300,
+      4125
+    ]
+  },
+  {
+    "seat_id": "dennis-kimbro",
+    "display_name": "Dr. Dennis Kimbro",
+    "image_url": "https://www.apbspeakers.com/media/fkdj4feq/kimbro_dennis_101422.jpg",
+    "source_url": "https://www.apbspeakers.com/speaker/dennis-kimbro/",
+    "credit": "APB Speakers",
+    "license_note": "No reuse license stated",
+    "license_url": null,
+    "bytes": 42253,
+    "sha256": "d8bead289f41583a5410de68590225ad52ef32509426797f02b1cbc860a02047",
+    "source_dimensions": [
+      1920,
+      775
+    ],
+    "crop_xyxy": [
+      450,
+      0,
+      1070,
+      775
+    ],
+    "master_sha256": "53658bdf86915ec70da189732383333048b271cd4a5f401dbe1bde7117ade692",
+    "master_dimensions": [
+      620,
+      775
+    ]
+  },
+  {
+    "seat_id": "les-brown",
+    "display_name": "Les Brown",
+    "image_url": "https://upload.wikimedia.org/wikipedia/commons/9/91/Les_Brown_speaking.jpg",
+    "source_url": "https://commons.wikimedia.org/wiki/File:Les_Brown_speaking.jpg",
+    "credit": "Dominick Brady",
+    "license_note": "CC BY 2.0",
+    "license_url": "https://creativecommons.org/licenses/by/2.0/",
+    "bytes": 1448425,
+    "sha256": "b2f9925954d2d26d4a671c97d211d5fc6cff0712fc53d65c55c2dc506848c7c2",
+    "source_dimensions": [
+      3264,
+      2448
+    ],
+    "crop_xyxy": [
+      450,
+      0,
+      2402,
+      2440
+    ],
+    "master_sha256": "fe204704e8559953091ae82a343223ae674859a43e8437fc0170a5e9008abc09",
+    "master_dimensions": [
+      1952,
+      2440
+    ]
+  }
+]
