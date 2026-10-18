@@ -51,7 +51,7 @@ export function CouncilRoom({
       className={council.stage}
       aria-label="Council room"
       data-testid="council-room"
-      style={{ padding: '1.5rem' }}
+      style={{ padding: 'clamp(0.75rem, 2.5vw, 1.5rem)' }}
     >
       <div
         style={{
