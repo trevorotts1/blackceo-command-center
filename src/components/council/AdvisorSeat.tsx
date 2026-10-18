@@ -49,6 +49,16 @@ export interface AdvisorSeatProps {
   variant?: 'full' | 'room';
 }
 
+/**
+ * Only the exact canonical seat's approved room-portrait path can switch
+ * visual density. A random third-party celebrity, URL or other seat's
+ * portrait cannot masquerade as an approved asset in this renderer.
+ * The upstream caller must load and validate the released art manifest.
+ */
+export function isApprovedCouncilRoomPortrait(src: string, seatId: string): boolean {
+  return src === `/council/portraits/${seatId}-room.webp`;
+}
+
 const STANCE_BADGE_CLASS: Record<string, string> = {
   support: council.stateSupport,
   conditional: council.stateConditional,
@@ -65,6 +75,7 @@ export const AdvisorSeat = forwardRef<HTMLButtonElement, AdvisorSeatProps>(
     const statusLabel = seatStatusLabel(seat);
     const showStanceBadge = seat.status === 'completed' && seat.card !== null;
     const roomDensity = variant === 'room';
+    const hasPortrait = roomDensity && isApprovedCouncilRoomPortrait(medallionSrc, seat.seatId);
 
     return (
       <button
@@ -75,6 +86,7 @@ export const AdvisorSeat = forwardRef<HTMLButtonElement, AdvisorSeatProps>(
         data-seat-id={seat.seatId}
         data-status={seat.status}
         data-variant={variant}
+        data-has-portrait={hasPortrait ? 'true' : 'false'}
         data-selected={selected ? 'true' : 'false'}
         aria-label={seatAccessibleName(seat)}
         aria-pressed={selected}
@@ -86,9 +98,15 @@ export const AdvisorSeat = forwardRef<HTMLButtonElement, AdvisorSeatProps>(
             manifest alt text for non-button contexts. */}
         <img
           src={medallionSrc}
-          alt={identity.medallion.altText}
-          width={roomDensity ? 36 : 44}
-          height={roomDensity ? 36 : 44}
+          alt={hasPortrait
+            ? `Original illustrated portrait of ${identity.displayName}`
+            : identity.medallion.altText}
+          width={hasPortrait ? 116 : roomDensity ? 36 : 44}
+          height={hasPortrait ? 145 : roomDensity ? 36 : 44}
+          className={hasPortrait ? 'council-seat-portrait-img' : undefined}
+          loading="lazy"
+          decoding="async"
+          data-testid={hasPortrait ? `council-portrait-${seat.seatId}` : undefined}
         />
         <span className={council.seatName}>{identity.displayName}</span>
         {!roomDensity ? (

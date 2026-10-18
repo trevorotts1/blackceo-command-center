@@ -111,6 +111,7 @@ export default defineConfig({
       // behavior, honest seat states (queued never "thinking"), sample badge,
       // reduced-motion flag with no information loss.
       'tests/unit/council-room-render.test.tsx',
+      'tests/unit/council-portrait-seat-render.test.tsx',
       // CWE-036 (Skill 77) — ActionPlanEditor / LinkedTasksPanel real
       // render proof: the three authorizations read as distinct, the
       // approved plan hash is visible, held tasks never render as

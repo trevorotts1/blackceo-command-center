@@ -344,3 +344,50 @@
     animation-iteration-count: 1 !important;
   }
 }
+
+/* WER-018: portrait-ready Council seats. The existing 36px medallions stay
+   honest fallbacks until an approved nine-person asset cohort is present.
+   A portrait path is not accepted unless it matches its own seat ID. */
+.council-stage .council-seat-room[data-has-portrait='true'] {
+  width: 160px;
+  min-height: 218px;
+  box-sizing: border-box;
+  gap: 0.375rem;
+  padding: 0.625rem;
+  border-radius: 1.125rem;
+  border-color: var(--council-stage-line);
+  background: linear-gradient(180deg, rgba(16, 46, 60, 0.94), rgba(12, 24, 37, 0.98));
+  box-shadow: 0 8px 26px rgba(0, 6, 14, 0.26);
+  overflow: visible;
+}
+.council-stage .council-seat-room[data-has-portrait='true'] .council-seat-portrait-img {
+  display: block;
+  flex: 0 0 auto;
+  width: min(116px, 100%);
+  height: 145px;
+  margin-inline: auto;
+  object-fit: contain;
+  object-position: bottom center;
+  border-radius: 0.5rem 0.5rem 0.25rem 0.25rem;
+}
+.council-stage .council-seat-room[data-has-portrait='true'] .council-seat-name {
+  font-size: var(--council-text-name);
+  line-height: 1.25;
+  min-width: 0;
+  max-width: 100%;
+  text-wrap: balance;
+  overflow-wrap: anywhere;
+}
+.council-stage .council-seat-room[data-has-portrait='true'] .council-seat-status {
+  font-size: var(--council-text-meta);
+  line-height: 1.25;
+  text-wrap: balance;
+}
+@container (max-width: 919px) {
+  .council-stage .council-seat-room[data-has-portrait='true'] {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    min-height: 216px;
+  }
+}
