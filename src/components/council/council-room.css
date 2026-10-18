@@ -217,11 +217,16 @@
 /* WER-019: long decisions, localized names and narrow browser zoom remain
    readable. No horizontal scroll or type-size reduction is used to fit. */
 .council-theme .council-room,
-.council-theme .council-room-frame,
 .council-theme .council-seat-room {
   box-sizing: border-box;
   min-width: 0;
   max-width: 100%;
+}
+/* Keep the desktop frame cap while allowing narrow containers to shrink. */
+.council-theme .council-room-frame {
+  box-sizing: border-box;
+  min-width: 0;
+  max-width: min(100%, var(--council-room-frame-w));
 }
 .council-theme .council-seat-room .council-seat-name,
 .council-theme .council-room-center-decision {

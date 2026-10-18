@@ -8,6 +8,9 @@ on:
       - "tests/unit/council-mobile-layout-contract.test.ts"
       - "tests/unit/council-room-logic.test.ts"
       - ".github/workflows/council-mobile-responsive-contract.yml"
+      - "tests/browser/council-frame-geometry.mjs"
+      - "src/components/council/council-theme.css"
+      - "vitest.component.config.ts"
   workflow_dispatch:
 
 permissions:
@@ -28,3 +31,7 @@ jobs:
         run: |
           node --import tsx --test tests/unit/council-mobile-layout-contract.test.ts tests/unit/council-room-logic.test.ts
           npx vitest run --config vitest.component.config.ts tests/unit/council-room-render.test.tsx
+      - name: Install browser for real layout regression
+        run: npx playwright install --with-deps chromium
+      - name: Verify Council browser geometry
+        run: node tests/browser/council-frame-geometry.mjs
