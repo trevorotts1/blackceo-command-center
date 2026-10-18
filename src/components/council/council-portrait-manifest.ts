@@ -1,13 +1,15 @@
 /**
- * WER-017: consume only a COMPLETE, approved nine-person portrait release.
+ * WER-017: consume a complete nine-person portrait release.
  *
  * The build script (scripts/council/build_portrait_assets.py) constructs the
- * release manifest after asset/rights sign-off. This validator is the
+ * release manifest after asset/rights sign-off. Existing owner-selected
+ * pictures may instead retain unverified rights without claiming sign-off.
+ * This validator is the
  * corresponding zero-side-effect UI trust boundary. A draft/test-only,
  * incomplete, mixed-person or tampered cohort returns no portrait maps.
  *
  * It verifies manifest structure, immutable names and hash references;
- * facial resemblance itself still REQUIRES independent human/art QC.
+ * It does not establish facial resemblance, authorship or license ownership.
  */
 import {
   COUNCIL_SEAT_IDS,
@@ -82,15 +84,19 @@ function hasProductionMarker(record: Data): boolean {
 
 export function validateApprovedCouncilPortraitManifest(raw: unknown): ApprovedCouncilPortraitMaps {
   const manifest = object(raw);
+  // Owner-selected existing pictures carry factual provenance, not invented
+  // illustration authorship, identity-review results or license approval.
+  const ownerSelected = manifest.source_kind === 'owner_selected_existing_images' &&
+    manifest.selection_authority === 'owner';
   if (
     !hasProductionMarker(manifest) ||
     manifest.schema !== 'blackceo.council-portraits/v1' ||
-    manifest.source_kind !== 'reviewed_original_editorial_illustrations' ||
+    (!ownerSelected && manifest.source_kind !== 'reviewed_original_editorial_illustrations') ||
     manifest.seat_count !== COUNCIL_SEAT_IDS.length ||
     !Array.isArray(manifest.entries) ||
     manifest.entries.length !== COUNCIL_SEAT_IDS.length
   ) {
-    fail('not a complete, approved nine-seat original illustration cohort');
+    fail('not a complete nine-seat portrait cohort');
   }
   const room = {} as Record<CouncilSeatId, string>;
   const detail = {} as Record<CouncilSeatId, string>;
@@ -111,20 +117,22 @@ export function validateApprovedCouncilPortraitManifest(raw: unknown): ApprovedC
       !hasProductionMarker(entry) ||
       !identity ||
       entry.display_name !== identity.displayName ||
-      entry.approved_subject !== identity.displayName ||
-      entry.identity_review_status !== 'approved' ||
-      !goodString(entry.identity_review_note) ||
-      !goodString(entry.approved_by) ||
-      entry.approved_by.trim() === 'synthetic-unit-test-harness' ||
-      !isUtcReviewTimestamp(entry.reviewed_at) ||
       !goodString(entry.alt_text) ||
       !goodString(entry.source_note) ||
       !goodString(entry.creation_method) ||
       typeof entry.rights_status !== 'string' ||
-      !rights.has(entry.rights_status) ||
+      (!rights.has(entry.rights_status) && !(ownerSelected && entry.rights_status === 'unverified')) ||
       !isHash(entry.master_sha256) ||
-      !isHash(entry.reviewed_master_sha256) ||
-      entry.reviewed_master_sha256 !== entry.master_sha256
+      (ownerSelected ? entry.selected_subject !== identity.displayName : (
+        entry.approved_subject !== identity.displayName ||
+        entry.identity_review_status !== 'approved' ||
+        !goodString(entry.identity_review_note) ||
+        !goodString(entry.approved_by) ||
+        entry.approved_by.trim() === 'synthetic-unit-test-harness' ||
+        !isUtcReviewTimestamp(entry.reviewed_at) ||
+        !isHash(entry.reviewed_master_sha256) ||
+        entry.reviewed_master_sha256 !== entry.master_sha256
+      ))
     ) {
       fail('invalid review metadata or wrong-subject portrait for ' + seatId);
     }
