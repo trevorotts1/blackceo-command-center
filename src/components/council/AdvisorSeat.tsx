@@ -99,7 +99,7 @@ export const AdvisorSeat = forwardRef<HTMLButtonElement, AdvisorSeatProps>(
         <img
           src={medallionSrc}
           alt={hasPortrait
-            ? `Original illustrated portrait of ${identity.displayName}`
+            ? `Portrait of ${identity.displayName}`
             : identity.medallion.altText}
           width={hasPortrait ? 116 : roomDensity ? 36 : 44}
           height={hasPortrait ? 145 : roomDensity ? 36 : 44}

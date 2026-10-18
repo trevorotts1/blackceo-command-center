@@ -69,6 +69,25 @@ function assertReject(doc: unknown): void {
   assert.throws(() => validateApprovedCouncilPortraitManifest(doc), CouncilPortraitManifestError);
 }
 
+test('owner-selected existing pictures require factual provenance, not fabricated rights approval', () => {
+  const doc = fixture();
+  doc.source_kind = 'owner_selected_existing_images';
+  doc.selection_authority = 'owner';
+  for (const entry of doc.entries as Obj[]) {
+    entry.selected_subject = entry.display_name;
+    entry.rights_status = 'unverified';
+    entry.creation_method = 'existing_picture';
+    for (const key of ['approved_subject', 'identity_review_status', 'identity_review_note', 'approved_by', 'reviewed_at', 'reviewed_master_sha256']) delete entry[key];
+  }
+  assert.equal(Object.keys(validateApprovedCouncilPortraitManifest(doc).roomSrcBySeat).length, 9);
+  const entry = (doc.entries as Obj[])[0];
+  entry.selected_subject = 'Les Brown';
+  assertReject(doc);
+  entry.selected_subject = entry.display_name;
+  delete entry.source_note;
+  assertReject(doc);
+});
+
 test('only exact reviewed nine-person cohort returns correct responsive room and drawer maps', () => {
   const result = validateApprovedCouncilPortraitManifest(fixture());
   assert.deepEqual(Object.keys(result.roomSrcBySeat), [...COUNCIL_SEAT_IDS]);

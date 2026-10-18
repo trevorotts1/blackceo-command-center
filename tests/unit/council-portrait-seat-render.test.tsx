@@ -1,5 +1,8 @@
-import { afterEach, describe, expect, it } from 'vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { cleanup, render, renderHook, screen, waitFor } from '@testing-library/react';
+import { useCouncilPortraitRelease } from '../../src/components/council/useCouncilPortraitRelease';
+import { readApprovedCouncilPortraitRelease } from '../../src/components/council/council-portrait-manifest';
+vi.mock('../../src/components/council/council-portrait-manifest', () => ({ readApprovedCouncilPortraitRelease: vi.fn() }));
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
@@ -10,13 +13,33 @@ import {
   fixtureMedallionSrcs,
 } from '../../src/components/council/council-room-fixtures';
 
-afterEach(() => cleanup());
+afterEach(() => { cleanup(); vi.resetAllMocks(); });
 
 const seat = SAMPLE_ROOM_VIEW.seats.find((candidate) => candidate.seatId === 'simon-sinek');
 if (!seat) throw new Error('canonical Simon Sinek fixture is missing');
 const fallback = fixtureMedallionSrcs('/portraits').small;
 
 describe('WER-018 nine-person portrait-aware room seat', () => {
+  it('loads released room/detail maps for the mounted page and aborts lookup on unmount', async () => {
+    const release = { status: 'approved' as const, images: { roomSrcBySeat: {}, detailSrcBySeat: {}, thumbSrcBySeat: {} } };
+    vi.mocked(readApprovedCouncilPortraitRelease).mockResolvedValue(release as never);
+    const hook = renderHook(() => useCouncilPortraitRelease());
+    await waitFor(() => expect(hook.result.current).toEqual(release));
+    const signal = vi.mocked(readApprovedCouncilPortraitRelease).mock.calls[0][1];
+    expect(signal?.aborted).toBe(false);
+    hook.unmount();
+    expect(signal?.aborted).toBe(true);
+    const page = readFileSync(join(process.cwd(), 'src/app/council/[sessionId]/page.tsx'), 'utf8');
+    expect(page).toContain('useCouncilPortraitRelease()');
+    expect(page).toContain('portraits.images.roomSrcBySeat');
+    expect(page).toContain('portraits.images.detailSrcBySeat');
+  });
+
+  it('preserves the unavailable state so missing pictures are not presented as portraits', async () => {
+    vi.mocked(readApprovedCouncilPortraitRelease).mockResolvedValue({ status: 'unavailable', reason: 'missing pictures' });
+    const hook = renderHook(() => useCouncilPortraitRelease());
+    await waitFor(() => expect(hook.result.current?.status).toBe('unavailable'));
+  });
   it('renders an approved canonical portrait at the large room size with full identity and status', () => {
     const path = '/council/portraits/simon-sinek-room.webp';
     render(<AdvisorSeat seat={seat} medallionSrc={path} variant="room" />);

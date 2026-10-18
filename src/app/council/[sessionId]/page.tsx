@@ -35,6 +35,7 @@ import { CouncilFollowUp } from '../../../components/council/CouncilFollowUp';
 import { CouncilOutcomeForm } from '../../../components/council/CouncilOutcomeForm';
 import { CouncilSourceDrawer } from '../../../components/council/CouncilSourceDrawer';
 import { COUNCIL_MEDALLION_LARGE_SRC, COUNCIL_MEDALLION_SMALL_SRC } from '../../../components/council/medallions';
+import { useCouncilPortraitRelease } from '../../../components/council/useCouncilPortraitRelease';
 import {
   CouncilApiClient,
   FetchCouncilSessionTransport,
@@ -61,6 +62,7 @@ export default function CouncilSessionPage({
   const { sessionId } = use(params);
   const searchParams = useSearchParams();
   const replay = searchParams.get('replay') === '1';
+  const portraits = useCouncilPortraitRelease();
 
   const client = useMemo(() => new CouncilApiClient(), []);
   const transport = useMemo(
@@ -168,9 +170,14 @@ export default function CouncilSessionPage({
         transport={transport}
         decisionTitle={detail?.title ?? 'Council session'}
         replay={replay}
-        medallionSrcBySeat={COUNCIL_MEDALLION_SMALL_SRC}
-        medallionLargeSrcBySeat={COUNCIL_MEDALLION_LARGE_SRC}
+        medallionSrcBySeat={portraits?.status === 'approved' ? portraits.images.roomSrcBySeat : COUNCIL_MEDALLION_SMALL_SRC}
+        medallionLargeSrcBySeat={portraits?.status === 'approved' ? portraits.images.detailSrcBySeat : COUNCIL_MEDALLION_LARGE_SRC}
       />
+      {portraits?.status === 'unavailable' ? (
+        <p role="status" data-testid="council-portrait-unavailable">
+          Portraits are unavailable. The room shows symbolic advisor medallions.
+        </p>
+      ) : null}
 
       {detailError ? (
         <p role="alert" data-testid="session-detail-error">
