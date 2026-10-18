@@ -70,6 +70,8 @@ import { CouncilFollowUp } from '../../src/components/council/CouncilFollowUp';
 import { CouncilOutcomeForm } from '../../src/components/council/CouncilOutcomeForm';
 import { fixtureMedallionSrcs } from '../../src/components/council/council-room-fixtures';
 import {
+  CouncilApiClient,
+  FetchCouncilSessionTransport,
   CouncilApiClientError,
   type CouncilSessionTransport,
   type CouncilStreamHandlers,
@@ -232,6 +234,17 @@ describe('CWE-030 reducer contract as the client binding', () => {
 /* ── Live session screen ────────────────────────────────────────────── */
 
 describe('live session screen', () => {
+  it('rejects malformed event envelopes without inventing a room or throwing a raw TypeError', async () => {
+    const transport = new FakeTransport({
+      kind: 'page',
+      page: undefined,
+    } as unknown as CouncilCatchUp);
+    renderLive(transport);
+    const error = await screen.findByTestId('council-live-error');
+    expect(error.textContent).toContain('invalid event page');
+    expect(screen.queryByTestId('council-room')).toBeNull();
+  });
+
   it('renders seats only from committed events: queued is waiting, never thinking', async () => {
     const transport = new FakeTransport({
       kind: 'snapshot',
@@ -769,5 +782,201 @@ describe('follow-up (T104) and outcome entry (T107)', () => {
     );
     expect(screen.getByTestId('outcome-no-prediction')).toBeTruthy();
     expect(screen.queryByTestId('outcome-observed')).toBeNull();
+  });
+});
+
+
+describe('independent QC: route changes with memoized transport', () => {
+  it('accepts a valid second-session snapshot after the sessionId prop changes', async () => {
+    const original = snapshotOf([FIXTURE_EVENT_CREATED]);
+    const transport: CouncilSessionTransport = {
+      snapshot: async (id) => ({kind: 'snapshot', snapshot: {
+        ...original, session_id: id,
+        projection: {...original.projection, session_id: id,
+          scope: {...original.projection.scope, session_id: id}},
+      }}),
+      page: async () => pageOf([]),
+      openStream: () => ({close: () => undefined}),
+    };
+    const props = {transport, decisionTitle: FIXTURE_BRIEF.question,
+      medallionSrcBySeat: small, medallionLargeSrcBySeat: large};
+    const view = render(<CouncilLiveSession {...props} sessionId={FIXTURE_SESSION_ID} />);
+    await screen.findByTestId('council-room');
+    view.rerender(<CouncilLiveSession {...props} sessionId="second-authorized-session" />);
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.queryByTestId('council-live-error')).toBeNull();
+    expect(screen.getByTestId('council-room')).toBeTruthy();
+  });
+});
+
+
+describe('independent QC: production snapshot envelope', () => {
+  it('renders the direct snapshot envelope returned by GET events?snapshot=1', async () => {
+    const snapshot = snapshotOf([FIXTURE_EVENT_CREATED]);
+    const client = new CouncilApiClient({ fetchFn: async () => new Response(
+      JSON.stringify({ok: true, data: snapshot, request_id: 'qc-read'}),
+      {status: 200, headers: {'Content-Type': 'application/json'}},
+    )});
+    render(<CouncilLiveSession sessionId={FIXTURE_SESSION_ID}
+      transport={new FetchCouncilSessionTransport(client)}
+      decisionTitle={FIXTURE_BRIEF.question} medallionSrcBySeat={small} />);
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.queryByTestId('council-live-error')).toBeNull();
+    expect(screen.getByTestId('council-room')).toBeTruthy();
+  });
+});
+
+
+describe('production snapshot privacy and malformed response boundary', () => {
+  function transportFor(data: unknown) {
+    const fetchFn = vi.fn(async (_input: string, _init?: RequestInit) => new Response(JSON.stringify({
+      ok: true, data, request_id: 'qc-snapshot-boundary',
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+    const transport = new FetchCouncilSessionTransport(new CouncilApiClient({ fetchFn }));
+    const openStream = vi.spyOn(transport, 'openStream');
+    return { transport, fetchFn, openStream };
+  }
+
+  function renderTransport(transport: CouncilSessionTransport) {
+    render(<CouncilLiveSession sessionId={FIXTURE_SESSION_ID} transport={transport}
+      decisionTitle={FIXTURE_BRIEF.question} medallionSrcBySeat={small} />);
+  }
+
+  it('renders direct support-only invalidation as private without opening a stream or reading more data', async () => {
+    const signal = {
+      kind: 'council.session.invalidated', session_id: FIXTURE_SESSION_ID,
+      scope: FIXTURE_SCOPE, state_version: 3, last_sequence: 2,
+      occurred_at: '2026-10-14T12:00:00Z',
+    };
+    const { transport, fetchFn, openStream } = transportFor(signal);
+    renderTransport(transport);
+    await screen.findByTestId('council-live-private');
+    expect(screen.queryByTestId('council-room')).toBeNull();
+    expect(screen.queryByTestId('council-live-error')).toBeNull();
+    expect(openStream).not.toHaveBeenCalled();
+    expect(fetchFn).toHaveBeenCalledOnce();
+    expect(fetchFn.mock.calls[0]?.[0]).toContain('/events?snapshot=1');
+  });
+
+  const valid = snapshotOf([FIXTURE_EVENT_CREATED]);
+  it.each([
+    ['null response', null],
+    ['unknown kind', { kind: 'unexpected', session_id: FIXTURE_SESSION_ID }],
+    ['foreign snapshot', { ...valid, session_id: 'foreign-session' }],
+    ['foreign projection', { ...valid, projection: { ...valid.projection, session_id: 'foreign-session' } }],
+    ['missing projection', { ...valid, projection: undefined }],
+    ['malformed seats', { ...valid, projection: { ...valid.projection, seats: null } }],
+    ['obsolete nested snapshot wrapper', { kind: 'snapshot', snapshot: valid }],
+    ['foreign invalidation', { kind: 'council.session.invalidated', session_id: 'foreign-session' }],
+  ])('fails closed for %s', async (_label, data) => {
+    const { transport, fetchFn, openStream } = transportFor(data);
+    renderTransport(transport);
+    const error = await screen.findByTestId('council-live-error');
+    expect(error.textContent).toContain('invalid session snapshot');
+    expect(screen.queryByTestId('council-room')).toBeNull();
+    expect(screen.queryByTestId('council-live-private')).toBeNull();
+    expect(openStream).not.toHaveBeenCalled();
+    expect(fetchFn).toHaveBeenCalledOnce();
+  });
+});
+
+
+describe('session ownership during delayed reads and stale callbacks', () => {
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((done) => { resolve = done; });
+    return { promise, resolve };
+  }
+  function scopedSnapshot(id: string, completed = false): CouncilCatchUp {
+    const snapshot = snapshotOf(completed
+      ? [FIXTURE_EVENT_CREATED, FIXTURE_EVENT_CARD_SINEK] : [FIXTURE_EVENT_CREATED]);
+    return { kind: 'snapshot', snapshot: {
+      ...snapshot, session_id: id,
+      projection: { ...snapshot.projection, session_id: id,
+        scope: { ...snapshot.projection.scope, session_id: id } },
+    } };
+  }
+  function invalidation(id: string): CouncilCatchUp {
+    return { kind: 'invalidation', signal: {
+      kind: 'council.session.invalidated', session_id: id,
+      scope: { ...FIXTURE_SCOPE, session_id: id }, state_version: 3,
+      last_sequence: 2, occurred_at: '2026-10-14T12:00:00Z',
+    } };
+  }
+  function element(id: string, transport: CouncilSessionTransport) {
+    return <CouncilLiveSession sessionId={id} transport={transport}
+      decisionTitle={FIXTURE_BRIEF.question} medallionSrcBySeat={small} />;
+  }
+
+  it('hides prior private content synchronously during the second read and ignores closed-stream callbacks', async () => {
+    const next = deferred<CouncilCatchUp>();
+    let oldHandlers!: CouncilStreamHandlers;
+    const closed = vi.fn();
+    const transport: CouncilSessionTransport = {
+      snapshot: (id) => id === FIXTURE_SESSION_ID
+        ? Promise.resolve(scopedSnapshot(id, true)) : next.promise,
+      page: async () => pageOf([]),
+      openStream: (_id, _cursor, handlers) => { oldHandlers = handlers; return { close: closed }; },
+    };
+    const view = render(element(FIXTURE_SESSION_ID, transport));
+    await screen.findByTestId('council-room');
+    expect(seatStatus('simon-sinek')).toBe('Completed');
+    view.rerender(element('private-second-session', transport));
+    expect(screen.queryByTestId('council-room')).toBeNull();
+    expect(screen.getByTestId('council-live-loading')).toBeTruthy();
+    expect(closed).toHaveBeenCalledOnce();
+    await act(async () => {
+      oldHandlers.onSnapshot(snapshotOf([FIXTURE_EVENT_CREATED, FIXTURE_EVENT_CARD_SINEK]));
+      oldHandlers.onEvent(FIXTURE_EVENT_CARD_ALICHE);
+      oldHandlers.onInvalidation();
+      oldHandlers.onStreamError('private old-session error');
+      oldHandlers.onDisconnect();
+    });
+    expect(screen.getByTestId('council-live-loading')).toBeTruthy();
+    expect(screen.queryByTestId('council-room')).toBeNull();
+    await act(async () => { next.resolve(invalidation('private-second-session')); });
+    expect(screen.getByTestId('council-live-private')).toBeTruthy();
+    expect(screen.queryByTestId('council-room')).toBeNull();
+  });
+
+  it('ignores an old resync promise after the next session has loaded', async () => {
+    const pendingPage = deferred<CouncilCatchUp>();
+    const handlersById = new Map<string, CouncilStreamHandlers>();
+    const page = vi.fn(() => pendingPage.promise);
+    const transport: CouncilSessionTransport = {
+      snapshot: async (id) => scopedSnapshot(id, id === FIXTURE_SESSION_ID),
+      page,
+      openStream: (id, _cursor, handlers) => {
+        handlersById.set(id, handlers); return { close: () => undefined };
+      },
+    };
+    const view = render(element(FIXTURE_SESSION_ID, transport));
+    await screen.findByTestId('council-room');
+    await act(async () => { handlersById.get(FIXTURE_SESSION_ID)!.onEvent(FIXTURE_EVENT_GAP); });
+    expect(page).toHaveBeenCalledOnce();
+    view.rerender(element('authorized-second-session', transport));
+    expect(screen.queryByTestId('council-room')).toBeNull();
+    await screen.findByTestId('council-room');
+    expect(seatStatus('simon-sinek')).toBe('Waiting in queue');
+    await act(async () => { pendingPage.resolve(invalidation(FIXTURE_SESSION_ID)); });
+    expect(screen.queryByTestId('council-live-private')).toBeNull();
+    expect(screen.getByTestId('council-room')).toBeTruthy();
+    expect(seatStatus('simon-sinek')).toBe('Waiting in queue');
+  });
+
+  it('ignores an old initial snapshot that resolves after the next session', async () => {
+    const first = deferred<CouncilCatchUp>();
+    const transport: CouncilSessionTransport = {
+      snapshot: (id) => id === FIXTURE_SESSION_ID
+        ? first.promise : Promise.resolve(scopedSnapshot(id)),
+      page: async () => pageOf([]),
+      openStream: () => ({ close: () => undefined }),
+    };
+    const view = render(element(FIXTURE_SESSION_ID, transport));
+    view.rerender(element('authorized-second-session', transport));
+    await screen.findByTestId('council-room');
+    await act(async () => { first.resolve(scopedSnapshot(FIXTURE_SESSION_ID, true)); });
+    expect(screen.getByTestId('council-room')).toBeTruthy();
+    expect(seatStatus('simon-sinek')).toBe('Waiting in queue');
   });
 });

@@ -24,6 +24,7 @@
 
 import type {
   CouncilCatchUp,
+  CouncilInvalidationSignal,
   CouncilResyncSnapshot,
   CouncilWireEvent,
 } from '@/lib/council/events/types';
@@ -141,10 +142,20 @@ export class CouncilApiClient {
     );
   }
 
-  getEventsSnapshot(sessionId: string): Promise<CouncilCatchUp> {
-    return this.request(
+  async getEventsSnapshot(sessionId: string): Promise<CouncilCatchUp> {
+    // The explicit snapshot route returns a raw snapshot/signal, whereas
+    // the cursor route returns CouncilCatchUp. Normalize at the transport.
+    const result = await this.request<CouncilResyncSnapshot | CouncilInvalidationSignal>(
       `/api/council/sessions/${encodeURIComponent(sessionId)}/events?snapshot=1`,
     );
+    if (result?.session_id === sessionId && result.kind === 'snapshot') {
+      return { kind: 'snapshot', snapshot: result };
+    }
+    if (result?.session_id === sessionId && result.kind === 'council.session.invalidated') {
+      return { kind: 'invalidation', signal: result };
+    }
+    throw new CouncilApiClientError('UNEXPECTED_RESPONSE',
+      'The Council events endpoint returned an invalid session snapshot.', 200, 'retry');
   }
 
   getEventsPage(sessionId: string, after: number): Promise<CouncilCatchUp> {

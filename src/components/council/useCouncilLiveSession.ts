@@ -24,7 +24,7 @@
  *     persistently as a recorded replay (T101).
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { CouncilClientReducer } from '@/lib/council/events/reducer';
 import type {
   CouncilCatchUp,
@@ -49,196 +49,201 @@ export interface CouncilLiveSession {
 
 const RECONNECT_DELAY_MS = 3000;
 
+interface OwnedSessionState extends Omit<CouncilLiveSession, 'reconnect'> {
+  owner: object;
+}
+
 export function useCouncilLiveSession(
   sessionId: string,
   transport: CouncilSessionTransport,
   options: { replay?: boolean } = {},
 ): CouncilLiveSession {
   const replay = options.replay ?? false;
-  const reducerRef = useRef<CouncilClientReducer | null>(null);
-  const reducerSessionRef = useRef<string | null>(null);
-  if (reducerRef.current === null || reducerSessionRef.current !== sessionId) {
-    reducerRef.current = new CouncilClientReducer(sessionId);
-    reducerSessionRef.current = sessionId;
-  }
-  const streamRef = useRef<{ close: () => void } | null>(null);
-  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const disposedRef = useRef(false);
+  // Each read lifecycle owns its display state. A new identity gates the old
+  // projection during render, before effect cleanup or the next read completes.
+  const owner = useMemo(() => ({}), [sessionId, transport, replay]);
+  const [state, setState] = useState<OwnedSessionState | null>(null);
+  const reconnectRef = useRef<{ owner: object; run: () => void } | null>(null);
+  const reconnect = useCallback(() => {
+    if (reconnectRef.current?.owner === owner) reconnectRef.current.run();
+  }, [owner]);
 
-  const [loadState, setLoadState] = useState<CouncilLoadState>('loading');
-  const [connection, setConnection] = useState<CouncilConnectionState>('connecting');
-  const [projection, setProjection] = useState<CouncilSessionProjection | null>(null);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  useEffect(() => {
+    const reducer = new CouncilClientReducer(sessionId);
+    let active = true;
+    let revoked = false;
+    let stream: { close: () => void } | null = null;
+    let streamGeneration = 0;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    const initial: OwnedSessionState = {
+      owner, loadState: 'loading', connection: 'connecting',
+      projection: null, errorMessage: null,
+    };
+    const current = () => active && !revoked;
+    const publish = (patch: Partial<OwnedSessionState>) => {
+      if (!current()) return;
+      setState((previous) => current()
+        ? { ...(previous?.owner === owner ? previous : initial), ...patch }
+        : previous);
+    };
+    publish(initial);
+    const syncProjection = () => publish({ projection: reducer.currentProjection });
+    const closeStream = () => {
+      streamGeneration += 1;
+      stream?.close();
+      stream = null;
+    };
+    const showPrivate = () => {
+      if (!current()) return;
+      closeStream();
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      // Revoke this lifecycle before any queued page or stream callback can
+      // publish content again. A fresh authorized lifecycle is required.
+      revoked = true;
+      setState((previous) => active
+        ? { ...initial, loadState: 'private', connection: 'disconnected' }
+        : previous);
+    };
 
-  const syncProjection = useCallback(() => {
-    const reducer = reducerRef.current;
-    setProjection(reducer ? reducer.currentProjection : null);
-  }, []);
-
-  const closeStream = useCallback(() => {
-    streamRef.current?.close();
-    streamRef.current = null;
-  }, []);
-
-  const applyCatchUp = useCallback(
-    (result: CouncilCatchUp): 'ok' | 'private' | 'gap' => {
-      const reducer = reducerRef.current;
-      if (!reducer) return 'ok';
+    const applyCatchUp = (result: CouncilCatchUp): 'ok' | 'private' | 'gap' => {
+      if (!result || typeof result !== 'object' || !('kind' in result)) {
+        throw new Error('The Council events endpoint returned an invalid event response.');
+      }
       if (result.kind === 'invalidation') return 'private';
       if (result.kind === 'snapshot') {
-        reducer.applySnapshot(result.snapshot);
+        const snapshot = result.snapshot;
+        if (
+          !snapshot || snapshot.kind !== 'snapshot' ||
+          snapshot.session_id !== sessionId ||
+          !snapshot.projection || snapshot.projection.session_id !== sessionId ||
+          !Array.isArray(snapshot.projection.seats)
+        ) {
+          throw new Error('The Council events endpoint returned an invalid session snapshot.');
+        }
+        reducer.applySnapshot(snapshot);
         syncProjection();
         return 'ok';
+      }
+      if (
+        result.kind !== 'page' || !result.page ||
+        result.page.kind !== 'events' || result.page.session_id !== sessionId ||
+        !Array.isArray(result.page.events)
+      ) {
+        throw new Error('The Council events endpoint returned an invalid event page.');
       }
       const outcomes = reducer.applyPage(result.page.events);
       syncProjection();
       return outcomes.includes('gap') ? 'gap' : 'ok';
-    },
-    [syncProjection],
-  );
+    };
 
-  const resync = useCallback(async (): Promise<'ok' | 'private'> => {
-    const reducer = reducerRef.current;
-    if (!reducer) return 'ok';
-    setConnection('resyncing');
-    const page = await transport.page(sessionId, reducer.cursor);
-    const pageResult = applyCatchUp(page);
-    if (pageResult !== 'gap') return pageResult;
-    const snapshot = await transport.snapshot(sessionId);
-    const snapshotResult = applyCatchUp(snapshot);
-    // A wholesale snapshot is authoritative: it cannot leave a gap.
-    return snapshotResult === 'gap' ? 'ok' : snapshotResult;
-  }, [applyCatchUp, sessionId, transport]);
+    const resync = async (): Promise<'ok' | 'private' | 'cancelled'> => {
+      if (!current()) return 'cancelled';
+      publish({ connection: 'resyncing' });
+      const page = await transport.page(sessionId, reducer.cursor);
+      if (!current()) return 'cancelled';
+      const result = applyCatchUp(page);
+      if (result !== 'gap') return result;
+      const snapshot = await transport.snapshot(sessionId);
+      if (!current()) return 'cancelled';
+      return applyCatchUp(snapshot) === 'private' ? 'private' : 'ok';
+    };
 
-  const openStream = useCallback(() => {
-    const reducer = reducerRef.current;
-    if (!reducer || replay) return;
-    closeStream();
-    streamRef.current = transport.openStream(sessionId, reducer.cursor, {
-      onEvent: (event) => {
-        const outcome = reducer.applyEvent(event);
-        syncProjection();
-        if (outcome === 'gap') {
-          closeStream();
-          void resync()
-            .then((result) => {
-              if (disposedRef.current) return;
-              if (result === 'private') {
-                setLoadState('private');
-                return;
-              }
-              setConnection('live');
-              openStream();
-            })
-            .catch(() => {
-              if (!disposedRef.current) setConnection('disconnected');
-            });
-        }
-      },
-      onSnapshot: (snapshot) => {
-        reducer.applySnapshot(snapshot);
-        syncProjection();
-      },
-      onInvalidation: () => {
-        closeStream();
-        setLoadState('private');
-      },
-      onStreamError: (message) => {
-        setErrorMessage(message);
-        setConnection('disconnected');
-      },
-      onDisconnect: () => {
-        if (disposedRef.current) return;
-        setConnection('disconnected');
-        if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
-        reconnectTimerRef.current = setTimeout(() => {
-          void reconnectRef.current();
-        }, RECONNECT_DELAY_MS);
-      },
-    });
-  }, [closeStream, replay, resync, sessionId, syncProjection, transport]);
-
-  const reconnect = useCallback(async () => {
-    if (disposedRef.current) return;
-    try {
-      const result = await resync();
-      if (disposedRef.current) return;
-      if (result === 'private') {
-        setLoadState('private');
-        return;
+    const reconnectNow = async () => {
+      if (!current()) return;
+      try {
+        const result = await resync();
+        if (!current() || result === 'cancelled') return;
+        if (result === 'private') return showPrivate();
+        publish({ loadState: 'ready', connection: 'live', errorMessage: null });
+        openStream();
+      } catch {
+        publish({ connection: 'disconnected' });
       }
-      setLoadState('ready');
-      setConnection('live');
-      setErrorMessage(null);
-      openStream();
-    } catch {
-      if (!disposedRef.current) setConnection('disconnected');
-    }
-  }, [openStream, resync]);
+    };
 
-  const reconnectRef = useRef(reconnect);
-  reconnectRef.current = reconnect;
+    const openStream = () => {
+      if (!current() || replay) return;
+      closeStream();
+      const generation = streamGeneration;
+      const ownsStream = () => current() && generation === streamGeneration;
+      const opened = transport.openStream(sessionId, reducer.cursor, {
+        onEvent: (event) => {
+          if (!ownsStream()) return;
+          const outcome = reducer.applyEvent(event);
+          syncProjection();
+          if (outcome === 'gap') {
+            closeStream();
+            void reconnectNow();
+          }
+        },
+        onSnapshot: (snapshot) => {
+          if (!ownsStream()) return;
+          applyCatchUp({ kind: 'snapshot', snapshot });
+        },
+        onInvalidation: () => {
+          if (ownsStream()) showPrivate();
+        },
+        onStreamError: (message) => {
+          if (ownsStream()) publish({ errorMessage: message, connection: 'disconnected' });
+        },
+        onDisconnect: () => {
+          if (!ownsStream()) return;
+          closeStream();
+          publish({ connection: 'disconnected' });
+          if (reconnectTimer) clearTimeout(reconnectTimer);
+          reconnectTimer = setTimeout(() => { void reconnectNow(); }, RECONNECT_DELAY_MS);
+        },
+      });
+      // A transport can invalidate/disconnect synchronously while opening.
+      if (ownsStream()) stream = opened;
+      else opened.close();
+    };
+    reconnectRef.current = { owner, run: () => { void reconnectNow(); } };
 
-  useEffect(() => {
-    disposedRef.current = false;
-    let cancelled = false;
-    (async () => {
+    void (async () => {
       try {
         const snapshot = await transport.snapshot(sessionId);
-        if (cancelled || disposedRef.current) return;
+        if (!current()) return;
         const applied = applyCatchUp(snapshot);
-        if (applied === 'private') {
-          setLoadState('private');
-          return;
-        }
+        if (applied === 'private') return showPrivate();
         if (applied === 'gap') {
           const result = await resync();
-          if (cancelled || disposedRef.current) return;
-          if (result === 'private') {
-            setLoadState('private');
-            return;
-          }
+          if (!current() || result === 'cancelled') return;
+          if (result === 'private') return showPrivate();
         }
-        setLoadState('ready');
+        publish({ loadState: 'ready' });
         if (replay) {
-          // Replay reads the committed record only; drain remaining
-          // pages in order, then stop. No live stream is opened.
-          const reducer = reducerRef.current;
-          if (reducer) {
-            for (let guard = 0; guard < 100; guard += 1) {
-              const page = await transport.page(sessionId, reducer.cursor);
-              if (cancelled || disposedRef.current) return;
-              const result = applyCatchUp(page);
-              if (result === 'private') {
-                setLoadState('private');
-                return;
-              }
-              if (result === 'gap') break;
-              if (page.kind !== 'page' || !page.page.has_more) break;
-            }
+          for (let guard = 0; guard < 100; guard += 1) {
+            const page = await transport.page(sessionId, reducer.cursor);
+            if (!current()) return;
+            const result = applyCatchUp(page);
+            if (result === 'private') return showPrivate();
+            if (result === 'gap' || page.kind !== 'page' || !page.page.has_more) break;
           }
-          setConnection('disconnected');
+          publish({ connection: 'disconnected' });
           return;
         }
-        setConnection('live');
+        publish({ connection: 'live' });
         openStream();
       } catch (error) {
-        if (cancelled || disposedRef.current) return;
-        setLoadState('error');
-        setErrorMessage(
-          error instanceof Error
-            ? error.message
-            : 'The session record could not be loaded.',
-        );
+        publish({
+          loadState: 'error',
+          errorMessage: error instanceof Error ? error.message : 'The session record could not be loaded.',
+        });
       }
     })();
     return () => {
-      cancelled = true;
-      disposedRef.current = true;
+      active = false;
       closeStream();
-      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (reconnectRef.current?.owner === owner) reconnectRef.current = null;
     };
-  }, [applyCatchUp, closeStream, openStream, replay, resync, sessionId, transport]);
+  }, [owner, replay, sessionId, transport]);
 
-  return { loadState, connection, projection, errorMessage, reconnect };
+  if (state?.owner !== owner) {
+    return { loadState: 'loading', connection: 'connecting', projection: null,
+      errorMessage: null, reconnect };
+  }
+  return { loadState: state.loadState, connection: state.connection,
+    projection: state.projection, errorMessage: state.errorMessage, reconnect };
 }
