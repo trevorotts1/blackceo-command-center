@@ -6,18 +6,15 @@
  * The session home (Section 21): the frozen brief, the pinned route
  * snapshot, CWE-032's council room embedded (never rebuilt), the
  * verdict in Section 21's fixed order, and the linked-consult entry.
- * Starting a run calls the registered start endpoint through the
- * typed bindings; until CWE-027 wires the run service the foundation
- * answers FEATURE_NOT_READY, and this page renders that typed state
- * naming the owner. No progress is ever simulated: the room shows
- * seats in their honest pre-run state, because per-seat live updates
- * arrive through the events endpoint owned by CWE-030, which is
- * registered but not wired.
+ * The page uses the already-wired CWE-030 journal snapshot/SSE service
+ * after a run is queued, instead of guessing completed advisor seats
+ * from the coarse session state. The pre-run room remains an explicit
+ * waiting-only preview. Failed/private event reads show their real
+ * state; never pretend an unavailable stream returned advisor answers.
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  endpointReadiness,
   featureNotReadyState,
   getModels,
   getSession,
@@ -33,6 +30,8 @@ import {
 import type { RouteCatalogEntry } from '@/lib/council/providers';
 import { council } from './council-theme';
 import { CouncilShell } from './CouncilShell';
+import { CouncilLiveSession } from './CouncilLiveSession';
+import { CouncilApiClient, FetchCouncilSessionTransport } from './council-session-client';
 import type { CouncilRoomView } from './council-room-types';
 import { COUNCIL_MEDALLION_LARGE_SRC, COUNCIL_MEDALLION_SMALL_SRC } from './medallions';
 import { identityLevelLabel } from './ModelRoutePicker';
@@ -42,25 +41,25 @@ import { ConsultPanel } from './ConsultPanel';
 import { sessionStateLabel } from './CouncilHome';
 
 /**
- * The room view derivable from real reads alone. Before a run, every
- * seat is queued: nothing has been produced, and the UI says exactly
- * that. A completed session's seats completed; their cards are read
- * from the committed record, not reconstructed here.
+ * Only draft/ready sessions can be projected directly from their session
+ * summary. Once queued, advisor status MUST come from committed journal
+ * receipts via CouncilLiveSession; a COMPLETED aggregate is not proof
+ * that all nine advisor cards exist or passed validation.
  */
 export function roomViewFromSession(session: CouncilStoredSession): CouncilRoomView {
   const state = session.state.state;
-  const completed = state === 'COMPLETED';
-  const round =
-    state === 'ROUND_1' ? 1 : state === 'ROUND_2' ? 2 : state === 'ROUND_3' ? 3 : null;
+  if (state !== 'DRAFT' && state !== 'READY') {
+    throw new Error('Post-start advisor states require a committed event projection.');
+  }
   return {
     decisionTitle: session.brief.question,
     phaseLabel: sessionStateLabel(state),
-    currentRound: round as 1 | 2 | 3 | null,
+    currentRound: null,
     cruxLabel: null,
-    mode: completed ? 'replay' : 'live',
+    mode: 'live',
     seats: session.spec.seat_ids.map((seatId) => ({
       seatId,
-      status: completed ? ('completed' as const) : ('queued' as const),
+      status: 'queued' as const,
       card: null,
     })),
   };
@@ -107,8 +106,16 @@ export function SessionDetail({ sessionId }: { sessionId: string }) {
     };
   }, [sessionId]);
 
-  const room = useMemo(() => (session ? roomViewFromSession(session) : null), [session]);
-  const eventsReadiness = endpointReadiness('council.sessions.events.get');
+  const preRun = session !== null &&
+    (session.state.state === 'DRAFT' || session.state.state === 'READY');
+  const room = useMemo(
+    () => (session && preRun ? roomViewFromSession(session) : null),
+    [session, preRun],
+  );
+  // Stable identity is critical: recreating the transport each render would
+  // reopen SSE and retry snapshots continuously.
+  const liveTransport = useMemo(() =>
+    new FetchCouncilSessionTransport(new CouncilApiClient()), []);
 
   const startEligible = session !== null
     && accessVia !== 'support'
@@ -258,21 +265,29 @@ export function SessionDetail({ sessionId }: { sessionId: string }) {
         ) : null}
       </section>
 
-      {room ? (
-        <section data-testid="session-room">
-          <CouncilShell
-            room={room}
+      <section data-testid="session-room">
+        {preRun && room ? (
+          <>
+            <CouncilShell
+              room={room}
+              medallionSrcBySeat={COUNCIL_MEDALLION_SMALL_SRC}
+              medallionLargeSrcBySeat={COUNCIL_MEDALLION_LARGE_SRC}
+            />
+            <p className={council.meta} data-testid="session-room-prerun-note">
+              This session has not started. All nine advisor positions are waiting;
+              no debate, stance or verdict has been inferred from a draft.
+            </p>
+          </>
+        ) : (
+          <CouncilLiveSession
+            sessionId={sessionId}
+            transport={liveTransport}
+            decisionTitle={session.brief.question}
             medallionSrcBySeat={COUNCIL_MEDALLION_SMALL_SRC}
             medallionLargeSrcBySeat={COUNCIL_MEDALLION_LARGE_SRC}
           />
-          <p className={council.meta}>
-            Live per-seat updates arrive through the session events endpoint (
-            {eventsReadiness.surface ?? 'session events'}), which is registered but not wired
-            yet; its owning unit is {eventsReadiness.owningUnit ?? 'unassigned'}. Until then
-            the room shows the honest state from the session record itself.
-          </p>
-        </section>
-      ) : null}
+        )}
+      </section>
 
       <section data-testid="session-verdict">
         <h2 className={council.heading}>Verdict</h2>
