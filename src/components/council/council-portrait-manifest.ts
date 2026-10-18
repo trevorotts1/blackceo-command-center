@@ -56,9 +56,34 @@ function isHash(value: unknown): value is string {
   return typeof value === 'string' && HASH.test(value);
 }
 
+// Match the producer's UTC timestamp grammar without Date.parse normalizing
+// impossible dates (for example February 30) into a different calendar day.
+function isUtcReviewTimestamp(value: unknown): boolean {
+  if (!goodString(value)) return false;
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d+)?Z$/.exec(value);
+  if (!match) return false;
+  const [year, month, day, hour, minute, second] = match.slice(1, 7).map(Number);
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const monthDays = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  // Python 3.14's producer also accepts ISO end-of-day midnight. Preserve
+  // that existing consumer behavior, but never normalize an impossible date
+  // or a non-midnight 24th hour. Fractional seconds must all be zero there.
+  const endOfDay = hour === 24 && minute === 0 && second === 0 &&
+    (!match[7] || /^\.0+$/.test(match[7])) && !(year === 9999 && month === 12 && day === 31);
+  return year >= 1 && month >= 1 && month <= 12 && day >= 1 &&
+    day <= monthDays[month - 1] && (hour <= 23 || endOfDay) && minute <= 59 && second <= 59;
+}
+
+// Older producer manifests omit this marker. If supplied it must explicitly
+// be false; true or a coerced/string value can never become a release.
+function hasProductionMarker(record: Data): boolean {
+  return !('test_only' in record) || record.test_only === false;
+}
+
 export function validateApprovedCouncilPortraitManifest(raw: unknown): ApprovedCouncilPortraitMaps {
   const manifest = object(raw);
   if (
+    !hasProductionMarker(manifest) ||
     manifest.schema !== 'blackceo.council-portraits/v1' ||
     manifest.source_kind !== 'reviewed_original_editorial_illustrations' ||
     manifest.seat_count !== COUNCIL_SEAT_IDS.length ||
@@ -83,25 +108,25 @@ export function validateApprovedCouncilPortraitManifest(raw: unknown): ApprovedC
     const seatId = entry.seat_id as CouncilSeatId;
     const identity = COUNCIL_SEAT_ROSTER.find((seat) => seat.seatId === seatId);
     if (
+      !hasProductionMarker(entry) ||
       !identity ||
       entry.display_name !== identity.displayName ||
       entry.approved_subject !== identity.displayName ||
       entry.identity_review_status !== 'approved' ||
       !goodString(entry.identity_review_note) ||
       !goodString(entry.approved_by) ||
-      entry.approved_by === 'synthetic-unit-test-harness' ||
-      !goodString(entry.reviewed_at) ||
-      !/^\d{4}-\d\d-\d\dT.*Z$/.test(entry.reviewed_at) ||
-      !Number.isFinite(Date.parse(entry.reviewed_at)) ||
+      entry.approved_by.trim() === 'synthetic-unit-test-harness' ||
+      !isUtcReviewTimestamp(entry.reviewed_at) ||
       !goodString(entry.alt_text) ||
       !goodString(entry.source_note) ||
       !goodString(entry.creation_method) ||
-      !rights.has(String(entry.rights_status)) ||
+      typeof entry.rights_status !== 'string' ||
+      !rights.has(entry.rights_status) ||
       !isHash(entry.master_sha256) ||
       !isHash(entry.reviewed_master_sha256) ||
       entry.reviewed_master_sha256 !== entry.master_sha256
     ) {
-      fail('unreviewed, unsigned or wrong-subject portrait for ' + seatId);
+      fail('invalid review metadata or wrong-subject portrait for ' + seatId);
     }
     const variants = object(entry.variants);
     if (

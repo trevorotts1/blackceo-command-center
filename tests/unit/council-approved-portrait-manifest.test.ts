@@ -102,7 +102,7 @@ test('Steve Harvey, a swapped portrait identity, missing seat and duplicated nam
   }));
 });
 
-test('no signed review, test-only art or changed source bytes can be surfaced as approved', () => {
+test('missing review metadata, test-only art or changed master hash references are rejected', () => {
   assertReject(altered((m) => {
     ((m.entries as Obj[])[0]).reviewed_master_sha256 = B;
   }));
@@ -143,7 +143,7 @@ test('no raw draft, empty or malformed artifact is treated as a complete illustr
   }
 });
 
-test('same-origin signed manifest lookup supplies approved room and drawer portraits only', async () => {
+test('same-origin manifest lookup validates review metadata before returning portrait maps', async () => {
   let called = 0;
   const fetcher = (async (url: RequestInfo | URL, init?: RequestInit) => {
     called += 1;
@@ -177,4 +177,63 @@ test('missing or malformed manifest remains visibly unavailable rather than forg
     (async () => { throw new Error('network offline'); }) as typeof fetch,
   );
   assert.equal(interrupted.status, 'unavailable');
+});
+
+
+test('explicit test-only markers fail closed at cohort and entry level', () => {
+  for (const value of [true, 'true', 'false', 0, null, [], {}]) {
+    assertReject(altered((m) => { m.test_only = value; }));
+    assertReject(altered((m) => { (m.entries as Obj[])[0].test_only = value; }));
+  }
+  const production = altered((m) => {
+    m.test_only = false;
+    for (const entry of m.entries as Obj[]) entry.test_only = false;
+  });
+  assert.equal(Object.keys(validateApprovedCouncilPortraitManifest(production).roomSrcBySeat).length, 9);
+});
+
+test('whitespace cannot disguise the reserved synthetic reviewer', () => {
+  for (const value of [' synthetic-unit-test-harness ', '\t\nsynthetic-unit-test-harness\r', ['reviewer-v1-independent'], {}]) {
+    assertReject(altered((m) => { (m.entries as Obj[])[0].approved_by = value; }));
+  }
+});
+
+test('rights status must be a supported string rather than a coercible value', () => {
+  for (const value of [['owned_generated'], ['licensed_original'], { toString: () => 'owned_original' }, null, true]) {
+    assertReject(altered((m) => { (m.entries as Obj[])[0].rights_status = value; }));
+  }
+});
+
+test('UTC review timestamps reject normalized calendar dates and unsupported clock forms', () => {
+  for (const value of [
+    '2026-02-30T12:00:00Z', '2026-02-29T12:00:00Z', '1900-02-29T12:00:00Z',
+    '2026-04-31T12:00:00Z', '0000-01-01T00:00:00Z', '2026-00-01T00:00:00Z',
+    '2026-13-01T00:00:00Z', '2026-01-00T00:00:00Z', '2026-10-17T24:01:00Z', '2026-10-17T24:00:01Z', '2026-10-17T24:00:00.1Z', '9999-12-31T24:00:00Z',
+    '2026-10-17T12:60:00Z', '2026-10-17T12:00:60Z', '2026-10-17T12:00Z',
+    '2026-10-17T12:00:00+00:00', '2026-10-17T12:00:00.Z', ['2026-10-17T12:00:00Z'],
+  ]) {
+    assertReject(altered((m) => { (m.entries as Obj[])[0].reviewed_at = value; }));
+  }
+});
+
+test('real calendar dates and producer-supported fractional UTC timestamps remain compatible', () => {
+  for (const value of ['0001-01-01T00:00:00Z', '2000-02-29T23:59:59Z', '2024-02-29T12:00:00.123456789Z', '2026-10-17T12:00:00.1Z', '2026-10-17T24:00:00Z', '2026-10-17T24:00:00.000Z']) {
+    const manifest = altered((m) => { (m.entries as Obj[])[0].reviewed_at = value; });
+    assert.equal(Object.keys(validateApprovedCouncilPortraitManifest(manifest).roomSrcBySeat).length, 9);
+  }
+});
+
+test('malformed review metadata remains unavailable through the release loader', async () => {
+  for (const mutate of [
+    (m: Obj) => { m.test_only = true; },
+    (m: Obj) => { (m.entries as Obj[])[0].test_only = true; },
+    (m: Obj) => { (m.entries as Obj[])[0].approved_by = ' synthetic-unit-test-harness '; },
+    (m: Obj) => { (m.entries as Obj[])[0].reviewed_at = '2026-02-30T12:00:00Z'; },
+    (m: Obj) => { (m.entries as Obj[])[0].rights_status = ['owned_generated']; },
+  ]) {
+    const result = await readApprovedCouncilPortraitRelease(
+      (async () => Response.json(altered(mutate))) as typeof fetch,
+    );
+    assert.equal(result.status, 'unavailable');
+  }
 });
