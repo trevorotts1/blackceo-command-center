@@ -5,6 +5,9 @@ on:
     paths:
       - "src/lib/council/journey-client.ts"
       - "src/components/council/SessionDetail.tsx"
+      - "src/components/council/CouncilRunStartPanel.tsx"
+      - "src/app/council/[sessionId]/page.tsx"
+      - "tests/unit/council-mounted-start.test.tsx"
       - "tests/unit/council-journey-render.test.tsx"
       - ".github/workflows/council-run-start-receipt.yml"
   workflow_dispatch:
@@ -24,4 +27,4 @@ jobs:
       - name: Install locked dependencies
         run: npm ci --no-audit --no-fund
       - name: Verify actual typed Start admission and read-only support
-        run: npx vitest run --config vitest.component.config.ts tests/unit/council-journey-render.test.tsx
+        run: npx vitest run --config vitest.component.config.ts tests/unit/council-journey-render.test.tsx tests/unit/council-mounted-start.test.tsx
