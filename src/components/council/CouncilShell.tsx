@@ -68,14 +68,17 @@ export function CouncilShell({
   initialView = 'room',
 }: CouncilShellProps) {
   const [view, setView] = useState<CouncilViewMode>(initialView);
-  const [selectedSeat, setSelectedSeat] = useState<CouncilSeatView | null>(null);
+  // Track stable identity rather than a snapshot object: cards, stance and
+  // state can arrive while a drawer stays open during a live Council run.
+  const [selectedSeatId, setSelectedSeatId] = useState<string | null>(null);
+  const selectedSeat = room.seats.find((seat) => seat.seatId === selectedSeatId) ?? null;
   const reducedMotion = usePrefersReducedMotion();
   const badge = roomModeBadge(room.mode);
 
   const handleSelectSeat = useCallback((seat: CouncilSeatView) => {
-    setSelectedSeat(seat);
+    setSelectedSeatId(seat.seatId);
   }, []);
-  const handleCloseDrawer = useCallback(() => setSelectedSeat(null), []);
+  const handleCloseDrawer = useCallback(() => setSelectedSeatId(null), []);
 
   return (
     <div
@@ -116,14 +119,14 @@ export function CouncilShell({
         <CouncilRoom
           room={room}
           medallionSrcBySeat={medallionSrcBySeat}
-          selectedSeatId={selectedSeat?.seatId ?? null}
+          selectedSeatId={selectedSeatId}
           onSelectSeat={handleSelectSeat}
         />
       ) : (
         <CouncilReadingView
           room={room}
           medallionSrcBySeat={medallionSrcBySeat}
-          selectedSeatId={selectedSeat?.seatId ?? null}
+          selectedSeatId={selectedSeatId}
           onSelectSeat={handleSelectSeat}
         />
       )}

@@ -312,3 +312,37 @@ describe('fireEvent smoke (drawer close button restores focus)', () => {
     expect(document.activeElement).toBe(seat);
   });
 });
+
+describe('live advisor selection continuity (WER-018)', () => {
+  it('refreshes the open drawer when a committed advisor card arrives without stealing focus', async () => {
+    const user = userEvent.setup();
+    const { rerender } = renderShell(QUEUED_ROOM_VIEW);
+    const selected = screen.getByTestId('council-seat-tiffany-aliche');
+    await user.click(selected);
+    const waitingDrawer = screen.getByRole('dialog');
+    expect(waitingDrawer.textContent).toContain('waiting in the queue');
+    const close = within(waitingDrawer).getByRole('button', { name: /close/i });
+    expect(document.activeElement).toBe(close);
+
+    // Same advisor identity, new committed room snapshot. The drawer must
+    // show the current card, not the seat object from the first click.
+    rerender(
+      <CouncilShell
+        room={SAMPLE_ROOM_VIEW}
+        medallionSrcBySeat={small}
+        medallionLargeSrcBySeat={large}
+      />,
+    );
+
+    const updatedDrawer = screen.getByRole('dialog');
+    expect(updatedDrawer.textContent).toContain(
+      'Delivery capacity is unproven at twice the volume',
+    );
+    expect(updatedDrawer.textContent).toContain('Confirm the cash reserve covers the full pilot cost');
+    expect(document.activeElement).toBe(close);
+
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(document.activeElement).toBe(selected);
+  });
+});
