@@ -355,17 +355,36 @@ describe('live session screen', () => {
     );
   });
 
-  it('replay mode is persistently labeled and never opens the live stream', async () => {
+  it('replay mode uses saved events from cursor zero, supports seeking, and never opens live SSE', async () => {
     const transport = new FakeTransport({
       kind: 'snapshot',
       snapshot: snapshotOf([FIXTURE_EVENT_CREATED, FIXTURE_EVENT_CARD_SINEK]),
     });
+    // Real playback MUST load history from zero, not use the last-state
+    // snapshot as a fabricated video timeline.
+    transport.pages.push(pageOf([FIXTURE_EVENT_CREATED, FIXTURE_EVENT_CARD_SINEK]));
     renderLive(transport, true);
     await screen.findByTestId('council-room');
     expect(screen.getByTestId('council-live-replay-note')).toBeTruthy();
-    expect(screen.getByTestId('council-shell-mode-badge').textContent).toBe(
-      'Recorded replay',
-    );
+    expect(screen.getByTestId('council-shell-mode-badge').textContent).toBe('Recorded replay');
+    expect(seatStatus('simon-sinek')).toBe('Waiting in queue');
+    fireEvent.change(screen.getByTestId('council-replay-seek'), {
+      target: { value: '60000' },
+    });
+    await waitFor(() => expect(seatStatus('simon-sinek')).toBe('Completed'));
+    expect(screen.getByTestId('council-replay-progress').textContent).toContain('2 of 2 recorded events');
+    expect(transport.handlers).toBeNull();
+  });
+
+  it('replay rejects unavailable saved history instead of displaying a fake latest snapshot', async () => {
+    const transport = new FakeTransport({
+      kind: 'snapshot',
+      snapshot: snapshotOf([FIXTURE_EVENT_CREATED, FIXTURE_EVENT_CARD_SINEK]),
+    });
+    // Empty initial event page cannot be turned into a valid timeline.
+    renderLive(transport, true);
+    await screen.findByTestId('council-replay-error');
+    expect(screen.queryByTestId('council-room')).toBeNull();
     expect(transport.handlers).toBeNull();
   });
 });

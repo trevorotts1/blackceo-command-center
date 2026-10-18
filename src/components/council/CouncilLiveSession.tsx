@@ -16,6 +16,7 @@
 
 import { council, councilcx } from './council-theme';
 import { CouncilShell } from './CouncilShell';
+import { CouncilRecordedReplay } from './CouncilRecordedReplay';
 import { useCouncilLiveSession } from './useCouncilLiveSession';
 import {
   projectionToRoomView,
@@ -33,7 +34,22 @@ export interface CouncilLiveSessionProps {
   medallionLargeSrcBySeat?: Readonly<Record<string, string>>;
 }
 
-export function CouncilLiveSession({
+export function CouncilLiveSession(props: CouncilLiveSessionProps) {
+  // Keep replay separate from the live-stream hook. It reconstructs
+  // history from cursor zero and cannot reuse the latest live snapshot.
+  if (props.replay) {
+    return <CouncilRecordedReplay
+      sessionId={props.sessionId}
+      transport={props.transport}
+      decisionTitle={props.decisionTitle}
+      medallionSrcBySeat={props.medallionSrcBySeat}
+      medallionLargeSrcBySeat={props.medallionLargeSrcBySeat}
+    />;
+  }
+  return <RunningCouncilSession {...props} />;
+}
+
+function RunningCouncilSession({
   sessionId,
   transport,
   decisionTitle,
