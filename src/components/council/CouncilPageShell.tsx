@@ -43,6 +43,7 @@ export function CouncilPageShell({
         <main>{children}</main>
         <footer className="council-journey-foot">
           <p className={council.meta}>{SECTION_7_LABEL}</p>
+          <p className={council.meta}><a href="/council/portraits/credits.html">Photograph credits</a></p>
         </footer>
       </div>
     </div>

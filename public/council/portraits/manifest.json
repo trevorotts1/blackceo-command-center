@@ -1,0 +1,351 @@
+{
+  "schema": "blackceo.council-portraits/v1",
+  "source_kind": "owner_selected_existing_images",
+  "seat_count": 9,
+  "room_bytes_total": 411432,
+  "entries": [
+    {
+      "seat_id": "simon-sinek",
+      "display_name": "Simon Sinek",
+      "master_sha256": "5b850a7fffa059d9233e2cec39c4cc2f769e4b32053f7dbb03ec048fd89e3142",
+      "attribution": "AI perspective inspired by the published work of Simon Sinek. Not the individual and not an endorsement.",
+      "selected_subject": "Simon Sinek",
+      "selected_master_sha256": "5b850a7fffa059d9233e2cec39c4cc2f769e4b32053f7dbb03ec048fd89e3142",
+      "rights_status": "unverified",
+      "creation_method": "Owner-authorized existing photograph; local crop and WebP resize; no generative editing.",
+      "source_note": "Shannon Smith / U.S. Navy. Source: https://commons.wikimedia.org/wiki/File:Simon_Sinek_speaks_at_Camp_H.M._Smith_in_Hawaii_(cropped).jpg Published license: Public domain (U.S. federal work). License: https://creativecommons.org/publicdomain/mark/1.0/ Changes: 4:5 crop, resize and WebP encoding. No endorsement implied.",
+      "alt_text": "Photograph of Simon Sinek",
+      "variants": {
+        "room": {
+          "src": "/council/portraits/simon-sinek-room.webp",
+          "width": 512,
+          "height": 640,
+          "media_type": "image/webp",
+          "bytes": 77434,
+          "sha256": "01473f2fd1484c46f6040a3450ccf684bb515a42aff17b8a7c3b87ec1637db99"
+        },
+        "detail": {
+          "src": "/council/portraits/simon-sinek-detail.webp",
+          "width": 800,
+          "height": 1000,
+          "media_type": "image/webp",
+          "bytes": 237040,
+          "sha256": "27e71838b5de189cd025cb2dbe6067d70f79e520eb0ac9b029affa3a0f94299b"
+        },
+        "thumb": {
+          "src": "/council/portraits/simon-sinek-thumb.webp",
+          "width": 160,
+          "height": 200,
+          "media_type": "image/webp",
+          "bytes": 8166,
+          "sha256": "3f0b1e7d4055d03068c29164403571edbe52c98036ab0799a22cdaf57a476af9"
+        }
+      }
+    },
+    {
+      "seat_id": "td-jakes",
+      "display_name": "T. D. Jakes",
+      "master_sha256": "fece99bb1f1664e454faa4e116b12b69ffe3ef2f5f7a3c810024956b9c47a1bc",
+      "attribution": "AI perspective inspired by the published work of T. D. Jakes. Not the individual and not an endorsement.",
+      "selected_subject": "T. D. Jakes",
+      "selected_master_sha256": "fece99bb1f1664e454faa4e116b12b69ffe3ef2f5f7a3c810024956b9c47a1bc",
+      "rights_status": "unverified",
+      "creation_method": "Owner-authorized existing photograph; local crop and WebP resize; no generative editing.",
+      "source_note": "Loren Kerns. Source: https://commons.wikimedia.org/wiki/File:TD_Jakes,_2020.jpg Published license: CC BY 2.0. License: https://creativecommons.org/licenses/by/2.0/ Changes: 4:5 crop, resize and WebP encoding. No endorsement implied.",
+      "alt_text": "Photograph of T. D. Jakes",
+      "variants": {
+        "room": {
+          "src": "/council/portraits/td-jakes-room.webp",
+          "width": 512,
+          "height": 640,
+          "media_type": "image/webp",
+          "bytes": 24724,
+          "sha256": "2926427c93a08e7570349f738b72e5420db9adb6794cd460aedb64593d124d5b"
+        },
+        "detail": {
+          "src": "/council/portraits/td-jakes-detail.webp",
+          "width": 800,
+          "height": 1000,
+          "media_type": "image/webp",
+          "bytes": 43900,
+          "sha256": "1f4ee9829368c13d0e5ca26a8b6ef08f726cb3d6e216b61ef8727ad198684ec8"
+        },
+        "thumb": {
+          "src": "/council/portraits/td-jakes-thumb.webp",
+          "width": 160,
+          "height": 200,
+          "media_type": "image/webp",
+          "bytes": 6276,
+          "sha256": "f89aa6bee0e32ff102e3e7e7a9c446bf97ca7b00f11fe1955b6afffbc347a1aa"
+        }
+      }
+    },
+    {
+      "seat_id": "oprah-winfrey",
+      "display_name": "Oprah Winfrey",
+      "master_sha256": "79fada3118274154748377c0dd7794719ef65269d0ad8b24d62b052608dec2b4",
+      "attribution": "AI perspective inspired by the published work of Oprah Winfrey. Not the individual and not an endorsement.",
+      "selected_subject": "Oprah Winfrey",
+      "selected_master_sha256": "79fada3118274154748377c0dd7794719ef65269d0ad8b24d62b052608dec2b4",
+      "rights_status": "unverified",
+      "creation_method": "Owner-authorized existing photograph; local crop and WebP resize; no generative editing.",
+      "source_note": "U.S. Embassy South Africa. Source: https://commons.wikimedia.org/wiki/File:Oprah_Winfrey_2016.jpg Published license: Public domain (U.S. federal work). License: https://creativecommons.org/publicdomain/mark/1.0/ Changes: 4:5 crop, resize and WebP encoding. No endorsement implied.",
+      "alt_text": "Photograph of Oprah Winfrey",
+      "variants": {
+        "room": {
+          "src": "/council/portraits/oprah-winfrey-room.webp",
+          "width": 512,
+          "height": 640,
+          "media_type": "image/webp",
+          "bytes": 45748,
+          "sha256": "afe052aaa026a5993ea6230261cf7434f5c58f10403a1da2e5da27509d765e1a"
+        },
+        "detail": {
+          "src": "/council/portraits/oprah-winfrey-detail.webp",
+          "width": 800,
+          "height": 1000,
+          "media_type": "image/webp",
+          "bytes": 87464,
+          "sha256": "7206d28815cbe2a6696d8bf55a59486bd6812d99056d26ac2d6961fcb92509ef"
+        },
+        "thumb": {
+          "src": "/council/portraits/oprah-winfrey-thumb.webp",
+          "width": 160,
+          "height": 200,
+          "media_type": "image/webp",
+          "bytes": 6502,
+          "sha256": "50b261851144e0e33ddca4f529f61a87178fc2807af5b755af2f02c869744c06"
+        }
+      }
+    },
+    {
+      "seat_id": "tiffany-aliche",
+      "display_name": "Tiffany Aliche",
+      "master_sha256": "f48185020b9adf4607ca3933908d228b961efce47fffb9c6685dd9a23058593d",
+      "attribution": "AI perspective inspired by the published work of Tiffany Aliche. Not the individual and not an endorsement.",
+      "selected_subject": "Tiffany Aliche",
+      "selected_master_sha256": "f48185020b9adf4607ca3933908d228b961efce47fffb9c6685dd9a23058593d",
+      "rights_status": "unverified",
+      "creation_method": "Owner-authorized existing photograph; local crop and WebP resize; no generative editing.",
+      "source_note": "The Budgetnista press page. Source: https://thebudgetnista.com/press/ Published license: No reuse license stated. Changes: 4:5 crop, resize and WebP encoding. No endorsement implied.",
+      "alt_text": "Photograph of Tiffany Aliche",
+      "variants": {
+        "room": {
+          "src": "/council/portraits/tiffany-aliche-room.webp",
+          "width": 512,
+          "height": 640,
+          "media_type": "image/webp",
+          "bytes": 48436,
+          "sha256": "54a238dcb15f8431d0605272d9177d8a2f1f1e11cd95f57929510de89b9179b4"
+        },
+        "detail": {
+          "src": "/council/portraits/tiffany-aliche-detail.webp",
+          "width": 800,
+          "height": 1000,
+          "media_type": "image/webp",
+          "bytes": 79486,
+          "sha256": "6d62e3ebf22ab4143239d7cc271162932b0458cf1d90aebe68dca85e7b83531f"
+        },
+        "thumb": {
+          "src": "/council/portraits/tiffany-aliche-thumb.webp",
+          "width": 160,
+          "height": 200,
+          "media_type": "image/webp",
+          "bytes": 10310,
+          "sha256": "86054a9c0812c673125c2083f20b1bea4c667c4697ef2f35ad75e18b347194f2"
+        }
+      }
+    },
+    {
+      "seat_id": "russell-brunson",
+      "display_name": "Russell Brunson",
+      "master_sha256": "f8651adc4b459af1700b8554da17ae642d22ca820d1e0943ff1aed81254b6a6a",
+      "attribution": "AI perspective inspired by the published work of Russell Brunson. Not the individual and not an endorsement.",
+      "selected_subject": "Russell Brunson",
+      "selected_master_sha256": "f8651adc4b459af1700b8554da17ae642d22ca820d1e0943ff1aed81254b6a6a",
+      "rights_status": "unverified",
+      "creation_method": "Owner-authorized existing photograph; local crop and WebP resize; no generative editing.",
+      "source_note": "Russell Brunson press and media / Approved Photos. Source: https://www.russellbrunson.com/press-and-media Published license: No general reuse license stated. Changes: 4:5 crop, resize and WebP encoding. No endorsement implied.",
+      "alt_text": "Photograph of Russell Brunson",
+      "variants": {
+        "room": {
+          "src": "/council/portraits/russell-brunson-room.webp",
+          "width": 512,
+          "height": 640,
+          "media_type": "image/webp",
+          "bytes": 36370,
+          "sha256": "a11fd38b86c0263bf7f896565ffded5ea88dddc02233aa624e5d290f4246327e"
+        },
+        "detail": {
+          "src": "/council/portraits/russell-brunson-detail.webp",
+          "width": 800,
+          "height": 1000,
+          "media_type": "image/webp",
+          "bytes": 110338,
+          "sha256": "5d30d30adc5cbc4d0cab750c10fba860a201567b9c6ce1cdb912c70a15838383"
+        },
+        "thumb": {
+          "src": "/council/portraits/russell-brunson-thumb.webp",
+          "width": 160,
+          "height": 200,
+          "media_type": "image/webp",
+          "bytes": 4832,
+          "sha256": "0b1b3fc0aba893738f532c4e71e3a0eeb01e11bec92a496569b49c64843b2a8f"
+        }
+      }
+    },
+    {
+      "seat_id": "michelle-obama",
+      "display_name": "Michelle Obama",
+      "master_sha256": "2d943c7171e7c74ba11a858b773df608dd4597f716d6632d9ee280d69730a4f8",
+      "attribution": "AI perspective inspired by the published work of Michelle Obama. Not the individual and not an endorsement.",
+      "selected_subject": "Michelle Obama",
+      "selected_master_sha256": "2d943c7171e7c74ba11a858b773df608dd4597f716d6632d9ee280d69730a4f8",
+      "rights_status": "unverified",
+      "creation_method": "Owner-authorized existing photograph; local crop and WebP resize; no generative editing.",
+      "source_note": "Joyce Boghosian / White House. Source: https://commons.wikimedia.org/wiki/File:Michelle_Obama_official_portrait_headshot.jpg Published license: Public domain (U.S. federal work). License: https://creativecommons.org/publicdomain/mark/1.0/ Changes: 4:5 crop, resize and WebP encoding. No endorsement implied.",
+      "alt_text": "Photograph of Michelle Obama",
+      "variants": {
+        "room": {
+          "src": "/council/portraits/michelle-obama-room.webp",
+          "width": 512,
+          "height": 640,
+          "media_type": "image/webp",
+          "bytes": 47938,
+          "sha256": "5e79061e13510f9eff44eb394598e0d7f49eb44da0563379c0662b3a9997d9b1"
+        },
+        "detail": {
+          "src": "/council/portraits/michelle-obama-detail.webp",
+          "width": 800,
+          "height": 1000,
+          "media_type": "image/webp",
+          "bytes": 109702,
+          "sha256": "28047b129baed088282af9af43263c78209051b34083b39dbf161c3633b00522"
+        },
+        "thumb": {
+          "src": "/council/portraits/michelle-obama-thumb.webp",
+          "width": 160,
+          "height": 200,
+          "media_type": "image/webp",
+          "bytes": 6252,
+          "sha256": "4051b6ab9febf6134146bf9a4429ae22722641ca986668d72b309c6ba567e9d1"
+        }
+      }
+    },
+    {
+      "seat_id": "brene-brown",
+      "display_name": "Brené Brown",
+      "master_sha256": "bf5a5462b3ad0dffa03864526a63476ed3299c3102069cf028c0968764f8718c",
+      "attribution": "AI perspective inspired by the published work of Brené Brown. Not the individual and not an endorsement.",
+      "selected_subject": "Brené Brown",
+      "selected_master_sha256": "bf5a5462b3ad0dffa03864526a63476ed3299c3102069cf028c0968764f8718c",
+      "rights_status": "unverified",
+      "creation_method": "Owner-authorized existing photograph; local crop and WebP resize; no generative editing.",
+      "source_note": "BBeargTeam; photographer Felix Sanchez (EXIF). Source: https://commons.wikimedia.org/wiki/File:Bren%C3%A9_Brown_Wikipedia.jpg Published license: CC BY-SA 4.0. License: https://creativecommons.org/licenses/by-sa/4.0/ Changes: 4:5 crop, resize and WebP encoding. No endorsement implied.",
+      "alt_text": "Photograph of Brené Brown",
+      "variants": {
+        "room": {
+          "src": "/council/portraits/brene-brown-room.webp",
+          "width": 512,
+          "height": 640,
+          "media_type": "image/webp",
+          "bytes": 54360,
+          "sha256": "765d40da422fa4a6f4ed2be8837cb94d49b5927edd281b420c4eda66fbe71d22"
+        },
+        "detail": {
+          "src": "/council/portraits/brene-brown-detail.webp",
+          "width": 800,
+          "height": 1000,
+          "media_type": "image/webp",
+          "bytes": 130296,
+          "sha256": "e458d9dc7a3d9efd2bc4441f851391c12fea656d0dd65f3b56625bc352a30eae"
+        },
+        "thumb": {
+          "src": "/council/portraits/brene-brown-thumb.webp",
+          "width": 160,
+          "height": 200,
+          "media_type": "image/webp",
+          "bytes": 8374,
+          "sha256": "08e8656953b2eedd5109da232bbfec786f32045b866420a5346e8db41670e27e"
+        }
+      }
+    },
+    {
+      "seat_id": "dennis-kimbro",
+      "display_name": "Dr. Dennis Kimbro",
+      "master_sha256": "53658bdf86915ec70da189732383333048b271cd4a5f401dbe1bde7117ade692",
+      "attribution": "AI perspective inspired by the published work of Dr. Dennis Kimbro. Not the individual and not an endorsement.",
+      "selected_subject": "Dr. Dennis Kimbro",
+      "selected_master_sha256": "53658bdf86915ec70da189732383333048b271cd4a5f401dbe1bde7117ade692",
+      "rights_status": "unverified",
+      "creation_method": "Owner-authorized existing photograph; local crop and WebP resize; no generative editing.",
+      "source_note": "APB Speakers. Source: https://www.apbspeakers.com/speaker/dennis-kimbro/ Published license: No reuse license stated. Changes: 4:5 crop, resize and WebP encoding. No endorsement implied.",
+      "alt_text": "Photograph of Dr. Dennis Kimbro",
+      "variants": {
+        "room": {
+          "src": "/council/portraits/dennis-kimbro-room.webp",
+          "width": 512,
+          "height": 640,
+          "media_type": "image/webp",
+          "bytes": 31486,
+          "sha256": "8e912c6b460fe77cf2415776b2bb4e030c1bab84bb1b6d3e2c22e0796f095b76"
+        },
+        "detail": {
+          "src": "/council/portraits/dennis-kimbro-detail.webp",
+          "width": 800,
+          "height": 1000,
+          "media_type": "image/webp",
+          "bytes": 53178,
+          "sha256": "8ab93a57c8bbd56d7517ee5b598733c256491fd162d14b9e1a0e785e4889bfc6"
+        },
+        "thumb": {
+          "src": "/council/portraits/dennis-kimbro-thumb.webp",
+          "width": 160,
+          "height": 200,
+          "media_type": "image/webp",
+          "bytes": 6028,
+          "sha256": "7db56adc0571f7fda4802943d19240c004d38ca76c5817a65ec375098041ecad"
+        }
+      }
+    },
+    {
+      "seat_id": "les-brown",
+      "display_name": "Les Brown",
+      "master_sha256": "fe204704e8559953091ae82a343223ae674859a43e8437fc0170a5e9008abc09",
+      "attribution": "AI perspective inspired by the published work of Les Brown. Not the individual and not an endorsement.",
+      "selected_subject": "Les Brown",
+      "selected_master_sha256": "fe204704e8559953091ae82a343223ae674859a43e8437fc0170a5e9008abc09",
+      "rights_status": "unverified",
+      "creation_method": "Owner-authorized existing photograph; local crop and WebP resize; no generative editing.",
+      "source_note": "Dominick Brady. Source: https://commons.wikimedia.org/wiki/File:Les_Brown_speaking.jpg Published license: CC BY 2.0. License: https://creativecommons.org/licenses/by/2.0/ Changes: 4:5 crop, resize and WebP encoding. No endorsement implied.",
+      "alt_text": "Photograph of Les Brown",
+      "variants": {
+        "room": {
+          "src": "/council/portraits/les-brown-room.webp",
+          "width": 512,
+          "height": 640,
+          "media_type": "image/webp",
+          "bytes": 44936,
+          "sha256": "2d3c7905d0da909256088870472c2c2bbfe5615c48abfa4c51434680c3dc34ac"
+        },
+        "detail": {
+          "src": "/council/portraits/les-brown-detail.webp",
+          "width": 800,
+          "height": 1000,
+          "media_type": "image/webp",
+          "bytes": 106640,
+          "sha256": "283e0619b416cfceb3ab1489885ff7bc0a135ca5bbdf402b011719307b4d24ed"
+        },
+        "thumb": {
+          "src": "/council/portraits/les-brown-thumb.webp",
+          "width": 160,
+          "height": 200,
+          "media_type": "image/webp",
+          "bytes": 5436,
+          "sha256": "50e45a56759c88b36e711b041b3021c2369f9c7559148462494829d5beb0db22"
+        }
+      }
+    }
+  ],
+  "selection_authority": "owner"
+}

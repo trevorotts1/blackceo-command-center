@@ -190,5 +190,39 @@ class CouncilPortraitBuildTests(unittest.TestCase):
         self.assertFalse(self.output.exists())
 
 
+
+class OwnerSelectedPhotoTests(unittest.TestCase):
+    def test_explicit_photo_mode_binds_sources_without_inventing_review(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            masters = root / 'masters'
+            masters.mkdir()
+            notes = {}
+            for seat, name in builder.SEATS.items():
+                p = masters / (seat + '.png')
+                Image.new('RGB', (320, 400), (80, 120, 160)).save(p)
+                notes[seat] = dict(selected_subject=name, selected_master_sha256=sha256(p.read_bytes()).hexdigest(), rights_status='unverified', creation_method='existing photo crop', source_note='Public source and credit recorded', alt_text=name)
+            provenance = root / 'provenance.json'
+            provenance.write_text(json.dumps(notes))
+            with self.assertRaises(builder.PortraitError):
+                builder.build_portraits(masters, provenance, root / 'default')
+            result = builder.build_portraits(masters, provenance, root / 'photos', owner_selected=True)
+            self.assertEqual(result['source_kind'], 'owner_selected_existing_images')
+            self.assertEqual(result['selection_authority'], 'owner')
+            for entry in result['entries']:
+                self.assertNotIn('approved_by', entry)
+                self.assertNotIn('identity_review_status', entry)
+                self.assertEqual(entry['rights_status'], 'unverified')
+            notes['simon-sinek']['selected_master_sha256'] = '0' * 64
+            provenance.write_text(json.dumps(notes))
+            with self.assertRaisesRegex(builder.PortraitError, 'changed after selection'):
+                builder.build_portraits(masters, provenance, root / 'changed', owner_selected=True)
+            notes['simon-sinek']['selected_subject'] = 'Les Brown'
+            provenance.write_text(json.dumps(notes))
+            with self.assertRaisesRegex(builder.PortraitError, 'subject mismatch'):
+                builder.build_portraits(masters, provenance, root / 'wrong-person', owner_selected=True)
+            with self.assertRaisesRegex(builder.PortraitError, 'test-fixture mode'):
+                builder.build_portraits(masters, provenance, root / 'fixture', owner_selected=True, allow_test_fixtures=True)
+
 if __name__ == "__main__":
     unittest.main()

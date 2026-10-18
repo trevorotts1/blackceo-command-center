@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Build the nine Council portrait variants from approved ORIGINAL RGBA masters.
+"""Build the nine Council portrait variants from prepared PNG masters.
 
 Inputs: <masters>/<seat-id>.png and a provenance.json object keyed by the
 canonical nine seat IDs. Requires Pillow (development tool only).
 Outputs under <out>/: <seat-id>-{room,detail,thumb}.webp + manifest.json.
 No completed asset set is published unless all nine inputs validate.
-This is not a portrait generator; generating/approving genuine art precedes it.
+Default mode requires reviewed original RGBA art. The explicit owner-selected
+mode accepts cropped existing photographs and retains unverified rights.
+This is not a portrait generator.
 """
 import argparse
 from datetime import datetime
@@ -54,7 +56,7 @@ def _text(value, field):
     return value.strip()
 
 
-def _provenance(path, *, allow_test_fixtures=False):
+def _provenance(path, *, allow_test_fixtures=False, owner_selected=False):
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
@@ -65,6 +67,26 @@ def _provenance(path, *, allow_test_fixtures=False):
     for seat, raw in payload.items():
         if not isinstance(raw, dict):
             raise PortraitError(f"Provenance for {seat} must be an object")
+
+        if owner_selected:
+            subject = _text(raw.get("selected_subject"), f"{seat}.selected_subject")
+            if subject != SEATS[seat]:
+                raise PortraitError(f"Portrait subject mismatch for {seat}")
+            digest = _text(raw.get("selected_master_sha256"), f"{seat}.selected_master_sha256")
+            if not re.fullmatch(r"[a-f0-9]{64}", digest):
+                raise PortraitError(f"Portrait {seat} selection must bind a SHA-256 digest")
+            # Selection records factual provenance without claiming an art,
+            # identity or rights approval that did not happen.
+            if raw.get("rights_status") != "unverified":
+                raise PortraitError(f"Owner-selected {seat} must retain unverified rights")
+            result[seat] = {
+                "selected_subject": subject,
+                "selected_master_sha256": digest,
+                "rights_status": "unverified",
+                **{field: _text(raw.get(field), f"{seat}.{field}") for field in
+                   ("creation_method", "source_note", "alt_text")},
+            }
+            continue
 
         # A correctly named file is not proof it depicts the right person.
         # A human art/identity reviewer must sign off on the exact master
@@ -114,7 +136,7 @@ def _provenance(path, *, allow_test_fixtures=False):
     return result
 
 
-def _read_master(path, seat):
+def _read_master(path, seat, *, owner_selected=False):
     if not path.is_file() or path.is_symlink():
         raise PortraitError(f"Missing or linked original master for {seat}: {path}")
     # Decode and bind the same immutable bytes, even if the file is replaced
@@ -123,6 +145,12 @@ def _read_master(path, seat):
     master_sha = hashlib.sha256(master_bytes).hexdigest()
     with Image.open(io.BytesIO(master_bytes)) as opened:
         opened.load()
+        if owner_selected:
+            if opened.format != "PNG" or opened.mode not in ("RGB", "RGBA"):
+                raise PortraitError(f"Selected photo {seat} must be an RGB/RGBA PNG")
+            if opened.width * 5 != opened.height * 4:
+                raise PortraitError(f"Selected photo {seat} must have a prepared 4:5 crop")
+            return opened.convert("RGBA"), master_sha
         if opened.format != "PNG" or opened.mode != "RGBA":
             raise PortraitError(f"Master {seat} must be a transparent RGBA PNG")
         if min(opened.size) < 1024:
@@ -148,8 +176,10 @@ def _encode_variant(master, size, limit, seat, variant):
     raise PortraitError(f"{seat} {variant} cannot fit under {limit} bytes without unacceptable quality")
 
 
-def build_portraits(masters: Path, provenance_path: Path, output: Path, *, allow_test_fixtures=False):
-    provenance = _provenance(provenance_path, allow_test_fixtures=allow_test_fixtures)
+def build_portraits(masters: Path, provenance_path: Path, output: Path, *, allow_test_fixtures=False, owner_selected=False):
+    if owner_selected and allow_test_fixtures:
+        raise PortraitError("Owner-selected release cannot use test-fixture mode")
+    provenance = _provenance(provenance_path, allow_test_fixtures=allow_test_fixtures, owner_selected=owner_selected)
 
     # The owner's nine Council seats are an allowlist. Never silently
     # ignore a Steve Harvey / tenth-person image dropped into the
@@ -180,10 +210,12 @@ def build_portraits(masters: Path, provenance_path: Path, output: Path, *, allow
         total_room_bytes = 0
         for seat, display_name in SEATS.items():
             master_path = masters / f"{seat}.png"
-            master, master_sha = _read_master(master_path, seat)
-            if provenance[seat]["reviewed_master_sha256"] != master_sha:
+            master, master_sha = (_read_master(master_path, seat, owner_selected=True)
+                                  if owner_selected else _read_master(master_path, seat))
+            hash_field = "selected_master_sha256" if owner_selected else "reviewed_master_sha256"
+            if provenance[seat][hash_field] != master_sha:
                 raise PortraitError(
-                    f"Portrait {seat} changed after identity review. "
+                    f"Portrait {seat} changed after {'selection' if owner_selected else 'identity review'}. "
                     "Review the exact new master before generating or publishing."
                 )
             variants = {}
@@ -214,6 +246,7 @@ def build_portraits(masters: Path, provenance_path: Path, output: Path, *, allow
         manifest = {
             "schema": "blackceo.council-portraits/v1",
             "source_kind": (
+                "owner_selected_existing_images" if owner_selected else
                 "synthetic_test_fixture_not_for_release"
                 if allow_test_fixtures else "reviewed_original_editorial_illustrations"
             ),
@@ -221,6 +254,8 @@ def build_portraits(masters: Path, provenance_path: Path, output: Path, *, allow
             "room_bytes_total": total_room_bytes,
             "entries": entries,
         }
+        if owner_selected:
+            manifest["selection_authority"] = "owner"
         (stage / "manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         # Build one complete cohort before replacing an existing production set.
         backup = output.with_name(output.name + ".previous")
@@ -245,9 +280,12 @@ def main(argv=None):
     parser.add_argument("--masters", required=True, type=Path)
     parser.add_argument("--provenance", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--owner-selected-existing-images", action="store_true",
+                        help="Use owner-selected prepared photos with factual, unverified-rights provenance")
     args = parser.parse_args(argv)
     try:
-        result = build_portraits(args.masters, args.provenance, args.output)
+        result = build_portraits(args.masters, args.provenance, args.output,
+                                owner_selected=args.owner_selected_existing_images)
     except (PortraitError, OSError, ValueError) as exc:
         print(f"PORTRAITS: FAIL: {exc}", file=sys.stderr)
         return 1
