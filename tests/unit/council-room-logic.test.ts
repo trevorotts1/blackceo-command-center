@@ -237,9 +237,9 @@ describe('design token consumption (Sections 22.3, 23)', () => {
 
   it('narrow rooms become a grid instead of scaling the table', () => {
     assert.ok(roomCss.includes('@container (max-width: 919px)'));
-    assert.ok(roomCss.includes('grid-template-columns: repeat(3, 1fr)'));
+    assert.ok(roomCss.includes('grid-template-columns: repeat(3, minmax(0, 1fr))'));
     assert.ok(roomCss.includes('@container (max-width: 640px)'));
-    assert.ok(roomCss.includes('grid-template-columns: repeat(2, 1fr)'));
+    assert.ok(roomCss.includes('grid-template-columns: repeat(2, minmax(0, 1fr))'));
   });
 });
 
