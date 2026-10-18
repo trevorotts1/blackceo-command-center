@@ -197,3 +197,39 @@
    transitions and animations under prefers-reduced-motion; the shell also
    sets data-reduced-motion so behavior can be tested, and the reading
    view never carries motion in the first place (Section 22.7, 23.2). */
+
+/* Portrait cards need normal-flow rows: the compact medallion ellipse cannot
+   fit their 145px artwork plus full names/status. Mixed cohorts also use this
+   grid, while an all-medallion room retains its original ellipse. */
+.council-room-frame:has([data-has-portrait='true']) {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1rem;
+  aspect-ratio: auto;
+}
+.council-stage .council-room-frame:has([data-has-portrait='true']) .council-room-seat {
+  position: static;
+  transform: none;
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+.council-room-frame:has([data-has-portrait='true']) .council-room-center {
+  position: static;
+  transform: none;
+  width: auto;
+  grid-column: 1 / -1;
+  padding: 0.5rem 0;
+}
+@container (max-width: 640px) {
+  .council-room-frame:has([data-has-portrait='true']) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.625rem;
+  }
+}
+/* A single column preserves 116px artwork at the smallest phone widths. */
+@container (max-width: 320px) {
+  .council-room-frame:has([data-has-portrait='true']) {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
