@@ -345,29 +345,67 @@ export async function getVerdict(sessionId: string): Promise<CouncilVerdictData>
 }
 
 /**
- * POST the run start. Until CWE-027 wires the run service (route
- * ownership passes to CWE-050), the foundation answers
- * FEATURE_NOT_READY; this call surfaces that typed error and never
- * reports progress of any kind.
+ * The actual CWE-027/CWE-050 queued-run receipt. A successful HTTP 202
+ * is NOT a validated Council verdict; it means one durable job was admitted.
  */
-export async function startSession(sessionId: string, idempotencyKey: string): Promise<never> {
-  // Literal /api path here (not the API_BASE composition) so the repo's
-  // U052 passthrough scanner sees this interface call, as it does for
-  // every other client in the codebase. The composed URL is identical.
+export interface CouncilStartReceipt {
+  session_id: string;
+  state: 'QUEUED';
+  state_version: number;
+  idempotent_replay: boolean;
+  job_id: string;
+  grant_id: string;
+  attempt: number;
+}
+
+function validatedStartReceipt(value: unknown, expectedSessionId: string): CouncilStartReceipt {
+  const r = value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+  const valid =
+    r !== null &&
+    r.session_id === expectedSessionId &&
+    r.state === 'QUEUED' &&
+    typeof r.job_id === 'string' && r.job_id.length > 0 &&
+    typeof r.grant_id === 'string' && r.grant_id.length > 0 &&
+    typeof r.idempotent_replay === 'boolean' &&
+    Number.isInteger(r.state_version) && Number(r.state_version) >= 0 &&
+    Number.isInteger(r.attempt) && Number(r.attempt) >= 0;
+  if (!valid) {
+    throw new CouncilClientError({
+      code: 'UNEXPECTED_RESPONSE',
+      message: 'The Council start endpoint returned no valid queued-run receipt. Reload this session before attempting another start.',
+      retryable: false,
+      action: 'reload_session',
+      requestId: null,
+      httpStatus: 200,
+    });
+  }
+  return r as unknown as CouncilStartReceipt;
+}
+
+/**
+ * Start only under the real authorized server grant. Preserve the caller's
+ * idempotency key for exact replay. Browser input never creates a grant.
+ */
+export async function startSession(
+  sessionId: string,
+  idempotencyKey: string,
+  input: { expectedVersion?: number; grantId?: string } = {},
+): Promise<CouncilStartReceipt> {
+  // Keep this literal route for the repository's API passthrough scanner.
   const { data } = await councilFetch<unknown>(
     `/api/council/sessions/${encodeURIComponent(sessionId)}/start`,
-    { method: 'POST', body: {}, idempotencyKey },
+    {
+      method: 'POST',
+      body: {
+        ...(input.expectedVersion === undefined ? {} : { expected_version: input.expectedVersion }),
+        ...(input.grantId === undefined ? {} : { grant_id: input.grantId }),
+      },
+      idempotencyKey,
+    },
   );
-  // The foundation never returns success here today; if a future wired
-  // service does, the caller still gets no fabricated state back.
-  throw new CouncilClientError({
-    code: 'UNEXPECTED_RESPONSE',
-    message: `Start answered without a typed run state: ${JSON.stringify(data)}.`,
-    retryable: false,
-    action: 'reload_session',
-    requestId: null,
-    httpStatus: 200,
-  });
+  return validatedStartReceipt(data, sessionId);
 }
 
 /**
