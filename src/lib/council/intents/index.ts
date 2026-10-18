@@ -34,4 +34,14 @@ export {
   type CompletionScanTrigger,
   type CouncilCompletionScannerDeps,
 } from './completion-scan';
+export {
+  CouncilIntentCommandDispatcher,
+  type CouncilCommandFailure,
+  type CouncilCommandName,
+  type CouncilCommandReceipt,
+  type CouncilCommandResult,
+  type CouncilIntentCommandDispatcherDeps,
+  type CouncilIntentCommandOutcome,
+  type CouncilIntentCommandRequest,
+} from './commands';
 export { CouncilIntentError, type CouncilIntentErrorCode } from './errors';

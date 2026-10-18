@@ -16,3 +16,4 @@ export * from './parent-task';
 export * from './plan-service';
 export * from './run-authorization-port';
 export * from './scan-queue';
+export * from './verdict-handoff';
