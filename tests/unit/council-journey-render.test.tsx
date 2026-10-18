@@ -428,7 +428,8 @@ describe('intake journey', () => {
     const user = userEvent.setup();
     render(<DecisionComposer />);
     expect(await screen.findByTestId('intake-step-route')).toBeTruthy();
-    const readiness = screen.getByTestId('route-readiness-route-fixture-untested');
+    // The route step mounts before the async model catalog resolves; wait for the real fixture response.
+    const readiness = await screen.findByTestId('route-readiness-route-fixture-untested');
     expect(readiness.dataset.readiness).toBe('UNTESTED');
     expect(readiness.textContent).toContain('UNTESTED');
     await user.click(screen.getByRole('radio', { name: /fixture route/i }));
@@ -709,7 +710,7 @@ describe('WER-015 committed event room on the mounted session journey', () => {
       // Match the specific event resource BEFORE the prefix-matched
       // /sessions/:id route. Otherwise the fixture supplies a session
       // record to the event reducer and masks the behavior under test.
-      { match: '/api/council/sessions/sess-fixture-1/events?snapshot=1', body: okEnvelope(oneCommittedSeat) },
+      { match: '/api/council/sessions/sess-fixture-1/events?snapshot=1', body: okEnvelope(oneCommittedSeat.snapshot) },
       { match: '/verdict', body: okEnvelope({ session_id: 'sess-fixture-1', verdict_state: 'not_ready', verdict: null }) },
       { match: '/api/council/sessions/sess-fixture-1', method: 'GET', body: okEnvelope(completedSession) },
       { match: '/api/council/models', body: MODELS_OK },

@@ -118,7 +118,7 @@ export function useCouncilLiveSession(
       syncProjection();
       return outcomes.includes('gap') ? 'gap' : 'ok';
     },
-    [syncProjection],
+    [sessionId, syncProjection],
   );
 
   const resync = useCallback(async (): Promise<'ok' | 'private'> => {
