@@ -57,18 +57,26 @@ test('every file a row cites exists in the repo', () => {
   }
 });
 
-// Truth at the merge-train-2 head (main 2be019fd + #569, #573). Gaps B and E are in the code, but the two
-// rows they touch still have a different unmet checklist item, so no row may say "Implemented". Each
-// row below must cite the PR that closed its gap AND name the still-open item.
-test('rows touched by a merged gap fix cite that PR and stay Partial', () => {
-  const closedBy: Record<string, string> = {
-    'Intelligence Settings': '#571',
-  };
-  for (const [name, pr] of Object.entries(closedBy)) {
-    const row = rows.find((r) => r[0] === name)!;
-    assert.ok(/partial/i.test(row[1]) && !/implemented/i.test(row[1]), `${name}: status is "${row[1]}"`);
-    assert.ok(row[3].includes(pr), `${name}: does not cite ${pr}`);
+// Intelligence Settings: every unticked item must carry "met in code: <file:line>" (or name the owner decision
+// it waits on), and every cited line must exist. The row is "Code-checked" only while no item is undecided, so a
+// new unannotated item, a cited line past the end of its file, or an item waiting on a decision fails here.
+test('Intelligence Settings: row cites #571, and its status matches the items under it', () => {
+  const sec = md.slice(md.indexOf('## Intelligence Settings Checklist'), md.indexOf('## Technical Infrastructure Checklist'));
+  const items = sec.split('\n').filter((l) => l.startsWith('- [ ]'));
+  assert.ok(items.length >= 15, `only ${items.length} unticked items found`);
+  const row = rows.find((r) => r[0] === 'Intelligence Settings')!;
+  assert.ok(row[3].includes('#571'), 'row does not cite #571');
+  const undecided = items.filter((l) => !/met in code/.test(l));
+  for (const l of undecided) assert.ok(/owner decision needed:/.test(l), `item neither met in code nor naming a decision: ${l}`);
+  for (const l of items.filter((x) => /met in code: /.test(x))) {
+    const refs = [...l.matchAll(/((?:src|presentation_job|tests)\/[\w./\[\]-]+\.\w+):(\d+)/g)];
+    assert.ok(refs.length > 0, `no file:line cited: ${l}`);
+    for (const [, f, n] of refs) {
+      assert.ok(fs.existsSync(path.join(root, f)), `cited file missing: ${f}`);
+      assert.ok(fs.readFileSync(path.join(root, f), 'utf-8').split('\n').length >= Number(n), `${f}:${n} is past the end of the file`);
+    }
   }
+  assert.ok(/code-checked/i.test(row[1]) === (undecided.length === 0), `status "${row[1]}" does not match ${undecided.length} undecided items`);
 });
 
 // No row may say "Implemented" while any checklist item for it is known missing; today none qualifies.
