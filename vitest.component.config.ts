@@ -151,6 +151,9 @@ export default defineConfig({
       // Gap D — Devil's Advocate challenge detail view (assumptions, full DA
       // response, outcome, resolution), real render proof.
       'tests/unit/cc-gap-d-da-detail-view.test.tsx',
+      // Gap E - persona selection log on Intelligence Settings (history,
+      // per-layer reasoning, department/date filters), real render proof.
+      'tests/unit/cc-gap-e-persona-selection-log.test.tsx',
     ],
     env: { NODE_ENV: 'test' },
     testTimeout: 15000,
