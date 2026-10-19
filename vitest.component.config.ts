@@ -148,6 +148,9 @@ export default defineConfig({
       // Item 19 — ABANDONED pill/panel, plain-words park record, resume
       // outcome rendering, and the board's Abandoned filter, real render proof.
       'tests/unit/item19-engine-panel-render.test.tsx',
+      // Gap B — focus-view Kanban labels blocked cards (they share the Review
+      // column under the PRD's five-column rule) so blocked never reads as review.
+      'tests/unit/cc-gap-b-focus-blocked-badge.test.tsx',
     ],
     env: { NODE_ENV: 'test' },
     testTimeout: 15000,
