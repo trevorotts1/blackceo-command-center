@@ -162,7 +162,7 @@ For the 6-column Full Task Board:
 
 **Data Sources:**
 - Database: da_challenges table
-- `department-config.json` - DA settings per department
+- ~~`department-config.json` - DA settings per department~~ DROPPED by owner decision 2026-10-19 (Trevor, #5): Devil's Advocate applies to all departments; no per-department DA setting is specified until a client asks for it
 
 ---
 
