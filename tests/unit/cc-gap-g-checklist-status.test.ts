@@ -79,17 +79,14 @@ test('no screen says "Implemented"', () => {
   }
 });
 
-// Each item below was verified missing at the train head: grading.ts weights are 25/30/20/25
-// (grade-calculator.ts 40/30/15/15 is @deprecated); no code under src reads department-config.json;
-// company-level benchmark comparison is not rendered; the focus page Back button goes to
+// Each item below was verified missing at the train head: no code under src reads department-config.json;
+// the focus page Back button goes to
 // /ceo-board/departments, not the unmounted Department Browser (gap A); Intelligence Settings has no
 // persona category list, domain filter or link to /personas.
 test('screens with a known-missing checklist item stay Partial and name it', () => {
   const knownMissing: Record<string, string> = {
-    'CEO Board': 'Grade calculation uses correct weights',
     'Department Boards': 'Reads department-config.json',
     'Kanban - Focused Single-Department View': 'Large "Back" button returns to Browser view',
-    'Performance Board': 'Industry benchmark comparisons',
     "Devil's Advocate": 'Respects department-config.json DA settings',
     'Intelligence Settings': 'Displays all personas from persona-categories.json',
   };
@@ -106,4 +103,19 @@ test('the department browser row stays Open (gap A, five-column browser unmounte
   const row = rows.find((r) => r[0] === 'Kanban - Department Browser View')!;
   assert.ok(/open|partial/i.test(row[1]) && !/implemented/i.test(row[1]), `status is "${row[1]}"`);
   assert.ok(/gap A/.test(row[3]), 'row does not cite gap A as the open item');
+});
+
+// Trevor's decisions of 2026-10-19: the spec follows the code for grade weights (25/30/20/25 in
+// grading.ts), and industry benchmarks live on department pages only, so no spec text may promise
+// the old 40/30/15/15 grade or a company-level benchmark on the Performance Board.
+test('spec text matches the grade-weights and benchmark decisions', () => {
+  const prd = fs.readFileSync(path.join(root, 'PRD.md'), 'utf-8');
+  const grading = fs.readFileSync(path.join(root, 'src/lib/grading.ts'), 'utf-8');
+  for (const [name, text] of [['PRD.md', prd], ['CHECKLIST.md', md]] as const) {
+    assert.ok(!/40% KPI|30% Agent|15% DA|15% Recommend/i.test(text), `${name}: still states the old 40/30/15/15 weights`);
+  }
+  assert.ok(/throughput:\s*0\.25[\s\S]*qcPassRate:\s*0\.30[\s\S]*sopCoverage:\s*0\.20[\s\S]*kpiAttainment:\s*0\.25/.test(grading), 'grading.ts weights no longer 25/30/20/25: update the spec text');
+  assert.ok(/25% Throughput[\s\S]*30% QC Pass Rate[\s\S]*20% SOP Coverage[\s\S]*25% KPI/.test(prd), 'PRD.md does not list the live weights');
+  const home = fs.readFileSync(path.join(root, 'src/app/page.tsx'), 'utf-8');
+  assert.ok(!/KPIs, benchmarks/.test(home), 'home card still promises benchmarks on the Performance Board');
 });

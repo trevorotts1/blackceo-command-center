@@ -263,7 +263,7 @@ export default function HomePage() {
     {
       title: 'Performance Board',
       description: 'CEO Performance Overview',
-      detail: 'Company-wide analytics, department grades, agent roster, KPIs, benchmarks, and strategic recommendations.',
+      detail: 'Company-wide analytics, department grades, agent roster, KPIs, and strategic recommendations. Industry benchmarks are on each department page.',
       icon: <BarChart3 className="w-7 h-7 text-white" />,
       gradient: 'from-amber-400 via-orange-500 to-red-500',
       route: '/ceo-board',

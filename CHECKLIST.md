@@ -11,11 +11,11 @@ Each row below was checked on 2026-10-19 against the head of merge train 2 (`mai
 
 | Component | Status | Verified By | Notes |
 |-----------|--------|-------------|-------|
-| CEO Board | ⚠️ Partial | Code inspection, 2026-10-19, main 2be019fd + #569, #573 | `src/app/ceo-board/page.tsx` (hero card, KPI cards, department grade cards). Open at the train head: "Grade calculation uses correct weights: 40% KPI, 30% Agent, 15% DA, 15% Recommendations" is not met. The live weights are 25% throughput, 30% QC pass rate, 20% SOP coverage, 25% KPI (`src/lib/grading.ts`); the 40/30/15/15 table in `src/lib/grade-calculator.ts` is marked `@deprecated`. No fix in flight: it is the decision packet's "Grade weights" item (change the spec or the code). |
+| CEO Board | 🟨 Code-checked | Code inspection, 2026-10-19, main 2be019fd + #569, #573 | `src/app/ceo-board/page.tsx` (hero card, KPI cards, department grade cards). Grade weights: decided 2026-10-19, the spec follows the code (25% throughput, 30% QC pass rate, 20% SOP coverage, 25% KPI in `src/lib/grading.ts`); the 40/30/15/15 table in `src/lib/grade-calculator.ts` is `@deprecated`. The checklist item above is reworded to match; it is still unticked until someone checks it in a running app. |
 | Department Boards | ⚠️ Partial | Code inspection, 2026-10-19, main 2be019fd + #569, #573 | `src/app/ceo-board/[dept]/page.tsx`. Open at the train head: "Reads department-config.json" is not met; no code under `src` reads that file (the only mention is a comment in `src/lib/routing/department-router.ts`). No fix in flight: it is not yet decided where per-department settings live. |
 | Kanban - Department Browser View | ⚠️ Open | Code inspection, 2026-10-19, main 2be019fd + #569, #573 | Sidebar + Kanban is live as the master board `src/app/tasks/all/page.tsx` (six columns, PRD 3.8). The five-column version this checklist describes, `src/components/ceo-board/DepartmentBrowser.tsx`, is not mounted on any route. Open item is department browser gap A, which is not in this train. Needs a product decision: keep the six-column board as the browser, or mount the five-column one. |
 | Kanban - Focused Single-Department View | ⚠️ Partial | Code inspection, 2026-10-19, main 2be019fd + #569, #573 | `src/app/ceo-board/[dept]/focus/page.tsx` is read-only, as this checklist's View B asks. The blocked-task defect (blocked tasks folded into the Review column with no marker) is fixed by PR #569 (gap B, merged into this train): blocked cards now carry a visible "Blocked" badge. Open at the train head: "Large \"Back\" button returns to Browser view" is not met. The button (`router.push('/ceo-board/departments')`) goes to the Departments performance overview, not to the Department Browser (sidebar plus Kanban), which is not mounted (department browser gap A, not in this train). The interactive per-department board is `src/app/tasks/by-department/page.tsx`. |
-| Performance Board | ⚠️ Partial | Code inspection, 2026-10-19, main 2be019fd + #569, #573 | The three lenses are sections of the CEO Board page `src/app/ceo-board/page.tsx` (home card "Performance Board" routes there from `src/app/page.tsx`). Open at the train head: "Industry benchmark comparisons" are not shown at company level (decision packet Question C), and "Formula matches PRD: `(kpi * 0.4) + ...`" is not met because the live grade weights differ (decision packet "Grade weights" item). No fix in flight for either. |
+| Performance Board | 🟨 Code-checked | Code inspection, 2026-10-19, main 2be019fd + #569, #573 | The three lenses are sections of the CEO Board page `src/app/ceo-board/page.tsx` (home card "Performance Board" routes there from `src/app/page.tsx`). Decided 2026-10-19: industry benchmarks stay on the department pages and the Performance Board shows no company-level benchmark (Question C option 1); the grade formula follows `src/lib/grading.ts` (grade-weights decision). Both checklist items are reworded to match and stay unticked until checked in a running app. |
 | Devil's Advocate | ⚠️ Partial | Code inspection, 2026-10-19, main 2be019fd + #569, #573 | `src/components/ceo-board/DevilsAdvocateFeed.tsx`, `src/app/api/da-challenges/route.ts`. "Challenge detail view accessible" is now met: PR #570 (gap D, merged in train #574) added the detail view. Open at the train head: "Respects department-config.json DA settings" is not defined anywhere in this repo. No fix in flight. |
 | Intelligence Settings | ⚠️ Partial | Code inspection, 2026-10-19, main 2be019fd + #569, #573 | `src/app/settings/intelligence/page.tsx`, `src/components/settings/PersonaSelectionLog.tsx`, `src/app/api/persona-selection-log/route.ts`. The Persona Selection Log subsection (history, per-layer reasoning, filters) is fixed by PR #571 (gap E, merged in train #574). Open at the train head: the Persona Categories items ("Displays all personas from persona-categories.json", "Category filters by domain work", persona details) are not on this screen; it shows personas only as options in the assignment dropdowns and has no category list, domain filter or link to `/personas`. A category and domain browser exists as a separate route, `src/app/personas/page.tsx`, but this screen does not link to it. No fix in flight: decide whether to link or embed it. |
 
@@ -25,7 +25,7 @@ Each row below was checked on 2026-10-19 against the head of merge train 2 (`mai
 
 ### Display
 - [ ] Company health letter grade displays (A-F)
-- [ ] Grade calculation uses correct weights: 40% KPI, 30% Agent, 15% DA, 15% Recommendations
+- [ ] Grade calculation uses correct weights: 25% throughput, 30% QC pass rate, 20% SOP coverage, 25% KPI (`DEFAULT_INPUT_WEIGHTS` in `src/lib/grading.ts`)
 - [ ] Real-time agent counter shows live count
 - [ ] Department cards show emoji, name, headcount, active tasks
 - [ ] Department health indicators render correctly
@@ -108,7 +108,7 @@ Each row below was checked on 2026-10-19 against the head of merge train 2 (`mai
 - [ ] Company-level KPIs display
 - [ ] Department-level KPIs display
 - [ ] Target vs actual progress bars
-- [ ] Industry benchmark comparisons
+- [ ] Industry benchmark comparisons are on the department pages (the Performance Board shows no company-level benchmark)
 - [ ] Historical trend charts
 
 ### Lens 2: Agent Performance
@@ -124,8 +124,8 @@ Each row below was checked on 2026-10-19 against the head of merge train 2 (`mai
 - [ ] Insight-to-action conversion
 
 ### Grade Calculation
-- [ ] Formula matches PRD: `(kpi * 0.4) + (agent * 0.3) + (da * 0.15) + (rec * 0.15)`
-- [ ] Calculation in utility function (grade-calculator.ts)
+- [ ] Formula matches PRD: `DEFAULT_INPUT_WEIGHTS` in `src/lib/grading.ts` (throughput 0.25, QC pass rate 0.30, SOP coverage 0.20, KPI 0.25)
+- [ ] Calculation in utility function (`src/lib/grading.ts`; `grade-calculator.ts` is deprecated)
 - [ ] Grades update when data changes
 
 **Verification Status:** ⬜ Not Verified
