@@ -164,6 +164,8 @@ export default defineConfig({
       'tests/unit/cc-gap-a-focus-back-button.test.tsx',
       // Gap A follow-up - departments rail shows an open-task count badge per department.
       'tests/unit/cc-dept-task-count-badge.test.tsx',
+      // Intelligence Settings links to the /personas category browser; /personas shows the persona fields.
+      'tests/unit/cc-persona-categories-link.test.tsx',
     ],
     env: { NODE_ENV: 'test' },
     testTimeout: 15000,
