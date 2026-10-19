@@ -57,42 +57,41 @@ test('every file a row cites exists in the repo', () => {
   }
 });
 
-// Truth at the merge-train-2 head (main 2be019fd + #569 + #573). Gaps B, D and E are in the code, so the
-// rows whose only open item was one of them are Implemented and cite the PR that closed it. Every other
-// row has an open item that is NOT a gap fix and must stay Partial/Open.
-test('screens closed by a merged gap fix are Implemented and cite that PR', () => {
+// Truth at the merge-train-2 head (main 2be019fd + #569, #573). Gaps B and E are in the code, but the two
+// rows they touch still have a different unmet checklist item, so no row may say "Implemented". Each
+// row below must cite the PR that closed its gap AND name the still-open item.
+test('rows touched by a merged gap fix cite that PR and stay Partial', () => {
   const closedBy: Record<string, string> = {
     'Kanban - Focused Single-Department View': '#569',
     'Intelligence Settings': '#571',
   };
   for (const [name, pr] of Object.entries(closedBy)) {
     const row = rows.find((r) => r[0] === name)!;
-    assert.ok(/implemented/i.test(row[1]) && !/partial|open/i.test(row[1]), `${name}: status is "${row[1]}"`);
+    assert.ok(/partial/i.test(row[1]) && !/implemented/i.test(row[1]), `${name}: status is "${row[1]}"`);
     assert.ok(row[3].includes(pr), `${name}: does not cite ${pr}`);
-    assert.ok(!/open at/i.test(row[3]), `${name}: Implemented row still lists an open item`);
   }
 });
 
-// Only the two rows above may say "Implemented"; any other row claiming it is a false claim.
-test('no other screen says "Implemented"', () => {
-  const allowed = new Set(['Kanban - Focused Single-Department View', 'Intelligence Settings']);
+// No row may say "Implemented" while any checklist item for it is known missing; today none qualifies.
+test('no screen says "Implemented"', () => {
   for (const [name, status] of rows) {
-    if (allowed.has(name)) continue;
     assert.ok(!/implemented/i.test(status), `${name}: claims "${status}"`);
   }
 });
 
-// Any row whose own checklist section still has an unchecked item known to be missing at the train head
-// cannot say "Implemented". Each item below was verified missing: grading.ts weights are 25/30/20/25
-// (grade-calculator.ts 40/30/15/15 is @deprecated); no code under src reads department-config.json (so
-// neither Department Boards nor the DA row's "Respects department-config.json DA settings" item can be
-// met); company-level benchmark comparison is not rendered; DepartmentBrowser.tsx is not mounted (gap A).
-test('screens with a known-missing checklist item never say "Implemented"', () => {
+// Each item below was verified missing at the train head: grading.ts weights are 25/30/20/25
+// (grade-calculator.ts 40/30/15/15 is @deprecated); no code under src reads department-config.json;
+// company-level benchmark comparison is not rendered; the focus page Back button goes to
+// /ceo-board/departments, not the unmounted Department Browser (gap A); Intelligence Settings has no
+// persona category list, domain filter or link to /personas.
+test('screens with a known-missing checklist item stay Partial and name it', () => {
   const knownMissing: Record<string, string> = {
     'CEO Board': 'Grade calculation uses correct weights',
     'Department Boards': 'Reads department-config.json',
+    'Kanban - Focused Single-Department View': 'Large "Back" button returns to Browser view',
     'Performance Board': 'Industry benchmark comparisons',
     "Devil's Advocate": 'Respects department-config.json DA settings',
+    'Intelligence Settings': 'Displays all personas from persona-categories.json',
   };
   for (const [name, status, , notes] of rows) {
     const item = knownMissing[name];
