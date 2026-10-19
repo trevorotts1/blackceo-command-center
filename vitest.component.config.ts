@@ -160,6 +160,8 @@ export default defineConfig({
       // Gap B — focus-view Kanban labels blocked cards (they share the Review
       // column under the PRD's five-column rule) so blocked never reads as review.
       'tests/unit/cc-gap-b-focus-blocked-badge.test.tsx',
+      // Gap A - focus-view large Back button returns to the department board (/tasks/all).
+      'tests/unit/cc-gap-a-focus-back-button.test.tsx',
     ],
     env: { NODE_ENV: 'test' },
     testTimeout: 15000,

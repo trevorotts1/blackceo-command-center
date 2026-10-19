@@ -166,7 +166,6 @@ Command Center is a sophisticated web application for managing and orchestrating
 - **Dynamic Departments:** Departments loaded from database workspaces, not hardcoded lists
 - **Brand Palette:** Automatic complementary color generation from company primary/secondary colors
 - **CEO Performance Board:** Company health grading, department analytics, recommendations (industry benchmarks on department pages)
-- **Department Browser (`DepartmentBrowser.tsx`):** Visual Kanban browser for all departments
 - **All Tasks (`/tasks/all`):** Cross-department Kanban with the departments rail on the left; clicking a department opens its Focus View.
 - **Department Picker (`/tasks/by-department`):** Grid of department cards; "Open Department" opens that department's Focus View.
 - **Focus View (`/workspace/[slug]`):** Single-department Kanban scoped to that department's tasks. Both the All-Tasks rail and the picker land here, and the board filters by the workspace's `workspace_id` (the enforced FK), so a department always shows exactly its own tasks. The left rail collapses to a minimal focused context with a "Back to All Departments" link.

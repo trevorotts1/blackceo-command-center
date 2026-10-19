@@ -143,9 +143,9 @@ export default function FocusedDepartmentPage() {
     <div className="min-h-screen bg-gray-50">
       {/* Header */}
       <header className="sticky top-0 z-50 bg-white border-b border-gray-200 px-6 py-3 flex items-center gap-4">
-        {/* Large Back Button */}
+        {/* Large Back Button: returns to the department board (/tasks/all) */}
         <button
-          onClick={() => router.push('/ceo-board/departments')}
+          onClick={() => router.push('/tasks/all')}
           className="flex items-center gap-2 px-5 py-2.5 bg-gray-900 text-white text-base font-semibold rounded-lg hover:bg-gray-800 transition-colors"
         >
           <ArrowLeft className="h-5 w-5" />

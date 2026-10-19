@@ -65,22 +65,21 @@ The BlackCEO Command Center is a Next.js dashboard application that provides a c
 
 **Purpose:** Visual task management with two view modes plus a full-site task board.
 
-**View A: Department Browser** (`/ceo-board`)
+**View A: Department Board** (`/tasks/all`)
 - Left sidebar: Vertical list of all departments
   - Emoji + department name
   - Task count badges
-  - Click to select active department
-- Right panel: Kanban for selected department
-  - Columns: New, Queued, In Progress, Review, Done (5 columns)
-  - Cards show: task title, assigned agent, persona pill, priority badge
+  - Click a department to open its Focus View (`/workspace/[slug]`)
+- Main panel: cross-department Kanban (the Full Task Board, View C, below)
+- This is the one live department board; the earlier five-column browser was removed (decision 2026-10-19)
 
 **View B: Focused Single-Department** (`/ceo-board/[dept]/focus`)
 - Full-screen Kanban for one department
 - No sidebar, maximum task visibility
-- Large "Back" button returns to Department Browser
+- Large "Back" button returns to the Department Board (`/tasks/all`)
 - Columns: New, Queued, In Progress, Review, Done (5 columns)
 
-**View C: Full Task Board** (`/tasks/all`, `/workspace/[slug]`)
+**View C: Full Task Board** (`/tasks/all`, `/workspace/[slug]`; `/tasks/all` is also the Department Board of View A)
 - MissionQueue component with config-driven column set
 - Columns: Backlog, To Do, In Progress, Review/QC, Blocked, Done (6 columns)
 - Backlog column: tasks being prepared (gated by the Triad Rule: must have description, SOP, persona, and assigned agent)
@@ -89,7 +88,7 @@ The BlackCEO Command Center is a Next.js dashboard application that provides a c
 
 **Column Definitions:**
 
-For the 5-column Department Browser / Focus view:
+For the 5-column Focused Single-Department view:
 1. **New** - Tasks just created, not yet prioritized
 2. **Queued** - Prioritized and waiting for agent assignment
 3. **In Progress** - Currently being worked by an agent
