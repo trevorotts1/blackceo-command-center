@@ -108,4 +108,31 @@ describe('Persona selection log (gap E)', () => {
     await waitFor(() => screen.getByRole('alert'));
     expect(screen.getByRole('alert').textContent).toContain('500');
   });
+
+  // The selector (persona-selector-v2.py write_persona_selection_log_row) stores the five layer scores nested
+  // under layer_scores.layers, not flat. Each must show by its checklist name with its score, never "[object Object]".
+  it('shows the five alignment layers by name from the selector\'s real layer_scores shape', async () => {
+    stubFetch({
+      ok: true,
+      body: {
+        entries: [{
+          id: 'e3', task_id: 't3', task_title: 'Offer page', persona_id: 'p-miller', persona_name: 'Donald Miller',
+          mode: 'leadership', score: 0.71, department_id: 'marketing', selected_at: '2026-10-12T10:00:00.000Z',
+          layer_scores: {
+            task_category: 'copywriting', variety_applied: false,
+            layers: { mission: 0.91, owner_values: 0.82, company_kpis: 0.73, dept_kpis: 0.64, task_fit: 0.55, _task_fit_method: 'semantic', _llm_reasoning: { mission: 'fits' } },
+          },
+        }],
+      },
+    });
+    render(<PersonaSelectionLog />);
+    const row = await waitFor(() => screen.getByTestId('persona-log-row'));
+    const text = row.textContent ?? '';
+    for (const [label, v] of [
+      ['Layer 1: Company Mission match:', '0.91'], ['Layer 2: Owner Values alignment:', '0.82'],
+      ['Layer 3: Company Goals relevance:', '0.73'], ['Layer 4: Department Goals fit:', '0.64'],
+      ['Layer 5: Task-specific suitability:', '0.55'],
+    ]) expect(text).toContain(`${label} ${v}`);
+    expect(text).not.toContain('[object Object]');
+  });
 });
