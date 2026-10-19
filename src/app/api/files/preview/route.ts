@@ -6,6 +6,9 @@
  *   - HTML/HTM files (existing behaviour)
  *   - Image files: PNG, JPG, GIF, WEBP, BMP, AVIF, TIFF — served with correct
  *     Content-Type so the browser can render them inline (duck-fix).
+ *   - PDF, MP3, WAV and MP4: types browsers render natively (gap F).
+ *   - `download=1`: ANY file type, as an attachment, under the same path
+ *     allow-list — for formats a browser cannot show (pptx, docx, zip, ...).
  *
  * Security: path must resolve under WORKSPACE_BASE_PATH or PROJECTS_PATH.
  * Path-traversal is blocked via path.normalize + startsWith check.
@@ -32,6 +35,10 @@ const PREVIEW_MIME: Record<string, string> = {
   '.tiff': 'image/tiff',
   '.tif':  'image/tiff',
   '.svg':  'image/svg+xml',
+  '.pdf':  'application/pdf',
+  '.mp3':  'audio/mpeg',
+  '.wav':  'audio/wav',
+  '.mp4':  'video/mp4',
 };
 
 export async function GET(request: NextRequest) {
@@ -46,7 +53,10 @@ export async function GET(request: NextRequest) {
   const normalizedPath = path.normalize(expandedPath);
 
   const ext = path.extname(normalizedPath).toLowerCase();
-  const mimeType = PREVIEW_MIME[ext];
+  const asDownload = request.nextUrl.searchParams.get('download') === '1';
+  // A download is an attachment, so any extension is safe to serve; inline
+  // preview stays restricted to the types above.
+  const mimeType = PREVIEW_MIME[ext] ?? (asDownload ? 'application/octet-stream' : undefined);
 
   if (!mimeType) {
     return NextResponse.json(
@@ -97,7 +107,10 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: 'Path is a directory' }, { status: 400 });
     }
 
-    const isText = mimeType.startsWith('text/') || mimeType === 'image/svg+xml';
+    const disposition = asDownload
+      ? `attachment; filename*=UTF-8''${encodeURIComponent(path.basename(resolvedPath))}`
+      : 'inline';
+    const isText = !asDownload && (mimeType.startsWith('text/') || mimeType === 'image/svg+xml');
 
     if (isText) {
       const content = readFileSync(resolvedPath, 'utf-8');
@@ -105,18 +118,20 @@ export async function GET(request: NextRequest) {
         headers: {
           'Content-Type': mimeType,
           'Content-Length': String(stats.size),
-          'Content-Disposition': 'inline',
+          'Content-Disposition': disposition,
         },
       });
     }
 
-    // Binary (images): read as Buffer and pass as Uint8Array (compatible with BodyInit).
+    // Binary (images, pdf, audio, video, downloads): read as Buffer and pass as
+    // Uint8Array (compatible with BodyInit).
     const binaryContent = readFileSync(resolvedPath);
     return new NextResponse(new Uint8Array(binaryContent), {
       headers: {
         'Content-Type': mimeType,
         'Content-Length': String(stats.size),
-        'Content-Disposition': 'inline',
+        'Content-Disposition': disposition,
+        ...(asDownload ? { 'X-Content-Type-Options': 'nosniff' } : {}),
       },
     });
   } catch (error) {

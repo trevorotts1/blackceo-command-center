@@ -148,6 +148,9 @@ export default defineConfig({
       // Item 19 — ABANDONED pill/panel, plain-words park record, resume
       // outcome rendering, and the board's Abandoned filter, real render proof.
       'tests/unit/item19-engine-panel-render.test.tsx',
+      // Gap F - deliverables: pdf/audio preview + download for every file type,
+      // so a web client is never left with only Finder-reveal, real render proof.
+      'tests/unit/cc-gap-f-deliverables-render.test.tsx',
     ],
     env: { NODE_ENV: 'test' },
     testTimeout: 15000,
