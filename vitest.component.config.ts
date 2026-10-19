@@ -148,6 +148,9 @@ export default defineConfig({
       // Item 19 — ABANDONED pill/panel, plain-words park record, resume
       // outcome rendering, and the board's Abandoned filter, real render proof.
       'tests/unit/item19-engine-panel-render.test.tsx',
+      // Gap E - persona selection log on Intelligence Settings (history,
+      // per-layer reasoning, department/date filters), real render proof.
+      'tests/unit/cc-gap-e-persona-selection-log.test.tsx',
     ],
     env: { NODE_ENV: 'test' },
     testTimeout: 15000,

@@ -37,6 +37,7 @@ import {
   type ProviderRefreshEntry,
 } from '@/components/settings/IntelligenceProviderList';
 import { PERSONA_MATCH_NAME, PERSONA_MATCH_TAGLINE } from '@/components/settings/persona-match';
+import { PersonaSelectionLog } from '@/components/settings/PersonaSelectionLog';
 
 /* ── Data shapes returned by /api/settings/intelligence ── */
 
@@ -699,6 +700,9 @@ export default function IntelligenceSettingsPage() {
             );
           })}
         </div>
+
+        {/* ── Persona selection log (PRD section 6) ── */}
+        <PersonaSelectionLog departments={departmentOptions} />
 
         {/* ── Legend ── */}
         <section className="bg-white border border-gray-200 rounded-xl shadow-sm px-5 py-4">
