@@ -6,15 +6,18 @@
 
 ## Component Verification Status
 
+Legend: ✅ runtime-verified in a browser · 🟨 implemented, checked by reading the code only (not yet verified in a running app) · ⚠️ open gap · ⬜ not started.
+Each row below was checked against `main` at `08fe862d` on 2026-10-19. The per-section "Verification Status" lines further down stay "Not Verified" until someone ticks the boxes in a running app.
+
 | Component | Status | Verified By | Notes |
 |-----------|--------|-------------|-------|
-| CEO Board | ⬜ Not Started | - | - |
-| Department Boards | ⬜ Not Started | - | - |
-| Kanban - Department Browser View | ⬜ Not Started | - | - |
-| Kanban - Focused Single-Department View | ⬜ Not Started | - | - |
-| Performance Board | ⬜ Not Started | - | - |
-| Devil's Advocate | ⬜ Not Started | - | - |
-| Intelligence Settings | ⬜ Not Started | - | - |
+| CEO Board | 🟨 Implemented | Code inspection, 2026-10-19, main 08fe862d | `src/app/ceo-board/page.tsx` (hero card, KPI cards, department grade cards) |
+| Department Boards | 🟨 Implemented | Code inspection, 2026-10-19, main 08fe862d | `src/app/ceo-board/[dept]/page.tsx` |
+| Kanban - Department Browser View | ⚠️ Open | Code inspection, 2026-10-19, main 08fe862d | Sidebar + Kanban is live as the master board `src/app/tasks/all/page.tsx` (six columns, PRD 3.8). The five-column version this checklist describes, `src/components/ceo-board/DepartmentBrowser.tsx`, is not mounted on any route. Needs a product decision: keep the six-column board as the browser, or mount the five-column one. |
+| Kanban - Focused Single-Department View | 🟨 Implemented (read-only) | Code inspection, 2026-10-19, main 08fe862d | `src/app/ceo-board/[dept]/focus/page.tsx`; the interactive per-department board is `src/app/tasks/by-department/page.tsx` |
+| Performance Board | 🟨 Implemented | Code inspection, 2026-10-19, main 08fe862d | The three lenses are sections of the CEO Board page `src/app/ceo-board/page.tsx` (home card "Performance Board" routes there from `src/app/page.tsx`). Company-level industry benchmark comparison is not shown. |
+| Devil's Advocate | 🟨 Implemented | Code inspection, 2026-10-19, main 08fe862d | `src/components/ceo-board/DevilsAdvocateFeed.tsx`, `src/app/api/da-challenges/route.ts` |
+| Intelligence Settings | 🟨 Implemented | Code inspection, 2026-10-19, main 08fe862d | `src/app/settings/intelligence/page.tsx`, `src/app/api/persona-selection-log/route.ts` |
 
 ---
 
