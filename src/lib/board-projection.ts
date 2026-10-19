@@ -53,3 +53,35 @@ export function columnIdToStatus(columnId: string): TaskStatus {
   if (columnId === 'todo') return 'assigned';
   return columnId as TaskStatus; // backlog/in_progress/review/blocked/done map 1:1
 }
+
+/**
+ * Statuses POST /api/tasks refuses on CREATE (see the completion-evidence gate
+ * in src/app/api/tasks/route.ts): a new task has no registered deliverable, so
+ * it cannot honestly claim completion or review yet. Mirrors the server list —
+ * keep the two in step.
+ */
+export const CREATE_TERMINAL_STATUSES: readonly TaskStatus[] = ['done', 'review'];
+
+export function isCreateTerminalStatus(status: TaskStatus): boolean {
+  return (CREATE_TERMINAL_STATUSES as readonly string[]).includes(status);
+}
+
+/** The create form's status choices: every status except the terminal two. */
+export function createDropdownStatuses(statuses: readonly TaskStatus[]): TaskStatus[] {
+  return statuses.filter((s) => !isCreateTerminalStatus(s));
+}
+
+/**
+ * The status a create form should actually submit. Seeding a create from the
+ * Done / Review column cannot be honoured (terminal statuses are refused at
+ * create), so it DOWNGRADES to the closest honest work state instead of
+ * letting the submit 403: Review -> assigned (queued, not yet written up),
+ * Done -> in_progress (work claimed, evidence not yet registered). The task
+ * still reaches the requested column by the normal route — register a
+ * deliverable, then move it.
+ */
+export function createSubmitStatus(status: TaskStatus): TaskStatus {
+  if (status === 'review') return 'assigned';
+  if (status === 'done') return 'in_progress';
+  return status; // every other status passes through 1:1
+}

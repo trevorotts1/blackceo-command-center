@@ -17,6 +17,8 @@ import './_isolated-db'; // MUST be first DB import: throwaway DATABASE_PATH.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { v4 as uuidv4 } from 'uuid';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
 import { getDb, run, queryOne } from '../../src/lib/db';
 import { purgeBoardResidue } from '../../scripts/remediate/purge-board-residue';
 
@@ -180,7 +182,10 @@ test('CLI --apply WITHOUT confirmation exits 3 and writes nothing (main() gate)'
   let refused = false;
   try {
     execFileSync('npx', ['tsx', 'scripts/remediate/purge-board-residue.ts', '--apply'], {
-      cwd: new URL('../..', import.meta.url).pathname,
+      // fileURLToPath, not URL.pathname: a checkout path containing a space
+      // yields a percent-encoded cwd ("mac%20mini"), which spawn() treats as a
+      // nonexistent directory — ENOENT with a null status, never exit 3.
+      cwd: path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..'),
       env: { ...process.env, DATABASE_PATH: process.env.DATABASE_PATH ?? '' },
       stdio: 'pipe',
     });

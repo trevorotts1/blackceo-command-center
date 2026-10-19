@@ -1628,6 +1628,12 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
             setCreateColumnId(null);
           }}
           workspaceId={workspaceId}
+          // A "+" pressed on the Done/Review column cannot seed a task into
+          // that status (POST /api/tasks refuses done/review at create — no
+          // deliverable exists yet). The column's own status is still passed
+          // through: TaskModal downgrades it (createSubmitStatus) and says so,
+          // so the operator sees WHERE the task is going and why, instead of
+          // the create 403'ing.
           initialStatus={createColumnId ? columnIdToStatus(createColumnId) : undefined}
         />
       )}
