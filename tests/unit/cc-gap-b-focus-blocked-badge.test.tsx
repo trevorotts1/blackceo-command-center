@@ -7,6 +7,9 @@
  *
  * npx vitest run --config vitest.component.config.ts tests/unit/cc-gap-b-focus-blocked-badge.test.tsx
  */
+// C8: the page statically reaches the DB singleton via resolve-department (mocked
+// below); isolate DATABASE_PATH first so the C8 guard holds and nothing can open the live DB.
+import './_isolated-db';
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, cleanup, waitFor, within } from '@testing-library/react';
 
