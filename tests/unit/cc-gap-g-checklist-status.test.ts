@@ -110,9 +110,10 @@ test('the department browser row stays Open (gap A, five-column browser unmounte
 // the old 40/30/15/15 grade or a company-level benchmark on the Performance Board.
 test('spec text matches the grade-weights and benchmark decisions', () => {
   const prd = fs.readFileSync(path.join(root, 'PRD.md'), 'utf-8');
+  const readme = fs.readFileSync(path.join(root, 'README.md'), 'utf-8');
   const grading = fs.readFileSync(path.join(root, 'src/lib/grading.ts'), 'utf-8');
-  for (const [name, text] of [['PRD.md', prd], ['CHECKLIST.md', md]] as const) {
-    assert.ok(!/40% KPI|30% Agent|15% DA|15% Recommend/i.test(text), `${name}: still states the old 40/30/15/15 weights`);
+  for (const [name, text] of [['PRD.md', prd], ['CHECKLIST.md', md], ['README.md', readme]] as const) {
+    assert.ok(!/40% KPI|30% Agent|15% DA|15% Recommend|40\/30\/15\/15 formula/i.test(text), `${name}: still states the old 40/30/15/15 weights`);
   }
   assert.ok(/throughput:\s*0\.25[\s\S]*qcPassRate:\s*0\.30[\s\S]*sopCoverage:\s*0\.20[\s\S]*kpiAttainment:\s*0\.25/.test(grading), 'grading.ts weights no longer 25/30/20/25: update the spec text');
   assert.ok(/25% Throughput[\s\S]*30% QC Pass Rate[\s\S]*20% SOP Coverage[\s\S]*25% KPI/.test(prd), 'PRD.md does not list the live weights');

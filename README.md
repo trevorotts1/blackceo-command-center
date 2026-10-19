@@ -170,7 +170,7 @@ Command Center is a sophisticated web application for managing and orchestrating
 - **All Tasks (`/tasks/all`):** Cross-department Kanban with the departments rail on the left; clicking a department opens its Focus View.
 - **Department Picker (`/tasks/by-department`):** Grid of department cards; "Open Department" opens that department's Focus View.
 - **Focus View (`/workspace/[slug]`):** Single-department Kanban scoped to that department's tasks. Both the All-Tasks rail and the picker land here, and the board filters by the workspace's `workspace_id` (the enforced FK), so a department always shows exactly its own tasks. The left rail collapses to a minimal focused context with a "Back to All Departments" link.
-- **Grade Calculator:** 40/30/15/15 formula (Revenue/Mission/Efficiency/Team)
+- **Grade Calculator:** department grade from 25% throughput / 30% QC pass rate / 20% SOP coverage / 25% KPI (`src/lib/grading.ts`)
 - **company-config.json Runtime Loader:** Dynamic persona and config loading
 - **Three-Lens Performance Board:** Revenue, Mission, and Operational Excellence views
 - **Breadcrumb Navigation:** Consistent breadcrumbs on all pages
