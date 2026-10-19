@@ -15,17 +15,20 @@
  *
  * Gates: bulk move carries no updated_by_agent_id, so the agent-only PATCH
  * gates do not apply — but the gates PATCH applies to operator moves DO:
- * the completion-evidence gate (T0-01) on any move into 'done', the
- * presentations no-skip proof gate (registered process_certificate_sha) on a
- * presentations task moved into 'done', and the Triad Rule gate on any move
- * out of 'backlog'. Bulk move is therefore never a bypass of the invariants
- * the single-card PATCH path protects.
+ * the completion-evidence gate (T0-01) on any move into 'done', the SAME
+ * evidence invariant on any move into 'review' (FIX 25 — review exists to have
+ * artifacts QC'd; an evidence-less card in that column is queued for a QC run
+ * that has nothing to read), the presentations no-skip proof gate (registered
+ * process_certificate_sha) on a presentations task moved into 'done', and the
+ * Triad Rule gate on any move out of 'backlog'. Bulk move is therefore never a
+ * bypass of the invariants the single-card PATCH path protects.
  *
  * Body: { operation: "move" | "archive" | "assign", taskIds: string[], ...params }
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { collectCompletionEvidence, noEvidenceMessage } from '@/lib/completion-evidence';
+import { collectCompletionEvidence, noEvidenceMessage, type CompletionEvidence } from '@/lib/completion-evidence';
+import { validateExecutionCompletion } from '@/lib/execution-attempts';
 import { queryOne, run } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { evaluatePresentationsCompletionGate } from '@/lib/presentations-cert-gate';
@@ -41,6 +44,8 @@ interface BulkRequest {
   taskIds: string[];
   /** Required for move: target status column. */
   targetStatus?: TaskStatus;
+  /** Required for move into 'review' when the task has an execution: its id. */
+  execution_id?: string;
   /** Required for assign: agent id to assign. */
   agentId?: string;
 }
@@ -52,6 +57,29 @@ type TaskResult = {
   status?: string;
   error?: string;
 };
+
+/**
+ * Review-flavored refusal. `noEvidenceMessage` is done-framed ("Cannot record
+ * this task as done"), so this states the same requirement for the review door
+ * in review's own words — it lives here rather than in task-lifecycle because
+ * task-lifecycle's counterpart is module-private and this route must not pull
+ * the whole lifecycle module in for one string.
+ */
+function completionEvidenceRefusal(taskId: string, evidence: CompletionEvidence): string {
+  // ponytail: separate copy of lifecycle's reviewEvidenceRefusalMessage text; hoist both to one shared export if a third door needs it.
+  const detail =
+    evidence.rows.length === 0
+      ? 'No deliverable of any kind is registered against this task.'
+      : `Registered deliverables are all unreachable: ${evidence.problems.join('; ')}.`;
+  return (
+    `Cannot move this task to review: no completion evidence. ${detail} ` +
+    `Review requires at least one registered, reachable deliverable — the same ` +
+    `requirement done has (quality is the QC scorer's call, existence is not). ` +
+    `Register one with POST /api/tasks/${taskId}/deliverables ` +
+    `— {"deliverable_type":"file","title":"<name>","path":"<absolute path>"} for a produced file, ` +
+    `or {"deliverable_type":"url","title":"<name>","path":"https://..."} for work that lives somewhere else.`
+  );
+}
 
 export async function POST(request: NextRequest) {
   try {
@@ -123,6 +151,33 @@ export async function POST(request: NextRequest) {
                   taskId,
                   ok: false,
                   error: noEvidenceMessage(taskId, completion),
+                });
+                continue;
+              }
+            }
+
+            // 1b. REVIEW EVIDENCE GATE (FIX 25, same invariant as `done` above).
+            //    PATCH (validateExecutionCompletion), transition() (checkPreconditions
+            //    BEFORE the operatorOverride bail-out) and the create path all
+            //    require completion evidence to enter 'review'; this door had no
+            //    such check, so a bulk move pushed evidence-less cards straight
+            //    into the QC column. The execution-identity leg is the same helper
+            //    PATCH calls — a stale/absent execution id on a task that HAS an
+            //    execution is refused, a legacy task with none passes.
+            if (targetStatus === 'review') {
+              const identityError = validateExecutionCompletion(taskId, {
+                executionId: body.execution_id,
+              });
+              if (identityError) {
+                results.push({ taskId, ok: false, error: identityError });
+                continue;
+              }
+              const completion = collectCompletionEvidence(taskId);
+              if (!completion.hasEvidence) {
+                results.push({
+                  taskId,
+                  ok: false,
+                  error: completionEvidenceRefusal(taskId, completion),
                 });
                 continue;
               }
