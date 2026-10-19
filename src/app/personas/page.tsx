@@ -183,6 +183,22 @@ export default function PersonasPage() {
                       </div>
                     )}
 
+                    {p.custom.length > 0 && (
+                      <div className="mb-2 flex flex-wrap items-center gap-1.5" data-testid="persona-use-cases">
+                        <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">
+                          Use cases
+                        </span>
+                        {p.custom.map((d) => (
+                          <span
+                            key={d}
+                            className="rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-700"
+                          >
+                            {d}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+
                     {p.perspective.length > 0 && (
                       <div className="flex flex-wrap gap-1.5">
                         {p.perspective.map((d) => (

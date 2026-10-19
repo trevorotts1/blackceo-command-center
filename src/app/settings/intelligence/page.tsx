@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import {
   Brain,
@@ -12,6 +13,7 @@ import {
   Wand2,
   Info,
   Users,
+  BookOpen,
   Bot,
   UserCheck,
   ChevronsUpDown,
@@ -700,6 +702,30 @@ export default function IntelligenceSettingsPage() {
             );
           })}
         </div>
+
+        {/* ── Persona categories: the category + domain browser lives at /personas ── */}
+        <section
+          data-testid="persona-categories-section"
+          className="bg-white border border-gray-200 rounded-xl shadow-sm px-5 py-4 flex flex-wrap items-center justify-between gap-3"
+        >
+          <div className="flex items-start gap-3">
+            <BookOpen className="w-5 h-5 text-brand-500 flex-shrink-0 mt-0.5" />
+            <div>
+              <p className="text-sm font-semibold text-gray-900">Persona categories</p>
+              <p className="text-sm text-gray-500">
+                Browse every persona from persona-categories.json by category and domain, with
+                each persona&apos;s name, description, tags and use cases.
+              </p>
+            </div>
+          </div>
+          <Link
+            href="/personas"
+            data-testid="persona-categories-link"
+            className="inline-flex items-center rounded-lg bg-brand-600 px-3 py-2 text-sm font-medium text-white hover:bg-brand-700"
+          >
+            Browse persona categories
+          </Link>
+        </section>
 
         {/* ── Persona selection log (PRD section 6) ── */}
         <PersonaSelectionLog departments={departmentOptions} />

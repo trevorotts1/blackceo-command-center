@@ -55,6 +55,8 @@ interface Department {
   headName: string | null;
   status: DepartmentStatus;
   agentStatus: AgentStatus;
+  /** Open tasks: every task in the department whose status is not `done`. */
+  openTaskCount: number;
 }
 
 interface AgentsSidebarProps {
@@ -110,14 +112,15 @@ export function AgentsSidebar({ workspaceId, isOpen = false, onClose, navigateOn
     let cancelled = false;
     const loadDepartments = async () => {
       try {
-        const res = await fetch('/api/workspaces');
+        // ?stats=true adds taskCounts per workspace (same scope, same head_agent_name join).
+        const res = await fetch('/api/workspaces?stats=true');
         if (!res.ok) return;
         const workspaces = await res.json();
         if (!Array.isArray(workspaces)) return;
 
         const enriched = await Promise.all(
           workspaces.map(
-            async (ws: { id: string; name: string; icon?: string; slug: string; head_agent_name?: string | null }) => {
+            async (ws: { id: string; name: string; icon?: string; slug: string; head_agent_name?: string | null; taskCounts?: { total?: number; done?: number } }) => {
               let agentStatus: AgentStatus = 'standby';
               try {
                 const ar = await fetch(
@@ -155,6 +158,7 @@ export function AgentsSidebar({ workspaceId, isOpen = false, onClose, navigateOn
                 headName: ws.head_agent_name || null,
                 status: deptStatus,
                 agentStatus,
+                openTaskCount: Math.max(0, (ws.taskCounts?.total ?? 0) - (ws.taskCounts?.done ?? 0)),
               } as Department;
             }
           )
@@ -526,6 +530,16 @@ export function AgentsSidebar({ workspaceId, isOpen = false, onClose, navigateOn
                     {dept.headName ?? '—'}
                   </div>
                 </div>
+
+                {/* Open-task count badge (tasks not in `done`) */}
+                <span
+                  data-testid={`dept-task-count-${dept.id}`}
+                  title={`${dept.openTaskCount} open task${dept.openTaskCount === 1 ? '' : 's'}`}
+                  aria-label={`${dept.openTaskCount} open task${dept.openTaskCount === 1 ? '' : 's'}`}
+                  className="bg-gray-100 text-gray-700 text-xs px-2 py-0.5 rounded-full font-semibold tabular-nums"
+                >
+                  {dept.openTaskCount}
+                </span>
 
                 {/* Status or Selected indicator */}
                 {isSelected ? (
