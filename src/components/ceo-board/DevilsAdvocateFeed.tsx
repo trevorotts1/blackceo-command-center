@@ -20,6 +20,8 @@ import { CANONICAL_SLUGS, canonicalDeptSlug } from '@/lib/routing/canonical-slug
  */
 interface DAChallenge {
   id: string;
+  /** The challenged task (the original proposal); null/absent when the producer sent none. */
+  task_id?: string | null;
   department_id: string | null;
   trigger_type: string;
   challenge: string;
@@ -161,6 +163,39 @@ function formatTimeAgo(dateString: string): string {
 // rather than faked — a Service-Level window for challenges belongs in the
 // per-department SLA table, not invented in a feed component.
 
+/**
+ * The challenged task ("original proposal"): its title, linked back to the
+ * board. Degrades to a plain note when there is no task_id or the task can no
+ * longer be fetched (deleted, archived off the board, or a producer-supplied id
+ * that never existed) — a detail view must not break on a dangling reference.
+ */
+function ChallengedTask({ taskId }: { taskId: string | null | undefined }) {
+  const [state, setState] = useState<{ title: string } | 'missing' | 'loading'>('loading');
+  useEffect(() => {
+    if (!taskId) return;
+    let live = true;
+    fetch(`/api/tasks/${encodeURIComponent(taskId)}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((t) => live && setState(t && typeof t.title === 'string' ? { title: t.title } : 'missing'))
+      .catch(() => live && setState('missing'));
+    return () => {
+      live = false;
+    };
+  }, [taskId]);
+
+  if (!taskId) return <>No task linked</>;
+  if (state === 'loading') return <>Loading…</>;
+  if (state === 'missing') return <>Task unavailable ({taskId})</>;
+  return (
+    <a
+      href={`/tasks/all?task=${encodeURIComponent(taskId)}`}
+      className="font-medium text-indigo-600 hover:text-indigo-700 underline"
+    >
+      {state.title}
+    </a>
+  );
+}
+
 export function DevilsAdvocateFeed() {
   const [challenges, setChallenges] = useState<DAChallenge[]>([]);
   const [loading, setLoading] = useState(true);
@@ -173,6 +208,23 @@ export function DevilsAdvocateFeed() {
       if (!next.delete(id)) next.add(id);
       return next;
     });
+
+  const [actionError, setActionError] = useState<string | null>(null);
+  const setStatus = async (id: string, status: DAChallenge['status']) => {
+    setActionError(null);
+    try {
+      const res = await fetch(`/api/da-challenges/${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ status }),
+      });
+      if (!res.ok) throw new Error(`Update failed (${res.status})`);
+      const { challenge: updated } = await res.json();
+      setChallenges((prev) => prev.map((c) => (c.id === id ? { ...c, ...updated } : c)));
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Update failed');
+    }
+  };
 
   useEffect(() => {
     async function fetchChallenges() {
@@ -272,6 +324,12 @@ export function DevilsAdvocateFeed() {
           <p className="text-base text-gray-500">AI challenges that keep departments honest</p>
         </div>
       </div>
+
+      {actionError && (
+        <p role="alert" className="mb-3 text-sm text-red-600">
+          {actionError}
+        </p>
+      )}
 
       {/* Challenges List */}
       <div className="space-y-4">
@@ -396,6 +454,12 @@ export function DevilsAdvocateFeed() {
                   className="mt-3 space-y-2 border-t border-gray-100 pt-3 text-sm text-gray-700"
                 >
                   <div>
+                    <dt className="text-xs font-medium text-gray-500">Challenged task</dt>
+                    <dd>
+                      <ChallengedTask taskId={challenge.task_id} />
+                    </dd>
+                  </div>
+                  <div>
                     <dt className="text-xs font-medium text-gray-500">Triggered by</dt>
                     <dd>{challenge.trigger_type}</dd>
                   </div>
@@ -417,6 +481,38 @@ export function DevilsAdvocateFeed() {
                       {challenge.resolved_at
                         ? new Date(challenge.resolved_at).toLocaleString()
                         : 'Not resolved yet'}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-xs font-medium text-gray-500">Update status</dt>
+                    <dd className="flex flex-wrap gap-2">
+                      {status !== 'escalated' && (
+                        <button
+                          type="button"
+                          onClick={() => setStatus(challenge.id, 'escalated')}
+                          className="rounded-lg border border-red-200 px-2.5 py-1 text-xs font-medium text-red-700 hover:bg-red-50"
+                        >
+                          Escalate
+                        </button>
+                      )}
+                      {status !== 'approved' && (
+                        <button
+                          type="button"
+                          onClick={() => setStatus(challenge.id, 'approved')}
+                          className="rounded-lg border border-emerald-200 px-2.5 py-1 text-xs font-medium text-emerald-700 hover:bg-emerald-50"
+                        >
+                          Mark approved
+                        </button>
+                      )}
+                      {status !== 'rejected' && (
+                        <button
+                          type="button"
+                          onClick={() => setStatus(challenge.id, 'rejected')}
+                          className="rounded-lg border border-gray-200 px-2.5 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                        >
+                          Mark rejected
+                        </button>
+                      )}
                     </dd>
                   </div>
                 </dl>

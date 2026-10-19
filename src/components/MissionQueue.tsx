@@ -241,6 +241,16 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
   // Opened via an "Answer" button: the modal focuses the audience input.
   const [focusAudience, setFocusAudience] = useState(false);
   const openAnswer = (task: Task) => { setFocusAudience(true); setEditingTask(task); };
+  // Deep link (?task=<id>, used by the Devil's Advocate feed): open that task's
+  // modal once it appears in the loaded board. Runs once per page load.
+  const deepLinkHandled = useRef(false);
+  useEffect(() => {
+    if (deepLinkHandled.current || typeof window === 'undefined') return;
+    const id = new URLSearchParams(window.location.search).get('task');
+    if (!id) { deepLinkHandled.current = true; return; }
+    const match = tasks.find((t) => t.id === id);
+    if (match) { deepLinkHandled.current = true; setEditingTask(match); }
+  }, [tasks]);
   const [draggedTask, setDraggedTask] = useState<Task | null>(null);
   const [activeFilter, setActiveFilter] = useState('total');
   // Live-overridable "Tasks Due" window (days). Starts at the prop default;
