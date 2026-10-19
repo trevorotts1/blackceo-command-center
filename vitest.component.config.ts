@@ -157,6 +157,9 @@ export default defineConfig({
       // Gap F - deliverables: pdf/audio preview + download for every file type,
       // so a web client is never left with only Finder-reveal, real render proof.
       'tests/unit/cc-gap-f-deliverables-render.test.tsx',
+      // Gap B — focus-view Kanban labels blocked cards (they share the Review
+      // column under the PRD's five-column rule) so blocked never reads as review.
+      'tests/unit/cc-gap-b-focus-blocked-badge.test.tsx',
     ],
     env: { NODE_ENV: 'test' },
     testTimeout: 15000,
