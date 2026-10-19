@@ -24,6 +24,9 @@ interface DAChallenge {
   trigger_type: string;
   challenge: string;
   specific_concern: string | null;
+  /** Gap D detail view: both are already in the list payload (SELECT *). */
+  assumptions?: string | null;
+  raw_response?: string | null;
   severity: 'low' | 'medium' | 'high' | null;
   /** A department's reply to the challenge, once one exists. */
   outcome: string | null;
@@ -162,6 +165,14 @@ export function DevilsAdvocateFeed() {
   const [challenges, setChallenges] = useState<DAChallenge[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Gap D: which challenge cards have their detail view open.
+  const [openIds, setOpenIds] = useState<Set<string>>(new Set());
+  const toggleOpen = (id: string) =>
+    setOpenIds((prev) => {
+      const next = new Set(prev);
+      if (!next.delete(id)) next.add(id);
+      return next;
+    });
 
   useEffect(() => {
     async function fetchChallenges() {
@@ -362,11 +373,54 @@ export function DevilsAdvocateFeed() {
                 </div>
               )}
 
-              {/* Timestamp */}
-              <div className="flex items-center gap-1.5 text-xs text-gray-400">
-                <Clock className="h-3 w-3" />
-                <span>{formatTimeAgo(challenge.created_at)}</span>
+              {/* Timestamp + detail toggle */}
+              <div className="flex items-center justify-between gap-1.5 text-xs text-gray-400">
+                <div className="flex items-center gap-1.5">
+                  <Clock className="h-3 w-3" />
+                  <span>{formatTimeAgo(challenge.created_at)}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => toggleOpen(challenge.id)}
+                  aria-expanded={openIds.has(challenge.id)}
+                  className="font-medium text-indigo-600 hover:text-indigo-700"
+                >
+                  {openIds.has(challenge.id) ? 'Hide details' : 'View details'}
+                </button>
               </div>
+
+              {/* Gap D: challenge detail view (PRD section 5) */}
+              {openIds.has(challenge.id) && (
+                <dl
+                  data-testid={`da-detail-${challenge.id}`}
+                  className="mt-3 space-y-2 border-t border-gray-100 pt-3 text-sm text-gray-700"
+                >
+                  <div>
+                    <dt className="text-xs font-medium text-gray-500">Triggered by</dt>
+                    <dd>{challenge.trigger_type}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-xs font-medium text-gray-500">Assumptions challenged</dt>
+                    <dd>{challenge.assumptions || 'None recorded'}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-xs font-medium text-gray-500">Full Devil&apos;s Advocate response</dt>
+                    <dd className="whitespace-pre-wrap">{challenge.raw_response || 'None recorded'}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-xs font-medium text-gray-500">Outcome</dt>
+                    <dd>{challenge.outcome || 'Not resolved yet'}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-xs font-medium text-gray-500">Resolved</dt>
+                    <dd>
+                      {challenge.resolved_at
+                        ? new Date(challenge.resolved_at).toLocaleString()
+                        : 'Not resolved yet'}
+                    </dd>
+                  </div>
+                </dl>
+              )}
             </motion.div>
           );
         })}

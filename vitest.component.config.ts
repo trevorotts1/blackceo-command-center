@@ -148,6 +148,9 @@ export default defineConfig({
       // Item 19 — ABANDONED pill/panel, plain-words park record, resume
       // outcome rendering, and the board's Abandoned filter, real render proof.
       'tests/unit/item19-engine-panel-render.test.tsx',
+      // Gap D — Devil's Advocate challenge detail view (assumptions, full DA
+      // response, outcome, resolution), real render proof.
+      'tests/unit/cc-gap-d-da-detail-view.test.tsx',
     ],
     env: { NODE_ENV: 'test' },
     testTimeout: 15000,
