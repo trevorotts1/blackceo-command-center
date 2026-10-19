@@ -315,18 +315,13 @@ function RunRow({ run }: { run: RunSummary }) {
                 </p>
               )}
               {run.report_md_path ? (
-                <p className="mt-3 flex items-center gap-1 text-xs text-white/50">
-                  <FileText className="h-3 w-3" />
-                  <a
-                    className="underline decoration-dotted underline-offset-2 hover:text-white"
-                    href={`/api/skill-runs?run_id=${encodeURIComponent(run.run_id)}`}
-                    target="_blank"
-                    rel="noreferrer"
-                    title="Open the run record (REPORT.md lives at this path on the emitting host)"
-                  >
-                    REPORT.md
-                  </a>
-                  <span className="truncate text-white/30">{run.report_md_path}</span>
+                <p className="mt-3 flex flex-wrap items-baseline gap-1 text-xs text-white/50">
+                  <FileText className="h-3 w-3 shrink-0" />
+                  <span className="text-white/60">REPORT.md</span>
+                  <span className="break-all font-mono text-white/40">{run.report_md_path}</span>
+                  {run.host_shape && (
+                    <span className="text-white/40">on host {run.host_shape}</span>
+                  )}
                 </p>
               ) : (
                 <p className="mt-3 text-xs text-white/30">
