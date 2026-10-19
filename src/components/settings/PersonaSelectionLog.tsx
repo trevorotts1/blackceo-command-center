@@ -4,7 +4,7 @@
  * Persona selection log (PRD section 6, gap E).
  *
  * History of persona assignments with the per-layer reasoning, filterable by
- * department, date and mode. Reads GET /api/persona-selection-log, which
+ * department, task type, date and mode. Reads GET /api/persona-selection-log, which
  * already existed with no UI caller. Honest states only: loading, error, and
  * an empty table say so; nothing is invented.
  */
@@ -31,6 +31,15 @@ interface Props {
 
 const humanize = (key: string) => key.replace(/_/g, ' ');
 
+/** The selector records the task's category inside layer_scores.task_category. */
+const taskTypeOf = (e: LogEntry): string | null => {
+  const c = e.layer_scores?.task_category;
+  return typeof c === 'string' && c ? c : null;
+};
+
+const layerRows = (e: LogEntry): [string, unknown][] =>
+  Object.entries(e.layer_scores ?? {}).filter(([k]) => k !== 'task_category');
+
 function formatLayer(value: unknown): string {
   if (typeof value === 'number') return Number.isInteger(value) ? String(value) : value.toFixed(2);
   return String(value);
@@ -42,6 +51,7 @@ export function PersonaSelectionLog({ departments = [] }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [dept, setDept] = useState('');
   const [mode, setMode] = useState('');
+  const [taskType, setTaskType] = useState('');
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
 
@@ -76,9 +86,15 @@ export function PersonaSelectionLog({ departments = [] }: Props) {
     [entries],
   );
 
+  const typeOptions = useMemo(
+    () => Array.from(new Set(entries.map(taskTypeOf).filter(Boolean))) as string[],
+    [entries],
+  );
+
   const shown = entries.filter((e) => {
     if (dept && e.department_id !== dept) return false;
     if (mode && e.mode !== mode) return false;
+    if (taskType && taskTypeOf(e) !== taskType) return false;
     const day = (e.selected_at || '').slice(0, 10);
     if (from && day < from) return false;
     if (to && day > to) return false;
@@ -126,6 +142,21 @@ export function PersonaSelectionLog({ departments = [] }: Props) {
           </select>
         </label>
         <label className="flex flex-col gap-1 text-xs text-gray-500">
+          Task type
+          <select
+            value={taskType}
+            onChange={(e) => setTaskType(e.target.value)}
+            className="px-2 py-1.5 bg-white border border-gray-200 rounded-lg text-sm text-gray-700"
+          >
+            <option value="">All task types</option>
+            {typeOptions.map((t) => (
+              <option key={t} value={t}>
+                {t}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="flex flex-col gap-1 text-xs text-gray-500">
           From
           <input
             type="date"
@@ -168,6 +199,7 @@ export function PersonaSelectionLog({ departments = [] }: Props) {
                 <th className="px-4 py-2 font-medium">Task</th>
                 <th className="px-4 py-2 font-medium">Department</th>
                 <th className="px-4 py-2 font-medium">Persona</th>
+                <th className="px-4 py-2 font-medium">Task type</th>
                 <th className="px-4 py-2 font-medium">Mode</th>
                 <th className="px-4 py-2 font-medium">Score</th>
                 <th className="px-4 py-2 font-medium">Layer reasoning</th>
@@ -182,14 +214,15 @@ export function PersonaSelectionLog({ departments = [] }: Props) {
                   <td className="px-4 py-2 text-gray-900">{e.task_title || e.task_id}</td>
                   <td className="px-4 py-2 text-gray-700">{deptName(e.department_id)}</td>
                   <td className="px-4 py-2 text-gray-900">{e.persona_name || e.persona_id}</td>
+                  <td className="px-4 py-2 text-gray-700">{taskTypeOf(e) ?? '-'}</td>
                   <td className="px-4 py-2 text-gray-700">{e.mode ?? '-'}</td>
                   <td className="px-4 py-2 text-gray-700">
                     {e.score === null || e.score === undefined ? '-' : formatLayer(e.score)}
                   </td>
                   <td className="px-4 py-2 text-gray-600">
-                    {e.layer_scores && Object.keys(e.layer_scores).length > 0 ? (
+                    {layerRows(e).length > 0 ? (
                       <ul className="space-y-0.5">
-                        {Object.entries(e.layer_scores).map(([k, v]) => (
+                        {layerRows(e).map(([k, v]) => (
                           <li key={k}>
                             <span className="text-gray-500">{humanize(k)}:</span> {formatLayer(v)}
                           </li>

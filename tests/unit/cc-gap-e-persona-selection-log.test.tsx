@@ -23,13 +23,13 @@ const entries = [
   {
     id: 'e1', task_id: 't1', task_title: 'Spring launch email', persona_id: 'p-hormozi',
     persona_name: 'Alex Hormozi', mode: 'auto', score: 0.87,
-    layer_scores: { company_mission: 0.9, owner_values: 0.8 },
+    layer_scores: { company_mission: 0.9, owner_values: 0.8, task_category: 'copywriting' },
     department_id: 'marketing', selected_at: '2026-10-01T10:00:00.000Z',
   },
   {
     id: 'e2', task_id: 't2', task_title: 'Pipeline review', persona_id: 'p-cardone',
     persona_name: 'Grant Cardone', mode: 'manual', score: null,
-    layer_scores: {},
+    layer_scores: { task_category: 'sales-strategy' },
     department_id: 'sales', selected_at: '2026-10-10T10:00:00.000Z',
   },
 ];
@@ -77,7 +77,16 @@ describe('Persona selection log (gap E)', () => {
     fireEvent.change(screen.getByLabelText('Department'), { target: { value: 'sales' } });
     expect(screen.getAllByTestId('persona-log-row')).toHaveLength(1);
     expect(screen.getByText('Grant Cardone')).toBeTruthy();
-    expect(screen.getByText('None recorded')).toBeTruthy(); // empty layer_scores, nothing invented
+    expect(screen.getByText('None recorded')).toBeTruthy(); // no layer scores, nothing invented
+
+    // Task type comes from layer_scores.task_category and filters on its own.
+    fireEvent.change(screen.getByLabelText('Department'), { target: { value: '' } });
+    fireEvent.change(screen.getByLabelText('Task type'), { target: { value: 'copywriting' } });
+    expect(screen.getAllByTestId('persona-log-row')).toHaveLength(1);
+    expect(screen.getByText('Alex Hormozi')).toBeTruthy();
+    // ...and is not repeated as if it were a reasoning score.
+    expect(screen.queryByText('task category:')).toBeNull();
+    fireEvent.change(screen.getByLabelText('Task type'), { target: { value: '' } });
 
     fireEvent.change(screen.getByLabelText('Department'), { target: { value: '' } });
     fireEvent.change(screen.getByLabelText('From'), { target: { value: '2026-10-05' } });
