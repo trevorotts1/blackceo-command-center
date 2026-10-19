@@ -71,3 +71,22 @@ test('screens with a known open defect are Partial and cite their fix PR', () =>
     assert.ok(notes.includes(expectPr[name]), `${name}: does not cite ${expectPr[name]}`);
   }
 });
+
+// Any row whose own checklist section still has an unchecked item known to be missing at main
+// cannot say "Implemented". Each item below was verified missing at main 08fe862d:
+// grading.ts weights are 25/30/20/25 (grade-calculator.ts 40/30/15/15 is @deprecated); no code
+// under src reads department-config.json; company-level benchmark comparison is not rendered.
+test('screens with a known-missing checklist item never say "Implemented"', () => {
+  const knownMissing: Record<string, string> = {
+    'CEO Board': 'Grade calculation uses correct weights',
+    'Department Boards': 'Reads department-config.json',
+    'Performance Board': 'Industry benchmark comparisons',
+  };
+  for (const [name, status, , notes] of rows) {
+    const item = knownMissing[name];
+    if (!item) continue;
+    assert.ok(md.includes(`- [ ] ${item}`), `${name}: item "${item}" is no longer an open checklist line, update this guard`);
+    assert.ok(/partial/i.test(status) && !/implemented/i.test(status), `${name}: status is "${status}"`);
+    assert.ok(/open at main/i.test(notes), `${name}: row does not cite the open item`);
+  }
+});
