@@ -28,3 +28,11 @@ test('the DA checklist item is not described as an open requirement', () => {
   const row = read('CHECKLIST.md').split('\n').find((l) => l.startsWith("| Devil's Advocate"))!;
   assert.ok(/DROPPED/.test(row), 'status table row does not record the drop');
 });
+
+test('the status table names the drop outside its open items, and never lists the dropped item as open', () => {
+  const notes = read('CHECKLIST.md').split('\n').find((l) => l.startsWith("| Devil's Advocate"))!;
+  const at = notes.search(/open at/i);
+  assert.ok(at > 0, 'row lost its open items; re-check the row before editing this guard');
+  assert.ok(/DA settings/.test(notes.slice(0, at)), 'the drop is not recorded before the open items');
+  assert.ok(!/department-config|DA settings/i.test(notes.slice(at)), 'the dropped item is listed among the open items');
+});
