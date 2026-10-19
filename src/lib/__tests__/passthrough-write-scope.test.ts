@@ -118,6 +118,14 @@
  * channel's CSRF-proof auth and is mechanically blocked by the
  * no-overlap assertion via the registry's canonical :id paths).
  *
+ * re-derived 2026-10-19 for Devil's Advocate escalation tracking: PATCH
+ * /api/da-challenges/{id} — the feed's Escalate / Mark approved / Mark rejected
+ * buttons (DevilsAdvocateFeed.tsx, session cookie + CSRF, never a bearer): 160
+ * mutating, 7 webhook-protected (unchanged), 153 non-webhook. Bearer totals
+ * unchanged: the item path is interface-called and must NOT join
+ * BEARER_REQUIRED_WRITE_ROUTES (the collection /api/da-challenges stays
+ * bearer-only for the service-to-service POST).
+ *
  * re-derived 2026-09-27 for ILJ-004 tenant skip marks: POST
  * /api/interview/state — the owner's browser marking one structured question
  * skipped (InterviewClient.tsx:375 with the session cookie + tenant
@@ -381,16 +389,16 @@ const nonWebhookCount = allMutatingRoutes.length - webhookProtectedCount;
 describe('passthrough-write-scope — anti-rot lock (U052)', () => {
   // ---- Counts ------------------------------------------------------------
 
-  it('API routes exporting a mutating method: 159 (literal assertion)', () => {
-    expect(allMutatingRoutes.length).toBe(159);
+  it('API routes exporting a mutating method: 160 (literal assertion)', () => {
+    expect(allMutatingRoutes.length).toBe(160);
   });
 
   it('protected by isWebhookSecretRoute: 7 (5 static + 2 dynamic — middleware src/middleware.ts:137-167)', () => {
     expect(webhookProtectedCount).toBe(7);
   });
 
-  it('non-webhook write routes: 152 (159 mutating − 7 webhook-protected; tenant authentication remains required)', () => {
-    expect(nonWebhookCount).toBe(152);
+  it('non-webhook write routes: 153 (160 mutating − 7 webhook-protected; tenant authentication remains required)', () => {
+    expect(nonWebhookCount).toBe(153);
   });
 
   it('interface call templates found by multi-line scanner', () => {

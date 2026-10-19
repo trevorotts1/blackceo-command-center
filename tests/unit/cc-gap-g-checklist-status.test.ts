@@ -103,21 +103,37 @@ test('screens with a known-missing checklist item stay Partial and name it', () 
 });
 
 // Devil's Advocate: "Respects department-config.json DA settings" was DROPPED (decision #5), so it is not
-// the reason the row is Partial. The row stays Partial only for items verified unmet in code: no
-// original-proposal view, no risks/alternatives/modifications fields, no review-type logic in this repo,
-// and no way to move a challenge to escalated. Each is named after "Open at"; a row that stops naming
-// them must be re-checked, not quietly promoted to "Code-checked".
-test("Devil's Advocate stays Partial and names the items that are really unmet", () => {
+// the reason the row is Partial. "Original proposal visible" and "Escalation tracking works" are now met in
+// code (challenged-task link in the detail view; PATCH /api/da-challenges/{id} plus the status buttons). The row
+// stays Partial only for items still unmet: no risks/alternatives/modifications (the producer's prompt forbids
+// proposing solutions) and no review-type logic. Each is named after "Open at"; a row that stops naming them
+// must be re-checked, not quietly promoted to "Code-checked", and a met item must not be listed as open.
+test("Devil's Advocate stays Partial and names only the items that are still unmet", () => {
   const row = rows.find((r) => r[0] === "Devil's Advocate")!;
   assert.ok(/partial/i.test(row[1]) && !/implemented/i.test(row[1]), `status is "${row[1]}"`);
-  const open = row[3].slice(row[3].search(/open at/i));
   assert.ok(/open at/i.test(row[3]), 'row does not cite the open items');
-  for (const item of ['Original proposal visible', 'Risks and alternatives listed', 'Recommended modifications shown', 'Review Types', 'Escalation tracking works']) {
+  const open = row[3].slice(row[3].search(/open at/i));
+  for (const item of ['Risks and alternatives listed', 'Recommended modifications shown', 'Review Types']) {
     assert.ok(open.includes(item), `open items do not name: ${item}`);
   }
-  for (const item of ['Original proposal visible', 'Escalation tracking works']) {
-    assert.ok(md.includes(`- [ ] ${item}`), `checklist line missing: ${item}`);
+  for (const line of ['Risks and alternatives listed', 'Recommended modifications shown', 'Required reviews trigger correctly']) {
+    assert.ok(md.includes(`- [ ] ${line}\n`), `checklist line missing or annotated as met: ${line}`);
   }
+  for (const item of ['Original proposal visible', 'Escalation tracking works']) {
+    assert.ok(!open.includes(item), `met item still listed as open: ${item}`);
+    assert.ok(md.includes(`- [ ] ${item} (met in code`), `checklist line not marked met: ${item}`);
+  }
+});
+
+// The two met claims are true only while their code exists: the detail view renders the challenged task from
+// task_id, the item route can set 'escalated' (validated to the four statuses), and the feed's buttons call it.
+test("Devil's Advocate: challenged-task view and escalation path exist in code", () => {
+  const feed = fs.readFileSync(path.join(root, 'src/components/ceo-board/DevilsAdvocateFeed.tsx'), 'utf-8');
+  assert.ok(feed.includes('<ChallengedTask taskId={challenge.task_id} />'), 'detail view no longer shows the challenged task');
+  assert.ok(feed.includes("setStatus(challenge.id, 'escalated')") && feed.includes("method: 'PATCH'"), 'feed has no way to escalate');
+  const route = fs.readFileSync(path.join(root, 'src/app/api/da-challenges/[id]/route.ts'), 'utf-8');
+  assert.ok(/export async function PATCH/.test(route), 'item route has no PATCH');
+  assert.ok(route.includes("z.enum(['pending', 'approved', 'rejected', 'escalated'])"), 'PATCH is not validated to the four statuses');
 });
 
 // Intelligence Settings Persona Categories: met through the linked /personas screen, not embedded. The three

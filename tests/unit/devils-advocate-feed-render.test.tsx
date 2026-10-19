@@ -34,7 +34,7 @@
  * npx vitest run --config vitest.component.config.ts tests/unit/devils-advocate-feed-render.test.tsx
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { render, screen, cleanup, waitFor } from '@testing-library/react';
+import { render, screen, cleanup, waitFor, fireEvent } from '@testing-library/react';
 
 import { DevilsAdvocateFeed } from '../../src/components/ceo-board/DevilsAdvocateFeed';
 import { CANONICAL_SLUGS } from '../../src/lib/routing/canonical-slug';
@@ -48,6 +48,7 @@ const FEED_URL = '/api/da-challenges';
  * src/app/api/da-challenges/route.ts's `DAChallenge`, current main). */
 interface FixtureChallenge {
   id: string;
+  task_id?: string | null;
   department_id: string | null;
   trigger_type: string;
   challenge: string;
@@ -289,5 +290,64 @@ describe('DevilsAdvocateFeed — real department ids render correctly (QC defect
     for (const fabricated of ['Sales conversion dropped', 'Ad spend increased', 'backlog for over 14 days']) {
       expect(screen.queryByText(fabricated)).toBeNull();
     }
+  });
+});
+
+
+describe('DevilsAdvocateFeed — challenged task + escalation tracking', () => {
+  /** Routes: feed list, task lookup, and the PATCH status update. */
+  function stubRoutes(
+    challenges: FixtureChallenge[],
+    task: { ok: boolean; body?: unknown } = { ok: true, body: { id: 't-1', title: 'Launch spring campaign' } },
+  ) {
+    return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url === FEED_URL) return { ok: true, status: 200, json: async () => ({ challenges }) } as Response;
+      if (url.startsWith('/api/tasks/')) {
+        return { ok: task.ok, status: task.ok ? 200 : 404, json: async () => task.body } as Response;
+      }
+      if (url.startsWith('/api/da-challenges/') && init?.method === 'PATCH') {
+        const { status } = JSON.parse(String(init.body));
+        const id = decodeURIComponent(url.split('/').pop()!);
+        const base = challenges.find((c) => c.id === id)!;
+        return { ok: true, status: 200, json: async () => ({ challenge: { ...base, status } }) } as Response;
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+  }
+
+  it('shows the challenged task title, linked back to the board, in the detail view', async () => {
+    global.fetch = stubRoutes([challenge({ id: 'c1', task_id: 't-1' })]) as unknown as typeof fetch;
+    render(<DevilsAdvocateFeed />);
+    await waitFor(() => screen.getByText('View details'));
+    fireEvent.click(screen.getByText('View details'));
+    const link = await waitFor(() => screen.getByText('Launch spring campaign'));
+    expect(link.closest('a')?.getAttribute('href')).toBe('/tasks/all?task=t-1');
+  });
+
+  it('degrades gracefully when the task is gone or the challenge has no task_id', async () => {
+    global.fetch = stubRoutes(
+      [challenge({ id: 'c-gone', task_id: 't-gone' }), challenge({ id: 'c-none', task_id: null })],
+      { ok: false },
+    ) as unknown as typeof fetch;
+    render(<DevilsAdvocateFeed />);
+    await waitFor(() => screen.getAllByText('View details'));
+    screen.getAllByText('View details').forEach((b) => fireEvent.click(b));
+    await waitFor(() => screen.getByText('Task unavailable (t-gone)'));
+    expect(screen.getByText('No task linked')).toBeTruthy();
+  });
+
+  it('Escalate sends PATCH {status:"escalated"} and the badge flips to Escalated', async () => {
+    const fetchMock = stubRoutes([challenge({ id: 'c1', task_id: 't-1' })]);
+    global.fetch = fetchMock as unknown as typeof fetch;
+    render(<DevilsAdvocateFeed />);
+    await waitFor(() => screen.getByText('View details'));
+    fireEvent.click(screen.getByText('View details'));
+    fireEvent.click(await waitFor(() => screen.getByText('Escalate')));
+    await waitFor(() => screen.getByText('⚠️ Escalated for review'));
+    expect(screen.getByText('Escalated')).toBeTruthy();
+    const call = fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH')!;
+    expect(call[0]).toBe('/api/da-challenges/c1');
+    expect(JSON.parse(String(call[1]!.body))).toEqual({ status: 'escalated' });
   });
 });
