@@ -56,3 +56,18 @@ test('every file a row cites exists in the repo', () => {
     }
   }
 });
+
+// Rows that the checklist's own sections show as incomplete at main must not say "Implemented".
+// Each must be Partial and name the open PR carrying the fix.
+test('screens with a known open defect are Partial and cite their fix PR', () => {
+  const expectPr: Record<string, string> = {
+    'Kanban - Focused Single-Department View': '#569',
+    "Devil's Advocate": '#570',
+    'Intelligence Settings': '#571',
+  };
+  for (const [name, status, , notes] of rows) {
+    if (!expectPr[name]) continue;
+    assert.ok(/partial/i.test(status) && !/implemented/i.test(status), `${name}: status is "${status}"`);
+    assert.ok(notes.includes(expectPr[name]), `${name}: does not cite ${expectPr[name]}`);
+  }
+});
