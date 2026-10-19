@@ -542,7 +542,11 @@ export function listSkill71Runs(filter: ListSkill71RunsFilter = {}): { runs: Ski
     }
     return {
       ...r,
-      stages_closed: stages.filter((s) => s.status === 'closed').length,
+      // Fix 12.3: a close whose receipt_status is not_authorized is not a
+      // pass; it must never inflate the "N/M stages closed" numerator.
+      stages_closed: stages.filter(
+        (s) => s.status === 'closed' && s.receipt_status !== 'not_authorized',
+      ).length,
       stages_total: SKILL71_STAGE_ORDER.length,
       cost_by_provider: cost,
       review_flag: reviewFlagFor(r.review_mode),

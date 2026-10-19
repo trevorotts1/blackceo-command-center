@@ -39,6 +39,7 @@ interface StageRow {
   receipt_status: string | null;
   closed_at: string | null;
   duration_s: number | null;
+  artifact_hashes: Record<string, string> | null;
   failures: string[] | null;
 }
 
@@ -112,12 +113,74 @@ function ReviewFlag({ run }: { run: RunSummary }) {
   return null;
 }
 
+const FOUR_IMAGE_PATHS = [
+  { label: 'Desktop wireframe', glob: 'desktop-wireframe/section-*.png' },
+  { label: 'Mobile wireframe', glob: 'mobile-tablet/section-*.png' },
+  { label: 'Desktop mockup', glob: 'final-mockups/desktop/part-*.png' },
+  { label: 'Mobile mockup', glob: 'final-mockups/mobile/part-*.png' },
+] as const;
+
+/** Run-folder-relative artifact path against the contract's glob. */
+function artifactMatches(path: string, glob: string): boolean {
+  const source = glob
+    .split('*')
+    .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('.*');
+  return new RegExp(`^${source}$`).test(path);
+}
+
+/**
+ * Fix 12.2: the four images a page must carry, rendered from
+ * artifact_hashes (which the run detail already serves). The panel never
+ * serves bytes: Fix 12.5 defers the media route until the artifacts exist.
+ */
+function FourImageSet({ stages }: { stages: StageRow[] }) {
+  const paths: string[] = [];
+  for (const stage of stages) {
+    for (const path of Object.keys(stage.artifact_hashes ?? {})) {
+      if (!paths.includes(path)) paths.push(path);
+    }
+  }
+  return (
+    <div className="mt-3 rounded-lg border border-white/10 bg-white/[0.02] p-3">
+      <p className="text-[11px] font-bold uppercase tracking-widest text-white/50">
+        Four images
+      </p>
+      <ul className="mt-2 space-y-1">
+        {FOUR_IMAGE_PATHS.map(({ label, glob }) => {
+          const matched = paths.filter((path) => artifactMatches(path, glob)).sort();
+          return (
+            <li key={glob} className="flex flex-wrap items-baseline gap-2 text-xs">
+              <span className="text-white/60">{label}</span>
+              {matched.length > 0 ? (
+                matched.map((path) => (
+                  <code
+                    key={path}
+                    className="break-all font-mono text-[11px] text-white/70"
+                  >
+                    {path}
+                  </code>
+                ))
+              ) : (
+                <span className="font-semibold text-amber-300">missing</span>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
 function StageDots({ detail }: { detail: RunDetail }) {
   return (
     <div className="flex flex-wrap items-center gap-1">
       {detail.stages.map((s) => {
-        const color =
-          s.status === 'closed'
+        const notAuthorized =
+          s.status === 'closed' && s.receipt_status === 'not_authorized';
+        const color = notAuthorized
+          ? 'bg-amber-400'
+          : s.status === 'closed'
             ? 'bg-emerald-400'
             : s.status === 'blocked'
               ? 'bg-red-400'
@@ -125,7 +188,7 @@ function StageDots({ detail }: { detail: RunDetail }) {
         return (
           <span
             key={s.stage}
-            title={`${s.stage}: ${s.status}`}
+            title={`${s.stage}: ${notAuthorized ? 'closed (NOT AUTHORIZED)' : s.status}`}
             className={`h-2.5 w-2.5 rounded-full ${color}`}
           />
         );
@@ -210,21 +273,30 @@ function RunRow({ run }: { run: RunSummary }) {
           {detail && (
             <>
               <StageDots detail={detail} />
+              <FourImageSet stages={detail.stages} />
               <ul className="mt-3 space-y-1">
                 {detail.stages.map((s) => (
                   <li key={s.stage} className="flex flex-wrap items-baseline gap-2 text-xs">
                     <span
                       className={
-                        s.status === 'closed'
-                          ? 'text-emerald-300'
-                          : s.status === 'blocked'
-                            ? 'font-semibold text-red-300'
-                            : 'text-white/40'
+                        s.status === 'closed' && s.receipt_status === 'not_authorized'
+                          ? 'text-amber-300'
+                          : s.status === 'closed'
+                            ? 'text-emerald-300'
+                            : s.status === 'blocked'
+                              ? 'font-semibold text-red-300'
+                              : 'text-white/40'
                       }
                     >
                       {s.stage}
                     </span>
-                    <span className="text-white/40">{s.status}</span>
+                    {s.receipt_status === 'not_authorized' ? (
+                      <span className="rounded-full border border-amber-400/40 bg-amber-500/15 px-2 py-0.5 text-[10px] font-bold text-amber-300">
+                        NOT AUTHORIZED
+                      </span>
+                    ) : (
+                      <span className="text-white/40">{s.status}</span>
+                    )}
                     {s.closed_at && (
                       <span className="text-white/30">{formatWhen(s.closed_at)}</span>
                     )}
