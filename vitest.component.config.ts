@@ -154,6 +154,9 @@ export default defineConfig({
       // Gap E - persona selection log on Intelligence Settings (history,
       // per-layer reasoning, department/date filters), real render proof.
       'tests/unit/cc-gap-e-persona-selection-log.test.tsx',
+      // Gap F - deliverables: pdf/audio preview + download for every file type,
+      // so a web client is never left with only Finder-reveal, real render proof.
+      'tests/unit/cc-gap-f-deliverables-render.test.tsx',
     ],
     env: { NODE_ENV: 'test' },
     testTimeout: 15000,
