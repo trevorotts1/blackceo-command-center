@@ -17,11 +17,14 @@ The BlackCEO Command Center is a Next.js dashboard application that provides a c
 **Purpose:** High-level executive dashboard showing company-wide AI workforce status.
 
 **Features:**
-- Company health letter grade (A-F) calculated from weighted metrics:
-  - 40% KPI Achievement
-  - 30% Agent Performance
-  - 15% Devil's Advocate Compliance
-  - 15% Recommendation Follow-Through
+- Company health letter grade (A-F). Each department score is a weighted mix of four inputs (`DEFAULT_INPUT_WEIGHTS` in `src/lib/grading.ts`):
+  - 25% Throughput
+  - 30% QC Pass Rate
+  - 20% SOP Coverage
+  - 25% KPI Attainment
+  - An input with too little data is skipped and the remaining weights are re-scaled; a department needs at least two scored inputs to be graded.
+  - The company score is the average of department scores weighted by task volume.
+  - Devil's Advocate compliance and recommendation follow-through are reported alongside the grade; they are not graded inputs.
 - Real-time agent activity counter
 - Department overview cards with:
   - Department emoji and name
@@ -116,7 +119,7 @@ For the 6-column Full Task Board:
 **Lens 1: Business Operations KPIs**
 - Company-level and department-level KPIs
 - Target vs actual progress bars
-- Industry benchmark comparisons
+- Industry benchmark comparisons appear on the department pages ("vs industry avg"); the Performance Board shows no company-level benchmark
 - Historical trend charts
 
 **Lens 2: Agent Performance**
@@ -298,7 +301,7 @@ For the 6-column Full Task Board:
 | CEO Board load time | < 2 seconds |
 | Kanban real-time sync | < 500ms latency |
 | Persona categories load | < 1 second |
-| Grade calculation accuracy | 100% match to formula |
+| Grade calculation accuracy | 100% match to the weights in `src/lib/grading.ts` |
 | Uptime | 99.5% |
 
 ---
