@@ -148,6 +148,15 @@ export default defineConfig({
       // Item 19 — ABANDONED pill/panel, plain-words park record, resume
       // outcome rendering, and the board's Abandoned filter, real render proof.
       'tests/unit/item19-engine-panel-render.test.tsx',
+      // Gap D — Devil's Advocate challenge detail view (assumptions, full DA
+      // response, outcome, resolution), real render proof.
+      'tests/unit/cc-gap-d-da-detail-view.test.tsx',
+      // Gap E - persona selection log on Intelligence Settings (history,
+      // per-layer reasoning, department/date filters), real render proof.
+      'tests/unit/cc-gap-e-persona-selection-log.test.tsx',
+      // Gap F - deliverables: pdf/audio preview + download for every file type,
+      // so a web client is never left with only Finder-reveal, real render proof.
+      'tests/unit/cc-gap-f-deliverables-render.test.tsx',
     ],
     env: { NODE_ENV: 'test' },
     testTimeout: 15000,

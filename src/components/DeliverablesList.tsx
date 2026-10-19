@@ -3,18 +3,29 @@
  * Displays deliverables (files, URLs, artifacts) for a task.
  *
  * Image deliverables (duck-fix): renders an inline <img> thumbnail that links
- * to the full-size preview.  Non-image files keep the Finder-reveal behaviour.
+ * to the full-size preview.  Gap F: every file deliverable also gets a
+ * browser-reachable path - an in-browser preview for html/pdf/audio/video, and
+ * a Download link for anything else (pptx, docx, ...) - so a web client is
+ * never left with only the Finder-reveal button, which works on the server box.
  */
 
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
-import { FileText, Link as LinkIcon, Package, ExternalLink, Eye, Image as ImageIcon } from 'lucide-react';
+import { FileText, Link as LinkIcon, Package, ExternalLink, Eye, Download, Image as ImageIcon } from 'lucide-react';
 import { debug } from '@/lib/debug';
 import type { TaskDeliverable } from '@/lib/types';
 
 /** Image file extensions (lower-case, with leading dot). */
 const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.avif', '.tiff', '.tif', '.svg']);
+
+/** Non-image types /api/files/preview serves inline (must match its PREVIEW_MIME). */
+const INLINE_PREVIEW_EXTS = new Set(['.html', '.htm', '.pdf', '.mp3', '.wav', '.mp4']);
+
+const extOf = (filePath: string): string => {
+  const dot = filePath.lastIndexOf('.');
+  return dot < 0 ? '' : filePath.slice(dot).toLowerCase();
+};
 
 interface DeliverablesListProps {
   taskId: string;
@@ -58,9 +69,14 @@ export function DeliverablesList({ taskId, engineLabel }: DeliverablesListProps)
   /** Return true when the deliverable path points to an image file. */
   const isImageDeliverable = (deliverable: TaskDeliverable): boolean => {
     if (deliverable.deliverable_type !== 'file' || !deliverable.path) return false;
-    const ext = deliverable.path.slice(deliverable.path.lastIndexOf('.')).toLowerCase();
-    return IMAGE_EXTS.has(ext);
+    return IMAGE_EXTS.has(extOf(deliverable.path));
   };
+
+  /** True when the browser can show the file inline (html, pdf, audio, video, images). */
+  const canPreview = (deliverable: TaskDeliverable): boolean =>
+    deliverable.deliverable_type !== 'url' &&
+    !!deliverable.path &&
+    (isImageDeliverable(deliverable) || INLINE_PREVIEW_EXTS.has(extOf(deliverable.path)));
 
   /**
    * Build the URL for serving a file deliverable inline via /api/files/preview.
@@ -68,6 +84,9 @@ export function DeliverablesList({ taskId, engineLabel }: DeliverablesListProps)
    */
   const previewUrl = (filePath: string): string =>
     `/api/files/preview?path=${encodeURIComponent(filePath)}`;
+
+  /** Same route and path allow-list, served as an attachment (any file type). */
+  const downloadUrl = (filePath: string): string => `${previewUrl(filePath)}&download=1`;
 
   const getDeliverableIcon = (deliverable: TaskDeliverable) => {
     if (isImageDeliverable(deliverable)) {
@@ -211,9 +230,8 @@ export function DeliverablesList({ taskId, engineLabel }: DeliverablesListProps)
                   <h4 className="font-medium text-gray-900">{deliverable.title}</h4>
                 )}
                 <div className="flex items-center gap-1">
-                  {/* Preview button for HTML or image files */}
-                  {deliverable.deliverable_type === 'file' && deliverable.path &&
-                    (deliverable.path.endsWith('.html') || deliverable.path.endsWith('.htm') || isImg) && (
+                  {/* Preview button for anything the browser can show inline */}
+                  {canPreview(deliverable) && (
                     <button
                       onClick={() => handlePreview(deliverable)}
                       className="flex-shrink-0 p-1.5 hover:bg-gray-200 rounded-lg text-cyan-600 transition-colors"
@@ -221,6 +239,18 @@ export function DeliverablesList({ taskId, engineLabel }: DeliverablesListProps)
                     >
                       <Eye className="w-4 h-4" />
                     </button>
+                  )}
+                  {/* Download link: works from any browser, unlike Finder reveal */}
+                  {deliverable.deliverable_type !== 'url' && deliverable.path && (
+                    <a
+                      href={downloadUrl(deliverable.path)}
+                      download
+                      className="flex-shrink-0 p-1.5 hover:bg-gray-200 rounded-lg text-emerald-600 transition-colors"
+                      title="Download file"
+                      aria-label={`Download ${deliverable.title}`}
+                    >
+                      <Download className="w-4 h-4" />
+                    </a>
                   )}
                   {/* Open/Reveal button */}
                   {deliverable.path && (
