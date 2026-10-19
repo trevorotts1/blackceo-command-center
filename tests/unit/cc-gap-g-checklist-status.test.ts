@@ -92,7 +92,6 @@ test('no screen says "Implemented"', () => {
 test('screens with a known-missing checklist item stay Partial and name it', () => {
   const knownMissing: Record<string, string> = {
     'Department Boards': 'Reads department-config.json',
-    "Devil's Advocate": 'Respects department-config.json DA settings',
   };
   for (const [name, status, , notes] of rows) {
     const item = knownMissing[name];
@@ -100,6 +99,24 @@ test('screens with a known-missing checklist item stay Partial and name it', () 
     assert.ok(md.includes(`- [ ] ${item}`), `${name}: item "${item}" is no longer an open checklist line, update this guard`);
     assert.ok(/partial/i.test(status) && !/implemented/i.test(status), `${name}: status is "${status}"`);
     assert.ok(/open at/i.test(notes), `${name}: row does not cite the open item`);
+  }
+});
+
+// Devil's Advocate: "Respects department-config.json DA settings" was DROPPED (decision #5), so it is not
+// the reason the row is Partial. The row stays Partial only for items verified unmet in code: no
+// original-proposal view, no risks/alternatives/modifications fields, no review-type logic in this repo,
+// and no way to move a challenge to escalated. Each is named after "Open at"; a row that stops naming
+// them must be re-checked, not quietly promoted to "Code-checked".
+test("Devil's Advocate stays Partial and names the items that are really unmet", () => {
+  const row = rows.find((r) => r[0] === "Devil's Advocate")!;
+  assert.ok(/partial/i.test(row[1]) && !/implemented/i.test(row[1]), `status is "${row[1]}"`);
+  const open = row[3].slice(row[3].search(/open at/i));
+  assert.ok(/open at/i.test(row[3]), 'row does not cite the open items');
+  for (const item of ['Original proposal visible', 'Risks and alternatives listed', 'Recommended modifications shown', 'Review Types', 'Escalation tracking works']) {
+    assert.ok(open.includes(item), `open items do not name: ${item}`);
+  }
+  for (const item of ['Original proposal visible', 'Escalation tracking works']) {
+    assert.ok(md.includes(`- [ ] ${item}`), `checklist line missing: ${item}`);
   }
 });
 
