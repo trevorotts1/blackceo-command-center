@@ -44,6 +44,9 @@ const STATUS_TO_COLUMN: Partial<Record<TaskStatus, KanbanColumn>> = {
   in_progress: 'in_progress',
   testing: 'in_progress',
   review: 'review',
+  // The PRD fixes this view at five columns, so a blocked task lands in
+  // Review (the "needs a human" column) but is never shown as plain review
+  // work: FocusedKanbanCard stamps it with a visible "Blocked" badge.
   blocked: 'review',
   done: 'done',
 };
@@ -251,6 +254,14 @@ function FocusedKanbanCard({ card }: { card: KanbanCard }) {
 
       {/* Badges */}
       <div className="flex items-center gap-1.5 flex-wrap">
+        {card.status === 'blocked' && (
+          <span
+            data-testid="blocked-badge"
+            className="inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold bg-red-100 text-red-700"
+          >
+            Blocked
+          </span>
+        )}
         <span
           className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold ${priorityStyle.bg} ${priorityStyle.text}`}
         >
