@@ -37,8 +37,26 @@ const taskTypeOf = (e: LogEntry): string | null => {
   return typeof c === 'string' && c ? c : null;
 };
 
-const layerRows = (e: LogEntry): [string, unknown][] =>
-  Object.entries(e.layer_scores ?? {}).filter(([k]) => k !== 'task_category');
+/** The five alignment layers the selector scores, in PRD order (keys of layer_scores.layers). */
+const LAYERS: [string, string][] = [
+  ['mission', 'Layer 1: Company Mission match'],
+  ['owner_values', 'Layer 2: Owner Values alignment'],
+  ['company_kpis', 'Layer 3: Company Goals relevance'],
+  ['dept_kpis', 'Layer 4: Department Goals fit'],
+  ['task_fit', 'Layer 5: Task-specific suitability'],
+];
+
+/**
+ * The selector stores {task_category, layers: {mission, ..., _llm_reasoning}, variety_applied}.
+ * Show the five layers by name with their score; any other scalar key (older rows are flat) is shown as before.
+ */
+const layerRows = (e: LogEntry): [string, unknown][] => {
+  const ls = e.layer_scores ?? {};
+  const layers = ls.layers && typeof ls.layers === 'object' ? (ls.layers as Record<string, unknown>) : {};
+  const named = LAYERS.filter(([k]) => layers[k] !== undefined).map(([k, label]) => [label, layers[k]] as [string, unknown]);
+  const flat = Object.entries(ls).filter(([k, v]) => k !== 'task_category' && k !== 'layers' && (v === null || typeof v !== 'object'));
+  return [...named, ...flat];
+};
 
 function formatLayer(value: unknown): string {
   if (typeof value === 'number') return Number.isInteger(value) ? String(value) : value.toFixed(2);
@@ -224,7 +242,7 @@ export function PersonaSelectionLog({ departments = [] }: Props) {
                       <ul className="space-y-0.5">
                         {layerRows(e).map(([k, v]) => (
                           <li key={k}>
-                            <span className="text-gray-500">{humanize(k)}:</span> {formatLayer(v)}
+                            <span className="text-gray-500">{k.startsWith('Layer ') ? k : humanize(k)}:</span> {formatLayer(v)}
                           </li>
                         ))}
                       </ul>
