@@ -79,14 +79,12 @@ test('no screen says "Implemented"', () => {
 });
 
 // Each item below was verified missing at the train head: no code under src reads department-config.json;
-// the department board rail (AgentsSidebar) shows no per-department task count (gap A follow-up);
-// Intelligence Settings has no persona category list, domain filter or link to /personas.
+// the department board rail (AgentsSidebar) shows no per-department task count (gap A follow-up).
 test('screens with a known-missing checklist item stay Partial and name it', () => {
   const knownMissing: Record<string, string> = {
     'Department Boards': 'Reads department-config.json',
     'Kanban - Department Board View': 'Departments display emoji + name + task count badge',
     "Devil's Advocate": 'Respects department-config.json DA settings',
-    'Intelligence Settings': 'Displays all personas from persona-categories.json',
   };
   for (const [name, status, , notes] of rows) {
     const item = knownMissing[name];
@@ -95,6 +93,19 @@ test('screens with a known-missing checklist item stay Partial and name it', () 
     assert.ok(/partial/i.test(status) && !/implemented/i.test(status), `${name}: status is "${status}"`);
     assert.ok(/open at/i.test(notes), `${name}: row does not cite the open item`);
   }
+});
+
+// Intelligence Settings Persona Categories: met through the linked /personas screen, not embedded. The three
+// lines are marked met only while the link and the /personas screen they rely on are in the code.
+test('Persona Categories items are marked met only while Intelligence Settings links to /personas', () => {
+  const page = fs.readFileSync(path.join(root, 'src/app/settings/intelligence/page.tsx'), 'utf-8');
+  assert.ok(/href="\/personas"/.test(page), 'Intelligence Settings no longer links to /personas');
+  assert.ok(fs.existsSync(path.join(root, 'src/app/personas/page.tsx')), '/personas page is missing');
+  for (const item of ['Displays all personas from persona-categories.json', 'Category filters by domain work', 'Persona details: name, description, tags, use cases']) {
+    assert.ok(md.includes(`- [ ] ${item} (met in code via the linked \`/personas\` screen;`), `checklist line not marked met: ${item}`);
+  }
+  const row = rows.find((r) => r[0] === 'Intelligence Settings')!;
+  assert.ok(/linked `\/personas` screen/.test(row[3]) && /not embedded/.test(row[3]), 'row does not say the items are met via the linked screen');
 });
 
 // An overstated row is the failure this file exists to catch: "Code-checked" and "Open at" must never meet.
