@@ -162,6 +162,8 @@ export default defineConfig({
       'tests/unit/cc-gap-b-focus-blocked-badge.test.tsx',
       // Gap A - focus-view large Back button returns to the department board (/tasks/all).
       'tests/unit/cc-gap-a-focus-back-button.test.tsx',
+      // Gap A follow-up - departments rail shows an open-task count badge per department.
+      'tests/unit/cc-dept-task-count-badge.test.tsx',
     ],
     env: { NODE_ENV: 'test' },
     testTimeout: 15000,

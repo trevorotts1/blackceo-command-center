@@ -78,13 +78,11 @@ test('no screen says "Implemented"', () => {
   }
 });
 
-// Each item below was verified missing at the train head: no code under src reads department-config.json;
-// the department board rail (AgentsSidebar) shows no per-department task count (gap A follow-up);
+// Each item below was verified missing at the train head: no code under src reads department-config.json, and
 // Intelligence Settings has no persona category list, domain filter or link to /personas.
 test('screens with a known-missing checklist item stay Partial and name it', () => {
   const knownMissing: Record<string, string> = {
     'Department Boards': 'Reads department-config.json',
-    'Kanban - Department Board View': 'Departments display emoji + name + task count badge',
     "Devil's Advocate": 'Respects department-config.json DA settings',
     'Intelligence Settings': 'Displays all personas from persona-categories.json',
   };
@@ -119,7 +117,8 @@ test('gap A: one department board, DepartmentBrowser removed, Back button target
   assert.ok(focusRow[3].includes('#569') && /gap A/.test(focusRow[3]), 'focus row does not cite #569 and gap A');
   assert.ok(md.includes('Large "Back" button returns to the department board'), 'checklist Back line missing');
   const boardRow = rows.find((r) => r[0] === 'Kanban - Department Board View')!;
-  assert.ok(/partial/i.test(boardRow[1]) && /gap A/.test(boardRow[3]) && /superseded/.test(boardRow[3]), 'board row must be Partial and cite gap A / superseded');
+  assert.ok(/code-checked/i.test(boardRow[1]) && !/open at/i.test(boardRow[3]) && /gap A/.test(boardRow[3]) && /superseded/.test(boardRow[3]), 'board row must be Code-checked, name no open item, and cite gap A / superseded');
+  assert.ok(boardRow[3].includes('tests/unit/cc-dept-task-count-badge.test.tsx'), 'board row does not cite the task count badge test');
 });
 
 // Trevor's decisions of 2026-10-19: the spec follows the code for grade weights (25/30/20/25 in
