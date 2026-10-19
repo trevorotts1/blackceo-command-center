@@ -137,6 +137,10 @@ export default defineConfig({
       'tests/unit/council-verdict-label-render.test.tsx',
       // Planning Mode — modal stays open on the Planning tab, polling resumes, Other text kept.
       'tests/unit/planning-mode-modal.test.tsx',
+      // Create-done gate — creation cannot offer/claim done/review; a "+"
+      // from the Review/Done column downgrades and says so; a refused
+      // create shows the server hint. Real render proof.
+      'tests/unit/create-done-gate-modal.test.tsx',
       // Planning Mode — start failure, gateway error and unreadable reply are visible with Try again.
       'tests/unit/planning-mode-start-error.test.tsx',
       // Item 19 — ABANDONED pill/panel, plain-words park record, resume

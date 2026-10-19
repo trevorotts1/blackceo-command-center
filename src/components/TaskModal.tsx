@@ -56,6 +56,9 @@ import { FieldHelp } from './ui/FieldHelp';
 import { TASK_FIELD_HELP } from '@/lib/task-field-help';
 import { TaskPublishSummaryPanel } from './TaskPublishSummaryPanel';
 import type { Task, TaskPriority, TaskStatus } from '@/lib/types';
+// Creation cannot claim done/review (no deliverable yet — the server refuses
+// it). These helpers are the client's side of that contract.
+import { createDropdownStatuses, createSubmitStatus, isCreateTerminalStatus } from '@/lib/board-projection';
 
 type TabType = 'overview' | 'planning' | 'activity' | 'deliverables' | 'sessions';
 
@@ -125,7 +128,9 @@ export function TaskModal({ task: taskProp, onClose, workspaceId, initialStatus,
     priority: task?.priority || 'medium' as TaskPriority,
     // New-task creation seeds from `initialStatus` (set by MissionQueue's
     // per-column "+" button); editing always keeps the task's own status.
-    status: task?.status || initialStatus || 'backlog' as TaskStatus,
+    // A seed of done/review is DOWNGRADED (createSubmitStatus) rather than
+    // offered — the server refuses terminal statuses at create.
+    status: task?.status || (initialStatus ? createSubmitStatus(initialStatus) : 'backlog') as TaskStatus,
     assigned_agent_id: task?.assigned_agent_id || '',
     due_date: task?.due_date || '',
     // Blocked-gate fields — only meaningful when status === 'blocked', but
@@ -231,6 +236,9 @@ export function TaskModal({ task: taskProp, onClose, workspaceId, initialStatus,
         const errObj = (errBody ?? {}) as {
           error?: string;
           message?: string;
+          // Server-accompanying remediation text (e.g. the create-done gate's
+          // "create in a work state, register a deliverable, then move it").
+          hint?: string;
           missing?: string[];
           details?: Array<{ path?: string[]; message?: string }>;
         };
@@ -248,7 +256,7 @@ export function TaskModal({ task: taskProp, onClose, workspaceId, initialStatus,
               .join('; ')
           : '';
         setSubmitError(
-          [errObj.message, errObj.error, detailText].filter(Boolean).join(' — ') ||
+          [errObj.message, errObj.error, detailText, errObj.hint].filter(Boolean).join(' — ') ||
             `Save failed (HTTP ${res.status}). Please try again or contact the operator.`,
         );
         setIsSubmitting(false);
@@ -823,12 +831,27 @@ export function TaskModal({ task: taskProp, onClose, workspaceId, initialStatus,
                 onChange={(e) => setForm({ ...form, status: e.target.value as TaskStatus })}
                 className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2.5 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
               >
-                {statuses.map((s) => (
+                {/* Creation cannot CLAIM done/review — there is no registered
+                    deliverable yet and POST /api/tasks refuses both. Editing
+                    keeps the full list: an existing task may already be there,
+                    and reaching done/review is a move AFTER evidence exists. */}
+                {(task ? statuses : createDropdownStatuses(statuses)).map((s) => (
                   <option key={s} value={s}>
                     {statusLabels[s]}
                   </option>
                 ))}
               </select>
+              {!task && initialStatus && isCreateTerminalStatus(initialStatus) && (
+                <p
+                  data-testid="create-status-downgraded-notice"
+                  className="mt-1.5 text-xs text-amber-700 leading-snug"
+                >
+                  New tasks can&apos;t start in {statusLabels[initialStatus]} — nothing is
+                  finished or ready for review yet. This one will be created in{' '}
+                  {statusLabels[form.status]}; register a deliverable, then move it to{' '}
+                  {statusLabels[initialStatus]}.
+                </p>
+              )}
             </div>
 
             {/* Priority */}
