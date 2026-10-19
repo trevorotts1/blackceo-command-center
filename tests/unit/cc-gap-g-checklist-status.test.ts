@@ -31,7 +31,7 @@ test('the table lists all seven screens', () => {
     [
       'CEO Board',
       'Department Boards',
-      'Kanban - Department Browser View',
+      'Kanban - Department Board View',
       'Kanban - Focused Single-Department View',
       'Performance Board',
       "Devil's Advocate",
@@ -62,7 +62,6 @@ test('every file a row cites exists in the repo', () => {
 // row below must cite the PR that closed its gap AND name the still-open item.
 test('rows touched by a merged gap fix cite that PR and stay Partial', () => {
   const closedBy: Record<string, string> = {
-    'Kanban - Focused Single-Department View': '#569',
     'Intelligence Settings': '#571',
   };
   for (const [name, pr] of Object.entries(closedBy)) {
@@ -80,13 +79,12 @@ test('no screen says "Implemented"', () => {
 });
 
 // Each item below was verified missing at the train head: no code under src reads department-config.json;
-// the focus page Back button goes to
-// /ceo-board/departments, not the unmounted Department Browser (gap A); Intelligence Settings has no
-// persona category list, domain filter or link to /personas.
+// the department board rail (AgentsSidebar) shows no per-department task count (gap A follow-up);
+// Intelligence Settings has no persona category list, domain filter or link to /personas.
 test('screens with a known-missing checklist item stay Partial and name it', () => {
   const knownMissing: Record<string, string> = {
     'Department Boards': 'Reads department-config.json',
-    'Kanban - Focused Single-Department View': 'Large "Back" button returns to Browser view',
+    'Kanban - Department Board View': 'Departments display emoji + name + task count badge',
     "Devil's Advocate": 'Respects department-config.json DA settings',
     'Intelligence Settings': 'Displays all personas from persona-categories.json',
   };
@@ -99,10 +97,29 @@ test('screens with a known-missing checklist item stay Partial and name it', () 
   }
 });
 
-test('the department browser row stays Open (gap A, five-column browser unmounted)', () => {
-  const row = rows.find((r) => r[0] === 'Kanban - Department Browser View')!;
-  assert.ok(/open|partial/i.test(row[1]) && !/implemented/i.test(row[1]), `status is "${row[1]}"`);
-  assert.ok(/gap A/.test(row[3]), 'row does not cite gap A as the open item');
+// An overstated row is the failure this file exists to catch: "Code-checked" and "Open at" must never meet.
+test('a "Code-checked" row names no open item, and a row naming one is not "Code-checked"', () => {
+  for (const [name, status, , notes] of rows) {
+    assert.ok(!(/code-checked/i.test(status) && /open at/i.test(notes)), `${name}: "${status}" but the notes name an open item`);
+  }
+});
+
+// Gap A, Trevor's answer "2: yes" (2026-10-19): /tasks/all is the one department board, the unmounted
+// five-column DepartmentBrowser is gone, and the focus view's Back button goes to the live board.
+test('gap A: one department board, DepartmentBrowser removed, Back button targets /tasks/all', () => {
+  assert.ok(fs.existsSync(path.join(root, 'src/app/tasks/all/page.tsx')), '/tasks/all page is missing');
+  assert.ok(!fs.existsSync(path.join(root, 'src/components/ceo-board/DepartmentBrowser.tsx')), 'DepartmentBrowser.tsx is back');
+  const focus = fs.readFileSync(path.join(root, 'src/app/ceo-board/[dept]/focus/page.tsx'), 'utf-8');
+  assert.ok(focus.includes("router.push('/tasks/all')"), 'focus Back button does not go to /tasks/all');
+  assert.ok(!focus.includes("router.push('/ceo-board/departments')"), 'focus Back button still goes to /ceo-board/departments');
+  for (const f of ['CHECKLIST.md', 'PRD.md', 'README.md']) {
+    assert.ok(!/Department Browser/.test(fs.readFileSync(path.join(root, f), 'utf-8')), `${f}: still describes a Department Browser`);
+  }
+  const focusRow = rows.find((r) => r[0] === 'Kanban - Focused Single-Department View')!;
+  assert.ok(focusRow[3].includes('#569') && /gap A/.test(focusRow[3]), 'focus row does not cite #569 and gap A');
+  assert.ok(md.includes('Large "Back" button returns to the department board'), 'checklist Back line missing');
+  const boardRow = rows.find((r) => r[0] === 'Kanban - Department Board View')!;
+  assert.ok(/partial/i.test(boardRow[1]) && /gap A/.test(boardRow[3]) && /superseded/.test(boardRow[3]), 'board row must be Partial and cite gap A / superseded');
 });
 
 // Trevor's decisions of 2026-10-19: the spec follows the code for grade weights (25/30/20/25 in

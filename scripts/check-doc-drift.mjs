@@ -75,7 +75,7 @@ if (!docDeptMatch) {
 
 // ── 2. Kanban columns: PRD.md claim vs MissionQueue BOARD_PRESETS ───────────
 
-// The PRD.md Section 3 documents both 5-column (Department Browser/Focus) and
+// The PRD.md Section 3 documents both 5-column (Focused Single-Department) and
 // 6-column (Full Task Board) variants. Extract the counts and verify them.
 
 const prdMd = read('PRD.md');
@@ -83,7 +83,7 @@ const prdMd = read('PRD.md');
 // 5-column variant: match lines between "For the 5-column..." and the next blank line
 // Use a non-greedy match that stops at the double newline before "For the 6-column"
 const fiveColMatch = prdMd.match(
-  /For the 5-column Department Browser[^:]*:\n((?:\d+\. \*\*[^*]+\*\* - [^\n]+\n)+)/
+  /For the 5-column Focused Single-Department view[^:]*:\n((?:\d+\. \*\*[^*]+\*\* - [^\n]+\n)+)/
 );
 if (fiveColMatch) {
   const items = fiveColMatch[1].match(/^\d+\./gm);

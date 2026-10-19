@@ -7,14 +7,14 @@
 ## Component Verification Status
 
 Legend: ✅ runtime-verified in a browser · 🟨 implemented, checked by reading the code only (not yet verified in a running app) · ⚠️ Partial or open: at least one checklist item is missing at the train head, and the row names the open pull request or says none exists · ⬜ not started.
-Each row below was checked on 2026-10-19 against the head of merge train 2 (`main` at `2be019fd`, which already carries gaps D #570, E #571 and F #572 from train #574, plus gap B #569 and this table #573). The per-section "Verification Status" lines further down stay "Not Verified" until someone ticks the boxes in a running app.
+Each row below was checked on 2026-10-19 against the head of merge train 2 (`main` at `2be019fd`, which already carries gaps D #570, E #571 and F #572 from train #574, plus gap B #569 and this table #573); the two Kanban rows were re-checked on `main` at `438b50ea` for gap A. The per-section "Verification Status" lines further down stay "Not Verified" until someone ticks the boxes in a running app.
 
 | Component | Status | Verified By | Notes |
 |-----------|--------|-------------|-------|
 | CEO Board | 🟨 Code-checked | Code inspection, 2026-10-19, main 2be019fd + #569, #573 | `src/app/ceo-board/page.tsx` (hero card, KPI cards, department grade cards). Grade weights: decided 2026-10-19, the spec follows the code (25% throughput, 30% QC pass rate, 20% SOP coverage, 25% KPI in `src/lib/grading.ts`); the 40/30/15/15 table in `src/lib/grade-calculator.ts` is `@deprecated`. The checklist item above is reworded to match; it is still unticked until someone checks it in a running app. |
 | Department Boards | ⚠️ Partial | Code inspection, 2026-10-19, main 2be019fd + #569, #573 | `src/app/ceo-board/[dept]/page.tsx`. Open at the train head: "Reads department-config.json" is not met; no code under `src` reads that file (the only mention is a comment in `src/lib/routing/department-router.ts`). No fix in flight: it is not yet decided where per-department settings live. |
-| Kanban - Department Browser View | ⚠️ Open | Code inspection, 2026-10-19, main 2be019fd + #569, #573 | Sidebar + Kanban is live as the master board `src/app/tasks/all/page.tsx` (six columns, PRD 3.8). The five-column version this checklist describes, `src/components/ceo-board/DepartmentBrowser.tsx`, is not mounted on any route. Open item is department browser gap A, which is not in this train. Needs a product decision: keep the six-column board as the browser, or mount the five-column one. |
-| Kanban - Focused Single-Department View | ⚠️ Partial | Code inspection, 2026-10-19, main 2be019fd + #569, #573 | `src/app/ceo-board/[dept]/focus/page.tsx` is read-only, as this checklist's View B asks. The blocked-task defect (blocked tasks folded into the Review column with no marker) is fixed by PR #569 (gap B, merged into this train): blocked cards now carry a visible "Blocked" badge. Open at the train head: "Large \"Back\" button returns to Browser view" is not met. The button (`router.push('/ceo-board/departments')`) goes to the Departments performance overview, not to the Department Browser (sidebar plus Kanban), which is not mounted (department browser gap A, not in this train). The interactive per-department board is `src/app/tasks/by-department/page.tsx`. |
+| Kanban - Department Board View | ⚠️ Partial | Code inspection, 2026-10-19, main 438b50ea | Decided 2026-10-19 (gap A, option 1): the department board is the live master board `src/app/tasks/all/page.tsx` (cross-department Kanban, departments rail on the left, six columns, PRD 3.8). The unmounted five-column `DepartmentBrowser` component was deleted and its five-column checklist item is closed as superseded. Open at this commit: "Departments display emoji + name + task count badge" is not met; the rail (`src/components/AgentsSidebar.tsx`) shows emoji, name, head agent and status, but no task count. No fix in flight. |
+| Kanban - Focused Single-Department View | 🟨 Code-checked | Code inspection, 2026-10-19, main 438b50ea | `src/app/ceo-board/[dept]/focus/page.tsx` is read-only, as this checklist's View B asks. Blocked cards carry a visible "Blocked" badge (PR #569, gap B). The large "Back" button now goes to the department board `/tasks/all` (gap A; component test `tests/unit/cc-gap-a-focus-back-button.test.tsx`). Every item in this section is met by the code; the boxes stay unticked until someone checks them in a running app. |
 | Performance Board | 🟨 Code-checked | Code inspection, 2026-10-19, main 2be019fd + #569, #573 | The three lenses are sections of the CEO Board page `src/app/ceo-board/page.tsx` (home card "Performance Board" routes there from `src/app/page.tsx`). Decided 2026-10-19: industry benchmarks stay on the department pages and the Performance Board shows no company-level benchmark (Question C option 1); the grade formula follows `src/lib/grading.ts` (grade-weights decision). Both checklist items are reworded to match and stay unticked until checked in a running app. |
 | Devil's Advocate | ⚠️ Partial | Code inspection, 2026-10-19, main 2be019fd + #569, #573 | `src/components/ceo-board/DevilsAdvocateFeed.tsx`, `src/app/api/da-challenges/route.ts`. "Challenge detail view accessible" is now met: PR #570 (gap D, merged in train #574) added the detail view. Open at the train head: "Respects department-config.json DA settings" is DROPPED by owner decision 2026-10-19 (Devil's Advocate applies to all departments; no per-department setting is built or planned until a client asks). No fix in flight. |
 | Intelligence Settings | ⚠️ Partial | Code inspection, 2026-10-19, main 2be019fd + #569, #573 | `src/app/settings/intelligence/page.tsx`, `src/components/settings/PersonaSelectionLog.tsx`, `src/app/api/persona-selection-log/route.ts`. The Persona Selection Log subsection (history, per-layer reasoning, filters) is fixed by PR #571 (gap E, merged in train #574). Open at the train head: the Persona Categories items ("Displays all personas from persona-categories.json", "Category filters by domain work", persona details) are not on this screen; it shows personas only as options in the assignment dropdowns and has no category list, domain filter or link to `/personas`. A category and domain browser exists as a separate route, `src/app/personas/page.tsx`, but this screen does not link to it. No fix in flight: decide whether to link or embed it. |
@@ -69,18 +69,18 @@ Each row below was checked on 2026-10-19 against the head of merge train 2 (`mai
 
 ## Kanban Board Checklist
 
-### Department Browser View (View A)
+### Department Board View (View A, live at `/tasks/all`)
 - [ ] Left sidebar shows all departments
 - [ ] Departments display emoji + name + task count badge
-- [ ] Clicking department sets it as active
-- [ ] Right panel shows Kanban for active department
-- [ ] Kanban columns: New, Queued, In Progress, Review, Done
+- [ ] Clicking a department opens that department's Focus View (`/workspace/[slug]`)
+- [ ] Main panel shows the cross-department Kanban
+- [x] ~~Kanban columns: New, Queued, In Progress, Review, Done (five-column browser)~~ Closed as superseded 2026-10-19 (gap A): the department board `/tasks/all` uses the six-column PRD 3.8 set; the five columns stay on the Focused view
 - [ ] Task cards show: title, assigned agent, persona pill, priority badge
 
 ### Focused Single-Department View (View B)
 - [ ] Full-screen Kanban displays
 - [ ] No sidebar visible
-- [ ] Large "Back" button returns to Browser view
+- [ ] Large "Back" button returns to the department board (`/tasks/all`)
 - [ ] Accessible via /ceo-board/[dept]/focus route
 
 ### Task Filtering
@@ -213,7 +213,7 @@ Each row below was checked on 2026-10-19 against the head of merge train 2 (`mai
 
 ### Frontend Components
 - [ ] Breadcrumb component on all pages
-- [ ] DepartmentBrowser component exists
+- [x] ~~DepartmentBrowser component exists~~ Closed as superseded 2026-10-19 (gap A): component deleted, the department board is `/tasks/all`
 - [ ] FocusedKanban component exists
 - [ ] ActivityLog component renders
 - [ ] DeliverablesList component renders
