@@ -263,6 +263,28 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // ── COMPLETION-EVIDENCE GATE ON CREATE (T0-01 / FIX 25) ──────────────────
+    // A task cannot be CREATED already-done (or already-in-review). Both states
+    // require at least one registered, reachable deliverable — and a task that
+    // does not exist yet has none, so the invariant makes both statuses
+    // unsatisfiable at create time, exactly as it does on PATCH. The create
+    // path never reaches transition() (it INSERTs the raw status, see
+    // createTaskCore), so it would otherwise be the one door around the gate.
+    // The remedy is the same API call the PATCH refusal names: create the
+    // card in a work state, register a deliverable, then move it.
+    if (validatedData.status === 'done' || validatedData.status === 'review') {
+      return NextResponse.json(
+        {
+          error: 'Forbidden: cannot create a task already done or in review with no completion evidence.',
+          hint:
+            `Create the task in backlog/inbox/planning/assigned/in_progress, register a deliverable ` +
+            `via POST /api/tasks/{id}/deliverables (a 'url' type pointing at where the work landed ` +
+            `is sufficient), then move it to ${validatedData.status}.`,
+        },
+        { status: 403 },
+      );
+    }
+
     // U94 (X.2.3) — requester-stamping completeness, Command-Center UI create
     // door. Mirrors the ingest route's own trim + empty-to-null + "chat id
     // present with no channel named defaults to telegram" normalization
