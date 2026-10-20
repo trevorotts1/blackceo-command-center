@@ -1,0 +1,14 @@
+{
+  "launch_id": "sample-launch-2026-11",
+  "units": {
+    "page_landing": "complete",
+    "page_sales": "complete",
+    "page_checkout": "running",
+    "page_thank_you": "pending",
+    "email_pre_launch": "complete",
+    "email_main_launch": "pending",
+    "text_opt_in": "pending",
+    "auto_post_sale": "pending",
+    "conversation_ai": "pending"
+  }
+}

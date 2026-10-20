@@ -215,6 +215,10 @@ export default defineConfig({
       // MR-38 — task-phases generic lifecycle progress unit tests. Uses vitest
       // globals + the '@/...' alias, so vitest-only, never the tsx --test glob.
       'tests/unit/task-phases.test.ts',
+      // WF-CC (launch automations) — launch plan + progress parsing and the
+      // launch-percentage formula. Vitest globals + the '@/...' alias, so
+      // vitest-only, never the tsx --test glob.
+      'tests/unit/launch-runs.test.ts',
       // MR-46 (fix2) — getAgentStatusDot color-mapping unit test (closes the
       // Haiku "no unit test for getAgentStatusDot" minor defect). Imports the
       // real MissionQueue.tsx, so it needs the store + next/navigation mocks —
