@@ -95,6 +95,7 @@ describe('UL-022 — launch storage contract', () => {
     fs.writeFileSync(path.join(dir, 'a.plan.json'), '{}');
     fs.writeFileSync(path.join(dir, 'a.progress.json'), '{}');
     fs.writeFileSync(path.join(dir, 'legacy.json'), '{}');
+    fs.writeFileSync(path.join(dir, 'progress-sample-launch.json'), '{}');
     fs.writeFileSync(path.join(dir, 'notes.txt'), 'ignored');
 
     const discovery = discoverLaunchFiles(dir);
@@ -103,6 +104,7 @@ describe('UL-022 — launch storage contract', () => {
       ['a.plan.json', 'plan', false],
       ['a.progress.json', 'progress', false],
       ['legacy.json', 'plan', true],
+      ['progress-sample-launch.json', 'progress', false],
     ]);
 
     const missing = discoverLaunchFiles(path.join(os.tmpdir(), 'cc-UL-022-no-such-dir'));

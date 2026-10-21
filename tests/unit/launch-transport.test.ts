@@ -24,6 +24,7 @@ import { describe, it, expect, beforeAll } from 'vitest';
 
 import { run } from '@/lib/db';
 import { handleLaunchIngest, launchInstallationId } from '@/lib/launch-transport';
+import { POST as ingestPOST } from '@/app/api/launch-runs/ingest/route';
 import { listLaunchRuns, getLaunchRun } from '@/lib/launch-ability-runs';
 
 const TOKEN = 'synthetic-UL-022-token-not-a-credential';
@@ -236,5 +237,26 @@ describe('UL-022 — launch progress sample transport', () => {
 
   it('reports this installation as provenance, never a client-supplied value', () => {
     expect(launchInstallationId()).toBe(INSTALLATION);
+  });
+
+  it('mounts the real authenticated ingest route (not a handler plus a proposal)', async () => {
+    const { NextRequest } = await import('next/server');
+    const event = runEvent({ event_id: uuid(40), run_id: uuid(940) });
+    const authed = new NextRequest('http://localhost/api/launch-runs/ingest', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ events: [event] }),
+    });
+    const ok = await ingestPOST(authed);
+    expect(ok.status).toBe(200);
+    const payload = (await ok.json()) as { accepted: number };
+    expect(payload.accepted).toBe(1);
+
+    // The mounted route enforces the same gate as the handler: no token → 401.
+    const anon = new NextRequest('http://localhost/api/launch-runs/ingest', {
+      method: 'POST',
+      body: JSON.stringify({ events: [runEvent({ event_id: uuid(41), run_id: uuid(941) })] }),
+    });
+    expect((await ingestPOST(anon)).status).toBe(401);
   });
 });

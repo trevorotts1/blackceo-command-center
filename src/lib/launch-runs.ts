@@ -164,9 +164,17 @@ const STATE_ALIASES: Record<string, LaunchUnitState> = {
   unrecognized: 'unknown',
 };
 
+/**
+ * Normalize a raw progress-file state. Unknown or missing states are
+ * `unknown` — never silently coerced to `pending`. A unit whose state the
+ * producer did not report honestly is unresolved: it must not count toward
+ * completion or imply go-live. (The typed validator in launch-storage.ts
+ * rejects unknown states first; this is the defense in depth for states
+ * that arrive through unvalidated shapes.)
+ */
 export function normalizeState(value: unknown): LaunchUnitState {
-  if (typeof value !== 'string') return 'pending';
-  return STATE_ALIASES[value.trim().toLowerCase()] ?? 'pending';
+  if (typeof value !== 'string') return 'unknown';
+  return STATE_ALIASES[value.trim().toLowerCase()] ?? 'unknown';
 }
 
 /** Accepts the progress shapes the swarm may emit: an array of
@@ -547,6 +555,23 @@ export function listLaunchRuns(dir = launchPlansDir()): LaunchRunsResult {
     const progress = progressByLaunch.get(record.manifest.launch_id);
     if (!progress) continue;
     const manifest = progress.manifest;
+
+    // A quarantined plan stays quarantined: progress NEVER revives it. The
+    // conflicting-duplicate block above already zeroed it with an actionable
+    // issue; consuming a matching progress file here would turn one side of a
+    // conflict back into N% / OK. Record the skip and move on.
+    if (record.run.availability === 'quarantined') {
+      const issue: LaunchIssue = {
+        file: progress.file,
+        code: 'conflicting_duplicate',
+        message:
+          `${progress.file} matches quarantined plan ${record.file}; progress is not consumed ` +
+          'until the conflict is resolved',
+      };
+      issues.push(issue);
+      errors.push(issue.message);
+      continue;
+    }
 
     if (record.manifest.launch_id !== manifest.launch_id) {
       quarantine(record.run, {

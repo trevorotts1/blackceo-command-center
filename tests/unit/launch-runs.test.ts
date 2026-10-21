@@ -30,6 +30,7 @@ import {
   listLaunchRuns,
   NOT_INCLUDED_LABEL,
   parseProgressStates,
+  type LaunchUnitState,
 } from '@/lib/launch-runs';
 import { planHash } from '@/lib/launch-storage';
 
@@ -177,8 +178,66 @@ describe('WF-CC — launch-runs', () => {
       progress: { x: 'in_progress', y: 'exploded', z: { state: 'blocked' } },
     });
     expect(map.get('x')).toBe('running');
-    expect(map.get('y')).toBe('pending');
+    // Unreported garbage is unresolved (unknown), never silently pending:
+    // pending would hide a unit the producer failed to report.
+    expect(map.get('y')).toBe('unknown');
     expect(map.get('z')).toBe('blocked');
+  });
+
+  it('consumes the producer progress-<launch_id>.json filename', () => {
+    const dir = tmpDir();
+    fs.writeFileSync(path.join(dir, 'sample-launch.plan.json'), JSON.stringify(PLAN));
+    fs.writeFileSync(
+      path.join(dir, 'progress-sample-launch-2026-11.json'),
+      JSON.stringify(PROGRESS),
+    );
+    const result = listLaunchRuns(dir);
+    expect(result.errors).toEqual([]);
+    expect(result.runs).toHaveLength(1);
+    // Same states as the .progress.json twin: 3 complete of 9 → 33%.
+    expect(result.runs[0].doneUnits).toBe(3);
+    expect(result.runs[0].percentage).toBe(33);
+  });
+
+  it('keeps conflicting plans quarantined after progress is applied', () => {
+    const dir = tmpDir();
+    writeLaunch(dir, PLAN, undefined, 'a');
+    writeLaunch(dir, { ...PLAN, offer: { name: 'Different offer' } }, undefined, 'b');
+    // Progress matching plan A exactly — must NOT revive it while B conflicts.
+    fs.writeFileSync(
+      path.join(dir, 'a.progress.json'),
+      JSON.stringify({ ...PROGRESS, plan_hash: planHash(PLAN) }),
+    );
+    const result = listLaunchRuns(dir);
+    expect(result.runs).toHaveLength(2);
+    expect(result.quarantined).toBe(2);
+    expect(result.runs.every((run) => run.doneUnits === 0)).toBe(true);
+    expect(result.runs.every((run) => run.percentage === 0)).toBe(true);
+    expect(result.runs.every((run) => run.availability === 'quarantined')).toBe(true);
+  });
+
+  it('never reports every-unit-complete with unknown or dropped units present', () => {
+    const dir = tmpDir();
+    const units: Record<string, unknown> = {};
+    for (const [id, unit] of Object.entries(PROGRESS.units as Record<string, Record<string, unknown>>)) {
+      units[id] = { ...unit, state: 'done' };
+    }
+    // One unit the producer never resolved: garbage state through an
+    // unvalidated shape stays unknown, and the run cannot read 100%.
+    const map = parseProgressStates({ units: { ghost_unit: 'exploded' } });
+    expect(map.get('ghost_unit')).toBe('unknown');
+    const run = buildLaunchRun(
+      {
+        ...(PLAN as Record<string, unknown>),
+        pages: [...((PLAN as Record<string, unknown>).pages as unknown[]), { id: 'ghost_unit', kind: 'landing' }],
+      },
+      new Map([
+        ...Object.keys(units).map((id) => [id, 'complete'] as [string, LaunchUnitState]),
+        ['ghost_unit', map.get('ghost_unit')!],
+      ]),
+    );
+    expect(run.percentage).toBeLessThan(100);
+    expect(run.doneUnits).toBeLessThan(run.totalUnits);
   });
 
   it('separates an unreadable directory from a genuinely empty one', () => {

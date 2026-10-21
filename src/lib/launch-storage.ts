@@ -362,6 +362,12 @@ export function discoverLaunchFiles(dir: string): LaunchDiscovery {
     const fullPath = path.join(dir, name);
     if (name.endsWith('.progress.json')) {
       files.push({ name, fullPath, kind: 'progress', legacyPlan: false });
+    } else if (name.startsWith('progress-') && !name.endsWith('.plan.json')) {
+      // Producer shape `progress-<launch_id>.json`: the progress filename the
+      // producer actually writes. Classified by name before parsing; content
+      // still goes through validateLaunchProgress (fail-closed), so a plan
+      // misnamed into this shape is quarantined, never consumed.
+      files.push({ name, fullPath, kind: 'progress', legacyPlan: false });
     } else {
       files.push({
         name,
