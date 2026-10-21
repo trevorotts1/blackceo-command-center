@@ -8463,6 +8463,38 @@ export const migrations: Migration[] = [
       db.exec(`CREATE INDEX IF NOT EXISTS idx_skill71_runs_last_event ON skill71_runs(last_event_at);`);
     }
   },
+  {
+    id: '173',
+    name: 'da_challenge_review_fields',
+    up: (db) => {
+      // RECOVERY/feature-wiring (CHECKLIST.md "Devil's Advocate" open items:
+      // "Risks and alternatives listed", "Recommended modifications shown",
+      // Review Types): these had no storage. Adds the three fields the paired
+      // producer (openclaw-onboarding shared-utils/devils-advocate*.py) now
+      // emits on the POST /api/da-challenges wire payload. PURELY ADDITIVE +
+      // column-existence-guarded ALTER (the no-op-safe pattern of migrations
+      // 020/170): existing rows keep NULL/defaults, so a challenge written by
+      // an older producer renders an HONEST "not provided" in the feed —
+      // never fabricated content.
+      console.log('[Migration 173] Adding da_challenges review fields...');
+      const cols = db.prepare(`PRAGMA table_info(da_challenges)`).all() as { name: string }[];
+      if (cols.length === 0) {
+        // Table is created by migration 020; on a pre-020 DB it will be
+        // created with the canonical shape before this migration runs.
+        console.log('[Migration 173] da_challenges absent — skipping (no-op)');
+        return;
+      }
+      const add = (column: string, def: string) => {
+        if (!cols.some((c) => c.name === column)) {
+          db.exec(`ALTER TABLE da_challenges ADD COLUMN ${column} ${def}`);
+        }
+      };
+      add('risks_alternatives', 'TEXT');
+      add('recommended_modifications', 'TEXT');
+      add('review_type', "TEXT NOT NULL DEFAULT 'required'");
+      console.log('[Migration 173] da_challenges review fields ready');
+    },
+  },
 
   // CWE-005 council persistence (directive Section 16). The entry lives
   // in src/lib/council/persistence/council-migration.ts. Its id was a
