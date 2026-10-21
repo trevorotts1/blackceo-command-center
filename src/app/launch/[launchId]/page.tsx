@@ -18,6 +18,9 @@ const STATE_STYLES: Record<LaunchUnitState, string> = {
   failed: 'bg-red-50 text-red-700 border-red-200',
   blocked: 'bg-amber-50 text-amber-700 border-amber-200',
   dropped: 'bg-bcc-border-light text-bcc-text-muted border-bcc-border line-through',
+  // UL-022 quarantine state: a manifest that could not be trusted. Shown, not
+  // counted as progress; the run's actionable issues render above the tables.
+  unknown: 'bg-amber-50 text-amber-800 border-amber-300',
 };
 
 function StateBadge({ state }: { state: LaunchUnitState }) {

@@ -1,26 +1,45 @@
 /**
- * launch-runs.ts — launch automation runs for the Command Center.
+ * launch-runs.ts — the DISK view of launch automation runs for the Command
+ * Center.
  *
- * Reads the SAME launch plan contract the skills emit
- * (onboarding `shared-utils/signature_launch_contract/launch-plan.schema.json`)
- * plus the run's progress file, and derives the launch percentage.
+ * Two files per launch, both owned by the launch skills:
+ *   plan     — `launch-plan.schema.json` v1.0.0 (approved plan)
+ *   progress — `progress_file.schema.json` v1.0  (WF-SWARM resumable progress,
+ *              carrying `launch_id`, `plan_hash`, `updated_at` and per-unit states)
+ *
+ * Storage contract: `src/lib/launch-schema.ts`; typed discovery, canonical
+ * plan hashing and manifest validation: `src/lib/launch-storage.ts`.
+ *
+ * The database/ability view is a SEPARATE store (`launch-ability-runs.ts`) and
+ * is not merged into this one — see `relateLaunchViews()` for the explicit
+ * relationship. Reading a plan with no progress file is honest pending; it is
+ * never reported as complete.
+ *
+ * Quarantine rule (fail closed): a progress file whose launch id, plan hash or
+ * revision does not match its plan, whose schema is unknown, or that conflicts
+ * with a duplicate, is NOT consumed. Every unit reports `unknown`, completion
+ * stays at zero, and the run carries an actionable issue. Missing, unreadable
+ * or non-object manifests are isolated per file — one bad file never hides the
+ * others, and an unreadable directory is `unavailable`, never `empty`.
  *
  * Read-only: this module never writes, never sends, never touches an account.
- * Server-only (imports fs/path) — imported by server components and the read
- * API only.
- *
- * Storage: one directory, one plan per file (`<name>.json`), optional sibling
- * progress file (`<name>.progress.json`). Directory comes from
- * `LAUNCH_PLANS_DIR`, default `<cwd>/data/launch-plans`. An absent or empty
- * directory is an honest empty state, not an error.
- *
- * ponytail: files on disk are the whole store (the skills already write one
- * progress file per run — the spec's §4.4). Swap the two `readFileSync` calls
- * for DB reads if launches ever need per-user access rules.
+ * Server-only (imports fs/path).
  */
 
-import fs from 'fs';
 import path from 'path';
+
+import {
+  discoverLaunchFiles,
+  fileLastUpdated,
+  planHash,
+  readLaunchJsonFile,
+  validateLaunchPlan,
+  validateLaunchProgress,
+  type LaunchIssue,
+  type LaunchIssueCode,
+  type LaunchPlanManifest,
+  type LaunchProgressManifest,
+} from './launch-storage';
 
 export type LaunchUnitKind = 'page' | 'email' | 'text' | 'automation' | 'conversation_ai';
 
@@ -30,7 +49,11 @@ export type LaunchUnitState =
   | 'complete'
   | 'failed'
   | 'blocked'
-  | 'dropped';
+  | 'dropped'
+  /** A state that could not be trusted (quarantined run). Never counts as done. */
+  | 'unknown';
+
+export type LaunchRunAvailability = 'ok' | 'quarantined';
 
 export interface LaunchUnit {
   id: string;
@@ -70,10 +93,30 @@ export interface LaunchRun {
   counts: Record<LaunchUnitKind, LaunchCounts>;
   totalUnits: number;
   doneUnits: number;
-  /** doneUnits / totalUnits, rounded. 0 when the plan has no units. */
+  /** doneUnits / totalUnits, rounded. 0 when the plan has no units or the run is quarantined. */
   percentage: number;
   /** Non-fatal problems (bad progress file, launch_id mismatch). */
   warnings: string[];
+  /** `quarantined` = a manifest could not be trusted; no state was consumed. */
+  availability: LaunchRunAvailability;
+  /** Actionable issue text, one line per problem. */
+  issues: string[];
+  issueCodes: LaunchIssueCode[];
+  /** Other file that claims the same launch, when a conflicting duplicate was found. */
+  duplicateOf: string | null;
+  /** Units whose state is unknown (a quarantined run reports every unit unknown). */
+  unknownUnits: number;
+  /** Planned email sequences (the count a client reads as "sequences"). */
+  sequenceCount: number;
+  /** Every planned email + text message across the plan. */
+  messageCount: number;
+  /** Producer's `updated_at` when present, else the plan file's mtime. */
+  lastUpdated: string | null;
+  /** Kinds the plan does not include at all. Render as "Not included", never 0/0. */
+  notIncluded: LaunchUnitKind[];
+  /** Approved plan hash (computed from the parsed plan) when the plan is valid. */
+  planHash: string | null;
+  revision: number | null;
 }
 
 export interface LaunchRunsResult {
@@ -81,7 +124,16 @@ export interface LaunchRunsResult {
   runs: LaunchRun[];
   /** Files that could not be read or parsed. */
   errors: string[];
+  /** `unavailable` = the directory itself could not be read. */
+  availability: 'ok' | 'unavailable';
+  /** A genuinely empty directory is `empty`; an unreadable one is `unavailable`. */
+  status: 'ok' | 'empty' | 'unavailable';
+  issues: LaunchIssue[];
+  quarantined: number;
 }
+
+/** Neutral label for a plan section that does not exist. Never "0/0 complete". */
+export const NOT_INCLUDED_LABEL = 'Not included';
 
 /** States that count toward the launch percentage. Dropped is NOT done: the
  *  run is not complete until a unit is fixed or the client drops it (§4.5). */
@@ -108,6 +160,8 @@ const STATE_ALIASES: Record<string, LaunchUnitState> = {
   pending: 'pending',
   queued: 'pending',
   waiting: 'pending',
+  unknown: 'unknown',
+  unrecognized: 'unknown',
 };
 
 export function normalizeState(value: unknown): LaunchUnitState {
@@ -153,7 +207,17 @@ function pretty(text: string): string {
   return text.replace(/_/g, ' ');
 }
 
-function planUnits(plan: Record<string, unknown>, states: Map<string, LaunchUnitState>): LaunchUnit[] {
+function positive(value: unknown): number {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+/** Pure projection: a plan object + trusted states → one run. */
+export function buildLaunchRun(
+  plan: Record<string, unknown>,
+  states: Map<string, LaunchUnitState>,
+  sourceFile = '',
+): LaunchRun {
   const units: LaunchUnit[] = [];
   const push = (
     raw: unknown,
@@ -189,7 +253,7 @@ function planUnits(plan: Record<string, unknown>, states: Map<string, LaunchUnit
     plan.email_sequences,
     'email',
     (r) => pretty(String(r.kind ?? 'email')),
-    (r) => `${Number(r.email_count ?? 0)} emails · drafts only`,
+    (r) => `${positive(r.email_count)} emails · drafts only`,
   );
   push(
     plan.text_sets,
@@ -200,7 +264,7 @@ function planUnits(plan: Record<string, unknown>, states: Map<string, LaunchUnit
       const hours = window && typeof window.start === 'string' && typeof window.end === 'string'
         ? ` · ${window.start}–${window.end}`
         : '';
-      return `${Number(r.messages ?? 0)} messages · ${r.promotional === true ? 'promotional' : 'non-promotional'}${hours}`;
+      return `${positive(r.messages)} messages · ${r.promotional === true ? 'promotional' : 'non-promotional'}${hours}`;
     },
   );
   push(
@@ -228,15 +292,7 @@ function planUnits(plan: Record<string, unknown>, states: Map<string, LaunchUnit
       waits_for: [],
     });
   }
-  return units;
-}
 
-export function buildLaunchRun(
-  plan: Record<string, unknown>,
-  states: Map<string, LaunchUnitState>,
-  sourceFile = '',
-): LaunchRun {
-  const units = planUnits(plan, states);
   const counts: Record<LaunchUnitKind, LaunchCounts> = {
     page: { total: 0, done: 0 },
     email: { total: 0, done: 0 },
@@ -253,8 +309,21 @@ export function buildLaunchRun(
 
   const offer = (plan.offer ?? {}) as Record<string, unknown>;
   const calendar = (plan.launch_calendar ?? {}) as Record<string, unknown>;
-  const ai = (plan.conversation_ai ?? {}) as Record<string, unknown>;
   const aiUnit = units.find((u) => u.kind === 'conversation_ai');
+
+  const emailSequences = Array.isArray(plan.email_sequences) ? plan.email_sequences : [];
+  const textSets = Array.isArray(plan.text_sets) ? plan.text_sets : [];
+  const messageCount = [...emailSequences, ...textSets].reduce((sum: number, row) => {
+    if (!row || typeof row !== 'object') return sum;
+    const rec = row as Record<string, unknown>;
+    return sum + positive(rec.email_count) + positive(rec.messages);
+  }, 0);
+
+  const notIncluded: LaunchUnitKind[] = [];
+  for (const kind of ['page', 'email', 'text', 'automation'] as const) {
+    if (counts[kind].total === 0) notIncluded.push(kind);
+  }
+  if (ai.requested !== true) notIncluded.push('conversation_ai');
 
   return {
     launchId: typeof plan.launch_id === 'string' ? plan.launch_id : sourceFile.replace(/\.json$/, ''),
@@ -281,6 +350,17 @@ export function buildLaunchRun(
     doneUnits,
     percentage: totalUnits === 0 ? 0 : Math.round((doneUnits / totalUnits) * 100),
     warnings: [],
+    availability: 'ok',
+    issues: [],
+    issueCodes: [],
+    duplicateOf: null,
+    unknownUnits: 0,
+    sequenceCount: emailSequences.length,
+    messageCount,
+    lastUpdated: null,
+    notIncluded,
+    planHash: null,
+    revision: typeof plan.revision === 'number' ? plan.revision : null,
   };
 }
 
@@ -288,52 +368,264 @@ export function launchPlansDir(): string {
   return process.env.LAUNCH_PLANS_DIR || path.join(process.cwd(), 'data', 'launch-plans');
 }
 
-/** Newest launches first by id (the contract's ids are date-stamped). */
+/** Put a run into quarantine: no state is trusted, completion stays at zero. */
+function quarantine(run: LaunchRun, issue: LaunchIssue, duplicateOf: string | null = null): void {
+  run.availability = 'quarantined';
+  if (!run.issueCodes.includes(issue.code)) run.issueCodes.push(issue.code);
+  run.issues.push(issue.message);
+  if (!run.warnings.includes(issue.message)) run.warnings.push(issue.message);
+  if (duplicateOf) run.duplicateOf = duplicateOf;
+  run.doneUnits = 0;
+  run.percentage = 0;
+  for (const kind of Object.keys(run.counts) as LaunchUnitKind[]) {
+    run.counts[kind].done = 0;
+  }
+  for (const unit of run.units) unit.state = 'unknown';
+  if (run.conversationAi.requested) run.conversationAi.state = 'unknown';
+  run.unknownUnits = run.units.length;
+}
+
+interface PlanRecord {
+  file: string;
+  raw: Record<string, unknown>;
+  manifest: LaunchPlanManifest;
+  hash: string;
+  run: LaunchRun;
+  ignored: boolean;
+}
+
+/**
+ * List launch runs on disk, newest launch id first.
+ *
+ * The result distinguishes three states a caller must never conflate:
+ *   `ok`          — directory read; every file accounted for (issues isolated per file)
+ *   `empty`       — directory read, genuinely no launch manifests
+ *   `unavailable` — directory could not be read; this is NOT an empty launch list
+ */
 export function listLaunchRuns(dir = launchPlansDir()): LaunchRunsResult {
-  const errors: string[] = [];
-  let entries: string[] = [];
-  try {
-    entries = fs.readdirSync(dir);
-  } catch {
-    return { dir, runs: [], errors };
+  const discovery = discoverLaunchFiles(dir);
+  const issues: LaunchIssue[] = [...discovery.errors];
+  const errors: string[] = discovery.errors.map((issue) => issue.message);
+
+  if (discovery.availability === 'unavailable') {
+    return {
+      dir,
+      runs: [],
+      errors,
+      availability: 'unavailable',
+      status: 'unavailable',
+      issues,
+      quarantined: 0,
+    };
   }
 
-  const runs: LaunchRun[] = [];
-  for (const file of entries.filter((f) => f.endsWith('.json') && !f.endsWith('.progress.json')).sort()) {
-    const full = path.join(dir, file);
-    let plan: Record<string, unknown>;
-    try {
-      plan = JSON.parse(fs.readFileSync(full, 'utf8')) as Record<string, unknown>;
-    } catch (error) {
-      errors.push(`${file}: ${error instanceof Error ? error.message : 'unreadable'}`);
+  const plans: PlanRecord[] = [];
+  for (const file of discovery.files.filter((f) => f.kind === 'plan')) {
+    const read = readLaunchJsonFile(file);
+    if (!read.ok) {
+      issues.push(read.issue);
+      errors.push(read.issue.message);
+      continue;
+    }
+    const validation = validateLaunchPlan(read.value);
+    if (!validation.ok) {
+      const issue: LaunchIssue = {
+        file: file.name,
+        code: validation.code,
+        message: `${file.name}: ${validation.errors.join('; ')}`,
+      };
+      issues.push(issue);
+      errors.push(issue.message);
+      continue;
+    }
+    const raw = read.value as Record<string, unknown>;
+    const manifest = validation.manifest;
+    const hash = planHash(raw);
+    const run = buildLaunchRun(raw, new Map(), file.name);
+    run.planHash = hash;
+    run.revision = manifest.revision ?? null;
+    run.lastUpdated = fileLastUpdated(file.fullPath);
+    plans.push({ file: file.name, raw, manifest, hash, run, ignored: false });
+  }
+
+  // Conflicting duplicates: same launch id, different approved hash → neither
+  // file may claim completion. Identical duplicates are harmless: keep the
+  // first, ignore the rest, never double-count.
+  const byLaunch = new Map<string, PlanRecord[]>();
+  for (const record of plans) {
+    const list = byLaunch.get(record.manifest.launch_id) ?? [];
+    list.push(record);
+    byLaunch.set(record.manifest.launch_id, list);
+  }
+  for (const [launchId, records] of byLaunch) {
+    if (records.length < 2) continue;
+    const distinctHashes = new Set(records.map((record) => record.hash));
+    if (distinctHashes.size === 1) {
+      for (const record of records.slice(1)) {
+        record.ignored = true;
+        const issue: LaunchIssue = {
+          file: record.file,
+          code: 'conflicting_duplicate',
+          message: `${record.file} duplicates ${records[0].file} for launch "${launchId}"; the duplicate is ignored`,
+        };
+        issues.push(issue);
+        errors.push(issue.message);
+      }
+      continue;
+    }
+    for (const record of records) {
+      const others = records.filter((other) => other !== record).map((other) => other.file);
+      quarantine(
+        record.run,
+        {
+          file: record.file,
+          code: 'conflicting_duplicate',
+          message:
+            `${record.file} and ${others.join(', ')} both claim launch "${launchId}" with different plans; ` +
+            'both are quarantined until one file is removed',
+        },
+        others[0],
+      );
+    }
+  }
+
+  // Progress files: parse + validate. A malformed or duplicated progress file
+  // quarantines the plan(s) it claims instead of leaving optimistic pending.
+  const progressByLaunch = new Map<string, { file: string; manifest: LaunchProgressManifest }>();
+  const brokenProgress: LaunchIssue[] = [];
+  const duplicatedProgress = new Set<string>();
+  for (const file of discovery.files.filter((f) => f.kind === 'progress')) {
+    const read = readLaunchJsonFile(file);
+    if (!read.ok) {
+      issues.push(read.issue);
+      errors.push(read.issue.message);
+      brokenProgress.push(read.issue);
+      continue;
+    }
+    const validation = validateLaunchProgress(read.value);
+    if (!validation.ok) {
+      const issue: LaunchIssue = {
+        file: file.name,
+        code: validation.code,
+        message: `${file.name}: ${validation.errors.join('; ')}`,
+      };
+      issues.push(issue);
+      errors.push(issue.message);
+      brokenProgress.push(issue);
+      continue;
+    }
+    const manifest = validation.manifest;
+    const prior = progressByLaunch.get(manifest.launch_id);
+    if (prior) {
+      duplicatedProgress.add(manifest.launch_id);
+      const issue: LaunchIssue = {
+        file: file.name,
+        code: 'conflicting_duplicate',
+        message:
+          `${file.name} and ${prior.file} both claim progress for launch "${manifest.launch_id}"; ` +
+          'both are ignored until one file is removed',
+      };
+      issues.push(issue);
+      errors.push(issue.message);
+      continue;
+    }
+    progressByLaunch.set(manifest.launch_id, { file: file.name, manifest });
+  }
+
+  // Attach a malformed progress file to its sibling plan when the name pairs,
+  // so "could not read progress" is never mistaken for "no progress yet".
+  for (const record of plans) {
+    const sibling = record.file.replace(/\.plan\.json$/, '').replace(/\.json$/, '');
+    const issue = brokenProgress.find((candidate) => {
+      const base = candidate.file.replace(/\.progress\.json$/, '');
+      return base === sibling || base === `progress-${record.manifest.launch_id}`;
+    });
+    if (issue) quarantine(record.run, issue);
+  }
+
+  for (const record of plans) {
+    const progress = progressByLaunch.get(record.manifest.launch_id);
+    if (!progress) continue;
+    const manifest = progress.manifest;
+
+    if (record.manifest.launch_id !== manifest.launch_id) {
+      quarantine(record.run, {
+        file: progress.file,
+        code: 'foreign_launch',
+        message:
+          `${progress.file} names launch "${manifest.launch_id}" but is paired with ` +
+          `"${record.manifest.launch_id}"; progress is not consumed`,
+      });
+      continue;
+    }
+    if (manifest.plan_hash !== record.hash) {
+      quarantine(record.run, {
+        file: progress.file,
+        code: 'plan_hash_mismatch',
+        message:
+          `${progress.file} belongs to plan hash ${manifest.plan_hash}, but ${record.file} hashes to ` +
+          `${record.hash}; progress is not consumed`,
+      });
+      continue;
+    }
+    if (
+      manifest.revision !== undefined &&
+      record.manifest.revision !== undefined &&
+      manifest.revision !== record.manifest.revision
+    ) {
+      quarantine(record.run, {
+        file: progress.file,
+        code: 'revision_mismatch',
+        message:
+          `${progress.file} is revision ${manifest.revision} but ${record.file} is revision ` +
+          `${record.manifest.revision}; progress is not consumed`,
+      });
+      continue;
+    }
+    if (duplicatedProgress.has(manifest.launch_id)) {
+      quarantine(record.run, {
+        file: progress.file,
+        code: 'conflicting_duplicate',
+        message: `launch "${manifest.launch_id}" has conflicting progress files; none are consumed`,
+      });
       continue;
     }
 
     const states = new Map<string, LaunchUnitState>();
-    const progressFile = /\.plan\.json$/.test(full)
-      ? full.replace(/\.plan\.json$/, '.progress.json')
-      : full.replace(/\.json$/, '.progress.json');
-    let progressWarning: string | null = null;
-    if (fs.existsSync(progressFile)) {
-      try {
-        const raw = JSON.parse(fs.readFileSync(progressFile, 'utf8')) as Record<string, unknown>;
-        for (const [id, state] of parseProgressStates(raw)) states.set(id, state);
-        const progressId = typeof raw.launch_id === 'string' ? raw.launch_id : null;
-        if (progressId && plan.launch_id && progressId !== plan.launch_id) {
-          progressWarning = `progress file launch_id "${progressId}" does not match plan "${String(plan.launch_id)}"`;
-        }
-      } catch (error) {
-        progressWarning = `progress file unreadable: ${error instanceof Error ? error.message : 'unknown'}`;
-      }
+    for (const [id, unit] of Object.entries(manifest.units)) {
+      states.set(id, normalizeState(unit.state));
     }
-
-    const run = buildLaunchRun(plan, states, file);
-    if (progressWarning) run.warnings.push(progressWarning);
-    runs.push(run);
+    const rebuilt = buildLaunchRun(record.raw, states, record.file);
+    rebuilt.planHash = record.hash;
+    rebuilt.revision = record.manifest.revision ?? null;
+    rebuilt.lastUpdated = manifest.updated_at;
+    record.run = rebuilt;
   }
 
-  runs.sort((a, b) => b.launchId.localeCompare(a.launchId));
-  return { dir, runs, errors };
+  // A progress file whose launch never appears as an approved plan is reported,
+  // never silently dropped and never counted.
+  for (const [launchId, progress] of progressByLaunch) {
+    if (byLaunch.has(launchId)) continue;
+    const issue: LaunchIssue = {
+      file: progress.file,
+      code: 'foreign_launch',
+      message: `${progress.file} names launch "${launchId}" but no approved plan exists for it; progress is not consumed`,
+    };
+    issues.push(issue);
+    errors.push(issue.message);
+  }
+
+  const visible = plans.filter((record) => !record.ignored).map((record) => record.run);
+  visible.sort((a, b) => b.launchId.localeCompare(a.launchId));
+  return {
+    dir,
+    runs: visible,
+    errors,
+    availability: 'ok',
+    status: visible.length === 0 ? 'empty' : 'ok',
+    issues,
+    quarantined: visible.filter((run) => run.availability === 'quarantined').length,
+  };
 }
 
 export function getLaunchRun(launchId: string, dir = launchPlansDir()): LaunchRun | null {

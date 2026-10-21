@@ -16,98 +16,42 @@
  * Auth for the HTTP transport REUSES the existing per-client ingest token store
  * (`verifySkill71IngestToken`). No new credential surface is minted by this
  * lane: client boxes keep their own token, and the token record still binds
- * client_slug + host_shape.
+ * client_slug + host_shape. An event that CONTRADICTS its token (different
+ * client, host shape or installation) is rejected before a row is written.
  *
- * Tables are provisioned lazily (`CREATE TABLE IF NOT EXISTS`) so this lane
- * adds new FILES only. ponytail: lazy DDL instead of a numbered migration;
- * fold into `src/lib/db/migrations.ts` (next free id) when the integrator edits
- * shared files, then drop `ensureLaunchRunSchema`.
+ * Storage: the tables are created by the NUMBERED migration `173`
+ * (`src/lib/db/migrations.ts`) from the one versioned contract in
+ * `src/lib/launch-schema.ts`. `ensureLaunchSchema()` remains only as the
+ * idempotent bootstrap for isolated tests and fresh code paths; it executes the
+ * SAME SQL, so production and tests can never diverge.
  */
 
 import { queryAll, queryOne, run, transaction } from '@/lib/db';
+import { launchSchemaStatements, LAUNCH_STORAGE_CONTRACT_VERSION } from '@/lib/launch-schema';
 import {
   LAUNCH_ABILITIES,
   computeLaunchProgress,
   getLaunchAbility,
+  validateProgressSample,
   type LaunchAbility,
   type LaunchProgress,
   type LaunchStageRow,
   type ProgressSample,
 } from '@/lib/launch-abilities';
-import type {
-  LaunchHostShape,
-  LaunchRunEvent,
+import {
+  launchEventContradictsToken,
+  validateLaunchRunEvent,
+  type LaunchHostShape,
+  type LaunchIngestToken,
+  type LaunchRunEvent,
 } from '@/lib/launch-run-events';
-
-const LAUNCH_RUN_SCHEMA_SQL = `
-CREATE TABLE IF NOT EXISTS launch_runs (
-  run_id TEXT PRIMARY KEY,
-  skill INTEGER NOT NULL,
-  ability_slug TEXT NOT NULL,
-  launch_id TEXT,
-  client_slug TEXT,
-  host_shape TEXT,
-  run_dir TEXT,
-  overall TEXT NOT NULL DEFAULT 'incomplete',
-  review_mode TEXT,
-  report_json_path TEXT,
-  report_md_path TEXT,
-  blocked_stage TEXT,
-  started_at TEXT,
-  last_event_at TEXT,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_launch_runs_skill ON launch_runs(skill);
-CREATE INDEX IF NOT EXISTS idx_launch_runs_launch ON launch_runs(launch_id);
-
-CREATE TABLE IF NOT EXISTS launch_run_stages (
-  run_id TEXT NOT NULL,
-  stage TEXT NOT NULL,
-  status TEXT NOT NULL,
-  receipt_status TEXT,
-  closed_at TEXT,
-  blocked_at TEXT,
-  duration_s REAL,
-  scores_summary_json TEXT,
-  cost_json TEXT,
-  artifact_hashes_json TEXT,
-  failures_json TEXT,
-  items_json TEXT,
-  updated_at TEXT NOT NULL,
-  PRIMARY KEY (run_id, stage)
-);
-
-CREATE TABLE IF NOT EXISTS launch_run_events (
-  event_id TEXT PRIMARY KEY,
-  run_id TEXT NOT NULL,
-  skill INTEGER NOT NULL,
-  event_type TEXT NOT NULL,
-  emitted_at TEXT NOT NULL,
-  source TEXT NOT NULL,
-  payload_json TEXT NOT NULL,
-  received_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_launch_run_events_run ON launch_run_events(run_id);
-
-CREATE TABLE IF NOT EXISTS launch_progress_samples (
-  launch_id TEXT NOT NULL,
-  room_id TEXT NOT NULL,
-  observed_at TEXT NOT NULL,
-  build_percent REAL NOT NULL,
-  batch_merge_percent REAL NOT NULL,
-  batch_status TEXT NOT NULL,
-  sample_json TEXT NOT NULL,
-  received_at TEXT NOT NULL,
-  PRIMARY KEY (launch_id, room_id, observed_at)
-);
-`;
 
 let schemaReady = false;
 
-/** Provision this lane's tables on first use. Idempotent and safe to call
- *  from every entry point (the DB handle itself is the process singleton). */
-export function ensureLaunchRunSchema(): void {
+/** Provision this lane's tables on first use. Idempotent, additive, and the
+ *  exact SQL migration 173 applies. Safe to call from every entry point (the
+ *  DB handle itself is the process singleton). */
+export function ensureLaunchSchema(): void {
   if (schemaReady) return;
   transaction(() => {
     const db = queryAll<{ name: string }>(
@@ -116,13 +60,23 @@ export function ensureLaunchRunSchema(): void {
     if (db.length > 0) return;
     // `run` executes one statement; split the DDL so each statement is prepared
     // on its own (better-sqlite3 refuses multi-statement prepare).
-    for (const statement of LAUNCH_RUN_SCHEMA_SQL.split(';')
-      .map((s) => s.trim())
-      .filter(Boolean)) {
+    for (const statement of launchSchemaStatements()) {
       run(`${statement};`);
     }
   });
   schemaReady = true;
+}
+
+/** @deprecated use ensureLaunchSchema — kept so existing imports keep working. */
+export const ensureLaunchRunSchema = ensureLaunchSchema;
+
+/** The storage-contract version this process wrote/expects. */
+export function launchStorageContractVersion(): number {
+  ensureLaunchSchema();
+  const row = queryOne<{ version: number }>(
+    `SELECT version FROM launch_storage_contract WHERE contract = 'launch'`,
+  );
+  return row?.version ?? LAUNCH_STORAGE_CONTRACT_VERSION;
 }
 
 function nowIso(): string {
@@ -138,27 +92,56 @@ export interface LaunchIngestStamp {
   /** Transport provenance (HTTP ingest): applied when the event omits the field. */
   client_slug?: string;
   host_shape?: LaunchHostShape;
+  installation_id?: string;
   source: string;
+}
+
+/**
+ * A duplicate whose content CONTRADICTS the row already stored, or an event
+ * that would rebind a run to a different launch. Never merged optimistically:
+ * the caller reports a rejection and the stored state is unchanged.
+ */
+export class LaunchIngestConflictError extends Error {
+  readonly code = 'conflicting_duplicate';
+}
+
+/** Reject a run re-bind before any row is written. */
+function assertRunIdentityCompatible(event: LaunchRunEvent): void {
+  if (!event.launch_id) return;
+  const row = queryOne<{ launch_id: string | null }>(
+    `SELECT launch_id FROM launch_runs WHERE run_id = ?`,
+    [event.run_id],
+  );
+  if (row?.launch_id && row.launch_id !== event.launch_id) {
+    throw new LaunchIngestConflictError(
+      `run ${event.run_id} is already bound to launch "${row.launch_id}"; ` +
+      `event claims "${event.launch_id}"`,
+    );
+  }
 }
 
 /**
  * Ingest one validated launch run event. Dedupe is by `event_id`, exactly as
  * the Skill 71 core does, so an at-least-once shipper can safely re-send.
+ *
+ * Throws `LaunchIngestConflictError` when the event would rebind the run to a
+ * different launch; nothing is written in that case.
  */
 export function ingestLaunchRunEvent(
   event: LaunchRunEvent,
   ability: LaunchAbility,
   stamp: LaunchIngestStamp,
 ): LaunchIngestOutcome {
-  ensureLaunchRunSchema();
+  ensureLaunchSchema();
+  assertRunIdentityCompatible(event);
   let outcome: LaunchIngestOutcome = { status: 'inserted', event_id: event.event_id };
   transaction(() => {
     const inserted = run(
       `INSERT OR IGNORE INTO launch_run_events
-         (event_id, run_id, skill, event_type, emitted_at, source, payload_json, received_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+         (event_id, run_id, skill, event_type, emitted_at, source, payload_json, installation_id, received_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [event.event_id, event.run_id, ability.skill, event.event_type, event.emitted_at,
-       stamp.source, JSON.stringify(event), nowIso()],
+       stamp.source, JSON.stringify(event), stamp.installation_id ?? null, nowIso()],
     );
     if (inserted.changes === 0) {
       outcome = { status: 'duplicate', event_id: event.event_id };
@@ -167,6 +150,52 @@ export function ingestLaunchRunEvent(
     applyLaunchEvent(event, ability, stamp);
   });
   return outcome;
+}
+
+export type LaunchIngestDecision =
+  | { ok: true; outcome: LaunchIngestOutcome }
+  | { ok: false; errors: string[] };
+
+/**
+ * The authenticated entry point: validate the event against the frozen
+ * contract, then against the verified token's client / host shape /
+ * installation, then ingest. A contradiction or a run rebind is a rejection;
+ * nothing is written.
+ */
+export function ingestAuthenticatedLaunchRunEvent(
+  raw: unknown,
+  token: LaunchIngestToken,
+  source: string,
+): LaunchIngestDecision {
+  const validation = validateLaunchRunEvent(raw);
+  if (!validation.ok) return { ok: false, errors: validation.errors };
+  // The frozen contract leaves `launch_id` optional (Skill 71 parity); the
+  // Launch ingest cannot. A run with no launch identity can never be tied to a
+  // plan, so it is rejected as absent identity rather than listed as progress.
+  if (!validation.event.launch_id) {
+    return {
+      ok: false,
+      errors: ['launch_id is required for launch ingest; an event with no launch identity cannot report progress'],
+    };
+  }
+  const contradiction = launchEventContradictsToken(validation.event, token);
+  if (contradiction) return { ok: false, errors: [contradiction] };
+  try {
+    return {
+      ok: true,
+      outcome: ingestLaunchRunEvent(validation.event, validation.ability, {
+        client_slug: token.client_slug,
+        host_shape: token.host_shape,
+        installation_id: token.installation_id,
+        source,
+      }),
+    };
+  } catch (error) {
+    if (error instanceof LaunchIngestConflictError) {
+      return { ok: false, errors: [error.message] };
+    }
+    throw error;
+  }
 }
 
 function touchRun(event: LaunchRunEvent, ability: LaunchAbility) {
@@ -182,7 +211,6 @@ function touchRun(event: LaunchRunEvent, ability: LaunchAbility) {
      event.emitted_at, event.emitted_at, nowIso(), nowIso()],
   );
 }
-
 function applyLaunchEvent(
   event: LaunchRunEvent,
   ability: LaunchAbility,
@@ -196,6 +224,7 @@ function applyLaunchEvent(
            launch_id = COALESCE(?, launch_id),
            client_slug = COALESCE(?, client_slug),
            host_shape = COALESCE(?, host_shape),
+           installation_id = COALESCE(?, installation_id),
            run_dir = COALESCE(?, run_dir),
            started_at = COALESCE(started_at, ?),
            updated_at = ?
@@ -203,6 +232,7 @@ function applyLaunchEvent(
         [event.launch_id ?? null,
          event.client_slug ?? stamp.client_slug ?? null,
          event.host_shape ?? stamp.host_shape ?? null,
+         event.installation_id ?? stamp.installation_id ?? null,
          event.run_dir ?? null,
          event.emitted_at, nowIso(), event.run_id],
       );
@@ -220,7 +250,12 @@ function applyLaunchEvent(
            scores_summary_json = excluded.scores_summary_json,
            cost_json = excluded.cost_json,
            artifact_hashes_json = excluded.artifact_hashes_json,
-           failures_json = NULL, updated_at = excluded.updated_at`,
+           failures_json = NULL, updated_at = excluded.updated_at
+         -- Nonregressing terminal state: a stage already closed with a pass
+         -- receipt is never downgraded to not_authorized by a later duplicate.
+         WHERE NOT (launch_run_stages.status = 'closed'
+                    AND launch_run_stages.receipt_status = 'pass'
+                    AND excluded.receipt_status = 'not_authorized')`,
         [event.run_id, event.stage, event.receipt_status, event.closed_at,
          event.duration_s ?? null,
          event.scores_summary ? JSON.stringify(event.scores_summary) : null,
@@ -312,6 +347,7 @@ export interface LaunchRunRow {
   launch_id: string | null;
   client_slug: string | null;
   host_shape: string | null;
+  installation_id: string | null;
   run_dir: string | null;
   overall: string;
   review_mode: string | null;
@@ -360,28 +396,52 @@ function summarize(row: LaunchRunRow): LaunchRunSummary {
   return { ...row, progress };
 }
 
-export function listLaunchRuns(
-  filter: ListLaunchRunsFilter = {},
-): { runs: LaunchRunSummary[]; total: number } {
-  ensureLaunchRunSchema();
-  const where: string[] = [];
-  const params: unknown[] = [];
-  if (filter.skill !== undefined) { where.push('skill = ?'); params.push(filter.skill); }
-  if (filter.launch_id) { where.push('launch_id = ?'); params.push(filter.launch_id); }
-  if (filter.status) { where.push('overall = ?'); params.push(filter.status); }
-  if (filter.client_slug) { where.push('client_slug = ?'); params.push(filter.client_slug); }
-  if (filter.host_shape) { where.push('host_shape = ?'); params.push(filter.host_shape); }
-  const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
-  const totalRow = queryOne<{ n: number }>(
-    `SELECT COUNT(*) AS n FROM launch_runs ${whereSql}`, params);
-  const limit = Math.min(Math.max(filter.limit ?? 50, 1), 200);
-  const offset = Math.max(filter.offset ?? 0, 0);
-  const rows = queryAll<LaunchRunRow>(
-    `SELECT * FROM launch_runs ${whereSql}
-     ORDER BY COALESCE(last_event_at, started_at, created_at) DESC
-     LIMIT ? OFFSET ?`,
-    [...params, limit, offset]);
-  return { runs: rows.map(summarize), total: totalRow?.n ?? 0 };
+/** The database view could not be read. Never converted to an empty result. */
+export class LaunchStoreUnavailableError extends Error {
+  readonly code = 'launch_store_unavailable';
+}
+
+export interface LaunchRunsPage {
+  runs: LaunchRunSummary[];
+  total: number;
+  /** `unavailable` means the database could not be read — NOT "no runs". */
+  availability: 'ok' | 'unavailable';
+  error?: string;
+}
+
+export function listLaunchRuns(filter: ListLaunchRunsFilter = {}): LaunchRunsPage {
+  try {
+    ensureLaunchSchema();
+    const where: string[] = [];
+    const params: unknown[] = [];
+    if (filter.skill !== undefined) { where.push('skill = ?'); params.push(filter.skill); }
+    if (filter.launch_id) { where.push('launch_id = ?'); params.push(filter.launch_id); }
+    if (filter.status) { where.push('overall = ?'); params.push(filter.status); }
+    if (filter.client_slug) { where.push('client_slug = ?'); params.push(filter.client_slug); }
+    if (filter.host_shape) { where.push('host_shape = ?'); params.push(filter.host_shape); }
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    const totalRow = queryOne<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM launch_runs ${whereSql}`, params);
+    const limit = Math.min(Math.max(filter.limit ?? 50, 1), 200);
+    const offset = Math.max(filter.offset ?? 0, 0);
+    const rows = queryAll<LaunchRunRow>(
+      `SELECT * FROM launch_runs ${whereSql}
+       ORDER BY COALESCE(last_event_at, started_at, created_at) DESC
+       LIMIT ? OFFSET ?`,
+      [...params, limit, offset]);
+    return {
+      runs: rows.map(summarize),
+      total: totalRow?.n ?? 0,
+      availability: 'ok',
+    };
+  } catch (error) {
+    return {
+      runs: [],
+      total: 0,
+      availability: 'unavailable',
+      error: error instanceof Error ? error.message : 'launch store unavailable',
+    };
+  }
 }
 
 export interface LaunchRunDetail {
@@ -391,13 +451,26 @@ export interface LaunchRunDetail {
 }
 
 export function getLaunchRun(runId: string): LaunchRunDetail | null {
-  ensureLaunchRunSchema();
+  try {
+    ensureLaunchSchema();
+  } catch (error) {
+    throw new LaunchStoreUnavailableError(
+      error instanceof Error ? error.message : 'launch store unavailable',
+    );
+  }
   const row = queryOne<LaunchRunRow>(`SELECT * FROM launch_runs WHERE run_id = ?`, [runId]);
   if (!row) return null;
-  const ability = getLaunchAbility(row.skill);
-  const detailRows = queryAll<Record<string, unknown>>(
-    `SELECT * FROM launch_run_stages WHERE run_id = ?`, [runId]);
+  let detailRows: Record<string, unknown>[];
+  try {
+    detailRows = queryAll<Record<string, unknown>>(
+      `SELECT * FROM launch_run_stages WHERE run_id = ?`, [runId]);
+  } catch (error) {
+    throw new LaunchStoreUnavailableError(
+      error instanceof Error ? error.message : 'launch stage store unavailable',
+    );
+  }
   const byStage = new Map(detailRows.map((r) => [r.stage as string, r]));
+  const ability = getLaunchAbility(row.skill);
   const order = ability?.stageOrder ?? detailRows.map((r) => r.stage as string);
   const stages = order.map((stage) => {
     const r = byStage.get(stage);
@@ -424,31 +497,79 @@ export function getLaunchRun(runId: string): LaunchRunDetail | null {
 // `project_id` in the contract carries the launch plan's `launch_id`.
 // ---------------------------------------------------------------------------
 
-/** Upsert one progress sample. Idempotent on (launch_id, room_id, observed_at). */
-export function ingestProgressSample(sample: ProgressSample): void {
-  ensureLaunchRunSchema();
+export type ProgressSampleOutcome =
+  | { status: 'inserted' | 'duplicate' }
+  | { status: 'rejected'; errors: string[] };
+
+/**
+ * Upsert one progress sample. Idempotent on (launch_id, room_id, observed_at)
+ * ONLY when the bytes agree: a conflicting payload at the same key is
+ * rejected, never allowed to overwrite the stored observation and inflate or
+ * deflate completion.
+ */
+export function ingestProgressSample(
+  sample: ProgressSample,
+  stamp: LaunchIngestStamp = { source: 'file' },
+): ProgressSampleOutcome {
+  ensureLaunchSchema();
+  const serialized = JSON.stringify(sample);
+  const existing = queryOne<{ sample_json: string }>(
+    `SELECT sample_json FROM launch_progress_samples
+      WHERE launch_id = ? AND room_id = ? AND observed_at = ?`,
+    [sample.project_id, sample.room_id, sample.observed_at],
+  );
+  if (existing) {
+    if (existing.sample_json === serialized) return { status: 'duplicate' };
+    return {
+      status: 'rejected',
+      errors: [
+        `conflicting duplicate progress sample for launch "${sample.project_id}" room ` +
+        `"${sample.room_id}" at ${sample.observed_at}; the stored sample is kept`,
+      ],
+    };
+  }
   run(
     `INSERT INTO launch_progress_samples
-       (launch_id, room_id, observed_at, build_percent, batch_merge_percent, batch_status, sample_json, received_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(launch_id, room_id, observed_at) DO UPDATE SET
-       build_percent = excluded.build_percent,
-       batch_merge_percent = excluded.batch_merge_percent,
-       batch_status = excluded.batch_status,
-       sample_json = excluded.sample_json,
-       received_at = excluded.received_at`,
+       (launch_id, room_id, observed_at, build_percent, batch_merge_percent, batch_status,
+        client_slug, host_shape, installation_id, sample_json, received_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [sample.project_id, sample.room_id, sample.observed_at,
      sample.build_percent, sample.batch_merge_percent, sample.batch_status,
-     JSON.stringify(sample), nowIso()],
+     stamp.client_slug ?? null, stamp.host_shape ?? null, stamp.installation_id ?? null,
+     serialized, nowIso()],
   );
+  return { status: 'inserted' };
+}
+
+/**
+ * Authenticated progress ingest: validate the sample against the launch
+ * progress contract, then apply the token's client / host / installation as
+ * provenance. A schema violation is a rejection; nothing is written.
+ */
+export function ingestAuthenticatedProgressSample(
+  raw: unknown,
+  token: LaunchIngestToken,
+  source: string,
+): ProgressSampleOutcome {
+  const validation = validateProgressSample(raw);
+  if (!validation.ok) return { status: 'rejected', errors: validation.errors };
+  return ingestProgressSample(validation.sample, {
+    client_slug: token.client_slug,
+    host_shape: token.host_shape,
+    installation_id: token.installation_id,
+    source,
+  });
+}
+
+export interface LaunchProgressRead {
+  samples: Array<{ launch_id: string; room_id: string; observed_at: string; sample: ProgressSample }>;
+  /** Rows whose stored JSON could not be read — reported, never dropped silently. */
+  unavailable: Array<{ launch_id: string; room_id: string; observed_at: string; error: string }>;
 }
 
 /** Newest progress sample per room for one launch, newest first. */
-export function getLaunchProgressSamples(
-  launchId: string,
-  limit = 20,
-): Array<{ launch_id: string; room_id: string; observed_at: string; sample: ProgressSample }> {
-  ensureLaunchRunSchema();
+export function getLaunchProgressSamples(launchId: string, limit = 20): LaunchProgressRead {
+  ensureLaunchSchema();
   const rows = queryAll<{ launch_id: string; room_id: string; observed_at: string; sample_json: string }>(
     `SELECT launch_id, room_id, observed_at, sample_json
        FROM launch_progress_samples
@@ -457,12 +578,26 @@ export function getLaunchProgressSamples(
       LIMIT ?`,
     [launchId, Math.min(Math.max(limit, 1), 200)],
   );
-  return rows.map((r) => ({
-    launch_id: r.launch_id,
-    room_id: r.room_id,
-    observed_at: r.observed_at,
-    sample: JSON.parse(r.sample_json) as ProgressSample,
-  }));
+  const samples: LaunchProgressRead['samples'] = [];
+  const unavailable: LaunchProgressRead['unavailable'] = [];
+  for (const row of rows) {
+    try {
+      samples.push({
+        launch_id: row.launch_id,
+        room_id: row.room_id,
+        observed_at: row.observed_at,
+        sample: JSON.parse(row.sample_json) as ProgressSample,
+      });
+    } catch (error) {
+      unavailable.push({
+        launch_id: row.launch_id,
+        room_id: row.room_id,
+        observed_at: row.observed_at,
+        error: error instanceof Error ? error.message : 'unreadable sample',
+      });
+    }
+  }
+  return { samples, unavailable };
 }
 
 /** Every registered ability with its latest runs — the registration surface. */
@@ -471,7 +606,7 @@ export function launchAbilityOverview(limitPerAbility = 5): Array<{
   run_count: number;
   runs: LaunchRunSummary[];
 }> {
-  ensureLaunchRunSchema();
+  ensureLaunchSchema();
   return LAUNCH_ABILITIES.map((ability) => {
     const counts = queryOne<{ n: number }>(
       `SELECT COUNT(*) AS n FROM launch_runs WHERE skill = ?`, [ability.skill]);

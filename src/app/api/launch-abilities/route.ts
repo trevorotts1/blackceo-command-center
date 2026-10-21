@@ -5,6 +5,7 @@ import {
   getLaunchRun,
   listLaunchRuns,
   launchAbilityOverview,
+  LaunchStoreUnavailableError,
 } from '@/lib/launch-ability-runs';
 
 export const dynamic = 'force-dynamic';
@@ -36,7 +37,18 @@ export async function GET(request: NextRequest) {
 
   const runId = searchParams.get('run_id');
   if (runId) {
-    const detail = getLaunchRun(runId);
+    let detail;
+    try {
+      detail = getLaunchRun(runId);
+    } catch (error) {
+      if (error instanceof LaunchStoreUnavailableError) {
+        return NextResponse.json(
+          { error: 'launch_store_unavailable', detail: error.message },
+          { status: 503 },
+        );
+      }
+      throw error;
+    }
     if (!detail) {
       return NextResponse.json({ error: 'launch run not found' }, { status: 404 });
     }
@@ -53,13 +65,20 @@ export async function GET(request: NextRequest) {
 
   const launchId = searchParams.get('launch_id');
   if (launchId) {
-    const { runs, total } = listLaunchRuns({
+    const page = listLaunchRuns({
       launch_id: launchId, status, client_slug: client, host_shape: hostShape, limit, offset,
     });
+    if (page.availability === 'unavailable') {
+      return NextResponse.json(
+        { error: 'launch_store_unavailable', detail: page.error ?? null },
+        { status: 503 },
+      );
+    }
     return NextResponse.json({
       launch_id: launchId,
-      runs,
-      total,
+      runs: page.runs,
+      total: page.total,
+      availability: page.availability,
       progress_samples: getLaunchProgressSamples(launchId),
     });
   }
@@ -73,10 +92,16 @@ export async function GET(request: NextRequest) {
         { status: 404 },
       );
     }
-    const { runs, total } = listLaunchRuns({
+    const page = listLaunchRuns({
       skill: ability.skill, status, client_slug: client, host_shape: hostShape, limit, offset,
     });
-    return NextResponse.json({ ability, runs, total });
+    if (page.availability === 'unavailable') {
+      return NextResponse.json(
+        { error: 'launch_store_unavailable', detail: page.error ?? null },
+        { status: 503 },
+      );
+    }
+    return NextResponse.json({ ability, runs: page.runs, total: page.total, availability: page.availability });
   }
 
   return NextResponse.json({
