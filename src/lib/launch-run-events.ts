@@ -59,6 +59,10 @@ export interface LaunchRunEvent {
   // launch extensions
   skill: number;
   launch_id?: string;
+  /** Launch extension: the installation that emitted the event. Optional on the
+   *  wire; when present it must equal the receiving installation, and the HTTP
+   *  transport rejects a contradiction instead of importing a foreign box's run. */
+  installation_id?: string;
   // frozen run-events contract v1.0
   event_id: string;
   event_type: LaunchEventType;
@@ -95,11 +99,13 @@ export interface LaunchRunEvent {
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SHA256_RE = /^[0-9a-f]{64}$/;
+/** Same shape as `launch-plan.schema.json`'s launch_id (minLength 3). */
+const LAUNCH_ID_RE = /^[a-z0-9][a-z0-9-]{2,}$/;
 const DATETIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
 
 const ALLOWED_KEYS = new Set<string>([
   // launch extensions
-  'skill', 'launch_id',
+  'skill', 'launch_id', 'installation_id',
   // frozen contract
   'event_id', 'event_type', 'schema_version', 'emitted_at', 'run_id', 'run_dir',
   'host_shape', 'client_slug', 'page_name', 'brand_id', 'client', 'test_run',
@@ -156,8 +162,11 @@ export function validateLaunchRunEvent(raw: unknown): LaunchValidationResult {
   const optString = (k: string) => {
     if (e[k] !== undefined && typeof e[k] !== 'string') errors.push(`${k} must be a string`);
   };
-  ['launch_id', 'run_dir', 'client_slug', 'page_name', 'brand_id', 'client', 'stage', 'item_id',
+  ['launch_id', 'installation_id', 'run_dir', 'client_slug', 'page_name', 'brand_id', 'client', 'stage', 'item_id',
    'report_json_path', 'report_md_path', 'authority_id', 'pinned_sha'].forEach(optString);
+  if (typeof e.launch_id === 'string' && !LAUNCH_ID_RE.test(e.launch_id)) {
+    errors.push('launch_id must be a lowercase slug matching the launch-plan contract');
+  }
 
   if (e.host_shape !== undefined &&
       !(LAUNCH_HOST_SHAPES as readonly string[]).includes(e.host_shape as string)) {
@@ -255,3 +264,40 @@ export function validateLaunchRunEvent(raw: unknown): LaunchValidationResult {
   if (errors.length || !ability) return { ok: false, errors };
   return { ok: true, event: e as unknown as LaunchRunEvent, ability };
 }
+
+// ---------------------------------------------------------------------------
+// Authenticated transport binding
+// ---------------------------------------------------------------------------
+
+/**
+ * What a verified per-client ingest token proves: the client slug, the fleet
+ * host shape, and THIS installation's id. Nothing else about the event is
+ * trusted before this comparison.
+ */
+export interface LaunchIngestToken {
+  client_slug: string;
+  host_shape: LaunchHostShape;
+  installation_id: string;
+}
+
+/**
+ * An event whose claimed client slug, host shape or installation contradicts
+ * the authenticated token is rejected. Absent claims are filled from the token
+ * by the ingestion stamp; a CONTRADICTION is never a fill-in.
+ */
+export function launchEventContradictsToken(
+  event: LaunchRunEvent,
+  token: LaunchIngestToken,
+): string | null {
+  if (event.client_slug !== undefined && event.client_slug !== token.client_slug) {
+    return `client_slug ${event.client_slug} contradicts the token's ${token.client_slug}`;
+  }
+  if (event.host_shape !== undefined && event.host_shape !== token.host_shape) {
+    return `host_shape ${event.host_shape} contradicts the token's ${token.host_shape}`;
+  }
+  if (event.installation_id !== undefined && event.installation_id !== token.installation_id) {
+    return `installation_id ${event.installation_id} contradicts this installation's ${token.installation_id}`;
+  }
+  return null;
+}
+

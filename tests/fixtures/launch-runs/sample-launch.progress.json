@@ -1,14 +1,101 @@
 {
+  "schema_version": "1.0",
   "launch_id": "sample-launch-2026-11",
+  "plan_hash": "sha256:56c28b6b2e34357f41f3919d990aed5d6bb4d370a3b701f4cea251b758c0d5eb",
+  "created_at": "2026-10-01T12:00:00Z",
+  "updated_at": "2026-10-01T12:45:00Z",
+  "percent": 33,
+  "counts": { "pending": 5, "running": 1, "done": 3, "failed": 0, "blocked": 0, "dropped": 0 },
   "units": {
-    "page_landing": "complete",
-    "page_sales": "complete",
-    "page_checkout": "running",
-    "page_thank_you": "pending",
-    "email_pre_launch": "complete",
-    "email_main_launch": "pending",
-    "text_opt_in": "pending",
-    "auto_post_sale": "pending",
-    "conversation_ai": "pending"
+    "page_landing": {
+      "kind": "page",
+      "waits_for": [],
+      "state": "done",
+      "attempts": 1,
+      "charged": false,
+      "artifact": "https://example.com/landing",
+      "note": null,
+      "updated_at": "2026-10-01T12:10:00Z"
+    },
+    "page_sales": {
+      "kind": "page",
+      "waits_for": [],
+      "state": "done",
+      "attempts": 1,
+      "charged": false,
+      "artifact": "https://example.com/offer",
+      "note": null,
+      "updated_at": "2026-10-01T12:20:00Z"
+    },
+    "page_checkout": {
+      "kind": "page",
+      "waits_for": ["page_sales"],
+      "state": "running",
+      "attempts": 1,
+      "charged": false,
+      "artifact": null,
+      "note": null,
+      "updated_at": "2026-10-01T12:30:00Z"
+    },
+    "page_thank_you": {
+      "kind": "page",
+      "waits_for": ["page_checkout"],
+      "state": "pending",
+      "attempts": 0,
+      "charged": false,
+      "artifact": null,
+      "note": null,
+      "updated_at": "2026-10-01T12:00:00Z"
+    },
+    "email_pre_launch": {
+      "kind": "email_sequence",
+      "waits_for": ["page_landing"],
+      "state": "done",
+      "attempts": 1,
+      "charged": false,
+      "artifact": "drafts/email-pre-launch.json",
+      "note": null,
+      "updated_at": "2026-10-01T12:40:00Z"
+    },
+    "email_main_launch": {
+      "kind": "email_sequence",
+      "waits_for": ["page_sales"],
+      "state": "pending",
+      "attempts": 0,
+      "charged": false,
+      "artifact": null,
+      "note": null,
+      "updated_at": "2026-10-01T12:00:00Z"
+    },
+    "text_opt_in": {
+      "kind": "text_set",
+      "waits_for": [],
+      "state": "pending",
+      "attempts": 0,
+      "charged": false,
+      "artifact": null,
+      "note": null,
+      "updated_at": "2026-10-01T12:00:00Z"
+    },
+    "auto_post_sale": {
+      "kind": "automation",
+      "waits_for": ["page_checkout"],
+      "state": "pending",
+      "attempts": 0,
+      "charged": false,
+      "artifact": null,
+      "note": null,
+      "updated_at": "2026-10-01T12:00:00Z"
+    },
+    "conversation_ai": {
+      "kind": "automation",
+      "waits_for": [],
+      "state": "pending",
+      "attempts": 0,
+      "charged": false,
+      "artifact": null,
+      "note": null,
+      "updated_at": "2026-10-01T12:00:00Z"
+    }
   }
 }
