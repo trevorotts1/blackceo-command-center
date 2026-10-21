@@ -15,13 +15,17 @@ export const dynamic = 'force-dynamic';
 const FOCUS =
   'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-bcc-primary';
 
-const STATE_STYLES: Record<LaunchUnitState, string> = {
+const STATE_STYLES: Record<LaunchUnitState | 'unknown', string> = {
   complete: 'bg-emerald-50 text-emerald-700 border-emerald-200',
   running: 'bg-sky-50 text-sky-700 border-sky-200',
   pending: 'bg-bcc-border-light text-bcc-text-muted border-bcc-border',
   failed: 'bg-red-50 text-red-700 border-red-200',
   blocked: 'bg-amber-50 text-amber-700 border-amber-200',
   dropped: 'bg-bcc-border-light text-bcc-text-muted border-bcc-border line-through',
+  // L12 quarantine state (fail-closed): a manifest that could not be trusted.
+  // Shown, not counted as progress. Forward-compatible entry so this page
+  // keeps compiling once the L12 storage contract merges.
+  unknown: 'bg-amber-50 text-amber-800 border-amber-300',
 };
 
 type RouteParams = { params: Promise<{ launchId: string }> };
@@ -36,7 +40,7 @@ export async function generateMetadata({ params }: RouteParams): Promise<Metadat
   };
 }
 
-function StateBadge({ state }: { state: LaunchUnitState }) {
+function StateBadge({ state }: { state: LaunchUnitState | 'unknown' }) {
   return (
     <span
       className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-semibold uppercase tracking-[0.08em] ${STATE_STYLES[state]}`}

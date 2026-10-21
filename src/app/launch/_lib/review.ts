@@ -15,11 +15,15 @@
 import type { LaunchRun, LaunchUnit, LaunchUnitState } from '@/lib/launch-runs';
 
 /** States that still need the client's decision or work. */
-const OPEN_STATES: ReadonlySet<LaunchUnitState> = new Set<LaunchUnitState>([
+const OPEN_STATES: ReadonlySet<LaunchUnitState | 'unknown'> = new Set<LaunchUnitState | 'unknown'>([
   'pending',
   'running',
   'failed',
   'blocked',
+  // L12 quarantine state (fail-closed): a manifest that could not be trusted.
+  // Treated as open so the next action routes to resolve, never go-live.
+  // Forward-compatible entry so this helper keeps working once L12 merges.
+  'unknown',
 ]);
 
 export interface PreviewLink {
@@ -123,11 +127,14 @@ export function nextAction(run: LaunchRun): NextAction {
     };
   }
 
-  if (unit.state === 'failed' || unit.state === 'blocked') {
+  if (unit.state === 'failed' || unit.state === 'blocked' || (unit.state as string) === 'unknown') {
     return {
       kind: 'resolve',
       label: `Resolve the ${unit.label}`,
-      detail: unit.detail,
+      detail:
+        (unit.state as string) === 'unknown'
+          ? 'This unit could not be trusted (quarantined manifest). Resolve the plan or progress file before launch.'
+          : unit.detail,
       href: null,
       unitId: unit.id,
     };
@@ -159,7 +166,10 @@ export function nextAction(run: LaunchRun): NextAction {
 /** Draft-ready vs live. This read-only screen can only ever observe a draft. */
 export function publicationState(run: LaunchRun): PublicationState {
   const attention = run.units.some(
-    (unit) => unit.state === 'failed' || unit.state === 'blocked',
+    (unit) =>
+      unit.state === 'failed' ||
+      unit.state === 'blocked' ||
+      (unit.state as string) === 'unknown',
   );
   if (attention) {
     return {
