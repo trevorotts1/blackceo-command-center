@@ -43,6 +43,14 @@ const TMP_DB = path.join(
   'mission-control.test.db',
 );
 process.env.DATABASE_PATH = TMP_DB;
+// Config-discovery isolation (the same contract tests/unit/_isolated-db.ts
+// documents): this suite's throwaway DB must never reseed from the
+// operator's runtime config/ files — a branded company-config.json or a
+// populated departments.json in the checkout would leak the real manifest
+// into every test database (the C8 leak class, config variant). An empty
+// fixture root makes resolveDepartmentsConfigPath() return null and pins the
+// company config to the repo's unbranded template (findCompanyConfigPaths).
+process.env.CC_TEST_FIXTURE_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'bc-dispatch-alias-fixture-'));
 
 // ── Isolated fake $HOME/.openclaw/agents/ tree — the ONLY runtime dir that
 // exists is `dept-billing` (the legacy alias form), mirroring the exact live
