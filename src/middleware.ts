@@ -1,4 +1,4 @@
-import { resolveTenantContext, tenantRegistration, requestHost } from '@/lib/auth/tenant-context';
+import { resolveLaunchAccess, resolveTenantContext, tenantRegistration, requestHost } from '@/lib/auth/tenant-context';
 import { NextRequest, NextResponse } from 'next/server';
 import { recordCfAccessSeen } from '@/lib/probes/cloudflare-access-probe';
 import {
@@ -217,6 +217,53 @@ function tenantRefusalResponse(request: NextRequest, body: { error: string; mess
     `<p>Re-open your private interview link to sign in again and continue where you left off — ` +
     `the same link works until your interview is complete, on any device. ` +
     `If that link no longer opens, ask your operator for a fresh one.</p></body></html>`,
+    { status: 403, headers: { ...headers, 'content-type': 'text/html; charset=utf-8' } },
+  );
+}
+
+/* ── L11 / UL-001 — launch read surface ────────────────────────────────────
+ *
+ * The launch pages and the two launch read APIs serve plan/progress material
+ * addressed by a CLIENT-SUPPLIED launch id. The readers are not tenant-scoped
+ * yet (see the tenant-scoped reader contract in lib/auth/tenant-context.ts),
+ * so the only safe posture today is:
+ *
+ *   1. a VERIFIED tenant identity is required for every launch page and API
+ *      read — resolved here, before any route handler or page component runs;
+ *   2. on a SHARED installation (more than one registered tenant identity, or
+ *      a client-kind proxy host) launch rendering is DISABLED until the
+ *      reader proves per-record ownership. A guessed id then cannot expose
+ *      another tenant's list, detail page, server-component payload or API
+ *      body, because the request is refused before the read.
+ *
+ * A single-tenant installation keeps working unchanged: there is exactly one
+ * tenant, so an unattributed launch record is the box's own.
+ */
+const LAUNCH_PAGE_ROUTE = '/launch';
+const LAUNCH_API_ROUTES = ['/api/launch-runs', '/api/launch-abilities'];
+
+function isLaunchSurface(pathname: string): boolean {
+  return (
+    matchesRoute(pathname, LAUNCH_PAGE_ROUTE) ||
+    LAUNCH_API_ROUTES.some((route) => matchesRoute(pathname, route))
+  );
+}
+
+/**
+ * Launch refusal: 403 + no-store, machine-readable JSON for API/fetch callers,
+ * a plain HTML page for browser navigations. Neither envelope echoes the
+ * requested launch id, a launch name, a tenant id or any record material —
+ * the refusal must not become the leak it prevents.
+ */
+function launchRefusal(request: NextRequest, code: string, message: string): NextResponse {
+  const headers = { 'cache-control': 'private, no-store' };
+  if (!isDocumentNavigation(request)) return NextResponse.json({ error: code }, { status: 403, headers });
+  const safe = message.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  return new NextResponse(
+    `<!doctype html><html lang="en"><head><meta charset="utf-8">` +
+    `<meta name="viewport" content="width=device-width,initial-scale=1">` +
+    `<title>Launch data unavailable</title></head><body style="font-family:system-ui,sans-serif;max-width:40rem;margin:4rem auto;padding:0 1rem">` +
+    `<h1>Launch data unavailable</h1><p>${safe}</p></body></html>`,
     { status: 403, headers: { ...headers, 'content-type': 'text/html; charset=utf-8' } },
   );
 }
@@ -495,6 +542,34 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
   // interview-shell gate applies. SUBTREE match (see PARTICIPANT_PUBLIC_ROUTE).
   if (matchesRoute(pathname, PARTICIPANT_PUBLIC_ROUTE)) {
     return NextResponse.next();
+  }
+
+  // L11 / UL-001 — launch reads are tenant-bound BEFORE any handler or page
+  // component runs. resolveLaunchAccess() proves identity cryptographically
+  // (signed session cookie / verified Access JWT / operator bearer) and never
+  // trusts a client-supplied id. A shared installation refuses launch
+  // rendering outright until its readers enforce per-record ownership; a
+  // single-tenant installation proceeds to the normal gates below. This block
+  // runs BEFORE demo mode on purpose: demo mode must not become a public
+  // launch-data surface.
+  if (isLaunchSurface(pathname)) {
+    let launchScope: Awaited<ReturnType<typeof resolveLaunchAccess>> | null = null;
+    try {
+      launchScope = await resolveLaunchAccess(request);
+    } catch {
+      return launchRefusal(
+        request,
+        'launch_tenant_required',
+        'Sign in with an authorized account to view launch data. If access still fails, contact your operator.',
+      );
+    }
+    if (launchScope.sharedHost) {
+      return launchRefusal(
+        request,
+        'launch_tenant_unscoped',
+        'Launch data is not tenant-scoped on this shared installation yet, so it is not shown here. Open the installation that owns the launch.',
+      );
+    }
   }
 
   // Demo mode, read-only public deployment.
