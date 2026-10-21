@@ -299,3 +299,94 @@ export async function resolveTenantContext(request: { headers: Headers }): Promi
   if (!subject) throw new TenantAccessError('A verified tenant identity is required');
   return { tenantId: reg.tenantId, companyId: reg.companyId, clientId: reg.clientId || null, kind: reg.kind, subject, host, installationId: reg.installationId, email };
 }
+
+/* ── L11 / UL-001 — tenant-scoped launch reader contract ───────────────────
+ *
+ * Launch plans and launch runs are stored WITHOUT an owner column (the files
+ * carry a launch_id only; the launch-ability rows carry a free-text
+ * client_slug). Every launch read was therefore addressed by a
+ * CLIENT-SUPPLIED id and served whatever record matched — the tenant identity
+ * never entered the data-access boundary. A caller authenticated to tenant A
+ * could list or guess an id and read tenant B's launch material.
+ *
+ * The contract below is the ONE definition of "may this verified caller read
+ * this launch record", for the middleware gate AND for the readers (L12's
+ * launch-runs / launch-ability-runs, L13's launch pages). Rules:
+ *
+ *   1. Identity comes ONLY from resolveLaunchAccess() → resolveTenantContext()
+ *      (signed session cookie, verified Access JWT, or the operator bearer).
+ *      Never from a path/query/header value the caller controls.
+ *   2. A record is owned only by its own tenant_id/company_id claim. A
+ *      client_slug is a label, never proof.
+ *   3. Single-tenant installation (one registered tenant identity, kind
+ *      'self'): an unattributed record is the box's own — visible.
+ *   4. Shared installation (more than one registered tenant identity, or a
+ *      client-kind proxy host): unattributed records are refused. Until a
+ *      reader proves per-record ownership, launch data stays unrendered there.
+ *      Guessable ids therefore return the same not-found-shaped refusal as a
+ *      missing record; nothing about another tenant is disclosed.
+ */
+export interface TenantLaunchScope extends TenantContext {
+  /** True when this installation serves more than one tenant identity, or is
+   *  a client-kind proxy host. Shared hosts may not serve unattributed launch
+   *  records — see launchRecordVisible(). */
+  sharedHost: boolean;
+}
+
+/** The ownership claim a launch record may carry. Unknown shape by design:
+ *  readers pass the raw plan/row object and this helper decides. */
+export interface LaunchRecordOwnership {
+  tenant_id?: unknown;
+  company_id?: unknown;
+  client_slug?: unknown;
+}
+
+/** Distinct tenant identities declared by the registry (never secrets).
+ *  Used only to decide whether this installation is shared. */
+export function tenantRegistryIdentities(): Array<{ tenantId: string; companyId: string; kind: 'self' | 'client' }> {
+  const seen = new Map<string, { tenantId: string; companyId: string; kind: 'self' | 'client' }>();
+  for (const reg of Object.values(readTenantRegistry())) {
+    if (!reg || !reg.tenantId || !reg.companyId) continue;
+    if (reg.kind !== 'self' && reg.kind !== 'client') continue;
+    const key = `${reg.tenantId}\u0000${reg.companyId}`;
+    if (!seen.has(key)) seen.set(key, { tenantId: reg.tenantId, companyId: reg.companyId, kind: reg.kind });
+  }
+  return [...seen.values()];
+}
+
+/** A host is shared when the registry declares more than one tenant identity,
+ *  or when its own registration is a client-kind proxy. A malformed registry is
+ *  already treated as unconfigured by readTenantRegistry(); tenantRegistration()
+ *  then decides whether the host is the box's own single tenant. Never throws
+ *  on its own beyond tenantRegistration's normal refusal. */
+export function launchHostIsShared(host: string): boolean {
+  const registration = tenantRegistration(host);
+  if (registration.kind === 'client') return true;
+  return tenantRegistryIdentities().length > 1;
+}
+
+/** Resolve the verified caller and the installation's sharing posture.
+ *  Throws TenantAccessError (403) exactly like resolveTenantContext when no
+ *  verified identity is present. Never reads a client-supplied tenant id. */
+export async function resolveLaunchAccess(request: { headers: Headers }): Promise<TenantLaunchScope> {
+  const context = await resolveTenantContext(request);
+  return { ...context, sharedHost: launchHostIsShared(context.host) };
+}
+
+/** True only when the verified scope may read this launch record.
+ *  `null`/`undefined` = a record that carries no ownership at all. */
+export function launchRecordVisible(
+  scope: TenantLaunchScope,
+  ownership: LaunchRecordOwnership | null | undefined,
+): boolean {
+  const claim = ownership ?? {};
+  const tenant = typeof claim.tenant_id === 'string' ? claim.tenant_id.trim() : '';
+  const company = typeof claim.company_id === 'string' ? claim.company_id.trim() : '';
+  // Unattributed: the box's own data only, never on a shared installation.
+  if (!tenant && !company) return !scope.sharedHost;
+  // Any ownership the record DOES carry must match exactly. A client_slug is
+  // deliberately ignored: it is free text, not proof of ownership.
+  if (tenant && tenant !== scope.tenantId) return false;
+  if (company && company !== scope.companyId) return false;
+  return true;
+}
