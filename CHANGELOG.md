@@ -280,6 +280,7 @@ Workforce Interview to make it yours." A bare standardPrebuild (standardReady) s
 ## [Unreleased]
 
 - unit/W2-B-U1: feat(ad-campaigns): optional title_prefix on ad-campaign epic title/description (W2-B-U1, manual H3 step 1) (merge fb410817ac92)
+- unit/S75-W08-U2: fix(skill75): server completion contract + media presentation + requester routing (D14) (merge c7ef890e45ac)
 
 ## [v7.6.98] — 2026-10-03 — notify(RR-F18/F51): escalations name the box by its fleet slug; Rescue Rangers posts only on an explicit `escalate`
 
