@@ -29,6 +29,7 @@ import { normalizeDepartmentsPayload } from '../departments-payload';
 import { ensureRuntimeConfigFile } from '../runtime-config';
 import { BLOCKED_ASK_TRIGGER_SQL } from '../blocked-ask';
 import { councilMigration } from '../council/persistence/council-migration';
+import { applyLaunchStorageContract } from '../launch-schema';
 import {
   dedupeCanonicalWorkspaces,
   reapDuplicateOpenAuthoringTasks,
@@ -8496,6 +8497,21 @@ export const migrations: Migration[] = [
     },
   },
 
+  {
+    id: '173',
+    name: 'launch_run_storage_contract',
+    up: (db) => {
+      // UL-022 / audit lane L12. The launch tables, their versioned contract
+      // row and the provenance columns, applied by the ONE exported body in
+      // src/lib/launch-schema.ts so this migration and its upgrade-safety test
+      // can never drift. Every statement is additive and idempotent, so an
+      // older populated database upgrades in place without touching a row.
+      console.log('[Migration 173] Adding launch run storage contract tables...');
+      applyLaunchStorageContract(db);
+      console.log('[Migration 173] Launch storage contract ready');
+    },
+  },
+
   // CWE-005 council persistence (directive Section 16). The entry lives
   // in src/lib/council/persistence/council-migration.ts. Its id was a
   // clearly marked PENDING integration-time assignment in the unit
@@ -8531,6 +8547,12 @@ export const migrations: Migration[] = [
 let lastFailedMigrationId: string | null = null;
 export function getLastFailedMigrationId(): string | null {
   return lastFailedMigrationId;
+}
+
+/** Registered migration ids, in declaration order. Read-only; lets a test
+ *  assert a numbered migration exists without parsing this file's source. */
+export function migrationIds(): string[] {
+  return migrations.map((migration) => migration.id);
 }
 
 /**

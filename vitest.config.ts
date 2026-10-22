@@ -163,6 +163,13 @@ export default defineConfig({
       // verifyInterviewToken, same vi.resetModules re-import pattern as
       // middleware-same-origin-board.test.ts — vitest-only, never the tsx glob.
       'tests/integration/redirect-loop.test.ts',
+      // L11 / UL-001 — launch tenant isolation: the launch pages and the two
+      // launch read APIs require a verified tenant identity, and a shared
+      // installation (A+B registry or a client-kind host) refuses launch
+      // rendering outright until readers enforce per-record ownership. Drives
+      // the REAL middleware via vi.resetModules + the real session-grant HMAC,
+      // so it is vitest-only, never the tsx --test glob.
+      'tests/integration/launch-tenant-isolation.test.ts',
       // U057 — Interview skip/defer bypass option tests. Verifies that the
       // bypass token signs/verifies correctly, rejects tampered/expired/absent
       // tokens, and has the correct 1-hour TTL. MR-17 fix2: the URL escape-hatch
@@ -219,6 +226,19 @@ export default defineConfig({
       // launch-percentage formula. Vitest globals + the '@/...' alias, so
       // vitest-only, never the tsx --test glob.
       'tests/unit/launch-runs.test.ts',
+      // UL-022 (audit lane L12) — versioned storage contract: producer plan
+      // hash parity, typed discovery, fail-closed manifest validation and the
+      // explicit disk-vs-database relationship. Vitest globals + '@' alias.
+      'tests/unit/launch-storage-contract.test.ts',
+      // UL-022 (audit lane L12) — the authenticated launch ingest transport
+      // against a REAL isolated database and a synthetic hashed token:
+      // cross-client/host/installation rejection, dedupe, conflicting-duplicate
+      // rejection and nonregressing terminal state. DB-backed, vitest-only.
+      'tests/unit/launch-transport.test.ts',
+      // UL-022 (audit lane L12) — numbered migration 173 upgrade safety: a
+      // populated pre-173 database gains the provenance columns and contract
+      // row without losing or rewriting rows. Real SQLite temp file.
+      'tests/unit/launch-migration-173.test.ts',
       // MR-46 (fix2) — getAgentStatusDot color-mapping unit test (closes the
       // Haiku "no unit test for getAgentStatusDot" minor defect). Imports the
       // real MissionQueue.tsx, so it needs the store + next/navigation mocks —

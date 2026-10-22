@@ -7,6 +7,12 @@
  * browser-reachable path - an in-browser preview for html/pdf/audio/video, and
  * a Download link for anything else (pptx, docx, ...) - so a web client is
  * never left with only the Finder-reveal button, which works on the server box.
+ *
+ * D14 (media presentation): image-TYPED deliverables take the image preview
+ * path (the old file-only detection missed them entirely), audio renders as
+ * playable audio and video as playable video, and a deliverable that carries a
+ * Skill 75 artifact-meta envelope shows its revision alongside its approval
+ * state (character/storyboard revisions included).
  */
 
 'use client';
@@ -14,10 +20,15 @@
 import { useEffect, useState, useCallback } from 'react';
 import { FileText, Link as LinkIcon, Package, ExternalLink, Eye, Download, Image as ImageIcon } from 'lucide-react';
 import { debug } from '@/lib/debug';
+import { parseSkill75Envelope, type Skill75ArtifactMeta } from '@/lib/validation';
 import type { TaskDeliverable } from '@/lib/types';
 
 /** Image file extensions (lower-case, with leading dot). */
 const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.avif', '.tiff', '.tif', '.svg']);
+
+/** Audio/video extensions /api/files/preview serves inline (its PREVIEW_MIME map). */
+const AUDIO_EXTS = new Set(['.mp3', '.wav']);
+const VIDEO_EXTS = new Set(['.mp4']);
 
 /** Non-image types /api/files/preview serves inline (must match its PREVIEW_MIME). */
 const INLINE_PREVIEW_EXTS = new Set(['.html', '.htm', '.pdf', '.mp3', '.wav', '.mp4']);
@@ -26,6 +37,55 @@ const extOf = (filePath: string): string => {
   const dot = filePath.lastIndexOf('.');
   return dot < 0 ? '' : filePath.slice(dot).toLowerCase();
 };
+
+export type DeliverableMediaKind = 'image' | 'audio' | 'video' | null;
+
+/**
+ * The media presentation kind for one deliverable (D14).
+ *
+ * The named defect: `deliverable_type === 'image'` rows missed the image
+ * preview path because detection looked at file extensions ONLY when the type
+ * was 'file'. An image-typed deliverable now always takes the image path.
+ * Audio/video kinds are extension-driven so a player is only rendered when the
+ * preview route can actually serve the file.
+ */
+export function mediaKindOf(
+  d: Pick<TaskDeliverable, 'deliverable_type' | 'path' | 'mime_type'>,
+): DeliverableMediaKind {
+  // A `url` deliverable is a link (rendered as one), and nothing renders
+  // without a path — same shape as the detection this replaces.
+  if (d.deliverable_type === 'url' || !d.path) return null;
+  if (d.deliverable_type === 'image') return 'image';
+  const ext = extOf(d.path);
+  if (IMAGE_EXTS.has(ext)) return 'image';
+  if (AUDIO_EXTS.has(ext)) return 'audio';
+  if (VIDEO_EXTS.has(ext)) return 'video';
+  // Image MIME fallback: the <img> degrades to hidden when the preview route
+  // cannot serve the extension (its onError handler), so this can never leave
+  // a broken frame. Audio/video stay extension-only (a player that cannot load
+  // is worse than a download link).
+  const mime = (d.mime_type ?? '').toLowerCase();
+  if (mime.startsWith('image/')) return 'image';
+  return null;
+}
+
+/**
+ * D14 — the per-artifact revision + approval state registered alongside a
+ * deliverable (a Skill 75 `artifact_meta` envelope embedded in the deliverable
+ * description). Rendered so character and storyboard revisions sit next to
+ * their approval state in the task UI; the durable deliverable/activity rows
+ * remain the copy of record (the board is only a view of the run).
+ */
+export function parseArtifactMeta(description?: string | null): Skill75ArtifactMeta | null {
+  if (!description) return null;
+  const candidates = [description.trim(), ...description.split('\n').map((l) => l.trim())];
+  for (const c of candidates) {
+    if (!c.startsWith('{')) continue;
+    const env = parseSkill75Envelope(c);
+    if (env && env.kind === 'artifact_meta') return env;
+  }
+  return null;
+}
 
 interface DeliverablesListProps {
   taskId: string;
@@ -66,17 +126,15 @@ export function DeliverablesList({ taskId, engineLabel }: DeliverablesListProps)
     loadDeliverables();
   }, [loadDeliverables]);
 
-  /** Return true when the deliverable path points to an image file. */
-  const isImageDeliverable = (deliverable: TaskDeliverable): boolean => {
-    if (deliverable.deliverable_type !== 'file' || !deliverable.path) return false;
-    return IMAGE_EXTS.has(extOf(deliverable.path));
-  };
+  /** Return true when the deliverable is an image (type, extension, or MIME). */
+  const isImageDeliverable = (deliverable: TaskDeliverable): boolean =>
+    mediaKindOf(deliverable) === 'image';
 
   /** True when the browser can show the file inline (html, pdf, audio, video, images). */
   const canPreview = (deliverable: TaskDeliverable): boolean =>
     deliverable.deliverable_type !== 'url' &&
     !!deliverable.path &&
-    (isImageDeliverable(deliverable) || INLINE_PREVIEW_EXTS.has(extOf(deliverable.path)));
+    (mediaKindOf(deliverable) !== null || INLINE_PREVIEW_EXTS.has(extOf(deliverable.path)));
 
   /**
    * Build the URL for serving a file deliverable inline via /api/files/preview.
@@ -202,6 +260,8 @@ export function DeliverablesList({ taskId, engineLabel }: DeliverablesListProps)
     <div className="space-y-3">
       {deliverables.map((deliverable) => {
         const isImg = isImageDeliverable(deliverable);
+        const mediaKind = mediaKindOf(deliverable);
+        const artifactMeta = parseArtifactMeta(deliverable.description);
         return (
           <div
             key={deliverable.id}
@@ -285,6 +345,40 @@ export function DeliverablesList({ taskId, engineLabel }: DeliverablesListProps)
                     }}
                   />
                 </a>
+              )}
+
+              {/* Inline playable audio (D14) — served through the existing
+                  authenticated preview path, never a raw filesystem path. */}
+              {mediaKind === 'audio' && deliverable.path && (
+                <audio
+                  className="mt-2 w-full max-w-md"
+                  controls
+                  preload="metadata"
+                  src={previewUrl(deliverable.path)}
+                  data-testid="deliverable-audio"
+                >
+                  <a href={downloadUrl(deliverable.path)}>Download {deliverable.title}</a>
+                </audio>
+              )}
+
+              {/* Inline playable video (D14) */}
+              {mediaKind === 'video' && deliverable.path && (
+                <video
+                  className="mt-2 max-h-64 max-w-full rounded border border-gray-200"
+                  controls
+                  preload="metadata"
+                  src={previewUrl(deliverable.path)}
+                  data-testid="deliverable-video"
+                />
+              )}
+
+              {/* D14 — revision alongside approval state (character bible /
+                  storyboard revisions included). Durable rows are the copy of
+                  record; this is the task-UI view of them. */}
+              {artifactMeta && (
+                <div className="mt-1 text-xs text-gray-500" data-testid="deliverable-artifact-meta">
+                  {artifactMeta.artifact_kind} · rev {artifactMeta.revision} · {artifactMeta.approval_state}
+                </div>
               )}
 
               {/* Description */}

@@ -385,6 +385,239 @@ export function validateLogoUrl(url: string): { valid: boolean; error?: string }
 }
 
 // ---------------------------------------------------------------------------
+// Skill 75 typed completion contract (D14) — the contract/version seam
+// ---------------------------------------------------------------------------
+//
+// A campaign carries a TYPED contract/version. Skill 75 campaigns are held to
+// the full completion contract at the server boundary (required stage
+// completion, revision-bound approvals, independent reviewer evidence, final
+// delivery evidence). EVERY OTHER campaign type is `legacy` and keeps its
+// exact, previously supported behavior — this is a per-campaign opt-in, never a
+// global breaking change.
+//
+// Resolution order (see ad-campaigns.resolveCampaignContract):
+//   1. the persisted marker line in campaigns.description (written at create
+//      from the explicit `contract` field, or from canonical-stage inference);
+//   2. no marker → inferred `skill75` when the campaign's stage slugs are
+//      EXACTLY the canonical Skill 75 12-stage mapping (a deterministic set
+//      match, never a fuzzy guess), otherwise `legacy`.
+// A marker that exists but cannot be parsed is FAIL-CLOSED: completion is
+// refused with a named error rather than silently downgraded to legacy.
+
+export const SKILL75_CONTRACT = 'skill75' as const;
+export const SKILL75_CONTRACT_VERSION = 1 as const;
+
+export const CampaignContractSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('skill75'), version: z.literal(1) }),
+  z.object({ kind: z.literal('legacy'), version: z.literal(1) }),
+]);
+export type CampaignContract = z.infer<typeof CampaignContractSchema>;
+
+export const SKILL75_TYPED_CONTRACT: CampaignContract = {
+  kind: SKILL75_CONTRACT,
+  version: SKILL75_CONTRACT_VERSION,
+};
+export const LEGACY_CONTRACT: CampaignContract = { kind: 'legacy', version: 1 };
+
+/**
+ * The canonical Skill 75 12-stage board mapping, verbatim from the factory's
+ * single source (batch_mode/batch.py STAGES — "Stage IDs come from
+ * batch_mode.batch.STAGES verbatim (never a second list)"). Used ONLY as the
+ * deterministic contract inference for a campaign that did not carry an
+ * explicit marker.
+ */
+export const SKILL75_STAGE_SLUGS = [
+  'research',
+  'creative-strategy',
+  'script-lyrics',
+  'music',
+  'continuity-bible',
+  'storyboard',
+  'image-keyframes',
+  'video-generation',
+  'qc-retakes',
+  'assembly',
+  'final-qc',
+  'delivery',
+] as const;
+
+/**
+ * Contract v1's required approval artifact kinds (spec 5.1: script, lyrics,
+ * character bible, music, storyboard, and the final production each need a
+ * versioned approval before dependent work / completion).
+ */
+export const SKILL75_REQUIRED_APPROVAL_KINDS = [
+  'script',
+  'lyrics',
+  'character_bible',
+  'music',
+  'storyboard',
+  'final',
+] as const;
+export type Skill75ArtifactKind = (typeof SKILL75_REQUIRED_APPROVAL_KINDS)[number];
+
+/** The marker line persisted in campaigns.description for a typed contract. */
+export function formatContractMarker(contract: CampaignContract): string {
+  return `contract=${contract.kind} v${contract.version}`;
+}
+
+const CONTRACT_MARKER_RE = /^contract=(skill75|legacy) v(\d+)$/;
+
+/**
+ * Parse the persisted contract marker out of a campaigns.description string.
+ * Returns the typed contract when a VALID marker is present, `null` when no
+ * marker line exists (→ legacy), and `malformed` when a marker line exists but
+ * does not parse — which the caller must treat as FAIL-CLOSED (never a silent
+ * downgrade to legacy behavior).
+ */
+export function parseContractMarker(
+  description: string | null | undefined,
+): { contract: CampaignContract | null; malformed?: string } {
+  if (!description) return { contract: null };
+  const found: string[] = [];
+  for (const line of description.split('\n')) {
+    const t = line.trim();
+    if (t.startsWith('contract=')) found.push(t);
+  }
+  if (found.length === 0) return { contract: null };
+  // More than one marker line is ambiguous (a duplicate or a corrupted edit):
+  // fail closed rather than pick one and silently inherit its behavior.
+  if (found.length > 1) return { contract: null, malformed: found.join(' / ') };
+  const t = found[0];
+  const m = CONTRACT_MARKER_RE.exec(t);
+  if (!m) return { contract: null, malformed: t };
+  const version = Number(m[2]);
+  if (m[1] === 'skill75' && version === SKILL75_CONTRACT_VERSION) {
+    return { contract: SKILL75_TYPED_CONTRACT };
+  }
+  if (m[1] === 'legacy' && version === 1) return { contract: LEGACY_CONTRACT };
+  return { contract: null, malformed: t };
+}
+
+/** True when the stage-slug set is EXACTLY the canonical Skill 75 12 stages. */
+export function isCanonicalSkill75StageSet(slugs: readonly string[]): boolean {
+  if (slugs.length !== SKILL75_STAGE_SLUGS.length) return false;
+  const seen = new Set(slugs.map((s) => s.trim().toLowerCase()));
+  return SKILL75_STAGE_SLUGS.every((s) => seen.has(s));
+}
+
+// ── Skill 75 evidence envelopes (spec 5.3 typed artifact envelope) ───────────
+//
+// Durable decision/evidence records, persisted as task_activities.metadata on
+// the campaign's stage cards (and accepted through POST /api/tasks/[id]/activities
+// metadata the same way). "A board is a view of the run, never the only copy of
+// a decision or the result": these rows ARE the copy the completion guard reads;
+// the board merely projects them. Every envelope is versioned and parsed
+// fail-closed — malformed metadata reads as MISSING evidence, never as approval.
+
+const Skill75EnvelopeBase = {
+  contract: z.literal(SKILL75_CONTRACT),
+  version: z.literal(SKILL75_CONTRACT_VERSION),
+};
+
+/** A revision-bound approval decision (spec 5.2). */
+export const Skill75ApprovalEnvelopeSchema = z.object({
+  ...Skill75EnvelopeBase,
+  kind: z.literal('approval'),
+  artifact_kind: z.enum(SKILL75_REQUIRED_APPROVAL_KINDS),
+  revision: z.number().int().positive(),
+  // Hash of the approved payload/asset manifest — the revision binding.
+  sha256: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/i, 'sha256 must be 64 hex characters')
+    .optional(),
+  decision: z.enum(['approved', 'revised']),
+  approver: z.string().min(1).max(200),
+  decided_at: z.string().min(1).max(64),
+  thread_id: z.string().max(128).optional(),
+});
+export type Skill75ApprovalEnvelope = z.infer<typeof Skill75ApprovalEnvelopeSchema>;
+
+/** Independent reviewer evidence — the reviewer may never be the executor. */
+export const Skill75ReviewEnvelopeSchema = z.object({
+  ...Skill75EnvelopeBase,
+  kind: z.literal('review'),
+  reviewer: z.string().min(1).max(200),
+  /** The executor whose work this review covers (independence check). */
+  actor: z.string().max(200),
+  verdict: z.enum(['pass', 'fail']),
+  scope: z.string().max(64).optional(),
+  revision: z.number().int().positive().optional(),
+});
+export type Skill75ReviewEnvelope = z.infer<typeof Skill75ReviewEnvelopeSchema>;
+
+/**
+ * The NATIVE workflow census (spec 10.3): actual native runtime counts are the
+ * authority; Command Center rows are a projection that must reconcile to them.
+ * Counts are raw observed values — never clamped to a declared peak.
+ */
+export const Skill75NativeCensusEnvelopeSchema = z.object({
+  ...Skill75EnvelopeBase,
+  kind: z.literal('native_census'),
+  observed_at: z.string().min(1).max(64),
+  counts: z.object({
+    running: z.number().int().nonnegative(),
+    queued: z.number().int().nonnegative(),
+    waiting: z.number().int().nonnegative(),
+    blocked: z.number().int().nonnegative(),
+    completed: z.number().int().nonnegative(),
+    unfinished: z.number().int().nonnegative(),
+  }),
+  agents_total: z.number().int().nonnegative(),
+  per_workflow: z.record(z.string(), z.number().int().nonnegative()).optional(),
+});
+export type Skill75NativeCensusEnvelope = z.infer<typeof Skill75NativeCensusEnvelopeSchema>;
+
+/** One SELF-REPORTED board agent row. Never proof of execution on its own. */
+export const Skill75AgentRowEnvelopeSchema = z.object({
+  ...Skill75EnvelopeBase,
+  kind: z.literal('agent_row'),
+  workflow_id: z.string().min(1).max(128),
+  agent_id: z.string().min(1).max(200),
+  role: z.string().max(64).optional(),
+});
+export type Skill75AgentRowEnvelope = z.infer<typeof Skill75AgentRowEnvelopeSchema>;
+
+/** Per-artifact revision + approval state, rendered beside media deliverables. */
+export const Skill75ArtifactMetaSchema = z.object({
+  ...Skill75EnvelopeBase,
+  kind: z.literal('artifact_meta'),
+  artifact_kind: z.string().min(1).max(64),
+  revision: z.number().int().positive(),
+  approval_state: z.enum(['pending', 'approved', 'revised']),
+});
+export type Skill75ArtifactMeta = z.infer<typeof Skill75ArtifactMetaSchema>;
+
+export const Skill75EnvelopeSchema = z.discriminatedUnion('kind', [
+  Skill75ApprovalEnvelopeSchema,
+  Skill75ReviewEnvelopeSchema,
+  Skill75NativeCensusEnvelopeSchema,
+  Skill75AgentRowEnvelopeSchema,
+  Skill75ArtifactMetaSchema,
+]);
+export type Skill75Envelope = z.infer<typeof Skill75EnvelopeSchema>;
+
+/**
+ * Parse one task_activities.metadata value into a typed Skill 75 envelope.
+ * Accepts the stored JSON string or the already-parsed object (the activities
+ * route accepts both shapes). Returns null for anything malformed, unknown, or
+ * foreign — FAIL-CLOSED: unparseable evidence is MISSING evidence.
+ */
+export function parseSkill75Envelope(raw: unknown): Skill75Envelope | null {
+  let value: unknown = raw;
+  if (typeof raw === 'string') {
+    try {
+      value = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+  if (!value || typeof value !== 'object') return null;
+  const parsed = Skill75EnvelopeSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
+// ---------------------------------------------------------------------------
 // Ad-campaign schemas (Skill 48 facebook-ad-generator → board)
 // ---------------------------------------------------------------------------
 
@@ -401,6 +634,20 @@ export const CreateAdCampaignSchema = z.object({
   money_ceiling_usd: z.number().nonnegative().optional(),
   estimated_cost_usd: z.number().nonnegative().optional(),
   show_date: z.string().max(100).optional(),
+  // D14 — typed completion contract (see the Skill 75 section below). Absent =
+  // legacy: every supported non-Skill-75 producer keeps its exact current
+  // behavior. Present = the campaign is held to that contract's completion
+  // evidence at the server boundary.
+  contract: CampaignContractSchema.optional(),
+  // D14 — the run's canonical origin record (spec 5.4), stamped onto every
+  // campaign card at creation so status/report-back returns to the recorded
+  // requester conversation (Telegram chat/thread or OpenClaw-app session)
+  // instead of a global owner Telegram destination. Optional/nullable to match
+  // CreateTaskSchema's requester stamping (U94): an unstamped create keeps the
+  // owner-report fallback behavior unchanged.
+  requester_channel: z.string().min(1).max(64).optional().nullable(),
+  requester_chat_id: z.string().min(1).max(128).optional().nullable(),
+  requester_session_key: z.string().min(1).max(256).optional().nullable(),
   stages: z
     .array(z.object({ slug: AdStageSlug, title: z.string().max(500).optional() }))
     .max(50)
@@ -424,6 +671,24 @@ export const UpdateAdCampaignStageSchema = z.object({
   blocked_reason: z.enum(['decision', 'approval', 'credential', 'payment']).optional().nullable(),
   blocked_on_human: z.enum(['owner', 'operator']).optional().nullable(),
   ask: z.string().max(500).optional().nullable(),
+  // ── D14 — Skill 75 completion evidence at the server boundary ──────────────
+  // The producer's own move contract already validates `evidence` and
+  // `reviewer` client-side (cc_sync.py enqueue_move: review/done require
+  // evidence, done requires an independent reviewer) but the server schema
+  // stripped both, so nothing was recorded and nothing could be enforced.
+  // Declared so they ARRIVE and are persisted as durable, typed records that
+  // the completion boundary reads (ad-campaigns.checkSkill75Completion):
+  // independent reviewer evidence and final delivery evidence must be present
+  // before a Skill 75 campaign can complete, and self-approval never counts.
+  // Optional everywhere: non-Skill-75 moves are byte-for-byte unchanged.
+  // evidence — where the stage's work landed / what proves it (free text).
+  evidence: z.string().max(4000).optional(),
+  // reviewer — the INDEPENDENT reviewer identity for this move (done moves).
+  reviewer: z.string().max(200).optional(),
+  // approval — a revision-bound approval decision (Skill 75 envelope).
+  approval: Skill75ApprovalEnvelopeSchema.optional(),
+  // review — a typed independent-review record (Skill 75 envelope).
+  review: Skill75ReviewEnvelopeSchema.optional(),
 })
   // Same poison-state gate as UpdateTaskSchema: an ad stage card parked on a
   // human with no ask is just as unanswerable as a board card.
