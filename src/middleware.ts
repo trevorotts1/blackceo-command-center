@@ -242,7 +242,28 @@ function tenantRefusalResponse(request: NextRequest, body: { error: string; mess
 const LAUNCH_PAGE_ROUTE = '/launch';
 const LAUNCH_API_ROUTES = ['/api/launch-runs', '/api/launch-abilities'];
 
+/**
+ * POST /api/launch-runs/ingest — the launch PRODUCER WRITE, not a launch read.
+ *
+ * The launch gate below is a READ gate: it proves a tenant identity with
+ * resolveLaunchAccess() and refuses launch RENDERING on a shared installation.
+ * The producer ingest has no read material at all (the route exports POST only)
+ * and authenticates itself with a per-client Bearer token in the handler. When
+ * the READ gate matched it as a launch surface it answered 403
+ * `launch_tenant_required` to every legitimate producer, so the documented
+ * ingest auth (src/app/api/launch-runs/ingest/route.ts, src/lib/
+ * launch-transport.ts) was unreachable — measured 2026-10-22 across all caller
+ * classes. Same shape as the self-authenticating exemptions at
+ * /api/auth/interview-session and /api/social-theme/*.
+ *
+ * This is a path decision, not a grant: it never weakens the read gate
+ * (reads under /api/launch-runs and /api/launch-abilities still resolve a
+ * verified tenant identity), and demo mode below still refuses the write.
+ */
+export const LAUNCH_INGEST_ROUTE = '/api/launch-runs/ingest';
+
 function isLaunchSurface(pathname: string): boolean {
+  if (pathname === LAUNCH_INGEST_ROUTE) return false;
   return (
     matchesRoute(pathname, LAUNCH_PAGE_ROUTE) ||
     LAUNCH_API_ROUTES.some((route) => matchesRoute(pathname, route))
@@ -811,6 +832,39 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
       // costs one HMAC verify per call.
       await setCsrfCookieIfMissing(passthrough, request);
       return passthrough;
+    }
+
+    // SELF-AUTHENTICATING PRODUCER — POST /api/launch-runs/ingest.
+    //
+    // The handler authenticates itself with a per-client Bearer token
+    // (skill71_ingest_tokens, hash only; verifySkill71IngestToken) and binds the
+    // token's client_slug + host_shape + this installation before it writes a
+    // row. That credential is a CLIENT credential, never MC_API_TOKEN, so
+    // comparing it against the master token below rejected every legitimate
+    // producer with 401 token-mismatch. Measured 2026-10-22 at head, after the
+    // launch read gate was corrected: the only credential that reached the
+    // handler was the operator's master token, which the handler then refused —
+    // i.e. no client could ever ingest.
+    //
+    // This is a path decision, not a grant: it mirrors the /api/auth/
+    // interview-session and /api/social-theme/* exemptions above, and the
+    // handler remains the ONLY gate. No-token and wrong-token callers still get
+    // 401 from it (proved in tests/unit/launch-transport.test.ts and the
+    // regression added with this change). Demo mode still refuses the write
+    // above, and the route exports POST only, so no read rides this path.
+    // Fail CLOSED on a missing credential (missing-header, same reason a
+    // bearer-listed route emits) and hand any PRESENTED bearer to the handler,
+    // which is the only component that can verify a per-client token. The
+    // master-token comparison below is deliberately skipped for this path: a
+    // client credential is never MC_API_TOKEN, so comparing it 401'd every
+    // legitimate producer. Nothing is granted here that the handler does not
+    // itself re-decide against the hash-only token store.
+    if (pathname === LAUNCH_INGEST_ROUTE) {
+      const ingestAuth = request.headers.get('authorization');
+      if (!ingestAuth || !ingestAuth.startsWith('Bearer ')) {
+        return unauthorized(request, 'Unauthorized', 'missing-header');
+      }
+      return authenticatedNext();
     }
 
     // Gate B — MC_API_TOKEN must exist to authenticate EXTERNAL /api/* callers.

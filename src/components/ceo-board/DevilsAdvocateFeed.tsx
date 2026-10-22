@@ -30,6 +30,11 @@ interface DAChallenge {
   assumptions?: string | null;
   raw_response?: string | null;
   severity: 'low' | 'medium' | 'high' | null;
+  /** Migration 173 — optional; NULL on pre-173 rows and on producers that don't emit them. */
+  risks_alternatives?: string | null;
+  recommended_modifications?: string | null;
+  /** Migration 173 — 'required' | 'optional' | 'standing' | 'deep-dive'; NULL on pre-173 rows. */
+  review_type?: string | null;
   /** A department's reply to the challenge, once one exists. */
   outcome: string | null;
   status: 'pending' | 'approved' | 'rejected' | 'escalated';
@@ -381,6 +386,14 @@ export function DevilsAdvocateFeed() {
                       {severity.label}
                     </span>
                   )}
+                  {challenge.review_type && (
+                    <span
+                      className="px-2 py-1 rounded-full text-xs font-medium border bg-violet-100 text-violet-700 border-violet-200"
+                      title={`Review type: ${challenge.review_type}`}
+                    >
+                      {challenge.review_type === 'deep-dive' ? 'deep dive' : challenge.review_type}
+                    </span>
+                  )}
                 </div>
                 <span
                   className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border ${statusConfig[status].className}`}
@@ -466,6 +479,21 @@ export function DevilsAdvocateFeed() {
                   <div>
                     <dt className="text-xs font-medium text-gray-500">Assumptions challenged</dt>
                     <dd>{challenge.assumptions || 'None recorded'}</dd>
+                  </div>
+                  {/* Migration 173 — honest empty state: a pre-173 row or a
+                      producer that didn't emit the section renders "Not
+                      provided", never fabricated content. */}
+                  <div>
+                    <dt className="text-xs font-medium text-gray-500">Risks &amp; alternatives</dt>
+                    <dd className="whitespace-pre-wrap">
+                      {challenge.risks_alternatives || 'Not provided by the generator'}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-xs font-medium text-gray-500">Recommended modifications</dt>
+                    <dd className="whitespace-pre-wrap">
+                      {challenge.recommended_modifications || 'Not provided by the generator'}
+                    </dd>
                   </div>
                   <div>
                     <dt className="text-xs font-medium text-gray-500">Full Devil&apos;s Advocate response</dt>

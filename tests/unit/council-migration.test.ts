@@ -626,8 +626,23 @@ test('registry: the council entry is registered once, under its allocated id', (
   };
   assert.equal(report.entries, 1, 'exactly one council registry entry');
   assert.equal(report.entryId, COUNCIL_MIGRATION_ID_PENDING);
-  assert.equal(report.total, 170, '169 registry migrations on the composed main + the council entry');
-  assert.equal(report.maxNumeric, 172, 'highest numeric id is the council entry at its allocated id 172 (mainline reaches 171)');
+  // Values below re-derived programmatically 2026-10-22 on the combined
+  // cc-batch/combined-2026-10-22 tree
+  // (npx tsx -e "import('./src/lib/db/migrations').then(m=>console.log(m.migrations.length, Math.max(...m.migrations.map(x=>parseInt(x.id,10)).filter(n=>!Number.isNaN(n)))))" -> 172 174).
+  // CC feature-wiring recovery (2026-10-21, migration da_challenge_review_fields):
+  // the registry grew from 170 to 171 entries; the count assertion moves with every
+  // migration addition, same as _head-migration.ts's derived contract (keep in sync).
+  // A RENUMBER does not move it: the entry count is unchanged by renumbering.
+  // Pre-existing off-by-one corrected here: origin/main carries 170 literal entries
+  // (+ the council entry = 171, which is what this assertion originally pinned). The
+  // recovery merge added da_challenge_review_fields, taking literal entries to 171 and
+  // the composed array to 172, but the pin was not moved with it — it described literal
+  // entries while asserting migrations.length. Unrelated to the 173 -> 174 renumber,
+  // which by definition changes no count.
+  assert.equal(report.total, 172, '171 literal registry migrations on the composed main + the council entry');
+  // The DA entry was renumbered 173 -> 174 to clear a duplicate id with main's
+  // 'launch_run_storage_contract' (which keeps 173). Highest id follows the move.
+  assert.equal(report.maxNumeric, 174, 'highest numeric id is 174 (da_challenge_review_fields, renumbered from 173); mainline launch contract holds 173, council sits at its allocated id 172');
   assert.equal(report.ledger, 1, 'the runner recorded the council migration exactly once');
   assert.equal(report.tables, ALL_COUNCIL_TABLES.length, 'getDb() applied the council schema');
   fs.rmSync(dir, { recursive: true, force: true });

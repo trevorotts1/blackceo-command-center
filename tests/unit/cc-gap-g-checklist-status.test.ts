@@ -89,10 +89,11 @@ test('no screen says "Implemented"', () => {
 // Each item below was verified missing at the train head: no code under src reads department-config.json.
 // (The department board rail task count, gap A follow-up, and the Intelligence Settings persona categories link
 // to /personas are now present, so those screens are no longer listed here.)
+// 'Department Boards' left the list 2026-10-21 (branch recovery/cc-feature-wiring-20261021, commit 04ae4bf3):
+// src/lib/department-config.ts + GET /api/department-config now read the Skill-23 convention file and the
+// department board renders it. The guard stays (empty) to catch the row drifting back to a known-missing state.
 test('screens with a known-missing checklist item stay Partial and name it', () => {
-  const knownMissing: Record<string, string> = {
-    'Department Boards': 'Reads department-config.json',
-  };
+  const knownMissing: Record<string, string> = {};
   for (const [name, status, , notes] of rows) {
     const item = knownMissing[name];
     if (!item) continue;
@@ -103,22 +104,36 @@ test('screens with a known-missing checklist item stay Partial and name it', () 
 });
 
 // Devil's Advocate: "Respects department-config.json DA settings" was DROPPED (decision #5), so it is not
-// the reason the row is Partial. "Original proposal visible" and "Escalation tracking works" are now met in
-// code (challenged-task link in the detail view; PATCH /api/da-challenges/{id} plus the status buttons). The row
-// stays Partial only for items still unmet: no risks/alternatives/modifications (the producer's prompt forbids
-// proposing solutions) and no review-type logic. Each is named after "Open at"; a row that stops naming them
-// must be re-checked, not quietly promoted to "Code-checked", and a met item must not be listed as open.
+// the reason the row is Partial. "Original proposal visible" and "Escalation tracking works" are met in code
+// (challenged-task link in the detail view; PATCH /api/da-challenges/{id} plus the status buttons). The
+// 2026-10-19 open items — no risks/alternatives/modifications storage and no review-type logic — were
+// CLOSED IN CODE by branch recovery/cc-feature-wiring-20261021 (commit 2b8e8c0a: migration 173 + POST
+// schema + feed render) and its paired openclaw-onboarding commit 3cfcb4848 (producer sections +
+// review_type on the wire). The row therefore stays Partial for exactly ONE item still unmet: the
+// producer-side auto-firing scheduler for standing/deep-dive reviews (deliberately not built; the CC
+// stores/badges/renders review_type for any value a producer sends). A row that stops naming it must be
+// re-checked, not quietly promoted.
 test("Devil's Advocate stays Partial and names only the items that are still unmet", () => {
   const row = rows.find((r) => r[0] === "Devil's Advocate")!;
   assert.ok(/partial/i.test(row[1]) && !/implemented/i.test(row[1]), `status is "${row[1]}"`);
   assert.ok(/open at/i.test(row[3]), 'row does not cite the open items');
   const open = row[3].slice(row[3].search(/open at/i));
-  for (const item of ['Risks and alternatives listed', 'Recommended modifications shown', 'Review Types']) {
-    assert.ok(open.includes(item), `open items do not name: ${item}`);
+  assert.ok(open.includes('Standing reviews auto-trigger for configured types'), 'open items do not name the one still-unmet item');
+  for (const closed of ['Risks and alternatives listed', 'Recommended modifications shown', 'Review Types']) {
+    assert.ok(!open.includes(closed), `met item still listed as open: ${closed}`);
   }
-  for (const line of ['Risks and alternatives listed', 'Recommended modifications shown', 'Required reviews trigger correctly']) {
-    assert.ok(md.includes(`- [ ] ${line}\n`), `checklist line missing or annotated as met: ${line}`);
+  // The five review/content lines are marked met in code (migration 173 + producer pairing) and stay
+  // unticked boxes per the checklist's "unticked until checked in a running app" doctrine:
+  for (const line of [
+    'Risks and alternatives listed',
+    'Recommended modifications shown',
+    'Required reviews trigger correctly',
+    'Optional reviews available on request',
+    'Deep dive option available',
+  ]) {
+    assert.ok(md.includes(`- [ ] ${line} (met in code`), `checklist line not marked met in code: ${line}`);
   }
+  assert.ok(md.includes('- [ ] Standing reviews auto-trigger for configured types (OPEN'), 'standing line not marked open');
   for (const item of ['Original proposal visible', 'Escalation tracking works']) {
     assert.ok(!open.includes(item), `met item still listed as open: ${item}`);
     assert.ok(md.includes(`- [ ] ${item} (met in code`), `checklist line not marked met: ${item}`);

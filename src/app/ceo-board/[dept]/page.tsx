@@ -76,18 +76,6 @@ interface DepartmentData {
   insight: string;
 }
 
-interface DepartmentData {
-  id: string;
-  name: string;
-  emoji: string;
-  headTitle: string;
-  /** Real grade from computeDepartmentGrade; null = insufficient data — never a fabricated letter */
-  grade: 'A' | 'B' | 'C' | 'D' | 'F' | null;
-  /** Real grade score; null = insufficient data — never 0 or 72 */
-  gradeScore: number | null;
-  insight: string;
-}
-
 interface KPIHistoryPoint {
   snapshot_date: string;
   value: number;
@@ -123,6 +111,21 @@ interface Recommendation {
   category: 'do-more' | 'stop' | 'watch' | 'try';
   confidence: number;
   supportingData: string;
+}
+
+// department-config.json (Skill 23 per-department config: KPI targets +
+// specialist assignments). The API returns found:false when no file exists —
+// the NORMAL state today — and the section renders an honest empty state,
+// never fabricated KPIs. Shape mirrors /api/department-config.
+interface DeptConfigData {
+  found: boolean;
+  parseError?: string;
+  sourcePath?: string;
+  expectedPath?: string;
+  department?: { slug: string; name: string };
+  kpiTargets?: { name: string; target: number; unit?: string }[];
+  assignments?: { role: string; agent: string }[];
+  notes?: string;
 }
 
 function formatValue(value: number, unit: string): string {
@@ -508,8 +511,101 @@ function MediaPreviewCards() {
 
 // U58: department-agents rows navigate to this agent's performance detail
 // page (/agents/[id] — @/lib/agents/performance's getAgentGrade).
-function AgentRow({ agent }: { agent: AgentData }) {
+// Renders the department's Skill-23 department-config.json (KPI targets +
+// specialist assignments). Honesty rule (CHECKLIST "No synthetic data"): a
+// missing file renders a muted empty state with the expected path, and a
+// malformed file renders its parse error — neither invents KPIs or roles.
+function DepartmentConfigSection({
+  config,
+  deptName,
+}: {
+  config: DeptConfigData | null;
+  deptName: string;
+}) {
+  const isEmpty = !config || !config.found;
+  const kpis = config?.kpiTargets ?? [];
+  const assignments = config?.assignments ?? [];
+
   return (
+    <SectionContainer
+      title="Department Config"
+      accentColor="bg-brand-500"
+      context={isEmpty ? 'no config file yet' : config!.sourcePath ?? undefined}
+    >
+      {config?.parseError ? (
+        <div className="rounded-xl bg-amber-50 border border-amber-200 p-4 text-sm text-amber-800">
+          <p className="font-medium">Config file exists but is not valid JSON</p>
+          <p className="mt-1 text-xs text-amber-700">{config.parseError}</p>
+        </div>
+      ) : isEmpty ? (
+        <div className="rounded-xl bg-gray-50 border border-dashed border-gray-200 p-6 text-center">
+          <p className="text-sm font-medium text-gray-700">No department-config.json yet</p>
+          <p className="mt-1 text-xs text-gray-500">
+            Skill 23 creates this file at{' '}
+            <code className="rounded bg-gray-100 px-1 py-0.5">{config?.expectedPath ?? '(path unknown)'}</code>{' '}
+            during the workforce build for {deptName}. Until it exists, KPI targets and
+            specialist assignments below come from the live database only — nothing here is
+            fabricated.
+          </p>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-wide text-gray-500 mb-3">
+              KPI targets
+            </p>
+            {kpis.length > 0 ? (
+              <div className="space-y-2">
+                {kpis.map((k) => (
+                  <div
+                    key={k.name}
+                    className="flex items-center justify-between rounded-lg border border-gray-100 bg-white px-3 py-2"
+                  >
+                    <span className="text-sm text-gray-700">{k.name}</span>
+                    <span className="text-sm font-semibold text-gray-900">
+                      {k.target}
+                      {k.unit ? ` ${k.unit}` : ''}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-sm text-gray-500">No KPI targets recorded.</p>
+            )}
+          </div>
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-wide text-gray-500 mb-3">
+              Specialist assignments
+            </p>
+            {assignments.length > 0 ? (
+              <div className="space-y-2">
+                {assignments.map((a) => (
+                  <div
+                    key={`${a.role}-${a.agent}`}
+                    className="rounded-lg border border-gray-100 bg-white px-3 py-2"
+                  >
+                    <p className="text-sm font-medium text-gray-900">{a.role}</p>
+                    <p className="text-xs text-gray-500">{a.agent}</p>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-sm text-gray-500">No specialist assignments recorded.</p>
+            )}
+          </div>
+          {config?.notes && (
+            <div className="lg:col-span-2">
+              <p className="text-xs font-semibold uppercase tracking-wide text-gray-500 mb-2">Notes</p>
+              <p className="text-sm text-gray-700 whitespace-pre-wrap">{config.notes}</p>
+            </div>
+          )}
+        </div>
+      )}
+    </SectionContainer>
+  );
+}
+
+function AgentRow({ agent }: { agent: AgentData }) {  return (
     <Link
       href={`/agents/${encodeURIComponent(agent.id)}`}
       className="flex items-center gap-4 px-4 py-3 hover:bg-gray-50/50 transition-colors"
@@ -717,6 +813,7 @@ export default function DepartmentSubBoardPage() {
   const [kpis, setKpis] = useState<KPIData[]>([]);
   const [agents, setAgents] = useState<AgentData[]>([]);
   const [recommendations, setRecommendations] = useState<Recommendation[]>([]);
+  const [deptConfig, setDeptConfig] = useState<DeptConfigData | null>(null);
   const [deptMemories, setDeptMemories] = useState<DeptMemoryItem[]>([]);
   const [deptTasks, setDeptTasks] = useState<OperationalTaskInput[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -868,6 +965,21 @@ export default function DepartmentSubBoardPage() {
         }
       } catch {
         setDeptTasks([]);
+      }
+
+      // Department Boards data source (PRD §2 / CHECKLIST "Reads
+      // department-config.json"): per-department KPI targets + specialist
+      // assignments from the Skill 23 convention file. found:false is the
+      // normal state (0 of 74 depts ship one) and is NOT an error.
+      try {
+        const cfgRes = await fetch(`/api/department-config?department=${deptId}`);
+        if (cfgRes.ok) {
+          setDeptConfig(await cfgRes.json());
+        } else {
+          setDeptConfig(null);
+        }
+      } catch {
+        setDeptConfig(null);
       }
 
       setIsLoading(false);
@@ -1227,6 +1339,15 @@ export default function DepartmentSubBoardPage() {
                 )}
               </SectionContainer>
             )}
+          </motion.section>
+
+          {/* Department config: KPI targets + specialist assignments from the
+              Skill 23 department-config.json (the PRD §2 data source the
+              CHECKLIST's "Reads department-config.json" item points at).
+              Renders for every department; found:false is the honest empty
+              state, never fabricated data. */}
+          <motion.section variants={sectionVariants} initial="hidden" animate="visible" transition={{ delay: 0.11 }}>
+            <DepartmentConfigSection config={deptConfig} deptName={department?.name ?? deptId} />
           </motion.section>
 
           {deptId === 'research' && (

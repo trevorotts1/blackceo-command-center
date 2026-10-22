@@ -259,4 +259,100 @@ describe('UL-022 — launch progress sample transport', () => {
     });
     expect((await ingestPOST(anon)).status).toBe(401);
   });
+
+  /**
+   * REGRESSION (2026-10-22) — the producer must survive MIDDLEWARE, not just
+   * the handler.
+   *
+   * Every test above calls handleLaunchIngest() or ingestPOST() directly, which
+   * is why the real defect was invisible: at head, middleware refused
+   * POST /api/launch-runs/ingest BEFORE the handler ran. Two independent causes,
+   * both proved by this test:
+   *
+   *   1. isLaunchSurface() matched the ingest path as a launch READ surface, so
+   *      the L11 read gate answered 403 `launch_tenant_required` to every
+   *      producer (a producer presents a per-client token, never a tenant
+   *      session).
+   *   2. Gate B compared the presented bearer against MC_API_TOKEN. A
+   *      per-client token is never that value, so a producer that survived (1)
+   *      was 401'd `token-mismatch`.
+   *
+   * Net effect at head: NO callER could ingest — a per-client token got 403
+   * from the read gate, and the operator's master token got to the handler and
+   * was then rejected there. This test drives the REAL middleware with a REAL
+   * producer token and asserts it reaches the handler and is accepted.
+   */
+  it('REGRESSION: middleware lets a per-client producer token reach the ingest handler', async () => {
+    const { NextRequest: Req } = await import('next/server');
+
+    const HOST = 'board.example.com';
+    const ORIGIN = `https://${HOST}`;
+    const prior = {
+      registry: process.env.MC_TENANT_REGISTRY_JSON,
+      apiToken: process.env.MC_API_TOKEN,
+      sessionSecret: process.env.MC_TENANT_SESSION_SECRET,
+      webhook: process.env.WEBHOOK_SECRET,
+      cf: process.env.REQUIRE_CF_ACCESS,
+      demo: process.env.DEMO_MODE,
+      insecure: process.env.ALLOW_INSECURE_OPEN_API,
+    };
+    process.env.MC_TENANT_REGISTRY_JSON = JSON.stringify({
+      [HOST]: { tenantId: 'fixture-self', companyId: 'default', kind: 'self', installationId: 'fixture-install' },
+    });
+    process.env.MC_API_TOKEN = 'synthetic-master-token-not-a-credential';
+    process.env.MC_TENANT_SESSION_SECRET = 'synthetic-session-secret';
+    process.env.WEBHOOK_SECRET = 'synthetic-webhook';
+    delete process.env.REQUIRE_CF_ACCESS;
+    delete process.env.DEMO_MODE;
+    delete process.env.ALLOW_INSECURE_OPEN_API;
+
+    try {
+      const { middleware } = await import('@/middleware');
+      const call = (bearer?: string) => {
+        const headers: Record<string, string> = { host: HOST };
+        if (bearer) headers.authorization = `Bearer ${bearer}`;
+        return new Req(`${ORIGIN}/api/launch-runs/ingest`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ events: [runEvent({ event_id: uuid(50), run_id: uuid(950) })] }),
+        });
+      };
+
+      // The producer's own token must get THROUGH middleware. `x-middleware-rewrite`
+      // means middleware rejected and re-routed to the 401 sink instead.
+      const producerReq = call(TOKEN);
+      const producerMw = await middleware(producerReq);
+      expect(producerMw.headers.get('x-middleware-rewrite')).toBeNull();
+      expect(producerMw.status).toBeLessThan(400);
+
+      // ...and the handler must then ACCEPT it (real hashed token, real DB).
+      const accepted = await ingestPOST(producerReq);
+      expect(accepted.status).toBe(200);
+      expect(((await accepted.json()) as { accepted: number }).accepted).toBe(1);
+
+      // Fail-closed is preserved: no credential never reaches the handler.
+      const anonMw = await middleware(call());
+      const reason = anonMw.headers.get('x-middleware-request-x-cc-auth-reject-reason');
+      expect(reason === 'missing-header' || anonMw.status >= 400).toBe(true);
+
+      // The launch READ gate is untouched: an unauthenticated read still refuses.
+      const readMw = await middleware(new Req(`${ORIGIN}/api/launch-runs`, { method: 'GET', headers: { host: HOST } }));
+      expect(readMw.status).toBe(403);
+      expect(await readMw.text()).toContain('launch_tenant_required');
+    } finally {
+      const restore: Array<[string, string | undefined]> = [
+        ['MC_TENANT_REGISTRY_JSON', prior.registry],
+        ['MC_API_TOKEN', prior.apiToken],
+        ['MC_TENANT_SESSION_SECRET', prior.sessionSecret],
+        ['WEBHOOK_SECRET', prior.webhook],
+        ['REQUIRE_CF_ACCESS', prior.cf],
+        ['DEMO_MODE', prior.demo],
+        ['ALLOW_INSECURE_OPEN_API', prior.insecure],
+      ];
+      for (const [k, v] of restore) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+  });
 });

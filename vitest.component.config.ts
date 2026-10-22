@@ -170,6 +170,10 @@ export default defineConfig({
       'tests/unit/cc-dept-task-count-badge.test.tsx',
       // Intelligence Settings links to the /personas category browser; /personas shows the persona fields.
       'tests/unit/cc-persona-categories-link.test.tsx',
+      // CC feature-wiring recovery (2026-10-21): the DA feed's migration-173
+      // review fields reach the screen — risks/alternatives + recommended
+      // modifications sections, review-type badge, honest empty states.
+      'tests/unit/cc-da-review-fields.test.tsx',
     ],
     env: { NODE_ENV: 'test' },
     testTimeout: 15000,
