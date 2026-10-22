@@ -88,6 +88,25 @@ export interface CompanyBrandingConfig {
  * When `cwd` is omitted the full fallback list is returned (production default).
  */
 export function findCompanyConfigPaths(cwd?: string): string[] {
+  // Test isolation (mirrors resolveDepartmentsConfigPath's CC_TEST_FIXTURE_ROOT
+  // layer, "Tests isolate filesystem discovery as well as the database"): when
+  // a runner provides a fixture root, ONLY that root's company-config.json is
+  // a candidate — a throwaway test DB must never seed a company from the
+  // operator's runtime branding files (the C8 leak class, config variant: an
+  // untracked config/company-config.json branded "BlackCEO" in the checkout
+  // used to win over the test's fixture company and silently re-attribute the
+  // whole reseed, breaking floor-department-invariant & co. on branded boxes).
+  // An explicit cwd still wins (the documented helper contract for the
+  // b3-branding-seed-guard suites, which point it at their own temp dirs).
+  if (cwd === undefined && process.env.CC_TEST_FIXTURE_ROOT) {
+    // Point the candidate at the TRACKED repo template, not the runtime
+    // config/ file: a runtime-modified config/company-config.json is untracked
+    // operator state that must not brand a throwaway test DB. The .example
+    // template is enforced (config-guard.yml) to stay the unpopulated
+    // "Your Company" form, so tests deterministically hit the unbranded-box
+    // fail-closed path (partial-config abort) exactly like a clean checkout.
+    return [path.join(process.cwd(), 'config', 'company-config.example.json')];
+  }
   const base = cwd ?? process.cwd();
   const cwdCandidate = ensureRuntimeConfigFile('company-config.json', base);
 

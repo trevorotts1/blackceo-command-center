@@ -40,6 +40,12 @@ export interface DAChallenge {
   severity: 'low' | 'medium' | 'high' | null;
   confidence: number | null;
   raw_response: string | null;
+  /** Migration 173 — optional risk/alternative text the generator may emit. NULL on pre-173 rows. */
+  risks_alternatives: string | null;
+  /** Migration 173 — optional recommended-modifications text. NULL on pre-173 rows. */
+  recommended_modifications: string | null;
+  /** Migration 173 — review type: required | optional | standing | deep-dive. Defaults to 'required'. */
+  review_type: string | null;
   status: DAChallengeStatus;
   dismissal_reason: string | null;
   outcome: string | null;
@@ -53,6 +59,8 @@ export interface DAChallenge {
  * docstring states "the CC-side U55c route must accept exactly this field set;
  * a shape change here is a paired commit on both repos".
  */
+const REVIEW_TYPES = ['required', 'optional', 'standing', 'deep-dive'] as const;
+
 const CreateDAChallengeSchema = z.object({
   trigger_type: z.string().min(1, 'trigger_type is required'),
   department: z.string(),
@@ -63,6 +71,12 @@ const CreateDAChallengeSchema = z.object({
   confidence: z.number().min(0).max(1).optional().default(0.5),
   raw_response: z.string().optional().default(''),
   task_id: z.string().optional(),
+  // Migration 173 fields — optional so older producers (without these
+  // sections) keep posting cleanly; the CC stores NULL and the feed renders
+  // an honest "not provided" rather than fabricated content.
+  risks_alternatives: z.string().optional().default(''),
+  recommended_modifications: z.string().optional().default(''),
+  review_type: z.enum(REVIEW_TYPES).optional().default('required'),
 });
 
 export async function GET(): Promise<NextResponse> {
@@ -118,8 +132,9 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       `INSERT INTO da_challenges
          (id, task_id, campaign_id, department_id, trigger_type, challenge,
           specific_concern, assumptions, severity, confidence, raw_response,
+          risks_alternatives, recommended_modifications, review_type,
           status, created_at)
-       VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+       VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
       [
         id,
         data.task_id ?? null,
@@ -131,6 +146,9 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         data.severity,
         data.confidence,
         data.raw_response || null,
+        data.risks_alternatives || null,
+        data.recommended_modifications || null,
+        data.review_type,
         now,
       ],
     );

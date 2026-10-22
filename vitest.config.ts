@@ -287,6 +287,14 @@ export default defineConfig({
       // middleware-same-origin-board.test.ts — vitest-only, never the tsx glob.
       'tests/unit/csf-001-expired-token.test.ts',
       'tests/unit/csf-expired-mid-sitting.test.ts',
+      // CC feature-wiring recovery (2026-10-21): migration 173 proves the
+      // da_challenges review fields against the real pre-173 table shape
+      // (additive ALTER, idempotent, pre-existing row untouched, defaults).
+      'tests/unit/migration-173-da-review-fields.test.ts',
+      // CC feature-wiring recovery (2026-10-21): the department-config reader
+      // (Skill 23 department-config.json convention) — candidate-path
+      // precedence/dedup, tolerant coercion, missing vs malformed file.
+      'tests/unit/cc-department-config.test.ts',
     ],
     env: {
       NODE_ENV: 'test',
