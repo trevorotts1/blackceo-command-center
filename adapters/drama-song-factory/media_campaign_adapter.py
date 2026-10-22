@@ -26,10 +26,28 @@ Contract (directive 20.1 / 20.5 + W3-01):
   * independent completion authority: done requires an independent reviewer
     (reviewer != actor) and completion evidence, enforced at enqueue —
     attempted self-approval stores nothing and hits no wire.
-  * durable outbox (create/move rows): pending -> sent -> acked, rejected
-    terminal, outage stops flush in order. Deliverable registration is a
-    synchronous prerequisite call (different route family); if it cannot be
-    acknowledged the caller aborts and no dependent stage move is enqueued.
+  * durable outbox (create/move/deliverable rows): pending -> sent -> acked,
+    rejected terminal, outage stops flush in order. Deliverable registration
+    fulfils the SAME acknowledged-outbox contract the stage-move guard reads
+    (cc_sync.stage_deliverable_queued): one durable row, acked before any
+    dependent stage move is enqueued; a file registered over HTTP without
+    that acknowledgement must never strand a legitimate stage.
+  * replay-safe stage completion: read the current acknowledged state,
+    enqueue only the required forward transitions, return the existing
+    receipt for identical valid evidence, and on a changed artifact
+    invalidate the appropriate review (done re-opens legally to backlog)
+    instead of an illegal done -> in_progress replay.
+
+Import boundary (finding D13): this packaged caller resolves its canonical
+shared transport from either supported distribution — the OpenClaw skill
+(`75-drama-song-ad-factory/scripts/core`) or the Claude-Nine skill
+(`drama-song-ad-factory/scripts/core`), installed under a skill root or
+dropped at the documented repo-root `core/` — or from CC_SYNC_CORE. The
+documented standalone entrypoint no longer dies on ModuleNotFoundError.
+
+Durable state (finding D13): the outbox defaults to a file bound to the
+tenant and run identity (cc_sync.default_outbox_path); `:memory:` is an
+explicit test seam only, so acknowledgement state survives process restart.
 
 Stdlib only: json, os, sys, urllib (transport + auth live in core/cc_sync.py).
 Auth material comes from env only (MC_API_TOKEN bearer, WEBHOOK_SECRET HMAC
@@ -44,9 +62,59 @@ import os
 import sys
 
 _BUILD_ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
-sys.path.insert(0, os.path.join(_BUILD_ROOT, "core"))
 
-from cc_sync import (  # noqa: E402  (path bootstrap above)
+
+def _core_dir_candidates():
+    """Where the canonical shared core may live, in support order."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    env = os.environ.get("CC_SYNC_CORE") or os.environ.get("SKILL75_CORE")
+    if env:
+        yield env
+    yield os.path.join(here, "core")
+    yield os.path.join(_BUILD_ROOT, "core")  # documented repo-root drop
+    home = os.path.expanduser("~")
+    for skill_root in (os.path.join(home, ".claude", "skills"),
+                       os.path.join(home, ".claude-nine", "skills"),
+                       os.path.join(home, ".openclaw", "skills")):
+        for dist in ("drama-song-ad-factory", "75-drama-song-ad-factory"):
+            yield os.path.join(skill_root, dist, "scripts", "core")
+
+
+def _load_cc_sync():
+    """Resolve and import cc_sync from either supported distribution.
+
+    A core that predates the durable-outbox contract (missing
+    default_outbox_path/pending_sync) is skipped in favour of a current one,
+    and named loudly when only stale copies exist — never a deep TypeError
+    from a version-skewed installation."""
+    tried, stale = [], []
+    for cand in _core_dir_candidates():
+        core = os.path.dirname(cand) if os.path.basename(cand) == "cc_sync.py" else cand
+        tried.append(core)
+        if not os.path.isfile(os.path.join(core, "cc_sync.py")):
+            continue
+        if core not in sys.path:
+            sys.path.insert(0, core)
+        import cc_sync
+        if not (hasattr(cc_sync, "default_outbox_path")
+                and hasattr(getattr(cc_sync, "Outbox", None), "pending_sync")):
+            stale.append(getattr(cc_sync, "__file__", core))
+            sys.modules.pop("cc_sync", None)  # a stale copy must not win
+            sys.path.remove(core)
+            continue
+        return cc_sync
+    if stale:
+        raise ModuleNotFoundError(
+            "cc_sync found but stale (predates the durable outbox API): %s — "
+            "update the installed drama-song factory distribution" % ", ".join(stale))
+    raise ModuleNotFoundError(
+        "cc_sync not found in any supported distribution (tried: %s); "
+        "install the drama-song factory core or set CC_SYNC_CORE to its "
+        "scripts/core directory" % ", ".join(tried))
+
+
+cc_sync = _load_cc_sync()
+from cc_sync import (  # noqa: E402  (core resolution above)
     AuthError,
     BoardSyncError,
     BlockedGateError,
@@ -82,17 +150,19 @@ class MediaCampaignAdapter:
     """Drive one media campaign through create -> stages -> deliverable -> complete.
 
     sender= is a test seam (same (status, body) contract as cc_sync transport).
+    db_path=None binds a durable outbox file to (workspace, run_id); pass
+    db_path=":memory:" only from explicit tests.
     """
 
-    def __init__(self, workspace, base_url=None, db_path=":memory:", sender=None):
-        from cc_sync import Outbox  # deferred: keeps import surface honest
-
+    def __init__(self, workspace, base_url=None, db_path=None, sender=None, run_id=None):
         self.workspace = workspace
-        self.outbox = Outbox(db_path=db_path, base_url=base_url, workspace=workspace, sender=sender)
+        self.outbox = cc_sync.Outbox(db_path=db_path, base_url=base_url,
+                                     workspace=workspace, sender=sender, run_id=run_id)
         # Reuse the outbox's verified stdlib transport (bearer + HMAC) for the
         # non-outbox calls (health/snapshot/deliverable) — one transport, no
-        # second header implementation to drift.
-        self.http = self.outbox._http_sender
+        # second header implementation to drift. self.outbox.sender honours the
+        # sender= test seam.
+        self.http = self.outbox.sender
 
     # -- lifecycle -------------------------------------------------------
     def connect(self):
@@ -122,9 +192,16 @@ class MediaCampaignAdapter:
 
         No `stages` argument exists: the adapter can only ever send
         CANONICAL_STAGES (12). Second call against a live run performs zero
-        writes (snapshot only); idempotent replay protection lives server-side.
+        writes (snapshot only); idempotent replay protection lives server-side
+        AND in the outbox key (same request, same row).
         """
-        existing = self.snapshot(job_id)
+        try:
+            existing = self.snapshot(job_id)
+        except TransportOutage:
+            # Board unreachable: fall through to the durable outbox. The
+            # idempotency key means a replay cannot enqueue a second create,
+            # and the server's job_id idempotency cannot mint a second campaign.
+            existing = None
         if existing is not None:
             return {
                 "created": False,
@@ -143,8 +220,19 @@ class MediaCampaignAdapter:
         )
         report = self.outbox.flush()
         state, result = self.outbox.db.execute("SELECT state, result FROM outbox WHERE id=?", (rid,)).fetchone()
+        if state == "rejected":
+            raise BoardSyncError("create rejected result=%s report=%s" % (result, report))
         if state != "acked":
-            raise BoardSyncError("create not acknowledged state=%s result=%s report=%s" % (state, result, report))
+            # Outage: keep the visible pending-synchronization state. The next
+            # call replays the SAME durable row — one campaign per tenant/run
+            # across retries and outages, no manual database edits.
+            return {
+                "created": None,
+                "campaign_id": job_id,
+                "card_count": 0,
+                "cards": {},
+                "report": report,
+            }
         snap = self.snapshot(job_id)
         if snap is None:
             raise BoardSyncError("create acked but server snapshot proves missing")
@@ -156,18 +244,41 @@ class MediaCampaignAdapter:
             "ack": json.loads(result) if result else None,
         }
 
-    # -- deliverable (synchronous prerequisite; see module docstring) -----
-    def register_deliverable(self, task_id, title, path, deliverable_type="file", description=None):
-        body = {"deliverable_type": deliverable_type, "title": title, "path": path}
-        if description:
-            body["description"] = description
-        status, resp = self.http("POST", "/api/tasks/%s/deliverables" % task_id, body)
-        if status != 201:
+    def initialize(self, job_id, show_name, owner=None, department="music", agent_id=None):
+        """Production initialization (D32): create OR reconcile exactly one
+        campaign and its canonical stage mapping through the durable outbox,
+        with tenant + stable run identity as the idempotency scope. Reports the
+        visible pending-synchronization state and the run's event stream."""
+        res = self.connect_or_create(job_id, show_name, owner=owner,
+                                     department=department, agent_id=agent_id)
+        if res.get("created") is not None:
+            missing = [s for s, _ in CANONICAL_STAGES if s not in (res.get("cards") or {})]
+            if missing:
+                raise BoardSyncError(
+                    "canonical stage mapping incomplete for %s: missing %s" % (job_id, missing))
+        res["sync"] = self.outbox.pending_sync(job_id=job_id)
+        res["events"] = self.outbox.events(job_id=job_id)
+        return res
+
+    # -- deliverable (acknowledged outbox prerequisite; see module docstring)
+    def register_deliverable(self, job_id, stage_slug, task_id, title, path,
+                             deliverable_type="file", description=None):
+        """Register a real artifact through the SAME acknowledged-outbox
+        contract the stage-move guard uses (cc_sync.stage_deliverable_queued).
+        If the registration cannot be acknowledged the caller aborts and no
+        dependent stage move is enqueued — order is the contract."""
+        rid = self.outbox.enqueue_stage_deliverable(
+            job_id, stage_slug, path, title, self.workspace,
+            description=description, deliverable_type=deliverable_type, task_id=task_id)
+        report = self.outbox.flush()
+        state, result = self.outbox.db.execute(
+            "SELECT state, result FROM outbox WHERE id=?", (rid,)).fetchone()
+        if state != "acked":
             raise BoardSyncError(
-                "deliverable registration refused http=%s code=%s"
-                % (status, (resp or {}).get("code") or (resp or {}).get("error"))
-            )
-        return {"http": status, "id": (resp or {}).get("id")}
+                "deliverable registration not acknowledged state=%s result=%s report=%s"
+                % (state, result, report))
+        res = json.loads(result) if result else {}
+        return {"http": res.get("http"), "id": res.get("id") or task_id}
 
     # -- stage moves (durable outbox) ------------------------------------
     def move(self, job_id, stage_slug, status, actor, reason=None, evidence=None, reviewer=None,
@@ -183,36 +294,106 @@ class MediaCampaignAdapter:
         state, result = self.outbox.db.execute("SELECT state, result FROM outbox WHERE id=?", (rid,)).fetchone()
         return {"state": state, "result": json.loads(result) if result else None, "report": report}
 
+    def _move_acked(self, job_id, stage_slug, status, actor, **kw):
+        res = self.move(job_id, stage_slug, status, actor, **kw)
+        if res["state"] != "acked":
+            raise BoardSyncError("stage %s -> %s not acknowledged: %s" % (stage_slug, status, res))
+        return res
+
     def block(self, job_id, stage_slug, actor, ask, blocked_reason="approval", blocked_on_human="owner", reason=None):
         """Human-only blocked: reason + a real ask are mandatory (client gate;
         server superRefine answers 400 ASK_REQUIRED without them)."""
         return self.move(job_id, stage_slug, "blocked", actor, reason=reason,
                          blocked_reason=blocked_reason, blocked_on_human=blocked_on_human, ask=ask)
 
+    def _reopen_ordinal(self, job_id, stage_slug):
+        """How many times this card was legally re-opened, counted from
+        durable move payloads and separator-tolerant (W08-U1 repair: the core
+        matches LIKE '%"reason":"reopen:%' while stored JSON is dumped with
+        default separators, 'key': 'value', so that count is always 0).
+
+        ponytail: reading payloads here — delegate to a fixed core
+        reopen_count when cc_sync ships one that matches its own storage.
+        """
+        rows = self.outbox.db.execute(
+            "SELECT payload FROM outbox WHERE kind='move' AND job_id=? AND stage_slug=?"
+            " AND state!=? ORDER BY id",
+            (job_id, stage_slug, cc_sync.REJECTED)).fetchall()
+        n = 0
+        for (payload,) in rows:
+            reason = (json.loads(payload) or {}).get("reason") or ""
+            if reason.startswith("reopen:"):
+                n += 1
+        return n
+
     def complete_stage(self, job_id, stage_slug, task_id, actor, reviewer, evidence_path,
                        show_name=None):
         """deliverable -> backlog/in_progress/review/done, independent reviewer.
 
+        Replay safe: reads the current acknowledged state and enqueues only
+        the required forward transitions. A completed stage with identical
+        valid evidence returns its existing receipt with zero new rows; a
+        changed artifact invalidates the appropriate review (done re-opens
+        legally to backlog, a review under a changed artifact falls back to
+        in_progress) instead of an illegal done -> in_progress replay.
+
         Aborts (raises) before any stage move if the deliverable is not
         acknowledged or a move is rejected/deferred — order is the contract.
         """
+        cur = self.outbox.acknowledged_status(job_id, stage_slug)
+        # Re-open cycles are keyed by a durable monotonic ordinal so a replayed
+        # cycle queues NEW intents instead of deduping onto the rows of the
+        # cycle it invalidated (W08-U1 repair).
+        cycle = self._reopen_ordinal(job_id, stage_slug) + 1
+        if cur == "done":
+            rec = self.outbox.stage_receipt(job_id, stage_slug, "done")
+            if rec and rec["evidence"] == evidence_path and rec["reviewer"] == reviewer:
+                return rec["receipt"]
+            self._move_acked(job_id, stage_slug, "backlog", actor,
+                             reason="%s (cycle %d)" % (
+                                 "reopen: evidence changed" if rec
+                                 else "reopen: evidence unverified", cycle))
+            cur = "backlog"
+        elif cur == "review":
+            rec = self.outbox.stage_receipt(job_id, stage_slug, "review")
+            if not (rec and rec["evidence"] == evidence_path):
+                self._move_acked(job_id, stage_slug, "in_progress", actor,
+                                 reason="reopen: review invalidated (evidence changed) (cycle %d)" % cycle)
+                cur = "in_progress"
         self.register_deliverable(
+            job_id,
+            stage_slug,
             task_id,
             "DTS-401 probe deliverable — %s" % stage_slug,
             evidence_path,
             description="registered before review/done: server evidence invariant",
         )
+        # A re-opened cycle re-sends its forward transitions as NEW intents
+        # (the reopen count is durable and monotonic per card), while identical
+        # retries within one cycle dedupe onto the same outbox rows.
+        reason = "stage lifecycle: %s" % stage_slug
+        reopened = self._reopen_ordinal(job_id, stage_slug)
+        if reopened:
+            reason += " (reopen %d)" % reopened
+        forward = {
+            "backlog": ("in_progress", "review", "done"),
+            "blocked": ("in_progress", "review", "done"),
+            "in_progress": ("review", "done"),
+            "review": ("done",),
+            None: ("in_progress", "review", "done"),
+        }[cur]
         flow = []
-        for status in ("in_progress", "review", "done"):
-            res = self.move(
-                job_id, stage_slug, status, actor,
-                reason="stage lifecycle: %s" % stage_slug,
-                evidence=evidence_path if status in ("review", "done") else None,
-                reviewer=reviewer if status == "done" else None,
-            )
-            if res["state"] != "acked":
-                raise BoardSyncError("stage %s -> %s not acknowledged: %s" % (stage_slug, status, res))
+        for status in forward:
+            self._move_acked(job_id, stage_slug, status, actor,
+                             reason=reason,
+                             evidence=evidence_path if status in ("review", "done") else None,
+                             reviewer=reviewer if status == "done" else None)
             flow.append(status)
+            if status in ("review", "done"):
+                self.outbox.record_stage_receipt(
+                    job_id, stage_slug, status, evidence_path,
+                    reviewer if status == "done" else "", actor,
+                    {"stage_slug": stage_slug, "flow": list(flow)})
         return {"stage_slug": stage_slug, "flow": flow}
 
     def complete(self, job_id, actor, reviewer, evidence_path):
@@ -252,7 +433,8 @@ def main(argv):
     try:
         if cmd == "probe":
             ws = workspace or (args[1] if len(args) > 1 else None)
-            ad = MediaCampaignAdapter(ws, base_url=base_url)
+            ad = MediaCampaignAdapter(ws, base_url=base_url,
+                                      run_id=args[0] if args else None)
             health = ad.connect()
             out = {"health": health}
             if args:
@@ -263,16 +445,16 @@ def main(argv):
         if cmd == "create":
             job_id, show_name = args[0], args[1]
             ws = workspace or (args[2] if len(args) > 2 else None)
-            ad = MediaCampaignAdapter(ws, base_url=base_url)
-            ad.connect()
-            _emit(cmd, "ok", ad.connect_or_create(job_id, show_name))
+            ad = MediaCampaignAdapter(ws, base_url=base_url, run_id=job_id)
+            _emit(cmd, "ok", ad.initialize(job_id, show_name))
             return 0
         if cmd in ("stage", "block", "complete"):
             # stage: job_id stage_slug task_id evidence_path [actor] [reviewer]
             # block: job_id stage_slug ask [reason]
             # complete: job_id evidence_path [actor] [reviewer]
             ws = workspace
-            ad = MediaCampaignAdapter(ws, base_url=base_url)
+            run = args[0] if args else None
+            ad = MediaCampaignAdapter(ws, base_url=base_url, run_id=run)
             actor, reviewer = os.environ.get("CC_ACTOR", "media-runner"), os.environ.get("CC_REVIEWER", "qc-lead")
             if cmd == "stage":
                 res = ad.complete_stage(args[0], args[1], args[2], actor, reviewer, args[3])
