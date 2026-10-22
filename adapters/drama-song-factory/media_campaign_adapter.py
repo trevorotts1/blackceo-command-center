@@ -306,6 +306,26 @@ class MediaCampaignAdapter:
         return self.move(job_id, stage_slug, "blocked", actor, reason=reason,
                          blocked_reason=blocked_reason, blocked_on_human=blocked_on_human, ask=ask)
 
+    def _reopen_ordinal(self, job_id, stage_slug):
+        """How many times this card was legally re-opened, counted from
+        durable move payloads and separator-tolerant (W08-U1 repair: the core
+        matches LIKE '%"reason":"reopen:%' while stored JSON is dumped with
+        default separators, 'key': 'value', so that count is always 0).
+
+        ponytail: reading payloads here — delegate to a fixed core
+        reopen_count when cc_sync ships one that matches its own storage.
+        """
+        rows = self.outbox.db.execute(
+            "SELECT payload FROM outbox WHERE kind='move' AND job_id=? AND stage_slug=?"
+            " AND state!=? ORDER BY id",
+            (job_id, stage_slug, cc_sync.REJECTED)).fetchall()
+        n = 0
+        for (payload,) in rows:
+            reason = (json.loads(payload) or {}).get("reason") or ""
+            if reason.startswith("reopen:"):
+                n += 1
+        return n
+
     def complete_stage(self, job_id, stage_slug, task_id, actor, reviewer, evidence_path,
                        show_name=None):
         """deliverable -> backlog/in_progress/review/done, independent reviewer.
@@ -321,19 +341,24 @@ class MediaCampaignAdapter:
         acknowledged or a move is rejected/deferred — order is the contract.
         """
         cur = self.outbox.acknowledged_status(job_id, stage_slug)
+        # Re-open cycles are keyed by a durable monotonic ordinal so a replayed
+        # cycle queues NEW intents instead of deduping onto the rows of the
+        # cycle it invalidated (W08-U1 repair).
+        cycle = self._reopen_ordinal(job_id, stage_slug) + 1
         if cur == "done":
             rec = self.outbox.stage_receipt(job_id, stage_slug, "done")
             if rec and rec["evidence"] == evidence_path and rec["reviewer"] == reviewer:
                 return rec["receipt"]
             self._move_acked(job_id, stage_slug, "backlog", actor,
-                             reason="reopen: evidence changed" if rec
-                             else "reopen: evidence unverified")
+                             reason="%s (cycle %d)" % (
+                                 "reopen: evidence changed" if rec
+                                 else "reopen: evidence unverified", cycle))
             cur = "backlog"
         elif cur == "review":
             rec = self.outbox.stage_receipt(job_id, stage_slug, "review")
             if not (rec and rec["evidence"] == evidence_path):
                 self._move_acked(job_id, stage_slug, "in_progress", actor,
-                                 reason="reopen: review invalidated (evidence changed)")
+                                 reason="reopen: review invalidated (evidence changed) (cycle %d)" % cycle)
                 cur = "in_progress"
         self.register_deliverable(
             job_id,
@@ -347,7 +372,7 @@ class MediaCampaignAdapter:
         # (the reopen count is durable and monotonic per card), while identical
         # retries within one cycle dedupe onto the same outbox rows.
         reason = "stage lifecycle: %s" % stage_slug
-        reopened = self.outbox.reopen_count(job_id, stage_slug)
+        reopened = self._reopen_ordinal(job_id, stage_slug)
         if reopened:
             reason += " (reopen %d)" % reopened
         forward = {

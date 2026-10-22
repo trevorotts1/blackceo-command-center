@@ -394,6 +394,46 @@ class Lifecycle(unittest.TestCase):
         rec = ad.outbox.stage_receipt("job-demo-1", "script-lyrics", "done")
         self.assertEqual(rec["evidence"], "/runs/r1/script-v2.md")
 
+    def test_reopen_cycles_queue_new_intents_never_dedupe_onto_prior_cycle(self):
+        """W08-U1 repair: a re-opened cycle must send its OWN hops. The core
+        reopen_count matcher is dead (LIKE '%"reason":"reopen:%' vs JSON dumped
+        as 'reason': 'value'), so without per-cycle intent identity cycle 3
+        collapsed silently: 0 wire moves, done receipt naming the cycle-1
+        artifact while the board held the cycle-2 one."""
+        board = FakeBoard()
+        ad = make_adapter(self, board)
+        ad.initialize("job-demo-1", "Demo Show")
+        task_id = ad.snapshot("job-demo-1")["task_ids"]["script-lyrics"]
+        ev1, ev2 = "/runs/r1/script.md", "/runs/r1/script-v2.md"
+        ad.complete_stage("job-demo-1", "script-lyrics", task_id,
+                          "media-runner", "qc-lead", ev1)
+        n1 = len(board.patch_statuses())
+        # cycle 2: changed artifact re-opens and re-sends every hop
+        ad.complete_stage("job-demo-1", "script-lyrics", task_id,
+                          "media-runner", "qc-lead", ev2)
+        n2 = len(board.patch_statuses()) - n1
+        self.assertEqual(n2, 4, "re-open + three forward hops sent as new intents")
+        # cycle 3: reverting to the earlier artifact is a THIRD completion
+        # cycle, not an identical retry — it must re-open and re-send too
+        ad.complete_stage("job-demo-1", "script-lyrics", task_id,
+                          "media-runner", "qc-lead", ev1)
+        n3 = len(board.patch_statuses()) - n1 - n2
+        self.assertEqual(n3, 4, "cycle 3 sends its own hops; never a silent no-op")
+        statuses = board.patch_statuses()
+        self.assertEqual(statuses.count("backlog"), 2, "one legal re-open per changed cycle")
+        self.assertEqual(statuses.count("done"), 3, "each cycle reaches done")
+        rec = ad.outbox.stage_receipt("job-demo-1", "script-lyrics", "done")
+        self.assertEqual(rec["evidence"], ev1, "receipt names the artifact actually landed")
+        self.assertEqual(board.campaigns["job-demo-1"]["script-lyrics"]["status"], "done")
+        # identical retry inside cycle 3 still dedupes onto its own rows
+        rows = ad.counts()
+        calls = len(board.calls)
+        again = ad.complete_stage("job-demo-1", "script-lyrics", task_id,
+                                  "media-runner", "qc-lead", ev1)
+        self.assertEqual(again["flow"], ["in_progress", "review", "done"])
+        self.assertEqual(ad.counts(), rows, "identical retry enqueues zero new rows")
+        self.assertEqual(len(board.calls), calls, "identical retry sends zero bytes")
+
     def test_one_campaign_per_tenant_run_across_retries_and_outages(self):
         board = FakeBoard()
         ad = make_adapter(self, board)
