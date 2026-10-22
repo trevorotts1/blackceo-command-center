@@ -57,6 +57,10 @@
  * test in src/lib/__tests__/passthrough-write-scope.test.ts, which fails when this
  * list and the codebase disagree -- so the list cannot rot silently.
  *
+ * 2026-10-22 (launch producer ingest census repair): +1 pattern for POST
+ * /api/launch-runs/ingest (see the comment at its pattern). Now 50 patterns
+ * covering 54 route templates; see the U052 lock test for the live census.
+ *
  * U052: This is the single source of truth, imported by both src/middleware.ts
  * and the anti-rot lock test. One array, one source.
  */
@@ -116,6 +120,19 @@ export const BEARER_REQUIRED_WRITE_ROUTES: RegExp[] = [
   // /api/skill-runs (the SkillRunsPanel feed), so the POST has no legitimate
   // tokenless caller.
   /^\/api\/skill-runs\/ingest$/,
+  // 2026-10-22 (launch run-events ingest, U052 census repair): POST
+  // /api/launch-runs/ingest — the launch producer ingest, enforcing its own
+  // per-client Bearer token in the handler (verifySkill71IngestToken against
+  // the same hash-only skill71_ingest_tokens store the Skill 71 transport
+  // uses). Service-to-service; the route exports POST only and the browser
+  // interface only ever GETs /api/launch-runs, so the POST has no legitimate
+  // tokenless caller. Listing it here is what the route's own docblock already
+  // described; until now the route was UNCLASSIFIED in this census and every
+  // producer was refused by middleware before reaching the handler.
+  // Middleware's LAUNCH_INGEST_ROUTE self-auth branch lets the handler's token
+  // be the gate (a per-client token is not MC_API_TOKEN and must never be
+  // compared against it).
+  /^\/api\/launch-runs\/ingest$/,
   /^\/api\/social\/media\/[^/]+$/,
   /^\/api\/social\/performance$/,
   /^\/api\/social-theme\/invitations$/,
