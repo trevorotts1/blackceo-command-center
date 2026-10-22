@@ -392,3 +392,55 @@ describe('MR-23 direct-to-origin forgery — true security posture', () => {
   });
 });
 
+/**
+ * UL-022 — POST /api/launch-runs/ingest, the launch producer transport.
+ *
+ * NOT a member of the WEBHOOK_SECRET_ROUTES / MC_API_TOKEN family asserted
+ * above. Per DB-CHANGES.md ingest posture it authenticates with its own
+ * per-client Bearer (skill71_ingest_tokens, hash-only) inside the handler, and
+ * client producer boxes must never hold the operator MC_API_TOKEN — so the
+ * middleware must let the request REACH that handler gate instead of refusing
+ * it first. The exemption is exactly `POST /api/launch-runs/ingest`; the
+ * handler answers 401 without a valid per-client token (proven in
+ * tests/unit/launch-transport.test.ts), so passthrough here is reachability,
+ * not authentication.
+ */
+describe('UL-022 producer ingest (POST /api/launch-runs/ingest) — self-authenticating per-client transport', () => {
+  const ENV: EnvOverrides = {
+    NODE_ENV: 'production',
+    MC_API_TOKEN: TOKEN,
+    WEBHOOK_SECRET: SECRET,
+    REQUIRE_CF_ACCESS: undefined,
+    ALLOW_INSECURE_OPEN_API: undefined,
+    DEMO_MODE: undefined,
+  };
+
+  it('a per-client producer bearer (NOT the operator MC_API_TOKEN) reaches the handler gate', async () => {
+    const mw = await loadMiddleware(ENV);
+    const res = await mw(makeReq('/api/launch-runs/ingest', { method: 'POST', bearer: 'per-client-ingest-token' }));
+    expect(isPassthrough(res)).toBe(true);
+  });
+
+  it('the exemption is POST-only: GET on the ingest path stays behind the launch tenant gate', async () => {
+    const mw = await loadMiddleware(ENV);
+    const res = await mw(makeReq('/api/launch-runs/ingest', { method: 'GET' }));
+    expect(isPassthrough(res)).toBe(false);
+    expect(res.status).toBe(403);
+  });
+
+  it('a forged same-origin, credential-less POST reaches ONLY the handler gate (which refuses it)', async () => {
+    const mw = await loadMiddleware(ENV);
+    const res = await mw(makeReq('/api/launch-runs/ingest', { method: 'POST', sameOrigin: true, authenticated: false }));
+    // Reachability is not authentication: the route's per-client token check
+    // answers 401 and writes nothing (see launch-transport.test.ts).
+    expect(isPassthrough(res)).toBe(true);
+  });
+
+  it('demo boxes stay read-only: the ingest POST is refused in demo mode', async () => {
+    const mw = await loadMiddleware({ ...ENV, DEMO_MODE: 'true' });
+    const res = await mw(makeReq('/api/launch-runs/ingest', { method: 'POST', bearer: 'per-client-ingest-token' }));
+    expect(isPassthrough(res)).toBe(false);
+    expect(res.status).toBe(403);
+  });
+});
+

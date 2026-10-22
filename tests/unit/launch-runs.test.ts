@@ -199,6 +199,20 @@ describe('WF-CC — launch-runs', () => {
     expect(result.runs[0].percentage).toBe(33);
   });
 
+  it('quarantines a plan when its producer-named progress file is malformed', () => {
+    const dir = tmpDir();
+    fs.writeFileSync(path.join(dir, 'sample-launch.plan.json'), JSON.stringify(PLAN));
+    // Producer naming (shared-utils/signature_launch/progress.py default_path):
+    // a progress file that cannot be read must quarantine the plan it names —
+    // "could not read progress" is never mistaken for "no progress yet".
+    fs.writeFileSync(path.join(dir, 'progress-sample-launch-2026-11.json'), '{not json');
+    const result = listLaunchRuns(dir);
+    expect(result.runs).toHaveLength(1);
+    expect(result.runs[0].availability).toBe('quarantined');
+    expect(result.runs[0].percentage).toBe(0);
+    expect(result.runs[0].units.every((unit) => unit.state === 'unknown')).toBe(true);
+  });
+
   it('keeps conflicting plans quarantined after progress is applied', () => {
     const dir = tmpDir();
     writeLaunch(dir, PLAN, undefined, 'a');

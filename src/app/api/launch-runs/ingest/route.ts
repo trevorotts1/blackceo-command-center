@@ -23,14 +23,15 @@ export const revalidate = 0;
  * sample bytes) are reported as duplicates, never errors.
  *
  * NOTE (U052 census): this POST is a service-to-service producer ingest —
- * the browser interface only ever GETs `/api/launch-runs` — so it needs a
- * bearer pattern in `src/lib/bearer-required-routes.ts` and a re-derived
- * census in `src/lib/__tests__/passthrough-write-scope.test.ts`. Both files
- * are shared and owned by other lanes; the mount here keeps the handler
- * reachable and self-authenticating, and the census update rides with the
- * lane that owns those files. Until that lands, this route still enforces
- * its own per-client Bearer token in the handler (a forged same-origin
- * header reaches it without a credential but gets a 401 with no token).
+ * the browser interface only ever GETs `/api/launch-runs` — and it is
+ * self-authenticating like the Skill 71 ingest at `/api/skill-runs/ingest`:
+ * the per-client Bearer in the handler is the ONLY gate. Per DB-CHANGES.md
+ * ingest posture this route must NOT get a `src/lib/bearer-required-routes.ts`
+ * pattern — stacking MC_API_TOKEN would force client producer boxes to hold
+ * the operator token, which they must never hold. The middleware exempts
+ * exactly `POST /api/launch-runs/ingest` (see src/middleware.ts) so the
+ * handler's gate is reached; without a credential the handler answers 401,
+ * so a forged same-origin header reaches it but authenticates nothing.
  */
 export async function POST(request: NextRequest) {
   const result = handleLaunchIngest({

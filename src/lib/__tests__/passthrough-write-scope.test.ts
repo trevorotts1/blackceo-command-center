@@ -126,6 +126,21 @@
  * BEARER_REQUIRED_WRITE_ROUTES (the collection /api/da-challenges stays
  * bearer-only for the service-to-service POST).
  *
+ * re-derived 2026-10-21 for the launch producer ingest (UL-022): POST
+ * /api/launch-runs/ingest — the launch run-events/progress producer transport
+ * (service-to-service; an external producer posts under a per-client Bearer
+ * verified in the handler, skill71_ingest_tokens hash-only, and the browser
+ * interface only ever GETs /api/launch-runs): 161 mutating, 7
+ * webhook-protected (unchanged), 154 non-webhook. Bearer totals UNCHANGED on
+ * purpose: per DB-CHANGES.md ingest posture a per-client-token ingest route
+ * must NOT join BEARER_REQUIRED_WRITE_ROUTES — stacking MC_API_TOKEN would
+ * force client producer boxes to hold the operator token, which they must
+ * never hold. Its middleware posture is the self-authenticated exemption
+ * (POST /api/launch-runs/ingest, src/middleware.ts) with the handler's own
+ * per-client token gate as the only authentication, so it is classified as a
+ * DOCUMENTED_SELF_AUTHENTICATED_ROUTE below — never bearer-gated, never
+ * interface-called.
+ *
  * re-derived 2026-09-27 for ILJ-004 tenant skip marks: POST
  * /api/interview/state — the owner's browser marking one structured question
  * skipped (InterviewClient.tsx:375 with the session cookie + tenant
@@ -389,16 +404,16 @@ const nonWebhookCount = allMutatingRoutes.length - webhookProtectedCount;
 describe('passthrough-write-scope — anti-rot lock (U052)', () => {
   // ---- Counts ------------------------------------------------------------
 
-  it('API routes exporting a mutating method: 160 (literal assertion)', () => {
-    expect(allMutatingRoutes.length).toBe(160);
+  it('API routes exporting a mutating method: 161 (literal assertion)', () => {
+    expect(allMutatingRoutes.length).toBe(161);
   });
 
   it('protected by isWebhookSecretRoute: 7 (5 static + 2 dynamic — middleware src/middleware.ts:137-167)', () => {
     expect(webhookProtectedCount).toBe(7);
   });
 
-  it('non-webhook write routes: 153 (160 mutating − 7 webhook-protected; tenant authentication remains required)', () => {
-    expect(nonWebhookCount).toBe(153);
+  it('non-webhook write routes: 154 (161 mutating − 7 webhook-protected; tenant authentication remains required)', () => {
+    expect(nonWebhookCount).toBe(154);
   });
 
   it('interface call templates found by multi-line scanner', () => {
@@ -469,6 +484,21 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
     '/api/council/sessions/{id}/action-plan/create',
   ];
 
+  // DOCUMENTED RESIDUAL (UL-022, 2026-10-21). Self-authenticated producer
+  // transport: POST /api/launch-runs/ingest is middleware-exempt (POST only,
+  // src/middleware.ts) and its ONLY authentication is the handler's per-client
+  // Bearer (skill71_ingest_tokens, hash-only; 401 without it — fail-closed at
+  // the route, proven in tests/unit/launch-transport.test.ts). Bearer-listing
+  // it is rejected on purpose (DB-CHANGES.md ingest posture: the operator
+  // MC_API_TOKEN is a different credential for a different caller, and client
+  // producer boxes must never hold it), and the browser interface never calls
+  // it (only GETs /api/launch-runs). Same enforcement as the console residual
+  // above: exact in both directions, so this entry fails as stale the moment
+  // the route gains a classification or disappears.
+  const DOCUMENTED_SELF_AUTHENTICATED_ROUTES: string[] = [
+    '/api/launch-runs/ingest',
+  ];
+
   it('every reachable mutating route is either in BEARER_REQUIRED_WRITE_ROUTES, called by the interface, or a documented unwired console route (exact residual enforced)', () => {
     const unclassified: string[] = [];
     const routeByPattern = new Set<string>(); // routes covered by bearer patterns
@@ -491,11 +521,13 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
     // without classification appears in `unexpected` and fails by name;
     // a residual entry that has since been classified (or removed)
     // appears in `stale` and fails by name, forcing this list to shrink.
-    const residual = new Set(DOCUMENTED_UNWIRED_CONSOLE_ROUTES);
+    const documented = [
+      ...DOCUMENTED_UNWIRED_CONSOLE_ROUTES,
+      ...DOCUMENTED_SELF_AUTHENTICATED_ROUTES,
+    ];
+    const residual = new Set(documented);
     const unexpected = unclassified.filter((p) => !residual.has(p));
-    const stale = DOCUMENTED_UNWIRED_CONSOLE_ROUTES.filter(
-      (p) => !unclassified.includes(p),
-    );
+    const stale = documented.filter((p) => !unclassified.includes(p));
     expect({ unexpected, stale }).toEqual({ unexpected: [], stale: [] });
   });
 

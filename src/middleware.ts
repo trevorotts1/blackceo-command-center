@@ -552,7 +552,16 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
   // single-tenant installation proceeds to the normal gates below. This block
   // runs BEFORE demo mode on purpose: demo mode must not become a public
   // launch-data surface.
-  if (isLaunchSurface(pathname)) {
+  //
+  // UL-022 carve-out: POST /api/launch-runs/ingest is the producer WRITE
+  // transport, not a launch read. It authenticates with its own per-client
+  // Bearer (skill71_ingest_tokens, hash-only) and must never require a browser
+  // identity here (client producer boxes hold no session and must never hold
+  // the operator MC_API_TOKEN — see DB-CHANGES.md ingest posture). The carve-out
+  // is POST-only: every other verb and every other path under the launch surface
+  // stays behind the verified-identity gate. Demo mode below still refuses it
+  // (read-only deployments ingest nothing).
+  if (isLaunchSurface(pathname) && !(pathname === '/api/launch-runs/ingest' && request.method === 'POST')) {
     let launchScope: Awaited<ReturnType<typeof resolveLaunchAccess>> | null = null;
     try {
       launchScope = await resolveLaunchAccess(request);
@@ -587,6 +596,19 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
     response.headers.set('X-Demo-Mode', 'true');
     return response;
   }
+
+  // UL-022 producer ingest: POST /api/launch-runs/ingest is self-authenticating,
+  // exactly like the interview-session surface below — the route IS the gate.
+  // handleLaunchIngest verifies the per-client Bearer against the hash-only
+  // skill71_ingest_tokens store and answers 401 on any absent or invalid token
+  // (fail-closed at the handler, so reaching the handler proves nothing), and
+  // rejects any event or sample that contradicts the token's client slug, host
+  // shape or installation before a row is written. It must therefore skip the
+  // MC_API_TOKEN Gate B below: the operator bearer is a different credential for
+  // a different caller, and stacking it would force client producer boxes to
+  // hold Trevor's operator token, which they must never hold (DB-CHANGES.md).
+  // POST only — every other verb falls through to the normal gates.
+  if (pathname === '/api/launch-runs/ingest' && request.method === 'POST') return NextResponse.next();
 
   // The invitation bootstrap shell has no tenant data; its APIs authenticate separately.
   // This permits first-party enrollment even when Access enforcement is enabled.
