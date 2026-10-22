@@ -16,9 +16,10 @@
  *     blocked_reason=approval, blocked_on_human=owner, ask=<the question>, and
  *     leaving blocked clears those columns;
  *   - a `url` deliverable is registered on the card BEFORE review (the FIX 25
- *     evidence gate refuses review — and done — without it);
- *   - the epic card walks in_progress → review → done and epic-done flips the
- *     campaign row to `complete`.
+ *   evidence gate refuses review — and done — without it);
+ *   - the epic card walks in_progress → review → done, and epic-done flips the
+ *     campaign row to `complete` ONLY with the Skill 75 completion evidence set
+ *     (D14 — see the closing test).
  *
  * Throwaway DB — enforced HERE, in the file itself, exactly as
  * ad-campaigns.test.ts does (see its C8 note): `_isolated-db` MUST stay the
@@ -27,8 +28,13 @@
  * un-isolated env. tests/unit/c8-db-isolation-guard.test.ts fails the build if
  * this regresses. Never point this at mission-control.db.
  *
- * No src/ change — this unit only pins what main already does. If a test here
- * fails on main, that is a finding for Trevor, not something a builder patches.
+ * No src/ change in the unit that wrote this pin. One pin WAS updated later by
+ * S75-W08-U2 (D14): the old closing test asserted "epic done completes the run"
+ * with every child stage still in backlog — which the repair spec names as the
+ * defect ("an epic marked done can never complete the campaign while required
+ * child stages are incomplete or failed"). The closing test now pins the
+ * repaired contract instead; everything else here is byte-for-byte the
+ * original pin.
  */
 
 import './_isolated-db';
@@ -320,7 +326,7 @@ test('illegal epic backlog -> done throws ILLEGAL_TRANSITION', async () => {
 // 3. The epic card closes the order.
 // ---------------------------------------------------------------------------
 
-test('the epic walks in_progress -> review -> done and completes the campaign', async () => {
+test('the epic walks in_progress -> review -> done; the campaign completes only with the Skill 75 evidence set (D14)', async () => {
   const res = createStudioOrder('Full order close');
   const jobId = res.campaign_id;
 
@@ -329,9 +335,40 @@ test('the epic walks in_progress -> review -> done and completes the campaign', 
   // review without it (same gate as a stage card).
   registerDeliveryUrl(jobId, 'epic', 'https://studio.example.com/clients/cl-1/orders/ord-2/final.mp4');
   await moveAdStage(jobId, { stage_slug: 'epic', status: 'review' });
-  const done = await moveAdStage(jobId, { stage_slug: 'epic', status: 'done' });
-  assert.equal(done.status, 'done');
+
+  // D14 REPAIR (Skill_75_Universal_Repair_Spec_v1.1 §13 / finding D14): the
+  // previous pin here — "epic done completes the run" with every child stage
+  // still in backlog and no approval/reviewer/delivery evidence — WAS the
+  // defect ("can mark a campaign complete when its epic is marked done without
+  // proving every required child"). The repaired contract: an epic marked done
+  // can never COMPLETE THE CAMPAIGN while the required evidence set is
+  // missing. The completing move is refused loudly (422, every missing item
+  // named) and the campaign row must not read complete. The full evidence path
+  // that DOES complete the campaign is pinned in
+  // tests/unit/w08-u2-skill75-completion-guards.test.ts.
+  await assert.rejects(
+    () => moveAdStage(jobId, { stage_slug: 'epic', status: 'done' }),
+    (err: unknown) => {
+      assert.ok(err instanceof AdCampaignError, `expected AdCampaignError, got ${String(err)}`);
+      assert.equal(err.code, 'SKILL75_COMPLETION_INCOMPLETE');
+      assert.equal(err.status, 422);
+      return true;
+    },
+  );
 
   const { campaign } = getAdCampaign(jobId);
-  assert.equal((campaign as { status: string }).status, 'complete', 'epic done completes the run');
+  assert.equal(
+    (campaign as { status: string }).status,
+    'active',
+    'a refused completion never claims the run is complete',
+  );
+
+  // The refusal is durable on the card — the board shows WHY (the board is a
+  // view of the run, never the only copy of the decision).
+  const epic = cardRow(jobId, 'epic')!;
+  const refusal = queryOne<{ message: string }>(
+    `SELECT message FROM task_activities WHERE task_id = ? AND activity_type = 'error' ORDER BY created_at DESC LIMIT 1`,
+    [epic.id],
+  );
+  assert.ok(refusal && refusal.message.includes('campaign completion refused'), 'refusal recorded on the epic card');
 });

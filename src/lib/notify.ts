@@ -1100,6 +1100,58 @@ export function notifyOwner(message: string): boolean {
 export type NotifyAudience = 'OWNER' | 'SYSTEM';
 
 /**
+ * D14 — a REQUESTER-ORIGIN delivery target: the recorded conversation a task
+ * actually came from (its canonical origin record), never a global owner
+ * destination. `route` names the lane:
+ *   chat      → the requester's chat id (Telegram), via notifyTelegram
+ *   session   → an OpenClaw-app / webchat gateway session key, via notifySession
+ *   hq-chat   → the private Headquarters bound session (its address IS the
+ *               session key; a route with no bound address REFUSES and never
+ *               downgrades to a public transport)
+ */
+export interface DeliveryTarget {
+  address: string;
+  channel: string;
+  route: 'chat' | 'session' | 'hq-chat';
+}
+
+/**
+ * Deliver a report to its recorded requester origin (D14).
+ *
+ * Contract mirrors notifyOwner's deliberately:
+ *   - BEST-EFFORT: never throws, returns whether a send was DISPATCHED.
+ *   - GATEWAY-ONLY: same transports as every other send (notifyTelegram /
+ *     notifySession), same SAFETY-01 test-runner refusal, same OWNER-SENDS hold.
+ *   - A route that exists but names NO addressable destination REFUSES — it
+ *     must never quietly fall back to a global owner Telegram destination
+ *     (spec 5.4 / D14). The caller decides whether an owner fallback applies
+ *     (it does only when the task has NO origin record at all).
+ *   - Existing failure logging/escalation is PRESERVED: a genuine non-dispatch
+ *     escalates through the same de-fanged digest path as notifyOwner.
+ */
+export function notifyOrigin(target: DeliveryTarget, message: string): boolean {
+  const address = (target.address ?? '').trim();
+  if (!address) {
+    appendNotificationLog({
+      ts: new Date().toISOString(),
+      kind: 'origin_send_refused',
+      message: `route=${target.route} channel=${target.channel} names no addressable destination — no owner fallback`,
+    });
+    return false;
+  }
+  const dispatched =
+    target.route === 'chat'
+      ? notifyTelegram({ chatId: address, message })
+      : notifySession({ sessionKey: address, message });
+  if (!dispatched && !ownerSendsSuppressed()) {
+    // Same rule as notifyOwner: a deliberate mute/hold is not a delivery
+    // failure; a genuine non-dispatch is, and must not be lost silently.
+    escalateUndeliverableOwner(`requester origin send not dispatched (${target.route})`, message);
+  }
+  return dispatched;
+}
+
+/**
  * MSG-06 / SWEEP-06 — the SYSTEM (operator) notification channel.
  *
  * SYSTEM-audience alerts (dispatch-block-at-cap, silent-failure escalations,
