@@ -626,8 +626,8 @@ test('registry: the council entry is registered once, under its allocated id', (
   };
   assert.equal(report.entries, 1, 'exactly one council registry entry');
   assert.equal(report.entryId, COUNCIL_MIGRATION_ID_PENDING);
-  assert.equal(report.total, 170, '169 registry migrations on the composed main + the council entry');
-  assert.equal(report.maxNumeric, 172, 'highest numeric id is the council entry at its allocated id 172 (mainline reaches 171)');
+  assert.equal(report.total, 171, '170 registry migrations on the composed main + the council entry');
+  assert.equal(report.maxNumeric, 173, 'highest numeric id is mainline 173 (launch_run_storage_contract); the council entry sits at its allocated 172');
   assert.equal(report.ledger, 1, 'the runner recorded the council migration exactly once');
   assert.equal(report.tables, ALL_COUNCIL_TABLES.length, 'getDb() applied the council schema');
   fs.rmSync(dir, { recursive: true, force: true });
