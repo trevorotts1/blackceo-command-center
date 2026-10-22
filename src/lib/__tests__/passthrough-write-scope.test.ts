@@ -126,6 +126,20 @@
  * BEARER_REQUIRED_WRITE_ROUTES (the collection /api/da-challenges stays
  * bearer-only for the service-to-service POST).
  *
+ * re-derived 2026-10-22 for the launch producer ingest (audit lane
+ * L12/UL-022, commit 81142289): POST /api/launch-runs/ingest — the launch
+ * shipper's producer ingest, verifying the same per-client token hashes the
+ * Skill 71 transport uses; the browser interface only ever GETs
+ * /api/launch-runs, so the POST has no legitimate tokenless caller and it
+ * joins BEARER_REQUIRED_WRITE_ROUTES: 161 mutating, 7 webhook-protected
+ * (unchanged), 154 non-webhook — 50 bearer patterns match 54 route templates
+ * (46 single-route + 4 collection-or-item x2; 46 + 4x2 = 54), of which the
+ * pre-engine recovery template is webhook-gated as well, leaving 53
+ * bearer-ONLY covered. This route landed WITHOUT its census update on both
+ * main and the recovery line, so this lock was already red at base
+ * 164c45a5 — the repair is the missing re-derivation, not a change in
+ * posture to accommodate this PR.
+ *
  * re-derived 2026-09-27 for ILJ-004 tenant skip marks: POST
  * /api/interview/state — the owner's browser marking one structured question
  * skipped (InterviewClient.tsx:375 with the session cookie + tenant
@@ -389,16 +403,24 @@ const nonWebhookCount = allMutatingRoutes.length - webhookProtectedCount;
 describe('passthrough-write-scope — anti-rot lock (U052)', () => {
   // ---- Counts ------------------------------------------------------------
 
-  it('API routes exporting a mutating method: 160 (literal assertion)', () => {
-    expect(allMutatingRoutes.length).toBe(160);
+  // re-derived 2026-10-22 for the launch producer ingest (audit lane
+  // L12/UL-022, commit 81142289): POST /api/launch-runs/ingest mounted a
+  // mutating route the census never absorbed, so these three counts were one
+  // low on both the recovery line and main (measured red at base 164c45a5
+  // and at HEAD, and on main's own QC run 39770066351 — a pre-existing
+  // defect, not this PR's). It is a service-to-service shipper ingest whose
+  // only browser touch is GET /api/launch-runs, so it belongs in
+  // BEARER_REQUIRED_WRITE_ROUTES, which is where it now is.
+  it('API routes exporting a mutating method: 161 (literal assertion)', () => {
+    expect(allMutatingRoutes.length).toBe(161);
   });
 
   it('protected by isWebhookSecretRoute: 7 (5 static + 2 dynamic — middleware src/middleware.ts:137-167)', () => {
     expect(webhookProtectedCount).toBe(7);
   });
 
-  it('non-webhook write routes: 153 (160 mutating − 7 webhook-protected; tenant authentication remains required)', () => {
-    expect(nonWebhookCount).toBe(153);
+  it('non-webhook write routes: 154 (161 mutating − 7 webhook-protected; tenant authentication remains required)', () => {
+    expect(nonWebhookCount).toBe(154);
   });
 
   it('interface call templates found by multi-line scanner', () => {
@@ -415,12 +437,12 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
     expect(count).toBeGreaterThanOrEqual(40);
   });
 
-  it('bearer-ONLY-covered routes: 52 (49 patterns match 53 templates; 1 of them — UPDATE-014 /api/tasks/{id}/operator-preengine-recovery — is webhook-gated, so 53 − 1 = 52)', () => {
-    expect(bearerCoveredRoutes.size).toBe(52);
+  it('bearer-ONLY-covered routes: 53 (50 patterns match 54 templates; 1 of them — UPDATE-014 /api/tasks/{id}/operator-preengine-recovery — is webhook-gated, so 54 − 1 = 53)', () => {
+    expect(bearerCoveredRoutes.size).toBe(53);
   });
 
-  it('BEARER_REQUIRED_WRITE_ROUTES.length is 49, matching 53 route templates (checksum: 45 + 4×2 = 53; the HQ merge wave added POST /api/hq/activity, the signed producer ingest whose only browser touch is a GET of the same path; the Skill 71 wave added POST /api/skill-runs/ingest, the run-events producer ingest whose only browser touch is a GET of /api/skill-runs)', () => {
-    expect(BEARER_REQUIRED_WRITE_ROUTES.length).toBe(49);
+  it('BEARER_REQUIRED_WRITE_ROUTES.length is 50, matching 54 route templates (checksum: 46 + 4×2 = 54; the HQ merge wave added POST /api/hq/activity, the signed producer ingest whose only browser touch is a GET of the same path; the Skill 71 wave added POST /api/skill-runs/ingest, the run-events producer ingest whose only browser touch is a GET of /api/skill-runs; the 2026-10-22 launch wave added POST /api/launch-runs/ingest, the launch producer ingest whose only browser touch is a GET of /api/launch-runs)', () => {
+    expect(BEARER_REQUIRED_WRITE_ROUTES.length).toBe(50);
   });
 
   it('route-list membership: BEARER_REQUIRED_WRITE_ROUTES includes /api/weight-profiles', () => {

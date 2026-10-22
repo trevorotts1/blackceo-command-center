@@ -116,6 +116,15 @@ export const BEARER_REQUIRED_WRITE_ROUTES: RegExp[] = [
   // /api/skill-runs (the SkillRunsPanel feed), so the POST has no legitimate
   // tokenless caller.
   /^\/api\/skill-runs\/ingest$/,
+  // 2026-10-22 (launch producer ingest, audit lane L12/UL-022): POST
+  // /api/launch-runs/ingest — the launch producer ingest mounted by
+  // 81142289. It enforces the SAME per-client Bearer token in the handler
+  // (handleLaunchIngest -> the skill71_ingest_tokens hash-only store), but
+  // until this pattern existed the route was reachable tokenless through the
+  // same-origin passthrough with a forged Origin/Referer. Service-to-service:
+  // an external shipper posts events/samples, and the browser interface only
+  // ever GETs /api/launch-runs. The route's own TODO named this update.
+  /^\/api\/launch-runs\/ingest$/,
   /^\/api\/social\/media\/[^/]+$/,
   /^\/api\/social\/performance$/,
   /^\/api\/social-theme\/invitations$/,
