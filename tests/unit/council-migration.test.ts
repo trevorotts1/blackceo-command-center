@@ -626,6 +626,9 @@ test('registry: the council entry is registered once, under its allocated id', (
   };
   assert.equal(report.entries, 1, 'exactly one council registry entry');
   assert.equal(report.entryId, COUNCIL_MIGRATION_ID_PENDING);
+  // Values below re-derived programmatically 2026-10-22 on the combined
+  // cc-batch/combined-2026-10-22 tree
+  // (npx tsx -e "import('./src/lib/db/migrations').then(m=>console.log(m.migrations.length, Math.max(...m.migrations.map(x=>parseInt(x.id,10)).filter(n=>!Number.isNaN(n)))))" -> 172 174).
   // CC feature-wiring recovery (2026-10-21, migration da_challenge_review_fields):
   // the registry grew from 170 to 171 entries; the count assertion moves with every
   // migration addition, same as _head-migration.ts's derived contract (keep in sync).
