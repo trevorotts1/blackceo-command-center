@@ -118,6 +118,22 @@
  * channel's CSRF-proof auth and is mechanically blocked by the
  * no-overlap assertion via the registry's canonical :id paths).
  *
+ * re-derived 2026-10-22 for the launch producer ingest census repair: POST
+ * /api/launch-runs/ingest had been mounted with a per-client Bearer transport
+ * (src/lib/launch-transport.ts, verifying the hash-only skill71_ingest_tokens
+ * store) but was never classified here, and middleware refused it before the
+ * handler ran — as a launch READ surface (403 launch_tenant_required) and then
+ * as a non-MC_API_TOKEN bearer (401 token-mismatch). Every producer was
+ * unreachable. The route is now bearer-listed (it is service-to-service; the
+ * browser interface only GETs /api/launch-runs) and middleware lets the
+ * handler's per-client token be the gate: 161 mutating, 7 webhook-protected
+ * (unchanged), 154 non-webhook — 50 bearer patterns match 54 route templates
+ * (46 single-route + 4 collection-or-item x2; 46 + 4x2 = 54), of which the
+ * pre-engine recovery template is webhook-gated as well, leaving 53
+ * bearer-ONLY covered. The launch READ gate is unchanged: /api/launch-runs,
+ * /api/launch-abilities and /launch/* still resolve a verified tenant identity
+ * and still refuse a shared installation.
+ *
  * re-derived 2026-10-19 for Devil's Advocate escalation tracking: PATCH
  * /api/da-challenges/{id} — the feed's Escalate / Mark approved / Mark rejected
  * buttons (DevilsAdvocateFeed.tsx, session cookie + CSRF, never a bearer): 160
@@ -441,7 +457,7 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
     expect(bearerCoveredRoutes.size).toBe(53);
   });
 
-  it('BEARER_REQUIRED_WRITE_ROUTES.length is 50, matching 54 route templates (checksum: 46 + 4×2 = 54; the HQ merge wave added POST /api/hq/activity, the signed producer ingest whose only browser touch is a GET of the same path; the Skill 71 wave added POST /api/skill-runs/ingest, the run-events producer ingest whose only browser touch is a GET of /api/skill-runs; the 2026-10-22 launch wave added POST /api/launch-runs/ingest, the launch producer ingest whose only browser touch is a GET of /api/launch-runs)', () => {
+  it('BEARER_REQUIRED_WRITE_ROUTES.length is 50, matching 54 route templates (checksum: 46 + 4×2 = 54; the HQ merge wave added POST /api/hq/activity, the signed producer ingest whose only browser touch is a GET of the same path; the Skill 71 wave added POST /api/skill-runs/ingest, the run-events producer ingest whose only browser touch is a GET of /api/skill-runs; the 2026-10-22 launch ingest wave (audit lane L12/UL-022 + U052 census repair) added POST /api/launch-runs/ingest, the launch producer ingest whose only browser touch is a GET of /api/launch-runs)', () => {
     expect(BEARER_REQUIRED_WRITE_ROUTES.length).toBe(50);
   });
 
