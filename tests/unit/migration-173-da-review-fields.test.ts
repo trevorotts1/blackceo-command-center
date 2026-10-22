@@ -29,12 +29,15 @@ describe('migration 173 — da_challenges review fields, proved against the pre-
     db.exec(schema);
 
     // A real box that has run migrations THROUGH 024 (the migration that
-    // reconciled da_challenges to its canonical shape — 024..172 never touch
-    // that table, so 024 IS the pre-173 shape) but NOT 173. Applying through
-    // 024 keeps this suite fast and dependency-free (later seed migrations
-    // are out of scope for a table-shape proof).
-    migration173 = migrations.find((m) => m.id === '173');
-    expect(migration173, 'this test file assumes migration 173 exists in the array').toBeDefined();
+    // reconciled da_challenges to its canonical shape — later migrations never
+    // touch that table, so 024 IS the pre-DA-review-fields shape) but NOT it.
+    // Applying through 024 keeps this suite fast and dependency-free (later
+    // seed migrations are out of scope for a table-shape proof).
+    // Select by NAME, not id: the id is an allocation slot (this entry was
+    // renumbered 173 -> 174 when it collided with main's launch contract
+    // migration); the name is the entry's identity and never moves.
+    migration173 = migrations.find((m) => m.name === 'da_challenge_review_fields');
+    expect(migration173, 'this test file assumes migration da_challenge_review_fields exists in the array').toBeDefined();
     const idx024 = migrations.findIndex((m) => m.id === '024');
     expect(idx024, 'this test file assumes migration 024 exists in the array').toBeGreaterThanOrEqual(0);
     for (const m of migrations.slice(0, idx024 + 1)) m.up(db);

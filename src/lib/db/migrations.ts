@@ -8465,7 +8465,13 @@ export const migrations: Migration[] = [
     }
   },
   {
-    id: '173',
+    // Renumbered 173 -> 174 at integration. This recovery-branch entry and
+    // main's 'launch_run_storage_contract' (audit lane L12/UL-022) both
+    // claimed 173, which fail-closed the loader at module load. Main's 173
+    // keeps its id (its upgrade-safety test pins it and it shipped first);
+    // this unmerged arrival takes the next free id. Both migrations are
+    // additive and idempotent, so the order swap is safe.
+    id: '174',
     name: 'da_challenge_review_fields',
     up: (db) => {
       // RECOVERY/feature-wiring (CHECKLIST.md "Devil's Advocate" open items:
@@ -8477,12 +8483,12 @@ export const migrations: Migration[] = [
       // 020/170): existing rows keep NULL/defaults, so a challenge written by
       // an older producer renders an HONEST "not provided" in the feed —
       // never fabricated content.
-      console.log('[Migration 173] Adding da_challenges review fields...');
+      console.log('[Migration 174] Adding da_challenges review fields...');
       const cols = db.prepare(`PRAGMA table_info(da_challenges)`).all() as { name: string }[];
       if (cols.length === 0) {
         // Table is created by migration 020; on a pre-020 DB it will be
         // created with the canonical shape before this migration runs.
-        console.log('[Migration 173] da_challenges absent — skipping (no-op)');
+        console.log('[Migration 174] da_challenges absent — skipping (no-op)');
         return;
       }
       const add = (column: string, def: string) => {
@@ -8493,7 +8499,7 @@ export const migrations: Migration[] = [
       add('risks_alternatives', 'TEXT');
       add('recommended_modifications', 'TEXT');
       add('review_type', "TEXT NOT NULL DEFAULT 'required'");
-      console.log('[Migration 173] da_challenges review fields ready');
+      console.log('[Migration 174] da_challenges review fields ready');
     },
   },
 
