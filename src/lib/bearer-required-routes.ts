@@ -53,6 +53,13 @@
  * comment at its pattern). Now 49 patterns covering 53 route templates; see
  * the U052 lock test for the live census.
  *
+ * 2026-10-21 (Launch automations ingest): +1 pattern for POST
+ * /api/launch-runs/ingest — the launch run-events/progress producer ingest
+ * (mounted by audit lane L12; its route note recorded this census
+ * registration as owed — the U052 anti-rot lock named it `unexpected` until
+ * this entry landed). Now 50 patterns covering 54 route templates; see the
+ * U052 lock test for the live census.
+ *
  * MAINTENANCE: a new interface call site to a listed route will 401. Re-derive with the
  * test in src/lib/__tests__/passthrough-write-scope.test.ts, which fails when this
  * list and the codebase disagree -- so the list cannot rot silently.
@@ -100,6 +107,13 @@ export const BEARER_REQUIRED_WRITE_ROUTES: RegExp[] = [
   // GET (READ_ONLY_METHODS short-circuits in requiresBearerForWrite).
   /^\/api\/hq\/activity$/,
   /^\/api\/interview\/send-link$/,
+  // 2026-10-21 (Launch automations ingest): POST /api/launch-runs/ingest — the
+  // launch run-events + progress-sample producer ingest (audit lane L12 mount),
+  // enforcing its own per-client Bearer token in the handler (hash-only token
+  // records; verifySkill71IngestToken, same store as /api/skill-runs/ingest).
+  // Service-to-service; the browser interface only ever GETs /api/launch-runs,
+  // so the POST has no legitimate tokenless caller.
+  /^\/api\/launch-runs\/ingest$/,
   /^\/api\/logo$/,
   /^\/api\/openclaw\/sessions$/,
   /^\/api\/operator\/journal\/[^/]+$/,

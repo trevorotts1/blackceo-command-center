@@ -389,16 +389,16 @@ const nonWebhookCount = allMutatingRoutes.length - webhookProtectedCount;
 describe('passthrough-write-scope — anti-rot lock (U052)', () => {
   // ---- Counts ------------------------------------------------------------
 
-  it('API routes exporting a mutating method: 160 (literal assertion)', () => {
-    expect(allMutatingRoutes.length).toBe(160);
+  it('API routes exporting a mutating method: 161 (literal assertion)', () => {
+    expect(allMutatingRoutes.length).toBe(161);
   });
 
   it('protected by isWebhookSecretRoute: 7 (5 static + 2 dynamic — middleware src/middleware.ts:137-167)', () => {
     expect(webhookProtectedCount).toBe(7);
   });
 
-  it('non-webhook write routes: 153 (160 mutating − 7 webhook-protected; tenant authentication remains required)', () => {
-    expect(nonWebhookCount).toBe(153);
+  it('non-webhook write routes: 154 (161 mutating − 7 webhook-protected; tenant authentication remains required)', () => {
+    expect(nonWebhookCount).toBe(154);
   });
 
   it('interface call templates found by multi-line scanner', () => {
@@ -415,12 +415,12 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
     expect(count).toBeGreaterThanOrEqual(40);
   });
 
-  it('bearer-ONLY-covered routes: 52 (49 patterns match 53 templates; 1 of them — UPDATE-014 /api/tasks/{id}/operator-preengine-recovery — is webhook-gated, so 53 − 1 = 52)', () => {
-    expect(bearerCoveredRoutes.size).toBe(52);
+  it('bearer-ONLY-covered routes: 53 (50 patterns match 54 templates; 1 of them — UPDATE-014 /api/tasks/{id}/operator-preengine-recovery — is webhook-gated, so 54 − 1 = 53)', () => {
+    expect(bearerCoveredRoutes.size).toBe(53);
   });
 
-  it('BEARER_REQUIRED_WRITE_ROUTES.length is 49, matching 53 route templates (checksum: 45 + 4×2 = 53; the HQ merge wave added POST /api/hq/activity, the signed producer ingest whose only browser touch is a GET of the same path; the Skill 71 wave added POST /api/skill-runs/ingest, the run-events producer ingest whose only browser touch is a GET of /api/skill-runs)', () => {
-    expect(BEARER_REQUIRED_WRITE_ROUTES.length).toBe(49);
+  it('BEARER_REQUIRED_WRITE_ROUTES.length is 50, matching 54 route templates (checksum: 46 + 4×2 = 54; the HQ merge wave added POST /api/hq/activity, the signed producer ingest whose only browser touch is a GET of the same path; the Skill 71 wave added POST /api/skill-runs/ingest, the run-events producer ingest whose only browser touch is a GET of /api/skill-runs; the Launch automations wave added POST /api/launch-runs/ingest, the launch run/progress producer ingest whose only browser touch is a GET of /api/launch-runs)', () => {
+    expect(BEARER_REQUIRED_WRITE_ROUTES.length).toBe(50);
   });
 
   it('route-list membership: BEARER_REQUIRED_WRITE_ROUTES includes /api/weight-profiles', () => {
@@ -429,6 +429,7 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
     // shared module reddens this test. No hand-copied duplicate.
     expect(requiresBearerForWrite('/api/weight-profiles', 'POST')).toBe(true);
     expect(requiresBearerForWrite('/api/skill-runs/ingest', 'POST')).toBe(true);
+    expect(requiresBearerForWrite('/api/launch-runs/ingest', 'POST')).toBe(true);
     expect(requiresBearerForWrite('/api/auth/interview-invitation', 'POST')).toBe(true);
     expect(requiresBearerForWrite('/api/bugs', 'POST')).toBe(true);
     expect(requiresBearerForWrite('/api/execution-queue/abc', 'DELETE')).toBe(true);
