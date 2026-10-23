@@ -289,6 +289,7 @@ Workforce Interview to make it yours." A bare standardPrebuild (standardReady) s
 ## [Unreleased]
 
 - unit/W2-B-U1: feat(ad-campaigns): optional title_prefix on ad-campaign epic title/description (W2-B-U1, manual H3 step 1) (merge fb410817ac92)
+- cc/unit/S75-W08-U1: W08-U1 CC: replay-safe stage moves — per-cycle intent identity (repair) (merge 93bb1e981f7e)
 
 ## [v7.6.98] — 2026-10-03 — notify(RR-F18/F51): escalations name the box by its fleet slug; Rescue Rangers posts only on an explicit `escalate`
 
