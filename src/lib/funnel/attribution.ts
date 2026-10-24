@@ -22,6 +22,11 @@
  *          message body that merely mentions a keyword is not a reference
  *          (D-05: an absent ref renders UNKNOWN, never success).
  *
+ *      The touch references of one event are the UNION of `refs`,
+ *      `touch_refs` and `keyword_ref` (deduped case-insensitively): the
+ *      adapter observed all of them, so dropping one because another field was
+ *      present would under-report a multitouch as a single keyword.
+ *
  *   2. OUTCOMES are counted INDEPENDENTLY: gift / contact / booking / sale.
  *      There is no total, no rate, no "sale implies booking" progression, and
  *      no derived stage. A sale increments only the sale bucket. An event
@@ -47,6 +52,19 @@
  * module therefore cannot distinguish "temporarily unreadable" from "present
  * but empty" through that reader. Fixing it belongs in `sources.ts`, which is
  * outside this unit's ownership.
+ *
+ * Known limitation (named, not hidden, id `pixel_events_schema_gap`): no
+ * producer in this repository emits this module's input contract. The one
+ * wired reader is `readJsonlDir('pixel-events')`, whose records are the
+ * Skill-38 Pixel-Concierge schema (`timestamp`, `event_type`, `site_id`,
+ * `agent_id`, `visitor_id`, `fingerprint`, `path`, `referrer`,
+ * `seconds_on_page`, `total_visits`, `first_visit_date`, `data`). `timestamp`
+ * and `agent_id` map honestly to `observed_at` and `attribution_source`
+ * (`mapPixelEventRecord`), but NO field of that schema is an attribution
+ * reference and none is an outcome kind, so pixel events classify
+ * `unknown`/`no_attribution_data` and count no outcome — fail-closed and
+ * inert, never a fabricated count. The gap is carried on every snapshot as
+ * `limitations`, not left implicit.
  */
 
 import { readJsonlDir } from '@/lib/conversational-ai/sources';
@@ -91,6 +109,29 @@ const OUTCOME_ALIASES: Record<OutcomeKind, readonly string[]> = {
   sale: ['sale', 'purchase', 'purchased', 'order_paid', 'payment_received'],
 };
 
+/**
+ * The input contract this adapter needs from a producer. Named here so the
+ * gap below is machine-checkable instead of folklore.
+ */
+export const FUNNEL_INPUT_CONTRACT_FIELDS = [
+  'kind',
+  'refs',
+  'keyword_ref',
+  'touch_refs',
+  'attribution_source',
+  'observed_at',
+] as const;
+export type FunnelInputContractField = (typeof FUNNEL_INPUT_CONTRACT_FIELDS)[number];
+
+/** Named limitations carried on every snapshot. Ids are stable, text is prose. */
+export const PRODUCER_LIMITATION_IDS = ['pixel_events_schema_gap'] as const;
+export type ProducerLimitationId = (typeof PRODUCER_LIMITATION_IDS)[number];
+
+export const PRODUCER_LIMITATIONS: Record<ProducerLimitationId, string> = {
+  pixel_events_schema_gap:
+    'pixel_events_schema_gap: no producer in this repository emits the input contract, so the wired pixel-events/ reader (Skill-38 Pixel-Concierge schema) can only map what the source proves — timestamp -> observed_at, agent_id -> attribution_source. No field of that schema is an attribution reference and none is an outcome kind (event_type is pageview/scroll/click/page_hidden/delete_request; referrer, path, data.href and data.text are page and copy, never attribution — D-05), so pixel events classify unknown and count no outcome until a producer emits the contract. This is a named gap, not a zero.',
+};
+
 export interface ReasonCount {
   reason: FunnelUnknownReason;
   count: number;
@@ -128,6 +169,8 @@ export interface FunnelAttributionSnapshot {
   nonOutcome: number | null;
   /** Malformed records plus unparseable source lines. `null` iff source absent. */
   refused: number | null;
+  /** Named input-contract gaps (`PRODUCER_LIMITATIONS`) — carried, not hidden. */
+  limitations: string[];
   generatedAt: string;
 }
 
@@ -155,6 +198,39 @@ export interface FunnelAttributionSource {
   records: unknown[];
   /** Source lines that failed to parse (surfaced as refusals). */
   skipped?: number;
+}
+
+/**
+ * Map one raw `pixel-events/` record (Skill-38 Pixel-Concierge schema) onto
+ * the input contract — mapping ONLY what the source proves:
+ *
+ *   observed_at        <- timestamp  (ISO-8601, when the event was observed)
+ *   attribution_source <- agent_id   (the observing emitter)
+ *
+ * A contract field already present on the record passes through untouched, so
+ * a producer that one day emits the real contract needs no change here.
+ * Deliberately NOT mapped: `event_type` (pageview|scroll|click|page_hidden|
+ * delete_request) is an event type, not an outcome kind; `referrer`, `path`,
+ * `data.href` and `data.text` are page and copy, not attribution references
+ * (D-05 — text is never attribution). Mapping either would fabricate a claim
+ * the source cannot support, so those records classify `unknown` and count no
+ * outcome, and the gap rides along as `pixel_events_schema_gap`.
+ *
+ * Non-objects pass through untouched and are refused by
+ * `buildFunnelAttribution` as `malformed_record`, as before.
+ */
+export function mapPixelEventRecord(raw: unknown): FunnelAttributionEvent {
+  if (!isPlainObject(raw)) return raw as FunnelAttributionEvent;
+  const ev: FunnelAttributionEvent = { ...raw };
+  if (nonEmptyString(ev.observed_at) === null) {
+    const ts = nonEmptyString(raw.timestamp);
+    if (ts) ev.observed_at = ts;
+  }
+  if (nonEmptyString(ev.attribution_source) === null) {
+    const agent = nonEmptyString(raw.agent_id);
+    if (agent) ev.attribution_source = agent;
+  }
+  return ev;
 }
 
 export interface BuildOptions {
@@ -191,8 +267,12 @@ function isTimestamp(v: unknown): boolean {
 }
 
 /**
- * Collect the DISTINCT touch references the adapter observed. Dedupe is
- * case-insensitive: `['SUMMER','summer']` is ONE touch, not multitouch.
+ * Collect the DISTINCT touch references the adapter observed. The three
+ * fields are UNIONED — a reference observed in `touch_refs` is still observed
+ * when `refs` is also present (and vice versa) — so a multitouch record can
+ * never collapse into the single-keyword bucket. Dedupe is case-insensitive:
+ * `['SUMMER','summer']` is ONE touch, not multitouch. A bare (non-array)
+ * `refs` / `touch_refs` carries no touch: those fields are lists.
  */
 export function observedRefs(ev: FunnelAttributionEvent): string[] {
   const raw: string[] = [];
@@ -201,7 +281,7 @@ export function observedRefs(ev: FunnelAttributionEvent): string[] {
     if (s) raw.push(s);
   };
   if (Array.isArray(ev.refs)) ev.refs.forEach(push);
-  else if (Array.isArray(ev.touch_refs)) ev.touch_refs.forEach(push);
+  if (Array.isArray(ev.touch_refs)) ev.touch_refs.forEach(push);
   push(ev.keyword_ref);
 
   const seen = new Set<string>();
@@ -263,6 +343,11 @@ function reasonList(map: Map<FunnelUnknownReason, number>): ReasonCount[] {
     .sort((a, b) => (a.reason < b.reason ? -1 : a.reason > b.reason ? 1 : 0));
 }
 
+/** Fresh copy of the named producer gaps — carried on every snapshot. */
+function producerLimitations(): string[] {
+  return PRODUCER_LIMITATION_IDS.map((id) => PRODUCER_LIMITATIONS[id]);
+}
+
 /**
  * Build the snapshot. Pure: no filesystem, no clock beyond `opts.now`.
  * `available: false` makes EVERY count `null` with `source_absent`.
@@ -297,6 +382,7 @@ export function buildFunnelAttribution(
       unclassified: { count: null, reasons: [] },
       nonOutcome: null,
       refused: null,
+      limitations: producerLimitations(),
       generatedAt: now,
     };
   }
@@ -379,12 +465,15 @@ export function buildFunnelAttribution(
     unclassified: { count: unclassified, reasons: reasonList(unclassifiedReasons) },
     nonOutcome,
     refused,
+    limitations: producerLimitations(),
     generatedAt: now,
   };
 }
 
 /**
- * Load from the accepted Round-3 reader (`pixel-events/`). The reader is
+ * Load from the accepted Round-3 reader (`pixel-events/`). Every record is
+ * first mapped through `mapPixelEventRecord`, so the source's own schema is
+ * read honestly instead of being guessed into the contract. The reader is
  * injectable so unit tests never read a real client workspace.
  */
 export function loadFunnelAttribution(opts: LoadOptions = {}): FunnelAttributionSnapshot {
@@ -392,7 +481,7 @@ export function loadFunnelAttribution(opts: LoadOptions = {}): FunnelAttribution
     opts.read ??
     ((): FunnelAttributionSource => readJsonlDir<unknown>('pixel-events'));
   const res = read();
-  return buildFunnelAttribution(res.records, {
+  return buildFunnelAttribution(res.records.map(mapPixelEventRecord), {
     available: res.available,
     source: res.source,
     sourceSkipped: res.skipped ?? 0,
@@ -430,6 +519,8 @@ export interface FunnelViewRows {
   attribution: FunnelRow[];
   outcomes: FunnelRow[];
   footnote: string | null;
+  /** Named input-contract gaps, rendered so a limitation is never invisible. */
+  limitations: string[];
 }
 
 /**
@@ -495,5 +586,11 @@ export function buildFunnelAttributionRows(snapshot: FunnelAttributionSnapshot):
     notes.push(`${snapshot.refused} record(s) refused as malformed.`);
   }
 
-  return { banner, attribution, outcomes, footnote: notes.length ? notes.join(' ') : null };
+  return {
+    banner,
+    attribution,
+    outcomes,
+    footnote: notes.length ? notes.join(' ') : null,
+    limitations: [...snapshot.limitations],
+  };
 }

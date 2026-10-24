@@ -62,6 +62,12 @@ export function FunnelAttributionView({ snapshot }: { snapshot: FunnelAttributio
       {rows.footnote ? (
         <p className="text-xs text-gray-500">{rows.footnote}</p>
       ) : null}
+
+      {rows.limitations.map((note) => (
+        <p key={note} className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+          {note}
+        </p>
+      ))}
     </section>
   );
 }
