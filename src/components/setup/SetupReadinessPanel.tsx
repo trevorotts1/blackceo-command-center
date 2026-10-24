@@ -48,23 +48,34 @@ const STATE_STYLE: Record<
 
 /**
  * What counts as evidence behind a claim: a real evidence object carrying a
- * probe that names what ran. An EMPTY object is not evidence — it is a blank
- * where the claim would have to stand — and neither is an empty or absent probe
- * name, because a claim nobody can check is not backed. Mirrors the
- * observed-empty rule in src/lib/readiness/setup.ts, and is the single
- * definition every read-side check below consults.
+ * probe that names what ran AND a non-empty observation of what it returned. An
+ * EMPTY object is not evidence — it is a blank where the claim would have to
+ * stand — and neither is an empty or absent probe name, because a claim nobody
+ * can check is not backed, nor an empty or absent observation, because READY
+ * cannot rest on an observation nobody made. Mirrors the observed-empty rule in
+ * src/lib/readiness/setup.ts:351-353 (`Object.keys(observed).length === 0`
+ * degrades a READY row to UNKNOWN), and is the single definition every
+ * read-side check below consults — so the whole class is fixed here.
  */
 function hasEvidence(item: ReadinessItem): boolean {
   const evidence = item.evidence as Partial<ReadinessEvidence> | null | undefined;
   if (!evidence || Object.keys(evidence).length === 0) return false;
   const probe = evidence.probe;
-  return typeof probe === 'string' && probe.trim().length > 0;
+  const observed = evidence.observed;
+  return (
+    typeof probe === 'string' &&
+    probe.trim().length > 0 &&
+    !!observed &&
+    typeof observed === 'object' &&
+    Object.keys(observed).length > 0
+  );
 }
 
 function EvidenceLine({ item }: { item: ReadinessItem }) {
   // A row whose evidence is missing must still render: it says so, instead of
-  // throwing and blanking the whole panel. An empty evidence object, or one
-  // with no probe name, is the same case — there is nothing there to show.
+  // throwing and blanking the whole panel. An empty evidence object, one with
+  // no probe name, and one with an empty or absent observation are the same
+  // case — there is nothing there to show.
   if (!hasEvidence(item)) {
     return (
       <p className="mt-1 text-xs text-bcc-text-muted break-words">
@@ -73,7 +84,9 @@ function EvidenceLine({ item }: { item: ReadinessItem }) {
     );
   }
   const { probe, observed, at } = item.evidence;
-  const observedText = JSON.stringify(observed ?? {});
+  // What is printed is exactly what hasEvidence admitted: an absent
+  // observation is never rendered as a real empty one.
+  const observedText = JSON.stringify(observed);
   return (
     <p className="mt-1 text-xs text-bcc-text-muted break-words">
       <span className="font-mono">{probe}</span>
@@ -89,8 +102,8 @@ function EvidenceLine({ item }: { item: ReadinessItem }) {
 export function ItemRow({ item }: { item: ReadinessItem }) {
   // A row with no evidence cannot back any claim — it reads UNKNOWN even if the
   // payload says READY. Fail-closed on the read side too. "No evidence" is
-  // hasEvidence(): an empty evidence object and an empty/absent probe name are
-  // both a claim with nothing behind it.
+  // hasEvidence(): an empty evidence object, an empty/absent probe name, and an
+  // empty/absent observation are all a claim with nothing behind it.
   const state: ReadinessState = hasEvidence(item) ? item.state : 'UNKNOWN';
   const style = STATE_STYLE[state];
   return (
@@ -123,8 +136,9 @@ const STATE_RANK: Record<ReadinessState, number> = { READY: 0, UNKNOWN: 1, BLOCK
  *   • a row with no evidence reads UNKNOWN, so it cannot leave READY at the top;
  *   • the badge is the WORST of the payload's `overall` and what the rows
  *     actually support — this surface never paints a claim it cannot back.
- * "No evidence" is hasEvidence(): an empty evidence object and an empty/absent
- * probe name are both a claim with nothing behind it.
+ * "No evidence" is hasEvidence(): an empty evidence object, an empty/absent
+ * probe name, and an empty/absent observation are all a claim with nothing
+ * behind it.
  * Exported for the T-31 unit test — this is the exact expression the header
  * renders from.
  */

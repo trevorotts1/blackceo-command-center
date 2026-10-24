@@ -510,5 +510,29 @@ test('T-31: a genuinely populated evidence row is still Ready', () => {
   assert.match(html, /Ready/, 'a row with a real probe and a real observation is Ready');
   assert.doesNotMatch(html, /Unknown/);
   assert.match(html, /SELECT 1 AS ok/, 'the probe that decided it is still shown');
+  assert.match(html, /&quot;result&quot;:1/, 'the observation it returned is still shown');
+  assert.match(html, /2026-10-24T00:00:00\.000Z/, 'the time it ran is still shown');
   assert.equal(badgeOf([item]), 'READY', 'a backed READY row must reach the badge');
+});
+
+// ── PBB-104 repair: the observed dimension, pinned ────────────────────────
+// hasEvidence() checked the probe name but never looked at `observed`, so a row
+// with a real probe and an EMPTY (or absent) observation painted green Ready
+// where the server rule at src/lib/readiness/setup.ts:351-353 degrades exactly
+// that row to UNKNOWN ("READY cannot rest on an empty observation"). Both
+// shapes below are the same payload-layer attack as the probe shapes: the row
+// CLAIMS READY and the read side must refuse the claim.
+
+test('T-31: an empty observation is not evidence — never Ready', () => {
+  assertNotReady(
+    forgedRow({ probe: 'SELECT 1 AS ok', observed: {}, at: '2026-10-24T00:00:00.000Z' }),
+    'observed:{}',
+  );
+});
+
+test('T-31: an absent observation is not evidence — never Ready', () => {
+  assertNotReady(
+    forgedRow({ probe: 'SELECT 1 AS ok', at: '2026-10-24T00:00:00.000Z' }),
+    'observed absent',
+  );
 });
