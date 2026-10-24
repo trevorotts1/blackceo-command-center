@@ -193,11 +193,35 @@ export interface TaskBlockEvent {
   created_at: string;
 }
 
+/**
+ * PBB-073 / T-35 — a card's lifecycle truth, derived server-side from REAL
+ * `task_events` rows (src/lib/board/lifecycle-projection.ts) and attached by
+ * GET /api/tasks. Absent on rows from any surface that has not adopted the
+ * projection yet, so every consumer must treat it as optional.
+ */
+export type LifecycleCardState = 'live' | 'stale' | 'unknown';
+export type LifecycleStaleReason = 'source_missing' | 'stream_stalled';
+
+export interface LifecycleCard {
+  task_id: string;
+  /** Board column proven by the newest event (null when nothing proves one). */
+  column: string | null;
+  state: LifecycleCardState;
+  stale_reason: LifecycleStaleReason | null;
+  /** Timestamp of the newest event this card can prove. Never invented. */
+  last_event_at: string | null;
+  last_event_id: string | null;
+  /** The unrecognised `to_status` that produced `state: 'unknown'`. */
+  unknown_event_type: string | null;
+}
+
 export interface Task {
   id: string;
   title: string;
   description?: string;
   status: TaskStatus;
+  /** PBB-073 / T-35 — event-derived placement + freshness (optional). */
+  lifecycle?: LifecycleCard | null;
   priority: TaskPriority;
   assigned_agent_id: string | null;
   created_by_agent_id: string | null;

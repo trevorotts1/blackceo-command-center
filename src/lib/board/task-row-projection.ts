@@ -43,7 +43,12 @@ import {
   taskRowMayHaveEngineState,
 } from '@/lib/presentation-engine-state';
 import { resolveProviderTruth, type ProviderTruth } from '@/lib/board/board-truth';
-import type { Agent, Task } from '@/lib/types';
+import {
+  loadLifecycleEvents,
+  projectLifecycleCards,
+  resolveStaleAfterMs,
+} from '@/lib/board/lifecycle-projection';
+import type { Agent, LifecycleCard, Task } from '@/lib/types';
 
 // P4-02 step 5 / A-U5 — cached sqlite_master probes. Schema presence is stable
 // per process, and a pre-090 (or pre-104) box must not have its board fetch
@@ -208,7 +213,7 @@ function engineFieldsForRow(row: TaskRowRaw): {
   }
 }
 
-export function projectTaskRow(row: TaskRowRaw): TaskRowRaw {
+function projectTaskRowCore(row: TaskRowRaw): TaskRowRaw {
   return {
     ...row,
     // ROBUST null-name guard (AF-TASKBOARD-NULLNAME): only emit the nested
@@ -260,8 +265,46 @@ export function projectTaskRow(row: TaskRowRaw): TaskRowRaw {
   };
 }
 
+/**
+ * PBB-073 / T-35 — event-derived lifecycle truth for these rows, read in ONE
+ * query per caller (board GET) or one per row (live emit / detail). Fail-soft:
+ * a pre-migration-070 box with no `task_events` table yields no lifecycle
+ * (the board keeps its previous status-mirror behaviour) rather than an error.
+ */
+function lifecycleForRows(
+  rows: readonly { id: string; status: Task['status'] }[],
+): Map<string, LifecycleCard> {
+  if (rows.length === 0) return new Map();
+  try {
+    const events = loadLifecycleEvents(rows.map((row) => row.id));
+    return projectLifecycleCards({
+      tasks: rows.map((row) => ({ id: row.id, status: row.status })),
+      events,
+      staleAfterMs: resolveStaleAfterMs(),
+    }).cards;
+  } catch {
+    return new Map();
+  }
+}
+
+/**
+ * A41 + PBB-073 — the single-row transform. Lifecycle is attached HERE too, so
+ * an SSE task_updated / task-detail payload carries it; otherwise a live
+ * update would replace a card in the Zustand store and silently DROP the
+ * stale/unknown badge the board had rendered.
+ */
+export function projectTaskRow(row: TaskRowRaw): TaskRowRaw {
+  const card = lifecycleForRows([row]).get(row.id) ?? null;
+  return { ...projectTaskRowCore(row), lifecycle: card };
+}
+
+/** Board GET's shape over a row set — ONE lifecycle query for the whole page. */
 export function projectTaskRows(rows: TaskRowRaw[]): TaskRowRaw[] {
-  return rows.map(projectTaskRow);
+  const cards = lifecycleForRows(rows);
+  return rows.map((row) => ({
+    ...projectTaskRowCore(row),
+    lifecycle: cards.get(row.id) ?? null,
+  }));
 }
 
 /**
