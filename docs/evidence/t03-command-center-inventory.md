@@ -2,11 +2,11 @@
 
 | | |
 |---|---|
-| Unit | PBB-064 / ledger task T-03 |
-| Agent | rev-lane-c (BUILD role, reverification agent C, alias `deepseek-chain`) |
+| Unit | PBB-064 / ledger task T-03 (repair pass **PBB-085**) |
+| Agent | rev-lane-c (build, alias `deepseek-chain`) → repair-lane-z (repair, alias `opus-chain`) |
 | Repo | `trevorotts1/blackceo-command-center` |
-| Worktree | `/Volumes/mac mini m4/Downloads/git trees and automations/worktrees/pb-skill38-20261024/rev-t03` |
-| Branch | `pb/PBB-064/t03-inventory` (cut from `origin/main`) |
+| Worktree | `/Volumes/mac mini m4/Downloads/git trees and automations/worktrees/pb-skill38-20261024/rev-t03` (build); `/Volumes/mac mini m4/Downloads/git trees and automations/worktrees/pb-skill38-20261024/fix-t03` (repair pass) |
+| Branch | `pb/PBB-064/t03-inventory` (build, cut from `origin/main`); `pb/PBB-085/t03-inventory` (repair pass) |
 | Baseline commit | `a92d11d940eb082944c30a3433f592aac0ce9842` |
 | App version | 7.6.125 (`package.json`) |
 | Date | 2026-10-24 |
@@ -37,7 +37,7 @@ Verdict scale:
 | 7 | Kanban lifecycle events + stale-state handling | **PRESENT** | Yes — live board, stale/offline banner, escalation notices |
 
 Counts at baseline: 64 page routes, 258 API route handlers, 1,064 `.ts`/`.tsx` files under
-`src/` (70,937 lines), 35 entries in the cron job table.
+`src/` — 286,343 lines combined (215,406 `.ts` + 70,937 `.tsx`) — 35 entries in the cron job table.
 
 ---
 
@@ -75,9 +75,11 @@ Why PARTIAL, not PRESENT:
   (`src/lib/clients.ts:48-68`) exposes connection fields and `interview_complete`, not
   reachability, last-seen, build stage or readiness.
 - Nothing in this repo probes a *remote* client's gateway. `clientToOpenClawTarget`
-  (`src/lib/clients.ts:323`) is consumed only by `src/app/api/events/client-feed/route.ts:40`
-  and interview handlers (`src/app/api/interview/answer/route.ts:523`,
-  `src/app/api/interview/state/route.ts:74`) — i.e. connection *use*, never discovery or probing.
+  (`src/lib/clients.ts:323`) has exactly three consumers: `src/app/api/events/client-feed/route.ts:85`,
+  `src/lib/bridge/dispatch.ts:38` (import at `:22`), and `src/lib/operator/goals.ts:302`
+  (import at `:24`) — i.e. connection *use*, never discovery or probing. The interview handlers
+  (`src/app/api/interview/answer/route.ts:523`, `src/app/api/interview/state/route.ts:74`) call
+  `getClientContext()`, not `clientToOpenClawTarget`.
 - Fleet-level discovery lives outside this repo (operator tooling), so Command Center cannot
   answer "which clients exist and what state are they in" on its own.
 
@@ -126,10 +128,10 @@ Server-side readiness is thorough. What a client can actually see is narrow.
 - Workforce build readiness: `src/app/api/onboarding/build-status/route.ts:16` (`GET`) —
   explicitly refuses to call a build complete without verification
   (`verifiedBuild && verifiedCommandCenter`, `:32`, statuses `validating` / `complete` / `waiting`).
-  Client surface: `src/app/onboarding/building/page.tsx:9` (stage enum), `:20` (stage labels).
-- Installation handshake: `src/app/api/auth/tenant-ready/route.ts:9` — returns
+  Client surface: `src/app/onboarding/building/page.tsx:9` (stage enum), `:22` (stage labels).
+- Installation handshake: `src/app/api/auth/tenant-ready/route.ts:13` (`missing[]`) — returns
   `{ready, missing[]}` with a named missing-component list… **but only for the operator**
-  (`context.subject !== 'operator:api'` → 403, `:11`). This is exactly the checklist a client
+  (`context.subject !== 'operator:api'` → 403, `:12`). This is exactly the checklist a client
   would need, and it is not available to a client.
 - Interview readiness gate: `src/app/api/interview/gate-status/route.ts:39`. Until closeout the
   middleware 302s every non-exempt page to `/interview`
@@ -233,10 +235,16 @@ that other skills write**. Follow-up has no operational surface at all — only 
 Booking — **ABSENT**:
 
 - No booking/appointment/calendar table. `src/lib/db/migrations.ts` contains 141
-  `CREATE TABLE` occurrences (includes comments and idempotent duplicates; not a table count),
-  and none of the enumerated names is a booking, appointment, availability or calendar table.
-- No route: `/api/*` inventory (258 handlers) has no `booking`, `appointment`, `calendar` or
-  `availability` path.
+  `CREATE TABLE` occurrences (includes comments and idempotent duplicates; not a table count).
+  The only name matching `book|appoint|calendar|availab` is substring noise — `notebooks` /
+  `notebook_sources` (`:1606`, `:1619`, matched on "book" inside "notebook"). None is a booking,
+  appointment, availability or calendar table.
+- No booking route. The `/api/*` inventory (258 handlers) contains no `booking`, `appointment`
+  or `calendar` path. One route matches `availab` and is **not** booking:
+  `src/app/api/operator/research/availability/route.ts` reports Research-module *provider*
+  availability (`{available, selected, providers[]}` — Perplexity/OpenAI/Ollama/xAI key
+  discovery, header `:1-18`), which has nothing to do with scheduling. The only other path
+  matches are the three `notebook` routes again matching on "book" inside "notebook".
 - The only hits are *routing vocabulary*, not capability: department profile
   `src/lib/routing/department-profiles.ts:128-131` ("book a flight", "reschedule a meeting"),
   department config `src/lib/routing/departments.config.ts:887,893`, and a role-library folder
@@ -326,7 +334,7 @@ Operator tuning surface: `src/app/settings/board-slas/page.tsx:12`, thresholds i
 | Surface | Where | What it honestly shows |
 |---|---|---|
 | Health dot | `src/app/page.tsx:476`, `:593`; `src/app/tasks/by-department/page.tsx:326`; tiers `src/components/HealthIndicator.tsx:65` | healthy / degraded / unavailable / checking, from tiered probes that require DB + gateway |
-| Build progress | `/onboarding/building` — `src/app/onboarding/building/page.tsx:9-21` | real stage, documents complete/total, ETA, and "needs attention" on failure; a build is never called complete without verification |
+| Build progress | `/onboarding/building` — `src/app/onboarding/building/page.tsx:9-22` | real stage, documents complete/total, ETA, and "needs attention" on failure; a build is never called complete without verification |
 | Board card state | `/tasks/all` — `src/components/kanban/StatusPill.tsx`, `src/components/TaskOverviewPanels.tsx:468` | current lifecycle status and the blocked reason/ask |
 | Publish state | `src/components/TaskModal.tsx:599` → `src/components/TaskPublishSummaryPanel.tsx`; `src/components/MarketingPublishButton.tsx:261` | persisted stage, next action and owner; ten queue states incl. `verification_required` / `overdue` |
 | Campaign sync strip | `src/app/campaigns/[id]/page.tsx:346`, staleness `:171` | live vs polling, last sync, stale/offline warning |
@@ -368,11 +376,80 @@ readiness, and any booking view.
 
 - Page routes: **64** `page.tsx` files under `src/app`.
 - API route handlers: **258** `route.ts` files under `src/app/api`.
-- Scheduled jobs: **35** entries in `src/lib/jobs/scheduler.ts` cron table (`:426+`).
-- Source scale: **1,064** `.ts`/`.tsx` files, **70,937** lines under `src/`.
+- Scheduled jobs: **35** entries in the `src/lib/jobs/scheduler.ts` `JOBS` cron table (starts
+  at `:426`; 36 `expr:` occurrences minus the type declaration line at `:426`).
+- Source scale: **1,064** `.ts`/`.tsx` files, **286,343** lines under `src/` combined
+  (**215,406** `.ts` + **70,937** `.tsx`).
 - Capabilities inventoried: **7** — **3 PRESENT** (lifecycle, campaign/approval/publication,
   Kanban events + stale handling), **4 PARTIAL** (client discovery, setup readiness,
   conversation/fulfillment/follow-up, booking/outcome). Booking itself is **ABSENT**;
   outcome views are PRESENT.
-- Distinct repository files cited: **85**.
+- Distinct repository files cited: **89** (**85** at build time; the repair pass added
+  `src/app/api/operator/research/availability/route.ts`, `src/lib/bridge/dispatch.ts`,
+  `src/lib/operator/goals.ts` and `src/lib/social/cycle-service.ts`; none removed). All 89
+  paths resolve to a file on disk at this commit.
 - Product code changes: **0**. Files added: **1** (this file).
+
+---
+
+## ABSENT-claim re-derivation (repair pass PBB-085)
+
+Instrument rule: on this machine `\b` is **non-functional** in `git grep` extended regex — it
+returns exit 1 regardless of repository content and manufactures false ABSENT claims. No
+word-boundary assertion is used in any check below; patterns are plain fixed strings or
+explicit character classes. Every zero-match claim carries a **control** — the same command
+shape against a pattern proven to exist in the same corpus. Had a control returned empty the
+check would be broken, not the repository. Control output is quoted verbatim.
+
+| # | ABSENT claim | Instrument (run at this worktree's HEAD) | Target result | Control, same shape / proven pattern | Verdict |
+|---|---|---|---|---|---|
+| A1 | No `/clients` page | `find src/app -name 'page.tsx' \| grep -i 'client'` | rc=1, 0 paths (64 pages total) | `… \| grep -i 'campaigns'` → `src/app/campaigns/[id]/page.tsx`, rc=0 | **holds** |
+| A2 | No per-client lifecycle / health / reachability state | `grep -rniE 'last_seen\|reachab\|client_health\|probeclient' src/` | 30 hits in 17 files, all prose about deliverables/routes being "unreachable"; no state field | `grep -rniE 'interview_complete' src/` → 6 matches in 4 files, rc=0 | **holds** — `PublicClient` (`src/lib/clients.ts:48-66`) exposes only connection fields, `interview_complete`, brand/logo, `is_self`, `has_gateway_token`, `has_cf_access`, timestamps |
+| A3 | No remote-box probing (`clientToOpenClawTarget` is connection use only) | `grep -rn 'clientToOpenClawTarget' src/` | 17 matches in 8 files: definition `src/lib/clients.ts:323`, comments `:311` / `src/lib/operator/goals.ts:272`, and exactly 3 call sites — `src/app/api/events/client-feed/route.ts:85`, `src/lib/bridge/dispatch.ts:38`, `src/lib/operator/goals.ts:302` | `grep -rn 'getClientContext' src/` → 17 matches in 8 files, rc=0 (incl. `src/app/api/interview/answer/route.ts:523`, `src/app/api/interview/state/route.ts:74`) | **holds** — consumer enumeration corrected (defect D2) |
+| A4 | No `.tsx` consumer of `/api/ad-campaigns` | `grep -rln 'ad-campaign' --include='*.tsx' src/` | rc=1, 0 files | `… --include='*.tsx' 'publish-summary'` → `src/components/TaskPublishSummaryPanel.tsx`, `src/components/MarketingPublishButton.tsx`, rc=0; `… --include='*.ts' 'ad-campaign'` → `src/lib/ad-campaigns.ts` + 9 more, rc=0 | **holds** |
+| A5 | No follow-up queue/worklist/owner/contact record; no `conversations` table | `grep -in 'CREATE TABLE' src/lib/db/migrations.ts \| grep -iE 'follow\|conversation\|contact'` → rc=1, 0 lines; `grep -rniE 'follow.?up (queue\|worklist)\|follow_?up_queue\|follow_?up_worklist' src/` → rc=1, 0 lines | both empty | same two-stage shape `… \| grep -iE 'publish_queue'` → 3 lines (`:794`, `:6357`, `:6412`), rc=0; `grep -rniE 'followUpPerformance' src/` → 6 lines, rc=0 | **holds** |
+| A6 | No booking table; no booking route | `find src/app/api -name 'route.ts' \| grep -iE 'book\|appoint\|calendar\|availab'` → 4 paths, none booking: 3 `notebook` routes (matched "book" inside "notebook") + `src/app/api/operator/research/availability/route.ts`; `grep -in 'CREATE TABLE' src/lib/db/migrations.ts \| grep -iE 'book\|appoint\|calendar\|availab'` → 2 lines, `notebooks` `:1606`, `notebook_sources` `:1619` | 4 + 2 path/table hits, all substring noise or a non-booking route | `… \| grep -iE 'health'` → 6 route paths, rc=0; `… \| grep -iE 'publish_queue'` → 3 lines, rc=0 | **holds at capability level** — the earlier literal sentence "no route … has a … availability path" was FALSE and is corrected (defect D3) |
+| A7 | `publish_queue` has no `awaiting_approval` state | `sed -n '898,912p' src/lib/types.ts` + `grep -rn 'awaiting_approval' src/` | status union is exactly 10 values, none an approval state; the single `awaiting_approval` hit is `draft_awaiting_approval` at `src/lib/social/cycle-service.ts:389`, a social-cycle disposition | `grep -rn 'verification_required' src/` → 10 lines, rc=0 | **holds** |
+
+### Rows changed in this repair pass
+
+| Row | Was | Now | Why |
+|---|---|---|---|
+| Counts, header summary (line ~39) | "`1,064` `.ts`/`.tsx` files under `src/` (70,937 lines)" | 286,343 lines combined (215,406 `.ts` + 70,937 `.tsx`) | D1 — 70,937 is the `.tsx`-only subtotal |
+| Counts, source-scale bullet | "**1,064** `.ts`/`.tsx` files, **70,937** lines under `src/`" | same split, 286,343 combined | D1, second occurrence |
+| Client discovery, remote-probe bullet | `clientToOpenClawTarget` "consumed only by … client-feed … and interview handlers (`answer/route.ts:523`, `state/route.ts:74`)" | exactly 3 consumers: `events/client-feed/route.ts:85`, `lib/bridge/dispatch.ts:38`, `lib/operator/goals.ts:302`; interview handlers call `getClientContext()` | D2 — named non-consumers, omitted two real ones |
+| Booking, table bullet | "none of the enumerated names is a booking… table" | names the substring noise (`notebooks` `:1606`, `notebook_sources`:1619`) | accuracy; keeps the grep reproducible |
+| Booking, route bullet | "`/api/*` inventory … has no `booking`, `appointment`, `calendar` or `availability` path" | no `booking`/`appointment`/`calendar` path; `src/app/api/operator/research/availability/route.ts` exists and reports Research-module *provider* availability, not scheduling | D3 — literally false sentence |
+| Setup readiness, build-progress citation | `building/page.tsx:20` (stage labels) | `:22` | citation drift (verified: `const STAGE_LABELS` at `:22`) |
+| Setup readiness, tenant-ready citation | route `:9`, 403 at `:11` | `missing[]` at `:13`, 403 at `:12` | citation drift (verified) |
+| Surfaces table, build-progress row | `building/page.tsx:9-21` | `:9-22` | citation drift |
+| Counts, scheduled-jobs bullet | "cron table (`:426+`)" | `JOBS` table starts at `:426`; 36 `expr:` occurrences minus the type declaration line | makes the 35 reproducible |
+| Header provenance rows | PBB-064 / rev-lane-c only | adds the PBB-085 repair pass worktree and branch | accuracy |
+| Word count in the build receipt | 2,670 | 2,680 (reported by the builder's own receipt outside this file) | citation drift; `wc -w` = 2680 |
+
+No claim was removed. No ABSENT claim was downgraded: all seven still hold at capability level
+after re-derivation with a valid instrument and a control per row.
+
+### Operational surfaces — render-component check (repair pass)
+
+Every row of "Client-visible operational status surfaces" was re-checked to name the component
+that renders it, at the cited line: `HealthIndicator` export at `src/components/HealthIndicator.tsx:65`,
+mounted `<HealthIndicator viewerRole="client" />` at `src/app/page.tsx:476`, `:593` and
+`src/app/tasks/by-department/page.tsx:326`; `export function StatusPill` at
+`src/components/kanban/StatusPill.tsx:46`; `export function BlockedReasonPanel` at
+`src/components/TaskOverviewPanels.tsx:468`; `<TaskPublishSummaryPanel taskId={task.id} />` at
+`src/components/TaskModal.tsx:599`; `data-testid="publish-summary-area"` at
+`src/components/MarketingPublishButton.tsx:261`; the F36 sync strip comment at
+`src/app/campaigns/[id]/page.tsx:346` with the offline derivation at `:171`; the three
+`fetch('/api/conversational-ai/…')` calls at `src/app/conversational-ai/page.tsx:43`, `:52`, `:76`;
+the two recommendation fetches at `src/components/ceo-board/RecommendationsSection.tsx:35`, `:48`;
+and the `state.kind === 'not_ready'` branch at `src/components/council/CouncilOutcomeForm.tsx:162-167`.
+All eight rows are accurate; none changed.
+
+### Method note for this pass
+
+Static read-only re-derivation in the `fix-t03` worktree at the repair branch head, which is the
+build commit `8b5667eacd6174321d04b157e10a92963ffcdf56`. No app start, no dev server, no
+database, no test suite, no network call — so no real database was ever touched.
+`scripts/ci/fast_guards.sh` / `fast_guards.py` were not run (prohibited). Nothing was pushed;
+no pull request; no merge.
