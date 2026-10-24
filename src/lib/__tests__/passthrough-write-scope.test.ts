@@ -427,16 +427,20 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
   // defect, not this PR's). It is a service-to-service shipper ingest whose
   // only browser touch is GET /api/launch-runs, so it belongs in
   // BEARER_REQUIRED_WRITE_ROUTES, which is where it now is.
-  it('API routes exporting a mutating method: 161 (literal assertion)', () => {
-    expect(allMutatingRoutes.length).toBe(161);
+  // re-derived 2026-10-24 for T-31 (PBB-232 merge lane): POST /api/setup/readiness
+  // added one mutating route; it is called by the setup panel (interface
+  // classification, so the every-route classification test stays green) and is
+  // not webhook-gated, so both censuses move by exactly one.
+  it('API routes exporting a mutating method: 162 (literal assertion)', () => {
+    expect(allMutatingRoutes.length).toBe(162);
   });
 
   it('protected by isWebhookSecretRoute: 7 (5 static + 2 dynamic — middleware src/middleware.ts:137-167)', () => {
     expect(webhookProtectedCount).toBe(7);
   });
 
-  it('non-webhook write routes: 154 (161 mutating − 7 webhook-protected; tenant authentication remains required)', () => {
-    expect(nonWebhookCount).toBe(154);
+  it('non-webhook write routes: 155 (162 mutating − 7 webhook-protected; tenant authentication remains required)', () => {
+    expect(nonWebhookCount).toBe(155);
   });
 
   it('interface call templates found by multi-line scanner', () => {
