@@ -28,6 +28,11 @@
  *   - NEVER blocks/rolls back DB state. Notification is downstream of the write.
  *   - Gateway-routed only: delegates to notify.ts notifyOwner() →
  *     `openclaw message send` (spec §8 / MEMORY: never a direct Bot API call).
+ *   - D14 (requester-origin routing): each report FIRST resolves the task's
+ *     canonical origin record and delivers to that recorded conversation
+ *     (notifyOrigin: Telegram chat/thread, or the OpenClaw-app gateway
+ *     session). The global owner destination is only the fallback for a task
+ *     with no origin record — see deliverTaskReport below.
  *   - Test/CI gate: OWNER_NOTIFY_TELEGRAM_DISABLED=1 suppresses sends (honored
  *     inside notify.ts). Must NOT be inherited by a live box (W5 edge case).
  *
@@ -64,10 +69,129 @@
 
 import path from 'path';
 import { queryOne } from '@/lib/db';
-import { notifyOwner } from '@/lib/notify';
+import { notifyOwner, notifyOrigin, type DeliveryTarget } from '@/lib/notify';
+import { resolveRequesterRoute, type RequesterRoute } from '@/lib/jobs/trust-engine';
 import { getMissionControlUrl } from '@/lib/config';
 import type { Task, Agent } from '@/lib/types';
 import type { SOP } from '@/lib/sops';
+
+// ---------------------------------------------------------------------------
+// D14 — requester-origin routing (status/report-back)
+// ---------------------------------------------------------------------------
+//
+// These reports used to ALWAYS go to the global owner Telegram destination.
+// For a task that came from a real requester conversation that is the wrong
+// audience: "Global-owner Telegram text is not proof of media delivery to the
+// requesting conversation." Each report now resolves the task's CANONICAL
+// ORIGIN RECORD (tasks.requester_channel / requester_chat_id /
+// requester_session_key — the same record the trust engine's report-back loop
+// reads) and delivers THERE: the requester's Telegram chat/thread, or their
+// OpenClaw-app gateway session. The owner destination remains the fallback for
+// a task with NO origin record (operator-created work), byte-for-byte the
+// pre-D14 behavior.
+//
+// TENANT/ACCOUNT BOUNDARY: the destination is resolved ONLY from the task's
+// own row — never a global target, never another task's conversation, never a
+// guessed chat id (same precedence rule as trust-engine.resolveRequesterRoute,
+// reused so the two lanes can never disagree). A route that exists but names no
+// addressable destination REFUSES rather than downgrading to the owner.
+
+export interface ReportDestination {
+  lane: 'chat' | 'session' | 'hq-chat' | 'owner';
+  address: string | null;
+  channel: string;
+}
+
+export function resolveReportDestination(task: {
+  requester_channel: string | null;
+  requester_chat_id: string | null;
+  requester_session_key?: string | null;
+}): ReportDestination {
+  const route: RequesterRoute | null = resolveRequesterRoute({
+    requester_channel: task.requester_channel ?? null,
+    requester_chat_id: task.requester_chat_id ?? null,
+    requester_session_key: task.requester_session_key ?? null,
+  });
+  if (!route) return { lane: 'owner', address: null, channel: 'owner' };
+  return { lane: route.route, address: route.address, channel: route.channel };
+}
+
+export interface ReportDelivery {
+  delivered: boolean;
+  destination: ReportDestination;
+  /** Set when the send was deliberately skipped (never a lost report). */
+  skipped?: string;
+}
+
+/**
+ * Deliver one report for a task to its recorded requester origin, falling back
+ * to the owner destination ONLY when the task has no origin record at all.
+ *
+ * `kind: 'done'` additionally honors the trust engine's completion stamp
+ * read-only: when `completion_sent_at` is already stamped the requester has
+ * already received the canonical done report, so this funnel must not double
+ * send into the same conversation. It never writes the stamp — the trust
+ * engine remains the single writer of its own claim columns.
+ */
+export function deliverTaskReport(
+  taskId: string,
+  message: string,
+  opts: { kind?: 'assigned' | 'started' | 'done' | 'held' } = {},
+): ReportDelivery {
+  let row: {
+    requester_channel: string | null;
+    requester_chat_id: string | null;
+    requester_session_key?: string | null;
+    completion_sent_at?: string | null;
+  } | undefined;
+  try {
+    row = queryOne(
+      `SELECT requester_channel, requester_chat_id, requester_session_key, completion_sent_at
+         FROM tasks WHERE id = ?`,
+      [taskId],
+    );
+  } catch {
+    // Pre-migration DB without requester_session_key (column added by migration
+    // 127) — degrade to the columns that exist, never to a guessed destination.
+    try {
+      row = queryOne(
+        `SELECT requester_channel, requester_chat_id, NULL AS requester_session_key, completion_sent_at
+           FROM tasks WHERE id = ?`,
+        [taskId],
+      );
+    } catch {
+      row = undefined;
+    }
+  }
+
+  const destination = resolveReportDestination({
+    requester_channel: row?.requester_channel ?? null,
+    requester_chat_id: row?.requester_chat_id ?? null,
+    requester_session_key: row?.requester_session_key ?? null,
+  });
+
+  if (destination.lane === 'owner') {
+    // No origin record: the pre-D14 owner-funnel behavior, preserved exactly
+    // (including notifyOwner's MSG-07 undeliverable escalation).
+    return { delivered: notifyOwner(message), destination };
+  }
+
+  if (opts.kind === 'done' && row?.completion_sent_at) {
+    return {
+      delivered: false,
+      destination,
+      skipped:
+        'requester already received the completion report (completion_sent_at stamped) — no duplicate send',
+    };
+  }
+
+  const target: DeliveryTarget = {
+    address: destination.address ?? '',
+    channel: destination.channel,
+    route: destination.lane,
+  };
+  return { delivered: notifyOrigin(target, message), destination };
+}
 
 // ---------------------------------------------------------------------------
 // Field resolution
@@ -240,7 +364,9 @@ export function notifyOwnerAssigned(
     if (!f) return false;
     const dept = deptLabel(f.department);
     const msg = `📥 I'm sending this task to the *${dept}* department.\n\n*Task:* ${f.title}`;
-    return notifyOwner(msg);
+    // D14: to the recorded requester origin (owner fallback only when the task
+    // carries no origin record).
+    return deliverTaskReport(taskId, msg, { kind: 'assigned' }).delivered;
   } catch (err) {
     console.error(
       '[owner-reports] notifyOwnerAssigned error (non-fatal): %s',
@@ -275,7 +401,9 @@ export function notifyOwnerStarted(
       `*Persona:* ${f.persona ?? 'auto-select'}`,
       `*SOP:* ${f.sop ?? '—'}`,
     ];
-    return notifyOwner(lines.join('\n'));
+    // D14: to the recorded requester origin (owner fallback only when the task
+    // carries no origin record).
+    return deliverTaskReport(taskId, lines.join('\n'), { kind: 'started' }).delivered;
   } catch (err) {
     console.error(
       '[owner-reports] notifyOwnerStarted error (non-fatal): %s',
@@ -313,7 +441,11 @@ export function notifyOwnerDone(
       `*SOP:* ${f.sop ?? '—'}`,
       `*Persona:* ${f.persona ?? '—'}`,
     ];
-    return notifyOwner(lines.join('\n'));
+    // D14: the completion report goes to the recorded requester conversation
+    // (Telegram chat/thread or OpenClaw-app session) — the global owner
+    // Telegram destination is NOT proof of media delivery to the requester.
+    // Owner fallback only when the task carries no origin record at all.
+    return deliverTaskReport(taskId, lines.join('\n'), { kind: 'done' }).delivered;
   } catch (err) {
     console.error(
       '[owner-reports] notifyOwnerDone error (non-fatal): %s',
@@ -371,7 +503,9 @@ export function notifyOwnerHeld(
       reason ? `*Why:* ${reason}` : null,
       `I'll report again as soon as it starts.`,
     ].filter((l): l is string => l !== null);
-    return notifyOwner(lines.join('\n'));
+    // D14: to the recorded requester origin (owner fallback only when the task
+    // carries no origin record).
+    return deliverTaskReport(taskId, lines.join('\n'), { kind: 'held' }).delivered;
   } catch (err) {
     console.error(
       '[owner-reports] notifyOwnerHeld error (non-fatal): %s',

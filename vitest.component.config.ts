@@ -157,6 +157,10 @@ export default defineConfig({
       // Gap F - deliverables: pdf/audio preview + download for every file type,
       // so a web client is never left with only Finder-reveal, real render proof.
       'tests/unit/cc-gap-f-deliverables-render.test.tsx',
+      // S75-W08-U2 (D14) — media presentation: image-TYPED deliverables through
+      // the image preview path, playable audio/video, revision + approval state
+      // beside character/storyboard deliverables, real render proof.
+      'tests/unit/w08-u2-deliverables-media-render.test.tsx',
       // Gap B — focus-view Kanban labels blocked cards (they share the Review
       // column under the PRD's five-column rule) so blocked never reads as review.
       'tests/unit/cc-gap-b-focus-blocked-badge.test.tsx',
@@ -166,6 +170,10 @@ export default defineConfig({
       'tests/unit/cc-dept-task-count-badge.test.tsx',
       // Intelligence Settings links to the /personas category browser; /personas shows the persona fields.
       'tests/unit/cc-persona-categories-link.test.tsx',
+      // CC feature-wiring recovery (2026-10-21): the DA feed's migration-173
+      // review fields reach the screen — risks/alternatives + recommended
+      // modifications sections, review-type badge, honest empty states.
+      'tests/unit/cc-da-review-fields.test.tsx',
     ],
     env: { NODE_ENV: 'test' },
     testTimeout: 15000,
