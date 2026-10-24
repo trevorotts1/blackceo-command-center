@@ -28,6 +28,7 @@ import { SSEDebugPanel } from '@/components/SSEDebugPanel';
 import { useSSE } from '@/hooks/useSSE';
 import { Breadcrumb } from '@/components/Breadcrumb';
 import { unwrapAgents } from '@/lib/api-envelope';
+import { carryForwardStaleCards } from '@/lib/board-projection';
 import type { Task } from '@/lib/types';
 
 export default function AllTasksPage() {
@@ -45,6 +46,11 @@ export default function AllTasksPage() {
   const [lastRefresh, setLastRefresh] = useState<string | null>(null);
   const refreshRequest = useRef<AbortController | null>(null);
   const refreshGeneration = useRef(0);
+  // PBB-073 / T-35 — the cards the board was ALREADY showing. A card whose
+  // source record disappears on refresh is carried forward as STALE (with the
+  // last event time the board observed) instead of silently vanishing or being
+  // left in the column it used to occupy.
+  const knownTasks = useRef<Task[]>([]);
 
   // MR-44 (fix2): this board is cross-department (departmentFilter={null}), so
   // it resolves the GLOBAL "Tasks Due" filter window (env override / fleet
@@ -78,7 +84,11 @@ export default function AllTasksPage() {
     }
     if (results[1].status === 'fulfilled') {
       if (Array.isArray(results[1].value)) {
-        setTasks(results[1].value);
+        // PBB-073 / T-35 — keep deleted-source cards visible as STALE.
+        const carried = carryForwardStaleCards(knownTasks.current, results[1].value);
+        const nextTasks = [...results[1].value, ...carried];
+        setTasks(nextTasks);
+        knownTasks.current = nextTasks;
         setLastRefresh(new Date().toLocaleTimeString());
       } else errors.push('Tasks: invalid response. Existing cards have been preserved.');
     }

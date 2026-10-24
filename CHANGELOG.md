@@ -288,6 +288,7 @@ Workforce Interview to make it yours." A bare standardPrebuild (standardReady) s
 
 ## [Unreleased]
 
+- unit/PBB-073-T35: feat(kanban): bind the board to REAL lifecycle events instead of the `tasks.status` mirror — a card's column now comes from the newest `task_events` row, a deleted source record is carried forward as STALE (`source_missing`), a stream stalled past `KANBAN_EVENT_STALE_AFTER_HOURS` (default 6h, `done` exempt) is STALE with its last event time, and an unrecognised `to_status` is surfaced as UNKNOWN instead of dropped. Stale/unknown cards render in an explicit read-only "Stale / Unknown" lane (`taskToColumnId` prefers `lifecycle`), so nothing sits silently in a column it can no longer prove. Test: `tests/unit/pbb073-t35-kanban-lifecycle-events.test.ts` (throwaway sqlite only — real `tasks`/`task_events` DDL, real loader SQL: transition moves the card, deleted source → STALE, stalled stream → STALE with timestamp, unknown event type → UNKNOWN with no crash).
 - unit/W2-B-U1: feat(ad-campaigns): optional title_prefix on ad-campaign epic title/description (W2-B-U1, manual H3 step 1) (merge fb410817ac92)
 - cc/unit/S75-W08-U1: W08-U1 CC: replay-safe stage moves — per-cycle intent identity (repair) (merge 93bb1e981f7e)
 

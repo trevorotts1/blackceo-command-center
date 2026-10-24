@@ -6,7 +6,7 @@ import { useMissionControl } from '@/lib/store';
 import { ErrorState } from './podcast/states';
 import { X } from 'lucide-react';
 import { triggerAutoDispatch, shouldTriggerAutoDispatch } from '@/lib/auto-dispatch';
-import type { Task, TaskStatus, BugTicket, BugStatus } from '@/lib/types';
+import type { Task, TaskStatus, BugTicket, BugStatus, LifecycleCard } from '@/lib/types';
 import { TaskModal } from './TaskModal';
 import { needsPlanningAnswer } from '@/lib/board/planning-chip';
 import { AUDIENCE_ASK_TEXT, needsAudienceAnswer, writtenForLabel, writtenForChipLabel } from '@/lib/board/audience-chip';
@@ -33,7 +33,7 @@ import {
   triadMissingPillText,
 } from '@/lib/board-labels';
 import { visibleRange, thumbMetrics, trackClickToScrollLeft, hasOverflow } from '@/lib/board/kanban-scroll';
-import { taskToColumnId, columnIdToStatus } from '@/lib/board-projection';
+import { taskToColumnId, columnIdToStatus, STALE_COLUMN_ID } from '@/lib/board-projection';
 import { canonicalDeptFromAnyLabel, canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 
 // Board kind: 'task' renders the existing 6-column task board (unchanged);
@@ -100,6 +100,8 @@ const COLUMN_TOOLTIPS: Record<string, string> = {
   review:      'Finished — being QC-checked before Done.',
   blocked:
     'Stuck, needs attention (a system fix or your input); should escalate to get fixed, not sit here.',
+  stale:
+    'No longer provable from the lifecycle event stream: the source record was deleted, the stream stalled past the threshold, or the newest event carries a status the board does not recognise. The card names its last event time.',
   done: 'Completed and approved.',
 };
 
@@ -110,6 +112,11 @@ const BOARD_PRESETS: Record<BoardKind, ColumnDef[]> = {
     { id: 'in_progress', label: 'In Progress', gradient: 'column-pill-progress', tooltip: COLUMN_TOOLTIPS.in_progress, maxWip: 5 },
     { id: 'review',      label: 'Review / QC', gradient: 'column-pill-review',   tooltip: COLUMN_TOOLTIPS.review,     maxWip: 8 },
     { id: 'blocked',     label: 'Blocked',     gradient: 'column-pill-blocked',  tooltip: COLUMN_TOOLTIPS.blocked },
+    // PBB-073 / T-35 — the explicit attention lane. Read-only placement: it
+    // holds cards the event stream can no longer prove (deleted source, stalled
+    // stream, unknown event type), so a human sees them instead of trusting a
+    // column they were silently left in.
+    { id: STALE_COLUMN_ID, label: 'Stale / Unknown', gradient: 'column-pill-blocked', tooltip: COLUMN_TOOLTIPS.stale },
     { id: 'done',        label: 'Done',        gradient: 'column-pill-done',     tooltip: COLUMN_TOOLTIPS.done },
   ],
   bug: [
@@ -292,6 +299,9 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
   // columns, unchanged). Computed early (used by the scroll-tracking effects
   // below, not just the render loop).
   const COLUMNS = BOARD_PRESETS[boardKind];
+  // PBB-073 / T-35 — the stale/unknown lane is a read-only attention lane, so
+  // it is never a MOVE target (the server has no such status).
+  const MOVE_COLUMNS = COLUMNS.filter((c) => c.id !== STALE_COLUMN_ID);
 
   // ── Mobile column picker (board mobile-responsiveness finding) ───────────
   // Below `lg`, columns no longer stack vertically full-width — they render
@@ -731,6 +741,9 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
    * this, dropping on Blocked always 400'd and silently snapped back.
    */
   const handleColumnMove = (task: Task, targetColumnId: string) => {
+    // The stale/unknown lane is a read-only ATTENTION lane, not a status. A
+    // drop/“move to” aimed at it is a no-op (the server has no such status).
+    if (targetColumnId === STALE_COLUMN_ID) return;
     const targetStatus = columnIdToStatus(targetColumnId);
     if (task.status === targetStatus) return;
 
@@ -1184,7 +1197,7 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
           {/* Bulk move dropdown */}
           <div className="flex items-center gap-1.5 flex-wrap">
             <span className="text-xs text-brand-200 hidden sm:inline">Move to:</span>
-            {COLUMNS.filter((c) => c.id !== 'blocked').map((col) => (
+            {COLUMNS.filter((c) => c.id !== 'blocked' && c.id !== STALE_COLUMN_ID).map((col) => (
               <button
                 key={col.id}
                 type="button"
@@ -1450,7 +1463,8 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
                 </div>
               ))
             ) : (
-              /* Task Board — 6 columns, with loading gate above */
+              /* Task Board — six status lanes + the stale/unknown attention
+                 lane, with loading gate above */
               COLUMNS.map((column) => {
                 const columnTasks = getTasksByStatus(column.id);
                 const atCapacity = isColumnAtCapacity(column, columnTasks.length);
@@ -1516,7 +1530,7 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
                           audience + ask), never created there — the API rejects
                           create-as-blocked. Hiding the button keeps it from
                           being a control that always errors. */}
-                      {column.id !== 'blocked' && (
+                      {column.id !== 'blocked' && column.id !== STALE_COLUMN_ID && (
                         <button
                           type="button"
                           onClick={() => {
@@ -1593,7 +1607,7 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
                                   if (tid !== task.id) return;
                                   handleColumnMove(task, targetColumnId);
                                 }}
-                                columns={COLUMNS}
+                                columns={MOVE_COLUMNS}
                                 currentColumnId={column.id}
                                 columnTaskCounts={Object.fromEntries(
                                   COLUMNS.map((c) => [c.id, getTasksByStatus(c.id).length]),
@@ -1611,7 +1625,7 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
                               onAnswer={() => openAnswer(task)}
                               isDragging={draggedTask?.id === task.id}
                               isCompleted={column.id === 'done'}
-                              columns={COLUMNS}
+                              columns={MOVE_COLUMNS}
                               currentColumnId={column.id}
                               onMove={handleColumnMove}
                               columnTaskCounts={Object.fromEntries(
@@ -1682,6 +1696,47 @@ export interface TaskCardProps {
   onMove: (task: Task, targetColumnId: string) => void;
   /** Current task count per column id, for WIP limit enforcement in the Move menu. */
   columnTaskCounts?: Record<string, number>;
+}
+
+/**
+ * PBB-073 / T-35 — card-face lifecycle chip.
+ *
+ * Renders NOTHING for a live card. For a card the event stream can no longer
+ * prove it states the condition AND the last event time, verbatim, so the
+ * operator never has to guess whether a column is real:
+ *   - source record deleted      → "STALE · source deleted · <time>"
+ *   - stalled past the threshold → "STALE · no event since <time>"
+ *   - unrecognised event status  → "UNKNOWN · <status>"
+ */
+export function LifecycleChip({ lifecycle }: { lifecycle?: LifecycleCard | null }) {
+  if (!lifecycle || lifecycle.state === 'live') return null;
+
+  const lastEvent = lifecycle.last_event_at;
+  const timeNote = lastEvent ? `last event ${lastEvent}` : 'no event on record';
+
+  if (lifecycle.state === 'unknown') {
+    const kind = lifecycle.unknown_event_type ?? 'unrecognised status';
+    return (
+      <span
+        data-testid="lifecycle-chip-unknown"
+        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-purple-100 text-purple-800 border border-purple-300"
+        title={`Newest lifecycle event carries a status the board does not recognise (${kind}). It is surfaced as UNKNOWN instead of being dropped. ${timeNote}.`}
+      >
+        UNKNOWN · {kind}
+      </span>
+    );
+  }
+
+  const detail = lifecycle.stale_reason === 'source_missing' ? 'source deleted' : 'no event since';
+  return (
+    <span
+      data-testid="lifecycle-chip-stale"
+      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-red-100 text-red-800 border border-red-300"
+      title={`This card's lifecycle can no longer be proven from the event stream (${detail}). ${timeNote}.`}
+    >
+      STALE · {detail} {lastEvent ?? '—'}
+    </span>
+  );
 }
 
 /**
@@ -1791,6 +1846,11 @@ export function TaskCard({ task, onDragStart, onClick, onAnswer, isDragging, isC
       <div className="flex flex-wrap gap-1.5 mb-3">
         {/* Status Pill — FIX 51a: shared extracted component (kanban/StatusPill.tsx) */}
         <StatusPill status={task.status} />
+
+        {/* PBB-073 / T-35 — lifecycle truth. A card the event stream can no
+            longer prove is labelled here, with the LAST event time it has, so
+            it can never sit silently in a column looking healthy. */}
+        <LifecycleChip lifecycle={task.lifecycle} />
 
         {/* P2-01 step 2 — "why is this here?" affordance: on a Being-Prepared
             (backlog) card, shows WHICH triad element(s) are still missing.
