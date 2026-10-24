@@ -49,7 +49,12 @@
  *
  * Timestamps are compared as INSTANTS, never as strings: ISO-8601 permits both
  * `...T10:20Z` and `...T10:20:30Z`, and lexically the minute-only form sorts
- * AFTER the second-precision one.
+ * AFTER the second-precision one. An instant must also read back as the date
+ * that was written: `Date.parse` rolls `2026-02-30` over to `2026-03-02`.
+ *
+ * Paths are compared in ONE spelling: `./package.json`, `src/../package.json`
+ * and `package.json/` are all `package.json`, and a path that is absolute or
+ * climbs out of the repo is refused (CANDIDATE_FILE_INVALID), never ignored.
  *
  * Fail-closed everywhere: a missing fact is a finding, never a pass. There is
  * no branch in this file where "not measured" renders green.
@@ -66,6 +71,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { posix } from 'node:path';
 
 // ─── Ownership ──────────────────────────────────────────────────────────────
 
@@ -143,8 +149,11 @@ export function staleEventContractFingerprint(): string {
 
 // ─── Receipt shapes (PREP-MERGE §3.4) ───────────────────────────────────────
 
-export type MergeMethod = 'merge' | 'squash' | 'rebase';
-export type ProofMethod = 'ancestry' | 'tree_equality' | 'content_equivalence';
+/** Closed vocabularies: the TS union is not enforced on JSON read from a remote. */
+export const MERGE_METHODS = ['merge', 'squash', 'rebase'] as const;
+export const PROOF_METHODS = ['ancestry', 'tree_equality', 'content_equivalence'] as const;
+export type MergeMethod = (typeof MERGE_METHODS)[number];
+export type ProofMethod = (typeof PROOF_METHODS)[number];
 export type CompatibilityCaseId = 'BC-01' | 'BC-02' | 'BC-03' | 'BC-04' | 'BC-05' | 'BC-06' | 'BC-07' | 'BC-08';
 
 export interface LeaseRecord {
@@ -265,7 +274,38 @@ function isNonEmpty(value: unknown): value is string {
 }
 
 function isIsoUtc(value: unknown): value is string {
-  return typeof value === 'string' && ISO_RE.test(value) && Number.isFinite(Date.parse(value));
+  if (typeof value !== 'string' || !ISO_RE.test(value)) return false;
+  const ms = Date.parse(value);
+  if (!Number.isFinite(ms)) return false;
+  // Date.parse rolls 02-30 over to 03-02 and hour 24 into the next day. The
+  // instant must read back as the date and time that was written.
+  const back = new Date(ms).toISOString();
+  return back.slice(0, 16) === value.slice(0, 16) && (value[16] !== ':' || back.slice(16, 19) === value.slice(16, 19));
+}
+
+/**
+ * A run id is a positive integer or a non-empty string, compared with `===`.
+ * Absent, null, `{}` and `1`-vs-`"1"` never bind a claim to a remote run.
+ */
+function isRunId(value: unknown): value is string | number {
+  return (typeof value === 'number' && Number.isSafeInteger(value) && value > 0) || isNonEmpty(value);
+}
+
+/**
+ * The one spelling of a repo-relative path, or null when the value is not one
+ * (absolute, climbs out of the repo, empty, or the repo root itself).
+ */
+export function normalizeRepoPath(value: unknown): string | null {
+  if (!isNonEmpty(value) || value.startsWith('/')) return null;
+  const path = posix.normalize(value).replace(/\/+$/, '');
+  if (path === '' || path === '.' || path === '..' || path.startsWith('../')) return null;
+  return path;
+}
+
+/** Every valid path a candidate changes, in its one spelling. */
+function candidatePaths(candidate: CandidateRecord): string[] {
+  const files = Array.isArray(candidate.files) ? candidate.files : [];
+  return files.map(normalizeRepoPath).filter((file): file is string => file !== null);
 }
 
 /**
@@ -298,15 +338,15 @@ function push(findings: Finding[], code: string, detail: string): void {
 
 /** A candidate touches a generated tree? */
 export function touchesGenerated(candidate: CandidateRecord): boolean {
-  return (candidate.files ?? []).some((file) =>
+  return candidatePaths(candidate).some((file) =>
     GENERATED_PREFIXES.some((prefix) => file === prefix.replace(/\/$/, '') || file.startsWith(prefix)),
   );
 }
 
 /** Every path two candidates both change. */
 export function sharedPaths(a: CandidateRecord, b: CandidateRecord): string[] {
-  const right = new Set(b.files ?? []);
-  return (a.files ?? []).filter((file) => right.has(file));
+  const right = new Set(candidatePaths(b));
+  return [...new Set(candidatePaths(a))].filter((file) => right.has(file));
 }
 
 // ─── Single receipt ─────────────────────────────────────────────────────────
@@ -321,6 +361,27 @@ export function verifyMergeReceipt(
 ): Verdict {
   const findings: Finding[] = [];
   const obligations = new Set(receipt.open_obligations ?? []);
+
+  // ── Candidates: at least one, one record per task, real paths ───────────
+  if (!Array.isArray(receipt.candidates) || receipt.candidates.length === 0) {
+    push(findings, 'CANDIDATE_SET_EMPTY', 'a promotion of no candidate proves nothing');
+  }
+  const seenTasks = new Set<string>();
+  for (const candidate of receipt.candidates ?? []) {
+    if (seenTasks.has(candidate.task_id)) {
+      push(findings, 'CANDIDATE_DUPLICATE', `task ${candidate.task_id} has more than one candidate record`);
+    }
+    seenTasks.add(candidate.task_id);
+    const files: unknown[] = Array.isArray(candidate.files) ? candidate.files : [];
+    const bad = files.filter((file) => normalizeRepoPath(file) === null);
+    if (files.length === 0 || bad.length > 0) {
+      push(
+        findings,
+        'CANDIDATE_FILE_INVALID',
+        `${candidate.task_id} must list the repo-relative paths it changes; refused: ${JSON.stringify(files.length === 0 ? candidate.files ?? null : bad)}`,
+      );
+    }
+  }
 
   // ── Identity / ownership ────────────────────────────────────────────────
   if (receipt.repo_alias !== CC_REPO_ALIAS) {
@@ -443,10 +504,14 @@ export function verifyMergeReceipt(
     }
     // A check claim is only proof if the REMOTE reported that run. Anything
     // else is a check nobody ran, and it renders green only if we stay blind.
+    // The run id is required and compared exactly: no id binds nothing.
+    if (!isRunId(check.run_id)) {
+      push(findings, 'CHECK_RUN_ID_INVALID', `context "${check.context}" names no run id`);
+    }
     const backing = remoteRuns.filter(
       (run) => run.context === check.context && run.head_sha === check.head_sha,
     );
-    if (backing.length !== 1 || String(backing[0].run_id) !== String(check.run_id)) {
+    if (backing.length !== 1 || !isRunId(check.run_id) || backing[0].run_id !== check.run_id) {
       push(
         findings,
         'CHECK_NOT_REMOTE',
@@ -496,7 +561,7 @@ export function verifyMergeReceipt(
 
   // ci_receipts: a run the remote reported, and one that passed.
   for (const ci of receipt.ci_receipts ?? []) {
-    if (!isNonEmpty(ci?.workflow) || !isNonEmpty(String(ci.run_id ?? ''))) {
+    if (!isNonEmpty(ci?.workflow) || !isRunId(ci.run_id)) {
       push(findings, 'CI_RECEIPT_INVALID', 'every ci_receipt needs a workflow and a run_id');
       continue;
     }
@@ -507,12 +572,14 @@ export function verifyMergeReceipt(
         `workflow "${ci.workflow}" concluded "${ci.conclusion}"`,
       );
     }
-    const backingRun = remoteRuns.find((run) => String(run.run_id) === String(ci.run_id));
+    // Bound by run id AND name: a reported run relabelled as another workflow
+    // is a workflow nobody ran.
+    const backingRun = remoteRuns.find((run) => run.run_id === ci.run_id && run.context === ci.workflow);
     if (!backingRun) {
       push(
         findings,
         'CI_RECEIPT_NOT_REMOTE',
-        `workflow "${ci.workflow}" run ${ci.run_id} is not a run the remote reported`,
+        `workflow "${ci.workflow}" run ${ci.run_id} is not a run the remote reported under that name`,
       );
     } else if (!isPassingConclusion(backingRun.conclusion)) {
       push(
@@ -526,7 +593,7 @@ export function verifyMergeReceipt(
   // dependencies: named against candidates this promotion proved, and against
   // a contract that actually exists.
   const candidateIds = new Set(receipt.candidates.map((c) => c.task_id));
-  const candidatePaths = new Set(receipt.candidates.flatMap((c) => c.files ?? []));
+  const changedPaths = new Set(receipt.candidates.flatMap(candidatePaths));
   for (const dep of receipt.dependencies ?? []) {
     if (!isNonEmpty(dep?.depends_on_candidate) || !candidateIds.has(dep.depends_on_candidate)) {
       push(
@@ -537,11 +604,11 @@ export function verifyMergeReceipt(
       continue;
     }
     const ref = dep.accepted_contract_ref;
+    const refPath = normalizeRepoPath(ref);
     const knownContract =
       isNonEmpty(ref) &&
-      (CONSUMER_CONTRACT_FILES.includes(ref) ||
-        ref === staleEventContractFingerprint() ||
-        candidatePaths.has(ref));
+      (ref === staleEventContractFingerprint() ||
+        (refPath !== null && (CONSUMER_CONTRACT_FILES.includes(refPath) || changedPaths.has(refPath))));
     if (!knownContract) {
       push(
         findings,
@@ -575,8 +642,40 @@ export function verifyMergeReceipt(
       }
     }
   }
+  // An order is a DAG: peel off every task with nothing left before it (Kahn).
+  // Whatever cannot be peeled sits on a cycle and has no publishable order.
+  const before = new Map<string, Set<string>>();
+  for (const edge of seenEdges) {
+    const [from, to] = edge.split('->');
+    if (!before.has(from)) before.set(from, new Set());
+    if (!before.has(to)) before.set(to, new Set());
+    before.get(to)!.add(from);
+  }
+  let peeled = true;
+  while (peeled) {
+    peeled = false;
+    for (const [task, preds] of before) {
+      if ([...preds].some((pred) => before.has(pred))) continue;
+      before.delete(task);
+      peeled = true;
+    }
+  }
+  if (before.size > 0) {
+    push(
+      findings,
+      'PUBLICATION_ORDER_CYCLE',
+      `publication order is cyclic through ${[...before.keys()].sort().join(', ')} — no task can publish first`,
+    );
+  }
 
   // ── Proof method must match how the promotion actually landed ───────────
+  // A value outside the vocabulary is refused, never classed as a rewrite.
+  if (!(MERGE_METHODS as readonly string[]).includes(receipt.merge_method)) {
+    push(findings, 'MERGE_METHOD_INVALID', `merge_method "${receipt.merge_method}" is not one of ${MERGE_METHODS.join('/')}`);
+  }
+  if (!(PROOF_METHODS as readonly string[]).includes(receipt.proof_method)) {
+    push(findings, 'PROOF_METHOD_INVALID', `proof_method "${receipt.proof_method}" is not one of ${PROOF_METHODS.join('/')}`);
+  }
   const ancestryRequired = receipt.merge_method === 'merge';
   if (ancestryRequired && receipt.proof_method !== 'ancestry') {
     push(
@@ -680,6 +779,10 @@ export function verifyMergeReceipt(
 
   const cases = receipt.cohort?.compatibility_cases ?? [];
   const declaredPairs = new Set(cases.map((c) => [...c.candidates].sort().join('|')));
+  // The single combined owner is a candidate of THIS promotion that itself
+  // writes the shared file — not any name, and not a bystander.
+  const resolver = receipt.candidates.find((c) => c.task_id === receipt.cohort?.shared_files_resolved_by);
+  const resolverPaths = new Set(resolver ? candidatePaths(resolver) : []);
   for (let i = 0; i < receipt.candidates.length; i += 1) {
     for (let j = i + 1; j < receipt.candidates.length; j += 1) {
       const left = receipt.candidates[i];
@@ -687,8 +790,8 @@ export function verifyMergeReceipt(
       const shared = sharedPaths(left, right);
       if (shared.length === 0) continue;
       const pairKey = [left.task_id, right.task_id].sort().join('|');
-      const singletonHit = shared.some((file) => SINGLETON_SHARED_FILES.includes(file));
-      if (singletonHit && !isNonEmpty(receipt.cohort?.shared_files_resolved_by)) {
+      const unowned = shared.filter((file) => SINGLETON_SHARED_FILES.includes(file) && !resolverPaths.has(file));
+      if (unowned.length > 0) {
         push(
           findings,
           'SHARED_FILE_COLLISION',
@@ -715,7 +818,7 @@ export function verifyMergeReceipt(
     );
   }
   const contractTouchers = receipt.candidates.filter((candidate) =>
-    (candidate.files ?? []).some((file) => CONSUMER_CONTRACT_FILES.includes(file)),
+    candidatePaths(candidate).some((file) => CONSUMER_CONTRACT_FILES.includes(file)),
   );
   for (const candidate of contractTouchers) {
     const related = cases.filter((c) => c.candidates.includes(candidate.task_id));
@@ -792,7 +895,9 @@ export interface BatchVerdict extends Verdict {
   /**
    * Findings keyed by receipt id, so a caller can act per receipt. A receipt id
    * used more than once is a defect in its own right, and those entries are
-   * keyed `<id>#1`, `<id>#2` and so on, so one can never swallow the other.
+   * keyed `<id>#1`, `<id>#2` and so on, so one can never swallow the other;
+   * a key already taken (an id that itself spells `<id>#1`) steps to the next
+   * free ordinal. The object has no prototype, so `__proto__` is a plain key.
    */
   byReceipt: Record<string, Finding[]>;
 }
@@ -806,7 +911,8 @@ export function verifyCohortBatch(
   entries: { receipt: MergeReceipt; evidence: RemoteEvidence }[],
 ): BatchVerdict {
   const findings: Finding[] = [];
-  const byReceipt: Record<string, Finding[]> = {};
+  // Own keys only: an id of "__proto__" is an entry, never the prototype.
+  const byReceipt: Record<string, Finding[]> = Object.create(null);
 
   const idTotals = new Map<string, number>();
   for (const { receipt } of entries) {
@@ -825,7 +931,15 @@ export function verifyCohortBatch(
         detail: `receipt id "${entry.receipt.id}" is used by ${total} receipts in this batch - identity must be unique`,
       });
     }
-    byReceipt[total > 1 ? `${entry.receipt.id}#${ordinal}` : entry.receipt.id] = verdict.findings;
+    // A crafted id may already spell `<id>#1`; step past any taken key so no
+    // entry can ever overwrite another.
+    let key = total > 1 ? `${entry.receipt.id}#${ordinal}` : String(entry.receipt.id);
+    let next = ordinal;
+    while (key in byReceipt) {
+      next += 1;
+      key = `${entry.receipt.id}#${next}`;
+    }
+    byReceipt[key] = verdict.findings;
     findings.push(...verdict.findings);
   }
 
