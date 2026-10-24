@@ -238,7 +238,17 @@ export interface CampaignApprovalView {
   /** Current applied-command revision (0 = never commanded). */
   revision: number;
   approval_summary: {
-    state: 'APPROVED' | 'PARTIAL' | 'UNKNOWN' | 'NONE';
+    /**
+     * NO 'APPROVED'. `MANIFEST_FIELD_SOURCES` has six fields with
+     * `source: null` — account binding, CTA, keyword, promised item and
+     * conversation policy versions — and CC has no table that can ever prove
+     * them. `unprovenManifestFields()` therefore always returns a non-empty
+     * set, so an 'APPROVED' roll-up was a value no input could reach: a
+     * permanently false promise in this public type. The roll-up reports the
+     * truth as PARTIAL and NAMES the unproven fields instead. Per-placement
+     * approval is unaffected — a placement is APPROVED at its fingerprint.
+     */
+    state: 'PARTIAL' | 'UNKNOWN' | 'NONE';
     approved_at: string | null;
     approved_by: string | null;
     reason: string;
@@ -269,12 +279,38 @@ function toMs(now: number | string | Date | undefined): number {
   return parseEventTime(now) ?? Date.now();
 }
 
-/** `tasks.due_date` is `YYYY-MM-DD` (or an ISO stamp) — the calendar day. */
+/**
+ * `tasks.due_date` is `YYYY-MM-DD` (or an ISO stamp) — the calendar day.
+ *
+ * The day must be a REAL calendar day. A regex alone accepts '2026-99-99' and
+ * '2026-02-31', and a fabricated day that reaches the calendar is rendered,
+ * approvable and APPROVED — which contradicts "a placement with no real date is
+ * UNKNOWN". So the shape is matched first, then the day is round-tripped
+ * through Date.UTC and rejected unless it survives unchanged. Anything after
+ * the day must be an ISO datetime separator (`T` or a space) and must itself
+ * parse, so a junk suffix never smuggles a date out.
+ */
 export function calendarDate(value: string | null | undefined): string | null {
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();
-  const match = /^(\d{4}-\d{2}-\d{2})/.exec(trimmed);
-  return match ? match[1] : null;
+  const match = /^(\d{4})-(\d{2})-(\d{2})(.*)$/.exec(trimmed);
+  if (!match) return null;
+  const [, yearText, monthText, dayText, rest] = match;
+  // A trailing datetime is fine only when it IS a datetime.
+  if (rest !== '' && rest[0] !== 'T' && rest[0] !== ' ') return null;
+  if (rest !== '' && parseEventTime(trimmed) === null) return null;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+  // setUTCFullYear (not Date.UTC) so a year under 100 is not folded into 19xx.
+  const probe = new Date(0);
+  probe.setUTCFullYear(year, month - 1, day);
+  probe.setUTCHours(0, 0, 0, 0);
+  if (probe.getUTCFullYear() !== year || probe.getUTCMonth() !== month - 1 || probe.getUTCDate() !== day) {
+    return null; // rolled over: 2026-02-31, 2026-13-45, 2026-02-29 in a non-leap year
+  }
+  return `${match[1]}-${match[2]}-${match[3]}`;
 }
 
 // ─── Fingerprint ────────────────────────────────────────────────────────────
@@ -332,6 +368,18 @@ export function approvalBlockers(task: CampaignTaskSource, channel: string | nul
 // ─── Publication receipts ───────────────────────────────────────────────────
 
 /**
+ * A completion stamp counts as DATED only when the day is a real calendar day
+ * AND the stamp parses. `parseEventTime` alone is not enough: it reads `'0'` as
+ * year 2000 and rolls `'2026-02-31'` forward to March, so a bogus stamp would
+ * still earn a provider completion receipt.
+ */
+function parseCompletionStamp(value: string): number | null {
+  const trimmed = value.trim();
+  if (calendarDate(trimmed) === null) return null;
+  return parseEventTime(trimmed);
+}
+
+/**
  * Map ONE real publish_queue row onto the receipt vocabulary. Fail-closed:
  * a row that is not PROVEN complete is never CURRENT. A `running` row is
  * exactly the D-13 trap (request admitted, reply not completed) — UNKNOWN.
@@ -345,20 +393,32 @@ export function classifyPublication(row: PublishQueueSource | null | undefined):
     return { state: 'UNKNOWN', reason: 'no_publication_receipt', evidence: null };
   }
   const status = (row.status || '').trim().toLowerCase();
-  const completed = typeof row.completed_at === 'string' && row.completed_at.trim().length > 0;
+  const rawCompleted = typeof row.completed_at === 'string' ? row.completed_at : null;
+  const hasCompletedText = rawCompleted !== null && rawCompleted.trim().length > 0;
+  // "Dated" means it parses as a real timestamp. A non-empty string is not a
+  // date: 'not-a-date' and 'yesterday' used to earn CURRENT / provider_completion_receipt,
+  // contradicting "only a dated completion is CURRENT".
+  const completedAt = hasCompletedText ? parseCompletionStamp(rawCompleted) : null;
 
   if (status === 'published' || status === 'completed') {
-    if (!completed) {
+    if (!hasCompletedText) {
       return {
         state: 'UNKNOWN',
         reason: 'completion_status_without_completed_at',
         evidence: `publish_queue:${row.id}`,
       };
     }
+    if (completedAt === null) {
+      return {
+        state: 'UNKNOWN',
+        reason: 'completion_timestamp_unparseable',
+        evidence: `publish_queue:${row.id}@${rawCompleted}`,
+      };
+    }
     return {
       state: 'CURRENT',
       reason: 'provider_completion_receipt',
-      evidence: `publish_queue:${row.id}@${row.completed_at}`,
+      evidence: `publish_queue:${row.id}@${rawCompleted}`,
     };
   }
   if (status === 'verification_required') {
@@ -397,7 +457,14 @@ export function classifyPublication(row: PublishQueueSource | null | undefined):
   };
 }
 
-/** Newest publish row per task (a retried intent can leave several). */
+/**
+ * Newest publish row per task (a retried intent can leave several).
+ *
+ * The ordering is a TOTAL order, so the winner is independent of the order the
+ * rows arrive in. The old fold let an unparseable `updated_at` outrank a real
+ * one whenever the real row was seen first, so the same data set answered
+ * BEHIND in one order and CURRENT in the other.
+ */
 export function newestPublishRow(
   rows: readonly PublishQueueSource[],
   taskId: string,
@@ -405,28 +472,22 @@ export function newestPublishRow(
   let best: PublishQueueSource | null = null;
   for (const row of rows) {
     if (row.task_id !== taskId && row.cc_task_id !== taskId) continue;
-    if (!best) {
-      best = row;
-      continue;
-    }
-    const next = parseEventTime(row.updated_at);
-    const held = parseEventTime(best.updated_at);
-    if (next !== null && held !== null && next !== held) {
-      if (next > held) best = row;
-      continue;
-    }
-    if (next !== null && held === null) best = row;
-    // Deterministic tie-break on id.
-    else if (publishTieBreaks(row, best)) best = row;
+    if (!best || comparePublishRecency(row, best) > 0) best = row;
   }
   return best;
 }
 
-function publishTieBreaks(next: PublishQueueSource, held: PublishQueueSource): boolean {
+/** -1 / 0 / 1. Strict, antisymmetric, transitive — never order-dependent. */
+function comparePublishRecency(next: PublishQueueSource, held: PublishQueueSource): number {
   const nextMs = parseEventTime(next.updated_at);
   const heldMs = parseEventTime(held.updated_at);
-  if (nextMs !== null && heldMs !== null) return nextMs === heldMs && next.id > held.id;
-  return next.id > held.id;
+  if (nextMs !== null && heldMs !== null && nextMs !== heldMs) return nextMs > heldMs ? 1 : -1;
+  // A row whose stamp parses always outranks one whose stamp is garbage: the
+  // malformed row says nothing about when it happened, so it cannot be newest.
+  if (nextMs !== null && heldMs === null) return 1;
+  if (nextMs === null && heldMs !== null) return -1;
+  // Same recency, or both unparseable: deterministic tie-break on id.
+  return next.id === held.id ? 0 : next.id > held.id ? 1 : -1;
 }
 
 // ─── Approval receipts ──────────────────────────────────────────────────────
@@ -607,6 +668,13 @@ export function buildCampaignApprovalView(input: CampaignApprovalInput): Campaig
     const publication = classifyPublication(publishRow);
 
     // ── freshness (C-F13) ──
+    // Freshness answers ONE question: is the lifecycle event stream still
+    // moving? It must never contradict its own reason, so a missing schedule is
+    // NOT folded in here — that fact lives on `date` and in
+    // `approval_blockers: ['scheduled_at']`. The old `date === null → unknown`
+    // overwrote a real STALE verdict while keeping its
+    // 'event_stream_stalled' reason: the state and its own reason disagreed and
+    // the STALE signal C-F13 exists to surface was masked.
     let freshness: FreshnessState = 'live';
     let freshnessReason: string | null = null;
     if (!lastEvent) {
@@ -618,10 +686,6 @@ export function buildCampaignApprovalView(input: CampaignApprovalInput): Campaig
         freshness = 'stale';
         freshnessReason = 'event_stream_stalled';
       }
-    }
-    if (date === null) {
-      freshness = 'unknown';
-      freshnessReason = freshnessReason ?? 'no_scheduled_date';
     }
 
     placements.push({
@@ -687,15 +751,16 @@ export function buildCampaignApprovalView(input: CampaignApprovalInput): Campaig
     } else if (covered.length !== placements.length || invalidated.length > 0) {
       summaryState = 'PARTIAL';
       summaryReason = `placements_unapproved_or_invalidated:${placements.length - covered.length + invalidated.length}`;
-    } else if (unproven.size > 0) {
+    } else {
       // Every placement is approved at its current fingerprint, but manifest
       // fields this repo cannot prove (account binding, CTA, keyword, …) are
-      // still UNKNOWN. The campaign is therefore NOT fully approved.
+      // still UNKNOWN. The campaign is therefore NOT fully approved — and from
+      // CC alone it never can be, because those fields have no source here (see
+      // MANIFEST_FIELD_SOURCES). This is the terminal branch, not a stop on the
+      // way to an 'APPROVED' that no input can reach; the fields are named
+      // below and on every placement so nothing is hidden.
       summaryState = 'PARTIAL';
-      summaryReason = `manifest_fields_unproven:${[...unproven].sort().join(',')}`;
-    } else {
-      summaryState = 'APPROVED';
-      summaryReason = 'all_placements_approved_at_current_fingerprint';
+      summaryReason = `manifest_fields_unproven:${[...unproven].sort().join(',') || 'none'}`;
     }
   }
 

@@ -10,11 +10,11 @@
  * refusal is shown verbatim with its code.
  */
 import { useMemo, useState, useTransition } from 'react';
-import type {
-  CampaignApprovalView,
-  CalendarCellState,
-  PlacementView,
-  PublicationState,
+import {
+  cellStateOf,
+  type CampaignApprovalView,
+  type CalendarCellState,
+  type PublicationState,
 } from '@/lib/campaigns/approval-contract';
 import {
   submitCampaignCommand,
@@ -47,15 +47,11 @@ const PUBLICATION_STYLE: Record<PublicationState, string> = {
   UNREACHABLE: 'bg-rose-100 text-rose-800',
 };
 
-function cellOf(placement: PlacementView): CalendarCellState {
-  if (placement.freshness === 'stale') return 'stale';
-  if (placement.freshness === 'unknown') return 'unknown';
-  if (placement.publication_state === 'CURRENT') return 'published';
-  if (placement.approval_state === 'HELD') return 'held';
-  if (placement.approval_state === 'APPROVED') return 'scheduled';
-  if (placement.approval_state === 'UNKNOWN') return 'unknown';
-  return 'unapproved';
-}
+// The calendar cell is decided in exactly ONE place: `cellStateOf()` in
+// approval-contract.ts. This board used to carry its own `cellOf()` with a
+// different precedence (freshness before publication), so a row that was both
+// published and stale rendered differently here than the contract said it
+// should. There is one rule now, and it is the tested one.
 
 export function CampaignApprovalBoard({ view }: { view: CampaignApprovalView }) {
   const [pending, startTransition] = useTransition();
@@ -203,7 +199,7 @@ export function CampaignApprovalBoard({ view }: { view: CampaignApprovalView }) 
                 </tr>
               ) : (
                 view.placements.map((placement) => {
-                  const cell = cellOf(placement);
+                  const cell = cellStateOf(placement);
                   const held = placement.approval_state === 'HELD';
                   const terminal = placement.task_status === 'done';
                   return (

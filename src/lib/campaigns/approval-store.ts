@@ -3,9 +3,13 @@
  *
  * Reads the REAL rows the projection needs and writes ONLY two things:
  *   • a `campaign_command_receipts` row (this module's own audit surface), and
- *   • for `hold_placement`, the canonical lifecycle transition to `blocked`
- *     via `transition()` — the same path every other board write uses, which
- *     is what actually stops dispatch.
+ *   • for `hold_placement`, `stopCardPermanently()` — the repo's terminal-stop
+ *     chokepoint, which flips the card to `blocked` through the canonical
+ *     lifecycle transition AND writes block_reason, the machine detail and
+ *     exactly one owner notice. Parking the card with a bare lifecycle
+ *     transition to `blocked` is the silent stop
+ *     `scripts/guard-silent-terminal-stops.ts` rejects: the card would stop and
+ *     nobody would be told.
  *
  * It deliberately has NO publish, enqueue, dispatch or provider import. The
  * campaign approval view can approve a manifest and hold one placement; it
@@ -25,7 +29,7 @@ import {
   ensureCampaignCompanyColumn,
   assertCampaignOwnedByCompany,
 } from '@/lib/social/company-context';
-import { transition, TransitionError } from '@/lib/task-lifecycle';
+import { stopCardPermanently } from '@/lib/stop-card';
 import type { LifecycleState } from '@/lib/task-lifecycle';
 import {
   buildCampaignApprovalView,
@@ -328,19 +332,38 @@ export async function applyCampaignCommand(raw: unknown, companyId: string): Pro
   if (decision.effect.kind === 'hold') {
     const taskId = decision.effect.task_id;
     const current = tasks.find((candidate) => candidate.id === taskId);
-    try {
-      await transition(taskId, 'blocked', {
-        actor: command.actor_id,
-        reason: `campaign_approval_hold:${command.purpose}`.slice(0, 500),
-        expectedFrom: (current?.status as LifecycleState | undefined) ?? undefined,
-        source: 'owner',
-      });
-    } catch (error) {
-      const code = error instanceof TransitionError ? error.code : 'TRANSITION_FAILED';
-      const message = error instanceof Error ? error.message : String(error);
-      const refusalCode = code === 'NOT_FOUND' ? 'target_not_found' : 'placement_state_changed';
-      const receipt = refused(command, campaignId, refusalCode, `hold refused (${code}): ${message}`, companyId);
-      return { ok: false, code: refusalCode, reason: refusalCode === 'target_not_found' ? 'campaign not found for this company' : 'placement changed before the hold was applied', status: refusalCode === 'target_not_found' ? 404 : 409, receipt };
+    // NO-SILENT-STOP: a hold parks this placement in `blocked` until a person
+    // answers — a card that will not move again on its own, which is exactly
+    // what this repo's terminal-stop doctrine means by a permanent stop. The
+    // chokepoint writes block_reason and the machine detail, stamps the notice
+    // claim and sends exactly one notice to the owner. A bare transition() to
+    // 'blocked' here is the silent stop scripts/guard-silent-terminal-stops.ts
+    // rejects, and it left the owner with no block_reason and no notice.
+    // `applyBlock` stays on so the chokepoint owns the write and its CAS.
+    const stopped = await stopCardPermanently({
+      taskId,
+      source: command.actor_id,
+      reason: `This campaign placement is on hold and cannot go out until you release it.`,
+      needs: `Review the hold on this placement (${command.purpose}) and answer before it resumes.`,
+      audience: 'OWNER',
+      machineDetail: `campaign_approval_hold:${command.purpose}`.slice(0, 500),
+      expectedFrom: (current?.status as LifecycleState | undefined) ?? undefined,
+    });
+    if (!stopped.blocked) {
+      // The chokepoint never throws: a lost CAS or a vanished row both come
+      // back as `blocked: false`, and the two are told apart by the load above.
+      const refusalCode = current ? 'placement_state_changed' : 'target_not_found';
+      const receipt = refused(command, campaignId, refusalCode, `hold refused (${refusalCode})`, companyId);
+      return {
+        ok: false,
+        code: refusalCode,
+        reason:
+          refusalCode === 'target_not_found'
+            ? 'campaign not found for this company'
+            : 'placement changed before the hold was applied',
+        status: refusalCode === 'target_not_found' ? 404 : 409,
+        receipt,
+      };
     }
     payload = JSON.stringify({ task_id: taskId, to_status: 'blocked' });
   } else {
