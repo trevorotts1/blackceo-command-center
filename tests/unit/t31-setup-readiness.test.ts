@@ -22,6 +22,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
 import Database from 'better-sqlite3';
 
 import {
@@ -30,7 +32,17 @@ import {
   runSetupAction,
   type SetupDeps,
 } from '../../src/lib/readiness/setup';
-import type { ReadinessItemId, ReadinessState } from '../../src/lib/readiness/types';
+import {
+  EmptyReadinessNotice,
+  ItemRow,
+  resolveOverallBadge,
+} from '../../src/components/setup/SetupReadinessPanel';
+import type {
+  ReadinessItem,
+  ReadinessItemId,
+  ReadinessState,
+  SetupReadiness,
+} from '../../src/lib/readiness/types';
 
 const FIXTURE_DIR = path.join(
   process.env.CC_TEST_FIXTURE_ROOT ?? os.tmpdir(),
@@ -241,7 +253,10 @@ test('T-31: an enabled action that succeeds flips the item to READY', async () =
 test('T-31: UNKNOWN is its own state and never rounds up to READY', async () => {
   // Roll-up arithmetic, pinned directly.
   const pairs: Array<[ReadinessState[], ReadinessState]> = [
-    [[], 'READY'],
+    // ASSERTION CHANGED by the PBB-079 repair — this row was [[], 'READY'] and
+    // pinned the defect. Zero rows is zero evidence, and a surface that proved
+    // nothing is UNKNOWN, never READY.
+    [[], 'UNKNOWN'],
     [['READY', 'READY'], 'READY'],
     [['READY', 'UNKNOWN'], 'UNKNOWN'],
     [['UNKNOWN', 'UNKNOWN'], 'UNKNOWN'],
@@ -304,6 +319,126 @@ test('T-31: every item carries the probe that decided it', async () => {
       if (item.state === 'BLOCKED') assert.ok(item.reason, `${item.id} blocked without a reason`);
       if (item.state !== 'BLOCKED') assert.equal(item.reason, undefined, `${item.id} has a stale reason`);
     }
+  } finally {
+    db.close();
+  }
+});
+
+// ── PBB-079 repair: the reviewer's attack, pinned ──────────────────────────
+
+test('T-31: zero evidence rows is UNKNOWN — never READY at any level', () => {
+  assert.equal(rollUp([]), 'UNKNOWN', 'an empty state set must not round up to READY');
+
+  const empty: SetupReadiness = {
+    overall: 'READY', // a payload that lies: no rows, yet claims READY
+    items: [],
+    actions: [],
+    computedAt: '2026-10-24T00:00:00.000Z',
+  };
+  assert.equal(resolveOverallBadge(empty), 'UNKNOWN', 'zero rows must never paint the READY badge');
+  assert.equal(resolveOverallBadge(null), null, 'no payload means no badge at all');
+
+  // A payload that claims READY while a row carries no evidence is not backed,
+  // and the badge must read what the rows actually support.
+  const unbacked: SetupReadiness = {
+    overall: 'READY',
+    items: [
+      { id: 'company_record', label: 'Company record exists', group: 'identity', state: 'READY' } as unknown as ReadinessItem,
+    ],
+    actions: [],
+    computedAt: '2026-10-24T00:00:00.000Z',
+  };
+  assert.equal(resolveOverallBadge(unbacked), 'UNKNOWN', 'a READY no row can back must not reach the badge');
+
+  const notice = renderToStaticMarkup(createElement(EmptyReadinessNotice));
+  assert.match(notice, /Unknown, not Ready/, 'the empty state must say so in plain words');
+});
+
+test('T-31: an item with no evidence renders UNKNOWN instead of throwing', () => {
+  const bare = {
+    id: 'company_record',
+    label: 'Company record exists',
+    group: 'identity',
+    state: 'READY', // claims READY with nothing behind it
+  } as unknown as ReadinessItem;
+
+  const html = renderToStaticMarkup(createElement(ItemRow, { item: bare }));
+  assert.match(html, /Unknown/, 'a row with no evidence reads UNKNOWN');
+  assert.match(html, /no evidence recorded/);
+  assert.doesNotMatch(html, /Ready/, 'an evidence-free row must never read READY');
+});
+
+test('T-31: a throwing clock degrades READY to UNKNOWN and never rejects the surface', async () => {
+  const db = fixtureDb('clock-boom');
+  try {
+    seedReadyBox(db, 'acme');
+    const readiness = await computeSetupReadiness({
+      deps: { ...deps({ db, companyId: 'acme' }), now: () => { throw new Error('clock_boom'); } },
+    });
+    assert.equal(readiness.computedAt, 'clock_unavailable');
+    assert.ok(readiness.items.length >= 8, 'one bad clock must not cost the other rows');
+    for (const item of readiness.items) {
+      assert.notEqual(item.state, 'READY', `${item.id} cannot claim READY without a timestamp`);
+    }
+    assert.equal(itemOf(readiness, 'database').evidence.observed.clockError, 'clock_boom');
+    // A proven fault stays BLOCKED even with a broken clock.
+    assert.equal(itemOf(readiness, 'schema_migrations').state, 'BLOCKED');
+  } finally {
+    db.close();
+  }
+});
+
+test('T-31: a throwing identity lookup is reported as an error, not as an unset variable', async () => {
+  const db = fixtureDb('identity-boom');
+  try {
+    const readiness = await computeSetupReadiness({
+      deps: {
+        ...deps({ db, companyId: null }),
+        companyId: () => { throw new Error('identity_boom'); },
+      },
+    });
+    for (const id of ['company_record', 'company_workspace'] as const) {
+      const item = itemOf(readiness, id);
+      assert.equal(item.state, 'UNKNOWN', `${id} is undecidable, not broken`);
+      assert.equal(item.evidence.observed.error, 'identity_boom', `${id} must name the thrown error`);
+      assert.doesNotMatch(String(item.evidence.observed.detail ?? ''), /MC_COMPANY_ID is unset/);
+    }
+    assert.notEqual(readiness.overall, 'READY');
+  } finally {
+    db.close();
+  }
+});
+
+test('T-31: a throwing owner-login predicate is UNKNOWN, never a rejected surface', async () => {
+  const db = fixtureDb('predicate-boom');
+  try {
+    const readiness = await computeSetupReadiness({
+      deps: {
+        ...deps({ db, companyId: 'acme' }),
+        allowsOwnerLogin: () => { throw new Error('predicate_boom'); },
+      },
+    });
+    const item = itemOf(readiness, 'owner_registration');
+    assert.equal(item.state, 'UNKNOWN');
+    assert.equal(item.evidence.observed.error, 'predicate_boom');
+    assert.ok(readiness.items.length >= 8, 'one bad predicate must not cost the other rows');
+  } finally {
+    db.close();
+  }
+});
+
+test('T-31: READY needs an observation — an empty one degrades to UNKNOWN', async () => {
+  const db = fixtureDb('empty-observation');
+  try {
+    const readiness = await computeSetupReadiness({
+      deps: {
+        ...deps({ db, companyId: 'acme' }),
+        probeGateway: async () => ({ ok: true, detail: {} }),
+      },
+    });
+    const gateway = itemOf(readiness, 'openclaw_gateway');
+    assert.equal(gateway.state, 'UNKNOWN', 'READY cannot rest on an empty observation');
+    assert.equal(gateway.evidence.observed.emptyObservation, 'probe returned no observed values');
   } finally {
     db.close();
   }

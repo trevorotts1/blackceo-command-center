@@ -71,11 +71,27 @@ export interface SetupDeps {
   probeGateway(): Promise<GatewayProbeResult>;
   applyMigrations(db: Database.Database): void;
   syncAgents(): Promise<AgentSyncResult>;
+  /** Owner-login predicate for this host. Injected so a throw can be driven. */
+  allowsOwnerLogin(host: string): boolean;
   now(): string;
 }
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * One observation record, always a record.
+ *
+ * A probe that returned nothing must not render as the literal text
+ * "undefined" under a row: an absent observation is recorded as absent.
+ */
+function evidence(probe: string, observed: Record<string, unknown> | undefined, at: string): ReadinessEvidence {
+  return {
+    probe,
+    observed: observed && typeof observed === 'object' ? observed : { emptyObservation: 'probe returned no observed values' },
+    at,
+  };
 }
 
 /** Bounded TCP connect. Reachability is proven by a completed handshake. */
@@ -148,6 +164,7 @@ const DEFAULT_DEPS: SetupDeps = {
   host: () => configuredPublicOrigin()?.hostname ?? 'localhost',
   probeGateway: () => tcpProbe(process.env.OPENCLAW_GATEWAY_URL || DEFAULT_GATEWAY_URL),
   applyMigrations: (db) => runMigrations(db),
+  allowsOwnerLogin: (host) => registrationAllowsOwnerLogin(host),
   syncAgents: async () => {
     // Loaded lazily: the sync pulls the gateway client, which no readiness read
     // should pay for.
@@ -157,18 +174,19 @@ const DEFAULT_DEPS: SetupDeps = {
   now: () => new Date().toISOString(),
 };
 
-function evidence(probe: string, observed: Record<string, unknown>, at: string): ReadinessEvidence {
-  return { probe, observed, at };
-}
-
 /**
  * Overall roll-up.
  *
  * BLOCKED outranks UNKNOWN because a proven fault is more actionable than an
  * open question, but UNKNOWN outranks READY unconditionally: something
  * undecidable is never a pass.
+ *
+ * An EMPTY state set is UNKNOWN, never READY. Zero evidence rows is not a
+ * clean bill of health — it is a surface that proved nothing, and vacuous
+ * truth must never read as a pass.
  */
 export function rollUp(states: ReadinessState[]): ReadinessState {
+  if (states.length === 0) return 'UNKNOWN';
   if (states.includes('BLOCKED')) return 'BLOCKED';
   if (states.includes('UNKNOWN')) return 'UNKNOWN';
   return 'READY';
@@ -250,6 +268,8 @@ interface ProbeRun {
   dbError: string | null;
   dbLatencyMs: number | null;
   companyId: string | null;
+  /** Why the identity could not be read at all — distinct from "unset". */
+  companyIdError: string | null;
   host: string;
   at: string;
 }
@@ -258,7 +278,21 @@ interface ProbeRun {
 export async function computeSetupReadiness(options: SetupOptions = {}): Promise<SetupReadiness> {
   const deps: SetupDeps = { ...DEFAULT_DEPS, ...options.deps };
   const host = options.host ?? deps.host();
-  const at = deps.now();
+
+  // A clock that throws must not take the whole surface down with it — the
+  // other seven rows are still worth reading. The failure is recorded and the
+  // computation continues; a claim that cannot be timestamped degrades below.
+  let at: string;
+  let clockError: string | null = null;
+  try {
+    at = deps.now();
+    if (typeof at !== 'string' || at.length === 0) {
+      throw new Error('now() returned no timestamp');
+    }
+  } catch (err) {
+    clockError = errorMessage(err);
+    at = 'clock_unavailable';
+  }
 
   let db: Database.Database | null = null;
   let dbError: string | null = null;
@@ -273,13 +307,15 @@ export async function computeSetupReadiness(options: SetupOptions = {}): Promise
   const dbLatencyMs = db ? Date.now() - dbStarted : null;
 
   let companyId: string | null = null;
+  let companyIdError: string | null = null;
   try {
     companyId = deps.companyId();
-  } catch {
+  } catch (err) {
     companyId = null;
+    companyIdError = errorMessage(err);
   }
 
-  const run: ProbeRun = { db, dbError, dbLatencyMs, companyId, host, at };
+  const run: ProbeRun = { db, dbError, dbLatencyMs, companyId, companyIdError, host, at };
   const items: ReadinessItem[] = [];
 
   // ── data ──────────────────────────────────────────────────────────────────
@@ -302,12 +338,35 @@ export async function computeSetupReadiness(options: SetupOptions = {}): Promise
   items.push(probeDispatchSchema(run));
   items.push(probeCompanyRecord(run));
   items.push(probeCompanyWorkspace(run));
-  items.push(probeOwnerRegistration(run));
+  items.push(probeOwnerRegistration(run, deps));
   items.push(probeAgentRoster(run));
   items.push(await probeGateway(deps, at));
 
+  // Evidence completeness. READY means "a probe observed this", so a READY row
+  // whose observation is empty, or whose timestamp could not be taken, is not
+  // proven — it degrades to UNKNOWN. A proven fault stays BLOCKED regardless of
+  // the clock. Nothing here throws away the surface: one bad clock or one
+  // vacuous answer costs that item its claim, never the other rows.
+  const proven: ReadinessItem[] = items.map((item) => {
+    const observed = item.evidence.observed ?? {};
+    const empty = Object.keys(observed).length === 0;
+    const downgraded = item.state === 'READY' && (clockError !== null || empty);
+    return {
+      ...item,
+      ...(downgraded ? { state: 'UNKNOWN' as ReadinessState } : {}),
+      evidence: {
+        ...item.evidence,
+        observed: {
+          ...observed,
+          ...(clockError !== null ? { clockError } : {}),
+          ...(empty ? { emptyObservation: 'probe returned no observed values' } : {}),
+        },
+      },
+    };
+  });
+
   const stateById = (id: ReadinessItemId): ReadinessState =>
-    items.find((item) => item.id === id)?.state ?? 'UNKNOWN';
+    proven.find((item) => item.id === id)?.state ?? 'UNKNOWN';
 
   const actions: OwnerAction[] = ACTION_SPECS.map((spec) => {
     const reason = disabledReasonFor(spec.id, stateById, db !== null, companyId);
@@ -317,8 +376,8 @@ export async function computeSetupReadiness(options: SetupOptions = {}): Promise
   });
 
   return {
-    overall: rollUp(items.map((item) => item.state)),
-    items,
+    overall: rollUp(proven.map((item) => item.state)),
+    items: proven,
     actions,
     computedAt: at,
   };
@@ -384,14 +443,21 @@ function probeCompanyRecord(run: ProbeRun): ReadinessItem {
   }
   if (run.companyId === null) {
     // No identity on this box: there is no row we could even look for. That is
-    // undecidable, not broken — and certainly not ready.
+    // undecidable, not broken — and certainly not ready. When the identity
+    // lookup itself THREW, say that: an error is not an absent variable.
     return {
       ...base,
       state: 'UNKNOWN',
-      evidence: evidence('SELECT companies WHERE id = ?', {
-        detail: 'MC_COMPANY_ID is unset, so no company row can be checked',
-        companyId: null,
-      }, run.at),
+      evidence: evidence('SELECT companies WHERE id = ?', run.companyIdError !== null
+        ? {
+            companyId: null,
+            detail: 'the company identity lookup threw, so no company row can be checked',
+            error: run.companyIdError,
+          }
+        : {
+            detail: 'MC_COMPANY_ID is unset, so no company row can be checked',
+            companyId: null,
+          }, run.at),
     };
   }
   try {
@@ -425,10 +491,16 @@ function probeCompanyWorkspace(run: ProbeRun): ReadinessItem {
     return {
       ...base,
       state: 'UNKNOWN',
-      evidence: evidence('SELECT workspaces WHERE company_id = ?', {
-        detail: 'MC_COMPANY_ID is unset, so workspaces cannot be scoped',
-        companyId: null,
-      }, run.at),
+      evidence: evidence('SELECT workspaces WHERE company_id = ?', run.companyIdError !== null
+        ? {
+            companyId: null,
+            detail: 'the company identity lookup threw, so workspaces cannot be scoped',
+            error: run.companyIdError,
+          }
+        : {
+            detail: 'MC_COMPANY_ID is unset, so workspaces cannot be scoped',
+            companyId: null,
+          }, run.at),
     };
   }
   try {
@@ -453,7 +525,7 @@ function probeCompanyWorkspace(run: ProbeRun): ReadinessItem {
   }
 }
 
-function probeOwnerRegistration(run: ProbeRun): ReadinessItem {
+function probeOwnerRegistration(run: ProbeRun, deps: SetupDeps): ReadinessItem {
   const base = { id: 'owner_registration' as const, label: 'Owner login usable', group: 'identity' as const };
   let registration;
   try {
@@ -499,7 +571,24 @@ function probeOwnerRegistration(run: ProbeRun): ReadinessItem {
       }, run.at),
     };
   }
-  const allowed = registrationAllowsOwnerLogin(run.host);
+  // The predicate is the last thing that can decide this item, and a predicate
+  // that throws decides nothing: UNKNOWN with the error recorded, never a
+  // rejected surface and never a guessed verdict.
+  let allowed: boolean;
+  try {
+    allowed = deps.allowsOwnerLogin(run.host);
+  } catch (err) {
+    return {
+      ...base,
+      state: 'UNKNOWN',
+      evidence: evidence('tenantRegistration(host) + hq_owner_login_uses lookup', {
+        host: run.host,
+        registration,
+        ownerLoginNonceTable: tablePresent,
+        error: errorMessage(err),
+      }, run.at),
+    };
+  }
   const state: ReadinessState = allowed && tablePresent ? 'READY' : 'BLOCKED';
   const reason = !allowed
     ? 'tenant registration does not permit owner login'

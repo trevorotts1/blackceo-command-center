@@ -46,8 +46,17 @@ const STATE_STYLE: Record<
 };
 
 function EvidenceLine({ item }: { item: ReadinessItem }) {
+  // A row whose evidence is missing must still render: it says so, instead of
+  // throwing and blanking the whole panel.
+  if (!item.evidence) {
+    return (
+      <p className="mt-1 text-xs text-bcc-text-muted break-words">
+        <span className="font-mono">no evidence recorded</span>
+      </p>
+    );
+  }
   const { probe, observed, at } = item.evidence;
-  const observedText = JSON.stringify(observed);
+  const observedText = JSON.stringify(observed ?? {});
   return (
     <p className="mt-1 text-xs text-bcc-text-muted break-words">
       <span className="font-mono">{probe}</span>
@@ -59,15 +68,19 @@ function EvidenceLine({ item }: { item: ReadinessItem }) {
   );
 }
 
-function ItemRow({ item }: { item: ReadinessItem }) {
-  const style = STATE_STYLE[item.state];
+/** Exported for the T-31 unit test: this is the row render, nothing else. */
+export function ItemRow({ item }: { item: ReadinessItem }) {
+  // A row with no evidence cannot back any claim — it reads UNKNOWN even if the
+  // payload says READY. Fail-closed on the read side too.
+  const state: ReadinessState = item.evidence ? item.state : 'UNKNOWN';
+  const style = STATE_STYLE[state];
   return (
     <li className={`rounded-xl border p-4 ${style.row}`}>
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="text-sm font-semibold text-bcc-text">{item.label}</p>
           <p className="text-xs text-bcc-text-secondary">{item.group}</p>
-          {item.state === 'BLOCKED' && item.reason && (
+          {state === 'BLOCKED' && item.reason && (
             <p className="mt-1 text-sm text-red-800">{item.reason}</p>
           )}
           <EvidenceLine item={item} />
@@ -80,6 +93,34 @@ function ItemRow({ item }: { item: ReadinessItem }) {
         </span>
       </div>
     </li>
+  );
+}
+
+const STATE_RANK: Record<ReadinessState, number> = { READY: 0, UNKNOWN: 1, BLOCKED: 2 };
+
+/**
+ * The header badge for a payload. Fail-closed on the read side:
+ *   • zero rows is NOT a pass — an empty item set reads UNKNOWN;
+ *   • a row with no evidence reads UNKNOWN, so it cannot leave READY at the top;
+ *   • the badge is the WORST of the payload's `overall` and what the rows
+ *     actually support — this surface never paints a claim it cannot back.
+ * Exported for the T-31 unit test — this is the exact expression the header
+ * renders from.
+ */
+export function resolveOverallBadge(readiness: SetupReadiness | null): ReadinessState | null {
+  if (!readiness) return null;
+  const rowStates = readiness.items.map((item) => (item.evidence ? item.state : 'UNKNOWN'));
+  const states: ReadinessState[] = rowStates.length > 0 ? rowStates : ['UNKNOWN'];
+  states.push(readiness.overall);
+  return states.reduce((worst, state) => (STATE_RANK[state] > STATE_RANK[worst] ? state : worst));
+}
+
+/** The explicit empty state. Exported so the T-31 unit test can render it. */
+export function EmptyReadinessNotice() {
+  return (
+    <p className="rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm font-semibold text-amber-900">
+      No readiness rows were computed — this surface is Unknown, not Ready.
+    </p>
   );
 }
 
@@ -180,9 +221,8 @@ export default function SetupReadinessPanel() {
     [],
   );
 
-  const overall = readiness?.items
-    ? readiness.overall
-    : null;
+  const items = readiness?.items ?? [];
+  const overall = resolveOverallBadge(readiness);
 
   return (
     <section className="space-y-6">
@@ -230,8 +270,10 @@ export default function SetupReadinessPanel() {
 
       {readiness && (
         <>
+          {readiness && items.length === 0 && <EmptyReadinessNotice />}
+
           <ul className="grid gap-3 md:grid-cols-2">
-            {readiness.items.map((item) => (
+            {items.map((item) => (
               <ItemRow key={item.id} item={item} />
             ))}
           </ul>
