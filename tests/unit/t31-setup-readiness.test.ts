@@ -443,3 +443,72 @@ test('T-31: READY needs an observation — an empty one degrades to UNKNOWN', as
     db.close();
   }
 });
+
+// ── PBB-097 repair: the named residual, pinned ────────────────────────────
+// The truthiness guard `item.evidence ? item.state : 'UNKNOWN'` treated an EMPTY
+// evidence object — and an evidence object with no probe name — as evidence, so
+// a forged payload row could paint a green Ready badge with nothing checkable
+// behind it. Every shape below is a payload-layer attack: the row CLAIMS READY
+// and the read side must refuse the claim.
+
+function forgedRow(evidence: unknown): ReadinessItem {
+  return {
+    id: 'company_record',
+    label: 'Company record exists',
+    group: 'identity',
+    state: 'READY', // the payload's claim — the read side must not take it on trust
+    evidence,
+  } as unknown as ReadinessItem;
+}
+
+function badgeOf(items: ReadinessItem[]): ReadinessState | null {
+  return resolveOverallBadge({
+    overall: 'READY', // a payload that lies: its rows claim READY on nothing
+    items,
+    actions: [],
+    computedAt: '2026-10-24T00:00:00.000Z',
+  });
+}
+
+function rowHtml(item: ReadinessItem): string {
+  return renderToStaticMarkup(createElement(ItemRow, { item }));
+}
+
+function assertNotReady(item: ReadinessItem, shape: string): void {
+  const html = rowHtml(item);
+  assert.match(html, /Unknown/, `${shape}: the row must read Unknown`);
+  assert.doesNotMatch(html, /Ready/, `${shape}: the row must never read Ready`);
+  assert.match(html, /no evidence recorded/, `${shape}: the row must say why it is unbacked`);
+  assert.equal(badgeOf([item]), 'UNKNOWN', `${shape}: the badge must not go green`);
+}
+
+test('T-31: an empty evidence object is not evidence — never Ready', () => {
+  assertNotReady(forgedRow({}), 'evidence:{}');
+});
+
+test('T-31: an empty probe name is not evidence — never Ready', () => {
+  assertNotReady(
+    forgedRow({ probe: '', observed: { result: 1 }, at: '2026-10-24T00:00:00.000Z' }),
+    "probe:''",
+  );
+});
+
+test('T-31: an absent probe name is not evidence — never Ready', () => {
+  assertNotReady(
+    forgedRow({ observed: { result: 1 }, at: '2026-10-24T00:00:00.000Z' }),
+    'probe absent',
+  );
+});
+
+test('T-31: a genuinely populated evidence row is still Ready', () => {
+  const item = forgedRow({
+    probe: 'SELECT 1 AS ok',
+    observed: { result: 1 },
+    at: '2026-10-24T00:00:00.000Z',
+  });
+  const html = rowHtml(item);
+  assert.match(html, /Ready/, 'a row with a real probe and a real observation is Ready');
+  assert.doesNotMatch(html, /Unknown/);
+  assert.match(html, /SELECT 1 AS ok/, 'the probe that decided it is still shown');
+  assert.equal(badgeOf([item]), 'READY', 'a backed READY row must reach the badge');
+});

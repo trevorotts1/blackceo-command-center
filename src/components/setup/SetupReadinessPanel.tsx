@@ -14,6 +14,7 @@ import { AlertTriangle, CheckCircle2, HelpCircle, RefreshCw, XCircle } from 'luc
 
 import type {
   OwnerAction,
+  ReadinessEvidence,
   ReadinessItem,
   ReadinessState,
   SetupReadiness,
@@ -45,10 +46,26 @@ const STATE_STYLE: Record<
   },
 };
 
+/**
+ * What counts as evidence behind a claim: a real evidence object carrying a
+ * probe that names what ran. An EMPTY object is not evidence — it is a blank
+ * where the claim would have to stand — and neither is an empty or absent probe
+ * name, because a claim nobody can check is not backed. Mirrors the
+ * observed-empty rule in src/lib/readiness/setup.ts, and is the single
+ * definition every read-side check below consults.
+ */
+function hasEvidence(item: ReadinessItem): boolean {
+  const evidence = item.evidence as Partial<ReadinessEvidence> | null | undefined;
+  if (!evidence || Object.keys(evidence).length === 0) return false;
+  const probe = evidence.probe;
+  return typeof probe === 'string' && probe.trim().length > 0;
+}
+
 function EvidenceLine({ item }: { item: ReadinessItem }) {
   // A row whose evidence is missing must still render: it says so, instead of
-  // throwing and blanking the whole panel.
-  if (!item.evidence) {
+  // throwing and blanking the whole panel. An empty evidence object, or one
+  // with no probe name, is the same case — there is nothing there to show.
+  if (!hasEvidence(item)) {
     return (
       <p className="mt-1 text-xs text-bcc-text-muted break-words">
         <span className="font-mono">no evidence recorded</span>
@@ -71,8 +88,10 @@ function EvidenceLine({ item }: { item: ReadinessItem }) {
 /** Exported for the T-31 unit test: this is the row render, nothing else. */
 export function ItemRow({ item }: { item: ReadinessItem }) {
   // A row with no evidence cannot back any claim — it reads UNKNOWN even if the
-  // payload says READY. Fail-closed on the read side too.
-  const state: ReadinessState = item.evidence ? item.state : 'UNKNOWN';
+  // payload says READY. Fail-closed on the read side too. "No evidence" is
+  // hasEvidence(): an empty evidence object and an empty/absent probe name are
+  // both a claim with nothing behind it.
+  const state: ReadinessState = hasEvidence(item) ? item.state : 'UNKNOWN';
   const style = STATE_STYLE[state];
   return (
     <li className={`rounded-xl border p-4 ${style.row}`}>
@@ -104,12 +123,14 @@ const STATE_RANK: Record<ReadinessState, number> = { READY: 0, UNKNOWN: 1, BLOCK
  *   • a row with no evidence reads UNKNOWN, so it cannot leave READY at the top;
  *   • the badge is the WORST of the payload's `overall` and what the rows
  *     actually support — this surface never paints a claim it cannot back.
+ * "No evidence" is hasEvidence(): an empty evidence object and an empty/absent
+ * probe name are both a claim with nothing behind it.
  * Exported for the T-31 unit test — this is the exact expression the header
  * renders from.
  */
 export function resolveOverallBadge(readiness: SetupReadiness | null): ReadinessState | null {
   if (!readiness) return null;
-  const rowStates = readiness.items.map((item) => (item.evidence ? item.state : 'UNKNOWN'));
+  const rowStates = readiness.items.map((item) => (hasEvidence(item) ? item.state : 'UNKNOWN'));
   const states: ReadinessState[] = rowStates.length > 0 ? rowStates : ['UNKNOWN'];
   states.push(readiness.overall);
   return states.reduce((worst, state) => (STATE_RANK[state] > STATE_RANK[worst] ? state : worst));
