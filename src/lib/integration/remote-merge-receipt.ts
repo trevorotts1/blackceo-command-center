@@ -33,10 +33,23 @@
  *   3. REQUIRED CHECKS AND NAMED REPAIR REMOTE CONTENT PROOF — every declared
  *      required context must appear exactly once, on a head the remote
  *      reported (CHECK_MISSING / CHECK_DUPLICATE / CHECK_STALE), and must have
- *      a passing conclusion (CHECK_NOT_PASSING). A named repair after a
+ *      a passing conclusion (CHECK_NOT_PASSING). Every check claim is then
+ *      cross-read against `RemoteEvidence.check_runs`: a claim the remote never
+ *      reported is CHECK_NOT_REMOTE, one the remote reported red is
+ *      CHECK_REMOTE_NOT_PASSING, and a red the remote reported on a named head
+ *      must stay owned (RED_CHECK_UNOWNED). The same binding holds for
+ *      `ci_receipts` (CI_RECEIPT_NOT_REMOTE / _NOT_PASSING), for
+ *      `independent_review` (INDEPENDENT_REVIEW_NOT_PASSING / _STALE), for
+ *      `dependencies` (DEPENDENCY_UNPROVEN / DEPENDENCY_CONTRACT_UNPROVEN) and
+ *      for `publication_order_edges` (PUBLICATION_ORDER_INVALID /
+ *      PUBLICATION_ORDER_UNKNOWN_CANDIDATE). A named repair after a
  *      baseline merge needs its OWN sha and its OWN remote proof: a baseline
  *      head sha re-used as "the repair" is refused (REPAIR_BASELINE_NOT_PROOF),
  *      per BC-08 — the earlier merge proves nothing about the repair.
+ *
+ * Timestamps are compared as INSTANTS, never as strings: ISO-8601 permits both
+ * `...T10:20Z` and `...T10:20:30Z`, and lexically the minute-only form sorts
+ * AFTER the second-precision one.
  *
  * Fail-closed everywhere: a missing fact is a finding, never a pass. There is
  * no branch in this file where "not measured" renders green.
@@ -252,7 +265,31 @@ function isNonEmpty(value: unknown): value is string {
 }
 
 function isIsoUtc(value: unknown): value is string {
-  return typeof value === 'string' && ISO_RE.test(value);
+  return typeof value === 'string' && ISO_RE.test(value) && Number.isFinite(Date.parse(value));
+}
+
+/**
+ * A lease window is a pair of INSTANTS. ISO-8601 lets one caller write
+ * `...T10:20Z` and another `...T10:20:30Z`, and comparing those as strings
+ * inverts the order ('Z' is 0x5A, ':' is 0x3A, so the minute-only form sorts
+ * AFTER the second-precision one). Never order timestamps lexically — parse
+ * them first. Returns null when the value is not a real instant.
+ */
+function toInstant(value: unknown): number | null {
+  return isIsoUtc(value) ? Date.parse(value) : null;
+}
+
+/** The remote vocabulary for a review that counts as a pass. */
+export const PASSING_REVIEW_VERDICTS = ['pass', 'passed', 'approved', 'approve'] as const;
+
+function isPassingConclusion(value: unknown): boolean {
+  return (PASSING_CHECK_CONCLUSIONS as readonly string[]).includes(value as string);
+}
+
+function isPassingReview(value: unknown): boolean {
+  return (PASSING_REVIEW_VERDICTS as readonly string[]).includes(
+    typeof value === 'string' ? value.trim().toLowerCase() : '',
+  );
 }
 
 function push(findings: Finding[], code: string, detail: string): void {
@@ -283,6 +320,7 @@ export function verifyMergeReceipt(
   evidence: RemoteEvidence,
 ): Verdict {
   const findings: Finding[] = [];
+  const obligations = new Set(receipt.open_obligations ?? []);
 
   // ── Identity / ownership ────────────────────────────────────────────────
   if (receipt.repo_alias !== CC_REPO_ALIAS) {
@@ -294,7 +332,8 @@ export function verifyMergeReceipt(
   if (receipt.target_branch !== CC_TARGET_BRANCH) {
     push(findings, 'TARGET_BRANCH_MISMATCH', `expected ${CC_TARGET_BRANCH}, got "${receipt.target_branch}"`);
   }
-  if (!isNonEmpty(receipt.id) || !receipt.id.startsWith(`M-${CC_REPO_ALIAS}-`)) {
+  const idPrefix = `M-${CC_REPO_ALIAS}-`;
+  if (!isNonEmpty(receipt.id) || !receipt.id.startsWith(idPrefix) || !isIsoUtc(receipt.id.slice(idPrefix.length))) {
     push(findings, 'RECEIPT_ID_INVALID', 'id must be M-command-center-<iso8601>');
   }
   if (receipt.schema_version !== undefined && receipt.schema_version !== MERGE_RECEIPT_SCHEMA_VERSION) {
@@ -322,8 +361,13 @@ export function verifyMergeReceipt(
     push(findings, 'TARGET_OWNER_NOT_RELEASED', 'the integrator must release its lease in the same run');
   } else if (!isIsoUtc(receipt.lease.released_at)) {
     push(findings, 'TARGET_OWNER_RELEASED_AT_INVALID', 'lease.released_at must be ISO-8601 UTC');
-  } else if (receipt.lease.released_at < receipt.lease.acquired_at) {
-    push(findings, 'TARGET_OWNER_WINDOW_INVALID', 'lease.released_at precedes acquired_at');
+  } else {
+    // Instants, never strings: `...T10:00Z` is EARLIER than `...T10:00:05Z`.
+    const releasedInstant = toInstant(receipt.lease.released_at);
+    const acquiredInstant = toInstant(receipt.lease.acquired_at);
+    if (releasedInstant !== null && acquiredInstant !== null && releasedInstant < acquiredInstant) {
+      push(findings, 'TARGET_OWNER_WINDOW_INVALID', 'lease.released_at precedes acquired_at');
+    }
   }
 
   // ── Remote read-back (never inferred) ───────────────────────────────────
@@ -349,6 +393,15 @@ export function verifyMergeReceipt(
       `base moved: receipt ${receipt.base_sha_before}, remote ${evidence.base_sha} — re-run checks`,
     );
   }
+  // The promotion's own proof may only name the sha the remote read back. A
+  // foreign `proof_evidence.remote_sha` is a local claim wearing a remote coat.
+  if (!isSha(receipt.proof_evidence?.remote_sha) || receipt.proof_evidence.remote_sha !== evidence.target_sha) {
+    push(
+      findings,
+      'PROOF_NOT_REMOTE',
+      `proof_evidence.remote_sha "${receipt.proof_evidence?.remote_sha ?? 'nothing'}" is not the remote read-back ${evidence.target_sha}`,
+    );
+  }
 
   // ── Required checks ─────────────────────────────────────────────────────
   if (receipt.check_receipts.length === 0) {
@@ -372,6 +425,7 @@ export function verifyMergeReceipt(
     receipt.target_sha_after,
     ...receipt.candidates.map((c) => c.head_sha),
   ]);
+  const remoteRuns = evidence.check_runs ?? [];
   for (const check of receipt.check_receipts) {
     if (!provableHeads.has(check.head_sha)) {
       push(
@@ -380,12 +434,145 @@ export function verifyMergeReceipt(
         `context "${check.context}" ran on ${check.head_sha}, which this promotion does not name`,
       );
     }
-    if (!(PASSING_CHECK_CONCLUSIONS as readonly string[]).includes(check.conclusion)) {
+    if (!isPassingConclusion(check.conclusion)) {
       push(
         findings,
         'CHECK_NOT_PASSING',
         `context "${check.context}" concluded "${check.conclusion}"`,
       );
+    }
+    // A check claim is only proof if the REMOTE reported that run. Anything
+    // else is a check nobody ran, and it renders green only if we stay blind.
+    const backing = remoteRuns.filter(
+      (run) => run.context === check.context && run.head_sha === check.head_sha,
+    );
+    if (backing.length !== 1 || String(backing[0].run_id) !== String(check.run_id)) {
+      push(
+        findings,
+        'CHECK_NOT_REMOTE',
+        `context "${check.context}" on ${check.head_sha} (run ${check.run_id}) is not the single run the remote reported`,
+      );
+    } else if (!isPassingConclusion(backing[0].conclusion)) {
+      push(
+        findings,
+        'CHECK_REMOTE_NOT_PASSING',
+        `the remote reported "${backing[0].conclusion}" for context "${check.context}" on ${check.head_sha}`,
+      );
+    }
+  }
+  // A red the remote reported on a head this promotion names stays owned.
+  for (const run of remoteRuns) {
+    if (!provableHeads.has(run.head_sha)) continue;
+    if (isPassingConclusion(run.conclusion)) continue;
+    if (!obligations.has(run.context)) {
+      push(
+        findings,
+        'RED_CHECK_UNOWNED',
+        `failing remote check "${run.context}" on ${run.head_sha} is not carried in open_obligations`,
+      );
+    }
+  }
+
+  // ── Declared proofs must also be MEASURED ────────────────────────────────
+  // independent_review: a named reviewer, a pass, on a head this promotion names.
+  const review = receipt.independent_review;
+  if (!isNonEmpty(review?.native_agent_id)) {
+    push(findings, 'INDEPENDENT_REVIEW_INVALID', 'independent_review.native_agent_id is required');
+  }
+  if (!isPassingReview(review?.verdict)) {
+    push(
+      findings,
+      'INDEPENDENT_REVIEW_NOT_PASSING',
+      `independent_review concluded "${review?.verdict ?? 'nothing'}"`,
+    );
+  }
+  if (!isSha(review?.exact_head_sha) || !provableHeads.has(review.exact_head_sha)) {
+    push(
+      findings,
+      'INDEPENDENT_REVIEW_STALE',
+      `independent_review covers ${review?.exact_head_sha ?? 'no head'}, which this promotion does not name`,
+    );
+  }
+
+  // ci_receipts: a run the remote reported, and one that passed.
+  for (const ci of receipt.ci_receipts ?? []) {
+    if (!isNonEmpty(ci?.workflow) || !isNonEmpty(String(ci.run_id ?? ''))) {
+      push(findings, 'CI_RECEIPT_INVALID', 'every ci_receipt needs a workflow and a run_id');
+      continue;
+    }
+    if (!isPassingConclusion(ci.conclusion)) {
+      push(
+        findings,
+        'CI_RECEIPT_NOT_PASSING',
+        `workflow "${ci.workflow}" concluded "${ci.conclusion}"`,
+      );
+    }
+    const backingRun = remoteRuns.find((run) => String(run.run_id) === String(ci.run_id));
+    if (!backingRun) {
+      push(
+        findings,
+        'CI_RECEIPT_NOT_REMOTE',
+        `workflow "${ci.workflow}" run ${ci.run_id} is not a run the remote reported`,
+      );
+    } else if (!isPassingConclusion(backingRun.conclusion)) {
+      push(
+        findings,
+        'CI_RECEIPT_NOT_PASSING',
+        `the remote reported "${backingRun.conclusion}" for workflow "${ci.workflow}" run ${ci.run_id}`,
+      );
+    }
+  }
+
+  // dependencies: named against candidates this promotion proved, and against
+  // a contract that actually exists.
+  const candidateIds = new Set(receipt.candidates.map((c) => c.task_id));
+  const candidatePaths = new Set(receipt.candidates.flatMap((c) => c.files ?? []));
+  for (const dep of receipt.dependencies ?? []) {
+    if (!isNonEmpty(dep?.depends_on_candidate) || !candidateIds.has(dep.depends_on_candidate)) {
+      push(
+        findings,
+        'DEPENDENCY_UNPROVEN',
+        `dependency on "${dep?.depends_on_candidate ?? 'nothing'}" is not a candidate this promotion proved`,
+      );
+      continue;
+    }
+    const ref = dep.accepted_contract_ref;
+    const knownContract =
+      isNonEmpty(ref) &&
+      (CONSUMER_CONTRACT_FILES.includes(ref) ||
+        ref === staleEventContractFingerprint() ||
+        candidatePaths.has(ref));
+    if (!knownContract) {
+      push(
+        findings,
+        'DEPENDENCY_CONTRACT_UNPROVEN',
+        `accepted_contract_ref "${ref ?? 'nothing'}" names no accepted contract`,
+      );
+    }
+  }
+
+  // publication_order_edges: "<task>-><task>", both ends proved here.
+  const seenEdges = new Set<string>();
+  for (const edge of receipt.publication_order_edges ?? []) {
+    const parts = typeof edge === 'string' ? edge.split('->') : [];
+    if (parts.length !== 2 || !isNonEmpty(parts[0]) || !isNonEmpty(parts[1])) {
+      push(findings, 'PUBLICATION_ORDER_INVALID', `publication order edge "${edge}" must be <task>-><task>`);
+      continue;
+    }
+    const [from, to] = parts;
+    if (from === to || seenEdges.has(edge)) {
+      push(findings, 'PUBLICATION_ORDER_INVALID', `publication order edge "${edge}" is a self-loop or a duplicate`);
+      continue;
+    }
+    seenEdges.add(edge);
+    for (const id of [from, to]) {
+      if (!candidateIds.has(id)) {
+        push(
+          findings,
+          'PUBLICATION_ORDER_UNKNOWN_CANDIDATE',
+          `publication order edge "${edge}" names ${id}, which this promotion did not prove`,
+        );
+      }
     }
   }
 
@@ -457,19 +644,19 @@ export function verifyMergeReceipt(
     if (
       repair.proof?.method !== receipt.proof_method ||
       !isSha(repair.proof?.remote_sha) ||
+      repair.proof?.remote_sha !== evidence.target_sha ||
       !isNonEmpty(repair.proof?.observed)
     ) {
       push(
         findings,
         'REPAIR_PROOF_MISSING',
-        `${repair.repair_id} has no own remote proof at the promotion's method`,
+        `${repair.repair_id} has no own remote proof at the promotion's method, bound to the remote read-back`,
       );
     }
   }
 
   // ── Cohort membership / shared files / reader-writer compatibility ──────
   const memberIds = new Set(receipt.cohort?.members ?? []);
-  const candidateIds = new Set(receipt.candidates.map((c) => c.task_id));
   for (const id of candidateIds) {
     if (!memberIds.has(id)) {
       push(findings, 'COHORT_MEMBERS_MISMATCH', `candidate ${id} is not listed in cohort.members`);
@@ -562,7 +749,6 @@ export function verifyMergeReceipt(
   if (receipt.force_push_or_deletion !== false) {
     push(findings, 'FORCE_PUSH_OR_DELETION', 'a force push or deletion is a defect, not a merge method');
   }
-  const obligations = new Set(receipt.open_obligations ?? []);
   for (const id of evidence.failed_candidates ?? []) {
     if (!obligations.has(id)) {
       push(findings, 'RED_CANDIDATE_UNOWNED', `red candidate ${id} is not carried in open_obligations`);
@@ -603,7 +789,11 @@ export function verifyMergeReceipt(
 // ─── Batch: one owner per target ────────────────────────────────────────────
 
 export interface BatchVerdict extends Verdict {
-  /** Findings keyed by receipt id, so a caller can act per receipt. */
+  /**
+   * Findings keyed by receipt id, so a caller can act per receipt. A receipt id
+   * used more than once is a defect in its own right, and those entries are
+   * keyed `<id>#1`, `<id>#2` and so on, so one can never swallow the other.
+   */
   byReceipt: Record<string, Finding[]>;
 }
 
@@ -618,9 +808,24 @@ export function verifyCohortBatch(
   const findings: Finding[] = [];
   const byReceipt: Record<string, Finding[]> = {};
 
+  const idTotals = new Map<string, number>();
+  for (const { receipt } of entries) {
+    idTotals.set(receipt.id, (idTotals.get(receipt.id) ?? 0) + 1);
+  }
+
+  const idOrdinals = new Map<string, number>();
   for (const entry of entries) {
     const verdict = verifyMergeReceipt(entry.receipt, entry.evidence);
-    byReceipt[entry.receipt.id] = verdict.findings;
+    const total = idTotals.get(entry.receipt.id) ?? 1;
+    const ordinal = (idOrdinals.get(entry.receipt.id) ?? 0) + 1;
+    idOrdinals.set(entry.receipt.id, ordinal);
+    if (total > 1) {
+      verdict.findings.push({
+        code: 'RECEIPT_ID_DUPLICATE',
+        detail: `receipt id "${entry.receipt.id}" is used by ${total} receipts in this batch - identity must be unique`,
+      });
+    }
+    byReceipt[total > 1 ? `${entry.receipt.id}#${ordinal}` : entry.receipt.id] = verdict.findings;
     findings.push(...verdict.findings);
   }
 
@@ -633,14 +838,22 @@ export function verifyCohortBatch(
   }
 
   for (const [target, receipts] of targets) {
-    const ordered = [...receipts].sort((a, b) =>
-      a.lease.acquired_at < b.lease.acquired_at ? -1 : a.lease.acquired_at > b.lease.acquired_at ? 1 : 0,
-    );
+    // Instants again: `...T10:20Z` acquires BEFORE `...T10:20:30Z`, whatever
+    // the strings say. An unreadable timestamp sorts where it can do harm, so
+    // it can only ever add a refusal, never hide one.
+    const ordered = [...receipts].sort((a, b) => {
+      const left = toInstant(a.lease?.acquired_at) ?? Number.NEGATIVE_INFINITY;
+      const right = toInstant(b.lease?.acquired_at) ?? Number.NEGATIVE_INFINITY;
+      if (left !== right) return left < right ? -1 : 1;
+      return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+    });
     for (let i = 1; i < ordered.length; i += 1) {
       const previous = ordered[i - 1];
       const current = ordered[i];
-      const prevReleased = previous.lease.released_at ?? '￿';
-      if (current.lease.acquired_at < prevReleased) {
+      // An unreleased lease still holds the target: its window ends at +Infinity.
+      const prevReleased = toInstant(previous.lease?.released_at) ?? Number.POSITIVE_INFINITY;
+      const currentAcquired = toInstant(current.lease?.acquired_at) ?? Number.NEGATIVE_INFINITY;
+      if (currentAcquired < prevReleased) {
         findings.push({
           code: 'TARGET_OWNER_CONFLICT',
           detail: `${target}: ${current.lease.holder} acquired generation ${current.lease.generation} before ${previous.lease.holder} released generation ${previous.lease.generation}`,
