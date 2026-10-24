@@ -21,6 +21,7 @@
  *   node --import tsx --test tests/unit/pbb073-t35-kanban-lifecycle-events.test.ts
  */
 
+import './_isolated-db'; // MUST be first DB import: throwaway DATABASE_PATH (C8 guard).
 import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
