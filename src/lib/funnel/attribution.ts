@@ -208,7 +208,13 @@ export interface FunnelAttributionSource {
  *   attribution_source <- agent_id   (the observing emitter)
  *
  * A contract field already present on the record passes through untouched, so
- * a producer that one day emits the real contract needs no change here.
+ * a producer that one day emits the real contract needs no change here — with
+ * one exception: when `observed_at` is present but names no real instant
+ * (`'yesterday-ish'`, `'2026'`), the proven `timestamp` is not thrown away in
+ * its favour. An unusable value cannot be evidence, and the source's own
+ * instant is exactly what the field is for; this mirrors the `agent_id` ->
+ * `attribution_source` fallback below. A `timestamp` that is itself not a
+ * real instant is never promoted.
  * Deliberately NOT mapped: `event_type` (pageview|scroll|click|page_hidden|
  * delete_request) is an event type, not an outcome kind; `referrer`, `path`,
  * `data.href` and `data.text` are page and copy, not attribution references
@@ -222,9 +228,9 @@ export interface FunnelAttributionSource {
 export function mapPixelEventRecord(raw: unknown): FunnelAttributionEvent {
   if (!isPlainObject(raw)) return raw as FunnelAttributionEvent;
   const ev: FunnelAttributionEvent = { ...raw };
-  if (nonEmptyString(ev.observed_at) === null) {
-    const ts = nonEmptyString(raw.timestamp);
-    if (ts) ev.observed_at = ts;
+  if (!isTimestamp(ev.observed_at)) {
+    const ts = raw.timestamp;
+    if (isTimestamp(ts)) ev.observed_at = ts;
   }
   if (nonEmptyString(ev.attribution_source) === null) {
     const agent = nonEmptyString(raw.agent_id);
@@ -258,12 +264,45 @@ function nonEmptyString(v: unknown): string | null {
   return t ? t : null;
 }
 
-/** ISO/date string that parses to a real instant. */
+/**
+ * ISO-8601 date-time that denotes a real instant.
+ *
+ * Deliberately NOT bare `Date.parse`: that accepts `"0"`, `"2026"` and
+ * `"2026-05-30"`, so a claim could pass the evidence gate without ever naming
+ * a moment. A date-time stamp is required — date and time, not a year, a
+ * month or a bare calendar day — and it must survive `Date.parse`, so a
+ * calendar-impossible stamp (`2026-13-45T99:99:99Z`) is refused too.
+ * Seconds and the offset are optional, so a producer emitting local ISO time
+ * is not refused for it.
+ */
+const ISO_DATETIME_RE =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|z|[+-]\d{2}:?\d{2})?$/;
+
 function isTimestamp(v: unknown): boolean {
   const s = nonEmptyString(v);
   if (!s) return false;
-  const ms = Date.parse(s);
-  return !Number.isNaN(ms);
+  if (!ISO_DATETIME_RE.test(s)) return false;
+  return !Number.isNaN(Date.parse(s));
+}
+
+/**
+ * The usable text one reference field carries, as a list of touches.
+ *
+ * Both shapes are accepted everywhere — a field may name its touch as a bare
+ * string or as a list of strings — because the fields are UNIONED and the
+ * adapter observed whatever shape the emitter wrote. Restricting `refs` to
+ * arrays (and `keyword_ref` to a scalar) silently discarded the touches in
+ * the other shape: `refs: 'SUMMER'` reported no touch at all.
+ *
+ * A field that carries no readable text contributes nothing: this reports
+ * what was OBSERVED, never a touch the adapter could not read.
+ */
+function touchesOf(v: unknown): string[] {
+  const one = (x: unknown): string | null => (typeof x === 'string' ? nonEmptyString(x) : null);
+  const scalar = one(v);
+  if (scalar) return [scalar];
+  if (Array.isArray(v)) return v.map(one).filter((s): s is string => s !== null);
+  return [];
 }
 
 /**
@@ -271,18 +310,17 @@ function isTimestamp(v: unknown): boolean {
  * fields are UNIONED — a reference observed in `touch_refs` is still observed
  * when `refs` is also present (and vice versa) — so a multitouch record can
  * never collapse into the single-keyword bucket. Dedupe is case-insensitive:
- * `['SUMMER','summer']` is ONE touch, not multitouch. A bare (non-array)
- * `refs` / `touch_refs` carries no touch: those fields are lists.
+ * `['SUMMER','summer']` is ONE touch, not multitouch. Each field is read in
+ * whatever shape it was written (a bare string or a list of strings), because
+ * dropping the shapes the field was not written in would drop an observed
+ * touch and report a multitouch as a single keyword. A value that carries no
+ * readable text is not a touch and is never invented.
  */
 export function observedRefs(ev: FunnelAttributionEvent): string[] {
   const raw: string[] = [];
-  const push = (v: unknown) => {
-    const s = nonEmptyString(v);
-    if (s) raw.push(s);
-  };
-  if (Array.isArray(ev.refs)) ev.refs.forEach(push);
-  if (Array.isArray(ev.touch_refs)) ev.touch_refs.forEach(push);
-  push(ev.keyword_ref);
+  for (const field of ['refs', 'touch_refs', 'keyword_ref'] as const) {
+    raw.push(...touchesOf(ev[field]));
+  }
 
   const seen = new Set<string>();
   const out: string[] = [];
@@ -422,7 +460,11 @@ export function buildFunnelAttribution(
 
     const kind = normalizeOutcomeKind(ev.kind);
     if (kind === null) {
-      if (nonEmptyString(ev.kind) === null) nonOutcome += 1;
+      // `unclassified` is "kind PRESENT but outside the vocabulary" and
+      // `nonOutcome` is "no outcome kind at all" — a blank or unreadable kind
+      // is still a kind the event carried, so it is unclassified. Only an
+      // absent kind (`undefined` / `null` / missing) is a non-outcome.
+      if (ev.kind === undefined || ev.kind === null) nonOutcome += 1;
       else {
         unclassified += 1;
         bump(unclassifiedReasons, 'outcome_kind_unrecognized');
@@ -504,6 +546,9 @@ export const OUTCOME_LABELS: Record<OutcomeKind, string> = {
   sale: 'Sales',
 };
 
+/** Label for the row that carries records with no outcome kind at all. */
+export const NON_OUTCOME_LABEL = 'Records with no outcome kind (not an outcome event)';
+
 export interface FunnelRow {
   id: string;
   label: string;
@@ -518,6 +563,12 @@ export interface FunnelViewRows {
   banner: string | null;
   attribution: FunnelRow[];
   outcomes: FunnelRow[];
+  /**
+   * Records that carried no outcome kind at all. Kept as its own row so a
+   * computed counter is never left invisible: the outcomes rows are exactly
+   * the four kinds, so a non-outcome cannot ride along in one of them.
+   */
+  nonOutcome: FunnelRow;
   footnote: string | null;
   /** Named input-contract gaps, rendered so a limitation is never invisible. */
   limitations: string[];
@@ -578,9 +629,29 @@ export function buildFunnelAttributionRows(snapshot: FunnelAttributionSnapshot):
     };
   });
 
+  const nonOutcome: FunnelRow =
+    snapshot.status === 'UNKNOWN'
+      ? {
+          id: 'non_outcome',
+          label: NON_OUTCOME_LABEL,
+          status: 'UNKNOWN',
+          count: null,
+          detail: REASON_TEXT[snapshot.reason ?? 'source_absent'],
+        }
+      : {
+          id: 'non_outcome',
+          label: NON_OUTCOME_LABEL,
+          status: 'OBSERVED',
+          count: snapshot.nonOutcome,
+          detail: null,
+        };
+
   const notes: string[] = [];
   if (snapshot.status === 'OBSERVED' && snapshot.unclassified.count) {
     notes.push(`${snapshot.unclassified.count} event(s) not counted in gift/contact/booking/sale: ${REASON_TEXT.outcome_kind_unrecognized}.`);
+  }
+  if (snapshot.status === 'OBSERVED' && snapshot.nonOutcome) {
+    notes.push(`${snapshot.nonOutcome} record(s) carried no outcome kind: not an outcome event.`);
   }
   if (snapshot.status === 'OBSERVED' && snapshot.refused) {
     notes.push(`${snapshot.refused} record(s) refused as malformed.`);
@@ -590,6 +661,7 @@ export function buildFunnelAttributionRows(snapshot: FunnelAttributionSnapshot):
     banner,
     attribution,
     outcomes,
+    nonOutcome,
     footnote: notes.length ? notes.join(' ') : null,
     limitations: [...snapshot.limitations],
   };

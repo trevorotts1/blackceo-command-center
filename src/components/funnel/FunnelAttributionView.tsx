@@ -59,6 +59,15 @@ export function FunnelAttributionView({ snapshot }: { snapshot: FunnelAttributio
         </ul>
       </div>
 
+      {/* Records with no outcome kind are neither an outcome nor an
+          unclassified refusal — the counter is rendered, never hidden. */}
+      <div>
+        <h3 className="mb-2 text-sm font-semibold text-gray-700">Other records</h3>
+        <ul className="space-y-1">
+          <Row row={rows.nonOutcome} />
+        </ul>
+      </div>
+
       {rows.footnote ? (
         <p className="text-xs text-gray-500">{rows.footnote}</p>
       ) : null}
