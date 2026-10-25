@@ -125,17 +125,28 @@ _REMOTE_URL = re.compile(
     r"[:/]"
     r"(?P<path>.+)$")
 
+# Transports that actually fetch from the host they name. Anything else
+# (ext::, file://, ...) resolves through a helper of its own and proves
+# nothing about origin, so it never counts as canonical.
+_REMOTE_SCHEMES = frozenset({"ssh", "git", "http", "https"})
+
 
 def normalize_remote_url(url: str) -> str:
     """`host/owner/repo` from any git remote URL form (scp, ssh, https).
 
     Credentials, port and transport are dropped: provenance compares on
-    repository identity, not on how a checkout was fetched. A local path
-    or any form that does not parse is returned as-is, so it can only ever
-    fail the canonical comparison.
+    repository identity, not on how a checkout was fetched. Only git's own
+    transports count, though -- a URL carrying any other scheme
+    (ext::, file://, javascript:, ...) is not a fetch of the canonical
+    repo no matter what its host and path say, so it is returned as-is.
+    A local path or any form that does not parse is likewise returned
+    as-is, so both can only ever fail the canonical comparison.
     """
     m = _REMOTE_URL.match(url.strip())
     if not m:
+        return url.strip()
+    scheme = m.group("scheme")
+    if scheme is not None and scheme.lower() not in _REMOTE_SCHEMES:
         return url.strip()
     path = m.group("path").split("?")[0].split("#")[0].strip("/")
     if path.endswith(".git"):
@@ -305,9 +316,13 @@ def load_manifest(target: Path) -> Dict[str, Any]:
         die(f"{path} does not exist (run sync first, or the gate has no "
             f"manifest to check against)")
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONEncodeError) as exc:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:  # JSONDecodeError, UnicodeDecodeError
         die(f"{path} is unreadable: {exc}")
+    if not isinstance(manifest, dict):
+        die(f"{path} is not a manifest (top-level "
+            f"{type(manifest).__name__}, want object)")
+    return manifest
 
 
 # --------------------------------------------------------------- sync

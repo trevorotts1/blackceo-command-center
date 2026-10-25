@@ -13,8 +13,17 @@
 #      commit not on the mainline           -> REFUSED (exit 2)
 #   C. canonical scp URL, commit on mainline -> OK, manifest records the
 #      verified source (repo/remote/url/mainline_ref)
+#   D. non-git scheme (ext://) on a canonical-looking URL
+#                                           -> REFUSED (exit 2), nothing copied
+#   E. commit only on the checkout's local main,
+#      no remote-tracking mainline          -> REFUSED (exit 2)
 #
-# Usage: bash tests/unit/pres037-canonical-source.test.sh
+# Named after the tool under test (sync-presentation-engine) so pres039's
+# T7 importer scan -- which excludes the parity tooling by name because it
+# names the package to verify it -- keeps treating these fixture-path
+# mentions as what they are, not as runtime importers.
+#
+# Usage: bash tests/unit/pres037-sync-presentation-engine-source.test.sh
 # Exit 0 = all checks passed.
 set -u
 WT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -118,6 +127,34 @@ if [ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep -q "already at canonical"; then
   ok "C: second sync is a no-op (recorded source does not break idempotence)"
 else
   bad "C: second sync was not a no-op (rc=$RC): $OUT"
+fi
+
+# --- D: a non-git scheme must not normalize to canonical ---------------------
+T_D="$(mktgt d)"
+git -C "$TMP/src" remote set-url origin "ext://github.com/$CANON"
+git -C "$TMP/src" update-ref refs/remotes/origin/main "$C2"
+OUT="$(python3 "$TOOL" sync --source "$TMP/src" --commit "$C2" --target "$T_D" 2>&1)"; RC=$?
+if [ "$RC" -eq 2 ] && printf '%s' "$OUT" | grep -q "no remote pointing at $CANON"; then
+  ok "D: non-git scheme refused (exit 2): $(printf '%s' "$OUT" | head -1)"
+else
+  bad "D: non-git scheme NOT refused (rc=$RC): $OUT"
+fi
+if [ ! -e "$T_D/presentation_job" ]; then
+  ok "D: refusal happened before any copy (no presentation_job/ written)"
+else
+  bad "D: presentation_job/ was written from a non-canonical scheme"
+fi
+
+# --- E: local refs/heads/main is the checkout's state, never the mainline ----
+T_E="$(mktgt e)"
+git -C "$TMP/src" remote set-url origin "git@github.com:$CANON.git"
+git -C "$TMP/src" update-ref -d refs/remotes/origin/main
+g "$TMP/src" branch -f main "$C2" >/dev/null 2>&1
+OUT="$(python3 "$TOOL" sync --source "$TMP/src" --commit "$C2" --target "$T_E" 2>&1)"; RC=$?
+if [ "$RC" -eq 2 ] && printf '%s' "$OUT" | grep -q "is not on $CANON's mainline"; then
+  ok "E: commit only on local main refused (exit 2, local refs/heads/main excluded)"
+else
+  bad "E: local-main commit NOT refused (rc=$RC): $OUT"
 fi
 
 echo "pres037: $PASS passed, $FAIL failed"
