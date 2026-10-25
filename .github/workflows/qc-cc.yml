@@ -876,6 +876,7 @@ jobs:
   interview-lock-e2e:
     name: Interview-unlock shell-lock e2e (Playwright)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -902,6 +903,7 @@ jobs:
         # iPhone 15 project. --with-deps pulls the apt libs the runner is
         # missing so the browsers launch.
         run: npx playwright install --with-deps chromium webkit
+        timeout-minutes: 10
 
       - name: Build production interview fixture
         env:
