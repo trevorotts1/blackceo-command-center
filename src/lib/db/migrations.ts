@@ -8527,6 +8527,51 @@ export const migrations: Migration[] = [
   // migration applies in numeric position after 171, which is safe
   // because the council schema is additive and independent.
   councilMigration,
+
+  {
+    id: '175',
+    name: 'fulfillment_operation_state',
+    up: (db) => {
+      // T-33 / cc-conversation-operations. Additive only: the versioned
+      // pause/retry/handoff state row plus its per-step receipt ledger. Every
+      // statement is IF NOT EXISTS, so a database whose schema.ts already
+      // created the tables (schema.ts runs before migrations on every open)
+      // upgrades as a no-op instead of failing.
+      console.log('[Migration 175] Adding fulfillment operation state...');
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS fulfillment_operations (
+          task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+          tenant_id TEXT NOT NULL,
+          company_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          state TEXT NOT NULL CHECK (state IN ('active', 'paused', 'handed_off')),
+          state_version INTEGER NOT NULL,
+          retry_count INTEGER NOT NULL DEFAULT 0,
+          handoff_owner_id TEXT,
+          handoff_backup_owner_id TEXT,
+          handoff_due_action TEXT,
+          handoff_context TEXT,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS fulfillment_operation_receipts (
+          id TEXT PRIMARY KEY,
+          task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+          tenant_id TEXT NOT NULL,
+          company_id TEXT NOT NULL,
+          step TEXT NOT NULL CHECK (step IN ('pause', 'retry', 'handoff')),
+          from_state TEXT NOT NULL,
+          to_state TEXT NOT NULL,
+          state_version INTEGER NOT NULL,
+          actor_owner_id TEXT NOT NULL,
+          proof TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_fulfillment_receipts_task
+          ON fulfillment_operation_receipts(task_id, created_at);
+      `);
+      console.log('[Migration 175] fulfillment_operations + receipts ready');
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner
