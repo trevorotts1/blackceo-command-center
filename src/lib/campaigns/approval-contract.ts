@@ -95,17 +95,31 @@ export const MANIFEST_FIELD_SOURCES: readonly ManifestFieldSource[] = [
   { field: 'conversation_policy_version', source: null },
 ];
 
-/** Placement approval states. UNKNOWN is a first-class, never-success state. */
+/**
+ * Placement approval states. UNKNOWN is a first-class, never-success state.
+ *
+ * No 'REVOKED': nothing in this repo produces it — the reachable set is
+ * exactly APPROVED | DRAFT | HELD | INVALIDATED | UNKNOWN, proven in
+ * tests/unit/pbb285-t32-dead-state-class.test.ts. A member no input can reach
+ * is a permanently false promise in this public type (same class as the
+ * 'APPROVED' summary state removed earlier), so it is gone rather than
+ * documented. Reintroduce it only with a producer and a test that reaches it.
+ */
 export type PlacementApprovalState =
   | 'APPROVED'
   | 'HELD'
   | 'DRAFT'
   | 'INVALIDATED'
-  | 'REVOKED'
   | 'UNKNOWN';
 
-/** Publication receipt vocabulary — the claim-gate row tokens. */
-export type PublicationState = 'CURRENT' | 'BEHIND' | 'UNKNOWN' | 'UNREACHABLE';
+/**
+ * Publication receipt vocabulary — the claim-gate row tokens.
+ * No 'UNREACHABLE': classifyPublication() only ever returns
+ * CURRENT | BEHIND | UNKNOWN (an unreachable provider is an absent or
+ * unrecognized receipt, which is UNKNOWN), and the board must not carry a
+ * style row for a state it can never render.
+ */
+export type PublicationState = 'CURRENT' | 'BEHIND' | 'UNKNOWN';
 
 export type FreshnessState = 'live' | 'stale' | 'unknown';
 

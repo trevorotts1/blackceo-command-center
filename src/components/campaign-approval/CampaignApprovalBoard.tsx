@@ -44,7 +44,6 @@ const PUBLICATION_STYLE: Record<PublicationState, string> = {
   CURRENT: 'bg-emerald-100 text-emerald-800',
   BEHIND: 'bg-amber-100 text-amber-800',
   UNKNOWN: 'bg-fuchsia-100 text-fuchsia-800',
-  UNREACHABLE: 'bg-rose-100 text-rose-800',
 };
 
 // The calendar cell is decided in exactly ONE place: `cellStateOf()` in
