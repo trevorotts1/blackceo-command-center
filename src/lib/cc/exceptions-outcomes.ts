@@ -274,7 +274,10 @@ function earliest(a: string | null, b: string | null): string | null {
   const bm = parseTime(b);
   if (am === null) return b;
   if (bm === null) return a;
-  return bm < am ? b : a;
+  if (am !== bm) return bm < am ? b : a;
+  // Same instant: pick by text, so the answer cannot depend on which member
+  // the caller happened to pass first.
+  return b < a ? b : a;
 }
 
 function latest(a: string | null, b: string | null): string | null {
@@ -284,7 +287,33 @@ function latest(a: string | null, b: string | null): string | null {
   const bm = parseTime(b);
   if (am === null) return b;
   if (bm === null) return a;
-  return bm > am ? b : a;
+  if (am !== bm) return bm > am ? b : a;
+  // Same instant: pick by text, so the answer cannot depend on member order.
+  return b > a ? b : a;
+}
+
+/**
+ * A deterministic description of one record's content, used only to break a tie
+ * between two records that share an id and a revision. Fixed field order, no
+ * object-key iteration, so the same record always yields the same key.
+ */
+function canonicalAlertKey(alert: AlertInput): string {
+  return JSON.stringify([
+    alert.surface,
+    alert.title,
+    alert.severity,
+    alert.dedup_of ?? null,
+    alert.fingerprint ?? null,
+    alert.first_seen_at ?? null,
+    alert.last_seen_at ?? null,
+    alert.owner?.assigned_agent_id ?? null,
+    alert.owner?.assigned_agent_name ?? null,
+    alert.owner?.owner_name ?? null,
+    alert.clearance
+      ? [alert.clearance.at ?? null, alert.clearance.by ?? null, alert.clearance.evidence ?? null]
+      : null,
+    alert.next_action ?? null,
+  ]);
 }
 
 const MAX_DEDUP_HOPS = 32;
@@ -322,7 +351,12 @@ export function projectAlerts(alerts: readonly AlertInput[]): AlertProjection {
       duplicateIdFolds.push(alert.id);
       const heldRev = typeof held.revision === 'number' ? held.revision : -Infinity;
       const nextRev = typeof alert.revision === 'number' ? alert.revision : -Infinity;
-      if (nextRev >= heldRev) byId.set(alert.id, alert);
+      // Equal revisions are decided by CONTENT, never by arrival: the later
+      // duplicate wins only when it is genuinely a newer revision, otherwise
+      // the maximum of a total order over the two records is kept.
+      if (nextRev > heldRev || (nextRev === heldRev && canonicalAlertKey(alert) > canonicalAlertKey(held))) {
+        byId.set(alert.id, alert);
+      }
       continue;
     }
     byId.set(alert.id, alert);
@@ -866,6 +900,35 @@ export interface BookingProjection {
   excluded_malformed: number | null;
 }
 
+/**
+ * TOTAL order over booking rows. Ids are not guaranteed unique in a raw
+ * adapter snapshot (unlike alerts, bookings are not folded by id), so two rows
+ * can share an id: the remaining fields decide, which keeps the rendered order
+ * identical whatever order the snapshot arrived in.
+ */
+function compareBookingRows(a: BookingRow, b: BookingRow): number {
+  if (a.id !== b.id) return a.id < b.id ? -1 : 1;
+  const keyA = canonicalBookingKey(a);
+  const keyB = canonicalBookingKey(b);
+  return keyA < keyB ? -1 : keyA > keyB ? 1 : 0;
+}
+
+function canonicalBookingKey(row: BookingRow): string {
+  return JSON.stringify([
+    row.stage,
+    row.state,
+    row.reason,
+    row.owner.kind,
+    row.owner.id,
+    row.owner.name,
+    row.requested_at,
+    row.confirmation_receipt,
+    row.service_receipt,
+    row.revision,
+    row.counts_as_sale,
+  ]);
+}
+
 export function projectBookings(records: readonly BookingInput[]): BookingProjection {
   // A non-list is not a snapshot: report UNKNOWN rather than crash or render 0.
   if (!Array.isArray(records)) {
@@ -944,7 +1007,7 @@ export function projectBookings(records: readonly BookingInput[]): BookingProjec
       counts_as_sale: false,
     });
   }
-  rows.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  rows.sort(compareBookingRows);
   return {
     rows,
     unknown: rows.filter((row) => row.state === 'unknown').length,

@@ -96,30 +96,52 @@ function lastClosingEvent(
   events: readonly BugTicketEventRow[],
 ): BugTicketEventRow | null {
   let best: BugTicketEventRow | null = null;
-  let bestAt: number | null = null;
   for (const event of events) {
     if (event.to_status !== 'CLOSED') continue;
-    const at = parseTime(cleanText(event.created_at));
-    const raw = cleanText(event.created_at) ?? '';
-    if (!best) {
-      best = event;
-      bestAt = at;
-      continue;
-    }
-    const heldRaw = cleanText(best.created_at) ?? '';
-    if (at === null) {
-      // An unproven timestamp never outranks a proven one. When NEITHER row
-      // proves a time, fall back to a stable tie-break so the credited actor
-      // does not depend on the query's row order.
-      if (bestAt === null && raw > heldRaw) best = event;
-      continue;
-    }
-    if (bestAt === null || at > bestAt) {
-      best = event;
-      bestAt = at;
-    }
+    // Strictly greater, never `>=`: a tie must be settled by the total order
+    // below, not by which row the query happened to return first.
+    if (!best || compareClosingEvents(event, best) > 0) best = event;
   }
   return best;
+}
+
+/**
+ * TOTAL order over closing events, independent of row order.
+ *
+ *   1. a proven instant outranks an unproven one;
+ *   2. a later instant outranks an earlier one;
+ *   3. equal instants (or two unproven times) compare by raw timestamp text;
+ *   4. then by actor, then by reason.
+ *
+ * Steps 3–4 exist because two closes CAN share an instant: the same millisecond
+ * with different actors, or the same instant written by both hands
+ * ('2026-10-24T08:00:00Z' and '2026-10-24 08:00:00'). Without them the first
+ * row wins and the credited actor flips with the query's order. Every record is
+ * fully compared here: two distinct events never compare equal, so the pick is
+ * the maximum of a set — the same element whatever order the set arrives in.
+ */
+function compareClosingEvents(
+  a: BugTicketEventRow,
+  b: BugTicketEventRow,
+): number {
+  const at = parseTime(cleanText(a.created_at));
+  const bt = parseTime(cleanText(b.created_at));
+  if (at !== null && bt === null) return 1;
+  if (at === null && bt !== null) return -1;
+  if (at !== null && bt !== null && at !== bt) return at < bt ? -1 : 1;
+
+  const rawA = cleanText(a.created_at) ?? '';
+  const rawB = cleanText(b.created_at) ?? '';
+  if (rawA !== rawB) return rawA < rawB ? -1 : 1;
+
+  const actorA = cleanText(a.actor) ?? '';
+  const actorB = cleanText(b.actor) ?? '';
+  if (actorA !== actorB) return actorA < actorB ? -1 : 1;
+
+  const reasonA = cleanText(a.reason) ?? '';
+  const reasonB = cleanText(b.reason) ?? '';
+  if (reasonA !== reasonB) return reasonA < reasonB ? -1 : 1;
+  return 0;
 }
 
 /**
