@@ -449,9 +449,12 @@ check "10.1" "atomic-deploy.sh is implemented (no 'implementation pending' stub)
 check "10.2" "atomic-deploy.sh: pre-flight disk gate (DISK_MIN_GB)" \
   "grep -q 'DISK_MIN_GB' scripts/atomic-deploy.sh"
 
-# 10.3 atomic-deploy.sh backs up the DB before touching build artifacts
-check "10.3" "atomic-deploy.sh: DB backup in pre-flight (sqlite3 checkpoint)" \
-  "grep -q 'wal_checkpoint' scripts/atomic-deploy.sh"
+# 10.3 atomic-deploy.sh backs up the DB before touching build artifacts.
+# FINDING 35: a WAL checkpoint of a LIVE database reports BUSY as a result row
+# (not an exception), so checkpoint-then-cp could miss committed rows still in
+# -wal. The backup must go through SQLite's online backup API and fail closed.
+check "10.3" "atomic-deploy.sh: DB backup in pre-flight (SQLite online backup, fail-closed)" \
+  "grep -q \"<<'PYBACKUP'\" scripts/atomic-deploy.sh && grep -q 'source.backup(dest)' scripts/atomic-deploy.sh && grep -q 'DB_BACKUP_RC' scripts/atomic-deploy.sh"
 
 # 10.4 atomic-deploy.sh creates .next.rollback snapshot
 check "10.4" "atomic-deploy.sh: rollback snapshot (.next.rollback)" \

@@ -1868,8 +1868,12 @@ test('B.2 static QC: qc-cc.sh section 10 checks all pass on atomic-deploy.sh', (
   // 10.2 — disk gate present
   assert.ok(src.includes('DISK_MIN_GB'), '10.2: must reference DISK_MIN_GB');
 
-  // 10.3 — DB backup via sqlite3 checkpoint
-  assert.ok(src.includes('wal_checkpoint'), '10.3: must call sqlite3 WAL checkpoint for DB backup');
+  // 10.3 — DB backup via SQLite's ONLINE backup API (finding 35). A WAL
+  // checkpoint on a live DB reports BUSY as a result row, so checkpoint-then-cp
+  // could miss committed rows still in -wal; the snapshot must fail closed.
+  assert.ok(src.includes("<<'PYBACKUP'"), '10.3: must snapshot the DB with SQLite\'s online backup');
+  assert.ok(src.includes('source.backup(dest)'), '10.3: must call Connection.backup()');
+  assert.ok(src.includes('DB_BACKUP_RC'), '10.3: a failed snapshot must abort the deploy');
 
   // 10.4 — rollback snapshot
   assert.ok(src.includes('next.rollback'), '10.4: must create .next.rollback snapshot');

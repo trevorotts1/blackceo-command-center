@@ -131,6 +131,14 @@ new_install() {
   git clone -q "$ORIGIN" "$1"
   git -C "$1" config user.email "box@test.invalid"
   git -C "$1" config user.name "Box"
+  # update.sh validates the origin's HOST + OWNER + REPOSITORY (finding 34),
+  # not the basename — so a clone whose origin is a bare local path no longer
+  # validates. Give the fixture origin the canonical identity while its fetch
+  # still resolves to the local upstream, exactly as a real box's https remote
+  # does.
+  git -C "$1" remote set-url origin "https://github.com/trevorotts1/blackceo-command-center.git"
+  git -C "$1" config --add "url.${ORIGIN}.insteadOf" \
+    "https://github.com/trevorotts1/blackceo-command-center.git"
 }
 
 run_updater() {

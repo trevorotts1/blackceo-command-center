@@ -46,20 +46,45 @@ CC_REQUIRED_MARKERS=(
   "src"
   "scripts/atomic-deploy.sh"
 )
-CC_EXPECTED_SLUG="$REPO_NAME"
+CC_EXPECTED_REPO_ID="github.com/trevorotts1/${REPO_NAME}"
 
 CC_CANDIDATE_PATH=""
 CC_CANDIDATE_REASON=""
-_cc_repo_slug() {
-  local u="${1%/}"
-  u="${u%.git}"
-  u="${u##*/}"
-  u="${u##*:}"
-  printf '%s' "$u"
+# Normalize a git remote to "host/owner/repo" and compare THAT, everywhere.
+# The old basename-only slug accepted any host and any owner (finding 34).
+# Handles https://[user[:token]@]host/owner/repo(.git),
+# ssh://git@host[:port]/owner/repo.git, scp-style git@host:owner/repo.git, and
+# explicit filesystem paths (no host tier — owner/repo from the last two
+# segments, so a local path can never match a network remote). Trailing
+# slashes, ".git" and userinfo are dropped; the id is lowercased because hosts
+# and GitHub paths are case-insensitive. Must stay identical to update.sh.
+_cc_repo_id() {
+  local u="$1" host="" id="" n=0
+  local -a parts=()
+  u="${u%/}"; u="${u%.git}"; u="${u%/}"
+  case "$u" in *://*) u="${u#*://}" ;; esac
+  case "$u" in *@*) u="${u#*@}" ;; esac
+  case "${u%%:*}" in
+    */*|"") ;;
+    *) if [ "${u%%:*}" != "$u" ]; then u="${u%%:*}/${u#*:}"; fi ;;
+  esac
+  if [ -z "$u" ]; then return 0; fi
+  IFS='/' read -r -a parts <<< "$u"
+  n="${#parts[@]}"
+  if [ "$n" -lt 2 ]; then return 0; fi
+  case "${parts[0]}" in
+    localhost|*.*) host="${parts[0]%%:*}" ;;
+  esac
+  if [ -n "$host" ]; then
+    id="$host/${parts[n-2]}/${parts[n-1]}"
+  else
+    id="${parts[n-2]}/${parts[n-1]}"
+  fi
+  printf '%s' "$id" | tr '[:upper:]' '[:lower:]'
 }
 _cc_validate_checkout() {
   local cand="$1"
-  local phys top top_phys origin_url slug marker
+  local phys top top_phys origin_url repo_id marker
   CC_CANDIDATE_PATH=""
   CC_CANDIDATE_REASON=""
 
@@ -91,9 +116,9 @@ _cc_validate_checkout() {
     CC_CANDIDATE_REASON="no 'origin' remote"
     return 1
   fi
-  slug="$(_cc_repo_slug "$origin_url")"
-  if [ "$slug" != "$CC_EXPECTED_SLUG" ]; then
-    CC_CANDIDATE_REASON="origin is a different repo (got '$slug', expected '$CC_EXPECTED_SLUG')"
+  repo_id="$(_cc_repo_id "$origin_url")"
+  if [ "$repo_id" != "$CC_EXPECTED_REPO_ID" ]; then
+    CC_CANDIDATE_REASON="origin is a different repo (got '${repo_id:-unparseable}', expected '$CC_EXPECTED_REPO_ID')"
     return 1
   fi
   for marker in "${CC_REQUIRED_MARKERS[@]}"; do

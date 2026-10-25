@@ -57,7 +57,8 @@ fatal() { echo "  ✗ ERROR: $1"; exit 1; }
 #     `~/clawd` repo, whose origin IS this repo; a bare "is it git + does
 #     origin match" test would wrongly accept it.)
 #   * that worktree's `origin` remote resolves to this repo, compared by
-#     normalized repo slug so https / ssh / with- or without-.git all match.
+#     normalized HOST + OWNER + REPOSITORY (see _cc_repo_id) so https / ssh /
+#     with- or without-.git all match while a foreign host or owner does not.
 #   * the app structure this updater actually drives is present: package.json
 #     naming the app, next.config.mjs, ecosystem.config.cjs, src/, and
 #     scripts/atomic-deploy.sh (Step 5 invokes that script from INSTALL_DIR).
@@ -75,14 +76,39 @@ CC_REQUIRED_MARKERS=(
   "scripts/atomic-deploy.sh"
 )
 
-# Normalize a git remote URL to its bare repo name: handles
-# https://host/owner/repo.git, git@host:owner/repo.git, and trailing slashes.
-_cc_repo_slug() {
-  local u="${1%/}"
-  u="${u%.git}"
-  u="${u##*/}"
-  u="${u##*:}"
-  printf '%s' "$u"
+# Normalize a git remote to "host/owner/repo" and compare THAT, everywhere.
+# The old basename-only slug accepted any host and any owner: a checkout whose
+# origin was <foreign-host>/<foreign-owner>/blackceo-command-center passed the
+# guard, and the updater then fetched and deployed from it (finding 34).
+# Handles https://[user[:token]@]host/owner/repo(.git),
+# ssh://git@host[:port]/owner/repo.git, scp-style git@host:owner/repo.git, and
+# explicit filesystem paths (no host tier — owner/repo from the last two
+# segments, so a local path can never match a network remote). Trailing
+# slashes, ".git" and userinfo are dropped; the id is lowercased because hosts
+# and GitHub paths are case-insensitive.
+_cc_repo_id() {
+  local u="$1" host="" id="" n=0
+  local -a parts=()
+  u="${u%/}"; u="${u%.git}"; u="${u%/}"
+  case "$u" in *://*) u="${u#*://}" ;; esac
+  case "$u" in *@*) u="${u#*@}" ;; esac
+  case "${u%%:*}" in
+    */*|"") ;;
+    *) if [ "${u%%:*}" != "$u" ]; then u="${u%%:*}/${u#*:}"; fi ;;
+  esac
+  if [ -z "$u" ]; then return 0; fi
+  IFS='/' read -r -a parts <<< "$u"
+  n="${#parts[@]}"
+  if [ "$n" -lt 2 ]; then return 0; fi
+  case "${parts[0]}" in
+    localhost|*.*) host="${parts[0]%%:*}" ;;
+  esac
+  if [ -n "$host" ]; then
+    id="$host/${parts[n-2]}/${parts[n-1]}"
+  else
+    id="${parts[n-2]}/${parts[n-1]}"
+  fi
+  printf '%s' "$id" | tr '[:upper:]' '[:lower:]'
 }
 
 # Never echo a remote URL raw — an https remote can carry embedded
@@ -91,7 +117,7 @@ _cc_redact_url() {
   printf '%s' "$1" | sed -E 's#(://)[^/@]*@#\1***@#'
 }
 
-CC_EXPECTED_SLUG="$(_cc_repo_slug "$REPO_URL")"
+CC_EXPECTED_REPO_ID="$(_cc_repo_id "$REPO_URL")"
 
 # Validate one candidate. Sets CC_CANDIDATE_PATH (physical path) on success,
 # CC_CANDIDATE_REASON (why it was rejected) on failure. Returns 0/1.
@@ -101,7 +127,7 @@ CC_CANDIDATE_PATH=""
 CC_CANDIDATE_REASON=""
 _cc_validate_checkout() {
   local cand="$1"
-  local phys top top_phys origin_url slug marker
+  local phys top top_phys origin_url repo_id marker
   CC_CANDIDATE_PATH=""
   CC_CANDIDATE_REASON=""
 
@@ -133,9 +159,9 @@ _cc_validate_checkout() {
     CC_CANDIDATE_REASON="git repo has no 'origin' remote"
     return 1
   fi
-  slug="$(_cc_repo_slug "$origin_url")"
-  if [ "$slug" != "$CC_EXPECTED_SLUG" ]; then
-    CC_CANDIDATE_REASON="origin remote is a different repo (got '$slug', expected '$CC_EXPECTED_SLUG')"
+  repo_id="$(_cc_repo_id "$origin_url")"
+  if [ "$repo_id" != "$CC_EXPECTED_REPO_ID" ]; then
+    CC_CANDIDATE_REASON="origin remote is a different repo (got '${repo_id:-unparseable}', expected '$CC_EXPECTED_REPO_ID')"
     return 1
   fi
   for marker in "${CC_REQUIRED_MARKERS[@]}"; do
@@ -435,6 +461,41 @@ success "Current version: ${OLD_VERSION:-unknown}"
 # ----------------------------------------------------------
 # Steps shared by the zero-downtime path and the merge path
 # ----------------------------------------------------------
+# The database the SERVER serves, resolved the same way ecosystem.config.cjs
+# resolves it — the same three tiers, in the same order:
+#   1. an exported DATABASE_PATH (pm2 restart --update-env carries it in)
+#   2. DATABASE_PATH parsed out of <INSTALL_DIR>/.env.local
+#      (relative values anchor on INSTALL_DIR, never on the caller's cwd)
+#   3. <INSTALL_DIR>/../data/mission-control.db
+# A relative tier-2 value is anchored on INSTALL_DIR; tier 3 is joined, not
+# resolved, so it keeps the app's own spelling. Prints the path, or nothing
+# when INSTALL_DIR is unset.
+cc_resolve_live_db() {
+  local v="" d=""
+  if [ -z "$INSTALL_DIR" ]; then return 0; fi
+  v="${DATABASE_PATH:-}"
+  if [ -n "$v" ]; then
+    case "$v" in
+      /*) printf '%s\n' "$v"; return 0 ;;
+    esac
+    warn "DATABASE_PATH=${v} is not absolute -- ignoring it for the departments sync (the app refuses it too)." >&2
+  fi
+  d="$INSTALL_DIR"
+  if [ -f "$d/.env.local" ]; then
+    v=$(sed -n -E 's/^[[:space:]]*(export[[:space:]]+)?DATABASE_PATH[[:space:]]*=[[:space:]]*//p' "$d/.env.local" \
+        | head -n 1 \
+        | sed -E "s/[[:space:]]+#.*$//; s/^[\"']//; s/[\"'][[:space:]]*$//")
+    if [ -n "$v" ]; then
+      case "$v" in
+        /*) printf '%s\n' "$v" ;;
+        *)  printf '%s\n' "${d}/${v}" ;;
+      esac
+      return 0
+    fi
+  fi
+  printf '%s\n' "${d}/../data/mission-control.db"
+}
+
 # U133 -- merge-additive departments sync, update-flow. The onboarding flow
 # populates departments.json once during initial setup, but a CC update that
 # ships new department definitions (or upstream changes to existing departments)
@@ -448,16 +509,41 @@ success "Current version: ${OLD_VERSION:-unknown}"
 cc_sync_departments() {
   step "Step 3: Sync departments from build-state (merge-additive)"
   local sync="$INSTALL_DIR/scripts/sync-departments-from-build-state.py"
-  if [ -f "$sync" ] && command -v python3 >/dev/null 2>&1; then
-    if python3 "$sync" --merge; then
-      success "Departments synced from build-state (merge-additive)"
-    else
-      warn "Departments sync exited non-zero -- dashboard will use the pre-update departments file."
-    fi
-  elif [ ! -f "$sync" ]; then
+  local resolver="$INSTALL_DIR/shared-utils/resolve_db.py"
+  local live_db="" parity_detail=""
+  if [ ! -f "$sync" ]; then
     warn "sync-departments-from-build-state.py not found in the updated checkout -- departments file was NOT synced."
-  else
+    return 0
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
     warn "python3 not found -- cannot run departments sync; departments file was NOT synced."
+    return 0
+  fi
+  # FINDING 36: the sync used to run with no --db, so the shared resolver chose
+  # the first EXISTING layout candidate. The update could then write one
+  # database, report success, and leave the board serving another. Resolve the
+  # served database ONCE here with ecosystem.config.cjs's own tiers, pass it
+  # explicitly, and require the resolver to agree before opening anything.
+  live_db="$(cc_resolve_live_db)"
+  if [ -z "$live_db" ]; then
+    warn "Could not resolve this box's database path -- departments sync SKIPPED (a guessed path could write a database the board never reads)."
+    return 0
+  fi
+  if [ ! -f "$live_db" ]; then
+    warn "No database at ${live_db} yet -- departments sync SKIPPED (nothing to seed; a fresh install seeds on first boot)."
+    return 0
+  fi
+  if [ -f "$resolver" ]; then
+    if ! parity_detail=$(python3 "$resolver" --verify-parity --app-db "$live_db" 2>&1); then
+      warn "$parity_detail"
+      warn "Refusing to sync a database the server may not read. Set DATABASE_PATH (and .env.local) to the served file, then re-run."
+      return 0
+    fi
+  fi
+  if python3 "$sync" --merge --db "$live_db"; then
+    success "Departments synced from build-state (merge-additive) into ${live_db}"
+  else
+    warn "Departments sync exited non-zero -- dashboard will use the pre-update departments file."
   fi
 }
 

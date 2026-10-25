@@ -756,13 +756,51 @@ fi
 # origin names the CC repo, package.json present, and the canonical
 # ecosystem.config.cjs present). Any other flag-less run exits non-zero BEFORE
 # touching anything.
+# Normalize a git remote to "host/owner/repo" and compare THAT, everywhere.
+# A bare repo-name substring match accepted ANY remote URL carrying the name —
+# https://evil.example/attacker/blackceo-command-center passed, and the deploy
+# then ran against a foreign checkout (finding 34). Handles
+# https://[user[:token]@]host/owner/repo(.git), ssh://git@host[:port]/owner/repo.git,
+# scp-style git@host:owner/repo.git, and explicit filesystem paths (no host
+# tier — owner/repo from the last two segments, so a local path can never match
+# a network remote). Trailing slashes, ".git" and userinfo are dropped; the id
+# is lowercased because hosts and GitHub paths are case-insensitive.
+# Must stay identical to update.sh / check-updates.sh.
+_cc_repo_id() {
+  local u="$1" host="" id="" n=0
+  local -a parts=()
+  u="${u%/}"; u="${u%.git}"; u="${u%/}"
+  case "$u" in *://*) u="${u#*://}" ;; esac
+  case "$u" in *@*) u="${u#*@}" ;; esac
+  case "${u%%:*}" in
+    */*|"") ;;
+    *) if [[ "${u%%:*}" != "$u" ]]; then u="${u%%:*}/${u#*:}"; fi ;;
+  esac
+  [[ -z "$u" ]] && return 0
+  IFS='/' read -r -a parts <<< "$u"
+  n="${#parts[@]}"
+  [[ "$n" -lt 2 ]] && return 0
+  case "${parts[0]}" in
+    localhost|*.*) host="${parts[0]%%:*}" ;;
+  esac
+  if [[ -n "$host" ]]; then
+    id="$host/${parts[n-2]}/${parts[n-1]}"
+  else
+    id="${parts[n-2]}/${parts[n-1]}"
+  fi
+  printf '%s' "$id" | tr '[:upper:]' '[:lower:]'
+}
+
+CC_EXPECTED_REPO_ID="github.com/trevorotts1/blackceo-command-center"
+
 if [[ "$APP_DIR_EXPLICIT" -eq 0 && -z "${CC_APP_DIR:-}" ]]; then
   _cc_remote="$(git -C "$APP_DIR" remote get-url origin 2>/dev/null || echo "")"
+  _cc_id="$(_cc_repo_id "$_cc_remote")"
   _cc_valid=0
   if [[ -d "$APP_DIR/.git" ]] \
      && [[ -f "$APP_DIR/package.json" ]] \
      && [[ -f "$APP_DIR/ecosystem.config.cjs" ]] \
-     && printf '%s' "$_cc_remote" | grep -q 'blackceo-command-center'; then
+     && [[ "$_cc_id" == "$CC_EXPECTED_REPO_ID" ]]; then
     _cc_valid=1
   fi
   if [[ "$_cc_valid" -ne 1 ]]; then
@@ -905,21 +943,6 @@ else
   # pruning (below, and in _disk_cleanup above) to backups THIS SCRIPT created.
   # Never drop this marker -- see the prune call below for why.
   DB_BACKUP="${DB_FILE}.backup.autodeploy.$(date +%Y%m%d-%H%M%S)"
-  # Best-effort pre-backup WAL flush. The Linux/VPS container ships python3 but
-  # NOT the sqlite3 CLI, so use the stdlib sqlite3 module (behaviour-equivalent
-  # to `sqlite3 <db> '.timeout 5000' 'PRAGMA wal_checkpoint(TRUNCATE);'`).
-  # better-sqlite3 is deliberately NOT used here: this runs BEFORE `npm run
-  # build`, so its native binding may be unbuilt/ABI-mismatched at this point.
-  # The connection is always closed in a finally and the whole thing is fenced
-  # so a checkpoint failure can never fail the deploy — the cp below still runs.
-  python3 - "$DB_FILE" <<'PYWAL' 2>/dev/null || true
-import sqlite3, sys
-conn = sqlite3.connect(sys.argv[1], timeout=5)
-try:
-    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-finally:
-    conn.close()
-PYWAL
   # Pre-check disk BEFORE the copy. The phase-1a gate above checks the deploy
   # as a whole; this checks that THIS copy specifically fits, so a truncated
   # .backup file can never be produced and then trusted as a rollback source.
@@ -927,7 +950,36 @@ PYWAL
     _preflight_abort_receipt "Cannot back up the database at ${DB_FILE} — insufficient free disk (details above). Old build untouched."
     exit 2
   fi
-  cp "$DB_FILE" "$DB_BACKUP"
+  # FINDING 35: SQLite ONLINE BACKUP (Connection.backup), not `cp`.
+  # The server is live. A preceding `PRAGMA wal_checkpoint(TRUNCATE)` reports
+  # BUSY as a RESULT ROW (it does not raise) and the old code ignored both the
+  # result and any failure, then copied only the main file — so committed
+  # frames still in -wal could be missing from a structurally valid backup and
+  # a rollback silently lost rows. Connection.backup() takes one consistent
+  # snapshot of the source, WAL included, while writers keep running.
+  # better-sqlite3 is deliberately NOT used here: this runs BEFORE `npm run
+  # build`, so its native binding may be unbuilt/ABI-mismatched at this point.
+  # FAIL-CLOSED: a snapshot that cannot complete aborts the deploy before the
+  # build replaces the old .next. The partial file is removed.
+  DB_BACKUP_RC=0
+  python3 - "$DB_FILE" "$DB_BACKUP" <<'PYBACKUP' || DB_BACKUP_RC=$?
+import sqlite3, sys
+src, dst = sys.argv[1], sys.argv[2]
+source = sqlite3.connect(src, timeout=5)
+try:
+    dest = sqlite3.connect(dst, timeout=5)
+    try:
+        source.backup(dest)   # online backup: consistent snapshot incl. -wal
+    finally:
+        dest.close()
+finally:
+    source.close()
+PYBACKUP
+  if [[ "$DB_BACKUP_RC" -ne 0 ]]; then
+    rm -f "$DB_BACKUP"
+    _preflight_abort_receipt "DB snapshot of ${DB_FILE} could not be completed by SQLite's online backup (rc ${DB_BACKUP_RC}) — refusing to continue without a rollback source. Old build untouched."
+    exit 2
+  fi
   # FIX 34 (presentation rev2): a 0-byte/truncated backup is not a backup.
   # Fail the deploy before the build replaces the old .next — the pre-backup
   # .next snapshot (1c) has not run yet, so exiting here leaves everything
@@ -946,10 +998,9 @@ PYWAL
   # (or reports a non-ok integrity result) and the deploy aborts (exit 2)
   # BEFORE the build replaces the old .next, so a poison backup never survives
   # into the rollback chain. A 0-byte / header-less file is refused on the
-  # magic-header check before any integrity verdict. A bare `cp` of a live
-  # WAL-mode DB can lag the -wal file; the checkpoint above shrinks that
-  # window and integrity_check still proves the restored-from file parses end
-  # to end. FAIL-CLOSED, unlike the checkpoint above: a non-zero verifier exit
+  # magic-header check before any integrity verdict. The online-backup block
+  # above already produced a consistent snapshot (WAL included); this verifies
+  # that snapshot parses end to end. FAIL-CLOSED: a non-zero verifier exit
   # aborts the deploy (exit 2) — a poison backup in the rollback chain is worse
   # than a delayed deploy; the backup itself is kept on disk for forensics.
   DB_BACKUP_VERIFY_RC=0

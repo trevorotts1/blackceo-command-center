@@ -6,9 +6,9 @@
  * scripts/atomic-deploy.sh source (never a copy — the extractor below reads
  * the actual file the deploy runs):
  *
- *   1. WAL-aware backup: the deploy checkpoints the WAL (PRAGMA
- *      wal_checkpoint(TRUNCATE)) before copying the LIVEDB, so the `cp`
- *      snapshot cannot lag committed pages.
+ *   1. WAL-aware backup: the deploy snapshots the LIVEDB through SQLite's
+ *      online backup API (finding 35) instead of checkpoint-then-`cp`, which
+ *      could miss committed rows still in -wal while the server was live.
  *   2. FIX 34b restore-verification: the backup file ITSELF is read back
  *      (SQLite magic header + PRAGMA integrity_check) BEFORE the deploy
  *      proceeds; a poison backup aborts the deploy with the FIX 34b abort
@@ -82,13 +82,18 @@ afterAll(() => {
 });
 
 describe('FIX 34 — atomic-deploy DB backup is WAL-aware and restore-verified', () => {
-  it('deploy script checkpoints the WAL before copying the DB (backup cannot lag committed pages)', () => {
-    expect(deploySource).toContain('PRAGMA wal_checkpoint(TRUNCATE)');
-    // The copy happens only after the checkpoint block.
-    const cpIdx = deploySource.indexOf('cp "$DB_FILE" "$DB_BACKUP"');
-    const chkIdx = deploySource.indexOf('PRAGMA wal_checkpoint(TRUNCATE)');
-    expect(chkIdx).toBeGreaterThan(-1);
-    expect(cpIdx).toBeGreaterThan(chkIdx);
+  it('deploy script snapshots the DB with SQLite online backup (backup cannot lag committed pages)', () => {
+    // FINDING 35: `PRAGMA wal_checkpoint(TRUNCATE)` on a LIVE db returns BUSY as
+    // a result row rather than raising, so the old checkpoint-then-`cp` could
+    // miss committed rows still in -wal. Connection.backup() takes one
+    // consistent snapshot, WAL included, and a failure aborts the deploy.
+    expect(deploySource).toContain("<<'PYBACKUP'");
+    expect(deploySource).toContain('source.backup(dest)');
+    expect(deploySource).not.toContain('cp "$DB_FILE" "$DB_BACKUP"');
+    expect(deploySource).toContain('DB_BACKUP_RC');
+    const abortIdx = deploySource.indexOf('could not be completed by SQLite');
+    expect(abortIdx).toBeGreaterThan(-1);
+    expect(deploySource.indexOf('exit 2', abortIdx)).toBeGreaterThan(abortIdx);
   });
 
   it('FIX 34b verifier aborts the deploy (exit 2) with the FIX 34b abort receipt on a bad backup', () => {
