@@ -144,6 +144,33 @@ export interface MatchedSkill {
   engineEntryPoint?: string | null;
 }
 
+/**
+ * Resolution state for the skill layer. It separates three different situations
+ * that used to collapse into "no matches, carry on":
+ *
+ *   • `ok`                  — configuration resolved; matches are trustworthy.
+ *   • `no_skills_installed` — the roots exist but hold no SKILL.md (nothing to hand over).
+ *   • `config_absent`       — the onboarding tree is not on this box at all
+ *                             (no skill roots, no dept map). Nothing to scope against.
+ *   • `deps_unresolvable`   — configuration IS present but the things it names are
+ *                             missing/unreadable (dept map path, bound skill,
+ *                             dangling skill symlink). Dispatch must NOT fall back
+ *                             to unrelated skills.
+ */
+export type SkillResolutionStatus =
+  | 'ok'
+  | 'no_skills_installed'
+  | 'config_absent'
+  | 'deps_unresolvable';
+
+export interface SkillResolution {
+  status: SkillResolutionStatus;
+  /** One-line reason; names the offending paths. */
+  detail: string;
+  /** Absolute paths (or bound skill identifiers) that could not be resolved. */
+  missingPaths: string[];
+}
+
 /** A task-targeted excerpt from one of the receiving agent's core files. */
 export interface CoreFileExcerpt {
   source: 'AGENTS.md' | 'TOOLS.md' | 'MEMORY.md';
@@ -818,9 +845,17 @@ function skillSearchRoots(): string[] {
   return Array.from(new Set(roots.filter(Boolean)));
 }
 
-/** Recursively find SKILL.md files under the given roots (depth + count capped). */
-function findSkillFiles(roots: string[]): string[] {
+/**
+ * Recursively find SKILL.md files under the given roots (depth + count capped).
+ *
+ * A broken skill symlink is a CONFIGURED-BUT-UNRESOLVABLE dependency, not an
+ * absence: the old walker skipped it silently, so the matcher went on to hand
+ * the doer an unrelated skill. Broken links at a root (a skill slot) or named
+ * SKILL.md are collected so the caller can name them and block the handoff.
+ */
+function findSkillFiles(roots: string[]): { files: string[]; brokenLinks: string[] } {
   const found: string[] = [];
+  const brokenLinks: string[] = [];
   const seen = new Set<string>();
 
   const walk = (dir: string, depth: number): void => {
@@ -848,6 +883,9 @@ function findSkillFiles(roots: string[]): string[] {
           isFile = st.isFile();
           isDir = st.isDirectory();
         } catch {
+          // Dangling symlink. Only skill-shaped entries count: a root-level link
+          // (a skill slot) or a SKILL.md link.
+          if (depth === 0 || e.name === 'SKILL.md') brokenLinks.push(full);
           continue;
         }
       }
@@ -864,7 +902,7 @@ function findSkillFiles(roots: string[]): string[] {
   };
 
   for (const r of roots) walk(r, 0);
-  return found;
+  return { files: found, brokenLinks };
 }
 
 /**
@@ -897,24 +935,64 @@ function parseSkillMeta(skillPath: string): { name: string; description: string 
 /**
  * Resolve the onboarding skill-department-map.json. Env-overridable via
  * SKILL_DEPARTMENT_MAP or CC_SKILL_DEPARTMENT_MAP (absolute file path).
- * Returns null when no map is present (skills then treated as globally scoped).
+ *
+ * The result is a discriminated STATE, not a nullable path: an env-pinned map
+ * that does not exist and a map that exists but will not parse are both
+ * configured-but-unresolvable, and must never be mistaken for "no map, so every
+ * skill is globally scoped".
  */
-function resolveSkillDeptMapPath(): string | null {
-  const env = process.env.CC_SKILL_DEPARTMENT_MAP || process.env.SKILL_DEPARTMENT_MAP;
-  if (env && env.trim()) return existsSafe(env.trim()) ? env.trim() : null;
+type DeptMapResolution =
+  | { kind: 'ok'; path: string; map: Map<string, string[]> }
+  | { kind: 'absent'; searched: string[] }
+  | { kind: 'unresolvable'; path: string; reason: string };
 
+/** Candidate locations for the dept map, in probe order. */
+function skillDeptMapCandidates(): string[] {
   const home = homeDir();
   const candidates: string[] = [];
   for (const base of [vaultRoot(), path.join(home, 'clawd'), path.join(home, '.openclaw', 'workspace')]) {
     candidates.push(path.join(base, 'openclaw-onboarding', 'skill-department-map.json'));
   }
   candidates.push(path.join(home, '.claude', 'skills', 'skill-department-map.json'));
-  const hit = firstExisting(candidates);
-  return hit.resolvable ? hit.path : null;
+  return candidates;
+}
+
+function resolveSkillDeptMap(): DeptMapResolution {
+  const env = process.env.CC_SKILL_DEPARTMENT_MAP || process.env.SKILL_DEPARTMENT_MAP;
+  const candidates = skillDeptMapCandidates();
+
+  let target: string;
+  if (env && env.trim()) {
+    target = env.trim();
+    if (!existsSafe(target)) {
+      return { kind: 'unresolvable', path: target, reason: 'configured dept map does not exist' };
+    }
+  } else {
+    const hit = firstExisting(candidates);
+    if (!hit.resolvable) return { kind: 'absent', searched: candidates };
+    target = hit.path;
+  }
+
+  let raw: unknown;
+  try {
+    raw = JSON.parse(fs.readFileSync(target, 'utf8'));
+  } catch (err) {
+    return {
+      kind: 'unresolvable',
+      path: target,
+      reason: `dept map unreadable/unparseable: ${(err as Error).message}`,
+    };
+  }
+
+  const map = normalizeSkillDeptMap(raw);
+  if (!map) {
+    return { kind: 'unresolvable', path: target, reason: 'dept map has no usable skill→department entries' };
+  }
+  return { kind: 'ok', path: target, map };
 }
 
 /**
- * Load + normalize the skill-department-map to `skill-name → canonical-dept-slug[]`.
+ * Normalize the skill-department-map to `skill-name → canonical-dept-slug[]`.
  *
  * Accepts three shapes (in precedence order):
  *   1. `{ "departments": { "<dept>": ["skill", …] } }`  (dept → skills)
@@ -922,18 +1000,11 @@ function resolveSkillDeptMapPath(): string | null {
  *   3. bare `{ "<skill>": ["dept", …] }`                 (skill → depts)
  *
  * Global tokens (*, all, global, …) are preserved as `*` so a skill can be
- * mapped to every department. Returns null when no usable map is found.
+ * mapped to every department. An EMPTY but valid map (`{}`) is not an error —
+ * it means "no skill is dept-scoped" and is returned as an empty Map. Only a
+ * non-object payload is unusable (null).
  */
-function loadSkillDeptMap(): Map<string, string[]> | null {
-  const p = resolveSkillDeptMapPath();
-  if (!p) return null;
-
-  let raw: unknown;
-  try {
-    raw = JSON.parse(fs.readFileSync(p, 'utf8'));
-  } catch {
-    return null;
-  }
+function normalizeSkillDeptMap(raw: unknown): Map<string, string[]> | null {
   if (!raw || typeof raw !== 'object') return null;
 
   const map = new Map<string, string[]>();
@@ -971,7 +1042,7 @@ function loadSkillDeptMap(): Map<string, string[]> | null {
     }
   }
 
-  return map.size > 0 ? map : null;
+  return map;
 }
 
 /**
@@ -1093,15 +1164,14 @@ function queryBoundSkillsForAgent(agentId: string | null | undefined): BoundSkil
  *     departments that do not use the skills tables yet).
  *   • Bindings exist → keep ONLY candidates that correspond to a bound skill,
  *     tagging each with its source_path + engine entry point. If every bound
- *     skill failed to resolve on disk, keep the original candidates rather than
- *     starving dispatch of context (the filesystem is the source of truth for
- *     what can RUN; the bindings say what SHOULD).
+ *     skill failed to resolve on disk this returns [] — the caller has already
+ *     classified that as `deps_unresolvable` and blocked the handoff. Handing
+ *     over an unrelated skill instead would hide a broken install.
  */
 function applySkillBindings(
   candidates: SkillCandidate[],
-  agentId: string | null | undefined,
+  bound: BoundSkill[],
 ): SkillCandidate[] {
-  const bound = queryBoundSkillsForAgent(agentId);
   if (bound.length === 0) return candidates;
 
   const tagged: SkillCandidate[] = [];
@@ -1116,7 +1186,117 @@ function applySkillBindings(
       engineEntryPoint: hit.sourcePath ? 'scripts/' : null,
     });
   }
-  return tagged.length > 0 ? tagged : candidates;
+  return tagged;
+}
+
+interface SkillDependencyAnalysis {
+  files: string[];
+  brokenLinks: string[];
+  map: Map<string, string[]> | null;
+  bound: BoundSkill[];
+  resolution: SkillResolution;
+}
+
+/** `ok` / `no_skills_installed` are the only states where a handoff is safe. */
+function skillResolutionAllowsHandoff(r: SkillResolution): boolean {
+  return r.status === 'ok' || r.status === 'no_skills_installed';
+}
+
+/**
+ * Probe the skill layer's DEPENDENCIES (not just its matches) and classify the
+ * result. This is the single place that decides whether the filesystem skill
+ * handoff is trustworthy.
+ *
+ * Precedence — a configured-but-broken dependency always wins over an absence:
+ *   1. dangling skill symlink under a root            → deps_unresolvable
+ *   2. configured dept map path missing/unparseable   → deps_unresolvable
+ *   3. every skill bound to the agent missing on disk → deps_unresolvable
+ *   4. no skill root exists on the box                → config_absent
+ *   5. no dept map anywhere (onboarding tree absent)  → config_absent
+ *   6. roots exist but hold no SKILL.md               → no_skills_installed
+ *   7. otherwise                                      → ok
+ */
+function analyzeSkillDependencies(agentId?: string | null): SkillDependencyAnalysis {
+  const roots = skillSearchRoots();
+  const { files, brokenLinks } = findSkillFiles(roots);
+  const mapState = resolveSkillDeptMap();
+  const map = mapState.kind === 'ok' ? mapState.map : null;
+  const bound = queryBoundSkillsForAgent(agentId);
+
+  const metas = files
+    .map((file) => ({ file, meta: parseSkillMeta(file) }))
+    .filter((m): m is { file: string; meta: { name: string; description: string } } => m.meta !== null);
+
+  const unresolvedBound = bound.filter(
+    (b) => !metas.some((m) => skillCorrespondsToBound({ name: m.meta.name, location: m.file }, b)),
+  );
+  const boundPaths = unresolvedBound.map((b) => b.sourcePath || `skill:${b.slug}`);
+
+  const missingRoots = roots.filter((r) => !existsSafe(r));
+  const allRootsMissing = roots.length > 0 && missingRoots.length === roots.length;
+
+  let resolution: SkillResolution;
+  if (brokenLinks.length > 0) {
+    resolution = {
+      status: 'deps_unresolvable',
+      detail: `dangling skill symlink(s) — the bound skill tree is not installed: ${brokenLinks.join(', ')}`,
+      missingPaths: brokenLinks,
+    };
+  } else if (mapState.kind === 'unresolvable') {
+    resolution = {
+      status: 'deps_unresolvable',
+      detail: `skill-department-map at ${mapState.path} is ${mapState.reason}`,
+      missingPaths: [mapState.path],
+    };
+  } else if (bound.length > 0 && unresolvedBound.length === bound.length) {
+    resolution = {
+      status: 'deps_unresolvable',
+      detail:
+        `every skill bound to this agent is missing on disk (${unresolvedBound
+          .map((b) => `${b.slug}→${b.sourcePath ?? 'no source_path'}`)
+          .join(', ')})`,
+      missingPaths: boundPaths,
+    };
+  } else if (allRootsMissing || roots.length === 0) {
+    resolution = {
+      status: 'config_absent',
+      detail: `no skill root exists on this box (probed: ${roots.join(', ') || 'none'})`,
+      missingPaths: missingRoots,
+    };
+  } else if (mapState.kind === 'absent') {
+    resolution = {
+      status: 'config_absent',
+      detail: `onboarding skill-department-map.json not found (probed: ${mapState.searched.join(', ')})`,
+      missingPaths: mapState.searched,
+    };
+  } else if (files.length === 0) {
+    resolution = {
+      status: 'no_skills_installed',
+      detail: `skill roots exist but hold no SKILL.md (probed: ${roots.join(', ')})`,
+      missingPaths: [],
+    };
+  } else {
+    resolution = { status: 'ok', detail: '', missingPaths: [] };
+  }
+
+  return { files, brokenLinks, map, bound, resolution };
+}
+
+/**
+ * Classify the skill layer for one agent WITHOUT running a match. Dispatch
+ * callers use this to name the missing paths when a handoff is refused.
+ * Never throws.
+ */
+export function resolveSkillDependencies(opts?: { agentId?: string | null }): SkillResolution {
+  try {
+    return analyzeSkillDependencies(opts?.agentId).resolution;
+  } catch (err) {
+    return {
+      status: 'deps_unresolvable',
+      detail: `skill dependency probe failed: ${(err as Error).message}`,
+      missingPaths: [],
+    };
+  }
 }
 
 /**
@@ -1137,18 +1317,38 @@ function applySkillBindings(
  * "task assigned -> engine runs". Agents with no bindings behave exactly as
  * before (pure filesystem match).
  *
+ * MISSING-DEPENDENCY STATE (finding 38): when the skill layer is
+ * configured-but-unresolvable — a dept map path that does not exist or will not
+ * parse, a bound skill absent from disk, a dangling skill symlink — or the
+ * onboarding tree is absent altogether, this returns [] (no handoff) and warns
+ * with the missing paths. It never substitutes unrelated skills for a broken
+ * binding. Pass `opts.onResolution` to receive the classification.
+ *
  * Async (embeddings do I/O). NEVER throws — returns [] on any failure.
  */
 export async function matchSkillsForTask(
   task: { title?: string | null; description?: string | null; department?: string | null },
-  opts?: { limit?: number; agentId?: string | null },
+  opts?: {
+    limit?: number;
+    agentId?: string | null;
+    /** Receives the dependency classification (same object `resolveSkillDependencies` returns). */
+    onResolution?: (r: SkillResolution) => void;
+  },
 ): Promise<MatchedSkill[]> {
   const limit = opts?.limit ?? 3;
   try {
-    const files = findSkillFiles(skillSearchRoots());
+    const analysis = analyzeSkillDependencies(opts?.agentId);
+    opts?.onResolution?.(analysis.resolution);
+    const { files, map, bound, resolution } = analysis;
+
+    if (!skillResolutionAllowsHandoff(resolution)) {
+      console.warn(
+        `[context-pack] skill handoff blocked (${resolution.status}): ${resolution.detail}`,
+      );
+      return [];
+    }
     if (files.length === 0) return [];
 
-    const map = loadSkillDeptMap();
     const deptCanon = task.department ? canonicalDeptSlug(task.department) : null;
 
     let candidates: SkillCandidate[] = [];
@@ -1169,7 +1369,7 @@ export async function matchSkillsForTask(
 
     // Unit 3.2: intersect the filesystem candidates with the assigned agent's
     // agent_skills bindings. No-op when the agent has no bindings.
-    candidates = applySkillBindings(candidates, opts?.agentId);
+    candidates = applySkillBindings(candidates, bound);
     if (candidates.length === 0) return [];
 
     const taskText = [task.title, task.description].filter(Boolean).join(' — ').trim();
