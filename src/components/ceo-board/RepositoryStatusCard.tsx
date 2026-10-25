@@ -13,18 +13,40 @@ interface RepositoryStatusCardProps {
   buildSuccess?: boolean;
 }
 
+/** Shown whenever no measured value has arrived. Never a stand-in sample. */
+const NOT_MEASURED = 'Not measured';
+
+const hasNumber = (value: number | undefined): value is number =>
+  typeof value === 'number' && Number.isFinite(value);
+
+const hasText = (value: string | undefined): value is string =>
+  typeof value === 'string' && value.trim() !== '';
+
 export function RepositoryStatusCard({
-  repoName = 'luminous-core-api',
-  version = 'v4.2.1-stable',
-  pullRequests = 14,
-  openIssues = 3,
-  buildNumber = 2904,
-  buildDuration = '4m 32s',
-  buildTime = '2 mins ago',
-  buildSuccess = true,
+  repoName,
+  version,
+  pullRequests,
+  openIssues,
+  buildNumber,
+  buildDuration,
+  buildTime,
+  buildSuccess,
 }: RepositoryStatusCardProps) {
-  const prPercent = Math.min(pullRequests * 5, 100);
-  const issuePercent = Math.min(openIssues * 5, 100);
+  // A measured zero is a real measurement: only `undefined`/non-finite counts as absent.
+  const prMeasured = hasNumber(pullRequests);
+  const issuesMeasured = hasNumber(openIssues);
+  const prPercent = prMeasured ? Math.min(pullRequests * 5, 100) : 0;
+  const issuePercent = issuesMeasured ? Math.min(openIssues * 5, 100) : 0;
+
+  const buildStatusLabel =
+    typeof buildSuccess === 'boolean'
+      ? `${buildSuccess ? 'Success' : 'Failed'}${hasNumber(buildNumber) ? ` #${buildNumber}` : ''}`
+      : NOT_MEASURED;
+
+  const buildDetail = [
+    hasText(buildDuration) ? `Completed in ${buildDuration}` : null,
+    hasText(buildTime) ? buildTime : null,
+  ].filter(Boolean);
 
   return (
     <div className="space-y-4">
@@ -36,8 +58,8 @@ export function RepositoryStatusCard({
             <Terminal className="h-5 w-5 text-brand-600" />
           </div>
           <div>
-            <p className="font-bold text-gray-900">{repoName}</p>
-            <p className="text-xs text-gray-400">{version}</p>
+            <p className="font-bold text-gray-900">{hasText(repoName) ? repoName : NOT_MEASURED}</p>
+            <p className="text-xs text-gray-400">{hasText(version) ? version : NOT_MEASURED}</p>
           </div>
         </div>
         <div className="space-y-4">
@@ -47,14 +69,18 @@ export function RepositoryStatusCard({
                 <GitPullRequest className="h-3.5 w-3.5" />
                 Pull Requests
               </span>
-              <span className="font-bold text-gray-900">{pullRequests}</span>
+              <span className={`font-bold ${prMeasured ? 'text-gray-900' : 'text-gray-400'}`}>
+                {prMeasured ? pullRequests : NOT_MEASURED}
+              </span>
             </div>
-            <div className="w-full h-1.5 bg-gray-100 rounded-full overflow-hidden">
-              <div
-                className="h-full bg-emerald-500 rounded-full transition-all duration-500"
-                style={{ width: `${prPercent}%` }}
-              />
-            </div>
+            {prMeasured && (
+              <div className="w-full h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-emerald-500 rounded-full transition-all duration-500"
+                  style={{ width: `${prPercent}%` }}
+                />
+              </div>
+            )}
           </div>
           <div>
             <div className="flex items-center justify-between text-sm mb-1.5">
@@ -62,14 +88,18 @@ export function RepositoryStatusCard({
                 <AlertCircle className="h-3.5 w-3.5" />
                 Open Issues
               </span>
-              <span className="font-bold text-gray-900">{openIssues}</span>
+              <span className={`font-bold ${issuesMeasured ? 'text-gray-900' : 'text-gray-400'}`}>
+                {issuesMeasured ? openIssues : NOT_MEASURED}
+              </span>
             </div>
-            <div className="w-full h-1.5 bg-gray-100 rounded-full overflow-hidden">
-              <div
-                className="h-full bg-rose-400 rounded-full transition-all duration-500"
-                style={{ width: `${issuePercent}%` }}
-              />
-            </div>
+            {issuesMeasured && (
+              <div className="w-full h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-rose-400 rounded-full transition-all duration-500"
+                  style={{ width: `${issuePercent}%` }}
+                />
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -78,13 +108,30 @@ export function RepositoryStatusCard({
       <div className="bg-gray-50 rounded-2xl border border-gray-100 p-5">
         <p className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3">Recent Build</p>
         <div className="flex items-center gap-2">
-          <CheckCircle className={`h-4 w-4 ${buildSuccess ? 'text-emerald-500' : 'text-rose-500'}`} style={{ fontVariationSettings: "'FILL' 1" } as React.CSSProperties} />
-          <span className={`text-sm font-bold ${buildSuccess ? 'text-emerald-600' : 'text-rose-600'}`}>
-            {buildSuccess ? 'Success' : 'Failed'} #{buildNumber}
+          <CheckCircle
+            className={`h-4 w-4 ${
+              typeof buildSuccess !== 'boolean'
+                ? 'text-gray-400'
+                : buildSuccess
+                  ? 'text-emerald-500'
+                  : 'text-rose-500'
+            }`}
+            style={{ fontVariationSettings: "'FILL' 1" } as React.CSSProperties}
+          />
+          <span
+            className={`text-sm font-bold ${
+              typeof buildSuccess !== 'boolean'
+                ? 'text-gray-400'
+                : buildSuccess
+                  ? 'text-emerald-600'
+                  : 'text-rose-600'
+            }`}
+          >
+            {buildStatusLabel}
           </span>
         </div>
         <p className="text-xs text-gray-400 mt-1.5">
-          Completed in {buildDuration} &middot; {buildTime}
+          {buildDetail.length > 0 ? buildDetail.join(' · ') : NOT_MEASURED}
         </p>
       </div>
     </div>
