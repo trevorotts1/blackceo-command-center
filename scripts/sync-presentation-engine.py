@@ -45,7 +45,11 @@ census against it whenever engine_origin.py is in the pinned tree.
 REFUSALS (fail-closed, exit 2)
 ------------------------------
   sync refuses: a missing or unresolvable --commit (an unpinned source is
-  not a source); a source that is not a git checkout; a target whose
+  not a source); a source that is not a git checkout; a source with no
+  remote whose normalized URL is trevorotts1/openclaw-onboarding, or whose
+  --commit is not reachable from that remote's mainline (a checkout that
+  merely carries the package tree is not canonical and must never be
+  stamped as such); a target whose
   presentation_job/ carries uncommitted changes (the sync replaces that
   directory wholesale and must never silently destroy uncommitted work).
   verify refuses (exit 2 even in --warn mode): a missing or unparseable
@@ -111,6 +115,84 @@ def resolve_commit(source: Path, ref: str) -> str:
         die(f"commit {ref!r} does not resolve in source {source} "
             f"(an unpinned source is not a source; pass a full commit SHA)")
     return sha
+
+
+_REMOTE_URL = re.compile(
+    r"^(?:(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*)://)?"
+    r"(?:(?P<user>[^/@]+)@)?"
+    r"(?P<host>[^/:]+)"
+    r"(?::(?P<port>\d+))?"
+    r"[:/]"
+    r"(?P<path>.+)$")
+
+
+def normalize_remote_url(url: str) -> str:
+    """`host/owner/repo` from any git remote URL form (scp, ssh, https).
+
+    Credentials, port and transport are dropped: provenance compares on
+    repository identity, not on how a checkout was fetched. A local path
+    or any form that does not parse is returned as-is, so it can only ever
+    fail the canonical comparison.
+    """
+    m = _REMOTE_URL.match(url.strip())
+    if not m:
+        return url.strip()
+    path = m.group("path").split("?")[0].split("#")[0].strip("/")
+    if path.endswith(".git"):
+        path = path[:-4]
+    if not path:
+        return m.group("host").lower()
+    host = m.group("host").lower()
+    if host == "www.github.com":
+        host = "github.com"
+    return f"{host}/{path}"
+
+
+# Remote-tracking mainline refs searched, in order, for the remote that
+# matches CANONICAL_REPO. Only refs fetched FROM that remote count: a local
+# refs/heads/main is the checkout's own state and can be ahead of canonical.
+_MAINLINE_REFS = ("refs/remotes/{remote}/main", "refs/remotes/{remote}/HEAD")
+
+
+def verified_source(source: Path, commit: str) -> Dict[str, str]:
+    """Prove `source` is the canonical repo and `commit` is on its mainline.
+
+    A checkout that merely CONTAINS the package tree is not canonical: the
+    manifest's provenance fields are a claim about where the bytes came
+    from, so the remote identity and the commit's mainline reachability are
+    both checked before anything is copied. The mainline TIP is not
+    recorded -- it moves, and a moving value would break sync idempotence;
+    the proof is this acceptance/refusal at copy time.
+    """
+    listing = git(source, "remote", "-v", check=False)
+    remotes: Dict[str, str] = {}
+    for line in listing.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 2:
+            remotes.setdefault(parts[0], parts[1])
+    matching = sorted(name for name, url in remotes.items()
+                      if normalize_remote_url(url).lower()
+                      == f"github.com/{CANONICAL_REPO}".lower())
+    if not matching:
+        seen = ", ".join(f"{n} ({u})"
+                         for n, u in sorted(remotes.items())) or "none"
+        die(f"source {source} has no remote pointing at {CANONICAL_REPO} "
+            f"(remotes: {seen}); a checkout that carries the package tree "
+            f"is not the canonical repository")
+    for remote in matching:
+        for ref in (r.format(remote=remote) for r in _MAINLINE_REFS):
+            head = git(source, "rev-parse", "--verify", "--quiet", ref,
+                       check=False)
+            tip = head.stdout.strip()
+            if head.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40}", tip):
+                continue
+            if git(source, "merge-base", "--is-ancestor", commit, tip,
+                   check=False).returncode == 0:
+                return {"repo": CANONICAL_REPO, "remote": remote,
+                        "url": f"https://github.com/{CANONICAL_REPO}",
+                        "mainline_ref": ref}
+    die(f"commit {commit} is not on {CANONICAL_REPO}'s mainline in {source} "
+        f"(remotes {', '.join(matching)}); refusing to stamp it canonical")
 
 
 def enumerate_tree(source: Path, commit: str) -> List[Dict[str, Any]]:
@@ -234,6 +316,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
     source = Path(args.source).resolve()
     target = Path(args.target).resolve()
     commit = resolve_commit(source, args.commit)
+    verified = verified_source(source, commit)
 
     if not (target / ".git").exists():
         die(f"target {target} is not a git checkout (no .git)")
@@ -268,9 +351,10 @@ def cmd_sync(args: argparse.Namespace) -> int:
     origin = harvest_origin(content)
 
     new_manifest: Dict[str, Any] = {
-        "canonical_repo": CANONICAL_REPO,
+        "canonical_repo": verified["repo"],
         "canonical_commit": commit,
         "canonical_package_path": CANONICAL_PACKAGE_PATH,
+        "source": verified,
         "generator_version": GENERATOR_VERSION,
         "package_digest": digest,
         "package_files": census_count,
@@ -328,7 +412,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
         "%Y-%m-%dT%H:%M:%SZ")
     ordered = {k: new_manifest[k] for k in (
         "canonical_repo", "canonical_commit", "canonical_package_path",
-        "generated_at", "generator_version", "package_digest",
+        "source", "generated_at", "generator_version", "package_digest",
         "package_files", "file_count", "origin", "files")}
     (pkg_dir / MANIFEST_NAME).write_text(
         json.dumps(ordered, indent=2) + "\n", encoding="utf-8")
