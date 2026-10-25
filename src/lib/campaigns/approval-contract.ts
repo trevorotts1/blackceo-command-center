@@ -40,7 +40,12 @@
  * clause above is unit-testable without a database.
  */
 import { createHash } from 'node:crypto';
-import { parseEventTime, type LifecycleEventRow } from '@/lib/board/lifecycle-projection';
+// The PURE leaf, never `@/lib/board/lifecycle-projection` — that module is
+// SERVER-ONLY and reaches `fs` / `child_process` through `@/lib/db`. This file
+// is imported by the client component `CampaignApprovalBoard.tsx`, so a server
+// edge here is bundled into the browser and the build dies.
+import { parseEventTime, type LifecycleEventRow } from '@/lib/board/lifecycle-event-row';
+import { cellStateOf } from './approval-cell-state';
 
 export type { LifecycleEventRow };
 
@@ -798,18 +803,15 @@ export function buildCampaignApprovalView(input: CampaignApprovalInput): Campaig
   };
 }
 
-/** The calendar cell a placement lands in. Publication only with a receipt. */
-export function cellStateOf(placement: PlacementView): CalendarCellState {
-  // A dated provider completion receipt is the strongest evidence there is;
-  // freshness still rides the row for the operator to see.
-  if (placement.publication_state === 'CURRENT') return 'published';
-  if (placement.freshness === 'stale') return 'stale';
-  if (placement.freshness === 'unknown') return 'unknown';
-  if (placement.approval_state === 'HELD') return 'held';
-  if (placement.approval_state === 'APPROVED') return 'scheduled';
-  if (placement.approval_state === 'UNKNOWN') return 'unknown';
-  return 'unapproved';
-}
+/**
+ * The calendar cell a placement lands in. Publication only with a receipt.
+ *
+ * Defined in `approval-cell-state.ts`, the browser-safe half of this contract,
+ * so the client component can import it WITHOUT this module — and its
+ * `node:crypto` hashing — entering the browser bundle. Re-exported here so
+ * every existing server and test import keeps working unchanged.
+ */
+export { cellStateOf };
 
 function approvedByOf(receipt: CommandReceipt): { approved_by: string | null; approved_at: string | null } | null {
   if (!receipt.payload_json) return null;

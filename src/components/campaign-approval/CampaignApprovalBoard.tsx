@@ -10,12 +10,15 @@
  * refusal is shown verbatim with its code.
  */
 import { useMemo, useState, useTransition } from 'react';
+// The browser-safe half ONLY. `@/lib/campaigns/approval-contract` hashes with
+// `node:crypto` and must stay out of the client graph; the render types below
+// are `import type`, so they are erased before bundling.
 import {
   cellStateOf,
   type CampaignApprovalView,
   type CalendarCellState,
   type PublicationState,
-} from '@/lib/campaigns/approval-contract';
+} from '@/lib/campaigns/approval-cell-state';
 import {
   submitCampaignCommand,
   type CampaignActionInput,
