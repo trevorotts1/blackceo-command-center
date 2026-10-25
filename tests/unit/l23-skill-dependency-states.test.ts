@@ -58,7 +58,7 @@ interface Box {
   writeSkill: (dir: string, name: string, description: string) => void;
 }
 
-function makeBox(o: { map: 'valid' | 'none' | 'missing' | 'broken' }): Box {
+function makeBox(o: { map: 'valid' | 'empty' | 'garbage' | 'none' | 'missing' | 'broken' }): Box {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'l23-home-'));
   const skillsDir = path.join(home, 'skills-box');
   fs.mkdirSync(skillsDir, { recursive: true });
@@ -77,6 +77,14 @@ function makeBox(o: { map: 'valid' | 'none' | 'missing' | 'broken' }): Box {
   const mapPath = path.join(home, 'skill-department-map.json');
   if (o.map === 'valid') {
     fs.writeFileSync(mapPath, JSON.stringify({ 'video-editor': ['media'] }), 'utf8');
+    process.env.CC_SKILL_DEPARTMENT_MAP = mapPath;
+  } else if (o.map === 'empty') {
+    fs.writeFileSync(mapPath, '{}', 'utf8'); // valid EMPTY map: no skill is dept-scoped
+    process.env.CC_SKILL_DEPARTMENT_MAP = mapPath;
+  } else if (o.map === 'garbage') {
+    // Valid JSON, but matches none of the accepted shapes — a broken map, not
+    // an empty one. Must never silently widen scope to every skill.
+    fs.writeFileSync(mapPath, '{"departments": 5, "note": "todo"}', 'utf8');
     process.env.CC_SKILL_DEPARTMENT_MAP = mapPath;
   } else if (o.map === 'broken') {
     fs.writeFileSync(mapPath, '{"departments": ', 'utf8'); // truncated JSON
@@ -172,7 +180,7 @@ test('configured dept map that will not parse → deps_unresolvable, handoff blo
   assert.match(r.detail, /unreadable|unparseable/i);
 });
 
-test('dangling skill symlink → deps_unresolvable naming the link, handoff blocked', async () => {
+test('dangling skill symlink → deps_unresolvable naming the link, handoff blocked', async (t) => {
   const box = makeBox({ map: 'valid' });
   box.writeSkill('video-editor', 'video-editor', 'Edit and render video clips, timelines and captions.');
 
@@ -180,7 +188,8 @@ test('dangling skill symlink → deps_unresolvable naming the link, handoff bloc
   try {
     fs.symlinkSync(path.join(box.home, 'gone-skill-tree'), link, 'dir');
   } catch {
-    return; // symlinks unsupported on this host — skip
+    t.skip('symlinks unsupported on this host'); // must SKIP, never pass vacuously
+    return;
   }
 
   const matches = await matchSkillsForTask(VIDEO_TASK);
@@ -242,6 +251,108 @@ test('agent bound to a skill that is not installed → deps_unresolvable, handof
 });
 
 // ---------------------------------------------------------------------------
+// State 2 (cont.) — the SAME rule must hold when only SOME dependencies broke
+// ---------------------------------------------------------------------------
+
+test('agent bound to one installed + one missing skill → deps_unresolvable naming the missing one', async () => {
+  const box = makeBox({ map: 'valid' });
+  box.writeSkill('video-editor', 'video-editor', 'Edit and render video clips, timelines and captions.');
+
+  const missingSource = path.join(box.home, 'not-installed', '58-podcast-production-engine');
+
+  const db = (await import('../../src/lib/db')).getDb();
+  db.prepare('INSERT OR IGNORE INTO workspaces (id, name, slug) VALUES (?, ?, ?)').run(
+    'l23-ws',
+    'L23 Test',
+    'l23-ws',
+  );
+  db.prepare('INSERT OR REPLACE INTO agents (id, name, role, workspace_id) VALUES (?, ?, ?, ?)').run(
+    'l23-agent-2',
+    'L23 Agent 2',
+    'specialist',
+    'l23-ws',
+  );
+  db.prepare('INSERT OR REPLACE INTO skills (id, slug, name, source_path, enabled) VALUES (?, ?, ?, ?, 1)').run(
+    'l23-skill-a',
+    'video-editor',
+    'video-editor',
+    path.join(box.skillsDir, 'video-editor'),
+  );
+  db.prepare('INSERT OR REPLACE INTO skills (id, slug, name, source_path, enabled) VALUES (?, ?, ?, ?, 1)').run(
+    'l23-skill-b',
+    '58-podcast-production-engine',
+    'podcast-production-engine',
+    missingSource,
+  );
+  db.prepare('INSERT OR REPLACE INTO agent_skills (agent_id, skill_id) VALUES (?, ?)').run(
+    'l23-agent-2',
+    'l23-skill-a',
+  );
+  db.prepare('INSERT OR REPLACE INTO agent_skills (agent_id, skill_id) VALUES (?, ?)').run(
+    'l23-agent-2',
+    'l23-skill-b',
+  );
+
+  const matches = await matchSkillsForTask(VIDEO_TASK, { agentId: 'l23-agent-2' });
+  assert.deepEqual(
+    matches,
+    [],
+    'a PARTIALLY missing binding must block too — the missing skill must never be silently dropped',
+  );
+
+  const r = await resolution('l23-agent-2');
+  assert.equal(r.status, 'deps_unresolvable', `expected deps_unresolvable, got ${r.status} (${r.detail})`);
+  assert.ok(
+    r.missingPaths.includes(missingSource),
+    `missingPaths must name the missing bound skill even when another one resolves, got: ${JSON.stringify(r.missingPaths)}`,
+  );
+});
+
+test('dept map that parses but matches no accepted shape → deps_unresolvable, not global scope', async () => {
+  const box = makeBox({ map: 'garbage' });
+  box.writeSkill('video-editor', 'video-editor', 'Edit and render video clips, timelines and captions.');
+
+  const matches = await matchSkillsForTask(VIDEO_TASK);
+  assert.deepEqual(
+    matches,
+    [],
+    'a shapeless map is a broken map — it must block the handoff, not widen it to every skill',
+  );
+
+  const r = await resolution();
+  assert.equal(r.status, 'deps_unresolvable', `expected deps_unresolvable, got ${r.status} (${r.detail})`);
+  assert.deepEqual(r.missingPaths, [box.mapPath]);
+});
+
+test('dangling skill-ROOT symlink next to a healthy root → deps_unresolvable naming the link', async (t) => {
+  const box = makeBox({ map: 'valid' });
+  box.writeSkill('video-editor', 'video-editor', 'Edit and render video clips, timelines and captions.');
+
+  const link = path.join(box.home, 'skills-link');
+  try {
+    fs.symlinkSync(path.join(box.home, 'gone-skill-tree'), link, 'dir');
+  } catch {
+    t.skip('symlinks unsupported on this host'); // must SKIP, never pass vacuously
+    return;
+  }
+  process.env.CC_SKILL_ROOTS = `${link}${path.delimiter}${box.skillsDir}`;
+
+  const matches = await matchSkillsForTask(VIDEO_TASK);
+  assert.deepEqual(
+    matches,
+    [],
+    'a broken skill-root link must block even when another root has skills — it is configured-but-broken, not absent',
+  );
+
+  const r = await resolution();
+  assert.equal(r.status, 'deps_unresolvable', `expected deps_unresolvable, got ${r.status} (${r.detail})`);
+  assert.ok(
+    r.missingPaths.includes(link),
+    `missingPaths must name the dangling root link, got: ${JSON.stringify(r.missingPaths)}`,
+  );
+});
+
+// ---------------------------------------------------------------------------
 // Control — a healthy box still resolves (the fix must not over-block)
 // ---------------------------------------------------------------------------
 
@@ -252,6 +363,25 @@ test('healthy box (map + installed skill) → ok and the skill is still handed o
   const matches = await matchSkillsForTask(VIDEO_TASK);
   assert.ok(matches.length > 0, 'a healthy box must still hand off its installed skill');
   assert.equal(matches[0].name, 'video-editor');
+
+  const r = await resolution();
+  assert.equal(r.status, 'ok', `expected ok, got ${r.status} (${r.detail})`);
+  assert.deepEqual(r.missingPaths, []);
+});
+
+test('valid EMPTY map ({}) → ok, skills stay unscoped; opts.onResolution sees the classification', async () => {
+  const box = makeBox({ map: 'empty' });
+  box.writeSkill('video-editor', 'video-editor', 'Edit and render video clips, timelines and captions.');
+
+  let seen: Resolution | null = null;
+  const matches = await matchSkillsForTask(VIDEO_TASK, {
+    onResolution: (r: Resolution) => {
+      seen = r;
+    },
+  });
+  assert.ok(matches.length > 0, 'an empty-but-valid map must not over-block the handoff');
+  assert.equal(matches[0].name, 'video-editor');
+  assert.equal(seen?.status, 'ok', `onResolution must see ok, got ${seen?.status} (${seen?.detail})`);
 
   const r = await resolution();
   assert.equal(r.status, 'ok', `expected ok, got ${r.status} (${r.detail})`);

@@ -1001,8 +1001,11 @@ function resolveSkillDeptMap(): DeptMapResolution {
  *
  * Global tokens (*, all, global, …) are preserved as `*` so a skill can be
  * mapped to every department. An EMPTY but valid map (`{}`) is not an error —
- * it means "no skill is dept-scoped" and is returned as an empty Map. Only a
- * non-object payload is unusable (null).
+ * it means "no skill is dept-scoped" and is returned as an empty Map. A payload
+ * that DECLARES entries but yields no usable skill→department entry (e.g.
+ * `{"departments": 5}` or `{"note": "todo"}`) is a BROKEN map, not an empty
+ * one — returning an empty Map there would silently widen scope to every skill
+ * (finding 38), so it is unusable (null).
  */
 function normalizeSkillDeptMap(raw: unknown): Map<string, string[]> | null {
   if (!raw || typeof raw !== 'object') return null;
@@ -1025,23 +1028,39 @@ function normalizeSkillDeptMap(raw: unknown): Map<string, string[]> | null {
   const skillContainer =
     obj.skills && typeof obj.skills === 'object' ? (obj.skills as Record<string, unknown>) : null;
 
+  let declared = 0;
+  let usable = 0;
   if (deptContainer) {
-    for (const [dept, skills] of Object.entries(deptContainer)) {
+    const entries = Object.entries(deptContainer);
+    declared = entries.length;
+    for (const [dept, skills] of entries) {
       if (Array.isArray(skills)) {
+        usable += 1;
         for (const s of skills) if (typeof s === 'string') addSkill(s, [dept]);
       }
     }
   } else if (skillContainer) {
-    for (const [skill, depts] of Object.entries(skillContainer)) {
-      if (Array.isArray(depts)) addSkill(skill, depts.filter((x): x is string => typeof x === 'string'));
+    const entries = Object.entries(skillContainer);
+    declared = entries.length;
+    for (const [skill, depts] of entries) {
+      if (Array.isArray(depts)) {
+        usable += 1;
+        addSkill(skill, depts.filter((x): x is string => typeof x === 'string'));
+      }
     }
   } else {
     // Bare shape — interpret keys as skill names → department arrays.
-    for (const [skill, depts] of Object.entries(obj)) {
-      if (Array.isArray(depts)) addSkill(skill, depts.filter((x): x is string => typeof x === 'string'));
+    const entries = Object.entries(obj);
+    declared = entries.length;
+    for (const [skill, depts] of entries) {
+      if (Array.isArray(depts)) {
+        usable += 1;
+        addSkill(skill, depts.filter((x): x is string => typeof x === 'string'));
+      }
     }
   }
 
+  if (usable === 0 && declared > 0) return null;
   return map;
 }
 
@@ -1163,10 +1182,11 @@ function queryBoundSkillsForAgent(agentId: string | null | undefined): BoundSkil
  *   • No agent, or no bindings → candidates unchanged (backwards compatible for
  *     departments that do not use the skills tables yet).
  *   • Bindings exist → keep ONLY candidates that correspond to a bound skill,
- *     tagging each with its source_path + engine entry point. If every bound
- *     skill failed to resolve on disk this returns [] — the caller has already
- *     classified that as `deps_unresolvable` and blocked the handoff. Handing
- *     over an unrelated skill instead would hide a broken install.
+ *     tagging each with its source_path + engine entry point. NEVER falls back
+ *     to the unrestricted candidate set: a bound skill missing from disk is
+ *     classified `deps_unresolvable` upstream and blocks the handoff before
+ *     this runs. Handing over an unrelated skill instead would hide a broken
+ *     install.
  */
 function applySkillBindings(
   candidates: SkillCandidate[],
@@ -1208,9 +1228,9 @@ function skillResolutionAllowsHandoff(r: SkillResolution): boolean {
  * handoff is trustworthy.
  *
  * Precedence — a configured-but-broken dependency always wins over an absence:
- *   1. dangling skill symlink under a root            → deps_unresolvable
+ *   1. dangling skill symlink (root or skill slot)    → deps_unresolvable
  *   2. configured dept map path missing/unparseable   → deps_unresolvable
- *   3. every skill bound to the agent missing on disk → deps_unresolvable
+ *   3. ANY skill bound to the agent missing on disk   → deps_unresolvable
  *   4. no skill root exists on the box                → config_absent
  *   5. no dept map anywhere (onboarding tree absent)  → config_absent
  *   6. roots exist but hold no SKILL.md               → no_skills_installed
@@ -1235,12 +1255,24 @@ function analyzeSkillDependencies(agentId?: string | null): SkillDependencyAnaly
   const missingRoots = roots.filter((r) => !existsSafe(r));
   const allRootsMissing = roots.length > 0 && missingRoots.length === roots.length;
 
+  // A skill ROOT that is itself a dangling symlink is configured-but-broken
+  // (the classic "skills tree lives on an unmounted volume"), not an absent
+  // candidate — a plain non-existent path is a probe miss, a broken link is not.
+  const brokenRoots = roots.filter((r) => {
+    try {
+      return fs.lstatSync(r).isSymbolicLink() && !existsSafe(r);
+    } catch {
+      return false;
+    }
+  });
+  const brokenLinksAll = [...brokenRoots, ...brokenLinks];
+
   let resolution: SkillResolution;
-  if (brokenLinks.length > 0) {
+  if (brokenLinksAll.length > 0) {
     resolution = {
       status: 'deps_unresolvable',
-      detail: `dangling skill symlink(s) — the bound skill tree is not installed: ${brokenLinks.join(', ')}`,
-      missingPaths: brokenLinks,
+      detail: `dangling skill symlink(s) — the bound skill tree is not installed: ${brokenLinksAll.join(', ')}`,
+      missingPaths: brokenLinksAll,
     };
   } else if (mapState.kind === 'unresolvable') {
     resolution = {
@@ -1248,11 +1280,11 @@ function analyzeSkillDependencies(agentId?: string | null): SkillDependencyAnaly
       detail: `skill-department-map at ${mapState.path} is ${mapState.reason}`,
       missingPaths: [mapState.path],
     };
-  } else if (bound.length > 0 && unresolvedBound.length === bound.length) {
+  } else if (unresolvedBound.length > 0) {
     resolution = {
       status: 'deps_unresolvable',
       detail:
-        `every skill bound to this agent is missing on disk (${unresolvedBound
+        `skill(s) bound to this agent missing on disk (${unresolvedBound
           .map((b) => `${b.slug}→${b.sourcePath ?? 'no source_path'}`)
           .join(', ')})`,
       missingPaths: boundPaths,
@@ -1319,10 +1351,11 @@ export function resolveSkillDependencies(opts?: { agentId?: string | null }): Sk
  *
  * MISSING-DEPENDENCY STATE (finding 38): when the skill layer is
  * configured-but-unresolvable — a dept map path that does not exist or will not
- * parse, a bound skill absent from disk, a dangling skill symlink — or the
- * onboarding tree is absent altogether, this returns [] (no handoff) and warns
- * with the missing paths. It never substitutes unrelated skills for a broken
- * binding. Pass `opts.onResolution` to receive the classification.
+ * parse, ANY bound skill absent from disk, a dangling skill symlink (slot or
+ * root) — or the onboarding tree is absent altogether, this returns [] (no
+ * handoff) and warns with the missing paths. It never substitutes unrelated
+ * skills for a broken binding. Pass `opts.onResolution` to receive the
+ * classification.
  *
  * Async (embeddings do I/O). NEVER throws — returns [] on any failure.
  */
