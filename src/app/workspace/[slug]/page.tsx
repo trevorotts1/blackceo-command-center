@@ -368,6 +368,14 @@ export default function WorkspacePage() {
         />
       </div>
 
+      {/* T-34: this workspace's bookings / failures / outcomes surface. A real
+          inbound link, not just a URL — the view is mounted and discoverable. */}
+      <div className="px-4 sm:px-6 lg:px-8 py-2 bg-white border-b border-gray-100 shrink-0">
+        <Link href={`/workspace/${slug}/exceptions`} className="text-sm text-indigo-600 hover:underline">
+          Bookings, failures and outcomes
+        </Link>
+      </div>
+
       {/* A7 — board projection drift banner (Anthology board only). Read-only,
           fail-soft; renders nothing unless the ledger shows confirmed drift. */}
       {workspace.slug === 'anthology' && <AnthologyBoardDriftBanner />}
