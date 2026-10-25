@@ -25,8 +25,8 @@ export const revalidate = 0;
  * fix-45: the endpoint used to read the checkout only, so a checkout that
  * moved under an older running build advertised the newer number and the
  * drift became invisible. The response now labels two values:
- *   - `buildVersion`    — recorded once when this build's process loaded,
- *                         immune to the checkout moving underneath it;
+ *   - `buildVersion`    — recorded once when this build's route module first
+ *                         loaded, immune to the checkout moving underneath it;
  *   - `checkoutVersion` — read live from disk on every request (what the
  *                         checkout says right now).
  * They differ exactly when the checkout has moved since the running build.
@@ -51,11 +51,14 @@ function readCheckoutVersion(): VersionRead {
 }
 
 /**
- * Build-recorded revision, captured at module load (server start from the
- * built bundle) and never re-read, so it cannot follow a checkout that moves.
+ * Build-recorded revision, captured the first time this module is evaluated
+ * and never re-read, so it cannot follow a checkout that moves under the
+ * running process.
  *
- * ponytail: a process-start record, not git-verified build provenance — a
- * `git pull` landing between `next build` and `next start` still moves it.
+ * ponytail: a first-load record, not git-verified build provenance — a
+ * `git pull` landing before evaluation moves it, whether evaluation happens
+ * at `next start` or lazily on the route's first request (module-evaluation
+ * timing for `force-dynamic` routes is not observed here, only inferred).
  * Upgrade path: stamp the revision at build time via next.config `env` and
  * read that here.
  */
@@ -63,7 +66,9 @@ const BUILD_VERSION_RECORD = readCheckoutVersion();
 
 export async function GET() {
   const checkout = readCheckoutVersion();
-  const error = checkout.error ?? BUILD_VERSION_RECORD.error;
+  // Both reads report: a degraded read whose cause got swallowed would leave a
+  // null field unexplained in an endpoint that exists to explain drift.
+  const error = [checkout.error, BUILD_VERSION_RECORD.error].filter(Boolean).join('; ') || undefined;
   return NextResponse.json(
     {
       version: checkout.version, // legacy alias, live checkout value
