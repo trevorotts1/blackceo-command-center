@@ -9,6 +9,8 @@
  */
 import { describe, it, expect } from 'vitest';
 import { render, screen } from '@testing-library/react';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { RepositoryStatusCard } from '@/components/ceo-board/RepositoryStatusCard';
 
 describe('RepositoryStatusCard — no fabricated defaults', () => {
@@ -16,12 +18,14 @@ describe('RepositoryStatusCard — no fabricated defaults', () => {
     const { container } = render(<RepositoryStatusCard />);
     const text = container.textContent ?? '';
 
-    expect(screen.getAllByText('Not measured').length).toBeGreaterThanOrEqual(4);
+    // Exactly six fields exist and all six must read "Not measured".
+    expect(screen.getAllByText('Not measured').length).toBe(6);
 
     for (const sample of [
       'luminous-core-api',
       'v4.2.1-stable',
       '14',
+      '3',
       '2904',
       '4m 32s',
       '2 mins ago',
@@ -29,6 +33,10 @@ describe('RepositoryStatusCard — no fabricated defaults', () => {
     ]) {
       expect(text).not.toContain(sample);
     }
+
+    // Belt: a prop-less render contains no digits at all, so no sample number
+    // of any kind can leak back in.
+    expect(text).not.toMatch(/\d/);
   });
 
   it('shows a measured zero as zero, never as "Not measured" or a sample', () => {
@@ -76,5 +84,27 @@ describe('RepositoryStatusCard — no fabricated defaults', () => {
     expect(text).toContain('Completed in 1m 5s');
     expect(text).toContain('5 mins ago');
     expect(text).not.toContain('Not measured');
+  });
+});
+
+describe('[dept] page — no sample substitution for missing or zero KPIs', () => {
+  // Source-contract guard (u56 pattern): the page-level half of finding 3 is
+  // "never substitute a number for a zero". ponytail: source scan, not a page
+  // render — add a render test when a /ceo-board/[dept] jsdom harness exists.
+  const src = readFileSync(
+    join(process.cwd(), 'src', 'app', 'ceo-board', '[dept]', 'page.tsx'),
+    'utf-8',
+  );
+
+  it('carries no sample KPI numbers and no `||` substitution on a measured value', () => {
+    for (const sample of ['84.36', '52.83', '4.38']) {
+      expect(src).not.toContain(sample);
+    }
+    // `?.value || x` turns a measured zero into the fallback — forbidden.
+    expect(src).not.toMatch(/\?\.\s*value\s*\|\|/);
+  });
+
+  it('does not import the sample-carrying KPIStatCardsRow', () => {
+    expect(src).not.toContain('KPIStatCardsRow');
   });
 });
