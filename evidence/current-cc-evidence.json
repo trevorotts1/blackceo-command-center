@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "id": "E-T03-CC-INTERFACES",
+  "kind": "source",
+  "task_ids": ["T-03"],
+  "requirement_ids": ["R-06", "R-20", "R-28", "R-31"],
+  "check_ids": ["C-03"],
+  "candidate_revision": "dfe01f86285d87ba7c9be6312530b97ad02a3255",
+  "base_revision": "dfe01f86285d87ba7c9be6312530b97ad02a3255",
+  "config_revision": null,
+  "actor_native_id": "PBB-403",
+  "author_native_ids": ["PBB-403"],
+  "observed_at": "2026-10-25T14:11:27Z",
+  "result": "OBSERVED",
+  "receipt_path": "evidence/T-03-EVIDENCE.md",
+  "limitations": [
+    "Route inventory derived from the tree at dfe01f86285d87ba7c9be6312530b97ad02a3255 only: 259 src/app route.ts files, 376 exported method/route pairs, 67 page.tsx files. Instrument positive control FILES=259 METHOD_ROWS=376; negative control on a nonexistent subdir returned 0 rows with EXISTS=False, so a zero is distinguishable from a broken walk.",
+    "No prior route inventory exists to diff against, and none was used as a source. current-cc-evidence.json is this task's output artifact; the package evidence/ directory holds only t04-storage-census.md; six package docs contain zero /api/ endpoint claims (regex control on src/middleware.ts returned 56 matches); repo docs/ filtered for route/api/endpoint names returned nothing. So no endpoint in the inventory can be a copy.",
+    "Permissions: 163 mutating routes classified. 51 BEARER (middleware Layer 2, src/middleware.ts:924-929 against BEARER_REQUIRED_WRITE_ROUTES, 50 patterns parsed at src/lib/bearer-required-routes.ts:67-166), 7 WEBHOOK_HMAC (5 static + 2 dynamic), 10 MIDDLEWARE_BYPASS (handler self-authenticates), and 95 SAME_ORIGIN_CSRF with NO credential gate.",
+    "FINDING: those 95 mutating routes are reachable tokenless through the same-origin passthrough (src/middleware.ts:799-835). Origin/Referer are client-settable (:377) and the CSRF cookie is minted on unauthenticated page loads (:1082-1087); the code names this as U052 residual at :776-794. It is closed only by REQUIRE_CF_ACCESS=true (Layer 1, :692).",
+    "FINDING: /api/social-theme/invitations and /api/social-theme/renew are listed as bearer-gated at src/lib/bearer-required-routes.ts:140-141, but src/middleware.ts:681 returns before Layer 2 for the whole /api/social-theme/* subtree, so those two patterns are unreachable there. The routes do self-authenticate (403 operator_service_required at invitations/route.ts:57,159; 403 renewal_auth_required at renew/route.ts:75,98). Code wins over the comment.",
+    "FINDING: the SSE envelope (src/lib/types.ts:874-914, 20 event names at :837-872) is a TypeScript type only, with no runtime validator; the HQ producer family IS runtime-validated by zod strictObject (src/lib/hq/types.ts:198,204,209,224) under HQ_ENVELOPE_SCHEMA_VERSION=1 (:180). Versioned tenant events therefore hold for the HQ family, not for the general bus.",
+    "Dedupe is real in three places and one of them is application-level only. DB-enforced: src/lib/execution-schema.ts:33 idempotency_key UNIQUE, :37-38 session_key/session_id UNIQUE, :47 UNIQUE(task_id,generation), :48-49 partial unique index over the 5 active states. Task creation: idempotency_key layer plus findDuplicateByTitleWindow (src/lib/tasks.ts:2455, guard/call :2724-2731). Manual dispatch: a 120s same-agent window (src/lib/dispatch-idempotency.ts:114, enforced src/app/api/tasks/[id]/dispatch/route.ts:330) that is a SELECT-then-send, so two concurrent POSTs can both send; no unique constraint backs it.",
+    "Lifecycle is enforced in code, not by the DB: src/lib/task-lifecycle.ts:146-163 LEGAL_TRANSITIONS over the 10 LifecycleStates at :115-125, funnel transition() :1296, declared-exception path :1109-1130, WIP limits :186 with checkWipLimit :238. tasks.status carries no CHECK constraint in src/lib/db/schema.ts, so a writer outside these routes is not blocked by the table.",
+    "R-06 PARTIAL: one scheduler exists (src/lib/jobs/scheduler.ts:1168 registerCronJobs, cron.schedule :1180, 35 JOBS entries parsed from :426-1116, single-owner leases via runLeasedJob :185). No 'placement cycle' concept exists: grep -rn placement src/lib/jobs/ returned 0 (control: same grep for 'cron' in scheduler.ts returned 87).",
+    "R-20 PARTIAL: attribution vocabulary and view are real (src/lib/funnel/attribution.ts:82-251, mounted at src/app/conversational-ai/funnel/page.tsx and src/components/funnel/FunnelAttributionView.tsx). Client workload is referenced in only 3 files and no measurement artifact proves it is computed from real work; live outcome producers are not on main, so outcomes render null/UNKNOWN with a reason.",
+    "R-28 PARTIAL/mostly ABSENT: readiness vocabulary and one computed surface exist (src/lib/readiness/types.ts:15-81 with 8 item ids at :43-51, computeSetupReadiness src/lib/readiness/setup.ts:278, route GET/POST src/app/api/setup/readiness/route.ts:58,75), but there is no tenant/surface/account/revision key as READINESS.md:4 requires, and the only invalidation event in the tree is hq_changed (src/lib/events.ts:295,315,485); zero invalidation references in src/lib/readiness/ or src/lib/board/.",
+    "R-31 MEASURED: 31 top-level route segments and 67 pages; Kanban move is a real HTTP action (src/components/MissionQueue.tsx:671-675 -> PATCH src/app/api/tasks/[id]/route.ts:80 -> zod :103 -> transition() :686-699); /kanban is a 308 to /tasks/all (src/app/kanban/page.tsx); versioned tenant events as per HQ above.",
+    "Environment-dependent gates: MC_API_TOKEN unset 503s unless ALLOW_INSECURE_OPEN_API (:131, :874), DEMO_MODE refuses all non-read /api/ (:597), and REQUIRE_CF_ACCESS decides whether Layer 1 runs (:692). 'Bearer-gated' is therefore an environment claim as well as a structural one.",
+    "Version rule is consistency, not increment: version v7.6.125, package.json 7.6.125, package-lock root 7.6.125, package-lock packages[\"\"] 7.6.125, CHANGELOG top [Unreleased] — all five agree before and after this evidence-only commit; no bump invented and no source/migration/config file touched."
+  ]
+}
