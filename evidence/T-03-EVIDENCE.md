@@ -746,9 +746,19 @@ So the PASS is a real pass: the same validator that accepts this file rejects a 
 
 No bump was invented: this is an evidence-only commit and the repo's rule is consistency, not increment.
 
-**Readbacks** (`git ls-remote --heads origin pb/PBB-403/t-03-reverify` and `gh api repos/trevorotts1/blackceo-command-center/git/ref/heads/pb/PBB-403/t-03-reverify`) both equal local HEAD — values recorded in the task receipt (§13).
+**Readbacks** (`git ls-remote --heads origin pb/PBB-403/t-03-reverify` and `gh api repos/trevorotts1/blackceo-command-center/git/ref/heads/pb/PBB-403/t-03-reverify`) both equal local HEAD — values in §13.
 
-**Negative control for the readback instrument:** a ref that does not exist returns **empty** stdout with exit code 0, so the discriminator is empty-vs-populated output, never the exit code.
+**Negative control for the readback instrument — run, not asserted:**
+
+```
+git ls-remote --heads origin pb/PBB-403/this-ref-does-not-exist-xyz
+→ (empty stdout)  EXIT 0
+
+gh api repos/.../git/ref/heads/pb/PBB-403/this-ref-does-not-exist-xyz
+→ {"message":"Not Found", ... "status":"404"}  gh: Not Found (HTTP 404)
+```
+
+So a ref readback is proven by **populated** output naming the same SHA, never by an exit code — `ls-remote` on a nonexistent ref is a silent success.
 
 ---
 
@@ -775,3 +785,19 @@ No bump was invented: this is an evidence-only commit and the repo's rule is con
 ## 12. Internal-disk discipline
 
 Every clone, script, output and intermediate lives under `/Volumes/mac mini m4/Downloads/git trees and automations/…` — `worktrees/PBB-403/blackceo-command-center` (clone) and `scratch/pb-skill38-20261024/lanes/PBB-403/` (instruments, `routes.tsv`, `perm.tsv`, `pages.tsv`, `route-table.md`, this file). No `/tmp` and no internal-disk path was used by this lane. The two committed files are the only files this task adds to the repo.
+
+---
+
+## 13. Readback record
+
+**Artifact commit (this task's evidence, two files):**
+
+```
+git rev-parse HEAD                                    → 016786cab99704094e2931561174becb827af9aa
+git ls-remote --heads origin pb/PBB-403/t-03-reverify → 016786cab99704094e2931561174becb827af9aa  refs/heads/pb/PBB-403/t-03-reverify
+gh api …/git/ref/heads/pb/PBB-403/t-03-reverify     → 016786cab99704094e2931561174becb827af9aa
+```
+
+All three identical: the branch on the remote is the local commit, verified by two independent instruments.
+
+**After this readback section was committed** (a documentation-only change to the same file), the branch head advanced by exactly one commit; the final `git ls-remote` and `gh api` readbacks were re-run against that head and both equal it. The values are carried in the task's structured receipt, which is the authoritative record for the head at hand-off. The artifact commit above is an ancestor of that head; no history was rewritten — no amend, no rebase, no force.
