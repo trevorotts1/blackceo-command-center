@@ -511,6 +511,43 @@ CREATE TABLE IF NOT EXISTS task_events (
 );
 CREATE INDEX IF NOT EXISTS idx_task_events_task_id ON task_events(task_id, created_at);
 
+-- T-33 / cc-conversation-operations. Versioned pause/retry/handoff state lives
+-- on its OWN row so a task's board status can never be mistaken for the
+-- fulfillment control state, and every applied transition keeps a receipt
+-- whose proof is a sha256 over the exact step. Migration 175 owns existing DBs;
+-- this base CREATE keeps a fresh DB self-sufficient. Purely additive.
+CREATE TABLE IF NOT EXISTS fulfillment_operations (
+  task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+  tenant_id TEXT NOT NULL,
+  company_id TEXT NOT NULL,
+  workspace_id TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('active', 'paused', 'handed_off')),
+  state_version INTEGER NOT NULL,
+  retry_count INTEGER NOT NULL DEFAULT 0,
+  handoff_owner_id TEXT,
+  handoff_backup_owner_id TEXT,
+  handoff_due_action TEXT,
+  handoff_context TEXT,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS fulfillment_operation_receipts (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  tenant_id TEXT NOT NULL,
+  company_id TEXT NOT NULL,
+  step TEXT NOT NULL CHECK (step IN ('pause', 'retry', 'handoff')),
+  from_state TEXT NOT NULL,
+  to_state TEXT NOT NULL,
+  state_version INTEGER NOT NULL,
+  actor_owner_id TEXT NOT NULL,
+  proof TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_fulfillment_receipts_task
+  ON fulfillment_operation_receipts(task_id, created_at);
+
 -- CANC-101 (finding 10 — migration 168 owns existing DBs; base CREATE covers
 -- fresh installs). Kill-fence acknowledgement: ONE row per task (UNIQUE on
 -- task_id, INSERT OR IGNORE), so cancelling twice never double-writes.
