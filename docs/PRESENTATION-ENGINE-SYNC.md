@@ -36,7 +36,9 @@ was given. It now refuses (exit 2) unless the source is provably canonical:
   resolve to `github.com/trevorotts1/openclaw-onboarding`. A checkout that merely
   carries the package tree is not canonical and is never stamped as such.
 - A URL whose `scp user@host` userinfo hides a foreign scheme is **refused**
-  (user-provided text cannot rename the transport scheme after normalization).
+  (e.g. `javascript:alert(1)@github.com/owner/repo`, which git routes to ssh
+  host `javascript` — the scheme and the userinfo are parsed separately, so
+  userinfo text can never be read as the transport scheme).
 - `--commit` must be **reachable from the canonical remote's fetched mainline**
   before anything is copied; an off-mainline sha is refused.
 - The target's `presentation_job/` must be clean — uncommitted changes are
