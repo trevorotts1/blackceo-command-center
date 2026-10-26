@@ -22,7 +22,80 @@ can decide how loudly to fail when the DB is absent.
 """
 
 import os
+import re
 from pathlib import Path
+
+# The Command Center checkout this file belongs to. ecosystem.config.cjs uses
+# $CC_INSTALL_DIR, else process.cwd(); the resolver is imported from the
+# checkout, so its own parent directory is that install root. CC_INSTALL_DIR
+# wins so callers (and tests) can point at a box's real install.
+def install_dir() -> Path:
+    """Install root the SERVER runs from — ecosystem.config.cjs's INSTALL_DIR."""
+    override = os.environ.get("CC_INSTALL_DIR")
+    if override:
+        return Path(override)
+    return Path(__file__).resolve().parent.parent
+
+_ENV_LOCAL_DB_RE = re.compile(
+    r"^[ \t]*(?:export[ \t]+)?DATABASE_PATH[ \t]*=[ \t]*(.*)$"
+)
+
+def database_path_from_env_local(dirpath: "str | Path"):
+    """
+    DATABASE_PATH parsed out of <dirpath>/.env.local, or None.
+
+    Mirrors __ccDbPathFromEnvLocal() in ecosystem.config.cjs: an inline comment
+    is stripped, surrounding quotes are dropped, and a RELATIVE value is
+    anchored on the directory holding the .env.local — never on the caller's
+    cwd. First parseable line wins, exactly as the app decides it.
+    """
+    d = Path(dirpath)
+    try:
+        text = (d / ".env.local").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        m = _ENV_LOCAL_DB_RE.match(line)
+        if not m:
+            continue
+        v = re.sub(r"[ \t]+#.*$", "", m.group(1)).strip()
+        # Exactly the app's `v.slice(1, -1)` when both ends carry the same
+        # quote — INCLUDING a lone quote (`"` -> ""), which the old len>=2
+        # guard kept literal, naming a file the app never opens.
+        if v and v[0] == v[-1] and v[0] in "\"'":
+            v = v[1:-1]
+        v = v.strip()
+        # __ccDbPathFromEnvLocal() (ecosystem.config.cjs:48-68) takes the FIRST
+        # matching line only and falls through to the next tier when its value
+        # is empty — an empty first match must NOT promote a later line, or the
+        # resolver disagrees with the app about which file is served.
+        if not v:
+            return None
+        p = Path(v)
+        return p if p.is_absolute() else (d / v)
+    return None
+
+def server_configured_db() -> Path:
+    """
+    The database the SERVER is configured to open — ecosystem.config.cjs's
+    three tiers, in its order:
+
+      1. $DATABASE_PATH                  (exported into the pm2 process)
+      2. DATABASE_PATH in <install>/.env.local
+      3. <install>/../data/mission-control.db
+
+    This is the ONLY authoritative answer on a box that configures its DB;
+    the install-layout candidate list below is a fallback for boxes that do
+    not (finding 36).
+    """
+    env = os.environ.get("DATABASE_PATH")
+    if env:
+        return Path(env)
+    d = install_dir()
+    configured = database_path_from_env_local(d)
+    if configured is not None:
+        return configured
+    return d.parent / "data" / "mission-control.db"
 
 
 # Ordered candidate list — first existing path wins.
@@ -50,6 +123,14 @@ _CANDIDATE_BUILDERS = [
     #     DATA-08 decoy-DB fix — honored before any install-layout candidate so a
     #     standalone script always opens the SAME file the app writes/reads.
     lambda: Path(os.environ["DATABASE_PATH"]) if "DATABASE_PATH" in os.environ else None,
+    # 2b — the SERVER's configured path from <install>/.env.local
+    #      (ecosystem.config.cjs tier 2). Finding 36: without this the resolver
+    #      picked the first EXISTING layout candidate and a sync could write a
+    #      database the board never reads.
+    lambda: database_path_from_env_local(install_dir()),
+    # 2c — the SERVER's configured fallback <install>/../data/mission-control.db
+    #      (ecosystem.config.cjs tier 3), checked before any guess.
+    lambda: install_dir().parent / "data" / "mission-control.db",
     # 3 — Mac default install path  (~/projects/command-center/mission-control.db)
     lambda: Path.home() / "projects" / "command-center" / "mission-control.db",
     # 4 — VPS canonical  (/data/projects/command-center/mission-control.db)
@@ -72,15 +153,17 @@ def find_dashboard_db() -> Path:
     Locate mission-control.db using the canonical candidate list.
 
     Checks (in order):
-      1. $DASHBOARD_DB_PATH env var (operator / Command Center override)
-      2. $DATABASE_PATH env var (the app's own resolution key — DATA-08)
-      3. ~/projects/command-center/mission-control.db   (Mac default)
-      4. /data/projects/command-center/mission-control.db  (VPS default)
-      5. /opt/mission-control/mission-control.db
-      6. /app/mission-control.db
-      7. /data/mission-control/mission-control.db       (legacy VPS)
-      8. ~/projects/mission-control/mission-control.db  (legacy Mac)
-      9. ~/blackceo-command-center/mission-control.db   (legacy dev)
+      1.  $DASHBOARD_DB_PATH env var (operator / Command Center override)
+      2.  $DATABASE_PATH env var (the app's own resolution key — DATA-08)
+      2b. DATABASE_PATH in <install>/.env.local  (server config — finding 36)
+      2c. <install>/../data/mission-control.db   (server config fallback)
+      3.  ~/projects/command-center/mission-control.db   (Mac default)
+      4.  /data/projects/command-center/mission-control.db  (VPS default)
+      5.  /opt/mission-control/mission-control.db
+      6.  /app/mission-control.db
+      7.  /data/mission-control/mission-control.db       (legacy VPS)
+      8.  ~/projects/mission-control/mission-control.db  (legacy Mac)
+      9.  ~/blackceo-command-center/mission-control.db   (legacy dev)
 
     Returns the first existing Path.
 
@@ -132,17 +215,16 @@ def app_db_path() -> Path:
     """
     The path the Command Center *app* resolves at runtime.
 
-    Mirrors src/lib/db/index.ts exactly:
-        DB_PATH = process.env.DATABASE_PATH || <cwd>/mission-control.db
+    Mirrors ecosystem.config.cjs (the pm2 process the board actually serves):
+        DB_PATH = process.env.DATABASE_PATH
+               || .env.local DATABASE_PATH
+               || <INSTALL_DIR>/../data/mission-control.db
 
-    Used only by verify_db_path_parity() to detect the DATA-08 decoy-DB
-    condition — NOT by find_dashboard_db() (which additionally honors the
-    app-forwarded $DASHBOARD_DB_PATH and the install-layout candidate list).
+    Used by verify_db_path_parity() to detect the DATA-08 decoy-DB condition —
+    NOT by find_dashboard_db() (which additionally honors the app-forwarded
+    $DASHBOARD_DB_PATH and the install-layout candidate list).
     """
-    env = os.environ.get("DATABASE_PATH")
-    if env:
-        return Path(env)
-    return Path.cwd() / "mission-control.db"
+    return server_configured_db()
 
 
 def verify_db_path_parity(app_db: "str | Path | None" = None):
@@ -154,13 +236,12 @@ def verify_db_path_parity(app_db: "str | Path | None" = None):
     caller decides how loudly to fail.
 
     `app_db` (optional): the app's resolved DB path when the caller knows it
-    (e.g. a deploy/converge step that also knows the app's cwd / DATABASE_PATH).
-    When omitted it is derived from $DATABASE_PATH / cwd via app_db_path().
+    (e.g. a deploy/converge step that resolved the served file once). When
+    omitted it is derived the way the server decides it via app_db_path()
+    ($DATABASE_PATH, else <install>/.env.local, else <install>/../data/…).
 
-    NOTE: when DATABASE_PATH (or an explicit app_db / DASHBOARD_DB_PATH) is set,
-    both the app and this resolver key off the SAME absolute path, so parity is
-    structural. When none is set, parity relies on the candidate ordering
-    matching the app's cwd default — the detail string flags that weaker state.
+    Enforce this BEFORE opening the DB for a write: a mismatch means the
+    script would seed one file while the board serves another (finding 36).
     """
     script_db = find_dashboard_db()
     expected = Path(app_db) if app_db else app_db_path()
