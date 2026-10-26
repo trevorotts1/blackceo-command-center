@@ -118,11 +118,21 @@ def resolve_commit(source: Path, ref: str) -> str:
 
 
 _REMOTE_URL = re.compile(
-    r"^(?:(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*)://)?"
-    r"(?:(?P<user>[^/@]+)@)?"
+    r"^(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*)://"
+    r"(?:(?P<user>[^/@]*)@)?"
     r"(?P<host>[^/:]+)"
     r"(?::(?P<port>\d+))?"
-    r"[:/]"
+    r"/(?P<path>.+)$")
+
+# scp form: [user@]host:path, as git's own parser reads it. The user and
+# host charsets exclude ':' deliberately: without that exclusion
+# 'javascript:alert(1)@github.com/owner/repo' parses as user
+# 'javascript:alert(1)' + host github.com and false-PASSes the canonical
+# repository, when git itself routes it to ssh host 'javascript'. A URL
+# carrying '://' is handled by _REMOTE_URL only; it never reaches here.
+_REMOTE_SCP = re.compile(
+    r"^(?:(?P<user>[A-Za-z0-9._-]+)@)?"
+    r"(?P<host>[A-Za-z0-9._-]+):"
     r"(?P<path>.+)$")
 
 # Transports that actually fetch from the host they name. Anything else
@@ -141,13 +151,22 @@ def normalize_remote_url(url: str) -> str:
     repo no matter what its host and path say, so it is returned as-is.
     A local path or any form that does not parse is likewise returned
     as-is, so both can only ever fail the canonical comparison.
+
+    The two forms are parsed separately (_REMOTE_URL requires '://',
+    _REMOTE_SCP is the [user@]host:path form) so that a foreign scheme
+    hidden in scp userinfo -- 'javascript:alert(1)@github.com/owner/repo',
+    which git routes to ssh host 'javascript' -- can never be read as
+    canonical.
     """
-    m = _REMOTE_URL.match(url.strip())
-    if not m:
-        return url.strip()
-    scheme = m.group("scheme")
-    if scheme is not None and scheme.lower() not in _REMOTE_SCHEMES:
-        return url.strip()
+    raw = url.strip()
+    m = _REMOTE_URL.match(raw)
+    if m is not None:
+        if m.group("scheme").lower() not in _REMOTE_SCHEMES:
+            return raw
+    else:
+        m = _REMOTE_SCP.match(raw)
+        if m is None:
+            return raw
     path = m.group("path").split("?")[0].split("#")[0].strip("/")
     if path.endswith(".git"):
         path = path[:-4]
