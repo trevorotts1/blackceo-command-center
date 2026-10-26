@@ -10,17 +10,25 @@
 #
 #   A. remote points elsewhere              -> REFUSED (exit 2), nothing copied
 #   B. canonical https URL with credentials,
-#      commit not on the mainline           -> REFUSED (exit 2)
+#      commit not on the mainline           -> REFUSED (exit 2), nothing copied
 #   C. canonical scp URL, commit on mainline -> OK, manifest records the
 #      verified source (repo/remote/url/mainline_ref)
 #   D. non-git scheme (ext://) on a canonical-looking URL
 #                                           -> REFUSED (exit 2), nothing copied
 #   E. commit only on the checkout's local main,
-#      no remote-tracking mainline          -> REFUSED (exit 2)
+#      no remote-tracking mainline          -> REFUSED (exit 2), nothing copied
 #   F. foreign scheme hidden in scp userinfo
 #      (javascript:alert(1)@github.com/...)  -> REFUSED (exit 2), nothing copied
 #   G. normalize_remote_url table: 13 legitimate remote forms normalize to the
-#      canonical repository, and the javascript: URL above does NOT
+#      canonical repository, and the javascript: URL above lands on the ssh
+#      host git itself routes it to ('javascript'), never on canonical
+#   H. a refused remote URL carrying a credential -> the refusal text names
+#      the normalized identity and never echoes the secret (CI logs)
+#   I. a manifest that parses but is not shaped like one -> REFUSED (exit 2,
+#      no traceback), in normal AND --warn mode
+#   J. a tracked hand-added file with an otherwise matching manifest -> sync
+#      must NOT claim "already at canonical": it removes the file, and the
+#      parity gate then passes on the result
 #
 # Named after the tool under test (sync-presentation-engine) so pres039's
 # T7 importer scan -- which excludes the parity tooling by name because it
@@ -45,6 +53,18 @@ g() { git -c user.email=qc@example.com -c user.name=QC -C "$1" "${@:2}"; }
 mkdir -p "$TMP/src/$PKG"
 printf 'ENGINE_DISTRIBUTOR = "canonical"\n' > "$TMP/src/$PKG/__init__.py"
 printf '{"revision": 1}\n' > "$TMP/src/$PKG/data.json"
+# The three files the built-in contract fallback reads, so a synced copy of
+# this fixture can pass `verify` end to end (case J). Without them verify
+# reports CONTRACT problems for reasons that have nothing to do with sync.
+printf 'STATE_SCHEMA_VERSION = 1\n' > "$TMP/src/$PKG/state.py"
+printf '# board: writes phase_id into activity metadata\n' > "$TMP/src/$PKG/board.py"
+printf '%s\n' \
+  'DISPATCH_CAPACITY_REFUSED = -4' \
+  'DISPATCH_UNKNOWN_DECK_TYPE = -5' \
+  'DISPATCH_CREDIT_REFUSED = -6' \
+  'DISPATCH_NOTIFY_REFUSED = -7' \
+  'CAPACITY_STATUS_UNDETERMINED = "undetermined"' \
+  > "$TMP/src/$PKG/launcher.py"
 g "$TMP/src" init -q
 g "$TMP/src" add -A
 g "$TMP/src" commit -qm "canonical tree"
@@ -91,6 +111,11 @@ if [ "$RC" -eq 2 ] && printf '%s' "$OUT" | grep -q "is not on $CANON's mainline"
   ok "B: off-mainline commit refused (exit 2, credentials stripped for the compare)"
 else
   bad "B: off-mainline commit NOT refused (rc=$RC): $OUT"
+fi
+if [ ! -e "$T_B/presentation_job" ]; then
+  ok "B: refusal happened before any copy (no presentation_job/ written)"
+else
+  bad "B: presentation_job/ was written from an off-mainline commit"
 fi
 
 # --- C: canonical scp URL, commit on the mainline ---------------------------
@@ -160,6 +185,11 @@ if [ "$RC" -eq 2 ] && printf '%s' "$OUT" | grep -q "is not on $CANON's mainline"
 else
   bad "E: local-main commit NOT refused (rc=$RC): $OUT"
 fi
+if [ ! -e "$T_E/presentation_job" ]; then
+  ok "E: refusal happened before any copy (no presentation_job/ written)"
+else
+  bad "E: presentation_job/ was written from a commit with no remote mainline"
+fi
 
 # --- F: a foreign scheme hidden in scp userinfo must not read as canonical ---
 # 'javascript:alert(1)@github.com/<canon>' is NOT userinfo + canonical host:
@@ -210,8 +240,13 @@ for url in accepted:
         bad.append("%s -> %s" % (url, got))
 hostile = "javascript:alert(1)@github.com/trevorotts1/openclaw-onboarding"
 got = mod.normalize_remote_url(hostile)
-if got == CANON:
-    bad.append("%s -> %s (FALSE PASS)" % (hostile, got))
+# Not merely "anything but canonical": git routes this URL to ssh host
+# 'javascript' with path 'alert(1)@github.com/...', so that identity is what
+# a correct normalizer must report. Pinning it catches a normalizer that
+# empties the value or drops the host -- both != CANON, both useless.
+if got != "javascript/alert(1)@github.com/trevorotts1/openclaw-onboarding":
+    bad.append("%s -> %s (want ssh host 'javascript/...', never canonical)"
+               % (hostile, got))
 for line in bad:
     print("FAIL: normalize: " + line)
 sys.exit(1 if bad else 0)
@@ -220,6 +255,86 @@ then
   ok "G: 13 legitimate forms normalize to canonical; javascript: form refused"
 else
   bad "G: remote-URL normalization table failed"
+fi
+
+# --- H: a refusal must not echo the credential carried by the remote URL ----
+# Refusal text lands in CI logs. Case B's credentialed remote is canonical and
+# is never printed; a WRONG credentialed remote is the leak path.
+T_H="$(mktgt h)"
+SECRET="ghp_PRES037SECRET"
+git -C "$TMP/src" remote set-url origin \
+  "https://x-access-token:$SECRET@github.com/someone-else/openclaw-onboarding.git"
+git -C "$TMP/src" update-ref refs/remotes/origin/main "$C2"
+OUT="$(python3 "$TOOL" sync --source "$TMP/src" --commit "$C2" --target "$T_H" 2>&1)"; RC=$?
+if [ "$RC" -eq 2 ] && printf '%s' "$OUT" | grep -q "someone-else/openclaw-onboarding"; then
+  ok "H: wrong credentialed remote refused (exit 2) naming its normalized identity"
+else
+  bad "H: wrong credentialed remote NOT refused as expected (rc=$RC): $OUT"
+fi
+if printf '%s' "$OUT" | grep -q "$SECRET"; then
+  bad "H: refusal text echoed the credential into the log"
+else
+  ok "H: refusal text does not echo the credential"
+fi
+
+# --- I: a manifest that parses but is not shaped like one -------------------
+# Structural breakage used to raise an uncaught TypeError (exit 1) -- reported
+# as "verification failed" when the truth is "this is not a manifest".
+BADM="$TMP/badmanifest"
+mkdir -p "$BADM/presentation_job"
+printf '{"files": "not-a-list"}\n' > "$BADM/presentation_job/PARITY-MANIFEST.json"
+OUT="$(python3 "$TOOL" verify --target "$BADM" 2>&1)"; RC=$?
+if [ "$RC" -eq 2 ] && printf '%s' "$OUT" | grep -q "is not a manifest"; then
+  ok "I: non-list files refused (exit 2)"
+else
+  bad "I: non-list files NOT refused cleanly (rc=$RC): $OUT"
+fi
+if printf '%s' "$OUT" | grep -q "Traceback"; then
+  bad "I: structurally wrong manifest raised an uncaught traceback"
+else
+  ok "I: no traceback on a structurally wrong manifest"
+fi
+printf '{"files": ["x"]}\n' > "$BADM/presentation_job/PARITY-MANIFEST.json"
+OUT="$(python3 "$TOOL" verify --target "$BADM" 2>&1)"; RC=$?
+if [ "$RC" -eq 2 ] && printf '%s' "$OUT" | grep -q "files\[0\]"; then
+  ok "I: non-object record refused (exit 2)"
+else
+  bad "I: non-object record NOT refused (rc=$RC): $OUT"
+fi
+printf '{"files": [{"path": "data.json"}]}\n' > "$BADM/presentation_job/PARITY-MANIFEST.json"
+OUT="$(python3 "$TOOL" verify --warn --target "$BADM" 2>&1)"; RC=$?
+if [ "$RC" -eq 2 ] && printf '%s' "$OUT" | grep -q "missing git_blob_sha"; then
+  ok "I: record missing required keys refused (exit 2 even in --warn)"
+else
+  bad "I: record missing required keys NOT refused (rc=$RC): $OUT"
+fi
+
+# --- J: idempotence must not bless a tree the parity gate rejects ------------
+# A tracked hand-added file leaves the manifest and every listed hash
+# matching, so sync used to print "already at canonical" and exit 0 over it.
+T_J="$(mktgt j)"
+git -C "$TMP/src" remote set-url origin "git@github.com:$CANON.git"
+git -C "$TMP/src" update-ref refs/remotes/origin/main "$C2"
+python3 "$TOOL" sync --source "$TMP/src" --commit "$C2" --target "$T_J" >/dev/null 2>&1
+g "$T_J" add -A >/dev/null 2>&1 && g "$T_J" commit -qm "synced" >/dev/null 2>&1
+printf 'SIDE_EFFECT = True\n' > "$T_J/presentation_job/stale_hand_edited.py"
+g "$T_J" add -A >/dev/null 2>&1 && g "$T_J" commit -qm "hand-added" >/dev/null 2>&1
+OUT="$(python3 "$TOOL" sync --source "$TMP/src" --commit "$C2" --target "$T_J" 2>&1)"; RC=$?
+if [ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep -q "already at canonical"; then
+  bad "J: sync blessed a tree carrying an unlisted file: $OUT"
+else
+  ok "J: sync did not claim 'already at canonical' over an unlisted file"
+fi
+if [ "$RC" -eq 0 ] && [ ! -e "$T_J/presentation_job/stale_hand_edited.py" ]; then
+  ok "J: sync removed the hand-added file (exit 0)"
+else
+  bad "J: hand-added file survived the sync (rc=$RC): $OUT"
+fi
+OUT="$(python3 "$TOOL" verify --target "$T_J" 2>&1)"; RC=$?
+if [ "$RC" -eq 0 ]; then
+  ok "J: parity gate passes on the regenerated tree"
+else
+  bad "J: parity gate still fails after sync (rc=$RC): $OUT"
 fi
 
 echo "pres037: $PASS passed, $FAIL failed"
