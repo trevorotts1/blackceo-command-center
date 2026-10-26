@@ -82,26 +82,34 @@ CC_REQUIRED_MARKERS=(
 # guard, and the updater then fetched and deployed from it (finding 34).
 # Handles https://[user[:token]@]host/owner/repo(.git),
 # ssh://git@host[:port]/owner/repo.git, scp-style git@host:owner/repo.git, and
-# explicit filesystem paths (no host tier — owner/repo from the last two
-# segments, so a local path can never match a network remote). Trailing
-# slashes, ".git" and userinfo are dropped; the id is lowercased because hosts
-# and GitHub paths are case-insensitive.
+# explicit filesystem paths. The host tier is emitted only for network forms
+# (a scheme other than file://, a userinfo@, or a host:path scp form) and is
+# dropped for file:// and bare paths, so a filesystem path can never match a
+# network remote — not even one spelled ./github.com/<owner>/<repo> or
+# github.com/<owner>/<repo> on disk. Trailing slashes, ".git" and userinfo are
+# dropped; the id is lowercased because hosts and GitHub paths are
+# case-insensitive.
+# Must stay byte-identical in update.sh, check-updates.sh and
+# scripts/atomic-deploy.sh; scripts/l21-remote-db-guards.test.sh compares them.
 _cc_repo_id() {
-  local u="$1" host="" id="" n=0
+  local u="$1" host="" id="" n=0 net=0
   local -a parts=()
   u="${u%/}"; u="${u%.git}"; u="${u%/}"
-  case "$u" in *://*) u="${u#*://}" ;; esac
-  case "$u" in *@*) u="${u#*@}" ;; esac
+  case "$u" in
+    file://*) u="${u#*://}" ;;
+    *://*)    u="${u#*://}"; net=1 ;;
+  esac
+  case "$u" in *@*) u="${u#*@}"; net=1 ;; esac
   case "${u%%:*}" in
     */*|"") ;;
-    *) if [ "${u%%:*}" != "$u" ]; then u="${u%%:*}/${u#*:}"; fi ;;
+    *) if [ "${u%%:*}" != "$u" ]; then u="${u%%:*}/${u#*:}"; net=1; fi ;;
   esac
   if [ -z "$u" ]; then return 0; fi
   IFS='/' read -r -a parts <<< "$u"
   n="${#parts[@]}"
   if [ "$n" -lt 2 ]; then return 0; fi
   case "${parts[0]}" in
-    localhost|*.*) host="${parts[0]%%:*}" ;;
+    localhost|*.*) if [ "$net" -eq 1 ]; then host="${parts[0]%%:*}"; fi ;;
   esac
   if [ -n "$host" ]; then
     id="$host/${parts[n-2]}/${parts[n-1]}"
@@ -465,11 +473,16 @@ success "Current version: ${OLD_VERSION:-unknown}"
 # resolves it — the same three tiers, in the same order:
 #   1. an exported DATABASE_PATH (pm2 restart --update-env carries it in)
 #   2. DATABASE_PATH parsed out of <INSTALL_DIR>/.env.local
-#      (relative values anchor on INSTALL_DIR, never on the caller's cwd)
-#   3. <INSTALL_DIR>/../data/mission-control.db
-# A relative tier-2 value is anchored on INSTALL_DIR; tier 3 is joined, not
-# resolved, so it keeps the app's own spelling. Prints the path, or nothing
-# when INSTALL_DIR is unset.
+#      (a relative value anchors on INSTALL_DIR, never on the caller's cwd)
+#   3. <INSTALL_DIR>/../data/mission-control.db (path.join's spelling; path
+#      parity compares resolved paths, so the ".." is harmless)
+# FAIL-CLOSED on a tier-1 value that is not absolute: ecosystem.config.cjs
+# feeds process.env.DATABASE_PATH to the app VERBATIM (line 69 — it never
+# refuses a relative value), so the served file cannot be named reliably.
+# Print nothing and let the caller skip the sync rather than fall through to a
+# lower tier and seed a database the board never reads (finding 36's exact
+# failure mode). Prints the path, or nothing when INSTALL_DIR is unset or the
+# served database is unresolvable.
 cc_resolve_live_db() {
   local v="" d=""
   if [ -z "$INSTALL_DIR" ]; then return 0; fi
@@ -478,7 +491,8 @@ cc_resolve_live_db() {
     case "$v" in
       /*) printf '%s\n' "$v"; return 0 ;;
     esac
-    warn "DATABASE_PATH=${v} is not absolute -- ignoring it for the departments sync (the app refuses it too)." >&2
+    warn "DATABASE_PATH=${v} is not absolute -- cannot name the served database; departments sync SKIPPED." >&2
+    return 0
   fi
   d="$INSTALL_DIR"
   if [ -f "$d/.env.local" ]; then
@@ -533,12 +547,16 @@ cc_sync_departments() {
     warn "No database at ${live_db} yet -- departments sync SKIPPED (nothing to seed; a fresh install seeds on first boot)."
     return 0
   fi
-  if [ -f "$resolver" ]; then
-    if ! parity_detail=$(python3 "$resolver" --verify-parity --app-db "$live_db" 2>&1); then
-      warn "$parity_detail"
-      warn "Refusing to sync a database the server may not read. Set DATABASE_PATH (and .env.local) to the served file, then re-run."
-      return 0
-    fi
+  # No resolver, no proof of which file the server reads -> no sync. Syncing
+  # without the parity gate is the pre-finding-36 behaviour, not a fallback.
+  if [ ! -f "$resolver" ]; then
+    warn "shared-utils/resolve_db.py missing from the updated checkout -- cannot prove which database the server serves; departments file was NOT synced."
+    return 0
+  fi
+  if ! parity_detail=$(python3 "$resolver" --verify-parity --app-db "$live_db" 2>&1); then
+    warn "$parity_detail"
+    warn "Refusing to sync a database the server may not read. Set DATABASE_PATH (and .env.local) to the served file, then re-run."
+    return 0
   fi
   if python3 "$sync" --merge --db "$live_db"; then
     success "Departments synced from build-state (merge-additive) into ${live_db}"

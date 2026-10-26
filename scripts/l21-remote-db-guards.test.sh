@@ -71,7 +71,10 @@ for f in "$UPDATE" "$CHECK" "$DEPLOY"; do
       "https://evil.example/attacker/blackceo-command-center.git" \
       "git@gitlab.example:attacker/blackceo-command-center.git" \
       "https://gitlab.com/trevorotts1/blackceo-command-center.git" \
-      "/tmp/decoy/trevorotts1/blackceo-command-center"; do
+      "/tmp/decoy/trevorotts1/blackceo-command-center" \
+      "github.com/trevorotts1/blackceo-command-center" \
+      "./github.com/trevorotts1/blackceo-command-center" \
+      "file://github.com/trevorotts1/blackceo-command-center"; do
     got="$(bash -c 'source "$1"; _cc_repo_id "$2"' _ "$WORK/fn.$$.sh" "$u")"
     if [ "$got" = "$canonical" ] || [ -z "$got" ]; then
       bad "$name: foreign remote '$u' collapsed to '$got' — guard would accept it"
@@ -80,6 +83,19 @@ for f in "$UPDATE" "$CHECK" "$DEPLOY"; do
     fi
   done
 done
+
+# ── 34c. the three normalizer copies must not drift apart ────────────────────
+# Each script keeps its own copy (the lib would live inside the very checkout
+# being located), so the copies are compared byte-for-byte: a drifted copy is
+# exactly how one script keeps a hole the other two closed.
+id_u="$(sed -n '/^_cc_repo_id() {/,/^}/p' "$UPDATE")"
+id_c="$(sed -n '/^_cc_repo_id() {/,/^}/p' "$CHECK")"
+id_d="$(sed -n '/^_cc_repo_id() {/,/^}/p' "$DEPLOY")"
+if [ -n "$id_u" ] && [ "$id_u" = "$id_c" ] && [ "$id_u" = "$id_d" ]; then
+  ok "_cc_repo_id() is byte-identical in update.sh, check-updates.sh and atomic-deploy.sh"
+else
+  bad "_cc_repo_id() copies have drifted (update.sh vs check-updates.sh vs atomic-deploy.sh)"
+fi
 
 # ── 34b. update.sh's actual checkout validator on a foreign-host fixture ────
 make_checkout() {  # $1 dir, $2 origin url
@@ -200,6 +216,19 @@ PY
     else
       bad "35: online backup lost data or failed (rc=$rc, output=$(printf '%s' "$rows" | tr '\n' ' '))"
     fi
+
+    # Fail-closed proof: a snapshot that CANNOT complete must surface a
+    # non-zero rc (atomic-deploy.sh turns that into an abort receipt + exit 2).
+    # A missing source in particular must never be silently re-created as an
+    # empty-but-structurally-valid backup that would sail past the 0-byte and
+    # integrity checks into the rollback chain.
+    fsrc_rc=0
+    python3 "$WORK/pybackup.py" "$WORK/does-not-exist.db" "$WORK/fail.backup" >/dev/null 2>&1 || fsrc_rc=$?
+    if [ "$fsrc_rc" -ne 0 ]; then
+      ok "35: an unbackable source surfaces rc=$fsrc_rc (atomic-deploy aborts)"
+    else
+      bad "35: PYBACKUP returned 0 for a missing source — the failure would be swallowed"
+    fi
   fi
   kill "$FIXTURE_PID" 2>/dev/null; wait "$FIXTURE_PID" 2>/dev/null; FIXTURE_PID=""
 fi
@@ -259,9 +288,66 @@ HARNESS
   else
     bad "the departments sync was NOT handed --db for the served DB (output: ${sync_out})"
   fi
+
+  # 36c. negative paths — every one of these must SKIP the sync. A sync that
+  # still runs here is the pre-finding-36 behaviour: writing a database with no
+  # proof the server reads it.
+  # (a) path-parity mismatch -> skip.
+  rm -f "$args_file"
+  env -u DATABASE_PATH DASHBOARD_DB_PATH="$WORK/home/projects/command-center/mission-control.db" \
+    bash "$WORK/sync_harness.sh" "$WORK/app" "$WORK/sync_fn.sh" "$WORK/resolve_live.sh" >/dev/null 2>&1
+  [ ! -f "$args_file" ] \
+    && ok "cc_sync_departments SKIPS the sync when path parity fails" \
+    || bad "cc_sync_departments synced despite a parity mismatch ($(tr '\n' ' ' < "$args_file"))"
+
+  # (b) no resolver -> no parity proof -> skip (never sync unverified).
+  rm -f "$args_file"
+  mv "$WORK/app/shared-utils/resolve_db.py" "$WORK/resolve_db.hidden"
+  env -u DATABASE_PATH bash "$WORK/sync_harness.sh" "$WORK/app" "$WORK/sync_fn.sh" "$WORK/resolve_live.sh" >/dev/null 2>&1
+  mv "$WORK/resolve_db.hidden" "$WORK/app/shared-utils/resolve_db.py"
+  [ ! -f "$args_file" ] \
+    && ok "cc_sync_departments SKIPS the sync when resolve_db.py is missing" \
+    || bad "cc_sync_departments synced with no parity check (resolver absent)"
+
+  # (c) a relative DATABASE_PATH is unresolvable, NOT replaceable by a lower
+  #     tier — the app uses the value verbatim (ecosystem.config.cjs:69).
+  rm -f "$args_file"
+  rel_out="$(env DATABASE_PATH=workspace/live.db INSTALL_DIR="$WORK/app" \
+             bash -c 'source "$1"; cc_resolve_live_db' _ "$WORK/resolve_live.sh" 2>/dev/null)"
+  [ -z "$rel_out" ] \
+    && ok "cc_resolve_live_db refuses a relative DATABASE_PATH (prints nothing)" \
+    || bad "cc_resolve_live_db fell through on a relative DATABASE_PATH (printed '$rel_out')"
+  env DATABASE_PATH=workspace/live.db bash "$WORK/sync_harness.sh" "$WORK/app" \
+      "$WORK/sync_fn.sh" "$WORK/resolve_live.sh" >/dev/null 2>&1
+  [ ! -f "$args_file" ] \
+    && ok "relative DATABASE_PATH: the sync SKIPS instead of seeding a guessed DB" \
+    || bad "relative DATABASE_PATH: the sync ran ($(tr '\n' ' ' < "$args_file"))"
+
+  # (d) no database file at the served path -> skip.
+  rm -f "$args_file"
+  mv "$WORK/app/workspace/live.db" "$WORK/live.db.hidden"
+  env -u DATABASE_PATH bash "$WORK/sync_harness.sh" "$WORK/app" "$WORK/sync_fn.sh" "$WORK/resolve_live.sh" >/dev/null 2>&1
+  mv "$WORK/live.db.hidden" "$WORK/app/workspace/live.db"
+  [ ! -f "$args_file" ] \
+    && ok "cc_sync_departments SKIPS when no database exists at the served path" \
+    || bad "cc_sync_departments synced with no database at the served path"
 else
   bad "update.sh: cc_resolve_live_db() / cc_sync_departments() not extractable"
 fi
+
+# ── 36d. the .env.local parse must mirror __ccDbPathFromEnvLocal exactly ─────
+# ecosystem.config.cjs takes the FIRST matching line only and falls through to
+# the next tier when its value is empty — an empty first match must NOT promote
+# a later line, or the resolver names a file the app never opens.
+printf 'DATABASE_PATH=\nDATABASE_PATH=workspace/live.db\n' > "$WORK/app/.env.local"
+empty_first="$(HOME="$WORK/home" CC_INSTALL_DIR="$WORK/app" python3 -I "$RESOLVER" 2>&1)"
+case "$empty_first" in
+  *"$WORK/app/workspace/live.db"*)
+    bad "resolve_db.py promoted a later .env.local line past an empty first match" ;;
+  *)
+    ok "resolve_db.py treats an empty first DATABASE_PATH match as no value" ;;
+esac
+printf 'DATABASE_PATH=workspace/live.db\n' > "$WORK/app/.env.local"
 
 printf '\n[l21-remote-db-guards] %s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

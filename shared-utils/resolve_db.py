@@ -62,8 +62,12 @@ def database_path_from_env_local(dirpath: "str | Path"):
         if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
             v = v[1:-1]
         v = v.strip()
+        # __ccDbPathFromEnvLocal() (ecosystem.config.cjs:48-68) takes the FIRST
+        # matching line only and falls through to the next tier when its value
+        # is empty — an empty first match must NOT promote a later line, or the
+        # resolver disagrees with the app about which file is served.
         if not v:
-            continue
+            return None
         p = Path(v)
         return p if p.is_absolute() else (d / v)
     return None

@@ -51,29 +51,39 @@ CC_EXPECTED_REPO_ID="github.com/trevorotts1/${REPO_NAME}"
 CC_CANDIDATE_PATH=""
 CC_CANDIDATE_REASON=""
 # Normalize a git remote to "host/owner/repo" and compare THAT, everywhere.
-# The old basename-only slug accepted any host and any owner (finding 34).
+# The old basename-only slug accepted any host and any owner: a checkout whose
+# origin was <foreign-host>/<foreign-owner>/blackceo-command-center passed the
+# guard, and the updater then fetched and deployed from it (finding 34).
 # Handles https://[user[:token]@]host/owner/repo(.git),
 # ssh://git@host[:port]/owner/repo.git, scp-style git@host:owner/repo.git, and
-# explicit filesystem paths (no host tier — owner/repo from the last two
-# segments, so a local path can never match a network remote). Trailing
-# slashes, ".git" and userinfo are dropped; the id is lowercased because hosts
-# and GitHub paths are case-insensitive. Must stay identical to update.sh.
+# explicit filesystem paths. The host tier is emitted only for network forms
+# (a scheme other than file://, a userinfo@, or a host:path scp form) and is
+# dropped for file:// and bare paths, so a filesystem path can never match a
+# network remote — not even one spelled ./github.com/<owner>/<repo> or
+# github.com/<owner>/<repo> on disk. Trailing slashes, ".git" and userinfo are
+# dropped; the id is lowercased because hosts and GitHub paths are
+# case-insensitive.
+# Must stay byte-identical in update.sh, check-updates.sh and
+# scripts/atomic-deploy.sh; scripts/l21-remote-db-guards.test.sh compares them.
 _cc_repo_id() {
-  local u="$1" host="" id="" n=0
+  local u="$1" host="" id="" n=0 net=0
   local -a parts=()
   u="${u%/}"; u="${u%.git}"; u="${u%/}"
-  case "$u" in *://*) u="${u#*://}" ;; esac
-  case "$u" in *@*) u="${u#*@}" ;; esac
+  case "$u" in
+    file://*) u="${u#*://}" ;;
+    *://*)    u="${u#*://}"; net=1 ;;
+  esac
+  case "$u" in *@*) u="${u#*@}"; net=1 ;; esac
   case "${u%%:*}" in
     */*|"") ;;
-    *) if [ "${u%%:*}" != "$u" ]; then u="${u%%:*}/${u#*:}"; fi ;;
+    *) if [ "${u%%:*}" != "$u" ]; then u="${u%%:*}/${u#*:}"; net=1; fi ;;
   esac
   if [ -z "$u" ]; then return 0; fi
   IFS='/' read -r -a parts <<< "$u"
   n="${#parts[@]}"
   if [ "$n" -lt 2 ]; then return 0; fi
   case "${parts[0]}" in
-    localhost|*.*) host="${parts[0]%%:*}" ;;
+    localhost|*.*) if [ "$net" -eq 1 ]; then host="${parts[0]%%:*}"; fi ;;
   esac
   if [ -n "$host" ]; then
     id="$host/${parts[n-2]}/${parts[n-1]}"
