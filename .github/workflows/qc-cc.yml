@@ -156,6 +156,11 @@ jobs:
       - name: Run qc-cc.sh
         run: bash scripts/qc-cc.sh
 
+      - name: T-45 remote merge receipt suite (explicit path)
+        run: node --import tsx --test tests/unit/pbb126-t45-remote-merge-receipt.test.ts tests/unit/pbb141-t45-remote-merge-receipt-repair.test.ts tests/unit/pbb181-t45-remote-merge-receipt-round3.test.ts
+        env:
+          NODE_ENV: test
+
   # ── Hardening plan ITEM 08 — real paired onboarding invitation acceptance ──
   # The onboarding contract workflow's paired check scans source strings and
   # mocks a receipt, so nothing exercised the PRES-046 manifest refusal or
