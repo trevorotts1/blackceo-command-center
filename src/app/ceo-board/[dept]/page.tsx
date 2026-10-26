@@ -46,7 +46,6 @@ import CreativeSprints from '@/components/ceo-board/creative/CreativeSprints';
 import ActiveSprintCard from '@/components/ceo-board/ops/ActiveSprintCard';
 import AutomationRoadmap from '@/components/ceo-board/ops/AutomationRoadmap';
 import RecentIncidents from '@/components/ceo-board/ops/RecentIncidents';
-import { KPIStatCardsRow } from '@/components/ceo-board/KPIStatCardsRow';
 import { DeploymentHealthChart } from '@/components/ceo-board/DeploymentHealthChart';
 import { RepositoryStatusCard } from '@/components/ceo-board/RepositoryStatusCard';
 import { DepartmentBlockersPanel } from '@/components/ceo-board/DepartmentBlockersPanel';
@@ -93,6 +92,17 @@ interface KPIData {
   sparkline: number[];
   benchmark?: number;
 }
+
+/**
+ * App Dev KPI tiles. Rendered from measured snapshots only: an absent metric
+ * reads "Not measured" rather than borrowing a sample number, and a measured
+ * zero is shown as zero.
+ */
+const APPDEV_KPI_TILES = [
+  { kpiId: 'test-coverage', label: 'Test Coverage', unit: '%' },
+  { kpiId: 'bug-fix-time', label: 'Avg Bug Fix Time', unit: 'hrs' },
+  { kpiId: 'features-shipped', label: 'Features Shipped', unit: '' },
+] as const;
 
 interface AgentData {
   id: string;
@@ -1202,11 +1212,34 @@ export default function DepartmentSubBoardPage() {
           {/* App Dev: KPI Stat Cards Row - Stitch direction */}
           {appdevDept && (
             <motion.section variants={sectionVariants} initial="hidden" animate="visible" transition={{ delay: 0.08 }}>
-              <KPIStatCardsRow
-                testCoverage={kpis.find(k => k.kpiId === 'test-coverage')?.value || 84.36}
-                avgBugFixTime={kpis.find(k => k.kpiId === 'bug-fix-time')?.value || 52.83}
-                featuresShipped={kpis.find(k => k.kpiId === 'features-shipped')?.value || 4.38}
-              />
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                {APPDEV_KPI_TILES.map((tile) => {
+                  const measured = kpis.find((k) => k.kpiId === tile.kpiId)?.value;
+                  const hasValue = typeof measured === 'number' && Number.isFinite(measured);
+                  return (
+                    <div
+                      key={tile.kpiId}
+                      className="bg-white rounded-2xl shadow-sm border border-gray-100 p-5 border-l-4 border-brand-500"
+                    >
+                      <p className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-1">
+                        {tile.label}
+                      </p>
+                      <h4 className="text-2xl font-extrabold text-gray-900">
+                        {hasValue ? (
+                          <>
+                            {measured}
+                            {tile.unit && (
+                              <span className="text-sm font-medium text-gray-400 ml-1">{tile.unit}</span>
+                            )}
+                          </>
+                        ) : (
+                          <span className="text-base font-bold text-gray-400">Not measured</span>
+                        )}
+                      </h4>
+                    </div>
+                  );
+                })}
+              </div>
             </motion.section>
           )}
 
