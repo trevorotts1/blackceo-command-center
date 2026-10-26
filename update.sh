@@ -496,9 +496,30 @@ cc_resolve_live_db() {
   fi
   d="$INSTALL_DIR"
   if [ -f "$d/.env.local" ]; then
-    v=$(sed -n -E 's/^[[:space:]]*(export[[:space:]]+)?DATABASE_PATH[[:space:]]*=[[:space:]]*//p' "$d/.env.local" \
-        | head -n 1 \
-        | sed -E "s/[[:space:]]+#.*$//; s/^[\"']//; s/[\"'][[:space:]]*$//")
+    # Mirror __ccDbPathFromEnvLocal() (ecosystem.config.cjs:48-68) EXACTLY.
+    # Any drift here names a file the app never opens, and the parity gate in
+    # cc_sync_departments then turns that box into a permanent false skip:
+    #   first matching line only (an empty first match must NOT promote a later
+    #   line); trim; strip a whitespace-introduced "# ..." inline comment;
+    #   trim; drop quotes ONLY when the value starts and ends with the same
+    #   quote (an unpaired quote stays literal; a lone quote slices to empty,
+    #   i.e. no value, exactly like the app's v.slice(1, -1)); trim; empty ->
+    #   fall through to the tier-3 default below.
+    # `|| true` on each substitution: `head -n 1` closes the pipe early, so a
+    # SIGPIPE out of sed trips `set -euo pipefail` and would abort the WHOLE
+    # updater mid-run (both cc_sync_departments call sites are bare commands)
+    # instead of falling through to the tier-3 default. stdout captured here
+    # is the first match either way.
+    v=$(sed -n -E 's/^[[:blank:]]*(export[[:blank:]]+)?DATABASE_PATH[[:blank:]]*=[[:blank:]]*//p' "$d/.env.local" | head -n 1) || true
+    v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"
+    v=$(printf '%s' "$v" | sed -E 's/[[:space:]]+#.*$//') || true
+    v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"
+    case "$v" in
+      \"*\") v="${v#\"}"; v="${v%\"}" ;;
+      \'*\') v="${v#\'}"; v="${v%\'}" ;;
+      \"|\')  v="" ;;
+    esac
+    v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"
     if [ -n "$v" ]; then
       case "$v" in
         /*) printf '%s\n' "$v" ;;

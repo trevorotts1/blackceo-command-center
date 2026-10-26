@@ -59,7 +59,10 @@ def database_path_from_env_local(dirpath: "str | Path"):
         if not m:
             continue
         v = re.sub(r"[ \t]+#.*$", "", m.group(1)).strip()
-        if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+        # Exactly the app's `v.slice(1, -1)` when both ends carry the same
+        # quote — INCLUDING a lone quote (`"` -> ""), which the old len>=2
+        # guard kept literal, naming a file the app never opens.
+        if v and v[0] == v[-1] and v[0] in "\"'":
             v = v[1:-1]
         v = v.strip()
         # __ccDbPathFromEnvLocal() (ecosystem.config.cjs:48-68) takes the FIRST
