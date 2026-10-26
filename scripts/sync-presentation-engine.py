@@ -45,12 +45,19 @@ census against it whenever engine_origin.py is in the pinned tree.
 REFUSALS (fail-closed, exit 2)
 ------------------------------
   sync refuses: a missing or unresolvable --commit (an unpinned source is
-  not a source); a source that is not a git checkout; a target whose
+  not a source); a source that is not a git checkout; a source with no
+  remote whose normalized URL is trevorotts1/openclaw-onboarding, or whose
+  --commit is not reachable from that remote's mainline (a checkout that
+  merely carries the package tree is not canonical and must never be
+  stamped as such); a target whose
   presentation_job/ carries uncommitted changes (the sync replaces that
   directory wholesale and must never silently destroy uncommitted work).
   verify refuses (exit 2 even in --warn mode): a missing or unparseable
-  PARITY-MANIFEST.json. A gate that cannot read its own manifest has not
-  "warned"; it has not run.
+  PARITY-MANIFEST.json, and one that parses but is not shaped like a
+  manifest (top level not an object, `files` not a list of records). A
+  gate that cannot read its own manifest has not "warned"; it has not run.
+  verify FAILS (exit 1, or warns) on recorded provenance that names a
+  repository other than CANONICAL_REPO.
 
 EXIT CODES: 0 ok / 1 verification failed / 2 usage or refusal / 3 drift
 found (drift mode only).
@@ -111,6 +118,130 @@ def resolve_commit(source: Path, ref: str) -> str:
         die(f"commit {ref!r} does not resolve in source {source} "
             f"(an unpinned source is not a source; pass a full commit SHA)")
     return sha
+
+
+_REMOTE_URL = re.compile(
+    r"^(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*)://"
+    r"(?:(?P<user>[^/@]*)@)?"
+    r"(?P<host>[^/:]+)"
+    r"(?::(?P<port>\d+))?"
+    r"/(?P<path>.+)$")
+
+# scp form: [user@]host:path, as git's own parser reads it. The user and
+# host charsets exclude ':' deliberately: without that exclusion
+# 'javascript:alert(1)@github.com/owner/repo' parses as user
+# 'javascript:alert(1)' + host github.com and false-PASSes the canonical
+# repository, when git itself routes it to ssh host 'javascript'. A URL
+# carrying '://' is handled by _REMOTE_URL only; it never reaches here.
+_REMOTE_SCP = re.compile(
+    r"^(?:(?P<user>[A-Za-z0-9._-]+)@)?"
+    r"(?P<host>[A-Za-z0-9._-]+):"
+    r"(?P<path>.+)$")
+
+# Transports that actually fetch from the host they name. Anything else
+# (ext::, file://, ...) resolves through a helper of its own and proves
+# nothing about origin, so it never counts as canonical.
+_REMOTE_SCHEMES = frozenset({"ssh", "git", "http", "https"})
+
+
+def normalize_remote_url(url: str) -> str:
+    """`host/owner/repo` from any git remote URL form (scp, ssh, https).
+
+    Credentials, port and transport are dropped: provenance compares on
+    repository identity, not on how a checkout was fetched. Only git's own
+    transports count, though -- a URL carrying any other scheme
+    (ext::, file://, javascript:, ...) is not a fetch of the canonical
+    repo no matter what its host and path say, so it is returned as-is.
+    A local path or any form that does not parse is likewise returned
+    as-is, so both can only ever fail the canonical comparison.
+
+    The two forms are parsed separately (_REMOTE_URL requires '://',
+    _REMOTE_SCP is the [user@]host:path form) so that a foreign scheme
+    hidden in scp userinfo -- 'javascript:alert(1)@github.com/owner/repo',
+    which git routes to ssh host 'javascript' -- can never be read as
+    canonical.
+    """
+    raw = url.strip()
+    m = _REMOTE_URL.match(raw)
+    if m is not None:
+        if m.group("scheme").lower() not in _REMOTE_SCHEMES:
+            return raw
+    else:
+        m = _REMOTE_SCP.match(raw)
+        if m is None:
+            return raw
+    path = m.group("path").split("?")[0].split("#")[0].strip("/")
+    if path.endswith(".git"):
+        path = path[:-4]
+    if not path:
+        return m.group("host").lower()
+    host = m.group("host").lower()
+    if host == "www.github.com":
+        host = "github.com"
+    return f"{host}/{path}"
+
+
+def describe_remote(url: str) -> str:
+    """`url`'s normalized identity, safe to put in a refusal message.
+
+    Refusal text lands in CI logs, and a git remote URL can carry a
+    credential: `https://x-access-token:<token>@github.com/...`. The raw
+    value is therefore never echoed -- only the `host/path` identity,
+    which is the part that explains the refusal. Anything that does not
+    reduce to a plain identity is reported as unparseable rather than
+    printed.
+    """
+    ident = normalize_remote_url(url)
+    if "@" in ident or "://" in ident:
+        return "<unparseable>"
+    return ident
+
+
+# Remote-tracking mainline refs searched, in order, for the remote that
+# matches CANONICAL_REPO. Only refs fetched FROM that remote count: a local
+# refs/heads/main is the checkout's own state and can be ahead of canonical.
+_MAINLINE_REFS = ("refs/remotes/{remote}/main", "refs/remotes/{remote}/HEAD")
+
+
+def verified_source(source: Path, commit: str) -> Dict[str, str]:
+    """Prove `source` is the canonical repo and `commit` is on its mainline.
+
+    A checkout that merely CONTAINS the package tree is not canonical: the
+    manifest's provenance fields are a claim about where the bytes came
+    from, so the remote identity and the commit's mainline reachability are
+    both checked before anything is copied. The mainline TIP is not
+    recorded -- it moves, and a moving value would break sync idempotence;
+    the proof is this acceptance/refusal at copy time.
+    """
+    listing = git(source, "remote", "-v", check=False)
+    remotes: Dict[str, str] = {}
+    for line in listing.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 2:
+            remotes.setdefault(parts[0], parts[1])
+    matching = sorted(name for name, url in remotes.items()
+                      if normalize_remote_url(url).lower()
+                      == f"github.com/{CANONICAL_REPO}".lower())
+    if not matching:
+        seen = ", ".join(f"{n} ({describe_remote(u)})"
+                         for n, u in sorted(remotes.items())) or "none"
+        die(f"source {source} has no remote pointing at {CANONICAL_REPO} "
+            f"(remotes: {seen}); a checkout that carries the package tree "
+            f"is not the canonical repository")
+    for remote in matching:
+        for ref in (r.format(remote=remote) for r in _MAINLINE_REFS):
+            head = git(source, "rev-parse", "--verify", "--quiet", ref,
+                       check=False)
+            tip = head.stdout.strip()
+            if head.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40}", tip):
+                continue
+            if git(source, "merge-base", "--is-ancestor", commit, tip,
+                   check=False).returncode == 0:
+                return {"repo": CANONICAL_REPO, "remote": remote,
+                        "url": f"https://github.com/{CANONICAL_REPO}",
+                        "mainline_ref": ref}
+    die(f"commit {commit} is not on {CANONICAL_REPO}'s mainline in {source} "
+        f"(remotes {', '.join(matching)}); refusing to stamp it canonical")
 
 
 def enumerate_tree(source: Path, commit: str) -> List[Dict[str, Any]]:
@@ -217,15 +348,44 @@ def harvest_origin(records_content: Dict[str, bytes]) -> Optional[Dict[str, Any]
     return found
 
 
+def _ignored_residue(rel: str) -> bool:
+    """True for entries under the package that are never canonical files:
+    the manifest itself and interpreter bytecode residue."""
+    return (rel == MANIFEST_NAME or "__pycache__" in Path(rel).parts
+            or rel.endswith(".pyc"))
+
+
 def load_manifest(target: Path) -> Dict[str, Any]:
     path = target / TARGET_PACKAGE / MANIFEST_NAME
     if not path.is_file():
         die(f"{path} does not exist (run sync first, or the gate has no "
             f"manifest to check against)")
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONEncodeError) as exc:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:  # JSONDecodeError, UnicodeDecodeError
         die(f"{path} is unreadable: {exc}")
+    if not isinstance(manifest, dict):
+        die(f"{path} is not a manifest (top-level "
+            f"{type(manifest).__name__}, want object)")
+    # Shape, not just grammar: a manifest that parses but carries a `files`
+    # value the checker cannot iterate is not a manifest either. Without
+    # this, verify/drift crash on a TypeError/KeyError and exit 1 -- a
+    # traceback reported as "verification failed" instead of the refusal
+    # it is. Fail closed with exit 2 and say what is wrong.
+    files = manifest.get("files")
+    if not isinstance(files, list):
+        die(f"{path} is not a manifest (files: "
+            f"{type(files).__name__}, want list)")
+    for i, rec in enumerate(files):
+        if not isinstance(rec, dict):
+            die(f"{path} is not a manifest (files[{i}]: "
+                f"{type(rec).__name__}, want object)")
+        missing = [k for k in ("path", "git_blob_sha", "sha256", "bytes")
+                   if k not in rec]
+        if missing:
+            die(f"{path} is not a manifest (files[{i}] missing "
+                f"{', '.join(missing)})")
+    return manifest
 
 
 # --------------------------------------------------------------- sync
@@ -234,6 +394,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
     source = Path(args.source).resolve()
     target = Path(args.target).resolve()
     commit = resolve_commit(source, args.commit)
+    verified = verified_source(source, commit)
 
     if not (target / ".git").exists():
         die(f"target {target} is not a git checkout (no .git)")
@@ -268,9 +429,10 @@ def cmd_sync(args: argparse.Namespace) -> int:
     origin = harvest_origin(content)
 
     new_manifest: Dict[str, Any] = {
-        "canonical_repo": CANONICAL_REPO,
+        "canonical_repo": verified["repo"],
         "canonical_commit": commit,
         "canonical_package_path": CANONICAL_PACKAGE_PATH,
+        "source": verified,
         "generator_version": GENERATOR_VERSION,
         "package_digest": digest,
         "package_files": census_count,
@@ -279,12 +441,26 @@ def cmd_sync(args: argparse.Namespace) -> int:
         "files": records,
     }
 
+    wanted = {e["path"] for e in entries}
+
     # Idempotence: if the pinned content and the recorded manifest (sans
-    # generated_at) already agree, write nothing at all.
+    # generated_at) already agree AND the directory carries exactly the
+    # pinned file set, write nothing at all. The file-set half is not an
+    # optimisation: a tracked hand-added file leaves the manifest and every
+    # listed hash matching, so without it sync would print "already at
+    # canonical" over a tree the parity gate then rejects as UNLISTED.
     if old_manifest is not None:
         comparable_old = {k: v for k, v in old_manifest.items()
                            if k != "generated_at"}
-        if comparable_old == new_manifest and all(
+        present = set()
+        if pkg_dir.is_dir():
+            for p in pkg_dir.rglob("*"):
+                if not p.is_file():
+                    continue
+                rel = p.relative_to(pkg_dir).as_posix()
+                if not _ignored_residue(rel):
+                    present.add(rel)
+        if comparable_old == new_manifest and present == wanted and all(
                 (pkg_dir / rec["path"]).is_file()
                 and sha256_hex((pkg_dir / rec["path"]).read_bytes()) == rec["sha256"]
                 for rec in records):
@@ -294,7 +470,6 @@ def cmd_sync(args: argparse.Namespace) -> int:
 
     # Wholesale replace: delete files the new tree does not carry, then
     # write the new tree. PARITY-MANIFEST.json is written last.
-    wanted = {e["path"] for e in entries}
     removed: List[str] = []
     if pkg_dir.is_dir():
         for p in sorted(pkg_dir.rglob("*")):
@@ -328,7 +503,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
         "%Y-%m-%dT%H:%M:%SZ")
     ordered = {k: new_manifest[k] for k in (
         "canonical_repo", "canonical_commit", "canonical_package_path",
-        "generated_at", "generator_version", "package_digest",
+        "source", "generated_at", "generator_version", "package_digest",
         "package_files", "file_count", "origin", "files")}
     (pkg_dir / MANIFEST_NAME).write_text(
         json.dumps(ordered, indent=2) + "\n", encoding="utf-8")
@@ -465,6 +640,25 @@ def cmd_verify(args: argparse.Namespace) -> int:
     pkg = target / TARGET_PACKAGE
     problems: List[str] = []
 
+    # The provenance sync recorded is a claim the gate has to check, not one
+    # it merely carries: a manifest naming a different canonical repository
+    # is not this repo's parity proof however well its file hashes line up.
+    if manifest.get("canonical_repo") != CANONICAL_REPO:
+        problems.append(f"PROVENANCE: canonical_repo "
+                        f"{manifest.get('canonical_repo')!r} != "
+                        f"{CANONICAL_REPO!r}")
+    pin_sha = manifest.get("canonical_commit")
+    if not isinstance(pin_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", pin_sha):
+        problems.append(f"PROVENANCE: canonical_commit {pin_sha!r} is not a "
+                        f"full 40-hex commit SHA")
+    recorded_source = manifest.get("source")
+    if recorded_source is not None:
+        src_repo = (recorded_source.get("repo")
+                    if isinstance(recorded_source, dict) else recorded_source)
+        if src_repo != CANONICAL_REPO:
+            problems.append(f"PROVENANCE: recorded source repo {src_repo!r} "
+                            f"!= {CANONICAL_REPO!r}")
+
     listed = set()
     for rec in records:
         rel = rec["path"]
@@ -487,9 +681,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
             if not p.is_file():
                 continue
             rel = p.relative_to(pkg).as_posix()
-            if rel == MANIFEST_NAME or rel in listed:
-                continue
-            if "__pycache__" in Path(rel).parts or rel.endswith(".pyc"):
+            if rel in listed or _ignored_residue(rel):
                 continue
             problems.append(f"UNLISTED {rel}: present in {TARGET_PACKAGE}/ "
                             f"but not in PARITY-MANIFEST (hand-added file?)")
