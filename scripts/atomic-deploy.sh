@@ -47,9 +47,11 @@
 #   Never rollback 3  — exit 3 (UNKNOWN/transient) triggers retry, never rollback
 #
 # REQUIRES: bash 4+, pm2, npm, python3, curl, df
-#           (no sqlite3 CLI: the pre-backup WAL checkpoint uses python3's stdlib
-#            sqlite3 module — the Linux/VPS container ships python3 but NOT the
-#            sqlite3 command-line binary.)
+#           (no sqlite3 CLI: the pre-deploy DB snapshot uses Python's stdlib
+#            sqlite3 ONLINE BACKUP API — the Linux/VPS container ships python3
+#            but NOT the sqlite3 command-line binary. The interpreter is probed
+#            for sqlite3 + Connection.backup() before it is trusted; see
+#            _cc_resolve_python. CC_PYTHON pins it.)
 #           lsof is OPTIONAL: Phase 1d uses it to find who is bound to the
 #           canonical port; without it, declared-port matching (pm2 jlist
 #           args/env) still works.
@@ -756,13 +758,59 @@ fi
 # origin names the CC repo, package.json present, and the canonical
 # ecosystem.config.cjs present). Any other flag-less run exits non-zero BEFORE
 # touching anything.
+# Normalize a git remote to "host/owner/repo" and compare THAT, everywhere.
+# A bare repo-name substring match accepted ANY remote URL carrying the name —
+# https://evil.example/attacker/blackceo-command-center passed, and the deploy
+# then ran against a foreign checkout (finding 34).
+# Handles https://[user[:token]@]host/owner/repo(.git),
+# ssh://git@host[:port]/owner/repo.git, scp-style git@host:owner/repo.git, and
+# explicit filesystem paths. The host tier is emitted only for network forms
+# (a scheme other than file://, a userinfo@, or a host:path scp form) and is
+# dropped for file:// and bare paths, so a filesystem path can never match a
+# network remote — not even one spelled ./github.com/<owner>/<repo> or
+# github.com/<owner>/<repo> on disk. Trailing slashes, ".git" and userinfo are
+# dropped; the id is lowercased because hosts and GitHub paths are
+# case-insensitive.
+# Must stay byte-identical in update.sh, check-updates.sh and
+# scripts/atomic-deploy.sh; scripts/l21-remote-db-guards.test.sh compares them.
+_cc_repo_id() {
+  local u="$1" host="" id="" n=0 net=0
+  local -a parts=()
+  u="${u%/}"; u="${u%.git}"; u="${u%/}"
+  case "$u" in
+    file://*) u="${u#*://}" ;;
+    *://*)    u="${u#*://}"; net=1 ;;
+  esac
+  case "$u" in *@*) u="${u#*@}"; net=1 ;; esac
+  case "${u%%:*}" in
+    */*|"") ;;
+    *) if [ "${u%%:*}" != "$u" ]; then u="${u%%:*}/${u#*:}"; net=1; fi ;;
+  esac
+  if [ -z "$u" ]; then return 0; fi
+  IFS='/' read -r -a parts <<< "$u"
+  n="${#parts[@]}"
+  if [ "$n" -lt 2 ]; then return 0; fi
+  case "${parts[0]}" in
+    localhost|*.*) if [ "$net" -eq 1 ]; then host="${parts[0]%%:*}"; fi ;;
+  esac
+  if [ -n "$host" ]; then
+    id="$host/${parts[n-2]}/${parts[n-1]}"
+  else
+    id="${parts[n-2]}/${parts[n-1]}"
+  fi
+  printf '%s' "$id" | tr '[:upper:]' '[:lower:]'
+}
+
+CC_EXPECTED_REPO_ID="github.com/trevorotts1/blackceo-command-center"
+
 if [[ "$APP_DIR_EXPLICIT" -eq 0 && -z "${CC_APP_DIR:-}" ]]; then
   _cc_remote="$(git -C "$APP_DIR" remote get-url origin 2>/dev/null || echo "")"
+  _cc_id="$(_cc_repo_id "$_cc_remote")"
   _cc_valid=0
   if [[ -d "$APP_DIR/.git" ]] \
      && [[ -f "$APP_DIR/package.json" ]] \
      && [[ -f "$APP_DIR/ecosystem.config.cjs" ]] \
-     && printf '%s' "$_cc_remote" | grep -q 'blackceo-command-center'; then
+     && [[ "$_cc_id" == "$CC_EXPECTED_REPO_ID" ]]; then
     _cc_valid=1
   fi
   if [[ "$_cc_valid" -ne 1 ]]; then
@@ -867,6 +915,42 @@ _resolve_runtime_db_path() {
   return 1
 }
 
+# Python interpreter for the SQLite blocks (finding 35). The pre-deploy snapshot
+# is load-bearing: it writes the ONLY rollback source, and the restore-verifier
+# below decides whether that source is usable. A `python3` earlier on PATH that
+# is a shim/wrapper and exits 0 without doing the work would produce no backup
+# (the 0-byte gate then refuses to deploy at all) or, worse, let the verifier
+# "pass" without ever opening the file. So never trust the NAME: prove the
+# interpreter imports sqlite3 and exposes Connection.backup(), and require a
+# TOKEN on stdout — a drain-stdin-and-exit-0 shim satisfies any exit-code-only
+# probe. CC_PYTHON pins the interpreter: when set it is used or the deploy
+# aborts, so an explicit operator choice is never silently swapped.
+_CC_PY_PROBE_TOKEN="cc-sqlite-online-backup-ok"
+_cc_python_capable() {
+  local cand="$1" out=""
+  [[ -n "$cand" && -x "$cand" ]] || return 1
+  out="$("$cand" -I -c 'import sqlite3,sys;sys.stdout.write("cc-sqlite-online-backup-ok" if hasattr(sqlite3.Connection,"backup") else "")' 2>/dev/null)" || return 1
+  [[ "$out" == "$_CC_PY_PROBE_TOKEN" ]]
+}
+_cc_resolve_python() {
+  local cand
+  if [[ -n "${CC_PYTHON:-}" ]]; then
+    if _cc_python_capable "$CC_PYTHON"; then printf '%s\n' "$CC_PYTHON"; return 0; fi
+    _err "CC_PYTHON=${CC_PYTHON} cannot import sqlite3 with Connection.backup(); refusing to substitute another interpreter."
+    return 1
+  fi
+  for cand in \
+    "$(command -v python3 2>/dev/null || true)" \
+    "$(command -v python 2>/dev/null || true)" \
+    /usr/bin/python3 \
+    /opt/homebrew/bin/python3 \
+    /usr/local/bin/python3; do
+    if _cc_python_capable "$cand"; then printf '%s\n' "$cand"; return 0; fi
+  done
+  _err "No Python interpreter with sqlite3 online backup (Connection.backup) found; refusing to deploy without a usable DB snapshot."
+  return 1
+}
+
 # ── 1b. DB backup ─────────────────────────────────────────────────────────────
 _log "[1b] Database backup"
 DB_FILE=""
@@ -905,21 +989,6 @@ else
   # pruning (below, and in _disk_cleanup above) to backups THIS SCRIPT created.
   # Never drop this marker -- see the prune call below for why.
   DB_BACKUP="${DB_FILE}.backup.autodeploy.$(date +%Y%m%d-%H%M%S)"
-  # Best-effort pre-backup WAL flush. The Linux/VPS container ships python3 but
-  # NOT the sqlite3 CLI, so use the stdlib sqlite3 module (behaviour-equivalent
-  # to `sqlite3 <db> '.timeout 5000' 'PRAGMA wal_checkpoint(TRUNCATE);'`).
-  # better-sqlite3 is deliberately NOT used here: this runs BEFORE `npm run
-  # build`, so its native binding may be unbuilt/ABI-mismatched at this point.
-  # The connection is always closed in a finally and the whole thing is fenced
-  # so a checkpoint failure can never fail the deploy — the cp below still runs.
-  python3 - "$DB_FILE" <<'PYWAL' 2>/dev/null || true
-import sqlite3, sys
-conn = sqlite3.connect(sys.argv[1], timeout=5)
-try:
-    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-finally:
-    conn.close()
-PYWAL
   # Pre-check disk BEFORE the copy. The phase-1a gate above checks the deploy
   # as a whole; this checks that THIS copy specifically fits, so a truncated
   # .backup file can never be produced and then trusted as a rollback source.
@@ -927,7 +996,50 @@ PYWAL
     _preflight_abort_receipt "Cannot back up the database at ${DB_FILE} — insufficient free disk (details above). Old build untouched."
     exit 2
   fi
-  cp "$DB_FILE" "$DB_BACKUP"
+  # FINDING 35: SQLite ONLINE BACKUP (Connection.backup), not `cp`.
+  # The server is live. A preceding `PRAGMA wal_checkpoint(TRUNCATE)` reports
+  # BUSY as a RESULT ROW (it does not raise) and the old code ignored both the
+  # result and any failure, then copied only the main file — so committed
+  # frames still in -wal could be missing from a structurally valid backup and
+  # a rollback silently lost rows. Connection.backup() takes one consistent
+  # snapshot of the source, WAL included, while writers keep running.
+  # better-sqlite3 is deliberately NOT used here: this runs BEFORE `npm run
+  # build`, so its native binding may be unbuilt/ABI-mismatched at this point.
+  # FAIL-CLOSED: a snapshot that cannot complete aborts the deploy before the
+  # build replaces the old .next. The partial file is removed.
+  # The interpreter is resolved ONCE and PROVEN capable here (see
+  # _cc_resolve_python): no silent fallback to a different python after a
+  # failure — an unusable interpreter is the same abort as an unusable snapshot.
+  PY_SQLITE=""
+  if ! PY_SQLITE="$(_cc_resolve_python)"; then
+    _preflight_abort_receipt "No usable Python interpreter for the SQLite online backup — refusing to continue without a rollback source. Old build untouched."
+    exit 2
+  fi
+  _ok "  DB snapshot interpreter: ${PY_SQLITE}"
+  DB_BACKUP_RC=0
+  "$PY_SQLITE" -I - "$DB_FILE" "$DB_BACKUP" <<'PYBACKUP' || DB_BACKUP_RC=$?
+import sqlite3, sys
+src, dst = sys.argv[1], sys.argv[2]
+# mode=rw on the SOURCE: a plain connect() CREATES a missing file, and an
+# empty-schema snapshot of it is structurally valid — it would sail past the
+# 0-byte and integrity checks and poison the rollback chain. A vanished source
+# must fail the snapshot (rc != 0 -> abort receipt), never fabricate one.
+src_uri = "file:" + src.replace("%", "%25").replace("?", "%3f").replace("#", "%23") + "?mode=rw"
+source = sqlite3.connect(src_uri, uri=True, timeout=5)
+try:
+    dest = sqlite3.connect(dst, timeout=5)
+    try:
+        source.backup(dest)   # online backup: consistent snapshot incl. -wal
+    finally:
+        dest.close()
+finally:
+    source.close()
+PYBACKUP
+  if [[ "$DB_BACKUP_RC" -ne 0 ]]; then
+    rm -f "$DB_BACKUP"
+    _preflight_abort_receipt "DB snapshot of ${DB_FILE} could not be completed by SQLite's online backup (rc ${DB_BACKUP_RC}) — refusing to continue without a rollback source. Old build untouched."
+    exit 2
+  fi
   # FIX 34 (presentation rev2): a 0-byte/truncated backup is not a backup.
   # Fail the deploy before the build replaces the old .next — the pre-backup
   # .next snapshot (1c) has not run yet, so exiting here leaves everything
@@ -946,14 +1058,17 @@ PYWAL
   # (or reports a non-ok integrity result) and the deploy aborts (exit 2)
   # BEFORE the build replaces the old .next, so a poison backup never survives
   # into the rollback chain. A 0-byte / header-less file is refused on the
-  # magic-header check before any integrity verdict. A bare `cp` of a live
-  # WAL-mode DB can lag the -wal file; the checkpoint above shrinks that
-  # window and integrity_check still proves the restored-from file parses end
-  # to end. FAIL-CLOSED, unlike the checkpoint above: a non-zero verifier exit
+  # magic-header check before any integrity verdict. The online-backup block
+  # above already produced a consistent snapshot (WAL included); this verifies
+  # that snapshot parses end to end. FAIL-CLOSED: a non-zero verifier exit
   # aborts the deploy (exit 2) — a poison backup in the rollback chain is worse
   # than a delayed deploy; the backup itself is kept on disk for forensics.
+  # The verifier must PROVE it ran: a positive token on stdout, not just exit 0.
+  # An interpreter that swallows the heredoc and exits 0 would otherwise turn
+  # "never opened the backup" into "verified" — the same false success finding
+  # 35 is about, one layer up.
   DB_BACKUP_VERIFY_RC=0
-  python3 - "$DB_BACKUP" <<'PYRESTORE' 2>/dev/null || DB_BACKUP_VERIFY_RC=$?
+  DB_BACKUP_VERIFY_OUT="$("$PY_SQLITE" -I - "$DB_BACKUP" 2>/dev/null <<'PYRESTORE'
 import sqlite3, os, sys
 ok = False
 try:
@@ -972,8 +1087,10 @@ except (sqlite3.DatabaseError, OSError):
     ok = False  # unreadable/malformed image is a failed verification
 if not ok:
     sys.exit(9)
+sys.stdout.write("RESTORE-VERIFIED")
 PYRESTORE
-  if [[ "$DB_BACKUP_VERIFY_RC" -ne 0 ]]; then
+)" || DB_BACKUP_VERIFY_RC=$?
+  if [[ "$DB_BACKUP_VERIFY_RC" -ne 0 || "$DB_BACKUP_VERIFY_OUT" != "RESTORE-VERIFIED" ]]; then
     _preflight_abort_receipt "FIX 34b: DB backup at ${DB_BACKUP} FAILED restore-verification (integrity_check != ok) — refusing to continue; the backup is kept on disk for forensics. Old build untouched."
     exit 2
   fi

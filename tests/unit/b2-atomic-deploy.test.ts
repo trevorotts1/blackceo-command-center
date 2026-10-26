@@ -36,7 +36,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { createRequire } from 'node:module';
@@ -1868,8 +1868,12 @@ test('B.2 static QC: qc-cc.sh section 10 checks all pass on atomic-deploy.sh', (
   // 10.2 — disk gate present
   assert.ok(src.includes('DISK_MIN_GB'), '10.2: must reference DISK_MIN_GB');
 
-  // 10.3 — DB backup via sqlite3 checkpoint
-  assert.ok(src.includes('wal_checkpoint'), '10.3: must call sqlite3 WAL checkpoint for DB backup');
+  // 10.3 — DB backup via SQLite's ONLINE backup API (finding 35). A WAL
+  // checkpoint on a live DB reports BUSY as a result row, so checkpoint-then-cp
+  // could miss committed rows still in -wal; the snapshot must fail closed.
+  assert.ok(src.includes("<<'PYBACKUP'"), '10.3: must snapshot the DB with SQLite\'s online backup');
+  assert.ok(src.includes('source.backup(dest)'), '10.3: must call Connection.backup()');
+  assert.ok(src.includes('DB_BACKUP_RC'), '10.3: a failed snapshot must abort the deploy');
 
   // 10.4 — rollback snapshot
   assert.ok(src.includes('next.rollback'), '10.4: must create .next.rollback snapshot');
@@ -2448,4 +2452,78 @@ test('P1 integration (b): good deploy + APP_DIR under /data-like path → exit 0
   } finally {
     fixture.cleanup();
   }
+});
+
+// ─── Interpreter-resolution pin (finding 35 regression) ───────────────────────
+// The DB snapshot and its restore-verifier are the ONLY rollback source, and
+// the base fixture puts a drain-stdin/exit-0 `python3` shim first on PATH —
+// exactly the interpreter that made the suite lie before. The deploy must
+// PROVE an interpreter runs SQLite's online backup rather than trust the name:
+// the pinned test asserts a real snapshot is produced and the interpreter that
+// produced it is NOT the shim.
+
+/** Non-empty backup files this deploy created for the fixture DB */
+function autodeployBackups(appDir: string): string[] {
+  const dir = path.dirname(path.join(appDir, 'mission-control.db'));
+  return readdirSync(dir)
+    .filter((n) => /\.backup\.autodeploy\.\d{8}-\d{6}$/.test(n))
+    .map((n) => path.join(dir, n));
+}
+
+test('interpreter pin: a drain-and-exit-0 python3 shim is never trusted; a real snapshot is still produced', async () => {
+  const fixture = buildFixture({ buildExitCode: 0, healthExitCode: 0 });
+  try {
+    const { exitCode, stderr } = runDeploy(fixture);
+    assert.strictEqual(exitCode, 0,
+      `Expected a green deploy with a real interpreter. Got exit ${exitCode}.\nstderr:\n${stderr}`);
+
+    // The interpreter that ran the snapshot must be a REAL one: named in the
+    // receipt and not the shim sitting in the fixture's own bin dir.
+    assert.ok(stderr.includes('DB snapshot interpreter:'),
+      `The deploy must report which interpreter it proved.\nstderr:\n${stderr}`);
+    const named = /DB snapshot interpreter: (\S+)/.exec(stderr)?.[1] ?? '';
+    assert.ok(named.startsWith('/'),
+      `Interpreter must be reported as an absolute path, got '${named}'`);
+    assert.ok(!named.startsWith(fixture.binDir),
+      `Interpreter resolved to the fixture shim (${named}); the shim would make every DB assertion vacuous`);
+
+    const backups = autodeployBackups(fixture.appDir);
+    assert.strictEqual(backups.length, 1,
+      `Expected exactly one deploy backup, got ${JSON.stringify(backups)}`);
+    const magic = readFileSync(backups[0]).subarray(0, 16).toString('binary');
+    assert.strictEqual(magic, 'SQLite format 3 ',
+      `The snapshot must be a real SQLite image, not a placeholder`);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test('interpreter pin: an unusable CC_PYTHON aborts (exit 2) instead of silently falling back', async () => {
+  const fixture = buildFixture({ buildExitCode: 0, healthExitCode: 0 });
+  try {
+    const shim = path.join(fixture.binDir, 'python3'); // drain stdin, exit 0
+    const { exitCode, stderr } = runDeploy(fixture, { CC_PYTHON: shim });
+    assert.strictEqual(exitCode, 2,
+      `A pinned interpreter that cannot do the backup must abort the deploy, got exit ${exitCode}.\nstderr:\n${stderr}`);
+    assert.ok(stderr.includes('ATOMIC DEPLOY ABORTED'),
+      `Expected a pre-flight abort receipt.\nstderr:\n${stderr}`);
+    assert.ok(!stderr.includes('ATOMIC DEPLOY SUCCESS'),
+      `A refused interpreter must never report success.\nstderr:\n${stderr}`);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test('interpreter pin: the capability probe is load-bearing in the shipped script', () => {
+  const src = readFileSync(path.join(process.cwd(), 'scripts', 'atomic-deploy.sh'), 'utf8');
+  // A name-only `command -v python3` re-opens the hole this pin exists for.
+  // The probe must demand work (sqlite3 + Connection.backup) AND a token.
+  assert.ok(src.includes('_cc_resolve_python()'), 'must resolve the interpreter');
+  assert.ok(src.includes('_cc_python_capable()'), 'must probe interpreter capability');
+  assert.ok(src.includes('hasattr(sqlite3.Connection,"backup")'),
+    'the probe must require Connection.backup(), not just an interpreter name');
+  assert.ok(src.includes('_CC_PY_PROBE_TOKEN'), 'the probe must require a positive token, not exit 0');
+  assert.ok(/"\$PY_SQLITE" -I - /.test(src),
+    'the snapshot/verifier must run through the resolved interpreter');
+  assert.ok(src.includes('DB_BACKUP_VERIFY_OUT'), 'the restore verifier must prove it ran');
 });
