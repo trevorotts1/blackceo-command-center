@@ -67,13 +67,15 @@ bash ~/projects/command-center/scripts/atomic-deploy.sh \
 
 ### What the Script Does
 
-1. **Backs up critical files** and verifies the checkout
+1. **Backs up critical files** and verifies the checkout — the git remote must normalize to `github.com/trevorotts1/blackceo-command-center` (host + owner + repository, not just the basename; `update.sh`, `check-updates.sh` and `atomic-deploy.sh` all enforce this)
 2. **Installs dependencies** — `npm ci`
-3. **Builds into a temp directory** — never touches the live `.next/` until the build is verified good
-4. **Atomically swaps** the new build in with a single `mv` — no missing-build window
-5. **Restarts PM2** — restarts the `blackceo-command-center` process
-6. **Health checks** — verifies the site is actually serving 200 OK
-7. **Auto-rollback** — if the health check fails, restores the prior build and restarts
+3. **Snapshots the database** — SQLite's ONLINE BACKUP (`Connection.backup()`) through a Python interpreter proven to import `sqlite3` and expose `Connection.backup` (`$CC_PYTHON` hard pin wins, else `python3`/`python`/absolute fallbacks); an unprovable interpreter or an incomplete snapshot aborts pre-flight (exit 2, old build untouched). The snapshot lands as `mission-control.db.backup.autodeploy.<ts>` and the restore-verifier must print `RESTORE-VERIFIED`
+4. **Resolves the served database** — `shared-utils/resolve_db.py` honors the server configuration first (`DATABASE_PATH`, then `.env.local`, then `<install>/../data/mission-control.db`), mirroring the app's `.env.local` parsing exactly (trim, unpaired quotes kept literal, CRLF tolerated); `update.sh` resolves the served DB once, enforces path parity, and passes it as `--db` so the departments sync seeds the DB the server actually serves — never a layout guess
+5. **Builds into a temp directory** — never touches the live `.next/` until the build is verified good
+6. **Atomically swaps** the new build in with a single `mv` — no missing-build window
+7. **Restarts PM2** — restarts the `blackceo-command-center` process
+8. **Health checks** — verifies the site is actually serving 200 OK
+9. **Auto-rollback** — if the health check fails, restores the prior build and restarts
 
 ---
 
@@ -90,8 +92,9 @@ cd ~/projects/mission-control
 rm -rf .next
 cp -r .next-backup .next
 
-# 3. Restore the database backup
-cp mission-control.db.backup mission-control.db
+# 3. Restore the database backup (newest autodeploy snapshot wins)
+ls -t mission-control.db.backup.autodeploy.* | head -1
+cp "$(ls -t mission-control.db.backup.autodeploy.* | head -1)" mission-control.db
 
 # 4. Restart PM2
 pm2 restart blackceo-command-center
@@ -155,9 +158,17 @@ section) for the ONBOARDING-side half of this same chain.
    `cc_route_update_through_canonical_path()`, which is where control passes
    to THIS repo.
 4. **THIS repo's `update.sh`** (owns the CC-side half): backs up critical
-   files, pulls/verifies the checkout, `npm ci`, then **Step 5: Build +
+   files (to `cc-backup-<ts>/` under the backup base), verifies the checkout's
+   remote identity (normalized host + owner + repository — a foreign checkout
+   named `blackceo-command-center` is rejected), pulls, `npm ci`, resolves the
+   SERVED database through `shared-utils/resolve_db.py` (server configuration
+   first: `DATABASE_PATH`, then `.env.local` parsed exactly like the app, then
+   `<install>/../data/mission-control.db`; a path-parity failure skips the
+   departments sync instead of seeding a guessed DB), then **Step 5: Build +
    restart (atomic deploy)** — routes through `scripts/atomic-deploy.sh`.
-5. **`scripts/atomic-deploy.sh`**: builds into a temp dir, gates on a FRESH
+5. **`scripts/atomic-deploy.sh`**: snapshots the DB with SQLite's ONLINE
+   BACKUP (`Connection.backup()` via a proven interpreter — not `cp`, and a
+   failed snapshot aborts pre-flight), builds into a temp dir, gates on a FRESH
    `.next/BUILD_ID` (mtime newer than build start — never accepts a stale
    artefact), atomically swaps `.next` in with one `mv` (no missing-build
    window), restarts pm2, health-checks via `scripts/cc-health-check.sh`, and
@@ -238,7 +249,7 @@ This creates a macOS LaunchAgent that auto-restarts the tunnel if it dies.
 ### Database Locked During Backup
 - **Symptom:** Backup step hangs or fails
 - **Cause:** Active database writes preventing copy
-- **Fix:** The script uses simple `cp` which works even with locked SQLite databases
+- **Fix:** `atomic-deploy.sh` snapshots the DB with SQLite's ONLINE BACKUP (`Connection.backup()` through a proven Python interpreter), so the snapshot is consistent even while the server writes (committed `-wal` rows are included). If the snapshot cannot complete, the deploy aborts pre-flight (exit 2) with the old build untouched — it never falls back to `cp`.
 - **Note:** If issues persist, check `lsof mission-control.db` for open handles
 
 ---
@@ -247,7 +258,7 @@ This creates a macOS LaunchAgent that auto-restarts the tunnel if it dies.
 
 Before every deployment, confirm:
 
-- [ ] **Database is backed up** — `mission-control.db.backup` exists and is recent
+- [ ] **Database is backed up** — `mission-control.db.backup.autodeploy.<timestamp>` exists and is recent (written by `atomic-deploy.sh`; the `update.sh` pre-update tree lands in `cc-backup-<timestamp>/` under the backup base)
 - [ ] **Build is backed up** — `.next-backup/` exists and is recent
 - [ ] **Clean build planned** — `rm -rf .next` will run before build
 - [ ] **Health check enabled** — Script will verify HTTP 200 after restart
@@ -330,4 +341,4 @@ never public.
 
 ---
 
-**Last Updated:** September 28, 2026
+**Last Updated:** October 26, 2026
