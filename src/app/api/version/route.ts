@@ -22,22 +22,60 @@ export const revalidate = 0;
  * `git pull`, etc). Exposing the version makes that instantly diagnosable —
  * "you're on v5.14.0, current is v5.17.0" — instead of a silent mystery.
  *
+ * fix-45: the endpoint used to read the checkout only, so a checkout that
+ * moved under an older running build advertised the newer number and the
+ * drift became invisible. The response now labels two values:
+ *   - `buildVersion`    — recorded once when this build's route module first
+ *                         loaded, immune to the checkout moving underneath it;
+ *   - `checkoutVersion` — read live from disk on every request (what the
+ *                         checkout says right now).
+ * They differ exactly when the checkout has moved since the running build.
+ * `version` stays a legacy alias of `checkoutVersion` for the footer chip.
+ *
  * Never throws: a missing/unreadable version file degrades to a 200 with
- * version: null rather than a 500, so this diagnostic endpoint can never
- * itself become a source of dashboard breakage.
+ * nulls rather than a 500, so this diagnostic endpoint can never itself become
+ * a source of dashboard breakage.
  */
-export async function GET() {
+
+type VersionRead = { version: string | null; error?: string };
+
+/** Reads the repo-root `version` file. Never throws. */
+function readCheckoutVersion(): VersionRead {
   try {
-    const versionFilePath = path.join(process.cwd(), 'version');
-    const raw = fs.readFileSync(versionFilePath, 'utf-8').trim();
-    if (!raw) {
-      return NextResponse.json({ version: null, error: 'version file is empty' }, { status: 200 });
-    }
-    return NextResponse.json({ version: raw });
+    const raw = fs.readFileSync(path.join(process.cwd(), 'version'), 'utf-8').trim();
+    if (!raw) return { version: null, error: 'version file is empty' };
+    return { version: raw };
   } catch (error) {
-    return NextResponse.json(
-      { version: null, error: error instanceof Error ? error.message : 'unknown error' },
-      { status: 200 },
-    );
+    return { version: null, error: error instanceof Error ? error.message : 'unknown error' };
   }
+}
+
+/**
+ * Build-recorded revision, captured the first time this module is evaluated
+ * and never re-read, so it cannot follow a checkout that moves under the
+ * running process.
+ *
+ * ponytail: a first-load record, not git-verified build provenance — a
+ * `git pull` landing before evaluation moves it, whether evaluation happens
+ * at `next start` or lazily on the route's first request (module-evaluation
+ * timing for `force-dynamic` routes is not observed here, only inferred).
+ * Upgrade path: stamp the revision at build time via next.config `env` and
+ * read that here.
+ */
+const BUILD_VERSION_RECORD = readCheckoutVersion();
+
+export async function GET() {
+  const checkout = readCheckoutVersion();
+  // Both reads report: a degraded read whose cause got swallowed would leave a
+  // null field unexplained in an endpoint that exists to explain drift.
+  const error = [checkout.error, BUILD_VERSION_RECORD.error].filter(Boolean).join('; ') || undefined;
+  return NextResponse.json(
+    {
+      version: checkout.version, // legacy alias, live checkout value
+      checkoutVersion: checkout.version,
+      buildVersion: BUILD_VERSION_RECORD.version,
+      ...(error ? { error } : {}),
+    },
+    { status: 200 },
+  );
 }
