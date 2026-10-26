@@ -156,6 +156,11 @@ jobs:
       - name: Run qc-cc.sh
         run: bash scripts/qc-cc.sh
 
+      - name: T-33 fulfillment thread-state suite (explicit path)
+        run: node --import tsx --import ./tests/setup/no-owner-telegram.ts --import ./tests/setup/tmp-sandbox.ts --test tests/unit/t33-fulfillment-state.test.ts tests/unit/t33-fulfillment-operations.test.ts tests/unit/t33-fulfillment-migration.test.ts
+        env:
+          NODE_ENV: test
+
   # ── Hardening plan ITEM 08 — real paired onboarding invitation acceptance ──
   # The onboarding contract workflow's paired check scans source strings and
   # mocks a receipt, so nothing exercised the PRES-046 manifest refusal or
