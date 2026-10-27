@@ -900,7 +900,7 @@ export interface SSEEvent {
   // PublishQueueItem just to broadcast.
   | {
     id: string;
-    status: 'queued' | 'running' | 'published' | 'failed';
+    status: 'awaiting_approval' | 'queued' | 'running' | 'published' | 'failed';
     task_id?: string | null;
     execution_id?: string | null;
   }
@@ -925,10 +925,13 @@ export interface PublishQueueItem {
   topic: string;
   platforms: string[];                 // decoded from the stored JSON string
   schedule: 'auto' | 'now' | string;   // ISO 8601 also allowed
-  status: 'queued' | 'running' | 'retrying' | 'scheduled' | 'published' | 'verification_required' | 'overdue' | 'done' | 'failed' | 'cancelled';
+  status: 'awaiting_approval' | 'queued' | 'running' | 'retrying' | 'scheduled' | 'published' | 'verification_required' | 'overdue' | 'done' | 'failed' | 'cancelled';
   run_id: string | null;
   requested_by: string | null;
   error: string | null;
+  /** C3 (PBB-917): campaign placement this intent belongs to, when any. */
+  campaign_id: string | null;
+  placement_id: string | null;
   created_at: string;
   updated_at: string;
   started_at: string | null;
