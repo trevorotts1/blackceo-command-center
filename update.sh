@@ -19,6 +19,12 @@
 #                      built-in 4000 default and is passed to atomic-deploy.
 #  Pinning all three is the supported way to update a box whose layout does
 #  not match a documented fleet layout.
+#    CC_MERGE_RECEIPTS Path of the remote merge-receipt bundle the fleet read
+#                      FROM THE REMOTE for this promotion. When set, the
+#                      target release's own verifier must prove it (Step 3c);
+#                      when unset, this update claims no promotion and the
+#                      guard says so instead of passing silently.
+#    CC_MERGE_RECEIPT_CHECK=0  Bypass Step 3c for a receipt you have read.
 # ============================================================
 
 set -euo pipefail
@@ -619,6 +625,43 @@ cc_contract_check() {
   fi
 }
 
+# T-45 remote merge-receipt guard (runs BEFORE anything is installed or built).
+# A promotion to `main` is only proof-of-record when its receipt -- supplied by
+# the caller from what it read FROM THE REMOTE, never inferred locally -- is
+# proved by those facts. The fleet reads that bundle and names it here; the
+# release's OWN read-only verifier decides. A claimed check, target sha, named
+# repair or consumer contract that the remote facts do not back is refused here,
+# before npm ci / migrations / build / restart, instead of arriving as a silently
+# unproven deploy. Exit codes: 0 proved, 1 findings, 2 usage/parse.
+# $1 is scripts/merge-receipt-verify.ts of the release being deployed.
+#
+# CC_MERGE_RECEIPTS unset means this update claims no promotion: skipped LOUDLY,
+# because "nothing was claimed" is not "nothing was wrong". Set
+# CC_MERGE_RECEIPT_CHECK=0 to bypass for a receipt you have already read.
+cc_merge_receipt_check() {
+  local verify="$1" bundle="${CC_MERGE_RECEIPTS:-}" rc
+  if [ "${CC_MERGE_RECEIPT_CHECK:-1}" = "0" ]; then
+    warn "CC_MERGE_RECEIPT_CHECK=0 -- remote merge receipts NOT verified for this update."
+  elif [ -z "$bundle" ]; then
+    warn "CC_MERGE_RECEIPTS unset -- this update claims no promotion; remote merge receipts were NOT verified."
+  elif [ ! -f "$bundle" ]; then
+    fatal "CC_MERGE_RECEIPTS=$bundle does not exist -- a claim that cannot be read cannot be proved. Dependencies, migrations, build and restart were NOT run."
+  elif [ ! -f "$verify" ]; then
+    warn "scripts/merge-receipt-verify.ts not found in the release being deployed -- the supplied receipt bundle could NOT be verified."
+  else
+    # set -e is active for the updater; inspect the verifier's exit contract.
+    set +e
+    node --import tsx "$verify" "$bundle"
+    rc=$?
+    set -e
+    if [ "$rc" -eq 0 ]; then
+      success "Remote merge receipts verified for the target release"
+    else
+      fatal "Remote merge receipts FAILED (exit $rc: 1 findings / 2 usage-parse; see the named refusal above). The promotion is not proved by the remote facts, so this update is refused. Fix the receipt, or re-run with CC_MERGE_RECEIPT_CHECK=0 after reading it. Dependencies, migrations, build and restart were NOT run."
+    fi
+  fi
+}
+
 # LIVE-DERIVED pm2 app name (was hardcoded to "blackceo-command-center").
 # On a box whose live CC runs under a different pm2 name (e.g. an operator box
 # running "cc-prod" on :4000), the hardcoded name matched NOTHING: the atomic
@@ -716,11 +759,20 @@ if [ -d ".git" ] && [ "${CC_UPDATE_ZERO_DOWNTIME:-1}" = "1" ]; then
     ZD_STAGE="$(mktemp -d "${TMPDIR:-/tmp}/cc-update-stage.XXXXXX")"
     # Staged scripts leave with the process; the live tree is never the stage.
     trap 'rm -rf "$ZD_STAGE"' EXIT
-    git archive "$ZD_TARGET" scripts | tar -x -C "$ZD_STAGE" \
+    # Stage the target's scripts, plus the verifier's library ONLY when that
+    # release ships it: `git archive` aborts on a pathspec the target does not
+    # have, which refused the whole promotion on any older/leaner release.
+    ZD_STAGE_PATHS=(scripts)
+    git cat-file -e "$ZD_TARGET:src/lib/integration" 2>/dev/null \
+      && ZD_STAGE_PATHS+=(src/lib/integration)
+    git archive "$ZD_TARGET" "${ZD_STAGE_PATHS[@]}" | tar -x -C "$ZD_STAGE" \
       || fatal "Could not stage the target release's scripts. Nothing was changed."
 
     step "Step 3b: Verify the OpenClaw gateway wire contract (target release)"
     cc_contract_check "$ZD_STAGE/scripts/openclaw-contract-check.mjs"
+
+    step "Step 3c: Verify remote merge receipts (target release)"
+    cc_merge_receipt_check "$ZD_STAGE/scripts/merge-receipt-verify.ts"
 
     step "Step 6: Build + promote + restart (atomic deploy, zero-downtime)"
     CC_PM2_NAME="$(cc_resolve_pm2_name "$ZD_STAGE/scripts/lib/pm2-port-zombies.py")"
@@ -980,6 +1032,9 @@ success "New version: ${NEW_VERSION:-unknown}"
 cc_sync_departments
 step "Step 3b: Verify the OpenClaw gateway wire contract"
 cc_contract_check "$INSTALL_DIR/scripts/openclaw-contract-check.mjs"
+
+step "Step 3c: Verify remote merge receipts"
+cc_merge_receipt_check "$INSTALL_DIR/scripts/merge-receipt-verify.ts"
 
 # ----------------------------------------------------------
 # Install dependencies
