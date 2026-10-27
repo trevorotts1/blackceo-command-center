@@ -14,6 +14,7 @@ import {
   findActiveExecutionForTask,
   buildOwnerUpdateMessage,
 } from '@/lib/task-kill';
+import { buildFulfillmentThreads } from '@/lib/fulfillment/thread-state';
 import type { Task, ActivityType, TaskActivity } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
@@ -181,8 +182,8 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
     // (src/lib/presentation-tenant-scope.ts). A foreign or unknown task is 404,
     // indistinguishable from a wrong id, so this read is not an existence oracle.
     const own = tenantTaskWhere(resolveActiveCompanyId());
-    const task = queryOne<{ id: string }>(
-      `SELECT t.id FROM tasks t WHERE t.id = ? AND ${own.sql}`,
+    const task = queryOne<{ id: string; workspace_id: string | null }>(
+      `SELECT t.id, t.workspace_id FROM tasks t WHERE t.id = ? AND ${own.sql}`,
       [id, ...own.params]
     );
     if (!task) {
@@ -204,7 +205,18 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
       [id]
     );
 
-    return NextResponse.json({ messages });
+    // T-33 / cc-conversation-operations — the canonical fulfillment thread for
+    // this task, read through the tenant-scoped read model (the read names the
+    // task's own workspace and refuses to run unscoped).
+    // ponytail: reads every thread in the workspace to show one task; add a
+    // taskId-scoped query in thread-state.ts if this endpoint gets hot.
+    const fulfillment = task.workspace_id
+      ? buildFulfillmentThreads({ workspaceId: task.workspace_id }).find(
+          (thread) => thread.taskId === id
+        ) ?? null
+      : null;
+
+    return NextResponse.json({ messages, fulfillment });
   } catch (error) {
     console.error('[messages:GET]', error);
     return NextResponse.json({ error: 'Failed to fetch messages' }, { status: 500 });
