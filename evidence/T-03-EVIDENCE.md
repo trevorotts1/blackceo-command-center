@@ -11,7 +11,7 @@ Every claim below is derived from the tree at that SHA. No prior inventory was u
 
 ## 1. Instrument proof — how the route list was produced
 
-**Instrument:** `/Volumes/mac mini m4/Downloads/git trees and automations/scratch/pb-skill38-20261024/lanes/PBB-403/enumerate_routes.py` — walks `src/app`, matches `route.(ts|tsx|js|jsx|mjs)`, and records each exported HTTP method symbol with its line number (`export [async] function M`, `export const M =`, `export { M ... }`). Route path is derived from the filesystem path (route groups `(x)` and parallel slots `@x` dropped).
+**Instrument:** `<PATH>` — walks `src/app`, matches `route.(ts|tsx|js|jsx|mjs)`, and records each exported HTTP method symbol with its line number (`export [async] function M`, `export const M =`, `export { M ... }`). Route path is derived from the filesystem path (route groups `(x)` and parallel slots `@x` dropped).
 
 **Command:**
 
@@ -784,7 +784,7 @@ So a ref readback is proven by **populated** output naming the same SHA, never b
 
 ## 12. Internal-disk discipline
 
-Every clone, script, output and intermediate lives under `/Volumes/mac mini m4/Downloads/git trees and automations/…` — `worktrees/PBB-403/blackceo-command-center` (clone) and `scratch/pb-skill38-20261024/lanes/PBB-403/` (instruments, `routes.tsv`, `perm.tsv`, `pages.tsv`, `route-table.md`, this file). No `/tmp` and no internal-disk path was used by this lane. The two committed files are the only files this task adds to the repo.
+Every clone, script, output and intermediate lives under `<PATH>` — `worktrees/PBB-403/blackceo-command-center` (clone) and `scratch/pb-skill38-20261024/lanes/PBB-403/` (instruments, `routes.tsv`, `perm.tsv`, `pages.tsv`, `route-table.md`, this file). No `/tmp` and no internal-disk path was used by this lane. The two committed files are the only files this task adds to the repo.
 
 ---
 
