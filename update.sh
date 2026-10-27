@@ -759,7 +759,13 @@ if [ -d ".git" ] && [ "${CC_UPDATE_ZERO_DOWNTIME:-1}" = "1" ]; then
     ZD_STAGE="$(mktemp -d "${TMPDIR:-/tmp}/cc-update-stage.XXXXXX")"
     # Staged scripts leave with the process; the live tree is never the stage.
     trap 'rm -rf "$ZD_STAGE"' EXIT
-    git archive "$ZD_TARGET" scripts src/lib/integration | tar -x -C "$ZD_STAGE" \
+    # Stage the target's scripts, plus the verifier's library ONLY when that
+    # release ships it: `git archive` aborts on a pathspec the target does not
+    # have, which refused the whole promotion on any older/leaner release.
+    ZD_STAGE_PATHS=(scripts)
+    git cat-file -e "$ZD_TARGET:src/lib/integration" 2>/dev/null \
+      && ZD_STAGE_PATHS+=(src/lib/integration)
+    git archive "$ZD_TARGET" "${ZD_STAGE_PATHS[@]}" | tar -x -C "$ZD_STAGE" \
       || fatal "Could not stage the target release's scripts. Nothing was changed."
 
     step "Step 3b: Verify the OpenClaw gateway wire contract (target release)"
