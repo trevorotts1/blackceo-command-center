@@ -48,6 +48,7 @@ export type ProviderState = 'draft' | 'scheduled' | 'published' | 'failed' | 'un
 
 /** publish_queue states the F03 dispatcher persists (W0 contract). */
 export type PublishQueueState =
+  | 'awaiting_approval'
   | 'queued' | 'running' | 'retrying' | 'scheduled' | 'published'
   | 'failed' | 'overdue' | 'done' | 'cancelled' | 'verification_required';
 
@@ -190,6 +191,14 @@ export function buildPublishMessage(
   let retryDeadline: string | null = null;
 
   switch (status) {
+    // C3 (PBB-917 / T-54) — the approval gate, in the owner's words. A
+    // campaign placement is NOT queued and NOT overdue: the owner owes the
+    // next action, and nothing is published until they approve.
+    case 'awaiting_approval':
+      stage = 'Waiting for your approval';
+      nextAction = 'Review and approve the campaign manifest. Nothing is published until you approve it.';
+      owner = 'client';
+      break;
     case 'queued':
       stage = 'queued';
       nextAction = 'The publishing worker will pick this up automatically. If it stays queued for more than a few minutes, the worker may be offline — we will surface it as overdue.';
@@ -320,9 +329,16 @@ export function buildTaskSummary(
   }
 
   const activePublish = publishRows.find((p) =>
-    ['queued', 'running', 'retrying', 'scheduled', 'overdue'].includes((p.status || '').toLowerCase()));
+    ['awaiting_approval', 'queued', 'running', 'retrying', 'scheduled', 'overdue'].includes((p.status || '').toLowerCase()));
   if (activePublish) {
     const ps = (activePublish.status || '').toLowerCase();
+    if (ps === 'awaiting_approval') {
+      stage = 'Waiting for your approval';
+      nextAction = 'Review and approve the campaign manifest. Nothing is published until you approve it.';
+      owner = 'client';
+      evidence.push({ kind: 'publish_queue', id: activePublish.id, at: activePublish.updated_at });
+      return { stage, lastVerified, nextAction, owner, retryDeadline, evidence, failures };
+    }
     stage = ps === 'overdue' ? 'overdue' : ps === 'retrying' ? 'retrying' : ps === 'scheduled' ? 'scheduled' : ps === 'queued' ? 'queued' : 'producing';
     if (ps === 'retrying' && activePublish.retry_at) {
       retryDeadline = activePublish.retry_at;

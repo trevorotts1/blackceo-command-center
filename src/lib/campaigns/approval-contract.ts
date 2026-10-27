@@ -225,6 +225,13 @@ export interface PlacementView {
   approval_blockers: string[];
   /** True only when the placement's own calendar identity is proven. */
   approvable: boolean;
+  /**
+   * C3 (PBB-917 / T-54) — review context: this placement's publish intent is
+   * parked before approval (`awaiting_approval`), so the review row can say so
+   * in the owner's words instead of showing it as queued work.
+   */
+  awaiting_approval?: boolean;
+  awaiting_approval_label?: string | null;
 }
 
 export interface CalendarDay {
@@ -685,6 +692,8 @@ export function buildCampaignApprovalView(input: CampaignApprovalInput): Campaig
 
     // ── publication receipt ──
     const publication = classifyPublication(publishRow);
+    // C3 (PBB-917 / T-54) — the review row's approval-pending context.
+    const awaitingApproval = (publishRow?.status ?? '').toLowerCase() === 'awaiting_approval';
 
     // ── freshness (C-F13) ──
     // Freshness answers ONE question: is the lifecycle event stream still
@@ -727,6 +736,8 @@ export function buildCampaignApprovalView(input: CampaignApprovalInput): Campaig
       unknown_fields: unknownFields,
       approval_blockers: blockers,
       approvable: blockers.length === 0,
+      awaiting_approval: awaitingApproval,
+      awaiting_approval_label: awaitingApproval ? 'Waiting for your approval' : null,
     });
   }
 
