@@ -795,7 +795,7 @@ Every clone, script, output and intermediate for this pass lives under `/Volumes
 **Artifact commit — the commit that adds both evidence files:**
 
 ```
-git rev-parse HEAD                                    → __ARTIFACT_SHA__
+git rev-parse HEAD                                    → c9d29acc389efc10bb6f12a445e4b34837ba03ed
 ```
 
 The readback rule this pass follows: a ref readback is proven by **populated** output naming the same SHA, never by an exit code — `git ls-remote` on a nonexistent ref is a silent success with empty stdout. The audited pass ran that negative control and it is recorded in §10 above; it still holds because the instrument is the same `git ls-remote`.
