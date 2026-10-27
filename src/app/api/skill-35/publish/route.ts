@@ -8,6 +8,11 @@ import {
   assertTaskOwnedByCompany,
   assertPlannerSheetOwnedByCompany,
 } from '@/lib/social/company-context';
+import {
+  AWAITING_APPROVAL,
+  ensurePublishQueueApprovalColumns,
+  taskCampaignContext,
+} from '@/lib/social/publish-approval';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -52,6 +57,8 @@ function rowToItem(row: Record<string, unknown>): PublishQueueItem {
     run_id: row.run_id ? String(row.run_id) : null,
     requested_by: row.requested_by ? String(row.requested_by) : null,
     error: row.error ? String(row.error) : null,
+    campaign_id: row.campaign_id ? String(row.campaign_id) : null,
+    placement_id: row.placement_id ? String(row.placement_id) : null,
     created_at: String(row.created_at),
     updated_at: String(row.updated_at),
     started_at: row.started_at ? String(row.started_at) : null,
@@ -156,6 +163,15 @@ export async function POST(request: NextRequest) {
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
 
+  // C3 (PBB-917 / T-54) — a CAMPAIGN placement is enqueued as
+  // `awaiting_approval`, never `queued`. The dispatcher's claim query stays
+  // `status IN ('queued','retrying')`, so an unapproved placement is never
+  // claimed. `approve_campaign` flips the approved placements to `queued`
+  // inside its receipt transaction. A non-campaign publish is unchanged.
+  const campaignContext = taskCampaignContext(taskId);
+  const enqueueStatus = campaignContext.campaignId ? AWAITING_APPROVAL : 'queued';
+  ensurePublishQueueApprovalColumns();
+
   // F20: stamp the deterministic idempotency key AT ENQUEUE, the same
   // derivation the dispatcher uses (company + task + normalized topic +
   // sorted platforms). A duplicate delivery (same logical request, byte-
@@ -178,9 +194,13 @@ export async function POST(request: NextRequest) {
   try {
     db.prepare(
       `INSERT INTO publish_queue
-        (id, task_id, company_id, sheet_id, topic, platforms, schedule, status, requested_by, idempotency_key, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)`,
-    ).run(id, taskId, companyId, sheetId, topic, JSON.stringify(platforms), schedule, requestedBy, idempotencyKey, now, now);
+        (id, task_id, company_id, sheet_id, topic, platforms, schedule, status, requested_by,
+         idempotency_key, campaign_id, placement_id, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      id, taskId, companyId, sheetId, topic, JSON.stringify(platforms), schedule, enqueueStatus,
+      requestedBy, idempotencyKey, campaignContext.campaignId, campaignContext.placementId, now, now,
+    );
   } catch (insertErr) {
     const msg = String((insertErr as Error).message);
     if (!/UNIQUE/.test(msg)) throw insertErr;

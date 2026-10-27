@@ -23,7 +23,8 @@
  * SERVER-ONLY.
  */
 import { v4 as uuidv4 } from 'uuid';
-import { getDb, queryAll, queryOne, run } from '@/lib/db';
+import { getDb, queryAll, queryOne, run, transaction } from '@/lib/db';
+import { flipApprovedPlacementRows } from '@/lib/social/publish-approval';
 import { loadLifecycleEvents } from '@/lib/board/lifecycle-projection';
 import {
   ensureCampaignCompanyColumn,
@@ -371,21 +372,37 @@ export async function applyCampaignCommand(raw: unknown, companyId: string): Pro
   }
 
   try {
-    const receipt = recordReceipt({
-      command_id: command.command_id,
-      company_id: companyId,
-      campaign_id: campaignId,
-      action: command.action,
-      target_type: command.target_type,
-      target_id: command.target_id,
-      expected_revision: command.expected_revision,
-      applied_revision: decision.applied_revision,
-      state: 'applied',
-      refusal_code: null,
-      reason: command.purpose,
-      payload_json: payload,
-      submitted_at: command.submitted_at,
-      recorded_at: new Date().toISOString(),
+    // C3 (PBB-917 / T-54) — the receipt and the queue release are ONE
+    // transaction: an approved placement becomes claimable exactly when, and
+    // only when, its approval receipt commits. A crash cannot leave an approval
+    // recorded with nothing released, or a released row with no receipt.
+    const receipt = transaction(() => {
+      const applied = recordReceipt({
+        command_id: command.command_id,
+        company_id: companyId,
+        campaign_id: campaignId,
+        action: command.action,
+        target_type: command.target_type,
+        target_id: command.target_id,
+        expected_revision: command.expected_revision,
+        applied_revision: decision.applied_revision,
+        state: 'applied',
+        refusal_code: null,
+        reason: command.purpose,
+        payload_json: payload,
+        submitted_at: command.submitted_at,
+        recorded_at: new Date().toISOString(),
+      });
+      if (applied.state === 'applied' && decision.effect.kind === 'approve') {
+        flipApprovedPlacementRows({
+          companyId,
+          campaignId,
+          placements: decision.effect.payload.placements,
+          tasks,
+          publishRows,
+        });
+      }
+      return applied;
     });
     if (receipt.state === 'refused') {
       // Same command_id already recorded as refused → report that, never a

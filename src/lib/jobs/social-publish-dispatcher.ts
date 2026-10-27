@@ -60,6 +60,11 @@ import { latestExecution } from '@/lib/execution-attempts';
 import { throwIfJobLeaseLost } from '@/lib/jobs/job-lease';
 import { broadcast } from '@/lib/events';
 import { notifySystem } from '@/lib/notify';
+import { loadCampaignApprovalSnapshot } from '@/lib/campaigns/approval-store';
+import {
+  placementGateFromSnapshot,
+  unapprovedPlacementError,
+} from '@/lib/social/publish-approval';
 
 // ── Tunables (env-overridable, furnace-proof floors) ────────────────────────
 const MAX_ATTEMPTS = Math.max(
@@ -88,6 +93,7 @@ const BATCH_LIMIT = Math.max(1, parseInt(process.env.SOCIAL_PUBLISH_BATCH_LIMIT 
 
 /** The W0 contract states the queue row persists. */
 export type PublishQueueState =
+  | 'awaiting_approval'
   | 'queued'
   | 'running'
   | 'retrying'
@@ -123,7 +129,13 @@ interface PublishQueueRow {
   last_attempt_at: string | null;
   retry_at: string | null;
   overdue_since: string | null;
+  /** C3 (PBB-917): set for a campaign placement; null for an ordinary publish. */
+  campaign_id: string | null;
+  placement_id: string | null;
 }
+
+/** The label the owner sees for a campaign row parked before approval. */
+export const AWAITING_APPROVAL_STATE_LABEL = 'Waiting for your approval';
 
 /**
  * Read-side state derivation (F03 required outcome: "A stopped consumer
@@ -144,6 +156,9 @@ export function deriveQueueItemState(row: {
 }): PublishQueueState {
   const status = (row.status || 'queued').toLowerCase() as PublishQueueState;
   const now = row.now ?? new Date();
+  // C3 (PBB-917) — approval is a real waiting state, never overdue: the owner
+  // owes the next action, the consumer is not stopped.
+  if (status === 'awaiting_approval') return 'awaiting_approval';
   if (status === 'queued') {
     const ageMs = now.getTime() - new Date(row.created_at).getTime();
     if (ageMs > OVERDUE_MINUTES * 60_000) return 'overdue';
@@ -189,6 +204,57 @@ function parsePlatforms(raw: string): string[] {
 }
 
 /**
+ * C3 (PBB-917 / T-54) — INVALIDATED rollback.
+ *
+ * For every `queued` row that belongs to a campaign placement, re-read the
+ * campaign approval snapshot and put the row back to `awaiting_approval` when
+ * the placement is no longer APPROVED at its current fingerprint. Runs before
+ * the claim query in each tick, so a changed placement is never claimed under
+ * its previous approval. Returns the number of rows parked.
+ */
+export function requeueInvalidatedCampaignRows(nowIso: string = new Date().toISOString()): number {
+  let rows: PublishQueueRow[];
+  try {
+    rows = queryAll<PublishQueueRow>(
+      `SELECT * FROM publish_queue
+        WHERE status = 'queued' AND campaign_id IS NOT NULL
+        ORDER BY updated_at ASC LIMIT 100`,
+    ) as unknown as PublishQueueRow[];
+  } catch {
+    return 0; // pre-column box: no campaign rows exist to roll back
+  }
+  if (rows.length === 0) return 0;
+  const snapshots = new Map<string, ReturnType<typeof loadCampaignApprovalSnapshot>>();
+  let parked = 0;
+  for (const row of rows) {
+    const placementId = row.placement_id || row.task_id;
+    const campaignId = row.campaign_id;
+    if (!placementId || !campaignId) continue;
+    const key = `${row.company_id}::${campaignId}`;
+    if (!snapshots.has(key)) {
+      snapshots.set(key, loadCampaignApprovalSnapshot(campaignId, row.company_id));
+    }
+    const gate = placementGateFromSnapshot(snapshots.get(key) ?? null, placementId);
+    if (gate.approved) continue;
+    const result = run(
+      `UPDATE publish_queue
+          SET status = 'awaiting_approval', error = ?, lease_owner = NULL,
+              lease_expires_at = NULL, retry_at = NULL, updated_at = ?
+        WHERE id = ? AND status = 'queued'`,
+      [`approval_invalidated:${gate.state}:${gate.reason}`.slice(0, 500), nowIso, row.id],
+    );
+    if (result.changes === 1) {
+      parked++;
+      broadcast({
+        type: `publish_state:${row.company_id}`,
+        payload: { id: row.id, status: 'awaiting_approval' },
+      });
+    }
+  }
+  return parked;
+}
+
+/**
  * One consumer tick. Claims up to BATCH_LIMIT claimable rows and drives each
  * through ingest → dispatch → ack. Never throws (scheduler-safe): every
  * per-row failure is caught and recorded on the row.
@@ -203,6 +269,13 @@ export async function runSocialPublishDispatcherSweep(): Promise<{
 }> {
   const db = getDb();
   const nowIso = new Date().toISOString();
+
+  // ── C3 INVALIDATED ROLLBACK, before any claim ────────────────────────────
+  // A placement whose fingerprint changed after approval is INVALIDATED. Any
+  // of its rows that were already released back to `queued` go back to
+  // `awaiting_approval` BEFORE this tick can claim them, so an edit can never
+  // be published under an old approval.
+  requeueInvalidatedCampaignRows(nowIso);
 
   // ── LINK-FOLLOW first: rows already dispatched follow their canonical task ──
   const runningRows = queryAll<PublishQueueRow>(
@@ -270,6 +343,34 @@ export async function runSocialPublishDispatcherSweep(): Promise<{
       if (claim.changes !== 1) continue; // another worker won the row
 
       throwIfJobLeaseLost();
+
+      // ── C3 DEFENSE IN DEPTH ──────────────────────────────────────────────
+      // The claim query never selects `awaiting_approval`, so this is the
+      // second gate: an unapproved campaign row that still reached dispatch
+      // (approval revoked between the rollback and the claim) fails visibly and
+      // is never ingested or dispatched.
+      const placementId = row.placement_id || row.task_id;
+      if (row.campaign_id && placementId) {
+        const snapshot = loadCampaignApprovalSnapshot(row.campaign_id, row.company_id);
+        const gate = placementGateFromSnapshot(snapshot, placementId);
+        if (!gate.approved) {
+          const refusal = unapprovedPlacementError(placementId, gate.revision);
+          run(
+            `UPDATE publish_queue SET status = 'failed', error = ?, lease_owner = NULL,
+               lease_expires_at = NULL, completed_at = ?, updated_at = ? WHERE id = ?`,
+            [refusal, nowIso, nowIso, row.id],
+          );
+          failed++;
+          broadcast({ type: `publish_state:${row.company_id}`, payload: { id: row.id, status: 'failed' } });
+          try {
+            notifySystem(
+              `Skill 35 publish ${row.id} refused: ${refusal} (placement is ${gate.state}). Topic: "${row.topic}".`,
+              { agent: 'social-publish-dispatcher', action: 'publish_unapproved' },
+            );
+          } catch { /* best-effort */ }
+          continue;
+        }
+      }
 
       // ── INGEST: canonical task, company-bound, idempotent ────────────────
       const platforms = parsePlatforms(row.platforms);
@@ -471,6 +572,9 @@ export async function runSocialPublishDispatcherSweep(): Promise<{
 export async function runSocialPublishOverdueSweep(): Promise<{ overdue: number; requeued: number; exhausted: number }> {
   const now = new Date();
   const nowIso = now.toISOString();
+  // C3 — an invalidated campaign placement is parked BEFORE this sweep can
+  // requeue it as `retrying` (retrying IS claimable, so parking first matters).
+  requeueInvalidatedCampaignRows(nowIso);
   const rows = queryAll<PublishQueueRow>(
     `SELECT * FROM publish_queue WHERE status IN ('queued','running','retrying') ORDER BY created_at ASC LIMIT 100`,
   ) as unknown as PublishQueueRow[];
