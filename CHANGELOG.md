@@ -8,7 +8,7 @@
 - fix(health check) D6: with `exp_backoff_restart_delay` pm2 reports an app it stopped on a `stop_exit_codes` exit as `waiting restart` (restart count frozen), so a refusal that wrote no receipt (for example "no supported Node runtime") stayed UNKNOWN. `waiting restart` with `exit_code` in `stop_exit_codes` (list or scalar, as pm2 reports it) is now `stopped`, so the verdict is RED. A different exit code, or no stop codes, is unchanged.
 - fix(watchdog) D7: a stale rebuild lock was broken with `rmdir`, which cannot remove a lock that is a regular file, so a file at `rebuild.lock` (seen on a real box) blocked every rebuild permanently: `mkdir` and `rmdir` both failed on it. A stale file lock (older than 30 minutes) is now removed with `rm -f` before the retry; a fresh lock of either kind still holds, and a stale lock directory is broken as before.
 - note: after a stop on 78, pm2 shows `waiting restart` with a restart count that stops rising; a dashboard that reads `online`/`stopped` should expect that.
-- test: `tests/unit/watchdog-cc-rebuild-defects.test.sh` (fake curl / pm2 / BSD-style mktemp, run under macOS bash 3.2 and bash 5) — twenty-four checks across D1–D7, wired into `qc-cc.yml`. 18 fail / 6 pass before, 24 pass after.
+- test: `tests/unit/watchdog-cc-rebuild-defects.test.sh` (fake curl / pm2 / BSD-style mktemp, run under macOS bash 3.2 and bash 5) — twenty-four checks across D1–D7, wired into `qc-cc.yml`. 15 fail / 9 pass before, 24 pass after.
 
 ## [v7.6.126] — 2026-10-26 — release: oct-25 fix batch (l20–l24) stamped; release-hygiene docs restored
 
