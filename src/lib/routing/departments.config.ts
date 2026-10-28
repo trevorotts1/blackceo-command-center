@@ -1201,13 +1201,69 @@ export function writeVerticalDerivationReceipt(
 // ---------------------------------------------------------------------------
 
 /**
+ * Hint seeds for departments that are routable but are NOT part of the
+ * 26-department floor: they enrich a client workspace of that name (same as
+ * DEFAULT_DEPARTMENTS) and never join the fallback floor, so no department
+ * count, canonical set or doc figure changes. Matching is substring-based
+ * (keywordScore), so keep entries to phrases that cannot occur by accident:
+ * no bare 'ap', 'ar' or 'je'.
+ */
+export const SUPPLEMENTAL_DEPARTMENT_HINTS: DepartmentConfig[] = [
+  {
+    id: 'accounting',
+    name: 'Accounting',
+    purpose:
+      'Bookkeeping and the books: bank feed entries, journal entries, reconciliations, chart of accounts, payroll journal entries, QuickBooks Online cleanup, Bill.com bills, accounts payable entries, financial statements, audits of the books and Form 990 prep.',
+    keywords: [
+      'accounting',
+      'bookkeep',
+      'quickbooks',
+      'qbo',
+      'bank feed',
+      'bank-feed',
+      'bank transaction',
+      'journal entry',
+      'journal entries',
+      'reconcil',
+      'chart of accounts',
+      'general ledger',
+      'trial balance',
+      'payroll je',
+      'payroll journal',
+      'bill.com',
+      'accounts payable',
+      'duplicate transaction',
+      'duplicate cleanup',
+      'financial statement',
+      'audit of the books',
+      'form 990',
+      '990s',
+    ],
+    agentRoles: ['Accountant', 'Bookkeeper', 'Accounts Payable', 'Controller'],
+    priority: 8,
+  },
+];
+
+/**
+ * Legacy spellings whose dispatch_rules rows also apply to a canonical
+ * department. Accounting only: the starter SOP seed keyed its bookkeeping rule
+ * 'finance-accounting', which no 'accounting' workspace matched. Deliberately
+ * NOT every alias in canonical-slug.ts: that would switch on other
+ * departments' legacy SOP-seeded rules (e.g. 'webdev') and replace their seed
+ * keywords fleet-wide. Extend per department, on purpose.
+ */
+const RULE_SLUG_ALIASES: Record<string, readonly string[]> = {
+  accounting: ['finance-accounting', 'bookkeeping'],
+};
+
+/**
  * Build a lookup map from canonical slug → DEFAULT_DEPARTMENTS entry so we
  * can enrich purpose/keywords/agentRoles when the client names a workspace
  * that maps to a standard dept.
  */
 function buildDefaultMap(): Map<string, DepartmentConfig> {
   const m = new Map<string, DepartmentConfig>();
-  for (const d of DEFAULT_DEPARTMENTS) {
+  for (const d of [...DEFAULT_DEPARTMENTS, ...SUPPLEMENTAL_DEPARTMENT_HINTS]) {
     m.set(canonicalDeptSlug(d.id), d);
     m.set(d.name.toLowerCase().trim(), d);
   }
@@ -1445,13 +1501,14 @@ function queryDispatchRulesOverrides(
 ): { keywords: string[]; priority: number | null } | null {
   try {
     const canonicalForRules = canonicalDeptSlug(deptSlug) || canonicalDeptSlug(deptId) || deptSlug || deptId;
+    const ruleSlugs = [canonicalForRules, deptId, ...(RULE_SLUG_ALIASES[canonicalForRules] ?? [])];
     const row = db
       .prepare(
         `SELECT task_keywords, priority FROM dispatch_rules
-         WHERE department_slug = ? OR department_slug = ?
+         WHERE department_slug IN (${ruleSlugs.map(() => '?').join(',')})
          ORDER BY priority DESC LIMIT 1`,
       )
-      .get(canonicalForRules, deptId) as { task_keywords: string | null; priority: number | null } | undefined;
+      .get(...ruleSlugs) as { task_keywords: string | null; priority: number | null } | undefined;
 
     if (!row) return null;
 

@@ -40,6 +40,12 @@ export const DEPARTMENT_PROFILES: Record<string, DepartmentProfile> = {
     not: 'Not a bug in a payment automation (Healer or Bugs), not hiring a bookkeeper (General Task).',
     words: ['invoice', 'payment', 'refund', 'expenses', 'subscription', 'accountant', 'bill'],
   },
+  accounting: {
+    owns: 'Keeping the books: bookkeeping, bank feed entries, journal entries, reconciliations, chart of accounts, payroll journal entries, bills and accounts payable entries, ledger cleanup, financial statements and audits of the books.',
+    typical: ['categorize bank feed entries', 'post a journal entry', 'reconcile an account', 'QuickBooks Online (QBO) cleanup', 'remove duplicate transactions', 'Bill.com bills and payments', 'payroll journal entry', 'prepare financial statements', 'audit of the books', 'Form 990 prep'],
+    not: 'Not sending invoices, chasing late payers or setting up subscriptions (Billing / Finance), not a payment automation that is broken (Healer or Bugs), not hiring a bookkeeper (General Task).',
+    words: ['bookkeeping', 'bank feed', 'journal entry', 'reconcile', 'chart of accounts', 'qbo', 'quickbooks', 'bill.com', 'accounts payable', '990'],
+  },
   'customer-support': {
     owns: 'Helping existing customers and members: tickets, complaints, returns, FAQs, onboarding and check-ins with clients.',
     typical: ['answer support tickets', 'login problems', 'angry reviews', 'process a return', 'member FAQ', 'client onboarding checklist', 'check-in message to clients', 'thank-you cards to clients'],
