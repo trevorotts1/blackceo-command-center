@@ -6,6 +6,9 @@
 # Usage:
 #   bash scripts/ingest-task.sh "<title>" [department_slug] [description]
 #
+# Omit department_slug to let the router pick the department. Passing
+# "general-task" is an EXPLICIT request for General Task and is never re-routed.
+#
 # Prints the ingest response (task_id on success); non-zero on failure.
 # Generic form of a per-box helper found on a client Mac (2026-09-18): the
 # checkout directory and port are derived, never hardcoded, so the same file
@@ -19,13 +22,13 @@ SECRET="$(sed -n -E 's/^WEBHOOK_SECRET=//p' "$ENV_FILE" | head -1 | sed -E "s/^[
 PORT="$(sed -n -E 's/^(CC_PORT|PORT)=//p' "$ENV_FILE" | head -1 | tr -d '"')"; PORT="${PORT:-4000}"
 
 TITLE="${1:?title required}"
-SLUG="${2:-general-task}"
+SLUG="${2:-}"
 DESC="${3:-}"
 
 BODY=$(python3 -c "
 import json, sys, time
 print(json.dumps({
-  'department_slug': sys.argv[1],
+  'department_slug': sys.argv[1] or None,
   'title': sys.argv[2],
   'description': sys.argv[3] or None,
   'source': 'main-agent-cli',

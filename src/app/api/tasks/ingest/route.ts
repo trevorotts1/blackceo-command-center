@@ -9,7 +9,8 @@ import type { PersonaBundle } from '@/lib/types';
 import { routeTask } from '@/lib/routing/department-router';
 import type { TaskPriority } from '@/lib/types';
 import { notifyOwnerSchemaError } from '@/lib/owner-reports';
-import { getSelfClient } from '@/lib/clients';
+import { isWorkforceProvisioned } from '@/lib/routing/workforce-provisioned';
+import { INGEST_PROVENANCE_HEADER, REQUESTED_DEPARTMENT_LINE } from '@/lib/routing/catch-all-policy';
 // WEBCHAT-REQUESTER-ROUTE — validates a candidate gateway session key at the
 // front door so only an ADDRESSABLE key is ever stamped as a requester address.
 import { normalizeRequesterSessionKey } from '@/lib/requester-session';
@@ -290,66 +291,6 @@ interface IngestPayload {
 }
 
 const VALID_PRIORITIES = new Set<TaskPriority>(['low', 'medium', 'high', 'critical']);
-
-/**
- * W3.1 — INTERVIEW-COMPLETED ROUTING GATE (spec §3).
- *
- * "Task routing applies ONLY to owners who COMPLETED the interview (have a
- * Zero Human Company with roles+SOPs). Not-completed = exempt (no routing
- * obligation)." A box is "workforce-provisioned" when it has BOTH:
- *
- *   1. A completed AI-Workforce interview (DB-backed self-client flag), AND
- *   2. Materialized, non-shell departments (per N37): at least one department
- *      workspace — not the CEO/master or the general catch-all — that has a
- *      live, non-master agent. A fresh/shell install has only the CEO shell and
- *      no specialist roster, so it is exempt: there is nowhere to route into.
- *
- * Fail-safe on the interview flag: when the self-client row is ABSENT (a legacy
- * box that predates the clients table) we cannot read the flag, so we defer to
- * the materialized-departments signal alone rather than wrongly exempting a box
- * that is clearly built out. When the row EXISTS we honour its flag exactly.
- *
- * When NOT provisioned, the CEO answers directly with NO routing obligation —
- * the ingest still captures the task (nothing is lost) but does NOT force it
- * through automatic department classification.
- */
-function isWorkforceProvisioned(companyId: string): { provisioned: boolean; reason: string } {
-  // (2) Materialized, non-shell departments with a live specialist agent.
-  const materialized = queryOne<{ n: number }>(
-    `SELECT COUNT(DISTINCT w.id) AS n
-       FROM workspaces w
-       JOIN agents a
-         ON a.workspace_id = w.id
-        AND a.is_master = 0
-        AND a.status != 'offline'
-      WHERE w.company_id = ? AND lower(w.slug) NOT IN
-              ('master-orchestrator', 'ceo', 'dept-ceo',
-               'general-task', 'dept-general-task', 'general')
-        AND lower(w.name) NOT IN
-              ('ceo', 'master orchestrator', 'general task', 'general')`,
-    [companyId],
-  );
-  const hasMaterializedDepts = (materialized?.n ?? 0) > 0;
-
-  // (1) Interview completion — DB-backed self-client flag (null when no row).
-  let interviewComplete: boolean | null = null;
-  try {
-    const self = getSelfClient();
-    interviewComplete = self ? self.interview_complete : null;
-  } catch {
-    // clients table absent / unreadable on a legacy box — treat as unknown.
-    interviewComplete = null;
-  }
-
-  // Unknown interview flag → defer to the materialized-departments signal.
-  const interviewOk = interviewComplete === null ? hasMaterializedDepts : interviewComplete;
-  const provisioned = hasMaterializedDepts && interviewOk;
-
-  const reason =
-    `interview=${interviewComplete === null ? 'unknown' : interviewComplete}, ` +
-    `materialized_depts=${hasMaterializedDepts}`;
-  return { provisioned, reason };
-}
 
 export async function POST(request: NextRequest) {
   try {
@@ -1043,11 +984,18 @@ export async function POST(request: NextRequest) {
     // An interview-incomplete / shell box is EXEMPT: the task is still captured,
     // but we do NOT force it through department classification.
     const provisioning = isWorkforceProvisioned(ingestCompanyId);
+    // True when capture could not route a bare card and the General Task
+    // placement below is a FALLBACK, not a request. createTaskCore parks such a
+    // card under the fallback reason instead of reading the backfilled
+    // `general-task` department as an explicit tag, and the intake sweep
+    // re-routes it once the box can route.
+    let captureFallback = false;
     if (!provisioning.provisioned) {
       console.log(
         `[INGEST] Routing gate: box NOT workforce-provisioned (${provisioning.reason}) — ` +
           `EXEMPT from forced routing. Capturing "${title}" without department classification.`,
       );
+      captureFallback = !departmentSlug && !pinnedAgentId && !routingHoldReason;
     }
 
     // ── Auto-route bare tasks (no department_slug) ────────────────────────────
@@ -1094,6 +1042,7 @@ export async function POST(request: NextRequest) {
         } else {
           // routeTask returned null — no confident match; fall back to
           // 'general-task' slug so the task is never left unrouted in backlog.
+          captureFallback = true;
           const generalWs = queryOne<{ id: string }>(
             `SELECT id FROM workspaces
               WHERE company_id = ? AND archived_at IS NULL
@@ -1118,6 +1067,7 @@ export async function POST(request: NextRequest) {
       } catch (routeErr) {
         // Non-fatal: log and continue with the CEO/default workspace already resolved above.
         console.warn('[INGEST] Auto-route failed (non-fatal), keeping CEO/default workspace:', (routeErr as Error).message);
+        captureFallback = true;
       }
     }
 
@@ -1125,7 +1075,7 @@ export async function POST(request: NextRequest) {
     // intentionally leave the agent FK columns NULL.
     const provenanceLines: string[] = [];
     if (source) provenanceLines.push(`Source: ${source}`);
-    if (resolvedDeptSlug) provenanceLines.push(`Requested department: ${resolvedDeptSlug}`);
+    if (resolvedDeptSlug) provenanceLines.push(`${REQUESTED_DEPARTMENT_LINE} ${resolvedDeptSlug}`);
     if (persona) provenanceLines.push(`From persona: ${persona}`);
     if (externalSessionId) provenanceLines.push(`Session: ${externalSessionId}`);
     // FIX 56 (W4.1) — fold the caller's context_refs into the description as a
@@ -1143,7 +1093,7 @@ export async function POST(request: NextRequest) {
     const effectiveSourceRef = resolveIngestSourceRef(sourceRef, idempotencyKey);
     if (effectiveSourceRef) provenanceLines.push(`Ref: ${effectiveSourceRef}`);
     const provenanceBlock = provenanceLines.length
-      ? `\n\n— Captured via task-ingest —\n${provenanceLines.join('\n')}`
+      ? `\n\n${INGEST_PROVENANCE_HEADER}\n${provenanceLines.join('\n')}`
       : '';
     const finalDescription = `${description ?? ''}${provenanceBlock}`.trim() || undefined;
 
@@ -1188,6 +1138,7 @@ export async function POST(request: NextRequest) {
               requester_chat_id: requesterChatId ?? null,
               requester_session_key: requesterSessionKey ?? null,
               humanDoorId: requesterChatId ? 'telegram-ingest' : null,
+              capture_fallback: captureFallback,
               route_lane: lane,
               effort_steps: effortSteps,
               depts_touched: deptsTouched,
@@ -1243,6 +1194,7 @@ export async function POST(request: NextRequest) {
         idempotency_payload_hash: requestFingerprint,
         idempotency_company_id: ingestCompanyId,
         routing_hold_reason: routingHoldReason,
+        capture_fallback: captureFallback,
         persona_bundle: producerBundle,
         // INGEST-10: stamp the immutable tasks.source column from this
         // VALIDATED ingest source (line ~435: trimmed string or undefined —
