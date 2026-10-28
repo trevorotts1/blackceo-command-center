@@ -125,11 +125,20 @@ test('a single-term bookkeeping task puts Accounting, with its profile, in front
   }
 });
 
+/** A box whose accounting workspace uses the 'bookkeeping' spelling. */
+let bookkeepingBox: { company: string; worker: string } | undefined;
+function bookkeeping() {
+  if (!bookkeepingBox) {
+    const co = company('bookkeeping-box');
+    bookkeepingBox = { company: co, worker: department(co, 'bookkeeping', 'Bookkeeping') };
+  }
+  return bookkeepingBox;
+}
+
 test('a workspace using a bookkeeping spelling gets the same seed and routes the same way', async () => {
-  const co = company('bookkeeping-box');
-  const worker = department(co, 'bookkeeping', 'Bookkeeping');
-  const routing = await routedTo(co, 'Categorize the bank feed entries and reconcile September');
-  assert.equal(routing!.agentId, worker, routing!.reason);
+  const b = bookkeeping();
+  const routing = await routedTo(b.company, 'Categorize the bank feed entries and reconcile September');
+  assert.equal(routing!.agentId, b.worker, routing!.reason);
 });
 
 test('the accounting profile exists under every spelling and says what it does not handle', () => {
@@ -152,18 +161,17 @@ test('the 26-department floor and canonical set are unchanged', () => {
 });
 
 test("the 'finance-accounting' dispatch rule applies to accounting spellings, and only those", () => {
-  const co = company('rule-box');
-  db.run('INSERT INTO workspaces(id,name,slug,company_id) VALUES(?,?,?,?)', ['finance-accounting', 'Finance Accounting', 'finance-accounting', co]);
-  db.run('INSERT INTO workspaces(id,name,slug,company_id) VALUES(?,?,?,?)', ['web-development', 'Web Development', 'web-development', co]);
+  const b = bookkeeping();
+  const other = company('rule-box');
+  db.run('INSERT INTO workspaces(id,name,slug,company_id) VALUES(?,?,?,?)', ['web-development', 'Web Development', 'web-development', other]);
   const ruleIds = [randomUUID(), randomUUID()];
   try {
     db.run('INSERT INTO dispatch_rules(id,department_slug,task_keywords,priority) VALUES(?,?,?,?)', [ruleIds[0], 'finance-accounting', 'zebra crossing', 9]);
     db.run('INSERT INTO dispatch_rules(id,department_slug,task_keywords,priority) VALUES(?,?,?,?)', [ruleIds[1], 'webdev', 'zebra crossing', 9]);
-    const loaded = config.loadDepartments(co);
-    const accounting = loaded.find((d) => d.id === 'finance-accounting')!;
-    assert.deepEqual(accounting.keywords, ['zebra crossing'], 'the rule keyed finance-accounting reaches the accounting workspace');
+    const accounting = config.loadDepartments(b.company).find((d) => d.id === 'bookkeeping')!;
+    assert.deepEqual(accounting.keywords, ['zebra crossing'], 'the rule keyed finance-accounting reaches the bookkeeping workspace');
     assert.equal(accounting.priority, 9);
-    const web = loaded.find((d) => d.id === 'web-development')!;
+    const web = config.loadDepartments(other).find((d) => d.id === 'web-development')!;
     assert.ok(!web.keywords.includes('zebra crossing'), "a legacy 'webdev' rule is not switched on for other departments");
   } finally {
     for (const id of ruleIds) db.run('DELETE FROM dispatch_rules WHERE id=?', [id]);
