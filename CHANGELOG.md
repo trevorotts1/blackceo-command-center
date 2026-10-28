@@ -1,3 +1,13 @@
+## [Unreleased] — 2026-10-28 — fix(routing): the accounting department gets a profile, seed keywords and slug aliases
+
+- fix(routing): a box with an `accounting` workspace sent bank-feed entries, journal entries, QBO cleanup, Bill.com, audits and 990s to General Task ("Model pick chose General Task: the task fits no listed department"). `accounting` is not in the 26-department floor, so it had no seed keywords and no profile, and the only bookkeeping dispatch rule in the SOP seed was keyed `finance-accounting`, which no `accounting` workspace matched.
+- feat(profile): `DEPARTMENT_PROFILES.accounting` (owns, typical work, what it does not handle, JEV words) so the model pick and the decision engine are told what the department handles. Invoices, collections and subscriptions stay with Billing / Finance.
+- feat(seed): `SUPPLEMENTAL_DEPARTMENT_HINTS` in `departments.config.ts` seeds accounting keywords (bookkeeping, QuickBooks/QBO, bank feed, journal entry, reconciliation, chart of accounts, payroll JE, Bill.com, accounts payable, duplicate cleanup, financial statements, audit of the books, Form 990). It enriches a workspace of that name and does NOT join `DEFAULT_DEPARTMENTS`: the 26-department floor, `CANONICAL_SLUGS` and the doc counts are unchanged. Promoting accounting to a canonical 27th department is a separate product decision.
+- fix(alias): `finance-accounting` and `bookkeeping` resolve to `accounting` in `canonicalDeptSlug`; `billing` / `billing-finance` is untouched.
+- fix(dispatch rules): an accounting workspace also reads `dispatch_rules` rows keyed `finance-accounting` or `bookkeeping`. Deliberately NOT every alias: widening it fleet-wide would switch on other departments' legacy SOP-seeded rules (for example `webdev`) and replace their seed keywords.
+- note: the keyword picker still needs two hits, so a title with one bookkeeping term (for example "Prepare the Form 990 workpapers") is decided by the model pick, which now sees Accounting and its profile as a candidate.
+- test: `tests/unit/accounting-department-routing.test.ts` — seven cases through the real router and department loader. 5 fail / 2 pass before, 7 pass after.
+
 ## [v7.6.126] — 2026-10-26 — release: oct-25 fix batch (l20–l24) stamped; release-hygiene docs restored
 
 - chore(release): the oct-25 fix batch (l20 repository card, l21 cc-deploy DB/remote guards, l22 presentation-engine canonical-source verification, l23 context-pack dependency blocking, l24 build-recorded version) landed 2026-10-25 with no release cut — this entry and the v7.6.126 stamp close that gap. All five stamp locations agree at v7.6.126; annotated tag minted on this commit.
