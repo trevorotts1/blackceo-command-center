@@ -115,7 +115,7 @@ OUT="$(hc_healthy FAKE_MKTEMP_FAIL=1)"; RC=$?
 # ── D6 ───────────────────────────────────────────────────────────────────────
 echo "D6 waiting restart on a stop exit code"
 waiting() {  # $1 exit_code  $2 stop_exit_codes JSON
-  printf '[{"name":"blackceo-command-center","pm_id":0,"pm2_env":{"name":"blackceo-command-center","status":"waiting restart","exit_code":%s,"stop_exit_codes":%s,"args":"--port %s"}}]' "$1" "$2" "$PORT"
+  printf '[{"name":"blackceo-command-center","pm_id":0,"pm2_env":{"name":"blackceo-command-center","status":"waiting restart","pm_uptime":1,"exit_code":%s,"stop_exit_codes":%s,"args":"--port %s"}}]' "$1" "$2" "$PORT"
 }
 hc_down() { env PATH="$WORK/bin-pm2:$PATH" FAKE_PM2_LIST="$(waiting "$1" "$2")" timeout 60 bash "$WORK/app/scripts/cc-health-check.sh" --port "$PORT" --json-only --canonical-dir "$WORK/app" 2>/dev/null; }
 for codes in '[78]' '78'; do
@@ -125,9 +125,9 @@ for codes in '[78]' '78'; do
     || bad "D6: stop_exit_codes=$codes rc=$RC $(printf '%s' "$OUT" | head -c 200)"
 done
 OUT="$(hc_down 1 '[78]')"; RC=$?
-[[ $RC -eq 3 ]] && ok "D6: waiting restart after a different exit code stays UNKNOWN" || bad "D6: exit 1 rc=$RC"
+[[ $RC -eq 3 && "$OUT" != *'startup_grace'* ]] && ok "D6: waiting restart after a different exit code stays UNKNOWN" || bad "D6: exit 1 rc=$RC"
 OUT="$(hc_down 78 '[]')"; RC=$?
-[[ $RC -eq 3 ]] && ok "D6: waiting restart with no stop_exit_codes stays UNKNOWN" || bad "D6: no stop codes rc=$RC"
+[[ $RC -eq 3 && "$OUT" != *'startup_grace'* ]] && ok "D6: waiting restart with no stop_exit_codes stays UNKNOWN" || bad "D6: no stop codes rc=$RC"
 
 # ── watchdog fixtures ────────────────────────────────────────────────────────
 cp "$REPO_ROOT/scripts/watchdog-cc.sh" "$WORK/cc/scripts/"
