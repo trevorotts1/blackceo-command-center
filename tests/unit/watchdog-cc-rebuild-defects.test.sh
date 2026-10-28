@@ -2,7 +2,7 @@
 #
 # watchdog-cc-rebuild-defects.test.sh
 #
-# Six defects that kept the watchdog and the stale-build rebuild from acting:
+# Seven defects that kept the watchdog and the stale-build rebuild from acting:
 #
 #   D1  cc-health-check.sh: `mktemp /tmp/pm2_raw_XXXXXX.json`. BSD/macOS mktemp only
 #       randomizes a template that ENDS in the Xs, so a suffixed template is a literal
@@ -21,6 +21,8 @@
 #   D6  cc-health-check.sh: with exp_backoff_restart_delay pm2 reports an app it stopped
 #       on a stop_exit_codes exit as "waiting restart", which never read as stopped, so
 #       a refusal that wrote no receipt stayed UNKNOWN.
+#   D7  watchdog-cc.sh: a stale rebuild lock was broken with `rmdir`, which cannot remove a
+#       lock that is a regular file, so that lock blocked every rebuild permanently.
 #
 # Fixture-only: fake curl / pm2 / mktemp on PATH, copies of the scripts in a temp dir.
 # Nothing on this machine is started, stopped or rebuilt.
@@ -192,6 +194,25 @@ watchdog 0 "/usr/bin:/bin" >/dev/null
 : > "$DEPLOY_LOG"
 watchdog 1 "/usr/bin:/bin" >/dev/null
 grep -q '^ARGS=' "$DEPLOY_LOG" && ok "D2: the next stale build gets its own rebuild" || bad "D2: no rebuild after recovery"
+
+# ── D7 ───────────────────────────────────────────────────────────────────────
+echo "D7 a stale rebuild lock that is a regular file"
+d7() {  # $1 = lock mtime (touch -t), $2 = file|dir ; prints the deploy log line count
+  rm -rf "$WORK/state/rebuild.lock"; rm -f "$WORK/state/"*.json; : > "$DEPLOY_LOG"
+  if [[ "$2" == "file" ]]; then : > "$WORK/state/rebuild.lock"; else mkdir "$WORK/state/rebuild.lock"; fi
+  touch -t "$1" "$WORK/state/rebuild.lock"
+  watchdog 1 "/usr/bin:/bin" > "$WORK/d7.out"
+  grep -c '^ARGS=' "$DEPLOY_LOG" 2>/dev/null || true
+}
+[[ "$(d7 202001010000 file)" == "1" && ! -e "$WORK/state/rebuild.lock" ]] \
+  && ok "D7: a stale lock that is a regular file is removed and the rebuild runs (lock released after)" \
+  || bad "D7: stale file lock blocked the rebuild: $(grep -o 'REBUILD[^\n]*' "$WORK/d7.out" | head -2)"
+[[ "$(d7 202001010000 dir)" == "1" ]] \
+  && ok "D7: a stale lock directory is still broken and the rebuild runs" || bad "D7: stale directory lock blocked the rebuild"
+[[ "$(d7 "$(date +%Y%m%d%H%M)" file)" == "0" ]] && grep -q 'another attempt holds the lock' "$WORK/d7.out" \
+  && ok "D7: control: a fresh lock, file or directory, still holds (no second rebuild in flight)" || bad "D7: control: a fresh file lock did not hold"
+[[ "$(d7 "$(date +%Y%m%d%H%M)" dir)" == "0" ]] && ok "D7: control: a fresh lock directory still holds" || bad "D7: control: a fresh lock directory did not hold"
+rm -rf "$WORK/state/rebuild.lock"
 
 # ── D4 ───────────────────────────────────────────────────────────────────────
 echo "D4 pm2 switch refreshes stop_exit_codes"

@@ -424,7 +424,13 @@ try:
 except Exception:
     print(0)" "$REBUILD_LOCK" 2>/dev/null || echo 0)
             if [[ "$LOCK_AGE" -gt 1800 ]]; then
-              rmdir "$REBUILD_LOCK" 2>/dev/null || true
+              # rmdir cannot remove a lock that is a regular file (a stray touch,
+              # a restore, another tool), so that lock blocked every rebuild
+              # forever: mkdir fails on it, rmdir fails on it, and the retry below
+              # failed too. A stale file lock is removed the same way.
+              if [[ -f "$REBUILD_LOCK" ]]; then rm -f "$REBUILD_LOCK" 2>/dev/null || true
+              else rmdir "$REBUILD_LOCK" 2>/dev/null || true
+              fi
               mkdir "$REBUILD_LOCK" 2>/dev/null || { printf '[watchdog-cc] REBUILD: another attempt holds the lock (stale lock could not be broken)\n' >&2; LOCKED=1; }
             else
               printf '[watchdog-cc] REBUILD: another attempt holds the lock — skipping (one rebuild at a time)\n' >&2
