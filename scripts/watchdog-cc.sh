@@ -60,6 +60,23 @@
 
 set -uo pipefail
 
+# cron hands this script PATH=/usr/bin:/bin, where `bash` is macOS's 3.2 and
+# atomic-deploy.sh (bash 4+) refuses to run, so the rebuild below died on every
+# cron-driven box. Put the Homebrew dirs ahead of the system dirs, but behind
+# anything the caller already placed first (a test's fake pm2 must still win).
+_wd_path=""; _wd_inserted=0; _wd_old_ifs="$IFS"; IFS=:
+read -r -a _wd_parts <<< "$PATH"
+IFS="$_wd_old_ifs"
+for _wd_d in ${_wd_parts[@]+"${_wd_parts[@]}"}; do
+  if [[ "$_wd_inserted" -eq 0 && ( "$_wd_d" == /usr/bin || "$_wd_d" == /bin ) ]]; then
+    _wd_path="${_wd_path:+$_wd_path:}/opt/homebrew/bin:/usr/local/bin"; _wd_inserted=1
+  fi
+  _wd_path="${_wd_path:+$_wd_path:}$_wd_d"
+done
+[[ "$_wd_inserted" -eq 1 ]] || _wd_path="${_wd_path:+$_wd_path:}/opt/homebrew/bin:/usr/local/bin"
+export PATH="$_wd_path"
+unset _wd_path _wd_inserted _wd_old_ifs _wd_parts _wd_d
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HEALTH_CHECK="${SCRIPT_DIR}/cc-health-check.sh"
 
@@ -89,10 +106,13 @@ WATCHDOG_STATE_DIR="${WATCHDOG_STATE_DIR:-${CC_ROOT_DEFAULT}/.cc-state}"
 WATCHDOG_MIN_FREE_MB="${WATCHDOG_MIN_FREE_MB:-2048}"
 WATCHDOG_REBUILD_BACKOFF_BASE="${WATCHDOG_REBUILD_BACKOFF_BASE:-300}"
 WATCHDOG_REBUILD_MAX_ATTEMPTS="${WATCHDOG_REBUILD_MAX_ATTEMPTS:-3}"
-# Authorized rebuild command (overridable for tests). Default is the canonical
-# atomic deploy; it must be a REBUILD, never a bare `pm2 start` of the same
-# stale tree (CC-H1: "never repeatedly start the unchanged build").
-WATCHDOG_REBUILD_CMD="${WATCHDOG_REBUILD_CMD:-bash scripts/atomic-deploy.sh}"
+# Authorized rebuild command (overridable for tests). Left empty here: the
+# default is the canonical atomic deploy, built where CC_DIR is known so it can
+# pass --app-dir (a bare run defaults to $HOME/projects/command-center, which is
+# the wrong tree on any box installed elsewhere). It must be a REBUILD, never a
+# bare `pm2 start` of the same stale tree (CC-H1: "never repeatedly start the
+# unchanged build").
+WATCHDOG_REBUILD_CMD="${WATCHDOG_REBUILD_CMD:-}"
 # ISSUE-04 scheduler-stall restart budget. Deliberately separate knobs from the
 # rebuild budget above: a restart is far cheaper than a rebuild, but it is also
 # the action most likely to be wrong, so it stays bounded and backed off.
@@ -304,6 +324,11 @@ if [[ "$RESULT_EXIT" -eq 0 ]]; then
       state_set "$SCHED_STATE" scheduler_recovered_at "$TS"
       printf '[watchdog-cc] SCHEDULER: sweeps are ticking again; restart budget reset for the next incident\n' >&2
     fi
+    # The rebuild budget is per incident too. Left alone, rebuild_attempts is a
+    # LIFETIME cap: after three rebuilds over a box's whole life the watchdog
+    # refuses every later one ("human review required") even though each
+    # earlier incident was verified GREEN.
+    state_set "$REBUILD_STATE" rebuild_attempts 0
     # Refusal receipt resolution on verified recovery is the health check's
     # job (it verifies build digest + online state); the watchdog only
     # archives its own incident bookkeeping here.
@@ -424,9 +449,10 @@ except Exception: print('yes')" "$REBUILD_STATE" "$WATCHDOG_REBUILD_MAX_ATTEMPTS
               state_set "$REBUILD_STATE" last_rebuild_at "$NOW"
               state_set "$REBUILD_STATE" rebuild_incident "$KEY"
               printf '[watchdog-cc] REBUILD: authorized atomic rebuild attempt %s/%s starting (locked, disk preflight passed: %sMB free)\n' "$((IN_ATTEMPTS + 1))" "$WATCHDOG_REBUILD_MAX_ATTEMPTS" "${FREE_MB:-?}" >&2
+              REBUILD_CMD="${WATCHDOG_REBUILD_CMD:-bash scripts/atomic-deploy.sh --app-dir $(printf '%q' "$CC_DIR")}"
               (
                 cd "$CC_DIR" || exit 1
-                bash -c "$WATCHDOG_REBUILD_CMD"
+                bash -c "$REBUILD_CMD"
               ) >> "$WATCHDOG_STATE_DIR/rebuild.log" 2>&1 || \
                 printf '[watchdog-cc] REBUILD: attempt %s FAILED (see %s/rebuild.log) — no further automatic attempts until backoff window; human review after cap\n' "$((IN_ATTEMPTS + 1))" "$WATCHDOG_STATE_DIR" >&2
               rmdir "$REBUILD_LOCK" 2>/dev/null || true

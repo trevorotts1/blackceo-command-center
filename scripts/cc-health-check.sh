@@ -383,6 +383,21 @@ for a in apps:
                     dport = str(v); break
     if dport == port or (not dport and name.lower() == target.lower()):
         st = env.get('status') or ''
+        # With exp_backoff_restart_delay pm2 reports an app it STOPPED on a
+        # stop_exit_codes exit as "waiting restart" (God.js sets that status
+        # before it decides not to restart), so a refusal (exit 78) that wrote
+        # no receipt never read as stopped. It is stopped: pm2 will not start it.
+        if st == 'waiting restart':
+            codes = env.get('stop_exit_codes')
+            codes = [] if codes is None else (codes if isinstance(codes, list) else [codes])
+            stop = set()
+            for c in codes:
+                try: stop.add(int(c))
+                except (TypeError, ValueError): pass
+            try: last = int(env.get('exit_code'))
+            except (TypeError, ValueError): last = None
+            if last is not None and last in stop:
+                st = 'stopped'
         pm_id = a.get('pm_id')
         rt = env.get('pm_uptime') or 0
         uptime = max(0, int(time.time() * 1000) - int(rt)) if rt else 0
@@ -666,18 +681,28 @@ else
   # Write pm2 output to a temp file rather than piping it to Python's stdin
   # (a heredoc on the same process would bind stdin first, causing
   # sys.stdin.read() to return '' — the root cause fixed in REDO #2).
-  _J=$(mktemp /tmp/pm2_raw_XXXXXX.json)
-  _E=$(mktemp /tmp/pm2_err_XXXXXX.txt)
+  # No suffix after the XXXXXX: BSD/macOS mktemp only randomizes a template that
+  # ENDS in the Xs, so "XXXXXX.json" creates that literal name once and every
+  # later run gets "File exists" (empty path, pm2 unreadable, verdict UNKNOWN,
+  # watchdog never acts). Same template shape as atomic-deploy.sh.
+  _J=$(mktemp "${TMPDIR:-/tmp}/pm2_raw_XXXXXX" 2>/dev/null) || _J=""
+  _E=$(mktemp "${TMPDIR:-/tmp}/pm2_err_XXXXXX" 2>/dev/null) || _E=""
   PM2_READ_FAIL=""
-  # A pm2 that cannot answer (daemon mid-restart during the deploy's pm2
-  # switch) is a measurement that could not be taken, NOT "no app": record it
-  # as INDETERMINATE (exit 3, retried by atomic-deploy), never as app_count 0.
-  pm2 jlist 2>"$_E" > "$_J" || { PM2_READ_FAIL="pm2 jlist failed: $(head -c 300 "$_E" | tr '\n"\\' '   ')"; echo "[]" > "$_J"; }
-  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   _PM2_RC=0
-  PM2_JSON=$(python3 -s "$SCRIPT_DIR/pm2-analyze-cc.py" \
-    --port "$PORT" --app-name "$PM2_APP_NAME" \
-    ${CANONICAL_DIR:+--canonical-dir "$CANONICAL_DIR"} < "$_J" 2>"$_E") || _PM2_RC=$?
+  if [[ -z "$_J" || -z "$_E" ]]; then
+    # Could not stage the read: a measurement that could not be taken, not "no app".
+    PM2_READ_FAIL="mktemp failed: cannot stage the pm2 read in ${TMPDIR:-/tmp}"
+    PM2_JSON=""
+  else
+    # A pm2 that cannot answer (daemon mid-restart during the deploy's pm2
+    # switch) is a measurement that could not be taken, NOT "no app": record it
+    # as INDETERMINATE (exit 3, retried by atomic-deploy), never as app_count 0.
+    pm2 jlist 2>"$_E" > "$_J" || { PM2_READ_FAIL="pm2 jlist failed: $(head -c 300 "$_E" | tr '\n"\\' '   ')"; echo "[]" > "$_J"; }
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    PM2_JSON=$(python3 -s "$SCRIPT_DIR/pm2-analyze-cc.py" \
+      --port "$PORT" --app-name "$PM2_APP_NAME" \
+      ${CANONICAL_DIR:+--canonical-dir "$CANONICAL_DIR"} < "$_J" 2>"$_E") || _PM2_RC=$?
+  fi
   # The analyzer prints {"error":...} (exit 0) when it cannot parse pm2's
   # output; a crash or empty stdout is the same class. All are indeterminate.
   if [[ -z "$PM2_READ_FAIL" && ( "$_PM2_RC" -ne 0 || -z "$PM2_JSON" ) ]]; then
@@ -688,7 +713,7 @@ else
   if [[ -n "$PM2_READ_FAIL" ]]; then
     PM2_JSON="{\"error\":\"${PM2_READ_FAIL//\"/\'}\",\"indeterminate\":true,\"app_count\":0,\"crash_loopers\":[],\"db_path_set\":false,\"cwd_ok\":false,\"null_cwd_count\":0,\"other_cc_apps\":[],\"other_cc_count\":0}"
   fi
-  rm -f "$_J" "$_E"
+  rm -f ${_J:+"$_J"} ${_E:+"$_E"}
 
   PM2_COUNT=$(printf '%s' "$PM2_JSON" | py "d.get('app_count',0)" 0)
   if [[ "$(printf '%s' "$PM2_JSON" | py "'true' if d.get('pm2_version_mismatch') else 'false'" false)" == "true" ]]; then
@@ -815,14 +840,14 @@ fi
 # URL that is unreachable is still UNKNOWN below.
 CF_PASS="skip"; CF_INDET=false; CF_DETAIL="CC_PUBLIC_URL not set in the checker's environment — this row is a skip (row 27: N/A); makes no claim about the box's own configuration (set CC_PUBLIC_URL in the checker's env to probe the tunnel)"
 if [[ -n "$PUBLIC_URL" ]]; then
-  _CF=$(mktemp /tmp/cf_probe_XXXXXX.html)
+  _CF=$(mktemp "${TMPDIR:-/tmp}/cf_probe_XXXXXX" 2>/dev/null) || _CF=""
   # Capture BOTH the status code and the redirect target (Location resolved to an
   # absolute URL) so an in-app interview-lock 302 can be told apart from a genuine
   # off-origin CF Access login redirect. --max-redirs 0 keeps CF login-redirects
   # visible as a 3xx rather than silently followed.
-  CF_WO=$(curl -s --max-time 15 --max-redirs 0 -w '%{http_code} %{redirect_url}' -o "$_CF" "$PUBLIC_URL" 2>/dev/null || echo "000 ")
+  CF_WO=$(curl -s --max-time 15 --max-redirs 0 -w '%{http_code} %{redirect_url}' -o "${_CF:-/dev/null}" "$PUBLIC_URL" 2>/dev/null || echo "000 ")
   CF_HTTP="${CF_WO%% *}"; CF_LOC="${CF_WO#* }"
-  CF_BODY=$(cat "$_CF" 2>/dev/null || echo ""); rm -f "$_CF"
+  CF_BODY=$(cat "${_CF:-/dev/null}" 2>/dev/null || echo ""); rm -f ${_CF:+"$_CF"}
   if   [[ "$CF_HTTP" == "000" ]]; then CF_INDET=true; CF_DETAIL="CF tunnel unreachable (row 27: UNKNOWN)"
   # 2026-09-18: HTTP 530 is Cloudflare's own edge answer (error 1033) when NO
   # cloudflared connector is registered for the hostname — the tunnel process
