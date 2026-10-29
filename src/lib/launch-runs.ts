@@ -545,7 +545,12 @@ export function listLaunchRuns(dir = launchPlansDir()): LaunchRunsResult {
   for (const record of plans) {
     const sibling = record.file.replace(/\.plan\.json$/, '').replace(/\.json$/, '');
     const issue = brokenProgress.find((candidate) => {
-      const base = candidate.file.replace(/\.progress\.json$/, '');
+      // Strip BOTH progress naming shapes: the reader's `<launch>.progress.json`
+      // and the producer's `progress-<launch_id>.json` (shared-utils
+      // signature_launch/progress.py default_path). Stripping only the first
+      // shape left the producer's trailing `.json` and silently dropped the
+      // pairing, mistaking "could not read progress" for "no progress yet".
+      const base = candidate.file.replace(/\.progress\.json$/, '').replace(/\.json$/, '');
       return base === sibling || base === `progress-${record.manifest.launch_id}`;
     });
     if (issue) quarantine(record.run, issue);
