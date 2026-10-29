@@ -49,6 +49,7 @@ import {
 import {
   CHAMBER_QUESTION_MAX,
   JOURNEY_DRAFT_STORAGE_KEY,
+  JOURNEY_PREFERENCE_STORAGE_KEY,
   emptyDecisionFlags,
   emptyJourneyDraft,
   normalizeChamberQuestion,
@@ -328,14 +329,39 @@ describe('CTR-104 chamber question reaches the intake without re-asking', () => 
 
     // The seeded text IS the decision answer (so Continue is never blocked
     // by an answer the client can see), and the flags stay editable.
+    //
+    // An unconfirmed seed is memory-only: landing here must not write an
+    // answered decision (with every flag false) to the device, or a later
+    // visit would resume past the decision step and silently drop the
+    // structured flags the panel assessment depends on.
+    expect(window.localStorage.getItem(JOURNEY_DRAFT_STORAGE_KEY)).toBeNull();
+
+    fireEvent.click(screen.getByTestId('intake-continue'));
+    expect(screen.getByTestId('intake-step-options')).toBeTruthy();
+
     const stored = JSON.parse(
       window.localStorage.getItem(JOURNEY_DRAFT_STORAGE_KEY) ?? 'null',
     ) as JourneyDraft;
     expect(stored.answers.decision?.text).toBe('Should we launch the revised offer?');
     expect(stored.answers.decision?.flags).toEqual(emptyDecisionFlags());
+  });
 
-    fireEvent.click(screen.getByTestId('intake-continue'));
-    expect(screen.getByTestId('intake-step-options')).toBeTruthy();
+  it('clearing the seeded decision leaves the field empty instead of restoring the seed', () => {
+    installFetch();
+    render(<DecisionComposer initialQuestion="Should we launch the revised offer?" />);
+
+    const field = screen.getByLabelText('Your decision') as HTMLTextAreaElement;
+    expect(field.value).toBe('Should we launch the revised offer?');
+
+    fireEvent.change(field, { target: { value: '' } });
+
+    // The seed is a display fallback, never an answer: once the client clears
+    // the field it stays cleared, and no answered decision is left behind.
+    expect((screen.getByLabelText('Your decision') as HTMLTextAreaElement).value).toBe('');
+    const stored = JSON.parse(
+      window.localStorage.getItem(JOURNEY_DRAFT_STORAGE_KEY) ?? 'null',
+    ) as JourneyDraft | null;
+    expect(stored?.answers.decision ?? null).toBeNull();
   });
 
   it('never silently drops a saved draft: a different chamber question offers an explicit restart', () => {
@@ -350,6 +376,7 @@ describe('CTR-104 chamber question reaches the intake without re-asking', () => 
       },
     };
     window.localStorage.setItem(JOURNEY_DRAFT_STORAGE_KEY, JSON.stringify(stale));
+    window.localStorage.setItem(JOURNEY_PREFERENCE_STORAGE_KEY, 'lean toward the small pilot');
 
     render(<DecisionComposer initialQuestion="A different decision" />);
     expect(screen.getByTestId('chamber-question-echo').textContent).toBe('A different decision');
@@ -365,6 +392,16 @@ describe('CTR-104 chamber question reaches the intake without re-asking', () => 
     expect(screen.getByTestId('intake-step-decision')).toBeTruthy();
     const field = screen.getByLabelText('Your decision') as HTMLTextAreaElement;
     expect(field.value).toBe('A different decision');
+    // The old draft is gone from the device, and the fresh seed is not
+    // written back until the client confirms it.
+    expect(window.localStorage.getItem(JOURNEY_DRAFT_STORAGE_KEY)).toBeNull();
+    // The private preference is its own record, written by the client: the
+    // restart never deletes it.
+    expect(window.localStorage.getItem(JOURNEY_PREFERENCE_STORAGE_KEY)).toBe(
+      'lean toward the small pilot',
+    );
+
+    fireEvent.click(screen.getByTestId('intake-continue'));
     const saved = JSON.parse(
       window.localStorage.getItem(JOURNEY_DRAFT_STORAGE_KEY) ?? 'null',
     ) as JourneyDraft;
@@ -376,7 +413,11 @@ describe('CTR-104 chamber question reaches the intake without re-asking', () => 
     installFetch();
     const answered: JourneyDraft = {
       ...emptyJourneyDraft(),
-      answers: { ...emptyJourneyDraft().answers, decision: 'Saved decision', options: ['a', 'b'] },
+      answers: {
+        ...emptyJourneyDraft().answers,
+        decision: { text: 'Saved decision', flags: emptyDecisionFlags() },
+        options: ['a', 'b'],
+      },
     };
     window.localStorage.setItem(JOURNEY_DRAFT_STORAGE_KEY, JSON.stringify(answered));
 
