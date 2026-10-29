@@ -132,7 +132,12 @@ Server-side readiness is thorough. What a client can actually see is narrow.
 - Installation handshake: `src/app/api/auth/tenant-ready/route.ts:13` (`missing[]`) — returns
   `{ready, missing[]}` with a named missing-component list… **but only for the operator**
   (`context.subject !== 'operator:api'` → 403, `:12`). This is exactly the checklist a client
-  would need, and it is not available to a client.
+  would need, and it was not available to a client at baseline.
+  **R-28 delta (branch `pb/PBB-752/t-03-deps`):** the same derivation now lives once in
+  `src/lib/readiness.ts` (`gatherReadinessInputs` + `collectReadinessMissing`), the operator
+  handshake consumes it without losing its `operator:api` gate, and the caller's own tenant can
+  read the identical list at `GET /api/readiness/checklist` (rendered at `/readiness`). The
+  `missing[]` list is no longer operator-only.
 - Interview readiness gate: `src/app/api/interview/gate-status/route.ts:39`. Until closeout the
   middleware 302s every non-exempt page to `/interview`
   (`src/middleware.ts:300-312` exemptions, redirect at `:1027`).
@@ -234,7 +239,7 @@ that other skills write**. Follow-up has no operational surface at all — only 
 
 Booking — **ABSENT**:
 
-- No booking/appointment/calendar table. `src/lib/db/migrations.ts` contains 141
+- No booking/appointment/calendar table. `src/lib/db/migrations.ts` contains 143
   `CREATE TABLE` occurrences (includes comments and idempotent duplicates; not a table count).
   The only name matching `book|appoint|calendar|availab` is substring noise — `notebooks` /
   `notebook_sources` (`:1606`, `:1619`, matched on "book" inside "notebook"). None is a booking,
@@ -348,6 +353,13 @@ Operator-only equivalents (not client surfaces): `/operator/*`, `/settings/board
 Surfaces that do **not** exist for a client: a client/tenant registry page, per-client
 readiness, and any booking view.
 
+**R-28 delta (branch `pb/PBB-752/t-03-deps`):** per-client readiness now exists — `/readiness`
+renders the caller's own `missing[]` from `GET /api/readiness/checklist`, and both surfaces share
+one derivation with the operator handshake (`src/lib/readiness.ts`). The registry page and any
+booking view remain absent. The `READINESS.md:4` tenant/surface/account/revision key contract is
+still not implemented: the checklist is keyed by company only, with no per-surface or revision
+key and no `readiness_changed` invalidation event — that clause stays open.
+
 ## What I did NOT check
 
 1. **No runtime verification.** No app start, no dev server, no database, no test suite, no
@@ -376,6 +388,9 @@ readiness, and any booking view.
 
 - Page routes: **64** `page.tsx` files under `src/app`.
 - API route handlers: **258** `route.ts` files under `src/app/api`.
+- **Counts as of the R-28 delta** (`pb/PBB-752/t-03-deps`, the two numbers above are the
+  baseline `a92d11d`): **65** `page.tsx` (`src/app/readiness/page.tsx` added) and **259**
+  `route.ts` (`src/app/api/readiness/checklist/route.ts` added) — i.e. baseline + 1 + 1.
 - Scheduled jobs: **35** entries in the `src/lib/jobs/scheduler.ts` `JOBS` cron table (starts
   at `:426`; 36 `expr:` occurrences minus the type declaration line at `:426`).
 - Source scale: **1,064** `.ts`/`.tsx` files, **286,343** lines under `src/` combined
