@@ -2610,6 +2610,14 @@ export interface CreateTaskCoreInput {
    */
   humanDoorId?: 'command-center-ui' | 'ceo-chat' | 'telegram-ingest' | 'interview-department-provision' | null;
   /**
+   * The caller could not route this card (box not provisioned, or no confident
+   * route) and placed it in General Task as a FALLBACK. The `general-task`
+   * department backfilled from that workspace is not an explicit request, so
+   * routing parks the card under CAPTURE_FALLBACK_REASON without classifying it
+   * and the intake sweep re-routes it once the box can route.
+   */
+  capture_fallback?: boolean;
+  /**
    * B-U7 (ingest parity) — OPTIONAL producer-supplied persona-bundle identity,
    * the SAME field vocabulary `cc_board.py`'s `report_persona_used` posts back
    * later (B-U6). The producer (e.g. a Skill-6 build) already resolved its
@@ -3059,7 +3067,7 @@ export async function createTaskCore(
         const snapshot = queryOne<Parameters<typeof commitIntakeAssignment>[0]>(
           'SELECT t.*, w.company_id FROM tasks t LEFT JOIN workspaces w ON w.id=t.workspace_id WHERE t.id=?', [id]);
         if (snapshot && !snapshot.assigned_agent_id) {
-          const decision = await routeTaskDecision({ ...snapshot, company_id: creationCompanyId, department: snapshot.department ?? undefined });
+          const decision = await routeTaskDecision({ ...snapshot, company_id: creationCompanyId, department: snapshot.department ?? undefined, capture_fallback: input.capture_fallback });
           if (decision.status === 'assigned' && commitIntakeAssignment({ ...snapshot, company_id: creationCompanyId }, decision)) {
             resolvedAgentId = decision.routing.agentId;
             routedDepartment = decision.routing.department;

@@ -30,7 +30,7 @@ import { queryAll, queryOne } from '@/lib/db';
 import type { Agent, Task, TaskPriority } from '@/lib/types';
 import { loadDepartments, type DepartmentConfig } from './departments.config';
 import { canonicalDeptSlug } from './canonical-slug';
-import { isCatchAllWorkspace } from './catch-all-policy';
+import { CAPTURE_FALLBACK_REASON, EXPLICIT_GENERAL_REASON, isCatchAllWorkspace } from './catch-all-policy';
 // JGT105 — direct sibling-file import (not the decision-engine barrel) to
 // keep this module's import graph a straight line, never a cycle.
 import { jevDecide, jevMode, jevEngineState, type JevDecision } from '@/lib/decision-engine/live';
@@ -1262,7 +1262,7 @@ export async function comDispatch(
     if (dept) {
       const slug = canonicalDeptSlug(dept.slug || dept.id);
       if (['general', 'general-task'].includes(slug) || ['general', 'general task'].includes(dept.name.trim().toLowerCase())) {
-        return catchAllAssignment(agents, departments, 'Explicit General Task request', task.source_reference ?? null);
+        return catchAllAssignment(agents, departments, EXPLICIT_GENERAL_REASON, task.source_reference ?? null);
       }
       const agent = pickBestAgent(agents, dept, task);
       if (agent) {
@@ -1447,6 +1447,13 @@ export type RoutingTask = Pick<Task, 'title' | 'priority'> & {
   source_reference?: string | null;
   /** Internal only: an already verified catch-all assignment needs a fresh worker choice. */
   catch_all?: boolean;
+  /**
+   * Capture could not route this card (box not provisioned, or no confident
+   * route). Park it on a catch-all worker with the fallback reason and do NOT
+   * classify: the stored `general-task` department is a fallback placement, not
+   * a request. The intake sweep re-routes it once the box can route.
+   */
+  capture_fallback?: boolean;
 };
 
 /** Resolve company before any model call; an empty or ambiguous scope never expands globally. */
@@ -1503,8 +1510,8 @@ export async function routeTaskDecision(task: RoutingTask): Promise<RoutingDecis
     if (matches.length > 1) return wait('Explicit department is missing or ambiguous within the task company', 'ambiguous');
   }
   let routing: RoutingResult | null;
-  if (task.catch_all && !task.target_agent) {
-    routing = catchAllAssignment(agents, departments, 'Reassessing queued catch-all executor', task.source_reference ?? null);
+  if ((task.catch_all || task.capture_fallback) && !task.target_agent) {
+    routing = catchAllAssignment(agents, departments, task.capture_fallback ? CAPTURE_FALLBACK_REASON : 'Reassessing queued catch-all executor', task.source_reference ?? null);
   } else {
     // No hint → comDispatch Step 2 runs DEPARTMENT_PICKER_ORDER (incl. JEV).
     // companyId binds the model pick's permission context (no model or credential is chosen here).
