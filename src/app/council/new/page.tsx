@@ -7,18 +7,28 @@
  * CWE-050 binds the CC draft service to the CWE-022/CWE-023 ports,
  * this page passes no prefilled facts, and the composer's prefill
  * path stands proven by its render tests with fixture facts.
+ *
+ * CTR-104: the visual chamber (/council) sends its question here as
+ * ?question=…, so the intake starts from that answer instead of asking
+ * it again. The query value is normalized by the shared
+ * normalizeChamberQuestion helper; it is never trusted verbatim.
  */
 
 import { CouncilPageShell } from '@/components/council/CouncilPageShell';
 import { DecisionComposer } from '@/components/council/DecisionComposer';
 
-export default function CouncilNewPage() {
+export default async function CouncilNewPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ question?: string | string[] }>;
+}) {
+  const params = await searchParams;
   return (
     <CouncilPageShell
       title="Ask the council"
       lede="One question at a time. Your progress is saved on this device as you go, and you can leave and resume exactly where you stopped."
     >
-      <DecisionComposer />
+      <DecisionComposer initialQuestion={params.question} />
     </CouncilPageShell>
   );
 }

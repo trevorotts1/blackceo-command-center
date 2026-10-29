@@ -51,6 +51,7 @@ import {
   loadJourneyDraft,
   loadJourneyPreference,
   missingMaterialQuestions,
+  normalizeChamberQuestion,
   panelSizeProblem,
   previewBriefFromDraft,
   recommendQuickPanel,
@@ -76,21 +77,96 @@ const MODE_OPTIONS: { id: JourneyDraft['mode']; label: string; note: string }[] 
   { id: 'consult', label: 'One-seat consult', note: 'One advisor answers a bounded question.' },
 ];
 
-export function DecisionComposer({ knownFacts = [] }: { knownFacts?: IntakeFact[] }) {
-  const [draft, setDraft] = useState<JourneyDraft>(() => {
-    const stored = loadJourneyDraft();
-    if (stored) return stored;
-    return emptyJourneyDraft(knownFacts);
-  });
+/**
+ * The draft the composer opens with. The chamber question never bypasses
+ * the decision step: its text is SEEDED into the decision field so the
+ * client confirms it (and its structured flags) instead of the answer
+ * being silently skipped. A saved draft that already answers a decision
+ * always wins (T016: an interrupted intake is never re-asked); the
+ * chamber question then offers an explicit restart instead of silently
+ * discarding that work.
+ */
+function initialDraftFor(
+  initialQuestion: string | string[] | null | undefined,
+  knownFacts: IntakeFact[],
+): JourneyDraft {
+  const stored = loadJourneyDraft();
+  if (stored) return stored;
+  return emptyJourneyDraft(knownFacts);
+}
+
+/**
+ * The chamber question becomes the decision answer, in the initial state
+ * (never via an effect). It is applied only when the draft carries no
+ * decision, so a resumed draft is never overwritten.
+ */
+function withChamberDecision(
+  draft: JourneyDraft,
+  chamberQuestion: string | null,
+): JourneyDraft {
+  if (!chamberQuestion || draft.answers.decision !== null) return draft;
+  return {
+    ...draft,
+    answers: {
+      ...draft.answers,
+      decision: { text: chamberQuestion, flags: emptyDecisionFlags() },
+    },
+  };
+}
+
+export function DecisionComposer({
+  knownFacts = [],
+  initialQuestion,
+}: {
+  knownFacts?: IntakeFact[];
+  /**
+   * The question typed in the visual chamber entry (/council). It seeds
+   * the decision text; see initialDraftFor.
+   */
+  initialQuestion?: string | string[] | null;
+}) {
+  const chamberQuestion = normalizeChamberQuestion(initialQuestion);
+  const [seedDecision, setSeedDecision] = useState<string | null>(chamberQuestion);
+  const [draft, setDraft] = useState<JourneyDraft>(() =>
+    withChamberDecision(initialDraftFor(initialQuestion, knownFacts), chamberQuestion),
+  );
   const [preference, setPreference] = useState<string>(() => loadJourneyPreference());
   const [preferenceVisited, setPreferenceVisited] = useState<boolean>(
     () => loadJourneyPreference().length > 0,
   );
+  // Resume index is computed from the UNSEEDED draft on purpose: a chamber
+  // question must not skip the decision step, because that step also collects
+  // the structured flags the panel assessment depends on.
   const [step, setStep] = useState<number>(() => {
-    const stored = loadJourneyDraft();
-    const initial = stored ?? emptyJourneyDraft(knownFacts);
+    const initial = initialDraftFor(initialQuestion, knownFacts);
     return resumeQuestionIndex(initial, loadJourneyPreference().length > 0);
   });
+  /**
+   * Explicit restart: a saved draft holds a different decision, so the
+   * chamber question cannot ride the resume path. Clearing the draft is a
+   * client-side action on the client's own device, and the new question is
+   * seeded into the decision step (flags still confirmed by the client).
+   */
+  const restartWithChamberQuestion = () => {
+    clearJourneyDraft();
+    clearJourneyPreference();
+    const fresh = emptyJourneyDraft(knownFacts);
+    setDraft(
+      chamberQuestion
+        ? {
+            ...fresh,
+            answers: {
+              ...fresh.answers,
+              decision: { text: chamberQuestion, flags: emptyDecisionFlags() },
+            },
+          }
+        : fresh,
+    );
+    setPreference('');
+    setPreferenceVisited(false);
+    setSeedDecision(chamberQuestion);
+    setStep(0);
+  };
   const [routes, setRoutes] = useState<RouteCatalogEntry[] | null>(null);
   const [routesError, setRoutesError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -244,6 +320,34 @@ export function DecisionComposer({ knownFacts = [] }: { knownFacts?: IntakeFact[
 
   return (
     <div data-testid="decision-composer">
+      {chamberQuestion ? (
+        <div className="council-journey-notice" data-testid="chamber-question-notice">
+          <p className={council.meta} style={{ margin: 0 }}>
+            From the chamber:{' '}
+            <strong data-testid="chamber-question-echo">{chamberQuestion}</strong>.{' '}
+            {draft.answers.decision && draft.answers.decision.text !== chamberQuestion ? (
+              <>
+                Your saved draft answers a different decision, so it stays as it is.{' '}
+                <button
+                  type="button"
+                  className={council.btn}
+                  data-testid="chamber-question-restart"
+                  onClick={restartWithChamberQuestion}
+                >
+                  Start a new intake with this question
+                </button>{' '}
+                or{' '}
+                <Link href="/council">return to the chamber</Link>.
+              </>
+            ) : (
+              <>
+                It is filled in below; confirm the flags and continue.{' '}
+                <Link href="/council">Back to the chamber</Link>.
+              </>
+            )}
+          </p>
+        </div>
+      ) : null}
       <ol className="council-journey-progress" aria-label="Intake progress">
         {INTAKE_QUESTIONS.map((q, index) => {
           const state =
@@ -281,7 +385,11 @@ export function DecisionComposer({ knownFacts = [] }: { knownFacts?: IntakeFact[
           <p className={council.meta}>{question.guidance}</p>
 
           {question.id === 'decision' ? (
-            <DecisionStep draft={draft} updateAnswers={updateAnswers} />
+            <DecisionStep
+              draft={draft}
+              updateAnswers={updateAnswers}
+              seedText={seedDecision}
+            />
           ) : null}
           {question.id === 'options' ? (
             <OptionsStep draft={draft} updateAnswers={updateAnswers} />
@@ -421,12 +529,17 @@ type AnswersPatch = (patch: Partial<JourneyDraft['answers']>) => void;
 function DecisionStep({
   draft,
   updateAnswers,
+  seedText = null,
 }: {
   draft: JourneyDraft;
   updateAnswers: AnswersPatch;
+  /** Chamber question carried into the entry, filled in but not answered. */
+  seedText?: string | null;
 }) {
   const current = draft.answers.decision;
-  const text = current?.text ?? '';
+  // A seeded chamber question fills the field; it stays UNANSWERED until
+  // the client confirms it (its structured flags still need a decision).
+  const text = current?.text ?? seedText ?? '';
   const flags = current?.flags ?? emptyDecisionFlags();
   const setText = (value: string) =>
     updateAnswers({ decision: value.trim() ? { text: value, flags } : null });
