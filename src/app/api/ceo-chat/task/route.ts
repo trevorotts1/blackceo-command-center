@@ -179,6 +179,9 @@ export async function POST(request: NextRequest) {
   let workspaceId: string | null = null;
   let department: string | null = null;
   let resolvedBy: string;
+  // True when the auto classifier could not place the card and General Task
+  // below is a FALLBACK, not a request (see createTaskCore capture_fallback).
+  let captureFallback = false;
 
   if (!isAuto) {
     // ── Explicit pick: a hard pin, never re-routed. ──────────────────────────
@@ -215,9 +218,9 @@ export async function POST(request: NextRequest) {
         resolvedBy = `auto-route:${routing.department}`;
       } else {
         const general = resolveGeneralTaskWorkspace();
+        captureFallback = true;
         if (general) {
           workspaceId = general.id;
-          department = general.slug || general.id;
           resolvedBy = 'auto-route:general-task-fallback';
         } else {
           resolvedBy = 'auto-route:unrouted';
@@ -226,8 +229,8 @@ export async function POST(request: NextRequest) {
     } catch (err) {
       console.warn('[/api/ceo-chat/task] routeTask failed (non-fatal), falling back to general-task:', err);
       const general = resolveGeneralTaskWorkspace();
+      captureFallback = true;
       workspaceId = general?.id ?? null;
-      department = general ? general.slug || general.id : null;
       resolvedBy = general ? 'auto-route:general-task-fallback' : 'auto-route:unrouted';
     }
   }
@@ -253,6 +256,7 @@ export async function POST(request: NextRequest) {
         // metric (checkTrustCoverage()). Always known-human: requester_chat_id
         // above is deterministic, never conditional, on this route.
         humanDoorId: 'ceo-chat',
+        capture_fallback: captureFallback,
         eventMessage: `Task captured via My AI CEO delegate control: ${title}`,
       },
       { origin: request.headers.get('origin') },

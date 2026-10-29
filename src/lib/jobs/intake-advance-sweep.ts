@@ -40,7 +40,8 @@ import { broadcast } from '@/lib/events';
 import { notifySystem } from '@/lib/notify';
 import { autoDispatchTask, planningInProgressSql } from '@/lib/task-dispatcher';
 import { blockDispatchIfOwnerKilled, loadKilledAtDefensive } from '@/lib/owner-killed';
-import { isCatchAllRoutingReason, isCatchAllWorkspace } from '@/lib/routing/catch-all-policy';
+import { isCaptureFallbackTask, isCatchAllRoutingReason, isCatchAllWorkspace } from '@/lib/routing/catch-all-policy';
+import { isWorkforceProvisioned } from '@/lib/routing/workforce-provisioned';
 import { routeTaskDecision, type RoutingDecision } from '@/lib/routing/department-router';
 import { throwIfJobLeaseLost } from '@/lib/jobs/job-lease';
 import { ensureCampaignForTask } from '@/lib/campaigns';
@@ -148,6 +149,11 @@ interface IntakeTaskRow {
   dispatch_hold?: number;
   workspace_slug?: string;
   workspace_name?: string;
+}
+
+/** A capture-fallback re-route that did not commit must not re-run (and re-ask the model) every tick. */
+function deferFallbackReroute(taskId: string): void {
+  run('UPDATE tasks SET next_routing_eligible_at = ? WHERE id = ?', [new Date(Date.now() + 15 * 60 * 1000).toISOString(), taskId]);
 }
 
 /** Persist every unsuccessful evaluation so the same oldest rows cannot monopolize each tick. */
@@ -338,6 +344,7 @@ export async function runIntakeAdvanceSweep(dependencies: {
   // NOTE: do NOT early-return on an empty advanceable set — the B6 cap-out
   // surfacing below must still run (capped tasks are, by construction, excluded
   // from `rows`). The loop is a no-op on an empty set.
+  const provisionedByCompany = new Map<string, boolean>();
   let routed = 0;
   let dispatched = 0;
   let waiting = 0;
@@ -377,6 +384,16 @@ export async function runIntakeAdvanceSweep(dependencies: {
         const worker = queryOne<{is_master:number}>('SELECT is_master FROM agents WHERE id=?',[task.assigned_agent_id]);
         if (worker?.is_master) { waiting++; continue; }
       }
+      // A card ingest parked in General Task as a FALLBACK (box not provisioned,
+      // or no confident route at capture) is routed once, and only when the box
+      // can route. It is classified with NO department hint: its stored
+      // `general-task` department is a placement, not an explicit request. A
+      // card the owner explicitly sent to General Task never matches this.
+      const fallbackParked = catchAll && isCaptureFallbackTask(task);
+      if (fallbackParked && !provisionedByCompany.has(task.company_id)) {
+        provisionedByCompany.set(task.company_id, isWorkforceProvisioned(task.company_id).provisioned);
+      }
+      const reroute = fallbackParked && provisionedByCompany.get(task.company_id) === true;
       let agentId = task.assigned_agent_id;
       let department = task.department;
 
@@ -388,18 +405,26 @@ export async function runIntakeAdvanceSweep(dependencies: {
           priority: task.priority,
           workspace_id: task.workspace_id,
           company_id: task.company_id,
-          department: task.department || undefined,
-          catch_all: catchAll,
+          department: reroute ? undefined : task.department || undefined,
+          catch_all: catchAll && !reroute,
+          capture_fallback: fallbackParked && !reroute,
         });
         throwIfJobLeaseLost();
         if (decision.status !== 'assigned') {
           if (!agentId) recordRoutingWait(task, decision.reason, decision.retryable);
+          else if (reroute) deferFallbackReroute(task.id);
           waiting++;
           continue;
         }
-        const unchangedCatchAll = catchAll && decision.routing.companyId === task.company_id && task.assigned_agent_id === decision.routing.agentId
+        // A re-route always commits, even to the same worker: the commit replaces
+        // the fallback reason, which is what stops it being re-routed next tick.
+        const unchangedCatchAll = catchAll && !reroute && decision.routing.companyId === task.company_id && task.assigned_agent_id === decision.routing.agentId
           && task.workspace_id === decision.routing.workspaceId && !task.dispatch_hold;
-        if (!unchangedCatchAll && !commitIntakeAssignment(task, decision)) { waiting++; continue; }
+        if (!unchangedCatchAll && !commitIntakeAssignment(task, decision)) {
+          if (reroute) deferFallbackReroute(task.id);
+          waiting++;
+          continue;
+        }
         agentId = decision.routing.agentId;
         department = decision.routing.department;
         task.workspace_id = decision.routing.workspaceId;

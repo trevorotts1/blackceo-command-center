@@ -324,6 +324,12 @@ function isInterviewGateExempt(pathname: string): boolean {
   // lock the operator out of /settings, which is the one place they could fix
   // configuration (env vars, build state, provisioning).
   if (pathname === '/settings' || pathname.startsWith('/settings/')) return true;
+  // R-28: /readiness is the CLIENT's own setup checklist — the same missing[]
+  // the operator handshake derives, over the caller's own tenant (its API route
+  // self-authenticates via resolveTenantContext and /api/* is already exempt).
+  // Read-only with zero mutation affordances: the interview lock itself is not
+  // loosened, /readiness only joins the exemption list.
+  if (pathname === '/readiness' || pathname.startsWith('/readiness/')) return true;
   // F27 social-theme mini app: the client's weekly planner surface is
   // reachable on its own invitation/session terms (purpose-bound cookie),
   // exactly like /interview — the operator's AI-Workforce completion state

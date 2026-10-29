@@ -25,6 +25,11 @@
  * and re-laid on current `origin/main` (9f910f0f), byte-identical to that
  * commit for every touched path. Do not trust a prior receipt for this unit;
  * re-measure the refs.
+ * Provenance (PBB-355 / T-30 repair 3 authorship note): this file is part of
+ * a REBUILD from the preserved patch `t30-fd347d38.patch`; the original branch
+ * `pb/PBB-284/t-30-repair` was deleted from origin and its local object graph
+ * is broken. The bytes under test are reconstructed on current `origin/main`,
+ * not continued from that branch.
  *
  * No database, no client workspace, no network.
  */

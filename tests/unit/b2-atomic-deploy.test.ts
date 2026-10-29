@@ -1474,7 +1474,7 @@ esac
       .map((line) => line.trim())
       .filter(Boolean);
     assert.ok(
-      calls.includes('start npm --name fallback-app --update-env -- start'),
+      calls.includes('start npm --name fallback-app --update-env --stop-exit-codes 78 -- start'),
       `--update-env belongs to PM2, before the -- separator. Calls: ${JSON.stringify(calls)}`,
     );
   } finally {
@@ -2383,7 +2383,7 @@ test('1d e2e REGRESSION GUARD: deploy on the live-box roster (canonical cc-prod)
       'The port-blind bug deleted blackceo-cc-demo-interview and blackceo-cc-demo-dashboard here. ' +
       `No delete/stop may be issued when nothing fights for the canonical port. Got: ${JSON.stringify(kills)}`);
 
-    assert.ok(calls.some((c) => c === 'restart cc-prod --update-env'),
+    assert.ok(calls.some((c) => c === 'restart cc-prod --update-env --stop-exit-codes 78'),
       `Phase 4 must restart the canonical app. pm2 calls: ${JSON.stringify(calls)}`);
   } finally {
     fixture.cleanup();
