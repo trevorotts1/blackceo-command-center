@@ -73,6 +73,13 @@ const ALIAS_MAP: Record<string, string> = {
   // billing variants
   'billing':           'billing-finance',
 
+  // accounting is a known routing department (department-profiles.ts) that is
+  // NOT in the 26-department CANONICAL_SLUGS model, so it resolves to itself;
+  // its legacy and common spellings resolve to it. 'billing-finance' (invoices,
+  // collections) is a different department and is never merged into it.
+  'finance-accounting':'accounting',
+  'bookkeeping':       'accounting',
+
   // web-dev variants
   'webdev':            'web-development',
   'web-dev':           'web-development',
