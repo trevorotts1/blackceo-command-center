@@ -210,17 +210,24 @@ module.exports = {
     instances: 1,
     exec_mode: 'fork',
     autorestart: true,
-    // CIRCUIT-BREAKER: min_uptime is the critical field — without it PM2 resets
-    // the restart counter on every brief launch and max_restarts never trips.
-    // With min_uptime:30000, a process that dies in <30s counts as a failed
-    // restart; after max_restarts=8 failures the app moves to `errored` state,
-    // stopping the loop and triggering the watchdog alert.
+    // CIRCUIT-BREAKER: stop_exit_codes (below) is the ONLY breaker that holds.
+    // min_uptime and max_restarts do NOT stop a restart loop on their own: pm2
+    // (lib/God.js handleExit) counts an "unstable" restart only while the app is
+    // younger than min_uptime * max_restarts since pm2 created it (30 s * 8 =
+    // 240 s), so an app that keeps dying instantly after that window is restarted
+    // forever and never reaches `errored`. Measured on a client box: about 2,000
+    // restarts in 9 hours with max_restarts: 8. They are kept as the early-life
+    // guard only.
     min_uptime: 30000,
     max_restarts: 8,
     // Exponential backoff (replaces fixed restart_delay) so rapid loops back off
-    // instead of hammering port/disk at full speed.
+    // instead of hammering port/disk at full speed. pm2 caps the delay at 15 s.
     exp_backoff_restart_delay: 2000,
     // Missing/stale builds exit 78: require a rebuild instead of endless restarts.
+    // With exp_backoff_restart_delay pm2 shows a stopped-on-78 app as
+    // `waiting restart` (restart count frozen), not `stopped`; cc-health-check.sh
+    // reads that as stopped. atomic-deploy.sh re-applies --stop-exit-codes 78 on
+    // every restart so an app started before this line existed still gets it.
     stop_exit_codes: [78],
     kill_timeout: 10000,
     watch: false,

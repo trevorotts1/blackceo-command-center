@@ -1462,12 +1462,17 @@ _ccbi_recover_interrupted_rollback() {
 # restart, reload, or start fails; callers must not run a health check after a
 # failed switch because an old healthy process can make that check pass.
 _ccbi_pm2_switch() {
+  # --stop-exit-codes 78 refreshes the registered definition: a restart alone
+  # keeps whatever the app was first started with, so a box started before
+  # ecosystem.config.cjs gained stop_exit_codes (or started via `pm2 start npm`)
+  # would restart-loop on a stale build (exit 78) forever. It persists through
+  # the Phase 5 `pm2 save`.
   if pm2 list 2>/dev/null | grep -q "$PM2_APP_NAME"; then
-    if pm2 restart "$PM2_APP_NAME" --update-env >/dev/null 2>&1; then
+    if pm2 restart "$PM2_APP_NAME" --update-env --stop-exit-codes 78 >/dev/null 2>&1; then
       return 0
     fi
     _warn "  pm2 restart failed — trying pm2 reload ..."
-    if pm2 reload "$PM2_APP_NAME" --update-env >/dev/null 2>&1; then
+    if pm2 reload "$PM2_APP_NAME" --update-env --stop-exit-codes 78 >/dev/null 2>&1; then
       return 0
     fi
     _err "  pm2 restart AND reload failed for '${PM2_APP_NAME}'."
@@ -1487,7 +1492,7 @@ _ccbi_pm2_switch() {
     _err "  pm2 start from ${APP_DIR}/ecosystem.config.cjs failed."
     return 1
   fi
-  if CC_PORT="$PORT" pm2 start npm --name "$PM2_APP_NAME" --update-env -- start >/dev/null 2>&1; then
+  if CC_PORT="$PORT" pm2 start npm --name "$PM2_APP_NAME" --update-env --stop-exit-codes 78 -- start >/dev/null 2>&1; then
     return 0
   fi
   _err "  fallback pm2 start npm failed for '${PM2_APP_NAME}'."
