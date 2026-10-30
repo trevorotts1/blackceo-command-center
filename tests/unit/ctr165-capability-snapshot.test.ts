@@ -68,7 +68,7 @@ test('strict snapshot refuses unknown fields, duplicates, and another installati
   assert.throws(
     () =>
       validateCapabilitySnapshot(
-        snapshot([{ ...skill, path: '/Users/client/.openclaw/skills/x' }]),
+        snapshot([{ ...skill, path: '<install-root>/skills/x' }]),
       ),
     (error: unknown) =>
       error instanceof CapabilitySnapshotError &&
