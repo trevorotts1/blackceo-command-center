@@ -95,6 +95,7 @@ import {
 } from './report-reading';
 import {
   buildCapabilityReportSection,
+  type CapabilityReportSection,
   type InstallationCapabilitySnapshot,
   type PlanProposalReference,
 } from './capability-snapshot';
@@ -321,6 +322,15 @@ export interface ReportModelInput {
    * unverified and claims no inventory.
    */
   capability_snapshot?: InstallationCapabilitySnapshot | null;
+  /**
+   * CTR-169: the report section actually rendered by the export, frozen
+   * into the export journal at create time. A download re-renders from
+   * this exact recorded projection instead of loading the live scope
+   * snapshot, so a later snapshot revision (or deletion) cannot change
+   * the bytes an existing export is bound to. Takes precedence over
+   * `capability_snapshot` when both are supplied.
+   */
+  capability_section?: CapabilityReportSection | null;
 }
 
 function scoredModel(input: ReportModelInput, verdict: ScoredVerdict) {
@@ -693,6 +703,31 @@ function buildDebateSection(
 }
 
 
+/** The plan references the capability section matches against. */
+function planProposalsFor(verdict: Verdict): PlanProposalReference[] {
+  return verdict.result_kind === 'scored'
+    ? verdict.action_proposals.map((proposal) => ({
+        action_id: proposal.action_id,
+        title: proposal.title,
+        description: proposal.description,
+        department_id: proposal.department_id,
+        assigned_agent_id: proposal.assigned_agent_id,
+        sop_id: proposal.sop_id,
+        persona_id: proposal.persona_id,
+      }))
+    : [];
+}
+
+/** Accept a journaled section only when it still carries a known status. */
+function asCapabilitySection(value: unknown): CapabilityReportSection | null {
+  if (!isPlainRecord(value)) return null;
+  return value.status === 'matched' ||
+    value.status === 'unmatched' ||
+    value.status === 'not_provided'
+    ? (value as unknown as CapabilityReportSection)
+    : null;
+}
+
 export function buildReportModel(input: ReportModelInput): Record<string, unknown> {
   const { verdict, brief, final_cards } = input;
   const packVersions = [...new Set(final_cards.map((card) => card.pack_version))].sort();
@@ -724,22 +759,12 @@ export function buildReportModel(input: ReportModelInput): Record<string, unknow
     ...brief.unknowns.map((unknown) => unknown.statement),
     ...((base.critical_unknowns as string[] | undefined) ?? []),
   ]);
-  const planProposals: PlanProposalReference[] =
-    verdict.result_kind === 'scored'
-      ? verdict.action_proposals.map((proposal) => ({
-          action_id: proposal.action_id,
-          title: proposal.title,
-          description: proposal.description,
-          department_id: proposal.department_id,
-          assigned_agent_id: proposal.assigned_agent_id,
-          sop_id: proposal.sop_id,
-          persona_id: proposal.persona_id,
-        }))
-      : [];
-  const safeTools = buildCapabilityReportSection(
-    input.capability_snapshot ?? null,
-    planProposals,
-  );
+  const planProposals = planProposalsFor(verdict);
+  const safeTools =
+    input.capability_section ?? buildCapabilityReportSection(
+      input.capability_snapshot ?? null,
+      planProposals,
+    );
   const readinessReasons: string[] = [...reading.blocked_reasons];
   if (verdict.result_kind === 'consult') {
     readinessReasons.push(
@@ -889,8 +914,28 @@ export function assertRedactionComplete(
 
 // ----------------------------------------------------------- markdown
 
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
 function asRecord(value: unknown): Record<string, unknown> {
-  return value as Record<string, unknown>;
+  return isPlainRecord(value) ? value : {};
+}
+
+/**
+ * CTR-169: the one safe debate reader. A model without a debate object
+ * yields `present: false` and an empty record; callers must print an
+ * explicit no-saved-debate block rather than reading properties off a
+ * cast. CTR-168 owns the print-template branch and can import this
+ * helper unchanged (`readReportDebateInput(model.debate)`).
+ */
+export interface ReportDebateInput {
+  present: boolean;
+  record: Record<string, unknown>;
+}
+export function readReportDebateInput(value: unknown): ReportDebateInput {
+  return isPlainRecord(value)
+    ? { present: true, record: value }
+    : { present: false, record: {} };
 }
 function asArray(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
@@ -1246,10 +1291,18 @@ function pushToolsMd(lines: string[], model: Record<string, unknown>): void {
  * absence of a chair stop note come from the record only.
  */
 function pushDebateMd(lines: string[], model: Record<string, unknown>): void {
-  const debate = asRecord(model.debate);
-  const highest = asNumberOrNull(debate.highest_round);
   lines.push('## The debate');
   lines.push('');
+  const debateInput = readReportDebateInput(model.debate);
+  if (!debateInput.present) {
+    lines.push(
+      'No saved debate record is present in this report model. Nothing is inferred: no rounds, seats, positions, or chair stop note are reported.',
+    );
+    lines.push('');
+    return;
+  }
+  const debate = debateInput.record;
+  const highest = asNumberOrNull(debate.highest_round);
   lines.push(
     `Rounds saved: ${Number(debate.rounds_saved ?? 0)}; highest round: ${
       highest === null ? 'none' : String(highest)
@@ -1427,6 +1480,12 @@ export interface CouncilExportRecord {
   visibility: 'private' | 'company';
   deliverable_id: string | null;
   created_at: string;
+  /**
+   * CTR-169: the exact capability report section rendered into this
+   * export, frozen in the journal payload. Null means the record predates
+   * this field (legacy export), not "the report had no tools section".
+   */
+  frozen_capability_section: CapabilityReportSection | null;
 }
 
 export interface CouncilExportResult {
@@ -1482,6 +1541,16 @@ function appendExportJournalRecord(
     deliverable_id: record.deliverable_id,
     created_at: record.created_at,
   };
+  if (record.frozen_capability_section !== null) {
+    // CTR-169: the exact report projection used at export, stored in the
+    // same owner-scoped, hash-chained export journal record. It contains
+    // only the fields that report section already prints (names,
+    // descriptions, availability, recorded references, limitations).
+    payload.report_inputs = {
+      version: 1,
+      capability_section: record.frozen_capability_section,
+    };
+  }
   const last = db
     .prepare(
       `SELECT sequence, event_hash FROM council_events
@@ -1541,6 +1610,7 @@ export function listExportRecords(
     .map((event) => {
       const payload = event.payload as Record<string, unknown>;
       const format = payload.format as ReportFormat;
+      const reportInputs = payload.report_inputs;
       return {
         export_id: payload.export_id as string,
         request_id: payload.request_id as string,
@@ -1560,6 +1630,9 @@ export function listExportRecords(
         visibility,
         deliverable_id: (payload.deliverable_id as string | null) ?? null,
         created_at: payload.created_at as string,
+        frozen_capability_section: isPlainRecord(reportInputs)
+          ? asCapabilitySection(reportInputs.capability_section)
+          : null,
       };
     });
 }
@@ -1723,8 +1796,22 @@ export async function createCouncilExport(
     }
   }
   const { session, verdict, cards } = loadExportableSession(deps, envelope, input.session_id);
-  const exportedAt = input.exported_at ?? new Date().toISOString();
+  const existing = listExportRecords(deps, envelope, input.session_id);
+  const recorded = existing.find((record) => record.request_id === input.request_id) ?? null;
+  // CTR-169: a replay of the same logical request re-renders from every
+  // input recorded by the first export (its date and its frozen
+  // capability section), never the live snapshot. A snapshot revised (or
+  // deleted) after the first export, or a replay on a later day, cannot
+  // change the recorded artifact's bytes.
+  const exportedAt =
+    recorded?.created_at ?? input.exported_at ?? new Date().toISOString();
   const redaction = input.redaction ?? null;
+  const capabilitySection =
+    recorded?.frozen_capability_section ??
+    buildCapabilityReportSection(
+      input.capability_snapshot ?? null,
+      planProposalsFor(verdict),
+    );
   const model = buildReportModel({
     verdict,
     brief: session.brief,
@@ -1732,7 +1819,7 @@ export async function createCouncilExport(
     report_date: exportedAt.slice(0, 10),
     session_mode: session.spec.mode,
     redaction,
-    capability_snapshot: input.capability_snapshot ?? null,
+    capability_section: capabilitySection,
   });
   const reportRevision = String(model.report_revision_id);
   const redacted = redaction !== null;
@@ -1826,7 +1913,6 @@ export async function createCouncilExport(
   // Deletion race recheck (T059): after rendering, before exposure.
   assertSessionAlive(deps, input.session_id, envelope.tenant_id);
 
-  const existing = listExportRecords(deps, envelope, input.session_id);
   const parentTaskId = parentTaskIdFor(deps, envelope, input.session_id);
   const artifacts: CouncilExportResult['artifacts'] = [];
   for (const artifact of rendered) {
@@ -1887,6 +1973,7 @@ export async function createCouncilExport(
       visibility: session.spec.visibility,
       deliverable_id: deliverableId,
       created_at: exportedAt,
+      frozen_capability_section: capabilitySection,
     };
     appendExportJournalRecord(
       deps.store.handle(),
@@ -2012,6 +2099,12 @@ export async function readCouncilExport(
     report_date: record.created_at.slice(0, 10),
     session_mode: session.spec.mode,
     redaction: null,
+    // CTR-169: re-render from the input frozen at create time. The
+    // live capability snapshot is deliberately not loaded here; the
+    // journaled section is the artifact's recorded input.
+    ...(record.frozen_capability_section !== null
+      ? { capability_section: record.frozen_capability_section }
+      : {}),
   });
   const markdown = renderMarkdown(model);
   const printHtml = renderPrintHtml(model, { cover: loadReportCoverAssets() });

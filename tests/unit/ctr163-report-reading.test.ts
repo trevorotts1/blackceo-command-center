@@ -64,7 +64,7 @@ test('readiness separates the decision from the reading and never prints WAIT - 
     conditions: blocked,
   });
   assert.equal(go.decision, 'Proceed: Run the small test');
-  assert.equal(go.readiness_status, 'actionable_with_conditions');
+  assert.equal(go.readiness_status, 'blocked');
   assert.notEqual(go.reading, go.label_plain);
 
   const wait = readScoredVerdict({

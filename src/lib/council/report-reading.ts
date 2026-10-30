@@ -62,7 +62,7 @@ export const READINESS_HEADLINE: Readonly<Record<ReadinessStatus, string>> = {
   actionable_with_conditions:
     'Actionable only after the recorded conditions are satisfied; execution approval is still separate.',
   blocked:
-    'Blocked. A failed or unresolved hard constraint on the recommended option, or a blocking ratification state, prevents acting yet.',
+    'Blocked. An open blocking condition, a failed or unresolved hard constraint on the recommended option, or a blocking ratification state prevents acting yet.',
   needs_reshape: 'Not ready as briefed. Reshape the plan before another decision.',
   not_advisable: 'Not advisable. Do not act on this decision.',
   waiting: 'Waiting. A material question is still open.',
@@ -237,9 +237,11 @@ export interface VerdictReading {
  * printed as a tautology above a firm recommendation.
  *
  * Readiness is the canonical 1.0.74 rule: the verdict must be GO or
- * GO_WITH_CONDITIONS; an open blocking condition is a condition, not a
- * blocker, but a failed/unknown hard constraint on the recommended option
- * or a blocking ratification state is a hard stop.
+ * GO_WITH_CONDITIONS, and any open blocking condition, failed/unknown hard
+ * constraint on the recommended option, or blocking ratification state is
+ * a hard stop. CTR-169 aligns the open-blocking-condition case with
+ * canonical `blocked`; `actionable_with_conditions` is never emitted for
+ * a condition the record itself marks blocking and open.
  */
 export function readScoredVerdict(args: {
   label: VerdictLabel;
@@ -277,6 +279,11 @@ export function readScoredVerdict(args: {
   if (ratificationBlocks) {
     blockedReasons.push(`Ratification status ${ratificationStatus} blocks readiness.`);
   }
+  if (args.conditions.blocking_open > 0) {
+    blockedReasons.push(
+      `${args.conditions.blocking_open} blocking condition(s) are open; the plan is not actionable until they are satisfied.`,
+    );
+  }
   const status: ReadinessStatus = !eligible
     ? args.label === 'RESHAPE'
       ? 'needs_reshape'
@@ -285,11 +292,11 @@ export function readScoredVerdict(args: {
         : args.label === 'WAIT'
           ? 'waiting'
           : 'blocked_on_information'
-    : recommendedHardFindings.length > 0 || ratificationBlocks
+    : recommendedHardFindings.length > 0 ||
+        ratificationBlocks ||
+        args.conditions.blocking_open > 0
       ? 'blocked'
-      : args.conditions.blocking_open > 0
-        ? 'actionable_with_conditions'
-        : 'ready_to_act';
+      : 'ready_to_act';
   const decision =
     args.recommended_option_label === null
       ? VERDICT_PLAIN_LABEL[args.label]
