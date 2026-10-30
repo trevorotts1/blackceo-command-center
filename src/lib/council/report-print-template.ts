@@ -34,6 +34,18 @@
 
 import type { ConditionSummary } from './report-reading';
 
+/**
+ * CTR-168 consult statement, shared by every export format.
+ *
+ * A consultation is one seat answering one question. It is not a
+ * convened council: no advisor rounds were run, no nine-seat debate
+ * happened, and the record holds no chair stop note. The sentence is a
+ * constant so the Markdown, record JSON, print HTML, and PDF exports
+ * cannot drift into claiming a debate that was never held.
+ */
+export const CONSULT_NO_DEBATE_NOTE =
+  'A consultation records one seat and no advisor rounds. There is no council debate, no nine-seat deliberation, and no chair stop note in this record.';
+
 export function escapeHtml(value: string): string {
   return value
     .replaceAll('&', '&amp;')
@@ -727,7 +739,13 @@ function renderRecords(model: Record<string, unknown>, number = '12'): string {
 function renderConsult(model: Record<string, unknown>): string {
   const consult = asRecord(model.consult);
   const out: string[] = [];
-  out.push(sectionHead('2', 'The consultation', 'One recorded seat. No score, no council verdict.'));
+  out.push(
+    sectionHead(
+      '2',
+      'The consultation',
+      'One recorded seat. No score, no council verdict, no council debate.',
+    ),
+  );
   out.push('<div class="consult-card">');
   out.push(`<h3>${escapeHtml(asString(consult.display_name))}</h3>`);
   out.push(`<p class="meta">${escapeHtml(asString(consult.label))}</p>`);
@@ -737,6 +755,13 @@ function renderConsult(model: Record<string, unknown>): string {
   out.push('<h3>Limits of this answer</h3>');
   out.push(hList(asArray(consult.limits)));
   out.push(`<p><strong>Next step:</strong> ${escapeHtml(asString(consult.next_step))}</p>`);
+  // CTR-168: state the absence of a debate explicitly in the print/PDF
+  // exports too, so a consult report never reads as a nine-seat council
+  // round. The note stays inside section 2; the section numbering is
+  // unchanged.
+  out.push(
+    `<p class="meta">${escapeHtml(asString(model.debate_note) || CONSULT_NO_DEBATE_NOTE)}</p>`,
+  );
   out.push('</div>');
   out.push(renderHowToUse(model, '3'));
   out.push(renderTools(model, '4'));

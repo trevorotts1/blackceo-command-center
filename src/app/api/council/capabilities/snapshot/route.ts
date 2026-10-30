@@ -2,6 +2,7 @@ import type { NextRequest } from 'next/server';
 import {
   checkBodyScope,
   handleCouncil,
+  machineAuthFor,
   parseJsonBody,
   requireIdempotencyKey,
   requireMutationProofFor,
@@ -55,9 +56,17 @@ function snapshotError(error: unknown): never {
  * When no snapshot has been recorded the response says so explicitly
  * instead of returning an empty inventory that reads like "nothing is
  * installed".
+ *
+ * CTR-168 machine binding: a machine-channel caller must pass the
+ * host-configured binding for operation 'capability_read'. A bearer
+ * alone is authentication, not authorization, and is no longer enough
+ * to read another installation's inventory; an unbound machine caller
+ * is refused COUNCIL_MACHINE_BINDING. Browser callers keep their
+ * existing session and CSRF authorization.
  */
 export async function GET(request: NextRequest) {
   return handleCouncil(request, async (ctx) => {
+    machineAuthFor(request, ctx.principal, 'capability_read');
     const stored = loadCapabilitySnapshot(
       ctx.store.handle(),
       scopeForPrincipal(ctx.principal),
@@ -97,10 +106,18 @@ export async function GET(request: NextRequest) {
  * short description, availability, source, and recorded plan references
  * are accepted; there is no path, URL, prompt, memory, credential, or
  * configuration field in the contract, and unknown fields are refused.
+ *
+ * CTR-168 machine binding: a machine-channel caller must additionally
+ * pass the host-configured binding for operation 'capability_write' and
+ * pin the bound installation with x-expected-installation-id. The
+ * binding is a separate operation from 'capability_read', so a
+ * read-only machine credential cannot replace this installation's
+ * inventory. Browser callers keep the CSRF proof.
  */
 export async function POST(request: NextRequest) {
   return handleCouncil(request, async (ctx) => {
     await requireMutationProofFor(request, ctx.principal);
+    machineAuthFor(request, ctx.principal, 'capability_write');
     const body = await parseJsonBody(request);
     const idempotencyKey = requireIdempotencyKey(
       request,

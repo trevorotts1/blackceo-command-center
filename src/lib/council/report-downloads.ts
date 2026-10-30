@@ -79,6 +79,7 @@ import { registerDeliverable } from '../task-lifecycle';
 import { CouncilApiError } from './api/errors';
 import { renderCouncilReportPdf, ReportPdfError } from './report-pdf';
 import {
+  CONSULT_NO_DEBATE_NOTE,
   formatCoverage,
   formatDisplayScore,
   formatScore,
@@ -493,6 +494,11 @@ function consultModel(input: ReportModelInput, verdict: Verdict) {
       card_next_step: card.next_step,
       next_step: verdict.next_step,
     } as Record<string, unknown>,
+    // CTR-168: a consult has no advisor rounds, so the record says so in
+    // words and carries no debate object at all. The explicit note keeps
+    // the record JSON export from reading like a debate with zero rounds.
+    debate: null as null,
+    debate_note: CONSULT_NO_DEBATE_NOTE,
   };
 }
 
@@ -997,7 +1003,7 @@ export function renderMarkdown(model: Record<string, unknown>): string {
     lines.push('## The debate');
     lines.push('');
     lines.push(
-      'A consultation records one seat and no advisor rounds; no nine-seat debate is claimed. The saved record contains no chair stop note.',
+      asString(model.debate_note) || CONSULT_NO_DEBATE_NOTE,
     );
     lines.push('');
     pushHowToUseMd(lines, model);

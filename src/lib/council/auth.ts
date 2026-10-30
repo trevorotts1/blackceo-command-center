@@ -74,7 +74,16 @@ export class CouncilAuthError extends Error {
   }
 }
 
-/** Permission vocabulary shared with the portable core (CWE-007). */
+/**
+ * Permission vocabulary shared with the portable core (CWE-007).
+ *
+ * CTR-168 adds the two installation-capability operations. They are
+ * deliberately named and narrow: a machine binding that may push or read
+ * an installation's capability snapshot does not thereby gain any
+ * session, plan, or execution permission, and vice versa. Reading and
+ * writing the snapshot are separate operations because a read-only
+ * monitor has no business replacing another installation's inventory.
+ */
 export type CouncilPermission =
   | 'run'
   | 'read'
@@ -83,7 +92,9 @@ export type CouncilPermission =
   | 'approve_plan'
   | 'create_tasks'
   | 'execute'
-  | 'diagnostic_capture';
+  | 'diagnostic_capture'
+  | 'capability_read'
+  | 'capability_write';
 
 export type CouncilAccessVia = 'owner' | 'company' | 'support';
 
