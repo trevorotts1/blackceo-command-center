@@ -68,7 +68,10 @@ import {
   recordedRouteEvidence,
   routeDescriptorFromRegistryEntry,
 } from '../providers';
-import { CAPABILITY_HANDOFF_CONTRACT } from '../capability-handoff';
+import {
+  CAPABILITY_SNAPSHOT_LIMITS,
+  CAPABILITY_SNAPSHOT_SCHEMA,
+} from '../capability-snapshot';
 import { listModels } from '@/lib/model-registry';
 
 export interface CouncilRouteContext {
@@ -438,20 +441,24 @@ export function capabilitiesData(ctx: CouncilRouteContext): Record<string, unkno
     endpoints: registrySummary(),
     routes: catalog.summary,
     principal: clientSafePrincipalView(ctx.principal),
-    client_capability_handoff: {
-      contract: CAPABILITY_HANDOFF_CONTRACT,
-      integration: 'not_integrated',
-      upload_route: null,
-      required_for_installed_skill_matches: true,
-      reason:
-        'The Command Center server runs in the tenant host and cannot read a client or operator box. Installed-skill matches therefore require a strict client handoff bound to this principal; until the upload route is integrated, the report prints an explicit not-provided state and claims no inventory.',
-      matching: 'exact_skill_id_or_normalized_exact_full_name_only',
+    installation_capability_snapshot: {
+      contract: CAPABILITY_SNAPSHOT_SCHEMA,
+      integration: 'integrated',
+      ingest_route: '/api/council/capabilities/snapshot',
+      read_route: '/api/council/capabilities/snapshot',
+      binding: 'authenticated_tenant_company_installation',
+      source_of_truth:
+        'A self installation is captured through the Command Center platform resolver; a client installation pushes a strict snapshot from its own runtime. The report reads the stored snapshot for the session scope and never reads another box.',
+      limits: CAPABILITY_SNAPSHOT_LIMITS,
+      matching: 'recorded_reference_or_exact_whole_phrase_only',
+      availability: 'installed_is_not_operational',
       refused: [
         'shared-token matches',
         'prefix matches',
         'fuzzy similarity',
-        'another owner or installation',
+        'a snapshot for another owner or installation',
         'unknown fields',
+        'any path, URL, prompt, memory, credential, or configuration field',
       ],
     },
   };

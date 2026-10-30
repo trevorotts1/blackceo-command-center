@@ -48,6 +48,7 @@ import {
   type ClientDecisionChoice,
 } from './coordination';
 import { CouncilSettingsService } from './settings';
+import { loadCapabilitySnapshotForPrincipal } from './capability-snapshot-service';
 import {
   createCouncilExport,
   findExportSession,
@@ -863,6 +864,15 @@ export async function createExportRoute(
     formats,
     redaction_profile_id: null,
   }, sessionId);
+  // CTR-165: the report reads the scope-bound installation snapshot. A
+  // self installation is captured through the existing platform resolver;
+  // a client installation is never read from disk and must have pushed its
+  // own snapshot. No caller-supplied inventory enters this path.
+  const capability = loadCapabilitySnapshotForPrincipal(
+    ctx.store.handle(),
+    ctx.principal,
+    { captured_at: new Date().toISOString().slice(0, 10) },
+  );
   const result = await createCouncilExport(
     { repositories: ctx.repositories, store: ctx.store },
     authorized.envelope,
@@ -877,6 +887,7 @@ export async function createExportRoute(
       request_id: idempotencyKey,
       exporter_subject: ctx.principal.subject,
       via: authorized.accessVia,
+      capability_snapshot: capability?.snapshot ?? null,
     },
   );
   const primary = result.artifacts[0];
@@ -890,6 +901,12 @@ export async function createExportRoute(
     verdict_revision: result.verdict_revision,
     verdict_content_sha256: result.verdict_content_sha256,
     artifacts: result.artifacts,
+    capability_snapshot: {
+      present: capability !== null,
+      source: capability?.source ?? null,
+      captured_now: capability?.captured_now ?? false,
+      item_count: capability?.snapshot.items.length ?? 0,
+    },
     created_at: new Date().toISOString(),
   };
 }

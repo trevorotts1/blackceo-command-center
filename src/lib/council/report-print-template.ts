@@ -412,40 +412,51 @@ function renderPlan(model: Record<string, unknown>): string {
   return out.join('\n');
 }
 
-function renderHowToUse(model: Record<string, unknown>): string {
+function renderHowToUse(model: Record<string, unknown>, number = '4'): string {
   const howToUse = asArray(model.how_to_use).map(asString);
   const out: string[] = [];
-  out.push(sectionHead('4', 'How to use this report', null));
+  out.push(sectionHead(number, 'How to use this report', null));
   out.push(howToUse.length > 0 ? hList(howToUse) : '<p class="meta">No reading guide was recorded.</p>');
   return out.join('\n');
 }
 
-function renderTools(model: Record<string, unknown>): string {
+function renderTools(model: Record<string, unknown>, number = '5'): string {
   const tools = asRecord(model.your_tools);
   const out: string[] = [];
-  out.push(sectionHead('5', 'Helpers that fit the plan', null));
+  out.push(sectionHead(number, 'Helpers that fit the plan', null));
   const status = asString(tools.status);
-  out.push(`<p>${escapeHtml(asString(tools.note) || 'No client capability handoff was provided.')}</p>`);
-  if (status === 'matched' || status === 'partial') {
+  out.push(`<p>${escapeHtml(asString(tools.note) || 'No installation capability snapshot was recorded.')}</p>`);
+  if (status === 'matched') {
     const matches = asArray(tools.matches);
     out.push('<ul>');
     for (const matchValue of matches) {
       const match = asRecord(matchValue);
-      const requirement = asRecord(match.requirement);
-      const names = asArray(match.matches)
-        .map((item) => asRecord(item))
-        .map((item) => `${asString(item.name)}${asStringOrNull(item.version) ? ` (${asString(item.version)})` : ''}`)
-        .join(', ');
+      const actions = asArray(match.matched_action_titles).map(asString).join(', ');
       out.push(
-        `<li>${escapeHtml(asStringOrNull(requirement.skill_id) ?? asString(requirement.name) ?? 'requirement')}: exact match — ${escapeHtml(names)}</li>`,
+        `<li><strong>${escapeHtml(asString(match.name))}</strong> <span class="meta">(${escapeHtml(
+          asString(match.kind),
+        )}, ${escapeHtml(asString(match.capability_id))}, ${escapeHtml(
+          asString(match.availability),
+        )})</span> — exact ${escapeHtml(asString(match.match_basis))} match for ${escapeHtml(
+          actions || 'the plan',
+        )}</li>`,
       );
     }
     out.push('</ul>');
   }
+  if (tools.no_match_note) {
+    out.push(`<p class="meta">${escapeHtml(asString(tools.no_match_note))}</p>`);
+  }
+  const limitations = asArray(tools.limitations).map(asString);
+  if (limitations.length > 0) {
+    out.push('<h3>What was read, and what was not</h3>');
+    out.push(hList(limitations));
+  }
+  out.push(`<p class="meta">${escapeHtml(asString(tools.availability_note))}</p>`);
   out.push(
     `<p class="meta">${escapeHtml(
       asString(tools.exactness_note) ||
-        'Only exact id or normalized full-name equality counts as an installed match. Token overlap, prefixes, and fuzzy similarity are not matches.',
+        'Only a recorded plan reference or an exact whole-phrase name counts. Shared words, prefixes, and fuzzy similarity are not matches.',
     )}</p>`,
   );
   return out.join('\n');
@@ -484,10 +495,90 @@ function renderScoreTable(model: Record<string, unknown>): string {
   return out.join('\n');
 }
 
+/**
+ * The saved-round debate. This is the ACTUAL card record: rounds saved,
+ * what changed between rounds, whether the council split, and the explicit
+ * absence of a chair stop note. A consult prints zero rounds and says so;
+ * no nine-seat debate is invented.
+ */
+function renderRounds(model: Record<string, unknown>): string {
+  const debate = asRecord(model.debate);
+  const highest = asNumberOrNull(debate.highest_round);
+  const out: string[] = [];
+  out.push(sectionHead('7', 'The debate', 'Only the saved advisor rounds. No round or reason is invented.'));
+  out.push(
+    `<p><strong>Rounds saved:</strong> ${escapeHtml(String(Number(debate.rounds_saved ?? 0)))} · ` +
+      `<strong>Highest round:</strong> ${escapeHtml(
+        highest === null ? 'none' : String(highest),
+      )} · <strong>Split:</strong> ${debate.split === true ? 'yes' : debate.split === false ? 'no' : 'not available'}</p>`,
+  );
+  out.push(hList(asArray(debate.notes)));
+  for (const roundValue of asArray(debate.rounds)) {
+    const round = asRecord(roundValue);
+    out.push(`<h3>Round ${escapeHtml(String(Number(round.round ?? 0)))}</h3>`);
+    const seats = asArray(round.seats);
+    if (seats.length === 0) {
+      out.push('<p class="meta">No seat cards were saved for this round.</p>');
+    } else {
+      out.push('<ul>');
+      for (const seatValue of seats) {
+        const seat = asRecord(seatValue);
+        out.push(
+          `<li>${escapeHtml(asString(seat.display_name))}: ${escapeHtml(
+            asString(seat.stance_text) || asString(seat.stance),
+          )} — ${escapeHtml(asString(seat.preferred_option_label))}</li>`,
+        );
+      }
+      out.push('</ul>');
+    }
+  }
+  const changes = asArray(debate.changes);
+  out.push('<h3>What changed between saved rounds</h3>');
+  if (changes.length === 0) {
+    out.push('<p class="meta">No seat changed its stance or preferred option between the saved rounds.</p>');
+  } else {
+    out.push('<ul>');
+    for (const changeValue of changes) {
+      const change = asRecord(changeValue);
+      out.push(
+        `<li>Round ${escapeHtml(String(Number(change.round ?? 0)))} — ${escapeHtml(
+          asString(change.display_name),
+        )}: ${escapeHtml(asString(change.from_stance_text))} / ${escapeHtml(
+          asString(change.from_option_label),
+        )} → ${escapeHtml(asString(change.to_stance_text))} / ${escapeHtml(
+          asString(change.to_option_label),
+        )}</li>`,
+      );
+    }
+    out.push('</ul>');
+  }
+  const positions = asArray(debate.positions);
+  if (positions.length > 0) {
+    out.push('<h3>Final positions</h3><ul>');
+    for (const positionValue of positions) {
+      const position = asRecord(positionValue);
+      out.push(
+        `<li>${escapeHtml(asString(position.option_label))}: ${escapeHtml(
+          asArray(position.seat_names).map(asString).join(', '),
+        )}</li>`,
+      );
+    }
+    out.push('</ul>');
+  }
+  out.push(
+    `<p class="meta">${escapeHtml(
+      asString(asRecord(debate.stop_record).note) ||
+        'The saved record contains no chair stop note.',
+    )}</p>`,
+  );
+  return out.join('\n');
+}
+
+
 function renderDebate(model: Record<string, unknown>): string {
   const verdict = asRecord(model.verdict_block);
   const out: string[] = [];
-  out.push(sectionHead('7', 'Why, and the strongest concern', null));
+  out.push(sectionHead('8', 'Why, and the strongest concern', null));
   out.push('<h3>Main reasons</h3>');
   out.push(hList(asArray(model.main_reasons)));
   out.push(
@@ -503,7 +594,7 @@ function renderConditions(model: Record<string, unknown>): string {
   const summary = asRecord(model.conditions_summary) as unknown as ConditionSummary;
   const items = asArray(summary.items);
   const out: string[] = [];
-  out.push(sectionHead('8', 'Conditions and safeguards', null));
+  out.push(sectionHead('9', 'Conditions and safeguards', null));
   out.push(
     `<p>${Number(summary.total ?? 0)} recorded · ${Number(summary.open ?? 0)} open · ${Number(
       summary.satisfied ?? 0,
@@ -534,7 +625,7 @@ function renderAdvisors(model: Record<string, unknown>, options: RenderPrintOpti
   const redacted = model.redacted === true;
   const cover = options.cover ?? null;
   const out: string[] = [];
-  out.push(sectionHead('9', 'Each member of the council', 'One entry per recorded seat, in roster order.'));
+  out.push(sectionHead('10', 'Each member of the council', 'One entry per recorded seat, in roster order.'));
   for (const seatValue of asArray(model.seats)) {
     const seat = asRecord(seatValue);
     const seatId = asString(seat.seat_id);
@@ -575,7 +666,7 @@ function renderAmendments(model: Record<string, unknown>): string {
     )} (${asString(amendment.materiality)}, ${asString(amendment.disposition)})`;
   };
   const out: string[] = [];
-  out.push(sectionHead('10', 'Amendments and ratification', null));
+  out.push(sectionHead('11', 'Amendments and ratification', null));
   out.push('<h3>Accepted amendments</h3>');
   const accepted = asArray(amendments.accepted);
   out.push(accepted.length > 0 ? `<ul>${accepted.map((a) => `<li>${escapeHtml(describe(a))}</li>`).join('')}</ul>` : '<p class="meta">None recorded.</p>');
@@ -600,11 +691,11 @@ function renderAmendments(model: Record<string, unknown>): string {
   return out.join('\n');
 }
 
-function renderRecords(model: Record<string, unknown>): string {
+function renderRecords(model: Record<string, unknown>, number = '12'): string {
   const verdict = asRecord(model.verdict_block);
   const provenance = asRecord(model.provenance);
   const out: string[] = [];
-  out.push(sectionHead('11', 'For your records', 'Identifiers and hashes only. No source text is reproduced.'));
+  out.push(sectionHead(number, 'For your records', 'Identifiers and hashes only. No source text is reproduced.'));
   out.push('<div class="record"><dl>');
   out.push(`<dt>Session</dt><dd>${escapeHtml(asString(model.session_id))}</dd>`);
   out.push(`<dt>Report revision</dt><dd>${escapeHtml(asString(model.report_revision_id))}</dd>`);
@@ -636,7 +727,7 @@ function renderRecords(model: Record<string, unknown>): string {
 function renderConsult(model: Record<string, unknown>): string {
   const consult = asRecord(model.consult);
   const out: string[] = [];
-  out.push(sectionHead('1', 'The consultation', 'One recorded seat. No score, no council verdict.'));
+  out.push(sectionHead('2', 'The consultation', 'One recorded seat. No score, no council verdict.'));
   out.push('<div class="consult-card">');
   out.push(`<h3>${escapeHtml(asString(consult.display_name))}</h3>`);
   out.push(`<p class="meta">${escapeHtml(asString(consult.label))}</p>`);
@@ -647,9 +738,9 @@ function renderConsult(model: Record<string, unknown>): string {
   out.push(hList(asArray(consult.limits)));
   out.push(`<p><strong>Next step:</strong> ${escapeHtml(asString(consult.next_step))}</p>`);
   out.push('</div>');
-  out.push(renderHowToUse(model));
-  out.push(renderTools(model));
-  out.push(renderRecords(model));
+  out.push(renderHowToUse(model, '3'));
+  out.push(renderTools(model, '4'));
+  out.push(renderRecords(model, '5'));
   return out.join('\n');
 }
 
@@ -681,6 +772,7 @@ export function renderPrintHtml(
     out.push(renderTools(model));
     out.push('<div class="part-banner part-start">Part 2 · The full record: options, members, conditions, and sources</div>');
     out.push(renderScoreTable(model));
+    out.push(renderRounds(model));
     out.push(renderDebate(model));
     out.push(renderConditions(model));
     out.push(renderAdvisors(model, options));

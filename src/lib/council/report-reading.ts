@@ -49,6 +49,7 @@ export const VERDICT_READING: Readonly<Record<VerdictLabel, string>> = {
 export type ReadinessStatus =
   | 'ready_to_act'
   | 'actionable_with_conditions'
+  | 'blocked'
   | 'needs_reshape'
   | 'not_advisable'
   | 'waiting'
@@ -60,6 +61,8 @@ export const READINESS_HEADLINE: Readonly<Record<ReadinessStatus, string>> = {
     'Ready to act on the recorded recommendation, subject to its own execution approval.',
   actionable_with_conditions:
     'Actionable only after the recorded conditions are satisfied; execution approval is still separate.',
+  blocked:
+    'Blocked. A failed or unresolved hard constraint on the recommended option, or a blocking ratification state, prevents acting yet.',
   needs_reshape: 'Not ready as briefed. Reshape the plan before another decision.',
   not_advisable: 'Not advisable. Do not act on this decision.',
   waiting: 'Waiting. A material question is still open.',
@@ -68,6 +71,30 @@ export const READINESS_HEADLINE: Readonly<Record<ReadinessStatus, string>> = {
   consult_only:
     'One-seat consultation only. There is no scored plan or readiness call.',
 };
+
+/**
+ * Canonical 1.0.74 readiness parity: only GO and GO_WITH_CONDITIONS may
+ * ever be eligible to act. A pending, rejected, or materially-unratified
+ * resolution blocks readiness, and a failed or unresolved hard constraint
+ * on the RECOMMENDED option is a readiness fact rather than a footnote.
+ */
+const READY_ELIGIBLE_VERDICTS: ReadonlySet<VerdictLabel> = new Set([
+  'GO',
+  'GO_WITH_CONDITIONS',
+]);
+
+const RATIFICATION_BLOCKS_READINESS: ReadonlySet<string> = new Set([
+  'pending',
+  'rejected',
+  'material_change_unratified',
+]);
+
+export interface RecommendedHardFinding {
+  constraint_id: string;
+  option_id: string;
+  result: ConstraintResult;
+  checker: string;
+}
 
 export interface ConditionSummaryItem {
   id: string;
@@ -200,32 +227,69 @@ export interface VerdictReading {
   reading: string;
   readiness_status: ReadinessStatus;
   readiness_headline: string;
+  /** Recorded facts that make readiness worse than the label alone. */
+  blocked_reasons: string[];
 }
 
 /**
  * The reading of a scored verdict. The headline carries the decision;
  * the reading is a separate sentence so a label such as WAIT is never
  * printed as a tautology above a firm recommendation.
+ *
+ * Readiness is the canonical 1.0.74 rule: the verdict must be GO or
+ * GO_WITH_CONDITIONS; an open blocking condition is a condition, not a
+ * blocker, but a failed/unknown hard constraint on the recommended option
+ * or a blocking ratification state is a hard stop.
  */
 export function readScoredVerdict(args: {
   label: VerdictLabel;
   recommended_option_label: string | null;
   conditions: ConditionSummary;
+  recommended_option_id?: string | null;
+  hard_findings?: readonly RecommendedHardFinding[];
+  ratification_status?: string | null;
 }): VerdictReading {
-  const status: ReadinessStatus =
-    args.label === 'GO'
-      ? args.conditions.blocking_open > 0
+  const recommendedId = args.recommended_option_id ?? null;
+  const recommendedHardFindings =
+    recommendedId === null
+      ? []
+      : (args.hard_findings ?? []).filter(
+          (finding) =>
+            finding.option_id === recommendedId &&
+            (finding.result === 'fail' || finding.result === 'unknown'),
+        );
+  const ratificationStatus = args.ratification_status ?? null;
+  const ratificationBlocks =
+    ratificationStatus !== null &&
+    RATIFICATION_BLOCKS_READINESS.has(ratificationStatus);
+  const eligible = READY_ELIGIBLE_VERDICTS.has(args.label);
+  const blockedReasons: string[] = [];
+  if (!eligible) {
+    blockedReasons.push(
+      `The recorded verdict was ${args.label}, which is never reported as ready to act.`,
+    );
+  }
+  if (recommendedHardFindings.length > 0) {
+    blockedReasons.push(
+      `${recommendedHardFindings.filter((finding) => finding.result === 'fail').length} hard constraint check(s) failed and ${recommendedHardFindings.filter((finding) => finding.result === 'unknown').length} could not be resolved for the recommended option.`,
+    );
+  }
+  if (ratificationBlocks) {
+    blockedReasons.push(`Ratification status ${ratificationStatus} blocks readiness.`);
+  }
+  const status: ReadinessStatus = !eligible
+    ? args.label === 'RESHAPE'
+      ? 'needs_reshape'
+      : args.label === 'DONT_DO_IT'
+        ? 'not_advisable'
+        : args.label === 'WAIT'
+          ? 'waiting'
+          : 'blocked_on_information'
+    : recommendedHardFindings.length > 0 || ratificationBlocks
+      ? 'blocked'
+      : args.conditions.blocking_open > 0
         ? 'actionable_with_conditions'
-        : 'ready_to_act'
-      : args.label === 'GO_WITH_CONDITIONS'
-        ? 'actionable_with_conditions'
-        : args.label === 'RESHAPE'
-          ? 'needs_reshape'
-          : args.label === 'DONT_DO_IT'
-            ? 'not_advisable'
-            : args.label === 'WAIT'
-              ? 'waiting'
-              : 'blocked_on_information';
+        : 'ready_to_act';
   const decision =
     args.recommended_option_label === null
       ? VERDICT_PLAIN_LABEL[args.label]
@@ -236,6 +300,7 @@ export function readScoredVerdict(args: {
     reading: VERDICT_READING[args.label],
     readiness_status: status,
     readiness_headline: READINESS_HEADLINE[status],
+    blocked_reasons: blockedReasons,
   };
 }
 
@@ -249,6 +314,7 @@ export function readConsultVerdict(args: {
       'This is advice from one recorded perspective. It is not a council verdict, carries no score, and records no plan.',
     readiness_status: 'consult_only',
     readiness_headline: READINESS_HEADLINE.consult_only,
+    blocked_reasons: [],
   };
 }
 
@@ -273,6 +339,9 @@ export function readVerdict(args: {
         prerequisites: args.verdict.prerequisites,
         hardFindings: args.verdict.hard_constraint_findings,
       }),
+    recommended_option_id: args.verdict.recommended_option_id,
+    hard_findings: args.verdict.hard_constraint_findings,
+    ratification_status: args.verdict.ratification_status,
   });
 }
 

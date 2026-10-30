@@ -93,10 +93,10 @@ import {
   type ConditionSummary,
 } from './report-reading';
 import {
-  matchPlanCapabilities,
-  type CapabilityHandoff,
-  type SkillRequirement,
-} from './capability-handoff';
+  buildCapabilityReportSection,
+  type InstallationCapabilitySnapshot,
+  type PlanProposalReference,
+} from './capability-snapshot';
 
 // ------------------------------------------------------------ formats
 
@@ -314,13 +314,12 @@ export interface ReportModelInput {
   session_mode: string | null;
   redaction: RedactionProfile | null;
   /**
-   * A client capability handoff already validated and bound by the
-   * caller. Absent means "not provided": the report then says the
-   * installed-skill match is unverified and claims no inventory.
+   * The installation capability snapshot already validated and bound to
+   * this session's exact installation by the store/service. Absent means
+   * "not provided": the report then says the installed-capability match is
+   * unverified and claims no inventory.
    */
-  capability_handoff?: CapabilityHandoff | null;
-  /** Plan skills the report should match exactly, when recorded. */
-  capability_requirements?: readonly SkillRequirement[];
+  capability_snapshot?: InstallationCapabilitySnapshot | null;
 }
 
 function scoredModel(input: ReportModelInput, verdict: ScoredVerdict) {
@@ -390,6 +389,10 @@ function scoredModel(input: ReportModelInput, verdict: ScoredVerdict) {
       description: proposal.description,
       rationale: proposal.rationale,
       source_condition_ids: [...proposal.source_condition_ids],
+      department_id: proposal.department_id,
+      assigned_agent_id: proposal.assigned_agent_id,
+      sop_id: proposal.sop_id,
+      persona_id: proposal.persona_id,
       acceptance_criteria: [...proposal.acceptance_criteria],
       depends_on_action_ids: [...proposal.depends_on_action_ids],
       risk_class: proposal.risk_class,
@@ -493,12 +496,197 @@ function consultModel(input: ReportModelInput, verdict: Verdict) {
   };
 }
 
+const STANCE_TEXT: Readonly<Record<string, string>> = {
+  support: 'Supports',
+  conditional: 'Supports with conditions',
+  oppose: 'Opposes',
+  abstain: 'Abstains',
+};
+
+function optionDisplayText(optionId: string | null, brief: DecisionBrief): string {
+  if (optionId === null) return 'No stated preference';
+  return brief.options.find((option) => option.id === optionId)?.label ?? optionId;
+}
+
 /**
- * Build the one report model. Pure and deterministic. Seat source
- * qualifications are not recorded in the Command Center (the seat
- * packs live in the portable runtime), so they render as 'not
- * recorded' here and are never upgraded.
+ * The debate section: the ACTUAL saved advisor rounds, what changed between
+ * them, whether the council split, and the explicit absence of a chair stop
+ * note. Nothing here is inferred. CC has no chair-note field, so the stop
+ * record says so instead of inventing a reason. A consult records one seat
+ * and no rounds, so it reports zero rounds and no invented nine-seat debate.
  */
+function buildDebateSection(
+  cards: readonly CouncilCard[],
+  brief: DecisionBrief,
+  sessionMode: string | null,
+): Record<string, unknown> {
+  const byRound = new Map<number, AdvisorCard[]>();
+  for (const card of cards) {
+    if (card.card_kind !== 'advisor') continue;
+    const seats = byRound.get(card.round) ?? [];
+    seats.push(card);
+    byRound.set(card.round, seats);
+  }
+  const rounds = [...byRound.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([round, seats]) => ({
+      round,
+      cards: [...seats].sort(
+        (a, b) => SEAT_IDS.indexOf(a.seat_id) - SEAT_IDS.indexOf(b.seat_id),
+      ),
+    }));
+  const highestRound = rounds.length > 0 ? rounds[rounds.length - 1].round : null;
+  const notes: string[] = [];
+  if (rounds.length === 0) {
+    notes.push(
+      'No advisor cards are saved in this record, so the debate cannot be reconstructed.',
+    );
+  } else if (rounds.length === 1) {
+    notes.push(
+      `Only one round of advisor cards is saved in this record (round ${rounds[0].round}), so a before-and-after comparison is not possible.`,
+    );
+  } else {
+    notes.push(`${rounds.length} rounds of advisor cards are saved in this record.`);
+  }
+  if (sessionMode === 'consult') {
+    notes.push(
+      'A consultation records one seat and no advisor rounds; no nine-seat debate is claimed.',
+    );
+  }
+  notes.push(
+    'The saved record contains no chair note explaining a stop decision; only the cards above are recorded.',
+  );
+
+  const changes: Array<Record<string, unknown>> = [];
+  for (let index = 1; index < rounds.length; index += 1) {
+    const previous = new Map(
+      rounds[index - 1].cards.map((card) => [card.seat_id, card]),
+    );
+    for (const card of rounds[index].cards) {
+      const before = previous.get(card.seat_id);
+      if (before === undefined) continue;
+      const changedOption =
+        before.preferred_option_id !== card.preferred_option_id;
+      const changedStance = before.stance !== card.stance;
+      if (!changedOption && !changedStance) continue;
+      changes.push({
+        round: rounds[index].round,
+        seat_id: card.seat_id,
+        display_name: seatDisplayName(card.seat_id),
+        from_option_label: optionDisplayText(before.preferred_option_id, brief),
+        to_option_label: optionDisplayText(card.preferred_option_id, brief),
+        from_stance_text: STANCE_TEXT[before.stance] ?? before.stance,
+        to_stance_text: STANCE_TEXT[card.stance] ?? card.stance,
+        changed_option: changedOption,
+        changed_stance: changedStance,
+      });
+    }
+  }
+
+  const latestBySeat = new Map<string, AdvisorCard>();
+  for (const round of rounds) {
+    for (const card of round.cards) latestBySeat.set(card.seat_id, card);
+  }
+  const latest = [...latestBySeat.values()].sort(
+    (a, b) => SEAT_IDS.indexOf(a.seat_id) - SEAT_IDS.indexOf(b.seat_id),
+  );
+  const byOption = new Map<string, string[]>();
+  const abstainedNames: string[] = [];
+  for (const card of latest) {
+    if (card.stance === 'abstain') abstainedNames.push(seatDisplayName(card.seat_id));
+    const key = card.preferred_option_id ?? '';
+    const names = byOption.get(key) ?? [];
+    names.push(seatDisplayName(card.seat_id));
+    byOption.set(key, names);
+  }
+  const positions = [...byOption.entries()]
+    .sort((a, b) => {
+      if (a[0] === '') return 1;
+      if (b[0] === '') return -1;
+      return a[0].localeCompare(b[0]);
+    })
+    .map(([optionId, names]) => ({
+      option_id: optionId === '' ? null : optionId,
+      option_label:
+        optionId === '' ? 'No stated preference' : optionDisplayText(optionId, brief),
+      seat_names: names,
+    }));
+  const split =
+    positions.filter((entry) => entry.option_id !== null).length > 1;
+  if (rounds.length > 0) {
+    notes.push(
+      split
+        ? 'The council split on which option to prefer; the groups are listed below.'
+        : 'The council did not split on which option to prefer; the disagreement is in the reasoning and objections each advisor recorded.',
+    );
+  }
+
+  const roundSupport = rounds.map((entry, index) => {
+    const counts: Record<'support' | 'conditional' | 'oppose' | 'abstain', number> = {
+      support: 0,
+      conditional: 0,
+      oppose: 0,
+      abstain: 0,
+    };
+    for (const card of entry.cards) counts[card.stance] += 1;
+    const previous = index > 0 ? rounds[index - 1] : null;
+    const identicalToPrevious =
+      previous !== null &&
+      previous.cards.length === entry.cards.length &&
+      entry.cards.every((card) => {
+        const before = previous.cards.find(
+          (candidate) => candidate.seat_id === card.seat_id,
+        );
+        return (
+          before !== undefined &&
+          before.stance === card.stance &&
+          before.preferred_option_id === card.preferred_option_id
+        );
+      });
+    return {
+      round: entry.round,
+      support: counts.support,
+      conditional: counts.conditional,
+      oppose: counts.oppose,
+      abstain: counts.abstain,
+      identical_to_previous: identicalToPrevious,
+    };
+  });
+
+  return {
+    rounds_saved: rounds.length,
+    highest_round: highestRound,
+    session_mode: sessionMode,
+    source: 'saved_advisor_cards_only',
+    rounds: rounds.map((entry) => ({
+      round: entry.round,
+      seats: entry.cards.map((card) => ({
+        seat_id: card.seat_id,
+        display_name: seatDisplayName(card.seat_id),
+        stance: card.stance,
+        stance_text: STANCE_TEXT[card.stance] ?? card.stance,
+        preferred_option_id: card.preferred_option_id,
+        preferred_option_label: optionDisplayText(card.preferred_option_id, brief),
+      })),
+    })),
+    round_support: roundSupport,
+    condensed_note:
+      rounds.length > 1 && changes.length === 0
+        ? 'No advisor changed position between the saved rounds, so the earlier rounds repeat the same positions. Read the final positions below; the earlier rounds add no new stance.'
+        : null,
+    changes,
+    positions,
+    split: rounds.length > 0 ? split : null,
+    abstained_names: abstainedNames,
+    stop_record: {
+      recorded: false,
+      note: 'The saved record contains no chair note explaining a stop decision; no stop reason is invented.',
+    },
+    notes,
+  };
+}
+
+
 export function buildReportModel(input: ReportModelInput): Record<string, unknown> {
   const { verdict, brief, final_cards } = input;
   const packVersions = [...new Set(final_cards.map((card) => card.pack_version))].sort();
@@ -522,41 +710,43 @@ export function buildReportModel(input: ReportModelInput): Record<string, unknow
           recommended_option_label: (base.verdict_block as Record<string, unknown>)
             .recommended_option_label as string | null,
           conditions,
+          recommended_option_id: verdict.recommended_option_id,
+          hard_findings: verdict.hard_constraint_findings,
+          ratification_status: verdict.ratification_status,
         });
   const unknowns = dedupeExact([
     ...brief.unknowns.map((unknown) => unknown.statement),
     ...((base.critical_unknowns as string[] | undefined) ?? []),
   ]);
-  const toolMatch = matchPlanCapabilities(
-    input.capability_requirements ?? [],
-    input.capability_handoff ?? null,
+  const planProposals: PlanProposalReference[] =
+    verdict.result_kind === 'scored'
+      ? verdict.action_proposals.map((proposal) => ({
+          action_id: proposal.action_id,
+          title: proposal.title,
+          description: proposal.description,
+          department_id: proposal.department_id,
+          assigned_agent_id: proposal.assigned_agent_id,
+          sop_id: proposal.sop_id,
+          persona_id: proposal.persona_id,
+        }))
+      : [];
+  const safeTools = buildCapabilityReportSection(
+    input.capability_snapshot ?? null,
+    planProposals,
   );
-  const safeTools = {
-    ...toolMatch,
-    matches: toolMatch.matches.map((match) => ({
-      requirement: match.requirement,
-      matches: match.matches.map((item) => ({
-        skill_id: item.skill_id,
-        name: item.name,
-        version: item.version,
-      })),
-    })),
-    exactness_note:
-      'Only an exact skill id or a normalized exact full-name match counts as installed. Shared tokens, prefixes, and fuzzy similarity are never matches. The Command Center server cannot read a client installation; without a bound handoff, this section says so instead of guessing.',
-  };
-  const readinessReasons: string[] = [];
+  const readinessReasons: string[] = [...reading.blocked_reasons];
   if (verdict.result_kind === 'consult') {
-    readinessReasons.push('One seat answered; a consultation carries no score and no plan.');
+    readinessReasons.push(
+      'One seat answered; a consultation carries no score and no plan.',
+    );
   } else {
     readinessReasons.push(`Recorded verdict label: ${verdict.label}.`);
     readinessReasons.push(
       `${conditions.total} condition(s) recorded; ${conditions.blocking_open} blocking and open.`,
     );
-    if (verdict.hard_constraint_findings.some((finding) => finding.result !== 'pass')) {
-      readinessReasons.push(
-        `${verdict.hard_constraint_findings.filter((finding) => finding.result !== 'pass').length} hard constraint finding(s) are not a pass.`,
-      );
-    }
+    readinessReasons.push(
+      `Ratification status: ${verdict.ratification_status}.`,
+    );
     readinessReasons.push(
       `${unknowns.recorded} unknown(s) recorded; ${unknowns.distinct} distinct.`,
     );
@@ -646,6 +836,7 @@ export function buildReportModel(input: ReportModelInput): Record<string, unknow
       unknowns: brief.unknowns.map((fact) => fact.statement),
     },
     ...base,
+    debate: buildDebateSection(final_cards, brief, input.session_mode),
     provenance: {
       evidence_manifest: brief.evidence_manifest.map((entry) => ({
         evidence_id: entry.evidence_id,
@@ -803,6 +994,12 @@ export function renderMarkdown(model: Record<string, unknown>): string {
     lines.push('');
     lines.push(`Next step: ${asString(consult.next_step)}`);
     lines.push('');
+    lines.push('## The debate');
+    lines.push('');
+    lines.push(
+      'A consultation records one seat and no advisor rounds; no nine-seat debate is claimed. The saved record contains no chair stop note.',
+    );
+    lines.push('');
     pushHowToUseMd(lines, model);
     pushToolsMd(lines, model);
     pushProvenanceMd(lines, model);
@@ -846,6 +1043,8 @@ export function renderMarkdown(model: Record<string, unknown>): string {
     );
   }
   lines.push('');
+
+  pushDebateMd(lines, model);
 
   lines.push('## Main arguments and strongest dissent');
   lines.push('');
@@ -997,30 +1196,111 @@ function pushToolsMd(lines: string[], model: Record<string, unknown>): void {
   const tools = asRecord(model.your_tools);
   lines.push('## Helpers that fit the plan');
   lines.push('');
-  lines.push(asString(tools.note) || 'No client capability handoff was provided.');
+  lines.push(
+    asString(tools.note) || 'No installation capability snapshot was recorded.',
+  );
   lines.push('');
-  const matches = asArray(tools.matches);
-  if (matches.length > 0) {
-    for (const matchValue of matches) {
+  if (asString(tools.status) === 'matched') {
+    for (const matchValue of asArray(tools.matches)) {
       const match = asRecord(matchValue);
-      const requirement = asRecord(match.requirement);
-      const names = asArray(match.matches)
-        .map((item) => asRecord(item))
-        .map(
-          (item) =>
-            `${asString(item.name)}${asStringOrNull(item.version) ? ` (${asString(item.version)})` : ''}`,
-        )
-        .join(', ');
+      const actions =
+        asArray(match.matched_action_titles).map(asString).join(', ') ||
+        'the plan';
       lines.push(
-        `- ${asStringOrNull(requirement.skill_id) ?? asString(requirement.name) ?? 'requirement'}: exact match — ${names}`,
+        `- **${asString(match.name)}** (${asString(match.kind)}, ${asString(
+          match.capability_id,
+        )}, ${asString(match.availability)}): exact ${asString(
+          match.match_basis,
+        )} match for ${actions}`,
       );
     }
     lines.push('');
   }
+  if (tools.no_match_note) {
+    lines.push(asString(tools.no_match_note));
+    lines.push('');
+  }
+  const limitations = asArray(tools.limitations).map(asString);
+  if (limitations.length > 0) {
+    lines.push('What was read, and what was not:');
+    lines.push(...mdList(limitations));
+    lines.push('');
+  }
+  lines.push(asString(tools.availability_note));
+  lines.push('');
   lines.push(
     asString(tools.exactness_note) ||
-      'Only exact id or normalized full-name equality counts as an installed match.',
+      'Only a recorded plan reference or an exact whole-phrase name counts.',
   );
+  lines.push('');
+}
+
+/**
+ * The saved-round debate. Counts, changes, positions, and the explicit
+ * absence of a chair stop note come from the record only.
+ */
+function pushDebateMd(lines: string[], model: Record<string, unknown>): void {
+  const debate = asRecord(model.debate);
+  const highest = asNumberOrNull(debate.highest_round);
+  lines.push('## The debate');
+  lines.push('');
+  lines.push(
+    `Rounds saved: ${Number(debate.rounds_saved ?? 0)}; highest round: ${
+      highest === null ? 'none' : String(highest)
+    }; split: ${debate.split === true ? 'yes' : debate.split === false ? 'no' : 'not available'}.`,
+  );
+  lines.push('');
+  lines.push(...mdList(asArray(debate.notes)));
+  lines.push('');
+  for (const roundValue of asArray(debate.rounds)) {
+    const round = asRecord(roundValue);
+    lines.push(`### Round ${Number(round.round ?? 0)}`);
+    lines.push('');
+    for (const seatValue of asArray(round.seats)) {
+      const seat = asRecord(seatValue);
+      lines.push(
+        `- ${asString(seat.display_name)}: ${asString(seat.stance_text) || asString(
+          seat.stance,
+        )} — ${asString(seat.preferred_option_label)}`,
+      );
+    }
+    lines.push('');
+  }
+  lines.push('What changed between saved rounds:');
+  const changes = asArray(debate.changes);
+  if (changes.length === 0) {
+    lines.push(
+      '- No seat changed its stance or preferred option between the saved rounds.',
+    );
+  } else {
+    for (const changeValue of changes) {
+      const change = asRecord(changeValue);
+      lines.push(
+        `- Round ${Number(change.round ?? 0)} — ${asString(
+          change.display_name,
+        )}: ${asString(change.from_stance_text)} / ${asString(
+          change.from_option_label,
+        )} → ${asString(change.to_stance_text)} / ${asString(
+          change.to_option_label,
+        )}`,
+      );
+    }
+  }
+  lines.push('');
+  const positions = asArray(debate.positions);
+  if (positions.length > 0) {
+    lines.push('Final positions:');
+    for (const positionValue of positions) {
+      const position = asRecord(positionValue);
+      lines.push(
+        `- ${asString(position.option_label)}: ${asArray(position.seat_names)
+          .map(asString)
+          .join(', ')}`,
+      );
+    }
+    lines.push('');
+  }
+  lines.push(asString(asRecord(debate.stop_record).note));
   lines.push('');
 }
 
@@ -1416,13 +1696,11 @@ export async function createCouncilExport(
     via: string;
     exported_at?: string;
     /**
-     * Optional, already validated and owner-bound install facts from
-     * the client. The route does not accept this yet; the report
-     * prints an explicit "not provided" tools section until the
-     * handoff integration lands.
+     * Optional, already validated and installation-bound snapshot from
+     * the scope store. The report prints an explicit "not provided"
+     * tools section when no snapshot exists.
      */
-    capability_handoff?: CapabilityHandoff | null;
-    capability_requirements?: readonly SkillRequirement[];
+    capability_snapshot?: InstallationCapabilitySnapshot | null;
   },
 ): Promise<CouncilExportResult> {
   for (const format of input.formats) {
@@ -1445,8 +1723,7 @@ export async function createCouncilExport(
     report_date: exportedAt.slice(0, 10),
     session_mode: session.spec.mode,
     redaction,
-    capability_handoff: input.capability_handoff ?? null,
-    capability_requirements: input.capability_requirements ?? [],
+    capability_snapshot: input.capability_snapshot ?? null,
   });
   const reportRevision = String(model.report_revision_id);
   const redacted = redaction !== null;
