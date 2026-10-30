@@ -1300,7 +1300,10 @@ function pushDebateMd(lines: string[], model: Record<string, unknown>): void {
     }
     lines.push('');
   }
-  lines.push(asString(asRecord(debate.stop_record).note));
+  lines.push(
+    asString(asRecord(debate.stop_record ?? {}).note) ||
+      'The saved record contains no chair stop note.',
+  );
   lines.push('');
 }
 

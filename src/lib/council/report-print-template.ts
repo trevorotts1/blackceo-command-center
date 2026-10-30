@@ -567,7 +567,7 @@ function renderRounds(model: Record<string, unknown>): string {
   }
   out.push(
     `<p class="meta">${escapeHtml(
-      asString(asRecord(debate.stop_record).note) ||
+      asString(asRecord(debate.stop_record ?? {}).note) ||
         'The saved record contains no chair stop note.',
     )}</p>`,
   );
