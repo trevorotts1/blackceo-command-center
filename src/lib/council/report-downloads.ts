@@ -84,6 +84,19 @@ import {
   formatScore,
   renderPrintHtml,
 } from './report-print-template';
+import { loadReportCoverAssets } from './report-cover-assets';
+import {
+  dedupeExact,
+  readConsultVerdict,
+  readScoredVerdict,
+  summarizeConditions,
+  type ConditionSummary,
+} from './report-reading';
+import {
+  matchPlanCapabilities,
+  type CapabilityHandoff,
+  type SkillRequirement,
+} from './capability-handoff';
 
 // ------------------------------------------------------------ formats
 
@@ -300,6 +313,14 @@ export interface ReportModelInput {
   report_date: string;
   session_mode: string | null;
   redaction: RedactionProfile | null;
+  /**
+   * A client capability handoff already validated and bound by the
+   * caller. Absent means "not provided": the report then says the
+   * installed-skill match is unverified and claims no inventory.
+   */
+  capability_handoff?: CapabilityHandoff | null;
+  /** Plan skills the report should match exactly, when recorded. */
+  capability_requirements?: readonly SkillRequirement[];
 }
 
 function scoredModel(input: ReportModelInput, verdict: ScoredVerdict) {
@@ -483,6 +504,71 @@ export function buildReportModel(input: ReportModelInput): Record<string, unknow
   const packVersions = [...new Set(final_cards.map((card) => card.pack_version))].sort();
   const base =
     verdict.result_kind === 'scored' ? scoredModel(input, verdict) : consultModel(input, verdict);
+  const advisorCards = final_cards.filter(
+    (card): card is AdvisorCard => card.card_kind === 'advisor' && card.round === 2,
+  );
+  const conditions: ConditionSummary = summarizeConditions({
+    prerequisites: verdict.result_kind === 'scored' ? verdict.prerequisites : [],
+    hardFindings: verdict.result_kind === 'scored' ? verdict.hard_constraint_findings : [],
+    cards: advisorCards,
+  });
+  const reading =
+    verdict.result_kind === 'consult'
+      ? readConsultVerdict({
+          seat_display_name: seatDisplayName(verdict.consult_card.seat_id),
+        })
+      : readScoredVerdict({
+          label: verdict.label,
+          recommended_option_label: (base.verdict_block as Record<string, unknown>)
+            .recommended_option_label as string | null,
+          conditions,
+        });
+  const unknowns = dedupeExact([
+    ...brief.unknowns.map((unknown) => unknown.statement),
+    ...((base.critical_unknowns as string[] | undefined) ?? []),
+  ]);
+  const toolMatch = matchPlanCapabilities(
+    input.capability_requirements ?? [],
+    input.capability_handoff ?? null,
+  );
+  const safeTools = {
+    ...toolMatch,
+    matches: toolMatch.matches.map((match) => ({
+      requirement: match.requirement,
+      matches: match.matches.map((item) => ({
+        skill_id: item.skill_id,
+        name: item.name,
+        version: item.version,
+      })),
+    })),
+    exactness_note:
+      'Only an exact skill id or a normalized exact full-name match counts as installed. Shared tokens, prefixes, and fuzzy similarity are never matches. The Command Center server cannot read a client installation; without a bound handoff, this section says so instead of guessing.',
+  };
+  const readinessReasons: string[] = [];
+  if (verdict.result_kind === 'consult') {
+    readinessReasons.push('One seat answered; a consultation carries no score and no plan.');
+  } else {
+    readinessReasons.push(`Recorded verdict label: ${verdict.label}.`);
+    readinessReasons.push(
+      `${conditions.total} condition(s) recorded; ${conditions.blocking_open} blocking and open.`,
+    );
+    if (verdict.hard_constraint_findings.some((finding) => finding.result !== 'pass')) {
+      readinessReasons.push(
+        `${verdict.hard_constraint_findings.filter((finding) => finding.result !== 'pass').length} hard constraint finding(s) are not a pass.`,
+      );
+    }
+    readinessReasons.push(
+      `${unknowns.recorded} unknown(s) recorded; ${unknowns.distinct} distinct.`,
+    );
+  }
+  const conditionsDisplay =
+    conditions.total === 0
+      ? 'none recorded'
+      : `${conditions.total} recorded, ${conditions.blocking_open} blocking and open`;
+  const unknownsDisplay =
+    unknowns.recorded === 0
+      ? 'none recorded'
+      : `${unknowns.recorded} recorded, ${unknowns.distinct} distinct`;
   const model: Record<string, unknown> = {
     schema_version: 'wise-elders.report/v1',
     artifact_kind: 'council_decision_report',
@@ -504,6 +590,50 @@ export function buildReportModel(input: ReportModelInput): Record<string, unknow
     source_pack_versions: packVersions,
     simulation_label: SIMULATION_LABEL,
     authorization_notice: AUTHORIZATION_NOTICE,
+    summary: {
+      label_plain: reading.label_plain,
+      decision: reading.decision,
+      reading: reading.reading,
+      readiness_headline: reading.readiness_headline,
+      evidence_strength:
+        (base.verdict_block as Record<string, unknown>).evidence_strength ?? null,
+      conditions_display: conditionsDisplay,
+      unknowns_display: unknownsDisplay,
+    },
+    readiness: {
+      status: reading.readiness_status,
+      headline: reading.readiness_headline,
+      reasons: readinessReasons,
+    },
+    question_and_context: {
+      question: brief.question,
+      facts: brief.facts.map((fact) => ({
+        id: fact.id,
+        statement: fact.statement,
+        evidence_ids: [...fact.evidence_ids],
+      })),
+      assumptions: brief.assumptions.map((fact) => fact.statement),
+      unknowns: {
+        recorded: unknowns.recorded,
+        distinct: unknowns.distinct,
+        collapsed: unknowns.collapsed,
+        items: unknowns.items,
+        note: unknowns.note,
+      },
+      critical_domains: brief.critical_domains.map((domain) => ({
+        domain: domain.domain,
+        status: domain.status,
+        unresolved_questions: [...domain.unresolved_questions],
+      })),
+    },
+    conditions_summary: conditions,
+    how_to_use: [
+      'Start with the decision, the readiness line, and the plan. Part 2 holds the full member record.',
+      'A recorded condition is a prerequisite, not a formality. A blocking condition that is open means do not act yet.',
+      'An unrecorded value prints as "not recorded". It is never filled in, estimated, or upgraded.',
+      'This report is advisory. Approving a plan and executing it are separate authorizations.',
+    ],
+    your_tools: safeTools,
     brief: {
       brief_id: brief.brief_id,
       revision: brief.revision,
@@ -616,6 +746,47 @@ export function renderMarkdown(model: Record<string, unknown>): string {
   lines.push(`> ${asString(model.authorization_notice)}`);
   lines.push('');
 
+  // CTR-163: the same reader projection the print/PDF renderer uses.
+  const summary = asRecord(model.summary);
+  const readiness = asRecord(model.readiness);
+  const question = asRecord(model.question_and_context);
+  lines.push('## What this means');
+  lines.push('');
+  lines.push(`Decision: ${asString(summary.decision) || 'not recorded'}`);
+  lines.push(`Readiness: ${asString(summary.readiness_headline) || 'not recorded'}`);
+  lines.push(`Evidence strength: ${asString(summary.evidence_strength) || 'not recorded'}`);
+  lines.push(`Conditions: ${asString(summary.conditions_display) || 'none recorded'}`);
+  lines.push(`Unknowns: ${asString(summary.unknowns_display) || 'none recorded'}`);
+  lines.push('');
+  lines.push(asString(summary.reading) || 'No reading sentence was recorded.');
+  lines.push('');
+  for (const reason of asArray(readiness.reasons)) {
+    lines.push(`- ${asString(reason)}`);
+  }
+  lines.push('');
+  lines.push('## The question and what was recorded');
+  lines.push('');
+  lines.push(`Question: ${asString(question.question) || asString(model.decision_title)}`);
+  lines.push('');
+  lines.push('Confirmed facts:');
+  const facts = asArray(question.facts);
+  lines.push(
+    ...(facts.length > 0
+      ? facts.map((factValue) => `- ${asString(asRecord(factValue).statement)}`)
+      : ['- none recorded']),
+  );
+  lines.push('');
+  lines.push('Assumptions:');
+  lines.push(...(asArray(question.assumptions).length > 0 ? mdList(asArray(question.assumptions)) : ['- none recorded']));
+  lines.push('');
+  const unknownsRecord = asRecord(question.unknowns);
+  lines.push('Unknowns:');
+  lines.push(
+    `- ${asString(unknownsRecord.note) || `${Number(unknownsRecord.recorded ?? 0)} recorded; ${Number(unknownsRecord.distinct ?? 0)} distinct.`}`,
+  );
+  lines.push(...mdList(asArray(unknownsRecord.items)));
+  lines.push('');
+
   const consult = model.consult as Record<string, unknown> | null;
   if (consult) {
     lines.push('## Consultation');
@@ -632,10 +803,15 @@ export function renderMarkdown(model: Record<string, unknown>): string {
     lines.push('');
     lines.push(`Next step: ${asString(consult.next_step)}`);
     lines.push('');
+    pushHowToUseMd(lines, model);
+    pushToolsMd(lines, model);
     pushProvenanceMd(lines, model);
     return `${lines.join('\n')}\n`;
   }
 
+  pushPlanMd(lines, model);
+  pushHowToUseMd(lines, model);
+  pushToolsMd(lines, model);
   lines.push('## Executive decision');
   lines.push('');
   lines.push(`Verdict: ${asString(verdict.label)}`);
@@ -679,7 +855,7 @@ export function renderMarkdown(model: Record<string, unknown>): string {
   lines.push(`Strongest dissent: ${asStringOrNull(model.strongest_dissent) ?? 'none recorded'}`);
   lines.push('');
 
-  lines.push('## Constraints, assumptions, and unknowns');
+  lines.push('## Constraints, assumptions, and conditions');
   lines.push('');
   lines.push('Hard constraints:');
   const findings = asArray(model.hard_constraints);
@@ -695,9 +871,23 @@ export function renderMarkdown(model: Record<string, unknown>): string {
   const assumptions = asArray(brief.assumptions);
   lines.push(...(assumptions.length > 0 ? mdList(assumptions) : ['- none recorded']));
   lines.push('');
-  lines.push('Unknowns:');
-  const unknowns = [...asArray(brief.unknowns), ...asArray(model.critical_unknowns)];
-  lines.push(...(unknowns.length > 0 ? mdList(unknowns) : ['- none recorded']));
+  const conditions = asRecord(model.conditions_summary);
+  lines.push('Conditions and safeguards:');
+  lines.push(
+    `- ${Number(conditions.total ?? 0)} recorded; ${Number(conditions.open ?? 0)} open; ${Number(
+      conditions.satisfied ?? 0,
+    )} satisfied; ${Number(conditions.waived ?? 0)} waived by the owner; ${Number(
+      conditions.unresolved ?? 0,
+    )} unresolved; ${Number(conditions.blocking_open ?? 0)} blocking and open.`,
+  );
+  for (const itemValue of asArray(conditions.items)) {
+    const item = asRecord(itemValue);
+    lines.push(
+      `- ${asString(item.description)} (${asString(item.kind)}, ${asString(item.status)}${item.blocking === true ? ', blocking' : ''}, source: ${asString(item.source)})`,
+    );
+  }
+  lines.push('');
+  lines.push('Unknowns were printed once, with their recorded/distinct counts, in the question section above; they are not repeated here.');
   lines.push('');
 
   lines.push('## Amendments and ratification');
@@ -728,49 +918,110 @@ export function renderMarkdown(model: Record<string, unknown>): string {
     );
   }
   lines.push('');
-
-  lines.push('## Action proposals and authorization boundaries');
+  lines.push('The plan, its acceptance criteria, its stop conditions, and its review criteria were printed once in "The plan" above; they are not repeated here.');
   lines.push('');
-  const proposals = asArray(model.action_proposals);
-  if (proposals.length === 0) lines.push('- none');
-  for (const proposalValue of proposals) {
-    const proposal = asRecord(proposalValue);
-    lines.push(`### ${asString(proposal.action_id)}: ${asString(proposal.title)}`);
-    lines.push('');
-    lines.push(asString(proposal.description));
-    lines.push('');
-    lines.push(`Rationale: ${asString(proposal.rationale)}`);
-    lines.push('Acceptance criteria:');
-    lines.push(...mdList(asArray(proposal.acceptance_criteria)));
-    const depends = asArray(proposal.depends_on_action_ids).map(asString);
-    lines.push(`Depends on: ${depends.length > 0 ? depends.join(', ') : 'none'}`);
-    lines.push(`Risk class: ${asString(proposal.risk_class)}`);
-    lines.push(
-      'Execution authorization: separate execution authorization is required before this proposal may be acted on.',
-    );
-    lines.push('');
-  }
   lines.push(`> ${asString(model.authorization_notice)}`);
-  lines.push('');
-
-  lines.push('## Test, stop conditions, and review criteria');
-  lines.push('');
-  lines.push(
-    `Cheapest informative test: ${asStringOrNull(model.cheapest_informative_test) ?? 'none recorded'}`,
-  );
-  lines.push('');
-  lines.push('Stop conditions:');
-  const stop = asArray(model.stop_criteria);
-  lines.push(...(stop.length > 0 ? mdList(stop) : ['- none recorded']));
-  lines.push('');
-  lines.push('Outcome review criteria:');
-  const review = asArray(model.review_criteria);
-  lines.push(...(review.length > 0 ? mdList(review) : ['- none recorded']));
   lines.push('');
 
   pushSeatsMd(lines, model);
   pushProvenanceMd(lines, model);
   return `${lines.join('\n')}\n`;
+}
+
+function pushPlanMd(lines: string[], model: Record<string, unknown>): void {
+  lines.push('## The plan');
+  lines.push('');
+  const proposals = asArray(model.action_proposals);
+  if (proposals.length === 0) lines.push('- none recorded');
+  proposals.forEach((proposalValue, index) => {
+    const proposal = asRecord(proposalValue);
+    lines.push(`### Step ${index + 1}: ${asString(proposal.title)}`);
+    lines.push('');
+    lines.push(asString(proposal.description));
+    lines.push('');
+    lines.push(`Why: ${asString(proposal.rationale) || 'not recorded'}`);
+    const criteria = asArray(proposal.acceptance_criteria)
+      .map(asString)
+      .filter((criterion) => criterion.trim().length > 0);
+    if (criteria.length > 0) {
+      lines.push('Done when:');
+      lines.push(...mdList(criteria));
+    } else {
+      lines.push(
+        'Not ready to execute: no acceptance criterion was recorded for this step, so it cannot be started until one is recorded and approved. This is an absence in the record, not a pass.',
+      );
+    }
+    const depends = asArray(proposal.depends_on_action_ids).map(asString);
+    lines.push(`Depends on: ${depends.length > 0 ? depends.join(', ') : 'none'}`);
+    lines.push(`Risk class: ${asString(proposal.risk_class)}`);
+    lines.push(
+      'Execution authorization: separate execution authorization is required before this step may be acted on.',
+    );
+    lines.push('');
+  });
+  lines.push(
+    `Cheapest informative test: ${asStringOrNull(model.cheapest_informative_test) ?? 'none recorded'}`,
+  );
+  lines.push('');
+  const stop = asArray(model.stop_criteria)
+    .map(asString)
+    .filter((value) => value.trim().length > 0);
+  lines.push('Stop if:');
+  lines.push(
+    ...(stop.length > 0
+      ? mdList(stop)
+      : ['- no stop condition was recorded; that is an absence in the record, not permission to continue indefinitely.']),
+  );
+  lines.push('');
+  const review = asArray(model.review_criteria)
+    .map(asString)
+    .filter((value) => value.trim().length > 0);
+  lines.push('How you will know it worked:');
+  lines.push(
+    ...(review.length > 0
+      ? mdList(review)
+      : ['- no outcome review criterion was recorded; that is an absence in the record, not a pass.']),
+  );
+  lines.push('');
+}
+
+function pushHowToUseMd(lines: string[], model: Record<string, unknown>): void {
+  lines.push('## How to use this report');
+  lines.push('');
+  const howToUse = asArray(model.how_to_use).map(asString);
+  lines.push(...(howToUse.length > 0 ? mdList(howToUse) : ['- no reading guide was recorded.']));
+  lines.push('');
+}
+
+function pushToolsMd(lines: string[], model: Record<string, unknown>): void {
+  const tools = asRecord(model.your_tools);
+  lines.push('## Helpers that fit the plan');
+  lines.push('');
+  lines.push(asString(tools.note) || 'No client capability handoff was provided.');
+  lines.push('');
+  const matches = asArray(tools.matches);
+  if (matches.length > 0) {
+    for (const matchValue of matches) {
+      const match = asRecord(matchValue);
+      const requirement = asRecord(match.requirement);
+      const names = asArray(match.matches)
+        .map((item) => asRecord(item))
+        .map(
+          (item) =>
+            `${asString(item.name)}${asStringOrNull(item.version) ? ` (${asString(item.version)})` : ''}`,
+        )
+        .join(', ');
+      lines.push(
+        `- ${asStringOrNull(requirement.skill_id) ?? asString(requirement.name) ?? 'requirement'}: exact match — ${names}`,
+      );
+    }
+    lines.push('');
+  }
+  lines.push(
+    asString(tools.exactness_note) ||
+      'Only exact id or normalized full-name equality counts as an installed match.',
+  );
+  lines.push('');
 }
 
 function pushSeatsMd(lines: string[], model: Record<string, unknown>): void {
@@ -1164,6 +1415,14 @@ export async function createCouncilExport(
     exporter_subject: string;
     via: string;
     exported_at?: string;
+    /**
+     * Optional, already validated and owner-bound install facts from
+     * the client. The route does not accept this yet; the report
+     * prints an explicit "not provided" tools section until the
+     * handoff integration lands.
+     */
+    capability_handoff?: CapabilityHandoff | null;
+    capability_requirements?: readonly SkillRequirement[];
   },
 ): Promise<CouncilExportResult> {
   for (const format of input.formats) {
@@ -1186,12 +1445,15 @@ export async function createCouncilExport(
     report_date: exportedAt.slice(0, 10),
     session_mode: session.spec.mode,
     redaction,
+    capability_handoff: input.capability_handoff ?? null,
+    capability_requirements: input.capability_requirements ?? [],
   });
   const reportRevision = String(model.report_revision_id);
   const redacted = redaction !== null;
 
+  const cover = loadReportCoverAssets();
   const markdown = renderMarkdown(model);
-  const printHtml = renderPrintHtml(model);
+  const printHtml = renderPrintHtml(model, { cover });
   // The pdf artifact renders from the same print HTML through the
   // composed Chromium renderer, but only when the pdf format was
   // requested: a record JSON created without pdf binds an unbound
@@ -1466,7 +1728,7 @@ export async function readCouncilExport(
     redaction: null,
   });
   const markdown = renderMarkdown(model);
-  const printHtml = renderPrintHtml(model);
+  const printHtml = renderPrintHtml(model, { cover: loadReportCoverAssets() });
   // A record JSON binds its pdf sibling from the journal: the pdf
   // artifact created under the same request carries the hash this
   // record was created with. Without one, the entry stays unbound.

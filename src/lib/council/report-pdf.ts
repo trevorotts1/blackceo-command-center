@@ -203,12 +203,13 @@ async function launchDefaultBrowser(): Promise<Browser> {
 }
 
 const PDF_FOOTER_TEMPLATE =
-  '<div style="width: 100%; text-align: center; font-size: 9pt; color: #444;">Page <span class="pageNumber"></span> of <span class="totalPages"></span></div>';
+  '<div style="width: 100%; text-align: center; font-size: 14pt; color: #3A3934; font-family: Georgia, \'Times New Roman\', serif;">Page <span class="pageNumber"></span> of <span class="totalPages"></span></div>';
 const PDF_HEADER_TEMPLATE = '<span></span>';
 
-/** The print template's @page margins (CWE-038 render.ts), passed
- * explicitly so Chromium paginates to the template's design. */
-const PDF_MARGIN = { top: '20mm', bottom: '20mm', left: '18mm', right: '18mm' };
+/** The print template's @page margins (CTR-163), passed explicitly so
+ * Chromium paginates to the template's design and leaves room for the
+ * 14pt page-number footer. */
+const PDF_MARGIN = { top: '17mm', bottom: '22mm', left: '20mm', right: '20mm' };
 
 /**
  * Pin the only volatile bytes in Chromium's PDF output (the

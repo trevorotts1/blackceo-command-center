@@ -68,6 +68,7 @@ import {
   recordedRouteEvidence,
   routeDescriptorFromRegistryEntry,
 } from '../providers';
+import { CAPABILITY_HANDOFF_CONTRACT } from '../capability-handoff';
 import { listModels } from '@/lib/model-registry';
 
 export interface CouncilRouteContext {
@@ -437,6 +438,22 @@ export function capabilitiesData(ctx: CouncilRouteContext): Record<string, unkno
     endpoints: registrySummary(),
     routes: catalog.summary,
     principal: clientSafePrincipalView(ctx.principal),
+    client_capability_handoff: {
+      contract: CAPABILITY_HANDOFF_CONTRACT,
+      integration: 'not_integrated',
+      upload_route: null,
+      required_for_installed_skill_matches: true,
+      reason:
+        'The Command Center server runs in the tenant host and cannot read a client or operator box. Installed-skill matches therefore require a strict client handoff bound to this principal; until the upload route is integrated, the report prints an explicit not-provided state and claims no inventory.',
+      matching: 'exact_skill_id_or_normalized_exact_full_name_only',
+      refused: [
+        'shared-token matches',
+        'prefix matches',
+        'fuzzy similarity',
+        'another owner or installation',
+        'unknown fields',
+      ],
+    },
   };
 }
 

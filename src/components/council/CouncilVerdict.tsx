@@ -28,6 +28,13 @@
 import { council } from './council-theme';
 import type { CouncilCard, DecisionBrief, Verdict } from '@/lib/council/contracts';
 import {
+  acceptanceCriteriaDisplay,
+  dedupeExact,
+  readConsultVerdict,
+  readScoredVerdict,
+  summarizeConditions,
+} from '@/lib/council/report-reading';
+import {
   classifyVerdictRead,
   qualificationLabel,
   type VerdictClassification,
@@ -35,15 +42,6 @@ import {
 import { seatIdentity, type CouncilRoomMode } from './council-room-types';
 import { CouncilExportMenu } from './CouncilExportMenu';
 import type { CouncilExportRequest } from './council-session-client';
-
-const LABEL_TEXT: Readonly<Record<string, string>> = {
-  GO: 'Go',
-  GO_WITH_CONDITIONS: 'Go, with conditions',
-  RESHAPE: 'Reshape the plan',
-  DONT_DO_IT: 'Do not do it',
-  WAIT: 'Wait',
-  INSUFFICIENT_EVIDENCE: 'Insufficient evidence',
-};
 
 const RATIFICATION_TEXT: Readonly<Record<string, string>> = {
   not_required: 'Ratification was not required for this verdict.',
@@ -135,13 +133,17 @@ export function CouncilVerdict({
 
   if (verdict.result_kind === 'consult') {
     const card = verdict.consult_card;
+    const reading = readConsultVerdict({
+      seat_display_name: seatIdentity(card.seat_id).displayName,
+    });
     return (
       <article data-testid="council-verdict">
         <section data-testid="verdict-recommendation" aria-label="Consultation result">
           <p className={council.meta}>CONSULTATION WITH ONE SEAT</p>
-          <h2 className={council.heading}>
-            {seatIdentity(card.seat_id).displayName}
-          </h2>
+          <h2 className={council.heading}>{reading.decision}</h2>
+          <p className={council.meta} data-testid="verdict-readiness">
+            {reading.reading} Readiness: {reading.readiness_headline}
+          </p>
           <p className={council.meta} data-testid="verdict-seat-label">
             {seatIdentity(card.seat_id).profileLabel}
           </p>
@@ -176,6 +178,17 @@ export function CouncilVerdict({
   const blockingFindings = verdict.hard_constraint_findings.filter(
     (finding) => finding.result !== 'pass',
   );
+  const conditions = summarizeConditions({
+    prerequisites: verdict.prerequisites,
+    hardFindings: verdict.hard_constraint_findings,
+  });
+  const reading = readScoredVerdict({
+    label: verdict.label,
+    recommended_option_label:
+      verdict.recommended_option_id === null ? null : recommended,
+    conditions,
+  });
+  const unknowns = dedupeExact(verdict.critical_unknowns);
   const advisorCards = cards.filter((c) => c.card_kind === 'advisor');
   const rounds = [1, 2, 3].filter((round) =>
     advisorCards.some((c) => c.card_kind === 'advisor' && c.round === round),
@@ -186,9 +199,11 @@ export function CouncilVerdict({
       {/* 1. Recommendation */}
       <section data-testid="verdict-recommendation" aria-label="Recommendation">
         <p className={council.meta}>THE COUNCIL RECOMMENDS</p>
-        <h2 className={council.heading}>
-          {LABEL_TEXT[verdict.label] ?? verdict.label}: {recommended}
-        </h2>
+        <h2 className={council.heading}>{reading.decision}</h2>
+        <p data-testid="verdict-reading">{reading.reading}</p>
+        <p className={council.meta} data-testid="verdict-readiness">
+          Readiness: {reading.readiness_headline}
+        </p>
         <p className={council.meta}>
           Evidence strength as recorded: {verdict.evidence_strength}.{' '}
           {RATIFICATION_TEXT[verdict.ratification_status] ?? ''}
@@ -206,6 +221,11 @@ export function CouncilVerdict({
       {/* 2. Conditions */}
       <section data-testid="verdict-conditions" aria-label="Conditions">
         <h3 className={council.heading}>Conditions</h3>
+        <p className={council.meta} data-testid="verdict-condition-counts">
+          {conditions.total} recorded · {conditions.open} open · {conditions.satisfied}{' '}
+          satisfied · {conditions.waived} waived by the owner · {conditions.unresolved}{' '}
+          unresolved · {conditions.blocking_open} blocking and open.
+        </p>
         {verdict.prerequisites.length === 0 && blockingFindings.length === 0 ? (
           <p>No conditions were recorded on this verdict.</p>
         ) : (
@@ -250,12 +270,19 @@ export function CouncilVerdict({
         ) : (
           <p>No dissent was recorded against this recommendation.</p>
         )}
-        {verdict.critical_unknowns.length > 0 ? (
+        {unknowns.recorded > 0 ? (
           <>
             <h4 className={council.heading}>Critical unknowns</h4>
+            <p className={council.meta} data-testid="verdict-unknown-counts">
+              {unknowns.recorded} recorded · {unknowns.distinct} distinct
+              {unknowns.collapsed > 0
+                ? ` · ${unknowns.collapsed} exact repeat(s) printed once`
+                : ''}
+            </p>
+            {unknowns.note ? <p className={council.meta}>{unknowns.note}</p> : null}
             <ul>
-              {verdict.critical_unknowns.map((item, i) => (
-                <li key={i}>{item}</li>
+              {unknowns.items.map((item) => (
+                <li key={item}>{item}</li>
               ))}
             </ul>
           </>
@@ -269,15 +296,26 @@ export function CouncilVerdict({
           <p>No action proposals were recorded on this verdict.</p>
         ) : (
           <ol>
-            {verdict.action_proposals.map((action) => (
-              <li key={action.action_id}>
-                <strong>{action.title}</strong>: {action.description}{' '}
-                <span className={council.meta}>
-                  (Planning only: creating or executing this work needs its own
-                  approval. A favorable verdict is not permission.)
-                </span>
-              </li>
-            ))}
+            {verdict.action_proposals.map((action) => {
+              const acceptance = acceptanceCriteriaDisplay(action.acceptance_criteria);
+              return (
+                <li key={action.action_id}>
+                  <strong>{action.title}</strong>: {action.description}{' '}
+                  <span className={council.meta}>
+                    (Planning only: creating or executing this work needs its own
+                    approval. A favorable verdict is not permission.)
+                  </span>
+                  <div className={council.meta}>
+                    Done when:{' '}
+                    {acceptance.not_ready ? (
+                      acceptance.note
+                    ) : (
+                      acceptance.items.join('; ')
+                    )}
+                  </div>
+                </li>
+              );
+            })}
           </ol>
         )}
         {verdict.cheapest_informative_test ? (
