@@ -85,6 +85,13 @@ import {
   formatScore,
   renderPrintHtml,
 } from './report-print-template';
+import { isPlainRecord, readReportDebateInput } from './report-model-guards';
+
+// CTR-171: the guards live in report-model-guards.ts so the print renderer
+// can share them without importing this module; re-exported here to keep
+// the CTR-169 public interface unchanged.
+export { readReportDebateInput };
+export type { ReportDebateInput } from './report-model-guards';
 import { loadReportCoverAssets } from './report-cover-assets';
 import {
   dedupeExact,
@@ -914,28 +921,8 @@ export function assertRedactionComplete(
 
 // ----------------------------------------------------------- markdown
 
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 function asRecord(value: unknown): Record<string, unknown> {
   return isPlainRecord(value) ? value : {};
-}
-
-/**
- * CTR-169: the one safe debate reader. A model without a debate object
- * yields `present: false` and an empty record; callers must print an
- * explicit no-saved-debate block rather than reading properties off a
- * cast. CTR-168 owns the print-template branch and can import this
- * helper unchanged (`readReportDebateInput(model.debate)`).
- */
-export interface ReportDebateInput {
-  present: boolean;
-  record: Record<string, unknown>;
-}
-export function readReportDebateInput(value: unknown): ReportDebateInput {
-  return isPlainRecord(value)
-    ? { present: true, record: value }
-    : { present: false, record: {} };
 }
 function asArray(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
@@ -1493,6 +1480,15 @@ export interface CouncilExportResult {
   session_id: string;
   verdict_revision: number;
   verdict_content_sha256: string;
+  /**
+   * CTR-171: the exact capability report section these artifacts were
+   * rendered from. On a replay this is the section frozen in the export
+   * journal by the first export, never a later live catalog. Callers
+   * report download metadata from this value so a replayed export cannot
+   * describe an inventory the artifact does not contain. It is the same
+   * bounded projection the report already prints, not the raw snapshot.
+   */
+  capability_section: CapabilityReportSection;
   artifacts: Array<{
     export_id: string;
     format: ReportFormat;
@@ -1999,6 +1995,7 @@ export async function createCouncilExport(
     session_id: input.session_id,
     verdict_revision: verdict.verdict_revision,
     verdict_content_sha256: verdict.content_sha256,
+    capability_section: capabilitySection,
     artifacts,
   };
 }

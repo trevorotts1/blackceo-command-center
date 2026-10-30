@@ -33,6 +33,7 @@
  */
 
 import type { ConditionSummary } from './report-reading';
+import { readReportDebateInput } from './report-model-guards';
 
 /**
  * CTR-168 consult statement, shared by every export format.
@@ -514,10 +515,21 @@ function renderScoreTable(model: Record<string, unknown>): string {
  * no nine-seat debate is invented.
  */
 function renderRounds(model: Record<string, unknown>): string {
-  const debate = asRecord(model.debate);
-  const highest = asNumberOrNull(debate.highest_round);
   const out: string[] = [];
   out.push(sectionHead('7', 'The debate', 'Only the saved advisor rounds. No round or reason is invented.'));
+  // CTR-171: read the debate through the CTR-169 guard. A model with no
+  // debate object (an absent record, or a consult whose model carries
+  // debate: null) prints an explicit absence and returns here; nothing
+  // reads highest_round off a bare cast.
+  const debateInput = readReportDebateInput(model.debate);
+  if (!debateInput.present) {
+    out.push(
+      '<p class="meta">No saved debate record is present in this report. Nothing is inferred: no rounds, seats, positions, or chair stop note are reported.</p>',
+    );
+    return out.join('\n');
+  }
+  const debate = debateInput.record;
+  const highest = asNumberOrNull(debate.highest_round);
   out.push(
     `<p><strong>Rounds saved:</strong> ${escapeHtml(String(Number(debate.rounds_saved ?? 0)))} · ` +
       `<strong>Highest round:</strong> ${escapeHtml(

@@ -891,6 +891,14 @@ export async function createExportRoute(
     },
   );
   const primary = result.artifacts[0];
+  // CTR-171: report the capability section the ARTIFACT was rendered from
+  // (the frozen journal input on a replay), not the live catalog loaded
+  // above. `source` and `captured_now` describe the create-time load and
+  // cannot be re-derived from the recorded artifact, so they are omitted
+  // here rather than reported from a newer read that may not match the
+  // bytes the caller is about to download. Only the bounded section
+  // projection is used; the raw snapshot is never returned or persisted.
+  const usedSection = result.capability_section;
   return {
     export_id: primary?.export_id ?? null,
     session_id: result.session_id,
@@ -902,10 +910,13 @@ export async function createExportRoute(
     verdict_content_sha256: result.verdict_content_sha256,
     artifacts: result.artifacts,
     capability_snapshot: {
-      present: capability !== null,
-      source: capability?.source ?? null,
-      captured_now: capability?.captured_now ?? false,
-      item_count: capability?.snapshot.items.length ?? 0,
+      present: usedSection.status !== 'not_provided',
+      status: usedSection.status,
+      installation_id: usedSection.snapshot?.installation_id ?? null,
+      captured_at: usedSection.snapshot?.captured_at ?? null,
+      basis: usedSection.snapshot?.basis ?? null,
+      item_count: usedSection.snapshot?.item_count ?? 0,
+      matched_count: usedSection.matched_count,
     },
     created_at: new Date().toISOString(),
   };
