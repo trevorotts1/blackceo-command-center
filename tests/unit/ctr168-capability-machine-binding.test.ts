@@ -15,6 +15,7 @@
  * Run: node --import tsx --import ./tests/setup/no-owner-telegram.ts \
  *   --test tests/unit/ctr168-capability-machine-binding.test.ts
  */
+import './_isolated-db';
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import type { NextRequest } from 'next/server';
