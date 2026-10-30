@@ -28,6 +28,7 @@ import {
 import {
   buildReportModel,
   renderMarkdown,
+  renderRecordJson,
 } from '../../src/lib/council/report-downloads';
 import {
   CONSULT_NO_DEBATE_NOTE,
@@ -181,7 +182,8 @@ test('a consult export states the absence of a debate in Markdown and print, and
     final_cards: [] as never,
   });
 
-  // The committed consult model carries no debate object at all.
+  // The committed consult model keeps debate: null — there is no
+  // zero-round debate object — and the explicit note carries the absence.
   assert.equal(model.debate, null);
   assert.equal(model.debate_note, CONSULT_NO_DEBATE_NOTE);
 
@@ -199,6 +201,27 @@ test('a consult export states the absence of a debate in Markdown and print, and
   // 5 records, and no section 7 for a consult.
   assert.match(html, /The consultation/);
   assert.match(html, /For your records/);
+});
+
+test('a consult record JSON keeps debate: null beside the note and never prints rounds', () => {
+  // UNEXECUTED here; Trevor owns the run. A consult with no saved advisor
+  // cards (no debate data at all) must export a record whose debate stays
+  // null, so the JSON export cannot read as a debate with zero rounds.
+  const sessionId = 'sess-ctr173-consult-record';
+  const model = buildReportModel({
+    verdict: consultVerdict(sessionId) as never,
+    brief: brief() as never,
+    final_cards: [] as never,
+  });
+  assert.equal(model.debate, null);
+  assert.equal(model.debate_note, CONSULT_NO_DEBATE_NOTE);
+
+  const record = JSON.parse(renderRecordJson(model, [])) as Record<string, unknown>;
+  assert.equal('debate' in record, true);
+  assert.equal(record.debate, null);
+  assert.equal(record.debate_note, CONSULT_NO_DEBATE_NOTE);
+  assert.ok(record.consult !== null && typeof record.consult === 'object');
+  assert.doesNotMatch(JSON.stringify(record.debate), /rounds_saved/);
 });
 
 test('a scored report with no saved debate object prints an explicit absence instead of throwing', () => {

@@ -514,6 +514,8 @@ function consultModel(input: ReportModelInput, verdict: Verdict) {
     // CTR-168: a consult has no advisor rounds, so the record says so in
     // words and carries no debate object at all. The explicit note keeps
     // the record JSON export from reading like a debate with zero rounds.
+    // CTR-173: buildReportModel preserves this null for a consult instead of
+    // overwriting it with a zero-round debate object.
     debate: null as null,
     debate_note: CONSULT_NO_DEBATE_NOTE,
   };
@@ -874,7 +876,13 @@ export function buildReportModel(input: ReportModelInput): Record<string, unknow
       unknowns: brief.unknowns.map((fact) => fact.statement),
     },
     ...base,
-    debate: buildDebateSection(final_cards, brief, input.session_mode),
+    // CTR-173: a consult model already carries debate: null plus the explicit
+    // debate_note (CTR-168). Only a scored model builds the saved-round debate
+    // object, so the consult null is never overwritten and the record JSON
+    // never prints a zero-round debate beside the note.
+    ...(verdict.result_kind === 'consult'
+      ? {}
+      : { debate: buildDebateSection(final_cards, brief, input.session_mode) }),
     provenance: {
       evidence_manifest: brief.evidence_manifest.map((entry) => ({
         evidence_id: entry.evidence_id,
