@@ -1,14 +1,21 @@
 'use client';
 
 /**
- * CouncilHome (CWE-033, Skill 77)
+ * CouncilHome (CWE-033, Skill 77; CTR-104 visual-first entry)
  *
- * The council home (Section 21): the primary action (ask the
- * council), the client's real session list from
- * GET /api/council/sessions, and the foundation's readiness picture
- * stated honestly (how many registered endpoints are wired, and that
- * run execution is not among them yet). Loading, empty, and error are
- * three different renders; an error never poses as an empty list.
+ * The council home renders the nine-seat chamber FIRST. The Council nav
+ * entry points here, so one click lands on the visual room with the
+ * question box inside it: no intake form stands between the click and
+ * the chamber. The guided intake is the conversation that starts AFTER
+ * the question (one question at a time on /council/new), never a gate
+ * before entry.
+ *
+ * Opening the chamber starts nothing: no session is created, no model
+ * is called, and the only requests are the existing authorized session
+ * list and capability probe. Existing sessions and the session history
+ * stay on this page below the chamber, and the foundation readiness
+ * summary stays stated honestly. Loading, empty, and error remain three
+ * different renders; an error never poses as an empty list.
  */
 
 import { useEffect, useState } from 'react';
@@ -20,7 +27,11 @@ import {
   type CouncilCapabilitiesData,
   type CouncilSessionListItem,
 } from '@/lib/council/journey-client';
+import { CHAMBER_QUESTION_MAX } from './council-journey-types';
 import { council } from './council-theme';
+import { CouncilShell } from './CouncilShell';
+import { COUNCIL_MEDALLION_SMALL_SRC } from './medallions';
+import { COUNCIL_SEAT_ROSTER, type CouncilRoomView } from './council-room-types';
 
 const STATE_LABELS: Record<string, string> = {
   DRAFT: 'Draft brief',
@@ -46,6 +57,24 @@ const STATE_LABELS: Record<string, string> = {
 export function sessionStateLabel(state: string): string {
   return STATE_LABELS[state] ?? state;
 }
+
+/**
+ * The honest pre-sitting room: the nine roster seats in their locked
+ * slots, all queued, with no question on the table yet. Static roster
+ * data only, so rendering it performs no I/O and starts nothing.
+ */
+export const IDLE_CHAMBER_ROOM: CouncilRoomView = {
+  decisionTitle: 'No question on the table yet',
+  phaseLabel: 'The chamber is open',
+  currentRound: null,
+  cruxLabel: null,
+  mode: 'idle',
+  seats: COUNCIL_SEAT_ROSTER.map((seat) => ({
+    seatId: seat.seatId,
+    status: 'queued' as const,
+    card: null,
+  })),
+};
 
 export function CouncilHome() {
   const [sessions, setSessions] = useState<CouncilSessionListItem[] | null>(null);
@@ -76,18 +105,58 @@ export function CouncilHome() {
 
   return (
     <div className="council-journey-stack" data-testid="council-home">
-      <div className="council-journey-notice">
+      <section className="council-chamber-panel" data-testid="council-chamber">
         <h2 className={council.heading} style={{ marginTop: 0 }}>
           Ask the council
         </h2>
-        <p>
-          Bring one decision. The guided intake asks one question at a time, saves your
-          progress as you go, and freezes a brief the nine advisors deliberate against.
+        <p className={council.meta} id="council-chamber-hint">
+          Type the decision you are facing. The chamber is already open below; the intake
+          questions come after, one at a time, and nothing is spent or started until you
+          choose a model route and freeze the brief.
         </p>
-        <Link className={council.btnPrimary} href="/council/new" data-testid="council-ask">
-          Ask the council
-        </Link>
-      </div>
+        {/* A native GET form: no client router needed, and the question
+            arrives on /council/new as ?question=… for the composer. */}
+        <form
+          action="/council/new"
+          method="get"
+          className="council-chamber-ask"
+          data-testid="council-chamber-ask"
+        >
+          <label className={council.meta} htmlFor="council-chamber-question">
+            Your question
+          </label>
+          <input
+            id="council-chamber-question"
+            name="question"
+            type="text"
+            required
+            maxLength={CHAMBER_QUESTION_MAX}
+            autoComplete="off"
+            className="council-journey-input council-chamber-input"
+            aria-describedby="council-chamber-hint"
+            data-testid="council-chamber-question"
+          />
+          <button
+            type="submit"
+            className={council.btnPrimary}
+            data-testid="council-chamber-submit"
+          >
+            Ask the council
+          </button>
+        </form>
+        <CouncilShell
+          room={IDLE_CHAMBER_ROOM}
+          medallionSrcBySeat={COUNCIL_MEDALLION_SMALL_SRC}
+        />
+
+        <p className={council.meta}>
+          Prefer the full guided intake from the start?{' '}
+          <Link href="/council/new" data-testid="council-chamber-guided-intake">
+            Open the guided intake
+          </Link>
+          .
+        </p>
+      </section>
 
       {capabilities ? (
         <p className={council.meta} data-testid="council-readiness-summary">
@@ -132,6 +201,11 @@ export function CouncilHome() {
             ))}
           </div>
         )}
+        <p className={council.meta}>
+          <Link href="/council/history" data-testid="council-history-link">
+            Session history
+          </Link>
+        </p>
       </section>
     </div>
   );
