@@ -29,6 +29,7 @@ import { normalizeDepartmentsPayload } from '../departments-payload';
 import { ensureRuntimeConfigFile } from '../runtime-config';
 import { BLOCKED_ASK_TRIGGER_SQL } from '../blocked-ask';
 import { councilMigration } from '../council/persistence/council-migration';
+import { CAPABILITY_SNAPSHOT_SCHEMA_SQL } from '../council/persistence/capability-snapshot-schema';
 import { applyLaunchStorageContract } from '../launch-schema';
 import {
   dedupeCanonicalWorkspaces,
@@ -8570,6 +8571,19 @@ export const migrations: Migration[] = [
           ON fulfillment_operation_receipts(task_id, created_at);
       `);
       console.log('[Migration 175] fulfillment_operations + receipts ready');
+    },
+  },
+
+  {
+    id: '176',
+    name: 'council_capability_snapshot',
+    up: (db) => {
+      // CTR-165. Additive only: one scope-bound snapshot row per
+      // (tenant, company, installation). IF NOT EXISTS makes a database
+      // whose schema already created the table upgrade as a no-op.
+      console.log('[Migration 176] Adding council capability snapshot table...');
+      db.exec(CAPABILITY_SNAPSHOT_SCHEMA_SQL);
+      console.log('[Migration 176] council capability snapshot ready');
     },
   },
 ];

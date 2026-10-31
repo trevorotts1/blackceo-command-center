@@ -68,6 +68,10 @@ import {
   recordedRouteEvidence,
   routeDescriptorFromRegistryEntry,
 } from '../providers';
+import {
+  CAPABILITY_SNAPSHOT_LIMITS,
+  CAPABILITY_SNAPSHOT_SCHEMA,
+} from '../capability-snapshot';
 import { listModels } from '@/lib/model-registry';
 
 export interface CouncilRouteContext {
@@ -189,6 +193,11 @@ export async function requireMutationProofFor(
  * exact permission that method declares. A machine caller with no
  * configured binding is refused COUNCIL_MACHINE_BINDING: machine
  * access is configured by the host, never claimed by the request.
+ *
+ * The operation is exact, never implied by another one. A caller
+ * authorized for 'read' is not thereby authorized for 'capability_read'
+ * or any other operation; every machine route names the one permission
+ * it requires.
  */
 export function machineAuthFor(
   request: NextRequest,
@@ -437,6 +446,33 @@ export function capabilitiesData(ctx: CouncilRouteContext): Record<string, unkno
     endpoints: registrySummary(),
     routes: catalog.summary,
     principal: clientSafePrincipalView(ctx.principal),
+    installation_capability_snapshot: {
+      contract: CAPABILITY_SNAPSHOT_SCHEMA,
+      integration: 'integrated',
+      ingest_route: '/api/council/capabilities/snapshot',
+      read_route: '/api/council/capabilities/snapshot',
+      binding: 'authenticated_tenant_company_installation',
+      machine_binding: {
+        read_operation: 'capability_read',
+        write_operation: 'capability_write',
+        source: 'host-configured MC_COUNCIL_MACHINE_BINDINGS_JSON; never request-claimed',
+        installation_pin_header: 'x-expected-installation-id',
+        note: 'A machine bearer without the named operation is refused COUNCIL_MACHINE_BINDING; read and write are separate operations.',
+      },
+      source_of_truth:
+        'A self installation is captured through the Command Center platform resolver; a client installation pushes a strict snapshot from its own runtime. The report reads the stored snapshot for the session scope and never reads another box.',
+      limits: CAPABILITY_SNAPSHOT_LIMITS,
+      matching: 'recorded_reference_or_exact_whole_phrase_only',
+      availability: 'installed_is_not_operational',
+      refused: [
+        'shared-token matches',
+        'prefix matches',
+        'fuzzy similarity',
+        'a snapshot for another owner or installation',
+        'unknown fields',
+        'any path, URL, prompt, memory, credential, or configuration field',
+      ],
+    },
   };
 }
 

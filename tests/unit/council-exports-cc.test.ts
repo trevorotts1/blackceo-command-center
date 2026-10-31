@@ -462,7 +462,17 @@ test('T105 + B15: formats agree from one model; the deliverable row and the down
   assert.equal(printCreated.status, 201, JSON.stringify(printCreated.body));
   const printDl = await download(printCreated.body.data.artifacts[0].export_id);
   assert.equal(printDl.status, 200);
-  assert.match(printDl.text, /12\.5pt/);
+  // Print contract (CTR-163): 14pt is the floor for every printable
+  // element and the rendered body is 15pt. The 12.5pt body size this
+  // assertion used to pin no longer exists; the floor assertion keeps a
+  // later change from shrinking any printable text below 14pt.
+  assert.match(printDl.text, /body \{[^}]*font-size: 15pt/);
+  assert.match(printDl.text, /font-size: 14pt/);
+  assert.equal(
+    /font-size:\s*(?:[0-9]|1[0-3])(?:\.[0-9]+)?pt/.test(printDl.text),
+    false,
+    'no printable element may drop below the 14pt floor',
+  );
   assert.match(printDl.text, /@page/);
   assert.match(printDl.text, /GO_WITH_CONDITIONS/);
 });

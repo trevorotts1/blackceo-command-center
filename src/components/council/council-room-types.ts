@@ -55,7 +55,7 @@ export type CouncilStance = 'support' | 'conditional' | 'oppose' | 'abstain';
 export type CouncilSeatStatus = 'queued' | 'started' | 'completed' | 'failed';
 
 /** How the room's data should be badged (Section 18.4, T101). */
-export type CouncilRoomMode = 'live' | 'replay' | 'sample';
+export type CouncilRoomMode = 'live' | 'replay' | 'sample' | 'idle';
 
 export interface CouncilMedallionRef {
   /** Canonical manifest file reference, master variant (240x240). */
@@ -323,5 +323,8 @@ export function roomModeBadge(mode: CouncilRoomMode): string | null {
       return 'Recorded replay';
     case 'sample':
       return 'Fictional sample';
+    case 'idle':
+      // The pre-sitting chamber: the room is open, nothing has started.
+      return 'Chamber open';
   }
 }
