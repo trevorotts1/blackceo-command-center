@@ -180,6 +180,12 @@ test('a consult export states the absence of a debate in Markdown and print, and
     verdict: consultVerdict(sessionId) as never,
     brief: brief() as never,
     final_cards: [] as never,
+    // ReportModelInput's own contract: every one of these is a real field the
+    // export service always passes. Omitted here, the model is built without
+    // them and the redaction guard reads `replacements` off undefined.
+    report_date: '2026-10-30',
+    session_mode: null,
+    redaction: null,
   });
 
   // The committed consult model keeps debate: null — there is no
@@ -212,6 +218,9 @@ test('a consult record JSON keeps debate: null beside the note and never prints 
     verdict: consultVerdict(sessionId) as never,
     brief: brief() as never,
     final_cards: [] as never,
+    report_date: '2026-10-30',
+    session_mode: null,
+    redaction: null,
   });
   assert.equal(model.debate, null);
   assert.equal(model.debate_note, CONSULT_NO_DEBATE_NOTE);
@@ -230,6 +239,9 @@ test('a scored report with no saved debate object prints an explicit absence ins
     verdict: scoredVerdict(sessionId) as never,
     brief: brief() as never,
     final_cards: [] as never,
+    report_date: '2026-10-30',
+    session_mode: null,
+    redaction: null,
   });
   delete (model as Record<string, unknown>).debate;
 

@@ -297,6 +297,24 @@ export async function renderCouncilReportPdf(
     const page = await browser.newPage();
     await page.setContent(printHtml, { waitUntil: 'load' });
     await page.emulateMedia({ media: 'print' });
+    // CTR-186: the report cover embeds one portrait per seat as a data URI
+    // (nine `<img>` elements, ~1.3 MB of base64). `load` fires when the
+    // documents are fetched, not when every image is decoded, so a print
+    // snapshot taken straight after it can embed a different image raster
+    // than a later snapshot of the SAME html. Since both renders must agree
+    // byte for byte (the composed export service verifies a download against
+    // the hash journaled at create time), settle the document first: fonts
+    // ready, every image decoded, two frames flushed. Nothing about what is
+    // printed changes — only that the paint has finished before it is taken.
+    await page.evaluate(async () => {
+      await document.fonts.ready;
+      await Promise.all(
+        Array.from(document.images).map((image) => image.decode().catch(() => undefined)),
+      );
+      await new Promise<void>((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+      });
+    });
     const bytes = await page.pdf({
       preferCSSPageSize: true,
       printBackground: true,

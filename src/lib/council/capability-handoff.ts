@@ -54,7 +54,16 @@ export const capabilityHandoffSchema = z
   .superRefine((value, ctx) => {
     const seen = new Set<string>();
     for (const [index, item] of value.items.entries()) {
-      const key = `${item.skill_id ?? ''}\u0000${item.name.toLowerCase()}`;
+      // Exact matching keys on the STABLE SKILL ID when the item records one
+      // (`matchSkillExactly` filters on `skill_id` alone in that case), and on
+      // the normalized name only when the item has no id. Two rows sharing a
+      // key are one installed skill recorded twice: an exact match would then
+      // return two hits for one requirement, which is ambiguous, so the whole
+      // handoff is refused instead of silently picking one row.
+      const key =
+        item.skill_id !== null
+          ? `id\u0000${item.skill_id}`
+          : `name\u0000${normalizeName(item.name)}`;
       if (seen.has(key)) {
         ctx.addIssue({
           code: 'custom',
