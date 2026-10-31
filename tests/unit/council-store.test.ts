@@ -97,7 +97,14 @@ test('getDb() applied the council schema through the real migration runner', () 
     .handle()
     .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'council%'`)
     .all() as { name: string }[];
-  assert.equal(tables.length, 19);
+  // 18 Section 16.2 tables + council_kanban_links (the council schema script)
+  // + council_capability_snapshots, which CTR-165's migration 176 adds on the
+  // same chain this real runner applied.
+  assert.equal(tables.length, 20);
+  assert.ok(
+    tables.some((table) => table.name === 'council_capability_snapshots'),
+    'the chain also applied CTR-165 migration 176 (council_capability_snapshots)',
+  );
 });
 
 test('scoped session reads enforce scope and Section 11.1 visibility', () => {

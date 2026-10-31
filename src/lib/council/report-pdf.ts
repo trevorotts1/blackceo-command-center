@@ -203,12 +203,13 @@ async function launchDefaultBrowser(): Promise<Browser> {
 }
 
 const PDF_FOOTER_TEMPLATE =
-  '<div style="width: 100%; text-align: center; font-size: 9pt; color: #444;">Page <span class="pageNumber"></span> of <span class="totalPages"></span></div>';
+  '<div style="width: 100%; text-align: center; font-size: 14pt; color: #3A3934; font-family: Georgia, \'Times New Roman\', serif;">Page <span class="pageNumber"></span> of <span class="totalPages"></span></div>';
 const PDF_HEADER_TEMPLATE = '<span></span>';
 
-/** The print template's @page margins (CWE-038 render.ts), passed
- * explicitly so Chromium paginates to the template's design. */
-const PDF_MARGIN = { top: '20mm', bottom: '20mm', left: '18mm', right: '18mm' };
+/** The print template's @page margins (CTR-163), passed explicitly so
+ * Chromium paginates to the template's design and leaves room for the
+ * 14pt page-number footer. */
+const PDF_MARGIN = { top: '17mm', bottom: '22mm', left: '20mm', right: '20mm' };
 
 /**
  * Pin the only volatile bytes in Chromium's PDF output (the
@@ -296,6 +297,24 @@ export async function renderCouncilReportPdf(
     const page = await browser.newPage();
     await page.setContent(printHtml, { waitUntil: 'load' });
     await page.emulateMedia({ media: 'print' });
+    // CTR-186: the report cover embeds one portrait per seat as a data URI
+    // (nine `<img>` elements, ~1.3 MB of base64). `load` fires when the
+    // documents are fetched, not when every image is decoded, so a print
+    // snapshot taken straight after it can embed a different image raster
+    // than a later snapshot of the SAME html. Since both renders must agree
+    // byte for byte (the composed export service verifies a download against
+    // the hash journaled at create time), settle the document first: fonts
+    // ready, every image decoded, two frames flushed. Nothing about what is
+    // printed changes — only that the paint has finished before it is taken.
+    await page.evaluate(async () => {
+      await document.fonts.ready;
+      await Promise.all(
+        Array.from(document.images).map((image) => image.decode().catch(() => undefined)),
+      );
+      await new Promise<void>((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+      });
+    });
     const bytes = await page.pdf({
       preferCSSPageSize: true,
       printBackground: true,

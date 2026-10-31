@@ -132,6 +132,12 @@ export default defineConfig({
       // kinds (T017), verdict section order (21.4), typed FEATURE_NOT_READY
       // states naming their owners, preference step separation.
       'tests/unit/council-journey-render.test.tsx',
+      // CTR-104 — visual-first Council entry: the nav click target is
+      // /council, the chamber (nine seats) renders before any intake UI,
+      // the question box is a native GET form, opening the chamber issues
+      // only the two authorized GET reads, sessions/history stay reachable,
+      // and a chamber question prefills the decision answer.
+      'tests/unit/council-chamber-entry-render.test.tsx',
       'tests/unit/council-mounted-start.test.tsx',
       // CWE-050 (Skill 77) — Section 7 attribution label on the composed
       // verdict surface: every seat-attributed row (scored detail rounds

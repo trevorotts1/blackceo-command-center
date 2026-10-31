@@ -15,17 +15,16 @@
  */
 
 import type { DecisionBrief, Verdict } from '@/lib/council/contracts/types';
+import {
+  acceptanceCriteriaDisplay,
+  dedupeExact,
+  planListDisplay,
+  readConsultVerdict,
+  readScoredVerdict,
+  summarizeConditions,
+} from '@/lib/council/report-reading';
 import { council } from './council-theme';
 import { seatDisplayName } from './council-journey-types';
-
-const VERDICT_LABEL_TEXT: Record<string, string> = {
-  GO: 'Go',
-  GO_WITH_CONDITIONS: 'Go, with conditions',
-  RESHAPE: 'Reshape the decision',
-  DONT_DO_IT: 'Do not do it',
-  WAIT: 'Wait',
-  INSUFFICIENT_EVIDENCE: 'Insufficient evidence',
-};
 
 function Section({
   order,
@@ -60,13 +59,20 @@ export function VerdictView({
 }) {
   if (verdict.result_kind === 'consult') {
     const card = verdict.consult_card;
+    const reading = readConsultVerdict({
+      seat_display_name: seatDisplayName(card.seat_id),
+    });
     return (
       <div data-testid="verdict-view" data-result-kind="consult">
         <Section order={1} name="recommendation" title="Consult answer">
-          <p className={council.meta}>
-            This session was a bounded consult, not a scored council decision. No scores were
-            produced.
+          <p className={council.meta} data-testid="verdict-start-here">
+            Start here: one recorded seat answered. This is advice, not a scored
+            council verdict, and there is no plan to approve.
           </p>
+          <p>
+            <strong>{reading.decision}.</strong> {reading.reading}
+          </p>
+          <p className={council.meta}>Readiness: {reading.readiness_headline}</p>
           <p>{card.answer}</p>
           {card.assumptions.length > 0 ? (
             <>
@@ -100,13 +106,33 @@ export function VerdictView({
     if (!id) return 'No option recommended';
     return brief?.options.find((o) => o.id === id)?.label ?? id;
   };
+  const conditions = summarizeConditions({
+    prerequisites: verdict.prerequisites,
+    hardFindings: verdict.hard_constraint_findings,
+  });
+  const reading = readScoredVerdict({
+    label: verdict.label,
+    recommended_option_label:
+      verdict.recommended_option_id === null
+        ? null
+        : optionLabel(verdict.recommended_option_id),
+    conditions,
+  });
+  const unknowns = dedupeExact(verdict.critical_unknowns);
 
   return (
     <div data-testid="verdict-view" data-result-kind="scored">
       <Section order={1} name="recommendation" title="Recommendation">
-        <p>
-          <strong>{VERDICT_LABEL_TEXT[verdict.label] ?? verdict.label}:</strong>{' '}
-          {optionLabel(verdict.recommended_option_id)}
+        <p className={council.meta} data-testid="verdict-start-here">
+          Start here: this is the recorded decision. The conditions come next; the
+          full scorecard and the technical record are behind the disclosures below.
+        </p>
+        <p data-testid="verdict-decision">
+          <strong>{reading.decision}.</strong>
+        </p>
+        <p data-testid="verdict-reading">{reading.reading}</p>
+        <p className={council.meta} data-testid="verdict-readiness">
+          Readiness: {reading.readiness_headline}
         </p>
         <p className={council.meta}>
           Evidence strength: {verdict.evidence_strength}. Validation:{' '}
@@ -115,32 +141,29 @@ export function VerdictView({
       </Section>
 
       <Section order={2} name="conditions" title="Conditions">
-        {verdict.prerequisites.length === 0 && verdict.hard_constraint_findings.length === 0 ? (
-          <p className={council.meta}>No conditions or prerequisites were recorded.</p>
-        ) : null}
-        {verdict.prerequisites.length > 0 ? (
-          <>
-            <h3>Prerequisites</h3>
-            <ul>
-              {verdict.prerequisites.map((p) => (
-                <li key={p}>{p}</li>
-              ))}
-            </ul>
-          </>
-        ) : null}
-        {verdict.hard_constraint_findings.length > 0 ? (
-          <>
-            <h3>Hard constraint findings</h3>
-            <ul>
-              {verdict.hard_constraint_findings.map((finding) => (
-                <li key={`${finding.constraint_id}-${finding.option_id}`}>
-                  {optionLabel(finding.option_id)}: {finding.result} (checked by{' '}
-                  {finding.checker})
-                </li>
-              ))}
-            </ul>
-          </>
-        ) : null}
+        <p className={council.meta} data-testid="verdict-condition-counts">
+          {conditions.total} recorded · {conditions.open} open · {conditions.satisfied}{' '}
+          satisfied · {conditions.waived} waived by the owner · {conditions.unresolved}{' '}
+          unresolved · {conditions.blocking_open} blocking and open.
+        </p>
+        {conditions.items.length === 0 ? (
+          <p className={council.meta}>
+            No conditions or prerequisites were recorded on this verdict. Seat-level
+            conditions, when a card records them, stay in the room and reading views.
+          </p>
+        ) : (
+          <ul>
+            {conditions.items.map((item) => (
+              <li key={`${item.source}-${item.id}`}>
+                {item.description}{' '}
+                <span className={council.meta}>
+                  ({item.kind}, {item.status}
+                  {item.blocking ? ', blocking' : ''})
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
         {verdict.stop_criteria.length > 0 ? (
           <>
             <h3>Stop criteria</h3>
@@ -150,7 +173,11 @@ export function VerdictView({
               ))}
             </ul>
           </>
-        ) : null}
+        ) : (
+          <p className={council.meta}>
+            {planListDisplay(verdict.stop_criteria, 'stop criterion').note}
+          </p>
+        )}
       </Section>
 
       <Section order={3} name="main-reasons" title="Three main reasons">
@@ -167,16 +194,25 @@ export function VerdictView({
 
       <Section order={4} name="strongest-concern" title="Strongest concern">
         <p>{verdict.strongest_dissent ?? 'No dissent was recorded.'}</p>
-        {verdict.critical_unknowns.length > 0 ? (
+        {unknowns.recorded > 0 ? (
           <>
             <h3>Critical unknowns</h3>
+            <p className={council.meta} data-testid="verdict-unknown-counts">
+              {unknowns.recorded} recorded · {unknowns.distinct} distinct
+              {unknowns.collapsed > 0
+                ? ` · ${unknowns.collapsed} exact repeat(s) printed once`
+                : ''}
+            </p>
+            {unknowns.note ? <p className={council.meta}>{unknowns.note}</p> : null}
             <ul>
-              {verdict.critical_unknowns.map((u) => (
+              {unknowns.items.map((u) => (
                 <li key={u}>{u}</li>
               ))}
             </ul>
           </>
-        ) : null}
+        ) : (
+          <p className={council.meta}>No critical unknowns were recorded.</p>
+        )}
       </Section>
 
       <Section order={5} name="next-actions" title="Immediate next actions">
@@ -184,14 +220,34 @@ export function VerdictView({
           <p className={council.meta}>No action proposals were recorded.</p>
         ) : (
           <ul>
-            {verdict.action_proposals.map((proposal) => (
-              <li key={proposal.action_id}>
-                <strong>{proposal.title}.</strong> {proposal.description}
-                {proposal.department_id ? (
-                  <span className={council.meta}> Department: {proposal.department_id}.</span>
-                ) : null}
-              </li>
-            ))}
+            {verdict.action_proposals.map((proposal) => {
+              const acceptance = acceptanceCriteriaDisplay(proposal.acceptance_criteria);
+              return (
+                <li key={proposal.action_id} data-testid={`verdict-action-${proposal.action_id}`}>
+                  <strong>{proposal.title}.</strong> {proposal.description}
+                  {proposal.department_id ? (
+                    <span className={council.meta}> Department: {proposal.department_id}.</span>
+                  ) : null}
+                  <div className={council.meta}>
+                    Done when:{' '}
+                    {acceptance.not_ready ? (
+                      <span data-testid={`verdict-action-${proposal.action_id}-not-ready`}>
+                        {acceptance.note}
+                      </span>
+                    ) : (
+                      acceptance.items.join('; ')
+                    )}
+                  </div>
+                  <div className={council.meta}>
+                    Depends on:{' '}
+                    {proposal.depends_on_action_ids.length > 0
+                      ? proposal.depends_on_action_ids.join(', ')
+                      : 'none'}{' '}
+                    · Risk class: {proposal.risk_class}
+                  </div>
+                </li>
+              );
+            })}
           </ul>
         )}
         {verdict.cheapest_informative_test ? (
@@ -202,7 +258,11 @@ export function VerdictView({
       </Section>
 
       <Section order={6} name="scorecard" title="Full scorecard">
-        <table className="council-journey-table" data-testid="verdict-scorecard">
+        <details data-testid="verdict-scorecard-disclosure">
+          <summary className={council.meta}>
+            Open the full scorecard and the weighting record
+          </summary>
+          <table className="council-journey-table" data-testid="verdict-scorecard">
           <thead>
             <tr>
               <th scope="col">Option</th>
@@ -242,6 +302,7 @@ export function VerdictView({
             {verdict.resolution_support.abstention}.
           </p>
         ) : null}
+        </details>
       </Section>
 
       <Section order={7} name="rounds-and-sources" title="Detailed rounds and sources">
@@ -249,7 +310,9 @@ export function VerdictView({
           Per-seat rounds are read in the room and reading views on this session page. The
           committed verdict record behind this page:
         </p>
-        <ul>
+        <details data-testid="verdict-records-disclosure">
+          <summary className={council.meta}>Open the committed record identifiers</summary>
+          <ul>
           <li>
             Brief hash <span className="council-journey-hash">{verdict.brief_sha256}</span>
           </li>
@@ -272,6 +335,7 @@ export function VerdictView({
             </ul>
           </>
         ) : null}
+        </details>
       </Section>
     </div>
   );
