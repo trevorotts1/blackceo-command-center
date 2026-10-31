@@ -156,6 +156,21 @@
  * 164c45a5 — the repair is the missing re-derivation, not a change in
  * posture to accommodate this PR.
  *
+ * re-derived 2026-10-30 for the CTR-165 capability snapshot ingest: POST
+ * /api/council/capabilities/snapshot — the scope-bound installation capability
+ * snapshot push. Its mutation proof is channel-specific, verified in the
+ * handler: handleCouncil resolves the CWE-007 principal (no tokenless caller),
+ * a browser principal must present the signed mc_csrf_token cookie
+ * (requireMutationProofFor), and a machine principal must present the approved
+ * bearer AND the host-configured operation-level binding 'capability_write'
+ * with the bound installation pinned by x-expected-installation-id
+ * (machineAuthFor), so a bearer alone is authentication, not authorization.
+ * It must NOT join BEARER_REQUIRED_WRITE_ROUTES: that would misstate the
+ * browser channel and 401 the console caller. No browser call site exists in
+ * this tree, so it is classified in the documented residual below:
+ * 163 mutating, 7 webhook-protected (unchanged), 156 non-webhook. Bearer
+ * totals unchanged (50 patterns match 54 templates, 53 bearer-ONLY).
+ *
  * re-derived 2026-09-27 for ILJ-004 tenant skip marks: POST
  * /api/interview/state — the owner's browser marking one structured question
  * skipped (InterviewClient.tsx:375 with the session cookie + tenant
@@ -431,16 +446,19 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
   // added one mutating route; it is called by the setup panel (interface
   // classification, so the every-route classification test stays green) and is
   // not webhook-gated, so both censuses move by exactly one.
-  it('API routes exporting a mutating method: 162 (literal assertion)', () => {
-    expect(allMutatingRoutes.length).toBe(162);
+  // re-derived 2026-10-30 for CTR-165 (capability snapshot ingest): POST
+  // /api/council/capabilities/snapshot adds one mutating route; it is never
+  // webhook-gated, so both censuses move by exactly one.
+  it('API routes exporting a mutating method: 163 (literal assertion)', () => {
+    expect(allMutatingRoutes.length).toBe(163);
   });
 
   it('protected by isWebhookSecretRoute: 7 (5 static + 2 dynamic — middleware src/middleware.ts:137-167)', () => {
     expect(webhookProtectedCount).toBe(7);
   });
 
-  it('non-webhook write routes: 155 (162 mutating − 7 webhook-protected; tenant authentication remains required)', () => {
-    expect(nonWebhookCount).toBe(155);
+  it('non-webhook write routes: 156 (163 mutating − 7 webhook-protected; tenant authentication remains required)', () => {
+    expect(nonWebhookCount).toBe(156);
   });
 
   it('interface call templates found by multi-line scanner', () => {
@@ -478,13 +496,17 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
 
   // ---- Derivation test: every reachable route is classified ---------------
 
-  // DOCUMENTED RESIDUAL (coordinator decision, 2026-10-16, train PR #550).
-  // The 13 council session routes below are in neither classification:
+  // DOCUMENTED RESIDUAL (coordinator decision, 2026-10-16, train PR #550;
+  // extended 2026-10-30 for the CTR-165 capability snapshot ingest).
+  // The 14 council write routes below are in neither classification:
   // no browser call site or client binding for them exists in this tree,
   // so the interface category cannot be evidenced, and the bearer
-  // category would misstate their real auth. Their designed caller is
-  // the operator's browser console, whose UI is not yet wired to them.
-  // Their posture, verified per handler: verified tenant identity plus
+  // category would misstate their real auth. The 13 session routes'
+  // designed caller is the operator's browser console, whose UI is not
+  // yet wired to them; the capability snapshot POST's callers are the
+  // machine channel and that same unwired console. Each entry's own
+  // comment records its verified posture. The 13 session routes are,
+  // verified per handler: verified tenant identity plus
   // the signed mc_csrf_token cookie at middleware passthrough, and
   // in-handler the CWE-007 principal with a CSRF mutation proof and
   // authorizeSessionMutate (the action-plan trio is dual-channel under
@@ -509,6 +531,17 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
     '/api/council/sessions/{id}/action-plan/preview', // dual-channel trio (CWE-045)
     '/api/council/sessions/{id}/action-plan/approve',
     '/api/council/sessions/{id}/action-plan/create',
+    // CTR-165 capability snapshot ingest (POST only; the GET of the same
+    // path is a read and needs no write classification). handleCouncil
+    // resolves the CWE-007 principal, so there is no tokenless caller; a
+    // browser principal proves the mutation with the signed mc_csrf_token
+    // cookie (requireMutationProofFor), and a machine principal must pass
+    // the approved bearer plus the host-configured operation-level binding
+    // 'capability_write' with the bound installation pinned by
+    // x-expected-installation-id (machineAuthFor). Bearer-listing it would
+    // 401 the console channel and misstate the browser auth, so it stays
+    // out of BEARER_REQUIRED_WRITE_ROUTES.
+    '/api/council/capabilities/snapshot',
   ];
 
   it('every reachable mutating route is either in BEARER_REQUIRED_WRITE_ROUTES, called by the interface, or a documented unwired console route (exact residual enforced)', () => {

@@ -79,11 +79,33 @@ import { registerDeliverable } from '../task-lifecycle';
 import { CouncilApiError } from './api/errors';
 import { renderCouncilReportPdf, ReportPdfError } from './report-pdf';
 import {
+  CONSULT_NO_DEBATE_NOTE,
   formatCoverage,
   formatDisplayScore,
   formatScore,
   renderPrintHtml,
 } from './report-print-template';
+import { isPlainRecord, readReportDebateInput } from './report-model-guards';
+
+// CTR-171: the guards live in report-model-guards.ts so the print renderer
+// can share them without importing this module; re-exported here to keep
+// the CTR-169 public interface unchanged.
+export { readReportDebateInput };
+export type { ReportDebateInput } from './report-model-guards';
+import { loadReportCoverAssets } from './report-cover-assets';
+import {
+  dedupeExact,
+  readConsultVerdict,
+  readScoredVerdict,
+  summarizeConditions,
+  type ConditionSummary,
+} from './report-reading';
+import {
+  buildCapabilityReportSection,
+  type CapabilityReportSection,
+  type InstallationCapabilitySnapshot,
+  type PlanProposalReference,
+} from './capability-snapshot';
 
 // ------------------------------------------------------------ formats
 
@@ -300,6 +322,22 @@ export interface ReportModelInput {
   report_date: string;
   session_mode: string | null;
   redaction: RedactionProfile | null;
+  /**
+   * The installation capability snapshot already validated and bound to
+   * this session's exact installation by the store/service. Absent means
+   * "not provided": the report then says the installed-capability match is
+   * unverified and claims no inventory.
+   */
+  capability_snapshot?: InstallationCapabilitySnapshot | null;
+  /**
+   * CTR-169: the report section actually rendered by the export, frozen
+   * into the export journal at create time. A download re-renders from
+   * this exact recorded projection instead of loading the live scope
+   * snapshot, so a later snapshot revision (or deletion) cannot change
+   * the bytes an existing export is bound to. Takes precedence over
+   * `capability_snapshot` when both are supplied.
+   */
+  capability_section?: CapabilityReportSection | null;
 }
 
 function scoredModel(input: ReportModelInput, verdict: ScoredVerdict) {
@@ -369,6 +407,10 @@ function scoredModel(input: ReportModelInput, verdict: ScoredVerdict) {
       description: proposal.description,
       rationale: proposal.rationale,
       source_condition_ids: [...proposal.source_condition_ids],
+      department_id: proposal.department_id,
+      assigned_agent_id: proposal.assigned_agent_id,
+      sop_id: proposal.sop_id,
+      persona_id: proposal.persona_id,
       acceptance_criteria: [...proposal.acceptance_criteria],
       depends_on_action_ids: [...proposal.depends_on_action_ids],
       risk_class: proposal.risk_class,
@@ -469,20 +511,294 @@ function consultModel(input: ReportModelInput, verdict: Verdict) {
       card_next_step: card.next_step,
       next_step: verdict.next_step,
     } as Record<string, unknown>,
+    // CTR-168: a consult has no advisor rounds, so the record says so in
+    // words and carries no debate object at all. The explicit note keeps
+    // the record JSON export from reading like a debate with zero rounds.
+    // CTR-173: buildReportModel preserves this null for a consult instead of
+    // overwriting it with a zero-round debate object.
+    debate: null as null,
+    debate_note: CONSULT_NO_DEBATE_NOTE,
   };
 }
 
+const STANCE_TEXT: Readonly<Record<string, string>> = {
+  support: 'Supports',
+  conditional: 'Supports with conditions',
+  oppose: 'Opposes',
+  abstain: 'Abstains',
+};
+
+function optionDisplayText(optionId: string | null, brief: DecisionBrief): string {
+  if (optionId === null) return 'No stated preference';
+  return brief.options.find((option) => option.id === optionId)?.label ?? optionId;
+}
+
 /**
- * Build the one report model. Pure and deterministic. Seat source
- * qualifications are not recorded in the Command Center (the seat
- * packs live in the portable runtime), so they render as 'not
- * recorded' here and are never upgraded.
+ * The debate section: the ACTUAL saved advisor rounds, what changed between
+ * them, whether the council split, and the explicit absence of a chair stop
+ * note. Nothing here is inferred. CC has no chair-note field, so the stop
+ * record says so instead of inventing a reason. A consult records one seat
+ * and no rounds, so it reports zero rounds and no invented nine-seat debate.
  */
+function buildDebateSection(
+  cards: readonly CouncilCard[],
+  brief: DecisionBrief,
+  sessionMode: string | null,
+): Record<string, unknown> {
+  const byRound = new Map<number, AdvisorCard[]>();
+  for (const card of cards) {
+    if (card.card_kind !== 'advisor') continue;
+    const seats = byRound.get(card.round) ?? [];
+    seats.push(card);
+    byRound.set(card.round, seats);
+  }
+  const rounds = [...byRound.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([round, seats]) => ({
+      round,
+      cards: [...seats].sort(
+        (a, b) => SEAT_IDS.indexOf(a.seat_id) - SEAT_IDS.indexOf(b.seat_id),
+      ),
+    }));
+  const highestRound = rounds.length > 0 ? rounds[rounds.length - 1].round : null;
+  const notes: string[] = [];
+  if (rounds.length === 0) {
+    notes.push(
+      'No advisor cards are saved in this record, so the debate cannot be reconstructed.',
+    );
+  } else if (rounds.length === 1) {
+    notes.push(
+      `Only one round of advisor cards is saved in this record (round ${rounds[0].round}), so a before-and-after comparison is not possible.`,
+    );
+  } else {
+    notes.push(`${rounds.length} rounds of advisor cards are saved in this record.`);
+  }
+  if (sessionMode === 'consult') {
+    notes.push(
+      'A consultation records one seat and no advisor rounds; no nine-seat debate is claimed.',
+    );
+  }
+  notes.push(
+    'The saved record contains no chair note explaining a stop decision; only the cards above are recorded.',
+  );
+
+  const changes: Array<Record<string, unknown>> = [];
+  for (let index = 1; index < rounds.length; index += 1) {
+    const previous = new Map(
+      rounds[index - 1].cards.map((card) => [card.seat_id, card]),
+    );
+    for (const card of rounds[index].cards) {
+      const before = previous.get(card.seat_id);
+      if (before === undefined) continue;
+      const changedOption =
+        before.preferred_option_id !== card.preferred_option_id;
+      const changedStance = before.stance !== card.stance;
+      if (!changedOption && !changedStance) continue;
+      changes.push({
+        round: rounds[index].round,
+        seat_id: card.seat_id,
+        display_name: seatDisplayName(card.seat_id),
+        from_option_label: optionDisplayText(before.preferred_option_id, brief),
+        to_option_label: optionDisplayText(card.preferred_option_id, brief),
+        from_stance_text: STANCE_TEXT[before.stance] ?? before.stance,
+        to_stance_text: STANCE_TEXT[card.stance] ?? card.stance,
+        changed_option: changedOption,
+        changed_stance: changedStance,
+      });
+    }
+  }
+
+  const latestBySeat = new Map<string, AdvisorCard>();
+  for (const round of rounds) {
+    for (const card of round.cards) latestBySeat.set(card.seat_id, card);
+  }
+  const latest = [...latestBySeat.values()].sort(
+    (a, b) => SEAT_IDS.indexOf(a.seat_id) - SEAT_IDS.indexOf(b.seat_id),
+  );
+  const byOption = new Map<string, string[]>();
+  const abstainedNames: string[] = [];
+  for (const card of latest) {
+    if (card.stance === 'abstain') abstainedNames.push(seatDisplayName(card.seat_id));
+    const key = card.preferred_option_id ?? '';
+    const names = byOption.get(key) ?? [];
+    names.push(seatDisplayName(card.seat_id));
+    byOption.set(key, names);
+  }
+  const positions = [...byOption.entries()]
+    .sort((a, b) => {
+      if (a[0] === '') return 1;
+      if (b[0] === '') return -1;
+      return a[0].localeCompare(b[0]);
+    })
+    .map(([optionId, names]) => ({
+      option_id: optionId === '' ? null : optionId,
+      option_label:
+        optionId === '' ? 'No stated preference' : optionDisplayText(optionId, brief),
+      seat_names: names,
+    }));
+  const split =
+    positions.filter((entry) => entry.option_id !== null).length > 1;
+  if (rounds.length > 0) {
+    notes.push(
+      split
+        ? 'The council split on which option to prefer; the groups are listed below.'
+        : 'The council did not split on which option to prefer; the disagreement is in the reasoning and objections each advisor recorded.',
+    );
+  }
+
+  const roundSupport = rounds.map((entry, index) => {
+    const counts: Record<'support' | 'conditional' | 'oppose' | 'abstain', number> = {
+      support: 0,
+      conditional: 0,
+      oppose: 0,
+      abstain: 0,
+    };
+    for (const card of entry.cards) counts[card.stance] += 1;
+    const previous = index > 0 ? rounds[index - 1] : null;
+    const identicalToPrevious =
+      previous !== null &&
+      previous.cards.length === entry.cards.length &&
+      entry.cards.every((card) => {
+        const before = previous.cards.find(
+          (candidate) => candidate.seat_id === card.seat_id,
+        );
+        return (
+          before !== undefined &&
+          before.stance === card.stance &&
+          before.preferred_option_id === card.preferred_option_id
+        );
+      });
+    return {
+      round: entry.round,
+      support: counts.support,
+      conditional: counts.conditional,
+      oppose: counts.oppose,
+      abstain: counts.abstain,
+      identical_to_previous: identicalToPrevious,
+    };
+  });
+
+  return {
+    rounds_saved: rounds.length,
+    highest_round: highestRound,
+    session_mode: sessionMode,
+    source: 'saved_advisor_cards_only',
+    rounds: rounds.map((entry) => ({
+      round: entry.round,
+      seats: entry.cards.map((card) => ({
+        seat_id: card.seat_id,
+        display_name: seatDisplayName(card.seat_id),
+        stance: card.stance,
+        stance_text: STANCE_TEXT[card.stance] ?? card.stance,
+        preferred_option_id: card.preferred_option_id,
+        preferred_option_label: optionDisplayText(card.preferred_option_id, brief),
+      })),
+    })),
+    round_support: roundSupport,
+    condensed_note:
+      rounds.length > 1 && changes.length === 0
+        ? 'No advisor changed position between the saved rounds, so the earlier rounds repeat the same positions. Read the final positions below; the earlier rounds add no new stance.'
+        : null,
+    changes,
+    positions,
+    split: rounds.length > 0 ? split : null,
+    abstained_names: abstainedNames,
+    stop_record: {
+      recorded: false,
+      note: 'The saved record contains no chair note explaining a stop decision; no stop reason is invented.',
+    },
+    notes,
+  };
+}
+
+
+/** The plan references the capability section matches against. */
+function planProposalsFor(verdict: Verdict): PlanProposalReference[] {
+  return verdict.result_kind === 'scored'
+    ? verdict.action_proposals.map((proposal) => ({
+        action_id: proposal.action_id,
+        title: proposal.title,
+        description: proposal.description,
+        department_id: proposal.department_id,
+        assigned_agent_id: proposal.assigned_agent_id,
+        sop_id: proposal.sop_id,
+        persona_id: proposal.persona_id,
+      }))
+    : [];
+}
+
+/** Accept a journaled section only when it still carries a known status. */
+function asCapabilitySection(value: unknown): CapabilityReportSection | null {
+  if (!isPlainRecord(value)) return null;
+  return value.status === 'matched' ||
+    value.status === 'unmatched' ||
+    value.status === 'not_provided'
+    ? (value as unknown as CapabilityReportSection)
+    : null;
+}
+
 export function buildReportModel(input: ReportModelInput): Record<string, unknown> {
   const { verdict, brief, final_cards } = input;
   const packVersions = [...new Set(final_cards.map((card) => card.pack_version))].sort();
   const base =
     verdict.result_kind === 'scored' ? scoredModel(input, verdict) : consultModel(input, verdict);
+  const advisorCards = final_cards.filter(
+    (card): card is AdvisorCard => card.card_kind === 'advisor' && card.round === 2,
+  );
+  const conditions: ConditionSummary = summarizeConditions({
+    prerequisites: verdict.result_kind === 'scored' ? verdict.prerequisites : [],
+    hardFindings: verdict.result_kind === 'scored' ? verdict.hard_constraint_findings : [],
+    cards: advisorCards,
+  });
+  const reading =
+    verdict.result_kind === 'consult'
+      ? readConsultVerdict({
+          seat_display_name: seatDisplayName(verdict.consult_card.seat_id),
+        })
+      : readScoredVerdict({
+          label: verdict.label,
+          recommended_option_label: (base.verdict_block as Record<string, unknown>)
+            .recommended_option_label as string | null,
+          conditions,
+          recommended_option_id: verdict.recommended_option_id,
+          hard_findings: verdict.hard_constraint_findings,
+          ratification_status: verdict.ratification_status,
+        });
+  const unknowns = dedupeExact([
+    ...brief.unknowns.map((unknown) => unknown.statement),
+    ...((base.critical_unknowns as string[] | undefined) ?? []),
+  ]);
+  const planProposals = planProposalsFor(verdict);
+  const safeTools =
+    input.capability_section ?? buildCapabilityReportSection(
+      input.capability_snapshot ?? null,
+      planProposals,
+    );
+  const readinessReasons: string[] = [...reading.blocked_reasons];
+  if (verdict.result_kind === 'consult') {
+    readinessReasons.push(
+      'One seat answered; a consultation carries no score and no plan.',
+    );
+  } else {
+    readinessReasons.push(`Recorded verdict label: ${verdict.label}.`);
+    readinessReasons.push(
+      `${conditions.total} condition(s) recorded; ${conditions.blocking_open} blocking and open.`,
+    );
+    readinessReasons.push(
+      `Ratification status: ${verdict.ratification_status}.`,
+    );
+    readinessReasons.push(
+      `${unknowns.recorded} unknown(s) recorded; ${unknowns.distinct} distinct.`,
+    );
+  }
+  const conditionsDisplay =
+    conditions.total === 0
+      ? 'none recorded'
+      : `${conditions.total} recorded, ${conditions.blocking_open} blocking and open`;
+  const unknownsDisplay =
+    unknowns.recorded === 0
+      ? 'none recorded'
+      : `${unknowns.recorded} recorded, ${unknowns.distinct} distinct`;
   const model: Record<string, unknown> = {
     schema_version: 'wise-elders.report/v1',
     artifact_kind: 'council_decision_report',
@@ -504,6 +820,50 @@ export function buildReportModel(input: ReportModelInput): Record<string, unknow
     source_pack_versions: packVersions,
     simulation_label: SIMULATION_LABEL,
     authorization_notice: AUTHORIZATION_NOTICE,
+    summary: {
+      label_plain: reading.label_plain,
+      decision: reading.decision,
+      reading: reading.reading,
+      readiness_headline: reading.readiness_headline,
+      evidence_strength:
+        (base.verdict_block as Record<string, unknown>).evidence_strength ?? null,
+      conditions_display: conditionsDisplay,
+      unknowns_display: unknownsDisplay,
+    },
+    readiness: {
+      status: reading.readiness_status,
+      headline: reading.readiness_headline,
+      reasons: readinessReasons,
+    },
+    question_and_context: {
+      question: brief.question,
+      facts: brief.facts.map((fact) => ({
+        id: fact.id,
+        statement: fact.statement,
+        evidence_ids: [...fact.evidence_ids],
+      })),
+      assumptions: brief.assumptions.map((fact) => fact.statement),
+      unknowns: {
+        recorded: unknowns.recorded,
+        distinct: unknowns.distinct,
+        collapsed: unknowns.collapsed,
+        items: unknowns.items,
+        note: unknowns.note,
+      },
+      critical_domains: brief.critical_domains.map((domain) => ({
+        domain: domain.domain,
+        status: domain.status,
+        unresolved_questions: [...domain.unresolved_questions],
+      })),
+    },
+    conditions_summary: conditions,
+    how_to_use: [
+      'Start with the decision, the readiness line, and the plan. Part 2 holds the full member record.',
+      'A recorded condition is a prerequisite, not a formality. A blocking condition that is open means do not act yet.',
+      'An unrecorded value prints as "not recorded". It is never filled in, estimated, or upgraded.',
+      'This report is advisory. Approving a plan and executing it are separate authorizations.',
+    ],
+    your_tools: safeTools,
     brief: {
       brief_id: brief.brief_id,
       revision: brief.revision,
@@ -516,6 +876,13 @@ export function buildReportModel(input: ReportModelInput): Record<string, unknow
       unknowns: brief.unknowns.map((fact) => fact.statement),
     },
     ...base,
+    // CTR-173: a consult model already carries debate: null plus the explicit
+    // debate_note (CTR-168). Only a scored model builds the saved-round debate
+    // object, so the consult null is never overwritten and the record JSON
+    // never prints a zero-round debate beside the note.
+    ...(verdict.result_kind === 'consult'
+      ? {}
+      : { debate: buildDebateSection(final_cards, brief, input.session_mode) }),
     provenance: {
       evidence_manifest: brief.evidence_manifest.map((entry) => ({
         evidence_id: entry.evidence_id,
@@ -563,7 +930,7 @@ export function assertRedactionComplete(
 // ----------------------------------------------------------- markdown
 
 function asRecord(value: unknown): Record<string, unknown> {
-  return value as Record<string, unknown>;
+  return isPlainRecord(value) ? value : {};
 }
 function asArray(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
@@ -616,6 +983,47 @@ export function renderMarkdown(model: Record<string, unknown>): string {
   lines.push(`> ${asString(model.authorization_notice)}`);
   lines.push('');
 
+  // CTR-163: the same reader projection the print/PDF renderer uses.
+  const summary = asRecord(model.summary);
+  const readiness = asRecord(model.readiness);
+  const question = asRecord(model.question_and_context);
+  lines.push('## What this means');
+  lines.push('');
+  lines.push(`Decision: ${asString(summary.decision) || 'not recorded'}`);
+  lines.push(`Readiness: ${asString(summary.readiness_headline) || 'not recorded'}`);
+  lines.push(`Evidence strength: ${asString(summary.evidence_strength) || 'not recorded'}`);
+  lines.push(`Conditions: ${asString(summary.conditions_display) || 'none recorded'}`);
+  lines.push(`Unknowns: ${asString(summary.unknowns_display) || 'none recorded'}`);
+  lines.push('');
+  lines.push(asString(summary.reading) || 'No reading sentence was recorded.');
+  lines.push('');
+  for (const reason of asArray(readiness.reasons)) {
+    lines.push(`- ${asString(reason)}`);
+  }
+  lines.push('');
+  lines.push('## The question and what was recorded');
+  lines.push('');
+  lines.push(`Question: ${asString(question.question) || asString(model.decision_title)}`);
+  lines.push('');
+  lines.push('Confirmed facts:');
+  const facts = asArray(question.facts);
+  lines.push(
+    ...(facts.length > 0
+      ? facts.map((factValue) => `- ${asString(asRecord(factValue).statement)}`)
+      : ['- none recorded']),
+  );
+  lines.push('');
+  lines.push('Assumptions:');
+  lines.push(...(asArray(question.assumptions).length > 0 ? mdList(asArray(question.assumptions)) : ['- none recorded']));
+  lines.push('');
+  const unknownsRecord = asRecord(question.unknowns);
+  lines.push('Unknowns:');
+  lines.push(
+    `- ${asString(unknownsRecord.note) || `${Number(unknownsRecord.recorded ?? 0)} recorded; ${Number(unknownsRecord.distinct ?? 0)} distinct.`}`,
+  );
+  lines.push(...mdList(asArray(unknownsRecord.items)));
+  lines.push('');
+
   const consult = model.consult as Record<string, unknown> | null;
   if (consult) {
     lines.push('## Consultation');
@@ -632,10 +1040,21 @@ export function renderMarkdown(model: Record<string, unknown>): string {
     lines.push('');
     lines.push(`Next step: ${asString(consult.next_step)}`);
     lines.push('');
+    lines.push('## The debate');
+    lines.push('');
+    lines.push(
+      asString(model.debate_note) || CONSULT_NO_DEBATE_NOTE,
+    );
+    lines.push('');
+    pushHowToUseMd(lines, model);
+    pushToolsMd(lines, model);
     pushProvenanceMd(lines, model);
     return `${lines.join('\n')}\n`;
   }
 
+  pushPlanMd(lines, model);
+  pushHowToUseMd(lines, model);
+  pushToolsMd(lines, model);
   lines.push('## Executive decision');
   lines.push('');
   lines.push(`Verdict: ${asString(verdict.label)}`);
@@ -671,6 +1090,8 @@ export function renderMarkdown(model: Record<string, unknown>): string {
   }
   lines.push('');
 
+  pushDebateMd(lines, model);
+
   lines.push('## Main arguments and strongest dissent');
   lines.push('');
   lines.push('Main arguments:');
@@ -679,7 +1100,7 @@ export function renderMarkdown(model: Record<string, unknown>): string {
   lines.push(`Strongest dissent: ${asStringOrNull(model.strongest_dissent) ?? 'none recorded'}`);
   lines.push('');
 
-  lines.push('## Constraints, assumptions, and unknowns');
+  lines.push('## Constraints, assumptions, and conditions');
   lines.push('');
   lines.push('Hard constraints:');
   const findings = asArray(model.hard_constraints);
@@ -695,9 +1116,23 @@ export function renderMarkdown(model: Record<string, unknown>): string {
   const assumptions = asArray(brief.assumptions);
   lines.push(...(assumptions.length > 0 ? mdList(assumptions) : ['- none recorded']));
   lines.push('');
-  lines.push('Unknowns:');
-  const unknowns = [...asArray(brief.unknowns), ...asArray(model.critical_unknowns)];
-  lines.push(...(unknowns.length > 0 ? mdList(unknowns) : ['- none recorded']));
+  const conditions = asRecord(model.conditions_summary);
+  lines.push('Conditions and safeguards:');
+  lines.push(
+    `- ${Number(conditions.total ?? 0)} recorded; ${Number(conditions.open ?? 0)} open; ${Number(
+      conditions.satisfied ?? 0,
+    )} satisfied; ${Number(conditions.waived ?? 0)} waived by the owner; ${Number(
+      conditions.unresolved ?? 0,
+    )} unresolved; ${Number(conditions.blocking_open ?? 0)} blocking and open.`,
+  );
+  for (const itemValue of asArray(conditions.items)) {
+    const item = asRecord(itemValue);
+    lines.push(
+      `- ${asString(item.description)} (${asString(item.kind)}, ${asString(item.status)}${item.blocking === true ? ', blocking' : ''}, source: ${asString(item.source)})`,
+    );
+  }
+  lines.push('');
+  lines.push('Unknowns were printed once, with their recorded/distinct counts, in the question section above; they are not repeated here.');
   lines.push('');
 
   lines.push('## Amendments and ratification');
@@ -728,49 +1163,202 @@ export function renderMarkdown(model: Record<string, unknown>): string {
     );
   }
   lines.push('');
-
-  lines.push('## Action proposals and authorization boundaries');
+  lines.push('The plan, its acceptance criteria, its stop conditions, and its review criteria were printed once in "The plan" above; they are not repeated here.');
   lines.push('');
-  const proposals = asArray(model.action_proposals);
-  if (proposals.length === 0) lines.push('- none');
-  for (const proposalValue of proposals) {
-    const proposal = asRecord(proposalValue);
-    lines.push(`### ${asString(proposal.action_id)}: ${asString(proposal.title)}`);
-    lines.push('');
-    lines.push(asString(proposal.description));
-    lines.push('');
-    lines.push(`Rationale: ${asString(proposal.rationale)}`);
-    lines.push('Acceptance criteria:');
-    lines.push(...mdList(asArray(proposal.acceptance_criteria)));
-    const depends = asArray(proposal.depends_on_action_ids).map(asString);
-    lines.push(`Depends on: ${depends.length > 0 ? depends.join(', ') : 'none'}`);
-    lines.push(`Risk class: ${asString(proposal.risk_class)}`);
-    lines.push(
-      'Execution authorization: separate execution authorization is required before this proposal may be acted on.',
-    );
-    lines.push('');
-  }
   lines.push(`> ${asString(model.authorization_notice)}`);
-  lines.push('');
-
-  lines.push('## Test, stop conditions, and review criteria');
-  lines.push('');
-  lines.push(
-    `Cheapest informative test: ${asStringOrNull(model.cheapest_informative_test) ?? 'none recorded'}`,
-  );
-  lines.push('');
-  lines.push('Stop conditions:');
-  const stop = asArray(model.stop_criteria);
-  lines.push(...(stop.length > 0 ? mdList(stop) : ['- none recorded']));
-  lines.push('');
-  lines.push('Outcome review criteria:');
-  const review = asArray(model.review_criteria);
-  lines.push(...(review.length > 0 ? mdList(review) : ['- none recorded']));
   lines.push('');
 
   pushSeatsMd(lines, model);
   pushProvenanceMd(lines, model);
   return `${lines.join('\n')}\n`;
+}
+
+function pushPlanMd(lines: string[], model: Record<string, unknown>): void {
+  lines.push('## The plan');
+  lines.push('');
+  const proposals = asArray(model.action_proposals);
+  if (proposals.length === 0) lines.push('- none recorded');
+  proposals.forEach((proposalValue, index) => {
+    const proposal = asRecord(proposalValue);
+    lines.push(`### Step ${index + 1}: ${asString(proposal.title)}`);
+    lines.push('');
+    lines.push(asString(proposal.description));
+    lines.push('');
+    lines.push(`Why: ${asString(proposal.rationale) || 'not recorded'}`);
+    const criteria = asArray(proposal.acceptance_criteria)
+      .map(asString)
+      .filter((criterion) => criterion.trim().length > 0);
+    if (criteria.length > 0) {
+      lines.push('Done when:');
+      lines.push(...mdList(criteria));
+    } else {
+      lines.push(
+        'Not ready to execute: no acceptance criterion was recorded for this step, so it cannot be started until one is recorded and approved. This is an absence in the record, not a pass.',
+      );
+    }
+    const depends = asArray(proposal.depends_on_action_ids).map(asString);
+    lines.push(`Depends on: ${depends.length > 0 ? depends.join(', ') : 'none'}`);
+    lines.push(`Risk class: ${asString(proposal.risk_class)}`);
+    lines.push(
+      'Execution authorization: separate execution authorization is required before this step may be acted on.',
+    );
+    lines.push('');
+  });
+  lines.push(
+    `Cheapest informative test: ${asStringOrNull(model.cheapest_informative_test) ?? 'none recorded'}`,
+  );
+  lines.push('');
+  const stop = asArray(model.stop_criteria)
+    .map(asString)
+    .filter((value) => value.trim().length > 0);
+  lines.push('Stop if:');
+  lines.push(
+    ...(stop.length > 0
+      ? mdList(stop)
+      : ['- no stop condition was recorded; that is an absence in the record, not permission to continue indefinitely.']),
+  );
+  lines.push('');
+  const review = asArray(model.review_criteria)
+    .map(asString)
+    .filter((value) => value.trim().length > 0);
+  lines.push('How you will know it worked:');
+  lines.push(
+    ...(review.length > 0
+      ? mdList(review)
+      : ['- no outcome review criterion was recorded; that is an absence in the record, not a pass.']),
+  );
+  lines.push('');
+}
+
+function pushHowToUseMd(lines: string[], model: Record<string, unknown>): void {
+  lines.push('## How to use this report');
+  lines.push('');
+  const howToUse = asArray(model.how_to_use).map(asString);
+  lines.push(...(howToUse.length > 0 ? mdList(howToUse) : ['- no reading guide was recorded.']));
+  lines.push('');
+}
+
+function pushToolsMd(lines: string[], model: Record<string, unknown>): void {
+  const tools = asRecord(model.your_tools);
+  lines.push('## Helpers that fit the plan');
+  lines.push('');
+  lines.push(
+    asString(tools.note) || 'No installation capability snapshot was recorded.',
+  );
+  lines.push('');
+  if (asString(tools.status) === 'matched') {
+    for (const matchValue of asArray(tools.matches)) {
+      const match = asRecord(matchValue);
+      const actions =
+        asArray(match.matched_action_titles).map(asString).join(', ') ||
+        'the plan';
+      lines.push(
+        `- **${asString(match.name)}** (${asString(match.kind)}, ${asString(
+          match.capability_id,
+        )}, ${asString(match.availability)}): exact ${asString(
+          match.match_basis,
+        )} match for ${actions}`,
+      );
+    }
+    lines.push('');
+  }
+  if (tools.no_match_note) {
+    lines.push(asString(tools.no_match_note));
+    lines.push('');
+  }
+  const limitations = asArray(tools.limitations).map(asString);
+  if (limitations.length > 0) {
+    lines.push('What was read, and what was not:');
+    lines.push(...mdList(limitations));
+    lines.push('');
+  }
+  lines.push(asString(tools.availability_note));
+  lines.push('');
+  lines.push(
+    asString(tools.exactness_note) ||
+      'Only a recorded plan reference or an exact whole-phrase name counts.',
+  );
+  lines.push('');
+}
+
+/**
+ * The saved-round debate. Counts, changes, positions, and the explicit
+ * absence of a chair stop note come from the record only.
+ */
+function pushDebateMd(lines: string[], model: Record<string, unknown>): void {
+  lines.push('## The debate');
+  lines.push('');
+  const debateInput = readReportDebateInput(model.debate);
+  if (!debateInput.present) {
+    lines.push(
+      'No saved debate record is present in this report model. Nothing is inferred: no rounds, seats, positions, or chair stop note are reported.',
+    );
+    lines.push('');
+    return;
+  }
+  const debate = debateInput.record;
+  const highest = asNumberOrNull(debate.highest_round);
+  lines.push(
+    `Rounds saved: ${Number(debate.rounds_saved ?? 0)}; highest round: ${
+      highest === null ? 'none' : String(highest)
+    }; split: ${debate.split === true ? 'yes' : debate.split === false ? 'no' : 'not available'}.`,
+  );
+  lines.push('');
+  lines.push(...mdList(asArray(debate.notes)));
+  lines.push('');
+  for (const roundValue of asArray(debate.rounds)) {
+    const round = asRecord(roundValue);
+    lines.push(`### Round ${Number(round.round ?? 0)}`);
+    lines.push('');
+    for (const seatValue of asArray(round.seats)) {
+      const seat = asRecord(seatValue);
+      lines.push(
+        `- ${asString(seat.display_name)}: ${asString(seat.stance_text) || asString(
+          seat.stance,
+        )} — ${asString(seat.preferred_option_label)}`,
+      );
+    }
+    lines.push('');
+  }
+  lines.push('What changed between saved rounds:');
+  const changes = asArray(debate.changes);
+  if (changes.length === 0) {
+    lines.push(
+      '- No seat changed its stance or preferred option between the saved rounds.',
+    );
+  } else {
+    for (const changeValue of changes) {
+      const change = asRecord(changeValue);
+      lines.push(
+        `- Round ${Number(change.round ?? 0)} — ${asString(
+          change.display_name,
+        )}: ${asString(change.from_stance_text)} / ${asString(
+          change.from_option_label,
+        )} → ${asString(change.to_stance_text)} / ${asString(
+          change.to_option_label,
+        )}`,
+      );
+    }
+  }
+  lines.push('');
+  const positions = asArray(debate.positions);
+  if (positions.length > 0) {
+    lines.push('Final positions:');
+    for (const positionValue of positions) {
+      const position = asRecord(positionValue);
+      lines.push(
+        `- ${asString(position.option_label)}: ${asArray(position.seat_names)
+          .map(asString)
+          .join(', ')}`,
+      );
+    }
+    lines.push('');
+  }
+  lines.push(
+    asString(asRecord(debate.stop_record ?? {}).note) ||
+      'The saved record contains no chair stop note.',
+  );
+  lines.push('');
 }
 
 function pushSeatsMd(lines: string[], model: Record<string, unknown>): void {
@@ -887,6 +1475,12 @@ export interface CouncilExportRecord {
   visibility: 'private' | 'company';
   deliverable_id: string | null;
   created_at: string;
+  /**
+   * CTR-169: the exact capability report section rendered into this
+   * export, frozen in the journal payload. Null means the record predates
+   * this field (legacy export), not "the report had no tools section".
+   */
+  frozen_capability_section: CapabilityReportSection | null;
 }
 
 export interface CouncilExportResult {
@@ -894,6 +1488,15 @@ export interface CouncilExportResult {
   session_id: string;
   verdict_revision: number;
   verdict_content_sha256: string;
+  /**
+   * CTR-171: the exact capability report section these artifacts were
+   * rendered from. On a replay this is the section frozen in the export
+   * journal by the first export, never a later live catalog. Callers
+   * report download metadata from this value so a replayed export cannot
+   * describe an inventory the artifact does not contain. It is the same
+   * bounded projection the report already prints, not the raw snapshot.
+   */
+  capability_section: CapabilityReportSection;
   artifacts: Array<{
     export_id: string;
     format: ReportFormat;
@@ -942,6 +1545,16 @@ function appendExportJournalRecord(
     deliverable_id: record.deliverable_id,
     created_at: record.created_at,
   };
+  if (record.frozen_capability_section !== null) {
+    // CTR-169: the exact report projection used at export, stored in the
+    // same owner-scoped, hash-chained export journal record. It contains
+    // only the fields that report section already prints (names,
+    // descriptions, availability, recorded references, limitations).
+    payload.report_inputs = {
+      version: 1,
+      capability_section: record.frozen_capability_section,
+    };
+  }
   const last = db
     .prepare(
       `SELECT sequence, event_hash FROM council_events
@@ -1001,6 +1614,7 @@ export function listExportRecords(
     .map((event) => {
       const payload = event.payload as Record<string, unknown>;
       const format = payload.format as ReportFormat;
+      const reportInputs = payload.report_inputs;
       return {
         export_id: payload.export_id as string,
         request_id: payload.request_id as string,
@@ -1020,6 +1634,9 @@ export function listExportRecords(
         visibility,
         deliverable_id: (payload.deliverable_id as string | null) ?? null,
         created_at: payload.created_at as string,
+        frozen_capability_section: isPlainRecord(reportInputs)
+          ? asCapabilitySection(reportInputs.capability_section)
+          : null,
       };
     });
 }
@@ -1164,6 +1781,12 @@ export async function createCouncilExport(
     exporter_subject: string;
     via: string;
     exported_at?: string;
+    /**
+     * Optional, already validated and installation-bound snapshot from
+     * the scope store. The report prints an explicit "not provided"
+     * tools section when no snapshot exists.
+     */
+    capability_snapshot?: InstallationCapabilitySnapshot | null;
   },
 ): Promise<CouncilExportResult> {
   for (const format of input.formats) {
@@ -1177,8 +1800,22 @@ export async function createCouncilExport(
     }
   }
   const { session, verdict, cards } = loadExportableSession(deps, envelope, input.session_id);
-  const exportedAt = input.exported_at ?? new Date().toISOString();
+  const existing = listExportRecords(deps, envelope, input.session_id);
+  const recorded = existing.find((record) => record.request_id === input.request_id) ?? null;
+  // CTR-169: a replay of the same logical request re-renders from every
+  // input recorded by the first export (its date and its frozen
+  // capability section), never the live snapshot. A snapshot revised (or
+  // deleted) after the first export, or a replay on a later day, cannot
+  // change the recorded artifact's bytes.
+  const exportedAt =
+    recorded?.created_at ?? input.exported_at ?? new Date().toISOString();
   const redaction = input.redaction ?? null;
+  const capabilitySection =
+    recorded?.frozen_capability_section ??
+    buildCapabilityReportSection(
+      input.capability_snapshot ?? null,
+      planProposalsFor(verdict),
+    );
   const model = buildReportModel({
     verdict,
     brief: session.brief,
@@ -1186,12 +1823,14 @@ export async function createCouncilExport(
     report_date: exportedAt.slice(0, 10),
     session_mode: session.spec.mode,
     redaction,
+    capability_section: capabilitySection,
   });
   const reportRevision = String(model.report_revision_id);
   const redacted = redaction !== null;
 
+  const cover = loadReportCoverAssets();
   const markdown = renderMarkdown(model);
-  const printHtml = renderPrintHtml(model);
+  const printHtml = renderPrintHtml(model, { cover });
   // The pdf artifact renders from the same print HTML through the
   // composed Chromium renderer, but only when the pdf format was
   // requested: a record JSON created without pdf binds an unbound
@@ -1278,7 +1917,6 @@ export async function createCouncilExport(
   // Deletion race recheck (T059): after rendering, before exposure.
   assertSessionAlive(deps, input.session_id, envelope.tenant_id);
 
-  const existing = listExportRecords(deps, envelope, input.session_id);
   const parentTaskId = parentTaskIdFor(deps, envelope, input.session_id);
   const artifacts: CouncilExportResult['artifacts'] = [];
   for (const artifact of rendered) {
@@ -1339,6 +1977,7 @@ export async function createCouncilExport(
       visibility: session.spec.visibility,
       deliverable_id: deliverableId,
       created_at: exportedAt,
+      frozen_capability_section: capabilitySection,
     };
     appendExportJournalRecord(
       deps.store.handle(),
@@ -1364,6 +2003,7 @@ export async function createCouncilExport(
     session_id: input.session_id,
     verdict_revision: verdict.verdict_revision,
     verdict_content_sha256: verdict.content_sha256,
+    capability_section: capabilitySection,
     artifacts,
   };
 }
@@ -1464,9 +2104,15 @@ export async function readCouncilExport(
     report_date: record.created_at.slice(0, 10),
     session_mode: session.spec.mode,
     redaction: null,
+    // CTR-169: re-render from the input frozen at create time. The
+    // live capability snapshot is deliberately not loaded here; the
+    // journaled section is the artifact's recorded input.
+    ...(record.frozen_capability_section !== null
+      ? { capability_section: record.frozen_capability_section }
+      : {}),
   });
   const markdown = renderMarkdown(model);
-  const printHtml = renderPrintHtml(model);
+  const printHtml = renderPrintHtml(model, { cover: loadReportCoverAssets() });
   // A record JSON binds its pdf sibling from the journal: the pdf
   // artifact created under the same request carries the hash this
   // record was created with. Without one, the entry stays unbound.

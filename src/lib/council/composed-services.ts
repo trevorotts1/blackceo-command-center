@@ -48,6 +48,7 @@ import {
   type ClientDecisionChoice,
 } from './coordination';
 import { CouncilSettingsService } from './settings';
+import { loadCapabilitySnapshotForPrincipal } from './capability-snapshot-service';
 import {
   createCouncilExport,
   findExportSession,
@@ -863,6 +864,15 @@ export async function createExportRoute(
     formats,
     redaction_profile_id: null,
   }, sessionId);
+  // CTR-165: the report reads the scope-bound installation snapshot. A
+  // self installation is captured through the existing platform resolver;
+  // a client installation is never read from disk and must have pushed its
+  // own snapshot. No caller-supplied inventory enters this path.
+  const capability = loadCapabilitySnapshotForPrincipal(
+    ctx.store.handle(),
+    ctx.principal,
+    { captured_at: new Date().toISOString().slice(0, 10) },
+  );
   const result = await createCouncilExport(
     { repositories: ctx.repositories, store: ctx.store },
     authorized.envelope,
@@ -877,9 +887,18 @@ export async function createExportRoute(
       request_id: idempotencyKey,
       exporter_subject: ctx.principal.subject,
       via: authorized.accessVia,
+      capability_snapshot: capability?.snapshot ?? null,
     },
   );
   const primary = result.artifacts[0];
+  // CTR-171: report the capability section the ARTIFACT was rendered from
+  // (the frozen journal input on a replay), not the live catalog loaded
+  // above. `source` and `captured_now` describe the create-time load and
+  // cannot be re-derived from the recorded artifact, so they are omitted
+  // here rather than reported from a newer read that may not match the
+  // bytes the caller is about to download. Only the bounded section
+  // projection is used; the raw snapshot is never returned or persisted.
+  const usedSection = result.capability_section;
   return {
     export_id: primary?.export_id ?? null,
     session_id: result.session_id,
@@ -890,6 +909,15 @@ export async function createExportRoute(
     verdict_revision: result.verdict_revision,
     verdict_content_sha256: result.verdict_content_sha256,
     artifacts: result.artifacts,
+    capability_snapshot: {
+      present: usedSection.status !== 'not_provided',
+      status: usedSection.status,
+      installation_id: usedSection.snapshot?.installation_id ?? null,
+      captured_at: usedSection.snapshot?.captured_at ?? null,
+      basis: usedSection.snapshot?.basis ?? null,
+      item_count: usedSection.snapshot?.item_count ?? 0,
+      matched_count: usedSection.matched_count,
+    },
     created_at: new Date().toISOString(),
   };
 }

@@ -882,3 +882,26 @@ export function clearJourneyPreference(): void {
     // Nothing to clear.
   }
 }
+
+// ------------------------------------------- chamber-first entry (CTR-104)
+
+/** Longest question accepted from the visual chamber entry. */
+export const CHAMBER_QUESTION_MAX = 2000;
+
+/**
+ * Normalize the question typed in the visual chamber (the /council entry
+ * form) before it becomes the intake's decision answer: whitespace
+ * collapsed, trimmed, and capped at CHAMBER_QUESTION_MAX. Returns null
+ * when nothing usable was typed, so the composer never starts from a
+ * blank decision and a crafted query string can never inject extra
+ * content into the brief.
+ */
+export function normalizeChamberQuestion(
+  raw: string | string[] | null | undefined,
+): string | null {
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  if (typeof value !== 'string') return null;
+  const collapsed = value.replace(/\s+/g, ' ').trim();
+  if (!collapsed) return null;
+  return collapsed.slice(0, CHAMBER_QUESTION_MAX);
+}

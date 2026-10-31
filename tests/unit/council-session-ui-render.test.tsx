@@ -443,7 +443,9 @@ describe('verdict screen', () => {
   it('foregrounds ONE recommendation with its conditions and strongest dissent (T103)', () => {
     renderVerdict();
     const recommendation = screen.getByTestId('verdict-recommendation');
-    expect(recommendation.textContent).toContain('Go, with conditions');
+    expect(recommendation.textContent).toContain(
+      'Proceed, but only with the recorded conditions',
+    );
     expect(recommendation.textContent).toContain(
       'B. Pilot the revised offer with new clients',
     );
@@ -515,7 +517,7 @@ describe('verdict screen', () => {
     await screen.findByTestId('council-export-markdown-state');
     expect(
       screen.getByTestId('council-export-markdown-state').textContent,
-    ).toContain('Not available yet');
+    ).toContain(`Not available: ${NOT_READY_ERROR.message}`);
   });
 });
 
