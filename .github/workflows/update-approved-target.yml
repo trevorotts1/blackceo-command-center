@@ -1,0 +1,85 @@
+name: Update approved-target gate
+
+# Gates the Command Center updater patch: approved-target (pin) enforcement,
+# the version route's commit identity, and a real networked ls-remote. No path
+# filter on purpose: a filtered workflow that does not run cannot gate, and a
+# required check that never reports leaves the PR blocked forever.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pin-suite:
+    name: Approved target pin suite
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Run the approved-target updater suite end to end
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/update-approved-target.test.sh
+
+  route-tests:
+    name: Version route commit tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Run the version route and commit-identity tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --import tsx --test \
+            tests/unit/p1-03-version-route.test.ts \
+            tests/unit/p1-03-version-route-commit.test.ts
+
+  networked-ls-remote:
+    name: Networked ls-remote check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Resolve main through the real updater check
+        shell: bash
+        run: |
+          set -euo pipefail
+          CC_APP_DIR="$GITHUB_WORKSPACE" bash check-updates.sh > "$RUNNER_TEMP/check-updates.json"
+          python3 -I - "$RUNNER_TEMP/check-updates.json" <<'PY'
+          import json, re, sys
+          with open(sys.argv[1]) as fh:
+              body = json.load(fh)
+          head = body.get("remote_head", "")
+          if not re.fullmatch(r"[0-9a-f]{40}", head):
+              sys.exit("remote_head is not a commit SHA: %r" % (head,))
+          source = body.get("remote_head_source", "")
+          if source != "git ls-remote refs/heads/main":
+              sys.exit("expected a networked ls-remote, got source %r" % (source,))
+          install = body.get("install_dir_status", "")
+          if install != "pinned":
+              sys.exit("checkout did not validate as a Command Center install: %r %r"
+                       % (install, body.get("install_dir_detail", "")))
+          if body.get("status") != "ok":
+              sys.exit("check-updates status %r reason %r"
+                       % (body.get("status"), body.get("reason_code")))
+          print("networked ls-remote OK: main at %s" % head)
+          PY
