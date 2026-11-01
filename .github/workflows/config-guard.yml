@@ -14,7 +14,7 @@ on:
 jobs:
   check-config-template-state:
     name: Verify config files are empty/template (no client data)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 

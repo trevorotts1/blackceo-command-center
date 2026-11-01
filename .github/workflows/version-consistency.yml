@@ -10,7 +10,7 @@ on:
 jobs:
   check-version-drift:
     name: Verify all 5 CC version locations agree
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:

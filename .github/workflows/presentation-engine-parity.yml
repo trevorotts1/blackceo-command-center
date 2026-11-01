@@ -36,7 +36,7 @@ on:
 jobs:
   parity:
     name: presentation_job parity vs pinned canonical commit (warn-first)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4

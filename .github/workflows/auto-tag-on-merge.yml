@@ -43,7 +43,7 @@ concurrency:
 jobs:
   auto-tag:
     name: Cut the annotated tag if /version changed on this push
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout full history + tags
         uses: actions/checkout@v4

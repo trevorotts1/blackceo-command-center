@@ -33,7 +33,7 @@ on:
 jobs:
   static-guard:
     name: Static call-site guard (+ mutation proof)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -56,7 +56,7 @@ jobs:
 
   behavioral-fixture:
     name: Behavioral fixture — task_events now appears for previously-unaudited paths
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: static-guard
     steps:
       - name: Checkout repo
