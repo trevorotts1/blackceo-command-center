@@ -24,6 +24,10 @@
 set -euo pipefail
 SCRIPT_VERSION="1.2.1"
 REPO_URL="https://github.com/trevorotts1/blackceo-command-center.git"
+# Directory holding this script and the update-target registry beside it.
+# Captured BEFORE the updater cd's into INSTALL_DIR, which may live anywhere.
+UPDATE_SH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CC_REGISTRY="$UPDATE_SH_DIR/config/update-target-registry.json"
 LOG_FILE="/tmp/blackceo-cc-update-$(date +%Y%m%d-%H%M%S).log"
 exec 1> >(tee -a "$LOG_FILE") 2>&1
 
@@ -213,15 +217,45 @@ fi
 # winner — every candidate is validated and exactly one must survive — but it
 # is preserved so the "checked" list reads in the documented priority.
 if [ -z "$INSTALL_DIR" ]; then
-  CANDIDATES=(
-    "$HOME/projects/command-center"
-    "/data/projects/command-center"
-    "$HOME/command-center/app"
-    "$HOME/clawd/projects/blackceo-command-center"
-    "/data/clawd/projects/blackceo-command-center"
-    "$HOME/blackceo-command-center"
-    "/data/blackceo-command-center"
-  )
+  # Registry-driven coverage: config/update-target-registry.json states which
+  # installed roots this repository actually ships and which legacy layouts it
+  # still tolerates. When readable it IS the candidate list, so a new
+  # documented layout is a registry edit rather than a script edit on every
+  # box. The built-in list below is the standalone fallback.
+  CANDIDATES=()
+  CC_REG_CANDIDATES=""
+  if [ -n "${UPDATE_SH_DIR:-}" ] && [ -f "$CC_REGISTRY" ] && command -v python3 >/dev/null 2>&1; then
+    CC_REG_CANDIDATES=$(python3 -I - "$CC_REGISTRY" <<'PYREG'
+import json, os, sys
+try:
+    with open(sys.argv[1]) as fh:
+        reg = json.load(fh)
+except Exception:
+    sys.exit(0)
+home = os.path.expanduser("~")
+for root in reg.get("install_roots") or []:
+    p = root.get("path", "") if isinstance(root, dict) else str(root)
+    if not p:
+        continue
+    print(p.replace("~", home, 1) if p.startswith("~") else p)
+PYREG
+    ) || CC_REG_CANDIDATES=""
+  fi
+  if [ -n "$CC_REG_CANDIDATES" ]; then
+    while IFS= read -r c; do
+      [ -n "$c" ] && CANDIDATES+=("$c")
+    done <<< "$CC_REG_CANDIDATES"
+  else
+    CANDIDATES=(
+      "$HOME/projects/command-center"
+      "/data/projects/command-center"
+      "$HOME/command-center/app"
+      "$HOME/clawd/projects/blackceo-command-center"
+      "/data/clawd/projects/blackceo-command-center"
+      "$HOME/blackceo-command-center"
+      "/data/blackceo-command-center"
+    )
+  fi
   CC_VALIDATED=()
   CC_REJECTED=()
   for c in "${CANDIDATES[@]}"; do
@@ -285,6 +319,45 @@ if [ -z "${CC_APP_DIR:-}" ]; then
 fi
 
 cd "$INSTALL_DIR"
+
+# ----------------------------------------------------------
+# Approved-target enforcement
+# ----------------------------------------------------------
+# CC_UPDATE_TARGET pins ONE main commit for a fleet roll. EVERY update path
+# must either use that commit or refuse: converging to moving `main` deploys a
+# commit the roll has not approved (or skips one it requires). Required is
+# opt-in — the registry's update_paths entries, or CC_REQUIRE_APPROVED_TARGET=1
+# on this box — because the fleet-wide decision is not made yet. When required
+# and no target was supplied, refuse with a named reason code and change
+# nothing; never fall back to the default branch.
+CC_UPDATE_TARGET="${CC_UPDATE_TARGET:-}"
+CC_REQUIRE_APPROVED_TARGET="${CC_REQUIRE_APPROVED_TARGET:-}"
+CC_TARGET_POLICY="optional"
+if [ -n "$CC_REQUIRE_APPROVED_TARGET" ] && [ "$CC_REQUIRE_APPROVED_TARGET" != "0" ]; then
+  CC_TARGET_POLICY="required"
+elif [ -f "$CC_REGISTRY" ] && command -v python3 >/dev/null 2>&1; then
+  CC_TARGET_POLICY=$(python3 -I - "$CC_REGISTRY" <<'PYREG'
+import json, sys
+try:
+    with open(sys.argv[1]) as fh:
+        reg = json.load(fh)
+except Exception:
+    print("optional"); sys.exit(0)
+for path in reg.get("update_paths") or []:
+    if isinstance(path, dict) and path.get("requires_approved_target") is True:
+        print("required"); sys.exit(0)
+print("optional")
+PYREG
+  ) || CC_TARGET_POLICY="optional"
+fi
+if [ "$CC_TARGET_POLICY" = "required" ] && [ -z "$CC_UPDATE_TARGET" ]; then
+  fatal "REFUSED [CC_UPDATE_TARGET_REQUIRED] this box requires an approved target, but CC_UPDATE_TARGET is unset. Every update path (zero-downtime, merge fallback, and the update check) is required to deploy a specific approved commit, and none may fall back to the moving default branch. Nothing was changed. Set CC_UPDATE_TARGET to the roll's commit SHA and re-run."
+fi
+if [ -n "$CC_UPDATE_TARGET" ]; then
+  success "Approved target: $CC_UPDATE_TARGET (policy: $CC_TARGET_POLICY)"
+else
+  warn "No approved target set (policy: $CC_TARGET_POLICY) — this box will follow the default branch."
+fi
 
 # Node runtime preflight — before backup pruning or checkout mutations.
 #
@@ -689,9 +762,9 @@ if [ -d ".git" ] && [ "${CC_UPDATE_ZERO_DOWNTIME:-1}" = "1" ]; then
   git fetch origin +refs/heads/main:refs/remotes/origin/main 2>&1 || fatal "git fetch failed"
   ZD_TARGET=$(git rev-parse origin/main)
   # CC_UPDATE_TARGET: a fleet roll pins one main commit for every box, so a merge
-  # landing mid-roll never reaches the boxes that update after it.
-  # ponytail: only the zero-downtime path honours the pin; the merge fallback
-  # below still converges to origin/main.
+  # landing mid-roll never reaches the boxes that update after it. Every path
+  # honours it: this one here, and the merge fallback below (which resolves the
+  # same commit and refuses rather than converging to moving origin/main).
   if [ -n "${CC_UPDATE_TARGET:-}" ]; then
     git merge-base --is-ancestor "$CC_UPDATE_TARGET" "$ZD_TARGET" 2>/dev/null \
       || fatal "CC_UPDATE_TARGET $CC_UPDATE_TARGET is not a commit on origin/main"
@@ -796,8 +869,21 @@ if [ -d ".git" ]; then
   # client boxes) never moves origin/main on a bare `git fetch origin main`, so
   # the update would target a years-old origin/main.
   git fetch origin +refs/heads/main:refs/remotes/origin/main 2>&1 || fatal "git fetch failed"
+  # A pin governs THIS path too. The zero-downtime path honours CC_UPDATE_TARGET;
+  # the fallback used to ignore it and merge moving origin/main, which deploys
+  # an unapproved commit mid-roll. Resolve the approved commit here and merge
+  # THAT; an unusable pin is fatal, never a silent fallback to main.
+  SYNC_TARGET="origin/main"
+  if [ -n "${CC_UPDATE_TARGET:-}" ]; then
+    git cat-file -e "${CC_UPDATE_TARGET}^{commit}" 2>/dev/null \
+      || fatal "REFUSED [CC_UPDATE_TARGET_UNKNOWN] CC_UPDATE_TARGET $CC_UPDATE_TARGET is not a commit in this checkout after fetch. Nothing was changed. Correct the pin or unset it."
+    git merge-base --is-ancestor "$CC_UPDATE_TARGET" origin/main 2>/dev/null \
+      || fatal "REFUSED [CC_UPDATE_TARGET_NOT_APPROVED] CC_UPDATE_TARGET $CC_UPDATE_TARGET is not a commit on origin/main. Nothing was changed. An approved target must be landed on the default branch before a roll pins it."
+    SYNC_TARGET=$(git rev-parse "${CC_UPDATE_TARGET}^{commit}")
+    success "Merge path pinned to approved target: $SYNC_TARGET"
+  fi
   OLD_HEAD_SHA=$(git rev-parse HEAD 2>/dev/null || true)
-  MERGE_BASE_SHA=$(git merge-base HEAD origin/main 2>/dev/null || true)
+  MERGE_BASE_SHA=$(git merge-base HEAD "$SYNC_TARGET" 2>/dev/null || true)
 
   for f in "${PER_BOX_CONFIG_FILES[@]}"; do
     customized=0
@@ -841,7 +927,7 @@ if [ -d ".git" ]; then
 
   set +e
   git -c user.name="BlackCEO Command Center Updater" \
-      -c user.email="updater@localhost" merge --no-edit origin/main 2>&1
+      -c user.email="updater@localhost" merge --no-edit "$SYNC_TARGET" 2>&1
   MERGE_RC=$?
   set -e
   if [ "$MERGE_RC" -ne 0 ]; then
@@ -897,7 +983,7 @@ if [ -d ".git" ]; then
       cmp -s "$PRESERVE_DIR/$f" "$f" \
         || fatal "Restore verification of $f FAILED (content mismatch) — do NOT deploy; snapshot preserved at $PRESERVE_DIR/$f"
       success "Per-box config restored (survives update): $f"
-      if [ -n "$OLD_HEAD_SHA" ] && ! git diff --quiet "$OLD_HEAD_SHA" origin/main -- "$f" 2>/dev/null; then
+      if [ -n "$OLD_HEAD_SHA" ] && ! git diff --quiet "$OLD_HEAD_SHA" "$SYNC_TARGET" -- "$f" 2>/dev/null; then
         warn "Upstream changed the prior tracked default for $f — this box's per-box client data was kept in ignored runtime state."
       fi
     elif [ ! -f "$f" ] && [ -f "$template" ]; then
@@ -962,9 +1048,9 @@ if [ -d ".git" ]; then
   fi
   [ "$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)" = "main" ] \
     || fatal "Post-sync branch assertion failed: checkout is not on main"
-  git merge-base --is-ancestor origin/main HEAD \
-    || fatal "Post-sync ancestry assertion failed: checkout does not contain latest origin/main"
-  success "Checkout converged to main with latest origin/main; local commits retained"
+  git merge-base --is-ancestor "$SYNC_TARGET" HEAD \
+    || fatal "Post-sync ancestry assertion failed: checkout does not contain the approved sync target $SYNC_TARGET"
+  success "Checkout converged to main with $SYNC_TARGET; local commits retained"
 else
   fatal "Install dir is not a git repo. Manual recovery required: clone $REPO_URL fresh."
 fi
