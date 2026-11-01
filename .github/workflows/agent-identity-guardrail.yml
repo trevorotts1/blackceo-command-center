@@ -10,7 +10,7 @@ on:
 jobs:
   identity-guardrail:
     name: No agent identity may direct persona assumption
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -29,7 +29,7 @@ jobs:
 
   n8n-workflow-validator:
     name: n8n workflow validator rejects fenced and malformed output (T2-39 / A46)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

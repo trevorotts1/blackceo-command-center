@@ -25,7 +25,7 @@ jobs:
   # BEFORE trusting its clean verdict on the real tree.
   ceo-chat-color-gate:
     name: My AI CEO off-brand color gate (indigo/purple/fuchsia)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -61,7 +61,7 @@ jobs:
   # comms_qc_passed onto a review card.
   u117-comms-qc-conformance-guard:
     name: U117 comms-QC conformance gate + mutation proof
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -85,7 +85,7 @@ jobs:
 
   qc-cc:
     name: QC Command Center
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -180,7 +180,7 @@ jobs:
   # never the ticket; a missing, failed or skipped proof fails this job.
   paired-invitation-acceptance:
     name: Real paired onboarding invitation acceptance (no skips, no ticket)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout the Command Center under test
         uses: actions/checkout@v4
@@ -242,7 +242,7 @@ jobs:
 
   qc-independence:
     name: QC scorer independence
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -270,7 +270,7 @@ jobs:
   # acceptance (f)/(4) actually runs in CI, not just locally.
   u55-ceo-hero-contract-tests:
     name: U55 CEO-hero contract + render-level tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -328,7 +328,7 @@ jobs:
   # A wrong verdict on any row blocks merge (per the severity tier table).
   deep-health-truth-table:
     name: B.1 deep-health truth table (vitest)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -373,7 +373,7 @@ jobs:
   # when pm2 is absent; fixture covers the app-level checks).
   deep-health-probe-fixture:
     name: B.1 thin-probe fixture (cc-health-check.sh)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       # Register the isolated installation at both build and runtime. The public
       # enrollment shell exposes asset refs only on explicitly registered hosts.
@@ -497,7 +497,7 @@ jobs:
 
   duck-e2e:
     name: Duck pipeline e2e (mock generator)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # NOTE: add this job to branch-protection required-status-checks so it
     # blocks merges when the duck pipeline is broken. Steps:
     #   Settings → Branches → main protection rule → Required status checks
@@ -547,7 +547,7 @@ jobs:
     #   - missing cc-start.sh → no orphan-port kill
     #   - missing circuit-breaker fields → PM2 loops forever
     # A planted fixture is used to PROVE the guard actually bites (self-test).
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -668,7 +668,7 @@ jobs:
   # blocks nothing is indistinguishable from no job at all. It blocks now.
   build-smoke:
     name: Build smoke test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -725,7 +725,7 @@ jobs:
   # misleading wording fails this job outright.
   no-client-names:
     name: No client names in tracked files (authoritative scan)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -815,7 +815,7 @@ jobs:
   # integration-tests/, conversational-ai/, fleet-heartbeat/scripts/, .claude/).
   shell-syntax:
     name: Shell script syntax (bash -n) guard
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -840,7 +840,7 @@ jobs:
 
   prove-zhe-web-e2e:
     name: prove-zhe web e2e + interview ZHE gates (P3-8)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Proves a completed interview through THIS app produces a Zero-Human-Everything
     # -compliant build state, and FAILS loudly if any ZHE gate (consent/exit-87,
     # decision-coverage/exit-88, provenanced-decline, expected-set equality) is
@@ -888,7 +888,7 @@ jobs:
   # without client credentials, external providers or the operator's workspace.
   interview-lock-e2e:
     name: Interview-unlock shell-lock e2e (Playwright)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -961,7 +961,7 @@ jobs:
   # Node 22: the durable store uses `node:sqlite` (built in from 22.5).
   rescue-rangers-tests:
     name: Rescue Rangers ticket store + relay snippets (node --test)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
