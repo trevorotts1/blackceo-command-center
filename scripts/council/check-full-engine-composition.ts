@@ -14,9 +14,10 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
 
+/** <project>/lanes/CTR-191-launch-parity/mission-control */
 const ROOT = join(import.meta.dirname, '..', '..');
-const CC = join(ROOT, '..', '..', '..', '..');
-const PROJECT = join(CC, '..', '..');
+/** <project> — the lane tree that carries the CTR-194 canonical snapshot. */
+const PROJECT = join(ROOT, '..', '..', '..');
 const CANON = join(PROJECT, 'lanes', 'CTR-194-repo-council-install', 'repo', '77-council-of-wise-elders');
 const read = (p: string) => readFileSync(p, 'utf8');
 
