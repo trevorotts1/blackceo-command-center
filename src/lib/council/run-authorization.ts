@@ -59,6 +59,7 @@ import {
   DEFAULT_COUNCIL_SETTINGS,
   canonicalHash,
   canonicalStringify,
+  isValidId,
   validateRunGrant,
   validateRunPreview,
   type CouncilEventType,
@@ -123,6 +124,21 @@ export class CouncilRunAuthorizationError extends Error {
 
 function invalidInput(message: string): CouncilRunAuthorizationError {
   return new CouncilRunAuthorizationError('RUN_INVALID_INPUT', message);
+}
+
+/**
+ * CWE-049 host review: the canonical RunGrant contract validates
+ * `issuer_principal` and `scope.owner_subject` as opaque idSchema values, but
+ * the trusted host subject may be a verified email (the tenant registry
+ * supports email subjects). This deterministic mapping keeps the PUBLIC grant
+ * projection contract-valid. The approval record and every authorization
+ * comparison keep the raw trusted subject; only the client-facing projection
+ * maps a subject that is not a legal id. Reversible only by the same hash,
+ * never by another principal.
+ */
+function contractSafePrincipalId(subject: string): string {
+  if (isValidId(subject)) return subject;
+  return `principal-${canonicalHash({ subject }).slice(0, 32)}`;
 }
 
 // ------------------------------------------------------------------ shapes
@@ -1576,12 +1592,15 @@ export class CouncilRunAuthorizationService {
       schema_version: 'wise-elders.run-grant/v1',
       grant_id: record.grant_id,
       authority_mode: record.authority_mode,
-      issuer_principal: record.issuer_principal,
+      issuer_principal: contractSafePrincipalId(record.issuer_principal),
       scope: {
         tenant_id: envelope.tenant_id,
         company_id: envelope.company_id,
         installation_id: record.proof.installation_id,
-        owner_subject: record.proof.owner_subject,
+        owner_subject:
+          record.proof.owner_subject === null
+            ? null
+            : contractSafePrincipalId(record.proof.owner_subject),
       },
       purpose: record.purpose,
       session_id: record.session_id as string,

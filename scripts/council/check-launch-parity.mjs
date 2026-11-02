@@ -112,7 +112,17 @@ if (existsSync(join(ROOT, routesRoute))) {
     /NextResponse\.json\(\s*payload/.test(src) && /const payload = \{ routes, harness_defaults \}/.test(src),
   );
   check('routes endpoint never emits credential values', !/credential\s*:/.test(src));
+  check(
+    'routes ids are legal canonical ids for host model ids containing /',
+    /canonicalRouteIdForModel\(entry\.routeId\)/.test(src),
+  );
 }
+const providers = read('src/lib/council/providers.ts');
+check(
+  'the canonical route-id helper is deterministic and contract-safe',
+  /export function canonicalRouteIdForModel/.test(providers) &&
+    /return `route-\$\{canonicalHash\(\{ model_id: modelId \}\)\.slice\(0, 32\)\}`/.test(providers),
+);
 
 const conveneRoute = 'src/app/api/council/convene/route.ts';
 check('convene endpoint exists', existsSync(join(ROOT, conveneRoute)));
@@ -140,6 +150,11 @@ if (existsSync(join(ROOT, conveneRoute))) {
   check(
     'convene body allowlist excludes caller authority',
     !/route_snapshot|authority_mode|ceilings|signature|grant_id/.test(allowlist),
+  );
+  check(
+    'convene writes a legal route id and does not put the raw model id in the spec',
+    /route_id: canonicalRouteIdForModel\(entry\.routeId\)/.test(src) &&
+      /requested_model_id: null/.test(src),
   );
   check(
     'convene returns the canonical 202 session id before work',
@@ -212,6 +227,21 @@ check(
   /source:\s*'\/portraits\/:file\*'[\s\S]*?destination:\s*'\/chamber\/portraits\/:file\*'/.test(
     nextConfig,
   ),
+);
+
+// CWE-049 host review: a tenant subject may be a verified email, which is not
+// a legal canonical idSchema value. The public RunGrant projection must map it
+// without changing the recorded principal or any authorization comparison.
+const runAuthorization = read('src/lib/council/run-authorization.ts');
+check(
+  'public run grants carry contract-safe issuer and owner ids',
+  /function contractSafePrincipalId/.test(runAuthorization) &&
+    /issuer_principal:\s*contractSafePrincipalId\(record\.issuer_principal\)/.test(
+      runAuthorization,
+    ) &&
+    /owner_subject:[\s\S]{0,120}contractSafePrincipalId\(record\.proof\.owner_subject\)/.test(
+      runAuthorization,
+    ),
 );
 
 if (failures.length > 0) {
