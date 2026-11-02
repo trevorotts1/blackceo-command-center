@@ -12,9 +12,11 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { NextRequest } from 'next/server';
 import { describe, it, expect, beforeAll, vi } from 'vitest';
 
-import { run } from '@/lib/db';
+import { run, queryAll as query } from '@/lib/db';
 import { OPERATOR_NAV } from '@/components/OperatorSidebar';
 import { POST as ingestPOST } from '@/app/api/launch-runs/ingest/route';
+import { GET as runsGET } from '@/app/api/launch-runs/route';
+import { getLaunchAbility } from '@/lib/launch-abilities';
 import LaunchListPage from '@/app/launch/page';
 import { relateLaunchViews } from '@/lib/launch-storage';
 
@@ -130,5 +132,44 @@ describe('CON-22 — /launch reads the ingest database', () => {
 describe('CON-22 — navigation', () => {
   it('lists /launch', () => {
     expect(OPERATOR_NAV.map((item) => item.href)).toContain('/launch');
+  });
+});
+
+describe('CON-21/22 — /api/launch-runs shows ingested runs keyed by launch_id', () => {
+  const get = (query = '') => runsGET(new NextRequest(`http://localhost/api/launch-runs${query}`));
+
+  it('lists the ingested launch with LAUNCH_PLANS_DIR unset', async () => {
+    const res = await get();
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    const launch = body.ingested.find((l: { launch_id: string }) => l.launch_id === LAUNCH_ID);
+    expect(launch.abilities.map((a: { skill: number }) => a.skill)).toContain(83);
+  });
+
+  it('returns one launch from the database with every stage of the ability', async () => {
+    const res = await get(`?launch_id=${LAUNCH_ID}`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.source).toBe('database');
+    const stages = body.abilities[0].stages as Array<{ stage: string; status: string }>;
+    expect(stages.map((s) => s.stage)).toEqual(getLaunchAbility(83)!.stageOrder);
+    const stored = query<{ status: string }>(
+      `SELECT status FROM launch_run_stages WHERE run_id = ? AND stage = 'intake'`,
+      [RUN_ID],
+    );
+    expect(stages.find((s) => s.stage === 'intake')!.status).toBe(stored[0].status);
+    expect(stored[0].status).not.toBe('not_run');
+  });
+
+  it('404s an unknown launch and keeps the 503 honesty contract for a configured, unreadable directory', async () => {
+    expect((await get('?launch_id=no-such-launch')).status).toBe(404);
+    process.env.LAUNCH_PLANS_DIR = '/nonexistent/launch-plans-cc-02';
+    try {
+      const res = await get();
+      expect(res.status).toBe(503);
+      expect((await res.json()).error).toBe('launch_store_unavailable');
+    } finally {
+      delete process.env.LAUNCH_PLANS_DIR;
+    }
   });
 });
