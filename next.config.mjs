@@ -80,6 +80,41 @@ const nextConfig = {
     }
     return config;
   },
+  async rewrites() {
+    /**
+     * CTR-191 universal Council screen.
+     *
+     * `/council` must open the SAME chamber the OpenClaw / claude-nine entry
+     * opens. That chamber is the canonical, dependency-free, same-origin bundle
+     * synced verbatim into `public/chamber` by
+     * `scripts/council/sync-chamber.mjs` — not a second renderer that imitates
+     * it. The rewrite keeps the URL at `/council` and runs AFTER middleware, so
+     * every existing auth, tenant and interview gate still runs first; only the
+     * document that renders changes. The chamber carries no data of its own: it
+     * reads this app's own authorized `/api/council/*` endpoints, which keep the
+     * Command Center's managed session store, tenant scope and principal
+     * authoritative.
+     *
+     * The chamber's single session read is `GET /council/<id>` with
+     * `Accept: application/json`. That path is also the React session page, so
+     * only the JSON read is rerouted, and only when the caller asks for JSON.
+     */
+    return {
+      beforeFiles: [
+        {
+          source: '/council',
+          destination: '/chamber/index.html',
+        },
+        {
+          source: '/council/:sessionId',
+          has: [{ type: 'header', key: 'accept', value: '(.*application/json.*)' }],
+          destination: '/api/council/chamber-sessions/:sessionId',
+        },
+      ],
+      afterFiles: [],
+      fallback: [],
+    };
+  },
   async headers() {
     return [
       {

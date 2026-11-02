@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<link rel="icon" href="data:,">
+<title>The chamber - Council of Wise Elders</title>
+<link rel="stylesheet" href="./chamber-theme.css">
+<link rel="stylesheet" href="./chamber-shell.css">
+<link rel="stylesheet" href="./chamber-decision.css">
+<link rel="stylesheet" href="./chamber-advisory.css">
+<link rel="stylesheet" href="./chamber-room.css">
+<link rel="stylesheet" href="./chamber-keypoints.css">
+<link rel="stylesheet" href="./chamber-seatcard.css">
+<link rel="stylesheet" href="./chamber-cue.css">
+</head>
+<body class="ch">
+<div class="ch-app">
+
+  <header id="ch-topbar" class="ch-top">
+    <div class="ch-top-brand">
+      <span class="ch-top-logo" role="img" aria-label="BlackCEO"></span>
+      <span class="ch-top-divider" aria-hidden="true"></span>
+      <p class="ch-top-name">Council of Wise Elders</p>
+    </div>
+
+    <nav id="ch-stepper" class="ch-top-steps" aria-label="Council phases">
+      <ol class="ch-step-list">
+        <li class="ch-step" data-step="brief" data-status="current" aria-current="step"><span class="ch-step-dot" aria-hidden="true"></span><span class="ch-step-label">Brief</span><span class="ch-sr-only ch-step-sr"> (current)</span></li>
+        <li class="ch-step" data-step="openings" data-status="todo"><span class="ch-step-dot" aria-hidden="true"></span><span class="ch-step-label">Openings</span></li>
+        <li class="ch-step" data-step="fault_lines" data-status="todo"><span class="ch-step-dot" aria-hidden="true"></span><span class="ch-step-label">Fault lines</span></li>
+        <li class="ch-step" data-step="debate" data-status="todo"><span class="ch-step-dot" aria-hidden="true"></span><span class="ch-step-label">Debate</span></li>
+        <li class="ch-step" data-step="vote" data-status="todo"><span class="ch-step-dot" aria-hidden="true"></span><span class="ch-step-label">Vote</span></li>
+        <li class="ch-step" data-step="verdict" data-status="todo"><span class="ch-step-dot" aria-hidden="true"></span><span class="ch-step-label">Verdict</span></li>
+      </ol>
+    </nav>
+
+    <div class="ch-top-actions">
+      <button type="button" class="ch-btn" id="ch-open-how" aria-haspopup="dialog">How it works</button>
+      <button type="button" class="ch-btn" id="ch-open-sessions" aria-haspopup="dialog">Past sessions</button>
+      <button type="button" class="ch-btn" id="ch-open-composer" aria-haspopup="dialog">New question</button>
+    </div>
+  </header>
+
+  <div id="ch-banner" class="ch-banner" role="status" hidden>
+    <p class="ch-banner-text"></p>
+    <button type="button" class="ch-btn ch-banner-exit" id="ch-banner-exit">Exit demo</button>
+  </div>
+
+  <noscript><p class="ch-noscript" role="note">The chamber needs JavaScript. Without it this page cannot read council sessions, and it shows nothing in their place.</p></noscript>
+
+  <main class="ch-main">
+    <section id="ch-decision" class="ch-panel" aria-label="The decision"></section>
+    <div class="ch-stage-grid">
+      <section id="ch-room" class="ch-panel" aria-label="The council room"></section>
+      <details class="ch-panel ch-activity">
+        <summary class="ch-activity-summary">Activity history</summary>
+        <aside id="ch-keypoints" aria-label="Key points"></aside>
+      </details>
+    </div>
+    <!-- Results cue (CTR-144). Plain flow between the council room and the
+         results, so it never covers a seat face or a control. Chamber-cue.js
+         fills the text from the view: waiting while the council works, ready
+         with a native anchor once the answer exists, and a pointer to the
+         room's own explanation when the sitting was blocked or stopped. -->
+    <div id="ch-results-cue" class="ch-cue" role="status" aria-live="polite" hidden>
+      <p id="ch-cue-text" class="ch-cue-text"></p>
+      <a id="ch-cue-link" class="ch-btn ch-cue-link" href="#ch-advisory" hidden></a>
+      <span id="ch-cue-arrow" class="ch-cue-arrow" aria-hidden="true" hidden></span>
+    </div>
+    <!-- Option detail bars live below the council in every state. The compact
+         decision header above carries only the question and the short status,
+         so the portraits are never pushed down by option rows. chamber-decision.js
+         mounts its existing list here instead of ranking anything itself. -->
+    <section id="ch-options" class="ch-panel ch-dec-options-panel" aria-label="Options and preferences" hidden></section>
+    <section id="ch-advisory" class="ch-panel" aria-label="The council's answer" hidden></section>
+  </main>
+
+  <footer class="ch-foot">
+    <p class="ch-foot-text">Each council member is an AI perspective inspired by the published work of the named author. Not the individual and not an endorsement.</p>
+  </footer>
+</div>
+
+<dialog id="ch-seatcard" class="ch-dialog"></dialog>
+
+<dialog id="ch-how" class="ch-dialog ch-how" aria-labelledby="ch-how-title">
+  <h2 id="ch-how-title" class="ch-how-title">How it works</h2>
+  <p class="ch-how-intro">You ask one question and name the options. The advisors work through it in phases, and the council ends with one recommendation and the reasons behind it. Nothing is final until the last phase.</p>
+  <p class="ch-how-note">Three sizes: every size seats all nine advisors. A light question runs exactly 2 rounds with at most 3 advisors working at once, a medium question runs up to 4 rounds, and a heavy question runs up to 10 rounds.</p>
+  <ol class="ch-how-phases">
+    <li><strong>Brief.</strong> The chair reads your question and freezes it with your options, so every advisor answers the same thing.</li>
+    <li><strong>Openings.</strong> Each advisor writes an independent first position, without seeing what the others wrote.</li>
+    <li><strong>Fault lines.</strong> The chair finds the points where the advisors really disagree.</li>
+    <li><strong>Debate.</strong> The advisors answer those disagreements and may change their minds, for as many rounds as the size allows.</li>
+    <li><strong>Vote.</strong> On the three older formats the chair drafts a resolution, and each advisor supports it, supports it with conditions, opposes it or abstains. Light, medium and heavy go straight from their last round to the verdict.</li>
+    <li><strong>Verdict.</strong> The chair checks the result, and the council gives one recommendation with its reasons.</li>
+  </ol>
+  <p class="ch-how-note">A consult skips the fault lines, debate and vote. Each advisor is an AI perspective inspired by the published work of the named author. Not the individual.</p>
+  <div class="ch-how-actions">
+    <button type="button" class="ch-btn ch-btn--primary" id="ch-how-demo">Watch a demo replay</button>
+    <a class="ch-btn" href="./advisors.html">The nine advisors</a>
+    <a class="ch-btn" href="/status">Service status</a>
+    <button type="button" class="ch-btn ch-dialog-close" data-ch-close>Close</button>
+  </div>
+</dialog>
+
+<dialog id="ch-sessions" class="ch-dialog ch-sessions" aria-labelledby="ch-sessions-title">
+  <h2 id="ch-sessions-title" class="ch-sessions-title">Past sessions</h2>
+  <p id="ch-sessions-status" class="ch-sessions-status" role="status"></p>
+  <ul id="ch-sessions-list" class="ch-sessions-list"></ul>
+  <p class="ch-sessions-hint">No sessions yet? Ask your agent to convene the Council of Wise Elders, or from the command line run <code>blackceo-council convene --brief FILE</code> (or <code>blackceo-council convene --sample</code>). A session appears here as soon as it is created, and its events stream in once it runs.</p>
+  <div class="ch-sessions-actions">
+    <button type="button" class="ch-btn" id="ch-sessions-refresh">Refresh</button>
+    <button type="button" class="ch-btn ch-dialog-close" data-ch-close>Close</button>
+  </div>
+</dialog>
+
+<dialog id="ch-composer" class="ch-dialog ch-composer" aria-labelledby="ch-composer-title">
+  <form id="ch-composer-form" class="ch-composer-form" novalidate>
+    <h2 id="ch-composer-title" class="ch-composer-title">New question</h2>
+
+    <div class="ch-composer-field">
+      <label for="ch-composer-question" class="ch-composer-label">Your question</label>
+      <textarea id="ch-composer-question" class="ch-composer-input" rows="2" maxlength="600" autocomplete="off"></textarea>
+    </div>
+
+    <fieldset class="ch-composer-options">
+      <legend class="ch-composer-label">Options (at least two, up to four)</legend>
+      <div id="ch-composer-option-rows" class="ch-composer-option-rows"></div>
+    </fieldset>
+
+    <div class="ch-composer-field">
+      <label for="ch-composer-context" class="ch-composer-label">What should the council know? (optional, one fact per line)</label>
+      <textarea id="ch-composer-context" class="ch-composer-input" rows="3" autocomplete="off"></textarea>
+    </div>
+
+    <fieldset class="ch-composer-routes">
+      <legend class="ch-composer-label">Which route runs the council</legend>
+      <p id="ch-composer-routes-status" class="ch-composer-hint" role="status">Loading routes...</p>
+      <div id="ch-composer-routes-list" class="ch-composer-routes-list"></div>
+    </fieldset>
+
+    <div class="ch-composer-field">
+      <label for="ch-composer-model" class="ch-composer-label">Model (optional)</label>
+      <input id="ch-composer-model" class="ch-composer-input" type="text" autocomplete="off" spellcheck="false" aria-describedby="ch-composer-model-hint">
+      <p id="ch-composer-model-hint" class="ch-composer-hint">Leave empty to use this route's default.</p>
+    </div>
+
+    <div id="ch-composer-error" class="ch-composer-error" role="alert" hidden></div>
+
+    <div class="ch-composer-actions">
+      <button type="submit" class="ch-btn ch-btn--primary" id="ch-composer-submit" disabled>Convene</button>
+      <p class="ch-composer-approval">Convening starts the council now on the model you chose.</p>
+      <button type="button" class="ch-btn ch-dialog-close" data-ch-close>Cancel</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="./chamber-seats.js"></script>
+<script src="./chamber-state.js"></script>
+<script src="./chamber-live.js"></script>
+<script src="./chamber-shell.js"></script>
+<script src="./chamber-decision.js"></script>
+<script src="./chamber-room.js"></script>
+<script src="./chamber-keypoints.js"></script>
+<script src="./chamber-seatcard.js"></script>
+<script src="./chamber-advisory.js"></script>
+<script src="./chamber-cue.js"></script>
+</body>
+</html>
