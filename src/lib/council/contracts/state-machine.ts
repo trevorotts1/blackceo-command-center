@@ -71,6 +71,43 @@ const MODE_PATHS: Record<SessionMode, Partial<Record<SessionState, SessionState[
     CONSULTING: ['VERIFYING'],
     VERIFYING: ['COMPLETED'],
   },
+  // Council sizes (contracts/modes.ts): Round 1 is the isolated opening and
+  // every later pass is a challenge round, so ROUND_2 re-enters CRUX_REVIEW
+  // (canonical protocol/composition.ts does exactly this) and there is no
+  // separate ratification pass: DRAFT_RESOLUTION goes straight to VERIFYING.
+  light: {
+    DRAFT: ['READY'],
+    READY: ['QUEUED'],
+    QUEUED: ['PREPARING'],
+    PREPARING: ['ROUND_1'],
+    ROUND_1: ['CRUX_REVIEW'],
+    CRUX_REVIEW: ['ROUND_2'],
+    ROUND_2: ['DRAFT_RESOLUTION', 'CRUX_REVIEW'],
+    DRAFT_RESOLUTION: ['VERIFYING'],
+    VERIFYING: ['COMPLETED'],
+  },
+  medium: {
+    DRAFT: ['READY'],
+    READY: ['QUEUED'],
+    QUEUED: ['PREPARING'],
+    PREPARING: ['ROUND_1'],
+    ROUND_1: ['CRUX_REVIEW'],
+    CRUX_REVIEW: ['ROUND_2'],
+    ROUND_2: ['DRAFT_RESOLUTION', 'CRUX_REVIEW'],
+    DRAFT_RESOLUTION: ['VERIFYING'],
+    VERIFYING: ['COMPLETED'],
+  },
+  heavy: {
+    DRAFT: ['READY'],
+    READY: ['QUEUED'],
+    QUEUED: ['PREPARING'],
+    PREPARING: ['ROUND_1'],
+    ROUND_1: ['CRUX_REVIEW'],
+    CRUX_REVIEW: ['ROUND_2'],
+    ROUND_2: ['DRAFT_RESOLUTION', 'CRUX_REVIEW'],
+    DRAFT_RESOLUTION: ['VERIFYING'],
+    VERIFYING: ['COMPLETED'],
+  },
 };
 
 /** States from which work is actively executing or awaiting execution. */

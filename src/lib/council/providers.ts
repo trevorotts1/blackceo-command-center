@@ -28,6 +28,7 @@ import { ALL_PROVIDERS, getProvider } from '../model-providers';
 import type { ModelProvider } from '../model-providers/types';
 import { resolveProviderApiKey } from '../provider-key-detection';
 import type { ModelRegistryEntry } from '../model-registry-types';
+import { canonicalHash } from './contracts';
 
 // ---------------------------------------------------------------------------
 // Route identity levels (Section 13.4). Ordered weakest to strongest.
@@ -182,6 +183,31 @@ export function routeDescriptorFromRegistryEntry(
     },
     credential,
   };
+}
+
+/**
+ * CTR-191: a contract-safe route id for the canonical chamber.
+ *
+ * Host model ids carry a provider prefix (`ollama-cloud/deepseek...`) and a
+ * slash is not a legal canonical `idSchema` value, so the raw model id cannot
+ * be the `SessionSpec.model_policy.route_id`. This derives a stable, opaque,
+ * legal route id from the exact model id. The exact model id still travels in
+ * the route snapshot, the run grant proof and `harness_defaults`; this value
+ * only names the route. The mapping is deterministic, so a cached chamber can
+ * resolve its own route id again without a second table.
+ */
+export function canonicalRouteIdForModel(modelId: string): string {
+  return `route-${canonicalHash({ model_id: modelId }).slice(0, 32)}`;
+}
+
+/** Resolve a canonical route id back to the catalog entry it names. */
+export function findCatalogEntryByCanonicalRouteId(
+  catalog: RouteCatalogEntry[],
+  routeId: string,
+): RouteCatalogEntry | null {
+  return (
+    catalog.find((entry) => canonicalRouteIdForModel(entry.routeId) === routeId) ?? null
+  );
 }
 
 /** Descriptors for every provider connector the host has registered (B08). */

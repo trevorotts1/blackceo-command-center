@@ -19,6 +19,42 @@ function resolveDistDir() {
   return rel;
 }
 
+/**
+ * The files the canonical `public/chamber/index.html` loads by relative
+ * reference. They are served from `/chamber/...`; the browser resolves the
+ * document's `./name` against `/council`, so each one needs a root-level
+ * rewrite that does not alter a single canonical byte. Keep this list in step
+ * with the bundle manifest (PROVENANCE.json) if the canonical release adds a
+ * top-level asset.
+ */
+const CHAMBER_ROOT_ASSETS = [
+  'chamber-theme.css',
+  'chamber-shell.css',
+  'chamber-decision.css',
+  'chamber-advisory.css',
+  'chamber-room.css',
+  'chamber-keypoints.css',
+  'chamber-seatcard.css',
+  'chamber-cue.css',
+  'council-theme.css',
+  'council-room.css',
+  'council-journey.css',
+  'chamber-seats.js',
+  'chamber-state.js',
+  'chamber-live.js',
+  'chamber-shell.js',
+  'chamber-decision.js',
+  'chamber-room.js',
+  'chamber-keypoints.js',
+  'chamber-seatcard.js',
+  'chamber-advisory.js',
+  'chamber-cue.js',
+  'demo-replay.json',
+  'advisors.html',
+  'not-packaged.html',
+  'blackceo-logo.png',
+];
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   // Loopback browser fixtures use this host. Next 16 carries React's dev debug
@@ -79,6 +115,70 @@ const nextConfig = {
       };
     }
     return config;
+  },
+  async rewrites() {
+    /**
+     * CTR-191 universal Council screen.
+     *
+     * `/council` must open the SAME chamber the OpenClaw / claude-nine entry
+     * opens. That chamber is the canonical, dependency-free, same-origin bundle
+     * synced verbatim into `public/chamber` by
+     * `scripts/council/sync-chamber.mjs` — not a second renderer that imitates
+     * it. The rewrite keeps the URL at `/council` and runs AFTER middleware, so
+     * every existing auth, tenant and interview gate still runs first; only the
+     * document that renders changes. The chamber carries no data of its own: it
+     * reads this app's own authorized `/api/council/*` endpoints, which keep the
+     * Command Center's managed session store, tenant scope and principal
+     * authoritative.
+     *
+     * The chamber's single session read is `GET /council/<id>` with
+     * `Accept: application/json`. That path is also the React session page, so
+     * only the JSON read is rerouted, and only when the caller asks for JSON.
+     */
+    return {
+      beforeFiles: [
+        {
+          /**
+           * Served through the CC adapter so the New-question intent script
+           * is added at response time. The canonical document on disk stays
+           * byte-identical; see src/app/api/council/chamber-index/route.ts.
+           */
+          source: '/council',
+          destination: '/api/council/chamber-index',
+        },
+        {
+          source: '/council/:sessionId',
+          has: [{ type: 'header', key: 'accept', value: '(.*application/json.*)' }],
+          destination: '/api/council/chamber-sessions/:sessionId',
+        },
+        {
+          source: '/council/:sessionId/report.pdf',
+          destination: '/api/council/chamber-sessions/:sessionId/report.pdf',
+        },
+        /**
+         * Base-path adapter for the unchanged canonical document.
+         *
+         * The canonical chamber is copied byte-for-byte and is served at
+         * `/council`, so every relative reference in its HTML/CSS
+         * (`./chamber-theme.css`, `./portraits/x.webp`, `./demo-replay.json`)
+         * resolves against `/`, not `/chamber/`. Rewriting only the files the
+         * canonical bundle itself names keeps the bundle bit-identical while
+         * letting its styles, scripts and portraits load. Nothing else under
+         * `/` is touched, and the `/council/*` app routes keep their own
+         * meanings.
+         */
+        ...CHAMBER_ROOT_ASSETS.map((asset) => ({
+          source: `/${asset}`,
+          destination: `/chamber/${asset}`,
+        })),
+        {
+          source: '/portraits/:file*',
+          destination: '/chamber/portraits/:file*',
+        },
+      ],
+      afterFiles: [],
+      fallback: [],
+    };
   },
   async headers() {
     return [

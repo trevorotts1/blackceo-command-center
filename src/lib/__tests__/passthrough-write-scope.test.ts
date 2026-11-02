@@ -171,6 +171,18 @@
  * 163 mutating, 7 webhook-protected (unchanged), 156 non-webhook. Bearer
  * totals unchanged (50 patterns match 54 templates, 53 bearer-ONLY).
  *
+ * re-derived 2026-11-02 for CTR-191: POST /api/council/convene adds one
+ * mutating, non-webhook route (164 mutating, 157 non-webhook). Its real auth
+ * is not bearer: handleCouncil resolves the CWE-007 principal, the handler
+ * requires a mutation proof (signed mc_csrf_token cookie for a browser
+ * principal; the approved bearer plus the host-configured machine binding for
+ * a machine principal), checkBodyScope rejects caller-supplied scope, and
+ * authorizeSessionMutate fences the created session before any grant. The
+ * chamber composer calls it from public/chamber/chamber-shell.js, which the
+ * interface scanner does not read; bearer-listing it would 401 the browser
+ * channel and misstate the auth. It is therefore recorded in the documented
+ * residual with that verified posture, never as a blanket exemption.
+ *
  * re-derived 2026-09-27 for ILJ-004 tenant skip marks: POST
  * /api/interview/state — the owner's browser marking one structured question
  * skipped (InterviewClient.tsx:375 with the session cookie + tenant
@@ -449,16 +461,16 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
   // re-derived 2026-10-30 for CTR-165 (capability snapshot ingest): POST
   // /api/council/capabilities/snapshot adds one mutating route; it is never
   // webhook-gated, so both censuses move by exactly one.
-  it('API routes exporting a mutating method: 163 (literal assertion)', () => {
-    expect(allMutatingRoutes.length).toBe(163);
+  it('API routes exporting a mutating method: 164 (literal assertion)', () => {
+    expect(allMutatingRoutes.length).toBe(164);
   });
 
   it('protected by isWebhookSecretRoute: 7 (5 static + 2 dynamic — middleware src/middleware.ts:137-167)', () => {
     expect(webhookProtectedCount).toBe(7);
   });
 
-  it('non-webhook write routes: 156 (163 mutating − 7 webhook-protected; tenant authentication remains required)', () => {
-    expect(nonWebhookCount).toBe(156);
+  it('non-webhook write routes: 157 (164 mutating − 7 webhook-protected; tenant authentication remains required)', () => {
+    expect(nonWebhookCount).toBe(157);
   });
 
   it('interface call templates found by multi-line scanner', () => {
@@ -542,6 +554,16 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
     // 401 the console channel and misstate the browser auth, so it stays
     // out of BEARER_REQUIRED_WRITE_ROUTES.
     '/api/council/capabilities/snapshot',
+    // CTR-191 canonical chamber composer (POST only). handleCouncil resolves
+    // the CWE-007 principal, so there is no tokenless caller; requireMutationProof
+    // demands the signed mc_csrf_token cookie for a browser principal and the
+    // approved bearer plus the host-configured machine binding for a machine
+    // principal; checkBodyScope refuses caller-supplied scope; and
+    // authorizeSessionMutate fences the created session before any grant is
+    // previewed or approved. The caller is public/chamber/chamber-shell.js,
+    // which the interface scanner does not read; bearer-listing it would 401
+    // the browser channel and misstate the auth.
+    '/api/council/convene',
   ];
 
   it('every reachable mutating route is either in BEARER_REQUIRED_WRITE_ROUTES, called by the interface, or a documented unwired console route (exact residual enforced)', () => {
