@@ -812,6 +812,35 @@ export class CouncilRepositories {
     }));
   }
 
+  /**
+   * Append one engine-observed event through the SAME hash-chained
+   * journal. Used by the composed canonical engine for events the store
+   * methods do not already own (crux_identified, resolution_drafted,
+   * operation_completed, session_blocked). Card, verdict, and state
+   * events stay owned by their atomic store commits.
+   */
+  appendEventRecord(
+    envelope: CouncilEnvelope,
+    sessionId: string,
+    input: {
+      type: CouncilEventType;
+      from_state: string | null;
+      to_state: string | null;
+      actor_subject: string;
+      payload: Record<string, unknown>;
+      created_at: string;
+    },
+  ): CouncilJournalEvent {
+    this.assertNotDeleted(envelope, sessionId);
+    return this.write(() => {
+      if (!this.sessionRow(envelope, sessionId)) throw sessionNotFound(sessionId);
+      return this.appendEventInTx(envelope, sessionId, {
+        event_id: this.newId(),
+        ...input,
+      });
+    });
+  }
+
   private latestEventOfType(
     envelope: CouncilEnvelope,
     sessionId: string,

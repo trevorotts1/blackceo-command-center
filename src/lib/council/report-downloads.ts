@@ -2009,6 +2009,54 @@ export async function createCouncilExport(
 }
 
 /**
+ * CTR-191 canonical download contract: render the report PDF for a saved
+ * session straight from the managed store, without creating a second
+ * deliverable identity.
+ *
+ * The canonical chamber links `/council/<id>/report.pdf` and expects the
+ * bytes on GET. This helper performs the same read-only checks as a PDF
+ * export (session alive, valid committed verdict, final cards present) and
+ * renders through the same model + Chromium path, but journals nothing and
+ * registers no deliverable: a browser download must not create authority or
+ * a duplicate artifact record. The route authorizes the session read before
+ * calling this, exactly like every other chamber read.
+ */
+export async function renderSessionReportPdf(
+  deps: ReportDownloadsDeps,
+  envelope: CouncilEnvelope,
+  sessionId: string,
+): Promise<{ bytes: Buffer; filename: string; media_type: string }> {
+  const { session, verdict, cards } = loadExportableSession(deps, envelope, sessionId);
+  const capabilitySection = buildCapabilityReportSection(
+    null,
+    planProposalsFor(verdict),
+  );
+  const model = buildReportModel({
+    verdict,
+    brief: session.brief,
+    final_cards: cards,
+    report_date: new Date().toISOString().slice(0, 10),
+    session_mode: session.spec.mode,
+    redaction: null,
+    capability_section: capabilitySection,
+  });
+  const printHtml = renderPrintHtml(model, { cover: loadReportCoverAssets() });
+  const bytes = await renderPdfArtifact(printHtml);
+  // Deletion race recheck (T059), same as the export path.
+  assertSessionAlive(deps, sessionId, envelope.tenant_id);
+  return {
+    bytes,
+    filename: reportFilename({
+      session_id: sessionId,
+      verdict_revision: verdict.verdict_revision,
+      format: 'pdf',
+      redacted: false,
+    }),
+    media_type: REPORT_FORMAT_REGISTRY.pdf.media_type,
+  };
+}
+
+/**
  * Find one export record by export ID for a session the caller can
  * already read, or null. Export IDs are unguessable hashes, but the
  * read path still requires the session read authorization first.

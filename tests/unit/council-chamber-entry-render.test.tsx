@@ -17,10 +17,11 @@
  *     src/lib/nav-gating.ts) — the chamber route, not /council/new.
  *   • /council renders the chamber (nine seats, room mode badge) BEFORE
  *     any intake UI; DecisionComposer is not mounted on the entry.
- *   • The question box is a native GET form to /council/new
- *     (?question=…): no client router, required + length-capped input.
- *   • Opening the chamber issues only the two authorized GET reads — no
- *     session create, no model catalog, no run start, no POST at all.
+ *   • The New-question control lives inside the chamber and points at
+ *     /council/new; it starts nothing from the entry route.
+ *   • Opening the chamber issues only authorized GET reads (capabilities,
+ *     sessions, and the selected sitting) — no session create, no model
+ *     catalog, no run start, no POST at all.
  *   • Existing sessions and the history link stay reachable below the
  *     chamber; a denied read shows a typed error, never an empty list
  *     and never invented session content.
@@ -221,41 +222,42 @@ describe('CTR-104 /council renders the visual chamber first', () => {
     expect(IDLE_CHAMBER_ROOM.seats.every((s) => s.status === 'queued' && s.card === null)).toBe(true);
   });
 
-  it('the question box lives inside the chamber and is a native GET form to /council/new', async () => {
+  it('the New-question control lives inside the chamber and points at /council/new', async () => {
     installFetch();
     render(<CouncilHome />);
 
     const chamber = await screen.findByTestId('council-chamber');
-    const form = within(chamber).getByTestId('council-chamber-ask');
-    expect(form.getAttribute('action')).toBe('/council/new');
-    expect(form.getAttribute('method')).toBe('get');
+    const newQuestion = within(chamber).getByTestId('council-chamber-new-question');
+    expect(newQuestion.tagName).toBe('A');
+    expect(newQuestion.getAttribute('href')).toBe('/council/new');
 
-    const input = within(form).getByTestId('council-chamber-question') as HTMLInputElement;
-    expect(input.name).toBe('question');
-    expect(input.required).toBe(true);
-    expect(input.maxLength).toBe(CHAMBER_QUESTION_MAX);
-    expect(input.getAttribute('aria-describedby')).toBe('council-chamber-hint');
-    expect(within(form).getByTestId('council-chamber-submit').tagName).toBe('BUTTON');
-
-    // The room precedes the optional guided-intake link and the sessions list.
-    const guided = screen.getByTestId('council-chamber-guided-intake');
-    const room = within(chamber).getByTestId('council-room');
-    expect(precedes(room, guided)).toBe(true);
+    // The chamber room is mounted on entry; the entry never mounts the
+    // guided intake or a decision composer.
+    expect(within(chamber).getByTestId('council-room')).toBeTruthy();
+    expect(screen.queryByTestId('decision-composer')).toBeNull();
+    expect(screen.queryByTestId('intake-step-decision')).toBeNull();
   });
 
-  it('opening the chamber performs only the two authorized reads and starts nothing', async () => {
+  it('opening the chamber performs only authorized reads and starts nothing', async () => {
     const calls = installFetch();
     render(<CouncilHome />);
     await screen.findByTestId('council-sessions-list');
 
-    expect(calls).toHaveLength(2);
-    expect(calls.every((c) => c.method === 'GET')).toBe(true);
-    expect(calls.map((c) => c.url.split('?')[0]).sort()).toEqual([
-      '/api/council/capabilities',
-      '/api/council/sessions',
-    ]);
+    const urls = calls.map((c) => c.url.split('?')[0]);
+    // The entry reads capabilities, the session list, the selected sitting
+    // (when one exists), and the public same-origin portrait manifest.
+    // Nothing else is authorized on open.
+    expect(urls).toEqual(expect.arrayContaining(['/api/council/capabilities', '/api/council/sessions']));
+    for (const url of urls) {
+      expect(
+        url === '/api/council/capabilities' ||
+          url === '/api/council/sessions' ||
+          url.startsWith('/api/council/sessions/') ||
+          url === '/council/portraits/manifest.json',
+      ).toBe(true);
+    }
     // No session create, no model catalog, no run start, no mutation of any kind.
-    expect(calls.some((c) => c.method !== 'GET')).toBe(false);
+    expect(calls.every((c) => c.method === 'GET')).toBe(true);
     expect(calls.some((c) => c.url.includes('/models'))).toBe(false);
     expect(calls.some((c) => c.url.includes('/start'))).toBe(false);
   });

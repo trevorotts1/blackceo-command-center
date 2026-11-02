@@ -59,6 +59,7 @@ import {
   DEFAULT_COUNCIL_SETTINGS,
   canonicalHash,
   canonicalStringify,
+  isValidId,
   validateRunGrant,
   validateRunPreview,
   type CouncilEventType,
@@ -123,6 +124,21 @@ export class CouncilRunAuthorizationError extends Error {
 
 function invalidInput(message: string): CouncilRunAuthorizationError {
   return new CouncilRunAuthorizationError('RUN_INVALID_INPUT', message);
+}
+
+/**
+ * CWE-049 host review: the canonical RunGrant contract validates
+ * `issuer_principal` and `scope.owner_subject` as opaque idSchema values, but
+ * the trusted host subject may be a verified email (the tenant registry
+ * supports email subjects). This deterministic mapping keeps the PUBLIC grant
+ * projection contract-valid. The approval record and every authorization
+ * comparison keep the raw trusted subject; only the client-facing projection
+ * maps a subject that is not a legal id. Reversible only by the same hash,
+ * never by another principal.
+ */
+function contractSafePrincipalId(subject: string): string {
+  if (isValidId(subject)) return subject;
+  return `principal-${canonicalHash({ subject }).slice(0, 32)}`;
 }
 
 // ------------------------------------------------------------------ shapes
@@ -1429,6 +1445,74 @@ export class CouncilRunAuthorizationService {
     };
   }
 
+  /**
+   * Release an admitted operation whose provider request was never
+   * dispatched (the canonical engine's finally path). The reservation
+   * is returned to the session ceiling exactly once; a committed or
+   * unknown reservation is never released.
+   */
+  releaseOperation(
+    principal: CouncilPrincipal,
+    input: {
+      grant_id: string;
+      session_id: string;
+      operation_id: string;
+      lease_epoch: number;
+    },
+  ): { operation_id: string; state: string } {
+    const envelope = this.envelope(principal);
+    return this.write(() => {
+      const row = this.reservationRow(envelope, input.session_id, input.operation_id);
+      if (!row) {
+        throw new CouncilRunAuthorizationError(
+          'BUDGET_RESERVATION_NOT_FOUND',
+          `No budget reservation for operation ${input.operation_id} exists in session ${input.session_id}.`,
+          { operation_id: input.operation_id },
+        );
+      }
+      if (row.grant_id !== input.grant_id) {
+        throw new CouncilRunAuthorizationError(
+          'RUN_OPERATION_GRANT_MISMATCH',
+          `Operation ${input.operation_id} was admitted under grant ${row.grant_id}, not ${input.grant_id}.`,
+          { operation_id: input.operation_id },
+        );
+      }
+      if (row.state !== 'reserved') return { operation_id: row.operation_id, state: row.state };
+      const currentEpoch = this.currentLeaseEpoch(envelope, input.session_id);
+      if (input.lease_epoch !== currentEpoch) {
+        throw new CouncilRunAuthorizationError(
+          'BUDGET_LEASE_FENCED',
+          `Operation ${input.operation_id} presented lease epoch ${input.lease_epoch}, but the session lease is at epoch ${currentEpoch}.`,
+          { session_id: input.session_id, operation_id: input.operation_id },
+        );
+      }
+      const now = this.now();
+      const result = this.db
+        .prepare(
+          `UPDATE council_budget_reservations
+              SET state = 'released', finalized_at = ?
+            WHERE tenant_id = ? AND company_id = ? AND session_id = ? AND id = ? AND state = 'reserved'`,
+        )
+        .run(now, envelope.tenant_id, envelope.company_id, input.session_id, row.id);
+      if (Number(result.changes) !== 1) {
+        return { operation_id: row.operation_id, state: 'reserved' };
+      }
+      this.appendJournal(envelope, input.session_id, {
+        type: 'operation_completed',
+        actor_subject: envelope.actor_subject,
+        payload: {
+          reservation_id: row.id,
+          operation_id: row.operation_id,
+          outcome: 'released',
+          from_state: 'reserved',
+          lease_epoch: input.lease_epoch,
+        },
+        created_at: now,
+      });
+      return { operation_id: row.operation_id, state: 'released' };
+    });
+  }
+
   // ------------------------------------------------------------- private data
 
   private reservationRow(
@@ -1576,12 +1660,15 @@ export class CouncilRunAuthorizationService {
       schema_version: 'wise-elders.run-grant/v1',
       grant_id: record.grant_id,
       authority_mode: record.authority_mode,
-      issuer_principal: record.issuer_principal,
+      issuer_principal: contractSafePrincipalId(record.issuer_principal),
       scope: {
         tenant_id: envelope.tenant_id,
         company_id: envelope.company_id,
         installation_id: record.proof.installation_id,
-        owner_subject: record.proof.owner_subject,
+        owner_subject:
+          record.proof.owner_subject === null
+            ? null
+            : contractSafePrincipalId(record.proof.owner_subject),
       },
       purpose: record.purpose,
       session_id: record.session_id as string,

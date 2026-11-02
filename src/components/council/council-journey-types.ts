@@ -492,6 +492,14 @@ export function panelSizeProblem(mode: SessionMode, seatCount: number): string |
   switch (mode) {
     case 'full':
       return seatCount === 9 ? null : 'Full mode keeps all nine seats.';
+    case 'light':
+    case 'medium':
+    case 'heavy':
+      // Council sizes (contracts/modes.ts MODE_SEATS) never select a
+      // smaller panel: mode changes rounds and concurrency only.
+      return seatCount === 9
+        ? null
+        : `${mode[0].toUpperCase()}${mode.slice(1)} mode keeps all nine seats.`;
     case 'selected':
       return seatCount >= 2 && seatCount <= 8
         ? null

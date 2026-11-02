@@ -87,6 +87,7 @@ import {
   type CompletionScanTrigger,
 } from './intents';
 import { listKanbanJournalEntries } from './kanban/journal';
+import { createConfiguredCouncilRunTransport } from './run-transport';
 
 export interface CouncilEngine {
   store: CouncilStore;
@@ -158,7 +159,12 @@ export interface CouncilEngineOverrides {
   store?: CouncilStore;
   subscriptions?: CouncilEventSubscriptions;
   settings?: CouncilSettingsService;
-  /** WER-014: the route transport. Absent means no run may dispatch. */
+  /**
+   * WER-014/CTR-191: the route transport.
+   * - omitted: compose the installation's configured provider transport
+   *   (`run-transport.ts`) over this store;
+   * - `null`: explicit opt-out for isolated compositions and tests.
+   */
   runTransport?: CouncilRunTransport | null;
   now?: () => string;
   newId?: () => string;
@@ -185,11 +191,24 @@ export function composeCouncilEngine(overrides: CouncilEngineOverrides = {}): Co
       workerId: overrides.workerId,
       leaseTtlMs: overrides.workerLeaseTtlMs,
       heartbeatMs: overrides.workerHeartbeatMs,
-      transport: overrides.runTransport ?? null,
+      transport:
+        overrides.runTransport === null
+          ? null
+          : overrides.runTransport ??
+            createConfiguredCouncilRunTransport({
+              store,
+              repositories,
+              jobs,
+              runAuthorization: runAuthorizationService,
+            }),
       now: overrides.now,
       newId: overrides.newId,
     },
   );
+  // Advertise this in-process worker immediately. Readiness needs BOTH a
+  // transport and a live heartbeat; without this the status surface reports
+  // `worker_not_heartbeating` until the first scheduler tick.
+  runWorker.touchPresence();
 
   const runAuthorizationFor = (principal: CouncilPrincipal) =>
     new CouncilRunAuthorizationAdapter({
@@ -460,8 +479,45 @@ export interface CouncilRunTransportResult {
  * every council_run job queued and reports the worker unavailable; the
  * worker never fabricates a dispatch result.
  */
+export interface CouncilRunExecutionInput {
+  tenant_id: string;
+  company_id: string;
+  installation_id: string;
+  session_id: string;
+  job_id: string;
+  attempt: number;
+  /** Session fencing generation (budget admission). */
+  lease_epoch: number;
+  /** Durable job lease epoch (checkpoint ownership). */
+  job_lease_epoch: number;
+  grant_id: string;
+  currency: string;
+  /** The grant's frozen route snapshot; never a default. */
+  route: CouncilRouteSelection;
+  principal: CouncilPrincipal;
+  signal: AbortSignal;
+  worker_id: string;
+  worker_subject: string;
+}
+
+export interface CouncilRunExecutionResult {
+  status: 'accepted' | 'failed' | 'unknown';
+  error_code?: string | null;
+  verdict_revision?: number | null;
+  session_state?: string | null;
+  cards_committed?: number | null;
+  reason?: string | null;
+}
+
 export interface CouncilRunTransport {
+  /** One admitted provider operation (explicit callers and tests). */
   dispatch(input: CouncilRunTransportDispatch): Promise<CouncilRunTransportResult>;
+  /**
+   * The FULL canonical engine. The production worker calls only this; when
+   * it is absent the worker refuses and leaves the job queued rather than
+   * marking a prepare-only operation complete.
+   */
+  execute?(input: CouncilRunExecutionInput): Promise<CouncilRunExecutionResult>;
 }
 
 export interface CouncilRunWorkerOptions {
@@ -469,13 +525,24 @@ export interface CouncilRunWorkerOptions {
   leaseTtlMs?: number;
   heartbeatMs?: number;
   transport?: CouncilRunTransport | null;
+  /**
+   * Explicit single-operation dispatch mode, for callers that intentionally
+   * wire a `dispatch`-only transport (legacy tests and explicit callers).
+   * Production composition leaves this false: a durable council_run job is
+   * completed only by the full canonical engine, never by one prepare call.
+   */
+  allowExplicitDispatch?: boolean;
   now?: () => string;
   newId?: () => string;
 }
 
 export interface CouncilRunWorkerReadiness {
   available: boolean;
-  reason: 'available' | 'transport_not_configured' | 'worker_not_heartbeating';
+  reason:
+    | 'available'
+    | 'transport_not_configured'
+    | 'full_engine_not_configured'
+    | 'worker_not_heartbeating';
   worker_id: string;
   live_worker_count: number;
   heartbeat_expires_at: string | null;
@@ -583,6 +650,7 @@ export class CouncilRunWorker {
   private readonly runAuthorization: CouncilRunAuthorizationService;
   private readonly db: Database.Database;
   private readonly transport: CouncilRunTransport | null;
+  private readonly allowExplicitDispatch: boolean;
   private readonly leaseTtlMs: number;
   private readonly heartbeatMs: number;
   private readonly now: () => string;
@@ -595,6 +663,9 @@ export class CouncilRunWorker {
     this.runAuthorization = deps.runAuthorization;
     this.db = deps.store.handle();
     this.transport = options.transport ?? null;
+    // Never implicit: a dispatch-only transport is usable for durable jobs
+    // only when the caller opted into the single-operation path.
+    this.allowExplicitDispatch = options.allowExplicitDispatch === true;
     this.leaseTtlMs = options.leaseTtlMs ?? COUNCIL_JOB_LEASE_TTL_MS;
     this.heartbeatMs = options.heartbeatMs ?? Math.max(10, Math.floor(this.leaseTtlMs / 4));
     this.now = options.now ?? (() => new Date().toISOString());
@@ -676,6 +747,9 @@ export class CouncilRunWorker {
     }
     if (!this.transport) {
       return { available: false, reason: 'transport_not_configured', ...base };
+    }
+    if (!this.allowExplicitDispatch && typeof this.transport.execute !== 'function') {
+      return { available: false, reason: 'full_engine_not_configured', ...base };
     }
     if (base.live_worker_count === 0) {
       return { available: false, reason: 'worker_not_heartbeating', ...base };
@@ -1007,6 +1081,16 @@ export class CouncilRunWorker {
         jobs: [],
       };
     }
+    if (!this.allowExplicitDispatch && typeof this.transport.execute !== 'function') {
+      return {
+        available: false,
+        reason:
+          'full_engine_not_configured: the wired transport exposes only a single-operation dispatch. The durable job is left queued rather than marked complete after a prepare-only call.',
+        scopes: 0,
+        claimed: 0,
+        jobs: [],
+      };
+    }
     this.touchPresence();
     const scopes = this.dueScopes();
     const maxJobs = options.maxJobsPerScope ?? 10;
@@ -1229,6 +1313,18 @@ export class CouncilRunWorker {
     let dispatchedRequestSha = '';
 
     try {
+      if (!this.allowExplicitDispatch && typeof this.transport!.execute === 'function') {
+        // A full-engine job is not one prepare operation.
+        base.operation_id = null;
+        return await this.runComposedSession(
+          scope,
+          job,
+          claim,
+          principal,
+          controller,
+          base,
+        );
+      }
       // Recovery: a result already accepted at this operation is never
       // replayed. Restart resumes from the durable checkpoint.
       if (job.checkpoint && job.checkpoint.status === 'accepted') {
@@ -1445,6 +1541,120 @@ export class CouncilRunWorker {
       clearInterval(timer);
       this.untrackController(sessionId, controller);
     }
+  }
+
+  /**
+   * Execute the WHOLE canonical council session inside the durable job.
+   * Completion is only reported after a committed verdict exists for a
+   * COMPLETED session; a prepare-only result never finishes the job.
+   */
+  private async runComposedSession(
+    scope: CouncilRunScope,
+    job: CouncilJobRecord,
+    claim: CouncilSessionLeaseClaim,
+    principal: CouncilPrincipal,
+    controller: AbortController,
+    base: Omit<CouncilRunJobOutcome, 'outcome' | 'reason'>,
+  ): Promise<CouncilRunJobOutcome> {
+    const sessionId = job.session_id as string;
+    const { grant_id, attempt } = this.payloadOf(job);
+    const failed = (errorCode: string, reason: string): CouncilRunJobOutcome => {
+      this.finish(scope, job, 'failed', {
+        error_code: errorCode,
+        terminal_reason: reason,
+      });
+      return { ...base, outcome: 'failed', reason };
+    };
+
+    if (job.checkpoint?.status === 'complete') {
+      const row = this.readSession(scope, sessionId);
+      const verdict =
+        row === null
+          ? null
+          : this.repositories.getVerdict(this.workerEnvelope(scope, row), sessionId);
+      if (row?.state === 'COMPLETED' && verdict) {
+        this.finish(scope, job, 'succeeded', {
+          checkpoint: job.checkpoint,
+          terminal_reason: 'recovered_complete',
+        });
+        return { ...base, outcome: 'recovered', reason: 'checkpoint_complete' };
+      }
+    }
+    if (!grant_id) return failed('RUN_GRANT_MISSING', 'job payload names no run grant');
+    const grantRecord = this.runAuthorization.loadGrantRecord(principal, grant_id);
+    if (!grantRecord || grantRecord.proof.stage !== 'granted') {
+      return failed('RUN_GRANT_INACTIVE', `grant ${grant_id} is not a granted run grant`);
+    }
+    const route = grantRecord.proof.route_snapshot;
+    if (!route) {
+      return failed('RUN_ROUTE_PIN_MISSING', 'the grant carries no pinned route snapshot');
+    }
+    const currency =
+      grantRecord.currency ?? grantRecord.proof.ceilings.max_money?.currency ?? null;
+    if (!currency) {
+      return failed(
+        'RUN_CURRENCY_REQUIRED',
+        'no currency is bound to the grant; admission would be unpriced',
+      );
+    }
+    if (!this.isCurrentGeneration(scope, sessionId, claim)) {
+      throw new CouncilRunFencedError(
+        `Generation ${claim.lease_epoch} of session ${sessionId} is stale before engine execution.`,
+      );
+    }
+    const result = await this.transport!.execute!({
+      tenant_id: scope.tenant_id,
+      company_id: scope.company_id,
+      installation_id: scope.installation_id,
+      session_id: sessionId,
+      job_id: job.id,
+      attempt,
+      lease_epoch: claim.lease_epoch,
+      job_lease_epoch: job.lease_epoch,
+      grant_id,
+      currency,
+      route,
+      principal,
+      signal: controller.signal,
+      worker_id: this.workerId,
+      worker_subject: claim.owner_subject,
+    });
+    if (!this.isCurrentGeneration(scope, sessionId, claim)) {
+      this.finish(scope, job, 'failed', {
+        error_code: 'LEASE_FENCED',
+        terminal_reason: 'generation moved while the canonical engine ran',
+      });
+      return { ...base, outcome: 'fenced', reason: 'lease_fenced' };
+    }
+    if (result.status === 'accepted') {
+      const row = this.readSession(scope, sessionId);
+      const verdict =
+        row === null
+          ? null
+          : this.repositories.getVerdict(this.workerEnvelope(scope, row), sessionId);
+      if (row?.state === 'COMPLETED' && verdict) {
+        this.finish(scope, job, 'succeeded', {
+          checkpoint: {
+            status: 'complete',
+            verdict_revision: verdict.verdict_revision,
+            session_state: 'COMPLETED',
+            cards_committed: result.cards_committed ?? null,
+            lease_epoch: claim.lease_epoch,
+            updated_at: this.now(),
+          },
+          terminal_reason: 'council_completed',
+        });
+        return { ...base, outcome: 'succeeded', reason: null };
+      }
+      return failed(
+        'COUNCIL_INCOMPLETE',
+        'the canonical engine returned without a committed verdict and COMPLETED session',
+      );
+    }
+    return failed(
+      result.error_code ?? (result.status === 'unknown' ? 'PROVIDER_COMPLETION_UNKNOWN' : 'COUNCIL_RUN_FAILED'),
+      result.reason ?? result.status,
+    );
   }
 }
 
