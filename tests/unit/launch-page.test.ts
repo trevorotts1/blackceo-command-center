@@ -122,7 +122,8 @@ describe('CON-22 — /launch reads the ingest database', () => {
 
     expect(html).toContain(LAUNCH_ID);
     expect(html).toContain('Black Friday Launcher');
-    expect(html).toContain('1/6 steps');
+    // Denominator is skill 83's stageOrder (U-approval-01 added the approval stage: 6 -> 7).
+    expect(html).toContain(`1/${getLaunchAbility(83)!.stageOrder.length} steps`);
     expect(html).not.toContain('No launch runs yet');
     expect(html).not.toContain('could not be read');
     expect(relateLaunchViews).toHaveBeenCalledWith([], [LAUNCH_ID]);
