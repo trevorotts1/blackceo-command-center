@@ -39,11 +39,15 @@ export async function GET(request: NextRequest) {
     const rows = ctx.store
       .handle()
       .prepare(
-        `SELECT id, mode, visibility, state, state_version, brief_revision, archived,
-                owner_subject, created_at, updated_at
-           FROM council_sessions
-          WHERE tenant_id = ? AND company_id = ? AND installation_id = ?
-          ORDER BY created_at DESC, id ASC`,
+        `SELECT s.id, s.mode, s.visibility, s.state, s.state_version, s.brief_revision, s.archived,
+                s.owner_subject, s.created_at, s.updated_at,
+                (SELECT br.question FROM council_brief_revisions br
+                  WHERE br.tenant_id = s.tenant_id AND br.company_id = s.company_id
+                    AND br.session_id = s.id AND br.revision = s.brief_revision
+                  LIMIT 1) AS question
+           FROM council_sessions s
+          WHERE s.tenant_id = ? AND s.company_id = ? AND s.installation_id = ?
+          ORDER BY s.created_at DESC, s.id ASC`,
       )
       .all(
         ctx.principal.scope.tenant_id,
@@ -60,6 +64,7 @@ export async function GET(request: NextRequest) {
       owner_subject: string | null;
       created_at: string;
       updated_at: string;
+      question: string | null;
     }>;
     const visible = rows.filter(
       (row) =>
@@ -71,6 +76,8 @@ export async function GET(request: NextRequest) {
     return respondOk(ctx, {
       sessions: page.map((row) => ({
         session_id: row.id,
+        // CTR-191: the canonical chamber labels a session by its question.
+        question: row.question,
         mode: row.mode,
         visibility: row.visibility,
         state: row.state,
