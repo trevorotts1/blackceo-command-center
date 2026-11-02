@@ -304,6 +304,11 @@ export default defineConfig({
       // (Skill 23 department-config.json convention) — candidate-path
       // precedence/dedup, tolerant coercion, missing vs malformed file.
       'tests/unit/cc-department-config.test.ts',
+      // CON-24 (U-cc-03) — non-gating launch ingest freshness + quarantine deep
+      // check (checkLaunchIngest + advisory.launch_ingest on /api/health/deep).
+      // Vitest imports + isolated DB + vi.doMock route import, so vitest-only,
+      // never the tsx --test glob.
+      'tests/unit/launch-deep-checks.test.ts',
     ],
     env: {
       NODE_ENV: 'test',
