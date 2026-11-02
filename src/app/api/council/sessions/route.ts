@@ -7,6 +7,7 @@ import {
   requireMutationProof,
   schemaValidation,
 } from '@/lib/council/api/foundation';
+import { okResponse } from '@/lib/council/api/errors';
 import { assertNoConfiguredSecretsInPayload } from '@/lib/council/auth';
 import { createDraftSession, parseDraftInput } from '@/lib/council/api/drafts';
 
@@ -120,7 +121,7 @@ export async function POST(request: NextRequest) {
     const idempotencyKey = requireIdempotencyKey(request, body, 'session draft creation');
     const input = parseDraftInput(body);
     const result = createDraftSession(ctx, input, idempotencyKey);
-    return respondOk(ctx, result.session, {
+    return okResponse(result.session, ctx.requestId, {
       status: result.replayed ? 200 : 201,
       meta: { replayed: result.replayed },
     });

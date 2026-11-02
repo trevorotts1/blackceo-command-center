@@ -87,6 +87,7 @@ import {
   type CompletionScanTrigger,
 } from './intents';
 import { listKanbanJournalEntries } from './kanban/journal';
+import { createConfiguredCouncilRunTransport } from './run-transport';
 
 export interface CouncilEngine {
   store: CouncilStore;
@@ -158,7 +159,12 @@ export interface CouncilEngineOverrides {
   store?: CouncilStore;
   subscriptions?: CouncilEventSubscriptions;
   settings?: CouncilSettingsService;
-  /** WER-014: the route transport. Absent means no run may dispatch. */
+  /**
+   * WER-014/CTR-191: the route transport.
+   * - omitted: compose the installation's configured provider transport
+   *   (`run-transport.ts`) over this store;
+   * - `null`: explicit opt-out for isolated compositions and tests.
+   */
   runTransport?: CouncilRunTransport | null;
   now?: () => string;
   newId?: () => string;
@@ -185,11 +191,18 @@ export function composeCouncilEngine(overrides: CouncilEngineOverrides = {}): Co
       workerId: overrides.workerId,
       leaseTtlMs: overrides.workerLeaseTtlMs,
       heartbeatMs: overrides.workerHeartbeatMs,
-      transport: overrides.runTransport ?? null,
+      transport:
+        overrides.runTransport === null
+          ? null
+          : overrides.runTransport ?? createConfiguredCouncilRunTransport({ store }),
       now: overrides.now,
       newId: overrides.newId,
     },
   );
+  // Advertise this in-process worker immediately. Readiness needs BOTH a
+  // transport and a live heartbeat; without this the status surface reports
+  // `worker_not_heartbeating` until the first scheduler tick.
+  runWorker.touchPresence();
 
   const runAuthorizationFor = (principal: CouncilPrincipal) =>
     new CouncilRunAuthorizationAdapter({
