@@ -94,11 +94,13 @@ import {
   type VerdictLabel,
 } from '../contracts';
 import { DEFAULT_COUNCIL_SETTINGS } from '../contracts';
+import { isCouncilSize, MODE_ROUND_POLICY } from '../contracts/modes';
 import { deriveHardConstraintFindings } from './decision';
 import {
-  cardContractInstruction,
+  cardOutputContract,
   cardRepairInstruction,
 } from './card-contract';
+import { evaluateConsensusStop } from './consensus';
 import { parseCardResponseText } from './card-text';
 import { CouncilError, invalidInput } from './errors';
 import type {
@@ -624,6 +626,15 @@ export class CouncilEngine {
               `Round 1 incomplete: ${failures.map((f) => `${f.seat_id}: ${f.message}`).join('; ')}`,
             );
           }
+          if (isCouncilSize(session.spec.mode)) {
+            const next = await this.councilSizeContinues(session, 1);
+            session = await this.transition(
+              session,
+              next ? 'CRUX_REVIEW' : 'DRAFT_RESOLUTION',
+              'chair',
+            );
+            break;
+          }
           session = await this.transition(session, 'CRUX_REVIEW', 'chair');
           break;
         }
@@ -636,7 +647,8 @@ export class CouncilEngine {
           break;
         }
         case 'ROUND_2': {
-          const failures = await this.runAdvisorRound(session, 2);
+          const completedRound = await this.completedAdvisorRound(session);
+          const failures = await this.runAdvisorRound(session, completedRound + 1);
           if (await this.controlStop(session.spec.session_id)) {
             return this.getSession(session.spec.session_id);
           }
@@ -647,6 +659,15 @@ export class CouncilEngine {
               `Round 2 incomplete: ${failures.map((f) => `${f.seat_id}: ${f.message}`).join('; ')}`,
             );
           }
+          if (isCouncilSize(session.spec.mode)) {
+            const next = await this.councilSizeContinues(session, completedRound + 1);
+            session = await this.transition(
+              session,
+              next ? 'CRUX_REVIEW' : 'DRAFT_RESOLUTION',
+              'chair',
+            );
+            break;
+          }
           session = await this.transition(session, 'DRAFT_RESOLUTION', 'chair');
           break;
         }
@@ -656,7 +677,10 @@ export class CouncilEngine {
             recommended_option_id: draft.recommended_option_id,
             semantic_sha256: draft.semantic_sha256,
           });
-          if (session.spec.mode === 'quick' && (await this.quickSkipApplies(session, draft))) {
+          if (
+            isCouncilSize(session.spec.mode) ||
+            (session.spec.mode === 'quick' && (await this.quickSkipApplies(session, draft)))
+          ) {
             session = await this.transition(session, 'VERIFYING', 'system');
           } else {
             session = await this.transition(session, 'ROUND_3', 'system');
@@ -804,7 +828,7 @@ export class CouncilEngine {
   private async runOperation(
     session: StoredSession,
     purpose: 'advisor' | 'ratification' | 'consult',
-    round: 1 | 2 | 3 | null,
+    round: number | null,
     seatId: SeatId,
     extraInput: Record<string, unknown>,
     validateExtra?: (author: CardAuthor) => string | null,
@@ -895,11 +919,11 @@ export class CouncilEngine {
             )
             .filter((v): v is string => v !== null)
         : null;
-    const outputContract = {
-      card_kind: purpose,
-      instruction: cardContractInstruction(purpose, challengeIds),
-      json_schema: cardAuthorJsonSchema(purpose),
-    };
+    // Canonical cardOutputContract (CTR-138): the contract states this
+    // call's exact round number, the evidence-ID and closed-object rules,
+    // and hands the model the lens-restricted schema the validator enforces.
+    const contractRound = purpose === 'consult' ? null : round;
+    const outputContract = cardOutputContract(purpose, challengeIds, contractRound);
     const systemWithContract = `${system}\n${outputContract.instruction}`;
     const requestInput: Record<string, unknown> = {
       brief: session.brief,
@@ -946,7 +970,7 @@ export class CouncilEngine {
           model_policy: session.spec.model_policy,
           system:
             repairs > 0
-              ? `${systemWithContract}\n${cardRepairInstruction(purpose, challengeIds, lastIssues)}`
+              ? `${systemWithContract}\n${cardRepairInstruction(purpose, challengeIds, lastIssues, contractRound)}`
               : systemWithContract,
           input: requestInput,
         };
@@ -1127,34 +1151,58 @@ export class CouncilEngine {
 
   // -------------------------------------------------------------- rounds
 
+  /**
+   * One advisory round: every panel seat answers once.
+   *
+   * Concurrency is the mode's own wave width (contracts/modes.ts
+   * max_concurrent_calls: light 3, medium and heavy the full roster), and
+   * the wave is a BARRIER: every claim of a wave is awaited together before
+   * the next wave is dispatched, exactly as the canonical
+   * protocol/composition.ts enqueueRound does. Round 1 is the isolated
+   * opening; every later pass challenges the cruxes of Round 1 with that
+   * pass's own round number on the card.
+   */
   private async runAdvisorRound(
     session: StoredSession,
-    round: 1 | 2,
+    round: number,
   ): Promise<SeatFailure[]> {
-    const cruxes = round === 2 ? await this.computeCruxes(session) : [];
+    const challenge = round > 1;
+    const cruxes = challenge ? await this.computeCruxes(session) : [];
+    const waveWidth = isCouncilSize(session.spec.mode)
+      ? Math.max(1, MODE_ROUND_POLICY[session.spec.mode].max_concurrent_calls)
+      : Math.max(1, session.spec.seat_ids.length);
     const failures: SeatFailure[] = [];
-    for (const seatId of session.spec.seat_ids) {
+    for (let i = 0; i < session.spec.seat_ids.length; i += waveWidth) {
       const stop = await this.controlStop(session.spec.session_id);
       if (stop) break;
-      const assigned = cruxes
-        .filter((c) => c.responsible_seats.includes(seatId))
-        .map((c) => ({
-          crux_id: c.crux_id,
-          question: `Resolve with evidence: ${c.resolution_test}`,
-        }));
-      try {
-        await this.runOperation(session, 'advisor', round, seatId, {
-          ...(round === 2
-            ? { crux_summary: cruxes, challenges_for_seat: assigned }
-            : {}),
-        });
-      } catch (err) {
-        failures.push({
-          seat_id: seatId,
-          round,
-          message: err instanceof Error ? err.message : String(err),
-        });
-      }
+      const wave = session.spec.seat_ids.slice(i, i + waveWidth);
+      const settled = await Promise.all(
+        wave.map(async (seatId) => {
+          const assigned = challenge
+            ? cruxes
+                .filter((c) => c.responsible_seats.includes(seatId))
+                .map((c) => ({
+                  crux_id: c.crux_id,
+                  question: `Resolve with evidence: ${c.resolution_test}`,
+                }))
+            : [];
+          try {
+            await this.runOperation(session, 'advisor', round, seatId, {
+              ...(challenge
+                ? { crux_summary: cruxes, challenges_for_seat: assigned }
+                : {}),
+            });
+            return null;
+          } catch (err) {
+            return {
+              seat_id: seatId,
+              round,
+              message: err instanceof Error ? err.message : String(err),
+            } satisfies SeatFailure;
+          }
+        }),
+      );
+      for (const failure of settled) if (failure) failures.push(failure);
     }
     return failures;
   }
@@ -1206,6 +1254,38 @@ export class CouncilEngine {
       }
     }
     return failures;
+  }
+
+  /** Highest advisor round with a committed card (0 when none). */
+  private async completedAdvisorRound(session: StoredSession): Promise<number> {
+    const cards = await this.cardsOfKind<AdvisorCard>(session, 'advisor');
+    return cards.reduce((max, card) => Math.max(max, card.round), 0);
+  }
+
+  /**
+   * The canonical council-size stop rule (contracts/modes.ts +
+   * protocol/consensus.ts): run while the mode's minimum rounds are not
+   * met, stop at its ceiling, and otherwise stop only when the round's
+   * committed cards satisfy the deterministic consensus test.
+   */
+  private async councilSizeContinues(
+    session: StoredSession,
+    completedRound: number,
+  ): Promise<boolean> {
+    if (!isCouncilSize(session.spec.mode)) return false;
+    const policy = MODE_ROUND_POLICY[session.spec.mode];
+    if (completedRound < policy.min_rounds) return true;
+    if (completedRound >= policy.max_rounds) return false;
+    if (policy.stop_from_round === null || completedRound < policy.stop_from_round) {
+      return true;
+    }
+    const cards = await this.cardsOfKind<AdvisorCard>(
+      session,
+      'advisor',
+      completedRound,
+    );
+    const optionIds = session.spec.options.map((option) => option.id);
+    return !evaluateConsensusStop(cards, optionIds).stop;
   }
 
   private async cardsOfKind<T extends CouncilCard>(
@@ -1399,8 +1479,15 @@ export class CouncilEngine {
 
     const ratification = await this.cardsOfKind<RatificationCard>(session, 'ratification');
     const round2 = await this.cardsOfKind<AdvisorCard>(session, 'advisor', 2);
+    // Council sizes have no ratification pass: their verdict is graded on
+    // the LAST challenge round's cards, never a stale Round 2.
+    const lastAdvisorRound = await this.completedAdvisorRound(session);
+    const gradedCards: AdvisorCard[] =
+      ratification.length === 0 && lastAdvisorRound > 2
+        ? await this.cardsOfKind<AdvisorCard>(session, 'advisor', lastAdvisorRound)
+        : round2;
     const finalCards: Array<AdvisorCard | RatificationCard> =
-      ratification.length > 0 ? ratification : round2;
+      ratification.length > 0 ? ratification : gradedCards;
     const totalWeight = session.spec.seat_ids.reduce(
       (sum, seatId) => sum + (session.brief.relevance_weights[seatId] ?? 1),
       0,
@@ -1453,7 +1540,7 @@ export class CouncilEngine {
       label = 'WAIT';
     } else {
       label = labelForScore(top.score ?? 0);
-      const blocking = round2.some(
+      const blocking = gradedCards.some(
         (c) =>
           c.preferred_option_id === top.option_id &&
           c.conditions.some((cond) => cond.blocking),

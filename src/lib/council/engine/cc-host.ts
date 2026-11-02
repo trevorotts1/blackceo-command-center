@@ -58,6 +58,7 @@ import {
   type ResolvedConnector,
 } from '../provider-route';
 import { CouncilError } from './errors';
+import { loadAdvisorPack } from './packs';
 import type {
   AuthorizationProvider,
   BudgetLedger,
@@ -619,10 +620,17 @@ class CcEvidence implements EvidenceProvider {
     const session = this.repos.getSession(this.envelope, sessionId);
     return session ? session.brief.evidence_manifest : [];
   }
-  async loadSeatPack(): Promise<{ pack_version: string; briefing_text: string } | null> {
-    // Installed seat packs are a separate runtime surface; the canonical
-    // engine handles their absence explicitly instead of inventing a pack.
-    return null;
+  /**
+   * The seat's approved pack, read from the installed canonical skill's
+   * own `advisors/<seat>/` source pack. The engine asks for it before it
+   * reserves budget, so a box without packs fails COUNCIL_PACKS_NOT_READY
+   * as a typed refusal and never spends; no pack text is ever invented.
+   */
+  async loadSeatPack(
+    seatId: SeatId,
+  ): Promise<{ pack_version: string; briefing_text: string } | null> {
+    const pack = loadAdvisorPack(seatId);
+    return { pack_version: pack.pack_version, briefing_text: pack.briefing_text };
   }
 }
 

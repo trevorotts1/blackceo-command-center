@@ -11,6 +11,7 @@
  */
 
 export type CouncilErrorCode =
+  | 'COUNCIL_PACKS_NOT_READY'
   | 'COUNCIL_USAGE'
   | 'COUNCIL_INVALID_INPUT'
   | 'COUNCIL_SESSION_NOT_FOUND'
