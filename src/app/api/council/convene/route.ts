@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { NextResponse, type NextRequest } from 'next/server';
 import {
   authorizeSessionMutate,
@@ -73,6 +74,7 @@ const TOP_LEVEL_FIELDS = [
   'requested_by',
   'model',
   'idempotency_key',
+  'intent_id',
 ] as const;
 
 const BRIEF_FIELDS = [
@@ -201,24 +203,36 @@ function linkSet(sessionId: string) {
 function idempotencyKeyFor(
   request: NextRequest,
   body: Record<string, unknown>,
-  fingerprint: Record<string, unknown>,
 ): string {
-  const header = request.headers.get('idempotency-key');
+  // A CLIENT INTENT ID, not the question, is what separates a retry from a
+  // new question. The existing `idempotency-key` header is the intent header;
+  // `x-council-intent-id` is accepted as the same signal. Same intent => the
+  // same sitting replays. A later identical question is a NEW intent.
+  const header =
+    request.headers.get('idempotency-key') ??
+    request.headers.get('x-council-intent-id');
   const fromBody =
-    typeof body.idempotency_key === 'string' ? body.idempotency_key : undefined;
+    typeof body.idempotency_key === 'string'
+      ? body.idempotency_key
+      : typeof body.intent_id === 'string'
+        ? body.intent_id
+        : undefined;
   const chosen = header ?? fromBody;
   if (chosen !== undefined) {
-    if (chosen.trim().length === 0 || chosen.length > MAX_IDEMPOTENCY_KEY) {
+    const key = chosen.trim();
+    if (key.length === 0 || key.length > MAX_IDEMPOTENCY_KEY) {
       throw schemaValidation(
-        `The idempotency key must be between 1 and ${MAX_IDEMPOTENCY_KEY} characters.`,
+        `The intent/idempotency key must be between 1 and ${MAX_IDEMPOTENCY_KEY} characters.`,
       );
     }
-    return chosen.trim();
+    return `convene-intent:${key}`;
   }
-  // The canonical composer sends no key. Derive one from the DECISION CONTENT
-  // only (never created_at/brief_id), so a retry or a double click dedups to
-  // the first sitting instead of creating a second council.
-  return `convene:${canonicalHash(fingerprint)}`;
+  // The canonical composer sends no intent id. Never derive one from the
+  // question content: that permanently deduped an identical question to its
+  // first sitting. An unkeyed POST is a NEW request and gets a fresh intent.
+  // Retries and double clicks carry the client intent id (see the CC adapter
+  // script served for the canonical chamber), so only THEY replay.
+  return `convene-intent:${randomUUID()}`;
 }
 
 function activeGrantId(
@@ -371,19 +385,7 @@ export async function POST(request: NextRequest) {
           ? rawWeights
           : Object.fromEntries(SEAT_IDS.map((seat) => [seat, 2]));
 
-      const fingerprint = {
-        route_id: routeId,
-        model: entry.modelId,
-        question,
-        options,
-        facts,
-        assumptions,
-        unknowns,
-        constraints,
-        relevance_weights: weights,
-        critical_domains: criticalDomains,
-      };
-      const idempotencyKey = idempotencyKeyFor(request, body, fingerprint);
+      const idempotencyKey = idempotencyKeyFor(request, body);
 
       const draft = createDraftSession(
         ctx,
@@ -491,8 +493,11 @@ export async function POST(request: NextRequest) {
       };
       assertNoConfiguredSecretsInPayload(payload);
 
-      // The durable job is the handoff. Start the existing run worker in the
-      // background and return now; the request never waits for a council.
+      // The durable job is the handoff. This is an immediate kick, NOT the
+      // execution guarantee: the scheduler's `council-run-pump` claims the job
+      // on its next tick even if this process dies right after the 202, and
+      // an expired lease is recovered by the same claim. The request never
+      // waits for a council.
       void import('@/lib/council/engine')
         .then((engine) => engine.getCouncilEngine().drainCouncilRunsOnce())
         .catch(() => undefined);

@@ -138,8 +138,13 @@ const nextConfig = {
     return {
       beforeFiles: [
         {
+          /**
+           * Served through the CC adapter so the New-question intent script
+           * is added at response time. The canonical document on disk stays
+           * byte-identical; see src/app/api/council/chamber-index/route.ts.
+           */
           source: '/council',
-          destination: '/chamber/index.html',
+          destination: '/api/council/chamber-index',
         },
         {
           source: '/council/:sessionId',
