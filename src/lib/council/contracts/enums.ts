@@ -51,36 +51,20 @@ export function advisorProfileLabel(displayName: string): string {
 }
 
 /**
- * Display roster. T. D. Jakes is ONE seat with three book lenses, never three
- * votes (Section 7). The label for Brené Brown preserves the accented
- * spelling in data.
+ * Mode vocabulary (canonical contracts/enums.ts). `light`, `medium` and
+ * `heavy` are the council sizes (contracts/modes.ts): they never select a
+ * smaller panel, only the rounds and the concurrency. The four older modes
+ * are unchanged.
  */
-export const SEAT_ROSTER: ReadonlyArray<{
-  seat_id: SeatId;
-  display_name: string;
-  lenses: readonly string[];
-}> = [
-  { seat_id: 'simon-sinek', display_name: 'Simon Sinek', lenses: [] },
-  {
-    seat_id: 'td-jakes',
-    display_name: 'T. D. Jakes',
-    lenses: ['instinct', 'disruptive-thinking', 'dont-drop-the-mic'],
-  },
-  { seat_id: 'oprah-winfrey', display_name: 'Oprah Winfrey', lenses: [] },
-  { seat_id: 'tiffany-aliche', display_name: 'Tiffany Aliche', lenses: [] },
-  { seat_id: 'russell-brunson', display_name: 'Russell Brunson', lenses: [] },
-  { seat_id: 'michelle-obama', display_name: 'Michelle Obama', lenses: [] },
-  { seat_id: 'brene-brown', display_name: 'Brené Brown', lenses: [] },
-  { seat_id: 'dennis-kimbro', display_name: 'Dr. Dennis Kimbro', lenses: [] },
-  { seat_id: 'les-brown', display_name: 'Les Brown', lenses: [] },
-];
-
-/** Mandatory label on every advisor profile (Section 8 source honesty). */
-export function advisorProfileLabel(displayName: string): string {
-  return `AI perspective inspired by the published work of ${displayName}. Not the individual and not an endorsement.`;
-}
-
-export const SESSION_MODES = ['full', 'selected', 'quick', 'consult'] as const;
+export const SESSION_MODES = [
+  'full',
+  'selected',
+  'quick',
+  'consult',
+  'light',
+  'medium',
+  'heavy',
+] as const;
 export type SessionMode = (typeof SESSION_MODES)[number];
 
 export const SESSION_VISIBILITIES = ['private', 'company'] as const;
