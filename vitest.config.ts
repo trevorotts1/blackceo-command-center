@@ -235,6 +235,11 @@ export default defineConfig({
       // cross-client/host/installation rejection, dedupe, conflicting-duplicate
       // rejection and nonregressing terminal state. DB-backed, vitest-only.
       'tests/unit/launch-transport.test.ts',
+      // CON-22 (U-cc-02) — /launch reads the ingest database with LAUNCH_PLANS_DIR
+      // unset, relates the disk and database views, nav lists Launch, and
+      // /api/launch-runs shows ingested runs. Vitest imports + isolated DB, so
+      // vitest-only, never the tsx --test glob.
+      'tests/unit/launch-page.test.ts',
       // UL-022 (audit lane L12) — numbered migration 173 upgrade safety: a
       // populated pre-173 database gains the provenance columns and contract
       // row without losing or rewriting rows. Real SQLite temp file.
