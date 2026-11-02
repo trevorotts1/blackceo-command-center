@@ -42,6 +42,7 @@ import {
 } from '@/lib/fixture-guard';
 import { getNotificationFailuresLogStats } from '@/lib/notify';
 import { ensureRuntimeConfigFile } from '@/lib/runtime-config';
+import { listLaunchRuns as listLaunchDiskRuns } from '@/lib/launch-runs';
 
 const execFileAsync = promisify(execFile);
 
@@ -2509,6 +2510,104 @@ export function checkFixtureEnvVars(): FixtureEnvCheckResult {
       active_research_fixture_env_vars: [],
       node_env: nodeEnv,
       detail: `fixture_env: advisory probe unavailable — ${
+        err instanceof Error ? err.message : String(err)
+      } (UNKNOWN; non-gating)`,
+    };
+  }
+}
+
+// ── check: launch ingest freshness + quarantine (CON-24) ─────────────────────
+//
+// A launch that stalls, a progress file that quarantines, or an ingest that
+// rejects every event used to leave NO health signal. This reads the two
+// launch stores (database: launch_runs / launch_run_events /
+// launch_progress_samples; disk: plan + progress manifests via listLaunchRuns)
+// and reports:
+//   - freshness: newest ingest (received_at) and the in-flight runs that have
+//     gone quiet longer than LAUNCH_INGEST_STALE_MS (a feed that stopped, or
+//     one whose every event is rejected, shows up here as a stalled run);
+//   - quarantine: how many disk runs refused to consume a progress file.
+//
+// NON-GATING BY CONSTRUCTION. A stale feed or a quarantine WARNS: the result
+// is `pass: true` + `degraded: true` (the company_branding mismatch posture),
+// so even a caller that mistakenly aggregated it into the gating checks could
+// not turn the box red. It is never `indeterminate` on a finding; a read
+// failure degrades to UNKNOWN with pass:true like every advisory here.
+// ponytail: rejected-event counts are not persisted by the ingest transport
+// (rejections write no row), so a total-rejection feed is seen only as the
+// stalled-run symptom; persist rejections in launch-transport to count them.
+
+export interface LaunchIngestResult extends CheckResult {
+  degraded?: boolean;
+  stale?: boolean;
+  newest_ingest_at?: string | null;
+  newest_ingest_age_seconds?: number | null;
+  in_flight_runs?: number;
+  stalled_runs?: number;
+  stale_after_seconds?: number;
+  quarantined_runs?: number;
+  quarantine_issues?: number;
+  disk_view?: 'ok' | 'empty' | 'unavailable';
+}
+
+/** In-flight launch runs silent longer than this are reported stalled. */
+export const LAUNCH_INGEST_STALE_MS = 24 * 60 * 60 * 1000;
+
+export function checkLaunchIngest(opts: { now?: number; plansDir?: string } = {}): LaunchIngestResult {
+  const now = opts.now ?? Date.now();
+  try {
+    const db = getDb();
+    const tables = new Set(
+      (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[]).map((r) => r.name),
+    );
+    let newest: string | null = null;
+    for (const t of ['launch_run_events', 'launch_progress_samples']) {
+      if (!tables.has(t)) continue;
+      const row = db.prepare(`SELECT MAX(received_at) AS m FROM ${t}`).get() as { m: string | null };
+      if (row.m && (!newest || Date.parse(row.m) > Date.parse(newest))) newest = row.m;
+    }
+    let inFlight = 0;
+    let stalled = 0;
+    if (tables.has('launch_runs')) {
+      const rows = db
+        .prepare("SELECT COALESCE(last_event_at, updated_at) AS at FROM launch_runs WHERE overall = 'incomplete'")
+        .all() as { at: string | null }[];
+      inFlight = rows.length;
+      // An unparseable stamp is treated as stalled: never read as fresh.
+      stalled = rows.filter((r) => !(now - Date.parse(r.at ?? '') < LAUNCH_INGEST_STALE_MS)).length;
+    }
+
+    const disk = opts.plansDir ? listLaunchDiskRuns(opts.plansDir) : listLaunchDiskRuns();
+    const quarantined = disk.quarantined;
+    const issues = disk.issues.length;
+
+    const age = newest && !Number.isNaN(Date.parse(newest)) ? Math.max(0, Math.round((now - Date.parse(newest)) / 1000)) : null;
+    const stale = stalled > 0;
+    const degraded = stale || quarantined > 0;
+    const parts = [
+      newest ? `newest ingest ${newest} (${age}s ago)` : 'no launch ingest recorded',
+      `${stalled}/${inFlight} in-flight run(s) silent > ${LAUNCH_INGEST_STALE_MS / 3_600_000}h`,
+      `${quarantined} quarantined run(s), ${issues} disk issue(s) (disk view ${disk.status})`,
+    ];
+    return {
+      pass: true,
+      degraded,
+      stale,
+      newest_ingest_at: newest,
+      newest_ingest_age_seconds: age,
+      in_flight_runs: inFlight,
+      stalled_runs: stalled,
+      stale_after_seconds: LAUNCH_INGEST_STALE_MS / 1000,
+      quarantined_runs: quarantined,
+      quarantine_issues: issues,
+      disk_view: disk.status,
+      detail: `launch_ingest: ${degraded ? 'WARN' : 'OK'} — ${parts.join('; ')} (advisory only, non-gating)`,
+    };
+  } catch (err) {
+    return {
+      pass: true,
+      indeterminate: true,
+      detail: `launch_ingest: advisory probe unavailable — ${
         err instanceof Error ? err.message : String(err)
       } (UNKNOWN; non-gating)`,
     };
