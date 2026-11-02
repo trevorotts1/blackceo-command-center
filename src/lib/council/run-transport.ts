@@ -37,12 +37,13 @@
  * - Failure law: a definite provider rejection is `failed`; an ambiguous
  *   failure (network, timeout, 5xx) is `unknown` and is never auto-replayed.
  *
- * Deliberate ceiling: the Command Center worker admits one `prepare`
- * operation per durable job. This transport executes that admitted operation
- * on the pinned route; it does not synthesize the multi-round debate graph.
- * ponytail: one operation per dispatch. Add a round/seat operation producer
- * when the canonical deliberation engine is composed into this repository —
- * do not widen this transport into a one-call council.
+ * CTR-191 completion: `execute()` composes the FULL canonical engine
+ * (`engine/council-engine.ts`, ported from the 77-council-of-wise-elders
+ * runtime) over the CC durable store/jobs/authorization. One durable job
+ * now runs both advisor rounds, crux review, draft resolution,
+ * ratification, deterministic scoring, verdict validation, and session
+ * COMPLETED. `dispatch()` remains the single-operation path for explicit
+ * callers; the production worker never treats it as a completed council.
  */
 
 import type Database from 'better-sqlite3';
@@ -52,11 +53,23 @@ import { resolveProviderApiKey } from '@/lib/provider-key-detection';
 import { canonicalHash } from './contracts';
 import type { CouncilRouteSelection } from './explicit-selection';
 import type {
+  CouncilRunExecutionInput,
+  CouncilRunExecutionResult,
   CouncilRunTransport,
   CouncilRunTransportDispatch,
   CouncilRunTransportResult,
 } from './engine';
 import type { CouncilStore } from './persistence/council-store';
+import { CouncilRepositories, envelopeFromScope } from './store';
+import { CouncilJobService } from './jobs';
+import { CouncilRunAuthorizationService } from './run-authorization';
+import { CouncilEngine } from './engine/council-engine';
+import { createCcCouncilHost } from './engine/cc-host';
+import { CouncilError } from './engine/errors';
+import {
+  assertExplicitRoute as assertPinnedRoute,
+  resolveConfiguredConnector,
+} from './provider-route';
 
 /** A typed refusal: the worker records `code` as the job's error_code. */
 export class CouncilRunTransportRefusal extends Error {
@@ -71,6 +84,10 @@ export class CouncilRunTransportRefusal extends Error {
 export interface ConfiguredCouncilRunTransportOptions {
   /** The composed council store; used only to read the session's own brief. */
   store?: CouncilStore;
+  /** Repositories/jobs/authorization from the ONE engine composition. */
+  repositories?: CouncilRepositories;
+  jobs?: CouncilJobService;
+  runAuthorization?: CouncilRunAuthorizationService;
   /** Hard ceiling for one provider request. Ambiguous overrun => unknown. */
   timeoutMs?: number;
   maxOutputTokens?: number;
@@ -212,6 +229,140 @@ export function createConfiguredCouncilRunTransport(
   const db = options.store?.handle() ?? null;
 
   return {
+    /**
+     * The FULL canonical engine over the CC durable store. One durable job
+     * runs all nine seats, both advisor rounds, crux review, draft
+     * resolution, ratification, deterministic scoring, verdict validation,
+     * and session COMPLETED. Nothing is marked complete on a prepare call.
+     */
+    async execute(input: CouncilRunExecutionInput): Promise<CouncilRunExecutionResult> {
+      if (!options.store) {
+        refusal(
+          'RUN_TRANSPORT_STORE_NOT_COMPOSED',
+          'The council store is not composed, so the canonical engine cannot run.',
+        );
+      }
+      assertPinnedRoute(input.route);
+      const repositories =
+        options.repositories ?? new CouncilRepositories({ adapter: options.store });
+      const jobs = options.jobs ?? new CouncilJobService({ store: options.store });
+      const runAuthorization =
+        options.runAuthorization ?? new CouncilRunAuthorizationService({ store: options.store });
+      const envelope = envelopeFromScope(
+        {
+          tenant_id: input.tenant_id,
+          company_id: input.company_id,
+          installation_id: input.installation_id,
+          owner_subject: null,
+        },
+        input.worker_subject,
+        'worker',
+        'write',
+      );
+      const session = repositories.getSession(envelope, input.session_id);
+      if (!session) {
+        return {
+          status: 'failed',
+          error_code: 'RUN_SESSION_NOT_FOUND',
+          reason: 'the session does not exist in this scope or is not visible to the worker',
+        };
+      }
+      if (session.spec.model_policy.route_id !== input.route.routeId) {
+        return {
+          status: 'failed',
+          error_code: 'RUN_ROUTE_PIN_MISMATCH',
+          reason: `the session route ${session.spec.model_policy.route_id} is not the grant's pinned route ${input.route.routeId}`,
+        };
+      }
+      if (input.signal.aborted) {
+        return { status: 'failed', error_code: 'RUN_TRANSPORT_ABORTED', reason: 'aborted before execution' };
+      }
+      // Credential presence and the exact route are preflighted BEFORE any
+      // state change or provider request. The value never leaves this call.
+      try {
+        resolveConfiguredConnector(input.route);
+      } catch (error) {
+        const code = (error as { code?: string }).code ?? 'RUN_PROVIDER_NOT_REGISTERED';
+        return { status: 'failed', error_code: code, reason: (error as Error).message };
+      }
+      const composed = createCcCouncilHost({
+        repositories,
+        store: options.store,
+        jobs,
+        runAuthorization,
+        principal: input.principal,
+        envelope,
+        session,
+        grant_id: input.grant_id,
+        currency: input.currency,
+        route: input.route,
+        job_id: input.job_id,
+        worker_id: input.worker_id,
+        worker_subject: input.worker_subject,
+        lease_epoch: input.lease_epoch,
+        job_lease_epoch: input.job_lease_epoch,
+        signal: input.signal,
+        timeoutMs,
+        newId: undefined,
+        now: undefined,
+      });
+      const engine = new CouncilEngine(composed.host, {
+        settings: composed.settings,
+        ownerId: input.worker_id,
+      });
+      try {
+        const finalSession = await engine.continueAdmittedSession(
+          input.session_id,
+          input.grant_id,
+        );
+        const verdict = repositories.getVerdict(envelope, input.session_id);
+        const cards = repositories.listCards(envelope, input.session_id);
+        if (finalSession.state.state === 'COMPLETED' && verdict) {
+          return {
+            status: 'accepted',
+            verdict_revision: verdict.verdict_revision,
+            session_state: finalSession.state.state,
+            cards_committed: cards.length,
+          };
+        }
+        return {
+          status: 'failed',
+          error_code:
+            finalSession.state.state === 'BLOCKED'
+              ? 'COUNCIL_BLOCKED'
+              : finalSession.state.state === 'PAUSED' ||
+                  finalSession.state.state === 'PAUSE_REQUESTED'
+                ? 'COUNCIL_PAUSED'
+                : finalSession.state.state === 'CANCELLED'
+                  ? 'COUNCIL_CANCELLED'
+                  : 'COUNCIL_RUN_INCOMPLETE',
+          session_state: finalSession.state.state,
+          cards_committed: cards.length,
+          reason: `session finished in ${finalSession.state.state} with ${cards.length} committed card(s)`,
+        };
+      } catch (error) {
+        if (error instanceof CouncilError) {
+          return {
+            status:
+              error.code === 'COUNCIL_TRANSPORT_FAILED' &&
+              (error as { unknownCompletion?: boolean }).unknownCompletion === true
+                ? 'unknown'
+                : 'failed',
+            error_code: error.code,
+            reason: error.message,
+          };
+        }
+        if (input.signal.aborted) {
+          return { status: 'failed', error_code: 'RUN_TRANSPORT_ABORTED', reason: 'cancelled' };
+        }
+        return {
+          status: 'failed',
+          error_code: (error as { code?: string }).code ?? 'COUNCIL_RUN_FAILED',
+          reason: error instanceof Error ? error.message : String(error),
+        };
+      }
+    },
+
     async dispatch(dispatch: CouncilRunTransportDispatch): Promise<CouncilRunTransportResult> {
       const route = dispatch.route;
       assertExplicitRoute(route);

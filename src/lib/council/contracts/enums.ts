@@ -21,6 +21,36 @@ export const SEAT_IDS = [
 export type SeatId = (typeof SEAT_IDS)[number];
 
 /**
+ * Display roster (Section 7). T. D. Jakes is ONE seat with three book
+ * lenses, never three votes. Ported from the canonical contracts so the
+ * composed engine's prompt assembly and verdict binding share one roster.
+ */
+export const SEAT_ROSTER: ReadonlyArray<{
+  seat_id: SeatId;
+  display_name: string;
+  lenses: readonly string[];
+}> = [
+  { seat_id: 'simon-sinek', display_name: 'Simon Sinek', lenses: [] },
+  {
+    seat_id: 'td-jakes',
+    display_name: 'T. D. Jakes',
+    lenses: ['instinct', 'disruptive-thinking', 'dont-drop-the-mic'],
+  },
+  { seat_id: 'oprah-winfrey', display_name: 'Oprah Winfrey', lenses: [] },
+  { seat_id: 'tiffany-aliche', display_name: 'Tiffany Aliche', lenses: [] },
+  { seat_id: 'russell-brunson', display_name: 'Russell Brunson', lenses: [] },
+  { seat_id: 'michelle-obama', display_name: 'Michelle Obama', lenses: [] },
+  { seat_id: 'brene-brown', display_name: 'Brené Brown', lenses: [] },
+  { seat_id: 'dennis-kimbro', display_name: 'Dr. Dennis Kimbro', lenses: [] },
+  { seat_id: 'les-brown', display_name: 'Les Brown', lenses: [] },
+];
+
+/** Mandatory source-honesty label on every advisor profile (Section 8). */
+export function advisorProfileLabel(displayName: string): string {
+  return `AI perspective inspired by the published work of ${displayName}. Not the individual and not an endorsement.`;
+}
+
+/**
  * Display roster. T. D. Jakes is ONE seat with three book lenses, never three
  * votes (Section 7). The label for Brené Brown preserves the accented
  * spelling in data.
