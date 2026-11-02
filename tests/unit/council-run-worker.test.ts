@@ -254,6 +254,10 @@ function newWorker(
     {
       workerId,
       transport,
+      // These cases intentionally exercise the explicit single-operation
+      // dispatch path; the full canonical engine is composed separately and
+      // remains required by default for a durable production job.
+      allowExplicitDispatch: true,
       now: nowFn,
       newId,
       leaseTtlMs: 60_000,

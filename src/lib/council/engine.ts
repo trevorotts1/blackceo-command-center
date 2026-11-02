@@ -525,6 +525,13 @@ export interface CouncilRunWorkerOptions {
   leaseTtlMs?: number;
   heartbeatMs?: number;
   transport?: CouncilRunTransport | null;
+  /**
+   * Explicit single-operation dispatch mode, for callers that intentionally
+   * wire a `dispatch`-only transport (legacy tests and explicit callers).
+   * Production composition leaves this false: a durable council_run job is
+   * completed only by the full canonical engine, never by one prepare call.
+   */
+  allowExplicitDispatch?: boolean;
   now?: () => string;
   newId?: () => string;
 }
@@ -643,6 +650,7 @@ export class CouncilRunWorker {
   private readonly runAuthorization: CouncilRunAuthorizationService;
   private readonly db: Database.Database;
   private readonly transport: CouncilRunTransport | null;
+  private readonly allowExplicitDispatch: boolean;
   private readonly leaseTtlMs: number;
   private readonly heartbeatMs: number;
   private readonly now: () => string;
@@ -655,6 +663,9 @@ export class CouncilRunWorker {
     this.runAuthorization = deps.runAuthorization;
     this.db = deps.store.handle();
     this.transport = options.transport ?? null;
+    // Never implicit: a dispatch-only transport is usable for durable jobs
+    // only when the caller opted into the single-operation path.
+    this.allowExplicitDispatch = options.allowExplicitDispatch === true;
     this.leaseTtlMs = options.leaseTtlMs ?? COUNCIL_JOB_LEASE_TTL_MS;
     this.heartbeatMs = options.heartbeatMs ?? Math.max(10, Math.floor(this.leaseTtlMs / 4));
     this.now = options.now ?? (() => new Date().toISOString());
@@ -737,7 +748,7 @@ export class CouncilRunWorker {
     if (!this.transport) {
       return { available: false, reason: 'transport_not_configured', ...base };
     }
-    if (typeof this.transport.execute !== 'function') {
+    if (!this.allowExplicitDispatch && typeof this.transport.execute !== 'function') {
       return { available: false, reason: 'full_engine_not_configured', ...base };
     }
     if (base.live_worker_count === 0) {
@@ -1070,7 +1081,7 @@ export class CouncilRunWorker {
         jobs: [],
       };
     }
-    if (typeof this.transport.execute !== 'function') {
+    if (!this.allowExplicitDispatch && typeof this.transport.execute !== 'function') {
       return {
         available: false,
         reason:
@@ -1302,7 +1313,7 @@ export class CouncilRunWorker {
     let dispatchedRequestSha = '';
 
     try {
-      if (typeof this.transport!.execute === 'function') {
+      if (!this.allowExplicitDispatch && typeof this.transport!.execute === 'function') {
         // A full-engine job is not one prepare operation.
         base.operation_id = null;
         return await this.runComposedSession(
