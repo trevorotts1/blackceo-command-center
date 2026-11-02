@@ -171,6 +171,13 @@
  * 163 mutating, 7 webhook-protected (unchanged), 156 non-webhook. Bearer
  * totals unchanged (50 patterns match 54 templates, 53 bearer-ONLY).
  *
+ * re-derived 2026-11-02 for PRD-32/PRD-01 (U-approval-01): POST
+ * /api/launch-approvals adds one mutating route, never webhook-gated: 164
+ * mutating, 7 webhook-protected (unchanged), 157 non-webhook; bearer totals
+ * unchanged (50 patterns -> 54 templates, 53 bearer-ONLY); classified in the
+ * documented residual below (the client's own browser session is the caller,
+ * so it must NOT be bearer-listed).
+ *
  * re-derived 2026-09-27 for ILJ-004 tenant skip marks: POST
  * /api/interview/state — the owner's browser marking one structured question
  * skipped (InterviewClient.tsx:375 with the session cookie + tenant
@@ -449,16 +456,16 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
   // re-derived 2026-10-30 for CTR-165 (capability snapshot ingest): POST
   // /api/council/capabilities/snapshot adds one mutating route; it is never
   // webhook-gated, so both censuses move by exactly one.
-  it('API routes exporting a mutating method: 163 (literal assertion)', () => {
-    expect(allMutatingRoutes.length).toBe(163);
+  it('API routes exporting a mutating method: 164 (literal assertion)', () => {
+    expect(allMutatingRoutes.length).toBe(164);
   });
 
   it('protected by isWebhookSecretRoute: 7 (5 static + 2 dynamic — middleware src/middleware.ts:137-167)', () => {
     expect(webhookProtectedCount).toBe(7);
   });
 
-  it('non-webhook write routes: 156 (163 mutating − 7 webhook-protected; tenant authentication remains required)', () => {
-    expect(nonWebhookCount).toBe(156);
+  it('non-webhook write routes: 157 (164 mutating − 7 webhook-protected; tenant authentication remains required)', () => {
+    expect(nonWebhookCount).toBe(157);
   });
 
   it('interface call templates found by multi-line scanner', () => {
@@ -498,7 +505,7 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
 
   // DOCUMENTED RESIDUAL (coordinator decision, 2026-10-16, train PR #550;
   // extended 2026-10-30 for the CTR-165 capability snapshot ingest).
-  // The 14 council write routes below are in neither classification:
+  // The 14 council write routes and the one launch approval route below are in neither classification:
   // no browser call site or client binding for them exists in this tree,
   // so the interface category cannot be evidenced, and the bearer
   // category would misstate their real auth. The 13 session routes'
@@ -542,6 +549,16 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
     // 401 the console channel and misstate the browser auth, so it stays
     // out of BEARER_REQUIRED_WRITE_ROUTES.
     '/api/council/capabilities/snapshot',
+    // PRD-32 / PRD-01 (U-approval-01) launch approval mint (POST only; the
+    // [approvalId] route is GET-only and not a mutating route). Middleware
+    // passthrough needs a verified non-operator tenant identity plus the
+    // signed mc_csrf_token cookie; in-handler mintLaunchApproval requires the
+    // tenant's REGISTERED client identity (registration subjects/allowedEmails),
+    // refuses operator:api 403, requires source_message.sender == the verified
+    // identity and `APPROVE <8-hex plan-hash prefix>`. No client UI call site
+    // is wired yet, so the interface category cannot be evidenced; it must NOT
+    // join BEARER_REQUIRED_WRITE_ROUTES (that would 401 the client's own browser).
+    '/api/launch-approvals',
   ];
 
   it('every reachable mutating route is either in BEARER_REQUIRED_WRITE_ROUTES, called by the interface, or a documented unwired console route (exact residual enforced)', () => {

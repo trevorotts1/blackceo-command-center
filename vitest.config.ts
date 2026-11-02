@@ -239,6 +239,10 @@ export default defineConfig({
       // populated pre-173 database gains the provenance columns and contract
       // row without losing or rewriting rows. Real SQLite temp file.
       'tests/unit/launch-migration-173.test.ts',
+      // PRD-32 / PRD-01 (U-approval-01) — launch approval endpoint: mint only from the
+      // tenant's registered client reply, read-only GET, migration 177 table guards.
+      // Vitest imports + isolated DB, so vitest-only, never the tsx --test glob.
+      'tests/unit/launch-approvals.test.ts',
       // MR-46 (fix2) — getAgentStatusDot color-mapping unit test (closes the
       // Haiku "no unit test for getAgentStatusDot" minor defect). Imports the
       // real MissionQueue.tsx, so it needs the store + next/navigation mocks —
