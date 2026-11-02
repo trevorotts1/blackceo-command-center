@@ -244,14 +244,16 @@ describe('CTR-104 /council renders the visual chamber first', () => {
     await screen.findByTestId('council-sessions-list');
 
     const urls = calls.map((c) => c.url.split('?')[0]);
-    // The entry reads capabilities, the session list, and the selected
-    // sitting (when one exists). Nothing else is authorized on open.
+    // The entry reads capabilities, the session list, the selected sitting
+    // (when one exists), and the public same-origin portrait manifest.
+    // Nothing else is authorized on open.
     expect(urls).toEqual(expect.arrayContaining(['/api/council/capabilities', '/api/council/sessions']));
     for (const url of urls) {
       expect(
         url === '/api/council/capabilities' ||
           url === '/api/council/sessions' ||
-          url.startsWith('/api/council/sessions/'),
+          url.startsWith('/api/council/sessions/') ||
+          url === '/council/portraits/manifest.json',
       ).toBe(true);
     }
     // No session create, no model catalog, no run start, no mutation of any kind.
