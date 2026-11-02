@@ -31,7 +31,11 @@ import {
   createRouteSelection,
   type CouncilRouteSelection,
 } from '@/lib/council/explicit-selection';
-import { findCatalogEntry } from '@/lib/council/providers';
+import {
+  canonicalRouteIdForModel,
+  findCatalogEntryByCanonicalRouteId,
+  type RouteCatalogEntry,
+} from '@/lib/council/providers';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -236,8 +240,8 @@ function readRouteSelection(
   ctx: Parameters<typeof getRunAuthorizationStatus>[0],
   routeId: string,
   requestedModel: string | undefined,
-): CouncilRouteSelection {
-  const entry = findCatalogEntry(modelsCatalogData(ctx).routes, routeId);
+): { selection: CouncilRouteSelection; entry: RouteCatalogEntry } {
+  const entry = findCatalogEntryByCanonicalRouteId(modelsCatalogData(ctx).routes, routeId);
   if (!entry) {
     throw new CouncilApiError(
       'ROUTE_NOT_IN_CATALOG',
@@ -263,7 +267,7 @@ function readRouteSelection(
     );
   }
   try {
-    return createRouteSelection(
+    const selection = createRouteSelection(
       entry,
       {
         routeId: entry.routeId,
@@ -280,6 +284,7 @@ function readRouteSelection(
       },
       { routeRevision: 1, createdAt: new Date().toISOString() },
     );
+    return { selection, entry };
   } catch (error) {
     if (error instanceof CouncilSelectionError) {
       throw new CouncilApiError(error.code, error.message, {
@@ -352,9 +357,8 @@ export async function POST(request: NextRequest) {
       if (body.requested_by !== undefined && body.requested_by !== null) {
         boundedString(body.requested_by, 'requested_by', 80, false);
       }
-      const selection = readRouteSelection(ctx, routeId, requestedModel);
-      const entry = findCatalogEntry(modelsCatalogData(ctx).routes, routeId);
-      if (!entry || !entry.modelId) {
+      const { selection, entry } = readRouteSelection(ctx, routeId, requestedModel);
+      if (!entry.modelId) {
         // readRouteSelection already refused; this narrows the type only.
         throw schemaValidation('The selected route has no configured model.');
       }
@@ -368,7 +372,7 @@ export async function POST(request: NextRequest) {
           : Object.fromEntries(SEAT_IDS.map((seat) => [seat, 2]));
 
       const fingerprint = {
-        route_id: entry.routeId,
+        route_id: routeId,
         model: entry.modelId,
         question,
         options,
@@ -390,8 +394,11 @@ export async function POST(request: NextRequest) {
           source_pack_version: CONTRACT_PACKAGE_VERSION,
           model_policy: {
             selection: 'explicit',
-            route_id: entry.routeId,
-            requested_model_id: entry.modelId,
+            // Canonical idSchema forbids '/' in an id, so the raw host model
+            // id cannot be this field. The exact model is pinned in the
+            // route snapshot and run grant; this is its legal route name.
+            route_id: canonicalRouteIdForModel(entry.routeId),
+            requested_model_id: null,
             reasoning_preference: null,
             fallback_policy: 'none',
           },
