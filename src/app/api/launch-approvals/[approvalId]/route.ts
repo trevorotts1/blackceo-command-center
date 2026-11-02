@@ -11,7 +11,7 @@ export const revalidate = 0;
  * or DELETE handler exists, so an approval cannot be edited or removed here.
  * Skills 83 / 6 / 44 read this to verify an approval before any effect.
  */
-export async function GET(request: NextRequest, { params }: { params: Promise<{ approvalId: string }> | { approvalId: string } }) {
+export async function GET(request: NextRequest, { params }: { params: Promise<{ approvalId: string }> }) {
   let ctx;
   try {
     ctx = await resolveTenantContext(request);

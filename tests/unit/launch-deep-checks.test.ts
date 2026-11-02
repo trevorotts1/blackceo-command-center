@@ -124,6 +124,10 @@ describe('CON-24 — checkLaunchIngest', () => {
   });
 });
 
+// Each callRoute re-imports the whole health route after resetModules, so two calls
+// can pass the 15 s default on a loaded runner; the assertions are unchanged.
+const ROUTE_TEST_TIMEOUT_MS = 90_000;
+
 describe('CON-24 — GET /api/health/deep advisory.launch_ingest', () => {
   type RouteBody = {
     pass: boolean;
@@ -172,7 +176,7 @@ describe('CON-24 — GET /api/health/deep advisory.launch_ingest', () => {
     expect(Object.keys(b.body.checks)).not.toContain('launch_ingest');
     expect(b.body.pass).toBe(a.body.pass);
     expect(b.body.indeterminate).toBe(a.body.indeterminate);
-  });
+  }, ROUTE_TEST_TIMEOUT_MS);
 
   it('a throwing probe degrades to a non-gating UNKNOWN, never a 500', async () => {
     const ok = await callRoute(() => ({ pass: true, detail: 'ok' }));
@@ -183,7 +187,7 @@ describe('CON-24 — GET /api/health/deep advisory.launch_ingest', () => {
     expect(String(r.body.advisory.launch_ingest.detail)).toContain('launch_ingest');
     expect(String(r.body.advisory.launch_ingest.detail)).toContain('non-gating');
     expect(r.body.pass).toBe(ok.body.pass);
-  });
+  }, ROUTE_TEST_TIMEOUT_MS);
 
   it('the real check is what the route serves (stalled run is reported)', async () => {
     process.env.LAUNCH_PLANS_DIR = tmpDir();
@@ -192,5 +196,5 @@ describe('CON-24 — GET /api/health/deep advisory.launch_ingest', () => {
     expect(status).toBe(200);
     expect(body.advisory.launch_ingest.stale).toBe(true);
     expect(body.advisory.launch_ingest.stalled_runs).toBe(1);
-  });
+  }, ROUTE_TEST_TIMEOUT_MS);
 });
