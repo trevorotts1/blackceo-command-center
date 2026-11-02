@@ -27,7 +27,10 @@ import { verifiedBuild } from '@/lib/interview/build-verification';
  */
 
 import { standardPlaceholderActive } from '@/lib/interview/build-verification';
+import fs from 'fs';
+import path from 'path';
 import { NextRequest, NextResponse } from 'next/server';
+import { resolveWorkspaceDir } from '@/lib/interview/paths';
 import { readBuildState, readStandardPrebuild } from '@/lib/interview/seam';
 import { resolveInterviewTenant, refuseUnverifiedTenant, tenantForHost } from '@/lib/interview/tenant';
 import { INTERNAL_GATE_HEADER, INTERNAL_HOST_HEADER, verifyInternalGateToken } from '@/lib/interview/internal-call';
@@ -83,9 +86,26 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     });
   }
   const bs = readBuildState();
+  // Completion is terminal. The build-state file is rewritten by many scripts,
+  // so a read can land mid-write (null) or on a regressed copy. Once this box
+  // has EVER seen interviewComplete=true it records a sticky latch, and the
+  // latch answers whenever the live read does not.
+  let interviewComplete = bs?.interviewComplete === true;
+  const latchPath = path.join(resolveWorkspaceDir(), '.interview-complete-latch.json');
+  if (interviewComplete) {
+    if (!fs.existsSync(latchPath)) {
+      try {
+        const tmp = `${latchPath}.${process.pid}.tmp`;
+        fs.writeFileSync(tmp, JSON.stringify({ interviewComplete: true, interviewCompletedAt: bs?.interviewCompletedAt ?? null, latchedAt: new Date().toISOString() }));
+        fs.renameSync(tmp, latchPath);
+      } catch { /* best effort; the live read still answers */ }
+    }
+  } else {
+    interviewComplete = fs.existsSync(latchPath);
+  }
   return NextResponse.json({
     priorCompletionDeclared,
-    interviewComplete: bs?.interviewComplete === true,
+    interviewComplete,
     buildCompleted: verifiedBuild(bs),
     standardReady: readStandardPrebuild(bs).standardReady,
     standardPlaceholder: standardPlaceholderActive(bs),
