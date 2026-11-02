@@ -228,6 +228,38 @@ export class CouncilJobService {
   }
 
   /**
+   * Persist the composed engine's latest checkpoint while the caller
+   * still owns the job lease. A stale generation writes nothing.
+   */
+  updateCheckpoint(
+    scope: { tenant_id: string; company_id: string },
+    input: {
+      job_id: string;
+      worker_id: string;
+      lease_epoch: number;
+      checkpoint: Record<string, unknown>;
+    },
+  ): boolean {
+    const now = this.now();
+    const result = this.db
+      .prepare(
+        `UPDATE council_jobs SET checkpoint_json = ?, updated_at = ?
+          WHERE tenant_id = ? AND company_id = ? AND id = ?
+            AND lease_owner = ? AND lease_epoch = ? AND state IN ('leased', 'running')`,
+      )
+      .run(
+        JSON.stringify(input.checkpoint),
+        now,
+        scope.tenant_id,
+        scope.company_id,
+        input.job_id,
+        input.worker_id,
+        input.lease_epoch,
+      );
+    return Number(result.changes) === 1;
+  }
+
+  /**
    * Claim the next due job of a kind under a lease. Exactly one
    * claimant wins: the claim is a single conditional UPDATE guarded
    * by the observed state and lease expiry.

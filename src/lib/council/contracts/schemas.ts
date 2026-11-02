@@ -484,6 +484,26 @@ export type CouncilCard = z.infer<typeof cardSchema>;
 
 export const CARD_KIND_VALUES = CARD_KINDS;
 
+/**
+ * Canonical card contract per kind, generated from the exact zod author
+ * definition the validator enforces (canonical `generate.ts` port). A
+ * composed provider request carries this schema so the model is told the
+ * precise shape instead of guessing the closed discriminator.
+ */
+const CARD_AUTHOR_SCHEMAS = {
+  advisor: advisorCardAuthorSchema,
+  ratification: ratificationCardAuthorSchema,
+  consult: consultCardAuthorSchema,
+} as const;
+export type CardAuthorKind = keyof typeof CARD_AUTHOR_SCHEMAS;
+
+export function cardAuthorJsonSchema(kind: CardAuthorKind): unknown {
+  return z.toJSONSchema(CARD_AUTHOR_SCHEMAS[kind], {
+    target: 'draft-2020-12',
+    unrepresentable: 'throw',
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Draft resolution and verdict (Sections 11.5, 11.6, 12.8)
 // ---------------------------------------------------------------------------

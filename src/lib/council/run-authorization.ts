@@ -1445,6 +1445,74 @@ export class CouncilRunAuthorizationService {
     };
   }
 
+  /**
+   * Release an admitted operation whose provider request was never
+   * dispatched (the canonical engine's finally path). The reservation
+   * is returned to the session ceiling exactly once; a committed or
+   * unknown reservation is never released.
+   */
+  releaseOperation(
+    principal: CouncilPrincipal,
+    input: {
+      grant_id: string;
+      session_id: string;
+      operation_id: string;
+      lease_epoch: number;
+    },
+  ): { operation_id: string; state: string } {
+    const envelope = this.envelope(principal);
+    return this.write(() => {
+      const row = this.reservationRow(envelope, input.session_id, input.operation_id);
+      if (!row) {
+        throw new CouncilRunAuthorizationError(
+          'BUDGET_RESERVATION_NOT_FOUND',
+          `No budget reservation for operation ${input.operation_id} exists in session ${input.session_id}.`,
+          { operation_id: input.operation_id },
+        );
+      }
+      if (row.grant_id !== input.grant_id) {
+        throw new CouncilRunAuthorizationError(
+          'RUN_OPERATION_GRANT_MISMATCH',
+          `Operation ${input.operation_id} was admitted under grant ${row.grant_id}, not ${input.grant_id}.`,
+          { operation_id: input.operation_id },
+        );
+      }
+      if (row.state !== 'reserved') return { operation_id: row.operation_id, state: row.state };
+      const currentEpoch = this.currentLeaseEpoch(envelope, input.session_id);
+      if (input.lease_epoch !== currentEpoch) {
+        throw new CouncilRunAuthorizationError(
+          'BUDGET_LEASE_FENCED',
+          `Operation ${input.operation_id} presented lease epoch ${input.lease_epoch}, but the session lease is at epoch ${currentEpoch}.`,
+          { session_id: input.session_id, operation_id: input.operation_id },
+        );
+      }
+      const now = this.now();
+      const result = this.db
+        .prepare(
+          `UPDATE council_budget_reservations
+              SET state = 'released', finalized_at = ?
+            WHERE tenant_id = ? AND company_id = ? AND session_id = ? AND id = ? AND state = 'reserved'`,
+        )
+        .run(now, envelope.tenant_id, envelope.company_id, input.session_id, row.id);
+      if (Number(result.changes) !== 1) {
+        return { operation_id: row.operation_id, state: 'reserved' };
+      }
+      this.appendJournal(envelope, input.session_id, {
+        type: 'operation_completed',
+        actor_subject: envelope.actor_subject,
+        payload: {
+          reservation_id: row.id,
+          operation_id: row.operation_id,
+          outcome: 'released',
+          from_state: 'reserved',
+          lease_epoch: input.lease_epoch,
+        },
+        created_at: now,
+      });
+      return { operation_id: row.operation_id, state: 'released' };
+    });
+  }
+
   // ------------------------------------------------------------- private data
 
   private reservationRow(
