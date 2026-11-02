@@ -15,7 +15,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 import { run } from '@/lib/db';
 import { ensureLaunchSchema } from '@/lib/launch-ability-runs';
@@ -121,5 +121,76 @@ describe('CON-24 — checkLaunchIngest', () => {
     expect(r.degraded).toBe(true);
     expect(r.pass).toBe(true);
     expect(r.detail).toContain('1 quarantined');
+  });
+});
+
+describe('CON-24 — GET /api/health/deep advisory.launch_ingest', () => {
+  type RouteBody = {
+    pass: boolean;
+    indeterminate: boolean;
+    checks: Record<string, unknown>;
+    advisory: { launch_ingest: Record<string, unknown> };
+  };
+
+  async function callRoute(launchStub?: () => unknown) {
+    vi.doMock('@/lib/health/deep-checks', async () => {
+      const actual = await vi.importActual<typeof import('@/lib/health/deep-checks')>('@/lib/health/deep-checks');
+      return {
+        ...actual,
+        ...(launchStub ? { checkLaunchIngest: launchStub } : {}),
+        checkPersonaGrounding: async () => ({ pass: true, detail: 'stub' }),
+      };
+    });
+    vi.resetModules();
+    const mod = (await import('../../src/app/api/health/deep/route')) as { GET: () => Promise<Response> };
+    const res = await mod.GET();
+    return { status: res.status, body: (await res.json()) as RouteBody };
+  }
+
+  afterEach(() => {
+    vi.doUnmock('@/lib/health/deep-checks');
+    vi.resetModules();
+    delete process.env.LAUNCH_PLANS_DIR;
+  });
+
+  it('reports freshness + quarantine count; a stale feed never changes pass/indeterminate or enters checks', async () => {
+    const fresh = {
+      pass: true, degraded: false, stale: false, quarantined_runs: 0, newest_ingest_age_seconds: 60,
+      detail: 'launch_ingest: OK (advisory only, non-gating)',
+    };
+    const stale = {
+      pass: true, degraded: true, stale: true, stalled_runs: 1, quarantined_runs: 2,
+      detail: 'launch_ingest: WARN (advisory only, non-gating)',
+    };
+    const a = await callRoute(() => fresh);
+    const b = await callRoute(() => stale);
+    expect(a.status).toBe(200);
+    expect(b.status).toBe(200);
+    expect(a.body.advisory.launch_ingest).toEqual(fresh);
+    expect(b.body.advisory.launch_ingest).toEqual(stale);
+    expect(Object.keys(a.body.checks)).not.toContain('launch_ingest');
+    expect(Object.keys(b.body.checks)).not.toContain('launch_ingest');
+    expect(b.body.pass).toBe(a.body.pass);
+    expect(b.body.indeterminate).toBe(a.body.indeterminate);
+  });
+
+  it('a throwing probe degrades to a non-gating UNKNOWN, never a 500', async () => {
+    const ok = await callRoute(() => ({ pass: true, detail: 'ok' }));
+    const r = await callRoute(() => { throw new Error('boom'); });
+    expect(r.status).toBe(200);
+    expect(r.body.advisory.launch_ingest.pass).toBe(true);
+    expect(r.body.advisory.launch_ingest.indeterminate).toBe(true);
+    expect(String(r.body.advisory.launch_ingest.detail)).toContain('launch_ingest');
+    expect(String(r.body.advisory.launch_ingest.detail)).toContain('non-gating');
+    expect(r.body.pass).toBe(ok.body.pass);
+  });
+
+  it('the real check is what the route serves (stalled run is reported)', async () => {
+    process.env.LAUNCH_PLANS_DIR = tmpDir();
+    seedRun('run-route-stalled', Date.now() - 3 * 24 * HOUR);
+    const { status, body } = await callRoute();
+    expect(status).toBe(200);
+    expect(body.advisory.launch_ingest.stale).toBe(true);
+    expect(body.advisory.launch_ingest.stalled_runs).toBe(1);
   });
 });
