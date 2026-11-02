@@ -1,10 +1,10 @@
-import type { NextRequest } from 'next/server';
+import { NextResponse, type NextRequest } from 'next/server';
 import {
   authorizeSessionRead,
   checkBodyScope,
   handleCouncil,
-  respondOk,
 } from '@/lib/council/api/foundation';
+import { assertNoConfiguredSecretsInPayload } from '@/lib/council/auth';
 import { CouncilPersistenceError } from '@/lib/council/store';
 
 export const dynamic = 'force-dynamic';
@@ -37,7 +37,7 @@ export async function GET(
       claimed[key] = value;
     }
     checkBodyScope(ctx.principal, claimed);
-    const { accessVia, envelope } = authorizeSessionRead(ctx, sessionId);
+    const { envelope } = authorizeSessionRead(ctx, sessionId);
     const stored = ctx.repositories.getSession(envelope, sessionId);
     if (!stored) {
       throw new CouncilPersistenceError(
@@ -45,19 +45,24 @@ export async function GET(
         `No council session ${sessionId} exists in this tenant and company scope.`,
       );
     }
-    return respondOk(
-      ctx,
-      {
-        session: {
-          session_id: stored.spec.session_id,
-          spec: stored.spec,
-          brief: stored.brief,
-          state: stored.state,
-          cards: ctx.repositories.listCards(envelope, sessionId),
-          verdict: ctx.repositories.getVerdict(envelope, sessionId),
-        },
+    // The canonical renderer reads `body.session` at the TOP level
+    // (chamber-live.js readSession). This adapter is the one CC-specific
+    // response on the read path, so it answers in that canonical shape
+    // instead of the CC `{ok,data}` envelope. Authorization, scope and the
+    // stored record are exactly the ones the React journey uses.
+    const payload = {
+      session: {
+        session_id: stored.spec.session_id,
+        spec: stored.spec,
+        brief: stored.brief,
+        state: stored.state,
+        cards: ctx.repositories.listCards(envelope, sessionId),
+        verdict: ctx.repositories.getVerdict(envelope, sessionId),
       },
-      { meta: { access_via: accessVia } },
-    );
+    };
+    assertNoConfiguredSecretsInPayload(payload);
+    return NextResponse.json(payload, {
+      headers: { 'cache-control': 'private, no-store' },
+    });
   });
 }

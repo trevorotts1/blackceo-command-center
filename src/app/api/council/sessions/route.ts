@@ -1,13 +1,13 @@
-import type { NextRequest } from 'next/server';
+import { NextResponse, type NextRequest } from 'next/server';
 import {
   checkBodyScope,
   handleCouncil,
   parseJsonBody,
   requireIdempotencyKey,
   requireMutationProof,
-  respondOk,
   schemaValidation,
 } from '@/lib/council/api/foundation';
+import { assertNoConfiguredSecretsInPayload } from '@/lib/council/auth';
 import { createDraftSession, parseDraftInput } from '@/lib/council/api/drafts';
 
 export const dynamic = 'force-dynamic';
@@ -73,7 +73,7 @@ export async function GET(request: NextRequest) {
         ctx.principal.supportAccess,
     );
     const page = visible.slice(offset, offset + limit);
-    return respondOk(ctx, {
+    const data = {
       sessions: page.map((row) => ({
         session_id: row.id,
         // CTR-191: the canonical chamber labels a session by its question.
@@ -90,7 +90,18 @@ export async function GET(request: NextRequest) {
       })),
       count: page.length,
       total_in_scope: visible.length,
-    }, { meta: { support_access: ctx.principal.supportAccess } });
+    };
+    // The CC React client unwraps `{ok,data}`; the canonical chamber reads
+    // `body.sessions` directly (chamber-live.js refreshList). One authorized
+    // read, both shapes, no second source of truth.
+    assertNoConfiguredSecretsInPayload(data);
+    return NextResponse.json({
+      ok: true,
+      data,
+      request_id: ctx.requestId,
+      meta: { support_access: ctx.principal.supportAccess },
+      ...data,
+    });
   });
 }
 
