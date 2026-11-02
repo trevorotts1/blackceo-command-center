@@ -74,7 +74,7 @@ export const OWNER_REDIRECT_PATH = '/hq';
 export const OWNER_SUBJECT_PREFIX = 'invited-owner:';
 
 /** Existing 30-day browser session; the same lifetime the interview session issues. */
-export const OWNER_SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
+export const OWNER_SESSION_TTL_SECONDS = 365 * 24 * 60 * 60; // Trevor 2026-11-02: one year
 
 /** Ticket transport bound (S7 body `{ticket}` only, max 4 KiB overall). */
 export const OWNER_LOGIN_TICKET_MAX = 2048;

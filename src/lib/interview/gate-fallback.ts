@@ -43,6 +43,16 @@ interface GateStatusResponse {
  *   so the middleware can fail closed to /interview.
  */
 export async function checkInterviewCompleteViaFallback(host?: string | null): Promise<boolean> {
+  return (await checkInterviewGateStatus(host)) === true;
+}
+
+/**
+ * Tri-state variant: true = complete, false = the endpoint DEFINITIVELY said
+ * incomplete, null = the check itself failed (timeout, busy server, 5xx, bad
+ * JSON). A completed owner holding a valid "complete" cookie must never be
+ * locked out by a failed CHECK — only by a definitive "incomplete" answer.
+ */
+export async function checkInterviewGateStatus(host?: string | null): Promise<boolean | null> {
   try {
     const port = process.env.CC_PORT || process.env.PORT || '4000';
     const url = `http://127.0.0.1:${port}${GATE_STATUS_PATH}`;
@@ -71,12 +81,13 @@ export async function checkInterviewCompleteViaFallback(host?: string | null): P
       headers: host ? headers : undefined,
     });
     clearTimeout(timeout);
-    if (!res.ok) return false;
+    if (!res.ok) return null;
     const body = (await res.json()) as GateStatusResponse;
     return body.interviewComplete === true || body.buildCompleted === true || body.priorCompletionDeclared === true
       || body.standardPlaceholder === true;
   } catch {
-    // Any failure (network, timeout, bad JSON) → fail closed
-    return false;
+    // Any failure (network, timeout, bad JSON) → unknown; callers without a
+    // valid complete cookie still fail closed.
+    return null;
   }
 }
