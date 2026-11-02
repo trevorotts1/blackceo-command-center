@@ -236,18 +236,18 @@ export function createConfiguredCouncilRunTransport(
      * and session COMPLETED. Nothing is marked complete on a prepare call.
      */
     async execute(input: CouncilRunExecutionInput): Promise<CouncilRunExecutionResult> {
-      if (!options.store) {
+      const store = options.store;
+      if (!store) {
         refusal(
           'RUN_TRANSPORT_STORE_NOT_COMPOSED',
           'The council store is not composed, so the canonical engine cannot run.',
         );
       }
       assertPinnedRoute(input.route);
-      const repositories =
-        options.repositories ?? new CouncilRepositories({ adapter: options.store });
-      const jobs = options.jobs ?? new CouncilJobService({ store: options.store });
+      const repositories = options.repositories ?? new CouncilRepositories({ adapter: store });
+      const jobs = options.jobs ?? new CouncilJobService({ store });
       const runAuthorization =
-        options.runAuthorization ?? new CouncilRunAuthorizationService({ store: options.store });
+        options.runAuthorization ?? new CouncilRunAuthorizationService({ store });
       const envelope = envelopeFromScope(
         {
           tenant_id: input.tenant_id,
@@ -287,7 +287,7 @@ export function createConfiguredCouncilRunTransport(
       }
       const composed = createCcCouncilHost({
         repositories,
-        store: options.store,
+        store,
         jobs,
         runAuthorization,
         principal: input.principal,
