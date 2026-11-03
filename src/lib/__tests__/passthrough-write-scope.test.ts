@@ -172,11 +172,25 @@
  * totals unchanged (50 patterns match 54 templates, 53 bearer-ONLY).
  *
  * re-derived 2026-11-02 for PRD-32/PRD-01 (U-approval-01): POST
- * /api/launch-approvals adds one mutating route, never webhook-gated: 164
- * mutating, 7 webhook-protected (unchanged), 157 non-webhook; bearer totals
- * unchanged (50 patterns -> 54 templates, 53 bearer-ONLY); classified in the
- * documented residual below (the client's own browser session is the caller,
- * so it must NOT be bearer-listed).
+ * /api/launch-approvals adds one mutating route, never webhook-gated. It is
+ * one of two routes added on 2026-11-02 (the other is POST
+ * /api/council/convene below), so combined: 165 mutating, 7 webhook-protected
+ * (unchanged), 158 non-webhook; bearer totals unchanged (50 patterns -> 54
+ * templates, 53 bearer-ONLY); classified in the documented residual below
+ * (the client's own browser session is the caller, so it must NOT be
+ * bearer-listed).
+ *
+ * re-derived 2026-11-02 for CTR-191: POST /api/council/convene adds one
+ * mutating, non-webhook route (165 mutating, 158 non-webhook with U-approval-01 combined). Its real auth
+ * is not bearer: handleCouncil resolves the CWE-007 principal, the handler
+ * requires a mutation proof (signed mc_csrf_token cookie for a browser
+ * principal; the approved bearer plus the host-configured machine binding for
+ * a machine principal), checkBodyScope rejects caller-supplied scope, and
+ * authorizeSessionMutate fences the created session before any grant. The
+ * chamber composer calls it from public/chamber/chamber-shell.js, which the
+ * interface scanner does not read; bearer-listing it would 401 the browser
+ * channel and misstate the auth. It is therefore recorded in the documented
+ * residual with that verified posture, never as a blanket exemption.
  *
  * re-derived 2026-09-27 for ILJ-004 tenant skip marks: POST
  * /api/interview/state — the owner's browser marking one structured question
@@ -456,16 +470,16 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
   // re-derived 2026-10-30 for CTR-165 (capability snapshot ingest): POST
   // /api/council/capabilities/snapshot adds one mutating route; it is never
   // webhook-gated, so both censuses move by exactly one.
-  it('API routes exporting a mutating method: 164 (literal assertion)', () => {
-    expect(allMutatingRoutes.length).toBe(164);
+  it('API routes exporting a mutating method: 165 (literal assertion)', () => {
+    expect(allMutatingRoutes.length).toBe(165);
   });
 
   it('protected by isWebhookSecretRoute: 7 (5 static + 2 dynamic — middleware src/middleware.ts:137-167)', () => {
     expect(webhookProtectedCount).toBe(7);
   });
 
-  it('non-webhook write routes: 157 (164 mutating − 7 webhook-protected; tenant authentication remains required)', () => {
-    expect(nonWebhookCount).toBe(157);
+  it('non-webhook write routes: 158 (165 mutating − 7 webhook-protected; tenant authentication remains required)', () => {
+    expect(nonWebhookCount).toBe(158);
   });
 
   it('interface call templates found by multi-line scanner', () => {
@@ -559,6 +573,16 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
     // is wired yet, so the interface category cannot be evidenced; it must NOT
     // join BEARER_REQUIRED_WRITE_ROUTES (that would 401 the client's own browser).
     '/api/launch-approvals',
+    // CTR-191 canonical chamber composer (POST only). handleCouncil resolves
+    // the CWE-007 principal, so there is no tokenless caller; requireMutationProof
+    // demands the signed mc_csrf_token cookie for a browser principal and the
+    // approved bearer plus the host-configured machine binding for a machine
+    // principal; checkBodyScope refuses caller-supplied scope; and
+    // authorizeSessionMutate fences the created session before any grant is
+    // previewed or approved. The caller is public/chamber/chamber-shell.js,
+    // which the interface scanner does not read; bearer-listing it would 401
+    // the browser channel and misstate the auth.
+    '/api/council/convene',
   ];
 
   it('every reachable mutating route is either in BEARER_REQUIRED_WRITE_ROUTES, called by the interface, or a documented unwired console route (exact residual enforced)', () => {

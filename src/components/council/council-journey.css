@@ -288,3 +288,36 @@
     width: 100%;
   }
 }
+
+/* CTR-191 — the chamber bar. The sitting's controls live in the room, not in
+   a page that comes before it: title on the left, the three chamber actions
+   on the right, wrapping to a full-width row below 40rem so every control
+   keeps the 44px touch target instead of being squeezed. */
+.council-theme .council-chamber-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem 1rem;
+  margin-bottom: 0.75rem;
+}
+
+.council-theme .council-chamber-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.council-theme .council-chamber-actions .council-btn {
+  min-height: var(--council-touch-target);
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+}
+
+@media (max-width: 40rem) {
+  .council-theme .council-chamber-actions {
+    width: 100%;
+  }
+}

@@ -21,9 +21,9 @@ export const SEAT_IDS = [
 export type SeatId = (typeof SEAT_IDS)[number];
 
 /**
- * Display roster. T. D. Jakes is ONE seat with three book lenses, never three
- * votes (Section 7). The label for Brené Brown preserves the accented
- * spelling in data.
+ * Display roster (Section 7). T. D. Jakes is ONE seat with three book
+ * lenses, never three votes. Ported from the canonical contracts so the
+ * composed engine's prompt assembly and verdict binding share one roster.
  */
 export const SEAT_ROSTER: ReadonlyArray<{
   seat_id: SeatId;
@@ -45,12 +45,26 @@ export const SEAT_ROSTER: ReadonlyArray<{
   { seat_id: 'les-brown', display_name: 'Les Brown', lenses: [] },
 ];
 
-/** Mandatory label on every advisor profile (Section 8 source honesty). */
+/** Mandatory source-honesty label on every advisor profile (Section 8). */
 export function advisorProfileLabel(displayName: string): string {
   return `AI perspective inspired by the published work of ${displayName}. Not the individual and not an endorsement.`;
 }
 
-export const SESSION_MODES = ['full', 'selected', 'quick', 'consult'] as const;
+/**
+ * Mode vocabulary (canonical contracts/enums.ts). `light`, `medium` and
+ * `heavy` are the council sizes (contracts/modes.ts): they never select a
+ * smaller panel, only the rounds and the concurrency. The four older modes
+ * are unchanged.
+ */
+export const SESSION_MODES = [
+  'full',
+  'selected',
+  'quick',
+  'consult',
+  'light',
+  'medium',
+  'heavy',
+] as const;
 export type SessionMode = (typeof SESSION_MODES)[number];
 
 export const SESSION_VISIBILITIES = ['private', 'company'] as const;
