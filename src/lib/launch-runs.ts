@@ -11,8 +11,8 @@
  * plan hashing and manifest validation: `src/lib/launch-storage.ts`.
  *
  * The database/ability view is a SEPARATE store (`launch-ability-runs.ts`) and
- * is not merged into this one — see `relateLaunchViews()` for the explicit
- * relationship. Reading a plan with no progress file is honest pending; it is
+ * is not merged into this one — `listIngestedLaunches()` reads it, and the
+ * /launch page states the relationship with `relateLaunchViews()`. Reading a plan with no progress file is honest pending; it is
  * never reported as complete.
  *
  * Quarantine rule (fail closed): a progress file whose launch id, plan hash or
@@ -40,6 +40,8 @@ import {
   type LaunchPlanManifest,
   type LaunchProgressManifest,
 } from './launch-storage';
+import { getLaunchAbility } from './launch-abilities';
+import { listLaunchRuns as listIngestedRuns } from './launch-ability-runs';
 
 export type LaunchUnitKind = 'page' | 'email' | 'text' | 'automation' | 'conversation_ai';
 
@@ -660,4 +662,77 @@ export function listLaunchRuns(dir = launchPlansDir()): LaunchRunsResult {
 
 export function getLaunchRun(launchId: string, dir = launchPlansDir()): LaunchRun | null {
   return listLaunchRuns(dir).runs.find((run) => run.launchId === launchId) ?? null;
+}
+
+/** True when an operator pointed LAUNCH_PLANS_DIR somewhere on purpose. */
+export function launchPlansDirConfigured(): boolean {
+  return Boolean(process.env.LAUNCH_PLANS_DIR);
+}
+
+// ---------------------------------------------------------------------------
+// DATABASE view: launches the skills reported through the ingest transport.
+// Works with LAUNCH_PLANS_DIR unset — the producer POSTs events, nobody has to
+// copy plan files anywhere. Stage counts only: the database holds stages the
+// skills closed, never the plan's emails, texts or automations.
+// ---------------------------------------------------------------------------
+
+export interface IngestedAbilityProgress {
+  skill: number;
+  name: string;
+  runId: string;
+  stagesClosed: number;
+  stagesTotal: number;
+  percentage: number;
+  blockedStages: string[];
+  nextStage: string | null;
+  lastEventAt: string | null;
+}
+
+export interface IngestedLaunch {
+  launchId: string;
+  abilities: IngestedAbilityProgress[];
+  lastEventAt: string | null;
+}
+
+export interface IngestedLaunchesResult {
+  launches: IngestedLaunch[];
+  /** `unavailable` = the database could not be read; NOT "no launches". */
+  availability: 'ok' | 'unavailable';
+  error?: string;
+}
+
+/**
+ * One entry per launch id, newest event first, grouping every ability's run.
+ * ponytail: reads the newest 200 runs (the store's page cap); page through
+ * `listIngestedRuns({offset})` if a box ever holds more than 200 launch runs.
+ */
+export function listIngestedLaunches(): IngestedLaunchesResult {
+  const page = listIngestedRuns({ limit: 200 });
+  if (page.availability === 'unavailable') {
+    return { launches: [], availability: 'unavailable', error: page.error };
+  }
+  const byLaunch = new Map<string, IngestedLaunch>();
+  for (const row of page.runs) {
+    if (!row.launch_id) continue;
+    const entry = byLaunch.get(row.launch_id) ?? { launchId: row.launch_id, abilities: [], lastEventAt: null };
+    entry.abilities.push({
+      skill: row.skill,
+      name: getLaunchAbility(row.skill)?.displayName ?? `Skill ${row.skill}`,
+      runId: row.run_id,
+      stagesClosed: row.progress.stages_closed,
+      stagesTotal: row.progress.stages_total,
+      percentage: row.progress.build_percent,
+      blockedStages: row.progress.blocked_stages,
+      nextStage: row.progress.next_stage,
+      lastEventAt: row.last_event_at,
+    });
+    if (row.last_event_at && (!entry.lastEventAt || row.last_event_at > entry.lastEventAt)) {
+      entry.lastEventAt = row.last_event_at;
+    }
+    byLaunch.set(row.launch_id, entry);
+  }
+  const launches = [...byLaunch.values()];
+  for (const launch of launches) launch.abilities.sort((a, b) => a.skill - b.skill);
+  launches.sort((a, b) => (b.lastEventAt ?? '').localeCompare(a.lastEventAt ?? ''));
+  return { launches, availability: 'ok' };
 }
