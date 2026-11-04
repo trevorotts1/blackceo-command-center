@@ -29,6 +29,7 @@ import { installedCompanyIdentity } from '@/lib/db/branding-seed';
 import { configuredPublicOrigin, tenantRegistration } from '@/lib/auth/tenant-context';
 import { registrationAllowsOwnerLogin } from '@/lib/auth/owner-login';
 
+import { getSkillRuntimeReadiness, type SkillRuntimeResult } from './skills';
 import type {
   ActionResult,
   OwnerAction,
@@ -73,6 +74,8 @@ export interface SetupDeps {
   syncAgents(): Promise<AgentSyncResult>;
   /** Owner-login predicate for this host. Injected so a throw can be driven. */
   allowsOwnerLogin(host: string): boolean;
+  /** Can each installed skill actually run (helpers present)? Read-only, cached, time-bounded. */
+  skillRuntime(): Promise<SkillRuntimeResult[]>;
   now(): string;
 }
 
@@ -165,6 +168,7 @@ const DEFAULT_DEPS: SetupDeps = {
   probeGateway: () => tcpProbe(process.env.OPENCLAW_GATEWAY_URL || DEFAULT_GATEWAY_URL),
   applyMigrations: (db) => runMigrations(db),
   allowsOwnerLogin: (host) => registrationAllowsOwnerLogin(host),
+  skillRuntime: () => getSkillRuntimeReadiness(),
   syncAgents: async () => {
     // Loaded lazily: the sync pulls the gateway client, which no readiness read
     // should pay for.
@@ -317,6 +321,8 @@ export async function computeSetupReadiness(options: SetupOptions = {}): Promise
 
   const run: ProbeRun = { db, dbError, dbLatencyMs, companyId, companyIdError, host, at };
   const items: ReadinessItem[] = [];
+  // Started now so its child processes overlap the gateway probe below.
+  const skillItems = probeSkills(deps, at);
 
   // ── data ──────────────────────────────────────────────────────────────────
   items.push({
@@ -341,6 +347,7 @@ export async function computeSetupReadiness(options: SetupOptions = {}): Promise
   items.push(probeOwnerRegistration(run, deps));
   items.push(probeAgentRoster(run));
   items.push(await probeGateway(deps, at));
+  items.push(...(await skillItems));
 
   // Evidence completeness. READY means "a probe observed this", so a READY row
   // whose observation is empty, or whose timestamp could not be taken, is not
@@ -645,6 +652,37 @@ async function probeGateway(deps: SetupDeps, at: string): Promise<ReadinessItem>
       state: 'UNKNOWN',
       evidence: evidence('tcp_connect(OPENCLAW_GATEWAY_URL)', { error: errorMessage(err) }, at),
     };
+  }
+}
+
+/**
+ * One row per installed skill: installed is not the same as able to run.
+ * The row's `reason` is the plain-English line a person can read; the module,
+ * interpreter and exit code live in `evidence.observed.checks` (operator detail).
+ * A probe that throws is one UNKNOWN row — never a missing section, never READY.
+ */
+async function probeSkills(deps: SetupDeps, at: string): Promise<ReadinessItem[]> {
+  try {
+    return (await deps.skillRuntime()).map((result): ReadinessItem => ({
+      id: `skill_runtime:${result.skill}`,
+      label: `${result.name} can run`,
+      group: 'runtime',
+      state: result.state,
+      ...(result.state === 'BLOCKED' ? { reason: result.message } : {}),
+      evidence: evidence('skill_runtime(PREREQS.json)', {
+        skill: result.skill,
+        summary: result.message,
+        checks: result.checks,
+      }, at),
+    }));
+  } catch (err) {
+    return [{
+      id: 'skill_runtime:all',
+      label: 'Installed skills can run',
+      group: 'runtime',
+      state: 'UNKNOWN',
+      evidence: evidence('skill_runtime(PREREQS.json)', { error: errorMessage(err) }, at),
+    }];
   }
 }
 

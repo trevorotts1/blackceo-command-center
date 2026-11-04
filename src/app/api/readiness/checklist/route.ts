@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { resolveTenantContext } from '@/lib/auth/tenant-context';
 import { collectReadinessMissing, gatherReadinessInputs } from '@/lib/readiness';
+import { getSkillRuntimeReadiness, toClientSkills } from '@/lib/readiness/skills';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 /**
@@ -11,6 +12,12 @@ export const dynamic = 'force-dynamic';
  * readiness is a shared per-surface list, not an operator-only secret.
  * Re-derived from live probes on every request (`private, no-store`), so a
  * rebind/disconnect/upgrade can never show a cached green (D-29).
+ *
+ * `skills` is additive and does NOT feed `ready`/`missing`/the status code: it
+ * says, in plain words, whether each installed skill can actually run (its
+ * helpers are present). It carries no paths, modules or exit codes — those are
+ * operator detail on /api/setup/readiness. Cached for a minute and time-bounded,
+ * so it can never hold this route up.
  */
 export async function GET(req: NextRequest) {
   try {
@@ -21,11 +28,13 @@ export async function GET(req: NextRequest) {
       { requireRemoteReceiver },
     );
     const missing = collectReadinessMissing(inputs);
+    const skills = toClientSkills(await getSkillRuntimeReadiness().catch(() => []));
     return NextResponse.json(
       {
         ready: missing.length === 0,
         companyId: context.companyId,
         missing,
+        skills,
       },
       {
         status: missing.length ? 503 : 200,
