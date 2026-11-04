@@ -695,6 +695,8 @@ test('R1b: precedence when two private folders hold the same package: OC_PYDEPS_
     assert.match(loses.checks[0].detail, /installed 1\.0\.0 is older than the required 3\.0/);
 
     // The middle rung: <OPENCLAW_ROOT>/pydeps beats ~/.claude when OC_PYDEPS_DIR is unset.
+    // Start ~/.claude clean: the block above left a 5.0.0 copy there, which would also satisfy >=3.0 and hide a swapped rung.
+    fs.rmSync(path.join(home, '.claude'), { recursive: true, force: true });
     plantPackage(path.join(root, 'oc', 'pydeps', py.tag), '5.0.0');
     plantPackage(path.join(home, '.claude', 'pydeps', py.tag), '1.0.0');
     assert.equal((await pydepsState({ OPENCLAW_ROOT: path.join(root, 'oc'), HOME: home }, 'ccpydepstest>=3.0')).state, 'READY', '<OPENCLAW_ROOT>/pydeps (5.0.0) shadows ~/.claude (1.0.0)');
