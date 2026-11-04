@@ -459,7 +459,7 @@ test('skills folder: OPENCLAW_ROOT wins, VPS Docker is /data/.openclaw, Mac is u
   }
 });
 
-// ── cache: brief, shared, never blocks ──────────────────────────────────────
+// ── cache: brief, shared, bounded ───────────────────────────────────────────
 
 test('cache: fresh within the window, recomputed after it, one shared in-flight run', async () => {
   let clock = 1_000;
@@ -622,48 +622,107 @@ async function realPython(): Promise<{ python: string; tag: string } | null> {
   }
 }
 
-test('R1: real python3 finds a package in the private pydeps folders (OC_PYDEPS_DIR, OPENCLAW_ROOT, ~/.claude) and reads its patch version', async (t) => {
+// ccpydepstest (a made-up package) planted directly in `dir`, at the given version.
+function plantPackage(dir: string, version = '4.0.0'): void {
+  fs.mkdirSync(path.join(dir, 'ccpydepstest'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'ccpydepstest', '__init__.py'), 'VALUE = 1\n');
+  fs.mkdirSync(path.join(dir, `ccpydepstest-${version}.dist-info`), { recursive: true });
+  fs.writeFileSync(path.join(dir, `ccpydepstest-${version}.dist-info`, 'METADATA'), `Metadata-Version: 2.1\nName: ccpydepstest\nVersion: ${version}\n`);
+}
+
+const pydepsNeed = (requirement: string) => JSON.stringify({
+  prerequisites: [{ type: 'manual', pythonModule: 'ccpydepstest', requirement, severity: 'optional' }],
+});
+
+/** The real runner and the real import script, with only the environment set. */
+const pydepsState = (vars: Record<string, string | undefined>, requirement = 'ccpydepstest>=4.0.0') =>
+  withEnv({ OC_PYDEPS_DIR: undefined, OPENCLAW_ROOT: '/cc-no-such-root', HOME: '/cc-no-such-home', CC_PYTHON: undefined, ...vars }, async () =>
+    only(await computeSkillRuntime({ ...harness({ skills: { '20-pydeps': pydepsNeed(requirement) } }).deps, findOnPath, runProcess }), '20-pydeps'));
+
+test('R1: real python3 finds a package in the private pydeps folders (OC_PYDEPS_DIR as-is, OPENCLAW_ROOT, ~/.claude) and reads its patch version', async (t) => {
   const py = await realPython();
   if (!py || !POSIX) { t.skip('a real python3 with importlib.metadata is needed'); return; }
 
-  // pydeps/py<X.Y>/ccpydepstest (version 4.0.0) under each of the three roots.
-  const plant = (folder: string) => {
-    const dir = path.join(folder, py.tag);
-    fs.mkdirSync(path.join(dir, 'ccpydepstest'), { recursive: true });
-    fs.writeFileSync(path.join(dir, 'ccpydepstest', '__init__.py'), 'VALUE = 1\n');
-    fs.mkdirSync(path.join(dir, 'ccpydepstest-4.0.0.dist-info'), { recursive: true });
-    fs.writeFileSync(path.join(dir, 'ccpydepstest-4.0.0.dist-info', 'METADATA'), 'Metadata-Version: 2.1\nName: ccpydepstest\nVersion: 4.0.0\n');
-  };
   const root = tmpDir('pydeps');
   const home = tmpDir('home');
-  plant(path.join(root, 'explicit'));
-  plant(path.join(root, 'oc', 'pydeps'));
-  plant(path.join(home, '.claude', 'pydeps'));
-
-  const nothing = { OC_PYDEPS_DIR: undefined, OPENCLAW_ROOT: root + '/empty', HOME: home + '/nobody', CC_PYTHON: undefined };
-  const need = (requirement: string) => JSON.stringify({
-    prerequisites: [{ type: 'manual', pythonModule: 'ccpydepstest', requirement, severity: 'optional' }],
-  });
-  const state = (vars: Record<string, string | undefined>, requirement = 'ccpydepstest>=4.0.0') =>
-    withEnv({ ...nothing, ...vars }, async () =>
-      only(await computeSkillRuntime({ ...harness({ skills: { '20-pydeps': need(requirement) } }).deps, findOnPath, runProcess }), '20-pydeps'));
+  // OC_PYDEPS_DIR is the package folder itself; the other two roots carry pydeps/py<X.Y>.
+  plantPackage(path.join(root, 'explicit'));
+  plantPackage(path.join(root, 'oc', 'pydeps', py.tag));
+  plantPackage(path.join(home, '.claude', 'pydeps', py.tag));
+  // A package under <OC_PYDEPS_DIR>/py<X.Y> is NOT on the list: the variable is used as-is.
+  plantPackage(path.join(root, 'appended', py.tag));
 
   try {
-    const without = await state({});
+    const without = await pydepsState({});
     assert.equal(without.state, 'BLOCKED', 'with no private folder on the list the package is genuinely missing');
     assert.match(without.checks[0].detail, /ModuleNotFoundError/);
 
-    assert.equal((await state({ OC_PYDEPS_DIR: path.join(root, 'explicit') })).state, 'READY', 'OC_PYDEPS_DIR is the full pydeps root');
-    assert.equal((await state({ OPENCLAW_ROOT: path.join(root, 'oc') })).state, 'READY', '<OPENCLAW_ROOT>/pydeps');
-    assert.equal((await state({ HOME: home })).state, 'READY', '~/.claude/pydeps');
+    assert.equal((await pydepsState({ OC_PYDEPS_DIR: path.join(root, 'explicit') })).state, 'READY', 'OC_PYDEPS_DIR is the package folder itself');
+    assert.equal((await pydepsState({ OC_PYDEPS_DIR: path.join(root, 'appended') })).state, 'BLOCKED', 'no py<X.Y> is appended to OC_PYDEPS_DIR');
+    assert.equal((await pydepsState({ OPENCLAW_ROOT: path.join(root, 'oc') })).state, 'READY', '<OPENCLAW_ROOT>/pydeps/py<X.Y>');
+    assert.equal((await pydepsState({ HOME: home })).state, 'READY', '~/.claude/pydeps/py<X.Y>');
 
-    const tooOld = await state({ OC_PYDEPS_DIR: path.join(root, 'explicit') }, 'ccpydepstest>=4.0.1');
+    const tooOld = await pydepsState({ OC_PYDEPS_DIR: path.join(root, 'explicit') }, 'ccpydepstest>=4.0.1');
     assert.equal(tooOld.state, 'BLOCKED', 'the floor keeps its patch number: 4.0.0 is older than 4.0.1');
     assert.match(tooOld.checks[0].detail, /installed 4\.0\.0 is older than the required 4\.0\.1/);
-    assert.equal((await state({ OC_PYDEPS_DIR: path.join(root, 'explicit') }, 'ccpydepstest>=3.9.9')).state, 'READY');
+    assert.equal((await pydepsState({ OC_PYDEPS_DIR: path.join(root, 'explicit') }, 'ccpydepstest>=3.9.9')).state, 'READY');
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
     fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('R1b: precedence when two private folders hold the same package: OC_PYDEPS_DIR, then OPENCLAW_ROOT, then ~/.claude', async (t) => {
+  const py = await realPython();
+  if (!py || !POSIX) { t.skip('a real python3 with importlib.metadata is needed'); return; }
+
+  const root = tmpDir('prec');
+  const home = tmpDir('prec-home');
+  try {
+    // New copy (5.0.0) in OC_PYDEPS_DIR, old copy (1.0.0) in ~/.claude: the first folder answers, floor >=3.0 is met.
+    plantPackage(path.join(root, 'explicit'), '5.0.0');
+    plantPackage(path.join(home, '.claude', 'pydeps', py.tag), '1.0.0');
+    const wins = await pydepsState({ OC_PYDEPS_DIR: path.join(root, 'explicit'), HOME: home }, 'ccpydepstest>=3.0');
+    assert.equal(wins.state, 'READY', 'OC_PYDEPS_DIR (5.0.0) shadows ~/.claude (1.0.0)');
+
+    // Reversed: old copy first, so the new copy further down the list must NOT rescue it.
+    fs.rmSync(path.join(root, 'explicit'), { recursive: true, force: true });
+    fs.rmSync(path.join(home, '.claude'), { recursive: true, force: true });
+    plantPackage(path.join(root, 'explicit'), '1.0.0');
+    plantPackage(path.join(home, '.claude', 'pydeps', py.tag), '5.0.0');
+    const loses = await pydepsState({ OC_PYDEPS_DIR: path.join(root, 'explicit'), HOME: home }, 'ccpydepstest>=3.0');
+    assert.equal(loses.state, 'BLOCKED', 'OC_PYDEPS_DIR (1.0.0) shadows ~/.claude (5.0.0)');
+    assert.match(loses.checks[0].detail, /installed 1\.0\.0 is older than the required 3\.0/);
+
+    // The middle rung: <OPENCLAW_ROOT>/pydeps beats ~/.claude when OC_PYDEPS_DIR is unset.
+    // Start ~/.claude clean: the block above left a 5.0.0 copy there, which would also satisfy >=3.0 and hide a swapped rung.
+    fs.rmSync(path.join(home, '.claude'), { recursive: true, force: true });
+    plantPackage(path.join(root, 'oc', 'pydeps', py.tag), '5.0.0');
+    plantPackage(path.join(home, '.claude', 'pydeps', py.tag), '1.0.0');
+    assert.equal((await pydepsState({ OPENCLAW_ROOT: path.join(root, 'oc'), HOME: home }, 'ccpydepstest>=3.0')).state, 'READY', '<OPENCLAW_ROOT>/pydeps (5.0.0) shadows ~/.claude (1.0.0)');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('R1c: a child that sleeps past the 4 s cap is cut off and reads UNKNOWN, never READY or BLOCKED', async (t) => {
+  if (!POSIX) { t.skip('shell stub'); return; }
+  const dir = tmpDir('hang');
+  try {
+    // `exec` so the sleeper IS the pinned interpreter: the timeout kill reaches it and frees the pipes.
+    const stub = path.join(dir, 'python3');
+    writeExe(stub, '#!/bin/sh\nexec sleep 60\n');
+    const started = Date.now();
+    const row = await pydepsState({ CC_PYTHON: stub });
+    const elapsedMs = Date.now() - started;
+    assert.equal(row.state, 'UNKNOWN', 'a hang is "could not tell"');
+    assert.equal(row.checks[0].outcome, 'unknown');
+    assert.equal(row.checks[0].rc, null, 'no exit code: the child was killed');
+    assert.match(row.checks[0].detail, /timed out/);
+    assert.ok(elapsedMs < 30_000, `the check must give up near the cap, not wait out the 60 s sleep (took ${elapsedMs} ms)`);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 
