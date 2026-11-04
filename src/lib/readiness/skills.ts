@@ -489,7 +489,6 @@ export function createBoundedCache<T>(
     let timer: NodeJS.Timeout | undefined;
     const late = new Promise<T>((resolve) => {
       timer = setTimeout(() => resolve(opts.onTimeout()), opts.budgetMs);
-      timer.unref?.();
     });
     try {
       return await Promise.race([inflight, late]);
