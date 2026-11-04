@@ -21,8 +21,9 @@
  * SAME PYTHON AS THE SKILLS. python3 is the operator's pin (`CC_PYTHON`, the
  * name scripts/atomic-deploy.sh uses) or the first python3 found. The import is
  * tried with the box's private package folders on sys.path, because that is
- * where the updater puts what a skill needs: `$OC_PYDEPS_DIR/py<X.Y>`, then
- * `<OpenClaw root>/pydeps/py<X.Y>`, then `~/.claude/pydeps/py<X.Y>`.
+ * where the updater puts what a skill needs: `$OC_PYDEPS_DIR` (the folder
+ * itself, as-is), then `<OpenClaw root>/pydeps/py<X.Y>`, then
+ * `~/.claude/pydeps/py<X.Y>`.
  *
  * READ-ONLY. This module never installs anything. The repair is the box
  * updater's job; the row only says whether the repair is still owed.
@@ -72,17 +73,19 @@ const SCRIPT_FAULT_LINE = /^[A-Za-z_][A-Za-z0-9_.]*:/;
  * SystemExit is not an Exception, so the sys.exit calls pass through the except.
  *
  * The first block puts the box's private package folders on sys.path before the
- * import, using THIS interpreter's own version for the folder name. The order
- * and names are the fleet contract: OC_PYDEPS_DIR (a full pydeps root), else
- * OPENCLAW_ROOT, else /data/.openclaw when that folder exists, else
- * ~/.openclaw; plus ~/.claude/pydeps. Anything before the try block that goes
- * wrong is a crash (exit 1, nothing on stdout), which reads as "could not tell".
+ * import, using THIS interpreter's own version for the py<X.Y> folder names.
+ * The order and names are the fleet contract: OC_PYDEPS_DIR, when set, IS the
+ * package folder (used as-is, no py<X.Y> appended, the same as the onboarding
+ * and 999-setup scripts); then <OPENCLAW_ROOT, else /data/.openclaw when that
+ * folder exists, else ~/.openclaw>/pydeps/py<X.Y>; then ~/.claude/pydeps/py<X.Y>.
+ * Anything before the try block that goes wrong is a crash (exit 1, nothing on
+ * stdout), which reads as "could not tell".
  */
 const PY_IMPORT_CHECK = String.raw`import importlib, os, re, sys
 tag = "py%d.%d" % sys.version_info[:2]
 home = os.path.expanduser("~")
 root = os.environ.get("OPENCLAW_ROOT") or ("/data/.openclaw" if os.path.isdir("/data/.openclaw") else os.path.join(home, ".openclaw"))
-cands = ([os.path.join(os.environ["OC_PYDEPS_DIR"], tag)] if os.environ.get("OC_PYDEPS_DIR") else []) + [os.path.join(root, "pydeps", tag), os.path.join(home, ".claude", "pydeps", tag)]
+cands = ([os.environ["OC_PYDEPS_DIR"]] if os.environ.get("OC_PYDEPS_DIR") else []) + [os.path.join(root, "pydeps", tag), os.path.join(home, ".claude", "pydeps", tag)]
 for p in reversed(cands):
     if os.path.isdir(p) and p not in sys.path:
         sys.path.insert(0, p)
