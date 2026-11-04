@@ -16,8 +16,10 @@ export const dynamic = 'force-dynamic';
  * `skills` is additive and does NOT feed `ready`/`missing`/the status code: it
  * says, in plain words, whether each installed skill can actually run (its
  * helpers are present). It carries no paths, modules or exit codes — those are
- * operator detail on /api/setup/readiness. Cached for a minute and time-bounded,
- * so it can never hold this route up.
+ * operator detail on /api/setup/readiness. Cached for a minute. On a cold cache
+ * this route waits at most 2 seconds for the skill checks; past that the skill
+ * list holds one "could not be checked right now" line while the checks finish
+ * in the background, so the next request has the real answer.
  */
 export async function GET(req: NextRequest) {
   try {

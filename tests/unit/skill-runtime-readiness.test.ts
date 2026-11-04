@@ -14,6 +14,9 @@
 import './_isolated-db'; // MUST be first: never touch a real database.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 
@@ -23,12 +26,14 @@ import {
   findOnPath,
   friendlySkillName,
   parseRequirement,
+  PAGE_BUDGET_MS,
   parseSkillNeeds,
   resolveSkillsDir,
   runProcess,
   skillMessage,
   summarizeSkill,
   toClientSkills,
+  versionAtLeast,
   type ProcessResult,
   type SkillCheckDetail,
   type SkillRuntimeDeps,
@@ -115,6 +120,7 @@ test('parser: a pythonModule counts whatever its severity; optional, conditional
       { type: 'credential', check: { envVar: 'SOME_KEY' }, severity: 'required' },
       { type: 'skill', check: { skill: '01-x' }, severity: 'required' },
       { type: 'manual', pythonModule: 'numpy', severity: 'optional' },
+      { type: 'manual', pythonModule: 'scipy', severity: 'optional', when: 'some-feature' },
     ],
   }));
   assert.deepEqual(needs, [
@@ -147,8 +153,9 @@ test('parser: unusable files are null (reported UNKNOWN), valid-but-empty files 
   assert.equal(parseSkillNeeds(' '.repeat(300_000)), null, 'an oversized file is refused, not parsed');
 });
 
-test('parser: only a >= requirement is a floor', () => {
+test('parser: only a >= requirement is a floor, and its patch number is kept', () => {
   assert.deepEqual(parseRequirement('jsonschema>=4.0', 'x'), { dist: 'jsonschema', floor: [4, 0] });
+  assert.deepEqual(parseRequirement('jsonschema>=4.0.1', 'x'), { dist: 'jsonschema', floor: [4, 0, 1] });
   assert.deepEqual(parseRequirement('PyYAML >= 6', 'yaml'), { dist: 'PyYAML', floor: [6, 0] });
   assert.deepEqual(parseRequirement('numpy', 'numpy'), { dist: 'numpy', floor: null });
   assert.deepEqual(parseRequirement('numpy==1.2', 'numpy'), { dist: 'numpy', floor: null });
@@ -178,7 +185,7 @@ test('mapping: the client lines are exact and carry no technical words', () => {
   assert.equal(skillMessage('READY', 'Black Friday Launcher'), 'Ready');
   assert.equal(
     skillMessage('BLOCKED', 'Black Friday Launcher'),
-    'Needs a quick fix: Black Friday Launcher is missing a helper it needs. Your system will repair this on the next update.',
+    'Needs a quick fix: Black Friday Launcher is missing something it needs. Please let your support team know.',
   );
   for (const state of ['READY', 'BLOCKED', 'UNKNOWN'] as const) {
     assert.doesNotMatch(
@@ -210,7 +217,7 @@ test('missing package: the Skill 83 case is BLOCKED, with module, interpreter an
   assert.equal(row.name, 'Black Friday Launcher');
   assert.equal(
     row.message,
-    'Needs a quick fix: Black Friday Launcher is missing a helper it needs. Your system will repair this on the next update.',
+    'Needs a quick fix: Black Friday Launcher is missing something it needs. Please let your support team know.',
   );
   const py = row.checks.find((c) => c.kind === 'python_module');
   assert.ok(py);
@@ -261,6 +268,112 @@ test('no python3 on PATH: the binary need is BLOCKED, the import is UNKNOWN (nev
   assert.equal(h.spawned.length, 0);
 });
 
+/** Run `fn` with env vars set (undefined deletes), restoring the originals after. */
+async function withEnv<T>(vars: Record<string, string | undefined>, fn: () => Promise<T>): Promise<T> {
+  const saved: Record<string, string | undefined> = {};
+  for (const [k, v] of Object.entries(vars)) {
+    saved[k] = process.env[k];
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+  try {
+    return await fn();
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+}
+
+test('R3: exit 1 is "missing" only when the script printed its own Name: message line; a crash or stub is UNKNOWN', async () => {
+  const run = async (stdout: string, stderr = '') =>
+    only(await computeSkillRuntime(harness({ process: () => ({ rc: 1, stdout, stderr, timedOut: false, spawnError: null }) }).deps))
+      .checks.find((c) => c.kind === 'python_module')!;
+
+  const crashed = await run('', 'Traceback (most recent call last):\nValueError: invalid literal for int()\n');
+  assert.equal(crashed.outcome, 'unknown', 'a traceback on stderr with nothing on stdout is a crash');
+  assert.match(crashed.detail, /did not answer/);
+  assert.equal((await run('', 'xcode-select: note: no developer tools were found')).outcome, 'unknown', 'the macOS developer-tools stub');
+  assert.equal((await run('hello from a shim\n')).outcome, 'unknown', 'stdout that is not the script\'s own line');
+
+  assert.equal((await run("ModuleNotFoundError: No module named 'jsonschema'\n")).outcome, 'missing');
+  const noisy = await run("loading plugins...\nImportError: cannot import name 'x'\n");
+  assert.equal(noisy.outcome, 'missing', 'what a module printed before failing does not hide the script\'s own answer');
+  assert.match(noisy.detail, /ImportError/);
+  assert.equal(only(await computeSkillRuntime(harness({ process: () => ({ rc: 1, stdout: '', stderr: '', timedOut: false, spawnError: null }) }).deps)).state, 'UNKNOWN');
+});
+
+test('R2: CC_PYTHON pins the interpreter for the import AND the python3 binary check, and a bad pin is never swapped', async () => {
+  const pin = '/opt/pinned/python3';
+  const pinned = harness({ onPath: { python3: '/usr/bin/python3', [pin]: pin } });
+  const row = await withEnv({ CC_PYTHON: pin }, async () => only(await computeSkillRuntime(pinned.deps)));
+  assert.equal(row.state, 'READY');
+  assert.equal(pinned.spawned[0].file, pin, 'the import ran under the pinned interpreter');
+  assert.equal(row.checks.find((c) => c.kind === 'binary')!.resolvedPath, pin);
+
+  const bad = harness({ onPath: { python3: '/usr/bin/python3' } });
+  const badRow = await withEnv({ CC_PYTHON: '/nope/python3' }, async () => only(await computeSkillRuntime(bad.deps)));
+  assert.equal(badRow.state, 'UNKNOWN', 'an unusable pin is not a proven fault and is not replaced by another python3');
+  assert.equal(bad.spawned.length, 0);
+  assert.match(badRow.checks.find((c) => c.kind === 'python_module')!.detail, /CC_PYTHON/);
+  assert.equal(badRow.checks.find((c) => c.kind === 'binary')!.outcome, 'unknown');
+
+  const unset = harness({});
+  await withEnv({ CC_PYTHON: undefined }, async () => computeSkillRuntime(unset.deps));
+  assert.equal(unset.spawned[0].file, '/usr/bin/python3');
+});
+
+test('binary minVersion: parsed, read with --version, compared part by part; an unreadable floor or answer is UNKNOWN, never READY', async () => {
+  const node = (minVersion: unknown) => JSON.stringify({
+    prerequisites: [{ type: 'binary', check: { binary: 'node', minVersion }, severity: 'required' }],
+  });
+  assert.deepEqual(parseSkillNeeds(node('22.13.0')), [{ kind: 'binary', binary: 'node', minVersion: [22, 13, 0] }]);
+  assert.deepEqual(parseSkillNeeds(node('18')), [{ kind: 'binary', binary: 'node', minVersion: [18, 0] }]);
+  assert.deepEqual(parseSkillNeeds(node('latest')), [{ kind: 'binary', binary: 'node', minVersion: null }]);
+  assert.deepEqual(parseSkillNeeds(node(18)), [{ kind: 'binary', binary: 'node', minVersion: null }]);
+
+  const SK = '77-council-of-wise-elders';
+  const say = (rc: number | null, stdout: string, extra: Partial<ProcessResult> = {}) =>
+    (): ProcessResult => ({ rc, stdout, stderr: '', timedOut: false, spawnError: null, ...extra });
+  const state = async (minVersion: unknown, answer: () => ProcessResult) => {
+    const h = harness({ skills: { [SK]: node(minVersion) }, onPath: { node: '/usr/bin/node' }, process: answer });
+    const row = only(await computeSkillRuntime(h.deps), SK);
+    return { row, h };
+  };
+
+  const ok = await state('22.13.0', say(0, 'v22.13.0\n'));
+  assert.equal(ok.row.state, 'READY');
+  assert.deepEqual(ok.h.spawned, [{ file: '/usr/bin/node', args: ['--version'] }]);
+  assert.equal(ok.row.checks[0].requirement, '>=22.13.0');
+
+  const old = await state('22.13.0', say(0, 'v22.12.9\n'));
+  assert.equal(old.row.state, 'BLOCKED', 'the patch number counts');
+  assert.match(old.row.checks[0].detail, /22\.12\.9 is older than the required 22\.13\.0/);
+
+  assert.equal((await state('18', say(0, 'v20.1.0\n'))).row.state, 'READY');
+  assert.equal((await state('18', say(0, 'v16.0.0\n'))).row.state, 'BLOCKED');
+  assert.equal((await state('18', say(0, 'no digits here\n'))).row.state, 'UNKNOWN');
+  assert.equal((await state('18', say(1, 'v20.1.0\n'))).row.state, 'UNKNOWN', 'a failing --version is not trusted');
+  assert.equal((await state('18', say(null, '', { timedOut: true }))).row.state, 'UNKNOWN');
+  const unread = await state('latest', say(0, 'v20.1.0\n'));
+  assert.equal(unread.row.state, 'UNKNOWN', 'a floor that cannot be read is never passed on presence alone');
+  assert.equal(unread.h.spawned.length, 0);
+});
+
+test('version floors compare part by part, with missing parts as zero', () => {
+  assert.equal(versionAtLeast([4, 0, 0], [4, 0, 1]), false);
+  assert.equal(versionAtLeast([4, 0, 1], [4, 0, 1]), true);
+  assert.equal(versionAtLeast([4, 0], [4, 0, 0]), true);
+  assert.equal(versionAtLeast([4, 0, 0, 1], [4, 0, 1]), false);
+  assert.equal(versionAtLeast([3, 11, 2], [3, 9]), true);
+  assert.equal(versionAtLeast([3, 8, 9], [3, 9]), false);
+});
+
+test('R4: a cold probe holds a request for at most two seconds', () => {
+  assert.ok(PAGE_BUDGET_MS <= 2_000, `the route comment says 2 seconds; the budget is ${PAGE_BUDGET_MS} ms`);
+});
+
 test('a required binary is a PATH lookup, with no child process', async () => {
   const h = harness({
     skills: { '75-drama-song-ad-factory': JSON.stringify({ prerequisites: [{ type: 'binary', check: { binary: 'ffmpeg' }, severity: 'required' }] }) },
@@ -283,7 +396,7 @@ test('read-only and no shell: a fixed argv, the module as data, and never pip or
   const { file, args } = h.spawned[0];
   assert.equal(file, '/usr/bin/python3');
   assert.equal(args[0], '-c');
-  assert.deepEqual(args.slice(2), ['jsonschema', 'jsonschema', '4', '0'], 'module, package and floor travel as argv');
+  assert.deepEqual(args.slice(2), ['jsonschema', 'jsonschema', '4.0'], 'module, package and floor travel as argv');
   assert.match(args[1], /import_module/, 'a real import, not a file lookup');
   assert.doesNotMatch(args[1], /jsonschema/, 'no value is interpolated into the script');
   for (const a of h.spawned.flatMap((s) => s.args)) {
@@ -407,7 +520,7 @@ test('setup readiness: a skill missing its helper is a BLOCKED row with the plai
   assert.equal(item.label, 'Black Friday Launcher can run');
   assert.equal(
     item.reason,
-    'Needs a quick fix: Black Friday Launcher is missing a helper it needs. Your system will repair this on the next update.',
+    'Needs a quick fix: Black Friday Launcher is missing something it needs. Please let your support team know.',
   );
   assert.equal(item.evidence.probe, 'skill_runtime(PREREQS.json)');
   const checks = item.evidence.observed.checks as SkillCheckDetail[];
@@ -445,7 +558,7 @@ test('panel: a blocked skill row shows the plain line and keeps the technical de
   const item = readiness.items.find((i) => i.id === `skill_runtime:${SKILL_83}`)!;
   const html = renderToStaticMarkup(createElement(ItemRow, { item }));
   const [visible, detail] = html.split('<details');
-  assert.match(visible, /Needs a quick fix: Black Friday Launcher is missing a helper it needs/);
+  assert.match(visible, /Needs a quick fix: Black Friday Launcher is missing something it needs/);
   assert.match(html, /Blocked/, 'the badge still reads Blocked');
   assert.doesNotMatch(visible, /jsonschema|python3/, 'technical words stay out of the always-visible text');
   assert.match(detail, /Technical detail/);
@@ -481,4 +594,142 @@ test('real python3: the fixed import script reports present, missing and too-old
   const old = only(results, '12-too-old');
   assert.ok(old.state === 'BLOCKED' || old.state === 'UNKNOWN', 'pip may be absent on a minimal python; it must never read READY');
   assert.notEqual(old.state, 'READY');
+});
+
+// ── real programs: the private package folders, the wider PATH search, the pin ──
+
+const POSIX = process.platform !== 'win32';
+
+function tmpDir(label: string): string {
+  return fs.mkdtempSync(path.join(os.tmpdir(), `cc-skill-${label}-`));
+}
+
+function writeExe(file: string, body: string): void {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, body, { mode: 0o755 });
+}
+
+/** A real python3 and its X.Y, or null when this machine has none. */
+async function realPython(): Promise<{ python: string; tag: string } | null> {
+  const { execFileSync } = await import('node:child_process');
+  const python = await withEnv({ CC_PYTHON: undefined }, () => findOnPath('python3'));
+  if (!python) return null;
+  try {
+    const tag = execFileSync(python, ['-c', 'import importlib.metadata,sys;print("py%d.%d" % sys.version_info[:2])'], { encoding: 'utf8' }).trim();
+    return { python, tag };
+  } catch {
+    return null;
+  }
+}
+
+test('R1: real python3 finds a package in the private pydeps folders (OC_PYDEPS_DIR, OPENCLAW_ROOT, ~/.claude) and reads its patch version', async (t) => {
+  const py = await realPython();
+  if (!py || !POSIX) { t.skip('a real python3 with importlib.metadata is needed'); return; }
+
+  // pydeps/py<X.Y>/ccpydepstest (version 4.0.0) under each of the three roots.
+  const plant = (folder: string) => {
+    const dir = path.join(folder, py.tag);
+    fs.mkdirSync(path.join(dir, 'ccpydepstest'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'ccpydepstest', '__init__.py'), 'VALUE = 1\n');
+    fs.mkdirSync(path.join(dir, 'ccpydepstest-4.0.0.dist-info'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'ccpydepstest-4.0.0.dist-info', 'METADATA'), 'Metadata-Version: 2.1\nName: ccpydepstest\nVersion: 4.0.0\n');
+  };
+  const root = tmpDir('pydeps');
+  const home = tmpDir('home');
+  plant(path.join(root, 'explicit'));
+  plant(path.join(root, 'oc', 'pydeps'));
+  plant(path.join(home, '.claude', 'pydeps'));
+
+  const nothing = { OC_PYDEPS_DIR: undefined, OPENCLAW_ROOT: root + '/empty', HOME: home + '/nobody', CC_PYTHON: undefined };
+  const need = (requirement: string) => JSON.stringify({
+    prerequisites: [{ type: 'manual', pythonModule: 'ccpydepstest', requirement, severity: 'optional' }],
+  });
+  const state = (vars: Record<string, string | undefined>, requirement = 'ccpydepstest>=4.0.0') =>
+    withEnv({ ...nothing, ...vars }, async () =>
+      only(await computeSkillRuntime({ ...harness({ skills: { '20-pydeps': need(requirement) } }).deps, findOnPath, runProcess }), '20-pydeps'));
+
+  try {
+    const without = await state({});
+    assert.equal(without.state, 'BLOCKED', 'with no private folder on the list the package is genuinely missing');
+    assert.match(without.checks[0].detail, /ModuleNotFoundError/);
+
+    assert.equal((await state({ OC_PYDEPS_DIR: path.join(root, 'explicit') })).state, 'READY', 'OC_PYDEPS_DIR is the full pydeps root');
+    assert.equal((await state({ OPENCLAW_ROOT: path.join(root, 'oc') })).state, 'READY', '<OPENCLAW_ROOT>/pydeps');
+    assert.equal((await state({ HOME: home })).state, 'READY', '~/.claude/pydeps');
+
+    const tooOld = await state({ OC_PYDEPS_DIR: path.join(root, 'explicit') }, 'ccpydepstest>=4.0.1');
+    assert.equal(tooOld.state, 'BLOCKED', 'the floor keeps its patch number: 4.0.0 is older than 4.0.1');
+    assert.match(tooOld.checks[0].detail, /installed 4\.0\.0 is older than the required 4\.0\.1/);
+    assert.equal((await state({ OC_PYDEPS_DIR: path.join(root, 'explicit') }, 'ccpydepstest>=3.9.9')).state, 'READY');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('R2: a program in a standard folder that is missing from PATH is found; absent everywhere is still missing', async (t) => {
+  if (!POSIX) { t.skip('POSIX folders'); return; }
+  const home = tmpDir('bin');
+  try {
+    writeExe(path.join(home, '.local', 'bin', 'cc-fake-tool'), '#!/bin/sh\nexit 0\n');
+    fs.writeFileSync(path.join(home, '.local', 'bin', 'cc-not-runnable'), 'x', { mode: 0o644 });
+    await withEnv({ HOME: home, PATH: '/cc-no-such-folder' }, async () => {
+      assert.equal(await findOnPath('cc-fake-tool'), path.join(home, '.local', 'bin', 'cc-fake-tool'), '~/.local/bin is searched after PATH');
+      assert.equal(await findOnPath('cc-not-runnable'), null, 'a file that is not executable is not a program');
+      assert.equal(await findOnPath('cc-no-such-program-anywhere'), null);
+      // Control for the instrument: a real program is found with a PATH that does not list it.
+      const sh = await findOnPath('sh');
+      assert.ok(sh && /\/(usr\/)?bin\/sh$/.test(sh), `sh should be found in a standard folder, got ${sh}`);
+    });
+    // The whole-skill path: PATH is empty, python3 still resolves, and a real import runs.
+    await withEnv({ PATH: '/cc-no-such-folder', HOME: home, CC_PYTHON: undefined }, async () => {
+      const row = only(await computeSkillRuntime({ ...harness({ skills: { [SKILL_83]: PREREQS_83 } }).deps, findOnPath, runProcess }));
+      const bin = row.checks.find((c) => c.kind === 'binary')!;
+      if (bin.outcome === 'missing') t.diagnostic('no python3 in any standard folder on this machine');
+      else assert.equal(bin.outcome, 'ok', 'python3 is not BLOCKED just because the service PATH is short');
+    });
+    // A name with a folder in it (the pin) is checked directly, never searched for.
+    assert.equal(await findOnPath(path.join(home, '.local', 'bin', 'cc-fake-tool')), path.join(home, '.local', 'bin', 'cc-fake-tool'));
+    assert.equal(await findOnPath(path.join(home, 'nope')), null);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('R2+R3: CC_PYTHON through the real runner; a pinned stub that crashes is UNKNOWN, a missing pin is UNKNOWN, neither is swapped', async (t) => {
+  if (!POSIX) { t.skip('shell stub'); return; }
+  const dir = tmpDir('pin');
+  try {
+    const stub = path.join(dir, 'python3');
+    writeExe(stub, '#!/bin/sh\necho "xcode-select: note: no developer tools were found" >&2\nexit 1\n');
+    const real = (vars: Record<string, string | undefined>) => withEnv(vars, async () =>
+      only(await computeSkillRuntime({ ...harness({ skills: { [SKILL_83]: PREREQS_83 } }).deps, findOnPath, runProcess })));
+
+    const crashed = await real({ CC_PYTHON: stub });
+    assert.equal(crashed.state, 'UNKNOWN', 'exit 1 with nothing on stdout is not a proven missing package');
+    const py = crashed.checks.find((c) => c.kind === 'python_module')!;
+    assert.equal(py.resolvedPath, stub, 'the pinned interpreter is the one that ran');
+    assert.equal(py.rc, 1);
+    assert.equal(py.outcome, 'unknown');
+
+    const gone = await real({ CC_PYTHON: path.join(dir, 'does-not-exist') });
+    assert.equal(gone.state, 'UNKNOWN');
+    assert.ok(gone.checks.every((c) => c.outcome === 'unknown'), 'no other python3 was tried in its place');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('real python3: a binary minVersion is read with --version', async (t) => {
+  const py = await realPython();
+  if (!py) { t.skip('a real python3 is needed'); return; }
+  const need = (minVersion: string) => JSON.stringify({
+    prerequisites: [{ type: 'binary', check: { binary: 'python3', minVersion }, severity: 'required' }],
+  });
+  const state = (minVersion: string) => withEnv({ CC_PYTHON: undefined }, async () =>
+    only(await computeSkillRuntime({ ...harness({ skills: { '27-video': need(minVersion) } }).deps, findOnPath, runProcess }), '27-video'));
+  assert.equal((await state('3.0')).state, 'READY');
+  const tooNew = await state('99.0');
+  assert.equal(tooNew.state, 'BLOCKED');
+  assert.match(tooNew.checks[0].detail, /is older than the required 99\.0/);
 });
