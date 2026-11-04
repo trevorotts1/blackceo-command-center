@@ -48,7 +48,9 @@ export type ReadinessItemId =
   | 'company_workspace'
   | 'owner_registration'
   | 'agent_roster'
-  | 'openclaw_gateway';
+  | 'openclaw_gateway'
+  /** One row per installed skill whose prerequisites can be checked by running something. */
+  | `skill_runtime:${string}`;
 
 export interface OwnerAction {
   id: OwnerActionId;

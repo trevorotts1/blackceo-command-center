@@ -115,7 +115,15 @@ export function ItemRow({ item }: { item: ReadinessItem }) {
           {state === 'BLOCKED' && item.reason && (
             <p className="mt-1 text-sm text-red-800">{item.reason}</p>
           )}
-          <EvidenceLine item={item} />
+          {typeof item.id === 'string' && item.id.startsWith('skill_runtime:') ? (
+            // Skill rows speak plainly; the module, interpreter and exit code stay one click away.
+            <details className="mt-1">
+              <summary className="cursor-pointer text-xs text-bcc-text-muted">Technical detail</summary>
+              <EvidenceLine item={item} />
+            </details>
+          ) : (
+            <EvidenceLine item={item} />
+          )}
         </div>
         <span
           className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-semibold uppercase tracking-wide ${style.badge}`}
