@@ -99,6 +99,10 @@ import type { Task } from '@/lib/types';
 import { notifyOwnerDone } from '@/lib/owner-reports';
 import { collectCompletionEvidence, noEvidenceMessage } from '@/lib/completion-evidence';
 import { requiresRegisteredCertificate, requiresRegisteredProof } from '@/lib/presentations-cert-gate';
+import {
+  launchAdmissionForTransition,
+  revalidateSameStatusCompletion,
+} from '@/lib/launch-domain';
 
 // ---------------------------------------------------------------------------
 // State machine definition
@@ -658,6 +662,33 @@ function checkPreconditions(
     }
   }
 
+  // ── GOVERNED LAUNCH DOMAIN ADMISSION (F23.6 / F23.13) ──────────────────────
+  // Deliberately ABOVE the operatorOverride bail-out, for the same reason the
+  // completion-evidence invariant is: an override may re-decide ROUTING, it
+  // cannot make launch-specific evidence exist, cannot re-activate a revoked
+  // scoped approval, and cannot rebind a run to another client/installation or
+  // plan revision. A governed page/launch card entering review or done without
+  // that evidence is refused here. `launchAdmissionForTransition` never reads
+  // `evidence.operatorOverride`, so placing it above this line is the whole
+  // guarantee — the ordering is proven by tests/unit/launch-f23-domain.test.ts
+  // ("operatorOverride cannot waive launch admission"): that test PASSES only
+  // while this block is above the bail-out.
+  {
+    const launchAdmission = launchAdmissionForTransition(
+      {
+        id: task.id,
+        title: task.title,
+        source: task.source,
+        department: task.department,
+        status: task.status,
+      },
+      to,
+    );
+    if (!launchAdmission.allow) {
+      throw new TransitionError('PRECONDITION_LAUNCH_EVIDENCE', launchAdmission.reason);
+    }
+  }
+
   if (evidence.operatorOverride) return;
 
   switch (to) {
@@ -1157,6 +1188,20 @@ export function transitionWithDeclaredException(args: {
   // Must come BEFORE the exception edge validation — a task already at the target
   // state is idempotent regardless of what edge it took to get there.
   if (from === args.to) {
+    // F23.13 — the same-status shortcut cannot preserve stale completion. For a
+    // governed launch card, an already-`done`/`review` row whose governing
+    // evidence changed (artifact hash, revoked approval, rebind attempt) is
+    // refused here instead of being echoed back as still-complete.
+    const revalidation = revalidateSameStatusCompletion({
+      id: args.taskId,
+      title: task.title,
+      source: task.source,
+      department: task.department,
+      status: from,
+    });
+    if (!revalidation.allow) {
+      throw new TransitionError('LAUNCH_COMPLETION_STALE', revalidation.reason);
+    }
     const current = queryOne<Task>('SELECT * FROM tasks WHERE id = ?', [args.taskId]);
     if (!current) throw new TransitionError('NOT_FOUND', `Task ${args.taskId} not found after idempotent check`);
     return current;
@@ -1326,8 +1371,20 @@ export async function transition(
     );
   }
 
-  // Idempotent: if already in target state, return current row
+  // Idempotent: if already in target state, return current row — but for a
+  // governed launch card the same-status shortcut cannot preserve stale
+  // completion (F23.13). Revalidate the governing evidence first.
   if (from === to) {
+    const revalidation = revalidateSameStatusCompletion({
+      id: task.id,
+      title: task.title,
+      source: task.source,
+      department: task.department,
+      status: from,
+    });
+    if (!revalidation.allow) {
+      throw new TransitionError('LAUNCH_COMPLETION_STALE', revalidation.reason);
+    }
     const current = queryOne<Task>('SELECT * FROM tasks WHERE id = ?', [taskId]);
     if (!current) throw new TransitionError('NOT_FOUND', `Task ${taskId} not found after idempotent check`);
     return current;

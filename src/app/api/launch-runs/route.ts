@@ -7,6 +7,7 @@ import {
   type IngestedLaunch,
 } from '@/lib/launch-runs';
 import { getLaunchRun as getIngestedRun, LaunchStoreUnavailableError } from '@/lib/launch-ability-runs';
+import { outboxSyncState } from '@/lib/launch-outbox';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -127,6 +128,10 @@ export async function GET(request: NextRequest) {
     ingested: ingested.launches.map(ingestedBody),
     ingested_total: ingested.launches.length,
     ingested_availability: ingested.availability,
+    // F23.10 — synchronization is reported separately and honestly. `sent`
+    // counts ACCEPTED events only; queued/retrying/dead-lettered never read as
+    // delivered, and `remote_acceptance_claimed` stays false during an outage.
+    sync: outboxSyncState(),
     dir,
     errors,
     availability,
