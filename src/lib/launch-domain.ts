@@ -1129,12 +1129,20 @@ export function launchAdmissionForTransition(
   }
 
   // A revoked or expired scoped approval invalidates the governing proof.
-  const approval = queryOne<{ revoked: number; expires_at: string }>(
-    `SELECT revoked, expires_at FROM launch_approvals
-      WHERE tenant_id = ? AND plan_hash = ? AND kind = 'plan_build'
-      ORDER BY created_at DESC LIMIT 1`,
-    [binding.tenantId, identity.planHash],
-  );
+  // The approvals table is created by migration 177; a database that has not
+  // applied it yet reads as "no approval" (an entire-launch card is then
+  // refused, a page card is not), never as an unhandled error.
+  let approval: { revoked: number; expires_at: string } | undefined;
+  try {
+    approval = queryOne<{ revoked: number; expires_at: string }>(
+      `SELECT revoked, expires_at FROM launch_approvals
+        WHERE tenant_id = ? AND plan_hash = ? AND kind = 'plan_build'
+        ORDER BY created_at DESC LIMIT 1`,
+      [binding.tenantId, identity.planHash],
+    );
+  } catch {
+    approval = undefined;
+  }
   if (approval) {
     if (approval.revoked === 1 || Date.parse(approval.expires_at) <= now) {
       return refuse(
