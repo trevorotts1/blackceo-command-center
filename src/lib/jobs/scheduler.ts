@@ -475,6 +475,31 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<unknown> | unk
       return getCouncilEngine().pumpOutboxOnce();
     },
   },
+  // council-run-pump: every minute — CTR-191's durable execution pump.
+  // A convene request enqueues the `council_run` job and returns 202; it is
+  // NOT the executor. This job is the durable consumer: it claims due jobs
+  // under the council job lease, recovers expired leases, dispatches the
+  // admitted operation through the configured provider transport
+  // (src/lib/council/run-transport.ts), and settles honestly. One job per
+  // scope per tick — the worker's own operation graph keeps its round
+  // barrier and concurrency; the pump never fans out a council.
+  // Kill switch: DISABLE_COUNCIL_RUN_PUMP=1.
+  {
+    name: 'council-run-pump',
+    expr: '* * * * *',
+    timeoutMs: 30 * 60_000,
+    fn: async () => {
+      if (
+        process.env.DISABLE_COUNCIL_RUN_PUMP === '1' ||
+        process.env.DISABLE_COUNCIL_RUN_PUMP === 'true'
+      ) {
+        console.log('[cron] council-run-pump: DISABLE_COUNCIL_RUN_PUMP set, skipping');
+        return { skipped: true, skippedReason: 'DISABLE_COUNCIL_RUN_PUMP set' };
+      }
+      const { getCouncilEngine } = await import('@/lib/council/engine');
+      return getCouncilEngine().drainCouncilRunsOnce({ maxJobsPerScope: 1 });
+    },
+  },
   // council-completion-scan: every 5 minutes (CWE-045 production)
   // invocation of CWE-037's completion scan. Completed sessions with
   // no scan at their current state version are scanned (trigger

@@ -1,0 +1,224 @@
+/* Decision header panel (W29 unit B). Colours only through var(--ch-*). */
+
+/* One column at every width: the option rows live below the council, so a
+   second header column would only ever be an empty gutter. */
+.ch-dec {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--ch-space-5, 24px);
+  align-items: start;
+  padding: var(--ch-space-5, 24px);
+}
+.ch-dec [hidden] {
+  display: none !important;
+}
+
+/* ---- title column ---- */
+.ch-dec-titlecol {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--ch-space-3, 12px);
+}
+.ch-dec-title {
+  margin: 0;
+  max-width: 100%;
+  font: 600 clamp(22px, 2.4vw, 28px) / 1.2 var(--ch-font);
+  color: var(--ch-ink);
+  overflow-wrap: anywhere;
+}
+.ch-dec-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ch-space-2, 8px);
+}
+.ch-dec-badge {
+  max-width: 100%;
+  padding: 3px 10px;
+  border: 1px solid var(--ch-line-strong);
+  border-radius: var(--ch-radius-pill, 999px);
+  font: 700 11px / 1.4 var(--ch-font);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ch-ink-muted);
+  overflow-wrap: anywhere;
+}
+.ch-dec-badge--verdict {
+  border-color: var(--ch-gold);
+  background: var(--ch-gold-soft);
+  color: var(--ch-gold-strong);
+}
+.ch-dec-sub {
+  margin: 0;
+  font: 400 15px / 1.5 var(--ch-font);
+  color: var(--ch-ink-muted);
+}
+.ch-dec-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ch-space-2, 8px);
+}
+
+/* ---- options column ---- */
+.ch-dec-options {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--ch-space-3, 12px);
+}
+.ch-dec-row {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: var(--ch-space-3, 12px);
+  min-width: 0;
+}
+.ch-dec-chip {
+  box-sizing: border-box;
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--ch-radius-chip, 6px);
+  background: var(--ch-surface-3);
+  color: var(--ch-ink);
+  font: 700 12px / 1 var(--ch-font);
+}
+.ch-dec-main {
+  min-width: 0;
+}
+.ch-dec-labelline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: var(--ch-space-2, 8px);
+}
+.ch-dec-label {
+  min-width: 0;
+  font: 400 14px / 24px var(--ch-font);
+  color: var(--ch-ink);
+  overflow-wrap: anywhere;
+}
+.ch-dec-reco {
+  font: 700 11px / 1.4 var(--ch-font);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ch-gold-strong);
+}
+.ch-dec-track {
+  height: 3px;
+  margin-top: 2px;
+  border-radius: var(--ch-radius-pill, 999px);
+  background: var(--ch-line);
+  overflow: hidden;
+}
+.ch-dec-fill {
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--ch-gold);
+  transition: width 600ms var(--ch-ease);
+}
+.ch-dec-value {
+  min-width: 3.5ch;
+  text-align: right;
+  font: 400 14px / 24px var(--ch-font);
+  font-variant-numeric: tabular-nums;
+  color: var(--ch-ink-muted);
+}
+
+/* ---- recommended option after the verdict ---- */
+.ch-dec-row--reco .ch-dec-chip {
+  background: var(--ch-gold);
+  color: var(--ch-on-gold);
+}
+.ch-dec-row--reco .ch-dec-fill {
+  background: var(--ch-gold-strong);
+}
+.ch-dec-row--reco .ch-dec-value {
+  color: var(--ch-ink);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ch-dec-fill {
+    transition: none;
+  }
+}
+
+/* ---- Compact header: question, then one short status line ------------- */
+
+.ch-dec-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  margin: 0;
+  padding: 0 10px;
+  border: 1px solid var(--ch-line-strong);
+  border-radius: var(--ch-radius-pill, 999px);
+  font: 700 11px / 1.4 var(--ch-font);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ch-ink-muted);
+}
+.ch-dec-status[data-status='complete'] {
+  border-color: var(--ch-gold);
+  background: var(--ch-gold-soft);
+  color: var(--ch-gold-strong);
+}
+
+/* A session header stays compact: the room directly below carries the
+   discussion, so the question is not a hero block. */
+.ch-dec:not(.ch-dec--empty) {
+  padding: var(--ch-space-4, 16px);
+  gap: var(--ch-space-4, 16px);
+}
+.ch-dec:not(.ch-dec--empty) .ch-dec-title {
+  font: 600 clamp(18px, 1.9vw, 24px) / 1.25 var(--ch-font);
+}
+
+/* Once the advisory panel under the council owns the answer, the header stays
+   one full-width line with no gap; the bars below the council step aside (see
+   .ch-has-answer further down) so the options are not printed twice. */
+.ch-dec.ch-dec--answered {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
+}
+
+/* ---- Option detail panel: below the council room in every state --------- */
+
+.ch-dec-options-panel {
+  display: block;
+  padding: var(--ch-space-4, 16px);
+}
+.ch-dec-options-panel[hidden] {
+  display: none;
+}
+@media (min-width: 600px) {
+  .ch-dec-options-panel {
+    padding: var(--ch-space-5, 24px);
+  }
+}
+
+/* The shares below the council are a live snapshot, never the verdict. */
+.ch-dec-note {
+  margin: 0 0 var(--ch-space-3, 12px);
+  font: 700 11px / 1.4 var(--ch-font);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ch-ink-muted);
+}
+.ch-dec-note:empty {
+  display: none;
+}
+
+/* The advisory panel repeats the options in full detail once an answer is on
+   the page, so this shorthand panel is hidden only in that case. A completed
+   session with no verdict has no advisory panel and keeps its bars here. */
+.ch-has-answer .ch-dec-options-panel {
+  display: none;
+}

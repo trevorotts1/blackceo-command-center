@@ -1,0 +1,36 @@
+name: CI pin drift
+
+# Runner images and action refs are pins. `ubuntu-latest` and a bare major tag
+# are not: the image moves when GitHub publishes a new one and the tag can be
+# retagged upstream, with zero bytes changing in this repo. This job is the
+# only thing that can see that, because nothing else in CI reads the pins.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ci-pin-drift:
+    name: Runner and action pins match the reviewed set
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Every workflow pin is explicit and in the reviewed set
+        run: node scripts/check-ci-pins.mjs
+
+      # The guard proves it can fail before its pass is trusted: this replays a
+      # reintroduced float, an exact-pin drift, an unreviewed action ref and an
+      # empty scan against a throwaway copy.
+      - name: Self-test the pin check (+ mutation proof)
+        run: bash tests/unit/ci-pin-drift.test.sh

@@ -8586,6 +8586,50 @@ export const migrations: Migration[] = [
       console.log('[Migration 176] council capability snapshot ready');
     },
   },
+
+  {
+    id: '177',
+    name: 'launch_approvals',
+    up: (db) => {
+      // PRD-32 / PRD-01. The launch approval record, minted only from the
+      // client's own reply (src/lib/launch-approvals.ts). Additive and
+      // idempotent (IF NOT EXISTS), so it re-runs without error. The table
+      // itself refuses DELETE and any edit except a 0 -> 1 revoke, so even a
+      // code path that reaches the DB cannot rewrite what the client approved.
+      console.log('[Migration 177] Adding launch_approvals...');
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS launch_approvals (
+          approval_id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL,
+          client_identity_ref TEXT NOT NULL,
+          kind TEXT NOT NULL CHECK (kind IN ('plan_build','paid_asset_budget','publish','automation_write','pin_rotation','design_board')),
+          plan_hash TEXT NOT NULL,
+          scope TEXT NOT NULL,
+          cap_minor INTEGER,
+          currency TEXT,
+          expires_at TEXT NOT NULL,
+          revoked INTEGER NOT NULL DEFAULT 0 CHECK (revoked IN (0, 1)),
+          source_message_ref TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          UNIQUE (tenant_id, source_message_ref)
+        );
+        CREATE INDEX IF NOT EXISTS idx_launch_approvals_plan ON launch_approvals(tenant_id, plan_hash);
+        CREATE TRIGGER IF NOT EXISTS launch_approvals_no_delete
+          BEFORE DELETE ON launch_approvals
+          BEGIN SELECT RAISE(ABORT, 'launch_approvals rows are never deleted'); END;
+        CREATE TRIGGER IF NOT EXISTS launch_approvals_revoke_only
+          BEFORE UPDATE ON launch_approvals
+          WHEN NEW.approval_id IS NOT OLD.approval_id OR NEW.tenant_id IS NOT OLD.tenant_id
+            OR NEW.client_identity_ref IS NOT OLD.client_identity_ref OR NEW.kind IS NOT OLD.kind
+            OR NEW.plan_hash IS NOT OLD.plan_hash OR NEW.scope IS NOT OLD.scope
+            OR NEW.cap_minor IS NOT OLD.cap_minor OR NEW.currency IS NOT OLD.currency
+            OR NEW.expires_at IS NOT OLD.expires_at OR NEW.source_message_ref IS NOT OLD.source_message_ref
+            OR NEW.created_at IS NOT OLD.created_at OR (OLD.revoked = 1 AND NEW.revoked = 0)
+          BEGIN SELECT RAISE(ABORT, 'launch_approvals rows are immutable except revoke'); END;
+      `);
+      console.log('[Migration 177] launch_approvals ready');
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner

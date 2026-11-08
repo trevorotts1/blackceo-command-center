@@ -106,6 +106,8 @@ function deps(overrides: Partial<SetupDeps> & { db: Database.Database | null; co
     companyId: () => companyId,
     host: () => 'localhost',
     probeGateway: async () => ({ ok: true, detail: { probe: 'tcp_connect', host: '127.0.0.1', port: 18789 } }),
+    // Hermetic: the real skill probe reads the machine's skills folder and spawns python3.
+    skillRuntime: async () => [],
     now: () => '2026-10-24T00:00:00.000Z',
     ...rest,
   };

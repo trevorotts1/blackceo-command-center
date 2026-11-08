@@ -4,6 +4,7 @@
  * R-28 client-facing readiness surface. Renders the caller's own per-surface
  * readiness checklist — the same live `missing[]` the operator handshake
  * derives — fetched from /api/readiness/checklist on every view (no cache).
+ * Below it, one plain line per installed skill: Ready, or what needs a fix.
  */
 import { useEffect, useState } from 'react';
 
@@ -11,7 +12,15 @@ interface Checklist {
   ready: boolean;
   companyId: string;
   missing: string[];
+  skills?: SkillLine[];
   error?: string;
+}
+
+interface SkillLine {
+  skill: string;
+  name: string;
+  state: 'READY' | 'BLOCKED' | 'UNKNOWN';
+  message: string;
 }
 
 const MISSING_LABELS: Record<string, string> = {
@@ -53,6 +62,9 @@ export default function ReadinessPage() {
     return () => controller.abort();
   }, []);
 
+  const skills = Array.isArray(checklist?.skills) ? checklist.skills : [];
+  const skillNeedsFix = skills.some((line) => line.state === 'BLOCKED');
+
   return (
     <main style={{ fontFamily: 'system-ui,sans-serif', maxWidth: '40rem', margin: '4rem auto', padding: '0 1rem' }}>
       <h1>Setup readiness</h1>
@@ -61,13 +73,29 @@ export default function ReadinessPage() {
       ) : checklist === null ? (
         <p>Checking your setup…</p>
       ) : checklist.ready ? (
-        <p>Your setup is ready.</p>
+        <p>{skillNeedsFix ? 'Your setup is ready, but a skill below needs a quick fix.' : 'Your setup is ready.'}</p>
       ) : (
         <>
           <p>Still needed for your setup:</p>
           <ul>
             {checklist.missing.map((item) => (
               <li key={item}>{MISSING_LABELS[item] ?? item}</li>
+            ))}
+          </ul>
+        </>
+      )}
+      {skills.length > 0 && (
+        <>
+          <h2>Your skills</h2>
+          <ul>
+            {skills.map((line) => (
+              <li key={line.skill}>
+                {line.state === 'READY' ? (
+                  <>{line.name}: <strong style={{ color: '#166534' }}>Ready</strong></>
+                ) : (
+                  <span style={{ color: line.state === 'BLOCKED' ? '#991b1b' : undefined }}>{line.message}</span>
+                )}
+              </li>
             ))}
           </ul>
         </>

@@ -29,7 +29,12 @@ import type {
 const encoder = new TextEncoder();
 
 export function formatEventFrame(event: CouncilWireEvent): string {
-  return `id: ${event.sequence}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
+  // CTR-191: the canonical chamber bundle reads a committed frame's time from
+  // `created_at`; this journal records it as `occurred_at`. Both names carry the
+  // same committed instant — the alias is additive, and `occurred_at` stays the
+  // contract field every existing consumer reads.
+  const frame = { ...event, created_at: event.occurred_at };
+  return `id: ${event.sequence}\nevent: ${event.type}\ndata: ${JSON.stringify(frame)}\n\n`;
 }
 
 export function formatSnapshotFrame(snapshot: CouncilResyncSnapshot): string {

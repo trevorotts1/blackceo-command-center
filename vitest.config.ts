@@ -235,10 +235,19 @@ export default defineConfig({
       // cross-client/host/installation rejection, dedupe, conflicting-duplicate
       // rejection and nonregressing terminal state. DB-backed, vitest-only.
       'tests/unit/launch-transport.test.ts',
+      // CON-22 (U-cc-02) — /launch reads the ingest database with LAUNCH_PLANS_DIR
+      // unset, relates the disk and database views, nav lists Launch, and
+      // /api/launch-runs shows ingested runs. Vitest imports + isolated DB, so
+      // vitest-only, never the tsx --test glob.
+      'tests/unit/launch-page.test.ts',
       // UL-022 (audit lane L12) — numbered migration 173 upgrade safety: a
       // populated pre-173 database gains the provenance columns and contract
       // row without losing or rewriting rows. Real SQLite temp file.
       'tests/unit/launch-migration-173.test.ts',
+      // PRD-32 / PRD-01 (U-approval-01) — launch approval endpoint: mint only from the
+      // tenant's registered client reply, read-only GET, migration 177 table guards.
+      // Vitest imports + isolated DB, so vitest-only, never the tsx --test glob.
+      'tests/unit/launch-approvals.test.ts',
       // MR-46 (fix2) — getAgentStatusDot color-mapping unit test (closes the
       // Haiku "no unit test for getAgentStatusDot" minor defect). Imports the
       // real MissionQueue.tsx, so it needs the store + next/navigation mocks —
@@ -295,6 +304,11 @@ export default defineConfig({
       // (Skill 23 department-config.json convention) — candidate-path
       // precedence/dedup, tolerant coercion, missing vs malformed file.
       'tests/unit/cc-department-config.test.ts',
+      // CON-24 (U-cc-03) — non-gating launch ingest freshness + quarantine deep
+      // check (checkLaunchIngest + advisory.launch_ingest on /api/health/deep).
+      // Vitest imports + isolated DB + vi.doMock route import, so vitest-only,
+      // never the tsx --test glob.
+      'tests/unit/launch-deep-checks.test.ts',
     ],
     env: {
       NODE_ENV: 'test',

@@ -8,7 +8,21 @@
 set -u
 SCRIPT_VERSION="1.0.0"
 REPO_NAME="blackceo-command-center"
-GH_RAW="https://raw.githubusercontent.com/trevorotts1/${REPO_NAME}/main"
+REPO_URL="https://github.com/trevorotts1/${REPO_NAME}.git"
+# Where this script lives: the registry beside it must be found no matter what
+# directory the Sunday cron agent invokes the script from.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CC_REGISTRY="$SCRIPT_DIR/config/update-target-registry.json"
+# Approved target (pin). A fleet roll pins ONE main commit for every box, so
+# the check must be measured against THAT commit. Comparing against a moving
+# `main` reports updates the roll has not approved and hides the one it
+# requires. The policy (required vs optional) comes from the registry below or
+# the CC_REQUIRE_APPROVED_TARGET override; the reference defaults to main.
+CC_UPDATE_TARGET="${CC_UPDATE_TARGET:-}"
+CC_REQUIRE_APPROVED_TARGET="${CC_REQUIRE_APPROVED_TARGET:-}"
+CC_UPDATE_BASE="${CC_UPDATE_BASE:-https://raw.githubusercontent.com/trevorotts1/${REPO_NAME}}"
+CC_TARGET_REF="${CC_UPDATE_TARGET:-main}"
+GH_RAW="${CC_UPDATE_BASE}/${CC_TARGET_REF}"
 
 # ----------------------------------------------------------
 # Detect install location
@@ -161,15 +175,47 @@ if [ -n "${CC_APP_DIR:-}" ]; then
 fi
 
 if [ -z "$INSTALL_DIR" ] && [ "$INSTALL_DIR_STATUS" != "pin_invalid" ]; then
-  CANDIDATES=(
-    "$HOME/projects/command-center"
-    "/data/projects/command-center"
-    "$HOME/command-center/app"
-    "$HOME/clawd/projects/blackceo-command-center"
-    "/data/clawd/projects/blackceo-command-center"
-    "$HOME/blackceo-command-center"
-    "/data/blackceo-command-center"
-  )
+  # Registry-driven coverage: config/update-target-registry.json is the
+  # shipped statement of which installed roots this repository actually
+  # creates (the two canonical layouts) and which legacy layouts it still
+  # tolerates. When the registry is readable it IS the candidate list, so a
+  # new documented layout needs a registry edit rather than a script edit on
+  # every box. The built-in list below is the standalone fallback (the U53
+  # test extracts this block and runs it with no registry present).
+  CANDIDATES=()
+  CC_REG_CANDIDATES=""
+  if [ -n "${SCRIPT_DIR:-}" ] && [ -f "$CC_REGISTRY" ] && command -v python3 >/dev/null 2>&1; then
+    CC_REG_CANDIDATES=$(python3 -I - "$CC_REGISTRY" <<'PYREG'
+import json, os, sys
+try:
+    with open(sys.argv[1]) as fh:
+        reg = json.load(fh)
+except Exception:
+    sys.exit(0)
+home = os.path.expanduser("~")
+for root in reg.get("install_roots") or []:
+    p = root.get("path", "") if isinstance(root, dict) else str(root)
+    if not p:
+        continue
+    print(p.replace("~", home, 1) if p.startswith("~") else p)
+PYREG
+    ) || CC_REG_CANDIDATES=""
+  fi
+  if [ -n "$CC_REG_CANDIDATES" ]; then
+    while IFS= read -r c; do
+      [ -n "$c" ] && CANDIDATES+=("$c")
+    done <<< "$CC_REG_CANDIDATES"
+  else
+    CANDIDATES=(
+      "$HOME/projects/command-center"
+      "/data/projects/command-center"
+      "$HOME/command-center/app"
+      "$HOME/clawd/projects/blackceo-command-center"
+      "/data/clawd/projects/blackceo-command-center"
+      "$HOME/blackceo-command-center"
+      "/data/blackceo-command-center"
+    )
+  fi
   CC_VALIDATED=()
   for c in "${CANDIDATES[@]}"; do
     if _cc_validate_checkout "$c"; then
@@ -217,6 +263,50 @@ if [ -n "$INSTALL_DIR" ] && [ -f "$INSTALL_DIR/package.json" ]; then
   LOCAL_PKG_VERSION=$(grep '"version"' "$INSTALL_DIR/package.json" | head -1 | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/')
 fi
 
+# Installed COMMIT, not just the version string. The version file is a release
+# stamp, and this repo's own gate requires the five stamp locations to AGREE,
+# not to move on every commit (see .github/workflows/version-consistency.yml and
+# the "[Unreleased]" CHANGELOG entries). A box can therefore sit hundreds of
+# commits behind origin/main while /version still reads the same string. Without
+# the commit, HAS_UPDATE below says "false" for exactly that box.
+LOCAL_COMMIT=""
+LOCAL_COMMIT_SHORT=""
+if [ -n "$INSTALL_DIR" ]; then
+  LOCAL_COMMIT=$(git -C "$INSTALL_DIR" rev-parse HEAD 2>/dev/null || true)
+  [ -n "$LOCAL_COMMIT" ] && LOCAL_COMMIT_SHORT="${LOCAL_COMMIT:0:12}"
+fi
+
+# ----------------------------------------------------------
+# Approved-target policy
+# ----------------------------------------------------------
+# Required is opt-in: the registry's check-updates entry, or
+# CC_REQUIRE_APPROVED_TARGET=1 on this box. Selectable because the fleet-wide
+# decision is not made yet; when required, a missing pin REFUSES by name
+# instead of silently measuring against moving main.
+CC_TARGET_POLICY="optional"
+if [ -n "$CC_REQUIRE_APPROVED_TARGET" ] && [ "$CC_REQUIRE_APPROVED_TARGET" != "0" ]; then
+  CC_TARGET_POLICY="required"
+elif [ -f "$CC_REGISTRY" ] && command -v python3 >/dev/null 2>&1; then
+  CC_TARGET_POLICY=$(python3 -I - "$CC_REGISTRY" <<'PYREG'
+import json, sys
+try:
+    with open(sys.argv[1]) as fh:
+        reg = json.load(fh)
+except Exception:
+    print("optional"); sys.exit(0)
+for path in reg.get("update_paths") or []:
+    if isinstance(path, dict) and path.get("name") == "check-updates" \
+       and path.get("requires_approved_target") is True:
+        print("required"); sys.exit(0)
+print("optional")
+PYREG
+  ) || CC_TARGET_POLICY="optional"
+fi
+CC_TARGET_REFUSED="false"
+if [ "$CC_TARGET_POLICY" = "required" ] && [ -z "$CC_UPDATE_TARGET" ]; then
+  CC_TARGET_REFUSED="true"
+fi
+
 # ----------------------------------------------------------
 # Fetch remote state
 # ----------------------------------------------------------
@@ -224,19 +314,73 @@ fetch_remote() {
   curl -fsSL --max-time 15 "${GH_RAW}/$1" 2>/dev/null || echo ""
 }
 
-LATEST_VERSION=$(fetch_remote version | tr -d '[:space:]')
-LATEST_CHANGELOG=$(fetch_remote CHANGELOG.md)
+# Remote head: the commit LOCAL_COMMIT is compared against. Assigned EXACTLY
+# ONCE here, on every path, so the JSON below can never reference an unbound
+# variable. Sources, and none may touch the network when the check has already
+# refused:
+#   * refused  -> nothing at all; a refusal is a misconfiguration, not a
+#                 reason to call GitHub.
+#   * pinned   -> resolve CC_UPDATE_TARGET inside this checkout. A roll's
+#                 commit IS the target; asking moving main would contradict
+#                 the pin and spend a network round trip to learn nothing.
+#   * unpinned -> a bounded, read-only `git ls-remote` of refs/heads/main.
+#                 Empty on any network/auth failure, which leaves commit
+#                 detection UNDETERMINED rather than guessing.
+REMOTE_HEAD=""
+REMOTE_HEAD_SOURCE=""
+if [ "$CC_TARGET_REFUSED" != "true" ]; then
+  if [ -n "$CC_UPDATE_TARGET" ]; then
+    if [ -n "$INSTALL_DIR" ] && git -C "$INSTALL_DIR" cat-file -e "${CC_UPDATE_TARGET}^{commit}" 2>/dev/null; then
+      _PIN_RESOLVED=$(git -C "$INSTALL_DIR" rev-parse "${CC_UPDATE_TARGET}^{commit}" 2>/dev/null || true)
+      if [ -n "$_PIN_RESOLVED" ]; then
+        REMOTE_HEAD="$_PIN_RESOLVED"
+        REMOTE_HEAD_SOURCE="approved-target:${CC_UPDATE_TARGET}"
+      fi
+    fi
+  elif command -v git >/dev/null 2>&1; then
+    REMOTE_HEAD=$(
+      GIT_TERMINAL_PROMPT=0 git \
+        -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=20 \
+        ls-remote --refs "$REPO_URL" refs/heads/main 2>/dev/null \
+        | awk 'NR==1 { print $1 }'
+    )
+    [ -n "$REMOTE_HEAD" ] && REMOTE_HEAD_SOURCE="git ls-remote refs/heads/main"
+  fi
+fi
 
-# Most recent changelog entry (top section until next "## v")
+LATEST_VERSION=""
+LATEST_CHANGELOG=""
+if [ "$CC_TARGET_REFUSED" != "true" ]; then
+  LATEST_VERSION=$(fetch_remote version | tr -d '[:space:]')
+  LATEST_CHANGELOG=$(fetch_remote CHANGELOG.md)
+fi
+
+# Most recent changelog entry. Headings in this repo are written
+# "## [vX.Y.Z] — date — title" (and "## [Unreleased]"), NOT "## vX.Y.Z"; the
+# old `/^## v/` pattern matched NEITHER, so the excerpt was always empty and
+# the agent was told nothing about what an update contained. Accept the
+# bracketed and unbracketed forms and stop at the next heading of any level.
 LATEST_ENTRY=""
 if [ -n "$LATEST_CHANGELOG" ]; then
   LATEST_ENTRY=$(echo "$LATEST_CHANGELOG" | awk '
-    /^## v/ {
-      if (count == 0) { count=1; print; next }
-      else { exit }
+    /^## / {
+      if (count == 0) {
+        if ($0 ~ /^##[[:space:]]+\[?v[0-9]/ || $0 ~ /^##[[:space:]]+\[?[Uu]nreleased/) {
+          count = 1; print; next
+        }
+        next
+      }
+      exit
     }
     count == 1 { print }
   ')
+fi
+
+# Which release the excerpt belongs to, so the reader never mistakes an
+# [Unreleased] block for a shipped version.
+EXCERPT_VERSION=""
+if [ -n "$LATEST_ENTRY" ]; then
+  EXCERPT_VERSION=$(printf '%s' "$LATEST_ENTRY" | head -1 | sed -E 's/^##[[:space:]]+\[?([^] ]+).*/\1/')
 fi
 
 # Risk hint
@@ -248,9 +392,47 @@ fi
 # ----------------------------------------------------------
 # Has update?
 # ----------------------------------------------------------
+# Two independent signals. The version string is a release stamp and does not
+# move on every commit; the commit is what the box actually runs. A differing
+# commit with an IDENTICAL version is the case this script used to miss
+# (version_stamp_drift). If the remote/pinned commit cannot be read, the result
+# falls back to the version comparison and update_reason says it is
+# undetermined.
+COMMIT_MATCHES_REMOTE=""
+if [ -n "$LOCAL_COMMIT" ] && [ -n "$REMOTE_HEAD" ]; then
+  if [ "$LOCAL_COMMIT" = "$REMOTE_HEAD" ]; then
+    COMMIT_MATCHES_REMOTE="true"
+  else
+    COMMIT_MATCHES_REMOTE="false"
+  fi
+fi
+COMMIT_MATCHES_REMOTE_JSON="null"
+[ "$COMMIT_MATCHES_REMOTE" = "true" ] && COMMIT_MATCHES_REMOTE_JSON="true"
+[ "$COMMIT_MATCHES_REMOTE" = "false" ] && COMMIT_MATCHES_REMOTE_JSON="false"
+
+VERSION_STAMP_DRIFT="false"
+if [ -n "$LATEST_VERSION" ] && [ "$LOCAL_VERSION" = "$LATEST_VERSION" ] \
+   && [ "$COMMIT_MATCHES_REMOTE" = "false" ]; then
+  VERSION_STAMP_DRIFT="true"
+fi
+
 HAS_UPDATE="false"
+UPDATE_REASON=""
 if [ -n "$LATEST_VERSION" ] && [ "$LOCAL_VERSION" != "$LATEST_VERSION" ]; then
   HAS_UPDATE="true"
+  UPDATE_REASON="version"
+fi
+if [ "$COMMIT_MATCHES_REMOTE" = "false" ]; then
+  HAS_UPDATE="true"
+  if [ -n "$UPDATE_REASON" ]; then UPDATE_REASON="version+commit"; else UPDATE_REASON="commit"; fi
+fi
+if [ "$HAS_UPDATE" = "false" ]; then
+  if [ -n "$LATEST_VERSION" ] && [ "$LOCAL_VERSION" = "$LATEST_VERSION" ] \
+     && [ "$COMMIT_MATCHES_REMOTE" = "true" ]; then
+    UPDATE_REASON="none"
+  else
+    UPDATE_REASON="undetermined"
+  fi
 fi
 
 # Risk-tier classification fallback if no explicit tag
@@ -274,6 +456,15 @@ LATEST_ENTRY_JSON=$(printf '%s' "$LATEST_ENTRY" | python3 -c "import sys,json; p
 # characters that could break out of a JSON string literal.
 INSTALL_DIR_DETAIL_JSON=$(printf '%s' "$INSTALL_DIR_DETAIL" | tr -d '"\\')
 
+CC_TARGET_PINNED="false"
+[ -n "$CC_UPDATE_TARGET" ] && CC_TARGET_PINNED="true"
+CC_STATUS="ok"
+CC_REASON_CODE=""
+if [ "$CC_TARGET_REFUSED" = "true" ]; then
+  CC_STATUS="refused"
+  CC_REASON_CODE="CC_UPDATE_TARGET_REQUIRED"
+fi
+
 cat <<JSON
 {
   "script_version": "${SCRIPT_VERSION}",
@@ -283,17 +474,38 @@ cat <<JSON
   "install_dir": "${INSTALL_DIR}",
   "install_dir_status": "${INSTALL_DIR_STATUS}",
   "install_dir_detail": "${INSTALL_DIR_DETAIL_JSON}",
+  "local_commit": "${LOCAL_COMMIT}",
+  "local_commit_short": "${LOCAL_COMMIT_SHORT}",
+  "remote_head": "${REMOTE_HEAD}",
+  "remote_head_source": "${REMOTE_HEAD_SOURCE}",
+  "commit_matches_remote_head": ${COMMIT_MATCHES_REMOTE_JSON},
+  "version_stamp_drift": ${VERSION_STAMP_DRIFT},
+  "update_reason": "${UPDATE_REASON}",
+  "target_ref": "${CC_TARGET_REF}",
+  "target_pinned": ${CC_TARGET_PINNED},
+  "target_policy": "${CC_TARGET_POLICY}",
+  "status": "${CC_STATUS}",
+  "reason_code": "${CC_REASON_CODE}",
   "local_version": "${LOCAL_VERSION}",
   "local_package_version": "${LOCAL_PKG_VERSION}",
   "latest_version": "${LATEST_VERSION}",
   "has_update": ${HAS_UPDATE},
   "risk_hint": "${RISK_HINT}",
   "inferred_risk": "${INFERRED_RISK}",
+  "changelog_excerpt_version": "${EXCERPT_VERSION}",
   "changelog_excerpt": ${LATEST_ENTRY_JSON}
 }
 JSON
+
+# A refused check is a misconfiguration, not "no update": signal it so the
+# agent cannot read silence as a healthy box. Exit BEFORE the timestamp write
+# so a refusal touches neither the network nor the checkout.
+if [ "$CC_TARGET_REFUSED" = "true" ]; then
+  exit 2
+fi
 
 # Record last check timestamp
 if [ -n "$INSTALL_DIR" ]; then
   date -u +%Y-%m-%dT%H:%M:%SZ > "$INSTALL_DIR/.last-update-check" 2>/dev/null || true
 fi
+exit 0

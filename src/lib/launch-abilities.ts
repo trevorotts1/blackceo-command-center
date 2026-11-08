@@ -60,7 +60,8 @@ export type LaunchPlanSection =
   | 'text_sets'
   | 'automations'
   | 'conversation_ai'
-  | 'launch_calendar';
+  | 'launch_calendar'
+  | 'offers';
 
 /**
  * The five launch abilities. Names and stage orders mirror the skill trees as
@@ -143,18 +144,19 @@ export const LAUNCH_ABILITIES: readonly LaunchAbility[] = [
     slug: 'black-friday-launcher',
     directory: '83-black-friday-launcher',
     displayName: 'Black Friday Launcher',
-    specRow: 'Skill 83 Black Friday Launcher — calendar, completeness, package (builds pages through 49)',
+    specRow: 'Skill 83 Black Friday Launcher — calendar, offers/prices, client approval, completeness, package (builds pages through 49)',
     lane: 'WF-LAUNCHERS',
     entrypoint: '83-black-friday-launcher/launcher_core/cli.py',
     stageOrder: [
       'intake',
       'launch_record',
+      'approval',
       'dispatch',
       'pieces',
       'assemble',
       'checks',
     ],
-    planSections: ['launch_calendar'],
+    planSections: ['launch_calendar', 'offers'],
   },
 ] as const;
 

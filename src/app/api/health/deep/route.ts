@@ -73,7 +73,9 @@
  *     "fixture_env":                { "pass": bool, "detail": string,        // CC-resear-001
  *       "active_fixture_env_vars": string[],           // NAMES only, never values
  *       "active_research_fixture_env_vars": string[],  // the subset that fabricates citations
- *       "node_env": string }
+ *       "node_env": string },
+ *     "launch_ingest":              { "pass": true, "detail": string, "degraded"?: bool, "stale"?: bool, "newest_ingest_at"?: string|null,
+ *       "newest_ingest_age_seconds"?: number|null, "stalled_runs"?: number, "quarantined_runs"?: number, ... } // CON-24
  *   }
  * }
  *
@@ -113,6 +115,8 @@
  *   `persona_grounding_degraded` event/chip is a SEPARATE, additive surface
  *   (src/lib/jobs/persona-grounding-sweep.ts's cron entry point + the
  *   read-only PersonaGroundingBanner component), not this route.
+ *   `launch_ingest` (CON-24) is the same posture: a stalled/stale launch feed or
+ *   a quarantined progress file warns (degraded) and never gates.
  *   The `mc_board_*_projection` (the "mc_board six") and `skill35_cycle_
  *   projection` fields (U100) generalize the SAME B-U13/U27 pattern to the
  *   remaining fail-soft productized-skill producers — non-gating for the
@@ -146,6 +150,7 @@ import {
   checkTrustCoverage,
   checkPersonaGrounding,
   checkFixtureEnvVars,
+  checkLaunchIngest,
 } from '@/lib/health/deep-checks';
 import { checkBoardJobsWatchdog, checkSchedulerLiveness } from '@/lib/jobs/board-jobs-watchdog';
 
@@ -372,6 +377,22 @@ export async function GET() {
         pass: true,
         indeterminate: true,
         detail: `fixture_env: advisory probe unavailable — ${
+          advErr instanceof Error ? advErr.message : String(advErr)
+        } (UNKNOWN; non-gating)`,
+      };
+    }
+
+    // CON-24 — launch ingest freshness + quarantine. Same isolation posture as every
+    // advisory block above: never in `checks`, own try/catch so a throw can never reach
+    // the outer catch (500 + pass:false). A stale feed or a quarantined progress file is
+    // an operational signal, never a Command Center correctness fault.
+    try {
+      advisory.launch_ingest = checkLaunchIngest();
+    } catch (advErr) {
+      advisory.launch_ingest = {
+        pass: true,
+        indeterminate: true,
+        detail: `launch_ingest: advisory probe unavailable — ${
           advErr instanceof Error ? advErr.message : String(advErr)
         } (UNKNOWN; non-gating)`,
       };

@@ -15,6 +15,7 @@ import {
   Search,
   Phone,
   Globe,
+  Rocket,
   ArrowLeft,
 } from 'lucide-react';
 import type { ReactNode } from 'react';
@@ -42,6 +43,7 @@ export const OPERATOR_NAV: OperatorNavItem[] = [
   { href: '/operator/research', label: 'Research', icon: <Search size={16} />, accent: '#06B6D4' },
   { href: '/operator/call', label: 'Call Mode', icon: <Phone size={16} />, accent: '#10B981' },
   { href: '/operator/web-agent', label: 'Web Agent', icon: <Globe size={16} />, accent: '#6366F1' },
+  { href: '/launch', label: 'Launch', icon: <Rocket size={16} />, accent: '#F97316' },
 ];
 
 export default function OperatorSidebar() {

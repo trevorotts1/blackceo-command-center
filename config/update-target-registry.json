@@ -1,0 +1,77 @@
+{
+  "schema": "blackceo.update-target-registry/v1",
+  "repo": "trevorotts1/blackceo-command-center",
+  "default_branch": "main",
+  "_comment": "Bundled-content / approved-target registry for the Command Center update paths. This file states which installed roots this repository actually ships and under what policy each update path may use a moving default branch. It carries POLICY only, never a live pin: a roll's commit arrives through CC_UPDATE_TARGET so no repository, schedule or client setting is changed by a registry edit. Unknown keys are ignored by the readers (check-updates.sh, update.sh).",
+  "install_roots": [
+    {
+      "path": "~/projects/command-center",
+      "platform": "mac",
+      "canonical": true,
+      "shipped_by": "scripts/install/mac-mini-bootstrap.sh"
+    },
+    {
+      "path": "/data/projects/command-center",
+      "platform": "vps-docker",
+      "canonical": true,
+      "shipped_by": "scripts/install/vps-docker-bootstrap.sh"
+    },
+    {
+      "path": "~/command-center/app",
+      "platform": "any",
+      "canonical": false,
+      "note": "legacy hand-install layout, kept as last-resort fallback"
+    },
+    {
+      "path": "~/clawd/projects/blackceo-command-center",
+      "platform": "mac",
+      "canonical": false,
+      "note": "legacy layout"
+    },
+    {
+      "path": "/data/clawd/projects/blackceo-command-center",
+      "platform": "vps-docker",
+      "canonical": false,
+      "note": "legacy layout"
+    },
+    {
+      "path": "~/blackceo-command-center",
+      "platform": "any",
+      "canonical": false,
+      "note": "legacy layout"
+    },
+    {
+      "path": "/data/blackceo-command-center",
+      "platform": "vps-docker",
+      "canonical": false,
+      "note": "legacy layout"
+    }
+  ],
+  "update_paths": [
+    {
+      "name": "zero-downtime",
+      "file": "update.sh",
+      "requires_approved_target": false,
+      "missing_target_reason_code": "CC_UPDATE_TARGET_REQUIRED",
+      "note": "honours CC_UPDATE_TARGET today; becomes mandatory when the registry or CC_REQUIRE_APPROVED_TARGET says so"
+    },
+    {
+      "name": "merge-fallback",
+      "file": "update.sh",
+      "requires_approved_target": false,
+      "missing_target_reason_code": "CC_UPDATE_TARGET_REQUIRED",
+      "note": "previously converged to moving origin/main regardless of a pin"
+    },
+    {
+      "name": "check-updates",
+      "file": "check-updates.sh",
+      "requires_approved_target": false,
+      "missing_target_reason_code": "CC_UPDATE_TARGET_REQUIRED",
+      "note": "previously always measured against moving main"
+    }
+  ],
+  "env_override": {
+    "CC_REQUIRE_APPROVED_TARGET": "1 makes an approved target mandatory on every update path, regardless of this registry",
+    "CC_UPDATE_TARGET": "commit SHA of the approved target for the current roll"
+  }
+}
