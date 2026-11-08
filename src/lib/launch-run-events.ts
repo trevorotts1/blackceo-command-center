@@ -22,7 +22,12 @@
  * validator can run on any surface and be unit-tested without a database.
  */
 
-import { getLaunchAbility, isLaunchStage, type LaunchAbility } from './launch-abilities';
+import {
+  getLaunchAbility,
+  isLaunchStage,
+  resolveLaunchStage,
+  type LaunchAbility,
+} from './launch-abilities';
 
 export const LAUNCH_EVENT_TYPES = [
   'run_initialized',
@@ -124,8 +129,8 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 }
 
 export type LaunchValidationResult =
-  | { ok: true; event: LaunchRunEvent; ability: LaunchAbility }
-  | { ok: false; errors: string[] };
+  | { ok: true; event: LaunchRunEvent; ability: LaunchAbility; canonicalStage: string | null }
+  | { ok: false; errors: string[]; codes: string[] };
 
 /**
  * Validate one launch run event against the frozen contract plus the ability's
@@ -134,8 +139,9 @@ export type LaunchValidationResult =
  */
 export function validateLaunchRunEvent(raw: unknown): LaunchValidationResult {
   const errors: string[] = [];
+  const codes: string[] = [];
   if (!isPlainObject(raw)) {
-    return { ok: false, errors: ['event is not a JSON object'] };
+    return { ok: false, errors: ['event is not a JSON object'], codes: ['not_an_object'] };
   }
   for (const key of Object.keys(raw)) {
     if (!ALLOWED_KEYS.has(key)) errors.push(`unknown field: ${key}`);
@@ -155,7 +161,7 @@ export function validateLaunchRunEvent(raw: unknown): LaunchValidationResult {
   if (!isDateTime(e.emitted_at)) errors.push('emitted_at must be an ISO-8601 date-time');
   if (typeof e.event_type !== 'string' || !(LAUNCH_EVENT_TYPES as readonly string[]).includes(e.event_type)) {
     errors.push(`event_type must be one of ${LAUNCH_EVENT_TYPES.join(', ')}`);
-    return { ok: false, errors };
+    return { ok: false, errors, codes: [...codes, 'invalid_event_type'] };
   }
   const type = e.event_type as LaunchEventType;
 
@@ -173,12 +179,20 @@ export function validateLaunchRunEvent(raw: unknown): LaunchValidationResult {
     errors.push('host_shape is not a known fleet shape');
   }
   if (e.test_run !== undefined && typeof e.test_run !== 'boolean') errors.push('test_run must be a boolean');
+  // F23.12 — canonicalise a declared producer alias (`check` → `checks`).
+  // A stage that is neither canonical nor a declared alias is UNKNOWN: it is
+  // rejected with `unknown_stage` so the transport can report it as a delivery
+  // failure instead of letting it disappear into a successful sync count.
+  let canonicalStage: string | null = null;
   if (e.stage !== undefined) {
     if (ability && !isLaunchStage(ability, e.stage)) {
       errors.push(
         `stage "${String(e.stage)}" is not in Skill ${ability.skill}'s declared stage order ` +
         `(${ability.stageOrder.join(', ')})`,
       );
+      codes.push('unknown_stage');
+    } else if (ability) {
+      canonicalStage = resolveLaunchStage(ability, e.stage).canonical;
     }
   }
   if (e.receipt_status !== undefined && !['pass', 'not_authorized'].includes(e.receipt_status as string)) {
@@ -261,8 +275,16 @@ export function validateLaunchRunEvent(raw: unknown): LaunchValidationResult {
     case 'pin_drift': requireFields(['authority_id', 'pinned_sha', 'observed_sha']); break;
   }
 
-  if (errors.length || !ability) return { ok: false, errors };
-  return { ok: true, event: e as unknown as LaunchRunEvent, ability };
+  if (errors.length || !ability) return { ok: false, errors, codes };
+  return {
+    ok: true,
+    event: {
+      ...(e as unknown as LaunchRunEvent),
+      ...(canonicalStage ? { stage: canonicalStage } : {}),
+    },
+    ability,
+    canonicalStage,
+  };
 }
 
 // ---------------------------------------------------------------------------

@@ -31,6 +31,7 @@ import { BLOCKED_ASK_TRIGGER_SQL } from '../blocked-ask';
 import { councilMigration } from '../council/persistence/council-migration';
 import { CAPABILITY_SNAPSHOT_SCHEMA_SQL } from '../council/persistence/capability-snapshot-schema';
 import { applyLaunchStorageContract } from '../launch-schema';
+import { applyLaunchDomainContract } from '../launch-domain-schema';
 import {
   dedupeCanonicalWorkspaces,
   reapDuplicateOpenAuthoringTasks,
@@ -8628,6 +8629,23 @@ export const migrations: Migration[] = [
           BEGIN SELECT RAISE(ABORT, 'launch_approvals rows are immutable except revoke'); END;
       `);
       console.log('[Migration 177] launch_approvals ready');
+    },
+  },
+
+  {
+    id: '178',
+    name: 'launch_governed_domain',
+    up: (db) => {
+      // F23.1/F23.2/F23.5/F23.10/F23.14. The governed launch domain's storage:
+      // immutable run identity, task bindings, evidence invalidations, the
+      // durable delivery outbox and the versioned stage vocabulary. Applied by
+      // the ONE exported body in src/lib/launch-domain-schema.ts so this
+      // migration and the runtime bootstrap can never drift. Additive and
+      // idempotent (IF NOT EXISTS), so an older populated database upgrades in
+      // place without touching a row.
+      console.log('[Migration 178] Adding governed launch domain tables...');
+      applyLaunchDomainContract(db);
+      console.log('[Migration 178] governed launch domain ready');
     },
   },
 ];

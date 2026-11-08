@@ -163,6 +163,106 @@ export const LAUNCH_ABILITIES: readonly LaunchAbility[] = [
 const BY_SKILL = new Map<number, LaunchAbility>(LAUNCH_ABILITIES.map((a) => [a.skill, a]));
 const BY_SLUG = new Map<string, LaunchAbility>(LAUNCH_ABILITIES.map((a) => [a.slug, a]));
 
+// ---------------------------------------------------------------------------
+// F23.12 — versioned stage vocabulary + producer aliases
+// ---------------------------------------------------------------------------
+//
+// The registry above is the Command Center's CANONICAL stage order. A producer
+// that emits a different spelling is not silently accepted as a different
+// stage: the alias is declared HERE, versioned, and canonicalised on receipt.
+// The live defect this fixes: Skill 83's `cmd_check` emits `check`, while the
+// Command Center registry named the same stage `checks`. Before this table the
+// validator rejected every Skill 83 check event as an unknown stage, so a
+// completed check disappeared from progress and from the sync count.
+//
+// RULES
+//   - the canonical order is NOT widened by an alias; `stageOrder` stays the
+//     agreed vocabulary producers are scored against;
+//   - a stage that is neither canonical nor a declared alias is UNKNOWN and is
+//     reported as a delivery failure, never counted as accepted;
+//   - a new stage must be registered here (and the vocabulary version bumped)
+//     BEFORE a producer emits it.
+
+/** Version of the agreed stage vocabulary (canonical names + declared aliases). */
+export const LAUNCH_STAGE_VOCABULARY_VERSION = 2;
+
+/** Producer spellings accepted as declared aliases of a canonical stage. */
+export const LAUNCH_STAGE_ALIASES: Readonly<Record<number, Readonly<Record<string, string>>>> = {
+  // Skill 83 launcher_core/cmd_check writes `check` (singular).
+  83: { check: 'checks' },
+};
+
+export interface LaunchStageResolution {
+  registered: boolean;
+  /** The canonical stage name the registry scores against, or null when unknown. */
+  canonical: string | null;
+  /** True when the producer's spelling was a declared alias. */
+  alias: boolean;
+}
+
+/** Resolve one producer spelling to the canonical stage, or report it unknown. */
+export function resolveLaunchStage(
+  ability: LaunchAbility,
+  stage: unknown,
+): LaunchStageResolution {
+  if (typeof stage !== 'string') return { registered: false, canonical: null, alias: false };
+  if (ability.stageOrder.includes(stage)) {
+    return { registered: true, canonical: stage, alias: false };
+  }
+  const alias = LAUNCH_STAGE_ALIASES[ability.skill]?.[stage];
+  if (alias && ability.stageOrder.includes(alias)) {
+    return { registered: true, canonical: alias, alias: true };
+  }
+  return { registered: false, canonical: null, alias: false };
+}
+
+/** The canonical stage for a producer spelling, or null when unregistered. */
+export function canonicalizeLaunchStage(
+  ability: LaunchAbility | null,
+  stage: unknown,
+): string | null {
+  if (!ability) return null;
+  return resolveLaunchStage(ability, stage).canonical;
+}
+
+/**
+ * The vocabulary rows a box records (migration 178 / launch_stage_vocabulary),
+ * so an unregistered spelling arriving from a producer is distinguishable from
+ * a registered alias after the fact.
+ */
+export interface LaunchStageVocabularyRow {
+  skill: number;
+  stage: string;
+  canonical: string;
+  alias_of: string | null;
+  vocabulary_version: number;
+}
+
+export function launchStageVocabulary(): LaunchStageVocabularyRow[] {
+  const rows: LaunchStageVocabularyRow[] = [];
+  for (const ability of LAUNCH_ABILITIES) {
+    for (const stage of ability.stageOrder) {
+      rows.push({
+        skill: ability.skill,
+        stage,
+        canonical: stage,
+        alias_of: null,
+        vocabulary_version: LAUNCH_STAGE_VOCABULARY_VERSION,
+      });
+    }
+    for (const [alias, canonical] of Object.entries(LAUNCH_STAGE_ALIASES[ability.skill] ?? {})) {
+      rows.push({
+        skill: ability.skill,
+        stage: alias,
+        canonical,
+        alias_of: canonical,
+        vocabulary_version: LAUNCH_STAGE_VOCABULARY_VERSION,
+      });
+    }
+  }
+  return rows;
+}
+
 /** Resolve an ability by skill number (`49`) or numeric string (`"49"`). */
 export function getLaunchAbility(skill: number | string | null | undefined): LaunchAbility | null {
   if (skill === null || skill === undefined) return null;
@@ -182,9 +282,14 @@ export function launchAbilitySkillNumbers(): number[] {
   return LAUNCH_ABILITIES.map((a) => a.skill);
 }
 
-/** True when `stage` is one of the ability's declared stages. */
+/**
+ * True when `stage` is one of the ability's declared stages OR a declared
+ * alias of one. The canonical spelling is what gets stored; this predicate is
+ * the acceptance gate and the alias is the reason a Skill 83 `check` no longer
+ * vanishes from progress.
+ */
 export function isLaunchStage(ability: LaunchAbility, stage: unknown): boolean {
-  return typeof stage === 'string' && ability.stageOrder.includes(stage);
+  return resolveLaunchStage(ability, stage).registered;
 }
 
 /**

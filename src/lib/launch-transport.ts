@@ -41,6 +41,20 @@ export interface LaunchTransportItemResult {
   id: string | null;
   status: 'inserted' | 'duplicate' | 'rejected';
   errors?: string[];
+  /** Machine-readable rejection reasons (`unknown_stage`, `not_an_object`, …). */
+  codes?: string[];
+}
+
+/**
+ * F23.12 — a rejected item is a DELIVERY FAILURE, stated as one. It never
+ * disappears into `accepted`/`duplicates` merely because the synchronization
+ * request itself returned 200.
+ */
+export interface LaunchTransportDeliveryFailure {
+  kind: 'event' | 'progress' | 'unknown';
+  id: string | null;
+  codes: string[];
+  errors: string[];
 }
 
 export interface LaunchTransportResponse {
@@ -50,6 +64,7 @@ export interface LaunchTransportResponse {
     duplicates: number;
     rejected: number;
     results: LaunchTransportItemResult[];
+    delivery_failures: LaunchTransportDeliveryFailure[];
     error?: string;
   };
 }
@@ -65,7 +80,14 @@ export function launchInstallationId(): string {
 function emptyResponse(status: number, error: string): LaunchTransportResponse {
   return {
     status,
-    payload: { accepted: 0, duplicates: 0, rejected: 0, results: [], error },
+    payload: {
+      accepted: 0,
+      duplicates: 0,
+      rejected: 0,
+      results: [],
+      delivery_failures: [],
+      error,
+    },
   };
 }
 
@@ -154,13 +176,13 @@ export function handleLaunchIngest(request: LaunchTransportRequest): LaunchTrans
       const decision = ingestAuthenticatedLaunchRunEvent(item, token, source);
       results.push(decision.ok
         ? { kind, id: decision.outcome.event_id, status: decision.outcome.status }
-        : { kind, id: itemId(item), status: 'rejected', errors: decision.errors });
+        : { kind, id: itemId(item), status: 'rejected', errors: decision.errors, codes: decision.codes });
       continue;
     }
     if (kind === 'progress') {
       const outcome = ingestAuthenticatedProgressSample(item, token, source);
       results.push(outcome.status === 'rejected'
-        ? { kind, id: itemId(item), status: 'rejected', errors: outcome.errors }
+        ? { kind, id: itemId(item), status: 'rejected', errors: outcome.errors, codes: ['invalid_progress_sample'] }
         : { kind, id: itemId(item), status: outcome.status });
       continue;
     }
@@ -169,6 +191,7 @@ export function handleLaunchIngest(request: LaunchTransportRequest): LaunchTrans
       id: itemId(item),
       status: 'rejected',
       errors: ['item is neither a launch run event nor a launch progress sample'],
+      codes: ['unknown_item'],
     });
   }
 
@@ -176,8 +199,19 @@ export function handleLaunchIngest(request: LaunchTransportRequest): LaunchTrans
   const accepted = results.filter((r) => r.status === 'inserted').length;
   const duplicates = results.filter((r) => r.status === 'duplicate').length;
   const rejected = results.filter((r) => r.status === 'rejected').length;
+  // F23.12 — every rejected item is listed as a delivery failure, with its
+  // codes. A caller that only reads `accepted` cannot make a rejected stage
+  // look synchronized: the item is here, not in the accepted count.
+  const deliveryFailures: LaunchTransportDeliveryFailure[] = results
+    .filter((r) => r.status === 'rejected')
+    .map((r) => ({
+      kind: r.kind,
+      id: r.id,
+      codes: r.codes ?? ['rejected'],
+      errors: r.errors ?? [],
+    }));
   return {
     status: rejected === results.length ? 422 : 200,
-    payload: { accepted, duplicates, rejected, results },
+    payload: { accepted, duplicates, rejected, results, delivery_failures: deliveryFailures },
   };
 }

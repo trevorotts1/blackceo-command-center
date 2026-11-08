@@ -309,6 +309,15 @@ export default defineConfig({
       // Vitest imports + isolated DB + vi.doMock route import, so vitest-only,
       // never the tsx --test glob.
       'tests/unit/launch-deep-checks.test.ts',
+      // F23 — governed launch domain: identity, canonical projection, card
+      // granularity, evidence invalidation, admission ordering (before the
+      // operator override), stage vocabulary and legacy reconciliation.
+      // Vitest globals + isolated DB, so vitest-only (excluded from test:unit).
+      'tests/unit/launch-f23-domain.test.ts',
+      // F23 — durable launch event outbox: idempotent enqueue, ordered atomic
+      // claim under concurrent producers/consumers, retry vs dead-letter, and
+      // an honest synchronization report that never claims remote acceptance.
+      'tests/unit/launch-f23-outbox.test.ts',
     ],
     env: {
       NODE_ENV: 'test',

@@ -45,6 +45,7 @@ import {
   type LaunchIngestToken,
   type LaunchRunEvent,
 } from '@/lib/launch-run-events';
+import { projectStageReportOverall } from '@/lib/launch-domain';
 
 let schemaReady = false;
 
@@ -105,17 +106,59 @@ export class LaunchIngestConflictError extends Error {
   readonly code = 'conflicting_duplicate';
 }
 
-/** Reject a run re-bind before any row is written. */
-function assertRunIdentityCompatible(event: LaunchRunEvent): void {
-  if (!event.launch_id) return;
-  const row = queryOne<{ launch_id: string | null }>(
-    `SELECT launch_id FROM launch_runs WHERE run_id = ?`,
+/**
+ * Reject a run re-bind before any row is written (F23.2).
+ *
+ * The run row is the stored identity. A later event that contradicts the skill,
+ * launch, client, host shape or installation already bound to that run is
+ * REJECTED, never merged optimistically — binding a run to another client or
+ * installation is the defect this closes.
+ */
+function assertRunIdentityCompatible(
+  event: LaunchRunEvent,
+  ability: LaunchAbility,
+  stamp: LaunchIngestStamp,
+): void {
+  const row = queryOne<{
+    launch_id: string | null;
+    skill: number;
+    client_slug: string | null;
+    host_shape: string | null;
+    installation_id: string | null;
+  }>(
+    `SELECT launch_id, skill, client_slug, host_shape, installation_id
+       FROM launch_runs WHERE run_id = ?`,
     [event.run_id],
   );
-  if (row?.launch_id && row.launch_id !== event.launch_id) {
+  if (!row) return;
+  if (row.skill !== ability.skill) {
+    throw new LaunchIngestConflictError(
+      `run ${event.run_id} is already bound to skill ${row.skill}; event claims skill ${ability.skill}`,
+    );
+  }
+  if (row.launch_id && event.launch_id && row.launch_id !== event.launch_id) {
     throw new LaunchIngestConflictError(
       `run ${event.run_id} is already bound to launch "${row.launch_id}"; ` +
       `event claims "${event.launch_id}"`,
+    );
+  }
+  const incomingClient = event.client_slug ?? stamp.client_slug ?? null;
+  if (row.client_slug && incomingClient && row.client_slug !== incomingClient) {
+    throw new LaunchIngestConflictError(
+      `run ${event.run_id} is already bound to client "${row.client_slug}"; event names "${incomingClient}"`,
+    );
+  }
+  const incomingHost = event.host_shape ?? stamp.host_shape ?? null;
+  if (row.host_shape && incomingHost && row.host_shape !== incomingHost) {
+    throw new LaunchIngestConflictError(
+      `run ${event.run_id} is already bound to host shape "${row.host_shape}"; event names "${incomingHost}"`,
+    );
+  }
+  const incomingInstallation = event.installation_id ?? stamp.installation_id ?? null;
+  if (row.installation_id && incomingInstallation && row.installation_id !== incomingInstallation) {
+    throw new LaunchIngestConflictError(
+      `run ${event.run_id} is already bound to installation "${row.installation_id}"; ` +
+        `event names "${incomingInstallation}"`,
     );
   }
 }
@@ -133,7 +176,7 @@ export function ingestLaunchRunEvent(
   stamp: LaunchIngestStamp,
 ): LaunchIngestOutcome {
   ensureLaunchSchema();
-  assertRunIdentityCompatible(event);
+  assertRunIdentityCompatible(event, ability, stamp);
   let outcome: LaunchIngestOutcome = { status: 'inserted', event_id: event.event_id };
   transaction(() => {
     const inserted = run(
@@ -154,7 +197,7 @@ export function ingestLaunchRunEvent(
 
 export type LaunchIngestDecision =
   | { ok: true; outcome: LaunchIngestOutcome }
-  | { ok: false; errors: string[] };
+  | { ok: false; errors: string[]; codes: string[] };
 
 /**
  * The authenticated entry point: validate the event against the frozen
@@ -168,7 +211,7 @@ export function ingestAuthenticatedLaunchRunEvent(
   source: string,
 ): LaunchIngestDecision {
   const validation = validateLaunchRunEvent(raw);
-  if (!validation.ok) return { ok: false, errors: validation.errors };
+  if (!validation.ok) return { ok: false, errors: validation.errors, codes: validation.codes };
   // The frozen contract leaves `launch_id` optional (Skill 71 parity); the
   // Launch ingest cannot. A run with no launch identity can never be tied to a
   // plan, so it is rejected as absent identity rather than listed as progress.
@@ -176,10 +219,11 @@ export function ingestAuthenticatedLaunchRunEvent(
     return {
       ok: false,
       errors: ['launch_id is required for launch ingest; an event with no launch identity cannot report progress'],
+      codes: ['missing_launch_id'],
     };
   }
   const contradiction = launchEventContradictsToken(validation.event, token);
-  if (contradiction) return { ok: false, errors: [contradiction] };
+  if (contradiction) return { ok: false, errors: [contradiction], codes: ['token_contradiction'] };
   try {
     return {
       ok: true,
@@ -192,7 +236,7 @@ export function ingestAuthenticatedLaunchRunEvent(
     };
   } catch (error) {
     if (error instanceof LaunchIngestConflictError) {
-      return { ok: false, errors: [error.message] };
+      return { ok: false, errors: [error.message], codes: ['conflicting_duplicate'] };
     }
     throw error;
   }
@@ -316,6 +360,15 @@ function applyLaunchEvent(
       break;
     }
     case 'report_generated': {
+      // F23.3 — the stored overall is a PROJECTION of the canonical current
+      // unit evidence (the run's stage rows), never the producer's own claim.
+      // The producer's `overall` remains in payload_json for audit; it can no
+      // longer make an incomplete run read as complete.
+      const projectedOverall = projectStageReportOverall(
+        ability,
+        event.launch_id ?? event.run_id,
+        stageRows(event.run_id),
+      );
       run(
         `UPDATE launch_runs SET
            overall = ?, review_mode = ?,
@@ -324,7 +377,7 @@ function applyLaunchEvent(
            run_dir = COALESCE(?, run_dir),
            updated_at = ?
          WHERE run_id = ?`,
-        [event.overall, event.review_mode, event.report_json_path ?? null,
+        [projectedOverall, event.review_mode, event.report_json_path ?? null,
          event.report_md_path ?? null, event.run_dir ?? null, nowIso(), event.run_id],
       );
       break;
