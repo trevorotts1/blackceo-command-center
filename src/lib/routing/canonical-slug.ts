@@ -147,6 +147,33 @@ const ALIAS_MAP: Record<string, string> = {
   'catchall':          'general-task',
   'unclassified':      'general-task',
 
+  // GHL hybrid (Document 1 §14.3, 2026-11-08) — cross-repository normalization.
+  // The onboarding repo labels these departments `courses` and
+  // `community-builder`; the Command Center's canonical ids are
+  // course-creator / community-management. The platform spellings
+  // (convert-and-flow, gohighlevel, ghl) all name the SAME product family, and
+  // its owning canonical department is `crm` — never `sales`:
+  // "convert-and-flow" is a product name, not a lead-closing instruction.
+  //
+  // ADDITIVE ONLY: no canonical id changes, and no workspace row is merged or
+  // rewritten. Storage join points keep using normalizeDeptPrefixedId(), which
+  // deliberately does NOT remap a bare id (see its doc comment) — so an alias
+  // here can never mint a second workspace row.
+  //
+  // Display punctuation/spaces are normalized BEFORE this lookup by
+  // canonicalDeptFromAnyLabel() (the existing slugify-then-canonicalize entry
+  // point); these keys are the post-normalization spellings.
+  'courses':           'course-creator',
+  'community-builder': 'community-management',
+  'convert-and-flow':  'crm',
+  'convert-flow':      'crm', // "Convert & Flow" after the punctuation pass
+  'convertandflow':    'crm',
+  'gohighlevel':       'crm',
+  'highlevel':         'crm',
+  'high-level':        'crm', // "High Level" after canonicalDeptFromAnyLabel's slugify pass
+  'high level':        'crm', // same words through bare canonicalDeptSlug (already-slugged callers)
+  'ghl':               'crm',
+
   // legacy department slugs that have no canonical equivalent yet —
   // normalize to lowercase but leave as-is so downstream code can still
   // route them without a crash.  (legacy)
@@ -228,6 +255,13 @@ export function canonicalDeptSlug(slug: string | null | undefined): string {
   return s;
 }
 
+/**
+ * §14.3 alias contract entry point: normalize DISPLAY punctuation and spaces
+ * (e.g. "Community Builder", "GoHighLevel", "Convert & Flow") to the slug shape
+ * the alias map uses, then canonicalize. Use this — not bare canonicalDeptSlug —
+ * wherever a human-typed department label (a task tag, a producer stamp) is
+ * compared to a workspace id/slug.
+ */
 export function canonicalDeptFromAnyLabel(label: string | null | undefined): string {
   if (!label) return '';
   const slugified = label.trim().toLowerCase()
