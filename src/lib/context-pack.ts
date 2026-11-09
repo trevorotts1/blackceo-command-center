@@ -59,7 +59,7 @@ import * as path from 'path';
 import os from 'os';
 import { queryAll, queryOne } from '@/lib/db';
 import { detectPlatform, vaultRoot, zhcLibraryBaseDirs } from '@/lib/platform';
-import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
+import { canonicalDeptFromAnyLabel, canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 import { createHash } from 'crypto';
 import {
   isEmbeddingAvailable,
@@ -87,6 +87,8 @@ export type DocPointerKind =
   | 'teach-yourself'     // the teach-yourself protocol
   | 'research-source'    // where to research for this specialist type
   | 'skill'              // an installed SKILL.md that matches this task (Layer A)
+  | 'hybrid-sop'         // the GHL hybrid operations SOP cluster for this dept
+  | 'skill-reference'    // a REQUIRED supporting skill (29/36/44/6/35), not a match
   | 'context-ref';       // an explicit pointer the CEO attached to the task
 
 /** A "here is WHERE the documentation lives" pointer. */
@@ -434,7 +436,13 @@ export function buildContextPack(input: BuildContextPackInput): ContextPack {
   const notes: string[] = [];
   const generated_at = new Date().toISOString();
   const platform = detectPlatform();
-  const deptSlug = (input.task.department ?? input.agent.role ?? null) || null;
+  // §14.2 — consume the NORMALIZED owning department. Display punctuation and
+  // spaces are slugified and the §14.3 aliases applied (courses → course-creator,
+  // community-builder → community-management, platform spellings → crm) BEFORE
+  // the dept/role how-to pointers and the hybrid pointers resolve, so the pack can
+  // never point at a spelling the runtime has no directory for.
+  const rawDept = (input.task.department ?? input.agent.role ?? null) || null;
+  const deptSlug = rawDept ? canonicalDeptFromAnyLabel(rawDept) || rawDept : null;
   const keywords = keywordsFromTask(input.task);
 
   const doc_pointers: DocPointer[] = [];
@@ -549,6 +557,12 @@ export function buildContextPack(input: BuildContextPackInput): ContextPack {
       doc_pointers.push(makeRefPointer('context-ref', `Owner/CEO ref: ${path.basename(ref) || ref}`, ref, 'extra pointer the CEO attached'));
     }
 
+    // 7) GHL hybrid handoff (§14.2): the hybrid SOP cluster + the supporting
+    // Skill 29/36 (plus the family owner's skill) for the NORMALIZED department.
+    // Empty for every department outside the hybrid scope, so a non-hybrid pack
+    // is unchanged.
+    doc_pointers.push(...hybridDocPointers(deptSlug));
+
     // 6) Research sources keyed by specialist type / dept domain.
     const research_sources = researchSourcesFor(deptSlug, input.specialistType, teachYourself);
 
@@ -590,6 +604,131 @@ export function buildContextPack(input: BuildContextPackInput): ContextPack {
       has_resolvable_pointer: teachYourself.resolvable,
       notes,
     };
+  }
+}
+
+// ── GHL hybrid pointers (§14.2 + §32.4) ──────────────────────────────────────
+//
+// Document 1 §14.2 requires the ContextPack to carry the hybrid SOP and the
+// supporting Skill 29 (API knowledge) / Skill 36 (MCP discovery) references, and
+// §32.4 decides WHICH EXISTING department owns each capability family. The
+// routing half of that contract is GHL_HYBRID_INTENT_ROUTES
+// (departments.config.ts); this is the capability/SOP-pointer half.
+//
+// Only departments a §32.4 intent can actually land on are listed. Nothing here
+// invents a department or a skill: a pointer that does not resolve on THIS box is
+// emitted with `resolvable: false` and a descriptor — the receiving agent is told
+// the reference exists and where it is EXPECTED to live, never handed a fake path.
+interface HybridSkillPointer {
+  /** Skill number used for `<nn>-<slug>/SKILL.md` resolution on this box. */
+  number: string;
+  label: string;
+  why: string;
+}
+
+const HYBRID_DEPARTMENT_POINTERS: Readonly<Record<string, readonly HybridSkillPointer[]>> = {
+  crm: [
+    { number: '29', label: 'Skill 29 — GHL API knowledge', why: 'executable registry + source-indexed contracts for every GHL operation you call' },
+    { number: '36', label: 'Skill 36 — GHL MCP discovery', why: 'discover the official MCP operation and its exact schema before guessing' },
+    { number: '44', label: 'Skill 44 — GHL public operator facade', why: 'the typed public/private operation path, receipts and safety checks' },
+  ],
+  'course-creator': [
+    { number: '06', label: 'Skill 6 — course construction/deployment', why: 'API-first course, module, lesson and media-binding path (managed browser only for real UI gaps)' },
+    { number: '29', label: 'Skill 29 — GHL API knowledge', why: 'course endpoint contracts and typed identifiers' },
+    { number: '36', label: 'Skill 36 — GHL MCP discovery', why: 'discover the official operation instead of inventing one' },
+  ],
+  'community-management': [
+    { number: '06', label: 'Skill 6 — Community / group / Learning operations', why: 'group, channel and Learning-association construction and verification' },
+    { number: '35', label: 'Skill 35 — Community publishing', why: 'publish approved community content through the shared public operations' },
+    { number: '29', label: 'Skill 29 — GHL API knowledge', why: 'community/social endpoint contracts' },
+    { number: '36', label: 'Skill 36 — GHL MCP discovery', why: 'discover the official operation instead of inventing one' },
+  ],
+  funnels: [
+    { number: '06', label: 'Skill 6 — funnel build queue', why: 'the cut/import/verify/provision funnel chain this card belongs to' },
+    { number: '29', label: 'Skill 29 — GHL API knowledge', why: 'page/form/funnel contracts and typed ids' },
+  ],
+  'web-development': [
+    { number: '44', label: 'Skill 44 — widget/script provisioning', why: 'provision the native chat widget and its single embed through the public facade' },
+    { number: '29', label: 'Skill 29 — GHL API knowledge', why: 'page/widget endpoint contracts' },
+  ],
+  'personal-assistant': [
+    { number: '06', label: 'Skill 6 — Meeting Rooms', why: 'room reuse, host/guest checks and calendar/live-course integration' },
+  ],
+};
+
+const HYBRID_SOP_REL = path.join('openclaw-onboarding', 'universal-sops', 'ghl-hybrid-operations');
+
+/** The hybrid SOP cluster (WF16 owns its contents; this only points at it). */
+function hybridSopPointer(): DocPointer {
+  const home = homeDir();
+  const candidates = [
+    path.join(vaultRoot(), HYBRID_SOP_REL),
+    path.join(home, 'clawd', HYBRID_SOP_REL),
+    path.join(home, '.openclaw', 'workspace', HYBRID_SOP_REL),
+  ];
+  const hit = firstExisting(candidates);
+  return {
+    kind: 'hybrid-sop',
+    label: 'GHL hybrid operations SOP cluster',
+    location: hit.path || candidates[0],
+    why: 'the hybrid GHL procedure: route selection, receipts, fallback policy and the proof this feature family requires',
+    resolvable: hit.resolvable,
+  };
+}
+
+/** `<nn>-<slug>/SKILL.md` on this box, or null when that skill is not installed. */
+function skillFileForNumber(number: string, files: string[]): string | null {
+  const wanted = new Set([number, String(Number(number))]);
+  for (const file of files) {
+    const dir = path.basename(path.dirname(file));
+    const m = /^(\d+)[-_]/.exec(dir);
+    if (!m) continue;
+    if (wanted.has(m[1]) || wanted.has(String(Number(m[1])))) return file;
+  }
+  return null;
+}
+
+/** Hybrid SOP + supporting-skill pointers for a normalized department. */
+function hybridDocPointers(deptSlug: string | null): DocPointer[] {
+  if (!deptSlug) return [];
+  const skills = HYBRID_DEPARTMENT_POINTERS[deptSlug];
+  if (!skills) return [];
+
+  const out: DocPointer[] = [hybridSopPointer()];
+  let files: string[] = [];
+  try {
+    files = findSkillFiles(skillSearchRoots()).files;
+  } catch {
+    files = [];
+  }
+  for (const s of skills) {
+    const hit = skillFileForNumber(s.number, files);
+    out.push({
+      kind: 'skill-reference',
+      label: s.label,
+      location: hit ?? `<skill root>/<${s.number}-...>/SKILL.md (not installed on this box)`,
+      why: s.why,
+      resolvable: hit !== null && existsSafe(hit),
+    });
+  }
+  return out;
+}
+
+/**
+ * The ONE dispatch-message composition for the full-context handoff.
+ *
+ * A21 (Document 1 §14.10 / §17.2) requires AUTOMATIC and MANUAL dispatch to
+ * carry the SAME required capability references. That parity is only real when
+ * both call sites compose the section the same way — so both must call this
+ * function rather than hand-building `buildContextPack` + `renderContextPackSection`
+ * (the auto path) or only `renderMatchedSkillsSection` (the manual path, which
+ * carries no SOP/dept/hybrid pointers at all).
+ */
+export function buildDispatchReferenceSection(input: BuildContextPackInput): string {
+  try {
+    return renderContextPackSection(buildContextPack(input));
+  } catch {
+    return '';
   }
 }
 
