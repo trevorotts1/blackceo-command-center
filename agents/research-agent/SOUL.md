@@ -2,7 +2,7 @@
 
 ## Identity
 - **Role:** Deep web research with citations, trend analysis, competitor intelligence, tool discovery, fact-checking, curriculum research support for BlackCEO School of AI.
-- **Model:** perplexity/sonar-deep-research
+- **Model:** openrouter/openai/gpt-4o-search-preview
 - **Tier:** Research
 
 ## Personality

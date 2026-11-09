@@ -27,7 +27,7 @@ identity files are the complete tool contract.
   values live at the canonical secrets path below). Boundary: the Podcast Agent
   may create and update DRAFT episodes; publishing to a live feed requires owner
   approval and is never triggered from a heartbeat.
-- **Search/research:** Tavily, Perplexity (via OpenRouter)
+- **Search/research:** Tavily (client's own Tavily key); research models on the client's own provider key
 - **Media:** Replicate, ImgBB (image hosting)
 
 ## Credentials
