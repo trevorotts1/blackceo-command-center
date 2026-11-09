@@ -1160,3 +1160,118 @@ export interface TaskPersonaBundleRow {
   /** U064 — ISO timestamp of when the client choice was set. */
   client_persona_set_at?: string | null;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WF18 · GHL hybrid operation receipts (Document 1 §5.5, §14.4-14.7, §29.7)
+//
+// ONE producer identity — `ghl-hybrid` — carries every GHL engine operation
+// receipt into Command Center. A receipt is an IMMUTABLE EVENT: `receipt_id`
+// identifies the event, `attempt_id` the concrete execution attempt, and
+// `event_sequence` a persisted increasing integer inside one logical operation
+// key `(company_id, location_id, run_id, operation_key)`.
+//
+// These are typed progress/detail fields, NOT task statuses. The Kanban
+// TaskStatus union above keeps its ten values (§14.7 last paragraph).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** The rails a receipt may name. Anything else is refused at the boundary. */
+export const GHL_OPERATION_RAILS = [
+  'public_rest',
+  'official_mcp',
+  'firebase_private',
+  'managed_browser',
+] as const;
+export type GhlOperationRail = (typeof GHL_OPERATION_RAILS)[number];
+
+/** §5.5 outcome vocabulary. `unknown_outcome` stays visible until reconciled. */
+export const GHL_RECEIPT_OUTCOMES = [
+  'planned',
+  'submitted',
+  'processing',
+  'verified',
+  'failed',
+  'blocked',
+  'unknown_outcome',
+  'not_requested',
+] as const;
+export type GhlReceiptOutcome = (typeof GHL_RECEIPT_OUTCOMES)[number];
+
+/**
+ * Readback evidence attached to a receipt. `verified` requires `matched`:
+ * a create that returned 2xx is NOT a verified outcome (§14.5, A23).
+ */
+export const GHL_RECEIPT_READBACK_STATES = [
+  'not_run',
+  'matched',
+  'mismatched',
+  'unknown',
+] as const;
+export type GhlReceiptReadbackState = (typeof GHL_RECEIPT_READBACK_STATES)[number];
+
+export interface GhlReceiptReadback {
+  state: GhlReceiptReadbackState;
+  checked_fields?: string[];
+  note?: string | null;
+}
+
+/** The validated operation receipt envelope (§5.5). */
+export interface GhlOperationReceipt {
+  schema_version: string;
+  receipt_id: string;
+  attempt_id: string;
+  event_sequence: number;
+  run_id: string;
+  operation_key: string;
+  operation_id: string;
+  /**
+   * NEVER trusted as an authorization input. The route derives the owning
+   * company from server context; a body value that disagrees is rejected.
+   */
+  company_id?: string | null;
+  /** The ONE authorized GHL location this receipt names. */
+  location_id: string;
+  task_id?: string | null;
+  parent_task_id?: string | null;
+  skill?: string | null;
+  department?: string | null;
+  rail: GhlOperationRail;
+  outcome: GhlReceiptOutcome;
+  build_state?: string | null;
+  requested_visibility?: string | null;
+  actual_visibility?: string | null;
+  request_hash?: string | null;
+  object_refs?: Record<string, string | number | boolean | null>;
+  readback?: GhlReceiptReadback | null;
+  attempts?: Array<Record<string, unknown>>;
+  evidence_refs?: string[];
+  next_action?: string | null;
+  observed_at: string;
+}
+
+/** The POST body envelope: `{schema_version, run_id, operation_receipt}`. */
+export interface GhlOperationIngestBody {
+  schema_version: string;
+  run_id: string;
+  operation_receipt: GhlOperationReceipt;
+}
+
+/** A persisted receipt-event row (migration 179). */
+export interface GhlOperationReceiptRow {
+  id: string;
+  company_id: string;
+  task_id: string;
+  run_id: string;
+  operation_key: string;
+  attempt_id: string;
+  event_sequence: number;
+  schema_version: string;
+  operation_id: string;
+  rail: string;
+  outcome: string;
+  observed_at: string;
+  received_at: string;
+  intent_hash: string;
+  receipt_id: string;
+  event_bytes_hash: string;
+  receipt_json: string;
+}

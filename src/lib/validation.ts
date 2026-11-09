@@ -3,6 +3,13 @@ import {
   BLOCKED_ASK_INVARIANT_MESSAGE,
   violatesBlockedAskInvariant,
 } from './blocked-ask';
+// WF18 — the receipt value sets live ONCE in types.ts; the zod enums below are
+// built from them so a new rail/outcome cannot be added to one place only.
+import {
+  GHL_OPERATION_RAILS,
+  GHL_RECEIPT_OUTCOMES,
+  GHL_RECEIPT_READBACK_STATES,
+} from './types';
 
 /**
  * Shared Zod refinement for the blocked-ask invariant (see src/lib/blocked-ask.ts):
@@ -756,3 +763,90 @@ export const UpdateArchifyRunPhaseSchema = z.object({
   // Same poison-state gate: a phase card parked on a human with no ask is just
   // as unanswerable as a board card.
   .superRefine(rejectBlockedWithoutAsk);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WF18 · GHL hybrid operation receipts (§5.5, §14.4)
+//
+// The request-boundary enforcer for the `ghl-hybrid` producer. Keep the value
+// sets in lockstep with src/lib/types.ts (GHL_OPERATION_RAILS /
+// GHL_RECEIPT_OUTCOMES / GHL_RECEIPT_READBACK_STATES) — they are imported, not
+// re-typed, so drift is impossible.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const GhlRailValue = z.enum(GHL_OPERATION_RAILS);
+const GhlOutcomeValue = z.enum(GHL_RECEIPT_OUTCOMES);
+const GhlReadbackStateValue = z.enum(GHL_RECEIPT_READBACK_STATES);
+
+/** A typed object-ref scalar — never a nested arbitrary object. */
+const GhlObjectRefScalar = z.union([
+  z.string().max(500),
+  z.number().finite(),
+  z.boolean(),
+  z.null(),
+]);
+
+const isoInstant = z
+  .string()
+  .min(10)
+  .max(64)
+  .refine((v) => !Number.isNaN(Date.parse(v)), { message: 'must be an RFC3339 timestamp' });
+
+export const GhlReceiptReadbackSchema = z.object({
+  state: GhlReadbackStateValue,
+  checked_fields: z.array(z.string().min(1).max(200)).max(50).optional(),
+  note: z.string().max(2000).optional().nullable(),
+});
+
+export const GhlOperationReceiptSchema = z.object({
+  schema_version: z.string().min(1).max(32),
+  receipt_id: z.string().uuid(),
+  attempt_id: z.string().uuid(),
+  event_sequence: z.number().int().min(1).max(1_000_000_000),
+  run_id: z.string().min(1).max(200),
+  operation_key: z.string().min(1).max(400),
+  operation_id: z.string().min(1).max(200),
+  // Present for reconciliation/audit only. NEVER an authorization input.
+  company_id: z.string().max(200).optional().nullable(),
+  location_id: z.string().min(1).max(200),
+  task_id: z.string().max(200).optional().nullable(),
+  parent_task_id: z.string().max(200).optional().nullable(),
+  skill: z.string().max(50).optional().nullable(),
+  department: z.string().max(200).optional().nullable(),
+  rail: GhlRailValue,
+  outcome: GhlOutcomeValue,
+  build_state: z.string().max(100).optional().nullable(),
+  requested_visibility: z.string().max(100).optional().nullable(),
+  actual_visibility: z.string().max(100).optional().nullable(),
+  request_hash: z.string().max(200).optional().nullable(),
+  object_refs: z.record(z.string().min(1).max(100), GhlObjectRefScalar).optional(),
+  readback: GhlReceiptReadbackSchema.optional().nullable(),
+  attempts: z.array(z.record(z.string(), z.unknown())).max(50).optional(),
+  evidence_refs: z.array(z.string().min(1).max(500)).max(50).optional(),
+  next_action: z.string().max(2000).optional().nullable(),
+  observed_at: isoInstant,
+});
+
+export const GhlOperationIngestSchema = z
+  .object({
+    schema_version: z.string().min(1).max(32),
+    run_id: z.string().min(1).max(200),
+    operation_receipt: GhlOperationReceiptSchema,
+  })
+  .superRefine((body, ctx) => {
+    if (body.operation_receipt.run_id !== body.run_id) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['operation_receipt', 'run_id'],
+        message: 'operation_receipt.run_id must equal the envelope run_id',
+      });
+    }
+    if (body.operation_receipt.schema_version !== body.schema_version) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['operation_receipt', 'schema_version'],
+        message: 'operation_receipt.schema_version must equal the envelope schema_version',
+      });
+    }
+  });
+
+export type GhlOperationIngestInput = z.infer<typeof GhlOperationIngestSchema>;
