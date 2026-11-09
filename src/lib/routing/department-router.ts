@@ -29,7 +29,12 @@
 import { queryAll, queryOne } from '@/lib/db';
 import type { Agent, Task, TaskPriority } from '@/lib/types';
 import { loadDepartments, type DepartmentConfig } from './departments.config';
-import { canonicalDeptSlug } from './canonical-slug';
+// canonicalDeptFromAnyLabel is the §14.3 punctuation/space normalization entry
+// point: a human-typed department label ("Community Builder", "GoHighLevel",
+// "Convert & Flow") must reach the same canonical id as the stored slug BEFORE
+// the explicit-tag comparison. Storage joins keep using canonicalDeptSlug /
+// normalizeDeptPrefixedId — this import only normalizes the TAG side.
+import { canonicalDeptFromAnyLabel, canonicalDeptSlug } from './canonical-slug';
 import { CAPTURE_FALLBACK_REASON, EXPLICIT_GENERAL_REASON, isCatchAllWorkspace } from './catch-all-policy';
 // JGT105 — direct sibling-file import (not the decision-engine barrel) to
 // keep this module's import graph a straight line, never a cycle.
@@ -1251,7 +1256,10 @@ export async function comDispatch(
   // ── Step 1: Explicit department tag ───────────────────────────────────────
   // Match by exact name (client's actual dept name) OR canonical slug
   if (task.department) {
-    const taskDeptCanon = canonicalDeptSlug(task.department);
+    // Normalize the DISPLAY label (punctuation/spaces) before alias lookup, so
+    // `Community Builder` / `GoHighLevel` / `Convert & Flow` match the stored
+    // canonical slug exactly as the aliases on the slug side do.
+    const taskDeptCanon = canonicalDeptFromAnyLabel(task.department);
     const matches = departments.filter(
       (d) =>
         d.name.toLowerCase() === task.department!.toLowerCase() ||
@@ -1505,7 +1513,9 @@ export async function routeTaskDecision(task: RoutingTask): Promise<RoutingDecis
   const departments = loadDepartments(companyId);
   const agents = fetchAgentsWithLoad(companyId);
   if (task.department) {
-    const canon = canonicalDeptSlug(task.department);
+    // Same display-label normalization as comDispatch Step 1 — the ambiguity
+    // pre-check must judge exactly what the dispatcher will match.
+    const canon = canonicalDeptFromAnyLabel(task.department);
     const matches = departments.filter(d => d.name.toLowerCase() === task.department!.toLowerCase() || canonicalDeptSlug(d.slug || d.id) === canon);
     if (matches.length > 1) return wait('Explicit department is missing or ambiguous within the task company', 'ambiguous');
   }
