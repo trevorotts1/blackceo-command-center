@@ -138,17 +138,24 @@ export const DEFAULT_DEPARTMENTS: DepartmentConfig[] = [
   {
     id: 'sales',
     name: 'Sales',
+    // GHL hybrid (§14.2, 2026-11-08): the PLATFORM words 'crm' and 'convert'
+    // were removed from Sales' hints. Both are substring-matched by keywordScore()
+    // and both name the CRM product, so a technical request ("build the GHL
+    // workflow", "convert-and-flow automation") scored Sales and landed on the
+    // closing team. Every genuine LEAD-CLOSING signal stays — a closing ask still
+    // routes here on 'lead' / 'deal' / 'close' / 'closing' / 'pipeline'.
     purpose:
-      'Sales pipeline management, lead qualification, deal closing, client proposals, revenue generation, and follow-up sequences.',
+      'Sales pipeline management, lead qualification, lead closing (turning a qualified prospect into a paying client), client proposals, revenue generation, and follow-up sequences. Platform or product work on GoHighLevel belongs to CRM, not here.',
     keywords: [
       'sales',
-      'crm',
       'lead',
       'prospect',
       'pipeline',
       'deal',
       'close',
-      'convert',
+      'lead closing',
+      'deal closing',
+      'convert leads',
       'revenue',
       'quota',
       'follow up',
@@ -248,9 +255,16 @@ export const DEFAULT_DEPARTMENTS: DepartmentConfig[] = [
   },
   {
     id: 'crm',
+    // GHL hybrid (§14.2 + §32.4, 2026-11-08): CRM owns TECHNICAL/PLATFORM work on
+    // the GoHighLevel account — sub-account administration, workflows/automations,
+    // integrations, API/webhooks, custom fields, PLUS provisioning the native
+    // feature families (Voice AI, Conversation AI, Agent Studio, Knowledge Bases,
+    // chat widgets, HighLevel Projects) and their monitoring. This is what keeps a
+    // technical CRM request out of the Sales hints: Sales no longer carries the
+    // platform words, and CRM now carries the whole technical vocabulary.
     name: 'CRM',
     purpose:
-      'Contact management, list segmentation, lead nurturing sequences, GHL automations, pipeline stages, and email deliverability.',
+      'GoHighLevel platform administration and technical CRM work: sub-accounts, contacts, lists and segmentation, tags and custom fields, pipelines, workflows and automations (triggers, webhooks, API, integrations), email deliverability — plus technical provisioning of the native feature families (Voice AI, Conversation AI, Agent Studio, Knowledge Bases, chat widgets, HighLevel Projects) and their workflow monitoring. Client records are maintained here; closing a qualified prospect stays in Sales.',
     keywords: [
       'crm',
       'contact',
@@ -267,15 +281,51 @@ export const DEFAULT_DEPARTMENTS: DepartmentConfig[] = [
       'nurture',
       'ghl',
       'gohighlevel',
+      'highlevel',
+      'high level',
       'tags',
       'tagging',
+      'custom field',
+      'custom fields',
       'pipeline stage',
       'workflow trigger',
+      'workflow',
+      'workflows',
+      'automation',
+      'automations',
+      'automation steps',
+      'execution log',
+      'execution logs',
+      'webhook',
+      'webhooks',
+      // `api` alone is NOT a keyword: keywordScore() is a substring match, so a
+      // bare 'api' would pull "rapid", "capital", "therapist" into CRM. The
+      // technical forms below are the ones that actually name an integration.
+      'rest api',
+      'api integration',
+      'api key',
+      'integration',
+      'integrations',
+      'sub-account',
+      'subaccount',
+      'snapshot',
       'lead capture',
       'opt-in',
       'list hygiene',
       'unsubscribe',
       'deliverability',
+      // Native feature families (§32.4) — routed to the department that already
+      // owns the account, never to a new per-family department.
+      'native ai',
+      'voice ai',
+      'ai receptionist',
+      'conversation ai',
+      'agent studio',
+      'knowledge base',
+      'knowledge',
+      'chat widget',
+      'highlevel projects',
+      'ghl projects',
     ],
     agentRoles: [
       'CRM Agent',
@@ -821,9 +871,10 @@ export const DEFAULT_DEPARTMENTS: DepartmentConfig[] = [
     id: 'course-creator',
     name: 'Course Creator',
     purpose:
-      'Online course creation, curriculum design, lesson modules, LMS platforms (Kajabi, Teachable, Thinkific), and e-learning content.',
+      'Online course creation and deployment: curriculum design, course/product shells, lesson modules, assessments, LMS platforms (Kajabi, Teachable, Thinkific, and GoHighLevel courses/Learning) and e-learning content. Also owns live-session course construction (meeting rooms attached to a course) and the group/Learning association the course hands to Community management.',
     keywords: [
       'course',
+      'courses',
       'curriculum',
       'lesson',
       'module',
@@ -835,6 +886,13 @@ export const DEFAULT_DEPARTMENTS: DepartmentConfig[] = [
       'e-learning',
       'online course',
       'education',
+      'course build',
+      'ghl course',
+      'highlevel course',
+      'live session',
+      'live sessions',
+      'live course',
+      'learning association',
     ],
     agentRoles: ['Course Creator', 'Curriculum Designer', 'Instructional Designer'],
     priority: 5,
@@ -864,18 +922,28 @@ export const DEFAULT_DEPARTMENTS: DepartmentConfig[] = [
     id: 'community-management',
     name: 'Community Management',
     purpose:
-      'Online community management, Discord/Slack communities, member engagement, moderation, community events, and group growth.',
+      'Online community management: GoHighLevel groups, channels and portal, member identity and moderation, the group/Learning association a course attaches to, inside-group live events, plus Discord/Slack communities, member engagement and group growth. Publishing approved posts to a connected channel is Skill 35 work executed from here.',
     keywords: [
       'community',
       'discord',
       'slack community',
       'group',
+      'groups',
+      'ghl group',
+      'ghl groups',
+      'channel',
+      'channels',
+      'portal',
+      'community builder',
       'tribe',
       'member',
+      'member identity',
       'engagement',
       'moderation',
       'onboarding member',
       'community event',
+      'group event',
+      'social planner',
       'forum',
     ],
     agentRoles: ['Community Manager', 'Community Builder', 'Moderator'],
@@ -1002,6 +1070,78 @@ export const DEFAULT_DEPARTMENTS: DepartmentConfig[] = [
     priority: 9,
   },
 ];
+
+// ---------------------------------------------------------------------------
+// GHL hybrid §32.4 — native-feature INTENTS mapped to departments that ALREADY
+// EXIST (Document 1 §32.4 and lines 2507-2523; build task WF17, 2026-11-08).
+//
+// This is a frozen interface table, not a second routing authority: it is the
+// explicit set WF17 must prove routes to real, installed departments, and the
+// set WF16 binds capability/SOP pointers to. It adds NO department and no
+// supplemental CRM entry — every slug below is an existing canonical slug in
+// CANONICAL_SLUGS / DEFAULT_DEPARTMENTS, and the runtime workspace roster stays
+// authoritative (a client who disabled one of these departments keeps it
+// disabled; nothing here may re-enable it).
+//
+// `departments` is ordered: the first slug is the primary owner. A consumer MUST
+// treat a missing/disabled owner as "ask the owner", never as licence to
+// fabricate a department id.
+// ---------------------------------------------------------------------------
+export type HybridCapabilityFamily =
+  | 'native-ai'
+  | 'knowledge-base'
+  | 'chat-widget'
+  | 'meeting-room'
+  | 'projects'
+  | 'marketing-quiz'
+  | 'workflow-monitoring';
+
+export interface HybridIntentRoute {
+  /** The §32.4 example intent this row is the contract for. */
+  intent: string;
+  capability: HybridCapabilityFamily;
+  /** Existing canonical department slugs that may own this intent, primary first. */
+  departments: readonly string[];
+}
+
+export const GHL_HYBRID_INTENT_ROUTES: readonly HybridIntentRoute[] = [
+  {
+    intent: 'Set up a native GHL Voice AI receptionist',
+    capability: 'native-ai',
+    departments: ['crm', 'customer-support'],
+  },
+  {
+    intent: 'Make a knowledge base from these approved support files',
+    capability: 'knowledge-base',
+    departments: ['crm', 'customer-support'],
+  },
+  {
+    intent: 'Put this native chat widget on my website',
+    capability: 'chat-widget',
+    departments: ['web-development', 'funnels', 'crm'],
+  },
+  {
+    intent: 'Set up a room for the live sessions in this course',
+    capability: 'meeting-room',
+    departments: ['course-creator', 'personal-assistant'],
+  },
+  {
+    intent: 'Mirror this verified client checklist into HighLevel Projects',
+    capability: 'projects',
+    departments: ['crm', 'master-orchestrator'],
+  },
+  {
+    intent: 'Create a lead-generation quiz, not a course quiz',
+    capability: 'marketing-quiz',
+    departments: ['funnels', 'marketing', 'web-development'],
+  },
+  {
+    intent: 'Show which automation steps failed yesterday',
+    capability: 'workflow-monitoring',
+    departments: ['crm'],
+  },
+];
+
 
 // ---------------------------------------------------------------------------
 // U107 (E5-2, closes G2a) — vertical never force-added to a client who is not
