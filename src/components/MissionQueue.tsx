@@ -12,7 +12,7 @@ import { needsPlanningAnswer } from '@/lib/board/planning-chip';
 import { AUDIENCE_ASK_TEXT, needsAudienceAnswer, writtenForLabel, writtenForChipLabel } from '@/lib/board/audience-chip';
 import { MarketingPublishButton } from './MarketingPublishButton';
 import PhaseStepper from './PhaseStepper';
-import { PersonaSlotChips, PersonaScopeChips, CommsAudienceChip, humanize } from './kanban/TaskCard';
+import { PersonaSlotChips, PersonaScopeChips, CommsAudienceChip, GhlHybridCardChips, humanize } from './kanban/TaskCard';
 import { AnthologyCardFace } from './anthology/AnthologyCardFace';
 import { isAnthologyTask } from './anthology/anthology-card';
 import { BoardToastStack, type BoardToastMessage } from './kanban/BoardToast';
@@ -2048,6 +2048,12 @@ export function TaskCard({ task, onDragStart, onClick, onAnswer, isDragging, isC
       {/* U116 (E6-2 / ADD-2) — standard-vs-specific comms-audience chip
           (outside-world comms artifacts only; empty-state when absent) */}
       <CommsAudienceChip task={task} />
+
+      {/* WF19 (A23 display side) — compact GHL hybrid progress chip row.
+          Composition only: the card reads the summary already on the task row,
+          renders nothing when absent, and shows an explicit unreadable chip
+          when the receipt payload is malformed. */}
+      <GhlHybridCardChips task={task} />
 
       {/* Sprint and Due Date */}
       {(task.sprint || task.due_date) && (

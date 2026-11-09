@@ -40,6 +40,15 @@
 'use client';
 
 import type { Task, TaskSubtaskPersona, TaskPersonaBundleScope } from '@/lib/types';
+// WF19 (A23 display side) — the ONE GHL view-model/validator, shared with the
+// task-detail panel so the card and the modal can never disagree about a run.
+import {
+  GhlHybridChips,
+  GhlHybridUnreadableChip,
+  buildGhlHybridView,
+  parseGhlHybridSummary,
+  readGhlSummaryField,
+} from '../ghl/GhlHybridProgress';
 
 /** Title-case a persona id / slug for display ("bly-copywriters" → "Bly Copywriters").
  * Exported for reuse by the B-U6 / U20 persona-mismatch chip (MissionQueue.tsx),
@@ -250,3 +259,27 @@ export function CommsAudienceChip({
 }
 
 export default PersonaSlotChips;
+
+
+/**
+ * WF19 (A23 display side) — compact phase / rail / result indicators on the
+ * board card, respecting the existing chip row (no new column, no new status,
+ * no second board).
+ *
+ * Reads ONLY the optional `ghl_hybrid` summary already attached to the task
+ * row, so a board of 200 cards issues zero extra requests. Absent field →
+ * renders nothing (an ordinary card is unchanged). Present but invalid → an
+ * explicit "GHL progress unreadable" chip: a broken receipt feed is never
+ * allowed to look like a clean run.
+ */
+export function GhlHybridCardChips({
+  task,
+}: {
+  task: Pick<Task, 'lifecycle'> & { ghl_hybrid?: unknown };
+}) {
+  const raw = readGhlSummaryField(task);
+  if (raw === undefined) return null;
+  const parsed = parseGhlHybridSummary(raw);
+  if (!parsed.ok) return <GhlHybridUnreadableChip reason={parsed.reason} />;
+  return <GhlHybridChips view={buildGhlHybridView(parsed.summary, task.lifecycle)} />;
+}

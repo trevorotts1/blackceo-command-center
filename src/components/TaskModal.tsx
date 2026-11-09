@@ -49,6 +49,9 @@ import {
   // any" label, reused across the Planning/Activity/Deliverables/Sessions
   // tabs below instead of re-deriving it per tab.
   engineSourceLabel,
+  // WF19 (A23 display side) — detailed GHL hybrid operation evidence +
+  // pending-action explanation. Read-only: it adds no execution controls.
+  GhlHybridEvidencePanel,
 } from './TaskOverviewPanels';
 // U105 (E4-8) — in-app "i" help icons next to this form's fields. Reads the
 // typed copy map; presentation only, no change to any field's behavior.
@@ -597,6 +600,12 @@ export function TaskModal({ task: taskProp, onClose, workspaceId, initialStatus,
                   truthful stage / next action / owner for social tasks; null
                   (nothing) when no publish intent is linked. */}
               <TaskPublishSummaryPanel taskId={task.id} />
+              {/* WF19 (A23) — GHL hybrid progress: phase/rail/result, verified
+                  vs required, fallback reason + its actual result, blocker,
+                  last real event, builder/reviewer, implementation vs
+                  activation, and the four distinct sub-results per feature
+                  family. Renders nothing when no receipts exist. */}
+              <GhlHybridEvidencePanel task={task} />
               <BlockedReasonPanel task={task} />
               {/* U38 (C-07) — human-promote control, review cards the QC
                   heuristic fallback parked only ([QC-HEURISTIC] /

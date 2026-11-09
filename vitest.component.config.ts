@@ -12,6 +12,10 @@ export default defineConfig({
     globals: true,
     setupFiles: ['./tests/setup/jsdom-storage.ts'],
     include: [
+      // WF19 (A23 display side) — GHL hybrid progress UI: view-model honesty
+      // (unknown stays unknown, no synthesized times, scheduled != published),
+      // component render, board-card chip wiring and receipt-panel read states.
+      'tests/unit/wf19-ghl-hybrid-progress-render.test.tsx',
       'tests/unit/audience-answered-no-ask-chip.test.tsx',
       'tests/unit/u55-company-health-render.test.tsx',
       // A-U5 acceptance (b) — PersonaScopeChips real render proof.

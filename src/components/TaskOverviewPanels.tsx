@@ -30,6 +30,11 @@ import { PersonaSlotChips, PersonaScopeChips } from './kanban/TaskCard';
 // Item 19 — the engine park panel (plain-words park record + the engine's
 // own resume path), shared with the presentation parent card face.
 import { PresentationEnginePanel } from './kanban/PresentationEnginePanel';
+// WF19 (A23 display side) — the detailed GHL operation-evidence panel. One
+// reader (GhlHybridPanel) for GET /api/tasks/[id]/ghl-operations; it renders
+// nothing when no receipts exist and an explicit error when the feed or the
+// payload cannot be read.
+import { GhlHybridPanel } from './ghl/GhlHybridProgress';
 
 // A slug like "russell-brunson" → "Russell Brunson" for display. Presentation
 // only — the authoritative name is persona_name when the selector resolved one.
@@ -934,4 +939,18 @@ export function PlanningMetaPanel({ task }: { task: Task }) {
       </div>
     </div>
   );
+}
+
+
+/**
+ * WF19 (A23 display side) — detailed operation evidence and the pending-action
+ * explanation in the task-detail window.
+ *
+ * Read-only: no execution controls, no GHL client, no status writes. The
+ * pending action comes from the receipts themselves (`next_action` /
+ * `current_blocker`), never from an assumption about where the card sits.
+ */
+export function GhlHybridEvidencePanel({ task }: { task: Task }) {
+  // Skip the extra request entirely for a task that cannot have hybrid work.
+  return <GhlHybridPanel taskId={task.id} lifecycle={task.lifecycle ?? null} />;
 }
