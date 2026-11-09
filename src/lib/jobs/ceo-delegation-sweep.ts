@@ -53,7 +53,11 @@ const CONFIDENCE_THRESHOLD = parseFloat(process.env.CEO_DELEGATION_MIN_SCORE || 
 // eligible exactly as before) instead of throwing "no such column". File-local
 // helpers, same shape as the sibling sweeps (intake-advance-sweep,
 // backlog-redispatch-sweep) so the vocabulary cannot drift.
-const ENGINE_OWNED_SOURCES = ['build_deck', 'build_deck_phase', 'podcast-engine'] as const;
+// WF18: the ghl-hybrid GHL engine owns its parent/phase cards end to end — the
+// board must never dispatch one (a second executor would repeat a remote write).
+/** WF18 — exported so the parity test proves every advancer carries the SAME
+ *  engine-owned vocabulary as src/lib/board-sources.ts (no lane can lag). */
+export const ENGINE_OWNED_SOURCES = ['build_deck', 'build_deck_phase', 'podcast-engine', 'ghl-hybrid'] as const;
 
 function tasksHaveSourceColumn(): boolean {
   try {

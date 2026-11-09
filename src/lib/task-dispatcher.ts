@@ -51,7 +51,10 @@ import { captureExecutionLoadEvidence } from '@/lib/execution-load-evidence';
 import { v4 as uuidv4 } from 'uuid';
 import { beginExecutionSend, executionSessionId, reserveExecution, recordExecutionAcceptance, recordExecutionUnknown, type DispatchOutcome, type Execution } from '@/lib/execution-attempts';
 import { throwIfJobLeaseLost } from '@/lib/jobs/job-lease';
-import { boardSourceLabel } from '@/lib/board-sources';
+import {
+  boardSourceLabel,
+  ENGINE_OWNED_SOURCES as ENGINE_OWNED_BOARD_SOURCES,
+} from '@/lib/board-sources';
 import { queryOne, run } from '@/lib/db';
 import { parseEventTimestamp } from '@/lib/dispatch-idempotency';
 import { getOpenClawClient } from '@/lib/openclaw/client';
@@ -631,13 +634,13 @@ function recordDispatchSuccess(taskId: string, opts: { preserveAttempts?: boolea
 // never be treated as evidence of a missing run.
 const DECK_RUN_REASON = 'deck_run_identity_missing';
 
-// ── FIX 38a (R5B §F1): engine-owned source vocabulary ────────────────────────
-// Sources an engine writes and advances ITSELF (Presentations or Skill 58 podcast). The board's
-// auto-advancers must never dispatch these cards — the engine is the single
-// executor. (FIX 36's planned board-sources.ts module is not in the tree yet;
-// this set is self-contained here so W17 does not depend on W16's landing.
-// When board-sources.ts exists, re-point this helper at its export.)
-const ENGINE_OWNED_SOURCES = new Set(['build_deck', 'build_deck_phase', 'podcast-engine']);
+// ── FIX 38a (R5B §F1) / WF18: engine-owned source vocabulary ──────────────────
+// Sources an engine writes and advances ITSELF (Presentations, Skill 58 podcast,
+// the ghl-hybrid GHL engine). The board's auto-advancers must never dispatch
+// these cards — the engine is the single executor. The vocabulary now comes from
+// src/lib/board-sources.ts (the ONE canonical copy) instead of a local set, so
+// adding a producer cannot leave the dispatcher one source behind.
+const ENGINE_OWNED_SOURCES: ReadonlySet<string> = new Set(ENGINE_OWNED_BOARD_SOURCES);
 
 /** True when a task's ingest `source` is owned by an engine (never board-dispatched). */
 function isEngineOwnedSource(source: string | null | undefined): boolean {

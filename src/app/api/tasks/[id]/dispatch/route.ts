@@ -27,6 +27,7 @@ import {
   DUPLICATE_SUPPRESSED_EVENT_TYPE,
 } from '@/lib/dispatch-idempotency';
 import { checkTaskWriteAuth, renderWriteBackInstructions } from '@/lib/mc-auth';
+import { boardSourceLabel, isEngineOwnedBoardSource } from '@/lib/board-sources';
 import { transition, recordStatusEvent, checkWipLimit } from '@/lib/task-lifecycle';
 import {
   resolveAgentRuntimeModel,
@@ -230,6 +231,30 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
 
     if (!task) {
       return NextResponse.json({ error: 'Task not found' }, { status: 404 });
+    }
+
+    // ── WF18 / FIX 38a-b: an ENGINE-OWNED card is never board-dispatched ─────
+    // A card whose immutable ingest `source` belongs to an engine (Presentations,
+    // Skill 58 podcast, the ghl-hybrid GHL engine) is created, sequenced and
+    // completed by that engine. A board dispatch here would put a SECOND
+    // executor on the same work — for ghl-hybrid that means repeating a real
+    // GoHighLevel mutation. Refuse loudly; the owning engine advances the card.
+    // (The sweeps already exclude these rows in their SELECT; this is the direct
+    // call path — the same refusal GUARD 4d makes inside task-dispatcher.)
+    if (isEngineOwnedBoardSource((task as Task & { source?: string | null }).source)) {
+      const owner = boardSourceLabel((task as Task & { source?: string | null }).source);
+      return NextResponse.json(
+        {
+          success: false,
+          held: true,
+          reason: 'engine_owned',
+          message:
+            `Task "${task.title}" is owned by ${owner ?? 'an engine'} — the board does not ` +
+            'dispatch this card. Its engine advances it and reports progress through an ' +
+            'operation receipt; sending it here would create a second executor.',
+        },
+        { status: 409 },
+      );
     }
 
     if (!task.assigned_agent_id) {

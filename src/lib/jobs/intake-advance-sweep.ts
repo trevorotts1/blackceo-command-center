@@ -88,7 +88,11 @@ const ADVANCEABLE_STATUSES = ['inbox', 'backlog', 'planning', 'pending_dispatch'
 // pre-089 rows are all NULL-source legacy tasks, which are ordinary board tasks
 // and remain advanceable, exactly as before). This is a SELECT-scope exclusion
 // only: the engine keeps full ownership of the card and no state changes here.
-const ENGINE_OWNED_SOURCES = ['build_deck', 'build_deck_phase', 'podcast-engine'] as const;
+// WF18: the ghl-hybrid GHL engine owns its parent/phase cards end to end — the
+// board must never dispatch one (a second executor would repeat a remote write).
+/** WF18 — exported so the parity test proves every advancer carries the SAME
+ *  engine-owned vocabulary as src/lib/board-sources.ts (no lane can lag). */
+export const ENGINE_OWNED_SOURCES = ['build_deck', 'build_deck_phase', 'podcast-engine', 'ghl-hybrid'] as const;
 
 function sourceExclusionClause(): string {
   try {
@@ -169,7 +173,7 @@ function recordRoutingWait(task: IntakeTaskRow, reason: string, retryable: boole
       AND killed_at IS NULL AND status IN ('inbox','backlog','planning','pending_dispatch','assigned')
       AND updated_at=? AND workspace_id IS ? AND routing_reason IS ? AND COALESCE(dispatch_hold,0)=?
       AND upper(COALESCE(description,'')) NOT LIKE '%OWNER KILLED%'
-      AND (source IS NULL OR source NOT IN ('build_deck','build_deck_phase','podcast-engine'))
+      AND (source IS NULL OR source NOT IN ('build_deck','build_deck_phase','podcast-engine','ghl-hybrid'))
       AND NOT EXISTS(SELECT 1 FROM task_executions x WHERE x.task_id=tasks.id AND x.state IN ${ACTIVE_EXECUTIONS})`,
       [attempts, timeNow(), retryable && !exhausted ? next : null, isHistoricalDepartmentHold(task.routing_reason) ? task.routing_reason : reason, retryable && !exhausted ? null : 'SYSTEM', task.routing_config_revision || null, retryable && !exhausted ? 'Automatic routing retry scheduled' : 'Configure an eligible worker or edit the task assignment', task.id, task.assignment_version, task.updated_at, task.workspace_id, task.routing_reason ?? null, task.dispatch_hold || 0]);
     if (changed.changes) run(`INSERT INTO events (id,type,task_id,message,created_at) VALUES (?,?,?,?,?)`,
@@ -200,7 +204,7 @@ export function commitIntakeAssignment(task: IntakeTaskRow, decision: Extract<Ro
       AND workspace_id IS ? AND routing_reason IS ? AND COALESCE(dispatch_hold,0) = ?
       AND archived_at IS NULL AND killed_at IS NULL AND updated_at = ?
       AND upper(COALESCE(description,'')) NOT LIKE '%OWNER KILLED%'
-      AND (source IS NULL OR source NOT IN ('build_deck', 'build_deck_phase', 'podcast-engine'))
+      AND (source IS NULL OR source NOT IN ('build_deck', 'build_deck_phase', 'podcast-engine','ghl-hybrid'))
       AND NOT ${planningInProgressSql('tasks')}
       AND NOT EXISTS(SELECT 1 FROM task_executions x WHERE x.task_id=tasks.id AND x.state IN ${ACTIVE_EXECUTIONS})
       AND ${taskCompanySql('tasks')}=?`,
@@ -228,7 +232,7 @@ export function normalizeIntakeForDispatch(taskId: string): boolean {
       AND a.workspace_id=t.workspace_id AND w.company_id=aw.company_id AND w.archived_at IS NULL AND aw.archived_at IS NULL
       AND t.archived_at IS NULL AND t.killed_at IS NULL AND COALESCE(t.dispatch_hold,0)=0
       AND upper(COALESCE(t.description,'')) NOT LIKE '%OWNER KILLED%'
-      AND (t.source IS NULL OR t.source NOT IN ('build_deck','build_deck_phase','podcast-engine'))
+      AND (t.source IS NULL OR t.source NOT IN ('build_deck','build_deck_phase','podcast-engine','ghl-hybrid'))
       AND NOT ${planningInProgressSql('t')}
       AND NOT EXISTS(SELECT 1 FROM task_executions x WHERE x.task_id=t.id AND x.state IN ${ACTIVE_EXECUTIONS})`,[taskId]);
     if (!task || (task.is_master && !(isCatchAllRoutingReason(task.routing_reason) && isCatchAllWorkspace(task)))) return false;
@@ -293,7 +297,7 @@ export async function runIntakeAdvanceSweep(dependencies: {
       AND status IN ('inbox','backlog','planning','pending_dispatch','assigned')
       AND archived_at IS NULL AND killed_at IS NULL AND assigned_agent_id IS NULL
       AND (COALESCE(dispatch_hold,0)=0 OR routing_reason GLOB 'Requested department * is unavailable in this company.')
-      AND (source IS NULL OR source NOT IN ('build_deck','build_deck_phase','podcast-engine'))
+      AND (source IS NULL OR source NOT IN ('build_deck','build_deck_phase','podcast-engine','ghl-hybrid'))
       AND NOT EXISTS(SELECT 1 FROM task_executions x WHERE x.task_id=tasks.id AND x.state IN ${ACTIVE_EXECUTIONS})
       AND ${taskCompanySql('tasks')}=?`,[revision,company]);
   }

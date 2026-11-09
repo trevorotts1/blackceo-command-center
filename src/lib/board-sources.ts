@@ -40,6 +40,11 @@
  *     (intake/interview-app/bridge/intake_writer.py payload.source; FIX 36)
  *   podcast-engine — Skill 58 state-machine mirror cards. They are status
  *     producers only; Command Center must never become a second executor.
+ *   ghl-hybrid — the ONE GHL engine producer (Document 1 §14.4, WF18). It
+ *     mints the parent drive card plus phase child cards for course/Community/
+ *     publishing/verification work and posts operation receipts to
+ *     /api/tasks/{id}/ghl-operations. Command Center stores and displays those
+ *     receipts; it never executes a GHL operation itself.
  */
 export const RECOGNIZED_BOARD_SOURCES: Set<string> = new Set([
   'funnel',
@@ -51,6 +56,7 @@ export const RECOGNIZED_BOARD_SOURCES: Set<string> = new Set([
   'build_deck_phase',
   'presentation-interview-app',
   'podcast-engine',
+  'ghl-hybrid',
 ]);
 
 /**
@@ -74,6 +80,7 @@ export const BOARD_SOURCE_LABELS: Record<string, string> = {
   build_deck_phase: 'a presentations deck phase build',
   'presentation-interview-app': 'the presentations interview app',
   'podcast-engine': 'the Podcast Engine',
+  'ghl-hybrid': 'the GHL hybrid course/Community engine',
 };
 
 /**
@@ -90,6 +97,10 @@ export const ENGINE_OWNED_SOURCES: readonly string[] = [
   'build_deck',
   'build_deck_phase',
   'podcast-engine',
+  // WF18 — a ghl-hybrid card is owned by the GHL engine end to end: the engine
+  // creates the parent/children, sequences the phases and completes them. A
+  // board dispatch would put a second executor on the same remote mutation.
+  'ghl-hybrid',
 ];
 
 /** True when a card's stamped `source` is owned by an engine, not by the board. */

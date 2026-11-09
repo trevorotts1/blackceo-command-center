@@ -101,7 +101,9 @@ test('[STRANDED-02] the display vocabulary matches the sources the dispatcher re
   // this fix removes.
   assert.deepEqual(
     [...ENGINE_OWNED_SOURCES].sort(),
-    ['build_deck', 'build_deck_phase', 'podcast-engine'],
+    // WF18 added the ghl-hybrid GHL engine producer: its parent/phase cards are
+    // engine-owned, so the board must never dispatch them either.
+    ['build_deck', 'build_deck_phase', 'ghl-hybrid', 'podcast-engine'],
   );
   for (const source of ENGINE_OWNED_SOURCES) {
     assert.ok(boardSourceLabel(source), `${source} must have a human name`);

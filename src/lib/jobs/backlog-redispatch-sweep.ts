@@ -101,7 +101,11 @@ export const REDISPATCH_ESCALATE_HOURS = 6;
 // eligible exactly as before) instead of throwing "no such column". The helpers
 // are file-local (not a shared module) because the sweep files are each other's
 // only consumers and must stay within their own review scope.
-const ENGINE_OWNED_SOURCES = ['build_deck', 'build_deck_phase', 'podcast-engine'] as const;
+// WF18: the ghl-hybrid GHL engine owns its parent/phase cards end to end — the
+// board must never dispatch one (a second executor would repeat a remote write).
+/** WF18 — exported so the parity test proves every advancer carries the SAME
+ *  engine-owned vocabulary as src/lib/board-sources.ts (no lane can lag). */
+export const ENGINE_OWNED_SOURCES = ['build_deck', 'build_deck_phase', 'podcast-engine', 'ghl-hybrid'] as const;
 
 function tasksHaveSourceColumn(): boolean {
   try {

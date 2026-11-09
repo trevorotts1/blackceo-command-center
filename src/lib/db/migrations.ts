@@ -8648,6 +8648,60 @@ export const migrations: Migration[] = [
       console.log('[Migration 178] governed launch domain ready');
     },
   },
+
+  {
+    id: '179',
+    name: 'ghl_hybrid_operation_receipts',
+    up: (db) => {
+      // WF18 (Document 1 §14.5, §29.7). The immutable receipt-event store for
+      // the ONE `ghl-hybrid` GHL producer. Additive and idempotent, so an older
+      // populated database upgrades in place without touching a row.
+      //
+      // WHY AN EVENT TABLE: a receipt is an immutable event. `receipt_id`
+      // identifies the event, `attempt_id` its concrete attempt, and
+      // `event_sequence` a persisted increasing integer inside one logical
+      // operation `(company_id, run_id, operation_key)`. The UNIQUE pair below
+      // is what makes an identical replay idempotent and a reused sequence with
+      // different bytes a conflict rather than an overwrite.
+      //
+      // NO DELETE TRIGGER deliberately: `task_id` cascades with its task row, and
+      // a delete-blocking trigger would make ordinary task deletion fail. The
+      // UPDATE trigger is the immutability guarantee this lane owes (there is no
+      // update path in the store at all).
+      console.log('[Migration 179] Adding ghl_operation_receipts...');
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS ghl_operation_receipts (
+          id               TEXT PRIMARY KEY,
+          company_id       TEXT NOT NULL,
+          task_id          TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+          run_id           TEXT NOT NULL,
+          operation_key    TEXT NOT NULL,
+          attempt_id       TEXT NOT NULL,
+          event_sequence   INTEGER NOT NULL,
+          schema_version   TEXT NOT NULL,
+          operation_id     TEXT NOT NULL,
+          rail             TEXT NOT NULL CHECK (rail IN ('public_rest','official_mcp','firebase_private','managed_browser')),
+          outcome          TEXT NOT NULL CHECK (outcome IN ('planned','submitted','processing','verified','failed','blocked','unknown_outcome','not_requested')),
+          observed_at      TEXT NOT NULL,
+          received_at      TEXT NOT NULL,
+          intent_hash      TEXT NOT NULL,
+          receipt_id       TEXT NOT NULL,
+          event_bytes_hash TEXT NOT NULL,
+          receipt_json     TEXT NOT NULL,
+          UNIQUE (company_id, run_id, operation_key, event_sequence),
+          UNIQUE (company_id, receipt_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_ghl_receipts_task
+          ON ghl_operation_receipts(company_id, task_id, received_at);
+        CREATE INDEX IF NOT EXISTS idx_ghl_receipts_operation
+          ON ghl_operation_receipts(company_id, run_id, operation_key, event_sequence);
+        CREATE TRIGGER IF NOT EXISTS ghl_operation_receipts_immutable
+          BEFORE UPDATE ON ghl_operation_receipts
+          BEGIN SELECT RAISE(ABORT, 'ghl_operation_receipts events are immutable'); END;
+      `);
+      console.log('[Migration 179] ghl_operation_receipts ready');
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner

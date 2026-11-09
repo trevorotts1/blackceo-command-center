@@ -136,6 +136,9 @@ test('normalizeBoardSource recognizes both engine sources + legacy set, fail-clo
   assert.equal(normalizeBoardSource('build_deck_phase'), 'build_deck_phase');
   assert.equal(normalizeBoardSource('presentation-interview-app'), 'presentation-interview-app');
   assert.equal(normalizeBoardSource('podcast-engine'), 'podcast-engine');
+  // WF18 — the ONE GHL engine producer joined the recognized set.
+  assert.equal(normalizeBoardSource('ghl-hybrid'), 'ghl-hybrid');
+  assert.equal(normalizeBoardSource(' GHL-Hybrid '), 'ghl-hybrid', 'trim + lowercase');
   assert.equal(normalizeBoardSource('  Build_Deck_Phase '), 'build_deck_phase', 'trim + lowercase');
   for (const legacy of ['funnel', 'survey', 'web-development', 'anthology', 'build_deck', 'presentations']) {
     assert.equal(normalizeBoardSource(legacy), legacy, `legacy source ${legacy} still recognized`);
@@ -144,7 +147,8 @@ test('normalizeBoardSource recognizes both engine sources + legacy set, fail-clo
   assert.equal(normalizeBoardSource(''), null);
   assert.equal(normalizeBoardSource(null), null);
   assert.equal(normalizeBoardSource(42), null);
-  assert.equal(RECOGNIZED_BOARD_SOURCES.size, 9);
+  // 10 after WF18 added the ghl-hybrid GHL engine producer.
+  assert.equal(RECOGNIZED_BOARD_SOURCES.size, 10);
 });
 
 // ── QC.md FIX 36 proof, over the REAL ingest → status round trip ──────────────
