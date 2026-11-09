@@ -1,0 +1,66 @@
+{
+  "fixture_version": "wf33.sync-intent.v1",
+  "frozen_at_contract": "BCM-GHL-HYBRID-2026-11-08 revision 3.0",
+  "source": "Document 1 section 29.7 required internal mapping; WF33-CP01",
+  "synthetic": true,
+  "mapping": {
+    "company_id": "SYNTHETIC_CC_COMPANY",
+    "location_id": "SYNTHETIC_GHL_LOCATION",
+    "cc_task_id": "SYNTHETIC_CC_TASK",
+    "project_space_id": "SYNTHETIC_PROJECT_SPACE",
+    "project_home_list_id": "SYNTHETIC_PROJECT_HOME_LIST",
+    "project_task_id": null,
+    "sync_policy_version": 1,
+    "enabled": true,
+    "field_ownership": {
+      "title": "cc",
+      "status": "cc",
+      "due_date": "human",
+      "notes": "human",
+      "evidence_links": "cc",
+      "verified_completion": "cc",
+      "assignee": "human"
+    },
+    "allowed_task_scopes": ["verified_completion"],
+    "correlation_marker": "cc-wf33:SYNTHETIC_CC_COMPANY:SYNTHETIC_GHL_LOCATION:SYNTHETIC_CC_TASK",
+    "last_source_revision": null,
+    "last_source_sequence": 0,
+    "last_applied_fingerprint": null,
+    "last_applied_fields_json": null,
+    "last_attempt_id": null,
+    "last_provider_readback_ref": null,
+    "sync_state": "unsynced",
+    "pending_reason": null,
+    "last_observed_at": null
+  },
+  "sync_intent": {
+    "intent_id": "SYNTHETIC_INTENT_ID",
+    "logical_key": "SYNTHETIC_CC_COMPANY|SYNTHETIC_GHL_LOCATION|SYNTHETIC_CC_TASK|1|sha256:SYNTHETIC_FINGERPRINT",
+    "company_id": "SYNTHETIC_CC_COMPANY",
+    "location_id": "SYNTHETIC_GHL_LOCATION",
+    "cc_task_id": "SYNTHETIC_CC_TASK",
+    "source_revision": "rev-1",
+    "source_sequence": 1,
+    "fingerprint": "sha256:SYNTHETIC_FINGERPRINT",
+    "operation": "create",
+    "payload_json": "{\"status\":\"in_progress\",\"title\":\"SYNTHETIC_TASK_TITLE\"}",
+    "status": "pending",
+    "attempts": 0,
+    "last_attempt_id": null,
+    "last_error": null,
+    "created_at": "2026-11-08T12:00:00.000Z",
+    "updated_at": "2026-11-08T12:00:00.000Z"
+  },
+  "adapter_interface": {
+    "createTask": "create once; requires a real approved dueDate and exactly one approved assigneeId",
+    "updateTask": "only CC-owned changed fields; never due date, notes or assignee",
+    "readTask": "null means the mapped remote target is gone -> drift, never recreate",
+    "findTaskByMarker": "lost-create reconciliation by correlation_marker before another create"
+  },
+  "wf18_shared_changes_required": [
+    "register GHL_PROJECTS_SYNC_MIGRATION_SQL (two additive tables + one index) in the CC migration chain",
+    "provide a SQL-backed ProjectsSyncStore implementing getMapping/saveMapping/getIntent/saveIntent",
+    "register the CC task event hook that calls projectCcTaskEvent for opted-in tenants only",
+    "no auth change is requested: tenant identity stays server-derived"
+  ]
+}
