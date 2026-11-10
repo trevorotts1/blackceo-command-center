@@ -1,3 +1,7 @@
+## [Unreleased] — 2026-11-10 — fix(interview): several brand colors in one answer are accepted
+
+- fix(brand color): the color field accepted only one value, so typing two hex codes left Save unavailable with no way forward. The first valid code becomes the primary color and the full answer stays in the transcript.
+
 ## [Unreleased] — 2026-11-08 — feat(launch): F23 governed launch evidence across Command Center and Kanban
 
 - feat(launch admission) F23.1–F23.13: `src/lib/launch-domain.ts` (new) owns the governed launch domain — immutable run identity (`launch_run_identity`), task/run bindings (`launch_task_bindings`), evidence invalidation events (`launch_evidence_invalidations`) and the admission decision used by `checkPreconditions` in `src/lib/task-lifecycle.ts`. Launch admission runs ABOVE the `operatorOverride` bail-out, so an override can re-decide routing but cannot make launch evidence exist, re-activate a revoked scoped approval, or rebind a run to another client/installation/plan. The same-status shortcut revalidates first, so an already-`done`/`review` card whose governing proof changed is refused (`LAUNCH_COMPLETION_STALE`) instead of echoing stale completion.
