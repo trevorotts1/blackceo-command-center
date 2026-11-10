@@ -120,7 +120,7 @@ export interface BrandColorResolution {
   /** Resolved #rrggbb hex, or null when the input could not be understood. */
   hex: string | null;
   /** How it resolved — for transparency in the interview UI. */
-  source: 'hex' | 'name' | 'unknown';
+  source: 'hex' | 'list' | 'name' | 'unknown';
   /** The normalized lookup key (for names) or the raw input. */
   matched: string;
 }
@@ -138,6 +138,13 @@ export function resolveBrandColor(input: string): BrandColorResolution {
   // 1. Hex first.
   const hex = normalizeHex(raw);
   if (hex) return { hex, source: 'hex', matched: raw };
+
+  // 1b. Several colors in one answer ("#C9A227, #2E1A47"): use the first code.
+  // A bare six-character token needs a digit so words like "facade" stay words.
+  const listed = raw.match(/#[0-9a-f]{3}(?:[0-9a-f]{3})?(?![0-9a-f])/i)?.[0]
+    ?? raw.match(/(?<![0-9a-z#])(?=[a-f]*\d)[0-9a-f]{6}(?![0-9a-z])/i)?.[0];
+  const listedHex = listed ? normalizeHex(listed) : null;
+  if (listedHex) return { hex: listedHex, source: 'list', matched: raw };
 
   // 2. Name lookup (strip spaces/dashes/underscores, lowercase).
   const key = raw.toLowerCase().replace(/[\s\-_]+/g, '');
