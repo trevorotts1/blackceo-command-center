@@ -124,6 +124,9 @@ function extractTurn(entry: unknown): { role: string | null; text: string } | nu
 function isAgentTurn(role: string | null): boolean {
   if (!role) return true; // unlabelled -> assume agent output
   const r = role.toLowerCase();
+  // Tool output (e.g. the agent reading its own skill file) is not the
+  // interviewer speaking; showing it put raw instructions on the owner's screen.
+  if (r.startsWith('tool') || r === 'function' || r === 'system') return false;
   return r !== 'user' && r !== 'owner' && r !== 'human' && r !== 'client';
 }
 
@@ -273,11 +276,21 @@ async function resolveSessionId(
   const claimed=run(`UPDATE tenant_interviews SET session_reservation=?,session_reserved_at=? WHERE tenant_id=? AND gateway_session_id IS NULL AND (session_reservation IS NULL OR session_reserved_at<?)`,[reservation,timeNow(),tenantId,cutoff]);
   if(!claimed.changes)throw new Error('Interview session is being established; retry shortly');
   try {
-    const session=await client.createSession('web',tenant.context.subject);
+    // The key is ours, not read back from the response, and the label is unique
+    // to this interview. A bare subject label collided with any other session
+    // carrying the owner's address, and the gateway refuses duplicate labels,
+    // which left the interviewer spinning on every visit.
+    const sessionKey=`agent:main:interview-${stored.interview_id}`;
+    try {
+      await client.createSession('web',`${tenant.context.subject} interview ${stored.interview_id.slice(0,8)}`,{key:sessionKey});
+    } catch(err) {
+      // Same label means this interview's own session exists and only its saved key was lost.
+      if(!/label already in use/i.test(err instanceof Error?err.message:String(err)))throw err;
+    }
     if(req.signal.aborted)throw new Error('Interview request was cancelled');
-    const saved=run(`UPDATE tenant_interviews SET gateway_session_id=?,session_reservation=NULL,session_reserved_at=NULL,updated_at=? WHERE tenant_id=? AND session_reservation=? AND gateway_session_id IS NULL`,[session.id,timeNow(),tenantId,reservation]);
+    const saved=run(`UPDATE tenant_interviews SET gateway_session_id=?,session_reservation=NULL,session_reserved_at=NULL,updated_at=? WHERE tenant_id=? AND session_reservation=? AND gateway_session_id IS NULL`,[sessionKey,timeNow(),tenantId,reservation]);
     if(!saved.changes)throw new Error('Session reservation expired; retry using the committed session');
-    return session.id;
+    return sessionKey;
   } catch(err) {
     run('UPDATE tenant_interviews SET session_reservation=NULL,session_reserved_at=NULL WHERE tenant_id=? AND session_reservation=?',[tenantId,reservation]);
     throw err;

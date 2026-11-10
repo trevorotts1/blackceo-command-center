@@ -271,7 +271,7 @@ for(const id of ['client-a','client-b'])run('INSERT OR IGNORE INTO clients(id,na
   proto.sendMessage=async()=>{sent++;throw new Error('fixture transport stops after session ownership check');};
   const request=(signal?:AbortSignal)=>new NextRequest('https://self.example/api/interview/turn',{method:'POST',headers:{host:'self.example',authorization:'Bearer fixture-api-token','content-type':'application/json'},body:JSON.stringify({content:'start interview'}),signal});
   const reset=()=>run("UPDATE tenant_interviews SET gateway_session_id=NULL,session_reservation=NULL,session_reserved_at=NULL WHERE tenant_id='operator'");
-  ensureTenantInterview('operator');
+  const interviewKey=`agent:main:interview-${ensureTenantInterview('operator').interview_id}`;
   try {
     reset();
     let release!:(value:any)=>void, entered!:()=>void;
@@ -281,7 +281,7 @@ for(const id of ['client-a','client-b'])run('INSERT OR IGNORE INTO clients(id,na
     const concurrent=await turn(request());
     assert.equal(concurrent.status,503);assert.equal(minted,1);assert.equal(sent,0);
     release({id:'stable-first-session'});await first;
-    assert.equal(queryOne<any>("SELECT gateway_session_id FROM tenant_interviews WHERE tenant_id='operator'").gateway_session_id,'stable-first-session');
+    assert.equal(queryOne<any>("SELECT gateway_session_id FROM tenant_interviews WHERE tenant_id='operator'").gateway_session_id,interviewKey);
     await turn(request());assert.equal(minted,1,'retry resumes the committed session');
 
     reset();sent=0;
@@ -294,8 +294,14 @@ for(const id of ['client-a','client-b'])run('INSERT OR IGNORE INTO clients(id,na
     await turn(request());
     lateRelease({id:'late-stale-session'});
     assert.equal((await stale).status,503);
-    assert.equal(queryOne<any>("SELECT gateway_session_id FROM tenant_interviews WHERE tenant_id='operator'").gateway_session_id,'replacement-session');
+    assert.equal(queryOne<any>("SELECT gateway_session_id FROM tenant_interviews WHERE tenant_id='operator'").gateway_session_id,interviewKey);
     assert.equal(sent,1,'late reservation owner never sends into the orphan session');
+
+    reset();sent=0;
+    proto.createSession=async()=>{throw new Error('label already in use: owner');};
+    await turn(request());
+    assert.equal(queryOne<any>("SELECT gateway_session_id FROM tenant_interviews WHERE tenant_id='operator'").gateway_session_id,interviewKey,'a duplicate label reuses this interview session');
+    assert.equal(sent,1,'the interviewer still receives the turn');
 
     reset();sent=0;
     let cancelRelease!:(value:any)=>void, cancelEntered!:()=>void;

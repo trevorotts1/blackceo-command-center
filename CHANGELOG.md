@@ -1,3 +1,8 @@
+## [Unreleased] — 2026-11-10 — fix(interview): the interviewer always opens, and only the interviewer's words reach the owner
+
+- fix(interview turn): the web interview created its gateway session under the owner's address alone and depended on reading the key back from the response. With no saved key, the next visit tried the same label and the gateway refused it, so the page sat on "Your interviewer is getting ready" forever. The session key is now derived from the interview id and the label is unique to that interview.
+- fix(interview turn): tool output counted as interviewer speech, so raw skill instructions could appear as the owner's next question. Only agent speech is returned now.
+
 ## [Unreleased] — 2026-11-08 — feat(launch): F23 governed launch evidence across Command Center and Kanban
 
 - feat(launch admission) F23.1–F23.13: `src/lib/launch-domain.ts` (new) owns the governed launch domain — immutable run identity (`launch_run_identity`), task/run bindings (`launch_task_bindings`), evidence invalidation events (`launch_evidence_invalidations`) and the admission decision used by `checkPreconditions` in `src/lib/task-lifecycle.ts`. Launch admission runs ABOVE the `operatorOverride` bail-out, so an override can re-decide routing but cannot make launch evidence exist, re-activate a revoked scoped approval, or rebind a run to another client/installation/plan. The same-status shortcut revalidates first, so an already-`done`/`review` card whose governing proof changed is refused (`LAUNCH_COMPLETION_STALE`) instead of echoing stale completion.
