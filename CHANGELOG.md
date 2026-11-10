@@ -1,6 +1,6 @@
 ## [Unreleased] — 2026-11-10 — fix(interview): the interviewer always opens, and only the interviewer's words reach the owner
 
-- fix(interview turn): the web interview created its gateway session under the owner's address alone and saved a field the gateway response does not reliably carry. The saved key came back empty, the next visit tried the same label, and the gateway refused it, so the page sat on "Your interviewer is getting ready" forever. The session key is now derived from the interview id and the label is unique to that interview.
+- fix(interview turn): the web interview created its gateway session under the owner's address alone and depended on reading the key back from the response. With no saved key, the next visit tried the same label and the gateway refused it, so the page sat on "Your interviewer is getting ready" forever. The session key is now derived from the interview id and the label is unique to that interview.
 - fix(interview turn): tool output counted as interviewer speech, so raw skill instructions could appear as the owner's next question. Only agent speech is returned now.
 
 ## [Unreleased] — 2026-11-08 — feat(launch): F23 governed launch evidence across Command Center and Kanban
