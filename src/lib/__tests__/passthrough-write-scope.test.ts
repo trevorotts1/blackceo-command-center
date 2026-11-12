@@ -476,16 +476,20 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
   // a server action, not an API route), so it is bearer-gated, and every census
   // moves by exactly one (166 mutating, 159 non-webhook, 51 patterns, 55
   // templates, 54 bearer-ONLY).
-  it('API routes exporting a mutating method: 166 (literal assertion)', () => {
-    expect(allMutatingRoutes.length).toBe(166);
+  // re-derived 2026-11-12 for chat approvals: POST
+  // /api/approval-requests/[requestId]/chat-decision adds one more mutating,
+  // bearer-gated route: 167 mutating, 160 non-webhook, 52 patterns, 56 templates,
+  // 55 bearer-ONLY.
+  it('API routes exporting a mutating method: 167 (literal assertion)', () => {
+    expect(allMutatingRoutes.length).toBe(167);
   });
 
   it('protected by isWebhookSecretRoute: 7 (5 static + 2 dynamic — middleware src/middleware.ts:137-167)', () => {
     expect(webhookProtectedCount).toBe(7);
   });
 
-  it('non-webhook write routes: 159 (166 mutating − 7 webhook-protected; tenant authentication remains required)', () => {
-    expect(nonWebhookCount).toBe(159);
+  it('non-webhook write routes: 160 (167 mutating − 7 webhook-protected; tenant authentication remains required)', () => {
+    expect(nonWebhookCount).toBe(160);
   });
 
   it('interface call templates found by multi-line scanner', () => {
@@ -502,12 +506,12 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
     expect(count).toBeGreaterThanOrEqual(40);
   });
 
-  it('bearer-ONLY-covered routes: 54 (51 patterns match 55 templates; 1 of them — UPDATE-014 /api/tasks/{id}/operator-preengine-recovery — is webhook-gated, so 55 − 1 = 54)', () => {
-    expect(bearerCoveredRoutes.size).toBe(54);
+  it('bearer-ONLY-covered routes: 55 (52 patterns match 56 templates; 1 of them — UPDATE-014 /api/tasks/{id}/operator-preengine-recovery — is webhook-gated, so 56 − 1 = 55)', () => {
+    expect(bearerCoveredRoutes.size).toBe(55);
   });
 
-  it('BEARER_REQUIRED_WRITE_ROUTES.length is 51, matching 55 route templates (checksum: 47 + 4×2 = 55; the 2026-11-12 owner approvals inbox added POST /api/approval-requests, the agent door whose only browser touch is a GET of the same path; the HQ merge wave added POST /api/hq/activity, the signed producer ingest whose only browser touch is a GET of the same path; the Skill 71 wave added POST /api/skill-runs/ingest, the run-events producer ingest whose only browser touch is a GET of /api/skill-runs; the 2026-10-22 launch ingest wave (audit lane L12/UL-022 + U052 census repair) added POST /api/launch-runs/ingest, the launch producer ingest whose only browser touch is a GET of /api/launch-runs)', () => {
-    expect(BEARER_REQUIRED_WRITE_ROUTES.length).toBe(51);
+  it('BEARER_REQUIRED_WRITE_ROUTES.length is 52, matching 56 route templates (checksum: 47 + 4×2 = 55, +1 for the 2026-11-12 chat-decision route; the 2026-11-12 owner approvals inbox added POST /api/approval-requests, the agent door whose only browser touch is a GET of the same path; the HQ merge wave added POST /api/hq/activity, the signed producer ingest whose only browser touch is a GET of the same path; the Skill 71 wave added POST /api/skill-runs/ingest, the run-events producer ingest whose only browser touch is a GET of /api/skill-runs; the 2026-10-22 launch ingest wave (audit lane L12/UL-022 + U052 census repair) added POST /api/launch-runs/ingest, the launch producer ingest whose only browser touch is a GET of /api/launch-runs)', () => {
+    expect(BEARER_REQUIRED_WRITE_ROUTES.length).toBe(52);
   });
 
   it('route-list membership: BEARER_REQUIRED_WRITE_ROUTES includes /api/weight-profiles', () => {

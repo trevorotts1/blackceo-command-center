@@ -82,9 +82,17 @@ export interface ApprovalRequest {
   path: string;
   /** Absolute deep link when the box's public URL is configured, else null. */
   approval_url: string | null;
+  /** First 6 characters of request_id: the agent prints it as "Code: XXXXXX" so a chat reply can name this request. */
+  short_code: string;
+  /** Every place the owner's yes is accepted from. */
+  approve_by: ApproveChannel[];
 }
 
-interface Row {
+export type ApproveChannel = 'command_center' | 'telegram' | 'chat_app';
+export const APPROVE_BY: ApproveChannel[] = ['command_center', 'telegram', 'chat_app'];
+export const shortCodeOf = (requestId: string): string => requestId.slice(0, 6);
+
+export interface Row {
   request_id: string; tenant_id: string; kind: RequestKind; location_id: string; action: string;
   object_key: string; plan_sha256: string; title: string; summary: string; preview_json: string;
   requested_by: string; status: 'pending' | 'approved' | 'changes_requested'; expires_at: string; valid_until: string | null;
@@ -115,6 +123,7 @@ export function toRequest(r: Row, now = Date.now()): ApprovalRequest {
     status: expired ? 'expired' : r.status, expires_at: r.expires_at, valid_until: r.valid_until, created_at: r.created_at,
     decided_at: r.decided_at, decided_by: r.decided_by, decision_note: r.decision_note,
     approval_id: r.approval_id, path: approvalRequestPath(r.request_id),
+    short_code: shortCodeOf(r.request_id), approve_by: [...APPROVE_BY],
     approval_url: (() => { const o = configuredPublicOrigin(); return o ? `${o.origin}${approvalRequestPath(r.request_id)}` : null; })(),
   };
 }
@@ -268,7 +277,7 @@ export function countPendingApprovals(tenantId: string): number {
 }
 
 /** Approval lifetime: 7 days from the click, extended to cover valid_until (max 30 days). */
-function approvalExpiry(row: Row, nowMs: number): string {
+export function approvalExpiry(row: Row, nowMs: number): string {
   const until = row.valid_until ? Date.parse(row.valid_until) : 0;
   return new Date(Math.min(nowMs + MAX_TTL_MS, Math.max(nowMs + DEFAULT_TTL_MS, until))).toISOString();
 }

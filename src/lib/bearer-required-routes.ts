@@ -67,6 +67,9 @@
  * through a server action on /approvals). Now 51 patterns covering 55 route
  * templates; see the U052 lock test for the live census.
  *
+ * 2026-11-12 (chat approvals): +1 pattern for POST /api/approval-requests/<id>/chat-decision.
+ * Now 52 patterns covering 56 route templates.
+ *
  * U052: This is the single source of truth, imported by both src/middleware.ts
  * and the anti-rot lock test. One array, one source.
  */
@@ -85,6 +88,10 @@ export const BEARER_REQUIRED_WRITE_ROUTES: RegExp[] = [
   // that is not the operator/agent bearer. GET (list/status) stays open to the
   // same-origin owner page and is read-only.
   /^\/api\/approval-requests$/,
+  // 2026-11-12 (chat approvals): POST /api/approval-requests/<id>/chat-decision — the agent
+  // relays the owner's chat reply; Command Center re-verifies the owner's message from the
+  // gateway's own inbound record before minting anything.
+  /^\/api\/approval-requests\/[^/]+\/chat-decision$/,
   /^\/api\/agents\/[^/]+\/memory-logs$/,
   /^\/api\/agents\/[^/]+\/openclaw$/,
   /^\/api\/anthology\/gate$/,
