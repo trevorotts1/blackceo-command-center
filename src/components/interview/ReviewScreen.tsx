@@ -22,8 +22,10 @@
  *   4. THE GATED BUILD — "Build my company", disabled until ALL THREE gate flags
  *      are true, exactly as in InterviewClient/DepartmentBoard. On click it POSTs
  *      /api/interview/complete (the same script the Telegram agent presses) and
- *      routes: pass → /onboarding/building, needs-review → calm holding screen,
- *      fail → drill-back list. AI Workforce standard-first (PHASE 6 item 6): on
+ *      routes: pass and needs-review → /onboarding/building (one meaning, one
+ *      destination), fail → drill-back list, 409 → the plain reasons the gate
+ *      gave plus an "Answer now" for every question still open, 429 → wait and
+ *      press again. AI Workforce standard-first (PHASE 6 item 6): on
  *      a STANDARD_READY box (the `standardReady` prop from the host's
  *      /api/interview/gate-status read) the trigger reads "Apply my
  *      customizations" — the interview EDITS the prebuilt foundation instead of
@@ -121,6 +123,12 @@ export interface ReviewScreenProps {
    * the question number (or null) so the host can resume the interview there.
    */
   onCircleBack?: (questionNumber: number | null) => void;
+  /**
+   * Hand control back to the conversation for one structured question the
+   * completion gate says is still open (the "Answer now" buttons on a refusal).
+   * Receives the question id.
+   */
+  onCircleBackStructured?: (questionId: string) => void;
   /** Notified after a successful inline edit, with the updated row. */
   onEdited?: (updated: ReviewAnswer) => void;
   className?: string;
@@ -203,10 +211,21 @@ interface CompleteResponse {
   status?: 'pass' | 'needs-review' | 'fail';
   redirect?: string;
   reasons?: string[];
+  /** Question ids the gate says are still open — each gets an "Answer now". */
+  missingQuestionIds?: string[];
   message?: string;
   error?: string;
   missing?: CompleteMissingItem[];
   alreadyComplete?: boolean;
+}
+
+/**
+ * A 409 from /api/interview/complete: plain-sentence reasons plus the open
+ * question ids, so the screen can name what to fix and take the owner there.
+ */
+interface Refusal {
+  reasons: string[];
+  missingQuestionIds: string[];
 }
 
 /* -------------------------------------------------------------------------- */
@@ -219,10 +238,9 @@ const ALL_GATES_FALSE: GateFlags = {
   noUnprovenancedDeclines: false,
 };
 
-/** Terminal screens the /complete verdict can route us to (pass redirects away). */
-type Outcome =
-  | { kind: 'needs-review'; message: string }
-  | { kind: 'fail'; reasons: string[] };
+/** The one terminal screen the /complete verdict can route us to (pass and
+ *  needs-review both redirect away). */
+type Outcome = { kind: 'fail'; reasons: string[] };
 
 /* -------------------------------------------------------------------------- */
 /* helpers                                                                     */
@@ -317,6 +335,7 @@ export default function ReviewScreen({
   sessionId,
   autoLoad = true,
   onCircleBack,
+  onCircleBackStructured,
   onEdited,
   className,
   standardReady = false,
@@ -347,6 +366,8 @@ export default function ReviewScreen({
   // Build trigger.
   const [submitting, setSubmitting] = useState(false);
   const [completeError, setCompleteError] = useState<string | null>(null);
+  /** A 409 refusal, as plain sentences + the question ids to go back to. */
+  const [refusal, setRefusal] = useState<Refusal | null>(null);
   const [outcome, setOutcome] = useState<Outcome | null>(null);
   /** True when the server already had interviewComplete set (idempotency guard)
    *  — next press should POST with retryKick to re-fire a potentially lost kick. */
@@ -451,6 +472,7 @@ export default function ReviewScreen({
     if (!allGatesPass || submitting) return; // belt-and-suspenders
     setSubmitting(true);
     setCompleteError(null);
+    setRefusal(null);
     setNeedsRetryKick(false);
     try {
       // The complete route's schema accepts {retryKick?: boolean} after MR-37 —
@@ -487,12 +509,14 @@ export default function ReviewScreen({
         return;
       }
       if (res.ok && data.status === 'needs-review') {
-        setOutcome({
-          kind: 'needs-review',
-          message:
-            data.message ??
-            "Thanks — we're reviewing your answers. Your workforce will start building shortly; no action is needed from you.",
-        });
+        // needs-review means the same thing as pass for the owner: the build
+        // runs. Same refresh, same redirect — one outcome, one screen.
+        try {
+          await refreshInterviewGate();
+        } catch {
+          /* non-fatal — the layout's InterviewGateSync refreshes it too */
+        }
+        router.push(data.redirect || '/onboarding/building');
         return;
       }
       if (res.ok && data.status === 'fail') {
@@ -503,8 +527,19 @@ export default function ReviewScreen({
         // If the 409 includes alreadyComplete + the interview is indeed done, flag
         // the next submission as a retry-kick so the operator can recover a lost kick.
         if (data.alreadyComplete) setNeedsRetryKick(true);
-        setCompleteError(formatMissing(data));
+        const reasons = data.reasons ?? [];
+        if (reasons.length > 0) {
+          // Name what to fix: one plain sentence per reason, plus an "Answer now"
+          // for every question the gate says is still open.
+          setRefusal({ reasons, missingQuestionIds: data.missingQuestionIds ?? [] });
+        } else {
+          setCompleteError(formatMissing(data));
+        }
         void loadState();
+        return;
+      }
+      if (res.status === 429) {
+        setCompleteError(data.message ?? 'Please wait a few minutes and press the button again.');
         return;
       }
       // Catch-all: flag alreadyComplete so the next press retries with a kick.
@@ -531,9 +566,6 @@ export default function ReviewScreen({
         }}
       />
     );
-  }
-  if (outcome?.kind === 'needs-review') {
-    return <NeedsReviewScreen message={outcome.message} />;
   }
 
   // Plain computation (not a hook) — it sits after the conditional terminal
@@ -640,6 +672,8 @@ export default function ReviewScreen({
           missingDepts={missingDepts}
           submitting={submitting}
           completeError={completeError}
+          refusal={refusal}
+          onAnswerNow={onCircleBackStructured}
           onBuild={() => void submitComplete()}
           standardReady={standardReady}
         />
@@ -857,6 +891,8 @@ function BuildGate({
   missingDepts,
   submitting,
   completeError,
+  refusal,
+  onAnswerNow,
   onBuild,
   standardReady,
 }: {
@@ -865,6 +901,10 @@ function BuildGate({
   missingDepts: number;
   submitting: boolean;
   completeError: string | null;
+  /** A 409 refusal: plain reasons + the question ids still open. */
+  refusal: Refusal | null;
+  /** Hands one open structured question back to the conversation. */
+  onAnswerNow?: (questionId: string) => void;
   onBuild: () => void;
   /** AI Workforce standard-first (PHASE 6 item 6): the third-state copy — the
    *  trigger reads "Apply my customizations" and the checklist heading speaks
@@ -917,6 +957,66 @@ function BuildGate({
         >
           <AlertTriangle className="h-4 w-4" aria-hidden style={{ flexShrink: 0, marginTop: '0.1rem' }} />
           <p style={{ margin: 0 }}>{completeError}</p>
+        </div>
+      )}
+
+      {/* A refusal names what to fix, in plain sentences, and takes the owner
+          straight back to any question the gate says is still open. */}
+      {refusal && (
+        <div
+          role="alert"
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '0.6rem',
+            borderRadius: 'var(--iv-radius-sm)',
+            border: '1px solid #e5c07a',
+            background: '#fdf6e3',
+            padding: '0.7rem 0.8rem',
+            fontSize: '0.85rem',
+            color: '#8a6d1f',
+          }}
+        >
+          <ul
+            style={{
+              listStyle: 'none',
+              margin: 0,
+              padding: 0,
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '0.4rem',
+            }}
+          >
+            {refusal.reasons.map((reason, i) => (
+              <li
+                key={i}
+                style={{ display: 'flex', alignItems: 'flex-start', gap: '0.45rem' }}
+              >
+                <AlertTriangle
+                  className="h-4 w-4"
+                  aria-hidden
+                  style={{ flexShrink: 0, marginTop: '0.1rem' }}
+                />
+                <span>{reason}</span>
+              </li>
+            ))}
+          </ul>
+          {refusal.missingQuestionIds.length > 0 && (
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem' }}>
+              {refusal.missingQuestionIds.map((questionId) => (
+                <button
+                  key={questionId}
+                  type="button"
+                  onClick={() => onAnswerNow?.(questionId)}
+                  disabled={!onAnswerNow}
+                  className={iv.btnGhost}
+                  style={{ padding: '0.3rem 0.6rem', fontSize: '0.8rem' }}
+                >
+                  Answer now
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
@@ -975,36 +1075,6 @@ function GateRow({ done, label }: { done: boolean; label: string }) {
 /* -------------------------------------------------------------------------- */
 /* terminal screens: needs-review + fail (distinct renders)                    */
 /* -------------------------------------------------------------------------- */
-
-function NeedsReviewScreen({ message }: { message: string }) {
-  return (
-    <div className={iv.root}>
-      <div className={iv.stage} style={{ alignItems: 'center', textAlign: 'center', maxWidth: '32rem' }}>
-        <div
-          style={{
-            display: 'inline-flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            height: '4rem',
-            width: '4rem',
-            borderRadius: 'var(--iv-radius)',
-            background: 'var(--iv-accent-wash)',
-            marginBottom: '0.5rem',
-          }}
-        >
-          <ClipboardList className="h-8 w-8" aria-hidden style={{ color: 'var(--iv-accent-strong)' }} />
-        </div>
-        <h1 className={iv.question} style={{ fontSize: '1.6rem' }}>
-          Thanks — we&apos;re reviewing your answers
-        </h1>
-        <p className={iv.lede}>{message}</p>
-        <p style={{ fontSize: '0.82rem', color: 'var(--iv-ink-faint)', marginTop: '0.5rem' }}>
-          You can close this tab. We&apos;ll be in touch shortly — no action needed.
-        </p>
-      </div>
-    </div>
-  );
-}
 
 function FailScreen({ reasons, onReview }: { reasons: string[]; onReview: () => void }) {
   return (
