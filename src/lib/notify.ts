@@ -1001,7 +1001,7 @@ export async function notifyOwnerPrivate(opts: {
   expectedChatId: string;
   message: string;
 }): Promise<{ status: 'accepted'; messageId: string } | { status: 'uncertain' | 'not-dispatched' }> {
-  if (ownerSendsSuppressed() || process.env.MC_COMPANY_ID !== opts.companyId ||
+  if (ownerSendsSuppressed() || ownerSendsHeld() || process.env.MC_COMPANY_ID !== opts.companyId ||
       !opts.expectedChatId || resolveOwnerChatId() !== opts.expectedChatId) {
     return { status: 'not-dispatched' };
   }
@@ -1105,6 +1105,10 @@ export function notifyOwner(message: string): boolean {
     escalateUndeliverableOwner('no owner chat resolvable', message);
     // Still `false`: callers that DO check (e.g. interview/send-link) must keep
     // reporting "owner not reachable" to the user. The escalation is additive.
+    return false;
+  }
+  if (ownerSendsHeld()) {
+    appendNotificationLog({ ts: new Date().toISOString(), kind: 'owner_send_held', message });
     return false;
   }
   const dispatched = notifyTelegram({ chatId, message });
