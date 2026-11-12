@@ -191,7 +191,7 @@ test('[U33/C-02] a card missing ONLY its persona is also held, naming just that 
   assert.equal(taskStatus(taskId), 'backlog');
   const holdEvents = eventsFor(taskId, 'triad_gate_hold');
   assert.equal(holdEvents.length, 1);
-  assert.match(holdEvents[0].message, /Missing: persona/);
+  assert.match(holdEvents[0].message, /Still needs: a working style/);
 });
 
 // ── (2) Triad-complete: NOT held — proceeds past GUARD 7 ────────────────────
