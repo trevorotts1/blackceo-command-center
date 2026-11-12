@@ -72,7 +72,7 @@ function fixturePayload(overall: 'live' | 'degraded' | 'offline'): {
       latencyMs: 12,
       error: overall === 'offline' ? 'unauthorized_401: gateway rejected token' : undefined,
       probedAt: now,
-      tier: 'critical',
+      tier: 'auxiliary',
     },
     {
       component: 'cloudflare_tunnel',
@@ -256,7 +256,8 @@ describe('HealthIndicator — operator variant', () => {
 
     const criticalSection = criticalHeading.closest('section') as HTMLElement;
     expect(within(criticalSection).getByText('Database')).toBeTruthy();
-    expect(within(criticalSection).getByText('OpenClaw Gateway')).toBeTruthy();
+    // U-01: the gateway is a counted auxiliary row, never critical.
+    expect(within(criticalSection).queryByText('OpenClaw Gateway')).toBeNull();
     // Providers must NOT double up under Critical/Auxiliary.
     expect(within(criticalSection).queryByText('Anthropic')).toBeNull();
 
@@ -264,6 +265,7 @@ describe('HealthIndicator — operator variant', () => {
     expect(within(providersSection).getByText('Anthropic')).toBeTruthy();
 
     const auxSection = auxHeading.closest('section') as HTMLElement;
+    expect(within(auxSection).getByText('OpenClaw Gateway')).toBeTruthy();
     expect(within(auxSection).getByText('Cloudflare Tunnel')).toBeTruthy();
 
     // U47: the Live Feed dot folded into the drawer as an auxiliary row.
@@ -291,7 +293,7 @@ describe('FIX47 — readiness is truthful across client and board indicators', (
   const ready = { status: 'ok', embeddings: { status: 'ok', degraded: false } };
   for (const [name, system, health, expected] of [
     ['healthy', fixturePayload('live'), ready, 'All systems working'],
-    ['embedding degradation in HTTP 200', fixturePayload('live'), { status: 'ok', embeddings: { status: 'degraded', degraded: true } }, 'Needs attention'],
+    ['embedding degradation in HTTP 200', fixturePayload('live'), { status: 'ok', embeddings: { status: 'degraded', degraded: true } }, 'All systems working'],
     ['migration degradation', fixturePayload('live'), { ...ready, status: 'degraded' }, 'Needs attention'],
     ['disconnected gateway', fixturePayload('offline'), ready, 'Offline'],
     ['unknown overall', { ...fixturePayload('live'), overall: 'unknown' }, ready, 'Status not available'],
@@ -354,16 +356,18 @@ describe('FIX47 — readiness is truthful across client and board indicators', (
     expect(screen.getByTestId('health-indicator').textContent).toBe('All systems working');
   });
 
-  it('does not clear degraded readiness until the embedding check also recovers', async () => {
+  it('embedding trouble alone never moves the client badge (advisory since U-01)', async () => {
+    // embedding_readiness is advisory: a degraded embedding check must not
+    // change the badge, and recovery changes nothing either.
     vi.useFakeTimers();
     let resolveHealth!: (response: Response) => void;
     let health: Response | Promise<Response> = jsonResponse({ status: 'ok', embeddings: { status: 'degraded', degraded: true } });
     global.fetch = stubFetch({ [STATUS_URL]: () => jsonResponse(fixturePayload('live')), '/api/health': () => health }) as typeof fetch;
     await act(async () => { render(<HealthIndicator viewerRole="client" />); });
-    expect(screen.getByTestId('health-indicator').textContent).toBe('Needs attention');
+    expect(screen.getByTestId('health-indicator').textContent).toBe('All systems working');
     health = new Promise<Response>((resolve) => { resolveHealth = resolve; });
     await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
-    expect(screen.getByTestId('health-indicator').textContent).toBe('Needs attention');
+    expect(screen.getByTestId('health-indicator').textContent).toBe('All systems working');
     await act(async () => { resolveHealth(jsonResponse(ready)); });
     expect(screen.getByTestId('health-indicator').textContent).toBe('All systems working');
   });

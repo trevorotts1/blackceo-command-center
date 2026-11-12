@@ -8,10 +8,9 @@
  * current payload and exposes a refresh button that triggers `?force=1`
  * re-runs.
  *
- * U-06 (CC-039): the old bootstrap admin action is gone. It posted
- * `/api/system/bootstrap` from the browser without a bearer token, so the
- * route refused it every time — a button that could not work. Bootstrap runs
- * out of band; this drawer is diagnostics only.
+ * U-06 (CC-039): the old browser admin action is gone. It sent its start
+ * request from the browser without a bearer token, so the route refused it
+ * every time. The start flow runs out of band; this drawer is diagnostics only.
  *
  * U47 change: rows are grouped by the U46 `tier` field (Critical /
  * Auxiliary / Model Providers) instead of a hand-maintained component-id
