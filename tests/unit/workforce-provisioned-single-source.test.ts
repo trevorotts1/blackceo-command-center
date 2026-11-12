@@ -141,7 +141,7 @@ test('case 7: the reason names both interview sources and the departments signal
   setSelfClientRow(0);
   writeBuildState({ interviewComplete: true });
   const { reason } = isWorkforceProvisioned(STAFFED);
-  assert.match(reason, /interview_db=0/);
+  assert.match(reason, /interview_db=false/);
   assert.match(reason, /interview_file=complete/);
   assert.match(reason, /materialized_depts=true/);
 });
