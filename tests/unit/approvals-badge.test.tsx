@@ -50,3 +50,23 @@ describe('mounted where the owner lands', () => {
     expect(src('components/Header.tsx')).toContain('<ApprovalsBadge />');
   });
 });
+
+describe('dashboard home page render', () => {
+  it('renders the badge in the home header when approvals are waiting', async () => {
+    vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (String(url).startsWith('/api/approval-requests')) return { ok: true, json: async () => ({ pending_count: 2 }) };
+      return { ok: false, status: 503, json: async () => ({}) };
+    }));
+    vi.doMock('@/components/HealthIndicator', () => ({ HealthIndicator: () => <span data-testid="health-indicator" /> }));
+    vi.doMock('next/navigation', () => ({ useRouter: () => ({ push: vi.fn() }), usePathname: () => '/' }));
+    const { default: HomePage } = await import('../../src/app/page');
+    const { container } = render(<HomePage />);
+    const badge = await screen.findByTestId('approvals-badge');
+    expect(badge.textContent).toContain('2 approvals waiting');
+    expect(badge.getAttribute('href')).toBe('/approvals');
+    const header = container.querySelector('header');
+    expect(header?.contains(badge)).toBe(true);
+    expect(header?.contains(screen.getByTestId('health-indicator'))).toBe(true);
+  });
+});
