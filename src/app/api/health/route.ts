@@ -179,16 +179,34 @@ function embeddingHealthFallback(): Record<string, unknown> {
   };
 }
 
+const EMBEDDINGS_CACHE_MS = 5 * 60 * 1000;
+let embeddingsCache: { at: number; block: Record<string, unknown> } | null = null;
+
+/** Test-only: drop the cached embeddings block between cases. */
+export function __resetEmbeddingsCache(): void {
+  embeddingsCache = null;
+}
+
 async function getEmbeddingsBlock(): Promise<Record<string, unknown>> {
+  // The probe shells out to python3 and scans two SQLite stores; a health poll
+  // (or a watchdog) must not pay that on every request. Five minutes is fresh
+  // enough for a status surface and cheap enough for a polled endpoint.
+  if (embeddingsCache && Date.now() - embeddingsCache.at < EMBEDDINGS_CACHE_MS) {
+    return embeddingsCache.block;
+  }
   try {
     const py = await probeEmbeddingHealthPy();
     if (py) {
       py.source = 'embedding_health.py';
+      embeddingsCache = { at: Date.now(), block: py };
       return py;
     }
-    return embeddingHealthFallback();
+    const fallback = embeddingHealthFallback();
+    embeddingsCache = { at: Date.now(), block: fallback };
+    return fallback;
   } catch {
-    // Absolute last resort — surface a degraded block rather than 500.
+    // Absolute last resort — surface a degraded block rather than 500. NOT
+    // cached: the next poll should try the probe again.
     return {
       check: 'dual_store_embedding_health',
       status: 'degraded',

@@ -13,6 +13,7 @@
  *   4. No provider key (none)  -> semanticReady false, degraded true, keyword-only note
  *   5. Provider/model mismatch -> active=openai but only gemini rows -> semanticReady false
  *   6. Never throws            -> returns a value on every path
+ *   7. Health route cache      -> two calls inside 5 minutes probe Python once
  *
  * One shared DB per file (node:test isolates each file in its own process);
  * inserts are monotonic so assertions do not depend on cross-test teardown.
@@ -156,4 +157,48 @@ test('getSOPEmbeddingHealth: active=openai but only gemini rows stored → not s
       'must warn that no rows match the active model'
     );
   });
+});
+
+// 7. /api/health embeddings cache -------------------------------------------
+test('health route: two calls inside five minutes run the Python probe once', async () => {
+  // A stand-in probe that records every invocation in a counter file. If the
+  // route caches the block, two GETs inside the 5-minute window spawn it once.
+  const counter = path.join(TMP_DIR, 'probe-count.txt');
+  const probe = path.join(TMP_DIR, 'fake_embedding_health.py');
+  fs.writeFileSync(
+    probe,
+    [
+      'import json, pathlib',
+      `pathlib.Path(${JSON.stringify(counter)}).open("a").write("x")`,
+      'print(json.dumps({',
+      '    "check": "dual_store_embedding_health",',
+      '    "status": "ok",',
+      '    "degraded": False,',
+      '    "asymmetric": False,',
+      '    "asymmetric_detail": "stand-in probe",',
+      '    "persona_index": None,',
+      '    "sop_index": {},',
+      '}))',
+    ].join('\n')
+  );
+
+  const savedScript = process.env.EMBEDDING_HEALTH_SCRIPT;
+  process.env.EMBEDDING_HEALTH_SCRIPT = probe;
+  try {
+    const db = await import('../../src/lib/db');
+    db.getDb(); // migrations, so GET() can answer 200
+    const { GET, __resetEmbeddingsCache } = await import('../../src/app/api/health/route');
+    __resetEmbeddingsCache();
+
+    const first = await GET();
+    const second = await GET();
+    assert.equal(first.status, 200);
+    assert.equal(second.status, 200);
+
+    const runs = fs.existsSync(counter) ? fs.readFileSync(counter, 'utf-8').length : 0;
+    assert.equal(runs, 1, 'two GETs inside five minutes must run the Python probe once');
+  } finally {
+    if (savedScript === undefined) delete process.env.EMBEDDING_HEALTH_SCRIPT;
+    else process.env.EMBEDDING_HEALTH_SCRIPT = savedScript;
+  }
 });
