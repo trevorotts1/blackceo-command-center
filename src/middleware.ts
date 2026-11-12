@@ -693,7 +693,14 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
   // the subdomain.
   const cfJwt = request.headers.get('cf-access-jwt-assertion');
   const cfEmail = request.headers.get('cf-access-authenticated-user-email');
-  if (cfJwt) recordCfAccessSeen(cfEmail);
+  // Only a request that SHOULD have come through the Access edge counts as
+  // evidence of a bypass: not a bearer-authenticated agent call and not a
+  // loopback probe (both legitimately arrive with no Access header).
+  if (cfJwt) {
+    recordCfAccessSeen(cfEmail, true);
+  } else if (!request.headers.get('authorization') && !/^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i.test(request.headers.get('host') || '')) {
+    recordCfAccessSeen(null, false);
+  }
 
   if (REQUIRE_CF_ACCESS) {
     try { await resolveTenantContext(request); }

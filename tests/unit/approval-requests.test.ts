@@ -15,6 +15,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { getDb } from '../../src/lib/db';
 import { migrations } from '../../src/lib/db/migrations';
 import { signTenantGrant } from '../../src/lib/auth/tenant-context';
+import { ownerSubjectForChatId } from '../../src/lib/auth/owner-login';
 import { BEARER_REQUIRED_WRITE_ROUTES, requiresBearerForWrite } from '../../src/lib/bearer-required-routes';
 
 const HOST = 'cc.inbox.test';
@@ -211,11 +212,14 @@ describe('the owner decision', () => {
 
     // The exact call the safety gate makes: GET with the agent bearer.
     const rec = await (await approvalRecord(polled.approval_id, { bearer: TOKEN })).json();
+    // The binding rides in scope JSON; no extra launch_approvals columns.
+    expect(JSON.parse(rec.scope)).toEqual({ location_id: LOCATION, action: 'publish', object_key: 'approve-me' });
     expect(rec).toMatchObject({
-      kind: 'publish', location_id: LOCATION, action: 'publish', object_key: 'approve-me',
-      plan_sha256: PLAN, approver: OWNER, revoked: false, verification_class: 'authenticated_platform_record',
-      client_identity_ref: OWNER,
+      kind: 'publish', plan_hash: `sha256:${PLAN}`, client_identity_ref: OWNER, revoked: false,
+      location_id: LOCATION, action: 'publish', object_key: 'approve-me',
+      plan_sha256: PLAN, approver: OWNER, verification_class: 'authenticated_platform_record',
     });
+    expect(Date.parse(rec.expires_at)).toBeGreaterThan(Date.now() + 6 * 24 * 3600 * 1000);
     expect(gateMismatches(rec, { kind: 'publish', location_id: LOCATION, action: 'publish', object_key: 'approve-me', plan_sha256: PLAN })).toEqual([]);
     // Id shape the gate accepts (^[A-Za-z0-9_-]{8,128}$).
     expect(polled.approval_id).toMatch(/^[A-Za-z0-9_-]{8,128}$/);
@@ -309,25 +313,66 @@ describe('the deep link and the list page', () => {
   });
 });
 
+describe('owner-login identity', () => {
+  const OWNER_CHAT = '7770001234';
+
+  it('accepts the session of the tenant\'s own owner chat (invited-owner:<sha256(chat)>), and nobody else', async () => {
+    process.env.OPENCLAW_OWNER_CHAT_ID = OWNER_CHAT;
+    try {
+      const made = await (await create(body({ object_key: 'owner-login-ok' }), { bearer: TOKEN })).json();
+      const stale = await decide(made.request_id, 'approve', '', await cookieFor(ownerSubjectForChatId('9990009999')));
+      expect(stale.ok).toBe(false); // an invited-owner hash that is not the current owner chat
+      const own = await decide(made.request_id, 'approve', '', await cookieFor(ownerSubjectForChatId(OWNER_CHAT)));
+      expect(own).toMatchObject({ ok: true, status: 'approved' });
+      const polled = await (await status(made.request_id, { bearer: TOKEN })).json();
+      const rec = await (await approvalRecord(polled.approval_id, { bearer: TOKEN })).json();
+      expect(rec.approver).toBe(ownerSubjectForChatId(OWNER_CHAT));
+      expect(rec.verification_class).toBe('authenticated_platform_record');
+    } finally {
+      delete process.env.OPENCLAW_OWNER_CHAT_ID;
+    }
+  });
+
+  it('fails closed when no owner chat is configured', async () => {
+    delete process.env.OPENCLAW_OWNER_CHAT_ID;
+    const made = await (await create(body({ object_key: 'owner-login-closed' }), { bearer: TOKEN })).json();
+    const out = await decide(made.request_id, 'approve', '', await cookieFor(ownerSubjectForChatId(OWNER_CHAT)));
+    expect(out.ok).toBe(false);
+  });
+});
+
+describe('approval lifetime', () => {
+  it('covers the whole window being approved (valid_until) and caps at 30 days', async () => {
+    const until = new Date(Date.now() + 20 * 24 * 3600 * 1000).toISOString();
+    const made = await (await create(body({ object_key: 'long-window', valid_until: until }), { bearer: TOKEN })).json();
+    expect(made.valid_until).toBe(until);
+    await decide(made.request_id, 'approve', '', ownerCookie);
+    const polled = await (await status(made.request_id, { bearer: TOKEN })).json();
+    const rec = await (await approvalRecord(polled.approval_id, { bearer: TOKEN })).json();
+    expect(Date.parse(rec.expires_at)).toBe(Date.parse(until));
+    const tooFar = await create(body({ object_key: 'x', valid_until: new Date(Date.now() + 90 * 24 * 3600 * 1000).toISOString() }), { bearer: TOKEN });
+    expect(tooFar.status).toBe(400);
+  });
+
+  it('a chat-reply record never carries the gate fields', async () => {
+    const { POST } = await import('../../src/app/api/launch-approvals/route');
+    const res = await POST(req('/api/launch-approvals', {
+      method: 'POST', cookie: ownerCookie,
+      body: { kind: 'publish', plan_hash: `sha256:${PLAN}`, scope: 'free text', source_message: { ref: 'chat-1', sender: OWNER, text: `APPROVE ${PLAN.slice(0, 8)}` } },
+    }));
+    const rec = await (await approvalRecord((await res.json()).approval_id, { bearer: TOKEN })).json();
+    expect(rec.verification_class).toBeUndefined();
+    expect(rec.location_id).toBeUndefined();
+  });
+});
+
 describe('migration 179', () => {
   const mig = () => migrations.find((m) => m.id === '179')!;
 
   it('exists and re-runs without error', () => {
     expect(mig()?.name).toBe('approval_requests_inbox');
+    expect(Object.keys(getDb().prepare('SELECT * FROM launch_approvals LIMIT 0').columns().reduce((o: Record<string, 1>, c) => ({ ...o, [c.name]: 1 }), {})))
+      .not.toContain('location_id'); // launch_approvals is not altered
     expect(() => { mig().up(getDb()); mig().up(getDb()); }).not.toThrow();
   });
-
-  it('keeps the new gate fields as immutable as the old ones', () => {
-    const db = getDb();
-    db.prepare(
-      `INSERT INTO launch_approvals (approval_id, tenant_id, client_identity_ref, kind, plan_hash, scope, expires_at, source_message_ref, created_at,
-         location_id, action, object_key, plan_sha256, approver, verification_class)
-       VALUES ('immutable-row-1', 'tenant-a', ?, 'publish', ?, 's', '2099-01-01T00:00:00.000Z', 'imm-m', '2026-11-12T00:00:00.000Z',
-         'l', 'publish', 'o', ?, ?, 'authenticated_platform_record')`,
-    ).run(OWNER, `sha256:${PLAN}`, PLAN, OWNER);
-    for (const col of ['location_id', 'action', 'object_key', 'plan_sha256', 'approver', 'verification_class']) {
-      expect(() => db.prepare(`UPDATE launch_approvals SET ${col}='tampered' WHERE approval_id='immutable-row-1'`).run()).toThrow(/immutable/);
-    }
-    expect(() => db.prepare("UPDATE launch_approvals SET revoked=1 WHERE approval_id='immutable-row-1'").run()).not.toThrow();
-  });
-});
+})

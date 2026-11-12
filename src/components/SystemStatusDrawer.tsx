@@ -21,6 +21,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { X, RefreshCw, PlayCircle } from 'lucide-react';
 import type { SystemStatus, TieredProbeResult } from '@/lib/probes/types';
+import { explainStatus } from '@/lib/status-explanations';
 
 interface StatusPayload {
   overall: SystemStatus;
@@ -493,6 +494,7 @@ function Section({ title, rows }: { title: string; rows: TieredProbeResult[] }) 
               {typeof r.latencyMs === 'number' && <span>{r.latencyMs}ms</span>}
               {r.error && <span className="text-orange-600 truncate">{r.error}</span>}
             </div>
+            <StatusExplanationBlock row={r} />
             {r.detail && Object.keys(r.detail).length > 0 && (
               <details className="mt-2">
                 <summary className="text-xs text-gray-500 cursor-pointer hover:text-gray-700">Detail</summary>
@@ -505,5 +507,26 @@ function Section({ title, rows }: { title: string; rows: TieredProbeResult[] }) 
         ))}
       </ul>
     </section>
+  );
+}
+
+/** Plain-English "what does this mean for me" for any row that is not healthy. */
+function StatusExplanationBlock({ row }: { row: TieredProbeResult }) {
+  const info = explainStatus(row);
+  if (!info) return null;
+  return (
+    <details className="mt-2" data-testid={`status-explain-${row.component}`}>
+      <summary className="text-xs font-medium text-brand-700 cursor-pointer hover:underline">
+        What does this mean for me?
+      </summary>
+      <div className="mt-1 space-y-1 text-xs text-gray-700 bg-orange-50 border border-orange-100 rounded p-2">
+        <p>{info.meaning}</p>
+        <p className="font-medium">{info.actionNeeded ? 'You need to act.' : 'You do not need to do anything.'}</p>
+        <p>{info.nextStep}</p>
+        {info.link ? (
+          <a href={info.link.href} className="underline text-brand-700">{info.link.label}</a>
+        ) : null}
+      </div>
+    </details>
   );
 }

@@ -8653,15 +8653,12 @@ export const migrations: Migration[] = [
     id: '179',
     name: 'approval_requests_inbox',
     up: (db) => {
-      // Owner approvals inbox. (1) approval_requests: what the agent asks the
+      // Owner approvals inbox: approval_requests holds what the agent asks the
       // owner to approve (it can create and read these, never decide them).
-      // (2) launch_approvals gains the fields the Convert and Flow safety gate
-      // reads back (location_id, action, object_key, plan_sha256, approver,
-      // verification_class) plus request_id; they are written only by the owner
-      // decision path in src/lib/approval-requests.ts. (3) The revoke-only
-      // trigger is recreated so the new columns are as immutable as the old
-      // ones. Additive and idempotent: re-running changes nothing.
-      console.log('[Migration 179] Adding approval_requests and gate fields on launch_approvals...');
+      // launch_approvals is NOT altered: the Convert and Flow binding rides in
+      // its immutable `scope` JSON (src/lib/approval-requests.ts). Additive and
+      // idempotent: re-running changes nothing.
+      console.log('[Migration 179] Adding approval_requests...');
       db.exec(`
         CREATE TABLE IF NOT EXISTS approval_requests (
           request_id TEXT PRIMARY KEY,
@@ -8677,6 +8674,7 @@ export const migrations: Migration[] = [
           requested_by TEXT NOT NULL,
           status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','changes_requested')),
           expires_at TEXT NOT NULL,
+          valid_until TEXT,
           created_at TEXT NOT NULL,
           decided_at TEXT,
           decided_by TEXT,
@@ -8685,28 +8683,6 @@ export const migrations: Migration[] = [
         );
         CREATE INDEX IF NOT EXISTS idx_approval_requests_status ON approval_requests(tenant_id, status, created_at);
         CREATE INDEX IF NOT EXISTS idx_approval_requests_plan ON approval_requests(tenant_id, kind, location_id, action, object_key, plan_sha256);
-      `);
-      const have = new Set(
-        (db.prepare('PRAGMA table_info(launch_approvals)').all() as { name: string }[]).map((c) => c.name),
-      );
-      for (const column of ['location_id', 'action', 'object_key', 'plan_sha256', 'approver', 'verification_class', 'request_id']) {
-        if (!have.has(column)) db.exec(`ALTER TABLE launch_approvals ADD COLUMN ${column} TEXT`);
-      }
-      db.exec(`
-        DROP TRIGGER IF EXISTS launch_approvals_revoke_only;
-        CREATE TRIGGER launch_approvals_revoke_only
-          BEFORE UPDATE ON launch_approvals
-          WHEN NEW.approval_id IS NOT OLD.approval_id OR NEW.tenant_id IS NOT OLD.tenant_id
-            OR NEW.client_identity_ref IS NOT OLD.client_identity_ref OR NEW.kind IS NOT OLD.kind
-            OR NEW.plan_hash IS NOT OLD.plan_hash OR NEW.scope IS NOT OLD.scope
-            OR NEW.cap_minor IS NOT OLD.cap_minor OR NEW.currency IS NOT OLD.currency
-            OR NEW.expires_at IS NOT OLD.expires_at OR NEW.source_message_ref IS NOT OLD.source_message_ref
-            OR NEW.created_at IS NOT OLD.created_at OR (OLD.revoked = 1 AND NEW.revoked = 0)
-            OR NEW.location_id IS NOT OLD.location_id OR NEW.action IS NOT OLD.action
-            OR NEW.object_key IS NOT OLD.object_key OR NEW.plan_sha256 IS NOT OLD.plan_sha256
-            OR NEW.approver IS NOT OLD.approver OR NEW.verification_class IS NOT OLD.verification_class
-            OR NEW.request_id IS NOT OLD.request_id
-          BEGIN SELECT RAISE(ABORT, 'launch_approvals rows are immutable except revoke'); END;
       `);
       console.log('[Migration 179] approval_requests ready');
     },

@@ -20,11 +20,12 @@
  * Pure of fs/network; the DB is reached through the shared `@/lib/db` layer.
  */
 import { randomUUID } from 'node:crypto';
+import { configuredPublicOrigin } from '@/lib/auth/tenant-context';
 import { queryAll, queryOne, run, transaction } from '@/lib/db';
 import type { TenantContext } from '@/lib/auth/tenant-context';
 import {
   PLAN_HASH_RE,
-  VERIFICATION_CLASS_OWNER,
+  OWNER_REQUEST_REF_PREFIX,
   registeredClientIdentity,
 } from '@/lib/launch-approvals';
 
@@ -38,7 +39,7 @@ const DEFAULT_TTL_MS = 7 * 24 * 3600 * 1000;
 const MAX_TTL_MS = 30 * 24 * 3600 * 1000;
 const ALLOWED_FIELDS = new Set([
   'kind', 'location_id', 'action', 'object_key', 'plan_sha256', 'title', 'summary',
-  'preview', 'requested_by', 'expires_at',
+  'preview', 'requested_by', 'expires_at', 'valid_until',
 ]);
 /** Fields only the server sets; naming one is a direct-write attempt. */
 const SERVER_OWNED = [
@@ -69,6 +70,8 @@ export interface ApprovalRequest {
   requested_by: string;
   status: RequestStatus;
   expires_at: string;
+  /** End of the window the owner is approving (e.g. the end of the week). The minted approval stays valid at least until then. */
+  valid_until: string | null;
   created_at: string;
   decided_at: string | null;
   decided_by: string | null;
@@ -77,12 +80,14 @@ export interface ApprovalRequest {
   approval_id: string | null;
   /** Stable deep link the agent can send to the owner. */
   path: string;
+  /** Absolute deep link when the box's public URL is configured, else null. */
+  approval_url: string | null;
 }
 
 interface Row {
   request_id: string; tenant_id: string; kind: RequestKind; location_id: string; action: string;
   object_key: string; plan_sha256: string; title: string; summary: string; preview_json: string;
-  requested_by: string; status: 'pending' | 'approved' | 'changes_requested'; expires_at: string;
+  requested_by: string; status: 'pending' | 'approved' | 'changes_requested'; expires_at: string; valid_until: string | null;
   created_at: string; decided_at: string | null; decided_by: string | null;
   decision_note: string | null; approval_id: string | null;
 }
@@ -107,9 +112,10 @@ export function toRequest(r: Row, now = Date.now()): ApprovalRequest {
     request_id: r.request_id, kind: r.kind, location_id: r.location_id, action: r.action,
     object_key: r.object_key, plan_sha256: r.plan_sha256, title: r.title, summary: r.summary,
     preview: parsePreview(r.preview_json), requested_by: r.requested_by,
-    status: expired ? 'expired' : r.status, expires_at: r.expires_at, created_at: r.created_at,
+    status: expired ? 'expired' : r.status, expires_at: r.expires_at, valid_until: r.valid_until, created_at: r.created_at,
     decided_at: r.decided_at, decided_by: r.decided_by, decision_note: r.decision_note,
     approval_id: r.approval_id, path: approvalRequestPath(r.request_id),
+    approval_url: (() => { const o = configuredPublicOrigin(); return o ? `${o.origin}${approvalRequestPath(r.request_id)}` : null; })(),
   };
 }
 
@@ -204,6 +210,13 @@ export function createApprovalRequest(ctx: TenantContext, body: unknown): Reques
     expires = t;
   }
 
+  let validUntil: string | null = null;
+  if (b.valid_until !== undefined) {
+    const t = typeof b.valid_until === 'string' ? Date.parse(b.valid_until) : NaN;
+    if (!Number.isFinite(t) || t <= now || t > now + MAX_TTL_MS) return refuse(400, 'invalid_valid_until');
+    validUntil = new Date(t).toISOString();
+  }
+
   const existing = queryAll<Row>(
     `SELECT * FROM approval_requests
        WHERE tenant_id = ? AND kind = ? AND location_id = ? AND action = ? AND object_key = ? AND plan_sha256 = ?
@@ -216,10 +229,10 @@ export function createApprovalRequest(ctx: TenantContext, body: unknown): Reques
   const requestId = randomUUID();
   run(
     `INSERT INTO approval_requests (request_id, tenant_id, kind, location_id, action, object_key, plan_sha256,
-       title, summary, preview_json, requested_by, status, expires_at, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+       title, summary, preview_json, requested_by, status, expires_at, valid_until, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
     [requestId, ctx.tenantId, kind, locationId, action, objectKey, planSha, title, summary,
-      JSON.stringify(preview), requestedBy, new Date(expires).toISOString(), new Date(now).toISOString()],
+      JSON.stringify(preview), requestedBy, new Date(expires).toISOString(), validUntil, new Date(now).toISOString()],
   );
   const row = queryOne<Row>('SELECT * FROM approval_requests WHERE request_id = ?', [requestId])!;
   return { status: 201, payload: { ...toRequest(row, now) } };
@@ -254,6 +267,12 @@ export function countPendingApprovals(tenantId: string): number {
   return row?.n ?? 0;
 }
 
+/** Approval lifetime: 7 days from the click, extended to cover valid_until (max 30 days). */
+function approvalExpiry(row: Row, nowMs: number): string {
+  const until = row.valid_until ? Date.parse(row.valid_until) : 0;
+  return new Date(Math.min(nowMs + MAX_TTL_MS, Math.max(nowMs + DEFAULT_TTL_MS, until))).toISOString();
+}
+
 export interface DecisionInput { decision: 'approve' | 'request_changes'; note?: string }
 
 /**
@@ -262,8 +281,9 @@ export interface DecisionInput { decision: 'approve' | 'request_changes'; note?:
  * registered client identity). Approve mints exactly one launch_approvals row;
  * a repeated approve returns the same record (idempotent), and the
  * unique (tenant, source_message_ref) constraint backs that up at the table.
- * The minted record lives 7 days from the click (not from the request), so a
- * late yes is still usable.
+ * The minted record lives 7 days from the click (not from the request), or until
+ * the request's valid_until if later (max 30 days), so a late yes is still usable.
+ * Binding: scope = JSON {location_id, action, object_key}; plan_hash = sha256:<hex>.
  */
 export function decideApprovalRequest(ctx: TenantContext, requestId: string, input: unknown): RequestResult {
   const identity = registeredClientIdentity(ctx);
@@ -295,14 +315,13 @@ export function decideApprovalRequest(ctx: TenantContext, requestId: string, inp
     } else {
       const approvalId = randomUUID();
       const digest = PLAN_HASH_RE.exec(row.plan_sha256)![1].toLowerCase();
+      const scope = JSON.stringify({ location_id: row.location_id, action: row.action, object_key: row.object_key });
       run(
         `INSERT INTO launch_approvals (approval_id, tenant_id, client_identity_ref, kind, plan_hash, scope,
-           cap_minor, currency, expires_at, revoked, source_message_ref, created_at,
-           location_id, action, object_key, plan_sha256, approver, verification_class, request_id)
-         VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [approvalId, ctx.tenantId, identity, row.kind, `sha256:${digest}`, `${row.title} — ${row.action} ${row.object_key}`.slice(0, 1000),
-          new Date(nowMs + DEFAULT_TTL_MS).toISOString(), `approval-request:${requestId}`, nowIso,
-          row.location_id, row.action, row.object_key, row.plan_sha256, identity, VERIFICATION_CLASS_OWNER, requestId],
+           cap_minor, currency, expires_at, revoked, source_message_ref, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, 0, ?, ?)`,
+        [approvalId, ctx.tenantId, identity, row.kind, `sha256:${digest}`, scope,
+          approvalExpiry(row, nowMs), `${OWNER_REQUEST_REF_PREFIX}${requestId}`, nowIso],
       );
       run(
         `UPDATE approval_requests SET status = 'approved', decided_at = ?, decided_by = ?, decision_note = ?, approval_id = ?
