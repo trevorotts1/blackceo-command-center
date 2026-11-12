@@ -46,11 +46,10 @@ export interface ProbeFn {
 export type ProbeTier = 'critical' | 'auxiliary';
 
 /**
- * The critical set per U46's binary spec: database + the OpenClaw gateway.
- * Everything else (telegram, memory, jobs, disk, agents, cli, the two
- * Cloudflare probes, unauthorized_401, and every provider_* row) is
- * auxiliary. Kept as a readonly list (not a Set) so it stays trivially
- * diffable in review.
+ * The critical set: the database only. The OpenClaw gateway is a COUNTED
+ * auxiliary row (its outage shows "Degraded", not "Unavailable", because the
+ * dashboard itself still loads). Advisory rows are listed in
+ * ADVISORY_COMPONENTS below and never change the badge.
  */
 export const CRITICAL_COMPONENTS: readonly string[] = [
   'database',
@@ -105,6 +104,33 @@ export function isNotApplicable(c: {
     c.detail?.configured === false ||
     (c.component === 'memory' && c.detail?.entries === 0)
   );
+}
+
+/**
+ * Advisory rows are shown in the operator drawer but never change the header
+ * badge. See 01-BUILD-SPEC U-01 for the written reason behind each entry.
+ */
+export const ADVISORY_COMPONENTS: readonly string[] = [
+  'cli',
+  'cloudflare_tunnel',
+  'cloudflare_access',
+  'memory',
+  'telegram',
+  'unauthorized_401',
+  'embedding_readiness',
+];
+
+export function isAdvisory(component: string): boolean {
+  return component.startsWith('provider_') || ADVISORY_COMPONENTS.includes(component);
+}
+
+/** The single filter every `overall` computation uses (server fresh, server cached, browser). */
+export function countsTowardOverall(c: {
+  component: string;
+  status: SystemStatus;
+  detail?: Record<string, unknown>;
+}): boolean {
+  return !isAdvisory(c.component) && !isNotApplicable(c);
 }
 
 export function computeOverallTiered(components: TieredStatusInput[]): SystemStatus {
