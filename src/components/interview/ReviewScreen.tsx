@@ -977,6 +977,9 @@ function BuildGate({
             color: '#8a6d1f',
           }}
         >
+          <p style={{ margin: 0 }}>
+            Almost there. One more thing we need:
+          </p>
           <ul
             style={{
               listStyle: 'none',
