@@ -116,10 +116,18 @@ test('case 6: five mixed tasks at night produce exactly two carved-out plans', (
   const plans = engine.planSends(rows, ctx(true) as any);
   assert.equal(plans.length, 2);
   const s = stamps(plans);
-  assert.deepStrictEqual(s, ['b1:blocked_notice_sent_at', 'd1:completion_sent_at']);
+  // U-15 (CC-050): the Done message also claims (covers) the ack and progress
+  // stamps so neither can be sent after it; the blocked ask covers the ack.
+  assert.deepStrictEqual(s, [
+    'b1:ack_sent_at',
+    'b1:blocked_notice_sent_at',
+    'd1:ack_sent_at',
+    'd1:completion_sent_at',
+    'd1:progress_last_sent_at',
+  ]);
 });
 
-test('case 7: five mixed tasks by day produce all five stamps in one digest', () => {
+test('case 7: five mixed tasks by day produce all five messages in one digest', () => {
   const oldCreated = new Date(NIGHT.getTime() - 11 * 60 * 1000).toISOString();
   const rows = [
     mkTask({ id: 'd1', status: 'done' }),
@@ -133,7 +141,17 @@ test('case 7: five mixed tasks by day produce all five stamps in one digest', ()
   const s = stamps(plans);
   assert.deepStrictEqual(
     s,
-    ['a1:ack_sent_at', 'b1:blocked_notice_sent_at', 'b2:ack_sent_at', 'd1:completion_sent_at', 'p1:progress_last_sent_at'],
+    [
+      'a1:ack_sent_at',
+      'b1:ack_sent_at',
+      'b1:blocked_notice_sent_at',
+      'b2:ack_sent_at',
+      'd1:ack_sent_at',
+      'd1:completion_sent_at',
+      'd1:progress_last_sent_at',
+      'p1:ack_sent_at',
+      'p1:progress_last_sent_at',
+    ],
   );
 });
 
@@ -143,7 +161,9 @@ test('case 8: five DONE tasks at night coalesce into one digest', () => {
   );
   const plans = engine.planSends(rows, ctx(true) as any);
   assert.equal(plans.length, 1);
-  assert.equal(plans[0].stamps.length, 5);
+  // U-15: each Done message carries its own stamp PLUS the covered ack and
+  // progress stamps (all empty on these rows), so 5 messages claim 15 stamps.
+  assert.equal(plans[0].stamps.length, 15);
   assert.ok(String(plans[0].message).startsWith('Here are 5 quick updates:'));
 });
 
