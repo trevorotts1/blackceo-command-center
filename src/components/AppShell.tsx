@@ -28,8 +28,8 @@ interface NavItem {
 const NAV_ITEMS: NavItem[] = [
   { label: 'Home', href: '/', icon: <Home className="w-5 h-5" /> },
   { label: 'CEO Board', href: '/ceo-board', icon: <BarChart3 className="w-5 h-5" /> },
-  { label: 'Departments', href: '/workspace', icon: <Building2 className="w-5 h-5" /> },
-  { label: 'Departments', href: '/ceo-board/departments', icon: <LayoutGrid className="w-5 h-5" /> },
+  { label: 'Department Boards', href: '/workspace', icon: <Building2 className="w-5 h-5" /> },
+  { label: 'Department Scores', href: '/ceo-board/departments', icon: <LayoutGrid className="w-5 h-5" /> },
   { label: 'Settings', href: '/settings', icon: <Settings className="w-5 h-5" /> },
 ];
 
