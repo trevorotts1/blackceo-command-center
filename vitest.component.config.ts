@@ -182,6 +182,11 @@ export default defineConfig({
       // review fields reach the screen — risks/alternatives + recommended
       // modifications sections, review-type badge, honest empty states.
       'tests/unit/cc-da-review-fields.test.tsx',
+      // BU-16 — a review-screen inline edit replaces that question's answer
+      // ({questionId, answer}: no "Updated on" note, no verbatim prompt), a row
+      // with no question id stays read-only, and the trigger follows the gate's
+      // still-open list; real render proof.
+      'tests/component/review-edit-replaces.test.tsx',
     ],
     env: { NODE_ENV: 'test' },
     testTimeout: 15000,
