@@ -316,6 +316,7 @@ export async function probeCli(): Promise<ProbeResult> {
           latencyMs: Date.now() - start,
           error: 'no CLIs registered in cli_install_registry (registry never seeded on this box)',
           detail: {
+            configured: false,
             registered: 0,
             breakdown: [],
             cause: 'installation-fault',
