@@ -26,7 +26,7 @@
  *
  * ── What it does ────────────────────────────────────────────────────────────
  * For every `in_progress` task whose last progress signal is older than
- * `STUCK_IN_PROGRESS_MINUTES` (default 45) AND which has emitted no recent
+ * `STUCK_IN_PROGRESS_MINUTES` (default 180; a card whose agent session still shows activity is left for up to STUCK_IN_PROGRESS_HARD_CEILING_MINUTES, default 720) AND which has emitted no recent
  * `events` row (liveness guard — a genuinely working agent leaves activity):
  *   1. Transitions the task to `blocked` via the audited `transition()` — which
  *      writes the structured `task_events` row that a raw UPDATE skips (the very
@@ -48,7 +48,7 @@
  * lost; the point is that a dead task stops being invisible.
  *
  * Tuning / opt-out:
- *   • STUCK_IN_PROGRESS_MINUTES  — no-progress threshold in minutes (default 45)
+ *   • STUCK_IN_PROGRESS_MINUTES  — no-progress threshold in minutes (default 180)
  *   • DISABLE_STUCK_IN_PROGRESS_SWEEP=1  — turn the sweep off entirely
  */
 
@@ -131,6 +131,16 @@ const LIVENESS_NOISE_EVENT_TYPES = [
   'stale_blocked_repinged',
   'af_model_sovereignty_block',
   'sop_library_gap',
+  // written by a background job (trust-engine.ts / persona-backfill-sweep.ts), not by the agent
+  'trust_ack',
+  'trust_progress',
+  'trust_phase_progress',
+  'trust_done',
+  'report_back_uncorrelated',
+  'blend_backfilled',
+  // written by the one-time note clean-up (stale-return-note-cleanup.ts, unit U-25), not by the agent
+  'stale_return_note_removed',
+  'stale_return_note_unrecognised',
 ];
 
 interface StuckRow {
@@ -153,6 +163,7 @@ export interface StuckSweepResult {
   /** Tasks recovered to `review` because finished work was found (SWEEP-RECOVER). */
   recovered: number;
   recoveredIds: string[];
+  skippedReason?: string;
 }
 
 /**
@@ -164,8 +175,10 @@ export interface StuckSweepResult {
  * and, on either signal, recovers the card to `review` instead of blocking it.
  */
 
-/** Block one stuck task, free its agent, and alert the operator once. */
-async function blockStuckTask(task: StuckRow, ageMinutes: number): Promise<void> {
+/** Block one stuck task, free its agent, and alert the operator once.
+ *  Returns true only when the card is now Blocked BECAUSE OF THIS CALL — a card
+ *  that left In Progress while the sweep was checking it is someone else's now. */
+async function blockStuckTask(task: StuckRow, ageMinutes: number): Promise<boolean> {
   const now = new Date().toISOString();
   const agentLabel = task.assigned_agent_name ?? task.assigned_agent_id ?? 'unknown agent';
   const reason =
@@ -181,8 +194,9 @@ async function blockStuckTask(task: StuckRow, ageMinutes: number): Promise<void>
   //    ever rejected, so an edge case never leaves the task silently stuck.
   let blockedLanded = true;
   try {
-    await transition(task.id, 'blocked', { actor: 'stuck-in-progress-sweep', reason });
+    await transition(task.id, 'blocked', { actor: 'stuck-in-progress-sweep', reason, expectedFrom: 'in_progress' });
   } catch (err) {
+    if (err instanceof TransitionError && err.code === 'CAS_CONFLICT') return false; // the card left In Progress while this sweep was checking it
     if (err instanceof TransitionError) {
       // U99-RAW-STATUS-WRITER: fallback-of-last-resort for when transition()
       // itself rejects the edge. Audited via recordStatusEvent immediately
@@ -205,6 +219,10 @@ async function blockStuckTask(task: StuckRow, ageMinutes: number): Promise<void>
       throw err;
     }
   }
+
+  // A card whose block did not land is not ours any more — steps 2 to 5 would
+  // write block metadata, free the agent and alert for a card someone else moved.
+  if (!blockedLanded) return false;
 
   // 2. Block metadata (transition() sets only status/updated_at/events).
   //
@@ -283,6 +301,7 @@ async function blockStuckTask(task: StuckRow, ageMinutes: number): Promise<void>
   console.warn(
     `[stuck-in-progress-sweep] task ${task.id} BLOCKED (${Math.round(ageMinutes)}min no progress, agent ${agentLabel})`,
   );
+  return true;
 }
 
 /**
@@ -295,7 +314,7 @@ export async function runStuckInProgressSweep(): Promise<StuckSweepResult> {
     process.env.DISABLE_STUCK_IN_PROGRESS_SWEEP === '1' ||
     process.env.DISABLE_STUCK_IN_PROGRESS_SWEEP === 'true'
   ) {
-    return { scanned: 0, blocked: 0, blockedIds: [], recovered: 0, recoveredIds: [] };
+    return { scanned: 0, blocked: 0, blockedIds: [], recovered: 0, recoveredIds: [], skippedReason: 'DISABLE_STUCK_IN_PROGRESS_SWEEP set' };
   }
 
   const cutoffMs = Date.now() - stuckThresholdMinutes() * 60_000;
@@ -342,7 +361,11 @@ export async function runStuckInProgressSweep(): Promise<StuckSweepResult> {
     // there is a recent event for this task, it is not silently dead — skip it.
     if (task.last_event_at) {
       const evMs = parseDbTime(task.last_event_at);
-      if (!Number.isNaN(evMs) && evMs > cutoffMs) continue;
+      if (!Number.isNaN(evMs) && evMs > cutoffMs) {
+        const ceilingMin = hardCeilingMinutes();
+        const pastCeiling = ceilingMin > 0 && progressMs < Date.now() - ceilingMin * 60_000;
+        if (!pastCeiling) continue; // recent activity, and still under the hard ceiling
+      }
     }
 
     const ageMinutes = (Date.now() - progressMs) / 60_000;
@@ -407,9 +430,10 @@ export async function runStuckInProgressSweep(): Promise<StuckSweepResult> {
     }
 
     try {
-      await blockStuckTask(task, ageMinutes);
-      blocked++;
-      blockedIds.push(task.id);
+      if (await blockStuckTask(task, ageMinutes)) {
+        blocked++;
+        blockedIds.push(task.id);
+      }
     } catch (err) {
       console.error(`[stuck-in-progress-sweep] failed to block ${task.id}:`, (err as Error).message);
     }
