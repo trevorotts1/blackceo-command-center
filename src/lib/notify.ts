@@ -737,6 +737,30 @@ export function __resetNotifyThrottleForTests(): void {
 }
 
 /**
+ * Why an `openclaw message send` child failed, in words. Node's bare
+ * "Command failed: openclaw message send ..." hides the three very different
+ * causes: our own timeout killing a slow CLI (killed + SIGTERM, no stderr),
+ * the CLI missing (ENOENT), and the CLI exiting non-zero (exit code + stderr).
+ * Never includes the message text or chat id.
+ */
+export function describeSendFailure(
+  err: { message: string; killed?: boolean; signal?: string | null; code?: string | number | null },
+  stderr?: string | Buffer,
+  timeoutMs: number = OWNER_SEND_TIMEOUT_MS,
+  redact?: string,
+): string {
+  let raw = String(stderr ?? '');
+  if (redact) raw = raw.split(redact).join('[message]');
+  const tail = raw.trim().split('\n').slice(-2).join(' | ').slice(0, 300);
+  if (err.killed || err.signal) {
+    return `timeout: the openclaw CLI did not finish within ${timeoutMs}ms and was killed (${err.signal ?? 'signal'}); the gateway is likely busy${tail ? `; stderr: ${tail}` : ''}`;
+  }
+  if (err.code === 'ENOENT') return 'the openclaw CLI was not found on PATH';
+  if (typeof err.code === 'number') return `the openclaw CLI exited with code ${err.code}${tail ? `; stderr: ${tail}` : ''}`;
+  return `${err.message}${tail ? `; stderr: ${tail}` : ''}`;
+}
+
+/**
  * Send a Telegram message to a specific chat via `openclaw message send`.
  *
  * MSG-01: this is FIRE-AND-FORGET. The send is dispatched with async
@@ -783,12 +807,12 @@ export function notifyTelegram(opts: {
       opts.message,
     ],
     { timeout: OWNER_SEND_TIMEOUT_MS },
-    (err) => {
+    (err, _stdout, stderr) => {
       if (err) {
         console.error(
           '[notify] Telegram send failed (chatId=%s): %s',
           opts.chatId,
-          err.message,
+          describeSendFailure(err, stderr, OWNER_SEND_TIMEOUT_MS, opts.message),
         );
       }
     },
@@ -987,6 +1011,8 @@ export async function notifyOwnerPrivate(opts: {
         '--target', opts.expectedChatId, '--message', opts.message, '--json'],
       { timeout: Math.min(OWNER_SEND_TIMEOUT_MS, 120_000), maxBuffer: 1024 * 1024 },
       (error, stdout) => {
+        // Deliberately NO logging here: the message is a private sign-in link and
+        // the CLI echoes it on stderr. The caller records the uncertain receipt.
         if (error) { resolve({ status: 'uncertain' }); return; }
         try {
           const payload = JSON.parse(stdout);
