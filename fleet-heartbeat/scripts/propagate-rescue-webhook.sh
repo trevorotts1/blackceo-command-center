@@ -287,9 +287,9 @@ if [ -n "\${SECRET_VAL}" ]; then
   SECRET_LINE=""
   if [ -f "\${HOST_ENV}" ]; then
     while IFS= read -r _line; do
-      case "\${_line}" in
-        "\${SECRET_KEY}="*) SECRET_LINE="\${_line}"; break ;;
-      esac
+      # No case statement here: this block is built inside $(cat <<REMOTE) and
+      # macOS /bin/bash 3.2 mis-parses case patterns there. Prefix-strip is POSIX.
+      if [ "\${_line%%=*}" = "\${SECRET_KEY}" ]; then SECRET_LINE="\${_line}"; break; fi
     done < "\${HOST_ENV}"
   fi
   SECRET_WANT="\${SECRET_KEY}='\${SECRET_VAL}'"
@@ -299,10 +299,7 @@ if [ -n "\${SECRET_VAL}" ]; then
     cp "\${HOST_ENV}" "\${HOST_ENV}.bak-pre-rescue-webhook-\${TS}"
     _tmp="\${HOST_ENV}.tmp.\$\$"
     while IFS= read -r _line || [ -n "\${_line}" ]; do
-      case "\${_line}" in
-        "\${SECRET_KEY}="*) printf '%s\n' "\${SECRET_WANT}" ;;
-        *) printf '%s\n' "\${_line}" ;;
-      esac
+      if [ "\${_line%%=*}" = "\${SECRET_KEY}" ]; then printf '%s\n' "\${SECRET_WANT}"; else printf '%s\n' "\${_line}"; fi
     done < "\${HOST_ENV}" > "\${_tmp}"
     mv "\${_tmp}" "\${HOST_ENV}"
     echo "  host .env: secret replaced"; HOST_CHANGED=1
@@ -318,11 +315,11 @@ if [ -n "\${SECRET_VAL}" ]; then
     IFS= read -r SV || true
     SK="RESCUE_RANGERS_WEBHOOK_SECRET"
     if command -v jq >/dev/null 2>&1; then
-      cur=\$(jq -r --arg k "$SK" ".env.vars[\$k] // empty" /data/.openclaw/openclaw.json 2>/dev/null || true)
-      if [ "$cur" = "$SV" ]; then
+      cur=\$(jq -r --arg k "\$SK" ".env.vars[\$k] // empty" /data/.openclaw/openclaw.json 2>/dev/null || true)
+      if [ "\$cur" = "\$SV" ]; then
         echo "  container openclaw.json: secret already correct"
       else
-        jq --arg k "$SK" --arg v "$SV" \\
+        jq --arg k "\$SK" --arg v "\$SV" \\
           ".env = (.env // {}) | .env.vars = (.env.vars // {}) | .env.vars[\$k] = \$v" \\
           /data/.openclaw/openclaw.json > /data/.openclaw/openclaw.json.tmp \\
           && mv /data/.openclaw/openclaw.json.tmp /data/.openclaw/openclaw.json \\
@@ -398,9 +395,9 @@ if [ -n "\${SECRET_VAL}" ]; then
   SECRET_LINE=""
   if [ -f "\${ENV_FILE}" ]; then
     while IFS= read -r _line; do
-      case "\${_line}" in
-        "\${SECRET_KEY}="*) SECRET_LINE="\${_line}"; break ;;
-      esac
+      # No case statement here: this block is built inside $(cat <<REMOTE) and
+      # macOS /bin/bash 3.2 mis-parses case patterns there. Prefix-strip is POSIX.
+      if [ "\${_line%%=*}" = "\${SECRET_KEY}" ]; then SECRET_LINE="\${_line}"; break; fi
     done < "\${ENV_FILE}"
   fi
   SECRET_WANT="\${SECRET_KEY}='\${SECRET_VAL}'"
@@ -410,10 +407,7 @@ if [ -n "\${SECRET_VAL}" ]; then
     cp "\${ENV_FILE}" "\${ENV_FILE}.bak-pre-rescue-webhook-\${TS}"
     _tmp="\${ENV_FILE}.tmp.\$\$"
     while IFS= read -r _line || [ -n "\${_line}" ]; do
-      case "\${_line}" in
-        "\${SECRET_KEY}="*) printf '%s\n' "\${SECRET_WANT}" ;;
-        *) printf '%s\n' "\${_line}" ;;
-      esac
+      if [ "\${_line%%=*}" = "\${SECRET_KEY}" ]; then printf '%s\n' "\${SECRET_WANT}"; else printf '%s\n' "\${_line}"; fi
     done < "\${ENV_FILE}" > "\${_tmp}"
     mv "\${_tmp}" "\${ENV_FILE}"
     echo "  .env: secret replaced"
