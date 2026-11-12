@@ -319,7 +319,16 @@ export function readEncryptedFile(encPath: string): string | null {
   }
   if (!isEncryptedEnvelope(envelope)) return null;
 
-  const result = decryptEnvelope(envelope);
+  let result: { plaintext: string; legacyKey: boolean } | null;
+  try {
+    result = decryptEnvelope(envelope);
+  } catch (err) {
+    // Unusable key material (InterviewKeyUnavailable) reaches the caller that
+    // maps it to 503 "temporarily unavailable"; every other decrypt failure
+    // stays null exactly as before.
+    if (err instanceof InterviewKeyUnavailable) throw err;
+    return null;
+  }
   if (!result) return null;
 
   if (result.legacyKey) {
