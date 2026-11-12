@@ -42,6 +42,7 @@ import {
   derivedPercent,
   getInterviewGateSnapshot,
   readAnswerBlocks,
+  runGate,
   type GateFlags,
 } from '@/lib/interview/seam';
 import { resolveInterviewTenant, refuseUnverifiedTenant } from '@/lib/interview/tenant';
@@ -256,53 +257,12 @@ export function clearSessionSkip(
   }
 }
 
-/** POST /api/interview/state — record (or clear) one structured-question skip. */
-export async function POST(request: NextRequest) {
-  const tenant = await resolveInterviewTenant(request);
-  const refusedTenant = refuseUnverifiedTenant(tenant);
-  if (refusedTenant) return refusedTenant;
-  if (tenant.kind !== 'client' || !tenant.client || !tenant.context) {
-    // Self tenants read their resume from the operator's canonical files, not
-    // the tenant skip store — never write a skip for them here.
-    return NextResponse.json({ error: 'not_applicable_for_self' }, { status: 400 });
-  }
-  let body: { questionId?: unknown; skipped?: unknown };
-  try {
-    body = (await request.json()) as { questionId?: unknown; skipped?: unknown };
-  } catch {
-    return NextResponse.json({ error: 'invalid_request', detail: 'bad body' }, { status: 400 });
-  }
-  const questionId = typeof body.questionId === 'string' ? body.questionId.trim() : '';
-  if (!questionId || !knownStructuredIds().has(questionId)) {
-    return NextResponse.json({ error: 'unknown_question', detail: 'questionId must be a known structured question id' }, { status: 400 });
-  }
-  const persisted = ensureTenantInterview(tenant.context.tenantId);
-  // `skipped: false` clears the mark (circle-back without answering yet keeps
-  // the card out of the skipped queue on this device; the server forgets it).
-  if (body.skipped === false) {
-    clearSessionSkip(tenant.context.tenantId, persisted.interview_id, questionId);
-    const skippedIds = readSessionSkips(
-      tenant.context.tenantId,
-      persisted.interview_id,
-      tenantAnswers(tenant.context.tenantId).map((a) => a.question_id),
-    );
-    return NextResponse.json({ ok: true, questionId, skipped: false, skippedIds });
-  }
-  // Never persist a skip for an already-answered question — an answer wins.
-  const savedAnswers = tenantAnswers(tenant.context.tenantId);
-  if (savedAnswers.some((a) => a.question_id === questionId)) {
-    return NextResponse.json({ error: 'already_answered', detail: 'this question already has an answer; the skip is not needed' }, { status: 409 });
-  }
-  if (!recordSessionSkip(tenant.context.tenantId, persisted.interview_id, questionId)) {
-    return NextResponse.json({ error: 'skip_not_saved' }, { status: 503 });
-  }
-  const skippedIds = readSessionSkips(
-    tenant.context.tenantId,
-    persisted.interview_id,
-    savedAnswers.map((a) => a.question_id),
-  );
-  return NextResponse.json({ ok: true, questionId, skippedIds });
-}
+/**
+ * BU-13: there is no POST here any more. Recording (or clearing) a structured
+ * skip moved to POST /api/interview/skip, which runs the step gate for this
+ * box's own interview and keeps the ILJ-004 tenant store for a client tenant.
+ * The skip-store helpers above stay exported for that route.
+ */
 
 /** Parse a comma-separated query param into a trimmed, de-duped string list. */
 function parseIdList(raw: string | null): string[] {
@@ -392,6 +352,9 @@ export async function GET(request: NextRequest) {
       revision: persisted.revision,
       buildCompleted: remote?.buildCompleted === true,
       qcStatus: remote?.qcStatus || 'pending',
+      // BU-13: the gate belongs to this box's OWN interview; a client tenant is
+      // never served the operator's gate state.
+      gate: null,
       session: { interviewSessionId: persisted.interview_id, gatewaySessionId: persisted.gateway_session_id },
       structured: {
         total: structured.total,
@@ -492,6 +455,13 @@ export async function GET(request: NextRequest) {
     const structured = computeStructuredResume(INTERVIEW_QUESTIONS, answeredIds, []);
     const skippedQueueIds: string[] = [];
 
+    // BU-13: the step gate's own status is the authority on position and
+    // percent. Additive — `structured`/`progress` keep their existing fields for
+    // one release. A tooling failure (exit 1) is NOT a refusal: the field comes
+    // back null and the derived percent above stands, so the page still renders.
+    const gateStatus = await runGate(['status']);
+    const gate = gateStatus.code === 0 ? gateStatus.json : null;
+
     return NextResponse.json({
       ok: true,
       companyId: tenant.context!.companyId,
@@ -530,8 +500,14 @@ export async function GET(request: NextRequest) {
       progress: {
         lastQuestionNumber,
         phasesComplete: snap.progress.phasesComplete ?? [],
-        percent, // derived q/30, capped 100 — never a stored field
+        // BU-13: the gate's percent (round(100 × requiredAnswered / requiredTotal))
+        // whenever the gate answered; the derived q/planned value only when the
+        // gate is unavailable.
+        percent: gate ? gate.percent : percent,
       },
+
+      // ── The step gate's own view (BU-13) ─────────────────────────────
+      gate: gate,
 
       // ── Resume position (welcome-back / continue) ────────────────────
       resume: {
@@ -599,6 +575,7 @@ export async function GET(request: NextRequest) {
         interviewComplete: false,
         buildCompleted: false,
         qcStatus: 'pending',
+        gate: null,
         progress: { lastQuestionNumber: null, phasesComplete: [], percent: 0 },
         resume: {
           status: null,
