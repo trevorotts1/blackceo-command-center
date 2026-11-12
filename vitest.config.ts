@@ -251,6 +251,9 @@ export default defineConfig({
       // Owner approvals inbox: agent registers/polls, only the registered owner
       // decides, approve mints the record the Skill 44 safety gate verifies.
       'tests/unit/approval-requests.test.ts',
+      // Chat approvals: the owner's yes from Telegram or the chat app, re-verified
+      // from the gateway's own inbound record (never the agent's claim).
+      'tests/unit/chat-approvals.test.ts',
       // MR-46 (fix2) — getAgentStatusDot color-mapping unit test (closes the
       // Haiku "no unit test for getAgentStatusDot" minor defect). Imports the
       // real MissionQueue.tsx, so it needs the store + next/navigation mocks —
