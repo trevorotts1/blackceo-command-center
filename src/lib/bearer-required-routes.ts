@@ -61,6 +61,12 @@
  * /api/launch-runs/ingest (see the comment at its pattern). Now 50 patterns
  * covering 54 route templates; see the U052 lock test for the live census.
  *
+ * 2026-11-12 (owner approvals inbox): +1 pattern for POST
+ * /api/approval-requests — the AGENT door that registers a request for the
+ * owner's yes. Service-to-service; the browser never calls it (the owner decides
+ * through a server action on /approvals). Now 51 patterns covering 55 route
+ * templates; see the U052 lock test for the live census.
+ *
  * U052: This is the single source of truth, imported by both src/middleware.ts
  * and the anti-rot lock test. One array, one source.
  */
@@ -74,6 +80,11 @@ export const BEARER_REQUIRED_WRITE_ROUTES: RegExp[] = [
   // ad-campaigns above.
   /^\/api\/archify-runs(\/[^/]+)?$/,
   /^\/api\/agents$/,
+  // 2026-11-12 (owner approvals inbox): POST /api/approval-requests — the agent
+  // registers a request for the owner's yes; the handler also refuses any caller
+  // that is not the operator/agent bearer. GET (list/status) stays open to the
+  // same-origin owner page and is read-only.
+  /^\/api\/approval-requests$/,
   /^\/api\/agents\/[^/]+\/memory-logs$/,
   /^\/api\/agents\/[^/]+\/openclaw$/,
   /^\/api\/anthology\/gate$/,

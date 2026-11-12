@@ -39,7 +39,20 @@ export interface LaunchApprovalRecord {
   expires_at: string;
   revoked: boolean;
   source_message_ref: string;
+  /** Fields the Convert and Flow safety gate (Skill 44) verifies. Null on a record
+   *  minted from a chat reply (no location/action/object binding), so such a
+   *  record can never satisfy that gate. Set only by the owner decision path. */
+  location_id: string | null;
+  action: string | null;
+  object_key: string | null;
+  plan_sha256: string | null;
+  approver: string | null;
+  verification_class: string | null;
+  request_id: string | null;
 }
+
+/** The only verification class the owner decision path writes. */
+export const VERIFICATION_CLASS_OWNER = 'authenticated_platform_record';
 
 /** Default and maximum lifetime of an approval. */
 const DEFAULT_TTL_MS = 7 * 24 * 3600 * 1000;
@@ -50,7 +63,7 @@ const SERVER_OWNED = ['approval_id', 'tenant_id', 'client_identity_ref', 'revoke
 const ALLOWED = new Set<string>([
   'kind', 'plan_hash', 'scope', 'cap_minor', 'currency', 'expires_at', 'source_message',
 ]);
-const PLAN_HASH_RE = /^(?:sha256:)?([0-9a-f]{64})$/i;
+export const PLAN_HASH_RE = /^(?:sha256:)?([0-9a-f]{64})$/i;
 const APPROVE_RE = /\bAPPROVE\s+([0-9a-f]{8})\b/i;
 
 export interface ApprovalResult {
@@ -77,7 +90,7 @@ const toRecord = (r: Row): LaunchApprovalRecord => ({ ...r, revoked: r.revoked =
  * Registered = listed in the tenant registration's `subjects` / `allowedEmails`.
  * The operator bearer (`operator:api`) is never a client identity.
  */
-function registeredClientIdentity(ctx: TenantContext): string | null {
+export function registeredClientIdentity(ctx: TenantContext): string | null {
   if (ctx.subject === 'operator:api') return null;
   let reg;
   try { reg = tenantRegistration(ctx.host); } catch { return null; }

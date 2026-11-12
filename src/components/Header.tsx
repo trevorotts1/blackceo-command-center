@@ -13,6 +13,7 @@ import { HealthIndicator } from './HealthIndicator';
 import { COUNCIL_NAV_HREF, COUNCIL_NAV_LABEL } from '@/lib/nav-gating';
 import { useCouncilEntry } from '@/components/council/useCouncilEntry';
 import { Landmark } from 'lucide-react';
+import { ApprovalsBadge } from '@/components/approvals/ApprovalsBadge';
 
 // --- AI Settings model & persona options ---
 // openrouter/free intentionally removed — AF-MODEL-SOVEREIGNTY forbids it as a default.
@@ -368,6 +369,7 @@ export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
 
       {/* Right: Time & Status */}
       <div className="flex items-center gap-2 sm:gap-4 shrink-0">
+        <ApprovalsBadge />
         {councilEntry.show && (
           <Link
             href={COUNCIL_NAV_HREF}

@@ -124,8 +124,9 @@ export interface OpenClawNativeEvent {
 // A flapping gateway used to trigger an infinite fixed-10s reconnect loop.
 // Mirrors the task-dispatcher's anti-furnace pattern (MAX_DISPATCH_ATTEMPTS,
 // exponential backoff, blocked terminal state): back off exponentially, and
-// after MAX_RECONNECT_ATTEMPTS consecutive failures enter a terminal "blocked"
-// state and stop retrying. A successful connection resets the counter.
+// after MAX_RECONNECT_ATTEMPTS consecutive failures report the outage once and
+// keep retrying at the capped delay forever (never a terminal state). A
+// successful connection resets the counter.
 const MAX_RECONNECT_ATTEMPTS = Math.max(
   1,
   parseInt(process.env.MAX_RECONNECT_ATTEMPTS || '5', 10),
@@ -165,9 +166,6 @@ export class OpenClawClient extends EventEmitter {
   private reconnectTimer: NodeJS.Timeout | null = null;
   /** U020: consecutive failed reconnect attempts (reset on a successful connect). */
   private reconnectAttempts = 0;
-  /** U020: terminal state after MAX_RECONNECT_ATTEMPTS consecutive failures —
-   *  scheduleReconnect() stops retrying until resetReconnectBackoff() is called. */
-  private reconnectBlocked = false;
   private messageId = 0;
   private pendingRequests = new Map<string | number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
   private connected = false;
@@ -830,38 +828,40 @@ export class OpenClawClient extends EventEmitter {
   private scheduleReconnect(): void {
     if (this.reconnectTimer || !this.autoReconnect) return;
 
-    // U020: terminal blocked state — after MAX_RECONNECT_ATTEMPTS consecutive
-    // failures stop retrying instead of hammering a flapping gateway forever.
-    if (this.reconnectBlocked) return;
-
+    // Never give up. A gateway that is down for minutes (restart, update,
+    // crash loop) must be recovered from automatically: the old terminal
+    // "blocked" state left the Command Center permanently disconnected until a
+    // human restarted it (client incident 2026-11-12). After
+    // MAX_RECONNECT_ATTEMPTS consecutive failures we surface the outage once
+    // and keep retrying at the capped backoff (RECONNECT_BACKOFF_MAX_MS), so a
+    // gateway that stays down costs one connection attempt per cap interval,
+    // never a hot loop.
     this.reconnectAttempts += 1;
-    if (this.reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
-      this.reconnectBlocked = true;
+    if (this.reconnectAttempts === MAX_RECONNECT_ATTEMPTS + 1) {
       this.recordConnectError(
-        `Reconnect blocked after ${MAX_RECONNECT_ATTEMPTS} failed attempts — gateway ${this.url} unreachable; not retrying`,
+        `Gateway ${this.url} unreachable after ${MAX_RECONNECT_ATTEMPTS} attempts — still retrying every ${Math.round(RECONNECT_BACKOFF_MAX_MS / 1000)}s`,
       );
       console.error(
-        `[OpenClaw] Reconnect blocked after ${MAX_RECONNECT_ATTEMPTS} failed attempts — giving up on ${this.url}`,
+        `[OpenClaw] ${MAX_RECONNECT_ATTEMPTS} reconnect attempts failed for ${this.url} — continuing to retry with capped backoff`,
       );
-      return;
     }
 
     // Bounded exponential backoff: base*2^(n-1) capped at the max
-    // (2s → 4s → 8s → 16s → 32s with the defaults).
+    // (2s → 4s → 8s → 16s → 32s → 32s … with the defaults).
     const delayMs = Math.min(
       RECONNECT_BACKOFF_MAX_MS,
-      RECONNECT_BACKOFF_BASE_MS * Math.pow(2, this.reconnectAttempts - 1),
+      RECONNECT_BACKOFF_BASE_MS * Math.pow(2, Math.min(this.reconnectAttempts - 1, 30)),
     );
 
     this.reconnectTimer = setTimeout(async () => {
       this.reconnectTimer = null;
-      if (!this.autoReconnect || this.reconnectBlocked) return;
+      if (!this.autoReconnect) return;
 
-      console.log(`[OpenClaw] Attempting reconnect (${this.reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`);
+      console.log(`[OpenClaw] Attempting reconnect (attempt ${this.reconnectAttempts})...`);
       try {
         await this.connect();
       } catch {
-        // Failed attempt: back off further, or block once the ceiling is hit.
+        // Failed attempt: back off further (capped) and try again.
         this.scheduleReconnect();
       }
     }, delayMs);
@@ -874,14 +874,12 @@ export class OpenClawClient extends EventEmitter {
    */
   resetReconnectBackoff(): void {
     this.reconnectAttempts = 0;
-    this.reconnectBlocked = false;
   }
 
-  /** U020: true once the client gave up after MAX_RECONNECT_ATTEMPTS consecutive
-   *  failures. Surfaced so the status route / callers can tell a blocked client
-   *  from a merely disconnected one. */
+  /** Retained for callers of the old terminal state. The client no longer
+   *  gives up (see scheduleReconnect), so this is always false. */
   isReconnectBlocked(): boolean {
-    return this.reconnectBlocked;
+    return false;
   }
 
   async call<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T> {

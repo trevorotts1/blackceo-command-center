@@ -248,6 +248,9 @@ export default defineConfig({
       // tenant's registered client reply, read-only GET, migration 177 table guards.
       // Vitest imports + isolated DB, so vitest-only, never the tsx --test glob.
       'tests/unit/launch-approvals.test.ts',
+      // Owner approvals inbox: agent registers/polls, only the registered owner
+      // decides, approve mints the record the Skill 44 safety gate verifies.
+      'tests/unit/approval-requests.test.ts',
       // MR-46 (fix2) — getAgentStatusDot color-mapping unit test (closes the
       // Haiku "no unit test for getAgentStatusDot" minor defect). Imports the
       // real MissionQueue.tsx, so it needs the store + next/navigation mocks —
