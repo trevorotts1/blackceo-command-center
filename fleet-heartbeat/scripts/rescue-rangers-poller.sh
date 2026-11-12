@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+# REFERENCE COPY - NOT THE RUNNING CODE.
+# The copy that runs is on the operator machine (its own fleet-heartbeat folder,
+# untracked there) and its published home is the private Fleet Ops repository.
+# This public copy can be behind it. It can also be ahead of it: see
+# docs/RESCUE-INTEGRATION.md. Do not deploy from this file, and do not
+# judge live behaviour from it. See docs/RESCUE-INTEGRATION.md.
+# (RRX-013)
 # rescue-rangers-poller.sh
 #
 # Mac-side half of the Rescue Rangers Relay (transport B: gateway-initiated pull).

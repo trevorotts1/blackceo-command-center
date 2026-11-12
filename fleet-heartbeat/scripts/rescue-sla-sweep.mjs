@@ -1,4 +1,13 @@
 #!/usr/bin/env node
+// REFERENCE COPY - NOT THE RUNNING CODE.
+// The copy that runs is on the operator machine (its own fleet-heartbeat folder,
+// untracked there) and its published home is the private Fleet Ops repository.
+// This public copy can be behind it. It can also be ahead of it: see
+// docs/RESCUE-INTEGRATION.md. Do not deploy from this file, and do not
+// judge live behaviour from it. See docs/RESCUE-INTEGRATION.md.
+// For rescue-sla-sweep.mjs only: this copy cannot start, because it imports the
+// ticket store module, which is a tombstone in this repository on purpose.
+// (RRX-013)
 // === Rescue Rangers — SLA AUTO-ESCALATION SWEEP (FIX-RESCUE-07) =============
 //
 // Finds tickets whose SLA has expired while still auto-working and escalates

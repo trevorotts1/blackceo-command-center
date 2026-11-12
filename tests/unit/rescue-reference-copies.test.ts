@@ -1,5 +1,5 @@
 /**
- * rescue-reference-copies.test.ts — acceptance for RRX-014 (lane C3).
+ * rescue-reference-copies.test.ts — acceptance for RRX-014 and RRX-013 (lane C3).
  *
  * Runs the PUBLIC reference copy of fleet-heartbeat/scripts/rescue-rangers-poller.sh
  * under /bin/bash with every outside dependency shadowed by a stub in a temporary
@@ -31,6 +31,8 @@ import { fileURLToPath } from 'node:url';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, '..', '..');
 const POLLER = path.join(repoRoot, 'fleet-heartbeat', 'scripts', 'rescue-rangers-poller.sh');
+const RECEIVER = path.join(repoRoot, 'fleet-heartbeat', 'scripts', 'rescue-receiver.mjs');
+const SLA_SWEEP = path.join(repoRoot, 'fleet-heartbeat', 'scripts', 'rescue-sla-sweep.mjs');
 
 // A stub `curl`: prints the pending body, a newline and the HTTP code (the poller
 // calls it with -w '\n%{http_code}' and no -o). Answer requests get a healthy 200.
@@ -192,5 +194,18 @@ test('RRX-014 (c): with no webhook secret the poller does not abort on the empty
     assert.equal(run.curlCalls.length, 1, 'the pull happens exactly once');
   } finally {
     rmSync(work, { recursive: true, force: true });
+  }
+});
+
+// RRX-013: each of the three scripts says plainly, in its first lines, that the
+// file is a reference copy and not the running code.
+test('RRX-013: each reference copy carries the REFERENCE COPY header', () => {
+  for (const script of [POLLER, RECEIVER, SLA_SWEEP]) {
+    const head = readFileSync(script, 'utf8').split('\n').slice(0, 12).join('\n');
+    assert.match(
+      head,
+      /REFERENCE COPY - NOT THE RUNNING CODE\./,
+      `${path.basename(script)} must state it is a reference copy in its first 12 lines`,
+    );
   }
 });
