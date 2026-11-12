@@ -24,6 +24,8 @@ export default defineConfig({
       'tests/unit/u42-task-detail-modal-populated.test.tsx',
       // U47 acceptance (a)/(b)/(c)/(e) — HealthIndicator real render proof.
       'tests/unit/u47-health-indicator.test.tsx',
+      // Owner approvals inbox: the "N approvals waiting" badge (dashboard home + Header).
+      'tests/unit/approvals-badge.test.tsx',
       // U104 acceptance (a)/(b)/(c) — engine-mirrored card honesty real render proof.
       'tests/unit/u104-engine-card-honesty.test.tsx',
       // U49/U61 (H+L.7) — Prove action outcome (pass/fail/fail-closed) real

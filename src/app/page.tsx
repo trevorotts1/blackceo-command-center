@@ -8,6 +8,7 @@ import { useLogoUrl } from '@/hooks/useLogoUrl';
 import { useCompanyBrand } from '@/hooks/useCompanyBrand';
 import { format } from 'date-fns';
 import { HealthIndicator } from '@/components/HealthIndicator';
+import { ApprovalsBadge } from '@/components/approvals/ApprovalsBadge';
 import { Breadcrumb } from '@/components/Breadcrumb';
 import {
   WORKSPACES_RETRY_MS,
@@ -473,6 +474,7 @@ export default function HomePage() {
           <span className="text-gray-500 text-base font-mono">
             {format(currentTime, 'MMM d, HH:mm:ss')}
           </span>
+          <ApprovalsBadge />
           <HealthIndicator viewerRole="client" />
         </div>
       </header>
