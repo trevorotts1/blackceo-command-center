@@ -3,9 +3,20 @@
  *
  * chacha20-poly1305 AEAD encryption for the interview transcript and the DB
  * mirror's answer/question columns. Key material is resolved at runtime from
- * the box identity secret (MC_INTERVIEW_SECRET, falling back to
- * MC_BOX_SECRET, then a SHA-256 derivation of the box hostname + a per-box
- * salt file). NEVER hardcoded, NEVER committed.
+ * the box identity secret (MC_INTERVIEW_SECRET, falling back to MC_BOX_SECRET,
+ * then a per-box key file that carries its own key — see WF-011 below). NEVER
+ * hardcoded, NEVER committed.
+ *
+ * WF-011 — THE KEY NO LONGER DEPENDS ON THE MACHINE'S NAME. The key file
+ * `.interview-key-salt.v2` is 64 bytes: 32 random salt bytes followed by the
+ * 32-byte key itself, so bytes 32 to 63 ARE the key and no hostname enters the
+ * derivation. A box renamed (or restored under a new name) still reads its own
+ * answers. A legacy 32-byte `.interview-key-salt` file is still accepted for
+ * READING — today's SHA-256(hostname + salt) derivation — and the first
+ * successful decrypt writes the v2 file beside it and re-encrypts the
+ * transcript with it (readEncryptedFile). A salt file that is unreadable or
+ * the wrong size is NEVER overwritten: `InterviewKeyUnavailable` is thrown so
+ * callers answer 503 "temporarily unavailable" and write nothing.
  *
  * Wire format (file):  "enc:v1:" + base64(nonce ‖ tag ‖ ciphertext)
  * Wire format (DB):    same string stored in the TEXT column.
@@ -26,57 +37,151 @@ const TAG_BYTES = 16;
 const KEY_BYTES = 32;
 const ENVELOPE_PREFIX = 'enc:v1:';
 
+/** Legacy v1 key file: 32 random salt bytes only; the key was derived from the
+ * machine name + that salt. Read for older boxes, never written. */
+const LEGACY_SALT_FILE = '.interview-key-salt';
+/** v2 key file: 32 salt bytes followed by the 32-byte key. Written on first use. */
+const KEY_FILE_V2 = '.interview-key-salt.v2';
+const V2_FILE_BYTES = 2 * KEY_BYTES;
+
 /* ─────────────────────────── Key resolution ──────────────────────────────── */
+
+/**
+ * Thrown when this box's interview key material cannot be used: a key/salt
+ * file is unreadable or the wrong size, or new material cannot be persisted.
+ * An existing file is never overwritten to recover. Callers answer 503
+ * "temporarily unavailable" and write nothing.
+ */
+export class InterviewKeyUnavailable extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'InterviewKeyUnavailable';
+  }
+}
 
 let _cachedKey: Buffer | null = null;
 
+function keyDir(): string {
+  return path.join(os.homedir(), '.openclaw');
+}
+
+function legacySaltPath(): string {
+  return path.join(keyDir(), LEGACY_SALT_FILE);
+}
+
+function v2KeyPath(): string {
+  return path.join(keyDir(), KEY_FILE_V2);
+}
+
 /**
- * Resolve the 32-byte encryption key. Priority:
+ * Read one key file and require an exact size. A missing file returns null; a
+ * file that exists but cannot be read or is the wrong size throws
+ * `InterviewKeyUnavailable` — it is evidence of an older/corrupt box, and
+ * overwriting it would destroy the only way to read the answers it protects.
+ */
+function readKeyFile(file: string, expectedBytes: number, label: string): Buffer | null {
+  let bytes: Buffer;
+  try {
+    bytes = fs.readFileSync(file);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw new InterviewKeyUnavailable(
+      `${label} at ${file} is unreadable: ${err instanceof Error ? err.message : 'read failed'}`,
+    );
+  }
+  if (bytes.length !== expectedBytes) {
+    throw new InterviewKeyUnavailable(
+      `${label} at ${file} is ${bytes.length} bytes, expected ${expectedBytes}; it is never overwritten`,
+    );
+  }
+  return bytes;
+}
+
+/** The v2 key: bytes 32 to 63 of the 64-byte file, no hostname involved. */
+function readV2Key(): Buffer | null {
+  const material = readKeyFile(v2KeyPath(), V2_FILE_BYTES, 'interview key file');
+  return material ? material.subarray(KEY_BYTES) : null;
+}
+
+/** The legacy key: today's SHA-256(hostname + 32-byte salt), READ paths only. */
+function readLegacyKey(): Buffer | null {
+  const salt = readKeyFile(legacySaltPath(), KEY_BYTES, 'legacy interview salt file');
+  if (!salt) return null;
+  const hostname = os.hostname() || 'unknown-box';
+  return crypto
+    .createHash('sha256')
+    .update(Buffer.concat([Buffer.from(hostname, 'utf-8'), salt]))
+    .digest();
+}
+
+/**
+ * First use on this box: write 32 random salt bytes followed by a 32-byte
+ * random key to `.interview-key-salt.v2` (mode 0600). Never overwrites — the
+ * write is exclusive, and a file another process won the race for is read and
+ * used instead. Failure to persist is fatal for encryption: a key that lives
+ * only in memory would make this box's answers unreadable on the next boot.
+ */
+function createV2Key(): Buffer {
+  const dir = keyDir();
+  const file = v2KeyPath();
+  const material = crypto.randomBytes(V2_FILE_BYTES);
+  try {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(file, material, { mode: 0o600, flag: 'wx' });
+    return material.subarray(KEY_BYTES);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+      const existing = readV2Key();
+      if (existing) return existing;
+    }
+    throw new InterviewKeyUnavailable(
+      `cannot persist interview key material at ${file}: ${err instanceof Error ? err.message : 'write failed'}`,
+    );
+  }
+}
+
+function envKey(): Buffer | null {
+  const fromEnv =
+    process.env.MC_INTERVIEW_SECRET || process.env.MC_BOX_SECRET || '';
+  if (!fromEnv.trim()) return null;
+  // Accept hex-encoded or raw strings; normalize to 32 bytes via SHA-256.
+  return crypto.createHash('sha256').update(fromEnv.trim()).digest();
+}
+
+/**
+ * Resolve the 32-byte key used to WRITE. Priority:
  *   1. MC_INTERVIEW_SECRET env var (hex or raw string, SHA-256 hashed to 32B)
  *   2. MC_BOX_SECRET env var (same treatment)
- *   3. Per-box salt file (~/.openclaw/.interview-key-salt) + hostname,
- *      SHA-256 hashed to 32B. The salt file is created on first use with
- *      32 random bytes (mode 0600).
+ *   3. .interview-key-salt.v2 — the key is bytes 32 to 63 of that file
+ *   4. first use: create the v2 file (after validating any legacy v1 file, so a
+ *      corrupt one still fails closed instead of being silently outgrown)
  *
  * The key is cached in-process after first resolution.
  */
 export function resolveInterviewKey(): Buffer {
   if (_cachedKey) return _cachedKey;
 
-  const fromEnv =
-    process.env.MC_INTERVIEW_SECRET || process.env.MC_BOX_SECRET || '';
-  if (fromEnv.trim()) {
-    // Accept hex-encoded or raw strings; normalize to 32 bytes via SHA-256.
-    _cachedKey = crypto.createHash('sha256').update(fromEnv.trim()).digest();
+  const fromEnv = envKey();
+  if (fromEnv) {
+    _cachedKey = fromEnv;
     return _cachedKey;
   }
 
-  // Derive from box identity: hostname + a persistent per-box random salt.
-  const saltDir = path.join(os.homedir(), '.openclaw');
-  const saltPath = path.join(saltDir, '.interview-key-salt');
-  let salt: Buffer;
-  try {
-    salt = fs.readFileSync(saltPath);
-    if (salt.length < 32) throw new Error('salt too short');
-  } catch {
-    salt = crypto.randomBytes(32);
-    try {
-      fs.mkdirSync(saltDir, { recursive: true, mode: 0o700 });
-      fs.writeFileSync(saltPath, salt, { mode: 0o600 });
-    } catch {
-      // Non-fatal: key still works for this process lifetime; persistence
-      // retries on next boot. A box that cannot write its salt still encrypts.
-    }
+  const existingV2 = readV2Key();
+  if (existingV2) {
+    _cachedKey = existingV2;
+    return _cachedKey;
   }
-  const hostname = os.hostname() || 'unknown-box';
-  _cachedKey = crypto
-    .createHash('sha256')
-    .update(Buffer.concat([Buffer.from(hostname, 'utf-8'), salt.subarray(0, 32)]))
-    .digest();
+
+  // A legacy file is not the write key any more, but it must be usable before
+  // this box starts writing under a new one: an unreadable/short v1 file throws
+  // here, exactly as it would on the read path.
+  readLegacyKey();
+  _cachedKey = createV2Key();
   return _cachedKey;
 }
 
-/** Test-only: clear the cached key so a new env/salt is picked up. */
+/** Test-only: clear the cached key so a new env/key file is picked up. */
 export function _resetKeyCache(): void {
   _cachedKey = null;
 }
@@ -103,14 +208,10 @@ export function encryptAtRest(plaintext: string): string {
   return ENVELOPE_PREFIX + envelope.toString('base64');
 }
 
-/**
- * Decrypt a wire-format envelope string back to UTF-8 plaintext.
- * Returns null if the input is not a valid envelope or integrity check fails.
- */
-export function decryptAtRest(envelope: string): string | null {
-  if (!envelope.startsWith(ENVELOPE_PREFIX)) return null;
+/** Decrypt one envelope with one key. Returns null on any failure (wrong key,
+ * tampered/corrupt data, malformed envelope) — never throws. */
+function decryptWithKey(key: Buffer, envelope: string): string | null {
   try {
-    const key = resolveInterviewKey();
     const raw = Buffer.from(envelope.slice(ENVELOPE_PREFIX.length), 'base64');
     if (raw.length < NONCE_BYTES + TAG_BYTES) return null;
     const nonce = raw.subarray(0, NONCE_BYTES);
@@ -128,6 +229,45 @@ export function decryptAtRest(envelope: string): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Try the current key (env or v2), then the legacy v1 derivation. Reports
+ * which key worked, so a file-level reader can re-encrypt what it just read
+ * with the v2 key. Throws `InterviewKeyUnavailable` when a key file exists but
+ * is unusable — a null here means only "this envelope does not decrypt".
+ */
+function decryptEnvelope(envelope: string): { plaintext: string; legacyKey: boolean } | null {
+  const primary = _cachedKey ?? envKey() ?? readV2Key();
+  if (primary) {
+    const plaintext = decryptWithKey(primary, envelope);
+    if (plaintext != null) {
+      _cachedKey = primary;
+      return { plaintext, legacyKey: false };
+    }
+  }
+
+  const legacy = readLegacyKey();
+  if (!legacy) return null;
+  const plaintext = decryptWithKey(legacy, envelope);
+  if (plaintext == null) return null;
+
+  // First successful decrypt on an older box: write the v2 key file beside the
+  // legacy salt (never overwriting anything) and use v2 from here on.
+  if (!primary) _cachedKey = createV2Key();
+  return { plaintext, legacyKey: true };
+}
+
+/**
+ * Decrypt a wire-format envelope string back to UTF-8 plaintext. Tries the v2
+ * key, then the legacy v1 (machine-name) derivation. Returns null if the input
+ * is not a valid envelope or the ciphertext does not decrypt; throws
+ * `InterviewKeyUnavailable` if this box's key material itself is unusable.
+ */
+export function decryptAtRest(envelope: string): string | null {
+  if (!envelope.startsWith(ENVELOPE_PREFIX)) return null;
+  const result = decryptEnvelope(envelope);
+  return result ? result.plaintext : null;
 }
 
 /**
@@ -164,16 +304,33 @@ export function writeEncryptedFile(encPath: string, plaintext: string): void {
 }
 
 /**
- * Read and decrypt an encrypted file. Returns null if the file doesn't exist
- * or decryption fails.
+ * Read and decrypt an encrypted file. Returns null if the file doesn't exist,
+ * holds no envelope, or decryption fails. A file that only the legacy v1 key
+ * could open is re-encrypted here with the v2 key (the one migration write of
+ * WF-011) so the machine name stops mattering; the plaintext is still returned
+ * if that rewrite cannot be made.
  */
 export function readEncryptedFile(encPath: string): string | null {
+  let envelope: string;
   try {
-    const envelope = fs.readFileSync(encPath, 'utf-8');
-    return decryptAtRest(envelope);
+    envelope = fs.readFileSync(encPath, 'utf-8');
   } catch {
     return null;
   }
+  if (!isEncryptedEnvelope(envelope)) return null;
+
+  const result = decryptEnvelope(envelope);
+  if (!result) return null;
+
+  if (result.legacyKey) {
+    try {
+      writeEncryptedFile(encPath, result.plaintext);
+    } catch {
+      // Best-effort: the v2 key file is already written, so the next read (or
+      // write) re-encrypts. The plaintext the caller asked for is returned.
+    }
+  }
+  return result.plaintext;
 }
 
 /**
