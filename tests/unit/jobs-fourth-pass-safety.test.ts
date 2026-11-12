@@ -160,11 +160,10 @@ test('3. a card that moved to review during the sweep is not blocked', async () 
   const target = seedInProgressTask(ws, agentId, 240);
   run(
     `CREATE TRIGGER u16_race_after_block AFTER INSERT ON task_events
-       WHEN NEW.to_status = 'blocked' AND NEW.task_id = ?
+       WHEN NEW.to_status = 'blocked' AND NEW.task_id = '${decoy}'
      BEGIN
-       UPDATE tasks SET status = 'review', updated_at = datetime('now') WHERE id = ?;
+       UPDATE tasks SET status = 'review', updated_at = datetime('now') WHERE id = '${target}';
      END`,
-    [decoy, target],
   );
 
   try {

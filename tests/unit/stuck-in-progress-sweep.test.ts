@@ -156,7 +156,10 @@ test('MR-07: hard ceiling blocks a task even past multiple thresholds', async ()
     });
 
     const result = await runStuckInProgressSweep();
-    assert.equal(result.blocked, 1, 'task past hard ceiling is blocked');
+    // U-16: the ceiling now also covers the events check, so a card from an
+    // earlier test in this file that is still in_progress and past this test's
+    // 5-minute ceiling is legitimately blocked in the same run — assert
+    // inclusion, not an exact count.
     assert.ok(result.blockedIds.includes(taskId), 'the ceiling-past task is in the blocked set');
 
     const task = queryOne<{ status: string }>('SELECT status FROM tasks WHERE id = ?', [taskId]);
