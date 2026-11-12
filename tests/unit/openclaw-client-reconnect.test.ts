@@ -3,11 +3,12 @@
  *
  * Verifies:
  *   1. scheduleReconnect() uses bounded exponential backoff (2s → 4s → 8s …).
- *   2. After MAX_RECONNECT_ATTEMPTS consecutive failures the client enters a
- *      terminal "blocked" state, records the failure, and stops retrying.
+ *   2. After MAX_RECONNECT_ATTEMPTS consecutive failures the client records the
+ *      outage ONCE and keeps retrying forever at the capped backoff — it never
+ *      gives up (2026-11-12: a permanent "giving up" left a client's Command
+ *      Center disconnected until a human restarted it).
  *   3. A successful connection resets the backoff/attempt counter (the same
- *      resetReconnectBackoff() the auth-success handler invokes), and
- *      setAutoReconnect(true) clears the blocked state for a manual retry.
+ *      resetReconnectBackoff() the auth-success handler invokes).
  *
  * Uses node:test mock timers; the real connect() is stubbed so no network I/O
  * happens and no gateway is required. Node 22's mock timers expose a
@@ -69,6 +70,12 @@ async function advance(ms: number): Promise<void> {
   await new Promise((resolve) => setImmediate(resolve));
 }
 
+/** Advance in 32s steps: each async reconnect callback schedules its successor
+ *  in a continuation, so one huge tick would fire only the first timer. */
+async function advanceInSteps(totalMs: number, stepMs = 32000): Promise<void> {
+  for (let elapsed = 0; elapsed < totalMs; elapsed += stepMs) await advance(stepMs);
+}
+
 test('reconnect backs off exponentially: 2s → 4s → 8s', async () => {
   mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
   try {
@@ -101,30 +108,63 @@ test('reconnect backs off exponentially: 2s → 4s → 8s', async () => {
   }
 });
 
-test('blocks after MAX_RECONNECT_ATTEMPTS consecutive failures and stops retrying', async () => {
+test('never gives up: keeps retrying at the capped delay after MAX_RECONNECT_ATTEMPTS', async () => {
   mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
   try {
     const client = makeClient();
     const connectCalls = stubFailingConnect(client);
 
     internals(client).scheduleReconnect();
-    // Drain all three attempts one backoff window at a time (each window's
-    // continuation schedules the next attempt).
     await advance(2000);
     await advance(4000);
     await advance(8000);
 
-    assert.equal(connectCalls(), 3, 'exactly MAX_RECONNECT_ATTEMPTS connect attempts');
-    assert.equal(client.isReconnectBlocked(), true, 'terminal blocked state after the ceiling');
-    assert.match(
-      client.getLastConnectError()?.message ?? '',
-      /blocked after 3 failed attempts/,
-      'the failure is recorded for the status surface',
-    );
+    assert.equal(connectCalls(), 3, 'the first MAX_RECONNECT_ATTEMPTS attempts run');
+    assert.equal(client.isReconnectBlocked(), false, 'there is no terminal blocked state');
 
-    // Terminal: no further attempts no matter how long we wait.
-    await advance(10 * 60 * 1000);
-    assert.equal(connectCalls(), 3, 'no reconnect attempts after blocked');
+    // 4th attempt at 16s, 5th at 32s (cap), then every 32s for as long as the
+    // gateway stays down.
+    await advance(16000);
+    assert.equal(connectCalls(), 4);
+    await advance(32000);
+    assert.equal(connectCalls(), 5);
+    await advance(32000);
+    assert.equal(connectCalls(), 6, 'still retrying at the capped 32s interval');
+    await advanceInSteps(60 * 60 * 1000);
+    assert.ok(connectCalls() > 100, `keeps retrying for an hour of outage, got ${connectCalls()}`);
+
+    const msg = client.getLastConnectError()?.message ?? '';
+    assert.match(msg, /unreachable after 3 attempts/, 'the outage is recorded for the status surface');
+    assert.match(msg, /still retrying/);
+
+    client.disconnect();
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test('recovers when the gateway comes back after a long outage', async () => {
+  mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
+  try {
+    const client = makeClient();
+    let up = false;
+    let calls = 0;
+    internals(client).connect = async () => {
+      calls += 1;
+      if (!up) throw new Error('gateway down');
+      internals(client).resetReconnectBackoff(); // what the auth-success handler does
+    };
+
+    internals(client).scheduleReconnect();
+    await advanceInSteps(10 * 60 * 1000); // ten minutes down
+    const downCalls = calls;
+    assert.ok(downCalls > 5);
+
+    up = true;
+    await advance(32000); // next capped attempt lands
+    assert.equal(calls, downCalls + 1, 'the next scheduled attempt connects once the gateway is back');
+    await advanceInSteps(10 * 60 * 1000);
+    assert.equal(calls, downCalls + 1, 'no further attempts after a successful connect');
 
     client.disconnect();
   } finally {
@@ -143,42 +183,21 @@ test('a successful connection resets the backoff/attempt counter', async () => {
     await advance(2000);
     await advance(4000);
     await advance(8000);
-    assert.equal(client.isReconnectBlocked(), true);
     assert.equal(connectCalls(), 3);
 
     // A successful connection invokes resetReconnectBackoff() (the auth-success
     // handler calls exactly this). Simulate that reset.
     internals(client).resetReconnectBackoff();
-    assert.equal(client.isReconnectBlocked(), false, 'reset clears the blocked state');
 
-    // The next failure sequence starts from the base delay again (2s), proving
-    // the attempt counter was reset — not from the would-be 4th-attempt delay.
-    internals(client).scheduleReconnect();
+    // The already-pending 4th attempt (scheduled at the old 16s delay) still
+    // fires; its failure then reschedules from the RESET counter, so the next
+    // delay is the base 2s, not the would-be 32s cap.
+    await advance(16000);
+    assert.equal(connectCalls(), 4);
     await advance(1999);
-    assert.equal(connectCalls(), 3, 'no attempt before the base delay elapses');
+    assert.equal(connectCalls(), 4, 'no attempt before the base delay elapses');
     await advance(1);
-    assert.equal(connectCalls(), 4, 'attempt fires at the base 2s delay after reset');
-
-    client.disconnect();
-  } finally {
-    mock.timers.reset();
-  }
-});
-
-test('setAutoReconnect(true) clears the terminal blocked state for a manual retry', async () => {
-  mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
-  try {
-    const client = makeClient();
-    stubFailingConnect(client);
-
-    internals(client).scheduleReconnect();
-    await advance(2000);
-    await advance(4000);
-    await advance(8000);
-    assert.equal(client.isReconnectBlocked(), true);
-
-    client.setAutoReconnect(true);
-    assert.equal(client.isReconnectBlocked(), false, 'manual re-enable unblocks the client');
+    assert.equal(connectCalls(), 5, 'attempt fires at the base 2s delay after reset');
 
     client.disconnect();
   } finally {

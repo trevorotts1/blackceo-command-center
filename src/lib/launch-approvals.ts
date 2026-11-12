@@ -16,6 +16,8 @@
 import { randomUUID } from 'node:crypto';
 import { queryOne, run } from '@/lib/db';
 import { tenantRegistration, type TenantContext } from '@/lib/auth/tenant-context';
+import { ownerSubjectForChatId, OWNER_SUBJECT_PREFIX } from '@/lib/auth/owner-login';
+import { resolveOwnerChatId } from '@/lib/notify';
 
 export const APPROVAL_KINDS = [
   'plan_build',
@@ -41,6 +43,9 @@ export interface LaunchApprovalRecord {
   source_message_ref: string;
 }
 
+/** The only verification class the owner decision path writes. */
+export const VERIFICATION_CLASS_OWNER = 'authenticated_platform_record';
+
 /** Default and maximum lifetime of an approval. */
 const DEFAULT_TTL_MS = 7 * 24 * 3600 * 1000;
 const MAX_TTL_MS = 30 * 24 * 3600 * 1000;
@@ -50,7 +55,7 @@ const SERVER_OWNED = ['approval_id', 'tenant_id', 'client_identity_ref', 'revoke
 const ALLOWED = new Set<string>([
   'kind', 'plan_hash', 'scope', 'cap_minor', 'currency', 'expires_at', 'source_message',
 ]);
-const PLAN_HASH_RE = /^(?:sha256:)?([0-9a-f]{64})$/i;
+export const PLAN_HASH_RE = /^(?:sha256:)?([0-9a-f]{64})$/i;
 const APPROVE_RE = /\bAPPROVE\s+([0-9a-f]{8})\b/i;
 
 export interface ApprovalResult {
@@ -77,8 +82,18 @@ const toRecord = (r: Row): LaunchApprovalRecord => ({ ...r, revoked: r.revoked =
  * Registered = listed in the tenant registration's `subjects` / `allowedEmails`.
  * The operator bearer (`operator:api`) is never a client identity.
  */
-function registeredClientIdentity(ctx: TenantContext): string | null {
+export function registeredClientIdentity(ctx: TenantContext): string | null {
   if (ctx.subject === 'operator:api') return null;
+  // A browser signed in by the owner-login link carries the session subject
+  // `invited-owner:<sha256(owner chat id)>`. It is the tenant's own owner ONLY
+  // when it equals the hash of the CURRENT server-side owner chat id; any other
+  // `invited-owner:` subject (a stale or foreign hash) is refused. Fail-closed:
+  // no configured owner chat means no match.
+  if (ctx.subject.startsWith(OWNER_SUBJECT_PREFIX)) {
+    let chat: string | null = null;
+    try { chat = resolveOwnerChatId(); } catch { chat = null; }
+    return chat && ownerSubjectForChatId(chat) === ctx.subject ? ctx.subject : null;
+  }
   let reg;
   try { reg = tenantRegistration(ctx.host); } catch { return null; }
   const registered = new Set([...(reg.subjects ?? []), ...(reg.allowedEmails ?? [])].map((s) => s.toLowerCase()));
@@ -150,10 +165,39 @@ export function mintLaunchApproval(ctx: TenantContext, body: unknown): ApprovalR
   return { status: 201, payload: { ...toRecord(row) } };
 }
 
+/** Prefix of the source_message_ref the owner decision path writes (server-only). */
+export const OWNER_REQUEST_REF_PREFIX = 'approval-request:';
+
+/**
+ * Gate view of a record. For a record minted by the owner decision path the
+ * binding is read back out of `scope` JSON {location_id, action, object_key},
+ * the plan hash from `plan_hash`, the approver from `client_identity_ref`, and
+ * `verification_class` is `authenticated_platform_record`. A record minted from
+ * a chat reply has a free-text scope, so none of these are derived and it can
+ * never satisfy the gate.
+ */
+function gateFields(r: Row): Record<string, unknown> {
+  if (!r.source_message_ref.startsWith(OWNER_REQUEST_REF_PREFIX)) return {};
+  let scope: Record<string, unknown> = {};
+  try { const v = JSON.parse(r.scope); if (v && typeof v === 'object') scope = v; } catch { /* free-text scope */ }
+  if (typeof scope.location_id !== 'string' || typeof scope.action !== 'string' || typeof scope.object_key !== 'string') return {};
+  const requestId = r.source_message_ref.slice(OWNER_REQUEST_REF_PREFIX.length);
+  const req = queryOne<{ plan_sha256: string }>('SELECT plan_sha256 FROM approval_requests WHERE request_id = ? AND tenant_id = ?', [requestId, r.tenant_id]);
+  return {
+    location_id: scope.location_id,
+    action: scope.action,
+    object_key: scope.object_key,
+    plan_sha256: req?.plan_sha256 ?? r.plan_hash.replace(/^sha256:/, ''),
+    approver: r.client_identity_ref,
+    verification_class: VERIFICATION_CLASS_OWNER,
+    request_id: requestId,
+  };
+}
+
 /** One stored record, scoped to the caller's tenant (another tenant's id reads as not found). */
 export function getLaunchApproval(tenantId: string, approvalId: string): ApprovalResult {
   const row = queryOne<Row>('SELECT * FROM launch_approvals WHERE approval_id = ? AND tenant_id = ?', [approvalId, tenantId]);
   if (!row) return refuse(404, 'approval_not_found');
   const record = toRecord(row);
-  return { status: 200, payload: { ...record, active: !record.revoked && Date.parse(record.expires_at) > Date.now() } };
+  return { status: 200, payload: { ...record, ...gateFields(row), active: !record.revoked && Date.parse(record.expires_at) > Date.now() } };
 }

@@ -8648,6 +8648,45 @@ export const migrations: Migration[] = [
       console.log('[Migration 178] governed launch domain ready');
     },
   },
+
+  {
+    id: '179',
+    name: 'approval_requests_inbox',
+    up: (db) => {
+      // Owner approvals inbox: approval_requests holds what the agent asks the
+      // owner to approve (it can create and read these, never decide them).
+      // launch_approvals is NOT altered: the Convert and Flow binding rides in
+      // its immutable `scope` JSON (src/lib/approval-requests.ts). Additive and
+      // idempotent: re-running changes nothing.
+      console.log('[Migration 179] Adding approval_requests...');
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS approval_requests (
+          request_id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL,
+          kind TEXT NOT NULL CHECK (kind IN ('automation_write','publish')),
+          location_id TEXT NOT NULL,
+          action TEXT NOT NULL,
+          object_key TEXT NOT NULL,
+          plan_sha256 TEXT NOT NULL,
+          title TEXT NOT NULL,
+          summary TEXT NOT NULL,
+          preview_json TEXT NOT NULL DEFAULT '{}',
+          requested_by TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','changes_requested')),
+          expires_at TEXT NOT NULL,
+          valid_until TEXT,
+          created_at TEXT NOT NULL,
+          decided_at TEXT,
+          decided_by TEXT,
+          decision_note TEXT,
+          approval_id TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_approval_requests_status ON approval_requests(tenant_id, status, created_at);
+        CREATE INDEX IF NOT EXISTS idx_approval_requests_plan ON approval_requests(tenant_id, kind, location_id, action, object_key, plan_sha256);
+      `);
+      console.log('[Migration 179] approval_requests ready');
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner
