@@ -52,11 +52,13 @@ const CURL_STUB = [
   '',
 ].join('\n');
 
-// A stub `openclaw`: records the call, prints FAKE_OPENCLAW_OUTPUT (empty by default).
+// A stub `openclaw`: records the call (one line per call), prints FAKE_OPENCLAW_OUTPUT
+// (empty by default). One line per call: "$*" spans lines when an argument (the agent
+// prompt) contains newlines, so count CALL markers, not raw log lines.
 const OPENCLAW_STUB = [
   '#!/bin/sh',
   'set -u',
-  'printf \'%s\\n\' "$*" >> "${FAKE_OPENCLAW_LOG:?}"',
+  'printf \'CALL\\n\' >> "${FAKE_OPENCLAW_LOG:?}"',
   '[ -n "${FAKE_OPENCLAW_OUTPUT:-}" ] && printf \'%s\' "$FAKE_OPENCLAW_OUTPUT"',
   'exit "${FAKE_OPENCLAW_RC:-0}"',
   '',
