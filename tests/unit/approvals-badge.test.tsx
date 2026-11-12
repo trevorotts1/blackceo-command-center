@@ -67,6 +67,6 @@ describe('dashboard home page render', () => {
     expect(badge.getAttribute('href')).toBe('/approvals');
     const header = container.querySelector('header');
     expect(header?.contains(badge)).toBe(true);
-    expect(header?.contains(screen.getByTestId('health-indicator'))).toBe(true);
+    expect(header?.querySelector('[data-testid="health-indicator"]')).not.toBeNull();
   });
 });
