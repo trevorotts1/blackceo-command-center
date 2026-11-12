@@ -105,7 +105,7 @@ test('leaves a fresh in_progress task alone', async () => {
     status: 'in_progress',
     workspaceId: ws,
     agentId,
-    updatedAt: isoMinutesAgo(5), // well under the 45-min threshold
+    updatedAt: isoMinutesAgo(5), // well under the 45-min threshold this file sets (the shipped default is 180)
     lastProgressAt: isoMinutesAgo(5),
   });
 
