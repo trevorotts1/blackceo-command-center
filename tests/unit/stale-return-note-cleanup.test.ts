@@ -20,7 +20,7 @@ import test, { beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { v4 as uuidv4 } from 'uuid';
-import { queryAll, queryOne, run, transaction } from '../../src/lib/db';
+import { queryAll, queryOne, run, getDb, transaction } from '../../src/lib/db';
 import {
   runStaleReturnNoteCleanup,
   stripStaleReturnNotes,
@@ -208,20 +208,38 @@ test('8) a card edited between the read and the write keeps the newer text; no r
   const newerText = 'Edited by a human while the clean-up was running';
 
   // Simulate the edit landing AFTER the candidate SELECT has read the old text.
-  // The clean-up module imports queryAll from '@/lib/db', so replacing that
-  // export for the duration of the call is the read-and-write interleaving.
-  const dbModule = require('../../src/lib/db') as { queryAll: typeof queryAll };
-  const realQueryAll = dbModule.queryAll;
+  // The clean-up module calls the live `getDb().prepare(...)` binding on every
+  // query, so the interleave is injected at the shared better-sqlite3 handle:
+  // after the candidate SELECT's statement is prepared, the edit lands first.
+  const dbModule = require('../../src/lib/db') as { getDb: typeof getDb };
+  void dbModule;
   let edited = false;
+  const handle = getDb();
+  const realPrepare = handle.prepare.bind(handle);
 
-  dbModule.queryAll = ((sql: string, params: unknown[] = []) => {
-    const rows = realQueryAll(sql, params);
-    if (!edited && typeof sql === 'string' && sql.includes('stale_return_note_unrecognised')) {
-      edited = true;
-      run('UPDATE tasks SET description = ? WHERE id = ?', [newerText, id]);
+  handle.prepare = ((sql: string, ...rest: unknown[]) => {
+    const stmt = (realPrepare as (...a: unknown[]) => { all: (...a: unknown[]) => unknown[] })(
+      sql,
+      ...rest,
+    );
+    // Fire only on the candidate SELECT's execution (not on prepare): let its
+    // .all() read the old text first, THEN land the concurrent edit, so the
+    // row the loop holds is stale and the compare-and-set must refuse it.
+    if (typeof sql === 'string' && sql.includes('SELECT id, description FROM tasks')) {
+      const realAll = stmt.all.bind(stmt);
+      (stmt as { all: unknown }).all = (...args: unknown[]) => {
+        const rows = realAll(...(args as []));
+        if (!edited) {
+          edited = true;
+          (realPrepare as (...a: unknown[]) => { run: (...a: unknown[]) => unknown })(
+            'UPDATE tasks SET description = ? WHERE id = ?',
+          ).run(newerText, id);
+        }
+        return rows;
+      };
     }
-    return rows;
-  }) as unknown as typeof queryAll;
+    return stmt;
+  }) as typeof handle.prepare;
 
   let result: ReturnType<typeof runStaleReturnNoteCleanup> = {
     scanned: -1,
@@ -231,7 +249,7 @@ test('8) a card edited between the read and the write keeps the newer text; no r
   try {
     result = runStaleReturnNoteCleanup();
   } finally {
-    dbModule.queryAll = realQueryAll;
+    handle.prepare = realPrepare as typeof handle.prepare;
   }
 
   assert.equal(edited, true, 'the interleaving really happened');
