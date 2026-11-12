@@ -30,6 +30,11 @@ function mkTask(over: Partial<TrustTaskRow>): TrustTaskRow {
     completion_sent_at: over.completion_sent_at ?? null,
     block_audience: over.block_audience ?? null,
     block_needs: over.block_needs ?? null,
+    blocked_notice_sent_at: over.blocked_notice_sent_at ?? null,
+    phase_progress_sent_at: over.phase_progress_sent_at ?? null,
+    last_reported_phase_label: over.last_reported_phase_label ?? null,
+    process_certificate_sha: over.process_certificate_sha ?? null,
+    source: over.source ?? null,
   };
 }
 
