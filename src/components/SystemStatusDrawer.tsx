@@ -6,9 +6,12 @@
  * U47: reused as-is by the consolidated <HealthIndicator/> (operator
  * variant only — the client variant never opens this drawer). Receives the
  * current payload and exposes a refresh button that triggers `?force=1`
- * re-runs, plus a "Re-run bootstrap" admin action that streams
- * `/api/system/bootstrap` SSE output into a modal log view (PRD v4.0.1
- * P1-13) — both carried over unchanged from the retired SystemStatusPill.
+ * re-runs.
+ *
+ * U-06 (CC-039): the old bootstrap admin action is gone. It posted
+ * `/api/system/bootstrap` from the browser without a bearer token, so the
+ * route refused it every time — a button that could not work. Bootstrap runs
+ * out of band; this drawer is diagnostics only.
  *
  * U47 change: rows are grouped by the U46 `tier` field (Critical /
  * Auxiliary / Model Providers) instead of a hand-maintained component-id
@@ -18,8 +21,8 @@
  * `w-96` that overflowed a 375px viewport.
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { X, RefreshCw, PlayCircle } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { X, RefreshCw } from 'lucide-react';
 import type { SystemStatus, TieredProbeResult } from '@/lib/probes/types';
 import { explainStatus } from '@/lib/status-explanations';
 
@@ -128,8 +131,6 @@ const STATUS_TEXT: Record<SystemStatus, string> = {
 
 export function SystemStatusDrawer({ payload, loading, onRefresh, onClose }: Props) {
   const components = payload?.components || [];
-  const [bootstrapOpen, setBootstrapOpen] = useState(false);
-  const [bootstrapRunning, setBootstrapRunning] = useState(false);
 
   // U47: fold the Live Feed dot in as an extra auxiliary row. Only polled
   // while the drawer is actually open.
@@ -194,283 +195,9 @@ export function SystemStatusDrawer({ payload, loading, onRefresh, onClose }: Pro
           <Section title="Auxiliary" rows={auxiliaryWithFeed} />
           <Section title="Model Providers" rows={providers} />
         </div>
-
-        <div className="border-t border-gray-100 p-4 bg-gray-50">
-          <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">
-            Admin Actions
-          </h3>
-          <button
-            onClick={() => setBootstrapOpen(true)}
-            disabled={bootstrapRunning}
-            className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-md bg-gray-900 text-white text-sm font-medium hover:bg-gray-800 disabled:opacity-60 disabled:cursor-not-allowed"
-            title="Re-run the platform bootstrap script"
-          >
-            <PlayCircle className="w-4 h-4" />
-            {bootstrapRunning ? 'Bootstrap running...' : 'Re-run bootstrap'}
-          </button>
-          <p className="mt-2 text-[11px] leading-snug text-gray-500">
-            Runs the install script for this platform. May take 5 to 15 minutes.
-          </p>
-        </div>
       </aside>
-
-      {bootstrapOpen && (
-        <BootstrapModal
-          onClose={() => setBootstrapOpen(false)}
-          onRunningChange={setBootstrapRunning}
-        />
-      )}
     </div>
   );
-}
-
-interface BootstrapModalProps {
-  onClose: () => void;
-  onRunningChange: (running: boolean) => void;
-}
-
-type BootstrapStatus = 'idle' | 'running' | 'success' | 'error';
-
-interface LogLine {
-  stream: 'stdout' | 'stderr' | 'meta';
-  text: string;
-}
-
-function BootstrapModal({ onClose, onRunningChange }: BootstrapModalProps) {
-  const [lines, setLines] = useState<LogLine[]>([]);
-  const [status, setStatus] = useState<BootstrapStatus>('idle');
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [summary, setSummary] = useState<{ exitCode: number; durationMs: number } | null>(null);
-  const abortRef = useRef<AbortController | null>(null);
-  const logEndRef = useRef<HTMLDivElement | null>(null);
-  const startedRef = useRef(false);
-
-  const appendLine = useCallback((line: LogLine) => {
-    setLines((prev) => {
-      // Cap log buffer at 2000 lines so the DOM stays responsive over long runs.
-      const next = prev.length > 2000 ? prev.slice(prev.length - 1500) : prev;
-      return [...next, line];
-    });
-  }, []);
-
-  // Parse the SSE stream. We do this manually because EventSource only
-  // supports GET requests, and we need POST.
-  const startStream = useCallback(async () => {
-    setStatus('running');
-    setErrorMessage(null);
-    setSummary(null);
-    onRunningChange(true);
-
-    const controller = new AbortController();
-    abortRef.current = controller;
-
-    try {
-      const res = await fetch('/api/system/bootstrap', {
-        method: 'POST',
-        signal: controller.signal,
-        headers: { Accept: 'text/event-stream' },
-      });
-
-      if (!res.ok || !res.body) {
-        const detail = await safeReadText(res);
-        setStatus('error');
-        setErrorMessage(
-          detail || `Request failed with status ${res.status}`
-        );
-        onRunningChange(false);
-        return;
-      }
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-
-        // SSE events are separated by a blank line.
-        let sepIdx = buffer.indexOf('\n\n');
-        while (sepIdx !== -1) {
-          const rawEvent = buffer.slice(0, sepIdx);
-          buffer = buffer.slice(sepIdx + 2);
-          handleSseBlock(rawEvent);
-          sepIdx = buffer.indexOf('\n\n');
-        }
-      }
-
-      // Flush any trailing event without a terminator.
-      if (buffer.trim().length > 0) {
-        handleSseBlock(buffer);
-      }
-    } catch (err) {
-      if ((err as Error).name === 'AbortError') {
-        appendLine({
-          stream: 'meta',
-          text: '[client] Stream canceled. The bootstrap process is still running on the server.',
-        });
-      } else {
-        setStatus('error');
-        setErrorMessage(err instanceof Error ? err.message : String(err));
-      }
-    } finally {
-      onRunningChange(false);
-      abortRef.current = null;
-    }
-
-    function handleSseBlock(block: string) {
-      const evtMatch = block.match(/^event:\s*(.+)$/m);
-      const dataLines = block
-        .split('\n')
-        .filter((l) => l.startsWith('data:'))
-        .map((l) => l.replace(/^data:\s?/, ''));
-      const eventName = evtMatch ? evtMatch[1].trim() : 'message';
-      const data = dataLines.join('\n');
-
-      if (eventName === 'stdout') {
-        appendLine({ stream: 'stdout', text: data });
-      } else if (eventName === 'stderr') {
-        appendLine({ stream: 'stderr', text: data });
-      } else if (eventName === 'error') {
-        setErrorMessage(data);
-      } else if (eventName === 'complete') {
-        try {
-          const parsed = JSON.parse(data) as { exitCode: number; durationMs: number };
-          setSummary(parsed);
-          setStatus(parsed.exitCode === 0 ? 'success' : 'error');
-        } catch {
-          setStatus('error');
-          setErrorMessage(`Malformed complete event: ${data}`);
-        }
-      }
-    }
-  }, [appendLine, onRunningChange]);
-
-  // Kick off the stream once on mount.
-  useEffect(() => {
-    if (startedRef.current) return;
-    startedRef.current = true;
-    void startStream();
-  }, [startStream]);
-
-  // Auto-scroll the log to the bottom as lines arrive.
-  useEffect(() => {
-    logEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
-  }, [lines.length]);
-
-  const handleCancelStream = () => {
-    abortRef.current?.abort();
-  };
-
-  const handleClose = () => {
-    abortRef.current?.abort();
-    onClose();
-  };
-
-  return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/50">
-      <div className="w-full max-w-3xl max-h-[85vh] bg-white rounded-xl shadow-2xl border border-gray-200 flex flex-col">
-        <div className="px-5 py-4 border-b border-gray-100 flex items-start justify-between gap-4">
-          <div>
-            <h2 className="text-base font-semibold text-gray-900">Re-run bootstrap</h2>
-            <p className="text-xs text-gray-500 mt-1">
-              Streaming live output from the install script. Closing this
-              window does not stop the bootstrap process on the server.
-            </p>
-          </div>
-          <button
-            onClick={handleClose}
-            className="p-1.5 rounded-md text-gray-500 hover:bg-gray-100"
-            title="Close"
-            aria-label="Close bootstrap modal"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-
-        {status === 'success' && summary && (
-          <div className="px-5 py-3 bg-emerald-50 border-b border-emerald-100 text-sm text-emerald-800">
-            Bootstrap completed in {(summary.durationMs / 1000).toFixed(1)}s (exit 0).
-          </div>
-        )}
-        {status === 'error' && (
-          <div className="px-5 py-3 bg-red-50 border-b border-red-100 text-sm text-red-800">
-            <div className="font-medium">Bootstrap failed</div>
-            <div className="mt-0.5 text-xs text-red-700 break-words">
-              {errorMessage || (summary ? `Exit code ${summary.exitCode}` : 'Unknown error')}
-            </div>
-          </div>
-        )}
-
-        <div className="flex-1 overflow-hidden p-4 bg-gray-950">
-          <pre
-            className="h-full max-h-[55vh] overflow-y-auto text-xs leading-relaxed font-mono text-gray-100 whitespace-pre-wrap break-words"
-            aria-live="polite"
-          >
-            {lines.map((line, idx) => (
-              <div
-                key={idx}
-                className={
-                  line.stream === 'stderr'
-                    ? 'text-orange-300'
-                    : line.stream === 'meta'
-                    ? 'text-sky-300 italic'
-                    : 'text-gray-100'
-                }
-              >
-                {line.text || ' '}
-              </div>
-            ))}
-            <div ref={logEndRef} />
-          </pre>
-        </div>
-
-        <div className="px-5 py-3 border-t border-gray-100 flex items-center justify-between gap-2 bg-gray-50">
-          <div className="text-xs text-gray-500">
-            {status === 'running' && 'Streaming...'}
-            {status === 'success' && 'Done.'}
-            {status === 'error' && 'Stopped with errors.'}
-            {status === 'idle' && 'Starting...'}
-          </div>
-          <div className="flex items-center gap-2">
-            {status === 'running' && (
-              <button
-                onClick={handleCancelStream}
-                className="px-3 py-1.5 text-xs font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-100"
-              >
-                Cancel stream
-              </button>
-            )}
-            <button
-              onClick={handleClose}
-              className="px-3 py-1.5 text-xs font-medium text-white bg-gray-900 rounded-md hover:bg-gray-800"
-            >
-              Close
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-async function safeReadText(res: Response): Promise<string> {
-  try {
-    const text = await res.text();
-    if (!text) return '';
-    try {
-      const parsed = JSON.parse(text);
-      if (parsed && typeof parsed === 'object' && 'error' in parsed) {
-        return String((parsed as { error: unknown }).error);
-      }
-    } catch {
-      // not JSON, fall through
-    }
-    return text;
-  } catch {
-    return '';
-  }
 }
 
 function Section({ title, rows }: { title: string; rows: TieredProbeResult[] }) {
