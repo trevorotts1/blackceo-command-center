@@ -45,7 +45,7 @@ describe('TaskModal — creation cannot claim done/review', () => {
     const labels = offeredLabels(select);
     expect(labels).not.toContain('Done');
     expect(labels).not.toContain('Review / QC');
-    for (const l of ['Backlog', 'Inbox (new)', 'Planning', 'Assigned (queued)', 'In Progress', 'Testing', 'Blocked']) {
+    for (const l of ['Being Prepared', 'Ready to Start (new)', 'Ready to Start (planning)', 'Ready to Start (queued)', 'In Progress', 'Review / QC (testing)', 'Blocked']) {
       expect(labels).toContain(l);
     }
   });
@@ -75,7 +75,7 @@ describe('TaskModal — creation cannot claim done/review', () => {
 
     const notice = screen.getByTestId('create-status-downgraded-notice');
     expect(notice.textContent).toMatch(/can't start in Review \/ QC/i);
-    expect(notice.textContent).toMatch(/register a deliverable/i);
+    expect(notice.textContent).toMatch(/Move it once the work is done/i);
 
     fireEvent.change(screen.getByPlaceholderText('What needs to be done?'), { target: { value: 'From review column' } });
     fireEvent.click(screen.getByRole('button', { name: /^Save$/ }));
@@ -86,8 +86,7 @@ describe('TaskModal — creation cannot claim done/review', () => {
     expect(post.body.status).toBe('assigned');
   });
 
-  it('a refused create shows the server `hint` in the error banner (no dead-end 403)', async () => {
-    vi.stubGlobal('fetch', () =>
+  it('a refused create shows the server `hint` in the error banner (no dead-end 403)', async () => {    vi.stubGlobal('fetch', () =>
       json(
         {
           error: 'Forbidden: cannot create a task already done or in review with no completion evidence.',
@@ -101,7 +100,9 @@ describe('TaskModal — creation cannot claim done/review', () => {
     fireEvent.click(screen.getByRole('button', { name: /^Save$/ }));
 
     const banner = await screen.findByTestId('task-save-error');
-    expect(banner.textContent).toMatch(/cannot create a task already done or in review/i);
+    // CC-040: the banner shows the human-facing hint only; the raw server
+    // error stays in the console.
     expect(banner.textContent).toMatch(/register a deliverable, then move it/i);
+    expect(banner.textContent).not.toMatch(/cannot create a task already done/i);
   });
 });

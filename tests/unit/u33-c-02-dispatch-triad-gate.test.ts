@@ -162,7 +162,7 @@ test('[U33/C-02 b] empty-description task is NOT claimable — held with a query
 
   const holdEvents = eventsFor(taskId, 'triad_gate_hold');
   assert.equal(holdEvents.length, 1, 'exactly one triad_gate_hold event must be written');
-  assert.match(holdEvents[0].message, /Missing: description/, 'names the missing field via board-labels vocabulary');
+  assert.match(holdEvents[0].message, /Still needs: a description/, 'names the missing field via board-labels vocabulary');
 
   // It never even attempted the gateway connection — GUARD 7 fires before that
   // step. TRIAD-PARK: the hold now ALSO records a failed advance attempt (that
