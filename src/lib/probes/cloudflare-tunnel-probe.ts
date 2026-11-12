@@ -148,7 +148,7 @@ export async function launchdTunnelEvidence(): Promise<{
   return { processRunning, launchdLabel };
 }
 
-async function probeMacMini(): Promise<{ status: 'live' | 'degraded' | 'offline'; details: string; detail: Record<string, unknown> }> {
+async function probeMacMini(): Promise<{ status: 'live' | 'degraded' | 'offline' | 'unknown'; details: string; detail: Record<string, unknown> }> {
   const outcome = await runFile('pm2', ['jlist'], EXEC_TIMEOUT_MS);
   if (outcome.exitCode !== 0) {
     return {
@@ -195,7 +195,7 @@ async function probeMacMini(): Promise<{ status: 'live' | 'degraded' | 'offline'
   };
 }
 
-async function probeVpsDocker(): Promise<{ status: 'live' | 'degraded' | 'offline'; details: string; detail: Record<string, unknown> }> {
+async function probeVpsDocker(): Promise<{ status: 'live' | 'degraded' | 'offline' | 'unknown'; details: string; detail: Record<string, unknown> }> {
   const sys = await runFile('systemctl', ['status', 'cloudflared'], EXEC_TIMEOUT_MS);
   if (sys.exitCode === 0) {
     return {
@@ -224,10 +224,13 @@ async function probeVpsDocker(): Promise<{ status: 'live' | 'degraded' | 'offlin
     }
   }
 
+  // Inside a container the tunnel normally runs on the HOST, where this
+  // process cannot see it. Not seeing it here is "cannot tell", not "down".
   return {
-    status: 'offline',
-    details: 'neither systemctl nor pm2 reported cloudflared running',
+    status: 'unknown',
+    details: 'cloudflared is not managed inside this container; the tunnel is expected to run on the host',
     detail: {
+      configured: false,
       systemctlExit: sys.exitCode,
       systemctlError: sys.error,
       pm2Exit: pm.exitCode,
