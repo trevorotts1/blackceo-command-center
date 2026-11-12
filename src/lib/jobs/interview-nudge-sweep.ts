@@ -119,18 +119,18 @@ export function buildResumeLink(sessionId: string): string {
 function messageForTier(tier: number, link: string): string {
   if (tier >= 168) {
     return (
-      'Your AI company is ready to finish whenever you are. ' +
+      'Your company setup is saved and waiting. ' +
       `Pick up your setup right where you left off: ${link}`
     );
   }
   if (tier >= 72) {
     return (
-      'Your AI company setup is still waiting for you — it only takes a few more minutes. ' +
+      'Your company setup is saved. The rest is short questions, most of them one tap. ' +
       `Continue here: ${link}`
     );
   }
   return (
-    "You're partway through setting up your AI company. " +
+    'Your company setup is saved part-way. ' +
     `Pick up where you left off whenever you're ready: ${link}`
   );
 }
@@ -262,6 +262,11 @@ export async function runInterviewNudgeSweep(
   }
 
   // ── Send exactly one owner nudge, record ONLY on confirmed delivery ────────
+  // CC-067: never send a link the owner cannot open from their own device.
+  const base = resumeBase();
+  if (!/^https?:\/\//i.test(base) || /\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])([:/]|$)/i.test(base)) {
+    return { scanned: 1, nudged: 0, tier, skippedReason: 'no public dashboard address is configured — nudge not sent' };
+  }
   const link = buildResumeLink(sessionId);
   let delivered = false;
   try {
