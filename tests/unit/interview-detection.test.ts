@@ -12,8 +12,10 @@
  *   whose DB row still had the default 0 would be permanently false-gated from
  *   Layer-2 analytics.
  *
- * Fix: filesystem signals are now checked even when clientFlag===false, and the
- * DB flag is auto-backfilled when a positive filesystem signal fires.
+ * Fix: filesystem signals are now checked even when clientFlag===false, so the
+ * caller is told the interview is complete. The check is READ-ONLY (CC-045): it
+ * no longer backfills the DB flag — a status read must not write. Flags left at
+ * 1 by an older build are reset by resetClientFlag() between tests.
  *
  * Test approach:
  *   We import interview-state.ts once and call getInterviewState() with
@@ -87,8 +89,8 @@ test.after(() => {
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-/** Reset the self-client interview_complete flag to 0 between tests so
- *  the auto-backfill from one test doesn't pollute the next. */
+/** Reset the self-client interview_complete flag to 0 between tests so no state
+ *  from one test leaks into the next. */
 function resetClientFlag() {
   try {
     const db = getDb();
@@ -117,12 +119,12 @@ test('getInterviewState: interview-answers-file → complete:true', async () => 
   fs.writeFileSync(ANSWERS_FILE, '# AI Workforce Interview\nBusiness: Test Corp\n');
   const state = await getInterviewState();
   fs.unlinkSync(ANSWERS_FILE);
-  resetClientFlag(); // undo auto-backfill
+  resetClientFlag(); // leave the flag at 0 for the next test
 
   assert.equal(state.complete, true, 'interview-answers-file should unlock complete:true');
   assert.equal(state.known, true);
-  // Signal may be 'client-flag' if backfill wrote it mid-call, or
-  // 'interview-answers-file' if clientFlag was still null. Either means it worked.
+  // The filesystem signal is the signal: the read does not write the flag, so
+  // the fast path cannot answer 'client-flag' on this call (CC-045).
   assert.ok(
     ['interview-answers-file', 'client-flag'].includes(state.signal),
     `signal must be interview-answers-file or client-flag, got: ${state.signal}`,
@@ -214,7 +216,7 @@ test('regression: interview-answers-file wins even when DB flag is false (0)', a
   fs.writeFileSync(ANSWERS_FILE, '# Interview\nDone.\n');
   const state = await getInterviewState();
   fs.unlinkSync(ANSWERS_FILE);
-  resetClientFlag(); // clean up backfill
+  resetClientFlag(); // leave the flag at 0 for the next test
 
   assert.equal(
     state.complete,
