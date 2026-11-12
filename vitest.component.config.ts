@@ -185,6 +185,11 @@ export default defineConfig({
       // The conversation screen keeps its typing box on screen before the
       // first question lands; real render proof.
       'tests/component/conversation-pane-input.test.tsx',
+      // BU-16 — a review-screen inline edit replaces that question's answer
+      // ({questionId, answer}: no "Updated on" note, no verbatim prompt), a row
+      // with no question id stays read-only, and the trigger follows the gate's
+      // still-open list; real render proof.
+      'tests/component/review-edit-replaces.test.tsx',
     ],
     env: { NODE_ENV: 'test' },
     testTimeout: 15000,
