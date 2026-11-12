@@ -181,7 +181,8 @@ function gateFields(r: Row): Record<string, unknown> {
   let scope: Record<string, unknown> = {};
   try { const v = JSON.parse(r.scope); if (v && typeof v === 'object') scope = v; } catch { /* free-text scope */ }
   if (typeof scope.location_id !== 'string' || typeof scope.action !== 'string' || typeof scope.object_key !== 'string') return {};
-  const requestId = r.source_message_ref.slice(OWNER_REQUEST_REF_PREFIX.length);
+  // `approval-request:<id>` (web) or `approval-request:<id>:chat:<channel>:<conversation>:<message>` (chat).
+  const requestId = r.source_message_ref.slice(OWNER_REQUEST_REF_PREFIX.length).split(':')[0];
   const req = queryOne<{ plan_sha256: string }>('SELECT plan_sha256 FROM approval_requests WHERE request_id = ? AND tenant_id = ?', [requestId, r.tenant_id]);
   return {
     location_id: scope.location_id,
