@@ -5,6 +5,7 @@
  * If any agent is `degraded`, the overall component is degraded.
  * If any agent is `busy` (but none degraded), the component is busy.
  * If any agent is `working`, the component is working.
+ * If every agent is `offline`, the component is degraded.
  * Otherwise it is live.
  */
 
@@ -57,12 +58,14 @@ export async function probeAgents(): Promise<ProbeResult> {
         };
         for (const r of rows) counts[r.status] = r.n;
 
+        const total = Object.values(counts).reduce((a, b) => a + b, 0);
+
         let status: SystemStatus = 'live';
         if (counts.degraded > 0) status = 'degraded';
         else if (counts.busy > 0) status = 'busy';
         else if (counts.working > 0) status = 'working';
-
-        const total = Object.values(counts).reduce((a, b) => a + b, 0);
+        // A fleet where every agent is offline is not live — nothing is running.
+        if (status === 'live' && total > 0 && counts.offline === total) status = 'degraded';
 
         return {
           component: 'agents',
