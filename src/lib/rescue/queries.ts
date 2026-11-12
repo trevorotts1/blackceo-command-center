@@ -107,6 +107,28 @@ export function listTicketsForDay(
   return rows.map((r) => toTicket(r, now));
 }
 
+/**
+ * Tickets created inside a window of UTC instants: `startIso` inclusive,
+ * `endIso` exclusive. Used for the Eastern day, whose midnights are not the
+ * store's own UTC day boundaries.
+ */
+export function listTicketsForWindow(
+  db: Database.Database,
+  startIso: string,
+  endIso: string,
+  now: number = Date.now(),
+): RescueTicket[] {
+  const rows = db
+    .prepare(
+      `SELECT * FROM tickets
+        WHERE created_at >= @start AND created_at < @end
+        ORDER BY created_at DESC
+        LIMIT ${MAX_TICKETS}`,
+    )
+    .all({ start: startIso, end: endIso }) as RescueTicketRow[];
+  return rows.map((r) => toTicket(r, now));
+}
+
 /** Most recently touched tickets regardless of state (the activity list). */
 export function listRecentTickets(
   db: Database.Database,

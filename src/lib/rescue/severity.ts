@@ -155,6 +155,91 @@ export function utcDayKey(at: Date | string = new Date()): string {
   return iso.slice(0, 10);
 }
 
+/** The Eastern time zone every human-facing rescue date is shown in. */
+const EASTERN_TZ = 'America/New_York';
+
+/**
+ * How far Eastern wall-clock time is from UTC at an instant, in milliseconds
+ * (negative in both EST and EDT). Derived from `Intl` so daylight saving is the
+ * platform's problem rather than a hand-maintained table's.
+ */
+function easternOffsetMs(utcMs: number): number {
+  const whole = Math.floor(utcMs / 1000) * 1000;
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: EASTERN_TZ,
+    hourCycle: 'h23',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  }).formatToParts(new Date(whole));
+  const field = (type: string): number => {
+    const part = parts.find((p) => p.type === type);
+    return Number(part ? part.value : NaN);
+  };
+  const wallAsUtc = Date.UTC(
+    field('year'),
+    field('month') - 1,
+    field('day'),
+    field('hour'),
+    field('minute'),
+    field('second'),
+  );
+  return wallAsUtc - whole;
+}
+
+/**
+ * The UTC instant of an Eastern calendar midnight, given that midnight written
+ * as a UTC value. Two passes: the offset at the guess, then the offset at the
+ * corrected instant, so a midnight that sits near a DST change still resolves.
+ */
+function easternMidnightUtc(wallUtcMs: number): number {
+  const first = wallUtcMs - easternOffsetMs(wallUtcMs);
+  return wallUtcMs - easternOffsetMs(first);
+}
+
+/**
+ * Midnight-to-midnight for the Eastern calendar day the instant falls on.
+ *
+ * The page's "today" is a person's day, so it must follow Eastern time, not
+ * UTC. The store's own day counters stay on `utcDayKey` — those joins are a
+ * different question and are deliberately left alone.
+ */
+export function easternDayWindow(at: Date): { startIso: string; endIso: string; label: string } {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: EASTERN_TZ,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(at);
+  const field = (type: string): number => {
+    const part = parts.find((p) => p.type === type);
+    return Number(part ? part.value : NaN);
+  };
+  const year = field('year');
+  const month = field('month');
+  const day = field('day');
+
+  // Date.UTC normalises an overflowing day, so this rolls months and years.
+  const start = easternMidnightUtc(Date.UTC(year, month - 1, day));
+  const end = easternMidnightUtc(Date.UTC(year, month - 1, day + 1));
+  const label =
+    new Intl.DateTimeFormat('en-US', {
+      timeZone: EASTERN_TZ,
+      weekday: 'long',
+      month: 'long',
+      day: 'numeric',
+    }).format(at) + ' (Eastern)';
+
+  return {
+    startIso: new Date(start).toISOString(),
+    endIso: new Date(end).toISOString(),
+    label,
+  };
+}
+
 /** Is this ticket still open AND past its SLA due time? */
 export function isSlaBreached(
   ticket: { status?: string | null; slaDueAt?: string | null; sla_due_at?: string | null },

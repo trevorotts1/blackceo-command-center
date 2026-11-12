@@ -3,12 +3,13 @@ import { getRescueReadDb, isRescueStoreAvailable } from '@/lib/rescue/db';
 import {
   capSuppressedForDay,
   listTicketsForDay,
+  listTicketsForWindow,
   mttrForWindow,
   openCountsBySeverity,
   repeatOffenders,
 } from '@/lib/rescue/queries';
 import { readStandingBlocks } from '@/lib/rescue/standing';
-import { orderSeverityCounts, tallyDaily, utcDayKey } from '@/lib/rescue/severity';
+import { easternDayWindow, orderSeverityCounts, tallyDaily, utcDayKey } from '@/lib/rescue/severity';
 import type { RescueSummary } from '@/lib/rescue/types';
 
 export const dynamic = 'force-dynamic';
@@ -40,9 +41,11 @@ export function GET(req: NextRequest): NextResponse {
       : DEFAULT_WINDOW_DAYS;
 
   const now = Date.now();
-  // The store keys its own day counters off the UTC prefix of created_at, so
-  // the dashboard's "today" must be the UTC day or the two disagree nightly.
-  const day = /^\d{4}-\d{2}-\d{2}$/.test(dayParam ?? '') ? (dayParam as string) : utcDayKey(new Date(now));
+  // The headline day is the Eastern day; the cap line is the store's UTC day.
+  const requestedDay = /^\d{4}-\d{2}-\d{2}$/.test(dayParam ?? '') ? (dayParam as string) : null;
+  const win = easternDayWindow(new Date(now));
+  const dayLabel = requestedDay ?? win.label;
+  const capDay = requestedDay ?? utcDayKey(new Date(now));
 
   const standing = readStandingBlocks();
   const db = getRescueReadDb();
@@ -53,7 +56,7 @@ export function GET(req: NextRequest): NextResponse {
       generatedAt: new Date(now).toISOString(),
       openBySeverity: orderSeverityCounts([]),
       openTotal: 0,
-      daily: tallyDaily(day, []),
+      daily: tallyDaily(dayLabel, []),
       standing,
       windowDays,
       mttrMinutes: null,
@@ -67,7 +70,10 @@ export function GET(req: NextRequest): NextResponse {
   try {
     const openBySeverity = orderSeverityCounts(openCountsBySeverity(db));
     const openTotal = openBySeverity.reduce((sum, row) => sum + row.open, 0);
-    const daily = tallyDaily(day, listTicketsForDay(db, day, now));
+    const dailyTickets = requestedDay
+      ? listTicketsForDay(db, requestedDay, now)
+      : listTicketsForWindow(db, win.startIso, win.endIso, now);
+    const daily = tallyDaily(dayLabel, dailyTickets);
     const { mttrMinutes, resolvedInWindow } = mttrForWindow(db, windowDays, now);
 
     const payload: RescueSummary = {
@@ -81,7 +87,7 @@ export function GET(req: NextRequest): NextResponse {
       mttrMinutes,
       resolvedInWindow,
       repeatOffenders: repeatOffenders(db, windowDays, 3, now),
-      capSuppressedToday: capSuppressedForDay(db, day),
+      capSuppressedToday: capSuppressedForDay(db, capDay),
     };
     return NextResponse.json(payload, { headers: NO_STORE });
   } catch (err) {
