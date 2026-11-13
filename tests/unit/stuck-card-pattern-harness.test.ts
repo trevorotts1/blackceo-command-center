@@ -175,14 +175,17 @@ test('fixture-guard: this suite runs ONLY against a throwaway DATABASE_PATH (sta
 });
 
 // ============================================================================
-// S1 — stuck-in-Backlog: board-hygiene rule 5's 21-day stale-backlog lane.
+// S1 — stuck-in-Backlog: board-hygiene rule 5's 21-day stale-backlog net
+// (U-17 spec item 6 / acceptance case 6, CC-064 / CC-051).
 //
-// U-17 (CC-064 / CC-051) changed what rule 5 does with a card whose requester
-// could not be asked: no `board_hygiene_stale_nudged` row is written at all —
-// the card is recorded once as `board_hygiene_stale_unasked` and is NEVER
-// auto-archived, because only a nudge that really went out may start the
-// archive clock. This fixture has no requester on file, so that is the branch
-// under test. The requester-present nudge is proven separately in S1b below.
+// A card whose requester could not be asked is recorded once as
+// `board_hygiene_stale_unasked`: no `board_hygiene_stale_nudged` row is written
+// at all and the card is NEVER nudged or auto-archived, because only a nudge
+// that really went out may start the archive clock. This fixture carries no
+// requester_chat_id, so the unasked record is the branch under test (the
+// earlier assertion here expected a nudge; that was the stale half, before
+// U-17's rule 5 change landed). The requester-present nudge is proven
+// separately in S1b below.
 // ============================================================================
 test('S1 stuck-in-Backlog: a 22-day-old card with no requester is recorded as unasked, never nudged or archived', async () => {
   const id = uuidv4();
@@ -194,18 +197,11 @@ test('S1 stuck-in-Backlog: a 22-day-old card with no requester is recorded as un
 
   const result = await runBoardHygiene();
 
-  assert.ok(
-    !result.staleNudgedIds.includes(id),
-    'S1: with no requester on file the card is NOT counted as nudged (U-17 rule 5)',
-  );
-  assert.equal(taskStatus(id), 'backlog', 'S1: the unasked record never changes status');
-  assert.equal(
-    eventsFor(id, 'board_hygiene_stale_nudged').length,
-    0,
-    'S1: no stale-backlog nudge event may fire when nobody could be asked',
-  );
+  assert.equal(result.staleNudgedIds.includes(id), false, 'S1: nobody could be asked, so this card is not "nudged"');
+  assert.equal(taskStatus(id), 'backlog', 'S1: an unasked card never leaves backlog');
+  assert.equal(eventsFor(id, 'board_hygiene_stale_nudged').length, 0, 'S1: no nudge event — no send happened');
   const unasked = eventsFor(id, 'board_hygiene_stale_unasked');
-  assert.equal(unasked.length, 1, 'S1: exactly one "requester was not asked" record fires');
+  assert.equal(unasked.length, 1, 'S1: exactly one unasked record fires (rule 5)');
   assert.match(unasked[0].message, /no requester on file/, 'S1: the record names the reason plainly');
   assert.match(unasked[0].message, /not auto-archived/i, 'S1: the record states the card is never auto-archived');
 
@@ -225,9 +221,9 @@ test('S1 stuck-in-Backlog: a 22-day-old card with no requester is recorded as un
 // ============================================================================
 // S1b — the OTHER half of U-17 rule 5: when a requester IS on file and the send
 // really goes out, the card is nudged (and only then may the archive clock
-// start). A stub `openclaw` on PATH proves a real dispatch happened; it never
-// reaches a human, and the real binary is unreachable while it runs (same
-// technique as tests/unit/notify-no-send-in-tests.test.ts).
+// start). A stub `openclaw` placed first on PATH proves a real dispatch
+// happened; it never reaches a human, and the real binary is unreachable while
+// it runs (same technique as tests/unit/notify-no-send-in-tests.test.ts).
 // ============================================================================
 test('S1b stuck-in-Backlog: a 22-day-old card WITH a requester gets the stale-backlog nudge', async () => {
   const shimDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-stuck-card-s1b-bin-'));
@@ -266,14 +262,14 @@ test('S1b stuck-in-Backlog: a 22-day-old card WITH a requester gets the stale-ba
     else delete process.env.OWNER_NOTIFY_ALLOW_SEND_IN_TEST;
   }
 
-  assert.ok(result.staleNudgedIds.includes(id), 'S1b: a card with a requester IS nudged');
+  assert.ok(result.staleNudgedIds.includes(id), 'S1b: a card with a requester must be nudged (rule 5)');
   const nudgeEvt = eventsFor(id, 'board_hygiene_stale_nudged');
-  assert.equal(nudgeEvt.length, 1, 'S1b: exactly one stale-backlog nudge event fires');
+  assert.equal(nudgeEvt.length, 1, 'S1b: exactly one nudge event fires');
   assert.match(nudgeEvt[0].message, /\[requester:messaged\]/, 'S1b: the event records that the requester was messaged');
   assert.equal(
     eventsFor(id, 'board_hygiene_stale_unasked').length,
     0,
-    'S1b: no "not asked" record when the nudge really went out',
+    'S1b: nothing is recorded unasked when the send really went out',
   );
   assert.equal(taskStatus(id), 'backlog', 'S1b: nudging never changes status');
 

@@ -47,6 +47,7 @@ import { broadcast } from '@/lib/events';
 import { notifySystem, ownerSendsSuppressed, ownerSendsHeld } from '@/lib/notify';
 import { sendRequesterAudienceAsk, sendProviderChoiceAsk, isQuietHour } from './trust-engine';
 import { recoverFinishedTaskToReview } from './finished-work-recovery';
+import { runStaleReturnNoteCleanup } from './stale-return-note-cleanup';
 import { resolveStaleTaskSweepKillFlag, killFlagSkipReason } from '@/lib/ops/operator-kill-flags';
 import { resolveSlaThreshold, minPossibleSlaThreshold } from '@/lib/board-slas';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
@@ -549,6 +550,12 @@ export async function runStaleTaskSweep(): Promise<StaleSweepResult> {
   const killFlag = resolveStaleTaskSweepKillFlag();
   if (killFlag.disabled) {
     return { scanned: 0, returned: 0, repinged: 0, skippedReason: killFlagSkipReason(killFlag) };
+  }
+
+  // U-25: remove the [STALE-RETURN] notes this job used to write into task
+  // descriptions. Bounded (200 cards per run); a no-op once none are left.
+  try { runStaleReturnNoteCleanup(); } catch (err) {
+    console.warn('[stale-task-sweep] note clean-up failed (non-fatal):', (err as Error).message);
   }
 
   // Guard: last_progress_at column must exist (migration 071).
