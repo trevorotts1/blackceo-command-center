@@ -13,8 +13,8 @@
  *     (src/lib/sops.ts) exactly: missing description / sop_id / a real
  *     persona_id (including the sentinel-persona-id edge case), and reports
  *     nothing missing once all three are genuinely present;
- *   - `triadMissingPillText` renders the exact "Missing: X, Y" copy the
- *     Backlog card pill shows.
+ *   - `triadMissingPillText` renders the plain-English "Still needs: X, Y" copy
+ *     the Backlog card pill shows.
  */
 
 import test from 'node:test';
@@ -79,13 +79,13 @@ test('triadMissingFields: only the actually-absent legs are reported', () => {
 
 // ── triadMissingPillText ─────────────────────────────────────────────────────
 
-test('triadMissingPillText: renders human labels in Triad order', () => {
+test('triadMissingPillText: renders plain-English labels in Triad order', () => {
   assert.equal(
     triadMissingPillText(['description', 'sop_id', 'persona_id']),
-    'Missing: description, SOP, persona',
+    'Still needs: a description, a playbook, a working style',
   );
 });
 
 test('triadMissingPillText: renders a single missing leg without a trailing comma', () => {
-  assert.equal(triadMissingPillText(['sop_id']), 'Missing: SOP');
+  assert.equal(triadMissingPillText(['sop_id']), 'Still needs: a playbook');
 });

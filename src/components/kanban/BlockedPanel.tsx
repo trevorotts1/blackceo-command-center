@@ -44,7 +44,7 @@ export function BlockedPanel({ task }: { task: BlockedPanelTask }) {
                 : 'bg-red-100 text-red-700'
             }`}
           >
-            {task.block_audience === 'SYSTEM' ? 'System fix needed' : 'Owner action needed'}
+            {task.block_audience === 'SYSTEM' ? 'Paused — a problem on our side' : 'Waiting on you'}
           </span>
         </div>
       )}
@@ -79,7 +79,7 @@ export function BlockedPanel({ task }: { task: BlockedPanelTask }) {
       {/* U061 — compact heal indicator on the card face only (detail in the modal) */}
       {typeof task.dispatch_attempts === 'number' && task.dispatch_attempts > 0 && (
         <p className="text-red-600 font-medium" data-testid="card-face-heal-attempts">
-          retrying — attempt {task.dispatch_attempts}
+          Trying again automatically (try {task.dispatch_attempts})
         </p>
       )}
     </div>
