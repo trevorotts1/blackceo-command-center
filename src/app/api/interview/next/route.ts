@@ -20,6 +20,9 @@
  *   403 forbidden                 — server-side tenant identity is not verified
  *   503 temporarily_unavailable   — the gate is not installed or could not run
  *                                   (never "not answered")
+ *   503 box_unreachable           — a CLIENT tenant whose own box cannot be
+ *                                   reached over the operator-hosted lane; the
+ *                                   page says so instead of a lock hint
  *
  * DOCTRINE: this route reads only. The gate is the sole writer of its state.
  */
@@ -29,6 +32,12 @@ import { runGate, writeKnownFacts } from '@/lib/interview/seam';
 import { resolveInterviewTenant, refuseUnverifiedTenant } from '@/lib/interview/tenant';
 import { getClientContext } from '@/lib/clients';
 import { loadCompanyConfig } from '@/lib/company-config';
+import { ensureTenantInterview } from '@/lib/interview/remote-store';
+import { readRemoteInterviewState } from '@/lib/interview/remote-protocol';
+
+/** BU-25: the exact sentence the page shows for an unreachable client box. */
+const BOX_UNREACHABLE_MESSAGE =
+  'We cannot reach your system right now. Your answers are saved. Please try again in a few minutes.';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -104,7 +113,23 @@ export async function GET(request: NextRequest) {
   // The gate's state folder belongs to THIS box's own interview. A client
   // tenant's deck is served over the operator-hosted lane (its own unit); this
   // route never reads the operator's gate state on another tenant's behalf.
+  //
+  // BU-25: probe that lane before answering anything. When the client's box
+  // cannot be reached the page must say "we cannot reach your system" (answers
+  // are saved) instead of a lock hint that reads like "answer more".
   if (tenant.kind !== 'self') {
+    try {
+      const interview = ensureTenantInterview(tenant.context!.tenantId);
+      await readRemoteInterviewState(tenant.context!, interview.interview_id);
+    } catch {
+      return NextResponse.json(
+        { error: 'box_unreachable', message: BOX_UNREACHABLE_MESSAGE },
+        { status: 503 },
+      );
+    }
+    // Reachable: the lane's own reader answers the question. This release has
+    // no next-question reader over that lane for a client tenant, so the route
+    // reports a tooling gap — never "not answered" and never the gate's order.
     return NextResponse.json({ error: 'temporarily_unavailable' }, { status: 503 });
   }
 
