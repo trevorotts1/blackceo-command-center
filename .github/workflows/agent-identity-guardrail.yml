@@ -2,13 +2,19 @@ name: Agent identity guardrail (T1-09 / A44)
 
 on:
   push:
-    branches: [main]
+    branches: [main, "batch/**"]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     branches: [main]
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   identity-guardrail:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     name: No agent identity may direct persona assumption
     runs-on: ubuntu-24.04
     steps:
@@ -28,6 +34,7 @@ jobs:
         run: python3 scripts/check-agent-identity-guardrail.py
 
   n8n-workflow-validator:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     name: n8n workflow validator rejects fenced and malformed output (T2-39 / A46)
     runs-on: ubuntu-24.04
     steps:

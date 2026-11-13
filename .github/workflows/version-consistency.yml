@@ -2,13 +2,19 @@ name: Version consistency
 
 on:
   push:
-    branches: [main]
+    branches: [main, "batch/**"]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     branches: [main]
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   check-version-drift:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     name: Verify all 5 CC version locations agree
     runs-on: ubuntu-24.04
     steps:
@@ -109,6 +115,9 @@ jobs:
         run: bash tests/unit/workflows-manually-runnable.test.sh
 
       - name: Verify annotated tag exists for current version
+        # Tag is minted by auto-tag-on-merge.yml, which runs on main pushes only; on
+        # batch/** pushes the tag can never appear, so this stays main-scoped for push.
+        if: github.event_name != 'push' || github.ref == 'refs/heads/main'
         shell: bash
         run: |
           set -euo pipefail
