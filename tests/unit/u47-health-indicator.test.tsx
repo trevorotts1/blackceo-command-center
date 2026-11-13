@@ -304,7 +304,10 @@ describe('FIX47 — readiness is truthful across client and board indicators', (
   const ready = { status: 'ok', embeddings: { status: 'ok', degraded: false } };
   for (const [name, system, health, expected] of [
     ['healthy', fixturePayload('live'), ready, 'Healthy'],
-    ['embedding degradation in HTTP 200', fixturePayload('live'), { status: 'ok', embeddings: { status: 'degraded', degraded: true } }, 'Degraded'],
+    // U-01: embedding_readiness is an ADVISORY row (spec U-01, advisory table:
+    // "never changes the badge"). A degraded embedding with an otherwise clean
+    // payload must read Healthy — the row is still listed in the drawer.
+    ['embedding degradation in HTTP 200 (advisory, never flips the badge)', fixturePayload('live'), { status: 'ok', embeddings: { status: 'degraded', degraded: true } }, 'Healthy'],
     ['migration degradation', fixturePayload('live'), { ...ready, status: 'degraded' }, 'Degraded'],
     ['disconnected gateway', fixturePayload('offline'), ready, 'Unavailable'],
     ['unknown overall', { ...fixturePayload('live'), overall: 'unknown' }, ready, 'Unknown'],
@@ -323,6 +326,37 @@ describe('FIX47 — readiness is truthful across client and board indicators', (
       expect(screen.queryByText('All systems operational')).toBeNull();
     });
   }
+
+  it('keeps a degraded advisory embedding row visible in the drawer without flipping the badge, while a counted row still degrades it', async () => {
+    // U-01 advisory table: embedding_readiness never changes the badge but must
+    // remain visible in the operator drawer. A counted row (openclaw_gateway)
+    // set to degraded must still yield Degraded.
+    global.fetch = stubFetch({
+      [STATUS_URL]: () => jsonResponse(fixturePayload('live')),
+      '/api/health': () => jsonResponse({ status: 'ok', embeddings: { status: 'degraded', degraded: true } }),
+      [FEED_URL]: () => jsonResponse({ events: [], client: null, source: 'local_db' }),
+    }) as typeof fetch;
+
+    render(<HealthIndicator viewerRole="operator" />);
+    await waitFor(() => expect(screen.getByTestId('health-indicator').textContent).toBe('Healthy'));
+    fireEvent.click(screen.getByTestId('health-indicator'));
+    await waitFor(() => screen.getByText('System Status'));
+
+    const auxSection = screen.getByText('Auxiliary').closest('section') as HTMLElement;
+    expect(within(auxSection).getByText('Embedding readiness')).toBeTruthy();
+
+    cleanup();
+
+    const counted = fixturePayload('live');
+    counted.components[1].status = 'degraded'; // openclaw_gateway is a counted row
+    global.fetch = stubFetch({
+      [STATUS_URL]: () => jsonResponse(counted),
+      '/api/health': () => jsonResponse(ready),
+    }) as typeof fetch;
+
+    render(<HealthIndicator viewerRole="client" />);
+    await waitFor(() => expect(screen.getByTestId('health-indicator').textContent).toBe('Degraded'));
+  });
 
   it('does not trust live overall when a returned required subsystem is degraded', async () => {
     const status = fixturePayload('live');
@@ -366,16 +400,19 @@ describe('FIX47 — readiness is truthful across client and board indicators', (
     expect(screen.getByTestId('health-indicator').textContent).toBe('Healthy');
   });
 
-  it('does not clear degraded readiness until the embedding check also recovers', async () => {
+  it('never keeps readiness degraded on the advisory embedding row alone', async () => {
+    // U-01 advisory table: embedding_readiness is advisory, so a degraded
+    // embedding (and a hanging embedding probe) can never hold the badge at
+    // Degraded. Counted-row degradation is covered above.
     vi.useFakeTimers();
     let resolveHealth!: (response: Response) => void;
     let health: Response | Promise<Response> = jsonResponse({ status: 'ok', embeddings: { status: 'degraded', degraded: true } });
     global.fetch = stubFetch({ [STATUS_URL]: () => jsonResponse(fixturePayload('live')), '/api/health': () => health }) as typeof fetch;
     await act(async () => { render(<HealthIndicator viewerRole="client" />); });
-    expect(screen.getByTestId('health-indicator').textContent).toBe('Degraded');
+    expect(screen.getByTestId('health-indicator').textContent).toBe('Healthy');
     health = new Promise<Response>((resolve) => { resolveHealth = resolve; });
     await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
-    expect(screen.getByTestId('health-indicator').textContent).toBe('Degraded');
+    expect(screen.getByTestId('health-indicator').textContent).toBe('Healthy');
     await act(async () => { resolveHealth(jsonResponse(ready)); });
     expect(screen.getByTestId('health-indicator').textContent).toBe('Healthy');
   });
