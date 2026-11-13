@@ -276,6 +276,11 @@ export default defineConfig({
       // returns the correct URL; relocation recovers; missing ledger honest
       // pending. DB-backed vitest suite (vitest globals + dynamic route
       // import), so vitest-only, never the tsx --test glob.
+      // PD-020 (lane FL11) — the board's resume resolves the department's
+      // engine folder and interpreter, refuses a configured-but-wrong path
+      // and a version-mismatched engine before spawning. Vitest globals +
+      // vi.mock/vi.hoisted, so vitest-only, never the tsx --test glob.
+      'tests/unit/pd020-engine-resume-door.test.ts',
       'tests/unit/pres010-run-bindings.test.ts',
       // FIX 35 (spec REV 3, Phase D data lane) — synthetic-row purge gate +
       // audit-backfill route. Hygiene script is driven as a subprocess against
