@@ -11,14 +11,19 @@
  *   task_activities               23 MB     53 k rows since 2026-09-09
  *   events                        15 MB     73 k rows since 2026-08-10
  *
- * Nothing ever deleted an old row from any of them. This job makes the four
+ * A fifth append-only table, `system_status_snapshots` (one row per probe per
+ * component), grows the same way and is pruned here too — only the newest row
+ * per component is ever read (`src/lib/system-status.ts:146-157`), within a
+ * 55-second cache window.
+ *
+ * Nothing ever deleted an old row from any of them. This job makes the five
  * diagnostic tables self-limiting so the database stops growing without bound.
  *
  * WHAT IT NEVER TOUCHES
  * ---------------------
  * `tasks`, `task_events`, `task_deliverables`, the persona tables, the SOP
  * tables and `job_liveness` (one row per job — it is a state table, not a log).
- * Only the four tables named above are pruned, and only under the rules below.
+ * Only the five tables named above are pruned, and only under the rules below.
  *
  * RETENTION RULES (each with an integer env override; a value below 1 or a
  * non-numeric value falls back to the default)
@@ -30,6 +35,12 @@
  *   sse_event_log                SSE_EVENT_LOG_RETENTION_DAYS    default 14
  *     Replay buffer for the live feed. Its only reader is a reconnecting client
  *     asking for events since a last-seen id, which is minutes old at worst.
+ *
+ *   system_status_snapshots      SYSTEM_STATUS_SNAPSHOTS_RETENTION_DAYS default 7
+ *     Time-series probe results for the System Status Panel. Only the newest row
+ *     per component is ever read (`src/lib/system-status.ts:146-157`), within a
+ *     55-second cache window, so a week of history has no reader at all. Rows
+ *     with a NULL `probed_at` are never deleted.
  *
  *   events                       EVENTS_RETENTION_DAYS           default 90
  *     RAISED FROM THE ORIGINALLY PROPOSED 60. The longest look-back any reader
@@ -78,12 +89,20 @@
  * ------------
  * Deletes run in batches of DB_RETENTION_BATCH_SIZE rows (default 5000) inside a
  * loop, table by table, under a total wall-clock budget of
- * DB_RETENTION_BUDGET_SECONDS (default 60). When the budget runs out the job
- * stops where it is and reports `budgetExhausted: true`; the next night picks up
- * (each table gets an equal share of whatever budget remains when its turn comes,
- * so one huge backlog cannot starve the others)
- * the remainder. This is what keeps the first run on a 539 MB database from
- * locking the live app behind one enormous DELETE.
+ * DB_RETENTION_BUDGET_SECONDS (default 60). Each table still gets a fair share of
+ * whatever budget remains when its turn comes, so one huge backlog cannot eat the
+ * whole night; and a table that exhausts its share no longer stops the rest —
+ * every later table runs as long as the TOTAL budget has not expired. When the
+ * total budget runs out the job stops where it is and reports
+ * `budgetExhausted: true`; the next night picks up the remainder. This is what
+ * keeps the first run on a 539 MB database from locking the live app behind one
+ * enormous DELETE.
+ *
+ * A FAILED DELETE IS NOT A SUCCESS. If a table's delete throws, the table is
+ * named in `failedTables`, every other table is still attempted, the
+ * `db_retention_ran` event is still written, and the job then throws
+ * `db_retention_partial_failure` so the scheduler records the run as an error
+ * instead of a false green.
  *
  * NO VACUUM. Deleting rows returns pages to SQLite's freelist; it does not
  * shrink the file. VACUUM rewrites the entire database and would block every
@@ -116,6 +135,7 @@ export const DB_RETENTION_CRON_TIMEZONE = 'America/New_York';
 
 const STAGE_TIMINGS_RETENTION_DAYS_DEFAULT = 30;
 const SSE_EVENT_LOG_RETENTION_DAYS_DEFAULT = 14;
+const SYSTEM_STATUS_SNAPSHOTS_RETENTION_DAYS_DEFAULT = 7;
 const EVENTS_RETENTION_DAYS_DEFAULT = 90;
 const TASK_ACTIVITIES_RETENTION_DAYS_DEFAULT = 30;
 
@@ -136,6 +156,7 @@ function intEnv(name: string, fallback: number): number {
 
 export interface DbRetentionDeleted {
   presentation_stage_timings: number;
+  system_status_snapshots: number;
   sse_event_log: number;
   events: number;
   task_activities: number;
@@ -151,6 +172,10 @@ export interface DbRetentionResult {
   deleted: DbRetentionDeleted;
   /** True when the time budget ran out before every table was fully pruned. */
   budgetExhausted: boolean;
+  /** Tables whose DELETE threw this run. Non-empty means the run is partial:
+   *  every other table was still attempted, and the job throws
+   *  `db_retention_partial_failure` after recording its event. */
+  failedTables: string[];
   /** PRAGMA freelist_count after the deletes — pages VACUUM could reclaim. */
   freelistPagesAfter: number;
   /** page_size * page_count after the deletes — the file size on disk. */
@@ -162,6 +187,7 @@ export interface DbRetentionResult {
 function emptyDeleted(): DbRetentionDeleted {
   return {
     presentation_stage_timings: 0,
+    system_status_snapshots: 0,
     sse_event_log: 0,
     events: 0,
     task_activities: 0,
@@ -179,11 +205,13 @@ export function formatDbRetentionSummary(result: DbRetentionResult): string {
   const reclaimableMb = (result.freelistPagesAfter * pageSize()) / (1024 * 1024);
   return (
     `deleted stage_timings=${d.presentation_stage_timings} ` +
+    `status_snapshots=${d.system_status_snapshots} ` +
     `sse_event_log=${d.sse_event_log} events=${d.events} ` +
     `task_activities=${d.task_activities} in ${seconds}s; ` +
     `${result.freelistPagesAfter} free pages ` +
     `(~${reclaimableMb.toFixed(1)} MB reclaimable by VACUUM)` +
-    (result.budgetExhausted ? ' — time budget exhausted, resuming next run' : '')
+    (result.budgetExhausted ? ' — time budget exhausted, resuming next run' : '') +
+    (result.failedTables.length > 0 ? `; FAILED: ${result.failedTables.join(', ')}` : '')
   );
 }
 
@@ -226,7 +254,8 @@ function tableExists(name: string): boolean {
  * `rowidSelect` must be a SELECT of rowids with exactly two bind parameters, in
  * order: the datetime modifier (e.g. '-30 days') and the batch LIMIT.
  *
- * Returns the number of rows deleted and whether it stopped on the budget.
+ * Returns the number of rows deleted, whether it stopped on the budget, and
+ * whether a batch DELETE threw.
  */
 function pruneInBatches(
   table: string,
@@ -234,32 +263,33 @@ function pruneInBatches(
   days: number,
   batchSize: number,
   deadlineMs: number,
-): { deleted: number; budgetExhausted: boolean } {
-  if (!tableExists(table)) return { deleted: 0, budgetExhausted: false };
+): { deleted: number; budgetExhausted: boolean; failed: boolean } {
+  if (!tableExists(table)) return { deleted: 0, budgetExhausted: false, failed: false };
 
   const sql = `DELETE FROM ${table} WHERE rowid IN (${rowidSelect})`;
   let deleted = 0;
 
   for (;;) {
-    if (Date.now() >= deadlineMs) return { deleted, budgetExhausted: true };
+    if (Date.now() >= deadlineMs) return { deleted, budgetExhausted: true, failed: false };
     let changes = 0;
     try {
       changes = run(sql, [`-${days} days`, batchSize]).changes;
     } catch (err) {
       // A prune failure on one table must never abort the others — the job's
-      // whole purpose is bounded, best-effort cleanup.
+      // whole purpose is bounded, best-effort cleanup. It is reported, though:
+      // `failed` makes the run throw at the end instead of reading as success.
       console.warn(`[db-retention] prune of ${table} failed:`, (err as Error).message);
-      return { deleted, budgetExhausted: false };
+      return { deleted, budgetExhausted: false, failed: true };
     }
     deleted += changes;
-    if (changes < batchSize) return { deleted, budgetExhausted: false };
+    if (changes < batchSize) return { deleted, budgetExhausted: false, failed: false };
   }
 }
 
 /**
  * Fair share of the remaining budget for the next table: what is left, divided
  * by the tables still to run. A million-row backlog in the first table cannot
- * starve the other three of their nightly pass; whatever it does not finish
+ * starve the other four of their nightly pass; whatever it does not finish
  * resumes the next night.
  */
 function shareDeadline(deadlineMs: number, tablesRemaining: number): number {
@@ -281,6 +311,7 @@ export async function runDbRetention(): Promise<DbRetentionResult> {
       skippedReason: 'DISABLE_DB_RETENTION set',
       deleted: emptyDeleted(),
       budgetExhausted: false,
+      failedTables: [],
       freelistPagesAfter: pragmaNumber('freelist_count', 'freelist_count'),
       dbSizeBytesAfter: pageSize() * pragmaNumber('page_count', 'page_count'),
       durationMs: Date.now() - startedMs,
@@ -293,6 +324,7 @@ export async function runDbRetention(): Promise<DbRetentionResult> {
 
   const deleted = emptyDeleted();
   let budgetExhausted = false;
+  const failedTables: string[] = [];
 
   // 1. presentation_stage_timings — pure instrumentation, age alone decides.
   {
@@ -303,14 +335,38 @@ export async function runDbRetention(): Promise<DbRetentionResult> {
         LIMIT ?`,
       intEnv('STAGE_TIMINGS_RETENTION_DAYS', STAGE_TIMINGS_RETENTION_DAYS_DEFAULT),
       batchSize,
-      shareDeadline(deadlineMs, 4),
+      shareDeadline(deadlineMs, 5),
     );
     deleted.presentation_stage_timings = r.deleted;
     budgetExhausted ||= r.budgetExhausted;
+    if (r.failed) failedTables.push('presentation_stage_timings');
   }
 
-  // 2. sse_event_log — live-feed replay buffer, age alone decides.
-  if (!budgetExhausted) {
+  // 2. system_status_snapshots — probe time series; only the newest row per
+  //    component is ever read, so age alone decides. Cheapest to prune and the
+  //    fastest growing, so it runs early with the second-largest share. A row
+  //    with a NULL probed_at never matches the comparison and is never deleted.
+  //
+  //    Each later block is gated on the TOTAL deadline, not on whether an
+  //    earlier table exhausted its own share — otherwise one huge backlog in
+  //    presentation_stage_timings starves every other table, every night.
+  if (Date.now() < deadlineMs) {
+    const r = pruneInBatches(
+      'system_status_snapshots',
+      `SELECT rowid FROM system_status_snapshots
+        WHERE ${sqlTime('probed_at')} < datetime('now', ?)
+        LIMIT ?`,
+      intEnv('SYSTEM_STATUS_SNAPSHOTS_RETENTION_DAYS', SYSTEM_STATUS_SNAPSHOTS_RETENTION_DAYS_DEFAULT),
+      batchSize,
+      shareDeadline(deadlineMs, 4),
+    );
+    deleted.system_status_snapshots = r.deleted;
+    budgetExhausted ||= r.budgetExhausted;
+    if (r.failed) failedTables.push('system_status_snapshots');
+  }
+
+  // 3. sse_event_log — live-feed replay buffer, age alone decides.
+  if (Date.now() < deadlineMs) {
     const r = pruneInBatches(
       'sse_event_log',
       `SELECT rowid FROM sse_event_log
@@ -322,12 +378,13 @@ export async function runDbRetention(): Promise<DbRetentionResult> {
     );
     deleted.sse_event_log = r.deleted;
     budgetExhausted ||= r.budgetExhausted;
+    if (r.failed) failedTables.push('sse_event_log');
   }
 
-  // 3. events — age AND the owning card must be finished. A row on a live card
+  // 4. events — age AND the owning card must be finished. A row on a live card
   //    (status not 'done' and archived_at IS NULL) is never deleted, at any age.
   //    task_id NULL (board-wide) and orphaned rows are prunable.
-  if (!budgetExhausted) {
+  if (Date.now() < deadlineMs) {
     const r = pruneInBatches(
       'events',
       `SELECT e.rowid
@@ -347,11 +404,12 @@ export async function runDbRetention(): Promise<DbRetentionResult> {
     );
     deleted.events = r.deleted;
     budgetExhausted ||= r.budgetExhausted;
+    if (r.failed) failedTables.push('events');
   }
 
-  // 4. task_activities — age AND the owning task must be done, archived, or
+  // 5. task_activities — age AND the owning task must be done, archived, or
   //    gone. A live task keeps its full activity trail (liveness signal).
-  if (!budgetExhausted) {
+  if (Date.now() < deadlineMs) {
     const r = pruneInBatches(
       'task_activities',
       `SELECT ta.rowid
@@ -370,6 +428,7 @@ export async function runDbRetention(): Promise<DbRetentionResult> {
     );
     deleted.task_activities = r.deleted;
     budgetExhausted ||= r.budgetExhausted;
+    if (r.failed) failedTables.push('task_activities');
   }
 
   // Deliberately NOT a VACUUM — see the file header. Report what VACUUM would
@@ -378,6 +437,7 @@ export async function runDbRetention(): Promise<DbRetentionResult> {
     ranAt,
     deleted,
     budgetExhausted,
+    failedTables,
     freelistPagesAfter: pragmaNumber('freelist_count', 'freelist_count'),
     dbSizeBytesAfter: pageSize() * pragmaNumber('page_count', 'page_count'),
     durationMs: Date.now() - startedMs,
@@ -394,6 +454,12 @@ export async function runDbRetention(): Promise<DbRetentionResult> {
     ]);
   } catch (err) {
     console.warn('[db-retention] could not record db_retention_ran event:', (err as Error).message);
+  }
+
+  // A failed delete must not read as success: every table has been attempted and
+  // the run is recorded, then the job fails so the scheduler ticks it 'error'.
+  if (failedTables.length > 0) {
+    throw new Error('db_retention_partial_failure');
   }
 
   return result;
