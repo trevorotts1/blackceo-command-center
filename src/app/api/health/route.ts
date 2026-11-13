@@ -11,6 +11,7 @@ import { getSOPEmbeddingHealth, resolveEmbeddingProvider } from '@/lib/sop-embed
 import { poolUsage } from '@/lib/capacity/provider-pools';
 import { readResourceLedger } from '@/lib/capacity/resource-ledger';
 import { jevEngineState } from '@/lib/decision-engine/live';
+import { readEmbeddingsCache, writeEmbeddingsCache } from '@/lib/embeddings-cache';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -179,30 +180,24 @@ function embeddingHealthFallback(): Record<string, unknown> {
   };
 }
 
-const EMBEDDINGS_CACHE_MS = 5 * 60 * 1000;
-let embeddingsCache: { at: number; block: Record<string, unknown> } | null = null;
-
-/** Test-only: drop the cached embeddings block between cases. */
-export function __resetEmbeddingsCache(): void {
-  embeddingsCache = null;
-}
-
 async function getEmbeddingsBlock(): Promise<Record<string, unknown>> {
   // The probe shells out to python3 and scans two SQLite stores; a health poll
-  // (or a watchdog) must not pay that on every request. Five minutes is fresh
-  // enough for a status surface and cheap enough for a polled endpoint.
-  if (embeddingsCache && Date.now() - embeddingsCache.at < EMBEDDINGS_CACHE_MS) {
-    return embeddingsCache.block;
+  // (or a watchdog) must not pay that on every request. The five-minute cache
+  // and its reset helper live in `@/lib/embeddings-cache` (a route file may
+  // export only route names).
+  const cached = readEmbeddingsCache();
+  if (cached) {
+    return cached;
   }
   try {
     const py = await probeEmbeddingHealthPy();
     if (py) {
       py.source = 'embedding_health.py';
-      embeddingsCache = { at: Date.now(), block: py };
+      writeEmbeddingsCache(py);
       return py;
     }
     const fallback = embeddingHealthFallback();
-    embeddingsCache = { at: Date.now(), block: fallback };
+    writeEmbeddingsCache(fallback);
     return fallback;
   } catch {
     // Absolute last resort — surface a degraded block rather than 500. NOT

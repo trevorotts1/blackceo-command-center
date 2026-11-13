@@ -187,7 +187,8 @@ test('health route: two calls inside five minutes run the Python probe once', as
   try {
     const db = await import('../../src/lib/db');
     db.getDb(); // migrations, so GET() can answer 200
-    const { GET, __resetEmbeddingsCache } = await import('../../src/app/api/health/route');
+    const { GET } = await import('../../src/app/api/health/route');
+    const { __resetEmbeddingsCache } = await import('../../src/lib/embeddings-cache');
     __resetEmbeddingsCache();
 
     const first = await GET();
