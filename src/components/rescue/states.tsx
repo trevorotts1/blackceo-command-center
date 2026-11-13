@@ -15,8 +15,9 @@
 import { LifeBuoy } from 'lucide-react';
 
 export const NO_STORE_COPY =
-  'No rescue ticket data on this box yet. The durable ticket store has not been ' +
-  'created here — tickets will appear as soon as the rescue receiver records its first one.';
+  'This box has no rescue ticket store, so this page has nothing to show. That is ' +
+  'normal on a client box. On the operator box it means the rescue receiver has not ' +
+  'written its ticket file yet, or the file could not be opened. It does not mean there are no open tickets.';
 
 export function EmptyState({ message, title }: { message?: string; title?: string }) {
   return (
