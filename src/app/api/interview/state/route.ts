@@ -354,7 +354,11 @@ export async function GET(request: NextRequest) {
       qcStatus: remote?.qcStatus || 'pending',
       // BU-13: the gate belongs to this box's OWN interview; a client tenant is
       // never served the operator's gate state.
-      gate: null,
+      // BU-25: a REACHABLE client box supplies its own gate over the
+      // operator-hosted lane; an unreachable one reads `gate: null` beside
+      // `remoteStatus: 'waiting_for_installation'`, so the page can say "we
+      // cannot reach your system" instead of a lock hint.
+      gate: remote?.gate ?? null,
       session: { interviewSessionId: persisted.interview_id, gatewaySessionId: persisted.gateway_session_id },
       structured: {
         total: structured.total,
