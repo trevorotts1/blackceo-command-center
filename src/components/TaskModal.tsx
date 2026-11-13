@@ -59,6 +59,7 @@ import type { Task, TaskPriority, TaskStatus } from '@/lib/types';
 // Creation cannot claim done/review (no deliverable yet — the server refuses
 // it). These helpers are the client's side of that contract.
 import { createDropdownStatuses, createSubmitStatus, isCreateTerminalStatus } from '@/lib/board-projection';
+import { BACKLOG_COLUMN_LABEL, TODO_COLUMN_LABEL } from '@/lib/board-labels';
 
 type TabType = 'overview' | 'planning' | 'activity' | 'deliverables' | 'sessions';
 
@@ -255,9 +256,13 @@ export function TaskModal({ task: taskProp, onClose, workspaceId, initialStatus,
               .filter(Boolean)
               .join('; ')
           : '';
+        // CC-040 — show the human-facing message only; keep the raw validator
+        // wording in the console for whoever debugs it.
+        console.error('Task save failed:', errObj.error, detailText);
         setSubmitError(
-          [errObj.message, errObj.error, detailText, errObj.hint].filter(Boolean).join(' — ') ||
-            `Save failed (HTTP ${res.status}). Please try again or contact the operator.`,
+          errObj.message ||
+            errObj.hint ||
+            'We could not save this task. Please try again. If it keeps happening, let your support contact know.',
         );
         setIsSubmitting(false);
         return;
@@ -281,6 +286,12 @@ export function TaskModal({ task: taskProp, onClose, workspaceId, initialStatus,
 
             if (!result.success) {
               console.error('Auto-dispatch failed:', result.error);
+              // CC-015 — say it on the banner, and keep the modal open so the
+              // person can see it instead of losing the message on close.
+              setSubmitError(
+                'Saved, but we could not hand this task to your AI team just now. It will be retried automatically.',
+              );
+              return;
             }
           }
 
@@ -361,9 +372,11 @@ export function TaskModal({ task: taskProp, onClose, workspaceId, initialStatus,
       } else {
         const data = await res.json().catch(() => ({}));
         console.error('Failed to archive task:', data);
+        setSubmitError('We could not remove this task from the board. Please try again.');
       }
     } catch (error) {
       console.error('Failed to archive task:', error);
+      setSubmitError('We could not remove this task from the board. Please try again.');
     }
   };
 
@@ -386,16 +399,25 @@ export function TaskModal({ task: taskProp, onClose, workspaceId, initialStatus,
     'done',
   ];
   const statusLabels: Record<TaskStatus, string> = {
-    backlog: 'Backlog',
-    inbox: 'Inbox (new)',
-    planning: 'Planning',
-    assigned: 'Assigned (queued)',
-    pending_dispatch: 'Pending Dispatch',
+    backlog: BACKLOG_COLUMN_LABEL,
+    inbox: `${TODO_COLUMN_LABEL} (new)`,
+    planning: `${TODO_COLUMN_LABEL} (planning)`,
+    assigned: `${TODO_COLUMN_LABEL} (queued)`,
+    pending_dispatch: `${TODO_COLUMN_LABEL} (starting)`,
     in_progress: 'In Progress',
     review: 'Review / QC',
-    testing: 'Testing',
+    testing: 'Review / QC (testing)',
     blocked: 'Blocked',
     done: 'Done',
+  };
+
+  // CC-040 — the same plain words the board's "Still needs" pill uses.
+  const TRIAD_MISSING_WORDS: Record<string, string> = {
+    description: 'a description',
+    sop: 'a playbook',
+    sop_id: 'a playbook',
+    persona: 'a working style',
+    persona_id: 'a working style',
   };
   const priorities: TaskPriority[] = ['low', 'medium', 'high', 'critical'];
 
@@ -427,9 +449,11 @@ export function TaskModal({ task: taskProp, onClose, workspaceId, initialStatus,
         });
       } else {
         console.error('Persona auto-suggest failed:', await res.text());
+        setSubmitError('We could not pick a working style automatically. Please try again in a moment.');
       }
     } catch (err) {
       console.error('Persona auto-suggest failed:', err);
+      setSubmitError('We could not pick a working style automatically. Please try again in a moment.');
     } finally {
       setSuggestingPersona(false);
     }
@@ -452,15 +476,18 @@ export function TaskModal({ task: taskProp, onClose, workspaceId, initialStatus,
       const sugRes = await fetch(`/api/sops/suggest?${params.toString()}`);
       if (!sugRes.ok) {
         console.error('SOP suggest failed:', sugRes.status);
+        setSubmitError('We could not attach a playbook automatically. Please try again in a moment.');
         return;
       }
       const body = await sugRes.json();
       const topSopId =
         Array.isArray(body?.suggestions) && body.suggestions[0]?.sop?.id;
       if (!topSopId) {
-        // Nothing matched — fall back to the SOP library in a new tab so the
-        // user can pick one manually.
-        window.open('/sops/proposals', '_blank');
+        // Nothing matched — say so in place. Never bounce the person into a
+        // separate tab they did not ask for.
+        setSubmitError(
+          'No ready-made playbook matched this task yet. Your AI team will write one — you do not need to do anything.',
+        );
         return;
       }
       const patchRes = await fetch(`/api/tasks/${task.id}`, {
@@ -479,6 +506,7 @@ export function TaskModal({ task: taskProp, onClose, workspaceId, initialStatus,
       }
     } catch (err) {
       console.error('SOP attach failed:', err);
+      setSubmitError('We could not attach a playbook automatically. Please try again in a moment.');
     } finally {
       setSuggestingSop(false);
     }
@@ -654,12 +682,17 @@ export function TaskModal({ task: taskProp, onClose, workspaceId, initialStatus,
                 </div>
                 <div className="flex-1">
                   <h4 className="text-sm font-semibold text-amber-900">
-                    Triad Rule, can&apos;t start this task yet
+                    This task isn&apos;t ready to start yet
                   </h4>
                   <p className="mt-1 text-xs text-amber-800">
-                    Every task needs a description, a SOP, and a persona before it can
-                    leave Backlog. Missing:{' '}
-                    <strong>{triadError.missing.join(', ')}</strong>.
+                    Every task needs a description, a playbook and a working style before it can
+                    start. Still needed:{' '}
+                    <strong>
+                      {Array.from(
+                        new Set(triadError.missing.map((key) => TRIAD_MISSING_WORDS[key] ?? key)),
+                      ).join(', ')}
+                    </strong>
+                    .
                   </p>
 
                   <div className="mt-3 flex flex-wrap gap-2">
@@ -672,7 +705,7 @@ export function TaskModal({ task: taskProp, onClose, workspaceId, initialStatus,
                         className="inline-flex items-center gap-1.5 rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-amber-700 disabled:opacity-60"
                       >
                         <Plus className="h-3.5 w-3.5" />
-                        {suggestingSop ? 'Finding SOP...' : 'Add an SOP'}
+                        {suggestingSop ? 'Finding a playbook...' : 'Attach a playbook'}
                       </button>
                     )}
                     {(triadError.missing.includes('persona') ||
@@ -684,7 +717,7 @@ export function TaskModal({ task: taskProp, onClose, workspaceId, initialStatus,
                         className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-indigo-700 disabled:opacity-60"
                       >
                         <Bot className="h-3.5 w-3.5" />
-                        {suggestingPersona ? 'Suggesting...' : 'Auto-suggest persona'}
+                        {suggestingPersona ? 'Choosing...' : 'Choose a working style for me'}
                       </button>
                     )}
                     {triadError.missing.includes('description') && (
@@ -846,10 +879,9 @@ export function TaskModal({ task: taskProp, onClose, workspaceId, initialStatus,
                   data-testid="create-status-downgraded-notice"
                   className="mt-1.5 text-xs text-amber-700 leading-snug"
                 >
-                  New tasks can&apos;t start in {statusLabels[initialStatus]} — nothing is
-                  finished or ready for review yet. This one will be created in{' '}
-                  {statusLabels[form.status]}; register a deliverable, then move it to{' '}
-                  {statusLabels[initialStatus]}.
+                  New tasks can&apos;t start in {statusLabels[initialStatus]} because nothing is
+                  finished yet. This one will start in {statusLabels[form.status]}. Move it once
+                  the work is done.
                 </p>
               )}
             </div>
@@ -939,7 +971,7 @@ export function TaskModal({ task: taskProp, onClose, workspaceId, initialStatus,
               {touchedBlocked &&
                 (!form.blocked_reason || !form.blocked_on_human || !form.ask.trim()) && (
                   <p className="text-xs text-red-700">
-                    Reason, audience, and ask are all required to save a task as Blocked.
+                    Please choose a reason, choose who is needed, and say what you need.
                   </p>
                 )}
             </div>

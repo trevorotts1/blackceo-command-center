@@ -342,7 +342,7 @@ test('[U33/C-02-b] gate ON: a card ALSO missing its description holds immediatel
 
   const holds = eventsFor(taskId, 'triad_gate_hold');
   assert.equal(holds.length, 1, 'the card is held');
-  assert.match(holds[0].message, /Missing: description, SOP/, 'both missing legs are named');
+  assert.match(holds[0].message, /Still needs: a description, a playbook/, 'both missing legs are named');
 
   // The point of the guard: human grooming is required anyway, so the sweep's
   // hold loop must NOT pay for an embedding call or spawn an authoring run.
