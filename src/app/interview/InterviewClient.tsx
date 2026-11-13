@@ -88,6 +88,10 @@ type Stage = 'welcome' | 'welcome-back' | 'question' | 'celebrate' | 'review';
 const SOFT_READ_RETRY_MS = 5_000;
 const SOFT_READ_MAX_RETRIES = 6;
 
+/** BU-25: a client tenant whose own box cannot be reached (503 box_unreachable). */
+const BOX_UNREACHABLE_MESSAGE =
+  'We cannot reach your system right now. Your answers are saved. Please try again in a few minutes.';
+
 /* -------------------------------------------------------------------------- */
 /* component                                                                   */
 /* -------------------------------------------------------------------------- */
@@ -111,6 +115,7 @@ export default function InterviewClient() {
   const [booting, setBooting] = useState(true);
   const [accessError, setAccessError] = useState<string | null>(null);
   const [softError, setSoftError] = useState(false);
+  const [boxUnreachable, setBoxUnreachable] = useState(false);
   const [softAttempts, setSoftAttempts] = useState(0);
   const [standardReady, setStandardReady] = useState(false);
   const [showSkip, setShowSkip] = useState(false);
@@ -130,9 +135,19 @@ export default function InterviewClient() {
         setAccessError(INTERVIEW_SIGN_IN_HELP);
         return null;
       }
+      // BU-25: an unreachable client box is not a blip and not "answer more".
+      if (res.status === 503) {
+        const body = (await res.json().catch(() => null)) as { error?: string } | null;
+        if (body?.error === 'box_unreachable') {
+          setBoxUnreachable(true);
+          return null;
+        }
+        throw new Error('next unavailable');
+      }
       if (!res.ok) throw new Error('next unavailable');
       const data = (await res.json()) as GateNext;
       setAccessError(null);
+      setBoxUnreachable(false);
       setSoftError(false);
       setSoftAttempts(0);
       return data;
@@ -446,9 +461,9 @@ export default function InterviewClient() {
 
   return (
     <MotionConfig reducedMotion="user">
-      {softError && (
+      {(boxUnreachable || softError) && (
         <p role="status" className="mx-auto w-full max-w-2xl px-5 pt-4 text-sm">
-          Reconnecting… your answers are saved.
+          {boxUnreachable ? BOX_UNREACHABLE_MESSAGE : 'Reconnecting… your answers are saved.'}
         </p>
       )}
       {screen}
