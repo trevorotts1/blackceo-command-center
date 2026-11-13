@@ -138,6 +138,10 @@ export const BOARD_HYGIENE_GLOBAL_DEFAULTS = {
 // ── Event type constants (single source, avoid typo drift across queries) ──
 
 const EVT_OWNER_REPINGED = 'board_hygiene_owner_repinged';
+// CC-064: a re-ping that could NOT be sent. Recorded so the card is not silently
+// treated as "reminded" — and so a broken send path surfaces instead of looking
+// identical to a quiet cooldown.
+const EVT_OWNER_REPING_FAILED = 'board_hygiene_owner_reping_failed';
 const EVT_OPERATOR_ESCALATED = 'board_hygiene_operator_escalated';
 const EVT_QC_STARVED = 'qc_starved';
 // The judge-FAILED alert. Distinct from qc_starved: 'starved' means NO judge is
@@ -146,6 +150,10 @@ const EVT_QC_STARVED = 'qc_starved';
 const EVT_QC_JUDGE_FAILED = 'qc_judge_failed';
 const EVT_DONE_ARCHIVED = 'board_hygiene_auto_archived_done';
 const EVT_STALE_NUDGED = 'board_hygiene_stale_nudged';
+// CC-064 / CC-051: a stale card whose requester was NEVER asked (no address, or
+// the send did not go out). Distinct from EVT_STALE_NUDGED precisely because only
+// a real nudge may ever lead to the auto-archive.
+const EVT_STALE_UNASKED = 'board_hygiene_stale_unasked';
 const EVT_STALE_ARCHIVED = 'auto_archived_stale';
 // skill6-v2 U33 / C-02 — Triad-stall alert.
 const EVT_TRIAD_STALLED = 'board_hygiene_triad_stalled';
@@ -291,6 +299,11 @@ function writeEvent(taskId: string, type: string, message: string): void {
   );
 }
 
+/** Plain-English age for a client-facing sentence: "2 days", "9 hours". */
+function ageWords(h: number): string {
+  return h >= 48 ? `${Math.round(h / 24)} days` : `${Math.round(h)} hours`;
+}
+
 /** Does the live `tasks` schema carry the P1-04 requester column yet? */
 function hasRequesterColumn(): boolean {
   try {
@@ -356,19 +369,30 @@ async function processBlockedLane(result: BoardHygieneResult): Promise<void> {
 
       // Rule 1: blocked > 48h, audience=OWNER → re-ping the requester, max
       // once/48h. NEVER touches status — re-ping only.
+      // CC-064: the message is written for the OWNER to read — plain English, no
+      // internal tag, and `block_reason` is deliberately NOT used (this codebase's
+      // own contract calls it machine wording: stop-card.ts:51-57).
       if (
         task.block_audience === 'OWNER' &&
         !isSeededStarterTask(task) &&
         ageHours >= ownerRepingHours &&
-        !hasRecentEvent(task.id, EVT_OWNER_REPINGED, OWNER_REPING_COOLDOWN_HOURS)
+        !hasRecentEvent(task.id, EVT_OWNER_REPINGED, OWNER_REPING_COOLDOWN_HOURS) &&
+        !hasRecentEvent(task.id, EVT_OWNER_REPING_FAILED, 6)
       ) {
+        const needs = (task.block_needs ?? task.ask ?? '').trim();
         const message =
-          `[BOARD-HYGIENE] Task "${task.title}" has been Blocked for ${Math.round(ageHours)}h ` +
-          `waiting on you. Needs: ${task.block_needs ?? task.ask ?? task.block_reason ?? '(no detail recorded)'}`;
-        sendOwnerMessage(null, message);
-        writeEvent(task.id, EVT_OWNER_REPINGED, `Re-pinged owner on blocked task (${Math.round(ageHours)}h). ${message}`);
-        result.ownerRepinged++;
-        result.ownerRepingedIds.push(task.id);
+          `Reminder: "${task.title}" has been waiting on you for ${ageWords(ageHours)}. ` +
+          (needs || 'It needs a decision or some input from you before it can continue.');
+        const sent = sendOwnerMessage(null, message);
+        writeEvent(
+          task.id,
+          sent ? EVT_OWNER_REPINGED : EVT_OWNER_REPING_FAILED,
+          `${sent ? 'Re-pinged' : 'Could NOT re-ping'} owner on blocked task (${Math.round(ageHours)}h). ${message}`,
+        );
+        if (sent) {
+          result.ownerRepinged++;
+          result.ownerRepingedIds.push(task.id);
+        }
       }
 
       // Rule 2: blocked > 7d, ANY audience → escalate to the operator lane.
@@ -660,34 +684,41 @@ function processStaleBacklogLane(result: BoardHygieneResult): void {
       const prevNudge = lastEvent(task.id, EVT_STALE_NUDGED);
 
       if (!prevNudge) {
-        // First time past the nudge threshold: message the requester, or —
-        // absent a requester id (pre-P1-04 boxes) — queue for the operator
-        // digest instead of messaging nobody.
+        // First time past the nudge threshold: message the requester. A card
+        // whose requester could NOT be asked is recorded as unasked and is NEVER
+        // auto-archived — only a nudge that really went out may start that clock
+        // (CC-064 / CC-051).
         const requesterId = requesterColPresent ? (task.requester_chat_id ?? null) : null;
-        const message = `[BOARD-HYGIENE] "${task.title}" has sat untouched in ${task.status} for ${Math.round(ageDays)}d — still want this? Reply to keep it active, or it will auto-archive in ${archiveAfterNudgeDays}d.`;
-
-        if (requesterId) {
-          sendOwnerMessage(requesterId, message);
-        } else {
+        const message =
+          `"${task.title}" has been sitting untouched for ${Math.round(ageDays)} days. Do you still want it? ` +
+          `If you do, open it on your board and save any change to it. Otherwise it will be put away in ` +
+          `${archiveAfterNudgeDays} days. Nothing is deleted.`;
+        if (requesterId && sendOwnerMessage(requesterId, message)) {
+          writeEvent(task.id, EVT_STALE_NUDGED, `${message} [requester:messaged]`);
+          result.staleNudged++;
+          result.staleNudgedIds.push(task.id);
+        } else if (!lastEvent(task.id, EVT_STALE_UNASKED)) {
           digestNoRequester.push(`${task.title} (id: ${task.id}, ${Math.round(ageDays)}d stale)`);
+          writeEvent(
+            task.id,
+            EVT_STALE_UNASKED,
+            `Stale ${Math.round(ageDays)}d; the requester was not asked ` +
+              `(${requesterId ? 'send not dispatched' : 'no requester on file'}). Not auto-archived.`,
+          );
         }
-
-        writeEvent(
-          task.id,
-          EVT_STALE_NUDGED,
-          `${message} [requester:${requesterId ? 'messaged' : 'none — operator digest'}]`,
-        );
-        result.staleNudged++;
-        result.staleNudgedIds.push(task.id);
         continue;
       }
 
       // Already nudged — has 7d elapsed since the nudge with NO activity
-      // (the progress timestamp never moved past the nudge) and no reply?
+      // (neither the progress clock nor the card's own updated_at moved past the
+      // nudge) and no reply? CC-051: the message promises that saving ANY change
+      // keeps the card, so updated_at counts as activity too.
       const nudgeMs = parseDbTime(prevNudge.created_at);
       if (Number.isNaN(nudgeMs)) continue;
       const daysSinceNudge = (Date.now() - nudgeMs) / (1000 * 60 * 60 * 24);
-      const noActivitySinceNudge = progressMs <= nudgeMs;
+      const updatedMs = parseDbTime(task.updated_at);
+      const touchedMs = Number.isNaN(updatedMs) ? progressMs : Math.max(progressMs, updatedMs);
+      const noActivitySinceNudge = touchedMs <= nudgeMs;
 
       if (daysSinceNudge >= archiveAfterNudgeDays && noActivitySinceNudge) {
         run(
