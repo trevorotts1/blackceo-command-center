@@ -79,7 +79,20 @@ function configuredWorkspace(): string | null {
       agents?: { defaults?: { workspace?: unknown } };
     };
     const value = parsed?.agents?.defaults?.workspace;
-    return typeof value === 'string' && value.trim() ? value.trim() : null;
+    if (typeof value !== 'string' || !value.trim()) return null;
+    const raw = value.trim();
+    // Mirror platform/common.sh oc_set_platform_paths, which runs
+    // os.path.expanduser() on this value and then refuses anything that is not
+    // an absolute path. Without this, a `~/clients/acme` config would make the
+    // app read `~/clients/acme/...` relative to the server's cwd while the
+    // scripts write the real home directory — the exact split this unit closes.
+    const expanded =
+      raw === '~'
+        ? os.homedir()
+        : raw.startsWith('~/')
+          ? path.join(os.homedir(), raw.slice(2))
+          : raw;
+    return path.isAbsolute(expanded) ? expanded : null;
   } catch {
     return null;
   }

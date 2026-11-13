@@ -143,6 +143,31 @@ test('an unreadable or malformed configuration file is ignored, not obeyed', (t)
   );
 });
 
+test('a `~` in the configured workspace is expanded, as platform/common.sh does', (t) => {
+  const home = isolatedHome(t);
+  noVpsPaths(t);
+  writeBoxConfig(home, '~/clients/acme');
+
+  assert.equal(
+    resolveWorkspaceDir(),
+    path.join(home, 'clients', 'acme'),
+    'a tilde must resolve to the real home, never to a path relative to the cwd',
+  );
+  assert.equal(
+    buildStatePath(),
+    path.join(home, 'clients', 'acme', '.workforce-build-state.json'),
+  );
+
+  // The scripts refuse a workspace that is not absolute, so a relative value is
+  // ignored here rather than silently used from the server's cwd.
+  writeBoxConfig(home, 'relative/ws');
+  assert.equal(
+    resolveWorkspaceDir(),
+    path.join(home, '.openclaw', 'workspace'),
+    'a relative configured workspace falls through to the $HOME workspace',
+  );
+});
+
 test('updateInterviewState passes --state <buildStatePath()> to the script', async (t) => {
   const home = isolatedHome(t);
   noVpsPaths(t);
