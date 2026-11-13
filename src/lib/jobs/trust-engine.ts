@@ -57,7 +57,8 @@
  * that carried it (`trust_ack(chat)` / `trust_ack(session)`).
  */
 
-import { queryAll, queryOne, run, transaction, timeNow } from '@/lib/db';
+import path from 'path';
+import { parseDbTime, queryAll, queryOne, run, transaction, timeNow } from '@/lib/db';
 import {
   notifyTelegram,
   notifySession,
@@ -65,6 +66,8 @@ import {
   recordUndeliverable,
   resolveOperatorChatId,
   resolveOwnerChatId,
+  ownerSendsSuppressed,
+  ownerSendsHeld,
 } from '@/lib/notify';
 import { REQUESTER_SESSION_CHANNEL } from '@/lib/requester-session';
 import { v4 as uuidv4 } from 'uuid';
@@ -448,6 +451,23 @@ function recordHqChatRefusal(taskId: string | null, reason: HqChatRefusalReason)
 }
 
 /**
+ * How many hq-chat refusals are already on record for a task. Three is the
+ * ceiling: past that the claim is kept so the task is not planned again.
+ * Never throws — an unreadable events table just means the ceiling is not hit.
+ */
+function hqRefusalCount(taskId: string | undefined): number {
+  if (!taskId) return 0;
+  try {
+    return queryOne<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM events WHERE task_id = ? AND type = 'report_back_uncorrelated'`,
+      [taskId],
+    )?.n ?? 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
  * The resolved address for one task's requester, and the lane that reaches it.
  *
  * ONE precedence rule, applied in ONE place, so the planner, the audience ask
@@ -547,6 +567,11 @@ export interface StampOp {
   extraSets: Record<string, string | null>;
   eventType: 'trust_ack' | 'trust_progress' | 'trust_done' | 'trust_phase_progress';
   eventMessage: string;
+  /** Present on a REPEATABLE stamp: the claim succeeds only while the column
+   *  still holds this exact value (null = empty). Absent = first-send claim (IS NULL). */
+  expectedPrior?: string | null;
+  /** True for a stamp claimed only to mark an earlier message as covered: no events row. */
+  silent?: boolean;
 }
 
 /** A planned client-facing send. `stamps` are claimed atomically before dispatch. */
@@ -596,23 +621,30 @@ export interface PlanContext {
 
 // ── Message builders ──────────────────────────────────────────────────────────
 
+/** A department code in plain words: "web-development" -> "the web development team". */
+function deptWords(department: string | null): string {
+  if (!department) return 'the right team';
+  const words = department.replace(/^dept-/i, '').replace(/[-_]+/g, ' ').trim().toLowerCase();
+  if (!words || words === 'general task') return 'our general team';
+  return `the ${words} team`;
+}
+
 function ackMessage(task: TrustTaskRow, queuedForGrooming: boolean): string {
   if (queuedForGrooming) {
     // P2-01 step 3: same honest language the board uses for a backlog-parked
     // (now "Being Prepared") card — BACKLOG_COLUMN_SUBTITLE — so the client
     // hears the identical explanation here and on the board.
     return (
-      `✅ Got it — "${task.title}" is captured and queued for grooming (being prepared). ` +
-      `${BACKLOG_COLUMN_SUBTITLE}. I'll assign it to the right department shortly and keep you posted.`
+      `✅ Got it — "${task.title}" is on your board and being prepared. ` +
+      `${BACKLOG_COLUMN_SUBTITLE}. I'll hand it to the right team shortly and keep you posted.`
     );
   }
-  const dept = task.department ? `the ${task.department} department` : 'the right department';
   const who = task.assigned_agent_name ? ` (${task.assigned_agent_name})` : '';
-  return `✅ Got it — "${task.title}" was assigned to ${dept}${who}. I'll update you as it moves.`;
+  return `✅ Got it — "${task.title}" was handed to ${deptWords(task.department)}${who}. I'll update you as it moves.`;
 }
 
 function progressMessage(task: TrustTaskRow, eta: string): string {
-  const who = task.assigned_agent_name ?? (task.department ? `the ${task.department} department` : 'the team');
+  const who = task.assigned_agent_name ?? deptWords(task.department);
   return `🔄 "${task.title}" is in progress with ${who}. Estimated completion: ${eta}.`;
 }
 
@@ -641,7 +673,10 @@ function phaseProgressMessage(
 
 function doneMessage(task: TrustTaskRow, deliverable: DeliverableInfo | null): string {
   if (deliverable) {
-    return `✅ Done: "${task.title}". ${deliverable.summary} Find it here: ${deliverable.location}`;
+    const isLink = /^https?:\/\//i.test(deliverable.location);
+    return isLink
+      ? `✅ Done: "${task.title}". ${deliverable.summary} Find it here: ${deliverable.location}`
+      : `✅ Done: "${task.title}". ${deliverable.summary} The file is called "${path.basename(deliverable.location)}". Open this task on your board to get it.`;
   }
   // NEVER fabricate a location. Honest completion + ask-for-details.
   return `✅ Done: "${task.title}". It's completed — ask me for details and I'll pull them up.`;
@@ -649,10 +684,22 @@ function doneMessage(task: TrustTaskRow, deliverable: DeliverableInfo | null): s
 
 // ── The pure planner ─────────────────────────────────────────────────────────
 
-/** True when the given instant falls inside the box-local quiet window. */
+/** The hour (0-23) in the box's configured client time zone. */
+export function quietClockHour(now: Date): number {
+  const read = (zone: string): number =>
+    Number(new Intl.DateTimeFormat('en-US', { timeZone: zone, hour: 'numeric', hourCycle: 'h23' }).format(now));
+  const zone = (process.env.TRUST_ENGINE_TIMEZONE || 'America/New_York').trim();
+  try {
+    const h = read(zone);
+    if (Number.isFinite(h)) return h;
+  } catch {
+    /* unknown zone name — fall through to the default */
+  }
+  return read('America/New_York');
+}
+
 export function isQuietHour(now: Date): boolean {
-  const h = now.getHours();
-  // Window wraps midnight: [22:00, 24:00) ∪ [00:00, 07:00).
+  const h = quietClockHour(now);
   return h >= NIGHT_START_HOUR || h < NIGHT_END_HOUR;
 }
 
@@ -669,10 +716,11 @@ export function isQuietHour(now: Date): boolean {
  * branch); 'blocked' + block_audience 'OWNER' -> the BLOCKED-on-owner ask.
  *
  * COST, stated plainly: NIGHT_START_HOUR/NIGHT_END_HOUR are evaluated with
- * Date#getHours(), which is the BOX-local hour. A client in another timezone can now
- * receive a DONE or BLOCKED message during THEIR night. That is a deliberate trade:
- * a nine-hour delay on "your deck is ready" was judged worse than an off-hours ping on
- * the two messages a client is actually waiting for.
+ * quietClockHour(), which reads the hour in TRUST_ENGINE_TIMEZONE (default Eastern),
+ * NOT the box clock. A client elsewhere can now receive a DONE or BLOCKED message
+ * during THEIR night. That is a deliberate trade: a nine-hour delay on "your deck is
+ * ready" was judged worse than an off-hours ping on the two messages a client is
+ * actually waiting for.
  */
 export function bypassesQuietHours(task: TrustTaskRow): boolean {
   if (task.status === 'done') return true;
@@ -681,8 +729,23 @@ export function bypassesQuietHours(task: TrustTaskRow): boolean {
 }
 
 function ageMs(now: Date, iso: string): number {
-  const t = Date.parse(iso);
+  const t = parseDbTime(iso);
   return Number.isNaN(t) ? Number.POSITIVE_INFINITY : now.getTime() - t;
+}
+
+/** Earlier-stage stamps a later message makes pointless. Claimed with the
+ *  later message so the earlier one is never sent after it. */
+function covers(task: TrustTaskRow, cols: Array<'ack_sent_at' | 'progress_last_sent_at'>): StampOp[] {
+  return cols
+    .filter((c) => !task[c])
+    .map((c) => ({
+      taskId: task.id,
+      guardColumn: c,
+      extraSets: {},
+      eventType: c === 'ack_sent_at' ? ('trust_ack' as const) : ('trust_progress' as const),
+      eventMessage: '',
+      silent: true,
+    }));
 }
 
 /**
@@ -775,6 +838,7 @@ export function planSends(tasks: TrustTaskRow[], ctx: PlanContext): PlannedSend[
             eventType: 'trust_done',
             eventMessage: `trust_done(${via}) -> ${chatId}: ${message}`,
           },
+          ...covers(task, ['ack_sent_at', 'progress_last_sent_at']),
         ],
         doneWithoutDeliverable: deliverable ? [] : [{ taskId: task.id, title: task.title }],
         heldForMissingPostflight: [],
@@ -793,7 +857,7 @@ export function planSends(tasks: TrustTaskRow[], ctx: PlanContext): PlannedSend[
       const throttled =
         task.blocked_notice_sent_at !== null &&
         ageMs(ctx.now, task.blocked_notice_sent_at) < BLOCKED_RENOTIFY_INTERVAL_MS;
-      if (!throttled) {
+      if (!throttled && !(night && task.blocked_notice_sent_at !== null)) {
         const message = blockedMessage(task);
         perTask.push({
           chatId,
@@ -806,7 +870,9 @@ export function planSends(tasks: TrustTaskRow[], ctx: PlanContext): PlannedSend[
               extraSets: {},
               eventType: 'trust_progress',
               eventMessage: `trust_progress(blocked,${via}) -> ${chatId}: ${message}`,
+              expectedPrior: task.blocked_notice_sent_at,
             },
+            ...covers(task, ['ack_sent_at']),
           ],
           doneWithoutDeliverable: [],
           heldForMissingPostflight: [],
@@ -846,6 +912,7 @@ export function planSends(tasks: TrustTaskRow[], ctx: PlanContext): PlannedSend[
                 extraSets: { last_reported_phase_label: phase.label },
                 eventType: 'trust_phase_progress',
                 eventMessage: `trust_phase_progress(${via}) -> ${chatId}: ${message}`,
+                expectedPrior: task.phase_progress_sent_at,
               },
             ],
             doneWithoutDeliverable: [],
@@ -872,6 +939,7 @@ export function planSends(tasks: TrustTaskRow[], ctx: PlanContext): PlannedSend[
             eventType: 'trust_progress',
             eventMessage: `trust_progress(${via}) -> ${chatId}: ${message}`,
           },
+          ...covers(task, ['ack_sent_at']),
         ],
         doneWithoutDeliverable: [],
         heldForMissingPostflight: [],
@@ -880,7 +948,7 @@ export function planSends(tasks: TrustTaskRow[], ctx: PlanContext): PlannedSend[
     }
 
     // ── Message 1 — ACK (past backlog, or 10 min after ingest, whichever first) ──
-    if (!task.ack_sent_at) {
+    if (!task.ack_sent_at && task.status !== 'done' && !night) {
       const pastBacklog = task.status !== 'backlog' && task.status !== 'inbox';
       const graceElapsed = ageMs(ctx.now, task.created_at) >= ACK_BACKLOG_GRACE_MS;
       if (pastBacklog || graceElapsed) {
@@ -1066,6 +1134,8 @@ export interface ExecuteResult {
   /** Claims this run wrote and then released because the transport proved the send
    *  did not happen. A non-zero value is a real alarm, not noise. */
   released: number;
+  /** Plans skipped untouched because client sends are muted or on hold. */
+  held: number;
 }
 
 /**
@@ -1083,8 +1153,8 @@ function releaseUnsentClaims(stamps: StampOp[], claimedAt: string): number {
   let released = 0;
   for (const stamp of stamps) {
     try {
-      const sets: string[] = [`${stamp.guardColumn} = NULL`, 'updated_at = ?'];
-      const params: (string | null)[] = [claimedAt];
+      const sets: string[] = [`${stamp.guardColumn} = ?`, 'updated_at = ?'];
+      const params: (string | null)[] = [stamp.expectedPrior ?? null, claimedAt];
       for (const col of Object.keys(stamp.extraSets)) {
         sets.push(`${col} = NULL`);
       }
@@ -1128,6 +1198,11 @@ export function executeSends(plans: PlannedSend[], ctx: ExecuteContext): Execute
   let sent = 0;
   let claimed = 0;
   let skipped = 0;
+  let held = 0;
+
+  // CC-053: when no sender is injected and the box's owner sends are muted or on
+  // hold, a Telegram/session send cannot go out at all this run.
+  const gatewayOff = !ctx.send && (ownerSendsSuppressed() || ownerSendsHeld());
 
   for (const plan of plans) {
     // TICKET 3 (L-13): a held (certificate-missing) plan has stamps: [] by
@@ -1138,10 +1213,18 @@ export function executeSends(plans: PlannedSend[], ctx: ExecuteContext): Execute
     // going to be claimed or sent), and move on — never attempt dispatch.
     const heldForMissingPostflight = plan.heldForMissingPostflight ?? [];
     if (heldForMissingPostflight.length > 0) {
-      for (const held of heldForMissingPostflight) {
-        escalate(`[trust-engine] completion_notification_held: ${held.detail}`);
+      for (const holding of heldForMissingPostflight) {
+        escalate(`[trust-engine] completion_notification_held: ${holding.detail}`);
       }
       skipped += 1;
+      continue;
+    }
+
+    // CC-053: a Telegram or session send cannot go out right now. Do not claim,
+    // do not write an event, do not release: leave the row exactly as it is so it
+    // is planned again when the hold lifts. (The two in-app channels still write.)
+    if (gatewayOff && plan.channel !== CEO_CHAT_CHANNEL && plan.channel !== HQ_CHAT_CHANNEL) {
+      held += 1;
       continue;
     }
 
@@ -1160,8 +1243,10 @@ export function executeSends(plans: PlannedSend[], ctx: ExecuteContext): Execute
           params.push(val);
         }
         params.push(stamp.taskId);
+        const repeatable = Object.prototype.hasOwnProperty.call(stamp, 'expectedPrior');
+        if (repeatable) params.push(stamp.expectedPrior ?? null);
         const res = run(
-          `UPDATE tasks SET ${sets.join(', ')} WHERE id = ? AND ${stamp.guardColumn} IS NULL`,
+          `UPDATE tasks SET ${sets.join(', ')} WHERE id = ? AND ${stamp.guardColumn} IS ${repeatable ? '?' : 'NULL'}`,
           params,
         );
         if (res.changes > 0) {
@@ -1170,13 +1255,15 @@ export function executeSends(plans: PlannedSend[], ctx: ExecuteContext): Execute
           // client-communication trail (P1-04 step 8, feeds P2-02). Best-effort:
           // a missing events table on a very old box must never roll back the
           // durable stamp, so the insert is swallowed but stays inside the tx.
-          try {
-            run(
-              `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
-              [uuidv4(), stamp.eventType, stamp.taskId, stamp.eventMessage, nowIso],
-            );
-          } catch {
-            // events row is best-effort telemetry — never block the send on it.
+          if (!stamp.silent) {
+            try {
+              run(
+                `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, ?, ?, ?, ?)`,
+                [uuidv4(), stamp.eventType, stamp.taskId, stamp.eventMessage, nowIso],
+              );
+            } catch {
+              // events row is best-effort telemetry — never block the send on it.
+            }
           }
         }
       }
@@ -1206,6 +1293,10 @@ export function executeSends(plans: PlannedSend[], ctx: ExecuteContext): Execute
     }
     if (dispatched) {
       sent += 1;
+    } else if (plan.channel === HQ_CHAT_CHANNEL && hqRefusalCount(plan.stamps[0]?.taskId) >= 3) {
+      // Three refusals are on record for this task. Keep the claim so it is not
+      // planned again; the refusal events are the durable account.
+      skipped += 1;
     } else {
       // PROVABLE NON-SEND. The transport returns false in exactly two cases, both
       // of which mean nothing was queued: the suppression short-circuit
@@ -1240,7 +1331,7 @@ export function executeSends(plans: PlannedSend[], ctx: ExecuteContext): Execute
     }
   }
 
-  return { sent, claimed, skipped, released };
+  return { sent, claimed, skipped, released, held };
 }
 
 // ── DB glue: load candidates + deliverable lookup ─────────────────────────────
@@ -1288,7 +1379,7 @@ function candidateSql(): string {
           OR t.requester_channel = '${HQ_CHAT_CHANNEL}')
      AND t.archived_at IS NULL
      AND (
-       t.ack_sent_at IS NULL
+       (t.ack_sent_at IS NULL AND t.status != 'done')
        OR (t.status = 'in_progress' AND t.progress_last_sent_at IS NULL)
        OR (t.status = 'blocked' AND t.block_audience = 'OWNER'
            AND (t.blocked_notice_sent_at IS NULL
@@ -1361,12 +1452,12 @@ export function runTrustEngineSweep(opts?: {
   escalate?: (message: string) => void;
 }): SweepResult {
   if (process.env.DISABLE_TRUST_ENGINE === '1' || process.env.DISABLE_TRUST_ENGINE === 'true') {
-    return { scanned: 0, sent: 0, claimed: 0, skipped: 0, released: 0, skippedReason: 'DISABLE_TRUST_ENGINE set' };
+    return { scanned: 0, sent: 0, claimed: 0, skipped: 0, released: 0, held: 0, skippedReason: 'DISABLE_TRUST_ENGINE set' };
   }
   const now = opts?.now ?? new Date();
   const tasks = loadCandidateTasks(opts?.taskId);
   if (tasks.length === 0) {
-    return { scanned: 0, sent: 0, claimed: 0, skipped: 0, released: 0 };
+    return { scanned: 0, sent: 0, claimed: 0, skipped: 0, released: 0, held: 0 };
   }
   const plans = planSends(tasks, {
     now,
