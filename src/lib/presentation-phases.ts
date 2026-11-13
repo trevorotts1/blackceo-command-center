@@ -1,106 +1,119 @@
-// U060: the 26 manifest phase ids collapsed to 7 client-facing labels.
-// EXCLUSIVE (each id appears exactly once) and TOTAL (every id appears).
-// No wildcards: a glob over ids cannot see P-SP-P3-HYGIENE, which is a QC
-// phase whose id does not end in -QC.
+// PD-006 — the presentation phase table is GENERATED from the pipeline manifest.
+//
+// src/lib/presentation-phases.generated.ts holds every manifest phase id (56 at
+// manifest_version 75) with its order, the client-facing step it belongs to and
+// its election gate. `npm run check:phases` regenerates and refuses when this
+// file is stale. This module derives every mapping the board reads from that
+// one generated table, so a phase added to (or retired from) the manifest can
+// never again be invisible, and a phase the manifest no longer has can never be
+// waited on forever.
+//
+// Thirteen client-facing steps, in lifecycle order. A branch step exists ONLY
+// for a run that elected the branch (BRANCH_STEPS names the election each
+// branch step needs), so a declined sales/checkout or VSL branch produces NO
+// step and no main step waits on a phase that will never run.
 //
 // Two design choices are deliberate and must NOT be "fixed":
 //   (i) per-stage QC lives in its stage — P1Q-COPY-QC in Script, P-TYPO-QC /
-//       P-PROMPT-QC in Prompts, P-IMAGE-QC in Images — because a client watching
-//       "Images 41/62" wants the image QC inside that bar, not in a separate
-//       bucket that turns amber halfway through. The standalone QC label carries
-//       only the two cross-cutting gates.
-//   (ii) P9-SPEECH is Script, not Delivered — it produces PRESENTERS-SPEECH.md,
-//        a script artifact, and putting it in Delivered would make a card show
-//        "Delivered: in progress" while nothing has shipped.
-//
-// Per-label counts: Intake 9 · Script 5 · Prompts 4 · Images 3 · Teleprompter 0
-// · QC 2 · Delivered 3. Checksum 9+5+4+3+0+2+3 = 26.
+//       P-PROMPT-QC in Design, P-IMAGE-QC in Images — because a client watching
+//       "Images 1/2" wants the image QC inside that bar, not in a separate
+//       bucket that turns amber halfway through. "Quality Check" carries the
+//       cross-cutting gates (P-SHIFT-QC, P-SPEECH-QC, P-QC-AGGREGATE, P-U-QC).
+//   (ii) P9-SPEECH, P8.4-FISH-TAG and P9.1-SPEECH-PDF are Script, not Audio and
+//       Video — they produce written speech artifacts, and putting them in
+//       Audio and Video would make a card show that bar running while nothing
+//       has been recorded.
 
-export const PHASE_LABELS = ['Intake','Script','Prompts','Images','Teleprompter','QC','Delivered'] as const;
+import {
+  STEPS,
+  PHASES,
+  OWNER_ACTION_PHASES,
+  BRANCH_STEPS,
+} from './presentation-phases.generated';
 
-// ── Item 19 (FIX-PLAN) — the P-U upsell branch ─────────────────────────────
-// The canonical PIPELINE-MANIFEST (v70) carries 22 P-U-* phase ids. None of
-// them is in PHASE_TO_LABEL: the U060 table maps the 26 main-line ids, and
-// its totality test pins exactly those 26. Before Item 19 every P-U activity
-// therefore landed in the reducer's `unmapped` bucket, which no surface
-// renders — a run that elected the sales/checkout or VSL branch built those
-// pages invisibly (the diagnostic's forever-amber finding: the branch could
-// neither complete nor be seen running).
-//
-// The branch maps to its OWN stepper steps, inserted after Images, and a
-// step exists ONLY for a branch the run actually elected (or, when the
-// election record cannot be read, a branch with real engine activity — the
-// engine emits P-U signals only for elected branches, because the manifest's
-// defers_unless gates defer the rest). A declined branch produces NO step:
-// no phantom steps, and no main label waits forever on a phase that will
-// never run.
-//
-// Grouping follows the manifest's own structure (defers_unless in
-// parentheses; orders are the manifest's):
-//   Sales Page — want_sales_checkout: P-U-SALES-COPY (3.6), P-U-DESIGN-SALES
-//     (4.2), P-U-DESIGN-RENDER-SALES (4.21), P-U-HTML-SALES (5.2),
-//     P-U-GHL-SALES (6.2, the GHL install), P-U-SALES-BUILD (8.75, ungated
-//     build step of the same branch).
-//   Checkout — want_sales_checkout: P-U-CHECKOUT-COPY (3.7),
-//     P-U-DESIGN-CHECKOUT (4.3), P-U-DESIGN-RENDER-CHECKOUT (4.31),
-//     P-U-HTML-CHECKOUT (5.3), P-U-CHECKOUT-BUILD (8.76, ungated),
-//     P-U-FORM-CHECKOUT (8.77, ungated payment/lead form wiring).
-//   VSL Page — want_vsl_page: P-U-VSL-RESEARCH (3.8), P-U-VSL-COPY (3.9),
-//     P-U-DESIGN-VSL (4.4), P-U-DESIGN-RENDER-VSL (4.41), P-U-HTML-VSL (5.4),
-//     P-U-FORM-GATE (5.6), P-U-GHL-VSL (6.4, the GHL install),
-//     P-U-VSL-BUILD (8.93, ungated).
-export const UPSELL_LABELS = ['Sales Page', 'Checkout', 'VSL Page'] as const;
+/** The thirteen client-facing steps, in lifecycle order. */
+export const PHASE_LABELS = STEPS;
 
-export type PhaseStepLabel =
-  | (typeof PHASE_LABELS)[number]
-  | (typeof UPSELL_LABELS)[number];
+export type PhaseStepLabel = (typeof PHASE_LABELS)[number];
 
-export const UPSELL_PHASE_TO_LABEL: Record<string, (typeof UPSELL_LABELS)[number]> = {
-  'P-U-SALES-COPY':           'Sales Page',
-  'P-U-DESIGN-SALES':         'Sales Page',
-  'P-U-DESIGN-RENDER-SALES':  'Sales Page',
-  'P-U-HTML-SALES':           'Sales Page',
-  'P-U-GHL-SALES':            'Sales Page',
-  'P-U-SALES-BUILD':          'Sales Page',
-  'P-U-CHECKOUT-COPY':        'Checkout',
-  'P-U-DESIGN-CHECKOUT':      'Checkout',
-  'P-U-DESIGN-RENDER-CHECKOUT': 'Checkout',
-  'P-U-HTML-CHECKOUT':        'Checkout',
-  'P-U-CHECKOUT-BUILD':       'Checkout',
-  'P-U-FORM-CHECKOUT':        'Checkout',
-  'P-U-VSL-RESEARCH':         'VSL Page',
-  'P-U-VSL-COPY':             'VSL Page',
-  'P-U-DESIGN-VSL':           'VSL Page',
-  'P-U-DESIGN-RENDER-VSL':    'VSL Page',
-  'P-U-HTML-VSL':             'VSL Page',
-  'P-U-FORM-GATE':            'VSL Page',
-  'P-U-GHL-VSL':              'VSL Page',
-  'P-U-VSL-BUILD':            'VSL Page',
-};
+/**
+ * The three branch steps — a step that exists only when the run elected the
+ * sales/checkout or the VSL branch. Derived from BRANCH_STEPS so there is one
+ * source for the list and its election keys.
+ */
+export const UPSELL_LABELS = [
+  'Sales Page',
+  'Checkout',
+  'Video Sales Page',
+] as const;
 
-// The two shared wrap-up phases gate on EITHER election
-// (defers_unless: want_sales_checkout == "yes" or want_vsl_page == "yes").
-// They are not steps of their own: P-U-QC is the upsell QC gate and joins
-// the QC label's required set, and P-U-COLLATERAL (the delivery backup of
-// the upsell pages) joins Delivered's — ONLY for a run with an active
-// upsell branch, so a deck-only run's QC stays 2 units and Delivered 3.
-export const UPSELL_SHARED_PHASE_TO_LABEL: Record<string, (typeof PHASE_LABELS)[number]> = {
-  'P-U-QC':         'QC',
-  'P-U-COLLATERAL': 'Delivered',
-};
+type BranchStepLabel = (typeof UPSELL_LABELS)[number];
+
+function branchStepOf(label: string): BranchStepLabel | null {
+  return (UPSELL_LABELS as readonly string[]).includes(label)
+    ? (label as BranchStepLabel)
+    : null;
+}
+
+/** The manifest phases, by id, in manifest order. */
+const PHASE_BY_ID = new Map(PHASES.map((p) => [p.id, p]));
+
+/**
+ * The election keys a phase defers on, read from the manifest's own
+ * `defers_unless` expression (the phase rows are the only source). An ungated
+ * phase returns [].
+ */
+function electionKeysOf(phaseId: string): string[] {
+  const expr = PHASE_BY_ID.get(phaseId)?.defersUnless;
+  if (typeof expr !== 'string' || expr.length === 0) return [];
+  const keys: string[] = [];
+  if (expr.includes('want_sales_checkout')) keys.push('want_sales_checkout');
+  if (expr.includes('want_vsl_page')) keys.push('want_vsl_page');
+  return keys;
+}
+
+/** Every manifest phase id mapped to its client-facing step. */
+export const PHASE_TO_LABEL: Record<string, PhaseStepLabel> = Object.fromEntries(
+  PHASES.map((p) => [p.id, p.step as PhaseStepLabel] as const),
+);
+
+/** The phases of the three branch steps. */
+export const UPSELL_PHASE_TO_LABEL: Record<string, PhaseStepLabel> =
+  Object.fromEntries(
+    PHASES.filter((p) => branchStepOf(p.step) != null).map((p) => [
+      p.id,
+      p.step as PhaseStepLabel,
+    ] as const),
+  );
+
+/**
+ * The shared wrap-up phases: gated on EITHER election (`defers_unless:
+ * want_sales_checkout == "yes" or want_vsl_page == "yes"`), and belonging to an
+ * ordinary step rather than a branch step. P-U-QC joins Quality Check and
+ * P-U-COLLATERAL joins Delivery — but ONLY for a run with an active upsell
+ * branch, so a deck-only run's Quality Check and Delivery never wait on them.
+ */
+export const UPSELL_SHARED_PHASE_TO_LABEL: Record<string, PhaseStepLabel> =
+  Object.fromEntries(
+    PHASES.filter((p) => branchStepOf(p.step) == null && electionKeysOf(p.id).length > 0).map(
+      (p) => [p.id, p.step as PhaseStepLabel] as const,
+    ),
+  );
 
 /** The branch a P-U phase id belongs to ('either' = the shared wrap-up). */
 export function upsellBranchOfPhase(
   phaseId: string,
 ): 'sales_checkout' | 'vsl' | 'either' | null {
-  const label = UPSELL_PHASE_TO_LABEL[phaseId];
-  if (label === 'Sales Page' || label === 'Checkout') return 'sales_checkout';
-  if (label === 'VSL Page') return 'vsl';
-  if (phaseId in UPSELL_SHARED_PHASE_TO_LABEL) return 'either';
+  if (!(phaseId in PHASE_TO_LABEL)) return null;
+  const branch = branchStepOf(PHASE_TO_LABEL[phaseId]);
+  if (branch != null) {
+    return BRANCH_STEPS[branch] === 'want_vsl_page' ? 'vsl' : 'sales_checkout';
+  }
+  if (electionKeysOf(phaseId).length > 0) return 'either';
   return null;
 }
 
-/** True when the id is any of the 22 manifest P-U ids. */
+/** True when the id is any phase that only exists for an elected upsell branch. */
 export function isUpsellPhaseId(phaseId: string): boolean {
   return upsellBranchOfPhase(phaseId) != null;
 }
@@ -117,77 +130,36 @@ export interface UpsellElections {
 }
 
 /**
- * The label ANY known phase id (main line, upsell branch, or shared
- * wrap-up) belongs to, or null for an id no table knows.
+ * The label ANY known phase id belongs to, or null for an id the manifest does
+ * not have.
  */
 export function labelForPhaseId(phaseId: string): PhaseStepLabel | null {
-  return (
-    PHASE_TO_LABEL[phaseId] ??
-    UPSELL_PHASE_TO_LABEL[phaseId] ??
-    UPSELL_SHARED_PHASE_TO_LABEL[phaseId] ??
-    null
-  );
+  return PHASE_TO_LABEL[phaseId] ?? null;
 }
 
-export const PHASE_TO_LABEL: Record<string, typeof PHASE_LABELS[number]> = {
-  'P-CONVERTER':        'Intake',
-  'P-0.5-RESEARCH':     'Intake',
-  'P0A-INTAKE':         'Intake',
-  'P-SP-CLAIM':         'Intake',
-  'P-SP-INTAKE':        'Intake',
-  'P-SP-INTAKE-TRACE':  'Intake',
-  'P0B-PRIORITY':       'Intake',
-  'P3-ARC':             'Intake',
-  'P-3.5-RESEARCH-MAP': 'Intake',
-  'P4-COPY':            'Script',
-  'P-SP-STRUCTURE':     'Script',
-  'P-SP-P3-HYGIENE':    'Script',
-  'P1Q-COPY-QC':        'Script',
-  'P9-SPEECH':          'Script',
-  'PF-DESIGN':          'Prompts',
-  'P-TYPO-QC':          'Prompts',
-  'P4-PROMPT':          'Prompts',
-  'P-PROMPT-QC':        'Prompts',
-  'P-STYLE-PREVIEW':    'Images',
-  'P4-RENDER':          'Images',
-  'P-IMAGE-QC':         'Images',
-  'P-SHIFT-QC':         'QC',
-  'P-SPEECH-QC':        'QC',
-  'P8-ASSEMBLE':        'Delivered',
-  'P9.5-NOTES-SYNC':    'Delivered',
-  'P9-DELIVER':         'Delivered',
-};
+// No step is derived from a deliverable row any more: P7-TELEPROMPTER is an
+// ordinary manifest phase of "Speaker Kit", so it advances like every other
+// phase. The export is kept (empty) for importers; there is nothing in it.
+export const DELIVERABLE_DERIVED_LABELS: readonly string[] = [];
 
-// Teleprompter has NO manifest phase. Its status is derived from deliverable
-// presence, never from task_activities. The teleprompter is produced by
-// build_teleprompter.py (1,643 lines, self-contained HTML, zero <link /
-// script src / <img). Eventually U019 may add a phase id for it; when that
-// lands, the reducer treats it as an additional signal, not a replacement
-// — see computePhaseProgress.
-export const DELIVERABLE_DERIVED_LABELS = ['Teleprompter'] as const;
-
-// FIX 50b — teleprompter detection by basename. The registration contract
-// (CreateDeliverableSchema, validation.ts) pins deliverable_type to the enum
-// file|url|artifact|image — there IS no 'teleprompter' type, and the engine's
-// register_deliverable (cc_board.py) posts type 'url' or 'artifact' with the
-// artifact's location in `path`. A reducer that tests the type string can
-// therefore NEVER see a real teleprompter row. The teleprompter's identity is
-// its basename: presenter-teleprompter.html, the same name build_deck.py
-// writes (DELIVERABLES_REQUIRED) and completion-evidence.ts's BUNDLE_SPECS
-// matches by. Routes must SELECT the `path` column and pass it through.
+// The teleprompter's identity is its basename: presenter-teleprompter.html,
+// the same name build_deck.py writes (DELIVERABLES_REQUIRED) and
+// completion-evidence.ts's BUNDLE_SPECS matches by. The registration contract
+// (CreateDeliverableSchema) pins deliverable_type to file|url|artifact|image —
+// there IS no 'teleprompter' type — so a type-only test can never see a real
+// teleprompter row. Kept as a helper for callers that inspect deliverable rows;
+// the stepper no longer uses it (P7-TELEPROMPTER is a phase now).
 export const TELEPROMPTER_BASENAME = 'presenter-teleprompter.html';
 
 /**
- * FIX 50b — true when a deliverable row IS the teleprompter.
+ * True when a deliverable row IS the teleprompter.
  *
  * Two accepted signals, OR-ed:
  *   1. basename match — path's final `/`-segment (or `\\`, for Windows-style
  *      paths that arrive through the ingest) equals presenter-teleprompter.html;
  *      trimming first, since registration paths have historically carried
  *      stray whitespace.
- *   2. legacy exact-type row — deliverable_type === 'teleprompter'. No writer
- *      emits it today (the Zod enum forbids it), but the type stays accepted so
- *      any fixture / hand-seeded row keeps meaning what it always meant.
+ *   2. legacy exact-type row — deliverable_type === 'teleprompter'.
  */
 export function isTeleprompterDeliverable(d: {
   deliverable_type: string;
@@ -216,7 +188,7 @@ export const ACTIVITY_SCHEMA_KNOWN_VERSIONS: readonly number[] = [0, 1];
  * Extract the phase id from an activity's metadata. `metadata` may be a nested
  * object or a pre-stringified JSON string — validation.ts:152 accepts both.
  * Returns null — never throws — for absent, malformed, or wrong-shaped input.
- * An id that is NOT in PHASE_TO_LABEL is still RETURNED here; the reducer is
+ * An id that no mapping table knows is still RETURNED here; the reducer is
  * what records it in `unmapped`. Filtering unknown ids to null inside this
  * function reads as defensive and silently destroys `unmapped`.
  *
@@ -268,7 +240,7 @@ export function activitySchemaInfo(
  * of the child's title text. Resolution order, most authoritative first:
  *   1. tasks.stage_slug — the explicit phase id a producer stamped on the row
  *      (FIX 52/W16a: ingest accepts `phase_id` and persists it as stage_slug).
- *      Any id PHASE_TO_LABEL knows maps directly ('P4-COPY' → Script).
+ *      Any id the manifest table knows maps directly ('P4-COPY' → Script).
  *   2. the child's own task_activities metadata.phase_id (the pre-W16a
  *      signal) — first mapped id wins.
  *   3. legacy title-substring match — last resort, only so pre-existing rows
@@ -298,7 +270,7 @@ export function childPhaseLabel(input: {
   // 3. Legacy fallback: title contains a label verbatim (case-insensitive).
   if (typeof input.title === 'string' && input.title.length > 0) {
     const lower = input.title.toLowerCase();
-    for (const label of [...PHASE_LABELS, ...UPSELL_LABELS]) {
+    for (const label of PHASE_LABELS) {
       if (lower.includes(label.toLowerCase())) return label;
     }
   }
@@ -316,11 +288,6 @@ export type PhaseStepStatus = 'not_started' | 'in_progress' | 'done';
  *   - 'completed'        — the pre-existing generic activity type that the
  *                          engine's per-phase writers used before the enum
  *                          widened (and still do on older runs in the DB)
- *
- * Before this fix computePhaseProgress could never emit `done` for an
- * activity-derived label — any phase id seen in activities stayed
- * `in_progress` forever, so the stepper could never show a green step and a
- * phase card could never be read as finished from the board.
  */
 export const PHASE_COMPLETED_ACTIVITY_TYPES = [
   'completed',
@@ -330,6 +297,38 @@ export const PHASE_COMPLETED_ACTIVITY_TYPES = [
 function isPhaseCompletedActivity(activityType: string): boolean {
   return (PHASE_COMPLETED_ACTIVITY_TYPES as readonly string[]).includes(
     activityType,
+  );
+}
+
+/**
+ * One branch step's step label, when the run's elections are UNDETERMINED and
+ * the evidence is read from activities instead: the engine emits a branch's
+ * phase signals only for an elected branch, because the manifest's
+ * defers_unless gates defer the rest. So evidence is proof of election.
+ */
+function branchStepActive(label: PhaseStepLabel, elections: UpsellElections | null, evidenced: (branch: 'sales_checkout' | 'vsl') => boolean): boolean {
+  const step = branchStepOf(label);
+  if (step == null) return true;
+  const needsVsl = BRANCH_STEPS[step] === 'want_vsl_page';
+  if (elections != null) return needsVsl ? elections.vsl : elections.salesCheckout;
+  return evidenced(needsVsl ? 'vsl' : 'sales_checkout');
+}
+
+/**
+ * True when a phase id applies to a run with these elections. An ungated phase
+ * always applies; a branch phase applies only to its elected branch; a shared
+ * wrap-up phase applies to either elected branch.
+ */
+function phaseAppliesToElections(phaseId: string, elections: UpsellElections): boolean {
+  const branch = branchStepOf(PHASE_TO_LABEL[phaseId]);
+  if (branch != null) {
+    return BRANCH_STEPS[branch] === 'want_vsl_page' ? elections.vsl : elections.salesCheckout;
+  }
+  const keys = electionKeysOf(phaseId);
+  if (keys.length === 0) return true;
+  return (
+    (keys.includes('want_sales_checkout') && elections.salesCheckout) ||
+    (keys.includes('want_vsl_page') && elections.vsl)
   );
 }
 
@@ -349,15 +348,12 @@ export interface PhaseProgressStep {
 }
 
 /**
- * PRES-020 — required phase ids per label. The defect: computePhaseProgress
- * collected completed LABELS, so any single completion-typed activity (e.g.
- * P4-COPY alone) flipped the whole Script label `done` before structure,
- * copy QC, or speech ran. The fix: a label is `done` only when EVERY
- * required phase id of that label has a completion signal. The required set
- * is exactly the manifest table above, minus labels the caller explicitly
+ * PRES-020 — required phase ids per label. A label is `done` only when EVERY
+ * required phase id of that label has a completion signal. The required set is
+ * exactly the generated manifest table, minus labels the caller explicitly
  * excludes (optional / not-applicable phases, approved manifest only) via
- * `excludedPhaseIds`. DELIVERABLE_DERIVED_LABELS (Teleprompter) never takes
- * part: no manifest phase id maps to it, so it stays deliverable-derived.
+ * `excludedPhaseIds`, and minus phases the run's elections defer (a declined
+ * sales/checkout branch, or a shared wrap-up phase when no branch is active).
  */
 export function requiredPhaseIdsForLabel(
   label: PhaseStepLabel,
@@ -368,38 +364,20 @@ export function requiredPhaseIdsForLabel(
     excludedPhaseIds instanceof Set
       ? excludedPhaseIds
       : new Set(excludedPhaseIds ?? []);
-  // Item 19 — an upsell branch label's required set is its manifest ids.
-  // With elections KNOWN and the branch declined, the set is empty (the
-  // phases are deferred for this run; nothing may wait on them).
-  if ((UPSELL_LABELS as readonly string[]).includes(label)) {
-    if (elections != null) {
-      const active =
-        label === 'VSL Page' ? elections.vsl : elections.salesCheckout;
-      if (!active) return [];
-    }
-    return Object.entries(UPSELL_PHASE_TO_LABEL)
-      .filter(([id, l]) => l === label && !excluded.has(id))
-      .map(([id]) => id);
-  }
-  const main = Object.entries(PHASE_TO_LABEL)
+  const ids = Object.entries(PHASE_TO_LABEL)
     .filter(([id, l]) => l === label && !excluded.has(id))
     .map(([id]) => id);
-  // Item 19 — the shared wrap-up ids join their main label ONLY when the
-  // caller knows an upsell branch is active for this run.
-  if (elections != null && (elections.salesCheckout || elections.vsl)) {
-    for (const [id, l] of Object.entries(UPSELL_SHARED_PHASE_TO_LABEL)) {
-      if (l === label && !excluded.has(id)) main.push(id);
-    }
-  }
-  return main;
+  if (elections == null) return ids;
+  return ids.filter((id) => phaseAppliesToElections(id, elections));
 }
 
 export interface PhaseProgress {
-  // The 7 main steps in PHASE_LABELS order, plus — Item 19 — one step per
-  // ACTIVE upsell branch (Sales Page / Checkout / VSL Page) inserted after
-  // Images. Inactive or unevidenced branches emit no step at all.
+  // The thirteen steps in PHASE_LABELS order, minus — Item 19 — any branch
+  // step whose branch the run did not elect (or, when the elections are
+  // UNDETERMINED, has no engine evidence for). Inactive branches emit no step
+  // at all.
   phases: PhaseProgressStep[];
-  unmapped: string[];            // phase ids seen that no mapping table knows
+  unmapped: string[];            // phase ids seen that the manifest does not have
 }
 
 export interface PhaseActivityLite {
@@ -429,10 +407,8 @@ export interface ComputePhaseProgressOptions {
   /**
    * PRES-020 — completion receipts per phase id. A completion-typed activity
    * marks the id done ONLY when its receipt validates (id present and
-   * explicitly true). Teleprompter completions still require the deliverable
-   * signal (see FIX 50b): presence alone never completes it. When omitted,
-   * every completion-typed activity counts (legacy behavior for callers that
-   * have no receipt source).
+   * explicitly true). When omitted, every completion-typed activity counts
+   * (legacy behavior for callers that have no receipt source).
    */
   completionReceipts?: Record<string, boolean | null | undefined> | null;
   /**
@@ -445,9 +421,7 @@ export interface ComputePhaseProgressOptions {
    * from the engine's own records. Known elections decide branch-step
    * emission exactly (elected → step with real states; declined → NO step).
    * When omitted/null (UNDETERMINED), a branch step is emitted only on real
-   * engine evidence for that branch — the engine emits P-U signals only for
-   * elected branches, so evidence is proof of election, and its absence
-   * keeps the stepper at the 7 main steps rather than inventing branches.
+   * engine evidence for that branch.
    */
   electedBranches?: UpsellElections | null;
 }
@@ -488,6 +462,11 @@ function scopeActive(
  * task_deliverables and passes the rows straight through, so this function, and
  * only this function, is what QC-2 and QC-3 call directly: no running server,
  * no duplicated reduction logic between the test and the route.
+ *
+ * `deliverables` no longer moves any step: PD-006 made P7-TELEPROMPTER an
+ * ordinary manifest phase, so the teleprompter's step advances on its phase
+ * completion like every other step. The parameter stays so the route keeps one
+ * call site and every caller keeps its signature.
  */
 export function computePhaseProgress(
   activities: Array<PhaseActivityLite>,
@@ -496,16 +475,15 @@ export function computePhaseProgress(
 ): PhaseProgress {
   const seenIds = new Set<string>();
   const completedIds = new Set<string>();
-  const touchedLabels = new Set<string>();
   const unmapped: string[] = [];
   const receipts = options?.completionReceipts ?? null;
   const activeScope = options?.activeScope ?? null;
   for (const a of activities) {
     const id = phaseIdOf(a);
     if (id == null) continue;
-    // Item 19 — P-U ids are KNOWN ids (branch/shared tables), never
-    // `unmapped`: unmapped means "no table knows this id", and a mapped
-    // branch the run did not elect is not-applicable, not unknown.
+    // Item 19 — a phase the manifest has is KNOWN, never `unmapped`:
+    // unmapped means "the manifest has no such id", and a mapped branch the
+    // run did not elect is not-applicable, not unknown.
     const label = labelForPhaseId(id);
     if (label == null) { if (!unmapped.includes(id)) unmapped.push(id); continue; }
     // PRES-020 — stale-scope rows are obsolete: a late completion from an
@@ -513,23 +491,18 @@ export function computePhaseProgress(
     // hold it in_progress either. Unscoped rows still count.
     if (!scopeActive(scopeOf(a), activeScope)) continue;
     seenIds.add(id);
-    touchedLabels.add(label);
     // PRES-020 — a completion-typed activity marks the PHASE ID done, never
     // the whole label. With receipts, the id completes only when its receipt
     // validates (explicit true). Without receipts, legacy behavior holds.
-    // Teleprompter has no phase ids; its only signal stays the deliverable.
     if (isPhaseCompletedActivity(a.activity_type)) {
       if (receipts == null || receipts[id] === true) completedIds.add(id);
     }
   }
-  // FIX 50b — teleprompter detected by basename (path column) OR the legacy
-  // 'teleprompter' type. Callers must SELECT path; a row without one only
-  // matches via the legacy type.
-  const hasTeleprompterDeliverable = deliverables.some(isTeleprompterDeliverable);
+  void deliverables;
 
   // ── Item 19 — which upsell branches are ACTIVE for this run ────────────
   // Known elections decide exactly. UNDETERMINED elections fall back to
-  // evidence: the engine's defers_unless gates mean P-U signals exist only
+  // evidence: the engine's defers_unless gates mean branch signals exist only
   // for elected branches, so scoped, current evidence is proof of election.
   const elections = options?.electedBranches ?? null;
   const evidenced = (branch: 'sales_checkout' | 'vsl' | 'either') =>
@@ -541,8 +514,8 @@ export function computePhaseProgress(
   // The elections view the required-set helper scores against: known
   // elections verbatim; in evidence mode, a synthesized view that is true
   // exactly when some upsell work is active (drives the shared wrap-up ids
-  // joining QC / Delivered, and nothing else).
-  const scoringElections: UpsellElections | null = elections ?? {
+  // joining Quality Check / Delivery, and nothing else).
+  const scoringElections: UpsellElections = elections ?? {
     salesCheckout: sharedActive,
     vsl: sharedActive,
   };
@@ -575,39 +548,18 @@ export function computePhaseProgress(
     return { label, status: 'not_started', doneIds: 0, totalIds: required.length, requiredIds: required };
   };
 
-  const phases: PhaseProgressStep[] = PHASE_LABELS.map((label) => {
-    if (label === 'Teleprompter') {
-      return {
+  const phases: PhaseProgressStep[] = [];
+  for (const label of PHASE_LABELS) {
+    // Item 19 — a branch step exists only for an active branch. A declined
+    // branch produces NO step: no phantom steps, and no main step waits on a
+    // phase that will never run.
+    if (!branchStepActive(label, elections, evidenced)) continue;
+    phases.push(
+      scoreStep(
         label,
-        status: hasTeleprompterDeliverable ? 'done' : 'not_started',
-        doneIds: hasTeleprompterDeliverable ? 1 : 0,
-        totalIds: 1,
-        requiredIds: [],
-      };
-    }
-    return scoreStep(
-      label,
-      requiredPhaseIdsForLabel(label, options?.excludedPhaseIds, scoringElections),
+        requiredPhaseIdsForLabel(label, options?.excludedPhaseIds, scoringElections),
+      ),
     );
-  });
-  void touchedLabels;
-
-  // Item 19 — branch steps, inserted after Images (the branch's design /
-  // render / HTML mass sits mid-pipeline), one per ACTIVE branch, in
-  // manifest order. A step's state is scored from the same seen/completed
-  // evidence as every main step: a phase the engine has not reached shows
-  // not_started — its true state, never a default success or a stuck amber.
-  const branchSteps: PhaseProgressStep[] = [];
-  if (salesActive) {
-    branchSteps.push(scoreStep('Sales Page', requiredPhaseIdsForLabel('Sales Page', options?.excludedPhaseIds, scoringElections)));
-    branchSteps.push(scoreStep('Checkout', requiredPhaseIdsForLabel('Checkout', options?.excludedPhaseIds, scoringElections)));
-  }
-  if (vslActive) {
-    branchSteps.push(scoreStep('VSL Page', requiredPhaseIdsForLabel('VSL Page', options?.excludedPhaseIds, scoringElections)));
-  }
-  if (branchSteps.length > 0) {
-    const imagesIdx = phases.findIndex((p) => p.label === 'Images');
-    phases.splice(imagesIdx + 1, 0, ...branchSteps);
   }
   return { phases, unmapped };
 }
@@ -676,11 +628,10 @@ export function phaseElapsedSeconds(
   const latestRun = selectCanonicalRunId(rows, authoritativeRunId);
   if (latestRun == null) return elapsed;
 
-  // Item 19 — P-U timing rows attribute to their branch step (or, for the
-  // shared wrap-up ids, to QC / Delivered) under the same activation rules
-  // as computePhaseProgress: known elections decide; otherwise the timing
-  // rows themselves are the evidence (a phase_exit row exists only for a
-  // phase the engine actually ran).
+  // Item 19 — branch timing rows attribute to their branch step under the
+  // same activation rules as computePhaseProgress: known elections decide;
+  // otherwise the timing rows themselves are the evidence (a phase_exit row
+  // exists only for a phase the engine actually ran).
   const canonicalRows = rows.filter((r) => r.run_id === latestRun);
   const rowBranch = (branch: 'sales_checkout' | 'vsl' | 'either') =>
     canonicalRows.some(
@@ -688,21 +639,35 @@ export function phaseElapsedSeconds(
     );
   const salesActive = electedBranches ? electedBranches.salesCheckout : rowBranch('sales_checkout');
   const vslActive = electedBranches ? electedBranches.vsl : rowBranch('vsl');
-  const sharedActive =
-    salesActive || vslActive || (electedBranches == null && rowBranch('either'));
 
   for (const r of canonicalRows) {
     if (typeof r.phase_id !== 'string' || r.phase_id.length === 0) continue;
     if (typeof r.duration_s !== 'number' || !Number.isFinite(r.duration_s)) continue;
-    let label: PhaseStepLabel | null = PHASE_TO_LABEL[r.phase_id] ?? null;
-    if (label == null) {
-      const branch = upsellBranchOfPhase(r.phase_id);
-      if (branch === 'sales_checkout' && salesActive) label = UPSELL_PHASE_TO_LABEL[r.phase_id];
-      else if (branch === 'vsl' && vslActive) label = UPSELL_PHASE_TO_LABEL[r.phase_id];
-      else if (branch === 'either' && sharedActive) label = UPSELL_SHARED_PHASE_TO_LABEL[r.phase_id];
-    }
+    const label = labelForPhaseId(r.phase_id);
     if (label == null) continue; // unmapped ids never advance a bar (same rule as computePhaseProgress)
+    const branch = branchStepOf(label);
+    if (branch != null) {
+      const needsVsl = BRANCH_STEPS[branch] === 'want_vsl_page';
+      if (needsVsl ? !vslActive : !salesActive) continue;
+    }
     elapsed[label] = (elapsed[label] ?? 0) + r.duration_s;
   }
   return elapsed;
+}
+
+/**
+ * PD-006 — the stepper's owner-action render. When the engine's park record
+ * names a phase in OWNER_ACTION_PHASES (the manifest's human phases), that
+ * step is the one waiting on the client, and the stepper replaces its label
+ * text with YOUR_TURN_TEXT and a distinct colour. Returns null — never a
+ * guess — when the park record names no owner-action phase.
+ */
+export const YOUR_TURN_TEXT = 'Your turn: pick style A, B or C';
+
+export function yourTurnStepLabel(
+  parkPhaseId: string | null | undefined,
+): PhaseStepLabel | null {
+  if (typeof parkPhaseId !== 'string' || parkPhaseId.length === 0) return null;
+  if (!(OWNER_ACTION_PHASES as readonly string[]).includes(parkPhaseId)) return null;
+  return labelForPhaseId(parkPhaseId);
 }
