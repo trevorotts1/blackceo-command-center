@@ -28,9 +28,11 @@ import { deliverInterviewOperation, drainInterviewOperations } from '@/lib/inter
  *
  * HARD CONSTRAINTS (see P0-1 doctrine):
  *   • This route NEVER hand-writes interviewComplete (only the script does).
- *   • This route NEVER sends a [WORKFORCE-RESUME] kick and NEVER talks to the
- *     OpenClaw gateway — it does not import getOpenClawClient at all. The kick is
- *     the script's job and fires only on interviewQc.status==pass.
+ *   • This route talks to the OpenClaw gateway through exactly ONE call —
+ *     kickWorkforceBuild(), after a pass or needs-review result, fired without
+ *     waiting on it. The kick is what starts the agent turn a script cannot
+ *     (BU-30); it does nothing unless the state itself says build-eligible, and
+ *     the 15-minute job repeats it if this one is lost.
  *   • It adds NO new trigger path: the only mutating call is the seam's
  *     updateInterviewState({ complete: true }) wrapper around the shell script.
  *   • Reads come from the canonical files, never a divergent DB copy.
@@ -49,6 +51,7 @@ import {
   type BuildState,
   type InterviewGateSnapshot,
 } from '@/lib/interview/seam';
+import { kickWorkforceBuild } from '@/lib/jobs/workforce-build-kick';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -352,6 +355,14 @@ function finalResponse(
   if ((outcome === 'pending' || outcome === 'unknown') && ctx.scriptError) {
     if (ctx.scriptError.exitCode === 2) outcome = 'needs-review';
     else if (ctx.scriptError.exitCode === 3) outcome = 'fail';
+  }
+
+  // BU-30: the interview is build-eligible. Start the agent turn a script cannot
+  // — fired WITHOUT waiting on it, so a slow or down gateway never delays this
+  // response. kickWorkforceBuild() decides from the state files whether there is
+  // anything to start, and the 15-minute job repeats it if this one is lost.
+  if (outcome === 'pass' || outcome === 'needs-review') {
+    void kickWorkforceBuild('interview-complete').catch(() => {});
   }
 
   switch (outcome) {
