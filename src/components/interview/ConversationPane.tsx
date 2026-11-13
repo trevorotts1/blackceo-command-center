@@ -113,81 +113,72 @@ export default function ConversationPane({
             }}
             className="space-y-4"
           >
-            {/* Question with serif display face for focal point */}
+            {/* Question speaks in the agent's bubble voice, never as a page heading */}
             <div>
-              <h2 className={ivcx(iv.question, 'text-2xl sm:text-3xl')}>
+              <div className={ivcx(iv.bubbleAgent, 'text-base whitespace-pre-line')}>
                 {currentQuestion}
-              </h2>
-            </div>
-
-            {/* Input Field + Send Button */}
-            <div className="flex flex-col gap-3">
-              <div className="flex items-end gap-2">
-                <textarea
-                  value={input}
-                  onChange={(e) => onInput(e.target.value)}
-                  onKeyDown={handleKeyDown}
-                  rows={3}
-                  placeholder="Type or speak your answer…"
-                  className={ivcx(
-                    iv.input,
-                    'flex-1 resize-none max-h-40 focus:outline-none',
-                  )}
-                  disabled={sending}
-                />
-                {/* Voice input: dictates into the SAME field, submitted via the
-                    same /api/interview/turn path as a typed answer. */}
-                <DictateAnswerButton
-                  value={input}
-                  onChange={onInput}
-                  disabled={sending}
-                  className="h-11 w-11 shrink-0"
-                />
-                <button
-                  type="button"
-                  onClick={onSend}
-                  disabled={!canSend}
-                  aria-label="Send answer"
-                  className={ivcx(
-                    iv.btn,
-                    iv.btnPrimary,
-                    'shrink-0 h-11 w-11 inline-flex items-center justify-center',
-                    !canSend && 'opacity-50 cursor-not-allowed',
-                  )}
-                >
-                  {sending ? (
-                    <Loader2 className="h-5 w-5 animate-spin" />
-                  ) : (
-                    <Send className="h-5 w-5" />
-                  )}
-                </button>
               </div>
-
-              {/* "I Don't Know" Button */}
-              <IDontKnowButton
-                onIDontKnow={onIDontKnow}
-                disabled={sending}
-                sessionId={sessionId}
-              />
             </div>
           </motion.div>
         )}
       </AnimatePresence>
 
-      {/* ── Waiting State ────────────────────────────────────────────────────── */}
-      {!currentQuestion && (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          transition={{ delay: 0.3 }}
-          className="text-center py-12"
-        >
-          <Loader2 className="h-5 w-5 text-slate-400 animate-spin mx-auto mb-2" />
+      {/* ── Answer input — always rendered, even before the first question ──── */}
+      <div className="flex flex-col gap-3">
+        {!currentQuestion && (
           <p className="text-sm text-slate-500">
-            Your interviewer is getting ready…
+            One moment — getting ready. You can type below whenever you like.
           </p>
-        </motion.div>
-      )}
+        )}
+
+        <div className="flex items-end gap-2">
+          <textarea
+            value={input}
+            onChange={(e) => onInput(e.target.value)}
+            onKeyDown={handleKeyDown}
+            rows={3}
+            placeholder="Type or speak your answer…"
+            className={ivcx(
+              iv.input,
+              'flex-1 resize-none max-h-40 focus:outline-none',
+            )}
+            disabled={sending}
+          />
+          {/* Voice input: dictates into the SAME field, submitted via the
+              same /api/interview/turn path as a typed answer. */}
+          <DictateAnswerButton
+            value={input}
+            onChange={onInput}
+            disabled={sending}
+            className="h-11 w-11 shrink-0"
+          />
+          <button
+            type="button"
+            onClick={onSend}
+            disabled={!canSend}
+            aria-label="Send answer"
+            className={ivcx(
+              iv.btn,
+              iv.btnPrimary,
+              'shrink-0 h-11 w-11 inline-flex items-center justify-center',
+              !canSend && 'opacity-50 cursor-not-allowed',
+            )}
+          >
+            {sending ? (
+              <Loader2 className="h-5 w-5 animate-spin" />
+            ) : (
+              <Send className="h-5 w-5" />
+            )}
+          </button>
+        </div>
+
+        {/* "I Don't Know" Button */}
+        <IDontKnowButton
+          onIDontKnow={onIDontKnow}
+          disabled={sending}
+          sessionId={sessionId}
+        />
+      </div>
 
       {/* Scroll anchor */}
       <div ref={scrollRef} className="h-0" />
