@@ -2,12 +2,13 @@ name: Update main convergence guard
 
 on:
   push:
-    branches: [main]
+    branches: [main, "batch/**"]
     paths:
       - "update.sh"
       - "scripts/update-preserve-per-box-config.test.sh"
       - ".github/workflows/update-main-convergence-guard.yml"
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     branches: [main]
     paths:
       - "update.sh"
@@ -15,8 +16,13 @@ on:
       - ".github/workflows/update-main-convergence-guard.yml"
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   update-main-convergence:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     name: Update preserves runtime state and converges to main
     runs-on: ubuntu-24.04
     steps:

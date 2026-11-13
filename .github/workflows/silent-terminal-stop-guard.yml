@@ -35,13 +35,19 @@ name: Silent terminal-stop guard
 
 on:
   push:
-    branches: [main]
+    branches: [main, "batch/**"]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     branches: [main]
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   static-guard:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     name: Static call-site guard (+ mutation proof)
     runs-on: ubuntu-24.04
     steps:
@@ -65,6 +71,7 @@ jobs:
         run: npx tsx scripts/guard-silent-terminal-stops.ts
 
   behavioral:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     name: Behavioral proof — one notice per permanent stop, never zero, never two
     runs-on: ubuntu-24.04
     needs: static-guard
