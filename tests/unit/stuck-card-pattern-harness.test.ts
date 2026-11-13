@@ -175,12 +175,15 @@ test('fixture-guard: this suite runs ONLY against a throwaway DATABASE_PATH (sta
 });
 
 // ============================================================================
-// S1 — stuck-in-Backlog: board-hygiene rule 5's 21-day stale-backlog nudge
-// (board-hygiene.ts:425-511) must fire. This net is already SHIPPED at HEAD —
-// C-01's job is to prove it fires, not to build it (C-02 is the day-0..21
-// dead-zone / Triad-stall closure, a separate unit).
+// S1 — stuck-in-Backlog: board-hygiene rule 5's 21-day stale-backlog net.
+// U-17 spec item 6 / acceptance case 6 settles what must fire: a card whose
+// requester could not be asked is recorded `board_hygiene_stale_unasked` and is
+// NEVER nudged or auto-archived — only a card WITH a requester gets the nudge.
+// This fixture carries no requester_chat_id, so the unasked record is the
+// correct outcome (the earlier assertion here expected a nudge; that was the
+// stale half, before U-17's rule 5 change landed).
 // ============================================================================
-test('S1 stuck-in-Backlog: a 22-day-old ungroomed card gets the stale-backlog nudge', async () => {
+test('S1 stuck-in-Backlog: a 22-day-old ungroomed card with no requester is recorded unasked, never nudged', async () => {
   const id = uuidv4();
   run(
     `INSERT INTO tasks (id, title, status, workspace_id, business_id, updated_at, last_progress_at)
@@ -190,10 +193,51 @@ test('S1 stuck-in-Backlog: a 22-day-old ungroomed card gets the stale-backlog nu
 
   const result = await runBoardHygiene();
 
-  assert.ok(result.staleNudgedIds.includes(id), 'S1: the 22-day backlog card must be nudged (board-hygiene rule 5)');
-  assert.equal(taskStatus(id), 'backlog', 'S1: nudging never changes status');
-  const nudgeEvt = eventsFor(id, 'board_hygiene_stale_nudged');
-  assert.equal(nudgeEvt.length, 1, 'S1: exactly one stale-backlog nudge event fires');
+  assert.equal(result.staleNudgedIds.includes(id), false, 'S1: nobody could be asked, so this card is not "nudged"');
+  assert.equal(taskStatus(id), 'backlog', 'S1: an unasked card never leaves backlog');
+  assert.equal(eventsFor(id, 'board_hygiene_stale_nudged').length, 0, 'S1: no nudge event — no send happened');
+  assert.equal(eventsFor(id, 'board_hygiene_stale_unasked').length, 1, 'S1: exactly one unasked record fires (rule 5)');
+});
+
+// S1b — the other half of rule 5: a card that DOES have a requester is still
+// nudged. Sends are enabled for this one call against a stub `openclaw` placed
+// first on PATH (the same technique stale-and-hygiene-fourth-pass.test.ts uses),
+// then restored so no later test in this file can reach a real chat.
+test('S1b stuck-in-Backlog: a 22-day-old card WITH a requester still gets the nudge', async () => {
+  const shimDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-stuck-card-harness-bin-'));
+  fs.writeFileSync(
+    path.join(shimDir, 'openclaw'),
+    `#!/bin/sh\necho "$@" >> ${JSON.stringify(path.join(shimDir, 'openclaw-sent.log'))}\n`,
+    { mode: 0o755 },
+  );
+  const realPath = process.env.PATH ?? '';
+  process.env.PATH = `${shimDir}:${realPath}`;
+  delete process.env.OWNER_NOTIFY_TELEGRAM_DISABLED;
+  process.env.OWNER_NOTIFY_ALLOW_SEND_IN_TEST = '1';
+
+  const id = uuidv4();
+  try {
+    run(
+      `INSERT INTO tasks (id, title, status, workspace_id, business_id, requester_chat_id, updated_at, last_progress_at)
+       VALUES (?, ?, 'backlog', NULL, NULL, ?, ?, ?)`,
+      [id, 'S1b fixture: confirm the venue for the offsite', '5550007777', daysAgo(22), daysAgo(22)],
+    );
+
+    const result = await runBoardHygiene();
+
+    assert.ok(result.staleNudgedIds.includes(id), 'S1b: a card with a requester must be nudged (rule 5)');
+    assert.equal(taskStatus(id), 'backlog', 'S1b: nudging never changes status');
+    assert.equal(eventsFor(id, 'board_hygiene_stale_nudged').length, 1, 'S1b: exactly one nudge event fires');
+    assert.equal(
+      eventsFor(id, 'board_hygiene_stale_unasked').length,
+      0,
+      'S1b: nothing is recorded unasked when the send really went out',
+    );
+  } finally {
+    process.env.PATH = realPath;
+    process.env.OWNER_NOTIFY_TELEGRAM_DISABLED = '1';
+    delete process.env.OWNER_NOTIFY_ALLOW_SEND_IN_TEST;
+  }
 });
 
 // ============================================================================
