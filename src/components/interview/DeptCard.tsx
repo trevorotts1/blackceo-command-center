@@ -181,20 +181,34 @@ export default function DeptCard({
       ) : standardReady ? (
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem' }}>
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.85rem', color: 'var(--iv-accent-strong)' }}>
-            <Check className="h-4 w-4" aria-hidden />
-            In your workforce
+            {decision === 'no' ? (
+              <X className="h-4 w-4" aria-hidden />
+            ) : (
+              <Check className="h-4 w-4" aria-hidden />
+            )}
+            {decision === 'no' ? 'Will be removed' : 'In your workforce'}
           </span>
           <div style={{ display: 'flex', gap: '0.5rem' }}>
             {onDecide && (
               <button
                 type="button"
-                onClick={() => onDecide('no')}
+                onClick={() => onDecide(decision === 'no' ? 'yes' : 'no')}
                 disabled={disabled || busy}
                 className={ivcx(iv.btnQuiet, busy && 'is-busy')}
-                aria-label={`Remove ${name} from your workforce`}
+                aria-label={
+                  decision === 'no'
+                    ? `Keep ${name} in your workforce`
+                    : `Remove ${name} from your workforce`
+                }
               >
-                {busy ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Trash2 className="h-4 w-4" aria-hidden />}
-                Remove
+                {busy ? (
+                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+                ) : decision === 'no' ? (
+                  <Check className="h-4 w-4" aria-hidden />
+                ) : (
+                  <Trash2 className="h-4 w-4" aria-hidden />
+                )}
+                {decision === 'no' ? 'Keep' : 'Remove'}
               </button>
             )}
           </div>
@@ -236,7 +250,9 @@ export default function DeptCard({
       {decision === 'no' && (
         <p style={{ margin: 0, fontSize: '0.8rem', color: 'var(--iv-ink-faint)', display: 'inline-flex', alignItems: 'center', gap: '0.4rem' }}>
           <X className="h-3.5 w-3.5" aria-hidden />
-          We won&apos;t build this — you can change your mind any time.
+          {standardReady
+            ? 'We will remove this team when your company is built. You can keep it instead.'
+            : "We won't build this — you can change your mind any time."}
         </p>
       )}
 
