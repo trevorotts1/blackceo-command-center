@@ -86,6 +86,27 @@ export function companyDiscoveryDir(): string {
 }
 
 /**
+ * The step gate's state directory. `interview_gate.py` writes its state file,
+ * answers log, known-facts file and handoff under `<workspace>/company-discovery/`,
+ * which is exactly `companyDiscoveryDir()` — same resolver, so the app, the gate
+ * and the shell scripts can never disagree about which folder is live.
+ */
+export function gateStateDir(): string {
+  return companyDiscoveryDir();
+}
+
+/**
+ * The registry the step gate actually reads: the copy INSTALLED with the skill
+ * on the box, at `<skill folder>/interview/questions.v2.json`.
+ *
+ * The vendored copy (`src/lib/interview-questions.v2.json`) exists ONLY for the
+ * browser bundle and for the byte-for-byte sync test — never for the gate.
+ */
+export function interviewRegistryPath(): string {
+  return path.join(resolveSkillScriptsDir(), '..', 'interview', 'questions.v2.json');
+}
+
+/**
  * Resolve the interview-answers transcript. Probes, in order:
  *   1. an explicit path recorded in build-state (interviewProgress.answersFilePath)
  *   2. <workspace>/company-discovery/workforce-interview-answers.md   (canonical)
@@ -149,6 +170,15 @@ export function resolveSkillScriptsDir(): string {
 /** Absolute path to update-interview-state.sh (the --phase / --complete writer). */
 export function updateInterviewStateScript(): string {
   return path.join(resolveSkillScriptsDir(), 'update-interview-state.sh');
+}
+
+/**
+ * Absolute path to interview_gate.py — the ONLY program that says which question
+ * is next, whether an answer is accepted, and whether the interview is complete.
+ * Every interview route reaches it through `runGate()` in seam.ts.
+ */
+export function interviewGateScript(): string {
+  return path.join(resolveSkillScriptsDir(), 'interview_gate.py');
 }
 
 /** Absolute path to record-dept-decision.sh (the provenanced decision writer). */
