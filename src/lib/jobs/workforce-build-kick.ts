@@ -188,9 +188,11 @@ export async function kickWorkforceBuild(
     }
     await client.sendMessage(sessionKey, KICK_MESSAGE);
   } catch (err) {
-    // A failed attempt records NO kickedAt and does not advance the count: the
-    // next run retries at once instead of the 20-minute window swallowing it. A
-    // stale kickedAt from a DIFFERENT build is dropped for the same reason.
+    // A failed attempt never advances the count, so the next run retries. The
+    // last SUCCESSFUL kick's time is kept for the SAME build (it is already
+    // older than the 20-minute window, or this run would have stopped before
+    // the send) and dropped for a different build, whose clock must not be
+    // started by another build's kick.
     const lastError = (err instanceof Error ? err.message : String(err)).slice(0, LAST_ERROR_MAX);
     const { kickedAt: staleKick, ...rest } = prior;
     writeJsonAtomic(kickPath, {
