@@ -12,12 +12,32 @@ export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 const headers = { 'cache-control': 'private, no-store' };
 
+/** Whole minutes since the interview completed; null when the stamp is absent or unparsable. */
+function waitingMinutesSince(value: unknown): number | null {
+  if (typeof value !== 'string' || !value) return null;
+  const started = Date.parse(value);
+  if (Number.isNaN(started)) return null;
+  return Math.max(0, Math.floor((Date.now() - started) / 60_000));
+}
+
+/** The keys the building page reads, defaulted so a sparse progress file never renders NaN/undefined. */
+function progressDefaults(progress: Record<string, unknown>): Record<string, unknown> {
+  return {
+    ...progress,
+    departments: Array.isArray(progress.departments) ? progress.departments : [],
+    documents_total: typeof progress.documents_total === 'number' ? progress.documents_total : 0,
+    documents_complete: typeof progress.documents_complete === 'number' ? progress.documents_complete : 0,
+    eta_minutes: typeof progress.eta_minutes === 'number' ? progress.eta_minutes : 0,
+    message: typeof progress.message === 'string' ? progress.message : '',
+  };
+}
+
 export async function GET(request: NextRequest) {
   try {
     const context = await resolveTenantContext(request);
     if (context.kind === 'client') return proxyTenantBoard(request, ['onboarding', 'build-status']);
     const state = readBuildState() as Record<string, unknown> | null;
-    if (!state) return NextResponse.json({ stage: 'idle', message: 'No active build has been recorded.', documents_total: 0, documents_complete: 0, departments: [], eta_minutes: 0 }, { headers });
+    if (!state) return NextResponse.json({ stage: 'idle', message: 'No active build has been recorded.', documents_total: 0, documents_complete: 0, departments: [], eta_minutes: 0, waiting_minutes: null }, { headers });
     const company = queryOne<{slug:string}>('SELECT slug FROM companies WHERE id = ?', [context.companyId]);
     const slug = typeof state.companySlug === 'string' ? state.companySlug : company?.slug;
     if (!slug || !/^[a-z0-9][a-z0-9_-]*$/.test(slug) || (company && company.slug !== slug) ||
@@ -28,6 +48,10 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: 'build_identity_missing', message: 'Your build is being double-checked. This page will update on its own. If it has not changed in an hour, let your support contact know.' }, { status: 409, headers });
     }
     const isComplete = verifiedBuild(state) && verifiedCommandCenter(state);
+    const waiting_minutes = waitingMinutesSince(state.interviewCompletedAt);
+    const companyRoot = typeof state.companyRoot === 'string' && path.isAbsolute(state.companyRoot)
+      ? state.companyRoot
+      : null;
     const roots = [
       process.env.OPENCLAW_COMPANY_ROOT,
       '/data/openclaw-master-files/zero-human-company',
@@ -35,9 +59,10 @@ export async function GET(request: NextRequest) {
       path.join(os.homedir(), '.openclaw', 'workspace', 'zero-human-company'),
       path.join(os.homedir(), 'clawd', 'zero-human-company'),
     ].filter((root): root is string => !!root);
-    const files = process.env.ZERO_HUMAN_COMPANY_DIR
-      ? [path.join(process.env.ZERO_HUMAN_COMPANY_DIR, 'build-progress.json')]
-      : roots.map(root => path.join(root, slug, 'build-progress.json'));
+    const files = (companyRoot ? [path.join(companyRoot, 'build-progress.json')] : []).concat(
+      process.env.ZERO_HUMAN_COMPANY_DIR
+        ? [path.join(process.env.ZERO_HUMAN_COMPANY_DIR, 'build-progress.json')]
+        : roots.map(root => path.join(root, slug, 'build-progress.json')));
     for (const file of files) {
       const raw = safeReadFileUtf8(file);
       if (!raw) continue;
@@ -45,11 +70,12 @@ export async function GET(request: NextRequest) {
       try { progress = JSON.parse(raw); } catch { continue; }
       if (!progress || progress.company_slug !== slug || progress.build_id !== state.buildId) continue;
       const complete = isComplete;
-      return NextResponse.json({ ...progress,
+      return NextResponse.json({ ...progressDefaults(progress),
         stage: progress.stage === 'complete' && !complete ? 'validating' : progress.stage,
         company_id: context.companyId, company_slug: slug, build_id: state.buildId,
         completion_verified: complete,
         completion_verification: state.completionVerification,
+        waiting_minutes,
       }, { headers });
     }
     return NextResponse.json({ stage: isComplete ? 'complete' : 'waiting',
@@ -57,6 +83,7 @@ export async function GET(request: NextRequest) {
       company_id: context.companyId, company_slug: slug, build_id: state.buildId,
       completion_verified: isComplete, completion_verification: state.completionVerification,
       documents_total: 0, documents_complete: 0, departments: [], eta_minutes: 0,
+      waiting_minutes,
     }, { headers });
   } catch (error) {
     return NextResponse.json({ error: error instanceof TenantAccessError ? 'forbidden' : 'build_status_unavailable',
