@@ -104,7 +104,7 @@ test('ACK: a task stalled in backlog past the grace window gets the HONEST queue
     deliverableFor: noDeliverable,
   });
   assert.equal(plans.length, 1, 'a stalled-backlog task must still be acknowledged');
-  assert.match(plans[0].message, /queued for grooming/i);
+  assert.match(plans[0].message, /being prepared/i);
   assert.equal(plans[0].stamps[0].guardColumn, 'ack_sent_at');
   assert.equal(plans[0].stamps[0].eventType, 'trust_ack');
 });
@@ -123,7 +123,7 @@ test('P2-01 step 3: the backlog-parked ACK uses the SAME honest "being prepared"
     plans[0].message.includes(BACKLOG_COLUMN_SUBTITLE),
     `expected the ACK to include the shared BACKLOG_COLUMN_SUBTITLE copy, got: ${plans[0].message}`,
   );
-  assert.match(plans[0].message, /queued for grooming/i, 'still the pre-existing honest phrase');
+  assert.match(plans[0].message, /being prepared/i, 'U-15: the pre-existing honest phrase, without the jargon');
 });
 
 test('ACK: a fresh backlog task inside the grace window is NOT acked yet (avoids premature noise)', () => {
@@ -135,13 +135,15 @@ test('ACK: a fresh backlog task inside the grace window is NOT acked yet (avoids
   assert.equal(plans.length, 0, 'a fresh backlog task must wait for the grace window');
 });
 
-test('ACK: a task advanced past backlog gets the assigned-to-department ack', () => {
+test('ACK: a task advanced past backlog gets the handed-to-team ack', () => {
   const plans = engine.planSends(
     [mkTask({ id: 't3', status: 'assigned', department: 'sales', assigned_agent_name: 'Candace' })],
     { now: DAYTIME, deliverableFor: noDeliverable },
   );
   assert.equal(plans.length, 1);
-  assert.match(plans[0].message, /assigned to the sales department/i);
+  // U-15 (CC-051): a department code reads as plain words, and the word
+  // "department" is gone from every client-facing message.
+  assert.match(plans[0].message, /handed to the sales team/i);
   assert.match(plans[0].message, /Candace/);
 });
 
@@ -197,7 +199,10 @@ test('DONE with a registered deliverable reports the real location', () => {
     },
   );
   assert.equal(plans.length, 1);
-  assert.match(plans[0].message, /Find it here: \/Users\/box\/Downloads\/one-pager\.pdf/);
+  // U-15 (CC-051/CC-014): a file deliverable names the FILE, never the server
+  // path it lives on; the operator record still keeps the full path.
+  assert.match(plans[0].message, /one-pager\.pdf/);
+  assert.doesNotMatch(plans[0].message, /\/Users\//, 'no server path in a client message');
   assert.equal(plans[0].stamps[0].extraSets.result_location, '/Users/box/Downloads/one-pager.pdf');
   assert.equal(plans[0].doneWithoutDeliverable.length, 0);
 });
@@ -275,7 +280,8 @@ test('DONE on a presentations task WITH a registered process_certificate_sha sen
   assert.equal(plans.length, 1);
   assert.equal(plans[0].heldForMissingPostflight.length, 0, 'a registered certificate must not be held');
   assert.equal(plans[0].stamps[0].guardColumn, 'completion_sent_at');
-  assert.match(plans[0].message, /Find it here: \/tmp\/deck\.pptx/);
+  assert.match(plans[0].message, /deck\.pptx/);
+  assert.doesNotMatch(plans[0].message, /\/tmp\//, 'no server path in a client message');
 });
 
 test('DONE on a non-presentations task is never gated by the certificate check', () => {
