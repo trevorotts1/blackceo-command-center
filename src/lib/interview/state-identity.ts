@@ -32,6 +32,7 @@
  */
 
 import fs from 'node:fs';
+import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { buildStatePath, resolveSkillScriptsDir } from './paths';
 import type { BuildState } from './seam';
@@ -105,10 +106,21 @@ export function stampStateIdentity(context: StateIdentityContext): boolean {
   }
 
   const scriptsDir = resolveSkillScriptsDir();
+  let scriptsDirPresent = false;
   try {
-    if (!fs.statSync(scriptsDir).isDirectory()) return false;
+    scriptsDirPresent = fs.statSync(scriptsDir).isDirectory();
   } catch {
-    return false;
+    scriptsDirPresent = false;
+  }
+  // The unit's own contract (state-identity.test.ts): a missing scripts
+  // folder is a hard false, never a bare file write. Only a PRESENT folder
+  // that merely lacks the workforce_state module falls back to tmp+rename.
+  if (!scriptsDirPresent) return false;
+  let useStateLock = true;
+  try {
+    if (!fs.statSync(path.join(scriptsDir, 'workforce_state.py')).isFile()) useStateLock = false;
+  } catch {
+    useStateLock = false;
   }
 
   const stamps = JSON.stringify({
@@ -117,12 +129,37 @@ export function stampStateIdentity(context: StateIdentityContext): boolean {
     tenantId: context.tenantId,
   });
 
+  // The Skill-23 state module (`workforce_state.update`, holding the write
+  // lock) is the primary writer. Fixture / minimal script trees that predate
+  // or omit that module fall back to the atomic tmp+rename this function used
+  // before BU-107 — same stamps, same preservation of every other key, same
+  // mode, never a foreign-stamp overwrite (the mismatched refusal above).
+  if (useStateLock) {
+    try {
+      execFileSync('python3', ['-c', STAMP_PROGRAM, scriptsDir, target, stamps], {
+        timeout: STAMP_TIMEOUT_MS,
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  const tmp = `${target}.identity-${process.pid}.tmp`;
   try {
-    execFileSync('python3', ['-c', STAMP_PROGRAM, scriptsDir, target, stamps], {
-      timeout: STAMP_TIMEOUT_MS,
-    });
+    const mode = fs.statSync(target).mode & 0o777;
+    const state = JSON.parse(fs.readFileSync(target, 'utf-8')) as BuildState;
+    if (classifyStateIdentity(state, context) === 'mismatched') return false;
+    for (const key of STAMPS) (state as Record<string, unknown>)[key] = context[key];
+    fs.writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`, { mode });
+    fs.renameSync(tmp, target);
     return true;
   } catch {
+    try {
+      fs.rmSync(tmp, { force: true });
+    } catch {
+      // Best-effort: never mask the stamp result.
+    }
     return false;
   }
 }
