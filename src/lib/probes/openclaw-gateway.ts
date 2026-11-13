@@ -148,9 +148,10 @@ export async function probeOpenClawGateway(): Promise<ProbeResult> {
 
         // Port is reachable but none of our identity probes matched — port squatter
         if (wsPortResult.reachable || healthResult.reachable || statusResult.reachable) {
+          const seen = [wsPortResult, healthResult, statusResult].find((r) => r.reachable);
           return offline(
             start,
-            `port is reachable (HTTP ${wsPortResult.status}) but no OpenClaw identity signal found — possible port squatter on ${GATEWAY_URL}`
+            `port is reachable (HTTP ${seen ? seen.status : 'unknown'}) but no OpenClaw identity signal found — possible port squatter on ${GATEWAY_URL}`
           );
         }
 
