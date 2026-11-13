@@ -392,7 +392,7 @@ export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
         </Link>
         <span className="hidden md:inline text-gray-500 text-sm font-mono">
           {currentTime ? (
-            format(currentTime, 'HH:mm:ss')
+            format(currentTime, 'h:mm a')
           ) : (
             <span className="inline-block w-20 h-4 bg-gray-100 rounded animate-pulse" aria-hidden />
           )}
@@ -402,8 +402,10 @@ export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
          *  on phones — that hiding is retired, not carried forward). Source
          *  of truth is U46's criticality-tiered `overall` from
          *  /api/system/status, not the retired per-page `isOnline` flag.
-         *  Operator variant: clickable, opens SystemStatusDrawer. */}
-        <HealthIndicator viewerRole="operator" />
+         *  U-06: the client variant — the header is on every main page, so it
+         *  must speak plain English. The operator detail drawer now lives
+         *  only in the Operator Console health page (/operator/health). */}
+        <HealthIndicator viewerRole="client" />
         {/* selectedClient is still read elsewhere in this header (the client
          *  picker below); nothing in this health affordance is scoped to it —
          *  system health is box-wide, not per-selected-client. */}
@@ -508,7 +510,7 @@ export function Header({ workspace, onMenuClick, sidebarOpen }: HeaderProps) {
                     >
                       {modelOptions.map((m) => (
                         <option key={m.value} value={m.value}>
-                          {m.value ? `${m.label} (${m.value})` : m.label}
+                          {m.label}
                         </option>
                       ))}
                     </select>
