@@ -13,11 +13,15 @@ interface BuildProgress {
   message: string;
   documents_total: number;
   documents_complete: number;
-  departments: Array<{ name: string; roles_total: number; roles_complete: number; status: string }>;
+  departments: Array<{ name?: string; slug?: string; roles_total: number; roles_complete?: number; status: string }>;
   eta_minutes: number;
   started_at?: string;
   completed_at?: string;
+  waiting_minutes?: number | null;
 }
+
+/** Past this many whole minutes a not-yet-verified build stops animating and says so plainly. */
+const LONG_WAIT_MINUTES = 120;
 
 const STAGE_LABELS: Record<BuildProgress['stage'], string> = {
   idle:        'Preparing to build...',
@@ -48,6 +52,11 @@ function stageLabel(progress: BuildProgress): string {
     }
   }
   return STAGE_LABELS[progress.stage] || 'Building your workforce...';
+}
+
+/** A long, unmoving wait is stated once, in place of the stage label and the message. */
+function isLongWait(progress: BuildProgress, isComplete: boolean): boolean {
+  return !isComplete && typeof progress.waiting_minutes === 'number' && progress.waiting_minutes >= LONG_WAIT_MINUTES;
 }
 
 export default function OnboardingBuildingPage() {
@@ -102,6 +111,7 @@ export default function OnboardingBuildingPage() {
     : 0;
 
   const isComplete = progress.stage === 'complete' && progress.completion_verified === true;
+  const longWait = isLongWait(progress, isComplete);
 
   return (
     <div className="iv-root p-8">
@@ -114,15 +124,26 @@ export default function OnboardingBuildingPage() {
           <div className="inline-flex items-center justify-center h-16 w-16 rounded-2xl bg-brand-50 mb-4">
             {isComplete
               ? <CheckCircle2 className="h-9 w-9 text-emerald-600" />
-              : <Building2 className="h-9 w-9 text-brand-600 animate-pulse" />}
+              : longWait
+                ? <Building2 className="h-9 w-9 text-brand-600" />
+                : <Building2 className="h-9 w-9 text-brand-600 animate-pulse" />}
           </div>
           <h1 className="text-3xl font-bold text-gray-900 mb-2">
-            {isComplete ? 'Your AI workforce is ready' : 'Building your AI workforce...'}
+            {isComplete
+              ? 'Your AI workforce is ready'
+              : longWait ? 'Your AI workforce is still being prepared' : 'Building your AI workforce...'}
           </h1>
-          <p className="text-gray-600">{stageLabel(progress)}</p>
-          {progress.message && <p className="mt-2 text-sm text-gray-600">{progress.message}</p>}
+          {longWait ? (
+            <p className="text-gray-600">This is taking longer than usual. Our team is on it, and we will message you when it is ready. You can close this page.</p>
+          ) : (
+            <>
+              <p className="text-gray-600">{stageLabel(progress)}</p>
+              {progress.message && <p className="mt-2 text-sm text-gray-600">{progress.message}</p>}
+            </>
+          )}
         </div>
 
+        {!(longWait && progress.documents_total === 0) && (
         <div className="bg-white rounded-2xl shadow-sm border p-6 mb-6">
           <div className="flex items-center justify-between mb-2">
             <span className="text-sm font-medium text-gray-700">Overall progress</span>
@@ -143,6 +164,7 @@ export default function OnboardingBuildingPage() {
             )}
           </div>
         </div>
+        )}
 
         {progress.departments.length > 0 && (
           <div className="bg-white rounded-2xl shadow-sm border p-6 mb-6">
@@ -150,13 +172,15 @@ export default function OnboardingBuildingPage() {
               Departments
             </h2>
             <div className="space-y-3">
-              {progress.departments.map(dept => {
+              {progress.departments.map((dept, index) => {
+                const name = dept.name || dept.slug || '';
+                const rolesComplete = dept.roles_complete ?? 0;
                 const deptPct = dept.roles_total > 0
-                  ? Math.round((dept.roles_complete / dept.roles_total) * 100)
+                  ? Math.round((rolesComplete / dept.roles_total) * 100)
                   : 0;
                 return (
-                  <div key={dept.name} className="flex items-center gap-4">
-                    <div className="w-40 text-sm text-gray-700 capitalize">{dept.name}</div>
+                  <div key={`${name}-${index}`} className="flex items-center gap-4">
+                    <div className="w-40 text-sm text-gray-700 capitalize">{name}</div>
                     <div className="flex-1 h-2 bg-gray-100 rounded-full overflow-hidden">
                       <div
                         className={`h-full rounded-full transition-all duration-500 ${
@@ -168,7 +192,7 @@ export default function OnboardingBuildingPage() {
                       />
                     </div>
                     <div className="w-20 text-right text-xs text-gray-500">
-                      {dept.roles_complete}/{dept.roles_total} roles
+                      {rolesComplete}/{dept.roles_total} roles
                     </div>
                   </div>
                 );
