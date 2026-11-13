@@ -18,7 +18,16 @@
  *     is what the caller renders.
  *   * Every refusal is surfaced with its reason: unbound run, unavailable
  *     binding, no engine state, terminal run, not parked, launcher not
- *     found, and the launcher's own refusal output verbatim.
+ *     found, a different engine version than the one the run recorded, and
+ *     the launcher's own refusal output verbatim.
+ *
+ *   * Which engine: the four-candidate order in the launcher module, with
+ *     the run's own recorded `engine_origin.package_dir` as candidate two.
+ *     A chosen engine whose content digest differs from the digest the run
+ *     recorded is refused — an operator repair receipt is tied to the hash
+ *     of the dispatcher file that issued it, so the older copy cannot
+ *     resume the newer run. The dispatch outcome names the folder and the
+ *     interpreter that were used.
  *
  * SERVER-ONLY. Never import from a 'use client' module.
  */
@@ -29,8 +38,11 @@ import {
   type TaskEngineView,
 } from '@/lib/presentation-engine-state';
 import {
+  enginePackageDigest,
   launchEngineResume,
-  resolveEngineScriptsDir,
+  readEngineOrigin,
+  resolveEngineScriptsDirDetail,
+  resolvePipelineInterpreter,
 } from '@/lib/presentation-engine-launcher';
 
 export type ResumeOutcome =
@@ -38,11 +50,17 @@ export type ResumeOutcome =
       kind: 'resumed';
       detail: string;
       view: TaskEngineView;
+      /** The engine directory the dispatch ran from. */
+      scriptsDir: string;
+      /** The interpreter the dispatch ran under. */
+      interpreter: string;
     }
   | {
       kind: 'dispatched_pending';
       detail: string;
       view: TaskEngineView;
+      scriptsDir: string;
+      interpreter: string;
     }
   | {
       kind: 'refused';
@@ -53,6 +71,7 @@ export type ResumeOutcome =
         | 'engine_terminal'
         | 'not_parked'
         | 'engine_launcher_not_found'
+        | 'engine_version_mismatch'
         | 'launcher_refused';
       refusal: string;
       view: TaskEngineView | null;
@@ -126,16 +145,38 @@ export async function resumeParkedEngineRun(
     };
   }
 
-  const scriptsDir = resolveEngineScriptsDir();
-  if (!scriptsDir) {
+  // Which engine and which interpreter. The run's own state names the
+  // engine that STARTED it; an operator repair receipt is tied to that
+  // engine's content, so a different one cannot resume it.
+  const origin = readEngineOrigin(view.runDir);
+  const engine = resolveEngineScriptsDirDetail(process.env, process.cwd(), {
+    recordedPackageDir: origin?.packageDir ?? null,
+  });
+  if (!engine) {
     return {
       kind: 'refused',
       code: 'engine_launcher_not_found',
       refusal:
-        'The presentation engine launcher was not found on this box (checked PRESENTATION_ENGINE_SCRIPTS_DIR and the Command Center directory for presentation_job/launcher.py); the resume cannot be dispatched.',
+        'The presentation engine launcher was not found on this box (checked PRESENTATION_ENGINE_SCRIPTS_DIR, the scripts folder recorded in the run state, the department scripts folder under the OpenClaw workspace, and the Command Center directory for presentation_job/launcher.py); the resume cannot be dispatched.',
       view,
     };
   }
+
+  const recordedDigest = origin?.packageDigest ?? null;
+  const chosenDigest = enginePackageDigest(engine.dir);
+  if (recordedDigest && chosenDigest && recordedDigest !== chosenDigest) {
+    return {
+      kind: 'refused',
+      code: 'engine_version_mismatch',
+      refusal:
+        'This build was started with a different engine version. Update this box, then press Resume again.',
+      view,
+    };
+  }
+
+  const scriptsDir = engine.dir;
+  const interpreter = resolvePipelineInterpreter(process.env).path;
+  const dispatchLine = ` The resume ran the engine at ${scriptsDir} under ${interpreter}.`;
 
   const before = {
     blockedAt: view.state.blocked?.at ?? null,
@@ -143,7 +184,7 @@ export async function resumeParkedEngineRun(
     terminal: view.state.terminal,
   };
 
-  const launch = await launchEngineResume(view.runDir, scriptsDir);
+  const launch = await launchEngineResume(view.runDir, scriptsDir, interpreter);
   if (launch.exitCode !== 0) {
     return {
       kind: 'refused',
@@ -173,10 +214,14 @@ export async function resumeParkedEngineRun(
       if (consumed) {
         return {
           kind: 'resumed',
-          detail: engineStateIsParked(fresh.state)
-            ? 'The engine consumed the resume and re-parked; the card shows the new park from the engine state.'
-            : 'The engine consumed the resume; the park is cleared in the engine state.',
+          detail:
+            (engineStateIsParked(fresh.state)
+              ? 'The engine consumed the resume and re-parked; the card shows the new park from the engine state.'
+              : 'The engine consumed the resume; the park is cleared in the engine state.') +
+            dispatchLine,
           view: fresh,
+          scriptsDir,
+          interpreter,
         };
       }
     }
@@ -185,8 +230,11 @@ export async function resumeParkedEngineRun(
         kind: 'dispatched_pending',
         detail:
           'The engine launcher accepted the resume and spawned the engine, but the run state still shows the park. ' +
-          'Nothing was changed on the board; the card updates from the engine state as it lands.',
+          'Nothing was changed on the board; the card updates from the engine state as it lands.' +
+          dispatchLine,
         view: fresh,
+        scriptsDir,
+        interpreter,
       };
     }
     await sleep(SETTLE_POLL_MS);
