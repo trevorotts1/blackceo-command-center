@@ -2,7 +2,7 @@ name: Update main convergence guard
 
 on:
   push:
-    branches: [main, "batch/**"]
+    branches: [main]
     paths:
       - "update.sh"
       - "scripts/update-preserve-per-box-config.test.sh"
