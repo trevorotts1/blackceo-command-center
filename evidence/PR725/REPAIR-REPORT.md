@@ -350,3 +350,43 @@ $ git ls-remote --heads origin pd/fl10-phase-table--post     # PRE, before any p
 
 No rebase, no force-push, no push to `main`; fast-forward only. No workflow file,
 check, or test was weakened, skipped or deleted.
+
+### 8.8 Green re-run at the pushed head, and the one load-flake it exposed
+
+After the report commit, both steps were re-run at the exact pushed head
+`82cd16ee94956fbf7d31e1c419c17649de23af3b` (a change to this markdown file only):
+
+```
+npm run test:unit      -> tests 4755  pass 4749  fail 1  skipped 5   EXIT=1
+npm run test:component -> Test Files 50 passed (50) / Tests 406 passed (406)  EXIT=0
+```
+
+The single failure was **not** PRES-037 and is not in any file this PR changes. It is the
+machine-relative timing budget in `tests/unit/council-gauntlet-pdf.test.ts:186`:
+
+```ts
+  assert.ok(
+    elapsedMs <= budgetMs,
+    `long render took ${elapsedMs.toFixed(0)}ms for ${pages} pages; budget ${budgetMs}ms; machine-relative (loaded 2-CPU VM)`,
+  );
+```
+
+The test asserts its own note that the budget is machine-relative. Run on its own, the
+same file at the same head is green, and the render finishes in under a tenth of the budget:
+
+```
+$ node --import tsx ... --test tests/unit/council-gauntlet-pdf.test.ts
+✔ fixtures are byte-identical to the CWE-038 manifest (drift check) (8.58075ms)
+✔ capability probe finds the Chromium renderer on this machine (0.435375ms)
+✔ golden report renders to a real PDF agreeing with its siblings (T106/T105) (2543.055083ms)
+✔ long report: page numbers on every page, evidence header repeats (T106) (964.551458ms)
+ℹ tests 6  ℹ pass 6  ℹ fail 0        EXIT=0
+```
+
+964 ms against a 10 000 ms budget, alone; over budget only while 4 755 tests run in
+parallel on the same machine. Two full-suite runs over the same product code — one at
+`76e1bb2e`, one at `82cd16ee`, differing only in this file — produced `fail 0` and
+`fail 1` respectively. That is a stochastic, load-dependent result, so it is the harness
+that varies, not the branch. CI runs this job on its own 2-CPU runner with Chromium and
+poppler provisioned, so the condition this local box hits does not exist there. Nothing in
+this test, the check, or the workflow was touched.
