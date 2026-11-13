@@ -176,6 +176,21 @@ export function deliverTaskReport(
     return { delivered: notifyOwner(message), destination };
   }
 
+  // Single sender (CC-050). For a task that has a requester address, the trust
+  // engine (src/lib/jobs/trust-engine.ts) sends the acknowledgement, the
+  // "in progress" message and the "done" message, each guarded by a stamp. This
+  // funnel was sending the same reports a second time. It stands down for those
+  // three kinds unless the trust engine is switched off on this box.
+  const trustEngineOff =
+    process.env.DISABLE_TRUST_ENGINE === '1' || process.env.DISABLE_TRUST_ENGINE === 'true';
+  if (!trustEngineOff && (opts.kind === 'assigned' || opts.kind === 'started' || opts.kind === 'done')) {
+    return {
+      delivered: false,
+      destination,
+      skipped: 'the trust engine is the single sender of this report to the requester',
+    };
+  }
+
   if (opts.kind === 'done' && row?.completion_sent_at) {
     return {
       delivered: false,
