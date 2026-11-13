@@ -85,7 +85,7 @@ interface CeoTaskRow {
   qc_reroute_attempts: number | null;
 }
 
-export async function runCeoDelegationSweep(): Promise<void> {
+export async function runCeoDelegationSweep(): Promise<{ skippedReason?: string }> {
   // SWEEP-01: PAUSED BY DEFAULT. Opt in per box with CEO_DELEGATION_SWEEP_ENABLED=1.
   // Previously this only skipped on an explicit =0, so it ran at default even
   // though the CHANGELOG claimed it stayed paused.
@@ -93,7 +93,7 @@ export async function runCeoDelegationSweep(): Promise<void> {
     process.env.CEO_DELEGATION_SWEEP_ENABLED !== '1' &&
     process.env.CEO_DELEGATION_SWEEP_ENABLED !== 'true'
   ) {
-    return;
+    return { skippedReason: 'ceo-delegation paused (opt in with CEO_DELEGATION_SWEEP_ENABLED=1)' };
   }
 
   // W8.2 anti-furnace: never re-select a task that has hit the dispatch attempt
@@ -186,7 +186,7 @@ export async function runCeoDelegationSweep(): Promise<void> {
     }
   }
 
-  if (allTasks.length === 0) return;
+  if (allTasks.length === 0) return {};
 
   for (const task of allTasks) {
     try {
@@ -227,7 +227,7 @@ export async function runCeoDelegationSweep(): Promise<void> {
         continue;
       }
       if (routing.score < CONFIDENCE_THRESHOLD) continue;
-      if (!isQcFail && /ceo|com/i.test(routing.department)) continue; // CEO/COM — leave for human
+      if (!isQcFail && /^(dept-)?(ceo|com)$/i.test(routing.department.trim())) continue; // CEO/COM — leave for human
 
       const now = new Date().toISOString();
       // G8-KANBAN fix: assign agent + department but LEAVE status at backlog.
@@ -279,4 +279,5 @@ export async function runCeoDelegationSweep(): Promise<void> {
       console.warn(`[ceo-delegation] Sweep failed for task ${task.id}:`, (err as Error).message);
     }
   }
+  return {};
 }
