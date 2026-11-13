@@ -101,7 +101,7 @@ describe('FIX 53 — stage timings linked to tasks and shown', () => {
     expect(row!.error_class).toBe('x');
   });
 
-  it('GET phases shows non-null elapsed_s for the mapped labels (Script, Prompts)', async () => {
+  it('GET phases shows non-null elapsed_s for the mapped labels (Script, Design)', async () => {
     // Task row must exist and be company-scope-visible (workspace_id NULL).
     const db = getDb();
     db.prepare(
@@ -117,11 +117,11 @@ describe('FIX 53 — stage timings linked to tasks and shown', () => {
     const byLabel = new Map<string, { elapsed_s: number | null }>(
       json.phases.map((p: { label: string; elapsed_s: number | null }) => [p.label, p]),
     );
-    // P4-COPY -> Script (12.4s), PF-DESIGN -> Prompts (7.1s)
+    // P4-COPY -> Script (12.4s), PF-DESIGN -> Design (7.1s)
     expect(byLabel.get('Script')!.elapsed_s).toBeCloseTo(12.4, 5);
-    expect(byLabel.get('Prompts')!.elapsed_s).toBeCloseTo(7.1, 5);
+    expect(byLabel.get('Design')!.elapsed_s).toBeCloseTo(7.1, 5);
     // Labels with no timing row stay null.
-    expect(byLabel.get('Intake')!.elapsed_s).toBeNull();
+    expect(byLabel.get('Getting Started')!.elapsed_s).toBeNull();
   });
 
   it('phaseElapsedSeconds: latest-run rows only; unmapped ids skipped; sums within a run', () => {
