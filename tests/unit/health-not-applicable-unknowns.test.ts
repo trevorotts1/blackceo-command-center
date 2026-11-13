@@ -15,7 +15,7 @@ test('unconfigured, empty-memory and provider unknowns are not applicable; real 
   assert.equal(isNotApplicable(row('telegram', 'auxiliary', 'degraded', { configured: false }) as never), false);
 });
 
-test('client readiness: only not-applicable unknowns => healthy; a real unknown still degrades', () => {
+test('client readiness: advisory rows never degrade; a counted unknown still does', () => {
   const health = { status: 'ok', embeddings: { status: 'ok', degraded: false } };
   const base = [
     row('database', 'critical', 'live'),
@@ -26,5 +26,6 @@ test('client readiness: only not-applicable unknowns => healthy; a real unknown 
   ];
   const status = (components: object[]) => ({ overall: 'live', probedAt: at, components });
   assert.equal(parseReadiness(status(base), health).tier, 'healthy');
-  assert.equal(parseReadiness(status([...base, row('cli', 'auxiliary', 'unknown')]), health).tier, 'degraded');
+  assert.equal(parseReadiness(status([...base, row('cli', 'auxiliary', 'unknown')]), health).tier, 'healthy');
+  assert.equal(parseReadiness(status([...base, row('jobs', 'auxiliary', 'unknown')]), health).tier, 'degraded');
 });
