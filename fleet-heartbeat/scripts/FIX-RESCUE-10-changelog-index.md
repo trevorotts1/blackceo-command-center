@@ -41,7 +41,7 @@ legacy scanner (proven — see Verification).
 Paths are resolved from env (`RII_CHANGE_LOG` / `RII_INDEX`), defaulting to
 `${CHANGE_LOG}` and a sibling `incidents.tsv` — no operator paths are baked in.
 
-## Live wiring (applied to the deploy — `change-log.md`/`remediate.sh`/`heartbeat.sh` are runtime-only, not tracked in this public repo)
+## Live wiring (applied on the operator machine; `remediate.sh` and `heartbeat.sh` in this repository are reference copies, and `change-log.md` is not tracked)
 
 ### `remediate.sh`
 
