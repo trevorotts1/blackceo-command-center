@@ -68,10 +68,13 @@ function deriveInterviewComplete(): boolean {
   if (!bs) return false;
   const status = interviewStatus(bs);
   // BUILT keeps this lock's own stricter receipt check (buildId match,
-  // version 1, no unmet requirements). The reader's BUILT is the contract's
-  // plain status word; opening a dashboard on a half-verified receipt would
-  // LOOSEN the shell lock, which this unit must not do.
-  if (status === 'BUILT') return verifiedBuild(bs);
+  // version 1, no unmet requirements) — EXCEPT when the interview itself is
+  // complete. Completion is terminal (interface contract S-1), and the Shell
+  // lock row of 2.3 opens on COMPLETE, BUILDING, BUILT, PLACEHOLDER and
+  // DECLARED, so a completed interview whose build receipt has drifted must
+  // not be locked out of its own dashboard. An interview that was never
+  // completed still needs the receipt, so a half-verified one cannot open it.
+  if (status === 'BUILT') return bs.interviewComplete === true || verifiedBuild(bs);
   return opensShell(status);
 }
 
