@@ -31,48 +31,49 @@ import {
   PHASE_TO_LABEL,
 } from '../../src/lib/presentation-phases';
 
-// All five Script ids: P4-COPY, P-SP-STRUCTURE, P-SP-P3-HYGIENE, P1Q-COPY-QC, P9-SPEECH.
+// All nine Script ids of manifest version 75: P0B-PRIORITY, P3-ARC, P4-COPY,
+// P-SP-STRUCTURE, P-SP-P3-HYGIENE, P1Q-COPY-QC, P9-SPEECH, P8.4-FISH-TAG, P9.1-SPEECH-PDF.
 const SCRIPT_IDS = requiredPhaseIdsForLabel('Script');
 const doneActivity = (phase_id: string, extra?: Record<string, unknown>) => ({
   activity_type: 'phase_completed',
   metadata: { phase_id, ...extra },
 });
 
-describe('PRES-020 — one of five done is partial, all required done is done', () => {
-  it('P4-COPY alone leaves Script in_progress with units 1/5', () => {
+describe('PRES-020 — one of nine done is partial, all required done is done', () => {
+  it('P4-COPY alone leaves Script in_progress with units 1/9', () => {
     const r = computePhaseProgress([doneActivity('P4-COPY')], []);
     const script = r.phases.find((p) => p.label === 'Script')!;
-    expect(SCRIPT_IDS.length).toBe(5);
+    expect(SCRIPT_IDS.length).toBe(9);
     expect(script.status).toBe('in_progress');
     expect(script.doneIds).toBe(1);
-    expect(script.totalIds).toBe(5);
+    expect(script.totalIds).toBe(9);
   });
 
-  it('all five Script ids done flips Script done with units 5/5', () => {
+  it('all nine Script ids done flips Script done with units 9/9', () => {
     const r = computePhaseProgress(SCRIPT_IDS.map((id) => doneActivity(id)), []);
     const script = r.phases.find((p) => p.label === 'Script')!;
     expect(script.status).toBe('done');
-    expect(script.doneIds).toBe(5);
-    expect(script.totalIds).toBe(5);
+    expect(script.doneIds).toBe(9);
+    expect(script.totalIds).toBe(9);
   });
 
-  it('four of five done is still partial (4/5)', () => {
+  it('eight of nine done is still partial (8/9)', () => {
     const r = computePhaseProgress(
-      SCRIPT_IDS.slice(0, 4).map((id) => doneActivity(id)),
+      SCRIPT_IDS.slice(0, 8).map((id) => doneActivity(id)),
       [],
     );
     const script = r.phases.find((p) => p.label === 'Script')!;
     expect(script.status).toBe('in_progress');
-    expect(script.doneIds).toBe(4);
-    expect(script.totalIds).toBe(5);
+    expect(script.doneIds).toBe(8);
+    expect(script.totalIds).toBe(9);
   });
 
   it('untouched labels stay not_started with full totals', () => {
     const r = computePhaseProgress([doneActivity('P4-COPY')], []);
-    const prompts = r.phases.find((p) => p.label === 'Prompts')!;
-    expect(prompts.status).toBe('not_started');
-    expect(prompts.doneIds).toBe(0);
-    expect(prompts.totalIds).toBe(4);
+    const design = r.phases.find((p) => p.label === 'Design')!;
+    expect(design.status).toBe('not_started');
+    expect(design.doneIds).toBe(0);
+    expect(design.totalIds).toBe(5);
   });
 });
 
@@ -112,7 +113,7 @@ describe('PRES-020 — late completion from an old attempt does not override ret
 describe('PRES-020 — optional phases excluded only by approved manifest', () => {
   it('excluding one id shrinks the required set (4/4 done)', () => {
     const excluded = ['P9-SPEECH'];
-    expect(requiredPhaseIdsForLabel('Script', excluded).length).toBe(4);
+    expect(requiredPhaseIdsForLabel('Script', excluded).length).toBe(8);
     const r = computePhaseProgress(
       SCRIPT_IDS.filter((id) => id !== 'P9-SPEECH').map((id) => doneActivity(id)),
       [],
@@ -120,7 +121,7 @@ describe('PRES-020 — optional phases excluded only by approved manifest', () =
     );
     const script = r.phases.find((p) => p.label === 'Script')!;
     expect(script.status).toBe('done');
-    expect(script.totalIds).toBe(4);
+    expect(script.totalIds).toBe(8);
   });
 
   it('a fully waived label is done only when a completion touched it', () => {
@@ -156,16 +157,18 @@ describe('PRES-020 — deliverable presence without QC does not complete', () =>
     expect(r.phases.find((p) => p.label === 'Script')!.doneIds).toBe(1);
   });
 
-  it('teleprompter still completes only via the deliverable signal', () => {
-    const withDel = computePhaseProgress([], [
+  it('the teleprompter phase is an ordinary Speaker Kit phase (PD-006)', () => {
+    // A deliverable row alone no longer completes anything: P7-TELEPROMPTER is
+    // a manifest phase of Speaker Kit, and the step advances on its completion.
+    const deliverableOnly = computePhaseProgress([], [
       { deliverable_type: 'artifact', path: 'working/deliverables/presenter-teleprompter.html' },
     ]);
-    expect(withDel.phases.find((p) => p.label === 'Teleprompter')!.status).toBe('done');
-    const withoutDel = computePhaseProgress(
-      [{ activity_type: 'phase_completed', metadata: { phase_id: 'P8-ASSEMBLE' } }],
-      [{ deliverable_type: 'artifact', path: 'working/deliverables/PRESENTER-GUIDE.pdf' }],
+    expect(deliverableOnly.phases.find((p) => p.label === 'Speaker Kit')!.status).toBe('not_started');
+    const phaseDone = computePhaseProgress(
+      [{ activity_type: 'phase_completed', metadata: { phase_id: 'P7-TELEPROMPTER' } }],
+      [],
     );
-    expect(withoutDel.phases.find((p) => p.label === 'Teleprompter')!.status).toBe('not_started');
+    expect(phaseDone.phases.find((p) => p.label === 'Speaker Kit')!.status).toBe('in_progress');
   });
 });
 
@@ -243,7 +246,7 @@ describe('PRES-020 — route emits honest percent/units/receipts', () => {
     );
   });
 
-  it('1-of-5 with receipts reads partial percent, units 1/5, one receipt', async () => {
+  it('1-of-9 with receipts reads partial percent, units 1/9, one receipt', async () => {
     const { GET } = await import('../../src/app/api/presentations/[taskId]/phases/route');
     const req = new NextRequest(`http://localhost/api/presentations/${TASK_ID}/phases`);
     const res = await GET(req, { params: { taskId: TASK_ID } });
@@ -253,8 +256,8 @@ describe('PRES-020 — route emits honest percent/units/receipts', () => {
     // P-SP-STRUCTURE carries a QC receipt; P4-COPY's bare completion does not.
     expect(script.status).toBe('in_progress');
     expect(script.units_completed).toBe(1);
-    expect(script.units_total).toBe(5);
-    expect(script.percent).toBe(20);
+    expect(script.units_total).toBe(9);
+    expect(script.percent).toBe(11);
     expect(script.receipts).toEqual([{ phase_id: 'P-SP-STRUCTURE', verified: true }]);
     // started_at stays an honest null; wall-clock lives in elapsed_s.
     expect(script.started_at).toBeNull();
