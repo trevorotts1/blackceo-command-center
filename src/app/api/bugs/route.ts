@@ -115,7 +115,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     const id = generateBugId();
     const now = new Date().toISOString();
     const eventId = uuidv4();
-    const workspaceId = data.workspace_id ?? 'bugs';
+    // The Bugs workspace is archived (2026-11-13); Healer owns bug intake now.
+    const workspaceId = data.workspace_id ?? 'healer';
 
     run(
       `INSERT INTO bug_tickets (
