@@ -189,3 +189,164 @@ root=v7.6.127 pkg=7.6.127 lock=7.6.127 lockpkg=7.6.127 cl=v7.6.127    (rc=0)
 
 and this PR does not touch `version`, `package.json`, `package-lock.json`, or `CHANGELOG.md`.
 No workflow file was edited; the job needs a re-run.
+
+---
+
+## 8. Repair attempt 2 — independent re-verification (2026-11-13)
+
+The fix from §3 was already on the branch. This attempt re-proved the whole chain
+from the live remote rather than trusting §4.
+
+### 8.1 PRE, proven against the remote (40 chars)
+
+```
+$ git ls-remote --heads origin pd/fl10-phase-table--post
+76e1bb2ef85820072e3f306769c6e657a4022106	refs/heads/pd/fl10-phase-table--post
+```
+
+PRE = `76e1bb2ef85820072e3f306769c6e657a4022106`. It already contains the one-line
+fix commit `76e1bb2e PD-006: retarget PRES-037 label assertion to the generated table`,
+whose parent is the `13a83cf8` this report was originally written at.
+
+### 8.2 The failing line, at PRE
+
+`tests/unit/pres037-stage-timings-idempotent.test.ts:161` now reads:
+
+```ts
+  assert.ok(Math.abs((byLabel.get('Design') ?? 0) - 7) < 1e-5);
+```
+
+CI's original RED was the same line with `'Prompts'`; the whole failure is quoted in §1.
+
+### 8.3 Mutation control — the fix is load-bearing, not cosmetic
+
+Reverting the one token to the pre-fix spelling and re-running the file:
+
+```
+$ sed -i '' "s/byLabel.get('Design') ?? 0) - 7/byLabel.get('Prompts') ?? 0) - 7/" \
+    tests/unit/pres037-stage-timings-idempotent.test.ts
+$ node --import tsx ... --test tests/unit/pres037-stage-timings-idempotent.test.ts
+✖ PRES-037: old-run events do not change the current run; split reported (12.784916ms)
+  AssertionError [ERR_ASSERTION]: The expression evaluated to a falsy value:
+ℹ pass 6
+ℹ fail 1
+EXIT=1
+```
+
+Restored to `'Design'`:
+
+```
+$ node --import tsx ... --test tests/unit/pres037-stage-timings-idempotent.test.ts
+✔ PRES-037: same keyed batch repeated contributes once (72.32675ms)
+✔ PRES-037: changed replay on the same key is a 409 conflict, writes nothing (0.6975ms)
+✔ PRES-037: mid-batch failure rolls back the whole batch (0.624917ms)
+✔ PRES-037: replay after lost ACK preserves totals (0.628792ms)
+✔ PRES-037: foreign task binding refused 422, nothing written (0.570833ms)
+✔ PRES-037: old-run events do not change the current run; split reported (8.486ms)
+✔ PRES-037: per-event ACKs persist across replays (0.398708ms)
+ℹ tests 7  ℹ pass 7  ℹ fail 0        EXIT=0
+```
+
+The assertion still demands exactly 7s of `PF-DESIGN`, exact to 1e-5. Nothing was
+weakened, skipped or deleted; no product, workflow or check file was touched.
+
+### 8.4 The check, re-run locally, both steps green
+
+Step 1 (`npm run test:unit`, the job's step):
+
+```
+ℹ tests 4755
+ℹ pass 4750
+ℹ fail 0
+ℹ skipped 5
+EXIT=0
+```
+
+Step 2 (`npm run test:component`, the job's second step):
+
+```
+ Test Files  50 passed (50)
+      Tests  406 passed (406)
+EXIT=0
+```
+
+Generator currency and the generator's own suite:
+
+```
+$ npm run check:phases
+phase table is current                                   (rc=0)
+
+$ python3 scripts/test_pd_cc_phase_table_gen.py
+Ran 6 tests in 0.250s
+OK                                                       (rc=0)
+```
+
+**First run of step 1 was NOT green — and the cause was this harness, not the branch.**
+It reported `fail 2`, both in `tests/unit/council-gauntlet-pdf.test.ts`:
+
+```
+✖ golden report renders to a real PDF agreeing with its siblings (T106/T105) (7871.39225ms)
+  Error: ENOENT: no such file or directory, open '.../work.H0b5Z8/gauntlet/golden-report.pdf'
+      at writeFileSync (node:fs:2496:35)
+      at TestContext.<anonymous> (tests/unit/council-gauntlet-pdf.test.ts:118:3)
+
+✖ long report: page numbers on every page, evidence header repeats (T106) (2111.603208ms)
+  Error: ENOENT: no such file or directory, open '.../work.H0b5Z8/gauntlet/long-report.pdf'
+      at TestContext.<anonymous> (tests/unit/council-gauntlet-pdf.test.ts:181:3)
+```
+
+I had pointed `GAUNTLET_OUT` at a directory that did not exist. The job itself does
+`mkdir -p "${{ runner.temp }}/council-gauntlet-evidence"` before step 1 — that step is
+reproduced below, and with it created the same two tests pass:
+
+```
+$ mkdir -p "$S/gauntlet"
+$ GAUNTLET_OUT="$S/gauntlet" npm run test:unit
+ℹ tests 4755  ℹ pass 4750  ℹ fail 0  ℹ skipped 5      EXIT=0
+```
+
+So neither failure had anything to do with this branch; they were missing-directory
+artefacts of the local replication.
+
+### 8.5 Sibling proof
+
+Open PRs at attempt time: 30. Exactly one touches any file this PR changes.
+
+| sibling | branch | files in common | `git merge-tree --write-tree HEAD origin/<sibling>` |
+|---|---|---|---|
+| #676 | `pd/fl10-phase-table` | all 13 | clean, tree `d5c144fd43113dd032ee8fdc61c80ae62f3488ed`, rc=0, 0 CONFLICT |
+
+`#676`'s head `13a83cf8` is also an ancestor of this branch head
+(`git merge-base --is-ancestor origin/pd/fl10-phase-table HEAD` → 0), so the pair is
+clean by construction and nothing needed importing. Current `main` is clean too:
+
+```
+$ git merge-tree --write-tree HEAD origin/main
+8a901afa4d56189efb188cbf4b098e1b0955c85d          # rc=0, 0 CONFLICT lines
+```
+
+### 8.6 What was blocked, and what is not proven here
+
+- **GitHub REST quota was exhausted before this attempt.** `gh api rate_limit`:
+  `{"core":{"limit":5000,"used":5000,"remaining":0,"reset":1794591524}}` — reset
+  12:38:44 PM Eastern. All reads were therefore made over GraphQL
+  (`{"graphql":{"remaining":4937}}`) rather than the REST endpoints `gh pr checks`
+  uses. No rate-limit retry loop was entered.
+- **`gh auth status` reports the keyring token as invalid for `trevorotts1`**, yet
+  GraphQL reads and `git push --dry-run` both succeed, so the working credential is
+  not the keyring one. Flagged, not worked around.
+- **No CI-granted green proof on this head.** Every one of the 34 check contexts at
+  `76e1bb2e` is still `QUEUED` with no runner assigned (checked at 12:39 PM Eastern,
+  ~12 minutes after they were created), so `U55` could only be proven green by
+  replicating the job's exact two commands locally, as §8.4 does. The check needs a
+  re-run once a runner picks it up.
+
+### 8.7 Provenance for this attempt
+
+```
+$ git ls-remote --heads origin pd/fl10-phase-table--post     # PRE, before any push
+76e1bb2ef85820072e3f306769c6e657a4022106
+```
+
+No rebase, no force-push, no push to `main`; fast-forward only. No workflow file,
+check, or test was weakened, skipped or deleted.
