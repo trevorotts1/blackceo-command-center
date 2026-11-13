@@ -30,7 +30,11 @@
  */
 
 import { useEffect, useState, useCallback, useRef } from 'react';
-import { PHASE_LABELS } from '@/lib/presentation-phases';
+import {
+  PHASE_LABELS,
+  YOUR_TURN_TEXT,
+  yourTurnStepLabel,
+} from '@/lib/presentation-phases';
 import type { PhaseStepStatus } from '@/lib/presentation-phases';
 import { useMissionControl } from '@/lib/store';
 
@@ -54,6 +58,17 @@ export interface PhaseProgressData {
   current_phase: string;
   phases: PhaseStepData[];
   unmapped?: string[];
+  /**
+   * PD-006 — the engine's own terminal/park records, as the phases route
+   * projects them. `park_status.phase` names the manifest phase the run is
+   * parked on; when that phase is in OWNER_ACTION_PHASES the stepper shows
+   * the owner-action step in its place. Optional: a payload without it (an
+   * older route, a stub) renders exactly as before.
+   */
+  engine?: {
+    terminal?: string | null;
+    park_status?: { phase?: string | null; label?: string | null } | null;
+  } | null;
 }
 
 export interface PhaseStepReceipt {
@@ -306,6 +321,11 @@ export default function PhaseStepper({
   ).length;
   const totalCount = phases.length;
 
+  // PD-006 — the step the run is parked on, when the park record names a
+  // phase the manifest marks as an OWNER ACTION (a human phase). That step
+  // renders the plain client instruction instead of its own label.
+  const yourTurnLabel = yourTurnStepLabel(data?.engine?.park_status?.phase ?? null);
+
   return (
     <div
       className="overflow-x-auto"
@@ -329,6 +349,11 @@ export default function PhaseStepper({
           const isActive = step.label === activeLabel;
           const isDone = step.status === 'done';
           const isInProgress = step.status === 'in_progress';
+          // PD-006 — the owner-action step wins over done/in_progress: the
+          // run is waiting on the client right now, so it reads as the one
+          // step to look at, in its own colour (never green "done").
+          const isYourTurn = yourTurnLabel != null && step.label === yourTurnLabel;
+          const shownText = isYourTurn ? YOUR_TURN_TEXT : step.label;
 
           let dotClass = 'bg-gray-200';
           let lineClass = 'bg-gray-200';
@@ -342,12 +367,18 @@ export default function PhaseStepper({
             lineClass = 'bg-gray-200';
             textClass = 'text-blue-700';
           }
+          if (isYourTurn) {
+            dotClass = 'bg-amber-500';
+            lineClass = 'bg-gray-200';
+            textClass = 'text-amber-700 font-semibold';
+          }
 
           return (
             <div
               key={step.label}
               className="flex items-center gap-1 flex-1 min-w-0"
               data-testid={`phase-step-${step.label.toLowerCase()}`}
+              data-owner-action={isYourTurn ? 'true' : undefined}
               aria-current={isActive ? 'step' : undefined}
             >
               <span
@@ -359,12 +390,14 @@ export default function PhaseStepper({
                 title={
                   // PRES-020 — honest units on hover: "Script 1/5" instead of
                   // a bare label that hides partial progress.
-                  typeof step.units_completed === 'number' && typeof step.units_total === 'number' && step.units_total > 0
-                    ? `${step.label} ${step.units_completed}/${step.units_total}`
-                    : step.label
+                  isYourTurn
+                    ? YOUR_TURN_TEXT
+                    : typeof step.units_completed === 'number' && typeof step.units_total === 'number' && step.units_total > 0
+                      ? `${step.label} ${step.units_completed}/${step.units_total}`
+                      : step.label
                 }
               >
-                {step.label}
+                {shownText}
                 {/* PRES-020 — honest units next to the label (1/5, not 50%). */}
                 {typeof step.units_completed === 'number' && typeof step.units_total === 'number' && step.units_total > 0 && (
                   <span className="ml-1 text-[9px] opacity-70 tabular-nums">
