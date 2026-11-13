@@ -6,10 +6,7 @@
  * `/api/cron/register` route without double-scheduling on Next.js hot reload
  * or repeated calls.
  *
- * Jobs:
- *   - model-refresh:  weekly, Sunday 03:00 (server local time)
- *   - usage-refresh:  every 6 hours
- *   - memory-index:   hourly, on the hour
+ * Jobs: see the JOBS array below (about forty; each entry carries its own comment).
  *
  * Each job is wrapped so a thrown error never crashes the scheduler. Errors
  * are logged and the next tick will run normally.
@@ -524,7 +521,8 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<unknown> | unk
     },
   },
   { name: 'dispatch-intents', expr: '*/2 * * * *', fn: runDispatchIntentSweep },
-  { name: 'execution-reconcile', expr: '*/2 * * * *', fn: runExecutionCompletionReconcile },
+  // LEASE: 5 min, not the 90s default — one run reads the gateway history of every in-progress task (see the qc-review-sweep note below for the same fault).
+  { name: 'execution-reconcile', expr: '*/2 * * * *', fn: runExecutionCompletionReconcile, timeoutMs: 300_000 },
   // provider-ledger: every 5 minutes — refresh each provider's remaining
   // balance from that vendor's OWN documented endpoint (resource-ledger.ts
   // carries a doc URL per provider). A provider that publishes no balance is
@@ -721,6 +719,7 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<unknown> | unk
             `sent ${result.sent}, skipped ${result.skipped}`,
         );
       }
+      return result;
     },
   },
 
@@ -745,6 +744,7 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<unknown> | unk
           `[cron] backlog-redispatch: scanned ${result.scanned} stuck task(s), re-dispatched ${result.dispatched}`,
         );
       }
+      return result;
     },
   },
 
@@ -774,6 +774,7 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<unknown> | unk
             `pinned ${result.pinned}, left ${result.leftPersonaless} personaless (mechanical)`,
         );
       }
+      return result;
     },
   },
 
@@ -792,7 +793,7 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<unknown> | unk
       const killFlag = resolveStaleTaskSweepKillFlag();
       if (killFlag.disabled) {
         console.log(`[cron] stale-task-sweep: ${killFlagSkipReason(killFlag)} — skipping (stale tasks NOT escalated)`);
-        return;
+        return { skippedReason: killFlagSkipReason(killFlag) };
       }
       const result = await runStaleTaskSweep();
       if (result.skippedReason) {
@@ -810,6 +811,7 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<unknown> | unk
           `${endStated > 0 ? ` (${(result.budgetEndStatedIds ?? []).join(', ')})` : ''}`,
         );
       }
+      return result;
     },
   },
 
@@ -819,7 +821,7 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<unknown> | unk
   // (execution-watcher) and the 24h stale-task-sweep never mark such a task
   // blocked nor alert the operator within a useful window — this is that missing
   // supervisor: block + free the agent + alert the operator once. Tune with
-  // STUCK_IN_PROGRESS_MINUTES (default 45); disable with
+  // STUCK_IN_PROGRESS_MINUTES (default 180); disable with
   // DISABLE_STUCK_IN_PROGRESS_SWEEP=1.
   {
     name: 'stuck-in-progress-sweep',
@@ -833,6 +835,7 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<unknown> | unk
           `blocked ${result.blocked}${result.blocked > 0 ? ` (${result.blockedIds.join(', ')})` : ''}`,
         );
       }
+      return result;
     },
   },
 
@@ -875,6 +878,7 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<unknown> | unk
           ? `[cron] weekly-done-clear: skipped — ${result.skippedReason}`
           : `[cron] weekly-done-clear: archived ${result.archivedCount} done task(s)`,
       );
+      return result;
     },
   },
 
@@ -999,6 +1003,7 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<unknown> | unk
             `done-archived=${result.doneArchived}, stale-nudged=${result.staleNudged}, stale-archived=${result.staleArchived}`,
         );
       }
+      return result;
     },
   },
 
@@ -1139,6 +1144,12 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<unknown> | unk
     },
   },
 ];
+
+/** Test-only accessor: hand back a job's `fn` so a test can call it directly
+ *  without registering any timer. Never used by the scheduler itself. */
+export function __jobFnForTests(name: string) {
+  return JOBS.find((j) => j.name === name)?.fn;
+}
 
 /**
  * Register every job. Safe to call multiple times.
