@@ -188,6 +188,9 @@ export default defineConfig({
       // WF-012 (BU-04) — a failed progress read keeps the owner's screen and
       // shows the reconnecting line; only a 401/403 keeps "Check your access".
       'tests/component/interview-soft-error.test.tsx',
+      // BU-25 — a 503 box_unreachable shows the spec sentence in place of the
+      // reconnect hint; any other 503 keeps the reconnect line.
+      'tests/component/interview-client-box-unreachable.test.tsx',
     ],
     env: { NODE_ENV: 'test' },
     testTimeout: 15000,
