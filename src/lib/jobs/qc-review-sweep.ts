@@ -77,6 +77,21 @@ export const QC_RESULT_LOOP_THRESHOLD = Math.max(
   parseInt(process.env.QC_RESULT_LOOP_THRESHOLD || '3', 10) || 3,
 );
 
+/**
+ * The judge-heal canary is a real judge call. A still-dead judge used to cost
+ * one failing call EVERY tick (every 2 minutes); it now costs at most one every
+ * QC_JUDGE_HEAL_INTERVAL_MINUTES (default 30). A healed card still opens the
+ * gate for the rest inside the same tick that heals it.
+ */
+let lastJudgeHealAttemptMs = 0;
+const judgeHealIntervalMs = () =>
+  Math.max(1, parseInt(process.env.QC_JUDGE_HEAL_INTERVAL_MINUTES || '30', 10) || 30) * 60_000;
+
+/** Test-only: forget the last heal attempt so the next tick may run the canary. */
+export function __resetJudgeHealClock(): void {
+  lastJudgeHealAttemptMs = 0;
+}
+
 interface QCResultLoopRow {
   score: number;
   passed: number;
@@ -203,7 +218,7 @@ async function handleQCResultLoopDetected(
   const audience = classifyQCBlockAudience(classifierInput);
   const needs = audience === 'SYSTEM'
     ? `System fix required: QC has produced the ${summary} without the task ever advancing. Investigate the scorer/routing for this task before re-enabling scoring.`
-    : `Owner action required: QC has produced the ${summary} without the task ever advancing. Reply here to unblock or reassign.`;
+    : `Owner action required: the quality check gave the same result ${threshold} times in a row, so this task was paused. Reply here to unblock or reassign.`;
 
   return blockTaskForQC({
     taskId,
@@ -311,8 +326,12 @@ export async function runQCReviewSweep(): Promise<QCReviewSweepResult> {
            AND e.message LIKE '%[QC-DEFERRED-PROVIDER-DOWN]%'
            AND ${sqlTime('e.created_at')} >= datetime('now', ?)
        )
-     ORDER BY t.updated_at ASC`,
-    [`-${deferredRetryMin} minutes`],
+     ORDER BY t.updated_at ASC
+     LIMIT ?`,
+    [
+      `-${deferredRetryMin} minutes`,
+      Math.max(1, parseInt(process.env.QC_REVIEW_SWEEP_BATCH || '25', 10) || 25),
+    ],
   );
 
   // HEAL: a card parked at [QC-JUDGE-FAILED-FINAL] because its judge MODEL was
@@ -339,18 +358,21 @@ export async function runQCReviewSweep(): Promise<QCReviewSweepResult> {
      ORDER BY t.updated_at ASC`,
     [],
   );
-  let healed = 0;
-  for (const row of healRows) {
-    try {
-      const r = await runQCOnReview(row.id);
-      if (!r || r.scoringPath !== 'llm') break; // judge still dead — stop after the canary
-      healed++;
-    } catch (err) {
-      console.error(`[qc-review-sweep] Error re-scoring judge-failed task ${row.id}:`, (err as Error).message);
-      break;
+  if (healRows.length > 0 && Date.now() - lastJudgeHealAttemptMs >= judgeHealIntervalMs()) {
+    lastJudgeHealAttemptMs = Date.now();
+    let healed = 0;
+    for (const row of healRows) {
+      try {
+        const r = await runQCOnReview(row.id);
+        if (!r || r.scoringPath !== 'llm') break; // judge still dead — stop after the canary
+        healed++;
+      } catch (err) {
+        console.error(`[qc-review-sweep] Error re-scoring judge-failed task ${row.id}:`, (err as Error).message);
+        break;
+      }
     }
+    if (healed > 0) console.log(`[qc-review-sweep] Healed ${healed} judge-model-gone card(s) — judge works again`);
   }
-  if (healed > 0) console.log(`[qc-review-sweep] Healed ${healed} judge-model-gone card(s) — judge works again`);
 
   if (stuckRows.length === 0) {
     return { scanned: 0, scored: 0, ranAt };
