@@ -1,4 +1,4 @@
-import { computeOverallTiered, isNotApplicable, type SystemStatus, type TieredProbeResult } from './probes/types';
+import { computeOverallTiered, countsTowardOverall, type SystemStatus, type TieredProbeResult } from './probes/types';
 
 export type HealthTier = 'healthy' | 'degraded' | 'unavailable' | 'checking' | 'unknown';
 export interface StatusPayload {
@@ -31,7 +31,7 @@ export function parseReadiness(status: unknown, health: unknown): { tier: Health
       || typeof item.probedAt !== 'string') return { tier: 'unknown', payload: null };
     components.push(item as unknown as TieredProbeResult);
   }
-  // These are required server probes, not optional provider connections.
+  // Both rows must be present for a verdict: database is critical, the gateway is counted.
   if (!['database', 'openclaw_gateway'].every((id) => components.some((c) => c.component === id))) {
     return { tier: 'unknown', payload: null };
   }
@@ -40,7 +40,7 @@ export function parseReadiness(status: unknown, health: unknown): { tier: Health
     status: health.embeddings.degraded || health.embeddings.status === 'degraded' ? 'degraded' : 'live',
     latencyMs: null, probedAt: status.probedAt,
   });
-  const computed = computeOverallTiered(components.filter((c) => !isNotApplicable(c)));
+  const computed = computeOverallTiered(components.filter(countsTowardOverall));
   const overall = status.overall === 'offline' || computed === 'offline' || health.status === 'error' ? 'offline'
     : status.overall === 'degraded' || computed === 'degraded' || health.status === 'degraded' ? 'degraded'
     : status.overall === 'live' ? 'live' : 'unknown';

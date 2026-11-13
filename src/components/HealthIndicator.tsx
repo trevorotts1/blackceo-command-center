@@ -1,33 +1,29 @@
 'use client';
 
 /**
- * HealthIndicator — the ONE consolidated health affordance (U47).
+ * HealthIndicator — the ONE consolidated health affordance (U47, reshaped by
+ * U-06 / CC-004).
  *
- * Before this unit the workspace header carried FIVE competing signals of
- * "is everything okay": SystemStatusPill (12-probe worst-of-all), the
- * "Gateway Online/Offline" block (a global `isOnline` boolean written by
- * five unrelated call sites), and — indirectly — the Live Feed rail's own
- * connectivity dot. A phone-width viewport saw only ONE of those (the
- * Gateway pill was `hidden sm:flex`), and the two visible-on-desktop
- * signals could each say something different for the same underlying
- * reality. This component replaces all of that with a single source of
- * truth: U46's criticality-tiered `overall` from `/api/system/status`,
- * combined with migration/embedding readiness and rendered as Healthy /
- * Degraded / Unavailable / Checking / Unknown — with a viewer-scoped presentation:
+ * One source of truth: U46's criticality-tiered `overall` from
+ * `/api/system/status`, combined with migration/embedding readiness via
+ * `parseReadiness`, rendered with a viewer-scoped presentation:
  *
- *   - `operator`: clickable, opens the existing SystemStatusDrawer
- *     (regrouped Critical / Auxiliary / Model Providers per U46's tier).
- *   - `client`: non-interactive dot + one plain word. Never renders a
- *     probe id, component name, or any internal detail — a client should
- *     never see "OpenClaw" or "Cloudflare" or a raw error string.
+ *   - `client`: a plain button with a small panel under it. The badge says
+ *     "All systems working" / "Needs attention" / "Offline" / "Checking…" /
+ *     "Status not available"; opening it lists plain-English reasons
+ *     (`clientReasons`) and the check time. Never a probe id, component
+ *     name, address or raw error string.
+ *   - `operator`: clickable, opens the existing SystemStatusDrawer with the
+ *     internal wording.
  *
- * Visible at every breakpoint — no `hidden` class at any width. The old
- * Gateway pill's phone-width hiding is the exact defect this unit retires.
+ * Visible at every breakpoint — no `hidden` class at any width.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { format } from 'date-fns';
 import { SystemStatusDrawer } from './SystemStatusDrawer';
 import { parseReadiness, type HealthTier, type StatusPayload } from '@/lib/health-readiness';
+import { clientLabel, clientReasons } from '@/lib/health-client-reasons';
 export type { HealthTier } from '@/lib/health-readiness';
 
 export type HealthIndicatorViewerRole = 'operator' | 'client';
@@ -36,7 +32,7 @@ interface Props {
   viewerRole: HealthIndicatorViewerRole;
 }
 
-const POLL_INTERVAL_MS = 30 * 1000;
+const POLL_INTERVAL_MS = 60 * 1000;
 
 const TIER_LABEL: Record<HealthTier, string> = {
   healthy: 'Healthy',
@@ -64,12 +60,14 @@ const TIER_STYLE: Record<HealthTier, { bg: string; text: string; border: string 
 
 export function HealthIndicator({ viewerRole }: Props) {
   const [payload, setPayload] = useState<StatusPayload | null>(null);
+  const [healthStatus, setHealthStatus] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
 
   const [tier, setTier] = useState<HealthTier>('checking');
   const active = useRef<AbortController | null>(null);
   const sequence = useRef(0);
+  const clientRef = useRef<HTMLDivElement>(null);
 
   const fetchStatus = useCallback(async (force = false) => {
     active.current?.abort();
@@ -81,6 +79,7 @@ export function HealthIndicator({ viewerRole }: Props) {
       if (request !== sequence.current) return;
       controller.abort();
       setPayload(null);
+      setHealthStatus(null);
       setTier('unavailable');
       setLoading(false);
     }, 10_000);
@@ -94,11 +93,14 @@ export function HealthIndicator({ viewerRole }: Props) {
       const [status, health] = await Promise.all([statusResponse.json(), healthResponse.json()]);
       if (request !== sequence.current || controller.signal.aborted) return;
       const next = parseReadiness(status, health);
+      const reported = (health as { status?: unknown } | null)?.status;
       setPayload(next.payload);
+      setHealthStatus(typeof reported === 'string' ? reported : null);
       setTier(next.tier);
     } catch {
       if (request !== sequence.current || controller.signal.aborted) return;
       setPayload(null);
+      setHealthStatus(null);
       setTier('unavailable');
     } finally {
       clearTimeout(timeout);
@@ -107,31 +109,88 @@ export function HealthIndicator({ viewerRole }: Props) {
   }, []);
 
   useEffect(() => {
-    void fetchStatus();
-    const id = setInterval(() => void fetchStatus(), POLL_INTERVAL_MS);
+    // Poll once a minute, but only while the tab is visible: a background tab
+    // hammering the status probes is load nobody is reading.
+    const poll = () => {
+      if (document.visibilityState === 'hidden') return;
+      void fetchStatus();
+    };
+    poll();
+    const id = setInterval(poll, POLL_INTERVAL_MS);
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void fetchStatus();
+    };
+    document.addEventListener('visibilitychange', onVisible);
     return () => {
       clearInterval(id);
+      document.removeEventListener('visibilitychange', onVisible);
       ++sequence.current;
       active.current?.abort();
     };
   }, [fetchStatus]);
 
+  // Close the client panel on Escape or an outside click.
+  useEffect(() => {
+    if (!open || viewerRole !== 'client') return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    const onPointer = (e: MouseEvent) => {
+      if (clientRef.current && !clientRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('keydown', onKey);
+    document.addEventListener('mousedown', onPointer);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      document.removeEventListener('mousedown', onPointer);
+    };
+  }, [open, viewerRole]);
+
   const style = TIER_STYLE[tier];
 
-  // Client variant: a dot + one plain word, never interactive, never a
-  // probe/component name, never an error string. Rendered at every
-  // breakpoint (no `hidden` class).
   if (viewerRole === 'client') {
+    const reasons = clientReasons(payload, healthStatus);
+    const label = clientLabel(tier);
+    const checkedAt = format(
+      payload?.probedAt ? new Date(payload.probedAt) : new Date(),
+      'h:mm a'
+    );
     return (
-      <div
-        data-testid="health-indicator"
-        data-viewer-role="client"
-        role="status"
-        aria-label={`System status: ${TIER_LABEL[tier]}`}
-        className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium border ${style.bg} ${style.text} ${style.border}`}
-      >
-        <span className={`w-2 h-2 rounded-full ${TIER_DOT[tier]}`} aria-hidden />
-        <span>{TIER_LABEL[tier]}</span>
+      <div className="relative" ref={clientRef}>
+        <button
+          type="button"
+          data-testid="health-indicator"
+          data-viewer-role="client"
+          onClick={() => setOpen((prev) => !prev)}
+          aria-expanded={open}
+          aria-label={`System status: ${label}. Click for details.`}
+          className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium border cursor-pointer transition-colors hover:opacity-90 ${style.bg} ${style.text} ${style.border}`}
+        >
+          <span className={`w-2 h-2 rounded-full ${TIER_DOT[tier]}`} aria-hidden />
+          <span>{label}</span>
+        </button>
+
+        {open && (
+          <div
+            role="dialog"
+            aria-label="System status details"
+            className="absolute right-0 top-full mt-2 w-72 bg-white border border-gray-200 rounded-xl shadow-lg z-50 p-4"
+          >
+            {tier === 'healthy' ? (
+              <p className="text-sm text-gray-700">Everything is running normally.</p>
+            ) : (
+              <ul className="space-y-3">
+                {reasons.map((reason) => (
+                  <li key={reason.title}>
+                    <p className="text-sm font-medium text-gray-900">{reason.title}</p>
+                    <p className="text-xs text-gray-600 mt-0.5">{reason.body}</p>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <p className="mt-3 text-xs text-gray-500">Checked at {checkedAt}</p>
+          </div>
+        )}
       </div>
     );
   }

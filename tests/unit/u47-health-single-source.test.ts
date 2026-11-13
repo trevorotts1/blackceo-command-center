@@ -179,11 +179,17 @@ test('U47: SystemStatusDrawer groups rows by the U46 tier field, not a hand-main
   assert.match(content, /w-full sm:w-96/);
 });
 
-test('U47: "Re-run bootstrap" admin action is still present, unmodified in its own logic', () => {
+test('U-06 (CC-039): the "Re-run bootstrap" admin action is gone from the drawer', () => {
+  // The button could never work from a browser (no bearer token on the
+  // request; the route requires one), so U-06 removes the whole Admin
+  // Actions block, BootstrapModal, safeReadText and the now-unused imports.
   const drawerPath = path.join(SRC, 'components', 'SystemStatusDrawer.tsx');
   const content = fs.readFileSync(drawerPath, 'utf8');
-  assert.match(content, /Re-run bootstrap/);
-  assert.match(content, /\/api\/system\/bootstrap/);
+  assert.doesNotMatch(content, /Re-run bootstrap/);
+  assert.doesNotMatch(content, /Admin Actions/);
+  assert.doesNotMatch(content, /BootstrapModal/);
+  assert.doesNotMatch(content, /ootstrap/);
+  assert.doesNotMatch(content, /PlayCircle/);
 });
 
 
