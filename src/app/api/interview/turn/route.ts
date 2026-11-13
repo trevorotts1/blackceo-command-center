@@ -158,6 +158,8 @@ interface ReplyWait {
   text: string | null;
   /** True when a history read failed (the caller must report no agent count). */
   historyFailed: boolean;
+  /** Agent turns present at the settling read (the recovery poll's `after`). */
+  agentCount: number | null;
 }
 
 /**
@@ -168,9 +170,11 @@ interface ReplyWait {
  *   • the newest history entry is an agent entry (the agent is not mid-turn —
  *     a trailing tool entry means it is still working), and
  *   • two consecutive polls, REPLY_POLL_INTERVAL_MS apart, saw the SAME number
- *     of entries. A narration line that lands first and the final line after it
- *     is one turn, so returning on the first sighting would show narration as
- *     the answer.
+ *     of agent turns. Agent turns — not raw entries — because the baseline the
+ *     caller holds is an agent-turn count: comparing entries against it settled
+ *     an unchanged history into a stale reply. A narration line that lands
+ *     first and the final line after it is one turn, so returning on the first
+ *     sighting would show narration as the answer.
  *
  * Only the last assistant text is returned — never a join of everything that
  * accumulated, which used to put the agent's own narration on the owner's
@@ -187,29 +191,29 @@ async function waitForAgentReply(
   let previousCount = -1;
   while (Date.now() < deadlineMs && !signal?.aborted) {
     await sleep(REPLY_POLL_INTERVAL_MS);
-    if (signal?.aborted) return { text: null, historyFailed: false };
+    if (signal?.aborted) return { text: null, historyFailed: false, agentCount: null };
     let history: unknown[];
     try {
       history = await client.getSessionHistory(sessionId);
     } catch {
       // Older gateway without sessions.history, or a transient error: the
       // caller reports pending with no count instead of guessing one.
-      return { text: null, historyFailed: true };
+      return { text: null, historyFailed: true, agentCount: null };
     }
-    if (!Array.isArray(history)) return { text: null, historyFailed: true };
+    if (!Array.isArray(history)) return { text: null, historyFailed: true, agentCount: null };
     const newest = history.length ? extractTurn(history[history.length - 1]) : null;
+    const texts = agentTextsFrom(history);
     if (
-      history.length > baselineCount &&
-      history.length === previousCount &&
+      texts.length > baselineCount &&
+      texts.length === previousCount &&
       !!newest &&
       isAgentTurn(newest.role)
     ) {
-      const texts = agentTextsFrom(history);
-      return { text: texts.length ? texts[texts.length - 1] : null, historyFailed: false };
+      return { text: texts.length ? texts[texts.length - 1] : null, historyFailed: false, agentCount: texts.length };
     }
-    previousCount = history.length;
+    previousCount = texts.length;
   }
-  return { text: null, historyFailed: false };
+  return { text: null, historyFailed: false, agentCount: null };
 }
 
 function sleep(ms: number): Promise<void> {
@@ -515,7 +519,7 @@ export async function POST(req: NextRequest) {
     // (below) to fetch it when it lands, instead of forcing a resend.
     pending: reply === null,
     // Baseline agent-turn count for the recovery poll (?after=<agentCount>).
-    agentCount: baselineCount + (reply === null ? 0 : 1),
+    agentCount: reply === null ? baselineCount : waited.agentCount,
   });
 }
 
