@@ -5,7 +5,7 @@
 
 import fs from 'fs';
 import path from 'path';
-import { getDb } from '@/lib/db';
+import { getDb, getMigrationStatus } from '@/lib/db';
 import {
   PROBE_TIMEOUT_MS,
   ProbeResult,
@@ -35,22 +35,21 @@ export async function probeDatabase(): Promise<ProbeResult> {
           // Non-fatal — file might be on a different absolute path in some envs.
         }
 
-        // Applied vs expected migration count.
+        // Applied vs expected migration count. The migration runner keys
+        // applied-state on `_migrations` alone; `schema_migrations` is not
+        // created by any migration, so the old query against it always threw
+        // and appliedCount was pinned at 0 — which, with a real pending count,
+        // would have made this critical probe permanently degraded.
         let appliedCount = 0;
+        let pendingCount = 0;
         try {
-          const r = db.prepare('SELECT COUNT(*) AS n FROM schema_migrations').get() as
-            | { n: number }
-            | undefined;
-          appliedCount = r?.n ?? 0;
+          const migrationStatus = getMigrationStatus(db);
+          appliedCount = migrationStatus.applied.length;
+          pendingCount = migrationStatus.pending.length;
         } catch {
-          // Table may not exist yet on a brand-new DB.
+          // Registry unavailable — report what we know rather than guess.
         }
-        // Expected count is derived from the highest id in schema_migrations
-        // plus the in-flight runner. Without a clean export we treat the
-        // applied count as the source of truth and only flag a gap when the
-        // table is missing. Track A1 owns migration registry exposure; this
-        // probe surfaces what it can without it.
-        const expectedCount = appliedCount;
+        const expectedCount = appliedCount + pendingCount;
 
         // Last backup timestamp from the manifest table if present.
         let lastBackupAt: string | null = null;
