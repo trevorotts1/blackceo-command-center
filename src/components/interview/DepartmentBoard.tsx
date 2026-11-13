@@ -10,6 +10,17 @@
  * gates the enforcer uses, so the Build button can never arm on an unfinished
  * board.
  *
+ * ── "Looks good — keep all" (BU-15, WF-016) ─────────────────────────────────
+ * The common case is one tap instead of 29. On a standard-first box the button
+ * records NOTHING per department (they are already built — silence = keep) and
+ * only answers the gate question `department_review` with `keep-all`. On an
+ * older box the button POSTs `{bulk:'keep-all'}` to /api/interview/decision,
+ * which presses the same record-dept-decision.sh button for every expected
+ * department that carries no recorded decision, one after another, stopping on
+ * the first failure — and only then answers the gate question. After any single
+ * card change the board answers the same gate question with `edited`, once no
+ * removal is waiting on its loss warning. "Later" no longer exists on screen.
+ *
  * ── Where the data comes from (files are the single source of truth) ─────────
  *   • GET /api/interview/canonical-departments → the LIVE floor set
  *     (mandatory + universal-primary-for-your-industry). The count is NEVER
@@ -22,7 +33,7 @@
  *     reflects them.
  *
  * ── The ONLY writer ──────────────────────────────────────────────────────────
- * Every YES / NO / LATER press POSTs /api/interview/decision, which presses the
+ * Every YES / NO press POSTs /api/interview/decision, which presses the
  * exact same record-dept-decision.sh button the Telegram agent presses. This
  * board never hand-writes a decision and never touches the state file directly;
  * a NO therefore becomes a provenanced, HONORED decline (shows "Skipped", is not
@@ -264,6 +275,10 @@ export default function DepartmentBoard({
   const [newName, setNewName] = useState('');
   const [mergePrompt, setMergePrompt] = useState<MergePrompt | null>(null);
 
+  // "Looks good — keep all" (BU-15): one tap for the common case.
+  const [keepAllBusy, setKeepAllBusy] = useState(false);
+  const [keepAllError, setKeepAllError] = useState<string | null>(null);
+
   // Keep the latest custom-id lists for the /state query without re-creating
   // loadState on every custom change.
   const customsRef = useRef<CustomDept[]>([]);
@@ -397,7 +412,66 @@ export default function DepartmentBoard({
     [sessionId],
   );
 
-  /* ---- record a YES / NO / LATER (the ONLY sanctioned writer) ---- */
+  /* ---- the team board's own gate answer (BU-15) ---- */
+
+  /**
+   * Answer the gate question `department_review` (choices: `keep-all` |
+   * `edited`) through /api/interview/answer — the single sanctioned writer for
+   * gate answers (it presses the gate, appends the transcript block and stamps
+   * progress). Best-effort: the board's own decision writes have already landed,
+   * and the gate refuses (`409 out_of_order`) whenever the board is not the
+   * current question — both are normal and neither may break the page.
+   */
+  const answerGateQuestion = useCallback(async (answer: 'keep-all' | 'edited') => {
+    try {
+      const res = await fetch('/api/interview/answer', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ questionId: 'department_review', answer }),
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }, []);
+
+  /**
+   * "Looks good — keep all" (WF-016). Standard-first: every department is
+   * already built, so nothing is recorded per department — only the gate answer.
+   * Older box: the decision route records a real `yes` for every expected
+   * department that has no recorded decision, one after another, and stops at
+   * the first failure; only a clean bulk run answers the gate.
+   */
+  const keepAll = useCallback(async () => {
+    if (keepAllBusy || busyDept) return;
+    setKeepAllBusy(true);
+    setKeepAllError(null);
+    try {
+      if (!standardReady) {
+        const res = await fetch('/api/interview/decision', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ bulk: 'keep-all', sessionId: sessionId ?? undefined }),
+        });
+        if (!res.ok) {
+          const data = (await res.json().catch(() => ({}))) as { message?: string };
+          setKeepAllError(
+            data.message ?? 'We couldn’t keep every department just now. Please try again.',
+          );
+          await loadState();
+          return;
+        }
+      }
+      await answerGateQuestion('keep-all');
+      await loadState();
+    } catch {
+      setKeepAllError('Network error — please try again.');
+    } finally {
+      setKeepAllBusy(false);
+    }
+  }, [keepAllBusy, busyDept, standardReady, sessionId, answerGateQuestion, loadState]);
+
+  /* ---- record a YES / NO (the ONLY sanctioned writer) ---- */
 
   const decide = useCallback(
     async (id: string, verb: DeptVerb) => {
@@ -452,8 +526,12 @@ export default function DepartmentBoard({
       // Re-read server truth so the coverage badge + complete flag reflect the
       // authoritative state, never the optimistic guess.
       await loadState();
+      // BU-15: a single card change answers the gate question with `edited`.
+      // Reached only when the write landed and no removal is waiting on its
+      // loss warning (both of those paths returned above).
+      void answerGateQuestion('edited');
     },
-    [busyDept, loadState, postDecision],
+    [busyDept, loadState, postDecision, answerGateQuestion],
   );
 
   /* ---- confirmed floor-decline retry (explicit owner acknowledgement) ---- */
@@ -503,7 +581,9 @@ export default function DepartmentBoard({
       setBusyDept(null);
     }
     await loadState();
-  }, [lossPrompt, busyDept, loadState, postDecision]);
+    // BU-15: the confirmed removal is the card's change — answer `edited`.
+    void answerGateQuestion('edited');
+  }, [lossPrompt, busyDept, loadState, postDecision, answerGateQuestion]);
 
   const cancelLossDecline = useCallback(() => {
     // Cancel leaves state untouched: the optimistic verb was already rolled
@@ -641,6 +721,33 @@ export default function DepartmentBoard({
           </div>
           <CompleteBadge complete={boardComplete} remaining={remaining} />
         </header>
+
+        {/* ── one tap for the common case (BU-15) ─────────────────────────── */}
+        <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.75rem' }}>
+          <button
+            type="button"
+            onClick={() => void keepAll()}
+            disabled={keepAllBusy || busyDept !== null}
+            className={ivcx(iv.btnPrimary, keepAllBusy && 'is-busy')}
+            data-keep-all="true"
+          >
+            {keepAllBusy ? (
+              <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+            ) : (
+              <Check className="h-4 w-4" aria-hidden />
+            )}
+            Looks good — keep all
+          </button>
+        </div>
+        {keepAllError && (
+          <p
+            role="alert"
+            style={{ margin: 0, fontSize: '0.85rem', color: '#F0B429', display: 'inline-flex', alignItems: 'center', gap: '0.4rem' }}
+          >
+            <AlertTriangle className="h-4 w-4" aria-hidden />
+            {keepAllError}
+          </p>
+        )}
 
         {/* ── un-provenanced-decline warning (gate #8 mirror) ─────────────── */}
         {coverage.rejections.length > 0 && (
