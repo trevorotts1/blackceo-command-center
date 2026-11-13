@@ -120,6 +120,16 @@ test.before(() => {
   for (const file of ['update-interview-state.sh', 'record-dept-decision.sh', 'list-canonical-departments.py']) {
     fs.writeFileSync(path.join(stubScripts, file), '# fixture\n');
   }
+  // BU-13: the answer route asks the step gate first and the state route reads
+  // its status. This fixture is about the transcript/resume repair, not the
+  // gate, so the gate is stubbed to ACCEPT and to report one answered question.
+  fs.writeFileSync(path.join(stubScripts, 'interview_gate.py'), [
+    'import json',
+    'print(json.dumps({"accepted": True, "qid": "company_name", "shortAccepted": False,',
+    '  "replaces": None, "requiredTotal": 1, "requiredAnswered": 1, "answeredTotal": 1,',
+    '  "percent": 100, "next": "industry", "missingRequired": []}))',
+    '',
+  ].join('\n'));
   fs.writeFileSync(path.join(runtimeRoot, 'openclaw.json'), JSON.stringify({
     agents: { entries: { main: { workspace, model: 'fixture/model' } } },
   }));
