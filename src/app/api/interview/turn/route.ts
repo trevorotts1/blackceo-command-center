@@ -59,6 +59,11 @@ const REPLY_TIMEOUT_MS = Number(process.env.INTERVIEW_TURN_TIMEOUT_MS) || 20_000
 /** How often we re-read session history while waiting for the reply. */
 const REPLY_POLL_INTERVAL_MS = Number(process.env.INTERVIEW_TURN_POLL_MS) || 1_200;
 
+/** The ONLY failure text the owner ever sees. The detail goes to the server log
+ *  (WF-005/WF-029): a raw gateway string on screen is unreadable and leaks
+ *  internals. */
+const ONE_MOMENT = 'One moment — getting ready. Please try again.';
+
 const requestSchema = z.object({
   // The owner's typed message. Empty is rejected — a turn must carry text.
   content: z.string().min(1).max(64_000),
@@ -130,10 +135,8 @@ function isAgentTurn(role: string | null): boolean {
   return r !== 'user' && r !== 'owner' && r !== 'human' && r !== 'client';
 }
 
-/** Ordered list of agent-voice texts currently in the session history. */
-async function agentTexts(client: OpenClawClient, sessionId: string): Promise<string[]> {
-  const history = await client.getSessionHistory(sessionId);
-  if (!Array.isArray(history)) return [];
+/** Ordered list of agent-voice texts in one already-read history array. */
+function agentTextsFrom(history: unknown[]): string[] {
   const out: string[] = [];
   for (const entry of history) {
     const turn = extractTurn(entry);
@@ -142,12 +145,37 @@ async function agentTexts(client: OpenClawClient, sessionId: string): Promise<st
   return out;
 }
 
+/** Ordered list of agent-voice texts currently in the session history. */
+async function agentTexts(client: OpenClawClient, sessionId: string): Promise<string[]> {
+  const history = await client.getSessionHistory(sessionId);
+  if (!Array.isArray(history)) return [];
+  return agentTextsFrom(history);
+}
+
+/** What one bounded wait produced. */
+interface ReplyWait {
+  /** The settled LAST assistant text, or null when nothing settled in time. */
+  text: string | null;
+  /** True when a history read failed (the caller must report no agent count). */
+  historyFailed: boolean;
+}
+
 /**
- * Poll session history until a NEW agent turn appears beyond `baselineCount`
- * (the number of agent turns present before we sent), or the timeout elapses.
- * Returns the newly-appended agent text (joined) or null on timeout. Never
- * throws: a history RPC error resolves to null so the caller degrades to a
- * `pending` result rather than a 500.
+ * Poll session history until the turn has SETTLED, then return only the last
+ * assistant text.
+ *
+ * Settled means BOTH:
+ *   • the newest history entry is an agent entry (the agent is not mid-turn —
+ *     a trailing tool entry means it is still working), and
+ *   • two consecutive polls, REPLY_POLL_INTERVAL_MS apart, saw the SAME number
+ *     of entries. A narration line that lands first and the final line after it
+ *     is one turn, so returning on the first sighting would show narration as
+ *     the answer.
+ *
+ * Only the last assistant text is returned — never a join of everything that
+ * accumulated, which used to put the agent's own narration on the owner's
+ * screen. A history RPC failure is reported as historyFailed rather than
+ * mistaken for "the agent did not reply"; on timeout both fields are empty.
  */
 async function waitForAgentReply(
   client: OpenClawClient,
@@ -155,23 +183,33 @@ async function waitForAgentReply(
   baselineCount: number,
   deadlineMs: number,
   signal?: AbortSignal,
-): Promise<string | null> {
+): Promise<ReplyWait> {
+  let previousCount = -1;
   while (Date.now() < deadlineMs && !signal?.aborted) {
     await sleep(REPLY_POLL_INTERVAL_MS);
-    if(signal?.aborted)return null;
-    let texts: string[];
+    if (signal?.aborted) return { text: null, historyFailed: false };
+    let history: unknown[];
     try {
-      texts = await agentTexts(client, sessionId);
+      history = await client.getSessionHistory(sessionId);
     } catch {
-      // Older gateway without sessions.history, or a transient error: stop
-      // polling and let the caller return a pending result.
-      return null;
+      // Older gateway without sessions.history, or a transient error: the
+      // caller reports pending with no count instead of guessing one.
+      return { text: null, historyFailed: true };
     }
-    if (texts.length > baselineCount) {
-      return texts.slice(baselineCount).join('\n\n');
+    if (!Array.isArray(history)) return { text: null, historyFailed: true };
+    const newest = history.length ? extractTurn(history[history.length - 1]) : null;
+    if (
+      history.length > baselineCount &&
+      history.length === previousCount &&
+      !!newest &&
+      isAgentTurn(newest.role)
+    ) {
+      const texts = agentTextsFrom(history);
+      return { text: texts.length ? texts[texts.length - 1] : null, historyFailed: false };
     }
+    previousCount = history.length;
   }
-  return null;
+  return { text: null, historyFailed: false };
 }
 
 function sleep(ms: number): Promise<void> {
@@ -335,12 +373,9 @@ function streamTurn(
         if(cancelled||signal?.aborted)return;
         await client.sendMessage(sessionId, content);
       } catch (err) {
+        console.error('[interview/turn] the gateway did not accept the message', err);
         enqueue(controller,
-          sseEvent('error', {
-            message: `Failed to reach the interviewer: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          }),
+          sseEvent('error', { message: ONE_MOMENT }),
         );
         enqueue(controller,sseEvent('done', { sessionId, pending: true }));
         if(!cancelled&&!signal?.aborted)controller.close();
@@ -421,13 +456,9 @@ export async function POST(req: NextRequest) {
   try {
     sessionId = await resolveSessionId(client, req, body.sessionId);
   } catch (err) {
+    console.error('[interview/turn] could not open an interview session', err);
     return NextResponse.json(
-      {
-        error: 'session_unavailable',
-        message: `Could not open an interview session on the gateway: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      },
+      { error: 'session_unavailable', message: ONE_MOMENT },
       { status: 503 },
     );
   }
@@ -439,31 +470,29 @@ export async function POST(req: NextRequest) {
   }
 
   // Buffered JSON turn: snapshot the agent turns present, relay the message,
-  // then wait (bounded) for the agent's next reply.
+  // then wait (bounded) for the agent's turn to settle.
   let baselineCount: number;
   try {
     baselineCount = (await agentTexts(client, sessionId)).length;
   } catch {
-    baselineCount = 0;
+    // No baseline means no honest way to tell the reply apart from what was
+    // already in the session. Report pending with no count rather than 0,
+    // which would hand the recovery poll the entire history.
+    return NextResponse.json({ sessionId, reply: null, pending: true, agentCount: null });
   }
 
   if(req.signal.aborted)return NextResponse.json({error:'request_cancelled'},{status:499});
   try {
     await client.sendMessage(sessionId, body.content);
   } catch (err) {
+    console.error('[interview/turn] the gateway did not accept the message', err);
     return NextResponse.json(
-      {
-        error: 'send_failed',
-        sessionId,
-        message: `Failed to reach the interviewer: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      },
+      { error: 'send_failed', sessionId, message: ONE_MOMENT },
       { status: 503 },
     );
   }
 
-  const reply = await waitForAgentReply(
+  const waited = await waitForAgentReply(
     client,
     sessionId,
     baselineCount,
@@ -471,6 +500,13 @@ export async function POST(req: NextRequest) {
     req.signal,
   );
 
+  if (waited.historyFailed) {
+    // The history could not be read, so there is no honest agent count to hand
+    // the recovery poll. A made-up 0 there would replay the whole history.
+    return NextResponse.json({ sessionId, reply: null, pending: true, agentCount: null });
+  }
+
+  const reply = waited.text;
   return NextResponse.json({
     sessionId,
     reply: reply ?? null,
@@ -507,7 +543,6 @@ export async function GET(req: NextRequest) {
 
   const url = new URL(req.url);
   const sessionId = (url.searchParams.get('sessionId') ?? '').trim();
-  const after = Math.max(0, parseInt(url.searchParams.get('after') ?? '0', 10) || 0);
   if (!sessionId) {
     return NextResponse.json(
       { error: 'invalid_request', detail: 'sessionId is required' },
@@ -519,6 +554,18 @@ export async function GET(req: NextRequest) {
   if(!tenant.context) return NextResponse.json({error:'forbidden'},{status:403});
   const owned=queryOne<{gateway_session_id:string}>('SELECT gateway_session_id FROM tenant_interviews WHERE tenant_id=?',[tenant.context.tenantId]);
   if(owned?.gateway_session_id!==sessionId)return NextResponse.json({error:'foreign_interview_session'},{status:403});
+
+  // `after` must be a real count. It used to be parseInt(..) || 0, so any
+  // non-number (or a missing one) became 0 and returned the WHOLE history —
+  // every earlier question, replayed as one giant reply.
+  const rawAfter = (url.searchParams.get('after') ?? '').trim();
+  if (!/^\d+$/.test(rawAfter)) {
+    return NextResponse.json(
+      { error: 'invalid_request', detail: 'after must be a non-negative number' },
+      { status: 400 },
+    );
+  }
+  const after = parseInt(rawAfter, 10);
 
   const conn = await connectOr503(req);
   if (!conn.ok) return conn.response;
