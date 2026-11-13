@@ -11,6 +11,7 @@ import { getSOPEmbeddingHealth, resolveEmbeddingProvider } from '@/lib/sop-embed
 import { poolUsage } from '@/lib/capacity/provider-pools';
 import { readResourceLedger } from '@/lib/capacity/resource-ledger';
 import { jevEngineState } from '@/lib/decision-engine/live';
+import { readEmbeddingsCache, writeEmbeddingsCache } from '@/lib/embeddings-cache';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -180,15 +181,27 @@ function embeddingHealthFallback(): Record<string, unknown> {
 }
 
 async function getEmbeddingsBlock(): Promise<Record<string, unknown>> {
+  // The probe shells out to python3 and scans two SQLite stores; a health poll
+  // (or a watchdog) must not pay that on every request. The five-minute cache
+  // and its reset helper live in `@/lib/embeddings-cache` (a route file may
+  // export only route names).
+  const cached = readEmbeddingsCache();
+  if (cached) {
+    return cached;
+  }
   try {
     const py = await probeEmbeddingHealthPy();
     if (py) {
       py.source = 'embedding_health.py';
+      writeEmbeddingsCache(py);
       return py;
     }
-    return embeddingHealthFallback();
+    const fallback = embeddingHealthFallback();
+    writeEmbeddingsCache(fallback);
+    return fallback;
   } catch {
-    // Absolute last resort — surface a degraded block rather than 500.
+    // Absolute last resort — surface a degraded block rather than 500. NOT
+    // cached: the next poll should try the probe again.
     return {
       check: 'dual_store_embedding_health',
       status: 'degraded',

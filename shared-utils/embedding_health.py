@@ -105,7 +105,7 @@ def _now() -> str:
 # ---------------------------------------------------------------------------
 
 def resolve_workspace_root() -> str:
-    root = os.environ.get("WORKSPACE_ROOT")
+    root = os.environ.get("OPENCLAW_WORKSPACE_ROOT") or os.environ.get("WORKSPACE_ROOT")
     if root and os.path.isdir(root):
         return root
     mac = os.path.expanduser("~/.openclaw/workspace")
@@ -412,6 +412,22 @@ def build_report(
 
     degraded = bool(persona["degraded"] or sop["degraded"] or asymmetric)
 
+    # Plain-language operator hint when a whole store sits on ONE known provider
+    # that is not the provider the app asked for (a setting, not a fault).
+    mismatch_hint = None
+    for st in (sop, persona):
+        dominant_provider = st.get("provider")
+        if (st.get("total_rows") and st.get("foreign_provider_rows") == st.get("total_rows")
+                and dominant_provider in ("google", "openai", "ollama")
+                and dominant_provider != st.get("canonical_provider")):
+            mismatch_hint = (
+                f"The {st['store']} was built with the '{dominant_provider}' embedder but this app "
+                f"expects '{st['canonical_provider']}'. Either set SOP_EMBEDDING_PROVIDER="
+                f"{dominant_provider} for this app, or rebuild the index with "
+                f"'{st['canonical_provider']}'. This is an operator setting; nothing is broken for the client."
+            )
+            break
+
     return {
         "check": "dual_store_embedding_health",
         "generated_at": _now(),
@@ -419,6 +435,7 @@ def build_report(
         "degraded": degraded,
         "asymmetric": asymmetric,
         "asymmetric_detail": detail,
+        "mismatch_hint": mismatch_hint,
         "persona_index": persona,
         "sop_index": sop,
     }
