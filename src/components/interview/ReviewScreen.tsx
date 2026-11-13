@@ -78,6 +78,7 @@ import {
   ivStaggerChild,
 } from './interview-theme';
 import { refreshInterviewGate } from '@/components/interview/gate-actions';
+import { fetchWithCsrfHeal } from '@/lib/interview/browser-recovery';
 
 /* -------------------------------------------------------------------------- */
 /* public shapes                                                               */
@@ -456,7 +457,7 @@ export default function ReviewScreen({
       // The complete route's schema accepts {retryKick?: boolean} after MR-37 —
       // when the idempotency guard returned alreadyComplete on a prior attempt,
       // we include retryKick:true so the script re-presses and re-fires the kick.
-      const res = await fetch('/api/interview/complete', {
+      const res = await fetchWithCsrfHeal('/api/interview/complete', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(needsRetryKick ? { retryKick: true } : {}),
