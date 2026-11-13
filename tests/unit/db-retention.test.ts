@@ -49,12 +49,13 @@ function daysAgoIso(days: number): string {
   return new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
 }
 
-/** Clear only the four pruned tables. `tasks` is left alone (other tables
+/** Clear only the five pruned tables. `tasks` is left alone (other tables
  *  foreign-key into it); each test makes its own task ids. */
 function clearFixtures(): void {
   run('DELETE FROM task_activities');
   run('DELETE FROM events');
   run('DELETE FROM sse_event_log');
+  run('DELETE FROM system_status_snapshots');
   run('DELETE FROM presentation_stage_timings');
 }
 
@@ -150,11 +151,12 @@ test('old rows are pruned from all four tables; fresh rows survive; counts match
     result.deleted,
     {
       presentation_stage_timings: 1,
+      system_status_snapshots: 0,
       sse_event_log: 1,
       events: 1,
       task_activities: 1,
     },
-    'exactly one old row deleted per table',
+    'exactly one old row deleted per seeded table',
   );
 
   const timingRowIds = db
@@ -184,7 +186,7 @@ test('old rows are pruned from all four tables; fresh rows survive; counts match
   assert.equal(ran?.n, 1, 'exactly one db_retention_ran event written');
   assert.match(
     ran?.message ?? '',
-    /deleted stage_timings=1 sse_event_log=1 events=1 task_activities=1 in [\d.]+s; \d+ free pages/,
+    /deleted stage_timings=1 status_snapshots=0 sse_event_log=1 events=1 task_activities=1 in [\d.]+s; \d+ free pages/,
     'the recorded summary carries the per-table counts',
   );
 
@@ -253,6 +255,7 @@ test('DISABLE_DB_RETENTION=1 skips the job and deletes nothing', async () => {
   assert.equal(result.skippedReason, 'DISABLE_DB_RETENTION set');
   assert.deepEqual(result.deleted, {
     presentation_stage_timings: 0,
+    system_status_snapshots: 0,
     sse_event_log: 0,
     events: 0,
     task_activities: 0,
