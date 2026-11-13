@@ -335,7 +335,11 @@ test('[STRANDED-01/E] a backlog card at the dispatch cap is blocked with a reaso
 
   const card = cardOf(taskId);
   assert.equal(card.status, 'blocked', 'the card stops being invisible queued work');
-  assert.match(String(card.block_reason), /dispatch-attempt cap/, 'the reason names the cap that was hit');
+  assert.equal(
+    card.block_reason,
+    'This task could not be started after several tries.',
+    'the client-facing reason is the U-09 (BUILD-SPEC row 28) wording; the cap that was hit is named in the operator alert asserted below',
+  );
   const capEvents = queryAll<{ message: string }>(
     `SELECT message FROM events WHERE task_id = ? AND type = 'task_dispatch_capped'`, [taskId]);
   assert.equal(capEvents.length, 1, 'exactly one operator alert');
