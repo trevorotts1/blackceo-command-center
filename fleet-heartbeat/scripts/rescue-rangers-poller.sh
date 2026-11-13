@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+# REFERENCE COPY - NOT THE RUNNING CODE.
+# The copy that runs is on the operator machine (its own fleet-heartbeat folder,
+# untracked there) and its published home is the private Fleet Ops repository.
+# This public copy can be behind it. It can also be ahead of it: see
+# docs/RESCUE-INTEGRATION.md. Do not deploy from this file, and do not
+# judge live behaviour from it. See docs/RESCUE-INTEGRATION.md.
+# (RRX-013)
 # rescue-rangers-poller.sh
 #
 # Mac-side half of the Rescue Rangers Relay (transport B: gateway-initiated pull).
@@ -39,13 +46,29 @@ _SECRET_ARGS=()
 if [ -n "${RESCUE_RANGERS_WEBHOOK_SECRET:-}" ]; then
   _SECRET_ARGS=(-H "X-Rescue-Secret: ${RESCUE_RANGERS_WEBHOOK_SECRET}")
 fi
-PENDING_JSON="$(curl -s --max-time 30 -X POST "$RELAY_URL" \
+# RRX-014: the HTTP code is captured and the body must parse. A failed fetch is
+# logged as a failure and exits 1. It is never turned into "zero tickets".
+# ${arr[@]+"${arr[@]}"} keeps bash 3.2 with `set -u` from aborting on an empty array.
+_PULL_RAW="$(curl -s --max-time 30 -w '\n%{http_code}' -X POST "$RELAY_URL" \
   -H 'Content-Type: application/json' \
-  "${_SECRET_ARGS[@]}" \
+  ${_SECRET_ARGS[@]+"${_SECRET_ARGS[@]}"} \
   -d "{\"action\":\"pending\",\"limit\":${PULL_LIMIT}}")"
-
-COUNT="$(printf '%s' "$PENDING_JSON" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("count",0))' 2>/dev/null || echo 0)"
-[ -z "$COUNT" ] && COUNT=0
+_PULL_RC=$?
+_PULL_CODE="${_PULL_RAW##*$'\n'}"
+PENDING_JSON="${_PULL_RAW%$'\n'*}"
+if [ "$_PULL_RC" -ne 0 ] || [ "$_PULL_CODE" != "200" ]; then
+  log "pull FAILED curl_rc=${_PULL_RC} http=${_PULL_CODE:-none}"
+  exit 1
+fi
+COUNT="$(printf '%s' "$PENDING_JSON" | python3 -c 'import sys,json
+d = json.load(sys.stdin)
+c = d.get("count", 0)
+assert isinstance(c, int) and not isinstance(c, bool) and c >= 0
+print(c)' 2>/dev/null)"
+if [ -z "$COUNT" ]; then
+  log "pull FAILED the answer was not JSON with a whole-number count"
+  exit 1
+fi
 if [ "$COUNT" -eq 0 ]; then
   exit 0
 fi
@@ -112,7 +135,8 @@ print("hard|||high|default deepseek/high")
   fi
 
   # Run one turn of the real rescue-rangers agent with tier-appropriate settings.
-  AGENT_OUT="$("$OPENCLAW_BIN" agent --agent rescue-rangers --message "$PROMPT" --json --timeout "$AGENT_TIMEOUT" --thinking "$THINKING_VAL" "${MODEL_ARGS[@]}" 2>/dev/null)"
+  # RRX-014: ${arr[@]+"${arr[@]}"} keeps bash 3.2 with `set -u` from aborting on the empty array of the default tier.
+  AGENT_OUT="$("$OPENCLAW_BIN" agent --agent rescue-rangers --message "$PROMPT" --json --timeout "$AGENT_TIMEOUT" --thinking "$THINKING_VAL" ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"} 2>/dev/null)"
   ANSWER="$(printf '%s' "$AGENT_OUT" | python3 -c '
 import sys, json
 raw = sys.stdin.read()
@@ -134,11 +158,13 @@ print(ans)
 ')"
 
   if [ -z "$ANSWER" ]; then
-    ANSWER="(rescue-rangers agent returned no text; please check the operator Mac gateway.)"
-    log "ticket ${TICKET_ID}: EMPTY agent reply"
-  else
-    log "ticket ${TICKET_ID}: got reply (${#ANSWER} chars)"
+    # RRX-014: an empty agent reply is NOT an answer. Posting a placeholder as the
+    # answer closed the ticket and handed the client's agent a sentence about the
+    # operator's machine. Post nothing; the ticket stays pending for the sweep.
+    log "ticket ${TICKET_ID}: EMPTY agent reply; nothing posted; ticket left pending"
+    continue
   fi
+  log "ticket ${TICKET_ID}: got reply (${#ANSWER} chars)"
 
   # Post the answer back to n8n (which posts to the group + returns to caller).
   # Include X-Rescue-Secret header if the env var is set (required when relay enforces auth).
