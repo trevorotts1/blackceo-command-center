@@ -192,7 +192,7 @@ describe("Item 19 — the Abandoned board filter", () => {
     // Scope to the filter bar: the card's own select checkbox also carries
     // the deck title ("Select "Abandoned Deck"") in its accessible name.
     const filterBar = document.querySelector('[data-walkthrough="filters"]') as HTMLElement;
-    fireEvent.click(within(filterBar).getByRole("button", { name: /Abandoned/ }));
+    fireEvent.click(within(filterBar).getByRole("button", { name: /Stopped/ }));
 
     await waitFor(() => {
       expect(screen.queryByText("Normal Deck")).toBeNull();

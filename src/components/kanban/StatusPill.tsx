@@ -12,7 +12,7 @@
  * originals so no card face changes appearance.
  */
 
-import { BACKLOG_COLUMN_LABEL } from '@/lib/board-labels';
+import { STATUS_PILL_LABELS } from '@/lib/board-labels';
 
 // P2-01: `backlog` maps to the renamed "Being Prepared" column label (imported
 // from src/lib/board-labels.ts) so a card's own status pill never contradicts
@@ -30,18 +30,10 @@ const STATUS_PILL_STYLES: Record<string, string> = {
   done: 'bg-emerald-100 text-emerald-700',
 };
 
-const STATUS_LABELS: Record<string, string> = {
-  backlog: BACKLOG_COLUMN_LABEL,
-  inbox: 'New',
-  planning: 'Planning',
-  assigned: 'Queued',
-  pending_dispatch: 'Pending',
-  in_progress: 'In Progress',
-  review: 'Review',
-  testing: 'Testing',
-  blocked: 'Blocked',
-  done: 'Done',
-};
+// CC-014: labels live in src/lib/board-labels.ts (STATUS_PILL_LABELS) so the
+// pill can never contradict the column it sits in, and the vocabulary is
+// testable without a component render.
+const STATUS_LABELS = STATUS_PILL_LABELS;
 
 export function StatusPill({ status }: { status: string }) {
   return (

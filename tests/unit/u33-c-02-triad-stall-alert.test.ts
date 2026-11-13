@@ -158,7 +158,7 @@ test('run #1 — Triad-incomplete backlog card past the stall threshold fires ex
   );
   const evts = eventsFor(missingSop49h, 'board_hygiene_triad_stalled');
   assert.equal(evts.length, 1, 'exactly one board_hygiene_triad_stalled event must be written');
-  assert.match(evts[0].message, /Missing: SOP/, 'the alert names the missing field using the card-pill vocabulary');
+  assert.match(evts[0].message, /Still needs: a playbook/, 'the alert names the missing field using the card-pill vocabulary');
   assert.equal(taskStatus(missingSop49h), 'backlog', 'the alert never changes task status');
 
   assert.ok(
@@ -167,7 +167,7 @@ test('run #1 — Triad-incomplete backlog card past the stall threshold fires ex
   );
   const evts2 = eventsFor(missingDescription60d, 'board_hygiene_triad_stalled');
   assert.equal(evts2.length, 1);
-  assert.match(evts2[0].message, /Missing: description, SOP, persona/, 'names ALL missing fields, in Triad order');
+  assert.match(evts2[0].message, /Still needs: a description, a playbook, a working style/, 'names ALL missing fields, in Triad order');
 });
 
 test('run #1 — a fully-groomed backlog card is never flagged, regardless of age', async () => {
