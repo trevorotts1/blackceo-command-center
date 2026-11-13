@@ -34,6 +34,7 @@ import {
   AdCampaignError,
   TransitionError,
 } from '../../src/lib/ad-campaigns';
+import { SKILL75_STAGE_SLUGS } from '../../src/lib/validation';
 
 /** Temp dir holding the fixture deliverable files (see registerStageDeliverable). */
 const AD_DELIVERABLE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'bc-adcampaign-deliv-'));
@@ -126,6 +127,50 @@ test('title_prefix overrides epic title/description; absent prefix keeps FB Ad R
     def.parent_id!,
   ]);
   assert.equal(epicDefault!.title, 'FB Ad Run — Acme Default Show');
+});
+
+test('twelve-stage Skill 75 campaign names itself in the epic description (S75-034)', () => {
+  const jobId = newJobId();
+  const stages = SKILL75_STAGE_SLUGS.map((slug) => ({ slug }));
+  assert.equal(stages.length, 12, 'canonical Skill 75 stage set is twelve stages');
+
+  const created = createAdCampaign({ job_id: jobId, show_name: 'Midnight Confession', stages });
+  assert.equal(created.created, true);
+
+  // The campaign row's description is the epic description: it must name the
+  // drama song run, never the Skill 48 Facebook run.
+  const campaignRow = queryOne<{ description: string }>(
+    'SELECT description FROM campaigns WHERE id = ?',
+    [jobId],
+  );
+  assert.equal(
+    campaignRow!.description,
+    'Drama song ad run (Skill 75).\ncontract=skill75 v1',
+    'a skill75 campaign carries the drama song epic description',
+  );
+
+  // The activity text no longer describes a Facebook ad card.
+  const epicCard = queryOne<{ id: string }>(
+    'SELECT id FROM tasks WHERE campaign_id = ? AND stage_slug = ?',
+    [jobId, 'epic'],
+  );
+  const epicActivity = queryOne<{ message: string }>('SELECT message FROM events WHERE task_id = ?', [
+    epicCard!.id,
+  ]);
+  assert.equal(epicActivity!.message, 'Ad card created: FB Ad Run — Midnight Confession');
+
+  // Every other producer keeps the exact previous wording.
+  const legacyId = newJobId();
+  createAdCampaign({ job_id: legacyId, show_name: 'Acme Legacy Show' });
+  const legacyCampaignRow = queryOne<{ description: string }>(
+    'SELECT description FROM campaigns WHERE id = ?',
+    [legacyId],
+  );
+  assert.equal(
+    legacyCampaignRow!.description,
+    'Skill 48 Facebook ad run.\ncontract=legacy v1',
+    'a legacy campaign keeps the Skill 48 wording byte for byte',
+  );
 });
 
 test('moveAdStage backlog -> in_progress -> review stays at review (no QC auto-done)', async () => {

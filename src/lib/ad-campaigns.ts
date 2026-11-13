@@ -595,7 +595,11 @@ export function createAdCampaign(input: CreateAdCampaignInput): CreateAdCampaign
   // Epic title/description use the optional title_prefix; 'FB Ad Run' default
   // keeps Skill 48 payloads (no title_prefix) byte-identical to before.
   const epicTitle = `${input.title_prefix ?? 'FB Ad Run'} — ${input.show_name}`;
-  const epicDescription = `${input.owner ? `Skill 48 Facebook ad run. owner=${input.owner}` : 'Skill 48 Facebook ad run.'}\n${contractMarker}`;
+  // The board says what actually ran: a Skill 75 drama campaign names itself;
+  // every other producer keeps the exact pre-D14 wording, byte for byte.
+  const epicRunLabel =
+    contract.kind === 'skill75' ? 'Drama song ad run (Skill 75).' : 'Skill 48 Facebook ad run.';
+  const epicDescription = `${input.owner ? `${epicRunLabel} owner=${input.owner}` : epicRunLabel}\n${contractMarker}`;
 
   // Build the card list: epic parent first, then one card per stage.
   const stageList = input.stages && input.stages.length > 0 ? input.stages : DEFAULT_AD_STAGES;
@@ -664,7 +668,7 @@ export function createAdCampaign(input: CreateAdCampaignInput): CreateAdCampaign
       run(
         `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
          VALUES (?, 'task_created', NULL, ?, ?, ?)`,
-        [uuidv4(), card.id, `FB ad card created: ${card.title}`, now],
+        [uuidv4(), card.id, `Ad card created: ${card.title}`, now],
       );
 
       const taskRow = queryOne<Task>('SELECT * FROM tasks WHERE id = ?', [card.id]);
