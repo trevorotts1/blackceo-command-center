@@ -192,6 +192,13 @@
  * channel and misstate the auth. It is therefore recorded in the documented
  * residual with that verified posture, never as a blanket exemption.
  *
+ * re-derived 2026-11-12 for U-06 / CC-039: the SystemStatusDrawer's "Re-run
+ * bootstrap" admin action was deleted (it posted /api/system/bootstrap from the
+ * browser with no bearer token, so the fail-closed handler refused it every
+ * time). The mutating-route census is unchanged — no route file moved — but
+ * POST /api/system/bootstrap lost its only interface call site, so it is now
+ * recorded in the documented residual below rather than inferred as wired.
+ *
  * re-derived 2026-09-27 for ILJ-004 tenant skip marks: POST
  * /api/interview/state — the owner's browser marking one structured question
  * skipped (InterviewClient.tsx:375 with the session cookie + tenant
@@ -593,6 +600,13 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
     // which the interface scanner does not read; bearer-listing it would 401
     // the browser channel and misstate the auth.
     '/api/council/convene',
+    // U-06 (CC-039): POST /api/system/bootstrap. The drawer's "Re-run
+    // bootstrap" button and its SSE modal were deleted with the Admin Actions
+    // block: the browser sent no bearer token, so the handler refused it every
+    // time (fail-closed 503 when MC_API_TOKEN is set). The start flow runs out
+    // of band; this diagnostics drawer no longer calls any mutating route.
+    // Bearer-listing it would 401 a console channel that no longer exists.
+    '/api/system/bootstrap',
   ];
 
   it('every reachable mutating route is either in BEARER_REQUIRED_WRITE_ROUTES, called by the interface, or a documented unwired console route (exact residual enforced)', () => {
