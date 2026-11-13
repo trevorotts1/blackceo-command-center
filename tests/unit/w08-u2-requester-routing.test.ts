@@ -250,13 +250,24 @@ test('a done report is skipped when the requester already got the canonical comp
   });
   const taskId = cardIdFor(jobId);
 
-  const before = deliverTaskReport(taskId, 'done report', { kind: 'done' });
-  assert.equal(before.skipped, undefined, 'first done report is not skipped');
+  // U-15 (CC-050): the trust engine is the single sender for a requester task,
+  // so this funnel stands down for done/started/assigned. This test is about
+  // the completion-stamp dedupe inside the funnel itself, so it switches the
+  // engine off — exactly what a box with DISABLE_TRUST_ENGINE=1 sees.
+  const savedDisable = process.env.DISABLE_TRUST_ENGINE;
+  process.env.DISABLE_TRUST_ENGINE = '1';
+  try {
+    const before = deliverTaskReport(taskId, 'done report', { kind: 'done' });
+    assert.equal(before.skipped, undefined, 'first done report is not skipped');
 
-  run('UPDATE tasks SET completion_sent_at = ? WHERE id = ?', [new Date().toISOString(), taskId]);
-  const after = deliverTaskReport(taskId, 'done report again', { kind: 'done' });
-  assert.equal(after.delivered, false);
-  assert.ok(after.skipped && after.skipped.includes('completion_sent_at'), 'skipped, with the reason named');
+    run('UPDATE tasks SET completion_sent_at = ? WHERE id = ?', [new Date().toISOString(), taskId]);
+    const after = deliverTaskReport(taskId, 'done report again', { kind: 'done' });
+    assert.equal(after.delivered, false);
+    assert.ok(after.skipped && after.skipped.includes('completion_sent_at'), 'skipped, with the reason named');
+  } finally {
+    if (savedDisable === undefined) delete process.env.DISABLE_TRUST_ENGINE;
+    else process.env.DISABLE_TRUST_ENGINE = savedDisable;
+  }
 
   // Other report kinds are unaffected by the completion stamp.
   const held = deliverTaskReport(taskId, 'held report', { kind: 'held' });

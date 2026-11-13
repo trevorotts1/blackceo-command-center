@@ -126,7 +126,7 @@ function DailyCounts({ summary }: { summary: RescueSummary }) {
         <h2 id="rescue-daily-heading" className="text-section text-gray-900">
           Today
         </h2>
-        <span className="text-caption text-gray-500 font-mono">{d.day} UTC</span>
+        <span className="text-caption text-gray-500 font-mono">{d.day}</span>
       </div>
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
         <StatCard
@@ -422,7 +422,7 @@ export default function RescueDashboard() {
       {summary.capSuppressedToday.length > 0 && (
         <section aria-labelledby="rescue-cap-heading">
           <h2 id="rescue-cap-heading" className="text-section text-gray-900 mb-3">
-            Suppressed by the daily cap
+            Suppressed by the daily cap (counted by UTC day)
           </h2>
           <div className="rounded-2xl border border-amber-200 bg-amber-50 shadow-card px-4 py-3">
             <ul className="space-y-1">

@@ -352,7 +352,7 @@ describe('single-tenant installation: launch reads keep working for the box tena
     expect(res.status).toBe(403);
     const body = await bodyText(res);
     expect(body).toContain('Launch data unavailable');
-    expect(body).toContain('Sign in with an authorized account');
+    expect(body).toContain('Please sign in with the email address you were invited with to see this page.');
   });
 
   it('DEMO_MODE does not open a public launch surface', async () => {

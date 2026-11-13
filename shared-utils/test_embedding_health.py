@@ -138,6 +138,34 @@ class EmbeddingHealthTests(unittest.TestCase):
         self.assertFalse(r["sop_index"]["semantic_ready"])
         self.assertTrue(r["asymmetric"])  # persona semantic, sop keyword-only
 
+    def test_openclaw_workspace_root_env_is_honoured(self):
+        ws = os.path.join(self.tmp, "operator-workspace")
+        db_path = os.path.join(ws, "data", "coaching-personas", "gemini-index.sqlite")
+        os.makedirs(os.path.dirname(db_path))
+        _make_persona_db(db_path, [("gemini-embedding-2", 3072)] * 2)
+
+        keys = ("OPENCLAW_WORKSPACE_ROOT", "WORKSPACE_ROOT", "PERSONA_INDEX_DB")
+        saved = {k: os.environ.pop(k, None) for k in keys}
+        try:
+            os.environ["OPENCLAW_WORKSPACE_ROOT"] = ws
+            self.assertEqual(eh.resolve_workspace_root(), ws)
+            self.assertEqual(eh.resolve_persona_db(None), db_path)
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+    def test_mismatch_hint_names_ollama_for_all_ollama_store(self):
+        # The SOP store was built entirely with the local ollama embedder while
+        # the app asked for google — a setting mismatch, not a fault.
+        _make_sop_db(self.sop_db, [("embeddinggemma-2:740m", 768)] * 4)
+        r = self._report("google")
+        self.assertTrue(r.get("mismatch_hint"), "all-ollama store read as google must hint")
+        self.assertIn("ollama", r["mismatch_hint"])
+        self.assertIn("sop_index", r["mismatch_hint"])
+
     def test_line_format_never_raises(self):
         _make_persona_db(self.persona_db, [("gemini-embedding-2", 3072)])
         _make_sop_db(self.sop_db, [("gemini-embedding-2", 3072)])

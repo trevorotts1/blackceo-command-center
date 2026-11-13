@@ -415,7 +415,11 @@ test('intake-advance-sweep: a legacy task_capped event dedups only the notice, n
     [id],
   );
   assert.equal(task?.status, 'blocked', 'a legacy task_capped event must not starve the idempotent block attempt');
-  assert.match(task?.block_reason ?? '', /QC-reroute cap reached/, 'the legacy capped task must receive the structured cap block');
+  // Wording pin, not behaviour: U-09 (BUILD-SPEC row 28) reworded this
+  // client-facing block_reason to plain English and moved the cap detail to
+  // the operator's [CAP-BLOCKED] timeline/escalation events. The structured
+  // block itself is still proven by the status transition above.
+  assert.match(task?.block_reason ?? '', /This task could not be started after several tries/, 'the legacy capped task must receive the structured cap block');
 
   const cappedEvents = queryOne<{ c: number }>(
     `SELECT COUNT(*) AS c FROM events WHERE task_id = ? AND type = 'task_capped'`,
