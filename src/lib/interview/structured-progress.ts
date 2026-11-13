@@ -35,6 +35,10 @@
 export interface StructuredQuestionLike {
   id: string;
   prompt: string;
+  /** Older wording this question was asked with (registry `legacyPrompts`).
+   *  A transcript block carrying one of these still matches the question, so an
+   *  answer given before a wording change is never lost. */
+  legacyPrompts?: readonly string[];
   section: string;
   required?: boolean;
 }
@@ -43,6 +47,9 @@ export interface StructuredQuestionLike {
 export interface AnswerBlockLike {
   question: string;
   answer: string;
+  /** The registry question id, when the block was written with a `**QID:**` line.
+   *  When present it is the ONLY match used — wording is never consulted. */
+  qid?: string | null;
 }
 
 /** Where a paused owner should resume inside the structured set. */
@@ -78,20 +85,53 @@ export function buildPromptIndex<Q extends StructuredQuestionLike>(
 }
 
 /**
+ * Index a question set by EVERY wording it has ever been asked with — the
+ * current `prompt` plus each `legacyPrompts` entry (first definition wins).
+ * Private to this module: `buildPromptIndex` keeps its canonical-only contract
+ * for callers that want strict current-wording matching.
+ */
+function buildWordingIndex<Q extends StructuredQuestionLike>(
+  questions: readonly Q[],
+): Map<string, Q> {
+  const idx = new Map<string, Q>();
+  const add = (key: string, q: Q) => {
+    const norm = normPrompt(key);
+    if (norm && !idx.has(norm)) idx.set(norm, q);
+  };
+  for (const q of questions) {
+    add(q.prompt, q);
+    for (const legacy of q.legacyPrompts ?? []) add(legacy, q);
+  }
+  return idx;
+}
+
+/**
  * The set of structured question ids that already have a transcript answer.
- * A block matches a question when its recorded question text normalizes to the
- * question's canonical prompt. Blocks that match no structured question (the
- * conversational depth) are ignored. Blocks with an empty answer are ignored
- * too — an empty answer is not an answer.
+ *
+ * Matching order (registry v2):
+ *   1. a block written with `**QID:** <id>` matches by ID and nothing else —
+ *      any wording is accepted, and an id the deck does not know is ignored
+ *      rather than guessed at by text;
+ *   2. a block with no QID line (written before the registry carried ids) falls
+ *      back to normalized prompt matching against the question's current
+ *      `prompt` and every entry of `legacyPrompts`.
+ *
+ * Blocks with an empty answer are ignored — an empty answer is not an answer.
  */
 export function computeAnsweredIds(
   blocks: readonly AnswerBlockLike[],
   questions: readonly StructuredQuestionLike[],
 ): string[] {
-  const idx = buildPromptIndex(questions);
+  const known = new Set(questions.map((q) => q.id));
+  const idx = buildWordingIndex(questions);
   const answered = new Set<string>();
   for (const b of blocks) {
     if (!b.answer || !b.answer.trim()) continue;
+    const qid = typeof b.qid === 'string' ? b.qid.trim() : '';
+    if (qid) {
+      if (known.has(qid)) answered.add(qid);
+      continue;
+    }
     const q = idx.get(normPrompt(b.question));
     if (q) answered.add(q.id);
   }
