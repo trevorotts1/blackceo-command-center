@@ -93,7 +93,7 @@ import WelcomeBack from '@/components/interview/WelcomeBack';
 
 import { useCompanyBrand } from '@/hooks/useCompanyBrand';
 import { useLogoUrl } from '@/hooks/useLogoUrl';
-import { skipInterviewForNow } from '@/components/interview/gate-actions';
+import { canSkipInterview, skipInterviewForNow } from '@/components/interview/gate-actions';
 
 /* -------------------------------------------------------------------------- */
 /* structured question set (shared base + vendored branding JSON)              */
@@ -226,6 +226,10 @@ const ALL_GATES_FALSE: GateFlags = {
 const RECOVERY_WINDOW_MS = 90_000;
 const RECOVERY_POLL_MS = 3_500;
 
+/** WF-012: a soft progress-read failure re-reads this often, this many times. */
+const SOFT_READ_RETRY_MS = 5_000;
+const SOFT_READ_MAX_RETRIES = 6;
+
 /** Session-storage key for structured questions the owner skipped this device. */
 const SKIPPED_KEY = 'iv-skipped-structured';
 
@@ -258,9 +262,18 @@ export default function InterviewClient() {
   // Server truth (progress rail + resume + gate flags + structured position).
   const [state, setState] = useState<InterviewStateResponse | null>(null);
   const [booting, setBooting] = useState(true);
-  const [stateError, setStateError] = useState<string | null>(null);
-  const [declaringCompletion, setDeclaringCompletion] = useState(false);
-  const [declarationError, setDeclarationError] = useState<string | null>(null);
+  // WF-012: two DIFFERENT failures, never one. accessError is a real refusal to
+  // read (401/403, or a failed enrollment exchange) — the full-screen "Check
+  // your access" view is correct there. softError is every other progress-read
+  // failure: a blip, never an ejection. The screen the owner is on stays put,
+  // a reconnecting line appears above it, and the read is retried.
+  const [accessError, setAccessError] = useState<string | null>(null);
+  const [softError, setSoftError] = useState(false);
+  const [softAttempts, setSoftAttempts] = useState(0);
+  // BU-05 (WF-013): "Skip for now" is operator-only. showSkip is resolved once
+  // on mount from the server action; an owner-facing session never sees it.
+  const [showSkip, setShowSkip] = useState(false);
+  const [skipError, setSkipError] = useState<string | null>(null);
 
   // Structured answers recorded THIS session (merged with the server's set so a
   // just-answered card is skipped even before the next /state read lands).
@@ -406,10 +419,17 @@ export default function InterviewClient() {
   const loadState = useCallback(async (): Promise<InterviewStateResponse | null> => {
     try {
       const res = await fetch('/api/interview/state', { cache: 'no-store' });
-      if (!res.ok) throw new Error(res.status === 403 || res.status === 401 ? INTERVIEW_SIGN_IN_HELP : INTERVIEW_RETRY_HELP);
+      if (res.status === 401 || res.status === 403) {
+        // The one class of failure that genuinely keeps the owner out.
+        setAccessError(INTERVIEW_SIGN_IN_HELP);
+        return null;
+      }
+      if (!res.ok) throw new Error(INTERVIEW_RETRY_HELP);
       const data = (await res.json()) as InterviewStateResponse;
       if (!verifiedProgress(data) && data.priorCompletionDeclared !== true) throw new Error(INTERVIEW_RETRY_HELP);
-      setStateError(null);
+      setAccessError(null);
+      setSoftError(false);
+      setSoftAttempts(0);
       setState(data);
       // ILJ-004: fold the server skip set into this device's local set so skips
       // survive a device switch — the server copy is authoritative for the
@@ -435,13 +455,26 @@ export default function InterviewClient() {
         });
       }
       return data;
-    } catch (error) {
-      setStateError(error instanceof Error ? error.message : 'Your progress is unavailable. Please retry.');
-      // Non-fatal: the rail stays as-is and gates stay fail-closed until the next
-      // successful read.
+    } catch {
+      // WF-012: a failed progress read is a blip, not an ejection. Never replace
+      // the screen the owner is on — remember the failure, keep the rail as-is,
+      // keep the gates fail-closed, and let the retry effect read again.
+      setSoftError(true);
+      setSoftAttempts((n) => n + 1);
       return null;
     }
   }, []);
+
+  // WF-012: re-read after a soft failure — at most SOFT_READ_MAX_RETRIES tries,
+  // SOFT_READ_RETRY_MS apart. When those run out the bar simply stays; the
+  // owner keeps working on the screen they already have.
+  useEffect(() => {
+    if (!softError || softAttempts > SOFT_READ_MAX_RETRIES) return;
+    const timer = setTimeout(() => {
+      void loadState();
+    }, SOFT_READ_RETRY_MS);
+    return () => clearTimeout(timer);
+  }, [softError, softAttempts, loadState]);
 
   // Opening another invitation on this same page can be a query or legacy
   // fragment navigation. Query (?enroll=) is the canonical short link (it
@@ -461,6 +494,24 @@ export default function InterviewClient() {
     return () => {
       window.removeEventListener('popstate', onSearchChange);
       window.removeEventListener('hashchange', onSearchChange);
+    };
+  }, []);
+
+  // BU-05 (WF-013): resolve the operator-only "Skip for now" affordance once on
+  // mount. A false answer (or any failure) hides it; the action itself refuses a
+  // non-operator anyway, so this is presentation only.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const allowed = await canSkipInterview();
+        if (!cancelled) setShowSkip(allowed);
+      } catch {
+        if (!cancelled) setShowSkip(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
     };
   }, []);
 
@@ -499,7 +550,7 @@ export default function InterviewClient() {
       if (enrollmentRef.current) {
         const enrollmentError = await enrollmentRef.current;
         if (cancelled) return;
-        if (enrollmentError) { setStateError(enrollmentError); setBooting(false); }
+        if (enrollmentError) { setAccessError(enrollmentError); setBooting(false); }
         return; // Success hands off to the authenticated, query-free document.
       }
       const data = await loadState();
@@ -543,8 +594,10 @@ export default function InterviewClient() {
       // A COMPLETED interview never shows the resume nag, regardless of answer
       // counts — the owner is done; route straight to the dashboard (already
       // unlocked by the gate cookie once interviewComplete is true). Checked
-      // FIRST, ahead of the answeredCount branch below.
-      if (data.interviewComplete === true || data.buildCompleted === true || data.priorCompletionDeclared === true) {
+      // FIRST, ahead of the answeredCount branch below. BU-05: a prior-completion
+      // declaration no longer redirects here — the route is operator-only and an
+      // existing row still opens the dashboard through the gate cookie.
+      if (data.interviewComplete === true || data.buildCompleted === true) {
         router.replace('/');
         return;
       }
@@ -782,10 +835,17 @@ export default function InterviewClient() {
     );
   }, [fireMilestone, loadState]);
 
-  /* ---- U057 skip-for-now handler ---- */
+  /* ---- U057 skip-for-now handler (operator-only since BU-05) ---- */
 
   const handleSkipForNow = useCallback(async () => {
-    try { await skipInterviewForNow(); } catch { /* non-fatal */ }
+    setSkipError(null);
+    try {
+      await skipInterviewForNow();
+    } catch {
+      // BU-05: a refused skip is said plainly and never navigates.
+      setSkipError('Skipping is not available for this account.');
+      return;
+    }
     router.push('/');
   }, [router]);
 
@@ -863,31 +923,10 @@ export default function InterviewClient() {
     if (!ticket) { window.location.reload(); return; }
     setBooting(true);
     const error = await recoverInterviewAccess(ticket);
-    if (error) { setStateError(error); setBooting(false); return; }
+    if (error) { setAccessError(error); setBooting(false); return; }
     pendingEnrollmentRef.current = null;
     window.location.replace(window.location.pathname);
   }, []);
-
-  const declareCompleted = useCallback(async () => {
-    if (declaringCompletion) return;
-    setDeclaringCompletion(true);
-    setDeclarationError(null);
-    try {
-      const response = await fetch('/api/interview/prior-completion', {
-        method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ confirmed: true }),
-      });
-      const result = await response.json();
-      if (!response.ok || result.priorCompletionDeclared !== true) {
-        throw new Error(response.status === 401 || response.status === 403
-          ? INTERVIEW_SIGN_IN_HELP : 'Your declaration was not saved. Please retry.');
-      }
-      window.location.assign('/');
-    } catch (error) {
-      setDeclarationError(error instanceof Error ? error.message : 'Your declaration was not saved. Please retry.');
-      setDeclaringCompletion(false);
-    }
-  }, [declaringCompletion]);
 
   /* ---- renders ---- */
 
@@ -901,10 +940,10 @@ export default function InterviewClient() {
 
   let screen: React.ReactNode;
 
-  if (stateError) {
+  if (accessError) {
     screen = <div className={iv.root}><div className={iv.stage} role="alert">
       <h1 className={iv.question}>Check your access</h1>
-      <p className={iv.lede}>{stateError}</p>
+      <p className={iv.lede}>{accessError}</p>
       <button type="button" className={iv.btnPrimary} disabled={booting} onClick={() => void retryAccess()}>{booting ? 'Checking…' : 'Check sign-in and retry'}</button>
       <p className="mt-4 text-sm">Use this same interview page after signing in. Submitted answers stay saved; a fresh link does not start a new interview.</p>
     </div></div>;
@@ -1010,23 +1049,19 @@ export default function InterviewClient() {
         onSelect={setConsent}
         onBegin={beginInterview}
         onSkip={handleSkipForNow}
+        showSkip={showSkip}
+        skipError={skipError}
         standardReady={standardReady}
       />
     );
   }
 
   // Respect the OS reduced-motion preference across every interview animation.
-  return <MotionConfig reducedMotion="user">{screen}
-    {!booting && !state?.interviewComplete && !state?.buildCompleted && !state?.priorCompletionDeclared && (
-      <section className="mx-auto w-full max-w-2xl px-5 pb-8" aria-label="Previously completed interview">
-        <button type="button" className={iv.btnSecondary} disabled={declaringCompletion}
-          aria-describedby="prior-completion-help" onClick={() => void declareCompleted()}>
-          {declaringCompletion ? 'Saving your declaration…' : 'I have already completed the interview'}
-        </button>
-        <p id="prior-completion-help" className="mt-3 text-sm">This saves your declaration that you previously completed the interview and stops repeat prompts across sign-ins. It does not create answers or mark your workforce build complete.</p>
-        {declarationError && <p role="alert" className="mt-3 text-sm">{declarationError}</p>}
-      </section>
-    )}
+  return <MotionConfig reducedMotion="user">
+    {/* WF-012: a soft progress-read failure shows this line ABOVE the screen the
+        owner is already on — never in place of it. */}
+    {softError && <p role="status" className="mx-auto w-full max-w-2xl px-5 pt-4 text-sm">Reconnecting… your answers are saved.</p>}
+    {screen}
   </MotionConfig>;
 }
 
@@ -1352,6 +1387,8 @@ function ConsentScreen({
   onSelect,
   onBegin,
   onSkip,
+  showSkip,
+  skipError,
   standardReady,
 }: {
   logoUrl: string;
@@ -1361,6 +1398,10 @@ function ConsentScreen({
   onSelect: (c: Consent) => void;
   onBegin: () => void;
   onSkip: () => void;
+  /** BU-05 (WF-013): operator-only. False hides "Skip for now" entirely. */
+  showSkip: boolean;
+  /** BU-05: a refused skip is stated plainly instead of navigating. */
+  skipError: string | null;
   /** AI Workforce standard-first (PHASE 6 item 6): edit-mode framing for a
    *  standard-prebuilt box. */
   standardReady: boolean;
@@ -1528,21 +1569,29 @@ function ConsentScreen({
           </p>
         )}
 
-        {/* U057: "Skip for now" — sets a 1-hour bypass cookie for urgent dashboard access. */}
-        <div className="mt-4 pt-4" style={{ borderTop: '1px solid var(--iv-line)' }}>
-          <button
-            type="button"
-            onClick={onSkip}
-            className={ivcx(iv.btnSecondary)}
-            style={{ width: '100%', justifyContent: 'center' }}
-            data-walkthrough="interview-skip-button"
-          >
-            Skip for now
-          </button>
-          <p className={ivcx(iv.lede, 'mt-2 text-center')} style={{ fontSize: '0.72rem' }}>
-            Go straight to your dashboard. A reminder will stay at the top until you finish the interview.
+        {/* U057: "Skip for now" — sets a 1-hour bypass cookie for urgent dashboard
+            access. BU-05: operator-only — an owner-facing session never sees it. */}
+        {showSkip && (
+          <div className="mt-4 pt-4" style={{ borderTop: '1px solid var(--iv-line)' }}>
+            <button
+              type="button"
+              onClick={onSkip}
+              className={ivcx(iv.btnSecondary)}
+              style={{ width: '100%', justifyContent: 'center' }}
+              data-walkthrough="interview-skip-button"
+            >
+              Skip for now
+            </button>
+            <p className={ivcx(iv.lede, 'mt-2 text-center')} style={{ fontSize: '0.72rem' }}>
+              Go straight to your dashboard. A reminder will stay at the top until you finish the interview.
+            </p>
+          </div>
+        )}
+        {skipError && (
+          <p role="alert" className={ivcx(iv.lede, 'mt-2 text-center')} style={{ fontSize: '0.78rem' }}>
+            {skipError}
           </p>
-        </div>
+        )}
       </motion.div>
     </div>
   );
