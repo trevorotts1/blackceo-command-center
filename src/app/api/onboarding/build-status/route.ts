@@ -22,10 +22,10 @@ export async function GET(request: NextRequest) {
     const slug = typeof state.companySlug === 'string' ? state.companySlug : company?.slug;
     if (!slug || !/^[a-z0-9][a-z0-9_-]*$/.test(slug) || (company && company.slug !== slug) ||
         (state.companyId && state.companyId !== context.companyId)) {
-      return NextResponse.json({ error: 'build_company_mismatch', message: 'Build identity needs verification for this company.' }, { status: 409, headers });
+      return NextResponse.json({ error: 'build_company_mismatch', message: 'We are confirming this build belongs to your company. This page will update on its own.' }, { status: 409, headers });
     }
     if (typeof state.buildId !== 'string' || !state.buildId) {
-      return NextResponse.json({ error: 'build_identity_missing', message: 'This build needs a current verification record. Ask your operator to resume validation.' }, { status: 409, headers });
+      return NextResponse.json({ error: 'build_identity_missing', message: 'Your build is being double-checked. This page will update on its own. If it has not changed in an hour, let your support contact know.' }, { status: 409, headers });
     }
     const isComplete = verifiedBuild(state) && verifiedCommandCenter(state);
     const roots = [
@@ -53,7 +53,7 @@ export async function GET(request: NextRequest) {
       }, { headers });
     }
     return NextResponse.json({ stage: isComplete ? 'complete' : 'waiting',
-      message: isComplete ? 'Your workforce build is verified.' : 'Waiting for current build progress from your installation.',
+      message: isComplete ? 'Your workforce build is verified.' : 'Your AI workforce is being set up. Progress will appear here shortly.',
       company_id: context.companyId, company_slug: slug, build_id: state.buildId,
       completion_verified: isComplete, completion_verification: state.completionVerification,
       documents_total: 0, documents_complete: 0, departments: [], eta_minutes: 0,
