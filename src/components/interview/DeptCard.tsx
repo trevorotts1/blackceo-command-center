@@ -4,8 +4,8 @@
  * DeptCard — one department card on the Phase-5.5 decision board (P2-5).
  *
  * A PURE presentational card. It renders a single department (emoji + name +
- * one-liner), a COVERED / NOT-YET coverage badge, and the owner's YES / NO /
- * LATER choice — but it owns NO data and presses NO buttons of its own. Every
+ * one-liner), a COVERED / NOT-YET coverage badge, and the owner's YES / NO
+ * choice — but it owns NO data and presses NO buttons of its own. Every
  * decision is relayed up via `onDecide`; the parent <DepartmentBoard/> is the
  * only thing that talks to POST /api/interview/decision (the single sanctioned
  * writer → record-dept-decision.sh). Keeping this component write-free means a
@@ -13,8 +13,8 @@
  *
  * Two card shapes share this component:
  *   • kind 'core' / 'recommended' — a canonical department the client's Skill-23
- *     script knows by id. Gets the full YES / NO / LATER control. A NO becomes a
- *     provenanced, honored decline (it shows NO and is not built downstream).
+ *     script knows by id. Gets the YES / NO control. A NO becomes a provenanced,
+ *     honored decline (it shows NO and is not built downstream).
  *   • kind 'custom' — an owner-added department. It has no canonical id the
  *     recorder would accept, so it is KEPT by default (opt-out model) and offers
  *     a Remove control instead of decision buttons.
@@ -28,7 +28,6 @@
 import { motion } from 'framer-motion';
 import {
   Check,
-  Clock3,
   Loader2,
   X,
   Trash2,
@@ -66,7 +65,7 @@ export interface DeptCardProps {
   error?: string | null;
   /** Disable all controls (e.g. the catalog is still loading). */
   disabled?: boolean;
-  /** Relay a YES / NO / LATER press up to the board (core/recommended only). */
+  /** Relay a YES / NO press up to the board (core/recommended only). */
   onDecide?: (verb: DeptVerb) => void;
   /** Opt a custom department out of the workforce (custom only). */
   onRemove?: () => void;
@@ -74,7 +73,7 @@ export interface DeptCardProps {
    * AI Workforce standard-first (PHASE 6 item 6): true → the card shows the
    * THIRD state — KEEP (default, the foundation is already built) / REMOVE
    * (confirmed decline with loss warning) / TUNE (want to personalize content).
-   * Legacy boxes (false) keep the YES / NO / LATER build-from-scratch controls.
+   * Legacy boxes (false) keep the YES / NO build-from-scratch controls.
    */
   standardReady?: boolean;
 }
@@ -217,7 +216,7 @@ export default function DeptCard({
         <div
           role="group"
           aria-label={`Decision for ${name}`}
-          style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '0.5rem' }}
+          style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '0.5rem' }}
         >
           <DecisionButton
             verb="yes"
@@ -226,14 +225,6 @@ export default function DeptCard({
             busy={busy}
             disabled={disabled}
             onClick={() => onDecide?.('yes')}
-          />
-          <DecisionButton
-            verb="later"
-            label="Decide later"
-            selected={decision === 'later'}
-            busy={busy}
-            disabled={disabled}
-            onClick={() => onDecide?.('later')}
           />
           <DecisionButton
             verb="no"
@@ -317,15 +308,9 @@ function CoverageBadge({
       </span>
     );
   }
-  if (later) {
-    return (
-      <span className={iv.badgePending} style={{ whiteSpace: 'nowrap' }}>
-        <Clock3 className="h-3.5 w-3.5" aria-hidden />
-        Later
-      </span>
-    );
-  }
-  if (keptByDefault) {
+  if (later || keptByDefault) {
+    // "Later" is gone from the screen (BU-15): an old record of it reads "Kept",
+    // exactly like a standard-first box's built-by-default department.
     return (
       <span className={iv.badgeCovered} style={{ whiteSpace: 'nowrap' }}>
         <CheckCircle2 className="h-3.5 w-3.5" aria-hidden />
@@ -342,7 +327,7 @@ function CoverageBadge({
 }
 
 /* -------------------------------------------------------------------------- */
-/* one YES / NO / LATER button                                                 */
+/* one YES / NO button                                                         */
 /* -------------------------------------------------------------------------- */
 
 function DecisionButton({
@@ -353,22 +338,22 @@ function DecisionButton({
   disabled,
   onClick,
 }: {
-  verb: DeptVerb;
+  verb: 'yes' | 'no';
   label: string;
   selected: boolean;
   busy: boolean;
   disabled: boolean;
   onClick: () => void;
 }) {
-  const base = verb === 'yes' && selected ? iv.btnPrimary : verb === 'later' ? iv.btnQuiet : iv.btnGhost;
-  const Icon = verb === 'yes' ? Check : verb === 'later' ? Clock3 : X;
-  // The primary variant already reads as "chosen"; give the ghost/quiet variants
-  // an explicit selected ring so a chosen NO / LATER is unmistakable on the dark
-  // panel (there is no generic .iv-btn.is-selected rule in globals.css).
+  const base = verb === 'yes' && selected ? iv.btnPrimary : iv.btnGhost;
+  const Icon = verb === 'yes' ? Check : X;
+  // The primary variant already reads as "chosen"; give the ghost variant an
+  // explicit selected ring so a chosen NO is unmistakable on the dark panel
+  // (there is no generic .iv-btn.is-selected rule in globals.css).
   const selectedRing =
-    selected && !(verb === 'yes')
+    selected && verb === 'no'
       ? {
-          borderColor: verb === 'no' ? 'var(--iv-line-strong)' : 'var(--iv-accent-ring)',
+          borderColor: 'var(--iv-line-strong)',
           boxShadow: '0 0 0 2px var(--iv-accent-wash)',
           color: 'var(--iv-ink)',
         }
