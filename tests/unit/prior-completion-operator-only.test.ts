@@ -156,8 +156,8 @@ test('the non-operator page render carries neither control', async () => {
   const markup = renderToStaticMarkup(
     createElement(AppRouterContext.Provider, { value: router }, createElement(InterviewClient)),
   );
-  // Control first: the consent screen really rendered.
-  assert.ok(markup.includes('Begin interview'), 'the consent screen must render');
+  // Control first: the welcome screen really rendered (one Start button).
+  assert.ok(markup.includes('Start'), 'the consent screen must render');
   assert.equal(markup.includes('I have already completed the interview'), false);
   assert.equal(markup.includes('Skip for now'), false);
 });
