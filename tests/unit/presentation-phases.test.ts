@@ -1,17 +1,22 @@
 /**
- * U060 — presentation-phases unit tests.
+ * PD-006 — presentation-phases unit tests.
  *
- * Proves:
- *   - exclusivity — every phase id appears exactly once (no double-assignments)
- *   - totality   — the 26 real ids are all present
- *   - checksum   — per-label counts sum to 26
- *   - no wildcards — no key contains `*`
- *   - P7 is absent — the audit's non-existent phase can never leak in
- *   - P-SP-P3-HYGIENE is mapped (the phase the audit's *-QC wildcard missed)
- *   - phaseIdOf returns the id from object metadata, stringified metadata,
- *     and null for absent/malformed/wrong-shaped/empty input
- *   - computePhaseProgress returns 7 labels always, in order, with correct
- *     statuses and unmapped
+ * The table is GENERATED from the pipeline manifest (manifest_version 75, 56
+ * phases, 13 client-facing steps). Proves:
+ *   - totality   — every manifest phase id has a step (nothing invisible)
+ *   - exclusivity — no id is named twice, and no id outside the manifest maps
+ *   - the 13 steps and their order
+ *   - no wildcard keys
+ *   - P7-TELEPROMPTER is an ordinary phase of Speaker Kit (the old special
+ *     case is gone; there is no 'Teleprompter' step)
+ *   - a retired phase id is unmapped, never silently tolerated
+ *   - the reducer: every phase of manifest version 75 done (sales and checkout
+ *     elected) leaves EVERY step done and `unmapped` empty; a declined branch
+ *     emits no branch step; branch steps ride on evidence when elections are
+ *     unknown
+ *   - phaseIdOf / activitySchemaInfo / isTeleprompterDeliverable contracts
+ *   - the stepper's owner-action text: parked on P-STYLE-PICK shows the exact
+ *     "Your turn: pick style A, B or C" text on the Your Style Pick step
  */
 
 import { describe, it, expect } from 'vitest';
@@ -21,452 +26,375 @@ import {
   DELIVERABLE_DERIVED_LABELS,
   PHASE_ACTIVITY_METADATA_KEY,
   TELEPROMPTER_BASENAME,
+  UPSELL_PHASE_TO_LABEL,
+  UPSELL_SHARED_PHASE_TO_LABEL,
+  YOUR_TURN_TEXT,
   isTeleprompterDeliverable,
+  labelForPhaseId,
   phaseIdOf,
+  requiredPhaseIdsForLabel,
+  yourTurnStepLabel,
   computePhaseProgress,
+  phaseElapsedSeconds,
 } from '@/lib/presentation-phases';
+import { MANIFEST_VERSION, PHASES, STEPS } from '@/lib/presentation-phases.generated';
 
-// The 26 real phase ids in manifest order, hard-coded so the test fails when
-// the manifest and the table drift.
-const MANIFEST_26 = [
-  'P-CONVERTER',
-  'P-0.5-RESEARCH',
-  'P0A-INTAKE',
-  'P-SP-CLAIM',
-  'P-SP-INTAKE',
-  'P-SP-INTAKE-TRACE',
-  'P0B-PRIORITY',
-  'P3-ARC',
-  'P-3.5-RESEARCH-MAP',
-  'P4-COPY',
-  'P-SP-STRUCTURE',
-  'P-SP-P3-HYGIENE',
-  'P1Q-COPY-QC',
-  'PF-DESIGN',
-  'P-TYPO-QC',
-  'P4-PROMPT',
-  'P-PROMPT-QC',
-  'P-STYLE-PREVIEW',
-  'P4-RENDER',
-  'P-IMAGE-QC',
-  'P-SHIFT-QC',
-  'P8-ASSEMBLE',
-  'P9-SPEECH',
-  'P-SPEECH-QC',
-  'P9.5-NOTES-SYNC',
-  'P9-DELIVER',
+const MANIFEST_IDS = PHASES.map((p) => p.id);
+
+const BRANCH_STEPS = ['Sales Page', 'Checkout', 'Video Sales Page'];
+
+const EXPECTED_STEPS = [
+  'Getting Started',
+  'Research',
+  'Script',
+  'Design',
+  'Your Style Pick',
+  'Images',
+  'Sales Page',
+  'Checkout',
+  'Video Sales Page',
+  'Speaker Kit',
+  'Audio and Video',
+  'Quality Check',
+  'Delivery',
 ];
 
-const EXPECTED_COUNTS: Record<string, number> = {
-  Intake: 9,
-  Script: 5,
-  Prompts: 4,
-  Images: 3,
-  Teleprompter: 0,
-  QC: 2,
-  Delivered: 3,
-};
+// The nine phase ids the old hand-typed table waited on that manifest
+// version 75 no longer has (design/render/HTML staged phases).
+const RETIRED_IDS = [
+  'P-U-DESIGN-SALES',
+  'P-U-DESIGN-RENDER-SALES',
+  'P-U-HTML-SALES',
+  'P-U-DESIGN-CHECKOUT',
+  'P-U-DESIGN-RENDER-CHECKOUT',
+  'P-U-HTML-CHECKOUT',
+  'P-U-DESIGN-VSL',
+  'P-U-DESIGN-RENDER-VSL',
+  'P-U-HTML-VSL',
+];
 
-describe('U060 — presentation-phases', () => {
-  describe('PHASE_TO_LABEL table', () => {
-    it('maps exactly all 26 manifest phases with no extras', () => {
-      const keys = Object.keys(PHASE_TO_LABEL);
-      const keySet = new Set(keys);
-      const manifestSet = new Set(MANIFEST_26);
+const doneActivity = (phase_id: string) => ({
+  activity_type: 'phase_completed',
+  metadata: { phase_id },
+});
 
-      const missingFromTable = [...manifestSet].filter((id) => !keySet.has(id));
-      const extraInTable = [...keySet].filter((id) => !manifestSet.has(id));
-
-      expect(keys.length).toBe(26);
-      expect(missingFromTable).toEqual([]);
-      expect(extraInTable).toEqual([]);
-    });
-
-    it('has exclusive mappings — no phase id appears twice', () => {
-      // Trivially true for a JS object literal, but we assert that no id is
-      // also in a deliverable-derived source set.
-      const deliverableDerivedSet = new Set(DELIVERABLE_DERIVED_LABELS);
-      // This is a structural check: PHASE_TO_LABEL has phase ids as keys.
-      // No phase id key is also a deliverable-derived label name.
-      const overlap = Object.keys(PHASE_TO_LABEL).filter((id) =>
-        deliverableDerivedSet.has(id),
-      );
-      expect(overlap).toEqual([]);
-    });
-
-    it('has no id mapped to more than one label (invert and check)', () => {
-      // Invert: label -> set of ids
-      const labelToIds: Record<string, string[]> = {};
-      for (const [id, label] of Object.entries(PHASE_TO_LABEL)) {
-        if (!labelToIds[label]) labelToIds[label] = [];
-        labelToIds[label].push(id);
-      }
-      // Each id should appear exactly once (JS objects enforce this),
-      // so duplicate detection is just a sanity check.
-      const allIds: string[] = [];
-      for (const ids of Object.values(labelToIds)) {
-        allIds.push(...ids);
-      }
-      expect(allIds.length).toBe(26);
-      expect(new Set(allIds).size).toBe(26);
-    });
-
-    it('has per-label counts matching expected: 9-5-4-3-0-2-3', () => {
-      const counts: Record<string, number> = {};
-      for (const lbl of PHASE_LABELS) counts[lbl] = 0;
-      for (const label of Object.values(PHASE_TO_LABEL)) {
-        counts[label] = (counts[label] ?? 0) + 1;
-      }
-      for (const [label, expected] of Object.entries(EXPECTED_COUNTS)) {
-        expect(counts[label]).toBe(expected);
-      }
-      const sum = Object.values(counts).reduce((a, b) => a + b, 0);
-      expect(sum).toBe(26);
-    });
-
-    it('has 7 labels in PHASE_LABELS', () => {
-      expect(PHASE_LABELS.length).toBe(7);
-      expect(PHASE_LABELS).toEqual([
-        'Intake',
-        'Script',
-        'Prompts',
-        'Images',
-        'Teleprompter',
-        'QC',
-        'Delivered',
-      ]);
-    });
-
-    it('has no wildcard keys', () => {
-      const wildcardKeys = Object.keys(PHASE_TO_LABEL).filter((k) =>
-        k.includes('*'),
-      );
-      expect(wildcardKeys).toEqual([]);
-    });
-
-    it('does not contain P7', () => {
-      expect('P7' in PHASE_TO_LABEL).toBe(false);
-    });
-
-    it('maps P-SP-P3-HYGIENE — the phase the audit\'s *-QC wildcard missed', () => {
-      expect(PHASE_TO_LABEL['P-SP-P3-HYGIENE']).toBe('Script');
-    });
-
-    it('maps the three previously-double-assigned phases exactly once each', () => {
-      // P-PROMPT-QC was in Prompts AND QC via the audit's wildcard.
-      expect(PHASE_TO_LABEL['P-PROMPT-QC']).toBe('Prompts');
-      // P-IMAGE-QC was in Images AND QC.
-      expect(PHASE_TO_LABEL['P-IMAGE-QC']).toBe('Images');
-      // P9-SPEECH was in Script AND Delivered.
-      expect(PHASE_TO_LABEL['P9-SPEECH']).toBe('Script');
-    });
-
-    it('has DELIVERABLE_DERIVED_LABELS containing only Teleprompter', () => {
-      expect(DELIVERABLE_DERIVED_LABELS).toEqual(['Teleprompter']);
-    });
-
-    it('has PHASE_ACTIVITY_METADATA_KEY set to phase_id', () => {
-      expect(PHASE_ACTIVITY_METADATA_KEY).toBe('phase_id');
-    });
+describe('PD-006 — the generated phase table', () => {
+  it('is manifest version 75 with 56 phases and 13 steps', () => {
+    expect(MANIFEST_VERSION).toBe(75);
+    expect(MANIFEST_IDS.length).toBe(56);
+    expect(STEPS.length).toBe(13);
+    expect(PHASE_LABELS).toEqual(STEPS);
   });
 
-  describe('phaseIdOf', () => {
-    it('returns the id from object metadata', () => {
-      expect(phaseIdOf({ metadata: { phase_id: 'P4-COPY' } })).toBe('P4-COPY');
-    });
-
-    it('returns the id from stringified metadata', () => {
-      expect(
-        phaseIdOf({ metadata: JSON.stringify({ phase_id: 'P4-COPY' }) }),
-      ).toBe('P4-COPY');
-    });
-
-    it('returns null for absent metadata', () => {
-      expect(phaseIdOf({})).toBeNull();
-    });
-
-    it('returns null for null metadata', () => {
-      expect(phaseIdOf({ metadata: null })).toBeNull();
-    });
-
-    it('returns null for malformed JSON', () => {
-      expect(phaseIdOf({ metadata: '{not json' })).toBeNull();
-    });
-
-    it('returns null for wrong-shaped metadata (a bare string)', () => {
-      expect(phaseIdOf({ metadata: '"a string"' })).toBeNull();
-    });
-
-    it('returns null for empty phase_id string', () => {
-      expect(phaseIdOf({ metadata: { phase_id: '' } })).toBeNull();
-    });
-
-    it('returns an unknown id — NOT null — so the reducer can record it in unmapped', () => {
-      expect(phaseIdOf({ metadata: { phase_id: 'P-DOES-NOT-EXIST' } })).toBe(
-        'P-DOES-NOT-EXIST',
-      );
-    });
-
-    it('returns null for an empty object in metadata', () => {
-      expect(phaseIdOf({ metadata: {} })).toBeNull();
-    });
-
-    it('returns null when phase_id is a number', () => {
-      expect(phaseIdOf({ metadata: { phase_id: 42 } })).toBeNull();
-    });
+  it('has the 13 client-facing steps in lifecycle order', () => {
+    expect(PHASE_LABELS).toEqual(EXPECTED_STEPS);
   });
 
-  describe('isTeleprompterDeliverable (FIX 50b)', () => {
-    it('TELEPROMPTER_BASENAME is the producer filename', () => {
-      expect(TELEPROMPTER_BASENAME).toBe('presenter-teleprompter.html');
-    });
-
-    it('matches an artifact row by basename of path', () => {
-      expect(
-        isTeleprompterDeliverable({
-          deliverable_type: 'artifact',
-          path: 'working/deliverables/presenter-teleprompter.html',
-        }),
-      ).toBe(true);
-    });
-
-    it('matches a file row with a bare basename', () => {
-      expect(
-        isTeleprompterDeliverable({
-          deliverable_type: 'file',
-          path: 'presenter-teleprompter.html',
-        }),
-      ).toBe(true);
-    });
-
-    it('matches through backslash separators', () => {
-      expect(
-        isTeleprompterDeliverable({
-          deliverable_type: 'file',
-          path: 'C:\\runs\\deck\\deliverables\\presenter-teleprompter.html',
-        }),
-      ).toBe(true);
-    });
-
-    it('matches a legacy type row even without a path', () => {
-      expect(isTeleprompterDeliverable({ deliverable_type: 'teleprompter' })).toBe(true);
-    });
-
-    it('does not match other basenames or other files in the same dir', () => {
-      expect(
-        isTeleprompterDeliverable({
-          deliverable_type: 'artifact',
-          path: 'working/deliverables/PRESENTER-GUIDE.pdf',
-        }),
-      ).toBe(false);
-      expect(
-        isTeleprompterDeliverable({
-          deliverable_type: 'artifact',
-          path: 'working/deliverables/presenter-teleprompter.html.bak',
-        }),
-      ).toBe(false);
-    });
-
-    it('does not match a prefix-extended basename (basename must be exact)', () => {
-      expect(
-        isTeleprompterDeliverable({
-          deliverable_type: 'url',
-          path: 'https://cdn.example.com/decks/old-presenter-teleprompter.html',
-        }),
-      ).toBe(false);
-    });
-
-    it('handles null / undefined / non-string paths without throwing', () => {
-      expect(isTeleprompterDeliverable({ deliverable_type: 'url', path: null })).toBe(false);
-      expect(isTeleprompterDeliverable({ deliverable_type: 'url', path: undefined })).toBe(false);
-      expect(isTeleprompterDeliverable({ deliverable_type: 'url' })).toBe(false);
-    });
+  it('maps every manifest phase id exactly once (totality)', () => {
+    expect(Object.keys(PHASE_TO_LABEL).length).toBe(MANIFEST_IDS.length);
+    const missing = MANIFEST_IDS.filter((id) => !(id in PHASE_TO_LABEL));
+    expect(missing).toEqual([]);
   });
 
-  describe('computePhaseProgress', () => {
-    it('returns 7 phases in PHASE_LABELS order', () => {
-      const result = computePhaseProgress([], []);
-      expect(result.phases.length).toBe(7);
-      expect(result.phases.map((p) => p.label)).toEqual([
-        'Intake',
-        'Script',
-        'Prompts',
-        'Images',
-        'Teleprompter',
-        'QC',
-        'Delivered',
-      ]);
-    });
+  it('maps no id the manifest does not have (nothing waits forever)', () => {
+    const known = new Set(MANIFEST_IDS);
+    const extra = Object.keys(PHASE_TO_LABEL).filter((id) => !known.has(id));
+    expect(extra).toEqual([]);
+  });
 
-    it('returns all not_started for empty input', () => {
-      const result = computePhaseProgress([], []);
-      for (const step of result.phases) {
-        if (step.label === 'Teleprompter') {
-          expect([step.status]).toContain('not_started');
-        } else {
-          expect(step.status).toBe('not_started');
-        }
-      }
-    });
+  it('maps every id to one of the thirteen steps', () => {
+    const steps = new Set<string>(PHASE_LABELS);
+    const bad = Object.entries(PHASE_TO_LABEL).filter(([, step]) => !steps.has(step));
+    expect(bad).toEqual([]);
+  });
 
-    it('marks labels with activity as in_progress', () => {
-      const activities = [
-        { activity_type: 'status_changed', metadata: { phase_id: 'P0A-INTAKE' } },
-        { activity_type: 'status_changed', metadata: { phase_id: 'P4-COPY' } },
-        { activity_type: 'status_changed', metadata: { phase_id: 'P4-RENDER' } },
-      ];
-      const result = computePhaseProgress(activities, []);
-      const advanced = result.phases
-        .filter((p) => p.status !== 'not_started')
-        .map((p) => p.label)
-        .sort();
-      expect(advanced).toEqual(['Images', 'Intake', 'Script']);
-    });
+  it('has no wildcard keys', () => {
+    expect(Object.keys(PHASE_TO_LABEL).filter((k) => k.includes('*'))).toEqual([]);
+  });
 
-    it('does NOT advance labels from activity_type alone — only from phase_id', () => {
-      const activities = [
-        { activity_type: 'status_changed', metadata: null },
-      ];
-      const result = computePhaseProgress(activities, []);
-      const advanced = result.phases.filter((p) => p.status !== 'not_started');
-      expect(advanced).toEqual([]);
-    });
+  it('makes P7-TELEPROMPTER an ordinary phase of Speaker Kit', () => {
+    expect(PHASE_TO_LABEL['P7-TELEPROMPTER']).toBe('Speaker Kit');
+    expect((PHASE_LABELS as readonly string[]).includes('Teleprompter')).toBe(false);
+    expect(DELIVERABLE_DERIVED_LABELS).toEqual([]);
+  });
 
-    it('records unmapped phase ids', () => {
-      const activities = [
-        { activity_type: 'status_changed', metadata: { phase_id: 'P-DOES-NOT-EXIST' } },
-      ];
-      const result = computePhaseProgress(activities, []);
-      expect(result.unmapped).toContain('P-DOES-NOT-EXIST');
-    });
+  it('leaves every retired phase id unmapped', () => {
+    for (const id of RETIRED_IDS) {
+      expect(labelForPhaseId(id)).toBeNull();
+    }
+  });
 
-    it('Teleprompter is not_started with no deliverable', () => {
-      const result = computePhaseProgress([], []);
-      const tp = result.phases.find((p) => p.label === 'Teleprompter')!;
-      expect(tp.status).toBe('not_started');
-    });
+  it('names only branch-step phases in UPSELL_PHASE_TO_LABEL', () => {
+    for (const [id, step] of Object.entries(UPSELL_PHASE_TO_LABEL)) {
+      expect(BRANCH_STEPS).toContain(step);
+      expect(PHASE_TO_LABEL[id]).toBe(step);
+    }
+    expect(UPSELL_PHASE_TO_LABEL['P-U-SALES-COPY']).toBe('Sales Page');
+    expect(UPSELL_PHASE_TO_LABEL['P-U-SALES-BUILD']).toBe('Sales Page');
+    expect(UPSELL_PHASE_TO_LABEL['P-U-VSL-BUILD']).toBe('Video Sales Page');
+  });
 
-    it('Teleprompter is done when a teleprompter deliverable exists', () => {
-      const result = computePhaseProgress(
-        [],
-        [{ deliverable_type: 'teleprompter' }],
-      );
-      const tp = result.phases.find((p) => p.label === 'Teleprompter')!;
-      expect(tp.status).toBe('done');
-    });
+  it('keeps the two shared wrap-up phases out of the branch tables', () => {
+    expect(UPSELL_SHARED_PHASE_TO_LABEL['P-U-QC']).toBe('Quality Check');
+    expect(UPSELL_SHARED_PHASE_TO_LABEL['P-U-COLLATERAL']).toBe('Delivery');
+    expect('P-U-QC' in UPSELL_PHASE_TO_LABEL).toBe(false);
+  });
 
-    // FIX 50b — basename detection. The registration enum has no
-    // 'teleprompter' type, so the REAL row is a file/artifact with the
-    // teleprompter's basename in `path`.
-    it('FIX 50b — Teleprompter is done from a basename match on path (artifact row)', () => {
-      const result = computePhaseProgress(
-        [],
-        [
-          { deliverable_type: 'artifact', path: 'working/deliverables/presenter-teleprompter.html' },
-        ],
-      );
-      const tp = result.phases.find((p) => p.label === 'Teleprompter')!;
-      expect(tp.status).toBe('done');
-    });
+  it('has PHASE_ACTIVITY_METADATA_KEY set to phase_id', () => {
+    expect(PHASE_ACTIVITY_METADATA_KEY).toBe('phase_id');
+  });
+});
 
-    it('FIX 50b — Teleprompter done from a bare-filename path (url row, published)', () => {
-      const result = computePhaseProgress(
-        [],
-        [{ deliverable_type: 'url', path: 'presenter-teleprompter.html' }],
-      );
-      const tp = result.phases.find((p) => p.label === 'Teleprompter')!;
-      expect(tp.status).toBe('done');
-    });
+describe('requiredPhaseIdsForLabel', () => {
+  it('Script holds the nine script phases', () => {
+    expect(requiredPhaseIdsForLabel('Script').sort()).toEqual(
+      [
+        'P0B-PRIORITY',
+        'P3-ARC',
+        'P4-COPY',
+        'P-SP-STRUCTURE',
+        'P-SP-P3-HYGIENE',
+        'P1Q-COPY-QC',
+        'P9-SPEECH',
+        'P8.4-FISH-TAG',
+        'P9.1-SPEECH-PDF',
+      ].sort(),
+    );
+  });
 
-    it('FIX 50b — Teleprompter done when basename is the only path segment after a deep prefix', () => {
-      const result = computePhaseProgress(
-        [],
-        [
-          {
-            deliverable_type: 'file',
-            path: '/var/openclaw/runs/deck-12/working/deliverables/presenter-teleprompter.html',
-          },
-        ],
-      );
-      const tp = result.phases.find((p) => p.label === 'Teleprompter')!;
-      expect(tp.status).toBe('done');
-    });
+  it('a declined branch step has no required ids and no shared wrap-up joins', () => {
+    const declined = { salesCheckout: false, vsl: false };
+    expect(requiredPhaseIdsForLabel('Sales Page', null, declined)).toEqual([]);
+    expect(requiredPhaseIdsForLabel('Video Sales Page', null, declined)).toEqual([]);
+    expect(requiredPhaseIdsForLabel('Quality Check', null, declined)).not.toContain('P-U-QC');
+    expect(requiredPhaseIdsForLabel('Delivery', null, declined)).not.toContain('P-U-COLLATERAL');
+  });
 
-    it('FIX 50b — basename match tolerates surrounding whitespace in path', () => {
-      const result = computePhaseProgress(
-        [],
-        [
-          { deliverable_type: 'artifact', path: '  working/deliverables/presenter-teleprompter.html  ' },
-        ],
-      );
-      const tp = result.phases.find((p) => p.label === 'Teleprompter')!;
-      expect(tp.status).toBe('done');
-    });
+  it('an elected branch keeps its ids and the shared wrap-up joins', () => {
+    const elected = { salesCheckout: true, vsl: false };
+    expect(requiredPhaseIdsForLabel('Sales Page', null, elected).length).toBe(4);
+    expect(requiredPhaseIdsForLabel('Video Sales Page', null, elected)).toEqual([]);
+    expect(requiredPhaseIdsForLabel('Quality Check', null, elected)).toContain('P-U-QC');
+    expect(requiredPhaseIdsForLabel('Delivery', null, elected)).toContain('P-U-COLLATERAL');
+  });
 
-    it('FIX 50b — other basenames do NOT advance Teleprompter', () => {
-      const result = computePhaseProgress(
-        [],
-        [
-          { deliverable_type: 'artifact', path: 'working/deliverables/PRESENTER-GUIDE.pdf' },
-          { deliverable_type: 'file', path: 'out.pptx' },
-          { deliverable_type: 'url', path: 'https://teleprompter.example.com/presenter-teleprompter.htmlX' },
-        ],
-      );
-      const tp = result.phases.find((p) => p.label === 'Teleprompter')!;
-      expect(tp.status).toBe('not_started');
-    });
+  it('honours excludedPhaseIds', () => {
+    expect(requiredPhaseIdsForLabel('Script', ['P9-SPEECH']).length).toBe(8);
+  });
+});
 
-    it('FIX 50b — a non-teleprompter row with no path stays not_started (no crash on null)', () => {
-      const result = computePhaseProgress(
-        [],
-        [{ deliverable_type: 'url', path: null }],
-      );
-      const tp = result.phases.find((p) => p.label === 'Teleprompter')!;
-      expect(tp.status).toBe('not_started');
-    });
+describe('computePhaseProgress', () => {
+  it('returns the non-branch steps for empty input (no phantom branch steps)', () => {
+    const result = computePhaseProgress([], []);
+    expect(result.phases.map((p) => p.label)).toEqual(
+      EXPECTED_STEPS.filter((s) => !BRANCH_STEPS.includes(s)),
+    );
+    expect(result.phases.every((p) => p.status === 'not_started')).toBe(true);
+    expect(result.unmapped).toEqual([]);
+  });
 
-    it('FIX 50b — rows lacking a path field entirely do not crash the reducer', () => {
-      const result = computePhaseProgress(
-        [],
-        [{ deliverable_type: 'artifact' } as unknown as { deliverable_type: string; path?: string | null }],
-      );
-      const tp = result.phases.find((p) => p.label === 'Teleprompter')!;
-      expect(tp.status).toBe('not_started');
-    });
+  it('every phase of manifest version 75 done with sales and checkout elected leaves every step done', () => {
+    const result = computePhaseProgress(
+      MANIFEST_IDS.map(doneActivity),
+      [],
+      { electedBranches: { salesCheckout: true, vsl: false } },
+    );
+    // Sales Page and Checkout are steps; Video Sales Page is declined, so no step.
+    expect(result.phases.map((p) => p.label)).toEqual(
+      EXPECTED_STEPS.filter((s) => s !== 'Video Sales Page'),
+    );
+    for (const step of result.phases) {
+      expect({ label: step.label, status: step.status }).toEqual({
+        label: step.label,
+        status: 'done',
+      });
+    }
+    expect(result.unmapped).toEqual([]);
+  });
 
-    it('a P7 activity does NOT advance Teleprompter (unmapped only)', () => {
-      const activities = [
-        { activity_type: 'status_changed', metadata: { phase_id: 'P7' } },
-      ];
-      const result = computePhaseProgress(
-        activities,
-        [{ deliverable_type: 'teleprompter' }],
-      );
-      const tp = result.phases.find((p) => p.label === 'Teleprompter')!;
-      expect(tp.status).toBe('done'); // from the deliverable, not P7
-      expect(result.unmapped).toContain('P7');
+  it('a declined branch produces no step at all', () => {
+    const result = computePhaseProgress([], [], {
+      electedBranches: { salesCheckout: false, vsl: false },
     });
+    expect(result.phases.map((p) => p.label)).not.toContain('Sales Page');
+    expect(result.phases.map((p) => p.label)).not.toContain('Checkout');
+    expect(result.phases.map((p) => p.label)).not.toContain('Video Sales Page');
+  });
 
-    it('deduplicates unmapped ids', () => {
-      const activities = [
-        { activity_type: 'status_changed', metadata: { phase_id: 'P-UNKNOWN' } },
-        { activity_type: 'status_changed', metadata: { phase_id: 'P-UNKNOWN' } },
-      ];
-      const result = computePhaseProgress(activities, []);
-      expect(result.unmapped).toEqual(['P-UNKNOWN']);
-    });
+  it('with the elections UNDETERMINED a branch step rides on engine evidence', () => {
+    const result = computePhaseProgress(
+      [{ activity_type: 'status_changed', metadata: { phase_id: 'P-U-VSL-COPY' } }],
+      [],
+    );
+    const vsl = result.phases.find((p) => p.label === 'Video Sales Page');
+    expect(vsl?.status).toBe('in_progress');
+    expect(result.phases.map((p) => p.label)).not.toContain('Sales Page');
+  });
 
-    it('handles stringified metadata in computePhaseProgress', () => {
-      const activities = [
-        {
-          activity_type: 'status_changed',
-          metadata: JSON.stringify({ phase_id: 'P3-ARC' }),
-        },
-      ];
-      const result = computePhaseProgress(activities, []);
-      expect(
-        result.phases.find((p) => p.label === 'Intake')!.status,
-      ).toBe('in_progress');
-    });
+  it('records an id the manifest does not have in unmapped', () => {
+    const result = computePhaseProgress(
+      [{ activity_type: 'status_changed', metadata: { phase_id: 'P-DOES-NOT-EXIST' } }],
+      [],
+    );
+    expect(result.unmapped).toEqual(['P-DOES-NOT-EXIST']);
+  });
+
+  it('deduplicates unmapped ids', () => {
+    const result = computePhaseProgress(
+      [doneActivity('P-UNKNOWN'), doneActivity('P-UNKNOWN')],
+      [],
+    );
+    expect(result.unmapped).toEqual(['P-UNKNOWN']);
+  });
+
+  it('the teleprompter advances its own step (Speaker Kit), never a separate one', () => {
+    const result = computePhaseProgress([doneActivity('P7-TELEPROMPTER')], []);
+    const speakerKit = result.phases.find((p) => p.label === 'Speaker Kit')!;
+    expect(speakerKit.status).toBe('in_progress');
+    expect(speakerKit.doneIds).toBe(1);
+    expect(speakerKit.totalIds).toBe(4);
+    expect((result.phases as Array<{ label: string }>).map((p) => p.label)).not.toContain(
+      'Teleprompter',
+    );
+  });
+
+  it('does not advance a step from activity_type alone — only from phase_id', () => {
+    const result = computePhaseProgress([{ activity_type: 'status_changed', metadata: null }], []);
+    expect(result.phases.filter((p) => p.status !== 'not_started')).toEqual([]);
+  });
+
+  it('handles stringified metadata', () => {
+    const result = computePhaseProgress(
+      [{ activity_type: 'status_changed', metadata: JSON.stringify({ phase_id: 'P3-ARC' }) }],
+      [],
+    );
+    expect(result.phases.find((p) => p.label === 'Script')!.status).toBe('in_progress');
+  });
+});
+
+describe('the stepper owner-action text (PD-006)', () => {
+  it('is exactly the approved sentence', () => {
+    expect(YOUR_TURN_TEXT).toBe('Your turn: pick style A, B or C');
+  });
+
+  it('names the Your Style Pick step when the run is parked on P-STYLE-PICK', () => {
+    expect(yourTurnStepLabel('P-STYLE-PICK')).toBe('Your Style Pick');
+  });
+
+  it('names no step for a park on a phase that is not an owner action', () => {
+    expect(yourTurnStepLabel('P4-RENDER')).toBeNull();
+    expect(yourTurnStepLabel('P-DOES-NOT-EXIST')).toBeNull();
+    expect(yourTurnStepLabel(null)).toBeNull();
+    expect(yourTurnStepLabel(undefined)).toBeNull();
+  });
+});
+
+describe('phaseIdOf', () => {
+  it('returns the id from object metadata', () => {
+    expect(phaseIdOf({ metadata: { phase_id: 'P4-COPY' } })).toBe('P4-COPY');
+  });
+
+  it('returns the id from stringified metadata', () => {
+    expect(phaseIdOf({ metadata: JSON.stringify({ phase_id: 'P4-COPY' }) })).toBe('P4-COPY');
+  });
+
+  it('returns null for absent metadata', () => {
+    expect(phaseIdOf({})).toBeNull();
+  });
+
+  it('returns null for null metadata', () => {
+    expect(phaseIdOf({ metadata: null })).toBeNull();
+  });
+
+  it('returns null for malformed JSON', () => {
+    expect(phaseIdOf({ metadata: '{not json' })).toBeNull();
+  });
+
+  it('returns null for wrong-shaped metadata (a bare string)', () => {
+    expect(phaseIdOf({ metadata: '"a string"' })).toBeNull();
+  });
+
+  it('returns null for empty phase_id string', () => {
+    expect(phaseIdOf({ metadata: { phase_id: '' } })).toBeNull();
+  });
+
+  it('returns an unknown id — NOT null — so the reducer can record it in unmapped', () => {
+    expect(phaseIdOf({ metadata: { phase_id: 'P-DOES-NOT-EXIST' } })).toBe('P-DOES-NOT-EXIST');
+  });
+
+  it('returns null for an empty object in metadata', () => {
+    expect(phaseIdOf({ metadata: {} })).toBeNull();
+  });
+
+  it('returns null when phase_id is a number', () => {
+    expect(phaseIdOf({ metadata: { phase_id: 42 } })).toBeNull();
+  });
+});
+
+describe('isTeleprompterDeliverable (FIX 50b, helper contract)', () => {
+  it('TELEPROMPTER_BASENAME is the producer filename', () => {
+    expect(TELEPROMPTER_BASENAME).toBe('presenter-teleprompter.html');
+  });
+
+  it('matches an artifact row by basename of path', () => {
+    expect(
+      isTeleprompterDeliverable({
+        deliverable_type: 'artifact',
+        path: 'working/deliverables/presenter-teleprompter.html',
+      }),
+    ).toBe(true);
+  });
+
+  it('matches a file row with a bare basename', () => {
+    expect(isTeleprompterDeliverable({ deliverable_type: 'file', path: 'presenter-teleprompter.html' })).toBe(true);
+  });
+
+  it('matches through backslash separators', () => {
+    expect(
+      isTeleprompterDeliverable({
+        deliverable_type: 'file',
+        path: 'C:\\runs\\deck\\deliverables\\presenter-teleprompter.html',
+      }),
+    ).toBe(true);
+  });
+
+  it('matches a legacy type row even without a path', () => {
+    expect(isTeleprompterDeliverable({ deliverable_type: 'teleprompter' })).toBe(true);
+  });
+
+  it('does not match other basenames or a prefix-extended basename', () => {
+    expect(
+      isTeleprompterDeliverable({ deliverable_type: 'artifact', path: 'working/deliverables/PRESENTER-GUIDE.pdf' }),
+    ).toBe(false);
+    expect(
+      isTeleprompterDeliverable({ deliverable_type: 'artifact', path: 'working/deliverables/presenter-teleprompter.html.bak' }),
+    ).toBe(false);
+    expect(
+      isTeleprompterDeliverable({ deliverable_type: 'url', path: 'https://cdn.example.com/decks/old-presenter-teleprompter.html' }),
+    ).toBe(false);
+  });
+
+  it('handles null / undefined / non-string paths without throwing', () => {
+    expect(isTeleprompterDeliverable({ deliverable_type: 'url', path: null })).toBe(false);
+    expect(isTeleprompterDeliverable({ deliverable_type: 'url', path: undefined })).toBe(false);
+    expect(isTeleprompterDeliverable({ deliverable_type: 'url' })).toBe(false);
+  });
+});
+
+describe('phaseElapsedSeconds', () => {
+  it('sums a label from the canonical run only and skips unmapped ids', () => {
+    const rows = [
+      { run_id: 'run-old', phase_id: 'P4-COPY', duration_s: 100 },
+      { run_id: 'run-new', phase_id: 'P4-COPY', duration_s: 7.5 },
+      { run_id: 'run-new', phase_id: 'NOT-A-REAL-PHASE', duration_s: 50 },
+    ];
+    expect(phaseElapsedSeconds(rows)).toEqual({ Script: 7.5 });
+    expect(phaseElapsedSeconds(rows, 'run-new')).toEqual({ Script: 7.5 });
+  });
+
+  it('attributes a branch phase only to an active branch', () => {
+    const rows = [{ run_id: 'r', phase_id: 'P-U-SALES-COPY', duration_s: 3 }];
+    expect(phaseElapsedSeconds(rows, null, { salesCheckout: true, vsl: false })).toEqual({ 'Sales Page': 3 });
+    expect(phaseElapsedSeconds(rows, null, { salesCheckout: false, vsl: false })).toEqual({});
   });
 });
