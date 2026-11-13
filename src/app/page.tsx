@@ -472,7 +472,7 @@ export default function HomePage() {
 
         <div className="flex items-center gap-4">
           <span className="text-gray-500 text-base font-mono">
-            {format(currentTime, 'MMM d, HH:mm:ss')}
+            {format(currentTime, 'MMM d, h:mm a')}
           </span>
           <ApprovalsBadge />
           <HealthIndicator viewerRole="client" />
@@ -591,11 +591,11 @@ export default function HomePage() {
           {/* Footer */}
           <motion.div className="mt-12 text-center" variants={cardVariants}>
             <div className="inline-flex items-center gap-2 px-4 py-2 bg-white border border-gray-200 rounded-full text-gray-500 text-sm">
-              <Activity className="w-4 h-4 text-indigo-500" />
-              <HealthIndicator viewerRole="client" />
               {/* P1-03 step 3: version stamp — makes build-generation drift
                   diagnosable at a glance ("you're on v5.14.0, current is
-                  v5.17.0"). Omitted entirely if /api/version hasn't resolved. */}
+                  v5.17.0"). Omitted entirely if /api/version hasn't resolved.
+                  U-06: the second health indicator that used to sit here is
+                  gone — one badge per page, and it is the one in the header. */}
               {ccVersion ? (
                 <>
                   <span className="text-gray-300" aria-hidden="true">·</span>

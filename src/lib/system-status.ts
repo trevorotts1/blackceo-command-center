@@ -22,7 +22,7 @@ import { probeCloudflareAccess } from './probes/cloudflare-access-probe';
 import { probeUnauthorized401 } from './probes/unauthorized-401-probe';
 import {
   computeOverallTiered,
-  isNotApplicable,
+  countsTowardOverall,
   ProbeResult,
   SystemStatus,
   TieredProbeResult,
@@ -37,8 +37,8 @@ export interface SystemStatusPayload {
   cacheAgeMs: number | null;
 }
 
-/** Cache TTL for the API layer (PRD 3.12 specifies a 30-second cache). */
-export const STATUS_CACHE_TTL_MS = 30 * 1000;
+/** Cache lifetime. Just under the browser's 60-second poll so two tabs share one probe run. */
+export const STATUS_CACHE_TTL_MS = 55 * 1000;
 
 function persistSnapshot(result: ProbeResult): void {
   try {
@@ -124,9 +124,7 @@ export async function runAllProbes(): Promise<SystemStatusPayload> {
   // Overall reflects criticality-tiered aggregation, not a flat worst-of-all
   // reduction: a critical outage means `offline`; an auxiliary problem never
   // does. Unknown providers (no key) do not degrade the overall.
-  const considered = components.filter(
-    (c) => !isNotApplicable(c)
-  );
+  const considered = components.filter(countsTowardOverall);
   const overall = computeOverallTiered(considered);
 
   return {
@@ -200,9 +198,7 @@ export function readCachedStatus(): SystemStatusPayload | null {
       tier: tierFor(r.component),
     }));
 
-    const considered = components.filter(
-      (c) => !isNotApplicable(c)
-    );
+    const considered = components.filter(countsTowardOverall);
     // Same shared function as the fresh path — identical inputs (same
     // component/tier/status triples) always produce an identical `overall`.
     const overall = computeOverallTiered(considered);
