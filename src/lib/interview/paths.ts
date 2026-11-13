@@ -7,11 +7,13 @@
  * same files the Telegram agent + the Skill-23 shell scripts touch.
  *
  *   ── State tree (workspace) ──────────────────────────────────────────────
- *     VPS / Hostinger Docker : /data/.openclaw/workspace
- *     Mac / bare install     : $HOME/.openclaw/workspace
- *   These are the EXACT two branches update-interview-state.sh and
- *   record-dept-decision.sh probe (in this order) — mirrored here so the app
- *   and the scripts always agree on which .workforce-build-state.json is live.
+ *     Configured              : agents.defaults.workspace in the box config file
+ *     VPS / Hostinger Docker  : /data/.openclaw/workspace
+ *     Mac / bare install      : $HOME/.openclaw/workspace
+ *   These are the EXACT branches update-interview-state.sh and
+ *   record-dept-decision.sh probe (in this order, plus the two env overrides
+ *   above) — mirrored here so the app and the scripts always agree on which
+ *   .workforce-build-state.json is live.
  *
  *   ── Skill tree (scripts) ────────────────────────────────────────────────
  *     VPS : /data/.openclaw/skills/23-ai-workforce-blueprint/scripts
@@ -21,6 +23,7 @@
  *
  * Env overrides (test / non-standard installs) always win when set:
  *   OPENCLAW_WORKSPACE_ROOT  — force the workspace dir
+ *   OPENCLAW_WORKSPACE_PATH  — force the workspace dir (second in the order)
  *   OPENCLAW_SKILL23_SCRIPTS — force the scripts dir
  *
  * Nothing here throws: a missing tree resolves to the canonical default path so
@@ -33,6 +36,7 @@ import os from 'os';
 import path from 'path';
 
 const VPS_WORKSPACE = '/data/.openclaw/workspace';
+const VPS_CONFIG = '/data/.openclaw/openclaw.json';
 const VPS_SKILLS = '/data/.openclaw/skills';
 const SKILL23 = '23-ai-workforce-blueprint';
 
@@ -56,16 +60,47 @@ function macWorkspace(): string {
   return path.join(os.homedir(), '.openclaw', 'workspace');
 }
 
+/** The Mac / bare install box configuration file. */
+function macConfigPath(): string {
+  return path.join(os.homedir(), '.openclaw', 'openclaw.json');
+}
+
+/**
+ * `agents.defaults.workspace` from the box configuration file — the VPS file
+ * (/data/.openclaw/openclaw.json) when it exists, else
+ * $HOME/.openclaw/openclaw.json. A missing file, bad JSON or wrong shape is
+ * ignored (returns null): a broken config never decides the workspace.
+ */
+function configuredWorkspace(): string | null {
+  try {
+    const configPath = safeIsFile(VPS_CONFIG) ? VPS_CONFIG : macConfigPath();
+    if (!safeIsFile(configPath)) return null;
+    const parsed = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as {
+      agents?: { defaults?: { workspace?: unknown } };
+    };
+    const value = parsed?.agents?.defaults?.workspace;
+    return typeof value === 'string' && value.trim() ? value.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Resolve the live OpenClaw workspace directory the SAME way the Skill-23 shell
- * scripts do: env override → /data/.openclaw/workspace (if it EXISTS) →
- * $HOME/.openclaw/workspace. The `/data` branch is only taken when the dir
- * actually exists (exactly `if [ -d /data/.openclaw/workspace ]` in the scripts),
- * so a Mac install with no /data never mis-resolves.
+ * scripts do: OPENCLAW_WORKSPACE_ROOT → OPENCLAW_WORKSPACE_PATH →
+ * agents.defaults.workspace from the box configuration file →
+ * /data/.openclaw/workspace (if it EXISTS) → $HOME/.openclaw/workspace. The
+ * `/data` branch is only taken when the dir actually exists (exactly
+ * `if [ -d /data/.openclaw/workspace ]` in the scripts), so a Mac install with
+ * no /data never mis-resolves.
  */
 export function resolveWorkspaceDir(): string {
-  const override = process.env.OPENCLAW_WORKSPACE_ROOT;
-  if (override && override.trim()) return override;
+  const rootOverride = process.env.OPENCLAW_WORKSPACE_ROOT;
+  if (rootOverride && rootOverride.trim()) return rootOverride;
+  const pathOverride = process.env.OPENCLAW_WORKSPACE_PATH;
+  if (pathOverride && pathOverride.trim()) return pathOverride;
+  const configured = configuredWorkspace();
+  if (configured) return configured;
   if (safeIsDir(VPS_WORKSPACE)) return VPS_WORKSPACE;
   return macWorkspace();
 }
