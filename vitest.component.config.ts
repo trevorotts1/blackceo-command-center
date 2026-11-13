@@ -182,6 +182,9 @@ export default defineConfig({
       // review fields reach the screen — risks/alternatives + recommended
       // modifications sections, review-type badge, honest empty states.
       'tests/unit/cc-da-review-fields.test.tsx',
+      // The conversation screen keeps its typing box on screen before the
+      // first question lands; real render proof.
+      'tests/component/conversation-pane-input.test.tsx',
     ],
     env: { NODE_ENV: 'test' },
     testTimeout: 15000,
