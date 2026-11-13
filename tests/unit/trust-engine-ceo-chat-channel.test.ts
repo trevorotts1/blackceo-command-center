@@ -26,6 +26,11 @@ vi.mock('@/lib/notify', () => ({
   recordUndeliverable: () => {},
   resolveOperatorChatId: () => null,
   resolveOwnerChatId: () => null,
+  // U-15: the executor now asks whether the owner lanes are muted or on hold
+  // (CC-053). This suite deliberately exercises the dispatch path with the
+  // transport mocked above, so both answers are "no".
+  ownerSendsSuppressed: () => false,
+  ownerSendsHeld: () => false,
 }));
 
 // U60/JM-U63c — the new Operations Rail broadcast emit point. Mocked so this

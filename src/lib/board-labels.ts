@@ -72,12 +72,50 @@ export function triadMissingFields(task: TriadFieldsInput): TriadMissingKey[] {
 }
 
 const TRIAD_MISSING_LABELS: Record<TriadMissingKey, string> = {
-  description: 'description',
-  sop_id: 'SOP',
-  persona_id: 'persona',
+  description: 'a description',
+  sop_id: 'a playbook',
+  persona_id: 'a working style',
 };
 
-/** "Missing: description, SOP" style text for the Backlog card pill. */
+/** "Still needs: a description, a playbook" text for the Backlog card pill. */
 export function triadMissingPillText(missing: TriadMissingKey[]): string {
-  return `Missing: ${missing.map((key) => TRIAD_MISSING_LABELS[key]).join(', ')}`;
+  return `Still needs: ${missing.map((key) => TRIAD_MISSING_LABELS[key]).join(', ')}`;
 }
+
+/**
+ * CC-014 — the status pill's label map. Lives here (not in the React
+ * component) so the single source of client vocabulary is importable without a
+ * component render. Every status that buckets into a board column shows that
+ * column's own label.
+ */
+export const STATUS_PILL_LABELS: Record<string, string> = {
+  backlog: BACKLOG_COLUMN_LABEL,
+  inbox: TODO_COLUMN_LABEL,
+  planning: TODO_COLUMN_LABEL,
+  assigned: TODO_COLUMN_LABEL,
+  pending_dispatch: TODO_COLUMN_LABEL,
+  in_progress: 'In Progress',
+  review: 'Review / QC',
+  testing: 'Review / QC',
+  blocked: 'Blocked',
+  done: 'Done',
+};
+
+/**
+ * Plain-English help for each board column (CC-017). Shown to the person using
+ * the board, never engineer vocabulary: no SOP, persona, lifecycle, QC-check or
+ * groomed. Imported by MissionQueue.tsx so the disclosure text and the hover
+ * title can never drift apart.
+ */
+export const COLUMN_HELP_TEXT: Record<
+  'todo' | 'in_progress' | 'review' | 'blocked' | 'stale' | 'done',
+  string
+> = {
+  todo: 'Ready to go. Waiting for a team member to pick it up.',
+  in_progress: 'A team member is working on this now.',
+  review: 'The work is finished and is being checked for quality.',
+  blocked:
+    'Stuck. The card says whether the problem is on our side or we need something from you.',
+  stale: 'We lost track of these. Open one to see when it last moved.',
+  done: 'Finished and approved.',
+};

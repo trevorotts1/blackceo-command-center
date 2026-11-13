@@ -1,23 +1,38 @@
 import { queryOne } from '@/lib/db';
 import { getSelfClient } from '@/lib/clients';
+import { readBuildState } from '@/lib/interview/seam';
+import { standardPlaceholderActive, verifiedBuild } from '@/lib/interview/build-verification';
 
 /**
- * W3.1 — INTERVIEW-COMPLETED ROUTING GATE (spec §3).
+ * W3.1 — INTERVIEW-COMPLETED ROUTING GATE (spec §3; CC-037).
  *
  * "Task routing applies ONLY to owners who COMPLETED the interview (have a
  * Zero Human Company with roles+SOPs). Not-completed = exempt (no routing
  * obligation)." A box is "workforce-provisioned" when it has BOTH:
  *
- *   1. A completed AI-Workforce interview (DB-backed self-client flag), AND
+ *   1. A finished AI-Workforce interview, AND
  *   2. Materialized, non-shell departments (per N37): at least one department
  *      workspace — not the CEO/master or the general catch-all — that has a
  *      live, non-master agent. A fresh/shell install has only the CEO shell and
  *      no specialist roster, so it is exempt: there is nowhere to route into.
  *
- * Fail-safe on the interview flag: when the self-client row is ABSENT (a legacy
- * box that predates the clients table) we cannot read the flag, so we defer to
- * the materialized-departments signal alone rather than wrongly exempting a box
- * that is clearly built out. When the row EXISTS we honour its flag exactly.
+ * ONE ANSWER TO "IS THIS COMPANY'S WORKFORCE LIVE?" (CC-037). The dashboard
+ * locks on the canonical build-state FILE; task routing used to lock on the
+ * `clients.interview_complete` DATABASE flag. The two disagreed in both
+ * directions: a flag of 0 with an open dashboard filed every task under General
+ * Task, and a flag of 1 set by a stray analytics read during an unfinished
+ * interview routed work that had no workforce behind it. The rule is:
+ *
+ *   When the build-state file can be read, IT DECIDES — in both directions.
+ *   The database flag counts only when the file cannot be read.
+ *
+ * A readable file says "complete" (interviewComplete true, or a verified build
+ * receipt), "placeholder" (an owner-ordered standard company, which admits the
+ * dashboard without claiming the interview finished), or "incomplete". A
+ * missing/unreadable file leaves the database flag as the only evidence left; a
+ * legacy box with neither a client row nor a readable file defers to the
+ * materialized-departments signal alone, so a clearly built-out box is never
+ * wrongly exempted.
  *
  * When NOT provisioned, the CEO answers directly with NO routing obligation —
  * the ingest still captures the task (nothing is lost) but does NOT force it
@@ -41,22 +56,38 @@ export function isWorkforceProvisioned(companyId: string): { provisioned: boolea
   );
   const hasMaterializedDepts = (materialized?.n ?? 0) > 0;
 
-  // (1) Interview completion — DB-backed self-client flag (null when no row).
-  let interviewComplete: boolean | null = null;
+  // (1) Interview completion. For this box's own company the canonical FILE is
+  // the authority (the same source the dashboard lock reads). The database flag
+  // is a fallback when the file is unreadable; it is neither an extra yes nor a veto.
+  let dbFlag: boolean | null = null;
   try {
     const self = getSelfClient();
-    interviewComplete = self ? self.interview_complete : null;
+    dbFlag = self ? self.interview_complete : null;
   } catch {
-    // clients table absent / unreadable on a legacy box — treat as unknown.
-    interviewComplete = null;
+    dbFlag = null;
   }
-
-  // Unknown interview flag → defer to the materialized-departments signal.
-  const interviewOk = interviewComplete === null ? hasMaterializedDepts : interviewComplete;
+  let fileSays: 'complete' | 'placeholder' | 'incomplete' | 'unreadable' = 'unreadable';
+  try {
+    const bs = readBuildState() as Record<string, unknown> | null;
+    if (bs) {
+      fileSays =
+        bs.interviewComplete === true || verifiedBuild(bs) ? 'complete'
+        : standardPlaceholderActive(bs) ? 'placeholder'
+        : 'incomplete';
+    }
+  } catch {
+    fileSays = 'unreadable';
+  }
+  const interviewOk =
+    fileSays === 'complete' ||
+    fileSays === 'placeholder' ||
+    // File unreadable or absent: the database flag is the only evidence left.
+    (fileSays === 'unreadable' && dbFlag === true) ||
+    // Legacy box: no client row and no readable file — defer to departments.
+    (fileSays === 'unreadable' && dbFlag === null && hasMaterializedDepts);
   const provisioned = hasMaterializedDepts && interviewOk;
-
   const reason =
-    `interview=${interviewComplete === null ? 'unknown' : interviewComplete}, ` +
+    `interview_db=${dbFlag === null ? 'unknown' : dbFlag}, interview_file=${fileSays}, ` +
     `materialized_depts=${hasMaterializedDepts}`;
   return { provisioned, reason };
 }

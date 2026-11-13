@@ -10,9 +10,10 @@
  * the operator branch wrote NO dedupable key at all, so there was nothing to
  * dedupe against.
  *
- * These tests count REAL escalations end-to-end: a local HTTP server stands in for
- * the escalation webhook (operator) and the Command Center's /api/events (owner), so
- * we assert on messages that ACTUALLY left the process, not on an internal counter.
+ * These tests count escalations end-to-end. The OPERATOR lane lands on the box's
+ * durable record (a local HTTP sink stands in for the escalation webhook), and the
+ * OWNER lane goes through the trust engine's gateway send — exercised against a
+ * stub `openclaw` on PATH, because CC-054 moved it off the old /api/events POST.
  *
  * The contract, in both directions:
  *   CAP    — N ticks over the same stuck task ⇒ AT MOST ONE escalation per window.
@@ -32,16 +33,17 @@ import test, { before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { v4 as uuidv4 } from 'uuid';
 import { run, queryOne } from '../../src/lib/db';
-import { runStaleTaskSweep } from '../../src/lib/jobs/stale-task-sweep';
+import { runStaleTaskSweep, __setStaleSweepClockForTests } from '../../src/lib/jobs/stale-task-sweep';
 
 // ── The escalation sink: every message that actually leaves the process ──────────
 let server: http.Server;
 /** POSTs to the Rescue-Rangers-style webhook — the OPERATOR escalation path. */
 let operatorEscalations: string[] = [];
-/** POSTs to the Command Center /api/events — the OWNER re-ping path. */
-let ownerEscalations: string[] = [];
 
 // 2026-10-02: board-housekeeping alerts no longer POST to Rescue Rangers; the
 // operator escalation now lands on the box's durable record (rung 3), which logs
@@ -60,7 +62,6 @@ before(async () => {
     req.on('data', (c) => (body += c));
     req.on('end', () => {
       if (req.url?.startsWith('/rescue')) operatorEscalations.push(body);
-      else if (req.url?.startsWith('/api/events')) ownerEscalations.push(body);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end('{"ok":true}');
     });
@@ -68,7 +69,6 @@ before(async () => {
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address() as AddressInfo;
   process.env.RESCUE_RANGERS_WEBHOOK_URL = `http://127.0.0.1:${port}/rescue`;
-  process.env.MISSION_CONTROL_URL = `http://127.0.0.1:${port}`;
   // SAFETY-06 (PR #176) gates the operator escalation webhook off in a test run so
   // no suite can POST to a LIVE endpoint by omission. This suite's whole point is to
   // COUNT that operator escalation — and it has already pointed the webhook at its
@@ -84,14 +84,12 @@ before(async () => {
 after(async () => {
   console.error = realConsoleError;
   delete process.env.RESCUE_RANGERS_WEBHOOK_URL;
-  delete process.env.MISSION_CONTROL_URL;
   delete process.env.OWNER_NOTIFY_ALLOW_SEND_IN_TEST;
   await new Promise<void>((resolve) => server.close(() => resolve()));
 });
 
 beforeEach(() => {
   operatorEscalations = [];
-  ownerEscalations = [];
 });
 
 function hoursAgo(h: number): string {
@@ -108,7 +106,7 @@ function hoursAgo(h: number): string {
  * Age default 4h: inside the 2h..6h re-ping band (past 6h the task is RETURNED,
  * and there is nothing left to dedupe).
  */
-function seedBlockedTask(who: 'operator' | 'owner', ageHours = 4): string {
+function seedBlockedTask(who: 'operator' | 'owner', ageHours = 4, requesterChatId: string | null = null): string {
   const id = uuidv4();
   // tasks.workspace_id defaults to 'default' and REFERENCES workspaces(id), so an
   // isolated DB needs a real workspace row or the INSERT trips the FK.
@@ -119,10 +117,14 @@ function seedBlockedTask(who: 'operator' | 'owner', ageHours = 4): string {
     `operations-${uuidv4().slice(0, 8)}`,
   ]);
   // blocked_reason is CHECK-constrained to ('decision','approval','credential','payment').
+  // CC-054: the owner re-ping is now addressed to the task's requester (or the
+  // owner record) through the trust engine, so an owner fixture carries a chat id
+  // when the test needs the send to actually go out.
   run(
-    `INSERT INTO tasks (id, title, status, workspace_id, blocked_on_human, blocked_reason, ask, updated_at, last_progress_at)
-     VALUES (?, ?, 'blocked', ?, ?, 'decision', 'Awaiting a human decision (fixture)', ?, ?)`,
-    [id, `Blocked task ${id.slice(0, 8)}`, wsId, who, hoursAgo(ageHours), hoursAgo(ageHours)],
+    `INSERT INTO tasks (id, title, status, workspace_id, blocked_on_human, blocked_reason, ask,
+                        requester_chat_id, updated_at, last_progress_at)
+     VALUES (?, ?, 'blocked', ?, ?, 'decision', 'Awaiting a human decision (fixture)', ?, ?, ?)`,
+    [id, `Blocked task ${id.slice(0, 8)}`, wsId, who, requesterChatId, hoursAgo(ageHours), hoursAgo(ageHours)],
   );
   return id;
 }
@@ -215,23 +217,37 @@ test('CAP: N operator-blocked tasks × 6 cron ticks ⇒ ONE escalation each, not
 });
 
 // ── (c) the dedup key is written on BOTH branches, not just the operator one ─────
-test('CAP: the OWNER branch is deduped too (the audit INSERT is shared by both paths)', async () => {
-  const taskId = seedBlockedTask('owner');
+test('CAP: the OWNER branch is deduped too (one reminder per window, never one per tick)', async () => {
+  // CC-054: an owner reminder is recorded only when it really went out, so this
+  // case runs sends enabled against a stub `openclaw` — the real binary is never
+  // reachable, and the stub does nothing but exit 0.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'bc-dedup-shim-'));
+  const shimDir = path.join(tmp, 'bin');
+  fs.mkdirSync(shimDir);
+  fs.writeFileSync(path.join(shimDir, 'openclaw'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  const REAL_PATH = process.env.PATH ?? '';
+  const savedMute = process.env.OWNER_NOTIFY_TELEGRAM_DISABLED;
 
-  for (let i = 0; i < 4; i++) await runStaleTaskSweep();
-  await settle(1, () => ownerEscalations);
+  const taskId = seedBlockedTask('owner', 4, '5550001111');
+  delete process.env.OWNER_NOTIFY_TELEGRAM_DISABLED;
+  process.env.PATH = `${shimDir}:${REAL_PATH}`;
+  // Pin the clock to 2pm so quiet hours can never decide this test.
+  __setStaleSweepClockForTests(() => new Date(2026, 0, 15, 14, 0, 0));
+  try {
+    for (let i = 0; i < 4; i++) await runStaleTaskSweep();
 
-  assert.equal(repingEventCount(taskId), 1, 'the owner branch writes exactly one dedup key across 4 ticks');
-  assert.equal(
-    escalationsFor(taskId, ownerEscalations),
-    1,
-    `owner re-ping fires once, not once per tick — got ${escalationsFor(taskId, ownerEscalations)}`,
-  );
-  assert.equal(
-    escalationsFor(taskId, operatorEscalations),
-    0,
-    'an owner-blocked task never escalates to the operator channel',
-  );
+    assert.equal(repingEventCount(taskId), 1, 'the owner branch writes exactly one dedup key across 4 ticks');
+    assert.equal(
+      escalationsFor(taskId, operatorEscalations),
+      0,
+      'a delivered owner reminder never escalates to the operator channel',
+    );
+  } finally {
+    __setStaleSweepClockForTests(null);
+    process.env.PATH = REAL_PATH;
+    if (savedMute !== undefined) process.env.OWNER_NOTIFY_TELEGRAM_DISABLED = savedMute;
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 // ── ANTI-SILENCE #1: a cap is not a mute ────────────────────────────────────────

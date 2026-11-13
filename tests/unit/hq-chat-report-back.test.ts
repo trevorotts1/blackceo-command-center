@@ -63,6 +63,10 @@ require.cache[notifyModulePath] = {
     recordUndeliverable: () => {},
     resolveOperatorChatId: () => null,
     resolveOwnerChatId: () => null,
+    // The doubles below ARE the transport, so the gateway is open: neither the
+    // owner-send mute nor the onboarding hold may gate the regression cases.
+    ownerSendsSuppressed: () => false,
+    ownerSendsHeld: () => false,
   },
 } as NodeModule;
 
