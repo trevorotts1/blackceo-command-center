@@ -32,7 +32,8 @@
  */
 
 import fs from 'node:fs';
-import { buildStatePath } from './paths';
+import { execFileSync } from 'node:child_process';
+import { buildStatePath, resolveSkillScriptsDir } from './paths';
 import type { BuildState } from './seam';
 
 export type StateIdentityVerdict = 'scoped' | 'unstamped' | 'mismatched' | 'absent';
@@ -70,28 +71,58 @@ export function classifyStateIdentity(
 /**
  * Backfill the missing identity stamps from the verified context.
  *
- * Re-reads the file first and REFUSES on `mismatched`, so this can never
- * overwrite a foreign tenant's stamp with the caller's own. Returns false on
- * any failure (unreadable, unwritable, bad JSON) — the caller then reports the
- * unstamped state honestly rather than claiming a scope it could not record.
+ * The write goes through the Skill-23 state module (`workforce_state.update`),
+ * which holds the `state.write.lock` while it reads, mutates and atomically
+ * replaces the file — no temp file of our own, no read-modify-write race with
+ * the shell scripts that write the same file. The module's `jq` command mode is
+ * NOT used: it needs the `jq` program, which boxes may lack.
  *
- * ponytail: last-writer-wins against the skill scripts that also write this
- * file. The re-read narrows the window to the serialize+rename; add a lockfile
- * only if a concurrent-write collision is ever actually observed.
+ * The `mismatched` refusal is checked here, before the call, so a foreign
+ * tenant's stamp is never touched at all. Returns false on any failure
+ * (unreadable state, unresolvable scripts folder, non-zero exit, timeout) —
+ * the caller then reports the unstamped state honestly rather than claiming a
+ * scope it could not record.
  */
+const STAMP_PROGRAM = `import json, sys
+sys.path.insert(0, sys.argv[1])
+from workforce_state import update
+stamps = json.loads(sys.argv[3])
+def mutate(state):
+    for key, value in stamps.items():
+        if state.get(key) in (None, ''):
+            state[key] = value
+update(sys.argv[2], mutate)`;
+
+const STAMP_TIMEOUT_MS = 10_000;
+
 export function stampStateIdentity(context: StateIdentityContext): boolean {
   const target = buildStatePath();
-  const tmp = `${target}.identity-${process.pid}.tmp`;
   try {
-    const mode = fs.statSync(target).mode & 0o777;
     const state = JSON.parse(fs.readFileSync(target, 'utf-8')) as BuildState;
     if (classifyStateIdentity(state, context) === 'mismatched') return false;
-    for (const key of STAMPS) state[key] = context[key];
-    fs.writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`, { mode });
-    fs.renameSync(tmp, target);
+  } catch {
+    return false;
+  }
+
+  const scriptsDir = resolveSkillScriptsDir();
+  try {
+    if (!fs.statSync(scriptsDir).isDirectory()) return false;
+  } catch {
+    return false;
+  }
+
+  const stamps = JSON.stringify({
+    companyId: context.companyId,
+    installationId: context.installationId,
+    tenantId: context.tenantId,
+  });
+
+  try {
+    execFileSync('python3', ['-c', STAMP_PROGRAM, scriptsDir, target, stamps], {
+      timeout: STAMP_TIMEOUT_MS,
+    });
     return true;
   } catch {
-    try { fs.unlinkSync(tmp); } catch { /* nothing to clean up */ }
     return false;
   }
 }
