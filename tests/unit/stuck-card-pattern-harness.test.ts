@@ -175,12 +175,16 @@ test('fixture-guard: this suite runs ONLY against a throwaway DATABASE_PATH (sta
 });
 
 // ============================================================================
-// S1 — stuck-in-Backlog: board-hygiene rule 5's 21-day stale-backlog nudge
-// (board-hygiene.ts:425-511) must fire. This net is already SHIPPED at HEAD —
-// C-01's job is to prove it fires, not to build it (C-02 is the day-0..21
-// dead-zone / Triad-stall closure, a separate unit).
+// S1 — stuck-in-Backlog: board-hygiene rule 5's 21-day stale-backlog lane.
+//
+// U-17 (CC-064 / CC-051) changed what rule 5 does with a card whose requester
+// could not be asked: no `board_hygiene_stale_nudged` row is written at all —
+// the card is recorded once as `board_hygiene_stale_unasked` and is NEVER
+// auto-archived, because only a nudge that really went out may start the
+// archive clock. This fixture has no requester on file, so that is the branch
+// under test. The requester-present nudge is proven separately in S1b below.
 // ============================================================================
-test('S1 stuck-in-Backlog: a 22-day-old ungroomed card gets the stale-backlog nudge', async () => {
+test('S1 stuck-in-Backlog: a 22-day-old card with no requester is recorded as unasked, never nudged or archived', async () => {
   const id = uuidv4();
   run(
     `INSERT INTO tasks (id, title, status, workspace_id, business_id, updated_at, last_progress_at)
@@ -190,10 +194,95 @@ test('S1 stuck-in-Backlog: a 22-day-old ungroomed card gets the stale-backlog nu
 
   const result = await runBoardHygiene();
 
-  assert.ok(result.staleNudgedIds.includes(id), 'S1: the 22-day backlog card must be nudged (board-hygiene rule 5)');
-  assert.equal(taskStatus(id), 'backlog', 'S1: nudging never changes status');
+  assert.ok(
+    !result.staleNudgedIds.includes(id),
+    'S1: with no requester on file the card is NOT counted as nudged (U-17 rule 5)',
+  );
+  assert.equal(taskStatus(id), 'backlog', 'S1: the unasked record never changes status');
+  assert.equal(
+    eventsFor(id, 'board_hygiene_stale_nudged').length,
+    0,
+    'S1: no stale-backlog nudge event may fire when nobody could be asked',
+  );
+  const unasked = eventsFor(id, 'board_hygiene_stale_unasked');
+  assert.equal(unasked.length, 1, 'S1: exactly one "requester was not asked" record fires');
+  assert.match(unasked[0].message, /no requester on file/, 'S1: the record names the reason plainly');
+  assert.match(unasked[0].message, /not auto-archived/i, 'S1: the record states the card is never auto-archived');
+
+  const archived = queryOne<{ archived_at: string | null }>('SELECT archived_at FROM tasks WHERE id = ?', [id]);
+  assert.equal(archived?.archived_at, null, 'S1: an unasked card is never auto-archived');
+
+  // A second run must neither re-record the unasked state nor archive the card.
+  const again = await runBoardHygiene();
+  assert.ok(!again.staleArchivedIds.includes(id), 'S1: still never archived on a later run');
+  assert.equal(
+    eventsFor(id, 'board_hygiene_stale_unasked').length,
+    1,
+    'S1: the unasked record is written once, not once per run',
+  );
+});
+
+// ============================================================================
+// S1b — the OTHER half of U-17 rule 5: when a requester IS on file and the send
+// really goes out, the card is nudged (and only then may the archive clock
+// start). A stub `openclaw` on PATH proves a real dispatch happened; it never
+// reaches a human, and the real binary is unreachable while it runs (same
+// technique as tests/unit/notify-no-send-in-tests.test.ts).
+// ============================================================================
+test('S1b stuck-in-Backlog: a 22-day-old card WITH a requester gets the stale-backlog nudge', async () => {
+  const shimDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-stuck-card-s1b-bin-'));
+  const sentinel = path.join(shimDir, 'openclaw-invoked.log');
+  fs.writeFileSync(
+    path.join(shimDir, 'openclaw'),
+    `#!/bin/sh\necho "invoked: $@" >> ${JSON.stringify(sentinel)}\n`,
+    { mode: 0o755 },
+  );
+
+  const id = uuidv4();
+  const requesterChatId = '7712345678';
+  run(
+    `INSERT INTO tasks (id, title, status, workspace_id, business_id, requester_chat_id, updated_at, last_progress_at)
+     VALUES (?, ?, 'backlog', NULL, NULL, ?, ?, ?)`,
+    [id, 'S1b fixture: draft the vendor onboarding checklist', requesterChatId, daysAgo(22), daysAgo(22)],
+  );
+
+  const savedPath = process.env.PATH ?? '';
+  const savedGate = process.env.OWNER_NOTIFY_TELEGRAM_DISABLED;
+  const savedAllow = process.env.OWNER_NOTIFY_ALLOW_SEND_IN_TEST;
+  // Deliberate, explicit opt-in to the dispatch path (documented escape hatch
+  // in src/lib/notify.ts) — with only the stub on PATH, a real send is
+  // impossible by construction.
+  delete process.env.OWNER_NOTIFY_TELEGRAM_DISABLED;
+  process.env.OWNER_NOTIFY_ALLOW_SEND_IN_TEST = '1';
+  process.env.PATH = shimDir;
+  let result: Awaited<ReturnType<typeof runBoardHygiene>>;
+  try {
+    result = await runBoardHygiene();
+  } finally {
+    process.env.PATH = savedPath;
+    if (savedGate !== undefined) process.env.OWNER_NOTIFY_TELEGRAM_DISABLED = savedGate;
+    else delete process.env.OWNER_NOTIFY_TELEGRAM_DISABLED;
+    if (savedAllow !== undefined) process.env.OWNER_NOTIFY_ALLOW_SEND_IN_TEST = savedAllow;
+    else delete process.env.OWNER_NOTIFY_ALLOW_SEND_IN_TEST;
+  }
+
+  assert.ok(result.staleNudgedIds.includes(id), 'S1b: a card with a requester IS nudged');
   const nudgeEvt = eventsFor(id, 'board_hygiene_stale_nudged');
-  assert.equal(nudgeEvt.length, 1, 'S1: exactly one stale-backlog nudge event fires');
+  assert.equal(nudgeEvt.length, 1, 'S1b: exactly one stale-backlog nudge event fires');
+  assert.match(nudgeEvt[0].message, /\[requester:messaged\]/, 'S1b: the event records that the requester was messaged');
+  assert.equal(
+    eventsFor(id, 'board_hygiene_stale_unasked').length,
+    0,
+    'S1b: no "not asked" record when the nudge really went out',
+  );
+  assert.equal(taskStatus(id), 'backlog', 'S1b: nudging never changes status');
+
+  const deadline = Date.now() + 3_000;
+  while (!fs.existsSync(sentinel) && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  assert.ok(fs.existsSync(sentinel), 'S1b: the nudge was really dispatched (stub openclaw invoked)');
+  fs.rmSync(shimDir, { recursive: true, force: true });
 });
 
 // ============================================================================
