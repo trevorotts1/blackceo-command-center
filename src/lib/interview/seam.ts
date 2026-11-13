@@ -37,7 +37,10 @@ import {
   answersEncFilePath,
   buildStatePath,
   departmentLossWarningScript,
+  gateStateDir,
   handoffFilePath,
+  interviewGateScript,
+  interviewRegistryPath,
   listCanonicalDepartmentsScript,
   recordDeptDecisionScript,
   scriptExists,
@@ -107,8 +110,9 @@ export interface VerticalPacksRecord {
 }
 
 /** AI Workforce standard-first (PHASE 1 state shape): the prebuild driver's
- *  namespaced state block. Written ONLY by prebuild-standard-workforce.sh/.py
- *  (never by the CC); the seam only ever READS it. `status: "done"` +
+ *  namespaced state block. Written ONLY by the onboarding repository's root
+ *  scripts/prebuild-standard-workforce.py (wrapper: prebuild-standard-workforce.sh);
+ *  never by the Command Center. The seam only ever READS it. `status: "done"` +
  *  `standardReadyAt` is the terminal record the STANDARD_READY prover verdict
  *  and the /preview surface key on. */
 export interface StandardPrebuild {
@@ -704,6 +708,10 @@ export interface AnswerBlock {
   question: string;
   /** The current answer text (may span multiple lines). */
   answer: string;
+  /** The registry question id from the block's `**QID:** <id>` line (registry
+   *  v2), or null for a block written before ids were recorded. When present it
+   *  is the authoritative match key — wording is never consulted. */
+  qid?: string | null;
   /** Any provenance note on the block (confirmed-from-context / updated-on), joined. */
   provenance: string | null;
   /** The `**Logged:** …` human timestamp, when the block carries one. */
@@ -734,6 +742,12 @@ export function parseAnswerBlocks(text: string): AnswerBlock[] {
     if (!question) continue;
     const answer = aMatch[1].trim();
 
+    // Registry v2: the answer route mirrors each accepted answer with a
+    // `**QID:** <id>` line. Older blocks carry no such line — qid stays null and
+    // readers fall back to wording (current prompt + legacyPrompts).
+    const qidMatch = chunk.match(/\*\*QID:\*\*\s*([^\n]+)/);
+    const qid = qidMatch && qidMatch[1].trim() ? qidMatch[1].trim() : null;
+
     // Provenance: an explicit **Provenance:** note (confirmed-from-context) and/or
     // any "Updated on … previous answer was …" inline-edit note (SKILL.md).
     const provParts: string[] = [];
@@ -748,7 +762,7 @@ export function parseAnswerBlocks(text: string): AnswerBlock[] {
     const loggedMatch = chunk.match(/\*\*Logged:\*\*\s*([^\n]+)/);
     const loggedAt = loggedMatch && loggedMatch[1].trim() ? loggedMatch[1].trim() : null;
 
-    blocks.push({ question, answer, provenance, loggedAt });
+    blocks.push({ question, answer, qid, provenance, loggedAt });
   }
 
   return blocks;
@@ -967,7 +981,115 @@ export async function updateInterviewState(
   }
   if (args.rateLimitSessionId) argv.push('--session-id', args.rateLimitSessionId);
   if (args.complete) argv.push('--complete');
+  // BU-22: pin the writer to the EXACT file paths.ts resolves (the --state flag
+  // added in BU-12). In production with no workspace override this equals the
+  // script's own /data-else-$HOME resolution, so it is a no-op there — but it
+  // guarantees the stamp lands in the same file the app reads, including when
+  // the workspace comes from agents.defaults.workspace in the box config.
+  argv.push('--state', buildStatePath());
   return runScript(updateInterviewStateScript(), 'bash', argv);
+}
+
+/* ──────────────────── Step gate (interview_gate.py, v2) ────────────────────── */
+
+/** One gate call's outcome. `code` is the gate's own exit code (0 ok,
+ *  2 refused, 3 not complete / one follow-up pending, 1 tooling) and `json` is
+ *  the object it printed on stdout. */
+export interface GateResult {
+  code: number;
+  json: any;
+}
+
+/** Parse the gate's stdout JSON object; undefined when it printed nothing usable. */
+function parseGateJson(text: string | undefined): any | undefined {
+  const body = (text ?? '').trim();
+  if (!body) return undefined;
+  try {
+    const parsed = JSON.parse(body);
+    return parsed && typeof parsed === 'object' ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Run the step gate — the ONLY program that says which question is next, whether
+ * an answer is accepted, and whether the interview is complete.
+ *
+ * Every call pins `--registry` and `--state-dir` to the exact files paths.ts
+ * resolves, so the web app, the Telegram agent and the shell scripts can never
+ * read a different registry or state folder.
+ *
+ * Never throws. Exit 2 (refused: wrong question, required skip, unknown
+ * question, bad usage) and exit 3 (not complete yet, or the answer needs one
+ * follow-up) are VERDICTS: they are returned with their code and JSON body. Exit
+ * 1, a missing script, or unusable output is a TOOLING failure —
+ * `{code:1, json:{error:'tooling'}}` — and the caller reports "temporarily
+ * unavailable", never "not answered".
+ */
+export async function runGate(args: string[]): Promise<GateResult> {
+  const script = interviewGateScript();
+  if (!scriptExists(script)) return { code: 1, json: { error: 'tooling' } };
+  const argv = [
+    '--registry',
+    interviewRegistryPath(),
+    '--state-dir',
+    gateStateDir(),
+    ...args,
+  ];
+  try {
+    const { stdout } = await runScript(script, 'python3', argv);
+    const json = parseGateJson(stdout);
+    return json === undefined ? { code: 1, json: { error: 'tooling' } } : { code: 0, json };
+  } catch (err) {
+    if (err instanceof InterviewScriptError) {
+      const code = err.exitCode;
+      if (code === 2 || code === 3) {
+        return { code, json: parseGateJson(err.stdout) ?? {} };
+      }
+    }
+    return { code: 1, json: { error: 'tooling' } };
+  }
+}
+
+/** One known fact: the value the app already holds + where it came from. */
+export interface KnownFact {
+  value: string;
+  source?: string;
+}
+
+/** The whole `interview-known.json` object: `{knownKey: {value, source}}`. */
+export type KnownFacts = Record<string, KnownFact>;
+
+/**
+ * Write `<gate state dir>/interview-known.json` atomically (temp file + rename)
+ * with mode 0600. The file makes the gate OFFER a `knownValue` on `next`; it
+ * never becomes an answer until the owner submits it, so nothing written here
+ * can fabricate one.
+ *
+ * Throws when the write fails — a known-fact file that silently was not written
+ * would silently re-ask every question it covers. The temp file is removed on
+ * failure, so a half-written file can never replace the good one.
+ */
+export function writeKnownFacts(known: KnownFacts): string {
+  const target = path.join(gateStateDir(), 'interview-known.json');
+  const tmp = `${target}.ts.tmp.${process.pid}.${Date.now()}`;
+  try {
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(tmp, `${JSON.stringify(known ?? {}, null, 2)}\n`, {
+      encoding: 'utf-8',
+      mode: 0o600,
+    });
+    fs.renameSync(tmp, target);
+  } catch (err) {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      // Temp file absent or already gone; the existing file is untouched.
+    }
+    throw err;
+  }
+  return target;
 }
 
 export interface RecordDeptDecisionArgs {
@@ -1023,12 +1145,12 @@ export async function recordDeptDecision(
     // never auto-added. Without it the writer exits 2 for a floor decline
     // (fail-closed) and the route surfaces the warning instead of a write.
     ...(args.confirmLoss ? ['--confirm-loss'] : []),
-    // Pin the writer to the EXACT file paths.ts resolves. record-dept-decision.sh
-    // supports --state; in production (no OPENCLAW_WORKSPACE_ROOT override) this
-    // equals the script's own /data-else-$HOME resolution, so it is a no-op there —
-    // but it guarantees the decision lands in the same file the app reads and makes
-    // the write path testable in isolation. (update-interview-state.sh has no --state
-    // flag, so it always uses its own /data-else-$HOME resolution.)
+    // Pin the writer to the EXACT file paths.ts resolves. Both writers accept
+    // --state (update-interview-state.sh gained it in BU-12); in production (no
+    // OPENCLAW_WORKSPACE_ROOT override) this equals each script's own
+    // /data-else-$HOME resolution, so it is a no-op there — but it guarantees
+    // the write lands in the same file the app reads and makes the write path
+    // testable in isolation.
     '--state',
     buildStatePath(),
   ];
