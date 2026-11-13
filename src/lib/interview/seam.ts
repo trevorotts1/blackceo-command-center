@@ -110,8 +110,9 @@ export interface VerticalPacksRecord {
 }
 
 /** AI Workforce standard-first (PHASE 1 state shape): the prebuild driver's
- *  namespaced state block. Written ONLY by prebuild-standard-workforce.sh/.py
- *  (never by the CC); the seam only ever READS it. `status: "done"` +
+ *  namespaced state block. Written ONLY by the onboarding repository's root
+ *  scripts/prebuild-standard-workforce.py (wrapper: prebuild-standard-workforce.sh);
+ *  never by the Command Center. The seam only ever READS it. `status: "done"` +
  *  `standardReadyAt` is the terminal record the STANDARD_READY prover verdict
  *  and the /preview surface key on. */
 export interface StandardPrebuild {
@@ -980,6 +981,12 @@ export async function updateInterviewState(
   }
   if (args.rateLimitSessionId) argv.push('--session-id', args.rateLimitSessionId);
   if (args.complete) argv.push('--complete');
+  // BU-22: pin the writer to the EXACT file paths.ts resolves (the --state flag
+  // added in BU-12). In production with no workspace override this equals the
+  // script's own /data-else-$HOME resolution, so it is a no-op there — but it
+  // guarantees the stamp lands in the same file the app reads, including when
+  // the workspace comes from agents.defaults.workspace in the box config.
+  argv.push('--state', buildStatePath());
   return runScript(updateInterviewStateScript(), 'bash', argv);
 }
 
@@ -1138,12 +1145,12 @@ export async function recordDeptDecision(
     // never auto-added. Without it the writer exits 2 for a floor decline
     // (fail-closed) and the route surfaces the warning instead of a write.
     ...(args.confirmLoss ? ['--confirm-loss'] : []),
-    // Pin the writer to the EXACT file paths.ts resolves. record-dept-decision.sh
-    // supports --state; in production (no OPENCLAW_WORKSPACE_ROOT override) this
-    // equals the script's own /data-else-$HOME resolution, so it is a no-op there —
-    // but it guarantees the decision lands in the same file the app reads and makes
-    // the write path testable in isolation. (update-interview-state.sh has no --state
-    // flag, so it always uses its own /data-else-$HOME resolution.)
+    // Pin the writer to the EXACT file paths.ts resolves. Both writers accept
+    // --state (update-interview-state.sh gained it in BU-12); in production (no
+    // OPENCLAW_WORKSPACE_ROOT override) this equals each script's own
+    // /data-else-$HOME resolution, so it is a no-op there — but it guarantees
+    // the write lands in the same file the app reads and makes the write path
+    // testable in isolation.
     '--state',
     buildStatePath(),
   ];
