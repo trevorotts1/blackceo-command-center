@@ -23,6 +23,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render, screen } from '@testing-library/react';
+import { createElement } from 'react';
 import { NextRequest } from 'next/server';
 
 const companyRootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bu104-company-'));
@@ -117,7 +118,7 @@ describe('building page', () => {
 
   it('states a long unmoving wait instead of a stage label', async () => {
     stubStatus({ ...base, waiting_minutes: 180 });
-    render(<OnboardingBuildingPage />);
+    render(createElement(OnboardingBuildingPage));
 
     expect(await screen.findByText(/still being prepared/)).toBeTruthy();
     expect(screen.queryByText(/Quality reviewing/)).toBeNull();
@@ -125,10 +126,11 @@ describe('building page', () => {
   });
 
   it('keeps the stage label for a short wait', async () => {
-    stubStatus({ ...base, waiting_minutes: 5 });
-    render(<OnboardingBuildingPage />);
+    stubStatus({ ...base, message: 'Step 4 of 9 in progress.', waiting_minutes: 5 });
+    render(createElement(OnboardingBuildingPage));
 
     expect(await screen.findByText('Quality reviewing every document...')).toBeTruthy();
+    expect(screen.getByText('Step 4 of 9 in progress.')).toBeTruthy();
     expect(screen.queryByText(/still being prepared/)).toBeNull();
   });
 });
