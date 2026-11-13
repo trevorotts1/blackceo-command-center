@@ -293,7 +293,12 @@ describe('FIX47 — readiness is truthful across client and board indicators', (
   const ready = { status: 'ok', embeddings: { status: 'ok', degraded: false } };
   for (const [name, system, health, expected] of [
     ['healthy', fixturePayload('live'), ready, 'All systems working'],
-    ['embedding degradation in HTTP 200', fixturePayload('live'), { status: 'ok', embeddings: { status: 'degraded', degraded: true } }, 'All systems working'],
+    // U-01: embedding_readiness is an ADVISORY row (spec U-01, advisory table:
+    // "never changes the badge"). A degraded embedding with an otherwise clean
+    // payload must stay healthy — the row is still listed in the drawer.
+    // U-06 names that healthy client badge "All systems working".
+    ['embedding degradation in HTTP 200 (advisory, never flips the badge)', fixturePayload('live'), { status: 'ok', embeddings: { status: 'degraded', degraded: true } }, 'All systems working'],
+    // U-01: a counted row (openclaw_gateway) still degrades; U-06 names it "Needs attention".
     ['migration degradation', fixturePayload('live'), { ...ready, status: 'degraded' }, 'Needs attention'],
     ['disconnected gateway', fixturePayload('offline'), ready, 'Offline'],
     ['unknown overall', { ...fixturePayload('live'), overall: 'unknown' }, ready, 'Status not available'],
@@ -313,6 +318,39 @@ describe('FIX47 — readiness is truthful across client and board indicators', (
       expect(screen.queryByText('All systems operational')).toBeNull();
     });
   }
+
+  it('keeps a degraded advisory embedding row visible in the drawer without flipping the badge, while a counted row still degrades it', async () => {
+    // U-01 advisory table: embedding_readiness never changes the badge but must
+    // remain visible in the operator drawer. A counted row (openclaw_gateway)
+    // set to degraded must still degrade the tier.
+    global.fetch = stubFetch({
+      [STATUS_URL]: () => jsonResponse(fixturePayload('live')),
+      '/api/health': () => jsonResponse({ status: 'ok', embeddings: { status: 'degraded', degraded: true } }),
+      [FEED_URL]: () => jsonResponse({ events: [], client: null, source: 'local_db' }),
+    }) as typeof fetch;
+
+    render(<HealthIndicator viewerRole="operator" />);
+    await waitFor(() => expect(screen.getByTestId('health-indicator').textContent).toBe('Healthy'));
+    fireEvent.click(screen.getByTestId('health-indicator'));
+    await waitFor(() => screen.getByText('System Status'));
+
+    const auxSection = screen.getByText('Auxiliary').closest('section') as HTMLElement;
+    expect(within(auxSection).getByText('Embedding readiness')).toBeTruthy();
+
+    cleanup();
+
+    const counted = fixturePayload('live');
+    counted.components[1].status = 'degraded'; // openclaw_gateway is a counted row
+    global.fetch = stubFetch({
+      [STATUS_URL]: () => jsonResponse(counted),
+      '/api/health': () => jsonResponse(ready),
+    }) as typeof fetch;
+
+    render(<HealthIndicator viewerRole="client" />);
+    // U-01: the counted row still degrades the tier; U-06: the client badge
+    // for the degraded tier reads "Needs attention".
+    await waitFor(() => expect(screen.getByTestId('health-indicator').textContent).toBe('Needs attention'));
+  });
 
   it('does not trust live overall when a returned required subsystem is degraded', async () => {
     const status = fixturePayload('live');
@@ -356,14 +394,19 @@ describe('FIX47 — readiness is truthful across client and board indicators', (
     expect(screen.getByTestId('health-indicator').textContent).toBe('All systems working');
   });
 
-  it('embedding trouble alone never moves the client badge (advisory since U-01)', async () => {
-    // embedding_readiness is advisory: a degraded embedding check must not
-    // change the badge, and recovery changes nothing either.
+  it('never keeps readiness degraded on the advisory embedding row alone (client badge stays "All systems working")', async () => {
+    // U-01 advisory table: embedding_readiness is advisory, so a degraded
+    // embedding (and a hanging embedding probe) can never hold the badge at
+    // Degraded. Counted-row degradation is covered above.
+    // U-06: the client badge for a healthy tier reads "All systems working";
+    // recovery changes nothing either.
     vi.useFakeTimers();
     let resolveHealth!: (response: Response) => void;
     let health: Response | Promise<Response> = jsonResponse({ status: 'ok', embeddings: { status: 'degraded', degraded: true } });
     global.fetch = stubFetch({ [STATUS_URL]: () => jsonResponse(fixturePayload('live')), '/api/health': () => health }) as typeof fetch;
     await act(async () => { render(<HealthIndicator viewerRole="client" />); });
+    // U-01: the advisory embedding row never moves the badge off healthy.
+    // U-06: that healthy client badge reads "All systems working".
     expect(screen.getByTestId('health-indicator').textContent).toBe('All systems working');
     health = new Promise<Response>((resolve) => { resolveHealth = resolve; });
     await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
