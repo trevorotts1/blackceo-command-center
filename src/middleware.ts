@@ -216,7 +216,7 @@ function tenantRefusalResponse(request: NextRequest, body: { error: string; mess
     `<h1>Sign in required</h1><p>${safe}</p>` +
     `<p>Re-open your private interview link to sign in again and continue where you left off — ` +
     `the same link works until your interview is complete, on any device. ` +
-    `If that link no longer opens, ask your operator for a fresh one.</p></body></html>`,
+    `If that link no longer opens, reply to the message that sent it and ask for a new one.</p></body></html>`,
     { status: 403, headers: { ...headers, 'content-type': 'text/html; charset=utf-8' } },
   );
 }
@@ -587,7 +587,7 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
       return launchRefusal(
         request,
         'launch_tenant_required',
-        'Sign in with an authorized account to view launch data. If access still fails, contact your operator.',
+        'Please sign in with the email address you were invited with to see this page. If it still does not work, let your support contact know.',
       );
     }
     if (launchScope.sharedHost) {
@@ -619,7 +619,7 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
   // This permits first-party enrollment even when Access enforcement is enabled.
   if (pathname === '/interview' && (request.method === 'GET' || request.method === 'HEAD')) {
     try { tenantRegistration(requestHost(request)); }
-    catch { return tenantRefusalResponse(request, { error: 'unregistered_hostname', message: 'This interview link does not match a registered host. Re-open your private interview link to sign in.' }); }
+    catch { return tenantRefusalResponse(request, { error: 'unregistered_hostname', message: 'This link is not valid for this address. Re-open the private interview link you were sent.' }); }
     const response=NextResponse.next();
     await setCsrfCookieIfMissing(response,request);
     return response;
@@ -668,7 +668,7 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
         return NextResponse.json({ error: 'hq_direct_origin_required' }, { status: 403, headers: { 'cache-control': 'private, no-store' } });
       }
     } catch {
-      return tenantRefusalResponse(request, { error: 'unregistered_hostname', message: 'This sign-in link does not match a registered Headquarters host. Ask your operator for a fresh private link.' });
+      return tenantRefusalResponse(request, { error: 'unregistered_hostname', message: 'This sign-in link is not valid for this address. Ask your support contact for a new private link.' });
     }
     const response = NextResponse.next();
     if (pathname === '/owner-login') await setCsrfCookieIfMissing(response, request);
@@ -745,7 +745,7 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
           return NextResponse.json({ error: 'hq_direct_origin_required' }, { status: 403, headers: { 'cache-control': 'private, no-store' } });
         }
       } catch {
-        return tenantRefusalResponse(request, { error: 'unregistered_hostname', message: 'This sign-in link does not match a registered Headquarters host. Ask your operator for a fresh private link.' });
+        return tenantRefusalResponse(request, { error: 'unregistered_hostname', message: 'This sign-in link is not valid for this address. Ask your support contact for a new private link.' });
       }
     }
     if (apiTenant?.kind === 'client' && !pathname.startsWith('/api/interview/') && !pathname.startsWith('/api/auth/') && !pathname.startsWith('/api/tenant-board/')) {
@@ -971,7 +971,7 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
     let scope='unverified';
     let gateEmail: string | null = null;
     try { const tenant=await resolveTenantContext(request); scope=`${tenant.tenantId}:${tenant.installationId}:${tenant.host}`; gateEmail=tenant.email ?? null; }
-    catch { return tenantRefusalResponse(request, { error: 'tenant_access_required', message: 'Sign in with an authorized account. If access still fails, contact your operator. This is an access issue, not an incomplete interview.' }); }
+    catch { return tenantRefusalResponse(request, { error: 'tenant_access_required', message: 'Please sign in with the email address you were invited with. If it still does not work, let your support contact know. Your interview answers are safe.' }); }
     const verdict = await verifyInterviewToken(token,scope);
     if (verdict.complete === true && verdict.valid && await checkInterviewCompleteViaFallback(request.headers.get('host'))) {
       // Primary cookie is valid-complete — admit immediately.
