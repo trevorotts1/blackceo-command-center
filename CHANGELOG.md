@@ -1,3 +1,10 @@
+## [Unreleased] — 2026-11-13 — ci(qc-cc): the unit-test job names the failing test, stops printing 50 MB of migration lines, and refuses a Vitest file in the Node-runner folder
+
+- ci(qc-cc) U55 job: the Node unit-test step keeps the full TAP in `unit.tap` and shows the job log without the `[Migration N]`, `[seed]`, `[reseed]` and `[DB]` lines (the log was ~51 MB, so the engine's tail-only read could not see the failure). A new last step, `if: failure()`, runs `scripts/ci-annotate-tap-failures.sh`, which prints each failing test as `::error file=tests/unit/<file>` so the check's annotations name the culprit.
+- ci(qc-cc) new guard `scripts/guard-no-vitest-in-node-unit.py`, run before the unit tests: fails in seconds if a file that `npm run test:unit` executes under Node's own runner (everything in `tests/unit/*.test.ts` except the exclusion list in package.json) imports `vitest`.
+- Source: batch-merge diagnosis 2026-11-13, section 5.3. No application code, no package version change.
+- Migration: CI only; not merged, deployed or rolled onto any client box.
+
 ## [Unreleased] — 2026-11-12 — fix(rescue): the rescue page and the reference scripts stop reporting things that are not true
 
 - ci(single trigger): the workflows no longer list `batch/**` under `push`. The batch merge engine always opens a pull request for a batch, so the `pull_request` trigger already runs every check; the push trigger ran each one a second time and doubled the jobs on the account's 20-job limit. Nothing else about any workflow changed.
