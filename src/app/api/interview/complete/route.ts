@@ -80,6 +80,10 @@ const requestSchema = z
 /** What the client redirects into on a passing QC (already exists, Wave 3 #9). */
 const BUILD_REDIRECT = '/onboarding/building';
 
+/** The one completion message, shown for pass and needs-review alike. */
+const DONE_MESSAGE =
+  'You are done. Your company is being built now. This usually takes 30 to 45 minutes. We will message you when it is ready.';
+
 /* -------------------------------------------------------------------------- */
 /* pre-flight                                                                  */
 /* -------------------------------------------------------------------------- */
@@ -193,6 +197,66 @@ function extractQcReasons(state: BuildState | null): string[] {
   return Array.from(new Set(out));
 }
 
+/**
+ * The question prompts a "not enough yet" reason points back to. Copied from
+ * the final question set character for character; used only to name the
+ * question inside a plain sentence, never to change its wording.
+ */
+const QUESTION_PROMPTS: Record<string, string> = {
+  brand_evokes:
+    'When someone sees your brand for the first time, what should they feel in the first five seconds?',
+  customer_feeling: 'After working with you, how should a customer feel?',
+  brand_descriptors: 'Give me three words a happy customer would use to describe you.',
+  ideal_customer: 'Who is your best kind of customer?',
+  unique_differentiator: 'Why do customers pick you instead of someone else?',
+};
+
+/** Fallback for a QC reason that matches no known key (never the raw string). */
+const GENERIC_REASON = 'One of your answers needs another look.';
+
+/**
+ * Substring → plain sentence. Checked in order, so the most specific key wins
+ * (a "Missing mandatory fields: company_name" line names the company name).
+ */
+const PLAIN_REASON_RULES: Array<{ key: string; sentence: string }> = [
+  { key: 'company_name', sentence: 'Please check your company name.' },
+  { key: 'industry', sentence: 'Please check what kind of business it is.' },
+  ...Object.entries(QUESTION_PROMPTS).map(([id, prompt]) => ({
+    key: id,
+    sentence: `Please add a little more to: ${prompt}`,
+  })),
+  {
+    key: 'disagree',
+    sentence: 'We are double-checking your saved answers. Please press the button again in a minute.',
+  },
+  { key: 'Missing mandatory fields', sentence: 'A required question is still open.' },
+  { key: 'departments[at-least-one]', sentence: 'Please confirm your team on the team screen.' },
+];
+
+/**
+ * Turn the QC verdict's raw reason strings into sentences an owner can act on.
+ * A reason that matches no key becomes GENERIC_REASON — the raw gate string is
+ * never shown to a client. De-duped, order preserved.
+ */
+function plainReasons(state: BuildState | null): string[] {
+  const raw = state?.interviewQc?.reasons;
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== 'string' || !entry.trim()) continue;
+    const hit = PLAIN_REASON_RULES.find((rule) => entry.includes(rule.key));
+    out.push(hit ? hit.sentence : GENERIC_REASON);
+  }
+  return Array.from(new Set(out));
+}
+
+/** The question ids the gate says are still open (drives "Answer now"). */
+function missingQuestionIds(state: BuildState | null): string[] {
+  const raw = state?.interviewQc?.missingQuestionIds;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((v): v is string => typeof v === 'string' && v.trim().length > 0);
+}
+
 /* -------------------------------------------------------------------------- */
 /* handler                                                                     */
 /* -------------------------------------------------------------------------- */
@@ -299,17 +363,28 @@ export async function POST(req: NextRequest) {
       // own fail-closed enforcement disagreed with our pre-flight — surface it as
       // a 409 so the UI re-checks the gates rather than treating it as a crash.
       if (err.exitCode === 87 || err.exitCode === 88) {
+        // Name what to fix instead of relaying the gate's own sentence: re-read
+        // the canonical file for the QC reasons and the open question ids.
+        const state = readBuildState();
         return NextResponse.json(
           {
             ok: false,
-            error: err.exitCode === 87 ? 'interview_pending' : 'reconciliation_pending',
-            message:
-              err.exitCode === 87
-                ? 'The build refused: a genuine interview / consent is still required.'
-                : 'The build refused: the department reconciliation board is incomplete.',
+            error: 'interview_incomplete',
+            reasons: plainReasons(state),
+            missingQuestionIds: missingQuestionIds(state),
             missing: collectMissing(await getInterviewGateSnapshot(coverageOpts).catch(() => snapshot)),
           },
           { status: 409 },
+        );
+      }
+      // exit 89 (rate limited / too many tries): say what to do, not that it broke.
+      if (err.exitCode === 89) {
+        return NextResponse.json(
+          {
+            error: 'try_again_later',
+            message: 'Please wait a few minutes and press the button again.',
+          },
+          { status: 429 },
         );
       }
       // exit 2 (needs-review) / exit 3 (fail): NOT a crash — the QC verdict is
@@ -370,11 +445,12 @@ function finalResponse(
       });
 
     case 'needs-review':
+      // needs-review is the pass outcome from the owner's side: the build runs.
       return NextResponse.json({
         status: 'needs-review',
+        redirect: BUILD_REDIRECT,
         operatorPing: true,
-        message:
-          "Thanks — we're reviewing your answers. Your workforce will start building shortly; no action is needed from you.",
+        message: DONE_MESSAGE,
         alreadyComplete: ctx.alreadyComplete,
       });
 
@@ -384,9 +460,9 @@ function finalResponse(
       // it as needs-review (gentle + operator ping) — never a false `pass`.
       return NextResponse.json({
         status: 'needs-review',
+        redirect: BUILD_REDIRECT,
         operatorPing: true,
-        message:
-          "Thanks — we're reviewing your answers. Your workforce will start building shortly; no action is needed from you.",
+        message: DONE_MESSAGE,
         qcStatus: rawStatus,
         alreadyComplete: ctx.alreadyComplete,
       });
