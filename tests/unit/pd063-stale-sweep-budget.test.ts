@@ -58,13 +58,11 @@
  *   node --import tsx --test tests/unit/pd063-stale-sweep-budget.test.ts
  */
 
-// SAFETY: mute every outbound escalation channel BEFORE anything is imported.
-// The owner re-ping path does a bare fetch() to getMissionControlUrl(), whose
-// default is http://localhost:4000 — the LIVE Command Center. Without the
-// override below a sweep in this suite could POST an event into live operator
-// state. MISSION_CONTROL_URL is pointed at this suite's own 127.0.0.1 sink in
-// before(), and RESCUE_RANGERS_WEBHOOK_URL (the operator rung) is deleted so
-// notifySystem() has no live endpoint to reach even if it were called.
+// SAFETY: mute every outbound owner channel BEFORE anything is imported. The
+// owner re-ping no longer POSTs to the Command Center (/api/events) — it goes
+// through the trust engine's gateway send, which this suite keeps muted, so no
+// message can leave the process. RESCUE_RANGERS_WEBHOOK_URL (the operator rung)
+// is deleted so notifySystem() has no live endpoint to reach either.
 process.env.OWNER_NOTIFY_TELEGRAM_DISABLED = '1';
 delete process.env.DISABLE_STALE_TASK_SWEEP;
 delete process.env.RESCUE_RANGERS_WEBHOOK_URL;
@@ -77,13 +75,11 @@ delete process.env.STALE_IN_PROGRESS_HOURS;
 
 import './_isolated-db'; // MUST be first: redirects DATABASE_PATH to a throwaway file.
 
-import test, { before, after, beforeEach } from 'node:test';
+import test, { beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import http from 'node:http';
-import type { AddressInfo } from 'node:net';
 import { v4 as uuidv4 } from 'uuid';
 import { run, queryOne, queryAll } from '../../src/lib/db';
 import { runStaleTaskSweep } from '../../src/lib/jobs/stale-task-sweep';
@@ -93,34 +89,7 @@ const SHIPPED_CAP = 5;
 /** Every task id this suite creates — the causal proof that nothing reached the live DB. */
 const fixtureIds: string[] = [];
 
-/** POSTs the sweep made to this suite's own Mission Control sink. */
-let escalations: string[] = [];
-let server: http.Server;
-
-before(async () => {
-  server = http.createServer((req, res) => {
-    let body = '';
-    req.on('data', (c) => (body += c));
-    req.on('end', () => {
-      escalations.push(body);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end('{"ok":true}');
-    });
-  });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const { port } = server.address() as AddressInfo;
-  // Point EVERY Command Center URL at the local sink so no packet can reach the
-  // live app on :4000 (the getMissionControlUrl() default).
-  process.env.MISSION_CONTROL_URL = `http://127.0.0.1:${port}`;
-});
-
-after(async () => {
-  delete process.env.MISSION_CONTROL_URL;
-  await new Promise<void>((resolve) => server.close(() => resolve()));
-});
-
 beforeEach(() => {
-  escalations = [];
   // ARCHIVE (never DELETE) every fixture an earlier test created, so this test's
   // sweep sees only its OWN candidates and the per-tick counters are unambiguous.
   // The sweep filters `archived_at IS NULL`, so this is the app's own semantics.
@@ -134,6 +103,7 @@ beforeEach(() => {
     ]);
   }
 });
+
 
 /**
  * The sweep's blocked→backlog return is deliberately FIRE-AND-FORGET
@@ -176,6 +146,14 @@ function seedBlockedTask(opts: {
   dispatchAttempts: number;
   qcRerouteAttempts?: number;
   nextEligibleInFuture?: boolean;
+  /** CC-054: an already-recorded reminder this many hours old. A card waiting on
+   *  its OWNER only leaves Blocked once a reminder really went out and the owner
+   *  has had the rest of the window (return − re-ping = 4h) to answer. */
+  reminderHoursAgo?: number;
+  /** Who the card is waiting on. An OPERATOR card keeps today's behaviour (no
+   *  reminder gate), and its escalation is recorded in the ledger even while
+   *  owner sends are muted — which is what makes anti-silence observable here. */
+  blockedOn?: 'owner' | 'operator';
 }): string {
   const id = uuidv4();
   fixtureIds.push(id);
@@ -184,11 +162,12 @@ function seedBlockedTask(opts: {
     `INSERT INTO tasks (id, title, status, workspace_id, blocked_on_human, blocked_reason, ask,
                         dispatch_attempts, qc_reroute_attempts, next_dispatch_eligible_at,
                         updated_at, last_progress_at)
-     VALUES (?, ?, 'blocked', ?, 'owner', 'decision', ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, 'blocked', ?, ?, 'decision', ?, ?, ?, ?, ?, ?)`,
     [
       id,
       `${opts.label} ${id.slice(0, 8)}`,
       ws,
+      opts.blockedOn ?? 'owner',
       'Operator must supply a fresh presentation contract (fixture)',
       opts.dispatchAttempts,
       opts.qcRerouteAttempts ?? 0,
@@ -197,6 +176,12 @@ function seedBlockedTask(opts: {
       hoursAgo(opts.ageHours),
     ],
   );
+  if (opts.reminderHoursAgo !== undefined) {
+    run(
+      `INSERT INTO events (id, type, task_id, message, created_at) VALUES (?, 'stale_blocked_repinged', ?, ?, ?)`,
+      [uuidv4(), id, 'fixture: a reminder really went out', hoursAgo(opts.reminderHoursAgo)],
+    );
+  }
   return id;
 }
 
@@ -259,17 +244,18 @@ function isDispatchableByAdvancers(id: string): boolean {
   return (row?.n ?? 0) > 0;
 }
 
-async function settle(expected: number, timeoutMs = 2000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (escalations.length < expected && Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 20));
-  }
-  await new Promise((r) => setTimeout(r, 120));
-}
-
-/** Escalations that actually left the process FOR THIS TASK (bodies carry the id). */
-function escalationsFor(taskId: string): number {
-  return escalations.filter((body) => body.includes(taskId)).length;
+/** Reminder rows this sweep recorded FOR THIS TASK — the durable evidence that a
+ *  re-ping was attempted and recorded. (The owner lane no longer POSTs to the
+ *  Command Center, so the event ledger is the observable.) */
+function repingRows(taskId: string): number {
+  return (
+    queryOne<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM events
+        WHERE task_id = ? AND type IN ('stale_repinged', 'stale_blocked_repinged')
+          AND message NOT LIKE 'fixture:%'`,
+      [taskId],
+    )?.n ?? 0
+  );
 }
 
 // ── ISOLATION ───────────────────────────────────────────────────────────────────
@@ -339,7 +325,7 @@ test('ISOLATION: this suite runs against a throwaway DB, never the live operator
 // re-dispatchable — exactly the live 06:50Z → 06:52Z sequence.
 test('(a) exhausted blocked card swept as stale does NOT get a zeroed budget and does NOT become re-dispatchable', async () => {
   // Mirrors the live row: 8 consumed attempts, blocked, stale past the 6h window.
-  const id = seedBlockedTask({ label: 'exhausted', ageHours: 8, dispatchAttempts: 8 });
+  const id = seedBlockedTask({ label: 'exhausted', ageHours: 8, dispatchAttempts: 8, blockedOn: 'operator' });
   assert.equal(isDispatchableByAdvancers(id), false, 'precondition: a blocked card is not advancer-dispatchable');
 
   const result = await runStaleTaskSweep();
@@ -374,8 +360,8 @@ test('(a) exhausted blocked card swept as stale does NOT get a zeroed budget and
   assert.deepEqual(result.budgetEndStatedIds, [id]);
 
   // NOT left silently stuck either: the card still reaches its named human.
-  await settle(1);
-  assert.equal(escalationsFor(id), 1, 'an end-stated card is re-escalated, never dropped without a word');
+  await flush();
+  assert.equal(repingRows(id), 1, 'an end-stated card is re-escalated, never dropped without a word');
 });
 
 // ── (a2) "NOT re-dispatchable" at the cap boundary, keyed on the shared constant ─
@@ -386,7 +372,11 @@ test('(a2) the guard keys on the SAME cap the dispatcher blocks at — cap-1 is 
     'sanity: the shipped default cap the dispatcher exports and blocks at',
   );
 
-  const belowCap = seedBlockedTask({ label: 'below-cap', ageHours: 8, dispatchAttempts: SHIPPED_CAP - 1 });
+  // CC-054: the below-cap card must have had its reminder sent (5h ago, past the
+  // 4h answer window) or the sweep now keeps an owner card Blocked on purpose.
+  const belowCap = seedBlockedTask({
+    label: 'below-cap', ageHours: 8, dispatchAttempts: SHIPPED_CAP - 1, reminderHoursAgo: 5,
+  });
   const atCap = seedBlockedTask({ label: 'at-cap', ageHours: 8, dispatchAttempts: SHIPPED_CAP });
 
   const result = await runStaleTaskSweep();
@@ -403,7 +393,9 @@ test('(a2) the guard keys on the SAME cap the dispatcher blocks at — cap-1 is 
 
 // ── (b) A GENUINELY STALE CARD IS STILL TRIAGED, NOT TRAPPED ────────────────────
 test('(b) a genuinely stale blocked card with remaining budget is STILL returned to backlog (the sweep still sweeps)', async () => {
-  const id = seedBlockedTask({ label: 'genuine', ageHours: 9, dispatchAttempts: 2 });
+  // CC-054: an owner card only leaves Blocked after a reminder really went out
+  // and the owner had the rest of the window (6h − 2h = 4h) to answer.
+  const id = seedBlockedTask({ label: 'genuine', ageHours: 9, dispatchAttempts: 2, reminderHoursAgo: 5 });
 
   const result = await runStaleTaskSweep();
   await flush(); // the return is fire-and-forget
@@ -422,7 +414,9 @@ test('(b2) the SWEEP-03 drag-back trap stays fixed: the stale backoff window is 
   // A card blocked with a backoff timer still in the FUTURE — pre-SWEEP-03 this
   // was the "rot in backlog" state. The window must still be cleared so the card
   // is immediately re-eligible; only the BUDGET is out of the sweep's hands.
-  const id = seedBlockedTask({ label: 'backoff', ageHours: 7, dispatchAttempts: 3, nextEligibleInFuture: true });
+  const id = seedBlockedTask({
+    label: 'backoff', ageHours: 7, dispatchAttempts: 3, nextEligibleInFuture: true, reminderHoursAgo: 5,
+  });
   assert.ok(taskRow(id)?.next_dispatch_eligible_at, 'precondition: a live backoff window is set');
 
   await runStaleTaskSweep();
@@ -438,31 +432,37 @@ test('(b2) the SWEEP-03 drag-back trap stays fixed: the stale backoff window is 
 });
 
 test('(b3) an end-stated card is NOT trapped silently — it keeps escalating every window', async () => {
-  const id = seedBlockedTask({ label: 'endstate-antisilence', ageHours: 8, dispatchAttempts: 6 });
+  // Operator-blocked so the reminder really lands (owner sends are muted in this
+  // suite) — the observable is the durable reminder row the sweep writes.
+  const id = seedBlockedTask({ label: 'endstate-antisilence', ageHours: 8, dispatchAttempts: 6, blockedOn: 'operator' });
 
   await runStaleTaskSweep();
-  await settle(1);
-  assert.equal(escalationsFor(id), 1, 'window 1: the end-stated card reaches a human');
+  await flush();
+  assert.equal(repingRows(id), 1, 'window 1: the end-stated card reaches a human');
 
   // Still within the dedup window ⇒ capped, not repeated.
   await runStaleTaskSweep();
-  await settle(1);
-  assert.equal(escalationsFor(id), 1, 'within the window the re-ping is still deduped');
+  await flush();
+  assert.equal(repingRows(id), 1, 'within the window the re-ping is still deduped');
 
   // Window passes and the card is STILL blocked with no human ⇒ escalate again.
   run('UPDATE events SET created_at = ? WHERE task_id = ?', [hoursAgo(25), id]);
   await runStaleTaskSweep();
-  await settle(2);
+  await flush();
   assert.equal(
-    escalationsFor(id),
+    repingRows(id),
     2,
     'window 2: still stuck ⇒ escalates again. End-stating CAPS the budget, it never MUTES the human',
   );
 });
 
 // ── (c) THE AUDIT TRAIL PRESERVES THE PRIOR ATTEMPT COUNT ───────────────────────
-test('(c) the consumed attempt count survives on the row, in the card note, and in task_events', async () => {
-  const id = seedBlockedTask({ label: 'audit', ageHours: 9, dispatchAttempts: 4, qcRerouteAttempts: 2 });
+test('(c) the consumed attempt count survives on the row, in the audit trail, and the description is left alone', async () => {
+  const id = seedBlockedTask({
+    label: 'audit', ageHours: 9, dispatchAttempts: 4, qcRerouteAttempts: 2, reminderHoursAgo: 5,
+  });
+  // CC-052: the card's own text is the client's — record what it looked like.
+  const originalDescription = taskRow(id)?.description;
 
   await runStaleTaskSweep();
   await flush(); // the return is fire-and-forget
@@ -470,23 +470,23 @@ test('(c) the consumed attempt count survives on the row, in the card note, and 
   // 1. The COLUMN survives — a re-opened card cannot masquerade as brand new.
   assert.equal(taskRow(id)?.dispatch_attempts, 4, 'the counter is preserved on the row itself');
 
-  // 2. The HAND-BACK NOTE shows the budget it already burned.
-  assert.match(
-    taskRow(id)?.description ?? '',
-    /dispatch_attempts=4\/5 PRESERVED/,
-    'the note handed to the orchestrator states the preserved budget',
+  // 2. The DESCRIPTION is untouched — no internal note is pasted into the client's text.
+  assert.equal(
+    taskRow(id)?.description,
+    originalDescription,
+    'the sweep must not write its bookkeeping into the description (CC-052)',
   );
-  assert.match(taskRow(id)?.description ?? '', /qc_reroute_attempts=2/, 'and the QC-reroute counter (FIX 41)');
 
-  // 3. The AUDIT ROW records it, so the ledger alone tells the story.
+  // 3. The AUDIT ROW records the preserved budget, so the ledger alone tells the story.
   const reasons = allReasons(id);
   assert.match(
     reasons,
     /dispatch_attempts=4\/5 PRESERVED/,
     'the task_events reason carries the preserved count — the audit trail is self-describing',
   );
+  assert.match(reasons, /qc_reroute_attempts=2/, 'and the QC-reroute counter (FIX 41)');
 
-  // 4. And the sweep authored no counter-mutating write at all.
+  // 4. And the event feed carries it too.
   const events = queryAll<{ message: string }>(
     `SELECT message FROM events WHERE task_id = ? AND type = 'task_returned'`,
     [id],
@@ -497,7 +497,7 @@ test('(c) the consumed attempt count survives on the row, in the card note, and 
 
 test('(c2) the sweep never DECREASES a dispatch budget on any path it drives', async () => {
   // A spread of stale cards across every branch the sweep can take.
-  const blockedRemaining = seedBlockedTask({ label: 'c2-blocked', ageHours: 9, dispatchAttempts: 3 });
+  const blockedRemaining = seedBlockedTask({ label: 'c2-blocked', ageHours: 9, dispatchAttempts: 3, reminderHoursAgo: 5 });
   const blockedExhausted = seedBlockedTask({ label: 'c2-exhausted', ageHours: 9, dispatchAttempts: 9 });
   const blockedRepingBand = seedBlockedTask({ label: 'c2-reping', ageHours: 3, dispatchAttempts: 4 });
   const inProgressStale = seedStaleInProgress('c2-inprogress', 30);
@@ -527,16 +527,17 @@ test('(c2) the sweep never DECREASES a dispatch budget on any path it drives', a
 
 // ── (e) EXISTING BEHAVIOUR IS UNCHANGED ─────────────────────────────────────────
 test('(e) the ordinary 2h re-ping band still re-pings once per window (SWEEP-DEDUP intact)', async () => {
-  const id = seedBlockedTask({ label: 'd-reping', ageHours: 4, dispatchAttempts: 1 });
+  // Operator-blocked: its escalation is recorded even while owner sends are muted.
+  const id = seedBlockedTask({ label: 'd-reping', ageHours: 4, dispatchAttempts: 1, blockedOn: 'operator' });
 
   await runStaleTaskSweep();
-  await settle(1);
-  assert.equal(escalationsFor(id), 1, 'the first tick re-pings a card in the 2h..6h band');
+  await flush();
+  assert.equal(repingRows(id), 1, 'the first tick re-pings a card in the 2h..6h band');
   assert.equal(taskRow(id)?.status, 'blocked', 'a re-ping band card is not returned yet');
 
   await runStaleTaskSweep();
-  await settle(1);
-  assert.equal(escalationsFor(id), 1, 'the next tick is deduped to zero');
+  await flush();
+  assert.equal(repingRows(id), 1, 'the next tick is deduped to zero');
 });
 
 test('(e) a stale non-blocked card still returns to backlog with an untouched budget', async () => {
@@ -556,12 +557,12 @@ test('(e) an exhausted card that is NOT yet stale is left completely alone', asy
   const id = seedBlockedTask({ label: 'd-fresh', ageHours: 1, dispatchAttempts: 8 });
 
   const result = await runStaleTaskSweep();
-  await settle(0);
+  await flush();
 
   assert.equal(taskRow(id)?.status, 'blocked');
   assert.equal(taskRow(id)?.dispatch_attempts, 8, 'untouched');
   assert.equal(result.budgetEndStated, 0, 'the end-state guard only fires at the stale threshold');
-  assert.equal(escalationsFor(id), 0, 'and nothing is escalated below the re-ping window');
+  assert.equal(repingRows(id), 0, 'and nothing is escalated below the re-ping window');
 });
 
 // ── (d) SOURCE SCAN: only a SANCTIONED writer may zero the counter ──────────────
