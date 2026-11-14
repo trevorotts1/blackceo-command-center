@@ -32,7 +32,9 @@
  */
 
 import fs from 'node:fs';
-import { buildStatePath } from './paths';
+import path from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { buildStatePath, resolveSkillScriptsDir } from './paths';
 import type { BuildState } from './seam';
 
 export type StateIdentityVerdict = 'scoped' | 'unstamped' | 'mismatched' | 'absent';
@@ -70,28 +72,94 @@ export function classifyStateIdentity(
 /**
  * Backfill the missing identity stamps from the verified context.
  *
- * Re-reads the file first and REFUSES on `mismatched`, so this can never
- * overwrite a foreign tenant's stamp with the caller's own. Returns false on
- * any failure (unreadable, unwritable, bad JSON) — the caller then reports the
- * unstamped state honestly rather than claiming a scope it could not record.
+ * The write goes through the Skill-23 state module (`workforce_state.update`),
+ * which holds the `state.write.lock` while it reads, mutates and atomically
+ * replaces the file — no temp file of our own, no read-modify-write race with
+ * the shell scripts that write the same file. The module's `jq` command mode is
+ * NOT used: it needs the `jq` program, which boxes may lack.
  *
- * ponytail: last-writer-wins against the skill scripts that also write this
- * file. The re-read narrows the window to the serialize+rename; add a lockfile
- * only if a concurrent-write collision is ever actually observed.
+ * The `mismatched` refusal is checked here, before the call, so a foreign
+ * tenant's stamp is never touched at all. Returns false on any failure
+ * (unreadable state, unresolvable scripts folder, non-zero exit, timeout) —
+ * the caller then reports the unstamped state honestly rather than claiming a
+ * scope it could not record.
  */
+const STAMP_PROGRAM = `import json, sys
+sys.path.insert(0, sys.argv[1])
+from workforce_state import update
+stamps = json.loads(sys.argv[3])
+def mutate(state):
+    for key, value in stamps.items():
+        if state.get(key) in (None, ''):
+            state[key] = value
+update(sys.argv[2], mutate)`;
+
+const STAMP_TIMEOUT_MS = 10_000;
+
 export function stampStateIdentity(context: StateIdentityContext): boolean {
   const target = buildStatePath();
+  try {
+    const state = JSON.parse(fs.readFileSync(target, 'utf-8')) as BuildState;
+    if (classifyStateIdentity(state, context) === 'mismatched') return false;
+  } catch {
+    return false;
+  }
+
+  const scriptsDir = resolveSkillScriptsDir();
+  let scriptsDirPresent = false;
+  try {
+    scriptsDirPresent = fs.statSync(scriptsDir).isDirectory();
+  } catch {
+    scriptsDirPresent = false;
+  }
+  // The unit's own contract (state-identity.test.ts): a missing scripts
+  // folder is a hard false, never a bare file write. Only a PRESENT folder
+  // that merely lacks the workforce_state module falls back to tmp+rename.
+  if (!scriptsDirPresent) return false;
+  let useStateLock = true;
+  try {
+    if (!fs.statSync(path.join(scriptsDir, 'workforce_state.py')).isFile()) useStateLock = false;
+  } catch {
+    useStateLock = false;
+  }
+
+  const stamps = JSON.stringify({
+    companyId: context.companyId,
+    installationId: context.installationId,
+    tenantId: context.tenantId,
+  });
+
+  // The Skill-23 state module (`workforce_state.update`, holding the write
+  // lock) is the primary writer. Fixture / minimal script trees that predate
+  // or omit that module fall back to the atomic tmp+rename this function used
+  // before BU-107 — same stamps, same preservation of every other key, same
+  // mode, never a foreign-stamp overwrite (the mismatched refusal above).
+  if (useStateLock) {
+    try {
+      execFileSync('python3', ['-c', STAMP_PROGRAM, scriptsDir, target, stamps], {
+        timeout: STAMP_TIMEOUT_MS,
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   const tmp = `${target}.identity-${process.pid}.tmp`;
   try {
     const mode = fs.statSync(target).mode & 0o777;
     const state = JSON.parse(fs.readFileSync(target, 'utf-8')) as BuildState;
     if (classifyStateIdentity(state, context) === 'mismatched') return false;
-    for (const key of STAMPS) state[key] = context[key];
+    for (const key of STAMPS) (state as Record<string, unknown>)[key] = context[key];
     fs.writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`, { mode });
     fs.renameSync(tmp, target);
     return true;
   } catch {
-    try { fs.unlinkSync(tmp); } catch { /* nothing to clean up */ }
+    try {
+      fs.rmSync(tmp, { force: true });
+    } catch {
+      // Best-effort: never mask the stamp result.
+    }
     return false;
   }
 }
