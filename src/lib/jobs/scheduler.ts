@@ -864,6 +864,27 @@ const JOBS: Array<{ name: string; expr: string; fn: () => Promise<unknown> | unk
     },
   },
 
+  // workforce-build-kick: every 15 minutes (:07/:22/:37/:52) — BU-30. Starts
+  // the agent turn a shell script cannot: reads build-state and, when the
+  // interview is complete and build-eligible and a build is WANTED, opens the
+  // gateway session and sends the ONE [WORKFORCE-RESUME] message. Bounded to
+  // one kick per 20 minutes and at most 12 per build. It never runs for a
+  // client tenant on a shared host — that, and only that, is its
+  // `skippedReason` (U-16/CC-058 reserve the field for "switched off").
+  // LEASE: 2 min, not the 90s default — a gateway connect plus send can exceed it.
+  // The module is imported dynamically so the scheduler never statically pulls
+  // the OpenClaw gateway client into every host boot path (council-outbox-pump
+  // above does the same).
+  {
+    name: 'workforce-build-kick',
+    expr: '7,22,37,52 * * * *',
+    timeoutMs: 120_000,
+    fn: async () => {
+      const { kickWorkforceBuild } = await import('./workforce-build-kick');
+      return kickWorkforceBuild('scheduled-job');
+    },
+  },
+
   // weekly-done-clear: Sunday 07:00 America/New_York — soft-archive all done
   // tasks (sets archived_at, never hard-deletes). Idempotent: a second run in
   // the same week is a no-op. Disable with DISABLE_WEEKLY_DONE_CLEAR=1.
