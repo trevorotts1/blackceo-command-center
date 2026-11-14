@@ -158,7 +158,7 @@ test('PRES-037: old-run events do not change the current run; split reported', a
   };
   const byLabel = new Map(json.phases.map((p) => [p.label, p.elapsed_s]));
   assert.ok(Math.abs((byLabel.get('Script') ?? 0) - 10) < 1e-5);
-  assert.ok(Math.abs((byLabel.get('Prompts') ?? 0) - 7) < 1e-5);
+  assert.ok(Math.abs((byLabel.get('Design') ?? 0) - 7) < 1e-5);
   assert.ok(Math.abs(json.timing_breakdown.Script.provider_s - 8) < 1e-5);
   assert.ok(Math.abs(json.timing_breakdown.Script.wall_s - 10) < 1e-5);
 });
