@@ -480,16 +480,31 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
   // /api/approval-requests/[requestId]/chat-decision adds one more mutating,
   // bearer-gated route: 167 mutating, 160 non-webhook, 52 patterns, 56 templates,
   // 55 bearer-ONLY.
-  it('API routes exporting a mutating method: 167 (literal assertion)', () => {
-    expect(allMutatingRoutes.length).toBe(167);
+  //
+  // re-derived 2026-11-14 for the interview gate routes (BU-13 + BU-17 + BU-25,
+  // measured on this tree — the censuses below are read from the run, never
+  // computed from a diff): BU-17's POST /api/interview/assist is a new mutating
+  // route (+1). BU-13's POST /api/interview/skip replaced the deleted POST
+  // handler on /api/interview/state (state/route.ts now exports GET only,
+  // route.ts:280), so that swap nets to zero. Neither route is webhook-gated
+  // and neither reads an Authorization bearer, so the census is 168 mutating,
+  // 7 webhook-protected (unchanged), 161 non-webhook, and the bearer totals
+  // stand (52 patterns / 56 templates / 55 bearer-ONLY). BU-25's own
+  // /api/interview/next exports GET only (`export async function GET(request:
+  // NextRequest)` at next/route.ts:107), so the POST/PATCH/PUT/DELETE scanner
+  // does not see it, it is not a mutating route, and it belongs in no list.
+  // The literals rise by one — they are the EXPECTED side; lowering one would
+  // hide exactly the routes this change adds.
+  it('API routes exporting a mutating method: 168 (literal assertion)', () => {
+    expect(allMutatingRoutes.length).toBe(168);
   });
 
   it('protected by isWebhookSecretRoute: 7 (5 static + 2 dynamic — middleware src/middleware.ts:137-167)', () => {
     expect(webhookProtectedCount).toBe(7);
   });
 
-  it('non-webhook write routes: 160 (167 mutating − 7 webhook-protected; tenant authentication remains required)', () => {
-    expect(nonWebhookCount).toBe(160);
+  it('non-webhook write routes: 161 (168 mutating − 7 webhook-protected; tenant authentication remains required)', () => {
+    expect(nonWebhookCount).toBe(161);
   });
 
   it('interface call templates found by multi-line scanner', () => {
@@ -549,6 +564,27 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
   // list cannot rot into a blanket exemption. Adding a route to this
   // list is a reviewable security decision, never a convenience.
   const DOCUMENTED_UNWIRED_CONSOLE_ROUTES: string[] = [
+    // BU-17 interview helper (POST only): /api/interview/assist offers three
+    // example answers to tap. POST opens with
+    // `const tenant = await resolveInterviewTenant(req)` (route.ts:252) then
+    // `refuseUnverifiedTenant(tenant)` (route.ts:253-254) — the verified tenant
+    // identity from the session cookie — and it never reads an Authorization
+    // bearer, so bearer-listing it would 401 the owner's own browser and
+    // misstate the auth. No browser call site for this path exists on this
+    // tree: nothing under src/ outside the API tree, and nothing in public/,
+    // references /api/interview/assist. The interface category therefore
+    // cannot be evidenced from source. Recorded here as the documented
+    // residual; wiring it to a component later moves it to interface-called
+    // and shrinks this list.
+    '/api/interview/assist',
+    // BU-13 interview skip (POST only): /api/interview/skip replaced the
+    // deleted POST handler on /api/interview/state — state/route.ts on this
+    // tree exports GET only (route.ts:280). Same tenant-cookie auth:
+    // `resolveInterviewTenant(request)` then `refuseUnverifiedTenant(tenant)`
+    // at the top of POST (route.ts:50-52), and no bearer read. No browser call
+    // site for this path exists on this tree either, so the interface category
+    // cannot be evidenced; documented residual until the page is wired to it.
+    '/api/interview/skip',
     '/api/council/sessions/{id}', // DELETE (tombstone delete, CWE-050)
     '/api/council/sessions/{id}/archive',
     '/api/council/sessions/{id}/cancel',
