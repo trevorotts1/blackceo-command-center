@@ -39,6 +39,11 @@ import { deliverInterviewOperation } from '@/lib/interview/remote-protocol';
  * Every accepted block carries the registry question id as its first line
  * (`**QID:** <id>`), so every reader matches by id and never by wording.
  *
+ * BU-17: the gate is an EXTERNAL skill script. When it is not installed on the
+ * box at all the route keeps its pre-BU-13 contract (validate → append → 200,
+ * `gate:'unavailable'`) rather than 503-ing the only write path; an installed
+ * gate that fails is still a hard 503.
+ *
  * Error mapping:
  *   400 invalid_request     — bad body (missing answer, unknown shape)
  *   400 missing_question    — no questionId, or no question text to record
@@ -65,7 +70,12 @@ import {
   InterviewScriptError,
   InterviewScriptMissingError,
 } from '@/lib/interview/seam';
-import { buildStatePath, scriptExists, updateInterviewStateScript } from '@/lib/interview/paths';
+import {
+  buildStatePath,
+  interviewGateScript,
+  scriptExists,
+  updateInterviewStateScript,
+} from '@/lib/interview/paths';
 import { refreshInterviewMirror } from '@/lib/interview/mirror';
 import { answersFilePath, answersEncFilePath } from '@/lib/interview/paths';
 import { isEncryptedEnvelope, readEncryptedFile } from '@/lib/interview/crypto';
@@ -484,9 +494,18 @@ export async function POST(req: NextRequest) {
   if (body.confirmedFromContext && body.confirmedFromContext.trim()) {
     gateArgs.push('--confirmed-from', body.confirmedFromContext.trim());
   }
-  const gate = await runGate(gateArgs);
+  // BU-17 RED-FIX: the gate is an EXTERNAL skill script (23-ai-workforce-blueprint),
+  // not something this app ships. When it is not installed on this box at all, the
+  // structured write keeps the route's pre-BU-13 contract — validate, append the
+  // canonical Q/A block, return the 200 receipt — instead of 503-ing the only write
+  // path the web surface has. The transcript is still the source of truth and the
+  // block still carries its `**QID:**`; the gate adds ORDERING/COUNTING, not
+  // authenticity. A gate that IS installed but fails is still a hard 503 below —
+  // a present-but-broken gate is never bypassed.
+  const gateInstalled = scriptExists(interviewGateScript());
+  const gate = gateInstalled ? await runGate(gateArgs) : null;
 
-  if (gate.code === 2) {
+  if (gate && gate.code === 2) {
     // Wrong question, unknown question, or an edit that is not allowed: the gate
     // names the question that IS current.
     return NextResponse.json(
@@ -494,7 +513,7 @@ export async function POST(req: NextRequest) {
       { status: 409 },
     );
   }
-  if (gate.code === 3) {
+  if (gate && gate.code === 3) {
     // One follow-up only. The gate did not record anything, so neither do we.
     return NextResponse.json({
       ok: true,
@@ -505,7 +524,7 @@ export async function POST(req: NextRequest) {
       next: await gateNext(),
     });
   }
-  if (gate.code !== 0) {
+  if (gate && gate.code !== 0) {
     // Tooling failure: "temporarily unavailable", never "that answer was refused".
     return NextResponse.json({ error: 'temporarily_unavailable' }, { status: 503 });
   }
@@ -715,11 +734,14 @@ export async function POST(req: NextRequest) {
 
   // 8) Success. Canonical writes landed; mirror reported (may be a soft warning).
   //    `accepted`/`shortAccepted`/`next` come from the gate, so the page renders
-  //    the same decision the Telegram agent got.
+  //    the same decision the Telegram agent got. When the gate is not installed,
+  //    `gate` is null: the answer is still accepted, and the receipt says plainly
+  //    that its ORDER was not gate-verified rather than implying it was.
   return NextResponse.json({
     ok: true,
     accepted: true,
-    shortAccepted: gate.json?.shortAccepted === true,
+    shortAccepted: gate?.json?.shortAccepted === true,
+    gate: gate ? 'verified' : 'unavailable',
     questionId,
     storeOn: storeOn ?? null,
     appended: true,
