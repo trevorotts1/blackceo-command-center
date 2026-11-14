@@ -198,6 +198,18 @@
  * time). The mutating-route census is unchanged — no route file moved — but
  * POST /api/system/bootstrap lost its only interface call site, so it is now
  * recorded in the documented residual below rather than inferred as wired.
+ * re-derived 2026-11-14 for BU-05 (WF-008) operator-only prior completion:
+ * POST /api/interview/prior-completion is unchanged in CLASSIFICATION — it is
+ * not a bearer route and never was — but its interface call site is gone. This
+ * unit removed the owner-facing "I have already completed the interview" button
+ * and its `fetch` from src/app/interview/InterviewClient.tsx and gated the
+ * handler on `kind === 'self'` with a non-`operator:api` `operator:` subject,
+ * which the handler enforces alongside the signed CSRF cookie and a refusal of
+ * `operator:api`. So the scanner's interface category no longer applies, and
+ * bearer-listing it would 403 the operator's own console caller. It joins
+ * DOCUMENTED_UNWIRED_CONSOLE_ROUTES with that verified posture. No census
+ * count moves: the route file already existed and was already counted in the
+ * 167 mutating / 160 non-webhook census; only its classification changes.
  *
  * re-derived 2026-09-27 for ILJ-004 tenant skip marks: POST
  * /api/interview/state — the owner's browser marking one structured question
@@ -634,6 +646,20 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
     // of band; this diagnostics drawer no longer calls any mutating route.
     // Bearer-listing it would 401 a console channel that no longer exists.
     '/api/system/bootstrap',
+    // BU-05 (WF-008) operator-only prior-completion attestation (POST only).
+    // Verified per handler in src/app/api/interview/prior-completion/route.ts:
+    // resolved tenant + refuseUnverifiedTenant; the machine principal is
+    // explicitly REFUSED (`subject === 'operator:api'` → 403
+    // owner_session_required) together with any request lacking the signed
+    // CSRF cookie, a same-origin check follows, and the declaration is gated on
+    // `kind === 'self'` plus a non-`operator:api` `operator:` subject
+    // (→ 403 operator_required). It is therefore NOT a bearer route — listing it
+    // in BEARER_REQUIRED_WRITE_ROUTES would 403 its only legitimate caller and
+    // misstate the auth. The owner-facing declaration button it used to serve
+    // was removed by this same unit, so no interface call site remains in this
+    // tree and the interface category cannot be evidenced; its designed caller
+    // is the operator's browser console, whose UI is not wired to it yet.
+    '/api/interview/prior-completion',
   ];
 
   it('every reachable mutating route is either in BEARER_REQUIRED_WRITE_ROUTES, called by the interface, or a documented unwired console route (exact residual enforced)', () => {
