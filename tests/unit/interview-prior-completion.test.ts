@@ -35,7 +35,9 @@ test('declaration persists, isolates tenants, never completes build, and disting
   const { GET: state } = await import('../../src/app/api/interview/state/route');
   const { middleware } = await import('../../src/middleware');
   const { checkInterviewCompleteViaFallback } = await import('../../src/lib/interview/gate-fallback');
-  const session = await signTenantGrant({ ...reg, host, subject: 'owner-uuid', purpose: 'session', exp: Date.now()/1000 + 3600, nonce: 'fixture-nonce' });
+  // BU-05: a prior-completion declaration is operator-only; the successful path
+  // in this test therefore signs in as an operator.
+  const session = await signTenantGrant({ ...reg, host, subject: 'operator:owner-uuid', purpose: 'session', exp: Date.now()/1000 + 3600, nonce: 'fixture-nonce' });
   const csrf = (await signCsrfToken()).value;
   const headers = { cookie: `mc_tenant_session=${session}; mc_csrf_token=${csrf}` };
   const before = await middleware(request('/'));
@@ -52,7 +54,7 @@ test('declaration persists, isolates tenants, never completes build, and disting
   assert.equal(first.status, 200);
   const declared = (await first.json()).declaration;
   assert.equal(declared.source, 'owner-self-attestation');
-  assert.equal(declared.declaredBy, 'owner-uuid');
+  assert.equal(declared.declaredBy, 'operator:owner-uuid');
   assert.deepEqual((await (await POST(request('/api/interview/prior-completion', headers, { confirmed: true }))).json()).declaration, declared);
   closeDb(); // Reopen real on-disk DB: no process-local or browser latch.
   assert.deepEqual(priorCompletion(reg), declared);
@@ -83,7 +85,7 @@ test('declaration persists, isolates tenants, never completes build, and disting
   } finally { globalThis.fetch = realFetch; closeDb(); }
 });
 
-test('client declaration and genuine completion survive stale remote state', async () => {
+test('a client session may not declare; a row recorded earlier still opens the dashboard', async () => {
   const clientHost = 'client.prior.example';
   const client = { ...reg, kind: 'client', tenantId: 'remote-tenant', clientId: 'remote-client', remoteUrl: 'https://remote.prior.example', remoteSecret: 'remote-fixture' };
   process.env.MC_TENANT_REGISTRY_JSON = JSON.stringify({ [host]: reg, [clientHost]: client });
@@ -96,15 +98,23 @@ test('client declaration and genuine completion survive stale remote state', asy
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async () => new Response(JSON.stringify({ tenantId: client.tenantId, installationId: client.installationId, state: 'acknowledged', httpStatus: 200, result: { interviewComplete: false } }))) as typeof fetch;
   try {
-    assert.equal((await POST(request('/api/interview/prior-completion', headers, { confirmed: true }))).status, 200);
+    // BU-05: a client session never makes an owner attestation about a company
+    // it does not operate — refused, and nothing written.
+    const refused = await POST(request('/api/interview/prior-completion', headers, { confirmed: true }));
+    assert.equal(refused.status, 403);
+    assert.equal((await refused.json()).error, 'operator_required');
+    assert.equal((getDb().prepare('SELECT COUNT(*) AS n FROM interview_prior_completion_declarations').get() as { n: number }).n, 0);
+    // A row recorded before this change keeps opening the dashboard. The route
+    // that could write one for a client session is now closed, so the row is
+    // inserted directly and read back through the same state the page reads.
+    getDb().prepare(`INSERT INTO interview_prior_completion_declarations
+      (tenant_id,company_id,installation_id,declared_by,declared_at,source)
+      VALUES (?,?,?,?,?,'owner-self-attestation')`)
+      .run(client.tenantId, client.companyId, client.installationId, 'operator:owner', new Date().toISOString());
     const progress = await (await GET(request('/api/interview/state', headers))).json();
     assert.equal(progress.interviewComplete, true);
     assert.equal(progress.priorCompletionDeclared, true);
     assert.equal((getDb().prepare('SELECT interview_complete FROM clients WHERE id=?').get(client.clientId) as { interview_complete: number }).interview_complete, 1);
-    // An unavailable store must report failure, never promise a saved declaration.
-    getDb().exec("CREATE TRIGGER reject_prior BEFORE INSERT ON interview_prior_completion_declarations BEGIN SELECT RAISE(ABORT, 'fixture write failure'); END");
-    assert.equal((await POST(request('/api/interview/prior-completion', headers, { confirmed: true }))).status, 503);
-    getDb().exec('DROP TRIGGER reject_prior');
   } finally { globalThis.fetch = originalFetch; process.env.MC_TENANT_REGISTRY_JSON = JSON.stringify({ [host]: reg }); closeDb(); }
 });
 
