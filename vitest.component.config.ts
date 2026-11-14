@@ -185,6 +185,9 @@ export default defineConfig({
       // The conversation screen keeps its typing box on screen before the
       // first question lands; real render proof.
       'tests/component/conversation-pane-input.test.tsx',
+      // WF-012 (BU-04) — a failed progress read keeps the owner's screen and
+      // shows the reconnecting line; only a 401/403 keeps "Check your access".
+      'tests/component/interview-soft-error.test.tsx',
     ],
     env: { NODE_ENV: 'test' },
     testTimeout: 15000,
