@@ -2,8 +2,10 @@
  * ilj004-skipped-server-persistence.test.ts — ILJ-004 server-side skip marks.
  *
  * Defect: skips lived only in InterviewClient sessionStorage, so a device
- * switch lost them. Fix: tenant_interview_skips table (server) + the state
- * route's POST writer / GET reader + mergeSkippedIds client merge.
+ * switch lost them. Fix: tenant_interview_skips table (server) + the skip
+ * route's POST writer / the state route's GET reader + mergeSkippedIds client
+ * merge. (BU-13 moved the writer from POST /api/interview/state to
+ * POST /api/interview/skip; the client-tenant store is unchanged.)
  *
  *   T1  pure: sanitizeSkippedIds drops unknown/answered/dupes, deck order
  *   T2  pure: mergeSkippedIds unions server + local sets, answers win
@@ -58,9 +60,11 @@ run('INSERT OR IGNORE INTO clients(id,name,is_self) VALUES(?,?,0)', ['skip-clien
 run('INSERT OR IGNORE INTO clients(id,name,is_self) VALUES(?,?,0)', ['skip-client-b', 'skip-client-b']);
 
 let GET: typeof import('../../src/app/api/interview/state/route')['GET'];
-let POST: typeof import('../../src/app/api/interview/state/route')['POST'];
+let POST: typeof import('../../src/app/api/interview/skip/route')['POST'];
 test.before(async () => {
-  ({ GET, POST } = await import('../../src/app/api/interview/state/route'));
+  ({ GET } = await import('../../src/app/api/interview/state/route'));
+  // BU-13: the skip writer moved out of the state route into its own route.
+  ({ POST } = await import('../../src/app/api/interview/skip/route'));
 });
 
 const QS = INTERVIEW_QUESTIONS;
@@ -147,8 +151,11 @@ test('T5: POST records a skip; a second-device GET returns the skipped set', asy
 test('T6: POST refuses unknown ids, self tenants, and skips for answered questions', async () => {
   const unknown = await POST(req('skip-a.example', 'POST', { questionId: 'not-a-question' }));
   assert.equal(unknown.status, 400);
+  // BU-13: a self tenant's skips are decided by the step gate. It is not
+  // installed in this fixture, so the route reports "temporarily unavailable"
+  // (the old state route answered 400 not_applicable_for_self instead).
   const self = await POST(req('skip-self.example', 'POST', { questionId: KNOWN[0] }));
-  assert.equal(self.status, 400);
+  assert.equal(self.status, 503);
 
   // Answer KNOWN[2] for tenant B, then try to skip it → 409, and a stored skip
   // for an answered question never surfaces in GET.
