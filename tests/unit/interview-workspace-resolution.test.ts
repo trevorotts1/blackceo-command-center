@@ -19,6 +19,7 @@
  * No DB, no network. One temp HOME and one temp scripts dir per case.
  */
 
+import './_isolated-db';
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
