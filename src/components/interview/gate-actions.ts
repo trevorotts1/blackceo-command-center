@@ -1,6 +1,6 @@
 'use server';
 import { priorCompletion } from '@/lib/interview/prior-completion';
-import { verifiedBuild, standardPlaceholderActive } from '@/lib/interview/build-verification';
+import { verifiedBuild } from '@/lib/interview/build-verification';
 import { resolveTenantContext, TenantAccessError } from '@/lib/auth/tenant-context';
 import { getClient } from '@/lib/clients';
 
@@ -34,15 +34,19 @@ import { getClient } from '@/lib/clients';
  */
 
 import { cookies, headers } from 'next/headers';
-import { readBuildState, readStandardPrebuild } from '@/lib/interview/seam';
+import { readBuildState } from '@/lib/interview/seam';
+import { interviewStatus, opensShell } from '@/lib/interview/interview-status';
 import { INTERVIEW_COOKIE_NAME, INTERVIEW_BYPASS_COOKIE_NAME, LATCH_COOKIE_NAME, signInterviewToken, signInterviewBypassToken, signLatchToken } from '@/lib/interview/gate-cookie';
 
 /**
- * True only on the doctrine's two terminal signals, read from the canonical
- * .workforce-build-state.json:
- *   • interviewComplete === true  — update-interview-state.sh --complete pressed
- *   • buildCompletedAt present     — the build finished (closeout reveal)
- * Anything mid-interview → false (the shell stays locked). Never throws.
+ * True only on the shell-lock states of the interface contract (2.3), read from
+ * the canonical .workforce-build-state.json through the ONE reader (BU-23):
+ *   • COMPLETE / BUILDING / BUILT — interviewComplete, or a verified build
+ *   • PLACEHOLDER                 — owner-ordered placeholder (see below)
+ *   • DECLARED                    — handled by the caller, which ORs in the
+ *                                   declarations-table row before this call
+ * Anything mid-interview (NOT_STARTED, IN_PROGRESS, READY) → false, so the shell
+ * stays locked. Never throws.
  *
  * AI Workforce standard-first (PHASE 6 item 8) — PREBUILT-PREVIEW STATE
  * AWARENESS: a standard-prebuilt box (build-state carries
@@ -50,9 +54,8 @@ import { INTERVIEW_COOKIE_NAME, INTERVIEW_BYPASS_COOKIE_NAME, LATCH_COOKIE_NAME,
  * state — files + board present, agents NOT registered, interview incomplete.
  * It must NOT mint a complete cookie: the read-only /preview surface is the
  * only early company view (middleware exemption), and the full dashboard stays
- * locked until interviewComplete. The read below makes this awareness explicit
- * and pinned by tests: `standardReady` is evaluated and deliberately never
- * admitted.
+ * locked until interviewComplete. STANDARD_READY is deliberately not one of the
+ * reader's shell-lock states, so it cannot mint a complete cookie by accident.
  *
  * DELIBERATE DOCTRINE EDIT (STD001, Trevor 2026-10-08): the owner-ordered
  * STANDARD PLACEHOLDER (companyMode "standard-placeholder" with
@@ -63,15 +66,16 @@ import { INTERVIEW_COOKIE_NAME, INTERVIEW_BYPASS_COOKIE_NAME, LATCH_COOKIE_NAME,
 function deriveInterviewComplete(): boolean {
   const bs = readBuildState();
   if (!bs) return false;
-  if (verifiedBuild(bs)) return true;
-  if (bs.interviewComplete === true) return true;
-  if (standardPlaceholderActive(bs)) return true;
-  // STANDARD_READY (standardPrebuild done, interview incomplete) — this third
-  // state is aware-but-not-complete: the shell lock holds, only /preview is
-  // reachable early. Read explicitly (and pinned by tests) so the prebuilt
-  // state can never accidentally mint a complete cookie.
-  if (readStandardPrebuild(bs).standardReady) return false;
-  return false;
+  const status = interviewStatus(bs);
+  // BUILT keeps this lock's own stricter receipt check (buildId match,
+  // version 1, no unmet requirements) — EXCEPT when the interview itself is
+  // complete. Completion is terminal (interface contract S-1), and the Shell
+  // lock row of 2.3 opens on COMPLETE, BUILDING, BUILT, PLACEHOLDER and
+  // DECLARED, so a completed interview whose build receipt has drifted must
+  // not be locked out of its own dashboard. An interview that was never
+  // completed still needs the receipt, so a half-verified one cannot open it.
+  if (status === 'BUILT') return bs.interviewComplete === true || verifiedBuild(bs);
+  return opensShell(status);
 }
 
 /**
@@ -124,6 +128,21 @@ export async function refreshInterviewGate(): Promise<void> {
 }
 
 /* U057 — Interview bypass ("Skip for now") */
+
+/**
+ * BU-05 (WF-013): the "Skip for now" affordance is operator-only. Resolves the
+ * tenant context on the server and answers a plain boolean; an unresolvable
+ * context (public invitation shell, expired grant) answers false and never
+ * throws, so the interview page simply renders without the control.
+ */
+export async function canSkipInterview(): Promise<boolean> {
+  try {
+    const context = await resolveTenantContext({ headers: new Headers(await headers()) });
+    return context.kind === 'self' && context.subject.startsWith('operator:');
+  } catch {
+    return false;
+  }
+}
 
 export async function skipInterviewForNow(): Promise<void> {
   const context=await resolveTenantContext({headers:new Headers(await headers())});
