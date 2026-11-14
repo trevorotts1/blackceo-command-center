@@ -40,6 +40,16 @@ test.before(async () => {
   fs.writeFileSync(path.join(companyRoot, 'company-config.json'), JSON.stringify({ companyId: 'ilg004-company', companySlug: 'ilg004-company' }));
   fs.writeFileSync(catalogPath, JSON.stringify({ personas: { canonical: { name: 'Canonical Fixture' } } }));
   for (const file of ['update-interview-state.sh', 'record-dept-decision.sh', 'list-canonical-departments.py']) fs.writeFileSync(path.join(stubScripts, file), '# fixture\n');
+  // BU-13: the answer route asks the step gate first. This fixture's subject is
+  // the quarantine refusal, not the gate, so the gate is stubbed to ACCEPT —
+  // otherwise the route answers 503 before it ever reaches the transcript.
+  fs.writeFileSync(path.join(stubScripts, 'interview_gate.py'), [
+    'import json',
+    'print(json.dumps({"accepted": True, "qid": "company_name", "shortAccepted": False,',
+    '  "replaces": None, "requiredTotal": 1, "requiredAnswered": 1, "answeredTotal": 1,',
+    '  "percent": 100, "missingRequired": []}))',
+    '',
+  ].join('\n'));
   fs.writeFileSync(path.join(runtimeRoot, 'openclaw.json'), JSON.stringify({ agents: { entries: { main: { workspace, model: 'fixture/model' } } } }));
   Object.assign(process.env, {
     OPENCLAW_WORKSPACE_ROOT: workspace, OPENCLAW_SKILL23_SCRIPTS: stubScripts, OPENCLAW_ROOT: runtimeRoot,
