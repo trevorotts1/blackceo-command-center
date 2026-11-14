@@ -38,7 +38,17 @@ import { deliverInterviewOperation, drainInterviewOperations } from '@/lib/inter
  *   403 missing_csrf_token / cross_origin_forbidden — session-write forgery guard
  *   409 confirm_loss_required — floor decline without explicit loss acknowledgement
  *   503 script_unavailable — the Skill-23 script is not installed on this box
+ *   503 temporarily_unavailable — the live department list could not be read
  *   502 decision_write_failed — any other non-zero script exit
+ *
+ * BU-15 (WF-016) — "Looks good — keep all": the body may instead be
+ * `{bulk:'keep-all'}`. On an older box this route records a real, provenanced
+ * `yes` for every expected department that carries no recorded decision, one
+ * after another, stopping and reporting at the FIRST failure (nothing after it
+ * is written). On a standard-first box the departments are already built, so
+ * silence is a keep: nothing is recorded. Either way the gate question
+ * `department_review` is answered by the page through /api/interview/answer,
+ * never here — this route writes decisions only.
  */
 
 import { NextRequest, NextResponse } from 'next/server';
@@ -47,8 +57,17 @@ import {
   lossWarningFor,
   recordDeptDecision,
   getOrCreateInterviewSessionId,
+  readBuildState,
+  readStandardPrebuild,
+  listCanonicalDepartments,
+  computeExpectedDecisionIds,
+  computeDecisionCoverage,
+  isProvenanced,
+  norm,
   InterviewScriptError,
   InterviewScriptMissingError,
+  type CanonicalDepartments,
+  type RawDecision,
 } from '@/lib/interview/seam';
 import { verifyCsrfToken } from '@/lib/csrf-protection';
 import { refreshInterviewMirror } from '@/lib/interview/mirror';
@@ -59,12 +78,17 @@ export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
 const requestSchema = z.object({
+  // BU-15: "Looks good — keep all". When this is `keep-all` the per-department
+  // fields are not used (and are refused for a client tenant below).
+  bulk: z.literal('keep-all').optional(),
   // Canonical department id (e.g. "marketing"). Validated for existence by the
   // script itself — an unknown/misspelled id surfaces as exit 1 → 400 here.
-  dept: z.string().min(1).max(128),
+  dept: z.string().min(1).max(128).optional(),
   // The owner's verb on this department. Exactly the three the script accepts;
   // a NO becomes a provenanced canonical_decline "declined", never a rejection.
-  decision: z.enum(['yes', 'no', 'later']),
+  // ('later' is no longer offered on screen — BU-15 — but an older page or the
+  // Telegram agent may still send it, so the writer keeps accepting it.)
+  decision: z.enum(['yes', 'no', 'later']).optional(),
   // Optional: pin to an existing interview session id. When absent, the seam
   // resolves/persists the stable interviewSessionId from build-state.
   sessionId: z.string().min(1).max(128).optional(),
@@ -128,6 +152,15 @@ export async function POST(req: NextRequest) {
     try {
       const raw=await req.text();
       const payload=requestSchema.parse(raw.trim()?JSON.parse(raw):undefined) || {};
+      // BU-15: a bulk keep-all needs the client's OWN expected department set,
+      // which this box cannot read. Refuse plainly instead of writing the
+      // operator's departments into the queue.
+      if ((payload as { bulk?: string }).bulk === 'keep-all') {
+        return NextResponse.json(
+          { error: 'bulk_unsupported', message: 'Keeping every department at once is only available on the box that runs your interview.' },
+          { status: 400 },
+        );
+      }
       const op=queueInterviewOperation(tenant.context!, 'decision', payload, req.headers.get('idempotency-key') || undefined);
       await drainInterviewOperations(tenant.context!);
       const delivery=await deliverInterviewOperation(tenant.context!,op);
@@ -172,6 +205,142 @@ export async function POST(req: NextRequest) {
   const sessionId =
     (body.sessionId && body.sessionId.trim()) || getOrCreateInterviewSessionId();
 
+  // 2b) "Looks good — keep all" (BU-15, WF-016).
+  //     Standard-first box: every department is already built, so silence is a
+  //     keep — NOTHING is recorded per department. Older box (decision D-4):
+  //     record a real, provenanced `yes` for every expected department that has
+  //     no recorded decision, one at a time, stopping at the first failure so
+  //     the page can report exactly which department stopped it.
+  if (body.bulk === 'keep-all') {
+    const state = readBuildState();
+    if (readStandardPrebuild(state).standardFirst) {
+      return NextResponse.json({
+        ok: true,
+        bulk: 'keep-all',
+        standardFirst: true,
+        recorded: 0,
+      });
+    }
+
+    let canonical: CanonicalDepartments;
+    try {
+      canonical = await listCanonicalDepartments();
+    } catch {
+      // The live floor list is unreadable: say "temporarily unavailable", never
+      // "you have no departments".
+      return NextResponse.json(
+        {
+          error: 'temporarily_unavailable',
+          message:
+            'We could not read your team list just now, so nothing was recorded. Please try again.',
+        },
+        { status: 503 },
+      );
+    }
+
+    const expected = computeExpectedDecisionIds(canonical, { standardFirst: false });
+    const decisions = (state?.canonicalReconciliation?.decisions ?? {}) as Record<
+      string,
+      RawDecision
+    >;
+    const recordedByNorm = new Map(
+      Object.entries(decisions).map(([rawId, value]) => [norm(rawId), value] as const),
+    );
+
+    const recorded: string[] = [];
+    let failedDept: string | null = null;
+    let failure: unknown = null;
+    for (const deptId of expected) {
+      const existing = recordedByNorm.get(norm(deptId));
+      // A provenanced decision (yes, no or an old later) is already the owner's
+      // answer — keep-all never overwrites one.
+      if (existing !== undefined && isProvenanced(existing)) continue;
+      try {
+        await recordDeptDecision({
+          dept: deptId,
+          decision: 'yes',
+          by: decidedBy,
+          session: sessionId,
+          source: 'owner-interview-keep-all',
+        });
+        recorded.push(deptId);
+      } catch (err) {
+        failedDept = deptId;
+        failure = err;
+        break;
+      }
+    }
+
+    try {
+      refreshInterviewMirror({ sessionId, ownerId: decidedBy });
+    } catch {
+      // swallow — the mirror is non-authoritative and must never fail the write.
+    }
+
+    const coverage = computeDecisionCoverage(readBuildState(), expected);
+
+    if (failedDept) {
+      if (failure instanceof InterviewScriptMissingError) {
+        return NextResponse.json(
+          {
+            error: 'script_unavailable',
+            message:
+              'The department-decision recorder is not installed on this box yet. ' +
+              'Nothing further was saved — your interviewer is reconnecting.',
+            script: failure.script,
+            recorded,
+            failedDept,
+          },
+          { status: 503 },
+        );
+      }
+      if (failure instanceof InterviewScriptError && failure.exitCode === 1) {
+        return NextResponse.json(
+          {
+            error: 'unknown_dept',
+            message: `"${failedDept}" is not a recognized department id.`,
+            dept: failedDept,
+            recorded,
+          },
+          { status: 400 },
+        );
+      }
+      return NextResponse.json(
+        {
+          error: 'decision_write_failed',
+          message: `Keeping every department stopped at “${failedDept}”. Please try again.`,
+          dept: failedDept,
+          recorded,
+          detail:
+            failure instanceof InterviewScriptError
+              ? failure.stderr.trim().split('\n').slice(-1)[0] || undefined
+              : undefined,
+        },
+        { status: 502 },
+      );
+    }
+
+    return NextResponse.json({
+      ok: true,
+      bulk: 'keep-all',
+      standardFirst: false,
+      recorded: recorded.length,
+      recordedDepts: recorded,
+      decisionCoverage: coverage,
+    });
+  }
+
+  // 2c) A single-card write needs both fields (the bulk form above is the only
+  //     body that may omit them).
+  if (!body.dept || !body.decision) {
+    return NextResponse.json(
+      { error: 'invalid_request', detail: 'dept and decision are required' },
+      { status: 400 },
+    );
+  }
+  const dept = body.dept;
+  const decision = body.decision;
+
   // Floor-decline loss confirmation (ISR-001): a "no" for a floor department
   // costs guaranteed functionality, so the route reads the AUTHORITATIVE
   // warning (department-loss-warning.py via seam.lossWarningFor — the same
@@ -180,8 +349,8 @@ export async function POST(req: NextRequest) {
   // state untouched, restore/keep stays the default, and the writer's own
   // exit-2 gate remains the backstop (a forged/omitted confirmLoss still
   // fails in the script). Non-floor declines and yes/later need no ack.
-  if (body.decision === 'no') {
-    const loss = await lossWarningFor(body.dept);
+  if (decision === 'no') {
+    const loss = await lossWarningFor(dept);
     if (loss.indeterminate) {
       return NextResponse.json(
         {
@@ -190,7 +359,7 @@ export async function POST(req: NextRequest) {
             'We could not verify what removing this department would cost ' +
             '(the department map is unavailable). Nothing was recorded — ' +
             'please try again, or ask your assistant to restore the department list first.',
-          dept: body.dept,
+          dept,
           detail: loss.reason,
         },
         { status: 503 },
@@ -201,10 +370,10 @@ export async function POST(req: NextRequest) {
         {
           error: 'confirm_loss_required',
           message:
-            `Removing “${body.dept}” means: ${loss.warning} ` +
+            `Removing “${dept}” means: ${loss.warning} ` +
             'Confirm you still want to skip it — otherwise it stays in your workforce.',
-          dept: body.dept,
-          decision: body.decision,
+          dept,
+          decision,
           warning: loss.warning,
           confirmLossRequired: true,
         },
@@ -217,15 +386,15 @@ export async function POST(req: NextRequest) {
   //    and the canonical_decline classification; this route only relays flags.
   try {
     await recordDeptDecision({
-      dept: body.dept,
-      decision: body.decision,
+      dept,
+      decision,
       by: decidedBy,
       session: sessionId,
       source: 'owner-interview',
       // Relayed ONLY when the owner explicitly acknowledged the warning above.
       // The writer re-checks independently (exit 2 without it), so a forged
       // flag with no shown warning still cannot silently drop a floor dept.
-      confirmLoss: body.decision === 'no' && body.confirmLoss === true,
+      confirmLoss: decision === 'no' && body.confirmLoss === true,
     });
   } catch (err) {
     if (err instanceof InterviewScriptMissingError) {
@@ -248,8 +417,8 @@ export async function POST(req: NextRequest) {
         return NextResponse.json(
           {
             error: 'unknown_dept',
-            message: `"${body.dept}" is not a recognized department id.`,
-            dept: body.dept,
+            message: `"${dept}" is not a recognized department id.`,
+            dept,
             detail: err.stderr.trim().split('\n').slice(-1)[0] || undefined,
           },
           { status: 400 },
@@ -261,17 +430,17 @@ export async function POST(req: NextRequest) {
       // changed mid-flight — fail closed with the same confirm shape, never a
       // bare write error. Nothing was recorded.
       if (err.exitCode === 2) {
-        const loss = await lossWarningFor(body.dept);
+        const loss = await lossWarningFor(dept);
         return NextResponse.json(
           {
             error: 'confirm_loss_required',
             message:
               loss.warning
-                ? `Removing “${body.dept}” means: ${loss.warning} ` +
+                ? `Removing “${dept}” means: ${loss.warning} ` +
                   'Confirm you still want to skip it — otherwise it stays in your workforce.'
                 : 'Removing this department needs explicit confirmation — otherwise it stays in your workforce.',
-            dept: body.dept,
-            decision: body.decision,
+            dept,
+            decision,
             ...(loss.warning ? { warning: loss.warning } : {}),
             confirmLossRequired: true,
           },
@@ -315,8 +484,8 @@ export async function POST(req: NextRequest) {
   //    it — the board re-reads /api/interview/state for the authoritative view).
   return NextResponse.json({
     ok: true,
-    dept: body.dept,
-    decision: body.decision,
+    dept,
+    decision,
     source: 'owner-interview',
     decidedBy,
     sessionId,
