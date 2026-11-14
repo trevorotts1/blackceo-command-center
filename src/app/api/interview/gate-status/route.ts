@@ -23,12 +23,27 @@ import { verifiedBuild } from '@/lib/interview/build-verification';
  *
  * Bypassed by the middleware itself (early return, before any auth layer) so
  * the middleware's own fallback fetch never hits an auth gate. Internal-only:
- * exposes three booleans, no secrets, no session, no write path.
+ * exposes booleans plus one state word, no secrets, no session, no write path.
+ *
+ * BU-23 (WF-023): adds `status` — the ONE reader's state name from
+ * src/lib/interview/interview-status.ts (the TypeScript port of the onboarding
+ * repository's scripts/interview_status.py; both are driven by one shared
+ * fixture). It is computed from the SAME single build-state read below, so this
+ * endpoint still does one sync read and one parse. The five fields this route
+ * already answered keep their exact meaning; `status` is additive and the
+ * middleware's admission keys are unchanged.
+ *
+ * READY is the one state this route cannot report: it needs the gate's own
+ * state file and question registry, which this endpoint deliberately does not
+ * read. An interview whose required questions are all answered but whose
+ * completion button has not been pressed therefore reports IN_PROGRESS here,
+ * never NOT_STARTED.
  */
 
 import { standardPlaceholderActive } from '@/lib/interview/build-verification';
 import { NextRequest, NextResponse } from 'next/server';
 import { readBuildState, readStandardPrebuild } from '@/lib/interview/seam';
+import { interviewStatus } from '@/lib/interview/interview-status';
 import { resolveInterviewTenant, refuseUnverifiedTenant, tenantForHost } from '@/lib/interview/tenant';
 import { INTERNAL_GATE_HEADER, INTERNAL_HOST_HEADER, verifyInternalGateToken } from '@/lib/interview/internal-call';
 
@@ -74,12 +89,14 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: 'completion_state_unavailable' }, { status: 503 });
   }
   if (tenant.kind === 'client' && tenant.client) {
+    const complete = tenant.client.interview_complete === true;
     return NextResponse.json({
       priorCompletionDeclared,
-      interviewComplete: tenant.client.interview_complete === true,
+      interviewComplete: complete,
       buildCompleted: false,
       standardReady: false,
       standardPlaceholder: false,
+      status: interviewStatus({ interviewComplete: complete }, { declared: priorCompletionDeclared }),
     });
   }
   const bs = readBuildState();
@@ -89,5 +106,6 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     buildCompleted: verifiedBuild(bs),
     standardReady: readStandardPrebuild(bs).standardReady,
     standardPlaceholder: standardPlaceholderActive(bs),
+    status: interviewStatus(bs, { declared: priorCompletionDeclared }),
   });
 }
