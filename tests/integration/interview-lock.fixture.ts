@@ -150,7 +150,20 @@ export function serverEnv(): Record<string, string> {
   fs.mkdirSync(agentDir,{recursive:true});fs.mkdirSync(scripts,{recursive:true});
   fs.writeFileSync(path.join(runtimeRoot,'openclaw.json'),JSON.stringify({agents:{entries:{main:{workspace:WORKSPACE_DIR,agentDir,model:{primary:'fixture/no-provider'}}}}}));
   for(const script of ['update-interview-state.sh','record-dept-decision.sh']) fs.writeFileSync(path.join(scripts,script),'#!/bin/sh\nexit 0\n',{mode:0o700});
+  // Fresh gate state every suite launch: the stub remembers answered ids and a
+  // stale gate-state from an earlier run would stop the fixture asking the
+  // first question, which breaks every serial test that assumes a fresh deck.
+  for (const stale of ['gate-state.json', 'interview-known.json']) {
+    try { fs.rmSync(path.join(WORKSPACE_DIR, 'company-discovery', stale), { force: true }); } catch {}
+  }
   fs.writeFileSync(path.join(scripts,'list-canonical-departments.py'),`import json\nprint(json.dumps({"mandatory":[],"optional":[],"conditional":[]}))\n`);
+  // Step gate (BU-13/BU-14): this suite drives the gate-backed page, so the gate
+  // must exist. The stub keeps the real contract for the two questions the draft
+  // test exercises, reading the vendored registry for wording.
+  fs.writeFileSync(path.join(scripts,'interview_gate.py'), fs.readFileSync(path.join(REPO_ROOT,'tests','integration','interview-gate-stub.py'), 'utf8'), {mode:0o700});
+  const interviewDir = path.join(path.dirname(scripts), 'interview');
+  fs.mkdirSync(interviewDir, { recursive: true });
+  fs.copyFileSync(path.join(REPO_ROOT, 'src', 'lib', 'interview-questions.v2.json'), path.join(interviewDir, 'questions.v2.json'));
   return {
     ...Object.fromEntries(['KIE_API_KEY','KIEAI_API_KEY','KIE_AI_API_KEY','OPENAI_API_KEY','FAL_KEY','FAL_API_KEY','FAL_AI_API_KEY','GEMINI_API_KEY','GOOGLE_API_KEY','FISH_AUDIO_API_KEY','ELEVENLABS_API_KEY','REPLICATE_API_TOKEN','REPLICATE_API_KEY','LUMA_API_KEY','LUMAAI_API_KEY','STABILITY_API_KEY','STABILITY_AI_API_KEY','RUNWAY_API_KEY','RUNWAYML_API_SECRET'].map(key=>[key,'isolated-browser-fixture-no-provider-access'])),
     OPENCLAW_WORKSPACE_ROOT: WORKSPACE_DIR,

@@ -1,4 +1,3 @@
-import '../unit/_isolated-db';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import InterviewClient from '@/app/interview/InterviewClient';
@@ -57,23 +56,46 @@ const READY_STATE = {
   flags: { genuineTranscriptReady: false, decisionCoverageComplete: false, noUnprovenancedDeclines: false },
 };
 
+/** The gate's first question, shaped exactly like GET /api/interview/next. */
+const FIRST_QUESTION = {
+  done: false,
+  id: 'company_name',
+  section: 'company',
+  kind: 'text',
+  prompt: 'What name should we put on everything we build for you?',
+  help: 'Use the name your customers know you by. You can change it later.',
+  example: 'Bright Path Coaching',
+  required: true,
+  allowSkip: false,
+  allowUnsure: false,
+  allowOther: false,
+  minChars: 2,
+  minWords: 1,
+  requiredTotal: 15,
+  requiredAnswered: 0,
+  answeredTotal: 0,
+  percent: 0,
+  attempt: 1,
+};
+
 describe('InterviewClient survives a failed progress read', () => {
   it('keeps the question card on screen and says it is reconnecting', async () => {
-    let stateReads = 0;
+    let gateReads = 0;
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
-        if (url.includes('/api/interview/state')) {
-          stateReads += 1;
-          // The first read succeeds; the next one is a server error.
-          return stateReads === 1
-            ? Response.json(READY_STATE)
+        if (url.includes('/api/interview/next')) {
+          gateReads += 1;
+          // The first read succeeds; the re-read after the answer is a server error.
+          return gateReads === 1
+            ? Response.json(FIRST_QUESTION)
             : Response.json({ error: 'server_error' }, { status: 500 });
         }
+        if (url.includes('/api/interview/state')) return Response.json(READY_STATE);
         if (url.includes('/api/interview/gate-status')) return Response.json({ standardReady: false });
         if (url.includes('/api/interview/answer')) {
-          return Response.json({ ok: true, appended: true, questionId: 'company_name' });
+          return Response.json({ ok: true, appended: true, accepted: true, questionId: 'company_name' });
         }
         return Response.json({ ok: true });
       }),
@@ -81,9 +103,8 @@ describe('InterviewClient survives a failed progress read', () => {
 
     render(<InterviewClient />);
 
-    // The first read landed and the consent screen is up.
-    fireEvent.click(screen.getAllByRole('radio')[0]);
-    fireEvent.click(screen.getByRole('button', { name: 'Begin interview' }));
+    // The first gate read landed and the welcome screen is up.
+    fireEvent.click(await screen.findByRole('button', { name: 'Start' }));
 
     // The current question card.
     const box = (await screen.findByPlaceholderText(
@@ -104,7 +125,7 @@ describe('InterviewClient survives a failed progress read', () => {
       'fetch',
       vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
-        if (url.includes('/api/interview/state')) {
+        if (url.includes('/api/interview/next')) {
           return Response.json({ error: 'forbidden' }, { status: 403 });
         }
         return Response.json({ ok: true });
