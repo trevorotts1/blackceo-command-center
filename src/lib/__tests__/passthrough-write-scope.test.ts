@@ -593,6 +593,24 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
     // which the interface scanner does not read; bearer-listing it would 401
     // the browser channel and misstate the auth.
     '/api/council/convene',
+    // BU-35 prior-completion declaration (POST only; the path has no other
+    // method). This branch removes the LAST browser call site of the route
+    // (the same deletion #699 carries): InterviewClient.tsx and
+    // gate-actions.ts on this head contain ZERO occurrences of the route
+    // string, so the interface category cannot be evidenced here. It is NOT
+    // wired on this tree, and must NOT join BEARER_REQUIRED_WRITE_ROUTES —
+    // that would 401 the operator's own browser channel and misstate the auth.
+    // Verified posture, per src/app/api/interview/prior-completion/route.ts:
+    //   L16-19 403 owner_session_required — the 'operator:api' service subject
+    //          is refused AND the signed CSRF cookie must verify
+    //          (verifyCsrfToken on CSRF_COOKIE_NAME);
+    //   L21-25 403 same_origin_required — Origin host must equal Host and the
+    //          protocol must be http(s);
+    //   L28-34 400 confirmation_required — body cap raw.length > 256 with the
+    //          body required to be exactly {"confirmed":true};
+    //   L38-40 403 operator_required — the tenant must be kind 'self' AND its
+    //          subject must start with 'operator:'.
+    '/api/interview/prior-completion',
   ];
 
   it('every reachable mutating route is either in BEARER_REQUIRED_WRITE_ROUTES, called by the interface, or a documented unwired console route (exact residual enforced)', () => {
