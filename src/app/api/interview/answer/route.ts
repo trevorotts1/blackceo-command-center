@@ -33,26 +33,39 @@ import { deliverInterviewOperation } from '@/lib/interview/remote-protocol';
  *     NEVER hand-writes build-state — those go exclusively through the scripts.
  *   • The synthetic "(Non-Interactive)" header is NEVER emitted here.
  *
+ * BU-13 (step gate): the SELF-tenant branch no longer decides whether an answer
+ * is acceptable. `interview_gate.py answer` does — it is the only thing that may
+ * say a question's answer was taken, needs one follow-up, or is out of order.
+ * Every accepted block carries the registry question id as its first line
+ * (`**QID:** <id>`), so every reader matches by id and never by wording.
+ *
  * Error mapping:
  *   400 invalid_request     — bad body (missing answer, unknown shape)
- *   400 missing_question    — neither a known questionId nor a prompt was given
+ *   400 missing_question    — no questionId, or no question text to record
  *   400 invalid_color       — brand-color answer that resolveBrandColor can't resolve
  *   400 invalid_logo_url    — logo answer that is not a valid http(s) URL
+ *   409 out_of_order        — the gate refused: not this question's turn
+ *   200 accepted:false      — the gate asks for ONE follow-up; nothing appended
  *   500 answers_write_failed — the transcript append itself failed
  *   503 script_unavailable  — update-interview-state.sh not installed on this box
+ *   503 temporarily_unavailable — the gate is missing or could not run
  *   502 state_write_failed  — any other non-zero exit from the state script
  */
 
 import { NextRequest, NextResponse } from 'next/server';
+import { execFile } from 'child_process';
+import { createRequire } from 'module';
+import { promisify } from 'util';
 import fs from 'fs';
 import path from 'path';
 import {
-  updateInterviewState,
+  runGate,
   getOrCreateInterviewSessionId,
   resolveInterviewWriteIdentity,
   InterviewScriptError,
   InterviewScriptMissingError,
 } from '@/lib/interview/seam';
+import { buildStatePath, scriptExists, updateInterviewStateScript } from '@/lib/interview/paths';
 import { refreshInterviewMirror } from '@/lib/interview/mirror';
 import { answersFilePath, answersEncFilePath } from '@/lib/interview/paths';
 import { isEncryptedEnvelope, readEncryptedFile } from '@/lib/interview/crypto';
@@ -88,6 +101,65 @@ const GENUINE_HEADER = '# Workforce Interview Answers';
  * pre-v4.63 `value` vs `answer` bug 400'd every structured card submit).
  */
 type AnswerBody = AnswerRequestBody;
+
+const execFileAsync = promisify(execFile);
+const STATE_SYNC_TIMEOUT_MS = 30_000;
+
+/**
+ * The vendored registry v2 (a byte copy of the one installed with the skill).
+ * Read ONLY to recover a question's wording when the client did not send one —
+ * the transcript still records the real question that was asked, and the
+ * `**QID:**` line (not the wording) is what later readers match on.
+ */
+const V2_REGISTRY: { questions?: Array<{ id?: string; prompt?: string }> } =
+  createRequire(import.meta.url)('../../../../lib/interview-questions.v2.json');
+
+function registryPromptFor(questionId?: string): string | undefined {
+  const id = (questionId ?? '').trim();
+  if (!id) return undefined;
+  const q = (V2_REGISTRY.questions ?? []).find((entry) => entry.id === id);
+  return q?.prompt?.trim() || undefined;
+}
+
+/** The gate's `next` payload, or null when the gate could not answer. */
+async function gateNext(): Promise<unknown> {
+  const next = await runGate(['next']);
+  return next.code === 0 ? next.json : null;
+}
+
+/**
+ * Stamp progress from the gate — `update-interview-state.sh --state <file>
+ * --sync-from-gate` (BU-12). Replaces the old `--question-number` stamp: the
+ * gate's own counters are the only ones that may reach build-state.
+ *
+ * The script is invoked directly (rather than through seam.updateInterviewState,
+ * which has no --sync-from-gate/--state flags) so it is pinned to the EXACT
+ * build-state file this app reads. Its failures surface as the same typed errors
+ * the route already maps, so the 503/429/502 handling below is unchanged.
+ */
+async function syncProgressFromGate(): Promise<void> {
+  const script = updateInterviewStateScript();
+  if (!scriptExists(script)) throw new InterviewScriptMissingError(script);
+  try {
+    await execFileAsync('bash', [script, '--state', buildStatePath(), '--sync-from-gate'], {
+      encoding: 'utf-8',
+      timeout: STATE_SYNC_TIMEOUT_MS,
+      maxBuffer: 8 * 1024 * 1024,
+    });
+  } catch (err) {
+    const e = err as NodeJS.ErrnoException & {
+      code?: number | string;
+      stderr?: string;
+      stdout?: string;
+    };
+    throw new InterviewScriptError(
+      script,
+      typeof e.code === 'number' ? e.code : null,
+      e.stderr ?? '',
+      e.stdout ?? '',
+    );
+  }
+}
 
 /** Human timestamp in the same style as build-workforce.log_answer's "%B %d, %Y at %I:%M %p". */
 function humanNow(): string {
@@ -170,6 +242,7 @@ function quarantineUnreadableTranscript(): string | null {
 }
 
 function appendAnswerBlock(args: {
+  qid: string;
   question: string;
   answer: string;
   confirmedFromContext?: string;
@@ -185,8 +258,10 @@ function appendAnswerBlock(args: {
     throw new Error(`refusing to append: encrypted transcript unreadable, quarantined to ${quarantined}`);
   }
 
-  // Build the Q/A block byte-shape (mirrors build-workforce.log_answer).
-  let block = `**Q:** ${args.question}\n**A:** ${args.answer}\n`;
+  // Build the Q/A block byte-shape (mirrors build-workforce.log_answer), with
+  // the registry id as the block's FIRST line: registry v2 readers match an
+  // answer by its id and never consult the wording.
+  let block = `**QID:** ${args.qid}\n**Q:** ${args.question}\n**A:** ${args.answer}\n`;
   if (args.confirmedFromContext && args.confirmedFromContext.trim()) {
     block += `**Provenance:** confirmed-from-context: ${args.confirmedFromContext.trim()}\n`;
   }
@@ -240,9 +315,16 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // 2) Resolve the question text + its storeOn column.
+  // 2) Resolve the question text + its storeOn column. The wording recorded in
+  //    the block is, in order: what the client showed, the registry v2 prompt
+  //    for that id, the Command Center deck's prompt. The id recorded in the
+  //    `**QID:**` line is what every reader matches on.
   const question = findQuestion(body.questionId);
-  const questionText = (body.prompt && body.prompt.trim()) || question?.prompt || '';
+  const questionText =
+    (body.prompt && body.prompt.trim()) ||
+    registryPromptFor(body.questionId) ||
+    question?.prompt ||
+    '';
   if (!questionText) {
     return NextResponse.json(
       {
@@ -377,10 +459,62 @@ export async function POST(req: NextRequest) {
     });
   }
 
+  // 3c) THE STEP GATE DECIDES (BU-13) — self tenant only; the client tenant
+  //     returned above with its own store untouched.
+  //
+  //     `interview_gate.py answer` is the ONLY thing allowed to say that an
+  //     answer was taken (exit 0), needs exactly one follow-up (exit 3, nothing
+  //     written), or is for a question that is not current (exit 2). Answers are
+  //     matched by question id, so an answer that cannot name its question id
+  //     cannot be placed at all — it is refused here rather than guessed at from
+  //     its wording.
+  const questionId = (body.questionId ?? '').trim();
+  if (!questionId) {
+    return NextResponse.json(
+      {
+        error: 'missing_question',
+        message:
+          'A structured answer must carry the questionId it was asked under, so the ' +
+          'step gate can place it.',
+      },
+      { status: 400 },
+    );
+  }
+  const gateArgs = ['answer', '--qid', questionId, '--text', transcriptAnswer, '--source', 'web'];
+  if (body.confirmedFromContext && body.confirmedFromContext.trim()) {
+    gateArgs.push('--confirmed-from', body.confirmedFromContext.trim());
+  }
+  const gate = await runGate(gateArgs);
+
+  if (gate.code === 2) {
+    // Wrong question, unknown question, or an edit that is not allowed: the gate
+    // names the question that IS current.
+    return NextResponse.json(
+      { error: 'out_of_order', expected: gate.json?.expected ?? null },
+      { status: 409 },
+    );
+  }
+  if (gate.code === 3) {
+    // One follow-up only. The gate did not record anything, so neither do we.
+    return NextResponse.json({
+      ok: true,
+      accepted: false,
+      questionId,
+      reason: gate.json?.reason ?? null,
+      followUp: gate.json?.followUp ?? null,
+      next: await gateNext(),
+    });
+  }
+  if (gate.code !== 0) {
+    // Tooling failure: "temporarily unavailable", never "that answer was refused".
+    return NextResponse.json({ error: 'temporarily_unavailable' }, { status: 503 });
+  }
+
   // 4) CANONICAL WRITE #1 — append the genuine Q/A block to the transcript.
   let transcriptPath: string;
   try {
     transcriptPath = appendAnswerBlock({
+      qid: questionId,
       question: questionText,
       answer: transcriptAnswer,
       confirmedFromContext: body.confirmedFromContext,
@@ -405,36 +539,26 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // 5) CANONICAL WRITE #2 — stamp progress via update-interview-state.sh.
-  //    Same button the Telegram agent presses; the script owns the build-state
-  //    write. The transcript is already saved, so a stamp failure is reported but
-  //    the answer is NOT lost (appended:true).
+  // 5) CANONICAL WRITE #2 — mirror the gate's own counters into build-state with
+  //    `update-interview-state.sh --state <file> --sync-from-gate` (BU-12).
+  //    `--question-number` is gone: the gate's answeredTotal/requiredTotal are
+  //    the only counters that may reach build-state, so the two can never
+  //    disagree. Same script the Telegram agent presses; the script owns the
+  //    build-state write. The transcript is already saved, so a stamp failure is
+  //    reported but the answer is NOT lost (appended:true).
   //
-  //    P0 FIX (client incident, 2026-07): `askedBy` keeps its EXACT
-  //    prior value/behavior — it still defaults to the 'interview-web' literal
-  //    when there is no real caller identity, and is still recorded verbatim in
-  //    lastQuestionAskedBy. What changes is the RATE-LIMIT bucket key: when
-  //    there is no real identity, the stable per-interview session id is
-  //    resolved and passed as rateLimitSessionId so update-interview-state.sh
-  //    buckets on the real session instead of the shared literal every
-  //    unauthenticated caller used to collapse onto. When a real identity IS
-  //    present, rateLimitSessionId is left undefined, so the script falls back
-  //    to askedBy exactly as before -- the authenticated Cf-Access/operator
-  //    path is unchanged. The decision logic itself is
-  //    seam.resolveInterviewWriteIdentity (pure, unit-tested independent of
-  //    this route) so this exact defaulting behavior is pinned.
+  //    P0 FIX (client incident, 2026-07): the caller identity is still resolved
+  //    exactly as before (explicit askedBy → Cf-Access email → operator-email),
+  //    defaults to the 'interview-web' sentinel and supplies the stable session
+  //    id; --sync-from-gate carries no rate-limit charge, so neither value is a
+  //    throttle key here — they key the read-mirror refresh at step 7.
   const { askedBy, rateLimitSessionId } = resolveInterviewWriteIdentity({
     bodyAskedBy: body.askedBy,
     cfAccessEmail: req.headers.get('Cf-Access-Authenticated-User-Email'),
     operatorEmail: req.headers.get('x-operator-email'),
   });
   try {
-    await updateInterviewState({
-      phase: body.phase,
-      questionNumber: body.questionNumber,
-      askedBy,
-      rateLimitSessionId,
-    });
+    await syncProgressFromGate();
   } catch (err) {
     if (err instanceof InterviewScriptMissingError) {
       return NextResponse.json(
@@ -590,13 +714,18 @@ export async function POST(req: NextRequest) {
   }
 
   // 8) Success. Canonical writes landed; mirror reported (may be a soft warning).
+  //    `accepted`/`shortAccepted`/`next` come from the gate, so the page renders
+  //    the same decision the Telegram agent got.
   return NextResponse.json({
     ok: true,
-    questionId: body.questionId ?? null,
+    accepted: true,
+    shortAccepted: gate.json?.shortAccepted === true,
+    questionId,
     storeOn: storeOn ?? null,
     appended: true,
     stateStamped: true,
     transcriptPath,
+    next: await gateNext(),
     mirror,
     dbMirror,
   });
