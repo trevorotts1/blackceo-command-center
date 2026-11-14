@@ -65,7 +65,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { recoverInterviewAccess, verifiedProgress, resumePhase, interviewDraftScope, INTERVIEW_SIGN_IN_HELP, INTERVIEW_RETRY_HELP } from '@/lib/interview/browser-recovery';
+import { recoverInterviewAccess, verifiedProgress, resumePhase, interviewDraftScope, INTERVIEW_SIGN_IN_HELP, INTERVIEW_RETRY_HELP, fetchWithCsrfHeal } from '@/lib/interview/browser-recovery';
 import { useInterviewDraft } from '@/components/interview/useInterviewDraft';
 import { AnimatePresence, MotionConfig, motion } from 'framer-motion';
 import { ArrowRight, Info, Lock, Sparkles } from 'lucide-react';
@@ -383,7 +383,7 @@ export default function InterviewClient() {
    */
   const postSkipToServer = useCallback(async (questionId: string, skipped: boolean) => {
     try {
-      const res = await fetch('/api/interview/state', {
+      const res = await fetchWithCsrfHeal('/api/interview/state', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ questionId, skipped }),
@@ -656,7 +656,7 @@ export default function InterviewClient() {
       recoveryRef.current.token++; // cancel any in-flight recovery poll
       setAwaitingReply(false);
       try {
-        const res = await fetch('/api/interview/turn', {
+        const res = await fetchWithCsrfHeal('/api/interview/turn', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ content: text, sessionId: sessionId ?? undefined }),
@@ -904,7 +904,7 @@ export default function InterviewClient() {
     setDeclaringCompletion(true);
     setDeclarationError(null);
     try {
-      const response = await fetch('/api/interview/prior-completion', {
+      const response = await fetchWithCsrfHeal('/api/interview/prior-completion', {
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ confirmed: true }),
       });
