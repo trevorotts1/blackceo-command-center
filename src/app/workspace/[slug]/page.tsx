@@ -41,6 +41,8 @@ export default function WorkspacePage() {
   const [notFound, setNotFound] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [deptName, setDeptName] = useState<string | null>(null);
+  // Healer owns bug intake since the Bugs workspace was archived (2026-11-13): it can show either board.
+  const [healerBugView, setHealerBugView] = useState(false);
   const logoUrl = useLogoUrl();
 
   // MR-44 (fix2): resolve the board's effective "Tasks Due" filter window from
@@ -374,6 +376,16 @@ export default function WorkspacePage() {
         <Link href={`/workspace/${slug}/exceptions`} className="text-sm text-indigo-600 hover:underline">
           Bookings, failures and outcomes
         </Link>
+        {workspace.slug === 'healer' && (
+          <button
+            type="button"
+            aria-pressed={healerBugView}
+            onClick={() => setHealerBugView((v) => !v)}
+            className="ml-4 text-sm text-indigo-600 hover:underline"
+          >
+            {healerBugView ? 'Show task board' : 'Show bug tickets'}
+          </button>
+        )}
       </div>
 
       {/* A7 — board projection drift banner (Anthology board only). Read-only,
@@ -429,7 +441,7 @@ export default function WorkspacePage() {
         <MissionQueue
           workspaceId={workspace.id}
           departmentFilter={routeDepartment}
-          boardKind={workspace.slug === 'bugs' ? 'bug' : 'task'}
+          boardKind={workspace.slug === 'bugs' || (workspace.slug === 'healer' && healerBugView) ? 'bug' : 'task'}
           dueDateWindowDays={dueDateWindowDays}
         />
 
