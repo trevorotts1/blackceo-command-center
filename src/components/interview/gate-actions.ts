@@ -129,6 +129,21 @@ export async function refreshInterviewGate(): Promise<void> {
 
 /* U057 — Interview bypass ("Skip for now") */
 
+/**
+ * BU-05 (WF-013): the "Skip for now" affordance is operator-only. Resolves the
+ * tenant context on the server and answers a plain boolean; an unresolvable
+ * context (public invitation shell, expired grant) answers false and never
+ * throws, so the interview page simply renders without the control.
+ */
+export async function canSkipInterview(): Promise<boolean> {
+  try {
+    const context = await resolveTenantContext({ headers: new Headers(await headers()) });
+    return context.kind === 'self' && context.subject.startsWith('operator:');
+  } catch {
+    return false;
+  }
+}
+
 export async function skipInterviewForNow(): Promise<void> {
   const context=await resolveTenantContext({headers:new Headers(await headers())});
   if(context.kind!=='self' || !context.subject.startsWith('operator:'))throw new Error('Operator identity required');

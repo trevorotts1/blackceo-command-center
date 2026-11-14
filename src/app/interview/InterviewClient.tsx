@@ -93,7 +93,7 @@ import WelcomeBack from '@/components/interview/WelcomeBack';
 
 import { useCompanyBrand } from '@/hooks/useCompanyBrand';
 import { useLogoUrl } from '@/hooks/useLogoUrl';
-import { skipInterviewForNow } from '@/components/interview/gate-actions';
+import { canSkipInterview, skipInterviewForNow } from '@/components/interview/gate-actions';
 
 /* -------------------------------------------------------------------------- */
 /* structured question set (shared base + vendored branding JSON)              */
@@ -270,8 +270,10 @@ export default function InterviewClient() {
   const [accessError, setAccessError] = useState<string | null>(null);
   const [softError, setSoftError] = useState(false);
   const [softAttempts, setSoftAttempts] = useState(0);
-  const [declaringCompletion, setDeclaringCompletion] = useState(false);
-  const [declarationError, setDeclarationError] = useState<string | null>(null);
+  // BU-05 (WF-013): "Skip for now" is operator-only. showSkip is resolved once
+  // on mount from the server action; an owner-facing session never sees it.
+  const [showSkip, setShowSkip] = useState(false);
+  const [skipError, setSkipError] = useState<string | null>(null);
 
   // Structured answers recorded THIS session (merged with the server's set so a
   // just-answered card is skipped even before the next /state read lands).
@@ -495,6 +497,24 @@ export default function InterviewClient() {
     };
   }, []);
 
+  // BU-05 (WF-013): resolve the operator-only "Skip for now" affordance once on
+  // mount. A false answer (or any failure) hides it; the action itself refuses a
+  // non-operator anyway, so this is presentation only.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const allowed = await canSkipInterview();
+        if (!cancelled) setShowSkip(allowed);
+      } catch {
+        if (!cancelled) setShowSkip(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // On mount: read state once and route to the right screen. ANY prior answer —
   // structured card, conversational turn, or a Telegram block — routes to
   // WelcomeBack (never consent, never question 1).
@@ -574,8 +594,10 @@ export default function InterviewClient() {
       // A COMPLETED interview never shows the resume nag, regardless of answer
       // counts — the owner is done; route straight to the dashboard (already
       // unlocked by the gate cookie once interviewComplete is true). Checked
-      // FIRST, ahead of the answeredCount branch below.
-      if (data.interviewComplete === true || data.buildCompleted === true || data.priorCompletionDeclared === true) {
+      // FIRST, ahead of the answeredCount branch below. BU-05: a prior-completion
+      // declaration no longer redirects here — the route is operator-only and an
+      // existing row still opens the dashboard through the gate cookie.
+      if (data.interviewComplete === true || data.buildCompleted === true) {
         router.replace('/');
         return;
       }
@@ -813,10 +835,17 @@ export default function InterviewClient() {
     );
   }, [fireMilestone, loadState]);
 
-  /* ---- U057 skip-for-now handler ---- */
+  /* ---- U057 skip-for-now handler (operator-only since BU-05) ---- */
 
   const handleSkipForNow = useCallback(async () => {
-    try { await skipInterviewForNow(); } catch { /* non-fatal */ }
+    setSkipError(null);
+    try {
+      await skipInterviewForNow();
+    } catch {
+      // BU-05: a refused skip is said plainly and never navigates.
+      setSkipError('Skipping is not available for this account.');
+      return;
+    }
     router.push('/');
   }, [router]);
 
@@ -898,27 +927,6 @@ export default function InterviewClient() {
     pendingEnrollmentRef.current = null;
     window.location.replace(window.location.pathname);
   }, []);
-
-  const declareCompleted = useCallback(async () => {
-    if (declaringCompletion) return;
-    setDeclaringCompletion(true);
-    setDeclarationError(null);
-    try {
-      const response = await fetchWithCsrfHeal('/api/interview/prior-completion', {
-        method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ confirmed: true }),
-      });
-      const result = await response.json();
-      if (!response.ok || result.priorCompletionDeclared !== true) {
-        throw new Error(response.status === 401 || response.status === 403
-          ? INTERVIEW_SIGN_IN_HELP : 'Your declaration was not saved. Please retry.');
-      }
-      window.location.assign('/');
-    } catch (error) {
-      setDeclarationError(error instanceof Error ? error.message : 'Your declaration was not saved. Please retry.');
-      setDeclaringCompletion(false);
-    }
-  }, [declaringCompletion]);
 
   /* ---- renders ---- */
 
@@ -1041,6 +1049,8 @@ export default function InterviewClient() {
         onSelect={setConsent}
         onBegin={beginInterview}
         onSkip={handleSkipForNow}
+        showSkip={showSkip}
+        skipError={skipError}
         standardReady={standardReady}
       />
     );
@@ -1052,16 +1062,6 @@ export default function InterviewClient() {
         owner is already on — never in place of it. */}
     {softError && <p role="status" className="mx-auto w-full max-w-2xl px-5 pt-4 text-sm">Reconnecting… your answers are saved.</p>}
     {screen}
-    {!booting && !state?.interviewComplete && !state?.buildCompleted && !state?.priorCompletionDeclared && (
-      <section className="mx-auto w-full max-w-2xl px-5 pb-8" aria-label="Previously completed interview">
-        <button type="button" className={iv.btnSecondary} disabled={declaringCompletion}
-          aria-describedby="prior-completion-help" onClick={() => void declareCompleted()}>
-          {declaringCompletion ? 'Saving your declaration…' : 'I have already completed the interview'}
-        </button>
-        <p id="prior-completion-help" className="mt-3 text-sm">This saves your declaration that you previously completed the interview and stops repeat prompts across sign-ins. It does not create answers or mark your workforce build complete.</p>
-        {declarationError && <p role="alert" className="mt-3 text-sm">{declarationError}</p>}
-      </section>
-    )}
   </MotionConfig>;
 }
 
@@ -1387,6 +1387,8 @@ function ConsentScreen({
   onSelect,
   onBegin,
   onSkip,
+  showSkip,
+  skipError,
   standardReady,
 }: {
   logoUrl: string;
@@ -1396,6 +1398,10 @@ function ConsentScreen({
   onSelect: (c: Consent) => void;
   onBegin: () => void;
   onSkip: () => void;
+  /** BU-05 (WF-013): operator-only. False hides "Skip for now" entirely. */
+  showSkip: boolean;
+  /** BU-05: a refused skip is stated plainly instead of navigating. */
+  skipError: string | null;
   /** AI Workforce standard-first (PHASE 6 item 6): edit-mode framing for a
    *  standard-prebuilt box. */
   standardReady: boolean;
@@ -1563,21 +1569,29 @@ function ConsentScreen({
           </p>
         )}
 
-        {/* U057: "Skip for now" — sets a 1-hour bypass cookie for urgent dashboard access. */}
-        <div className="mt-4 pt-4" style={{ borderTop: '1px solid var(--iv-line)' }}>
-          <button
-            type="button"
-            onClick={onSkip}
-            className={ivcx(iv.btnSecondary)}
-            style={{ width: '100%', justifyContent: 'center' }}
-            data-walkthrough="interview-skip-button"
-          >
-            Skip for now
-          </button>
-          <p className={ivcx(iv.lede, 'mt-2 text-center')} style={{ fontSize: '0.72rem' }}>
-            Go straight to your dashboard. A reminder will stay at the top until you finish the interview.
+        {/* U057: "Skip for now" — sets a 1-hour bypass cookie for urgent dashboard
+            access. BU-05: operator-only — an owner-facing session never sees it. */}
+        {showSkip && (
+          <div className="mt-4 pt-4" style={{ borderTop: '1px solid var(--iv-line)' }}>
+            <button
+              type="button"
+              onClick={onSkip}
+              className={ivcx(iv.btnSecondary)}
+              style={{ width: '100%', justifyContent: 'center' }}
+              data-walkthrough="interview-skip-button"
+            >
+              Skip for now
+            </button>
+            <p className={ivcx(iv.lede, 'mt-2 text-center')} style={{ fontSize: '0.72rem' }}>
+              Go straight to your dashboard. A reminder will stay at the top until you finish the interview.
+            </p>
+          </div>
+        )}
+        {skipError && (
+          <p role="alert" className={ivcx(iv.lede, 'mt-2 text-center')} style={{ fontSize: '0.78rem' }}>
+            {skipError}
           </p>
-        </div>
+        )}
       </motion.div>
     </div>
   );
