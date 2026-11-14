@@ -68,7 +68,7 @@ const CHECKOUT_IDS = Object.entries(UPSELL_PHASE_TO_LABEL)
   .filter(([, l]) => l === 'Checkout')
   .map(([id]) => id);
 const VSL_IDS = Object.entries(UPSELL_PHASE_TO_LABEL)
-  .filter(([, l]) => l === 'VSL Page')
+  .filter(([, l]) => l === 'Video Sales Page')
   .map(([id]) => id);
 
 function makeRunDir(name: string): string {
@@ -130,10 +130,10 @@ const startedActivity = (phase_id: string) => ({
 // ── 1. The stepper mapping ──────────────────────────────────────────────────
 
 describe('Item 19 — stepper: elected branches get steps with real states', () => {
-  it('the manifest mapping is total: 20 branch ids + 2 shared ids', () => {
-    expect(SALES_IDS.length).toBe(6);
-    expect(CHECKOUT_IDS.length).toBe(6);
-    expect(VSL_IDS.length).toBe(8);
+  it('the manifest mapping is total: 13 branch ids + 2 shared ids', () => {
+    expect(SALES_IDS.length).toBe(4);
+    expect(CHECKOUT_IDS.length).toBe(3);
+    expect(VSL_IDS.length).toBe(6);
   });
 
   it('sales/checkout elected: both steps appear, not_started, honest totals', () => {
@@ -141,19 +141,20 @@ describe('Item 19 — stepper: elected branches get steps with real states', () 
       electedBranches: { salesCheckout: true, vsl: false },
     });
     expect(r.phases.map((p) => p.label)).toEqual([
-      'Intake', 'Script', 'Prompts', 'Images',
+      'Getting Started', 'Research', 'Script', 'Design',
+      'Your Style Pick', 'Images',
       'Sales Page', 'Checkout',
-      'Teleprompter', 'QC', 'Delivered',
+      'Speaker Kit', 'Audio and Video', 'Quality Check', 'Delivery',
     ]);
     const sales = r.phases.find((p) => p.label === 'Sales Page')!;
     const checkout = r.phases.find((p) => p.label === 'Checkout')!;
     expect(sales.status).toBe('not_started');
-    expect(sales.totalIds).toBe(6);
+    expect(sales.totalIds).toBe(4);
     expect(checkout.status).toBe('not_started');
-    expect(checkout.totalIds).toBe(6);
+    expect(checkout.totalIds).toBe(3);
     // The shared wrap-up ids join their main labels for an elected run.
-    expect(r.phases.find((p) => p.label === 'QC')!.totalIds).toBe(3);
-    expect(r.phases.find((p) => p.label === 'Delivered')!.totalIds).toBe(4);
+    expect(r.phases.find((p) => p.label === 'Quality Check')!.totalIds).toBe(4);
+    expect(r.phases.find((p) => p.label === 'Delivery')!.totalIds).toBe(7);
   });
 
   it('VSL elected only: VSL step appears, no sales/checkout steps', () => {
@@ -161,10 +162,10 @@ describe('Item 19 — stepper: elected branches get steps with real states', () 
       electedBranches: { salesCheckout: false, vsl: true },
     });
     const labels = r.phases.map((p) => p.label);
-    expect(labels).toContain('VSL Page');
+    expect(labels).toContain('Video Sales Page');
     expect(labels).not.toContain('Sales Page');
     expect(labels).not.toContain('Checkout');
-    expect(r.phases.find((p) => p.label === 'VSL Page')!.totalIds).toBe(8);
+    expect(r.phases.find((p) => p.label === 'Video Sales Page')!.totalIds).toBe(6);
   });
 
   it('partial branch progress is in_progress with honest units; all done + receipts is done', () => {
@@ -176,7 +177,7 @@ describe('Item 19 — stepper: elected branches get steps with real states', () 
     const sales = partial.phases.find((p) => p.label === 'Sales Page')!;
     expect(sales.status).toBe('in_progress');
     expect(sales.doneIds).toBe(3);
-    expect(sales.totalIds).toBe(6);
+    expect(sales.totalIds).toBe(4);
 
     const full = computePhaseProgress(
       SALES_IDS.map(doneActivity),
@@ -196,29 +197,30 @@ describe('Item 19 — stepper: elected branches get steps with real states', () 
     });
     const gatedSales = gated.phases.find((p) => p.label === 'Sales Page')!;
     expect(gatedSales.status).toBe('in_progress');
-    expect(gatedSales.doneIds).toBe(5);
+    expect(gatedSales.doneIds).toBe(3);
   });
 
   it('a started-but-unfinished branch step is in_progress, never a default success', () => {
-    const r = computePhaseProgress([startedActivity('P-U-DESIGN-VSL')], [], {
+    const r = computePhaseProgress([startedActivity('P-U-VSL-COPY')], [], {
       electedBranches: { salesCheckout: false, vsl: true },
     });
-    const vsl = r.phases.find((p) => p.label === 'VSL Page')!;
+    const vsl = r.phases.find((p) => p.label === 'Video Sales Page')!;
     expect(vsl.status).toBe('in_progress');
     expect(vsl.doneIds).toBe(0);
   });
 });
 
 describe('Item 19 — stepper: declined branches show no phantom steps', () => {
-  it('both declined: exactly the 7 main steps, main totals unchanged', () => {
+  it('both declined: exactly the 10 main steps, main totals unchanged', () => {
     const r = computePhaseProgress([], [], {
       electedBranches: { salesCheckout: false, vsl: false },
     });
     expect(r.phases.map((p) => p.label)).toEqual([
-      'Intake', 'Script', 'Prompts', 'Images', 'Teleprompter', 'QC', 'Delivered',
+      'Getting Started', 'Research', 'Script', 'Design', 'Your Style Pick',
+      'Images', 'Speaker Kit', 'Audio and Video', 'Quality Check', 'Delivery',
     ]);
-    expect(r.phases.find((p) => p.label === 'QC')!.totalIds).toBe(2);
-    expect(r.phases.find((p) => p.label === 'Delivered')!.totalIds).toBe(3);
+    expect(r.phases.find((p) => p.label === 'Quality Check')!.totalIds).toBe(3);
+    expect(r.phases.find((p) => p.label === 'Delivery')!.totalIds).toBe(6);
   });
 
   it('both declined: stray P-U activity creates no step and is NOT unmapped', () => {
@@ -227,26 +229,26 @@ describe('Item 19 — stepper: declined branches show no phantom steps', () => {
       [],
       { electedBranches: { salesCheckout: false, vsl: false } },
     );
-    expect(r.phases.length).toBe(7);
+    expect(r.phases.length).toBe(10);
     // Mapped-but-not-applicable is not "unknown": the ids stay out of the
     // unmapped bucket, and no label waits on them.
     expect(r.unmapped).toEqual([]);
     expect(r.phases.every((p) => p.status === 'not_started')).toBe(true);
   });
 
-  it('unknown elections and no evidence: exactly 7 steps (no invented branches)', () => {
+  it('unknown elections and no evidence: exactly 10 steps (no invented branches)', () => {
     const r = computePhaseProgress([doneActivity('P4-COPY')], []);
-    expect(r.phases.length).toBe(7);
+    expect(r.phases.length).toBe(10);
   });
 
   it('unknown elections with branch evidence: the evidenced branch appears', () => {
     const r = computePhaseProgress([startedActivity('P-U-VSL-COPY')], []);
     const labels = r.phases.map((p) => p.label);
-    expect(labels).toContain('VSL Page');
+    expect(labels).toContain('Video Sales Page');
     expect(labels).not.toContain('Sales Page');
     expect(r.unmapped).toEqual([]);
-    // Shared wrap-up joins QC on the same evidence.
-    expect(r.phases.find((p) => p.label === 'QC')!.totalIds).toBe(3);
+    // Shared wrap-up joins Quality Check on the same evidence.
+    expect(r.phases.find((p) => p.label === 'Quality Check')!.totalIds).toBe(4);
   });
 
   it('elapsed seconds attribute P-U rows to their branch step only when active', () => {
@@ -469,11 +471,11 @@ describe('Item 19 — routes surface ABANDONED and the park record', () => {
     const labels = body.phases.map((p) => p.label);
     expect(labels).toContain('Sales Page');
     expect(labels).toContain('Checkout');
-    expect(labels).not.toContain('VSL Page');
+    expect(labels).not.toContain('Video Sales Page');
     const sales = body.phases.find((p) => p.label === 'Sales Page')!;
     expect(sales.status).toBe('in_progress');
     expect(sales.units_completed).toBe(1);
-    expect(sales.units_total).toBe(6);
+    expect(sales.units_total).toBe(4);
     expect(sales.receipts).toEqual([{ phase_id: 'P-U-SALES-COPY', verified: true }]);
     expect(body.unmapped).toEqual([]);
   });
