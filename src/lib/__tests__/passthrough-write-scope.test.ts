@@ -566,23 +566,44 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
   // list cannot rot into a blanket exemption. Adding a route to this
   // list is a reviewable security decision, never a convenience.
   const DOCUMENTED_UNWIRED_CONSOLE_ROUTES: string[] = [
-    // BU-17 interview helper (POST only): /api/interview/assist offers three
-    // example answers to tap. It authenticates through resolveInterviewTenant +
-    // refuseUnverifiedTenant (the verified tenant identity from the session
-    // cookie) and NEVER reads an Authorization bearer, so bearer-listing it
-    // would 401 the owner's own browser and misstate the auth. No browser call
-    // site for this path exists in this tree — nothing under src/ (outside the
-    // API tree) or public/ references it, and the interview client still posts
-    // /api/interview/turn and /api/interview/state — so the interface category
-    // cannot be evidenced from source. Recorded here as the documented
-    // residual; wiring it to a component later moves it to interface-called.
-    '/api/interview/assist',
-    // BU-13 interview skip (POST only): /api/interview/skip replaced the
-    // deleted POST /api/interview/state. Same tenant-cookie auth
-    // (resolveInterviewTenant + refuseUnverifiedTenant) and no bearer read.
-    // No browser call site for this path exists in this tree either, so the
-    // interface category cannot be evidenced; documented residual for now.
-    '/api/interview/skip',
+    // BU-14 interview gate page (POST only): /api/interview/assist and
+    // /api/interview/skip were documented residuals here until this unit. BU-14
+    // wired both to QuestionCard.tsx (skipQuestion and the "I am not sure"
+    // helper POST them with the session cookie + tenant resolution, never a
+    // bearer), so the interface scanner now evidences both and their old
+    // residual entries are removed. This unit instead removed the last
+    // interface call sites of the two routes below.
+    //
+    // BU-14 (WF-009 et al) interview turn (POST only): /api/interview/turn
+    // relays one owner message to the client's own OpenClaw agent. It
+    // authenticates through resolveInterviewTenant + refuseUnverifiedTenant
+    // (the verified tenant identity from the session cookie) and NEVER reads
+    // an Authorization bearer, so bearer-listing it would 401 the owner's own
+    // browser and misstate the auth. BU-14 removed every interface send (the
+    // page is driven by GET /api/interview/next; no text is ever sent in the
+    // owner's name), so no browser call site for this path remains in this
+    // tree outside the API tree — the interface category cannot be evidenced
+    // from source, and its designed caller is the operator's browser console,
+    // whose UI is not wired to it yet. Documented residual.
+    '/api/interview/turn',
+    // BU-05/BU-14 prior-completion attestation (POST only): POST
+    // /api/interview/prior-completion records that the interview was already
+    // done. Verified per handler in
+    // src/app/api/interview/prior-completion/route.ts: resolved tenant +
+    // refuseUnverifiedTenant; the machine principal is explicitly REFUSED
+    // (subject === 'operator:api' → 403 owner_session_required) together with
+    // any request lacking the signed CSRF cookie, a same-origin check
+    // follows, and the declaration is gated on kind === 'self' plus a
+    // non-operator:api operator: subject (→ 403 operator_required). It is
+    // therefore NOT a bearer route — listing it in
+    // BEARER_REQUIRED_WRITE_ROUTES would 403 its only legitimate caller and
+    // misstate the auth. BU-14 removed the owner-facing "I have already
+    // completed the interview" button and its fetch from
+    // src/app/interview/InterviewClient.tsx, so no interface call site
+    // remains in this tree and the interface category cannot be evidenced;
+    // its designed caller is the operator's browser console, whose UI is not
+    // wired to it yet. Documented residual.
+    '/api/interview/prior-completion',
     '/api/council/sessions/{id}', // DELETE (tombstone delete, CWE-050)
     '/api/council/sessions/{id}/archive',
     '/api/council/sessions/{id}/cancel',

@@ -184,24 +184,25 @@ test('minted operator invitation opens its fragment and loads own authenticated 
   expect((await context.cookies()).some(cookie => cookie.name === 'mc_tenant_session' && cookie.httpOnly)).toBeTruthy();
   // The incomplete-interview banner is expected; enrollment/state errors are not.
   await expect(page.getByRole('alert').filter({ hasText: /invitation.*(?:expired|already used)|sign[ -]in|progress.*unavailable/i })).toHaveCount(0);
-  await expect(page.getByRole('heading', { name: 'Let’s tailor your company' })).toBeVisible();
-  const begin = page.getByRole('button', { name: 'Begin tailoring', exact: true });
-  await expect(begin).toBeDisabled();
+  // BU-14 (06-QUESTION-SET-FINAL.md Part 1): one welcome heading, one "Start"
+  // button, no consent radios. The heading is the gate-driven welcome copy.
+  await expect(page.getByRole('heading', { name: "Let's set up your company" })).toBeVisible();
+  const start = page.getByRole('button', { name: 'Start', exact: true });
+  await expect(start).toBeEnabled();
+  await expect(page.getByRole('radio')).toHaveCount(0);
   // A fresh browser gets the real first-run walkthrough. Dismiss it as a user
-  // would before choosing consent; do not force clicks through its modal.
+  // would; do not force clicks through its modal.
   const closeWalkthrough = page.getByRole('button', { name: 'Close walkthrough', exact: true });
   await expect(closeWalkthrough).toBeVisible();
   await closeWalkthrough.click();
   await expect(closeWalkthrough).toBeHidden();
-  await page.getByRole('radio', { name: /Yes — tailor it now/ }).click();
-  await expect(begin).toBeEnabled();
   expect(redemptions).toBe(1);
   const resumed = page.waitForResponse(response => response.url().endsWith('/api/interview/state') && response.status() === 200);
   await page.reload({ waitUntil: 'domcontentloaded' });
   const resumedState = await (await resumed).json();
   expect(resumedState.session.interviewSessionId).toBe(ownState.session.interviewSessionId);
   await expect(page).toHaveURL(`${BASE_URL}/interview`);
-  await expect(page.getByRole('heading', { name: 'Let’s tailor your company' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: "Let's set up your company" })).toBeVisible();
   expect(redemptions).toBe(1); // Reload must not re-POST the ticket, whether or not a second open would be accepted.
   const invitationUrl = new URL(invitation.url);
   // Sender emits canonical ?enroll=; legacy issuers emit #enroll= — accept either.
@@ -209,7 +210,7 @@ test('minted operator invitation opens its fragment and loads own authenticated 
   expect((await page.request.post('/api/auth/interview-session', { data: { ticket } })).status()).toBe(200);
   await page.goto(invitation.url);
   await expect(page).toHaveURL(`${BASE_URL}/interview`);
-  await expect(page.getByRole('heading', { name: 'Let’s tailor your company' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: "Let's set up your company" })).toBeVisible();
   expect(redemptions).toBe(1); // APIRequestContext calls are outside page events; reopening the URL must not redeem again from the browser.
   expect(JSON.parse(fs.readFileSync(BUILD_STATE_PATH, 'utf8')).interviewComplete).toBe(false);
   writeBuildState(false);
@@ -248,7 +249,7 @@ test('temporary state outage retains the unused invitation for an in-page retry'
     await closeWalkthrough.click();
     outage = false;
     await page.getByRole('button', { name: 'Check sign-in and retry', exact: true }).click();
-    await expect(page.getByRole('heading', { name: 'Let’s tailor your company', exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { name: "Let's set up your company", exact: true })).toBeVisible();
     await expect(page).toHaveURL(`${BASE_URL}/interview`);
     expect(redemptions).toBe(1);
     expect((await context.cookies()).some(cookie => cookie.name === 'mc_tenant_session' && cookie.httpOnly)).toBe(true);
@@ -273,9 +274,8 @@ test('browser restores an unsent draft and resumes after a real submitted answer
     await expect(closeWalkthrough).toBeVisible();
     await closeWalkthrough.click();
     const begin = async () => {
-      await page.getByRole('radio', { name: /Yes — tailor it now/ }).click();
-      await page.getByRole('button', { name: 'Begin tailoring', exact: true }).click();
-      await expect(page.getByRole('textbox', { name: 'What is your company name?', exact: true })).toBeVisible();
+      await page.getByRole('button', { name: 'Start', exact: true }).click();
+      await expect(page.getByRole('textbox', { name: 'What name should we put on everything we build for you?', exact: true })).toBeVisible();
     };
     await begin();
     await page.getByRole('textbox').fill(draftCompany);
@@ -288,11 +288,11 @@ test('browser restores an unsent draft and resumes after a real submitted answer
     const receipt = await saved;
     expect(receipt.status(), await receipt.text()).toBe(200);
     expect((await receipt.json()).appended).toBe(true);
-    await expect(page.getByRole('heading', { name: 'What industry are you in?', exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'What kind of business is it?', exact: true })).toBeVisible();
     await page.getByRole('textbox').fill('Fixture unsent industry');
     await page.reload();
-    await page.getByRole('button', { name: 'Continue where I left off', exact: true }).click();
-    await expect(page.getByRole('heading', { name: 'What industry are you in?', exact: true })).toBeVisible();
+    await page.getByRole('button', { name: 'Continue', exact: true }).click();
+    await expect(page.getByRole('heading', { name: 'What kind of business is it?', exact: true })).toBeVisible();
     await expect(page.getByRole('textbox')).toHaveValue('Fixture unsent industry');
     const progress = await (await page.request.get('/api/interview/state')).json();
     expect(progress.structured.answeredIds).toContain('company_name');

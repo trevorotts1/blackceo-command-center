@@ -1,242 +1,93 @@
 'use client';
 
 /**
- * InterviewClient — the orchestrator for the /interview surface (Wave 5 · P4,
- * continuity overhaul v4.63).
+ * InterviewClient — the orchestrator for the /interview surface.
  *
- * It drives the seven interview components as ONE coherent flow, entirely from
- * server truth (GET /api/interview/state) and the canonical write routes. It
- * never writes a canonical file itself; every persistence path goes through an
- * API route (turn / answer / decision / complete), which press the exact same
- * scripts the Telegram interview agent presses.
+ * The page is driven by the step gate. Three screens, nothing else:
  *
- * ── The phases it orchestrates ────────────────────────────────────────────────
- *   0  CONSENT       — three options, NONE auto-selected; Begin stays disabled
- *                      until an explicit choice (never auto-select). Shown ONLY
- *                      when nothing has ever been answered.
- *   RESUME           — whenever ANY answer exists (a structured card, a
- *                      conversational turn, or a Telegram-recorded block), the
- *                      owner lands on <WelcomeBack> and resumes EXACTLY where
- *                      they left off:
- *                        • structured set incomplete → the FIRST unanswered
- *                          card (structured.nextIndex, computed server-side
- *                          from the canonical transcript);
- *                        • structured set complete → the free-form conversation.
- *                      Resume is the only forward path — no "start over".
- *   1-5 Q&A          — structured cards one at a time (identity → branding →
- *                      operations), each POSTing /api/interview/answer with its
- *                      question number + phase so progress is stamped per
- *                      answer. Questions already answered are SKIPPED (never
- *                      re-asked); known facts are prefilled as confirm-or-
- *                      correct. Then the conversational depth over
- *                      /api/interview/turn, with pending-reply recovery polling.
- *   5.5 DEPARTMENTS  — <DepartmentBoard>; coverage gate (build gates #3 ∧ #8).
- *                      AI Workforce standard-first (PHASE 6 item 6): on a
- *                      STANDARD_READY box (standardPrebuild.status === "done",
- *                      interview incomplete — read from /api/interview/gate-status)
- *                      the board runs in its THIRD state: the foundation is
- *                      already built, so each department is built-KEEP (default,
- *                      implicit — no record needed) / REMOVE (confirmed decline
- *                      with loss warning) / TUNE (content personalization), and
- *                      the surrounding copy switches to edit-mode framing. The
- *                      review screen receives `standardReady` from here: its
- *                      gated trigger reads "Apply my customizations" instead of
- *                      "Build my company" — armed by the same triple gate with
- *                      gate #3 relaxed to declines + adds only.
- *   6  REVIEW        — <ReviewScreen>: triple-gated "Build my company" (or
- *                      "Apply my customizations" on a STANDARD_READY box).
+ *   welcome   → one "Start" button (wording from the question-set document)
+ *   question  → ONE question at a time, straight from GET /api/interview/next.
+ *               The page never decides order, never re-asks, never counts on
+ *               its own; the department board is simply the question whose
+ *               `kind` is 'board'.
+ *   review    → <ReviewScreen>, after one celebration when the last required
+ *               question is answered.
  *
- * ── Continuity guarantees (new in v4.63) ─────────────────────────────────────
- *   • The structured position is SERVER-derived (transcript → answeredIds →
- *     nextIndex): a refresh, a new browser, or a hop from Telegram all land on
- *     the exact next unanswered question with every prior answer intact.
- *   • The gateway conversation session id is persisted per interview
- *     (localStorage, keyed by the stable interviewSessionId), so a reload
- *     continues the SAME interviewer session instead of minting a fresh one.
- *   • A turn whose reply outlives the request window is no longer a dead-end:
- *     the client polls GET /api/interview/turn until the interviewer's reply
- *     lands.
+ * Continuity: on load, if the gate already has accepted answers, the owner lands
+ * on <WelcomeBack> ("Welcome back. You are N of M done. Next: …"), one button.
  *
- * ── Clean client bundle ───────────────────────────────────────────────────────
- * Imports NOTHING from the Node-only interview seam. The structured set is the
- * shared client-safe base questions + the same vendored branding JSON the Node
- * module loads — one definition per question, zero drift.
+ * Nothing here ever sends words in the owner's name. "I am not sure" asks the
+ * helper for ideas; the owner picks or writes, and nothing is saved until the
+ * owner presses Continue.
+ *
+ * Every persistence path goes through an API route (next / answer / skip /
+ * complete) — the same ones the Telegram agent uses. This file never writes a
+ * file or touches the database.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { recoverInterviewAccess, verifiedProgress, resumePhase, interviewDraftScope, INTERVIEW_SIGN_IN_HELP, INTERVIEW_RETRY_HELP, fetchWithCsrfHeal } from '@/lib/interview/browser-recovery';
-import { useInterviewDraft } from '@/components/interview/useInterviewDraft';
+import {
+  recoverInterviewAccess,
+  interviewDraftScope,
+  INTERVIEW_SIGN_IN_HELP,
+  INTERVIEW_RETRY_HELP,
+} from '@/lib/interview/browser-recovery';
 import { AnimatePresence, MotionConfig, motion } from 'framer-motion';
-import { ArrowRight, Info, Lock, Sparkles } from 'lucide-react';
+import { ArrowRight, Info, Sparkles } from 'lucide-react';
 
 import { iv, ivcx, ivScreenVariants } from '@/components/interview/interview-theme';
-import {
-  IDENTITY_QUESTIONS,
-  OPERATIONS_QUESTIONS,
-  type InterviewQuestion,
-} from '@/lib/interview/base-questions';
-import {
-  mergeSkippedIds,
-  nextStructuredIndex,
-  personalizePrompt,
-} from '@/lib/interview/structured-progress';
-import brandingRaw from '@/lib/interview-questions.branding-questions.json';
-
-import ProgressRail from '@/components/interview/ProgressRail';
-import QuestionCard from '@/components/interview/QuestionCard';
-import ConversationPane from '@/components/interview/ConversationPane';
-import DepartmentBoard from '@/components/interview/DepartmentBoard';
+import QuestionCard, {
+  isDone,
+  type AnswerResponse,
+  type GateNext,
+  type NextQuestion,
+} from '@/components/interview/QuestionCard';
 import ReviewScreen from '@/components/interview/ReviewScreen';
 import MilestoneScreen from '@/components/interview/MilestoneScreen';
 import WelcomeBack from '@/components/interview/WelcomeBack';
 
 import { useCompanyBrand } from '@/hooks/useCompanyBrand';
 import { useLogoUrl } from '@/hooks/useLogoUrl';
-import { skipInterviewForNow } from '@/components/interview/gate-actions';
+import { canSkipInterview, skipInterviewForNow } from '@/components/interview/gate-actions';
+
+import registryRaw from '@/lib/interview-questions.v2.json';
 
 /* -------------------------------------------------------------------------- */
-/* structured question set (shared base + vendored branding JSON)              */
+/* registry wording, used only to NAME a set-aside question (never a number)   */
 /* -------------------------------------------------------------------------- */
 
-/** identity → branding → operations: the full ordered structured set. Mirrors
- *  INTERVIEW_QUESTIONS in src/lib/interview-questions.ts exactly — identity and
- *  operations come from the SAME shared module; branding from the SAME JSON. */
-const STRUCTURED_QUESTIONS: InterviewQuestion[] = [
-  ...IDENTITY_QUESTIONS,
-  ...((brandingRaw as { questions: unknown }).questions as InterviewQuestion[]),
-  ...OPERATIONS_QUESTIONS,
-];
-
-/** Jargon-free milestone name for a completed structured section. */
-const SECTION_MILESTONE: Record<InterviewQuestion['section'], string> = {
-  identity: 'Your company',
-  branding: 'Your brand',
-  operations: 'How you run',
-};
+const REGISTRY_PROMPTS: Record<string, string> = Object.fromEntries(
+  ((registryRaw as { questions?: Array<{ id: string; prompt: string }> }).questions ?? []).map(
+    (q) => [q.id, q.prompt],
+  ),
+);
 
 /* -------------------------------------------------------------------------- */
-/* JSON shapes (mirror the API routes — kept local so no Node import leaks in) */
+/* JSON shapes (mirror the API routes — no Node import leaks in)              */
 /* -------------------------------------------------------------------------- */
 
-interface GateFlags {
-  genuineTranscriptReady: boolean;
-  decisionCoverageComplete: boolean;
-  noUnprovenancedDeclines: boolean;
-}
-
-interface InterviewStateResponse {
-  ok: boolean;
+/** The little bit of `/api/interview/state` this page still needs. */
+interface IdentityResponse {
   companyId?: string;
   installationId?: string;
   buildId?: string | null;
-  interviewComplete: boolean;
-  priorCompletionDeclared?: boolean;
-  buildCompleted: boolean;
-  qcStatus: string;
+  interviewComplete?: boolean;
+  buildCompleted?: boolean;
   session?: { interviewSessionId: string | null; gatewaySessionId?: string | null };
-  structured?: {
-    total: number;
-    answeredIds: string[];
-    remainingIds: string[];
-    nextIndex: number | null;
-    complete: boolean;
-    /** ILJ-004 (additive): server-side skip marks for this session. */
-    skippedIds?: string[];
-  };
-  knownContext?: Record<string, { value: string; source: string }>;
-  progress: {
-    lastQuestionNumber: number | null;
-    phasesComplete: string[];
-    percent: number;
-  };
-  resume: {
-    status: string | null;
-    nextQuestionNumber: number | null;
-    skippedQuestions: number[];
-    totalQuestionsAnswered: number | null;
-    handoffExists: boolean;
-  };
-  transcript?: {
-    exists: boolean;
-    qBlockCount: number;
-    sizeBytes: number;
-    hasSyntheticHeader: boolean;
-    genuine: boolean;
-  };
-  decisionCoverage: {
-    complete: boolean;
-    expected: string[];
-    covered: string[];
-    missing: string[];
-    declined: string[];
-    rejections: string[];
-  };
-  flags: GateFlags;
+  gate?: { skippedOpen?: unknown } | null;
 }
 
-interface TurnResponse {
-  sessionId?: string;
-  reply?: string | null;
-  pending?: boolean;
-  agentCount?: number;
-  error?: string;
-  message?: string;
-}
-
-/** AI Workforce standard-first (PHASE 6 item 6): the shape of
- *  GET /api/interview/gate-status. `standardReady` is the prebuilt-foundation
- *  signal (build-state standardPrebuild.status === "done") — it flips the
- *  decision board into its THIRD state (built-keep / remove / tune) and the
- *  consent + trigger copy into edit-mode framing. It NEVER unlocks anything:
- *  the shell lock still keys on interviewComplete alone. */
 interface GateStatusResponse {
   interviewComplete?: boolean;
   buildCompleted?: boolean;
   standardReady?: boolean;
 }
 
-/* -------------------------------------------------------------------------- */
-/* local UI state                                                              */
-/* -------------------------------------------------------------------------- */
+type Stage = 'welcome' | 'welcome-back' | 'question' | 'celebrate' | 'review';
 
-/** The three welcome/consent options. Null = nothing selected (the default). */
-type Consent = 'full' | 'quick' | 'learn' | null;
-
-/** The orchestrated phases (0-6, with the department board as 5.5). */
-type Stage = 'consent' | 'welcome-back' | 'qa' | 'milestone' | 'departments' | 'review';
-
-/** Within the Q&A stage: structured cards first, then free-form conversation. */
-type QaMode = 'structured' | 'conversation';
-
-interface PendingMilestone {
-  phase: string;
-  completed?: number;
-  total?: number;
-  unit?: string;
-}
-
-const ALL_GATES_FALSE: GateFlags = {
-  genuineTranscriptReady: false,
-  decisionCoverageComplete: false,
-  noUnprovenancedDeclines: false,
-};
-
-/** How long the pending-reply recovery keeps polling before going quiet. */
-const RECOVERY_WINDOW_MS = 90_000;
-const RECOVERY_POLL_MS = 3_500;
-
-/** WF-012: a soft progress-read failure re-reads this often, this many times. */
 const SOFT_READ_RETRY_MS = 5_000;
 const SOFT_READ_MAX_RETRIES = 6;
-
-/** Session-storage key for structured questions the owner skipped this device. */
-const SKIPPED_KEY = 'iv-skipped-structured';
-
-/** localStorage key for the persisted gateway conversation session. */
-function gatewaySessionKey(interviewSessionId: string | null): string {
-  return `iv-gw-session:${interviewSessionId ?? 'unresolved'}`;
-}
 
 /* -------------------------------------------------------------------------- */
 /* component                                                                   */
@@ -245,241 +96,105 @@ function gatewaySessionKey(interviewSessionId: string | null): string {
 export default function InterviewClient() {
   const router = useRouter();
   const enrollmentRef = useRef<Promise<string | null> | null>(null);
-  // Keep an unused invitation only in memory so a temporary outage can be retried.
   const pendingEnrollmentRef = useRef<string | null>(null);
 
-  // P3-2 live-rebrand hooks — the surface re-themes the instant branding answers
-  // land (BrandTheme rewrites the --brand-* vars the iv-* tokens point at).
   const logoUrl = useLogoUrl();
   const brand = useCompanyBrand();
 
-  // Phase machine.
-  const [stage, setStage] = useState<Stage>('consent');
-  const [consent, setConsent] = useState<Consent>(null);
-  const [qaMode, setQaMode] = useState<QaMode>('structured');
-  const [structIndex, setStructIndex] = useState(0);
+  const [stage, setStage] = useState<Stage>('welcome');
+  /** The gate's current position. Null while booting or after a failed read. */
+  const [next, setNext] = useState<GateNext | null>(null);
+  /** Identity used for draft scoping (never for authority). */
+  const [identity, setIdentity] = useState<IdentityResponse | null>(null);
+  /** Skipped questions the gate still holds open, by their own wording. */
+  const [skipped, setSkipped] = useState<Array<{ id: string; prompt: string }>>([]);
 
-  // Server truth (progress rail + resume + gate flags + structured position).
-  const [state, setState] = useState<InterviewStateResponse | null>(null);
   const [booting, setBooting] = useState(true);
-  // WF-012: two DIFFERENT failures, never one. accessError is a real refusal to
-  // read (401/403, or a failed enrollment exchange) — the full-screen "Check
-  // your access" view is correct there. softError is every other progress-read
-  // failure: a blip, never an ejection. The screen the owner is on stays put,
-  // a reconnecting line appears above it, and the read is retried.
   const [accessError, setAccessError] = useState<string | null>(null);
   const [softError, setSoftError] = useState(false);
   const [softAttempts, setSoftAttempts] = useState(0);
-  const [declaringCompletion, setDeclaringCompletion] = useState(false);
-  const [declarationError, setDeclarationError] = useState<string | null>(null);
-
-  // Structured answers recorded THIS session (merged with the server's set so a
-  // just-answered card is skipped even before the next /state read lands).
-  const [locallyAnswered, setLocallyAnswered] = useState<Set<string>>(new Set());
-  // Structured questions the owner skipped (persisted per device; optional Qs only).
-  const [skippedIds, setSkippedIds] = useState<Set<string>>(new Set());
-  // Saved-ticker: when the last successful answer save landed.
-  const [lastSavedAt, setLastSavedAt] = useState<number | null>(null);
-
-  // Conversation (free-form Q&A depth).
-  const [currentQuestion, setCurrentQuestion] = useState('');
-  const [currentReaction, setCurrentReaction] = useState('');
-  const draftScope = interviewDraftScope(state);
-  const [input, setInput, , draftAvailable] = useInterviewDraft(draftScope, 'conversation');
-  const [sending, setSending] = useState(false);
-  const [awaitingReply, setAwaitingReply] = useState(false);
-  const [sessionId, setSessionIdState] = useState<string | null>(null);
-
-  // Department board completeness (gates #3 ∧ #8), relayed via onCoverageChange.
-  const [boardComplete, setBoardComplete] = useState(false);
-
-  // AI Workforce standard-first (PHASE 6 item 6): STANDARD_READY flag from
-  // /api/interview/gate-status — true when the box is standard-prebuilt (the
-  // canonical foundation exists) while the interview is still incomplete.
-  // Drives the decision board's third state (built-keep / remove / tune) and
-  // the edit-mode copy. Defaults false = legacy build-from-scratch framing.
   const [standardReady, setStandardReady] = useState(false);
+  const [showSkip, setShowSkip] = useState(false);
+  const [skipError, setSkipError] = useState<string | null>(null);
 
-  // Milestone interstitial (words only).
-  const [milestone, setMilestone] = useState<PendingMilestone | null>(null);
-  const afterMilestone = useRef<() => void>(() => {});
-
-  // One-shot guards + recovery-poll bookkeeping.
   const routedRef = useRef(false);
-  const scrollRef = useRef<HTMLDivElement | null>(null);
-  const recoveryRef = useRef<{ token: number }>({ token: 0 });
-  // ILJ-004: latest-value mirrors so skip callbacks (stable identities) never
-  // read a stale closure over answeredIds / interviewSessionId.
-  const answeredIdsRef = useRef<Set<string>>(new Set());
-  const interviewSessionIdRef = useRef<string | null>(null);
 
-  const flags = state?.flags ?? ALL_GATES_FALSE;
-  const transcriptReady = flags.genuineTranscriptReady;
-  const interviewSessionId = state?.session?.interviewSessionId ?? null;
-  const knownContext = state?.knownContext ?? {};
-  const companyName = knownContext.company_name?.value ?? null;
+  const draftScope = interviewDraftScope(identity);
+  const sessionId = identity?.session?.interviewSessionId ?? null;
 
-  /* ---- answered/skipped bookkeeping ---- */
+  /* ---- the gate ---------------------------------------------------------- */
 
-  const answeredIds = useMemo(() => {
-    const ids = new Set(state?.structured?.answeredIds ?? []);
-    locallyAnswered.forEach((id) => ids.add(id));
-    return ids;
-  }, [locallyAnswered, state?.structured?.answeredIds]);
-
-  // ILJ-004: keep the callback-safe mirrors current (effects, not render writes).
-  useEffect(() => {
-    answeredIdsRef.current = answeredIds;
-  }, [answeredIds]);
-  useEffect(() => {
-    interviewSessionIdRef.current = interviewSessionId;
-  }, [interviewSessionId]);
-
-  /** Structured questions skipped AND still unanswered (the circle-back queue). */
-  const skippedQueue = useMemo(
-    () => STRUCTURED_QUESTIONS.filter((q) => skippedIds.has(q.id) && !answeredIds.has(q.id)),
-    [answeredIds, skippedIds],
-  );
-
-  const persistSkipped = useCallback((ids: Set<string>) => {
+  const fetchNext = useCallback(async (): Promise<GateNext | null> => {
     try {
-      sessionStorage.setItem(`${SKIPPED_KEY}:${interviewSessionId || 'unresolved'}`, JSON.stringify(Array.from(ids)));
-    } catch {
-      /* private mode — chips simply don't survive this tab */
-    }
-  }, [interviewSessionId]);
-
-  /**
-   * ILJ-004: fold the server skip set into this device's local set (server
-   * wins the union; answers always clear). sessionStorage stays the same-tab
-   * cache it always was — cross-device survival comes from the server copy.
-   * Never throws; a malformed server set degrades to the local set.
-   */
-  const syncSkipsFromServer = useCallback((serverIds: readonly unknown[]) => {
-    setSkippedIds((prev) => {
-      let merged: string[];
-      try {
-        merged = mergeSkippedIds(STRUCTURED_QUESTIONS, serverIds, Array.from(prev), Array.from(answeredIdsRef.current));
-      } catch {
-        return prev;
-      }
-      try {
-        sessionStorage.setItem(
-          `${SKIPPED_KEY}:${interviewSessionIdRef.current || 'unresolved'}`,
-          JSON.stringify(merged),
-        );
-      } catch {
-        /* private mode — the merge still stands in memory */
-      }
-      return new Set(merged);
-    });
-  }, []);
-
-  /**
-   * ILJ-004: best-effort server write for one skip mark. The local chip is
-   * already set by the caller (optimistic) — a server failure degrades to the
-   * pre-ILJ-004 same-device behavior, never a blocked UI. `skipped: false`
-   * clears a mark the owner circled back to without answering yet.
-   */
-  const postSkipToServer = useCallback(async (questionId: string, skipped: boolean) => {
-    try {
-      const res = await fetchWithCsrfHeal('/api/interview/state', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ questionId, skipped }),
-      });
-      if (!res.ok) return;
-      const data = (await res.json()) as { skippedIds?: unknown };
-      if (Array.isArray(data.skippedIds)) syncSkipsFromServer(data.skippedIds);
-    } catch {
-      /* offline — the local chip still stands */
-    }
-  }, [syncSkipsFromServer]);
-
-  /* ---- gateway-session persistence (continuity across reloads) ---- */
-
-  const setSessionId = useCallback(
-    (id: string | null) => {
-      setSessionIdState(id);
-      try {
-        const key = gatewaySessionKey(interviewSessionId);
-        if (id) localStorage.setItem(key, id);
-        else localStorage.removeItem(key);
-      } catch {
-        /* storage unavailable — the session just won't survive a reload */
-      }
-    },
-    [interviewSessionId],
-  );
-
-  /* ---- state (progress + resume + gate flags) ---- */
-
-  const loadState = useCallback(async (): Promise<InterviewStateResponse | null> => {
-    try {
-      const res = await fetch('/api/interview/state', { cache: 'no-store' });
+      const res = await fetch('/api/interview/next', { cache: 'no-store' });
       if (res.status === 401 || res.status === 403) {
-        // The one class of failure that genuinely keeps the owner out.
         setAccessError(INTERVIEW_SIGN_IN_HELP);
         return null;
       }
-      if (!res.ok) throw new Error(INTERVIEW_RETRY_HELP);
-      const data = (await res.json()) as InterviewStateResponse;
-      if (!verifiedProgress(data) && data.priorCompletionDeclared !== true) throw new Error(INTERVIEW_RETRY_HELP);
+      if (!res.ok) throw new Error('next unavailable');
+      const data = (await res.json()) as GateNext;
       setAccessError(null);
       setSoftError(false);
       setSoftAttempts(0);
-      setState(data);
-      // ILJ-004: fold the server skip set into this device's local set so skips
-      // survive a device switch — the server copy is authoritative for the
-      // UNION (mergeSkippedIds drops answered/unknown ids on both sides).
-      if (Array.isArray(data.structured?.skippedIds)) {
-        const serverIds = data.structured.skippedIds;
-        setSkippedIds((prev) => {
-          let merged: string[];
-          try {
-            merged = mergeSkippedIds(STRUCTURED_QUESTIONS, serverIds, Array.from(prev), Array.from(answeredIdsRef.current));
-          } catch {
-            return prev;
-          }
-          try {
-            sessionStorage.setItem(
-              `${SKIPPED_KEY}:${data?.session?.interviewSessionId || interviewSessionIdRef.current || 'unresolved'}`,
-              JSON.stringify(merged),
-            );
-          } catch {
-            /* private mode — the merge still stands in memory */
-          }
-          return new Set(merged);
-        });
-      }
       return data;
     } catch {
-      // WF-012: a failed progress read is a blip, not an ejection. Never replace
-      // the screen the owner is on — remember the failure, keep the rail as-is,
-      // keep the gates fail-closed, and let the retry effect read again.
+      // A failed read is a blip, not an ejection: keep the screen, say so.
       setSoftError(true);
       setSoftAttempts((n) => n + 1);
       return null;
     }
   }, []);
 
-  // WF-012: re-read after a soft failure — at most SOFT_READ_MAX_RETRIES tries,
-  // SOFT_READ_RETRY_MS apart. When those run out the bar simply stays; the
-  // owner keeps working on the screen they already have.
+  /** Identity + the gate's skipped list + the standard-first signal. */
+  const loadContext = useCallback(async () => {
+    try {
+      const res = await fetch('/api/interview/state', { cache: 'no-store' });
+      if (res.status === 401 || res.status === 403) setAccessError(INTERVIEW_SIGN_IN_HELP);
+      if (res.ok) {
+        const data = (await res.json()) as IdentityResponse;
+        setIdentity(data);
+        // A finished interview never shows the resume nag.
+        if (data.interviewComplete === true || data.buildCompleted === true) {
+          router.replace('/');
+          return;
+        }
+        const open = data.gate?.skippedOpen;
+        if (Array.isArray(open)) {
+          setSkipped(
+            open
+              .filter((id): id is string => typeof id === 'string')
+              .map((id) => ({ id, prompt: REGISTRY_PROMPTS[id] ?? id })),
+          );
+        }
+      }
+    } catch {
+      /* the gate reads decide the screen; context is best-effort */
+    }
+    try {
+      const gsRes = await fetch('/api/interview/gate-status', { cache: 'no-store' });
+      if (gsRes.ok) {
+        const gs = (await gsRes.json()) as GateStatusResponse;
+        setStandardReady(gs.standardReady === true);
+      }
+    } catch {
+      /* legacy framing stays */
+    }
+  }, [router]);
+
+  // A soft failure re-reads a bounded number of times; the bar simply stays.
   useEffect(() => {
     if (!softError || softAttempts > SOFT_READ_MAX_RETRIES) return;
     const timer = setTimeout(() => {
-      void loadState();
+      void fetchNext().then((data) => {
+        if (!data) return;
+        setNext(data);
+        if (isDone(data) && stage !== 'review') setStage('review');
+      });
     }, SOFT_READ_RETRY_MS);
     return () => clearTimeout(timer);
-  }, [softError, softAttempts, loadState]);
+  }, [fetchNext, softAttempts, softError, stage]);
 
-  // Opening another invitation on this same page can be a query or legacy
-  // fragment navigation. Query (?enroll=) is the canonical short link (it
-  // survives Cloudflare Access login); fragment (#enroll=) stays accepted so
-  // tickets issued before the query migration still bootstrap. Reload into
-  // the normal bootstrap so it verifies the current sign-in, just as a fresh
-  // navigation would.
+  // Clicks on another invitation reload into the normal bootstrap.
   useEffect(() => {
     const hasEnrollment = () =>
       new URLSearchParams(window.location.search).has('enroll') ||
@@ -495,34 +210,38 @@ export default function InterviewClient() {
     };
   }, []);
 
-  // On mount: read state once and route to the right screen. ANY prior answer —
-  // structured card, conversational turn, or a Telegram block — routes to
-  // WelcomeBack (never consent, never question 1).
+  // BU-05 (WF-013): "Skip for now" is operator-only. Presentation only — the
+  // action itself refuses a non-operator anyway.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const allowed = await canSkipInterview();
+        if (!cancelled) setShowSkip(allowed);
+      } catch {
+        if (!cancelled) setShowSkip(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // On mount: exchange the invitation, then read the gate ONCE and route.
   useEffect(() => {
     let cancelled = false;
     void (async () => {
       const params = new URLSearchParams(window.location.search);
-      // Canonical short links carry ?enroll= (survives Cloudflare Access
-      // login); legacy links carry #enroll= — accept either, query first.
       const enrollment =
         params.get('enroll') ??
         new URLSearchParams(window.location.hash.slice(1)).get('enroll');
-      let bootstrapPath = window.location.pathname + window.location.search;
       if (enrollment && !enrollmentRef.current) {
         pendingEnrollmentRef.current = enrollment;
-        // Keep ?enroll= until the exchange below issues the session cookie:
-        // POST /api/auth/interview-session sets the HttpOnly cookie, so a
-        // short link works with NO prior tenant cookie. Only after a
-        // successful exchange is the query stripped (expired/invalid links
-        // stay visible so the owner can copy or re-request them).
-        // StrictMode effect replay must await the same exchange, never
-        // load unauthenticated state or submit this ticket a second time.
         enrollmentRef.current = (async () => {
           const error = await recoverInterviewAccess(enrollment);
           if (error) return error;
           const cleanUrl = window.location.pathname;
           window.history.replaceState(null, '', cleanUrl);
-          bootstrapPath = cleanUrl;
           window.location.replace(cleanUrl);
           return null;
         })();
@@ -530,781 +249,240 @@ export default function InterviewClient() {
       if (enrollmentRef.current) {
         const enrollmentError = await enrollmentRef.current;
         if (cancelled) return;
-        if (enrollmentError) { setAccessError(enrollmentError); setBooting(false); }
-        return; // Success hands off to the authenticated, query-free document.
-      }
-      const data = await loadState();
-      // AI Workforce standard-first (PHASE 6 item 6): read the prebuilt-
-      // foundation signal alongside the interview state. gate-status is the
-      // internal endpoint the middleware fallback uses — no auth, pure read.
-      // Failure degrades to legacy framing (standardReady stays false).
-      try {
-        const gsRes = await fetch('/api/interview/gate-status', { cache: 'no-store' });
-        if (gsRes.ok) {
-          const gs = (await gsRes.json()) as GateStatusResponse;
-          if (!cancelled) setStandardReady(gs.standardReady === true);
+        if (enrollmentError) {
+          setAccessError(enrollmentError);
+          setBooting(false);
         }
-      } catch {
-        /* legacy framing stays */
+        return; // success hands off to the authenticated, query-free document
       }
+
+      // Read identity FIRST so a state outage is told plainly: the reservation
+      // refetch in recoverInterviewAccess surfaces a 503 as INTERVIEW_RETRY_HELP.
+      // Without it, a failed /next alone would leave the owner on a silent
+      // welcome screen while their invitation stays unconsumed in the URL.
+      const stateRes = await fetch('/api/interview/state', { cache: 'no-store' }).catch(() => null);
+      if (!stateRes || !stateRes.ok) {
+        if (cancelled) return;
+        void loadContext();
+        setBooting(false);
+        if (routedRef.current) return;
+        const retryHelper = await recoverInterviewAccess(pendingEnrollmentRef.current ?? enrollment ?? '');
+        if (cancelled) return;
+        setAccessError(retryHelper ?? INTERVIEW_RETRY_HELP);
+        return;
+      }
+      let identity = null;
+      try { identity = (await stateRes.json()) as IdentityResponse; } catch { identity = null; }
+      setIdentity(identity);
+      if (identity && (identity.interviewComplete === true || identity.buildCompleted === true)) {
+        router.replace('/');
+        return;
+      }
+      const data = await fetchNext();
+      void loadContext();
       if (cancelled) return;
       setBooting(false);
       if (routedRef.current) return;
       routedRef.current = true;
-
-      // Restore per-device skipped chips, then fold in the server copy (a skip
-      // marked on ANOTHER device arrives here on this fresh load — cross-device
-      // survival land here, not in sessionStorage alone).
-      try {
-        const raw = sessionStorage.getItem(`${SKIPPED_KEY}:${data?.session?.interviewSessionId || 'unresolved'}`);
-        const local: string[] = raw ? (JSON.parse(raw) as string[]) : [];
-        const server: unknown[] = Array.isArray(data?.structured?.skippedIds)
-          ? data.structured.skippedIds
-          : [];
-        // ILJ-004: fold the server skip set into this device's local set so skips
-        // survive a device switch. sessionStorage stays the same-tab cache it
-        // always was; the server copy is authoritative for the UNION.
-        setSkippedIds(new Set(mergeSkippedIds(STRUCTURED_QUESTIONS, server, local)));
-      } catch {
-        /* ignore */
-      }
-
-      if (!data) return;
-
-      // A COMPLETED interview never shows the resume nag, regardless of answer
-      // counts — the owner is done; route straight to the dashboard (already
-      // unlocked by the gate cookie once interviewComplete is true). Checked
-      // FIRST, ahead of the answeredCount branch below.
-      if (data.interviewComplete === true || data.buildCompleted === true || data.priorCompletionDeclared === true) {
-        router.replace('/');
+      if (!data) return; // the welcome screen stays; the reconnecting bar shows
+      setNext(data);
+      if (isDone(data)) {
+        setStage('review');
         return;
       }
-
-      // Restore the gateway conversation session for this interview.
-      try {
-        const stored = data.session?.gatewaySessionId || null;
-        if (stored) setSessionIdState(stored);
-      } catch {
-        /* ignore */
-      }
-
-      const answeredCount =
-        (data.structured?.answeredIds.length ?? 0) ||
-        (data.transcript?.qBlockCount ?? 0) ||
-        (data.resume?.totalQuestionsAnswered ?? 0);
-
-      if (answeredCount > 0) {
-        setStage('welcome-back');
-      }
+      setStage((data.requiredAnswered ?? 0) > 0 ? 'welcome-back' : 'welcome');
     })();
     return () => {
       cancelled = true;
     };
-  }, [loadState, router]);
+  }, [fetchNext, loadContext]);
 
-  /* ---- pending-reply recovery (a slow interviewer is not a dead-end) ---- */
+  /* ---- transitions ------------------------------------------------------- */
 
-  const startRecoveryPoll = useCallback(
-    (sid: string, after: number) => {
-      const token = ++recoveryRef.current.token;
-      const deadline = Date.now() + RECOVERY_WINDOW_MS;
-      setAwaitingReply(true);
+  const refreshNext = useCallback(async () => {
+    const data = await fetchNext();
+    if (!data) return;
+    setNext(data);
+    if (isDone(data) && stage !== 'review') setStage('celebrate');
+  }, [fetchNext, stage]);
 
-      const poll = async () => {
-        if (recoveryRef.current.token !== token) return; // superseded
-        if (Date.now() > deadline) {
-          setAwaitingReply(false);
-          setCurrentReaction(
-            'Your interviewer is taking a moment. Your answers are safe — send another message whenever you like.',
-          );
-          return;
-        }
-        try {
-          const res = await fetch(
-            `/api/interview/turn?sessionId=${encodeURIComponent(sid)}&after=${after}`,
-            { cache: 'no-store' },
-          );
-          if (res.ok) {
-            const data = (await res.json()) as TurnResponse;
-            if (recoveryRef.current.token !== token) return;
-            if (data.reply && data.reply.trim()) {
-              setAwaitingReply(false);
-              setCurrentReaction('');
-              setCurrentQuestion(data.reply);
-              void loadState();
-              return;
-            }
-          }
-        } catch {
-          /* transient — keep polling until the deadline */
-        }
-        setTimeout(() => void poll(), RECOVERY_POLL_MS);
-      };
-      setTimeout(() => void poll(), RECOVERY_POLL_MS);
+  const handleAnswered = useCallback(
+    async (data: AnswerResponse) => {
+      const fresh = data.next ?? (await fetchNext());
+      void loadContext();
+      if (!fresh) return;
+      setNext(fresh);
+      setStage(isDone(fresh) ? 'celebrate' : 'question');
     },
-    [loadState],
+    [fetchNext, loadContext],
   );
 
-  /* ---- a single conversational turn (free-form depth) ---- */
-
-  const sendTurn = useCallback(
-    async (content: string) => {
-      const text = content.trim();
-      if (!text || sending) return;
-      setSending(true);
-      setCurrentReaction('');
-      recoveryRef.current.token++; // cancel any in-flight recovery poll
-      setAwaitingReply(false);
-      try {
-        const res = await fetchWithCsrfHeal('/api/interview/turn', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ content: text, sessionId: sessionId ?? undefined }),
-        });
-
-        if (res.status === 503) {
-          const data = (await res.json().catch(() => ({}))) as TurnResponse;
-          setCurrentReaction(
-            data.message ??
-              'Your interviewer is reconnecting. Your answers are safe — try again in a moment.',
-          );
-          return;
-        }
-
-        const data = (await res.json().catch(() => ({}))) as TurnResponse;
-        if (data.sessionId) setSessionId(data.sessionId);
-
-        if (!res.ok) {
-          setCurrentReaction(
-            data.message ?? 'Something went wrong sending that. Please try again.',
-          );
-          return;
-        }
-
-        setInput((current) => current.trim() === text ? '' : current);
-        if (data.reply && data.reply.trim()) {
-          setCurrentQuestion(data.reply);
-        } else if (data.pending) {
-          setCurrentReaction(
-            'Your interviewer is thinking — their next question will appear here shortly.',
-          );
-          if (data.sessionId) {
-            startRecoveryPoll(data.sessionId, data.agentCount ?? 0);
-          }
-        }
-      } catch {
-        setCurrentReaction('Network hiccup — that message did not send. Please try again.');
-      } finally {
-        setSending(false);
-        // Re-read progress + gate flags after every turn so the continue affordance
-        // arms the instant the transcript gate is satisfied.
-        void loadState();
-      }
+  const handleSkipped = useCallback(
+    async (fresh: GateNext | null) => {
+      const target = fresh ?? (await fetchNext());
+      void loadContext();
+      if (!target) return;
+      setNext(target);
+      setStage(isDone(target) ? 'celebrate' : 'question');
     },
-    [loadState, sending, sessionId, setSessionId, setInput, startRecoveryPoll],
+    [fetchNext, loadContext],
   );
 
-  /* ---- milestone helper (words only) ---- */
+  const start = useCallback(async () => {
+    const data = next && !isDone(next) ? next : await fetchNext();
+    if (!data) return;
+    setNext(data);
+    setStage(isDone(data) ? 'review' : 'question');
+  }, [fetchNext, next]);
 
-  const fireMilestone = useCallback((m: PendingMilestone, next: () => void) => {
-    afterMilestone.current = next;
-    setMilestone(m);
-    setStage('milestone');
-  }, []);
-
-  const dismissMilestone = useCallback(() => {
-    const next = afterMilestone.current;
-    afterMilestone.current = () => {};
-    setMilestone(null);
-    next();
-  }, []);
-
-  /* ---- entering the conversational (free-form) sub-phase ---- */
-
-  const startConversation = useCallback(() => {
-    setQaMode('conversation');
-    setStage('qa');
-    setCurrentQuestion('');
-    // Ground the interviewer with what the cards already captured (memory): the
-    // agent reads the transcript, and this opening keeps the in-session context
-    // aligned with it so nothing is re-asked.
-    const intro = companyName
-      ? `I've shared my company's basics — I'm ${companyName}'s owner, and I'm ready to talk through how my business actually runs day to day. Please don't re-ask anything I've already answered.`
-      : "I've shared my company's basics — I'm ready to talk through how my business actually runs day to day. Please don't re-ask anything I've already answered.";
-    void sendTurn(intro);
-  }, [companyName, sendTurn]);
-
-  /* ---- advancing the structured question set ---- */
-
-  const advanceStructured = useCallback(
-    (fromIndex: number, opts: { skipped?: boolean } = {}) => {
-      const q = STRUCTURED_QUESTIONS[fromIndex];
-
-      let nextAnswered = answeredIds;
-      if (opts.skipped) {
-        // Optimistic local chip (same-tab instant) + best-effort server write
-        // (cross-device survival). The visual flow below uses the same merged
-        // set the render path derives, so the card advances identically even
-        // when the server write is still in flight or offline.
-        setSkippedIds((prev) => {
-          const next = new Set(prev);
-          next.add(q.id);
-          persistSkipped(next);
-          return next;
-        });
-        void postSkipToServer(q.id, true);
-      } else {
-        setLocallyAnswered((prev) => new Set(prev).add(q.id));
-        nextAnswered = new Set(answeredIds).add(q.id);
-        setLastSavedAt(Date.now());
-      }
-      void loadState();
-
-      const skipSet = new Set(skippedIds);
-      if (opts.skipped) skipSet.add(q.id);
-
-      const nextIdx = nextStructuredIndex(
-        STRUCTURED_QUESTIONS,
-        fromIndex + 1,
-        nextAnswered,
-        skipSet,
-      );
-
-      const done = nextIdx === null;
-      const next = done ? undefined : STRUCTURED_QUESTIONS[nextIdx];
-      const atSectionBoundary = done || (next && next.section !== q.section);
-
-      if (!done) setStructIndex(nextIdx);
-      if (!atSectionBoundary) return; // stay on the structured cards
-
-      // Section complete → celebrate (words only), then continue.
-      fireMilestone({ phase: SECTION_MILESTONE[q.section] }, () => {
-        if (done) startConversation();
-        else setStage('qa');
-      });
-    },
-    [
-      answeredIds,
-      fireMilestone,
-      loadState,
-      persistSkipped,
-      postSkipToServer,
-      skippedIds,
-      startConversation,
-    ],
-  );
-
-  /* ---- Q&A → departments (gated on a genuine transcript) ---- */
-
-  const goToDepartments = useCallback(() => {
-    fireMilestone({ phase: 'Your team' }, () => setStage('departments'));
-  }, [fireMilestone]);
-
-  /* ---- departments → review (celebrate with the REAL department counts) ---- */
-
-  const goToReview = useCallback(async () => {
-    const data = await loadState();
-    const cov = data?.decisionCoverage;
-    const completed = cov?.covered.length ?? 0;
-    const total = cov?.expected.length ?? 0;
-    fireMilestone(
-      { phase: 'Your departments', completed, total, unit: 'department' },
-      () => setStage('review'),
-    );
-  }, [fireMilestone, loadState]);
-
-  /* ---- U057 skip-for-now handler ---- */
+  const resume = useCallback(() => {
+    const data = next && !isDone(next) ? next : null;
+    if (data) {
+      setStage('question');
+      return;
+    }
+    void start();
+  }, [next, start]);
 
   const handleSkipForNow = useCallback(async () => {
-    try { await skipInterviewForNow(); } catch { /* non-fatal */ }
+    setSkipError(null);
+    try {
+      await skipInterviewForNow();
+    } catch {
+      // BU-05: a refused skip is said plainly and never navigates.
+      setSkipError('Skipping is not available for this account.');
+      return;
+    }
     router.push('/');
   }, [router]);
 
-  /* ---- consent → begin (never proceed without an explicit choice) ---- */
-
-  const beginInterview = useCallback(() => {
-    if (consent === null) return;
-    setQaMode('structured');
-    setStructIndex(
-      nextStructuredIndex(STRUCTURED_QUESTIONS, 0, answeredIds, skippedIds) ?? 0,
-    );
-    setStage('qa');
-  }, [answeredIds, consent, skippedIds]);
-
-  /* ---- resume (WelcomeBack) — land EXACTLY where the owner left off ---- */
-
-  const resumeInterview = useCallback(() => {
-    const nextIdx = nextStructuredIndex(STRUCTURED_QUESTIONS, 0, answeredIds, skippedIds);
-    const phase = resumePhase(nextIdx, flags);
-    if (phase === 'departments' || phase === 'review') { setStage(phase); return; }
-    if (nextIdx !== null) {
-      // Structured set unfinished → back to the first unanswered card.
-      setQaMode('structured');
-      setStructIndex(nextIdx);
-      setStage('qa');
-      return;
-    }
-    // Structured set done → continue the conversation where it left off.
-    setQaMode('conversation');
-    setStage('qa');
-    setCurrentQuestion('');
-    void sendTurn(
-      companyName
-        ? `I'm back to continue ${companyName}'s interview — let's pick up right where we left off. Please don't re-ask anything I've already answered.`
-        : "I'm back — let's pick up right where we left off. Please don't re-ask anything I've already answered.",
-    );
-  }, [answeredIds, companyName, flags, sendTurn, skippedIds]);
-
-  /** Circle back to a SKIPPED STRUCTURED question — re-opens that exact card. */
-  const circleBackStructured = useCallback((questionId: string) => {
-    const idx = STRUCTURED_QUESTIONS.findIndex((q) => q.id === questionId);
-    if (idx < 0) return;
-    setSkippedIds((prev) => {
-      const next = new Set(prev);
-      next.delete(questionId);
-      persistSkipped(next);
-      return next;
-    });
-    // ILJ-004: clear the server mark too (the owner is about to answer it, and
-    // answering clears it server-side anyway — this just un-skips the queue on
-    // the OTHER device immediately, without waiting for an answer).
-    void postSkipToServer(questionId, false);
-    setQaMode('structured');
-    setStructIndex(idx);
-    setStage('qa');
-  }, [persistSkipped, postSkipToServer]);
-
-  /** Circle back to a numbered CONVERSATIONAL question (agent-owned queue). */
-  const circleBack = useCallback(
-    (questionNumber: number | null) => {
-      setQaMode('conversation');
-      setStage('qa');
-      setCurrentQuestion('');
-      void sendTurn(
-        questionNumber != null
-          ? `I'd like to go back and answer question ${questionNumber} now.`
-          : "I'd like to revisit a question I skipped earlier.",
-      );
-    },
-    [sendTurn],
-  );
-
   const retryAccess = useCallback(async () => {
     const ticket = pendingEnrollmentRef.current;
-    if (!ticket) { window.location.reload(); return; }
+    if (!ticket) {
+      window.location.reload();
+      return;
+    }
     setBooting(true);
     const error = await recoverInterviewAccess(ticket);
-    if (error) { setAccessError(error); setBooting(false); return; }
+    if (error) {
+      setAccessError(error);
+      setBooting(false);
+      return;
+    }
     pendingEnrollmentRef.current = null;
+    // The ticket is now a session: hand off to the authenticated,
+    // query-free document, exactly as a fresh boot does.
     window.location.replace(window.location.pathname);
   }, []);
 
-  const declareCompleted = useCallback(async () => {
-    if (declaringCompletion) return;
-    setDeclaringCompletion(true);
-    setDeclarationError(null);
-    try {
-      const response = await fetchWithCsrfHeal('/api/interview/prior-completion', {
-        method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ confirmed: true }),
-      });
-      const result = await response.json();
-      if (!response.ok || result.priorCompletionDeclared !== true) {
-        throw new Error(response.status === 401 || response.status === 403
-          ? INTERVIEW_SIGN_IN_HELP : 'Your declaration was not saved. Please retry.');
-      }
-      window.location.assign('/');
-    } catch (error) {
-      setDeclarationError(error instanceof Error ? error.message : 'Your declaration was not saved. Please retry.');
-      setDeclaringCompletion(false);
-    }
-  }, [declaringCompletion]);
-
-  /* ---- renders ---- */
+  /* ---- renders ----------------------------------------------------------- */
 
   const brandStyle = brand.primaryColor
     ? ({ ['--iv-accent-strong' as string]: brand.primaryColor } as React.CSSProperties)
     : undefined;
 
-  const answersSaved =
-    state?.transcript?.qBlockCount ??
-    Math.max(answeredIds.size, state?.resume.totalQuestionsAnswered ?? 0);
+  const question: NextQuestion | null = next && !isDone(next) ? next : null;
 
   let screen: React.ReactNode;
 
   if (accessError) {
-    screen = <div className={iv.root}><div className={iv.stage} role="alert">
-      <h1 className={iv.question}>Check your access</h1>
-      <p className={iv.lede}>{accessError}</p>
-      <button type="button" className={iv.btnPrimary} disabled={booting} onClick={() => void retryAccess()}>{booting ? 'Checking…' : 'Check sign-in and retry'}</button>
-      <p className="mt-4 text-sm">Use this same interview page after signing in. Submitted answers stay saved; a fresh link does not start a new interview.</p>
-    </div></div>;
-  } else if (stage === 'milestone' && milestone) {
+    screen = (
+      <div className={iv.root}>
+        <div className={iv.stage} role="alert">
+          <h1 className={iv.question}>Check your access</h1>
+          <p className={iv.lede}>{accessError}</p>
+          <button
+            type="button"
+            className={iv.btnPrimary}
+            disabled={booting}
+            onClick={() => void retryAccess()}
+          >
+            {booting ? 'Checking…' : 'Check sign-in and retry'}
+          </button>
+          <p className="mt-4 text-sm">
+            Use this same interview page after signing in. Submitted answers stay saved; a fresh
+            link does not start a new interview.
+          </p>
+        </div>
+      </div>
+    );
+  } else if (stage === 'celebrate') {
     screen = (
       <MilestoneScreen
-        phase={milestone.phase}
-        unit={milestone.unit}
-        completed={milestone.completed}
-        totalDepts={milestone.total}
-        onDismiss={dismissMilestone}
+        phase="everything we need"
+        headline="That's everything we need"
+        onDismiss={() => setStage('review')}
+        autoAdvanceMs={null}
       />
     );
   } else if (stage === 'welcome-back') {
-    const nextIdx = nextStructuredIndex(STRUCTURED_QUESTIONS, 0, answeredIds, skippedIds);
-    const phase = resumePhase(nextIdx, flags);
-    const nextPrompt = nextIdx !== null
-      ? personalizePrompt(STRUCTURED_QUESTIONS[nextIdx].prompt, companyName)
-      : phase === 'review' ? 'Review your answers and apply your customizations'
-      : phase === 'departments' ? 'Continue choosing your departments' : null;
     screen = (
       <WelcomeBack
-        percent={state?.progress.percent ?? 0}
-        answersSaved={answersSaved}
-        nextQuestionNumber={state?.resume.nextQuestionNumber ?? null}
-        nextUpPrompt={nextPrompt}
-        skippedQuestions={state?.resume.skippedQuestions ?? []}
-        skippedStructured={skippedQueue.map((q) => ({
-          id: q.id,
-          prompt: personalizePrompt(q.prompt, companyName),
-        }))}
-        onContinue={resumeInterview}
-        onReviewSkipped={circleBack}
-        onReviewSkippedStructured={circleBackStructured}
-      />
-    );
-  } else if (stage === 'departments') {
-    screen = (
-      <DepartmentsStage
-        sessionId={sessionId}
-        onCoverageChange={setBoardComplete}
-        boardComplete={boardComplete}
-        onContinue={() => void goToReview()}
-        standardReady={standardReady}
+        requiredAnswered={question?.requiredAnswered ?? 0}
+        requiredTotal={question?.requiredTotal ?? 0}
+        nextPrompt={question?.prompt ?? null}
+        skipped={skipped}
+        onContinue={resume}
       />
     );
   } else if (stage === 'review') {
     screen = (
       <div style={brandStyle}>
-        <ReviewScreen
-          sessionId={sessionId ?? undefined}
-          onCircleBack={circleBack}
-          standardReady={standardReady}
-        />
+        <ReviewScreen sessionId={sessionId ?? undefined} standardReady={standardReady} />
       </div>
     );
-  } else if (stage === 'qa') {
-    const question = STRUCTURED_QUESTIONS[structIndex];
-    const known = question ? knownContext[question.id] : undefined;
+  } else if (stage === 'question' && question) {
     screen = (
-      <QaStage
-        brandStyle={brandStyle}
-        logoUrl={logoUrl}
-        phasesComplete={state?.progress.phasesComplete ?? []}
-        percent={state?.progress.percent ?? 0}
-        answersSaved={answersSaved}
-        lastSavedAt={lastSavedAt}
-        mode={qaMode}
-        draftScope={draftScope}
-        draftAvailable={draftAvailable}
-        question={qaMode === 'structured' ? question : undefined}
-        questionNumber={structIndex + 1}
-        knownValue={known?.value}
-        knownSource={known?.source}
-        companyName={companyName}
-        sessionId={sessionId}
-        onAnswered={() => advanceStructured(structIndex)}
-        onSkip={() => advanceStructured(structIndex, { skipped: true })}
-        // conversation props
-        currentQuestion={currentQuestion}
-        currentReaction={currentReaction}
-        input={input}
-        onInput={setInput}
-        onSend={() => {
-          const text = input;
-          void sendTurn(text);
-        }}
-        onIDontKnow={(msg) => void sendTurn(msg)}
-        sending={sending || awaitingReply}
-        scrollRef={scrollRef}
-        transcriptReady={transcriptReady}
-        onContinueToDepartments={goToDepartments}
-      />
+      <div className={iv.root} style={brandStyle}>
+        <div className="mx-auto w-full max-w-3xl px-5 py-8">
+          <BrandHeader logoUrl={logoUrl} />
+          <p className="mb-4 text-sm" style={{ color: 'var(--iv-ink-soft)' }} aria-live="polite">
+            {question.requiredAnswered ?? 0} of {question.requiredTotal ?? 0}
+          </p>
+          <AnimatePresence mode="wait">
+            <QuestionCard
+              key={question.id}
+              question={question}
+              draftScope={draftScope}
+              sessionId={sessionId ?? undefined}
+              standardReady={standardReady}
+              onAnswered={(data) => void handleAnswered(data)}
+              onSkipped={(fresh) => void handleSkipped(fresh)}
+              onOutOfOrder={() => void refreshNext()}
+              autoFocus
+            />
+          </AnimatePresence>
+        </div>
+      </div>
     );
   } else {
-    // stage === 'consent'
     screen = (
-      <ConsentScreen
+      <WelcomeScreen
         logoUrl={logoUrl}
         brandStyle={brandStyle}
-        consent={consent}
         booting={booting}
-        onSelect={setConsent}
-        onBegin={beginInterview}
+        onStart={() => void start()}
         onSkip={handleSkipForNow}
-        standardReady={standardReady}
+        showSkip={showSkip}
+        skipError={skipError}
       />
     );
   }
 
-  // Respect the OS reduced-motion preference across every interview animation.
-  return <MotionConfig reducedMotion="user">
-    {/* WF-012: a soft progress-read failure shows this line ABOVE the screen the
-        owner is already on — never in place of it. */}
-    {softError && <p role="status" className="mx-auto w-full max-w-2xl px-5 pt-4 text-sm">Reconnecting… your answers are saved.</p>}
-    {screen}
-    {!booting && !state?.interviewComplete && !state?.buildCompleted && !state?.priorCompletionDeclared && (
-      <section className="mx-auto w-full max-w-2xl px-5 pb-8" aria-label="Previously completed interview">
-        <button type="button" className={iv.btnSecondary} disabled={declaringCompletion}
-          aria-describedby="prior-completion-help" onClick={() => void declareCompleted()}>
-          {declaringCompletion ? 'Saving your declaration…' : 'I have already completed the interview'}
-        </button>
-        <p id="prior-completion-help" className="mt-3 text-sm">This saves your declaration that you previously completed the interview and stops repeat prompts across sign-ins. It does not create answers or mark your workforce build complete.</p>
-        {declarationError && <p role="alert" className="mt-3 text-sm">{declarationError}</p>}
-      </section>
-    )}
-  </MotionConfig>;
-}
-
-/* -------------------------------------------------------------------------- */
-/* Q&A stage — ALWAYS shows the ProgressRail; structured card OR conversation  */
-/* -------------------------------------------------------------------------- */
-
-function QaStage({
-  brandStyle,
-  logoUrl,
-  phasesComplete,
-  percent,
-  answersSaved,
-  lastSavedAt,
-  mode,
-  draftScope,
-  draftAvailable,
-  question,
-  questionNumber,
-  knownValue,
-  knownSource,
-  companyName,
-  sessionId,
-  onAnswered,
-  onSkip,
-  currentQuestion,
-  currentReaction,
-  input,
-  onInput,
-  onSend,
-  onIDontKnow,
-  sending,
-  scrollRef,
-  transcriptReady,
-  onContinueToDepartments,
-}: {
-  brandStyle?: React.CSSProperties;
-  logoUrl: string;
-  phasesComplete: string[];
-  percent: number;
-  answersSaved: number;
-  lastSavedAt: number | null;
-  mode: QaMode;
-  draftScope: string | null;
-  draftAvailable: boolean;
-  question?: InterviewQuestion;
-  questionNumber: number;
-  knownValue?: string;
-  knownSource?: string;
-  companyName: string | null;
-  sessionId: string | null;
-  onAnswered: () => void;
-  onSkip: () => void;
-  currentQuestion: string;
-  currentReaction: string;
-  input: string;
-  onInput: (v: string) => void;
-  onSend: () => void;
-  onIDontKnow: (msg: string) => void;
-  sending: boolean;
-  scrollRef: React.RefObject<HTMLDivElement | null>;
-  transcriptReady: boolean;
-  onContinueToDepartments: () => void;
-}) {
   return (
-    <div className={iv.root} style={brandStyle}>
-      <div className="mx-auto grid w-full max-w-5xl grid-cols-1 gap-8 px-5 py-8 lg:grid-cols-[1fr_260px]">
-        {/* ── main column ─────────────────────────────────────────────────── */}
-        <main className={iv.stage} style={{ width: '100%' }}>
-          <BrandHeader logoUrl={logoUrl} />
-
-          {mode === 'structured' && question ? (
-            <AnimatePresence mode="wait">
-              <QuestionCard
-                key={question.id}
-                draftScope={draftScope}
-                question={question}
-                questionNumber={questionNumber}
-                knownValue={knownValue}
-                knownSource={knownSource}
-                companyName={companyName}
-                sessionId={sessionId ?? undefined}
-                onAnswered={onAnswered}
-                onSkip={onSkip}
-                autoFocus
-              />
-            </AnimatePresence>
-          ) : (
-            <div>
-              <p className="mb-3 text-sm">{draftAvailable ? 'Unsent text is kept in this browser. Send your answer to save it to your interview.' : 'This browser could not keep your draft. Send your answer before closing the page.'}</p>
-              <ConversationPane
-                currentReaction={currentReaction}
-                currentQuestion={currentQuestion}
-                input={input}
-                onInput={onInput}
-                onSend={onSend}
-                onIDontKnow={onIDontKnow}
-                sending={sending}
-                sessionId={sessionId}
-                scrollRef={scrollRef}
-              />
-
-              {/* Advance to the department board once the transcript gate (a
-                  genuine, non-fabricated transcript) is satisfied. */}
-              <div className="mt-8 flex flex-col items-start gap-2">
-                <button
-                  type="button"
-                  onClick={onContinueToDepartments}
-                  disabled={!transcriptReady}
-                  aria-disabled={!transcriptReady}
-                  className={ivcx(iv.btnPrimary, !transcriptReady && 'is-busy')}
-                  style={{
-                    opacity: transcriptReady ? 1 : 0.55,
-                    cursor: transcriptReady ? 'pointer' : 'not-allowed',
-                  }}
-                >
-                  {transcriptReady ? (
-                    <ArrowRight className="h-4 w-4" aria-hidden />
-                  ) : (
-                    <Lock className="h-4 w-4" aria-hidden />
-                  )}
-                  Continue to your departments
-                </button>
-                {!transcriptReady && (
-                  <p className={iv.lede} style={{ fontSize: '0.8rem' }}>
-                    Answer a few more questions and this will unlock.
-                  </p>
-                )}
-              </div>
-            </div>
-          )}
-        </main>
-
-        {/* ── progress rail (ALWAYS shown in Q&A) ─────────────────────────── */}
-        <aside data-walkthrough="interview-progress-rail">
-          <ProgressRail
-            phasesComplete={phasesComplete}
-            percent={percent}
-            answersSaved={answersSaved}
-            lastSavedAt={lastSavedAt}
-          />
-        </aside>
-      </div>
-    </div>
-  );
-}
-
-/* -------------------------------------------------------------------------- */
-/* Departments stage — DepartmentBoard + a coverage-gated continue             */
-/* -------------------------------------------------------------------------- */
-
-function DepartmentsStage({
-  sessionId,
-  onCoverageChange,
-  boardComplete,
-  onContinue,
-  standardReady,
-}: {
-  sessionId: string | null;
-  onCoverageChange: (complete: boolean) => void;
-  boardComplete: boolean;
-  onContinue: () => void;
-  /** AI Workforce standard-first (PHASE 6 item 6): true → the board is in its
-   *  THIRD state — the foundation is ALREADY BUILT, so for each department the
-   *  owner decides built-KEEP (default, needs no record) / REMOVE (confirmed
-   *  decline with loss warning) / TUNE (content personalization). Legacy boxes
-   *  (false) keep the pitch-the-missing-set framing. */
-  standardReady: boolean;
-}) {
-  return (
-    <div className={iv.dark} style={{ minHeight: '100vh' }}>
-      <DepartmentBoard
-        sessionId={sessionId ?? undefined}
-        onCoverageChange={onCoverageChange}
-        standardReady={standardReady}
-      />
-      {standardReady && (
-        <div style={{ textAlign: 'center', margin: '0.5rem auto 0', maxWidth: '38rem', padding: '0 1rem' }}>
-          <p
-            style={{
-              fontSize: '0.85rem',
-              color: 'var(--iv-ink-soft)',
-              margin: 0,
-            }}
-          >
-            Your standard company foundation is already built — review it below.
-            For each department: keep it (the default), tune what it focuses on,
-            or remove the ones you don&apos;t need.
-          </p>
-          <p style={{ marginTop: '0.5rem' }}>
-            <a
-              href="/preview"
-              style={{
-                fontSize: '0.82rem',
-                color: 'var(--iv-accent-strong)',
-                textDecoration: 'underline',
-                textUnderlineOffset: '0.15em',
-              }}
-            >
-              See a read-only preview of your company
-            </a>
-          </p>
-        </div>
+    <MotionConfig reducedMotion="user">
+      {softError && (
+        <p role="status" className="mx-auto w-full max-w-2xl px-5 pt-4 text-sm">
+          Reconnecting… your answers are saved.
+        </p>
       )}
-      {/* Coverage-gated continue: arms only when the board reports every expected
-          department decided AND zero un-provenanced declines. In the
-          standard-first state KEEPs are implicit, so this arms as soon as any
-          removals/additions are recorded with provenance. */}
-      <div
-        style={{
-          position: 'sticky',
-          bottom: 0,
-          display: 'flex',
-          justifyContent: 'center',
-          padding: '1rem',
-          background: 'linear-gradient(to top, var(--iv-canvas), transparent)',
-        }}
-      >
-        <button
-          type="button"
-          onClick={onContinue}
-          disabled={!boardComplete}
-          aria-disabled={!boardComplete}
-          className={ivcx(iv.btnPrimary, !boardComplete && 'is-busy')}
-          style={{
-            opacity: boardComplete ? 1 : 0.55,
-            cursor: boardComplete ? 'pointer' : 'not-allowed',
-          }}
-        >
-          {boardComplete ? (
-            <ArrowRight className="h-4 w-4" aria-hidden />
-          ) : (
-            <Lock className="h-4 w-4" aria-hidden />
-          )}
-          Review &amp; build
-        </button>
-      </div>
-    </div>
+      {screen}
+    </MotionConfig>
   );
 }
 
 /* -------------------------------------------------------------------------- */
-/* brand header (live rebrand: logo swaps in as soon as it's answered)         */
+/* brand header                                                               */
 /* -------------------------------------------------------------------------- */
 
 function BrandHeader({ logoUrl }: { logoUrl: string }) {
@@ -1313,11 +491,7 @@ function BrandHeader({ logoUrl }: { logoUrl: string }) {
     <div className="mb-6 flex items-center gap-3">
       {isImageUrl ? (
         // eslint-disable-next-line @next/next/no-img-element
-        <img
-          src={logoUrl}
-          alt="Your logo"
-          style={{ height: 32, maxWidth: 160, objectFit: 'contain' }}
-        />
+        <img src={logoUrl} alt="Your logo" style={{ height: 32, maxWidth: 160, objectFit: 'contain' }} />
       ) : (
         <span
           className="inline-flex items-center gap-2"
@@ -1332,122 +506,43 @@ function BrandHeader({ logoUrl }: { logoUrl: string }) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* consent / welcome (phase 0) — three options, NONE auto-selected             */
+/* welcome (one Start button; the three old choices are gone)                 */
 /* -------------------------------------------------------------------------- */
 
-const CONSENT_OPTIONS: Array<{ id: Exclude<Consent, null>; title: string; desc: string }> = [
-  {
-    id: 'full',
-    title: 'Yes — interview me now',
-    desc: 'Answer in your own words, one question at a time. About 15–20 minutes.',
-  },
-  {
-    id: 'quick',
-    title: "I've only got a few minutes",
-    desc: 'Start now and pick up later — every answer is saved and we can send you a link to continue.',
-  },
-  {
-    id: 'learn',
-    title: 'What happens with my answers?',
-    desc: 'See how your interview becomes your AI workforce before you begin.',
-  },
-];
-
-/** AI Workforce standard-first (PHASE 6 item 6): consent options for a
- *  standard-prebuilt box (STANDARD_READY). Same ids / mechanics — only the
- *  framing changes from "we build your company" to "your company's standard
- *  foundation is already set up — this conversation tailors it to you." */
-const STANDARD_READY_CONSENT_OPTIONS: Array<{
-  id: Exclude<Consent, null>;
-  title: string;
-  desc: string;
-}> = [
-  {
-    id: 'full',
-    title: 'Yes — tailor it now',
-    desc: 'Answer in your own words, one question at a time. About 15–20 minutes.',
-  },
-  {
-    id: 'quick',
-    title: "I've only got a few minutes",
-    desc: 'Start now and pick up later — every answer is saved and we can send you a link to continue.',
-  },
-  {
-    id: 'learn',
-    title: 'What happens with my answers?',
-    desc: 'See how this conversation tailors your pre-built company before you begin.',
-  },
-];
-
-function ConsentScreen({
+function WelcomeScreen({
   logoUrl,
   brandStyle,
-  consent,
   booting,
-  onSelect,
-  onBegin,
+  onStart,
   onSkip,
-  standardReady,
+  showSkip,
+  skipError,
 }: {
   logoUrl: string;
   brandStyle?: React.CSSProperties;
-  consent: Consent;
   booting: boolean;
-  onSelect: (c: Consent) => void;
-  onBegin: () => void;
+  onStart: () => void;
   onSkip: () => void;
-  /** AI Workforce standard-first (PHASE 6 item 6): edit-mode framing for a
-   *  standard-prebuilt box. */
-  standardReady: boolean;
+  /** BU-05 (WF-013): operator-only. False hides "Skip for now" entirely. */
+  showSkip: boolean;
+  skipError: string | null;
 }) {
-  const consentOptions = standardReady ? STANDARD_READY_CONSENT_OPTIONS : CONSENT_OPTIONS;
+  const [explain, setExplain] = useState(false);
   return (
     <div className={iv.root} style={brandStyle}>
-      <motion.div
-        variants={ivScreenVariants}
-        initial="initial"
-        animate="animate"
-        className={iv.stage}
-      >
+      <motion.div variants={ivScreenVariants} initial="initial" animate="animate" className={iv.stage}>
         <div className="mb-8 text-center" data-walkthrough="interview-welcome">
           <div className="mb-4 flex justify-center">
             <BrandHeader logoUrl={logoUrl} />
           </div>
-          <h1 className={iv.question}>
-            {standardReady ? 'Let’s tailor your company' : 'Let’s build your company'}
-          </h1>
+          <h1 className={iv.question}>Let&apos;s set up your company</h1>
           <p className={ivcx(iv.lede, 'mt-2')}>
-            {standardReady
-              ? "Your company's standard foundation is already set up. This conversation tailors it to your business — no jargon, just your own words."
-              : 'A short conversation about your business. We turn your answers into a full AI workforce — no jargon, just your own words.'}
+            About 12 minutes. 15 short questions, most of them one tap. Your answers are saved as you
+            go, so you can stop and come back.
           </p>
-          {/* P1-03 c.4 (interview-lock clarity): a client redirected here by the
-              middleware's interview shell-lock (src/middleware.ts) was landing
-              with no explanation of WHY, which got reported as an outage rather
-              than a locked-until-complete state. One line of copy closes that. */}
           <p className={ivcx(iv.lede, 'mt-2')} style={{ fontSize: '0.82rem' }}>
-            Your Command Center unlocks when the AI Workforce Interview is complete.
+            Your dashboard opens as soon as you finish these questions.
           </p>
-          {/* BLOCKER 8(a): day-one experience — on a standard-prebuilt box the
-              owner can see their pre-built foundation before starting the
-              interview. /preview is the read-only company view (no forms, no
-              actions, no mutation affordance) — the motivation surface the
-              prebuild doctrine says must be reachable. */}
-          {standardReady && (
-            <p style={{ marginTop: '1rem' }}>
-              <a
-                href="/preview"
-                style={{
-                  fontSize: '0.85rem',
-                  color: 'var(--iv-accent-strong)',
-                  textDecoration: 'underline',
-                  textUnderlineOffset: '0.15em',
-                }}
-              >
-                Preview your company — your departments are already set up.
-              </a>
-            </p>
-          )}
           {booting && (
             <p className={iv.lede} style={{ fontSize: '0.78rem', marginTop: '0.5rem' }} aria-live="polite">
               Checking for saved progress…
@@ -1455,129 +550,83 @@ function ConsentScreen({
           )}
         </div>
 
-        <div
-          role="radiogroup"
-          aria-label="How would you like to begin?"
-          className="mb-6 space-y-3"
-          data-walkthrough="interview-consent-options"
+        <button
+          type="button"
+          onClick={onStart}
+          disabled={booting}
+          aria-disabled={booting}
+          data-walkthrough="interview-begin-button"
+          className={ivcx(iv.btnPrimary, booting && 'is-busy')}
+          style={{ width: '100%', justifyContent: 'center', opacity: booting ? 0.55 : 1 }}
         >
-          {consentOptions.map((opt) => {
-            const selected = consent === opt.id;
-            return (
-              <button
-                key={opt.id}
-                type="button"
-                role="radio"
-                aria-checked={selected}
-                onClick={() => onSelect(opt.id)}
-                className={ivcx(iv.choice, selected && 'is-selected')}
-                style={{ width: '100%', textAlign: 'left' }}
-              >
-                <span className="flex items-start gap-3">
-                  <span
-                    aria-hidden
-                    className="mt-0.5 flex h-5 w-5 items-center justify-center rounded-full border-2"
-                    style={{
-                      borderColor: selected
-                        ? 'var(--iv-accent-strong)'
-                        : 'var(--iv-line-strong)',
-                    }}
-                  >
-                    {selected && (
-                      <span
-                        className="h-2.5 w-2.5 rounded-full"
-                        style={{ background: 'var(--iv-accent-strong)' }}
-                      />
-                    )}
-                  </span>
-                  <span>
-                    <span className="block font-semibold" style={{ color: 'var(--iv-ink)' }}>
-                      {opt.title}
-                    </span>
-                    <span
-                      className="mt-0.5 block text-sm"
-                      style={{ color: 'var(--iv-ink-soft)' }}
-                    >
-                      {opt.desc}
-                    </span>
-                  </span>
-                </span>
-              </button>
-            );
-          })}
-        </div>
+          Start
+          <ArrowRight className="h-5 w-5" aria-hidden />
+        </button>
+
+        <p className="mt-3 text-center">
+          <button
+            type="button"
+            onClick={() => setExplain((v) => !v)}
+            style={{
+              fontSize: '0.85rem',
+              color: 'var(--iv-accent-strong)',
+              textDecoration: 'underline',
+              textUnderlineOffset: '0.15em',
+              background: 'none',
+              border: 0,
+              cursor: 'pointer',
+            }}
+          >
+            What happens with my answers?
+          </button>
+        </p>
 
         <AnimatePresence>
-          {consent === 'learn' && (
+          {explain && (
             <motion.div
               initial={{ opacity: 0, height: 0 }}
               animate={{ opacity: 1, height: 'auto' }}
               exit={{ opacity: 0, height: 0 }}
               className="overflow-hidden"
             >
-              <div
-                className={iv.card}
-                style={{ marginBottom: '1.5rem', display: 'flex', gap: '0.6rem' }}
-              >
+              <div className={iv.card} style={{ marginTop: '1rem', display: 'flex', gap: '0.6rem' }}>
                 <Info
                   className="h-4 w-4"
                   aria-hidden
                   style={{ color: 'var(--iv-accent-strong)', flexShrink: 0, marginTop: '0.15rem' }}
                 />
                 <p style={{ margin: 0, fontSize: '0.9rem', color: 'var(--iv-ink-soft)' }}>
-                  {standardReady
-                    ? 'Your answers are saved on your own box and used only to tailor the departments, roles, and playbooks already set up for you. Nothing is shared. When you finish, we apply your customizations — you can keep going whenever you’re ready.'
-                    : 'Your answers are saved on your own box and used only to design your departments, roles, and playbooks. Nothing is shared. When you finish, we assemble everything and start building — you can keep going whenever you’re ready.'}
+                  Your answers are saved on your own box and used only to design your departments,
+                  roles, and playbooks. Nothing is shared. When you finish, we assemble everything
+                  and start building — you can keep going whenever you’re ready.
                 </p>
               </div>
             </motion.div>
           )}
         </AnimatePresence>
 
-        <button
-          type="button"
-          onClick={onBegin}
-          disabled={consent === null}
-          aria-disabled={consent === null}
-          data-walkthrough="interview-begin-button"
-          className={ivcx(iv.btnPrimary, consent === null && 'is-busy')}
-          style={{
-            width: '100%',
-            justifyContent: 'center',
-            opacity: consent === null ? 0.55 : 1,
-            cursor: consent === null ? 'not-allowed' : 'pointer',
-          }}
-        >
-          {consent === 'learn'
-            ? standardReady
-              ? 'I’m ready — tailor my company'
-              : "I'm ready — begin interview"
-            : standardReady
-              ? 'Begin tailoring'
-              : 'Begin interview'}
-          <ArrowRight className="h-5 w-5" aria-hidden />
-        </button>
-        {consent === null && (
-          <p className={ivcx(iv.lede, 'mt-3 text-center')} style={{ fontSize: '0.78rem' }}>
-            Choose an option above to start.
+        {showSkip && (
+          <div className="mt-4 pt-4" style={{ borderTop: '1px solid var(--iv-line)' }}>
+            <button
+              type="button"
+              onClick={onSkip}
+              className={ivcx(iv.btnSecondary)}
+              style={{ width: '100%', justifyContent: 'center' }}
+              data-walkthrough="interview-skip-button"
+            >
+              Skip for now
+            </button>
+            <p className={ivcx(iv.lede, 'mt-2 text-center')} style={{ fontSize: '0.72rem' }}>
+              Go straight to your dashboard. A reminder will stay at the top until you finish the
+              interview.
+            </p>
+          </div>
+        )}
+        {skipError && (
+          <p role="alert" className={ivcx(iv.lede, 'mt-2 text-center')} style={{ fontSize: '0.78rem' }}>
+            {skipError}
           </p>
         )}
-
-        {/* U057: "Skip for now" — sets a 1-hour bypass cookie for urgent dashboard access. */}
-        <div className="mt-4 pt-4" style={{ borderTop: '1px solid var(--iv-line)' }}>
-          <button
-            type="button"
-            onClick={onSkip}
-            className={ivcx(iv.btnSecondary)}
-            style={{ width: '100%', justifyContent: 'center' }}
-            data-walkthrough="interview-skip-button"
-          >
-            Skip for now
-          </button>
-          <p className={ivcx(iv.lede, 'mt-2 text-center')} style={{ fontSize: '0.72rem' }}>
-            Go straight to your dashboard. A reminder will stay at the top until you finish the interview.
-          </p>
-        </div>
       </motion.div>
     </div>
   );
