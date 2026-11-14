@@ -1,26 +1,23 @@
 /**
  * U47 — ONE <HealthIndicator/>, operator/client variants, mobile-visible.
+ * U-06 (CC-004, CC-020, CC-022, CC-036) — the client variant speaks plain
+ * English: a button that opens a small reasons panel; the operator drawer is
+ * no longer reachable from the shared Header.
  *
  * Renders the REAL components (react-dom via @testing-library/react +
  * jsdom — see vitest.component.config.ts), never a hand-rolled restatement.
- * `global.fetch` is stubbed per-test; every stub throws on an unlisted URL
- * so a regression that adds a second/different endpoint call is caught by
- * the ACTUAL component's actual effect.
+ * `global.fetch` is stubbed per-test; every stub throws on an unlisted URL so
+ * a regression that adds a second/different endpoint call is caught by the
+ * ACTUAL component's actual effect.
  *
- * Binary acceptance covered (spec H+L.1.2 / U47):
- *   (a) exactly one health affordance — proven by (1) rendering the client
- *       and operator variants and confirming each is the ONLY
- *       [data-testid="health-indicator"] node in its tree, and (2) a
- *       source-scan in u47-health-single-source.test.ts confirming
- *       Header.tsx renders <HealthIndicator/> exactly once and no longer
- *       references the retired SystemStatusPill / "Gateway Online/Offline"
- *       strings.
- *   (b) client-variant render contains none of the strings `OpenClaw`,
- *       `Cloudflare`, `unauthorized_401`, or any probe id.
- *   (c) indicator visible at 375px width — proven by asserting the root
- *       node's className never contains the Tailwind `hidden` token, at
- *       every one of the three health tiers.
- *   (e) "Re-run bootstrap" drawer action still works.
+ * Acceptance covered:
+ *   (a) exactly one [data-testid="health-indicator"] node per tree;
+ *   (b) the client surface leaks no probe id / component name / error string;
+ *   (c) the badge never applies a `hidden` class at any tier;
+ *   U-06 — clean payload reads "All systems working"; a gateway outage reads
+ *   "Needs attention" and names the gateway in plain words after a click;
+ *   Header renders the client variant and nothing with
+ *   data-viewer-role="operator".
  *
  * npx vitest run --config vitest.component.config.ts
  */
@@ -28,20 +25,17 @@ import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, waitFor, within, fireEvent, act } from '@testing-library/react';
 
 import { HealthIndicator } from '../../src/components/HealthIndicator';
+import { Header } from '../../src/components/Header';
 
-// jsdom does not implement scrollIntoView; SystemStatusDrawer's (unchanged,
-// pre-existing) BootstrapModal calls it on every log update. Polyfill so
-// the "Re-run bootstrap" real-render test below can exercise that flow.
-if (typeof Element !== 'undefined' && !Element.prototype.scrollIntoView) {
-  Element.prototype.scrollIntoView = () => {};
-}
+vi.mock('next/navigation', () => ({
+  useRouter: () => ({ push: vi.fn(), refresh: vi.fn() }),
+  usePathname: () => '/',
+}));
 
 afterEach(() => { cleanup(); vi.useRealTimers(); });
 
 const STATUS_URL = '/api/system/status';
-const FORCE_STATUS_URL = '/api/system/status?force=1';
 const FEED_URL = '/api/events/client-feed?limit=1';
-const BOOTSTRAP_URL = '/api/system/bootstrap';
 
 interface FixtureComponent {
   component: string;
@@ -78,7 +72,7 @@ function fixturePayload(overall: 'live' | 'degraded' | 'offline'): {
       latencyMs: 12,
       error: overall === 'offline' ? 'unauthorized_401: gateway rejected token' : undefined,
       probedAt: now,
-      tier: 'critical',
+      tier: 'auxiliary',
     },
     {
       component: 'cloudflare_tunnel',
@@ -126,27 +120,49 @@ beforeEach(() => {
   vi.useRealTimers();
 });
 
-describe('HealthIndicator — client variant', () => {
-  it('renders a dot + one plain word, is non-interactive, and leaks no probe/component/error strings (acceptance b)', async () => {
+describe('HealthIndicator — client variant (U-06)', () => {
+  it('reads "All systems working" for a clean payload and opens the all-normal panel', async () => {
     global.fetch = stubFetch({
-      [STATUS_URL]: () => jsonResponse(fixturePayload('offline')),
+      [STATUS_URL]: () => jsonResponse(fixturePayload('live')),
     }) as unknown as typeof fetch;
 
     render(<HealthIndicator viewerRole="client" />);
 
-    await waitFor(() => screen.getByText('Unavailable'));
+    await waitFor(() => expect(screen.getByTestId('health-indicator').textContent).toBe('All systems working'));
 
     const nodes = screen.getAllByTestId('health-indicator');
     expect(nodes).toHaveLength(1);
-    const node = nodes[0];
+    const button = nodes[0];
+    expect(button.tagName).toBe('BUTTON');
+    expect(button.getAttribute('aria-expanded')).toBe('false');
 
-    // Non-interactive: no button, no click handler role.
-    expect(node.tagName).not.toBe('BUTTON');
-    expect(node.getAttribute('role')).toBe('status');
+    fireEvent.click(button);
+    expect(button.getAttribute('aria-expanded')).toBe('true');
 
-    // Never leaks internal detail — the exact strings named in the spec's
-    // binary acceptance (b), plus every raw component id in the fixture.
-    const text = node.textContent ?? '';
+    const dialog = screen.getByRole('dialog', { name: 'System status details' });
+    expect(within(dialog).getByText('Everything is running normally.')).toBeTruthy();
+    expect(within(dialog).getByText(/^Checked at /)).toBeTruthy();
+  });
+
+  it('reads "Needs attention" and names the gateway in plain words when that row is offline', async () => {
+    const status = fixturePayload('degraded');
+    status.components[1].status = 'offline';
+    status.components[1].error = 'unauthorized_401: gateway rejected token';
+    global.fetch = stubFetch({ [STATUS_URL]: () => jsonResponse(status) }) as unknown as typeof fetch;
+
+    render(<HealthIndicator viewerRole="client" />);
+
+    await waitFor(() => expect(screen.getByTestId('health-indicator').textContent).toBe('Needs attention'));
+    fireEvent.click(screen.getByTestId('health-indicator'));
+
+    const dialog = screen.getByRole('dialog', { name: 'System status details' });
+    expect(within(dialog).getByText("Your AI team can't be reached right now")).toBeTruthy();
+    expect(
+      within(dialog).getByText('New tasks will wait safely and start on their own once the connection is back.')
+    ).toBeTruthy();
+
+    // Never a probe id, component name, or raw error string.
+    const text = (screen.getByTestId('health-indicator').parentElement?.textContent ?? '') + dialog.textContent;
     for (const banned of [
       'OpenClaw',
       'Cloudflare',
@@ -159,14 +175,23 @@ describe('HealthIndicator — client variant', () => {
     ]) {
       expect(text).not.toContain(banned);
     }
-    expect(text).toBe('Unavailable');
+  });
+
+  it('closes the panel on Escape', async () => {
+    global.fetch = stubFetch({ [STATUS_URL]: () => jsonResponse(fixturePayload('live')) }) as unknown as typeof fetch;
+    render(<HealthIndicator viewerRole="client" />);
+    await waitFor(() => screen.getByText('All systems working'));
+
+    fireEvent.click(screen.getByTestId('health-indicator'));
+    expect(screen.getByRole('dialog', { name: 'System status details' })).toBeTruthy();
+
+    fireEvent.keyDown(document, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'System status details' })).toBeNull());
   });
 
   it('never applies a `hidden` class at any of the three health tiers (acceptance c)', async () => {
     for (const overall of ['live', 'degraded', 'offline'] as const) {
-      global.fetch = stubFetch({
-        [STATUS_URL]: () => jsonResponse(fixturePayload(overall)),
-      }) as unknown as typeof fetch;
+      global.fetch = stubFetch({ [STATUS_URL]: () => jsonResponse(fixturePayload(overall)) }) as unknown as typeof fetch;
 
       const { unmount } = render(<HealthIndicator viewerRole="client" />);
       await waitFor(() => {
@@ -179,17 +204,32 @@ describe('HealthIndicator — client variant', () => {
     }
   });
 
-  it('does not open a drawer or expose a click handler', async () => {
-    global.fetch = stubFetch({
-      [STATUS_URL]: () => jsonResponse(fixturePayload('live')),
+  it('never opens the operator drawer', async () => {
+    global.fetch = stubFetch({ [STATUS_URL]: () => jsonResponse(fixturePayload('live')) }) as unknown as typeof fetch;
+    render(<HealthIndicator viewerRole="client" />);
+    await waitFor(() => screen.getByText('All systems working'));
+
+    fireEvent.click(screen.getByTestId('health-indicator'));
+    expect(screen.queryByText('System Status')).toBeNull();
+  });
+});
+
+describe('Header — the client badge, never the operator drawer (U-06)', () => {
+  it('renders the client variant and no data-viewer-role="operator" element', async () => {
+    global.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url === STATUS_URL) return jsonResponse(fixturePayload('live'));
+      if (url === '/api/health') return jsonResponse({ status: 'ok', embeddings: { status: 'ok', degraded: false } });
+      return { ok: false, status: 503, json: async () => ({}) } as Response;
     }) as unknown as typeof fetch;
 
-    render(<HealthIndicator viewerRole="client" />);
-    await waitFor(() => screen.getByText('Healthy'));
+    const { container } = render(<Header />);
 
-    // SystemStatusDrawer renders a "System Status" heading when open. It
-    // must never appear for the client variant, no matter what.
-    expect(screen.queryByText('System Status')).toBeNull();
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="health-indicator"]')?.textContent).toBe('All systems working');
+    });
+    expect(container.querySelector('[data-viewer-role="client"]')).not.toBeNull();
+    expect(container.querySelector('[data-viewer-role="operator"]')).toBeNull();
   });
 });
 
@@ -216,7 +256,8 @@ describe('HealthIndicator — operator variant', () => {
 
     const criticalSection = criticalHeading.closest('section') as HTMLElement;
     expect(within(criticalSection).getByText('Database')).toBeTruthy();
-    expect(within(criticalSection).getByText('OpenClaw Gateway')).toBeTruthy();
+    // U-01: the gateway is a counted auxiliary row, never critical.
+    expect(within(criticalSection).queryByText('OpenClaw Gateway')).toBeNull();
     // Providers must NOT double up under Critical/Auxiliary.
     expect(within(criticalSection).queryByText('Anthropic')).toBeNull();
 
@@ -224,6 +265,7 @@ describe('HealthIndicator — operator variant', () => {
     expect(within(providersSection).getByText('Anthropic')).toBeTruthy();
 
     const auxSection = auxHeading.closest('section') as HTMLElement;
+    expect(within(auxSection).getByText('OpenClaw Gateway')).toBeTruthy();
     expect(within(auxSection).getByText('Cloudflare Tunnel')).toBeTruthy();
 
     // U47: the Live Feed dot folded into the drawer as an auxiliary row.
@@ -232,11 +274,9 @@ describe('HealthIndicator — operator variant', () => {
     });
   });
 
-  it('never applies a `hidden` class at any of the three health tiers (acceptance c)', async () => {
+  it('keeps the operator wording and never applies a `hidden` class at any tier (acceptance c)', async () => {
     for (const overall of ['live', 'degraded', 'offline'] as const) {
-      global.fetch = stubFetch({
-        [STATUS_URL]: () => jsonResponse(fixturePayload(overall)),
-      }) as unknown as typeof fetch;
+      global.fetch = stubFetch({ [STATUS_URL]: () => jsonResponse(fixturePayload(overall)) }) as unknown as typeof fetch;
 
       const { unmount } = render(<HealthIndicator viewerRole="operator" />);
       await waitFor(() => {
@@ -247,70 +287,24 @@ describe('HealthIndicator — operator variant', () => {
       cleanup();
     }
   });
-
-  it('"Re-run bootstrap" still works after the drawer\'s regrouping change (acceptance e)', async () => {
-    const bootstrapFetchCalls: { method?: string }[] = [];
-
-    // Minimal SSE-shaped ReadableStream reader: one `complete` event, then
-    // done. Matches the exact parsing BootstrapModal.startStream() does
-    // (split on the blank-line SSE separator).
-    const sseText =
-      'event: stdout\ndata: [bootstrap] starting...\n\n' +
-      'event: complete\ndata: {"exitCode":0,"durationMs":42}\n\n';
-    const encoder = new TextEncoder();
-    const chunk = encoder.encode(sseText);
-    let served = false;
-    const reader = {
-      read: async () => {
-        if (!served) {
-          served = true;
-          return { value: chunk, done: false };
-        }
-        return { value: undefined, done: true };
-      },
-    };
-
-    global.fetch = stubFetch({
-      [STATUS_URL]: () => jsonResponse(fixturePayload('live')),
-      [FEED_URL]: () => jsonResponse({ events: [], client: null, source: 'local_db' }),
-      [BOOTSTRAP_URL]: () => {
-        bootstrapFetchCalls.push({ method: 'POST' });
-        return {
-          ok: true,
-          body: { getReader: () => reader },
-        } as unknown as Response;
-      },
-    }) as unknown as typeof fetch;
-
-    render(<HealthIndicator viewerRole="operator" />);
-    await waitFor(() => screen.getByText('Healthy'));
-    fireEvent.click(screen.getByTestId('health-indicator'));
-    await waitFor(() => screen.getByText('System Status'));
-
-    const rerunButton = screen.getByRole('button', { name: /re-run bootstrap/i });
-    fireEvent.click(rerunButton);
-
-    await waitFor(() => {
-      expect(bootstrapFetchCalls.length).toBe(1);
-    });
-    await waitFor(() => {
-      expect(screen.getByText(/Bootstrap completed in/)).toBeTruthy();
-    });
-  });
 });
-
 
 describe('FIX47 — readiness is truthful across client and board indicators', () => {
   const ready = { status: 'ok', embeddings: { status: 'ok', degraded: false } };
   for (const [name, system, health, expected] of [
-    ['healthy', fixturePayload('live'), ready, 'Healthy'],
-    ['embedding degradation in HTTP 200', fixturePayload('live'), { status: 'ok', embeddings: { status: 'degraded', degraded: true } }, 'Degraded'],
-    ['migration degradation', fixturePayload('live'), { ...ready, status: 'degraded' }, 'Degraded'],
-    ['disconnected gateway', fixturePayload('offline'), ready, 'Unavailable'],
-    ['unknown overall', { ...fixturePayload('live'), overall: 'unknown' }, ready, 'Unknown'],
-    ['malformed status', {}, ready, 'Unknown'],
-    ['empty subsystem results', { ...fixturePayload('live'), components: [] }, ready, 'Unknown'],
-    ['missing embedding result', fixturePayload('live'), { status: 'ok' }, 'Unknown'],
+    ['healthy', fixturePayload('live'), ready, 'All systems working'],
+    // U-01: embedding_readiness is an ADVISORY row (spec U-01, advisory table:
+    // "never changes the badge"). A degraded embedding with an otherwise clean
+    // payload must stay healthy — the row is still listed in the drawer.
+    // U-06 names that healthy client badge "All systems working".
+    ['embedding degradation in HTTP 200 (advisory, never flips the badge)', fixturePayload('live'), { status: 'ok', embeddings: { status: 'degraded', degraded: true } }, 'All systems working'],
+    // U-01: a counted row (openclaw_gateway) still degrades; U-06 names it "Needs attention".
+    ['migration degradation', fixturePayload('live'), { ...ready, status: 'degraded' }, 'Needs attention'],
+    ['disconnected gateway', fixturePayload('offline'), ready, 'Offline'],
+    ['unknown overall', { ...fixturePayload('live'), overall: 'unknown' }, ready, 'Status not available'],
+    ['malformed status', {}, ready, 'Status not available'],
+    ['empty subsystem results', { ...fixturePayload('live'), components: [] }, ready, 'Status not available'],
+    ['missing embedding result', fixturePayload('live'), { status: 'ok' }, 'Status not available'],
   ] as const) {
     it(name, async () => {
       global.fetch = stubFetch({ [STATUS_URL]: () => jsonResponse(system), '/api/health': () => jsonResponse(health) }) as typeof fetch;
@@ -318,18 +312,52 @@ describe('FIX47 — readiness is truthful across client and board indicators', (
       await waitFor(() => {
         const indicators = screen.getAllByTestId('health-indicator');
         expect(indicators).toHaveLength(3);
-        for (const indicator of indicators) expect(indicator.textContent).toBe(expected);
+        expect(indicators[0].textContent).toBe(expected);
+        expect(indicators[1].textContent).toBe(expected);
       });
       expect(screen.queryByText('All systems operational')).toBeNull();
     });
   }
+
+  it('keeps a degraded advisory embedding row visible in the drawer without flipping the badge, while a counted row still degrades it', async () => {
+    // U-01 advisory table: embedding_readiness never changes the badge but must
+    // remain visible in the operator drawer. A counted row (openclaw_gateway)
+    // set to degraded must still degrade the tier.
+    global.fetch = stubFetch({
+      [STATUS_URL]: () => jsonResponse(fixturePayload('live')),
+      '/api/health': () => jsonResponse({ status: 'ok', embeddings: { status: 'degraded', degraded: true } }),
+      [FEED_URL]: () => jsonResponse({ events: [], client: null, source: 'local_db' }),
+    }) as typeof fetch;
+
+    render(<HealthIndicator viewerRole="operator" />);
+    await waitFor(() => expect(screen.getByTestId('health-indicator').textContent).toBe('Healthy'));
+    fireEvent.click(screen.getByTestId('health-indicator'));
+    await waitFor(() => screen.getByText('System Status'));
+
+    const auxSection = screen.getByText('Auxiliary').closest('section') as HTMLElement;
+    expect(within(auxSection).getByText('Embedding readiness')).toBeTruthy();
+
+    cleanup();
+
+    const counted = fixturePayload('live');
+    counted.components[1].status = 'degraded'; // openclaw_gateway is a counted row
+    global.fetch = stubFetch({
+      [STATUS_URL]: () => jsonResponse(counted),
+      '/api/health': () => jsonResponse(ready),
+    }) as typeof fetch;
+
+    render(<HealthIndicator viewerRole="client" />);
+    // U-01: the counted row still degrades the tier; U-06: the client badge
+    // for the degraded tier reads "Needs attention".
+    await waitFor(() => expect(screen.getByTestId('health-indicator').textContent).toBe('Needs attention'));
+  });
 
   it('does not trust live overall when a returned required subsystem is degraded', async () => {
     const status = fixturePayload('live');
     status.components[1].status = 'degraded';
     global.fetch = stubFetch({ [STATUS_URL]: () => jsonResponse(status) }) as typeof fetch;
     render(<HealthIndicator viewerRole="client" />);
-    await waitFor(() => expect(screen.getByTestId('health-indicator').textContent).toBe('Degraded'));
+    await waitFor(() => expect(screen.getByTestId('health-indicator').textContent).toBe('Needs attention'));
   });
 
   it('clears stale healthy state on an HTTP error and recovers only on a verified result', async () => {
@@ -337,16 +365,16 @@ describe('FIX47 — readiness is truthful across client and board indicators', (
     let response = jsonResponse(fixturePayload('live'));
     global.fetch = stubFetch({ [STATUS_URL]: () => response }) as typeof fetch;
     await act(async () => { render(<HealthIndicator viewerRole="client" />); });
-    expect(screen.getByTestId('health-indicator').textContent).toBe('Healthy');
+    expect(screen.getByTestId('health-indicator').textContent).toBe('All systems working');
     response = jsonResponse({}, false);
-    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
-    expect(screen.getByTestId('health-indicator').textContent).toBe('Unavailable');
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(screen.getByTestId('health-indicator').textContent).toBe('Offline');
     response = jsonResponse({});
-    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
-    expect(screen.getByTestId('health-indicator').textContent).toBe('Unknown');
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(screen.getByTestId('health-indicator').textContent).toBe('Status not available');
     response = jsonResponse(fixturePayload('live'));
-    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
-    expect(screen.getByTestId('health-indicator').textContent).toBe('Healthy');
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(screen.getByTestId('health-indicator').textContent).toBe('All systems working');
   });
 
   it('times out a hanging response, ignores its late success, then recovers on the next poll', async () => {
@@ -358,31 +386,38 @@ describe('FIX47 — readiness is truthful across client and board indicators', (
     await act(async () => { render(<HealthIndicator viewerRole="client" />); });
     expect(screen.getByTestId('health-indicator').textContent).toBe('Checking…');
     await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
-    expect(screen.getByTestId('health-indicator').textContent).toBe('Unavailable');
+    expect(screen.getByTestId('health-indicator').textContent).toBe('Offline');
     await act(async () => { finish(jsonResponse(fixturePayload('live'))); });
-    expect(screen.getByTestId('health-indicator').textContent).toBe('Unavailable');
+    expect(screen.getByTestId('health-indicator').textContent).toBe('Offline');
     hanging = false;
-    await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
-    expect(screen.getByTestId('health-indicator').textContent).toBe('Healthy');
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(screen.getByTestId('health-indicator').textContent).toBe('All systems working');
   });
 
-  it('does not clear degraded readiness until the embedding check also recovers', async () => {
+  it('never keeps readiness degraded on the advisory embedding row alone (client badge stays "All systems working")', async () => {
+    // U-01 advisory table: embedding_readiness is advisory, so a degraded
+    // embedding (and a hanging embedding probe) can never hold the badge at
+    // Degraded. Counted-row degradation is covered above.
+    // U-06: the client badge for a healthy tier reads "All systems working";
+    // recovery changes nothing either.
     vi.useFakeTimers();
     let resolveHealth!: (response: Response) => void;
     let health: Response | Promise<Response> = jsonResponse({ status: 'ok', embeddings: { status: 'degraded', degraded: true } });
     global.fetch = stubFetch({ [STATUS_URL]: () => jsonResponse(fixturePayload('live')), '/api/health': () => health }) as typeof fetch;
     await act(async () => { render(<HealthIndicator viewerRole="client" />); });
-    expect(screen.getByTestId('health-indicator').textContent).toBe('Degraded');
+    // U-01: the advisory embedding row never moves the badge off healthy.
+    // U-06: that healthy client badge reads "All systems working".
+    expect(screen.getByTestId('health-indicator').textContent).toBe('All systems working');
     health = new Promise<Response>((resolve) => { resolveHealth = resolve; });
-    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
-    expect(screen.getByTestId('health-indicator').textContent).toBe('Degraded');
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(screen.getByTestId('health-indicator').textContent).toBe('All systems working');
     await act(async () => { resolveHealth(jsonResponse(ready)); });
-    expect(screen.getByTestId('health-indicator').textContent).toBe('Healthy');
+    expect(screen.getByTestId('health-indicator').textContent).toBe('All systems working');
   });
 
   it('reports network errors without claiming healthy', async () => {
     global.fetch = vi.fn().mockRejectedValue(new Error('offline'));
     render(<HealthIndicator viewerRole="client" />);
-    await waitFor(() => expect(screen.getByTestId('health-indicator').textContent).toBe('Unavailable'));
+    await waitFor(() => expect(screen.getByTestId('health-indicator').textContent).toBe('Offline'));
   });
 });

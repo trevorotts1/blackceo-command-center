@@ -8,14 +8,20 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   pin-suite:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     name: Approved target pin suite
     runs-on: ubuntu-24.04
     steps:
@@ -29,6 +35,7 @@ jobs:
           bash scripts/update-approved-target.test.sh
 
   route-tests:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     name: Version route commit tests
     runs-on: ubuntu-24.04
     steps:
@@ -53,6 +60,7 @@ jobs:
             tests/unit/p1-03-version-route-commit.test.ts
 
   networked-ls-remote:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     name: Networked ls-remote check
     runs-on: ubuntu-24.04
     steps:

@@ -75,14 +75,17 @@ test('probeJobs: pending count excludes archived tasks (archived_at IS NULL filt
   const before = (await probeJobs()).detail as { pendingTasks: number } | undefined;
   assert.ok(before);
 
-  seedTask({ status: 'blocked', archivedAt: new Date().toISOString() }); // archived — must be excluded
-  seedTask({ status: 'blocked', archivedAt: null }); // live — must be counted
+  // U-04a narrowed the backlog count to status NOT IN ('done','review','blocked')
+  // — a blocked card waits on a human, not on a job — so the fixture uses the
+  // canonical 'backlog' status to keep testing the archived_at exclusion.
+  seedTask({ status: 'backlog', archivedAt: new Date().toISOString() }); // archived — must be excluded
+  seedTask({ status: 'backlog', archivedAt: null }); // live — must be counted
 
   const after = (await probeJobs()).detail as { pendingTasks: number } | undefined;
   assert.ok(after);
   assert.equal(
     after!.pendingTasks,
     before!.pendingTasks + 1,
-    'exactly the one non-archived blocked task should raise the pending count; the archived one must be excluded',
+    'exactly the one non-archived backlog task should raise the pending count; the archived one must be excluded',
   );
 });

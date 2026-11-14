@@ -591,9 +591,9 @@ export async function runIntakeAdvanceSweep(dependencies: {
           actor: 'intake-advance-sweep',
           attempts: null, // already at/over cap — do not touch the counter here
           gaps: [],
-          needs: `System fix required: task hit the ${capLabel} (${attemptsShown}) and can no longer auto-advance. ${capFix}`,
+          needs: 'This task ran into a problem on our side and is paused. You do not need to do anything right now.',
           audience: 'SYSTEM',
-          blockReason: `${capLabel} reached (${attemptsShown}) while advancing from ${t.status}`,
+          blockReason: 'This task could not be started after several tries.',
           timelineEventMessage: `[CAP-BLOCKED] Task "${t.title}" reached the ${capLabel} (${attemptsShown}) and has been blocked for operator triage.`,
           escalationMessage: `[CAP-BLOCKED] "${t.title}" hit the ${capLabel} (${attemptsShown}) while stuck in ${t.status} and can no longer auto-advance. ${capFix}`,
         });

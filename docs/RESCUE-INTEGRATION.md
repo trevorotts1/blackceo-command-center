@@ -33,6 +33,17 @@ Per the Rescue contract (D12): boarding is a VIEW. A Command Center outage
 delays visibility, never the rescue itself. No rescue code may treat a board
 write as a precondition for working a ticket.
 
+## The scripts under fleet-heartbeat/scripts are reference copies
+
+`rescue-receiver.mjs`, `rescue-rangers-poller.sh` and `rescue-sla-sweep.mjs` in this
+repository are reference copies. The copies that run live on the operator machine and
+in the private Fleet Ops repository, and differ from these in both directions: some fixes
+here were never installed there, and some running libraries were never published here. `rescue-sla-sweep.mjs`
+here cannot start at all: it imports the ticket store tombstone. The tier rules exist
+in three places with different models (`rescue-receiver.mjs`, `rescue-rangers-poller.sh`,
+`lib/rescue-tier-router.mjs`); only `lib/rescue-tier-router.mjs` states the binding
+model policy. Never treat a change to these files as a change to the live rescue path.
+
 ## Legacy path labels (RR-017 caller inventory)
 
 | Path | Classification | CC-side rule |

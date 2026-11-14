@@ -27,11 +27,17 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     branches: [main]
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   static-guard:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     name: Static call-site guard (+ mutation proof)
     runs-on: ubuntu-24.04
     steps:
@@ -55,6 +61,7 @@ jobs:
         run: npx tsx scripts/guard-raw-status-writers.ts
 
   behavioral-fixture:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     name: Behavioral fixture — task_events now appears for previously-unaudited paths
     runs-on: ubuntu-24.04
     needs: static-guard

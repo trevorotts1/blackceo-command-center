@@ -44,10 +44,10 @@
 
 import { queryAll, queryOne, run, sqlTime, parseDbTime } from '@/lib/db';
 import { broadcast } from '@/lib/events';
-import { getMissionControlUrl } from '@/lib/config';
-import { missionControlAuthHeaders } from '@/lib/mc-auth';
-import { notifySystem } from '@/lib/notify';
+import { notifySystem, ownerSendsSuppressed, ownerSendsHeld } from '@/lib/notify';
+import { sendRequesterAudienceAsk, sendProviderChoiceAsk, isQuietHour } from './trust-engine';
 import { recoverFinishedTaskToReview } from './finished-work-recovery';
+import { runStaleReturnNoteCleanup } from './stale-return-note-cleanup';
 import { resolveStaleTaskSweepKillFlag, killFlagSkipReason } from '@/lib/ops/operator-kill-flags';
 import { resolveSlaThreshold, minPossibleSlaThreshold } from '@/lib/board-slas';
 import { canonicalDeptSlug } from '@/lib/routing/canonical-slug';
@@ -63,6 +63,18 @@ import { blockDispatchIfOwnerKilled } from '@/lib/owner-killed';
 import { v4 as uuidv4 } from 'uuid';
 
 export const STALE_TASK_SWEEP_CRON = '*/10 * * * *';
+
+/**
+ * CC-054: the clock the quiet-hours check reads. A test that asserts "a 2pm
+ * reminder goes out" would otherwise pass by day and fail by night, so this one
+ * check takes an injectable clock. It is used for the quiet-hours check ONLY —
+ * every age calculation in this file keeps `Date.now()`.
+ */
+let sweepClock: () => Date = () => new Date();
+
+export function __setStaleSweepClockForTests(fn: (() => Date) | null): void {
+  sweepClock = fn ?? (() => new Date());
+}
 
 // F09 / FIX 24: presentations signature-deck renders legitimately run for many
 // hours (40 pipeline phases; batch render of 25-50 slides). In_progress
@@ -323,60 +335,43 @@ function wasRecentlyRepinged(
 }
 
 /**
- * Attempt to notify the blocked_on_human via the available channels.
- * Best-effort: failure here must never crash the sweep.
+ * CC-054: what a reminder attempt actually achieved. Only 'delivered' may be
+ * recorded as a re-ping; 'held' means nothing left the box (muted, on hold, or
+ * quiet hours) so the next run tries again; 'no-address' means the owner has no
+ * resolvable destination at all and the operator was told.
  */
-async function repingBlockedHuman(task: StaleTaskRow): Promise<void> {
-  const who = task.blocked_on_human ?? 'owner';
-  // U101: report THIS task's own effective (department-overridden or global)
-  // re-ping threshold, not always the global constant. FIX 24: the re-ping is
-  // its OWN named window (STALE_BLOCKED_REPING_HOURS), not half of the return
-  // window anymore.
-  const repingHours = resolveSlaThreshold(task.department, 'staleBlockedRepingHours', STALE_BLOCKED_REPING_HOURS);
-  const message =
-    `[STALE-BLOCKED] Task "${task.title}" (id: ${task.id}) has been waiting in Blocked for over ` +
-    `${repingHours}h without a response. ` +
-    `Reminder: ${task.ask ?? '(no ask specified)'}`;
+type RepingOutcome = 'delivered' | 'held' | 'no-address';
 
+async function repingBlockedHuman(task: StaleTaskRow): Promise<RepingOutcome> {
+  const who = task.blocked_on_human ?? 'owner';
   if (who === 'operator') {
-    // SWEEP-06 / MSG-06: an operator re-ping is a SYSTEM concern — route it
-    // through the single notifySystem() path (Rescue Rangers webhook, or a
-    // server log when unset). It must NEVER reach a client Telegram.
-    notifySystem(message, { agent: 'stale-task-sweep', action: 'escalate' });
-  } else {
-    // Owner: notify via the Command Center's internal message route (which
-    // triggers Telegram if wired). Best-effort -- no throw on failure.
-    const ccUrl = getMissionControlUrl();
-    try {
-      // AUTH (SWEEP-401): this is a SERVER-SIDE loopback to our own /api/events —
-      // it carries NO same-origin Origin/Referer, so middleware Gate B treats it
-      // as EXTERNAL and (with MC_API_TOKEN set) hard-401s a POST without a bearer.
-      // Before this fix every owner re-ping 401'd and was swallowed by the catch
-      // below (one box logged ~1,301 rejections at ~600/hr), silently dropping
-      // stale-blocked owner notifications fleet-wide. Present the canonical bearer.
-      const resp = await fetch(`${ccUrl}/api/events`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...missionControlAuthHeaders() },
-        body: JSON.stringify({
-          type: 'stale_blocked_repinged',
-          payload: { task_id: task.id, message },
-        }),
-      });
-      if (!resp.ok) {
-        // Do not swallow silently — a rejected re-ping means the owner was NOT
-        // notified; surface it loudly (this is exactly the failure that stayed
-        // invisible for a month behind a bare console.warn on the catch alone).
-        console.error(
-          `[stale-task-sweep] Owner re-ping POST /api/events returned ${resp.status} — owner was NOT notified` +
-            (resp.status === 401 || resp.status === 403
-              ? ' (AUTH: verify MC_API_TOKEN is set in this process and matches the Command Center)'
-              : ''),
-        );
-      }
-    } catch (err) {
-      console.warn('[stale-task-sweep] Owner re-ping notification failed:', (err as Error).message);
-    }
+    // U101: report THIS task's own effective (department-overridden or global)
+    // re-ping threshold, not always the global constant.
+    const repingHours = resolveSlaThreshold(task.department, 'staleBlockedRepingHours', STALE_BLOCKED_REPING_HOURS);
+    notifySystem(
+      `[STALE-BLOCKED] Task "${task.title}" (id: ${task.id}) has been waiting in Blocked for over ` +
+        `${repingHours}h without a response. Reminder: ${task.ask ?? '(no ask specified)'}`,
+      { agent: 'stale-task-sweep', action: 'escalate' },
+    );
+    return 'delivered';
   }
+  // Owner. Never at night, never while client sends are muted or on hold —
+  // in both cases nothing is recorded, so the next run tries again.
+  if (ownerSendsSuppressed() || ownerSendsHeld() || isQuietHour(sweepClock())) return 'held';
+  const text =
+    `Reminder: "${task.title}" is still waiting on you. ` +
+    `${task.ask?.trim() || 'It needs a decision or some input from you before it can continue.'}`;
+  const viaRequester = sendRequesterAudienceAsk(task.id, text);
+  if (viaRequester === 'telegram' || viaRequester === 'session') return 'delivered';
+  if (viaRequester === 'send_failed') return 'held';
+  const viaOwner = sendProviderChoiceAsk(task.id, text);
+  if (viaOwner === 'telegram') return 'delivered';
+  if (viaOwner === 'send_failed') return 'held';
+  notifySystem(
+    `[stale-blocked-undeliverable] Task ${task.id} is waiting on its owner and no owner address could be resolved.`,
+    { agent: 'stale-task-sweep', action: 'escalate' },
+  );
+  return 'no-address';
 }
 
 /**
@@ -395,11 +390,14 @@ async function repingBlockedOnce(task: StaleTaskRow, ageHours: number): Promise<
   if (wasRecentlyRepinged(task.id)) return false;
 
   // First threshold: re-ping the named human.
-  await repingBlockedHuman(task);
+  const outcome = await repingBlockedHuman(task);
+  // CC-054: a HELD reminder (muted, on hold, or quiet hours) sent nothing, so
+  // it must record nothing either — the next run tries again.
+  if (outcome === 'held') return false;
   // Audit trail AND the dedup key the check above reads. Written on BOTH
-  // branches (operator → notifySystem, owner → /api/events) because this
-  // INSERT is common to both — that is what makes the dedup cover the
-  // operator path, which previously wrote NO dedupable key at all.
+  // branches (operator → notifySystem, owner → the trust engine's gateway send)
+  // because this INSERT is common to both — that is what makes the dedup cover
+  // the operator path, which previously wrote NO dedupable key at all.
   const now = new Date().toISOString();
   try {
     run(
@@ -416,6 +414,27 @@ async function repingBlockedOnce(task: StaleTaskRow, ageHours: number): Promise<
     );
   }
   return true;
+}
+
+/**
+ * CC-054: when the newest reminder for this stay in Blocked was recorded (ms),
+ * or null. A null means no reminder can be PROVEN to have gone out — the card
+ * stays Blocked and the sweep tries again, rather than returning a card whose
+ * owner was never told.
+ */
+function lastRepingMs(taskId: string, sinceMs: number): number | null {
+  try {
+    const row = queryOne<{ created_at: string }>(
+      `SELECT created_at FROM events
+        WHERE task_id = ? AND type IN ('stale_repinged', 'stale_blocked_repinged')
+        ORDER BY ${sqlTime('created_at')} DESC LIMIT 1`,
+      [taskId],
+    );
+    const ms = parseDbTime(row?.created_at);
+    return Number.isNaN(ms) || ms <= sinceMs ? null : ms;
+  } catch {
+    return null; // cannot prove a reminder went out — the card stays Blocked
+  }
 }
 
 /**
@@ -452,16 +471,12 @@ async function returnToOrchestrator(task: StaleTaskRow, reason: string): Promise
   ]
     .filter(Boolean)
     .join(', ');
-  const handbackNote = [
-    `[STALE-RETURN] ${now}${accounting ? ` (${accounting})` : ''}`,
-    `Problem: ${reason}`,
-    `Tried: stale sweep detected no progress`,
-    `Needs: orchestrator re-route or human triage`,
-  ].join('\n');
 
-  const updatedDescription = task.description
-    ? `${handbackNote}\n\n---\n\n${task.description}`
-    : handbackNote;
+  // CC-052: the description is NO LONGER WRITTEN. The handback note that used to
+  // be prepended here ([STALE-RETURN] …) put internal bookkeeping into the
+  // client's own description — the very text they read on the card. The
+  // `task_returned` event below already records the reason and the counters, so
+  // nothing is lost by leaving the description exactly as its author wrote it.
 
   // SWEEP-03 (drag-back trap) — CORRECTED BY PD-TEST-063.
   //
@@ -501,8 +516,9 @@ async function returnToOrchestrator(task: StaleTaskRow, reason: string): Promise
     // FIX 41 + PD-TEST-063: NEITHER qc_reroute_attempts NOR dispatch_attempts
     // appears in extraColumns — transition() writes only the columns listed, so
     // both counters pass through untouched on every stale return.
+    // CC-052: the description is not listed either — the card's own text is the
+    // client's, and this sweep no longer edits it.
     const extraCols: Record<string, string | number | null> = {
-      description: updatedDescription,
       last_progress_at: now,
     };
     if (fromBlocked) {
@@ -534,6 +550,12 @@ export async function runStaleTaskSweep(): Promise<StaleSweepResult> {
   const killFlag = resolveStaleTaskSweepKillFlag();
   if (killFlag.disabled) {
     return { scanned: 0, returned: 0, repinged: 0, skippedReason: killFlagSkipReason(killFlag) };
+  }
+
+  // U-25: remove the [STALE-RETURN] notes this job used to write into task
+  // descriptions. Bounded (200 cards per run); a no-op once none are left.
+  try { runStaleReturnNoteCleanup(); } catch (err) {
+    console.warn('[stale-task-sweep] note clean-up failed (non-fatal):', (err as Error).message);
   }
 
   // Guard: last_progress_at column must exist (migration 071).
@@ -595,6 +617,18 @@ export async function runStaleTaskSweep(): Promise<StaleSweepResult> {
     minPossibleSlaThreshold('staleBlockedRepingedHours', STALE_THRESHOLDS.blocked_repinged),
   );
 
+  // The QC-reroute cap, read from the same QC_MAX_REROUTES constant every other
+  // consumer uses (env-overridable). CC-063 reads it in the candidate query as
+  // well as in the per-row guard below.
+  const qcCap = parseInt(process.env.QC_MAX_REROUTES || String(QC_MAX_REROUTES), 10);
+
+  // CC-063: a card already in `backlog` is WITH the orchestrator — there is
+  // nothing to return it to, and transition('backlog'→'backlog') is an idempotent
+  // no-op, so pre-fix the sweep re-"returned" the same card on EVERY tick. Those
+  // cards no longer enter the candidate list at all (they used to crowd out live
+  // cards behind the LIMIT 100); they are counted separately before the loop.
+  // A blocked card that already spent its whole QC-reroute budget is END-STATED
+  // by the cap path and is excluded here for the same reason it is skipped below.
   let candidates: StaleTaskRow[];
   try {
     candidates = queryAll<StaleTaskRow>(
@@ -606,18 +640,34 @@ export async function runStaleTaskSweep(): Promise<StaleSweepResult> {
        WHERE archived_at IS NULL
          AND status NOT IN ('done')
          AND ${sqlTime(progressCol)} < ${sqlTime('?')}
+         AND status != 'backlog'
+         AND NOT (status = 'blocked' AND COALESCE(qc_reroute_attempts, 0) >= ?)
        ORDER BY ${sqlTime(progressCol)} ASC
        LIMIT 100`,
-      [hoursAgo(tightestThreshold)],
+      [hoursAgo(tightestThreshold), qcCap],
     );
   } catch (err) {
     return { scanned: 0, returned: 0, repinged: 0, skippedReason: `Query failed: ${(err as Error).message}` };
   }
 
+  // SWEEP-LOOP / CC-063: the backlog cards the sweep used to walk one by one.
+  // One count query, one log line, no per-card event.
+  let alreadyInBacklog = 0;
+  try {
+    alreadyInBacklog =
+      queryOne<{ n: number }>(
+        `SELECT COUNT(*) AS n FROM tasks
+          WHERE archived_at IS NULL AND status = 'backlog'
+            AND ${sqlTime(progressCol)} < ${sqlTime('?')}`,
+        [hoursAgo(STALE_THRESHOLDS.backlog)],
+      )?.n ?? 0;
+  } catch {
+    alreadyInBacklog = 0;
+  }
+
   let returned = 0;
   let repinged = 0;
   let recovered = 0;
-  let alreadyInBacklog = 0;
   const recoveredIds: string[] = [];
   // PD-TEST-063: blocked cards with an exhausted dispatch budget that were
   // re-escalated instead of being laundered back onto the dispatch conveyor.
@@ -681,8 +731,8 @@ export async function runStaleTaskSweep(): Promise<StaleSweepResult> {
         // past the cap forever. So: skip entirely. The card stays blocked, the
         // counter stays where the cap path left it, and no stale sweep fires a
         // re-ping or a return against it. The cap is read from the same
-        // QC_MAX_REROUTES constant every other consumer uses (env-overridable).
-        const qcCap = parseInt(process.env.QC_MAX_REROUTES || String(QC_MAX_REROUTES), 10);
+        // QC_MAX_REROUTES constant every other consumer uses (env-overridable),
+        // read once above the candidate query.
         if ((task.qc_reroute_attempts ?? 0) >= qcCap) {
           continue;
         }
@@ -718,6 +768,20 @@ export async function runStaleTaskSweep(): Promise<StaleSweepResult> {
             budgetEndStated++;
             budgetEndStatedIds.push(task.id);
             continue;
+          }
+          // CC-054 (owner decision D-8 default): a card waiting on the OWNER
+          // leaves Blocked only after a reminder that was really sent, and only
+          // after the owner has had the rest of the window to answer it. With no
+          // provable reminder, or one sent too recently, the sweep reminds (if
+          // the dedup allows) and leaves the card where it is.
+          // Operator-blocked cards keep today's behaviour: returned at the window.
+          if ((task.blocked_on_human ?? 'owner') !== 'operator') {
+            const remindedAt = lastRepingMs(task.id, progressDate);
+            const answerWindowMs = Math.max(0, returnThreshold - repingThreshold) * 3_600_000;
+            if (remindedAt === null || Date.now() - remindedAt < answerWindowMs) {
+              if (await repingBlockedOnce(task, ageHours)) repinged++;
+              continue;
+            }
           }
           // Second threshold passed: return to orchestrator. The consumed
           // dispatch budget rides along in the reason so the audit row itself
@@ -787,17 +851,8 @@ export async function runStaleTaskSweep(): Promise<StaleSweepResult> {
             console.error(`[stale-task-sweep] recovery check failed for ${task.id}:`, (err as Error).message);
           }
         }
-        // SWEEP-LOOP: a task already in backlog IS with the orchestrator — there is
-        // nothing to return it to. transition('backlog'→'backlog') is an idempotent
-        // no-op that writes none of the extraColumns (last_progress_at stays
-        // frozen), so pre-fix the sweep re-"returned" the same card on EVERY tick:
-        // a task_returned event + broadcast every 10 min per stale backlog card,
-        // forever (measured: ~30 cards × 144/day on a box with intake-advance off).
-        // Count it, name it once per run, write nothing.
-        if (task.status === 'backlog') {
-          alreadyInBacklog++;
-          continue;
-        }
+        // CC-063: backlog cards never reach this loop — the candidate query
+        // excludes `status = 'backlog'` and the count above names them once.
         returnToOrchestrator(
           task,
           `Task stale in '${task.status}' for ${Math.round(ageHours)}h (threshold: ${thresholdHours}h) with no progress`,

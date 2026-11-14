@@ -14,8 +14,13 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     branches: [main]
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   # ── U60/JM-U63b — My AI CEO off-brand color gate ────────────────────────
@@ -24,6 +29,7 @@ jobs:
   # introduction. The mutation self-test proves the scanner actually bites
   # BEFORE trusting its clean verdict on the real tree.
   ceo-chat-color-gate:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     name: My AI CEO off-brand color gate (indigo/purple/fuchsia)
     runs-on: ubuntu-24.04
     steps:
@@ -60,6 +66,7 @@ jobs:
   # COMMS_QC_CONFORMANCE (see .env.example) — inert until a producer posts
   # comms_qc_passed onto a review card.
   u117-comms-qc-conformance-guard:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     name: U117 comms-QC conformance gate + mutation proof
     runs-on: ubuntu-24.04
     steps:
@@ -84,6 +91,7 @@ jobs:
           NODE_ENV: test
 
   qc-cc:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     name: QC Command Center
     runs-on: ubuntu-24.04
     steps:
@@ -179,6 +187,7 @@ jobs:
   # no fleet write, no client send. The proof records paired revisions and
   # never the ticket; a missing, failed or skipped proof fails this job.
   paired-invitation-acceptance:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     name: Real paired onboarding invitation acceptance (no skips, no ticket)
     runs-on: ubuntu-24.04
     steps:
@@ -241,6 +250,7 @@ jobs:
           PY
 
   qc-independence:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     name: QC scorer independence
     runs-on: ubuntu-24.04
     steps:
@@ -269,6 +279,7 @@ jobs:
   # CompanyHeroCard + NeedsAttentionSection (test:component) — proving U55
   # acceptance (f)/(4) actually runs in CI, not just locally.
   u55-ceo-hero-contract-tests:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     name: U55 CEO-hero contract + render-level tests
     runs-on: ubuntu-24.04
     steps:
@@ -312,11 +323,23 @@ jobs:
         # a developer-machine path that does not exist on a CI runner).
         run: mkdir -p "${{ runner.temp }}/council-gauntlet-evidence"
 
+      - name: Guard - no Vitest import in a test that Node's own runner executes
+        run: python3 scripts/guard-no-vitest-in-node-unit.py
+
       - name: Run tests/unit/*.test.ts (Node built-in runner)
-        run: npm run test:unit
+        # The full TAP stream is kept in unit.tap (for the annotation step); the job log shows it without the
+        # database-migration chatter that otherwise grows the log to ~50 MB.
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run test:unit 2>&1 | tee "${{ runner.temp }}/unit.tap" | { grep -v -E '^[[:space:]]*(# )?\[(Migration [0-9]+|seed|reseed|DB)\]' || true; }
         env:
           NODE_ENV: test
           GAUNTLET_OUT: ${{ runner.temp }}/council-gauntlet-evidence
+
+      - name: Annotate failing unit tests (file and name)
+        if: failure()
+        run: bash scripts/ci-annotate-tap-failures.sh "${{ runner.temp }}/unit.tap"
 
       - name: Run real render-level proof (jsdom + @testing-library/react)
         run: npm run test:component
@@ -327,6 +350,7 @@ jobs:
   # Ports every applicable row of docs/B1-truth-table.md into vitest.
   # A wrong verdict on any row blocks merge (per the severity tier table).
   deep-health-truth-table:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     name: B.1 deep-health truth table (vitest)
     runs-on: ubuntu-24.04
     steps:
@@ -372,6 +396,7 @@ jobs:
   # a broken state (missing asset).  Does NOT require pm2 (pm2 check is skipped
   # when pm2 is absent; fixture covers the app-level checks).
   deep-health-probe-fixture:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     name: B.1 thin-probe fixture (cc-health-check.sh)
     runs-on: ubuntu-24.04
     env:
@@ -496,6 +521,7 @@ jobs:
           echo "OK: correctly returned exit 1 (RED) for stale manifest"
 
   duck-e2e:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     name: Duck pipeline e2e (mock generator)
     runs-on: ubuntu-24.04
     # NOTE: add this job to branch-protection required-status-checks so it
@@ -540,6 +566,7 @@ jobs:
           DUCK_E2E_ARTIFACT_QC: ""
 
   port-pin-env-bleed-guard:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     name: Port-pin and env-bleed guard (v4.42.0+)
     # Prevents re-introduction of the CC crash-loop root causes:
     #   - process.env.PORT in ecosystem → OpenClaw gateway PORT bleeds in
@@ -667,6 +694,7 @@ jobs:
   # "Failed to collect page data for /api/ad-campaigns/[id]". A red job that
   # blocks nothing is indistinguishable from no job at all. It blocks now.
   build-smoke:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     name: Build smoke test
     runs-on: ubuntu-24.04
     steps:
@@ -724,6 +752,7 @@ jobs:
   # assertion on its own output means a future revert back to the old
   # misleading wording fails this job outright.
   no-client-names:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     name: No client names in tracked files (authoritative scan)
     runs-on: ubuntu-24.04
     steps:
@@ -814,6 +843,7 @@ jobs:
   # ship. Covers scripts/*.sh and every nested scripts dir (install/, cloudflare/,
   # integration-tests/, conversational-ai/, fleet-heartbeat/scripts/, .claude/).
   shell-syntax:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     name: Shell script syntax (bash -n) guard
     runs-on: ubuntu-24.04
     steps:
@@ -839,6 +869,7 @@ jobs:
           echo "All shell scripts parsed cleanly."
 
   prove-zhe-web-e2e:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     name: prove-zhe web e2e + interview ZHE gates (P3-8)
     runs-on: ubuntu-24.04
     # Proves a completed interview through THIS app produces a Zero-Human-Everything
@@ -887,6 +918,7 @@ jobs:
   # HTTPS. This exercises secure enrollment cookies, pause/resume and gate locking
   # without client credentials, external providers or the operator's workspace.
   interview-lock-e2e:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     name: Interview-unlock shell-lock e2e (Playwright)
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -960,6 +992,7 @@ jobs:
   # invariants (under the cap everything still pages; the gate fails OPEN).
   # Node 22: the durable store uses `node:sqlite` (built in from 22.5).
   rescue-rangers-tests:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     name: Rescue Rangers ticket store + relay snippets (node --test)
     runs-on: ubuntu-24.04
     steps:

@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     branches: [main]
   workflow_dispatch:
 
@@ -11,8 +12,13 @@ on:
 # name were shipped inside runtime config. Only the *.example.json templates may
 # be tracked; client-specific runtime files must stay ignored and untracked.
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   check-config-template-state:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     name: Verify config files are empty/template (no client data)
     runs-on: ubuntu-24.04
     steps:

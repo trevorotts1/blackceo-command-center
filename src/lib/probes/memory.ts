@@ -54,7 +54,16 @@ export async function probeMemory(): Promise<ProbeResult> {
         if (count.n === 0) {
           status = 'unknown';
         } else if (latestAt) {
-          const ageMs = Date.now() - new Date(latestAt + 'Z').getTime();
+          // created_at arrives in two dialects: SQLite space form
+          // ('YYYY-MM-DD HH:MM:SS', UTC, no zone marker) and full ISO-8601
+          // ending in 'Z' or an offset. Blindly appending 'Z' turned the ISO
+          // form into '...ZZ' — an Invalid Date, so ageMs was NaN, the
+          // finite check failed, and a memory ledger that had not written in
+          // days still read `live`. Normalize to one parseable ISO string.
+          const iso = /[zZ]$|[+-]\d{2}:?\d{2}$/.test(latestAt)
+            ? latestAt
+            : latestAt.replace(' ', 'T') + 'Z';
+          const ageMs = Date.now() - Date.parse(iso);
           if (Number.isFinite(ageMs) && ageMs > 24 * 60 * 60 * 1000) {
             status = 'degraded';
             error = 'no memory writes in the last 24h';

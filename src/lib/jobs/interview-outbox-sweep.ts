@@ -3,7 +3,9 @@ import { tenantRegistration } from '@/lib/auth/tenant-context';
 import { drainInterviewOperations } from '@/lib/interview/remote-protocol';
 import { throwIfJobLeaseLost } from './job-lease';
 export async function runInterviewOutboxSweep() {
- const hosts=Object.keys(JSON.parse(process.env.MC_TENANT_REGISTRY_JSON||'{}'));
+ let hosts: string[] = [];
+ try { hosts = Object.keys(JSON.parse(process.env.MC_TENANT_REGISTRY_JSON || '{}')); }
+ catch { return { scanned: 0, skippedReason: 'MC_TENANT_REGISTRY_JSON is not valid JSON' }; }
  let scanned=0;
  for(const host of hosts) {
   throwIfJobLeaseLost();

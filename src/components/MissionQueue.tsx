@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { Plus, GripVertical, Eye, AlertTriangle, ChevronLeft, ChevronRight, Search, Inbox as InboxIcon, CheckSquare, Square, Archive, ArrowRight, UserPlus, XCircle } from 'lucide-react';
 import { useMissionControl } from '@/lib/store';
 import { ErrorState } from './podcast/states';
@@ -29,6 +29,7 @@ import {
   BACKLOG_COLUMN_LABEL,
   TODO_COLUMN_LABEL,
   BACKLOG_COLUMN_SUBTITLE,
+  COLUMN_HELP_TEXT,
   triadMissingFields,
   triadMissingPillText,
 } from '@/lib/board-labels';
@@ -36,7 +37,7 @@ import { visibleRange, thumbMetrics, trackClickToScrollLeft, hasOverflow } from 
 import { taskToColumnId, columnIdToStatus, STALE_COLUMN_ID } from '@/lib/board-projection';
 import { canonicalDeptFromAnyLabel, canonicalDeptSlug } from '@/lib/routing/canonical-slug';
 
-// Board kind: 'task' renders the existing 6-column task board (unchanged);
+// Board kind: 'task' renders the existing 7-column task board (unchanged);
 // 'bug' renders the 7-lane Bugs Department board backed by /api/bugs.
 type BoardKind = 'task' | 'bug';
 
@@ -74,7 +75,7 @@ interface MissionQueueProps {
 // This is intentionally a UI/column-mapping change, not a schema change.
 //
 // BOARD_PRESETS drives the config-driven column set (T3-001).
-// The 'task' preset is the original 6 columns verbatim.
+// The 'task' preset is the original 7 columns verbatim.
 // The 'bug' preset renders the 7-lane Bugs Department board.
 // All existing task board code paths are gated behind boardKind === 'task' (the default).
 
@@ -94,15 +95,22 @@ const SCROLL_HINT_KEY = 'bcc-kanban-scroll-hint-done';
 // hover copy for "Being Prepared"; see src/lib/board-labels.ts.
 const COLUMN_TOOLTIPS: Record<string, string> = {
   backlog: BACKLOG_COLUMN_SUBTITLE,
-  todo:
-    'Groomed & ready — has description + SOP + persona and is assigned to an agent; queued but not started.',
-  in_progress: 'An agent is actively working this.',
-  review:      'Finished — being QC-checked before Done.',
-  blocked:
-    'Stuck, needs attention (a system fix or your input); should escalate to get fixed, not sit here.',
-  stale:
-    'No longer provable from the lifecycle event stream: the source record was deleted, the stream stalled past the threshold, or the newest event carries a status the board does not recognise. The card names its last event time.',
-  done: 'Completed and approved.',
+  todo: COLUMN_HELP_TEXT.todo,
+  in_progress: COLUMN_HELP_TEXT.in_progress,
+  review: COLUMN_HELP_TEXT.review,
+  blocked: COLUMN_HELP_TEXT.blocked,
+  stale: COLUMN_HELP_TEXT.stale,
+  done: COLUMN_HELP_TEXT.done,
+};
+
+// CC-035 — what an empty column says. Plain English, never "No tasks".
+const COLUMN_EMPTY_TEXT: Record<string, string> = {
+  backlog: 'Nothing waiting. New requests land here first.',
+  todo: 'Nothing queued.',
+  in_progress: 'No one is working on a task right now.',
+  review: 'Nothing is being checked.',
+  blocked: "Nothing is stuck. That's good.",
+  done: 'Finished tasks will appear here.',
 };
 
 const BOARD_PRESETS: Record<BoardKind, ColumnDef[]> = {
@@ -116,7 +124,7 @@ const BOARD_PRESETS: Record<BoardKind, ColumnDef[]> = {
     // holds cards the event stream can no longer prove (deleted source, stalled
     // stream, unknown event type), so a human sees them instead of trusting a
     // column they were silently left in.
-    { id: STALE_COLUMN_ID, label: 'Stale / Unknown', gradient: 'column-pill-blocked', tooltip: COLUMN_TOOLTIPS.stale },
+    { id: STALE_COLUMN_ID, label: 'Needs a Look', gradient: 'column-pill-blocked', tooltip: COLUMN_TOOLTIPS.stale },
     { id: 'done',        label: 'Done',        gradient: 'column-pill-done',     tooltip: COLUMN_TOOLTIPS.done },
   ],
   bug: [
@@ -236,7 +244,7 @@ export const departmentNames: Record<string, string> = {
 };
 
 export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task', loadError, onRetry, dueDateWindowDays = 7 }: MissionQueueProps) {
-  const { tasks, isLoading, updateTaskStatus, updateTask, addEvent, selectedDepartment, setSelectedDepartment } = useMissionControl();
+  const { tasks, agents, isLoading, updateTaskStatus, updateTask, addEvent, selectedDepartment, setSelectedDepartment } = useMissionControl();
   const selectedTaskIds = useMissionControl((s) => s.selectedTaskIds);
   const toggleTaskSelection = useMissionControl((s) => s.toggleTaskSelection);
   const clearTaskSelection = useMissionControl((s) => s.clearTaskSelection);
@@ -295,7 +303,7 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
   const [bulkAssignAgentId, setBulkAssignAgentId] = useState('');
   const [bulkSubmitting, setBulkSubmitting] = useState(false);
 
-  // Select the active column set from BOARD_PRESETS; default is 'task' (6
+  // Select the active column set from BOARD_PRESETS; default is 'task' (7
   // columns, unchanged). Computed early (used by the scroll-tracking effects
   // below, not just the render loop).
   const COLUMNS = BOARD_PRESETS[boardKind];
@@ -333,6 +341,27 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
   }, []);
   const dismissToast = useCallback((id: string) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
+  }, []);
+
+  // CC-016 — "this column is full" is said ONCE per drag, not once per
+  // dragover event (the browser fires dragover continuously). Reset on the
+  // next drag start.
+  const capacityToastShown = useRef(false);
+  const notifyColumnFull = useCallback((column: ColumnDef) => {
+    if (capacityToastShown.current) return;
+    capacityToastShown.current = true;
+    pushToast({
+      tone: 'info',
+      title: `"${column.label}" is full`,
+      detail: `This column holds up to ${column.maxWip} tasks at a time. Finish or move one first.`,
+    });
+  }, [pushToast]);
+
+  // CC-017 — per-column "What is this column?" disclosure. The help is visible
+  // text on first load and the button collapses it. Tracked as collapsed-so-far.
+  const [collapsedHelp, setCollapsedHelp] = useState<Record<string, boolean>>({});
+  const toggleHelp = useCallback((columnId: string) => {
+    setCollapsedHelp((prev) => ({ ...prev, [columnId]: !prev[columnId] }));
   }, []);
 
   // ── Bug board state (boardKind === 'bug') ─────────────────────────────────
@@ -583,6 +612,7 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
   };
 
   const handleDragStart = (e: React.DragEvent, task: Task) => {
+    capacityToastShown.current = false;
     setDraggedTask(task);
     e.dataTransfer.effectAllowed = 'move';
   };
@@ -591,8 +621,10 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
     // When a column has a WIP limit and is already at capacity, disallow the
     // drop by not preventing the default (no drop zone). The dropTarget style
     // gating below also visually signals this — the column card list won't
-    // show the drag-over highlight when at capacity.
+    // show the drag-over highlight when at capacity. Say so once per drag
+    // instead of silently refusing.
     if (column && taskCount !== undefined && isColumnAtCapacity(column, taskCount)) {
+      notifyColumnFull(column);
       return; // don't prevent default — drop will be rejected by the browser
     }
     e.preventDefault();
@@ -679,7 +711,9 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
           id: crypto.randomUUID(),
           type: targetStatus === 'done' ? 'task_completed' : 'task_status_changed',
           task_id: task.id,
-          message: `Task "${task.title}" moved to ${targetStatus}`,
+          message: `Task "${task.title}" moved to ${
+            MOVE_COLUMNS.find((c) => c.id === taskToColumnId({ status: targetStatus }))?.label ?? targetStatus
+          }`,
           created_at: new Date().toISOString(),
         });
 
@@ -694,6 +728,13 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
 
           if (!result.success) {
             console.error('Auto-dispatch failed:', result.error);
+            pushToast({
+              tone: 'error',
+              title: `"${task.title}" has not started yet`,
+              detail: task.assigned_agent_id
+                ? 'We could not hand this task to your AI team just now. It will be retried automatically. You do not need to move it again.'
+                : 'This task has no team member assigned. Open the task and choose who should do it.',
+            });
           }
         }
         return;
@@ -715,10 +756,15 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
         return;
       }
 
+      console.error('Failed to move task:', errBody?.error ?? `HTTP ${res.status}`);
       pushToast({
         tone: 'error',
-        title: errBody?.error || `Couldn't move "${task.title}" (HTTP ${res.status})`,
-        detail: errBody?.message || errBody?.remediation || errBody?.hint,
+        title: `Couldn't move "${task.title}"`,
+        detail:
+          errBody?.message ||
+          errBody?.remediation ||
+          errBody?.hint ||
+          'Please try again. If it keeps happening, let your support contact know.',
       });
     } catch (error) {
       console.error('Failed to update task status:', error);
@@ -819,6 +865,9 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
 
   const numSelected = selectedTaskIds.size;
 
+  // CC-042 — show people the task's own title, never a truncated id.
+  const taskTitleById = useMemo(() => new Map(tasks.map((t) => [t.id, t.title] as const)), [tasks]);
+
   const handleBulkMove = useCallback(async (targetColumnId: string) => {
     const targetStatus = columnIdToStatus(targetColumnId);
     const ids = Array.from(selectedTaskIds);
@@ -856,7 +905,7 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
           // without a store snapshot, so refetch instead.
           pushToast({
             tone: 'error',
-            title: `Could not move ${r.taskId.slice(0, 8)}...`,
+            title: `Could not move "${taskTitleById.get(r.taskId) ?? 'this task'}"`,
             detail: r.error ?? 'Unknown error',
           });
         }
@@ -871,7 +920,9 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
       } else {
         pushToast({
           tone: 'info',
-          title: `Moved ${data.ok} task${data.ok === 1 ? '' : 's'} to ${targetStatus}`,
+          title: `Moved ${data.ok} task${data.ok === 1 ? '' : 's'} to ${
+            MOVE_COLUMNS.find((c) => c.id === targetColumnId)?.label ?? targetColumnId
+          }`,
         });
       }
 
@@ -938,7 +989,7 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
         if (!r.ok) {
           pushToast({
             tone: 'error',
-            title: `Could not archive ${r.taskId.slice(0, 8)}...`,
+            title: `Could not archive "${taskTitleById.get(r.taskId) ?? 'this task'}"`,
             detail: r.error ?? 'Unknown error',
           });
         }
@@ -1029,6 +1080,26 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
   const countableTasks = searchResults !== null ? searchResults : tasks;
   const filteredTasks = countableTasks.filter(matchesScope);
 
+  // CC-024 — the attention lane exists only when something needs attention.
+  const displayColumns = boardKind === 'bug'
+    ? COLUMNS
+    : COLUMNS.filter((c) => c.id !== STALE_COLUMN_ID || getTasksByStatus(c.id).length > 0);
+
+  // CC-043 — count each column ONCE per render, not once per card.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const columnTaskCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const c of COLUMNS) counts[c.id] = getTasksByStatus(c.id).length;
+    return counts;
+  }, [tasks, searchResults, searchQuery, activeFilter, effectiveDepartment, workspaceId, dueWindowDays]);
+
+  const boardIsEmpty =
+    boardKind === 'task' &&
+    filteredTasks.length === 0 &&
+    !isLoading &&
+    !searchQuery.trim() &&
+    activeFilter === 'total';
+
   const filters = [
     {
       id: 'total',
@@ -1040,7 +1111,7 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
     { id: 'completed', label: 'Completed' },
     // Item 19 — engine-ABANDONED runs: the producer posts them as
     // `review`, so no status filter could ever find them before this.
-    { id: 'abandoned', label: 'Abandoned' },
+    { id: 'abandoned', label: 'Stopped' },
   ];
 
   return (
@@ -1225,14 +1296,19 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
 
           {/* Bulk assign */}
           <div className="flex items-center gap-1.5">
-            <input
-              type="text"
+            <select
               value={bulkAssignAgentId}
               onChange={(e) => setBulkAssignAgentId(e.target.value)}
-              placeholder="Agent ID..."
-              aria-label="Agent ID to bulk-assign"
-              className="w-32 px-2 py-1 rounded-md bg-white/20 placeholder-brand-200 text-white text-xs border border-white/20 focus:outline-none focus:ring-1 focus:ring-white/50"
-            />
+              aria-label="Team member to assign the selected tasks to"
+              className="w-full sm:w-44 px-2 py-1 rounded-md bg-white/20 text-white text-xs border border-white/20 focus:outline-none focus:ring-1 focus:ring-white/50"
+            >
+              <option value="" className="text-gray-900">Choose a team member…</option>
+              {agents.map((agent) => (
+                <option key={agent.id} value={agent.id} className="text-gray-900">
+                  {agent.name}
+                </option>
+              ))}
+            </select>
             <button
               type="button"
               disabled={bulkSubmitting || !bulkAssignAgentId.trim()}
@@ -1291,7 +1367,7 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
           aria-label="Jump to board column"
           className="flex items-center gap-2 overflow-x-auto"
         >
-          {COLUMNS.map((column, index) => {
+          {displayColumns.map((column, index) => {
             const count =
               boardKind === 'bug' ? getBugsByStatus(column.id).length : getTasksByStatus(column.id).length;
             const isActive = overflowing ? !!visibleCols[index] : index === activeColumnIndex && visibleCols.length === 0;
@@ -1395,6 +1471,13 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
           </>
         )}
 
+        {/* CC-035 — whole-board empty state, above the columns. */}
+        {boardIsEmpty && (
+          <p className="px-4 lg:px-6 pt-4 text-sm text-gray-500">
+            No tasks yet. Ask your AI team for something in chat, or press New Task.
+          </p>
+        )}
+
         {/* Actual scrollable column strip */}
         <div
           ref={scrollRef}
@@ -1465,7 +1548,7 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
             ) : (
               /* Task Board — six status lanes + the stale/unknown attention
                  lane, with loading gate above */
-              COLUMNS.map((column) => {
+              displayColumns.map((column) => {
                 const columnTasks = getTasksByStatus(column.id);
                 const atCapacity = isColumnAtCapacity(column, columnTasks.length);
                 const capacityLabel = wipLabel(column, columnTasks.length);
@@ -1512,25 +1595,24 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
                         </button>
                         <div
                           className={`flex items-center gap-2 px-3 lg:px-4 py-2 lg:py-2.5 rounded-full text-white shadow-md cursor-help ${atCapacity ? 'kanban-column-pill-at-capacity' : column.gradient}`}
-                          title={atCapacity ? `${column.tooltip ?? ''} (WIP limit ${column.maxWip} reached)` : column.tooltip ?? undefined}
+                          title={atCapacity ? `${column.tooltip ?? ''} (holds up to ${column.maxWip} at a time)` : column.tooltip ?? undefined}
                         >
                           <span className={`text-badge font-bold px-2 py-0.5 rounded-full ${atCapacity ? 'bg-red-400 text-white' : 'bg-white/20'}`}>
                             {capacityLabel ?? columnTasks.length}
                           </span>
                           <span className="text-sm font-bold">{column.label}</span>
                           {atCapacity && (
-                            <span className="text-badge font-bold bg-red-400 text-white px-1.5 py-0.5 rounded-full" aria-label={`WIP limit ${column.maxWip} reached`}>
-                              FULL
+                            <span className="text-badge font-bold bg-red-400 text-white px-1.5 py-0.5 rounded-full" aria-label={`This column is full — it holds up to ${column.maxWip} at a time`}>
+                              Full
                             </span>
                           )}
                         </div>
                       </div>
-                      {/* No "+" on the Blocked column: a task can only ENTER
-                          Blocked by being moved there (it needs a reason +
-                          audience + ask), never created there — the API rejects
-                          create-as-blocked. Hiding the button keeps it from
-                          being a control that always errors. */}
-                      {column.id !== 'blocked' && column.id !== STALE_COLUMN_ID && (
+                      {/* CC-025 — no "+" where a new card cannot honestly
+                          start: Blocked needs human-only fields, the attention
+                          lane is read-only, and Review / Done need evidence
+                          that a brand-new task does not have. */}
+                      {column.id !== 'blocked' && column.id !== STALE_COLUMN_ID && column.id !== 'review' && column.id !== 'done' && (
                         <button
                           type="button"
                           onClick={() => {
@@ -1548,6 +1630,25 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
                       )}
                     </div>
 
+                    {/* CC-017 — the column's meaning as visible text, not only a
+                        hover title. Shown on first load; a real button collapses
+                        it. */}
+                    {column.tooltip && (
+                      <div className="shrink-0 -mt-2">
+                        <button
+                          type="button"
+                          aria-expanded={!collapsedHelp[column.id]}
+                          onClick={() => toggleHelp(column.id)}
+                          className="text-[11px] font-medium text-gray-500 underline underline-offset-2 hover:text-gray-800"
+                        >
+                          What is this column?
+                        </button>
+                        {!collapsedHelp[column.id] && (
+                          <p className="mt-1 text-[11px] leading-snug text-gray-500">{column.tooltip}</p>
+                        )}
+                      </div>
+                    )}
+
                     {/* Tasks — min-h-0 keeps the list constrained so it
                         scrolls internally instead of clipping; pb-6 gives
                         the last card breathing room at the shell edge. */}
@@ -1560,7 +1661,7 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
                               ? 'No tasks match this filter'
                               : effectiveDepartment
                                 ? 'No tasks in this department'
-                                : 'No tasks'}
+                                : COLUMN_EMPTY_TEXT[column.id] ?? 'Nothing here yet.'}
                           </span>
                           {(searchQuery.trim() !== '' || activeFilter !== 'total') && (
                             <button
@@ -1609,9 +1710,7 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
                                 }}
                                 columns={MOVE_COLUMNS}
                                 currentColumnId={column.id}
-                                columnTaskCounts={Object.fromEntries(
-                                  COLUMNS.map((c) => [c.id, getTasksByStatus(c.id).length]),
-                                )}
+                                columnTaskCounts={columnTaskCounts}
                                 parentTask={task}
                               />
                             );
@@ -1628,9 +1727,7 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
                               columns={MOVE_COLUMNS}
                               currentColumnId={column.id}
                               onMove={handleColumnMove}
-                              columnTaskCounts={Object.fromEntries(
-                                COLUMNS.map((c) => [c.id, getTasksByStatus(c.id).length]),
-                              )}
+                              columnTaskCounts={columnTaskCounts}
                             />
                           );
                         })
@@ -1713,6 +1810,7 @@ export function LifecycleChip({ lifecycle }: { lifecycle?: LifecycleCard | null 
 
   const lastEvent = lifecycle.last_event_at;
   const timeNote = lastEvent ? `last event ${lastEvent}` : 'no event on record';
+  const lastEventAgo = lastEvent ? formatDistanceToNow(new Date(lastEvent), { addSuffix: true }) : null;
 
   if (lifecycle.state === 'unknown') {
     const kind = lifecycle.unknown_event_type ?? 'unrecognised status';
@@ -1722,7 +1820,7 @@ export function LifecycleChip({ lifecycle }: { lifecycle?: LifecycleCard | null 
         className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-purple-100 text-purple-800 border border-purple-300"
         title={`Newest lifecycle event carries a status the board does not recognise (${kind}). It is surfaced as UNKNOWN instead of being dropped. ${timeNote}.`}
       >
-        UNKNOWN · {kind}
+        Needs a look
       </span>
     );
   }
@@ -1734,7 +1832,7 @@ export function LifecycleChip({ lifecycle }: { lifecycle?: LifecycleCard | null 
       className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-red-100 text-red-800 border border-red-300"
       title={`This card's lifecycle can no longer be proven from the event stream (${detail}). ${timeNote}.`}
     >
-      STALE · {detail} {lastEvent ?? '—'}
+      {lastEventAgo ? `No update since ${lastEventAgo}` : 'No update on record'}
     </span>
   );
 }
@@ -1864,7 +1962,7 @@ export function TaskCard({ task, onDragStart, onClick, onAnswer, isDragging, isC
           return (
             <span
               className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-amber-50 text-amber-700 border border-amber-200"
-              title={`Why is this here? "${BACKLOG_COLUMN_LABEL}" means it's still missing part of the Triad (description + SOP + persona) it needs before it can start.`}
+              title={`Why is this here? "${BACKLOG_COLUMN_LABEL}" means it is still getting ready: it needs a description, a playbook and a working style before it can start.`}
             >
               🧩 {triadMissingPillText(missingTriad)}
             </span>
@@ -1949,7 +2047,7 @@ export function TaskCard({ task, onDragStart, onClick, onAnswer, isDragging, isC
             className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-orange-100 text-orange-800 border border-orange-300"
             title="The audience was never confirmed in time — this task released under the neutral house voice. Confirm the audience to re-voice future work."
           >
-            ⚠️ Released on house voice
+            ⚠️ Written in a neutral voice
           </span>
         )}
 
@@ -1977,7 +2075,7 @@ export function TaskCard({ task, onDragStart, onClick, onAnswer, isDragging, isC
                   ' — open the task to resolve.'
             }
           >
-            🚨 Persona mismatch
+            🚨 Working style needs a look
           </span>
         )}
 
@@ -1996,7 +2094,7 @@ export function TaskCard({ task, onDragStart, onClick, onAnswer, isDragging, isC
             className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-orange-100 text-orange-800 border border-orange-300"
             title={task.dispatch_hold.message}
           >
-            🔌 Agent not wired on this box
+            🔌 Team member not connected yet
           </span>
         )}
 
@@ -2149,29 +2247,12 @@ function ModelPill({ task }: { task: Task }) {
   };
 
   if (!task.model_id) {
-    return (
-      <span
-        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-400 italic"
-        title="No intended model resolved yet. Dispatch the task to pin the model the Command Center will request."
-      >
-        🤖 no model
-      </span>
-    );
+    // CC-024 — nothing resolved yet is not worth a chip on the card face.
+    return null;
   }
 
   const label = task.model_label || task.model_id;
-
-  const tooltipParts: string[] = [];
-  tooltipParts.push('Intended model (CC-resolved; gateway runs the agent\'s configured model)');
-  tooltipParts.push(task.model_label ? `${task.model_label} (${task.model_id})` : task.model_id);
-  if (task.model_provider) tooltipParts.push(`Provider: ${task.model_provider}`);
-  if (typeof task.model_input_cost_per_million === 'number') {
-    tooltipParts.push(`Input: $${task.model_input_cost_per_million.toFixed(2)} / 1M tok`);
-  }
-  if (typeof task.model_output_cost_per_million === 'number') {
-    tooltipParts.push(`Output: $${task.model_output_cost_per_million.toFixed(2)} / 1M tok`);
-  }
-  const tooltip = tooltipParts.join('\n');
+  const tooltip = task.model_label ? `${task.model_label} (${task.model_id})` : task.model_id;
 
   return (
     <a

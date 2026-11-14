@@ -57,8 +57,8 @@ nothing lands in `ps` output.
 
 ## Wiring (applied on the private operator deploy)
 
-`heartbeat.sh` / `remediate.sh` carry the client return-leg allowlist and are
-**not** committed to this public repo; the edit is applied on the operator box:
+`heartbeat.sh` and `remediate.sh` in this repository are tracked reference copies.
+The copies that run are on the operator machine; the edit is applied there:
 
 ```sh
 source "$(dirname "$0")/lib/rescue-outage-ticket.sh"

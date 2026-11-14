@@ -66,7 +66,7 @@ function renderTaskCard(task: Task) {
 // ── (a) held task -> chip on the card, text in the modal ───────────────────
 
 describe('TaskCard — class-b dispatch-hold chip (C-06 acceptance a)', () => {
-  it('renders the "Agent not wired on this box" chip when the task carries dispatch_hold', () => {
+  it('renders the "Team member not connected yet" chip when the task carries dispatch_hold', () => {
     renderTaskCard(
       baseTask({
         dispatch_hold: {
@@ -80,7 +80,7 @@ describe('TaskCard — class-b dispatch-hold chip (C-06 acceptance a)', () => {
     );
     const chip = screen.getByTestId('dispatch-hold-chip');
     expect(chip).toBeTruthy();
-    expect(chip.textContent).toMatch(/Agent not wired on this box/);
+    expect(chip.textContent).toMatch(/Team member not connected yet/);
     expect(chip.getAttribute('title')).toBe(HOLD_MESSAGE);
   });
 });

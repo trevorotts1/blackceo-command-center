@@ -217,8 +217,15 @@ test('V5: quiet hours hold the phase message but not blocked/done', () => {
   // So exactly two plans survive, and the phase task is NOT one of them.
   assert.equal(plans.length, 2, 'done + blocked-on-OWNER survive quiet hours; the phase report does not');
   // PlannedSend carries no taskId of its own -- the task id lives on each stamp.
+  // U-15 (CC-050): the surviving messages also claim (cover) their earlier
+  // stamps, so v5-done carries three stamps and v5-blocked two.
   const ids = plans.flatMap((pl) => pl.stamps.map((st) => st.taskId)).sort();
-  assert.deepStrictEqual(ids, ['v5-blocked', 'v5-done'], 'the phase task must be the one held');
+  assert.deepStrictEqual(
+    ids,
+    ['v5-blocked', 'v5-blocked', 'v5-done', 'v5-done', 'v5-done'],
+    'the phase task must be the one held',
+  );
+  assert.ok(!ids.includes('v5-phase'), 'no stamp may be claimed for the held phase report');
 });
 
 test('V5-bis: phase message at night with isNight=false (permissive) still respects the !night guard', () => {

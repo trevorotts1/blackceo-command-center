@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import type { ReactNode } from 'react';
 import OperatorSidebar from '@/components/OperatorSidebar';
 import OperatorOnboarding from '@/components/operator/OperatorOnboarding';
+import { HealthIndicator } from '@/components/HealthIndicator';
 import { detectPlatform } from '@/lib/platform';
 
 export const metadata: Metadata = {
@@ -17,6 +18,11 @@ export default function OperatorLayout({ children }: { children: ReactNode }) {
     <div className="flex min-h-screen bg-bcc-bg">
       <OperatorSidebar />
       <main className="flex-1 min-w-0">
+        {/* U-06: the header now carries the client variant everywhere, so the
+            operator detail drawer lives here — the only place it is reachable. */}
+        <div className="flex justify-end px-4 py-2 border-b border-gray-100 bg-white">
+          <HealthIndicator viewerRole="operator" />
+        </div>
         <div className="max-w-[1400px] mx-auto px-6 md:px-10 py-8">
           {children}
         </div>

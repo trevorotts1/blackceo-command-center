@@ -586,7 +586,12 @@ export async function reconcileStalledExecutions(
       console.warn(`[execution-watcher] stall-reconcile history read failed (${row.session_key}):`, (err as Error).message);
     }
 
-    if (messages.some(isAgentActivity)) {
+    // Alive means activity NEWER than the stall cut-off. When the gateway gives
+    // no timestamps at all we cannot tell, and keep the old benefit of the doubt.
+    const activity = messages.filter(isAgentActivity);
+    const stamped = activity.map(extractMessageTimeMs).filter((ms): ms is number => ms !== null);
+    const alive = activity.length > 0 && (stamped.length === 0 || stamped.some((ms) => ms > cutoff));
+    if (alive) {
       // Alive. Promoting from its own state also stamps updated_at, so the stall
       // clock restarts and a long, productive run is never re-probed every tick.
       if (recordExecutionEvidence(row.id, 'running', row.state)) {
@@ -831,9 +836,9 @@ async function advanceToReview(taskId: string, agentId: string | null, agentName
  * Reconcile sweep: scan all in_progress tasks with an active session for a
  * `TASK_COMPLETE:` marker in the agent's recent assistant messages.
  */
-export async function runExecutionCompletionReconcile(): Promise<void> {
+export async function runExecutionCompletionReconcile(): Promise<{ skippedReason?: string }> {
   if (process.env.EXECUTION_WATCHER_ENABLED === '0') {
-    return; // Safety net explicitly disabled.
+    return { skippedReason: 'EXECUTION_WATCHER_ENABLED=0' }; // Safety net explicitly disabled.
   }
 
   recoverExpiredExecutions();
@@ -875,7 +880,7 @@ export async function runExecutionCompletionReconcile(): Promise<void> {
        AND t.assigned_agent_id IS NOT NULL`
   );
 
-  if (rows.length === 0) return;
+  if (rows.length === 0) return {};
 
   // MR-15: track whether we could reach the gateway at all this tick. If the
   // gateway is unreachable for EVERY task, the reconcile cannot find a
@@ -1008,4 +1013,5 @@ export async function runExecutionCompletionReconcile(): Promise<void> {
       console.warn(`[execution-watcher] Reconcile failed for task ${task.id}:`, (err as Error).message);
     }
   }
+  return {};
 }

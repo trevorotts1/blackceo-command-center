@@ -1001,7 +1001,7 @@ export async function notifyOwnerPrivate(opts: {
   expectedChatId: string;
   message: string;
 }): Promise<{ status: 'accepted'; messageId: string } | { status: 'uncertain' | 'not-dispatched' }> {
-  if (ownerSendsSuppressed() || process.env.MC_COMPANY_ID !== opts.companyId ||
+  if (ownerSendsSuppressed() || ownerSendsHeld() || process.env.MC_COMPANY_ID !== opts.companyId ||
       !opts.expectedChatId || resolveOwnerChatId() !== opts.expectedChatId) {
     return { status: 'not-dispatched' };
   }
@@ -1105,6 +1105,10 @@ export function notifyOwner(message: string): boolean {
     escalateUndeliverableOwner('no owner chat resolvable', message);
     // Still `false`: callers that DO check (e.g. interview/send-link) must keep
     // reporting "owner not reachable" to the user. The escalation is additive.
+    return false;
+  }
+  if (ownerSendsHeld()) {
+    appendNotificationLog({ ts: new Date().toISOString(), kind: 'owner_send_held', message });
     return false;
   }
   const dispatched = notifyTelegram({ chatId, message });
@@ -1291,6 +1295,11 @@ export function notifySystem(
     // propagate-rescue-webhook.sh) and is never logged or hardcoded. When it is unset the
     // POST still fires (best-effort contract) and the receiver rejects it fail-closed.
     const rescueSecret = process.env.RESCUE_RANGERS_WEBHOOK_SECRET || '';
+    // RRX-017: one identifier per alert per 15-minute window, so a retry or a
+    // second process sending the same alert cannot open a second ticket.
+    const requestId = `cc-${createHash('sha1')
+      .update(`${identity.boxId} ${meta?.agent ?? ''} ${message} ${Math.floor(Date.now() / DEDUP_TTL_MS)}`)
+      .digest('hex')}`;
     void fetch(webhookUrl, {
       method: 'POST',
       headers: {
@@ -1299,6 +1308,7 @@ export function notifySystem(
       },
       body: JSON.stringify({
         action: meta?.action ?? 'escalate',
+        request_id: requestId,
         // `agent` is kept for backward compatibility with the existing receiver;
         // `agentName` is the canonical field name in the fleet payload schema.
         agent: meta?.agent ?? 'command-center',
@@ -1307,14 +1317,23 @@ export function notifySystem(
         boxName: identity.boxName,
         boxType: identity.boxType,
         boxId: identity.boxId,
+        person: 'operator',
+        openclawVersion: 'n/a',
+        problem: message,
+        alreadyTried: 'n/a (automated Command Center alert)',
+        returnTo: 'none',
         message,
       }),
-    }).catch((err) => {
-      console.warn(
-        '[notify] notifySystem: Rescue Rangers POST failed: %s',
-        (err as Error).message,
-      );
-    });
+    })
+      .then((res) => {
+        // RRX-017: a refused alert leaves a durable record. It used to vanish.
+        if (!res.ok) {
+          recordUndeliverable('rescue_rangers_post_refused', `HTTP ${res.status}: ${message}`);
+        }
+      })
+      .catch((err) => {
+        recordUndeliverable('rescue_rangers_post_failed', `${(err as Error).message}: ${message}`);
+      });
     dispatched = true;
   }
 

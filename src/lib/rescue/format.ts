@@ -12,7 +12,23 @@
  * or legacy row renders blank instead of "Invalid Date".
  */
 
-import { formatDistanceToNow, format as formatDate } from 'date-fns';
+import { formatDistanceToNow } from 'date-fns';
+
+/**
+ * The page's times are Eastern, 12-hour, and say so. `date-fns` `format` would
+ * print in the viewer's own zone in 24-hour form, so the zone is pinned here.
+ * `en-US` may separate the day period with a narrow no-break space (U+202F);
+ * normalize it so the rendered text and its checks read a plain space.
+ */
+function formatEastern(d: Date, options: Intl.DateTimeFormatOptions): string {
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    hour12: true,
+    ...options,
+  })
+    .format(d)
+    .replace(/ /g, ' ');
+}
 
 export function parseStoreTime(iso: string | null | undefined): Date | null {
   if (!iso) return null;
@@ -31,13 +47,24 @@ export function relativeTime(iso: string | null | undefined): string {
 /** Absolute timestamp for title attributes and the timeline gutter. */
 export function absoluteTime(iso: string | null | undefined): string {
   const d = parseStoreTime(iso);
-  return d ? formatDate(d, 'yyyy-MM-dd HH:mm:ss') : '';
+  return d
+    ? `${formatEastern(d, {
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit',
+        second: '2-digit',
+      })} Eastern`
+    : '';
 }
 
 /** Clock time only, for dense timeline rows. */
 export function clockTime(iso: string | null | undefined): string {
   const d = parseStoreTime(iso);
-  return d ? formatDate(d, 'HH:mm:ss') : '';
+  return d
+    ? formatEastern(d, { hour: 'numeric', minute: '2-digit', second: '2-digit' })
+    : '';
 }
 
 /** "42 min" / "3.5 h" for MTTR. */
