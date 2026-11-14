@@ -32,14 +32,13 @@
  *      building from scratch. Same three gate flags arm it; gate #3 is already
  *      relaxed server-side to declines+adds (KEEPS are implicit).
  *
- * ── Inline edit → genuine provenance (SKILL.md edge case) ─────────────────────
- * An edit does NOT rewrite history. It POSTs /api/interview/answer, which APPENDS
- * a fresh, genuine Q/A block to workforce-interview-answers.md (files are the
- * single source of truth; the transcript only ever grows). The new block carries
- * an "Updated on <date> — previous answer was: <X>" note in its answer body, so
- * the file records exactly what changed and when — the provenance the SKILL.md
- * edge case requires. We never hand-write the file, never touch build-state with
- * TS/jq, and never send a color/logo answer through here (those keep their strict
+ * ── Inline edit → the answer replaces that question's answer ─────────────────
+ * An edit POSTs /api/interview/answer with `{questionId, answer}` — the typed
+ * text IS the answer, with no "Updated on …" note and no verbatim `prompt`
+ * appended to it (the route records the registry prompt for that id itself).
+ * A row with no questionId cannot be addressed by the gate, so it is shown
+ * read-only. We never hand-write the file, never touch build-state with TS/jq,
+ * and never send a color/logo answer through here (those keep their strict
  * storeOn validation on the conversational path); free-text answers only.
  *
  * ── Data & doctrine ───────────────────────────────────────────────────────────
@@ -155,9 +154,22 @@ interface GateFlags {
   noUnprovenancedDeclines: boolean;
 }
 
+/**
+ * `gate` on GET /api/interview/state — the step gate's own status (BU-13).
+ * `null` when this box runs no gate (a client tenant is never served the
+ * operator's gate state) or the gate could not be read.
+ */
+interface GateSnapshot {
+  missingRequired: string[];
+  requiredTotal?: number;
+  requiredAnswered?: number;
+  percent?: number;
+}
+
 interface StateResponse {
   ok: boolean;
   flags: GateFlags;
+  gate?: GateSnapshot | null;
   resume: {
     status: string | null;
     nextQuestionNumber: number | null;
@@ -256,18 +268,6 @@ function humanDate(): string {
   });
 }
 
-/**
- * Build the answer body an inline edit appends. Keeps the new answer first, then
- * an "Updated on <date> — previous answer was: <X>" provenance note, so the
- * canonical file records exactly what changed (SKILL.md edge case) without ever
- * rewriting an earlier block.
- */
-function withUpdateNote(next: string, previous: string): string {
-  const prev = previous.trim();
-  const note = `Updated on ${humanDate()} — previous answer was: ${prev ? `"${prev}"` : '(blank)'}`;
-  return `${next.trim()}\n\n${note}`;
-}
-
 /** Group answers by phase, preserving first-seen order (falls back to one group). */
 function groupByPhase(answers: ReviewAnswer[]): Array<{ phase: string; rows: ReviewAnswer[] }> {
   const order: string[] = [];
@@ -333,7 +333,6 @@ function formatMissing(data: CompleteResponse): string {
 export default function ReviewScreen({
   answers = [],
   synthesis,
-  sessionId,
   autoLoad = true,
   onCircleBack,
   onCircleBackStructured,
@@ -375,10 +374,17 @@ export default function ReviewScreen({
   const [needsRetryKick, setNeedsRetryKick] = useState(false);
 
   const flags = state?.flags ?? ALL_GATES_FALSE;
+  // The step gate's own list of required questions still open (BU-16). A box
+  // with no gate (a client tenant) adds no lock of its own here; whenever the
+  // gate does answer, its list is the authority — an open required question
+  // keeps the button locked even when the three legacy flags are all true.
+  const gateMissing = state?.gate?.missingRequired ?? [];
+  const gateSatisfied = !state?.gate || gateMissing.length === 0;
   const allGatesPass =
     flags.genuineTranscriptReady &&
     flags.decisionCoverageComplete &&
-    flags.noUnprovenancedDeclines;
+    flags.noUnprovenancedDeclines &&
+    gateSatisfied;
 
   // AI Workforce standard-first (PHASE 6 item 6): the third-state trigger copy.
   // On a STANDARD_READY box the interview EDITS the prebuilt foundation (apply
@@ -390,6 +396,13 @@ export default function ReviewScreen({
 
   const skipped = state?.resume?.skippedQuestions ?? [];
   const missingDepts = state?.decisionCoverage?.missing?.length ?? 0;
+
+  // The answer list is built from both reads: the recorded answers come from
+  // GET /api/interview/answers, and the questions still open come from the
+  // gate on GET /api/interview/state. A 409 refusal's own ids win while they
+  // are on screen (they are the newest answer). Each gets an "Answer now".
+  const openQuestionIds =
+    refusal?.missingQuestionIds.length ? refusal.missingQuestionIds : gateMissing;
 
   /* ---- live state (flags + skipped queue + coverage) ---- */
 
@@ -431,31 +444,29 @@ export default function ReviewScreen({
     void loadAnswers();
   }, [autoLoad, hostProvidedAnswers, loadAnswers]);
 
-  /* ---- inline edit (append genuine block + updated-on note) ---- */
+  /* ---- inline edit (the typed text becomes that question's answer) ---- */
 
   const saveEdit = useCallback(
     async (row: ReviewAnswer, nextValue: string): Promise<boolean> => {
       const trimmed = nextValue.trim();
+      if (!row.questionId) return false; // read-only: nothing to address it by
       if (!trimmed || trimmed === row.answer.trim()) return true; // no-op
 
       const res = await fetch('/api/interview/answer', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
+        // The answer IS the typed text: no "Updated on …" note, no `prompt`
+        // (the route records the registry prompt for this question id itself).
         body: JSON.stringify({
-          // Record the real question verbatim so the appended block is genuine.
-          prompt: row.question,
-          // New answer first, then the "Updated on … — previous answer was …" note.
-          answer: withUpdateNote(trimmed, row.answer),
-          phase: row.phase ?? undefined,
-          questionNumber:
-            typeof row.questionNumber === 'number' ? row.questionNumber : undefined,
-          sessionId: sessionId ?? undefined,
+          questionId: row.questionId,
+          answer: trimmed,
         }),
       });
 
       if (!res.ok) return false;
 
-      // Reflect the edit locally: new answer + a visible updated-on provenance.
+      // Reflect the edit locally: the new answer plus an on-screen "updated"
+      // marker. Nothing is appended to the answer body.
       const provenance = `Updated on ${humanDate()}`;
       const updated: ReviewAnswer = { ...row, answer: trimmed, provenance };
       setRows((prev) => prev.map((r) => (r.id === row.id ? updated : r)));
@@ -464,7 +475,7 @@ export default function ReviewScreen({
       void loadState();
       return true;
     },
-    [loadState, onEdited, sessionId],
+    [loadState, onEdited],
   );
 
   /* ---- the gated build trigger (same three flags as everywhere) ---- */
@@ -674,6 +685,7 @@ export default function ReviewScreen({
           submitting={submitting}
           completeError={completeError}
           refusal={refusal}
+          openQuestionIds={openQuestionIds}
           onAnswerNow={onCircleBackStructured}
           onBuild={() => void submitComplete()}
           standardReady={standardReady}
@@ -694,7 +706,9 @@ function AnswerRow({
   row: ReviewAnswer;
   onSave: (next: string) => Promise<boolean>;
 }) {
-  const editable = row.editable !== false;
+  // A row with no question id is read-only: an edit posts {questionId, answer},
+  // and there is no id to address the answer by.
+  const editable = row.editable !== false && Boolean(row.questionId);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(row.answer);
   const [saving, setSaving] = useState(false);
@@ -893,6 +907,7 @@ function BuildGate({
   submitting,
   completeError,
   refusal,
+  openQuestionIds,
   onAnswerNow,
   onBuild,
   standardReady,
@@ -904,6 +919,8 @@ function BuildGate({
   completeError: string | null;
   /** A 409 refusal: plain reasons + the question ids still open. */
   refusal: Refusal | null;
+  /** Required questions the gate says are still open (or a refusal's ids). */
+  openQuestionIds: string[];
   /** Hands one open structured question back to the conversation. */
   onAnswerNow?: (questionId: string) => void;
   onBuild: () => void;
@@ -961,8 +978,7 @@ function BuildGate({
         </div>
       )}
 
-      {/* A refusal names what to fix, in plain sentences, and takes the owner
-          straight back to any question the gate says is still open. */}
+      {/* A refusal names what to fix, in plain sentences. */}
       {refusal && (
         <div
           role="alert"
@@ -1005,22 +1021,25 @@ function BuildGate({
               </li>
             ))}
           </ul>
-          {refusal.missingQuestionIds.length > 0 && (
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem' }}>
-              {refusal.missingQuestionIds.map((questionId) => (
-                <button
-                  key={questionId}
-                  type="button"
-                  onClick={() => onAnswerNow?.(questionId)}
-                  disabled={!onAnswerNow}
-                  className={iv.btnGhost}
-                  style={{ padding: '0.3rem 0.6rem', fontSize: '0.8rem' }}
-                >
-                  Answer now
-                </button>
-              ))}
-            </div>
-          )}
+        </div>
+      )}
+
+      {/* The gate's own open required questions are listed here even before the
+          trigger is pressed, so a locked button always says what is missing. */}
+      {openQuestionIds.length > 0 && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem' }}>
+          {openQuestionIds.map((questionId) => (
+            <button
+              key={questionId}
+              type="button"
+              onClick={() => onAnswerNow?.(questionId)}
+              disabled={!onAnswerNow}
+              className={iv.btnGhost}
+              style={{ padding: '0.3rem 0.6rem', fontSize: '0.8rem' }}
+            >
+              Answer now
+            </button>
+          ))}
         </div>
       )}
 
