@@ -18,6 +18,7 @@
  * No DB, no network. Only temp files, cleaned up.
  */
 
+import './_isolated-db';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
