@@ -1104,6 +1104,108 @@ export function writeKnownFacts(known: KnownFacts): string {
   return target;
 }
 
+/* ──────────────────── Step gate (interview_gate.py, v2) ────────────────────── */
+
+/** One gate call's outcome. `code` is the gate's own exit code (0 ok,
+ *  2 refused, 3 not complete / one follow-up pending, 1 tooling) and `json` is
+ *  the object it printed on stdout. */
+export interface GateResult {
+  code: number;
+  json: any;
+}
+
+/** Parse the gate's stdout JSON object; undefined when it printed nothing usable. */
+function parseGateJson(text: string | undefined): any | undefined {
+  const body = (text ?? '').trim();
+  if (!body) return undefined;
+  try {
+    const parsed = JSON.parse(body);
+    return parsed && typeof parsed === 'object' ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Run the step gate — the ONLY program that says which question is next, whether
+ * an answer is accepted, and whether the interview is complete.
+ *
+ * Every call pins `--registry` and `--state-dir` to the exact files paths.ts
+ * resolves, so the web app, the Telegram agent and the shell scripts can never
+ * read a different registry or state folder.
+ *
+ * Never throws. Exit 2 (refused: wrong question, required skip, unknown
+ * question, bad usage) and exit 3 (not complete yet, or the answer needs one
+ * follow-up) are VERDICTS: they are returned with their code and JSON body. Exit
+ * 1, a missing script, or unusable output is a TOOLING failure —
+ * `{code:1, json:{error:'tooling'}}` — and the caller reports "temporarily
+ * unavailable", never "not answered".
+ */
+export async function runGate(args: string[]): Promise<GateResult> {
+  const script = interviewGateScript();
+  if (!scriptExists(script)) return { code: 1, json: { error: 'tooling' } };
+  const argv = [
+    '--registry',
+    interviewRegistryPath(),
+    '--state-dir',
+    gateStateDir(),
+    ...args,
+  ];
+  try {
+    const { stdout } = await runScript(script, 'python3', argv);
+    const json = parseGateJson(stdout);
+    return json === undefined ? { code: 1, json: { error: 'tooling' } } : { code: 0, json };
+  } catch (err) {
+    if (err instanceof InterviewScriptError) {
+      const code = err.exitCode;
+      if (code === 2 || code === 3) {
+        return { code, json: parseGateJson(err.stdout) ?? {} };
+      }
+    }
+    return { code: 1, json: { error: 'tooling' } };
+  }
+}
+
+/** One known fact: the value the app already holds + where it came from. */
+export interface KnownFact {
+  value: string;
+  source?: string;
+}
+
+/** The whole `interview-known.json` object: `{knownKey: {value, source}}`. */
+export type KnownFacts = Record<string, KnownFact>;
+
+/**
+ * Write `<gate state dir>/interview-known.json` atomically (temp file + rename)
+ * with mode 0600. The file makes the gate OFFER a `knownValue` on `next`; it
+ * never becomes an answer until the owner submits it, so nothing written here
+ * can fabricate one.
+ *
+ * Throws when the write fails — a known-fact file that silently was not written
+ * would silently re-ask every question it covers. The temp file is removed on
+ * failure, so a half-written file can never replace the good one.
+ */
+export function writeKnownFacts(known: KnownFacts): string {
+  const target = path.join(gateStateDir(), 'interview-known.json');
+  const tmp = `${target}.ts.tmp.${process.pid}.${Date.now()}`;
+  try {
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(tmp, `${JSON.stringify(known ?? {}, null, 2)}\n`, {
+      encoding: 'utf-8',
+      mode: 0o600,
+    });
+    fs.renameSync(tmp, target);
+  } catch (err) {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      // Temp file absent or already gone; the existing file is untouched.
+    }
+    throw err;
+  }
+  return target;
+}
+
 export interface RecordDeptDecisionArgs {
   dept: string;
   decision: 'yes' | 'no' | 'later';
