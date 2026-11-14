@@ -128,8 +128,8 @@
  * So the scanner's interface category no longer applies, and bearer-listing it
  * would 403 the operator's own console caller. It joins
  * DOCUMENTED_UNWIRED_CONSOLE_ROUTES with that verified posture. No census count
- * moves: the route file already existed and was already counted in the 167
- * mutating / 160 non-webhook census; only its classification changes.
+ * moves: the route file already existed and was already counted in the 168
+ * mutating / 161 non-webhook census; only its classification changes.
  *
  * re-derived 2026-10-22 for the launch producer ingest census repair: POST
  * /api/launch-runs/ingest had been mounted with a per-client Bearer transport
@@ -211,18 +211,6 @@
  * time). The mutating-route census is unchanged — no route file moved — but
  * POST /api/system/bootstrap lost its only interface call site, so it is now
  * recorded in the documented residual below rather than inferred as wired.
- * re-derived 2026-11-14 for BU-05 (WF-008) operator-only prior completion:
- * POST /api/interview/prior-completion is unchanged in CLASSIFICATION — it is
- * not a bearer route and never was — but its interface call site is gone. This
- * unit removed the owner-facing "I have already completed the interview" button
- * and its `fetch` from src/app/interview/InterviewClient.tsx and gated the
- * handler on `kind === 'self'` with a non-`operator:api` `operator:` subject,
- * which the handler enforces alongside the signed CSRF cookie and a refusal of
- * `operator:api`. So the scanner's interface category no longer applies, and
- * bearer-listing it would 403 the operator's own console caller. It joins
- * DOCUMENTED_UNWIRED_CONSOLE_ROUTES with that verified posture. No census
- * count moves: the route file already existed and was already counted in the
- * 167 mutating / 160 non-webhook census; only its classification changes.
  *
  * re-derived 2026-09-27 for ILJ-004 tenant skip marks: POST
  * /api/interview/state — the owner's browser marking one structured question
