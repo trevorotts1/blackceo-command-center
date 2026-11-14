@@ -192,6 +192,21 @@
  * channel and misstate the auth. It is therefore recorded in the documented
  * residual with that verified posture, never as a blanket exemption.
  *
+ * re-derived 2026-11-14 for BU-05 operator-only prior completion: POST
+ * /api/interview/prior-completion — the operator's browser declaration that
+ * the interview was already done. The handler refuses the service channel
+ * (subject operator:api answers 403 owner_session_required) and any non-self
+ * or non-operator tenant (403 operator_required), requires the signed
+ * mc_csrf_token cookie plus a same-origin request, and accepts only
+ * {"confirmed": true} under a 256-byte cap. The owner-facing "I have already
+ * completed the interview" button is gone by design (an owner session can
+ * never satisfy operator_required), and no operator console UI is wired to
+ * the route yet, so the interface category cannot be evidenced. It is
+ * recorded in the documented residual with that verified posture; it must
+ * NOT join BEARER_REQUIRED_WRITE_ROUTES (that would 401 the operator's own
+ * browser channel). The census is unchanged — this route already counted as
+ * one mutating, non-webhook route; only its classification moved.
+ *
  * re-derived 2026-09-27 for ILJ-004 tenant skip marks: POST
  * /api/interview/state — the owner's browser marking one structured question
  * skipped (InterviewClient.tsx:375 with the session cookie + tenant
@@ -529,7 +544,8 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
 
   // DOCUMENTED RESIDUAL (coordinator decision, 2026-10-16, train PR #550;
   // extended 2026-10-30 for the CTR-165 capability snapshot ingest).
-  // The 14 council write routes and the one launch approval route below are in neither classification:
+  // The council write routes, the one launch approval route and the
+  // operator-only prior-completion declaration below are in neither classification:
   // no browser call site or client binding for them exists in this tree,
   // so the interface category cannot be evidenced, and the bearer
   // category would misstate their real auth. The 13 session routes'
@@ -593,6 +609,18 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
     // which the interface scanner does not read; bearer-listing it would 401
     // the browser channel and misstate the auth.
     '/api/council/convene',
+    // BU-05 (WF-008) operator-only prior-completion declaration (POST only;
+    // the route file exposes no other mutating method). Middleware passthrough
+    // needs the verified tenant identity; the handler additionally refuses
+    // operator:api (403 owner_session_required), demands a non-self tenant be
+    // refused (403 operator_required), verifies the signed mc_csrf_token
+    // cookie, enforces same-origin, and accepts only {"confirmed": true}.
+    // BU-23/BU-05 removed the owner-facing InterviewClient button because an
+    // owner session can never satisfy operator_required; no operator console
+    // UI calls the route yet, so the interface category cannot be evidenced.
+    // It must NOT join BEARER_REQUIRED_WRITE_ROUTES (that would 401 the
+    // operator's own browser channel).
+    '/api/interview/prior-completion',
   ];
 
   it('every reachable mutating route is either in BEARER_REQUIRED_WRITE_ROUTES, called by the interface, or a documented unwired console route (exact residual enforced)', () => {
