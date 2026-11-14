@@ -480,16 +480,26 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
   // /api/approval-requests/[requestId]/chat-decision adds one more mutating,
   // bearer-gated route: 167 mutating, 160 non-webhook, 52 patterns, 56 templates,
   // 55 bearer-ONLY.
-  it('API routes exporting a mutating method: 167 (literal assertion)', () => {
-    expect(allMutatingRoutes.length).toBe(167);
+  //
+  // re-derived 2026-11-14 for BU-17/BU-13 (measured on this tree at 50b5e823,
+  // independent of vitest): POST /api/interview/assist (BU-17) is a new mutating
+  // route, so the census is 168 mutating, 7 webhook-protected (unchanged),
+  // 161 non-webhook. BU-13's POST /api/interview/skip replaced the deleted POST
+  // /api/interview/state in the same window and nets to zero (state lost its
+  // POST handler as skip gained one), so it moves no count but is a new route
+  // face and is classified in the documented residual below. Neither route is
+  // bearer-gated; bearer totals therefore stand (52 patterns / 56 templates /
+  // 55 bearer-ONLY). Measuring shows 168/161, so these two literals rise by one.
+  it('API routes exporting a mutating method: 168 (literal assertion)', () => {
+    expect(allMutatingRoutes.length).toBe(168);
   });
 
   it('protected by isWebhookSecretRoute: 7 (5 static + 2 dynamic — middleware src/middleware.ts:137-167)', () => {
     expect(webhookProtectedCount).toBe(7);
   });
 
-  it('non-webhook write routes: 160 (167 mutating − 7 webhook-protected; tenant authentication remains required)', () => {
-    expect(nonWebhookCount).toBe(160);
+  it('non-webhook write routes: 161 (168 mutating − 7 webhook-protected; tenant authentication remains required)', () => {
+    expect(nonWebhookCount).toBe(161);
   });
 
   it('interface call templates found by multi-line scanner', () => {
@@ -549,6 +559,23 @@ describe('passthrough-write-scope — anti-rot lock (U052)', () => {
   // list cannot rot into a blanket exemption. Adding a route to this
   // list is a reviewable security decision, never a convenience.
   const DOCUMENTED_UNWIRED_CONSOLE_ROUTES: string[] = [
+    // BU-17 interview helper (POST only): /api/interview/assist offers three
+    // example answers to tap. It authenticates through resolveInterviewTenant +
+    // refuseUnverifiedTenant (the verified tenant identity from the session
+    // cookie) and NEVER reads an Authorization bearer, so bearer-listing it
+    // would 401 the owner's own browser and misstate the auth. No browser call
+    // site for this path exists in this tree — nothing under src/ (outside the
+    // API tree) or public/ references it, and the interview client still posts
+    // /api/interview/turn and /api/interview/state — so the interface category
+    // cannot be evidenced from source. Recorded here as the documented
+    // residual; wiring it to a component later moves it to interface-called.
+    '/api/interview/assist',
+    // BU-13 interview skip (POST only): /api/interview/skip replaced the
+    // deleted POST /api/interview/state. Same tenant-cookie auth
+    // (resolveInterviewTenant + refuseUnverifiedTenant) and no bearer read.
+    // No browser call site for this path exists in this tree either, so the
+    // interface category cannot be evidenced; documented residual for now.
+    '/api/interview/skip',
     '/api/council/sessions/{id}', // DELETE (tombstone delete, CWE-050)
     '/api/council/sessions/{id}/archive',
     '/api/council/sessions/{id}/cancel',
