@@ -189,6 +189,11 @@ export function serverEnv(): Record<string, string> {
     CC_PORT: String(PORT),
     MC_INTERVIEW_COOKIE_SECRET: COOKIE_SECRET,
     DATABASE_PATH: DB_PATH,
+    // Test isolation: seed the throwaway DB only from the tracked example
+    // template (partial-config), never the checkout's branded config. Without
+    // it, T3's mirrored draft name brands the fixture company and breaks
+    // foundation board reconciliation.
+    CC_TEST_FIXTURE_ROOT: E2E_OUT_DIR,
     ZERO_HUMAN_COMPANY_DIR: COMPANY_DIR,
     PORT: String(PORT),
     NEXT_DIST_DIR: ".next-interview-lock",
