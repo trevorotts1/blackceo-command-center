@@ -1,3 +1,4 @@
+import '../unit/_isolated-db'; // MUST be first: points DATABASE_PATH at a throwaway DB (C8 guard).
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import InterviewClient from '@/app/interview/InterviewClient';
