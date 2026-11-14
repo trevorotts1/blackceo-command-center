@@ -66,6 +66,38 @@ export async function recoverInterviewAccess(ticket: string, fetcher: typeof fet
   }
 }
 
+/**
+ * BU-24 (WF-032): one bounded CSRF self-heal for the interview page's POSTs.
+ *
+ * Every mutating /api/interview/* request except send-link passes through the
+ * middleware's same-origin passthrough, which requires the signed
+ * `mc_csrf_token` cookie (src/middleware.ts). That cookie lives one hour, so a
+ * long interview outlives it and the next POST is refused with 401 BEFORE the
+ * route runs. On a 401 this performs exactly ONE GET to
+ * /api/interview/gate-status — auth-bypassed at the top of the middleware, so
+ * the heal itself can never 401 or 302 — then repeats the original request ONCE
+ * with the same body and headers. A second 401 is returned as-is (no third
+ * try); any non-401 response is returned untouched. A failed heal ping is
+ * ignored: the bounded retry is safe on its own.
+ */
+export async function fetchWithCsrfHeal(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+): Promise<Response> {
+  const first = await fetch(input, init);
+  if (first.status !== 401) return first;
+  try {
+    await fetch('/api/interview/gate-status', {
+      method: 'GET',
+      credentials: 'same-origin',
+      cache: 'no-store',
+    });
+  } catch {
+    // Best-effort heal ping: the single bounded retry below still runs.
+  }
+  return fetch(input, init);
+}
+
 export function resumePhase(nextStructured: number | null, flags: {
   genuineTranscriptReady: boolean; decisionCoverageComplete: boolean; noUnprovenancedDeclines: boolean;
 }): 'structured' | 'conversation' | 'departments' | 'review' {
