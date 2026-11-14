@@ -1,3 +1,4 @@
+import '../unit/_isolated-db';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import InterviewClient from '@/app/interview/InterviewClient';
