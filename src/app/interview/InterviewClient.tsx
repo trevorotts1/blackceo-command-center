@@ -226,6 +226,10 @@ const ALL_GATES_FALSE: GateFlags = {
 const RECOVERY_WINDOW_MS = 90_000;
 const RECOVERY_POLL_MS = 3_500;
 
+/** WF-012: a soft progress-read failure re-reads this often, this many times. */
+const SOFT_READ_RETRY_MS = 5_000;
+const SOFT_READ_MAX_RETRIES = 6;
+
 /** Session-storage key for structured questions the owner skipped this device. */
 const SKIPPED_KEY = 'iv-skipped-structured';
 
@@ -258,7 +262,14 @@ export default function InterviewClient() {
   // Server truth (progress rail + resume + gate flags + structured position).
   const [state, setState] = useState<InterviewStateResponse | null>(null);
   const [booting, setBooting] = useState(true);
-  const [stateError, setStateError] = useState<string | null>(null);
+  // WF-012: two DIFFERENT failures, never one. accessError is a real refusal to
+  // read (401/403, or a failed enrollment exchange) — the full-screen "Check
+  // your access" view is correct there. softError is every other progress-read
+  // failure: a blip, never an ejection. The screen the owner is on stays put,
+  // a reconnecting line appears above it, and the read is retried.
+  const [accessError, setAccessError] = useState<string | null>(null);
+  const [softError, setSoftError] = useState(false);
+  const [softAttempts, setSoftAttempts] = useState(0);
   const [declaringCompletion, setDeclaringCompletion] = useState(false);
   const [declarationError, setDeclarationError] = useState<string | null>(null);
 
@@ -406,10 +417,17 @@ export default function InterviewClient() {
   const loadState = useCallback(async (): Promise<InterviewStateResponse | null> => {
     try {
       const res = await fetch('/api/interview/state', { cache: 'no-store' });
-      if (!res.ok) throw new Error(res.status === 403 || res.status === 401 ? INTERVIEW_SIGN_IN_HELP : INTERVIEW_RETRY_HELP);
+      if (res.status === 401 || res.status === 403) {
+        // The one class of failure that genuinely keeps the owner out.
+        setAccessError(INTERVIEW_SIGN_IN_HELP);
+        return null;
+      }
+      if (!res.ok) throw new Error(INTERVIEW_RETRY_HELP);
       const data = (await res.json()) as InterviewStateResponse;
       if (!verifiedProgress(data) && data.priorCompletionDeclared !== true) throw new Error(INTERVIEW_RETRY_HELP);
-      setStateError(null);
+      setAccessError(null);
+      setSoftError(false);
+      setSoftAttempts(0);
       setState(data);
       // ILJ-004: fold the server skip set into this device's local set so skips
       // survive a device switch — the server copy is authoritative for the
@@ -435,13 +453,26 @@ export default function InterviewClient() {
         });
       }
       return data;
-    } catch (error) {
-      setStateError(error instanceof Error ? error.message : 'Your progress is unavailable. Please retry.');
-      // Non-fatal: the rail stays as-is and gates stay fail-closed until the next
-      // successful read.
+    } catch {
+      // WF-012: a failed progress read is a blip, not an ejection. Never replace
+      // the screen the owner is on — remember the failure, keep the rail as-is,
+      // keep the gates fail-closed, and let the retry effect read again.
+      setSoftError(true);
+      setSoftAttempts((n) => n + 1);
       return null;
     }
   }, []);
+
+  // WF-012: re-read after a soft failure — at most SOFT_READ_MAX_RETRIES tries,
+  // SOFT_READ_RETRY_MS apart. When those run out the bar simply stays; the
+  // owner keeps working on the screen they already have.
+  useEffect(() => {
+    if (!softError || softAttempts > SOFT_READ_MAX_RETRIES) return;
+    const timer = setTimeout(() => {
+      void loadState();
+    }, SOFT_READ_RETRY_MS);
+    return () => clearTimeout(timer);
+  }, [softError, softAttempts, loadState]);
 
   // Opening another invitation on this same page can be a query or legacy
   // fragment navigation. Query (?enroll=) is the canonical short link (it
@@ -499,7 +530,7 @@ export default function InterviewClient() {
       if (enrollmentRef.current) {
         const enrollmentError = await enrollmentRef.current;
         if (cancelled) return;
-        if (enrollmentError) { setStateError(enrollmentError); setBooting(false); }
+        if (enrollmentError) { setAccessError(enrollmentError); setBooting(false); }
         return; // Success hands off to the authenticated, query-free document.
       }
       const data = await loadState();
@@ -863,7 +894,7 @@ export default function InterviewClient() {
     if (!ticket) { window.location.reload(); return; }
     setBooting(true);
     const error = await recoverInterviewAccess(ticket);
-    if (error) { setStateError(error); setBooting(false); return; }
+    if (error) { setAccessError(error); setBooting(false); return; }
     pendingEnrollmentRef.current = null;
     window.location.replace(window.location.pathname);
   }, []);
@@ -901,10 +932,10 @@ export default function InterviewClient() {
 
   let screen: React.ReactNode;
 
-  if (stateError) {
+  if (accessError) {
     screen = <div className={iv.root}><div className={iv.stage} role="alert">
       <h1 className={iv.question}>Check your access</h1>
-      <p className={iv.lede}>{stateError}</p>
+      <p className={iv.lede}>{accessError}</p>
       <button type="button" className={iv.btnPrimary} disabled={booting} onClick={() => void retryAccess()}>{booting ? 'Checking…' : 'Check sign-in and retry'}</button>
       <p className="mt-4 text-sm">Use this same interview page after signing in. Submitted answers stay saved; a fresh link does not start a new interview.</p>
     </div></div>;
@@ -1016,7 +1047,11 @@ export default function InterviewClient() {
   }
 
   // Respect the OS reduced-motion preference across every interview animation.
-  return <MotionConfig reducedMotion="user">{screen}
+  return <MotionConfig reducedMotion="user">
+    {/* WF-012: a soft progress-read failure shows this line ABOVE the screen the
+        owner is already on — never in place of it. */}
+    {softError && <p role="status" className="mx-auto w-full max-w-2xl px-5 pt-4 text-sm">Reconnecting… your answers are saved.</p>}
+    {screen}
     {!booting && !state?.interviewComplete && !state?.buildCompleted && !state?.priorCompletionDeclared && (
       <section className="mx-auto w-full max-w-2xl px-5 pb-8" aria-label="Previously completed interview">
         <button type="button" className={iv.btnSecondary} disabled={declaringCompletion}
