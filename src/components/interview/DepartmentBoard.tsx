@@ -69,6 +69,7 @@ import {
   ivScreenVariants,
 } from './interview-theme';
 import DeptCard, { type DeptVerb } from './DeptCard';
+import { fetchWithCsrfHeal } from '@/lib/interview/browser-recovery';
 
 /* -------------------------------------------------------------------------- */
 /* JSON shapes (mirror the API routes; no Node import leaks into the bundle)   */
@@ -369,7 +370,7 @@ export default function DepartmentBoard({
     async (id: string, verb: DeptVerb, confirmLoss: boolean): Promise<{ ok: boolean; confirmPrompt?: { id: string; verb: DeptVerb; warning: string }; message?: string }> => {
       let res: Response;
       try {
-        res = await fetch('/api/interview/decision', {
+        res = await fetchWithCsrfHeal('/api/interview/decision', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({
