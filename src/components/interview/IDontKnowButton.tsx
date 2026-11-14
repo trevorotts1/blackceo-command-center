@@ -1,24 +1,14 @@
 'use client';
 
 /**
- * IDontKnowButton — P1-4 research protocol trigger
+ * IDontKnowButton — the "I am not sure" affordance on every question that
+ * allows it.
  *
- * Responsibilities:
- *   1. Render a prominent "I don't know" button under the question
- *   2. Trigger the agent's 6-step research protocol via a callback to the parent
- *
- * Design:
- *   - Button appears below the input field as a secondary action
- *   - On click, calls onIDontKnow() which the parent (ConversationPane/InterviewClient)
- *     handles by sending a turn via /api/interview/turn
- *   - The agent responds with a recommendation, which the parent's message history
- *     detects and renders as an option-card set or normal follow-up question
- *   - Drill-down follow-ups render as normal conversation messages (warm reactions + question)
- *
- * The parent (InterviewClient) is responsible for:
- *   - Detecting when the agent returns a "recommendation" response
- *   - Rendering recommendation cards (go with it / adjust / skip) via RecommendationCard
- *   - Managing the conversation flow and session state
+ * It asks the PAGE HELPER for up to three suggestions (POST
+ * /api/interview/assist, after marking the question unsure through
+ * /api/interview/skip). Nothing is written for the owner and no sentence is
+ * ever sent in the owner's name: the owner picks an idea, edits it, or writes
+ * their own, and nothing is saved until they press Continue.
  */
 
 import { motion } from 'framer-motion';
@@ -26,9 +16,11 @@ import { HelpCircle } from 'lucide-react';
 import { iv, ivcx, ivTransition } from './interview-theme';
 
 export interface IDontKnowButtonProps {
-  /** Called when user clicks the "I don't know" button. Parent handles turn dispatch. */
-  onIDontKnow: (msg: string) => void;
-  /** Disable the button while a turn is in flight. */
+  /** Ask the helper for suggestions. Called on click. */
+  onSuggest?: () => void;
+  /** @deprecated legacy turn caller kept so older callers still compile. */
+  onIDontKnow?: (msg: string) => void;
+  /** Disable the button while a request is in flight. */
   disabled?: boolean;
   /** Session ID (passed through for context, unused by this button). */
   sessionId?: string | null;
@@ -37,23 +29,25 @@ export interface IDontKnowButtonProps {
 }
 
 export default function IDontKnowButton({
+  onSuggest,
   onIDontKnow,
   disabled = false,
   sessionId,
   className,
 }: IDontKnowButtonProps) {
-  const handleIDontKnow = () => {
-    // Trigger the research protocol. The parent (InterviewClient) will:
-    // 1. Send this to /api/interview/turn
-    // 2. Receive the agent's research recommendation
-    // 3. Render it as either a recommendation card set or a drill-down question
-    onIDontKnow("I don't know the answer to that. Can you suggest something based on what you know?");
+  const handleClick = () => {
+    if (onSuggest) {
+      onSuggest();
+      return;
+    }
+    // Legacy callers only. No sentence is written for the owner here.
+    onIDontKnow?.('');
   };
 
   return (
     <motion.button
       type="button"
-      onClick={handleIDontKnow}
+      onClick={handleClick}
       disabled={disabled}
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
@@ -66,19 +60,17 @@ export default function IDontKnowButton({
         disabled && 'opacity-50 cursor-not-allowed',
         className,
       )}
+      data-walkthrough="interview-not-sure"
     >
       <HelpCircle className="h-4 w-4" />
-      <span>I don&apos;t know</span>
+      <span>I am not sure</span>
     </motion.button>
   );
 }
 
 /**
- * RecommendationCard — renders a single option from the agent's research recommendation
- *
- * Used when the agent returns a structured recommendation with multiple options
- * (e.g., go with this / adjust / skip). The parent detects the recommendation
- * structure in the agent's message and renders these cards for each option.
+ * RecommendationCard — one of the up-to-three ideas the helper returns.
+ * Tapping it fills the answer box; it never saves.
  */
 export function RecommendationCard({
   label,

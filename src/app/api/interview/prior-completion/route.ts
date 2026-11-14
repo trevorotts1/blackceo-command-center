@@ -32,6 +32,12 @@ export async function POST(request: NextRequest) {
   } catch {
     return NextResponse.json({ error: 'confirmation_required' }, { status: 400, headers });
   }
+  // BU-05 (WF-008): a prior-completion declaration is an operator attestation
+  // about the company the operator administers. An owner-facing client session
+  // never makes it: only the self tenant, signed in as an operator, may declare.
+  if (tenant.context!.kind !== 'self' || !tenant.context!.subject.startsWith('operator:')) {
+    return NextResponse.json({ error: 'operator_required' }, { status: 403, headers });
+  }
   try {
     const declaration = declarePriorCompletion(tenant.context!);
     return NextResponse.json({ ok: true, priorCompletionDeclared: true, declaration, redirect: '/' }, { headers });

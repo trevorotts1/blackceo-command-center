@@ -30,6 +30,8 @@ import { iv, ivcx, ivTokens, ivScreenVariants, ivDurations, ivEase } from './int
 export interface MilestoneScreenProps {
   /** The phase name being celebrated. */
   phase: string;
+  /** Exact headline to show, when the caller has its own sentence. */
+  headline?: string;
   /** Optional: the noun for the progress stat (default "department"). Only rendered if completed is also provided. */
   unit?: string;
   /** Optional: total expected items (denominator for the progress stat). Only rendered if completed is also provided. */
@@ -44,6 +46,7 @@ export interface MilestoneScreenProps {
 
 export default function MilestoneScreen({
   phase,
+  headline,
   unit = 'department',
   totalDepts,
   completed,
@@ -130,7 +133,7 @@ export default function MilestoneScreen({
                   }}
                   className={iv.question}
                 >
-                  That&apos;s {phase} done
+                  {headline ?? `That's ${phase} done`}
                 </motion.h1>
 
                 {/* Progress stat: "3 of 16 departments" — only rendered if counts are provided */}
