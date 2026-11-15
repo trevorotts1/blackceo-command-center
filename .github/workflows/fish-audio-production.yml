@@ -1,6 +1,7 @@
 name: Fish Audio production contract
 
 on:
+  workflow_dispatch:
   pull_request:
     branches: [main]
   push:
@@ -10,7 +11,7 @@ jobs:
   fish-audio-production:
     if: ${{ !startsWith(github.head_ref, 'batch/') }}
     name: Fish Audio model and client voice
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
