@@ -10,6 +10,18 @@ import { queryOne, run, transaction } from '@/lib/db';
 export const OPERATOR_PRESENTATION_CONTRACT_VERSION = 1;
 type YesNo = 'yes' | 'no';
 type DeliveryDestinations = string | string[];
+/**
+ * PD-013 interview pace. The build run mode (`run_mode`) is a separate axis and
+ * never selects the interview depth.
+ */
+export type OperatorInterviewDepth = 'quick' | 'in_depth';
+/**
+ * PD-013/PD-004b default provenance. The signed operator contract carries the
+ * real owner message in which the client accepted the QUICK defaults, so the
+ * bridge can prove every defaulted answer under `enforce` instead of inventing
+ * one. Absent means no defaults were accepted -> QUICK runs fail closed.
+ */
+export type OperatorDefaultAcceptance = { msg_id: string; chat_id: string; text: string };
 export type OperatorPresentationIntake = {
   version: 1; source: 'operator-delegated';
   title: string; presentation_type: 'from_scratch'; run_mode: 'ultra' | 'standard' | 'economy';
@@ -21,6 +33,8 @@ export type OperatorPresentationIntake = {
   want_ghl_upload: YesNo; delivery_destinations: DeliveryDestinations;
   want_sales_checkout: YesNo; want_vsl_page: YesNo;
   answers: Record<string, string>;
+  interview_depth?: OperatorInterviewDepth;
+  default_acceptance?: OperatorDefaultAcceptance;
 };
 export type OperatorPresentationContract = OperatorPresentationIntake & { task_id: string; execution_id: string };
 
@@ -49,7 +63,27 @@ export function parseOperatorPresentationContract(value: unknown): OperatorPrese
   if (typeof raw.pitch_included !== 'boolean' || typeof raw.want_audio_demo !== 'boolean') throw new Error('presentation_intake applicability fields are invalid');
   if (!raw.answers || typeof raw.answers !== 'object' || Array.isArray(raw.answers) || Object.values(raw.answers).some(v => typeof v !== 'string' || v.length > 4000)) throw new Error('presentation_intake answers are invalid');
   if ('task_id' in raw || 'execution_id' in raw) throw new Error('presentation_intake task_id and execution_id are server-issued');
-  return { version: 1, source: 'operator-delegated', title, presentation_type: 'from_scratch', run_mode: raw.run_mode, workhorse_model: 'deepseek-flash@deepseek-direct', slide_count: raw.slide_count as number, pitch_included: raw.pitch_included, deliverable_set: deliverableSet, want_teleprompter: yesNo('want_teleprompter'), want_speech_script: yesNo('want_speech_script'), want_audio_deliverable: yesNo('want_audio_deliverable'), want_audio_demo: raw.want_audio_demo, want_ghl_upload: yesNo('want_ghl_upload'), delivery_destinations: Array.isArray(destinations) ? destinations.map(item => item.trim()) : destinations.trim(), want_sales_checkout: yesNo('want_sales_checkout'), want_vsl_page: yesNo('want_vsl_page'), answers: raw.answers as Record<string, string> };
+  const depthRaw = raw.interview_depth;
+  if (depthRaw !== undefined && depthRaw !== 'quick' && depthRaw !== 'in_depth') throw new Error('presentation_intake interview_depth is invalid');
+  const acceptanceRaw = raw.default_acceptance;
+  let defaultAcceptance: OperatorDefaultAcceptance | undefined;
+  if (acceptanceRaw !== undefined) {
+    if (!acceptanceRaw || typeof acceptanceRaw !== 'object' || Array.isArray(acceptanceRaw)) throw new Error('presentation_intake default_acceptance is invalid');
+    const acceptance = acceptanceRaw as Record<string, unknown>;
+    const msgId = typeof acceptance.msg_id === 'string' ? acceptance.msg_id.trim() : '';
+    const chatId = typeof acceptance.chat_id === 'string' ? acceptance.chat_id.trim() : '';
+    const text = typeof acceptance.text === 'string' ? acceptance.text.trim() : '';
+    if (!msgId || msgId.length > 256) throw new Error('presentation_intake default_acceptance msg_id is invalid');
+    if (!chatId || chatId.length > 256) throw new Error('presentation_intake default_acceptance chat_id is invalid');
+    if (!text || text.length > 4000) throw new Error('presentation_intake default_acceptance text is invalid');
+    defaultAcceptance = { msg_id: msgId, chat_id: chatId, text };
+  }
+  const parsed: OperatorPresentationIntake = { version: 1, source: 'operator-delegated', title, presentation_type: 'from_scratch', run_mode: raw.run_mode, workhorse_model: 'deepseek-flash@deepseek-direct', slide_count: raw.slide_count as number, pitch_included: raw.pitch_included, deliverable_set: deliverableSet, want_teleprompter: yesNo('want_teleprompter'), want_speech_script: yesNo('want_speech_script'), want_audio_deliverable: yesNo('want_audio_deliverable'), want_audio_demo: raw.want_audio_demo, want_ghl_upload: yesNo('want_ghl_upload'), delivery_destinations: Array.isArray(destinations) ? destinations.map(item => item.trim()) : destinations.trim(), want_sales_checkout: yesNo('want_sales_checkout'), want_vsl_page: yesNo('want_vsl_page'), answers: raw.answers as Record<string, string> };
+  // Optional fields are added only when present so the canonical receipt bytes
+  // of a pre-provenance contract stay exactly what its HMAC was signed over.
+  if (depthRaw !== undefined) parsed.interview_depth = depthRaw;
+  if (defaultAcceptance) parsed.default_acceptance = defaultAcceptance;
+  return parsed;
 }
 
 export function bindOperatorPresentationContract(taskId: string, intake: OperatorPresentationIntake): OperatorPresentationContract {

@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { queryOne } from '../../src/lib/db';
 import { createTaskCore } from '../../src/lib/tasks';
-import { bridgeReceipt, loadOperatorPresentationContract, parseOperatorPresentationContract, ensureOperatorPresentationContract } from '../../src/lib/presentation-operator-contract';
+import { bindOperatorPresentationContract, bridgeReceipt, loadOperatorPresentationContract, parseOperatorPresentationContract, ensureOperatorPresentationContract } from '../../src/lib/presentation-operator-contract';
 import { launchOperatorPresentationContract } from '../../src/lib/presentation-operator-launcher';
 
 process.env.WEBHOOK_SECRET = 'operator-contract-test-secret';
@@ -151,6 +151,39 @@ test('a failed contract insert rolls back the canonical task creation', async ()
     /operator-delegated task record/,
   );
   assert.equal(queryOne<{ n: number }>('SELECT count(*) n FROM tasks WHERE title=?', [title])?.n, 0);
+});
+
+test('operator contract transports the PD-013 pace and default provenance reference', () => {
+  const parsed = parseOperatorPresentationContract({
+    ...intake, interview_depth: 'quick',
+    default_acceptance: { msg_id: 'm1', chat_id: 'c1', text: 'good' },
+  });
+  assert.equal(parsed.interview_depth, 'quick');
+  assert.deepEqual(parsed.default_acceptance, { msg_id: 'm1', chat_id: 'c1', text: 'good' });
+  // Absent fields stay absent, so a pre-provenance contract's canonical bytes
+  // (and therefore its HMAC) are unchanged.
+  const legacy = parseOperatorPresentationContract(intake);
+  assert.equal('interview_depth' in legacy, false);
+  assert.equal('default_acceptance' in legacy, false);
+});
+
+test('invalid pace or default provenance reference is refused', () => {
+  assert.throws(() => parseOperatorPresentationContract({ ...intake, interview_depth: 'sometimes' }), /interview_depth is invalid/);
+  assert.throws(() => parseOperatorPresentationContract({ ...intake, default_acceptance: { msg_id: '', chat_id: 'c', text: 'good' } }), /msg_id is invalid/);
+  assert.throws(() => parseOperatorPresentationContract({ ...intake, default_acceptance: { msg_id: 'm', chat_id: '', text: 'good' } }), /chat_id is invalid/);
+  assert.throws(() => parseOperatorPresentationContract({ ...intake, default_acceptance: { msg_id: 'm', chat_id: 'c', text: '' } }), /text is invalid/);
+  assert.throws(() => parseOperatorPresentationContract({ ...intake, default_acceptance: 'good' }), /default_acceptance is invalid/);
+});
+
+test('the signed receipt covers the transported provenance fields', () => {
+  const parsed = parseOperatorPresentationContract({
+    ...intake, interview_depth: 'quick',
+    default_acceptance: { msg_id: 'm1', chat_id: 'c1', text: 'good' },
+  });
+  const bound = bindOperatorPresentationContract('d4e05a2f-f83b-4e87-aabe-d5e31c43867b', parsed);
+  const quick = bridgeReceipt(bound).receipt_hmac;
+  const deep = bridgeReceipt({ ...bound, interview_depth: 'in_depth' }).receipt_hmac;
+  assert.notEqual(quick, deep);
 });
 
 test.after(() => fs.rmSync(TEST_ROOT, { recursive: true, force: true }));
