@@ -31,7 +31,7 @@ jobs:
         run: |
           python3 - <<'PY'
           import json, os, re
-          source = json.load(open('config/fish-audio-policy.vendored.source.json'))
+          source = json.load(open('src/lib/voice/fish-audio-policy.vendored.source.json'))
           assert source['repository'] == 'trevorotts1/openclaw-onboarding'
           assert re.fullmatch('[a-f0-9]{40}', source['commit'])
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:

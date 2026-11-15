@@ -1,7 +1,7 @@
 # Fish Audio Client Voice
 
 Call Mode's Fish Audio route follows Skill 30's `production-policy.json`, vendored
-as `config/fish-audio-policy.vendored.json` with a SHA-256 pin. BlackCEO adopted
+as `src/lib/voice/fish-audio-policy.vendored.json` with a SHA-256 pin. BlackCEO adopted
 Drama-3 in onboarding PR #2754. Fish Audio's server default is S2.1 Pro, so every
 request must send the model header. The route sends `drama-3` unless the client or
 operator explicitly sets `FISH_AUDIO_MODEL=s2.1-pro`. Free, legacy, empty and

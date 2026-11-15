@@ -16,7 +16,7 @@ data = (args.source_root / source_path).read_bytes()
 policy = json.loads(data)
 if policy.get("schema_version") != 1:
     sys.exit("Unsupported Fish Audio policy schema")
-target = Path(__file__).resolve().parents[1] / "config/fish-audio-policy.vendored.json"
+target = Path(__file__).resolve().parents[1] / "src/lib/voice/fish-audio-policy.vendored.json"
 digest = hashlib.sha256(data).hexdigest()
 fingerprint = target.with_suffix(".json.sha256")
 provenance = target.with_suffix(".source.json")

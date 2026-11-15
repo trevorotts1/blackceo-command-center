@@ -4,6 +4,7 @@
 - Read an independently owner-approved voice fingerprint bound to the installed company. Wrong/missing voice, foreign company, missing approval and unapproved request overrides fail before synthesis. The model catalog and an API key are not voice approval.
 - Preserve saved/default Fish Audio selection while unavailable, visibly mark it blocked, and require an explicit provider change. Server/provider/proxy/network failures cannot silently substitute browser speech or another model/provider. Do not reuse a different provider's saved voice override.
 - Failed, empty or invalid provider metadata leaves Call Mode stopped instead of inventing an available browser voice.
+- Keep the immutable vendored policy under `src/lib/voice/` so the shared build inventory covers changes to policy bytes while per-client runtime `config/` stays excluded.
 - Vendor Skill 30's policy with source commit and SHA-256 pin; add cross-repository CI parity, synthetic server/client regression tests and headless Call Mode render tests.
 - Migration: each existing installation needs independent voice approval from the owner's confirmed selection, never an expected value copied from the active setting. See `docs/FISH_AUDIO_PRODUCTION.md`. No client files were changed and no live/paid synthesis or listening test was run. Not merged or deployed. Onboarding's deployment pin remains unchanged.
 

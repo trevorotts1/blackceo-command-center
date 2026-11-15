@@ -2,7 +2,7 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
-import policy from '../../../config/fish-audio-policy.vendored.json';
+import policy from './fish-audio-policy.vendored.json';
 import { resolveOpenClawRuntimeRoot } from '../openclaw/runtime-root';
 
 export class FishAudioConfigError extends Error {}
