@@ -1,0 +1,47 @@
+name: Fish Audio production contract
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  fish-audio-production:
+    if: ${{ !startsWith(github.head_ref, 'batch/') }}
+    name: Fish Audio model and client voice
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Server and browser fallback regression tests (no live providers)
+        run: node --import tsx --import ./tests/setup/no-owner-telegram.ts --import ./tests/setup/tmp-sandbox.ts --test tests/unit/fish-audio-production.test.ts
+      - name: Headless Call Mode rendering (jsdom, mocked microphone)
+        run: npx --no-install vitest run --config vitest.component.config.ts tests/component/callmode-fish-voice.test.tsx
+      - name: Read the reviewed source commit
+        id: source
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os, re
+          source = json.load(open('config/fish-audio-policy.vendored.source.json'))
+          assert source['repository'] == 'trevorotts1/openclaw-onboarding'
+          assert re.fullmatch('[a-f0-9]{40}', source['commit'])
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('commit=' + source['commit'] + '\n')
+          PY
+      - uses: actions/checkout@v4
+        with:
+          repository: trevorotts1/openclaw-onboarding
+          ref: ${{ steps.source.outputs.commit }}
+          path: .fish-audio-source
+          persist-credentials: false
+      - name: Vendored model policy matches the exact Skill 30 source
+        run: python3 scripts/sync-fish-audio-policy.py --source-root .fish-audio-source --check

@@ -24,6 +24,20 @@ export interface TtsProviderInfo {
   label: string;
   /** True if this provider's API key is configured on the server. */
   available: boolean;
+  /** The server's configured first choice, even when temporarily unavailable. */
+  isDefault?: boolean;
+}
+
+/** Keep a chosen client voice selected while blocked; changing voices is explicit. */
+export function selectTtsProvider(providers: TtsProviderInfo[], stored: TtsProviderId | null): TtsProviderId {
+  if (stored === 'fish_audio') return stored;
+  if (!providers.length) throw new Error('Voice provider configuration could not be verified');
+  if (stored && providers.some(p => p.id === stored && p.available)) return stored;
+  const preferred = providers.find(p => p.isDefault);
+  if (preferred && (preferred.id === 'fish_audio' || preferred.available)) return preferred.id;
+  const available = providers.find(p => p.available);
+  if (!available) throw new Error('No verified voice provider is available');
+  return available.id;
 }
 
 export interface SpeakOptions {
@@ -44,13 +58,17 @@ export interface SpeakResult {
 export async function listTtsProviders(): Promise<TtsProviderInfo[]> {
   const res = await fetch('/api/operator/tts', { method: 'GET' });
   if (!res.ok) {
-    return [{ id: 'browser', label: 'Browser (built-in)', available: true }];
+    throw new Error('Voice provider configuration could not be verified');
   }
-  const data = (await res.json()) as { providers?: TtsProviderInfo[] };
-  if (!data.providers || data.providers.length === 0) {
-    return [{ id: 'browser', label: 'Browser (built-in)', available: true }];
+  const data = (await res.json()) as { providers?: TtsProviderInfo[]; default?: TtsProviderId };
+  const known = new Set(['openai', 'elevenlabs', 'fish_audio', 'xai', 'browser']);
+  if (!data || !Array.isArray(data.providers) || !data.providers.length ||
+      !data.providers.every(p => p && known.has(p.id) && typeof p.available === 'boolean' && typeof p.label === 'string') ||
+      new Set(data.providers.map(p => p.id)).size !== data.providers.length ||
+      !data.providers.some(p => p.id === data.default)) {
+    throw new Error('Voice provider configuration could not be verified');
   }
-  return data.providers;
+  return data.providers.map(provider => ({ ...provider, isDefault: provider.id === data.default }));
 }
 
 /**
@@ -87,11 +105,17 @@ export async function speak(text: string, options: SpeakOptions = {}): Promise<S
     });
   } catch (err) {
     if ((err as Error).name === 'AbortError') throw err;
+    if (!provider || provider === 'fish_audio') {
+      throw new Error('The selected client voice is unavailable. Review Fish Audio configuration before retrying.');
+    }
     // Network or provider unreachable. Fall back to browser TTS.
     return speakWithBrowser(trimmed, options);
   }
 
   if (!res.ok || !res.body) {
+    if (!provider || provider === 'fish_audio' || res.headers.get('x-tts-fallback') === 'blocked') {
+      throw new Error('The selected client voice is unavailable. Review Fish Audio configuration before retrying.');
+    }
     // Server-side failure. Fall back to browser TTS so the call keeps moving.
     return speakWithBrowser(trimmed, options);
   }

@@ -32,6 +32,7 @@ import { Phone, PhoneOff, Mic, MicOff, AlertCircle, Volume2 } from 'lucide-react
 import { startVad, type VadHandle } from '@/lib/voice/vad';
 import {
   listTtsProviders,
+  selectTtsProvider,
   speak,
   type TtsProviderId,
   type TtsProviderInfo,
@@ -104,21 +105,27 @@ export default function CallMode({ agentId, agentLabel, onClose, onUserUtterance
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const list = await listTtsProviders();
+      let list: TtsProviderInfo[];
+      try { list = await listTtsProviders(); } catch {
+        if (!cancelled) {
+          setError('Could not verify voice settings. Close this call and try again.');
+          setPhase('error');
+        }
+        return;
+      }
       if (cancelled) return;
-      const available = list.filter((p) => p.available);
       setProviders(list);
       const stored = (typeof window !== 'undefined' && window.localStorage.getItem(STORAGE_KEY)) as
         | TtsProviderId
         | null;
       const storedVoice = typeof window !== 'undefined' ? window.localStorage.getItem(STORAGE_VOICE_KEY) : null;
-      const initial =
-        stored && available.some((p) => p.id === stored)
-          ? stored
-          : available[0]?.id ?? 'browser';
+      const initial = selectTtsProvider(list, stored);
       setProvider(initial);
-      if (storedVoice) setVoice(storedVoice);
+      if (storedVoice && stored === initial && initial !== 'fish_audio') setVoice(storedVoice);
       else if (initial === 'openai') setVoice('alloy');
+      if (initial === 'fish_audio' && !list.some(p => p.id === initial && p.available)) {
+        setFallbackNotice('Your selected Fish Audio voice needs configuration. Choose another provider explicitly to change voices.');
+      }
     })();
     return () => {
       cancelled = true;
@@ -276,7 +283,7 @@ export default function CallMode({ agentId, agentLabel, onClose, onUserUtterance
       try {
         const result = await speak(text, {
           provider: provider ?? undefined,
-          voice: voice || undefined,
+          voice: provider === 'fish_audio' ? undefined : voice || undefined,
           signal: controller.signal,
         });
         if (provider && result.provider !== provider) {
@@ -426,7 +433,10 @@ export default function CallMode({ agentId, agentLabel, onClose, onUserUtterance
     }
   }, [phase]);
 
-  const availableProviders = providers.filter((p) => p.available);
+  const availableProviders = providers.filter((p) => p.available || p.id === provider);
+  if (provider === 'fish_audio' && !availableProviders.some(p => p.id === provider)) {
+    availableProviders.push({ id: 'fish_audio', label: 'Fish Audio', available: false });
+  }
   const voicesForProvider = provider ? VOICES_BY_PROVIDER[provider] ?? [] : [];
 
   return (
@@ -455,8 +465,8 @@ export default function CallMode({ agentId, agentLabel, onClose, onUserUtterance
                 className="bg-white/5 border border-white/10 rounded-md px-2 py-1 text-[13px] text-white focus:outline-none focus:border-white/30"
               >
                 {availableProviders.map((p) => (
-                  <option key={p.id} value={p.id} className="text-black">
-                    {p.label}
+                  <option key={p.id} value={p.id} disabled={!p.available} className="text-black">
+                    {p.label}{p.available ? '' : ' (needs configuration)'}
                   </option>
                 ))}
               </select>
