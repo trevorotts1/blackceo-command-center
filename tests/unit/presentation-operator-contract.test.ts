@@ -153,4 +153,36 @@ test('a failed contract insert rolls back the canonical task creation', async ()
   assert.equal(queryOne<{ n: number }>('SELECT count(*) n FROM tasks WHERE title=?', [title])?.n, 0);
 });
 
+test('END008: the pace and the client default-acceptance message are transportable', () => {
+  const parsed = parseOperatorPresentationContract({
+    ...intake,
+    interview_depth: 'quick',
+    default_acceptance: { msg_id: 'msg-1', chat_id: 'chat-1', text: 'good' },
+  });
+  assert.equal(parsed.interview_depth, 'quick');
+  assert.deepEqual(parsed.default_acceptance, { msg_id: 'msg-1', chat_id: 'chat-1', text: 'good' });
+  const inDepth = parseOperatorPresentationContract({ ...intake, interview_depth: 'in_depth' });
+  assert.equal(inDepth.interview_depth, 'in_depth');
+});
+
+test('END008: a contract without provenance keeps its exact canonical shape', () => {
+  const parsed = parseOperatorPresentationContract(intake);
+  assert.equal('interview_depth' in parsed, false);
+  assert.equal('default_acceptance' in parsed, false);
+  assert.equal(JSON.stringify(parsed).includes('default_acceptance'), false);
+});
+
+test('END008: an unknown pace or an incomplete acceptance is refused', () => {
+  assert.throws(() => parseOperatorPresentationContract({ ...intake, interview_depth: 'quickish' }),
+    /interview_depth is invalid/);
+  assert.throws(() => parseOperatorPresentationContract({ ...intake, default_acceptance: { msg_id: 'm', chat_id: 'c' } }),
+    /default_acceptance text is invalid/);
+  assert.throws(() => parseOperatorPresentationContract({ ...intake, default_acceptance: { msg_id: '', chat_id: 'c', text: 'good' } }),
+    /default_acceptance msg_id is invalid/);
+  assert.throws(() => parseOperatorPresentationContract({ ...intake, default_acceptance: { msg_id: 'm', chat_id: '', text: 'good' } }),
+    /default_acceptance chat_id is invalid/);
+  assert.throws(() => parseOperatorPresentationContract({ ...intake, default_acceptance: 'good' }),
+    /default_acceptance is invalid/);
+});
+
 test.after(() => fs.rmSync(TEST_ROOT, { recursive: true, force: true }));
