@@ -138,12 +138,15 @@ describe('BU-16 — the trigger follows the gate, not only the three flags', () 
     );
     render(<ReviewScreen answers={ROWS} />);
 
+    // The gate state arrives asynchronously (ReviewScreen starts with state
+    // null). The trigger is always on screen — its label renders before the
+    // gate loads — so waiting on it proves nothing. Wait on the chip the gate
+    // state actually drives, then assert the trigger stayed locked.
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: /Build my company/i })).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'Answer now' })).toBeTruthy();
     });
     const build = screen.getByRole('button', { name: /Build my company/i }) as HTMLButtonElement;
     expect(build.disabled).toBe(true);
-    expect(screen.getByRole('button', { name: 'Answer now' })).toBeTruthy();
   });
 
   it('arms once the gate reports nothing required still open', async () => {
