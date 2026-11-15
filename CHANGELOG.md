@@ -1,3 +1,13 @@
+## [v7.6.128] - 2026-11-15 - Fish Audio uses the approved client voice and explicit production model
+
+- Call Mode defaults to the Skill 30 Drama-3 policy, always sent in the HTTP model header. Explicit `FISH_AUDIO_MODEL=s2.1-pro` is permitted; free, legacy, empty and unknown values are rejected without automatic downgrade.
+- Read an independently owner-approved voice fingerprint bound to the installed company. Wrong/missing voice, foreign company, missing approval and unapproved request overrides fail before synthesis. The model catalog and an API key are not voice approval.
+- Preserve saved/default Fish Audio selection while unavailable, visibly mark it blocked, and require an explicit provider change. Server/provider/proxy/network failures cannot silently substitute browser speech or another model/provider. Do not reuse a different provider's saved voice override.
+- Failed, empty or invalid provider metadata leaves Call Mode stopped instead of inventing an available browser voice.
+- Keep the immutable vendored policy under `src/lib/voice/` so the shared build inventory covers changes to policy bytes while per-client runtime `config/` stays excluded.
+- Vendor Skill 30's policy with source commit and SHA-256 pin; add cross-repository CI parity, synthetic server/client regression tests and headless Call Mode render tests.
+- Migration: each existing installation needs independent voice approval from the owner's confirmed selection, never an expected value copied from the active setting. See `docs/FISH_AUDIO_PRODUCTION.md`. No client files were changed and no live/paid synthesis or listening test was run. Not merged or deployed. Onboarding's deployment pin remains unchanged.
+
 ## [Unreleased] — 2026-11-13 — ci(qc-cc): the unit-test job names the failing test, stops printing 50 MB of migration lines, and refuses a Vitest file in the Node-runner folder
 
 - ci(qc-cc) U55 job: the Node unit-test step keeps the full TAP in `unit.tap` and shows the job log without the `[Migration N]`, `[seed]`, `[reseed]` and `[DB]` lines (the log was ~51 MB, so the engine's tail-only read could not see the failure). A new last step, `if: failure()`, runs `scripts/ci-annotate-tap-failures.sh`, which prints each failing test as `::error file=tests/unit/<file>` so the check's annotations name the culprit.
