@@ -41,7 +41,10 @@ import { verifiedBuild } from '@/lib/interview/build-verification';
  */
 
 import { standardPlaceholderActive } from '@/lib/interview/build-verification';
+import fs from 'fs';
+import path from 'path';
 import { NextRequest, NextResponse } from 'next/server';
+import { resolveWorkspaceDir } from '@/lib/interview/paths';
 import { readBuildState, readStandardPrebuild } from '@/lib/interview/seam';
 import { interviewStatus } from '@/lib/interview/interview-status';
 import { resolveInterviewTenant, refuseUnverifiedTenant, tenantForHost } from '@/lib/interview/tenant';
@@ -100,9 +103,28 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     });
   }
   const bs = readBuildState();
+  // Completion is terminal. The build-state file is rewritten by many scripts,
+  // so a read can land mid-write (null) or on a copy without the flag. Once this
+  // box has EVER seen interviewComplete=true it records a sticky latch, and the
+  // latch answers whenever the live read gives no answer. An explicit
+  // interviewComplete=false is a definitive answer and still locks.
+  const live = bs?.interviewComplete;
+  let interviewComplete = live === true;
+  const latchPath = path.join(resolveWorkspaceDir(), '.interview-complete-latch.json');
+  if (interviewComplete) {
+    if (!fs.existsSync(latchPath)) {
+      try {
+        const tmp = `${latchPath}.${process.pid}.tmp`;
+        fs.writeFileSync(tmp, JSON.stringify({ interviewComplete: true, interviewCompletedAt: bs?.interviewCompletedAt ?? null, latchedAt: new Date().toISOString() }));
+        fs.renameSync(tmp, latchPath);
+      } catch { /* best effort; the live read still answers */ }
+    }
+  } else if (typeof live !== 'boolean') {
+    interviewComplete = fs.existsSync(latchPath);
+  }
   return NextResponse.json({
     priorCompletionDeclared,
-    interviewComplete: bs?.interviewComplete === true,
+    interviewComplete,
     buildCompleted: verifiedBuild(bs),
     standardReady: readStandardPrebuild(bs).standardReady,
     standardPlaceholder: standardPlaceholderActive(bs),
