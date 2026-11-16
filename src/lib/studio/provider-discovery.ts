@@ -122,7 +122,7 @@ export const PROVIDER_DISCOVERY: ProviderDiscoveryEntry[] = [
     // still what fills the registry on the weekly refresh — this list only
     // gives a freshly-deployed box something honest to show before then.
     models: [
-      { model_id: 'kie/gpt-image-2-5-sunburst-text-to-image', label: 'GPT Image 2.5 (Kie)', capability: 'image_generation', family: 'gpt-image-2-5-sunburst', generates: true },
+      { model_id: 'kie/gpt-image-2-6/sunburst-text-to-image', label: 'GPT Image 2.6 (Kie)', capability: 'image_generation', family: 'gpt-image-2-6/sunburst', generates: true },
       { model_id: 'kie/gpt-image-2-text-to-image', label: 'GPT Image 2 (Kie)', capability: 'image_generation', family: 'gpt-image-2', generates: true },
       { model_id: 'kie/nano-banana-2', label: 'Nano Banana 2 (Kie)', capability: 'image_generation', family: 'nano-banana-2', generates: true },
       { model_id: 'kie/wan/3-0-video', label: 'Wan 3.0 Video (Kie)', capability: 'video_generation', family: 'wan-3-0', generates: true },
