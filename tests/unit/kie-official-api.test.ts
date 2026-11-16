@@ -355,8 +355,8 @@ test('provider-discovery seeds no KIE model ids from memory — only skill 66/67
   const SKILL_66_IMAGE = new Set([
     'gpt-image-2-text-to-image',
     'gpt-image-2-image-to-image',
-    'gpt-image-2-5-sunburst-text-to-image',
-    'gpt-image-2-5-sunburst-image-to-image',
+    'gpt-image-2-6/sunburst-text-to-image',
+    'gpt-image-2-6/sunburst-image-to-image',
     'nano-banana-2',
     'nano-banana-2-lite',
     'nano-banana-pro',

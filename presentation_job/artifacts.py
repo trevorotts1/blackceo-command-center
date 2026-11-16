@@ -118,7 +118,7 @@ def validate_design_prompt(path: Path, rel_path: str,
     of the model maxLength, via the shared enforcer).
 
     `build_infographic.resolve_design_prompt` reads this file VERBATIM as ONE
-    GPT-Image-2.5 prompt and refuses it via `prompt_gate` before any paid call.
+    GPT-Image 2.6 prompt and refuses it via `prompt_gate` before any paid call.
     Re-validating the same band here means an out-of-band prompt is caught at
     the DESIGN phase (cheap re-author) instead of at the render phase (parked
     run). Length is measured on the stripped text, exactly as the gate does."""

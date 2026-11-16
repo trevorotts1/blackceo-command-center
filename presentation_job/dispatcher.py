@@ -1388,7 +1388,7 @@ ARTIFACT_CONTRACTS: Dict[str, str] = {
 # reducer CONCATENATES the three unit outputs into ONE artifact
 # (`prompts/<page>.design.txt`, `_reduce_text_concat`), and the consuming
 # render phase (`build_infographic.resolve_design_prompt`) sends that ONE
-# artifact VERBATIM to GPT-Image-2.5 as ONE prompt behind the shared gate at
+# artifact VERBATIM to GPT-Image 2.6 as ONE prompt behind the shared gate at
 # `prompt_gate.PROMPT_CHAR_FLOOR .. PROMPT_CHAR_CEILING`.
 #
 # Nothing in the producer knew any of that. All three phases had NO entry in
@@ -1518,7 +1518,7 @@ def _design_page_prompt_contract(phase_id: str, order: Dict[str, Any]) -> str:
         attribution = (
             f"1. YOU ARE AUTHORING PART {ordinal} OF {n} OF ONE SINGLE PROMPT, "
             f"NOT A PROMPT OF YOUR OWN. `prompts/{page}.design.txt` is ONE "
-            f"image prompt, sent VERBATIM to GPT-Image-2.5 to render ONE 16:9 "
+            f"image prompt, sent VERBATIM to GPT-Image 2.6 to render ONE 16:9 "
             f"page-design image. The engine authors it in {n} parts "
             f"concurrently and joins them in ordinal order with a blank line. "
             f"Part 1 opens the prompt: it carries the ONE `[ARCHETYPE ...]` "
@@ -1531,7 +1531,7 @@ def _design_page_prompt_contract(phase_id: str, order: Dict[str, Any]) -> str:
         attribution = (
             f"1. YOU ARE AUTHORING THE WHOLE PROMPT. "
             f"`prompts/{page}.design.txt` is ONE image prompt, sent VERBATIM to "
-            f"GPT-Image-2.5 to render ONE 16:9 page-design image. It carries "
+            f"GPT-Image 2.6 to render ONE 16:9 page-design image. It carries "
             f"exactly ONE `[ARCHETYPE ...]` layout header, ONE "
             f"canvas/format/resolution declaration, and closes with the ONE "
             f"`DO-NOT BLOCK` negative block.\n")
@@ -1556,7 +1556,7 @@ def _design_page_prompt_contract(phase_id: str, order: Dict[str, Any]) -> str:
         f"ASSEMBLED FILE, NOT ON YOUR PART. The shared gate (KIE rule 12) "
         f"requires the complete `prompts/{page}.design.txt` to be between "
         f"{_bud['floor']:,} and {_bud['ceiling']:,} characters "
-        f"(80 percent of the {_bud['max']:,}-character GPT-Image-2.5 maxLength "
+        f"(80 percent of the {_bud['max']:,}-character GPT-Image 2.6 maxLength "
         f"up to that maxLength less the {_bud['pin']}-character English pin the "
         f"renderer appends; aim for 95 to 100 percent). "
         f"Your part is {ordinal} of {n}, so YOUR OWN OUTPUT MUST BE BETWEEN "
