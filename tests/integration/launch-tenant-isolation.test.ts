@@ -32,6 +32,7 @@ import { NextRequest, NextResponse } from 'next/server';
 // hermetic (no localhost fetch, no live Command Center).
 vi.mock('@/lib/interview/gate-fallback', () => ({
   checkInterviewCompleteViaFallback: async () => true,
+  checkInterviewGateStatus: async () => true,
 }));
 
 const TENANT_SECRET = 'l11-synthetic-tenant-session-secret';

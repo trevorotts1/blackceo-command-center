@@ -66,7 +66,7 @@ test('a link minted months ago still signs the owner in while the interview is u
     assert.equal(response.status, 200, `a ${daysOld}-day-old link must still work`);
     const body = await response.json();
     assert.equal(body.resumed, false);
-    assert.match(response.headers.get('set-cookie')!, /Max-Age=2592000/i);
+    assert.match(response.headers.get('set-cookie')!, /Max-Age=31536000/i);
   }
 });
 
@@ -195,7 +195,7 @@ test('same signed invitation works across devices through the completion grace, 
       assert.equal(expired.headers.get('set-cookie'), null);
     }
     const sessionStatus = await GET(new NextRequest(`https://${host}/api/auth/interview-session`, { headers: { host, cookie } }));
-    assert.equal(sessionStatus.status, 200, 'independent 30-day session remains valid');
+    assert.equal(sessionStatus.status, 200, 'independent 1-year session remains valid');
     assert.equal(fs.readFileSync(statePath, 'utf8'), before, 'completion timestamp, flag and answers are unchanged');
   } finally { Date.now = realNow; }
 });

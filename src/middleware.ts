@@ -12,7 +12,7 @@ import {
   sanitizeHeaderValue,
 } from '@/lib/probes/unauthorized-401-contract';
 import { INTERVIEW_COOKIE_NAME, INTERVIEW_BYPASS_COOKIE_NAME, LATCH_COOKIE_NAME, verifyInterviewToken, verifyInterviewBypassToken, verifyInterviewBypassCookieToken, signInterviewToken } from '@/lib/interview/gate-cookie';
-import { checkInterviewCompleteViaFallback } from '@/lib/interview/gate-fallback';
+import { checkInterviewCompleteViaFallback, checkInterviewGateStatus } from '@/lib/interview/gate-fallback';
 import { BEARER_REQUIRED_WRITE_ROUTES, requiresBearerForWrite } from '@/lib/bearer-required-routes';
 import {
   CSRF_COOKIE_NAME,
@@ -216,7 +216,11 @@ function tenantRefusalResponse(request: NextRequest, body: { error: string; mess
     `<h1>Sign in required</h1><p>${safe}</p>` +
     `<p>Re-open your private interview link to sign in again and continue where you left off — ` +
     `the same link works until your interview is complete, on any device. ` +
-    `If that link no longer opens, reply to the message that sent it and ask for a new one.</p></body></html>`,
+    `If that link no longer opens, reply to the message that sent it and ask for a new one.</p>` +
+    // Expired or missing sign-in is never a dead end: one click clears the stale
+    // Cloudflare Access session and the next visit shows a fresh sign-in.
+    `<p><a href="/cdn-cgi/access/logout" style="display:inline-block;padding:.75rem 1.25rem;background:#111;color:#fff;border-radius:.5rem;text-decoration:none">Sign in again</a> ` +
+    `&nbsp;then <a href="/">open your Command Center</a>.</p></body></html>`,
     { status: 403, headers: { ...headers, 'content-type': 'text/html; charset=utf-8' } },
   );
 }
@@ -973,7 +977,9 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
     try { const tenant=await resolveTenantContext(request); scope=`${tenant.tenantId}:${tenant.installationId}:${tenant.host}`; gateEmail=tenant.email ?? null; }
     catch { return tenantRefusalResponse(request, { error: 'tenant_access_required', message: 'Please sign in with the email address you were invited with. If it still does not work, let your support contact know. Your interview answers are safe.' }); }
     const verdict = await verifyInterviewToken(token,scope);
-    if (verdict.complete === true && verdict.valid && await checkInterviewCompleteViaFallback(request.headers.get('host'))) {
+    if (verdict.complete === true && verdict.valid && await checkInterviewGateStatus(request.headers.get('host')) !== false) {
+      // A failed CHECK (timeout/busy/5xx) never revokes a valid complete cookie;
+      // only a definitive "incomplete" answer does.
       // Primary cookie is valid-complete — admit immediately.
     } else {
       // MR-17: admin escape hatches BEFORE the fallback chain. A corrupted
@@ -1023,7 +1029,7 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
       const latchToken = request.cookies.get(LATCH_COOKIE_NAME)?.value;
       if (latchToken) {
         const latchVerdict = await verifyInterviewToken(latchToken,scope);
-        if (latchVerdict.complete === true && latchVerdict.valid && await checkInterviewCompleteViaFallback(request.headers.get('host'))) {
+        if (latchVerdict.complete === true && latchVerdict.valid && await checkInterviewGateStatus(request.headers.get('host')) !== false) {
           admitted = true;
         }
       }
