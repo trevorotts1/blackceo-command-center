@@ -104,10 +104,12 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   }
   const bs = readBuildState();
   // Completion is terminal. The build-state file is rewritten by many scripts,
-  // so a read can land mid-write (null) or on a regressed copy. Once this box
-  // has EVER seen interviewComplete=true it records a sticky latch, and the
-  // latch answers whenever the live read does not.
-  let interviewComplete = bs?.interviewComplete === true;
+  // so a read can land mid-write (null) or on a copy without the flag. Once this
+  // box has EVER seen interviewComplete=true it records a sticky latch, and the
+  // latch answers whenever the live read gives no answer. An explicit
+  // interviewComplete=false is a definitive answer and still locks.
+  const live = bs?.interviewComplete;
+  let interviewComplete = live === true;
   const latchPath = path.join(resolveWorkspaceDir(), '.interview-complete-latch.json');
   if (interviewComplete) {
     if (!fs.existsSync(latchPath)) {
@@ -117,7 +119,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         fs.renameSync(tmp, latchPath);
       } catch { /* best effort; the live read still answers */ }
     }
-  } else {
+  } else if (typeof live !== 'boolean') {
     interviewComplete = fs.existsSync(latchPath);
   }
   return NextResponse.json({

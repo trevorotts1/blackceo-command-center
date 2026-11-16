@@ -17,7 +17,7 @@
  *     in the database — not a process-local Map, which two processes and a
  *     restart would each defeat. A consumed ticket stays consumed even if the
  *     response never reached the browser; the operator mints a fresh link.
- *   • The destination cookie is the EXISTING 30-day `purpose:'session'` grant
+ *   • The destination cookie is the EXISTING 1-year `purpose:'session'` grant
  *     (`mc_tenant_session`, HttpOnly / Secure in production / SameSite=Lax /
  *     Path=/ / no Domain). No new session mechanism, no new identity service,
  *     no interview re-enrollment path.
@@ -73,7 +73,7 @@ export const OWNER_REDIRECT_PATH = '/hq';
 /** Stable subject shape, identical to interview issuance (S7 line 275). */
 export const OWNER_SUBJECT_PREFIX = 'invited-owner:';
 
-/** Existing 30-day browser session; the same lifetime the interview session issues. */
+/** Existing 1-year browser session; the same lifetime the interview session issues. */
 export const OWNER_SESSION_TTL_SECONDS = 365 * 24 * 60 * 60; // Trevor 2026-11-02: one year
 
 /** Ticket transport bound (S7 body `{ticket}` only, max 4 KiB overall). */
