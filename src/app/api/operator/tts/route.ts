@@ -14,9 +14,8 @@
  *   4. xai        (X_AI_API_KEY)
  *   5. elevenlabs (ELEVENLABS_API_KEY)
  *
- * On provider error the route falls back to the next configured provider in
- * the priority list and surfaces `x-tts-provider` so the client can display
- * a "fell back to X" toast.
+ * Most providers may fall back in priority order. A selected Fish Audio
+ * client voice fails closed; neither server nor browser may substitute it.
  *
  * xAI voice availability is plan-gated. On 403/404 we mark the provider as
  * unavailable for the remainder of the process lifetime so subsequent
@@ -24,6 +23,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
+import { resolveFishAudioConfig } from '../../../../lib/voice/fish-audio-config';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -51,7 +51,7 @@ function isProviderConfigured(id: ProviderId): boolean {
     case 'elevenlabs':
       return Boolean(process.env.ELEVENLABS_API_KEY && process.env.ELEVENLABS_VOICE_ID);
     case 'fish_audio':
-      return Boolean(process.env.FISH_AUDIO_API_KEY);
+      try { resolveFishAudioConfig(); return true; } catch { return false; }
     case 'xai':
       return Boolean(process.env.X_AI_API_KEY);
     case 'browser':
@@ -101,6 +101,16 @@ export async function POST(req: NextRequest) {
   const requested = (url.searchParams.get('provider') || '').toLowerCase() as ProviderId | '';
   const voiceOverride = url.searchParams.get('voice') || undefined;
 
+  // A chosen client voice must never silently become another provider's voice.
+  const fishSelected = requested === 'fish_audio' || (!requested && priorityOrder()[0] === 'fish_audio');
+  if (fishSelected) {
+    try { resolveFishAudioConfig(voiceOverride); } catch (error) {
+      return NextResponse.json({ error: (error as Error).message }, {
+        status: 409, headers: { 'x-tts-fallback': 'blocked', 'cache-control': 'no-store' },
+      });
+    }
+  }
+
   const candidates: ProviderId[] = [];
   if (requested && isProviderConfigured(requested as ProviderId)) {
     candidates.push(requested as ProviderId);
@@ -131,6 +141,11 @@ export async function POST(req: NextRequest) {
       });
     } catch (err) {
       lastError = (err as Error).message;
+      if (providerId === 'fish_audio') {
+        return NextResponse.json({ error: 'Fish Audio synthesis failed; no model or voice fallback' }, {
+          status: 502, headers: { 'x-tts-fallback': 'blocked', 'cache-control': 'no-store' },
+        });
+      }
     }
   }
   return NextResponse.json(
@@ -216,33 +231,32 @@ async function synthesizeElevenLabs(text: string, voice: string | undefined): Pr
 }
 
 async function synthesizeFishAudio(text: string, voice: string | undefined): Promise<SynthResult> {
-  const apiKey = process.env.FISH_AUDIO_API_KEY;
-  if (!apiKey) throw new Error('FISH_AUDIO_API_KEY is not set');
-  const referenceId = voice || process.env.FISH_AUDIO_VOICE_ID;
-  if (!referenceId) throw new Error('FISH_AUDIO_VOICE_ID is not set');
+  const { apiKey, voiceId, model } = resolveFishAudioConfig(voice);
   const res = await fetch('https://api.fish.audio/v1/tts', {
     method: 'POST',
     headers: {
       authorization: `Bearer ${apiKey}`,
       'content-type': 'application/json',
+      model,
     },
     body: JSON.stringify({
       text,
-      reference_id: referenceId,
+      reference_id: voiceId,
       format: 'mp3',
-      mp3_bitrate: 128,
+      mp3_bitrate: 64,
       chunk_length: 200,
       normalize: true,
       latency: 'normal',
     }),
   });
   if (!res.ok) {
-    const detail = await safeReadText(res);
-    // 401/403/429/5xx all fall through to the next provider in priority order.
-    // Surface the status code so the caller's catch block can log it.
-    throw new Error(`Fish Audio TTS ${res.status}: ${detail}`);
+    // Provider error text can echo client text, voice IDs or credentials.
+    throw new Error(`Fish Audio TTS failed (HTTP ${res.status}); no model or voice fallback`);
   }
   const buf = await res.arrayBuffer();
+  if (!buf.byteLength || !res.headers.get('content-type')?.startsWith('audio/')) {
+    throw new Error('Fish Audio did not return nonempty audio');
+  }
   return { body: buf, contentType: res.headers.get('content-type') || 'audio/mpeg' };
 }
 

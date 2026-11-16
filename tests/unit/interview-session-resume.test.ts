@@ -46,11 +46,11 @@ async function atTime<T>(timestamp: number, body: () => Promise<T>) {
   try { return await body(); } finally { Date.now = original; }
 }
 
-test('legacy 24h receipt field and 30-day cookie/JWT expiry remain separate and exact', async () => {
+test('legacy 24h receipt field and 1-year cookie/JWT expiry remain separate and exact', async () => {
   assert.equal(INTERVIEW_INVITATION_TTL_SECONDS, 86400);
-  assert.equal(INTERVIEW_SESSION_TTL_SECONDS, 2592000);
+  assert.equal(INTERVIEW_SESSION_TTL_SECONDS, 31536000);
   const start = now(); const { response, cookie } = await enroll();
-  assert.match(response.headers.get('set-cookie')!, /Max-Age=2592000/i);
+  assert.match(response.headers.get('set-cookie')!, /Max-Age=31536000/i);
   assert.match(response.headers.get('set-cookie')!, /HttpOnly/i);
   // SameSite=Lax, pinned: the link arrives as a cross-site top-level
   // navigation (tapped in an external app), which Strict would strip the
@@ -73,7 +73,7 @@ test('a redeemed link resumes on its own browser and re-opens on a fresh one', a
   assert.equal(resumedBody.resumed, true);
   const renewed = resumed.headers.get('set-cookie');
   assert.ok(renewed, 'resume must renew the session cookie with a fresh expiry');
-  assert.match(renewed, /Max-Age=2592000/i);
+  assert.match(renewed, /Max-Age=31536000/i);
   assert.match(renewed, /HttpOnly/i);
   assert.match(renewed, /SameSite=lax/i);
   const renewedGrant = await verifyTenantGrant(renewed.split(';')[0].split('=')[1], host, 'session');

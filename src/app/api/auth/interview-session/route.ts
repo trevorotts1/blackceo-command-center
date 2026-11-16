@@ -66,7 +66,7 @@ export async function POST(req: NextRequest) {
       if (enrollmentWindowClosed(active.companyId)) {
         return NextResponse.json({ error: 'interview_already_complete' }, { status: 403, headers });
       }
-      // Sliding renewal: an actively used session gets a fresh 30-day window
+      // Sliding renewal: an actively used session gets a fresh 1-year window
       // on each resume so it never dies mid-interview. Ownership and scope
       // are copied from the LIVE session grant (active), never the ticket —
       // the ticket is identity proof only, exactly as the mismatch check above.

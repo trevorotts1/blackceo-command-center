@@ -158,7 +158,7 @@ test('KNOWN-GOOD CONTROL: a fresh ticket signs the owner in and the session veri
   const grant = await verifyTenantGrant(cookie.split(';')[0].split('=').slice(1).join('='), HOST, 'session');
   assert.ok(grant, 'the issued cookie is a real verifiable session grant');
   assert.equal(grant.subject, OWNER_SUBJECT);
-  assert.ok(grant.exp <= now() + OWNER_SESSION_TTL_SECONDS, 'a 30-day session, not an unbounded one');
+  assert.ok(grant.exp <= now() + OWNER_SESSION_TTL_SECONDS, 'a 1-year session, not an unbounded one');
 });
 
 /* ── Expiry: the purpose is bounded, enrollment stays timeless ────────────── */

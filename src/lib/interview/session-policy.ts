@@ -41,7 +41,7 @@ export const INTERVIEW_INVITATION_REDEEMABLE = 'until-interview-complete';
  * cookie should not be permanent. It no longer strands anyone, because a lapsed
  * session can re-open the same link while its enrollment window is open.
  */
-export const INTERVIEW_SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
+export const INTERVIEW_SESSION_TTL_SECONDS = 365 * 24 * 60 * 60; // Trevor 2026-11-02: one year
 
 /** Fixed grace after interview completion; never renewed by opening a link. */
 export const INTERVIEW_COMPLETION_GRACE_SECONDS = 24 * 60 * 60;
