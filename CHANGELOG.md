@@ -1,3 +1,7 @@
+## [Unreleased] — 2026-11-10 — fix(interview): several brand colors in one answer are accepted
+
+- fix(brand color): the color field accepted only one value, so typing two hex codes left Save unavailable with no way forward. The first valid code becomes the primary color and the full answer stays in the transcript.
+
 ## [v7.6.128] - 2026-11-15 - Fish Audio uses the approved client voice and explicit production model
 
 - Call Mode defaults to the Skill 30 Drama-3 policy, always sent in the HTTP model header. Explicit `FISH_AUDIO_MODEL=s2.1-pro` is permitted; free, legacy, empty and unknown values are rejected without automatic downgrade.
