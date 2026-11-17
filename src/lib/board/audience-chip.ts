@@ -30,3 +30,24 @@ export const ANSWERED_AUDIENCE_SOURCES = ['task_named', 'owner_default', 'operat
 export function needsAudienceAnswer(t: { blend_confirm_state?: string | null; audience_source?: string | null }): boolean {
   return t.blend_confirm_state === 'pending' && !(ANSWERED_AUDIENCE_SOURCES as readonly string[]).includes(t.audience_source ?? '');
 }
+
+/**
+ * True only for a question the OWNER can actually answer: the audience question
+ * is open AND the task is live AND it is not an operator/system fault. Operator-
+ * blocked and SYSTEM-audience tasks carry engineering text in `ask`, and an
+ * archived task cannot be confirmed, so none of them belong on the owner's board.
+ */
+export function isOwnerQuestion(t: {
+  blend_confirm_state?: string | null;
+  audience_source?: string | null;
+  archived_at?: string | null;
+  blocked_on_human?: string | null;
+  block_audience?: string | null;
+}): boolean {
+  return (
+    needsAudienceAnswer(t) &&
+    !t.archived_at &&
+    t.blocked_on_human !== 'operator' &&
+    t.block_audience !== 'SYSTEM'
+  );
+}
