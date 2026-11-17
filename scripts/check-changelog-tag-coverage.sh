@@ -40,7 +40,7 @@ N="${1:-60}"
 TAGS_FILE="$(mktemp)"
 trap 'rm -f "$TAGS_FILE"' EXIT
 git for-each-ref --merged HEAD --sort=-creatordate --format='%(refname:short)' refs/tags \
-  | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n "$N" > "$TAGS_FILE"
+  | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | awk -v n="$N" 'NR<=n' > "$TAGS_FILE"
 
 TAG_COUNT=$(wc -l < "$TAGS_FILE" | tr -d '[:space:]')
 if [ "$TAG_COUNT" -eq 0 ]; then
