@@ -1,3 +1,10 @@
+## [Unreleased] — 2026-11-17 — fix(board): the "waiting for your answer" banner shows only real owner questions
+
+- fix(board): the yellow banner and the card chip listed every task with an open audience question, including tasks blocked on the operator (dispatch cap, provider quota errors) and archived tasks, and printed the engineering error text as if it were the owner's question. New `isOwnerQuestion()` hides operator-blocked, SYSTEM and archived cards, and the banner always shows the approved plain-language audience question instead of the raw `ask` text. The task-detail "Waiting for your answer" hold uses the same rule.
+- fix(api): `POST /api/tasks/[id]/audience` on an archived or inactive task now returns 409 with a plain message instead of a 500.
+- Tests: `tests/unit/owner-question-filter.test.ts`, extended `tests/unit/audience-answered-no-ask-chip.test.tsx`. No version bump.
+- Migration: none. Not merged or deployed.
+
 ## [Unreleased] — 2026-11-10 — fix(interview): several brand colors in one answer are accepted
 
 - fix(brand color): the color field accepted only one value, so typing two hex codes left Save unavailable with no way forward. The first valid code becomes the primary color and the full answer stays in the transcript.

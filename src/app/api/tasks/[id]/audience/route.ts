@@ -65,6 +65,8 @@ export async function GET(_request: NextRequest, { params }: RouteParams) {
   return NextResponse.json(gate, { status: 200 });
 }
 
+const INACTIVE_TASK_MESSAGE = 'This task is archived or no longer active, so there is nothing to answer.';
+
 export async function POST(request: NextRequest, { params }: RouteParams) {
   try {
     const { id } = await params;
@@ -72,6 +74,9 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
     const task = queryOne<Task>('SELECT * FROM tasks WHERE id = ?', [id]);
     if (!task) {
       return NextResponse.json({ error: 'Task not found' }, { status: 404 });
+    }
+    if (task.archived_at) {
+      return NextResponse.json({ error: INACTIVE_TASK_MESSAGE }, { status: 409 });
     }
 
     let payload: unknown;
@@ -137,6 +142,9 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
 
     return NextResponse.json({ success: true, changed, rescored, task: updated }, { status: 200 });
   } catch (error) {
+    if (error instanceof Error && error.message === 'persona_task_inactive') {
+      return NextResponse.json({ error: INACTIVE_TASK_MESSAGE }, { status: 409 });
+    }
     console.error('[audience] Failed to confirm task audience:', error);
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }

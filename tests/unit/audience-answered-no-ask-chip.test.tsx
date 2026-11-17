@@ -41,4 +41,17 @@ describe("answered audience never asks again", () => {
     expect(screen.getByText(/Needs your answer/)).toBeTruthy();
     expect(screen.getByTestId("audience-ask-banner")).toBeTruthy();
   });
+  it("operator-blocked and archived cards never reach the owner banner, and the banner never prints raw ask text", () => {
+    m.mockReturnValue(st([
+      task({ id: "op", title: "Op fault", blend_confirm_state: "pending", blocked_on_human: "operator", ask: "System fix required: dispatch-attempt cap" }),
+      task({ id: "ar", title: "Old one", blend_confirm_state: "pending", archived_at: "2026-11-01T00:00:00Z" }),
+      task({ id: "ok", title: "Real one", blend_confirm_state: "pending", ask: "SOP authoring failed 401 insufficient_quota" }),
+    ]));
+    render(<MissionQueue departmentFilter={null} />);
+    const banner = screen.getByTestId("audience-ask-banner");
+    expect(banner.textContent).toMatch(/1 task waiting for your answer/);
+    expect(banner.textContent).toMatch(/Real one/);
+    expect(banner.textContent).toMatch(/Who will be reading this\?/);
+    expect(banner.textContent).not.toMatch(/Op fault|Old one|System fix|insufficient_quota/);
+  });
 });
