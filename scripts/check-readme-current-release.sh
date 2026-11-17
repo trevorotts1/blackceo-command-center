@@ -27,7 +27,7 @@ REPO_VER=$(head -1 version | tr -d '[:space:]')
 echo "Repo /version: $REPO_VER"
 
 # "**Current release: vX.Y.Z" heading must equal /version.
-HEADER_VER=$(grep -oE '\*\*Current release: v[0-9]+\.[0-9]+\.[0-9]+' README.md | head -1 | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' || echo "MISSING")
+HEADER_VER=$(grep -m1 -oE '\*\*Current release: v[0-9]+\.[0-9]+\.[0-9]+' README.md | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' || echo "MISSING")
 if [ "$HEADER_VER" != "$REPO_VER" ]; then
   echo "README DRIFT: '**Current release: $HEADER_VER' heading != /version ($REPO_VER)"
   FAIL=1
@@ -36,7 +36,7 @@ else
 fi
 
 # "The current release is vX.Y.Z" prose (under Historical release highlights) must equal /version.
-PROSE_VER=$(grep -oE 'current release is v[0-9]+\.[0-9]+\.[0-9]+' README.md | head -1 | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' || echo "MISSING")
+PROSE_VER=$(grep -m1 -oE 'current release is v[0-9]+\.[0-9]+\.[0-9]+' README.md | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' || echo "MISSING")
 if [ "$PROSE_VER" != "$REPO_VER" ]; then
   echo "README DRIFT: 'current release is $PROSE_VER' prose != /version ($REPO_VER)"
   FAIL=1
