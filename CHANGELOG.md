@@ -1,3 +1,15 @@
+## [v8.0.0] - 2026-11-17 - Milestone
+
+- milestone: Command Center major release. The Command Center build room closed with all 24 of 24 units complete on 2026-11-16, alongside four other build rooms.
+- This release also rolls up the changes merged to main since the v7.6.128 stamp. The four below (#821, #825, #826, #830) had no changelog line of their own until now:
+  - feat(contract) #821 (END008, landed through batch #832): the operator contract schema now carries the PD-013 pace and the default provenance reference.
+  - fix(ci) #830 (landed through batch #831): the version-locations check no longer fails at random from a broken-pipe flake, and Next.js is patched for security advisory GHSA-mfr8-8qww-v76h.
+  - fix(auth) #826 (landed through batch #829): a completed interview never locks the client out again, sign-in lasts one year, and a refused sign-in now offers to sign in again. Answers are latched only when the live read returns none.
+  - fix(images) #825 (landed through batch #827): image generation moves from GPT Image 2.5 to GPT Image 2.6 (Sunburst), including the provider discovery seed, its test, and the vendored presentation job.
+- batches #827, #829, #831 and #832 each carried one of the changes above (#825, #826, #830 and #821).
+- Also merged since the stamp: #824 (batch #828), several brand colors in one answer are accepted; it already has its own Unreleased entry below.
+- version stamped in `version`, `package.json`, `package-lock.json` (both fields), README current-release lines, and this changelog.
+
 ## [Unreleased] — 2026-11-10 — fix(interview): several brand colors in one answer are accepted
 
 - fix(brand color): the color field accepted only one value, so typing two hex codes left Save unavailable with no way forward. The first valid code becomes the primary color and the full answer stays in the transcript.
