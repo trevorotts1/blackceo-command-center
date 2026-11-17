@@ -5,6 +5,7 @@
 - New `GET /api/owner-questions?status=open` and bearer-only `POST /api/owner-questions/[id]/chat-answer` (id or short code). Command Center re-reads the client's message from the gateway record before applying it; YES accepts the recommendation; replays are idempotent.
 - The board's audience panel shows the recommendation with a "Use my recommendation" button; a board answer closes the open question.
 - Tests: new `tests/unit/owner-questions.test.ts`; census and head-migration pins moved (migration 180, 169 mutating routes, 53 bearer patterns).
+- Safety limits: a question closes when its card no longer waits (bundle no longer pending, card running or finished, or no longer blocked on the owner); at most 3 reminders per question, then it closes as expired with one operator note; one sweep tick sends at most 3 messages; an answer is re-checked against the card at answer time.
 - Migration: 180 (`owner_questions`, additive and idempotent).
 
 ## [Unreleased] — 2026-11-10 — fix(interview): several brand colors in one answer are accepted

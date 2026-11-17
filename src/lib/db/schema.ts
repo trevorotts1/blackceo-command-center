@@ -929,6 +929,7 @@ CREATE TABLE IF NOT EXISTS owner_questions (
   pushed_at TEXT,
   push_delivery TEXT,
   last_reminded_at TEXT,
+  reminder_count INTEGER NOT NULL DEFAULT 0,
   answered_at TEXT,
   answer TEXT,
   answer_source TEXT CHECK (answer_source IN ('board','chat') OR answer_source IS NULL),

@@ -53,6 +53,7 @@ export interface OwnerQuestionRow {
   pushed_at: string | null;
   push_delivery: string | null;
   last_reminded_at: string | null;
+  reminder_count: number;
   answered_at: string | null;
   answer: string | null;
   answer_source: OwnerAnswerSource | null;
@@ -60,6 +61,10 @@ export interface OwnerQuestionRow {
 }
 
 export const REMINDER_INTERVAL_MS = 24 * 60 * 60 * 1000;
+/** A question is reminded at most this many times, then closed as expired. */
+export const MAX_REMINDERS_PER_QUESTION = 3;
+/** Pushes plus reminders one sweep tick may send (oldest first); the rest wait for the next tick. */
+export const MAX_OWNER_QUESTION_SENDS_PER_TICK = 3;
 const SHORT_CODE_RE = /^Q-[0-9A-F]{6}$/;
 
 export class OwnerQuestionError extends Error {
@@ -253,6 +258,21 @@ function reportUndeliverableOnce(q: OwnerQuestionRow, delivery: string): void {
   } catch { /* best-effort */ }
 }
 
+/** Atomic claim of the one push. Exactly one caller per question ever gets true. */
+export function claimPush(id: string, nowIso: string): boolean {
+  const res = run('UPDATE owner_questions SET pushed_at = ? WHERE id = ? AND pushed_at IS NULL AND answered_at IS NULL', [nowIso, id]);
+  return (res.changes ?? 0) > 0;
+}
+
+/** Atomic claim of one reminder: only the caller that saw the current last_reminded_at wins. */
+export function claimReminder(id: string, expectedLast: string | null, nowIso: string): boolean {
+  const res = run(
+    'UPDATE owner_questions SET last_reminded_at = ?, reminder_count = reminder_count + 1 WHERE id = ? AND answered_at IS NULL AND last_reminded_at IS ?',
+    [nowIso, id, expectedLast],
+  );
+  return (res.changes ?? 0) > 0;
+}
+
 export function pushOwnerQuestion(id: string, opts: PushOptions = {}): PushResult {
   const q = getOwnerQuestion(id);
   if (!q) return { status: 'not_found' };
@@ -261,8 +281,7 @@ export function pushOwnerQuestion(id: string, opts: PushOptions = {}): PushResul
   if (gateSends(opts)) return { status: 'deferred' };
 
   const now = (opts.now ?? new Date()).toISOString();
-  const claim = run('UPDATE owner_questions SET pushed_at = ? WHERE id = ? AND pushed_at IS NULL AND answered_at IS NULL', [now, q.id]);
-  if ((claim.changes ?? 0) < 1) return { status: 'already_pushed' };
+  if (!claimPush(q.id, now)) return { status: 'already_pushed' };
 
   let delivery: RequesterAudienceAskDelivery = 'send_failed';
   try {
@@ -279,26 +298,33 @@ export function pushOwnerQuestion(id: string, opts: PushOptions = {}): PushResul
   return { status: 'undeliverable', delivery };
 }
 
-/** One reminder, at most once per 24 hours per question. */
-export function remindOwnerQuestion(id: string, opts: PushOptions = {}): 'reminded' | 'not_due' | 'deferred' | 'failed' {
+/** One reminder, at most once per 24 hours per question, at most MAX_REMINDERS_PER_QUESTION in all. */
+export function remindOwnerQuestion(id: string, opts: PushOptions = {}): 'reminded' | 'not_due' | 'deferred' | 'failed' | 'expired' {
   const q = getOwnerQuestion(id);
   if (!q || q.answered_at || !q.pushed_at) return 'not_due';
   const nowDate = opts.now ?? new Date();
   const last = Date.parse(q.last_reminded_at ?? q.pushed_at);
   if (!Number.isFinite(last) || nowDate.getTime() - last < REMINDER_INTERVAL_MS) return 'not_due';
+  if ((q.reminder_count ?? 0) >= MAX_REMINDERS_PER_QUESTION) {
+    if (closeQuestion(q.id, `(expired: no answer after ${MAX_REMINDERS_PER_QUESTION} reminders)`, 'board')) {
+      try {
+        notifySystem(
+          `[owner-question-expired] Question ${q.short_code} on task ${q.task_id} got no answer after ${MAX_REMINDERS_PER_QUESTION} reminders and was closed.`,
+          { agent: 'owner-questions', action: 'escalate' },
+        );
+      } catch { /* best-effort */ }
+    }
+    return 'expired';
+  }
   if (gateSends(opts)) return 'deferred';
   const nowIso = nowDate.toISOString();
-  const claim = run(
-    'UPDATE owner_questions SET last_reminded_at = ? WHERE id = ? AND answered_at IS NULL AND last_reminded_at IS ?',
-    [nowIso, q.id, q.last_reminded_at],
-  );
-  if ((claim.changes ?? 0) < 1) return 'not_due';
+  if (!claimReminder(q.id, q.last_reminded_at, nowIso)) return 'not_due';
   let delivery: RequesterAudienceAskDelivery = 'send_failed';
   try {
     delivery = (opts.send ?? defaultOwnerQuestionSender)(q.task_id, `Reminder: ${composeOwnerQuestionMessage(q)}`);
   } catch { /* retain */ }
   if (delivery === 'telegram' || delivery === 'session') return 'reminded';
-  run('UPDATE owner_questions SET last_reminded_at = ? WHERE id = ?', [q.last_reminded_at, q.id]);
+  run('UPDATE owner_questions SET last_reminded_at = ?, reminder_count = reminder_count - 1 WHERE id = ?', [q.last_reminded_at, q.id]);
   return 'failed';
 }
 
@@ -321,22 +347,36 @@ export function closeOpenAudienceQuestion(taskId: string, label: string | null):
   } catch { /* table may not exist on an un-migrated box */ }
 }
 
-/** Close questions whose card no longer waits on the owner (answered elsewhere, archived, resumed). */
+const PRE_DISPATCH_STATES = new Set(['inbox', 'planning', 'backlog', 'pending_dispatch', 'assigned']);
+
+/**
+ * True when the card no longer waits on the owner for THIS question: gone,
+ * archived, an operator fault, or (audience) the persona bundle is no longer
+ * pending / the card left the pre-dispatch states, or (owner_block) the card
+ * is no longer blocked on the owner.
+ */
+export function isQuestionStale(q: Pick<OwnerQuestionRow, 'task_id' | 'kind'>): boolean {
+  const t = queryOne<{ status: string; archived_at: string | null; audience_source: string | null; blocked_on_human: string | null; block_audience: string | null }>(
+    'SELECT status, archived_at, audience_source, blocked_on_human, block_audience FROM tasks WHERE id = ?',
+    [q.task_id],
+  );
+  if (!t || t.archived_at || t.blocked_on_human === 'operator' || t.block_audience === 'SYSTEM') return true;
+  const blockedOnOwner = t.status === 'blocked' && (t.block_audience === 'OWNER' || t.blocked_on_human === 'owner');
+  if (q.kind === 'owner_block') return !blockedOnOwner;
+  // audience
+  if (!blockedOnOwner && !PRE_DISPATCH_STATES.has(t.status)) return true; // running / finished: nothing left to confirm
+  if ((ANSWERED_AUDIENCE_SOURCES as readonly string[]).includes(t.audience_source ?? '') && t.status !== 'blocked') return true;
+  const bundle = queryOne<{ confirm_state: string | null }>('SELECT confirm_state FROM task_persona_bundle WHERE task_id = ?', [q.task_id]);
+  return !bundle || bundle.confirm_state !== 'pending';
+}
+
+/** Close questions whose card no longer waits on the owner (answered elsewhere, archived, released, resumed). */
 export function closeStaleOwnerQuestions(): number {
   let closed = 0;
   try {
     const open = queryAll<OwnerQuestionRow>('SELECT * FROM owner_questions WHERE answered_at IS NULL');
     for (const q of open) {
-      const t = queryOne<{ status: string; archived_at: string | null; audience_source: string | null; blocked_on_human: string | null; block_audience: string | null }>(
-        'SELECT status, archived_at, audience_source, blocked_on_human, block_audience FROM tasks WHERE id = ?',
-        [q.task_id],
-      );
-      let stale = !t || !!t.archived_at || t.blocked_on_human === 'operator' || t.block_audience === 'SYSTEM';
-      if (!stale && t) {
-        if (q.kind === 'owner_block') stale = t.status !== 'blocked';
-        else stale = (ANSWERED_AUDIENCE_SOURCES as readonly string[]).includes(t.audience_source ?? '') && t.status !== 'blocked';
-      }
-      if (stale && closeQuestion(q.id, '(closed: this card no longer waits on you)', 'board')) closed++;
+      if (isQuestionStale(q) && closeQuestion(q.id, '(closed: this card no longer waits on you)', 'board')) closed++;
     }
   } catch { /* table may not exist */ }
   return closed;
@@ -350,14 +390,16 @@ export function runOwnerQuestionBackstop(opts: { now?: Date; send?: OwnerQuestio
   try {
     out.closed = closeStaleOwnerQuestions();
     const open = queryAll<OwnerQuestionRow>('SELECT * FROM owner_questions WHERE answered_at IS NULL ORDER BY asked_at ASC');
+    let sends = 0;
     for (const q of open) {
+      if (sends >= MAX_OWNER_QUESTION_SENDS_PER_TICK) break; // the rest wait for the next tick
       if (!q.pushed_at) {
         const r = pushOwnerQuestion(q.id, { now: opts.now, send: opts.send });
-        if (r.status === 'pushed') out.pushed++;
+        if (r.status === 'pushed') { out.pushed++; sends++; }
         else if (r.status === 'deferred') out.deferred++;
       } else {
         const r = remindOwnerQuestion(q.id, { now: opts.now, send: opts.send });
-        if (r === 'reminded') out.reminded++;
+        if (r === 'reminded') { out.reminded++; sends++; }
         else if (r === 'deferred') out.deferred++;
       }
     }
@@ -451,6 +493,10 @@ export async function answerOwnerQuestion(p: {
   if (ref) {
     const used = queryOne<{ id: string }>('SELECT id FROM owner_questions WHERE source_message_ref = ? AND id != ?', [ref, q.id]);
     if (used) throw new OwnerQuestionError('message_already_used', 'That message already answered a different question.');
+  }
+  if (isQuestionStale(q)) {
+    closeQuestion(q.id, '(closed: this card no longer waits on you)', 'board');
+    throw new OwnerQuestionError('question_no_longer_open', 'That card no longer waits on an answer from you, so nothing was changed.');
   }
   const typed = stripQuestionCode(p.answer);
   if (!typed) throw new OwnerQuestionError('blank_answer', 'The answer is empty.');

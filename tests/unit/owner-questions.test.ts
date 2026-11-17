@@ -65,6 +65,8 @@ function bundle() {
 function open(taskId: string, kind: 'audience' | 'owner_block' = 'audience', rec = 'I recommend: your email list, because this is a sale.') {
   const r = oq.openOwnerQuestion({ taskId, kind, question: 'Who is this for?', recommendation: rec, recommendedValue: 'your email list' });
   assert.ok(r.ok, JSON.stringify(r));
+  // A held audience card has a pending persona bundle; owner_block cards are tested blocked-on-owner.
+  if (kind === 'audience' && !db.queryOne('SELECT 1 AS x FROM task_persona_bundle WHERE task_id = ?', [taskId])) persistPersonaBundle(taskId, bundle());
   return r.row;
 }
 
@@ -430,4 +432,122 @@ test('[list] open questions are listed with the fixed contract fields; stale one
   assert.deepEqual(list.map((x) => x.id), [q.id]);
   assert.deepEqual(Object.keys(list[0]).sort(), ['asked_at', 'id', 'kind', 'pushed_at', 'question', 'recommendation', 'short_code', 'task_id', 'task_title']);
   assert.ok(oq.getOwnerQuestion(aq.id)!.answered_at);
+});
+
+// ── QC round 1: flood, caps, claims, stale answers ───────────────────────────
+
+const H = 3600e3;
+
+test('[flood] a card released under house voice and finished: 1 push, then closed, no further sends', () => {
+  const t = nid('t'); insertTask(t);
+  const q = open(t);
+  const sent: string[] = [];
+  const send = (_i: string, x: string) => { sent.push(x); return 'telegram' as const; };
+  oq.pushOwnerQuestion(q.id, { send, now: NOON });
+  db.run("UPDATE tasks SET status = 'done' WHERE id = ?", [t]);
+  const d = [25, 50, 75].map((h) => oq.runOwnerQuestionBackstop({ now: new Date(NOON.getTime() + h * H), send }));
+  assert.deepEqual(d.map((x) => x.reminded), [0, 0, 0]);
+  assert.equal(d[0].closed, 1);
+  assert.equal(sent.length, 1, 'a finished card is never reminded about');
+  assert.ok(oq.getOwnerQuestion(q.id)!.answered_at);
+});
+
+test('[flood] a deadline_fallback bundle (card released, still pre-dispatch) closes the audience question', () => {
+  const t = nid('t'); insertTask(t);
+  const q = open(t);
+  db.run("UPDATE task_persona_bundle SET confirm_state = 'deadline_fallback' WHERE task_id = ?", [t]);
+  const sent: string[] = [];
+  const r = oq.runOwnerQuestionBackstop({ now: NOON, send: (_i, x) => { sent.push(x); return 'telegram'; } });
+  assert.equal(r.closed, 1);
+  assert.equal(sent.length, 0);
+  assert.ok(oq.getOwnerQuestion(q.id)!.answered_at);
+});
+
+test('[flood] an owner_block question closes once the card is no longer blocked on the owner', () => {
+  const t = nid('t'); insertTask(t, { status: 'blocked', audience: 'OWNER', onHuman: 'owner' });
+  const q = open(t, 'owner_block', 'I recommend: x.');
+  assert.equal(oq.closeStaleOwnerQuestions(), 0, 'still blocked on the owner: stays open');
+  db.run("UPDATE tasks SET status = 'in_progress', block_audience = NULL, blocked_on_human = NULL WHERE id = ?", [t]);
+  assert.equal(oq.closeStaleOwnerQuestions(), 1);
+  assert.ok(oq.getOwnerQuestion(q.id)!.answered_at);
+});
+
+test('[remind] at most 3 reminders per question, then it closes as expired', () => {
+  const t = nid('t'); insertTask(t);
+  const q = open(t);
+  const sent: string[] = [];
+  const send = (_i: string, x: string) => { sent.push(x); return 'telegram' as const; };
+  oq.pushOwnerQuestion(q.id, { send, now: NOON });
+  for (let day = 1; day <= 8; day++) oq.runOwnerQuestionBackstop({ now: new Date(NOON.getTime() + (day * 24 + 1) * H), send });
+  assert.equal(sent.length, 4, '1 push + 3 reminders, never more');
+  const row = oq.getOwnerQuestion(q.id)!;
+  assert.equal(row.reminder_count, 3);
+  assert.ok(row.answered_at);
+  assert.match(row.answer ?? '', /expired/);
+});
+
+test('[backstop] one sweep tick sends at most 3 messages, oldest first; the rest wait for the next tick', () => {
+  const ids: string[] = [];
+  for (let i = 0; i < 10; i++) {
+    const t = nid('t'); insertTask(t);
+    const q = open(t);
+    db.run('UPDATE owner_questions SET asked_at = ? WHERE id = ?', [new Date(NOON.getTime() - (100 - i) * 60e3).toISOString(), q.id]);
+    ids.push(q.id);
+  }
+  const sentTo: string[] = [];
+  const send = (taskId: string) => { sentTo.push(taskId); return 'telegram' as const; };
+  const first = oq.runOwnerQuestionBackstop({ now: NOON, send });
+  assert.equal(first.pushed, 3);
+  assert.equal(sentTo.length, 3);
+  assert.deepEqual(ids.slice(0, 3).map((id) => oq.getOwnerQuestion(id)!.pushed_at !== null), [true, true, true], 'oldest first');
+  assert.equal(oq.getOwnerQuestion(ids[3])!.pushed_at, null);
+  assert.equal(oq.runOwnerQuestionBackstop({ now: NOON, send }).pushed, 3, 'next tick sends the next three');
+});
+
+test('[claim] the push claim and the reminder claim are atomic: a second claimant loses', () => {
+  const t = nid('t'); insertTask(t);
+  const q = open(t);
+  const now = NOON.toISOString();
+  assert.equal(oq.claimPush(q.id, now), true);
+  assert.equal(oq.claimPush(q.id, now), false, 'already pushed');
+  const t2 = nid('t'); insertTask(t2);
+  const q2 = open(t2);
+  oq.closeOpenAudienceQuestion(t2, 'x');
+  assert.equal(oq.claimPush(q2.id, now), false, 'answered questions cannot be claimed');
+  // reminder claim: two callers that both saw last_reminded_at = null
+  assert.equal(oq.claimReminder(q.id, null, now), true);
+  assert.equal(oq.claimReminder(q.id, null, now), false);
+  assert.equal(oq.getOwnerQuestion(q.id)!.reminder_count, 1);
+});
+
+test('[answer] a card that no longer waits is closed and refused at answer time', async () => {
+  const t = nid('t'); insertTask(t);
+  persistPersonaBundle(t, bundle());
+  const q = open(t);
+  db.run("UPDATE tasks SET status = 'done' WHERE id = ?", [t]);
+  await assert.rejects(
+    oq.answerOwnerQuestion({ id: q.id, answer: 'yes', source: 'chat', sourceMessageRef: 'telegram:1:77' }),
+    (e: { code?: string }) => e.code === 'question_no_longer_open',
+  );
+  assert.ok(oq.getOwnerQuestion(q.id)!.answered_at, 'closed as stale');
+  assert.notEqual(db.queryOne<{ audience_source: string | null }>('SELECT audience_source FROM tasks WHERE id = ?', [t])!.audience_source, 'operator_confirmed', 'no audience was applied');
+});
+
+test('[chat-answer] stale card is 409 question_no_longer_open with a hint; empty or code-only messages are 422', async () => {
+  const body = { answer: 'my clients', channel: 'telegram', source_message_ref: `telegram:${OWNER}:900` };
+  const t = nid('t'); insertTask(t);
+  const q = open(t);
+  const codeOnly = await chat.applyOwnerChatAnswer(ctx, q.id, body, deps(inbound({ text: q.short_code })));
+  assert.equal(codeOnly.status, 422);
+  assert.equal(codeOnly.payload.error, 'empty_message');
+  const empty = await chat.applyOwnerChatAnswer(ctx, q.id, body, deps(inbound({ text: '' })));
+  assert.equal(empty.status, 422);
+  assert.equal(oq.getOwnerQuestion(q.id)!.answered_at, null);
+  assert.notEqual(db.queryOne<{ audience_label: string | null }>('SELECT audience_label FROM tasks WHERE id = ?', [t])!.audience_label, 'my clients', 'the agent paraphrase was not applied');
+
+  db.run("UPDATE tasks SET status = 'done' WHERE id = ?", [t]);
+  const stale = await chat.applyOwnerChatAnswer(ctx, q.id, body, deps(inbound({ text: `yes ${q.short_code}` })));
+  assert.equal(stale.status, 409);
+  assert.equal(stale.payload.error, 'question_no_longer_open');
+  assert.equal(typeof stale.payload.hint, 'string');
 });

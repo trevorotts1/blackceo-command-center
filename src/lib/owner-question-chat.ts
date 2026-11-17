@@ -124,13 +124,17 @@ export async function applyOwnerChatAnswer(
     return refuse(422, 'ambiguous_question', `Several questions are waiting. Reply directly to the question, or include its code ${q.short_code}.`);
   }
 
-  const text = stripQuestionCode(msg.text) ? msg.text : b.answer;
+  // The VERIFIED words only: an empty or code-only message never falls back to the agent's paraphrase.
+  if (!stripQuestionCode(msg.text)) {
+    return refuse(422, 'empty_message', 'That message has no answer in it. Reply with YES or with what you want.');
+  }
+  const text = msg.text;
   try {
     const r = await answerOwnerQuestion({ id: q.id, answer: text, source: 'chat', sourceMessageRef: ref });
     return { status: 200, payload: { success: true, applied: r.applied, replayed: r.replayed, question: publicQuestion(r.row) } };
   } catch (err) {
     if (err instanceof OwnerQuestionError) {
-      if (err.code === 'already_answered' || err.code === 'message_already_used') return refuse(409, err.code, err.message);
+      if (err.code === 'already_answered' || err.code === 'message_already_used' || err.code === 'question_no_longer_open') return refuse(409, err.code, err.message);
       if (err.code === 'not_found') return refuse(404, 'question_not_found', err.message);
       return refuse(422, err.code, err.message);
     }
