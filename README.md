@@ -1,6 +1,6 @@
 # Command Center
 
-**Current release: v8.0.0 (2026-11-17)** — Milestone release: the Command Center build room closed 24 of 24 units on 2026-11-16. Version stamp only; behavior is unchanged from v7.6.128. See CHANGELOG.md.
+**Current release: v8.0.0 (2026-11-17)** — Milestone release: the Command Center build room closed 24 of 24 units on 2026-11-16. Also rolls up the fixes merged since v7.6.128 (see CHANGELOG). See CHANGELOG.md.
 
 **Recent releases** (since v7.3.3 - full per-release history in [CHANGELOG.md](CHANGELOG.md)):
 

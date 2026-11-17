@@ -1,7 +1,13 @@
 ## [v8.0.0] - 2026-11-17 - Milestone
 
 - milestone: Command Center major release. The Command Center build room closed with all 24 of 24 units complete on 2026-11-16, alongside four other build rooms.
-- This release changes the version number only. No application code, database migrations, or settings change, so behavior is the same as v7.6.128.
+- This release also rolls up the changes merged to main since the v7.6.128 stamp, none of which had a changelog line of its own:
+  - feat(contract) #821 (END008): the operator contract schema now carries the PD-013 pace and the default provenance reference.
+  - fix(ci) #830: the version-locations check no longer fails at random from a broken-pipe flake, and Next.js is patched for security advisory GHSA-mfr8-8qww-v76h.
+  - fix(auth) #826: a completed interview never locks the client out again, sign-in lasts one year, and a refused sign-in now offers to sign in again. Answers are latched only when the live read returns none.
+  - fix(interview) #824: several brand colors in one answer are accepted (the existing Unreleased entry below describes it in detail).
+  - fix(images) #825: image generation moves from GPT Image 2.5 to GPT Image 2.6 (Sunburst), including the provider discovery seed, its test, and the vendored presentation job.
+  - fix(fish-audio) #823: the Fish Audio workflow matches the reviewed runner and recovery triggers, and the production voice policy is included in the build attestation.
 - version stamped in `version`, `package.json`, `package-lock.json` (both fields), README current-release lines, and this changelog.
 
 ## [Unreleased] — 2026-11-10 — fix(interview): several brand colors in one answer are accepted
