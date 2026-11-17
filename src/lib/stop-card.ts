@@ -86,6 +86,7 @@ import { recordBlockEvent } from '@/lib/block-events';
 import { notifySystem } from '@/lib/notify';
 import { isSeededStarterTask } from '@/lib/starter-task';
 import { sendRequesterAudienceAsk, sendProviderChoiceAsk } from '@/lib/jobs/trust-engine';
+import { openOwnerQuestion, pushOwnerQuestion, buildOwnerBlockRecommendation } from '@/lib/owner-questions';
 
 /** Who a permanent stop is addressed to. SYSTEM never reaches the client. */
 export type StopAudience = 'OWNER' | 'SYSTEM';
@@ -127,6 +128,15 @@ export interface StopCardParams {
   extraColumns?: Record<string, string | number | null>;
   /** Passthrough to transition() for operator-initiated stops. */
   operatorOverride?: boolean;
+  /**
+   * OWNER stops only. Overrides the owner question this stop opens (the audience
+   * hard-hold opens an `audience` question, not a generic `owner_block` one).
+   */
+  ownerQuestion?: {
+    kind: 'audience' | 'owner_block';
+    recommendation: string;
+    recommendedValue?: string | null;
+  };
 }
 
 export interface StopCardResult {
@@ -297,16 +307,48 @@ export async function stopCardPermanently(p: StopCardParams): Promise<StopCardRe
   // an internal producer minted has no requester at all, so it falls through to
   // the box owner — resolved, never hardcoded, by sendProviderChoiceAsk.
   let delivery: 'telegram' | 'session' | 'undeliverable' = 'undeliverable';
+  // Every question for the client carries a plain recommendation and is pushed
+  // ONCE (owner-questions store). Refused (archived / operator fault) or
+  // unpushable falls through to the plain notice below, exactly as before.
+  let pushedViaStore = false;
   try {
-    const viaRequester = sendRequesterAudienceAsk(p.taskId, message);
-    if (viaRequester === 'telegram' || viaRequester === 'session') {
-      delivery = viaRequester;
-    } else {
-      const viaOwner = sendProviderChoiceAsk(p.taskId, message);
-      if (viaOwner === 'telegram') delivery = 'telegram';
+    const oq = p.ownerQuestion ?? {
+      kind: 'owner_block' as const,
+      recommendation: buildOwnerBlockRecommendation(p.needs, task.title),
+      recommendedValue: null,
+    };
+    const opened = openOwnerQuestion({
+      taskId: p.taskId,
+      kind: oq.kind,
+      question: message,
+      recommendation: oq.recommendation,
+      recommendedValue: oq.recommendedValue ?? null,
+    });
+    if (opened.ok) {
+      const pushed = pushOwnerQuestion(opened.row.id, { bypassQuietHours: true });
+      if (pushed.status === 'pushed') {
+        delivery = pushed.delivery === 'session' ? 'session' : 'telegram';
+        pushedViaStore = true;
+      } else if (pushed.status === 'already_pushed') {
+        delivery = 'telegram';
+        pushedViaStore = true;
+      }
     }
   } catch (err) {
-    console.error('[stop-card] OWNER notify failed (non-fatal):', (err as Error).message);
+    console.error('[stop-card] owner question failed (non-fatal):', (err as Error).message);
+  }
+  if (!pushedViaStore) {
+    try {
+      const viaRequester = sendRequesterAudienceAsk(p.taskId, message);
+      if (viaRequester === 'telegram' || viaRequester === 'session') {
+        delivery = viaRequester;
+      } else {
+        const viaOwner = sendProviderChoiceAsk(p.taskId, message);
+        if (viaOwner === 'telegram') delivery = 'telegram';
+      }
+    } catch (err) {
+      console.error('[stop-card] OWNER notify failed (non-fatal):', (err as Error).message);
+    }
   }
 
   if (delivery === 'undeliverable') {

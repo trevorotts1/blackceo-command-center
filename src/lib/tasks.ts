@@ -72,6 +72,7 @@ import { notifySystem } from '@/lib/notify';
 import { notifyOwnerAssigned } from '@/lib/owner-reports';
 import {
   sendRequesterAudienceAsk,
+  sendProviderChoiceAsk,
   type RequesterAudienceAskDelivery,
 } from '@/lib/jobs/trust-engine';
 import { loadTaskRow } from '@/lib/board/task-row-projection';
@@ -81,6 +82,12 @@ import { assertNoFixtureDerivedServerWrite } from '@/lib/fixture-guard';
 import type { Task, TaskPriority, Agent, PersonaBundle, TaskPersonaBundleRow } from '@/lib/types';
 import { extractNamedRecipient } from '@/lib/audience/named-recipient';
 import { AUDIENCE_ASK_TEXT, ANSWERED_AUDIENCE_SOURCES } from '@/lib/board/audience-chip';
+import {
+  openOwnerQuestion,
+  pushOwnerQuestion,
+  buildAudienceRecommendation,
+  closeOpenAudienceQuestion,
+} from '@/lib/owner-questions';
 
 // ─── SENTINEL GUARD HELPERS ──────────────────────────────────────────────────
 
@@ -1940,6 +1947,15 @@ export async function blockForOwnerConfirm(
     operatorOverride: true,
     machineDetail:
       `[AUDIENCE-CONFIRM] Unconfirmed past the deadline in build department "${department}" — HARD-HOLD, never house-voice.`,
+    ownerQuestion: (() => {
+      const facts = queryOne<{ title: string; description: string | null }>('SELECT title, description FROM tasks WHERE id = ?', [taskId]);
+      const rec = buildAudienceRecommendation(facts ?? { title: 'this task', description: null }, decision);
+      return {
+        kind: 'audience' as const,
+        recommendation: rec.text,
+        recommendedValue: rec.label,
+      };
+    })(),
   });
   const blocked = blockedResult.blocked;
   if (!blocked) return; // transition aborted (CAS lost / illegal / error) — no duplicate event/notify
@@ -2008,9 +2024,37 @@ export function holdForAudienceConfirm(
       ? `This is going to ${decision.audienceLabel}. Is that who it's written for? This task is waiting until you answer.`
       : AUDIENCE_ASK_TEXT;
     let askDelivery: RequesterAudienceAskDelivery = 'send_failed';
+    // The client asks "what do you recommend?" — so the question carries a plain
+    // recommendation and is pushed ONCE through the owner-questions store. The
+    // injected sender still delivers it (requester chat first, owner chat next).
+    let pushedViaStore = false;
     try {
-      askDelivery = sendRequesterAudienceAskFn(taskId, audienceQuestion);
-    } catch { /* requester notification best-effort; retain send_failed */ }
+      const facts = queryOne<{ title: string; description: string | null }>('SELECT title, description FROM tasks WHERE id = ?', [taskId]);
+      const rec = buildAudienceRecommendation(facts ?? { title: 'this task', description: null }, decision);
+      const opened = openOwnerQuestion({
+        taskId, kind: 'audience', question: audienceQuestion, recommendation: rec.text, recommendedValue: rec.label,
+      });
+      if (opened.ok) {
+        const sender: (id: string, text: string) => RequesterAudienceAskDelivery = (id, text) => {
+          const first = sendRequesterAudienceAskFn(id, text);
+          if (first !== 'none (no requester_chat_id)') return first;
+          const viaOwner = sendProviderChoiceAsk(id, text);
+          return viaOwner === 'telegram' ? viaOwner : first;
+        };
+        const pushed = pushOwnerQuestion(opened.row.id, { send: sender, bypassQuietHours: true });
+        if (pushed.status === 'pushed' || pushed.status === 'undeliverable') {
+          askDelivery = pushed.delivery;
+          pushedViaStore = true;
+        } else if (pushed.status === 'already_pushed') {
+          pushedViaStore = true; // already asked once; never re-send
+        }
+      }
+    } catch { /* store best-effort: fall through to the plain ask */ }
+    if (!pushedViaStore) {
+      try {
+        askDelivery = sendRequesterAudienceAskFn(taskId, audienceQuestion);
+      } catch { /* requester notification best-effort; retain send_failed */ }
+    }
 
     try {
       run(
@@ -2210,6 +2254,8 @@ export function confirmTaskAudience(
     run('INSERT INTO events(id,type,task_id,message,created_at) VALUES(?,?,?,?,?)',
       [uuidv4(),'audience_confirmed',taskId,'Audience confirmed; refreshing the persona decision before dispatch.',new Date().toISOString()]);
   });
+  // The board (or an auto-answer) settled the audience: close the open owner question.
+  closeOpenAudienceQuestion(taskId, opts.audienceLabel ?? null);
 }
 
 

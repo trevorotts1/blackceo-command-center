@@ -15,6 +15,15 @@
 - fix(api): `POST /api/tasks/[id]/audience` on an archived or inactive task now returns 409 with a plain message instead of a 500.
 - Tests: `tests/unit/owner-question-filter.test.ts`, extended `tests/unit/audience-answered-no-ask-chip.test.tsx`. No version bump.
 - Migration: none. Not merged or deployed.
+## [Unreleased] — 2026-11-17 — feat(owner-questions): every question for the client carries a recommendation, is pushed once to their chat, and can be answered from chat
+
+- New `owner_questions` store: each audience question and each owner-blocked card gets a plain-English recommendation (never blank), a short reference code (`Q-` plus six hex), and one push to the client's main chat (requester chat first, else the registered owner chat). Claim-then-send, so it is never sent twice; quiet hours, the owner-sends hold and the test mute leave it unpushed for the next sweep; one reminder at most every 24 hours from the trust-engine sweep.
+- Opened from `holdForAudienceConfirm`, `blockForOwnerConfirm` and the OWNER branch of `stopCardPermanently`. Operator/system faults, archived cards and operator-blocked cards are never owner questions.
+- New `GET /api/owner-questions?status=open` and bearer-only `POST /api/owner-questions/[id]/chat-answer` (id or short code). Command Center re-reads the client's message from the gateway record before applying it; YES accepts the recommendation; replays are idempotent.
+- The board's audience panel shows the recommendation with a "Use my recommendation" button; a board answer closes the open question.
+- Tests: new `tests/unit/owner-questions.test.ts`; census and head-migration pins moved (migration 180, 169 mutating routes, 53 bearer patterns).
+- Safety limits: a question closes when its card no longer waits (bundle no longer pending, card running or finished, or no longer blocked on the owner); at most 3 reminders per question, then it closes as expired with one operator note; one sweep tick sends at most 3 messages; an answer is re-checked against the card at answer time.
+- Migration: 180 (`owner_questions`, additive and idempotent).
 
 ## [Unreleased] — 2026-11-10 — fix(interview): several brand colors in one answer are accepted
 
