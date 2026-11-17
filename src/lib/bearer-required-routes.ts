@@ -70,6 +70,9 @@
  * 2026-11-12 (chat approvals): +1 pattern for POST /api/approval-requests/<id>/chat-decision.
  * Now 52 patterns covering 56 route templates.
  *
+ * 2026-11-17 (owner questions): +1 pattern for POST /api/owner-questions/<id>/chat-answer.
+ * Now 53 patterns covering 57 route templates.
+ *
  * U052: This is the single source of truth, imported by both src/middleware.ts
  * and the anti-rot lock test. One array, one source.
  */
@@ -92,6 +95,9 @@ export const BEARER_REQUIRED_WRITE_ROUTES: RegExp[] = [
   // relays the owner's chat reply; Command Center re-verifies the owner's message from the
   // gateway's own inbound record before minting anything.
   /^\/api\/approval-requests\/[^/]+\/chat-decision$/,
+  // 2026-11-17 (owner questions): POST /api/owner-questions/<id>/chat-answer — the agent relays the
+  // client's chat reply; Command Center re-verifies the message from the gateway record first.
+  /^\/api\/owner-questions\/[^/]+\/chat-answer$/,
   /^\/api\/agents\/[^/]+\/memory-logs$/,
   /^\/api\/agents\/[^/]+\/openclaw$/,
   /^\/api\/anthology\/gate$/,

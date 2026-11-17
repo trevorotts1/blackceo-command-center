@@ -914,4 +914,28 @@ CREATE TABLE IF NOT EXISTS skill71_ingest_tokens (
   created_at TEXT DEFAULT (datetime('now')),
   revoked_at TEXT
 );
+
+-- Owner questions (migration 180): what the Command Center asks the client,
+-- with a plain-English recommendation, one chat push, and the answer.
+CREATE TABLE IF NOT EXISTS owner_questions (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('audience','owner_block')),
+  short_code TEXT NOT NULL UNIQUE,
+  question TEXT NOT NULL,
+  recommendation TEXT NOT NULL,
+  recommended_value TEXT,
+  asked_at TEXT NOT NULL,
+  pushed_at TEXT,
+  push_delivery TEXT,
+  last_reminded_at TEXT,
+  answered_at TEXT,
+  answer TEXT,
+  answer_source TEXT CHECK (answer_source IN ('board','chat') OR answer_source IS NULL),
+  source_message_ref TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_owner_questions_open_unique
+  ON owner_questions(task_id, kind) WHERE answered_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_owner_questions_task ON owner_questions(task_id);
+CREATE INDEX IF NOT EXISTS idx_owner_questions_ref ON owner_questions(source_message_ref);
 `;

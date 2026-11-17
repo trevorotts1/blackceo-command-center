@@ -19,7 +19,8 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Users, Loader2, CheckCircle2 } from 'lucide-react';
+import { Users, Loader2, CheckCircle2, Lightbulb } from 'lucide-react';
+import { labelFromRecommendation } from '@/lib/owner-question-text';
 
 interface AudienceGateStatus {
   hold: boolean;
@@ -96,6 +97,21 @@ export function AudienceConfirmPanel({ taskId, onConfirmed, autoFocus, assumedLa
   );
 
   const [changing, setChanging] = useState(false);
+  // The plain-English recommendation the client was also sent in chat.
+  const [recommendation, setRecommendation] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch('/api/owner-questions?status=open');
+        if (!res.ok) return;
+        const body = (await res.json()) as { questions?: Array<{ task_id: string; kind: string; recommendation: string }> };
+        const q = body.questions?.find((x) => x.task_id === taskId && x.kind === 'audience');
+        if (!cancelled) setRecommendation(q?.recommendation ?? null);
+      } catch { /* recommendation is optional */ }
+    })();
+    return () => { cancelled = true; };
+  }, [taskId]);
   const held = !!status && !!status.hold;
   const showing = !loading && !!status && (held || !!assumedLabel);
   useEffect(() => {
@@ -146,6 +162,23 @@ export function AudienceConfirmPanel({ taskId, onConfirmed, autoFocus, assumedLa
                   Change
                 </button>
               </div>
+            </div>
+          )}
+
+          {status.hold && recommendation && (
+            <div className="mt-3 rounded-lg border border-indigo-200 bg-white p-3" data-testid="audience-recommendation">
+              <p className="flex items-start gap-1.5 text-xs text-indigo-900">
+                <Lightbulb className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                <span>{recommendation}</span>
+              </p>
+              <button
+                type="button"
+                disabled={submitting}
+                onClick={() => confirm(labelFromRecommendation(recommendation))}
+                className="mt-2 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-700 disabled:opacity-60"
+              >
+                Use my recommendation
+              </button>
             </div>
           )}
 

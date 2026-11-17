@@ -643,11 +643,11 @@ test('registry: the council entry is registered once, under its allocated id', (
   // the composed array to 172, but the pin was not moved with it — it described literal
   // entries while asserting migrations.length. Unrelated to the 173 -> 174 renumber,
   // which by definition changes no count.
-  assert.equal(report.total, 177, '176 literal registry migrations + the council entry = 177 composed array entries');
+  assert.equal(report.total, 178, '177 literal registry migrations + the council entry = 178 composed array entries (180 owner_questions added 2026-11-17)');
   // The DA entry was renumbered 173 -> 174 to clear a duplicate id with main's
   // 'launch_run_storage_contract' (which keeps 173). Highest id follows every
   // addition: CTR-165's migration 176 'council_capability_snapshot' is the head.
-  assert.equal(report.maxNumeric, 179, 'highest numeric id is 179 (approval_requests_inbox); 178 is F23 launch_governed_domain; 177 is launch_approvals (PRD-32); 176 is council_capability_snapshot (CTR-165); da_challenge_review_fields sits at 174 after its 173 -> 174 renumber, mainline launch contract holds 173, council sits at its allocated id 172');
+  assert.equal(report.maxNumeric, 180, 'highest numeric id is 180 (owner_questions); 179 is approval_requests_inbox; 178 is F23 launch_governed_domain; 177 is launch_approvals (PRD-32); 176 is council_capability_snapshot (CTR-165); da_challenge_review_fields sits at 174 after its 173 -> 174 renumber, mainline launch contract holds 173, council sits at its allocated id 172');
   assert.equal(report.ledger, 1, 'the runner recorded the council migration exactly once');
   // The real chain also applies CTR-165's migration 176
   // (council_capability_snapshots), which is NOT part of the council schema

@@ -281,12 +281,14 @@ test('[hold] first hold asks the requester, writes the board ask, and records Te
   const t1 = queryOne<{ next_dispatch_eligible_at: string | null }>('SELECT next_dispatch_eligible_at FROM tasks WHERE id = ?', [id]);
   assert.ok(t1?.next_dispatch_eligible_at, 'held task is deferred with a poll window');
 
-  assert.deepEqual(audienceAskCalls, [{
-    taskId: id,
-    question: AUDIENCE_ASK_TEXT,
-  }], 'the client-safe question is routed through the trust-engine requester seam');
+  assert.equal(audienceAskCalls.length, 1, 'the question is pushed exactly once through the trust-engine requester seam');
+  assert.equal(audienceAskCalls[0].taskId, id);
+  // The pushed text is the client-safe question PLUS a plain recommendation and the reply instructions.
+  assert.ok(audienceAskCalls[0].question.startsWith(AUDIENCE_ASK_TEXT), 'the client-safe question leads the message');
+  assert.match(audienceAskCalls[0].question, /My recommendation: /);
+  assert.match(audienceAskCalls[0].question, /Reply YES to go with my recommendation/);
   const ask = queryOne<{ ask: string | null }>('SELECT ask FROM tasks WHERE id = ?', [id]);
-  assert.equal(ask?.ask, audienceAskCalls[0].question, 'the same question is visible on the board');
+  assert.equal(ask?.ask, AUDIENCE_ASK_TEXT, 'the same question is visible on the board');
   const askEvent = queryOne<{ message: string }>(
     "SELECT message FROM events WHERE task_id = ? AND type = 'audience_confirm_ask_sent'", [id],
   );
