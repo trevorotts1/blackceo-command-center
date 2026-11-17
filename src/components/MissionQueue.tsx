@@ -9,7 +9,7 @@ import { triggerAutoDispatch, shouldTriggerAutoDispatch } from '@/lib/auto-dispa
 import type { Task, TaskStatus, BugTicket, BugStatus, LifecycleCard } from '@/lib/types';
 import { TaskModal } from './TaskModal';
 import { needsPlanningAnswer } from '@/lib/board/planning-chip';
-import { AUDIENCE_ASK_TEXT, needsAudienceAnswer, writtenForLabel, writtenForChipLabel } from '@/lib/board/audience-chip';
+import { AUDIENCE_ASK_TEXT, isOwnerQuestion, writtenForLabel, writtenForChipLabel } from '@/lib/board/audience-chip';
 import { MarketingPublishButton } from './MarketingPublishButton';
 import PhaseStepper from './PhaseStepper';
 import { PersonaSlotChips, PersonaScopeChips, CommsAudienceChip, humanize } from './kanban/TaskCard';
@@ -1325,7 +1325,7 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
       {/* Audience-confirm banner — a dashboard-created task has no chat to ask
           "who will read this?" in, so the board asks the person sitting at it. */}
       {(() => {
-        const pending = filteredTasks.filter((t) => needsAudienceAnswer(t));
+        const pending = filteredTasks.filter((t) => isOwnerQuestion(t));
         if (pending.length === 0) return null;
         return (
           <div role="alert" data-testid="audience-ask-banner" className="mx-4 mt-3 lg:mx-6 rounded-xl border border-amber-400 bg-amber-50 p-3 text-amber-900">
@@ -1337,7 +1337,7 @@ export function MissionQueue({ workspaceId, departmentFilter, boardKind = 'task'
                 <li key={t.id} className="flex items-center justify-between gap-3">
                   <span className="min-w-0 text-xs">
                     <span className="font-medium">{t.title}</span>
-                    <span className="block opacity-80">{t.ask || AUDIENCE_ASK_TEXT}</span>
+                    <span className="block opacity-80">{AUDIENCE_ASK_TEXT}</span>
                   </span>
                   <button
                     type="button"
@@ -2008,7 +2008,7 @@ export function TaskCard({ task, onDragStart, onClick, onAnswer, isDragging, isC
             a neutral house voice after 30 min. This chip surfaces the pending
             confirm gate on the card face so the operator sees it without opening
             the modal. */}
-        {needsAudienceAnswer(task) && (
+        {isOwnerQuestion(task) && (
           <button
             type="button"
             onClick={(e) => { e.stopPropagation(); (onAnswer ?? onClick)(); }}

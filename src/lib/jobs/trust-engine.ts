@@ -76,6 +76,7 @@ import { CEO_CHAT_CHANNEL } from '@/lib/ceo-chat/config';
 import { appendTrustMessage } from '@/lib/ceo-chat/store';
 import { broadcast } from '@/lib/events';
 import { requiresRegisteredCertificate, requiresRegisteredProof } from '@/lib/presentations-cert-gate';
+import { runOwnerQuestionBackstop } from '@/lib/owner-questions';
 
 // ── Tunables ──────────────────────────────────────────────────────────────
 /** After ingest, wait up to this long for the triad to advance a task past
@@ -1455,6 +1456,12 @@ export function runTrustEngineSweep(opts?: {
     return { scanned: 0, sent: 0, claimed: 0, skipped: 0, released: 0, held: 0, skippedReason: 'DISABLE_TRUST_ENGINE set' };
   }
   const now = opts?.now ?? new Date();
+  // Owner-question backstop: push anything still unpushed and send at most one
+  // reminder per 24h. Skipped on the per-task trigger so a status change never
+  // re-walks every open question.
+  if (!opts?.taskId) {
+    try { runOwnerQuestionBackstop({ now }); } catch { /* never block the report-back sweep */ }
+  }
   const tasks = loadCandidateTasks(opts?.taskId);
   if (tasks.length === 0) {
     return { scanned: 0, sent: 0, claimed: 0, skipped: 0, released: 0, held: 0 };

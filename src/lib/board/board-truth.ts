@@ -26,6 +26,7 @@
 import { queryOne, queryAll } from '@/lib/db';
 import { personaBundleHash } from '@/lib/persona-state';
 import { normalizeBoardSource } from '@/lib/board-sources';
+import { isOwnerQuestion } from '@/lib/board/audience-chip';
 
 // ─── Executor (actual worker + owner-direct vs delegated) ────────────────────
 
@@ -272,6 +273,10 @@ export interface SelectionHoldTaskInput {
   routing_wait_owner?: string | null;
   routing_next_action?: string | null;
   blend_confirm_state?: string | null;
+  audience_source?: string | null;
+  archived_at?: string | null;
+  blocked_on_human?: string | null;
+  block_audience?: string | null;
 }
 
 /**
@@ -296,7 +301,7 @@ export function selectionHolds(task: SelectionHoldTaskInput): SelectionHold[] {
         .join(' Next action: '),
     });
   }
-  if (task.blend_confirm_state === 'pending') {
+  if (isOwnerQuestion(task)) {
     holds.push({
       kind: 'audience-confirm',
       title: 'Waiting for your answer',

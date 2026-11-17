@@ -8687,6 +8687,42 @@ export const migrations: Migration[] = [
       console.log('[Migration 179] approval_requests ready');
     },
   },
+
+  {
+    id: '180',
+    name: 'owner_questions',
+    up: (db) => {
+      // Every question the Command Center asks the client: the question, the
+      // plain-English recommendation, the one push to the client's chat, and
+      // the answer (from the board or from chat). Additive and idempotent.
+      console.log('[Migration 180] Adding owner_questions...');
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS owner_questions (
+          id TEXT PRIMARY KEY,
+          task_id TEXT NOT NULL,
+          kind TEXT NOT NULL CHECK (kind IN ('audience','owner_block')),
+          short_code TEXT NOT NULL UNIQUE,
+          question TEXT NOT NULL,
+          recommendation TEXT NOT NULL,
+          recommended_value TEXT,
+          asked_at TEXT NOT NULL,
+          pushed_at TEXT,
+          push_delivery TEXT,
+          last_reminded_at TEXT,
+          reminder_count INTEGER NOT NULL DEFAULT 0,
+          answered_at TEXT,
+          answer TEXT,
+          answer_source TEXT CHECK (answer_source IN ('board','chat') OR answer_source IS NULL),
+          source_message_ref TEXT
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_owner_questions_open_unique
+          ON owner_questions(task_id, kind) WHERE answered_at IS NULL;
+        CREATE INDEX IF NOT EXISTS idx_owner_questions_task ON owner_questions(task_id);
+        CREATE INDEX IF NOT EXISTS idx_owner_questions_ref ON owner_questions(source_message_ref);
+      `);
+      console.log('[Migration 180] owner_questions ready');
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner
