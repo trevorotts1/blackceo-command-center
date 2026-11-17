@@ -33,7 +33,7 @@ jobs:
           V_PKG=$(python3 -c "import json; print(json.load(open('package.json'))['version'])")
           V_LOCK=$(python3 -c "import json; print(json.load(open('package-lock.json'))['version'])")
           V_LOCK_PKG=$(python3 -c "import json; print(json.load(open('package-lock.json'))['packages'][''].get('version','MISSING'))")
-          V_CL=$(grep -oE '## \[v[0-9]+\.[0-9]+\.[0-9]+\]' CHANGELOG.md | head -1 | sed -E 's/## \[(v[0-9]+\.[0-9]+\.[0-9]+)\]/\1/')
+          V_CL=$(grep -m1 -oE '## \[v[0-9]+\.[0-9]+\.[0-9]+\]' CHANGELOG.md | sed -E 's/## \[(v[0-9]+\.[0-9]+\.[0-9]+)\]/\1/')
 
           norm() { echo "${1#v}"; }
           N_ROOT=$(norm "$V_ROOT")
@@ -158,7 +158,7 @@ jobs:
             fi
             ty=$(git cat-file -t "refs/tags/$t" 2>/dev/null || echo unknown)
             c=$(git rev-parse "$t^{commit}" 2>/dev/null || echo "-")
-            cv=$(git show "$c:version" 2>/dev/null | head -1 | tr -d '[:space:]' || true)
+            cv=$(git show "$c:version" 2>/dev/null | sed -n 1p | tr -d '[:space:]' || true)
             echo "$ty $c ${cv:--}"
           }
 
@@ -233,7 +233,7 @@ jobs:
             # code lands on main. Existing releases remain subject to every tag
             # assertion below; only a strictly newer, unpublished PR version waits.
             if [ "${GITHUB_EVENT_NAME:-}" = "pull_request" ]; then
-              BASE_VERSION=$(git show origin/main:version | head -1 | tr -d '[:space:]')
+              BASE_VERSION=$(git show origin/main:version | sed -n 1p | tr -d '[:space:]')
               if python3 - "$V_ROOT" "$BASE_VERSION" <<'PENDING_TAG'
           import re, sys
           def version(value):
@@ -299,7 +299,7 @@ jobs:
             echo "❌ Tag $V_ROOT resolves to commit $TAG_COMMIT, which has no /version file at all."
             exit 1
           fi
-          TAG_COMMIT_VERSION=$(echo "$TAG_COMMIT_VERSION_RAW" | head -1 | tr -d '[:space:]')
+          TAG_COMMIT_VERSION=$(echo "$TAG_COMMIT_VERSION_RAW" | sed -n 1p | tr -d '[:space:]')
           N_ROOT_FOR_TAG="${V_ROOT#v}"
           N_TAG_COMMIT_VERSION="${TAG_COMMIT_VERSION#v}"
           if [ "$N_ROOT_FOR_TAG" != "$N_TAG_COMMIT_VERSION" ]; then

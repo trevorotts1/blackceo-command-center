@@ -31,7 +31,7 @@ echo "CANONICAL_SLUGS actual size: $CANON_COUNT"
 check_slug_count() {
   local file="$1" pattern="$2" label="$3"
   local found
-  found=$(grep -oE "$pattern" "$file" | grep -oE '[0-9]+' | head -1 || true)
+  found=$(grep -oE "$pattern" "$file" | grep -oE '[0-9]+' | sed -n 1p || true)
   if [ -z "$found" ]; then
     echo "MISSING: $label not found in $file (pattern: $pattern)"
     FAIL=1
@@ -62,7 +62,7 @@ MIG_COUNT=$(echo "$MIG_IDS" | grep -c .)
 MIG_MAX=$(grep -oE "id: '[0-9]+'" "$MIG_FILE" | grep -oE '[0-9]+' | sort -n | tail -1)
 echo "migrations.ts actual: $MIG_COUNT entries, highest id $MIG_MAX"
 
-QC_MATCH=$(grep -oE '\([0-9]+ entries spanning 001-[0-9]+' QC.md | head -1 || true)
+QC_MATCH=$(grep -oE '\([0-9]+ entries spanning 001-[0-9]+' QC.md | sed -n 1p || true)
 if [ -z "$QC_MATCH" ]; then
   echo "MISSING: QC.md item 7 no longer states '(NNN entries spanning 001-NNN' — update the check or QC.md"
   FAIL=1
