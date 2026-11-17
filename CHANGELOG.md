@@ -1,3 +1,9 @@
+## [v8.0.0] - 2026-11-17 - Milestone
+
+- milestone: Command Center major release. The Command Center build room closed with all 24 of 24 units complete on 2026-11-16, alongside four other build rooms.
+- This release changes the version number only. No application code, database migrations, or settings change, so behavior is the same as v7.6.128.
+- version stamped in `version`, `package.json`, `package-lock.json` (both fields), README current-release lines, and this changelog.
+
 ## [Unreleased] — 2026-11-10 — fix(interview): several brand colors in one answer are accepted
 
 - fix(brand color): the color field accepted only one value, so typing two hex codes left Save unavailable with no way forward. The first valid code becomes the primary color and the full answer stays in the transcript.
