@@ -3,11 +3,16 @@
 # slow apt mirror hang the job. Only the INSTALL is retried; no test is touched.
 #   usage: playwright-install.sh <browser> [<browser> ...]
 #   env:   BROWSER_CACHE_HIT=true when ~/.cache/ms-playwright was restored
-#          PW_INSTALL_ATTEMPTS (default 3), PW_INSTALL_TIMEOUT seconds per attempt (default 300)
+#          PW_INSTALL_ATTEMPTS (3) and PW_INSTALL_TIMEOUT (300 s) for the browser download;
+#          PW_DEPS_ATTEMPTS (5) and PW_DEPS_TIMEOUT (120 s) for the apt step
 set -uo pipefail
 [ "$#" -ge 1 ] || { echo "usage: $0 <browser>..." >&2; exit 2; }
 ATTEMPTS="${PW_INSTALL_ATTEMPTS:-3}"
 LIMIT="${PW_INSTALL_TIMEOUT:-300}"
+# apt downloads are resumable and keep every finished .deb, so short attempts
+# lose almost nothing and cut a stalled connection off quickly.
+DEPS_LIMIT="${PW_DEPS_TIMEOUT:-120}"
+DEPS_ATTEMPTS="${PW_DEPS_ATTEMPTS:-5}"
 START=$(date +%s)
 
 # apt: retry each download, give up on a stalled connection quickly, IPv4 only.
@@ -41,12 +46,13 @@ apt_recover() {  # $1 attempt number that just failed
 
 retry() {  # description, command...
   local what="$1"; shift
-  local n=1
-  while [ "$n" -le "$ATTEMPTS" ]; do
-    echo "::group::$what (attempt $n of $ATTEMPTS)"
-    if with_timeout "$LIMIT" "$@"; then echo "::endgroup::"; return 0; fi
+  local n=1 attempts="$ATTEMPTS" limit="$LIMIT"
+  case "$what" in *install-deps*) attempts="$DEPS_ATTEMPTS"; limit="$DEPS_LIMIT" ;; esac
+  while [ "$n" -le "$attempts" ]; do
+    echo "::group::$what (attempt $n of $attempts)"
+    if with_timeout "$limit" "$@"; then echo "::endgroup::"; return 0; fi
     echo "::endgroup::"
-    echo "::warning::$what failed or timed out after ${LIMIT}s (attempt $n of $ATTEMPTS)"
+    echo "::warning::$what failed or timed out after ${limit}s (attempt $n of $attempts)"
     case "$what" in *install-deps*) apt_recover "$n" ;; esac
     n=$((n + 1)); sleep "${PW_RETRY_SLEEP:-15}"
   done

@@ -23,7 +23,7 @@ cat > "$W/bin/node" <<'F'
 echo probe >> "$FAKE_PROBE"; [ "${PROBE_OK:-0}" = "1" ]
 F
 chmod +x "$W/bin/node"
-run() { env PATH="$W/bin:$PATH" FAKE_LOG="$W/log" FAKE_PROBE="$W/probe" PW_INSTALL_ATTEMPTS=3 PW_RETRY_SLEEP=0 "$@" bash "$S" chromium webkit >"$W/out" 2>&1; }
+run() { env PATH="$W/bin:$PATH" FAKE_LOG="$W/log" FAKE_PROBE="$W/probe" PW_INSTALL_ATTEMPTS=3 PW_DEPS_ATTEMPTS=5 PW_RETRY_SLEEP=0 "$@" bash "$S" chromium webkit >"$W/out" 2>&1; }
 
 : > "$W/log"; FAIL_FIRST=0 PROBE_OK=1 run; rc=$?
 [ $rc -eq 0 ] && [ "$(wc -l < "$W/log")" -eq 1 ] && grep -q '^playwright install chromium webkit' "$W/log" && ok "browsers launch: only the browser install runs, apt (install-deps) skipped" || bad "launching run rc=$rc log=$(cat "$W/log")"
@@ -37,6 +37,8 @@ run() { env PATH="$W/bin:$PATH" FAKE_LOG="$W/log" FAKE_PROBE="$W/probe" PW_INSTA
 : > "$W/log"; FAIL_FIRST=99 PROBE_OK=1 run; rc=$?
 [ $rc -ne 0 ] && [ "$(wc -l < "$W/log")" -eq 3 ] && ok "gives up after 3 attempts and fails" || bad "limit not enforced rc=$rc calls=$(wc -l < "$W/log")"
 
+: > "$W/log"; FAIL_FIRST=4 PROBE_OK=0 run; rc=$?
+[ $rc -ne 0 ] || bad "browser install failures should have consumed attempts first"
 : > "$W/log"; FAIL_FIRST=1 PROBE_OK=0 run; rc=$?
 [ $rc -eq 0 ] && ok "install-deps path also retries (fake npx fails once more)" || bad "install-deps retry rc=$rc"
 
