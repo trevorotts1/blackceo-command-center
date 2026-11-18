@@ -29,8 +29,8 @@ import {
   registeredClientIdentity,
 } from '@/lib/launch-approvals';
 
-/** The two kinds the safety gate reads (`automation_write`, `publish`). */
-export const REQUEST_KINDS = ['automation_write', 'publish'] as const;
+/** Kinds the owner can approve: the two the safety gate reads, plus a money cap. */
+export const REQUEST_KINDS = ['automation_write', 'publish', 'paid_asset_budget'] as const;
 export type RequestKind = (typeof REQUEST_KINDS)[number];
 
 export type RequestStatus = 'pending' | 'approved' | 'changes_requested' | 'expired';
@@ -39,7 +39,7 @@ const DEFAULT_TTL_MS = 7 * 24 * 3600 * 1000;
 const MAX_TTL_MS = 30 * 24 * 3600 * 1000;
 const ALLOWED_FIELDS = new Set([
   'kind', 'location_id', 'action', 'object_key', 'plan_sha256', 'title', 'summary',
-  'preview', 'requested_by', 'expires_at', 'valid_until',
+  'preview', 'requested_by', 'expires_at', 'valid_until', 'cap_minor', 'currency',
 ]);
 /** Fields only the server sets; naming one is a direct-write attempt. */
 const SERVER_OWNED = [
@@ -64,6 +64,10 @@ export interface ApprovalRequest {
   action: string;
   object_key: string;
   plan_sha256: string;
+  /** Money cap in minor units (cents) for paid_asset_budget; null otherwise. */
+  cap_minor: number | null;
+  /** ISO 4217 code paired with cap_minor; null otherwise. */
+  currency: string | null;
   title: string;
   summary: string;
   preview: ApprovalPreview;
@@ -94,7 +98,8 @@ export const shortCodeOf = (requestId: string): string => requestId.slice(0, 6);
 
 export interface Row {
   request_id: string; tenant_id: string; kind: RequestKind; location_id: string; action: string;
-  object_key: string; plan_sha256: string; title: string; summary: string; preview_json: string;
+  object_key: string; plan_sha256: string; cap_minor: number | null; currency: string | null;
+  title: string; summary: string; preview_json: string;
   requested_by: string; status: 'pending' | 'approved' | 'changes_requested'; expires_at: string; valid_until: string | null;
   created_at: string; decided_at: string | null; decided_by: string | null;
   decision_note: string | null; approval_id: string | null;
@@ -118,7 +123,8 @@ export function toRequest(r: Row, now = Date.now()): ApprovalRequest {
   const expired = r.status === 'pending' && Date.parse(r.expires_at) <= now;
   return {
     request_id: r.request_id, kind: r.kind, location_id: r.location_id, action: r.action,
-    object_key: r.object_key, plan_sha256: r.plan_sha256, title: r.title, summary: r.summary,
+    object_key: r.object_key, plan_sha256: r.plan_sha256, cap_minor: r.cap_minor ?? null, currency: r.currency ?? null,
+    title: r.title, summary: r.summary,
     preview: parsePreview(r.preview_json), requested_by: r.requested_by,
     status: expired ? 'expired' : r.status, expires_at: r.expires_at, valid_until: r.valid_until, created_at: r.created_at,
     decided_at: r.decided_at, decided_by: r.decided_by, decision_note: r.decision_note,
@@ -178,6 +184,28 @@ function validatePreview(raw: unknown): ApprovalPreview | null {
   return out;
 }
 
+/** A money cap is required for paid_asset_budget and refused for every other kind. */
+function parseCap(kind: RequestKind, rawCap: unknown, rawCurrency: unknown):
+  { capMinor: number | null; currency: string | null } | { error: string; detail: string } {
+  if (kind !== 'paid_asset_budget') {
+    if (rawCap !== undefined || rawCurrency !== undefined) return { error: 'cap_not_allowed', detail: 'cap_minor and currency belong to paid_asset_budget only' };
+    return { capMinor: null, currency: null };
+  }
+  if (!Number.isSafeInteger(rawCap) || (rawCap as number) <= 0) return { error: 'invalid_cap_minor', detail: 'a positive whole number of minor units (cents)' };
+  if (typeof rawCurrency !== 'string' || !/^[A-Z]{3}$/.test(rawCurrency)) return { error: 'invalid_currency', detail: 'three-letter ISO code, e.g. USD' };
+  return { capMinor: rawCap as number, currency: rawCurrency };
+}
+
+/** "$25.00 USD" for the owner; null when the request carries no cap. */
+export function formatCap(capMinor: number | null, currency: string | null): string | null {
+  if (capMinor === null || currency === null) return null;
+  try {
+    return `${new Intl.NumberFormat('en-US', { style: 'currency', currency }).format(capMinor / 100)} ${currency}`;
+  } catch {
+    return `${(capMinor / 100).toFixed(2)} ${currency}`;
+  }
+}
+
 /**
  * AGENT DOOR: register "this needs the owner's yes". Only the operator/agent
  * bearer (`operator:api`) may call this; an owner session is refused because
@@ -210,6 +238,8 @@ export function createApprovalRequest(ctx: TenantContext, body: unknown): Reques
   if (!preview) return refuse(400, 'invalid_preview', 'text (string), links [{label,url}], images [https url]');
   const requestedBy = b.requested_by === undefined ? 'agent' : str(b.requested_by, 100);
   if (!requestedBy) return refuse(400, 'invalid_requested_by');
+  const cap = parseCap(kind, b.cap_minor, b.currency);
+  if ('error' in cap) return refuse(400, cap.error, cap.detail);
 
   const now = Date.now();
   let expires = now + DEFAULT_TTL_MS;
@@ -229,18 +259,19 @@ export function createApprovalRequest(ctx: TenantContext, body: unknown): Reques
   const existing = queryAll<Row>(
     `SELECT * FROM approval_requests
        WHERE tenant_id = ? AND kind = ? AND location_id = ? AND action = ? AND object_key = ? AND plan_sha256 = ?
+         AND cap_minor IS ? AND currency IS ?
          AND status IN ('pending','approved') AND expires_at > ?
        ORDER BY created_at DESC`,
-    [ctx.tenantId, kind, locationId, action, objectKey, planSha, new Date(now).toISOString()],
+    [ctx.tenantId, kind, locationId, action, objectKey, planSha, cap.capMinor, cap.currency, new Date(now).toISOString()],
   )[0];
   if (existing) return { status: 200, payload: { ...toRequest(existing, now), replayed: true } };
 
   const requestId = randomUUID();
   run(
     `INSERT INTO approval_requests (request_id, tenant_id, kind, location_id, action, object_key, plan_sha256,
-       title, summary, preview_json, requested_by, status, expires_at, valid_until, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
-    [requestId, ctx.tenantId, kind, locationId, action, objectKey, planSha, title, summary,
+       cap_minor, currency, title, summary, preview_json, requested_by, status, expires_at, valid_until, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
+    [requestId, ctx.tenantId, kind, locationId, action, objectKey, planSha, cap.capMinor, cap.currency, title, summary,
       JSON.stringify(preview), requestedBy, new Date(expires).toISOString(), validUntil, new Date(now).toISOString()],
   );
   const row = queryOne<Row>('SELECT * FROM approval_requests WHERE request_id = ?', [requestId])!;
@@ -328,8 +359,8 @@ export function decideApprovalRequest(ctx: TenantContext, requestId: string, inp
       run(
         `INSERT INTO launch_approvals (approval_id, tenant_id, client_identity_ref, kind, plan_hash, scope,
            cap_minor, currency, expires_at, revoked, source_message_ref, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, 0, ?, ?)`,
-        [approvalId, ctx.tenantId, identity, row.kind, `sha256:${digest}`, scope,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+        [approvalId, ctx.tenantId, identity, row.kind, `sha256:${digest}`, scope, row.cap_minor ?? null, row.currency ?? null,
           approvalExpiry(row, nowMs), `${OWNER_REQUEST_REF_PREFIX}${requestId}`, nowIso],
       );
       run(

@@ -252,6 +252,21 @@ describe('Telegram approval from the gateway record', () => {
   });
 });
 
+describe('Telegram approval of a budget', () => {
+  it('a chat "approve" mints a launch approval carrying the requested cap', async () => {
+    const made = await create({ kind: 'paid_asset_budget', action: 'generate_images', cap_minor: 2500, currency: 'USD' });
+    const mid = cacheMessage({ text: 'approve' });
+    const out = await chat(made.request_id, tg('approve', mid));
+    expect(out.status).toBe(200);
+    const { GET } = await import('../../src/app/api/launch-approvals/[approvalId]/route');
+    const rec = await (await GET(req(`/api/launch-approvals/${out.json.approval_id}`, { bearer: TOKEN }), { params: Promise.resolve({ approvalId: out.json.approval_id }) } as never)).json();
+    expect(rec).toMatchObject({
+      kind: 'paid_asset_budget', cap_minor: 2500, currency: 'USD', approver: `telegram:${OWNER_CHAT}`,
+      verification_class: 'authenticated_platform_record', revoked: false,
+    });
+  });
+});
+
 describe('the agent token cannot mint without a verifiable message', () => {
   it('refuses with no gateway store at all', async () => {
     const made = await create();

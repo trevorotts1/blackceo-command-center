@@ -19,6 +19,8 @@ Failure is 400 (bad body), 403 or 409, as `{ "error": "<code>", "detail": "<sent
 
 `GET /api/approval-requests/<id>` also returns `short_code` (first 6 characters of `request_id`) and `approve_by: ["command_center","telegram","chat_app"]`.
 
+A spending budget is registered as `kind: "paid_asset_budget"` with `cap_minor` (cents) and `currency`. Approving it by chat or on the page mints the launch approval with that same cap, and the page shows the spending limit.
+
 ## What Command Center checks itself (never the agent's claim)
 
 It reads the owner's message from the gateway's own record, read-only: Telegram from `openclaw.sqlite` (`plugin_state_entries`, namespace `telegram.message-cache`, key `<botHash>:<account>:<chatId>:<messageId>`; directory from `OPENCLAW_STATE_DIR`, else `~/.openclaw/state`, or `/data/.openclaw/state` on VPS); webchat from the session transcript `agents/<agent>/sessions/<session>.jsonl`. Then it requires all of:

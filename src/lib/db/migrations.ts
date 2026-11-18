@@ -8723,6 +8723,43 @@ export const migrations: Migration[] = [
       console.log('[Migration 180] owner_questions ready');
     },
   },
+
+  {
+    id: '181',
+    name: 'approval_requests_paid_asset_budget',
+    up: (db) => {
+      // The owner approvals inbox learns the money kind: a paid_asset_budget
+      // request carries the cap the owner is approving (cap_minor + currency),
+      // and approving it mints a launch approval carrying that same cap.
+      // SQLite cannot widen a CHECK in place, so the table is rebuilt only when
+      // the kind is not yet allowed. Every row and column already present is
+      // copied, so a box that grew extra columns locally keeps them.
+      console.log('[Migration 181] approval_requests: paid_asset_budget...');
+      const table = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'approval_requests'").get() as { sql: string } | undefined;
+      if (!table) throw new Error('[Migration 181] approval_requests missing; migration 179 must run first');
+      const cols = (db.prepare('PRAGMA table_info(approval_requests)').all() as { name: string }[]).map((c) => c.name);
+      if (!cols.includes('cap_minor')) db.exec('ALTER TABLE approval_requests ADD COLUMN cap_minor INTEGER');
+      if (!cols.includes('currency')) db.exec('ALTER TABLE approval_requests ADD COLUMN currency TEXT');
+      if (!table.sql.includes("'paid_asset_budget'")) {
+        const all = (db.prepare('PRAGMA table_info(approval_requests)').all() as { name: string }[]).map((c) => c.name);
+        const list = all.map((c) => `"${c}"`).join(', ');
+        const widened = (db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'approval_requests'").get() as { sql: string }).sql
+          .replace("kind IN ('automation_write','publish')", "kind IN ('automation_write','publish','paid_asset_budget')");
+        if (!widened.includes("'paid_asset_budget'")) throw new Error('[Migration 181] could not locate the approval_requests kind CHECK');
+        db.exec(`
+          ALTER TABLE approval_requests RENAME TO approval_requests_pre181;
+          ${widened};
+          INSERT INTO approval_requests (${list}) SELECT ${list} FROM approval_requests_pre181;
+          DROP TABLE approval_requests_pre181;
+        `);
+      }
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_approval_requests_status ON approval_requests(tenant_id, status, created_at);
+        CREATE INDEX IF NOT EXISTS idx_approval_requests_plan ON approval_requests(tenant_id, kind, location_id, action, object_key, plan_sha256);
+      `);
+      console.log('[Migration 181] approval_requests paid_asset_budget ready');
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner

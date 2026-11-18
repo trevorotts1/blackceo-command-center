@@ -233,8 +233,9 @@ export function decideApprovalFromChat(ctx: TenantContext, requestId: string, in
       run(
         `INSERT INTO launch_approvals (approval_id, tenant_id, client_identity_ref, kind, plan_hash, scope,
            cap_minor, currency, expires_at, revoked, source_message_ref, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, 0, ?, ?)`,
-        [approvalId, ctx.tenantId, identity, row.kind, `sha256:${digest}`, scope, approvalExpiry(row, nowMs), ref, nowIso],
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+        [approvalId, ctx.tenantId, identity, row.kind, `sha256:${digest}`, scope, row.cap_minor ?? null, row.currency ?? null,
+          approvalExpiry(row, nowMs), ref, nowIso],
       );
       run(
         `UPDATE approval_requests SET status = 'approved', decided_at = ?, decided_by = ?, decision_note = ?, approval_id = ?

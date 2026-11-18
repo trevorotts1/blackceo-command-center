@@ -12,6 +12,7 @@ import './_isolated-db';
 import { describe, it, expect, beforeAll, vi } from 'vitest';
 import { NextRequest } from 'next/server';
 import { renderToStaticMarkup } from 'react-dom/server';
+import Database from 'better-sqlite3';
 import { getDb } from '../../src/lib/db';
 import { migrations } from '../../src/lib/db/migrations';
 import { signTenantGrant } from '../../src/lib/auth/tenant-context';
@@ -376,3 +377,96 @@ describe('migration 179', () => {
     expect(() => { mig().up(getDb()); mig().up(getDb()); }).not.toThrow();
   });
 })
+
+describe('paid asset budget approvals', () => {
+  const budget = (over: Record<string, unknown> = {}) => body({
+    kind: 'paid_asset_budget', action: 'generate_images', object_key: 'campaign-pictures',
+    title: 'Picture budget', summary: 'Generate the campaign pictures.', cap_minor: 2500, currency: 'USD', ...over,
+  });
+
+  it('registers a budget request carrying its cap, and refuses a missing, bad or misplaced cap', async () => {
+    const res = await create(budget(), { bearer: TOKEN });
+    expect(res.status).toBe(201);
+    expect(await res.json()).toMatchObject({ kind: 'paid_asset_budget', cap_minor: 2500, currency: 'USD', status: 'pending' });
+    const refusals = await Promise.all([
+      create(budget({ object_key: 'b1', cap_minor: undefined }), { bearer: TOKEN }),
+      create(budget({ object_key: 'b2', currency: undefined }), { bearer: TOKEN }),
+      create(budget({ object_key: 'b3', cap_minor: 0 }), { bearer: TOKEN }),
+      create(budget({ object_key: 'b4', cap_minor: 25.5 }), { bearer: TOKEN }),
+      create(budget({ object_key: 'b5', currency: 'usd' }), { bearer: TOKEN }),
+      create(body({ object_key: 'b6', cap_minor: 2500, currency: 'USD' }), { bearer: TOKEN }),
+    ]);
+    expect(refusals.map((r) => r.status)).toEqual([400, 400, 400, 400, 400, 400]);
+    expect((await refusals[5].json()).error).toBe('cap_not_allowed');
+  });
+
+  it('replays the same budget, but a different cap is a new request', async () => {
+    const a = await (await create(budget({ object_key: 'replay-cap' }), { bearer: TOKEN })).json();
+    const again = await (await create(budget({ object_key: 'replay-cap' }), { bearer: TOKEN })).json();
+    expect(again).toMatchObject({ request_id: a.request_id, replayed: true });
+    const bigger = await (await create(budget({ object_key: 'replay-cap', cap_minor: 9900 }), { bearer: TOKEN })).json();
+    expect(bigger.request_id).not.toBe(a.request_id);
+  });
+
+  it('the owner approving on the page mints a launch approval carrying the same cap', async () => {
+    const made = await (await create(budget({ object_key: 'approve-budget' }), { bearer: TOKEN })).json();
+    expect(await decide(made.request_id, 'approve', '', ownerCookie)).toMatchObject({ ok: true, status: 'approved' });
+    const polled = await (await status(made.request_id, { bearer: TOKEN })).json();
+    const rec = await (await approvalRecord(polled.approval_id, { bearer: TOKEN })).json();
+    expect(rec).toMatchObject({
+      kind: 'paid_asset_budget', cap_minor: 2500, currency: 'USD', approver: OWNER,
+      verification_class: 'authenticated_platform_record', revoked: false,
+    });
+  });
+
+  it('the agent token still cannot decide a budget request', async () => {
+    const made = await (await create(budget({ object_key: 'agent-cannot' }), { bearer: TOKEN })).json();
+    const { decideApprovalRequest } = await import('../../src/lib/approval-requests');
+    const out = decideApprovalRequest({ tenantId: 'tenant-a', subject: 'operator:api' } as never, made.request_id, { decision: 'approve' });
+    expect(out.status).toBe(403);
+  });
+
+  it('shows the spending limit on the approval page, and no limit on other kinds', async () => {
+    const made = await (await create(budget({ object_key: 'page-budget' }), { bearer: TOKEN })).json();
+    const plain = await (await create(body({ object_key: 'page-plain' }), { bearer: TOKEN })).json();
+    const { default: Page } = await import('../../src/app/approvals/[requestId]/page');
+    pageCookie = ownerCookie;
+    const withCap = renderToStaticMarkup(await Page({ params: Promise.resolve({ requestId: made.request_id }) }));
+    expect(withCap).toContain('Spending limit: $25.00 USD');
+    const without = renderToStaticMarkup(await Page({ params: Promise.resolve({ requestId: plain.request_id }) }));
+    expect(without).not.toContain('Spending limit');
+  });
+});
+
+describe('migration 181', () => {
+  const mig = () => migrations.find((m) => m.id === '181')!;
+
+  it('widens the kind, keeps every row and extra column, and re-runs without error', () => {
+    const db = new Database(':memory:');
+    migrations.find((m) => m.id === '179')!.up(db);
+    db.exec('ALTER TABLE approval_requests ADD COLUMN local_extra TEXT');
+    db.prepare(`INSERT INTO approval_requests (request_id, tenant_id, kind, location_id, action, object_key, plan_sha256,
+      title, summary, requested_by, expires_at, created_at, local_extra)
+      VALUES ('r1','t','publish','l','a','o','${PLAN}','T','S','agent','2099-01-01','2026-01-01','kept')`).run();
+    expect(mig()?.name).toBe('approval_requests_paid_asset_budget');
+    expect(() => { mig().up(db); mig().up(db); }).not.toThrow();
+    expect(db.prepare('SELECT kind, local_extra, cap_minor FROM approval_requests').all()).toEqual([{ kind: 'publish', local_extra: 'kept', cap_minor: null }]);
+    expect(() => db.prepare(`INSERT INTO approval_requests (request_id, tenant_id, kind, location_id, action, object_key, plan_sha256,
+      cap_minor, currency, title, summary, requested_by, expires_at, created_at)
+      VALUES ('r2','t','paid_asset_budget','l','a','o','${PLAN}',2500,'USD','T','S','agent','2099-01-01','2026-01-01')`).run()).not.toThrow();
+    expect(() => db.prepare(`INSERT INTO approval_requests (request_id, tenant_id, kind, location_id, action, object_key, plan_sha256,
+      title, summary, requested_by, expires_at, created_at)
+      VALUES ('r3','t','bogus','l','a','o','${PLAN}','T','S','agent','2099-01-01','2026-01-01')`).run()).toThrow();
+    const idx = db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='approval_requests'").all().map((r: { name: string }) => r.name);
+    expect(idx).toEqual(expect.arrayContaining(['idx_approval_requests_status', 'idx_approval_requests_plan']));
+  });
+
+  it('upgrades a box that already rebuilt the table with the budget kind and cap columns', () => {
+    const db = new Database(':memory:');
+    migrations.find((m) => m.id === '179')!.up(db);
+    mig().up(db);
+    expect(() => mig().up(db)).not.toThrow();
+    const cols = db.prepare('PRAGMA table_info(approval_requests)').all().map((c: { name: string }) => c.name);
+    expect(cols.filter((c: string) => c === 'cap_minor' || c === 'currency')).toEqual(['cap_minor', 'currency']);
+  });
+});

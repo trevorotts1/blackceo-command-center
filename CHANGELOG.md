@@ -9,6 +9,13 @@
 - batches #827, #829, #831 and #832 each carried one of the changes above (#825, #826, #830 and #821).
 - Also merged since the stamp: #824 (batch #828), several brand colors in one answer are accepted; it already has its own Unreleased entry below.
 - version stamped in `version`, `package.json`, `package-lock.json` (both fields), README current-release lines, and this changelog.
+## [Unreleased] — 2026-11-17 — feat(approvals): the owner can approve a spending budget from the approvals inbox
+
+- feat(approvals): `POST /api/approval-requests` accepts a third kind, `paid_asset_budget`, which must carry `cap_minor` (a positive whole number of cents) and `currency` (three-letter code). Other kinds refuse a cap (`cap_not_allowed`). A different cap for the same plan is a new request, never a replay of the old one.
+- feat(approvals): approving a budget request, on the `/approvals` page or by a chat reply through `chat-decision`, mints the launch approval with that same cap and currency. Before this, a budget approval could only come from the client's own signed-in session typing "APPROVE <code>", and no screen offered that, so a budget the owner had agreed to in writing had no way to be recorded.
+- feat(approvals): the approval card shows "Spending limit: $25.00 USD" for a budget request.
+- Migration 181 `approval_requests_paid_asset_budget`: adds `cap_minor` and `currency`, widens the `kind` check by rebuilding the table only when needed, copies every existing row and column, restores both indexes. Re-runs cleanly.
+- Tests: `tests/unit/approval-requests.test.ts` (budget registration and refusals, cap-aware replay, page approval minting the cap, agent token cannot decide, spending limit shown, migration 181 on a table with extra columns and on an already-upgraded table) and `tests/unit/chat-approvals.test.ts` (a Telegram "approve" mints the cap). No version bump.
 ## [Unreleased] — 2026-11-17 — fix(board): the "waiting for your answer" banner shows only real owner questions
 
 - fix(board): the yellow banner and the card chip listed every task with an open audience question, including tasks blocked on the operator (dispatch cap, provider quota errors) and archived tasks, and printed the engineering error text as if it were the owner's question. New `isOwnerQuestion()` hides operator-blocked, SYSTEM and archived cards, and the banner always shows the approved plain-language audience question instead of the raw `ask` text. The task-detail "Waiting for your answer" hold uses the same rule.
