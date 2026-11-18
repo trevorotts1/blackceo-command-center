@@ -38,6 +38,11 @@ apt_recover() {  # $1 attempt number that just failed
   sudo dpkg --configure -a >/dev/null 2>&1 || true
   local mirror
   case "$1" in 1) mirror="http://azure.archive.ubuntu.com/ubuntu" ;; *) mirror="http://archive.ubuntu.com/ubuntu" ;; esac
+  # GitHub-hosted images point apt at `mirror+file:/etc/apt/apt-mirrors.txt`; the
+  # mirror actually used lives in that list, not in the sources file.
+  if [ -f /etc/apt/apt-mirrors.txt ]; then
+    printf '%s\tpriority:1\n' "$mirror" | sudo tee /etc/apt/apt-mirrors.txt >/dev/null 2>&1 || true
+  fi
   for f in /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list; do
     [ -f "$f" ] && sudo sed -i -E "s#https?://[A-Za-z0-9.-]*ubuntu\.com/ubuntu/?#${mirror}#g" "$f" 2>/dev/null || true
   done
