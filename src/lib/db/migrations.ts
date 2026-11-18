@@ -8763,7 +8763,15 @@ export const migrations: Migration[] = [
         db.exec(`DROP TABLE IF EXISTS ${SCRATCH}`);
         db.exec(`CREATE TABLE ${SCRATCH} AS SELECT ${list} FROM approval_requests`);
         if (count(SCRATCH) !== before) throw new Error('[Migration 181] approval_requests copy lost rows; original kept');
-        // A child table pointing here must not block the drop: the same rows come
+        // A child table that deletes with its parent would lose rows at the
+        // drop (deferring only postpones the check), so refuse loudly instead;
+        // nothing references approval_requests today.
+        const children = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[])
+          .filter((t) => (db.prepare(`PRAGMA foreign_key_list("${t.name}")`).all() as { table: string; on_delete: string }[])
+            .some((fk) => fk.table === 'approval_requests' && /CASCADE|SET NULL|SET DEFAULT/i.test(fk.on_delete)))
+          .map((t) => t.name);
+        if (children.length) throw new Error(`[Migration 181] ${children.join(', ')} would lose rows when approval_requests is rebuilt; migrate them first`);
+        // A plain child pointing here must not block the drop: the same rows come
         // back under the same keys before the transaction commits.
         db.pragma('defer_foreign_keys = ON');
         db.exec('DROP TABLE approval_requests');

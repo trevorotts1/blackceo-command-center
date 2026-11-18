@@ -502,6 +502,18 @@ describe('migration 181', () => {
     expect(db.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
   });
 
+  it('refuses instead of silently cascading when a child deletes with approval_requests', () => {
+    const db = new Database(':memory:');
+    db.pragma('foreign_keys = ON');
+    migrations.find((m) => m.id === '179')!.up(db);
+    db.exec(`CREATE TABLE child (id TEXT PRIMARY KEY, request_id TEXT REFERENCES approval_requests(request_id) ON DELETE CASCADE);`);
+    db.prepare(`INSERT INTO approval_requests (request_id, tenant_id, kind, location_id, action, object_key, plan_sha256,
+      title, summary, requested_by, expires_at, created_at) VALUES ('r1','t','publish','l','a','o','${PLAN}','T','S','agent','2099-01-01','2026-01-01')`).run();
+    db.prepare("INSERT INTO child (id, request_id) VALUES ('c1','r1')").run();
+    expect(() => db.transaction(() => mig().up(db))()).toThrow(/child would lose rows/);
+    expect(db.prepare('SELECT COUNT(*) n FROM child').get()).toEqual({ n: 1 });
+  });
+
   it('upgrades a box that already rebuilt the table with the budget kind and cap columns', () => {
     const db = new Database(':memory:');
     migrations.find((m) => m.id === '179')!.up(db);

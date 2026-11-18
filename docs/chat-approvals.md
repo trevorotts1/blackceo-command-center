@@ -19,7 +19,7 @@ Failure is 400 (bad body), 403 or 409, as `{ "error": "<code>", "detail": "<sent
 
 `GET /api/approval-requests/<id>` also returns `short_code` (first 6 characters of `request_id`) and `approve_by: ["command_center","telegram","chat_app"]`.
 
-A spending budget is registered as `kind: "paid_asset_budget"` with `cap_minor` (minor units, e.g. cents) and `currency`. Approving it by chat or on the page mints the launch approval with that same cap, and the page shows the spending limit. A chat approval of a budget must show the amount: the agent's approval message states it (for example `Picture budget: $25.00 USD. Code: <short_code>`) and the owner replies to that message, or the owner's own words contain the amount. An inline button and the "only pending request" shortcut never approve a budget; both are refused with `amount_not_shown`.
+A spending budget is registered as `kind: "paid_asset_budget"` with `cap_minor` (minor units, e.g. cents) and `currency`. Approving it by chat or on the page mints the launch approval with that same cap, and the page shows the spending limit. A chat approval of a budget must show the amount and be tied to the request: the agent's approval message states the amount and the code (for example `Picture budget: $25.00 USD. Code: <short_code>`) and the owner replies to that message, or the owner's own words contain both the amount and the code. A reply that does not show the amount is refused with `amount_not_shown`. An inline button never approves a budget (`amount_not_shown`), and the "only pending request" shortcut does not apply, so an answer with the amount but no code and no reply is refused with `ambiguous_request`.
 
 ## What Command Center checks itself (never the agent's claim)
 
