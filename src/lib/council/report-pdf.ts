@@ -333,6 +333,25 @@ export async function renderCouncilReportPdf(
       `PDF render failed: ${err instanceof Error ? err.message : String(err)}`,
     );
   } finally {
-    if (browser) await browser.close().catch(() => undefined);
+    if (browser) await closeBrowserBounded(browser);
   }
+}
+
+/** How long a finished render waits for Chromium to exit before moving on. */
+const BROWSER_CLOSE_WAIT_MS = 2_000;
+
+/**
+ * The PDF bytes are complete before teardown, so a slow Chromium exit (seconds
+ * on a loaded host) must not hold the response. Wait briefly for a clean
+ * close; past that, kill the process so nothing is left running.
+ */
+async function closeBrowserBounded(browser: Browser): Promise<void> {
+  const closed = browser.close().then(() => true, () => true);
+  const timedOut = new Promise<boolean>((resolve) => {
+    const timer = setTimeout(() => resolve(false), BROWSER_CLOSE_WAIT_MS);
+    timer.unref?.();
+  });
+  if (await Promise.race([closed, timedOut])) return;
+  const proc = (browser as unknown as { process?: () => { kill: (signal?: string) => boolean } | null }).process?.();
+  try { proc?.kill('SIGKILL'); } catch { /* already gone */ }
 }
