@@ -134,20 +134,33 @@ curl -s -o /dev/null -w "%{http_code}" https://<your-subdomain>.zerohumanworkfor
 
 ---
 
-## Automated Sunday Update Path (P1-07)
+## Automated Update Path (Tuesday, Friday, Sunday 2:30 AM Eastern)
 
-Every client box self-updates automatically every Sunday ~3:00 AM. This section
-is the one-page answer to "what runs, which file, what proves success, how to
-roll back" for that automated path — see also the onboarding repo's
-`UPDATE-PLAYBOOK.md` ("Automated Command Center Update — Sunday 3AM (P1-07)"
-section) for the ONBOARDING-side half of this same chain.
+Every client box updates itself on a fixed schedule with no fleet roll and no
+"ask first" step. This section is the one-page answer to "what runs, which
+file, what proves success, how to roll back" — see also the onboarding repo's
+`UPDATE-PLAYBOOK.md` for the ONBOARDING-side half of this same chain, and its
+auto-update contract for the lock and the status beacon.
+
+### Schedule
+
+- **Days:** Tuesday, Friday and Sunday, Eastern calendar day (America/New_York,
+  DST-correct, independent of the box's own time zone).
+- **2:15 AM Eastern:** the client's main OpenClaw chat gets one notice: the
+  update starts in 15 minutes and the client can type `cancel` to skip it.
+- **2:30 AM Eastern, plus a per-box 0 to 15 minute jitter:** the update run
+  starts. A `cancel` skips THIS run only; the next scheduled day runs normally.
+- One system crontab line per box (`# openclaw-auto-update`, every 5 minutes)
+  installed by the onboarding repo; it replaces the old Sunday 3:00 AM cron, the
+  Saturday self-update cron and the agent "ask first" job. This repo no longer
+  ships `cron-prompt.txt`: nothing in Command Center asks the client anything
+  before updating, and the deterministic script decides by comparing versions.
 
 ### What runs, in order
 
-1. **Cron** (installed by the onboarding repo's `scripts/setup-weekly-update.sh`):
-   `0 3 * * 0` → `~/.openclaw/skills/.update-restart-if-needed`, which downloads
-   and runs the LATEST `update-skills.sh` from `openclaw-onboarding` (never a
-   stale local copy).
+1. **The auto-update run** (onboarding repo, deterministic script, not the
+   LLM) takes the shared box update lock, compares versions against GitHub
+   `main`, and only continues when something is behind.
 2. **`update-skills.sh` D5 block** runs the on-box Skill 32 installer:
    `32-command-center-setup/scripts/run-full-install.sh --update-only`.
 3. **`run-full-install.sh` Phase 6 (update-only)** does the ONBOARDING-owned
@@ -157,15 +170,18 @@ section) for the ONBOARDING-side half of this same chain.
    any duplicate pm2 aliases down to one canonical process — then calls
    `cc_route_update_through_canonical_path()`, which is where control passes
    to THIS repo.
-4. **THIS repo's `update.sh`** (owns the CC-side half): backs up critical
-   files (to `cc-backup-<ts>/` under the backup base), verifies the checkout's
-   remote identity (normalized host + owner + repository — a foreign checkout
-   named `blackceo-command-center` is rejected), pulls, `npm ci`, resolves the
-   SERVED database through `shared-utils/resolve_db.py` (server configuration
-   first: `DATABASE_PATH`, then `.env.local` parsed exactly like the app, then
-   `<install>/../data/mission-control.db`; a path-parity failure skips the
-   departments sync instead of seeding a guessed DB), then **Step 5: Build +
-   restart (atomic deploy)** — routes through `scripts/atomic-deploy.sh`.
+4. **THIS repo's `update.sh`** (owns the CC-side half) first **honours the
+   shared update lock**: launched by the auto-update run it inherits the lock
+   from its live ancestor and proceeds; run by hand while another updater owns
+   the lock it changes nothing and exits **75** (deferred). Then it backs up
+   critical files (to `cc-backup-<ts>/` under the backup base), verifies the
+   checkout's remote identity (normalized host + owner + repository — a foreign
+   checkout named `blackceo-command-center` is rejected), pulls, `npm ci`,
+   resolves the SERVED database through `shared-utils/resolve_db.py` (server
+   configuration first: `DATABASE_PATH`, then `.env.local` parsed exactly like
+   the app, then `<install>/../data/mission-control.db`; a path-parity failure
+   skips the departments sync instead of seeding a guessed DB), then **Step 5:
+   Build + restart (atomic deploy)** — routes through `scripts/atomic-deploy.sh`.
 5. **`scripts/atomic-deploy.sh`**: snapshots the DB with SQLite's ONLINE
    BACKUP (`Connection.backup()` via a proven interpreter — not `cp`, and a
    failed snapshot aborts pre-flight), builds into a temp dir, gates on a FRESH
@@ -174,6 +190,39 @@ section) for the ONBOARDING-side half of this same chain.
    window), restarts pm2, health-checks via `scripts/cc-health-check.sh`, and
    **auto-rolls back to the prior build if the health check is not green**
    (never on exit-3 UNKNOWN — that pauses/retries instead, per the B.2 spec).
+
+### Shared update lock and the version report
+
+- **Lease:** `/tmp/openclaw-update.lock` (override `OPENCLAW_UPDATE_LEASE`), the
+  same lease the operator fleet roll takes. `update.sh` sources the onboarding
+  helper `<openclaw root>/scripts/box-update-lock.sh` (override
+  `CC_BOX_UPDATE_LOCK_LIB`). If the helper is not on the box yet the run warns
+  and continues, because there is nothing to serialize against.
+- **How the beacon gets the Command Center versions:** once `update.sh` has
+  resolved the install location (the failures before that point write no
+  result), it ends with exactly one line, `CC_UPDATE_RESULT {json}`, on its own
+  stdout, and writes the same JSON to the file named by `CC_UPDATE_RESULT_FILE`
+  when that variable is set. The auto-update run must set that variable (or
+  capture the line); a caller that does neither only has the log and the
+  `version` file. Schema `cc-update-result/1`: `status` (`CURRENT`, `UPDATED`,
+  `DEFERRED` or `FAILED`), `before` and `after` (the `version` file),
+  `commit_before`, `commit_after`, `detail`. The beacon's
+  `versions.command_center.before` and `.after` come from `before` and `after`.
+- **Exit codes:** 0 current or updated; 75 deferred because another updater
+  holds the lock; anything else failed. An aborted run (including a `set -e`
+  abort) is reported `FAILED`.
+- **Health unknown is a failure:** when `atomic-deploy.sh` exits 3 (the new
+  build is swapped in but health was never confirmed, and it was not rolled
+  back) `update.sh` reports `FAILED` with that detail and exits 1, never
+  `UPDATED`, so the caller repairs or rolls back.
+- **No client message from this repo:** under the scheduled auto-update (run id
+  `auto-update-...`) the `AGENTS.md` update note does NOT tell the agent to
+  message the owner; the client receives only the 2:15 AM notice and the cancel
+  reply. A manual run keeps the "tell the owner" step.
+- **Lock hygiene:** the lease is released by the single EXIT cleanup, after any
+  node_modules restore, and the lock's flock file descriptor (fd 9) is closed
+  for `atomic-deploy.sh` and every `pm2` call, so a pm2 daemon started during
+  the update cannot hold the lock after the run ends.
 
 ### What proves success
 
@@ -184,7 +233,7 @@ section) for the ONBOARDING-side half of this same chain.
   `.next/BUILD_ID` mtime newer than the pull timestamp AND
   `curl -fsS localhost:4000/api/health` returns `200`. It stamps
   `commandCenterLastUpdateVerified` (true/false) in the box's build-state
-  file either way — this is the single source of truth for "did Sunday's CC
+  file either way — this is the single source of truth for "did the scheduled CC
   update actually take effect," not a log line or an exit code.
 
 ### How to roll back
@@ -197,7 +246,7 @@ section) for the ONBOARDING-side half of this same chain.
   re-run resnapshots and retries. To restore the LAST rollback artifact by
   hand: `rm -rf ~/projects/command-center/.next && cp -r ~/projects/command-center/.next.rollback ~/projects/command-center/.next && pm2 restart blackceo-command-center`.
 - **Repo-level (a bad merge, not a bad box):** `git revert` the offending
-  commit on `main` and let the next Sunday run (or a manual `update.sh`
+  commit on `main` and let the next scheduled run (or a manual `update.sh`
   re-run) pull the reverted code — same atomic/health/rollback contract
   applies to a revert exactly as it does to a forward fix.
 
@@ -211,7 +260,7 @@ The checkout lives under `/data/projects/command-center` specifically because
 `/data` is the persistent bind-mounted volume, so the CC checkout + database
 survive a `docker compose up -d --force-recreate` of the OUTER container (a
 DIFFERENT, less-frequent maintenance action — e.g. an image/dependency bump —
-from the Sunday CC code update). **Never** use bare `docker compose restart`
+from the scheduled CC code update). **Never** use bare `docker compose restart`
 for that outer-container action; it skips `env_file` re-read.
 
 ---

@@ -2,7 +2,8 @@
 # ============================================================
 #  BlackCEO Command Center — Check for Updates (READ-ONLY)
 #  Compares local install against GitHub. NEVER updates anything.
-#  Outputs structured JSON the cron agent reasons over.
+#  Outputs structured JSON for the deterministic Tue/Fri/Sun auto-update script.
+#  Nothing asks the client first: the script compares version/commit and decides.
 # ============================================================
 
 set -u
@@ -10,7 +11,7 @@ SCRIPT_VERSION="1.0.0"
 REPO_NAME="blackceo-command-center"
 REPO_URL="https://github.com/trevorotts1/${REPO_NAME}.git"
 # Where this script lives: the registry beside it must be found no matter what
-# directory the Sunday cron agent invokes the script from.
+# directory the auto-update script invokes this from.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CC_REGISTRY="$SCRIPT_DIR/config/update-target-registry.json"
 # Approved target (pin). A fleet roll pins ONE main commit for every box, so
@@ -36,7 +37,7 @@ GH_RAW="${CC_UPDATE_BASE}/${CC_TARGET_REF}"
 # scripts/install/vps-docker-bootstrap.sh). Consequence before this fix: on
 # every canonically-installed box, INSTALL_DIR resolved empty -> LOCAL_VERSION
 # empty -> HAS_UPDATE computed true whenever the GitHub fetch succeeded ->
-# permanent false "update available" on the Sunday cron. This also never
+# permanent false "update available" on the scheduled auto-update. This also never
 # honored a CC_APP_DIR override, unlike update.sh. Fixed by mirroring
 # update.sh's resolution exactly: honor CC_APP_DIR first, then fall back to the
 # canonical paths prepended ahead of the legacy last-resort candidates.
@@ -45,7 +46,7 @@ GH_RAW="${CC_UPDATE_BASE}/${CC_TARGET_REF}"
 # package.json" was the whole test, so a decoy could win. `~/projects/command-
 # center` is FIRST in the list and on the operator Mac mini it exists as a
 # non-git DATA directory. This file is READ-ONLY (it never updates anything),
-# so it cannot abort the way update.sh does: the Sunday cron agent parses this
+# so it cannot abort the way update.sh does: the auto-update script parses this
 # JSON. Instead it validates identically and reports the outcome in two new
 # fields, `install_dir_status` and `install_dir_detail`, so an unresolvable or
 # ambiguous install is VISIBLE to the agent rather than silently reported

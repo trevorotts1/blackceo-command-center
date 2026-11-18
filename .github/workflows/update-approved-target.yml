@@ -34,6 +34,12 @@ jobs:
           set -euo pipefail
           bash scripts/update-approved-target.test.sh
 
+      - name: Run the shared-lock and version-report updater suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/update-lock-and-report.test.sh
+
   route-tests:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     name: Version route commit tests

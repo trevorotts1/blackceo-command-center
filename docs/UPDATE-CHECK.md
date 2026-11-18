@@ -1,8 +1,10 @@
 # `check-updates.sh` — what an installed copy reports about itself
 
-`check-updates.sh` is the read-only Sunday check. It never fetches into the
-checkout, never updates the app, and writes only `.last-update-check`. Its JSON
-is consumed by the box agent.
+`check-updates.sh` is the read-only version check behind the Tuesday/Friday/Sunday
+auto-update. It never fetches into the checkout, never updates the app, and writes
+only `.last-update-check`. Its JSON is read by the deterministic auto-update
+script, which decides by itself; there is no "ask first" step and no client
+prompt (the old `cron-prompt.txt` flow was removed).
 
 ## Version vs commit
 
