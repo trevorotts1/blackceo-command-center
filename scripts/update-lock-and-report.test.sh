@@ -29,6 +29,7 @@ mkdir -p "$WORK/bin" "$WORK/home"
 
 cat > "$WORK/bin/npm" <<'FAKENPM'
 #!/bin/sh
+if [ "$1" = "ci" ] && [ -n "${NPM_CI_FAIL:-}" ]; then echo "fixture: npm ci failed" >&2; exit 1; fi
 if [ "$1" = "run" ] && [ "$2" = "build" ]; then
   mkdir -p .next && printf 'fixture-build\n' > .next/BUILD_ID
 fi
@@ -84,8 +85,11 @@ done
 if [ -n "$rev" ] && [ "$(git -C "$app" rev-parse HEAD)" != "$rev" ]; then
   git -C "$app" merge --ff-only -q "$rev" 2>/dev/null || git -C "$app" checkout -q "$rev" || exit 2
 fi
+if [ -n "${FD9_PROBE:-}" ]; then
+  if { true >&9; } 2>/dev/null; then echo open > "$FD9_PROBE"; else echo closed > "$FD9_PROBE"; fi
+fi
 echo "fake-atomic-deploy: GREEN"
-exit 0
+exit "${ATOMIC_RC:-0}"
 FAKEDEPLOY
 chmod +x "$ORIGIN/scripts/atomic-deploy.sh"
 git -C "$ORIGIN" add -A && git -C "$ORIGIN" commit -qm "fixture v6.0.0"
@@ -123,10 +127,12 @@ box_update_lock_acquire() {
     if [ -n "${BFX_LOCK_RUN_ID-}" ] && [ "$BFX_LOCK_RUN_ID" = "$(_rec run_id)" ]; then return 0; fi
     echo "LOCK HELD: fixture owner pid $pid" >&2; return 3
   fi
+  if command -v flock >/dev/null 2>&1; then exec 9<>"$BUL_LOCK_PATH" && flock -n 9 || return 3; fi
   printf 'pid=%s\nrun_id=%s\nrole=%s\n' "$$" "$2" "$3" > "$BUL_LOCK_PATH" || return 1
   return 0
 }
 box_update_lock_release() {
+  [ -n "${ORDER_LOG:-}" ] && echo "release: node_modules.prev=$([ -d node_modules.prev ] && echo present || echo gone)" >> "$ORDER_LOG"
   [ -f "${BUL_LOCK_PATH:-}" ] && [ "$(_rec pid)" = "$$" ] && rm -f "$BUL_LOCK_PATH"
   return 0
 }
@@ -156,6 +162,7 @@ if run_updater "$INST" "$WORK/out-1.txt" $(lock_env); then ok "updater exits 0";
 [ "$(jget "$RESULT" commit_before)" != "$(jget "$RESULT" commit_after)" ] && [ -n "$(jget "$RESULT" commit_after)" ] \
   && ok "result carries distinct before/after commits" || bad "commit before/after wrong"
 grep -q '^CC_UPDATE_RESULT {' "$WORK/out-1.txt" && ok "CC_UPDATE_RESULT line printed on stdout" || bad "no CC_UPDATE_RESULT line"
+grep -q 'Tell the owner: "Command Center updated to' "$WORK/home/clawd/AGENTS.md" && ok "manual run still tells the agent to tell the owner" || bad "manual run lost the tell-the-owner step"
 [ ! -e "$LEASE" ] && ok "lease file released on the way out" || bad "lease file left behind"
 
 # ── Case 2: already current -> CURRENT, before == after ─────────────────────
@@ -186,8 +193,8 @@ INST="$WORK/install-4"; new_install "$INST"; rm -f "$LEASE" "$RESULT"
 bump_origin 6.2.1
 (
   . "$LOCKLIB"
-  box_update_lock_acquire "$LEASE" "auto-update-test-run" "auto-update" "$INST" || exit 9
-  export BFX_LOCK_RUN_ID="auto-update-test-run" BFX_LOCK_OWNER_PID="$$"
+  box_update_lock_acquire "$LEASE" "auto-update-20261117T000000Z-1" "auto-update" "$INST" || exit 9
+  export BFX_LOCK_RUN_ID="auto-update-20261117T000000Z-1" BFX_LOCK_OWNER_PID="$$"
   env HOME="$WORK/home" PATH="$FIXTURE_PATH" CC_APP_DIR="$INST" $(lock_env) \
     bash "$UPDATE_SH" > "$WORK/out-4.txt" 2>&1
   echo $? > "$WORK/rc4"
@@ -196,6 +203,8 @@ bump_origin 6.2.1
 )
 [ "$(cat "$WORK/rc4" 2>/dev/null)" = "0" ] && ok "child update.sh proceeds under the parent's lease" || bad "child did not proceed (rc $(cat "$WORK/rc4" 2>/dev/null))"
 [ "$(cat "$WORK/lease4" 2>/dev/null)" = "held" ] && ok "child left the parent's lease in place" || bad "child released the parent's lease"
+if grep -q 'Tell the owner' "$WORK/home/clawd/AGENTS.md"; then bad "scheduled run told the agent to message the owner"; else ok "scheduled run adds NO tell-the-owner instruction"; fi
+grep -q 'Do NOT message the owner' "$WORK/home/clawd/AGENTS.md" && ok "scheduled run says not to message the owner" || bad "no do-not-message line"
 [ "$(jget "$RESULT" status)" = "UPDATED" ] && ok "inherited run reports UPDATED" || bad "inherited run reported '$(jget "$RESULT" status)'"
 
 # ── Case 5: helper absent -> warn and proceed ───────────────────────────────
@@ -214,6 +223,47 @@ INST="$WORK/install-6"; new_install "$INST"; rm -f "$LEASE" "$RESULT"
 if run_updater "$INST" "$WORK/out-6.txt" $(lock_env) CC_REQUIRE_APPROVED_TARGET=1; then bad "expected a refusal"; else ok "run fails without the required target"; fi
 [ "$(jget "$RESULT" status)" = "FAILED" ] && ok "result status FAILED" || bad "status '$(jget "$RESULT" status)'"
 [ ! -e "$LEASE" ] && ok "lease released after failure" || bad "lease left behind after failure"
+
+# fake flock so the helper takes its flock path (fd 9) on every platform
+mkdir -p "$WORK/flockbin"; printf '#!/bin/sh\nexit 0\n' > "$WORK/flockbin/flock"; chmod +x "$WORK/flockbin/flock"
+
+# ── Case 8: flock fd 9 is closed for atomic-deploy (and the mutation proof) ──
+echo "Case 8: the lock's fd 9 does not leak into atomic-deploy"
+INST="$WORK/install-8"; new_install "$INST"; rm -f "$LEASE" "$RESULT" "$WORK/fd9"
+bump_origin 6.4.0
+FIXTURE_PATH_SAVE="$FIXTURE_PATH"; FIXTURE_PATH="$WORK/flockbin:$FIXTURE_PATH"
+run_updater "$INST" "$WORK/out-8.txt" $(lock_env) FD9_PROBE="$WORK/fd9"
+[ "$(cat "$WORK/fd9" 2>/dev/null)" = "closed" ] && ok "atomic-deploy child sees fd 9 closed" || bad "fd 9 state in child: '$(cat "$WORK/fd9" 2>/dev/null)'"
+# mutation: the same run with the close removed MUST leak, or this test proves nothing
+sed 's/ 9>&-//g' "$UPDATE_SH" > "$WORK/update-leaky.sh"
+INST="$WORK/install-8b"; new_install "$INST"; rm -f "$LEASE" "$RESULT" "$WORK/fd9"
+env HOME="$WORK/home" PATH="$FIXTURE_PATH" CC_APP_DIR="$INST" $(lock_env) FD9_PROBE="$WORK/fd9" bash "$WORK/update-leaky.sh" > "$WORK/out-8b.txt" 2>&1
+[ "$(cat "$WORK/fd9" 2>/dev/null)" = "open" ] && ok "mutation proof: without the close fd 9 leaks (test can fail)" || bad "mutation did not leak ('$(cat "$WORK/fd9" 2>/dev/null)') — test is vacuous"
+# every pm2 call and the deploy calls in update.sh close fd 9
+MISSING="$(grep -nE '(^|[^a-zA-Z_.-])pm2 (list|jlist|reload|restart)|"\$\{?Z?D?_?BASH4\}?" "' "$UPDATE_SH" | grep -v '^[0-9]*:[[:space:]]*#' | grep -v '9>&-' | grep -v 'warn "' || true)"
+[ -z "$MISSING" ] && ok "every pm2 and atomic-deploy call site closes fd 9" || bad "call sites without 9>&-: $MISSING"
+FIXTURE_PATH="$FIXTURE_PATH_SAVE"
+
+# ── Case 9: atomic-deploy exit 3 (health unknown) is not UPDATED ────────────
+echo "Case 9: health unknown -> FAILED, non-zero exit"
+INST="$WORK/install-9"; new_install "$INST"; rm -f "$LEASE" "$RESULT"
+bump_origin 6.5.0
+run_updater "$INST" "$WORK/out-9.txt" $(lock_env) ATOMIC_RC=3; RC9=$?
+[ "$RC9" -ne 0 ] && ok "exit code non-zero ($RC9)" || bad "exit 0 with unknown health"
+[ "$(jget "$RESULT" status)" = "FAILED" ] && ok "result status FAILED, not UPDATED" || bad "status '$(jget "$RESULT" status)'"
+grep -q 'health unknown' "$RESULT" && ok "detail names the unknown health" || bad "detail missing"
+[ ! -e "$LEASE" ] && ok "lease released" || bad "lease left behind"
+
+# ── Case 10: lock released only AFTER node_modules is restored ──────────────
+echo "Case 10: abort in the node_modules window -> restore first, release last"
+INST="$WORK/install-10"; new_install "$INST"; rm -f "$LEASE" "$RESULT" "$WORK/order.log"
+mkdir -p "$INST/node_modules" && echo marker > "$INST/node_modules/marker" && echo node_modules >> "$INST/.git/info/exclude"
+run_updater "$INST" "$WORK/out-10.txt" $(lock_env) NPM_CI_FAIL=1 ORDER_LOG="$WORK/order.log"; RC10=$?
+[ "$RC10" -ne 0 ] && ok "failed npm ci fails the run" || bad "run succeeded despite npm ci failure"
+[ -f "$INST/node_modules/marker" ] && ok "previous node_modules restored" || bad "node_modules not restored"
+if [ -n "${ONB_LOCK_LIB:-}" ]; then ok "release-order log skipped (real helper has no hook); restore and lease checks cover it"; elif grep -q 'node_modules.prev=gone' "$WORK/order.log" 2>/dev/null; then ok "lock was released after the restore (no .prev left at release)"; else bad "release order: $(cat "$WORK/order.log" 2>/dev/null)"; fi
+[ "$(jget "$RESULT" status)" = "FAILED" ] && ok "result FAILED" || bad "status '$(jget "$RESULT" status)'"
+[ ! -e "$LEASE" ] && ok "lease released" || bad "lease left behind"
 
 # ── Case 7: the ask-first flow is gone, docs match the new schedule ─────────
 echo "Case 7: ask flow removed, DEPLOYMENT.md documents Tue/Fri/Sun"

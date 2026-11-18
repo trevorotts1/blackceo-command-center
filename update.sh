@@ -40,13 +40,13 @@ exec 1> >(tee -a "$LOG_FILE") 2>&1
 step() { echo ""; echo "━━━ $1 ━━━"; }
 success() { echo "  ✓ $1"; }
 warn() { echo "  ⚠ $1"; }
-# fatal also writes the machine-readable result (status FAILED) and releases the
-# shared update lease. Both helpers are defined further down; the `type` guards
-# keep fatal usable before they exist (early failures, before the lock).
+# fatal also writes the machine-readable result (status FAILED). The shared
+# update lease is released by the EXIT trap (_cc_exit_cleanup), AFTER any other
+# EXIT cleanup such as restoring node_modules. The `type` guard keeps fatal
+# usable before the helper exists (early failures, before the lock).
 fatal() {
   echo "  ✗ ERROR: $1"
   if type _cc_write_result >/dev/null 2>&1; then _cc_write_result FAILED "$1" || true; fi
-  if type box_update_lock_release >/dev/null 2>&1; then box_update_lock_release || true; fi
   exit 1
 }
 
@@ -354,6 +354,13 @@ cd "$INSTALL_DIR"
 # cc-update-result/1: status CURRENT|UPDATED|DEFERRED|FAILED, version before and
 # after, commit before and after, detail. The auto-update beacon reads it for
 # versions.command_center. Exit codes: 0 done, 75 deferred, anything else failed.
+CC_RESULT_WRITTEN=0
+CC_HEALTH_UNKNOWN=0
+# The scheduled auto-update names its run auto-update-<UTC>-<pid> and exports it
+# as BFX_LOCK_RUN_ID. Under it the client gets only the 2:15 notice and the
+# cancel reply, so the AGENTS.md note must not tell the agent to message the owner.
+CC_AUTO_UPDATE=0
+case "${BFX_LOCK_RUN_ID:-}" in auto-update-*) CC_AUTO_UPDATE=1 ;; esac
 CC_RESULT_BEFORE="$(tr -d '[:space:]' < version 2>/dev/null || true)"
 CC_RESULT_COMMIT_BEFORE="$(git rev-parse HEAD 2>/dev/null || true)"
 
@@ -371,12 +378,26 @@ _cc_write_result() {
     "$status" "$(_cc_json_escape "$CC_RESULT_BEFORE")" "$(_cc_json_escape "$after")" \
     "$(_cc_json_escape "$CC_RESULT_COMMIT_BEFORE")" "$(_cc_json_escape "$commit_after")" \
     "$(_cc_json_escape "$detail")")"
+  CC_RESULT_WRITTEN=1
   echo "CC_UPDATE_RESULT $json"
   if [ -n "${CC_UPDATE_RESULT_FILE:-}" ]; then
     printf '%s\n' "$json" > "$CC_UPDATE_RESULT_FILE" 2>/dev/null || true
   fi
   return 0
 }
+
+# Single EXIT cleanup: every EXIT trap in this script ends by calling it, so the
+# lock is always released LAST. An abort nobody reported (set -e) still yields a
+# FAILED result line.
+_cc_exit_cleanup() {
+  local rc="${1:-0}"
+  if [ "$CC_RESULT_WRITTEN" -ne 1 ] && [ "$rc" -ne 0 ] && [ "$rc" -ne 75 ]; then
+    _cc_write_result FAILED "update.sh aborted (exit $rc)" || true
+  fi
+  if type box_update_lock_release >/dev/null 2>&1; then box_update_lock_release || true; fi
+  return 0
+}
+trap '_cc_exit_cleanup $?' EXIT
 
 _cc_lock_lib=""
 if [ -n "${CC_BOX_UPDATE_LOCK_LIB:-}" ]; then
@@ -837,7 +858,7 @@ cc_resolve_pm2_name() {
     name="$CC_PM2_APP_NAME"
     success "pm2 app name (CC_PM2_APP_NAME override): $name" >&2
   elif command -v pm2 >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1 && [ -f "$lib" ]; then
-    name=$(pm2 jlist 2>/dev/null \
+    name=$(pm2 jlist 9>&- 2>/dev/null \
       | python3 -s "$lib" --resolve-name "${CC_PORT:-4000}" "" 2>/dev/null \
       | head -1 || true)
     [ -n "$name" ] && success "pm2 app name (live, declares port ${CC_PORT:-4000}): $name" >&2
@@ -914,7 +935,7 @@ if [ -d ".git" ] && [ "${CC_UPDATE_ZERO_DOWNTIME:-1}" = "1" ]; then
     success "Zero-downtime path: target $ZD_TARGET is a fast-forward of the clean live checkout"
     ZD_STAGE="$(mktemp -d "${TMPDIR:-/tmp}/cc-update-stage.XXXXXX")"
     # Staged scripts leave with the process; the live tree is never the stage.
-    trap 'rm -rf "$ZD_STAGE"' EXIT
+    trap 'rc=$?; rm -rf "$ZD_STAGE"; { type _cc_exit_cleanup >/dev/null 2>&1 && _cc_exit_cleanup $rc; }' EXIT
     # Stage the target's scripts, plus the verifier's library ONLY when that
     # release ships it: `git archive` aborts on a pathspec the target does not
     # have, which refused the whole promotion on any older/leaner release.
@@ -941,7 +962,7 @@ if [ -d ".git" ] && [ "${CC_UPDATE_ZERO_DOWNTIME:-1}" = "1" ]; then
     set -e
     case "$ADEPLOY_RC" in
       0) success "Atomic deploy GREEN — built beside the live release, promoted, and serving" ;;
-      3) warn "Atomic deploy UNKNOWN (health indeterminate) — fresh build swapped but health not confirmed. NOT rolled back; investigate. See receipt above." ;;
+      3) warn "Atomic deploy UNKNOWN (health indeterminate) — fresh build swapped but health not confirmed. NOT rolled back; investigate. See receipt above."; CC_HEALTH_UNKNOWN=1 ;;
       1) fatal "Atomic deploy FAILED and auto-rolled-back to the prior build — the update did NOT take effect on the running server. See the atomic-deploy receipt above." ;;
       2) fatal "Atomic deploy pre-flight failed (disk / build / deps) — old build untouched and still serving. Fix the reported issue and re-run this updater." ;;
       *) fatal "Atomic deploy exited with unexpected code $ADEPLOY_RC — refusing to declare the update successful." ;;
@@ -1243,7 +1264,7 @@ _cc_restore_node_modules() {
   fi
   _cc_nm_prev=""
 }
-trap _cc_restore_node_modules EXIT
+trap 'rc=$?; _cc_restore_node_modules; { type _cc_exit_cleanup >/dev/null 2>&1 && _cc_exit_cleanup $rc; }' EXIT
 if [ -d node_modules ]; then
   rm -rf node_modules.prev
   if mv node_modules node_modules.prev; then
@@ -1319,7 +1340,7 @@ _cc_assert_native_module_usable better-sqlite3
 # everything after this point fails forward onto a working node_modules.
 rm -rf "$_cc_nm_prev"
 _cc_nm_prev=""
-trap - EXIT
+trap 'rc=$?; { type _cc_exit_cleanup >/dev/null 2>&1 && _cc_exit_cleanup $rc; }' EXIT
 
 # ----------------------------------------------------------
 # Run any database migrations (if seed files changed)
@@ -1399,7 +1420,7 @@ if [ -f "$ATOMIC_DEPLOY" ] && [ -n "$BASH4" ]; then
   set -e
   case "$ADEPLOY_RC" in
     0) success "Atomic deploy GREEN — fresh build compiled, atomically swapped, and serving"; DEPLOY_OK=1 ;;
-    3) warn "Atomic deploy UNKNOWN (health indeterminate) — fresh build swapped but health not confirmed. NOT rolled back; investigate. See receipt above."; DEPLOY_OK=1 ;;
+    3) warn "Atomic deploy UNKNOWN (health indeterminate) — fresh build swapped but health not confirmed. NOT rolled back; investigate. See receipt above."; DEPLOY_OK=1; CC_HEALTH_UNKNOWN=1 ;;
     1) fatal "Atomic deploy FAILED and auto-rolled-back to the prior build — the update did NOT take effect on the running server. See the atomic-deploy receipt above." ;;
     2) fatal "Atomic deploy pre-flight failed (disk / build / deps) — old build untouched, code NOT recompiled. Fix the reported issue and re-run this updater." ;;
     *) fatal "Atomic deploy exited with unexpected code $ADEPLOY_RC — refusing to declare the update successful." ;;
@@ -1454,11 +1475,11 @@ if [ "$DEPLOY_OK" -ne 1 ]; then
     # Target the LIVE app name first — reloading ecosystem.config.cjs on a box
     # whose CC runs under a non-fleet name would START a second app that fights
     # the live one for the port (same defect class as the old hardcoded name).
-    if pm2 list 2>/dev/null | grep -q "$CC_PM2_NAME"; then
-      pm2 reload "$CC_PM2_NAME" 2>&1 || pm2 restart "$CC_PM2_NAME" 2>&1 || warn "PM2 reload failed — restart manually with: pm2 restart $CC_PM2_NAME"
+    if pm2 list 9>&- 2>/dev/null | grep -q "$CC_PM2_NAME"; then
+      pm2 reload "$CC_PM2_NAME" 9>&- 2>&1 || pm2 restart "$CC_PM2_NAME" 9>&- 2>&1 || warn "PM2 reload failed — restart manually with: pm2 restart $CC_PM2_NAME"
       success "PM2 reloaded '$CC_PM2_NAME' onto fresh build"
-    elif pm2 list 2>/dev/null | grep -q "command-center\|blackceo"; then
-      pm2 reload ecosystem.config.cjs 2>&1 || pm2 restart all 2>&1 || warn "PM2 reload failed — restart manually with pm2 restart all"
+    elif pm2 list 9>&- 2>/dev/null | grep -q "command-center\|blackceo"; then
+      pm2 reload ecosystem.config.cjs 9>&- 2>&1 || pm2 restart all 9>&- 2>&1 || warn "PM2 reload failed — restart manually with pm2 restart all"
       success "PM2 reloaded onto fresh build"
     else
       warn "PM2 installed but no command-center process found — start manually with: pm2 start ecosystem.config.cjs"
@@ -1547,6 +1568,12 @@ awk '
 ' "$AGENTS_FILE" > "$AGENTS_FILE.tmp" 2>/dev/null || true
 mv "$AGENTS_FILE.tmp" "$AGENTS_FILE" 2>/dev/null || true
 
+if [ "$CC_AUTO_UPDATE" -eq 1 ]; then
+  OWNER_STEP='3. Do NOT message the owner about this update (the scheduled auto-update already told them; they get only the 2:15 notice and the cancel reply).'
+else
+  OWNER_STEP="3. Tell the owner: \"Command Center updated to ${NEW_VERSION}. [list any items that need owner action]\""
+fi
+
 cat >> "$AGENTS_FILE" <<EOF
 
 ## 🔴 COMMAND CENTER UPDATE PENDING
@@ -1556,7 +1583,7 @@ BlackCEO Command Center was updated from ${OLD_VERSION:-unknown} to ${NEW_VERSIO
 Read \`$INSTALL_DIR/CHANGELOG.md\` (top entry) and:
 1. Verify the app is running (curl http://localhost:4000/api/health or check pm2 status)
 2. Run any SQL migrations if the changelog mentions schema changes
-3. Tell the owner: "Command Center updated to ${NEW_VERSION}. [list any items that need owner action]"
+${OWNER_STEP}
 4. Remove this section from AGENTS.md when complete
 
 Backup of pre-update state: $BACKUP_DIR
@@ -1579,10 +1606,15 @@ echo "  Next steps:"
 echo "    1. Verify the app is responsive (curl /api/health if endpoint exists)"
 echo "    2. Tell your agent: 'Process the COMMAND CENTER UPDATE PENDING section in my AGENTS.md'"
 echo ""
+if [ "$CC_HEALTH_UNKNOWN" -eq 1 ]; then
+  # Health was never confirmed: this is NOT an update the caller may count as done.
+  _cc_write_result FAILED "atomic deploy health unknown (exit 3): new build swapped in, health not confirmed, not rolled back"
+  echo "  ✗ Health not confirmed after deploy — reporting FAILED so the caller repairs or rolls back."
+  exit 1
+fi
 if [ "${CC_RESULT_COMMIT_BEFORE:-}" = "$(git -C "$INSTALL_DIR" rev-parse HEAD 2>/dev/null || true)" ] \
    && [ "${CC_RESULT_BEFORE:-}" = "${NEW_VERSION:-}" ]; then
   _cc_write_result CURRENT "already on the latest release"
 else
   _cc_write_result UPDATED "updated"
 fi
-box_update_lock_release 2>/dev/null || true

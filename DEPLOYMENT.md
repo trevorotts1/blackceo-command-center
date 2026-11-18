@@ -198,14 +198,31 @@ auto-update contract for the lock and the status beacon.
   helper `<openclaw root>/scripts/box-update-lock.sh` (override
   `CC_BOX_UPDATE_LOCK_LIB`). If the helper is not on the box yet the run warns
   and continues, because there is nothing to serialize against.
-- **Report for the beacon:** every run prints one line, `CC_UPDATE_RESULT {json}`,
-  and writes the same JSON to `$CC_UPDATE_RESULT_FILE` when that is set. Schema
-  `cc-update-result/1`: `status` (`CURRENT`, `UPDATED`, `DEFERRED` or `FAILED`),
-  `before` and `after` (the `version` file), `commit_before`, `commit_after`,
-  `detail`. The auto-update beacon uses `before` and `after` for
-  `versions.command_center`.
-- **Exit codes:** 0 done (current or updated), 75 deferred because another
-  updater holds the lock, anything else failed.
+- **How the beacon gets the Command Center versions:** once `update.sh` has
+  resolved the install location (the failures before that point write no
+  result), it ends with exactly one line, `CC_UPDATE_RESULT {json}`, on its own
+  stdout, and writes the same JSON to the file named by `CC_UPDATE_RESULT_FILE`
+  when that variable is set. The auto-update run must set that variable (or
+  capture the line); a caller that does neither only has the log and the
+  `version` file. Schema `cc-update-result/1`: `status` (`CURRENT`, `UPDATED`,
+  `DEFERRED` or `FAILED`), `before` and `after` (the `version` file),
+  `commit_before`, `commit_after`, `detail`. The beacon's
+  `versions.command_center.before` and `.after` come from `before` and `after`.
+- **Exit codes:** 0 current or updated; 75 deferred because another updater
+  holds the lock; anything else failed. An aborted run (including a `set -e`
+  abort) is reported `FAILED`.
+- **Health unknown is a failure:** when `atomic-deploy.sh` exits 3 (the new
+  build is swapped in but health was never confirmed, and it was not rolled
+  back) `update.sh` reports `FAILED` with that detail and exits 1, never
+  `UPDATED`, so the caller repairs or rolls back.
+- **No client message from this repo:** under the scheduled auto-update (run id
+  `auto-update-...`) the `AGENTS.md` update note does NOT tell the agent to
+  message the owner; the client receives only the 2:15 AM notice and the cancel
+  reply. A manual run keeps the "tell the owner" step.
+- **Lock hygiene:** the lease is released by the single EXIT cleanup, after any
+  node_modules restore, and the lock's flock file descriptor (fd 9) is closed
+  for `atomic-deploy.sh` and every `pm2` call, so a pm2 daemon started during
+  the update cannot hold the lock after the run ends.
 
 ### What proves success
 
