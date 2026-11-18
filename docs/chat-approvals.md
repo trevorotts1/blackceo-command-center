@@ -15,21 +15,23 @@ The owner can approve from three places: the Command Center page (`/approvals/<r
 
 `webchat` refs are `webchat:<session_id>:<entry_id>`. Success (200) returns the request with `status` (`approved` or `changes_requested`) and, on approve, `approval_id` (the value for `CAF_APPROVAL_ID`). A repeat of the same message returns the same `approval_id` with `replayed: true`.
 
-Failure is 400 (bad body), 403 or 409, as `{ "error": "<code>", "detail": "<sentence the agent can relay>" }`, and nothing is minted. Codes: `message_not_found`, `inbound_record_unavailable`, `owner_not_registered`, `not_from_owner`, `sender_is_bot`, `message_before_request`, `request_expired`, `text_not_a_decision`, `text_does_not_match_decision`, `ambiguous_request`, `message_for_other_request`, `message_already_used`, `request_not_pending`.
+Failure is 400 (bad body), 403 or 409, as `{ "error": "<code>", "detail": "<sentence the agent can relay>" }`, and nothing is minted. Codes: `message_not_found`, `inbound_record_unavailable`, `owner_not_registered`, `not_from_owner`, `sender_is_bot`, `message_before_request`, `request_expired`, `text_not_a_decision`, `text_does_not_match_decision`, `ambiguous_request`, `message_for_other_request`, `message_already_used`, `request_not_pending`, `amount_not_shown` (a budget reply that does not show the amount).
 
 `GET /api/approval-requests/<id>` also returns `short_code` (first 6 characters of `request_id`) and `approve_by: ["command_center","telegram","chat_app"]`.
 
-A spending budget is registered as `kind: "paid_asset_budget"` with `cap_minor` (cents) and `currency`. Approving it by chat or on the page mints the launch approval with that same cap, and the page shows the spending limit.
+A spending budget is registered as `kind: "paid_asset_budget"` with `cap_minor` (minor units, e.g. cents) and `currency`. Approving it by chat or on the page mints the launch approval with that same cap, and the page shows the spending limit. A chat approval of a budget must show the amount: the agent's approval message states it (for example `Picture budget: $25.00 USD. Code: <short_code>`) and the owner replies to that message, or the owner's own words contain the amount. An inline button and the "only pending request" shortcut never approve a budget; both are refused with `amount_not_shown`.
 
 ## What Command Center checks itself (never the agent's claim)
 
 It reads the owner's message from the gateway's own record, read-only: Telegram from `openclaw.sqlite` (`plugin_state_entries`, namespace `telegram.message-cache`, key `<botHash>:<account>:<chatId>:<messageId>`; directory from `OPENCLAW_STATE_DIR`, else `~/.openclaw/state`, or `/data/.openclaw/state` on VPS); webchat from the session transcript `agents/<agent>/sessions/<session>.jsonl`. Then it requires all of:
 
-1. the message exists; 2. its chat and sender are the registered owner chat (`resolveOwnerChatId()`); 3. the sender is not a bot; 4. it was sent after the request was created and before it expired; 5. its words are a clear English yes (approve, yes, ok, looks good, go, thumbs up) or a clear change request, matching the claimed decision; 6. it is bound to this request: a reply to the agent's approval message carrying this request's code, or text containing the 6-character code, or an inline-button callback naming the full request id, or this is the owner's only pending request.
+1. the message exists; 2. its chat and sender are the registered owner chat (`resolveOwnerChatId()`); 3. the sender is not a bot; 4. it was sent after the request was created and before it expired; 5. its words are a clear English yes (approve, yes, ok, looks good, go, thumbs up) or a clear change request, matching the claimed decision; 6. it is bound to this request: a reply to the agent's approval message carrying this request's code, or text containing the 6-character code, or an inline-button callback naming the full request id, or this is the owner's only pending request. For a `paid_asset_budget` request only the first two count, and the amount must also appear in the quoted message or the owner's words.
 
 The agent must put `Code: <short_code>` in every approval message it sends.
 
 ## Telegram inline buttons
+
+Buttons are for `automation_write` and `publish` only. Never send buttons for a `paid_asset_budget` request: a click carries no amount and is refused. Ask the owner to reply to the message that states the amount.
 
 `openclaw message send --channel telegram --presentation '<json>'` supports `buttons` blocks (verified in the OpenClaw 2026.11 CLI help and `docs/channels/telegram/rich-messages.md`). A callback click is delivered to the agent as an owner message with the text `callback_data: <value>`. Use the value `apr:<request_id>:<approve|changes>`:
 
