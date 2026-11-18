@@ -276,6 +276,21 @@ describe('Telegram approval of a budget', () => {
     expect(out.status).toBe(200);
   });
 
+  it('refuses an inline button for a budget: a button carries no amount', async () => {
+    const made = await budget();
+    const out = await chat(made.request_id, tg('approve', cacheMessage({ text: `callback_data: apr:${made.request_id}:approve` })));
+    expect(out.status).toBe(409);
+    expect(out.json.error).toBe('amount_not_shown');
+  });
+
+  it('refuses "$25.00 not ok" replying to the bot amount message: negation survives the amount', async () => {
+    const made = await budget();
+    const mid = cacheMessage({ text: '$25.00 not ok', replyTo: { id: 3, fromBot: true, text: `Picture budget: $25.00 USD. Code: ${made.short_code}` } });
+    const out = await chat(made.request_id, tg('approve', mid));
+    expect(out.status).toBe(409);
+    expect(out.json.error).toBe('text_not_a_decision');
+  });
+
   it('refuses a bare "ok" even as the only pending request, and a reply whose bot message shows a different amount', async () => {
     const made = await budget();
     const before = approvals();
@@ -285,6 +300,24 @@ describe('Telegram approval of a budget', () => {
     const wrong = await chat(made.request_id, tg('approve', cacheMessage({ text: 'ok', replyTo: { id: 2, fromBot: true, text: `Budget $2.50. Code: ${made.short_code}` } })));
     expect(wrong.json.error).toBe('amount_not_shown');
     expect(approvals()).toBe(before);
+  });
+});
+
+describe('reading the owner words around an amount', () => {
+  const ID = '0123456789abcdef0123456789abcdef0123';
+  it('sets aside only this request amount and never hides negation', async () => {
+    const { interpretOwnerText } = await import('../../src/lib/chat-approvals');
+    const read = (t: string, amount: string | null = '$25.00', ccy: string | null = 'USD') => interpretOwnerText(t, ID, amount, ccy).meaning;
+    expect(read('$25.00 not ok')).toBe('unclear');
+    expect(read('2500 not approved')).toBe('unclear');
+    expect(read('ok 25 not 250')).toBe('unclear');
+    expect(read('yes 100 nah')).toBe('changes');
+    expect(read('$25.00 not ok', null, null)).toBe('unclear');
+    expect(read('approve $25.00')).toBe('approve');
+    expect(read('approve $25.00 USD')).toBe('approve');
+    expect(read('approve $25')).toBe('unclear');
+    expect(read('approve $2,500.00', '$2,500.00')).toBe('approve');
+    expect(read('approve $2500.00', '$2,500.00')).toBe('approve');
   });
 });
 

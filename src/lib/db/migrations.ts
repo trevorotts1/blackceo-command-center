@@ -8763,6 +8763,9 @@ export const migrations: Migration[] = [
         db.exec(`DROP TABLE IF EXISTS ${SCRATCH}`);
         db.exec(`CREATE TABLE ${SCRATCH} AS SELECT ${list} FROM approval_requests`);
         if (count(SCRATCH) !== before) throw new Error('[Migration 181] approval_requests copy lost rows; original kept');
+        // A child table pointing here must not block the drop: the same rows come
+        // back under the same keys before the transaction commits.
+        db.pragma('defer_foreign_keys = ON');
         db.exec('DROP TABLE approval_requests');
         db.exec(widened);
         db.exec(`INSERT INTO approval_requests (${list}) SELECT ${list} FROM ${SCRATCH}`);

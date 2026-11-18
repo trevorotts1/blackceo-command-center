@@ -49,12 +49,19 @@ const CHANGE_WORDS = new Set(['change', 'changes', 'edit', 'revise', 'redo', 'fi
 const APPROVE_CORE = new Set(['approve', 'approved', 'yes', 'yep', 'yeah', 'y', 'ok', 'okay', 'k', 'sure', 'go', 'good', 'great', 'perfect', 'lgtm', 'confirm', 'confirmed', '👍', '✅', '👌']);
 const APPROVE_FILLER = new Set(['it', 'this', 'that', 'please', 'thanks', 'thank', 'you', 'do', 'the', 'plan', 'and', 'ahead', 'looks', 'sounds', 'all', 'right', 'is', 'its', "it's", 'i', 'send', 'publish', 'post', 'ship', 'proceed', 'now', 'them', 'these', 'code']);
 
-function tokens(text: string, code: string): string[] {
-  return text
-    .toLowerCase()
-    .replace(new RegExp(`\\b${code}\\b`, 'gi'), ' ')
-    // An amount the owner restates ("approve $25.00") is not a word to judge.
-    .replace(/\p{Sc}?\s?\d[\d,]*(?:\.\d+)?(?:\s?[a-z]{3})?/gu, ' ')
+const escapeRe = (t: string) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+function tokens(text: string, code: string, amount: string | null, currency: string | null): string[] {
+  let t = text.toLowerCase().replace(new RegExp(`\\b${code}\\b`, 'gi'), ' ');
+  // Only THIS request's own amount ("$25.00", optionally "USD") is set aside so
+  // a restated amount is not judged as a word. Every other word stays,
+  // including "not", "nah" and "now", so negation is never hidden.
+  if (amount) {
+    const flexible = escapeRe(amount.toLowerCase()).replace(/\s+/g, '\\s*').replace(/,/g, ',?');
+    const ccy = currency ? `(?:\\s*${escapeRe(currency.toLowerCase())}\\b)?` : '';
+    t = t.replace(new RegExp(`${flexible}${ccy}`, 'gu'), ' ');
+  }
+  return t
     .replace(/[^\p{L}\p{N}\p{Extended_Pictographic}'’✅]+/gu, ' ')
     .replace(/’/g, "'")
     .split(/\s+/)
@@ -62,10 +69,12 @@ function tokens(text: string, code: string): string[] {
 }
 
 /** What the owner's words mean. `callback` carries the full request id from an inline button. */
-export function interpretOwnerText(text: string, requestId: string): { meaning: 'approve' | 'changes' | 'unclear'; callbackFor: string | null } {
+export function interpretOwnerText(
+  text: string, requestId: string, amount: string | null = null, currency: string | null = null,
+): { meaning: 'approve' | 'changes' | 'unclear'; callbackFor: string | null } {
   const cb = /^\s*(?:callback_data:\s*)?apr:([0-9a-f-]{36}):(approve|changes)\s*$/i.exec(text);
   if (cb) return { meaning: cb[2].toLowerCase() === 'approve' ? 'approve' : 'changes', callbackFor: cb[1].toLowerCase() };
-  const toks = tokens(text, shortCodeOf(requestId));
+  const toks = tokens(text, shortCodeOf(requestId), amount, currency);
   if (toks.length === 0 || toks.length > 14) return { meaning: 'unclear', callbackFor: null };
   if (toks.some((t) => CHANGE_WORDS.has(t))) return { meaning: 'changes', callbackFor: null };
   if (toks.some((t) => NEGATION.has(t))) return { meaning: 'unclear', callbackFor: null };
@@ -105,7 +114,8 @@ function parseBody(input: unknown): Parsed | RequestResult {
 
 /**
  * A money approval must be one the owner could read: the amount has to appear in
- * the bot message they answered (reply or button) or in their own words. The
+ * the bot message they replied to or in their own words (an inline button
+ * carries no amount, so it cannot approve money). The
  * agent alone sets the cap, so a bare "ok" never approves an amount unseen.
  */
 function showsAmount(row: Row, msg: InboundMessage): boolean {
@@ -123,7 +133,7 @@ function bind(row: Row, msg: InboundMessage, callbackFor: string | null, ownerPe
     return {
       ok: false,
       res: refuse(409, 'amount_not_shown',
-        `A spending approval must show the amount. Send the owner a message stating ${capAmountText(row.cap_minor, row.currency)} and code ${code}, and have them reply to it or tap its button.`),
+        `A spending approval must show the amount. Send the owner a message stating ${capAmountText(row.cap_minor, row.currency)} and code ${code}, and have them reply to that message.`),
     };
   }
   if (callbackFor) {
@@ -203,7 +213,7 @@ export function decideApprovalFromChat(ctx: TenantContext, requestId: string, in
   if (msg.sentAtMs > Date.now() + SKEW_MS) return refuse(403, 'message_in_future', 'That message is dated in the future.');
 
   // 5: the words.
-  const said = interpretOwnerText(msg.text, requestId);
+  const said = interpretOwnerText(msg.text, requestId, capAmountText(row0.cap_minor, row0.currency), row0.currency);
   if (said.meaning === 'unclear') {
     return refuse(409, 'text_not_a_decision', 'That message is not a clear yes or a clear change request. Ask the owner to reply "approve" or describe the changes.');
   }
