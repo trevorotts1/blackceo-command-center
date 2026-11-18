@@ -306,7 +306,9 @@ jobs:
         # honestly (EXPORT_FORMAT_NOT_READY) when no browser executable
         # exists, so without this step those tests can only ever fail in
         # CI. Chromium only: the PDF renderer launches no other browser.
-        run: npx playwright install --with-deps chromium
+        uses: ./.github/actions/playwright-install
+        with:
+          browsers: "chromium"
 
       - name: Install poppler-utils (council PDF tests inspect rendered PDFs)
         # The same council PDF tests also shell out to poppler's pdfinfo
@@ -947,8 +949,13 @@ jobs:
         # Chromium covers the desktop + Pixel 7 projects; WebKit covers the
         # iPhone 15 project. --with-deps pulls the apt libs the runner is
         # missing so the browsers launch.
-        run: npx playwright install --with-deps chromium webkit
-        timeout-minutes: 10
+        uses: ./.github/actions/playwright-install
+        with:
+          # Only the browser this matrix project drives: chromium-desktop and
+          # chromium-pixel7 never launch WebKit, and WebKit's OS libraries are the
+          # bulk of the apt download that stalls on a slow mirror.
+          browsers: ${{ startsWith(matrix.project, 'webkit') && 'webkit' || 'chromium' }}
+        timeout-minutes: 20
 
       - name: Build production interview fixture
         env:

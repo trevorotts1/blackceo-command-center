@@ -1,0 +1,27 @@
+name: Install Playwright browsers
+description: >
+  Caches the Playwright browser binaries (keyed on the installed Playwright
+  version and the browser list) and installs the OS libraries with apt retries,
+  a per-attempt timeout and an install-only retry. Never retries a test.
+inputs:
+  browsers:
+    description: Space separated browser names, for example "chromium webkit"
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Resolve Playwright version
+      id: ver
+      shell: bash
+      run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+    - name: Cache Playwright browser binaries
+      id: cache
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/ms-playwright
+        key: playwright-${{ runner.os }}-${{ steps.ver.outputs.version }}-${{ inputs.browsers }}
+    - name: Install OS libraries and browsers (retrying the install only)
+      shell: bash
+      env:
+        BROWSER_CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+      run: bash "${{ github.workspace }}/.github/scripts/playwright-install.sh" ${{ inputs.browsers }}
