@@ -30,7 +30,7 @@ import { queryAll, queryOne, run, transaction } from '@/lib/db';
 import type { TenantContext } from '@/lib/auth/tenant-context';
 import { resolveOwnerChatId } from '@/lib/notify';
 import { PLAN_HASH_RE, OWNER_REQUEST_REF_PREFIX } from '@/lib/launch-approvals';
-import { approvalExpiry, shortCodeOf, toRequest, type Row, type RequestResult } from '@/lib/approval-requests';
+import { approvalExpiry, capAmountText, shortCodeOf, toRequest, type Row, type RequestResult } from '@/lib/approval-requests';
 import { readTelegramInbound, readWebchatInbound, type InboundMessage } from '@/lib/gateway-inbound';
 
 export const CHAT_CHANNELS = ['telegram', 'webchat'] as const;
@@ -49,10 +49,19 @@ const CHANGE_WORDS = new Set(['change', 'changes', 'edit', 'revise', 'redo', 'fi
 const APPROVE_CORE = new Set(['approve', 'approved', 'yes', 'yep', 'yeah', 'y', 'ok', 'okay', 'k', 'sure', 'go', 'good', 'great', 'perfect', 'lgtm', 'confirm', 'confirmed', '👍', '✅', '👌']);
 const APPROVE_FILLER = new Set(['it', 'this', 'that', 'please', 'thanks', 'thank', 'you', 'do', 'the', 'plan', 'and', 'ahead', 'looks', 'sounds', 'all', 'right', 'is', 'its', "it's", 'i', 'send', 'publish', 'post', 'ship', 'proceed', 'now', 'them', 'these', 'code']);
 
-function tokens(text: string, code: string): string[] {
-  return text
-    .toLowerCase()
-    .replace(new RegExp(`\\b${code}\\b`, 'gi'), ' ')
+const escapeRe = (t: string) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+function tokens(text: string, code: string, amount: string | null, currency: string | null): string[] {
+  let t = text.toLowerCase().replace(new RegExp(`\\b${code}\\b`, 'gi'), ' ');
+  // Only THIS request's own amount ("$25.00", optionally "USD") is set aside so
+  // a restated amount is not judged as a word. Every other word stays,
+  // including "not", "nah" and "now", so negation is never hidden.
+  if (amount) {
+    const flexible = escapeRe(amount.toLowerCase()).replace(/\s+/g, '\\s*').replace(/,/g, ',?');
+    const ccy = currency ? `(?:\\s*${escapeRe(currency.toLowerCase())}\\b)?` : '';
+    t = t.replace(new RegExp(`${flexible}${ccy}`, 'gu'), ' ');
+  }
+  return t
     .replace(/[^\p{L}\p{N}\p{Extended_Pictographic}'’✅]+/gu, ' ')
     .replace(/’/g, "'")
     .split(/\s+/)
@@ -60,10 +69,12 @@ function tokens(text: string, code: string): string[] {
 }
 
 /** What the owner's words mean. `callback` carries the full request id from an inline button. */
-export function interpretOwnerText(text: string, requestId: string): { meaning: 'approve' | 'changes' | 'unclear'; callbackFor: string | null } {
+export function interpretOwnerText(
+  text: string, requestId: string, amount: string | null = null, currency: string | null = null,
+): { meaning: 'approve' | 'changes' | 'unclear'; callbackFor: string | null } {
   const cb = /^\s*(?:callback_data:\s*)?apr:([0-9a-f-]{36}):(approve|changes)\s*$/i.exec(text);
   if (cb) return { meaning: cb[2].toLowerCase() === 'approve' ? 'approve' : 'changes', callbackFor: cb[1].toLowerCase() };
-  const toks = tokens(text, shortCodeOf(requestId));
+  const toks = tokens(text, shortCodeOf(requestId), amount, currency);
   if (toks.length === 0 || toks.length > 14) return { meaning: 'unclear', callbackFor: null };
   if (toks.some((t) => CHANGE_WORDS.has(t))) return { meaning: 'changes', callbackFor: null };
   if (toks.some((t) => NEGATION.has(t))) return { meaning: 'unclear', callbackFor: null };
@@ -101,8 +112,30 @@ function parseBody(input: unknown): Parsed | RequestResult {
   };
 }
 
+/**
+ * A money approval must be one the owner could read: the amount has to appear in
+ * the bot message they replied to or in their own words (an inline button
+ * carries no amount, so it cannot approve money). The
+ * agent alone sets the cap, so a bare "ok" never approves an amount unseen.
+ */
+function showsAmount(row: Row, msg: InboundMessage): boolean {
+  const amount = capAmountText(row.cap_minor, row.currency);
+  if (!amount) return true;
+  const norm = (t: string) => t.replace(/[\s,]/g, '');
+  const want = norm(amount);
+  const seen = [msg.text, msg.replyTo?.senderIsBot ? msg.replyTo.text : ''];
+  return seen.some((t) => norm(t).includes(want));
+}
+
 function bind(row: Row, msg: InboundMessage, callbackFor: string | null, ownerPendingIds: string[]): { ok: true } | { ok: false; res: RequestResult } {
   const code = shortCodeOf(row.request_id);
+  if (row.kind === 'paid_asset_budget' && !showsAmount(row, msg)) {
+    return {
+      ok: false,
+      res: refuse(409, 'amount_not_shown',
+        `A spending approval must show the amount. Send the owner a message stating ${capAmountText(row.cap_minor, row.currency)} and code ${code}, and have them reply to that message.`),
+    };
+  }
   if (callbackFor) {
     return callbackFor === row.request_id.toLowerCase()
       ? { ok: true }
@@ -116,7 +149,7 @@ function bind(row: Row, msg: InboundMessage, callbackFor: string | null, ownerPe
     }
   }
   if (hasCode(msg.text, code)) return { ok: true };
-  if (ownerPendingIds.length === 1 && ownerPendingIds[0] === row.request_id) return { ok: true };
+  if (row.kind !== 'paid_asset_budget' && ownerPendingIds.length === 1 && ownerPendingIds[0] === row.request_id) return { ok: true };
   return {
     ok: false,
     res: refuse(409, 'ambiguous_request',
@@ -180,7 +213,7 @@ export function decideApprovalFromChat(ctx: TenantContext, requestId: string, in
   if (msg.sentAtMs > Date.now() + SKEW_MS) return refuse(403, 'message_in_future', 'That message is dated in the future.');
 
   // 5: the words.
-  const said = interpretOwnerText(msg.text, requestId);
+  const said = interpretOwnerText(msg.text, requestId, capAmountText(row0.cap_minor, row0.currency), row0.currency);
   if (said.meaning === 'unclear') {
     return refuse(409, 'text_not_a_decision', 'That message is not a clear yes or a clear change request. Ask the owner to reply "approve" or describe the changes.');
   }
@@ -233,8 +266,9 @@ export function decideApprovalFromChat(ctx: TenantContext, requestId: string, in
       run(
         `INSERT INTO launch_approvals (approval_id, tenant_id, client_identity_ref, kind, plan_hash, scope,
            cap_minor, currency, expires_at, revoked, source_message_ref, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, 0, ?, ?)`,
-        [approvalId, ctx.tenantId, identity, row.kind, `sha256:${digest}`, scope, approvalExpiry(row, nowMs), ref, nowIso],
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+        [approvalId, ctx.tenantId, identity, row.kind, `sha256:${digest}`, scope, row.cap_minor ?? null, row.currency ?? null,
+          approvalExpiry(row, nowMs), ref, nowIso],
       );
       run(
         `UPDATE approval_requests SET status = 'approved', decided_at = ?, decided_by = ?, decision_note = ?, approval_id = ?

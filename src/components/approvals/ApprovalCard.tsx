@@ -1,5 +1,5 @@
 import Link from 'next/link';
-import type { ApprovalRequest } from '@/lib/approval-requests';
+import { formatCap, type ApprovalRequest } from '@/lib/approval-requests';
 import { ApprovalPreview } from './ApprovalPreview';
 import { DecisionButtons } from './DecisionButtons';
 
@@ -11,6 +11,7 @@ const STATUS_LABEL: Record<ApprovalRequest['status'], string> = {
 };
 
 export function ApprovalCard({ item, detail }: { item: ApprovalRequest; detail?: boolean }) {
+  const budget = formatCap(item.cap_minor, item.currency);
   return (
     <section className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm" data-testid="approval-card">
       <div className="flex flex-wrap items-start justify-between gap-2">
@@ -19,6 +20,11 @@ export function ApprovalCard({ item, detail }: { item: ApprovalRequest; detail?:
         </h2>
         <span className="rounded-full bg-gray-100 px-3 py-1 text-xs font-medium text-gray-700">{STATUS_LABEL[item.status]}</span>
       </div>
+      {budget ? (
+        <p className="mt-3 rounded-lg bg-emerald-50 border border-emerald-200 p-3 text-base font-semibold text-emerald-900" data-testid="approval-budget">
+          Spending limit: {budget}
+        </p>
+      ) : null}
       <p className="mt-2 text-gray-700 whitespace-pre-wrap">{item.summary}</p>
       <ApprovalPreview preview={item.preview} />
       {item.status === 'pending' ? <DecisionButtons requestId={item.request_id} /> : null}
