@@ -38,6 +38,8 @@ jobs:
           node --import tsx --test tests/unit/council-mobile-layout-contract.test.ts tests/unit/council-room-logic.test.ts
           npx vitest run --config vitest.component.config.ts tests/unit/council-room-render.test.tsx
       - name: Install browser for real layout regression
-        run: npx playwright install --with-deps chromium
+        uses: ./.github/actions/playwright-install
+        with:
+          browsers: "chromium"
       - name: Verify Council browser geometry
         run: node tests/browser/council-frame-geometry.mjs

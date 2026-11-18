@@ -40,6 +40,12 @@ jobs:
           set -euo pipefail
           bash scripts/update-lock-and-report.test.sh
 
+      - name: Run the Playwright install retry suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/playwright-install.test.sh
+
   route-tests:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     name: Version route commit tests
