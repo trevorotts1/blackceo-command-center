@@ -8723,6 +8723,71 @@ export const migrations: Migration[] = [
       console.log('[Migration 180] owner_questions ready');
     },
   },
+
+  {
+    id: '181',
+    name: 'approval_requests_paid_asset_budget',
+    up: (db) => {
+      // The owner approvals inbox learns the money kind: a paid_asset_budget
+      // request carries the cap the owner is approving (cap_minor + currency),
+      // and approving it mints a launch approval carrying that same cap.
+      // SQLite cannot widen a CHECK in place, so the table is rebuilt only when
+      // the kind is not yet allowed. Every row and column already present is
+      // copied, so a box that grew extra columns locally keeps them.
+      console.log('[Migration 181] approval_requests: paid_asset_budget...');
+      const table = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'approval_requests'").get() as { sql: string } | undefined;
+      if (!table) throw new Error('[Migration 181] approval_requests missing; migration 179 must run first');
+      const cols = (db.prepare('PRAGMA table_info(approval_requests)').all() as { name: string }[]).map((c) => c.name);
+      if (!cols.includes('cap_minor')) db.exec('ALTER TABLE approval_requests ADD COLUMN cap_minor INTEGER');
+      if (!cols.includes('currency')) db.exec('ALTER TABLE approval_requests ADD COLUMN currency TEXT');
+      if (!table.sql.includes("'paid_asset_budget'")) {
+        // Copy out and back, never ALTER ... RENAME: a rename makes SQLite
+        // re-check every trigger in the schema, so one stale unrelated trigger
+        // would fail the whole boot (same reason migration 147 copies).
+        const all = (db.prepare('PRAGMA table_info(approval_requests)').all() as { name: string }[]).map((c) => c.name);
+        const list = all.map((c) => `"${c}"`).join(', ');
+        const current = (db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'approval_requests'").get() as { sql: string }).sql;
+        // Match the kind CHECK whatever spacing or quoting the box stored it with.
+        const widened = current.replace(
+          /(kind\s+IN\s*\(\s*'automation_write'\s*,\s*'publish')(\s*\))/i,
+          "$1,'paid_asset_budget'$2",
+        );
+        if (!widened.includes("'paid_asset_budget'")) throw new Error('[Migration 181] could not locate the approval_requests kind CHECK');
+        // Indexes and triggers a box added itself are recreated after the rebuild.
+        const extras = (db.prepare(
+          "SELECT sql FROM sqlite_master WHERE tbl_name = 'approval_requests' AND type IN ('index','trigger') AND sql IS NOT NULL",
+        ).all() as { sql: string }[]).map((r) => r.sql);
+        const SCRATCH = 'approval_requests_scratch181';
+        const count = (t: string) => (db.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get() as { n: number }).n;
+        const before = count('approval_requests');
+        db.exec(`DROP TABLE IF EXISTS ${SCRATCH}`);
+        db.exec(`CREATE TABLE ${SCRATCH} AS SELECT ${list} FROM approval_requests`);
+        if (count(SCRATCH) !== before) throw new Error('[Migration 181] approval_requests copy lost rows; original kept');
+        // A child table that deletes with its parent would lose rows at the
+        // drop (deferring only postpones the check), so refuse loudly instead;
+        // nothing references approval_requests today.
+        const children = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[])
+          .filter((t) => (db.prepare(`PRAGMA foreign_key_list("${t.name}")`).all() as { table: string; on_delete: string }[])
+            .some((fk) => fk.table === 'approval_requests' && /CASCADE|SET NULL|SET DEFAULT/i.test(fk.on_delete)))
+          .map((t) => t.name);
+        if (children.length) throw new Error(`[Migration 181] ${children.join(', ')} would lose rows when approval_requests is rebuilt; migrate them first`);
+        // A plain child pointing here must not block the drop: the same rows come
+        // back under the same keys before the transaction commits.
+        db.pragma('defer_foreign_keys = ON');
+        db.exec('DROP TABLE approval_requests');
+        db.exec(widened);
+        db.exec(`INSERT INTO approval_requests (${list}) SELECT ${list} FROM ${SCRATCH}`);
+        if (count('approval_requests') !== before) throw new Error('[Migration 181] approval_requests restore lost rows');
+        db.exec(`DROP TABLE ${SCRATCH}`);
+        for (const sql of extras) db.exec(sql.replace(/^CREATE\s+(UNIQUE\s+)?(INDEX|TRIGGER)\s+(?!IF NOT EXISTS)/i, (m) => `${m}IF NOT EXISTS `));
+      }
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_approval_requests_status ON approval_requests(tenant_id, status, created_at);
+        CREATE INDEX IF NOT EXISTS idx_approval_requests_plan ON approval_requests(tenant_id, kind, location_id, action, object_key, plan_sha256);
+      `);
+      console.log('[Migration 181] approval_requests paid_asset_budget ready');
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner

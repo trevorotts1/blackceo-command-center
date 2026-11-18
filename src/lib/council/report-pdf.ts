@@ -333,6 +333,28 @@ export async function renderCouncilReportPdf(
       `PDF render failed: ${err instanceof Error ? err.message : String(err)}`,
     );
   } finally {
-    if (browser) await browser.close().catch(() => undefined);
+    if (browser) await closeBrowserBounded(browser);
   }
+}
+
+/** How long a finished render waits for Chromium to exit before moving on. */
+const BROWSER_CLOSE_WAIT_MS = 2_000;
+
+/**
+ * The PDF bytes are complete before teardown, so a slow Chromium exit (seconds
+ * on a loaded host) must not hold the response. Wait briefly for a clean
+ * close; past that, return and let the close finish in the background. The
+ * Playwright Browser exposes no process handle, so nothing here kills it.
+ */
+async function closeBrowserBounded(browser: Browser): Promise<void> {
+  const closed = browser.close().then(() => true, () => true);
+  // A normal (ref'd) timer, cleared once settled: unref'ing it lets the event
+  // loop look idle while the race is pending, and Node's test runner then
+  // cancels the caller ("event loop has already resolved").
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = new Promise<boolean>((resolve) => {
+    timer = setTimeout(() => resolve(false), BROWSER_CLOSE_WAIT_MS);
+  });
+  await Promise.race([closed, timedOut]);
+  clearTimeout(timer);
 }

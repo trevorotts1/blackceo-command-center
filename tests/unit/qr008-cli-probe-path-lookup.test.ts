@@ -128,6 +128,11 @@ test('QR-008: the measured box case — ~/bin resolves under pm2-shaped minimal 
     // by the fixture test above regardless of what is installed here.
     return;
   }
+  // The fixed directories are searched first by design, so a box that ALSO has
+  // adb there (Homebrew's android-platform-tools) resolves to that copy. This
+  // case is only about ~/bin being the sole home; skip honestly otherwise.
+  const fixedFirst = [path.join(HOME, '.local', 'bin'), '/opt/homebrew/bin', '/usr/local/bin', path.join(HOME, '.npm-global', 'bin')];
+  if (fixedFirst.some((d) => fs.existsSync(path.join(d, 'adb')))) return;
   // The login shell is a deterministic stub that prints the PATH a real
   // interactive login shell would (with ~/bin). Spawning the operator's real
   // `$SHELL -lic` made this test depend on rc-file speed: under a loaded full
