@@ -40,7 +40,15 @@ exec 1> >(tee -a "$LOG_FILE") 2>&1
 step() { echo ""; echo "━━━ $1 ━━━"; }
 success() { echo "  ✓ $1"; }
 warn() { echo "  ⚠ $1"; }
-fatal() { echo "  ✗ ERROR: $1"; exit 1; }
+# fatal also writes the machine-readable result (status FAILED) and releases the
+# shared update lease. Both helpers are defined further down; the `type` guards
+# keep fatal usable before they exist (early failures, before the lock).
+fatal() {
+  echo "  ✗ ERROR: $1"
+  if type _cc_write_result >/dev/null 2>&1; then _cc_write_result FAILED "$1" || true; fi
+  if type box_update_lock_release >/dev/null 2>&1; then box_update_lock_release || true; fi
+  exit 1
+}
 
 # ----------------------------------------------------------
 # Detect install location
@@ -325,6 +333,81 @@ if [ -z "${CC_APP_DIR:-}" ]; then
 fi
 
 cd "$INSTALL_DIR"
+
+# ----------------------------------------------------------
+# Shared box update lock + machine-readable result (auto-update contract)
+# ----------------------------------------------------------
+# Tuesday/Friday/Sunday auto-update and the operator fleet roll serialize on ONE
+# lease file (default /tmp/openclaw-update.lock; override OPENCLAW_UPDATE_LEASE).
+# The helper is the onboarding repo's scripts/box-update-lock.sh, delivered to
+# <openclaw root>/scripts/ on every box and SOURCED here, never copied.
+#   - launched by the auto-update run (run-full-install.sh --update-only or
+#     atomic-deploy.sh): the lease is inherited from the live ancestor, so the
+#     update proceeds with no re-acquire;
+#   - run standalone while another writer holds it: refuse, change NOTHING, exit
+#     75 (DEFERRED). Waiting and retrying belong to the caller, not to this script.
+# A box whose onboarding helper has not been delivered yet cannot be serialized;
+# that is warned about and the run proceeds (the helper arrives with the update).
+#
+# Result: one line `CC_UPDATE_RESULT {json}` on stdout and, when
+# CC_UPDATE_RESULT_FILE is set, the same JSON in that file. Schema
+# cc-update-result/1: status CURRENT|UPDATED|DEFERRED|FAILED, version before and
+# after, commit before and after, detail. The auto-update beacon reads it for
+# versions.command_center. Exit codes: 0 done, 75 deferred, anything else failed.
+CC_RESULT_BEFORE="$(tr -d '[:space:]' < version 2>/dev/null || true)"
+CC_RESULT_COMMIT_BEFORE="$(git rev-parse HEAD 2>/dev/null || true)"
+
+_cc_json_escape() {
+  printf '%s' "$1" | python3 -c 'import json,sys; sys.stdout.write(json.dumps(sys.stdin.read())[1:-1])' 2>/dev/null \
+    || printf '%s' "$1" | tr -d '"\\\n\r'
+}
+
+# $1 status  $2 detail (optional). Never fails the caller.
+_cc_write_result() {
+  local status="$1" detail="${2:-}" after commit_after json
+  after="$(tr -d '[:space:]' < "$INSTALL_DIR/version" 2>/dev/null || true)"
+  commit_after="$(git -C "$INSTALL_DIR" rev-parse HEAD 2>/dev/null || true)"
+  json="$(printf '{"schema":"cc-update-result/1","status":"%s","before":"%s","after":"%s","commit_before":"%s","commit_after":"%s","detail":"%s"}' \
+    "$status" "$(_cc_json_escape "$CC_RESULT_BEFORE")" "$(_cc_json_escape "$after")" \
+    "$(_cc_json_escape "$CC_RESULT_COMMIT_BEFORE")" "$(_cc_json_escape "$commit_after")" \
+    "$(_cc_json_escape "$detail")")"
+  echo "CC_UPDATE_RESULT $json"
+  if [ -n "${CC_UPDATE_RESULT_FILE:-}" ]; then
+    printf '%s\n' "$json" > "$CC_UPDATE_RESULT_FILE" 2>/dev/null || true
+  fi
+  return 0
+}
+
+_cc_lock_lib=""
+if [ -n "${CC_BOX_UPDATE_LOCK_LIB:-}" ]; then
+  _cc_lock_lib="$CC_BOX_UPDATE_LOCK_LIB"
+else
+  for _c in "${OPENCLAW_ROOT_DIR:-}/scripts/box-update-lock.sh" \
+            "/data/.openclaw/scripts/box-update-lock.sh" \
+            "$HOME/.openclaw/scripts/box-update-lock.sh"; do
+    [ -f "$_c" ] && { _cc_lock_lib="$_c"; break; }
+  done
+fi
+if [ -n "$_cc_lock_lib" ] && [ -f "$_cc_lock_lib" ]; then
+  # shellcheck source=/dev/null
+  . "$_cc_lock_lib"
+  set +e
+  box_update_lock_acquire "${OPENCLAW_UPDATE_LEASE:-/tmp/openclaw-update.lock}" \
+    "cc-update-$(date -u +%Y%m%dT%H%M%SZ)-$$" "cc-update" "$INSTALL_DIR"
+  CC_LOCK_RC=$?
+  set -e
+  case "$CC_LOCK_RC" in
+    0) success "Shared box update lock held (or inherited from the auto-update run)" ;;
+    3)
+      echo "  ⚠ Another updater owns this box. Nothing was changed."
+      _cc_write_result DEFERRED "another updater holds the box update lock"
+      exit 75
+      ;;
+    *) fatal "Could not take the shared box update lock (rc $CC_LOCK_RC) — refusing to update without it. Nothing was changed." ;;
+  esac
+else
+  warn "box-update-lock.sh not found under the OpenClaw root — this run cannot be serialized against other updaters. Continuing; the onboarding update delivers the helper."
+fi
 
 # ----------------------------------------------------------
 # Approved-target enforcement
@@ -853,7 +936,7 @@ if [ -d ".git" ] && [ "${CC_UPDATE_ZERO_DOWNTIME:-1}" = "1" ]; then
     [ -n "${CC_PORT:-}" ] && ZD_ARGS+=(--port "$CC_PORT")
     success "Atomic deploy source revision: $ZD_TARGET (the live tree stays on $(git rev-parse --short HEAD) until promotion)"
     set +e
-    "$ZD_BASH4" "$ZD_STAGE/scripts/atomic-deploy.sh" "${ZD_ARGS[@]}"
+    "$ZD_BASH4" "$ZD_STAGE/scripts/atomic-deploy.sh" "${ZD_ARGS[@]}" 9>&-
     ADEPLOY_RC=$?
     set -e
     case "$ADEPLOY_RC" in
@@ -1311,7 +1394,7 @@ if [ -f "$ATOMIC_DEPLOY" ] && [ -n "$BASH4" ]; then
   # set -e is active for the updater; suspend it around the deploy so we can
   # inspect its exit-contract code (0 green / 1 rolled-back / 2 pre-flight / 3 unknown).
   set +e
-  "$BASH4" "$ATOMIC_DEPLOY" "${ADEPLOY_ARGS[@]}"
+  "$BASH4" "$ATOMIC_DEPLOY" "${ADEPLOY_ARGS[@]}" 9>&-
   ADEPLOY_RC=$?
   set -e
   case "$ADEPLOY_RC" in
@@ -1496,3 +1579,10 @@ echo "  Next steps:"
 echo "    1. Verify the app is responsive (curl /api/health if endpoint exists)"
 echo "    2. Tell your agent: 'Process the COMMAND CENTER UPDATE PENDING section in my AGENTS.md'"
 echo ""
+if [ "${CC_RESULT_COMMIT_BEFORE:-}" = "$(git -C "$INSTALL_DIR" rev-parse HEAD 2>/dev/null || true)" ] \
+   && [ "${CC_RESULT_BEFORE:-}" = "${NEW_VERSION:-}" ]; then
+  _cc_write_result CURRENT "already on the latest release"
+else
+  _cc_write_result UPDATED "updated"
+fi
+box_update_lock_release 2>/dev/null || true

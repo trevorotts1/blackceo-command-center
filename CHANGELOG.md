@@ -1,3 +1,11 @@
+## [v8.0.1] - 2026-11-17 - Auto-update: remove the ask flow, honor the shared update lock
+
+- feat(update): `update.sh` now honours the box's shared update lock (`/tmp/openclaw-update.lock`, override `OPENCLAW_UPDATE_LEASE`) through the onboarding helper `box-update-lock.sh`. Launched by the Tuesday/Friday/Sunday auto-update run it inherits the lock and proceeds; run by hand while another updater holds it, it changes nothing and exits 75 (deferred). A box without the helper yet gets a warning and the update still runs. The lock is released on success and on failure.
+- feat(update): `update.sh` reports its version before and after for the auto-update status beacon: one `CC_UPDATE_RESULT {json}` line on stdout and, when `CC_UPDATE_RESULT_FILE` is set, the same JSON in that file (schema `cc-update-result/1`: status CURRENT, UPDATED, DEFERRED or FAILED, versions and commits before and after).
+- remove(update): `cron-prompt.txt`, the Sunday "ask the client first" agent prompt, is deleted. Nothing in Command Center asks the client before updating; `check-updates.sh` stays a read-only version and commit check read by the deterministic auto-update script, and its comments and `docs/UPDATE-CHECK.md` now say so.
+- docs: `DEPLOYMENT.md` "Automated Sunday Update Path" is now "Automated Update Path (Tuesday, Friday, Sunday 2:30 AM Eastern)": 2:15 AM notice with cancel, 2:30 AM run with jitter, the lock, the result line and the exit codes.
+- Tests: new `scripts/update-lock-and-report.test.sh` (29 checks: free lock, current, deferred exit 75, inherited lock, helper absent, failed run, ask flow removed, docs), wired into the `Update approved-target gate` workflow. Also passes against the real onboarding helper (`ONB_LOCK_LIB`).
+- Migration: none. Not merged or deployed.
 ## [v8.0.0] - 2026-11-17 - Milestone
 
 - milestone: Command Center major release. The Command Center build room closed with all 24 of 24 units complete on 2026-11-16, alongside four other build rooms.
