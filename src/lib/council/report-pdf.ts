@@ -343,7 +343,8 @@ const BROWSER_CLOSE_WAIT_MS = 2_000;
 /**
  * The PDF bytes are complete before teardown, so a slow Chromium exit (seconds
  * on a loaded host) must not hold the response. Wait briefly for a clean
- * close; past that, kill the process so nothing is left running.
+ * close; past that, return and let the close finish in the background. The
+ * Playwright Browser exposes no process handle, so nothing here kills it.
  */
 async function closeBrowserBounded(browser: Browser): Promise<void> {
   const closed = browser.close().then(() => true, () => true);
@@ -354,9 +355,6 @@ async function closeBrowserBounded(browser: Browser): Promise<void> {
   const timedOut = new Promise<boolean>((resolve) => {
     timer = setTimeout(() => resolve(false), BROWSER_CLOSE_WAIT_MS);
   });
-  const done = await Promise.race([closed, timedOut]);
+  await Promise.race([closed, timedOut]);
   clearTimeout(timer);
-  if (done) return;
-  const proc = (browser as unknown as { process?: () => { kill: (signal?: string) => boolean } | null }).process?.();
-  try { proc?.kill('SIGKILL'); } catch { /* already gone */ }
 }
