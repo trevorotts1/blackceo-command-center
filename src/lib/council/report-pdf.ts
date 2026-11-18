@@ -347,11 +347,16 @@ const BROWSER_CLOSE_WAIT_MS = 2_000;
  */
 async function closeBrowserBounded(browser: Browser): Promise<void> {
   const closed = browser.close().then(() => true, () => true);
+  // A normal (ref'd) timer, cleared once settled: unref'ing it lets the event
+  // loop look idle while the race is pending, and Node's test runner then
+  // cancels the caller ("event loop has already resolved").
+  let timer: ReturnType<typeof setTimeout> | undefined;
   const timedOut = new Promise<boolean>((resolve) => {
-    const timer = setTimeout(() => resolve(false), BROWSER_CLOSE_WAIT_MS);
-    timer.unref?.();
+    timer = setTimeout(() => resolve(false), BROWSER_CLOSE_WAIT_MS);
   });
-  if (await Promise.race([closed, timedOut])) return;
+  const done = await Promise.race([closed, timedOut]);
+  clearTimeout(timer);
+  if (done) return;
   const proc = (browser as unknown as { process?: () => { kill: (signal?: string) => boolean } | null }).process?.();
   try { proc?.kill('SIGKILL'); } catch { /* already gone */ }
 }
