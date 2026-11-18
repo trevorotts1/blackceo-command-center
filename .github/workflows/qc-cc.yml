@@ -951,7 +951,10 @@ jobs:
         # missing so the browsers launch.
         uses: ./.github/actions/playwright-install
         with:
-          browsers: "chromium webkit"
+          # Only the browser this matrix project drives: chromium-desktop and
+          # chromium-pixel7 never launch WebKit, and WebKit's OS libraries are the
+          # bulk of the apt download that stalls on a slow mirror.
+          browsers: ${{ startsWith(matrix.project, 'webkit') && 'webkit' || 'chromium' }}
         timeout-minutes: 20
 
       - name: Build production interview fixture
