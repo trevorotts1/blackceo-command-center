@@ -21,6 +21,24 @@ with_timeout() {  # $1 seconds, rest command
   if command -v timeout >/dev/null 2>&1; then timeout "$s" "$@"; else "$@"; fi
 }
 
+# Kill an apt left running by a timed-out attempt (it would hold the dpkg lock
+# and fail every later attempt), repair a half-finished dpkg, and rotate the
+# Ubuntu mirror so a stalled one is not asked again.
+apt_recover() {  # $1 attempt number that just failed
+  command -v sudo >/dev/null 2>&1 || return 0
+  sudo pkill -9 -x apt-get 2>/dev/null || true
+  sudo pkill -9 -x apt 2>/dev/null || true
+  sleep 2
+  sudo rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock 2>/dev/null || true
+  sudo dpkg --configure -a >/dev/null 2>&1 || true
+  local mirror
+  case "$1" in 1) mirror="http://azure.archive.ubuntu.com/ubuntu" ;; *) mirror="http://archive.ubuntu.com/ubuntu" ;; esac
+  for f in /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list; do
+    [ -f "$f" ] && sudo sed -i -E "s#https?://[A-Za-z0-9.-]*ubuntu\.com/ubuntu/?#${mirror}#g" "$f" 2>/dev/null || true
+  done
+  echo "::warning::apt recovered after attempt $1; mirror now $mirror"
+}
+
 retry() {  # description, command...
   local what="$1"; shift
   local n=1
@@ -29,17 +47,38 @@ retry() {  # description, command...
     if with_timeout "$LIMIT" "$@"; then echo "::endgroup::"; return 0; fi
     echo "::endgroup::"
     echo "::warning::$what failed or timed out after ${LIMIT}s (attempt $n of $ATTEMPTS)"
+    case "$what" in *install-deps*) apt_recover "$n" ;; esac
     n=$((n + 1)); sleep "${PW_RETRY_SLEEP:-15}"
   done
   return 1
 }
 
-# OS libraries are not cached by the browser cache, so they are always installed.
-retry "playwright install-deps $*" npx playwright install-deps "$@" || exit 1
-# Browser binaries: a cache hit makes this a quick version check, no download.
+# Browser binaries come from the Playwright CDN, not apt; a cache hit makes this
+# a quick version check with no download.
 retry "playwright install $*" npx playwright install "$@" || exit 1
 
+# The runner image already carries most browser libraries. Only touch apt (the
+# step that hangs on a slow mirror) when a real launch of every requested
+# browser fails.
+PROBE_JS='
+  const pw = require("@playwright/test");
+  (async () => {
+    for (const name of process.argv.slice(1)) {
+      const b = await pw[name].launch();
+      await b.close();
+    }
+  })().then(() => process.exit(0), (e) => { console.error(String(e).split("\n")[0]); process.exit(1); });
+'
+if with_timeout 120 node -e "$PROBE_JS" "$@"; then
+  echo "playwright-install: all requested browsers launch; OS libraries already present, skipping apt"
+  APT_SKIPPED=true
+else
+  echo "playwright-install: a browser failed to launch, installing OS libraries"
+  retry "playwright install-deps $*" npx playwright install-deps "$@" || exit 1
+  APT_SKIPPED=false
+fi
+
 ELAPSED=$(( $(date +%s) - START ))
-echo "playwright-install: ${ELAPSED}s (browser cache hit: ${BROWSER_CACHE_HIT:-false})"
-[ -n "${GITHUB_STEP_SUMMARY:-}" ] && echo "Playwright install: ${ELAPSED}s, browser cache hit: ${BROWSER_CACHE_HIT:-false}" >> "$GITHUB_STEP_SUMMARY"
+echo "playwright-install: ${ELAPSED}s (browser cache hit: ${BROWSER_CACHE_HIT:-false}, apt skipped: $APT_SKIPPED)"
+[ -n "${GITHUB_STEP_SUMMARY:-}" ] && echo "Playwright install: ${ELAPSED}s, browser cache hit: ${BROWSER_CACHE_HIT:-false}, apt skipped: $APT_SKIPPED" >> "$GITHUB_STEP_SUMMARY"
 exit 0
