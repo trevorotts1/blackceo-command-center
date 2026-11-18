@@ -438,6 +438,18 @@ describe('paid asset budget approvals', () => {
   });
 });
 
+describe('budget amounts per currency', () => {
+  it('formats by the currency minor unit and refuses an unknown currency', async () => {
+    const { formatCap } = await import('../../src/lib/approval-requests');
+    expect(formatCap(2500, 'USD')).toBe('$25.00 USD');
+    expect(formatCap(2500, 'JPY')).toBe('¥2,500 JPY');
+    expect(formatCap(2500, 'KWD')?.replace(/\s/g, ' ')).toBe('KWD 2.500 KWD');
+    expect(formatCap(null, null)).toBeNull();
+    const bad = await create(body({ kind: 'paid_asset_budget', object_key: 'zzz', cap_minor: 100, currency: 'ZZZ' }), { bearer: TOKEN });
+    expect(bad.status).toBe(400);
+  });
+});
+
 describe('migration 181', () => {
   const mig = () => migrations.find((m) => m.id === '181')!;
 
@@ -459,6 +471,22 @@ describe('migration 181', () => {
       VALUES ('r3','t','bogus','l','a','o','${PLAN}','T','S','agent','2099-01-01','2026-01-01')`).run()).toThrow();
     const idx = db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='approval_requests'").all().map((r: { name: string }) => r.name);
     expect(idx).toEqual(expect.arrayContaining(['idx_approval_requests_status', 'idx_approval_requests_plan']));
+  });
+
+  it('handles a kind CHECK stored with different spacing and keeps a locally added index', () => {
+    const db = new Database(':memory:');
+    db.exec(`CREATE TABLE approval_requests (request_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK (kind  IN ( 'automation_write' , 'publish' )), location_id TEXT NOT NULL, action TEXT NOT NULL,
+      object_key TEXT NOT NULL, plan_sha256 TEXT NOT NULL, title TEXT NOT NULL, summary TEXT NOT NULL,
+      preview_json TEXT NOT NULL DEFAULT '{}', requested_by TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+      expires_at TEXT NOT NULL, valid_until TEXT, created_at TEXT NOT NULL, decided_at TEXT, decided_by TEXT,
+      decision_note TEXT, approval_id TEXT);
+      CREATE INDEX idx_local_extra ON approval_requests(requested_by);`);
+    mig().up(db);
+    const sql = (db.prepare("SELECT sql FROM sqlite_master WHERE name='approval_requests'").get() as { sql: string }).sql;
+    expect(sql).toContain("'paid_asset_budget'");
+    const idx = db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='approval_requests'").all().map((r) => (r as { name: string }).name);
+    expect(idx).toContain('idx_local_extra');
   });
 
   it('upgrades a box that already rebuilt the table with the budget kind and cap columns', () => {

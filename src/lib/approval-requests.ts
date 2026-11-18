@@ -192,18 +192,34 @@ function parseCap(kind: RequestKind, rawCap: unknown, rawCurrency: unknown):
     return { capMinor: null, currency: null };
   }
   if (!Number.isSafeInteger(rawCap) || (rawCap as number) <= 0) return { error: 'invalid_cap_minor', detail: 'a positive whole number of minor units (cents)' };
-  if (typeof rawCurrency !== 'string' || !/^[A-Z]{3}$/.test(rawCurrency)) return { error: 'invalid_currency', detail: 'three-letter ISO code, e.g. USD' };
+  if (typeof rawCurrency !== 'string' || !/^[A-Z]{3}$/.test(rawCurrency) || minorDigits(rawCurrency) === null) {
+    return { error: 'invalid_currency', detail: 'a supported three-letter ISO code, e.g. USD' };
+  }
   return { capMinor: rawCap as number, currency: rawCurrency };
+}
+
+const KNOWN_CURRENCIES = new Set(Intl.supportedValuesOf('currency'));
+
+/** Decimal places of a currency's minor unit (USD 2, JPY 0, KWD 3); null if unknown. */
+function minorDigits(currency: string): number | null {
+  if (!KNOWN_CURRENCIES.has(currency)) return null;
+  try {
+    return new Intl.NumberFormat('en-US', { style: 'currency', currency }).resolvedOptions().maximumFractionDigits ?? null;
+  } catch { return null; }
+}
+
+/** The amount as the owner reads it, e.g. "$25.00"; null when the request carries no cap. */
+export function capAmountText(capMinor: number | null, currency: string | null): string | null {
+  if (capMinor === null || currency === null) return null;
+  const digits = minorDigits(currency);
+  if (digits === null) return null;
+  return new Intl.NumberFormat('en-US', { style: 'currency', currency }).format(capMinor / 10 ** digits);
 }
 
 /** "$25.00 USD" for the owner; null when the request carries no cap. */
 export function formatCap(capMinor: number | null, currency: string | null): string | null {
-  if (capMinor === null || currency === null) return null;
-  try {
-    return `${new Intl.NumberFormat('en-US', { style: 'currency', currency }).format(capMinor / 100)} ${currency}`;
-  } catch {
-    return `${(capMinor / 100).toFixed(2)} ${currency}`;
-  }
+  const amount = capAmountText(capMinor, currency);
+  return amount && currency ? `${amount} ${currency}` : null;
 }
 
 /**

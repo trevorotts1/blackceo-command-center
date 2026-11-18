@@ -8741,17 +8741,34 @@ export const migrations: Migration[] = [
       if (!cols.includes('cap_minor')) db.exec('ALTER TABLE approval_requests ADD COLUMN cap_minor INTEGER');
       if (!cols.includes('currency')) db.exec('ALTER TABLE approval_requests ADD COLUMN currency TEXT');
       if (!table.sql.includes("'paid_asset_budget'")) {
+        // Copy out and back, never ALTER ... RENAME: a rename makes SQLite
+        // re-check every trigger in the schema, so one stale unrelated trigger
+        // would fail the whole boot (same reason migration 147 copies).
         const all = (db.prepare('PRAGMA table_info(approval_requests)').all() as { name: string }[]).map((c) => c.name);
         const list = all.map((c) => `"${c}"`).join(', ');
-        const widened = (db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'approval_requests'").get() as { sql: string }).sql
-          .replace("kind IN ('automation_write','publish')", "kind IN ('automation_write','publish','paid_asset_budget')");
+        const current = (db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'approval_requests'").get() as { sql: string }).sql;
+        // Match the kind CHECK whatever spacing or quoting the box stored it with.
+        const widened = current.replace(
+          /(kind\s+IN\s*\(\s*'automation_write'\s*,\s*'publish')(\s*\))/i,
+          "$1,'paid_asset_budget'$2",
+        );
         if (!widened.includes("'paid_asset_budget'")) throw new Error('[Migration 181] could not locate the approval_requests kind CHECK');
-        db.exec(`
-          ALTER TABLE approval_requests RENAME TO approval_requests_pre181;
-          ${widened};
-          INSERT INTO approval_requests (${list}) SELECT ${list} FROM approval_requests_pre181;
-          DROP TABLE approval_requests_pre181;
-        `);
+        // Indexes and triggers a box added itself are recreated after the rebuild.
+        const extras = (db.prepare(
+          "SELECT sql FROM sqlite_master WHERE tbl_name = 'approval_requests' AND type IN ('index','trigger') AND sql IS NOT NULL",
+        ).all() as { sql: string }[]).map((r) => r.sql);
+        const SCRATCH = 'approval_requests_scratch181';
+        const count = (t: string) => (db.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get() as { n: number }).n;
+        const before = count('approval_requests');
+        db.exec(`DROP TABLE IF EXISTS ${SCRATCH}`);
+        db.exec(`CREATE TABLE ${SCRATCH} AS SELECT ${list} FROM approval_requests`);
+        if (count(SCRATCH) !== before) throw new Error('[Migration 181] approval_requests copy lost rows; original kept');
+        db.exec('DROP TABLE approval_requests');
+        db.exec(widened);
+        db.exec(`INSERT INTO approval_requests (${list}) SELECT ${list} FROM ${SCRATCH}`);
+        if (count('approval_requests') !== before) throw new Error('[Migration 181] approval_requests restore lost rows');
+        db.exec(`DROP TABLE ${SCRATCH}`);
+        for (const sql of extras) db.exec(sql.replace(/^CREATE\s+(UNIQUE\s+)?(INDEX|TRIGGER)\s+(?!IF NOT EXISTS)/i, (m) => `${m}IF NOT EXISTS `));
       }
       db.exec(`
         CREATE INDEX IF NOT EXISTS idx_approval_requests_status ON approval_requests(tenant_id, status, created_at);

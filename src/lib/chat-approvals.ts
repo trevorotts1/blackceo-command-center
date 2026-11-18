@@ -30,7 +30,7 @@ import { queryAll, queryOne, run, transaction } from '@/lib/db';
 import type { TenantContext } from '@/lib/auth/tenant-context';
 import { resolveOwnerChatId } from '@/lib/notify';
 import { PLAN_HASH_RE, OWNER_REQUEST_REF_PREFIX } from '@/lib/launch-approvals';
-import { approvalExpiry, shortCodeOf, toRequest, type Row, type RequestResult } from '@/lib/approval-requests';
+import { approvalExpiry, capAmountText, shortCodeOf, toRequest, type Row, type RequestResult } from '@/lib/approval-requests';
 import { readTelegramInbound, readWebchatInbound, type InboundMessage } from '@/lib/gateway-inbound';
 
 export const CHAT_CHANNELS = ['telegram', 'webchat'] as const;
@@ -53,6 +53,8 @@ function tokens(text: string, code: string): string[] {
   return text
     .toLowerCase()
     .replace(new RegExp(`\\b${code}\\b`, 'gi'), ' ')
+    // An amount the owner restates ("approve $25.00") is not a word to judge.
+    .replace(/\p{Sc}?\s?\d[\d,]*(?:\.\d+)?(?:\s?[a-z]{3})?/gu, ' ')
     .replace(/[^\p{L}\p{N}\p{Extended_Pictographic}'’✅]+/gu, ' ')
     .replace(/’/g, "'")
     .split(/\s+/)
@@ -101,8 +103,29 @@ function parseBody(input: unknown): Parsed | RequestResult {
   };
 }
 
+/**
+ * A money approval must be one the owner could read: the amount has to appear in
+ * the bot message they answered (reply or button) or in their own words. The
+ * agent alone sets the cap, so a bare "ok" never approves an amount unseen.
+ */
+function showsAmount(row: Row, msg: InboundMessage): boolean {
+  const amount = capAmountText(row.cap_minor, row.currency);
+  if (!amount) return true;
+  const norm = (t: string) => t.replace(/[\s,]/g, '');
+  const want = norm(amount);
+  const seen = [msg.text, msg.replyTo?.senderIsBot ? msg.replyTo.text : ''];
+  return seen.some((t) => norm(t).includes(want));
+}
+
 function bind(row: Row, msg: InboundMessage, callbackFor: string | null, ownerPendingIds: string[]): { ok: true } | { ok: false; res: RequestResult } {
   const code = shortCodeOf(row.request_id);
+  if (row.kind === 'paid_asset_budget' && !showsAmount(row, msg)) {
+    return {
+      ok: false,
+      res: refuse(409, 'amount_not_shown',
+        `A spending approval must show the amount. Send the owner a message stating ${capAmountText(row.cap_minor, row.currency)} and code ${code}, and have them reply to it or tap its button.`),
+    };
+  }
   if (callbackFor) {
     return callbackFor === row.request_id.toLowerCase()
       ? { ok: true }
@@ -116,7 +139,7 @@ function bind(row: Row, msg: InboundMessage, callbackFor: string | null, ownerPe
     }
   }
   if (hasCode(msg.text, code)) return { ok: true };
-  if (ownerPendingIds.length === 1 && ownerPendingIds[0] === row.request_id) return { ok: true };
+  if (row.kind !== 'paid_asset_budget' && ownerPendingIds.length === 1 && ownerPendingIds[0] === row.request_id) return { ok: true };
   return {
     ok: false,
     res: refuse(409, 'ambiguous_request',

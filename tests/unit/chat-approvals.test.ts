@@ -253,17 +253,38 @@ describe('Telegram approval from the gateway record', () => {
 });
 
 describe('Telegram approval of a budget', () => {
-  it('a chat "approve" mints a launch approval carrying the requested cap', async () => {
-    const made = await create({ kind: 'paid_asset_budget', action: 'generate_images', cap_minor: 2500, currency: 'USD' });
-    const mid = cacheMessage({ text: 'approve' });
+  const budget = () => create({ kind: 'paid_asset_budget', action: 'generate_images', cap_minor: 2500, currency: 'USD' });
+  const record = async (approvalId: string) => {
+    const { GET } = await import('../../src/app/api/launch-approvals/[approvalId]/route');
+    return (await GET(req(`/api/launch-approvals/${approvalId}`, { bearer: TOKEN }), { params: Promise.resolve({ approvalId }) } as never)).json();
+  };
+
+  it('a reply to the bot message that states the amount mints a launch approval carrying the cap', async () => {
+    const made = await budget();
+    const mid = cacheMessage({ text: 'approve', replyTo: { id: 1, fromBot: true, text: `Picture budget: $25.00 USD. Code: ${made.short_code}` } });
     const out = await chat(made.request_id, tg('approve', mid));
     expect(out.status).toBe(200);
-    const { GET } = await import('../../src/app/api/launch-approvals/[approvalId]/route');
-    const rec = await (await GET(req(`/api/launch-approvals/${out.json.approval_id}`, { bearer: TOKEN }), { params: Promise.resolve({ approvalId: out.json.approval_id }) } as never)).json();
-    expect(rec).toMatchObject({
+    expect(await record(out.json.approval_id)).toMatchObject({
       kind: 'paid_asset_budget', cap_minor: 2500, currency: 'USD', approver: `telegram:${OWNER_CHAT}`,
       verification_class: 'authenticated_platform_record', revoked: false,
     });
+  });
+
+  it('the owner naming the amount and code in their own words is accepted', async () => {
+    const made = await budget();
+    const out = await chat(made.request_id, tg('approve', cacheMessage({ text: `approve $25.00 ${made.short_code}` })));
+    expect(out.status).toBe(200);
+  });
+
+  it('refuses a bare "ok" even as the only pending request, and a reply whose bot message shows a different amount', async () => {
+    const made = await budget();
+    const before = approvals();
+    const bare = await chat(made.request_id, tg('approve', cacheMessage({ text: 'ok' })));
+    expect(bare.status).toBe(409);
+    expect(bare.json.error).toBe('amount_not_shown');
+    const wrong = await chat(made.request_id, tg('approve', cacheMessage({ text: 'ok', replyTo: { id: 2, fromBot: true, text: `Budget $2.50. Code: ${made.short_code}` } })));
+    expect(wrong.json.error).toBe('amount_not_shown');
+    expect(approvals()).toBe(before);
   });
 });
 
