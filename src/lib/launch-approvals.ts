@@ -26,6 +26,10 @@ export const APPROVAL_KINDS = [
   'automation_write',
   'pin_rotation',
   'design_board',
+  // Skill 44 qc-built-workflow.sh (S44-46) and Skill 50 P4 deploy verify these
+  // through approval_record.py, which already lists both as canonical kinds.
+  'qc_session',
+  'email_deploy',
 ] as const;
 export type ApprovalKind = (typeof APPROVAL_KINDS)[number];
 

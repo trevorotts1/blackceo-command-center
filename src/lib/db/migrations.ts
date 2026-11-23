@@ -8788,6 +8788,59 @@ export const migrations: Migration[] = [
       console.log('[Migration 181] approval_requests paid_asset_budget ready');
     },
   },
+
+  {
+    id: '182',
+    name: 'approval_kinds_qc_session_email_deploy',
+    up: (db) => {
+      // Skill 44 qc-built-workflow.sh needs a `qc_session` record and Skill 50 P4
+      // an `email_deploy` record; approval_record.py already verifies both kinds.
+      // Both kind CHECKs learn them, and approval_requests gains `scope_json`
+      // (the scope entries the minted approval carries). Same copy-out/copy-back
+      // as migration 181: every row, column, index and trigger is kept,
+      // including the launch_approvals no-delete and revoke-only guards.
+      console.log('[Migration 182] approval kinds: qc_session, email_deploy...');
+      const NEW_KINDS = ['qc_session', 'email_deploy'];
+      const widenKindCheck = (table: string) => {
+        const current = (db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?").get(table) as { sql: string } | undefined)?.sql;
+        if (!current) throw new Error(`[Migration 182] ${table} missing; its creating migration must run first`);
+        const missing = NEW_KINDS.filter((k) => !current.includes(`'${k}'`));
+        if (!missing.length) return;
+        const widened = current.replace(/(kind\s+IN\s*\([^)]*?)(\s*\))/i, (_m, list: string, close: string) => `${list}${missing.map((k) => `,'${k}'`).join('')}${close}`);
+        if (missing.some((k) => !widened.includes(`'${k}'`))) throw new Error(`[Migration 182] could not locate the ${table} kind CHECK`);
+        const cols = (db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => `"${c.name}"`).join(', ');
+        const extras = (db.prepare(
+          "SELECT sql FROM sqlite_master WHERE tbl_name = ? AND type IN ('index','trigger') AND sql IS NOT NULL",
+        ).all(table) as { sql: string }[]).map((r) => r.sql);
+        const children = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[])
+          .filter((t) => (db.prepare(`PRAGMA foreign_key_list("${t.name}")`).all() as { table: string; on_delete: string }[])
+            .some((fk) => fk.table === table && /CASCADE|SET NULL|SET DEFAULT/i.test(fk.on_delete)))
+          .map((t) => t.name);
+        if (children.length) throw new Error(`[Migration 182] ${children.join(', ')} would lose rows when ${table} is rebuilt; migrate them first`);
+        const SCRATCH = `${table}_scratch182`;
+        const count = (t: string) => (db.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get() as { n: number }).n;
+        const before = count(table);
+        db.exec(`DROP TABLE IF EXISTS ${SCRATCH}`);
+        db.exec(`CREATE TABLE ${SCRATCH} AS SELECT ${cols} FROM ${table}`);
+        if (count(SCRATCH) !== before) throw new Error(`[Migration 182] ${table} copy lost rows; original kept`);
+        db.pragma('defer_foreign_keys = ON');
+        // DROP TABLE removes the table's own triggers before its implicit delete,
+        // so the no-delete guard does not fire; it is recreated from `extras`.
+        db.exec(`DROP TABLE ${table}`);
+        db.exec(widened);
+        db.exec(`INSERT INTO ${table} (${cols}) SELECT ${cols} FROM ${SCRATCH}`);
+        if (count(table) !== before) throw new Error(`[Migration 182] ${table} restore lost rows`);
+        db.exec(`DROP TABLE ${SCRATCH}`);
+        for (const sql of extras) db.exec(sql.replace(/^CREATE\s+(UNIQUE\s+)?(INDEX|TRIGGER)\s+(?!IF NOT EXISTS)/i, (m) => `${m}IF NOT EXISTS `));
+      };
+      const requestCols = (db.prepare('PRAGMA table_info(approval_requests)').all() as { name: string }[]).map((c) => c.name);
+      if (!requestCols.length) throw new Error('[Migration 182] approval_requests missing; migration 179 must run first');
+      if (!requestCols.includes('scope_json')) db.exec('ALTER TABLE approval_requests ADD COLUMN scope_json TEXT');
+      widenKindCheck('launch_approvals');
+      widenKindCheck('approval_requests');
+      console.log('[Migration 182] approval kinds qc_session, email_deploy ready');
+    },
+  },
 ];
 
 // DATA-03: fail-fast at module load if two migrations share an id. The runner

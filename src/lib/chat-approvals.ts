@@ -30,7 +30,7 @@ import { queryAll, queryOne, run, transaction } from '@/lib/db';
 import type { TenantContext } from '@/lib/auth/tenant-context';
 import { resolveOwnerChatId } from '@/lib/notify';
 import { PLAN_HASH_RE, OWNER_REQUEST_REF_PREFIX } from '@/lib/launch-approvals';
-import { approvalExpiry, capAmountText, shortCodeOf, toRequest, type Row, type RequestResult } from '@/lib/approval-requests';
+import { approvalExpiry, capAmountText, mintedScope, shortCodeOf, toRequest, type Row, type RequestResult } from '@/lib/approval-requests';
 import { readTelegramInbound, readWebchatInbound, type InboundMessage } from '@/lib/gateway-inbound';
 
 export const CHAT_CHANNELS = ['telegram', 'webchat'] as const;
@@ -262,7 +262,7 @@ export function decideApprovalFromChat(ctx: TenantContext, requestId: string, in
     } else {
       const approvalId = randomUUID();
       const digest = PLAN_HASH_RE.exec(row.plan_sha256)![1].toLowerCase();
-      const scope = JSON.stringify({ location_id: row.location_id, action: row.action, object_key: row.object_key });
+      const scope = mintedScope(row);
       run(
         `INSERT INTO launch_approvals (approval_id, tenant_id, client_identity_ref, kind, plan_hash, scope,
            cap_minor, currency, expires_at, revoked, source_message_ref, created_at)

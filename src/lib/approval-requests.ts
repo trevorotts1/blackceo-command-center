@@ -29,9 +29,19 @@ import {
   registeredClientIdentity,
 } from '@/lib/launch-approvals';
 
-/** Kinds the owner can approve: the two the safety gate reads, plus a money cap. */
-export const REQUEST_KINDS = ['automation_write', 'publish', 'paid_asset_budget'] as const;
+/**
+ * Kinds the owner can approve: the two the safety gate reads, a money cap, and
+ * the two approval_record.py verifies by scope (Skill 44 QC session, Skill 50 deploy).
+ */
+export const REQUEST_KINDS = ['automation_write', 'publish', 'paid_asset_budget', 'qc_session', 'email_deploy'] as const;
 export type RequestKind = (typeof REQUEST_KINDS)[number];
+
+/**
+ * Kinds whose consumer (approval_record.py `verify`) checks the record's scope
+ * entries, e.g. `qc_model:<model>` + `qc_session:<id>` or the email run name.
+ * A request of these kinds must carry `scope`; every other kind refuses it.
+ */
+export const SCOPED_KINDS: readonly RequestKind[] = ['qc_session', 'email_deploy'];
 
 export type RequestStatus = 'pending' | 'approved' | 'changes_requested' | 'expired';
 
@@ -39,7 +49,7 @@ const DEFAULT_TTL_MS = 7 * 24 * 3600 * 1000;
 const MAX_TTL_MS = 30 * 24 * 3600 * 1000;
 const ALLOWED_FIELDS = new Set([
   'kind', 'location_id', 'action', 'object_key', 'plan_sha256', 'title', 'summary',
-  'preview', 'requested_by', 'expires_at', 'valid_until', 'cap_minor', 'currency',
+  'preview', 'requested_by', 'expires_at', 'valid_until', 'cap_minor', 'currency', 'scope',
 ]);
 /** Fields only the server sets; naming one is a direct-write attempt. */
 const SERVER_OWNED = [
@@ -68,6 +78,8 @@ export interface ApprovalRequest {
   cap_minor: number | null;
   /** ISO 4217 code paired with cap_minor; null otherwise. */
   currency: string | null;
+  /** Scope entries the approval covers, for SCOPED_KINDS; null otherwise. */
+  scope: string[] | null;
   title: string;
   summary: string;
   preview: ApprovalPreview;
@@ -99,7 +111,7 @@ export const shortCodeOf = (requestId: string): string => requestId.slice(0, 6);
 export interface Row {
   request_id: string; tenant_id: string; kind: RequestKind; location_id: string; action: string;
   object_key: string; plan_sha256: string; cap_minor: number | null; currency: string | null;
-  title: string; summary: string; preview_json: string;
+  scope_json: string | null; title: string; summary: string; preview_json: string;
   requested_by: string; status: 'pending' | 'approved' | 'changes_requested'; expires_at: string; valid_until: string | null;
   created_at: string; decided_at: string | null; decided_by: string | null;
   decision_note: string | null; approval_id: string | null;
@@ -124,7 +136,7 @@ export function toRequest(r: Row, now = Date.now()): ApprovalRequest {
   return {
     request_id: r.request_id, kind: r.kind, location_id: r.location_id, action: r.action,
     object_key: r.object_key, plan_sha256: r.plan_sha256, cap_minor: r.cap_minor ?? null, currency: r.currency ?? null,
-    title: r.title, summary: r.summary,
+    scope: scopeEntries(r), title: r.title, summary: r.summary,
     preview: parsePreview(r.preview_json), requested_by: r.requested_by,
     status: expired ? 'expired' : r.status, expires_at: r.expires_at, valid_until: r.valid_until, created_at: r.created_at,
     decided_at: r.decided_at, decided_by: r.decided_by, decision_note: r.decision_note,
@@ -198,6 +210,44 @@ function parseCap(kind: RequestKind, rawCap: unknown, rawCurrency: unknown):
   return { capMinor: rawCap as number, currency: rawCurrency };
 }
 
+/** No commas: approval_record.py `normalize_scope` splits the stored scope on commas. */
+const SCOPE_ENTRY_RE = /^[^,\r\n]{1,200}$/;
+
+/** Scope entries are required for SCOPED_KINDS and refused for every other kind. */
+function parseScope(kind: RequestKind, raw: unknown): { entries: string[] | null } | { error: string; detail: string } {
+  if (!SCOPED_KINDS.includes(kind)) {
+    return raw === undefined ? { entries: null } : { error: 'scope_not_allowed', detail: `scope belongs to ${SCOPED_KINDS.join(' and ')} only` };
+  }
+  const detail = '1 to 20 strings, each 1-200 characters with no comma or line break';
+  if (!Array.isArray(raw) || raw.length < 1 || raw.length > 20) return { error: 'invalid_scope', detail };
+  const entries: string[] = [];
+  for (const e of raw) {
+    const t = typeof e === 'string' ? e.trim() : '';
+    if (!SCOPE_ENTRY_RE.test(t)) return { error: 'invalid_scope', detail };
+    if (!entries.includes(t)) entries.push(t);
+  }
+  return { entries };
+}
+
+function scopeEntries(r: Pick<Row, 'scope_json'>): string[] | null {
+  if (!r.scope_json) return null;
+  try {
+    const v = JSON.parse(r.scope_json);
+    return Array.isArray(v) && v.every((e) => typeof e === 'string') ? v : null;
+  } catch { return null; }
+}
+
+/**
+ * The `scope` written into the minted launch_approvals row. SCOPED_KINDS carry
+ * their entries comma-joined, the shape approval_record.py `normalize_scope`
+ * reads; every other kind carries the Convert and Flow binding JSON the
+ * Skill 44 safety gate reads back through `gateFields`.
+ */
+export function mintedScope(row: Row): string {
+  const entries = SCOPED_KINDS.includes(row.kind) ? scopeEntries(row) : null;
+  return entries?.length ? entries.join(', ') : JSON.stringify({ location_id: row.location_id, action: row.action, object_key: row.object_key });
+}
+
 const KNOWN_CURRENCIES = new Set(Intl.supportedValuesOf('currency'));
 
 /** Decimal places of a currency's minor unit (USD 2, JPY 0, KWD 3); null if unknown. */
@@ -256,6 +306,9 @@ export function createApprovalRequest(ctx: TenantContext, body: unknown): Reques
   if (!requestedBy) return refuse(400, 'invalid_requested_by');
   const cap = parseCap(kind, b.cap_minor, b.currency);
   if ('error' in cap) return refuse(400, cap.error, cap.detail);
+  const scope = parseScope(kind, b.scope);
+  if ('error' in scope) return refuse(400, scope.error, scope.detail);
+  const scopeJson = scope.entries ? JSON.stringify(scope.entries) : null;
 
   const now = Date.now();
   let expires = now + DEFAULT_TTL_MS;
@@ -275,19 +328,19 @@ export function createApprovalRequest(ctx: TenantContext, body: unknown): Reques
   const existing = queryAll<Row>(
     `SELECT * FROM approval_requests
        WHERE tenant_id = ? AND kind = ? AND location_id = ? AND action = ? AND object_key = ? AND plan_sha256 = ?
-         AND cap_minor IS ? AND currency IS ?
+         AND cap_minor IS ? AND currency IS ? AND scope_json IS ?
          AND status IN ('pending','approved') AND expires_at > ?
        ORDER BY created_at DESC`,
-    [ctx.tenantId, kind, locationId, action, objectKey, planSha, cap.capMinor, cap.currency, new Date(now).toISOString()],
+    [ctx.tenantId, kind, locationId, action, objectKey, planSha, cap.capMinor, cap.currency, scopeJson, new Date(now).toISOString()],
   )[0];
   if (existing) return { status: 200, payload: { ...toRequest(existing, now), replayed: true } };
 
   const requestId = randomUUID();
   run(
     `INSERT INTO approval_requests (request_id, tenant_id, kind, location_id, action, object_key, plan_sha256,
-       cap_minor, currency, title, summary, preview_json, requested_by, status, expires_at, valid_until, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
-    [requestId, ctx.tenantId, kind, locationId, action, objectKey, planSha, cap.capMinor, cap.currency, title, summary,
+       cap_minor, currency, scope_json, title, summary, preview_json, requested_by, status, expires_at, valid_until, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
+    [requestId, ctx.tenantId, kind, locationId, action, objectKey, planSha, cap.capMinor, cap.currency, scopeJson, title, summary,
       JSON.stringify(preview), requestedBy, new Date(expires).toISOString(), validUntil, new Date(now).toISOString()],
   );
   const row = queryOne<Row>('SELECT * FROM approval_requests WHERE request_id = ?', [requestId])!;
@@ -339,7 +392,8 @@ export interface DecisionInput { decision: 'approve' | 'request_changes'; note?:
  * unique (tenant, source_message_ref) constraint backs that up at the table.
  * The minted record lives 7 days from the click (not from the request), or until
  * the request's valid_until if later (max 30 days), so a late yes is still usable.
- * Binding: scope = JSON {location_id, action, object_key}; plan_hash = sha256:<hex>.
+ * Binding: scope = JSON {location_id, action, object_key} (SCOPED_KINDS: the
+ * request's scope entries, comma-joined); plan_hash = sha256:<hex>.
  */
 export function decideApprovalRequest(ctx: TenantContext, requestId: string, input: unknown): RequestResult {
   const identity = registeredClientIdentity(ctx);
@@ -371,7 +425,7 @@ export function decideApprovalRequest(ctx: TenantContext, requestId: string, inp
     } else {
       const approvalId = randomUUID();
       const digest = PLAN_HASH_RE.exec(row.plan_sha256)![1].toLowerCase();
-      const scope = JSON.stringify({ location_id: row.location_id, action: row.action, object_key: row.object_key });
+      const scope = mintedScope(row);
       run(
         `INSERT INTO launch_approvals (approval_id, tenant_id, client_identity_ref, kind, plan_hash, scope,
            cap_minor, currency, expires_at, revoked, source_message_ref, created_at)

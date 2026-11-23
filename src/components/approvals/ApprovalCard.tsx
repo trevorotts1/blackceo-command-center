@@ -25,6 +25,9 @@ export function ApprovalCard({ item, detail }: { item: ApprovalRequest; detail?:
           Spending limit: {budget}
         </p>
       ) : null}
+      {item.scope ? (
+        <p className="mt-3 text-sm text-gray-700" data-testid="approval-scope">Covers: {item.scope.join(', ')}</p>
+      ) : null}
       <p className="mt-2 text-gray-700 whitespace-pre-wrap">{item.summary}</p>
       <ApprovalPreview preview={item.preview} />
       {item.status === 'pending' ? <DecisionButtons requestId={item.request_id} /> : null}

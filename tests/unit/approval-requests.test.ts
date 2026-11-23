@@ -450,6 +450,187 @@ describe('budget amounts per currency', () => {
   });
 });
 
+/**
+ * Mirrors openclaw-onboarding approval_record.py (normalize_record + _check) for
+ * a live Command Center row: kind via COMMAND_CENTER_KIND_ALIASES (qc_session and
+ * email_deploy are canonical as-is), plan hash, consenting actor
+ * (client_identity_ref), tenant, source_message_ref, scope split on commas,
+ * revoked, expiry. Returns the names that would be refused.
+ */
+function consumerMismatches(rec: Record<string, unknown>, want: { kind: string; plan_hash: string; actor: string; tenant: string; scope: string[] }): string[] {
+  const bad: string[] = [];
+  if (rec.kind !== want.kind) bad.push('kind');
+  if (String(rec.plan_hash).replace(/^sha256:/, '').toLowerCase() !== want.plan_hash.toLowerCase()) bad.push('plan_hash');
+  if (String(rec.client_identity_ref ?? '').toLowerCase() !== want.actor.toLowerCase()) bad.push('consenting_actor_ref');
+  if (String(rec.tenant_id ?? '').toLowerCase() !== want.tenant.toLowerCase()) bad.push('tenant_ref');
+  if (typeof rec.source_message_ref !== 'string' || !rec.source_message_ref.trim()) bad.push('source_message_ref');
+  if (rec.verification_class !== undefined && rec.verification_class !== 'authenticated_platform_record') bad.push('verification_class');
+  if (typeof rec.scope !== 'string') bad.push('scope');
+  else {
+    const s = rec.scope;
+    const covered = new Set([s.trim(), ...s.split(',').map((p) => p.trim()).filter(Boolean)]);
+    if (!want.scope.every((e) => covered.has(e))) bad.push('scope');
+  }
+  if (rec.revoked !== false) bad.push('revoked');
+  if (!(Date.parse(String(rec.expires_at)) > Date.now())) bad.push('expires_at');
+  return bad;
+}
+
+describe('qc_session and email_deploy approvals (Skill 44 QC, Skill 50 deploy)', () => {
+  const CASES = [
+    { kind: 'qc_session', action: 'qc_built_workflow', scope: ['qc_model:kimi-k2.6', 'qc_session:sess-42'] },
+    { kind: 'email_deploy', action: 'email_deploy', scope: ['golden-landing-10'] },
+  ] as const;
+  const scoped = (c: (typeof CASES)[number], over: Record<string, unknown> = {}) => body({
+    kind: c.kind, action: c.action, object_key: `${c.kind}-obj`, scope: [...c.scope],
+    title: `${c.kind} approval`, summary: 'Owner approves this exact plan.', ...over,
+  });
+
+  for (const c of CASES) {
+    it(`${c.kind}: the agent registers it with scope; the owner approves; the record reads back with every field approval_record.py checks`, async () => {
+      const res = await create(scoped(c), { bearer: TOKEN });
+      expect(res.status).toBe(201);
+      const made = await res.json();
+      expect(made).toMatchObject({ kind: c.kind, scope: [...c.scope], status: 'pending', approval_id: null });
+      expect((await (await create(scoped(c), { bearer: TOKEN })).json())).toMatchObject({ request_id: made.request_id, replayed: true });
+
+      expect(await decide(made.request_id, 'approve', '', ownerCookie)).toMatchObject({ ok: true, status: 'approved' });
+      const polled = await (await status(made.request_id, { bearer: TOKEN })).json();
+      expect(polled).toMatchObject({ status: 'approved', decided_by: OWNER });
+      expect(polled.approval_id).toMatch(/^[A-Za-z0-9_-]{8,128}$/);
+
+      // The exact GET approval_record.py `_fetch` makes, with the agent bearer.
+      const got = await approvalRecord(polled.approval_id, { bearer: TOKEN });
+      expect(got.status).toBe(200);
+      const rec = await got.json();
+      expect(rec).toMatchObject({
+        approval_id: polled.approval_id, kind: c.kind, plan_hash: `sha256:${PLAN}`, tenant_id: 'tenant-a',
+        client_identity_ref: OWNER, scope: c.scope.join(', '), revoked: false, active: true,
+        source_message_ref: `approval-request:${made.request_id}`, cap_minor: null, currency: null,
+      });
+      expect(consumerMismatches(rec, { kind: c.kind, plan_hash: PLAN, actor: OWNER, tenant: 'tenant-a', scope: [...c.scope] })).toEqual([]);
+      // Bound to this plan and this scope only.
+      expect(consumerMismatches(rec, { kind: c.kind, plan_hash: 'f'.repeat(64), actor: OWNER, tenant: 'tenant-a', scope: ['other-run'] }))
+        .toEqual(['plan_hash', 'scope']);
+      // A record of one kind never satisfies the other kind's check.
+      const other = c.kind === 'qc_session' ? 'email_deploy' : 'qc_session';
+      expect(consumerMismatches(rec, { kind: other, plan_hash: PLAN, actor: OWNER, tenant: 'tenant-a', scope: [...c.scope] })).toEqual(['kind']);
+    });
+
+    it(`${c.kind}: the agent bearer cannot self-approve through either door`, async () => {
+      const made = await (await create(scoped(c, { object_key: `${c.kind}-self` }), { bearer: TOKEN })).json();
+      const { decideApprovalRequest } = await import('../../src/lib/approval-requests');
+      const { resolveTenantContext } = await import('../../src/lib/auth/tenant-context');
+      const agentCtx = await resolveTenantContext(req('/x', { bearer: TOKEN }));
+      const before = approvalCount();
+      const out = decideApprovalRequest(agentCtx, made.request_id, { decision: 'approve' });
+      expect(out.status).toBe(403);
+      expect(out.payload.error).toBe('client_identity_required');
+      const { POST } = await import('../../src/app/api/launch-approvals/route');
+      const direct = await POST(req('/api/launch-approvals', {
+        method: 'POST', bearer: TOKEN,
+        body: { kind: c.kind, plan_hash: `sha256:${PLAN}`, scope: c.scope.join(', '), source_message: { ref: `agent-${c.kind}`, sender: OWNER, text: `APPROVE ${PLAN.slice(0, 8)}` } },
+      }));
+      expect(direct.status).toBe(403);
+      expect(approvalCount()).toBe(before);
+      expect((await (await status(made.request_id, { bearer: TOKEN })).json())).toMatchObject({ status: 'pending', approval_id: null });
+    });
+  }
+
+  it('requires scope for these kinds, refuses it on every other kind, and refuses entries the consumer would split', async () => {
+    const [q] = CASES;
+    const results = await Promise.all([
+      create(scoped(q, { object_key: 's1', scope: undefined }), { bearer: TOKEN }),
+      create(scoped(q, { object_key: 's2', scope: [] }), { bearer: TOKEN }),
+      create(scoped(q, { object_key: 's3', scope: ['qc_model:a, qc_session:b'] }), { bearer: TOKEN }),
+      create(scoped(q, { object_key: 's4', scope: 'qc_model:a' }), { bearer: TOKEN }),
+      create(scoped(q, { object_key: 's5', scope: [''] }), { bearer: TOKEN }),
+      create(scoped(q, { object_key: 's6', cap_minor: 100, currency: 'USD' }), { bearer: TOKEN }),
+      create(body({ object_key: 's7', scope: ['x'] }), { bearer: TOKEN }),
+    ]);
+    expect(results.map((r) => r.status)).toEqual([400, 400, 400, 400, 400, 400, 400]);
+    expect((await results[6].json()).error).toBe('scope_not_allowed');
+    expect((await results[5].json()).error).toBe('cap_not_allowed');
+  });
+
+  it('a different scope for the same plan is a new request, never a replay', async () => {
+    const [q] = CASES;
+    const a = await (await create(scoped(q, { object_key: 'scope-replay' }), { bearer: TOKEN })).json();
+    const b = await (await create(scoped(q, { object_key: 'scope-replay', scope: ['qc_model:other', 'qc_session:sess-42'] }), { bearer: TOKEN })).json();
+    expect(b.request_id).not.toBe(a.request_id);
+  });
+
+  it('the approval page shows the owner exactly what the approval covers', async () => {
+    const [q] = CASES;
+    const made = await (await create(scoped(q, { object_key: 'page-scope' }), { bearer: TOKEN })).json();
+    pageCookie = ownerCookie;
+    const { default: Page } = await import('../../src/app/approvals/[requestId]/page');
+    const html = renderToStaticMarkup(await Page({ params: Promise.resolve({ requestId: made.request_id }) }));
+    expect(html).toContain('Covers: qc_model:kimi-k2.6, qc_session:sess-42');
+  });
+
+  it('existing kinds still mint the Convert and Flow binding JSON', async () => {
+    const made = await (await create(body({ object_key: 'binding-kept' }), { bearer: TOKEN })).json();
+    expect(made.scope).toBeNull();
+    await decide(made.request_id, 'approve', '', ownerCookie);
+    const polled = await (await status(made.request_id, { bearer: TOKEN })).json();
+    const rec = await (await approvalRecord(polled.approval_id, { bearer: TOKEN })).json();
+    expect(JSON.parse(rec.scope)).toEqual({ location_id: LOCATION, action: 'publish', object_key: 'binding-kept' });
+    expect(rec.verification_class).toBe('authenticated_platform_record');
+  });
+});
+
+describe('migration 182', () => {
+  const mig = () => migrations.find((m) => m.id === '182')!;
+  const upTo181 = (db: Database.Database) => {
+    for (const id of ['177', '179', '181']) migrations.find((m) => m.id === id)!.up(db);
+  };
+
+  it('widens both kind checks, adds scope_json, keeps every row and both launch_approvals guards, and re-runs', () => {
+    const db = new Database(':memory:');
+    db.pragma('foreign_keys = ON');
+    upTo181(db);
+    db.prepare(`INSERT INTO launch_approvals (approval_id, tenant_id, client_identity_ref, kind, plan_hash, scope, expires_at, source_message_ref, created_at)
+      VALUES ('a1','t','o','publish','sha256:${PLAN}','s','2099-01-01','m1','2026-01-01')`).run();
+    db.prepare(`INSERT INTO approval_requests (request_id, tenant_id, kind, location_id, action, object_key, plan_sha256,
+      title, summary, requested_by, expires_at, created_at) VALUES ('r1','t','publish','l','a','o','${PLAN}','T','S','agent','2099-01-01','2026-01-01')`).run();
+    expect(mig()?.name).toBe('approval_kinds_qc_session_email_deploy');
+    expect(() => db.transaction(() => { mig().up(db); mig().up(db); })()).not.toThrow();
+    expect(db.prepare('SELECT approval_id, kind FROM launch_approvals').all()).toEqual([{ approval_id: 'a1', kind: 'publish' }]);
+    expect(db.prepare('SELECT request_id, scope_json FROM approval_requests').all()).toEqual([{ request_id: 'r1', scope_json: null }]);
+    for (const k of ['qc_session', 'email_deploy']) {
+      expect(() => db.prepare(`INSERT INTO launch_approvals (approval_id, tenant_id, client_identity_ref, kind, plan_hash, scope, expires_at, source_message_ref, created_at)
+        VALUES ('a-${k}','t','o','${k}','sha256:${PLAN}','s','2099-01-01','m-${k}','2026-01-01')`).run()).not.toThrow();
+      expect(() => db.prepare(`INSERT INTO approval_requests (request_id, tenant_id, kind, location_id, action, object_key, plan_sha256,
+        scope_json, title, summary, requested_by, expires_at, created_at) VALUES ('r-${k}','t','${k}','l','a','o','${PLAN}','["x"]','T','S','agent','2099-01-01','2026-01-01')`).run()).not.toThrow();
+    }
+    expect(() => db.prepare(`INSERT INTO launch_approvals (approval_id, tenant_id, client_identity_ref, kind, plan_hash, scope, expires_at, source_message_ref, created_at)
+      VALUES ('bad','t','o','bogus','sha256:${PLAN}','s','2099-01-01','m-bad','2026-01-01')`).run()).toThrow();
+    // The immutability guards survive the rebuild.
+    expect(() => db.prepare("DELETE FROM launch_approvals WHERE approval_id='a1'").run()).toThrow(/never deleted/);
+    expect(() => db.prepare("UPDATE launch_approvals SET scope='other' WHERE approval_id='a1'").run()).toThrow(/immutable/);
+    expect(() => db.prepare("INSERT INTO launch_approvals (approval_id, tenant_id, client_identity_ref, kind, plan_hash, scope, expires_at, source_message_ref, created_at) VALUES ('dup','t','o','publish','p','s','2099','m1','2026')").run()).toThrow(/UNIQUE/);
+    const idx = db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND sql IS NOT NULL").all().map((r) => (r as { name: string }).name);
+    expect(idx).toEqual(expect.arrayContaining(['idx_launch_approvals_plan', 'idx_approval_requests_status', 'idx_approval_requests_plan']));
+  });
+
+  it('the fully migrated live database keeps the launch_approvals guards', () => {
+    const triggers = getDb().prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='launch_approvals'").all().map((r) => (r as { name: string }).name);
+    expect(triggers).toEqual(expect.arrayContaining(['launch_approvals_no_delete', 'launch_approvals_revoke_only']));
+    const sql = (getDb().prepare("SELECT sql FROM sqlite_master WHERE name='launch_approvals'").get() as { sql: string }).sql;
+    expect(sql).toContain("'qc_session'");
+    expect(sql).toContain("'email_deploy'");
+  });
+
+  it('refuses instead of silently cascading when a child deletes with launch_approvals', () => {
+    const db = new Database(':memory:');
+    db.pragma('foreign_keys = ON');
+    upTo181(db);
+    db.exec(`CREATE TABLE child (id TEXT PRIMARY KEY, approval_id TEXT REFERENCES launch_approvals(approval_id) ON DELETE CASCADE);`);
+    expect(() => db.transaction(() => mig().up(db))()).toThrow(/child would lose rows/);
+  });
+});
+
 describe('migration 181', () => {
   const mig = () => migrations.find((m) => m.id === '181')!;
 
